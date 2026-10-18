@@ -97,6 +97,26 @@ let cachedRawConfig: Record<string, unknown> | null = null;
 let cachedRawConfigFile: string | null = null;
 let cachedRawConfigMtimeMs: number | null = null;
 
+/** True when a read-only read of these bytes disagrees with the mutating reader's cache. */
+function readOnlyDisagreesWithCache(
+  configFile: string,
+  mtimeMsForCache: number | null,
+  data: Record<string, unknown>,
+): boolean {
+  return (
+    cachedRawConfig !== null &&
+    cachedRawConfigFile === configFile &&
+    sameCacheMtime(cachedRawConfigMtimeMs, mtimeMsForCache) &&
+    JSON.stringify(cachedRawConfig) !== JSON.stringify(data)
+  );
+}
+
+/** Cache keys come from stat.mtimeMs; utimes restoration is not bit-identical. */
+function sameCacheMtime(a: number | null, b: number | null): boolean {
+  if (a == null || b == null) return false;
+  return a === b || Math.abs(a - b) < 1;
+}
+
 // ── Config Integrity (HMAC) ──────────────────────────────
 
 let cachedIntegrityKey: string | null = null;
@@ -447,9 +467,17 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
       try { mtimeMsForCache = statSync(configFile).mtimeMs; } catch { /* best-effort */ }
 
       const content = readFileSync(configFile, 'utf-8');
-      // An empty file is treated as "no config yet", not a parse failure.
+      // An empty or whitespace-only file is treated as "no config yet", not a
+      // parse failure. On the read-only path that still has to disagree with a
+      // warm mutating cache for the same mtime (B3-R3): emptying the file in
+      // place while restoring mtime would otherwise report Guard off while
+      // getActionGuardCoreConfig() still serves the cached strict-ON verdict.
       if (content.trim().length === 0) {
-        return { data: {}, parseFailed: false };
+        const data: Record<string, unknown> = {};
+        if (options.readOnly && readOnlyDisagreesWithCache(configFile, mtimeMsForCache, data)) {
+          return { data, parseFailed: false, unverified: true };
+        }
+        return { data, parseFailed: false };
       }
 
       let data: Record<string, unknown>;
@@ -521,13 +549,7 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
       // will while the mtime is unchanged. If its cached verdict for these
       // bytes differs from this fresh one (e.g. strict, cached after a write
       // failed, since recovered), the two readers disagree: unverified.
-      if (
-        options.readOnly &&
-        cachedRawConfig !== null &&
-        cachedRawConfigFile === configFile &&
-        cachedRawConfigMtimeMs === mtimeMsForCache &&
-        JSON.stringify(cachedRawConfig) !== JSON.stringify(data)
-      ) {
+      if (options.readOnly && readOnlyDisagreesWithCache(configFile, mtimeMsForCache, data)) {
         return { data, parseFailed: false, unverified: true };
       }
 

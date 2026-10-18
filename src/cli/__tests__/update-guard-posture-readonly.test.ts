@@ -405,6 +405,38 @@ describe('a config with no signature yet is unknown read-only, never off', () =>
     }
   });
 
+  // B3-R3: empty/whitespace early-return used to skip the cache-disagreement
+  // check, so a file emptied in place (mtime restored) read as off while the
+  // getter still served cached strict-ON.
+  (asRoot ? it.skip : it)('B3-R3: emptying config.json in place after a cached strict verdict is unknown, not off', async () => {
+    try {
+      writeConfig({ actionGuard: { enabled: false } });
+      const { config } = await fresh();
+      fs.chmodSync(configDir, 0o500);
+      expect(config.getActionGuardCoreConfig().enabled).toBe(true); // adoption fails, strict cached
+      fs.chmodSync(configDir, 0o700);
+      const cfg = file('config.json');
+      const st = fs.statSync(cfg);
+      fs.writeFileSync(cfg, '  \n');
+      fs.utimesSync(cfg, st.atime, st.mtime);
+      expect(config.readActionGuardCoreConfigReadOnly()).toBeNull();
+      const update = await import('../update.js');
+      const guard = await update.readGuardSwitch();
+      expect(guard).toBe('unknown');
+      const { buildUpdateSummary } = await import('../update-summary.js');
+      const summary = buildUpdateSummary({
+        fromVersion: '5.9.0', toVersion: '5.10.0', packageState: 'updated',
+        engine: { ok: true }, plugin: { status: 'ok' }, skill: { status: 'ok' },
+        guardOn: guard !== 'off', guardUnknown: guard === 'unknown',
+        protection: { status: 'ok' },
+      });
+      expect(summary.headline).toBe('check');
+      expect(summary.rows.find((r) => r.label === 'Guard')).toMatchObject({ mark: 'check' });
+    } finally {
+      fs.chmodSync(configDir, 0o700);
+    }
+  });
+
   // Same shape on a signed config: the key could not be read (or replaced), so
   // the getter cached strict; the key is readable again but config.json is
   // unchanged, so the getter keeps answering from its cache.
@@ -539,6 +571,15 @@ describe('an unreadable config is unknown, never "off (the default)"', () => {
     const lines = renderUpdateSummary(summary, input, { width: 80, ascii: true });
     expect(lines[0]).toMatch(/^Update failed/);
     expect(lines.join('\n')).toMatch(/\[x\]\s+OpenClaw\s+the gateway started without/);
+  });
+
+  it('a genuinely empty or whitespace-only config with a cold cache is still off', async () => {
+    fs.writeFileSync(file('config.json'), '');
+    let update = await freshUpdate();
+    expect(await update.readGuardSwitch()).toBe('off');
+    fs.writeFileSync(file('config.json'), '  \n');
+    update = await freshUpdate();
+    expect(await update.readGuardSwitch()).toBe('off');
   });
 
   it('unknown keeps the row a thing to check; a signed off config is still "off (the default)"', async () => {
