@@ -1,5 +1,5 @@
 /**
- * ShieldCortex Real-time Scanning Plugin for OpenClaw v2026.3.22+
+ * ShieldCortex Real-time Scanning Plugin for OpenClaw v2026.4.23+
  *
  * Uses typed OpenClaw plugin hooks (`api.on`) for llm_input/llm_output
  * scanning and before_tool_call / before_agent_run interception.
