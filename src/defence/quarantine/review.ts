@@ -1,5 +1,5 @@
 import { getDatabase, withTransaction } from '../../database/init.js';
-import { addMemory, MemoryBlockedError } from '../../memory/store.js';
+import { addMemory, MemoryBlockedError, MemoryRateLimitedError } from '../../memory/store.js';
 import type { Memory, MemorySourceKind } from '../../memory/types.js';
 import { recordQuarantineDecision } from '../../threat-graph/decision.js';
 
@@ -194,7 +194,11 @@ function approveExistingPendingRow(row: QuarantineRow, reviewedBy: string, bulk 
       discardReadmissionHolds(maxIdBefore);
       markPendingRowReviewed(row.id, 'rejected', reviewedBy);
       ledgerDecision(row, 'reject', reviewedBy, bulk);
-      return { id: row.id, status: 'rejected', reason: `still held on re-scan: ${e.reason}` };
+      // The rate limit refuses before any scan runs, so don't claim one (#830).
+      const reason = e instanceof MemoryRateLimitedError
+        ? `not admitted (memory write rate limit): ${e.reason}`
+        : `still held on re-scan: ${e.reason}`;
+      return { id: row.id, status: 'rejected', reason };
     }
     throw e;
   }
