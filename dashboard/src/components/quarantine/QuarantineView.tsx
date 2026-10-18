@@ -45,7 +45,7 @@ function ConfirmationDialog({
           {action === 'approve'
             ? isMemoryFile
               ? 'This will mark the memory-file finding as reviewed. The source file is not modified.'
-              : 'This will try to approve the item. Its content is re-scanned first and may still be refused.'
+              : 'This will try to approve the item. Approval is not guaranteed: if the item cannot be admitted, it is rejected instead.'
             : isMemoryFile
               ? 'This will dismiss the memory-file finding. The source file is not deleted or edited.'
               : 'This will permanently discard the memory.'}
@@ -278,8 +278,10 @@ export function QuarantineView() {
             <p className="text-xs text-[var(--sc-text-dim)] mb-4">
               {bulkConfirm === 'approve'
                 ? selectedMemoryFileCount > 0
-                  ? 'Memory-file findings will be marked reviewed without editing files. Other selected items are re-scanned first and may still be refused.'
-                  : 'This will try to approve all selected items. Their content is re-scanned first and some may still be refused.'
+                  ? selectedMemoryFileCount === selectedIds.size
+                    ? 'Memory-file findings will be marked reviewed without editing files.'
+                    : 'Memory-file findings will be marked reviewed without editing files. The other selected items will be tried for approval; any that cannot be admitted are rejected instead.'
+                  : 'This will try to approve all selected items. Approval is not guaranteed: any that cannot be admitted are rejected instead.'
                 : selectedMemoryFileCount > 0
                   ? 'Memory-file findings will be dismissed without editing files. Other selected memories will be discarded.'
                   : 'This will permanently discard all selected memories.'}

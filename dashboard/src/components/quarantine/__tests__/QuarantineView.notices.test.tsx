@@ -47,9 +47,9 @@ function mutation(results: unknown[] = []) {
   } as never;
 }
 
-function setup({ single = [] as unknown[], bulk = [] as unknown[] } = {}) {
+function setup({ single = [] as unknown[], bulk = [] as unknown[], items = [item(1), item(2)] } = {}) {
   (useQuarantine as jest.Mock).mockReturnValue({
-    data: { items: [item(1), item(2)], total: 2 },
+    data: { items, total: items.length },
     isLoading: false,
     isError: false,
     error: null,
@@ -68,9 +68,10 @@ function setup({ single = [] as unknown[], bulk = [] as unknown[] } = {}) {
 function approveOne(id: number) {
   const card = screen.getByText(`held note ${id}`).closest('.glass-card') as HTMLElement;
   fireEvent.click(within(card).getByRole('button', { name: /Approve/ }));
-  expect(screen.getByText(/Its content is re-scanned first and may still be refused\./)).toBeInTheDocument();
-  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'YES' } });
+  expect(screen.getByText(/Approval is not guaranteed: if the item cannot be admitted, it is rejected instead\./)).toBeInTheDocument();
   const dialog = screen.getByText('Approve quarantined item?').parentElement as HTMLElement;
+  expect(within(dialog).queryByText(/re-scan/)).not.toBeInTheDocument();
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'YES' } });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Approve' }));
 }
 
@@ -78,7 +79,9 @@ function approveAll() {
   fireEvent.click(screen.getByRole('button', { name: /Select all/ }));
   const bar = screen.getByText('2 selected').parentElement as HTMLElement;
   fireEvent.click(within(bar).getByRole('button', { name: 'Approve' }));
-  expect(screen.getByText(/Their content is re-scanned first and some may still be refused\./)).toBeInTheDocument();
+  expect(screen.getByText(/Approval is not guaranteed: any that cannot be admitted are rejected instead\./)).toBeInTheDocument();
+  const bulkDialog = screen.getByText('Approve 2 items?').parentElement as HTMLElement;
+  expect(within(bulkDialog).queryByText(/re-scan/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Approve 2 items' }));
 }
 
@@ -121,5 +124,22 @@ describe('QuarantineView approval notices (#824, #828)', () => {
     setup({ bulk: [result] });
     approveAll();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['only memory-file findings', ['memory_file', 'memory_file'], 'Memory-file findings will be marked reviewed without editing files.'],
+    [
+      'memory-file findings and other items',
+      ['memory_file', 'cli'],
+      'Memory-file findings will be marked reviewed without editing files. The other selected items will be tried for approval; any that cannot be admitted are rejected instead.',
+    ],
+  ])('the bulk approve dialog for %s describes only what will happen', (_name, sources, text) => {
+    setup({ items: sources.map((source_type, i) => ({ ...item(i + 1), source_type })) });
+    fireEvent.click(screen.getByRole('button', { name: /Select all/ }));
+    const bar = screen.getByText('2 selected').parentElement as HTMLElement;
+    fireEvent.click(within(bar).getByRole('button', { name: 'Approve' }));
+    const bulkDialog = screen.getByText('Approve 2 items?').parentElement as HTMLElement;
+    expect(within(bulkDialog).getByText(text, { exact: true })).toBeInTheDocument();
+    expect(within(bulkDialog).queryByText(/re-scan/)).not.toBeInTheDocument();
   });
 });
