@@ -21,7 +21,9 @@ function mockCtx(overrides: Partial<CommandContext> = {}): CommandContext {
       { id: 11, title: 'stealth instruction in CLAUDE.md' },
       { id: 12, title: 'low-trust agent write' },
     ]),
-    quarantineReview: jest.fn(async () => undefined),
+    quarantineReview: jest.fn(async (_id: number, action: 'approve' | 'reject') => ({
+      status: action === 'approve' ? 'approved' : 'rejected',
+    })),
     ironDome: jest.fn(async (action) => (action === 'status' ? 'iron dome: ACTIVE' : `iron dome → ${action}`)),
     remember: jest.fn(async () => ({ id: 99 })),
     routes: [
@@ -137,6 +139,30 @@ describe('runCommand', () => {
     const res = await runCommand('quarantine approve 11', ctx);
     expect(ctx.quarantineReview).toHaveBeenCalledWith(11, 'approve');
     expect(res.ok).toBe(true);
+    expect(res.lines).toEqual(['▸ approved #11']);
+  });
+
+  it('quarantine approve <id> reports a re-scan refusal instead of approved (#824)', async () => {
+    const ctx = mockCtx({
+      quarantineReview: jest.fn(async () => ({
+        status: 'rejected',
+        reason: 'still held on re-scan: skill threat detected',
+      })),
+    });
+    const res = await runCommand('quarantine approve 11', ctx);
+    expect(ctx.quarantineReview).toHaveBeenCalledWith(11, 'approve');
+    expect(res.ok).toBe(false);
+    const text = res.lines.join('\n');
+    expect(text).not.toContain('▸ approved');
+    expect(text).toContain('#11 was not approved: still held on re-scan: skill threat detected');
+    expect(text).toContain('#11 is now rejected');
+  });
+
+  it('quarantine approve <id> without a reason still reports the recorded status (#824)', async () => {
+    const ctx = mockCtx({ quarantineReview: jest.fn(async () => ({ status: 'rejected' })) });
+    const res = await runCommand('quarantine approve 7', ctx);
+    expect(res.ok).toBe(false);
+    expect(res.lines.join('\n')).toContain('#7 was not approved');
   });
 
   it('quarantine reject <id> reviews by id', async () => {

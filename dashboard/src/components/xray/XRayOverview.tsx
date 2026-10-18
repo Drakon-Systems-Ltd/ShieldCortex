@@ -117,7 +117,10 @@ function XRayContent() {
   const { data: activityData } = useXRayActivity(8, { kind: activityKind });
   const { data: watchSessionsData } = useXRayWatchSessions(8, { state: watchState });
   const { data: statusData } = useXRayStatus();
-  const { data: findingsStats } = useXRayFindingsStats();
+  // On error react-query keeps the last good data; an unreadable store must
+  // not show stale (or zero) counts as current, so drop them.
+  const { data: lastFindingsStats, isError: findingsStatsError } = useXRayFindingsStats();
+  const findingsStats = findingsStatsError ? undefined : lastFindingsStats;
   const {
     data: findingsData,
     isLoading: findingsLoading,
@@ -200,7 +203,7 @@ function XRayContent() {
     { id: 'history', label: 'History', count: summary.total },
     { id: 'watch', label: 'Watch', count: statusSummary?.activeWatchRoots ?? 0 },
     { id: 'activity', label: 'Scan activity' },
-    { id: 'findings', label: 'Findings', count: findingsStats?.new ?? 0 },
+    { id: 'findings', label: 'Findings', count: findingsStats?.new },
   ]);
 
   return (

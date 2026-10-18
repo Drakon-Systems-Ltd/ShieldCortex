@@ -25,6 +25,7 @@ import { formatXRayReport, formatXRayMarkdown } from './report.js';
 import { toSarif } from './sarif.js';
 import { watchDirectory } from './watch.js';
 import { appendActivity, appendHistory, createHistoryEntry, type XRayTargetType } from './activity.js';
+import { stringifyJsonTerminalSafe } from '../cli/term-ui.js';
 
 // ── Re-exports ──────────────────────────────────────────────
 
@@ -203,9 +204,9 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
   if (sarifOutput) {
     // Pure SARIF JSON on stdout — nothing else, so the file can be uploaded
     // straight to GitHub Code Scanning.
-    console.log(JSON.stringify(toSarif(result.findings), null, 2));
+    console.log(stringifyJsonTerminalSafe(toSarif(result.findings), 2));
   } else if (jsonOutput) {
-    console.log(JSON.stringify(result, null, 2));
+    console.log(stringifyJsonTerminalSafe(result, 2));
   } else if (markdownOutput) {
     console.log(formatXRayMarkdown(result));
   } else {

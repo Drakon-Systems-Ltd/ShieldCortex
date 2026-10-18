@@ -538,11 +538,22 @@ export class MemoryPausedError extends Error {
  * Error thrown when memory is blocked by the defence firewall
  */
 export class MemoryBlockedError extends Error {
+  /** The firewall reason without the message prefix, for callers that explain it. */
+  readonly reason: string;
+
   constructor(reason: string) {
     super(`Memory blocked by defence firewall: ${reason}`);
     this.name = 'MemoryBlockedError';
+    this.reason = reason;
   }
 }
+
+/**
+ * #830 — the write rate limit refuses before the admission scan runs. Internal
+ * marker so callers that explain a refusal (quarantine approval) don't claim a
+ * scan. Same name and message as any other MemoryBlockedError.
+ */
+export class MemoryRateLimitedError extends MemoryBlockedError {}
 
 /**
  * #402 Class-B assembly abort inside a transactional admission session (#395).
@@ -754,7 +765,7 @@ export function addMemory(
       // row would, so a flood from an attested source can accrue.
       source_attested: attestedFlag(options?.sourceAttested),
     });
-    throw new MemoryBlockedError(`Rate limited: exceeded ${RATE_LIMIT_MAX} writes per minute`);
+    throw new MemoryRateLimitedError(`Rate limited: exceeded ${RATE_LIMIT_MAX} writes per minute`);
   }
 
   // DEFENCE PIPELINE: Scan EVERY write before storage. Source-less writes get a

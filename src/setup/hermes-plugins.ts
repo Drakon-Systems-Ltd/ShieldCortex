@@ -162,6 +162,9 @@ import path from 'path';
 /** The manifest key our plugin declares — the thing that can collide. */
 export const HERMES_PLUGIN_NAME = 'shieldcortex';
 
+/** The probe's answer when no Hermes Python interpreter could be located. */
+export const NO_HERMES_INTERPRETER = 'no Hermes interpreter found';
+
 /** How long the Hermes probe may take before we give up on an answer. */
 const PROBE_TIMEOUT_MS = 8_000;
 
@@ -1155,7 +1158,7 @@ export function probeHermesDiscovery(
   const searchHome = resolveHermesHome(env);
   const interpreter =
     opts.interpreter !== undefined ? opts.interpreter : resolveHermesInterpreter(searchHome);
-  if (interpreter === null) return { error: 'no Hermes interpreter found' };
+  if (interpreter === null) return { error: NO_HERMES_INTERPRETER };
 
   const payload = JSON.stringify({
     name: HERMES_PLUGIN_NAME,

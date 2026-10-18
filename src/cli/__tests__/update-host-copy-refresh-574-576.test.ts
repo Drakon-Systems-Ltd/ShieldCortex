@@ -297,4 +297,23 @@ describe('stepHermesPlugin — what `update` reports (#576)', () => {
     expect(result.summary).toMatch(/--fix-hermes-plugin-copies/);
     expect(result.detail).toEqual(['no Hermes interpreter found']);
   });
+
+  it('no interpreter: plain summary; the probe detail only with --verbose', async () => {
+    const refresh = (): HermesRefreshResult => ({
+      ...base,
+      status: 'warn',
+      reason: 'no-interpreter',
+      summary: 'could not determine which copy Hermes loads — nothing written',
+      detail: ['no Hermes interpreter found'],
+    });
+    const quiet = await runQuietly(() => stepHermesPlugin({ home, refresh }));
+    expect(quiet.summary).toBe("couldn't find Hermes' Python, so Hermes wasn't updated");
+    expect(quiet.detail).toEqual([]);
+    const loud = await runQuietly(() => stepHermesPlugin({ home, refresh, verbose: true }));
+    expect(loud.summary).toBe("couldn't find Hermes' Python, so Hermes wasn't updated");
+    expect(loud.detail).toEqual([
+      'could not determine which copy Hermes loads — nothing written',
+      'no Hermes interpreter found',
+    ]);
+  });
 });

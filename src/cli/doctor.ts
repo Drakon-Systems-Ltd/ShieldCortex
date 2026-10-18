@@ -37,7 +37,7 @@ import {
 } from '../integrations/openclaw-conversation-capability.js';
 import { parseRegistrationsSince, parseLogLinePid } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
-import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
+import { nativeBindingDisplayRemediation, nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
 import {
   hermesEnvironment,
   protectedDirs,
@@ -140,6 +140,8 @@ import { DEFAULT_IRON_DOME_CONFIG, type IronDomeConfig } from '../defence/iron-d
 import { sharedSensitivitySqlPredicate } from '../defence/sensitivity/isolation.js';
 import {
   formatDoctorReport,
+  nextCommandForFailures,
+  sanitiseDoctorRowsForDisplay,
   shouldColorDoctor,
   type DoctorReportStyle,
 } from './doctor-report.js';
@@ -176,6 +178,7 @@ import {
   type RecallRepetitionVerdict,
   type SlotProblem,
 } from './recall-repetition.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
 
 export const VACUUM_FREE_SHARE = 0.2;
 
@@ -198,8 +201,12 @@ export interface CheckResult {
   status: CheckStatus;
   message: string;
   fix?: string;
+  /** See DoctorReportItem.displayFix — display-only; `--json` emits `fix`. */
+  displayFix?: string;
   /** See DoctorReportItem.fixNoteWithCommands — keeps a report-only fix's prose in the human report. */
   fixNoteWithCommands?: true;
+  /** See DoctorReportItem.verboseNote — printed only with --verbose. */
+  verboseNote?: string;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
@@ -940,13 +947,15 @@ function engineLoadFailure(dbPath: string, err: unknown): CheckResult {
   const typed = err instanceof NativeModuleLoadError;
   const cause = typed ? err.cause : err;
   const guidance = typed ? err.message : (err instanceof Error ? err.message : String(err));
+  const installDir = resolveSelfInstallDir();
   return {
     label: 'Database',
     status: 'fail',
     message:
       'cannot load the database engine (better-sqlite3) — an install problem, ' +
       `NOT database corruption: ${tildify(dbPath)} was never opened and is untouched.\n${guidance}`,
-    fix: nativeBindingRemediation(resolveSelfInstallDir(), cause),
+    fix: nativeBindingRemediation(installDir, cause),
+    displayFix: nativeBindingDisplayRemediation(installDir, cause),
   };
 }
 
@@ -1039,8 +1048,9 @@ export function runDatabaseCheck(dbPath: string, env: Environment = detectEnviro
     // A stat'able DB can still be unopenable because the file itself is owned
     // by another user (mode 600 root:root — the other half of the sudo
     // artefact). Telling that user to delete their database is bad advice.
+    const installDir = isNativeBindingFault ? resolveSelfInstallDir() : '';
     const fix = isNativeBindingFault
-      ? nativeBindingRemediation(resolveSelfInstallDir(), msg)
+      ? nativeBindingRemediation(installDir, msg)
       : looksLikePermissionError(err, msg)
         ? ownershipFix()
         : 'Back up and delete `~/.shieldcortex/memories.db`, then restart the MCP server';
@@ -1049,6 +1059,7 @@ export function runDatabaseCheck(dbPath: string, env: Environment = detectEnviro
       status: 'fail',
       message: `cannot open — ${msg}`,
       fix,
+      ...(isNativeBindingFault ? { displayFix: nativeBindingDisplayRemediation(installDir, msg) } : {}),
     };
   }
 }
@@ -1178,7 +1189,7 @@ export async function checkAttestationCoverage(
  */
 export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promise<CheckResult> {
   const label = 'Chained ledger';
-  const { verifyLedger, summariseLedgerReport } = await import('../defence/ledger/verify.js');
+  const { verifyLedger, summariseLedgerReport, allProblemsAreLegacyProjectBackfill } = await import('../defence/ledger/verify.js');
   const { resolveLedgerConfig } = await import('../defence/ledger/config.js');
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const Database = require('better-sqlite3');
@@ -1203,7 +1214,9 @@ export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promis
     const report = verifyLedger(db, { heartbeatIntervalMs: resolveLedgerConfig().heartbeatIntervalMs });
     const message = summariseLedgerReport(report);
     if (report.status === 'inconsistent') {
-      return { label, status: 'fail', message, fix: 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
+      return { label, status: 'fail', message, fix: allProblemsAreLegacyProjectBackfill(report)
+        ? 'Likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in `project` on chained audit rows; no digest field other than `project` changed in those rows. Find and remove or upgrade the old copy (check every global install and npx cache on this host) before running any repair; `shieldcortex ledger verify` shows the full report'
+        : 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
     }
     if (report.status === 'unchained') return { label, status: 'warn', message };
     return { label, status: 'pass', message };
@@ -8229,9 +8242,12 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'warn',
+        // Plain words (15 Oct 2026): this is a check that could not run, and
+        // the old wording ("roster", "SQLite index unreadable") read as a fault.
         message:
-          'cannot read OpenClaw\'s plugin roster (SQLite index unreadable — broken better-sqlite3 binding, locked DB, or pre-2026.6.1 OpenClaw) — cannot confirm the realtime plugin is loaded; NOT necessarily unprotected',
-        fix: 'Cannot read OpenClaw\'s plugin roster file. Not unprotected if the plugin is already loaded. Do not run repair from this warning.',
+          'couldn\'t read OpenClaw\'s plugin list, so couldn\'t check the realtime plugin is running. ' +
+          'This is a check that couldn\'t run, not a fault (the list file may be locked, or OpenClaw is older than 2026.6.1)',
+        fix: 'Couldn\'t read OpenClaw\'s plugin list file. If the plugin is already loaded you are protected. Do not run repair from this warning.',
       };
     case 'load-unproven':
       // #142: the boot roster snapshot races plugin registration, and a
@@ -8243,10 +8259,14 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         status: 'warn',
         message:
           verdict.loadedInLiveRoster == null
-            ? 'load state UNPROVEN — no fresh gateway roster could be read. A missing install-index entry does not prove a live unload'
-            : 'load state UNPROVEN — absent from the boot roster snapshot, but a plugin registration was sighted after it ' +
-              '(registration races the snapshot; CLI activity writes identical lines). Neither protected nor unprotected is proven',
-        fix: `Prove it live: ${LIVE_CANARY_COMMAND}`,
+            ? 'couldn\'t confirm the gateway loaded the plugin — there was no recent gateway start-up record to read. ' +
+              'This is a check that couldn\'t run, not a fault'
+            : 'couldn\'t confirm the gateway loaded the plugin — it was missing from the start-up list but registered just after ' +
+              '(that timing can happen normally). Neither OK nor a fault is confirmed',
+        // A plain command in the default report; the consent-gated live
+        // probe (an env var plus internal wording) only with --verbose.
+        fix: 'Check it: `shieldcortex openclaw status`',
+        verboseNote: `Prove enforcement live: ${LIVE_CANARY_COMMAND}`,
       };
     case 'enabled-not-loaded':
       return {
@@ -8313,7 +8333,10 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
           status: 'pass',
           message:
             `realtime plugin installed and enabled at v${version} — but the RUNNING gateway's boot roster ` +
-            `could not be read, so load is NOT separately proven. Prove it live with: ${LIVE_CANARY_COMMAND}`,
+            'could not be read, so load is NOT separately proven',
+          // Not in the message: a pass becomes a default-report warn when
+          // conversation access is withheld, and that row must stay plain.
+          verboseNote: `Prove it live with: ${LIVE_CANARY_COMMAND}`,
         };
       }
       // Roster-confirmed loaded, but doctor does NOT run the live enforcement
@@ -8337,8 +8360,9 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         label,
         status: 'pass',
         message: hotReload
-          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`
-          : `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
+          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, v${version}); enforcement not probed here`
+          : `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here`,
+        verboseNote: `Prove it live with: ${LIVE_CANARY_COMMAND}`,
       };
     }
     default: {
@@ -9293,11 +9317,14 @@ export async function runDoctor(
   const verbose = args.includes('--verbose') || args.includes('--debug');
   const hostTable = scanHostTable();
   const unwired = presentUnwired(hostTable);
+  // #788: check messages and fixes carry host-derived text (install dirs,
+  // error messages). The human report and the NEXT line read a display copy
+  // with each line passed through the display sanitiser; `--json` below keeps
+  // the raw `visible` rows (machine-readable output stays unsanitised).
+  const displayRows = sanitiseDoctorRowsForDisplay(visible);
   let nextCommand: string | null = null;
   if (failures > 0) {
-    const failFix = visible.find((r) => r.status === 'fail' && r.fix)?.fix?.trim() ?? '';
-    nextCommand = failFix.split('\n').map((l) => l.trim()).find((l) => /^(shieldcortex|openclaw|npm|node)\b/.test(l))
-      ?? 'shieldcortex doctor --verbose';
+    nextCommand = nextCommandForFailures(displayRows);
   } else if (unwired.length > 0) {
     nextCommand = 'shieldcortex setup';
   }
@@ -9310,19 +9337,22 @@ export async function runDoctor(
   // where the report is red, which is the failure mode doctor exists to avoid.
   // Returns before the human report so the output is parseable on its own.
   if (args.includes('--json')) {
-    console.log(JSON.stringify({
+    console.log(stringifyJsonTerminalSafe({
       version: String(pkg.version ?? ''),
       passed, warnings, failures, infos, total,
       exitCode: doctorExitCode(visible, { strict: args.includes('--strict') }),
-      results: visible.map((r) => ({ label: r.label, status: r.status, message: r.message, fix: r.fix })),
-    }, null, 2));
+      results: visible.map((r) => ({
+        label: r.label, status: r.status, message: r.message, fix: r.fix,
+        ...(r.verboseNote ? { verboseNote: r.verboseNote } : {}),
+      })),
+    }, 2));
     const jsonExit = doctorExitCode(visible, { strict: args.includes('--strict') });
     if (jsonExit !== 0) process.exitCode = jsonExit;
     return { passed, warnings, failures, infos, total, exitCode: jsonExit };
   }
 
   const style: DoctorReportStyle = { bold, reset, green, yellow, red, cyan, dim };
-  const reportLines = formatDoctorReport(visible, {
+  const reportLines = formatDoctorReport(displayRows, {
     verbose,
     version: String(pkg.version ?? ''),
     target: (() => {

@@ -78,6 +78,7 @@ import { execSync } from 'child_process';
 import { SCAN_EXIT, formatScanToolFailure } from './cli/scan-exit.js';
 import { argvWantsHelp } from './cli/wants-help.js';
 import { ENV_HELP, SCAN_SKILL_HELP, dispatchHelp } from './cli/dispatch-help.js';
+import { stringifyJsonTerminalSafe } from './cli/term-ui.js';
 
 // Heavy modules (MCP server, visualization API + express/cors/ws, embedding
 // model, brain worker, installer handlers) are loaded lazily via `await import`
@@ -229,11 +230,10 @@ async function startMcpServer(dbPath?: string): Promise<void> {
   // — the client sees only a bare `-32000`. Attempt the class-appropriate
   // recovery through the shared binding helper; if it cannot heal, fail LOUDLY
   // to stderr + a breadcrumb carrying the selected remediation, never silently.
-  const { selfHealMcpNativeBinding } = await import('./setup/mcp-self-heal.js');
+  const { selfHealMcpNativeBinding, printMcpStartupFailure } = await import('./setup/mcp-self-heal.js');
   const heal = await selfHealMcpNativeBinding();
   if (!heal.ok) {
-    console.error(heal.message);
-    if (heal.breadcrumbPath) console.error(`\nDetails written to: ${heal.breadcrumbPath}`);
+    printMcpStartupFailure(heal);
     process.exit(1);
   }
 
@@ -736,7 +736,8 @@ ${bold}COMMANDS${reset}
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
   ${cyan}audit${reset} [options]       Run a full security audit
   ${cyan}ledger${reset} verify [--json]  Check the chained audit ledger (read-only; exit 1 if inconsistent)
-  ${cyan}setup${reset} [target]        Start here: detects hosts, asks before wiring each
+  ${cyan}setup${reset} [target]        Start here: bare setup detects hosts, asks before wiring each
+                        setup <host> (e.g. setup claude) wires that host without asking
                         Targets: claude, openclaw, hermes, copilot, codex, security
                         Flags: --with-stop-hook (sampled per-turn extraction)
                                --with-session-end (extraction on session exit)
@@ -1379,7 +1380,7 @@ ${bold}DOCS${reset}
     const result = await scanUrl(urlArg);
 
     if (wantsJson) {
-      console.log(JSON.stringify(result, null, 2));
+      console.log(stringifyJsonTerminalSafe(result, 2));
     } else if (wantsMarkdown) {
       console.log(formatEnvScanMarkdown(result));
     } else {

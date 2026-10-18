@@ -22,7 +22,8 @@ import {
   recordWatchSessionEvent,
   startWatchSession,
 } from './activity.js';
-import { addFindings } from './findings-store.js';
+import { addFindings, FindingsStoreWriteRefusedError } from './findings-store.js';
+import { stringifyJsonTerminalSafe } from '../cli/term-ui.js';
 
 // ── Constants ───────────────────────────────────────────────
 
@@ -172,7 +173,14 @@ export async function watchDirectory(
     const { score, riskLevel } = calculateTrustScore(newFindings);
     const scannedAt = new Date().toISOString();
 
-    addFindings(session.id, 'watch', abs, newFindings);
+    try {
+      addFindings(session.id, 'watch', abs, newFindings);
+    } catch (err) {
+      // An unreadable findings file is refused, not replaced (#801). Report it
+      // and keep watching; the findings are still reported below.
+      if (!(err instanceof FindingsStoreWriteRefusedError)) throw err;
+      console.error(`${c.yellow}${c.bold}Warning:${c.reset} ${err.message}`);
+    }
 
     appendActivity({
       kind: 'watch',
@@ -202,7 +210,7 @@ export async function watchDirectory(
     });
 
     if (json) {
-      console.log(JSON.stringify({
+      console.log(stringifyJsonTerminalSafe({
         file: abs,
         trustScore: score,
         riskLevel,
