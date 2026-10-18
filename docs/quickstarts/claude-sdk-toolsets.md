@@ -236,8 +236,9 @@ whose text trips ShieldCortex's credential recognisers, as written, percent-deco
 as the URL parser maps it, is shown as `redacted-host` on cards and audit rows. The
 mapped text is built character by character with case kept: each character is mapped the
 way the parser maps it on its own (fullwidth text becomes ASCII, characters the parser
-ignores are dropped). If that mapping and the parser's own ASCII host disagree, the host
-is withheld. The parser's lowercased host is checked against the recognisers too. A long
+ignores are dropped). If that mapping and the parser's own host disagree in the number of
+labels or in any label other than a punycode (`xn--`) label, the host is withheld. IP
+addresses and hosts of non-web schemes are not compared this way. The parser's lowercased host is checked against the recognisers too. A long
 internationalised name is still shown as its punycode, unless it trips them. An unknown member
 name that trips them is audited as `other`; the policy and the driver still get the real
 URL. A secret in a shape the recognisers do not know is not guaranteed to be caught.

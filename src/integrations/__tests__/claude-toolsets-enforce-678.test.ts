@@ -988,7 +988,25 @@ describe('review regressions (#678 P2)', () => {
     }
   });
 
+  // One internationalised label must not switch the check off for the whole
+  // host: the TAB hides every label from the raw text, and only the ASCII
+  // labels can be compared.
   it.each([
+    ['a Unicode label', 'https:/\t/eyJa.eyJa.a.ü/'],
+    ['an A-label typed as punycode', 'https:/\t/eyJa.eyJa.a.xn--tda/'],
+    ['a fullwidth JWT shape and a Unicode label', `https:/\t/ｅｙＪａ${stop}ｅｙＪａ${stop}ａ${stop}ü/`],
+  ])('withholds a disagreeing host that also has %s', async (_label, url) => {
+    expect(new URL(url).hostname).toBe('eyja.eyja.a.xn--tda');
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { cards, hosts, surface } = await witnessSurface(mode, url);
+      expectCardsWithheld(url, cards);
+      expect(hosts).toEqual(Array(4).fill('redacted-host'));
+      expect(surface.toLowerCase()).not.toContain('eyja.eyja.a');
+    }
+  });
+
+  it.each([
+    ['an ASCII label beside an internationalised one', 'https://docs.münchen.example/', 'docs.xn--mnchen-3ya.example'],
     ['a long internationalised host', `https://${longIdn}.example/`, new URL(`https://${longIdn}.example/`).hostname],
     ['a long internationalised host with a longer suffix', `https://${longIdn}.evil.example/`, new URL(`https://${longIdn}.evil.example/`).hostname],
     ['a long hyphenated host', 'https://ordinary-internal-service-discovery/', 'ordinary-internal-service-discovery'],

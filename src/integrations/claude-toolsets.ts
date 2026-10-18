@@ -527,14 +527,20 @@ function displayHost(url: string | undefined): string | undefined {
   for (const candidate of new Set([rawHost, decoded, mapped])) {
     if (redactCredentials(candidate) !== candidate || looksSecretish(candidate)) return 'redacted-host';
   }
-  // Fail closed when the mapping is not faithful for this input: an ASCII host
-  // the parser produced must be `mapped` folded to lowercase. Not for punycode
-  // labels (Unicode kept in `mapped`, a long A-label is not a credential), IP
-  // literals (the parser rewrites `0x7f.1` to `127.0.0.1`) or opaque hosts of
-  // other schemes (not mapped at all).
-  const faithfulnessApplies = SPECIAL_SCHEMES.has(parsed.protocol) && !host.startsWith('[') && isIP(host) !== 4
-    && !host.split('.').some((label) => label.startsWith('xn--'));
-  if (faithfulnessApplies && mapped.toLowerCase() !== host) return 'redacted-host';
+  // Fail closed when the mapping is not faithful for this input: the parser's
+  // host and `mapped` folded to lowercase must have the same labels, and every
+  // label must match. A punycode label is skipped on its own (Unicode is kept in
+  // `mapped`, a long A-label is not a credential), never the whole host, so one
+  // internationalised label cannot hide an ASCII label the raw text never showed.
+  // Not for IP literals (the parser rewrites `0x7f.1` to `127.0.0.1`) or opaque
+  // hosts of other schemes (not mapped at all).
+  const faithfulnessApplies = SPECIAL_SCHEMES.has(parsed.protocol) && !host.startsWith('[') && isIP(host) !== 4;
+  if (faithfulnessApplies) {
+    const hostLabels = host.split('.');
+    const mappedLabels = mapped.toLowerCase().split('.');
+    if (hostLabels.length !== mappedLabels.length
+      || hostLabels.some((label, i) => !label.startsWith('xn--') && label !== mappedLabels[i])) return 'redacted-host';
+  }
   // The parsed host, in both cases; only against the recognisers, since a long
   // punycode label is an opaque ASCII run.
   for (const candidate of [host, host.toUpperCase()]) {
