@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import { evictEventOverflow } from '../threat-graph/shared.js';
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 function insertNode(kind: string, key: string, lastSeen: string): void {

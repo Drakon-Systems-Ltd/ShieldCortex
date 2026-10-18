@@ -86,6 +86,10 @@ export function filterByRelevance(rows, opts = {}) {
   // passed; the relative floor + term-coverage do the gating otherwise.
   const maxBm25 =
     typeof opts.maxBm25 === 'number' && Number.isFinite(opts.maxBm25) ? opts.maxBm25 : null;
+  // #720 (Tars): there is deliberately NO semantic exemption. A row the #717
+  // vector plane surfaced is gated on wording exactly like an FTS row; its
+  // `_similarity` only affects ranking. A `minSemanticSimilarity` option is
+  // ignored so a caller cannot reopen that door.
 
   // Distinct, non-empty query terms (lowercased) — defines totalQueryTerms.
   const distinctTerms = [];

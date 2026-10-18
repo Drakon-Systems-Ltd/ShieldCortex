@@ -85,7 +85,7 @@ export function PrunePanel() {
                 key={v}
                 type="button"
                 onClick={() => setSalienceLte(v)}
-                className={`rounded border px-1.5 py-0.5 text-[10px] transition ${
+                className={`rounded border px-1.5 py-0.5 text-xs transition ${
                   salienceLte === v
                     ? 'border-[var(--sc-danger)] text-[var(--sc-danger)]'
                     : 'border-[var(--sc-border)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text)]'
@@ -115,7 +115,7 @@ export function PrunePanel() {
                 key={v}
                 type="button"
                 onClick={() => setAgeDaysGte(v)}
-                className={`rounded border px-1.5 py-0.5 text-[10px] transition ${
+                className={`rounded border px-1.5 py-0.5 text-xs transition ${
                   ageDaysGte === v
                     ? 'border-[var(--sc-danger)] text-[var(--sc-danger)]'
                     : 'border-[var(--sc-border)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text)]'
@@ -173,7 +173,7 @@ export function PrunePanel() {
             <span className="text-sm font-semibold text-[var(--sc-text)]">
               {preview.matched} memories match
             </span>
-            <span className="text-[10px] text-[var(--sc-text-muted)]">
+            <span className="text-xs text-[var(--sc-text-muted)]">
               showing first {preview.sample.length}
             </span>
           </div>
@@ -183,9 +183,9 @@ export function PrunePanel() {
             <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto text-xs">
               {preview.sample.map((s) => (
                 <li key={s.id} className="flex items-baseline gap-2 text-[var(--sc-text-dim)]">
-                  <span className="font-mono text-[10px] text-[var(--sc-text-muted)]">#{s.id}</span>
+                  <span className="font-mono text-xs text-[var(--sc-text-muted)]">#{s.id}</span>
                   <span className="truncate flex-1 text-[var(--sc-text)]">{s.title}</span>
-                  <span className="text-[10px] text-[var(--sc-text-muted)]">
+                  <span className="text-xs text-[var(--sc-text-muted)]">
                     {s.project ?? '(no project)'} · sal {s.salience.toFixed(2)} · {s.ageDays}d
                   </span>
                 </li>

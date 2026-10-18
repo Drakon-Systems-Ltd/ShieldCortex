@@ -165,11 +165,12 @@ describe('guard readiness: posture and mode lines', () => {
 });
 
 describe('CHANGELOG', () => {
-  it('Unreleased names the watch-only copy correction', () => {
-    const unreleased = between(read('CHANGELOG.md'), '## [Unreleased]', '\n## [');
-    assert.match(unreleased, /Watch only[^\n]*catastrophic[^\n]*not the only/i);
-    const bullet = unreleased.split('\n').find((l) => /Watch only copy/.test(l));
-    assert.ok(bullet, 'no Watch only copy bullet');
+  it('CHANGELOG (Unreleased, or the release that shipped it) names the watch-only copy correction', () => {
+    // The bullet starts under [Unreleased] and moves into a versioned section at
+    // release time; the contract is its wording, not which heading it sits under.
+    const bullet = read('CHANGELOG.md').split('\n').find((l) => l.startsWith('- **Watch only copy'));
+    assert.ok(bullet, 'no Watch only copy bullet in CHANGELOG.md');
+    assert.match(bullet, /Watch only[^\n]*catastrophic[^\n]*not the only/i);
     assert.match(bullet, /recognises as changing its own config/);
     assert.match(bullet, /does not promise that every route to those files is caught/);
     assert.match(bullet, /not a complete list/);

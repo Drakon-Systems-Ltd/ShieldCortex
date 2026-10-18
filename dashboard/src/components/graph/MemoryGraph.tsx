@@ -865,7 +865,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
                         }}
                       >
                         <span className="truncate">{hit.name}</span>
-                        <span className="ml-2 shrink-0 text-[10px] text-[var(--sc-text-muted)]">
+                        <span className="ml-2 shrink-0 text-xs text-[var(--sc-text-muted)]">
                           {hit.type} · {hit.memoryCount}
                         </span>
                       </button>
@@ -889,7 +889,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
             </div>
 
             {mode === 'focus' && focusTrail.length > 0 && (
-              <nav aria-label="Focus trail" className="flex flex-wrap items-center gap-1 rounded-md bg-[var(--sc-surface)]/95 px-2 py-1 text-[11px] text-[var(--sc-text-muted)]">
+              <nav aria-label="Focus trail" className="flex flex-wrap items-center gap-1 rounded-md bg-[var(--sc-surface)]/95 px-2 py-1 text-xs text-[var(--sc-text-muted)]">
                 <button type="button" className="hover:text-[var(--sc-text)]" onClick={() => { setMode('map'); setFocusTrail([]); }}>Map</button>
                 {focusTrail.map((id, i) => (
                   <span key={`${id}-${i}`} className="flex items-center gap-1">
@@ -916,7 +916,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
             )}
 
             {mode === 'path' && (
-              <div className="space-y-1 rounded-md bg-[var(--sc-surface)]/95 px-2 py-1.5 text-[11px] text-[var(--sc-text-dim)]">
+              <div className="space-y-1 rounded-md bg-[var(--sc-surface)]/95 px-2 py-1.5 text-xs text-[var(--sc-text-dim)]">
                 <div>
                   Path: <strong>{pathFrom?.name ?? 'shift-click or search a start'}</strong> → <strong>{pathTo?.name ?? 'then pick a target'}</strong>
                   {(pathFrom || pathTo) && (
@@ -955,7 +955,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
             )}
 
             {mode === 'map' && (
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md bg-[var(--sc-surface)]/95 px-2 py-1.5 text-[11px] text-[var(--sc-text-dim)]">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md bg-[var(--sc-surface)]/95 px-2 py-1.5 text-xs text-[var(--sc-text-dim)]">
                 <label className="flex items-center gap-1.5">
                   min mentions
                   <input
@@ -981,7 +981,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
           </div>
 
           {/* ── Legend (persistent, collapsible) ── */}
-          <div className="absolute bottom-3 left-3 z-10 rounded-md bg-[var(--sc-surface)]/95 p-2 text-[11px] text-[var(--sc-text-dim)]">
+          <div className="absolute bottom-3 left-3 z-10 rounded-md bg-[var(--sc-surface)]/95 p-2 text-xs text-[var(--sc-text-dim)]">
             <button type="button" className="font-medium text-[var(--sc-text)]" aria-expanded={legendOpen} onClick={() => setLegendOpen((o) => !o)}>
               Legend {legendOpen ? '▾' : '▸'}
             </button>
@@ -1029,7 +1029,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
           </div>
 
           {/* ── Status line (bottom-right): honest counts + truncation ── */}
-          <div className="absolute bottom-3 right-3 z-10 max-w-[320px] rounded-md bg-[var(--sc-surface)]/95 px-2 py-1 text-right text-[10px] text-[var(--sc-text-muted)]">
+          <div className="absolute bottom-3 right-3 z-10 max-w-[320px] rounded-md bg-[var(--sc-surface)]/95 px-2 py-1 text-right text-xs text-[var(--sc-text-muted)]">
             {overview.isLoading && 'Loading graph…'}
             {mode === 'map' && counts && (
               <span>
@@ -1066,7 +1066,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
               style={{ left: Math.min(contextMenu.x, size.width - 176), top: Math.min(contextMenu.y, size.height - 140) }}
               onMouseLeave={() => setContextMenu(null)}
             >
-              <div className="truncate px-3 py-1 text-[10px] text-[var(--sc-text-muted)]">{contextMenu.node.label}</div>
+              <div className="truncate px-3 py-1 text-xs text-[var(--sc-text-muted)]">{contextMenu.node.label}</div>
               {contextMenu.node.kind === 'entity' && (
                 <>
                   <MenuItem icon={<Crosshair size={12} aria-hidden />} label="Focus" onClick={() => { focusEntity(contextMenu.node.numericId); setContextMenu(null); }} />
@@ -1103,7 +1103,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
 
           {/* ── Hover link tooltip ── */}
           {hoverTooltip && (
-            <div className="pointer-events-none absolute left-1/2 top-3 z-10 max-w-md -translate-x-1/2 whitespace-pre-line rounded-md bg-[var(--sc-surface)]/95 px-3 py-1.5 text-center text-[11px] text-[var(--sc-text-dim)] shadow-[var(--sc-shadow-card)]">
+            <div className="pointer-events-none absolute left-1/2 top-3 z-10 max-w-md -translate-x-1/2 whitespace-pre-line rounded-md bg-[var(--sc-surface)]/95 px-3 py-1.5 text-center text-xs text-[var(--sc-text-dim)] shadow-[var(--sc-shadow-card)]">
               {hoverTooltip}
             </div>
           )}
@@ -1117,7 +1117,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
           floating on top of nodes. ── */}
       {!preview && listOpen && (
         <div className="flex w-56 shrink-0 flex-col border-l border-[var(--sc-border)] bg-[var(--sc-surface)]">
-          <div className="border-b border-[var(--sc-border)] px-2 py-1 text-[11px] font-medium text-[var(--sc-text)]">
+          <div className="border-b border-[var(--sc-border)] px-2 py-1 text-xs font-medium text-[var(--sc-text)]">
             Nodes ({graphData.nodes.length})
           </div>
           <ul className="min-h-0 flex-1 overflow-y-auto py-1" aria-label="Graph nodes">
@@ -1134,7 +1134,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
                     }}
                     onDoubleClick={() => n.kind === 'entity' && focusEntity(n.numericId)}
                     className={cn(
-                      'flex w-full items-center gap-1.5 px-2 py-1 text-left text-[11px] text-[var(--sc-text-dim)] hover:bg-[var(--sc-surface-2)] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--sc-focus)]',
+                      'flex w-full items-center gap-1.5 px-2 py-1 text-left text-xs text-[var(--sc-text-dim)] hover:bg-[var(--sc-surface-2)] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--sc-focus)]',
                       selectedId === n.id && 'bg-[var(--sc-primary-soft)] text-[var(--sc-text)]',
                     )}
                   >
@@ -1148,7 +1148,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
                 </li>
               ))}
           </ul>
-          <div className="border-t border-[var(--sc-border)] px-2 py-1 text-[10px] text-[var(--sc-text-muted)]">
+          <div className="border-t border-[var(--sc-border)] px-2 py-1 text-xs text-[var(--sc-text-muted)]">
             <Kbd>Enter</Kbd> select · double-click to focus
           </div>
         </div>
@@ -1183,7 +1183,7 @@ function ModeButton({ active, disabled, onClick, icon, label }: { active: boolea
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        'flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors focus-visible:outline-2 focus-visible:outline-[var(--sc-focus)]',
+        'flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-[var(--sc-focus)]',
         active
           ? 'border-[var(--sc-primary)] bg-[var(--sc-primary-soft)] text-[var(--sc-primary)]'
           : 'border-[var(--sc-border)] bg-[var(--sc-surface)]/95 text-[var(--sc-text-dim)] hover:border-[var(--sc-border-strong)]',

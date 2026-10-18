@@ -58,7 +58,7 @@ describe('defence_audit schema', () => {
 
 describe('deriveAttested', () => {
   const declared: DefenceSource = { type: 'agent', identifier: 'jarvis' };
-  const inferred: DefenceSource = { type: 'unknown', identifier: 'undetected' };
+  const inferred: DefenceSource = { type: 'agent', identifier: 'undetected' };
 
   it('no declaration → attested (identity is system-derived)', () => {
     expect(deriveAttested({ declared: undefined, resolved: inferred, clamped: false, strict: false })).toBe(true);

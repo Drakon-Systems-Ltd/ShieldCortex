@@ -4,7 +4,7 @@ description: "Memory and defence for AI agents: semantic recall, knowledge graph
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 5.4.0
+  version: 5.10.5
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
@@ -61,7 +61,7 @@ permissions:
     - https://api.shieldcortex.ai (Cloud sync + audit telemetry — only when Cloud sync is enabled; licence validation — only when a licence key is activated, fired at CLI `license activate` and the dashboard's activation call (POST /api/license/activate), with no periodic or background re-check; sends the subscription id, works with Cloud sync off; never called when no key is configured)
     - https://huggingface.co (embedding-model download — Xenova/all-MiniLM-L6-v2, ~90 MB, fetched into ~/.cache/shieldcortex/models by the MCP server's background preload at startup or the first operation needing an embedding, whenever the model is not already cached, plus one re-download if a cached copy is detected corrupt; SHIELDCORTEX_SKIP_EMBEDDINGS=1 prevents it. The optional Local AI Explainer model downloads from the same host only on explicit, consent-prompted `review-copilot enable`/`download-model` — its review runs use the local cache only)
     - https://registry.npmjs.org (three paths — explicit update actions via npm subprocess, dashboard "Check for updates"/"Update" or `shieldcortex update`; X-Ray package inspection, `shieldcortex xray <package>` or the dashboard X-Ray page, which queries package metadata directly over HTTPS and with `--deep` also downloads the package tarball from whatever URL that metadata names — normally registry.npmjs.org, size- and redirect-capped, but with no separate host allowlist; and the OpenClaw hook's `npx -y shieldcortex` fallback, which downloads the package on first use when ShieldCortex is not installed locally)
-    - User-configured webhook URLs (two POST paths — memory-event notifications to webhooks you add to ~/.shieldcortex/config.json, and Iron Dome operator-notify messages for action-guard holds/denies to the `actionGuard.notify` webhook you configure; both off until you configure them)
+    - User-configured webhook URLs (two POST paths — memory-event notifications to webhooks you add to ~/.shieldcortex/config.json, and Iron Dome operator-notify messages for action-guard holds/denies, plus `maintenance_fail` check names from `shieldcortex maintain`, to the `actionGuard.notify` webhook you configure; both off until you configure them)
     - The URL you pass to `shieldcortex env scan <url>` (fetched once for analysis)
     - http://localhost:3001 (local REST API + WebSocket — loopback only)
     - http://localhost:3030 (local dashboard UI; also the worker health check — loopback only)
@@ -88,7 +88,7 @@ This is an enforcing memory boundary, not a passive scanner. Across the read/wri
 | **Publisher** | [Drakon Systems Ltd](https://github.com/Drakon-Systems-Ltd) (UK company) |
 | **Source code** | [github.com/Drakon-Systems-Ltd/ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex) — fully open, **MIT** licence (this skill file itself is published MIT-0, per the frontmatter) |
 | **npm package** | [npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex) — every release git-tagged with a matching GitHub release |
-| **npm audit** | Clean — `npm audit` returns 0 vulnerabilities |
+| **npm audit** | Not clean: 0 unwaived production advisories, 4 waived (not fixed) — three `sharp` and one `sprintf-js`, all reachable only through the optional `@huggingface/transformers` package. Reachability and expiry dates: [docs/security/audit-waivers.md](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/security/audit-waivers.md) |
 | **Downloads** | 11,000+/month (July 2026) |
 | **CI/CD** | CI lint/test on every push; the maintainer manually tags each release, and the tag push triggers an automated CI publish to npm |
 | **Postinstall script** | Declared and bounded: prints setup instructions; on **global** installs it also smoke-tests the native SQLite binding, seeds default config on first install, and refreshes an OpenClaw hook/plugin that a previous setup already installed. It never adds integrations to a machine that had none, and it is a no-op for CI and local dependency installs. `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` skips the refresh. |
@@ -99,7 +99,7 @@ This is an enforcing memory boundary, not a passive scanner. Across the read/wri
 This section explains every privileged operation the tool performs and why.
 
 - **Active interception, not scan-only — on hosts that can deny.** Writes failing the pipeline are quarantined/blocked; recalled memory is trust/ACL-filtered before the agent sees it. Tool-call denial is **bound** on Claude Code (PreToolUse), OpenClaw (`before_tool_call`), and Hermes (`pre_tool_call`, enforce by default). Codex, Cursor, Copilot, and generic MCP get a memory server / scanner the model may ignore — they are **not bound**. Tool-output firewall defaults to advisory. `shieldcortex doctor` and `shieldcortex lease` report bound / not-bound / unknown per plane.
-- **Setup is user-initiated, with one bounded exception.** Installing hooks, registering the MCP server, and migrating data are manual steps the user runs in their terminal, and `quickstart` asks before each action. The npm postinstall script (disclosed in the trust table above) never adds integrations that weren't already present — on global installs it only prints instructions, checks the native binding, seeds default config on first install, and refreshes an existing OpenClaw hook/plugin install. The exception: the bundled cortex-memory hook performs a small automatic self-heal at gateway bootstrap, documented in full under **"Automatic self-heal at gateway bootstrap"** below.
+- **Setup is user-initiated, with one bounded exception.** Installing hooks, registering the MCP server, and migrating data are manual steps the user runs in their terminal, and bare `quickstart` / `setup` asks before each action; a named host, as in `setup claude`, is wired without asking. The npm postinstall script (disclosed in the trust table above) never adds integrations that weren't already present — on global installs it only prints instructions, checks the native binding, seeds default config on first install, and refreshes an existing OpenClaw hook/plugin install. The exception: the bundled cortex-memory hook performs a small automatic self-heal at gateway bootstrap, documented in full under **"Automatic self-heal at gateway bootstrap"** below.
 - **Setup migrates legacy data.** The first `quickstart`/`setup` run may move or remove legacy config/memory directories (e.g. `~/.claude-cortex/`, `~/.claude-memory/`) into `~/.shieldcortex/` and copy hook files into place. This happens only on the user-run setup command — never on `npm install` (the postinstall script does not touch memory or config data beyond seeding defaults on a first-ever global install).
 - **Destructive `forget` is bounded and gated.** Per-memory and filtered bulk deletes go through a delete ACL (own-only) and are recorded in the audit ledger. Revoke-by-source (`forget --fromSource`, bulk-delete every memory from one source — for purging a poisoned agent) is **disabled by default** and only enabled by an out-of-band human action (`shieldcortex config --allow-revoke-by-source`); even then it is bounded by a trust-hierarchy ACL (you must own the source or out-rank it) and a per-call row cap. A compromised agent cannot mass-delete your memory.
 - **The bundled dashboard never renders RESTRICTED content.** The local visualization API and its WebSocket feed redact credential-class (`RESTRICTED`) memory content before it reaches the browser — the row stays visible (title/metadata) so you can manage it, but the secret is withheld (view full content via the CLI). Credential patterns in titles/metadata are masked too. This is a display-surface safeguard on top of the on-disk store; it does not weaken the firewall.
@@ -265,6 +265,7 @@ shieldcortex license status       # Check licence tier
 ### Maintenance
 ```bash
 shieldcortex update              # Self-update (npm package + OpenClaw plugin + skill)
+shieldcortex maintain --dry-run  # Preview storage/memory hygiene (plain `maintain` applies it)
 ```
 
 ## What Gets Scanned

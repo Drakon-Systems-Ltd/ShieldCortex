@@ -41,14 +41,14 @@ export function TopBar() {
       : 'Connecting to the local ShieldCortex API…';
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-[var(--sc-border)] bg-[var(--sc-surface)] px-4">
+    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-[var(--sc-border)] bg-[var(--sc-rail)] px-4">
       <label className="flex items-center gap-2 text-xs text-[var(--sc-text-muted)]">
         <span className="hidden sm:inline">Project</span>
         <select
           value={projectFilter ?? ''}
           onChange={(e) => setProjectFilter(e.target.value === '' ? null : e.target.value)}
           aria-label="Filter dashboard by project"
-          className="h-8 max-w-44 rounded-md border border-[var(--sc-border)] bg-[var(--sc-surface)] px-2 text-xs text-[var(--sc-text)] focus-visible:outline-2 focus-visible:outline-[var(--sc-focus)]"
+          className="h-9 max-w-44 rounded-md border border-[var(--sc-border-strong)] bg-[var(--sc-surface)] px-2 text-xs text-[var(--sc-text)] focus-visible:outline-2 focus-visible:outline-[var(--sc-focus)]"
         >
           <option value="">All projects</option>
           {projectList.map((p) => (
@@ -64,10 +64,10 @@ export function TopBar() {
         type="button"
         onClick={() => setPaletteOpen(true)}
         aria-label="Open search and command palette"
-        className="flex h-8 min-w-0 flex-1 max-w-md items-center gap-2 rounded-md border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-3 text-left text-xs text-[var(--sc-text-muted)] transition-colors hover:border-[var(--sc-border-strong)] focus-visible:outline-2 focus-visible:outline-[var(--sc-focus)]"
+        className="flex h-9 min-w-0 flex-1 max-w-md items-center gap-2 rounded-md border border-[var(--sc-border-strong)] bg-[var(--sc-surface)] px-3 text-left text-xs text-[var(--sc-text-muted)] transition-colors hover:border-[var(--sc-border-strong)] focus-visible:outline-2 focus-visible:outline-[var(--sc-focus)]"
       >
         <Search size={13} aria-hidden />
-        <span className="flex-1 truncate">Search or run a command…</span>
+        <span className="flex-1 truncate">Search memories or go to a page</span>
         <Kbd>⌘K</Kbd>
       </button>
 

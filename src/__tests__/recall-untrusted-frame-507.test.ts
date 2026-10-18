@@ -24,9 +24,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
-// @ts-expect-error -- importing a .mjs hook utility
 import { flattenRecallField, formatRecallContext, frameRecallBlock, MARKER_REMOVED, neutraliseFrameMarkers, recallFrame, recallFrameFields, recallFrameTail, RECALL_FRAME_OVERHEAD_CHARS } from '../../scripts/lib/recall-frame.mjs';
-// @ts-expect-error -- importing a .mjs hook utility
 import { buildStartPack, NATIVE_INJECT_CONTRACT, PACK_HEADER, packFrameTail } from '../../scripts/lib/inject-pack.mjs';
 import { analyzeFirewall } from '../defence/firewall/index.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
@@ -101,14 +99,16 @@ describe('#507 frame shape', () => {
 
   it('returns null when there is nothing to frame', () => {
     expect(formatRecallContext([], 150)).toBeNull();
-    expect(formatRecallContext(undefined, 150)).toBeNull();
+    // Deliberately pass absent values through the runtime guard.
+    expect(formatRecallContext(undefined as unknown as [], 150)).toBeNull();
     expect(frameRecallBlock('')).toBeNull();
     expect(frameRecallBlock('   \n ')).toBeNull();
-    expect(frameRecallBlock(undefined)).toBeNull();
+    expect(frameRecallBlock(undefined as unknown as string)).toBeNull();
   });
 
   it('tolerates a missing title or content', () => {
-    expect((formatRecallContext([{ id: 1 }, { id: 2, title: null, content: 5 }], 150) as string).split('\n')).toHaveLength(5);
+    // Deliberately pass malformed stored fields through the runtime formatter.
+    expect((formatRecallContext([{ id: 1 }, { id: 2, title: null as unknown as string, content: 5 as unknown as string }], 150) as string).split('\n')).toHaveLength(5);
   });
 
   it('fixed overhead; per-memory content cap unchanged; titles are NOT capped', () => {

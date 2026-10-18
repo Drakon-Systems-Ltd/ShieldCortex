@@ -45,7 +45,7 @@ function ConfirmationDialog({
           {action === 'approve'
             ? isMemoryFile
               ? 'This will mark the memory-file finding as reviewed. The source file is not modified.'
-              : 'This will approve the item and promote it into memory.'
+              : 'This will try to approve the item. Approval is not guaranteed: if the item cannot be admitted, it is rejected instead.'
             : isMemoryFile
               ? 'This will dismiss the memory-file finding. The source file is not deleted or edited.'
               : 'This will permanently discard the memory.'}
@@ -109,32 +109,32 @@ function LocalAiQuarantineAnnotation({ annotation }: { annotation: ReviewAnnotat
   return (
     <div className="mb-3 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)]/70 p-3">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--sc-ok)]">
+        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--sc-ok)]">
           <Bot size={12} /> Local AI Explainer
         </span>
-        <span className="rounded border border-[var(--sc-border)] px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--sc-text-dim)]">
+        <span className="rounded border border-[var(--sc-border)] px-2 py-0.5 text-xs text-[var(--sc-text-dim)]">
           {categoryLabel(annotation.category)}
         </span>
-        <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${actionTone(annotation.suggestedAction)}`}>
+        <span className={`rounded border px-2 py-0.5 text-xs ${actionTone(annotation.suggestedAction)}`}>
           {annotation.suggestedAction.replace(/_/g, ' ')}
         </span>
-        <span className="text-[10px] text-[var(--sc-text-muted)]">
+        <span className="text-xs text-[var(--sc-text-muted)]">
           {Math.round(annotation.confidence * 100)}% confidence
         </span>
         {annotation.similarGroupKey && (
-          <span className="inline-flex items-center gap-1 text-[10px] text-[var(--sc-text-muted)]">
+          <span className="inline-flex items-center gap-1 text-xs text-[var(--sc-text-muted)]">
             <Tags size={11} /> {annotation.similarGroupKey}
           </span>
         )}
       </div>
       <p className="mt-2 text-xs leading-5 text-[var(--sc-text)]">{annotation.summary}</p>
-      <p className="mt-1 text-[11px] leading-5 text-[var(--sc-text-dim)]">{annotation.reasoning}</p>
+      <p className="mt-1 text-xs leading-5 text-[var(--sc-text-dim)]">{annotation.reasoning}</p>
       {annotation.evidence.length > 0 && (
         <div className="mt-2 space-y-1.5">
           {annotation.evidence.map((entry, index) => (
             <div key={`${entry.snippet}-${index}`} className="rounded border border-[var(--sc-border)] bg-[var(--sc-surface)] px-2 py-1.5">
-              <div className="text-[10px] text-[var(--sc-text-muted)]">{entry.reason}</div>
-              <div className="mt-0.5 text-[11px] text-[var(--sc-text)] break-words">&quot;{entry.snippet}&quot;</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">{entry.reason}</div>
+              <div className="mt-0.5 text-xs text-[var(--sc-text)] break-words">&quot;{entry.snippet}&quot;</div>
             </div>
           ))}
         </div>
@@ -161,6 +161,7 @@ export function QuarantineView() {
   } | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [bulkConfirm, setBulkConfirm] = useState<'approve' | 'reject' | null>(null);
+  const [refusalNotice, setRefusalNotice] = useState<string | null>(null);
   const mutationError =
     (approveMutation.error as Error | null)?.message ||
     (rejectMutation.error as Error | null)?.message ||
@@ -174,7 +175,16 @@ export function QuarantineView() {
   const pendingItems = items.filter(i => i.status === 'pending');
   const annotatedItems = items.filter(i => i.annotation);
   const needsAiReviewItems = pendingItems.filter(i => !i.annotation);
-  const selectedItems = pendingItems.filter(i => selectedIds.has(i.id));
+  // #831: count, dialog copy and submitted ids come from the selected rows that are
+  // still pending, so ids that left the list (refresh or a single review) never count.
+  // Keep the order the rows were selected in: the server approves in the order it is
+  // sent, and under the memory write rate limit that order decides which items get in.
+  const pendingById = new Map(pendingItems.map(i => [i.id, i] as const));
+  const selectedItems = Array.from(selectedIds).flatMap(id => {
+    const pending = pendingById.get(id);
+    return pending ? [pending] : [];
+  });
+  const selectedCount = selectedItems.length;
   const selectedMemoryFileCount = selectedItems.filter(i => i.source_type === 'memory_file').length;
   const annotationGroups = (() => {
     const groups = new Map<string, number>();
@@ -186,7 +196,7 @@ export function QuarantineView() {
     return [...groups.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
   })();
   const allSelected = pendingItems.length > 0 && pendingItems.every(i => selectedIds.has(i.id));
-  const someSelected = pendingItems.some(i => selectedIds.has(i.id));
+  const someSelected = selectedCount > 0;
   const copilotBusy = annotateMutation.isPending || annotatePendingMutation.isPending;
   const canAnnotate = Boolean(copilotStatus?.enabled && copilotStatus.featureEnabled && copilotStatus.modelCached);
 
@@ -210,7 +220,16 @@ export function QuarantineView() {
   const handleConfirm = () => {
     if (!confirmAction) return;
     if (confirmAction.action === 'approve') {
-      approveMutation.mutate(confirmAction.item.id);
+      const id = confirmAction.item.id;
+      setRefusalNotice(null);
+      approveMutation.mutate(id, {
+        // #824: the re-scan can refuse an approval; the item then ends rejected.
+        onSuccess: (result) => {
+          if (result.status !== 'approved') {
+            setRefusalNotice(`Item #${id} was not approved${result.reason ? `: ${result.reason}` : ''}. It is now ${result.status}.`);
+          }
+        },
+      });
     } else {
       rejectMutation.mutate({ id: confirmAction.item.id });
     }
@@ -218,10 +237,20 @@ export function QuarantineView() {
   };
 
   const handleBulkConfirm = () => {
-    if (!bulkConfirm || selectedIds.size === 0) return;
-    const ids = Array.from(selectedIds);
+    if (!bulkConfirm || selectedCount === 0) return;
+    const ids = selectedItems.map(i => i.id);
     if (bulkConfirm === 'approve') {
-      bulkApproveMutation.mutate(ids);
+      setRefusalNotice(null);
+      bulkApproveMutation.mutate(ids, {
+        // #824: report refused items instead of dropping them silently. Not every
+        // refusal comes from a re-scan (BLOCK rows, rate limits), so don't claim one (#828).
+        onSuccess: (result) => {
+          const refused = result.rejected ?? 0;
+          if (refused > 0) {
+            setRefusalNotice(`${refused} of ${ids.length} selected item${ids.length !== 1 ? 's' : ''} ${refused === 1 ? 'was' : 'were'} not approved: ${refused === 1 ? 'it' : 'they'} could not be admitted. ${refused === 1 ? 'It is' : 'They are'} now rejected, not added to memory.`);
+          }
+        },
+      });
     } else {
       bulkRejectMutation.mutate(ids);
     }
@@ -253,15 +282,19 @@ export function QuarantineView() {
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="bg-[var(--sc-surface)] border border-[var(--sc-border)] rounded-xl p-6 max-w-md w-full mx-4">
             <h3 className="text-sm font-semibold text-[var(--sc-text)] mb-2">
-              {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedIds.size} item{selectedIds.size !== 1 ? 's' : ''}?
+              {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedCount} item{selectedCount !== 1 ? 's' : ''}?
             </h3>
             <p className="text-xs text-[var(--sc-text-dim)] mb-4">
               {bulkConfirm === 'approve'
                 ? selectedMemoryFileCount > 0
-                  ? 'Memory-file findings will be marked reviewed without editing files. Other selected items will be promoted into memory.'
-                  : 'This will approve all selected items and promote them into memory.'
+                  ? selectedMemoryFileCount === selectedCount
+                    ? 'Memory-file findings will be marked reviewed without editing files.'
+                    : 'Memory-file findings will be marked reviewed without editing files. The other selected items will be tried for approval; any that cannot be admitted are rejected instead.'
+                  : 'This will try to approve all selected items. Approval is not guaranteed: any that cannot be admitted are rejected instead.'
                 : selectedMemoryFileCount > 0
-                  ? 'Memory-file findings will be dismissed without editing files. Other selected memories will be discarded.'
+                  ? selectedMemoryFileCount === selectedCount
+                    ? 'Memory-file findings will be dismissed without editing files.'
+                    : 'Memory-file findings will be dismissed without editing files. Other selected memories will be discarded.'
                   : 'This will permanently discard all selected memories.'}
             </p>
             <div className="flex gap-2 justify-end">
@@ -279,7 +312,7 @@ export function QuarantineView() {
                     : 'bg-[var(--sc-danger)] text-[var(--sc-text)] hover:bg-[var(--sc-danger)]'
                 }`}
               >
-                {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedIds.size} item{selectedIds.size !== 1 ? 's' : ''}
+                {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedCount} item{selectedCount !== 1 ? 's' : ''}
               </button>
             </div>
           </div>
@@ -294,14 +327,14 @@ export function QuarantineView() {
                 <Sparkles size={16} className="text-[var(--sc-ok)]" />
                 Local AI Explainer
               </h3>
-              <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
+              <span className={`rounded border px-2 py-0.5 text-xs ${
                 copilotStatus?.enabled
                   ? 'border-[var(--sc-ok)]/25 bg-[var(--sc-ok)]/10 text-[var(--sc-ok)]'
                   : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)]'
               }`}>
                 {copilotStatus?.enabled ? 'enabled' : 'disabled'}
               </span>
-              <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
+              <span className={`rounded border px-2 py-0.5 text-xs ${
                 copilotStatus?.modelCached
                   ? 'border-[var(--sc-ok)]/25 bg-[var(--sc-ok)]/10 text-[var(--sc-ok)]'
                   : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)]'
@@ -316,7 +349,7 @@ export function QuarantineView() {
                   ? 'Download the local model first: shieldcortex review-copilot download-model'
                   : 'Explain unreviewed quarantine items locally; approve and reject decisions stay manual.'}
             </div>
-            <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-[var(--sc-text-muted)]">
+            <div className="mt-2 flex flex-wrap gap-2 text-xs text-[var(--sc-text-muted)]">
               <span className={needsAiReviewItems.length > 0 ? 'text-[var(--sc-amber)]' : ''}>
                 {needsAiReviewItems.length} need explanation
               </span>
@@ -371,7 +404,7 @@ export function QuarantineView() {
             </button>
             {someSelected && (
               <>
-                <span className="text-xs text-[var(--sc-text-muted)]">{selectedIds.size} selected</span>
+                <span className="text-xs text-[var(--sc-text-muted)]">{selectedCount} selected</span>
                 <button
                   onClick={() => setBulkConfirm('approve')}
                   className="flex items-center gap-1 px-2.5 py-1 text-xs bg-[var(--sc-ok)]/10 text-[var(--sc-ok)] rounded-lg hover:bg-[var(--sc-ok)]/20 transition-colors"
@@ -393,6 +426,12 @@ export function QuarantineView() {
       {mutationError && (
         <div className="glass-card p-5 border-[var(--sc-danger)]/30 bg-[var(--sc-danger)]/10 text-sm text-[var(--sc-danger)]">
           {mutationError}
+        </div>
+      )}
+
+      {refusalNotice && (
+        <div role="status" className="glass-card p-5 border-[var(--sc-warn)]/30 bg-[var(--sc-warn)]/10 text-sm text-[var(--sc-warn)]">
+          {refusalNotice}
         </div>
       )}
 
@@ -447,12 +486,12 @@ export function QuarantineView() {
                             {item.title || 'Untitled'}
                           </h4>
                           {item.status === 'pending' && !item.annotation && (
-                            <span className="inline-flex items-center gap-1 rounded border border-[var(--sc-amber)]/25 bg-[var(--sc-amber)]/10 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-[var(--sc-amber)]">
+                            <span className="inline-flex items-center gap-1 rounded border border-[var(--sc-amber)]/25 bg-[var(--sc-amber)]/10 px-2 py-0.5 text-xs font-semibold text-[var(--sc-amber)]">
                               <Bot size={10} /> Needs explanation
                             </span>
                           )}
                         </div>
-                        <div className="text-[10px] text-[var(--sc-text-muted)] mt-0.5">
+                        <div className="text-xs text-[var(--sc-text-muted)] mt-0.5">
                           {item.source_type} &middot; {new Date(item.created_at).toLocaleString()}
                           {item.anomaly_score > 0 && (
                             <span className={`ml-2 ${item.anomaly_score > 0.5 ? 'text-[var(--sc-danger)]' : 'text-[var(--sc-amber)]'}`}>
@@ -461,13 +500,13 @@ export function QuarantineView() {
                           )}
                         </div>
                         {isMemoryFile && (
-                          <div className="mt-1 break-all font-mono text-[10px] text-[var(--sc-text-muted)]">
+                          <div className="mt-1 break-all font-mono text-xs text-[var(--sc-text-muted)]">
                             {item.source_identifier}
                           </div>
                         )}
                       </div>
                     </div>
-                    <span className="text-[10px] text-[var(--sc-danger)] bg-[var(--sc-danger)]/10 px-2 py-0.5 rounded">
+                    <span className="text-xs text-[var(--sc-danger)] bg-[var(--sc-danger)]/10 px-2 py-0.5 rounded">
                       {item.reason?.slice(0, 50) || 'Threat detected'}
                     </span>
                   </div>
@@ -481,7 +520,7 @@ export function QuarantineView() {
                   {indicators.length > 0 && (
                     <div className="flex gap-1 mb-3 flex-wrap">
                       {indicators.map((ind: string, i: number) => (
-                        <span key={i} className="text-[9px] text-[var(--sc-amber)] bg-[var(--sc-amber)]/10 px-1.5 py-0.5 rounded">
+                        <span key={i} className="text-xs text-[var(--sc-amber)] bg-[var(--sc-amber)]/10 px-1.5 py-0.5 rounded">
                           {ind}
                         </span>
                       ))}
@@ -520,7 +559,7 @@ export function QuarantineView() {
 
                   {/* Review info (for reviewed items) */}
                   {item.reviewed_at && (
-                    <div className="text-[10px] text-[var(--sc-text-muted)]">
+                    <div className="text-xs text-[var(--sc-text-muted)]">
                       {item.status === 'approved' ? 'Approved' : 'Rejected'} by {item.reviewed_by} at {new Date(item.reviewed_at).toLocaleString()}
                     </div>
                   )}

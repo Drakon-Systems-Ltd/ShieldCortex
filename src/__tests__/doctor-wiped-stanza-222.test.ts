@@ -121,6 +121,8 @@ describe('#222 — doctor cannot green-tick an unrecognised state', () => {
       loadedInIndex: false,
       loadedInLiveRoster: null,
       indexReadable: true,
+      configReadable: true,
+      configPresent: true,
       openClawTracked: false,
       indexWarnsConflict: false,
       metadataConflict: false,
@@ -224,6 +226,8 @@ describe('#103 — doctor must not claim roster confirmation it does not have', 
       loadedInIndex: true,
       loadedInLiveRoster,
       indexReadable: true,
+      configReadable: true,
+      configPresent: true,
       openClawTracked: true,
       indexWarnsConflict: false,
       metadataConflict: false,
@@ -260,7 +264,9 @@ describe('#103 — doctor must not claim roster confirmation it does not have', 
     expect(renderPluginLoadVerdict(healthyVerdict(null)).status).toBe('pass');
   });
 
-  it('still points at the live canary as the way to actually prove it', () => {
-    expect(renderPluginLoadVerdict(healthyVerdict(null)).message).toMatch(/canary|prove it live/i);
+  it('still points at the live canary as the way to actually prove it (--verbose only)', () => {
+    // PR #773: the consent-gated probe command moved out of the message (a
+    // pass can become a default-report warn) into the verbose-only note.
+    expect(renderPluginLoadVerdict(healthyVerdict(null)).verboseNote).toMatch(/canary|prove it live/i);
   });
 });

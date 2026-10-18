@@ -25,7 +25,7 @@ const PLUGIN = 'shieldcortex-realtime';
 
 let tempHome: string;
 let previousDocker: string | undefined;
-let previousExitCode: string | number | undefined;
+let previousExitCode: string | number | null | undefined;
 
 function configPath(): string {
   return path.join(tempHome, '.openclaw', 'openclaw.json');
@@ -57,7 +57,7 @@ afterEach(() => {
   __setNativePluginInstallForTest(null);
   if (previousDocker === undefined) delete process.env.DOCKER;
   else process.env.DOCKER = previousDocker;
-  process.exitCode = previousExitCode;
+  process.exitCode = previousExitCode ?? undefined;
   jest.restoreAllMocks();
   fs.rmSync(tempHome, { recursive: true, force: true });
 });

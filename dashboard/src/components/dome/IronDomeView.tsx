@@ -132,7 +132,7 @@ export function IronDomeView() {
       {/* Status + Deactivate */}
       <div className="flex items-center gap-3">
         {statusLoading ? (
-          <span className="text-[10px] text-[var(--sc-text-muted)] animate-pulse">Loading...</span>
+          <span className="text-xs text-[var(--sc-text-muted)] animate-pulse">Loading...</span>
         ) : (
           <StatusPill state={isActive ? 'ok' : 'off'}>{isActive ? 'active' : 'inactive'}</StatusPill>
         )}
@@ -173,7 +173,7 @@ export function IronDomeView() {
                   <Icon size={12} />
                   <span className="text-xs font-medium">{label}</span>
                 </div>
-                <div className="text-[10px] text-[var(--sc-text-muted)]">{description}</div>
+                <div className="text-xs text-[var(--sc-text-muted)]">{description}</div>
               </button>
             ))}
           </div>
@@ -193,13 +193,13 @@ export function IronDomeView() {
                   key={name}
                   className="flex items-center gap-3 rounded-lg bg-[var(--sc-surface-2)]/50 px-3 py-2"
                 >
-                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-[var(--sc-border)] text-[10px] text-[var(--sc-text-muted)]">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-[var(--sc-border)] text-xs text-[var(--sc-text-muted)]">
                     {i + 1}
                   </span>
                   <Icon size={14} className="shrink-0 text-[var(--sc-text-muted)]" />
                   <div className="min-w-0 flex-1">
                     <div className="text-xs font-medium text-[var(--sc-text)]">{name}</div>
-                    <div className="truncate text-[10px] text-[var(--sc-text-muted)]">{description}</div>
+                    <div className="truncate text-xs text-[var(--sc-text-muted)]">{description}</div>
                   </div>
                   <StatusPill state={st}>{st === 'ok' ? 'on' : st}</StatusPill>
                 </li>
@@ -215,7 +215,7 @@ export function IronDomeView() {
           <h3 className="text-sm font-medium text-[var(--sc-text)] mb-3">Active Configuration</h3>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
             <div>
-              <div className="text-[10px] text-[var(--sc-text-muted)] uppercase mb-1">Trusted Channels</div>
+              <div className="text-xs text-[var(--sc-text-muted)] mb-1">Trusted Channels</div>
               <div className="flex flex-wrap gap-1">
                 {config.trustedChannels.map((ch) => (
                   <span key={ch} className="px-1.5 py-0.5 bg-[var(--sc-surface-2)] rounded text-[var(--sc-text-dim)]">
@@ -225,7 +225,7 @@ export function IronDomeView() {
               </div>
             </div>
             <div>
-              <div className="text-[10px] text-[var(--sc-text-muted)] uppercase mb-1">Requires Approval</div>
+              <div className="text-xs text-[var(--sc-text-muted)] mb-1">Requires Approval</div>
               <div className="flex flex-wrap gap-1">
                 {config.requireApproval.map((a) => (
                   <span key={a} className="px-1.5 py-0.5 bg-[var(--sc-danger)]/10 border border-[var(--sc-danger)]/20 rounded text-[var(--sc-danger)]">
@@ -235,7 +235,7 @@ export function IronDomeView() {
               </div>
             </div>
             <div>
-              <div className="text-[10px] text-[var(--sc-text-muted)] uppercase mb-1">Kill Phrase</div>
+              <div className="text-xs text-[var(--sc-text-muted)] mb-1">Kill Phrase</div>
               <div className="space-y-2">
                 <input
                   type="text"
@@ -248,11 +248,11 @@ export function IronDomeView() {
                   <button
                     onClick={() => updateConfigMutation.mutate({ killPhrase: killPhraseDraft.trim() })}
                     disabled={updateConfigMutation.isPending || !killPhraseDraft.trim() || !killPhraseDirty}
-                    className="px-3 py-1.5 rounded-lg bg-[var(--sc-danger)] hover:bg-[var(--sc-danger)]/80 disabled:opacity-50 text-[11px] font-medium text-[var(--sc-text)] transition-colors"
+                    className="px-3 py-1.5 rounded-lg bg-[var(--sc-danger)] hover:bg-[var(--sc-danger)]/80 disabled:opacity-50 text-xs font-medium text-[var(--sc-text)] transition-colors"
                   >
                     {updateConfigMutation.isPending ? 'Saving...' : 'Save phrase'}
                   </button>
-                  <span className="text-[10px] text-[var(--sc-text-muted)]">
+                  <span className="text-xs text-[var(--sc-text-muted)]">
                     {isActive ? 'Say this in a conversation to trigger lockdown.' : 'This will apply the next time Iron Dome is active.'}
                   </span>
                 </div>
@@ -267,8 +267,8 @@ export function IronDomeView() {
         <div className="glass-card-strong p-6 border-2 !border-[var(--sc-danger)]/50 animate-pulse-slow">
           <div className="flex items-center gap-2 mb-3">
             <OctagonX size={18} className="text-[var(--sc-danger)]" />
-            <h3 className="text-sm font-bold text-[var(--sc-danger)] uppercase tracking-wide">Kill Switch Active</h3>
-            <span className="ml-auto text-[10px] bg-[var(--sc-danger)]/20 text-[var(--sc-danger)] px-2 py-0.5 rounded-full border border-[var(--sc-danger)]/30">
+            <h3 className="text-sm font-bold text-[var(--sc-danger)]">Kill Switch Active</h3>
+            <span className="ml-auto text-xs bg-[var(--sc-danger)]/20 text-[var(--sc-danger)] px-2 py-0.5 rounded-full border border-[var(--sc-danger)]/30">
               LOCKDOWN
             </span>
           </div>
@@ -279,18 +279,18 @@ export function IronDomeView() {
           {/* Kill switch metadata */}
           {killSwitchMeta && (
             <div className="bg-[var(--sc-danger)]/10 border border-[var(--sc-danger)]/20 rounded-lg p-3 mb-4 space-y-1">
-              <div className="text-[10px] text-[var(--sc-text-muted)]">
+              <div className="text-xs text-[var(--sc-text-muted)]">
                 <span className="text-[var(--sc-danger)] font-medium">Triggered:</span>{' '}
                 {new Date(killSwitchMeta.triggeredAt).toLocaleString()}
               </div>
-              <div className="text-[10px] text-[var(--sc-text-muted)]">
+              <div className="text-xs text-[var(--sc-text-muted)]">
                 <span className="text-[var(--sc-danger)] font-medium">Source:</span>{' '}
                 {killSwitchMeta.source === 'kill_phrase' ? `Kill phrase "${killSwitchMeta.phrase}"` :
                  killSwitchMeta.source === 'manual' ? 'Manual (dashboard)' :
                  killSwitchMeta.source === 'mcp_tool' ? 'MCP tool' : killSwitchMeta.source}
               </div>
               {killSwitchMeta.memoryCountAtTrigger !== undefined && (
-                <div className="text-[10px] text-[var(--sc-text-muted)]">
+                <div className="text-xs text-[var(--sc-text-muted)]">
                   <span className="text-[var(--sc-danger)] font-medium">Memories at trigger:</span>{' '}
                   {killSwitchMeta.memoryCountAtTrigger}
                 </div>
@@ -324,7 +324,7 @@ export function IronDomeView() {
                 )}
                 Resume Agent
               </button>
-              <span className="text-[10px] text-[var(--sc-text-muted)]">
+              <span className="text-xs text-[var(--sc-text-muted)]">
                 Only resume after you&apos;ve investigated the threat
               </span>
             </div>
@@ -340,14 +340,14 @@ export function IronDomeView() {
             Immediately halts your agent when you suspect it has been compromised or is acting on poisoned data. Blocks ALL operations — no reads, writes, or modifications. Iron Dome stays active.
           </p>
           {config?.killPhrase && (
-            <p className="text-[10px] text-[var(--sc-text-muted)] mb-3">
+            <p className="text-xs text-[var(--sc-text-muted)] mb-3">
               Kill phrase: <span className="font-mono text-[var(--sc-text-dim)]">&quot;{config.killPhrase}&quot;</span> — say this in conversation for hands-free stop
             </p>
           )}
           <button
             onClick={() => setConfirmStopOpen(true)}
             disabled={emergencyStopMutation.isPending}
-            className="flex items-center gap-1.5 px-4 py-2 bg-[var(--sc-danger)] hover:bg-[var(--sc-danger)]/80 disabled:opacity-50 rounded-lg text-xs font-bold text-[var(--sc-text)] uppercase tracking-wider transition-colors"
+            className="flex items-center gap-1.5 px-4 py-2 bg-[var(--sc-danger)] hover:bg-[var(--sc-danger)]/80 disabled:opacity-50 rounded-lg text-xs font-bold text-[var(--sc-text)] transition-colors"
           >
             {emergencyStopMutation.isPending ? (
               <Loader2 size={12} className="animate-spin" />
@@ -407,7 +407,7 @@ export function IronDomeView() {
                   <XCircle size={14} className="text-[var(--sc-danger)]" />
                 )}
                 <span
-                  className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
+                  className={`text-xs font-medium px-2 py-0.5 rounded-full ${
                     RISK_COLOURS[scanResult.riskLevel] ?? 'bg-[var(--sc-surface-2)]/20 text-[var(--sc-text-dim)]'
                   }`}
                 >
@@ -425,13 +425,13 @@ export function IronDomeView() {
                   }`}
                 >
                   <div className="flex items-center gap-2 mb-1">
-                    <span className="text-[10px] font-medium uppercase">
+                    <span className="text-xs font-medium">
                       {d.severity}
                     </span>
                     <span className="text-xs text-[var(--sc-text)]">{d.category.replace(/_/g, ' ')}</span>
                   </div>
-                  <p className="text-[11px] text-[var(--sc-text-dim)] mb-1">{d.description}</p>
-                  <code className="text-[10px] text-[var(--sc-text-muted)] bg-[var(--sc-surface-2)] px-1.5 py-0.5 rounded block truncate">
+                  <p className="text-xs text-[var(--sc-text-dim)] mb-1">{d.description}</p>
+                  <code className="text-xs text-[var(--sc-text-muted)] bg-[var(--sc-surface-2)] px-1.5 py-0.5 rounded block truncate">
                     {d.match}
                   </code>
                 </div>
@@ -444,7 +444,7 @@ export function IronDomeView() {
         <div className="glass-card p-6">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-medium text-[var(--sc-text)]">Event Feed</h3>
-            <span className="text-[10px] text-[var(--sc-text-muted)]">
+            <span className="text-xs text-[var(--sc-text-muted)]">
               Last {logs.length} events
             </span>
           </div>
@@ -454,28 +454,28 @@ export function IronDomeView() {
           <div className="mb-1 grid grid-cols-2 gap-2">
             <div className="rounded-lg bg-[var(--sc-surface-2)]/50 p-2 text-center">
               <div className="text-sm font-bold text-[var(--sc-danger)]">{blockedToday}</div>
-              <div className="text-[10px] text-[var(--sc-text-muted)]">Blocked today</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">Blocked today</div>
             </div>
             <div className="rounded-lg bg-[var(--sc-surface-2)]/50 p-2 text-center">
               <div className="text-sm font-bold text-[var(--sc-ok)]">{allowedToday}</div>
-              <div className="text-[10px] text-[var(--sc-text-muted)]">Allowed today</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">Allowed today</div>
             </div>
           </div>
-          <div className="mb-3 text-[10px] text-[var(--sc-text-muted)]">
+          <div className="mb-3 text-xs text-[var(--sc-text-muted)]">
             of the {logs.length} most recently loaded events
           </div>
           <div className="grid grid-cols-3 gap-2 mb-3">
             <div className="bg-[var(--sc-surface-2)]/50 rounded-lg p-2 text-center">
               <div className="text-sm font-bold text-[var(--sc-text)]">{logs.length}</div>
-              <div className="text-[10px] text-[var(--sc-text-muted)]">Total</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">Total</div>
             </div>
             <div className="bg-[var(--sc-surface-2)]/50 rounded-lg p-2 text-center">
               <div className="text-sm font-bold text-[var(--sc-danger)]">{blockCount}</div>
-              <div className="text-[10px] text-[var(--sc-text-muted)]">Blocked</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">Blocked</div>
             </div>
             <div className="bg-[var(--sc-surface-2)]/50 rounded-lg p-2 text-center">
               <div className="text-sm font-bold text-[var(--sc-ok)]">{allowCount}</div>
-              <div className="text-[10px] text-[var(--sc-text-muted)]">Allowed</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">Allowed</div>
             </div>
           </div>
 
@@ -484,7 +484,7 @@ export function IronDomeView() {
             {logs.length === 0 ? (
               <div className="text-center py-6">
                 <Shield size={20} className="text-[var(--sc-text-muted)] mx-auto mb-1.5" />
-                <p className="text-[10px] text-[var(--sc-text-muted)]">
+                <p className="text-xs text-[var(--sc-text-muted)]">
                   No Iron Dome events yet
                 </p>
               </div>
@@ -502,7 +502,7 @@ export function IronDomeView() {
                   <span className="text-[var(--sc-text-dim)] truncate flex-1">
                     {(log.reason ?? '').replace(/^\[iron-dome:\w+\]\s*/, '')}
                   </span>
-                  <span className="text-[10px] text-[var(--sc-text-muted)] shrink-0">
+                  <span className="text-xs text-[var(--sc-text-muted)] shrink-0">
                     {new Date(log.timestamp).toLocaleTimeString()}
                   </span>
                 </div>

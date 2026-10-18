@@ -51,6 +51,7 @@ export interface WebhookNotifyChannelOptions {
  *  on this header must never see a value this module invented, and an older
  *  caller with no `event` at all keeps getting the header it has always got. */
 function eventOf(n: AnyOperatorNotification): string {
+  if (n.event === 'maintenance_fail') return 'maintenance_fail';
   if (n.event === 'denied_no_prompt_surface') return 'denied_no_prompt_surface';
   if (n.event === 'conversation_threat') return 'conversation_threat';
   if (n.event === 'action_guard_denial') return 'action_guard_denial';
@@ -82,6 +83,7 @@ function buildConversationPayload(n: ConversationThreatNotification): Record<str
 }
 
 function buildPayload(n: AnyOperatorNotification): Record<string, unknown> {
+  if (n.event === 'maintenance_fail') return { event: n.event, checks: n.checks, text: formatOperatorNotification(n), ts: new Date().toISOString() };
   if (isConversationThreatNotification(n)) return buildConversationPayload(n);
   if (isActionGuardOutcomeNotification(n)) return buildActionGuardPayload(n);
   return buildApprovalPayload(n);

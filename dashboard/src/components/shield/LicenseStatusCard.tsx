@@ -52,7 +52,7 @@ export function LicenseStatusCard() {
             <Shield size={16} className="text-[var(--sc-ok)]" />
             <h3 className="text-sm font-semibold text-[var(--sc-text)]">Licence</h3>
           </div>
-          <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-[var(--sc-surface-2)] text-[var(--sc-text-dim)] border border-[var(--sc-border)]">
+          <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-[var(--sc-surface-2)] text-[var(--sc-text-dim)] border border-[var(--sc-border)]">
             Free
           </span>
         </div>
@@ -123,11 +123,11 @@ export function LicenseStatusCard() {
         <div className="flex items-center gap-2">
           <Shield size={16} className={TIER_COLOURS[tier]} />
           <h3 className="text-sm font-medium text-[var(--sc-text)]">Licence</h3>
-          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${TIER_COLOURS[tier]} ${TIER_BG[tier]}`}>
+          <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${TIER_COLOURS[tier]} ${TIER_BG[tier]}`}>
             {TIER_LABELS[tier]}
           </span>
         </div>
-        <span className="text-[10px] text-[var(--sc-text-muted)]">
+        <span className="text-xs text-[var(--sc-text-muted)]">
           {enabledCount}/{totalCount} features
         </span>
       </div>
@@ -155,7 +155,7 @@ export function LicenseStatusCard() {
       {/* Feature list toggle */}
       <button
         onClick={() => setShowFeatures(!showFeatures)}
-        className="flex items-center gap-1 text-[10px] text-[var(--sc-text-muted)] hover:text-[var(--sc-text)] transition-colors mb-2"
+        className="flex items-center gap-1 text-xs text-[var(--sc-text-muted)] hover:text-[var(--sc-text)] transition-colors mb-2"
       >
         {showFeatures ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
         {showFeatures ? 'Hide features' : 'Show features'}
@@ -174,7 +174,7 @@ export function LicenseStatusCard() {
                 {f.description.split('.')[0]}
               </span>
               {!f.enabled && (
-                <span className={`text-[9px] px-1 py-0.5 rounded ${TIER_COLOURS[f.requiredTier]} ${TIER_BG[f.requiredTier]}`}>
+                <span className={`text-xs px-1 py-0.5 rounded ${TIER_COLOURS[f.requiredTier]} ${TIER_BG[f.requiredTier]}`}>
                   {TIER_LABELS[f.requiredTier]}
                 </span>
               )}
@@ -187,7 +187,7 @@ export function LicenseStatusCard() {
       <button
         onClick={handleDeactivate}
         disabled={deactivateMutation.isPending}
-        className="text-[10px] text-[var(--sc-text-muted)] hover:text-[var(--sc-danger)] transition-colors"
+        className="text-xs text-[var(--sc-text-muted)] hover:text-[var(--sc-danger)] transition-colors"
       >
         Deactivate
       </button>

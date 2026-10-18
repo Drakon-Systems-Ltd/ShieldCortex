@@ -44,7 +44,8 @@ describe('update executes the newly installed CLI', () => {
     expect(body).toMatch(/process\.exit\(handoff\)/);
     expect(body).toMatch(/reexecFailed[\s\S]*protection unproven/);
     expect(src).toMatch(/shell: false/);
-    expect(body).toContain('maybePrintActionGuardDefaultOffNotice(mainUpdated)');
+    // The Guard notice gates on the version crossed, like the 4.11 notice.
+    expect(body).toContain('maybePrintActionGuardDefaultOffNotice(fromVersion, mainUpdated)');
     expect(src).toContain('SHIELDCORTEX_UPDATE_FROM_VERSION');
     expect(body).toMatch(/maybePrint411Notice\(fromVersion/);
   });

@@ -14,7 +14,6 @@ import { describe, it, expect, beforeAll } from '@jest/globals';
 let defendRecallRows: any;
 
 beforeAll(async () => {
-  // @ts-expect-error -- importing a plain .mjs hook util from a .ts test
   ({ defendRecallRows } = await import('../../scripts/lib/recall-defence.mjs'));
 });
 
@@ -185,7 +184,6 @@ describe('defendRecallRows — reviewed/pinned bypass (owner decision)', () => {
 
 describe('loadRecallDefence — fail open', () => {
   it('returns null when the dist build is absent (so the hook leaves recall unchanged)', async () => {
-    // @ts-expect-error -- importing a plain .mjs hook util from a .ts test
     const mod = await import('../../scripts/lib/recall-defence.mjs');
     const fs = await import('node:fs');
     const os = await import('node:os');

@@ -117,8 +117,13 @@ describe('config --action-guard-enforce-when-ready confirmation message', () => 
 });
 
 describe('config --help Action Guard lines', () => {
-  const help = between(SRC, "'  --action-guard-enforce-when-ready", "'  --action-guard-notify-openclaw");
-  const advisory = literals(help.slice(help.indexOf("'  --action-guard-advisory")));
+  // `config --help` text lives in the CONFIG_HELP template literal (#767 moved it
+  // out of src/cloud/cli.ts); collapse the help-line padding before matching.
+  const HELP_SRC = read('src', 'cli', 'dispatch-help.ts');
+  const flat = (s) => s.replace(/\s+/g, ' ');
+  const configHelp = between(HELP_SRC, 'export const CONFIG_HELP = `', '`;');
+  const help = between(configHelp, '  --action-guard-enforce-when-ready', '  --action-guard-notify-openclaw');
+  const advisory = flat(help.slice(help.indexOf('  --action-guard-advisory')));
 
   it('watch-only help line names the floor and Hermes independence', () => {
     assertQualifiedExceptions(advisory);
@@ -127,21 +132,22 @@ describe('config --help Action Guard lines', () => {
   });
 
   it('shadow help line scopes logging to ordinary dangerous ops', () => {
-    assert.match(literals(help), /Log ordinary dangerous ops \(shadow\)/);
+    assert.match(flat(help), /Log ordinary dangerous ops \(shadow\)/);
   });
 
   it('shadow help line qualifies Hermes by its own SHIELDCORTEX_ENFORCE setting', () => {
-    const shadow = literals(help.slice(0, help.indexOf("'  --action-guard-advisory")));
+    const shadow = flat(help.slice(0, help.indexOf('  --action-guard-advisory')));
     assert.match(shadow, /Hermes ignores the gate/);
     assertHermesQualified(shadow);
   });
 });
 
 describe('CHANGELOG', () => {
-  it('Unreleased Docs names the config CLI watch-only copy correction', () => {
-    const unreleased = between(read('CHANGELOG.md'), '## [Unreleased]', '\n## [');
-    const bullet = unreleased.split('\n').find((l) => /config` watch only copy/i.test(l));
-    assert.ok(bullet, 'no config watch only copy bullet');
+  it('Docs (Unreleased, or the release that shipped it) names the config CLI watch-only copy correction', () => {
+    // The bullet starts under [Unreleased] and moves into a versioned section at
+    // release time; the contract is its wording, not which heading it sits under.
+    const bullet = read('CHANGELOG.md').split('\n').find((l) => l.startsWith('- **') && /config` watch only copy/i.test(l));
+    assert.ok(bullet, 'no config watch only copy bullet in CHANGELOG.md');
     assert.match(bullet, /SHIELDCORTEX_ENFORCE/);
     assert.match(bullet, /not runtime proof/);
   });

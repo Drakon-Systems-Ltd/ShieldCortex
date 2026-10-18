@@ -33,6 +33,7 @@ We support the latest two major versions of the `shieldcortex` npm package. Olde
 
 | Version | Status |
 |---|---|
+| 5.x | ✅ Supported |
 | 4.x | ✅ Supported |
 | 3.x | ⚠️ Security fixes only, best-effort |
 | ≤ 2.x | ❌ End of life |
