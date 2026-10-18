@@ -457,18 +457,53 @@ function guardFingerprint(row) {
   return createHash('sha256').update(payload).digest('hex').slice(0, 16);
 }
 
+// #654 — identity resolution. Kept byte-for-byte in step with guardIdentity()
+// in src/defence/iron-dome/session-guard.ts, which this hook cannot import; the
+// #654 parity vectors pin the two. guardFingerprint above stays VERBATIM as the
+// v1 formula: every receipt already on disk was written with it.
+const BINDING_PLANES = new Set(['action_guard', 'conversation_firewall']);
+const BINDING_STRING_FIELDS = ['gatewayInstanceId', 'hookName', 'pluginId', 'nonce', 'actionKey'];
+const MAX_RECEIPT_IDENTITIES = 16384;
+
+// Pure structural copy of hasRequiredBinding (enforcement-binding.ts).
+function hasValidBindingNonce(row) {
+  if (!BINDING_PLANES.has(String(row.plane ?? ''))) return false;
+  if (typeof row.seq !== 'number' || !Number.isInteger(row.seq) || row.seq < 1) return false;
+  for (const field of BINDING_STRING_FIELDS) {
+    if (typeof row[field] !== 'string' || row[field].length === 0) return false;
+  }
+  return /^[0-9a-f]{32}$/.test(String(row.nonce));
+}
+
+function nonceFingerprint(row) {
+  const payload = JSON.stringify({
+    sessionKey: row.sessionKey,
+    action: row.action,
+    outcome: row.outcome,
+    tool: row.tool,
+    ts: row.ts,
+    bindingNonce: `n:${String(row.nonce)}`,
+    threats: Array.isArray(row.threats) ? row.threats.map(cleanSignal).filter(Boolean).sort() : [],
+  });
+  return createHash('sha256').update(payload).digest('hex').slice(0, 16);
+}
+
+// ID → nonce → physical position. Only a strictly valid string ID is the
+// eventId basis; a value that merely coerces to 32 hex keeps HEAD's v1 bytes
+// (so old receipts still match) but is not claimed as an exact identity.
+function guardIdentity(row, physKey) {
+  const v1 = guardFingerprint({ ...row, _auditLineKey: physKey });
+  if (typeof row.auditEventId === 'string' && /^[a-f0-9]{32}$/.test(row.auditEventId)) {
+    return { primary: v1, basis: 'eventId', v1 };
+  }
+  if (hasValidBindingNonce(row)) return { primary: nonceFingerprint(row), basis: 'bindingNonce', v1 };
+  return { primary: v1, basis: 'physicalRow', v1 };
+}
+
 function sessionGuardIndexFile(sessionKey) {
   return /^sc-[a-f0-9]{16}$/.test(String(sessionKey ?? ''))
     ? join(SESSION_GUARD_DIR, `${sessionKey}.jsonl`)
     : null;
-}
-
-function addSummaryFingerprints(row, seen) {
-  if (Array.isArray(row.guardFingerprints)) {
-    for (const fp of row.guardFingerprints) {
-      if (/^[a-f0-9]{16}$/.test(String(fp))) seen.add(String(fp));
-    }
-  }
 }
 
 // Keep in step with src/defence/iron-dome/session-guard.ts — the hook cannot
@@ -478,80 +513,79 @@ function addSummaryFingerprints(row, seen) {
 const GUARD_INDEX_ORIGINS = new Set(['claude-code-hook', 'openclaw-interceptor']);
 const SUMMARY_ORIGINS = new Set(['claude-code-stop-hook', 'openclaw-session-end']);
 
-function collectSummariesFromLines(lines, sessionKey, alreadySummarised) {
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    try {
-      const row = JSON.parse(line);
-      const isSummary = (row?.recordKind === 'summary' || row?.type === 'session_summary')
-        && SUMMARY_ORIGINS.has(String(row.origin ?? ''))
-        && row.sessionKey === sessionKey
-        && row.outcome === 'action_guard_degraded';
-      if (isSummary) addSummaryFingerprints(row, alreadySummarised);
-    } catch { /* ignore malformed audit lines */ }
+function parseAuditLine(line) {
+  if (!line.trim()) return null;
+  try {
+    const row = JSON.parse(line);
+    return row && typeof row === 'object' && !Array.isArray(row) ? row : null;
+  } catch {
+    return null;
   }
 }
 
-function collectGuardsFromLines(lines, file, sessionKey, alreadySummarised, rows, baseLineIndex = 0) {
-  for (const [offset, line] of lines.entries()) {
-    const lineIndex = baseLineIndex + offset;
-    if (!line.trim()) continue;
-    try {
-      const row = JSON.parse(line);
-      const isGuard = (row?.recordKind === 'guard' || row?.type === 'intercept')
-        && GUARD_INDEX_ORIGINS.has(String(row.origin ?? ''))
-        && row.action !== 'notify'
-        && row.sessionKey === sessionKey
-        && GUARD_DEGRADED_OUTCOMES.has(String(row.outcome));
-      if (!isGuard) continue;
-      row._auditLineKey = `${file}:${lineIndex}`;
-      const fp = guardFingerprint(row);
-      if (alreadySummarised.has(fp)) continue;
-      alreadySummarised.add(fp);
-      rows.push({ ...row, _guardFingerprint: fp });
-    } catch { /* ignore malformed audit lines */ }
-  }
+function isSummaryRow(row, sessionKey) {
+  return (row.recordKind === 'summary' || row.type === 'session_summary')
+    && SUMMARY_ORIGINS.has(String(row.origin ?? ''))
+    && row.sessionKey === sessionKey
+    && row.outcome === 'action_guard_degraded';
 }
 
+function isGuardRow(row, sessionKey) {
+  return (row.recordKind === 'guard' || row.type === 'intercept')
+    && GUARD_INDEX_ORIGINS.has(String(row.origin ?? ''))
+    && row.action !== 'notify'
+    && row.sessionKey === sessionKey
+    && GUARD_DEGRADED_OUTCOMES.has(String(row.outcome));
+}
 
-function forEachJsonlLine(file, visitor, maxBytes = MAX_AUDIT_SCAN_BYTES, expectedIdentity = null) {
+/**
+ * Stream one JSONL source and report how the read ENDED: `read` only when it
+ * reached the size it set out to read (realtime: the size seen at discovery;
+ * index: its 64 MiB prefix, `truncated` beyond). A refused identity check is
+ * `refused`; an lstat/open/fstat error, a shrunk file, an early EOF or a
+ * mid-stream throw is `failed`; ENOENT on lstat is `absent` (the caller decides
+ * whether that is a known absence or a vanished candidate). Chunks are decoded
+ * per chunk, exactly as before — the TS reader reproduces that for parity.
+ */
+function forEachJsonlLine(source, visitor) {
+  const file = source.file;
+  let droppedLines = 0;
+  let st;
+  try {
+    st = lstatSync(file);
+  } catch (err) {
+    return { status: err?.code === 'ENOENT' ? 'absent' : 'failed', droppedLines };
+  }
+  if (!st.isFile() || st.isSymbolicLink()) return { status: 'refused', droppedLines };
   let fd;
   try {
-    const st = lstatSync(file);
-    if (!st.isFile() || st.isSymbolicLink()) return;
     testOnlyPauseAuditOpen();
     fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    const opened = fstatSync(fd);
-    if (expectedIdentity && (opened.dev !== expectedIdentity.dev || opened.ino !== expectedIdentity.ino)) {
-      try { closeSync(fd); } catch { /* ignore */ }
-      fd = undefined;
-      return;
-    }
-    if (!opened.isFile() || opened.nlink > 1) {
-      try { closeSync(fd); } catch { /* ignore */ }
-      fd = undefined;
-      return;
-    }
-    maxBytes = Math.max(0, Math.min(Number(maxBytes) || 0, opened.size, MAX_AUDIT_SCAN_BYTES));
-    if (maxBytes <= 0) {
-      try { closeSync(fd); } catch { /* ignore */ }
-      fd = undefined;
-      return;
-    }
-  } catch {
-    if (fd !== undefined) {
-      try { closeSync(fd); } catch { /* ignore */ }
-    }
-    return;
+  } catch (err) {
+    return { status: err?.code === 'ELOOP' ? 'refused' : 'failed', droppedLines };
   }
   try {
+    const opened = fstatSync(fd);
+    const expected = source.identity ?? { dev: st.dev, ino: st.ino };
+    if (opened.dev !== expected.dev || opened.ino !== expected.ino) return { status: 'refused', droppedLines };
+    if (!opened.isFile() || opened.nlink > 1) return { status: 'refused', droppedLines };
+    let target;
+    let truncated = false;
+    if (source.isIndex) {
+      target = Math.min(opened.size, MAX_AUDIT_SCAN_BYTES);
+      truncated = opened.size > MAX_AUDIT_SCAN_BYTES;
+    } else {
+      target = Number(source.maxBytes) || 0;
+      if (opened.size < target) return { status: 'failed', droppedLines };
+    }
     const buf = Buffer.alloc(64 * 1024);
     let carry = '';
     let lineIndex = 0;
-    let bytesRead = 0;
     let totalRead = 0;
     let droppingOversizedLine = false;
-    while (totalRead < maxBytes && (bytesRead = readSync(fd, buf, 0, Math.min(buf.length, maxBytes - totalRead), null)) > 0) {
+    while (totalRead < target) {
+      const bytesRead = readSync(fd, buf, 0, Math.min(buf.length, target - totalRead), null);
+      if (bytesRead <= 0) break;
       totalRead += bytesRead;
       carry += buf.subarray(0, bytesRead).toString('utf8');
       while (true) {
@@ -565,6 +599,7 @@ function forEachJsonlLine(file, visitor, maxBytes = MAX_AUDIT_SCAN_BYTES, expect
           continue;
         }
         if (Buffer.byteLength(line, 'utf8') > MAX_JSONL_LINE_BYTES) {
+          droppedLines += 1;
           lineIndex += 1;
           continue;
         }
@@ -573,98 +608,216 @@ function forEachJsonlLine(file, visitor, maxBytes = MAX_AUDIT_SCAN_BYTES, expect
       if (Buffer.byteLength(carry, 'utf8') > MAX_JSONL_LINE_BYTES) {
         carry = '';
         droppingOversizedLine = true;
+        droppedLines += 1;
       }
     }
+    if (totalRead !== target) return { status: 'failed', droppedLines };
     if (!droppingOversizedLine && carry && Buffer.byteLength(carry, 'utf8') <= MAX_JSONL_LINE_BYTES) visitor(carry, lineIndex);
+    return { status: truncated ? 'truncated' : 'read', droppedLines };
+  } catch {
+    return { status: 'failed', droppedLines };
   } finally {
     try { closeSync(fd); } catch { /* ignore */ }
   }
 }
 
-function collectSummariesFromFile(source, sessionKey, alreadySummarised) {
-  forEachJsonlLine(source.file, (line) => collectSummariesFromLines([line], sessionKey, alreadySummarised), source.maxBytes, source.identity ?? null);
-}
-
-function collectGuardsFromFile(source, sessionKey, alreadySummarised, rows) {
-  forEachJsonlLine(source.file, (line, lineIndex) => collectGuardsFromLines([line], source.file, sessionKey, alreadySummarised, rows, lineIndex), source.maxBytes, source.identity ?? null);
-}
-
+// Discovery reports what it could NOT see instead of returning [] on every
+// error: only ENOENT on the audit dir is a known absence (existsSync maps every
+// error to false, which is exactly the absent-vs-failed conflation #654 fixes).
 function auditFilesNewestFirst({ sinceMs = null, limit = null } = {}) {
+  const out = { state: 'failed', files: [], skipped: 0, refused: 0, failed: 0 };
   try {
-    if (!existsSync(AUDIT_DIR)) return [];
-    const auditDirStat = lstatSync(AUDIT_DIR);
-    if (!auditDirStat.isDirectory() || auditDirStat.isSymbolicLink()) return [];
-    let candidates = readdirSync(AUDIT_DIR)
-      .filter((f) => /^realtime-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
-      .map((f) => join(AUDIT_DIR, f))
-      .map((file) => {
-        try {
-          const st = lstatSync(file);
-          if (!st.isFile() || st.isSymbolicLink()) return null;
-          return { file, mtimeMs: st.mtimeMs, size: st.size, dev: st.dev, ino: st.ino };
-        } catch { return null; }
-      })
-      .filter(Boolean);
+    let auditDirStat;
+    try {
+      auditDirStat = lstatSync(AUDIT_DIR);
+    } catch (err) {
+      if (err?.code === 'ENOENT') out.state = 'absent';
+      return out;
+    }
+    if (!auditDirStat.isDirectory() || auditDirStat.isSymbolicLink()) {
+      out.state = 'refused';
+      return out;
+    }
+    let candidates = [];
+    for (const name of readdirSync(AUDIT_DIR).filter((f) => /^realtime-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))) {
+      const file = join(AUDIT_DIR, name);
+      let st;
+      try {
+        st = lstatSync(file);
+      } catch {
+        out.failed += 1;
+        continue;
+      }
+      if (!st.isFile() || st.isSymbolicLink()) {
+        out.refused += 1;
+        continue;
+      }
+      candidates.push({ file, mtimeMs: st.mtimeMs, size: st.size, dev: st.dev, ino: st.ino });
+    }
     if (sinceMs !== null) candidates = candidates.filter((f) => f.mtimeMs >= sinceMs);
     candidates.sort((a, b) => b.file.localeCompare(a.file));
     const maxFiles = limit === null ? MAX_AUDIT_SCAN_FILES : Math.min(limit, MAX_AUDIT_SCAN_FILES);
-    const files = [];
     let bytes = 0;
-    for (const item of candidates) {
-      if (files.length >= maxFiles) break;
-      if (item.size > MAX_AUDIT_SCAN_BYTES) continue;
+    for (const [i, item] of candidates.entries()) {
+      if (out.files.length >= maxFiles) { out.skipped += candidates.length - i; break; }
+      if (item.size > MAX_AUDIT_SCAN_BYTES) { out.skipped += 1; continue; }
       const remaining = MAX_AUDIT_SCAN_BYTES - bytes;
-      if (remaining <= 0) break;
-      if (item.size > remaining) continue;
-      files.push({ file: item.file, maxBytes: item.size, identity: { dev: item.dev, ino: item.ino } });
+      if (remaining <= 0) { out.skipped += candidates.length - i; break; }
+      if (item.size > remaining) { out.skipped += 1; continue; }
+      out.files.push({ file: item.file, maxBytes: item.size, identity: { dev: item.dev, ino: item.ino } });
       bytes += item.size;
     }
-    return files;
+    out.state = 'listed';
+    return out;
   } catch {
-    return [];
+    return { state: 'failed', files: [], skipped: 0, refused: 0, failed: 0 };
   }
 }
 
+function newPassGaps() {
+  // Positive completion: every source starts as a failure and is promoted
+  // only on the normal path that proves otherwise.
+  return { auditDir: 'failed', index: 'failed', skippedFiles: 0, refusedFiles: 0, failedFiles: 0, droppedLines: 0 };
+}
+
+function passComplete(g) {
+  return (g.auditDir === 'absent' || g.auditDir === 'listed')
+    && (g.index === 'absent' || g.index === 'read')
+    && g.skippedFiles === 0 && g.refusedFiles === 0 && g.failedFiles === 0 && g.droppedLines === 0;
+}
+
+// Rows from a refused or failed source (including a mid-stream failure) are
+// neither counted nor allowed to suppress: each source's rows are buffered and
+// committed only when the source was read to its target.
+function runPass(pass, sources, gaps, visit) {
+  const committed = [];
+  let processed = 0;
+  try {
+    for (const source of sources) {
+      const local = [];
+      const res = forEachJsonlLine(source, (line, lineIndex) => visit(line, lineIndex, source.file, local));
+      gaps.droppedLines += res.droppedLines;
+      if (source.isIndex) gaps.index = res.status;
+      else if (res.status === 'refused') gaps.refusedFiles += 1;
+      else if (res.status !== 'read') gaps.failedFiles += 1;
+      if (res.status === 'read' || res.status === 'truncated') committed.push(...local);
+      processed += 1;
+    }
+  } catch {
+    for (const source of sources.slice(processed)) {
+      if (source.isIndex) gaps.index = 'failed';
+      else gaps.failedFiles += 1;
+    }
+  }
+  return committed;
+}
+
 function collectGuardStateForSessionKey(sessionKey) {
-  const alreadySummarised = new Set();
-  const rows = [];
-  const sourceFiles = [];
+  const coverageGaps = { receipts: newPassGaps(), guards: newPassGaps() };
+  const sources = [];
+  let indexState = 'failed';
   const indexFile = sessionGuardIndexFile(sessionKey);
-  let hasIndex = false;
-  if (indexFile && existsSync(indexFile)) {
+  if (!indexFile) {
+    indexState = 'absent';
+  } else {
     try {
       const st = lstatSync(indexFile);
-      if (st.isFile() && !st.isSymbolicLink()) {
-        try { const st = lstatSync(indexFile); sourceFiles.push({ file: indexFile, maxBytes: MAX_AUDIT_SCAN_BYTES, identity: { dev: st.dev, ino: st.ino } }); } catch { /* ignore */ }
-        hasIndex = true;
+      if (!st.isFile() || st.isSymbolicLink()) indexState = 'refused';
+      else {
+        sources.push({ file: indexFile, isIndex: true, identity: { dev: st.dev, ino: st.ino } });
+        indexState = null;
       }
-    } catch { /* fall back to audit */ }
+    } catch (err) {
+      indexState = err?.code === 'ENOENT' ? 'absent' : 'failed';
+    }
   }
-  for (const source of auditFilesNewestFirst()) sourceFiles.push(source);
-  // Two-pass collection is deliberate: summaries usually appear after guard rows
-  // in the primary audit file. Reading guards first would re-summarise rows that
-  // were already accounted for later in the same file. The per-session index is
-  // an acceleration source only; it is explicitly best-effort, so the canonical
-  // primary audit remains the recovery source even when an index exists. Files
-  // are streamed line-by-line so recovery stays memory-bounded under large audit
-  // histories and malformed oversized lines.
-  for (const source of sourceFiles) {
-    try { collectSummariesFromFile(source, sessionKey, alreadySummarised); } catch { /* ignore */ }
+  const listing = auditFilesNewestFirst();
+  for (const source of listing.files) sources.push(source);
+  for (const gaps of [coverageGaps.receipts, coverageGaps.guards]) {
+    gaps.auditDir = listing.state;
+    gaps.skippedFiles = listing.skipped;
+    gaps.refusedFiles = listing.refused;
+    gaps.failedFiles = listing.failed;
+    if (indexState) gaps.index = indexState;
   }
-  for (const source of sourceFiles) {
-    try { collectGuardsFromFile(source, sessionKey, alreadySummarised, rows); } catch { /* ignore */ }
+  // Two passes over the same sources: every receipt is known before any guard
+  // is judged, so a summary that sits after its guard rows still covers them.
+  // The per-session index is an acceleration source only; the canonical
+  // primary audit remains the recovery source even when an index exists.
+  const receipts = runPass('receipts', sources, coverageGaps.receipts, (line, _lineIndex, _file, out) => {
+    const row = parseAuditLine(line);
+    if (!row || !isSummaryRow(row, sessionKey)) return;
+    out.push(Array.isArray(row.guardFingerprints)
+      ? { fingerprints: row.guardFingerprints.map(String).filter((fp) => /^[a-f0-9]{16}$/.test(fp)), legacy: row.fingerprintScheme !== 2 }
+      : { fingerprints: null, legacy: false });
+  });
+  const guards = runPass('guards', sources, coverageGaps.guards, (line, lineIndex, file, out) => {
+    const row = parseAuditLine(line);
+    if (!row || !isGuardRow(row, sessionKey)) return;
+    out.push({ row, id: guardIdentity(row, `${file}:${lineIndex}`) });
+  });
+
+  const covered = new Set();
+  const receiptKinds = { fingerprinted: 0, legacy: 0, fingerprintless: 0 };
+  for (const r of receipts) {
+    if (r.fingerprints === null) { receiptKinds.fingerprintless += 1; continue; }
+    receiptKinds.fingerprinted += 1;
+    if (r.legacy) receiptKinds.legacy += 1;
+    for (const fp of r.fingerprints) covered.add(fp);
   }
-  return { alreadySummarised, rows, source: hasIndex ? 'index+audit' : 'audit' };
+  const receiptFingerprints = covered.size;
+  // Step A: an observable historical v1 alias covers its row's primary (a
+  // receipt that listed one copy of a bound row by position covers the mirror).
+  for (const g of guards) {
+    if (covered.has(g.id.primary) || covered.has(g.id.v1)) covered.add(g.id.primary);
+  }
+  // Step B: pending = what no receipt lists, one entry per identity.
+  const pending = [];
+  const seen = new Set();
+  for (const g of guards) {
+    if (covered.has(g.id.primary) || seen.has(g.id.primary)) continue;
+    seen.add(g.id.primary);
+    pending.push(g);
+  }
+  const coverage = passComplete(coverageGaps.receipts) && passComplete(coverageGaps.guards) ? 'bounded-complete' : 'partial';
+  return {
+    pending,
+    receiptFingerprints,
+    receiptKinds,
+    receiptsComplete: passComplete(coverageGaps.receipts),
+    coverage,
+    coverageGaps,
+    source: sources.some((src) => src.isIndex) ? 'index+audit' : 'audit',
+  };
+}
+
+// Gap kinds and counts only — never a path.
+function noteCoveragePartial(sessionKey, state) {
+  if (state.coverage !== 'partial') return;
+  const parts = [];
+  for (const pass of ['receipts', 'guards']) {
+    const g = state.coverageGaps[pass];
+    const kinds = [];
+    if (g.auditDir !== 'absent' && g.auditDir !== 'listed') kinds.push(`auditDir=${g.auditDir}`);
+    if (g.index !== 'absent' && g.index !== 'read') kinds.push(`index=${g.index}`);
+    for (const k of ['skippedFiles', 'refusedFiles', 'failedFiles', 'droppedLines']) {
+      if (g[k] > 0) kinds.push(`${k}=${g[k]}`);
+    }
+    if (kinds.length) parts.push(`${pass}:${kinds.join(',')}`);
+  }
+  console.error(`[shieldcortex stop-hook] action_guard_degraded coverage=partial sessionKey=${sessionKey} ${parts.join(' ')}`);
 }
 
 function appendSessionGuardSummary(sessionKey, entry) {
   const indexFile = sessionGuardIndexFile(sessionKey);
-  if (!indexFile) return;
+  if (!indexFile) return false;
   try {
-    if (!ensureDirectoryNoSymlink(AUDIT_DIR)) return;
-    if (!ensureDirectoryNoSymlink(SESSION_GUARD_DIR)) return;
-    appendFileNoFollow(indexFile, JSON.stringify({ recordKind: 'summary', ...entry }) + '\n');
-  } catch { /* primary audit row remains canonical */ }
+    if (!ensureDirectoryNoSymlink(AUDIT_DIR)) return false;
+    if (!ensureDirectoryNoSymlink(SESSION_GUARD_DIR)) return false;
+    return appendFileNoFollow(indexFile, JSON.stringify({ recordKind: 'summary', ...entry }) + '\n');
+  } catch {
+    return false; /* primary audit row remains canonical */
+  }
 }
 
 function safeAuditTimestamp(value) {
@@ -816,15 +969,42 @@ function recordActionGuardSessionOutcome(rawSessionId) {
   const lock = acquireSummaryLock(sessionKey);
   if (!lock) {
     const state = collectGuardStateForSessionKey(sessionKey);
-    if (state.rows.length > 0) return { recorded: false, count: state.rows.length, pending: true, sessionKey };
-    return state.alreadySummarised.size > 0
-      ? { recorded: true, count: 0, existing: true, sessionKey }
-      : { recorded: false, count: 0, sessionKey };
+    noteCoveragePartial(sessionKey, state);
+    const status = { coverage: state.coverage, coverageGaps: state.coverageGaps };
+    if (state.pending.length > 0) return { recorded: false, count: state.pending.length, pending: true, sessionKey, ...status };
+    return state.receiptFingerprints > 0
+      ? { recorded: true, count: 0, existing: true, sessionKey, ...status }
+      : { recorded: false, count: 0, sessionKey, ...status };
   }
   try {
     const state = collectGuardStateForSessionKey(sessionKey);
-    const { rows, alreadySummarised } = state;
-    if (rows.length === 0) return alreadySummarised.size > 0 ? { recorded: true, count: 0, existing: true, sessionKey } : { recorded: false, count: 0, sessionKey };
+    noteCoveragePartial(sessionKey, state);
+    const status = { coverage: state.coverage, coverageGaps: state.coverageGaps };
+    // `existing` means "nothing pending in what this reader inspected" — it is
+    // only as strong as the `coverage` it travels with.
+    if (state.pending.length === 0) {
+      return state.receiptFingerprints > 0
+        ? { recorded: true, count: 0, existing: true, sessionKey, ...status }
+        : { recorded: false, count: 0, sessionKey, ...status };
+    }
+    // Batched so a receipt always fits the 1 MiB line cap both readers apply;
+    // the rest stays pending for the next call. Never a receipt for rows it
+    // does not list.
+    const batch = state.pending.slice(0, MAX_RECEIPT_IDENTITIES);
+    const pendingRemaining = state.pending.length - batch.length;
+    const extra = pendingRemaining > 0 ? { pendingRemaining } : {};
+    const rows = batch.map((g) => g.row);
+    const identityBasis = { eventId: 0, bindingNonce: 0, physicalRow: 0 };
+    for (const g of batch) identityBasis[g.id.basis] += 1;
+    const overlapReasons = [];
+    if (state.receiptKinds.fingerprintless > 0) overlapReasons.push('fingerprintless-summary');
+    // Coarse on purpose: position-based prior coverage cannot be ruled out.
+    // Never inferred from a missing file, a timestamp or matching content.
+    if ((state.receiptKinds.legacy > 0 && identityBasis.bindingNonce > 0)
+      || (state.receiptKinds.fingerprinted > 0 && identityBasis.physicalRow > 0)) {
+      overlapReasons.push('position-dependent-receipt');
+    }
+    if (!state.receiptsComplete) overlapReasons.push('receipt-coverage-partial');
     const counts = rows.reduce((acc, row) => {
       const outcome = String(row.outcome ?? 'unknown');
       acc[outcome] = (acc[outcome] ?? 0) + 1;
@@ -841,30 +1021,50 @@ function recordActionGuardSessionOutcome(rawSessionId) {
       sessionKey,
       action: 'session_health',
       outcome: 'action_guard_degraded',
-      guardOutcomeCount: rows.length,
-      guardFingerprints: rows.map((r) => r._guardFingerprint).filter((fp) => /^[a-f0-9]{16}$/.test(String(fp))),
+      guardOutcomeCount: batch.length,
+      guardFingerprints: batch.map((g) => g.id.primary),
+      fingerprintScheme: 2,
+      identityBasis,
+      // Cardinality of THIS batch only — not novelty, not coverage.
+      eventCountExact: identityBasis.physicalRow === 0,
+      ...(overlapReasons.length ? { historicalOverlap: 'possible', overlapReasons } : {}),
+      ...(state.receiptKinds.fingerprintless > 0 ? { unknownMembershipSummaryRows: state.receiptKinds.fingerprintless } : {}),
+      ...status,
+      ...extra,
       outcomes: counts,
       threats,
       firstGuardTs: times[0],
       lastGuardTs: times[times.length - 1],
       ts: new Date().toISOString(),
     };
+    const notWritten = { recorded: false, count: batch.length, sessionKey, receipt: 'none', indexMirror: 'not-attempted', ...status, ...extra };
     try {
       if (!ensureDirectoryNoSymlink(AUDIT_DIR)) {
         noteAuditSinkFailure('audit directory is unsafe or outside the state tree');
-        return { recorded: false, count: rows.length, sessionKey };
+        return notWritten;
       }
       const date = new Date().toISOString().slice(0, 10);
       if (!appendFileNoFollow(join(AUDIT_DIR, `realtime-${date}.jsonl`), JSON.stringify(entry) + '\n')) {
         noteAuditSinkFailure(`append failed for realtime-${date}.jsonl`);
-        return { recorded: false, count: rows.length, sessionKey };
+        return notWritten;
       }
-      appendSessionGuardSummary(sessionKey, entry);
-      console.error(`[shieldcortex stop-hook] action_guard_degraded sessionKey=${sessionKey} guardOutcomes=${rows.length}`);
-      return { recorded: true, count: rows.length, sessionKey };
+      // Write outcomes are known only now: they live on the return value and
+      // stderr, never patched back onto a row (history stays append-only).
+      const mirrored = appendSessionGuardSummary(sessionKey, entry);
+      if (!mirrored) console.error(`[shieldcortex stop-hook] action_guard_degraded index mirror FAILED sessionKey=${sessionKey}; the primary receipt stands`);
+      console.error(`[shieldcortex stop-hook] action_guard_degraded sessionKey=${sessionKey} guardOutcomes=${batch.length}`);
+      return {
+        recorded: true,
+        count: batch.length,
+        sessionKey,
+        receipt: mirrored ? 'primary+index' : 'primary-only',
+        indexMirror: mirrored ? 'ok' : 'failed',
+        ...status,
+        ...extra,
+      };
     } catch (err) {
       noteAuditSinkFailure(err?.message ?? err);
-      return { recorded: false, count: rows.length, sessionKey };
+      return notWritten;
     }
   } finally {
     releaseSummaryLock(lock);

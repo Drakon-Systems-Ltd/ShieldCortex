@@ -183,6 +183,19 @@ describe('#509 r10 — a card decision row keeps its own call\'s context across 
     expect(row.entry.broker).toEqual({ fixture: 'broker-held' });
   });
 
+  it('#654 P6: the held call\'s decision row has its own ID, distinct from every row of the overlapping call', async () => {
+    const { row, captured } = await runOverlap({ toolName: 'Bash', arguments: { leaseProbe: true }, sessionId: 'session-B' });
+    expectAsOwnCall(row);
+    const id = row.entry.auditEventId;
+    expect(id).toMatch(/^[a-f0-9]{32}$/);
+    const others = captured.filter((r) => r !== row);
+    expect(others.length).toBeGreaterThan(0);
+    for (const r of others) {
+      expect(r.entry.auditEventId).toMatch(/^[a-f0-9]{32}$/);
+      expect(r.entry.auditEventId).not.toBe(id);
+    }
+  });
+
   it('the captured args are a snapshot: mutating the caller\'s params after the hold does not rewrite the row', async () => {
     const atHold = deferred();
     const card = deferred();

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, appendFileSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, isAbsolute, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
@@ -429,6 +429,11 @@ export interface InterceptAuditEntry {
    * gates, denies, or mints a card.
    */
   contractDrift?: ContractDriftLike;
+  /** #654 — one per emitted row, shared by every local copy (realtime, the
+   *  session-guard index, the onAuditEntry callback); never derived from
+   *  content. Without it the two copies of one event have different
+   *  file:line identities and the stop hook counts them twice. */
+  auditEventId?: string;
   /** #260 — plane origin so the session-guard summariser can find this row. */
   origin?: 'openclaw-interceptor';
   sessionKey?: string;
@@ -1709,13 +1714,23 @@ export function createInterceptor(
    *  row's own call (emitAudit below); #372 hands it a hold-time snapshot so a
    *  decision that arrives after the turn moved on still lands on ITS call. */
   function emitAuditWith(entry: InterceptAuditEntry, captured: CapturedAuditContext): void {
+    // #654: minted here, once per emitted row and before fan-out, so every
+    // copy carries the same identity. Placed after `...entry` so no caller
+    // value can pre-empt it, and re-asserted after binding so an injected
+    // binder that drops or rewrites the field still cannot fork the copies.
+    // The binding nonce stays independent.
+    const auditEventId = randomBytes(16).toString('hex');
     const withOrigin: InterceptAuditEntry = {
       ...entry,
       origin: 'openclaw-interceptor',
+      auditEventId,
       ...(captured.sessionKey ? { sessionKey: captured.sessionKey } : {}),
       ...(captured.readinessPin ? { readinessPin: captured.readinessPin } : {}),
     };
-    const bound = bindAudit ? bindAudit(withOrigin, captured.args) : withOrigin;
+    const bound: InterceptAuditEntry = {
+      ...(bindAudit ? bindAudit(withOrigin, captured.args) : withOrigin),
+      auditEventId,
+    };
     writeAuditEntry(bound);
     try { options?.sessionGuard?.index(bound); } catch { /* never wedge the turn */ }
     // #509 r8 (SF5): readiness bookkeeping stays on this machine. A tally row
