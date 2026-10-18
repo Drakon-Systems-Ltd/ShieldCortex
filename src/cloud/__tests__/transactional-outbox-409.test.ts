@@ -29,7 +29,7 @@ describe('#409 transactional outbox', () => {
     try {
       const gate = await import('../../license/gate.js');
       if (typeof (gate as { setFeatureOverride?: (k: string, v: boolean) => void }).setFeatureOverride === 'function') {
-        (gate as { setFeatureOverride: (k: string, v: boolean) => void }).setFeatureOverride('cloud_sync', true);
+        (gate as unknown as { setFeatureOverride: (k: string, v: boolean) => void }).setFeatureOverride('cloud_sync', true);
       }
     } catch { /* may already be enabled in test env */ }
   });
@@ -200,7 +200,7 @@ describe('#409 transactional outbox', () => {
     expect(first.deliveryKey).not.toBe(second.deliveryKey);
     expect(queueRows()).toHaveLength(2);
 
-    globalThis.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 }) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = jest.fn<() => Promise<unknown>>().mockResolvedValue({ ok: true, status: 200 }) as unknown as typeof globalThis.fetch;
     dispatchMemoryOutboxBestEffort({ ...base, title: 't1' }, first.deliveryKey);
     await new Promise((r) => setTimeout(r, 40));
 
@@ -287,7 +287,7 @@ describe('#409 transactional outbox', () => {
     const { deliveryKey } = writeMemorySyncOutbox(record, { op: 'upsert' });
     expect(queueRows()[0].status).toBe('pending');
 
-    globalThis.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 }) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = jest.fn<() => Promise<unknown>>().mockResolvedValue({ ok: true, status: 200 }) as unknown as typeof globalThis.fetch;
     dispatchMemoryOutboxBestEffort(record, deliveryKey);
     // allow microtask
     await new Promise((r) => setTimeout(r, 30));

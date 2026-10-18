@@ -19,22 +19,27 @@ When `openclawAutoMemory` is enabled:
 3. Saves up to 5 high-salience memories to ShieldCortex via mcporter
 4. Skips exact and near-duplicate memories using novelty filtering
 
-### On `/stop`, `/clear`, `/exit` (Session End)
+### On `/stop` (Session End)
 When `openclawAutoMemory` is enabled:
-1. Captures the current session transcript before it ends
+1. Reads the current session transcript
 2. Pattern-matches for important content (same patterns as `/new`)
 3. Saves memories with a `session-stop` tag for tracking
-4. **Ensures work is saved** even when explicitly ending a session
-5. Skips exact and near-duplicate memories using novelty filtering
+4. Skips exact and near-duplicate memories using novelty filtering
+
+Core OpenClaw 2026.9.6 does not show the hook's "Saved N memories" note for `/stop`: the stop command sends its own reply and does not read the hook's `event.messages`.
+
+`/clear` and `/exit` are not core OpenClaw 2026.9.6 hook events, and they are not in this hook's `events` list, so this hook does not capture on them.
 
 ### On Session Start (Agent Bootstrap)
 Bootstrap context injection was **disabled in v2026.2.26**. OpenClaw's native Memory Search now handles context recall at session start, so the hook no longer pushes memories into the system prompt (which was producing ~40× duplication of CORTEX_MEMORY.md and eating most of the context window).
 
 The hook still fires on `agent:bootstrap` for lifecycle wiring (warning-bootstrap-file handoff, etc.) but contributes nothing to the system prompt. This keeps `extraSystemPromptHash` stable across turns and prevents the session-binding reset loop documented in `src/setup/claude-md.ts`.
 
-### Keyword Triggers
+### Keyword Triggers (dormant, not registered)
 
-Say any of these phrases to trigger an instant save to Cortex memory:
+The handler has a keyword-trigger path, but it is **not registered** on core OpenClaw 2026.9.6 with this manifest, and it is not enabled by default. The `events` list above subscribes only `command:new`, `command:stop` and `agent:bootstrap`. OpenClaw never sends this hook a `message` event, and no other command action reaches the handler's command fallback. Saying one of these phrases does **not** save anything through this hook. The per-message proactive recall in the same `message` branch is dormant for the same reason; this hook does not recall memory on each message.
+
+Phrases the dormant code recognises:
 
 | Trigger Phrase | Category | Importance |
 |---------------|----------|------------|
@@ -62,7 +67,7 @@ Say any of these phrases to trigger an instant save to Cortex memory:
 | **"decision made"** | architecture | high |
 | **"going with"** | architecture | normal |
 
-Content after the trigger phrase is extracted and saved as the memory content.
+The dormant helper tries to save the text after the phrase, or the whole message when that text is under five characters. Subscribing a `message` event would not be enough on its own: the handler returns unless `event.role` is `"user"` and reads the text from `event.content`, but the OpenClaw 2026.9.6 hook event has no top-level `role` or `content` field (a received message's text is in `event.context.content`). With that event shape the handler stops at the role check and never reaches the keyword check.
 
 ## Defence Audit Guarantees
 
@@ -103,7 +108,9 @@ shieldcortex memories purge --malformed --execute    # delete (writes a backup f
 
 ## Auto-Memory
 
-Auto-memory extraction is enabled by default. ShieldCortex complements your existing memory system by capturing decisions, fixes, and learnings with built-in deduplication to avoid noise.
+Auto-memory extraction runs only when `openclawAutoMemory` is `true` in `~/.shieldcortex/config.json`. When the key is not set, or the file is missing, it is off. A fresh global, non-CI `npm install -g shieldcortex` on a machine with no config file writes one with `openclawAutoMemory: true` (and `proactiveRecall: true`) when that write succeeds. Local and CI installs, and installs run with `--ignore-scripts`, do not write it. An existing config file is never changed, so an upgrade keeps whatever it already says. When on, it captures decisions, fixes, and learnings, with deduplication.
+
+The config file does not install this hook. It runs only once the hook is installed in OpenClaw and not disabled there: `shieldcortex openclaw install`, or `shieldcortex setup`, which asks before wiring.
 
 Disable auto-save with CLI:
 

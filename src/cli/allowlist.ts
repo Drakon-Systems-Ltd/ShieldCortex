@@ -30,6 +30,7 @@ import {
 } from '../defence/iron-dome/reviewed-scripts.js';
 import { getReviewedScriptsRaw, setReviewedScripts } from '../cloud/config.js';
 import { COMMAND_HELP_SPECS, commandWantsHelp } from './wants-help.js';
+import { sanitiseDisplayField } from './term-ui.js';
 
 export const ALLOWLIST_HELP = `Usage: shieldcortex allowlist [list|add|remove|verify|scan]
 
@@ -84,8 +85,8 @@ function renderList(entries: ReviewedScriptEntry[]): string {
   }
   const lines: string[] = [`${BOLD}Action Guard — reviewed scripts${RESET}\n`];
   for (const e of entries) {
-    lines.push(`  ${BOLD}${e.path}${RESET}  ${renderDrift(driftOf(e))}`);
-    lines.push(`     ${DIM}sha256 ${e.sha256.slice(0, 16)}…${e.addedAt ? ` · added ${new Date(e.addedAt).toISOString().slice(0, 10)}` : ''}${e.note ? ` · ${e.note}` : ''}${RESET}`);
+    lines.push(`  ${BOLD}${sanitiseDisplayField(e.path)}${RESET}  ${renderDrift(driftOf(e))}`);
+    lines.push(`     ${DIM}sha256 ${e.sha256.slice(0, 16)}…${e.addedAt ? ` · added ${new Date(e.addedAt).toISOString().slice(0, 10)}` : ''}${e.note ? ` · ${sanitiseDisplayField(e.note)}` : ''}${RESET}`);
     lines.push('');
   }
   lines.push(`${DIM}An edited file re-gates automatically; \`allowlist add\` it again once re-reviewed.${RESET}\n`);
@@ -216,7 +217,7 @@ export function runAllowlist(argv: string[], deps: AllowlistDeps = {}): number |
     for (const e of entries) {
       const state = driftOf(e);
       if (state !== 'ok') drifted += 1;
-      log(`${state === 'ok' ? `${GREEN}✓${RESET}` : `${RED}✗${RESET}`} ${e.path}  ${renderDrift(state)}`);
+      log(`${state === 'ok' ? `${GREEN}✓${RESET}` : `${RED}✗${RESET}`} ${sanitiseDisplayField(e.path)}  ${renderDrift(state)}`);
     }
     if (entries.length === 0) log(`${DIM}Nothing to verify — allowlist is empty.${RESET}`);
     return drifted > 0 ? 1 : 0;
@@ -242,11 +243,11 @@ export function runAllowlist(argv: string[], deps: AllowlistDeps = {}): number |
 
     const pin = pinReviewedScript(target, note, { now, readEntries, writeEntries });
     if (!pin.ok) {
-      err(pin.error);
+      err(sanitiseDisplayField(pin.error));
       return 1;
     }
 
-    log(`${GREEN}✓${RESET} Pinned ${BOLD}${pin.entry.path}${RESET} as reviewed.`);
+    log(`${GREEN}✓${RESET} Pinned ${BOLD}${sanitiseDisplayField(pin.entry.path)}${RESET} as reviewed.`);
     log(`  sha256 ${pin.entry.sha256.slice(0, 16)}… — the guard stops folding this file's source.`);
     log(`${DIM}  You are vouching for this file's CONTENT. Any edit re-gates it; the command line`);
     log(`  that invokes it is still scanned in full. Remove with: shieldcortex allowlist remove <path>${RESET}`);
@@ -271,19 +272,19 @@ export function runAllowlist(argv: string[], deps: AllowlistDeps = {}): number |
     }
     const kept = entries.filter((e) => e.path !== canonical && e.path !== target);
     if (kept.length === entries.length) {
-      err(`No allowlist entry matches "${target}". Run \`shieldcortex allowlist\` to see what is pinned.`);
+      err(`No allowlist entry matches "${sanitiseDisplayField(target)}". Run \`shieldcortex allowlist\` to see what is pinned.`);
       return 1;
     }
     try {
       writeEntries(toRecords(kept));
     } catch (e) {
-      err(`Could not write the allowlist: ${e instanceof Error ? e.message : String(e)}`);
+      err(`Could not write the allowlist: ${sanitiseDisplayField(e instanceof Error ? e.message : String(e))}`);
       return 1;
     }
-    log(`${GREEN}✓${RESET} Removed ${BOLD}${target}${RESET} — its source folds into the scan again.`);
+    log(`${GREEN}✓${RESET} Removed ${BOLD}${sanitiseDisplayField(target)}${RESET} — its source folds into the scan again.`);
     return 0;
   }
 
-  err(`Unknown subcommand "${sub}". Usage: shieldcortex allowlist [list|add|remove|verify|scan]`);
+  err(`Unknown subcommand "${sanitiseDisplayField(sub)}". Usage: shieldcortex allowlist [list|add|remove|verify|scan]`);
   return 1;
 }

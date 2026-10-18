@@ -43,6 +43,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { NotifyChannel, OperatorNotification } from './operator-notify.js';
+import { describeSignals, formatApprovalCardLines, type ApprovalCardSummary } from './approval-card.js';
 
 /** Mirrors `resolveOpenClawBinary` in src/setup/openclaw.ts, minus the
  *  synchronous `which` call — the hook path loads this module on every held
@@ -95,8 +96,37 @@ function isSecretEgress(signals: string[]): boolean {
   return signals.some((s) => s.toLowerCase().includes('secret') || s.toLowerCase().includes('credential'));
 }
 
+/** The values-free alert surface the hook hands the notify layer
+ *  (`Tool: [redacted …] fields=…`). On a decision card it reads as gibberish
+ *  (#648), so it is never shown there — not even as a fallback. */
+const REDACTED_SURFACE_RE = /^[^:\n]{1,64}: \[redacted[^\]\n]*\](?: fields=\S*| no command field)?$|^redacted action surface$/;
+
+/**
+ * #648: the card answers three questions — WHAT it wants to do (plain English,
+ * naming the target), WHY ShieldCortex stopped it, and WHO is asking — and
+ * keeps the short hash, the allow-once/deny choice and the expiry. The summary
+ * is built on the box (approval-card.ts) where every target has already been
+ * through the credential redactor; this function only lays it out.
+ *
+ * A notification without a summary but carrying the redacted alert surface is
+ * still given the plain WHY line and an honest WHAT line rather than the
+ * placeholder. Anything else (the `guard test-approval` round-trip, whose
+ * `command` is the instruction the operator must read) keeps the old layout.
+ */
 export function buildCardFields(n: OperatorNotification): { title: string; description: string } {
   const title = clip(`ShieldCortex: approve ${n.tool}? [${n.shortHash}]`, TITLE_MAX);
+  const card: ApprovalCardSummary | undefined = n.card
+    ?? (REDACTED_SURFACE_RE.test(String(n.command ?? '').trim())
+      ? {
+          action: `Use ${/^[A-Za-z][A-Za-z0-9_.-]{0,31}$/.test(n.tool) ? n.tool : 'a tool'} (details withheld: could not summarise safely)`,
+          reason: describeSignals(n.signals),
+          who: 'not reported by this caller',
+        }
+      : undefined);
+  if (card) {
+    const description = clip(formatApprovalCardLines(card, { expiresInMs: CARD_TIMEOUT_MS, budget: DESCRIPTION_MAX }).join('\n'), DESCRIPTION_MAX);
+    return { title, description };
+  }
   const commandPart = isSecretEgress(n.signals)
     ? '(command withheld — contains credential material)'
     : n.command;

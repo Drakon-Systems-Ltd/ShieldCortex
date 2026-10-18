@@ -10,7 +10,7 @@ import {
  *
  * `before_agent_run` is the only conversation hook that can block, and it first
  * shipped in OpenClaw 2026.5.12 (dist-verified: 0 occurrences in 2026.4.23 /
- * 5.5 / 5.6 / 5.7, 54 in 5.12). Our manifest still declares `>= 2026.3.22`.
+ * 5.5 / 5.6 / 5.7, 54 in 5.12). Our manifest still declares `>= 2026.4.23`.
  *
  * The trap: OpenClaw does not reject an unknown typed hook — it warns and
  * returns. So registering it on an older host looks successful and enforces
@@ -24,8 +24,8 @@ describe('#225 phase 2 — which hosts can enforce at all', () => {
   });
 
   it('rejects every version in the silently-ignoring range', () => {
-    // Each of these declares support in our manifest today and would register
-    // the hook to no effect.
+    // Each of these would register the hook to no effect. 2026.3.22 is below
+    // our manifest floor (2026.4.23) and stays as a below-floor probe.
     for (const v of ['2026.3.22', '2026.4.23', '2026.5.5', '2026.5.6', '2026.5.7']) {
       expect(evaluateEnforcementSupport(v).support).toBe('unsupported');
     }

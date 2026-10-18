@@ -7,6 +7,9 @@ import {
   RESTRICTED_PATTERNS,
   CONFIDENTIAL_PATTERNS,
   INTERNAL_PATTERNS,
+  PERSONAL_PEOPLE_PATTERN,
+  PERSONAL_EVENT_PATTERN,
+  PERSONAL_STANDALONE_PATTERNS,
   type SensitivityPattern,
 } from './patterns.js';
 import { detectPII } from './pii.js';
@@ -69,6 +72,23 @@ export function classifyContent(
     if (level === 'PUBLIC' || level === 'INTERNAL') {
       level = 'CONFIDENTIAL';
       confidence = 0.85;
+    }
+  }
+
+  // #718: personal / family / relationship content. Only raises PUBLIC and
+  // INTERNAL — CONFIDENTIAL and RESTRICTED already outrank it. A "surprise
+  // family trip" note used to land as PUBLIC and was then a recall candidate
+  // in every unattended automation lane on the host.
+  if (level === 'PUBLIC' || level === 'INTERNAL') {
+    const personalLabels: string[] = [];
+    if (PERSONAL_PEOPLE_PATTERN.test(text) && PERSONAL_EVENT_PATTERN.test(text)) {
+      personalLabels.push('personal-life-event');
+    }
+    personalLabels.push(...matchPatterns(text, PERSONAL_STANDALONE_PATTERNS).labels);
+    if (personalLabels.length > 0) {
+      allLabels.push(...personalLabels);
+      level = 'PERSONAL';
+      confidence = 0.7;
     }
   }
 

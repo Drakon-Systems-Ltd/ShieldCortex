@@ -111,7 +111,7 @@ function ScanResultPanel({ result }: { result: MemoryScanResult }) {
           {indicators.map((indicator) => (
             <span
               key={indicator}
-              className="rounded bg-[var(--sc-surface-2)] px-2 py-1 text-[11px] text-[var(--sc-text-dim)]"
+              className="rounded bg-[var(--sc-surface-2)] px-2 py-1 text-xs text-[var(--sc-text-dim)]"
             >
               {indicator}
             </span>
@@ -282,7 +282,7 @@ export function MemoryActionModal({ memory, onClose }: MemoryActionModalProps) {
           <div className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
             <div className="space-y-4">
               <section>
-                <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Content</h3>
+                <h3 className="text-xs font-semibold text-[var(--sc-text-muted)]">Content</h3>
                 <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/70 p-3 font-sans text-sm leading-6 text-[var(--sc-text)]">
                   {memory.content}
                 </pre>
@@ -328,7 +328,7 @@ export function MemoryActionModal({ memory, onClose }: MemoryActionModalProps) {
 
             <div className="space-y-4">
               <section className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
-                <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Health</h3>
+                <h3 className="text-xs font-semibold text-[var(--sc-text-muted)]">Health</h3>
                 <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
                   <div>
                     <div className="text-[var(--sc-text-muted)]">Salience</div>
@@ -350,7 +350,7 @@ export function MemoryActionModal({ memory, onClose }: MemoryActionModalProps) {
               </section>
 
               <section className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
-                <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Provenance</h3>
+                <h3 className="text-xs font-semibold text-[var(--sc-text-muted)]">Provenance</h3>
                 <dl className="mt-3 space-y-2 text-sm">
                   <div className="flex justify-between gap-3">
                     <dt className="text-[var(--sc-text-muted)]">Source</dt>
@@ -381,7 +381,7 @@ export function MemoryActionModal({ memory, onClose }: MemoryActionModalProps) {
 
               {tags.length > 0 && (
                 <section className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
-                  <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Tags</h3>
+                  <h3 className="text-xs font-semibold text-[var(--sc-text-muted)]">Tags</h3>
                   <div className="mt-3 flex flex-wrap gap-1.5">
                     {tags.map((tag) => (
                       <span key={tag} className="rounded bg-[var(--sc-surface-2)] px-2 py-1 text-xs text-[var(--sc-text-dim)]">

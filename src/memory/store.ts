@@ -538,11 +538,22 @@ export class MemoryPausedError extends Error {
  * Error thrown when memory is blocked by the defence firewall
  */
 export class MemoryBlockedError extends Error {
+  /** The firewall reason without the message prefix, for callers that explain it. */
+  readonly reason: string;
+
   constructor(reason: string) {
     super(`Memory blocked by defence firewall: ${reason}`);
     this.name = 'MemoryBlockedError';
+    this.reason = reason;
   }
 }
+
+/**
+ * #830 — the write rate limit refuses before the admission scan runs. Internal
+ * marker so callers that explain a refusal (quarantine approval) don't claim a
+ * scan. Same name and message as any other MemoryBlockedError.
+ */
+export class MemoryRateLimitedError extends MemoryBlockedError {}
 
 /**
  * #402 Class-B assembly abort inside a transactional admission session (#395).
@@ -754,7 +765,7 @@ export function addMemory(
       // row would, so a flood from an attested source can accrue.
       source_attested: attestedFlag(options?.sourceAttested),
     });
-    throw new MemoryBlockedError(`Rate limited: exceeded ${RATE_LIMIT_MAX} writes per minute`);
+    throw new MemoryRateLimitedError(`Rate limited: exceeded ${RATE_LIMIT_MAX} writes per minute`);
   }
 
   // DEFENCE PIPELINE: Scan EVERY write before storage. Source-less writes get a
@@ -858,7 +869,7 @@ export function addMemory(
   const submittedContentHash = createContentHash(persisted.redacted ? persisted.fields.content : input.content);
   input = persisted.fields;
   const scannedSensitivity = defenceResult.sensitivity.level;
-  const stampedSensitivity = persisted.redacted && (scannedSensitivity === 'PUBLIC' || scannedSensitivity === 'INTERNAL')
+  const stampedSensitivity = persisted.redacted && (scannedSensitivity === 'PUBLIC' || scannedSensitivity === 'INTERNAL' || scannedSensitivity === 'PERSONAL')
     ? 'CONFIDENTIAL'
     : scannedSensitivity;
 
@@ -1494,7 +1505,7 @@ export function updateMemory(
         ...(updates.metadata !== undefined || changed(redaction.fields.metadata, existing.metadata) ? { metadata: redaction.fields.metadata } : {}),
       };
       // Never let the row sit below CONFIDENTIAL while it names an identifier.
-      if (!existing.sensitivityLevel || existing.sensitivityLevel === 'PUBLIC' || existing.sensitivityLevel === 'INTERNAL') {
+      if (!existing.sensitivityLevel || existing.sensitivityLevel === 'PUBLIC' || existing.sensitivityLevel === 'INTERNAL' || existing.sensitivityLevel === 'PERSONAL') {
         fields.push('sensitivity_level = ?');
         values.push('CONFIDENTIAL');
       }
@@ -1815,7 +1826,7 @@ export function mergeMemories(
     // raises the floor to CONFIDENTIAL — it must never pull a RESTRICTED row
     // down (that would open it to readers checkAccess refused before the merge).
     const sensitivityRank = (level: string | null | undefined): number =>
-      ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'].indexOf(level ?? '');
+      ['PUBLIC', 'INTERNAL', 'PERSONAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'].indexOf(level ?? '');
     const mergedSensitivity = [
       kept.sensitivityLevel,
       removed.sensitivityLevel,

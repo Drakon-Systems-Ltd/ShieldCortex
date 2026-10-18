@@ -180,11 +180,13 @@ export function isHolderPidAlive(
   return true;
 }
 
-/**
- * Parent pid of `pid`, or null when it cannot be read. Linux reads
- * `/proc/<pid>/status`; elsewhere `ps -o ppid=` (only reached on the rare
- * path where a live foreign holder exists, never on the unscoped fast path).
- */
+/** Use an explicit session PID only when it can identify a reapable process. */
+export function resolveHolderPid(holderPid?: number): number {
+  return typeof holderPid === 'number' && Number.isInteger(holderPid) && holderPid > 1
+    ? holderPid
+    : process.pid;
+}
+
 export interface AcquireInput {
   dir?: string;
   scope: LeaseScope;
@@ -192,6 +194,7 @@ export interface AcquireInput {
   nowMs?: number;
   ttlMs?: number;
   reason?: string;
+  holderPid?: number;
 }
 
 export interface AcquireResult {
@@ -220,7 +223,7 @@ export function acquireOrRefreshLease(input: AcquireInput): AcquireResult {
     const token = `${nowMs.toString(36)}-${randomBytes(6).toString('hex')}`;
     const record: StoredLease = {
       holder: input.self,
-      pid: process.pid,
+      pid: resolveHolderPid(input.holderPid),
       reason: input.reason,
       acquiredAtMs: current?.holder === input.self ? (current.acquiredAtMs ?? nowMs) : nowMs,
       expiresAtMs: nowMs + ttlMs,
@@ -291,6 +294,7 @@ export interface LeaseGateOptions {
   dir?: string;
   nowMs?: number;
   ttlMs?: number;
+  holderPid?: number;
 }
 
 function sha256(text: string): string {
@@ -349,7 +353,7 @@ export function evaluateToolCallLease(
     const decision = checkSessionLease({ scope, ledger, held, self, nowMs, holderAlive });
 
     if (decision.verdict === 'allow') {
-      const acquired = acquireOrRefreshLease({ dir, scope, self, nowMs, ttlMs: opts.ttlMs });
+      const acquired = acquireOrRefreshLease({ dir, scope, self, nowMs, ttlMs: opts.ttlMs, holderPid: opts.holderPid });
       if (!acquired.acquired && acquired.record && acquired.record.holder !== self) {
         // Lost a race between check and acquire — re-decide with the winner.
         const winnerAlive = isHolderPidAlive(acquired.record.pid);

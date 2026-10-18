@@ -36,7 +36,7 @@
  * WOULD do, and unlink/rmdir what they made.
  */
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
-import { mkdtempSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, unlinkSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { evaluateToolCall } from '../tool-action-guard.js';
@@ -90,26 +90,73 @@ describe('#339 — Darwin alias parity', () => {
   });
 });
 
+/**
+ * The guard trusts a FIXED set of temp roots (`/tmp/`, `/var/tmp/`,
+ * `/var/folders/`, plus the Darwin `/private` spellings), never whatever
+ * `os.tmpdir()` happens to be. This is the test's own statement of that
+ * contract, so the real-filesystem cases below can say which answer the
+ * scratch root they actually got deserves.
+ */
+function resolvesUnderFixedTempRoot(p: string): boolean {
+  return /^(?:\/private)?\/(?:tmp|var\/tmp|var\/folders)\/[^/]/i.test(p);
+}
+
+// Real files, made under the runtime's own scratch root (`os.tmpdir()`), which
+// may or may not be one of the fixed temp roots — a sandboxed runner sets
+// TMPDIR under $HOME. The escape cases do not depend on that: a symlink out to
+// /etc blocks wherever it lives. The plain-directory cases do, and are pinned
+// both ways: confined under a fixed root, NOT confined under an arbitrary one.
+// The fixed-root positives that must hold on every machine live in
+// guard-tmp-confine-339-fixed-root.test.ts behind a virtual fs view, so this
+// file never has to write outside the runtime scratch root to prove them.
 describe('#339 — confinement is resolved, not spelled (symlink escape)', () => {
   let sandbox = '';
+  let sandboxResolved = '';
   const escape = () => join(sandbox, 'escape-link');
   const real = () => join(sandbox, 'real-dir');
+  const intoTmp = () => join(sandbox, 'into-tmp');
 
   beforeAll(() => {
     sandbox = mkdtempSync(join(tmpdir(), 'sc339-'));
+    sandboxResolved = realpathSync(sandbox);
     mkdirSync(real());
     symlinkSync(ETC, escape());
+    // A link INTO the fixed temp root. Only the link is made, inside scratch;
+    // nothing is written under /tmp.
+    symlinkSync('/tmp', intoTmp());
   });
 
   afterAll(() => {
     // Unlink/rmdir only — this suite never runs a recursive delete of its own.
-    for (const f of [() => unlinkSync(escape()), () => rmdirSync(real()), () => rmdirSync(sandbox)]) {
+    for (const f of [
+      () => unlinkSync(escape()), () => unlinkSync(intoTmp()),
+      () => rmdirSync(real()), () => rmdirSync(sandbox),
+    ]) {
       try { f(); } catch { /* best effort */ }
     }
   });
 
-  it('a real directory under the temp root stays confined (#170 relief holds)', () => {
-    expect(verdict(`${RMRF} ${real()}`).decision).toBe('allow');
+  it('every fixture sits under the runtime scratch root', () => {
+    expect(sandboxResolved.startsWith(`${realpathSync(tmpdir())}/`)).toBe(true);
+  });
+
+  it('a real scratch directory is confined exactly when it resolves under a fixed temp root', () => {
+    const expected = resolvesUnderFixedTempRoot(sandboxResolved) ? 'allow' : 'block';
+    expect(verdict(`${RMRF} ${real()}`).decision).toBe(expected);
+    expect(verdict(`${RMRF} ${join(sandbox, 'never-created')}`).decision).toBe(expected);
+  });
+
+  it('a scratch root outside the fixed temp roots is not trusted for being os.tmpdir()', () => {
+    if (resolvesUnderFixedTempRoot(sandboxResolved)) {
+      // Nothing to prove here on this machine without writing outside the
+      // scratch root; the fixed-root file covers the arbitrary-root refusal
+      // through its virtual view on every machine.
+      expect(verdict(`${RMRF} ${real()}`).decision).toBe('allow');
+      return;
+    }
+    expect(verdict(`${RMRF} ${real()}`).decision).toBe('block');
+    expect(verdict(`${RMRF} ${join(sandbox, 'never-created')}`).decision).toBe('block');
+    expect(verdict(`${RMRF} ${real()}`).signals).toContain('recursive-force-delete');
   });
 
   it('a temp-root path that is a symlink OUT of the tree is not confined', () => {
@@ -120,12 +167,19 @@ describe('#339 — confinement is resolved, not spelled (symlink escape)', () =>
     expect(verdict(`${RMRF} ${escape()}/child`).decision).toBe('block');
   });
 
-  it('a path that does not exist at all is judged lexically and stays confined', () => {
-    expect(verdict(`${RMRF} ${join(sandbox, 'never-created')}`).decision).toBe('allow');
-  });
-
   it('one escaping target costs the exemption for the whole line', () => {
     expect(verdict(`${RMRF} ${real()} ${escape()}`).decision).toBe('block');
+  });
+
+  // Under an untrusted scratch root the escape cases above would block even on
+  // a purely lexical reading. This pair cannot: the written path is under
+  // scratch, and only following the real link puts the target under /tmp.
+  it('a real link into the fixed temp root is followed, and confines a child under it', () => {
+    expect(verdict(`${RMRF} ${intoTmp()}/sc339-not-created-child`).decision).toBe('allow');
+  });
+
+  it('a real link to the fixed temp root ITSELF resolves to the root and is not confined', () => {
+    expect(verdict(`${RMRF} ${intoTmp()}`).decision).toBe('block');
   });
 });
 

@@ -265,7 +265,7 @@ function ExplainerError({ message }: { message: string }) {
       <p>The Local AI Explainer is opt-in. Enable it from a terminal:</p>
       <pre className="overflow-x-auto rounded bg-black/30 p-2 text-xs text-[var(--sc-text)]">shieldcortex review-copilot enable --accept-download</pre>
       <p className="text-xs text-[var(--sc-text-muted)]">
-        Runs a small local model (Qwen2.5-0.5B) on this machine — nothing leaves your device. Requires a Pro licence.
+        Runs a small local model (Qwen2.5-0.5B) on this machine — nothing leaves your device.
       </p>
     </div>
   );

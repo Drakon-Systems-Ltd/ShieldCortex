@@ -66,15 +66,15 @@ function PoliciesTable() {
                 <div className="flex items-center gap-2">
                   <span className="text-[var(--sc-text)] font-medium">{policy.name}</span>
                   {policy.is_active === 1 && (
-                    <span className="px-1.5 py-0.5 rounded bg-[var(--sc-ok)]/20 text-[var(--sc-ok)] text-[10px] font-medium">Active</span>
+                    <span className="px-1.5 py-0.5 rounded bg-[var(--sc-ok)]/20 text-[var(--sc-ok)] text-xs font-medium">Active</span>
                   )}
                 </div>
-                {policy.description && <p className="text-[var(--sc-text-muted)] text-[10px] mt-0.5">{policy.description}</p>}
+                {policy.description && <p className="text-[var(--sc-text-muted)] text-xs mt-0.5">{policy.description}</p>}
               </div>
               {!policy.is_active && (
                 <button
                   onClick={() => activatePolicy.mutate(policy.id)}
-                  className="flex items-center gap-1 px-2 py-1 text-[10px] bg-[var(--sc-ok)]/20 text-[var(--sc-ok)] rounded hover:bg-[var(--sc-ok)]/30"
+                  className="flex items-center gap-1 px-2 py-1 text-xs bg-[var(--sc-ok)]/20 text-[var(--sc-ok)] rounded hover:bg-[var(--sc-ok)]/30"
                   title="Set active"
                 >
                   <Check size={10} /> Activate
@@ -106,10 +106,10 @@ function PreviewContent() {
               <div className="flex items-center gap-2">
                 <span className="text-[var(--sc-text)] font-medium">{policy.name}</span>
                 {policy.is_active && (
-                  <span className="px-1.5 py-0.5 rounded bg-[var(--sc-ok)]/20 text-[var(--sc-ok)] text-[10px] font-medium">Active</span>
+                  <span className="px-1.5 py-0.5 rounded bg-[var(--sc-ok)]/20 text-[var(--sc-ok)] text-xs font-medium">Active</span>
                 )}
               </div>
-              <p className="text-[var(--sc-text-muted)] text-[10px] mt-0.5">{policy.description}</p>
+              <p className="text-[var(--sc-text-muted)] text-xs mt-0.5">{policy.description}</p>
             </div>
           </div>
         ))}

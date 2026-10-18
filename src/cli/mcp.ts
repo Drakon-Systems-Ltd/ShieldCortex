@@ -19,6 +19,7 @@ import {
   type McpToolsScanReport,
 } from '../audit/mcp-tools-scanner.js';
 import { toSarif } from '../xray/sarif.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
 
 /**
  * SQLite-backed hash store over the `mcp_tool_hashes` table. Persists the
@@ -123,9 +124,9 @@ async function runScan(args: string[]): Promise<void> {
 
   if (options.sarif) {
     // Pure SARIF JSON on stdout — uploadable straight to GitHub Code Scanning.
-    console.log(JSON.stringify(toSarif(report.findings), null, 2));
+    console.log(stringifyJsonTerminalSafe(toSarif(report.findings), 2));
   } else if (options.json) {
-    console.log(JSON.stringify(report, null, 2));
+    console.log(stringifyJsonTerminalSafe(report, 2));
   } else {
     console.log(formatToolsReport(report));
   }

@@ -162,6 +162,9 @@ import path from 'path';
 /** The manifest key our plugin declares — the thing that can collide. */
 export const HERMES_PLUGIN_NAME = 'shieldcortex';
 
+/** The probe's answer when no Hermes Python interpreter could be located. */
+export const NO_HERMES_INTERPRETER = 'no Hermes interpreter found';
+
 /** How long the Hermes probe may take before we give up on an answer. */
 const PROBE_TIMEOUT_MS = 8_000;
 
@@ -1207,19 +1210,18 @@ export function probeHermesDiscovery(
   // lookup and falls through to the `hermes` launcher on PATH.
   const searchHome = resolveHermesHome(env);
   // `noInterpreter` only for a search that met nothing but absence (#651 r2);
-  // an unreadable candidate or an unusable launcher is not "none found".
+  // an unreadable candidate, an unusable launcher or a dangling link is not
+  // "none found". The error text stays NO_HERMES_INTERPRETER in every no-answer
+  // case, as on main, so `update`'s plain "couldn't find Hermes' Python" row is
+  // unchanged; the doctor's absence downgrade reads only the structured flag.
   let interpreter: string;
   if (opts.interpreter !== undefined) {
-    if (opts.interpreter === null) return { error: 'no Hermes interpreter found', noInterpreter: true };
+    if (opts.interpreter === null) return { error: NO_HERMES_INTERPRETER, noInterpreter: true };
     interpreter = opts.interpreter;
   } else {
     const search = searchHermesInterpreter(searchHome);
-    if (search.kind === 'absent') return { error: 'no Hermes interpreter found', noInterpreter: true };
-    if (search.kind === 'undetermined') {
-      return {
-        error: `no usable Hermes interpreter found (${search.path} could not be read, or is not a usable interpreter)`,
-      };
-    }
+    if (search.kind === 'absent') return { error: NO_HERMES_INTERPRETER, noInterpreter: true };
+    if (search.kind === 'undetermined') return { error: NO_HERMES_INTERPRETER };
     interpreter = search.interpreter;
   }
 

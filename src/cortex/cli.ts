@@ -3,6 +3,7 @@
  * Pro tier feature: systematic mistake learning + pre-flight checks.
  */
 
+import { CORTEX_HELP } from '../cli/dispatch-help.js';
 import { requireFeature } from '../license/gate.js';
 import {
   capture, preflight, review, graduate, search, loadMistakes,
@@ -24,27 +25,7 @@ const VALID_CATEGORIES: MistakeCategory[] = [
 const VALID_SEVERITIES: MistakeSeverity[] = ['critical', 'high', 'medium', 'low'];
 
 function printUsage(): void {
-  console.log(`
-  shieldcortex cortex <command> [options]
-
-  Commands:
-    capture     Log a mistake and extract a prevention rule
-    preflight   Pre-task check against past mistakes
-    review      Pattern analysis and weekly review
-    graduate    Archive learned rules (30+ days, no recurrence)
-    list        Browse mistake log
-    stats       Summary counts and trends
-    search      Full-text search across all entries
-    confirm     Log a positive confirmation (what worked well)
-    confirmations  List or search confirmations
-
-  Examples:
-    shieldcortex cortex capture --category code --what "Guessed URLs" --why "Didn't use API" --rule "Always fetch handles from API"
-    shieldcortex cortex preflight --task "deploy to Fly.io"
-    shieldcortex cortex review
-    shieldcortex cortex confirm --category code --what "Used TypeScript strict mode" --why-worked "Caught type errors early" --when-repeat "Always on new TS projects"
-    shieldcortex cortex stats
-  `);
+  console.log(CORTEX_HELP);
 }
 
 function parseArgs(args: string[]): Record<string, string> {

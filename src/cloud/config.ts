@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync, renameSync, rmSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync, lstatSync, renameSync, rmSync } from 'fs';
 import { join, resolve } from 'path';
 import { homedir, hostname } from 'os';
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'crypto';
@@ -97,13 +97,33 @@ let cachedRawConfig: Record<string, unknown> | null = null;
 let cachedRawConfigFile: string | null = null;
 let cachedRawConfigMtimeMs: number | null = null;
 
+/** True when a read-only read of these bytes disagrees with the mutating reader's cache. */
+function readOnlyDisagreesWithCache(
+  configFile: string,
+  mtimeMsForCache: number | null,
+  data: Record<string, unknown>,
+): boolean {
+  return (
+    cachedRawConfig !== null &&
+    cachedRawConfigFile === configFile &&
+    sameCacheMtime(cachedRawConfigMtimeMs, mtimeMsForCache) &&
+    JSON.stringify(cachedRawConfig) !== JSON.stringify(data)
+  );
+}
+
+/** Cache keys come from stat.mtimeMs; utimes restoration is not bit-identical. */
+function sameCacheMtime(a: number | null, b: number | null): boolean {
+  if (a == null || b == null) return false;
+  return a === b || Math.abs(a - b) < 1;
+}
+
 // ── Config Integrity (HMAC) ──────────────────────────────
 
 let cachedIntegrityKey: string | null = null;
 let cachedIntegrityKeyFile: string | null = null;
 let configTampered = false;
 
-function getIntegrityKey(): string {
+function getIntegrityKey(readOnly = false): string {
   const integrityKeyFile = getIntegrityKeyFile();
   const configDir = getConfigDir();
   if (cachedIntegrityKey && cachedIntegrityKeyFile === integrityKeyFile) return cachedIntegrityKey;
@@ -114,6 +134,7 @@ function getIntegrityKey(): string {
       return cachedIntegrityKey;
     }
   } catch { /* ignore */ }
+  if (readOnly) throw new Error('config integrity key unavailable');
   // Generate new key on first run
   const key = randomBytes(32).toString('hex');
   mkdirSecure(configDir);
@@ -124,8 +145,8 @@ function getIntegrityKey(): string {
   return key;
 }
 
-function signConfig(jsonContent: string): string {
-  return createHmac('sha256', getIntegrityKey()).update(jsonContent, 'utf-8').digest('hex');
+function signConfig(jsonContent: string, readOnly = false): string {
+  return createHmac('sha256', getIntegrityKey(readOnly)).update(jsonContent, 'utf-8').digest('hex');
 }
 
 /**
@@ -155,7 +176,13 @@ function writeConfigSignature(jsonContent: string): void {
   try { chmodSync(sigFile, 0o600); } catch { /* best-effort */ }
 }
 
-type IntegrityVerdict = 'valid' | 'self-heal' | 'tampered';
+/**
+ * `'unverified'` is returned only to a read-only caller, and only where the
+ * mutating verdict would depend on a write succeeding (legacy adoption). It is
+ * neither trusted nor tampered: the posture is unknown until a mutating read
+ * settles it.
+ */
+type IntegrityVerdict = 'valid' | 'self-heal' | 'tampered' | 'unverified';
 
 /**
  * Verify a parsed config object's integrity, returning a three-way verdict.
@@ -183,11 +210,11 @@ type IntegrityVerdict = 'valid' | 'self-heal' | 'tampered';
  * whole-file signature). On a missing legacy sig file we adopt the current
  * content as trusted (first run after upgrade), matching prior behaviour.
  */
-function checkConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: string): IntegrityVerdict {
+function checkConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: string, readOnly = false): IntegrityVerdict {
   try {
     if (typeof parsed._sig === 'string') {
       // Embedded scheme: recompute over the canonical body (object minus _sig).
-      const computed = signConfig(canonicalBodyForSig(parsed));
+      const computed = signConfig(canonicalBodyForSig(parsed), readOnly);
       if (constantTimeEqualHex(parsed._sig, computed)) return 'valid';
       // Embedded sig mismatch — is the file otherwise authentic? If a legacy
       // whole-file sig still validates these exact bytes, the content is intact
@@ -195,7 +222,7 @@ function checkConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: s
       const sigFile = getSigFile();
       if (existsSync(sigFile)) {
         const legacySig = readFileSync(sigFile, 'utf-8').trim();
-        if (constantTimeEqualHex(legacySig, signConfig(rawFileContent))) return 'self-heal';
+        if (constantTimeEqualHex(legacySig, signConfig(rawFileContent, readOnly))) return 'self-heal';
       }
       return 'tampered';
     }
@@ -205,11 +232,15 @@ function checkConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: s
       // First run after upgrade with no sig yet — adopt as trusted, write a
       // legacy sig so a subsequent read (before the next write upgrades it)
       // still verifies. Matches the prior behaviour to avoid a false tamper.
+      // Read-only: the mutating verdict here is 'valid' if that write succeeds
+      // and 'tampered' if it fails, and no permission check can prove a write
+      // will succeed. Say so instead of guessing.
+      if (readOnly) return 'unverified';
       writeConfigSignature(rawFileContent);
       return 'valid';
     }
     const storedSig = readFileSync(sigFile, 'utf-8').trim();
-    const computedSig = signConfig(rawFileContent);
+    const computedSig = signConfig(rawFileContent, readOnly);
     return constantTimeEqualHex(storedSig, computedSig) ? 'valid' : 'tampered';
   } catch {
     return 'tampered';
@@ -355,6 +386,22 @@ interface RawConfigState {
    * setting that the unreadable file still holds.
    */
   parseFailed: boolean;
+  /**
+   * True when the file EXISTS but reading it threw (permissions, I/O), or, on
+   * a read-only read, when it could not be stat'ed for any reason other than
+   * ENOENT. `data` is still {} for every existing caller; only a reader that must not mistake
+   * "unreadable" for "unset" consults this.
+   */
+  readFailed?: boolean;
+  /**
+   * Read-only reads only: the file was read and parsed, but what the mutating
+   * reader would make of it depends on a write (legacy `.config-sig`
+   * adoption), or the mutating reader's cache holds a different verdict for
+   * these same bytes (left by an earlier failed write). `data` is still the
+   * parsed file; only a reader that must not guess the effective posture
+   * consults this.
+   */
+  unverified?: boolean;
 }
 
 /**
@@ -370,28 +417,46 @@ interface RawConfigState {
  * (that would silently turn a temporary OS-owned floor into a permanent local
  * setting, and would survive removing the lock).
  */
-function readRawConfigStateUnlocked(): RawConfigState {
+function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawConfigState {
   const configFile = getConfigFile();
 
-  // mtime cache: if the file is unchanged since the last successful read,
-  // return the cached parsed object without touching disk again.
-  try {
-    const mtimeMs = statSync(configFile).mtimeMs;
-    if (
-      cachedRawConfig !== null &&
-      cachedRawConfigFile === configFile &&
-      cachedRawConfigMtimeMs === mtimeMs
-    ) {
-      // Return a shallow copy so callers can mutate freely without poisoning
-      // the cache (accessors push to arrays / set fields before writing back).
-      return { data: { ...cachedRawConfig }, parseFailed: false };
+  if (options.readOnly) {
+    // A read-only caller must tell "no config file" from "a config file it
+    // cannot reach", so it neither takes the cache (a cache hit would hide a
+    // permission lost since the last read) nor asks existsSync (which answers
+    // false for a file behind a directory it cannot enter). lstat, not stat:
+    // stat follows a dangling config.json symlink and throws ENOENT, which
+    // this branch used to treat as "no config" and report Guard off. Only
+    // ENOENT on the directory entry itself is absent; any other lstat error
+    // (EACCES, ENOTDIR, ELOOP, ...) is readFailed. A present symlink whose
+    // target cannot be read fails later in readFileSync and is also readFailed.
+    try {
+      lstatSync(configFile);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { data: {}, parseFailed: false };
+      return { data: {}, parseFailed: false, readFailed: true };
     }
-  } catch {
-    // stat failed (file likely absent) — fall through to the real read.
+  } else {
+    // mtime cache: if the file is unchanged since the last successful read,
+    // return the cached parsed object without touching disk again.
+    try {
+      const mtimeMs = statSync(configFile).mtimeMs;
+      if (
+        cachedRawConfig !== null &&
+        cachedRawConfigFile === configFile &&
+        cachedRawConfigMtimeMs === mtimeMs
+      ) {
+        // Return a shallow copy so callers can mutate freely without poisoning
+        // the cache (accessors push to arrays / set fields before writing back).
+        return { data: { ...cachedRawConfig }, parseFailed: false };
+      }
+    } catch {
+      // stat failed (file likely absent) — fall through to the real read.
+    }
   }
 
   try {
-    if (existsSync(configFile)) {
+    if (options.readOnly || existsSync(configFile)) {
       // Capture mtime BEFORE reading the bytes. The cache key must describe the
       // exact bytes we're about to read: if we stat AFTER readFileSync, a
       // concurrent write between read and stat would cache the OLD bytes under
@@ -402,9 +467,17 @@ function readRawConfigStateUnlocked(): RawConfigState {
       try { mtimeMsForCache = statSync(configFile).mtimeMs; } catch { /* best-effort */ }
 
       const content = readFileSync(configFile, 'utf-8');
-      // An empty file is treated as "no config yet", not a parse failure.
+      // An empty or whitespace-only file is treated as "no config yet", not a
+      // parse failure. On the read-only path that still has to disagree with a
+      // warm mutating cache for the same mtime (B3-R3): emptying the file in
+      // place while restoring mtime would otherwise report Guard off while
+      // getActionGuardCoreConfig() still serves the cached strict-ON verdict.
       if (content.trim().length === 0) {
-        return { data: {}, parseFailed: false };
+        const data: Record<string, unknown> = {};
+        if (options.readOnly && readOnlyDisagreesWithCache(configFile, mtimeMsForCache, data)) {
+          return { data, parseFailed: false, unverified: true };
+        }
+        return { data, parseFailed: false };
       }
 
       let data: Record<string, unknown>;
@@ -418,7 +491,11 @@ function readRawConfigStateUnlocked(): RawConfigState {
       }
 
       // Verify HMAC integrity (embedded `_sig`, else legacy `.config-sig`).
-      const verdict = checkConfigIntegrity(data, content);
+      const verdict = checkConfigIntegrity(data, content, options.readOnly);
+      if (verdict === 'unverified') {
+        delete data._sig;
+        return { data, parseFailed: false, unverified: true };
+      }
       if (verdict === 'tampered') {
         configTampered = true;
         console.error(
@@ -439,7 +516,7 @@ function readRawConfigStateUnlocked(): RawConfigState {
       // can't leak into CloudConfig or get re-serialised as a normal field.
       delete data._sig;
 
-      if (verdict === 'self-heal') {
+      if (verdict === 'self-heal' && !options.readOnly) {
         // The bytes are authentic (legacy whole-file sig still validates) — only
         // the embedded `_sig` drifted. Re-sign silently to converge on the
         // embedded-only format and drop the stale legacy sig. This is a one-shot:
@@ -462,15 +539,27 @@ function readRawConfigStateUnlocked(): RawConfigState {
 
       // Populate the mtime cache from the parsed (sig-stripped) object, keyed on
       // the mtime captured BEFORE the read (matches the bytes actually parsed).
-      if (mtimeMsForCache !== null) {
+      if (mtimeMsForCache !== null && !options.readOnly) {
         cachedRawConfig = { ...data };
         cachedRawConfigFile = configFile;
         cachedRawConfigMtimeMs = mtimeMsForCache;
       }
 
+      // A read-only read does not take the cache, but the mutating reader
+      // will while the mtime is unchanged. If its cached verdict for these
+      // bytes differs from this fresh one (e.g. strict, cached after a write
+      // failed, since recovered), the two readers disagree: unverified.
+      if (options.readOnly && readOnlyDisagreesWithCache(configFile, mtimeMsForCache, data)) {
+        return { data, parseFailed: false, unverified: true };
+      }
+
       return { data, parseFailed: false };
     }
-  } catch { /* ignore — treat as absent */ }
+  } catch {
+    // Treated as absent by every existing caller; flagged for the read-only
+    // posture reader, which must not report an unreadable file as "off".
+    return { data: {}, parseFailed: false, readFailed: true };
+  }
   return { data: {}, parseFailed: false };
 }
 
@@ -489,9 +578,9 @@ function readRawConfigStateUnlocked(): RawConfigState {
  * agent instead of at its next restart. A stale security policy is the worse
  * trade.
  */
-function readRawConfigState(): RawConfigState {
-  const state = readRawConfigStateUnlocked();
-  const lock = getPolicyLockState();
+function readRawConfigState(options: { readOnly?: boolean } = {}): RawConfigState {
+  const state = readRawConfigStateUnlocked(options);
+  const lock = options.readOnly ? readPolicyLock({ audit: false }) : getPolicyLockState();
   const locked = applyPolicyLock(state.data, lock);
   return locked === state.data ? state : { ...state, data: locked };
 }
@@ -505,8 +594,8 @@ export function getPolicyLockState(): PolicyLockState {
   return readPolicyLock({ audit: true });
 }
 
-export function readRawConfig(): Record<string, unknown> {
-  return readRawConfigState().data;
+export function readRawConfig(options: { readOnly?: boolean } = {}): Record<string, unknown> {
+  return readRawConfigState(options).data;
 }
 
 /**
@@ -930,7 +1019,34 @@ export function actionGuardPosture(core: ActionGuardCoreConfig): ActionGuardPost
  * minted false cards on ordinary OpenClaw exec bags.
  */
 export function getActionGuardCoreConfig(): ActionGuardCoreConfig {
-  const raw = readRawConfig();
+  return resolveActionGuardCore(readRawConfig());
+}
+
+/**
+ * The core config read without changing anything: no `.config-sig` adoption,
+ * no `.integrity-key` minting, no self-heal rewrite, no audit event for an
+ * unverifiable lock. The policy-lock floor is still applied
+ * (`readPolicyLock({ audit: false })`).
+ *
+ * Returns the same EFFECTIVE core config as {@link getActionGuardCoreConfig}
+ * when that answer does not depend on a write. Returns `null` (unknown, which
+ * is not "off") when it does — a config with no signature yet, whose verdict
+ * hangs on adoption succeeding, or one the getter's cache holds a different
+ * verdict for — and when the config file exists but could not be read or
+ * parsed.
+ */
+export function readActionGuardCoreConfigReadOnly(): ActionGuardCoreConfig | null {
+  try {
+    const state = readRawConfigState({ readOnly: true });
+    if (state.parseFailed || state.readFailed || state.unverified) return null;
+    return resolveActionGuardCore(state.data);
+  } catch {
+    return null;
+  }
+}
+
+/** Top-level `actionGuard` merged over the `interceptor.actionGuard` alias. Pure. */
+function resolveActionGuardCore(raw: Record<string, unknown>): ActionGuardCoreConfig {
   const interceptor = raw.interceptor && typeof raw.interceptor === 'object' && !Array.isArray(raw.interceptor)
     ? (raw.interceptor as Record<string, unknown>)
     : {};
@@ -1032,6 +1148,40 @@ export function getCloudIronDomeCache(): Record<string, unknown> | null {
     return raw.cloudIronDome as Record<string, unknown>;
   }
   return null;
+}
+
+/**
+ * Read the cloud cache for diagnostics without signature adoption, self-heal,
+ * cache mutation, policy-lock audit, or any filesystem write. An unreadable or
+ * unverifiable existing config is reported to the caller as unavailable.
+ */
+export function peekCloudIronDomeCache(): Record<string, unknown> | null {
+  const configFile = getConfigFile();
+  if (!existsSync(configFile)) return null;
+
+  const content = readFileSync(configFile, 'utf-8');
+  if (!content.trim()) return null;
+  const parsed: unknown = JSON.parse(content);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Config unreadable');
+  const raw = parsed as Record<string, unknown>;
+
+  // Verify signatures using only an existing key. An unsigned legacy file is
+  // readable, but this peek must not adopt it by creating .config-sig.
+  const sigFile = getSigFile();
+  if (typeof raw._sig === 'string' || existsSync(sigFile)) {
+    const key = readFileSync(getIntegrityKeyFile(), 'utf-8').trim();
+    if (!key) throw new Error('Config integrity key unreadable');
+    const signed = (body: string) => createHmac('sha256', key).update(body, 'utf-8').digest('hex');
+    const embeddedValid = typeof raw._sig === 'string' &&
+      constantTimeEqualHex(raw._sig, signed(canonicalBodyForSig(raw)));
+    const legacyValid = existsSync(sigFile) &&
+      constantTimeEqualHex(readFileSync(sigFile, 'utf-8').trim(), signed(content));
+    if (!embeddedValid && !legacyValid) throw new Error('Config integrity check failed');
+  }
+
+  return raw.cloudIronDome && typeof raw.cloudIronDome === 'object' && !Array.isArray(raw.cloudIronDome)
+    ? raw.cloudIronDome as Record<string, unknown>
+    : null;
 }
 
 // ── Sync Timestamp ────────────────────────────────────

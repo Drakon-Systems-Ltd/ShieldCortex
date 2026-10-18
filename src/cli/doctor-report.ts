@@ -7,7 +7,42 @@
  * truncated mid-sentence via ellipsis — it wraps in full at any width.
  */
 
+import { sanitiseDisplayLines } from './term-ui.js';
+
 export type DoctorStatus = 'pass' | 'warn' | 'fail' | 'info';
+
+/**
+ * Display copy of doctor rows for the human report (#788): `message`, `fix`
+ * and `verboseNote` carry host-derived text (install dirs, error messages),
+ * so each of their lines goes through the display sanitiser. Line breaks that
+ * the report uses for layout are kept; every other break character and every
+ * control sequence is neutralised. The input rows are not modified, so
+ * `--json` output and exit codes stay on the raw values.
+ *
+ * Splitting cannot tell a host line break from a layout one, so a row whose
+ * fix embeds a host value carries `displayFix`, composed with that value
+ * already display-sanitised; the display copy uses it in place of `fix` (#799).
+ */
+export function sanitiseDoctorRowsForDisplay<T extends DoctorReportItem>(rows: readonly T[]): T[] {
+  return rows.map((r) => ({
+    ...r,
+    message: sanitiseDisplayLines(r.message),
+    ...(r.fix !== undefined ? { fix: sanitiseDisplayLines(r.displayFix ?? r.fix) } : {}),
+    ...(r.verboseNote !== undefined ? { verboseNote: sanitiseDisplayLines(r.verboseNote) } : {}),
+  }));
+}
+
+/**
+ * Doctor's NEXT command when a check failed: the first command line of the
+ * first failing row's fix, else `shieldcortex doctor --verbose`. Expects the
+ * display copy from `sanitiseDoctorRowsForDisplay`, so a line here is either
+ * code-authored layout or a host value marked with ⏎ — never a host line.
+ */
+export function nextCommandForFailures(displayRows: readonly DoctorReportItem[]): string {
+  const failFix = displayRows.find((r) => r.status === 'fail' && r.fix)?.fix?.trim() ?? '';
+  return failFix.split('\n').map((l) => l.trim()).find((l) => /^(shieldcortex|openclaw|npm|node)\b/.test(l))
+    ?? 'shieldcortex doctor --verbose';
+}
 
 /** Minimal input shape — matches CheckResult fields the renderer needs. */
 export interface DoctorReportItem {
@@ -15,6 +50,25 @@ export interface DoctorReportItem {
   status: DoctorStatus;
   message: string;
   fix?: string;
+  /**
+   * Display-only copy of `fix` composed with its host values (install dir)
+   * already passed through `sanitiseDisplayField`, so their line breaks show
+   * as ⏎ instead of becoming fix lines or a NEXT command (#799). Read only by
+   * `sanitiseDoctorRowsForDisplay`; `--json` emits `fix`. Set only where the
+   * fix is never rewritten afterwards.
+   */
+  displayFix?: string;
+  /**
+   * The `fix` is a report whose backticked commands are inspection steps, not
+   * the remedy: print the prose AND the commands. Without it a row with any
+   * command prints the commands only, which drops the explanation (#649).
+   */
+  fixNoteWithCommands?: true;
+  /**
+   * Extra detail for `--verbose` only: internal wording or consent-gated
+   * commands that would confuse the default report (PR #773).
+   */
+  verboseNote?: string;
 }
 
 export interface FormatDoctorReportOpts {
@@ -278,6 +332,10 @@ interface ThemeGroup {
   fixCommands: string[];
   /** Original English `fix` — printed as a note when no safe `$` remains. */
   fixNote: string;
+  /** Print `fixNote` before the commands too — see DoctorReportItem. */
+  fixNoteWithCommands?: true;
+  /** --verbose only; see DoctorReportItem.verboseNote. */
+  verboseNotes: string[];
   count: number;
   labels: string[];
 }
@@ -317,6 +375,8 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
       why: it.message.replace(/\s+/g, ' ').trim(),
       fixCommands: extractFixCommands(it.fix),
       fixNote: it.fix ?? '',
+      ...(it.fixNoteWithCommands ? { fixNoteWithCommands: true as const } : {}),
+      verboseNotes: it.verboseNote ? [it.verboseNote] : [],
       count: 1,
       labels: [it.label],
     }));
@@ -335,6 +395,8 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
         why: it.message.replace(/\s+/g, ' ').trim(),
         fixCommands: extractFixCommands(it.fix),
         fixNote: it.fix ?? '',
+        ...(it.fixNoteWithCommands ? { fixNoteWithCommands: true as const } : {}),
+        verboseNotes: it.verboseNote ? [it.verboseNote] : [],
         count: 1,
         labels: [it.label],
       };
@@ -349,6 +411,7 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
       const cmds = extractFixCommands(it.fix);
       for (const c of cmds) if (!existing.fixCommands.includes(c)) existing.fixCommands.push(c);
       if (!existing.fixNote && it.fix) existing.fixNote = it.fix;
+      if (it.verboseNote && !existing.verboseNotes.includes(it.verboseNote)) existing.verboseNotes.push(it.verboseNote);
       // Prefer the dedicated conversation-scanning label over plugin-loaded note
       if (/conversation scanning/i.test(it.label) && !/conversation scanning/i.test(existing.what)) {
         existing.what = shortWhat(it);
@@ -376,7 +439,7 @@ function statusColor(status: DoctorStatus, s: DoctorReportStyle): string {
   }
 }
 
-function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle): string[] {
+function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle, verbose = false): string[] {
   const mark = STATUS_MARK[g.status];
   const col = statusColor(g.status, style);
   const xN = g.count > 1 ? `  x${g.count}` : '';
@@ -402,6 +465,9 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
     ? g.fixCommands.filter((c) => !isHonestyForbiddenCommand(c))
     : g.fixCommands;
   if (cmds.length > 0) {
+    if (g.fixNoteWithCommands && g.fixNote) {
+      lines.push(...wrapLine(cleanWhy(g.fixNote), width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
+    }
     for (const cmd of cmds) {
       const runnable = /^(?:[\w.-]+\s+)?(?:shieldcortex|openclaw|claude|npm|node|systemctl|launchctl|chown|chmod)\b/i.test(cmd)
         || cmd.startsWith('SHIELDCORTEX_');
@@ -422,6 +488,11 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
     const note = 'Conversation scanning is off. That is valid. Do not grant conversation access from this warning.';
     lines.push(...wrapLine(note, width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
   }
+  if (verbose) {
+    for (const note of g.verboseNotes) {
+      lines.push(...wrapLine(note, width, 4, 6).map((l) => `${style.dim}${l}${style.reset}`));
+    }
+  }
   return lines;
 }
 
@@ -431,6 +502,8 @@ function renderPassLine(it: DoctorReportItem, width: number, style: DoctorReport
   return [
     `${style.green}${STATUS_MARK.pass}${style.reset} ${themeForLabel(it.label).padEnd(6)} ${ellipsize(it.label, Math.max(8, width - 12))}`,
     ...wrapLine(msg, width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`),
+    // Pass lines print only with --verbose, so the note always may.
+    ...(it.verboseNote ? wrapLine(it.verboseNote, width, 4, 6).map((l) => `${style.dim}${l}${style.reset}`) : []),
   ];
 }
 
@@ -479,7 +552,7 @@ export function formatDoctorReport(
     if (groups.length === 0) return;
     lines.push(`${style.bold}${title}${style.reset}`);
     for (let i = 0; i < groups.length; i++) {
-      lines.push(...renderIssueBlock(groups[i], width, style));
+      lines.push(...renderIssueBlock(groups[i], width, style, verbose));
       if (i !== groups.length - 1) lines.push('');
     }
     lines.push('');

@@ -28,7 +28,7 @@ describe('CLAUDE.md ghost-tool block refresh (guards against #27)', () => {
     else process.env.HOME = originalHome;
     if (originalUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = originalUserProfile;
-    process.exitCode = previousExitCode;
+    process.exitCode = previousExitCode ?? undefined;
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 

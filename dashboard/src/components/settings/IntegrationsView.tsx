@@ -85,7 +85,7 @@ export function IntegrationsView() {
           />
         </div>
 
-        <p className="mt-5 text-[11px] text-[var(--sc-text-muted)]">
+        <p className="mt-5 text-xs text-[var(--sc-text-muted)]">
           You can also toggle these via the CLI: <code className="font-mono">shieldcortex config --openclaw-auto-memory true|false</code> ·{' '}
           <code className="font-mono">shieldcortex config --proactive-recall true|false</code>
         </p>

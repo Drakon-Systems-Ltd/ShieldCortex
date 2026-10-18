@@ -82,8 +82,8 @@ describe('config --action-guard-* core flags', () => {
     expect(getActionGuardCoreConfig().enabled).toBe(false);
     logSpy.mockClear();
     handleCloudConfig(['--cloud-status']);
-    const lines = logSpy.mock.calls.map((c) => String(c[0]));
-    expect(lines.some((l) => l.includes('Action Guard: Off'))).toBe(true);
+    const lines = logSpy.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(lines.some((l: string) => l.includes('Action Guard: Off'))).toBe(true);
   });
 
   it('--action-guard-enforce writes enabled:true AND enforce:true, and status shows Enforce', () => {
@@ -93,8 +93,8 @@ describe('config --action-guard-* core flags', () => {
     expect(onDisk.actionGuard.enforce).toBe(true);
     logSpy.mockClear();
     handleCloudConfig(['--cloud-status']);
-    const lines = logSpy.mock.calls.map((c) => String(c[0]));
-    expect(lines.some((l) => l.includes('Action Guard: Enforce'))).toBe(true);
+    const lines = logSpy.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(lines.some((l: string) => l.includes('Action Guard: Enforce'))).toBe(true);
   });
 
   it('--action-guard-advisory writes enforce:false and leaves enabled as-is, status shows Advisory', () => {
@@ -108,8 +108,8 @@ describe('config --action-guard-* core flags', () => {
     expect(cfg.enforce).toBe(false);
     logSpy.mockClear();
     handleCloudConfig(['--cloud-status']);
-    const lines = logSpy.mock.calls.map((c) => String(c[0]));
-    expect(lines.some((l) => l.includes('Action Guard: Advisory (warn-mode)'))).toBe(true);
+    const lines = logSpy.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(lines.some((l: string) => l.includes('Action Guard: Advisory (warn-mode)'))).toBe(true);
   });
 
   it('--action-guard-advisory on a disabled guard still writes enforce:false without re-enabling', () => {

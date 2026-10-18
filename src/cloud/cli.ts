@@ -1,3 +1,4 @@
+import { CLOUD_HELP, CONFIG_HELP } from '../cli/dispatch-help.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import type { OpenClawPluginGuardSync } from '../setup/openclaw-plugin-guard-sync.js';
 import {
@@ -415,15 +416,17 @@ export function handleCloudConfig(args: string[]): void {
     const previousPosture = actionGuardPosture(getActionGuardCoreConfig());
     applyActionGuardCore(
       { enabled: true, enforce: true, readinessGate: true },
-      'Action Guard ENFORCE WHEN READY — dangerous ops are logged, not stopped, until three conditions hold: two readiness ' +
+      'Action Guard ENFORCE WHEN READY — ordinary dangerous ops are logged, not stopped, until three conditions hold: two readiness ' +
         'proxies measured here (operational intervention rate ≤ 2% over ≥ 500 calls / 7 days, and approval reachability ' +
         '≥ 98% of requests answered by a human through a configured channel) AND reviewed effectiveness evidence for this ' +
         'guard version. That evidence is always required and none has been published, so today this posture stays in shadow. ' +
         'Needs a human approval channel (--action-guard-notify-openclaw or --action-guard-notify-webhook), and a webhook ' +
         'so a later demotion notice can reach you (--action-guard-notify-webhook). ' +
-        'Catastrophic ops block in every posture. Check progress: shieldcortex guard readiness. ' +
+        'Catastrophic ops block in every posture, and in shadow calls the guard recognises as changing its own state/config ' +
+        'or disabling it are still held or blocked. Check progress: shieldcortex guard readiness. ' +
         'The Claude Code hook and the OpenClaw plugin are each measured and promoted on their own calls; ' +
-        'the Hermes plugin does not implement the gate and enforces immediately.',
+        'the Hermes plugin does not implement the gate and enforces immediately unless its own enforce setting ' +
+        '(SHIELDCORTEX_ENFORCE) opts it out; this flag does not change that setting.',
     );
     // Start the durable transition record. Only a CHANGE of posture adds an
     // entry; re-running this on an enforce-when-ready install cannot clear a
@@ -438,7 +441,9 @@ export function handleCloudConfig(args: string[]): void {
   if (args.includes('--action-guard-advisory')) {
     applyActionGuardCore(
       { enforce: false, readinessGate: false },
-      'Action Guard ADVISORY (warn-mode) — dangerous ops log but are not gated (catastrophic still blocks when enabled).',
+      'Action Guard ADVISORY (warn-mode) — ordinary dangerous ops log but are not gated. Still held or blocked when enabled, ' +
+        'including catastrophic ops and calls the guard recognises as changing its own state/config or disabling it. ' +
+        'The Hermes plugin has its own enforce setting (SHIELDCORTEX_ENFORCE), which this does not change.',
     );
     changed = true;
   }
@@ -610,56 +615,7 @@ export function handleCloudConfig(args: string[]): void {
   }
 
   if (!changed) {
-    console.log('Usage: shieldcortex config [options]');
-    console.log('');
-    console.log('Options:');
-    console.log('  --mode <mode>          Set defence mode (strict|balanced|permissive)');
-    console.log('  --cloud-api-key <key>  Set cloud API key');
-    console.log('  --cloud-url <url>      Set cloud base URL');
-    console.log('  --cloud-enable         Enable cloud sync');
-    console.log('  --cloud-disable        Disable cloud sync');
-    console.log('  --cloud-include-sensitive  Sync CONFIDENTIAL+ memories (off by default since v4.27)');
-    console.log('  --cloud-exclude-sensitive  Stop syncing CONFIDENTIAL+ memories (default)');
-    console.log('  --cloud-status         Show current configuration');
-    console.log('  --openclaw-auto-memory <true|false>  Extract memories from OpenClaw LLM output (off when unset)');
-    console.log('  --proactive-recall <true|false>  Inject SC memory into prompts (off when unset — adds latency)');
-    console.log('                            A fresh global npm install (not CI) with no ~/.shieldcortex/config.json');
-    console.log('                            writes both as true. An existing config.json is never changed, so an');
-    console.log('                            upgrade keeps your current values; a key it does not set stays off');
-    console.log('  --ranker <rrf|legacy>  Hybrid retrieval engine (default: rrf; SHIELDCORTEX_RANKER env overrides)');
-    console.log('  --self-heal <true|false>  Let the cortex-memory hook repair its own install at gateway bootstrap');
-    console.log('                            (default: true; false = warn-only. SHIELDCORTEX_SKIP_SELF_HEAL=1 also opts out)');
-    console.log('  --tool-firewall-enforce   Redact/withhold threatening tool output before the agent sees it');
-    console.log('  --tool-firewall-advisory  Log tool-output threats but deliver intact (default)');
-    console.log('  --tool-firewall-off / --tool-firewall-on  Disable / enable tool-output scanning');
-    console.log('  --allow-revoke-by-source / --disallow-revoke-by-source  Enable/disable destructive forget --fromSource (default: disabled)');
-    console.log('  --policy-status          Show the OS-owned policy lock: pinned keys, or why there is none');
-    console.log('  --action-guard-enable    Turn Action Guard on, keeping the current enforce/advisory setting (default: off)');
-    console.log('  --action-guard-disable   Turn Action Guard off entirely — tool calls are NOT gated (the default)');
-    console.log('  --action-guard-enforce   Gate dangerous ops (approval/block) from now on; also enables the guard');
-    console.log('  --action-guard-enforce-when-ready  Log dangerous ops (shadow) until two readiness proxies hold here');
-    console.log('                           (≤ 2% would-stop, ≥ 98% of approvals answered by a human) AND reviewed');
-    console.log('                           effectiveness evidence exists for this version — always required, none');
-    console.log('                           published yet, so it stays in shadow today. Needs a webhook;');
-    console.log('                           progress: shieldcortex guard readiness. Claude Code hook and OpenClaw');
-    console.log('                           plugin, each measured on its own calls; Hermes ignores the gate and');
-    console.log('                           enforces immediately. Also enables the guard');
-    console.log('  --action-guard-advisory  Watch only — dangerous ops log but are not gated (catastrophic still blocks)');
-    console.log('  --action-guard-notify-openclaw  Notify Action Guard denials via the native OpenClaw approval card');
-    console.log('  --action-guard-notify-webhook <https-url>  Notify Action Guard denials to an https webhook');
-    console.log('  --action-guard-notify-disable   Disable Action Guard denial notifications');
-    console.log('  --memory-inject-contract <sc_only|disable_native_inject>  Set the memory-inject native contract (signed write)');
-    console.log('  --memory-plane <dual_legacy|import_only|sc_canonical>  Set memory.plane (signed write; stamps planeSetAt)');
-    console.log('  --memory-host-posture <mcp_sidecar_no_inject|bus_contract>  Honest sidecar (also turns inject off) or bus-contract posture (signed write)');
-    console.log('  --memory-host-runtime <openclaw|claude_code|hermes>[,…]  Declare the bound host runtime(s) doctor must prove (signed write)');
-    console.log('  --auto-memory-sampling <n>  Stop-hook sampling cadence in turns (1-20, ≤ 5 recommended; signed write)');
-    console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
-    console.log('');
-    console.log('LLM Verification:');
-    console.log('  --verify-enable        Enable LLM verification (requires cloud + verify scope)');
-    console.log('  --verify-disable       Disable LLM verification');
-    console.log('  --verify-mode <mode>   Set verify mode (advisory|enforce)');
-    console.log('  --verify-timeout <ms>  Set verify timeout in ms (1000-30000)');
+    console.log(CONFIG_HELP);
   }
 }
 
@@ -704,7 +660,7 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
     return;
   }
 
-  console.log('Usage: shieldcortex cloud sync --full');
+  console.log(CLOUD_HELP);
 }
 
 /**

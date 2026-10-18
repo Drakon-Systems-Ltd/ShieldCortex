@@ -39,7 +39,7 @@ import {
 } from '../integrations/openclaw-conversation-capability.js';
 import { parseRegistrationsSince, parseLogLinePid } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
-import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
+import { nativeBindingDisplayRemediation, nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
 import {
   hermesEnvironment,
   protectedDirs,
@@ -132,14 +132,19 @@ import {
   readRawConfig,
   migrateInterceptorActionGuardAlias,
 } from '../cloud/config.js';
+import { resolveMemoryConfig } from '../memory/config.js';
+import type { MemoryConfig } from '../memory/types.js';
 import { validateOpenClawConfig } from '../integrations/openclaw-config-validate.js';
 import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
 import type { DoctorExplainerOutcome } from '../defence/iron-dome/doctor-explainer.js';
 import { normaliseWebhookUrl } from '../defence/iron-dome/notify-config.js';
+import { DEFAULT_IRON_DOME_CONFIG, type IronDomeConfig } from '../defence/iron-dome/config.js';
 import { sharedSensitivitySqlPredicate } from '../defence/sensitivity/isolation.js';
 import {
   formatDoctorReport,
+  nextCommandForFailures,
+  sanitiseDoctorRowsForDisplay,
   shouldColorDoctor,
   type DoctorReportStyle,
 } from './doctor-report.js';
@@ -169,6 +174,17 @@ import {
   type CorrelateCronDenialsOptions,
   type CronDenialReport,
 } from './cron-denial-audit.js';
+import {
+  evaluateRecallRepetition,
+  REPEAT_MIN_SET_SIZE,
+  REPEAT_SAMPLE_RUNS,
+  type RecallRepetitionDeps,
+  type RecallRepetitionVerdict,
+  type SlotProblem,
+} from './recall-repetition.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
+
+export const VACUUM_FREE_SHARE = 0.2;
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -189,6 +205,12 @@ export interface CheckResult {
   status: CheckStatus;
   message: string;
   fix?: string;
+  /** See DoctorReportItem.displayFix — display-only; `--json` emits `fix`. */
+  displayFix?: string;
+  /** See DoctorReportItem.fixNoteWithCommands — keeps a report-only fix's prose in the human report. */
+  fixNoteWithCommands?: true;
+  /** See DoctorReportItem.verboseNote — printed only with --verbose. */
+  verboseNote?: string;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
@@ -929,13 +951,15 @@ function engineLoadFailure(dbPath: string, err: unknown): CheckResult {
   const typed = err instanceof NativeModuleLoadError;
   const cause = typed ? err.cause : err;
   const guidance = typed ? err.message : (err instanceof Error ? err.message : String(err));
+  const installDir = resolveSelfInstallDir();
   return {
     label: 'Database',
     status: 'fail',
     message:
       'cannot load the database engine (better-sqlite3) — an install problem, ' +
       `NOT database corruption: ${tildify(dbPath)} was never opened and is untouched.\n${guidance}`,
-    fix: nativeBindingRemediation(resolveSelfInstallDir(), cause),
+    fix: nativeBindingRemediation(installDir, cause),
+    displayFix: nativeBindingDisplayRemediation(installDir, cause),
   };
 }
 
@@ -1028,8 +1052,9 @@ export function runDatabaseCheck(dbPath: string, env: Environment = detectEnviro
     // A stat'able DB can still be unopenable because the file itself is owned
     // by another user (mode 600 root:root — the other half of the sudo
     // artefact). Telling that user to delete their database is bad advice.
+    const installDir = isNativeBindingFault ? resolveSelfInstallDir() : '';
     const fix = isNativeBindingFault
-      ? nativeBindingRemediation(resolveSelfInstallDir(), msg)
+      ? nativeBindingRemediation(installDir, msg)
       : looksLikePermissionError(err, msg)
         ? ownershipFix()
         : 'Back up and delete `~/.shieldcortex/memories.db`, then restart the MCP server';
@@ -1038,6 +1063,7 @@ export function runDatabaseCheck(dbPath: string, env: Environment = detectEnviro
       status: 'fail',
       message: `cannot open — ${msg}`,
       fix,
+      ...(isNativeBindingFault ? { displayFix: nativeBindingDisplayRemediation(installDir, msg) } : {}),
     };
   }
 }
@@ -1167,7 +1193,7 @@ export async function checkAttestationCoverage(
  */
 export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promise<CheckResult> {
   const label = 'Chained ledger';
-  const { verifyLedger, summariseLedgerReport } = await import('../defence/ledger/verify.js');
+  const { verifyLedger, summariseLedgerReport, allProblemsAreLegacyProjectBackfill } = await import('../defence/ledger/verify.js');
   const { resolveLedgerConfig } = await import('../defence/ledger/config.js');
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const Database = require('better-sqlite3');
@@ -1192,7 +1218,9 @@ export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promis
     const report = verifyLedger(db, { heartbeatIntervalMs: resolveLedgerConfig().heartbeatIntervalMs });
     const message = summariseLedgerReport(report);
     if (report.status === 'inconsistent') {
-      return { label, status: 'fail', message, fix: 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
+      return { label, status: 'fail', message, fix: allProblemsAreLegacyProjectBackfill(report)
+        ? 'Likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in `project` on chained audit rows; no digest field other than `project` changed in those rows. Find and remove or upgrade the old copy (check every global install and npx cache on this host) before running any repair; `shieldcortex ledger verify` shows the full report'
+        : 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
     }
     if (report.status === 'unchained') return { label, status: 'warn', message };
     return { label, status: 'pass', message };
@@ -1426,7 +1454,7 @@ export function runSchemaDriftCheck(dbPath: string): CheckResult {
           label: 'Schema',
           status: 'warn',
           message: `missing columns: ${missing.join(', ')}`,
-          fix: 'Restart the MCP server to auto-migrate, or run: shieldcortex install',
+          fix: 'Restart the MCP server to auto-migrate, or run: shieldcortex setup claude',
         };
       }
     } finally {
@@ -1446,8 +1474,22 @@ async function checkSchema(): Promise<CheckResult> {
 /**
  * Pure helper for the memory-count check. Exported so tests can drive it
  * against a temp database instead of the homedir install.
+ *
+ * #650: the `STM — consolidation needed` row fires only when STM is OVER the
+ * configured cap, because that is the only condition `shieldcortex consolidate`
+ * clears: consolidate() promotes, expires and then cap-evicts down to the cap
+ * and no further, and the store's own auto-enforcement triggers on the same
+ * `> cap` test. The old row warned from 90% of a hardcoded 100, so a busy
+ * install sitting at its cap (the designed steady state) was told to run a
+ * command that could never make the row go away.
+ *
+ * `config` is injectable so tests pin the cap instead of reading the host's
+ * memory settings.
  */
-export function runMemoryStatsCheck(dbPath: string): CheckResult {
+export function runMemoryStatsCheck(
+  dbPath: string,
+  config: Pick<MemoryConfig, 'maxShortTermMemories' | 'maxLongTermMemories'> = resolveMemoryConfig(),
+): CheckResult {
   const prerequisite = databasePrerequisite('Memories', dbPath);
   if (prerequisite) return prerequisite;
 
@@ -1459,19 +1501,33 @@ export function runMemoryStatsCheck(dbPath: string): CheckResult {
       const stm = (db.prepare("SELECT COUNT(*) as count FROM memories WHERE type = 'short_term'").get() as { count: number }).count;
       const ltm = (db.prepare("SELECT COUNT(*) as count FROM memories WHERE type = 'long_term'").get() as { count: number }).count;
 
-      const STM_LIMIT = 100;
-      const LTM_LIMIT = 1000;
+      const STM_LIMIT = config.maxShortTermMemories;
+      const LTM_LIMIT = config.maxLongTermMemories;
 
       let status: CheckStatus = 'pass';
-      let warnings: string[] = [];
+      const warnings: string[] = [];
+      const fixes: string[] = [];
 
-      if (stm >= STM_LIMIT * 0.9) {
+      if (stm > STM_LIMIT) {
         status = 'warn';
         warnings.push(`${stm}/${STM_LIMIT} STM — consolidation needed`);
+        fixes.push(
+          'STM is over its cap. Run `shieldcortex consolidate` to promote, expire and evict short-term memory ' +
+          'down to the cap (the brain worker does the same on its own schedule). The same pass also evicts ' +
+          'long-term memory that is over its own cap and resolves identical long-term pairs; it reports each ' +
+          'count separately. Rows captured within the last hour and pinned rows are never evicted, so a breach ' +
+          'made of fresh captures clears on a later run.',
+        );
       }
       if (ltm >= LTM_LIMIT * 0.9) {
         status = 'warn';
         warnings.push(`${ltm}/${LTM_LIMIT} LTM — approaching limit`);
+        fixes.push(
+          'Housekeeping. LTM is near its cap. Run `shieldcortex consolidate` if you want it now; otherwise the ' +
+          'worker does it. Note that consolidation evicts long-term rows only once LTM is OVER the cap (never ' +
+          'rows captured within the last hour or pinned rows), so this row can stay while LTM sits between ' +
+          '90% and 100%. No action needed unless recall feels stale.',
+        );
       }
 
       const message = warnings.length > 0
@@ -1482,9 +1538,7 @@ export function runMemoryStatsCheck(dbPath: string): CheckResult {
         label: 'Memories',
         status,
         message,
-        ...(status === 'warn'
-          ? { fix: 'Housekeeping. STM is near its cap. Run `shieldcortex consolidate` if you want it now; otherwise the worker does it. No action needed unless recall feels stale.' }
-          : {}),
+        ...(fixes.length > 0 ? { fix: fixes.join(' ') } : {}),
       };
     } finally {
       db.close();
@@ -1622,7 +1676,7 @@ export function runWritePathProbe(dbPath: string, env: Environment = detectEnvir
   const isOpenClawOnly = env.hasOpenClaw && !env.hasClaude;
   const failFix = isOpenClawOnly
     ? 'Run `shieldcortex repair` — it opens the database through the full init/migration path (and rebuilds the DB engine if that is the fault). This box has no MCP server to restart.'
-    : 'This is the smoking gun for a stale schema or migration drift. Run `shieldcortex repair` (opens the DB through the full init/migration path), restart the MCP server (auto-migrates on next open), or re-install: shieldcortex install';
+    : 'This is the smoking gun for a stale schema or migration drift. Run `shieldcortex repair` (opens the DB through the full init/migration path), restart the MCP server (auto-migrates on next open), or re-install: shieldcortex setup claude';
 
   try {
     const Database = require('better-sqlite3');
@@ -1716,14 +1770,14 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
   if (probe.kind === 'absent') {
     // No settings.json is not a fault. Either Claude Code isn't on this box at
     // all (OpenClaw-only / headless installs never grow one), or it is and the
-    // user hasn't run `shieldcortex install` yet — the exact state of every
+    // user hasn't run `shieldcortex setup` yet — the exact state of every
     // fresh install. A ⚠️ here told healthy boxes something was wrong (#129).
     return env.hasClaude
       ? {
           label: 'Hooks',
           status: 'info',
           message: 'not configured yet — no ~/.claude/settings.json',
-          fix: 'Run `shieldcortex install` to configure hooks',
+          fix: 'Run `shieldcortex setup claude` to configure hooks',
         }
       : {
           label: 'Hooks',
@@ -1736,7 +1790,7 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
     const hooks = settings.hooks || {};
 
-    // Single source of truth: whatever `shieldcortex install` actually installs.
+    // Single source of truth: whatever `shieldcortex setup claude` actually installs.
     // Previously hardcoded a different list which produced false "missing" warnings
     // after SessionEnd was removed from defaults (was crashing OpenClaw agents). [#23]
     const hookNames = [...REQUIRED_HOOK_NAMES];
@@ -1783,7 +1837,7 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
         message:
           `${installed}/${hookNames.length} installed but ${unresolvable.length} DO NOT RESOLVE ` +
           `(${unresolvable.join(', ')}) — these hooks never run, so the guard is not enforcing here`,
-        fix: 'Run `shieldcortex install` to rewrite them to an absolute path (#146)',
+        fix: 'Run `shieldcortex setup claude` to rewrite them to an absolute path (#146)',
       };
     }
 
@@ -1794,7 +1848,7 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
         label: 'Hooks',
         status: 'warn',
         message: `${installed}/${hookNames.length} installed — missing: ${missing.join(', ')}`,
-        fix: 'Run `shieldcortex install` to configure hooks',
+        fix: 'Run `shieldcortex setup claude` to configure hooks',
       };
     }
   } catch (err: unknown) {
@@ -2089,7 +2143,7 @@ function readDbFreeSpace(dbPath: string): DbFreeSpace | null {
   }
 }
 
-export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = DIRECTORY_BUDGET_BYTES): Promise<CheckResult> {
+export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = DIRECTORY_BUDGET_BYTES, options: { dbPath?: string } = {}): Promise<CheckResult> {
   const dirProbe = probePath(scDir);
   if (dirProbe.kind === 'denied' || dirProbe.kind === 'error') {
     // "Directory not yet created" is a ✅. An unreadable one is not — this is
@@ -2210,7 +2264,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     const backupsStr = backupsSize > 0 ? ` + ${formatBytes(backupsSize)} backups` : '';
 
     // One database open, for one number: how much of the file is free space.
-    const free = readDbFreeSpace(path.join(scDir, 'memories.db'));
+    const free = readDbFreeSpace(options.dbPath ?? path.join(scDir, 'memories.db'));
 
     // Name WHICH logs, and how much of the DB file is free pages, so the
     // headline points somewhere. The leading `DB … · backups … · logs …` shape
@@ -2239,7 +2293,6 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
      * file to reclaim a rounding error, so recommending it wastes the
      * operator's time and teaches them to ignore us.
      */
-    const VACUUM_FREE_SHARE = 0.2;
 
     /**
      * Report, and advise only where a MEASUREMENT supports it (#573 round 3).
@@ -2277,10 +2330,90 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
           + 'recovery reading it, so bounding it safely is separate work, tracked in #579. Nothing '
           + 'here will delete security evidence for you.';
       }
-      return `No single measured consumer: DB ${formatBytes(liveDbSize)}${dbFreeNote}, backups `
-        + `${formatBytes(backupsSize)}, repair logs ${formatBytes(repairLogSize)}, audit `
-        + `${formatBytes(auditLogSize)}, everything else ${formatBytes(otherSize)}. Those sizes are `
-        + 'the whole measurement — inspect before removing anything.';
+      reportOnly = true;
+      return largestConsumerReport();
+    };
+    // Set when remedy() fell through to the report: its only command is the
+    // `logs prune` dry run, an inspection step, so the human report must keep
+    // the attribution and scope prose next to it.
+    let reportOnly = false;
+
+    /**
+     * #649: no command applies, but the row still has to say WHERE the bytes
+     * are. Until now this branch said "No single measured consumer" even for a
+     * database holding 54% of the budget, because only a ≥50% repair-log or
+     * audit share got its own text. It now names the biggest budgeted term (or
+     * every term tied for biggest) whether or not it is a majority, and says
+     * for that term only what the measurement supports.
+     *
+     * Ranked over the BUDGETED terms only: backups (#153) and the model cache
+     * are exempt from the limit, so a large rollback copy is never "the"
+     * consumer of a budget it does not spend.
+     *
+     * Free pages are reusable space INSIDE the database file — SQLite writes new
+     * rows into them — not free space on the filesystem. Nothing here probes
+     * the filesystem, so nothing here claims the disk is full, or that saves
+     * will fail because the freelist is small.
+     */
+    const largestConsumerReport = (): string => {
+      const terms: Array<{ key: 'db' | 'audit' | 'repair' | 'other'; label: string; bytes: number }> = [
+        { key: 'db', label: 'the database', bytes: liveDbSize },
+        { key: 'audit', label: 'audit evidence', bytes: auditLogSize },
+        { key: 'repair', label: 'repair logs', bytes: repairLogSize },
+        { key: 'other', label: 'everything else', bytes: otherSize },
+      ];
+      const budgeted = terms.reduce((sum, t) => sum + t.bytes, 0);
+      const ranked = terms.filter((t) => t.bytes > 0).sort((a, b) => b.bytes - a.bytes);
+      const exempt = backupsSize > 0 ? ` Backups (${formatBytes(backupsSize)}) are exempt from the limit.` : '';
+      const scope = ` The ${limitMb} MB limit is ShieldCortex's own footprint budget, not a measurement of `
+        + 'free space on the filesystem — inspect before removing anything.';
+      if (ranked.length === 0 || budgeted === 0) {
+        return `Nothing measured counts against the limit.${exempt}${scope}`;
+      }
+
+      const top = ranked.filter((t) => t.bytes === ranked[0].bytes);
+      const pctOf = (bytes: number): number => Math.round((bytes / budgeted) * 100);
+      const head = top.length === 1
+        ? `Largest measured consumer: ${top[0].label}, ${formatBytes(top[0].bytes)} of the `
+          + `${formatBytes(budgeted)} counted against the limit (${pctOf(top[0].bytes)}%).`
+        : `Largest measured consumers, tied: ${top.map((t) => t.label).join(' and ')}, `
+          + `${formatBytes(top[0].bytes)} each of the ${formatBytes(budgeted)} counted against the limit `
+          + `(${pctOf(top[0].bytes)}% each).`;
+      const rest = ranked.filter((t) => !top.includes(t));
+      const restText = rest.length > 0
+        ? ` Then ${rest.map((t) => `${t.label} ${formatBytes(t.bytes)}`).join(', ')}.`
+        : '';
+
+      const notes: string[] = [];
+      for (const t of top) {
+        if (t.key === 'db') {
+          if (free === null || free.pageCount <= 0) {
+            notes.push('The database\'s free pages could not be read, so nothing about what fills it '
+              + 'was measured and no command is named for it.');
+          } else {
+            notes.push(`Only ${formatBytes(free.freeBytes)} of the database `
+              + `(${Math.round((free.freePages / free.pageCount) * 100)}% of its pages) is free pages — `
+              + 'space SQLite reuses for new writes inside the file, not free disk space — below the '
+              + `${Math.round(VACUUM_FREE_SHARE * 100)}% where compacting is worth a full rewrite. `
+              + 'Doctor does not measure which rows fill the database, so it names no command to shrink it.');
+          }
+        } else if (t.key === 'audit') {
+          notes.push('Audit evidence has no automatic retention yet (#579), and nothing here deletes it.');
+        } else if (t.key === 'repair') {
+          notes.push('`shieldcortex logs prune` (without --execute) lists which project-key repair logs '
+            + 'retention would remove; it never touches audit evidence.');
+        } else {
+          notes.push('Everything else is files doctor does not classify (state, quarantine and the '
+            + 'like), so no command is named for it.');
+        }
+      }
+      // A large audit plane that is not the top term is still worth one line:
+      // it is the term an operator is most likely to try to clear by hand.
+      if (!top.some((t) => t.key === 'audit') && auditLogSize > 0 && pctOf(auditLogSize) >= 25) {
+        notes.push(`Audit evidence (${pctOf(auditLogSize)}%) has no automatic retention yet (#579), `
+          + 'and nothing here deletes it.');
+      }
+      return `${head}${restText}${exempt} ${notes.join(' ')}${scope}`;
     };
 
     if (pct >= 95) {
@@ -2289,6 +2422,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
         status: 'fail',
         message: `${dataStr}${backupsStr}${modelsStr} — at limit! (${breakdown})`,
         fix: remedy(),
+        ...(reportOnly ? { fixNoteWithCommands: true as const } : {}),
       };
     } else if (pct >= 80) {
       return {
@@ -2296,6 +2430,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
         status: 'warn',
         message: `${dataStr}${backupsStr}${modelsStr} — approaching limit (${breakdown})`,
         fix: remedy(),
+        ...(reportOnly ? { fixNoteWithCommands: true as const } : {}),
       };
     } else {
       return { label: 'Disk', status: 'pass', message: `${dataStr}${backupsStr}${modelsStr}` };
@@ -4930,12 +5065,18 @@ async function readinessRowsForSurface(
     return [{ label, status: 'info', message: `enforce when ready: not in use on this host — ${notInUseText(summary.adapter)}` }];
   }
   const { intervention, reachability, effectiveness } = summary.report;
+  const { describeEvidenceCarry, describeNotCounted } = await import('./guard.js');
+  const notCounted = describeNotCounted(summary.report);
   const pct = (r: number | null) => (r === null ? 'n/a' : `${(r * 100).toFixed(1)}%`);
   const bars =
     `readiness proxies: operational intervention rate ${pct(intervention.rate)} (${intervention.stops}/${intervention.total}, need ≤ 2% over ≥ 500 calls / 7 days); ` +
     `approval reachability ${pct(reachability.rate)} (${reachability.reached}/${reachability.resolved}, need ≥ 98% over ≥ 20) via ` +
     `${reachability.channel.configured ? reachability.channel.kind : 'no channel'}; last round-trip ${reachability.lastRoundTripAt ?? 'never'}; ` +
-    `effectiveness evidence ${effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}`;
+    `effectiveness evidence ${effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}; ` +
+    // #719: evidence is keyed on the policy hash — say what carried over.
+    `evidence: ${intervention.fresh.total} call(s) fresh since this policy, ${intervention.carried.total} carried from compatible prior policy` +
+    describeEvidenceCarry(summary.report).map((n) => `; ${n}`).join('') +
+    (notCounted ? `; not counted: ${notCounted}` : '');
   const missing = summary.report.missing.length > 0 ? ` Missing: ${summary.report.missing.join('; ')}.` : '';
   // #509 r5: the promotion notice is the detection control for a forged
   // journal, so doctor names the newest promotion the journal records for the
@@ -5751,7 +5892,6 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
   // "cannot determine", never as a passing zero.
   let injectPack: InjectPackModule | null = null;
   try {
-    // @ts-expect-error — importing a .mjs hook util that has no .d.ts
     injectPack = await import('../../scripts/lib/inject-pack.mjs') as InjectPackModule;
   } catch {
     injectPack = null;
@@ -7646,11 +7786,149 @@ async function checkHookTimeouts(): Promise<CheckResult> {
       label: 'Hook timeouts',
       status: 'warn',
       message: `below canonical: ${drift.join(', ')}`,
-      fix: 'Re-run `shieldcortex install` to restore canonical timeouts',
+      fix: 'Re-run `shieldcortex setup claude` to restore canonical timeouts',
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { label: 'Hook timeouts', status: 'info', message: `check skipped — ${msg}` };
+  }
+}
+
+// ── Check: recall lane pin (#718 / #722) ─────────────────
+/**
+ * Prompt recall scopes itself by lane (interactive / cron / automation /
+ * subagent). Lanes are detected from markers that OpenClaw's own prompt
+ * builders write; a scheduler outside OpenClaw (systemd timer, crontab, CI)
+ * writes none, so its turns look interactive and get the owner's full recall.
+ * SHIELDCORTEX_RECALL_LANE pins the lane for such a job. An unrecognised
+ * value fails safe in the hook — the turn is treated as `automation` (#722
+ * review R4): no recall by default, PUBLIC rows only where
+ * `recallLanes.automation.recall` is true (#729) — which is worth a WARN: the
+ * operator meant some lane, and it is not the one they get.
+ */
+const RECALL_LANES = ['interactive', 'cron', 'automation', 'subagent'] as const;
+
+export function checkRecallLanePin(env: NodeJS.ProcessEnv = process.env): CheckResult {
+  const label = 'Recall lane';
+  const raw = env.SHIELDCORTEX_RECALL_LANE;
+  const pinned = String(raw ?? '').trim().toLowerCase();
+  if (pinned && (RECALL_LANES as readonly string[]).includes(pinned)) {
+    return { label, status: 'info', message: `pinned to "${pinned}" by SHIELDCORTEX_RECALL_LANE in this environment` };
+  }
+  if (pinned) {
+    return {
+      label,
+      status: 'warn',
+      message: `SHIELDCORTEX_RECALL_LANE="${String(raw).trim()}" is not a lane — prompt recall treats every turn in this environment as automation until it is fixed (no recall by default; PUBLIC rows only if recallLanes.automation.recall is true)`,
+      fix: `Set SHIELDCORTEX_RECALL_LANE to one of: ${RECALL_LANES.join(', ')}`,
+    };
+  }
+  return {
+    label,
+    status: 'info',
+    message: 'detected from OpenClaw prompt markers. Jobs launched by another scheduler (systemd, crontab, CI) '
+      + 'carry no marker and recall as interactive — set SHIELDCORTEX_RECALL_LANE=cron (or automation) in that job\'s environment.',
+  };
+}
+
+// ── Check: repeated recall top-k (#717) ─────────────────
+/**
+ * WARN when the newest interactive prompt-recall runs all returned the same
+ * non-empty top-k candidate set — #717's envelope-dominated query signature.
+ * The evaluation lives in recall-repetition.ts; this only words the verdict.
+ *
+ * Every message is fixed text plus counts: no prompt, title, path, id or hash.
+ * Nothing here is a PASS unless a full sample was read, and the WARN names no
+ * command — repetition is evidence to look at, not a fault with a known fix.
+ */
+export const RECALL_REPETITION_LABEL = 'Recall repetition';
+
+const SLOT_PROBLEM_TEXT: Record<SlotProblem, string> = {
+  corrupt: 'not valid JSON',
+  unreadable: 'unreadable',
+  oversized: 'oversized',
+  unsafe: 'not a regular file',
+  malformed: 'malformed',
+  budget: 'over the read budget',
+  missing: 'missing with older entries behind it',
+};
+
+export function recallRepetitionResult(v: RecallRepetitionVerdict): CheckResult {
+  const label = RECALL_REPETITION_LABEL;
+  switch (v.kind) {
+    case 'absent':
+      return { label, status: 'info', message: 'no recall log yet — repeated top-k sets not checked' };
+    case 'unavailable':
+      return {
+        label,
+        status: 'info',
+        message: v.reason === 'unsafe'
+          ? 'recall log is not a plain directory — not read, repeated top-k sets not checked'
+          : 'recall log could not be read — repeated top-k sets not checked',
+      };
+    case 'incomplete': {
+      const parts = (Object.keys(v.problems) as SlotProblem[]).map((p) => SLOT_PROBLEM_TEXT[p]);
+      return {
+        label,
+        status: 'info',
+        message: `recall log sample incomplete — an entry was ${parts.join(', ')} after ${v.interactiveRuns} `
+          + 'interactive run(s) — repeated top-k sets not checked',
+      };
+    }
+    case 'insufficient': {
+      const skipped = v.otherLaneRuns + v.unknownLaneRuns;
+      return {
+        label,
+        status: 'info',
+        message: `${v.interactiveRuns} of ${REPEAT_SAMPLE_RUNS} interactive recall runs logged`
+          + (skipped > 0 ? ` (${skipped} cron/automation/subagent or unlabelled runs skipped)` : '')
+          + ' — not enough to check for repeated top-k sets',
+      };
+    }
+    case 'below-floor':
+      return {
+        label,
+        status: 'info',
+        message: `last ${v.runs} interactive recall runs share a ${v.setSize}-candidate top-k set, `
+          + `below the ${REPEAT_MIN_SET_SIZE}-candidate floor for this check`,
+      };
+    case 'same-prompt':
+      return {
+        label,
+        status: 'info',
+        message: `last ${v.runs} interactive recall runs share a ${v.setSize}-candidate top-k set, `
+          + 'but every one has the same prompt hash — the same prompt repeated, which explains it',
+      };
+    case 'varied':
+      return {
+        label,
+        status: 'pass',
+        message: `last ${v.runs} interactive recall runs did not all return the same non-empty top-k set`,
+      };
+    case 'repeated': {
+      const identity = v.distinctPromptHashes === null
+        ? 'prompt identity not recorded for every run'
+        : `${v.distinctPromptHashes} distinct prompt hashes`;
+      return {
+        label,
+        status: 'warn',
+        message: `last ${v.runs} interactive recall runs returned the same ${v.setSize}-candidate top-k set (${identity}). `
+          + 'This is repetition evidence, not a proven root cause: a recall query dominated by a message wrapper '
+          + 'or envelope can do this, and so can asking about the same topic repeatedly or an unmarked '
+          + 'scheduled job recalling as interactive. Compare recent recalls with what was asked before changing anything.',
+      };
+    }
+  }
+}
+
+export async function checkRecallRepetition(
+  deps: RecallRepetitionDeps = { homeDir: os.homedir() },
+): Promise<CheckResult> {
+  try {
+    return recallRepetitionResult(evaluateRecallRepetition(deps));
+  } catch {
+    // Fixed text: an error message could quote a path under the home dir.
+    return { label: RECALL_REPETITION_LABEL, status: 'info', message: 'recall log could not be read — repeated top-k sets not checked' };
   }
 }
 
@@ -8092,9 +8370,12 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'warn',
+        // Plain words (15 Oct 2026): this is a check that could not run, and
+        // the old wording ("roster", "SQLite index unreadable") read as a fault.
         message:
-          'cannot read OpenClaw\'s plugin roster (SQLite index unreadable — broken better-sqlite3 binding, locked DB, or pre-2026.6.1 OpenClaw) — cannot confirm the realtime plugin is loaded; NOT necessarily unprotected',
-        fix: 'Cannot read OpenClaw\'s plugin roster file. Not unprotected if the plugin is already loaded. Do not run repair from this warning.',
+          'couldn\'t read OpenClaw\'s plugin list, so couldn\'t check the realtime plugin is running. ' +
+          'This is a check that couldn\'t run, not a fault (the list file may be locked, or OpenClaw is older than 2026.6.1)',
+        fix: 'Couldn\'t read OpenClaw\'s plugin list file. If the plugin is already loaded you are protected. Do not run repair from this warning.',
       };
     case 'load-unproven':
       // #142: the boot roster snapshot races plugin registration, and a
@@ -8106,10 +8387,14 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         status: 'warn',
         message:
           verdict.loadedInLiveRoster == null
-            ? 'load state UNPROVEN — no fresh gateway roster could be read. A missing install-index entry does not prove a live unload'
-            : 'load state UNPROVEN — absent from the boot roster snapshot, but a plugin registration was sighted after it ' +
-              '(registration races the snapshot; CLI activity writes identical lines). Neither protected nor unprotected is proven',
-        fix: `Prove it live: ${LIVE_CANARY_COMMAND}`,
+            ? 'couldn\'t confirm the gateway loaded the plugin — there was no recent gateway start-up record to read. ' +
+              'This is a check that couldn\'t run, not a fault'
+            : 'couldn\'t confirm the gateway loaded the plugin — it was missing from the start-up list but registered just after ' +
+              '(that timing can happen normally). Neither OK nor a fault is confirmed',
+        // A plain command in the default report; the consent-gated live
+        // probe (an env var plus internal wording) only with --verbose.
+        fix: 'Check it: `shieldcortex openclaw status`',
+        verboseNote: `Prove enforcement live: ${LIVE_CANARY_COMMAND}`,
       };
     case 'enabled-not-loaded':
       return {
@@ -8176,7 +8461,10 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
           status: 'pass',
           message:
             `realtime plugin installed and enabled at v${version} — but the RUNNING gateway's boot roster ` +
-            `could not be read, so load is NOT separately proven. Prove it live with: ${LIVE_CANARY_COMMAND}`,
+            'could not be read, so load is NOT separately proven',
+          // Not in the message: a pass becomes a default-report warn when
+          // conversation access is withheld, and that row must stay plain.
+          verboseNote: `Prove it live with: ${LIVE_CANARY_COMMAND}`,
         };
       }
       // Roster-confirmed loaded, but doctor does NOT run the live enforcement
@@ -8200,8 +8488,9 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         label,
         status: 'pass',
         message: hotReload
-          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`
-          : `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
+          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, v${version}); enforcement not probed here`
+          : `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here`,
+        verboseNote: `Prove it live with: ${LIVE_CANARY_COMMAND}`,
       };
     }
     default: {
@@ -8824,6 +9113,112 @@ export async function runDoctorAiSection(
   return { lines: formatAiSection(outcome), outcome };
 }
 
+export const IRON_DOME_PROFILE_LABEL = 'Iron Dome profile';
+
+/** Report unsafe stock settings in the effective local/cloud Iron Dome policy. */
+export function ironDomeProfileVerdict(config: IronDomeConfig): CheckResult {
+  if (config.enabled === false) {
+    return {
+      label: IRON_DOME_PROFILE_LABEL,
+      status: 'info',
+      message: 'Iron Dome not active — profile not checked',
+    };
+  }
+
+  const defaultPhrase = config.killPhrase?.trim().toLowerCase() ===
+    DEFAULT_IRON_DOME_CONFIG.killPhrase.trim().toLowerCase();
+  const noPiiRules = !config.piiRules?.neverOutput?.length && !config.piiRules?.aggregatesOnly?.length;
+  const noSubAgentBlocks = !config.subAgentRestrictions?.blockedOperations?.length;
+  const gaps = [
+    ...(defaultPhrase ? ['default kill phrase'] : []),
+    ...(noPiiRules ? ['no PII rules'] : []),
+    ...(noSubAgentBlocks ? ['no sub-agent blocks'] : []),
+  ];
+
+  if (defaultPhrase || noPiiRules) {
+    const fixes: string[] = [];
+    if (noPiiRules) {
+      fixes.push('For PII rules, review the Iron Dome activate command with the school, enterprise, personal or paranoid profile before using it. Activating a profile replaces the whole Iron Dome config, including trusted channels, the kill phrase and all rule lists. Set the kill phrase afterwards.');
+    }
+    // Activating a profile replaces the phrase, so the phrase step follows either gap.
+    fixes.push('Set a unique kill phrase (3–80 chars) in the dashboard Iron Dome view (http://localhost:3030).');
+    return {
+      label: IRON_DOME_PROFILE_LABEL,
+      status: 'warn',
+      message: `stock defaults: ${gaps.join(', ')}`,
+      fix: fixes.join(' '),
+    };
+  }
+
+  return {
+    label: IRON_DOME_PROFILE_LABEL,
+    status: 'pass',
+    message: `${config.profile ?? 'custom'} profile${noSubAgentBlocks ? ' (no sub-agent blocks)' : ''}`,
+  };
+}
+
+/**
+ * Read the persisted Iron Dome config straight from the store, read-only.
+ * Iron Dome keeps its config in the `iron_dome_config` table, and its own
+ * loader goes through the database singleton — which the shipped doctor path
+ * never initialises (#471), so that loader would silently return the disabled
+ * default and this check would never fire. Returns null when nothing is stored.
+ */
+export function readStoredIronDomeConfig(dbPath: string): IronDomeConfig | null {
+  if (!fs.existsSync(dbPath)) return null;
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try {
+    const hasTable = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'iron_dome_config'"
+    ).get();
+    if (!hasTable) return null;
+    const row = db.prepare('SELECT value FROM iron_dome_config WHERE key = ?').get('config') as { value: string } | undefined;
+    if (!row) return null;
+    const parsed = JSON.parse(row.value) as Partial<IronDomeConfig>;
+    return {
+      ...DEFAULT_IRON_DOME_CONFIG,
+      ...parsed,
+      piiRules: { ...DEFAULT_IRON_DOME_CONFIG.piiRules, ...(parsed.piiRules ?? {}) },
+      subAgentRestrictions: { ...DEFAULT_IRON_DOME_CONFIG.subAgentRestrictions, ...(parsed.subAgentRestrictions ?? {}) },
+    };
+  } finally {
+    db.close();
+  }
+}
+
+export async function checkIronDomeProfile(dbPath: string = getDbPath()): Promise<CheckResult> {
+  try {
+    const { isDatabaseInitialized } = await import('../database/init.js');
+    if (isDatabaseInitialized()) {
+      // In-process caller (MCP/API server): the effective config includes custom and cloud policy.
+      const ironDome = await import('../defence/iron-dome/index.js');
+      // Peek, not get: the loader writes normalised config back to the store.
+      const effective = ironDome.peekEffectiveIronDomeConfig();
+      if (!effective) return {
+        label: IRON_DOME_PROFILE_LABEL,
+        status: 'info',
+        message: 'could not read Iron Dome profile — stored config unreadable',
+      };
+      return ironDomeProfileVerdict(effective);
+    }
+    const stored = readStoredIronDomeConfig(dbPath);
+    if (!stored) {
+      return { label: IRON_DOME_PROFILE_LABEL, status: 'info', message: 'Iron Dome not configured — profile not checked' };
+    }
+    return ironDomeProfileVerdict(stored);
+  } catch {
+    // Fixed text only, and no logging: parse errors quote the stored config,
+    // which can hold the kill phrase and PII rules.
+    return {
+      label: IRON_DOME_PROFILE_LABEL,
+      status: 'info',
+      message: 'could not read Iron Dome profile — stored config unreadable',
+    };
+  }
+}
+
 /**
  * Exit-code policy.
  *
@@ -8881,6 +9276,8 @@ export async function runDoctor(
     checkSemanticCoverage, // #458: how much of the store semantic recall can actually see
     checkHooks,
     checkHookTimeouts,
+    async () => checkRecallLanePin(),
+    async () => checkRecallRepetition(), // #717: same top-k on every recent interactive recall
     checkAutoMemoryHooks,
     checkAutoMemorySampling,
     checkMemoryPlaneEmptyBrain,
@@ -8915,6 +9312,7 @@ export async function runDoctor(
     checkActionGuard,
     checkRuntimePosture,
     checkActionGuardReadiness,
+    checkIronDomeProfile,
     checkCronDenials,
     checkThreatGraph,
     checkAttestationCoverage,
@@ -9047,11 +9445,14 @@ export async function runDoctor(
   const verbose = args.includes('--verbose') || args.includes('--debug');
   const hostTable = scanHostTable();
   const unwired = presentUnwired(hostTable);
+  // #788: check messages and fixes carry host-derived text (install dirs,
+  // error messages). The human report and the NEXT line read a display copy
+  // with each line passed through the display sanitiser; `--json` below keeps
+  // the raw `visible` rows (machine-readable output stays unsanitised).
+  const displayRows = sanitiseDoctorRowsForDisplay(visible);
   let nextCommand: string | null = null;
   if (failures > 0) {
-    const failFix = visible.find((r) => r.status === 'fail' && r.fix)?.fix?.trim() ?? '';
-    nextCommand = failFix.split('\n').map((l) => l.trim()).find((l) => /^(shieldcortex|openclaw|npm|node)\b/.test(l))
-      ?? 'shieldcortex doctor --verbose';
+    nextCommand = nextCommandForFailures(displayRows);
   } else if (unwired.length > 0) {
     nextCommand = 'shieldcortex setup';
   }
@@ -9064,19 +9465,22 @@ export async function runDoctor(
   // where the report is red, which is the failure mode doctor exists to avoid.
   // Returns before the human report so the output is parseable on its own.
   if (args.includes('--json')) {
-    console.log(JSON.stringify({
+    console.log(stringifyJsonTerminalSafe({
       version: String(pkg.version ?? ''),
       passed, warnings, failures, infos, total,
       exitCode: doctorExitCode(visible, { strict: args.includes('--strict') }),
-      results: visible.map((r) => ({ label: r.label, status: r.status, message: r.message, fix: r.fix })),
-    }, null, 2));
+      results: visible.map((r) => ({
+        label: r.label, status: r.status, message: r.message, fix: r.fix,
+        ...(r.verboseNote ? { verboseNote: r.verboseNote } : {}),
+      })),
+    }, 2));
     const jsonExit = doctorExitCode(visible, { strict: args.includes('--strict') });
     if (jsonExit !== 0) process.exitCode = jsonExit;
     return { passed, warnings, failures, infos, total, exitCode: jsonExit };
   }
 
   const style: DoctorReportStyle = { bold, reset, green, yellow, red, cyan, dim };
-  const reportLines = formatDoctorReport(visible, {
+  const reportLines = formatDoctorReport(displayRows, {
     verbose,
     version: String(pkg.version ?? ''),
     target: (() => {
