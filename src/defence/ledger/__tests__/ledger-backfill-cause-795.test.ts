@@ -1,4 +1,4 @@
-/** #795: identify the old startup project backfill without changing ledger status. */
+/** #795/#834: identify the old startup project backfill and gate the doctor warning on #674. */
 import { afterEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
 import { mkdtempSync, readFileSync, rmSync } from 'fs';
@@ -50,6 +50,20 @@ function edit(dbPath: string, sql: string): void {
     // the older copy before #674's trigger existed.
     db.exec('DROP TRIGGER trg_defence_audit_chained_project_immutable');
     db.exec(sql);
+  } finally {
+    db.close();
+  }
+}
+
+function reopenWithCurrentBuild(dbPath: string): void {
+  initDatabase(dbPath);
+  closeDatabase();
+}
+
+function hasProtectingTrigger(dbPath: string): boolean {
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try {
+    return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='trg_defence_audit_chained_project_immutable'").get();
   } finally {
     db.close();
   }
@@ -119,15 +133,40 @@ describe('legacy project backfill diagnosis (#795)', () => {
     expect(cli.code).toBe(1);
     expect(cli.report.problems.every((p) => p.cause === 'legacy-project-backfill')).toBe(true);
     const doctor = await checkChainedLedger({ dbPath });
+    expect(hasProtectingTrigger(dbPath)).toBe(false);
     expect(doctor.status).toBe('fail');
     expect(doctor.message).toMatch(/likely cause: an older ShieldCortex copy/);
+    expect(doctor.fix).toMatch(/3 problem\(s\) are explained by a legacy project backfill/i);
     expect(doctor.fix).toMatch(/likely cause: an older ShieldCortex copy/i);
     expect(doctor.fix).toMatch(/older ShieldCortex copy \(5\.2\.1 or earlier\).*global install and npx cache/i);
     expect(doctor.fix).toContain('no digest field other than `project` changed in those rows');
+    expect(doctor.fix).toMatch(/protecting trigger is missing.*cause can recur/i);
+    expect(doctor.fix).toMatch(/current ShieldCortex \(5\.10\.2 or later\) recreates it/i);
     expect(doctor.fix).not.toBe(oldFix);
     for (const text of [summariseLedgerReport(report), formatLedgerReport(report), doctor.fix ?? '', ...report.problems.map((p) => p.detail)]) {
       expect(text).not.toMatch(/nothing else/i);
     }
+    expect(readFileSync(dbPath).equals(before)).toBe(true);
+  });
+
+  it('warns for an explained backfill after a current build restores the trigger without changing the database', async () => {
+    const dbPath = chainedDb();
+    edit(dbPath, "UPDATE defence_audit SET project = 'legacy' WHERE seq IS NOT NULL");
+    reopenWithCurrentBuild(dbPath);
+    expect(hasProtectingTrigger(dbPath)).toBe(true);
+    const before = readFileSync(dbPath);
+    const report = reportFor(dbPath);
+    expect(report.status).toBe('inconsistent');
+    expect(report.problems).toHaveLength(3);
+    expect(allProblemsAreLegacyProjectBackfill(report)).toBe(true);
+    const doctor = await checkChainedLedger({ dbPath });
+    expect(doctor.status).toBe('warn');
+    expect(doctor.message).toBe(summariseLedgerReport(report));
+    expect(`${doctor.message} ${doctor.fix}`).toMatch(/3 problem\(s\)/i);
+    expect(doctor.fix).toMatch(/explained by a legacy project backfill.*older ShieldCortex copy \(5\.2\.1 or earlier\)/i);
+    expect(doctor.fix).toMatch(/cannot recur.*trigger now refuses those changes/i);
+    expect(doctor.fix).toMatch(/find and remove or upgrade the old copy/i);
+    expect(`${doctor.message} ${doctor.fix}`).not.toMatch(/repair command|ledger repair|before running any repair/i);
     expect(readFileSync(dbPath).equals(before)).toBe(true);
   });
 
@@ -140,6 +179,8 @@ describe('legacy project backfill diagnosis (#795)', () => {
     expect(report.problems.find((p) => p.seq === 2)).toMatchObject({ kind: 'digest-mismatch' });
     expect(report.problems.find((p) => p.seq === 2)?.cause).toBeUndefined();
     expect(allProblemsAreLegacyProjectBackfill(report)).toBe(false);
+    reopenWithCurrentBuild(dbPath);
+    expect(hasProtectingTrigger(dbPath)).toBe(true);
     await expectMixedOutputMatchesOrdinary(dbPath);
   });
 
@@ -149,6 +190,8 @@ describe('legacy project backfill diagnosis (#795)', () => {
     const report = reportFor(dbPath);
     expect(report.firstBad).toMatchObject({ seq: 1, cause: 'legacy-project-backfill' });
     expect(report.problems.filter((p) => p.cause === 'legacy-project-backfill')).toHaveLength(2);
+    reopenWithCurrentBuild(dbPath);
+    expect(hasProtectingTrigger(dbPath)).toBe(true);
     await expectMixedOutputMatchesOrdinary(dbPath);
   });
 
@@ -161,6 +204,19 @@ describe('legacy project backfill diagnosis (#795)', () => {
     expect(report.problems[0]).toMatchObject({ kind: 'digest-mismatch', seq: 1 });
     expect(report.problems[0].cause).toBeUndefined();
     expect(allProblemsAreLegacyProjectBackfill(report)).toBe(false);
+  });
+
+  it('fails for a non-backfill edit with the protecting trigger present', async () => {
+    const dbPath = chainedDb();
+    const db = new Database(dbPath);
+    try { db.exec("UPDATE defence_audit SET reason = 'edited' WHERE seq = 1"); } finally { db.close(); }
+    const report = reportFor(dbPath);
+    expect(hasProtectingTrigger(dbPath)).toBe(true);
+    expect(report.status).toBe('inconsistent');
+    expect(allProblemsAreLegacyProjectBackfill(report)).toBe(false);
+    const doctor = await checkChainedLedger({ dbPath });
+    expect(doctor.status).toBe('fail');
+    expect(doctor.fix).toBe(oldFix);
   });
 
   it('still reports a bad row hash when the project-null digest matches', () => {

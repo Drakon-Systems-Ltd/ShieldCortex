@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Doctor warns for fully explained legacy project backfills when the protecting trigger is present (#834).** Its Chained ledger row stays a failure if any problem is unexplained or the trigger is missing; ledger verification still reports the ledger as inconsistent.
 - **The dashboard Quarantine view's bulk selection only counts items that are still pending (#831).** After the pending list refreshed or an item was reviewed on its own, the "N selected" count, the bulk approve/reject confirmation and the ids sent to the server still included items that had already left the list. They now cover only the selected items that are still pending, so a bulk reject of memory-file findings no longer says other selected memories will be discarded when none remain. Which items are approved or rejected is unchanged.
 
 ## [5.10.5] - 2026-10-18

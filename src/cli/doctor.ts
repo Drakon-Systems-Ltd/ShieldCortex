@@ -1184,6 +1184,8 @@ export async function checkAttestationCoverage(
  * Chained ledger (#617, design §5.7): one row from the SAME verifier as
  * `shieldcortex ledger verify` — consistent (pass), inconsistent (fail, with
  * the first bad seq), or unchained (warn: this database has no chain yet).
+ * An inconsistent ledger is a warning only when every problem is the legacy
+ * project backfill and the database has the trigger that prevents recurrence.
  * A pass is local only: it never claims completeness or that the whole chain
  * was not rewritten; `ledger verify` prints the full limits statement.
  */
@@ -1214,9 +1216,17 @@ export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promis
     const report = verifyLedger(db, { heartbeatIntervalMs: resolveLedgerConfig().heartbeatIntervalMs });
     const message = summariseLedgerReport(report);
     if (report.status === 'inconsistent') {
-      return { label, status: 'fail', message, fix: allProblemsAreLegacyProjectBackfill(report)
-        ? 'Likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in `project` on chained audit rows; no digest field other than `project` changed in those rows. Find and remove or upgrade the old copy (check every global install and npx cache on this host) before running any repair; `shieldcortex ledger verify` shows the full report'
-        : 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
+      if (allProblemsAreLegacyProjectBackfill(report)) {
+        let triggerPresent = false;
+        try {
+          triggerPresent = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='trg_defence_audit_chained_project_immutable'").get();
+        } catch { /* Treat an unreadable trigger catalog as missing. */ }
+        const fix = `${report.problems.length} problem(s) are explained by a legacy project backfill: likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in \`project\` on chained audit rows; no digest field other than \`project\` changed in those rows. Find and remove or upgrade the old copy (check every global install and npx cache on this host). \`shieldcortex ledger verify\` shows the full report.`;
+        return { label, status: triggerPresent ? 'warn' : 'fail', message, fix: triggerPresent
+          ? `${fix} The cause cannot recur while the protecting trigger is present: the trigger now refuses those changes.`
+          : `${fix} The protecting trigger is missing, so the cause can recur. Opening the database with a current ShieldCortex (5.10.2 or later) recreates it.` };
+      }
+      return { label, status: 'fail', message, fix: 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
     }
     if (report.status === 'unchained') return { label, status: 'warn', message };
     return { label, status: 'pass', message };
