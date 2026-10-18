@@ -45,7 +45,7 @@ function ConfirmationDialog({
           {action === 'approve'
             ? isMemoryFile
               ? 'This will mark the memory-file finding as reviewed. The source file is not modified.'
-              : 'This will approve the item and promote it into memory.'
+              : 'This will try to approve the item. Its content is re-scanned first and may still be refused.'
             : isMemoryFile
               ? 'This will dismiss the memory-file finding. The source file is not deleted or edited.'
               : 'This will permanently discard the memory.'}
@@ -233,11 +233,12 @@ export function QuarantineView() {
     if (bulkConfirm === 'approve') {
       setRefusalNotice(null);
       bulkApproveMutation.mutate(ids, {
-        // #824: report items the re-scan refused instead of dropping them silently.
+        // #824: report refused items instead of dropping them silently. Not every
+        // refusal comes from a re-scan (BLOCK rows, rate limits), so don't claim one (#828).
         onSuccess: (result) => {
           const refused = result.rejected ?? 0;
           if (refused > 0) {
-            setRefusalNotice(`${refused} of ${ids.length} selected item${ids.length !== 1 ? 's' : ''} ${refused === 1 ? 'was' : 'were'} not approved: the re-scan refused ${refused === 1 ? 'it' : 'them'}. ${refused === 1 ? 'It is' : 'They are'} now rejected.`);
+            setRefusalNotice(`${refused} of ${ids.length} selected item${ids.length !== 1 ? 's' : ''} ${refused === 1 ? 'was' : 'were'} not approved: ${refused === 1 ? 'it' : 'they'} could not be admitted. ${refused === 1 ? 'It is' : 'They are'} now rejected, not added to memory.`);
           }
         },
       });
@@ -277,8 +278,8 @@ export function QuarantineView() {
             <p className="text-xs text-[var(--sc-text-dim)] mb-4">
               {bulkConfirm === 'approve'
                 ? selectedMemoryFileCount > 0
-                  ? 'Memory-file findings will be marked reviewed without editing files. Other selected items will be promoted into memory.'
-                  : 'This will approve all selected items and promote them into memory.'
+                  ? 'Memory-file findings will be marked reviewed without editing files. Other selected items are re-scanned first and may still be refused.'
+                  : 'This will try to approve all selected items. Their content is re-scanned first and some may still be refused.'
                 : selectedMemoryFileCount > 0
                   ? 'Memory-file findings will be dismissed without editing files. Other selected memories will be discarded.'
                   : 'This will permanently discard all selected memories.'}
