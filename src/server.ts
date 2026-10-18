@@ -875,12 +875,12 @@ but you can use this tool to check for new contradictions at any time.`,
       const text = (items as any[]).map((q: any) => `[${q.id}] ${q.original_title || 'Untitled'} | source: ${q.source_type}:${q.source_identifier} | reason: ${q.reason}`).join('\n');
       return { content: [{ type: 'text', text: framedRecall(text) }] };
     } else if (args.action === 'approve' && args.quarantineId) {
-      const { approveQuarantineItem } = await import('./defence/quarantine/review.js');
+      const { approveQuarantineItem, describeApproveResult } = await import('./defence/quarantine/review.js');
       const result = approveQuarantineItem(args.quarantineId, args.notes || 'mcp');
       if (!result) {
         return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} was not pending or no longer exists.` }] };
       }
-      return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} approved${result.memoryId ? ` and promoted to memory ${result.memoryId}` : ''}.` }] };
+      return { content: [{ type: 'text', text: describeApproveResult(args.quarantineId, result) }] };
     } else if (args.action === 'reject' && args.quarantineId) {
       const { rejectQuarantineItem } = await import('./defence/quarantine/review.js');
       const result = rejectQuarantineItem(args.quarantineId, args.notes || 'mcp');
@@ -889,12 +889,12 @@ but you can use this tool to check for new contradictions at any time.`,
       }
       return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} rejected.` }] };
     } else if (args.action === 'approve_by_source' && args.sourceIdentifier) {
-      const { approveQuarantineItemsBySource } = await import('./defence/quarantine/review.js');
+      const { approveQuarantineItemsBySource, describeBulkApproveResult } = await import('./defence/quarantine/review.js');
       const result = approveQuarantineItemsBySource(args.sourceIdentifier, args.notes || 'batch-approve');
       if (result.total === 0) {
         return { content: [{ type: 'text', text: `No pending quarantine items from source "${args.sourceIdentifier}".` }] };
       }
-      return { content: [{ type: 'text', text: `Batch approved ${result.updated} of ${result.total} items from "${args.sourceIdentifier}" (${result.promoted} promoted to memory).` }] };
+      return { content: [{ type: 'text', text: describeBulkApproveResult(args.sourceIdentifier, result) }] };
     }
     return { content: [{ type: 'text', text: 'Invalid action or missing required parameters.' }] };
   }));
