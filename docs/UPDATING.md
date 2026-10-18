@@ -149,7 +149,7 @@ One host often has more than one ShieldCortex copy: a global install, a project 
 
 The database now refuses that change, whichever copy issues it. Once a current build has opened the database, any change to the `project` of a chained audit row is aborted. An update that leaves the value as it was still goes through.
 
-If an older copy changed chained rows before the trigger was installed, `shieldcortex doctor` shows a warning when every ledger problem matches that legacy `project` backfill and the protecting trigger is present. It still shows a failure for mixed or unexplained problems, or when the trigger is missing. A trigger that only shares the name, with a different definition or on another table, counts as missing. `shieldcortex ledger verify` still reports the ledger as inconsistent. Opening an existing chained database with ShieldCortex 5.10.2 or later recreates a missing trigger.
+If an older copy changed chained rows before the trigger was installed, `shieldcortex doctor` shows a warning when every ledger problem matches that legacy `project` backfill and the protecting trigger is present. It still shows a failure for mixed or unexplained problems, or when the trigger is missing. A trigger that only shares the name, with a different definition or on another table, counts as missing. `shieldcortex ledger verify` still reports the ledger as inconsistent. Opening an existing chained database with ShieldCortex 5.10.2 or later recreates the trigger when nothing holds its name. It never replaces a different trigger that already holds the name: remove that trigger first, then open the database with a current ShieldCortex to install the shipped one. `shieldcortex doctor` says which case applies.
 
 What you may see:
 

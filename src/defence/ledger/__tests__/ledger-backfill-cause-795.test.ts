@@ -13,7 +13,7 @@ import {
   summariseLedgerReport,
   verifyLedger,
 } from '../verify.js';
-import { checkChainedLedger, hasShippedProjectImmutabilityTrigger } from '../../../cli/doctor.js';
+import { checkChainedLedger, hasShippedProjectImmutabilityTrigger, projectImmutabilityTriggerState } from '../../../cli/doctor.js';
 import { runLedgerCommand } from '../../../cli/ledger.js';
 
 const dirs: string[] = [];
@@ -201,11 +201,17 @@ describe('legacy project backfill diagnosis (#795)', () => {
     const report = reportFor(dbPath);
     expect(allProblemsAreLegacyProjectBackfill(report)).toBe(true);
     const ro = new Database(dbPath, { readonly: true, fileMustExist: true });
-    try { expect(hasShippedProjectImmutabilityTrigger(ro)).toBe(false); } finally { ro.close(); }
+    try {
+      expect(hasShippedProjectImmutabilityTrigger(ro)).toBe(false);
+      expect(projectImmutabilityTriggerState(ro)).toBe('other');
+    } finally { ro.close(); }
     const doctor = await checkChainedLedger({ dbPath });
     expect(doctor.status).toBe('fail');
     expect(doctor.fix).toMatch(/protecting trigger is missing.*cause can recur/i);
     expect(doctor.fix).not.toMatch(/cannot recur/i);
+    // A current build does not recreate an occupied name, so the fix must not promise it.
+    expect(doctor.fix).not.toMatch(/recreates it/i);
+    expect(doctor.fix).toMatch(/a different trigger holds its name.*never replaces.*Remove that trigger.*install the shipped one/i);
     expect(readFileSync(dbPath).equals(before)).toBe(true);
   });
 
@@ -213,6 +219,9 @@ describe('legacy project backfill diagnosis (#795)', () => {
     const fresh = chainedDb();
     const migrated = chainedDb();
     edit(migrated, 'SELECT 1');
+    // edit() drops the trigger, so the reopen below is what installs it again.
+    const dropped = new Database(migrated, { readonly: true, fileMustExist: true });
+    try { expect(projectImmutabilityTriggerState(dropped)).toBe('absent'); } finally { dropped.close(); }
     reopenWithCurrentBuild(migrated);
     for (const dbPath of [fresh, migrated]) {
       const db = new Database(dbPath, { readonly: true, fileMustExist: true });
@@ -225,6 +234,8 @@ describe('legacy project backfill diagnosis (#795)', () => {
     expect(hasShippedProjectImmutabilityTrigger(throwing)).toBe(false);
     const throwingAll = { prepare: () => ({ all: () => { throw new Error('SQLITE_BUSY'); } }) };
     expect(hasShippedProjectImmutabilityTrigger(throwingAll)).toBe(false);
+    expect(projectImmutabilityTriggerState(throwing)).toBe('unreadable');
+    expect(projectImmutabilityTriggerState(throwingAll)).toBe('unreadable');
   });
 
   it('keeps the original doctor fix when a non-project column also changed', async () => {
