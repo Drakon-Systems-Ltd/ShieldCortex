@@ -121,10 +121,14 @@ jobs:
       # dependency-free node:test files that read source and docs text only.
       # `npm test` (Jest) does not collect `.node-test.mjs`, so a contract that a
       # code move broke stayed red on main behind a green build. Linux only:
-      # text matching is platform-independent. The step fails if the glob
-      # matches nothing, so a rename cannot turn it into a silent no-op.
+      # text matching is platform-independent. check-docs-contracts.mjs fails
+      # the step unless the *.node-test.mjs files equal
+      # scripts/docs-contract/manifest.txt and nothing else in that directory
+      # is misnamed, so a renamed or unlisted contract cannot silently drop out
+      # of the glob (#847).
       - name: Docs contracts (node:test)
         run: |
+          node scripts/check-docs-contracts.mjs
           set -- scripts/docs-contract/*.node-test.mjs
           if [ ! -e "$1" ]; then
             echo "::error::no scripts/docs-contract/*.node-test.mjs files found"
