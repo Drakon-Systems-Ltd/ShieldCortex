@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
-import { assertSafeRuntimeForDbPath, closeDatabase, expandPath, holdsStartupLock, initDatabase, resolveMemoriesDbPath, StartupLockHeldError } from '../database/init.js';
+import { assertSafeRuntimeForDbPath, closeDatabase, expandPath, holdsStartupLock, initDatabase, isDatabaseInitialized, resolveMemoriesDbPath, StartupLockHeldError } from '../database/init.js';
 import { readRawConfig } from '../cloud/config.js';
 import { resolveMemoryConfig } from '../memory/config.js';
 import type { MemoryConfig, ConsolidationResult } from '../memory/types.js';
@@ -87,8 +87,17 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
   };
   let db: Database.Database | undefined;
   let dbOwnedByInit = false;
+  let dbBorrowed = false;
   let locked = !dryRun && liveLock(dbPath);
   deps.afterLockCheck?.();
+  /** Ownership lost mid-run (#813): this and every later write step is skipped as locked. */
+  const lostLock = (from: 'consolidate' | 'embed' | 'vacuum'): void => {
+    locked = true;
+    const order = ['consolidate', 'embed', 'vacuum'] as const;
+    for (const name of order.slice(order.indexOf(from))) {
+      steps[name] = name === 'embed' ? step('skipped', 'locked', { missing: 0, embedded: 0 }) : step('skipped', 'locked');
+    }
+  };
   try {
     if (locked) {
       steps.consolidate = step('skipped', 'locked');
@@ -97,8 +106,12 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
     } else if (dryRun) {
       if (fs.existsSync(dbPath)) db = new Database(dbPath, { readonly: true, fileMustExist: true });
     } else {
+      // initDatabase() hands back the module's existing handle, without
+      // consulting refuseIfLocked, when another caller in this process opened
+      // it first. That handle is BORROWED: use it, never close it (#763).
+      dbBorrowed = isDatabaseInitialized();
       db = injectedPath ? initDatabase(dbPath, { refuseIfLocked: true }) : initDatabase(undefined, { refuseIfLocked: true });
-      dbOwnedByInit = true;
+      dbOwnedByInit = !dbBorrowed;
       locked = !holdsStartupLock();
       if (locked) {
         steps.consolidate = step('skipped', 'locked');
@@ -125,8 +138,11 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
         else if (dryRun) steps.consolidate = step('skipped', 'dry-run: STM over cap', { stm: count, promoted: 0, deleted: 0 });
         else {
           const { consolidate } = await import('../memory/consolidate.js');
-          const result: ConsolidationResult = deps.consolidate ? deps.consolidate() : consolidate(config);
-          steps.consolidate = step('ran', 'STM over cap', { stm: count, promoted: result.consolidated, deleted: result.deleted });
+          if (!holdsStartupLock()) lostLock('consolidate');
+          else {
+            const result: ConsolidationResult = deps.consolidate ? deps.consolidate() : consolidate(config);
+            steps.consolidate = step('ran', 'STM over cap', { stm: count, promoted: result.consolidated, deleted: result.deleted });
+          }
         }
       }
     } catch (err) { failStep('consolidate', err); }
@@ -140,6 +156,8 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
         if (!cacheReady) {
           const missing = (db.prepare('SELECT COUNT(*) AS n FROM memories WHERE embedding IS NULL').get() as { n: number }).n;
           steps.embed = step('skipped', 'embedding model not cached', { missing, embedded: 0 });
+        } else if (!dryRun && !holdsStartupLock()) {
+          lostLock('embed');
         } else {
           const result: EmbedBackfillResult = await backfillEmbeddings({ db, execute: !dryRun, embed: deps.embed });
           steps.embed = step(dryRun ? 'skipped' : result.embedded > 0 ? 'ran' : result.failed > 0 ? 'failed' : 'noop',
@@ -165,6 +183,7 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
         const share = pages ? free / pages : 0;
         if (share < VACUUM_FREE_SHARE) steps.vacuum = step('skipped', 'free-page share below gate', { pages, freePages: free });
         else if (dryRun) steps.vacuum = step('skipped', 'dry-run: free-page share meets gate', { pages, freePages: free });
+        else if (!holdsStartupLock()) lostLock('vacuum');
         else {
           try {
             if (deps.vacuum) deps.vacuum(db);
@@ -178,7 +197,8 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
       }
     } catch (err) { failStep('vacuum', err); }
   } finally {
-    if (dbOwnedByInit) {
+    if (dbBorrowed) { /* another caller's handle — leave it open */ }
+    else if (dbOwnedByInit) {
       closeDatabase();
     } else if (db && db.open) db.close();
   }

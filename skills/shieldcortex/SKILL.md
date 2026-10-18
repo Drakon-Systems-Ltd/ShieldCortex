@@ -4,7 +4,7 @@ description: "Memory and defence for AI agents: semantic recall, knowledge graph
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 5.10.2
+  version: 5.10.5
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]

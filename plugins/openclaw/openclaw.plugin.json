@@ -1,11 +1,11 @@
 {
   "id": "shieldcortex-realtime",
-  "version": "5.10.2",
+  "version": "5.10.5",
   "name": "ShieldCortex Real-time Scanner",
   "description": "Real-time defence scanning on LLM input, memory extraction on LLM output, and active tool call interception with approval gating.",
   "kind": null,
   "engines": {
-    "openclaw": ">=2026.3.22",
+    "openclaw": ">=2026.4.23",
     "recommended": ">=2026.4.23",
     "conversationGate": ">=2026.5.12",
     "conversationGateNote": "The before_agent_run gate (conversation firewall enforcement) first appears in OpenClaw 2026.5.9-beta.1 and first ships stable in 2026.5.12; 2026.5.7 has no such hook. Below that floor the hook registration is silently dropped by the host, so the plugin reports the conversation plane as observation-only rather than claiming enforcement. Everything else in this plugin still works at the `openclaw` floor above."
