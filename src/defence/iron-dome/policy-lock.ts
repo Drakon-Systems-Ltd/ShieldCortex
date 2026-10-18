@@ -207,11 +207,18 @@ export interface PolicyLockOptions {
  * `shieldcortex protect` is obeyed by the already-running agent rather than at
  * the next restart. A stale security policy is a worse trade than four syscalls.
  */
-let lastReportedSignature: string | null = null;
+let lastWarnedSignature: string | null = null;
+/**
+ * Kept apart from the warning slot: a read that does not audit (`audit: false`,
+ * e.g. the read-only update screen) must not use up the audit row a later
+ * auditing read for the same state still owes.
+ */
+let lastAuditedSignature: string | null = null;
 
 /** Test hook: forget the once-per-process report suppression. */
 export function clearPolicyLockReportState(): void {
-  lastReportedSignature = null;
+  lastWarnedSignature = null;
+  lastAuditedSignature = null;
 }
 
 /** Where the lock file would live, whether or not it exists. */
@@ -286,9 +293,8 @@ function readPolicyLockInner(seam: ProtectedFsSeam): PolicyLockState {
 
 function reportUnverifiable(state: Extract<PolicyLockState, { status: 'unverifiable' }>, options: PolicyLockOptions): void {
   const signature = `${state.path}|${state.reason}`;
-  if (lastReportedSignature === signature) return;
-  lastReportedSignature = signature;
-  if (options.warn !== false) {
+  if (options.warn !== false && lastWarnedSignature !== signature) {
+    lastWarnedSignature = signature;
     // console.error, not process.stderr.write: it is the stderr channel every
     // other warning in src/ uses (including the integrity-check warning this
     // sits beside), so a host that redirects one redirects both.
@@ -298,7 +304,8 @@ function reportUnverifiable(state: Extract<PolicyLockState, { status: 'unverifia
       `defence mode strict). ${PROTECT_HINT} to write a valid lock, or remove the file to run unlocked.`,
     );
   }
-  if (options.audit) {
+  if (options.audit && lastAuditedSignature !== signature) {
+    lastAuditedSignature = signature;
     emitProtectedAudit({
       outcome: 'policy_unverifiable',
       path: state.path,

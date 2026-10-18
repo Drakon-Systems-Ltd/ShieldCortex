@@ -9,6 +9,7 @@
  * Free + Enterprise repricing.
  */
 
+import { XRAY_HELP } from '../cli/dispatch-help.js';
 import fs from 'fs';
 import { mkdirSecure } from '../setup/state-permissions.js';
 import path from 'path';
@@ -111,22 +112,7 @@ export async function handleXRayCommand(args: string[]): Promise<void> {
 
   // Show usage if no target
   if (positional.length === 0) {
-    console.error('Usage: shieldcortex xray <target> [--deep] [--json] [--markdown] [--watch]');
-    console.error('');
-    console.error('  target:     npm package name, local file path, or directory path');
-    console.error('  --deep      Deep scan with full analysis');
-    console.error('  --json      Output JSON result');
-    console.error('  --markdown  Output markdown report');
-    console.error('  --sarif     Output SARIF 2.1.0 (GitHub Code Scanning)');
-    console.error('  --ci        CI/CD mode: exit code 1 if risk >= threshold');
-    console.error('  --threshold=LEVEL  Risk threshold for --ci (CRITICAL|HIGH|MEDIUM|LOW, default: HIGH)');
-    console.error('  --watch     Watch directory for changes and scan incrementally');
-    console.error('');
-    console.error('Examples:');
-    console.error('  shieldcortex xray ./src/');
-    console.error('  shieldcortex xray package.json');
-    console.error('  shieldcortex xray lodash --deep');
-    console.error('  shieldcortex xray ./src --watch');
+    console.error(XRAY_HELP);
     process.exit(1);
   }
 

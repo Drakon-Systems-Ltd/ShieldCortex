@@ -77,6 +77,7 @@ import { createRequire } from 'module';
 import { execSync } from 'child_process';
 import { SCAN_EXIT, formatScanToolFailure } from './cli/scan-exit.js';
 import { argvWantsHelp } from './cli/wants-help.js';
+import { ENV_HELP, SCAN_SKILL_HELP, dispatchHelp } from './cli/dispatch-help.js';
 import { stringifyJsonTerminalSafe } from './cli/term-ui.js';
 
 // Heavy modules (MCP server, visualization API + express/cors/ws, embedding
@@ -596,6 +597,14 @@ async function isLocalDashboardRunning(): Promise<boolean> {
  * Main entry point
  */
 async function main() {
+  // #767: a help request is answered before ANYTHING else — before the hook
+  // branch below, the strict preflight, the npm staleness preamble, the stats
+  // banner and every lazy handler import. `dispatchHelp` is pure: it reads the
+  // command's row in the shared registry and prints the usage from
+  // src/cli/dispatch-help.ts. Commands it does not know (update, doctor,
+  // maintain, mcp, …) gate inside their own handler and fall through here.
+  if (dispatchHelp(process.argv.slice(2))) return;
+
   // Dispatch the "hook" subcommand FIRST — before checkVersionStaleness() and
   // the stats banner. Hooks fire on every UserPromptSubmit, so this path
   // must be as cheap as possible: no `npm ls -g` staleness probe (hooks were
@@ -665,8 +674,13 @@ async function main() {
     }
   }
 
-  // Handle --help / -h / help / unknown args
-  if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
+  // Handle --help / -h / help / unknown args. A help flag behind a global
+  // option (`--mode api --help`, `--dashboard -h`) is the same request: without
+  // this it reached the server modes below and started a server (#767).
+  if (
+    process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help' ||
+    (process.argv[2]?.startsWith('-') && argvWantsHelp(process.argv.slice(2)))
+  ) {
     const bold = '\x1b[1m';
     const cyan = '\x1b[36m';
     const reset = '\x1b[0m';
@@ -1251,15 +1265,7 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'scan-skill') {
     const filePath = process.argv[3];
     if (!filePath) {
-      console.error('Usage: shieldcortex scan-skill <path> [--accept | --clear | --forget]');
-      console.error('  Scans an agent instruction file for threats.');
-      console.error('  Supports: SKILL.md, HOOK.md, handler.js, .cursorrules,');
-      console.error('  .windsurfrules, .clinerules, CLAUDE.md, copilot-instructions.md,');
-      console.error('  .aider.conf.yml, .continue/config.json');
-      console.error('');
-      console.error('  --accept / --clear   Mark this file (by content hash) as reviewed &');
-      console.error('                       acceptable — suppresses re-flagging until it changes.');
-      console.error('  --forget             Remove a previously recorded acceptance.');
+      console.error(SCAN_SKILL_HELP);
       process.exit(1);
     }
     const { scanSkill, contentHash, recordVerdict, removeVerdict, getVerdict } =
@@ -1358,9 +1364,7 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'env') {
     const sub = process.argv[3];
     if (sub !== 'scan') {
-      console.error('Usage: shieldcortex env scan <url> [--json | --markdown]');
-      console.error('  Fetches the URL, scores provenance, detects hidden instructions,');
-      console.error('  runs injection patterns against visible + hidden content, and returns a taint label.');
+      console.error(ENV_HELP);
       process.exit(1);
     }
     const urlArg = process.argv[4];

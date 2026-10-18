@@ -9,9 +9,11 @@
  *
  * The old help said "(default: off)" for both, which is false for a fresh
  * global install. Source contract only: the help strings are read out of
- * src/cloud/cli.ts and the claims are pinned to scripts/postinstall.mjs and
- * src/cloud/config.ts. Nothing here runs postinstall, setup or a config
- * writer, and nothing reads or writes the real home directory.
+ * src/cli/dispatch-help.ts (the one `CONFIG_HELP` that both `config --help`
+ * and the handler print, since #767) and the claims are pinned to
+ * scripts/postinstall.mjs and src/cloud/config.ts. Nothing here runs
+ * postinstall, setup or a config writer, and nothing reads or writes the real
+ * home directory.
  */
 
 import fs from 'fs';
@@ -24,17 +26,14 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
 const read = (...rel: string[]): string => fs.readFileSync(path.join(REPO_ROOT, ...rel), 'utf8');
 
-/** The `config` usage text, rebuilt from its console.log string literals. */
+/** The `config` usage text: the lines of the `CONFIG_HELP` template literal up to its verification section. */
 function configHelpLines(): string[] {
-  const src = read('src', 'cloud', 'cli.ts');
-  const start = src.indexOf("console.log('Usage: shieldcortex config [options]')");
+  const src = read('src', 'cli', 'dispatch-help.ts');
+  const start = src.indexOf('export const CONFIG_HELP = `Usage: shieldcortex config [options]');
   expect(start).toBeGreaterThan(-1);
-  const end = src.indexOf("console.log('LLM Verification:')", start);
+  const end = src.indexOf('LLM Verification:', start);
   expect(end).toBeGreaterThan(start);
-  const lines: string[] = [];
-  const re = /console\.log\('((?:[^'\\]|\\.)*)'\)/g;
-  for (const m of src.slice(start, end).matchAll(re)) lines.push(m[1].replace(/\\'/g, "'"));
-  return lines;
+  return src.slice(src.indexOf('`', start) + 1, end).split('\n');
 }
 
 /** Body of a top-level `function name()` / `if (...) {` block, by brace matching. */
