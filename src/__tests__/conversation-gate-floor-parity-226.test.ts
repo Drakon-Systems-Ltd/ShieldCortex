@@ -72,6 +72,6 @@ describe('#226 the conversation-gate floor does not drift across the build bound
     // Raising engines.openclaw to the gate floor would block installation for
     // every operator on an older host, including for the Action Guard, which is
     // not a conversation hook and works far below it.
-    expect(manifest.engines.openclaw).toBe('>=2026.3.22');
+    expect(manifest.engines.openclaw).toBe('>=2026.4.23');
   });
 });

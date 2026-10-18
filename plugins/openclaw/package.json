@@ -30,7 +30,7 @@
   },
   "peerDependencies": {
     "shieldcortex": "^5.0.0",
-    "openclaw": ">=2026.3.22"
+    "openclaw": ">=2026.4.23"
   },
   "peerDependenciesMeta": {
     "openclaw": {

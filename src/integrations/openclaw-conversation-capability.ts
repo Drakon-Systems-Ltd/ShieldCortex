@@ -4,18 +4,18 @@
  * `before_agent_run` is the only conversation hook that can block a run, and it
  * did not exist until OpenClaw **2026.5.12**. Verified by sweeping the
  * published dists: 0 occurrences in 2026.4.23, 2026.5.5, 2026.5.6 and 2026.5.7;
- * 54 in 2026.5.12. Our plugin manifest declares `openclaw >= 2026.3.22`.
+ * 54 in 2026.5.12. Our plugin manifest declares `openclaw >= 2026.4.23`.
  *
  * The trap this module closes: OpenClaw does NOT reject an unknown typed hook.
  * It emits `unknown typed hook "…" ignored` as a warn diagnostic and returns.
- * So on every host in the 2026.3.22–2026.5.7 range, registering the hook would
+ * So on every host in the 2026.4.23–2026.5.7 range, registering the hook would
  * appear to succeed and enforce nothing — a silent no-op, which is the same
  * false-green family as #200, #222 and phase 1 of this issue.
  *
  * DELIBERATELY NOT a hard engine-floor bump. Raising `engines.openclaw` to
  * 2026.5.12 would block installation for every operator on an older host —
  * including from the Action Guard (`before_tool_call`), which is not a
- * conversation hook, works fine on 2026.3.22, and is the plugin's primary
+ * conversation hook, works fine at the 2026.4.23 floor, and is the plugin's primary
  * defence. Punishing users of a working feature to gate one they may never
  * enable is the wrong trade. The floor stays; the CAPABILITY is detected and
  * reported per host.
