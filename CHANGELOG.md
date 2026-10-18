@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **The `update` screen reads the Guard setting without changing any file (#773 follow-up).** Drawing the closing screen no longer signs, re-signs or rewrites the config, creates an integrity key, or writes an audit event. When the Guard setting cannot be read or confirmed without writing (for example a config that has no signature yet, or a `config.json` entry that exists but cannot be read, including a dangling symlink, or an empty file whose in-process cache still holds a different setting), the Guard row says "couldn't confirm the Guard setting" and points at `shieldcortex doctor` as a thing to check, instead of showing "off (the default)".
 - **The dashboard Quarantine view's bulk selection only counts items that are still pending (#831).** After the pending list refreshed or an item was reviewed on its own, the "N selected" count, the bulk approve/reject confirmation and the ids sent to the server still included items that had already left the list. They now cover only the selected items that are still pending, so a bulk reject of memory-file findings no longer says other selected memories will be discarded when none remain. Which items are approved or rejected is unchanged.
 
 ## [5.10.5] - 2026-10-18
