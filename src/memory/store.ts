@@ -549,6 +549,13 @@ export class MemoryBlockedError extends Error {
 }
 
 /**
+ * #830 — the write rate limit refuses before the admission scan runs. Internal
+ * marker so callers that explain a refusal (quarantine approval) don't claim a
+ * scan. Same name and message as any other MemoryBlockedError.
+ */
+export class MemoryRateLimitedError extends MemoryBlockedError {}
+
+/**
  * #402 Class-B assembly abort inside a transactional admission session (#395).
  *
  * The sweep's own quarantine moves live inside the caller's transaction, so an
@@ -758,7 +765,7 @@ export function addMemory(
       // row would, so a flood from an attested source can accrue.
       source_attested: attestedFlag(options?.sourceAttested),
     });
-    throw new MemoryBlockedError(`Rate limited: exceeded ${RATE_LIMIT_MAX} writes per minute`);
+    throw new MemoryRateLimitedError(`Rate limited: exceeded ${RATE_LIMIT_MAX} writes per minute`);
   }
 
   // DEFENCE PIPELINE: Scan EVERY write before storage. Source-less writes get a
