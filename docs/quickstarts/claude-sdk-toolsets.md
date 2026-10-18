@@ -108,7 +108,7 @@ For the computer toolset pass `toolset: 'computer'`; the class takes `confirm` a
 | `navigate` | scheme, private-range and allowlist check | the SDK checks no scheme; `javascript:` and `file:` are refused |
 | click on a `ref` | resolved only from the `read_page` / `find` output of the same tab and page (a full read replaces the tab's refs; navigating drops them); a button labelled pay / send / delete / accept / submit is **irreversible**; a link click (the catalogue has no href) is held once tainted | the only way to know what a click does |
 | click on a coordinate, any desktop click | **unclassified**: allowed untainted, held once tainted | Anthropic: `confirm` "receives the tool and its input, not the screen" |
-| `type`, `form_input`, `key` | typed text scanned for secrets → **denied**; Enter after typing = submit | credentials must never be typed into a page |
+| `type`, `form_input`, `key` | typed text scanned for secrets → **denied** (by `enforce`); Enter after typing = submit | credentials must never be typed into a page |
 | `javascript_exec`, `file_upload` | held; an upload from `.ssh`, `.aws`, `.env`, … is denied | runs with the page's authority / exfiltrates files |
 | `get_page_text`, `read_page`, `find`, console, network | scanned with the tool-response scanner (injection, hidden HTML, credentials, markdown-image exfil); a non-string result has every string leaf scanned, and one that cannot be fully walked is never reported clean | page content is untrusted |
 | `screenshot`, `zoom` | taints the session; not scanned (no OCR in P1), so the result event carries `not-scanned:image` and never `scanClean: true` | — |
@@ -215,6 +215,10 @@ Upload 1 file(s) from this machine to checkout.example.com? The page receives a 
 
 A DENY card (the typed-secret one above) is only on the verdict `classify` returns; `inner` is never asked for a DENY.
 
+In `observe` the same call is not stopped, and `inner` is asked with the card as usual.
+The card then ends "In enforce mode this would be denied." instead of "Denied; nothing was
+typed / uploaded / opened."
+
 ### Not in this release
 
 - The #673 digest (unanswered cards collected as "skipped" entries).
@@ -226,7 +230,13 @@ A DENY card (the typed-secret one above) is only on the verdict `classify` retur
 One event per call and one per scanned result. `urlPolicy` records one `call` event per URL it checks (signal `url-policy`), in observe mode as well. Fields: toolset, member, mode, decision,
 effect kinds, signal names, taint, `requestedBy`, host (never path or query), element role
 and a bounded, escaped label with secret-shaped text redacted, input hash, outcome, host answer, scan indicators. Never the
-typed text, never a URL query string, never page content.
+typed text, never a URL query string, never page content. Signal names are fixed
+diagnostics (an unrecognised scheme is `url-scheme-unknown`, without the scheme). A host
+whose text trips ShieldCortex's credential recognisers, as written, percent-decoded, or
+as the URL parser maps it (fullwidth or soft-hyphenated text becomes ASCII and is
+lowercased), is shown as `redacted-host` on cards and audit rows, and an unknown member
+name that trips them is audited as `other`; the policy and the driver still get the real
+URL. A secret in a shape the recognisers do not know is not guaranteed to be caught.
 
 ## Known limits
 

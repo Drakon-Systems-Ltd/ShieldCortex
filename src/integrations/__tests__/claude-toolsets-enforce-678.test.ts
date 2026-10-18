@@ -766,6 +766,37 @@ describe('review regressions (#678 P2)', () => {
     expect(events.filter((e) => e.host).every((e) => e.host === 'redacted-host')).toBe(true);
   });
 
+  // The URL parser maps these hosts to ASCII (and folds case) after the
+  // original-text check: the parsed host is checked too, in both cases.
+  const wide = (s: string) => [...s].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join('');
+  it.each([
+    ['fullwidth', `https://${wide(AWS_SHAPED_KEY)}.example.com/`],
+    ['soft-hyphenated', `https://${AWS_SHAPED_KEY.slice(0, 4)}­${AWS_SHAPED_KEY.slice(4)}.example.com/`],
+  ])('redacts a credential-shaped host the parser maps to ASCII (%s)', async (_label, url) => {
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { guard, events } = makeGuard({ mode });
+      const verdict = guard.classify(ctx('navigate', { url }));
+      expect(verdict.card).toContain('redacted-host');
+      await guard.confirm()(ctx('navigate', { url }));
+      await guard.confirm()(ctx('scroll', {}, { tabURL: url }));
+      if (mode === 'observe') {
+        expect(() => guard.urlPolicy()({}, url)).not.toThrow();
+      } else {
+        expect(() => guard.urlPolicy()({}, url)).toThrow();
+      }
+      guard.interceptRequest(url);
+      const surface = JSON.stringify({ card: verdict.card, scroll: guard.classify(ctx('scroll', {}, { tabURL: url })).card, events });
+      expect(surface).not.toMatch(new RegExp(AWS_SHAPED_KEY.slice(4), 'i'));
+      expect(events.filter((e) => e.host).map((e) => e.host)).toEqual(['redacted-host', 'redacted-host', 'redacted-host', 'redacted-host']);
+    }
+  });
+
+  it('a host the parser maps to ordinary ASCII or punycode is still shown', () => {
+    const { guard } = makeGuard({ mode: 'observe' });
+    expect(guard.classify(ctx('navigate', { url: `https://${wide('www')}.example.com/` })).card).toContain('www.example.com');
+    expect(guard.classify(ctx('navigate', { url: 'https://bücher.example/' })).card).toContain('xn--bcher-kva.example');
+  });
+
   it('a refused typing attempt still leaves text pending, so the next Enter holds', async () => {
     const { guard } = makeGuard();
     await readPage(guard);
@@ -800,5 +831,32 @@ describe('review regressions (#678 P2)', () => {
       expect(guard.classify(ctx('file_upload', input)).card).toContain('Denied; nothing was uploaded.');
     }
     expect(guard.classify(ctx('file_upload', input)).card.length).toBeLessThanOrEqual(200);
+  });
+
+  it.each([
+    ['navigate', { url: 'javascript:alert(1)' }, 'nothing was opened'],
+    ['type', { text: AWS_SHAPED_KEY }, 'nothing was typed'],
+  ] as const)('%s block cards describe the actual outcome in each mode', async (member, input, enforced) => {
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { guard } = makeGuard({ mode });
+      const cards: string[] = [];
+      const toolUse = { id: `block_${member}_${mode}` };
+      const answer = await guard.confirm(async (_ctx, card) => { cards.push(card.card); return true; })(ctx(member, input, { toolUse }));
+      let ran = false;
+      const run = guard.execute({ toolUse }, member, input, async () => { ran = true; });
+      if (mode === 'observe') {
+        expect(answer).toBe(true);
+        await run;
+        expect(ran).toBe(true);
+        expect(cards[0]).toContain('In enforce mode this would be denied.');
+        expect(cards[0]).not.toMatch(/Denied|nothing was/);
+      } else {
+        expect(answer).toBe(false);
+        await expect(run).rejects.toThrow();
+        expect(ran).toBe(false);
+        expect(guard.classify(ctx(member, input)).card).toContain(`Denied; ${enforced}.`);
+      }
+      expect(JSON.stringify(cards)).not.toContain(AWS_SHAPED_KEY);
+    }
   });
 });

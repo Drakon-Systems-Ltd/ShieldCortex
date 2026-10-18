@@ -489,7 +489,10 @@ function displayHost(url: string | undefined): string | undefined {
   // The parser percent-decodes the host (`%41KIA…` → `akia…`): check the decoded original-case text too.
   let decoded = rawHost;
   try { decoded = decodeURIComponent(rawHost); } catch { /* keep raw */ }
-  for (const candidate of new Set([rawHost, decoded])) {
+  // The parsed host too, in both cases: IDNA mapping turns fullwidth or
+  // soft-hyphenated text into ASCII that neither original matches, then folds
+  // it to lowercase, which case-sensitive patterns (AKIA…) would miss.
+  for (const candidate of new Set([rawHost, decoded, host, host.toUpperCase()])) {
     if (redactCredentials(candidate) !== candidate || looksSecretish(candidate)) return 'redacted-host';
   }
   return host.slice(0, 253);
