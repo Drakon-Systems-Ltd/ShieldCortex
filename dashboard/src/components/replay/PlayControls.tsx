@@ -107,7 +107,7 @@ export function PlayControls({ playback, totalOverride }: PlayControlsProps) {
           ) : (
             <Play className="h-4 w-4" aria-hidden />
           )}
-          <span className="ml-1.5 text-[10px] uppercase tracking-wider">
+          <span className="ml-1.5 text-xs">
             {playing ? 'Pause' : 'Play'}
           </span>
         </ControlButton>
@@ -120,7 +120,7 @@ export function PlayControls({ playback, totalOverride }: PlayControlsProps) {
       </div>
 
       {/* Progress label */}
-      <div className="text-[11px] font-mono text-[var(--sc-text-muted)] tabular-nums">
+      <div className="text-xs font-mono text-[var(--sc-text-muted)] tabular-nums">
         <span className="text-[var(--sc-text)]">{Math.min(currentIndex + 1, total)}</span>
         <span className="text-[var(--sc-text-dim)]"> / </span>
         <span>{total}</span>
@@ -128,7 +128,7 @@ export function PlayControls({ playback, totalOverride }: PlayControlsProps) {
 
       {/* Speed segmented control */}
       <div className="flex items-center gap-1">
-        <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--sc-text-muted)]">
+        <span className="text-xs font-mono text-[var(--sc-text-muted)]">
           speed
         </span>
         <div className="flex overflow-hidden rounded border border-[var(--sc-border)] theme-glass:border-[var(--sc-border)]">
@@ -138,7 +138,7 @@ export function PlayControls({ playback, totalOverride }: PlayControlsProps) {
               type="button"
               onClick={() => setSpeed(s as ReplaySpeed)}
               className={cn(
-                'px-2 py-0.5 text-[10px] font-mono tabular-nums transition-colors',
+                'px-2 py-0.5 text-xs font-mono tabular-nums transition-colors',
                 s === speed
                   ? 'bg-[var(--sc-ok)]/15 text-[var(--sc-ok)] theme-glass:bg-[var(--sc-ok)]/15 theme-glass:text-[var(--sc-ok)]'
                   : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)] theme-glass:text-[var(--sc-text-dim)]',

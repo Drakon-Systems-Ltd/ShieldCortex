@@ -8,10 +8,10 @@ Every local feature is free — no trial, no licence key. Full cloud sync and sh
 
 ```bash
 npm install -g shieldcortex
-shieldcortex install
+shieldcortex setup
 ```
 
-This sets up the local server and hooks for common MCP-driven coding agents.
+`setup` shows the hosts it detects (Claude Code, OpenClaw, Hermes, Codex, Cursor / VS Code) and asks before wiring each one. To skip the table and install for one host without asking, name it: `shieldcortex setup codex`, `shieldcortex setup copilot` (VS Code / Cursor) or `shieldcortex setup claude`. The older `shieldcortex install` is the Claude Code install (the same as `setup claude`), not the wizard.
 
 ## Verify
 

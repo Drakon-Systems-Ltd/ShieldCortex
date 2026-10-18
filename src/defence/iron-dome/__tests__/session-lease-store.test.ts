@@ -1,4 +1,6 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
@@ -8,6 +10,7 @@ import {
   releaseLease,
   evaluateToolCallLease,
   isHolderPidAlive,
+  resolveHolderPid,
 } from '../session-lease-store.js';
 
 /**
@@ -67,6 +70,42 @@ describe('readDecisionsLedger — absent vs unreadable are different answers', (
 });
 
 describe('acquire / refresh / release / crash recovery', () => {
+  it('uses a valid holder PID and falls back for invalid values', () => {
+    const validPid = process.ppid > 1 && process.ppid !== process.pid ? process.ppid : process.pid + 1;
+    expect(resolveHolderPid(validPid)).toBe(validPid);
+    for (const holderPid of [1, 0, -5, 1.5, NaN, undefined]) {
+      expect(resolveHolderPid(holderPid)).toBe(process.pid);
+      const r = acquireOrRefreshLease({ dir, scope: 'install', self: 'session-a', nowMs: NOW, holderPid });
+      expect(r.record?.pid).toBe(process.pid);
+    }
+  });
+
+  it('keeps a foreign live holder until that process exits, then reaps it before TTL', async () => {
+    const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], {
+      stdio: ['pipe', 'ignore', 'ignore'],
+    });
+    await once(child, 'spawn');
+    const exit = once(child, 'exit');
+    try {
+      expect(child.pid).toBeDefined();
+      expect(child.pid).not.toBe(process.pid);
+      const first = acquireOrRefreshLease({ dir, scope: 'install', self: 'session-a', nowMs: NOW, holderPid: child.pid });
+      expect(first.acquired).toBe(true);
+      expect(first.record?.pid).toBe(child.pid);
+
+      const held = acquireOrRefreshLease({ dir, scope: 'install', self: 'session-b', nowMs: NOW + 1000 });
+      expect(held.acquired).toBe(false);
+      expect(held.record?.holder).toBe('session-a');
+    } finally {
+      child.stdin.end();
+      await exit;
+    }
+
+    const reaped = acquireOrRefreshLease({ dir, scope: 'install', self: 'session-b', nowMs: NOW + 2000 });
+    expect(reaped.acquired).toBe(true);
+    expect(reaped.record?.holder).toBe('session-b');
+  });
+
   it('acquires a free lease and verifies ownership by re-read', () => {
     const r = acquireOrRefreshLease({ dir, scope: 'install', self: 'session-a', nowMs: NOW });
     expect(r.acquired).toBe(true);

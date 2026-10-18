@@ -132,7 +132,7 @@ describe('doctor — fresh-install states are informational, not failures', () =
     it('treats a missing settings.json on a Claude host as info with a next step', () => {
       const result = runHooksCheck(path.join(tmpDir, 'settings.json'), claudeEnv);
       expect(result.status).toBe('info');
-      expect(result.fix).toMatch(/shieldcortex install/);
+      expect(result.fix).toMatch(/shieldcortex setup claude/);
     });
 
     it('treats a host without Claude Code as info, with nothing to fix', () => {

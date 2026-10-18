@@ -16,7 +16,7 @@ import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import { detectRelationConflicts, resolveConflict } from '../threat-graph/conflict.js';
 import { projectToCompletion, rebuildThreatGraph } from '../threat-graph/projector.js';
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 function entity(name: string): number {

@@ -22,7 +22,13 @@
  */
 
 /** The tiers a non-owner, non-operator caller may be allowed to read. */
-export const SHARED_SENSITIVITY_LEVELS: ReadonlySet<string> = new Set(['PUBLIC', 'INTERNAL', 'CONFIDENTIAL']);
+//
+// PERSONAL (#718) is a shared tier for these checks: it is readable by the
+// owner exactly as the PUBLIC/INTERNAL rows it used to be stored as were.
+// What keeps it out of automated lanes is the prompt-recall lane policy
+// (scripts/lib/recall-lane.mjs), not isolation — isolating it here would
+// redact a personal note from the owner's own interactive recall.
+export const SHARED_SENSITIVITY_LEVELS: ReadonlySet<string> = new Set(['PUBLIC', 'INTERNAL', 'PERSONAL', 'CONFIDENTIAL']);
 
 /**
  * The code points `String.prototype.trim` strips (ECMAScript WhiteSpace plus

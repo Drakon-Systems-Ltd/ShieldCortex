@@ -285,7 +285,10 @@ export interface InterceptorConfig {
 export interface ToolCallContext {
   toolName: string;
   arguments: Record<string, unknown>;
-  requireApproval?: (message: string) => Promise<boolean>;
+  /** `detail.card` is set only by the action-guard prompt builder below
+   *  (#648 r2 B1): the host lays out the plain-English card from that object,
+   *  never from line text in `message`, which carries payload. */
+  requireApproval?: (message: string, detail?: ApprovalPromptDetail) => Promise<boolean>;
   /** Optional one-shot completion through the gateway's OWN model pool (#143).
    *  ShieldCortex supplies no credentials of its own; when a gateway build does
    *  not offer this, the broker has no judge and holds for the operator —
@@ -298,6 +301,8 @@ export interface ToolCallContext {
   /** The gateway session this call belongs to (#233). Used to look up a
    *  conversation-level taint; absent means no escalation, never a default. */
   sessionId?: string;
+  /** #648: the OpenClaw agent making the call, for the card's WHO line. */
+  agentId?: string;
 }
 
 /**
@@ -591,21 +596,62 @@ interface ApprovalPromptInput {
   content: string;
 }
 
+/**
+ * #648 r3 R4 — the characters that never reach a card, as character-class
+ * bodies. These are THE SAME strings as `CARD_LINE_BREAK_CLASS` and
+ * `CARD_HIDDEN_CHAR_CLASS` in src/defence/iron-dome/approval-card.ts: this
+ * file is built with `rootDir: plugins/openclaw` and cannot import from src/
+ * (TS6059), so approval-card-648-r3-chars.test.ts imports both and fails if
+ * they differ by a single character. Change both together.
+ *
+ * Line breaks in any renderer: C0/C1 controls (CR, LF, VT, FF, NEL U+0085)
+ * and the Unicode line/paragraph separators.
+ */
+export const CARD_LINE_BREAK_CLASS = '\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029';
+/** Hidden and look-alike characters: soft hyphen, Arabic letter mark, Hangul
+ *  and Mongolian fillers, zero-width marks, bidi embeddings, overrides and
+ *  isolates, U+2060-206F, variation selectors, tag characters, the BOM, and
+ *  quotes that look like `"`. */
+export const CARD_HIDDEN_CHAR_CLASS = [
+  '\\u00ad', '\\u061c', '\\u115f', '\\u1160', '\\u17b4', '\\u17b5', '\\u180e', '\\u200b-\\u200f', '\\u202a-\\u202e', '\\u2060-\\u206f',
+  '\\u3164', '\\ufe00-\\ufe0f', '\\ufeff', '\\uffa0', '\\u{e0000}-\\u{e007f}', '\\u{e0100}-\\u{e01ef}',
+  '\\u201c-\\u201f', '\\u2033', '\\u301d-\\u301f', '\\uff02',
+].join('');
+const PROMPT_LINE_BREAKS = new RegExp(`[${CARD_LINE_BREAK_CLASS}]`, 'gu');
+const PROMPT_FORMAT_CHARS = new RegExp(`[${CARD_HIDDEN_CHAR_CLASS}]`, 'gu');
+
+/**
+ * #648 r2 (B1, S9): every value interpolated into an approval prompt goes
+ * through here. The prompt is split into lines and the host joins them with
+ * ` | `, so a value that could carry a line break or a `|` could forge a line
+ * of its own (`What: …`, `Allow once …`). Breaks become spaces, `|` becomes
+ * `¦`, and invisible format characters are shown as `<U+XXXX>` instead of
+ * silently reordering the card.
+ */
+export function flattenPromptField(value: unknown): string {
+  return String(value ?? '')
+    .replace(PROMPT_FORMAT_CHARS, (c) => `<U+${(c.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}>`)
+    .replace(PROMPT_LINE_BREAKS, ' ')
+    .replace(/\|/g, '¦')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function formatApprovalPrompt(input: ApprovalPromptInput): string {
   const preview = input.content.length > 200
     ? input.content.slice(0, 200) + '...'
     : input.content;
   const threatList = input.threats.length > 0
-    ? input.threats.join(', ')
+    ? input.threats.map(flattenPromptField).join(', ')
     : 'none identified';
 
   return [
     '🛡️ ShieldCortex — Tool Call Intercepted',
     '',
-    `Tool:       ${input.tool}`,
-    `Risk:       ${input.severity} (${input.firewallResult})`,
+    `Tool:       ${flattenPromptField(input.tool)}`,
+    `Risk:       ${flattenPromptField(input.severity)} (${flattenPromptField(input.firewallResult)})`,
     `Threats:    ${threatList}`,
-    `Content:    "${preview}"`,
+    `Content:    "${flattenPromptField(preview)}"`,
     '',
     '[Approve]  [Deny]',
   ].join('\n');
@@ -669,7 +715,7 @@ const FALLBACK_CATASTROPHIC_PATTERNS: RegExp[] = [
 // `isGatedNpxBunx` (shape-based, #96), not by a DANGEROUS pattern, and a blunt
 // fallback matching them would over-gate `npx tsc`; `uvx`/`dlx` (unconditional)
 // ARE covered. Mirrored in scripts/pre-tool-hook.mjs + hermes/sc_client.py.
-const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?: true }> = [
+const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?: true; dataQuotes?: true }> = [
   { re: /\brm\b|\bunlink\b|\brmdir\b|(?:(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?|\bxargs\s+(?:-{1,2}\S+\s+)*|-exec\s+)shred\b/i, signal: 'file-delete' },
   { re: /\bsudo\b|\bdoas\b|\bsu\s/i, signal: 'privilege-escalation' },
   { re: /\bgit\b[^|\n]*\bpush\b[^|\n]*(--force\b|-f\b|\+)/i, signal: 'git-force-push' },
@@ -682,6 +728,9 @@ const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?
   { re: /\bdd\b[^|;&\n]*\bof=/i, signal: 'dd-overwrite' },
   { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:etc|usr|var|home|bin|sbin|boot|lib|lib64|opt|root)(?:\/\*?)?(?:\s|$)/i, signal: 'recursive-perms-system-dir' },
   { re: /\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)/i, signal: 'truncate-to-zero' },
+  // #503: database / cloud / infrastructure teardown. Every one of these scored `allow` (benign) — the destruction tiers were filesystem-centric. Command position only, so prose and grep for these words stay quiet; an opening quote counts as a command start so `bash -c` / `ssh host '…'` wrappers are still seen. `dataQuotes`: a match inside a quoted argument of a data command (`grep "…"`, `echo '…'`, `git commit -m "…"`) is a mention, as in the real guard — see fallbackDataQuoteRanges. SQL verbs only behind a database client; DELETE gated only with no WHERE.
+  // #503 ReDoS: A verb's second gap stops at the next copy of that verb (`(?!\sdelete\b)`), so a verb-dense line with no separator is linear, not quadratic; the matches and spans are unchanged, because the greedy gap already picked the last verb before the target. That rule holds only when the verb ends on the binary's own line, so two spellings keep the plain gap: a verb reached through its own newline (the `(?<=\n)` arm), and a newline INSIDE the two-word `s3 rm` (the `(?=[^\S\n]*\n)` arm; the stopping arm takes same-line `[^\S\n]+` only). Each runs at most once per start, so the row stays linear.
+  { re: /(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:[\w.~-]*\/)*(?:(?:psql|mysql|mariadb|sqlite3|sqlcmd|duckdb|clickhouse(?:-client)?|cockroach)\b[^\n]*\b(?:drop\s+(?:database|schema|table)\b|truncate\s+(?:table\s+)?(?!-)[\w."`[\]]|delete\s+from\s+[\w."`[\]]+\s*(?:;|["']|$))|dropdb\b|mysqladmin\b[^|;&\n]*\sdrop\b|mongo(?:sh)?\b[^\n]*(?:dropDatabase|\.drop)\s*\(|redis-cli\b[^|;&\n]*\bflush(?:all|db)\b|(?:terraform|tofu|terragrunt)\b[^|;&\n]*\s(?:destroy\b|(?<=\n)apply\b[^|;&\n]*\s-destroy\b|apply\b(?:(?!\sapply\b)[^|;&\n])*\s-destroy\b)|pulumi\b[^|;&\n]*\s(?:destroy|down)\b|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s(?:ns|namespaces?|pvc?|persistentvolumes?|persistentvolumeclaims?|deploy(?:ments?)?|statefulsets?|sts|nodes?|crds?|customresourcedefinitions?|all)\b(?![-.])|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s--all\b|helm\b[^|;&\n]*\s(?:uninstall|delete)\b|aws\b[^|;&\n]*\s(?:terminate-instances|delete-[\w-]+|rb|(?<=\n)s3\s+rm\b[^|;&\n]*\s--recursive|s3(?=[^\S\n]*\n)\s+rm\b[^|;&\n]*\s--recursive|s3[^\S\n]+rm\b(?:(?!\ss3\s+rm\b)[^|;&\n])*\s--recursive)\b|gcloud\b[^|;&\n]*\sdelete\b|gsutil\b[^|;&\n]*\s(?:rb\b|(?<=\n)rm\b[^|;&\n]*\s-\w*r|rm\b(?:(?!\srm\b)[^|;&\n])*\s-\w*r)|az\b[^|;&\n]*\s(?:group|vm)\s+delete\b|doctl\b[^|;&\n]*\s(?:delete|rm)\b|gh\s+(?:repo\s+delete\b|api\b[^|;&\n]*(?:-X|--method)[\s=]*DELETE\b)|docker(?:-compose)?\b[^|;&\n]*\s(?:system\s+prune|volume\s+(?:prune|rm)|(?<=\n)down\b[^|;&\n]*\s(?:-v|--volumes)\b|down\b(?:(?!\sdown\b)[^|;&\n])*\s(?:-v|--volumes)\b)|(?:flyctl|fly)\s+(?:apps?\s+(?:destroy|delete)|destroy|volumes?\s+(?:destroy|delete)|postgres\s+(?:destroy|delete))\b|heroku\s+(?:apps:destroy|pg:reset)\b|vercel\s+(?:rm|remove)\b|wrangler\s+delete\b)/i, signal: 'destroy-data-or-infra', dataQuotes: true },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   // #505: `.ssh` behind any home root + `authorized_keys` as a path segment — mirrors the guard row.
   { re: /\/etc\/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|\/home\/[^\s\/'"]+|\/root|\/Users\/[^\s\/'"]+)\/\.ssh(?![\w.-])|(?:^|[\s'"=:\/])\.ssh\/authorized_keys2?\b|\/authorized_keys2?\b|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
@@ -881,15 +930,117 @@ function fallbackWriteTargetMatch(args: Record<string, unknown> | undefined, too
   return null;
 }
 
+// ── #503: quoted DATA, ported to the blunt fallback ─────────────────────────
+//
+// The destroy-data-or-infra row counts an opening quote as a command start, so
+// `bash -c '…'` and `ssh host '…'` wrappers are seen. The real guard then
+// drops a match that lies inside a quoted argument of a data command
+// (`classifyWithCtx`: DATA_COMMAND / TEXT_FLAG in tool-action-guard.ts). The
+// fallback had no such step, so `grep -F "<teardown>" RUNBOOK.md` gated here
+// and allowed with the guard up. This mirrors that step, narrower and
+// fail-closed:
+//  - no quote is data when the text has nested execution or eval, or pipes
+//    into anything but a read-only filter (grep, head, sort, jq, tee, …);
+//  - a quote is data only when its statement's command word is a data command,
+//    or it is the value of a long text flag on a non-executor;
+//  - a match is dropped only when it lies inside ONE data quote; an unclosed
+//    quote is never data;
+//  - no quote is data when the text pairs quotes the shell does not (review
+//    R3 on #626): a quote in a comment, an ANSI-C `$'…'`, heredoc text, or
+//    `${…}` with its own nested quotes.
+// Used only by rows tagged `dataQuotes`. Kept in sync with
+// scripts/pre-tool-hook.mjs and plugins/hermes/shieldcortex/sc_client.py.
+
+/** The guard's DATA_COMMAND (here ending at a word break: `ptpython` is not `pt`), TEXT_FLAG and EXEC_COMMAND_WORD sets. */
+const FALLBACK_DATA_COMMAND_RE = /^(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)/i;
+const FALLBACK_TEXT_FLAG_RE = /(?:^|\s)--(?:text|body|message|comment|description|title|content|caption|note|summary|prompt|subject)(?:=|\s+)$/i;
+const FALLBACK_EXEC_WORD_RE = /^(?:bash|sh|zsh|ksh|dash|ash|python[\d.]*|node|nodejs|ruby|perl|php|eval|exec|source|ssh|scp|docker|podman|kubectl|nsenter|chroot|busybox|xargs|find|flock|watch|make|awk|sed|su|runuser|systemd-run|at|batch)$/i;
+/** A pipe into anything but a read-only filter (`echo "…" | bash`, `| "sh"`, `| b\\ash`) — `||` is not a pipe. */
+const FALLBACK_UNSAFE_PIPE_RE = /(?<!\|)\|(?!\|)&?(?![ \t]*(?:grep|egrep|fgrep|zgrep|rg|ag|ack|head|tail|less|more|wc|sort|uniq|cut|tr|jq|cat|tee|column|nl|fold|fmt)(?:[ \t\n|;&)]|$))/;
+/** Syntax whose quotes the walk below would mis-pair: ANSI-C `$'…'`, a heredoc, `${…}`. */
+const FALLBACK_QUOTE_UNMODELLED_RE = /\$'|<<|\$\{/;
+/** A `#` after one of these (or at the start) opens a comment. */
+const FALLBACK_WORD_BREAK = ' \t\n\r\v\f;&|()<>';
+/** A command word further back than this from its own quote is not recognised (the quote stays executed). */
+const FALLBACK_QUOTE_PREFIX_CAP = 512;
+/** Inert matches looked past before the row fails closed. */
+const FALLBACK_INERT_MATCH_CAP = 64;
+
+/** `[open, close + 1)` of every quoted data argument, or [] when none can be trusted. */
+function fallbackDataQuoteRanges(text: string): Array<[number, number]> {
+  if (FALLBACK_NESTED_EXEC_RE.test(text) || FALLBACK_QUOTE_UNMODELLED_RE.test(text)) return [];
+  const ranges: Array<[number, number]> = [];
+  // Quote contents blanked, so the pipe check below never reads quoted text.
+  let unquoted = '';
+  let q: string | null = null;
+  let open = -1;
+  let stmtStart = 0;
+  let commentCheckedTo = 0;   // end of the last line already found free of quotes after a `#`
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    // Bash escaping: `\` escapes the next char outside quotes and inside "…".
+    if (c === '\\' && q !== "'") { unquoted += q ? '  ' : text.slice(i, i + 2); i++; continue; }
+    if (q) {
+      unquoted += ' ';
+      if (c !== q) continue;
+      const prefix = text.slice(stmtStart, open);
+      if (open - stmtStart <= FALLBACK_QUOTE_PREFIX_CAP) {
+        const bare = prefix.replace(/^\s+/, '').replace(/^(?:\w+=\S*\s+)*/, '').replace(/^(?:sudo|doas)\s+/, '');
+        const isAssignment = /(?:^|\s)(?:export\s+|local\s+|declare\s+\S+\s+)?\w+(?:\[[^\]]*\])?\+?=$/.test(prefix);
+        const word = bare.split(/\s+/)[0] ?? '';
+        if (!isAssignment && (FALLBACK_DATA_COMMAND_RE.test(bare)
+          || (FALLBACK_TEXT_FLAG_RE.test(prefix) && !FALLBACK_EXEC_WORD_RE.test(word)))) {
+          ranges.push([open, i + 1]);
+        }
+      }
+      q = null;
+      continue;
+    }
+    unquoted += c;
+    if (c === '"' || c === "'") { q = c; open = i; continue; }
+    if (c === ';' || c === '\n' || c === '|' || c === '&' || c === '(') stmtStart = i + 1;
+    else if (c === '#' && i >= commentCheckedTo && (i === 0 || FALLBACK_WORD_BREAK.includes(text[i - 1]))) {
+      // A comment runs to the end of the line, and a quote in it is no quote
+      // to the shell. Rather than model it (a `\ #` is not one), trust no
+      // quote at all when one is there. Kept walking either way.
+      const eol = text.indexOf('\n', i);
+      commentCheckedTo = eol < 0 ? text.length : eol;
+      const line = text.slice(i, commentCheckedTo);
+      if (line.includes('"') || line.includes("'")) return [];
+    }
+  }
+  return FALLBACK_UNSAFE_PIPE_RE.test(unquoted) ? [] : ranges;
+}
+
+/** True when `re` matches somewhere outside a quoted data argument. */
+function fallbackExecutedMatch(re: RegExp, text: string): boolean {
+  const g = new RegExp(re.source, re.flags.replace('g', '') + 'g');
+  let ranges: Array<[number, number]> | null = null;
+  let inert = 0;
+  for (let from = 0; from <= text.length;) {
+    g.lastIndex = from;
+    const m = text.matchAll(g).next().value;   // matchAll starts at lastIndex
+    if (!m) return false;
+    ranges ??= fallbackDataQuoteRanges(text);
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+    if (!ranges.some(([a, b]) => start >= a && end <= b)) return true;
+    if (++inert >= FALLBACK_INERT_MATCH_CAP) return true;   // fail closed
+    // Overlapping re-scan: a match starting inside this one is still checked.
+    from = start + 1;
+  }
+  return false;
+}
+
 function fallbackDangerousMatch(args: Record<string, unknown> | undefined, toolName?: string): string | null {
   const writeTarget = fallbackWriteTargetMatch(args, toolName);
   if (writeTarget) return writeTarget;
   const text = fallbackExecSurface(args);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
-  for (const { re, signal, lockPath } of FALLBACK_DANGEROUS_PATTERNS) {
+  for (const { re, signal, lockPath, dataQuotes } of FALLBACK_DANGEROUS_PATTERNS) {
     if (lockReadOnly && lockPath === true) continue;
-    if (re.test(text)) return signal;
+    if (dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
   }
   return null;
 }
@@ -997,26 +1148,155 @@ function actionGuardLead(
     return `${AGENT_SUBJECT} used ${toolName}, which ShieldCortex does not fully recognise yet. `
       + 'Allow once lets this one call through. It does not teach the tool.';
   }
-  return `${AGENT_SUBJECT} wants to use ${toolName}, and ShieldCortex rated this call ${v.severity}. `
+  return `${AGENT_SUBJECT} wants to use ${toolName}, and ShieldCortex rated this call ${flattenPromptField(v.severity)}. `
     + 'Allow once is this call only.';
 }
 
-/** Operator-facing approval prompt for a gated action (not a memory write). */
+/** #648: the card summary as `shieldcortex/defence` builds it. Structural,
+ *  like ToolGuardVerdictLike — this file takes no compile-time dependency on
+ *  the main package. */
+export interface ApprovalCardText {
+  action: string;
+  reason: string;
+  who: string;
+}
+
+/** The card's pending window (OpenClaw's own ceiling; see index.ts). */
+const CARD_EXPIRY_TEXT = 'expires in 10 min';
+const CARD_FOOTER = `Allow once is this call only · ${CARD_EXPIRY_TEXT}`;
+
+/** Trailing markers a clipped card line always keeps — the same regex as
+ *  `CARD_TAIL_MARKERS` in src/defence/iron-dome/approval-card.ts (#648 r2 S6),
+ *  pinned equal by approval-card-648-r3-chars.test.ts (#648 r3 R4). */
+export const CARD_TAIL_MARKERS = /(?:, as (?:administrator|another user) \(sudo\)| \(\+\d+ more (?:steps?|reasons?)\)| \(part of it is built as it runs\)| \(command too long to summarise fully\)| and \d+ more)+$/;
+
+/** One flattened card line, clipped in the MIDDLE so the verb, the tail (a
+ *  file name, the session) and the trailing markers survive (#648 r2 S6). */
+export function clipCardLine(text: unknown, max: number): string {
+  const one = flattenPromptField(text);
+  if (one.length <= max) return one;
+  const tail = CARD_TAIL_MARKERS.exec(one)?.[0] ?? '';
+  const body = one.slice(0, one.length - tail.length);
+  const room = Math.max(12, max - tail.length);
+  if (body.length <= room) return `${body}${tail}`;
+  const head = Math.ceil((room - 1) / 2);
+  return `${body.slice(0, head)}…${body.slice(body.length - (room - 1 - head))}${tail}`;
+}
+
+/**
+ * #648 r2 (B1): the plain-English card as structured data. It is handed to the
+ * host bridge beside the prompt text (`requireApproval(message, { card })`),
+ * and the bridge lays the card out from THIS object only — never by looking
+ * for `What:` lines in the text, which also carries payload (a memory write's
+ * `Content:`, a guard reason, a tool name). Every field is one flattened line.
+ */
+export interface PlainApprovalCard {
+  what: string;
+  why: string;
+  who: string;
+  footer: string;
+}
+
+export interface ApprovalPromptDetail {
+  card?: PlainApprovalCard;
+}
+
+/** The action line's guaranteed room: the whole generic WHAT and most plain
+ *  sentences fit unclipped. */
+const WHAT_FLOOR = 64;
+/** WHO is clipped no shorter than this to make room for WHY (#648 r5). */
+const WHO_FLOOR = 32;
+
+/** Between two reasons on the WHY line — `REASON_SEPARATOR` in
+ *  src/defence/iron-dome/approval-card.ts. */
+const REASON_SEPARATOR = '; ';
+
+/** A WHY body in `max` characters by whole reasons from the front, the rest
+ *  marked `; …` — `fitReasons` in approval-card.ts, pinned equal by test. */
+export function fitReasons(reason: unknown, max: number): string {
+  const one = flattenPromptField(reason);
+  if (one.length <= max) return one;
+  const parts = one.split(REASON_SEPARATOR);
+  const mark = `${REASON_SEPARATOR}…`;
+  let shown = '';
+  for (const p of parts) {
+    const next = shown ? `${shown}${REASON_SEPARATOR}${p}` : p;
+    if (next.length + mark.length > max) break;
+    shown = next;
+  }
+  return shown ? `${shown}${mark}` : `${one.slice(0, Math.max(1, max - 1)).trimEnd()}…`;
+}
+
+export function plainApprovalCard(card: ApprovalCardText | undefined): PlainApprovalCard | undefined {
+  if (!card || typeof card.action !== 'string' || !card.action.trim()) return undefined;
+  // The host joins these lines with ' | ' into a 256-character description.
+  // WHY, WHO and the footer are bounded first; the action gets what is left —
+  // but never less than WHAT_FLOOR (#648 r3): the generic WHAT must read
+  // whole, so a long WHO (a generated CI hostname), then WHY, gives way.
+  // #648 r5 R1: WHY carries every reason; WHO gives way first, and only then
+  // does WHY drop its last (reassuring) reasons — whole, marked `; …`.
+  const fixed = 'What: '.length + 'Why: '.length + 'Who: '.length + CARD_FOOTER.length + 3 * 3;
+  const want = Math.min(WHAT_FLOOR, flattenPromptField(card.action).length);
+  const whyFor = (whoLine: string) => fitReasons(card.reason, Math.max(40, 256 - (fixed + whoLine.length + want)));
+  const shown = (why: string) => why.split(REASON_SEPARATOR).filter((p) => p && !p.endsWith('…')).length;
+  const all = flattenPromptField(card.reason).split(REASON_SEPARATOR).length;
+  let who = clipCardLine(card.who, 75);
+  let why = whyFor(who);
+  // WHO is clipped only as far as it lets WHY show more of its reasons.
+  for (let len = who.length - 1; len >= WHO_FLOOR && shown(why) < all; len -= 1) {
+    const shorter = clipCardLine(card.who, len);
+    const more = whyFor(shorter);
+    if (shown(more) > shown(why)) {
+      who = shorter;
+      why = more;
+    }
+  }
+  const room = Math.max(40, Math.min(120, 256 - (fixed + why.length + who.length)));
+  return { what: clipCardLine(card.action, room), why, who, footer: CARD_FOOTER };
+}
+
+/**
+ * Operator-facing approval prompt for a gated action (not a memory write).
+ *
+ * #648: with a card summary, the prompt is WHAT / WHY / WHO in plain English —
+ * the action naming its target (already through the credential redactor), the
+ * reason from the one signal-phrase table, and the agent, box and session —
+ * plus what allow-once buys and when the card expires. The raw signal ids,
+ * the guard's own `reason` text and the severity word stay in the audit row;
+ * none of them is on the card. Without a summary (an older dist) the #600
+ * layout is kept, with the reason flattened to one line so it cannot forge a
+ * label line of its own.
+ */
 export function formatActionGuardPrompt(
   toolName: string,
   v: ToolGuardVerdictLike,
   args?: Record<string, unknown>,
+  card?: ApprovalCardText,
 ): string {
+  const plain = plainApprovalCard(card);
+  if (plain) {
+    return [
+      '🛡️ ShieldCortex needs a yes',
+      '',
+      `What: ${plain.what}`,
+      `Why: ${plain.why}`,
+      `Who: ${plain.who}`,
+      plain.footer,
+      '',
+      '[Allow once]  [Deny]',
+    ].join('\n');
+  }
+  const tool = flattenPromptField(toolName);
   return [
     '🛡️ ShieldCortex needs a yes',
     '',
-    actionGuardLead(toolName, v, args),
+    actionGuardLead(tool, v, args),
     '',
-    `Tool:       ${toolName}`,
-    `Action:     ${v.action}`,
-    `Risk:       ${v.severity}`,
-    `Signals:    ${v.signals.join(', ') || 'none'}`,
-    `Reason:     ${v.reason}`,
+    `Tool:       ${tool}`,
+    `Action:     ${flattenPromptField(v.action)}`,
+    `Risk:       ${flattenPromptField(v.severity)}`,
+    `Signals:    ${(Array.isArray(v.signals) ? v.signals : []).map(flattenPromptField).join(', ') || 'none'}`,
+    `Reason:     ${flattenPromptField(v.reason)}`,
     '',
     '[Allow once]  [Deny]',
   ].join('\n');
@@ -1351,6 +1631,20 @@ interface InterceptorOptions {
    *  disk. Injected from `shieldcortex/defence` at runtime so this plugin does
    *  not grow a second schema. Absent = unbound (older installed package). */
   bindAudit?: (entry: InterceptAuditEntry, args?: Record<string, unknown>) => InterceptAuditEntry;
+  /** #648 — the plain-English what/why/who for an approval card, injected
+   *  from `shieldcortex/defence` (`buildApprovalCard`) like the evaluator.
+   *  Absent on an older dist, or throwing, means the card keeps the #600
+   *  layout below; nothing about the decision changes either way. */
+  buildApprovalCard?: (input: {
+    tool: string;
+    input: unknown;
+    signals: readonly string[];
+    plane: 'openclaw';
+    agentId?: string;
+    sessionId?: string;
+    cwd?: string;
+    agentPid?: number;
+  }) => ApprovalCardText;
   /** #509 r7 — the enforce-when-ready gate (see {@link ReadinessRuntime}). */
   readiness?: ReadinessRuntime;
   /** #509 r7 — whether an OS policy lock is on disk. The lock pins
@@ -1380,6 +1674,28 @@ export function createInterceptor(
   const log = config.logger ?? { info: console.log, warn: console.warn };
   const onAuditEntry = options?.onAuditEntry;
   const bindAudit = options?.bindAudit;
+  /** #648: the card's what/why/who, or undefined (older dist, or a summariser
+   *  that threw) — then the prompt keeps its previous layout. Never throws. */
+  const approvalCardFor = (context: ToolCallContext, v: ToolGuardVerdictLike): ApprovalCardText | undefined => {
+    if (typeof options?.buildApprovalCard !== 'function') return undefined;
+    try {
+      const card = options.buildApprovalCard({
+        tool: context.toolName,
+        input: context.arguments,
+        signals: Array.isArray(v.signals) ? v.signals : [],
+        plane: 'openclaw',
+        agentId: context.agentId,
+        sessionId: context.sessionId,
+        cwd: toolCallCwd(context),
+        // No agentPid (#648 r2): the gateway runs every agent's sessions, so
+        // descending from it does not prove THIS agent started a process —
+        // the card says "a running program" rather than "it started".
+      });
+      return card && typeof card.action === 'string' ? card : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: false, enforce: true, autoApprove: [] };
   const evaluateToolCall = options?.evaluateToolCall;
   const broker = options?.broker;
@@ -2127,7 +2443,14 @@ export function createInterceptor(
     let approved: boolean;
     try {
       approved = await withApprovalDeadline(
-        context.requireApproval(formatActionGuardPrompt(context.toolName, v, context.arguments)),
+        (() => {
+          const card = approvalCardFor(context, v);
+          const plain = plainApprovalCard(card);
+          return context.requireApproval!(
+            formatActionGuardPrompt(context.toolName, v, context.arguments, card),
+            plain ? { card: plain } : undefined,
+          );
+        })(),
         brokered ? brokerApprovalTimeoutMs(v.severity) : 0,
       );
     } catch (err) {
