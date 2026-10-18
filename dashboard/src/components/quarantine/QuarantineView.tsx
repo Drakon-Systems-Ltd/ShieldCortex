@@ -280,7 +280,11 @@ export function QuarantineView() {
                 ? selectedMemoryFileCount > 0
                   ? selectedMemoryFileCount === selectedIds.size
                     ? 'Memory-file findings will be marked reviewed without editing files.'
-                    : 'Memory-file findings will be marked reviewed without editing files. The other selected items will be tried for approval; any that cannot be admitted are rejected instead.'
+                    : selectedItems.length === selectedIds.size
+                      ? 'Memory-file findings will be marked reviewed without editing files. The other selected items will be tried for approval; any that cannot be admitted are rejected instead.'
+                      // Some selected ids are no longer in the list (it refreshed after selecting),
+                      // so we can't tell whether any non-memory-file items remain (#828).
+                      : 'Memory-file findings will be marked reviewed without editing files. Any other selected items that are still pending will be tried for approval; any that cannot be admitted are rejected instead.'
                   : 'This will try to approve all selected items. Approval is not guaranteed: any that cannot be admitted are rejected instead.'
                 : selectedMemoryFileCount > 0
                   ? 'Memory-file findings will be dismissed without editing files. Other selected memories will be discarded.'

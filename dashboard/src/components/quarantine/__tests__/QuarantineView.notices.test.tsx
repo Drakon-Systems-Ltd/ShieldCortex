@@ -62,7 +62,7 @@ function setup({ single = [] as unknown[], bulk = [] as unknown[], items = [item
   (useBulkRejectQuarantine as jest.Mock).mockReturnValue(mutation());
   (useAnnotateQuarantine as jest.Mock).mockReturnValue(mutation());
   (useAnnotatePendingQuarantine as jest.Mock).mockReturnValue(mutation());
-  render(<QuarantineView />);
+  return render(<QuarantineView />);
 }
 
 function approveOne(id: number) {
@@ -140,6 +140,33 @@ describe('QuarantineView approval notices (#824, #828)', () => {
     fireEvent.click(within(bar).getByRole('button', { name: 'Approve' }));
     const bulkDialog = screen.getByText('Approve 2 items?').parentElement as HTMLElement;
     expect(within(bulkDialog).getByText(text, { exact: true })).toBeInTheDocument();
+    expect(within(bulkDialog).queryByText(/re-scan/)).not.toBeInTheDocument();
+  });
+
+  it('a selection kept across a list refresh does not claim other items exist', () => {
+    const memoryFile = (id: number) => ({ ...item(id), source_type: 'memory_file' });
+    const { rerender } = setup({ items: [memoryFile(1), memoryFile(2)] });
+    fireEvent.click(screen.getByRole('button', { name: /Select all/ }));
+    // Finding 1 leaves the pending list (for example reviewed on its own) while both stay selected.
+    (useQuarantine as jest.Mock).mockReturnValue({
+      data: { items: [memoryFile(2)], total: 1 },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: jest.fn(),
+    });
+    rerender(<QuarantineView />);
+    expect(screen.queryByText('held note 1')).not.toBeInTheDocument();
+    const bar = screen.getByText('2 selected').parentElement as HTMLElement;
+    fireEvent.click(within(bar).getByRole('button', { name: 'Approve' }));
+    const bulkDialog = screen.getByText('Approve 2 items?').parentElement as HTMLElement;
+    expect(
+      within(bulkDialog).getByText(
+        'Memory-file findings will be marked reviewed without editing files. Any other selected items that are still pending will be tried for approval; any that cannot be admitted are rejected instead.',
+        { exact: true },
+      ),
+    ).toBeInTheDocument();
+    expect(within(bulkDialog).queryByText(/The other selected items/)).not.toBeInTheDocument();
     expect(within(bulkDialog).queryByText(/re-scan/)).not.toBeInTheDocument();
   });
 });
