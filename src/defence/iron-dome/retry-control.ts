@@ -71,6 +71,7 @@ import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 
 import { mkdirSecure } from '../../setup/state-permissions.js';
 import { DEFAULT_DNP_DIGEST_WINDOW_MS } from './dnp-digest.js';
+import { CARD_HIDDEN_CHAR_CLASS, CARD_LINE_BREAK_CLASS } from './approval-card.js';
 
 /** The hash every fingerprint, card and grant is bound to is the SAME #118
  *  canonical tool-call hash — re-exported so callers (the hook, the CLI) have
@@ -1241,7 +1242,20 @@ export function scopeTail(cwd?: string): string {
   return out.length <= 40 ? out : `…${out.slice(-39)}`;
 }
 
+/** #853 — the plain-English what / why / who a held card leads with, built
+ *  on this box by approval-card.ts `buildApprovalCard` (every target already
+ *  through the credential redactor). Structural so this module takes no
+ *  dependency on the card builder. */
+export interface HeldCardSummary {
+  action: string;
+  reason: string;
+  who: string;
+}
+
 export interface RetryCardCopyInput {
+  /** #853: when present the card is laid out as What / Why / Who plus the
+   *  outcome line, instead of the redacted-surface layout below. */
+  card?: HeldCardSummary;
   tool: string;
   signals: string[];
   redactedSurface: string;
@@ -1274,6 +1288,7 @@ export interface RetryCardFields {
  * the audit row: the card is the CONTROL, the webhook is the RECORD.
  */
 export function buildRetryCardFields(input: RetryCardCopyInput): RetryCardFields {
+  if (isUsableHeldCard(input.card)) return buildHeldCardFields(input, input.card);
   const tool = String(input.tool || 'tool').slice(0, 32);
   const topSignal = String(input.signals?.[0] ?? 'action-guard').slice(0, 32);
   const rawTitle = `Approve once? ${tool} · ${topSignal}`;
@@ -1311,6 +1326,106 @@ export function buildRetryCardFields(input: RetryCardCopyInput): RetryCardFields
     description: description.slice(0, CARD_DESCRIPTION_MAX),
     surfaceWithheld: withheld,
     surfaceTruncated,
+  };
+}
+
+function isUsableHeldCard(card: HeldCardSummary | undefined): card is HeldCardSummary {
+  return Boolean(card)
+    && [card!.action, card!.reason, card!.who].every((f) => typeof f === 'string' && f.trim().length > 0);
+}
+
+/**
+ * #853 — the outcome line every held card carries, whole. It answers the only
+ * questions the owner must not have to guess: what Approve buys (ONE run,
+ * only if the agent retries the same call, in this scope), and what Deny or
+ * silence means (nothing runs). The Claude Code hook cannot pause a call, so
+ * "if retried" is the honest wording — the card never says the call is
+ * waiting, and never says it ran.
+ */
+export function heldCardOutcomeLine(ttlMs: number, cwd?: string): string {
+  const minutes = Math.max(1, Math.round(ttlMs / 60_000));
+  return `Approve: runs ONCE if retried within ${minutes}m (${scopeTail(cwd)}) · Deny or no reply: nothing runs`;
+}
+
+const HELD_CARD_BREAKS = new RegExp(`[${CARD_LINE_BREAK_CLASS}]`, 'gu');
+const HELD_CARD_HIDDEN = new RegExp(`[${CARD_HIDDEN_CHAR_CLASS}]`, 'gu');
+
+/** One card line, the approval-card.ts `flattenCardText` discipline: the
+ *  fields crossed a process boundary (the waiter's argv), so line breaks
+ *  become spaces and hidden characters are shown, never passed through. */
+function flatCardLine(v: unknown): string {
+  return String(v ?? '')
+    .replace(HELD_CARD_HIDDEN, (c) => `<U+${(c.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}>`)
+    .replace(HELD_CARD_BREAKS, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * #853 — What / Why / Who / outcome, in that order, inside OpenClaw's 256-char
+ * description cap. The outcome line (with the card's own expiry) is the trust
+ * copy and is never the part a cap cuts: WHO and WHY give way first, the
+ * action keeps a floor. A secret-egress class withholds the action's target
+ * exactly as the surface layout does (#173/#192) — the card names the tool,
+ * the audit row carries the rest.
+ */
+function buildHeldCardFields(input: RetryCardCopyInput, card: HeldCardSummary): RetryCardFields {
+  const tool = flatCardLine(input.tool || 'tool').slice(0, 32);
+  // The card's own expiry rides in the title so the description's budget goes
+  // to the action and the outcome.
+  const rawTitle = `ShieldCortex held ${tool} — approve once? Card expires in ${Math.max(1, Math.round(RETRY_CARD_LIFETIME_MS / 60_000))}m`;
+  const title = rawTitle.length <= CARD_TITLE_MAX ? rawTitle : `${rawTitle.slice(0, CARD_TITLE_MAX - 1)}…`;
+  // Same rule as the #310 layout: a schedule slower than the grant must be
+  // SAID, with the command that outlasts it.
+  const cronCaveat =
+    typeof input.cronIntervalMs === 'number'
+    && Number.isFinite(input.cronIntervalMs)
+    && input.cronIntervalMs > input.ttlMs
+      ? ' · job reruns later? `approve --denial <id> --ttl`'
+      : '';
+  const outcome = `${heldCardOutcomeLine(input.ttlMs, input.cwd)}${cronCaveat}`;
+  const withheld = isSecretEgress(input.signals ?? []);
+  const fullWhat = withheld ? `${tool} call — target withheld (secret egress; see audit)` : flatCardLine(card.action);
+  const fullWhy = flatCardLine(card.reason);
+  const fullWho = flatCardLine(card.who);
+  const room = CARD_DESCRIPTION_MAX - 'What: '.length - 'Why: '.length - 'Who: '.length - 3 - outcome.length;
+
+  // Natural lengths when they fit. Otherwise WHY gives way first, then WHO;
+  // WHAT keeps a floor and takes back any slack the others do not need.
+  let why = fullWhy.length;
+  let who = fullWho.length;
+  let what = fullWhat.length;
+  if (what + why + who > room) {
+    why = Math.min(why, 40);
+    who = Math.min(who, 56);
+    what = Math.min(what, Math.max(40, room - why - who));
+    let slack = room - what - why - who;
+    const giveWho = Math.max(0, Math.min(slack, fullWho.length - who));
+    who += giveWho; slack -= giveWho;
+    why += Math.max(0, Math.min(slack, fullWhy.length - why));
+    // Floors can only overrun when a widened outcome line leaves no room.
+    const over = what + why + who - room;
+    if (over > 0) why = Math.max(16, why - over);
+    if (what + why + who > room) who = Math.max(16, room - what - why);
+  }
+  const clip = (text: string, max: number) => (text.length <= max ? text : `${text.slice(0, Math.max(1, max - 1))}…`);
+  // Middle cut: the head (the verb, the agent) and the tail (a file name, the
+  // session tag) both survive.
+  const middle = (text: string, max: number) => {
+    if (text.length <= max) return text;
+    const head = Math.ceil((max - 1) / 2);
+    return `${text.slice(0, head)}…${text.slice(text.length - (max - 1 - head))}`;
+  };
+  const whatLine = middle(fullWhat, what);
+  const body = [`What: ${whatLine}`, `Why: ${clip(fullWhy, why)}`, `Who: ${middle(fullWho, who)}`].join('\n');
+  // Last resort, never reached at today's sizes: the BODY is cut, never the
+  // outcome line.
+  const description = `${clip(body, Math.max(1, CARD_DESCRIPTION_MAX - outcome.length - 1))}\n${outcome}`;
+  return {
+    title,
+    description: description.slice(0, CARD_DESCRIPTION_MAX),
+    surfaceWithheld: true,
+    surfaceTruncated: !withheld && whatLine !== fullWhat,
   };
 }
 

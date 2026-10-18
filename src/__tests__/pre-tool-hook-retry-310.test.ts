@@ -86,7 +86,7 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     for (const f of [
       'tool-action-guard.js', 'action-approvals.js', 'notify-config.js', 'operator-notify.js',
       'script-source-resolver.js', 'dnp-digest.js', 'retry-control.js', 'dnp-retry-waiter.js',
-      'openclaw-approval-channel.js',
+      'openclaw-approval-channel.js', 'approval-card.js',
     ]) {
       const real = join(REAL_DIST, f);
       if (existsSync(real)) {
@@ -313,6 +313,7 @@ describe('#310 — retry control through the real Claude Code hook', () => {
 
     expect(r.decision).toBe('deny');
     expect(r.reason).toContain('Catastrophic-tier');
+    expect(r.reason).not.toMatch(/held for the operator|No Approve card/);
     expect(store()).toBeNull();
   });
 
@@ -380,6 +381,80 @@ describe('#310 — retry control through the real Claude Code hook', () => {
   });
 
   // ── The full loop ──────────────────────────────────────────────────────
+
+  // ── #853: the held card's copy and the agent's own notice ───────────────
+  // Claude Code gives a cron tick, a sub-agent and an interactive-less
+  // session all the same hook payload shape; only the session id differs.
+  for (const [label, sessionId] of [
+    ['cron tick', 'cron-nightly-backup-2026-10-18'],
+    ['sub-agent', 'subagent-7f3a9c'],
+  ] as const) {
+    it(`#853 ${label}: the card leads with What/Why/Who and the agent is told nothing ran or was delivered`, () => {
+      writeConfig(retryConfig({ openclaw: true }));
+      const argsFile = join(home, 'openclaw-args.txt');
+      writeFileSync(openclawBin, `#!/bin/sh\nprintf '%s\\0' "$@" > ${JSON.stringify(argsFile)}\ncat ${JSON.stringify(decisionFile)}\n`, { mode: 0o755 });
+
+      const denied = runHook(IRREVERSIBLE, { sessionId });
+      expect(denied.decision).toBe('deny');
+      // U1: the model reads permissionDecisionReason, not stderr — the held
+      // notice must be IN the JSON reason, with the row's real actionId.
+      const actionId = String(denialRows()[0]?.actionId ?? '');
+      expect(actionId).toMatch(/^act-[0-9a-f]{16}$/);
+      const reason = String(denied.reason ?? '');
+      expect(reason.startsWith('ShieldCortex Action Guard: ')).toBe(true);
+      expect(reason).toContain(`Bash did NOT run (${actionId}); it is held for the operator.`);
+      expect(reason).toContain('delivery is not confirmed');
+      expect(reason).toContain('retrying this SAME call within 10m of their Approve runs it once');
+      expect(reason).toContain('a retry before they approve is refused again');
+      expect(reason).toContain('if they deny or do not answer, nothing runs');
+      expect(reason).toContain('Do not set actionGuard.enforce:false.');
+      expect(reason).not.toContain('<actionId>');
+      expect(reason).not.toContain('an Approve-once card if raised');
+      expect(reason).not.toMatch(/\bran\b/i);
+      // The operator's terminal keeps the same notice.
+      expect(denied.stderr).toContain(`Bash did NOT run (${actionId})`);
+      expect(`${denied.stderr}\n${reason}`).not.toMatch(/\bdelivered\b|card raised/i);
+
+      expect(waitFor(() => existsSync(argsFile))).toBe(true);
+      const argv = readFileSync(argsFile, 'utf8').split('\0');
+      const params = JSON.parse(argv[argv.indexOf('--params') + 1]) as Record<string, unknown>;
+      const lines = String(params.description).split('\n');
+      expect(lines[0]).toMatch(/^What: \S/);
+      expect(lines[0]).toContain('modprobe');
+      expect(lines[1]).toMatch(/^Why: \S/);
+      expect(lines[2]).toMatch(/^Who: Claude Code on .+ · session sc-[0-9a-f]{16}$/);
+      expect(lines[2]).not.toContain(sessionId);
+      expect(lines[3]).toMatch(/^Approve: runs ONCE if retried within 10m \(.+\) · Deny or no reply: nothing runs$/);
+      expect(String(params.title)).toBe('ShieldCortex held Bash — approve once? Card expires in 10m');
+      expect(String(params.description).length).toBeLessThanOrEqual(256);
+      expect(params.allowedDecisions).toEqual(['allow-once', 'deny']);
+    });
+  }
+
+  it('#853 cards on but no card channel: the reason says nothing ran, why there is no card, and the real actionId', () => {
+    writeConfig(retryConfig({ openclaw: false }));
+    const denied = runHook(IRREVERSIBLE, { sessionId: 'cron-nightly-backup-2026-10-18' });
+    expect(denied.decision).toBe('deny');
+    const actionId = String(denialRows()[0]?.actionId ?? '');
+    expect(actionId).toMatch(/^act-[0-9a-f]{16}$/);
+    const reason = String(denied.reason ?? '');
+    expect(reason).toContain(`This call did NOT run. No Approve card (no-openclaw-card-channel) for ${actionId}.`);
+    expect(reason).toContain(`shieldcortex approve --denial ${actionId}`);
+    expect(reason).not.toContain('<actionId>');
+    expect(reason).not.toMatch(/held for the operator|delivery is not confirmed/);
+  });
+
+  it('#853 cards off: the static reason carries the real actionId, never the placeholder', () => {
+    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl() } });
+    const denied = runHook(IRREVERSIBLE, { sessionId: 'subagent-7f3a9c' });
+    expect(denied.decision).toBe('deny');
+    const actionId = String(denialRows()[0]?.actionId ?? '');
+    expect(actionId).toMatch(/^act-[0-9a-f]{16}$/);
+    const reason = String(denied.reason ?? '');
+    expect(reason).toContain(`wait for operator: shieldcortex approve --denial ${actionId} (one-shot)`);
+    expect(reason).not.toContain('<actionId>');
+    expect(reason).not.toMatch(/held for the operator|did NOT run/);
+  });
 
   it('deny → card → tap → the SAME job retries once, then is refused again', () => {
     writeConfig(retryConfig({ openclaw: true }));
