@@ -7,8 +7,15 @@ That ADR is not edited. This one supersedes exactly one clause of it (§3) and r
 
 ## 0. Context and evidence
 
-The issue reports this from clawdbot1, 15–18 Oct 2026: 72 refused actions, of which about 60 were
-`denied_no_prompt_surface` (a cron job or a sub-agent, no card, no human). The owner's
+The issue body reported about 60 `denied_no_prompt_surface` rows on clawdbot1, 15–18 Oct 2026.
+That figure was a substring overcount. The confirmed breakdown (issue comment
+[#issuecomment-6256267789](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/853#issuecomment-6256267789),
+read-only from the box's `realtime-2026-10-1[5-8].jsonl` audit files) is **34** true
+`denied_no_prompt_surface` rows: all `origin: claude-code-hook` (openclaw-interceptor 0), all
+`permissionMode: bypassPermissions` with `noPromptSurfaceReason` "bypassPermissions mode shows no
+prompt", Bash 31 / Write 3, four distinct sessions, 19 on 16 Oct and 15 on 18 Oct. The breakdown
+does not say what launched those sessions (cron, sub-agent or a worker), so this ADR does not claim
+one. The owner's
 requirement is to hold the action, send one plain card (What / Why / Who / outcome), tell the
 agent the action is held, and report expiry as "nothing ran". Until that ships, Guard stays
 advisory on every box.
@@ -27,20 +34,25 @@ What the repo says today (all CONFIRMED by reading the files named):
 | The agent-facing deny text is `terminalDecisionReason`. Before slice 1 it was static (a literal `<actionId>`) and the #853 notice went to stderr only; slice 1 puts the notice, with the real actionId, into `permissionDecisionReason` | `pre-tool-hook.mjs` `terminalDecisionReason`, `alertGuardOutcome`, `emitApprovalRequired` |
 | `actionGuard.retryCards` defaults to false. Absent, junk and `"true"` all count as off | `normaliseRetryControlConfig`; pinned by `retry-card-copy-853.test.ts` |
 
-Which plane produced the clawdbot1 rows: **LIKELY** the Claude Code hook (Claude Code sessions run
-headless by OpenClaw cron jobs or sub-agents), because that is the only writer of the
-outcome name. I have not read the clawdbot1 logs. **Rollout gate R0 (§9) is to confirm this from
-the rows' `origin` field before anything flips.** The interceptor's `failure_denied` rows have the
-same silent-deny shape, so this ADR covers them as well. The acceptance metric counts them too (§9).
+Which plane produced the clawdbot1 rows: **CONFIRMED** the Claude Code hook in
+`bypassPermissions` (34 of 34, per the comment above), which matches the repo fact that the hook
+is the only writer of the outcome name. That classification half of R0 (§9) is done. So
+**Plane A in `bypassPermissions` is the first target.** The interceptor's no-approver
+`failure_denied` branch has the same silent-deny shape and stays in scope, but later: this
+evidence shows no interceptor no-surface failures on clawdbot1 (the comment attributes that box's
+interceptor refusals to the separate lease self-refusal, #854). The acceptance metric still
+counts eligible interceptor rows once Plane B ships (§9).
 
 ## 1. Decision (summary)
 
 1. **Two planes, two different meanings of "hold".** They are never merged, and neither reads the
    other's store.
-   - **Plane A, the Claude Code hook.** It cannot pause. "Held" means *refused now, with a single
+   - **Plane A, the Claude Code hook (first; this is where all 34 clawdbot1 rows came from, in
+     `bypassPermissions`).** It cannot pause. "Held" means *refused now, with a single
      operator decision pending that, on Approve, lets one retry of the exact same call through*.
      This is the #310 mechanism with new copy, a new outcome name and expiry reporting.
-   - **Plane B, the OpenClaw interceptor.** It can (LIKELY) pause: our own plugin header
+   - **Plane B, the OpenClaw interceptor (later; the clawdbot1 evidence shows no no-surface
+     failures on this plane).** It can (LIKELY) pause: our own plugin header
      (`plugins/openclaw/index.ts`) says `before_tool_call` is awaited in-process. That is
      ShieldCortex's reading, not something verified against OpenClaw for an await of up to
      10 minutes, or for cron and sub-agent sessions specifically (see U3, U10). "Held" means *the tool call is suspended in the running turn until the operator
@@ -218,25 +230,31 @@ Clocks (new rows only. The #310 table stands):
 
 | Gate | Requirement | Blocks |
 |---|---|---|
-| R0 | Classify the clawdbot1 15–18 Oct refusals by `origin` and `noPromptSurfaceReason` / failure-policy branch, from the box's own `denials.jsonl` and audit rows. Record the counts in the issue. Also confirm U10 (Plane B transport and await length) against OpenClaw | Any Plane B code |
+| R0 | Classify the clawdbot1 15–18 Oct refusals by `origin` and `noPromptSurfaceReason` / failure-policy branch. **Done** (issue comment 6256267789: 34 DNP, all `claude-code-hook` / `bypassPermissions`, interceptor 0). Still open: confirm U10 (Plane B transport and await length) against OpenClaw, and U5 | Any Plane B code |
 | R1 | Slice 1 (Plane A copy, the uncommitted work) merged with `retryCards` still false. Agent text in `permissionDecisionReason` (implemented in slice 1, pinned by the real-hook tests) | R2 |
 | R2 | Slice 2: `held_for_retry` / `retry_card_expired` / `retry_card_failed` outcomes, plus every reader updated (`guard-readiness.ts` would-stop set, `session-guard.ts`, `dnp-digest.ts`, stop-hook summary, `cron-denial-audit-375`, webhook outcome header, `doctor`) | Soak A |
-| Soak A | ≥3 days on a clawdbot1-class host, `retryCards: true`. Matrix: ≥3 cron identities, Claude Code sub-agent, empty origin, grant then newer DNP, budget exhaustion, deny, expiry, transport-down. **Pass:** zero `denied_no_prompt_surface` rows whose `noCardReason` is absent, exactly one card per identity per epoch, every expiry and deny reported | Plane A default flip (separate owner decision) |
+| Soak A | ≥3 days on a clawdbot1-class host, `retryCards: true`. Matrix: headless Claude Code sessions in `bypassPermissions` first (the 34-row clawdbot1 shape, Bash and Write), ≥3 distinct identities, a cron-launched and a sub-agent session if the host has them, empty origin, grant then newer DNP, budget exhaustion, deny, expiry, transport-down. **Pass:** zero `denied_no_prompt_surface` rows whose `noCardReason` is absent, exactly one card per identity per epoch, every expiry and deny reported | Plane A default flip (separate owner decision) |
 | R3 | Slice 3: Plane B behind `openclaw.heldApprovals.enabled=false`, with the sub-agent classifier, the dedupe set and the follow-up notice | Soak B |
-| Soak B | ≥3 days on clawdbot1. Same matrix on OpenClaw cron and sub-agent sessions, plus a gateway restart mid-hold and a turn timeout shorter than the hold. **Pass:** zero `failure_denied` rows for eligible calls, one card per key, no double card (host plus owner) | Plane B default flip |
+| Soak B | ≥3 days on clawdbot1. Same matrix on OpenClaw cron and sub-agent sessions, plus a gateway restart mid-hold and a turn timeout shorter than the hold. clawdbot1 showed zero interceptor no-surface rows for 15–18 Oct, so organic traffic may not exercise this; the matrix must be driven deliberately. **Pass:** zero `failure_denied` rows for eligible calls, one card per key, no double card (host plus owner) | Plane B default flip |
 | E | Guard leaves advisory only after both soaks pass and the owner decides. #509 readiness rules unchanged | enforce on any box |
 
 **No live-control change.** This ADR and slice 1 change no default, no posture, no `enforce`,
 no `failurePolicy`, no `retryCards` value, and no interceptor behaviour. A test already pins
 `retryCards` dark (`retry-card-copy-853.test.ts`).
 
-## 10. Test plan (cron and sub-agent coverage)
+## 10. Test plan (hook `bypassPermissions` first, then cron and sub-agent coverage)
+
+Plane A tests lead, and every hook case runs with `permission_mode: 'bypassPermissions'` (the
+real-hook harness default, `pre-tool-hook-retry-310.test.ts`), because that is the only shape the
+clawdbot1 evidence shows. Session labels such as "cron tick" or "sub-agent" in those tests are
+session ids only; the hook cannot tell launchers apart (§8).
 
 Existing in the uncommitted slice:
 - `src/defence/iron-dome/__tests__/retry-card-copy-853.test.ts` covers What/Why/Who/outcome for a Claude Code headless session, an OpenClaw cron and an OpenClaw sub-agent; a truncation order that never cuts the outcome line; secret-egress withholding; line-break and hidden-character flattening; the #310 fallback; `allow-once`/`deny` only; and `retryCards` dark.
 - `src/__tests__/pre-tool-hook-retry-310.test.ts` covers a cron-tick and sub-agent hook payload through the real hook: the card leads with What/Why/Who, the raw session id is not echoed, and the JSON `permissionDecisionReason` carries the denial row's real actionId, "did NOT run", "held for the operator", "delivery is not confirmed", the retry-within-TTL wording and "nothing runs", and never `<actionId>`, "delivered" or "ran". Two more cases pin the reason when cards are on with no card channel (no-card reason plus real actionId) and when cards are off (real actionId replaces the placeholder). The catastrophic case asserts no held or no-card text.
 
-Required before Soak A (slice 2):
+Required before Soak A (slice 2), all in `bypassPermissions`:
+0. Hook, headless worker session, Bash and Write each: DNP → `held_for_retry` → Approve → a retry of the identical call in the same cwd spends the grant once. A further retry is refused again.
 1. Hook, cron tick: DNP → `held_for_retry` → Approve → **next tick's fresh session** spends the grant once. A third run is refused again.
 2. Hook, sub-agent: same, with the retry from the same session.
 3. Two holds for the same identity while the card is live: one card. Row 2 is `held_for_retry` with `cardDedupedTo`.
@@ -261,10 +279,10 @@ Required before Soak B (slice 3):
 ## 11. Unresolved security risks (accepted for design, must be closed or re-accepted at the soak reviews)
 
 - **U1: the agent may not see the held notice (Plane A). Narrowed by slice 1.** The notice is now in `permissionDecisionReason` with the real actionId, and the real-hook tests pin the JSON. What the tests cannot pin is Claude Code's side: that it passes `permissionDecisionReason` to the model on a `deny` (unverified, from memory: the hooks contract says it does). Whether hook stderr reaches the model on a JSON `deny` with exit 0 is still UNKNOWN, so stderr is kept only for the operator's terminal. Close at Soak A by reading a real headless transcript.
-- **U2: Plane A "Approve runs it" depends on the agent retrying.** A cron job whose next tick is later than the TTL, or an agent that gives up, never runs the approved action. The card says "if retried", but the owner's acceptance wording ("Approve runs the action") is only met for Plane B. This needs owner sign-off.
+- **U2: Plane A "Approve runs it" depends on the agent retrying.** A cron job whose next tick is later than the TTL, or an agent that gives up (for example a one-shot `bypassPermissions` worker that exits after the refusal), never runs the approved action. Plane A is the plane implicated by all 34 observed rows, so this gap matters directly; the breakdown cannot tell which calls would have been retried. The card says "if retried", but the owner's acceptance wording ("Approve runs the action") is only met for Plane B. This needs owner sign-off.
 - **U3: Plane B holds a live turn for up to 10 minutes.** An OpenClaw cron turn timeout shorter than the hold, or a host that serialises cron runs, can stall or kill the job. OpenClaw's cron turn budget, and whether it allows a `before_tool_call` await that long at all, is UNKNOWN to this codebase. Soak B must measure it. The fallback is `hold_cancelled` reported, with nothing run.
 - **U4: stale cards after a gateway restart (Plane B).** The card can stay tappable in the owner's chat after the hold is dead. A tap does nothing, but the owner gets no "too late" reply unless the gateway reports one. Whether the gateway closes orphaned approval requests on restart is UNKNOWN.
-- **U5: OpenClaw sub-agent routing is unverified.** Today sub-agents get the host card, and where the host shows it is UNKNOWN. Moving sub-agents to the owner channel assumes the host card was not reaching anyone. R0 must confirm this from clawdbot1 rows before slice 3, or the change could replace a working card with a different one.
+- **U5: OpenClaw sub-agent routing is unverified.** Today sub-agents get the host card, and where the host shows it is UNKNOWN. Moving sub-agents to the owner channel assumes the host card was not reaching anyone. The R0 breakdown cannot settle this: it found zero interceptor no-surface rows on clawdbot1. It must be confirmed some other way before slice 3, or the change could replace a working card with a different one.
 - **U6: no host-wide card budget across planes.** A box running both planes could send up to 3 cards per window per plane. A shared counter would need Plane B to write a Plane A store, which §3 forbids, so this is accepted as a 2× ceiling.
 - **U7: one-tap social engineering.** The card's What line is agent-influenced (it is the redacted call). The redactor, flattening and secret-egress withholding reduce the risk but do not remove it. A carefully shaped command could read as benign in ≤256 characters. The broker `harden` path is the only model-side check, and it is off by default.
 - **U8: delivery is unconfirmable.** No end-to-end receipt exists from the chat platform. "Exactly one card arrives" can be asserted only up to the gateway hand-off. Soak evidence is the owner's own count.
