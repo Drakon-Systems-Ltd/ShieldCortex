@@ -285,11 +285,11 @@ export function approveQuarantineItemsBySource(sourceIdentifier: string, reviewe
 
 /**
  * Reply text for an approval request (MCP `quarantine_review`). Reports the
- * recorded outcome: an approval the re-scan refused says so (#824).
+ * recorded outcome: a refused approval says so (#824).
  */
 export function describeApproveResult(id: number, result: QuarantineReviewResult): string {
   if (result.status !== 'approved') {
-    return `Quarantine item ${id} was not approved: ${result.reason ?? 'the re-scan still refuses this content'}. `
+    return `Quarantine item ${id} was not approved: ${result.reason ?? 'it could not be admitted'}. `
       + 'The item is now rejected and was not added to memory.';
   }
   return `Quarantine item ${id} approved${result.memoryId ? ` and promoted to memory ${result.memoryId}` : ''}.`;
@@ -299,7 +299,7 @@ export function describeApproveResult(id: number, result: QuarantineReviewResult
 export function describeBulkApproveResult(sourceIdentifier: string, result: QuarantineBulkReviewResult): string {
   const approved = result.updated - result.rejected;
   const notApproved = result.rejected > 0
-    ? `; ${result.rejected} not approved (the re-scan still refuses them; now rejected, not added to memory)`
+    ? `; ${result.rejected} not approved (could not be admitted; now rejected, not added to memory)`
     : '';
   return `Batch reviewed ${result.updated} of ${result.total} items from "${sourceIdentifier}": `
     + `${approved} approved (${result.promoted} promoted to memory)${notApproved}.`;
