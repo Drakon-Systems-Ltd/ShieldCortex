@@ -244,4 +244,22 @@ describe('QuarantineView bulk selection after the pending list changes (#831)', 
     submitBulk('Reject', 1);
     expect((useBulkRejectQuarantine as jest.Mock)().mutate).toHaveBeenCalledWith([2]);
   });
+
+  it('bulk approve submits the surviving items in the order they were selected', () => {
+    // The server approves in the order it receives ids, and under the memory write rate
+    // limit that order decides which items are admitted, so the payload keeps selection order.
+    const { rerender } = setup({ items: [item(1), item(2), item(3)], bulk: [{ success: true, updated: 2, total: 2, promoted: 2, rejected: 0 }] });
+    const toggle = (id: number) => {
+      const card = screen.getByText(`held note ${id}`).closest('.glass-card') as HTMLElement;
+      fireEvent.click(within(card).getAllByRole('button')[0]);
+    };
+    toggle(3);
+    toggle(2);
+    toggle(1);
+    expect(screen.getByText('3 selected')).toBeInTheDocument();
+    refreshPending([item(1), item(3)], rerender);
+    openBulk('Approve', 2);
+    submitBulk('Approve', 2);
+    expect((useBulkApproveQuarantine as jest.Mock)().mutate).toHaveBeenCalledWith([3, 1], expect.anything());
+  });
 });

@@ -177,7 +177,13 @@ export function QuarantineView() {
   const needsAiReviewItems = pendingItems.filter(i => !i.annotation);
   // #831: count, dialog copy and submitted ids come from the selected rows that are
   // still pending, so ids that left the list (refresh or a single review) never count.
-  const selectedItems = pendingItems.filter(i => selectedIds.has(i.id));
+  // Keep the order the rows were selected in: the server approves in the order it is
+  // sent, and under the memory write rate limit that order decides which items get in.
+  const pendingById = new Map(pendingItems.map(i => [i.id, i] as const));
+  const selectedItems = Array.from(selectedIds).flatMap(id => {
+    const pending = pendingById.get(id);
+    return pending ? [pending] : [];
+  });
   const selectedCount = selectedItems.length;
   const selectedMemoryFileCount = selectedItems.filter(i => i.source_type === 'memory_file').length;
   const annotationGroups = (() => {
