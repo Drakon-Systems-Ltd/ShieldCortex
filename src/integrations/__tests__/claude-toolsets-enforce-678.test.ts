@@ -797,6 +797,70 @@ describe('review regressions (#678 P2)', () => {
     expect(guard.classify(ctx('navigate', { url: 'https://bücher.example/' })).card).toContain('xn--bcher-kva.example');
   });
 
+  // Cards and audit hosts for one URL, plus the decisions an ordinary off-list host gets.
+  async function hostSurface(mode: 'observe' | 'enforce', url: string) {
+    const { guard, events } = makeGuard({ mode });
+    const verdict = guard.classify(ctx('navigate', { url }));
+    const scroll = guard.classify(ctx('scroll', {}, { tabURL: url }));
+    await guard.confirm()(ctx('navigate', { url }));
+    await guard.confirm()(ctx('scroll', {}, { tabURL: url }));
+    try { guard.urlPolicy()({}, url); } catch { /* the decision is asserted below */ }
+    const intercepted = guard.interceptRequest(url);
+    const ordinary = makeGuard({ mode }).guard;
+    expect(verdict.decision).toBe(ordinary.classify(ctx('navigate', { url: 'https://off-list.example/' })).decision);
+    expect(intercepted).toBe(ordinary.interceptRequest('https://off-list.example/'));
+    const hosts = events.filter((e) => e.host).map((e) => e.host);
+    expect(hosts).toHaveLength(4);
+    return { cards: [verdict.card, scroll.card], hosts, surface: JSON.stringify({ cards: [verdict.card, scroll.card], events }) };
+  }
+
+  // Mixed-case recognisers (JWT `eyJ`) need the mapped text with case kept;
+  // the parser's lowercase `eyja.eyja.a` and its uppercase both miss them.
+  const stop = '。';
+  it.each([
+    ['short', `https://ｅｙＪａ${stop}ｅｙＪａ${stop}ａ/`, 'eyja.eyja.a'],
+    ['segmented', `https://${wide('eyJhbGciOiJub25lIn0')}${stop}${wide('eyJhIjoxfQ')}${stop}${wide('abc')}/`, 'eyjhbgcioijub25lin0.eyjhijoxfq.abc'],
+  ])('redacts a JWT-shaped host the parser maps and lowercases (%s)', async (_label, url, folded) => {
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { cards, hosts, surface } = await hostSurface(mode, url);
+      for (const card of cards) expect(card).toContain('redacted-host');
+      expect(hosts).toEqual(['redacted-host', 'redacted-host', 'redacted-host', 'redacted-host']);
+      expect(surface.toLowerCase()).not.toContain(folded);
+    }
+  });
+
+  // A long internationalised label becomes a long punycode run: that is not a credential.
+  const longIdn = '書'.repeat(28);
+  it.each([
+    [`https://${longIdn}.example/`, 'example'],
+    [`https://${longIdn}.evil.example/`, 'evil.example'],
+  ])('shows the punycode of a long internationalised host %s', async (url, suffix) => {
+    const punycode = new URL(url).hostname;
+    expect(punycode).toMatch(new RegExp(`^xn--[a-z0-9-]{30,}\\.${suffix.replace('.', '\\.')}$`));
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { cards, hosts, surface } = await hostSurface(mode, url);
+      for (const card of cards) expect(card).toContain(`.${suffix}`);
+      expect(hosts).toEqual([punycode, punycode, punycode, punycode]);
+      expect(surface).not.toContain('redacted-host');
+    }
+  });
+
+  it('shows a long lowercase hyphenated host unchanged', async () => {
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { hosts } = await hostSurface(mode, 'https://ordinary-internal-service-discovery/');
+      expect(hosts).toEqual(Array(4).fill('ordinary-internal-service-discovery'));
+    }
+  });
+
+  it('a host mapped to ASCII displays the same as that ASCII typed directly', async () => {
+    const mapped = `https://${'ﬃ'.repeat(20)}.example/`;
+    const typed = `https://${'ffi'.repeat(20)}.example/`;
+    expect(new URL(mapped).hostname).toBe(new URL(typed).hostname);
+    for (const mode of ['observe', 'enforce'] as const) {
+      expect((await hostSurface(mode, mapped)).hosts).toEqual((await hostSurface(mode, typed)).hosts);
+    }
+  });
+
   it('a refused typing attempt still leaves text pending, so the next Enter holds', async () => {
     const { guard } = makeGuard();
     await readPage(guard);

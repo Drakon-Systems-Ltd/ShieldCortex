@@ -489,11 +489,18 @@ function displayHost(url: string | undefined): string | undefined {
   // The parser percent-decodes the host (`%41KIA…` → `akia…`): check the decoded original-case text too.
   let decoded = rawHost;
   try { decoded = decodeURIComponent(rawHost); } catch { /* keep raw */ }
-  // The parsed host too, in both cases: IDNA mapping turns fullwidth or
-  // soft-hyphenated text into ASCII that neither original matches, then folds
-  // it to lowercase, which case-sensitive patterns (AKIA…) would miss.
-  for (const candidate of new Set([rawHost, decoded, host, host.toUpperCase()])) {
+  // IDNA mapping turns fullwidth or soft-hyphenated text into ASCII that
+  // neither original matches, then folds it to lowercase. `mapped` redoes the
+  // mapping with case kept, so mixed-case patterns (`eyJ…`, `AIza…`) still match.
+  const mapped = decoded.normalize('NFKC').replace(/[。．｡]/g, '.')
+    .replace(/[­͏​-‍⁠﻿︀-️]/g, '');
+  for (const candidate of new Set([rawHost, decoded, mapped])) {
     if (redactCredentials(candidate) !== candidate || looksSecretish(candidate)) return 'redacted-host';
+  }
+  // The parsed host, in both cases, for mappings NFKC does not reproduce; only
+  // against the recognisers, since a long punycode label is an opaque ASCII run.
+  for (const candidate of [host, host.toUpperCase()]) {
+    if (redactCredentials(candidate) !== candidate) return 'redacted-host';
   }
   return host.slice(0, 253);
 }
