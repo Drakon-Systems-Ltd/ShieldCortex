@@ -1,5 +1,5 @@
 import { getDatabase, withTransaction } from '../../database/init.js';
-import { addMemory, MemoryBlockedError } from '../../memory/store.js';
+import { addMemory, MemoryBlockedError, MemoryRateLimitedError } from '../../memory/store.js';
 import type { Memory, MemorySourceKind } from '../../memory/types.js';
 import { recordQuarantineDecision } from '../../threat-graph/decision.js';
 
@@ -194,7 +194,11 @@ function approveExistingPendingRow(row: QuarantineRow, reviewedBy: string, bulk 
       discardReadmissionHolds(maxIdBefore);
       markPendingRowReviewed(row.id, 'rejected', reviewedBy);
       ledgerDecision(row, 'reject', reviewedBy, bulk);
-      return { id: row.id, status: 'rejected', reason: `still held on re-scan: ${e.reason}` };
+      // The rate limit refuses before any scan runs, so don't claim one (#830).
+      const reason = e instanceof MemoryRateLimitedError
+        ? `not admitted (memory write rate limit): ${e.reason}`
+        : `still held on re-scan: ${e.reason}`;
+      return { id: row.id, status: 'rejected', reason };
     }
     throw e;
   }
@@ -285,11 +289,11 @@ export function approveQuarantineItemsBySource(sourceIdentifier: string, reviewe
 
 /**
  * Reply text for an approval request (MCP `quarantine_review`). Reports the
- * recorded outcome: an approval the re-scan refused says so (#824).
+ * recorded outcome: a refused approval says so (#824).
  */
 export function describeApproveResult(id: number, result: QuarantineReviewResult): string {
   if (result.status !== 'approved') {
-    return `Quarantine item ${id} was not approved: ${result.reason ?? 'the re-scan still refuses this content'}. `
+    return `Quarantine item ${id} was not approved: ${result.reason ?? 'it could not be admitted'}. `
       + 'The item is now rejected and was not added to memory.';
   }
   return `Quarantine item ${id} approved${result.memoryId ? ` and promoted to memory ${result.memoryId}` : ''}.`;
@@ -299,7 +303,7 @@ export function describeApproveResult(id: number, result: QuarantineReviewResult
 export function describeBulkApproveResult(sourceIdentifier: string, result: QuarantineBulkReviewResult): string {
   const approved = result.updated - result.rejected;
   const notApproved = result.rejected > 0
-    ? `; ${result.rejected} not approved (the re-scan still refuses them; now rejected, not added to memory)`
+    ? `; ${result.rejected} not approved (could not be admitted; now rejected, not added to memory)`
     : '';
   return `Batch reviewed ${result.updated} of ${result.total} items from "${sourceIdentifier}": `
     + `${approved} approved (${result.promoted} promoted to memory)${notApproved}.`;

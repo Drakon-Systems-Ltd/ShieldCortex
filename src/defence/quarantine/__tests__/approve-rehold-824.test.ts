@@ -157,6 +157,20 @@ describe('#824 reply text reports the recorded outcome', () => {
     insertPending({ content: SKILL_HELD, sourceId: 'mixed' });
     const text = describeBulkApproveResult('mixed', approveQuarantineItemsBySource('mixed', 'batch-approve'));
     expect(text).toBe('Batch reviewed 2 of 2 items from "mixed": 1 approved (1 promoted to memory); '
-      + '1 not approved (the re-scan still refuses them; now rejected, not added to memory).');
+      + '1 not approved (could not be admitted; now rejected, not added to memory).');
+  });
+
+  // #828: an originally-BLOCK row is rejected without a re-scan, so the batch
+  // reply must not say a re-scan refused it.
+  it('batch reply for an originally-BLOCK row does not claim a re-scan', () => {
+    insertPending({ content: BENIGN, sourceType: 'agent', sourceId: 'blocked', reason: 'sub-agent hold' });
+    insertPending({ content: 'whatever the original was', sourceId: 'blocked', firewallResult: 'BLOCK' });
+    const result = approveQuarantineItemsBySource('blocked', 'batch-approve');
+    expect(result.rejected).toBe(1);
+    expect(result.items.find((i) => i.status === 'rejected')?.reason).toBe('hard-blocked content is never re-admitted');
+    const text = describeBulkApproveResult('blocked', result);
+    expect(text).toBe('Batch reviewed 2 of 2 items from "blocked": 1 approved (1 promoted to memory); '
+      + '1 not approved (could not be admitted; now rejected, not added to memory).');
+    expect(text).not.toMatch(/re-scan/);
   });
 });
