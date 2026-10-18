@@ -233,9 +233,11 @@ and a bounded, escaped label with secret-shaped text redacted, input hash, outco
 typed text, never a URL query string, never page content. Signal names are fixed
 diagnostics (an unrecognised scheme is `url-scheme-unknown`, without the scheme). A host
 whose text trips ShieldCortex's credential recognisers, as written, percent-decoded, or
-as the URL parser maps it (fullwidth or soft-hyphenated text becomes ASCII; this mapped
-text is checked with its case kept, and the parser's lowercased host is checked against
-the recognisers too), is shown as `redacted-host` on cards and audit rows. A long
+as the URL parser maps it, is shown as `redacted-host` on cards and audit rows. The
+mapped text is built character by character with case kept: each character is mapped the
+way the parser maps it on its own (fullwidth text becomes ASCII, characters the parser
+ignores are dropped). If that mapping and the parser's own ASCII host disagree, the host
+is withheld. The parser's lowercased host is checked against the recognisers too. A long
 internationalised name is still shown as its punycode, unless it trips them. An unknown member
 name that trips them is audited as `other`; the policy and the driver still get the real
 URL. A secret in a shape the recognisers do not know is not guaranteed to be caught.

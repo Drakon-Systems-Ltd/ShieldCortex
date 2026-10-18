@@ -861,6 +861,150 @@ describe('review regressions (#678 P2)', () => {
     }
   });
 
+  // The URL policy for an off-list host: observe lets it through, enforce refuses.
+  function expectOffListPolicy(mode: 'observe' | 'enforce', url: string) {
+    const { guard } = makeGuard({ mode });
+    if (mode === 'observe') {
+      expect(() => guard.urlPolicy()({}, url)).not.toThrow();
+    } else {
+      expect(() => guard.urlPolicy()({}, url)).toThrow();
+    }
+  }
+
+  // Like `hostSurface`, for URLs that may hold whitespace or control characters
+  // or that the parser rejects: both blocked outright, as before, and no host of theirs is shown.
+  async function witnessSurface(mode: 'observe' | 'enforce', url: string) {
+    let parsed: string | undefined;
+    try { parsed = new URL(url).hostname; } catch { parsed = undefined; }
+    const { guard, events } = makeGuard({ mode });
+    const verdict = guard.classify(ctx('navigate', { url }));
+    const scroll = guard.classify(ctx('scroll', {}, { tabURL: url }));
+    await guard.confirm()(ctx('navigate', { url }));
+    await guard.confirm()(ctx('scroll', {}, { tabURL: url }));
+    if (mode === 'observe') {
+      expect(() => guard.urlPolicy()({}, url)).not.toThrow();
+    } else {
+      expect(() => guard.urlPolicy()({}, url)).toThrow();
+    }
+    const intercepted = guard.interceptRequest(url);
+    const ordinary = makeGuard({ mode }).guard;
+    const offList = ordinary.classify(ctx('navigate', { url: 'https://off-list.example/' })).decision;
+    const blocked = /[\s\x00-\x1f\x7f]/.test(url) || parsed === undefined;
+    expect(verdict.decision).toBe(blocked ? 'block' : offList);
+    expect(intercepted).toBe(ordinary.interceptRequest('https://off-list.example/'));
+    const hosts = events.filter((e) => e.host).map((e) => e.host);
+    return { parsed, cards: [verdict.card, scroll.card], hosts, surface: JSON.stringify({ cards: [verdict.card, scroll.card], events }) };
+  }
+
+  // The scroll card names the tab's host. The navigate card for a URL with
+  // whitespace or a control character is the generic not-a-web-page card, which
+  // names no host; any other navigate card names the (withheld) host.
+  function expectCardsWithheld(url: string, [navigate, scroll]: string[]) {
+    expect(scroll).toContain('redacted-host');
+    if (/[\s\x00-\x1f\x7f]/.test(url)) {
+      expect(navigate.startsWith('Open an address that is not a web page? ShieldCortex does not allow this kind of address.')).toBe(true);
+    } else {
+      expect(navigate).toContain('redacted-host');
+    }
+  }
+
+  // Redacted on every card and audit host when parsed; when the parser rejects
+  // the URL, the only host shown is the current tab's, never the URL's.
+  async function expectJwtWitnessWithheld(url: string) {
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { parsed, cards, hosts, surface } = await witnessSurface(mode, url);
+      if (parsed === undefined) {
+        expect(hosts.length).toBeGreaterThan(0);
+        expect(hosts.every((h) => h === 'checkout.example.com')).toBe(true);
+      } else {
+        expect(parsed).toBe('eyja.eyja.a');
+        expectCardsWithheld(url, cards);
+        expect(hosts).toEqual(Array(4).fill('redacted-host'));
+      }
+      expect(surface.toLowerCase()).not.toContain('eyja.eyja.a');
+    }
+  }
+
+  // Characters the parser ignores (or, on some ICU versions, rejects) inside a
+  // JWT shape. The case-kept text is built from what the parser does with each
+  // character, so one it ignores is dropped there too.
+  const ignorable = [0x0009, 0x000a, 0x000d, 0x115f, 0x1160, 0x17b4, 0x17b5,
+    0x180b, 0x180c, 0x180d, 0x180e, 0x180f, 0x2061, 0x2062, 0x2063, 0x2064,
+    0x206a, 0x206b, 0x206c, 0x206d, 0x206e, 0x206f, 0x3164, 0xffa0, 0xe0100];
+  it.each(ignorable.flatMap((cp) => {
+    const ch = String.fromCodePoint(cp);
+    const label = cp.toString(16).toUpperCase().padStart(4, '0');
+    return [
+      [label, 'ascii', `https://e${ch}yJa.eyJa.a/`],
+      [label, 'fullwidth', `https://ｅ${ch}ｙＪａ${stop}ｅｙＪａ${stop}ａ/`],
+    ];
+  }))('a JWT-shaped host with U+%s inside (%s) is withheld or not shown at all', async (_cp, _form, url) => {
+    await expectJwtWitnessWithheld(url);
+  });
+
+  it.each([
+    ['U+180B in the fullwidth JWT shape', `https://ｅｙ᠋Ｊａ${stop}ｅｙＪａ${stop}ａ/`],
+    ['U+0009 in the ASCII JWT shape', 'https://e\tyJa.eyJa.a/'],
+    ['U+2061 in the ASCII JWT shape', 'https://e⁡yJa.eyJa.a/'],
+    ['U+0009 in the fullwidth JWT shape', `https://ｅ\tｙＪａ${stop}ｅｙＪａ${stop}ａ/`],
+    ['U+2061 in the fullwidth JWT shape', `https://ｅ⁡ｙＪａ${stop}ｅｙＪａ${stop}ａ/`],
+  ])('redacts the reviewed witness: %s', async (_label, url) => {
+    await expectJwtWitnessWithheld(url);
+  });
+
+  it('the U+180B witness parses on this runtime, so it is redacted rather than unparseable', async () => {
+    const url = `https://ｅｙ᠋Ｊａ${stop}ｅｙＪａ${stop}ａ/`;
+    expect(new URL(url).hostname).toBe('eyja.eyja.a');
+    for (const mode of ['observe', 'enforce'] as const) {
+      expect((await witnessSurface(mode, url)).hosts).toEqual(Array(4).fill('redacted-host'));
+    }
+  });
+
+  it('withholds a long opaque run split by a character the parser ignores, like the run typed directly', async () => {
+    const split = `https://${'ｑ'.repeat(16)}᠋${'ｑ'.repeat(16)}.example/`;
+    const typed = `https://${'q'.repeat(32)}.example/`;
+    expect(new URL(split).hostname).toBe(new URL(typed).hostname);
+    for (const mode of ['observe', 'enforce'] as const) {
+      expectOffListPolicy(mode, split);
+      const { cards, hosts, surface } = await hostSurface(mode, split);
+      for (const card of cards) expect(card).toContain('redacted-host');
+      expect(hosts).toEqual(Array(4).fill('redacted-host'));
+      expect(hosts).toEqual((await hostSurface(mode, typed)).hosts);
+      expect(surface).not.toContain('q'.repeat(20));
+    }
+  });
+
+  // A TAB between the slashes is stripped by the parser before it finds the
+  // host, so the host text the guard reads (empty) and the parsed host
+  // disagree. Only the mapping-equivalence check withholds this one.
+  it('withholds a host when its case-kept mapping and the parsed host disagree', async () => {
+    const url = 'https:/\t/eyJa.eyJa.a/';
+    expect(new URL(url).hostname).toBe('eyja.eyja.a');
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { cards, hosts, surface } = await witnessSurface(mode, url);
+      expectCardsWithheld(url, cards);
+      expect(hosts).toEqual(Array(4).fill('redacted-host'));
+      expect(surface.toLowerCase()).not.toContain('eyja.eyja.a');
+    }
+  });
+
+  it.each([
+    ['a long internationalised host', `https://${longIdn}.example/`, new URL(`https://${longIdn}.example/`).hostname],
+    ['a long internationalised host with a longer suffix', `https://${longIdn}.evil.example/`, new URL(`https://${longIdn}.evil.example/`).hostname],
+    ['a long hyphenated host', 'https://ordinary-internal-service-discovery/', 'ordinary-internal-service-discovery'],
+    ['an internationalised host', 'https://münchen.example/', 'xn--mnchen-3ya.example'],
+    ['a plain ASCII host', 'https://Docs.Example.com/', 'docs.example.com'],
+    ['an IPv4 host the parser rewrites', 'https://0x8.8.8.8/', '8.8.8.8'],
+  ])('still shows %s', async (_label, url, expected) => {
+    for (const mode of ['observe', 'enforce'] as const) {
+      expectOffListPolicy(mode, url);
+      const { cards, hosts, surface } = await hostSurface(mode, url);
+      expect(hosts).toEqual(Array(4).fill(expected));
+      for (const card of cards) expect(card).toContain(expected.length <= 32 ? expected : expected.slice(-29));
+      expect(surface).not.toContain('redacted-host');
+    }
+  });
+
   it('a refused typing attempt still leaves text pending, so the next Enter holds', async () => {
     const { guard } = makeGuard();
     await readPage(guard);

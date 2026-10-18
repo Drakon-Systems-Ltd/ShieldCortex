@@ -475,10 +475,32 @@ function hostOf(url: string | undefined): string | undefined {
   return parsed?.hostname || undefined;
 }
 
+/**
+ * What the URL parser makes of one non-ASCII code point in a host, asked of the
+ * parser itself (`a<ch>a`): `''` when it ignores it, the ASCII text it maps it
+ * to, or `undefined` when it rejects it or keeps it as Unicode (punycode).
+ */
+const parserCharCache = new Map<string, string | undefined>();
+function parserMapsChar(ch: string): string | undefined {
+  if (parserCharCache.has(ch)) return parserCharCache.get(ch);
+  let mapped: string | undefined;
+  try {
+    const probed = new URL(`http://a${ch}a/`).hostname;
+    const inner = probed.length >= 2 && probed.startsWith('a') && probed.endsWith('a') ? probed.slice(1, -1) : undefined;
+    if (inner !== undefined && /^[\x21-\x7e]*$/.test(inner) && !probed.includes('xn--')) mapped = inner;
+  } catch { /* rejected: keep the character */ }
+  if (parserCharCache.size >= 1024) parserCharCache.clear();
+  parserCharCache.set(ch, mapped);
+  return mapped;
+}
+
+const SPECIAL_SCHEMES = new Set(['http:', 'https:', 'ws:', 'wss:', 'ftp:', 'file:']);
+
 /** Host for cards and audit only; policy and approval binding use `hostOf`. */
 function displayHost(url: string | undefined): string | undefined {
-  const host = hostOf(url);
-  if (!host || !url) return host;
+  const parsed = url ? parseUrlLikeBrowser(url) : null;
+  const host = parsed?.hostname || undefined;
+  if (!host || !url || !parsed) return host;
   // Same scheme rule as `parseUrlLikeBrowser`; `https:HOST` (no slashes) is
   // still a host for the URL parser, so strip the scheme and ANY leading slashes.
   const authority = url.replaceAll('\\', '/').replace(SCHEME_PREFIX, '').replace(/^\/+/, '').split(/[/?#]/, 1)[0];
@@ -489,16 +511,32 @@ function displayHost(url: string | undefined): string | undefined {
   // The parser percent-decodes the host (`%41KIA…` → `akia…`): check the decoded original-case text too.
   let decoded = rawHost;
   try { decoded = decodeURIComponent(rawHost); } catch { /* keep raw */ }
-  // IDNA mapping turns fullwidth or soft-hyphenated text into ASCII that
-  // neither original matches, then folds it to lowercase. `mapped` redoes the
-  // mapping with case kept, so mixed-case patterns (`eyJ…`, `AIza…`) still match.
-  const mapped = decoded.normalize('NFKC').replace(/[。．｡]/g, '.')
-    .replace(/[­͏​-‍⁠﻿︀-️]/g, '');
+  // IDNA mapping turns fullwidth text into ASCII, drops ignored characters and
+  // folds case. `mapped` redoes that with case kept, so mixed-case patterns
+  // (`eyJ…`, `AIza…`) still match: each character is mapped the way the parser
+  // maps it on its own (TAB/LF/CR are dropped anywhere), not by a hand list.
+  let mapped = '';
+  let probes = 0;
+  for (const ch of decoded.normalize('NFKC').replace(/[。．｡]/g, '.')) {
+    if (ch === '\t' || ch === '\n' || ch === '\r') continue;
+    if (ch <= '\x7f') { mapped += ch; continue; }
+    // Bounded like the host itself: a host needing more probes than a DNS name has characters is withheld.
+    if (!parserCharCache.has(ch) && ++probes > 253) return 'redacted-host';
+    mapped += parserMapsChar(ch) ?? ch;
+  }
   for (const candidate of new Set([rawHost, decoded, mapped])) {
     if (redactCredentials(candidate) !== candidate || looksSecretish(candidate)) return 'redacted-host';
   }
-  // The parsed host, in both cases, for mappings NFKC does not reproduce; only
-  // against the recognisers, since a long punycode label is an opaque ASCII run.
+  // Fail closed when the mapping is not faithful for this input: an ASCII host
+  // the parser produced must be `mapped` folded to lowercase. Not for punycode
+  // labels (Unicode kept in `mapped`, a long A-label is not a credential), IP
+  // literals (the parser rewrites `0x7f.1` to `127.0.0.1`) or opaque hosts of
+  // other schemes (not mapped at all).
+  const faithfulnessApplies = SPECIAL_SCHEMES.has(parsed.protocol) && !host.startsWith('[') && isIP(host) !== 4
+    && !host.split('.').some((label) => label.startsWith('xn--'));
+  if (faithfulnessApplies && mapped.toLowerCase() !== host) return 'redacted-host';
+  // The parsed host, in both cases; only against the recognisers, since a long
+  // punycode label is an opaque ASCII run.
   for (const candidate of [host, host.toUpperCase()]) {
     if (redactCredentials(candidate) !== candidate) return 'redacted-host';
   }
