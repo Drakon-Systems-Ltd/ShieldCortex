@@ -10,6 +10,7 @@
  *   shieldcortex iron-dome audit [--tail] [--search <term>] [--date <date>]
  */
 
+import { IRON_DOME_HELP } from './dispatch-help.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -84,29 +85,7 @@ export async function handleIronDomeCommand(args: string[]): Promise<void> {
 }
 
 function printUsage(): void {
-  console.log(`
-${bold}Iron Dome — Behaviour Protection Layer${reset}
-
-${bold}Usage:${reset}
-  shieldcortex iron-dome activate [--profile <profile>]
-  shieldcortex iron-dome status
-  shieldcortex iron-dome deactivate
-  shieldcortex iron-dome scan --text "..." | --file <path>
-  shieldcortex iron-dome audit [--tail] [--search <term>]
-  shieldcortex iron-dome confirmation list
-  shieldcortex iron-dome confirmation move <action> <red|amber|green>
-  shieldcortex iron-dome confirmation add <action> <red|amber|green>
-  shieldcortex iron-dome confirmation remove <action>
-
-${bold}Profiles:${reset}
-  school       GDPR strict, pupil data locked
-  enterprise   Financial protection, compliance
-  personal     Lighter touch for personal use
-  paranoid     Everything requires approval
-
-${bold}Trusted local channels:${reset}
-  terminal, cli, dashboard
-`);
+  console.log(IRON_DOME_HELP);
 }
 
 function handleActivate(args: string[]): void {

@@ -191,7 +191,8 @@ describe('realtime JSONL ledger', () => {
     fs.writeFileSync(file, full.slice(0, 40));
     const partial = projectRealtimeLedger({ dir });
     expect(partial.processed).toBe(0);
-    expect(partial.errors).toEqual([]);
+    expect(partial.errors).toEqual([]); // #579: an unterminated tail is not a hold
+    expect(partial.cursor).toBe('');
 
     // Append completes: the full line + newline is now consumable.
     fs.writeFileSync(file, full + '\n');
@@ -217,6 +218,13 @@ describe('realtime JSONL ledger', () => {
     const first = projectRealtimeLedger({ dir, maxFileBytes: 10 }); // both files exceed 10 bytes
     expect(first.eventNodes).toBe(0);
     expect(first.errors.length).toBe(2);
+    // #579: oversize keeps its floor policy and is distinct from the
+    // unreadable-file hold — the cursor floors past the file, no hold error.
+    expect(first.cursor).toBe('realtime-2026-08-11.jsonl:9999999999');
+    for (const e of first.errors) {
+      expect(e).toMatch(/exceeds the 10-byte file cap — skipped$/);
+      expect(e).not.toMatch(/held at this file/);
+    }
 
     // Cursor moved past the oversized files — a later normal file still projects.
     fs.writeFileSync(

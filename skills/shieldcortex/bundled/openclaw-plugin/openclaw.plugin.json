@@ -5,7 +5,7 @@
   "description": "Real-time defence scanning on LLM input, memory extraction on LLM output, and active tool call interception with approval gating.",
   "kind": null,
   "engines": {
-    "openclaw": ">=2026.3.22",
+    "openclaw": ">=2026.4.23",
     "recommended": ">=2026.4.23"
   },
   "enabledByDefault": false,

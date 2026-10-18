@@ -45,7 +45,7 @@ function ConfirmationDialog({
           {action === 'approve'
             ? isMemoryFile
               ? 'This will mark the memory-file finding as reviewed. The source file is not modified.'
-              : 'This will approve the item and promote it into memory.'
+              : 'This will try to approve the item. Approval is not guaranteed: if the item cannot be admitted, it is rejected instead.'
             : isMemoryFile
               ? 'This will dismiss the memory-file finding. The source file is not deleted or edited.'
               : 'This will permanently discard the memory.'}
@@ -161,6 +161,7 @@ export function QuarantineView() {
   } | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [bulkConfirm, setBulkConfirm] = useState<'approve' | 'reject' | null>(null);
+  const [refusalNotice, setRefusalNotice] = useState<string | null>(null);
   const mutationError =
     (approveMutation.error as Error | null)?.message ||
     (rejectMutation.error as Error | null)?.message ||
@@ -174,7 +175,16 @@ export function QuarantineView() {
   const pendingItems = items.filter(i => i.status === 'pending');
   const annotatedItems = items.filter(i => i.annotation);
   const needsAiReviewItems = pendingItems.filter(i => !i.annotation);
-  const selectedItems = pendingItems.filter(i => selectedIds.has(i.id));
+  // #831: count, dialog copy and submitted ids come from the selected rows that are
+  // still pending, so ids that left the list (refresh or a single review) never count.
+  // Keep the order the rows were selected in: the server approves in the order it is
+  // sent, and under the memory write rate limit that order decides which items get in.
+  const pendingById = new Map(pendingItems.map(i => [i.id, i] as const));
+  const selectedItems = Array.from(selectedIds).flatMap(id => {
+    const pending = pendingById.get(id);
+    return pending ? [pending] : [];
+  });
+  const selectedCount = selectedItems.length;
   const selectedMemoryFileCount = selectedItems.filter(i => i.source_type === 'memory_file').length;
   const annotationGroups = (() => {
     const groups = new Map<string, number>();
@@ -186,7 +196,7 @@ export function QuarantineView() {
     return [...groups.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
   })();
   const allSelected = pendingItems.length > 0 && pendingItems.every(i => selectedIds.has(i.id));
-  const someSelected = pendingItems.some(i => selectedIds.has(i.id));
+  const someSelected = selectedCount > 0;
   const copilotBusy = annotateMutation.isPending || annotatePendingMutation.isPending;
   const canAnnotate = Boolean(copilotStatus?.enabled && copilotStatus.featureEnabled && copilotStatus.modelCached);
 
@@ -210,7 +220,16 @@ export function QuarantineView() {
   const handleConfirm = () => {
     if (!confirmAction) return;
     if (confirmAction.action === 'approve') {
-      approveMutation.mutate(confirmAction.item.id);
+      const id = confirmAction.item.id;
+      setRefusalNotice(null);
+      approveMutation.mutate(id, {
+        // #824: the re-scan can refuse an approval; the item then ends rejected.
+        onSuccess: (result) => {
+          if (result.status !== 'approved') {
+            setRefusalNotice(`Item #${id} was not approved${result.reason ? `: ${result.reason}` : ''}. It is now ${result.status}.`);
+          }
+        },
+      });
     } else {
       rejectMutation.mutate({ id: confirmAction.item.id });
     }
@@ -218,10 +237,20 @@ export function QuarantineView() {
   };
 
   const handleBulkConfirm = () => {
-    if (!bulkConfirm || selectedIds.size === 0) return;
-    const ids = Array.from(selectedIds);
+    if (!bulkConfirm || selectedCount === 0) return;
+    const ids = selectedItems.map(i => i.id);
     if (bulkConfirm === 'approve') {
-      bulkApproveMutation.mutate(ids);
+      setRefusalNotice(null);
+      bulkApproveMutation.mutate(ids, {
+        // #824: report refused items instead of dropping them silently. Not every
+        // refusal comes from a re-scan (BLOCK rows, rate limits), so don't claim one (#828).
+        onSuccess: (result) => {
+          const refused = result.rejected ?? 0;
+          if (refused > 0) {
+            setRefusalNotice(`${refused} of ${ids.length} selected item${ids.length !== 1 ? 's' : ''} ${refused === 1 ? 'was' : 'were'} not approved: ${refused === 1 ? 'it' : 'they'} could not be admitted. ${refused === 1 ? 'It is' : 'They are'} now rejected, not added to memory.`);
+          }
+        },
+      });
     } else {
       bulkRejectMutation.mutate(ids);
     }
@@ -253,15 +282,19 @@ export function QuarantineView() {
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="bg-[var(--sc-surface)] border border-[var(--sc-border)] rounded-xl p-6 max-w-md w-full mx-4">
             <h3 className="text-sm font-semibold text-[var(--sc-text)] mb-2">
-              {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedIds.size} item{selectedIds.size !== 1 ? 's' : ''}?
+              {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedCount} item{selectedCount !== 1 ? 's' : ''}?
             </h3>
             <p className="text-xs text-[var(--sc-text-dim)] mb-4">
               {bulkConfirm === 'approve'
                 ? selectedMemoryFileCount > 0
-                  ? 'Memory-file findings will be marked reviewed without editing files. Other selected items will be promoted into memory.'
-                  : 'This will approve all selected items and promote them into memory.'
+                  ? selectedMemoryFileCount === selectedCount
+                    ? 'Memory-file findings will be marked reviewed without editing files.'
+                    : 'Memory-file findings will be marked reviewed without editing files. The other selected items will be tried for approval; any that cannot be admitted are rejected instead.'
+                  : 'This will try to approve all selected items. Approval is not guaranteed: any that cannot be admitted are rejected instead.'
                 : selectedMemoryFileCount > 0
-                  ? 'Memory-file findings will be dismissed without editing files. Other selected memories will be discarded.'
+                  ? selectedMemoryFileCount === selectedCount
+                    ? 'Memory-file findings will be dismissed without editing files.'
+                    : 'Memory-file findings will be dismissed without editing files. Other selected memories will be discarded.'
                   : 'This will permanently discard all selected memories.'}
             </p>
             <div className="flex gap-2 justify-end">
@@ -279,7 +312,7 @@ export function QuarantineView() {
                     : 'bg-[var(--sc-danger)] text-[var(--sc-text)] hover:bg-[var(--sc-danger)]'
                 }`}
               >
-                {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedIds.size} item{selectedIds.size !== 1 ? 's' : ''}
+                {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedCount} item{selectedCount !== 1 ? 's' : ''}
               </button>
             </div>
           </div>
@@ -371,7 +404,7 @@ export function QuarantineView() {
             </button>
             {someSelected && (
               <>
-                <span className="text-xs text-[var(--sc-text-muted)]">{selectedIds.size} selected</span>
+                <span className="text-xs text-[var(--sc-text-muted)]">{selectedCount} selected</span>
                 <button
                   onClick={() => setBulkConfirm('approve')}
                   className="flex items-center gap-1 px-2.5 py-1 text-xs bg-[var(--sc-ok)]/10 text-[var(--sc-ok)] rounded-lg hover:bg-[var(--sc-ok)]/20 transition-colors"
@@ -393,6 +426,12 @@ export function QuarantineView() {
       {mutationError && (
         <div className="glass-card p-5 border-[var(--sc-danger)]/30 bg-[var(--sc-danger)]/10 text-sm text-[var(--sc-danger)]">
           {mutationError}
+        </div>
+      )}
+
+      {refusalNotice && (
+        <div role="status" className="glass-card p-5 border-[var(--sc-warn)]/30 bg-[var(--sc-warn)]/10 text-sm text-[var(--sc-warn)]">
+          {refusalNotice}
         </div>
       )}
 

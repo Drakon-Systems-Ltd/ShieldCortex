@@ -25,8 +25,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 
 import { runDefencePipeline } from '../defence/pipeline.js';
-import { addMemory, MemoryBlockedError } from '../memory/store.js';
-import { initDatabase, closeDatabase, getDatabase } from '../database/init.js';
+import { MemoryBlockedError } from '../memory/store.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceConfig, DefenceSource } from '../defence/types.js';
 import { detectInstructions } from '../defence/firewall/instruction-detector.js';
@@ -75,7 +74,7 @@ const LOW_TRUST: DefenceSource = { type: 'agent', identifier: 'agent-spawned>tas
 const balancedConfig: DefenceConfig = { ...DEFAULT_DEFENCE_CONFIG, mode: 'balanced' };
 
 // Every test runs against a fresh in-memory DB so audit-row counts are isolated.
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 function makeMemory(overrides: Partial<Memory> = {}): Memory {
@@ -140,7 +139,6 @@ describe('A. Memory firewall (what it stores)', () => {
     const db = new Database(dbPath);
     try {
       db.exec(readFileSync(schemaPath, 'utf-8'));
-      // @ts-expect-error -- .mjs hook util has no type declarations
       const { saveAutoExtractedMemory } = await import('../../scripts/lib/save-memory.mjs');
       await saveAutoExtractedMemory(
         db,
@@ -214,7 +212,6 @@ describe('A. Memory firewall (what it stores)', () => {
 
       // (2) EVERY ACCEPTED ROW CARRIES PROVENANCE: a benign write through the
       // real hook capture path lands a row with non-null source + trust + verdict.
-      // @ts-expect-error -- .mjs hook util has no type declarations
       const { saveAutoExtractedMemory } = await import('../../scripts/lib/save-memory.mjs');
       await saveAutoExtractedMemory(
         db,

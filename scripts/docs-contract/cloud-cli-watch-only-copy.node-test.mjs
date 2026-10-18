@@ -61,11 +61,25 @@ const assertQualifiedExceptions = (t) => {
   assert.doesNotMatch(t, /\bany call\b|\bevery call\b/i);
 };
 
+/** Hermes ignores the gate, but enforcing is conditional on its own setting. */
+const HERMES_QUALIFIED = /enforces immediately unless its own enforce setting \(SHIELDCORTEX_ENFORCE\) opts it out/;
+const assertHermesQualified = (t) => {
+  assert.match(t, HERMES_QUALIFIED);
+  assert.match(t, /does not change that setting/);
+  assert.doesNotMatch(t, /enforces immediately(?! unless its own enforce setting \(SHIELDCORTEX_ENFORCE\))/);
+};
+
 describe('source: Hermes enforce is independent of the shared config switch', () => {
   it('Hermes resolves enforce from SHIELDCORTEX_ENFORCE', () => {
     const src = read('plugins', 'hermes', 'shieldcortex', '__init__.py');
     assert.match(src, /resolve_enforce\(os\.environ\.get\("SHIELDCORTEX_ENFORCE"\)\)/);
     assert.doesNotMatch(src, /actionGuard/);
+  });
+
+  it('resolve_enforce is on unless an explicit opt-out word', () => {
+    const src = read('plugins', 'hermes', 'shieldcortex', 'policy.py');
+    assert.match(src, /_ENFORCE_OPTOUT = frozenset\(/);
+    assert.match(src, /return \(value or ""\)\.strip\(\)\.lower\(\) not in _ENFORCE_OPTOUT/);
   });
 
   it('the advisory flag still writes only enforce:false / readinessGate:false', () => {
@@ -96,14 +110,20 @@ describe('config --action-guard-enforce-when-ready confirmation message', () => 
     assertQualifiedExceptions(t);
   });
 
-  it('keeps the Hermes-ignores-the-gate qualifier', () => {
-    assert.match(t, /the Hermes plugin does not implement the gate and enforces immediately/);
+  it('says Hermes ignores the gate without promising it enforces regardless of SHIELDCORTEX_ENFORCE', () => {
+    assert.match(t, /the Hermes plugin does not implement the gate/);
+    assertHermesQualified(t);
   });
 });
 
 describe('config --help Action Guard lines', () => {
-  const help = between(SRC, "'  --action-guard-enforce-when-ready", "'  --action-guard-notify-openclaw");
-  const advisory = literals(help.slice(help.indexOf("'  --action-guard-advisory")));
+  // `config --help` text lives in the CONFIG_HELP template literal (#767 moved it
+  // out of src/cloud/cli.ts); collapse the help-line padding before matching.
+  const HELP_SRC = read('src', 'cli', 'dispatch-help.ts');
+  const flat = (s) => s.replace(/\s+/g, ' ');
+  const configHelp = between(HELP_SRC, 'export const CONFIG_HELP = `', '`;');
+  const help = between(configHelp, '  --action-guard-enforce-when-ready', '  --action-guard-notify-openclaw');
+  const advisory = flat(help.slice(help.indexOf('  --action-guard-advisory')));
 
   it('watch-only help line names the floor and Hermes independence', () => {
     assertQualifiedExceptions(advisory);
@@ -112,7 +132,13 @@ describe('config --help Action Guard lines', () => {
   });
 
   it('shadow help line scopes logging to ordinary dangerous ops', () => {
-    assert.match(literals(help), /Log ordinary dangerous ops \(shadow\)/);
+    assert.match(flat(help), /Log ordinary dangerous ops \(shadow\)/);
+  });
+
+  it('shadow help line qualifies Hermes by its own SHIELDCORTEX_ENFORCE setting', () => {
+    const shadow = flat(help.slice(0, help.indexOf('  --action-guard-advisory')));
+    assert.match(shadow, /Hermes ignores the gate/);
+    assertHermesQualified(shadow);
   });
 });
 
@@ -122,6 +148,14 @@ describe('CHANGELOG', () => {
     // release time; the contract is its wording, not which heading it sits under.
     const bullet = read('CHANGELOG.md').split('\n').find((l) => l.startsWith('- **') && /config` watch only copy/i.test(l));
     assert.ok(bullet, 'no config watch only copy bullet in CHANGELOG.md');
+    assert.match(bullet, /SHIELDCORTEX_ENFORCE/);
+    assert.match(bullet, /not runtime proof/);
+  });
+
+  it('Unreleased Docs names the enforce-when-ready Hermes qualification', () => {
+    const unreleased = between(read('CHANGELOG.md'), '## [Unreleased]', '\n## [');
+    const bullet = unreleased.split('\n').find((l) => /enforce-when-ready` copy: Hermes/i.test(l));
+    assert.ok(bullet, 'no enforce-when-ready Hermes copy bullet');
     assert.match(bullet, /SHIELDCORTEX_ENFORCE/);
     assert.match(bullet, /not runtime proof/);
   });

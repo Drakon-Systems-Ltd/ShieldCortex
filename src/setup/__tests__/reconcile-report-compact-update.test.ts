@@ -15,9 +15,13 @@ function fridayClassResult(): ReconcileExecResult {
     verdict: {
       state: 'duplicate-install',
       severity: 'warn',
-      recommendedAction: 'prune',
+      recommendedAction: 'dedupe-and-reload',
       enabledInConfig: true,
       loadedInIndex: true,
+      loadedInLiveRoster: null,
+      indexReadable: true,
+      configReadable: true,
+      configPresent: true,
       openClawTracked: true,
       indexWarnsConflict: false,
       metadataConflict: false,
@@ -33,6 +37,10 @@ function fridayClassResult(): ReconcileExecResult {
       recommendedAction: 'none',
       enabledInConfig: true,
       loadedInIndex: true,
+      loadedInLiveRoster: null,
+      indexReadable: true,
+      configReadable: true,
+      configPresent: true,
       openClawTracked: true,
       indexWarnsConflict: false,
       metadataConflict: false,
@@ -66,6 +74,8 @@ function fridayClassResult(): ReconcileExecResult {
       reasons: [
         'roster proof FAILED: could not read the running gateway boot roster (log rotated, wiped, or written elsewhere) — cannot confirm the interceptor is loaded; the SQLite install index lists it as enabled, but that is install state, not load state; canary proof: live probe was denied by the interceptor and audited; version proof: on-disk build 4.54.10 satisfies expected 4.54.10',
       ],
+      index: null,
+      liveRoster: null,
       canary: { ran: true, denied: true, auditEntryFound: true },
     },
     ok: false,
@@ -138,6 +148,8 @@ describe('protectionLedgerFromReconcile fail-closed', () => {
       canaryProof: false,
       versionProof: true,
       reasons: ['ABSENT from running gateway'],
+      index: null,
+      liveRoster: null,
       canary: { ran: true, denied: false, auditEntryFound: false },
     };
     r.ok = false;
@@ -158,6 +170,8 @@ describe('protectionLedgerFromReconcile fail-closed', () => {
       canaryProof: true,
       versionProof: false,
       reasons: ['on-disk older than expected'],
+      index: null,
+      liveRoster: null,
       canary: { ran: true, denied: true, auditEntryFound: true },
     };
     const ledger = protectionLedgerFromReconcile(r);

@@ -1151,4 +1151,42 @@ export function runMigrations(database: Database.Database): void {
   } catch (err) {
     logIfUnexpectedDdlError(err, 'chained ledger columns + tables (#617)');
   }
+
+  // Migration: #674 — a chained row's `project` cannot change.
+  //
+  // Builds up to v5.2.1 run the project backfill above WITHOUT the
+  // `seq IS NULL` guard on every startup. Against a database this build has
+  // already chained, that rewrites `project` (part of the content digest) on
+  // NULL-project chained rows and `ledger verify` then fails. The guard lives
+  // in new code, which an old binary never runs, so the refusal has to live
+  // in the database: this trigger aborts any statement that changes `project`
+  // on a row with a seq, whichever build issues it. No-op updates
+  // (NULL -> NULL, 'a' -> 'a') pass. It is scoped to `UPDATE OF project` so
+  // the writer's finalise (content_digest, row_hash), the memory FK
+  // `ON DELETE SET NULL` (memory_id) and retention DELETEs never fire it.
+  //
+  // Compatibility protection, not a tamper boundary: anyone with SQL access
+  // can drop the trigger, and old builds' unchained INSERTs and un-checkpointed
+  // DELETEs are not covered. Tamper detection stays with `ledger verify`.
+  // The message deliberately matches none of logIfUnexpectedDdlError's
+  // expected patterns (in this build or v5.2.1), so an old build prints it on
+  // stderr instead of swallowing it. Created only once `seq` exists; fresh
+  // databases get it from schema.sql / inline-schema.ts, which carry the same
+  // DDL.
+  try {
+    const hasSeq = (database.prepare('PRAGMA table_info(defence_audit)').all() as { name: string }[])
+      .some((c) => c.name === 'seq');
+    if (hasSeq) {
+      database.exec(`
+        CREATE TRIGGER IF NOT EXISTS trg_defence_audit_chained_project_immutable
+        BEFORE UPDATE OF project ON defence_audit
+        WHEN OLD.seq IS NOT NULL AND NEW.project IS NOT OLD.project
+        BEGIN
+          SELECT RAISE(ABORT, 'ShieldCortex #674: project of a chained defence_audit row is immutable (an older ShieldCortex build may be opening this database)');
+        END;
+      `);
+    }
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'chained project immutability trigger (#674)');
+  }
 }

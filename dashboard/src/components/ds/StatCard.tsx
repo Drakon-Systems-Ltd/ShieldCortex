@@ -9,6 +9,8 @@ interface StatCardProps {
   value: string | number;
   icon: LucideIcon;
   trend?: { value: number; label: string };
+  /** One muted line under the value: scope or freshness of what it measures. */
+  hint?: string;
   /** Legacy accents map to v2 semantics: coral→danger, cyan→neutral. */
   accent?: 'coral' | 'cyan' | 'amber' | 'muted';
   className?: string;
@@ -22,7 +24,7 @@ const ACCENT_VALUE = {
 } as const;
 
 /** Stat tile: label, tabular value, optional trend delta. */
-export function StatCard({ label, value, icon: Icon, trend, accent = 'cyan', className }: StatCardProps) {
+export function StatCard({ label, value, icon: Icon, trend, hint, accent = 'cyan', className }: StatCardProps) {
   return (
     <div
       className={cn(
@@ -35,6 +37,7 @@ export function StatCard({ label, value, icon: Icon, trend, accent = 'cyan', cla
         <Icon size={15} aria-hidden className="shrink-0 text-[var(--sc-text-muted)]" />
       </div>
       <div className={cn('mt-1.5 text-2xl font-semibold tabular-nums', ACCENT_VALUE[accent])}>{value}</div>
+      {hint && <div className="mt-1 text-xs text-[var(--sc-text-muted)]">{hint}</div>}
       {trend && (
         <div className="mt-1 flex items-center gap-1 text-xs text-[var(--sc-text-muted)]">
           {trend.value >= 0 ? (

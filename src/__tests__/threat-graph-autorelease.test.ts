@@ -31,7 +31,7 @@ function seedAllowance(pattern: string, exemplarHash: string, opts: { active?: b
   `).run(Number(src.lastInsertRowid), Number(dst.lastInsertRowid), state.expires, JSON.stringify(state));
 }
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 const Q = 'QUARANTINE' as const;
