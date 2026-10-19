@@ -11,8 +11,8 @@ import { enqueueFailedQuarantineSync } from './sync-queue.js';
 import { getDatabase, isDatabaseInitialized } from '../database/init.js';
 import { redactCredentials } from '../defence/credential-leak/index.js';
 import { sanitiseInput } from '../defence/input-sanitisation/index.js';
-import { classifySensitivity, hasRedactionToken, redactForPersistence } from '../defence/sensitivity/index.js';
-import type { SensitivityLevel } from '../defence/types.js';
+import { classifySensitivityPrecise, hasRedactionToken, redactForPersistence } from '../defence/sensitivity/index.js';
+import type { SensitivityTier } from '../defence/sensitivity/tier.js';
 
 /** A quarantine entry as presented to the cloud sync gate. */
 export interface QuarantineSyncEntry {
@@ -97,8 +97,8 @@ export function prepareQuarantineSyncPayload(
   };
 }
 
-const LEVEL_RANK: Record<SensitivityLevel, number> = { PUBLIC: 0, INTERNAL: 1, PERSONAL: 2, CONFIDENTIAL: 3, RESTRICTED: 4 };
-const LEVELS: SensitivityLevel[] = ['PUBLIC', 'INTERNAL', 'PERSONAL', 'CONFIDENTIAL', 'RESTRICTED'];
+const LEVEL_RANK: Record<SensitivityTier, number> = { PUBLIC: 0, INTERNAL: 1, PERSONAL: 2, CONFIDENTIAL: 3, RESTRICTED: 4 };
+const LEVELS: SensitivityTier[] = ['PUBLIC', 'INTERNAL', 'PERSONAL', 'CONFIDENTIAL', 'RESTRICTED'];
 
 /**
  * Rank a stored level string. Unknown but non-empty values are ranked as
@@ -109,7 +109,7 @@ function rankLevel(level: unknown): number | null {
   if (typeof level !== 'string') return null;
   const normalised = level.trim().toUpperCase();
   if (normalised.length === 0) return null;
-  return normalised in LEVEL_RANK ? LEVEL_RANK[normalised as SensitivityLevel] : LEVEL_RANK.CONFIDENTIAL;
+  return normalised in LEVEL_RANK ? LEVEL_RANK[normalised as SensitivityTier] : LEVEL_RANK.CONFIDENTIAL;
 }
 
 /**
@@ -159,14 +159,14 @@ function readAuditSensitivity(auditId: unknown): string | null {
  * classification, so the maximum is never lower than it; where persistence
  * rewrote the text, the token floor and provenance are the evidence.
  */
-export function reconstructQuarantineSensitivity(row: Record<string, unknown>): SensitivityLevel {
+export function reconstructQuarantineSensitivity(row: Record<string, unknown>): SensitivityTier {
   const content = typeof row.original_content === 'string' ? row.original_content : '';
   const title = typeof row.original_title === 'string' ? row.original_title : '';
 
-  let rank = LEVEL_RANK[classifySensitivity(content, title).level];
+  let rank = LEVEL_RANK[classifySensitivityPrecise(content, title).level];
   const sanitisedContent = sanitiseInput(content).sanitised;
-  rank = Math.max(rank, LEVEL_RANK[classifySensitivity(sanitisedContent, title).level]);
-  rank = Math.max(rank, LEVEL_RANK[classifySensitivity(sanitisedContent, sanitiseInput(title).sanitised).level]);
+  rank = Math.max(rank, LEVEL_RANK[classifySensitivityPrecise(sanitisedContent, title).level]);
+  rank = Math.max(rank, LEVEL_RANK[classifySensitivityPrecise(sanitisedContent, sanitiseInput(title).sanitised).level]);
   if (hasRedactionToken(content) || hasRedactionToken(title)) rank = Math.max(rank, LEVEL_RANK.CONFIDENTIAL);
   const provenance = rankLevel(readAuditSensitivity(row.audit_id));
   if (provenance !== null) rank = Math.max(rank, provenance);

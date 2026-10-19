@@ -16,7 +16,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { classifySensitivity } from '../defence/sensitivity/index.js';
+import { classifySensitivity, classifySensitivityPrecise } from '../defence/sensitivity/index.js';
 import { isIsolatedSensitivity } from '../defence/sensitivity/isolation.js';
 import { reclassifyMemories } from '../cli/reclassify.js';
 
@@ -267,9 +267,11 @@ const R3_ENGINEERING_NEGATIVES = [
 
 describe('PERSONAL sensitivity tier (#718)', () => {
   it('classifies the 13195-shaped memory as PERSONAL', () => {
-    const c = classifySensitivity(FAMILY_CONTENT, FAMILY_TITLE);
+    const c = classifySensitivityPrecise(FAMILY_CONTENT, FAMILY_TITLE);
     expect(c.level).toBe('PERSONAL');
     expect(c.detectedPatterns).toContain('personal-life-event');
+    // 5.x compat: the public classifier projects PERSONAL to CONFIDENTIAL.
+    expect(classifySensitivity(FAMILY_CONTENT, FAMILY_TITLE).level).toBe('CONFIDENTIAL');
   });
 
   it('does not fire on engineering vocabulary', () => {
@@ -279,6 +281,7 @@ describe('PERSONAL sensitivity tier (#718)', () => {
       ['Use the Inter font family for the dashboard.', 'Fonts'],
       ['Circuit breaker trips after five failures.', 'Resilience'],
     ]) {
+      expect([title, classifySensitivityPrecise(content, title).level]).toEqual([title, 'PUBLIC']);
       expect([title, classifySensitivity(content, title).level]).toEqual([title, 'PUBLIC']);
     }
   });
@@ -298,7 +301,13 @@ describe('PERSONAL sensitivity tier (#718)', () => {
     'Baby steps: the sister project mirrors our partner SLA for the holiday release',
     ...R3_ENGINEERING_NEGATIVES,
   ])('engineering/business text is not PERSONAL: %s', (content) => {
-    expect(classifySensitivity(content, 'note').level).not.toBe('PERSONAL');
+    // Precise seam: the projected public level is never PERSONAL, so asserting
+    // on it would pass vacuously.
+    const precise = classifySensitivityPrecise(content, 'note').level;
+    expect(precise).not.toBe('PERSONAL');
+    if (precise === 'PUBLIC' || precise === 'INTERNAL') {
+      expect(classifySensitivity(content, 'note').level).not.toBe('CONFIDENTIAL');
+    }
   });
 
   it.each([
@@ -318,7 +327,8 @@ describe('PERSONAL sensitivity tier (#718)', () => {
     'Keep it from her until the weekend',
     'Keep this a secret from him',
   ])('private-life text is still PERSONAL: %s', (content) => {
-    expect(classifySensitivity(content, 'note').level).toBe('PERSONAL');
+    expect(classifySensitivityPrecise(content, 'note').level).toBe('PERSONAL');
+    expect(classifySensitivity(content, 'note').level).toBe('CONFIDENTIAL');
   });
 
   it('never lowers a higher tier', () => {
@@ -432,7 +442,7 @@ describe('memories reclassify (#718)', () => {
       const racedId = (db.prepare(`SELECT id FROM memories WHERE title = 'Raced'`).get() as { id: number }).id;
       const classify = (content: string, title: string) => {
         if (title === 'Raced') race(other, racedId);
-        return classifySensitivity(content, title);
+        return classifySensitivityPrecise(content, title);
       };
       const r = await reclassifyMemories({ db, project: PROJECT, execute: true, classify });
       other.close();
@@ -494,7 +504,7 @@ function makeHome(): { home: string; dbPath: string } {
      VALUES (lower(hex(randomblob(16))), 'long_term', ?, ?, ?, ?, 1.0, 1.0, ?, 'active')`,
   );
   // The private memory, labelled as the classifier now labels it.
-  ins.run('context', FAMILY_TITLE, FAMILY_CONTENT, PROJECT, classifySensitivity(FAMILY_CONTENT, FAMILY_TITLE).level);
+  ins.run('context', FAMILY_TITLE, FAMILY_CONTENT, PROJECT, classifySensitivityPrecise(FAMILY_CONTENT, FAMILY_TITLE).level);
   ins.run('error', 'Deploy errors digest', 'Deploy errors from the nightly digest job: summarise yesterday failures and the trip plan.', PROJECT, 'PUBLIC');
   // A watchdog-vocabulary memory — the kind the probe used to pull in.
   ins.run('pattern', 'Liveness probe protocol', 'Automated liveness check probe from mc-watchdog confirms the CLI backend is registered; reply single line.', PROJECT, 'PUBLIC');

@@ -1427,6 +1427,8 @@ function xrayMemoryGuard(content: string, title?: string): XRayGuardResult {
 // Field paths verified against src/defence/types.ts: trust.score (TrustScore.score),
 // sensitivity.level (SensitivityClassification.level), fragmentation.score
 // (FragmentationAnalysis.score; fragmentation itself is nullable).
+// The public pipeline returns the 5.6.0 four-value level: PERSONAL content
+// reads CONFIDENTIAL here, while the local defence_audit row keeps PERSONAL.
 type PipelineRunner = (
   content: string,
   title: string,
