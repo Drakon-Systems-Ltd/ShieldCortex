@@ -7,7 +7,7 @@ import { getBetterSqlite3 } from './better-sqlite3-guard.js';
 import { NativeModuleLoadError, isNativeModuleLoadError, formatNativeLoadError } from './native-load-classify.js';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, renameSync, copyFileSync, readdirSync, openSync, closeSync, realpathSync, linkSync, fstatSync } from 'fs';
 import { randomUUID } from 'crypto';
-import { basename, dirname, join } from 'path';
+import { basename, dirname, join, resolve } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
@@ -275,6 +275,25 @@ interface LockIdentity { dev: number; ino: number; bytes: Buffer; partial?: bool
  */
 const displacedLocks = new Map<string, string>();
 
+/**
+ * The startup lock path for `dbPath`, spelled one way per database: absolute,
+ * normalised, with the parent directory's symlinks resolved when it exists
+ * (the lock file itself need not). `displacedLocks` is keyed by this path, so
+ * a same-process retry that spells the database differently (`./`, `..`,
+ * relative versus absolute, a symlinked parent) still finds a record it left
+ * aside instead of publishing into the vacant lock path (#837).
+ */
+function startupLockPath(dbPath: string): string {
+  const absolute = resolve(dbPath);
+  let parent = dirname(absolute);
+  try {
+    parent = realpathSync(parent);
+  } catch {
+    // Missing or unreadable parent: keep the normalised lexical path.
+  }
+  return `${join(parent, basename(absolute))}.lock`;
+}
+
 /** Read the lock record and its inode through one descriptor; null when absent. */
 function readLockSnapshot(path: string): LockSnapshot | null {
   let fd: number;
@@ -417,8 +436,10 @@ function restoreLock(aside: string, lockPath: string, bytes: Buffer | undefined)
 }
 
 /**
- * Remove the lock at `lockPath` only if it is still exactly `expected` (same
- * device, inode and bytes). The record is first
+ * Remove the lock at `lockPath` only if it is still `expected`: same device
+ * and inode, and the same bytes (or, for `partial`, a prefix of them — safe
+ * only because the caller still holds the descriptor that created that inode,
+ * so no other record can be at it). The record is first
  * renamed aside atomically, so a lock another process published after
  * `expected` was read is never unlinked by name. A record that does not match,
  * or cannot be read, is put back; if that fails it is left at the aside name,
@@ -662,7 +683,7 @@ function judgeLock(snapshot: LockSnapshot, dbPath: string, lockPath: string): { 
  * it untouched (#763).
  */
 function acquireStartupLock(dbPath: string, refuseIfLocked = false): void {
-  const lockPath = `${dbPath}.lock`;
+  const lockPath = startupLockPath(dbPath);
   const runtime = resolveRuntimeInfo();
   const payload = JSON.stringify({
     pid: process.pid,

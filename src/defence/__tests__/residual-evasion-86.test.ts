@@ -189,6 +189,7 @@ describe('#86.3 dot word-boundary correctness — must ALLOW the siblings', () =
 
 describe('#86-redos — heredoc-linking stays fast under load', () => {
   const MAX_SCALING_RATIO = 16;
+  const MEASUREMENT_ATTEMPTS = 3;
   const HANG_DETECTOR_MS = 2000;
 
   function manyHeredocs(count: number, evilAt?: number): string {
@@ -228,22 +229,38 @@ describe('#86-redos — heredoc-linking stays fast under load', () => {
     // samples are mostly timer and scheduler noise, and the 0.2 ms floor below
     // would otherwise flatten a real ratio.
     const batchSize = Math.min(256, Math.max(1, Math.ceil(4 / Math.max(probeMs, 0.01))));
-    let bestSmallMs = Number.POSITIVE_INFINITY;
-    let bestBigMs = Number.POSITIVE_INFINITY;
-    for (let sample = 0; sample < 5; sample++) {
-      const smallStart = performance.now();
-      for (let call = 0; call < batchSize; call++) work(small);
-      bestSmallMs = Math.min(bestSmallMs, performance.now() - smallStart);
+    function measureRatio(): number {
+      let bestSmallMs = Number.POSITIVE_INFINITY;
+      let bestBigMs = Number.POSITIVE_INFINITY;
+      for (let sample = 0; sample < 5; sample++) {
+        const smallStart = performance.now();
+        for (let call = 0; call < batchSize; call++) work(small);
+        bestSmallMs = Math.min(bestSmallMs, performance.now() - smallStart);
 
-      const bigStart = performance.now();
-      for (let call = 0; call < batchSize; call++) work(big);
-      bestBigMs = Math.min(bestBigMs, performance.now() - bigStart);
+        const bigStart = performance.now();
+        for (let call = 0; call < batchSize; call++) work(big);
+        bestBigMs = Math.min(bestBigMs, performance.now() - bigStart);
+      }
+      return bestBigMs / Math.max(bestSmallMs, 0.2);
+    }
+
+    // #845: a shared macOS runner measured the linear self-test control at
+    // 19.8x (bound 16x), so one noisy window can still fail a linear row.
+    // Re-measure up to MEASUREMENT_ATTEMPTS times and keep the lowest ratio.
+    // Noise only ever inflates a ratio on some attempts; a real super-linear
+    // regression (the ~26x sabotage above) exceeds the bound on every attempt,
+    // so the minimum still catches it, and the quadratic control below still
+    // has to clear the bound on all of them.
+    const ratios: number[] = [];
+    for (let attempt = 0; attempt < MEASUREMENT_ATTEMPTS; attempt++) {
+      ratios.push(measureRatio());
+      if (ratios[ratios.length - 1] < MAX_SCALING_RATIO) break;
     }
 
     const fullSizeStart = performance.now();
     const v = work(fullSize);
     const fullSizeMs = performance.now() - fullSizeStart;
-    return { v, ratio: bestBigMs / Math.max(bestSmallMs, 0.2), fullSizeMs };
+    return { v, ratio: Math.min(...ratios), ratios, fullSizeMs };
   }
 
   it('stays fast on a ~50k-char, 789-quoted-heredoc pathological command (each redirected to a distinct file)', () => {
