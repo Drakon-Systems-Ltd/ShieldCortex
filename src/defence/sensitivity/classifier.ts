@@ -2,7 +2,7 @@
  * Content sensitivity classifier.
  */
 
-import type { PreciseSensitivityClassification, SensitivityTier } from './tier.js';
+import type { SensitivityClassification, SensitivityLevel } from '../types.js';
 import {
   RESTRICTED_PATTERNS,
   CONFIDENTIAL_PATTERNS,
@@ -36,11 +36,11 @@ function matchPatterns(
 export function classifyContent(
   content: string,
   title: string,
-): PreciseSensitivityClassification {
+): SensitivityClassification {
   const text = `${title}\n${content}`;
 
   const allLabels: string[] = [];
-  let level: SensitivityTier = 'PUBLIC';
+  let level: SensitivityLevel = 'PUBLIC';
   let confidence = 0.5;
 
   // Check in priority order: RESTRICTED > CONFIDENTIAL > INTERNAL

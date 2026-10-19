@@ -952,11 +952,7 @@ async function loadDefenceModules(db) {
     if (typeof dispositionMod.resolveDisposition !== 'function') return null;
 
     _defenceCache = {
-      // Precise #718 tier so the stored label keeps PERSONAL (5.x compat); the
-      // public function (projected to CONFIDENTIAL) only on a mismatched dist.
-      runDefencePipeline: typeof pipelineMod.runDefencePipelinePrecise === 'function'
-        ? pipelineMod.runDefencePipelinePrecise
-        : pipelineMod.runDefencePipeline,
+      runDefencePipeline: pipelineMod.runDefencePipeline,
       resolveDisposition: dispositionMod.resolveDisposition,
       classifyContentForm: typeof formMod.classifyContentForm === 'function' ? formMod.classifyContentForm : null,
       detectNonAuthoritativeInstruction:

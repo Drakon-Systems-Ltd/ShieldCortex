@@ -242,8 +242,6 @@ SHIELDCORTEX_RECALL_LANE=cron       # or automation, subagent, interactive
 
 The warning is repetition evidence, not a proven root cause: asking about the same topic repeatedly, or an unmarked scheduled job recalling as `interactive`, does the same. It does not ask you to change any setting. If the log is missing, too short, has a gap with older entries behind it, or is unreadable, corrupt or oversized, the row is INFO "not checked" and never a pass.
 
-**Library API and PERSONAL (5.x compat).** From the release after 5.10.5, the exported `SensitivityLevel` is the 5.6.0 four-value union again, and `classifySensitivity`, `runDefencePipeline`, `scan` and the skill scanners return `CONFIDENTIAL` for content the classifier tiers as PERSONAL. Stored labels, the audit log, the HTTP scan routes, `shieldcortex scan --json`, Cloud sync and every lane rule on this page keep `PERSONAL`.
-
 <a id="reclassify"></a>
 
 #### Backfilling labels: `shieldcortex memories reclassify`
