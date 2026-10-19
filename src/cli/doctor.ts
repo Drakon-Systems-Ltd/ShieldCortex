@@ -20,9 +20,11 @@ import {
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
 import {
+  canonicalProjectDirFromIndex,
   gatherReconcileInput,
   reconcilePluginState,
   REALTIME_PLUGIN_ID,
+  type ReconcileInput,
   type ReconcileVerdict,
 } from '../integrations/openclaw-plugin-index.js';
 import {
@@ -46,6 +48,7 @@ import {
   type HermesPluginCopy,
   type HermesPluginRootScan,
   type HermesPluginScan,
+  type HermesEnvironment,
   type HermesProjectState,
   type HermesScanOptions,
 } from '../setup/hermes-plugins.js';
@@ -155,6 +158,7 @@ import {
   writeRepairAgentBrief,
   claudeToolGateWired,
   claudePlaneEnforcing,
+  HERMES_AGENT_HOME_MARKERS,
   type HostGatePlanes,
   type OpenClawGatePosture,
 } from '../setup/host-table.js';
@@ -3101,6 +3105,55 @@ const HERMES_UNREADABLE_FIX =
   '`--fix-hermes-plugin-copies` moves nothing in any root: the copy the scan could not read ' +
   'can be the one the gateway loads, or the one another plugin root resolves through.';
 
+/**
+ * Hermes is confirmed ABSENT on this host, not merely un-askable (#651).
+ *
+ * `scan.present` only says a directory exists at the Hermes home; a leftover
+ * `~/.hermes/ekho-state` makes it true on a host the HOSTS table rightly calls
+ * `Hermes absent`, and the plugin-copies row then warned "could not determine
+ * which copy Hermes loads". That is the wrong question on a host with nothing
+ * to load. Every condition below is required, so uncertainty never reads as
+ * absence:
+ *
+ *   - no interpreter was found (`noInterpreter`, a structured fact — never a
+ *     parse of the reason string). It is set only when every candidate statted
+ *     as absent and PATH held no `hermes` launcher (#651 r2): an unreadable
+ *     candidate, or a launcher with no usable interpreter, is not absence. An
+ *     interpreter that was found and failed is a broken Hermes, not an absent one;
+ *   - no path was unreadable anywhere in the scan;
+ *   - `HERMES_HOME` is unset — an operator who points this process at a home
+ *     has told us Hermes lives there;
+ *   - none of the HOSTS table's agent-home markers (`HERMES_AGENT_HOME_MARKERS`)
+ *     is in the home, and there is no `plugins/` directory at all — each one
+ *     STATTED as missing (ENOENT/ENOTDIR). Any other stat error is a path that
+ *     could not be read, and that is not absence.
+ *
+ * No interpreter alone proves nothing: an agent home with a moved or broken
+ * venv still warns, because there a plugin copy may well be loaded.
+ */
+export function hermesConfirmedAbsent(scan: HermesPluginScan, env: HermesEnvironment): boolean {
+  if (scan.fromHermes || !scan.noInterpreter || scan.undetermined.length > 0) return false;
+  if (env.hermesHome !== null) return false;
+  return [...HERMES_AGENT_HOME_MARKERS, 'plugins'].every((entry) => {
+    try {
+      fs.lstatSync(path.join(scan.hermesHome, entry));
+      return false;
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      return code === 'ENOENT' || code === 'ENOTDIR';
+    }
+  });
+}
+
+/** The INFO line for a home directory that exists but holds no Hermes (#651). */
+function hermesAbsentMessage(hermesHome: string): string {
+  return (
+    `skipped (Hermes not detected — ${tildify(hermesHome)} exists but holds no Hermes agent home ` +
+    `(${HERMES_AGENT_HOME_MARKERS.join(', ')}) and no plugins/ directory, and no Hermes ` +
+    'interpreter was found)'
+  );
+}
+
 export async function checkHermesPluginShadowing(
   home: string = os.homedir(),
   opts: HermesScanOptions = {},
@@ -3144,6 +3197,12 @@ export async function checkHermesPluginShadowing(
 
   if (!scan.present) {
     return { label, status: 'info', message: 'skipped (Hermes not detected)' };
+  }
+
+  // A directory at the Hermes home with no agent home and no plugins in it is
+  // an absent runtime, the same verdict the HOSTS table draws (#651).
+  if (hermesConfirmedAbsent(scan, env)) {
+    return { label, status: 'info', message: hermesAbsentMessage(hermesHome) };
   }
 
   // No Hermes discovery, no verdict (#569 r4). Never PASS, never a winner.
@@ -3419,9 +3478,10 @@ export async function checkHermesPluginFreshness(
   opts: HermesScanOptions = {},
 ): Promise<CheckResult> {
   const label = 'Hermes plugin';
+  const env = hermesEnvironment(home);
   let scan: HermesPluginScan;
   try {
-    scan = scanHermesPluginCopies(hermesEnvironment(home), opts);
+    scan = scanHermesPluginCopies(env, opts);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { label, status: 'info', message: `check skipped — ${msg}` };
@@ -3433,6 +3493,10 @@ export async function checkHermesPluginFreshness(
   // uninstall was a crash. Doctor has no stored marker to read intent from.
   // `update` prints that sentence when its own swap fails, and nowhere else.
   if (!scan.present) return { label, status: 'info', message: 'skipped (Hermes not detected)' };
+  // Same absent verdict as the copies row, so the two never disagree (#651).
+  if (hermesConfirmedAbsent(scan, env)) {
+    return { label, status: 'info', message: hermesAbsentMessage(scan.hermesHome) };
+  }
   if (scan.undetermined.length > 0 || !scan.fromHermes) {
     return {
       label,
@@ -4820,6 +4884,12 @@ export function policyLockRows(): CheckResult[] {
       // Enforce + plugin-off is the Jarvis 5.0.6 paste: HOSTS said Guard off,
       // doctor still FAILed and printed `$ protect` + exit 1. That looks like
       // a crash. Warn, no copy-paste protect, until something is actually on.
+      //
+      // #651 r2: this row is deliberately NOT downgraded to INFO. The signed
+      // config read returns enabled:false for an unreadable or corrupt file as
+      // well as a real "off", and signed-off does not prove the OpenClaw plane
+      // is off (its plugin config can enable the guard). Neither is confirmed
+      // absence, so the WARN stays until a reader can prove both.
       rows.push({
         label: `${label} policy lock`,
         status: liveGating ? 'fail' : 'warn',
@@ -8113,8 +8183,11 @@ export async function checkOpenClawPluginLoadState(
     return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
   }
 
-  const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion }));
-  const result = renderPluginLoadVerdict(verdict);
+  const input = gatherReconcileInput(home, { expectedVersion });
+  const verdict = reconcilePluginState(input);
+  const result = verdict.state === 'duplicate-install'
+    ? withDuplicateInstallEvidence(renderPluginLoadVerdict(verdict), home, input)
+    : renderPluginLoadVerdict(verdict);
 
   // #226: "loaded" is not "protecting the conversation". A plugin whose
   // conversation-access grant is missing has had its llm_input/llm_output
@@ -8142,6 +8215,61 @@ export async function checkOpenClawPluginLoadState(
     }
   }
   return result;
+}
+
+/**
+ * #651: the duplicate-install row said "prune the stale duplicate" and named
+ * no directory. This adds what the evidence on disk actually supports — every
+ * observed project dir by full path, and which one (if any) OpenClaw's install
+ * index names — and nothing it does not.
+ *
+ * The index names an INSTALL, not what the running gateway loaded (#103), so
+ * nothing added here calls a directory stale or safe to delete (the verdict's
+ * own "prune the stale duplicate" wording is older and names none), and no
+ * removal command is printed: the fix stays the verdict's, and the message
+ * says "inspect before removing anything by hand". Where the index cannot be read, names no
+ * dir, or names one that is not on disk, the row says exactly that instead of
+ * guessing. Pure over `input`; reads nothing.
+ */
+export function withDuplicateInstallEvidence(
+  result: CheckResult,
+  home: string,
+  input: Pick<ReconcileInput, 'index' | 'projectDirs' | 'pluginId'>,
+): CheckResult {
+  const projectsRoot = path.join(home, '.openclaw', 'npm', 'projects');
+  const dirs = input.projectDirs ?? [];
+  const full = (name: string) => tildify(path.join(projectsRoot, name));
+  const observed = `Observed: ${dirs.map(full).join(', ')}.`;
+  let evidence: string;
+  if (input.index == null) {
+    evidence =
+      'The OpenClaw install index could not be read, so nothing here says which of them is the ' +
+      'recorded install.';
+  } else {
+    const named = canonicalProjectDirFromIndex(input.index, input.pluginId);
+    if (named === null) {
+      evidence = 'The OpenClaw install index names no install dir for this plugin, so nothing here ' +
+        'says which of them is the recorded install.';
+    } else if (!dirs.includes(named)) {
+      evidence = `The OpenClaw install index names ${full(named)}, which is not among them.`;
+    } else {
+      const others = dirs.filter((d) => d !== named).map(full).join(', ');
+      evidence =
+        `The OpenClaw install index names ${full(named)} as the install; it does not name ${others}. ` +
+        'The index records install state, not what the running gateway loaded.';
+    }
+  }
+  // The caution goes in the MESSAGE (#651 r2): the human renderer prints the
+  // message in full at every width, but drops a WARN fix note that carries
+  // `shieldcortex repair` and substitutes "No action needed". The fix stays the
+  // verdict's own.
+  const caution =
+    'Doctor does not say which of these, if any, is stale or safe to delete; inspect each ' +
+    '(for example the package.json version in it) before removing anything by hand.';
+  return {
+    ...result,
+    message: `${result.message}. ${observed} ${evidence} ${caution}`,
+  };
 }
 
 /**
