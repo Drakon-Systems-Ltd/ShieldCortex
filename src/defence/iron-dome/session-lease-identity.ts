@@ -14,13 +14,21 @@
 import { sessionKeyFor, type SessionGuardOptions } from './session-guard.js';
 
 /**
- * The lease holder for a raw session id: the session key, or '' when the id is
- * blank or no salt is available. '' is deliberate — `evaluateToolCallLease`
- * gives a blank self its per-process fallback, and a blank never re-enters.
+ * The lease holder for a raw session id:
+ *  - the session key, for a nonblank id;
+ *  - '' for a blank, whitespace-only or missing id. `evaluateToolCallLease`
+ *    maps '' to its per-process `anon-pid-<pid>` fallback, unchanged — so
+ *    blank callers inside ONE process share that holder and re-enter each
+ *    other, while a blank on the hook plane (`ppid:<pid>`) never matches it;
+ *  - null when the id is nonblank but its key cannot be derived (no usable
+ *    salt). That is NOT a blank: falling back to '' would put every named
+ *    session of this process on one shared holder. A caller must refuse the
+ *    scoped lease call instead.
  */
 export function leaseIdentityFor(
   rawSessionId: string | null | undefined,
   opts: Pick<SessionGuardOptions, 'home' | 'salt'> = {},
-): string {
-  return sessionKeyFor(typeof rawSessionId === 'string' ? rawSessionId : undefined, opts) ?? '';
+): string | null {
+  if (typeof rawSessionId !== 'string' || !rawSessionId.trim()) return '';
+  return sessionKeyFor(rawSessionId, opts);
 }

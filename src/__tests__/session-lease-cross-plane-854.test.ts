@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHmac } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, realpathSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, realpathSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -254,5 +254,153 @@ describe('#854 — the hook .mjs formula and the TS helper agree byte for byte',
     await runHook('parity-recovered', { envSalt: false });
     expect(leaseRecord()?.holder).toBe(expectedKey(recovered, 'parity-recovered'));
     expect(leaseIdentityFor('parity-recovered', { home })).toBe(leaseRecord()?.holder);
+  });
+});
+
+/**
+ * #854 round 2 — a nonblank session whose identity cannot be derived (no usable
+ * salt) is refused for scoped calls. It never becomes '', a raw id or the
+ * process's `anon-pid-<pid>` holder, which would merge every named session of
+ * one OpenClaw process into one holder.
+ *
+ * Every in-process salt lookup here is pinned to the sandbox home through a
+ * test-owned wrapper around the real `leaseIdentityFor`; lease state lives in
+ * a SEPARATE writable dir, so the salt dir listing is exactly the salt files.
+ */
+describe('#854 r2 — a failed identity derivation refuses; it never merges sessions', () => {
+  let leaseDir: string;
+  const SALT_FILE = 'action-guard-session-salt';
+
+  beforeEach(() => {
+    delete process.env.SHIELDCORTEX_SESSION_SALT;
+    leaseDir = join(home, 'lease-state');
+    mkdirSync(leaseDir, { recursive: true });
+    process.env.SHIELDCORTEX_CONFIG_DIR = leaseDir;
+  });
+
+  /** The real adapters over the real defence module, salt lookup pinned to `saltHome`. */
+  function pinnedPlane(saltHome: string, evaluateToolCall: (...a: unknown[]) => unknown = allowAll) {
+    const mod = {
+      ...defence,
+      leaseIdentityFor: (id: string | null | undefined) => leaseIdentityFor(id, { home: saltHome }),
+    };
+    const adapters = actionLeaseAdapters(mod as never);
+    const interceptor = createInterceptor(
+      { ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never,
+      okPipeline as never,
+      { evaluateToolCall: evaluateToolCall as never, ...adapters },
+    );
+    return {
+      adapters,
+      call: (sessionId: string | undefined, command = COMMAND) =>
+        interceptor.handleToolCall({ toolName: 'exec', arguments: { command }, sessionId }),
+    };
+  }
+
+  function heldRecord(): { holder: string; pid: number } | undefined {
+    const file = join(leaseDir, 'leases', 'leases.json');
+    if (!existsSync(file)) return undefined;
+    return JSON.parse(readFileSync(file, 'utf-8')).leases['npm-publish'];
+  }
+
+  function saltDirSnapshot(dir: string): Array<[string, string]> {
+    return readdirSync(dir).sort().map((name) => [name, readFileSync(join(dir, name)).toString('hex')]);
+  }
+
+  function corruptPrimary(): void {
+    writeFileSync(join(stateDir, SALT_FILE), 'not-a-salt\n');
+  }
+
+  it('two different named sessions in one process are each refused; neither takes or re-enters a hold', async () => {
+    corruptPrimary();
+    const plane = pinnedPlane(home);
+    for (const id of ['session-a', 'session-b', 'session-a']) {
+      await expect(plane.call(id)).rejects.toThrow(/identity could not be derived/);
+      expect(heldRecord()).toBeUndefined();
+    }
+    // Unscoped calls are not lease calls, so a missing salt does not refuse them.
+    await expect(plane.call('session-a', 'ls -la')).resolves.toBeUndefined();
+  });
+
+  it('a named session with no derivable identity never re-enters, or releases, this process\'s anonymous hold', async () => {
+    corruptPrimary();
+    const plane = pinnedPlane(home);
+    await expect(plane.call(undefined)).resolves.toBeUndefined();
+    expect(heldRecord()?.holder).toBe(`anon-pid-${process.pid}`);
+
+    await expect(plane.call('session-a')).rejects.toThrow(/identity could not be derived/);
+    await expect(plane.call('session-b')).rejects.toThrow(/identity could not be derived/);
+    plane.adapters.releaseActionLease!('exec', { command: COMMAND }, 'session-b');
+    expect(heldRecord()?.holder).toBe(`anon-pid-${process.pid}`);
+  });
+
+  it('the refusal is an explicit non-allow decision, not a throw, and names no salt, path or key', () => {
+    corruptPrimary();
+    const gate = pinnedPlane(home).adapters.checkActionLease!('exec', { command: COMMAND }, 'session-a');
+    expect(gate?.scope).toBe('npm-publish');
+    expect(gate?.decision.verdict).toBe('unknown');
+    expect(gate?.acquired).toBeUndefined();
+    expect(gate?.decision.reason).not.toMatch(/salt|sc-[a-f0-9]|\/|anon-pid/);
+  });
+
+  it('a failed derivation writes nothing into the salt directory (no .recovered* slot is created)', async () => {
+    corruptPrimary();
+    const before = saltDirSnapshot(stateDir);
+    expect(leaseIdentityFor('session-a', { home })).toBeNull();
+    expect(defence.sessionKeySalt(home)).toBeNull();
+    await expect(pinnedPlane(home).call('session-a')).rejects.toThrow(/identity could not be derived/);
+    expect(saltDirSnapshot(stateDir)).toEqual(before);
+  });
+
+  it('absent primary (fresh home): mints the primary exactly once, as before #854, and reuses it', () => {
+    const fresh = realpathSync(mkdtempSync(join(tmpdir(), 'sc-lease-854-fresh-')));
+    try {
+      const first = leaseIdentityFor('session-fresh', { home: fresh });
+      const saltDir = join(fresh, '.shieldcortex');
+      expect(readdirSync(saltDir)).toEqual([SALT_FILE]);
+      const salt = readFileSync(join(saltDir, SALT_FILE), 'utf-8').trim();
+      expect(salt).toMatch(/^[a-f0-9]{64}$/);
+      expect(statSync(join(saltDir, SALT_FILE)).mode & 0o777).toBe(0o600);
+      expect(first).toBe(expectedKey(salt, 'session-fresh'));
+      expect(leaseIdentityFor('session-fresh', { home: fresh })).toBe(first);
+      expect(readdirSync(saltDir)).toEqual([SALT_FILE]);
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+
+  it('absent primary with a valid .recovered: reads it, like the hook, and mints nothing', () => {
+    const recovered = 'cd'.repeat(32);
+    writeFileSync(join(stateDir, `${SALT_FILE}.recovered`), `${recovered}\n`);
+    const before = saltDirSnapshot(stateDir);
+    expect(leaseIdentityFor('session-r', { home })).toBe(expectedKey(recovered, 'session-r'));
+    expect(saltDirSnapshot(stateDir)).toEqual(before);
+  });
+
+  it('salt lost between acquire and release (guard blocks): release frees exactly the hold acquire took', async () => {
+    writeFileSync(join(stateDir, SALT_FILE), `${'ef'.repeat(32)}\n`);
+    const blockAfterSaltLoss = () => {
+      // Runs between the lease check (acquired) and the interceptor's release.
+      expect(heldRecord()?.holder).toBe(expectedKey('ef'.repeat(32), 'session-a'));
+      corruptPrimary();
+      return { decision: 'block', severity: 'critical', family: 'exec', action: 'exec', reason: 'blocked', signals: [] as string[] };
+    };
+    await expect(pinnedPlane(home, blockAfterSaltLoss).call('session-a')).rejects.toThrow(/blocked/);
+    expect(heldRecord()).toBeUndefined();
+  });
+
+  it('release with the acquiring gate reuses its identity; without it, a failed derivation releases nothing', () => {
+    writeFileSync(join(stateDir, SALT_FILE), `${'ef'.repeat(32)}\n`);
+    const { adapters } = pinnedPlane(home);
+    const gate = adapters.checkActionLease!('exec', { command: COMMAND }, 'session-a');
+    expect(gate?.acquired).toBe(true);
+    corruptPrimary();
+
+    adapters.releaseActionLease!('exec', { command: COMMAND }, 'session-a');
+    expect(heldRecord()?.holder).toBe(expectedKey('ef'.repeat(32), 'session-a'));
+
+    adapters.releaseActionLease!('exec', { command: COMMAND }, 'session-b', gate!);
+    // The gate, not the passed id, decides who releases: the hold acquire took.
+    expect(heldRecord()).toBeUndefined();
   });
 });

@@ -143,7 +143,7 @@ type DefenceModule = {
   sessionKeyFor?: (value: string | undefined, opts?: { home?: string; salt?: string }) => string | null;
   /** #854 — the lease identity both planes act as. Optional: an older dist
    *  falls back to sessionKeyFor, which is the same formula. */
-  leaseIdentityFor?: (rawSessionId: string | null | undefined, opts?: { home?: string; salt?: string }) => string;
+  leaseIdentityFor?: (rawSessionId: string | null | undefined, opts?: { home?: string; salt?: string }) => string | null;
   appendSessionGuardIndex?: (opts: { home?: string; entry: Record<string, unknown> }) => boolean;
   recordActionGuardDegraded?: (
     rawSessionId: string | undefined,
@@ -2790,36 +2790,80 @@ export function isInternalContent(text: string, sessionId?: string | null): bool
 }
 
 type InterceptorRuntimeOptions = NonNullable<Parameters<typeof createInterceptor>[2]>;
+type ActionLeaseGate = NonNullable<ReturnType<NonNullable<InterceptorRuntimeOptions['checkActionLease']>>>;
 
 /**
  * #854: the interceptor's lease adapters. The holder is the SAME identity the
  * Claude Code hook leases as — `leaseIdentityFor` (or, on an older dist,
  * `sessionKeyFor`, the same formula) — never the raw sessionId, which can
  * never equal an `sc-…` holder and so refused this session's own lease as
- * "held by another session". Acquire and release derive it identically. A
- * blank id maps to '' and gets the store's per-process fallback, as before.
+ * "held by another session". A blank id maps to '' and gets the store's
+ * per-process fallback, as before.
+ *
+ * A NONBLANK id whose key cannot be derived (no usable salt) is refused for
+ * every scoped call: it must not become '', a raw id or the per-process
+ * fallback, which would let two named sessions of this process share a hold.
+ * The refusal is a decision, not a throw — the interceptor treats a throw as
+ * "no lease".
+ *
+ * Release reuses the identity acquire used for that gate, captured when the
+ * lease was taken, so a salt lost or changed in between can never point the
+ * release at a different holder. Without a captured identity it re-derives,
+ * and does nothing when that fails.
  */
 export function actionLeaseAdapters(
   defenceMod: DefenceModule | null | undefined,
 ): Pick<InterceptorRuntimeOptions, 'checkActionLease' | 'releaseActionLease'> {
   const mod = defenceMod as (DefenceModule & Record<string, unknown>) | null | undefined;
   const evaluate = mod?.evaluateToolCallLease as
-    | ((toolName: string, args: Record<string, unknown>, opts: { self: string }) => ReturnType<NonNullable<InterceptorRuntimeOptions['checkActionLease']>>)
+    | ((toolName: string, args: Record<string, unknown>, opts: { self: string }) => ActionLeaseGate | null)
     | undefined;
   const release = mod?.releaseToolCallLease as
     | ((toolName: string, args: Record<string, unknown>, opts: { self: string }) => void)
     | undefined;
-  const identity = (sessionId: string | undefined): string => {
+  const scopeFor = mod?.scopeForToolCall as
+    | ((toolName: string, args: Record<string, unknown>) => string | null)
+    | undefined;
+  /** null = a nonblank id whose identity could not be derived. */
+  const identity = (sessionId: string | undefined): string | null => {
     if (typeof mod?.leaseIdentityFor === 'function') return mod.leaseIdentityFor(sessionId);
-    if (typeof mod?.sessionKeyFor === 'function') return mod.sessionKeyFor(sessionId) ?? '';
+    if (typeof mod?.sessionKeyFor === 'function') {
+      if (typeof sessionId !== 'string' || !sessionId.trim()) return '';
+      return mod.sessionKeyFor(sessionId);
+    }
     return sessionId ?? '';
   };
+  const acquiredAs = new WeakMap<object, string>();
   return {
     checkActionLease: typeof evaluate === 'function'
-      ? (toolName, args, sessionId) => evaluate(toolName, args, { self: identity(sessionId) })
+      ? (toolName, args, sessionId) => {
+          const self = identity(sessionId);
+          if (self === null) {
+            // Unscoped calls stay lease-free. Without a scope classifier there
+            // is no way to tell, so every call is treated as scoped.
+            const scope = typeof scopeFor === 'function' ? scopeFor(toolName, args) : 'session-identity';
+            if (scope == null) return null;
+            return {
+              scope,
+              decision: {
+                verdict: 'unknown',
+                reason:
+                  `this session's identity could not be derived, so ShieldCortex cannot tell whether ` +
+                  `another session holds ${scope} — refusing rather than acting under a shared or guessed identity`,
+              },
+            };
+          }
+          const gate = evaluate(toolName, args, { self });
+          if (gate?.acquired) acquiredAs.set(gate, self);
+          return gate;
+        }
       : undefined,
     releaseActionLease: typeof release === 'function'
-      ? (toolName, args, sessionId) => release(toolName, args, { self: identity(sessionId) })
+      ? (toolName, args, sessionId, gate) => {
+          const self = gate ? acquiredAs.get(gate) : identity(sessionId);
+          if (typeof self !== 'string') return;
+          release(toolName, args, { self });
+        }
       : undefined,
   };
 }

@@ -12,7 +12,7 @@
  */
 import { createHmac, randomBytes } from 'node:crypto';
 import {
-  appendFileSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync,
+  appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -108,27 +108,17 @@ function discoveredSessionSaltFiles(primary: string): string[] {
   }
 }
 
-/** Write-then-link, like the hooks' publishFileAtomically: a concurrent reader
- *  never sees a half-written salt and skips on to a different slot. */
-function publishSalt(file: string, salt: string): boolean {
-  const tmp = `${file}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`;
-  try {
-    writeFileSync(tmp, `${salt}\n`, { flag: 'wx', mode: 0o600 });
-    linkSync(tmp, file);
-    return true;
-  } catch {
-    return false;
-  } finally {
-    try { unlinkSync(tmp); } catch { /* ignore */ }
-  }
-}
-
 /**
  * #854: the salt is half of the session identity, so this must find the SAME
- * file the hooks find — same candidate files, same order (primary, the three
- * legacy `.recovered*` slots, then discovered `.recoveredN`). Reading only the
- * primary meant a corrupt primary gave this plane a fresh, unpersisted salt on
- * every call while the hook used `.recovered`: one session, two identities.
+ * file the hooks find — same candidate files, same order (env, primary, the
+ * three legacy `.recovered*` slots, then discovered `.recoveredN`). Reading only
+ * the primary meant a corrupt primary gave this plane a fresh, unpersisted salt
+ * on every call while the hook used `.recovered`: one session, two identities.
+ *
+ * Recovery slots are READ here, never written — publishing them is the hooks'
+ * job. The one write is the pre-#854 first-run mint of an ABSENT primary.
+ * A primary that exists but is unusable, with no valid recovery slot, returns
+ * null: the identity cannot be derived, and a caller must not invent one.
  */
 export function sessionKeySalt(home?: string): string | null {
   const fromEnv = process.env.SHIELDCORTEX_SESSION_SALT;
@@ -141,23 +131,29 @@ export function sessionKeySalt(home?: string): string | null {
       const existing = readExistingSessionSalt(file);
       if (existing) return existing;
     }
+    if (!primaryIsAbsent(primary)) return null;
     const salt = randomBytes(32).toString('hex');
-    for (const file of legacySessionSaltFiles(primary)) {
-      if (publishSalt(file, salt)) return salt;
-      const raced = readExistingSessionSalt(file);
-      if (raced) return raced;
+    try {
+      writeFileSync(primary, `${salt}\n`, { flag: 'wx', mode: 0o600 });
+      return salt;
+    } catch {
+      if (existsSync(primary)) {
+        const raced = readFileSync(primary, 'utf8').trim().toLowerCase();
+        if (/^[a-f0-9]{64}$/.test(raced)) return raced;
+      }
+      return salt;
     }
-    for (let i = 4; i < 4 + MAX_SESSION_SALT_RECOVERY_ATTEMPTS; i += 1) {
-      const file = `${primary}.recovered${i}`;
-      const existing = readExistingSessionSalt(file);
-      if (existing) return existing;
-      if (publishSalt(file, salt)) return salt;
-      const raced = readExistingSessionSalt(file);
-      if (raced) return raced;
-    }
-    return null;
   } catch {
     return null;
+  }
+}
+
+function primaryIsAbsent(primary: string): boolean {
+  try {
+    lstatSync(primary);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === 'ENOENT';
   }
 }
 
