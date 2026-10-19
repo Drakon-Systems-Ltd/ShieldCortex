@@ -5,8 +5,8 @@
  * Degrades gracefully when embedding model is unavailable.
  */
 
-import { scanSkillContent } from './scan-skill.js';
-import type { SkillScanResult } from './scan-skill.js';
+import { scanSkillContentPrecise } from './scan-skill.js';
+import type { PreciseSkillScanResult } from './scan-skill.js';
 import type { SkillFormat } from './parser.js';
 
 export interface DeepScanCorrelation {
@@ -19,7 +19,8 @@ export interface DeepScanResult {
   correlations: DeepScanCorrelation[];
   intentBreakdown: Record<string, number>;
   recommendations: string[];
-  scanResults: SkillScanResult[];
+  /** Wire boundary (POST /api/skills/deep-scan): precise 5.10.5 shape, PERSONAL kept. */
+  scanResults: PreciseSkillScanResult[];
   degraded: boolean;
   degradedReason?: string;
 }
@@ -29,7 +30,7 @@ export interface DeepScanResult {
  * Cross-correlates findings across files and analyses intent patterns.
  */
 export async function runDeepScan(files: Array<{ name: string; content: string; format?: string }>): Promise<DeepScanResult> {
-  const scanResults: SkillScanResult[] = [];
+  const scanResults: PreciseSkillScanResult[] = [];
   const correlations: DeepScanCorrelation[] = [];
   const intentCounts: Record<string, number> = {};
   const recommendations: string[] = [];
@@ -39,7 +40,7 @@ export async function runDeepScan(files: Array<{ name: string; content: string; 
   // Scan each file individually
   for (const file of files) {
     try {
-      const result = scanSkillContent(
+      const result = scanSkillContentPrecise(
         file.content,
         undefined,
         file.format as SkillFormat | undefined,

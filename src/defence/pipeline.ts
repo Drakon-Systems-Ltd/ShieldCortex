@@ -13,7 +13,6 @@ import type {
   ProvenanceSource,
   FirewallAnalysis,
   FragmentationAnalysis,
-  SensitivityClassification,
   TrustScore,
 } from './types.js';
 import { DEFAULT_DEFENCE_CONFIG } from './types.js';
@@ -21,12 +20,13 @@ import { DEFAULT_DEFENCE_CONFIG } from './types.js';
 import { sanitiseInput } from './input-sanitisation/index.js';
 import { scoreSource } from './trust/index.js';
 import { analyzeFirewall } from './firewall/index.js';
-import { classifySensitivity } from './sensitivity/index.js';
+import { classifySensitivityPrecise } from './sensitivity/index.js';
+import { toPublicSensitivity, type PreciseSensitivityClassification } from './sensitivity/tier.js';
 import { analyzeFragmentation } from './fragmentation/index.js';
 import { scanForCredentials, type CredentialScanResult } from './credential-leak/index.js';
 import { logAudit, createAuditContentHash } from './audit/index.js';
 import { persistEvent } from '../api/events.js';
-import { syncToCloud } from '../cloud/sync.js';
+import { syncToCloudInternal } from '../cloud/sync.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import { getDefenceMode, getTrustModifierMode } from '../cloud/config.js';
@@ -117,6 +117,37 @@ export function runDefencePipeline(
   project?: string,
   options?: PipelineRunOptions,
 ): DefencePipelineResult {
+  return toPublicPipelineResult(
+    runDefencePipelinePrecise(content, title, source, config, project, options),
+  );
+}
+
+/**
+ * INTERNAL: the pipeline result with the precise #718 tier (`level` may be
+ * PERSONAL). The 5.7.0–5.10.5 shape. Not re-exported from package barrels.
+ */
+export type PreciseDefencePipelineResult = Omit<DefencePipelineResult, 'sensitivity'> & {
+  sensitivity: PreciseSensitivityClassification;
+};
+
+/** INTERNAL: public copy of a precise result (PERSONAL → CONFIDENTIAL). Key order and sub-objects kept. */
+export function toPublicPipelineResult(result: PreciseDefencePipelineResult): DefencePipelineResult {
+  return { ...result, sensitivity: toPublicSensitivity(result.sensitivity) };
+}
+
+/**
+ * INTERNAL: `runDefencePipeline` without the public projection. Wire boundaries
+ * (HTTP scan routes, CLI JSON) and the memory writers use this so stored and
+ * emitted labels stay exactly as in 5.10.5. Not re-exported from package barrels.
+ */
+export function runDefencePipelinePrecise(
+  content: string,
+  title: string,
+  source: DefenceSource | ProvenanceSource,
+  config?: DefenceConfig,
+  project?: string,
+  options?: PipelineRunOptions,
+): PreciseDefencePipelineResult {
   return runDefencePipelineInternal(content, title, source, config, project, {
     ...publicPipelineOptions(options),
     sideEffects: 'record',
@@ -132,7 +163,7 @@ export function runDefencePipelinePreviewInternal(
   project?: string,
   options?: PipelineRunOptions,
   sanitiseInputForTest?: typeof sanitiseInput,
-): DefencePipelineResult {
+): PreciseDefencePipelineResult {
   return runDefencePipelineInternal(content, title, source, config, project, {
     ...publicPipelineOptions(options),
     sideEffects: 'preview',
@@ -150,7 +181,7 @@ export function runDefencePipelineTransactionalInternal(
   project?: string,
   options?: PipelineRunOptions,
   sanitiseInputForTest?: typeof sanitiseInput,
-): DefencePipelineResult {
+): PreciseDefencePipelineResult {
   return runDefencePipelineInternal(content, title, source, config, project, {
     ...publicPipelineOptions(options),
     sideEffects: 'transactional',
@@ -166,7 +197,7 @@ function runDefencePipelineInternal(
   config: DefenceConfig | undefined,
   project: string | undefined,
   options: InternalPipelineRunOptions,
-): DefencePipelineResult {
+): PreciseDefencePipelineResult {
   const cfg = config ?? { ...DEFAULT_DEFENCE_CONFIG, mode: getDefenceMode() };
   const startTime = performance.now();
 
@@ -209,7 +240,7 @@ function runDefencePipelineInternal(
     }
 
     // 4. Classify sensitivity
-    const sensitivity: SensitivityClassification = classifySensitivity(cleanContent, title);
+    const sensitivity: PreciseSensitivityClassification = classifySensitivityPrecise(cleanContent, title);
 
     // 5. Run fragmentation detection (if enabled and firewall didn't block)
     let fragmentation: FragmentationAnalysis | null = null;
@@ -395,7 +426,7 @@ function runDefencePipelineInternal(
       }
     }
 
-    const pipelineResult: DefencePipelineResult = {
+    const pipelineResult: PreciseDefencePipelineResult = {
       allowed,
       firewall,
       fragmentation,
@@ -410,7 +441,7 @@ function runDefencePipelineInternal(
     if (isFeatureEnabled('cloud_audit_sync')) {
       runExternalEffect(options, () => {
         try {
-          syncToCloud(pipelineResult, source, durationMs);
+          syncToCloudInternal(pipelineResult, source, durationMs);
         } catch {
           // Cloud sync must never affect local pipeline
         }
