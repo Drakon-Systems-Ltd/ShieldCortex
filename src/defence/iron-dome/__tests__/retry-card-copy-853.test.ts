@@ -59,7 +59,8 @@ describe('#853 — held retry card copy', () => {
       expect(lines[1]).toMatch(/^Why: \S/);
       expect(lines[2]).toMatch(who);
       expect(lines[3]).toBe(heldCardOutcomeLine(600_000, '/srv/jobs/nightly'));
-      expect(fields.title).toBe('ShieldCortex held Bash — approve once? Card expires in 10m');
+      expect(fields.title).toBe('ShieldCortex held Bash — allow one retry? Card expires in 10m');
+      expect(fields.surfaceWithheld).toBe(false);
       expect(fields.surfaceTruncated).toBe(false);
       expect(fields.description.length).toBeLessThanOrEqual(256);
       expect(fields.title.length).toBeLessThanOrEqual(80);
@@ -70,9 +71,22 @@ describe('#853 — held retry card copy', () => {
     });
   }
 
-  it('says what Approve buys and what Deny or silence means, in plain words', () => {
+  it('says what "Allow one retry" buys and what Deny or silence means, in plain words', () => {
     const line = heldCardOutcomeLine(600_000, '/srv/jobs/nightly');
-    expect(line).toBe('Approve: runs ONCE if retried within 10m (jobs/nightly) · Deny or no reply: nothing runs');
+    expect(line).toBe('Allow one retry: same call, within 10m (jobs/nightly) · Deny or no reply: nothing runs');
+    // N1: retry-only semantics — the denied call is never promised a run.
+    expect(line).not.toMatch(/\bApprove:|runs ONCE|will run/);
+  });
+
+  it('N2: a non-finite or junk TTL reads as 1m, never NaN', () => {
+    for (const ttl of [Number.NaN, Number.POSITIVE_INFINITY, undefined as unknown as number, 'x' as unknown as number, 0, -5]) {
+      const line = heldCardOutcomeLine(ttl, '/srv/jobs/nightly');
+      expect(line).not.toMatch(/NaN|Infinity/);
+      expect(line).toContain('same call, within 1m (jobs/nightly)');
+    }
+    const fields = buildRetryCardFields(heldInput('sc-0123456789abcdef', 'claude-code', { ttlMs: Number.NaN }));
+    expect(fields.description).not.toMatch(/NaN/);
+    expect(fields.description.length).toBeLessThanOrEqual(256);
   });
 
   it('cuts WHAT / WHY / WHO before the outcome line, however long they are', () => {
@@ -86,9 +100,28 @@ describe('#853 — held retry card copy', () => {
     expect(lines[0]).toMatch(/^What: delete x+…x+ archive\.tar$/);
     expect(lines[3]).toContain('Deny or no reply: nothing runs');
     expect(lines[3]).toContain('approve --denial <id> --ttl');
-    expect(lines[3].startsWith('Approve: runs ONCE if retried within 10m')).toBe(true);
+    expect(lines[3].startsWith('Allow one retry: same call, within 10m')).toBe(true);
     expect(lines[2]).toMatch(/^Who: agent x+…x+ sc-tail$/);
     expect(fields.surfaceTruncated).toBe(true);
+    // N3: a clipped target is truncated, not withheld.
+    expect(fields.surfaceWithheld).toBe(false);
+  });
+
+  it('clips a long runner hostname while keeping the session and retry terms truthful', () => {
+    const sessionId = 'sc-0123456789abcdef';
+    const card = buildApprovalCard({
+      tool: 'Bash', input: IRREVERSIBLE, signals: ['dangerous-shell'],
+      plane: 'claude-code', sessionId, host: 'runner-' + 'x'.repeat(55),
+      cwd: '/srv/jobs/nightly',
+    });
+    const fields = buildRetryCardFields({ ...heldInput(sessionId, 'claude-code'), card });
+    const lines = fields.description.split('\n');
+    expect(lines).toHaveLength(4);
+    expect(lines[2]).toMatch(/^Who: Claude Code on runner-.*….*x · session sc-0123456789abcdef$/);
+    expect(lines[2]).not.toContain('x'.repeat(55));
+    expect(lines[3]).toBe('Allow one retry: same call, within 10m (jobs/nightly) · Deny or no reply: nothing runs');
+    expect(fields.description.length).toBeLessThanOrEqual(256);
+    expect(fields.title + fields.description).not.toMatch(NO_FALSE_CLAIM);
   });
 
   it('withholds the target for a secret-egress class, as the #310 layout does', () => {

@@ -126,17 +126,47 @@ order (suppression first, then digest and budget, then card):
 5. The hook decision is still `deny`. Claude Code's contract is unchanged.
 6. **Agent-facing text goes in `permissionDecisionReason`, not only stderr** (slice 1, done). It is
    the `retryCardAgentNotice` wording, carrying the real actionId: did NOT run, held for the
-   operator, delivery not confirmed, retrying this SAME call within N minutes of the Approve runs
-   it once, a retry before approval is refused again, and Deny or no answer means nothing runs.
+   operator, delivery not confirmed, once the operator allows one retry, a retry of this SAME call
+   within N minutes is let through once (nothing runs unless the call is retried), a retry before approval is refused again, and Deny or no answer means nothing runs.
    The static "an Approve-once card if raised" sentence is replaced whenever a card was handed
    off. When cards are on but none was raised, the reason says so with the `noCardReason` and the
    real actionId. When cards are off, the static text carries the real actionId instead of the
    `<actionId>` placeholder. The same notice is still printed to stderr. (See risk U1.)
 
-"Approve runs the action" on Plane A means **the next retry of the identical call in the same
-canonical cwd, within the grant TTL, runs once**. For a cron job, that is the next tick if the
-interval is no longer than the TTL. If the interval is longer, the card already says so and points
-at `approve --denial <id> --ttl` (existing #310 rule). The ADR does not claim more than this.
+**What an approval does on Plane A.** Plane A never runs anything on approval. Approval mints a
+one-use grant: **if** the identical call is retried in the same canonical cwd before the grant TTL
+ends, that one retry is let through. Nothing re-invokes the agent, and no action is guaranteed to
+run. This ADR makes no "Approve runs the action" claim for Plane A, and no claim that a cron job's
+next tick will spend the grant: whether a later session retries, and whether it does so inside the
+TTL, depends on the launcher, which the hook cannot see (§8). Where the retry may come later than
+the TTL, the card points at `approve --denial <id> --ttl` (existing #310 rule).
+
+**Plane A's decision affordance must read "Allow one retry"**, not "Run it" or wording that
+promises execution. Slice 1 puts "allow one retry" in the card title and outcome line. The
+gateway renders the native buttons from `allowedDecisions: ['allow-once', 'deny']`; ShieldCortex
+does not control their displayed labels through the current request shape. R2 must verify the
+rendered label on the target channel and, if it is misleading, provide an honest decision
+surface before Soak A. The title alone is not proof that the button has that label.
+
+**One-shot `--print` workers.** A headless `claude --print` (one-shot) worker cannot retry on its
+own: the refusal ends its turn, and the process exits. For these workers:
+- The agent-facing notice tells the agent that its final output **must end with a
+  machine-readable line `HELD <actionId>`** (the real actionId, on its own line, as the last line
+  of output) so that the launcher can detect the hold without parsing prose.
+- A launcher that sees `HELD <actionId>` may wait for the operator's decision and then re-run the
+  **same** worker (same prompt, same canonical cwd). The re-run is a fresh session; it spends the
+  grant only if it reproduces the identical call before the grant TTL ends.
+- The grant may expire before the re-run reaches the call, and the re-run may not make the same
+  call at all. In either case nothing runs from the approval, and the grant ends up
+  approved-but-unspent (§7). No action is guaranteed.
+- Launcher support is outside ShieldCortex. Without it, a one-shot worker's approval is never
+  spent.
+
+**Owner sign-off.** Because Plane A cannot deliver "Approve runs the action", the revised #853
+acceptance for Plane A (one card per held identity; approval allows one retry within the TTL;
+every deny, expiry and unspent approval reported as nothing ran) is **not accepted until the owner,
+Michael, signs off on it explicitly**. Until then, Plane A meets only that revised wording, and
+the original wording is met only by Plane B. (See U2.)
 
 ### 4.2 Plane B: OpenClaw interceptor (in-turn hold)
 
@@ -200,8 +230,8 @@ never claims one.
 **Plane A** (unchanged #310 state machine, plus two reported terminals):
 `fingerprint → claimed(card live, epoch pinned) → granted(TTL from tap) → consumed`.
 The other terminals are `expired-unanswered`, `granted-expired-unspent` and `revoked(by Deny)`.
-- New: when the card expires unanswered, the waiter appends `retry_card_expired` and the digest says "card for <tool> (<actionId>) expired. Nothing ran."
-- An unspent grant at TTL is reported by the existing sweeper (`formatUnspentExpiryNotice`). There is still no daemon, so the notice rides the next guard event or `approve` call. This is restated honestly, not dressed up.
+- New: when the card expires unanswered, the waiter appends a `retry_card_expired` row and sends one follow-up notice with no buttons on the card's channel: "ShieldCortex: card for <tool> (<actionId>) expired. Nothing ran." The digest repeats the same line.
+- **Approved-but-unspent.** A grant that reaches its TTL without a matching retry is described as **"approved, not run"**, never as "ran" or "approved and run". There is still no daemon, so it is surfaced only when a sweep happens (the existing sweeper, `formatUnspentExpiryNotice`, on the next guard event or `approve` call): `doctor` and the digest then show "<tool> (<actionId>): approved, not run. The approval expired before a matching retry. A one-shot worker needs a launcher re-run; approval alone does not re-run it." This is restated honestly, not dressed up: if no sweep runs, nothing surfaces it.
 - A Deny is reported (`retry_denied`, existing) with "nothing ran".
 
 **Plane B:**
@@ -232,7 +262,7 @@ Clocks (new rows only. The #310 table stands):
 |---|---|---|
 | R0 | Classify the clawdbot1 15–18 Oct refusals by `origin` and `noPromptSurfaceReason` / failure-policy branch. **Done** (issue comment 6256267789: 34 DNP, all `claude-code-hook` / `bypassPermissions`, interceptor 0). Still open: confirm U10 (Plane B transport and await length) against OpenClaw, and U5 | Any Plane B code |
 | R1 | Slice 1 (Plane A copy, the uncommitted work) merged with `retryCards` still false. Agent text in `permissionDecisionReason` (implemented in slice 1, pinned by the real-hook tests) | R2 |
-| R2 | Slice 2: `held_for_retry` / `retry_card_expired` / `retry_card_failed` outcomes, plus every reader updated (`guard-readiness.ts` would-stop set, `session-guard.ts`, `dnp-digest.ts`, stop-hook summary, `cron-denial-audit-375`, webhook outcome header, `doctor`) | Soak A |
+| R2 | Slice 2: `held_for_retry` / `retry_card_expired` / `retry_card_failed` outcomes, plus every reader updated (`guard-readiness.ts` would-stop set, `session-guard.ts`, `dnp-digest.ts`, stop-hook summary, `cron-denial-audit-375`, webhook outcome header, `doctor`). Also: verify that the rendered Plane A decision affordance says "Allow one retry" (resolve any gateway label mismatch before soak); the expiry row plus its no-button "Nothing ran." follow-up; approved-but-unspent shown as "approved, not run" by `doctor` and the digest on sweep; the `HELD <actionId>` final-line instruction in the agent notice (§4.1). Owner (Michael) sign-off on the revised Plane A acceptance recorded before Soak A starts | Soak A |
 | Soak A | ≥3 days on a clawdbot1-class host, `retryCards: true`. Matrix: headless Claude Code sessions in `bypassPermissions` first (the 34-row clawdbot1 shape, Bash and Write), ≥3 distinct identities, a cron-launched and a sub-agent session if the host has them, empty origin, grant then newer DNP, budget exhaustion, deny, expiry, transport-down. **Pass:** zero `denied_no_prompt_surface` rows whose `noCardReason` is absent, exactly one card per identity per epoch, every expiry and deny reported | Plane A default flip (separate owner decision) |
 | R3 | Slice 3: Plane B behind `openclaw.heldApprovals.enabled=false`, with the sub-agent classifier, the dedupe set and the follow-up notice | Soak B |
 | Soak B | ≥3 days on clawdbot1. Same matrix on OpenClaw cron and sub-agent sessions, plus a gateway restart mid-hold and a turn timeout shorter than the hold. clawdbot1 showed zero interceptor no-surface rows for 15–18 Oct, so organic traffic may not exercise this; the matrix must be driven deliberately. **Pass:** zero `failure_denied` rows for eligible calls, one card per key, no double card (host plus owner) | Plane B default flip |
@@ -254,11 +284,14 @@ Existing in the uncommitted slice:
 - `src/__tests__/pre-tool-hook-retry-310.test.ts` covers a cron-tick and sub-agent hook payload through the real hook: the card leads with What/Why/Who, the raw session id is not echoed, and the JSON `permissionDecisionReason` carries the denial row's real actionId, "did NOT run", "held for the operator", "delivery is not confirmed", the retry-within-TTL wording and "nothing runs", and never `<actionId>`, "delivered" or "ran". Two more cases pin the reason when cards are on with no card channel (no-card reason plus real actionId) and when cards are off (real actionId replaces the placeholder). The catastrophic case asserts no held or no-card text.
 
 Required before Soak A (slice 2), all in `bypassPermissions`:
-0. Hook, headless worker session, Bash and Write each: DNP → `held_for_retry` → Approve → a retry of the identical call in the same cwd spends the grant once. A further retry is refused again.
-1. Hook, cron tick: DNP → `held_for_retry` → Approve → **next tick's fresh session** spends the grant once. A third run is refused again.
-2. Hook, sub-agent: same, with the retry from the same session.
+0. Hook, headless worker session, Bash and Write each: DNP → `held_for_retry` → "Allow one retry" → a retry of the identical call in the same cwd spends the grant once. A further retry is refused again.
+1. Hook, a fresh session presenting the identical call in the same cwd within the TTL (the shape a re-launched worker or a later cron tick would have, if it retries): it spends the grant once, and a third run is refused again. The test asserts only this; it does not assert that any launcher retries.
+1a. Hook, one-shot `--print` worker shape: the agent notice instructs that the final output ends with `HELD <actionId>` carrying the real actionId. A re-run of the same worker after approval spends the grant once if it reproduces the call within the TTL; a re-run after the TTL is refused again and the grant is reported "approved, not run".
+2. Hook, sub-agent: same as 0, with the retry from the same session.
 3. Two holds for the same identity while the card is live: one card. Row 2 is `held_for_retry` with `cardDedupedTo`.
-4. Card expires unanswered: a `retry_card_expired` row, and the digest says nothing ran.
+4. Card expires unanswered: a `retry_card_expired` row, one follow-up notice with no buttons saying nothing ran, and the digest says nothing ran.
+4a. Approved but no matching retry before TTL: after a sweep, `doctor` and the digest show "approved, not run", and never "ran".
+4b. The Plane A card's rendered decision affordance is labelled "Allow one retry" on the target channel (gateway integration check); the copy test pins the title and outcome line only.
 5. Deny: `retry_denied`. A later retry is refused while suppression is live, and no new card.
 6. Waiter transport fails after `requesting`: `retry_card_failed`, and the digest shows `--denial`.
 7. Cards off or budget exhausted: `denied_no_prompt_surface` with `noCardReason`. These are excluded from the acceptance count only by that field.
@@ -279,7 +312,7 @@ Required before Soak B (slice 3):
 ## 11. Unresolved security risks (accepted for design, must be closed or re-accepted at the soak reviews)
 
 - **U1: the agent may not see the held notice (Plane A). Narrowed by slice 1.** The notice is now in `permissionDecisionReason` with the real actionId, and the real-hook tests pin the JSON. What the tests cannot pin is Claude Code's side: that it passes `permissionDecisionReason` to the model on a `deny` (unverified, from memory: the hooks contract says it does). Whether hook stderr reaches the model on a JSON `deny` with exit 0 is still UNKNOWN, so stderr is kept only for the operator's terminal. Close at Soak A by reading a real headless transcript.
-- **U2: Plane A "Approve runs it" depends on the agent retrying.** A cron job whose next tick is later than the TTL, or an agent that gives up (for example a one-shot `bypassPermissions` worker that exits after the refusal), never runs the approved action. Plane A is the plane implicated by all 34 observed rows, so this gap matters directly; the breakdown cannot tell which calls would have been retried. The card says "if retried", but the owner's acceptance wording ("Approve runs the action") is only met for Plane B. This needs owner sign-off.
+- **U2: on Plane A an approval only allows one retry; nothing is guaranteed to run.** Spending the grant depends on something retrying the identical call within the TTL. A one-shot `--print` worker cannot retry by itself; it can only end with `HELD <actionId>` for a launcher to re-run it, and the re-run may miss the TTL or not repeat the call (§4.1). A later session (for example a cron-launched one) may come after the TTL or never repeat the call. Plane A is the plane implicated by all 34 observed rows, so this gap matters directly; the breakdown cannot tell which calls would have been retried. The card copy says "Allow one retry"; the rendered button label remains to be verified at R2. Unspent approvals must be reported as "approved, not run". The original acceptance wording ("Approve runs the action") is only met for Plane B. The revised Plane A acceptance needs explicit sign-off from the owner, Michael, before it is accepted.
 - **U3: Plane B holds a live turn for up to 10 minutes.** An OpenClaw cron turn timeout shorter than the hold, or a host that serialises cron runs, can stall or kill the job. OpenClaw's cron turn budget, and whether it allows a `before_tool_call` await that long at all, is UNKNOWN to this codebase. Soak B must measure it. The fallback is `hold_cancelled` reported, with nothing run.
 - **U4: stale cards after a gateway restart (Plane B).** The card can stay tappable in the owner's chat after the hold is dead. A tap does nothing, but the owner gets no "too late" reply unless the gateway reports one. Whether the gateway closes orphaned approval requests on restart is UNKNOWN.
 - **U5: OpenClaw sub-agent routing is unverified.** Today sub-agents get the host card, and where the host shows it is UNKNOWN. Moving sub-agents to the owner channel assumes the host card was not reaching anyone. The R0 breakdown cannot settle this: it found zero interceptor no-surface rows on clawdbot1. It must be confirmed some other way before slice 3, or the change could replace a working card with a different one.

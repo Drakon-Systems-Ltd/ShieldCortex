@@ -1336,15 +1336,20 @@ function isUsableHeldCard(card: HeldCardSummary | undefined): card is HeldCardSu
 
 /**
  * #853 — the outcome line every held card carries, whole. It answers the only
- * questions the owner must not have to guess: what Approve buys (ONE run,
- * only if the agent retries the same call, in this scope), and what Deny or
- * silence means (nothing runs). The Claude Code hook cannot pause a call, so
- * "if retried" is the honest wording — the card never says the call is
- * waiting, and never says it ran.
+ * questions the owner must not have to guess: what the approve button buys
+ * (ONE retry of the same call, in this scope, inside the TTL — not a run: the
+ * call was denied and nothing re-invokes the agent, ADR §4.1), and what Deny
+ * or silence means (nothing runs). The card never says the call is waiting,
+ * will run, or ran.
  */
 export function heldCardOutcomeLine(ttlMs: number, cwd?: string): string {
-  const minutes = Math.max(1, Math.round(ttlMs / 60_000));
-  return `Approve: runs ONCE if retried within ${minutes}m (${scopeTail(cwd)}) · Deny or no reply: nothing runs`;
+  return `Allow one retry: same call, within ${grantMinutes(ttlMs)}m (${scopeTail(cwd)}) · Deny or no reply: nothing runs`;
+}
+
+/** #853 N2 — a TTL that is not a finite positive number reads as 1m, never "NaNm". */
+function grantMinutes(ttlMs: number): number {
+  const minutes = Math.round(Number(ttlMs) / 60_000);
+  return Number.isFinite(minutes) ? Math.max(1, minutes) : 1;
 }
 
 const HELD_CARD_BREAKS = new RegExp(`[${CARD_LINE_BREAK_CLASS}]`, 'gu');
@@ -1373,7 +1378,7 @@ function buildHeldCardFields(input: RetryCardCopyInput, card: HeldCardSummary): 
   const tool = flatCardLine(input.tool || 'tool').slice(0, 32);
   // The card's own expiry rides in the title so the description's budget goes
   // to the action and the outcome.
-  const rawTitle = `ShieldCortex held ${tool} — approve once? Card expires in ${Math.max(1, Math.round(RETRY_CARD_LIFETIME_MS / 60_000))}m`;
+  const rawTitle = `ShieldCortex held ${tool} — allow one retry? Card expires in ${Math.max(1, Math.round(RETRY_CARD_LIFETIME_MS / 60_000))}m`;
   const title = rawTitle.length <= CARD_TITLE_MAX ? rawTitle : `${rawTitle.slice(0, CARD_TITLE_MAX - 1)}…`;
   // Same rule as the #310 layout: a schedule slower than the grant must be
   // SAID, with the command that outlasts it.
@@ -1424,7 +1429,9 @@ function buildHeldCardFields(input: RetryCardCopyInput, card: HeldCardSummary): 
   return {
     title,
     description: description.slice(0, CARD_DESCRIPTION_MAX),
-    surfaceWithheld: true,
+    // #853 N3 — withheld means the target was dropped (secret egress), as
+    // in the #310 layout; a clipped target is surfaceTruncated, not this.
+    surfaceWithheld: withheld,
     surfaceTruncated: !withheld && whatLine !== fullWhat,
   };
 }

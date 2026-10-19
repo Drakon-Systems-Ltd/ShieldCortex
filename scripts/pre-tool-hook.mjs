@@ -1674,7 +1674,7 @@ function safeGuardOutcomeReason(verdict, outcome, event) {
 /** The hook's own actionId shape (mintActionId); anything else stays a placeholder. */
 const AGENT_ACTION_ID = /^act-[0-9a-f]{16}$/;
 
-function terminalDecisionReason(verdict, outcome, event, { actionId, agentNotice } = {}) {
+function terminalDecisionReason(verdict, outcome, event, { actionId, agentNotice, held } = {}) {
   const signals = safeSignalList(verdict?.signals);
   const suffix = signals.length > 0 ? ` [${signals.join(', ')}]` : '';
   const id = typeof actionId === 'string' && AGENT_ACTION_ID.test(actionId) ? actionId : '<actionId>';
@@ -1682,7 +1682,9 @@ function terminalDecisionReason(verdict, outcome, event, { actionId, agentNotice
     ? (
       // UX: tell the AGENT what to do next — pinned lane or one-shot human approve.
       // Never steer toward enforce:false / broad autoApprove (#386).
-      ' Headless session: do NOT retry freehand network/gh/curl. '
+      // #853 N1 — "do not retry" would contradict a held card's one allowed
+      // retry; what is ruled out is a freehand workaround.
+      ' Headless session: do NOT work around this with a freehand network/gh/curl call. '
       + 'If a reviewed/pinned work-lane script exists for this job, run that path instead. '
       // #853 U1 — the retry plane's notice (card handed off, or why there is
       // none) is what the model reads; stderr alone may never reach it.
@@ -1694,7 +1696,13 @@ function terminalDecisionReason(verdict, outcome, event, { actionId, agentNotice
     : '';
   const severity = safeSeverity(verdict?.severity, event);
   const severityPrefix = severity === 'critical' ? 'Catastrophic-tier. ' : '';
-  return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${nextStep}${suffix}`;
+  // #853 §4.1 — a held card's machine-readable marker is the reason's LAST
+  // line, so a launcher can match it without parsing prose. Only with a real
+  // actionId: a placeholder would be a marker nothing can resolve.
+  const heldLine = outcome === 'denied_no_prompt_surface' && held === true && id !== '<actionId>'
+    ? `\nHELD ${id}`
+    : '';
+  return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${nextStep}${suffix}${heldLine}`;
 }
 
 function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey, actionId, notify }) {
@@ -1896,14 +1904,17 @@ function heldRetryCardFor(notify, { toolName, toolInput, verdict, sessionKey, cw
 /**
  * #853 — what the AGENT is told after a retry card is raised. Honest on all
  * three counts: the call did not run; the card was handed to a detached
- * waiter, which is NOT proof it reached the operator; and an Approve only
- * takes effect if this same call is retried inside the grant window — the
- * hook cannot pause a call, so nothing here waits for the tap.
+ * waiter, which is NOT proof it reached the operator; and "Allow one retry"
+ * only takes effect if this same call is retried inside the grant window —
+ * the hook cannot pause a call, so nothing here waits for the tap and nothing
+ * runs by itself. A one-shot worker is asked to end with `HELD <actionId>`
+ * for its launcher (§4.1); the hook never claims the launcher acts on it.
  */
 function retryCardAgentNotice(tool, actionId, ttlMs) {
   const minutes = Math.max(1, Math.round(Number(ttlMs) / 60_000) || 1);
   return `${tool} did NOT run (${actionId}); it is held for the operator. An approve-once card was handed to the operator's card channel — delivery is not confirmed. `
-    + `If they approve, retrying this SAME call within ${minutes}m of their Approve runs it once; a retry before they approve is refused again; if they deny or do not answer, nothing runs. Do not freehand-retry network.`;
+    + `If they choose "Allow one retry", ONE retry of this SAME call, unchanged and from the same directory, within ${minutes}m of their decision is let through; nothing runs unless that retry happens. A retry before they decide is refused again; if they deny or do not answer, nothing runs. `
+    + `If you are a one-shot worker that cannot retry, end your final output with this exact line on its own: HELD ${actionId}`;
 }
 
 /** #853 — the no-card counterpart: retry cards are on, but none was raised. */
@@ -2179,6 +2190,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
     notify: notifyStatus,
     actionId: id,
     agentNotice,
+    held: retryCard?.raised === true,
   };
 }
 
@@ -3031,6 +3043,7 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
   emitDecision('deny', terminalDecisionReason({ ...auditVerdict, reason }, 'denied_no_prompt_surface', 'action_guard_denial', {
     actionId: notified?.actionId ?? actionId,
     agentNotice: notified?.agentNotice,
+    held: notified?.held === true,
   }));
 }
 
