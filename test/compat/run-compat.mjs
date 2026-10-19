@@ -151,7 +151,9 @@ function walkExports(consumerDir) {
 }
 
 function walkerSelfTest() {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-compat-selftest-'));
+  // Realpath: macOS os.tmpdir() is /var/folders/... while TypeScript reports
+  // /private/var/...; every path compared below must share one spelling.
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-compat-selftest-')));
   const pkgDir = path.join(tmp, 'node_modules/shieldcortex');
   fs.mkdirSync(path.join(pkgDir, 'dist'), { recursive: true });
   fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({
@@ -187,7 +189,7 @@ const missed = walkerSelfTest();
 if (missed.length) { console.log(`  FAIL: walker missed controls: ${missed.join(', ')}`); failed = true; }
 else console.log('  PASS: every control reported');
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-compat-'));
+const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-compat-')));
 try {
   const source = resolvePackage(pkgArg, tmp);
   if (!fs.existsSync(path.join(source, 'dist', 'index.d.ts'))) {
@@ -202,7 +204,9 @@ try {
   console.log(`fixtures against ${pkgArg ?? 'repo build'}:`);
   const program = ts.createProgram(fixtures.map((f) => path.join(consumer, f)), compilerOptions);
   const pkgFiles = program.getSourceFiles().map((s) => s.fileName).filter((f) => f.includes('/node_modules/shieldcortex/'));
-  const stray = pkgFiles.filter((f) => !f.startsWith(path.join(consumer, 'node_modules/shieldcortex/dist/')));
+  const distRoot = path.join(fs.realpathSync(path.join(consumer, 'node_modules/shieldcortex/dist')), path.sep);
+  const stray = pkgFiles.filter((f) => !fs.realpathSync(f).startsWith(distRoot));
+  for (const f of stray) console.log(`  STRAY ${f}`);
   console.log(`  ${pkgFiles.length} shieldcortex declaration files, all under node_modules/shieldcortex/dist: ${stray.length === 0}`);
   if (stray.length || pkgFiles.length === 0) failed = true;
   const diags = ts.getPreEmitDiagnostics(program);
