@@ -1184,10 +1184,64 @@ export async function checkAttestationCoverage(
   }
 }
 
+// The #674 trigger exactly as schema.sql, inline-schema.ts and migrations.ts
+// create it (SQLite stores it without IF NOT EXISTS or the final semicolon).
+const SHIPPED_PROJECT_IMMUTABILITY_TRIGGER_SQL = "CREATE TRIGGER trg_defence_audit_chained_project_immutable BEFORE UPDATE OF project ON defence_audit WHEN OLD.seq IS NOT NULL AND NEW.project IS NOT OLD.project BEGIN SELECT RAISE(ABORT, 'ShieldCortex #674: project of a chained defence_audit row is immutable (an older ShieldCortex build may be opening this database)'); END";
+
+/**
+ * #834: true only when the database holds the shipped #674 trigger: the right
+ * name, on `defence_audit`, with the shipped definition (whitespace aside).
+ * A same-named trigger with another body or on another table does not prevent
+ * the backfill, and `CREATE TRIGGER IF NOT EXISTS` never replaces it, so it
+ * counts as missing. A catalog read that throws also counts as missing.
+ * Read-only: one `sqlite_master` SELECT.
+ */
+export function hasShippedProjectImmutabilityTrigger(db: { prepare(sql: string): { all(...params: unknown[]): unknown[] } }): boolean {
+  return projectImmutabilityTriggerState(db) === 'shipped';
+}
+
+/**
+ * #834: why the protecting trigger does or does not count.
+ * - `shipped`: the shipped definition on `defence_audit`.
+ * - `absent`: no trigger holds the name; opening the database with a current
+ *   build creates it (`CREATE TRIGGER IF NOT EXISTS`).
+ * - `other`: a different trigger holds the name; a current build never replaces
+ *   it, so it must be removed before the shipped one can be installed.
+ * - `unreadable`: the catalog read threw.
+ */
+export type ProjectImmutabilityTriggerState = 'shipped' | 'absent' | 'other' | 'unreadable';
+
+export function projectImmutabilityTriggerState(db: { prepare(sql: string): { all(...params: unknown[]): unknown[] } }): ProjectImmutabilityTriggerState {
+  try {
+    const rows = db.prepare("SELECT tbl_name, sql FROM sqlite_master WHERE type='trigger' AND name=?")
+      .all('trg_defence_audit_chained_project_immutable') as { tbl_name: unknown; sql: unknown }[];
+    if (rows.length === 0) return 'absent';
+    if (rows.length !== 1) return 'other';
+    const [row] = rows;
+    if (row.tbl_name !== 'defence_audit' || typeof row.sql !== 'string') return 'other';
+    const normalised = row.sql.replace(/\s+/g, ' ').trim().replace(/;$/, '').trim();
+    return normalised === SHIPPED_PROJECT_IMMUTABILITY_TRIGGER_SQL ? 'shipped' : 'other';
+  } catch {
+    return 'unreadable';
+  }
+}
+
+function missingTriggerFix(state: Exclude<ProjectImmutabilityTriggerState, 'shipped'>): string {
+  if (state === 'absent') {
+    return 'The protecting trigger is missing, so the cause can recur. Opening the database with a current ShieldCortex (5.10.2 or later) recreates it.';
+  }
+  if (state === 'other') {
+    return 'The protecting trigger is missing, so the cause can recur: a different trigger holds its name (`trg_defence_audit_chained_project_immutable`), and ShieldCortex never replaces a trigger that already holds the name. Remove that trigger (for example with `sqlite3`), then open the database with a current ShieldCortex (5.10.2 or later) to install the shipped one.';
+  }
+  return 'The protecting trigger is missing, so the cause can recur: doctor could not read the trigger catalog to confirm it.';
+}
+
 /**
  * Chained ledger (#617, design §5.7): one row from the SAME verifier as
  * `shieldcortex ledger verify` — consistent (pass), inconsistent (fail, with
  * the first bad seq), or unchained (warn: this database has no chain yet).
+ * An inconsistent ledger is a warning only when every problem is the legacy
+ * project backfill and the database has the trigger that prevents recurrence.
  * A pass is local only: it never claims completeness or that the whole chain
  * was not rewritten; `ledger verify` prints the full limits statement.
  */
@@ -1218,9 +1272,15 @@ export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promis
     const report = verifyLedger(db, { heartbeatIntervalMs: resolveLedgerConfig().heartbeatIntervalMs });
     const message = summariseLedgerReport(report);
     if (report.status === 'inconsistent') {
-      return { label, status: 'fail', message, fix: allProblemsAreLegacyProjectBackfill(report)
-        ? 'Likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in `project` on chained audit rows; no digest field other than `project` changed in those rows. Find and remove or upgrade the old copy (check every global install and npx cache on this host) before running any repair; `shieldcortex ledger verify` shows the full report'
-        : 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
+      if (allProblemsAreLegacyProjectBackfill(report)) {
+        const triggerState = projectImmutabilityTriggerState(db);
+        const triggerPresent = triggerState === 'shipped';
+        const fix = `${report.problems.length} problem(s) are explained by a legacy project backfill: likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in \`project\` on chained audit rows; no digest field other than \`project\` changed in those rows. Find and remove or upgrade the old copy (check every global install and npx cache on this host). \`shieldcortex ledger verify\` shows the full report.`;
+        return { label, status: triggerPresent ? 'warn' : 'fail', message, fix: triggerPresent
+          ? `${fix} The cause cannot recur while the protecting trigger is present: the trigger now refuses those changes.`
+          : `${fix} ${missingTriggerFix(triggerState as Exclude<ProjectImmutabilityTriggerState, 'shipped'>)}` };
+      }
+      return { label, status: 'fail', message, fix: 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
     }
     if (report.status === 'unchained') return { label, status: 'warn', message };
     return { label, status: 'pass', message };
