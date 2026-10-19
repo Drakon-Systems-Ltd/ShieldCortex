@@ -11,9 +11,11 @@
  * requires origin, sessionKey and a degraded outcome.
  */
 import { createHmac, randomBytes } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export const GUARD_DEGRADED_OUTCOMES = new Set([
   'auto_denied',
@@ -70,6 +72,64 @@ export function sessionKeyFor(value: string | undefined, opts: SessionGuardOptio
   return `sc-${createHmac('sha256', salt).update(`action-guard-session:${value}`).digest('hex').slice(0, 16)}`;
 }
 
+/** Same slot range as MAX_SESSION_SALT_RECOVERY_ATTEMPTS in the hooks. */
+const MAX_SESSION_SALT_RECOVERY_ATTEMPTS = 256;
+
+function readExistingSessionSalt(file: string): string | null {
+  try {
+    const st = lstatSync(file);
+    if (!st.isFile() || st.isSymbolicLink()) return null;
+    const salt = readFileSync(file, 'utf8').trim();
+    return /^[a-f0-9]{64}$/i.test(salt) ? salt.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+function legacySessionSaltFiles(primary: string): string[] {
+  return [primary, `${primary}.recovered`, `${primary}.recovered2`, `${primary}.recovered3`];
+}
+
+function discoveredSessionSaltFiles(primary: string): string[] {
+  try {
+    const entries: Array<{ slot: number; file: string }> = [];
+    for (const name of readdirSync(dirname(primary))) {
+      const match = name.match(/^action-guard-session-salt\.recovered(\d+)$/);
+      if (!match) continue;
+      const slot = Number(match[1]);
+      if (!Number.isInteger(slot) || String(slot) !== match[1]) continue;
+      if (slot < 4 || slot >= 4 + MAX_SESSION_SALT_RECOVERY_ATTEMPTS) continue;
+      entries.push({ slot, file: join(dirname(primary), name) });
+    }
+    entries.sort((a, b) => a.slot - b.slot);
+    return entries.map((entry) => entry.file);
+  } catch {
+    return [];
+  }
+}
+
+/** Write-then-link, like the hooks' publishFileAtomically: a concurrent reader
+ *  never sees a half-written salt and skips on to a different slot. */
+function publishSalt(file: string, salt: string): boolean {
+  const tmp = `${file}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`;
+  try {
+    writeFileSync(tmp, `${salt}\n`, { flag: 'wx', mode: 0o600 });
+    linkSync(tmp, file);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { unlinkSync(tmp); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * #854: the salt is half of the session identity, so this must find the SAME
+ * file the hooks find — same candidate files, same order (primary, the three
+ * legacy `.recovered*` slots, then discovered `.recoveredN`). Reading only the
+ * primary meant a corrupt primary gave this plane a fresh, unpersisted salt on
+ * every call while the hook used `.recovered`: one session, two identities.
+ */
 export function sessionKeySalt(home?: string): string | null {
   const fromEnv = process.env.SHIELDCORTEX_SESSION_SALT;
   if (typeof fromEnv === 'string' && /^[a-f0-9]{64}$/i.test(fromEnv)) return fromEnv.toLowerCase();
@@ -77,21 +137,25 @@ export function sessionKeySalt(home?: string): string | null {
     const dir = join(stateHome(home), '.shieldcortex');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const primary = join(dir, 'action-guard-session-salt');
-    if (existsSync(primary)) {
-      const existing = readFileSync(primary, 'utf8').trim().toLowerCase();
-      if (/^[a-f0-9]{64}$/.test(existing)) return existing;
+    for (const file of [...legacySessionSaltFiles(primary), ...discoveredSessionSaltFiles(primary)]) {
+      const existing = readExistingSessionSalt(file);
+      if (existing) return existing;
     }
     const salt = randomBytes(32).toString('hex');
-    try {
-      writeFileSync(primary, `${salt}\n`, { flag: 'wx', mode: 0o600 });
-      return salt;
-    } catch {
-      if (existsSync(primary)) {
-        const raced = readFileSync(primary, 'utf8').trim().toLowerCase();
-        if (/^[a-f0-9]{64}$/.test(raced)) return raced;
-      }
-      return salt;
+    for (const file of legacySessionSaltFiles(primary)) {
+      if (publishSalt(file, salt)) return salt;
+      const raced = readExistingSessionSalt(file);
+      if (raced) return raced;
     }
+    for (let i = 4; i < 4 + MAX_SESSION_SALT_RECOVERY_ATTEMPTS; i += 1) {
+      const file = `${primary}.recovered${i}`;
+      const existing = readExistingSessionSalt(file);
+      if (existing) return existing;
+      if (publishSalt(file, salt)) return salt;
+      const raced = readExistingSessionSalt(file);
+      if (raced) return raced;
+    }
+    return null;
   } catch {
     return null;
   }

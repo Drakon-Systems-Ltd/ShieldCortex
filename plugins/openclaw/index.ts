@@ -141,6 +141,9 @@ type DefenceModule = {
   /** #260 — session-guard index + degraded-run summary. Optional so an older
    *  installed dist degrades to "no index" rather than crashing the hook. */
   sessionKeyFor?: (value: string | undefined, opts?: { home?: string; salt?: string }) => string | null;
+  /** #854 — the lease identity both planes act as. Optional: an older dist
+   *  falls back to sessionKeyFor, which is the same formula. */
+  leaseIdentityFor?: (rawSessionId: string | null | undefined, opts?: { home?: string; salt?: string }) => string;
   appendSessionGuardIndex?: (opts: { home?: string; entry: Record<string, unknown> }) => boolean;
   recordActionGuardDegraded?: (
     rawSessionId: string | undefined,
@@ -2786,6 +2789,41 @@ export function isInternalContent(text: string, sessionId?: string | null): bool
   return matchesSkipPatterns(inner);
 }
 
+type InterceptorRuntimeOptions = NonNullable<Parameters<typeof createInterceptor>[2]>;
+
+/**
+ * #854: the interceptor's lease adapters. The holder is the SAME identity the
+ * Claude Code hook leases as — `leaseIdentityFor` (or, on an older dist,
+ * `sessionKeyFor`, the same formula) — never the raw sessionId, which can
+ * never equal an `sc-…` holder and so refused this session's own lease as
+ * "held by another session". Acquire and release derive it identically. A
+ * blank id maps to '' and gets the store's per-process fallback, as before.
+ */
+export function actionLeaseAdapters(
+  defenceMod: DefenceModule | null | undefined,
+): Pick<InterceptorRuntimeOptions, 'checkActionLease' | 'releaseActionLease'> {
+  const mod = defenceMod as (DefenceModule & Record<string, unknown>) | null | undefined;
+  const evaluate = mod?.evaluateToolCallLease as
+    | ((toolName: string, args: Record<string, unknown>, opts: { self: string }) => ReturnType<NonNullable<InterceptorRuntimeOptions['checkActionLease']>>)
+    | undefined;
+  const release = mod?.releaseToolCallLease as
+    | ((toolName: string, args: Record<string, unknown>, opts: { self: string }) => void)
+    | undefined;
+  const identity = (sessionId: string | undefined): string => {
+    if (typeof mod?.leaseIdentityFor === 'function') return mod.leaseIdentityFor(sessionId);
+    if (typeof mod?.sessionKeyFor === 'function') return mod.sessionKeyFor(sessionId) ?? '';
+    return sessionId ?? '';
+  };
+  return {
+    checkActionLease: typeof evaluate === 'function'
+      ? (toolName, args, sessionId) => evaluate(toolName, args, { self: identity(sessionId) })
+      : undefined,
+    releaseActionLease: typeof release === 'function'
+      ? (toolName, args, sessionId) => release(toolName, args, { self: identity(sessionId) })
+      : undefined,
+  };
+}
+
 function resolveHookSessionId(
   event: { sessionId?: string } | undefined,
   ctx?: AgentCtx,
@@ -4599,14 +4637,9 @@ export default {
           // injected through the same runtime seam as evaluateToolCall. Older
           // installed packages without the export simply leave the option
           // undefined (no lease plane — the capability-honesty surface says so).
-          checkActionLease: typeof (defenceMod as any)?.evaluateToolCallLease === 'function'
-            ? (toolName, args, sessionId) =>
-                (defenceMod as any).evaluateToolCallLease(toolName, args, { self: sessionId ?? '' })
-            : undefined,
-          releaseActionLease: typeof (defenceMod as any)?.releaseToolCallLease === 'function'
-            ? (toolName, args, sessionId) =>
-                (defenceMod as any).releaseToolCallLease(toolName, args, { self: sessionId ?? '' })
-            : undefined,
+          // #854: both adapters act as the SAME identity the Claude Code hook
+          // leases as — see actionLeaseAdapters.
+          ...actionLeaseAdapters(defenceMod),
           // #260: the session-guard index. Same formula as the Claude Code
           // hook. Absent on an older dist — then emitAudit still stamps origin
           // but does not write an index nobody would summarise.
