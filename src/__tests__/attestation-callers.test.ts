@@ -159,13 +159,36 @@ describe('phase 3 — remaining pipeline callers', () => {
       'src/integrations/langchain.ts',
     ];
 
-    it.each(files)('%s passes at most 5 args to runDefencePipeline (no options)', (rel) => {
+    // Every pipeline entry point, with the count of positional args that come
+    // BEFORE its options parameter. The public runDefencePipeline delegates to
+    // runDefencePipelinePrecise (the 5.x wire seam the REST routes now call),
+    // so the pin follows the caller onto whichever entry it uses.
+    const entryMaxArgs: Record<string, number> = {
+      runDefencePipeline: 5,
+      runDefencePipelinePrecise: 5,
+      runDefencePipelineWithVerify: 5,
+      runDefencePipelinePreviewInternal: 5,
+      runDefencePipelineTransactionalInternal: 6,
+    };
+
+    it.each(files)('%s passes at most 5 args to runDefencePipeline* (no options)', (rel) => {
       const src = readFileSync(join(repoRoot, rel), 'utf8');
-      const calls = extractCallArgs(src, 'runDefencePipeline(');
-      expect(calls.length).toBeGreaterThan(0);
-      for (const args of calls) {
-        expect(countTopLevelArgs(args)).toBeLessThanOrEqual(5);
+      // Any runDefencePipeline*( call must be a classified entry, so a new
+      // seam cannot carry options past this pin unexamined.
+      const used = [...new Set([...src.matchAll(/\b(runDefencePipeline\w*)\(/g)].map((m) => m[1]))];
+      expect(used.length).toBeGreaterThan(0);
+      for (const name of used) {
+        expect(Object.keys(entryMaxArgs)).toContain(name);
       }
+      let total = 0;
+      for (const name of used) {
+        const calls = extractCallArgs(src, `${name}(`);
+        total += calls.length;
+        for (const args of calls) {
+          expect(countTopLevelArgs(args)).toBeLessThanOrEqual(entryMaxArgs[name]);
+        }
+      }
+      expect(total).toBeGreaterThan(0);
     });
 
     it('behavioural: the langchain guard scan leaves attestation NULL', () => {

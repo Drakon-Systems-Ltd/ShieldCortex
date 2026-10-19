@@ -13,7 +13,8 @@
  */
 
 import { analyzeFirewall } from '../firewall/index.js';
-import { classifySensitivity } from '../sensitivity/index.js';
+import { classifySensitivityPrecise } from '../sensitivity/index.js';
+import { toPublicSensitivity, type PreciseSensitivityClassification } from '../sensitivity/tier.js';
 import type {
   DefenceConfig,
   DefenceSource,
@@ -203,7 +204,7 @@ function buildConfig(mode?: 'strict' | 'balanced' | 'permissive'): DefenceConfig
 function scanParsed(
   parsed: ParsedSkill,
   options?: SkillScanOptions,
-): SkillScanResult {
+): PreciseSkillScanResult {
   const startTime = Date.now();
   const includeContent = options?.includeContent ?? false;
   const config = buildConfig(options?.mode);
@@ -221,7 +222,7 @@ function scanParsed(
   );
 
   // 2. Sensitivity classification
-  const sensitivity = classifySensitivity(parsed.content, parsed.name);
+  const sensitivity = classifySensitivityPrecise(parsed.content, parsed.name);
 
   // 3. Collect findings from firewall threat indicators
   if (firewall.result === 'BLOCK' || firewall.result === 'QUARANTINE') {
@@ -449,6 +450,27 @@ export function scanSkill(
   filePath: string,
   options?: SkillScanOptions,
 ): SkillScanResult {
+  return toPublicSkillScanResult(scanSkillPrecise(filePath, options));
+}
+
+/**
+ * INTERNAL: skill scan result with the precise #718 tier (`level` may be
+ * PERSONAL). The 5.7.0–5.10.5 shape. Not re-exported from package barrels.
+ */
+export type PreciseSkillScanResult = Omit<SkillScanResult, 'sensitivity'> & {
+  sensitivity: PreciseSensitivityClassification;
+};
+
+/** INTERNAL: public copy of a precise skill result (PERSONAL → CONFIDENTIAL). */
+export function toPublicSkillScanResult(result: PreciseSkillScanResult): SkillScanResult {
+  return { ...result, sensitivity: toPublicSensitivity(result.sensitivity) };
+}
+
+/** INTERNAL: `scanSkill` without the public projection (HTTP wire boundary). */
+export function scanSkillPrecise(
+  filePath: string,
+  options?: SkillScanOptions,
+): PreciseSkillScanResult {
   try {
     const parsed = readSkillFile(filePath);
     const result = scanParsed(parsed, options);
@@ -499,6 +521,16 @@ export function scanSkillContent(
   format?: SkillFormat,
   name?: string,
 ): SkillScanResult {
+  return toPublicSkillScanResult(scanSkillContentPrecise(content, options, format, name));
+}
+
+/** INTERNAL: `scanSkillContent` without the public projection (HTTP wire boundary, deep scan). */
+export function scanSkillContentPrecise(
+  content: string,
+  options?: SkillScanOptions,
+  format?: SkillFormat,
+  name?: string,
+): PreciseSkillScanResult {
   try {
     const parsed = parseSkillFile(content, format);
 

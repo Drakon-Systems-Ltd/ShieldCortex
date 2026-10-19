@@ -96,6 +96,19 @@ export function syncToCloud(
   source: DefenceSource | ProvenanceSource,
   durationMs: number,
 ): void {
+  syncToCloudInternal(result, source, durationMs);
+}
+
+/**
+ * INTERNAL: `syncToCloud` over a result whose `sensitivity.level` may carry the
+ * precise #718 tier (PERSONAL). The pipeline passes its unprojected result here
+ * so the audit-ingest value matches 5.10.5. Not re-exported from package barrels.
+ */
+export function syncToCloudInternal(
+  result: Omit<DefencePipelineResult, 'sensitivity'> & { sensitivity: { level: string } },
+  source: DefenceSource | ProvenanceSource,
+  durationMs: number,
+): void {
   const config = getCloudConfig();
 
   // Bail immediately if cloud sync is not configured
