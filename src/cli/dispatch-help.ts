@@ -117,7 +117,8 @@ Options:
                            published yet, so it stays in shadow today. Needs a webhook;
                            progress: shieldcortex guard readiness. Claude Code hook and OpenClaw
                            plugin, each measured on its own calls; Hermes ignores the gate and
-                           enforces immediately. Also enables the guard
+                           enforces immediately unless its own enforce setting (SHIELDCORTEX_ENFORCE)
+                           opts it out; this does not change that setting. Also enables the guard
   --action-guard-advisory  Watch only — ordinary dangerous ops log but are not gated. Still held or
                            blocked, including catastrophic ops and calls the guard recognises as
                            changing its own state/config or disabling it. Hermes has its own

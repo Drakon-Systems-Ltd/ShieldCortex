@@ -693,16 +693,35 @@ ${bold}USAGE${reset}
 ${bold}COMMANDS${reset}
   ${cyan}remember${reset} <title>       Write a memory (via the defence pipeline)
                         --content <text> or pipe via stdin; --importance, --tags
-  ${cyan}memories${reset} import-native Import native Markdown once through full defence
-                        (dry-run by default; --apply admits then archives)
+  ${cyan}memories${reset} <subcommand> Memory-store tools: import-native, migrate-legacy, prune,
+                        embed-backfill, reclassify, dedupe, repair-project-keys,
+                        purge, recalc (memories --help lists each one's flags).
+                        import-native imports native Markdown once through full
+                        defence (dry-run by default; --apply admits then archives)
+  ${cyan}memory${reset} <subcommand>   Show, downvote or list memories; revert-backfill (memory --help)
+  ${cyan}inspect${reset} <subcommand>  Show the last precompact or prompt-recall candidates
+  ${cyan}import-jsonl${reset} [path]   Import Claude Code session transcripts (JSONL) for
+                        dashboard replay (default: ~/.claude/projects/**/*.jsonl)
   ${cyan}scan${reset} <text>           Scan text through the defence pipeline
                         Exit: 0=allow 1=caught 2=usage 3=tool-failure. Health = parse stdout.
   ${cyan}scan-skill${reset} <path>     Scan an agent instruction file for threats
                         (--accept to suppress a reviewed file; --forget to undo)
   ${cyan}scan-skills${reset}           Scan all installed skills/hooks
+  ${cyan}mcp${reset} scan [server]     Scan MCP server tool descriptions for poisoning and
+                        rug-pull drift (--json, --ci)
+  ${cyan}env${reset} scan <url>        Score a URL's provenance and scan it for hidden
+                        instructions (--json, --markdown)
+  ${cyan}xray${reset} <target>         Scan an npm package, file or directory for risky code
+                        (--deep, --json, --sarif, --ci, --watch)
+  ${cyan}xray-preinstall${reset}       npm pre-install check of ./package.json scripts
+                        (exit 1 blocks the install)
   ${cyan}dashboard${reset}             Open the local security dashboard
+  ${cyan}api${reset}                   Start the visualization API server (http://localhost:3001)
   ${cyan}worker${reset}                Run headless background sync + heartbeat worker
   ${cyan}status${reset}                Show current protection status
+  ${cyan}stats${reset}                 Print the security report (scan, block and quarantine counts)
+  ${cyan}consolidate${reset}           Run memory maintenance, then Dream Mode consolidation
+                        (opens the memory database, creating it if absent)
   ${cyan}doctor${reset}                Diagnose installation issues (exits 1 on a ❌; --strict also fails on ⚠️)
                         Repairs: --fix-project-keys (project-key collisions)
                                  --fix-action-guard (migrate the deprecated
@@ -719,6 +738,13 @@ ${bold}COMMANDS${reset}
                         (dry-run; --execute). Audit logs are not managed yet (#579).
   ${cyan}approve${reset} [hash]        Grant a one-shot Action Guard approval for one exact
                         command (no hash = list recent refusals; --ttl N minutes)
+  ${cyan}deny${reset} [hash]           Reject a pending Action Guard approval request
+                        (no hash = list recent refusals; TTY only)
+  ${cyan}freeze${reset} <scope> --reason <why>
+                        Record a FROZEN decision for a scope in this host's
+                        decisions ledger (TTY only)
+  ${cyan}unfreeze${reset} <scope>      Lift a recorded freeze (TTY only)
+  ${cyan}lease${reset}                 Show recorded freezes, held leases and bound planes (read-only)
   ${cyan}guard${reset} readiness       Enforce-when-ready, per surface (Claude Code hook, OpenClaw plugin):
                         posture, mode, readiness proxies + effectiveness evidence
   ${cyan}guard${reset} test-approval   Send a synthetic approval request through your channel (TTY only;
@@ -753,13 +779,21 @@ ${bold}COMMANDS${reset}
                         Flags: --dry-run, --from-config, --config <path>,
                                --agent-uid <uid> (needed when the invoking
                                shell gives protect no other way to learn it)
+  ${cyan}update${reset}                Upgrade the npm package, then reconcile this host (hooks,
+                        plugin, native DB engine, permissions); mutates the host
+  ${cyan}repair${reset}                Heal a broken install in place (native binding, OpenClaw
+                        plugin metadata, state permissions)
+  ${cyan}migrate${reset}               Move a Claude Cortex / Claude Memory install to ShieldCortex
   ${cyan}uninstall${reset}             Remove ShieldCortex from your project
   ${cyan}openclaw${reset} <action>     Manage OpenClaw hook integration
   ${cyan}copilot${reset} <action>      Set up VS Code / Cursor MCP integration
   ${cyan}codex${reset} <action>        Set up Codex CLI / VS Code MCP integration (memory only)
   ${cyan}hermes${reset} <action>       Install the Hermes pre_tool_call Action Guard plugin
   ${cyan}graph${reset} backfill        Backfill knowledge graph from memories
-  ${cyan}hook${reset} <action>         Manage hooks (start, stop, status)
+  ${cyan}threat-graph${reset} <command> Rebuild or inspect the threat graph (rebuild, status,
+                        campaigns, conflicts, reset-source, resolve-conflict)
+  ${cyan}hook${reset} <name>           Run one hook by name (a built-in hook or a customHooks
+                        entry); the host's hook payload is read from stdin
   ${cyan}service${reset} <action>      Manage background service
 
 ${bold}OPTIONS${reset}
