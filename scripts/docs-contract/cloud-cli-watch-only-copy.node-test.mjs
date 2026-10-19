@@ -152,9 +152,9 @@ describe('CHANGELOG', () => {
     assert.match(bullet, /not runtime proof/);
   });
 
-  it('Unreleased Docs names the enforce-when-ready Hermes qualification', () => {
-    const unreleased = between(read('CHANGELOG.md'), '## [Unreleased]', '\n## [');
-    const bullet = unreleased.split('\n').find((l) => /enforce-when-ready` copy: Hermes/i.test(l));
+  it('Docs (Unreleased, or the release that shipped it) names the enforce-when-ready Hermes qualification', () => {
+    // Same rule as above: the bullet moves into a versioned section at release time.
+    const bullet = read('CHANGELOG.md').split('\n').find((l) => l.startsWith('- **') && /enforce-when-ready` copy: Hermes/i.test(l));
     assert.ok(bullet, 'no enforce-when-ready Hermes copy bullet');
     assert.match(bullet, /SHIELDCORTEX_ENFORCE/);
     assert.match(bullet, /not runtime proof/);
