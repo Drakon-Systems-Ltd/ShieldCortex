@@ -63,7 +63,7 @@ If npm skipped the package's lifecycle scripts (for example `--ignore-scripts`, 
 
 ## Where it can block
 
-Action Guard stays off until you turn it on. A bare `sudo shieldcortex protect` turns it on and pins that posture. [Policy lock](docs/UPDATING.md#policy-lock).
+Action Guard stays off until you turn it on. That shared setting is the tool gate for Claude Code and OpenClaw. A bare `sudo shieldcortex protect` turns it on and pins that posture. [Policy lock](docs/UPDATING.md#policy-lock). The Hermes plugin does not read the shared setting; it has its own (below).
 
 | Host | Memory scan | Tool gate |
 |---|---|---|
@@ -76,7 +76,7 @@ Action Guard stays off until you turn it on. A bare `sudo shieldcortex protect` 
 
 `shieldcortex doctor` prints the same split: `memory + tool gate` for a host that can deny, and memory only, not a gate, for one that cannot. It shows the live Guard posture for Claude Code and OpenClaw. For Hermes it only reports whether the plugin copy is present. It will not print "protected" for a host that cannot deny.
 
-Hermes gates tool calls once you run `hermes plugins enable shieldcortex` and the local API (`shieldcortex api`) is up. Codex, Cursor, VS Code, and other MCP hosts get a memory server the model may call. That server is a scanner, not a deny.
+Hermes gates tool calls once you run `hermes plugins enable shieldcortex` and the local API (`shieldcortex api`) is up. The enabled plugin enforces by default, whatever the shared Action Guard setting says: it blocks unless `SHIELDCORTEX_ENFORCE` opts it out (`0`, `false`, `no`, `off` or `advisory`). Hermes has no approval prompt, so a call Action Guard would hold for approval is blocked while enforcing. Advisory mode still blocks Action Guard's hard-block verdicts and calls that touch the guard's own state or config; while the API is unreachable it still blocks those calls and the catastrophic shapes its fallback scan recognises. [Hermes plugin](plugins/hermes/shieldcortex/README.md). Codex, Cursor, VS Code, and other MCP hosts get a memory server the model may call. That server is a scanner, not a deny.
 
 If the Claude Code PreToolUse hook fails to load, a bounded fallback still blocks recognised catastrophic commands, even with the guard off. While the hook is broken those patterns also stop routine recursive force-deletes. Calls that do not match stay fail-open. [Full note](docs/UPDATING.md#claude-code-hook-fallback).
 
