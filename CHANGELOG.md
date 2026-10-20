@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+- **Prompt capture raises a redacted PERSONAL prompt to CONFIDENTIAL (#858).** When credentials are redacted from a captured prompt, its stored sensitivity is now at least CONFIDENTIAL, matching memory save. Before, a PERSONAL prompt with a redacted secret stayed PERSONAL. Rows captured before the upgrade keep their stored label.
+
 ### Fixed
 - CLI help after an ignored duplicate value flag or an overriding equals-form option now prints usage without running the command or creating state. The help gate follows each parser's first-occurrence or streaming rules, including `memories embed-backfill --limit=1 --limit --help`; literal help tokens that the parser actually reads as values remain values (#838)
 - Consolidation no longer drops a deleted duplicate's tags when one memory has several near-duplicates in the same pass (#860).
