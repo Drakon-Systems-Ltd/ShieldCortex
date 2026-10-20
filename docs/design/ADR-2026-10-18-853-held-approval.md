@@ -1,6 +1,25 @@
 # ADR 2026-10-18: Held approval when nobody can be asked (#853)
 
-Status: PROPOSED (design-first; no live-control change in this ADR or its first slice)
+> **SUPERSEDED (20 Oct 2026) — historical proposed design only.**
+> The Action Guard design contract accepted in
+> [#875 (issuecomment-6291485171)](https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues/875#issuecomment-6291485171)
+> replaces the target state described below. Principle 2 of that contract: where a gate applies,
+> the action is **held**, one card reaches the owner, approval **runs the held action**, and the
+> **same card** then shows the outcome: *ran* / *denied, nothing ran* / *expired, nothing ran*.
+> **No 10-minute allowlist tokens and no retry-by-hand.**
+>
+> This ADR's Plane A "held-for-retry" / "Allow one retry" model, its one-use grant with a TTL
+> (including the 10-minute ceiling), the "approved, not run" terminal and the rollout gates built
+> on them are therefore **not authority for any follow-on #853 implementation**. Where this document
+> and the #875 contract differ, #875 wins. The text below is kept unedited as the record of what was
+> proposed.
+>
+> What still stands from PR #855: slice 1 only, i.e. the What/Why/Who/outcome card copy, the
+> agent-facing `permissionDecisionReason` notice and their test fixtures, with
+> `actionGuard.retryCards` remaining **dark (off) by default**. Slice 1 is not a #853 fix and does
+> not complete it.
+
+Status: SUPERSEDED by #875 design contract (was: PROPOSED, design-first; no live-control change in this ADR or its first slice)
 Issue: Drakon-Systems-Ltd/ShieldCortex#853, "never silently deny when there is no prompt surface"
 Builds on: `ADR-2026-08-19-retry-control.md` (the #310 ADR) and `2026-08-19-310-retry-control.md` (DESIGN-310 v3-final).
 That ADR is not edited. This one supersedes exactly one clause of it (§3) and restates the rest.
