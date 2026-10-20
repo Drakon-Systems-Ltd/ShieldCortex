@@ -66,10 +66,15 @@ function auditDirFor(home?: string): string {
 
 /** Same formula as scripts/pre-tool-hook.mjs and scripts/stop-hook.mjs. */
 export function sessionKeyFor(value: string | undefined, opts: SessionGuardOptions = {}): string | null {
-  if (typeof value !== 'string' || !value.trim()) return null;
+  if (typeof value !== 'string') return null;
+  // Keep canonicalisation in sync with scripts/pre-tool-hook.mjs and
+  // scripts/stop-hook.mjs.
+  // Reject lone surrogates before UTF-8 can alias them with U+FFFD.
+  const id: string & { isWellFormed?: () => boolean } = value.trim();
+  if (!id || (typeof id.isWellFormed === 'function' ? !id.isWellFormed() : /[\uD800-\uDFFF]/u.test(id))) return null;
   const salt = opts.salt ?? sessionKeySalt(opts.home);
   if (!salt) return null;
-  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${value}`).digest('hex').slice(0, 16)}`;
+  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${id}`).digest('hex').slice(0, 16)}`;
 }
 
 /** Same slot range as MAX_SESSION_SALT_RECOVERY_ATTEMPTS in the hooks. */
@@ -126,6 +131,11 @@ export function sessionKeySalt(home?: string): string | null {
   try {
     const dir = join(stateHome(home), '.shieldcortex');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Match ensureDirectoryNoSymlink in scripts/pre-tool-hook.mjs: the salt
+    // parent is the sole component below home. Home itself and its ancestors
+    // are not checked; an explicit env salt above still takes precedence.
+    const st = lstatSync(dir);
+    if (!st.isDirectory() || st.isSymbolicLink()) return null;
     const primary = join(dir, 'action-guard-session-salt');
     for (const file of [...legacySessionSaltFiles(primary), ...discoveredSessionSaltFiles(primary)]) {
       const existing = readExistingSessionSalt(file);

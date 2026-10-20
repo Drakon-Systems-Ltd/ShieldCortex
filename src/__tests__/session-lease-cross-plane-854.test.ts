@@ -1,10 +1,14 @@
 import { spawn } from 'node:child_process';
 import { createHmac } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, realpathSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, realpathSync, existsSync, statSync, renameSync, symlinkSync } from 'node:fs';
+import * as fs from 'node:fs';
+import * as crypto from 'node:crypto';
+import * as path from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { createInterceptor, DEFAULT_CONFIG } from '../../plugins/openclaw/interceptor.js';
 import { actionLeaseAdapters } from '../../plugins/openclaw/index.js';
 import * as defence from '../defence/index.js';
@@ -26,6 +30,7 @@ import { releaseToolCallLease } from '../defence/iron-dome/session-lease-store.j
  */
 
 const HOOK_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'pre-tool-hook.mjs');
+const STOP_HOOK_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'stop-hook.mjs');
 const DIST_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dist');
 const SALT = 'ab'.repeat(32);
 const COMMAND = 'npm publish';
@@ -136,6 +141,134 @@ function leaseRecord(): { holder: string; pid: number } | undefined {
 function expectedKey(salt: string, id: string): string {
   return `sc-${createHmac('sha256', salt).update(`action-guard-session:${id}`).digest('hex').slice(0, 16)}`;
 }
+
+/** Execute the hook's actual helpers without its main(), to observe no-key
+ * results directly. Blank ids still use a separate process-holder fallback;
+ * a nonblank id whose key cannot be derived is refused at the lease call site. */
+function hookIdentity(id: string, hookPath: string = HOOK_PATH): { salt: string | undefined; key: string | undefined } {
+  const source = readFileSync(hookPath, 'utf8');
+  const helpersEnd = hookPath === STOP_HOOK_PATH ? 'const SAFE_SUMMARY_SIGNALS' : 'function hookSessionExtras(';
+  const helpers = source.slice(source.indexOf('function readExistingSessionSalt('), source.indexOf(helpersEnd));
+  expect(helpers).toContain('function sessionKeyFor(');
+  const directoryCheck = source.slice(source.indexOf('function ensureDirectoryNoSymlink('), source.indexOf('function testOnlyPauseAppendOpen('));
+  const recoveryLimit = source.match(/^const MAX_SESSION_SALT_RECOVERY_ATTEMPTS = \d+;/m)?.[0];
+  expect(recoveryLimit).toBeDefined();
+  return runInNewContext(`${recoveryLimit}\n${helpers}\n${directoryCheck}\n({ salt: sessionKeySalt(), key: sessionKeyFor(id) })`, {
+    ...fs, ...crypto, ...path, id,
+    homedir: () => home,
+    mkdirSecure: (dir: string) => mkdirSync(dir, { recursive: true, mode: 0o700 }),
+    process: { env: { ...process.env }, pid: process.pid },
+  });
+}
+
+describe('#857 — canonical lease identity across both planes', () => {
+  it('old-dist compatibility retains raw holders when neither identity export exists', () => {
+    const gate = { scope: 'npm-publish', decision: { verdict: 'allow', reason: 'legacy fixture' }, acquired: true };
+    const evaluate = jest.fn((_tool: string, _args: Record<string, unknown>, _opts: { self: string }) => gate);
+    const release = jest.fn();
+    const adapters = actionLeaseAdapters({ evaluateToolCallLease: evaluate, releaseToolCallLease: release } as never);
+    for (const id of ['session-a', ' session-a ', '', '   ', undefined]) {
+      const self = id ?? '';
+      expect(adapters.checkActionLease!('exec', { command: COMMAND }, id)).toBe(gate);
+      expect(evaluate).toHaveBeenLastCalledWith('exec', { command: COMMAND }, { self });
+      adapters.releaseActionLease!('exec', { command: COMMAND }, 'different-id', gate);
+      expect(release).toHaveBeenLastCalledWith('exec', { command: COMMAND }, { self });
+      adapters.releaseActionLease!('exec', { command: COMMAND }, id);
+      expect(release).toHaveBeenLastCalledWith('exec', { command: COMMAND }, { self });
+    }
+  });
+
+  it('trims padded ids inside both formulas and re-enters the same real hook hold', async () => {
+    const expected = expectedKey(SALT, 'session-a');
+    for (const id of [' session-a ', 'session-a']) {
+      expect(defence.sessionKeyFor(id, { home })).toBe(expected);
+      expect(hookIdentity(id).key).toBe(expected);
+      await runHook(id);
+      expect(leaseRecord()?.holder).toBe(expected);
+      await expect(openclawPlane().call(id)).resolves.toBeUndefined();
+    }
+    for (const id of ['', ' \t\n ']) {
+      expect(hookIdentity(id).key).toBeUndefined();
+      expect(defence.sessionKeyFor(id, { home })).toBeNull();
+    }
+  });
+
+  it('rejects lone surrogates instead of aliasing the valid replacement character', async () => {
+    const invalid = 'x\uD800';
+    const valid = 'x\uFFFD';
+    expect(hookIdentity(invalid).key).toBeUndefined();
+    expect(defence.sessionKeyFor(invalid, { home })).toBeNull();
+    const expected = expectedKey(SALT, valid);
+    expect(hookIdentity(valid).key).toBe(expected);
+    expect(defence.sessionKeyFor(valid, { home })).toBe(expected);
+    await runHook(valid);
+    expect(leaseRecord()?.holder).toBe(expected);
+    await expect(openclawPlane().call(invalid)).rejects.toThrow(/identity could not be derived/);
+    const invalidHook = await runHook(invalid);
+    expect(hookLeaseRefused(invalidHook)).toBe(true);
+    expect(leaseRecord()?.holder).toBe(expected);
+  });
+
+  it('refuses a malformed named id on a free scope instead of leasing as the process holder', async () => {
+    const invalid = 'x\uD800';
+    await expect(openclawPlane().call(invalid)).rejects.toThrow(/identity could not be derived/);
+    const invalidHook = await runHook(invalid);
+    expect(hookLeaseRefused(invalidHook)).toBe(true);
+    expect(leaseRecord()).toBeUndefined();
+  });
+
+  it('preserves well-formed non-ASCII and supplementary ids without merging distinct sessions', async () => {
+    const ids = ['sessión-ü', 'session-😀'];
+    const keys: string[] = [];
+    for (const id of ids) {
+      const expected = expectedKey(SALT, id);
+      expect(hookIdentity(id).key).toBe(expected);
+      expect(defence.sessionKeyFor(id, { home })).toBe(expected);
+      await runHook(id);
+      expect(leaseRecord()?.holder).toBe(expected);
+      await expect(openclawPlane().call(id)).resolves.toBeUndefined();
+      openclawPlane().adapters.releaseActionLease!('exec', { command: COMMAND }, id);
+      expect(leaseRecord()).toBeUndefined();
+      keys.push(expected);
+    }
+    expect(new Set(keys).size).toBe(ids.length);
+  });
+
+  it('the stop hook keys a session exactly as the pre-tool hook and the TS plane do', () => {
+    for (const id of ['session-a', ' session-a ', '\tsession-a\n', 'sessión-ü', 'session-😀', 'x\uFFFD']) {
+      const expected = expectedKey(SALT, id.trim());
+      expect(hookIdentity(id, STOP_HOOK_PATH).key).toBe(expected);
+      expect(hookIdentity(id).key).toBe(expected);
+      expect(defence.sessionKeyFor(id, { home })).toBe(expected);
+    }
+    for (const id of ['', ' \t\n ', 'x\uD800']) {
+      expect(hookIdentity(id, STOP_HOOK_PATH).key).toBeNull();
+      expect(hookIdentity(id).key).toBeUndefined();
+      expect(defence.sessionKeyFor(id, { home })).toBeNull();
+    }
+  });
+
+  it('refuses a symlinked salt parent on both planes; a real directory is the positive control', async () => {
+    delete process.env.SHIELDCORTEX_SESSION_SALT;
+    writeFileSync(join(stateDir, 'action-guard-session-salt'), `${SALT}\n`);
+    expect(hookIdentity('session-a')).toEqual({ salt: SALT, key: expectedKey(SALT, 'session-a') });
+    expect(defence.sessionKeySalt(home)).toBe(SALT);
+    expect(defence.sessionKeyFor('session-a', { home })).toBe(hookIdentity('session-a').key);
+    await runHook('session-a', { envSalt: false });
+    expect(leaseRecord()?.holder).toBe(expectedKey(SALT, 'session-a'));
+    releaseToolCallLease('exec', { command: COMMAND }, { self: expectedKey(SALT, 'session-a') });
+
+    const realState = join(home, 'real-state');
+    renameSync(stateDir, realState);
+    symlinkSync(realState, stateDir, 'dir');
+    expect(hookIdentity('session-a')).toEqual({ salt: undefined, key: undefined });
+    expect(defence.sessionKeySalt(home)).toBeNull();
+    expect(defence.sessionKeyFor('session-a', { home })).toBeNull();
+    const unresolved = await runHook('session-a', { envSalt: false });
+    expect(hookLeaseRefused(unresolved)).toBe(true);
+    expect(leaseRecord()).toBeUndefined();
+  });
+});
 
 describe('#854 — the issue: one session is never refused by its own lease', () => {
   it('hook plane holds npm-publish → the OpenClaw plane of the SAME session is allowed', async () => {

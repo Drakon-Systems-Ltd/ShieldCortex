@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - The npm release workflow now requests online exact-version reads and allows 120 polls, 10 seconds apart, for both packages to appear before failing loudly (20 minutes of waiting, plus request time). The plugin tarball check runs after a successful plugin publish even if the version wait fails, unless the job is cancelled; release and ClawHub recovery require that check to pass (#871).
+- Session lease identities now trim surrounding whitespace and reject malformed Unicode consistently in Claude Code and OpenClaw, preventing cross-plane self-refusals and malformed-id aliases. Session ids that differ only by surrounding whitespace are now treated as one session on both planes. Both decline a file-based identity through a symlinked state directory. A nonblank id whose key cannot be derived is refused on both planes instead of the Claude Code hook leasing as a process holder. Older distributions without identity helpers retain their raw-id compatibility fallback and cannot guarantee cross-plane parity (#857). This closes the two parity exceptions listed under #854 in 5.10.6.
 
 ## [5.10.6] - 2026-10-20
 
