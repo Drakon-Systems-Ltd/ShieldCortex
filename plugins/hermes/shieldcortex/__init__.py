@@ -208,10 +208,12 @@ def register(ctx):
             _audit_gate_degraded(tool_name, verdict.reason, denied)
         fallback_denies = fallback_blocked or fallback_self_protected or (fallback_dangerous and enforce)
         if (verdict.available and verdict.decision != "allow") or fallback_denies:
-            if fallback_blocked:
-                tier = "FALLBACK_BLOCK (catastrophic)"
-            elif fallback_self_protected:
+            # Same precedence as policy.action_guard_decision: self-protection,
+            # then catastrophic, then dangerous-while-enforcing.
+            if fallback_self_protected:
                 tier = "FALLBACK_BLOCK (self-protection)"
+            elif fallback_blocked:
+                tier = "FALLBACK_BLOCK (catastrophic)"
             elif fallback_dangerous and enforce:
                 tier = "FALLBACK_BLOCK (dangerous)"
             else:

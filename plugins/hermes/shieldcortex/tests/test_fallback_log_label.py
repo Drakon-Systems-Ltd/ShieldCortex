@@ -12,7 +12,7 @@ from sc_client import ActionGuardVerdict  # noqa: E402
 
 
 class FallbackLogLabel(unittest.TestCase):
-    def _hook(self):
+    def _hook(self, catastrophic=False):
         pkg_parent = str(Path(__file__).resolve().parents[2])
         if pkg_parent not in sys.path:
             sys.path.insert(0, pkg_parent)
@@ -36,7 +36,7 @@ class FallbackLogLabel(unittest.TestCase):
             "fallback_write_target_match": plugin.fallback_write_target_match,
         }
         plugin.evaluate_tool_call = lambda *_a, **_k: down
-        plugin.fallback_catastrophic_match = lambda *_a, **_k: False
+        plugin.fallback_catastrophic_match = lambda *_a, **_k: catastrophic
         plugin.fallback_dangerous_match = lambda *_a, **_k: True
         plugin.fallback_self_protection_match = lambda *_a, **_k: True
         plugin.fallback_write_target_match = lambda *_a, **_k: None
@@ -83,6 +83,33 @@ class FallbackLogLabel(unittest.TestCase):
             joined = "\n".join(records)
             self.assertIn("FALLBACK_BLOCK (self-protection)", joined)
             self.assertNotIn("FALLBACK_BLOCK (dangerous)", joined)
+        finally:
+            lg.removeHandler(handler)
+            lg.setLevel(old_level)
+
+    def test_overlap_of_catastrophic_and_self_protection_logs_self_protection(self):
+        # policy.action_guard_decision returns the self-protection block first,
+        # so the log label must follow the same precedence when both flags match.
+        hook = self._hook(catastrophic=True)
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        lg = logging.getLogger("shieldcortex.hermes")
+        handler = Capture()
+        lg.addHandler(handler)
+        old_level = lg.level
+        lg.setLevel(logging.WARNING)
+        try:
+            d = hook("terminal", {"command": "ls -la"})
+            self.assertIsNotNone(d)
+            self.assertEqual(d["action"], "block")
+            self.assertIn("guard's own state or config", d["message"])
+            joined = "\n".join(records)
+            self.assertIn("FALLBACK_BLOCK (self-protection)", joined)
+            self.assertNotIn("FALLBACK_BLOCK (catastrophic)", joined)
         finally:
             lg.removeHandler(handler)
             lg.setLevel(old_level)

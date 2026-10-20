@@ -179,8 +179,20 @@ describe('Hermes outage fallback documentation', () => {
   it('outage log label names the deciding fallback tier', () => {
     const plugin = read('plugins', 'hermes', 'shieldcortex', '__init__.py');
     assert.match(plugin, /FALLBACK_BLOCK \(self-protection\)/);
-    assert.match(plugin, /elif fallback_self_protected:/);
-    assert.match(plugin, /elif fallback_dangerous and enforce:/);
+    // Precedence mirrors policy.action_guard_decision: self-protection, then
+    // catastrophic, then dangerous-while-enforcing.
+    const order = [
+      /if fallback_self_protected:\s+tier = "FALLBACK_BLOCK \(self-protection\)"/,
+      /elif fallback_blocked:\s+tier = "FALLBACK_BLOCK \(catastrophic\)"/,
+      /elif fallback_dangerous and enforce:\s+tier = "FALLBACK_BLOCK \(dangerous\)"/,
+    ];
+    let at = -1;
+    for (const re of order) {
+      const m = re.exec(plugin);
+      assert.ok(m, `missing tier branch ${re}`);
+      assert.ok(m.index > at, `tier branch out of order: ${re}`);
+      at = m.index;
+    }
   });
 });
 
