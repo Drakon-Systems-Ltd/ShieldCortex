@@ -3,7 +3,6 @@
  */
 
 import type { SensitivityLevel } from '../types.js';
-import type { SensitivityTier } from './tier.js';
 import { RESTRICTED_PATTERNS, CONFIDENTIAL_PATTERNS } from './patterns.js';
 
 /**
@@ -40,17 +39,6 @@ function partialMask(value: string): string {
 export function redactForDisplay(
   content: string,
   level: SensitivityLevel,
-): string {
-  return redactForDisplayTier(content, level);
-}
-
-/**
- * INTERNAL: `redactForDisplay` over the precise five-value tier. PERSONAL is
- * returned as-is. Never re-exported from a package entry point.
- */
-export function redactForDisplayTier(
-  content: string,
-  level: SensitivityTier,
 ): string {
   if (level === 'RESTRICTED') {
     return redactContent(content);

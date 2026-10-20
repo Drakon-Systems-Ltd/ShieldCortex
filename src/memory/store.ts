@@ -61,10 +61,8 @@ import type { TripleProvenance } from '../graph/resolve.js';
 import { storeFragmentationData } from '../defence/index.js';
 import {
   runDefencePipeline,
-  runDefencePipelinePrecise,
   runDefencePipelinePreviewInternal,
   runDefencePipelineTransactionalInternal,
-  type PreciseDefencePipelineResult,
 } from '../defence/pipeline.js';
 import { resolveDispositionV2, type DispositionV2 } from '../defence/disposition.js';
 import { classifyContentForm } from '../defence/form-classifier.js';
@@ -594,7 +592,7 @@ function runMemoryEffect(deferredEffects: DeferredMemoryEffect[] | undefined, ef
 function quarantineMemory(
   input: MemoryInput,
   source: DefenceSource,
-  result: Pick<DefencePipelineResult, 'firewall' | 'auditId'>,
+  result: DefencePipelineResult,
   deferredEffects?: DeferredMemoryEffect[],
   strict = false,
 ): void {
@@ -624,8 +622,7 @@ function quarantineMemory(
 
 export interface MemoryAdmissionAssessment {
   source: DefenceSource;
-  // Precise #718 tier: the stored label keeps PERSONAL (5.x compat).
-  result: PreciseDefencePipelineResult;
+  result: DefencePipelineResult;
   disposition: DispositionV2;
   contentHash: string;
   title: string;
@@ -664,7 +661,7 @@ function assessMemoryAdmissionInternal(
         { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata } },
         sanitiseInputForTest,
       )
-      : runDefencePipelinePrecise(input.content, input.title, effectiveSource, undefined, input.project, { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata } });
+      : runDefencePipeline(input.content, input.title, effectiveSource, undefined, input.project, { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata } });
   const disposition = resolveDispositionV2({
     allowed: result.allowed,
     firewallResult: result.firewall.result,

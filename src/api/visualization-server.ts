@@ -36,15 +36,14 @@ import {
 import { BrainWorker } from '../worker/brain-worker.js';
 import { isPaused, isKillSwitchActive, getKillSwitchMeta, activateKillSwitch, deactivateKillSwitch } from './control.js';
 import { getRunningVersion } from './version.js';
-import { runDefencePipelinePrecise } from '../defence/pipeline.js';
+import { runDefencePipeline } from '../defence/pipeline.js';
 import { evaluateToolCall } from '../defence/iron-dome/tool-action-guard.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
 import { queryAgentOperations } from '../defence/audit/queries.js';
 import { logAudit } from '../defence/audit/index.js';
 import { getCloudConfig, getTrustedSkills, addTrustedSkill, removeTrustedSkill, getDeviceId, getDeviceName, getDefenceMode } from '../cloud/config.js';
-import { scanSkill, discoverSkillFiles } from '../defence/skill-scanner/index.js';
-import { scanSkillPrecise, scanSkillContentPrecise } from '../defence/skill-scanner/scan-skill.js';
+import { scanSkill, scanSkillContent, discoverSkillFiles } from '../defence/skill-scanner/index.js';
 import { getIronDomeStatus, activateIronDome, deactivateIronDome, scanForInjection, logIronDomeAudit, updateIronDomeConfig } from '../defence/iron-dome/index.js';
 import type { IronDomeProfile } from '../defence/iron-dome/index.js';
 import { requireFeature, FeatureGatedError } from '../license/gate.js';
@@ -496,8 +495,7 @@ export function handleV1Scan(req: Request, res: Response): void {
     // Always use persisted config — no per-request overrides via HTTP
     const defenceConfig: DefenceConfig = { ...DEFAULT_DEFENCE_CONFIG, mode: getDefenceMode() };
 
-    // Wire boundary: 5.10.5 shape, PERSONAL in `level`; do not project.
-    const result = runDefencePipelinePrecise(
+    const result = runDefencePipeline(
       content,
       title ?? 'Untitled',
       defenceSource,
@@ -541,8 +539,7 @@ export function handleV1ScanBatch(req: Request, res: Response): void {
       if (!item.content || typeof item.content !== 'string') {
         return { error: 'content (string) is required', allowed: false };
       }
-      // Wire boundary: 5.10.5 shape, PERSONAL in `level`; do not project.
-      return runDefencePipelinePrecise(
+      return runDefencePipeline(
         item.content,
         item.title ?? 'Untitled',
         defenceSource,
@@ -895,12 +892,11 @@ export function startVisualizationServer(dbPath?: string): void {
         }
       }
 
-      // Wire boundary: 5.10.5 shape, PERSONAL in `level`; do not project.
       let result;
       if (filePath) {
-        result = scanSkillPrecise(filePath, { mode });
+        result = scanSkill(filePath, { mode });
       } else {
-        result = scanSkillContentPrecise(content, { mode }, format, name);
+        result = scanSkillContent(content, { mode }, format, name);
       }
 
       res.json(result);

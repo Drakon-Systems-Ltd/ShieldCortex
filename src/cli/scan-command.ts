@@ -279,11 +279,10 @@ async function runParsedScan(parsed: Extract<ParsedScanArgs, { ok: true }>): Pro
     const { initDatabase } = await import('../database/init.js');
     initDatabase(dbPath);
 
-    // Precise tier: CLI JSON/text keep PERSONAL exactly as in 5.10.5.
-    const { runDefencePipelinePrecise } = await import('../defence/pipeline.js');
+    const { runDefencePipeline } = await import('../defence/pipeline.js');
     // Bare CLI identity is hardcoded in this dispatch → attested by construction.
     // Declared --source is caller labelling only and is never host-attested.
-    result = runDefencePipelinePrecise(
+    result = runDefencePipeline(
       parsed.text,
       'CLI Scan',
       parsed.source,

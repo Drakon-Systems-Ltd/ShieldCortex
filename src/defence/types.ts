@@ -7,9 +7,10 @@
 
 // ── Classification Enums ──
 
-// Public four-value level, exactly as declared in 5.6.0. The #718 PERSONAL
-// tier is internal (sensitivity/tier.ts); public results project it.
-export type SensitivityLevel = 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED';
+// PERSONAL (#718) sits between INTERNAL and CONFIDENTIAL: personal / family /
+// relationship content that is not a credential or an identifier, but must
+// only ever be recalled into the owner's interactive lane.
+export type SensitivityLevel = 'PUBLIC' | 'INTERNAL' | 'PERSONAL' | 'CONFIDENTIAL' | 'RESTRICTED';
 
 export type FirewallResult = 'ALLOW' | 'BLOCK' | 'QUARANTINE';
 
