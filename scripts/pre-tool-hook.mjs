@@ -1226,10 +1226,15 @@ function sessionKeySalt() {
 }
 
 function sessionKeyFor(value) {
-  if (typeof value !== 'string' || !value.trim()) return undefined;
+  if (typeof value !== 'string') return undefined;
+  // Keep canonicalisation in sync with src/defence/iron-dome/session-guard.ts
+  // and scripts/stop-hook.mjs.
+  // Reject lone surrogates before UTF-8 can alias them with U+FFFD.
+  const id = value.trim();
+  if (!id || (typeof id.isWellFormed === 'function' ? !id.isWellFormed() : /[\uD800-\uDFFF]/u.test(id))) return undefined;
   const salt = sessionKeySalt();
   if (!salt) return undefined;
-  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${value}`).digest('hex').slice(0, 16)}`;
+  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${id}`).digest('hex').slice(0, 16)}`;
 }
 
 function hookSessionExtras(hookData, permissionMode) {
