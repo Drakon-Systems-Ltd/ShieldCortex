@@ -64,7 +64,7 @@ function makeMod(over: Partial<Mod> = {}): Mod {
     appendSessionGuardIndex: ({ entry }) => appendSessionGuardIndex({ entry }),
     recordActionGuardDegraded: (id, opts) => recordActionGuardDegraded(id, { salt: SALT, origin: opts?.origin }),
     normaliseNotifyConfig: (raw) => normaliseNotifyConfig(raw),
-    createWebhookNotifyChannel: (opts) => createWebhookNotifyChannel({ ...opts, fetchImpl }),
+    createWebhookNotifyChannel: (opts) => createWebhookNotifyChannel({ ...opts, fetchImpl }) as ReturnType<NonNullable<Mod['createWebhookNotifyChannel']>>,
     buildActionGuardOutcomeNotification: (input) => ({
       ...buildActionGuardOutcomeNotification({
         event: input.event === 'action_guard_denial' ? 'action_guard_denial' : 'action_guard_warning',
@@ -257,6 +257,26 @@ describe('#673 transport and failures', () => {
     expect(posts).toHaveLength(0);
     expect(digestRows('s-local').map((r) => [r.phase, r.transport])).toEqual([['local_only', null]]);
   });
+
+  it.each([['torn fragment', '{'], ['valid object', JSON.stringify({ note: 'last row' })]])(
+    'B2 local_only after an unterminated %s stays suppressed when webhook is later enabled', async (_label, tail) => {
+      const sessionId = 's-local-tail';
+      seed(sessionId, 2);
+      expect(recordActionGuardDegraded(sessionId, { salt: SALT }).recorded).toBe(true);
+      const file = join(auditDir, 'session-guard', `${keyOf(sessionId)}.jsonl`);
+      appendFileSync(file, tail);
+      await run(sessionId, { rawNotify: { enabled: false } });
+      expect(posts).toHaveLength(0);
+      const first = readSessionGuardIndexBounded(keyOf(sessionId));
+      expect(first.rows.filter((r) => r.recordKind === 'digest').map((r) => r.phase)).toEqual(['local_only']);
+      // Prove suppression comes from the on-disk marker, not process state.
+      __resetConfigStateForTest();
+      await run(sessionId, { rawNotify: WEBHOOK });
+      expect(posts).toHaveLength(0);
+      expect(readSessionGuardIndexBounded(keyOf(sessionId)).rows.filter((r) => r.recordKind === 'digest'))
+        .toEqual(first.rows.filter((r) => r.recordKind === 'digest'));
+    },
+  );
 
   it('a module without the notify transport → local_only and 0 sends', async () => {
     seed('s-oldmod', 2);

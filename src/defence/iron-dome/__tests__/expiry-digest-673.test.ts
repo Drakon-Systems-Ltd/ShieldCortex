@@ -318,6 +318,117 @@ describe('#673 bounded index reader and receipts', () => {
     expect(appendExpiryDigestRecord('sc-bad', { digestId, phase: 'attempt', observed: 1, rendered: 1, complete: true, transport: null })).toBe(false);
   });
 
+  const receipt = {
+    digestId: 'c'.repeat(32), phase: 'local_only' as const,
+    observed: 1, rendered: 1, complete: true, transport: null,
+  };
+  const summary = {
+    recordKind: 'summary', type: 'session_summary', origin: 'openclaw-session-end',
+    sessionKey: KEY, outcome: 'action_guard_degraded',
+  };
+  const mirrorFile = () => join(auditDir, `realtime-${new Date().toISOString().slice(0, 10)}.jsonl`);
+  const writerModule = new URL('../../../../dist/defence/iron-dome/session-guard.js', import.meta.url).href;
+
+  it('B1 refuses a symlink index without touching its target or creating a mirror', () => {
+    const outside = join(auditDir, 'outside.jsonl');
+    const before = `${JSON.stringify(timeout(1))}\n`;
+    writeFileSync(outside, before);
+    symlinkSync(outside, indexFile());
+    expect(appendExpiryDigestRecord(KEY, receipt)).toBe(false);
+    expect(readFileSync(outside, 'utf8')).toBe(before);
+    expect(existsSync(mirrorFile())).toBe(false);
+  });
+
+  it('B1 skips a symlink mirror without touching its target; the index remains usable', () => {
+    const outside = join(auditDir, 'outside.jsonl');
+    writeFileSync(outside, 'unchanged\n');
+    symlinkSync(outside, mirrorFile());
+    expect(appendExpiryDigestRecord(KEY, receipt)).toBe(true);
+    expect(readFileSync(outside, 'utf8')).toBe('unchanged\n');
+    expect(readSessionGuardIndexBounded(KEY).rows).toEqual([expect.objectContaining({ phase: 'local_only' })]);
+  });
+
+  it('B1 a FIFO mirror never blocks the writer (bounded child process)', () => {
+    writeFileSync(indexFile(), `${JSON.stringify(timeout(1))}\n${JSON.stringify(summary)}\n`);
+    const fifo = spawnSync('mkfifo', [mirrorFile()], { encoding: 'utf8', timeout: 3_000 });
+    expect(fifo.error).toBeUndefined();
+    expect(fifo.status).toBe(0);
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      const { appendExpiryDigestRecord } = await import(${JSON.stringify(writerModule)});
+      process.stdout.write(JSON.stringify(appendExpiryDigestRecord(${JSON.stringify(KEY)}, ${JSON.stringify(receipt)})));
+    `], { encoding: 'utf8', timeout: 3_000, env: { ...process.env, SHIELDCORTEX_AUDIT_DIR: auditDir } });
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(0);
+    expect(child.stdout).toBe('true');
+    expect(readSessionGuardIndexBounded(KEY).rows).toContainEqual(expect.objectContaining({ phase: 'local_only' }));
+  });
+
+  it('B1 regular-file controls append to both sinks without overwriting existing bytes', () => {
+    const before = `${JSON.stringify(summary)}\n`;
+    writeFileSync(indexFile(), before);
+    writeFileSync(mirrorFile(), before);
+    expect(appendExpiryDigestRecord(KEY, receipt)).toBe(true);
+    for (const file of [indexFile(), mirrorFile()]) {
+      const text = readFileSync(file, 'utf8');
+      expect(text.startsWith(before)).toBe(true);
+      expect(text.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))).toEqual([
+        summary, expect.objectContaining({ recordKind: 'digest', phase: 'local_only' }),
+      ]);
+    }
+  });
+
+  it.each([['torn fragment', '{'], ['valid object', JSON.stringify({ note: 'last row' })]])(
+    'B2 establishes a readable marker after an unterminated %s and an existing summary', (_label, tail) => {
+      writeFileSync(indexFile(), `${JSON.stringify(timeout(1))}\n${JSON.stringify(summary)}\n${tail}`);
+      expect(appendExpiryDigestRecord(KEY, receipt)).toBe(true);
+      const read = readSessionGuardIndexBounded(KEY);
+      expect(read.rows).toContainEqual(summary);
+      expect(read.rows).toContainEqual(expect.objectContaining({ recordKind: 'digest', phase: 'local_only' }));
+      expect(read.corrupt).toBe(tail === '{' ? 1 : 0);
+      if (tail !== '{') expect(read.rows).toContainEqual({ note: 'last row' });
+      expect(buildApprovalExpiryDigest(read, { sessionKey: KEY }).alreadyDigested).toBe(true);
+    },
+  );
+
+  it.each([['early EOF', true], ['short reads fill the window', false]])(
+    'B3 %s preserves the parsed prefix and reports completeness honestly', (_label, earlyEof) => {
+      const prefix = `${JSON.stringify(timeout(1))}\n`;
+      writeFileSync(indexFile(), `${prefix}${JSON.stringify(timeout(2))}\n`);
+      // Patch the real fs seam in an isolated process, not the reader result.
+      // fstat sees the entire file; readSync supplies a prefix then EOF, or
+      // successive short reads that eventually fill that exact window.
+      const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+        import fs from 'node:fs';
+        import { syncBuiltinESMExports } from 'node:module';
+        const { readSessionGuardIndexBounded } = await import(${JSON.stringify(writerModule)});
+        const realRead = fs.readSync;
+        let calls = 0;
+        fs.readSync = (fd, buffer, offset, length, position) => {
+          calls++;
+          if (${earlyEof} && calls > 1) return 0;
+          return realRead(fd, buffer, offset, Math.min(length, ${Buffer.byteLength(prefix)}), position);
+        };
+        syncBuiltinESMExports();
+        const read = readSessionGuardIndexBounded(${JSON.stringify(KEY)});
+        process.stdout.write(JSON.stringify({ read, calls }));
+      `], { encoding: 'utf8', timeout: 3_000, env: { ...process.env, SHIELDCORTEX_AUDIT_DIR: auditDir } });
+      expect(child.error).toBeUndefined();
+      expect(child.status).toBe(0);
+      const { read, calls } = JSON.parse(child.stdout) as { read: BoundedIndexRead; calls: number };
+      expect(calls).toBeGreaterThan(1);
+      expect(read).toMatchObject({ truncated: earlyEof, corrupt: 0, oversized: 0, unsafe: false });
+      expect(read.rows).toEqual(earlyEof ? [timeout(1)] : [timeout(1), timeout(2)]);
+      const digest = buildApprovalExpiryDigest(read, { sessionKey: KEY });
+      expect(digest.complete).toBe(!earlyEof);
+      expect(digest.text).toContain(earlyEof ? 'at least 1 recorded approval timeout' : '2 recorded approval timeouts');
+      if (!earlyEof) expect(digest.text).not.toContain('at least');
+      expect(appendExpiryDigestRecord(KEY, { ...receipt, complete: digest.complete })).toBe(true);
+      expect(readSessionGuardIndexBounded(KEY).rows).toContainEqual(expect.objectContaining({
+        recordKind: 'digest', complete: !earlyEof,
+      }));
+    },
+  );
+
   it('recordActionGuardDegraded ignores digest rows: they are neither a summary nor a guard', () => {
     const sessionId = 'agent:main:digest-ignored';
     const key = `sc-${createHmac('sha256', SALT).update(`action-guard-session:${sessionId}`).digest('hex').slice(0, 16)}`;

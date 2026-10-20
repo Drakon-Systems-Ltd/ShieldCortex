@@ -264,7 +264,7 @@ export const EXPIRY_DIGEST_MAX_LINE_BYTES = 16 * 1024;
 
 export interface BoundedIndexRead {
   rows: Array<Record<string, unknown>>;
-  /** The file was cut (byte window) or the line cap was hit. */
+  /** The byte window or line cap cut the file, or reading ended early. */
   truncated: boolean;
   /** Lines that were not a JSON object. */
   corrupt: number;
@@ -309,6 +309,7 @@ export function readSessionGuardIndexBounded(
       if (n <= 0) break;
       read += n;
     }
+    if (read < length) out.truncated = true;
     let text = buf.subarray(0, read).toString('utf8');
     if (start > 0) {
       out.truncated = true;
@@ -360,6 +361,25 @@ export function isExpiryDigestRecord(row: Record<string, unknown>, sessionKey: s
   return row.recordKind === 'digest' && row.sessionKey === sessionKey;
 }
 
+function appendDigestLine(file: string, line: string): void {
+  let fd: number | undefined;
+  try {
+    // Without these flags we cannot promise no link following or FIFO wait.
+    if (typeof fsConstants.O_NOFOLLOW !== 'number' || typeof fsConstants.O_NONBLOCK !== 'number') {
+      throw new Error('Safe digest append is unavailable');
+    }
+    fd = openSync(file, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT
+      | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK, 0o600);
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error('Digest sink is not a regular file');
+    // A write-only descriptor cannot inspect the tail. A conservative newline
+    // separates even a torn final record; readers already ignore blank lines.
+    appendFileSync(fd, `${st.size > 0 ? '\n' : ''}${line}`);
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
 /**
  * Append one content-free digest row to the session index and mirror it to
  * the day's realtime stream, like the #260 summary row. Closed field set: no
@@ -394,9 +414,9 @@ export function appendExpiryDigestRecord(
     const auditDir = auditDirFor(opts.home);
     mkdirSync(join(auditDir, 'session-guard'), { recursive: true, mode: 0o700 });
     const line = `${JSON.stringify(row)}\n`;
-    appendFileSync(join(auditDir, 'session-guard', `${sessionKey}.jsonl`), line);
+    appendDigestLine(join(auditDir, 'session-guard', `${sessionKey}.jsonl`), line);
     // The realtime mirror is a copy; the index row above is the receipt.
-    try { appendFileSync(join(auditDir, `realtime-${ts.slice(0, 10)}.jsonl`), line); } catch { /* mirror only */ }
+    try { appendDigestLine(join(auditDir, `realtime-${ts.slice(0, 10)}.jsonl`), line); } catch { /* mirror only */ }
     return true;
   } catch {
     return false;
