@@ -65,7 +65,7 @@ import {
   commandWantsHelp,
   type CommandHelpSpec,
   type GatedCommand,
-  type ValueRule,
+  type ValueFlagRule,
 } from '../wants-help.js';
 import { runAllowlist } from '../allowlist.js';
 
@@ -351,9 +351,9 @@ function declaredFor(command: GatedCommand | 'global'): readonly string[] {
 }
 
 /** Every (flag → rule) a row applies, across its own table and its verb rows. */
-function rulesOf(row: CommandHelpSpec): Map<string, Set<ValueRule>> {
-  const out = new Map<string, Set<ValueRule>>();
-  const add = (flag: string, rule: ValueRule) => {
+function rulesOf(row: CommandHelpSpec): Map<string, Set<ValueFlagRule>> {
+  const out = new Map<string, Set<ValueFlagRule>>();
+  const add = (flag: string, rule: ValueFlagRule) => {
     if (!out.has(flag)) out.set(flag, new Set());
     out.get(flag)!.add(rule);
   };
@@ -364,7 +364,7 @@ function rulesOf(row: CommandHelpSpec): Map<string, Set<ValueRule>> {
   return out;
 }
 
-function rulesFor(command: GatedCommand | 'global'): Map<string, Set<ValueRule>> {
+function rulesFor(command: GatedCommand | 'global'): Map<string, Set<ValueFlagRule>> {
   if (command === 'global') return new Map(Object.entries(GLOBAL_VALUES).map(([f, r]) => [f, new Set([r])]));
   return rulesOf(COMMAND_HELP_SPECS[command]);
 }
@@ -409,7 +409,7 @@ describe('#577 — every recognised value-consuming flag is in its command\'s li
       const declared = declaredFor(command);
       const rules = rulesFor(command);
       const describe1 = (f: string) =>
-        `${f}${declared.includes(f) ? `:${[...(rules.get(f) ?? [])].join('|')}` : ' ✗MISSING'}`;
+        `${f}${declared.includes(f) ? `:${[...(rules.get(f) ?? [])].map((r) => `${r.value}/${r.occurrence}${r.equalsPrecedence ? '/equals-first' : ''}`).join('|')}` : ' ✗MISSING'}`;
       rows.push(`${command.padEnd(14)} ${flags.length ? flags.map(describe1).join(' ') : '(none)'}`);
       // Every declared flag should be a real consumer too — a list that names a
       // flag nothing consumes is dead weight the next reader has to verify.
@@ -420,6 +420,19 @@ describe('#577 — every recognised value-consuming flag is in its command\'s li
     // Printed, not just asserted: this table is the review artefact for "which
     // flag does each command consume a value for, and is it listed?".
     console.log(`#577 value-flag audit (flag:rule — always | unless-double-dash | unless-dash)\n${rows.join('\n')}`);
+  });
+
+  it('#838: every declared rule has an explicit occurrence model', () => {
+    for (const command of commands) {
+      for (const [flag, rules] of rulesFor(command)) {
+        for (const rule of rules) {
+          expect({ command, flag, occurrence: rule.occurrence })
+            .toEqual({ command, flag, occurrence: expect.stringMatching(/^(first|every)$/) });
+          expect(['always', 'unless-double-dash', 'unless-dash']).toContain(rule.value);
+          if (rule.equalsPrecedence) expect(rule.occurrence).toBe('first');
+        }
+      }
+    }
   });
 
   it('every row\'s valueFlags is exactly the keys of its rules (own table ∪ verb rows)', () => {
