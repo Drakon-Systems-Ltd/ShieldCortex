@@ -18,18 +18,13 @@ const ESCAPES = CODES.map((c) => `\\u${c.toString(16).padStart(4, '0')}`);
 
 let reason = '';
 
-// The CLI calls the precise (wire-shape) seam since the 5.x compat patch; the
-// public name stays mocked too so either entry yields the same fake verdict.
-const fakePipeline = () => ({
-  allowed: false,
-  firewall: { result: 'QUARANTINE', reason, anomalyScore: 0, threatIndicators: [], blockedPatterns: [] },
-  trust: { score: 0.9 },
-  sensitivity: { level: 'PUBLIC' },
-});
-
 jest.unstable_mockModule('../../defence/pipeline.js', () => ({
-  runDefencePipeline: fakePipeline,
-  runDefencePipelinePrecise: fakePipeline,
+  runDefencePipeline: () => ({
+    allowed: false,
+    firewall: { result: 'QUARANTINE', reason, anomalyScore: 0, threatIndicators: [], blockedPatterns: [] },
+    trust: { score: 0.9 },
+    sensitivity: { level: 'PUBLIC' },
+  }),
 }));
 
 const { runScanArgv } = await import('../scan-command.js');

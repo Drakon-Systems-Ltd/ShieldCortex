@@ -27,7 +27,7 @@
  * exactly the ones that are private.
  */
 import type { Database } from 'better-sqlite3';
-import { classifySensitivityPrecise } from '../defence/sensitivity/index.js';
+import { classifySensitivity } from '../defence/sensitivity/index.js';
 import { normaliseSensitivityLabel } from '../defence/sensitivity/isolation.js';
 
 /** Ascending. Anything not in this list is left untouched. */
@@ -91,7 +91,7 @@ interface SeenRow {
 
 export async function reclassifyMemories(options: ReclassifyOptions = {}): Promise<ReclassifyResult> {
   const dryRun = options.execute !== true;
-  const classify = options.classify ?? classifySensitivityPrecise;
+  const classify = options.classify ?? classifySensitivity;
 
   let db = options.db;
   let openedOwn = false;

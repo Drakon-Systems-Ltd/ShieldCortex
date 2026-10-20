@@ -140,11 +140,7 @@ async function loadDefenceModules() {
     _defenceCache = {
       scanForCredentials: credentialMod.scanForCredentials,
       redactCredentials: credentialMod.redactCredentials,
-      // Precise #718 tier so session_events keeps PERSONAL (5.x compat); the
-      // public function (projected to CONFIDENTIAL) only on a mismatched dist.
-      classifySensitivity: typeof sensitivityMod.classifySensitivityPrecise === 'function'
-        ? sensitivityMod.classifySensitivityPrecise
-        : sensitivityMod.classifySensitivity,
+      classifySensitivity: sensitivityMod.classifySensitivity,
     };
     _defenceCacheKey = distRoot;
     return _defenceCache;
