@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+- **Prompt capture raises a redacted PERSONAL prompt to CONFIDENTIAL (#858).** When credentials are redacted from a captured prompt, its stored sensitivity is now at least CONFIDENTIAL, matching memory save. Before, a PERSONAL prompt with a redacted secret stayed PERSONAL. Rows captured before the upgrade keep their stored label.
+
 ### Fixed
 - Consolidation no longer drops a deleted duplicate's tags when one memory has several near-duplicates in the same pass (#860).
 - **Doctor warns for fully explained legacy project backfills when the protecting trigger is present (#834).** Its Chained ledger row stays a failure if any problem is unexplained or the trigger is missing; ledger verification still reports the ledger as inconsistent. Only the trigger as ShieldCortex ships it counts: a trigger that merely has the same name (another definition, or on another table) is treated as missing, and the fix text says to remove it first, because a current ShieldCortex recreates only a trigger whose name is free.
