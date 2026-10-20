@@ -190,8 +190,9 @@ def register(ctx):
         verdict = evaluate_tool_call(tool_name, tool_args)
         # Issue #59/WS2: scanner unreachable no longer means blanket fail-open.
         # The dependency-free fallback scan (raw exec surface, not the JSON blob)
-        # denies catastrophic shapes always and dangerous shapes when enforcing;
-        # everything else still fails open — loudly, as gate_degraded.
+        # denies self-protection and catastrophic shapes always, and dangerous
+        # shapes when enforcing; everything else still fails open — loudly, as
+        # gate_degraded.
         fallback_blocked = False
         fallback_dangerous = False
         fallback_self_protected = False
@@ -207,8 +208,14 @@ def register(ctx):
             _audit_gate_degraded(tool_name, verdict.reason, denied)
         fallback_denies = fallback_blocked or fallback_self_protected or (fallback_dangerous and enforce)
         if (verdict.available and verdict.decision != "allow") or fallback_denies:
-            tier = "FALLBACK_BLOCK (catastrophic)" if fallback_blocked else (
-                "FALLBACK_BLOCK (dangerous)" if fallback_denies else verdict.decision)
+            if fallback_blocked:
+                tier = "FALLBACK_BLOCK (catastrophic)"
+            elif fallback_self_protected:
+                tier = "FALLBACK_BLOCK (self-protection)"
+            elif fallback_dangerous and enforce:
+                tier = "FALLBACK_BLOCK (dangerous)"
+            else:
+                tier = verdict.decision
             log.warning(
                 "[shieldcortex] %s on tool %r: %s",
                 tier, tool_name, verdict.reason or verdict.signals,

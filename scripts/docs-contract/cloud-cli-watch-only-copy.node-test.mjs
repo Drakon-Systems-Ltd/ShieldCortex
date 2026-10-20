@@ -168,6 +168,20 @@ describe('Hermes outage fallback documentation', () => {
       assert.doesNotMatch(paragraph, /bounded fallback scan blocks only/);
     });
   }
+
+  it('plugin README names the same outage fallback tiers as the main README', () => {
+    const plugin = read('plugins', 'hermes', 'shieldcortex', 'README.md').replace(/\s+/g, ' ');
+    assert.match(plugin, /While the API is unreachable, its bounded fallback scan blocks the self-protection and catastrophic shapes it recognises in every mode, and recognised dangerous shapes while enforcing \(the default\)\./);
+    assert.match(plugin, /In advisory mode, only the recognised self-protection and catastrophic shapes are blocked by the fallback\./);
+    assert.doesNotMatch(plugin, /still denies the unambiguous catastrophic shapes/);
+  });
+
+  it('outage log label names the deciding fallback tier', () => {
+    const plugin = read('plugins', 'hermes', 'shieldcortex', '__init__.py');
+    assert.match(plugin, /FALLBACK_BLOCK \(self-protection\)/);
+    assert.match(plugin, /elif fallback_self_protected:/);
+    assert.match(plugin, /elif fallback_dangerous and enforce:/);
+  });
 });
 
 describe('CHANGELOG', () => {

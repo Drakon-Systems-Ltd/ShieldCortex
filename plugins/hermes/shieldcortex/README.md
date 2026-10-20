@@ -18,16 +18,18 @@ no approval prompt).
   with `SHIELDCORTEX_ENFORCE=0` (also accepts `false` / `no` / `off` / `advisory`).
   Earlier releases defaulted to advisory and required `SHIELDCORTEX_ENFORCE=1` to
   block — that opt-in is no longer needed.
-- **Fail-closed on catastrophic shapes (issue #59/WS2).** If the ShieldCortex
-  API is unreachable, a dependency-free fallback scan (ported from — and kept
-  in sync with — the OpenClaw interceptor and Claude Code hook) still denies
-  the unambiguous catastrophic shapes (recursive root deletes, pipe-download
-  to shell, raw-disk writes, fork bombs, …). This hard-block tier ignores
-  advisory mode, mirroring the OpenClaw posture. Anything the fallback does
-  not recognise still fails open — a down scanner must not wedge an agent
-  doing normal work. Every degraded decision is logged AND leaves a
-  `gate_degraded` entry in the shared `~/.shieldcortex/audit/realtime-*.jsonl`
-  stream, so "could not scan" is distinguishable from "scanned & allowed".
+- **API-outage fallback.** If the ShieldCortex API is unreachable, a
+  dependency-free fallback scan (ported from — and kept in sync with — the
+  OpenClaw interceptor and Claude Code hook) still runs. While the API is
+  unreachable, its bounded fallback scan blocks the self-protection and
+  catastrophic shapes it recognises in every mode, and recognised dangerous
+  shapes while enforcing (the default). In advisory mode, only the recognised
+  self-protection and catastrophic shapes are blocked by the fallback.
+  Anything the fallback does not recognise still fails open — a down scanner
+  must not wedge an agent doing normal work. Every degraded decision is logged
+  AND leaves a `gate_degraded` entry in the shared
+  `~/.shieldcortex/audit/realtime-*.jsonl` stream, so "could not scan" is
+  distinguishable from "scanned & allowed".
 
 ## Requires
 
