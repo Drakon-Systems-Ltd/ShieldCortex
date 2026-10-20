@@ -117,6 +117,26 @@ jobs:
       - name: Test
         run: npm test
 
+      # #843 — the docs/copy contracts under scripts/docs-contract are
+      # dependency-free node:test files that read source and docs text only.
+      # `npm test` (Jest) does not collect `.node-test.mjs`, so a contract that a
+      # code move broke stayed red on main behind a green build. Linux only:
+      # text matching is platform-independent. check-docs-contracts.mjs fails
+      # the step unless the *.node-test.mjs files equal
+      # scripts/docs-contract/manifest.txt and nothing else in that directory
+      # is misnamed, so a renamed or unlisted contract cannot silently drop out
+      # of the glob (#847).
+      - name: Docs contracts (node:test)
+        run: |
+          node scripts/check-docs-contracts.mjs
+          set -- scripts/docs-contract/*.node-test.mjs
+          if [ ! -e "$1" ]; then
+            echo "::error::no scripts/docs-contract/*.node-test.mjs files found"
+            exit 1
+          fi
+          echo "Running $# docs contract files"
+          node --test "$@"
+
       # The advertised Hermes bound plane is Python. `npm test` never loads it,
       # so a fail-open in evaluate_tool_call shipped through a green Node suite.
       - name: Hermes plugin unit tests
@@ -130,3 +150,12 @@ jobs:
 
       - name: Lint dashboard
         run: cd dashboard && npm run lint
+
+      # #689 — the dashboard Jest suites were never run in CI: the root
+      # `npm test` does not load dashboard/, so a dashboard regression could
+      # ship through a green build. Linux only, like the build and lint steps
+      # above (pure JS, platform-independent). 16 suites / 146 tests at the
+      # time this step was added; `--ci` refuses to write a new snapshot, so a
+      # missing one fails the run instead of being created silently.
+      - name: Test dashboard
+        run: cd dashboard && npm test -- --ci

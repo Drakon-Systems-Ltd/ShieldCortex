@@ -74,6 +74,7 @@ import {
   undeterminedSummary,
   type HermesPluginScan,
   type HermesScanOptions,
+  NO_HERMES_INTERPRETER,
 } from './hermes-plugins.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -229,6 +230,9 @@ export interface HermesRefreshResult {
   detail: string[];
   /** The copies actually rewritten, with where each previous one went. */
   refreshed: Array<{ dir: string; backup: string | null }>;
+  /** Machine-readable cause of a warn, for plain wording on the update
+   *  screen. 'no-interpreter': Hermes' Python could not be found. */
+  reason?: 'no-interpreter';
 }
 
 const FIX_POINTER =
@@ -359,10 +363,13 @@ export function refreshHermesPluginCopies(
     if (!hermesPluginPresentAt(standardHermesTarget(scan.hermesHome))) {
       return { status: 'not-installed', summary: 'Hermes plugin not installed', detail: [], refreshed: [] };
     }
-    return warn(
+    const undetermined = warn(
       `could not determine which copy Hermes loads — nothing written (${FIX_POINTER})`,
       [scan.undeterminedReason ?? 'reason unrecorded'],
     );
+    return scan.undeterminedReason === NO_HERMES_INTERPRETER
+      ? { ...undetermined, reason: 'no-interpreter' }
+      : undetermined;
   }
 
   // Shadowing copies and project plugins both mean the copy the gateway loads

@@ -391,6 +391,51 @@ shieldcortex doctor --strict   # every ⚠️ becomes exit 1
 Use that where "disabled anywhere in the fleet" must break the build. Plain
 `shieldcortex doctor` stays green for the operator who chose it.
 
+### Doctor severity notes (#651)
+
+A ⚠️ is meant to mark something you can act on. One family of rows is ℹ️
+instead, and so no longer fails `--strict`:
+
+- **Hermes plugin copies / Hermes plugin** when Hermes is confirmed absent: the
+  Hermes home holds none of `config.yaml`, `config.yml`, `profiles/`, `SOUL.md`
+  (the markers the HOSTS table uses), has no `plugins/` directory, `HERMES_HOME`
+  is unset, and the interpreter search found nothing: every venv candidate was
+  missing and there is no `hermes` launcher on `PATH`. Any one of those present,
+  an unreadable path (including a venv candidate or `PATH` entry that cannot be
+  checked), a dangling symlink where a venv candidate or launcher would be (or
+  on a directory above it), a `hermes` launcher that gives no usable interpreter (unreadable,
+  `#!/usr/bin/env` shebang, missing target), or an interpreter that was found
+  but failed keeps the ⚠️.
+
+**Action guard policy lock** with no lock installed and Guard not live is still
+⚠️ (`Guard is off on this host … not unprotected`, no fix command). It is not
+downgraded: doctor's signed-config read returns "off" for a corrupt or
+unreadable `config.json` as well as a real off, and a signed off does not prove
+the OpenClaw plane is off, because the plugin's own config can enable the
+guard. A live gate with no lock stays ❌.
+
+The HOSTS table header (`Guard on/off/mixed`) is computed from the configured
+Claude Code hook and OpenClaw plugin only; Hermes feeds it nothing, and it is
+not a check of running processes. `mixed` is the Claude Code hook enforcing
+while OpenClaw is observe-only or off; `on` is otherwise at least one of the two
+enforcing (OpenClaw counts only when signed `actionGuard.enabled` is `true`);
+`off` is neither. The word after a host is that host's own configured gate. For
+OpenClaw, `observe-only` is a collapsed label: the plugin entry is not disabled
+but is not armed to block, which covers `enforce: false` and also a disabled
+`actionGuard` or `interceptor`. `off` is a disabled plugin entry. For Claude
+Code, `off` is the hook wired with signed Enforce not on. `Guard off` beside
+`observe-only` is consistent, and doctor prints this legend under the table
+whenever a host shows one of those words.
+
+The OpenClaw "multiple install dirs" warning lists every
+`~/.openclaw/npm/projects/*` directory it found and which one OpenClaw's install
+index names as the install. The index records an install, not what the running
+gateway loaded. The row's opening sentence still says "prune the stale
+duplicate" (older wording), but it does not identify which directory is stale,
+and the row says so: doctor does not say which, if any, is stale or safe to
+delete, so inspect each before removing anything by hand. It prints no removal
+command; `shieldcortex repair` remains the remedy.
+
 ## Uninstall
 
 ```bash

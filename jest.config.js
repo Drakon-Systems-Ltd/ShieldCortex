@@ -39,4 +39,11 @@ export default {
   },
   verbose: true,
   testTimeout: 10000,
+  // Recycle a worker whose heap has grown past 1 GB once its current test
+  // file finishes. Workers are long-lived and run hundreds of ESM/ts-jest
+  // files each, so retained memory accumulates until whichever suite happens
+  // to be running hits the heap limit and the run fails with "Jest worker ran
+  // out of memory" (#811, seen on macos-test). Restarting the worker between
+  // files changes no test; it has no effect on --runInBand runs.
+  workerIdleMemoryLimit: '1GB',
 };

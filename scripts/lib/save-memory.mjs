@@ -311,6 +311,8 @@ function redactCandidate(defence, memory) {
   return { memory, raiseSensitivity: true, redacted: false };
 }
 
+// Redaction floor: keep aligned with scripts/lib/capture-prompt.mjs and
+// src/memory/store.ts (stampedSensitivity); never lower RESTRICTED or SECRET.
 function atLeastConfidential(level) {
   return level === 'RESTRICTED' || level === 'SECRET' || level === 'CONFIDENTIAL' ? level : 'CONFIDENTIAL';
 }

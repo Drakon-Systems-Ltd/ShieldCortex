@@ -17,6 +17,7 @@
  * approval reachability and force a demotion).
  */
 
+import { GUARD_HELP } from './dispatch-help.js';
 import { execFile } from 'node:child_process';
 import { randomBytes, randomInt } from 'node:crypto';
 import readline from 'node:readline/promises';
@@ -63,6 +64,7 @@ import {
 } from '../defence/iron-dome/guard-readiness.js';
 import type { OperatorNotification, NotifyChannel } from '../defence/iron-dome/operator-notify.js';
 import { isInteractive } from './approve.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
 
 // ==================== SUMMARY (shared with doctor) ====================
 
@@ -519,7 +521,7 @@ export async function runGuardCommand(argv: string[], opts: { home?: string } = 
       : buildReadinessSummaries({ home: opts.home });
     const hermes = summaries.some((s) => s.posture === 'enforce-when-ready') ? HERMES_READINESS_LINE : null;
     if (argv.includes('--json')) {
-      console.log(JSON.stringify(surface ? summaries[0] : { surfaces: summaries, hermes }, null, 2));
+      console.log(stringifyJsonTerminalSafe(surface ? summaries[0] : { surfaces: summaries, hermes }, 2));
     } else {
       summaries.forEach((summary, i) => {
         if (i > 0) console.log('');
@@ -535,9 +537,6 @@ export async function runGuardCommand(argv: string[], opts: { home?: string } = 
   if (sub === 'test-approval') {
     return (await runTestApproval({ adapter: surface })).code;
   }
-  console.log('Usage: shieldcortex guard readiness [--surface claude-code|openclaw] [--json]');
-  console.log('                                  Show the enforce-when-ready readiness conditions, per surface (#509)');
-  console.log('       shieldcortex guard test-approval [--surface claude-code|openclaw]');
-  console.log('                                  Send a synthetic approval request through your channel');
+  console.log(GUARD_HELP);
   return sub === '--help' || sub === '-h' || sub === 'help' ? 0 : 1;
 }

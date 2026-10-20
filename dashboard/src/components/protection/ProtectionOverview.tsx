@@ -9,6 +9,7 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import { StatCard } from '@/components/ds/StatCard';
+import type { StatusPillState } from '@/components/ds/StatusPill';
 import { PageHeader } from '@/components/ds/PageHeader';
 import { useIronDomeStatus } from '@/hooks/useIronDome';
 import { useAuditStats, useQuarantine } from '@/hooks/useDefence';
@@ -21,10 +22,21 @@ import { PolicyManagementView } from '@/components/protection/PolicyManagementVi
 import { protectionTabs, protectionTabHref } from '@/components/protection/protection-tabs';
 import { useUrlTab } from '@/hooks/useUrlTab';
 import { useRouter } from 'next/navigation';
+import { ironDomePill, queryStatus } from '@/lib/query-status';
 
 type ProtectionTab = 'status' | 'quarantine' | 'audit' | 'intercepts' | 'policies';
 
 const VALID_TABS: ProtectionTab[] = ['status', 'quarantine', 'audit', 'intercepts', 'policies'];
+
+const IRON_DOME_VALUE: Record<StatusPillState, string> = {
+  ok: 'On',
+  off: 'Off',
+  warn: 'Unconfirmed',
+  fail: 'Unknown',
+  info: 'Unknown',
+  unknown: 'Unknown',
+  unavailable: 'Unavailable',
+};
 
 function ProtectionContent() {
   // 'dome' is the pre-restyle tab id (brief §8 renamed Iron Dome -> Status);
@@ -32,7 +44,9 @@ function ProtectionContent() {
   const [tab, setTab] = useUrlTab<ProtectionTab>('/protection', VALID_TABS, 'status', { dome: 'status' });
   const router = useRouter();
 
-  const { data: ironDome } = useIronDomeStatus();
+  const ironDome = useIronDomeStatus();
+  const ironDomeStatus = queryStatus(ironDome);
+  const ironDomeState = ironDomePill(ironDomeStatus, ironDome.data?.enabled).state;
   const { data: auditStats } = useAuditStats('24h');
   const { data: quarantine } = useQuarantine('pending', 10);
   const { data: intercepts } = useInterceptorEvents({ limit: 25 });
@@ -55,11 +69,19 @@ function ProtectionContent() {
 
         {/* Stats row */}
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          {/* Iron Dome only: Action Guard has its own config plane and no
+              dashboard endpoint, so this card must not read as overall
+              protection, and only a confirmed `enabled: true` says On (#693). */}
           <StatCard
-            label="Protection level"
-            value={ironDome?.enabled ? 'On' : 'Off'}
+            label="Iron Dome"
+            value={ironDomeStatus === 'pending' ? 'Checking…' : IRON_DOME_VALUE[ironDomeState]}
             icon={Shield}
-            accent={ironDome?.enabled ? 'cyan' : 'muted'}
+            accent={ironDomeState === 'ok' ? 'cyan' : ironDomeState === 'off' ? 'muted' : 'amber'}
+            hint={
+              ironDomeStatus === 'stale'
+                ? 'Last check failed. Does not include Action Guard.'
+                : 'Does not include Action Guard.'
+            }
           />
           <StatCard
             label="Blocked (24h)"

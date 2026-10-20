@@ -77,6 +77,8 @@ import { createRequire } from 'module';
 import { execSync } from 'child_process';
 import { SCAN_EXIT, formatScanToolFailure } from './cli/scan-exit.js';
 import { argvWantsHelp } from './cli/wants-help.js';
+import { ENV_HELP, SCAN_SKILL_HELP, dispatchHelp } from './cli/dispatch-help.js';
+import { stringifyJsonTerminalSafe } from './cli/term-ui.js';
 
 // Heavy modules (MCP server, visualization API + express/cors/ws, embedding
 // model, brain worker, installer handlers) are loaded lazily via `await import`
@@ -228,11 +230,10 @@ async function startMcpServer(dbPath?: string): Promise<void> {
   // — the client sees only a bare `-32000`. Attempt the class-appropriate
   // recovery through the shared binding helper; if it cannot heal, fail LOUDLY
   // to stderr + a breadcrumb carrying the selected remediation, never silently.
-  const { selfHealMcpNativeBinding } = await import('./setup/mcp-self-heal.js');
+  const { selfHealMcpNativeBinding, printMcpStartupFailure } = await import('./setup/mcp-self-heal.js');
   const heal = await selfHealMcpNativeBinding();
   if (!heal.ok) {
-    console.error(heal.message);
-    if (heal.breadcrumbPath) console.error(`\nDetails written to: ${heal.breadcrumbPath}`);
+    printMcpStartupFailure(heal);
     process.exit(1);
   }
 
@@ -596,6 +597,14 @@ async function isLocalDashboardRunning(): Promise<boolean> {
  * Main entry point
  */
 async function main() {
+  // #767: a help request is answered before ANYTHING else — before the hook
+  // branch below, the strict preflight, the npm staleness preamble, the stats
+  // banner and every lazy handler import. `dispatchHelp` is pure: it reads the
+  // command's row in the shared registry and prints the usage from
+  // src/cli/dispatch-help.ts. Commands it does not know (update, doctor,
+  // maintain, mcp, …) gate inside their own handler and fall through here.
+  if (dispatchHelp(process.argv.slice(2))) return;
+
   // Dispatch the "hook" subcommand FIRST — before checkVersionStaleness() and
   // the stats banner. Hooks fire on every UserPromptSubmit, so this path
   // must be as cheap as possible: no `npm ls -g` staleness probe (hooks were
@@ -665,8 +674,13 @@ async function main() {
     }
   }
 
-  // Handle --help / -h / help / unknown args
-  if (process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help') {
+  // Handle --help / -h / help / unknown args. A help flag behind a global
+  // option (`--mode api --help`, `--dashboard -h`) is the same request: without
+  // this it reached the server modes below and started a server (#767).
+  if (
+    process.argv[2] === '--help' || process.argv[2] === '-h' || process.argv[2] === 'help' ||
+    (process.argv[2]?.startsWith('-') && argvWantsHelp(process.argv.slice(2)))
+  ) {
     const bold = '\x1b[1m';
     const cyan = '\x1b[36m';
     const reset = '\x1b[0m';
@@ -679,16 +693,35 @@ ${bold}USAGE${reset}
 ${bold}COMMANDS${reset}
   ${cyan}remember${reset} <title>       Write a memory (via the defence pipeline)
                         --content <text> or pipe via stdin; --importance, --tags
-  ${cyan}memories${reset} import-native Import native Markdown once through full defence
-                        (dry-run by default; --apply admits then archives)
+  ${cyan}memories${reset} <subcommand> Memory-store tools: import-native, migrate-legacy, prune,
+                        embed-backfill, reclassify, dedupe, repair-project-keys,
+                        purge, recalc (memories --help lists each one's flags).
+                        import-native imports native Markdown once through full
+                        defence (dry-run by default; --apply admits then archives)
+  ${cyan}memory${reset} <subcommand>   Show, downvote or list memories; revert-backfill (memory --help)
+  ${cyan}inspect${reset} <subcommand>  Show the last precompact or prompt-recall candidates
+  ${cyan}import-jsonl${reset} [path]   Import Claude Code session transcripts (JSONL) for
+                        dashboard replay (default: ~/.claude/projects/**/*.jsonl)
   ${cyan}scan${reset} <text>           Scan text through the defence pipeline
                         Exit: 0=allow 1=caught 2=usage 3=tool-failure. Health = parse stdout.
   ${cyan}scan-skill${reset} <path>     Scan an agent instruction file for threats
                         (--accept to suppress a reviewed file; --forget to undo)
   ${cyan}scan-skills${reset}           Scan all installed skills/hooks
+  ${cyan}mcp${reset} scan [server]     Scan MCP server tool descriptions for poisoning and
+                        rug-pull drift (--json, --ci)
+  ${cyan}env${reset} scan <url>        Score a URL's provenance and scan it for hidden
+                        instructions (--json, --markdown)
+  ${cyan}xray${reset} <target>         Scan an npm package, file or directory for risky code
+                        (--deep, --json, --sarif, --ci, --watch)
+  ${cyan}xray-preinstall${reset}       npm pre-install check of ./package.json scripts
+                        (exit 1 blocks the install)
   ${cyan}dashboard${reset}             Open the local security dashboard
+  ${cyan}api${reset}                   Start the visualization API server (http://localhost:3001)
   ${cyan}worker${reset}                Run headless background sync + heartbeat worker
   ${cyan}status${reset}                Show current protection status
+  ${cyan}stats${reset}                 Print the security report (scan, block and quarantine counts)
+  ${cyan}consolidate${reset}           Run memory maintenance, then Dream Mode consolidation
+                        (opens the memory database, creating it if absent)
   ${cyan}doctor${reset}                Diagnose installation issues (exits 1 on a ❌; --strict also fails on ⚠️)
                         Repairs: --fix-project-keys (project-key collisions)
                                  --fix-action-guard (migrate the deprecated
@@ -705,6 +738,13 @@ ${bold}COMMANDS${reset}
                         (dry-run; --execute). Audit logs are not managed yet (#579).
   ${cyan}approve${reset} [hash]        Grant a one-shot Action Guard approval for one exact
                         command (no hash = list recent refusals; --ttl N minutes)
+  ${cyan}deny${reset} [hash]           Reject a pending Action Guard approval request
+                        (no hash = list recent refusals; TTY only)
+  ${cyan}freeze${reset} <scope> --reason <why>
+                        Record a FROZEN decision for a scope in this host's
+                        decisions ledger (TTY only)
+  ${cyan}unfreeze${reset} <scope>      Lift a recorded freeze (TTY only)
+  ${cyan}lease${reset}                 Show recorded freezes, held leases and bound planes (read-only)
   ${cyan}guard${reset} readiness       Enforce-when-ready, per surface (Claude Code hook, OpenClaw plugin):
                         posture, mode, readiness proxies + effectiveness evidence
   ${cyan}guard${reset} test-approval   Send a synthetic approval request through your channel (TTY only;
@@ -722,7 +762,8 @@ ${bold}COMMANDS${reset}
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
   ${cyan}audit${reset} [options]       Run a full security audit
   ${cyan}ledger${reset} verify [--json]  Check the chained audit ledger (read-only; exit 1 if inconsistent)
-  ${cyan}setup${reset} [target]        Start here: detects hosts, asks before wiring each
+  ${cyan}setup${reset} [target]        Start here: bare setup detects hosts, asks before wiring each
+                        setup <host> (e.g. setup claude) wires that host without asking
                         Targets: claude, openclaw, hermes, copilot, codex, security
                         Flags: --with-stop-hook (sampled per-turn extraction)
                                --with-session-end (extraction on session exit)
@@ -738,13 +779,21 @@ ${bold}COMMANDS${reset}
                         Flags: --dry-run, --from-config, --config <path>,
                                --agent-uid <uid> (needed when the invoking
                                shell gives protect no other way to learn it)
+  ${cyan}update${reset}                Upgrade the npm package, then reconcile this host (hooks,
+                        plugin, native DB engine, permissions); mutates the host
+  ${cyan}repair${reset}                Heal a broken install in place (native binding, OpenClaw
+                        plugin metadata, state permissions)
+  ${cyan}migrate${reset}               Move a Claude Cortex / Claude Memory install to ShieldCortex
   ${cyan}uninstall${reset}             Remove ShieldCortex from your project
   ${cyan}openclaw${reset} <action>     Manage OpenClaw hook integration
   ${cyan}copilot${reset} <action>      Set up VS Code / Cursor MCP integration
   ${cyan}codex${reset} <action>        Set up Codex CLI / VS Code MCP integration (memory only)
   ${cyan}hermes${reset} <action>       Install the Hermes pre_tool_call Action Guard plugin
   ${cyan}graph${reset} backfill        Backfill knowledge graph from memories
-  ${cyan}hook${reset} <action>         Manage hooks (start, stop, status)
+  ${cyan}threat-graph${reset} <command> Rebuild or inspect the threat graph (rebuild, status,
+                        campaigns, conflicts, reset-source, resolve-conflict)
+  ${cyan}hook${reset} <name>           Run one hook by name (a built-in hook or a customHooks
+                        entry); the host's hook payload is read from stdin
   ${cyan}service${reset} <action>      Manage background service
 
 ${bold}OPTIONS${reset}
@@ -1250,15 +1299,7 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'scan-skill') {
     const filePath = process.argv[3];
     if (!filePath) {
-      console.error('Usage: shieldcortex scan-skill <path> [--accept | --clear | --forget]');
-      console.error('  Scans an agent instruction file for threats.');
-      console.error('  Supports: SKILL.md, HOOK.md, handler.js, .cursorrules,');
-      console.error('  .windsurfrules, .clinerules, CLAUDE.md, copilot-instructions.md,');
-      console.error('  .aider.conf.yml, .continue/config.json');
-      console.error('');
-      console.error('  --accept / --clear   Mark this file (by content hash) as reviewed &');
-      console.error('                       acceptable — suppresses re-flagging until it changes.');
-      console.error('  --forget             Remove a previously recorded acceptance.');
+      console.error(SCAN_SKILL_HELP);
       process.exit(1);
     }
     const { scanSkill, contentHash, recordVerdict, removeVerdict, getVerdict } =
@@ -1357,9 +1398,7 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'env') {
     const sub = process.argv[3];
     if (sub !== 'scan') {
-      console.error('Usage: shieldcortex env scan <url> [--json | --markdown]');
-      console.error('  Fetches the URL, scores provenance, detects hidden instructions,');
-      console.error('  runs injection patterns against visible + hidden content, and returns a taint label.');
+      console.error(ENV_HELP);
       process.exit(1);
     }
     const urlArg = process.argv[4];
@@ -1375,7 +1414,7 @@ ${bold}DOCS${reset}
     const result = await scanUrl(urlArg);
 
     if (wantsJson) {
-      console.log(JSON.stringify(result, null, 2));
+      console.log(stringifyJsonTerminalSafe(result, 2));
     } else if (wantsMarkdown) {
       console.log(formatEnvScanMarkdown(result));
     } else {

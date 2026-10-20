@@ -62,8 +62,13 @@ export function useCommandContext(): CommandContext {
         return (data.items ?? []).map((i) => ({ id: i.id, title: i.original_title ?? i.title ?? `item ${i.id}` }));
       },
       quarantineReview: async (id, action) => {
-        if (action === 'approve') await approveQ.mutateAsync(id);
-        else await rejectQ.mutateAsync({ id });
+        // #824: pass the recorded outcome through; an approval can end rejected.
+        if (action === 'approve') {
+          const r = await approveQ.mutateAsync(id);
+          return { status: r.status, reason: r.reason };
+        }
+        const r = await rejectQ.mutateAsync({ id });
+        return { status: r.status };
       },
       ironDome: async (action) => {
         if (action === 'status') {
