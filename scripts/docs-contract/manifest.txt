@@ -1,0 +1,10 @@
+# Every docs contract CI runs (#847). scripts/check-docs-contracts.mjs fails
+# the "Docs contracts (node:test)" step unless this list equals the
+# *.node-test.mjs files in this directory. Add a new contract's name here.
+auto-memory-guard-default-docs.node-test.mjs
+cloud-cli-watch-only-copy.node-test.mjs
+docs-contract-manifest-guard.node-test.mjs
+memory-default-hook-update-copy.node-test.mjs
+openclaw-hook-event-copy.node-test.mjs
+setup-target-wiring-copy.node-test.mjs
+watch-only-self-protection-copy.node-test.mjs

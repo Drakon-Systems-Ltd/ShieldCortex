@@ -212,6 +212,8 @@ export { checkSessionLease, leasePermits, scopeForToolCall, findFreeze, SCOPE_KE
 export type { LeaseScope, LeaseRecord, LeaseDecision, LeaseVerdict, LeaseCheckInput } from './iron-dome/session-lease.js';
 export { evaluateToolCallLease, releaseToolCallLease, acquireOrRefreshLease, releaseLease, listLeases, readDecisionsLedger, decisionsLedgerPath, resolveStateDir } from './iron-dome/session-lease-store.js';
 export type { LeaseGateResult, LeaseGateOptions } from './iron-dome/session-lease-store.js';
+// #854: the one lease identity both planes act as (hook + OpenClaw interceptor).
+export { leaseIdentityFor } from './iron-dome/session-lease-identity.js';
 // AI-assisted approval broker (#143) — the decision core, the judge layer and
 // their config. Exported so a host transport (the OpenClaw plugin, the Claude
 // Code hook) can reach them at runtime without importing the package at compile

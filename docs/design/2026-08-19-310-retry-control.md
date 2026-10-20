@@ -74,6 +74,18 @@ Order per DNP event: **suppression check → digest/budget accounting → card/m
 sessionKey?}, tool, signals, redactedSurface, deniedAt, suppression?, claim?, grant? }`.
 - TTL/prune: fingerprints prune with the pending-retention clock (60m rolling from last DNP);
   suppressions prune at window end; spent/expired grants prune at spend-TTL + 24h (audit tail).
+  **Superseded by #682:** fingerprints are kept for a 48h operator review window
+  (`RETRY_PENDING_REVIEW_WINDOW_MS`, rolling from the last DNP), and a row is kept while ANY of
+  live claim, live grant, grant audit tail, live suppression or that window holds (one OR'd
+  predicate shared by the prune, the list and `approve --denial`). The store is capped at
+  `MAX_RETRY_ROWS` (128): past it the oldest-denied row that holds no live claim, grant, audit
+  tail or suppression is dropped; protected rows are never dropped, and an over-cap store is
+  reported as such. A dropped row leaves a bounded receipt in the same file (`retired`: at most
+  64, at most 7 days; id, aliases, tool, reason, times; no hash, origin, surface or grant
+  material), which `findRow` never reads, so `approve --denial` can say "expired" or "dropped
+  for space" instead of "no match". The window authorises nothing: approving an old identity
+  mints the same one-shot grant (default 10m, max 60m, from the approval), which the first
+  matching call inside that window spends. It is not held for a later scheduled run.
 - denials.jsonl stays #284-redacted (no hash) — the fingerprint store is the control record,
   permissioned like approvals (0600, owner-only).
 - `shieldcortex approve --denial <actionId>` reads the fingerprint → same `grantRetry`. No
@@ -87,7 +99,7 @@ sessionKey?}, tool, signals, redactedSurface, deniedAt, suppression?, claim?, gr
 | Grant spend TTL | `actionGuard.retryGrantTtlMs` | 10m from tap |
 | Deny suppression | `actionGuard.denySuppressionMs` | = digest window |
 | Card budget window | **shares the digest window start** (`dnpDigestWindowMs`) | 15m |
-| Fingerprint retention | pending-retention clock | 60m rolling |
+| Fingerprint retention | operator review window (#682; was the 60m pending-retention clock) | 48h rolling |
 
 - Card budget: per-hash 1 (epoch-pinned claim) + global 3 per window. Suppressed events don't
   count. `budget_exhausted` appears on the **operator digest/webhook copy** with the actionIds

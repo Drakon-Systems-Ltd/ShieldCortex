@@ -106,3 +106,38 @@ describe('gateway startup intent (the aiquant silent-skip, 1 Aug 2026)', () => {
     expect(manifest.activation.onCapabilities).toEqual(expect.arrayContaining(['hook']));
   });
 });
+
+/**
+ * #821: the plugin declared two different minimum OpenClaw versions —
+ * `>=2026.3.22` in peerDependencies and both openclaw.plugin.json copies,
+ * `>=2026.4.23` in package.json engines and compat. Every declared floor must
+ * name the gateway version compat already enforces at install.
+ */
+describe('one declared OpenClaw floor (#821)', () => {
+  const thisFile = fileURLToPath(import.meta.url);
+  const repoRoot = path.resolve(path.dirname(thisFile), '..', '..');
+  const readJson = (...segments: string[]) =>
+    JSON.parse(fs.readFileSync(path.join(repoRoot, ...segments), 'utf-8'));
+
+  const pkg = readJson('plugins', 'openclaw', 'package.json');
+  const floor = `>=${pkg.openclaw.compat.minGatewayVersion}`;
+
+  it('compat.minGatewayVersion is a concrete version', () => {
+    expect(pkg.openclaw.compat.minGatewayVersion).toMatch(/^\d{4}\.\d+\.\d+$/);
+  });
+
+  it('package.json peerDependencies, engines and compat.pluginApi name that floor', () => {
+    expect({
+      peerDependencies: pkg.peerDependencies.openclaw,
+      engines: pkg.engines.openclaw,
+      pluginApi: pkg.openclaw.compat.pluginApi,
+    }).toEqual({ peerDependencies: floor, engines: floor, pluginApi: floor });
+  });
+
+  it.each([
+    ['plugins/openclaw/openclaw.plugin.json'],
+    ['skills/shieldcortex/bundled/openclaw-plugin/openclaw.plugin.json'],
+  ])('%s engines.openclaw names that floor', (manifestPath) => {
+    expect(readJson(...manifestPath.split('/')).engines.openclaw).toBe(floor);
+  });
+});

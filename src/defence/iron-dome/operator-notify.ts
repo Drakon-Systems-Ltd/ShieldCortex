@@ -227,7 +227,17 @@ export interface ActionGuardOutcomeNotification {
 }
 
 /** Every shape a channel can be handed. */
-export type AnyOperatorNotification = OperatorNotification | ConversationThreatNotification | ActionGuardOutcomeNotification;
+export interface MaintenanceFailNotification {
+  event: 'maintenance_fail';
+  checks: Array<{ label: string; status: 'fail'; message: string }>;
+}
+
+/** Only doctor's already-rendered check names and messages; never memory rows. */
+export function buildMaintenanceFailNotification(checks: MaintenanceFailNotification['checks']): MaintenanceFailNotification {
+  return { event: 'maintenance_fail', checks: checks.map(({ label, message }) => ({ label, status: 'fail', message })) };
+}
+
+export type AnyOperatorNotification = OperatorNotification | ConversationThreatNotification | ActionGuardOutcomeNotification | MaintenanceFailNotification;
 
 export function isActionGuardOutcomeNotification(
   n: AnyOperatorNotification,
@@ -728,6 +738,9 @@ export function formatActionGuardOutcomeNotification(n: ActionGuardOutcomeNotifi
  *  richer presentation (inline buttons, etc.) from the structured
  *  `OperatorNotification` instead — this is the lowest common denominator. */
 export function formatOperatorNotification(n: AnyOperatorNotification): string {
+  if (n.event === 'maintenance_fail') {
+    return ['ShieldCortex maintenance: doctor checks failed', ...n.checks.map(c => `${c.label}: ${c.status} — ${c.message}`)].join('\n');
+  }
   // #242/#243 terminal guard alerts have no hash and no command. They are not
   // approval requests; the operator gets a redacted incident report and enough
   // session identity to find the real row locally.

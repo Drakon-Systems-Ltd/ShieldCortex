@@ -153,19 +153,18 @@ describe('#702 — what must not move', () => {
     }
   });
 
-  it('a sink-free program that opens a secret: nothing resolved on any plane; -c holds no invocations, the heredoc records the key as opaque (#712)', () => {
+  it('a sink-free program that opens a secret: nothing resolved on any plane; neither -c nor the heredoc (#713) holds an invocation', () => {
     const prog = `key = open('/home/u/.ssh/id_rsa').read()\nprint(len(key))\n`;
     const inline = run(asInline(prog));
     expect(inline.seen).toEqual([]);
     expect(inline.v.signals).toContain('touch-sensitive-path');
     expect(inline.v.signals).not.toContain('opaque-script-invocation');
-    // The heredoc relief is withdrawn pending an allow-list design (PR #712),
-    // so the key path is a candidate again, as in 5.5.0 — and #702 records it
-    // as opaque instead of reading it.
+    // #713: the body is a literal-path data read, so the heredoc allow-list
+    // masks it like the `-c` plane: the key path is no candidate at all.
     const heredoc = run(asHeredoc(prog));
     expect(heredoc.seen).toEqual([]);
     expect(heredoc.v.signals).toContain('touch-sensitive-path');
-    expect(heredoc.v.signals).toContain('opaque-script-invocation');
+    expect(heredoc.v.signals).not.toContain('opaque-script-invocation');
   });
 
   it('DELIBERATE: a script that lives INSIDE the sensitive set is not read either — the access is the gate', () => {

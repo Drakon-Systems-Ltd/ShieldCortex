@@ -356,6 +356,20 @@ CREATE INDEX IF NOT EXISTS idx_audit_operation ON defence_audit(operation);
 CREATE INDEX IF NOT EXISTS idx_audit_source_ident_ts ON defence_audit(source_type, source_identifier, timestamp);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_chain ON defence_audit(ledger_id, epoch, seq);
 
+-- #674: a chained row's project cannot change. Builds up to v5.2.1 backfill
+-- project on every startup without skipping chained rows, which would break the
+-- content digest; this refuses the change whichever build issues it. No-op
+-- updates pass, and only UPDATE OF project fires it (the writer's finalise,
+-- memory FK SET NULL and retention DELETEs do not). Compatibility protection,
+-- not a tamper boundary: verification stays with `ledger verify`. Same DDL as
+-- migrations.ts and inline-schema.ts.
+CREATE TRIGGER IF NOT EXISTS trg_defence_audit_chained_project_immutable
+BEFORE UPDATE OF project ON defence_audit
+WHEN OLD.seq IS NOT NULL AND NEW.project IS NOT OLD.project
+BEGIN
+  SELECT RAISE(ABORT, 'ShieldCortex #674: project of a chained defence_audit row is immutable (an older ShieldCortex build may be opening this database)');
+END;
+
 -- #617 chained ledger (design §5.7). One ledger per database: ledger_meta holds
 -- its identity, current epoch and head (updated in the same transaction as
 -- every chained append). ledger_marker holds the chained rows that are not

@@ -35,6 +35,7 @@ import {
   renderBatchIdentity,
   shortSourceLabel,
   sanitiseDisplayField,
+  stringifyJsonTerminalSafe,
   wrapText,
   basenameOf,
   defaultColorStyle,
@@ -85,6 +86,11 @@ export interface ScanDeps extends AllowlistDeps {
   globs?: string[];
   /** Injected stdin for tests; default asks on the real terminal. */
   prompt?: (question: string) => Promise<string>;
+  /** Called from `shieldcortex update`: plain words, no hashes or source ids.
+   *  Wording only; what is discovered, asked and written is the same. */
+  updateFlow?: boolean;
+  /** `update --verbose`: keep the full scan summary and source detail. */
+  verbose?: boolean;
 }
 
 export interface DiscoveredScript {
@@ -589,6 +595,7 @@ function renderReviewItem(
   index: number,
   total: number,
   previewPage = 0,
+  showHash = true,
 ): string {
   const width = getWidth();
   const style = supportsColor() ? defaultColorStyle() : NO_STYLE;
@@ -609,7 +616,7 @@ function renderReviewItem(
       previewPage: pageLines ? previewPage : undefined,
       previewTotalLines: item.preview ? item.preview.split('\n').length : undefined,
     },
-    { width, style },
+    { width, style, showHash },
   ).join('\n');
 }
 
@@ -660,11 +667,11 @@ export async function reviewScanItems(items: ScanItem[], deps: ScanDeps = {}): P
     const pages = previewPages(item.preview);
     // re-prompt loop for same item (view paging)
     for (;;) {
-      log(renderReviewItem(item, i + 1, reviewable.length, previewPage));
+      log(renderReviewItem(item, i + 1, reviewable.length, previewPage, deps.updateFlow !== true));
       const answer = (await ask(`> `)).trim().toLowerCase();
       if (answer === 'q' || answer === 'quit') {
         result.quit = true;
-        log(`${style.dim}Stopped — ${result.pinned} pinned this run stay pinned; the rest fold as usual.${style.reset}`);
+        log(style.dim + 'Stopped. ' + result.pinned + ' trusted so far; the rest stay untrusted for now.' + style.reset);
         return result;
       }
       if (answer === 'v' || answer === 'view') {
@@ -675,24 +682,25 @@ export async function reviewScanItems(items: ScanItem[], deps: ScanDeps = {}): P
         if (previewPage >= pages.length) {
           // exhausted — further v is skip (default-deny, no hang)
           result.skipped += 1;
-          log(`${style.dim}no more source — skipped${style.reset}`);
+          log(style.dim + 'End of the script \u2014 not trusted for now.' + style.reset);
           break;
         }
         previewPage += 1;
         continue;
       }
       if (answer === 'y' || answer === 'yes') {
-        const note = (await ask('note (optional, why trusted): ')).trim() || undefined;
+        const note = (await ask('Why do you trust it? (optional, press Enter to skip): ')).trim() || undefined;
         const pin = pinReviewedScript(item.path, note, {
           ...deps,
           ...(item.sha256 ? { expectedSha256: item.sha256 } : {}),
         });
         if (pin.ok) {
           result.pinned += 1;
-          log(`  ${style.green}✓${style.reset} pinned ${style.bold}${basenameOf(pin.entry.path)}${style.reset} · edit re-gates`);
+          log('  ' + style.green + '\u2713' + style.reset + ' Trusted ' + style.bold + sanitiseDisplayField(basenameOf(pin.entry.path)) + style.reset +
+            ". If the script changes, you'll be asked again.");
         } else {
           result.failed += 1;
-          err(`  ✗ ${pin.error}`);
+          err(`  ✗ ${sanitiseDisplayField(pin.error)}`);
         }
         break;
       }
@@ -764,7 +772,7 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
       else openclawCronPath = value;
       i += 1;
     } else {
-      err(`Unknown option "${a}". ${SCAN_USAGE}`);
+      err(`Unknown option "${sanitiseDisplayField(a)}". ${SCAN_USAGE}`);
       return 1;
     }
   }
@@ -786,7 +794,7 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
     items = classifyScripts(discovered.scripts, readEntries());
     items = markCronDenials(items, correlateForScan(scanDeps));
   } catch (e) {
-    err(`Scan failed: ${e instanceof Error ? e.message : String(e)}`);
+    err(`Scan failed: ${sanitiseDisplayField(e instanceof Error ? e.message : String(e))}`);
     return 1;
   }
 
@@ -796,7 +804,7 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
 
   if (json) {
     log(
-      JSON.stringify(
+      stringifyJsonTerminalSafe(
         {
           sources: sourceReport,
           discoveryIncomplete: incomplete,
@@ -817,9 +825,8 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
             cronDenied: i.deniedNote ?? null,
           })),
         },
-        null,
         2,
-      ),
+      )!,
     );
     if (incomplete) return 1;
     return needsReview.length > 0 ? 3 : 0;
@@ -830,14 +837,14 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
     if (broken.length > 0) {
       err(
         `Cron source(s) present but not readable/parseable — scan is incomplete. Fix: ${broken
-          .map((s) => s.path)
+          .map((s) => sanitiseDisplayField(s.path))
           .join(', ')}`,
       );
     }
     if (sourceReport.openclawCronUnverifiable) {
       err(
-        `OpenClaw is installed but neither cron source exists (${sourceReport.openclaw.path}, ` +
-          `${sourceReport.openclawDb.path}) — scan could not look, so this is not "no crons".`,
+        `OpenClaw is installed but neither cron source exists (${sanitiseDisplayField(sourceReport.openclaw.path)}, ` +
+          `${sanitiseDisplayField(sourceReport.openclawDb.path)}) — scan could not look, so this is not "no crons".`,
       );
     }
     // Incomplete discovery must not look like "all clear".
@@ -903,9 +910,9 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
         ...(item.sha256 ? { expectedSha256: item.sha256 } : {}),
       });
       if (pin.ok) {
-        log(`${GREEN}✓${RESET} Pinned ${BOLD}${pin.entry.path}${RESET}`);
+        log(`${GREEN}✓${RESET} Pinned ${BOLD}${sanitiseDisplayField(pin.entry.path)}${RESET}`);
       } else {
-        err(`✗ ${pin.error}`);
+        err(`✗ ${sanitiseDisplayField(pin.error)}`);
         failed += 1;
       }
     }
@@ -924,6 +931,21 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
  * no writes. Never throws — an update must not fail because a cron file was
  * strange.
  */
+/**
+ * One plain line: how many scheduled scripts are not reviewed yet.
+ *
+ * Review is trust, not an execution gate (#780): a trusted script's source is
+ * no longer folded into the Guard's scan. Lack of review does not by itself
+ * stop a script: while the Guard is on, an untrusted one gets the normal
+ * checks (which may still hold or block it); while it is off, the Guard does
+ * not check it.
+ */
+export function scriptsNeedAYes(n: number): string {
+  return n === 1
+    ? '1 new or changed scheduled script is not reviewed yet. Trusting it stops the Guard re-checking its contents until the file changes.'
+    : n + ' new or changed scheduled scripts are not reviewed yet. Trusting one stops the Guard re-checking its contents until the file changes.';
+}
+
 export async function maybeReviewAllowlistAfterUpdate(deps: ScanDeps = {}): Promise<void> {
   const log = deps.log ?? ((m: string) => console.log(m));
   try {
@@ -938,13 +960,17 @@ export async function maybeReviewAllowlistAfterUpdate(deps: ScanDeps = {}): Prom
     const needsReview = items.filter((i) => i.status === 'new' || i.status === 'changed');
 
     if (incomplete) {
-      const reasons = broken.map((s) => `${s.path}:${s.status}`);
+      const reasons = broken.map((s) => `${sanitiseDisplayField(s.path)}:${sanitiseDisplayField(s.status)}`);
       if (discovered.sources.openclawCronUnverifiable) {
-        reasons.push(`${discovered.sources.openclawDb.path}:no readable OpenClaw cron source`);
+        reasons.push(`${sanitiseDisplayField(discovered.sources.openclawDb.path)}:no readable OpenClaw cron source`);
       }
+      // Default update screen: plain words. The paths and reasons are the
+      // detail an operator needs to dig in, so they stay under --verbose.
       log(
-        `${DIM}reviewed-script scan: cron source incomplete (${reasons.join(', ')}) — ` +
-          `run: shieldcortex allowlist scan${RESET}`,
+        deps.updateFlow && !deps.verbose
+          ? DIM + "Couldn't read every list of scheduled jobs. Check: shieldcortex allowlist scan" + RESET
+          : `${DIM}reviewed-script scan: cron source incomplete (${reasons.join(', ')}) — ` +
+            `run: shieldcortex allowlist scan${RESET}`,
       );
       // Still offer review for whatever we *did* find when interactive.
     }
@@ -954,16 +980,19 @@ export async function maybeReviewAllowlistAfterUpdate(deps: ScanDeps = {}): Prom
     const interactive = deps.interactive ?? isInteractive();
     if (!interactive) {
       if (needsReview.length > 0) {
-        log(
-          `${DIM}reviewed-script scan: ${needsReview.length} new/changed — run: shieldcortex allowlist scan${RESET}`,
-        );
+        log(DIM + scriptsNeedAYes(needsReview.length) + ' Review: shieldcortex allowlist scan' + RESET);
       }
       return;
     }
     if (needsReview.length === 0) return;
-    log(renderSummary(items, discovered.sources));
+    if (deps.updateFlow && !deps.verbose) {
+      log(scriptsNeedAYes(needsReview.length));
+      log('');
+    } else {
+      log(renderSummary(items, discovered.sources));
+    }
     await reviewScanItems(items, deps);
   } catch (e) {
-    log(`${DIM}reviewed-script scan skipped — ${e instanceof Error ? e.message : String(e)}${RESET}`);
+    log(`${DIM}Scheduled-script check skipped — ${sanitiseDisplayField(e instanceof Error ? e.message : String(e))}${RESET}`);
   }
 }

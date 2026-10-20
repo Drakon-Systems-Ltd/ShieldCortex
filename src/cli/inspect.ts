@@ -10,6 +10,8 @@
  *   shieldcortex inspect last-precompact [--history N | --all]
  */
 
+import { INSPECT_HELP } from './dispatch-help.js';
+
 // ANSI colours — match doctor.ts conventions.
 const bold = '\x1b[1m';
 const reset = '\x1b[0m';
@@ -140,7 +142,8 @@ interface RecallCandidate {
   memoryPurpose?: string | null;
   salience?: number | null;
   ftsRank?: number | null;
-  source?: 'fts' | 'category-boost' | null;
+  source?: 'fts' | 'vector' | 'both' | 'category-boost' | null;
+  vectorSimilarity?: number | null;
   effectiveSalience?: number | null;
   injected?: boolean;
   dropReason?: string | null;
@@ -156,6 +159,7 @@ interface RecallEntry {
   candidates?: RecallCandidate[];
   injectedCount?: number | null;
   finalContextChars?: number | null;
+  vectorPlane?: string | null;
 }
 
 function fmtRank(rank: number | null | undefined): string {
@@ -180,6 +184,7 @@ function printRecallEntry(index: number, entry: RecallEntry) {
     entry.project ? `project=${entry.project}` : null,
     entry.sessionId ? `session=${entry.sessionId.slice(0, 8)}` : null,
     entry.minSalience != null ? `min_sal=${entry.minSalience.toFixed(2)}` : null,
+    entry.vectorPlane ? `vector=${entry.vectorPlane}` : null,
   ].filter(Boolean).join(', ');
   if (meta) console.log(`  ${dim}${meta}${reset}`);
   console.log(`  Candidates: ${candidates.length} considered, ${green}${injected.length} injected${reset}, ${dim}${dropped.length} dropped${reset}`);
@@ -241,18 +246,7 @@ async function cmdLastRecall(args: string[]): Promise<number> {
 }
 
 function printHelp() {
-  console.log('Usage: shieldcortex inspect <subcommand>');
-  console.log('');
-  console.log('Subcommands:');
-  console.log('  last-precompact [--history N | --all]    Show extractor candidates from the last precompact run');
-  console.log('                                           --history N (0=newest, up to 9) — show slot N');
-  console.log('                                           --all — show every entry in the ring buffer (newest first)');
-  console.log('');
-  console.log('  last-recall [--history N | --all]        Show recall candidates from the last prompt-recall run');
-  console.log('                                           (requires proactiveRecall=true; logs prompt + per-candidate');
-  console.log('                                           FTS rank + effective salience + drop reason).');
-  console.log('                                           Note: prompts are stored locally at ~/.shieldcortex/recall-log/');
-  console.log('                                           — same trust boundary as memories.db.');
+  console.log(INSPECT_HELP);
 }
 
 export async function handleInspectCommand(args: string[]): Promise<void> {

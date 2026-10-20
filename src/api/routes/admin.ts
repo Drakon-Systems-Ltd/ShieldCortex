@@ -527,7 +527,8 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
       if (!result) {
         return res.status(404).json({ error: 'Quarantine entry not found or already reviewed' });
       }
-      res.json({ success: true, ...result });
+      // #824: an approval the re-scan refused ends `rejected`; don't report success.
+      res.json({ ...result, success: result.status === 'approved' });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
