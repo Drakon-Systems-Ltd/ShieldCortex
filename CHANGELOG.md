@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.10.7] - 2026-10-20
+
+Patch on 5.10.6: the Claude Code hook and the OpenClaw plugin now derive one session lease identity for the same session id, including ids with surrounding whitespace (#857, PR #868), and the Hermes plugin's outage log names the fallback tier that actually decided a block (#866, PR #870). No new configuration and nothing to do on upgrade.
+
 ### Fixed
 - **Hermes plugin outage log names the deciding fallback tier (#866).** A self-protection fallback deny was labelled `FALLBACK_BLOCK (dangerous)` even though the decision blocked on the self-protection branch. The label now says `self-protection`, `catastrophic`, or `dangerous` in the same precedence the decision uses (self-protection first, then catastrophic, then dangerous). Logging only; the block itself was already correct.
 - Session lease identities now trim surrounding whitespace and reject malformed Unicode consistently in Claude Code and OpenClaw, preventing cross-plane self-refusals and malformed-id aliases. Session ids that differ only by surrounding whitespace are now treated as one session on both planes. Both decline a file-based identity through a symlinked state directory. A nonblank id whose key cannot be derived is refused on both planes instead of the Claude Code hook leasing as a process holder. Older distributions without identity helpers retain their raw-id compatibility fallback and cannot guarantee cross-plane parity (#857). This closes the two parity exceptions listed under #854 in 5.10.6.
