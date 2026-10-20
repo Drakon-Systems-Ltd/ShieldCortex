@@ -143,7 +143,8 @@ function expectedKey(salt: string, id: string): string {
 }
 
 /** Execute the hook's actual helpers without its main(), to observe no-key
- * results directly (the real hook retains its separate ppid lease fallback). */
+ * results directly. Blank ids still use a separate process-holder fallback;
+ * a nonblank id whose key cannot be derived is refused at the lease call site. */
 function hookIdentity(id: string, hookPath: string = HOOK_PATH): { salt: string | undefined; key: string | undefined } {
   const source = readFileSync(hookPath, 'utf8');
   const helpersEnd = hookPath === STOP_HOOK_PATH ? 'const SAFE_SUMMARY_SIGNALS' : 'function hookSessionExtras(';
@@ -208,6 +209,14 @@ describe('#857 — canonical lease identity across both planes', () => {
     expect(leaseRecord()?.holder).toBe(expected);
   });
 
+  it('refuses a malformed named id on a free scope instead of leasing as the process holder', async () => {
+    const invalid = 'x\uD800';
+    await expect(openclawPlane().call(invalid)).rejects.toThrow(/identity could not be derived/);
+    const invalidHook = await runHook(invalid);
+    expect(hookLeaseRefused(invalidHook)).toBe(true);
+    expect(leaseRecord()).toBeUndefined();
+  });
+
   it('preserves well-formed non-ASCII and supplementary ids without merging distinct sessions', async () => {
     const ids = ['sessión-ü', 'session-😀'];
     const keys: string[] = [];
@@ -255,8 +264,9 @@ describe('#857 — canonical lease identity across both planes', () => {
     expect(hookIdentity('session-a')).toEqual({ salt: undefined, key: undefined });
     expect(defence.sessionKeySalt(home)).toBeNull();
     expect(defence.sessionKeyFor('session-a', { home })).toBeNull();
-    await runHook('session-a', { envSalt: false });
-    expect(leaseRecord()?.holder).toBe(`ppid:${process.pid}`);
+    const unresolved = await runHook('session-a', { envSalt: false });
+    expect(hookLeaseRefused(unresolved)).toBe(true);
+    expect(leaseRecord()).toBeUndefined();
   });
 });
 
