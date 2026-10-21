@@ -1226,17 +1226,25 @@ function sessionKeySalt() {
 }
 
 function sessionKeyFor(value) {
-  if (typeof value !== 'string' || !value.trim()) return undefined;
+  if (typeof value !== 'string') return undefined;
+  // Keep canonicalisation in sync with src/defence/iron-dome/session-guard.ts
+  // and scripts/stop-hook.mjs.
+  // Reject lone surrogates before UTF-8 can alias them with U+FFFD.
+  const id = value.trim();
+  if (!id || (typeof id.isWellFormed === 'function' ? !id.isWellFormed() : /[\uD800-\uDFFF]/u.test(id))) return undefined;
   const salt = sessionKeySalt();
   if (!salt) return undefined;
-  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${value}`).digest('hex').slice(0, 16)}`;
+  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${id}`).digest('hex').slice(0, 16)}`;
 }
 
 function hookSessionExtras(hookData, permissionMode) {
   const extra = {};
   const rawSessionId = typeof hookData?.session_id === 'string' ? hookData.session_id : hookData?.sessionId;
-  const sessionKey = sessionKeyFor(rawSessionId);
-  if (sessionKey) extra.sessionKey = sessionKey;
+  if (typeof rawSessionId === 'string' && rawSessionId.trim()) {
+    const sessionKey = sessionKeyFor(rawSessionId);
+    if (sessionKey) extra.sessionKey = sessionKey;
+    else extra.namedIdentityUnresolved = true;
+  }
   const safeMode = safePermissionMode(permissionMode);
   if (safeMode) extra.permissionMode = safeMode;
   return extra;
@@ -3140,16 +3148,38 @@ process.stdin.on('end', async () => {
     // become a new way to deny everything — while state UNreadability fails
     // closed to 'unknown' inside the store itself.
     const harnessPid = resolveHarnessPid();
-    const leaseSelf = baseExtra.sessionKey || `ppid:${harnessPid}`;
+    // Blank/missing ids keep the process holder. A nonblank id whose key cannot
+    // be derived must not fall through to that holder — OpenClaw refuses, and
+    // sharing ppid would let two invalid named ids re-enter each other.
+    const leaseSelf = baseExtra.namedIdentityUnresolved
+      ? null
+      : (baseExtra.sessionKey || `ppid:${harnessPid}`);
     let leaseGate = null;
     try {
       const lease = await loadLease();
       if (lease) {
-        leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, holderPid: harnessPid });
-        if (leaseGate && leaseGate.ledgerChanged) {
-          console.error(
-            `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,
-          );
+        if (leaseSelf === null) {
+          const scope = typeof lease.scopeForToolCall === 'function'
+            ? lease.scopeForToolCall(toolName, toolInput)
+            : 'session-identity';
+          if (scope != null) {
+            leaseGate = {
+              scope,
+              decision: {
+                verdict: 'unknown',
+                reason:
+                  `this session's identity could not be derived, so ShieldCortex cannot tell whether ` +
+                  `another session holds ${scope} — refusing rather than acting under a shared or guessed identity`,
+              },
+            };
+          }
+        } else {
+          leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, holderPid: harnessPid });
+          if (leaseGate && leaseGate.ledgerChanged) {
+            console.error(
+              `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,
+            );
+          }
         }
         if (leaseGate && leaseGate.decision.verdict !== 'allow') {
           writeAuditEntry(safeToolName(toolName), {

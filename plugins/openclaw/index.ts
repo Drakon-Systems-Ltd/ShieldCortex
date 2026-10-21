@@ -2831,6 +2831,8 @@ export function actionLeaseAdapters(
       if (typeof sessionId !== 'string' || !sessionId.trim()) return '';
       return mod.sessionKeyFor(sessionId);
     }
+    // Compatibility only: raw ids are used when dist predates #856 and has
+    // neither identity export. Such a dist cannot promise hook-plane parity.
     return sessionId ?? '';
   };
   const acquiredAs = new WeakMap<object, string>();
