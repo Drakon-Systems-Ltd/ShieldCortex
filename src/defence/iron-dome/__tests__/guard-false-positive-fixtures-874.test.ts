@@ -70,6 +70,56 @@ describe('#874 (b) read-only inspection of the ShieldCortex config dir', () => {
     expect(v.decision).not.toBe('allow');
   });
 
+  it.each([
+    'tail -n 5 ~/.shieldcortex/config.json',
+    'grep -n "actionGuard" ~/.shieldcortex/config.json',
+    "jq '.actionGuard.enabled' ~/.shieldcortex/config.json",
+    'wc -c ~/.shieldcortex/config.json',
+    'stat ~/.shieldcortex/config.json',
+    'ls -la ~/.shieldcortex/config.json',
+  ])('a plain read with quoted or plain arguments stays benign: %s', (command) => {
+    const v = bash(command);
+    expect(v.decision).toBe('allow');
+    expect(v.signals).not.toContain('touch-guard-config');
+  });
+
+  // #879 review r1: an option or env var that makes an observation verb run a
+  // program is not a read. Classifier input only; nothing here is executed.
+  it.each([
+    'rg "--pre=/usr/bin/printf" . ~/.shieldcortex/config.json',
+    "rg '--pre=/usr/bin/printf' . ~/.shieldcortex/config.json",
+    'rg --pre /usr/bin/printf . ~/.shieldcortex/config.json',
+    'rg "--pre" /usr/bin/printf . ~/.shieldcortex/config.json',
+    'rg --pre=/usr/bin/printf . ~/.shieldcortex/config.json',
+    'rg --pre-glob=* actionGuard ~/.shieldcortex/config.json',
+    'rg actionGuard ~/.shieldcortex/config.json',
+    'RIPGREP_CONFIG_PATH=/tmp/probe/rg.conf rg actionGuard ~/.shieldcortex/config.json',
+    'RIPGREP_CONFIG_PATH="/tmp/probe/rg.conf" rg actionGuard ~/.shieldcortex/config.json',
+    'LESSOPEN=/tmp/probe/pre.sh${IFS}%s less ~/.shieldcortex/config.json',
+    "LESSOPEN='/tmp/probe/pre.sh${IFS}%s' less ~/.shieldcortex/config.json",
+    'LESSOPEN="/tmp/probe/pre.sh %s" less ~/.shieldcortex/config.json',
+    'less ~/.shieldcortex/config.json',
+    'more ~/.shieldcortex/config.json',
+    'file ~/.shieldcortex/config.json',
+    'FOO=1 cat ~/.shieldcortex/config.json',
+    'LC_ALL=C ls -la ~/.shieldcortex/config.json',
+    'FOO="1" cat ~/.shieldcortex/config.json',
+    'sudo cat ~/.shieldcortex/config.json',
+    '/tmp/probe/cat ~/.shieldcortex/config.json',
+    './cat ~/.shieldcortex/config.json',
+    'cat ~/.shieldcortex/config.json &',
+    'cat ~/.shieldcortex/config.json 2>/dev/null',
+    'cat ~/.shieldcortex/config.json\\',
+    'grep --color=always enabled ~/.shieldcortex/config.json',
+    'cat ~/.shieldcortex/config.json; (cat ~/.shieldcortex/config.json)',
+    'cat ~/.shieldcortex/config.json | ',
+    'cat "~/.shieldcortex/config.json',
+  ])('an execution-capable or unprovable shape keeps touch-guard-config: %s', (command) => {
+    const v = bash(command);
+    expect(v.signals).toContain('touch-guard-config');
+    expect(v.decision).not.toBe('allow');
+  });
+
   it('Write and Edit on the config stay on the floor', () => {
     expect(evaluateToolCall('Write', { file_path: '/home/u/.shieldcortex/config.json', content: '{}' }).signals).toContain('touch-guard-config');
     expect(evaluateToolCall('Edit', { file_path: '/home/u/.shieldcortex/config.json', old_string: 'a', new_string: 'b' }).signals).toContain('touch-guard-config');
