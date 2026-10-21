@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Dependencies: `hono` moves to 4.13.13 and `@modelcontextprotocol/sdk` to 1.32.1 to clear newly published advisories.** The lockfile pinned `hono` 4.13.7, below the patched 4.13.11 for the `serveStatic` double-decoding advisory (GHSA-5r4p-p66f-jhc7) published on 20 Oct, and the MCP SDK 1.31.0, below 1.32.0 for four advisories published the same day (GHSA-22jm-h49p-29qw, GHSA-6prh-2h8m-c8cw, GHSA-46jr-4wx8-v453, GHSA-rvq5-wwqv-78pq). `hono` is a transitive dependency of the MCP SDK; the SDK range in `package.json` is now `^1.32.1`. No ShieldCortex source changed. This restores the release audit gate (`release-audit-claims`), which reports unwaived production advisories live and had turned red on main.
+
 ## [5.10.7] - 2026-10-20
 
 Patch on 5.10.6: the Claude Code hook and the OpenClaw plugin now derive one session lease identity for the same session id, including ids with surrounding whitespace (#857, PR #868), and the Hermes plugin's outage log names the fallback tier that actually decided a block (#866, PR #870). No new configuration and nothing to do on upgrade.
