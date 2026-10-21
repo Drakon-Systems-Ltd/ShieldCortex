@@ -650,6 +650,9 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
 
   it.each([
     'ls -l /usr/local/bin/python3 && python3 scripts/dual.py',
+    'cd "$REPO" && python3 scripts/dual.py',
+    'cd ../other && python3 scripts/dual.py',
+    'mkdir -p "$OUT" && python3 scripts/dual.py',
     'which python3; python3 scripts/dual.py',
     'ls -l /usr/bin/python3; ./scripts/absdual.py',
     'which python3 > /dev/null && ./scripts/absdual.py',

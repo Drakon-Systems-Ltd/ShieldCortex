@@ -5069,11 +5069,15 @@ const ENV_SETTING_WORD_RE = /^(?:read|readarray|mapfile|declare|typeset|local|re
  */
 const ENV_SETTING_WITH_FLAG: ReadonlyMap<string, RegExp> = new Map([['printf', /^-v/], ['wait', /^-p/], ['command', /^-[A-Za-z]*p/]]);
 /**
- * #885 — verbs whose operands are only read, so naming an interpreter path
- * (`ls -l /usr/local/bin/python3`, `which python3`) changes nothing. Their
- * redirect targets are still judged.
+ * #885 — verbs whose operands are only read or only name a directory or text,
+ * so naming an interpreter path (`ls -l /usr/local/bin/python3`, `which
+ * python3`) changes nothing. `cd` / `pushd` / `popd` / `mkdir` / `echo` /
+ * `printf` write no existing file by their operands (a later write still has to
+ * name the interpreter, which is judged on its own statement), so
+ * `cd "$REPO" && python3 long.py` keeps its relief. Redirect targets are
+ * still judged.
  */
-const READ_ONLY_OPERAND_VERBS: ReadonlySet<string> = new Set(['ls', 'stat', 'cat', 'head', 'tail', 'wc', 'file', 'which', 'type', 'grep', 'egrep', 'fgrep', 'jq']);
+const READ_ONLY_OPERAND_VERBS: ReadonlySet<string> = new Set(['ls', 'stat', 'cat', 'head', 'tail', 'wc', 'file', 'which', 'type', 'grep', 'egrep', 'fgrep', 'jq', 'cd', 'pushd', 'popd', 'mkdir', 'echo', 'printf']);
 /** A system bin directory (any slash run), preceded by no path or word character. */
 const SYSTEM_BIN_MENTION_RE = /(?:^|[^\w.~/-])\/+(?:usr(?:\/+local)?\/+)?bin(?![\w.-])|(?:^|[^\w.~/-])\/+opt\/+homebrew\/+bin(?![\w.-])/;
 /** The directories above a system bin directory: writing one can replace it. */
