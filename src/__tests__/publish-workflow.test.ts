@@ -157,12 +157,40 @@ describe('publish.yml — per-package recovery', () => {
     expect(simulate({ rootPublished: true, pluginPublished: true })[verify!.name]).toBe(true);
   });
 
+  it('uses online exact-version reads on every poll and final assertion (#871)', () => {
+    const verify = byName['Verify both packages landed on npm at the expected version']!;
+    expect(verify.body.match(/npm view --prefer-online shieldcortex@\$MAIN version/g)).toHaveLength(2);
+    expect(verify.body.match(/npm view --prefer-online @drakon-systems\/shieldcortex-realtime@\$PLUGIN version/g)).toHaveLength(2);
+    expect(verify.body).toContain('for i in $(seq 1 120); do');
+    expect(verify.body).toContain('sleep 10');
+    expect(verify.body).toContain('::error::Main package not on npm at expected version');
+    expect(verify.body).toContain('::error::Plugin sub-package not on npm at expected version');
+    expect(verify.body.match(/exit 1/g)).toHaveLength(2);
+    expect(workflow).not.toContain('continue-on-error:');
+  });
+
+  it('checks the plugin tarball after publish even when propagation fails (#871)', () => {
+    const publish = byName['Publish plugin to npm']!;
+    const shape = byName['Verify plugin tarball shape']!;
+    expect(publish.id).toBe('publish_plugin');
+    expect(shape.if).toBe("${{ !cancelled() && (steps.publish_plugin.outcome == 'success' || steps.release_ready.outcome == 'success') }}");
+    expect(evalGhIf(shape.if, {}, {}, { publish_plugin: 'success' }, { failed: true, cancelled: false })).toBe(true);
+    for (const publishOutcome of ['failure', 'skipped']) {
+      expect(evalGhIf(shape.if, {}, {}, { publish_plugin: publishOutcome }, { failed: true, cancelled: false })).toBe(false);
+    }
+    expect(evalGhIf(shape.if, {}, {}, { publish_plugin: 'success' }, { failed: true, cancelled: true })).toBe(false);
+    expect(simulate({ rootPublished: true, pluginPublished: true })[shape.name]).toBe(true);
+    expect(shape.body).toContain('::error::Plugin tarball is missing dist/index.js');
+    expect(shape.body).toContain('::error::Plugin package.json is missing openclaw.extensions');
+    expect(shape.body.match(/exit 1/g)).toHaveLength(2);
+  });
+
   it('GitHub Release creation/update runs on every successful publish and on an already-published rerun (#604 gate)', () => {
     // #604: no longer unconditional — it requires the release-readiness checkpoint
     // and runs behind exactly one failure (npm propagation), pinned in
     // publish-workflow-gates-604.test.ts. Here: every recovery scenario still reaches it.
     expect(byName['Create GitHub Release']?.if).toBe(
-      "${{ !cancelled() && steps.release_ready.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
+      "${{ !cancelled() && steps.release_ready.outcome == 'success' && steps.npm_shape.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
     );
     expect(simulate({ rootPublished: true, pluginPublished: false })['Create GitHub Release']).toBe(true);
     expect(simulate({ rootPublished: true, pluginPublished: true })['Create GitHub Release']).toBe(true);
@@ -182,10 +210,10 @@ describe('publish.yml — per-package recovery', () => {
     // install — never on already_published. Full gate semantics are pinned in
     // publish-workflow-gates-604.test.ts.
     expect(byName['Install ClawHub CLI']?.if).toBe(
-      "${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
+      "${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && steps.npm_shape.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
     );
     expect(byName['Sync + verify ClawHub']?.if).toBe(
-      "${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && steps.clawhub_cli.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
+      "${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && steps.npm_shape.outcome == 'success' && steps.clawhub_cli.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
     );
     expect(byName['Install ClawHub CLI']?.if).not.toMatch(/already_published/);
     expect(byName['Sync + verify ClawHub']?.if).not.toMatch(/already_published/);
