@@ -1,0 +1,433 @@
+/**
+ * The calm update screen (owner request, 15 Oct 2026).
+ *
+ * Five scenarios, rendered from fixtures through the same pure renderer
+ * runUpdate() calls. Nothing here runs npm, OpenClaw, Hermes or a gateway.
+ */
+import { describe, it, expect } from '@jest/globals';
+
+import {
+  buildUpdateSummary,
+  renderUpdateSummary,
+  crossesGuardDefaultOff,
+  BANNED_DEFAULT_PHRASES,
+  BANNED_DEFAULT_PATTERNS,
+  GUARD_ON_COMMAND,
+  GUARD_STATUS_COMMAND,
+  type UpdateSummaryInput,
+} from '../update-summary.js';
+import { guardDefaultOffNoticeLines } from '../update.js';
+import { defaultColorStyle, NO_STYLE, stripAnsi, renderPinCard } from '../term-ui.js';
+import { scriptsNeedAYes } from '../allowlist-scan.js';
+import { renderPluginLoadVerdict } from '../doctor.js';
+import { formatDoctorReport } from '../doctor-report.js';
+
+const ok = { status: 'ok' as const };
+
+function base(over: Partial<UpdateSummaryInput> = {}): UpdateSummaryInput {
+  return {
+    fromVersion: '5.7.0',
+    toVersion: '5.9.0',
+    packageState: 'updated',
+    engine: { ok: true },
+    plugin: ok,
+    skill: ok,
+    hook: ok,
+    hermes: { status: 'skip' },
+    guardOn: false,
+    // Guard off: the live enforcement probe has nothing to prove, so the
+    // plugin check comes back "not confirmed" on a perfectly healthy host.
+    protection: {
+      status: 'unproven',
+      loaded: 'unknown',
+      pluginVersion: '5.9.0',
+      gatewayReloaded: true,
+      nextCommand: 'shieldcortex doctor --ai',
+    },
+    ...over,
+  };
+}
+
+const PLUGIN_INSTALL_COMMAND = 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest';
+const PLUGIN_BEHIND: UpdateSummaryInput['protection'] = {
+  status: 'unproven',
+  loaded: 'unknown',
+  versionOk: false,
+  pluginVersion: '5.7.0',
+  expectedVersion: '5.9.0',
+  gatewayReloaded: false,
+  nextCommand: PLUGIN_INSTALL_COMMAND,
+};
+// PR #773 follow-up: the plugin check proved the running gateway started
+// without the ShieldCortex plugin. Red whatever else the run found.
+const GATEWAY_WITHOUT_PLUGIN: UpdateSummaryInput['protection'] = {
+  status: 'failed',
+  loaded: 'no',
+  pluginVersion: '5.9.0',
+  gatewayReloaded: false,
+  nextCommand: 'shieldcortex repair',
+};
+const PLUGIN_STEP_WARN: UpdateSummaryInput['plugin'] = { status: 'warn', rerun: 'shieldcortex update' };
+
+const SCENARIOS: Record<string, UpdateSummaryInput> = {
+  'a: all OK, Guard off': base(),
+  'b: all OK, Guard on and proven': base({
+    guardOn: true,
+    protection: { status: 'ok', loaded: 'yes', pluginVersion: '5.9.0', gatewayReloaded: true },
+  }),
+  'c: Guard on, plugin load not confirmed': base({ guardOn: true }),
+  'd: Hermes present, no interpreter': base({ hermes: { status: 'warn', reason: 'no-interpreter' } }),
+  'e: package install failed': base({ packageState: 'failed' }),
+  // PR #773 review: a plugin older than this CLI. The plugin check returns
+  // "behind" (versionOk false) with the install command; Guard state must not
+  // change whether the user sees it.
+  'f: plugin behind, Guard off': base({ protection: PLUGIN_BEHIND }),
+  'f: plugin behind, Guard on': base({ guardOn: true, protection: PLUGIN_BEHIND }),
+  // PR #773 follow-up: the plugin step warned AND the gateway started without
+  // the plugin. The warning used to win and the screen went yellow with a
+  // green Guard row; the proven-absent plugin must stay red.
+  'g: gateway without plugin, plugin step warned, Guard on': base({ guardOn: true, plugin: PLUGIN_STEP_WARN, protection: GATEWAY_WITHOUT_PLUGIN }),
+  'g: gateway without plugin, plugin step warned, Guard off': base({ plugin: PLUGIN_STEP_WARN, protection: GATEWAY_WITHOUT_PLUGIN }),
+};
+
+const EXPECTED_HEADLINE: Record<string, 'updated' | 'check' | 'failed'> = {
+  'a: all OK, Guard off': 'updated',
+  'b: all OK, Guard on and proven': 'updated',
+  'c: Guard on, plugin load not confirmed': 'check',
+  'd: Hermes present, no interpreter': 'check',
+  'e: package install failed': 'failed',
+  'f: plugin behind, Guard off': 'check',
+  'f: plugin behind, Guard on': 'check',
+  'g: gateway without plugin, plugin step warned, Guard on': 'failed',
+  'g: gateway without plugin, plugin step warned, Guard off': 'failed',
+};
+
+function screen(input: UpdateSummaryInput, opts: { color?: boolean; ascii?: boolean } = {}): string[] {
+  const style = opts.color ? defaultColorStyle() : NO_STYLE;
+  return renderUpdateSummary(buildUpdateSummary(input), input, { width: 80, style, ascii: opts.ascii });
+}
+
+function bannedHits(text: string): string[] {
+  const hits: string[] = [];
+  for (const phrase of BANNED_DEFAULT_PHRASES) {
+    // Short words match as words ("pin" must not match "spinning");
+    // upper-case tokens (VERDICT, SoT) are case-sensitive.
+    const caseSensitive = phrase !== phrase.toLowerCase();
+    const esc = phrase.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&');
+    const re = new RegExp('(^|[^A-Za-z])' + esc + '(ned|s)?($|[^A-Za-z])', caseSensitive ? '' : 'i');
+    if (re.test(text)) hits.push(phrase);
+  }
+  for (const re of BANNED_DEFAULT_PATTERNS) if (re.test(text)) hits.push(String(re));
+  return hits;
+}
+
+describe('update summary: five scenarios', () => {
+  for (const [name, input] of Object.entries(SCENARIOS)) {
+    it(name + ' (snapshot)', () => {
+      expect(screen(input).join('\n')).toMatchSnapshot();
+    });
+
+    it(name + ' headline class', () => {
+      const summary = buildUpdateSummary(input);
+      expect(summary.headline).toBe(EXPECTED_HEADLINE[name]);
+      const first = screen(input, { color: true })[0];
+      const style = defaultColorStyle();
+      const colour = EXPECTED_HEADLINE[name] === 'updated' ? style.green
+        : EXPECTED_HEADLINE[name] === 'check' ? style.yellow : style.red;
+      expect(first.startsWith(colour)).toBe(true);
+    });
+
+    it(name + ' fits 80 columns', () => {
+      for (const line of screen(input, { color: true })) {
+        expect(stripAnsi(line).length).toBeLessThanOrEqual(80);
+      }
+    });
+  }
+
+  it('(a) is green, with no warning row', () => {
+    const summary = buildUpdateSummary(SCENARIOS['a: all OK, Guard off']);
+    expect(summary.headline).toBe('updated');
+    expect(summary.rows.some((r) => r.mark === 'check' || r.mark === 'fail')).toBe(false);
+    expect(screen(SCENARIOS['a: all OK, Guard off'], { color: true })[0]).toContain(defaultColorStyle().green);
+  });
+
+  it('Guard off is neutral, never a warning — the same check with Guard on is', () => {
+    const off = buildUpdateSummary(base());
+    const on = buildUpdateSummary(base({ guardOn: true }));
+    expect(off.rows.find((r) => r.label === 'Guard')?.mark).toBe('off');
+    expect(on.rows.find((r) => r.label === 'Guard')?.mark).toBe('check');
+  });
+
+  it('red only for a real failure: an unconfirmed check with Guard on is yellow', () => {
+    expect(buildUpdateSummary(base({ guardOn: true })).headline).toBe('check');
+    expect(buildUpdateSummary(base({ guardOn: true, protection: { status: 'failed', loaded: 'no' } })).headline).toBe('failed');
+    expect(buildUpdateSummary(base({ engine: { ok: false, remediation: 'x' } })).headline).toBe('failed');
+  });
+
+  it('(f) a plugin behind this CLI is a yellow OpenClaw row with the install fix, Guard off or on', () => {
+    for (const name of ['f: plugin behind, Guard off', 'f: plugin behind, Guard on']) {
+      const summary = buildUpdateSummary(SCENARIOS[name]);
+      expect(summary.headline).toBe('check');
+      const oc = summary.rows.find((r) => r.label === 'OpenClaw');
+      expect(oc).toMatchObject({
+        mark: 'check',
+        text: 'plugin 5.7.0 is behind ShieldCortex 5.9.0',
+        command: PLUGIN_INSTALL_COMMAND,
+        commandLabel: 'Fix',
+      });
+      const text = screen(SCENARIOS[name]).join('\n');
+      expect(text).toContain('! OpenClaw       plugin 5.7.0 is behind ShieldCortex 5.9.0');
+      expect(text).not.toMatch(/\[ok\]|\u2713 OpenClaw/);
+      // An install command is a fix, never a "Check:".
+      expect(text).not.toMatch(/Check: openclaw plugins install/);
+      expect(text).not.toContain('couldn\'t confirm OpenClaw is checking tool calls');
+    }
+    const guardOff = buildUpdateSummary(SCENARIOS['f: plugin behind, Guard off']);
+    expect(guardOff.rows.find((r) => r.label === 'Guard')?.mark).toBe('off');
+    const guardOn = buildUpdateSummary(SCENARIOS['f: plugin behind, Guard on']);
+    expect(guardOn.rows.find((r) => r.label === 'Guard')).toMatchObject({ mark: 'check', commandLabel: 'Fix' });
+  });
+
+  it('(f) falls back to the new version when the check did not name the expected one', () => {
+    const input = base({ protection: { ...PLUGIN_BEHIND, expectedVersion: null } });
+    expect(buildUpdateSummary(input).rows.find((r) => r.label === 'OpenClaw')?.text)
+      .toBe('plugin 5.7.0 is behind ShieldCortex 5.9.0');
+  });
+
+  it('(e) names the version you are still on', () => {
+    expect(screen(SCENARIOS['e: package install failed'])[0]).toBe('Update failed \u2014 ShieldCortex is still on 5.7.0');
+  });
+
+  it('every non-OK row has what, why (<= 12 words) and exactly one command', () => {
+    for (const input of Object.values(SCENARIOS)) {
+      for (const row of buildUpdateSummary(input).rows) {
+        if (row.mark !== 'check' && row.mark !== 'fail') continue;
+        expect(row.text.length).toBeGreaterThan(0);
+        expect(row.why).toBeDefined();
+        expect(String(row.why).split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(12);
+        expect(row.command).toBeDefined();
+        expect(String(row.command)).not.toMatch(/, then |;/);
+      }
+    }
+  });
+});
+
+describe('a gateway that started without the plugin is always red (#773 follow-up)', () => {
+  const RED_TEXT = 'the gateway started without the ShieldCortex plugin';
+  const PLUGIN_STEPS: Record<string, Partial<UpdateSummaryInput>> = {
+    'plugin step ok': {},
+    'plugin step warned': { plugin: PLUGIN_STEP_WARN },
+    'plugin step failed': { plugin: { status: 'failed', rerun: 'shieldcortex update' } },
+    'plugin behind': { protection: { ...PLUGIN_BEHIND, status: 'failed', loaded: 'no' } },
+  };
+
+  for (const [step, over] of Object.entries(PLUGIN_STEPS)) {
+    for (const guardOn of [true, false]) {
+      const name = step + ', Guard ' + (guardOn ? 'on' : 'off');
+      const input = base({ protection: GATEWAY_WITHOUT_PLUGIN, ...over, guardOn });
+      const fix = String(input.protection.nextCommand);
+
+      it(name + ': one red OpenClaw row naming the absent plugin, with the check\'s fix', () => {
+        const summary = buildUpdateSummary(input);
+        const oc = summary.rows.filter((r) => r.label === 'OpenClaw');
+        expect(oc).toHaveLength(1);
+        expect(oc[0]).toMatchObject({ mark: 'fail', command: fix, commandLabel: 'Fix' });
+        expect(oc[0].text).toContain(RED_TEXT);
+        if (input.plugin.status === 'warn' || input.plugin.status === 'failed') {
+          // The plugin step's own problem is kept, inside the red row.
+          expect(oc[0].text).toContain('couldn\'t be updated');
+        }
+      });
+
+      it(name + ': the headline is a red "Update failed"', () => {
+        const summary = buildUpdateSummary(input);
+        expect(summary.headline).toBe('failed');
+        expect(summary.title).toMatch(/^Update failed \u2014 \d problems? to fix$/);
+        const first = screen(input, { color: true })[0];
+        expect(first.startsWith(defaultColorStyle().red)).toBe(true);
+        expect(stripAnsi(first)).toMatch(/^Update failed/);
+        const text = screen(input, { ascii: true }).join('\n');
+        expect(text).toContain('[x]   OpenClaw');
+        expect(text).not.toContain('[!]   OpenClaw');
+        expect(text).not.toContain('[ok]  OpenClaw');
+      });
+
+      if (guardOn) {
+        it(name + ': the Guard row is red, never a tick', () => {
+          const summary = buildUpdateSummary(input);
+          const guard = summary.rows.filter((r) => r.label === 'Guard');
+          expect(guard).toHaveLength(1);
+          expect(guard[0].mark).not.toBe('ok');
+          expect(guard[0]).toMatchObject({
+            mark: 'fail',
+            text: 'on, but OpenClaw isn\'t running the plugin',
+            command: fix,
+            commandLabel: 'Fix',
+          });
+          expect(String(guard[0].why).split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(12);
+          const text = screen(input, { ascii: true }).join('\n');
+          expect(text).toContain('[x]   Guard');
+          expect(text).not.toContain('[ok]  Guard');
+          expect(screen(input).join('\n')).not.toMatch(/\u2713 Guard/);
+        });
+      } else {
+        it(name + ': Guard off stays the neutral off row', () => {
+          const summary = buildUpdateSummary(input);
+          const guard = summary.rows.filter((r) => r.label === 'Guard');
+          expect(guard).toHaveLength(1);
+          expect(guard[0]).toMatchObject({ mark: 'off', text: 'off (the default)', command: GUARD_ON_COMMAND });
+          expect(summary.headline).toBe('failed');
+        });
+      }
+    }
+  }
+
+  it('counts the red rows: two problems with Guard on, one with Guard off', () => {
+    const on = buildUpdateSummary(SCENARIOS['g: gateway without plugin, plugin step warned, Guard on']);
+    expect(on.title).toBe('Update failed \u2014 2 problems to fix');
+    expect(on.rows.filter((r) => r.mark === 'fail').map((r) => r.label)).toEqual(['OpenClaw', 'Guard']);
+    const off = buildUpdateSummary(SCENARIOS['g: gateway without plugin, plugin step warned, Guard off']);
+    expect(off.title).toBe('Update failed \u2014 1 problem to fix');
+    expect(off.rows.filter((r) => r.mark === 'fail').map((r) => r.label)).toEqual(['OpenClaw']);
+  });
+
+  it('the reviewer\'s reproduction: plugin warned, plugin check failed, Guard on', () => {
+    const input = base({
+      guardOn: true,
+      plugin: PLUGIN_STEP_WARN,
+      protection: { status: 'failed', loaded: 'no' },
+    });
+    const lines = screen(input, { ascii: true });
+    expect(lines[0]).toBe('Update failed - 2 problems to fix');
+    expect(lines).not.toContain('  [ok]  Guard          on');
+    expect(lines.join('\n')).not.toContain('ShieldCortex updated');
+    // No nextCommand from the check: both rows fall back to repair.
+    const summary = buildUpdateSummary(input);
+    expect(summary.rows.find((r) => r.label === 'OpenClaw')?.command).toBe('shieldcortex repair');
+    expect(summary.rows.find((r) => r.label === 'Guard')?.command).toBe('shieldcortex repair');
+  });
+});
+
+describe('Guard default-off migration notice', () => {
+  it('prints when the update crosses 4.54.15', () => {
+    const lines = guardDefaultOffNoticeLines('4.54.14', true).join('\n');
+    expect(lines).toContain('Action Guard is off by default since 4.54.15.');
+    expect(lines).toContain(GUARD_ON_COMMAND);
+    expect(lines).toContain(GUARD_STATUS_COMMAND);
+    expect(guardDefaultOffNoticeLines('4.10.3', true).length).toBeGreaterThan(0);
+  });
+
+  it('does not print for 5.7.0 -> 5.9.0', () => {
+    expect(guardDefaultOffNoticeLines('5.7.0', true)).toEqual([]);
+  });
+
+  it('does not print when nothing was updated, or on the boundary itself', () => {
+    expect(guardDefaultOffNoticeLines('4.54.14', false)).toEqual([]);
+    expect(guardDefaultOffNoticeLines('4.54.15', true)).toEqual([]);
+    expect(crossesGuardDefaultOff('not-a-version', () => -1)).toBe(false);
+  });
+
+  it('points at commands that exist', () => {
+    expect(GUARD_ON_COMMAND).toBe('shieldcortex config --action-guard-enable');
+    expect(GUARD_STATUS_COMMAND).toBe('shieldcortex guard readiness');
+  });
+});
+
+describe('banned phrases stay out of the default output', () => {
+  for (const [name, input] of Object.entries(SCENARIOS)) {
+    it(name, () => {
+      for (const opts of [{}, { color: true }, { ascii: true }]) {
+        const text = stripAnsi(screen(input, opts).join('\n'));
+        expect(bannedHits(text)).toEqual([]);
+      }
+    });
+  }
+
+  it('Guard notice', () => {
+    expect(bannedHits(stripAnsi(guardDefaultOffNoticeLines('4.54.14', true, { color: true }).join('\n')))).toEqual([]);
+  });
+
+  it('allowlist review card inside update', () => {
+    const card = renderPinCard({
+      index: 1,
+      total: 2,
+      status: 'new',
+      path: '/opt/fixture/openclaw/scripts/redteam-cron.sh',
+      sha256: '9ebef1ad0e5f'.repeat(5) + 'abcd',
+      sources: ['openclaw-cron-db'],
+    }, { width: 80, style: NO_STYLE }).join('\n');
+    expect(bannedHits(card)).toEqual([]);
+    expect(card).toContain("found in OpenClaw's scheduled jobs");
+    expect(card).toContain('Trust this scheduled script?');
+    expect(card).toContain('[y] trust  [n] not now  [v] view  [q] stop');
+    expect(bannedHits(scriptsNeedAYes(2))).toEqual([]);
+    expect(scriptsNeedAYes(2)).toContain('2 new or changed scheduled scripts are not reviewed yet.');
+    for (const n of [1, 2]) expect(scriptsNeedAYes(n)).not.toMatch(/before (it|they) can run|needs? a yes/);
+  });
+
+  it('doctor plugin-load rows that could not check', () => {
+    for (const state of ['index-unreadable', 'load-unproven'] as const) {
+      for (const live of [null, false] as const) {
+        const r = renderPluginLoadVerdict({
+          state,
+          severity: 'warn',
+          recommendedAction: 'none',
+          enabledInConfig: true,
+          loadedInIndex: false,
+          loadedInLiveRoster: live,
+          indexReadable: state !== 'index-unreadable',
+          configReadable: true,
+          configPresent: true,
+          openClawTracked: true,
+          indexWarnsConflict: false,
+          metadataConflict: false,
+          indexVersion: null,
+          installsJsonVersion: null,
+          reasons: [],
+        } as unknown as Parameters<typeof renderPluginLoadVerdict>[0]);
+        expect(bannedHits(r.message + ' ' + (r.fix ?? ''))).toEqual([]);
+      }
+    }
+  });
+
+  it('doctor report: the live-probe hint prints only with --verbose', () => {
+    const r = renderPluginLoadVerdict({
+      state: 'load-unproven',
+      severity: 'warn',
+      recommendedAction: 'none',
+      enabledInConfig: true,
+      loadedInIndex: false,
+      loadedInLiveRoster: null,
+      indexReadable: true,
+      configReadable: true,
+      configPresent: true,
+      openClawTracked: true,
+      indexWarnsConflict: false,
+      metadataConflict: false,
+      indexVersion: null,
+      installsJsonVersion: null,
+      reasons: [],
+    } as unknown as Parameters<typeof renderPluginLoadVerdict>[0]);
+    const plain = formatDoctorReport([r], { width: 80 }).join('\n');
+    expect(plain).toContain('$ shieldcortex openclaw status');
+    expect(bannedHits(plain)).toEqual([]);
+    expect(plain).not.toMatch(/ALLOW_GATEWAY_CANARY/);
+    const verbose = formatDoctorReport([r], { width: 80, verbose: true }).join('\n');
+    expect(verbose.replace(/\s+/g, ' ')).toMatch(/SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 shieldcortex openclaw status/);
+  });
+});
+
+describe('NO_COLOR / non-TTY rendering', () => {
+  it('plain ASCII markers, no colour codes, no box drawing (snapshot)', () => {
+    const all = Object.values(SCENARIOS).map((input) => screen(input, { ascii: true }).join('\n')).join('\n\n');
+    expect(all).toMatchSnapshot();
+    expect(all).not.toMatch(/\u001b\[/);
+    // eslint-disable-next-line no-control-regex
+    expect(all).not.toMatch(/[^\x00-\x7f]/);
+    expect(all).toContain('[ok]');
+    expect(all).toContain('[off]');
+    expect(all).toContain('[!]');
+    expect(all).toContain('[x]');
+  });
+});
+

@@ -15,6 +15,7 @@ import { getBetterSqlite3 } from '../database/better-sqlite3-guard.js';
 import { resolveMemoriesDbPath } from '../database/init.js';
 import { verifyLedger, formatLedgerReport } from '../defence/ledger/verify.js';
 import { resolveLedgerConfig } from '../defence/ledger/config.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
 
 export const LEDGER_HELP = `Usage: shieldcortex ledger verify [--json] [--db <path>]
 
@@ -97,7 +98,7 @@ export function runLedgerCommand(argv: string[], io: LedgerIo = defaultIo): numb
   }
   try {
     const report = verifyLedger(db, { heartbeatIntervalMs: resolveLedgerConfig().heartbeatIntervalMs });
-    io.stdout(json ? `${JSON.stringify({ database: path, ...report }, null, 2)}\n` : formatLedgerReport(report));
+    io.stdout(json ? `${stringifyJsonTerminalSafe({ database: path, ...report }, 2)}\n` : formatLedgerReport(report));
     return report.status === 'inconsistent' ? 1 : 0;
   } finally {
     db.close();

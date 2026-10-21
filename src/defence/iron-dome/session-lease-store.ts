@@ -54,6 +54,8 @@ import {
   type LeaseScope,
 } from './session-lease.js';
 
+export { scopeForToolCall };
+
 // ── Paths ───────────────────────────────────────────────────────────────────
 
 /** Honours SHIELDCORTEX_CONFIG_DIR like cloud/config.ts's getConfigDir. */

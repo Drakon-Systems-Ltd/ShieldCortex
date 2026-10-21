@@ -584,11 +584,42 @@ export function formatReconcileReport(
 }
 
 /** Map reconcile+self-check to the update step ledger without false FAILED. */
+/** Plain facts for the update summary screen. Read-only; decides nothing. */
+export interface ProtectionFacts {
+  /** Plugin seen on the running gateway's load list: yes / no / unknown. */
+  loaded: 'yes' | 'no' | 'unknown';
+  /** False only when the running build is proven older than expected. */
+  versionOk?: boolean;
+  pluginVersion: string | null;
+  /** The plugin version this CLI expects (its own version). */
+  expectedVersion?: string | null;
+  gatewayReloaded: boolean;
+  nextCommand?: string;
+}
+
+export function protectionFactsFromReconcile(
+  result: ReconcileExecResult,
+  nextCommand?: string,
+): ProtectionFacts {
+  const sc = result.selfCheck;
+  const verStep = result.stepResults.find((s) => s.kind === 'openclaw-update' && s.ok);
+  const fromStep = verStep?.detail.match(/(\d+\.\d+\.\d+)/)?.[1] ?? null;
+  return {
+    loaded: sc?.rosterState === 'loaded' ? 'yes' : sc?.rosterState === 'absent' ? 'no' : 'unknown',
+    ...(sc && sc.versionProof === false ? { versionOk: false } : {}),
+    pluginVersion: fromStep ?? (result.postVerdict ?? result.verdict).onDiskVersion ?? null,
+    expectedVersion: (result.postVerdict ?? result.verdict).expectedVersion ?? null,
+    gatewayReloaded: result.stepResults.some((s) => s.kind === 'gateway-reload' && s.ok),
+    ...(nextCommand ? { nextCommand } : {}),
+  };
+}
+
 export function protectionLedgerFromReconcile(result: ReconcileExecResult): {
   status: 'ok' | 'unproven' | 'failed' | 'warn';
   summary: string;
   detail: string[];
   outcome: ReturnType<typeof summariseRepair>['outcome'];
+  facts: ProtectionFacts;
 } {
   const summary = summariseRepair({
     applied: result.applied,
@@ -610,11 +641,12 @@ export function protectionLedgerFromReconcile(result: ReconcileExecResult): {
   });
   const detail: string[] = [summary.headline];
   if (summary.nextCommand) detail.push(`next: ${summary.nextCommand}`);
+  const facts = protectionFactsFromReconcile(result, summary.nextCommand);
   if (summary.outcome === 'protected') {
-    return { status: 'ok', summary: 'protected', detail, outcome: summary.outcome };
+    return { status: 'ok', summary: 'protected', detail, outcome: summary.outcome, facts };
   }
   if (summary.outcome === 'unprotected') {
-    return { status: 'failed', summary: 'unprotected', detail, outcome: summary.outcome };
+    return { status: 'failed', summary: 'unprotected', detail, outcome: summary.outcome, facts };
   }
   if (summary.outcome === 'protected-unproven') {
     // Do not hardcode Friday-class chips — other unproven classes exist
@@ -625,9 +657,10 @@ export function protectionLedgerFromReconcile(result: ReconcileExecResult): {
       summary: chip || 'protection unproven',
       detail,
       outcome: summary.outcome,
+      facts,
     };
   }
-  return { status: 'unproven', summary: 'protection unproven', detail, outcome: summary.outcome };
+  return { status: 'unproven', summary: 'protection unproven', detail, outcome: summary.outcome, facts };
 }
 
 /**

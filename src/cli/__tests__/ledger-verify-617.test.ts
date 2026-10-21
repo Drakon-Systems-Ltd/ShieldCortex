@@ -40,7 +40,7 @@ function chainedDb(rows = 4): string {
       source_type: 'cli', source_identifier: 'ledger-cli', trust_score: 0.9,
       sensitivity_level: 'INTERNAL', firewall_result: 'ALLOW', operation: 'write',
       anomaly_score: 0, threat_indicators: '[]', blocked_patterns: '[]',
-      reason: `cli ${i}`, fragmentation_score: null,
+      reason: `cli ${i}`, fragmentation_score: null, pipeline_duration_ms: null,
     });
   }
   closeDatabase();

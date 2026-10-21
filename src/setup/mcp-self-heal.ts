@@ -22,9 +22,10 @@ import fs from 'fs';
 import { mkdirSecure } from './state-permissions.js';
 import path from 'path';
 import os from 'os';
+import { sanitiseDisplayField } from '../cli/term-ui.js';
 import {
   ensureNativeBinding,
-  nativeBindingRemediation,
+  nativeBindingDisplayRemediation,
   resolveSelfInstallDir,
   type EnsureResult,
 } from './native-binding.js';
@@ -72,19 +73,23 @@ function defaultLogsDir(): string {
 export function formatMcpSpawnError(
   installDir: string,
   underlying: string,
-  remediation = nativeBindingRemediation(installDir, underlying),
+  remediation = nativeBindingDisplayRemediation(installDir, underlying),
 ): string {
   return [
     'ShieldCortex MCP server failed to start: the database engine (better-sqlite3)',
     'could not be loaded and automatic recovery did not produce a loadable binding.',
     '',
-    `Install: ${installDir}`,
+    // #788: install dir, remediation and error text are host-derived; this
+    // message goes to stderr, so each line passes the display sanitiser.
+    `Install: ${sanitiseDisplayField(installDir)}`,
     '',
     'Recommended recovery:',
-    ...remediation.split('\n').map((line) => `  ${line}`),
+    ...remediation.split('\n').map((line) => `  ${sanitiseDisplayField(line)}`),
     'Then restart the app that launches this MCP server.',
     '',
-    `Underlying error: ${underlying}`,
+    // The underlying error is not layout: its line breaks are shown as ⏎ so
+    // it cannot print lines that look like separate status or instructions.
+    `Underlying error: ${sanitiseDisplayField(underlying)}`,
   ].join('\n');
 }
 
@@ -112,7 +117,7 @@ export async function selfHealMcpNativeBinding(
   // status === 'failed' — heal impossible. Fail loudly.
   const dir = installDir();
   const underlying = result.error ?? 'unknown native-module load failure';
-  const remediation = result.remediation ?? nativeBindingRemediation(dir, underlying);
+  const remediation = result.remediation ?? nativeBindingDisplayRemediation(dir, underlying);
   const message = formatMcpSpawnError(dir, underlying, remediation);
 
   let breadcrumbPath: string | undefined;
@@ -133,4 +138,18 @@ export async function selfHealMcpNativeBinding(
   }
 
   return { ok: false, healed: false, message, breadcrumbPath };
+}
+
+/**
+ * The MCP entry point's two stderr writes for an unrecoverable startup
+ * failure. `message` is already display-sanitised by `formatMcpSpawnError`;
+ * the breadcrumb path sits under the home directory, so it is cleaned here at
+ * the terminal sink (#799). The file itself was written to the real path.
+ */
+export function printMcpStartupFailure(
+  heal: Pick<McpSelfHealOutcome, 'message' | 'breadcrumbPath'>,
+  write: (line: string) => void = (line) => console.error(line),
+): void {
+  write(String(heal.message ?? ''));
+  if (heal.breadcrumbPath) write(`\nDetails written to: ${sanitiseDisplayField(heal.breadcrumbPath)}`);
 }

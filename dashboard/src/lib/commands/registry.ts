@@ -27,6 +27,13 @@ export interface ConsolidateSummary {
   deleted: number;
 }
 
+export interface QuarantineReviewOutcome {
+  /** The status the server recorded for the item (`approved` or `rejected`). */
+  status: string;
+  /** Why an approval ended rejected, when the server says. */
+  reason?: string;
+}
+
 export interface RouteRef {
   label: string;
   href: string;
@@ -41,7 +48,8 @@ export interface CommandContext {
   forget: (id: number) => Promise<void>;
   consolidate: () => Promise<ConsolidateSummary>;
   quarantineList: () => Promise<RecallHit[]>;
-  quarantineReview: (id: number, action: 'approve' | 'reject') => Promise<void>;
+  /** Resolves with the outcome the server recorded, which can differ from the action asked for (#824). */
+  quarantineReview: (id: number, action: 'approve' | 'reject') => Promise<QuarantineReviewOutcome>;
   ironDome: (action: 'on' | 'off' | 'status') => Promise<string>;
   remember: (text: string) => Promise<{ id: number }>;
   routes: RouteRef[];
@@ -158,8 +166,15 @@ const quarantine: Command = {
     if (sub === 'approve' || sub === 'reject') {
       const id = Number(args[1]);
       if (!Number.isInteger(id)) return err([`quarantine ${sub}: give a numeric id`]);
-      await ctx.quarantineReview(id, sub);
-      return ok([`▸ ${sub === 'approve' ? 'approved' : 'rejected'} #${id}`]);
+      const outcome = await ctx.quarantineReview(id, sub);
+      const wanted = sub === 'approve' ? 'approved' : 'rejected';
+      // #824: report what the server recorded, not what was asked for. An
+      // approval the re-scan refused comes back `rejected` with a reason.
+      if (outcome.status !== wanted) {
+        const why = outcome.reason ? `: ${outcome.reason}` : '';
+        return err([`quarantine ${sub}: #${id} was not ${wanted}${why}`, `  #${id} is now ${outcome.status}`]);
+      }
+      return ok([`▸ ${wanted} #${id}`]);
     }
     return err(['quarantine: use list | approve <id> | reject <id>']);
   },

@@ -42,8 +42,8 @@ function setup(opts: { roster: Array<{ pluginId: string; enabled: boolean }>; on
 }
 
 const passingSelfCheck: SelfCheckRunResult = {
-  ok: true, rosterProof: true, canaryProof: true, reasons: ['ok'],
-  index: null, canary: { ran: true, denied: true, auditEntryFound: true },
+  ok: true, rosterProof: true, rosterState: 'loaded', canaryProof: true, versionProof: true, reasons: ['ok'],
+  index: null, liveRoster: [PLUGIN], canary: { ran: true, denied: true, auditEntryFound: true },
 };
 
 describe('reconcileOpenClawPluginState', () => {
@@ -60,7 +60,7 @@ describe('reconcileOpenClawPluginState', () => {
     expect(res.verdict.severity).toBe('warn');
     expect(res.plan.some((s) => s.kind === 'openclaw-update')).toBe(true);
     expect(res.applied).toBe(false);
-    expect(calls).toHaveLength ? expect(calls.length).toBe(0) : expect(calls.length).toBe(0);
+    expect(calls).toHaveLength(0);
   });
 
   it('apply: executes the silent-drop remediation via `plugins update`, then self-checks', async () => {

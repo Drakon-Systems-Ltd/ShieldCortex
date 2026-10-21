@@ -97,10 +97,10 @@ export function validateCap(value: unknown, key: string = 'cap'): number | undef
  * `readRawConfig()` is mtime-cached, so this is cheap enough to sit on the
  * write path as a default parameter.
  */
-export function resolveMemoryConfig(base: MemoryConfig = DEFAULT_CONFIG): MemoryConfig {
+export function resolveMemoryConfig(base: MemoryConfig = DEFAULT_CONFIG, options: { readOnly?: boolean } = {}): MemoryConfig {
   let block: Record<string, unknown>;
   try {
-    block = memoryBlock(readRawConfig());
+    block = memoryBlock(readRawConfig(options));
   } catch {
     return base;
   }

@@ -482,15 +482,18 @@ async function loadGuard() {
  * Optional by construction: if the module is missing the hook behaves exactly
  * as it did before, degrading to `opaque-script-invocation` rather than
  * failing on a partial dist.
+ *
+ * `base` is the directory a relative script path resolves against — see
+ * {@link scriptResolutionBase}.
  */
-async function loadScriptResolver() {
+async function loadScriptResolver(base) {
   const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'script-source-resolver.js')).href
     );
     return typeof mod.createScriptSourceResolver === 'function'
-      ? mod.createScriptSourceResolver(process.cwd())
+      ? mod.createScriptSourceResolver(base)
       : undefined;
   } catch {
     return undefined;
@@ -502,8 +505,11 @@ async function loadScriptResolver() {
  * resolver above, and meaningless without it: an exemption only exists where
  * a fold would have happened. Missing module, empty config, malformed
  * entries — all degrade to "no exemptions", never to an error.
+ *
+ * Takes the SAME `base` as the resolver: the pin is bound to the file whose
+ * bytes were folded, so the two must agree on which file a relative path names.
  */
-async function loadReviewedScriptCheck(rawEntries) {
+async function loadReviewedScriptCheck(rawEntries, base) {
   if (!Array.isArray(rawEntries) || rawEntries.length === 0) return undefined;
   const distRoot = hookDistRoot();
   try {
@@ -511,11 +517,37 @@ async function loadReviewedScriptCheck(rawEntries) {
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'reviewed-scripts.js')).href
     );
     return typeof mod.createReviewedScriptCheck === 'function'
-      ? mod.createReviewedScriptCheck(rawEntries, process.cwd())
+      ? mod.createReviewedScriptCheck(rawEntries, base)
       : undefined;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The directory a relative invoked-script path resolves against (#634).
+ *
+ * The command starts in the directory Claude Code reports per call as payload
+ * `cwd`. Claude Code's published contract also runs hook handlers in its
+ * current directory, so on an undisturbed host the two agree; they diverge
+ * when something in between moves the hook process (a wrapper or harness
+ * that changes directory before exec'ing it). Resolving against the process
+ * cwd then folds an unrelated same-named file — or finds nothing and goes
+ * opaque — instead of the script the command will actually execute. Payload
+ * `cwd` is the per-call value, so it is the one to trust.
+ *
+ * Only an absolute string is taken. Anything else (absent, empty, relative,
+ * NUL-bearing, absurdly long) falls back to `process.cwd()`, which is what the
+ * hook used for every call before this. A relative value is refused rather
+ * than resolved, because resolving it would silently re-anchor it on the very
+ * process cwd this exists to stop trusting. No stat: a reported directory
+ * that does not exist resolves nothing and degrades to opaque, exactly as a
+ * missing script does.
+ */
+function scriptResolutionBase(rawCwd) {
+  if (typeof rawCwd !== 'string' || rawCwd.length === 0 || rawCwd.length > 4096) return process.cwd();
+  if (rawCwd.includes('\0') || !isAbsolute(rawCwd)) return process.cwd();
+  return rawCwd;
 }
 
 /**
@@ -1050,6 +1082,9 @@ const SAFE_SIGNALS = new Set([
   'write-content-dangerous', 'delete-critical-path', 'session-lease',
   // #509: the enforce-when-ready gate's own demotion and promotion notices.
   'readiness-demoted', 'readiness-promoted',
+  // #874: the other two self-protection floor signals. Guard reason codes,
+  // not operator data; redacted, a floor denial could not name its signal.
+  'touch-guard-config', 'disable-action-guard',
 ]);
 /**
  * #436 — the only tiers that deny with no operator affordance. Everything the
@@ -1194,17 +1229,25 @@ function sessionKeySalt() {
 }
 
 function sessionKeyFor(value) {
-  if (typeof value !== 'string' || !value.trim()) return undefined;
+  if (typeof value !== 'string') return undefined;
+  // Keep canonicalisation in sync with src/defence/iron-dome/session-guard.ts
+  // and scripts/stop-hook.mjs.
+  // Reject lone surrogates before UTF-8 can alias them with U+FFFD.
+  const id = value.trim();
+  if (!id || (typeof id.isWellFormed === 'function' ? !id.isWellFormed() : /[\uD800-\uDFFF]/u.test(id))) return undefined;
   const salt = sessionKeySalt();
   if (!salt) return undefined;
-  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${value}`).digest('hex').slice(0, 16)}`;
+  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${id}`).digest('hex').slice(0, 16)}`;
 }
 
 function hookSessionExtras(hookData, permissionMode) {
   const extra = {};
   const rawSessionId = typeof hookData?.session_id === 'string' ? hookData.session_id : hookData?.sessionId;
-  const sessionKey = sessionKeyFor(rawSessionId);
-  if (sessionKey) extra.sessionKey = sessionKey;
+  if (typeof rawSessionId === 'string' && rawSessionId.trim()) {
+    const sessionKey = sessionKeyFor(rawSessionId);
+    if (sessionKey) extra.sessionKey = sessionKey;
+    else extra.namedIdentityUnresolved = true;
+  }
   const safeMode = safePermissionMode(permissionMode);
   if (safeMode) extra.permissionMode = safeMode;
   return extra;
@@ -1631,6 +1674,12 @@ function safeGuardOutcomeReason(verdict, outcome, event) {
       : 'Action Guard warning in advisory mode; inspect local audit for details.';
   }
   if (outcome === 'denied_no_prompt_surface') {
+    // #874: under Watch only (advisory) the ordinary dangerous tier never gets
+    // here; only the self-protection floor does. Say so, instead of implying
+    // the posture asked for an approval it does not ask for.
+    if (verdict?.advisoryFloor === true) {
+      return 'Action Guard is in Watch only (advisory), but this call would change the guard\'s own state or config or switch it off, which Watch only still holds; this session has no prompt surface, so the tool call was denied.';
+    }
     return 'Action Guard required approval but this session has no prompt surface; the tool call was denied.';
   }
   if (String(verdict?.reason ?? '').toLowerCase().includes('guard unavailable')) {
@@ -3108,16 +3157,38 @@ process.stdin.on('end', async () => {
     // become a new way to deny everything — while state UNreadability fails
     // closed to 'unknown' inside the store itself.
     const harnessPid = resolveHarnessPid();
-    const leaseSelf = baseExtra.sessionKey || `ppid:${harnessPid}`;
+    // Blank/missing ids keep the process holder. A nonblank id whose key cannot
+    // be derived must not fall through to that holder — OpenClaw refuses, and
+    // sharing ppid would let two invalid named ids re-enter each other.
+    const leaseSelf = baseExtra.namedIdentityUnresolved
+      ? null
+      : (baseExtra.sessionKey || `ppid:${harnessPid}`);
     let leaseGate = null;
     try {
       const lease = await loadLease();
       if (lease) {
-        leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, holderPid: harnessPid });
-        if (leaseGate && leaseGate.ledgerChanged) {
-          console.error(
-            `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,
-          );
+        if (leaseSelf === null) {
+          const scope = typeof lease.scopeForToolCall === 'function'
+            ? lease.scopeForToolCall(toolName, toolInput)
+            : 'session-identity';
+          if (scope != null) {
+            leaseGate = {
+              scope,
+              decision: {
+                verdict: 'unknown',
+                reason:
+                  `this session's identity could not be derived, so ShieldCortex cannot tell whether ` +
+                  `another session holds ${scope} — refusing rather than acting under a shared or guessed identity`,
+              },
+            };
+          }
+        } else {
+          leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, holderPid: harnessPid });
+          if (leaseGate && leaseGate.ledgerChanged) {
+            console.error(
+              `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,
+            );
+          }
         }
         if (leaseGate && leaseGate.decision.verdict !== 'allow') {
           writeAuditEntry(safeToolName(toolName), {
@@ -3142,11 +3213,14 @@ process.stdin.on('end', async () => {
       return;
     }
 
-    const resolveScriptSource = await loadScriptResolver();
+    // #634: resolve against the harness-reported per-call cwd, not this
+    // process's own — see scriptResolutionBase.
+    const scriptBase = scriptResolutionBase(hookData.cwd);
+    const resolveScriptSource = await loadScriptResolver(scriptBase);
     // #189: the allowlist check only rides along when a resolver exists —
     // without a resolver nothing folds, so there is nothing to exempt.
     const isReviewedScript = resolveScriptSource
-      ? await loadReviewedScriptCheck(cfg.reviewedScripts)
+      ? await loadReviewedScriptCheck(cfg.reviewedScripts, scriptBase)
       : undefined;
     let verdict;
     try {
@@ -3181,7 +3255,7 @@ process.stdin.on('end', async () => {
       } else {
         try {
           // Pin every row this call writes to the adapter + policy version in
-          // force: only same-version rows count as readiness evidence.
+          // force: evidence is keyed on its policy hash (#719).
           const pin = readinessMod.currentReadinessPin();
           if (pin) baseExtra.readinessPin = pin;
           const resolved = readinessMod.resolveReadiness({
@@ -3338,7 +3412,9 @@ process.stdin.on('end', async () => {
         actionId,
       });
       recordNotifyAudit(toolName, verdict, toolInput, { ...baseExtra, actionId }, notified);
-      console.error(`[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} — ${safeGuardOutcomeReason(verdict, 'warned', 'action_guard_warning')}`);
+      // #874: the one warning line names the signals, so the transcript says
+      // what was let through without anyone opening the audit.
+      console.error(`[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} — ${safeGuardOutcomeReason(verdict, 'warned', 'action_guard_warning')} [${safeSignalList(verdict.signals).join(', ')}]`);
       process.exit(0); // Advisory: warn, emit no decision.
     }
 
@@ -3540,7 +3616,9 @@ process.stdin.on('end', async () => {
     // already approved, or a call the judge hardened, is unaffected by this.
     await emitApprovalRequired(
       toolName,
-      verdict,
+      // #874: an advisory host reaches here only through the self-protection
+      // floor (or an unscanned call); the flag lets the denial say which.
+      !cfg.enforce && selfProtected && !unscannedBlock ? { ...verdict, advisoryFloor: true } : verdict,
       toolInput,
       permissionMode,
       'require_approval',

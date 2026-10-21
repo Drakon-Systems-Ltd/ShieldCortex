@@ -47,7 +47,7 @@ export interface HostGatePlanes {
   openclaw: OpenClawGatePosture;
 }
 
-export type GuardHeadline = 'off' | 'on' | 'mixed';
+export type GuardHeadline = 'off' | 'on' | 'mixed' | 'advisory';
 
 export interface HostTableDeps {
   openclawBinaryPresent?: (home: string) => boolean;
@@ -168,7 +168,10 @@ export function claudeToolGateWired(homeArg?: string): boolean {
 
 /**
  * Headline for the HOSTS table. `mixed` is one bound plane enforcing and
- * another bound plane observe-only/off — not "Guard off".
+ * another bound plane observe-only/off — not "Guard off". `advisory` (#874)
+ * is no plane enforcing while the Claude Code hook is wired and the signed
+ * guard is enabled in Watch only: that hook still scans, warns, and denies the
+ * catastrophic tier and the self-protection floor, so "off" was untrue.
  */
 export function guardHeadlineFromPlanes(planes: HostGatePlanes): GuardHeadline {
   const claudeEnforcing = planes.claudeWired && planes.signedEnforce;
@@ -176,7 +179,13 @@ export function guardHeadlineFromPlanes(planes: HostGatePlanes): GuardHeadline {
   const ocObserve = planes.openclaw === 'observe-only' || planes.openclaw === 'off';
   if (claudeEnforcing && ocObserve) return 'mixed';
   if (claudeEnforcing || ocEnforcing) return 'on';
+  if (claudePlaneAdvisory(planes)) return 'advisory';
   return 'off';
+}
+
+/** #874: Claude Code hook wired, signed guard enabled, Enforce not on (Watch only). */
+export function claudePlaneAdvisory(planes: HostGatePlanes): boolean {
+  return planes.claudeWired && planes.signedEnabled && !planes.signedEnforce;
 }
 
 export function claudePlaneEnforcing(planes: HostGatePlanes): boolean {
@@ -273,16 +282,25 @@ function openclawWired(home: string): boolean {
   return openclawPluginEnabled(config) && openclawPluginArtifactPresent(oc);
 }
 
+/** The files that make a directory a Hermes agent home, not just a directory. */
+export const HERMES_AGENT_HOME_MARKERS: readonly string[] = ['config.yaml', 'config.yml', 'profiles', 'SOUL.md'];
+
+/**
+ * Whether `root` holds a real Hermes agent home (config, profiles, or
+ * SOUL.md). The HOSTS table's presence rule, exported so doctor's Hermes rows
+ * (#651) judge "absent" by the same markers instead of a second definition.
+ */
+export function hermesAgentHomeMarkersPresent(root: string): boolean {
+  return HERMES_AGENT_HOME_MARKERS.some((m) => dirExists(path.join(root, m)));
+}
+
 function hermesPresent(home: string): boolean {
   const root = path.join(home, '.hermes');
   if (!dirExists(root)) return false;
   // A leftover ~/.hermes/ekho-state dir is not Hermes. Require a real
   // agent home (config, profiles, or SOUL.md). Jarvis 5.0.5 false-presented
   // from ekho-state alone with no hermes binary.
-  return dirExists(path.join(root, 'config.yaml'))
-    || dirExists(path.join(root, 'config.yml'))
-    || dirExists(path.join(root, 'profiles'))
-    || dirExists(path.join(root, 'SOUL.md'));
+  return hermesAgentHomeMarkersPresent(root);
 }
 
 function hermesWired(home: string): boolean {
@@ -390,10 +408,26 @@ export function wiredHosts(table: HostTable): HostRow[] {
   return table.rows.filter((r) => r.wired);
 }
 
+/** The legend under the HOSTS table when a row shows a gate word (#651). */
+export const HOST_TABLE_GATE_LEGEND: readonly string[] = [
+  '  Header Guard on/off/mixed/advisory: configured Claude Code hook and OpenClaw plugin only (not Hermes,',
+  '  not a live check). mixed = Claude Code enforcing, OpenClaw observe-only/off; on = otherwise one',
+  '  enforcing (OpenClaw counts only with signed actionGuard.enabled); advisory = neither enforcing,',
+  '  Claude Code hook in Watch only; off = neither enforcing and the Claude Code hook not in Watch only',
+  '  (OpenClaw observe-only does not make the header advisory).',
+  '  Word after a host: its own configured gate. OpenClaw observe-only = entry not disabled but not',
+  '  armed to block (enforce false, or actionGuard/interceptor disabled); off = entry disabled.',
+  '  Claude Code advisory = hook wired, signed guard on in Watch only (ordinary dangerous calls run',
+  '  with a logged warning; catastrophic calls and changes to the guard itself are still denied);',
+  '  Claude Code off = hook wired, signed guard not on.',
+];
+
 export function formatHostTable(table: HostTable, version?: string, planes?: HostGatePlanes): string[] {
   const lines: string[] = [];
   const headline = planes ? guardHeadlineFromPlanes(planes) : 'off';
-  const guardLabel = headline === 'on' ? 'Guard on' : headline === 'mixed' ? 'Guard mixed' : 'Guard off';
+  const guardLabel = headline === 'on' ? 'Guard on'
+    : headline === 'mixed' ? 'Guard mixed'
+      : headline === 'advisory' ? 'Guard advisory' : 'Guard off';
   lines.push(version ? `ShieldCortex  ${version}    ${guardLabel}` : `ShieldCortex    ${guardLabel}`);
   lines.push('');
   const width = Math.max(...table.rows.map((r) => r.label.length), 10);
@@ -403,6 +437,16 @@ export function formatHostTable(table: HostTable, version?: string, planes?: Hos
     const kind = r.kind === 'bound' ? 'memory + tool gate' : 'memory only — not a gate';
     const posture = rowGatePosture(r, planes);
     lines.push(`  ${r.label.padEnd(width)}  ${present}  ${wired}  ${kind}${posture ? `  ${posture}` : ''}`);
+  }
+  // #651: "Guard off" in the header beside "observe-only" on a row read as a
+  // contradiction. They answer different questions; say so once, only when a
+  // row actually shows a gate word. Display only — changes no posture. #651 r2:
+  // the words below describe `guardHeadlineFromPlanes` and
+  // `openclawGatePosture` as they are — observe-only is a collapsed label that
+  // includes a disabled guard or interceptor, and Hermes feeds no plane.
+  if (table.rows.some((r) => rowGatePosture(r, planes) !== undefined)) {
+    lines.push('');
+    lines.push(...HOST_TABLE_GATE_LEGEND);
   }
   const todo = presentUnwired(table);
   if (todo.length > 0) {
@@ -417,7 +461,7 @@ function rowGatePosture(r: HostRow, planes?: HostGatePlanes): string | undefined
   if (!planes || !r.present || r.kind !== 'bound') return undefined;
   if (r.id === 'claude') {
     if (!planes.claudeWired) return undefined;
-    return planes.signedEnforce ? 'enforcing' : 'off';
+    return planes.signedEnforce ? 'enforcing' : claudePlaneAdvisory(planes) ? 'advisory' : 'off';
   }
   if (r.id === 'openclaw') {
     if (planes.openclaw === 'unknown') return undefined;

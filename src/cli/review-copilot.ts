@@ -1,3 +1,4 @@
+import { REVIEW_COPILOT_HELP } from './dispatch-help.js';
 import { existsSync, readdirSync, rmSync, readFileSync } from 'fs';
 import readline from 'readline';
 import { getReviewCopilotConfig, setReviewCopilotConfig } from '../cloud/config.js';
@@ -6,15 +7,7 @@ import { FeatureGatedError, requireFeature } from '../license/gate.js';
 import { preloadReviewCopilotModel, disposeReviewCopilotWorker } from '../defence/judge/index.js';
 
 function usage(): void {
-  console.log('Usage: shieldcortex review-copilot <enable|disable|status|download-model|annotate> [options]');
-  console.log('');
-  console.log('Commands:');
-  console.log('  enable [--accept-download]       Enable Local AI Explainer');
-  console.log('  disable [--purge]                Disable Local AI Explainer; --purge removes cached model files');
-  console.log('  status                           Show config and recent metadata-only telemetry');
-  console.log('  download-model [--accept-download]  Download/preload the configured local model');
-  console.log('  annotate --pending [--limit N]   Explain pending quarantine items');
-  console.log('  annotate --id <id>               Explain one pending quarantine item');
+  console.log(REVIEW_COPILOT_HELP);
 }
 
 function requireReviewCopilotFeature(): boolean {

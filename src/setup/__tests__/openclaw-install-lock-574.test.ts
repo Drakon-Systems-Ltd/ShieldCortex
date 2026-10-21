@@ -38,7 +38,7 @@ let savedExitCode: number | string | undefined;
 
 beforeEach(() => {
   for (const key of KEYS) saved[key] = process.env[key];
-  savedExitCode = process.exitCode;
+  savedExitCode = process.exitCode ?? undefined;
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-oc-install-lock-'));
   openclawRoot = path.join(home, '.openclaw');
   claudeRoot = path.join(home, '.claude');
@@ -57,7 +57,7 @@ afterEach(() => {
     if (saved[key] === undefined) delete process.env[key];
     else process.env[key] = saved[key];
   }
-  process.exitCode = savedExitCode;
+  process.exitCode = savedExitCode ?? undefined;
   fs.rmSync(home, { recursive: true, force: true });
 });
 

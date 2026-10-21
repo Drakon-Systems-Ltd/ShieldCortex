@@ -20,9 +20,11 @@ import {
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
 import {
+  canonicalProjectDirFromIndex,
   gatherReconcileInput,
   reconcilePluginState,
   REALTIME_PLUGIN_ID,
+  type ReconcileInput,
   type ReconcileVerdict,
 } from '../integrations/openclaw-plugin-index.js';
 import {
@@ -37,7 +39,7 @@ import {
 } from '../integrations/openclaw-conversation-capability.js';
 import { parseRegistrationsSince, parseLogLinePid } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
-import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
+import { nativeBindingDisplayRemediation, nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
 import {
   hermesEnvironment,
   protectedDirs,
@@ -46,6 +48,7 @@ import {
   type HermesPluginCopy,
   type HermesPluginRootScan,
   type HermesPluginScan,
+  type HermesEnvironment,
   type HermesProjectState,
   type HermesScanOptions,
 } from '../setup/hermes-plugins.js';
@@ -141,6 +144,8 @@ import { DEFAULT_IRON_DOME_CONFIG, type IronDomeConfig } from '../defence/iron-d
 import { sharedSensitivitySqlPredicate } from '../defence/sensitivity/isolation.js';
 import {
   formatDoctorReport,
+  nextCommandForFailures,
+  sanitiseDoctorRowsForDisplay,
   shouldColorDoctor,
   type DoctorReportStyle,
 } from './doctor-report.js';
@@ -154,6 +159,7 @@ import {
   writeRepairAgentBrief,
   claudeToolGateWired,
   claudePlaneEnforcing,
+  HERMES_AGENT_HOME_MARKERS,
   type HostGatePlanes,
   type OpenClawGatePosture,
 } from '../setup/host-table.js';
@@ -169,6 +175,17 @@ import {
   type CorrelateCronDenialsOptions,
   type CronDenialReport,
 } from './cron-denial-audit.js';
+import {
+  evaluateRecallRepetition,
+  REPEAT_MIN_SET_SIZE,
+  REPEAT_SAMPLE_RUNS,
+  type RecallRepetitionDeps,
+  type RecallRepetitionVerdict,
+  type SlotProblem,
+} from './recall-repetition.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
+
+export const VACUUM_FREE_SHARE = 0.2;
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -189,8 +206,12 @@ export interface CheckResult {
   status: CheckStatus;
   message: string;
   fix?: string;
+  /** See DoctorReportItem.displayFix — display-only; `--json` emits `fix`. */
+  displayFix?: string;
   /** See DoctorReportItem.fixNoteWithCommands — keeps a report-only fix's prose in the human report. */
   fixNoteWithCommands?: true;
+  /** See DoctorReportItem.verboseNote — printed only with --verbose. */
+  verboseNote?: string;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
@@ -931,13 +952,15 @@ function engineLoadFailure(dbPath: string, err: unknown): CheckResult {
   const typed = err instanceof NativeModuleLoadError;
   const cause = typed ? err.cause : err;
   const guidance = typed ? err.message : (err instanceof Error ? err.message : String(err));
+  const installDir = resolveSelfInstallDir();
   return {
     label: 'Database',
     status: 'fail',
     message:
       'cannot load the database engine (better-sqlite3) — an install problem, ' +
       `NOT database corruption: ${tildify(dbPath)} was never opened and is untouched.\n${guidance}`,
-    fix: nativeBindingRemediation(resolveSelfInstallDir(), cause),
+    fix: nativeBindingRemediation(installDir, cause),
+    displayFix: nativeBindingDisplayRemediation(installDir, cause),
   };
 }
 
@@ -1030,8 +1053,9 @@ export function runDatabaseCheck(dbPath: string, env: Environment = detectEnviro
     // A stat'able DB can still be unopenable because the file itself is owned
     // by another user (mode 600 root:root — the other half of the sudo
     // artefact). Telling that user to delete their database is bad advice.
+    const installDir = isNativeBindingFault ? resolveSelfInstallDir() : '';
     const fix = isNativeBindingFault
-      ? nativeBindingRemediation(resolveSelfInstallDir(), msg)
+      ? nativeBindingRemediation(installDir, msg)
       : looksLikePermissionError(err, msg)
         ? ownershipFix()
         : 'Back up and delete `~/.shieldcortex/memories.db`, then restart the MCP server';
@@ -1040,6 +1064,7 @@ export function runDatabaseCheck(dbPath: string, env: Environment = detectEnviro
       status: 'fail',
       message: `cannot open — ${msg}`,
       fix,
+      ...(isNativeBindingFault ? { displayFix: nativeBindingDisplayRemediation(installDir, msg) } : {}),
     };
   }
 }
@@ -1160,16 +1185,70 @@ export async function checkAttestationCoverage(
   }
 }
 
+// The #674 trigger exactly as schema.sql, inline-schema.ts and migrations.ts
+// create it (SQLite stores it without IF NOT EXISTS or the final semicolon).
+const SHIPPED_PROJECT_IMMUTABILITY_TRIGGER_SQL = "CREATE TRIGGER trg_defence_audit_chained_project_immutable BEFORE UPDATE OF project ON defence_audit WHEN OLD.seq IS NOT NULL AND NEW.project IS NOT OLD.project BEGIN SELECT RAISE(ABORT, 'ShieldCortex #674: project of a chained defence_audit row is immutable (an older ShieldCortex build may be opening this database)'); END";
+
+/**
+ * #834: true only when the database holds the shipped #674 trigger: the right
+ * name, on `defence_audit`, with the shipped definition (whitespace aside).
+ * A same-named trigger with another body or on another table does not prevent
+ * the backfill, and `CREATE TRIGGER IF NOT EXISTS` never replaces it, so it
+ * counts as missing. A catalog read that throws also counts as missing.
+ * Read-only: one `sqlite_master` SELECT.
+ */
+export function hasShippedProjectImmutabilityTrigger(db: { prepare(sql: string): { all(...params: unknown[]): unknown[] } }): boolean {
+  return projectImmutabilityTriggerState(db) === 'shipped';
+}
+
+/**
+ * #834: why the protecting trigger does or does not count.
+ * - `shipped`: the shipped definition on `defence_audit`.
+ * - `absent`: no trigger holds the name; opening the database with a current
+ *   build creates it (`CREATE TRIGGER IF NOT EXISTS`).
+ * - `other`: a different trigger holds the name; a current build never replaces
+ *   it, so it must be removed before the shipped one can be installed.
+ * - `unreadable`: the catalog read threw.
+ */
+export type ProjectImmutabilityTriggerState = 'shipped' | 'absent' | 'other' | 'unreadable';
+
+export function projectImmutabilityTriggerState(db: { prepare(sql: string): { all(...params: unknown[]): unknown[] } }): ProjectImmutabilityTriggerState {
+  try {
+    const rows = db.prepare("SELECT tbl_name, sql FROM sqlite_master WHERE type='trigger' AND name=?")
+      .all('trg_defence_audit_chained_project_immutable') as { tbl_name: unknown; sql: unknown }[];
+    if (rows.length === 0) return 'absent';
+    if (rows.length !== 1) return 'other';
+    const [row] = rows;
+    if (row.tbl_name !== 'defence_audit' || typeof row.sql !== 'string') return 'other';
+    const normalised = row.sql.replace(/\s+/g, ' ').trim().replace(/;$/, '').trim();
+    return normalised === SHIPPED_PROJECT_IMMUTABILITY_TRIGGER_SQL ? 'shipped' : 'other';
+  } catch {
+    return 'unreadable';
+  }
+}
+
+function missingTriggerFix(state: Exclude<ProjectImmutabilityTriggerState, 'shipped'>): string {
+  if (state === 'absent') {
+    return 'The protecting trigger is missing, so the cause can recur. Opening the database with a current ShieldCortex (5.10.2 or later) recreates it.';
+  }
+  if (state === 'other') {
+    return 'The protecting trigger is missing, so the cause can recur: a different trigger holds its name (`trg_defence_audit_chained_project_immutable`), and ShieldCortex never replaces a trigger that already holds the name. Remove that trigger (for example with `sqlite3`), then open the database with a current ShieldCortex (5.10.2 or later) to install the shipped one.';
+  }
+  return 'The protecting trigger is missing, so the cause can recur: doctor could not read the trigger catalog to confirm it.';
+}
+
 /**
  * Chained ledger (#617, design §5.7): one row from the SAME verifier as
  * `shieldcortex ledger verify` — consistent (pass), inconsistent (fail, with
  * the first bad seq), or unchained (warn: this database has no chain yet).
+ * An inconsistent ledger is a warning only when every problem is the legacy
+ * project backfill and the database has the trigger that prevents recurrence.
  * A pass is local only: it never claims completeness or that the whole chain
  * was not rewritten; `ledger verify` prints the full limits statement.
  */
 export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promise<CheckResult> {
   const label = 'Chained ledger';
-  const { verifyLedger, summariseLedgerReport } = await import('../defence/ledger/verify.js');
+  const { verifyLedger, summariseLedgerReport, allProblemsAreLegacyProjectBackfill } = await import('../defence/ledger/verify.js');
   const { resolveLedgerConfig } = await import('../defence/ledger/config.js');
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const Database = require('better-sqlite3');
@@ -1194,6 +1273,14 @@ export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promis
     const report = verifyLedger(db, { heartbeatIntervalMs: resolveLedgerConfig().heartbeatIntervalMs });
     const message = summariseLedgerReport(report);
     if (report.status === 'inconsistent') {
+      if (allProblemsAreLegacyProjectBackfill(report)) {
+        const triggerState = projectImmutabilityTriggerState(db);
+        const triggerPresent = triggerState === 'shipped';
+        const fix = `${report.problems.length} problem(s) are explained by a legacy project backfill: likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in \`project\` on chained audit rows; no digest field other than \`project\` changed in those rows. Find and remove or upgrade the old copy (check every global install and npx cache on this host). \`shieldcortex ledger verify\` shows the full report.`;
+        return { label, status: triggerPresent ? 'warn' : 'fail', message, fix: triggerPresent
+          ? `${fix} The cause cannot recur while the protecting trigger is present: the trigger now refuses those changes.`
+          : `${fix} ${missingTriggerFix(triggerState as Exclude<ProjectImmutabilityTriggerState, 'shipped'>)}` };
+      }
       return { label, status: 'fail', message, fix: 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
     }
     if (report.status === 'unchained') return { label, status: 'warn', message };
@@ -1428,7 +1515,7 @@ export function runSchemaDriftCheck(dbPath: string): CheckResult {
           label: 'Schema',
           status: 'warn',
           message: `missing columns: ${missing.join(', ')}`,
-          fix: 'Restart the MCP server to auto-migrate, or run: shieldcortex install',
+          fix: 'Restart the MCP server to auto-migrate, or run: shieldcortex setup claude',
         };
       }
     } finally {
@@ -1650,7 +1737,7 @@ export function runWritePathProbe(dbPath: string, env: Environment = detectEnvir
   const isOpenClawOnly = env.hasOpenClaw && !env.hasClaude;
   const failFix = isOpenClawOnly
     ? 'Run `shieldcortex repair` — it opens the database through the full init/migration path (and rebuilds the DB engine if that is the fault). This box has no MCP server to restart.'
-    : 'This is the smoking gun for a stale schema or migration drift. Run `shieldcortex repair` (opens the DB through the full init/migration path), restart the MCP server (auto-migrates on next open), or re-install: shieldcortex install';
+    : 'This is the smoking gun for a stale schema or migration drift. Run `shieldcortex repair` (opens the DB through the full init/migration path), restart the MCP server (auto-migrates on next open), or re-install: shieldcortex setup claude';
 
   try {
     const Database = require('better-sqlite3');
@@ -1744,14 +1831,14 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
   if (probe.kind === 'absent') {
     // No settings.json is not a fault. Either Claude Code isn't on this box at
     // all (OpenClaw-only / headless installs never grow one), or it is and the
-    // user hasn't run `shieldcortex install` yet — the exact state of every
+    // user hasn't run `shieldcortex setup` yet — the exact state of every
     // fresh install. A ⚠️ here told healthy boxes something was wrong (#129).
     return env.hasClaude
       ? {
           label: 'Hooks',
           status: 'info',
           message: 'not configured yet — no ~/.claude/settings.json',
-          fix: 'Run `shieldcortex install` to configure hooks',
+          fix: 'Run `shieldcortex setup claude` to configure hooks',
         }
       : {
           label: 'Hooks',
@@ -1764,7 +1851,7 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
     const hooks = settings.hooks || {};
 
-    // Single source of truth: whatever `shieldcortex install` actually installs.
+    // Single source of truth: whatever `shieldcortex setup claude` actually installs.
     // Previously hardcoded a different list which produced false "missing" warnings
     // after SessionEnd was removed from defaults (was crashing OpenClaw agents). [#23]
     const hookNames = [...REQUIRED_HOOK_NAMES];
@@ -1811,7 +1898,7 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
         message:
           `${installed}/${hookNames.length} installed but ${unresolvable.length} DO NOT RESOLVE ` +
           `(${unresolvable.join(', ')}) — these hooks never run, so the guard is not enforcing here`,
-        fix: 'Run `shieldcortex install` to rewrite them to an absolute path (#146)',
+        fix: 'Run `shieldcortex setup claude` to rewrite them to an absolute path (#146)',
       };
     }
 
@@ -1822,7 +1909,7 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
         label: 'Hooks',
         status: 'warn',
         message: `${installed}/${hookNames.length} installed — missing: ${missing.join(', ')}`,
-        fix: 'Run `shieldcortex install` to configure hooks',
+        fix: 'Run `shieldcortex setup claude` to configure hooks',
       };
     }
   } catch (err: unknown) {
@@ -2117,7 +2204,7 @@ function readDbFreeSpace(dbPath: string): DbFreeSpace | null {
   }
 }
 
-export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = DIRECTORY_BUDGET_BYTES): Promise<CheckResult> {
+export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = DIRECTORY_BUDGET_BYTES, options: { dbPath?: string } = {}): Promise<CheckResult> {
   const dirProbe = probePath(scDir);
   if (dirProbe.kind === 'denied' || dirProbe.kind === 'error') {
     // "Directory not yet created" is a ✅. An unreadable one is not — this is
@@ -2238,7 +2325,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     const backupsStr = backupsSize > 0 ? ` + ${formatBytes(backupsSize)} backups` : '';
 
     // One database open, for one number: how much of the file is free space.
-    const free = readDbFreeSpace(path.join(scDir, 'memories.db'));
+    const free = readDbFreeSpace(options.dbPath ?? path.join(scDir, 'memories.db'));
 
     // Name WHICH logs, and how much of the DB file is free pages, so the
     // headline points somewhere. The leading `DB … · backups … · logs …` shape
@@ -2267,7 +2354,6 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
      * file to reclaim a rounding error, so recommending it wastes the
      * operator's time and teaches them to ignore us.
      */
-    const VACUUM_FREE_SHARE = 0.2;
 
     /**
      * Report, and advise only where a MEASUREMENT supports it (#573 round 3).
@@ -3080,6 +3166,55 @@ const HERMES_UNREADABLE_FIX =
   '`--fix-hermes-plugin-copies` moves nothing in any root: the copy the scan could not read ' +
   'can be the one the gateway loads, or the one another plugin root resolves through.';
 
+/**
+ * Hermes is confirmed ABSENT on this host, not merely un-askable (#651).
+ *
+ * `scan.present` only says a directory exists at the Hermes home; a leftover
+ * `~/.hermes/ekho-state` makes it true on a host the HOSTS table rightly calls
+ * `Hermes absent`, and the plugin-copies row then warned "could not determine
+ * which copy Hermes loads". That is the wrong question on a host with nothing
+ * to load. Every condition below is required, so uncertainty never reads as
+ * absence:
+ *
+ *   - no interpreter was found (`noInterpreter`, a structured fact — never a
+ *     parse of the reason string). It is set only when every candidate statted
+ *     as absent and PATH held no `hermes` launcher (#651 r2): an unreadable
+ *     candidate, or a launcher with no usable interpreter, is not absence. An
+ *     interpreter that was found and failed is a broken Hermes, not an absent one;
+ *   - no path was unreadable anywhere in the scan;
+ *   - `HERMES_HOME` is unset — an operator who points this process at a home
+ *     has told us Hermes lives there;
+ *   - none of the HOSTS table's agent-home markers (`HERMES_AGENT_HOME_MARKERS`)
+ *     is in the home, and there is no `plugins/` directory at all — each one
+ *     STATTED as missing (ENOENT/ENOTDIR). Any other stat error is a path that
+ *     could not be read, and that is not absence.
+ *
+ * No interpreter alone proves nothing: an agent home with a moved or broken
+ * venv still warns, because there a plugin copy may well be loaded.
+ */
+export function hermesConfirmedAbsent(scan: HermesPluginScan, env: HermesEnvironment): boolean {
+  if (scan.fromHermes || !scan.noInterpreter || scan.undetermined.length > 0) return false;
+  if (env.hermesHome !== null) return false;
+  return [...HERMES_AGENT_HOME_MARKERS, 'plugins'].every((entry) => {
+    try {
+      fs.lstatSync(path.join(scan.hermesHome, entry));
+      return false;
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      return code === 'ENOENT' || code === 'ENOTDIR';
+    }
+  });
+}
+
+/** The INFO line for a home directory that exists but holds no Hermes (#651). */
+function hermesAbsentMessage(hermesHome: string): string {
+  return (
+    `skipped (Hermes not detected — ${tildify(hermesHome)} exists but holds no Hermes agent home ` +
+    `(${HERMES_AGENT_HOME_MARKERS.join(', ')}) and no plugins/ directory, and no Hermes ` +
+    'interpreter was found)'
+  );
+}
+
 export async function checkHermesPluginShadowing(
   home: string = os.homedir(),
   opts: HermesScanOptions = {},
@@ -3123,6 +3258,12 @@ export async function checkHermesPluginShadowing(
 
   if (!scan.present) {
     return { label, status: 'info', message: 'skipped (Hermes not detected)' };
+  }
+
+  // A directory at the Hermes home with no agent home and no plugins in it is
+  // an absent runtime, the same verdict the HOSTS table draws (#651).
+  if (hermesConfirmedAbsent(scan, env)) {
+    return { label, status: 'info', message: hermesAbsentMessage(hermesHome) };
   }
 
   // No Hermes discovery, no verdict (#569 r4). Never PASS, never a winner.
@@ -3398,9 +3539,10 @@ export async function checkHermesPluginFreshness(
   opts: HermesScanOptions = {},
 ): Promise<CheckResult> {
   const label = 'Hermes plugin';
+  const env = hermesEnvironment(home);
   let scan: HermesPluginScan;
   try {
-    scan = scanHermesPluginCopies(hermesEnvironment(home), opts);
+    scan = scanHermesPluginCopies(env, opts);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { label, status: 'info', message: `check skipped — ${msg}` };
@@ -3412,6 +3554,10 @@ export async function checkHermesPluginFreshness(
   // uninstall was a crash. Doctor has no stored marker to read intent from.
   // `update` prints that sentence when its own swap fails, and nowhere else.
   if (!scan.present) return { label, status: 'info', message: 'skipped (Hermes not detected)' };
+  // Same absent verdict as the copies row, so the two never disagree (#651).
+  if (hermesConfirmedAbsent(scan, env)) {
+    return { label, status: 'info', message: hermesAbsentMessage(scan.hermesHome) };
+  }
   if (scan.undetermined.length > 0 || !scan.fromHermes) {
     return {
       label,
@@ -4807,6 +4953,12 @@ export function policyLockRows(): CheckResult[] {
       // Enforce + plugin-off is the Jarvis 5.0.6 paste: HOSTS said Guard off,
       // doctor still FAILed and printed `$ protect` + exit 1. That looks like
       // a crash. Warn, no copy-paste protect, until something is actually on.
+      //
+      // #651 r2: this row is deliberately NOT downgraded to INFO. The signed
+      // config read returns enabled:false for an unreadable or corrupt file as
+      // well as a real "off", and signed-off does not prove the OpenClaw plane
+      // is off (its plugin config can enable the guard). Neither is confirmed
+      // absence, so the WARN stays until a reader can prove both.
       rows.push({
         label: `${label} policy lock`,
         status: liveGating ? 'fail' : 'warn',
@@ -5042,12 +5194,18 @@ async function readinessRowsForSurface(
     return [{ label, status: 'info', message: `enforce when ready: not in use on this host — ${notInUseText(summary.adapter)}` }];
   }
   const { intervention, reachability, effectiveness } = summary.report;
+  const { describeEvidenceCarry, describeNotCounted } = await import('./guard.js');
+  const notCounted = describeNotCounted(summary.report);
   const pct = (r: number | null) => (r === null ? 'n/a' : `${(r * 100).toFixed(1)}%`);
   const bars =
     `readiness proxies: operational intervention rate ${pct(intervention.rate)} (${intervention.stops}/${intervention.total}, need ≤ 2% over ≥ 500 calls / 7 days); ` +
     `approval reachability ${pct(reachability.rate)} (${reachability.reached}/${reachability.resolved}, need ≥ 98% over ≥ 20) via ` +
     `${reachability.channel.configured ? reachability.channel.kind : 'no channel'}; last round-trip ${reachability.lastRoundTripAt ?? 'never'}; ` +
-    `effectiveness evidence ${effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}`;
+    `effectiveness evidence ${effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}; ` +
+    // #719: evidence is keyed on the policy hash — say what carried over.
+    `evidence: ${intervention.fresh.total} call(s) fresh since this policy, ${intervention.carried.total} carried from compatible prior policy` +
+    describeEvidenceCarry(summary.report).map((n) => `; ${n}`).join('') +
+    (notCounted ? `; not counted: ${notCounted}` : '');
   const missing = summary.report.missing.length > 0 ? ` Missing: ${summary.report.missing.join('; ')}.` : '';
   // #509 r5: the promotion notice is the detection control for a forged
   // journal, so doctor names the newest promotion the journal records for the
@@ -5863,7 +6021,6 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
   // "cannot determine", never as a passing zero.
   let injectPack: InjectPackModule | null = null;
   try {
-    // @ts-expect-error — importing a .mjs hook util that has no .d.ts
     injectPack = await import('../../scripts/lib/inject-pack.mjs') as InjectPackModule;
   } catch {
     injectPack = null;
@@ -7758,11 +7915,149 @@ async function checkHookTimeouts(): Promise<CheckResult> {
       label: 'Hook timeouts',
       status: 'warn',
       message: `below canonical: ${drift.join(', ')}`,
-      fix: 'Re-run `shieldcortex install` to restore canonical timeouts',
+      fix: 'Re-run `shieldcortex setup claude` to restore canonical timeouts',
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { label: 'Hook timeouts', status: 'info', message: `check skipped — ${msg}` };
+  }
+}
+
+// ── Check: recall lane pin (#718 / #722) ─────────────────
+/**
+ * Prompt recall scopes itself by lane (interactive / cron / automation /
+ * subagent). Lanes are detected from markers that OpenClaw's own prompt
+ * builders write; a scheduler outside OpenClaw (systemd timer, crontab, CI)
+ * writes none, so its turns look interactive and get the owner's full recall.
+ * SHIELDCORTEX_RECALL_LANE pins the lane for such a job. An unrecognised
+ * value fails safe in the hook — the turn is treated as `automation` (#722
+ * review R4): no recall by default, PUBLIC rows only where
+ * `recallLanes.automation.recall` is true (#729) — which is worth a WARN: the
+ * operator meant some lane, and it is not the one they get.
+ */
+const RECALL_LANES = ['interactive', 'cron', 'automation', 'subagent'] as const;
+
+export function checkRecallLanePin(env: NodeJS.ProcessEnv = process.env): CheckResult {
+  const label = 'Recall lane';
+  const raw = env.SHIELDCORTEX_RECALL_LANE;
+  const pinned = String(raw ?? '').trim().toLowerCase();
+  if (pinned && (RECALL_LANES as readonly string[]).includes(pinned)) {
+    return { label, status: 'info', message: `pinned to "${pinned}" by SHIELDCORTEX_RECALL_LANE in this environment` };
+  }
+  if (pinned) {
+    return {
+      label,
+      status: 'warn',
+      message: `SHIELDCORTEX_RECALL_LANE="${String(raw).trim()}" is not a lane — prompt recall treats every turn in this environment as automation until it is fixed (no recall by default; PUBLIC rows only if recallLanes.automation.recall is true)`,
+      fix: `Set SHIELDCORTEX_RECALL_LANE to one of: ${RECALL_LANES.join(', ')}`,
+    };
+  }
+  return {
+    label,
+    status: 'info',
+    message: 'detected from OpenClaw prompt markers. Jobs launched by another scheduler (systemd, crontab, CI) '
+      + 'carry no marker and recall as interactive — set SHIELDCORTEX_RECALL_LANE=cron (or automation) in that job\'s environment.',
+  };
+}
+
+// ── Check: repeated recall top-k (#717) ─────────────────
+/**
+ * WARN when the newest interactive prompt-recall runs all returned the same
+ * non-empty top-k candidate set — #717's envelope-dominated query signature.
+ * The evaluation lives in recall-repetition.ts; this only words the verdict.
+ *
+ * Every message is fixed text plus counts: no prompt, title, path, id or hash.
+ * Nothing here is a PASS unless a full sample was read, and the WARN names no
+ * command — repetition is evidence to look at, not a fault with a known fix.
+ */
+export const RECALL_REPETITION_LABEL = 'Recall repetition';
+
+const SLOT_PROBLEM_TEXT: Record<SlotProblem, string> = {
+  corrupt: 'not valid JSON',
+  unreadable: 'unreadable',
+  oversized: 'oversized',
+  unsafe: 'not a regular file',
+  malformed: 'malformed',
+  budget: 'over the read budget',
+  missing: 'missing with older entries behind it',
+};
+
+export function recallRepetitionResult(v: RecallRepetitionVerdict): CheckResult {
+  const label = RECALL_REPETITION_LABEL;
+  switch (v.kind) {
+    case 'absent':
+      return { label, status: 'info', message: 'no recall log yet — repeated top-k sets not checked' };
+    case 'unavailable':
+      return {
+        label,
+        status: 'info',
+        message: v.reason === 'unsafe'
+          ? 'recall log is not a plain directory — not read, repeated top-k sets not checked'
+          : 'recall log could not be read — repeated top-k sets not checked',
+      };
+    case 'incomplete': {
+      const parts = (Object.keys(v.problems) as SlotProblem[]).map((p) => SLOT_PROBLEM_TEXT[p]);
+      return {
+        label,
+        status: 'info',
+        message: `recall log sample incomplete — an entry was ${parts.join(', ')} after ${v.interactiveRuns} `
+          + 'interactive run(s) — repeated top-k sets not checked',
+      };
+    }
+    case 'insufficient': {
+      const skipped = v.otherLaneRuns + v.unknownLaneRuns;
+      return {
+        label,
+        status: 'info',
+        message: `${v.interactiveRuns} of ${REPEAT_SAMPLE_RUNS} interactive recall runs logged`
+          + (skipped > 0 ? ` (${skipped} cron/automation/subagent or unlabelled runs skipped)` : '')
+          + ' — not enough to check for repeated top-k sets',
+      };
+    }
+    case 'below-floor':
+      return {
+        label,
+        status: 'info',
+        message: `last ${v.runs} interactive recall runs share a ${v.setSize}-candidate top-k set, `
+          + `below the ${REPEAT_MIN_SET_SIZE}-candidate floor for this check`,
+      };
+    case 'same-prompt':
+      return {
+        label,
+        status: 'info',
+        message: `last ${v.runs} interactive recall runs share a ${v.setSize}-candidate top-k set, `
+          + 'but every one has the same prompt hash — the same prompt repeated, which explains it',
+      };
+    case 'varied':
+      return {
+        label,
+        status: 'pass',
+        message: `last ${v.runs} interactive recall runs did not all return the same non-empty top-k set`,
+      };
+    case 'repeated': {
+      const identity = v.distinctPromptHashes === null
+        ? 'prompt identity not recorded for every run'
+        : `${v.distinctPromptHashes} distinct prompt hashes`;
+      return {
+        label,
+        status: 'warn',
+        message: `last ${v.runs} interactive recall runs returned the same ${v.setSize}-candidate top-k set (${identity}). `
+          + 'This is repetition evidence, not a proven root cause: a recall query dominated by a message wrapper '
+          + 'or envelope can do this, and so can asking about the same topic repeatedly or an unmarked '
+          + 'scheduled job recalling as interactive. Compare recent recalls with what was asked before changing anything.',
+      };
+    }
+  }
+}
+
+export async function checkRecallRepetition(
+  deps: RecallRepetitionDeps = { homeDir: os.homedir() },
+): Promise<CheckResult> {
+  try {
+    return recallRepetitionResult(evaluateRecallRepetition(deps));
+  } catch {
+    // Fixed text: an error message could quote a path under the home dir.
+    return { label: RECALL_REPETITION_LABEL, status: 'info', message: 'recall log could not be read — repeated top-k sets not checked' };
   }
 }
 
@@ -8017,8 +8312,11 @@ export async function checkOpenClawPluginLoadState(
     return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
   }
 
-  const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion }));
-  const result = renderPluginLoadVerdict(verdict);
+  const input = gatherReconcileInput(home, { expectedVersion });
+  const verdict = reconcilePluginState(input);
+  const result = verdict.state === 'duplicate-install'
+    ? withDuplicateInstallEvidence(renderPluginLoadVerdict(verdict), home, input)
+    : renderPluginLoadVerdict(verdict);
 
   // #226: "loaded" is not "protecting the conversation". A plugin whose
   // conversation-access grant is missing has had its llm_input/llm_output
@@ -8046,6 +8344,61 @@ export async function checkOpenClawPluginLoadState(
     }
   }
   return result;
+}
+
+/**
+ * #651: the duplicate-install row said "prune the stale duplicate" and named
+ * no directory. This adds what the evidence on disk actually supports — every
+ * observed project dir by full path, and which one (if any) OpenClaw's install
+ * index names — and nothing it does not.
+ *
+ * The index names an INSTALL, not what the running gateway loaded (#103), so
+ * nothing added here calls a directory stale or safe to delete (the verdict's
+ * own "prune the stale duplicate" wording is older and names none), and no
+ * removal command is printed: the fix stays the verdict's, and the message
+ * says "inspect before removing anything by hand". Where the index cannot be read, names no
+ * dir, or names one that is not on disk, the row says exactly that instead of
+ * guessing. Pure over `input`; reads nothing.
+ */
+export function withDuplicateInstallEvidence(
+  result: CheckResult,
+  home: string,
+  input: Pick<ReconcileInput, 'index' | 'projectDirs' | 'pluginId'>,
+): CheckResult {
+  const projectsRoot = path.join(home, '.openclaw', 'npm', 'projects');
+  const dirs = input.projectDirs ?? [];
+  const full = (name: string) => tildify(path.join(projectsRoot, name));
+  const observed = `Observed: ${dirs.map(full).join(', ')}.`;
+  let evidence: string;
+  if (input.index == null) {
+    evidence =
+      'The OpenClaw install index could not be read, so nothing here says which of them is the ' +
+      'recorded install.';
+  } else {
+    const named = canonicalProjectDirFromIndex(input.index, input.pluginId);
+    if (named === null) {
+      evidence = 'The OpenClaw install index names no install dir for this plugin, so nothing here ' +
+        'says which of them is the recorded install.';
+    } else if (!dirs.includes(named)) {
+      evidence = `The OpenClaw install index names ${full(named)}, which is not among them.`;
+    } else {
+      const others = dirs.filter((d) => d !== named).map(full).join(', ');
+      evidence =
+        `The OpenClaw install index names ${full(named)} as the install; it does not name ${others}. ` +
+        'The index records install state, not what the running gateway loaded.';
+    }
+  }
+  // The caution goes in the MESSAGE (#651 r2): the human renderer prints the
+  // message in full at every width, but drops a WARN fix note that carries
+  // `shieldcortex repair` and substitutes "No action needed". The fix stays the
+  // verdict's own.
+  const caution =
+    'Doctor does not say which of these, if any, is stale or safe to delete; inspect each ' +
+    '(for example the package.json version in it) before removing anything by hand.';
+  return {
+    ...result,
+    message: `${result.message}. ${observed} ${evidence} ${caution}`,
+  };
 }
 
 /**
@@ -8146,9 +8499,12 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'warn',
+        // Plain words (15 Oct 2026): this is a check that could not run, and
+        // the old wording ("roster", "SQLite index unreadable") read as a fault.
         message:
-          'cannot read OpenClaw\'s plugin roster (SQLite index unreadable — broken better-sqlite3 binding, locked DB, or pre-2026.6.1 OpenClaw) — cannot confirm the realtime plugin is loaded; NOT necessarily unprotected',
-        fix: 'Cannot read OpenClaw\'s plugin roster file. Not unprotected if the plugin is already loaded. Do not run repair from this warning.',
+          'couldn\'t read OpenClaw\'s plugin list, so couldn\'t check the realtime plugin is running. ' +
+          'This is a check that couldn\'t run, not a fault (the list file may be locked, or OpenClaw is older than 2026.6.1)',
+        fix: 'Couldn\'t read OpenClaw\'s plugin list file. If the plugin is already loaded you are protected. Do not run repair from this warning.',
       };
     case 'load-unproven':
       // #142: the boot roster snapshot races plugin registration, and a
@@ -8160,10 +8516,14 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         status: 'warn',
         message:
           verdict.loadedInLiveRoster == null
-            ? 'load state UNPROVEN — no fresh gateway roster could be read. A missing install-index entry does not prove a live unload'
-            : 'load state UNPROVEN — absent from the boot roster snapshot, but a plugin registration was sighted after it ' +
-              '(registration races the snapshot; CLI activity writes identical lines). Neither protected nor unprotected is proven',
-        fix: `Prove it live: ${LIVE_CANARY_COMMAND}`,
+            ? 'couldn\'t confirm the gateway loaded the plugin — there was no recent gateway start-up record to read. ' +
+              'This is a check that couldn\'t run, not a fault'
+            : 'couldn\'t confirm the gateway loaded the plugin — it was missing from the start-up list but registered just after ' +
+              '(that timing can happen normally). Neither OK nor a fault is confirmed',
+        // A plain command in the default report; the consent-gated live
+        // probe (an env var plus internal wording) only with --verbose.
+        fix: 'Check it: `shieldcortex openclaw status`',
+        verboseNote: `Prove enforcement live: ${LIVE_CANARY_COMMAND}`,
       };
     case 'enabled-not-loaded':
       return {
@@ -8230,7 +8590,10 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
           status: 'pass',
           message:
             `realtime plugin installed and enabled at v${version} — but the RUNNING gateway's boot roster ` +
-            `could not be read, so load is NOT separately proven. Prove it live with: ${LIVE_CANARY_COMMAND}`,
+            'could not be read, so load is NOT separately proven',
+          // Not in the message: a pass becomes a default-report warn when
+          // conversation access is withheld, and that row must stay plain.
+          verboseNote: `Prove it live with: ${LIVE_CANARY_COMMAND}`,
         };
       }
       // Roster-confirmed loaded, but doctor does NOT run the live enforcement
@@ -8254,8 +8617,9 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         label,
         status: 'pass',
         message: hotReload
-          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`
-          : `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
+          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, v${version}); enforcement not probed here`
+          : `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here`,
+        verboseNote: `Prove it live with: ${LIVE_CANARY_COMMAND}`,
       };
     }
     default: {
@@ -9041,6 +9405,8 @@ export async function runDoctor(
     checkSemanticCoverage, // #458: how much of the store semantic recall can actually see
     checkHooks,
     checkHookTimeouts,
+    async () => checkRecallLanePin(),
+    async () => checkRecallRepetition(), // #717: same top-k on every recent interactive recall
     checkAutoMemoryHooks,
     checkAutoMemorySampling,
     checkMemoryPlaneEmptyBrain,
@@ -9208,11 +9574,14 @@ export async function runDoctor(
   const verbose = args.includes('--verbose') || args.includes('--debug');
   const hostTable = scanHostTable();
   const unwired = presentUnwired(hostTable);
+  // #788: check messages and fixes carry host-derived text (install dirs,
+  // error messages). The human report and the NEXT line read a display copy
+  // with each line passed through the display sanitiser; `--json` below keeps
+  // the raw `visible` rows (machine-readable output stays unsanitised).
+  const displayRows = sanitiseDoctorRowsForDisplay(visible);
   let nextCommand: string | null = null;
   if (failures > 0) {
-    const failFix = visible.find((r) => r.status === 'fail' && r.fix)?.fix?.trim() ?? '';
-    nextCommand = failFix.split('\n').map((l) => l.trim()).find((l) => /^(shieldcortex|openclaw|npm|node)\b/.test(l))
-      ?? 'shieldcortex doctor --verbose';
+    nextCommand = nextCommandForFailures(displayRows);
   } else if (unwired.length > 0) {
     nextCommand = 'shieldcortex setup';
   }
@@ -9225,19 +9594,22 @@ export async function runDoctor(
   // where the report is red, which is the failure mode doctor exists to avoid.
   // Returns before the human report so the output is parseable on its own.
   if (args.includes('--json')) {
-    console.log(JSON.stringify({
+    console.log(stringifyJsonTerminalSafe({
       version: String(pkg.version ?? ''),
       passed, warnings, failures, infos, total,
       exitCode: doctorExitCode(visible, { strict: args.includes('--strict') }),
-      results: visible.map((r) => ({ label: r.label, status: r.status, message: r.message, fix: r.fix })),
-    }, null, 2));
+      results: visible.map((r) => ({
+        label: r.label, status: r.status, message: r.message, fix: r.fix,
+        ...(r.verboseNote ? { verboseNote: r.verboseNote } : {}),
+      })),
+    }, 2));
     const jsonExit = doctorExitCode(visible, { strict: args.includes('--strict') });
     if (jsonExit !== 0) process.exitCode = jsonExit;
     return { passed, warnings, failures, infos, total, exitCode: jsonExit };
   }
 
   const style: DoctorReportStyle = { bold, reset, green, yellow, red, cyan, dim };
-  const reportLines = formatDoctorReport(visible, {
+  const reportLines = formatDoctorReport(displayRows, {
     verbose,
     version: String(pkg.version ?? ''),
     target: (() => {

@@ -21,7 +21,7 @@ import {
   toPackItem,
 } from '../../../scripts/lib/inject-pack.mjs';
 
-function row(partial) {
+function row(partial: Partial<import('../../../scripts/lib/inject-pack.mjs').InjectRow> = {}): import('../../../scripts/lib/inject-pack.mjs').InjectRow {
   return {
     id: 1,
     title: 'Decision',
@@ -88,7 +88,7 @@ describe('inject-pack v2', () => {
     expect(isInjectEligible(row({ quarantined: '1' }), scope)).toBe(true);
     expect(isInjectEligible(row({ project: 'other', transferable: 1 }), scope)).toBe(true);
     expect(isInjectEligible(row({ project: 'other', transferable: '1' }), scope)).toBe(false);
-    expect(stableRank([row({ id: 2, pinned: '1' }), row({ id: 1, pinned: 1 })]).map((r: { id: number }) => r.id))
+    expect(stableRank([row({ id: 2, pinned: '1' }), row({ id: 1, pinned: 1 })]).map((r) => r.id))
       .toEqual([1, 2]);
   });
 
@@ -165,7 +165,7 @@ describe('inject-pack v2', () => {
       expect(it.tokens).toBeLessThanOrEqual(100 + 5); // envelope slack
     }
     expect(pack.text).toContain('untrusted data');
-    expect(pack.sessionState.pinnedPack.items.length).toBe(pack.items.length);
+    expect(pack.sessionState.pinnedPack?.items.length).toBe(pack.items.length);
   });
 
   it('hash ring suppresses second start inject of same content', () => {
