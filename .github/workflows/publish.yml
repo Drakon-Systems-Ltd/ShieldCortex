@@ -132,6 +132,11 @@ jobs:
       # commit. A missing tag (v4.54.15 at issue time) leaves the artefact
       # unbound to source. Tag-push already has the tag; workflow_dispatch
       # from main must still see it locally after fetch.
+      # #881: the tag must also point at the commit being published. A ref of
+      # refs/tags/* (tag push, or workflow_dispatch run on a tag) must name
+      # v<version> and resolve to GITHUB_SHA. workflow_dispatch from a branch
+      # builds the checked-out HEAD, so v<version> must resolve to HEAD.
+      # rev-list -n 1 peels annotated tags to their commit.
       - name: Require matching git tag
         run: |
           VERSION=$(node -p "require('./package.json').version")
@@ -141,8 +146,24 @@ jobs:
             echo "::error::No git tag ${TAG} for package.json version ${VERSION}. Tag the release commit before publishing (#472)."
             exit 1
           fi
-          TAG_COMMIT=$(git rev-list -n 1 "${TAG}")
+          TAG_COMMIT=$(git rev-list -n 1 "refs/tags/${TAG}")
           echo "Tag ${TAG} -> ${TAG_COMMIT}"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            if [[ "${GITHUB_REF_NAME}" != "${TAG}" ]]; then
+              echo "::error::Triggering tag ${GITHUB_REF_NAME} does not match package.json version tag ${TAG} (#881)."
+              exit 1
+            fi
+            EXPECTED_COMMIT="${GITHUB_SHA}"
+            EXPECTED_LABEL="GITHUB_SHA"
+          else
+            EXPECTED_COMMIT=$(git rev-parse HEAD)
+            EXPECTED_LABEL="checked-out HEAD"
+          fi
+          if [[ "${TAG_COMMIT}" != "${EXPECTED_COMMIT}" ]]; then
+            echo "::error::Tag ${TAG} points at ${TAG_COMMIT}, but ${EXPECTED_LABEL} is ${EXPECTED_COMMIT}. Refusing to publish a version whose tag is on a different commit (#881)."
+            exit 1
+          fi
+          echo "Tag ${TAG} matches ${EXPECTED_LABEL} ${EXPECTED_COMMIT}"
 
       - name: Publish to npm
         if: steps.version_check.outputs.already_published == 'false'

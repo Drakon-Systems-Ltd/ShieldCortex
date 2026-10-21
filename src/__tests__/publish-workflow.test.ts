@@ -233,4 +233,15 @@ describe('publish.yml — per-package recovery', () => {
     expect(step?.body).toMatch(/rev-parse -q --verify/);
     expect(simulate({ rootPublished: true, pluginPublished: true })['Require matching git tag']).toBe(true);
   });
+
+  it('refuses to publish when the version tag is on a different commit (#881)', () => {
+    const body = byName['Require matching git tag']?.body ?? '';
+    expect(body).toMatch(/TAG_COMMIT=\$\(git rev-list -n 1 "refs\/tags\/\$\{TAG\}"\)/);
+    expect(body).toMatch(/"\$\{GITHUB_REF_NAME\}" != "\$\{TAG\}"/);
+    expect(body).toMatch(/EXPECTED_COMMIT="\$\{GITHUB_SHA\}"/);
+    expect(body).toMatch(/EXPECTED_COMMIT=\$\(git rev-parse HEAD\)/);
+    expect(body).toMatch(/"\$\{TAG_COMMIT\}" != "\$\{EXPECTED_COMMIT\}"/);
+    const names = steps.map((s) => s.name);
+    expect(names.indexOf('Require matching git tag')).toBeLessThan(names.indexOf('Publish to npm'));
+  });
 });
