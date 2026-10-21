@@ -152,7 +152,7 @@ describe('#874 advisory posture on a session with no prompt surface', () => {
     expect(d.permissionDecisionReason).not.toMatch(/^[^[]*\[redacted-signal\]$/);
   });
 
-  describe('enforce is unchanged', () => {
+  describe('enforce still denies the remaining dangerous tier without a prompt surface', () => {
     beforeEach(() => writeConfig({ enforce: true }));
 
     it('an ordinary dangerous call with no prompt surface is still denied', async () => {

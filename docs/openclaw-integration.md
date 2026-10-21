@@ -370,9 +370,11 @@ What it is not:
   webhook answered 2xx. There is no retry, no failover and no gateway/chat
   adapter for this report. With no webhook (or notify disabled) the report is
   kept local only.
-- **Per host session, once.** Several runs that reuse one session id are one
-  report; a session id that ends again after its report gets no second one.
-  A session with no `session_end`, or with conflicting session ids, gets none.
+- **Per host session, once in the scanned window.** Several runs that reuse one
+  session id are one report while the earlier digest row is still inside the
+  last 1 MiB / 5,000-line scan; a reused id whose earlier digest has aged out
+  of that window can get another. A session with no `session_end`, or with
+  conflicting session ids, gets none.
 
 The index gains content-free `recordKind: "digest"` rows (`local_only`,
 `attempt`, `receipt`), mirrored to `realtime-*.jsonl`; the session summary,
