@@ -5069,6 +5069,71 @@ const ENV_SETTING_WORD_RE = /^(?:read|readarray|mapfile|declare|typeset|local|re
  */
 const ENV_SETTING_WITH_FLAG: ReadonlyMap<string, RegExp> = new Map([['printf', /^-v/], ['wait', /^-p/], ['command', /^-[A-Za-z]*p/]]);
 /**
+ * #885 — verbs whose operands are only read, so naming an interpreter path
+ * (`ls -l /usr/local/bin/python3`, `which python3`) changes nothing. Their
+ * redirect targets are still judged.
+ */
+const READ_ONLY_OPERAND_VERBS: ReadonlySet<string> = new Set(['ls', 'stat', 'cat', 'head', 'tail', 'wc', 'file', 'which', 'type', 'grep', 'egrep', 'fgrep', 'jq']);
+/** A system bin directory (any slash run), preceded by no path or word character. */
+const SYSTEM_BIN_MENTION_RE = /(?:^|[^\w.~/-])\/+(?:usr(?:\/+local)?\/+)?bin(?![\w.-])|(?:^|[^\w.~/-])\/+opt\/+homebrew\/+bin(?![\w.-])/;
+/** The directories above a system bin directory: writing one can replace it. */
+const SYSTEM_BIN_ANCESTORS: ReadonlySet<string> = new Set(['', '/usr', '/usr/local', '/opt', '/opt/homebrew']);
+/** A standalone output-redirect operator; its target is the next token. */
+const REDIRECT_OP_RE = /^\d*&?>[>|&]?$/;
+/** An output redirect with its target attached (`>/usr/bin/python3`, `2>>f`). */
+const REDIRECT_ATTACHED_RE = /^\d*&?>[>|&]?(.+)$/;
+/**
+ * #885 — a word that may name a trusted interpreter path as something this
+ * command writes: a system bin directory or a path in or above one, a
+ * relative word whose last segment is an interpreter (or `env`, the program
+ * an `env` shebang runs) or `.`, which the unknown working directory may
+ * place in a bin directory, or a word the guard cannot resolve (a `..`
+ * segment, a glob or brace in a path, a variable or substitution).
+ * Over-rejects by design: the cost is a lost attestation, never a lost gate.
+ */
+function mayNameInterpreterPath(word: string): boolean {
+  if (/[$`]/.test(word) || /(?:^|\/)\.\.(?:\/|$)/.test(word)) return true;
+  if (word.includes('/') && /[*?[{]/.test(word)) return true;
+  const eq = word.indexOf('=');
+  for (const w of eq >= 0 ? [word, word.slice(eq + 1)] : [word]) {
+    const norm = w.replace(/\/\.(?=\/|$)/g, '').replace(/\/+$/, '');
+    if (SYSTEM_BIN_MENTION_RE.test(norm)) return true;
+    if (w.startsWith('/') && SYSTEM_BIN_ANCESTORS.has(norm.replace(/\/+/g, '/'))) return true;
+    const base = commandBaseName(norm);
+    if (base === '.' || base === 'env' || SCRIPT_INTERPRETER.test(base)) return true;
+  }
+  return false;
+}
+/**
+ * #885 — whether one statement may write a trusted interpreter path: a
+ * redirect target, or an operand of any verb outside the read-only set, that
+ * `mayNameInterpreterPath` accepts. The command word itself and the wrapper
+ * words before it (`sudo`, `/usr/bin/env`) are what runs, not what is written.
+ * `pending` carries a redirect operator whose target the statement splitter
+ * moved into the next statement (`>|`, `&>`).
+ */
+function statementWritesInterpreterPath(tokens: readonly string[], pending: { redirect: boolean }): boolean {
+  const cmdIdx = commandWordIndex(tokens);
+  const readOnly = READ_ONLY_OPERAND_VERBS.has(commandBaseName(tokens[cmdIdx] ?? ''));
+  for (let k = 0; k < tokens.length; k++) {
+    const t = tokens[k];
+    if (pending.redirect) {
+      pending.redirect = false;
+      if (mayNameInterpreterPath(t)) return true;
+      continue;
+    }
+    if (REDIRECT_OP_RE.test(t)) { pending.redirect = true; continue; }
+    const attached = t.match(REDIRECT_ATTACHED_RE);
+    if (attached) {
+      if (mayNameInterpreterPath(attached[1])) return true;
+      continue;
+    }
+    if (k === cmdIdx || readOnly || (k < cmdIdx && EXEC_WRAPPER.test(commandBaseName(t)))) continue;
+    if (mayNameInterpreterPath(t)) return true;
+  }
+  return false;
+}
+/**
  * #874 D3 — how far this command can change what an interpreter runs.
  * `lookup`: only which program a bare NAME finds (a PATH assignment or a
  * `name() {` definition). `env`: anything that may load code into an
@@ -5089,8 +5154,13 @@ type InterpreterShadow = 'none' | 'lookup' | 'env';
 function interpreterShadow(surface: string): InterpreterShadow {
   const dequoted = tokeniseStatement(surface).join(' ');
   if (INTERPRETER_ENV_RE.test(surface) || INTERPRETER_ENV_RE.test(dequoted) || NON_INERT_ASSIGNMENT_RE.test(dequoted)) return 'env';
+  const pending = { redirect: false };
   for (const stmt of splitCommandStatements(surface)) {
     const tokens = tokeniseStatement(stmt);
+    // #885: a write that may replace the interpreter (`ln -sf /bin/bash
+    // /usr/local/bin/python3`, `cp … python3`, `> /usr/bin/python3`) makes
+    // its name and an absolute shebang no evidence of the language.
+    if (statementWritesInterpreterPath(tokens, pending)) return 'env';
     // One pass: a flag word arms its flag test for the tokens after it. A
     // standalone `.` is treated like `source`, anywhere in the statement, so
     // `if . f` / `while . f` / `coproc . f` cannot hide it from command position.

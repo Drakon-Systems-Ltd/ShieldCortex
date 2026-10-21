@@ -618,6 +618,45 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
     expect(v.signals).toContain('stop-process-or-service');
   });
 
+  // #885: a write in the same command that may replace the interpreter (a
+  // link, copy, move, install, tee or redirect onto a system-bin interpreter
+  // path, or onto a bare interpreter name the working directory may place in
+  // a bin directory) withdraws the named-interpreter and absolute-shebang
+  // attestation alike. Classifier input only; none of these strings is executed.
+  const BIN_WRITES = [
+    'ln -sf /bin/bash /usr/local/bin/python3',
+    'cp /bin/bash /usr/local/bin/python3',
+    'mv /tmp/x /usr/local/bin/python3',
+    'install -m 755 /tmp/x /opt/homebrew/bin/python3',
+    'ln -sf /bin/bash /usr/bin/python3',
+    "ln -sf /bin/bash '/usr/bin/python3'",
+    'ln -sf /bin/bash /usr//local/./bin/python3',
+    'cat /tmp/x > /usr/local/bin/python3',
+    'cat /tmp/x >/usr/bin/python3',
+    'cat /tmp/x >| /usr/bin/python3',
+    'cat /tmp/x | tee /usr/local/bin/python3',
+    'cp /tmp/x -t /usr/local/bin',
+    'cd /usr/local/bin && ln -sf /tmp/x python3',
+    'cd /usr/local/bin; cat /tmp/x > python3',
+  ];
+  it.each(BIN_WRITES.flatMap(w => [
+    `${w}; python3 scripts/dual.py`,
+    `${w}; ./scripts/absdual.py`,
+  ]))('a same-command write to an interpreter path stays gated: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
+  it.each([
+    'ls -l /usr/local/bin/python3 && python3 scripts/dual.py',
+    'which python3; python3 scripts/dual.py',
+    'ls -l /usr/bin/python3; ./scripts/absdual.py',
+    'which python3 > /dev/null && ./scripts/absdual.py',
+  ])('a read of the interpreter path keeps the mention relief: %s', (command) => {
+    expect(run(command).decision).toBe('allow');
+  });
+
   // (2) A word that names an inherited object property is an ordinary word to
   // the shadow check: the read is judged, and a real sink after it stays gated.
   const PROTO_WORDS = ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf'];
