@@ -41,6 +41,14 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 5. **Background service** — if you ran `shieldcortex service install`, check `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`). Linux and macOS restart the service; Windows schedules it for the next login.
 6. **Doctor** — `shieldcortex doctor` warns when the OpenClaw plugin or Hermes copy is behind the package and names the command to run. It exits 1 on a failure (`--strict` also fails on warnings). Repairs are opt-in flags: `--fix-project-keys`, `--fix-action-guard`, `--fix-hermes-plugin-copies`.
 
+<a id="whats-new-in-511"></a>
+
+## What's new in 5.11
+
+- **A summary of approvals that timed out, when an OpenClaw session ends (#673, partial).** If you set up the Action Guard notify webhook (`actionGuard.notify`), the OpenClaw plugin now sends it one short message at the end of a session that had approval requests time out: up to 10 entries with the tool, tier and a plain-English reason, plus a count of the rest. It is a report only: approvals, timeouts and decisions work exactly as before, and the message never claims a call was blocked or skipped. Without a webhook nothing is sent. Nothing to do on upgrade.
+- **A tampered `config.json` stays flagged (#647).** When `config.json` fails its signature check, ShieldCortex used to clear the warning on the next config write and save the strict fallback view as if you had chosen it. Now explicit config writes (such as `shieldcortex config` flags) refuse with a message and exit 1, and automatic background writes skip with one line on stderr; the file is left exactly as it was. `shieldcortex doctor` names the verdict. To recover, restore a backup whose signature still verifies, or move `config.json` aside and rebuild it through the setters.
+- **Dependency advisories cleared.** `hono` moves to 4.13.13 and the MCP SDK to 1.32.1, clearing the `serveStatic` advisory (GHSA-5r4p-p66f-jhc7) and four MCP SDK advisories published on 20 Oct. Nothing to do on upgrade.
+
 <a id="whats-new-in-510"></a>
 
 ## What's new in 5.10

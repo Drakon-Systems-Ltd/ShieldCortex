@@ -4,7 +4,7 @@ description: "Memory and defence for AI agents: semantic recall, knowledge graph
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 5.10.7
+  version: 5.11.0
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
@@ -61,7 +61,7 @@ permissions:
     - https://api.shieldcortex.ai (Cloud sync + audit telemetry — only when Cloud sync is enabled; licence validation — only when a licence key is activated, fired at CLI `license activate` and the dashboard's activation call (POST /api/license/activate), with no periodic or background re-check; sends the subscription id, works with Cloud sync off; never called when no key is configured)
     - https://huggingface.co (embedding-model download — Xenova/all-MiniLM-L6-v2, ~90 MB, fetched into ~/.cache/shieldcortex/models by the MCP server's background preload at startup or the first operation needing an embedding, whenever the model is not already cached, plus one re-download if a cached copy is detected corrupt; SHIELDCORTEX_SKIP_EMBEDDINGS=1 prevents it. The optional Local AI Explainer model downloads from the same host only on explicit, consent-prompted `review-copilot enable`/`download-model` — its review runs use the local cache only)
     - https://registry.npmjs.org (three paths — explicit update actions via npm subprocess, dashboard "Check for updates"/"Update" or `shieldcortex update`; X-Ray package inspection, `shieldcortex xray <package>` or the dashboard X-Ray page, which queries package metadata directly over HTTPS and with `--deep` also downloads the package tarball from whatever URL that metadata names — normally registry.npmjs.org, size- and redirect-capped, but with no separate host allowlist; and the OpenClaw hook's `npx -y shieldcortex` fallback, which downloads the package on first use when ShieldCortex is not installed locally)
-    - User-configured webhook URLs (two POST paths — memory-event notifications to webhooks you add to ~/.shieldcortex/config.json, and Iron Dome operator-notify messages for action-guard holds/denies, plus `maintenance_fail` check names from `shieldcortex maintain`, to the `actionGuard.notify` webhook you configure; both off until you configure them)
+    - User-configured webhook URLs (two POST paths — memory-event notifications to webhooks you add to ~/.shieldcortex/config.json, and Iron Dome operator-notify messages for action-guard holds/denies, plus `maintenance_fail` check names from `shieldcortex maintain` and the OpenClaw plugin's session-end digest of recorded approval timeouts, to the `actionGuard.notify` webhook you configure; both off until you configure them)
     - The URL you pass to `shieldcortex env scan <url>` (fetched once for analysis)
     - http://localhost:3001 (local REST API + WebSocket — loopback only)
     - http://localhost:3030 (local dashboard UI; also the worker health check — loopback only)
