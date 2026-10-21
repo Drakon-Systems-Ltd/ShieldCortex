@@ -347,6 +347,49 @@ describe('#86-redos — heredoc-linking stays fast under load', () => {
     expect(v.severity).toBe('catastrophic');
   });
 
+  // #874 D1: matches inside a long attested interpreter file are classified
+  // without the shared re-scan budget, bounded by STRUCTURAL_CLASSIFY_CAP and
+  // a binary search over the fold's regions. Line-structured on purpose: one
+  // long newline-free line of `rm` words is slow in the CATASTROPHIC table
+  // regex on main as well, which this change does not touch.
+  const DENSE_LINE = 'rm kill unlink sudo pkill killall npm i -g x systemctl stop y crontab -e at now apt-get install z curl -d a https://e.example.com chmod 777';
+  function foldCall(name: string, body: string) {
+    return evaluateToolCall('Bash', { command: `python3 ${name}` }, undefined,
+      { resolveScriptSource: (p: string) => (p === name ? body : null) });
+  }
+  const denseFold = (lines: number) => `#!/usr/bin/env python3\nDOC = """\n${`${DENSE_LINE}\n`.repeat(lines)}"""\nprint(DOC)\n`;
+  const quotedFold = (words: number) => `#!/usr/bin/env python3\nX = [\n${"'rm',\n".repeat(words)}]\nprint(X)\n`;
+
+  it('#874 — stays linear on a dense mention fold under the classification cap', () => {
+    const { v, ratio, fullSizeMs } = scaling((lines: number) => foldCall('dense.py', denseFold(lines)), 30, 240);
+    expect(ratio).toBeLessThan(MAX_SCALING_RATIO);
+    expect(fullSizeMs).toBeLessThan(HANG_DETECTOR_MS);
+    expect(v.decision).not.toBe('block');
+  });
+
+  it('#874 — a ~256 KB dense mention fold finishes inside the hang detector and still gates', () => {
+    // Under MAX_SCRIPT_BYTES (262,144): a larger file is never read, so it
+    // would be judged as an unscanned script, not by this path.
+    const body = denseFold(1_800);
+    expect(body.length).toBeGreaterThan(240_000);
+    expect(body.length).toBeLessThanOrEqual(262_144);
+    const start = performance.now();
+    const v = foldCall('dense.py', body);
+    expect(performance.now() - start).toBeLessThan(HANG_DETECTOR_MS);
+    // Past STRUCTURAL_CLASSIFY_CAP the fold falls back to fail-closed.
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).not.toContain('opaque-script-invocation');
+  });
+
+  it('#874 — a ~32 KB fold of quoted single-word literals hits the structural cap and fails closed', () => {
+    const { v, ratio, fullSizeMs } = scaling((words: number) => foldCall('quoted.py', quotedFold(words)), 640, 5_120);
+    expect(quotedFold(5_120).length).toBeLessThan(32_768);
+    expect(ratio).toBeLessThan(MAX_SCALING_RATIO);
+    expect(fullSizeMs).toBeLessThan(HANG_DETECTOR_MS);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toContain('file-delete');
+  });
+
   it('detects quadratic work while accepting linear work at the same sizes', () => {
     function stringWork(count: number, quadratic: boolean): string {
       let value = '';

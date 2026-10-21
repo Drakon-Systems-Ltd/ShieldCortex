@@ -2816,7 +2816,9 @@ function secretHintExecutedIn(text: string, region: ScanRegion): boolean {
   const hint = region.lang === 'sh' ? SECRET_HINT : FOLDED_SOURCE_SECRET_HINT;
   const slice = text.slice(region.start, region.end);
   const g = new RegExp(hint.source, hint.flags.includes('g') ? hint.flags : `${hint.flags}g`);
-  const data = region.lang === 'sh' ? [] : scriptDataRanges(text, region);
+  // #874 D2: lexed only on the first assignment-shaped hit, so a clean large
+  // file costs one regex pass.
+  let data: ScriptDataRange[] | null = region.lang === 'sh' ? [] : null;
   let m: RegExpExecArray | null;
   while ((m = g.exec(slice)) !== null) {
     if (m[0].length === 0) { g.lastIndex++; continue; }
@@ -2830,7 +2832,10 @@ function secretHintExecutedIn(text: string, region: ScanRegion): boolean {
     // identifier so the opener quote does not poke out of the data range.
     const ident = m[0].search(/(?:password|secret)/i);
     const identStart = a + (ident >= 0 ? ident : 0);
-    if (assignment && data.some(({ range: [s, e] }) => identStart >= s && b <= e)) continue;
+    if (assignment) {
+      data = data ?? scriptDataRanges(text, region);
+      if (data.some(({ range: [s, e] }) => identStart >= s && b <= e)) continue;
+    }
     return true;
   }
   return false;
@@ -3098,6 +3103,13 @@ interface ScanRegion {
    * e.g. `scripts/github-backup.sh → resilience/sync-code-backup.sh`.
    */
   chain?: string;
+  /**
+   * #874 D3 — a folded non-shell region whose language something other than
+   * the file suffix vouched for: every invocation of the file named its
+   * interpreter, or ran it by path with a shebang naming the same language.
+   * Only these regions are decided structurally by the DANGEROUS scan (D1).
+   */
+  langAttested?: boolean;
 }
 
 /**
@@ -3839,18 +3851,140 @@ export function guardConfigAccessIsReadOnly(text: string): boolean {
   if (/[$`\\]/.test(cmd)) return false;
   const statements = guardConfigStatements(cmd);
   if (!statements || statements.length === 0) return false;
-  for (const stages of statements) {
-    for (const argv of stages) {
-      if (!GUARD_CONFIG_READONLY_VERB_RE.test(argv[0] ?? '')) return false;
-      for (const arg of argv.slice(1)) {
-        if (arg.startsWith('-') && arg.includes('=')) return false;
-        // `~` only as a leading home reference, never mid-word or `~user`.
-        const tilde = arg.indexOf('~');
-        if (tilde > 0 || (tilde === 0 && arg.length > 1 && arg[1] !== '/')) return false;
-      }
+  return statements.every(stagesAreClosedSetReads);
+}
+
+/**
+ * Every stage of one pipeline is a bare GUARD_CONFIG_READONLY_VERB_RE verb
+ * followed by plain words: no `--opt=value` spelling, and `~` only as a
+ * leading `~/`. Shared by the #879 config carve-out and the #874 D5 mask.
+ */
+function stagesAreClosedSetReads(stages: string[][]): boolean {
+  for (const argv of stages) {
+    if (!GUARD_CONFIG_READONLY_VERB_RE.test(argv[0] ?? '')) return false;
+    for (const arg of argv.slice(1)) {
+      if (arg.startsWith('-') && arg.includes('=')) return false;
+      // `~` only as a leading home reference, never mid-word or `~user`.
+      const tilde = arg.indexOf('~');
+      if (tilde > 0 || (tilde === 0 && arg.length > 1 && arg[1] !== '/')) return false;
     }
   }
   return true;
+}
+
+/**
+ * #874 D5 — whole-command vetoes for `closedReadPipelineMask`. Any of these
+ * means a plain-looking read may not be what runs, or its output may go
+ * somewhere other than the tool result: a heredoc, an escape or expansion, a
+ * carriage return, a background job or `|&`, process substitution, a grouping
+ * or subshell, or a redirect anywhere in the command.
+ */
+const CLOSED_READ_VETO_RE = /<<|[\\`$\r(){}<>]|(?<!&)&(?!&)/;
+/**
+ * #874 D5 — a word that turns the command into a compound one (whose loop or
+ * group may pipe or redirect a masked read's output) or changes how later
+ * words are found or run (an assignment, an exported preload, a changed
+ * directory or PATH lookup). Judged on every word of the command, quoted or
+ * not, so it over-rejects (`grep done f`) rather than parse shell grammar.
+ */
+const CLOSED_READ_VETO_WORD_RE = /^(?:if|then|else|elif|fi|for|while|until|do|done|case|esac|select|function|time|coproc|in|!|\[\[|\]\]|export|declare|typeset|readonly|local|set|unset|alias|unalias|shopt|enable|hash|builtin|command|exec|eval|source|trap|ulimit|umask|cd|pushd|popd|env|sudo|doas|nohup|xargs)$/;
+/**
+ * #874 D5 — `.` sources a file only in command position; as an argument it is
+ * data (`jq .`, `ls .`). Checked on the first word of every pipeline stage.
+ */
+const CLOSED_READ_DOT_SOURCE = '.';
+
+/**
+ * #874 D5 — `execCommand` with every top-level statement that is a
+ * CLOSED-SET READ PIPELINE replaced by same-length spaces, or null when no
+ * statement qualifies or the command is outside the grammar.
+ *
+ * A qualifying statement is one pipeline whose every stage passes
+ * `stagesAreClosedSetReads`: a bare `ls`/`dir`/`cat`/`head`/`tail`/`wc`/
+ * `stat`/`du`/`grep`/`egrep`/`fgrep`/`jq` with plain arguments (quoted
+ * arguments may hold any character but newline, because `$`, backtick and
+ * backslash are vetoed command-wide). None of those verbs writes a file, runs
+ * a program or opens a socket from its arguments, and a pipe into any other
+ * stage disqualifies the pipeline, so the statement's output reaches only the
+ * tool result and nothing it names can reach another statement. The caller
+ * re-checks a rule on the masked text; that answers "would this call match
+ * without the plain reads?".
+ *
+ * `command` is the command before comment/print/heredoc stripping and
+ * `rawCommand` the one before `${IFS}` deobfuscation. The mask applies only
+ * when neither step changed anything, so the mask's offsets and the shell's
+ * view of the text are the same bytes.
+ */
+export function closedReadPipelineMask(execCommand: string, command: string, rawCommand: string): string | null {
+  const cmd = String(execCommand || '');
+  if (!cmd || cmd !== command || command !== rawCommand) return null;
+  if (CLOSED_READ_VETO_RE.test(cmd)) return null;
+  if (STORE_NESTED_EXEC_RE.test(cmd) || POLICY_LOCK_ENV_SEAM_RE.test(cmd)) return null;
+  // Top-level statements with their offsets, quote-aware.
+  const spans: Array<[number, number]> = [];
+  let quote = '';
+  let from = 0;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (quote) {
+      if (c === quote) quote = '';
+      else if (c === '\n') return null;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; continue; }
+    const two = cmd.slice(i, i + 2);
+    if (c === '\n' || c === ';' || two === '&&' || two === '||') {
+      spans.push([from, i]);
+      if (two === '&&' || two === '||') i++;
+      from = i + 1;
+    }
+  }
+  if (quote) return null;
+  spans.push([from, cmd.length]);
+  let out = cmd;
+  let masked = false;
+  for (const [a, b] of spans) {
+    const stmt = cmd.slice(a, b);
+    const parsed = guardConfigStatements(stmt, { quotedAny: true });
+    if (parsed === null) {
+      if (stmt.trim()) {
+        // Outside the grammar: judge its words for the vetoes only.
+        for (const w of stmt.split(/[\s|;&]+/)) {
+          if (CLOSED_READ_VETO_WORD_RE.test(w.replace(/['"]/g, '')) || /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(w)) return null;
+        }
+        for (const stage of stmt.split('|')) {
+          if ((stage.trim().split(/\s+/)[0] ?? '').replace(/['"]/g, '') === CLOSED_READ_DOT_SOURCE) return null;
+        }
+      }
+      continue;
+    }
+    for (const stages of parsed) {
+      for (const argv of stages) {
+        for (const w of argv) {
+          if (CLOSED_READ_VETO_WORD_RE.test(w)) return null;
+        }
+        if (/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(argv[0] ?? '')) return null;
+        if (argv[0] === CLOSED_READ_DOT_SOURCE) return null;
+      }
+    }
+    if (parsed.length !== 1 || !stagesAreClosedSetReads(parsed[0]!)) continue;
+    if (parsed[0]!.some(closedReadStageMayWrite)) continue;
+    out = out.slice(0, a) + ' '.repeat(b - a) + out.slice(b);
+    masked = true;
+  }
+  return masked ? out : null;
+}
+
+/**
+ * #874 D5 — a closed-set stage spelled with an option that writes or edits in
+ * place (`jq -i`, `--in-place`, in the jq builds and wrappers that have it).
+ * Any short-option cluster holding `i` counts for jq, so `-ri` is caught too.
+ * Such a stage keeps its statement out of the mask; the #879 carve-out is not
+ * changed by this.
+ */
+function closedReadStageMayWrite(argv: string[]): boolean {
+  if (argv[0] !== 'jq') return false;
+  return argv.slice(1).some(a => a === '--in-place' || /^-[A-Za-z]*i/.test(a));
 }
 
 /** Characters a guard-config read argument may contain, unquoted. */
@@ -3864,7 +3998,7 @@ const GUARD_CONFIG_WORD_CHAR_RE = /[A-Za-z0-9_./@%+,:=*?[\]~-]/;
  * character (inside quotes a space is also allowed). The caller has already
  * refused `$`, backtick and backslash, so no quoted span can expand.
  */
-function guardConfigStatements(cmd: string): string[][][] | null {
+function guardConfigStatements(cmd: string, opts: { quotedAny?: boolean } = {}): string[][][] | null {
   const statements: string[][][] = [];
   let stages: string[][] = [];
   let argv: string[] = [];
@@ -3892,7 +4026,10 @@ function guardConfigStatements(cmd: string): string[][][] | null {
     const c = cmd[i]!;
     if (quote) {
       if (c === quote) quote = '';
-      else if (c === ' ' || GUARD_CONFIG_WORD_CHAR_RE.test(c)) tok = (tok ?? '') + c;
+      // #874 D5: with `quotedAny`, any character but a newline is literal
+      // inside quotes. Sound only because the caller vetoes `$`, backtick and
+      // backslash command-wide, so nothing inside a quote can expand.
+      else if (c === ' ' || GUARD_CONFIG_WORD_CHAR_RE.test(c) || (opts.quotedAny && c !== '\n')) tok = (tok ?? '') + c;
       else return null;
       continue;
     }
@@ -4153,49 +4290,6 @@ const INTERPRETER_RECURSIVE_DELETE_SPAN =
 
 
 
-/**
- * Byte ranges that came from a folded file in a NON-SHELL language (#165).
- *
- * The DANGEROUS/SENSITIVE rules are written in shell vocabulary — `kill`,
- * `apt-get install`, `sudo`, `.env`. Inside a JavaScript or Python file those
- * are identifiers, properties and string literals, not commands. #160 wired
- * script folding into the Claude Code hook, which pointed those shell rules at
- * arbitrary program source on the surface that gates every Bash call, and the
- * result was that ordinary work stopped: `npm test` gated on a runner
- * containing `process.kill(process.pid, sig)`, and `node dist/index.js` gated
- * because our OWN CLI bundle contains the rule vocabulary in its remedy strings.
- *
- * Folded SHELL source is excluded from this — a `.sh` file really is shell, and
- * `systemctl stop nginx` inside one must still gate. So the distinction is the
- * language of the region, never "was it folded".
- *
- * What is deliberately NOT relaxed: CATASTROPHIC still matches everywhere
- * (that is the write-then-exec threat #160 exists to catch), and any region
- * with a shell-out sink is already treated as a command surface upstream.
- */
-function foldedNonShellRanges(regions: readonly ScanRegion[]): Array<[number, number]> {
-  return regions
-    .filter(r => r.folded && r.lang !== 'sh' && !r.hasSink)
-    .map(r => [r.start, r.end] as [number, number]);
-}
-
-/** True when EVERY occurrence of `re` in `text` sits inside a folded non-shell region. */
-function onlyInFoldedNonShell(re: RegExp, text: string, ranges: Array<[number, number]>): boolean {
-  if (ranges.length === 0) return false;
-  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
-  g.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  let seen = false;
-  let guard = 0;
-  while ((m = g.exec(text)) !== null && guard++ < 200) {
-    seen = true;
-    const at = m.index;
-    if (!ranges.some(([a, b]) => at >= a && at < b)) return false;   // one outside → keep the signal
-    if (m[0].length === 0) g.lastIndex++;
-  }
-  return seen;
-}
-
 function matchSpansClassified(
   patterns: Pattern[],
   text: string,
@@ -4256,6 +4350,132 @@ function matchSpansClassified(
         : cRaw;
       if (c === 'executed') { best = { span: m[0], tier: 'executed', at: s }; break; }
       if (c === 'payload' && best === null) best = { span: m[0], tier: 'payload', at: s };
+      sharedBudget--;
+      if (++iters >= MAX_CLASSIFY_ITERS || sharedBudget <= 0) {
+        best = { span: m[0], tier: 'executed', at: s };
+        break;
+      }  // fail-closed
+    }
+    if (best !== null) {
+      out.push(withProvenance(
+        { signal: p.signal, span: fmtSpan(best.span), tier: best.tier },
+        text, best.at, regions,
+      ));
+    }
+  }
+  return out;
+}
+
+/**
+ * #874 D1 — how many matches per call the DANGEROUS scan may decide
+ * structurally (below) before it falls back to the shared re-scan budget.
+ */
+const STRUCTURAL_CLASSIFY_CAP = 512;
+
+/** The region of `sorted` (by start, disjoint) that wholly contains [s, e), if any. */
+function regionContaining(sorted: readonly ScanRegion[], s: number, e: number): ScanRegion | null {
+  let lo = 0;
+  let hi = sorted.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const r = sorted[mid]!;
+    if (r.start > s) hi = mid - 1;
+    else if (r.end <= s) lo = mid + 1;
+    else return e <= r.end ? r : null;
+  }
+  return null;
+}
+
+/**
+ * #874 D1 — `matchSpansClassified` for the DANGEROUS tier only. CATASTROPHIC
+ * keeps the original function unchanged.
+ *
+ * The shared re-scan budget is a TIME bound for the shell-side classifier. It
+ * was also spent on matches inside folded interpreter files, so a long
+ * read-only Python verifier with a handful of harmless mentions (in printed
+ * messages, help text, docstrings) ran the budget out, and every LATER rule
+ * that matched anywhere in it was then forced `executed`. A match that lies
+ * wholly inside a `decidable` region is now classified by the same
+ * `classifyWithCtx` without spending that budget, so its class is the one the
+ * file would get if it were short. Decidable means: folded from a file on
+ * disk, not shell, and `langAttested` (D3). Everything else — shell text,
+ * inline `-c`/heredoc programs, folded `.sh`, a match straddling a region
+ * edge, every path-target rule — goes through the budget path exactly as
+ * before, and budget exhaustion still fails closed.
+ *
+ * Over the classification cap there is no span context, so only a decidable
+ * region with no shell-out sink is decided, as `mention` (what
+ * `classifyWithCtx` returns there for every non-path-target rule); a
+ * sink-bearing one stays `executed`, as it is today.
+ *
+ * At most STRUCTURAL_CLASSIFY_CAP matches per call are decided this way; past
+ * it a match takes the budget path.
+ */
+function matchSpansClassifiedStructural(
+  patterns: Pattern[],
+  text: string,
+  regions: readonly ScanRegion[],
+  decidable: readonly ScanRegion[],
+): ClassifiedMatch[] {
+  if (decidable.length === 0) return matchSpansClassified(patterns, text, regions);
+  const sorted = [...decidable].sort((a, b) => a.start - b.start);
+  let structuralLeft = STRUCTURAL_CLASSIFY_CAP;
+  const decide = (signal: string, s: number, e: number): ScanRegion | null => {
+    if (structuralLeft <= 0 || PATH_TARGET_SIGNALS.has(signal)) return null;
+    return regionContaining(sorted, s, e);
+  };
+  const out: ClassifiedMatch[] = [];
+
+  if (text.length > SPAN_CLASSIFY_CAP) {
+    for (const p of patterns) {
+      if (p.signal === 'install-package-global' && !/(?:-g|global)/i.test(text)) continue;
+      const g = p.re.global ? p.re : new RegExp(p.re.source, p.re.flags + 'g');
+      for (const m of text.matchAll(g)) {
+        const s = m.index ?? 0;
+        const r = decide(p.signal, s, s + m[0].length);
+        if (r && !r.hasSink) { structuralLeft--; continue; }
+        out.push({ signal: p.signal, span: fmtSpan(m[0]), tier: 'executed' });
+        break;
+      }
+    }
+    return out;
+  }
+
+  const ctx = buildSpanCtx(text, regions);
+  let sharedBudget = text.length > LARGE_SURFACE ? MAX_CLASSIFY_ITERS_LARGE : Infinity;
+  for (const p of patterns) {
+    const pathTarget = PATH_TARGET_SIGNALS.has(p.signal);
+    const g = p.re.global ? p.re : new RegExp(p.re.source, p.re.flags + 'g');
+    let best: { span: string; tier: MatchTier; at: number } | null = null;
+    // The first budget-path match is the original fast path: an `executed`
+    // one keeps the signal, and an exhausted budget fails closed on it
+    // without spending. Every budget-path match after a non-executed one
+    // spends one unit, as the original re-scan loop does (it re-visits the
+    // first occurrence too).
+    let firstBudgetMatch = true;
+    let iters = 0;
+    for (const m of text.matchAll(g)) {
+      const s = m.index ?? 0;
+      const e = s + m[0].length;
+      const cRaw = classifyWithCtx(ctx, s, e, text, pathTarget);
+      const c = (cRaw === 'mention'
+        && p.signal === 'recursive-force-delete'
+        && INTERPRETER_RECURSIVE_DELETE_SPAN.test(m[0]))
+        ? 'executed' as const
+        : cRaw;
+      if (decide(p.signal, s, e)) {
+        structuralLeft--;
+        if (c === 'executed') { best = { span: m[0], tier: 'executed', at: s }; break; }
+        if (c === 'payload' && best === null) best = { span: m[0], tier: 'payload', at: s };
+        continue;
+      }
+      if (c === 'executed') { best = { span: m[0], tier: 'executed', at: s }; break; }
+      if (c === 'payload' && best === null) best = { span: m[0], tier: 'payload', at: s };
+      if (firstBudgetMatch && sharedBudget <= 0) {
+        best = { span: m[0], tier: 'executed', at: s };
+        break;
+      }
+      firstBudgetMatch = false;
       sharedBudget--;
       if (++iters >= MAX_CLASSIFY_ITERS || sharedBudget <= 0) {
         best = { span: m[0], tier: 'executed', at: s };
@@ -4753,6 +4973,27 @@ const WRAPPER_FLAG_TAKES_VALUE: Record<string, RegExp> = {
  */
 export type ScriptLang = 'sh' | 'python' | 'node' | 'ruby' | 'perl' | 'php';
 export interface DetectedScript { path: string; lang: ScriptLang; }
+/**
+ * #874 D3 — how the language of a detected script was chosen. `interpreter`:
+ * a named interpreter token ran it (`python3 f.py`), so the language is what
+ * the command says. `source`: `source f` / `. f`, always the shell.
+ * `extension`: a path in command position, where the KERNEL picks the
+ * interpreter from the shebang the guard has not read yet — the suffix is a
+ * guess, and `./tool.py` with a bash shebang runs as bash. `unattested`: an
+ * interpreter name this command could have pointed at another program (a
+ * path outside the system bin directories, a PATH assignment, an alias or a
+ * function), or a child named only by interpreter source. The shebang is no
+ * evidence for these: whatever runs the file ignores it.
+ */
+type DetectedVia = 'interpreter' | 'source' | 'extension' | 'unattested';
+const VIA_STRENGTH: Record<DetectedVia, number> = { interpreter: 3, extension: 2, source: 1, unattested: 0 };
+/** An interpreter token that names the real interpreter: bare, or in a system bin directory. */
+const ATTESTING_INTERPRETER_TOKEN_RE = /^(?:\/usr\/bin\/|\/bin\/|\/usr\/local\/bin\/|\/opt\/homebrew\/bin\/)?[A-Za-z0-9.]+$/;
+/** A command that could make a bare interpreter name run something else. */
+// The function-definition arm starts only at a word start, so a long word run
+// is scanned once rather than from every offset (linear, not quadratic).
+const INTERPRETER_SHADOW_RE = /\bPATH=|\balias\b|\bfunction\b|(?<![\w.-])[\w.-]+\s*\(\s*\)\s*\{|\bhash\b|\benable\b|\bBASH_ENV=|\bENV=/;
+interface DetectedScriptVia extends DetectedScript { via: DetectedVia; }
 
 function langFromInterpreter(base: string): ScriptLang {
   if (/^python/.test(base)) return 'python';
@@ -4896,7 +5137,12 @@ export function detectScriptInvocation(execSurface: string, depth = 0): string[]
  * lines are not — see `SCRIPT_LANG_RULES` and `buildSpanCtx`.
  */
 export function detectScriptInvocations(execSurface: string, depth = 0): DetectedScript[] {
-  const found: DetectedScript[] = [];
+  return detectScriptInvocationsVia(execSurface, depth).map(({ path, lang }) => ({ path, lang }));
+}
+
+/** As `detectScriptInvocations`, plus how each language was chosen (#874 D3). */
+function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScriptVia[] {
+  const found: DetectedScriptVia[] = [];
   if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
 
   // #713: the whole-command heredoc data-read relief is NOT applied here. It is
@@ -4906,8 +5152,11 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   // recursion, the #217 pass) therefore never relieve anything: strictly more
   // scanning, never less.
   const surface = maskSinkFreeInlinePrograms(execSurface);
+  // #874 D3: a named interpreter vouches for the language only when the name
+  // cannot have been redirected to some other program by this same command.
+  const interpreterShadowable = INTERPRETER_SHADOW_RE.test(execSurface);
 
-  const add = (p: string, lang?: ScriptLang): void => {
+  const add = (p: string, lang: ScriptLang | undefined, via: DetectedVia): void => {
     const clean = p.trim();
     if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
     const resolved = lang ?? langFromPath(clean);
@@ -4918,9 +5167,15 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
     // and turning a catastrophic block into an allow. Keeping both is strictly
     // more entries and every consumer treats extra invocations as more
     // dangerous, not less, so this only ever moves fail-closed.
-    if (found.some(f => f.path === clean && f.lang === resolved)) return;
+    // #874 D3: a duplicate keeps the WEAKER attestation — `python3 x.py;
+    // ./x.py` runs the file once through the kernel's shebang choice too.
+    const dup = found.find(f => f.path === clean && f.lang === resolved);
+    if (dup) {
+      if (VIA_STRENGTH[via] < VIA_STRENGTH[dup.via]) dup.via = via;
+      return;
+    }
     if (found.length >= MAX_DETECTED_SCRIPTS) return;
-    found.push({ path: clean, lang: resolved });
+    found.push({ path: clean, lang: resolved, via });
   };
 
   for (const stmt of splitCommandStatements(surface)) {
@@ -4937,31 +5192,34 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
     // `source f.sh` / `. f.sh` — always read BY THE SHELL, whatever the suffix.
     if (base === 'source' || cmd === '.') {
       const target = tokens[i + 1];
-      if (target && !target.startsWith('-')) add(target, 'sh');
+      if (target && !target.startsWith('-')) add(target, 'sh', 'source');
       continue;
     }
 
     if (SCRIPT_INTERPRETER.test(base)) {
       const lang = langFromInterpreter(base);
+      const interpVia: DetectedVia = !interpreterShadowable && ATTESTING_INTERPRETER_TOKEN_RE.test(cmd)
+        ? 'interpreter'
+        : 'unattested';
       for (let j = i + 1; j < tokens.length; j++) {
         const a = tokens[j];
         if (a === '-') break;                                   // program on stdin
         if (a === '<') continue;                                // `bash < f.sh`
-        if (a.startsWith('<')) { add(a.slice(1), lang); break; }
+        if (a.startsWith('<')) { add(a.slice(1), lang, interpVia); break; }
         if (a.startsWith('>')) break;                           // redirect target, not a program
         if (a.startsWith('-')) {
           if (isInlineProgramFlag(base, a)) {
             // The inline program itself is already in the exec surface (and
             // already scanned); only follow a file invocation NESTED in it.
             if (/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(base)) {
-              for (const nested of detectScriptInvocations(tokens[j + 1] ?? '', depth + 1)) add(nested.path, nested.lang);
+              for (const nested of detectScriptInvocationsVia(tokens[j + 1] ?? '', depth + 1)) add(nested.path, nested.lang, nested.via);
             }
             break;
           }
           if (FLAG_TAKES_VALUE.test(a)) j++;
           continue;
         }
-        add(a, lang);
+        add(a, lang, interpVia);
         break;
       }
       continue;
@@ -4973,7 +5231,7 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
     // language every rule is written for). An installed CLI's shim is the one
     // exception (#199): its body is the launcher's plumbing, not the operator's
     // command, and the bare-name spelling of the same call never folds at all.
-    if (looksLikePathToken(cmd) && !isInstalledBinaryPath(cmd)) add(cmd);
+    if (looksLikePathToken(cmd) && !isInstalledBinaryPath(cmd)) add(cmd, undefined, 'extension');
   }
   return found;
 }
@@ -5071,11 +5329,25 @@ function foldScriptSources(
   isReviewedScript?: (scriptPath: string, source: string) => boolean,
   subst?: SubstitutionState,
 ): ScriptFold {
-  const roots = detectScriptInvocations(execCommand);
+  const roots = detectScriptInvocationsVia(execCommand);
   if (roots.length === 0) return { content: '', opaque: false, regions: [], reviewed: [], unreadSensitive: [] };
   if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [], reviewed: [], unreadSensitive: [] };
 
   const visited = new Set<string>();
+  // #874 D3: every way each path was invoked, including the invocations the
+  // visited set skips, so one region's attestation answers for all of them.
+  const invocations = new Map<string, Array<{ lang: ScriptLang; via: DetectedVia }>>();
+  const noteInvocation = (p: string, lang: ScriptLang, via: DetectedVia): void => {
+    const list = invocations.get(p);
+    if (list) list.push({ lang, via });
+    else invocations.set(p, [{ lang, via }]);
+  };
+  // A child named by interpreter SOURCE is attested by nothing the guard can
+  // read: the text may say `python3 c.py` while the program runs it another way.
+  const nestedVia = (parentLang: ScriptLang, via: DetectedVia): DetectedVia =>
+    parentLang === 'sh' ? via : 'unattested';
+  const shebangs = new Map<string, ScriptLang | null>();
+  for (const r of roots) noteInvocation(r.path, r.lang, r.via);
   // #184: carry the invocation chain so a nested match can name every hop.
   const queue: Array<{ path: string; lang: ScriptLang; depth: number; chain: string[] }> =
     roots.map(r => ({ path: r.path, lang: r.lang, depth: 1, chain: [r.path] }));
@@ -5201,11 +5473,12 @@ function foldScriptSources(
       // of entries that can reach here is bounded by the root-owned lock's
       // ceiling rather than by the same-UID config alone.
       const nestedOfReviewed = next.lang === 'sh' || hasShellOutSink(reviewedScan, next.lang, true)
-        ? detectScriptInvocations(reviewedScan)
+        ? detectScriptInvocationsVia(reviewedScan)
         : [];
       if (nestedOfReviewed.length > 0) {
         if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
         else for (const n of nestedOfReviewed) {
+          noteInvocation(n.path, n.lang, nestedVia(next.lang, n.via));
           if (!visited.has(n.path)) {
             queue.push({ path: n.path, lang: n.lang, depth: next.depth + 1, chain: [...next.chain, n.path] });
           }
@@ -5216,6 +5489,7 @@ function foldScriptSources(
 
     const scan = reviewedScan;
     const hasSink = hasShellOutSink(scan, next.lang, true);
+    shebangs.set(next.path, shebangLang(src));
     total += src.length;
     if (parts.length > 0) cursor += 1;                  // the '\n' join separator
     regions.push({
@@ -5240,10 +5514,11 @@ function foldScriptSources(
     // on an unmasked sink-bearing program, so the three planes agree. Comments
     // are already blanked from `scan`, so a path mentioned in a docstring is
     // not followed.
-    const nested = next.lang === 'sh' || hasSink ? detectScriptInvocations(scan) : [];
+    const nested = next.lang === 'sh' || hasSink ? detectScriptInvocationsVia(scan) : [];
     if (nested.length > 0) {
       if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;         // depth exceeded — say so
       else for (const n of nested) {
+        noteInvocation(n.path, n.lang, nestedVia(next.lang, n.via));
         if (!visited.has(n.path)) {
           queue.push({ path: n.path, lang: n.lang, depth: next.depth + 1, chain: [...next.chain, n.path] });
         }
@@ -5251,7 +5526,37 @@ function foldScriptSources(
     }
   }
 
+  // #874 D3: decided after the walk, when every invocation of each path is
+  // known. One unattested or differently-languaged invocation withdraws it.
+  for (const r of regions) {
+    const p = r.sourcePath ?? '';
+    const inv = invocations.get(p) ?? [];
+    r.langAttested = r.lang !== 'sh' && inv.length > 0 && inv.every(i => i.lang === r.lang
+      && (i.via === 'interpreter' || (i.via === 'extension' && shebangs.get(p) === r.lang)));
+  }
+
   return { content: parts.join('\n'), opaque, regions, reviewed, unreadSensitive };
+}
+
+/**
+ * #874 D3 — the language a `#!` first line names, or null. Only the plain
+ * interpreter and `env <interpreter>` spellings count; anything else (no
+ * shebang, a shell, `env -S …`, an unknown program) is not an attestation.
+ */
+function shebangLang(src: string): ScriptLang | null {
+  const nl = src.indexOf('\n');
+  const first = (nl < 0 ? src : src.slice(0, nl)).replace(/\r$/, '');
+  const m = /^#!\s*(\S+)(?:[ \t]+(\S+))?/.exec(first);
+  if (!m) return null;
+  let prog = commandBaseName(m[1]!);
+  if (prog === 'env') {
+    if (!m[2] || m[2].startsWith('-')) return null;
+    prog = commandBaseName(m[2]);
+  }
+  if (/^python\d?(?:\.\d+)?$/.test(prog)) return 'python';
+  if (prog === 'node' || prog === 'nodejs') return 'node';
+  if (prog === 'ruby' || prog === 'perl' || prog === 'php') return prog;
+  return null;
 }
 
 // ── Command-substitution expansion (#517) ────────────────────────────────────
@@ -6921,18 +7226,41 @@ function evaluateToolCallCore(
   // Over the classification cap the span classifier fails closed and never
   // consults the region map, so building one is pure cost — skip it. This keeps
   // the pathological 50k-command path (issue #86-redos) at its measured budget.
+  // The fold's regions in scan-surface offsets. Computed whatever the size:
+  // over the cap the span classifier has no region map, but the DANGEROUS
+  // scan (#874 D1) and the secret hint (#874 D2) still need to know which
+  // bytes came from which file.
+  const foldRegions: ScanRegion[] = fold.regions.map(r => ({
+    ...r,
+    start: r.start + execSurface.length + 1,            // +1 for the '\n' join
+    end: r.end + execSurface.length + 1,
+  }));
   const scriptRegions: ScanRegion[] = scanSurface.length > SPAN_CLASSIFY_CAP ? [] : [
     ...interpreterHeredocRegions(execCommand),
     ...inlineProgramRegions(execCommand),
-    ...fold.regions.map(r => ({
-      ...r,
-      start: r.start + execSurface.length + 1,          // +1 for the '\n' join
-      end: r.end + execSurface.length + 1,
-    })),
+    ...foldRegions,
   ];
   const regions = scriptRegions.length > 0
     ? withShellComplement(scriptRegions, scanSurface.length)
     : [];
+  // #874 D5/D6: the same call with every closed-set read pipeline blanked out
+  // (`closedReadPipelineMask`), length-preserving so `regions` still apply.
+  // Computed on first use; null when the command has no such pipeline or is
+  // outside the mask's grammar. Only ever used to WITHDRAW a floor or
+  // secret-egress signal that the unmasked surface also produced.
+  let readMasked: { surface: string; egressCommand: string } | null | undefined;
+  const closedReadMasked = (): { surface: string; egressCommand: string } | null => {
+    if (readMasked === undefined) {
+      const m = family === 'exec' ? closedReadPipelineMask(execCommand, command, rawCommand) : null;
+      readMasked = m === null || !execSurface.startsWith(execCommand) ? null : {
+        surface: fold.content
+          ? `${m}${execSurface.slice(execCommand.length)}\n${fold.content}`
+          : `${m}${execSurface.slice(execCommand.length)}`,
+        egressCommand: fold.content ? `${m}\n${fold.content}` : m,
+      };
+    }
+    return readMasked;
+  };
   // Recorded at the lowest surfaced tier when a script's contents could not be
   // read (no resolver, unreadable, oversized, binary, too deep). Never a gate on
   // its own — the doctor/selfcheck probes and plenty of legitimate calls hit it.
@@ -7015,16 +7343,33 @@ function evaluateToolCallCore(
   // uses FOLDED_SOURCE_SECRET_HINT (quoted literals / key material only).
   // Matches wholly inside a comment or string are payload, not a credential
   // in flight. Tool args stay on the command-line hint — they are values.
-  let secretSighted = SECRET_HINT.test(rawStringArgs(args));
-  if (!secretSighted) {
-    const slices = regions.length > 0
-      ? regions
+  // #874 D2: over the classification cap `regions` is empty, which judged a
+  // whole long Python file by the SHELL hint — an unquoted
+  // `password = imap_password` became a credential in flight. The cap bounds
+  // the span classifier's cost; it is not a language boundary, so the fold's
+  // own offsets still say which bytes are interpreter source.
+  const secretSlices: ScanRegion[] = regions.length > 0
+    ? regions
+    : foldRegions.length > 0
+      ? withShellComplement(foldRegions, scanSurface.length)
       : [{ start: 0, end: scanSurface.length, lang: 'sh' as const, hasSink: false, folded: false }];
-    secretSighted = slices.some((r) => secretHintExecutedIn(scanSurface, r));
-  }
+  const argsSecret = SECRET_HINT.test(rawStringArgs(args));
+  const secretSighted = argsSecret || secretSlices.some((r) => secretHintExecutedIn(scanSurface, r));
   if (egress && secretSighted && externalDestination) {
-    return withReview(verdict('block', 'catastrophic', family, 'data_exfiltration',
-      'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]));
+    // #874 D6: a closed-set read pipeline (a plain `grep`/`cat`/… on plain
+    // arguments, alone or piped only into those) opens no socket, writes no
+    // file and feeds no other process, so a secret-shaped grep PATTERN that
+    // appears only there is not a credential this call can carry off-host.
+    // Withdrawn only when the secret itself disappears with those pipelines
+    // blanked. A URL or egress word that sits only in a read does not
+    // withdraw it: the secret is then elsewhere in the call and may travel.
+    const rm = closedReadMasked();
+    const holdsWithoutReads = rm === null || argsSecret
+      || secretSlices.some((r) => secretHintExecutedIn(rm.surface, r));
+    if (holdsWithoutReads) {
+      return withReview(verdict('block', 'catastrophic', family, 'data_exfiltration',
+        'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]));
+    }
   }
 
   const canonical = ACTION_BY_FAMILY[family];
@@ -7053,7 +7398,10 @@ function evaluateToolCallCore(
   //     IS the access), so `id_rsa` in folded source is untouched by this.
   // Demoted, not dropped: the signals are surfaced at the sensitive tier below
   // so the match stays auditable instead of vanishing.
-  const dangerClassified = matchSpansClassified(DANGEROUS, scanSurface, regions);
+  // #874 D1: matches wholly inside an attested folded interpreter file are
+  // classified without spending the shared re-scan budget.
+  const dangerClassified = matchSpansClassifiedStructural(DANGEROUS, scanSurface, regions,
+    foldRegions.filter(r => r.folded && r.lang !== 'sh' && r.langAttested === true));
   const dangerPayloadOnly = dangerClassified.filter(m => m.tier === 'payload');
   const dangerMatches = [...catastrophicPayload, ...dangerClassified.filter(m => m.tier === 'executed')]
     // #170: same target-not-verb principle as the catastrophic tier. A delete
@@ -7266,6 +7614,30 @@ function evaluateToolCallCore(
       span: `command is ${command.length} chars (cap ${OVERSIZED_COMMAND_LENGTH})`,
       tier: 'executed',
     });
+  }
+  // #874 D5: a floor signal raised only by a closed-set read pipeline (see
+  // `closedReadPipelineMask`) next to an unrelated statement — `shieldcortex
+  // guard --help; grep -n PreToolUse <claude settings>` — is dropped when the
+  // same rule no longer matches with those pipelines blanked. The carve-outs
+  // above need EVERY statement to be a read; this one needs only the
+  // statements that name the path to be reads. It applies only when floor
+  // signals are ALL that is left, so a read next to any other recognised
+  // dangerous statement keeps the floor in every posture. The #500 command
+  // shapes and the #509 r5 cd-relative / guard-dir rules still apply to the
+  // whole call. `touch-sensitive-path` is not a floor signal and is never
+  // relieved: reading a key is the risk. Nor is a call that still makes a
+  // network request once the reads are blanked.
+  if (dangerSignals.length > 0
+      && dangerSignals.every(sig => GUARD_SELF_PROTECTION_SIGNALS.includes(sig))
+      && !guardDisableInvoked(scanSurface)) {
+    const rm = closedReadMasked();
+    // Conservative beyond the design: a call that still reaches the network
+    // once the reads are blanked keeps the floor (#522 G4 "a read with a
+    // hostile sibling"), even though the read's output cannot reach it.
+    if (rm !== null && !EXTERNAL_EGRESS.test(rm.egressCommand) && !EXTERNAL_EGRESS.test(url)) {
+      dangerSignals = dangerSignals.filter(sig => guardDirSignals.includes(sig)
+        || matchSpansClassified(DANGEROUS.filter(p => p.signal === sig), rm.surface, regions).length > 0);
+    }
   }
   if (dangerSignals.length > 0) {
     const action = dangerActionFor(dangerSignals, family);
