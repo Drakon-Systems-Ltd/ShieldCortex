@@ -462,9 +462,12 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
       ['dual40k.py', '#!/usr/bin/env python3', 40_000],
       ['absdual.py', '#!/usr/bin/python3', 9_000],
       ['customdual.py', '#!/tmp/evil/python3', 9_000],
+      ['absnode.js', '#!/usr/bin/node', 9_000],
     ] as const) {
       write(`scripts/${name}`, [shebang, 'DOC = """', prose(size), MENTIONS, '"""', 'systemctl stop nginx', ''].join('\n'));
     }
+    // #874 review round 2: a shell wrapper whose child inherits its environment.
+    write('scripts/wrap.sh', ['#!/bin/bash', './scripts/absdual.py', ''].join('\n'));
   });
   afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -540,6 +543,65 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
     expect(v.signals).toContain('stop-process-or-service');
   });
 
+  // #874 review round 2. Classifier input only; none of these strings is
+  // executed. (1) An absolute shebang ignores PATH but not a preload or an
+  // environment change, so those leave a path invocation unattested, directly,
+  // under `export`, through `bash -c` and through a shell wrapper file.
+  const PRELOADS = ['LD_PRELOAD=/tmp/x.so', 'PYTHONPATH=/tmp/evil', 'NODE_OPTIONS=--require=/tmp/p.js'];
+  it.each(['absdual.py', 'absnode.js'].flatMap(f => PRELOADS.flatMap(pre => [
+    `${pre} ./scripts/${f}`,
+    `export ${pre}; ./scripts/${f}`,
+    `${pre} bash -c "./scripts/${f}"`,
+  ])).concat([
+    'PYTHONSTARTUP=/tmp/p.py bash -c "./scripts/absdual.py"',
+    'PATH=/tmp/evil bash -c "./scripts/absdual.py"',
+    'LD_PRELOAD=/tmp/x.so bash scripts/wrap.sh',
+    'PYTHONPATH=/tmp/evil bash scripts/wrap.sh',
+    '/tmp/evil/bash scripts/wrap.sh',
+    'bash -l scripts/wrap.sh',
+  ]))('a preload under an absolute shebang stays gated: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
+  // (2) A nested `-c` program inherits the outer shell's distrust: a startup
+  // option that runs a file first, or a shell outside the system bin dirs.
+  it.each([
+    'bash --rcfile /tmp/rc -ic "python3 scripts/dual.py"',
+    'bash --rcfile /tmp/rc -ic "./scripts/absdual.py"',
+    'bash --init-file /tmp/rc -ic "python3 scripts/dual40k.py"',
+    'bash -ic "python3 scripts/dual40k.py"',
+    'bash -lc "python3 scripts/dual.py"',
+    'bash -l -c "./scripts/absdual.py"',
+    'bash -O extglob -c "python3 scripts/dual.py"',
+    '/tmp/evil/bash -c "python3 scripts/dual.py"',
+    '/tmp/evil/bash -c "python3 scripts/dual40k.py"',
+    '/opt/x/sh -c "./scripts/absdual.py"',
+  ])('an untrusted outer shell keeps a nested script gated: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
+  // (3) A builtin that sets a variable without a `NAME=` token withdraws
+  // attestation from the named interpreter and the absolute shebang alike.
+  it.each([
+    'printf -v PYTHONPATH /tmp/evil; python3 scripts/dual.py',
+    'read PYTHONPATH <<< /tmp/evil; python3 scripts/dual.py',
+    'printf -v PYTHONPATH /tmp/evil; ./scripts/absdual.py',
+    'read PYTHONPATH <<< /tmp/evil; ./scripts/absdual.py',
+    'read PYTHONPATH <<< /tmp/evil; python3 scripts/dual40k.py',
+    'mapfile -t PYTHONPATH < /tmp/p; python3 scripts/dual.py',
+    'for PYTHONPATH in /tmp/evil; do python3 scripts/dual.py; done',
+    ': ${PYTHONPATH:=/tmp/evil}; ./scripts/absdual.py',
+    'declare -x PYTHONPATH=/tmp/evil; ./scripts/absdual.py',
+  ])('a variable set by a builtin stays gated: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
   it.each([
     'python3 scripts/dual.py',
     'python3 scripts/dual40k.py',
@@ -549,6 +611,10 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
     './scripts/absdual.py',
     // PATH cannot redirect an absolute shebang.
     'PATH=/tmp/evil ./scripts/absdual.py',
+    './scripts/absnode.js',
+    // A trusted shell with inert options keeps a nested invocation's attestation.
+    'bash -c "python3 scripts/dual.py"',
+    'bash -e -o pipefail -c "./scripts/absdual.py"',
   ])('an attested interpreter keeps the mention relief: %s', (command) => {
     expect(run(command).decision).toBe('allow');
   });

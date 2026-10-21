@@ -4990,8 +4990,10 @@ export interface DetectedScript { path: string; lang: ScriptLang; }
  * evidence for these: whatever runs the file ignores it.
  */
 // `extension-shadowed`: as `extension`, but this command can change what a
-// PATH lookup finds, so an `env <interpreter>` shebang is no evidence; only an
-// absolute one is.
+// PATH lookup finds (and nothing else; see `interpreterShadow`), so an
+// `env <interpreter>` shebang is no evidence; only an absolute one is. A
+// command that can preload code or change the environment leaves a path
+// invocation `unattested` whatever its shebang.
 type DetectedVia = 'interpreter' | 'source' | 'extension' | 'extension-shadowed' | 'unattested';
 const VIA_STRENGTH: Record<DetectedVia, number> = { interpreter: 4, extension: 3, 'extension-shadowed': 2, source: 1, unattested: 0 };
 /** The system bin directories an interpreter path may name and still attest. */
@@ -5024,31 +5026,78 @@ const INERT_INTERPRETER_FLAG_RE: Record<Exclude<ScriptLang, 'sh'>, RegExp> = {
 function isInertInterpreterFlag(lang: ScriptLang, flag: string): boolean {
   return lang !== 'sh' && INERT_INTERPRETER_FLAG_RE[lang].test(flag);
 }
-/** A command that could make a bare interpreter name run something else. */
+/**
+ * #874 D3 (review round 2) — shell options that run no file before the inline
+ * program: `-e`/`-u`/`-x`/`-v`/`-f` clusters, `--norc`/`--noprofile`, and
+ * `-o` with one of a few named options (its value is the next token). Every
+ * other option may (`-i`/`-l` read startup files, `--rcfile`, `--init-file`,
+ * `-O`, an unknown `-o` value), and so withdraws trust in the shell.
+ */
+function isInertShellFlag(flag: string, value?: string): boolean {
+  if (flag === '--norc' || flag === '--noprofile') return true;
+  if (!/^-[euxvfo]*$/.test(flag)) return false;
+  return !flag.includes('o') || /^(?:errexit|nounset|pipefail|xtrace|verbose|noglob|noclobber)$/.test(value ?? '');
+}
+/**
+ * A command that could make a bare interpreter NAME find another program, and
+ * nothing more: a PATH assignment or a `name() {` definition. A path in
+ * command position (and an absolute `#!` program) is not looked up by name.
+ */
 // The function-definition arm starts only at a word start, so a long word run
 // is scanned once rather than from every offset (linear, not quadratic).
-const INTERPRETER_SHADOW_RE = /\bPATH=|\balias\b|\bfunction\b|(?<![\w.-])[\w.-]+\s*\(\s*\)\s*\{|\bhash\b|\benable\b|\bBASH_ENV=|\bENV=|\beval\b|\bsource\b|\bexport\b|\bdeclare\b|\btypeset\b|\bbuiltin\b/;
-/** An assignment of anything but an inert variable, after a word boundary of shell text. */
-const NON_INERT_ASSIGNMENT_RE = new RegExp(`(?:^|[\\s;&|(){}\`])(?!(?:${INERT_INTERPRETER_ENV})=)[A-Za-z_]\\w*\\+?=`);
+const INTERPRETER_LOOKUP_RE = /\bPATH\+?=|(?<![\w.-])[\w.-]+\s*\(\s*\)\s*\{/;
 /**
- * #874 D3 (review round 1) — can this command redirect a bare interpreter name
- * or load code into it before its program? Judged on the raw surface AND on
- * its tokenised form (quotes and backslashes removed, as the shell removes
- * them), so `P'ATH'=`, `P\ATH=`, `fu'nction'`, `al'ias'` and `ha'sh'` are
- * seen as the words they become. Any non-inert assignment anywhere in the
- * command counts (a preload variable, an exported one, one inside a quoted
- * `env -S` string), and so does a `.` in command position. Over-rejects by
- * design: the cost is a lost attestation, never a lost gate.
+ * A command that could load code into an interpreter or change its
+ * environment, read on the text: these words, a `${NAME=…}` / `${NAME:=…}`
+ * expansion, or an arithmetic `((…))` that may assign.
  */
-function interpreterLookupShadowed(surface: string): boolean {
-  if (INTERPRETER_SHADOW_RE.test(surface)) return true;
+const INTERPRETER_ENV_RE = /\balias\b|\bfunction\b|\bhash\b|\benable\b|\bBASH_ENV=|\bENV=|\beval\b|\bsource\b|\bexport\b|\bdeclare\b|\btypeset\b|\bbuiltin\b|\$\{\w+:?=|\(\(/;
+/** An assignment of anything but an inert variable or PATH, after a word boundary of shell text. */
+const NON_INERT_ASSIGNMENT_RE = new RegExp(`(?:^|[\\s;&|(){}\`])(?!(?:${INERT_INTERPRETER_ENV})=)(?!PATH\\+?=)[A-Za-z_]\\w*\\+?=`);
+/**
+ * #874 D3 (review round 2) — shell words that set or export a variable, load
+ * shell code, or change how later words resolve, without a `NAME=` token
+ * (`printf -v NAME`, `read NAME`, `for NAME in`, `declare`, `mapfile`, …).
+ * Matched as whole tokens anywhere in the tokenised command, not only in
+ * command position: over-rejects (`grep read f`), never under-rejects.
+ */
+const ENV_SETTING_WORD_RE = /^(?:read|readarray|mapfile|declare|typeset|local|readonly|export|unset|let|eval|set|shopt|trap|alias|hash|builtin|enable|source|getopts|for|select|function)$/;
+/** Words that set a variable only with a flag: `printf -v NAME`, `wait -p NAME`, `command -p`. */
+const ENV_SETTING_WITH_FLAG: Record<string, RegExp> = { printf: /^-v/, wait: /^-p/, command: /^-[A-Za-z]*p/ };
+/**
+ * #874 D3 — how far this command can change what an interpreter runs.
+ * `lookup`: only which program a bare NAME finds (a PATH assignment or a
+ * `name() {` definition). `env`: anything that may load code into an
+ * interpreter or alter its environment — a non-inert assignment
+ * (`LD_PRELOAD`, `PYTHONPATH`, `NODE_OPTIONS`, …), `export`, `eval`,
+ * `source`/`.`, `alias`/`hash`/`function`, or a builtin that sets a variable
+ * without a `NAME=` token. `env` wins over `lookup`. An absolute `#!` program
+ * discharges `lookup`, never `env`.
+ */
+type InterpreterShadow = 'none' | 'lookup' | 'env';
+/**
+ * #874 D3 (review rounds 1-2) — judged on the raw surface AND on its
+ * tokenised form (quotes and backslashes removed, as the shell removes them),
+ * so `P'ATH'=`, `P\ATH=`, `fu'nction'`, `al'ias'` and `ha'sh'` are seen as the
+ * words they become. Over-rejects by design: the cost is a lost attestation,
+ * never a lost gate.
+ */
+function interpreterShadow(surface: string): InterpreterShadow {
   const dequoted = tokeniseStatement(surface).join(' ');
-  if (INTERPRETER_SHADOW_RE.test(dequoted) || NON_INERT_ASSIGNMENT_RE.test(dequoted)) return true;
+  if (INTERPRETER_ENV_RE.test(surface) || INTERPRETER_ENV_RE.test(dequoted) || NON_INERT_ASSIGNMENT_RE.test(dequoted)) return 'env';
   for (const stmt of splitCommandStatements(surface)) {
     const tokens = tokeniseStatement(stmt);
-    if (tokens[commandWordIndex(tokens)] === '.') return true;
+    if (tokens[commandWordIndex(tokens)] === '.') return 'env';
+    // One pass: a flag word arms its flag test for the tokens after it.
+    const armed = new Set<RegExp>();
+    for (const t of tokens) {
+      if (ENV_SETTING_WORD_RE.test(t)) return 'env';
+      for (const flag of armed) if (flag.test(t)) return 'env';
+      const flag = ENV_SETTING_WITH_FLAG[commandBaseName(t)];
+      if (flag) armed.add(flag);
+    }
   }
-  return false;
+  return INTERPRETER_LOOKUP_RE.test(surface) || INTERPRETER_LOOKUP_RE.test(dequoted) ? 'lookup' : 'none';
 }
 interface DetectedScriptVia extends DetectedScript { via: DetectedVia; }
 
@@ -5211,7 +5260,7 @@ function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScr
   const surface = maskSinkFreeInlinePrograms(execSurface);
   // #874 D3: a named interpreter vouches for the language only when the name
   // cannot have been redirected to some other program by this same command.
-  const interpreterShadowable = interpreterLookupShadowed(execSurface);
+  const shadow = interpreterShadow(execSurface);
 
   const add = (p: string, lang: ScriptLang | undefined, via: DetectedVia): void => {
     const clean = p.trim();
@@ -5255,7 +5304,7 @@ function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScr
 
     if (SCRIPT_INTERPRETER.test(base)) {
       const lang = langFromInterpreter(base);
-      let interpVia: DetectedVia = !interpreterShadowable && ATTESTING_INTERPRETER_TOKEN_RE.test(cmd)
+      let interpVia: DetectedVia = shadow === 'none' && ATTESTING_INTERPRETER_TOKEN_RE.test(cmd)
         ? 'interpreter'
         : 'unattested';
       for (let j = i + 1; j < tokens.length; j++) {
@@ -5268,16 +5317,20 @@ function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScr
           if (isInlineProgramFlag(base, a)) {
             // The inline program itself is already in the exec surface (and
             // already scanned); only follow a file invocation NESTED in it.
-            // #874 D3: a shadow in THIS command reaches the nested one too.
+            // #874 D3 (review round 2): the nested invocation keeps its
+            // attestation only under a trusted shell — no shadow anywhere in
+            // this command, a system-bin shell, and no startup option (`-i`,
+            // `-l`, `--rcfile`, …) that runs a file before the inline program.
             if (/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(base)) {
+              const shellTrusted = interpVia === 'interpreter' && isInertShellFlag(a.replace(/[cs]/g, ''));
               for (const nested of detectScriptInvocationsVia(tokens[j + 1] ?? '', depth + 1)) {
-                add(nested.path, nested.lang, interpreterShadowable ? shadowedVia(nested.via) : nested.via);
+                add(nested.path, nested.lang, shellTrusted ? nested.via : 'unattested');
               }
             }
             break;
           }
           // #874 D3: a flag that may load code before the program withdraws it.
-          if (!isInertInterpreterFlag(lang, a)) interpVia = 'unattested';
+          if (lang === 'sh' ? !isInertShellFlag(a, tokens[j + 1]) : !isInertInterpreterFlag(lang, a)) interpVia = 'unattested';
           if (FLAG_TAKES_VALUE.test(a)) j++;
           continue;
         }
@@ -5294,17 +5347,13 @@ function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScr
     // exception (#199): its body is the launcher's plumbing, not the operator's
     // command, and the bare-name spelling of the same call never folds at all.
     if (looksLikePathToken(cmd) && !isInstalledBinaryPath(cmd)) {
-      add(cmd, undefined, interpreterShadowable ? 'extension-shadowed' : 'extension');
+      // #874 D3 (review round 2): only a PATH-style shadow leaves the
+      // shebang as evidence (an absolute one ignores PATH); a preload or an
+      // environment change reaches whatever interpreter the shebang names.
+      add(cmd, undefined, shadow === 'none' ? 'extension' : shadow === 'lookup' ? 'extension-shadowed' : 'unattested');
     }
   }
   return found;
-}
-
-/** #874 D3 — the attestation an invocation keeps under a command that can redirect interpreter lookup. */
-function shadowedVia(via: DetectedVia): DetectedVia {
-  if (via === 'interpreter') return 'unattested';
-  if (via === 'extension') return 'extension-shadowed';
-  return via;
 }
 
 /** Per-file read cap. Larger than any hand-written script; a file over it is
@@ -5413,10 +5462,12 @@ function foldScriptSources(
     if (list) list.push({ lang, via });
     else invocations.set(p, [{ lang, via }]);
   };
-  // A child named by interpreter SOURCE is attested by nothing the guard can
-  // read: the text may say `python3 c.py` while the program runs it another way.
-  const nestedVia = (parentLang: ScriptLang, via: DetectedVia): DetectedVia =>
-    parentLang === 'sh' ? via : 'unattested';
+  // A child is recorded as an edge from the file that named it and resolved
+  // after the walk (below), when every invocation of that parent is known.
+  const edges: Array<{ parent: string; parentLang: ScriptLang; child: string; lang: ScriptLang; via: DetectedVia }> = [];
+  const noteChild = (parent: { path: string; lang: ScriptLang }, n: DetectedScriptVia): void => {
+    edges.push({ parent: parent.path, parentLang: parent.lang, child: n.path, lang: n.lang, via: n.via });
+  };
   const shebangs = new Map<string, Shebang | null>();
   for (const r of roots) noteInvocation(r.path, r.lang, r.via);
   // #184: carry the invocation chain so a nested match can name every hop.
@@ -5549,7 +5600,7 @@ function foldScriptSources(
       if (nestedOfReviewed.length > 0) {
         if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
         else for (const n of nestedOfReviewed) {
-          noteInvocation(n.path, n.lang, nestedVia(next.lang, n.via));
+          noteChild(next, n);
           if (!visited.has(n.path)) {
             queue.push({ path: n.path, lang: n.lang, depth: next.depth + 1, chain: [...next.chain, n.path] });
           }
@@ -5589,13 +5640,37 @@ function foldScriptSources(
     if (nested.length > 0) {
       if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;         // depth exceeded — say so
       else for (const n of nested) {
-        noteInvocation(n.path, n.lang, nestedVia(next.lang, n.via));
+        noteChild(next, n);
         if (!visited.has(n.path)) {
           queue.push({ path: n.path, lang: n.lang, depth: next.depth + 1, chain: [...next.chain, n.path] });
         }
       }
     }
   }
+
+  // #874 D3 (review round 2): a child keeps its own attestation only when its
+  // parent is a shell file and EVERY invocation of that parent is a trusted
+  // named shell: the child inherits the parent's environment, so a preload,
+  // a startup option or an unproven shell above it reaches it too. A child
+  // named by interpreter SOURCE is attested by nothing the guard can read:
+  // the text may say `python3 c.py` while the program runs it another way.
+  // Resolved to a fixed point (attestation only ever weakens, so it ends);
+  // if it does not settle inside the bound, every child is unattested.
+  const edgeVia: Array<DetectedVia | undefined> = edges.map(() => undefined);
+  const invocationsOf = (p: string): Array<{ lang: ScriptLang; via: DetectedVia }> => [
+    ...(invocations.get(p) ?? []),
+    ...edges.flatMap((e, k) => (e.child === p && edgeVia[k] ? [{ lang: e.lang, via: edgeVia[k]! }] : [])),
+  ];
+  let settled = edges.length === 0;
+  for (let pass = 0; !settled && pass <= edges.length + 1; pass++) {
+    settled = true;
+    edges.forEach((e, k) => {
+      const trusted = e.parentLang === 'sh' && invocationsOf(e.parent).every(i => i.via === 'interpreter');
+      const via: DetectedVia = trusted ? e.via : 'unattested';
+      if (edgeVia[k] !== via) { edgeVia[k] = via; settled = false; }
+    });
+  }
+  edges.forEach((e, k) => noteInvocation(e.child, e.lang, settled ? edgeVia[k]! : 'unattested'));
 
   // #874 D3: decided after the walk, when every invocation of each path is
   // known. One unattested or differently-languaged invocation withdraws it.
