@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- The npm release workflow now refuses to publish when the `v<version>` tag points at a different commit from the one being built: on a tag-triggered run the tag must also be the triggering tag and resolve to the run's commit, and on a branch-dispatched run it must resolve to the checked-out commit. The error names both commits (#881). The bundled ClawHub copy of the OpenClaw plugin stays a frozen 4.31.2 snapshot, and its manifest keeps saying 4.31.2.
+
 ## [5.11.0] - 2026-10-21
 
 Minor on 5.10.7. The OpenClaw plugin can send one report-only digest of recorded approval timeouts at session end to the `actionGuard.notify` webhook you already configured (#673, partial, PR #731); it reports only and changes no approval, timeout or decision. A write on a tampered `config.json` no longer re-signs it as valid: explicit setters refuse and exit 1, automatic writers skip, and `shieldcortex doctor` names the config verdict (#647, PR #699). `hono` moves to 4.13.13 and the MCP SDK to 1.32.1 to clear advisories published on 20 Oct (PR #876), and the npm release workflow verifies the published versions with fresh registry reads (#871, PR #872). Under Watch only (advisory), read-only inspection of ShieldCortex's own config on a session with no prompt surface is no longer denied, Watch only denials name their signal instead of `redacted-signal`, and `shieldcortex doctor` reports Watch only as advisory rather than off (#874, PR #879); the plain-read exception applies under every posture including Enforce, which still holds writes on that file and still denies the remaining dangerous tier with no prompt surface; Action Guard stays off by default. No new configuration. If `config.json` fails its signature check, a config write now refuses instead of clearing the warning; restore a backup whose signature verifies, or move it aside and rebuild it through the setters.
