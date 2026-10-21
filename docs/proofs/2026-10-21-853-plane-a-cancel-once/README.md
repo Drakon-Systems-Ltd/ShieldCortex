@@ -16,7 +16,7 @@ worker was a temporary probe, wired in through a per-case `--settings` file unde
 | Hook-side controlled cancel (the hook sees a cancel signal mid-hold and returns `deny`): does anything run? | **No.** Marker absent, and still absent 28 s after worker exit, which is 6.1 s past the 30 s hold's planned end. The model got `PreToolUse:Bash hook error: probe hold cancelled, nothing ran` (is_error). | X4 |
 | Worker cancelled mid-hold (SIGTERM / SIGINT to the `claude` process): does anything run? | **No**, in both cases, including after the 30 s hold would have ended. The hook got SIGTERM 11–12 ms after the controller signalled the worker. | X1, X2 |
 | Can a hook turn a cancellation into a run by printing `allow` on SIGTERM? | **No.** The late `allow` JSON was printed to stdout and logged by Claude Code, but the result was `status 1` / `outcome: error`, and nothing ran. | X3 |
-| Hook children after cancel | None were left: no hook process and no hold `sleep` child alive at the end of the post-exit wait. | X1–X4 |
+| Hook children after cancel | No hook process was left at the end of the post-exit wait (X1–X4). The hold `sleep` child was checked and not alive in X1–X3 only. X4's `cancelfile` probe does not log its 0.2 s polling `sleep` pids, so its `hook_child_alive = no` is the script default, not an observation; cleanup of X4's children was not checked. | X1–X4 (hook process), X1–X3 (hold child) |
 | What does the launcher see on a worker cancel? | It differs by signal. SIGTERM: rc 143, **no** tool result and **no** final `result` event. SIGINT: **rc 0**, a tool result `The user doesn't want to proceed with this tool use…`, and final `result` subtype `error_during_execution`. A launcher must not treat rc 0 as success. | X1, X2 |
 
 ## 1. Method
@@ -24,7 +24,8 @@ worker was a temporary probe, wired in through a per-case `--settings` file unde
 Scripts are in this directory and are reproducible as is:
 
 - `probe-hook.sh <runDir> <holdS> <allow|deny|cancelfile> <onSignal: exit|allow>`: the temporary
-  PreToolUse hook. It logs its start, its hold child's pid and `CLAUDE_PID`, then holds. `allow`/`deny`
+  PreToolUse hook. It logs its start and `CLAUDE_PID`, then holds. In `allow`/`deny` mode it also logs
+  its hold `sleep` child's pid; in `cancelfile` mode it logs no child pids. `allow`/`deny`
   sleep for the hold, then emit that `permissionDecision`. `cancelfile` polls `<runDir>/cancel` every
   0.2 s and emits `deny "probe hold cancelled, nothing ran"` if it appears, else `allow` at the end. It
   traps TERM, INT and HUP. With `onSignal=allow` it prints an `allow` decision and exits 0 on the
@@ -32,7 +33,8 @@ Scripts are in this directory and are reproducible as is:
 - `run-case.sh <CASE> <hookTimeoutS> <holdS> <mode> <onSignal> <none|TERM|INT|cancelfile> <atS>`: one
   isolated worker. The controlled action fires `<atS>` s after the hook logs its start. After the
   worker exits it waits `POST_WAIT` s, then checks for leftover hook processes and whether the hold
-  child is alive.
+  child is alive. The child check uses the pid logged by the hook, so it only observes something in
+  `allow`/`deny` mode; with no logged pid it reports the default `hook_child_alive=no`.
 - `run-all.sh`: the matrix below, cases in parallel.
 - `summarize.py <runDir>`: a scrubbed JSON summary (counts, timings, hook/tool outcomes, filtered
   debug lines). It drops session ids, tool-use ids and message ids, and masks `CLAUDE_PID`.
@@ -85,14 +87,16 @@ Times are epoch seconds (prefix `17926000` omitted), from the hook log, controll
 | X4 | 50 / 30 / cancelfile | cancel file at 25.683 (Δ6.09) | cancel-file-seen → deny at 25.786 | success, exit 0 (deny) | 1, is_error: `PreToolUse:Bash hook error: probe hold cancelled, nothing ran` | **none** | 0 / 10.2 s |
 
 All seven cases: `hook_invocations = 1`, `stream_tool_use_count = 1`, `hook_procs_left = 0`,
-`hook_child_alive = no`. Post-exit waits: 5 s (O1–O3) and 28 s (X1–X4). The X waits end 4.5–6.1 s after
-the 30 s hold's planned end (hook start + 30 s). No marker appeared during them.
+`hook_child_alive = no`. `hook_child_alive = no` is an observation only for O1, O2 and X1–X3, which
+logged a hold child pid; for O3 and X4 (`cancelfile`) no child pid was logged, so it is the default.
+Post-exit waits: 5 s (O1–O3) and 28 s (X1–X4). The X waits end 4.5–6.1 s after the 30 s hold's
+planned end (hook start + 30 s). No marker appeared during them.
 
 Debug-log lines, verbatim (paths shortened to `…` here; full text in `evidence/*.json`):
 
-- X1: `[uds-messaging] Shutting down`, then `Hooks: PreToolUse:Bash […] finished with status 1 (6098ms)`, then `[ERROR] Hook PreToolUse:Bash (PreToolUse) error: status code 1`.
-- X2: `[uds-messaging] Shutting down`, then `Hooks: PreToolUse:Bash […] cancelled (6083ms)`, then `Hook PreToolUse:Bash (PreToolUse) cancelled:`.
-- X3: `finished with status 1 (6113ms)`, then `[ERROR] "Hook PreToolUse:Bash (PreToolUse) error: status code 1\nstdout:\n{…"permissionDecision":"allow","permissionDecisionReason":"probe late allow after TERM"}}"`. The hook's own exit was 0, so the 1 is Claude Code's status for a hook ended by teardown (LIKELY, inferred from X1/X3).
+- X1: `[uds-messaging] Shutting down`, then `Hooks: PreToolUse:Bash […] finished with status 1 (6067ms)`, then `[ERROR] Hook PreToolUse:Bash (PreToolUse) error: status code 1`.
+- X2: `[uds-messaging] Shutting down`, then `Hooks: PreToolUse:Bash […] cancelled (6061ms)`, then `Hook PreToolUse:Bash (PreToolUse) cancelled:`.
+- X3: `finished with status 1 (6057ms)`, then `[ERROR] "Hook PreToolUse:Bash (PreToolUse) error: status code 1\nstdout:\n{…"permissionDecision":"allow","permissionDecisionReason":"probe late allow after TERM"}}"`. The hook's own exit was 0, so the 1 is Claude Code's status for a hook ended by teardown (LIKELY, inferred from X1/X3).
 - X4: `returned permissionDecision: deny (reason: probe hold cancelled, nothing ran)`.
 
 A first run of the same matrix (16:25:35Z–16:26:14Z) gave the same outcome on every case: marker
