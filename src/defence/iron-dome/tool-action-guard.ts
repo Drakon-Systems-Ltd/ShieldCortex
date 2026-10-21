@@ -5127,7 +5127,9 @@ function statementWritesInterpreterPath(tokens: readonly string[], pending: { re
     if (pending.redirect) {
       pending.redirect = false;
       if (mayNameInterpreterPath(t)) return true;
-      continue;
+      // A guessed operator (a quoted `\"->\"` word) must not swallow a real
+      // redirect that follows: re-judge a token that carries one.
+      if (!t.includes('>')) continue;
     }
     if (REDIRECT_OP_RE.test(t)) { pending.redirect = true; continue; }
     const attached = t.match(REDIRECT_ATTACHED_RE);
