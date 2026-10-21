@@ -5062,8 +5062,12 @@ const NON_INERT_ASSIGNMENT_RE = new RegExp(`(?:^|[\\s;&|(){}\`])(?!(?:${INERT_IN
  * command position: over-rejects (`grep read f`), never under-rejects.
  */
 const ENV_SETTING_WORD_RE = /^(?:read|readarray|mapfile|declare|typeset|local|readonly|export|unset|let|eval|set|shopt|trap|alias|hash|builtin|enable|source|getopts|for|select|function)$/;
-/** Words that set a variable only with a flag: `printf -v NAME`, `wait -p NAME`, `command -p`. */
-const ENV_SETTING_WITH_FLAG: Record<string, RegExp> = { printf: /^-v/, wait: /^-p/, command: /^-[A-Za-z]*p/ };
+/**
+ * Words that set a variable only with a flag: `printf -v NAME`, `wait -p NAME`,
+ * `command -p`. A Map, so a token such as `constructor` or `__proto__` finds
+ * nothing rather than an inherited object property.
+ */
+const ENV_SETTING_WITH_FLAG: ReadonlyMap<string, RegExp> = new Map([['printf', /^-v/], ['wait', /^-p/], ['command', /^-[A-Za-z]*p/]]);
 /**
  * #874 D3 — how far this command can change what an interpreter runs.
  * `lookup`: only which program a bare NAME finds (a PATH assignment or a
@@ -5087,14 +5091,15 @@ function interpreterShadow(surface: string): InterpreterShadow {
   if (INTERPRETER_ENV_RE.test(surface) || INTERPRETER_ENV_RE.test(dequoted) || NON_INERT_ASSIGNMENT_RE.test(dequoted)) return 'env';
   for (const stmt of splitCommandStatements(surface)) {
     const tokens = tokeniseStatement(stmt);
-    if (tokens[commandWordIndex(tokens)] === '.') return 'env';
-    // One pass: a flag word arms its flag test for the tokens after it.
+    // One pass: a flag word arms its flag test for the tokens after it. A
+    // standalone `.` is treated like `source`, anywhere in the statement, so
+    // `if . f` / `while . f` / `coproc . f` cannot hide it from command position.
     const armed = new Set<RegExp>();
     for (const t of tokens) {
-      if (ENV_SETTING_WORD_RE.test(t)) return 'env';
+      if (t === '.' || ENV_SETTING_WORD_RE.test(t)) return 'env';
       for (const flag of armed) if (flag.test(t)) return 'env';
-      const flag = ENV_SETTING_WITH_FLAG[commandBaseName(t)];
-      if (flag) armed.add(flag);
+      const flag = ENV_SETTING_WITH_FLAG.get(commandBaseName(t));
+      if (flag instanceof RegExp) armed.add(flag);
     }
   }
   return INTERPRETER_LOOKUP_RE.test(surface) || INTERPRETER_LOOKUP_RE.test(dequoted) ? 'lookup' : 'none';

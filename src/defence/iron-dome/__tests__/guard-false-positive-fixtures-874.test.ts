@@ -602,6 +602,37 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
     expect(v.signals).toContain('stop-process-or-service');
   });
 
+  // #874 review round 3. Classifier input only; none of these strings is
+  // executed. (1) A dot-source behind `if` / `while` / `until` / `coproc` still
+  // runs a file before the sibling, so it withdraws the absolute-shebang
+  // attestation the way `source` does.
+  it.each([
+    'if . /tmp/x; then ./scripts/absdual.py; fi',
+    'while . /tmp/x; do ./scripts/absdual.py; done',
+    'until . /tmp/x; do ./scripts/absdual.py; done',
+    'coproc . /tmp/x; ./scripts/absdual.py',
+    'if source /tmp/x; then ./scripts/absdual.py; fi',
+  ])('a dot-source behind a keyword stays gated: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
+  // (2) A word that names an inherited object property is an ordinary word to
+  // the shadow check: the read is judged, and a real sink after it stays gated.
+  const PROTO_WORDS = ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf'];
+  it.each(PROTO_WORDS)('a read of the word %s is still a read', (word) => {
+    expect(() => run(`grep ${word} README.md`)).not.toThrow();
+    expect(run(`grep ${word} README.md`).decision).toBe('allow');
+  });
+
+  it.each(PROTO_WORDS)('a read of the word %s does not ungate a real sink after it', (word) => {
+    let v: ReturnType<typeof run> | undefined;
+    expect(() => { v = run(`grep ${word} README.md; python3 scripts/stop20k.py`); }).not.toThrow();
+    expect(v!.decision).not.toBe('allow');
+    expect(v!.signals).toContain('stop-process-or-service');
+  });
+
   it.each([
     'python3 scripts/dual.py',
     'python3 scripts/dual40k.py',
