@@ -1,0 +1,51 @@
+{
+ "marker_lines": [
+  "RAN-O1 1792600034.564137"
+ ],
+ "hook_invocations": 1,
+ "hook_log": [
+  "1792600019.457850 start pid=3455485 pgid=3455484 claude_pid=<pid> hold=15 mode=allow onsig=exit",
+  "1792600019.471499 child pid=3455501",
+  "1792600034.473616 hold-done returning allow",
+  "1792600034.474104 exit 0"
+ ],
+ "controller_log": [],
+ "payload_summary": [
+  "Bash bypassPermissions echo RAN-O1 $EPOCHREALTIME >> $TMPDIR/case853-plane-a-proof2/runs/O1/marker.txt"
+ ],
+ "stream_tool_use_count": 1,
+ "stream_tool_result_count": 1,
+ "stream_tool_results": [
+  {
+   "is_error": false,
+   "content": "(Bash completed with no output)"
+  }
+ ],
+ "stream_hook_events": [
+  [
+   "hook_started",
+   null,
+   null
+  ],
+  [
+   "hook_response",
+   "success",
+   0
+  ]
+ ],
+ "stream_final_result": [
+  {
+   "subtype": "success",
+   "is_error": false,
+   "num_turns": 2,
+   "result": "Ran: the command completed with no output (exit succeeded, nothing printed)."
+  }
+ ],
+ "debug_hook_lines": [
+  "2026-10-21T16:27:14.475Z [DEBUG] Hooks: PreToolUse:Bash [$TMPDIR/case853-plane-a-proof2/probe-hook.sh $TMPDIR/case853-plane-a-proof2/runs/O1 15 allow exit] finished with status 0 (15030ms)",
+  "2026-10-21T16:27:14.477Z [DEBUG] \"Hook PreToolUse:Bash (PreToolUse) success:\\n{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"permissionDecision\\\":\\\"allow\\\",\\\"permissionDecisionReason\\\":\\\"probe allow\\\"}}\"",
+  "2026-10-21T16:27:14.478Z [DEBUG] Hook PreToolUse ($TMPDIR/case853-plane-a-proof2/probe-hook.sh $TMPDIR/case853-plane-a-proof2/runs/O1 15 allow exit) returned permissionDecision: allow (reason: probe allow)",
+  "2026-10-21T16:27:15.620Z [DEBUG] [uds-messaging] Shutting down"
+ ],
+ "result": "case=O1 rc=0 t0=1792600017.488498 t1=1792600036.134972 wall=18.646474 post_wait_end=1792600041.138128 hook_procs_left=0 hook_child_alive=no"
+}

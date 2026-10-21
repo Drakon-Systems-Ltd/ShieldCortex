@@ -1,0 +1,49 @@
+{
+ "marker_lines": [],
+ "hook_invocations": 1,
+ "hook_log": [
+  "1792600018.929192 start pid=3455432 pgid=3455431 claude_pid=<pid> hold=30 mode=allow onsig=exit",
+  "1792600018.942123 child pid=3455439",
+  "1792600024.970098 signal-TERM"
+ ],
+ "controller_log": [
+  "1792600024.959477 controller sending SIGINT to claude_pid=<pid> comm=claude"
+ ],
+ "payload_summary": [
+  "Bash bypassPermissions echo RAN-X2 $EPOCHREALTIME >> $TMPDIR/case853-plane-a-proof2/runs/X2/marker.txt"
+ ],
+ "stream_tool_use_count": 1,
+ "stream_tool_result_count": 1,
+ "stream_tool_results": [
+  {
+   "is_error": true,
+   "content": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+  }
+ ],
+ "stream_hook_events": [
+  [
+   "hook_started",
+   null,
+   null
+  ],
+  [
+   "hook_response",
+   "cancelled",
+   1
+  ]
+ ],
+ "stream_final_result": [
+  {
+   "subtype": "error_during_execution",
+   "is_error": true,
+   "num_turns": 3,
+   "result": "None"
+  }
+ ],
+ "debug_hook_lines": [
+  "2026-10-21T16:27:04.964Z [DEBUG] [uds-messaging] Shutting down",
+  "2026-10-21T16:27:04.970Z [DEBUG] Hooks: PreToolUse:Bash [$TMPDIR/case853-plane-a-proof2/probe-hook.sh $TMPDIR/case853-plane-a-proof2/runs/X2 30 allow exit] cancelled (6061ms)",
+  "2026-10-21T16:27:04.970Z [DEBUG] Hook PreToolUse:Bash (PreToolUse) cancelled:"
+ ],
+ "result": "case=X2 rc=0 t0=1792600017.487160 t1=1792600025.543816 wall=8.056656 post_wait_end=1792600053.546588 hook_procs_left=0 hook_child_alive=no"
+}

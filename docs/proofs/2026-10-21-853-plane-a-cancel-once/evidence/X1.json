@@ -1,0 +1,37 @@
+{
+ "marker_lines": [],
+ "hook_invocations": 1,
+ "hook_log": [
+  "1792600019.740882 start pid=3455542 pgid=3455541 claude_pid=<pid> hold=30 mode=allow onsig=exit",
+  "1792600019.755457 child pid=3455549",
+  "1792600025.794871 signal-TERM"
+ ],
+ "controller_log": [
+  "1792600025.783269 controller sending SIGTERM to claude_pid=<pid> comm=claude"
+ ],
+ "payload_summary": [
+  "Bash bypassPermissions echo RAN-X1 $EPOCHREALTIME >> $TMPDIR/case853-plane-a-proof2/runs/X1/marker.txt"
+ ],
+ "stream_tool_use_count": 1,
+ "stream_tool_result_count": 0,
+ "stream_tool_results": [],
+ "stream_hook_events": [
+  [
+   "hook_started",
+   null,
+   null
+  ],
+  [
+   "hook_response",
+   "error",
+   1
+  ]
+ ],
+ "stream_final_result": [],
+ "debug_hook_lines": [
+  "2026-10-21T16:27:05.788Z [DEBUG] [uds-messaging] Shutting down",
+  "2026-10-21T16:27:05.795Z [DEBUG] Hooks: PreToolUse:Bash [$TMPDIR/case853-plane-a-proof2/probe-hook.sh $TMPDIR/case853-plane-a-proof2/runs/X1 30 allow exit] finished with status 1 (6067ms)",
+  "2026-10-21T16:27:05.795Z [ERROR] Hook PreToolUse:Bash (PreToolUse) error: status code 1"
+ ],
+ "result": "case=X1 rc=143 t0=1792600017.485733 t1=1792600026.297974 wall=8.812241 post_wait_end=1792600054.300652 hook_procs_left=0 hook_child_alive=no"
+}
