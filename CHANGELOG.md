@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.10.8] - 2026-10-21
+
+Patch on 5.10.7: dependency-only release that moves `hono` to 4.13.13 and `@modelcontextprotocol/sdk` to 1.32.1 to clear advisories published on 20 Oct (PR #876). No ShieldCortex source changed and nothing to do on upgrade.
+
 ### Fixed
 - **Dependencies: `hono` moves to 4.13.13 and `@modelcontextprotocol/sdk` to 1.32.1 to clear newly published advisories.** The lockfile pinned `hono` 4.13.7, below the patched 4.13.11 for the `serveStatic` double-decoding advisory (GHSA-5r4p-p66f-jhc7) published on 20 Oct, and the MCP SDK 1.31.0, below 1.32.0 for four advisories published the same day (GHSA-22jm-h49p-29qw, GHSA-6prh-2h8m-c8cw, GHSA-46jr-4wx8-v453, GHSA-rvq5-wwqv-78pq). `hono` is a transitive dependency of the MCP SDK; the SDK range in `package.json` is now `^1.32.1`. No ShieldCortex source changed. This restores the release audit gate (`release-audit-claims`), which reports unwaived production advisories live and had turned red on main.
 
