@@ -480,6 +480,8 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   // (r5) promoting itself to enforcing — both announced when they happen.
   // r8: a surface starting its record, watching first.
   'readiness-demoted', 'readiness-promoted', 'readiness-started',
+  // #874: parity with the hook — the other two self-protection floor signals.
+  'touch-guard-config', 'disable-action-guard',
 ]);
 const SAFE_ACTION_GUARD_OUTCOMES = new Set([
   'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',

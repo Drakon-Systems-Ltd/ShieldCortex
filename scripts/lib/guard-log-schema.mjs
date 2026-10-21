@@ -34,7 +34,7 @@ export const GUARD_SIGNAL_VOCABULARY = Object.freeze([
   'approval-required', 'change-permissions', 'command-exec', 'credential-access',
   'dangerous-shell', 'data-exfiltration', 'dd-overwrite', 'decode-pipe-to-shell',
   'delete-critical-path', 'delete-root-or-home', 'destructive-filesystem',
-  'disk-partition-tool', 'exec-like', 'external-egress', 'fallback-scan',
+  'disable-action-guard', 'disk-partition-tool', 'exec-like', 'external-egress', 'fallback-scan',
   'file-delete', 'filesystem-destructive', 'force-push', 'force-push-invocation',
   'fork-bomb', 'format-filesystem', 'git-delete-branch', 'git-force-push',
   'git-mutate', 'install-package', 'install-package-global', 'invalid-tool-input',
@@ -48,7 +48,7 @@ export const GUARD_SIGNAL_VOCABULARY = Object.freeze([
   'redirect-to-block-device', 'registry-code-exec', 'reviewed-script',
   'secret-egress', 'secret-egress-fold', 'service-restart', 'session-lease',
   'shell-injection', 'shred-device', 'stop-process-or-service',
-  'touch-approval-store', 'touch-decisions-ledger', 'touch-sensitive-path',
+  'touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'touch-sensitive-path',
   'destroy-data-or-infra', 'truncate-to-zero', 'type-coercion', 'unknown-keys', 'untrusted-script',
   'wipe-history-or-logs', 'write-content-catastrophic', 'write-content-dangerous',
   // the writer's substitute for any signal outside its allowlist
