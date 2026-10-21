@@ -3760,7 +3760,11 @@ const STORE_MUTATION_RE = new RegExp(
 );
 
 /** Nested execution keeps the gate. */
-const STORE_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\/|\bfunction\b|[\w.-]+\s*\(\s*\)\s*\{/i;
+// The function-definition arm starts only at a word start (#874 review): any
+// match starting mid-word has one starting at that word's start, so this is
+// the same test, but a long word is scanned once rather than from every
+// offset (linear, not quadratic).
+const STORE_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\/|\bfunction\b|(?<![\w.-])[\w.-]+\s*\(\s*\)\s*\{/i;
 
 /**
  * Split on statement separators without treating `2>&1` / `>&` / `|&` as
@@ -4985,14 +4989,67 @@ export interface DetectedScript { path: string; lang: ScriptLang; }
  * function), or a child named only by interpreter source. The shebang is no
  * evidence for these: whatever runs the file ignores it.
  */
-type DetectedVia = 'interpreter' | 'source' | 'extension' | 'unattested';
-const VIA_STRENGTH: Record<DetectedVia, number> = { interpreter: 3, extension: 2, source: 1, unattested: 0 };
+// `extension-shadowed`: as `extension`, but this command can change what a
+// PATH lookup finds, so an `env <interpreter>` shebang is no evidence; only an
+// absolute one is.
+type DetectedVia = 'interpreter' | 'source' | 'extension' | 'extension-shadowed' | 'unattested';
+const VIA_STRENGTH: Record<DetectedVia, number> = { interpreter: 4, extension: 3, 'extension-shadowed': 2, source: 1, unattested: 0 };
+/** The system bin directories an interpreter path may name and still attest. */
+const SYSTEM_BIN_DIR = String.raw`(?:\/usr\/bin\/|\/bin\/|\/usr\/local\/bin\/|\/opt\/homebrew\/bin\/)`;
 /** An interpreter token that names the real interpreter: bare, or in a system bin directory. */
-const ATTESTING_INTERPRETER_TOKEN_RE = /^(?:\/usr\/bin\/|\/bin\/|\/usr\/local\/bin\/|\/opt\/homebrew\/bin\/)?[A-Za-z0-9.]+$/;
+const ATTESTING_INTERPRETER_TOKEN_RE = new RegExp(`^${SYSTEM_BIN_DIR}?[A-Za-z0-9.]+$`);
+/** A `#!` program path that attests: absolute, in a system bin directory (#874 review N2). */
+const ATTESTING_SHEBANG_PROGRAM_RE = new RegExp(`^${SYSTEM_BIN_DIR}[A-Za-z0-9.]+$`);
+/**
+ * #713 / #874 D3 — the env variables that cannot change which program an
+ * interpreter name runs or what it loads before its program: locale and
+ * output settings only. Every other assignment can (`PATH`, `BASH_ENV`,
+ * `PYTHONSTARTUP`, `PYTHONPATH`, `NODE_OPTIONS`, `PERL5OPT`, `RUBYOPT`, …).
+ * Shared by the heredoc data-read gate and named-interpreter attestation.
+ */
+const INERT_INTERPRETER_ENV = 'LANG|LANGUAGE|LC_[A-Z]+|TZ|TERM|COLUMNS|NO_COLOR|FORCE_COLOR|PYTHONIOENCODING|PYTHONUTF8|PYTHONUNBUFFERED|PYTHONDONTWRITEBYTECODE';
+/**
+ * #713 / #874 D3 — interpreter flags that load no code before the program,
+ * each its own token. Any other flag may (`node --require=…`, `--import=…`,
+ * `ruby -r…`, `python3 -m…`, `php -dauto_prepend_file=…`). Shared as above.
+ */
+const INERT_INTERPRETER_FLAG = { python: '-[uBIsEq]', node: '--no-warnings', other: '-w' } as const;
+const INERT_INTERPRETER_FLAG_RE: Record<Exclude<ScriptLang, 'sh'>, RegExp> = {
+  python: new RegExp(`^${INERT_INTERPRETER_FLAG.python}$`),
+  node: new RegExp(`^${INERT_INTERPRETER_FLAG.node}$`),
+  ruby: new RegExp(`^${INERT_INTERPRETER_FLAG.other}$`),
+  perl: new RegExp(`^${INERT_INTERPRETER_FLAG.other}$`),
+  php: new RegExp(`^${INERT_INTERPRETER_FLAG.other}$`),
+};
+function isInertInterpreterFlag(lang: ScriptLang, flag: string): boolean {
+  return lang !== 'sh' && INERT_INTERPRETER_FLAG_RE[lang].test(flag);
+}
 /** A command that could make a bare interpreter name run something else. */
 // The function-definition arm starts only at a word start, so a long word run
 // is scanned once rather than from every offset (linear, not quadratic).
-const INTERPRETER_SHADOW_RE = /\bPATH=|\balias\b|\bfunction\b|(?<![\w.-])[\w.-]+\s*\(\s*\)\s*\{|\bhash\b|\benable\b|\bBASH_ENV=|\bENV=/;
+const INTERPRETER_SHADOW_RE = /\bPATH=|\balias\b|\bfunction\b|(?<![\w.-])[\w.-]+\s*\(\s*\)\s*\{|\bhash\b|\benable\b|\bBASH_ENV=|\bENV=|\beval\b|\bsource\b|\bexport\b|\bdeclare\b|\btypeset\b|\bbuiltin\b/;
+/** An assignment of anything but an inert variable, after a word boundary of shell text. */
+const NON_INERT_ASSIGNMENT_RE = new RegExp(`(?:^|[\\s;&|(){}\`])(?!(?:${INERT_INTERPRETER_ENV})=)[A-Za-z_]\\w*\\+?=`);
+/**
+ * #874 D3 (review round 1) — can this command redirect a bare interpreter name
+ * or load code into it before its program? Judged on the raw surface AND on
+ * its tokenised form (quotes and backslashes removed, as the shell removes
+ * them), so `P'ATH'=`, `P\ATH=`, `fu'nction'`, `al'ias'` and `ha'sh'` are
+ * seen as the words they become. Any non-inert assignment anywhere in the
+ * command counts (a preload variable, an exported one, one inside a quoted
+ * `env -S` string), and so does a `.` in command position. Over-rejects by
+ * design: the cost is a lost attestation, never a lost gate.
+ */
+function interpreterLookupShadowed(surface: string): boolean {
+  if (INTERPRETER_SHADOW_RE.test(surface)) return true;
+  const dequoted = tokeniseStatement(surface).join(' ');
+  if (INTERPRETER_SHADOW_RE.test(dequoted) || NON_INERT_ASSIGNMENT_RE.test(dequoted)) return true;
+  for (const stmt of splitCommandStatements(surface)) {
+    const tokens = tokeniseStatement(stmt);
+    if (tokens[commandWordIndex(tokens)] === '.') return true;
+  }
+  return false;
+}
 interface DetectedScriptVia extends DetectedScript { via: DetectedVia; }
 
 function langFromInterpreter(base: string): ScriptLang {
@@ -5154,7 +5211,7 @@ function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScr
   const surface = maskSinkFreeInlinePrograms(execSurface);
   // #874 D3: a named interpreter vouches for the language only when the name
   // cannot have been redirected to some other program by this same command.
-  const interpreterShadowable = INTERPRETER_SHADOW_RE.test(execSurface);
+  const interpreterShadowable = interpreterLookupShadowed(execSurface);
 
   const add = (p: string, lang: ScriptLang | undefined, via: DetectedVia): void => {
     const clean = p.trim();
@@ -5198,7 +5255,7 @@ function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScr
 
     if (SCRIPT_INTERPRETER.test(base)) {
       const lang = langFromInterpreter(base);
-      const interpVia: DetectedVia = !interpreterShadowable && ATTESTING_INTERPRETER_TOKEN_RE.test(cmd)
+      let interpVia: DetectedVia = !interpreterShadowable && ATTESTING_INTERPRETER_TOKEN_RE.test(cmd)
         ? 'interpreter'
         : 'unattested';
       for (let j = i + 1; j < tokens.length; j++) {
@@ -5211,11 +5268,16 @@ function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScr
           if (isInlineProgramFlag(base, a)) {
             // The inline program itself is already in the exec surface (and
             // already scanned); only follow a file invocation NESTED in it.
+            // #874 D3: a shadow in THIS command reaches the nested one too.
             if (/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(base)) {
-              for (const nested of detectScriptInvocationsVia(tokens[j + 1] ?? '', depth + 1)) add(nested.path, nested.lang, nested.via);
+              for (const nested of detectScriptInvocationsVia(tokens[j + 1] ?? '', depth + 1)) {
+                add(nested.path, nested.lang, interpreterShadowable ? shadowedVia(nested.via) : nested.via);
+              }
             }
             break;
           }
+          // #874 D3: a flag that may load code before the program withdraws it.
+          if (!isInertInterpreterFlag(lang, a)) interpVia = 'unattested';
           if (FLAG_TAKES_VALUE.test(a)) j++;
           continue;
         }
@@ -5231,9 +5293,18 @@ function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScr
     // language every rule is written for). An installed CLI's shim is the one
     // exception (#199): its body is the launcher's plumbing, not the operator's
     // command, and the bare-name spelling of the same call never folds at all.
-    if (looksLikePathToken(cmd) && !isInstalledBinaryPath(cmd)) add(cmd, undefined, 'extension');
+    if (looksLikePathToken(cmd) && !isInstalledBinaryPath(cmd)) {
+      add(cmd, undefined, interpreterShadowable ? 'extension-shadowed' : 'extension');
+    }
   }
   return found;
+}
+
+/** #874 D3 — the attestation an invocation keeps under a command that can redirect interpreter lookup. */
+function shadowedVia(via: DetectedVia): DetectedVia {
+  if (via === 'interpreter') return 'unattested';
+  if (via === 'extension') return 'extension-shadowed';
+  return via;
 }
 
 /** Per-file read cap. Larger than any hand-written script; a file over it is
@@ -5346,7 +5417,7 @@ function foldScriptSources(
   // read: the text may say `python3 c.py` while the program runs it another way.
   const nestedVia = (parentLang: ScriptLang, via: DetectedVia): DetectedVia =>
     parentLang === 'sh' ? via : 'unattested';
-  const shebangs = new Map<string, ScriptLang | null>();
+  const shebangs = new Map<string, Shebang | null>();
   for (const r of roots) noteInvocation(r.path, r.lang, r.via);
   // #184: carry the invocation chain so a nested match can name every hop.
   const queue: Array<{ path: string; lang: ScriptLang; depth: number; chain: string[] }> =
@@ -5531,32 +5602,50 @@ function foldScriptSources(
   for (const r of regions) {
     const p = r.sourcePath ?? '';
     const inv = invocations.get(p) ?? [];
+    const sb = shebangs.get(p);
     r.langAttested = r.lang !== 'sh' && inv.length > 0 && inv.every(i => i.lang === r.lang
-      && (i.via === 'interpreter' || (i.via === 'extension' && shebangs.get(p) === r.lang)));
+      && (i.via === 'interpreter'
+        || (i.via === 'extension' && sb?.lang === r.lang)
+        || (i.via === 'extension-shadowed' && sb?.lang === r.lang && !sb.viaEnv)));
   }
 
   return { content: parts.join('\n'), opaque, regions, reviewed, unreadSensitive };
 }
 
+/** #874 D3 — what a `#!` line attests: the language, and whether `env` looks the interpreter up on PATH. */
+interface Shebang { lang: ScriptLang; viaEnv: boolean; }
+
 /**
  * #874 D3 — the language a `#!` first line names, or null. Only the plain
- * interpreter and `env <interpreter>` spellings count; anything else (no
- * shebang, a shell, `env -S …`, an unknown program) is not an attestation.
+ * interpreter and `env <interpreter>` spellings count, and the program must
+ * sit in a system bin directory (the same directory policy as an explicit
+ * interpreter token: a `python3` in any other directory may be a wrapper that
+ * runs the file as shell). An `env` interpreter must be a bare or system-bin
+ * name with nothing after it; a plain interpreter may carry one inert flag.
+ * Anything else (no shebang, a shell, `env -S …`, an unknown program, a
+ * custom directory, a flag that loads code) is not an attestation.
  */
-function shebangLang(src: string): ScriptLang | null {
+function shebangLang(src: string): Shebang | null {
   const nl = src.indexOf('\n');
   const first = (nl < 0 ? src : src.slice(0, nl)).replace(/\r$/, '');
-  const m = /^#!\s*(\S+)(?:[ \t]+(\S+))?/.exec(first);
-  if (!m) return null;
-  let prog = commandBaseName(m[1]!);
-  if (prog === 'env') {
-    if (!m[2] || m[2].startsWith('-')) return null;
-    prog = commandBaseName(m[2]);
+  if (!first.startsWith('#!')) return null;
+  const words = first.slice(2).split(/[ \t]+/).filter(Boolean);
+  if (words.length === 0 || !ATTESTING_SHEBANG_PROGRAM_RE.test(words[0]!)) return null;
+  let prog = commandBaseName(words[0]!);
+  let rest = words.slice(1);
+  const viaEnv = prog === 'env';
+  if (viaEnv) {
+    if (rest.length !== 1 || !ATTESTING_INTERPRETER_TOKEN_RE.test(rest[0]!)) return null;
+    prog = commandBaseName(rest[0]!);
+    rest = [];
   }
-  if (/^python\d?(?:\.\d+)?$/.test(prog)) return 'python';
-  if (prog === 'node' || prog === 'nodejs') return 'node';
-  if (prog === 'ruby' || prog === 'perl' || prog === 'php') return prog;
-  return null;
+  let lang: ScriptLang | null = null;
+  if (/^python\d?(?:\.\d+)?$/.test(prog)) lang = 'python';
+  else if (prog === 'node' || prog === 'nodejs') lang = 'node';
+  else if (prog === 'ruby' || prog === 'perl' || prog === 'php') lang = prog;
+  if (!lang) return null;
+  if (rest.length > 1 || (rest.length === 1 && !isInertInterpreterFlag(lang, rest[0]!))) return null;
+  return { lang, viaEnv };
 }
 
 // ── Command-substitution expansion (#517) ────────────────────────────────────
@@ -6124,10 +6213,10 @@ function heredocBodies(text: string): HeredocBody[] {
 const DATA_READ_HEREDOC_INTRO = new RegExp(
   '^\\s*'
   + '(?:cd[ \\t]+[\\w.\\/~-]+[ \\t]*&&[ \\t]*)?'
-  + '(?:(?:LANG|LANGUAGE|LC_[A-Z]+|TZ|TERM|COLUMNS|NO_COLOR|FORCE_COLOR|PYTHONIOENCODING|PYTHONUTF8|PYTHONUNBUFFERED|PYTHONDONTWRITEBYTECODE)=[\\w.\\/:,-]*[ \\t]+)*'
+  + `(?:(?:${INERT_INTERPRETER_ENV})=[\\w.\\/:,-]*[ \\t]+)*`
   + '(?:(?:env|nohup|nice|command|timeout[ \\t]+\\d+[smhd]?)[ \\t]+)*'
   + '(?:\\/usr\\/bin\\/|\\/usr\\/local\\/bin\\/|\\/bin\\/|\\/opt\\/homebrew\\/bin\\/)?'
-  + '(?:python[\\d.]*(?:[ \\t]+-[uBIsEq])*|(?:node|nodejs)(?:[ \\t]+--no-warnings)*|(?:ruby|perl|php)(?:[ \\t]+-w)*)'
+  + `(?:python[\\d.]*(?:[ \\t]+${INERT_INTERPRETER_FLAG.python})*|(?:node|nodejs)(?:[ \\t]+${INERT_INTERPRETER_FLAG.node})*|(?:ruby|perl|php)(?:[ \\t]+${INERT_INTERPRETER_FLAG.other})*)`
   + '(?:[ \\t]+-)?'
   + '[ \\t]+<<([\'"])[A-Za-z_]\\w*\\1[ \\t]*\\n$',
 );

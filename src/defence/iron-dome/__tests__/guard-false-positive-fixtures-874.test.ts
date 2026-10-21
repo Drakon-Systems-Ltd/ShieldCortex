@@ -456,6 +456,15 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
     for (const [name, shebang] of [['dual.py', '#!/usr/bin/env python3'], ['dualbash.py', '#!/bin/bash']]) {
       write(`scripts/${name}`, [shebang, 'DOC = """', prose(9_000), MENTIONS, '"""', 'systemctl stop nginx', ''].join('\n'));
     }
+    // #874 review round 1: the same body past the 32,768-character span cap,
+    // under an absolute shebang, and under a shebang in a custom directory.
+    for (const [name, shebang, size] of [
+      ['dual40k.py', '#!/usr/bin/env python3', 40_000],
+      ['absdual.py', '#!/usr/bin/python3', 9_000],
+      ['customdual.py', '#!/tmp/evil/python3', 9_000],
+    ] as const) {
+      write(`scripts/${name}`, [shebang, 'DOC = """', prose(size), MENTIONS, '"""', 'systemctl stop nginx', ''].join('\n'));
+    }
   });
   afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -498,6 +507,50 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
 
   it('the attested sibling of the rows above is a mention', () => {
     expect(run('python3 scripts/dual.py').decision).toBe('allow');
+  });
+
+  // #874 review round 1: the shadow check runs on the tokenised command (the
+  // words the shell sees once quotes and backslashes are removed), treats any
+  // non-inert assignment and any non-inert interpreter flag as able to change
+  // what runs, and an env shebang as no evidence under such a command.
+  // Classifier input only; none of these strings is executed.
+  it.each([
+    "P'ATH'=/tmp/evil python3 scripts/dual.py",
+    'P\\ATH=/tmp/evil python3 scripts/dual.py',
+    "fu'nction' python3 { bash \"$@\"; }; python3 scripts/dual.py",
+    "al'ias' python3=bash; python3 scripts/dual.py",
+    "ha'sh' -p /tmp/evil/python3 python3; python3 scripts/dual.py",
+    'PYTHONSTARTUP=/tmp/p.py python3 scripts/dual.py',
+    'PYTHONPATH=/tmp/evil python3 scripts/dual.py',
+    'NODE_OPTIONS=--require=/tmp/p.js PERL5OPT=-I/tmp RUBYOPT=-r/tmp/p python3 scripts/dual.py',
+    'export PYTHONSTARTUP=/tmp/p.py; python3 scripts/dual.py',
+    'env PYTHONSTARTUP=/tmp/p.py python3 scripts/dual.py',
+    'python3 -W ignore scripts/dual.py',
+    'PATH=/tmp/evil bash -c "python3 scripts/dual.py"',
+    'PATH=/tmp/evil ./scripts/dual.py',
+    "P'ATH'=/tmp/evil ./scripts/dual.py",
+    './scripts/customdual.py',
+    'PATH=/tmp/evil python3 scripts/dual40k.py',
+    "P'ATH'=/tmp/evil python3 scripts/dual40k.py",
+    'PYTHONSTARTUP=/tmp/p.py python3 scripts/dual40k.py',
+    'PATH=/tmp/evil ./scripts/dual40k.py',
+  ])('a shadowed or preloaded interpreter stays gated: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
+  it.each([
+    'python3 scripts/dual.py',
+    'python3 scripts/dual40k.py',
+    'LANG=C python3 scripts/dual.py',
+    'python3 -u scripts/dual.py',
+    './scripts/dual.py',
+    './scripts/absdual.py',
+    // PATH cannot redirect an absolute shebang.
+    'PATH=/tmp/evil ./scripts/absdual.py',
+  ])('an attested interpreter keeps the mention relief: %s', (command) => {
+    expect(run(command).decision).toBe('allow');
   });
 
   it.each([
@@ -568,4 +621,31 @@ describe('#874 (f) real-effect oracle for the relieved read pipelines', () => {
     // length-preserving and only ever blanks whole statements).
     expect((masked ?? 'x').replace(/[\s;]|&&|\|\|/g, '')).toBe('');
   });
+});
+
+/**
+ * #874 review round 1 (D6 timing): the closed-read mask is reached by the
+ * secret-egress recheck. A long word after a masked read once drove a
+ * quadratic function-definition scan there (6.7 s at 60,000 characters).
+ * End to end through evaluateToolCall, with a warm-up call; the bound is
+ * generous so it does not depend on box speed, and it is far below the
+ * quadratic cost at these sizes.
+ */
+describe('#874 D6 closed-read mask stays linear on a long word', () => {
+  const shape = (n: number) =>
+    'grep -n "password: example-pattern" README.md; curl https://example.test/ ' + 'a'.repeat(n);
+
+  it.each([20_000, 60_000, 100_000])('evaluates %i trailing word characters promptly', (n) => {
+    evaluateToolCall('Bash', { command: shape(1_000) });
+    const t0 = performance.now();
+    evaluateToolCall('Bash', { command: shape(n) });
+    expect(performance.now() - t0).toBeLessThan(1000);
+  }, 120_000);
+
+  it('the mask itself is linear on the same input', () => {
+    const cmd = shape(100_000);
+    const t0 = performance.now();
+    closedReadPipelineMask(cmd, cmd, cmd);
+    expect(performance.now() - t0).toBeLessThan(1000);
+  }, 120_000);
 });
