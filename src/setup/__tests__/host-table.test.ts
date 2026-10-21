@@ -149,7 +149,7 @@ describe('host table', () => {
     const text = lines.join('\n');
     expect(text).toContain('Guard off');
     expect(text).toMatch(/OpenClaw.*observe-only/);
-    expect(text).toMatch(/Header Guard on\/off\/mixed: configured Claude Code hook and OpenClaw plugin only \(not Hermes,/);
+    expect(text).toMatch(/Header Guard on\/off\/mixed\/advisory: configured Claude Code hook and OpenClaw plugin only \(not Hermes,/);
     expect(text).toMatch(/mixed = Claude Code enforcing, OpenClaw observe-only\/off/);
     // #651 r2: observe-only is a collapsed label — a disarmed guard or
     // interceptor shows it too — so the legend never says it means "enabled".
@@ -157,6 +157,40 @@ describe('host table', () => {
     expect(text).not.toMatch(/observe-only = enabled/);
     // Display only: no command that would change posture.
     expect(text).not.toMatch(/action-guard-enable|action-guard-enforce|iron-dome activate|shieldcortex config/i);
+  });
+
+  // #874: advisory is not off. The hook still scans, warns, and denies the
+  // catastrophic tier and the self-protection floor.
+  it('#874 Watch only on the Claude Code hook is Guard advisory, not Guard off', () => {
+    const h = home();
+    mkdirSync(join(h, '.claude'), { recursive: true });
+    writeFileSync(
+      join(h, '.claude', 'settings.json'),
+      JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: 'shieldcortex hook pre-tool' }] }] } }),
+    );
+    const planes: HostGatePlanes = {
+      signedEnabled: true,
+      signedEnforce: false,
+      claudeWired: claudeToolGateWired(h),
+      openclaw: 'unknown',
+    };
+    expect(guardHeadlineFromPlanes(planes)).toBe('advisory');
+    const text = formatHostTable(scanHostTable(h), '5.10.7', planes).join('\n');
+    expect(text).toContain('Guard advisory');
+    expect(text).not.toContain('Guard off');
+    expect(text).toMatch(/Claude Code.*advisory/);
+    expect(text).toMatch(/Claude Code\s+present\s+wired\s+memory \+ tool gate\s+advisory/);
+    expect(text).not.toMatch(/Claude Code\s+present\s+wired\s+memory \+ tool gate\s+off/);
+    expect(text).toMatch(/Claude Code advisory = hook wired, signed guard on in Watch only/);
+    expect(text).not.toMatch(/action-guard-enable|action-guard-enforce|iron-dome activate|shieldcortex config/i);
+  });
+
+  it('#874 a disabled signed guard with the hook wired is still Guard off; an enforcing plane still wins', () => {
+    const base = { claudeWired: true, openclaw: 'unknown' as const };
+    expect(guardHeadlineFromPlanes({ ...base, signedEnabled: false, signedEnforce: false })).toBe('off');
+    expect(guardHeadlineFromPlanes({ ...base, signedEnabled: true, signedEnforce: true })).toBe('on');
+    expect(guardHeadlineFromPlanes({ claudeWired: false, openclaw: 'unknown', signedEnabled: true, signedEnforce: false })).toBe('off');
+    expect(guardHeadlineFromPlanes({ claudeWired: true, openclaw: 'enforcing', signedEnabled: true, signedEnforce: false })).toBe('on');
   });
 
   it('#651 prints no legend when no row shows a gate word', () => {

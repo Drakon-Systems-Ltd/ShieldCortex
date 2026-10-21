@@ -3694,6 +3694,13 @@ const STORE_READONLY_VERB_RE = new RegExp(`^(?:${STORE_READONLY_VERBS.join('|')}
  * round widens nothing for the approval store.
  */
 const LOCK_READONLY_VERB_RE = new RegExp(`^(?:${[...STORE_READONLY_VERBS, 'jq'].join('|')})$`, 'i');
+/**
+ * #874 guard-config inspection: the lock verbs plus `du`, which only reports
+ * sizes. Same separate-set discipline as the lock set above, so neither the
+ * #89 store set nor the #501 lock set widens.
+ */
+const GUARD_CONFIG_PATH_RE = /\.shieldcortex[\\/]+config\.json\b/i;
+const GUARD_CONFIG_READONLY_VERB_RE = new RegExp(`^(?:${[...STORE_READONLY_VERBS, 'jq', 'du'].join('|')})$`, 'i');
 /** `git <sub>` stages that only read the working tree / history. */
 const GIT_READONLY_SUBCOMMAND_RE = /^(?:log|show|diff|status|blame|ls-files)$/i;
 /**
@@ -3802,6 +3809,20 @@ export function guardStoreAccessIsReadOnly(text: string): boolean {
  */
 export function policyLockAccessIsReadOnly(text: string): boolean {
   return shellAccessIsReadOnly(text, { pathRe: POLICY_LOCK_PATH_RE, verbRe: LOCK_READONLY_VERB_RE, gitReadOnly: true });
+}
+
+/**
+ * #874: true when the whole command is pure shell inspection of
+ * `~/.shieldcortex/config.json` (`ls`/`du`/`cat`/`grep`/`jq` …). #500 put the
+ * config on the self-protection floor so a tool call cannot REWRITE it; a read
+ * changes nothing, and gating it denied the operator's own footprint check on
+ * headless hosts in every posture. Same fail-closed machinery as the store and
+ * lock helpers: every statement and pipeline stage must be a read verb, and a
+ * redirect, `tee`, `cp`/`mv`, nested execution or interpreter keeps the gate.
+ * The caller still refuses the carve-out when a #500 command shape is present.
+ */
+export function guardConfigAccessIsReadOnly(text: string): boolean {
+  return shellAccessIsReadOnly(text, { pathRe: GUARD_CONFIG_PATH_RE, verbRe: GUARD_CONFIG_READONLY_VERB_RE });
 }
 
 interface ReadOnlyShellOptions {
@@ -7068,6 +7089,15 @@ function evaluateToolCallCore(
       && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
       && !guardDisableInvoked(scanSurface)) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'disable-action-guard');
+  }
+  // #874: pure shell inspection of the guard's own config is not a rewrite of
+  // it. Same three conditions as the lock carve-out above; Write/Edit never
+  // pass (their surface is the target path, not a read verb).
+  if (dangerSignals.includes('touch-guard-config')
+      && guardConfigAccessIsReadOnly(scanSurface)
+      && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
+      && !guardDisableInvoked(scanSurface)) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'touch-guard-config');
   }
   // External egress is a potential exfil vector — but only when the call carries
   // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing

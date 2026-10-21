@@ -414,16 +414,20 @@ unreadable `config.json` as well as a real off, and a signed off does not prove
 the OpenClaw plane is off, because the plugin's own config can enable the
 guard. A live gate with no lock stays ❌.
 
-The HOSTS table header (`Guard on/off/mixed`) is computed from the configured
+The HOSTS table header (`Guard on/off/mixed/advisory`) is computed from the configured
 Claude Code hook and OpenClaw plugin only; Hermes feeds it nothing, and it is
 not a check of running processes. `mixed` is the Claude Code hook enforcing
 while OpenClaw is observe-only or off; `on` is otherwise at least one of the two
 enforcing (OpenClaw counts only when signed `actionGuard.enabled` is `true`);
-`off` is neither. The word after a host is that host's own configured gate. For
+`advisory` is neither enforcing while the Claude Code hook is wired and the
+signed guard is on in Watch only; `off` is none of these. The word after a host is that host's own configured gate. For
 OpenClaw, `observe-only` is a collapsed label: the plugin entry is not disabled
 but is not armed to block, which covers `enforce: false` and also a disabled
 `actionGuard` or `interceptor`. `off` is a disabled plugin entry. For Claude
-Code, `off` is the hook wired with signed Enforce not on. `Guard off` beside
+Code, `advisory` is the hook wired with the signed guard on in Watch only
+(ordinary dangerous calls run with a logged warning; catastrophic calls and
+calls that would change the guard itself are still denied), and `off` is the
+hook wired with the signed guard not on. `Guard off` beside
 `observe-only` is consistent, and doctor prints this legend under the table
 whenever a host shows one of those words.
 
