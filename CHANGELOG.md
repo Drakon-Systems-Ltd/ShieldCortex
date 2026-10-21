@@ -9,6 +9,13 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - The npm release workflow now requests online exact-version reads and allows 120 polls, 10 seconds apart, for both packages to appear before failing loudly (20 minutes of waiting, plus request time). The plugin tarball check runs after a successful plugin publish even if the version wait fails, unless the job is cancelled; release and ClawHub recovery require that check to pass (#871).
+- **Dependencies: `hono` moves to 4.13.13 and `@modelcontextprotocol/sdk` to 1.32.1 to clear newly published advisories.** The lockfile pinned `hono` 4.13.7, below the patched 4.13.11 for the `serveStatic` double-decoding advisory (GHSA-5r4p-p66f-jhc7) published on 20 Oct, and the MCP SDK 1.31.0, below 1.32.0 for four advisories published the same day (GHSA-22jm-h49p-29qw, GHSA-6prh-2h8m-c8cw, GHSA-46jr-4wx8-v453, GHSA-rvq5-wwqv-78pq). `hono` is a transitive dependency of the MCP SDK; the SDK range in `package.json` is now `^1.32.1`. No ShieldCortex source changed. This restores the release audit gate (`release-audit-claims`), which reports unwaived production advisories live and had turned red on main.
+
+## [5.10.7] - 2026-10-20
+
+Patch on 5.10.6: the Claude Code hook and the OpenClaw plugin now derive one session lease identity for the same session id, including ids with surrounding whitespace (#857, PR #868), and the Hermes plugin's outage log names the fallback tier that actually decided a block (#866, PR #870). No new configuration and nothing to do on upgrade.
+
+### Fixed
 - **Hermes plugin outage log names the deciding fallback tier (#866).** A self-protection fallback deny was labelled `FALLBACK_BLOCK (dangerous)` even though the decision blocked on the self-protection branch. The label now says `self-protection`, `catastrophic`, or `dangerous` in the same precedence the decision uses (self-protection first, then catastrophic, then dangerous). Logging only; the block itself was already correct.
 - Session lease identities now trim surrounding whitespace and reject malformed Unicode consistently in Claude Code and OpenClaw, preventing cross-plane self-refusals and malformed-id aliases. Session ids that differ only by surrounding whitespace are now treated as one session on both planes. Both decline a file-based identity through a symlinked state directory. A nonblank id whose key cannot be derived is refused on both planes instead of the Claude Code hook leasing as a process holder. Older distributions without identity helpers retain their raw-id compatibility fallback and cannot guarantee cross-plane parity (#857). This closes the two parity exceptions listed under #854 in 5.10.6.
 
