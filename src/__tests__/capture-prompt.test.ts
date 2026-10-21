@@ -12,6 +12,10 @@
  * choke on the test corpus.
  */
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
+import { classifySensitivity } from '../defence/sensitivity/index.js';
+// @ts-expect-error — JS module with no .d.ts
+import { recordSessionEvent } from '../../scripts/lib/session-capture.mjs';
 
 // `.mjs` import — Jest with ESM support resolves this at runtime.
 // @ts-expect-error — JS module with no .d.ts
@@ -36,6 +40,58 @@ afterEach(() => {
 });
 
 describe('captureForSessionEvent', () => {
+  describe('#858: stored prompt sensitivity after redaction', () => {
+    beforeEach(() => {
+      closeDatabase();
+      initDatabase(':memory:');
+    });
+
+    afterEach(() => {
+      closeDatabase();
+    });
+
+    // Unlike a Stripe key, this synthetic OpenAI format is detected by the
+    // credential scanner but not the sensitivity classifier's key patterns.
+    const secret = 'sk-' + 'abcdefghijklmnopqrstuvwxyz';
+    const personal = 'Surprise birthday trip for my wife in March.';
+
+    it.each([
+      { name: 'PERSONAL with a credential', raw: `${personal} ${secret}`, classified: 'PERSONAL', stored: 'CONFIDENTIAL', redacted: true },
+      { name: 'PERSONAL without a credential', raw: personal, classified: 'PERSONAL', stored: 'PERSONAL', redacted: false },
+      { name: 'RESTRICTED with a credential', raw: `${personal} api_key=${secret}`, classified: 'RESTRICTED', stored: 'RESTRICTED', redacted: true },
+    ])('stores $name as $stored', async ({ raw, classified, stored, redacted }) => {
+      // Prove the actual classifier reaches the tier under test, not a
+      // higher tier that would make the redaction-floor check vacuous.
+      expect(classifySensitivity(raw, '').level).toBe(classified);
+      const result = await captureForSessionEvent(raw);
+      if (redacted) {
+        expect(result.redactedCount).toBeGreaterThan(0);
+        expect(result.redactedText).not.toContain(secret);
+        expect(result.redactedText).toContain('[REDACTED-');
+      } else {
+        expect(result.redactedCount).toBe(0);
+        expect(result.redactedText).toBe(raw);
+      }
+
+      // Same capture → writer boundary as prompt-recall-hook.mjs; inspect
+      // the persisted row rather than only the sanitiser's return value.
+      const db = getDatabase();
+      const id = recordSessionEvent(db, {
+        session_id: 'sc-858',
+        ts: '2026-01-01T00:00:00Z',
+        kind: 'prompt',
+        actor: 'user',
+        payload: { text: result.redactedText },
+        sensitivity_level: result.sensitivity,
+      });
+      expect(typeof id).toBe('number');
+      const row = db.prepare('SELECT payload, sensitivity_level FROM session_events WHERE id = ?')
+        .get(id) as { payload: string; sensitivity_level: string };
+      expect(JSON.parse(row.payload)).toEqual({ text: result.redactedText });
+      expect(row.sensitivity_level).toBe(stored);
+    });
+  });
+
   it('redacts a synthetic credential and elevates sensitivity', async () => {
     // Built via concatenation so GitHub's secret-scanner skips it.
     const secret = 'sk_' + 'live_' + 'abcdefghijklmnopqrstuvwx';

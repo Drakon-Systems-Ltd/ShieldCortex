@@ -20,9 +20,11 @@ import {
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
 import {
+  canonicalProjectDirFromIndex,
   gatherReconcileInput,
   reconcilePluginState,
   REALTIME_PLUGIN_ID,
+  type ReconcileInput,
   type ReconcileVerdict,
 } from '../integrations/openclaw-plugin-index.js';
 import {
@@ -46,6 +48,7 @@ import {
   type HermesPluginCopy,
   type HermesPluginRootScan,
   type HermesPluginScan,
+  type HermesEnvironment,
   type HermesProjectState,
   type HermesScanOptions,
 } from '../setup/hermes-plugins.js';
@@ -98,6 +101,7 @@ import {
 } from '../memory/plane-drift.js';
 import {
   applyPolicyLock,
+  applyStrictFailClosedPosture,
   describePolicyLock,
   readPolicyLock,
   PROTECT_HINT,
@@ -125,7 +129,7 @@ import {
   getActionGuardCoreConfig,
   getConfigDir,
   hasTrustedMemorySidecarPosture,
-  isConfigTampered,
+  inspectConfigIntegrity,
   readRawConfig,
   migrateInterceptorActionGuardAlias,
 } from '../cloud/config.js';
@@ -155,6 +159,7 @@ import {
   writeRepairAgentBrief,
   claudeToolGateWired,
   claudePlaneEnforcing,
+  HERMES_AGENT_HOME_MARKERS,
   type HostGatePlanes,
   type OpenClawGatePosture,
 } from '../setup/host-table.js';
@@ -1180,10 +1185,64 @@ export async function checkAttestationCoverage(
   }
 }
 
+// The #674 trigger exactly as schema.sql, inline-schema.ts and migrations.ts
+// create it (SQLite stores it without IF NOT EXISTS or the final semicolon).
+const SHIPPED_PROJECT_IMMUTABILITY_TRIGGER_SQL = "CREATE TRIGGER trg_defence_audit_chained_project_immutable BEFORE UPDATE OF project ON defence_audit WHEN OLD.seq IS NOT NULL AND NEW.project IS NOT OLD.project BEGIN SELECT RAISE(ABORT, 'ShieldCortex #674: project of a chained defence_audit row is immutable (an older ShieldCortex build may be opening this database)'); END";
+
+/**
+ * #834: true only when the database holds the shipped #674 trigger: the right
+ * name, on `defence_audit`, with the shipped definition (whitespace aside).
+ * A same-named trigger with another body or on another table does not prevent
+ * the backfill, and `CREATE TRIGGER IF NOT EXISTS` never replaces it, so it
+ * counts as missing. A catalog read that throws also counts as missing.
+ * Read-only: one `sqlite_master` SELECT.
+ */
+export function hasShippedProjectImmutabilityTrigger(db: { prepare(sql: string): { all(...params: unknown[]): unknown[] } }): boolean {
+  return projectImmutabilityTriggerState(db) === 'shipped';
+}
+
+/**
+ * #834: why the protecting trigger does or does not count.
+ * - `shipped`: the shipped definition on `defence_audit`.
+ * - `absent`: no trigger holds the name; opening the database with a current
+ *   build creates it (`CREATE TRIGGER IF NOT EXISTS`).
+ * - `other`: a different trigger holds the name; a current build never replaces
+ *   it, so it must be removed before the shipped one can be installed.
+ * - `unreadable`: the catalog read threw.
+ */
+export type ProjectImmutabilityTriggerState = 'shipped' | 'absent' | 'other' | 'unreadable';
+
+export function projectImmutabilityTriggerState(db: { prepare(sql: string): { all(...params: unknown[]): unknown[] } }): ProjectImmutabilityTriggerState {
+  try {
+    const rows = db.prepare("SELECT tbl_name, sql FROM sqlite_master WHERE type='trigger' AND name=?")
+      .all('trg_defence_audit_chained_project_immutable') as { tbl_name: unknown; sql: unknown }[];
+    if (rows.length === 0) return 'absent';
+    if (rows.length !== 1) return 'other';
+    const [row] = rows;
+    if (row.tbl_name !== 'defence_audit' || typeof row.sql !== 'string') return 'other';
+    const normalised = row.sql.replace(/\s+/g, ' ').trim().replace(/;$/, '').trim();
+    return normalised === SHIPPED_PROJECT_IMMUTABILITY_TRIGGER_SQL ? 'shipped' : 'other';
+  } catch {
+    return 'unreadable';
+  }
+}
+
+function missingTriggerFix(state: Exclude<ProjectImmutabilityTriggerState, 'shipped'>): string {
+  if (state === 'absent') {
+    return 'The protecting trigger is missing, so the cause can recur. Opening the database with a current ShieldCortex (5.10.2 or later) recreates it.';
+  }
+  if (state === 'other') {
+    return 'The protecting trigger is missing, so the cause can recur: a different trigger holds its name (`trg_defence_audit_chained_project_immutable`), and ShieldCortex never replaces a trigger that already holds the name. Remove that trigger (for example with `sqlite3`), then open the database with a current ShieldCortex (5.10.2 or later) to install the shipped one.';
+  }
+  return 'The protecting trigger is missing, so the cause can recur: doctor could not read the trigger catalog to confirm it.';
+}
+
 /**
  * Chained ledger (#617, design §5.7): one row from the SAME verifier as
  * `shieldcortex ledger verify` — consistent (pass), inconsistent (fail, with
  * the first bad seq), or unchained (warn: this database has no chain yet).
+ * An inconsistent ledger is a warning only when every problem is the legacy
+ * project backfill and the database has the trigger that prevents recurrence.
  * A pass is local only: it never claims completeness or that the whole chain
  * was not rewritten; `ledger verify` prints the full limits statement.
  */
@@ -1214,9 +1273,15 @@ export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promis
     const report = verifyLedger(db, { heartbeatIntervalMs: resolveLedgerConfig().heartbeatIntervalMs });
     const message = summariseLedgerReport(report);
     if (report.status === 'inconsistent') {
-      return { label, status: 'fail', message, fix: allProblemsAreLegacyProjectBackfill(report)
-        ? 'Likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in `project` on chained audit rows; no digest field other than `project` changed in those rows. Find and remove or upgrade the old copy (check every global install and npx cache on this host) before running any repair; `shieldcortex ledger verify` shows the full report'
-        : 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
+      if (allProblemsAreLegacyProjectBackfill(report)) {
+        const triggerState = projectImmutabilityTriggerState(db);
+        const triggerPresent = triggerState === 'shipped';
+        const fix = `${report.problems.length} problem(s) are explained by a legacy project backfill: likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in \`project\` on chained audit rows; no digest field other than \`project\` changed in those rows. Find and remove or upgrade the old copy (check every global install and npx cache on this host). \`shieldcortex ledger verify\` shows the full report.`;
+        return { label, status: triggerPresent ? 'warn' : 'fail', message, fix: triggerPresent
+          ? `${fix} The cause cannot recur while the protecting trigger is present: the trigger now refuses those changes.`
+          : `${fix} ${missingTriggerFix(triggerState as Exclude<ProjectImmutabilityTriggerState, 'shipped'>)}` };
+      }
+      return { label, status: 'fail', message, fix: 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
     }
     if (report.status === 'unchained') return { label, status: 'warn', message };
     return { label, status: 'pass', message };
@@ -3101,6 +3166,55 @@ const HERMES_UNREADABLE_FIX =
   '`--fix-hermes-plugin-copies` moves nothing in any root: the copy the scan could not read ' +
   'can be the one the gateway loads, or the one another plugin root resolves through.';
 
+/**
+ * Hermes is confirmed ABSENT on this host, not merely un-askable (#651).
+ *
+ * `scan.present` only says a directory exists at the Hermes home; a leftover
+ * `~/.hermes/ekho-state` makes it true on a host the HOSTS table rightly calls
+ * `Hermes absent`, and the plugin-copies row then warned "could not determine
+ * which copy Hermes loads". That is the wrong question on a host with nothing
+ * to load. Every condition below is required, so uncertainty never reads as
+ * absence:
+ *
+ *   - no interpreter was found (`noInterpreter`, a structured fact — never a
+ *     parse of the reason string). It is set only when every candidate statted
+ *     as absent and PATH held no `hermes` launcher (#651 r2): an unreadable
+ *     candidate, or a launcher with no usable interpreter, is not absence. An
+ *     interpreter that was found and failed is a broken Hermes, not an absent one;
+ *   - no path was unreadable anywhere in the scan;
+ *   - `HERMES_HOME` is unset — an operator who points this process at a home
+ *     has told us Hermes lives there;
+ *   - none of the HOSTS table's agent-home markers (`HERMES_AGENT_HOME_MARKERS`)
+ *     is in the home, and there is no `plugins/` directory at all — each one
+ *     STATTED as missing (ENOENT/ENOTDIR). Any other stat error is a path that
+ *     could not be read, and that is not absence.
+ *
+ * No interpreter alone proves nothing: an agent home with a moved or broken
+ * venv still warns, because there a plugin copy may well be loaded.
+ */
+export function hermesConfirmedAbsent(scan: HermesPluginScan, env: HermesEnvironment): boolean {
+  if (scan.fromHermes || !scan.noInterpreter || scan.undetermined.length > 0) return false;
+  if (env.hermesHome !== null) return false;
+  return [...HERMES_AGENT_HOME_MARKERS, 'plugins'].every((entry) => {
+    try {
+      fs.lstatSync(path.join(scan.hermesHome, entry));
+      return false;
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      return code === 'ENOENT' || code === 'ENOTDIR';
+    }
+  });
+}
+
+/** The INFO line for a home directory that exists but holds no Hermes (#651). */
+function hermesAbsentMessage(hermesHome: string): string {
+  return (
+    `skipped (Hermes not detected — ${tildify(hermesHome)} exists but holds no Hermes agent home ` +
+    `(${HERMES_AGENT_HOME_MARKERS.join(', ')}) and no plugins/ directory, and no Hermes ` +
+    'interpreter was found)'
+  );
+}
+
 export async function checkHermesPluginShadowing(
   home: string = os.homedir(),
   opts: HermesScanOptions = {},
@@ -3144,6 +3258,12 @@ export async function checkHermesPluginShadowing(
 
   if (!scan.present) {
     return { label, status: 'info', message: 'skipped (Hermes not detected)' };
+  }
+
+  // A directory at the Hermes home with no agent home and no plugins in it is
+  // an absent runtime, the same verdict the HOSTS table draws (#651).
+  if (hermesConfirmedAbsent(scan, env)) {
+    return { label, status: 'info', message: hermesAbsentMessage(hermesHome) };
   }
 
   // No Hermes discovery, no verdict (#569 r4). Never PASS, never a winner.
@@ -3419,9 +3539,10 @@ export async function checkHermesPluginFreshness(
   opts: HermesScanOptions = {},
 ): Promise<CheckResult> {
   const label = 'Hermes plugin';
+  const env = hermesEnvironment(home);
   let scan: HermesPluginScan;
   try {
-    scan = scanHermesPluginCopies(hermesEnvironment(home), opts);
+    scan = scanHermesPluginCopies(env, opts);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { label, status: 'info', message: `check skipped — ${msg}` };
@@ -3433,6 +3554,10 @@ export async function checkHermesPluginFreshness(
   // uninstall was a crash. Doctor has no stored marker to read intent from.
   // `update` prints that sentence when its own swap fails, and nowhere else.
   if (!scan.present) return { label, status: 'info', message: 'skipped (Hermes not detected)' };
+  // Same absent verdict as the copies row, so the two never disagree (#651).
+  if (hermesConfirmedAbsent(scan, env)) {
+    return { label, status: 'info', message: hermesAbsentMessage(scan.hermesHome) };
+  }
   if (scan.undetermined.length > 0 || !scan.fromHermes) {
     return {
       label,
@@ -4541,7 +4666,11 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     // report "Action Guard is disabled in config" on a box where the policy
     // lock had it on and enforcing. Reading the file and grading the file is
     // exactly the gap #501 closes everywhere else.
-    const raw = applyPolicyLock(onDisk, readPolicyLock({ audit: false, warn: false }));
+    // #647: and on a tampered file the enforced posture is the strict one —
+    // the same view every runtime reader gets — so this row agrees with the
+    // integrity row instead of grading bytes nothing enforces.
+    const trusted = inspectConfigIntegrity().verdict === 'tampered' ? applyStrictFailClosedPosture(onDisk) : onDisk;
+    const raw = applyPolicyLock(trusted, readPolicyLock({ audit: false, warn: false }));
     const isBlock = isConfigBlock;
     const top = isBlock(raw?.actionGuard) ? (raw.actionGuard as Record<string, unknown>) : null;
     const interceptor = isBlock(raw?.interceptor) ? (raw.interceptor as Record<string, unknown>) : null;
@@ -4778,6 +4907,10 @@ export function policyLockRows(): CheckResult[] {
   const rows: CheckResult[] = [];
   const label = 'Action guard';
 
+  // #647: inspected FIRST and without side effects — the accessor below may
+  // adopt an unsigned file or self-heal a stale signature, and the row should
+  // name what was on disk when doctor looked, not what the look turned it into.
+  const integrity = inspectConfigIntegrity();
   const state = readPolicyLock({ audit: false, warn: false });
   const summary = describePolicyLock(state);
   // Signed leftover Enforce is not a live gate. Jarvis 5.0.6: HOSTS said
@@ -4820,6 +4953,12 @@ export function policyLockRows(): CheckResult[] {
       // Enforce + plugin-off is the Jarvis 5.0.6 paste: HOSTS said Guard off,
       // doctor still FAILed and printed `$ protect` + exit 1. That looks like
       // a crash. Warn, no copy-paste protect, until something is actually on.
+      //
+      // #651 r2: this row is deliberately NOT downgraded to INFO. The signed
+      // config read returns enabled:false for an unreadable or corrupt file as
+      // well as a real "off", and signed-off does not prove the OpenClaw plane
+      // is off (its plugin config can enable the guard). Neither is confirmed
+      // absence, so the WARN stays until a reader can prove both.
       rows.push({
         label: `${label} policy lock`,
         status: liveGating ? 'fail' : 'warn',
@@ -4846,29 +4985,78 @@ export function policyLockRows(): CheckResult[] {
       break;
   }
 
-  // The integrity signature, described for what it is.
-  const tampered = isConfigTampered();
-  rows.push(
-    tampered
-      ? {
-          label: `${label} config integrity`,
-          status: 'fail',
-          message:
-            'config.json does not match its integrity signature — corruption, a torn write, or a hand edit. ' +
-            'The strict fail-closed posture is in force (guard on + enforcing, no auto-approve, broker off, ' +
-            'defence mode strict). Note this HMAC is a CORRUPTION detector, not tamper protection: its key ' +
-            'lives beside the file it signs and under the same uid, so anything that can edit the config can ' +
-            're-sign it. The policy lock is the control that a same-user process cannot forge.',
-          fix: 'Re-write the affected settings with the `shieldcortex config --*` flags (they re-sign), then re-run doctor.',
-        }
-      : {
-          label: `${label} config integrity`,
-          status: 'pass',
-          message:
-            'config.json matches its integrity signature (a corruption / accidental-edit check — the key is ' +
-            'co-located and same-uid, so it is not tamper protection; the policy lock row above is).',
-        },
-  );
+  // The integrity signature, described for what it is. #647: the verdict is
+  // inspected without side effects (above) and named outright. The old row read
+  // a process flag that the next config write cleared — so a write that had
+  // just re-signed a tampered file reported `pass`, and anything that was not
+  // `tampered` (malformed, unreadable, unsigned) also read as a plain pass.
+  const HMAC_NOTE =
+    'Note this HMAC is a CORRUPTION detector, not tamper protection: its key lives beside the file it signs ' +
+    'and under the same uid, so anything that can edit the config can re-sign it. The policy lock is the ' +
+    'control that a same-user process cannot forge.';
+  const integrityLabel = `${label} config integrity`;
+  switch (integrity.verdict) {
+    case 'tampered':
+      rows.push({
+        label: integrityLabel,
+        status: 'fail',
+        message:
+          'verdict: tampered — config.json does not match its integrity signature (corruption, a torn write, or a ' +
+          'hand edit). The strict fail-closed posture is in force (guard on + enforcing, no auto-approve, no ' +
+          'reviewed-script pins, broker off, defence mode strict), and config writes are refused so the file, its ' +
+          `pins and this verdict are preserved. ${HMAC_NOTE}`,
+        fix:
+          'Do not re-run `shieldcortex config --*` flags to clear this — they refuse on a tampered file. Review the ' +
+          'file, then restore a backup whose signature still verifies, or move config.json aside (keep it) and ' +
+          'rebuild it through the setters (docs/design/2026-09-16-501-policy-lock.md §8.7). Then re-run doctor.',
+      });
+      break;
+    case 'malformed':
+    case 'unreadable':
+      rows.push({
+        label: integrityLabel,
+        status: 'fail',
+        message:
+          `verdict: ${integrity.verdict} — config.json exists but ${integrity.verdict === 'malformed' ? 'is not a JSON object' : 'cannot be read'}. ` +
+          `Settings fall back to defaults and config writes are refused so the file is not overwritten. ${HMAC_NOTE}`,
+        fix: `Fix or restore ${integrity.path}, then re-run doctor.`,
+      });
+      break;
+    case 'absent':
+      rows.push({
+        label: integrityLabel,
+        status: 'pass',
+        message: `verdict: absent — there is no config.json yet, so defaults apply and nothing needs verifying. ${HMAC_NOTE}`,
+      });
+      break;
+    case 'unsigned':
+      rows.push({
+        label: integrityLabel,
+        status: 'pass',
+        message:
+          'verdict: unsigned — config.json carries no signature yet (pre-v4.32 format); the next read adopts it as ' +
+          `trusted and the next write signs it. ${HMAC_NOTE}`,
+      });
+      break;
+    case 'self-heal':
+      rows.push({
+        label: integrityLabel,
+        status: 'pass',
+        message:
+          'verdict: self-heal — the embedded signature is stale but the legacy whole-file signature authenticates ' +
+          `these exact bytes; it is re-signed on the next read. ${HMAC_NOTE}`,
+      });
+      break;
+    case 'valid':
+      rows.push({
+        label: integrityLabel,
+        status: 'pass',
+        message:
+          'verdict: valid — config.json matches its integrity signature (a corruption / accidental-edit check — the key is ' +
+          'co-located and same-uid, so it is not tamper protection; the policy lock row above is).',
+      });
+      break;
+  }
 
   return rows;
 }
@@ -4883,6 +5071,18 @@ export function policyLockRows(): CheckResult[] {
 export function fixActionGuardConfig(): { changed: boolean; backupPath?: string; message: string } {
   const configPath = path.join(getConfigDir(), 'config.json');
   if (!fs.existsSync(configPath)) return { changed: false, message: 'no config file — nothing to migrate' };
+  // #647: on a tampered file the migration write is refused, so refuse here,
+  // BEFORE the backup copy — a "fix" that leaves a backup and changes nothing
+  // is litter, and one that re-signed the file would launder the verdict.
+  if (inspectConfigIntegrity().verdict === 'tampered') {
+    return {
+      changed: false,
+      message:
+        'not migrating: config.json fails its integrity check (verdict: tampered), and a migration write would ' +
+        're-sign it. Nothing was changed. Recover it first by moving config.json aside and rebuilding it through ' +
+        'the setters (docs/design/2026-09-16-501-policy-lock.md §8.7)',
+    };
+  }
   const raw = readRawConfig();
   const isBlock = (v: unknown): v is Record<string, unknown> =>
     !!v && typeof v === 'object' && !Array.isArray(v);
@@ -8113,8 +8313,11 @@ export async function checkOpenClawPluginLoadState(
     return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
   }
 
-  const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion }));
-  const result = renderPluginLoadVerdict(verdict);
+  const input = gatherReconcileInput(home, { expectedVersion });
+  const verdict = reconcilePluginState(input);
+  const result = verdict.state === 'duplicate-install'
+    ? withDuplicateInstallEvidence(renderPluginLoadVerdict(verdict), home, input)
+    : renderPluginLoadVerdict(verdict);
 
   // #226: "loaded" is not "protecting the conversation". A plugin whose
   // conversation-access grant is missing has had its llm_input/llm_output
@@ -8142,6 +8345,61 @@ export async function checkOpenClawPluginLoadState(
     }
   }
   return result;
+}
+
+/**
+ * #651: the duplicate-install row said "prune the stale duplicate" and named
+ * no directory. This adds what the evidence on disk actually supports — every
+ * observed project dir by full path, and which one (if any) OpenClaw's install
+ * index names — and nothing it does not.
+ *
+ * The index names an INSTALL, not what the running gateway loaded (#103), so
+ * nothing added here calls a directory stale or safe to delete (the verdict's
+ * own "prune the stale duplicate" wording is older and names none), and no
+ * removal command is printed: the fix stays the verdict's, and the message
+ * says "inspect before removing anything by hand". Where the index cannot be read, names no
+ * dir, or names one that is not on disk, the row says exactly that instead of
+ * guessing. Pure over `input`; reads nothing.
+ */
+export function withDuplicateInstallEvidence(
+  result: CheckResult,
+  home: string,
+  input: Pick<ReconcileInput, 'index' | 'projectDirs' | 'pluginId'>,
+): CheckResult {
+  const projectsRoot = path.join(home, '.openclaw', 'npm', 'projects');
+  const dirs = input.projectDirs ?? [];
+  const full = (name: string) => tildify(path.join(projectsRoot, name));
+  const observed = `Observed: ${dirs.map(full).join(', ')}.`;
+  let evidence: string;
+  if (input.index == null) {
+    evidence =
+      'The OpenClaw install index could not be read, so nothing here says which of them is the ' +
+      'recorded install.';
+  } else {
+    const named = canonicalProjectDirFromIndex(input.index, input.pluginId);
+    if (named === null) {
+      evidence = 'The OpenClaw install index names no install dir for this plugin, so nothing here ' +
+        'says which of them is the recorded install.';
+    } else if (!dirs.includes(named)) {
+      evidence = `The OpenClaw install index names ${full(named)}, which is not among them.`;
+    } else {
+      const others = dirs.filter((d) => d !== named).map(full).join(', ');
+      evidence =
+        `The OpenClaw install index names ${full(named)} as the install; it does not name ${others}. ` +
+        'The index records install state, not what the running gateway loaded.';
+    }
+  }
+  // The caution goes in the MESSAGE (#651 r2): the human renderer prints the
+  // message in full at every width, but drops a WARN fix note that carries
+  // `shieldcortex repair` and substitutes "No action needed". The fix stays the
+  // verdict's own.
+  const caution =
+    'Doctor does not say which of these, if any, is stale or safe to delete; inspect each ' +
+    '(for example the package.json version in it) before removing anything by hand.';
+  return {
+    ...result,
+    message: `${result.message}. ${observed} ${evidence} ${caution}`,
+  };
 }
 
 /**

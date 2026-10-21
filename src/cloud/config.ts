@@ -96,18 +96,25 @@ let cachedConfigFile: string | null = null;
 let cachedRawConfig: Record<string, unknown> | null = null;
 let cachedRawConfigFile: string | null = null;
 let cachedRawConfigMtimeMs: number | null = null;
+// The verdict the cached object was classified with (#647). A cache hit must
+// answer with the same verdict as the read that populated it — before this a
+// hit reported a tampered file as an ordinary writable one.
+let cachedRawConfigIntegrity: ConfigIntegrity | null = null;
 
 /** True when a read-only read of these bytes disagrees with the mutating reader's cache. */
 function readOnlyDisagreesWithCache(
   configFile: string,
   mtimeMsForCache: number | null,
   data: Record<string, unknown>,
+  integrity: ConfigIntegrity,
 ): boolean {
+  // #647 caches raw bytes, not the strict view: identical data can carry a
+  // different verdict after a signature becomes readable or is repaired.
   return (
     cachedRawConfig !== null &&
     cachedRawConfigFile === configFile &&
     sameCacheMtime(cachedRawConfigMtimeMs, mtimeMsForCache) &&
-    JSON.stringify(cachedRawConfig) !== JSON.stringify(data)
+    (cachedRawConfigIntegrity !== integrity || JSON.stringify(cachedRawConfig) !== JSON.stringify(data))
   );
 }
 
@@ -210,11 +217,39 @@ type IntegrityVerdict = 'valid' | 'self-heal' | 'tampered' | 'unverified';
  * whole-file signature). On a missing legacy sig file we adopt the current
  * content as trusted (first run after upgrade), matching prior behaviour.
  */
-function checkConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: string, readOnly = false): IntegrityVerdict {
+function checkConfigIntegrity(
+  parsed: Record<string, unknown>,
+  rawFileContent: string,
+  opts: { sideEffects: false },
+): IntegrityVerdict | 'unsigned';
+function checkConfigIntegrity(
+  parsed: Record<string, unknown>,
+  rawFileContent: string,
+  opts?: { readOnly?: boolean },
+): IntegrityVerdict;
+function checkConfigIntegrity(
+  parsed: Record<string, unknown>,
+  rawFileContent: string,
+  opts: { sideEffects?: boolean; readOnly?: boolean } = {},
+): IntegrityVerdict | 'unsigned' {
+  const sideEffects = opts.sideEffects !== false;
+  const readOnly = opts.readOnly === true;
   try {
+    // A read-only inspection (doctor) must not mint an integrity key: a
+    // missing key leaves nothing to verify against, which is reported as
+    // tampered exactly as the minting path would conclude.
+    const sign = sideEffects
+      ? (body: string): string => signConfig(body, readOnly)
+      : (() => {
+          const key = readIntegrityKeyNoMint();
+          return (body: string): string => {
+            if (key === null) throw new Error('no integrity key');
+            return createHmac('sha256', key).update(body, 'utf-8').digest('hex');
+          };
+        })();
     if (typeof parsed._sig === 'string') {
       // Embedded scheme: recompute over the canonical body (object minus _sig).
-      const computed = signConfig(canonicalBodyForSig(parsed), readOnly);
+      const computed = sign(canonicalBodyForSig(parsed));
       if (constantTimeEqualHex(parsed._sig, computed)) return 'valid';
       // Embedded sig mismatch — is the file otherwise authentic? If a legacy
       // whole-file sig still validates these exact bytes, the content is intact
@@ -222,13 +257,15 @@ function checkConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: s
       const sigFile = getSigFile();
       if (existsSync(sigFile)) {
         const legacySig = readFileSync(sigFile, 'utf-8').trim();
-        if (constantTimeEqualHex(legacySig, signConfig(rawFileContent, readOnly))) return 'self-heal';
+        if (constantTimeEqualHex(legacySig, sign(rawFileContent))) return 'self-heal';
       }
       return 'tampered';
     }
     // Legacy scheme: separate .config-sig file signed over the whole file.
     const sigFile = getSigFile();
     if (!existsSync(sigFile)) {
+      // Read-only inspection: say what the ordinary read WOULD do, don't do it.
+      if (!sideEffects) return 'unsigned';
       // First run after upgrade with no sig yet — adopt as trusted, write a
       // legacy sig so a subsequent read (before the next write upgrades it)
       // still verifies. Matches the prior behaviour to avoid a false tamper.
@@ -240,10 +277,68 @@ function checkConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: s
       return 'valid';
     }
     const storedSig = readFileSync(sigFile, 'utf-8').trim();
-    const computedSig = signConfig(rawFileContent, readOnly);
+    const computedSig = sign(rawFileContent);
     return constantTimeEqualHex(storedSig, computedSig) ? 'valid' : 'tampered';
   } catch {
     return 'tampered';
+  }
+}
+
+/** The integrity key if one exists — never generated (see checkConfigIntegrity). */
+function readIntegrityKeyNoMint(): string | null {
+  try {
+    const key = readFileSync(getIntegrityKeyFile(), 'utf-8').trim();
+    return key || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What `config.json` is, as the integrity check sees it (#647). Every state is
+ * named rather than collapsed: before this, "unreadable" and "non-object JSON"
+ * read as absent (and were then overwritten), and a cache hit forgot that the
+ * file it had cached was tampered.
+ *
+ *  - `absent`     no file, or an empty one — safe to create.
+ *  - `valid`      a signature verifies (or an unsigned legacy file was adopted).
+ *  - `self-heal`  the embedded `_sig` is stale but the legacy whole-file sig
+ *                 still authenticates the exact bytes; re-signed on read.
+ *  - `malformed`  present but not a JSON object.
+ *  - `unreadable` present but could not be read (permissions, a directory, I/O).
+ *  - `tampered`   no signature authenticates these bytes.
+ *  - `unverified` read-only legacy adoption depends on a write; not cached.
+ */
+export type ConfigIntegrity = 'absent' | 'valid' | 'self-heal' | 'malformed' | 'unreadable' | 'tampered' | 'unverified';
+
+/**
+ * Thrown by an explicit setter asked to write while `config.json` is
+ * `tampered` (#647).
+ *
+ * A write starts from the file's bytes, and on a tampered file those bytes are
+ * exactly what the integrity check refused to trust. Writing them back would
+ * sign them as valid and end the alarm; writing the strict view back instead
+ * would persist the fail-closed posture as if the operator had chosen it,
+ * wiping `reviewedScripts`/`autoApprove`. So the write does neither: the file,
+ * its pins and its stale signature are left exactly as they are, the strict
+ * posture stays in force on every read, and the message points at the
+ * runbook recovery (#501 §8.7: move the file aside, rebuild through setters).
+ */
+export class ConfigIntegrityRefusal extends Error {
+  readonly verdict: 'tampered';
+  readonly configPath: string;
+  constructor(configPath: string) {
+    super(
+      `Refusing to write ${configPath}: it does not match its integrity signature (verdict: tampered — ` +
+      'corruption, a torn write, or a hand edit). The file, its reviewed-script pins and its auto-approve ' +
+      'list are left untouched, and the strict fail-closed posture stays in force until the file is ' +
+      'recovered. A setting change cannot re-sign it. See `shieldcortex doctor` for the verdict, then ' +
+      'recover by moving config.json aside (keep it) and rebuilding it through the setters ' +
+      '(docs/design/2026-09-16-501-policy-lock.md §8.7).',
+    );
+    this.name = 'ConfigIntegrityRefusal';
+    this.verdict = 'tampered';
+    this.configPath = configPath;
   }
 }
 
@@ -377,15 +472,22 @@ export function isSensitiveLevel(level: string | null | undefined): boolean {
 // ── Trusted Skills ──────────────────────────────────────
 
 interface RawConfigState {
-  /** Parsed config (or {} if the file is missing/empty), with `_sig` stripped. */
+  /**
+   * Parsed config (or {} if the file is missing/empty/unreadable), with `_sig`
+   * stripped. In the UNLOCKED state this is what the file says — including on
+   * a `tampered` verdict, where it is the untrusted bytes, never the strict
+   * view (#647). The effective reader applies the posture.
+   */
   data: Record<string, unknown>;
   /**
-   * True when the file EXISTS but could not be parsed (corrupt / mid-write
-   * torn read). Callers that persist (getDeviceId/getDeviceName) MUST NOT write
-   * when this is set — overwriting would wipe cloudApiKey and every other
-   * setting that the unreadable file still holds.
+   * True when the file EXISTS but could not be parsed or read (corrupt /
+   * mid-write torn read / non-object JSON / unreadable). Callers that persist
+   * (getDeviceId/getDeviceName) MUST NOT write when this is set — overwriting
+   * would wipe cloudApiKey and every other setting that the file still holds.
    */
   parseFailed: boolean;
+  /** The integrity verdict these bytes were classified with (#647). */
+  integrity: ConfigIntegrity;
   /**
    * True when the file EXISTS but reading it threw (permissions, I/O), or, on
    * a read-only read, when it could not be stat'ed for any reason other than
@@ -416,6 +518,14 @@ interface RawConfigState {
  * what the operator configured and never bake a lock-derived value into the file
  * (that would silently turn a temporary OS-owned floor into a permanent local
  * setting, and would survive removing the lock).
+ *
+ * **Not forced either** (#647): on a `tampered` verdict the data here is still
+ * the file's own bytes, with `integrity: 'tampered'`. The strict fail-closed
+ * posture is applied by {@link readRawConfigState}, for the same reason the
+ * lock is: a value forced on top of the file for READS must never become the
+ * file. Before #647 the posture was applied here, so the next incidental write
+ * persisted it — `reviewedScripts`/`autoApprove` wiped — and re-signed the
+ * result as valid, ending the tamper alarm with nobody having reviewed it.
  */
 function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawConfigState {
   const configFile = getConfigFile();
@@ -433,8 +543,11 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
     try {
       lstatSync(configFile);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { data: {}, parseFailed: false };
-      return { data: {}, parseFailed: false, readFailed: true };
+      configTampered = false;
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { data: {}, parseFailed: false, integrity: 'absent' };
+      }
+      return { data: {}, parseFailed: true, readFailed: true, integrity: 'unreadable' };
     }
   } else {
     // mtime cache: if the file is unchanged since the last successful read,
@@ -444,19 +557,23 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
       if (
         cachedRawConfig !== null &&
         cachedRawConfigFile === configFile &&
-        cachedRawConfigMtimeMs === mtimeMs
+        cachedRawConfigMtimeMs === mtimeMs &&
+        cachedRawConfigIntegrity !== null
       ) {
+        configTampered = cachedRawConfigIntegrity === 'tampered';
         // Return a shallow copy so callers can mutate freely without poisoning
         // the cache (accessors push to arrays / set fields before writing back).
-        return { data: { ...cachedRawConfig }, parseFailed: false };
+        return { data: { ...cachedRawConfig }, parseFailed: false, integrity: cachedRawConfigIntegrity };
       }
     } catch {
       // stat failed (file likely absent) — fall through to the real read.
     }
   }
 
+  let present = false;
   try {
     if (options.readOnly || existsSync(configFile)) {
+      present = true;
       // Capture mtime BEFORE reading the bytes. The cache key must describe the
       // exact bytes we're about to read: if we stat AFTER readFileSync, a
       // concurrent write between read and stat would cache the OLD bytes under
@@ -473,43 +590,49 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
       // place while restoring mtime would otherwise report Guard off while
       // getActionGuardCoreConfig() still serves the cached strict-ON verdict.
       if (content.trim().length === 0) {
+        configTampered = false;
         const data: Record<string, unknown> = {};
-        if (options.readOnly && readOnlyDisagreesWithCache(configFile, mtimeMsForCache, data)) {
-          return { data, parseFailed: false, unverified: true };
+        if (options.readOnly && readOnlyDisagreesWithCache(configFile, mtimeMsForCache, data, 'absent')) {
+          return { data, parseFailed: false, integrity: 'absent', unverified: true };
         }
-        return { data, parseFailed: false };
+        return { data, parseFailed: false, integrity: 'absent' };
       }
 
-      let data: Record<string, unknown>;
+      let parsed: unknown;
       try {
-        data = JSON.parse(content);
+        parsed = JSON.parse(content);
       } catch {
         // File exists but is corrupt/torn. Do NOT return {} as writable —
         // signal parseFailed so persisters skip the write and we never clobber
         // a momentarily-unreadable config.
-        return { data: {}, parseFailed: true };
+        configTampered = false;
+        return { data: {}, parseFailed: true, integrity: 'malformed' };
       }
+      // `null`, an array or a scalar parses but is not a config. It used to
+      // fall into the catch below and read as ABSENT — writable, and so
+      // overwritten by the next setter. It is malformed, like a torn write.
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        configTampered = false;
+        return { data: {}, parseFailed: true, integrity: 'malformed' };
+      }
+      const data = parsed as Record<string, unknown>;
 
       // Verify HMAC integrity (embedded `_sig`, else legacy `.config-sig`).
-      const verdict = checkConfigIntegrity(data, content, options.readOnly);
+      const verdict = checkConfigIntegrity(data, content, { readOnly: options.readOnly });
       if (verdict === 'unverified') {
         delete data._sig;
-        return { data, parseFailed: false, unverified: true };
+        return { data, parseFailed: false, integrity: 'unverified', unverified: true };
       }
+      configTampered = verdict === 'tampered';
       if (verdict === 'tampered') {
-        configTampered = true;
         console.error(
           '[ShieldCortex] WARNING: config integrity check failed — the file does not match its signature ' +
           '(corruption, a torn write, or a hand edit). Falling back to the strict fail-closed posture.',
         );
-        // #501: a tampered verdict now forces the WHOLE fail-closed posture,
-        // not just `defenceMode`. Before this, `actionGuard.enabled` was still
-        // read straight out of the bytes the integrity check had just called
-        // untrustworthy — so the one scenario the check exists to catch was
-        // also the scenario in which the guard stayed off. Same posture the
-        // policy lock uses for an unverifiable lock, from the same constant, so
-        // the two cannot drift.
-        data = applyStrictFailClosedPosture(data);
+        // #501 forces the WHOLE fail-closed posture on a tampered verdict. #647
+        // moved WHERE: it is applied in readRawConfigState, on the way out to
+        // readers, so that this state (the one writes start from) keeps the
+        // file's own bytes and mutateRawConfig can refuse to sign them.
       }
 
       // `_sig` is an integrity artefact, never config data — strip it so it
@@ -530,37 +653,45 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
         // {}-wipe-on-parse-fail risk mutateRawConfig guards against cannot apply),
         // and routing back through mutateRawConfig would re-enter readRawConfigState
         // — re-hitting this same 'self-heal' verdict before the write lands and
-        // recursing. The direct write is what keeps it one-shot.
+        // recursing. The direct write is what keeps it one-shot. It is never the
+        // tampered path (#647): 'self-heal' requires a signature over these bytes.
         try {
           writeRawConfig({ ...data });
         } catch { /* best-effort: a failed heal just re-checks on the next read */ }
-        return { data, parseFailed: false };
+        return { data, parseFailed: false, integrity: 'self-heal' };
       }
 
       // Populate the mtime cache from the parsed (sig-stripped) object, keyed on
-      // the mtime captured BEFORE the read (matches the bytes actually parsed).
+      // the mtime captured BEFORE the read (matches the bytes actually parsed),
+      // together with the verdict so a cache hit answers the same way.
       if (mtimeMsForCache !== null && !options.readOnly) {
         cachedRawConfig = { ...data };
         cachedRawConfigFile = configFile;
         cachedRawConfigMtimeMs = mtimeMsForCache;
+        cachedRawConfigIntegrity = verdict;
       }
 
       // A read-only read does not take the cache, but the mutating reader
       // will while the mtime is unchanged. If its cached verdict for these
       // bytes differs from this fresh one (e.g. strict, cached after a write
       // failed, since recovered), the two readers disagree: unverified.
-      if (options.readOnly && readOnlyDisagreesWithCache(configFile, mtimeMsForCache, data)) {
-        return { data, parseFailed: false, unverified: true };
+      if (options.readOnly && readOnlyDisagreesWithCache(configFile, mtimeMsForCache, data, verdict)) {
+        return { data, parseFailed: false, integrity: verdict, unverified: true };
       }
 
-      return { data, parseFailed: false };
+      return { data, parseFailed: false, integrity: verdict };
     }
   } catch {
-    // Treated as absent by every existing caller; flagged for the read-only
-    // posture reader, which must not report an unreadable file as "off".
-    return { data: {}, parseFailed: false, readFailed: true };
+    // A file that EXISTS but cannot be read (EACCES, EISDIR, EIO) is not an
+    // absent one: treating it as absent let the next setter rename a fresh
+    // near-empty config over it (#647). Read-only, like a parse failure.
+    if (present) {
+      configTampered = false;
+      return { data: {}, parseFailed: true, readFailed: true, integrity: 'unreadable' };
+    }
   }
-  return { data: {}, parseFailed: false };
+  configTampered = false;
+  return { data: {}, parseFailed: false, integrity: 'absent' };
 }
 
 /**
@@ -580,8 +711,18 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
  */
 function readRawConfigState(options: { readOnly?: boolean } = {}): RawConfigState {
   const state = readRawConfigStateUnlocked(options);
+  // #501: a tampered verdict forces the WHOLE fail-closed posture, not just
+  // `defenceMode`. Before #501, `actionGuard.enabled` was still read straight
+  // out of the bytes the integrity check had just called untrustworthy — so
+  // the one scenario the check exists to catch was also the scenario in which
+  // the guard stayed off. Same posture the policy lock uses for an
+  // unverifiable lock, from the same constant, so the two cannot drift.
+  // #647: applied HERE, on the effective view only, never to the state a
+  // write starts from — same order and same function as before, so every
+  // reader sees exactly what it saw before #647.
+  const base = state.integrity === 'tampered' ? applyStrictFailClosedPosture(state.data) : state.data;
   const lock = options.readOnly ? readPolicyLock({ audit: false }) : getPolicyLockState();
-  const locked = applyPolicyLock(state.data, lock);
+  const locked = applyPolicyLock(base, lock);
   return locked === state.data ? state : { ...state, data: locked };
 }
 
@@ -596,6 +737,62 @@ export function getPolicyLockState(): PolicyLockState {
 
 export function readRawConfig(options: { readOnly?: boolean } = {}): Record<string, unknown> {
   return readRawConfigState(options).data;
+}
+
+// ── Integrity inspection (#647) ──
+
+export interface ConfigIntegrityReport {
+  /**
+   * The verdict, with one more word than {@link ConfigIntegrity}: `unsigned`
+   * is a file with no signature at all, which the next ordinary read adopts
+   * as trusted (pre-v4.32 compatibility). Inspection reports it instead of
+   * adopting it.
+   */
+  verdict: ConfigIntegrity | 'unsigned';
+  path: string;
+}
+
+interface ConfigBytes {
+  path: string;
+  verdict: ConfigIntegrity | 'unsigned';
+  bytes: Buffer | null;
+  data: Record<string, unknown> | null;
+}
+
+function readConfigBytesNoSideEffects(): ConfigBytes {
+  const path = getConfigFile();
+  if (!existsSync(path)) return { path, verdict: 'absent', bytes: null, data: null };
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(path);
+  } catch {
+    return { path, verdict: 'unreadable', bytes: null, data: null };
+  }
+  const content = bytes.toString('utf-8');
+  if (content.trim().length === 0) return { path, verdict: 'absent', bytes, data: null };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return { path, verdict: 'malformed', bytes, data: null };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { path, verdict: 'malformed', bytes, data: null };
+  }
+  const data = parsed as Record<string, unknown>;
+  return { path, verdict: checkConfigIntegrity(data, content, { sideEffects: false }), bytes, data };
+}
+
+/**
+ * The integrity verdict of `config.json` RIGHT NOW, with no side effects at
+ * all: no self-heal write, no legacy-signature adoption, no integrity-key mint,
+ * no cache update and no change to {@link isConfigTampered}. Doctor reports
+ * this, so that what it says cannot depend on which accessor ran first, and so
+ * that asking the question never changes the answer.
+ */
+export function inspectConfigIntegrity(): ConfigIntegrityReport {
+  const { path, verdict } = readConfigBytesNoSideEffects();
+  return { path, verdict };
 }
 
 /**
@@ -749,6 +946,7 @@ function invalidateRawConfigCache(): void {
   cachedRawConfig = null;
   cachedRawConfigFile = null;
   cachedRawConfigMtimeMs = null;
+  cachedRawConfigIntegrity = null;
 }
 
 /**
@@ -810,18 +1008,31 @@ function writeRawConfig(raw: Record<string, unknown>): void {
  * `parseFailed` flag, so mutating that `{}` and writing it back atomically
  * persists a near-empty, validly-signed config — wiping `cloudApiKey` and every
  * other setting the corrupt file still holds, with no error signal. This helper
- * reads through `readRawConfigState()` (which preserves `parseFailed`) and
- * refuses to write when the on-disk config is unreadable.
+ * reads through `readRawConfigStateUnlocked()` (which preserves `parseFailed`
+ * and the integrity verdict) and refuses to write when the on-disk config is
+ * unreadable.
  *
- * `onParseFail`:
- *   - `'throw'` (default): surface corruption to user-facing/explicit setters so
- *     the caller sees the problem rather than silently losing credentials.
+ * It also refuses to write a `tampered` config (#647). Every write signs what it
+ * writes, so a write on a tampered file can only do one of two wrong things:
+ * sign the untrusted bytes as valid (laundering the verdict), or — as it did
+ * before #647, when the read it started from was the forced view — persist the
+ * strict posture as if the operator had chosen it, wiping `reviewedScripts` and
+ * `autoApprove`. It now does neither: the refusal happens before the caller's
+ * change runs and before anything touches disk, so the file's bytes, mode,
+ * mtime, pins and stale signature all survive. Recovery is outside this
+ * gate: move the file aside and rebuild it through the setters (#501 §8.7).
+ *
+ * `onParseFail` (the name predates #647; it governs both refusals):
+ *   - `'throw'` (default): surface corruption/tampering to user-facing/explicit
+ *     setters so the caller sees the problem rather than silently losing
+ *     credentials. A tampered config throws {@link ConfigIntegrityRefusal}.
  *   - `'skip'`: silently no-op for automatic / hot-path writes that must NEVER
  *     throw (background sync, read-with-migration). Returns false so the caller
- *     can tell the write was skipped.
+ *     can tell the write was skipped. On a tampered config one stderr line per
+ *     process says so, so a background writer that keeps retrying stays quiet.
  *
  * Returns true if the mutation was applied and persisted, false if it was
- * skipped because the config was unparseable (`onParseFail: 'skip'`).
+ * skipped (`onParseFail: 'skip'`).
  */
 function mutateRawConfig(
   fn: (raw: Record<string, unknown>) => void,
@@ -831,7 +1042,7 @@ function mutateRawConfig(
   // configured, not the values the policy lock is currently forcing on top of
   // it. Writing the locked view back would freeze an OS-owned floor into the
   // local file, where it would outlive the lock that produced it.
-  const { data, parseFailed } = readRawConfigStateUnlocked();
+  const { data, parseFailed, integrity } = readRawConfigStateUnlocked();
   if (parseFailed) {
     console.error('[ShieldCortex] config.json is unreadable — refusing to overwrite (would wipe settings incl. cloudApiKey). Fix or remove the file.');
     if (onParseFail === 'throw') {
@@ -842,9 +1053,27 @@ function mutateRawConfig(
     }
     return false;
   }
+  if (integrity === 'tampered') {
+    warnTamperedWriteRefusedOnce();
+    if (onParseFail === 'throw') throw new ConfigIntegrityRefusal(getConfigFile());
+    return false;
+  }
   fn(data);
   writeRawConfig(data);
   return true;
+}
+
+let tamperedWriteRefusalWarned = false;
+
+/** One line per process, however often a background writer retries (#647). */
+function warnTamperedWriteRefusedOnce(): void {
+  if (tamperedWriteRefusalWarned) return;
+  tamperedWriteRefusalWarned = true;
+  console.error(
+    '[ShieldCortex] config.json fails its integrity check — refusing config writes so the file and its ' +
+    'pins are not re-signed or overwritten. Run `shieldcortex doctor`; recover by moving config.json aside and ' +
+    'rebuilding it through the setters (docs/design/2026-09-16-501-policy-lock.md §8.7).',
+  );
 }
 
 export function getTrustedSkills(): string[] {
@@ -1930,12 +2159,17 @@ export function setRevokeBySourceEnabled(enabled: boolean): void {
  * Returns a stable UUID for this machine.
  * Generates and persists on first call; reads from config thereafter.
  */
+// An id minted but not persisted because config.json is tampered (#647). Kept
+// for the process so the sync callers (several per upload) see ONE identity
+// rather than a fresh one per call while the write is being refused.
+let unpersistedDeviceId: string | null = null;
+
 export function getDeviceId(): string {
   const { data: raw, parseFailed } = readRawConfigState();
   if (typeof raw.deviceId === 'string' && raw.deviceId) {
     return raw.deviceId;
   }
-  const id = randomUUID();
+  const id = unpersistedDeviceId ?? randomUUID();
   if (parseFailed) {
     // The config file exists but is unreadable. Persisting now would write
     // `{ deviceId }` over the corrupt bytes and destroy cloudApiKey and every
@@ -1948,9 +2182,10 @@ export function getDeviceId(): string {
   }
   // Persist through the guarded helper so no bare writeRawConfig exists outside
   // mutateRawConfig; skip-policy keeps this read-then-persist path non-throwing.
-  mutateRawConfig((m) => {
+  const written = mutateRawConfig((m) => {
     m.deviceId = id;
   }, 'skip');
+  unpersistedDeviceId = written ? null : id;
   return id;
 }
 

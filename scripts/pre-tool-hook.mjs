@@ -1082,6 +1082,9 @@ const SAFE_SIGNALS = new Set([
   'write-content-dangerous', 'delete-critical-path', 'session-lease',
   // #509: the enforce-when-ready gate's own demotion and promotion notices.
   'readiness-demoted', 'readiness-promoted',
+  // #874: the other two self-protection floor signals. Guard reason codes,
+  // not operator data; redacted, a floor denial could not name its signal.
+  'touch-guard-config', 'disable-action-guard',
 ]);
 /**
  * #436 — the only tiers that deny with no operator affordance. Everything the
@@ -1226,17 +1229,25 @@ function sessionKeySalt() {
 }
 
 function sessionKeyFor(value) {
-  if (typeof value !== 'string' || !value.trim()) return undefined;
+  if (typeof value !== 'string') return undefined;
+  // Keep canonicalisation in sync with src/defence/iron-dome/session-guard.ts
+  // and scripts/stop-hook.mjs.
+  // Reject lone surrogates before UTF-8 can alias them with U+FFFD.
+  const id = value.trim();
+  if (!id || (typeof id.isWellFormed === 'function' ? !id.isWellFormed() : /[\uD800-\uDFFF]/u.test(id))) return undefined;
   const salt = sessionKeySalt();
   if (!salt) return undefined;
-  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${value}`).digest('hex').slice(0, 16)}`;
+  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${id}`).digest('hex').slice(0, 16)}`;
 }
 
 function hookSessionExtras(hookData, permissionMode) {
   const extra = {};
   const rawSessionId = typeof hookData?.session_id === 'string' ? hookData.session_id : hookData?.sessionId;
-  const sessionKey = sessionKeyFor(rawSessionId);
-  if (sessionKey) extra.sessionKey = sessionKey;
+  if (typeof rawSessionId === 'string' && rawSessionId.trim()) {
+    const sessionKey = sessionKeyFor(rawSessionId);
+    if (sessionKey) extra.sessionKey = sessionKey;
+    else extra.namedIdentityUnresolved = true;
+  }
   const safeMode = safePermissionMode(permissionMode);
   if (safeMode) extra.permissionMode = safeMode;
   return extra;
@@ -1663,6 +1674,12 @@ function safeGuardOutcomeReason(verdict, outcome, event) {
       : 'Action Guard warning in advisory mode; inspect local audit for details.';
   }
   if (outcome === 'denied_no_prompt_surface') {
+    // #874: under Watch only (advisory) the ordinary dangerous tier never gets
+    // here; only the self-protection floor does. Say so, instead of implying
+    // the posture asked for an approval it does not ask for.
+    if (verdict?.advisoryFloor === true) {
+      return 'Action Guard is in Watch only (advisory), but this call would change the guard\'s own state or config or switch it off, which Watch only still holds; this session has no prompt surface, so the tool call was denied.';
+    }
     return 'Action Guard required approval but this session has no prompt surface; the tool call was denied.';
   }
   if (String(verdict?.reason ?? '').toLowerCase().includes('guard unavailable')) {
@@ -3211,16 +3228,38 @@ process.stdin.on('end', async () => {
     // become a new way to deny everything — while state UNreadability fails
     // closed to 'unknown' inside the store itself.
     const harnessPid = resolveHarnessPid();
-    const leaseSelf = baseExtra.sessionKey || `ppid:${harnessPid}`;
+    // Blank/missing ids keep the process holder. A nonblank id whose key cannot
+    // be derived must not fall through to that holder — OpenClaw refuses, and
+    // sharing ppid would let two invalid named ids re-enter each other.
+    const leaseSelf = baseExtra.namedIdentityUnresolved
+      ? null
+      : (baseExtra.sessionKey || `ppid:${harnessPid}`);
     let leaseGate = null;
     try {
       const lease = await loadLease();
       if (lease) {
-        leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, holderPid: harnessPid });
-        if (leaseGate && leaseGate.ledgerChanged) {
-          console.error(
-            `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,
-          );
+        if (leaseSelf === null) {
+          const scope = typeof lease.scopeForToolCall === 'function'
+            ? lease.scopeForToolCall(toolName, toolInput)
+            : 'session-identity';
+          if (scope != null) {
+            leaseGate = {
+              scope,
+              decision: {
+                verdict: 'unknown',
+                reason:
+                  `this session's identity could not be derived, so ShieldCortex cannot tell whether ` +
+                  `another session holds ${scope} — refusing rather than acting under a shared or guessed identity`,
+              },
+            };
+          }
+        } else {
+          leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, holderPid: harnessPid });
+          if (leaseGate && leaseGate.ledgerChanged) {
+            console.error(
+              `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,
+            );
+          }
         }
         if (leaseGate && leaseGate.decision.verdict !== 'allow') {
           writeAuditEntry(safeToolName(toolName), {
@@ -3444,7 +3483,9 @@ process.stdin.on('end', async () => {
         actionId,
       });
       recordNotifyAudit(toolName, verdict, toolInput, { ...baseExtra, actionId }, notified);
-      console.error(`[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} — ${safeGuardOutcomeReason(verdict, 'warned', 'action_guard_warning')}`);
+      // #874: the one warning line names the signals, so the transcript says
+      // what was let through without anyone opening the audit.
+      console.error(`[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} — ${safeGuardOutcomeReason(verdict, 'warned', 'action_guard_warning')} [${safeSignalList(verdict.signals).join(', ')}]`);
       process.exit(0); // Advisory: warn, emit no decision.
     }
 
@@ -3646,7 +3687,9 @@ process.stdin.on('end', async () => {
     // already approved, or a call the judge hardened, is unaffected by this.
     await emitApprovalRequired(
       toolName,
-      verdict,
+      // #874: an advisory host reaches here only through the self-protection
+      // floor (or an unscanned call); the flag lets the denial say which.
+      !cfg.enforce && selfProtected && !unscannedBlock ? { ...verdict, advisoryFloor: true } : verdict,
       toolInput,
       permissionMode,
       'require_approval',

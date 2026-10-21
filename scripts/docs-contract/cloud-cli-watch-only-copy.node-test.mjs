@@ -142,6 +142,60 @@ describe('config --help Action Guard lines', () => {
   });
 });
 
+describe('Hermes outage fallback documentation', () => {
+  // Static source/copy contract only; this does not exercise the runtime gate.
+  it('source keeps self-protection and catastrophic floors, plus dangerous matches when enforcing', () => {
+    const plugin = read('plugins', 'hermes', 'shieldcortex', '__init__.py');
+    const policy = read('plugins', 'hermes', 'shieldcortex', 'policy.py');
+    assert.match(plugin, /fallback_denies = fallback_blocked or fallback_self_protected or \(fallback_dangerous and enforce\)/);
+    const actionFallback = between(policy, '    if not verdict.available:', '    if verdict.decision == "block":');
+    assert.match(actionFallback, /if fallback_self_protected:/);
+    assert.match(actionFallback, /return tool_call_decision\([\s\S]*enforce=enforce,[\s\S]*fallback_blocked=fallback_blocked,[\s\S]*fallback_dangerous=fallback_dangerous,/);
+    const toolFallback = between(policy, '    if not verdict.available:', '    if not enforce:');
+    assert.match(toolFallback, /if fallback_blocked:/);
+    assert.match(toolFallback, /if fallback_dangerous and enforce:/);
+  });
+
+  for (const file of ['README.md', 'CHANGELOG.md']) {
+    it(`${file} distinguishes default-enforcing and advisory outage tiers`, () => {
+      const paragraph = read(file).split('\n').find((line) => file === 'README.md'
+        ? line.startsWith('Hermes gates tool calls')
+        : line.startsWith('- **README "Where it can block":'));
+      assert.ok(paragraph, `no Hermes gate paragraph in ${file}`);
+      assert.match(paragraph, /enforces by default/);
+      assert.match(paragraph, /While the API is unreachable, its bounded fallback scan blocks the self-protection and catastrophic shapes it recognises in every mode, and recognised dangerous shapes while enforcing \(the default\)\./);
+      assert.match(paragraph, /In advisory mode, only the recognised self-protection and catastrophic shapes are blocked by the fallback\./);
+      assert.doesNotMatch(paragraph, /bounded fallback scan blocks only/);
+    });
+  }
+
+  it('plugin README names the same outage fallback tiers as the main README', () => {
+    const plugin = read('plugins', 'hermes', 'shieldcortex', 'README.md').replace(/\s+/g, ' ');
+    assert.match(plugin, /While the API is unreachable, its bounded fallback scan blocks the self-protection and catastrophic shapes it recognises in every mode, and recognised dangerous shapes while enforcing \(the default\)\./);
+    assert.match(plugin, /In advisory mode, only the recognised self-protection and catastrophic shapes are blocked by the fallback\./);
+    assert.doesNotMatch(plugin, /still denies the unambiguous catastrophic shapes/);
+  });
+
+  it('outage log label names the deciding fallback tier', () => {
+    const plugin = read('plugins', 'hermes', 'shieldcortex', '__init__.py');
+    assert.match(plugin, /FALLBACK_BLOCK \(self-protection\)/);
+    // Precedence mirrors policy.action_guard_decision: self-protection, then
+    // catastrophic, then dangerous-while-enforcing.
+    const order = [
+      /if fallback_self_protected:\s+tier = "FALLBACK_BLOCK \(self-protection\)"/,
+      /elif fallback_blocked:\s+tier = "FALLBACK_BLOCK \(catastrophic\)"/,
+      /elif fallback_dangerous and enforce:\s+tier = "FALLBACK_BLOCK \(dangerous\)"/,
+    ];
+    let at = -1;
+    for (const re of order) {
+      const m = re.exec(plugin);
+      assert.ok(m, `missing tier branch ${re}`);
+      assert.ok(m.index > at, `tier branch out of order: ${re}`);
+      at = m.index;
+    }
+  });
+});
+
 describe('CHANGELOG', () => {
   it('Docs (Unreleased, or the release that shipped it) names the config CLI watch-only copy correction', () => {
     // The bullet starts under [Unreleased] and moves into a versioned section at
@@ -152,9 +206,9 @@ describe('CHANGELOG', () => {
     assert.match(bullet, /not runtime proof/);
   });
 
-  it('Unreleased Docs names the enforce-when-ready Hermes qualification', () => {
-    const unreleased = between(read('CHANGELOG.md'), '## [Unreleased]', '\n## [');
-    const bullet = unreleased.split('\n').find((l) => /enforce-when-ready` copy: Hermes/i.test(l));
+  it('Docs (Unreleased, or the release that shipped it) names the enforce-when-ready Hermes qualification', () => {
+    // Same rule as above: the bullet moves into a versioned section at release time.
+    const bullet = read('CHANGELOG.md').split('\n').find((l) => l.startsWith('- **') && /enforce-when-ready` copy: Hermes/i.test(l));
     assert.ok(bullet, 'no enforce-when-ready Hermes copy bullet');
     assert.match(bullet, /SHIELDCORTEX_ENFORCE/);
     assert.match(bullet, /not runtime proof/);

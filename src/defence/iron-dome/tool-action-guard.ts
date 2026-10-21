@@ -3694,6 +3694,15 @@ const STORE_READONLY_VERB_RE = new RegExp(`^(?:${STORE_READONLY_VERBS.join('|')}
  * round widens nothing for the approval store.
  */
 const LOCK_READONLY_VERB_RE = new RegExp(`^(?:${[...STORE_READONLY_VERBS, 'jq'].join('|')})$`, 'i');
+/**
+ * #874 guard-config inspection: a CLOSED set of verbs with no option that runs
+ * another program or writes a file. Not derived from the store set: `rg --pre`,
+ * `less` with LESSOPEN, `more`/`ag`/`ack` pagers and `file -C` all execute or
+ * write from an option or the environment (#879 review r1), so a basename
+ * check alone is not a proof of a read.
+ */
+const GUARD_CONFIG_PATH_RE = /\.shieldcortex[\\/]+config\.json\b/i;
+const GUARD_CONFIG_READONLY_VERB_RE = /^(?:ls|dir|cat|head|tail|wc|stat|du|grep|egrep|fgrep|jq)$/;
 /** `git <sub>` stages that only read the working tree / history. */
 const GIT_READONLY_SUBCOMMAND_RE = /^(?:log|show|diff|status|blame|ls-files)$/i;
 /**
@@ -3802,6 +3811,110 @@ export function guardStoreAccessIsReadOnly(text: string): boolean {
  */
 export function policyLockAccessIsReadOnly(text: string): boolean {
   return shellAccessIsReadOnly(text, { pathRe: POLICY_LOCK_PATH_RE, verbRe: LOCK_READONLY_VERB_RE, gitReadOnly: true });
+}
+
+/**
+ * #874: true when the whole command is pure shell inspection of
+ * `~/.shieldcortex/config.json` (`ls`/`du`/`cat`/`grep`/`jq` …). #500 put the
+ * config on the self-protection floor so a tool call cannot REWRITE it; a read
+ * changes nothing, and gating it denied the operator's own footprint check on
+ * headless hosts in every posture. Same fail-closed machinery as the store and
+ * lock helpers, but stricter, because the store helpers judge a stage by its
+ * verb's basename after stripping `VAR=value` prefixes — so an option
+ * (`rg "--pre=…"`) or an env var (`RIPGREP_CONFIG_PATH=…`, `LESSOPEN=…`) that
+ * makes the verb run a program read as a read (#879 review r1). Here the
+ * command is tokenised with real quote handling and accepted only when every
+ * stage is a bare verb from GUARD_CONFIG_READONLY_VERB_RE followed by plain
+ * words: no env prefix, no `sudo`, no path to the verb, no `$`, backtick or
+ * backslash anywhere, no redirect, background, subshell, brace or comment,
+ * and no `--opt=value` spelling. Anything else keeps the gate.
+ * The caller still refuses the carve-out when a #500 command shape is present.
+ */
+export function guardConfigAccessIsReadOnly(text: string): boolean {
+  const cmd = String(text || '');
+  if (!GUARD_CONFIG_PATH_RE.test(cmd)) return false;
+  if (STORE_MUTATION_RE.test(cmd)) return false;
+  if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
+  // Expansion and escapes are the ways a plain-looking word stops being one.
+  if (/[$`\\]/.test(cmd)) return false;
+  const statements = guardConfigStatements(cmd);
+  if (!statements || statements.length === 0) return false;
+  for (const stages of statements) {
+    for (const argv of stages) {
+      if (!GUARD_CONFIG_READONLY_VERB_RE.test(argv[0] ?? '')) return false;
+      for (const arg of argv.slice(1)) {
+        if (arg.startsWith('-') && arg.includes('=')) return false;
+        // `~` only as a leading home reference, never mid-word or `~user`.
+        const tilde = arg.indexOf('~');
+        if (tilde > 0 || (tilde === 0 && arg.length > 1 && arg[1] !== '/')) return false;
+      }
+    }
+  }
+  return true;
+}
+
+/** Characters a guard-config read argument may contain, unquoted. */
+const GUARD_CONFIG_WORD_CHAR_RE = /[A-Za-z0-9_./@%+,:=*?[\]~-]/;
+
+/**
+ * Tokenise `cmd` into statements → pipeline stages → argv, removing quotes
+ * the way the shell would. Returns null for anything outside that grammar:
+ * an operator other than `;`, `&&`, `||`, `|` or newline, an unterminated
+ * quote, an empty pipeline stage, or a character that is not a plain word
+ * character (inside quotes a space is also allowed). The caller has already
+ * refused `$`, backtick and backslash, so no quoted span can expand.
+ */
+function guardConfigStatements(cmd: string): string[][][] | null {
+  const statements: string[][][] = [];
+  let stages: string[][] = [];
+  let argv: string[] = [];
+  let tok: string | null = null;
+  let quote = '';
+  let pipePending = false;
+  const endToken = () => { if (tok !== null) argv.push(tok); tok = null; };
+  const endStage = (): boolean => {
+    endToken();
+    if (argv.length === 0) return false;
+    stages.push(argv);
+    argv = [];
+    return true;
+  };
+  const endStatement = (): boolean => {
+    endToken();
+    if (argv.length > 0) endStage();
+    else if (pipePending) return false;
+    if (stages.length > 0) statements.push(stages);
+    stages = [];
+    pipePending = false;
+    return true;
+  };
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (quote) {
+      if (c === quote) quote = '';
+      else if (c === ' ' || GUARD_CONFIG_WORD_CHAR_RE.test(c)) tok = (tok ?? '') + c;
+      else return null;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; tok = tok ?? ''; continue; }
+    if (c === ' ' || c === '\t') { endToken(); continue; }
+    if (c === '\n' || c === ';') { if (!endStatement()) return null; continue; }
+    if ((c === '&' || c === '|') && cmd[i + 1] === c) {
+      if (!endStatement()) return null;
+      i++;
+      continue;
+    }
+    if (c === '|') {
+      if (!endStage()) return null;
+      pipePending = true;
+      continue;
+    }
+    if (GUARD_CONFIG_WORD_CHAR_RE.test(c)) { tok = (tok ?? '') + c; continue; }
+    return null;
+  }
+  if (quote) return null;
+  if (!endStatement()) return null;
+  return statements;
 }
 
 interface ReadOnlyShellOptions {
@@ -7068,6 +7181,15 @@ function evaluateToolCallCore(
       && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
       && !guardDisableInvoked(scanSurface)) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'disable-action-guard');
+  }
+  // #874: pure shell inspection of the guard's own config is not a rewrite of
+  // it. Same three conditions as the lock carve-out above; Write/Edit never
+  // pass (their surface is the target path, not a read verb).
+  if (dangerSignals.includes('touch-guard-config')
+      && guardConfigAccessIsReadOnly(scanSurface)
+      && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
+      && !guardDisableInvoked(scanSurface)) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'touch-guard-config');
   }
   // External egress is a potential exfil vector — but only when the call carries
   // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing
