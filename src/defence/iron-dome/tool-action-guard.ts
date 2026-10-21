@@ -5097,7 +5097,10 @@ const REDIRECT_ATTACHED_RE = /^\d*&?>[>|&]?(.+)$/;
  */
 function mayNameInterpreterPath(word: string): boolean {
   if (/[$`]/.test(word) || /(?:^|\/)\.\.(?:\/|$)/.test(word)) return true;
-  if (word.includes('/') && /[*?[{]/.test(word)) return true;
+  // A glob or brace may expand to an existing interpreter name (`python[3]`),
+  // with or without a slash; only a glob that ends in a literal alphabetic
+  // extension (`*.txt`, `out/*.json`) cannot.
+  if (/[*?[{]/.test(word) && !/\.[A-Za-z][A-Za-z0-9]{0,4}$/.test(word)) return true;
   const eq = word.indexOf('=');
   for (const w of eq >= 0 ? [word, word.slice(eq + 1)] : [word]) {
     const norm = w.replace(/\/\.(?=\/|$)/g, '').replace(/\/+$/, '');
@@ -5132,8 +5135,19 @@ function statementWritesInterpreterPath(tokens: readonly string[], pending: { re
       if (mayNameInterpreterPath(attached[1])) return true;
       continue;
     }
+    // A redirect needs no space before it: `cat /bin/bash>/usr/bin/python3`
+    // leaves the operator inside a word. Judge what follows the first `>`
+    // whatever the verb, and carry an operator that ends the word.
+    const gt = t.indexOf('>');
+    if (gt > 0) {
+      const target = t.slice(gt).replace(/^>[>|&]?/, '');
+      if (target === '') pending.redirect = true;
+      else if (mayNameInterpreterPath(target)) return true;
+    }
     if (k === cmdIdx || readOnly || (k < cmdIdx && EXEC_WRAPPER.test(commandBaseName(t)))) continue;
     if (mayNameInterpreterPath(t)) return true;
+    // A short option with its value attached (`curl -opython3`, `wget -Opython3`).
+    if (/^-[A-Za-z]./.test(t) && mayNameInterpreterPath(t.slice(2))) return true;
   }
   return false;
 }

