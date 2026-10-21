@@ -210,6 +210,11 @@ design change.
 - An interactive (TTY) session was not tested. Only `-p`, `bypassPermissions`.
 - A real ShieldCortex hook was not exercised. The probe stands in for it, so node start-up time
   and store latency were not measured.
+- Sub-second times in this note came from `date +%s.%3N`. On this host `date` is uutils 0.10.0,
+  which mis-renders `%3N` for fractions below 0.1 s (found later, see
+  `docs/proofs/2026-10-21-853-plane-a-cancel-once/README.md` §4). Hook-log and marker fractions here may
+  be wrong where the true fraction was below .100. Debug-log durations (for example `5011ms`) and
+  whole-second findings are unaffected.
 - The documentation quotes came through a summarising fetch. The experimental results do not
   depend on them.
 
