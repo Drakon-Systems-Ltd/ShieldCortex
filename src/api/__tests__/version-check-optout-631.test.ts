@@ -238,6 +238,23 @@ describe('SHIELDCORTEX_SKIP_UPDATE_CHECK (#631)', () => {
     expect(npmViewCalls()).toHaveLength(1);
   });
 
+  it('=1 after a warm cache drops the cached answer and spawns nothing more', async () => {
+    const warm = await version.checkForUpdates();
+    expect(warm.latestVersion).toBe('99.0.0');
+    expect(npmViewCalls()).toHaveLength(1);
+
+    process.env.SHIELDCORTEX_SKIP_UPDATE_CHECK = '1';
+    for (const info of [await version.checkForUpdates(), await version.checkForUpdates(true)]) {
+      expect(info).toMatchObject({ checkStatus: 'disabled', checkDisabledBy: 'env', latestVersion: null, cacheHit: false, checkedAt: null });
+    }
+    expect(npmViewCalls()).toHaveLength(1);
+
+    delete process.env.SHIELDCORTEX_SKIP_UPDATE_CHECK;
+    const after = await version.checkForUpdates();
+    expect(after).toMatchObject({ checkStatus: 'ok', cacheHit: false });
+    expect(npmViewCalls()).toHaveLength(2);
+  });
+
   it('cannot re-enable a check the config turned off', async () => {
     config.setDashboardUpdateCheck(false);
     process.env.SHIELDCORTEX_SKIP_UPDATE_CHECK = '0';
@@ -259,6 +276,13 @@ describe('getDashboardUpdateCheckSetting / config persistence (#631)', () => {
     expect(get({}, { SHIELDCORTEX_SKIP_UPDATE_CHECK: '1' })).toEqual({ enabled: false, disabledBy: 'env' });
     expect(get({ dashboardUpdateCheck: true }, { SHIELDCORTEX_SKIP_UPDATE_CHECK: '1' })).toEqual({ enabled: false, disabledBy: 'env' });
     expect(get({}, { SHIELDCORTEX_SKIP_UPDATE_CHECK: 'true' })).toEqual({ enabled: true });
+    // Edge values: only boolean false (config) and exactly '1' (env) disable.
+    for (const value of ['0', null, [], [false], {}]) {
+      expect(get({ dashboardUpdateCheck: value }, {})).toEqual({ enabled: true });
+    }
+    for (const value of ['false', '', ' 1', '1 ', 'yes']) {
+      expect(get({}, { SHIELDCORTEX_SKIP_UPDATE_CHECK: value })).toEqual({ enabled: true });
+    }
   });
 
   it('setDashboardUpdateCheck persists to config.json in the configured dir and reloads', () => {
@@ -355,7 +379,7 @@ describe('GET /api/version/check route (#631)', () => {
 
   it('disabled: normal and force=true requests spawn nothing and say disabled', async () => {
     config.setDashboardUpdateCheck(false);
-    for (const query of [{}, { force: 'true' }]) {
+    for (const query of [{}, { force: 'true' }] as Array<Record<string, string>>) {
       const res = await getCheck(query);
       expect(res.statusCode).toBe(200);
       expect(res.body).toMatchObject({ checkStatus: 'disabled', checkDisabledBy: 'config', latestVersion: null, updateAvailable: false });
