@@ -705,7 +705,9 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
  * resignTamperedConfig). The argument grammar is parseResignArgs (resign-args.ts).
  *
  * Exit codes: 0 previewed, or re-signed AND recorded; 1 refused, nothing
- * written; 2 re-signed but the audit record was NOT written.
+ * re-signed (a refusal at the last check before the rename has already
+ * written the backup of the reviewed bytes, and keeps it); 2 re-signed but the
+ * audit record was NOT written.
  */
 function handleResign(resign: Exclude<ResignArgs, { kind: 'not-resign' }>): void | Promise<void> {
   if (resign.kind === 'reject') {
@@ -715,6 +717,10 @@ function handleResign(resign: Exclude<ResignArgs, { kind: 'not-resign' }>): void
   if (resign.kind === 'help') {
     console.log('Usage: shieldcortex config --resign                     Preview (writes nothing)');
     console.log('       shieldcortex config --resign --confirm <sha256>  Re-sign the parse of exactly the previewed bytes');
+    console.log('--confirm may come before --resign; one --help/-h prints this; nothing else is accepted.');
+    console.log('A change to the file visible at the last check before the rename is refused. Best effort: a');
+    console.log('writer between that check and the rename is overwritten with the signed parse of the bytes you');
+    console.log('confirmed, and the backup of those reviewed bytes is kept.');
     console.log('Exit codes: 0 previewed, or re-signed and recorded; 1 refused, nothing re-signed;');
     console.log('            2 re-signed but the config_resigned audit row was NOT recorded.');
     return;

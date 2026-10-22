@@ -136,9 +136,13 @@ Options:
   --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)
   --resign               Preview re-signing a config.json that fails its integrity check (writes nothing)
   --resign --confirm <sha256>  Re-sign the parse of exactly the previewed bytes (full sha256). Refused if
-                           the audit log cannot be opened, the file changed, or it would trust a key no
-                           verified lock covers (never readinessGate); backs up, signs, then records
-                           config_resigned. Takes no other arguments. Exit 2: re-signed, row NOT recorded
+                           the audit log cannot be opened, a change to the file is visible at its last
+                           check, or it would trust a key no verified lock covers (never readinessGate);
+                           backs up, signs, then records config_resigned. Best effort: a writer between
+                           that last check and the rename is overwritten with the signed parse of the
+                           confirmed bytes, and the reviewed backup is kept. --confirm may come before
+                           --resign; one --help/-h prints usage; nothing else is accepted.
+                           Exit 2: re-signed, row NOT recorded
 
 LLM Verification:
   --verify-enable        Enable LLM verification (requires cloud + verify scope)
