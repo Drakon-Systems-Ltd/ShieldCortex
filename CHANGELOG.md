@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **#898 The transitive `ip-address` dependency is updated to 10.7.4.** A newly published advisory (GHSA-rxp7-6hxx-x8q5, quadratic-time matching of a zone identifier in `Address6`) covered the 10.7.2 copy in the lockfile, so the live production audit reported one unwaived advisory and the audit-claims test failed. Only the lockfile entry changed; the audit claim (0 unwaived production advisories; 2 waived) holds again.
 - **#893 The bundled skill file's frontmatter no longer breaks ClawHub sync.** In 5.12.0 one `network_endpoints` item in `skills/shieldcortex/SKILL.md` contained a colon followed by a space, which YAML reads as a key/value pair instead of a text line, so the ClawHub publish step rejected the skill. The wording now uses a semicolon. No behaviour change; the npm packages were unaffected.
 
 ## [5.12.0] - 2026-10-22
