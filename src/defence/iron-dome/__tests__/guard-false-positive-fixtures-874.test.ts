@@ -670,11 +670,41 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
     'printf %%n PATH',
     'printf "$FMT" PATH',
     'printf -- "$FMT" PATH',
+    // Review r10: a format word made by a substitution, which the statement
+    // splitter moves out of the printf statement, and a redirection before
+    // the format word, which is not the format word.
+    'printf "$(echo %n)" PATH',
+    'printf $(echo %n) PATH',
+    'printf -- "$(cat fmt)" PATH',
+    'printf -- $(cat fmt) PATH',
+    'printf "`cat fmt`" PATH',
+    'printf `cat fmt` PATH',
+    'printf -- "`cat fmt`" PATH',
+    'printf -- `cat fmt` PATH',
+    'printf "%s$(cat fmt)" PATH',
+    'printf "%s `cat fmt`" PATH',
+    'printf %$(echo n) PATH',
+    'printf >/dev/null "$FMT" PATH',
+    'printf > /dev/null "$FMT" PATH',
+    'printf 2>/dev/null "$FMT" PATH',
+    'printf 2> /dev/null "$FMT" PATH',
+    'printf >> /dev/null "$FMT" PATH',
+    'printf >>/dev/null "$FMT" PATH',
+    'printf < /dev/null "$FMT" PATH',
+    'printf <&- "$FMT" PATH',
+    'printf {fd}>/dev/null "$FMT" PATH',
+    'printf &>/dev/null "$FMT" PATH',
+    'printf >| /dev/null "$FMT" PATH',
+    'printf 2>&1 "$FMT" PATH',
+    'printf -- >/dev/null "$FMT" PATH',
+    'printf >/dev/null -- "$(echo %n)" PATH',
+    'printf 2>/dev/null "`cat fmt`" PATH',
   ];
   it.each(PRINTF_STORES.flatMap(p => [
     `${p}; python3 scripts/dual.py`,
     `${p} && python3 scripts/dual.py`,
     `${p}; ./scripts/absdual.py`,
+    `${p} && ./scripts/absdual.py`,
   ]))('a printf that may store into a variable stays gated: %s', (command) => {
     const v = run(command);
     expect(v.decision).not.toBe('allow');
@@ -686,6 +716,16 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
     "printf 'done\\n'; python3 scripts/dual.py",
     "printf '%s\\n' \"$X\"; ./scripts/absdual.py",
     "printf 'done\\n' && ./scripts/absdual.py",
+    // A substitution in a DATA operand after a literal format stores nothing.
+    'printf %s "$(date)"; python3 scripts/dual.py',
+    'printf %s "$(date)" && python3 scripts/dual.py',
+    'printf %s "$(date)" && ./scripts/absdual.py',
+    'printf %s $(date); ./scripts/absdual.py',
+    'printf %s `date`; python3 scripts/dual.py',
+    'printf %s "`date`" && ./scripts/absdual.py',
+    "printf '%s\\n' \"$(date)\"; python3 scripts/dual.py",
+    "printf >/dev/null '%s\\n' \"$X\"; python3 scripts/dual.py",
+    "printf 2>/dev/null 'done\\n' && ./scripts/absdual.py",
   ])('a printf with a literal format free of %%n keeps the mention relief: %s', (command) => {
     expect(run(command).decision).toBe('allow');
   });

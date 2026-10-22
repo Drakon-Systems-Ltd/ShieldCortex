@@ -5168,6 +5168,28 @@ function statementWritesInterpreterPath(tokens: readonly string[], pending: { re
  */
 type InterpreterShadow = 'none' | 'lookup' | 'env';
 /**
+ * A word that opens a redirection once quotes are removed: `[n]` or `{var}`
+ * then `<` or `>` (`>`, `2>/dev/null`, `&>`, `<&-`, `{fd}>f`). Over-matches a
+ * quoted `'>x'`, which only moves the printf format check one word on.
+ */
+const PRINTF_REDIRECT_RE = /^(?:\d*|\{\w+\})&?[<>]/;
+/** A redirection operator whose target is the next word. */
+const PRINTF_BARE_REDIRECT_RE = /^(?:\d*|\{\w+\})(?:&>>?|>>?|>\||>&|<<-?|<<<|<>|<&|<)$/;
+/**
+ * `splitCommandStatements`, keeping for each statement whether a `$(`, a
+ * backtick or a parenthesis ended it — so a word at its end may continue into
+ * a substitution — rather than `;`, `&`, `|` or a newline.
+ */
+function splitStatementsMarkingCuts(text: string): Array<{ stmt: string; cut: boolean }> {
+  const out: Array<{ stmt: string; cut: boolean }> = [];
+  const parts = text.split(/(\$\(|[`()])/);
+  for (let i = 0; i < parts.length; i += 2) {
+    const stmts = parts[i].split(/[;&|\n\r]+/);
+    for (let j = 0; j < stmts.length; j++) out.push({ stmt: stmts[j], cut: j === stmts.length - 1 && i + 1 < parts.length });
+  }
+  return out;
+}
+/**
  * #874 D3 (review rounds 1-2) — judged on the raw surface AND on its
  * tokenised form (quotes and backslashes removed, as the shell removes them),
  * so `P'ATH'=`, `P\ATH=`, `fu'nction'`, `al'ias'` and `ha'sh'` are seen as the
@@ -5178,7 +5200,7 @@ function interpreterShadow(surface: string): InterpreterShadow {
   const dequoted = tokeniseStatement(surface).join(' ');
   if (INTERPRETER_ENV_RE.test(surface) || INTERPRETER_ENV_RE.test(dequoted) || NON_INERT_ASSIGNMENT_RE.test(dequoted)) return 'env';
   const pending = { redirect: false };
-  for (const stmt of splitCommandStatements(surface)) {
+  for (const { stmt, cut } of splitStatementsMarkingCuts(surface)) {
     const tokens = tokeniseStatement(stmt);
     // #885: a write that may replace the interpreter (`ln -sf /bin/bash
     // /usr/local/bin/python3`, `cp … python3`, `> /usr/bin/python3`) makes
@@ -5189,20 +5211,37 @@ function interpreterShadow(surface: string): InterpreterShadow {
     // `if . f` / `while . f` / `coproc . f` cannot hide it from command position.
     // A printf format word built from an expansion cannot be shown free of
     // `%n`: an expansion in an option or the format word counts as `-v` does.
+    // Redirections before the format (`printf >/dev/null "$FMT"`, `2> f`) are
+    // skipped, not taken for it. A printf whose format is not found in its
+    // statement (the splitter moved it into a `$(`, a backtick or the next
+    // statement) or whose format word runs on into a substitution
+    // (`printf "%s$(…)"`) counts as `-v` does too.
     const armed = new Set<RegExp>();
     let printfFormatPending = false;
-    for (const t of tokens) {
+    let redirectTargetNext = false;
+    let formatIdx = -1;
+    for (let k = 0; k < tokens.length; k++) {
+      const t = tokens[k];
       if (t === '.' || ENV_SETTING_WORD_RE.test(t)) return 'env';
       for (const flag of armed) if (flag.test(t)) return 'env';
       if (printfFormatPending) {
-        if (/[$`]/.test(t)) return 'env';
-        if (!t.startsWith('-')) printfFormatPending = false;
+        if (redirectTargetNext) redirectTargetNext = false;
+        else if (PRINTF_REDIRECT_RE.test(t)) redirectTargetNext = PRINTF_BARE_REDIRECT_RE.test(t);
+        else {
+          if (/[$`]/.test(t)) return 'env';
+          if (!t.startsWith('-')) { printfFormatPending = false; formatIdx = k; }
+        }
       }
       const base = commandBaseName(t);
       const flag = ENV_SETTING_WITH_FLAG.get(base);
       if (flag instanceof RegExp) armed.add(flag);
-      if (base === 'printf') printfFormatPending = true;
+      if (base === 'printf') { printfFormatPending = true; redirectTargetNext = false; }
     }
+    if (printfFormatPending) return 'env';
+    // Appending a character that joins the last token shows that word was cut
+    // mid-word or inside an open quote.
+    if (cut && formatIdx >= 0 && formatIdx === tokens.length - 1
+      && tokeniseStatement(`${stmt}X`).length === tokens.length) return 'env';
   }
   return INTERPRETER_LOOKUP_RE.test(surface) || INTERPRETER_LOOKUP_RE.test(dequoted) ? 'lookup' : 'none';
 }
