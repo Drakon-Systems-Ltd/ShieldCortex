@@ -6,11 +6,13 @@
  * Accepted, exactly:
  *   --resign                          preview
  *   --resign --confirm <sha256>       confirmed re-sign
- *   either of the above plus --help / -h, and nothing else: usage
+ *   --confirm <sha256> --resign       the same, in the other order
+ *   any of the above plus ONE --help or -h, and nothing else: usage
  *
  * Everything else that LOOKS like a recovery request — `--resign` or
  * `--confirm` in any position, or a `--resign=…` / `--confirm=…` spelling — is
- * a recovery request that is rejected. It must never fall through to the
+ * a recovery request that is rejected, as is a repeated flag (`--help` and
+ * `-h` count as one flag). It must never fall through to the
  * ordinary setters, and a `--help` beside an unsupported token must not turn
  * the rejection into a usage print. Messages name flags, never values: a value
  * beside a flag can be a credential.
@@ -60,6 +62,11 @@ export function parseResignArgs(args: readonly string[]): ResignArgs {
   }
   const confirms = args.reduce<number[]>((at, a, i) => (a === '--confirm' ? [...at, i] : at), []);
   if (resigns > 1 || confirms.length > 1) return reject(', once');
+  // `--help` and `-h` are one option: a second occurrence, in any spelling, is
+  // a repeated flag like any other.
+  if (args.filter(isHelp).length > 1) {
+    return { kind: 'reject', message: '`config --resign` takes `--help` / `-h` once. Nothing was written.' };
+  }
 
   let value: string | undefined;
   if (confirms.length === 1) {

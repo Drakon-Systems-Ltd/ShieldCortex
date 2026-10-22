@@ -290,7 +290,7 @@ describe('#647 a lock never masks a hand edit the re-sign would sign', () => {
     ['broker.enabled: true', { broker: { enabled: true } }],
     ['a non-empty reviewedScripts', { reviewedScripts: PINS }],
   ];
-  const ALIAS_CASES = ['locked', 'unverifiable'].flatMap((status) =>
+  const ALIAS_CASES = ['absent', 'locked', 'unverifiable'].flatMap((status) =>
     ALIAS_LOOSENINGS.map(([label, alias]) => [status, label, alias] as const));
 
   it.each(ALIAS_CASES)('lock %s, alias-only %s (top-level strict): REFUSED, nothing written', async (status, _label, alias) => {

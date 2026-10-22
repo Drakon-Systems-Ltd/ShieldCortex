@@ -369,6 +369,15 @@ describe('#647 config --resign argument grammar, exhaustively', () => {
     ['--resign', '--confirm'],
     ['--resign', '--confirm', '--help'],
     ['--resign', '--confirm', '-h'],
+    // Round-2 review B3: `--help` and `-h` are one option, so a second
+    // occurrence in any spelling is a repeated flag, not usage.
+    ['--resign', '--help', '--help'],
+    ['--resign', '-h', '-h'],
+    ['--resign', '--help', '-h'],
+    ['-h', '--resign', '--help'],
+    ['--resign', '--confirm', 'SHA', '--help', '--help'],
+    ['--resign', '--confirm', 'SHA', '-h', '-h'],
+    ['--help', '--confirm', 'SHA', '--resign', '-h'],
   ];
   const HELP: string[][] = [
     ['--resign', '--help'],
@@ -409,6 +418,17 @@ describe('#647 config --resign argument grammar, exhaustively', () => {
     expect(logs.join('\n')).toMatch(/2 re-signed but the config_resigned audit row was NOT recorded/);
     expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
     expect(openSinkSpy).not.toHaveBeenCalled();
+  });
+
+  it('a repeated help flag is named as one, in either spelling, and never echoes the hash', async () => {
+    const { parseResignArgs } = await import('../../cloud/resign-args.js');
+    const sha = 'a'.repeat(64);
+    for (const args of [['--resign', '--help', '--help'], ['--resign', '-h', '--confirm', sha, '--help']]) {
+      const parsed = parseResignArgs(args);
+      expect(parsed.kind).toBe('reject');
+      expect(parsed.kind === 'reject' && parsed.message).toMatch(/`--help` \/ `-h` once/);
+      expect(parsed.kind === 'reject' && parsed.message).not.toContain(sha);
+    }
   });
 
   it('--resign=1 --proactive-recall true on a VALID config does not reach the ordinary setter', async () => {
