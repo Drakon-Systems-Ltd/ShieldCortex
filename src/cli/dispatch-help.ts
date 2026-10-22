@@ -105,6 +105,9 @@ Options:
   --ranker <rrf|legacy>  Hybrid retrieval engine (default: rrf; SHIELDCORTEX_RANKER env overrides)
   --self-heal <true|false>  Let the cortex-memory hook repair its own install at gateway bootstrap
                             (default: true; false = warn-only. SHIELDCORTEX_SKIP_SELF_HEAL=1 also opts out)
+  --dashboard-update-check <true|false>  Let the dashboard ask the npm registry for the latest version
+                            (default: true; false = no lookup, reported as disabled. SHIELDCORTEX_SKIP_UPDATE_CHECK=1 also opts out.
+                            Only this lookup — not an offline mode)
   --tool-firewall-enforce   Redact/withhold threatening tool output before the agent sees it
   --tool-firewall-advisory  Log tool-output threats but deliver intact (default)
   --tool-firewall-off / --tool-firewall-on  Disable / enable tool-output scanning

@@ -32,6 +32,16 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 - `SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1` alone — enough for a headless `shieldcortex openclaw install` to restart the gateway, including the one npm's postinstall runs to refresh an existing OpenClaw integration; that path does not read the reconcile variable.
 - `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` — set on `npm install -g shieldcortex` to keep postinstall away from `~/.openclaw` entirely: no refresh, no installer, no restart.
 
+### Dashboard update check
+
+The local dashboard asks the npm registry for the latest version (`npm view shieldcortex version`, cached 5 minutes). To turn that lookup off:
+
+```bash
+shieldcortex config --dashboard-update-check false   # writes "dashboardUpdateCheck": false
+```
+
+or set `SHIELDCORTEX_SKIP_UPDATE_CHECK=1` for the dashboard/API process. The dashboard then reports the check as off instead of looking up a newer release; installed and running versions are still shown. This turns off that one lookup only. It is not an offline mode: `shieldcortex update`, the dashboard's Update button, cloud sync and other features that use the network behave as before.
+
 ### Updating by hand
 
 1. **Package** — `npm install -g shieldcortex@latest`. On a box with an earlier OpenClaw hook or plugin, npm's postinstall refreshes it and can restart the gateway (see Restart controls). How it decides what to refresh: [install-time refresh](openclaw-integration.md#install-time-refresh-postinstall).

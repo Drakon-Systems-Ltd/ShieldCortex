@@ -16,6 +16,8 @@ import {
   isProactiveRecallEnabled,
   setProactiveRecall,
   setSelfHeal,
+  setDashboardUpdateCheck,
+  DASHBOARD_UPDATE_CHECK_SKIP_ENV,
   restore410Defaults,
   getRankerConfig,
   setRankerConfig,
@@ -378,6 +380,32 @@ function handleCloudConfigFlags(args: string[]): void {
         : 'Hook self-heal disabled — the cortex-memory hook will log what it would have done and write nothing. Run `shieldcortex openclaw install` to migrate the hook yourself.',
     );
     console.log('Restart the OpenClaw gateway for this to take effect.');
+    changed = true;
+  }
+
+  const dashboardUpdateCheckIdx = args.indexOf('--dashboard-update-check');
+  if (dashboardUpdateCheckIdx !== -1) {
+    const value = args[dashboardUpdateCheckIdx + 1];
+    if (!value) {
+      console.error('Missing value for --dashboard-update-check. Use true or false.');
+      process.exit(1);
+    }
+    const normalized = value.toLowerCase();
+    if (normalized !== 'true' && normalized !== 'false') {
+      console.error(`Invalid value for --dashboard-update-check: ${value}. Use true or false.`);
+      process.exit(1);
+    }
+    const enabled = normalized === 'true';
+    setDashboardUpdateCheck(enabled);
+    console.log(
+      enabled
+        ? 'Dashboard update check enabled (default) — the dashboard asks the npm registry for the latest shieldcortex version.'
+        : 'Dashboard update check disabled — the dashboard will not query the npm registry and reports the check as disabled. '
+          + 'This stops only that lookup; `shieldcortex update`, cloud sync and other outbound features are unchanged.',
+    );
+    if (enabled && process.env[DASHBOARD_UPDATE_CHECK_SKIP_ENV] === '1') {
+      console.log(`Note: ${DASHBOARD_UPDATE_CHECK_SKIP_ENV}=1 is set and keeps the check off for processes that inherit it.`);
+    }
     changed = true;
   }
 

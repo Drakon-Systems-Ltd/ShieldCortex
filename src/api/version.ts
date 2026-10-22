@@ -8,6 +8,7 @@ import { execFileSync, execFile } from 'child_process';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import { getDashboardUpdateCheckSetting } from '../cloud/config.js';
 
 // Get package.json path relative to this module
 const __filename = fileURLToPath(import.meta.url);
@@ -36,14 +37,27 @@ let versionCache: {
 } | null = null;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
+/**
+ * Outcome of the registry lookup (#631):
+ *   ok        latestVersion came from the registry (fresh or cached)
+ *   failed    the lookup ran and failed — latestVersion is unknown
+ *   disabled  the operator turned the lookup off; nothing was queried
+ * Only `ok` means updateAvailable:false is an "up to date" answer.
+ */
+export type UpdateCheckStatus = 'ok' | 'failed' | 'disabled';
+
 export interface VersionInfo {
   currentVersion: string;
   runningVersion: string;
   latestVersion: string | null;
   updateAvailable: boolean;
   stale: boolean;
-  checkedAt: string;
+  /** When the registry was last queried; null when the check is disabled. */
+  checkedAt: string | null;
   cacheHit: boolean;
+  checkStatus: UpdateCheckStatus;
+  /** Which switch turned the check off. Present only when checkStatus is 'disabled'. */
+  checkDisabledBy?: 'config' | 'env';
 }
 
 export interface UpdateResult {
@@ -98,6 +112,26 @@ export async function checkForUpdates(forceRefresh = false): Promise<VersionInfo
   const currentVersion = getCurrentVersion();
   const now = Date.now();
 
+  // Opt-out gate (#631) — ahead of the cache and of forceRefresh, so a disabled
+  // check never spawns npm and never replays an earlier registry answer as if
+  // it were current. Dropping the cache means re-enabling starts from a fresh
+  // lookup rather than one made before the operator opted out.
+  const setting = getDashboardUpdateCheckSetting();
+  if (!setting.enabled) {
+    versionCache = null;
+    return {
+      currentVersion,
+      runningVersion: STARTUP_VERSION,
+      latestVersion: null,
+      updateAvailable: false,
+      stale: STARTUP_VERSION !== currentVersion,
+      checkedAt: null,
+      cacheHit: false,
+      checkStatus: 'disabled',
+      checkDisabledBy: setting.disabledBy,
+    };
+  }
+
   // Return cached result if still valid
   if (!forceRefresh && versionCache && now - versionCache.checkedAt < CACHE_TTL) {
     return {
@@ -110,6 +144,7 @@ export async function checkForUpdates(forceRefresh = false): Promise<VersionInfo
       stale: STARTUP_VERSION !== currentVersion,
       checkedAt: new Date(versionCache.checkedAt).toISOString(),
       cacheHit: true,
+      checkStatus: 'ok',
     };
   }
 
@@ -118,6 +153,8 @@ export async function checkForUpdates(forceRefresh = false): Promise<VersionInfo
     const result = execFileSync('npm', ['view', 'shieldcortex', 'version'], {
       encoding: 'utf-8',
       timeout: 10000, // 10 second timeout
+      // One registry query, not two: keep npm from also checking for a newer npm.
+      env: { ...process.env, npm_config_update_notifier: 'false' },
     }).trim();
 
     versionCache = {
@@ -133,6 +170,7 @@ export async function checkForUpdates(forceRefresh = false): Promise<VersionInfo
       stale: STARTUP_VERSION !== currentVersion,
       checkedAt: new Date(now).toISOString(),
       cacheHit: false,
+      checkStatus: 'ok',
     };
   } catch {
     // Network error or npm not available
@@ -144,6 +182,7 @@ export async function checkForUpdates(forceRefresh = false): Promise<VersionInfo
       stale: STARTUP_VERSION !== currentVersion,
       checkedAt: new Date(now).toISOString(),
       cacheHit: false,
+      checkStatus: 'failed',
     };
   }
 }
