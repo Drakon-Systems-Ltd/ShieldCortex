@@ -5007,8 +5007,8 @@ export function policyLockRows(): CheckResult[] {
           `pins and this verdict are preserved. ${HMAC_NOTE}`,
         fix:
           'Do not re-run `shieldcortex config --*` flags to clear this — they refuse on a tampered file. Review the ' +
-          'file, then restore a backup whose signature still verifies, or move config.json aside (keep it) and ' +
-          'rebuild it through the setters (docs/design/2026-09-16-501-policy-lock.md §8.7). Then re-run doctor.',
+          'file, then `shieldcortex config --resign` (a preview; writes nothing) and `--resign --confirm <sha256>`; ' +
+          'or restore a backup whose signature still verifies. Then re-run doctor.',
       });
       break;
     case 'malformed':
@@ -5079,8 +5079,7 @@ export function fixActionGuardConfig(): { changed: boolean; backupPath?: string;
       changed: false,
       message:
         'not migrating: config.json fails its integrity check (verdict: tampered), and a migration write would ' +
-        're-sign it. Nothing was changed. Recover it first by moving config.json aside and rebuilding it through ' +
-        'the setters (docs/design/2026-09-16-501-policy-lock.md §8.7)',
+        're-sign it. Nothing was changed. Review it with `shieldcortex config --resign` first',
     };
   }
   const raw = readRawConfig();

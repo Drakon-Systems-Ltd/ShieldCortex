@@ -20,8 +20,9 @@
  * runs, and several of them pull in the database layer or the defence pipeline
  * on import. Printing usage must not load any of that. Handlers that print the
  * same usage on their own error paths import the constant from this module, so
- * there is one copy of each text; this module imports nothing but the registry
- * and the scan exit contract (both already on the CLI's startup graph).
+ * there is one copy of each text; this module imports nothing but the registry,
+ * the scan exit contract (both already on the CLI's startup graph) and the
+ * dependency-free `config --resign` argument grammar (#647).
  *
  * Commands NOT in this table are gated inside their own handler, before any
  * side effect: the #577 strict/help-gated set (`update`, `repair`, `migrate`,
@@ -31,6 +32,7 @@
  */
 import { SCAN_USAGE_LINES } from './scan-exit.js';
 import { commandWantsHelp, isGatedCommand, type GatedCommand } from './wants-help.js';
+import { isResignInvocation } from '../cloud/resign-args.js';
 
 const bold = '\x1b[1m';
 const reset = '\x1b[0m';
@@ -132,6 +134,15 @@ Options:
   --memory-host-runtime <openclaw|claude_code|hermes>[,…]  Declare the bound host runtime(s) doctor must prove (signed write)
   --auto-memory-sampling <n>  Stop-hook sampling cadence in turns (1-20, ≤ 5 recommended; signed write)
   --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)
+  --resign               Preview re-signing a config.json that fails its integrity check (writes nothing)
+  --resign --confirm <sha256>  Re-sign the parse of exactly the previewed bytes (full sha256). Refused if
+                           the audit log cannot be opened, a change to the file is visible at its last
+                           check, or it would trust a key no verified lock covers (never readinessGate);
+                           backs up, signs, then records config_resigned. Best effort: a writer between
+                           that last check and the rename is overwritten with the signed parse of the
+                           confirmed bytes, and the reviewed backup is kept. --confirm may come before
+                           --resign; one --help/-h prints usage; nothing else is accepted.
+                           Exit 2: re-signed, row NOT recorded
 
 LLM Verification:
   --verify-enable        Enable LLM verification (requires cloud + verify scope)
@@ -467,6 +478,9 @@ export function dispatchHelp(
 ): boolean {
   const word = argv[0];
   if (!word || !isGatedCommand(word) || !isDispatchGated(word)) return false;
+  // #647: a `config --resign` request owns its own --help, so that a help token
+  // beside an unsupported argument is the handler's rejection, not usage.
+  if (word === 'config' && isResignInvocation(argv.slice(1))) return false;
   if (!commandWantsHelp(word, argv.slice(1))) return false;
   log(DISPATCH_HELP[word]);
   return true;
