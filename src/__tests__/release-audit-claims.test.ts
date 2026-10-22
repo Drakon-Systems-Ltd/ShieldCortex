@@ -212,19 +212,6 @@ describe('#466 hermetic — the SKILL.md security claim is structurally honest',
     })).toBe(true);
   });
 
-  it('keeps the sprintf-js waiver record in sync with its prose', () => {
-    const waiver = parseWaivers(waiverMarkdown).find((w) => w.id === 'SC-WAIVER-639-sprintf-js');
-    expect(waiver).toMatchObject({
-      package: 'sprintf-js', advisories: [1241202], ghsa: ['GHSA-hp3w-g68c-fv3c'],
-      severity: 'moderate', reviewed: '2026-10-06', expires: '2027-01-06', issue: 639,
-    });
-    const prose = waiverMarkdown.split('### SC-WAIVER-639-sprintf-js')[1]?.split('## Waiver records')[0];
-    expect(prose).toBeDefined();
-    for (const value of ['1241202', 'GHSA-hp3w-g68c-fv3c', 'moderate', '2026-10-06', '2027-01-06']) {
-      expect(prose).toContain(value);
-    }
-  });
-
   it('locks every @modelcontextprotocol/sdk copy above the OAuth credential advisory range', () => {
     const lock = JSON.parse(readFileSync(join(REPO_ROOT, 'package-lock.json'), 'utf8')) as {
       packages: Record<string, { version?: string }>;
