@@ -348,21 +348,26 @@ describe('#861 — the pipeline entry-point table is exhaustive', () => {
     });
   });
 
-  // B1 (#886 review): an options-bearing call must not vanish from the scan
+  // B1/B2 (#886 review): an options-bearing call must not vanish from the scan
   // while a safe call survives. Each fixture is the REAL REST caller with one
-  // indirect route added; its two safe four-argument calls remain.
+  // indirect route added; (a) rewrites one of its two safe four-argument calls,
+  // every other fixture keeps both and asserts it did.
   describe('the caller scan fails closed on indirect routes (copies of the real REST caller)', () => {
     const rel = 'src/api/visualization-server.ts';
     const restPath = join(repoRoot, rel);
     const real = readFileSync(restPath, 'utf8');
     const safeCall = { entry: 'runDefencePipeline', argCount: 4, spread: false };
+    const attestingCall = { entry: 'runDefencePipelineWithVerify', argCount: 6, spread: false };
+    const sixArgs = "(content, 'note', source, undefined, undefined, { sourceAttested: true })";
     const firstCall = /runDefencePipeline\(\s*content,\s*title \?\? 'Untitled',\s*defenceSource,\s*defenceConfig,\s*\)/;
     const passesGate = (scan: { calls: unknown[]; problems: string[] }) => scan.problems.length === 0 && scan.calls.length > 0;
-    function scanRest(src: string) {
-      return scanPipelineEntryCalls(callerProgram([restPath], { [restPath]: src }), restPath, pipelinePath, rel);
+    /** Scan a copy of the REST caller, with optional extra in-memory modules in the program. */
+    function scanRest(src: string, extra: Record<string, string> = {}) {
+      return scanPipelineEntryCalls(
+        callerProgram([restPath, ...Object.keys(extra)], { ...extra, [restPath]: src }), restPath, pipelinePath, rel);
     }
-    function withAppended(body: string): string {
-      return `${real}\nexport async function reviewProbe(content: string, source: DefenceSource) {\n${body}\n}\n`;
+    function withAppended(body: string, imports = ''): string {
+      return `${imports}${real}\nexport async function reviewProbe(content: string, source: DefenceSource) {\n${body}\n}\n`;
     }
 
     it('control: the unmodified copy passes with both safe calls', () => {
@@ -384,13 +389,14 @@ describe('#861 — the pipeline entry-point table is exhaustive', () => {
     it('(b) a destructured alias from a dynamic import is a problem', () => {
       const scan = scanRest(withAppended([
         "  const { runDefencePipelineWithVerify: verify } = await import('../defence/pipeline.js');",
-        "  return verify(content, 'note', source, undefined, undefined, { sourceAttested: true });",
+        `  return verify${sixArgs};`,
       ].join('\n')));
-      expect(scan.calls).toContainEqual(safeCall);
+      expect(scan.calls).toEqual([safeCall, safeCall, attestingCall]);
       // The binding pattern is visited before its initializer.
       expect(scan.problems).toEqual([
         `${rel}: runDefencePipelineWithVerify referenced other than as a direct call`,
         `${rel}: dynamic import() of an entry-point module ('../defence/pipeline.js')`,
+        `${rel}: runDefencePipelineWithVerify called with 6 args (options at 6)`,
       ]);
       expect(passesGate(scan)).toBe(false);
     }, 60_000);
@@ -400,7 +406,7 @@ describe('#861 — the pipeline entry-point table is exhaustive', () => {
         "  const p = await import('../defence/pipeline.js');",
         "  return p.runDefencePipelineWithVerify.call(undefined, content, 'note', source, undefined, undefined, { sourceAttested: true });",
       ].join('\n')));
-      expect(scan.calls).toContainEqual(safeCall);
+      expect(scan.calls).toEqual([safeCall, safeCall]);
       expect(scan.problems).toEqual([
         `${rel}: dynamic import() of an entry-point module ('../defence/pipeline.js')`,
         `${rel}: runDefencePipelineWithVerify referenced other than as a direct call`,
@@ -411,13 +417,104 @@ describe('#861 — the pipeline entry-point table is exhaustive', () => {
     it('(d) element access on a dynamic barrel namespace is a problem', () => {
       const scan = scanRest(withAppended([
         "  const p = await import('../defence/index.js');",
-        "  return p['runDefencePipelineWithVerify'](content, 'note', source, undefined, undefined, { sourceAttested: true });",
+        `  return p['runDefencePipelineWithVerify']${sixArgs};`,
       ].join('\n')));
-      expect(scan.calls).toContainEqual(safeCall);
+      expect(scan.calls).toEqual([safeCall, safeCall, attestingCall]);
       expect(scan.problems).toEqual([
         `${rel}: dynamic import() of an entry-point module ('../defence/index.js')`,
-        `${rel}: runDefencePipelineWithVerify referenced other than as a direct call`,
+        `${rel}: entry-point namespace 'p' used other than as ns.name`,
+        `${rel}: runDefencePipelineWithVerify called with 6 args (options at 6)`,
       ]);
+      expect(passesGate(scan)).toBe(false);
+    }, 60_000);
+
+    // The package's own `shieldcortex/defence` subpath resolves to the dist
+    // DECLARATIONS (dist/defence/pipeline.d.ts), not to src — provenance is by
+    // declaring file, so both identities map to the same entry.
+    it('(e) a string-literal named import from the package subpath is resolved through its dist declarations', () => {
+      const scan = scanRest(withAppended(`  return packageOnlyVerify${sixArgs};`,
+        "import { 'runDefencePipelineWithVerify' as packageOnlyVerify } from 'shieldcortex/defence';\n"));
+      expect(scan.calls).toEqual([safeCall, safeCall, attestingCall]);
+      expect(scan.problems).toEqual([`${rel}: runDefencePipelineWithVerify called with 6 args (options at 6)`]);
+      expect(passesGate(scan)).toBe(false);
+    }, 60_000);
+
+    it('(f) a package-subpath namespace import called by computed key is a problem', () => {
+      const scan = scanRest(withAppended([
+        "  const key = 'runDefencePipelineWithVerify';",
+        `  return p[key]${sixArgs};`,
+      ].join('\n'), "import * as p from 'shieldcortex/defence';\n"));
+      expect(scan.calls).toEqual([safeCall, safeCall, attestingCall]);
+      expect(scan.problems).toEqual([
+        `${rel}: namespace/default import of an entry-point module ('shieldcortex/defence')`,
+        `${rel}: entry-point namespace 'p' used other than as ns.name`,
+        `${rel}: runDefencePipelineWithVerify called with 6 args (options at 6)`,
+      ]);
+      expect(passesGate(scan)).toBe(false);
+    }, 60_000);
+
+    it('(g) a package-subpath dynamic import called by computed key is a problem', () => {
+      const scan = scanRest(withAppended([
+        "  const p = await import('shieldcortex/defence');",
+        "  const key = 'runDefencePipelineWithVerify';",
+        `  return p[key]${sixArgs};`,
+      ].join('\n')));
+      expect(scan.calls).toEqual([safeCall, safeCall, attestingCall]);
+      expect(scan.problems).toEqual([
+        `${rel}: dynamic import() of an entry-point module ('shieldcortex/defence')`,
+        `${rel}: entry-point namespace 'p' used other than as ns.name`,
+        `${rel}: runDefencePipelineWithVerify called with 6 args (options at 6)`,
+      ]);
+      expect(passesGate(scan)).toBe(false);
+    }, 60_000);
+
+    describe('through an `export * as defence` re-export module (source-backed, not a package path)', () => {
+      const reexport = { [join(repoRoot, 'src', 'api', 'review-virtual.ts')]: "export * as defence from '../defence/pipeline.js';\n" };
+      const importIt = "import { defence } from './review-virtual.js';\n";
+
+      it('(h) a computed-key call on the re-exported namespace is resolved and a problem', () => {
+        const scan = scanRest(withAppended([
+          "  const key = 'runDefencePipelineWithVerify';",
+          `  return defence[key]${sixArgs};`,
+        ].join('\n'), importIt), reexport);
+        expect(scan.calls).toEqual([safeCall, safeCall, attestingCall]);
+        expect(scan.problems).toEqual([
+          `${rel}: entry-point namespace 'defence' used other than as ns.name`,
+          `${rel}: runDefencePipelineWithVerify called with 6 args (options at 6)`,
+        ]);
+        expect(passesGate(scan)).toBe(false);
+      }, 60_000);
+
+      it('(i) an unresolvable access to the re-exported namespace fails closed', () => {
+        const scan = scanRest(withAppended([
+          "  const key: string = 'runDefencePipelineWithVerify';",
+          `  return (defence as any)[key]${sixArgs};`,
+        ].join('\n'), importIt), reexport);
+        // The call itself cannot be pinned; the namespace escape is the problem.
+        expect(scan.calls).toEqual([safeCall, safeCall]);
+        expect(scan.problems).toEqual([`${rel}: entry-point namespace 'defence' used other than as ns.name`]);
+        expect(passesGate(scan)).toBe(false);
+      }, 60_000);
+    });
+
+    // N3: erased type positions are not runtime references.
+    const typeOnly = [
+      "import type { runDefencePipelineWithVerify as ReviewScan } from '../defence/pipeline.js';",
+      'export type ReviewSignature = typeof ReviewScan;',
+      '',
+    ].join('\n');
+
+    it('(j) a type-only import and `typeof` use is not flagged', () => {
+      const scan = scanRest(withAppended('  return null as unknown as ReviewSignature;', typeOnly));
+      expect(scan).toEqual({ calls: [safeCall, safeCall], problems: [] });
+      expect(passesGate(scan)).toBe(true);
+    }, 60_000);
+
+    it('(k) beside that type-only use, a runtime six-argument call is still a problem', () => {
+      const scan = scanRest(withAppended(`  return runtimeVerify${sixArgs};`,
+        `${typeOnly}import { runDefencePipelineWithVerify as runtimeVerify } from '../defence/pipeline.js';\n`));
+      expect(scan.calls).toEqual([safeCall, safeCall, attestingCall]);
+      expect(scan.problems).toEqual([`${rel}: runDefencePipelineWithVerify called with 6 args (options at 6)`]);
       expect(passesGate(scan)).toBe(false);
     }, 60_000);
   });
@@ -510,19 +607,31 @@ function diffEntryTable(exported: string[], tableKeys: string[]): { missing: str
 }
 
 /**
- * Every reference to a pipeline entry point in `file`, resolved with the
- * type checker (so an alias, a barrel re-export or a renamed re-export maps
- * back to the exported `runDefencePipeline*` name). Only a direct call is
- * accepted, and only within the entry's table limit; anything else is a
- * problem — fail closed, because its argument count could not be pinned:
- *   - any other use of an entry (escaped value, `.call/.apply/.bind`, element
- *     access, destructuring, parenthesised callee);
+ * A file that declares the pipeline: the source, or its emitted declarations
+ * or JS under any root — the `shieldcortex/defence` package self-reference
+ * resolves to dist/defence/pipeline.d.ts, whose symbols differ from src's.
+ */
+const PIPELINE_DECLARING_FILE = /[\\/]defence[\\/]pipeline(\.d\.ts|\.ts|\.js)$/;
+
+/**
+ * Every reference to a pipeline entry point in `file`. An expression is an
+ * entry when its symbol, its type or its call's resolved signature leads to a
+ * `runDefencePipeline*` declaration in a pipeline-declaring file — so an alias,
+ * a barrel or renamed re-export, an `export * as ns` namespace, a computed key
+ * and the package's own dist declarations all map back to the declared name.
+ * Only a direct call (`f(...)`, `ns.f(...)`, `ns[key](...)`) is accepted, and
+ * only within the entry's table limit; anything else is a problem — fail
+ * closed, because its argument count could not be pinned:
+ *   - any other use of an entry (escaped value, `.call/.apply/.bind`,
+ *     destructuring, parenthesised or computed callee);
  *   - a namespace/default import, re-export, dynamic `import()` or
- *     `import = require` of a module that exports an entry (the pipeline, the
- *     defence barrel, or anything re-exporting them), or of a module that
- *     cannot be resolved; any `require()` call;
+ *     `import = require` of a module that exposes an entry (directly or through
+ *     `export * as ns`), or of a module that cannot be resolved; any
+ *     `require()` call;
+ *   - a namespace value exposing an entry used other than as `ns.name`;
  *   - a `runDefencePipeline*` name that does not resolve to an entry
  *     (unknown, or imported through a route the checker cannot follow).
+ * Erased type positions (`import type`, `typeof X` in a type) are skipped.
  */
 function scanPipelineEntryCalls(program: ts.Program, file: string, pipelineFile: string, label: string): {
   calls: Array<{ entry: string; argCount: number; spread: boolean }>;
@@ -532,22 +641,69 @@ function scanPipelineEntryCalls(program: ts.Program, file: string, pipelineFile:
   const sf = program.getSourceFile(file);
   const pipeline = program.getSourceFile(pipelineFile);
   if (!sf || !pipeline) throw new Error(`cannot load ${sf ? pipelineFile : file}`);
-  const pipelineModule = checker.getSymbolAtLocation(pipeline);
-  if (!pipelineModule) throw new Error(`${pipelineFile} is not a module`);
   const resolve = (s: ts.Symbol): ts.Symbol => (s.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(s) : s);
-  const entries = new Map<ts.Symbol, string>();
-  for (const sym of checker.getExportsOfModule(pipelineModule)) {
-    if (sym.getName().startsWith(ENTRY_PREFIX)) entries.set(resolve(sym), sym.getName());
-  }
-  if (entries.size === 0) throw new Error(`${pipelineFile} exports no ${ENTRY_PREFIX}* entry point`);
-  const entryOf = (node: ts.Node): string | undefined => {
-    const sym = checker.getSymbolAtLocation(node);
-    return sym && entries.get(resolve(sym));
+  /** The entry name `decl` declares, if it is a `runDefencePipeline*` function of a pipeline-declaring file. */
+  const entryDecl = (decl: ts.Declaration | undefined): string | undefined => {
+    if (!decl) return undefined;
+    const fileName = decl.getSourceFile().fileName;
+    if (fileName !== pipelineFile && !PIPELINE_DECLARING_FILE.test(fileName)) return undefined;
+    const named = (ts.isArrowFunction(decl) || ts.isFunctionExpression(decl)) && ts.isVariableDeclaration(decl.parent)
+      ? decl.parent : decl;
+    const name = (ts.isFunctionDeclaration(named) || ts.isVariableDeclaration(named)) && named.name && ts.isIdentifier(named.name)
+      ? named.name.text : undefined;
+    return name?.startsWith(ENTRY_PREFIX) ? name : undefined;
   };
-  /** true/false: the module does/doesn't export an entry; undefined: unresolved. */
+  const entryOfSymbol = (s: ts.Symbol | undefined): string | undefined =>
+    s && (resolve(s).declarations ?? []).map(entryDecl).find(Boolean);
+  const entryOf = (node: ts.Node): string | undefined => {
+    const bySymbol = entryOfSymbol(checker.getSymbolAtLocation(node));
+    if (bySymbol) return bySymbol;
+    const type = checker.getTypeAtLocation(node);
+    return (type.isUnion() ? type.types : [type]).map(t => entryOfSymbol(t.getSymbol())).find(Boolean);
+  };
+  if (!checker.getExportsOfModule(checker.getSymbolAtLocation(pipeline)!).some(e => entryOfSymbol(e))) {
+    throw new Error(`${pipelineFile} exports no ${ENTRY_PREFIX}* entry point`);
+  }
+  /** true/false: the module does/doesn't expose an entry, following `export * as ns` (cycle-safe); undefined: unresolved. */
+  const bearing = new Map<ts.Symbol, boolean | undefined>();
+  const bearsEntry = (mod: ts.Symbol): boolean | undefined => {
+    if (bearing.has(mod)) return bearing.get(mod);
+    bearing.set(mod, false);
+    let result: boolean | undefined = false;
+    for (const e of checker.getExportsOfModule(mod)) {
+      const target = resolve(e);
+      const bears = checker.isUnknownSymbol(target) ? undefined
+        : entryOfSymbol(target) ? true
+          : target.flags & ts.SymbolFlags.ValueModule ? bearsEntry(target) : false;
+      if (bears) { result = true; break; }
+      if (bears === undefined) result = undefined;
+    }
+    bearing.set(mod, result);
+    return result;
+  };
   const exportsEntry = (specifier: ts.Expression): boolean | undefined => {
     const mod = checker.getSymbolAtLocation(specifier);
-    return mod && checker.getExportsOfModule(mod).some(e => entries.has(resolve(e)));
+    return mod && bearsEntry(mod);
+  };
+  /**
+   * A namespace object (static or dynamic import, `export * as ns`) exposing
+   * an entry, or unresolved. Judged by its members too: a dynamic import's
+   * interop type is not the module symbol itself.
+   */
+  const isBearingNamespace = (node: ts.Node): boolean => {
+    const type = checker.getTypeAtLocation(node);
+    const s = type.getSymbol();
+    if (s && s.flags & ts.SymbolFlags.ValueModule && bearsEntry(s) !== false) return true;
+    return checker.getPropertiesOfType(type).some((p) => {
+      const target = resolve(p);
+      return !!entryOfSymbol(target) || (!!(target.flags & ts.SymbolFlags.ValueModule) && bearsEntry(target) !== false);
+    });
+  };
+  const lexicalEntry = (node: ts.Identifier | ts.PropertyAccessExpression | ts.ElementAccessExpression): string | undefined => {
+    const name = ts.isIdentifier(node) ? node.text
+      : ts.isPropertyAccessExpression(node) ? node.name.text
+        : ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : undefined;
+    return name?.startsWith(ENTRY_PREFIX) ? name : undefined;
   };
   const calls: Array<{ entry: string; argCount: number; spread: boolean }> = [];
   const problems: string[] = [];
@@ -559,13 +715,26 @@ function scanPipelineEntryCalls(program: ts.Program, file: string, pipelineFile:
   };
 
   const visit = (node: ts.Node): void => {
+    // Erased at runtime: nothing here can call an entry.
+    if ((ts.isTypeNode(node) && !ts.isExpressionWithTypeArguments(node))
+      || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) return;
     if (ts.isImportDeclaration(node)) {
       const clause = node.importClause;
-      if (clause && !clause.isTypeOnly) {
-        const whole = !!clause.name || !!(clause.namedBindings && ts.isNamespaceImport(clause.namedBindings));
-        checkModule(node.moduleSpecifier, 'namespace/default import', !whole);
+      if (!clause || clause.isTypeOnly) return;
+      const whole = !!clause.name || !!(clause.namedBindings && ts.isNamespaceImport(clause.namedBindings));
+      checkModule(node.moduleSpecifier, 'namespace/default import', !whole);
+      if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+        for (const spec of clause.namedBindings.elements) {
+          const imported = (spec.propertyName ?? spec.name).text;
+          if (!spec.isTypeOnly && imported.startsWith(ENTRY_PREFIX) && !entryOf(spec.name)) {
+            problems.push(`${label}: ${imported} imported but not resolved to an entry point`);
+          }
+        }
       }
-    } else if (ts.isExportDeclaration(node) && node.moduleSpecifier && !node.isTypeOnly) {
+      return; // Named bindings are checked at their uses.
+    }
+    if (ts.isExportDeclaration(node) && node.isTypeOnly) return;
+    if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
       checkModule(node.moduleSpecifier, 're-export', false);
     } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
       checkModule(node.moduleReference.expression, 'import = require', false);
@@ -575,22 +744,21 @@ function scanPipelineEntryCalls(program: ts.Program, file: string, pipelineFile:
       problems.push(`${label}: require() call`);
     }
 
-    const isName = ts.isIdentifier(node)
-      || (ts.isStringLiteralLike(node) && ts.isElementAccessExpression(node.parent) && node.parent.argumentExpression === node);
-    if (isName) {
-      const resolved = entryOf(node);
-      const text = (node as ts.Identifier | ts.StringLiteralLike).text;
-      const entry = resolved ?? (text.startsWith(ENTRY_PREFIX) ? text : undefined);
-      if (entry) {
-        const parent = node.parent;
-        const callee = ts.isPropertyAccessExpression(parent) && parent.name === node ? parent : node;
-        const call = ts.isIdentifier(node) && ts.isCallExpression(callee.parent) && callee.parent.expression === callee
-          ? callee.parent : undefined;
-        if (call) {
-          calls.push({ entry, argCount: call.arguments.length, spread: call.arguments.some(ts.isSpreadElement) });
-        } else if (!(ts.isImportSpecifier(parent) && resolved && entryOf(parent.name))) {
-          problems.push(`${label}: ${entry} referenced other than as a direct call`);
-        }
+    const isCandidate = ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)
+      // A declaration's own name is not a use (shorthand `{ f }` and `export { f }` are).
+      || (ts.isIdentifier(node) && !((node.parent as ts.NamedDeclaration).name === node
+        && !ts.isShorthandPropertyAssignment(node.parent) && !ts.isExportSpecifier(node.parent)));
+    if (isCandidate) {
+      const expr = node as ts.Identifier | ts.PropertyAccessExpression | ts.ElementAccessExpression;
+      const call = ts.isCallExpression(expr.parent) && expr.parent.expression === expr ? expr.parent : undefined;
+      const entry = entryOf(expr) ?? (call && entryDecl(checker.getResolvedSignature(call)?.declaration)) ?? lexicalEntry(expr);
+      if (entry && call) {
+        calls.push({ entry, argCount: call.arguments.length, spread: call.arguments.some(ts.isSpreadElement) });
+      } else if (entry) {
+        problems.push(`${label}: ${entry} referenced other than as a direct call`);
+      }
+      if (isBearingNamespace(expr) && !(ts.isPropertyAccessExpression(expr.parent) && expr.parent.expression === expr)) {
+        problems.push(`${label}: entry-point namespace '${expr.getText(sf)}' used other than as ns.name`);
       }
     }
     ts.forEachChild(node, visit);
