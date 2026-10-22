@@ -7,7 +7,7 @@ const originalHome = process.env.HOME;
 const originalUserProfile = process.env.USERPROFILE;
 const originalSkipTrial = process.env.SHIELDCORTEX_SKIP_TRIAL;
 
-let mockReviewQuarantineItem: jest.Mock;
+let mockReviewQuarantineItem: jest.Mock<(item: unknown) => Promise<unknown>>;
 
 function annotationFor(item: { id: number | string }, suggestedAction: 'approve' | 'reject') {
   return {
@@ -55,7 +55,7 @@ describe('Review Copilot quarantine annotations', () => {
     process.env.SHIELDCORTEX_SKIP_TRIAL = '1';
     consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
-    mockReviewQuarantineItem = jest.fn();
+    mockReviewQuarantineItem = jest.fn<(item: unknown) => Promise<unknown>>();
     jest.unstable_mockModule('../license/gate.js', () => ({
       requireFeature: jest.fn(),
       FeatureGatedError: class FeatureGatedError extends Error {},

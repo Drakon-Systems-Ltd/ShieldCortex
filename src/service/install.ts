@@ -20,8 +20,16 @@ const __dirname = path.dirname(__filename);
 
 type Platform = 'macos' | 'linux' | 'windows';
 
+type ExecFn = (command: string, options?: Parameters<typeof execSync>[1]) => unknown;
+
 interface ServiceOptions {
   mode?: ServiceMode;
+  /**
+   * Runs the systemctl / launchctl activation and query commands. Tests inject
+   * a stub so nothing real is spawned. (The best-effort linger step still
+   * calls execSync directly.)
+   */
+  exec?: ExecFn;
 }
 
 function detectPlatform(): Platform {
@@ -140,10 +148,71 @@ function summarizeServiceMode(mode: ServiceMode): string {
   }
 }
 
-type ExecFn = (command: string, options?: Parameters<typeof execSync>[1]) => unknown;
+/**
+ * The CLI verb that runs the same mode in the foreground. `shieldcortex
+ * worker|dashboard|api` select exactly the `--mode <mode>` the unit's
+ * ExecStart would have run (parseArgs in src/index.ts).
+ */
+function foregroundCommand(mode: ServiceMode): string {
+  return `shieldcortex ${mode}`;
+}
+
+/** The install flag that selects `mode`, for a repair hint; empty when the unit's mode is unknown. */
+function modeFlag(mode: ServiceMode | null): string {
+  switch (mode) {
+    case 'worker':
+      return ' --headless';
+    case 'api':
+      return ' --api';
+    case 'dashboard':
+      return ' --dashboard';
+    default:
+      return '';
+  }
+}
+
+/**
+ * True when the activation failure says systemctl itself is unusable on this
+ * host, as opposed to systemd rejecting the unit: the binary is missing (the
+ * shell exits 127, or ENOENT when spawned directly) or there is no user bus
+ * or no systemd init to talk to (#768, clean container / node:slim image).
+ *
+ * Activation runs with stdio inherited, so a "Failed to connect to bus" line
+ * normally reaches the terminal, not this error: the text branch below only
+ * fires when a caller captured output. A no-bus failure with nothing captured
+ * (status 1, message naming the command) takes the generic guidance instead,
+ * which still names the foreground fallback.
+ */
+function isSystemdUnavailable(err: unknown): boolean {
+  const e = (err ?? {}) as { code?: unknown; status?: unknown; message?: unknown; stdout?: unknown; stderr?: unknown };
+  if (e.code === 'ENOENT' || e.status === 127) return true;
+  const text = [e.message, e.stdout, e.stderr]
+    .filter((v): v is string | Buffer => typeof v === 'string' || Buffer.isBuffer(v))
+    .map((v) => String(v))
+    .join('\n');
+  return /systemctl: (?:command )?not found|Failed to connect to bus|System has not been booted with systemd/i.test(text);
+}
+
+/**
+ * True when a failed `launchctl print <domain>/<label>` is launchd's own
+ * "Could not find service ..." answer: the job is definitely not loaded.
+ * Anything else — launchctl missing (ENOENT, or shell status 127), no GUI
+ * domain, any other error — says nothing about whether the job is loaded,
+ * so status must report unknown rather than claim it is absent (#768).
+ */
+function isLaunchdServiceNotFound(err: unknown): boolean {
+  const e = (err ?? {}) as { code?: unknown; status?: unknown; message?: unknown; stdout?: unknown; stderr?: unknown };
+  if (e.code === 'ENOENT' || e.status === 127) return false;
+  const text = [e.stdout, e.stderr, e.message]
+    .filter((v): v is string | Buffer => typeof v === 'string' || Buffer.isBuffer(v))
+    .map((v) => String(v))
+    .join('\n');
+  return /Could not find service/i.test(text);
+}
 
 const MACOS_SERVICE_LABEL = 'com.shieldcortex.dashboard';
 const LINUX_SERVICE_UNIT = 'shieldcortex-dashboard.service';
+const SERVICE_USAGE = 'Usage: shieldcortex service <install|repair|uninstall|status> [--dashboard|--api|--headless]';
 
 function macosGuiDomain(): string {
   const uid = process.getuid?.();
@@ -240,6 +309,7 @@ function tryEnableLinuxLinger(): void {
 
 export async function installService(options: ServiceOptions = {}): Promise<void> {
   const platform = detectPlatform();
+  const exec = options.exec ?? execSync;
   const mode = options.mode ?? detectDefaultServiceMode(platform);
   const config = getServiceConfig(mode);
   const servicePath = getServicePath(platform);
@@ -265,14 +335,14 @@ export async function installService(options: ServiceOptions = {}): Promise<void
   try {
     switch (platform) {
       case 'macos': {
-        const { reloaded } = await activateMacosService(servicePath);
+        const { reloaded } = await activateMacosService(servicePath, { exec });
         console.log(reloaded
           ? 'Service was already loaded — restarted with the new configuration.'
           : 'Service loaded via launchctl.');
         break;
       }
       case 'linux':
-        activateLinuxService();
+        activateLinuxService(exec);
         if (mode === 'worker' || mode === 'api') {
           tryEnableLinuxLinger();
         }
@@ -284,14 +354,23 @@ export async function installService(options: ServiceOptions = {}): Promise<void
         break;
     }
   } catch (err: any) {
+    // #768: automation reads this exit code. A unit that could not be
+    // activated is not an installed service, however far the file work got.
+    process.exitCode = 1;
     console.error(`Failed to enable service: ${err.message}`);
+    const foreground = foregroundCommand(mode);
     if (platform === 'macos') {
       // Common over ssh: no GUI session means no gui/<uid> domain to load
       // into. The LaunchAgent still auto-starts at the next GUI login.
-      console.log(`The service file was written to ${servicePath} — it will auto-start at the next GUI login, or load it now with:`);
-      console.log(`  launchctl bootstrap gui/$(id -u) "${servicePath}"`);
+      console.error(`The service file was written to ${servicePath} — it will auto-start at the next GUI login, or load it now with:`);
+      console.error(`  launchctl bootstrap gui/$(id -u) "${servicePath}"`);
+      console.error(`To run the same mode in the foreground instead: ${foreground}`);
+    } else if (isSystemdUnavailable(err)) {
+      console.error('systemd user services are not available on this host (systemctl is missing or there is no user bus), so the service cannot be enabled here.');
+      console.error(`The unit file stays at ${servicePath}. To run the same mode in the foreground instead: ${foreground}`);
     } else {
-      console.log(`The service file was written to ${servicePath} — you can enable it manually.`);
+      console.error(`The unit file stays at ${servicePath}. Inspect with: systemctl --user status ${LINUX_SERVICE_UNIT}`);
+      console.error(`If this host has no systemd user session, run the same mode in the foreground instead: ${foreground}`);
     }
     return;
   }
@@ -309,7 +388,7 @@ export async function installService(options: ServiceOptions = {}): Promise<void
 }
 
 export async function repairService(options: ServiceOptions = {}): Promise<void> {
-  await uninstallService();
+  await uninstallService({ exec: options.exec });
   await installService(options);
 }
 
@@ -321,8 +400,9 @@ function cleanLogsDirectory(): void {
   }
 }
 
-export async function uninstallService(options?: { cleanLogs?: boolean }): Promise<void> {
+export async function uninstallService(options?: { cleanLogs?: boolean; exec?: ExecFn }): Promise<void> {
   const platform = detectPlatform();
+  const exec = options?.exec ?? execSync;
   const servicePath = getServicePath(platform);
 
   if (!fs.existsSync(servicePath)) {
@@ -333,10 +413,10 @@ export async function uninstallService(options?: { cleanLogs?: boolean }): Promi
   try {
     switch (platform) {
       case 'macos':
-        execSync(`launchctl unload -w "${servicePath}"`, { stdio: 'inherit' });
+        exec(`launchctl unload -w "${servicePath}"`, { stdio: 'inherit' });
         break;
       case 'linux':
-        execSync('systemctl --user disable --now shieldcortex-dashboard.service', { stdio: 'inherit' });
+        exec(`systemctl --user disable --now ${LINUX_SERVICE_UNIT}`, { stdio: 'inherit' });
         break;
       case 'windows':
         break;
@@ -353,8 +433,9 @@ export async function uninstallService(options?: { cleanLogs?: boolean }): Promi
   }
 }
 
-export async function serviceStatus(): Promise<void> {
+export async function serviceStatus(options: { exec?: ExecFn } = {}): Promise<void> {
   const platform = detectPlatform();
+  const exec = options.exec ?? execSync;
   const servicePath = getServicePath(platform);
   const installed = fs.existsSync(servicePath);
   const inspection = inspectServiceEntryPoint(platform, servicePath);
@@ -371,34 +452,119 @@ export async function serviceStatus(): Promise<void> {
     }
   }
 
-  if (!installed) return;
+  if (!installed) {
+    console.log('Install:   shieldcortex service install [--dashboard|--api|--headless]');
+    process.exitCode = 1;
+    return;
+  }
 
-  try {
-    switch (platform) {
-      case 'macos': {
-        const domain = `${macosGuiDomain()}/${MACOS_SERVICE_LABEL}`;
-        const out = execSync(`launchctl print ${domain} 2>&1`, { encoding: 'utf-8' });
-        const pidMatch = out.match(/\bpid\s*=\s*(\d+)/i);
-        const running = /\bstate\s*=\s*running\b/i.test(out) || Boolean(pidMatch);
-        console.log(`Running:   ${running ? `yes${pidMatch ? ` (PID ${pidMatch[1]})` : ''}` : 'no'}`);
+  const mode = inspection.mode ?? detectDefaultServiceMode(platform);
+  // "Activated" means the platform supervisor knows the unit and is running
+  // it. A stale-but-running unit stays activated (exit 0): the service is up,
+  // and the Healthy/Repair lines already carry the advice.
+  let activated = true;
+  // The query itself failed (no systemctl or launchctl, no user bus or GUI
+  // domain): nothing is known about the job, so repair is not the advice.
+  let unqueryable = false;
+
+  switch (platform) {
+    case 'macos': {
+      const domain = `${macosGuiDomain()}/${MACOS_SERVICE_LABEL}`;
+      const query = `launchctl print ${domain}`;
+      let out: string | null = null;
+      let detail = '';
+      let notLoaded = false;
+      try {
+        out = String(exec(`${query} 2>&1`, { encoding: 'utf-8' }) ?? '');
+      } catch (err: any) {
+        // 2>&1 puts launchd's own line ("Could not find service ...") in stdout.
+        detail = String(err?.stdout || err?.message || err).trim().split('\n')[0];
+        notLoaded = isLaunchdServiceNotFound(err);
+      }
+      if (out === null && !notLoaded) {
+        // The query never got an answer from launchd (no launchctl on PATH,
+        // no GUI domain, ...). Mirrors the Linux "unknown" branch: nothing is
+        // known about the job, so repair is not the advice.
+        console.log('Loaded:    unknown');
+        console.log('Running:   unknown');
+        console.log(`Error:     could not query launchd: ${query}: ${detail}`);
+        console.log(`Hint:      inspect with: ${query}; if launchd cannot be reached from here, run the same mode in the foreground: ${foregroundCommand(mode)}`);
+        activated = false;
+        unqueryable = true;
         break;
       }
-      case 'linux': {
-        const out = execSync('systemctl --user is-active shieldcortex-dashboard.service 2>&1', { encoding: 'utf-8' }).trim();
-        console.log(`Running:   ${out === 'active' ? 'yes' : 'no'}`);
+      if (out === null) {
+        console.log('Loaded:    no');
+        console.log('Running:   no');
+        console.log(`Error:     ${query}: ${detail}`);
+        activated = false;
         break;
       }
-      case 'windows':
-        console.log('Running:   (check Task Manager for node.exe)');
-        break;
+      const pidMatch = out.match(/\bpid\s*=\s*(\d+)/i);
+      const running = /\bstate\s*=\s*running\b/i.test(out) || Boolean(pidMatch);
+      console.log('Loaded:    yes');
+      console.log(`Running:   ${running ? `yes${pidMatch ? ` (PID ${pidMatch[1]})` : ''}` : 'no'}`);
+      if (!running) activated = false;
+      break;
     }
-  } catch {
-    console.log('Running:   no');
+    case 'linux': {
+      const enabled = queryLinuxUnitState(exec, 'is-enabled');
+      // If the first query never reached systemd, the second cannot either.
+      const active = enabled.error === null ? queryLinuxUnitState(exec, 'is-active') : enabled;
+      const problem = enabled.error ?? active.error;
+      if (problem !== null) {
+        console.log('Enabled:   unknown');
+        console.log('Running:   unknown');
+        console.log(`Error:     could not query systemd user services: ${problem}`);
+        console.log(`Hint:      if this host has no systemd user services, run the same mode in the foreground: ${foregroundCommand(mode)}`);
+        activated = false;
+        unqueryable = true;
+        break;
+      }
+      // systemctl(1) "is-enabled output": `enabled` and `enabled-runtime` are
+      // the enabled-via-symlinks states (the latter only until reboot). The
+      // other exit-0 words (static, indirect, generated, alias, linked, ...)
+      // do not mean "starts at login" and keep the no (<state>) reading.
+      const isEnabled = enabled.state === 'enabled' || enabled.state === 'enabled-runtime';
+      const isActive = active.state === 'active';
+      const enabledNote = enabled.state === 'enabled-runtime' ? ' (runtime only; not persistent across reboot)' : '';
+      console.log(`Enabled:   ${isEnabled ? `yes${enabledNote}` : `no (${enabled.state})`}`);
+      console.log(`Running:   ${isActive ? 'yes' : `no (${active.state})`}`);
+      if (!isEnabled || !isActive) activated = false;
+      break;
+    }
+    case 'windows':
+      console.log('Running:   (check Task Manager for node.exe)');
+      break;
   }
 
-  if (inspection.stale) {
-    console.log('Repair:    shieldcortex service repair');
+  if (inspection.stale || (!activated && !unqueryable)) {
+    console.log(`Repair:    shieldcortex service repair${modeFlag(inspection.mode)}`);
   }
+  if (!activated) process.exitCode = 1;
+}
+
+/**
+ * One `systemctl --user is-enabled|is-active` answer. systemctl replies to
+ * these verbs with exactly one lowercase word (enabled, disabled, active,
+ * inactive, failed, not-found, ...) and a non-zero exit for the negative
+ * ones, so the word is read from stdout either way (2>&1 keeps it there).
+ * Anything that is not one word ("systemctl: not found", "Failed to connect
+ * to bus: ...") means the query never reached systemd.
+ */
+function queryLinuxUnitState(exec: ExecFn, verb: 'is-enabled' | 'is-active'): { state: string | null; error: string | null } {
+  const command = `systemctl --user ${verb} ${LINUX_SERVICE_UNIT} 2>&1`;
+  let out: string;
+  let message = '';
+  try {
+    out = String(exec(command, { encoding: 'utf-8' }) ?? '').trim();
+  } catch (err: any) {
+    out = String(err?.stdout ?? '').trim();
+    message = String(err?.message ?? err);
+  }
+  if (/^[a-z][a-z-]*$/.test(out)) return { state: out, error: null };
+  const detail = (out || message || 'no output').split('\n')[0];
+  return { state: null, error: detail };
 }
 
 function parseServiceModeArgs(args: string[]): ServiceMode | undefined {
@@ -408,22 +574,32 @@ function parseServiceModeArgs(args: string[]): ServiceMode | undefined {
   return undefined;
 }
 
-export async function handleServiceCommand(subcommand: string, args: string[] = []): Promise<void> {
+export async function handleServiceCommand(
+  subcommand: string,
+  args: string[] = [],
+  deps: { exec?: ExecFn } = {},
+): Promise<void> {
+  const { exec } = deps;
   switch (subcommand) {
     case 'install':
-      await installService({ mode: parseServiceModeArgs(args) });
+      await installService({ mode: parseServiceModeArgs(args), exec });
       break;
     case 'repair':
-      await repairService({ mode: parseServiceModeArgs(args) });
+      await repairService({ mode: parseServiceModeArgs(args), exec });
       break;
     case 'uninstall':
-      await uninstallService({ cleanLogs: process.argv.includes('--clean-logs') });
+      await uninstallService({ cleanLogs: process.argv.includes('--clean-logs'), exec });
       break;
     case 'status':
-      await serviceStatus();
+      await serviceStatus({ exec });
+      break;
+    case '--help':
+    case '-h':
+      // Help is not an error.
+      console.log(SERVICE_USAGE);
       break;
     default:
-      console.log('Usage: shieldcortex service <install|repair|uninstall|status> [--dashboard|--api|--headless]');
+      console.log(SERVICE_USAGE);
       process.exit(1);
   }
 }

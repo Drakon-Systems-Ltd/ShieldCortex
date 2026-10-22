@@ -22,6 +22,19 @@ const OUTCOME_STYLES: Record<string, string> = {
   failure_denied: 'bg-[var(--sc-danger)]/10 text-[var(--sc-danger)]',
 };
 
+/** Plain-word outcome labels (Opus §3 glossary); the raw value is the filter key. */
+export const OUTCOME_LABELS: Record<string, string> = {
+  approved: 'You allowed',
+  denied: 'You denied',
+  auto_denied: 'Blocked automatically',
+  warned: 'Warned',
+  logged: 'Logged only',
+  failure_allowed: 'Check failed, allowed',
+  failure_denied: 'Check failed, blocked',
+};
+
+const SEVERITY_LABELS: Record<string, string> = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' };
+
 export function InterceptorEventsView() {
   const [severity, setSeverity] = useState<string>('');
   const [outcome, setOutcome] = useState<string>('');
@@ -47,30 +60,30 @@ export function InterceptorEventsView() {
       <div className="glass-card p-6">
         <div className="grid gap-3 md:grid-cols-4">
           <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-4">
-            <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
+            <div className="flex items-center gap-2 text-xs text-[var(--sc-text-muted)]">
               <Activity size={12} />
               Total
             </div>
             <div className="mt-2 text-xl font-semibold text-[var(--sc-text)]">{summary?.total ?? 0}</div>
           </div>
           <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-4">
-            <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
+            <div className="flex items-center gap-2 text-xs text-[var(--sc-text-muted)]">
               <CheckCircle2 size={12} />
-              Approved
+              You allowed
             </div>
             <div className="mt-2 text-xl font-semibold text-[var(--sc-ok)]">{summary?.approved ?? 0}</div>
           </div>
           <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-4">
-            <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
+            <div className="flex items-center gap-2 text-xs text-[var(--sc-text-muted)]">
               <AlertTriangle size={12} />
-              Denied
+              You denied
             </div>
             <div className="mt-2 text-xl font-semibold text-[var(--sc-amber)]">{summary?.denied ?? 0}</div>
           </div>
           <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-4">
-            <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
+            <div className="flex items-center gap-2 text-xs text-[var(--sc-text-muted)]">
               <ShieldAlert size={12} />
-              Failures
+              Check failures
             </div>
             <div className="mt-2 text-xl font-semibold text-[var(--sc-danger)]">{summary?.failures ?? 0}</div>
           </div>
@@ -94,13 +107,9 @@ export function InterceptorEventsView() {
             className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-3 py-1.5 text-xs text-[var(--sc-text)]"
           >
             <option value="">All outcomes</option>
-            <option value="approved">Approved</option>
-            <option value="denied">Denied</option>
-            <option value="auto_denied">Auto denied</option>
-            <option value="warned">Warned</option>
-            <option value="logged">Logged</option>
-            <option value="failure_allowed">Failure allowed</option>
-            <option value="failure_denied">Failure denied</option>
+            {Object.entries(OUTCOME_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
           </select>
           <select
             value={tool}
@@ -119,13 +128,13 @@ export function InterceptorEventsView() {
         {isError ? (
           <CardError
             inline
-            message={`Failed to load interceptor events: ${error instanceof Error ? error.message : 'fetch failed'}`}
+            message={`Couldn't load activity: ${error instanceof Error ? error.message : 'fetch failed'}`}
             onRetry={() => refetch()}
           />
         ) : isLoading ? (
-          <div className="flex h-32 items-center justify-center text-sm text-[var(--sc-text-dim)]">Loading interceptor events…</div>
+          <div className="flex h-32 items-center justify-center text-sm text-[var(--sc-text-dim)]">Loading activity…</div>
         ) : entries.length === 0 ? (
-          <div className="flex h-32 items-center justify-center text-sm text-[var(--sc-text-dim)]">No interceptor events found for the current filters.</div>
+          <div className="flex h-32 items-center justify-center text-sm text-[var(--sc-text-dim)]">No activity matches these filters.</div>
         ) : (
           <div className="divide-y divide-[var(--sc-border)]">
             {entries.map((entry, index) => (
@@ -136,24 +145,24 @@ export function InterceptorEventsView() {
                     {new Date(entry.ts).toLocaleString()}
                   </div>
                   <div className="text-sm font-medium text-[var(--sc-text)]">{entry.tool}</div>
-                  <div className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] ${SEVERITY_STYLES[entry.severity] ?? SEVERITY_STYLES.low}`}>
-                    {entry.severity.toUpperCase()}
+                  <div className={`inline-flex rounded-full border px-2.5 py-1 text-xs ${SEVERITY_STYLES[entry.severity] ?? SEVERITY_STYLES.low}`}>
+                    {SEVERITY_LABELS[entry.severity] ?? entry.severity}
                   </div>
                 </div>
 
                 <div className="min-w-0">
-                  <div className="text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Preview</div>
+                  <div className="text-xs text-[var(--sc-text-muted)]">Preview</div>
                   <p className="mt-2 line-clamp-4 text-sm leading-6 text-[var(--sc-text)]">
                     {entry.preview || 'No preview captured.'}
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2">
                     {(entry.threats ?? []).map((threat) => (
-                      <span key={threat} className="rounded-full border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2.5 py-1 text-[11px] text-[var(--sc-text)]">
+                      <span key={threat} className="rounded-full border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2.5 py-1 text-xs text-[var(--sc-text)]">
                         {threat}
                       </span>
                     ))}
                     {(!entry.threats || entry.threats.length === 0) && (
-                      <span className="rounded-full border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2.5 py-1 text-[11px] text-[var(--sc-text-dim)]">
+                      <span className="rounded-full border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2.5 py-1 text-xs text-[var(--sc-text-dim)]">
                         No explicit threat tags
                       </span>
                     )}
@@ -162,21 +171,21 @@ export function InterceptorEventsView() {
 
                 <div className="space-y-3">
                   <div>
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Outcome</div>
-                    <div className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-[11px] ${OUTCOME_STYLES[entry.outcome] ?? OUTCOME_STYLES.logged}`}>
-                      {entry.outcome.replace(/_/g, ' ')}
+                    <div className="text-xs text-[var(--sc-text-muted)]">Outcome</div>
+                    <div className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-xs ${OUTCOME_STYLES[entry.outcome] ?? OUTCOME_STYLES.logged}`}>
+                      {OUTCOME_LABELS[entry.outcome] ?? entry.outcome.replace(/_/g, ' ')}
                     </div>
                   </div>
                   <div>
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Firewall</div>
+                    <div className="text-xs text-[var(--sc-text-muted)]">Firewall</div>
                     <div className="mt-1 text-sm text-[var(--sc-text)]">{entry.firewallResult}</div>
                   </div>
                   <div>
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Action</div>
+                    <div className="text-xs text-[var(--sc-text-muted)]">Action</div>
                     <div className="mt-1 text-sm text-[var(--sc-text)]">{entry.action}</div>
                   </div>
                   <div>
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Anomaly score</div>
+                    <div className="text-xs text-[var(--sc-text-muted)]">Anomaly score</div>
                     <div className="mt-1 text-sm text-[var(--sc-text)]">{entry.anomalyScore.toFixed(2)}</div>
                   </div>
                 </div>

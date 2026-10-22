@@ -31,9 +31,9 @@ export function PageHeader({
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="min-w-0">
           {eyebrow && (
-            <p className="text-[11px] uppercase tracking-wider text-[var(--sc-text-muted)]">{eyebrow}</p>
+            <p className="text-xs text-[var(--sc-text-muted)]">{eyebrow}</p>
           )}
-          <h1 className="truncate text-lg font-semibold text-[var(--sc-text)]">{title}</h1>
+          <h1 className="truncate text-[1.625rem] font-semibold leading-tight text-[var(--sc-text)]">{title}</h1>
           {subtitle && <p className="mt-0.5 text-sm text-[var(--sc-text-muted)]">{subtitle}</p>}
         </div>
         {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}

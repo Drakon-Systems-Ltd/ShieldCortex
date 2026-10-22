@@ -344,6 +344,42 @@ Optional cloud config example:
 }
 ```
 
+### Approval-timeout report at session end (#673, partial)
+
+When an OpenClaw session ends, ShieldCortex reads that session's local guard
+index (`~/.shieldcortex/audit/session-guard/<sc-…>.jsonl`, the last 1 MiB /
+5,000 lines at most) and, if it holds recorded `card_timeout` outcomes, sends
+**one** report-only message to the configured
+`interceptor.actionGuard.notify.webhookUrl`. It lists up to 10 calls (generic
+tool name, tier, the plain-English reason) and counts the rest as "+K more
+recorded in this scan".
+
+What it is not:
+
+- **Not an approval.** It has no approve/deny controls and grants nothing. The
+  approval request, its timeout and every decision path are unchanged.
+- **Not fewer cards.** The initial approval cards and any host "expired"
+  messages are sent exactly as before. This report is added at session end;
+  it does not replace them.
+- **Not a blocked/skipped claim.** No OpenClaw version is yet verified by a
+  pinned host-contract test, so every entry says ShieldCortex has not verified
+  whether that OpenClaw version blocked the call.
+- **Not a complete count.** Counts are what the local index recorded; a
+  partly unreadable index is reported as "at least N".
+- **Not delivery to a person.** "Delivered" in the local receipt row means the
+  webhook answered 2xx. There is no retry, no failover and no gateway/chat
+  adapter for this report. With no webhook (or notify disabled) the report is
+  kept local only.
+- **Per host session, once in the scanned window.** Several runs that reuse one
+  session id are one report while the earlier digest row is still inside the
+  last 1 MiB / 5,000-line scan; a reused id whose earlier digest has aged out
+  of that window can get another. A session with no `session_end`, or with
+  conflicting session ids, gets none.
+
+The index gains content-free `recordKind: "digest"` rows (`local_only`,
+`attempt`, `receipt`), mirrored to `realtime-*.jsonl`; the session summary,
+the stop hook and readiness evidence ignore them.
+
 ## Shared database
 
 Memories are stored in `~/.shieldcortex/memories.db` and shared across ShieldCortex integrations (including Claude Code + OpenClaw when both use ShieldCortex memory tools).
@@ -390,6 +426,55 @@ shieldcortex doctor --strict   # every ⚠️ becomes exit 1
 
 Use that where "disabled anywhere in the fleet" must break the build. Plain
 `shieldcortex doctor` stays green for the operator who chose it.
+
+### Doctor severity notes (#651)
+
+A ⚠️ is meant to mark something you can act on. One family of rows is ℹ️
+instead, and so no longer fails `--strict`:
+
+- **Hermes plugin copies / Hermes plugin** when Hermes is confirmed absent: the
+  Hermes home holds none of `config.yaml`, `config.yml`, `profiles/`, `SOUL.md`
+  (the markers the HOSTS table uses), has no `plugins/` directory, `HERMES_HOME`
+  is unset, and the interpreter search found nothing: every venv candidate was
+  missing and there is no `hermes` launcher on `PATH`. Any one of those present,
+  an unreadable path (including a venv candidate or `PATH` entry that cannot be
+  checked), a dangling symlink where a venv candidate or launcher would be (or
+  on a directory above it), a `hermes` launcher that gives no usable interpreter (unreadable,
+  `#!/usr/bin/env` shebang, missing target), or an interpreter that was found
+  but failed keeps the ⚠️.
+
+**Action guard policy lock** with no lock installed and Guard not live is still
+⚠️ (`Guard is off on this host … not unprotected`, no fix command). It is not
+downgraded: doctor's signed-config read returns "off" for a corrupt or
+unreadable `config.json` as well as a real off, and a signed off does not prove
+the OpenClaw plane is off, because the plugin's own config can enable the
+guard. A live gate with no lock stays ❌.
+
+The HOSTS table header (`Guard on/off/mixed/advisory`) is computed from the configured
+Claude Code hook and OpenClaw plugin only; Hermes feeds it nothing, and it is
+not a check of running processes. `mixed` is the Claude Code hook enforcing
+while OpenClaw is observe-only or off; `on` is otherwise at least one of the two
+enforcing (OpenClaw counts only when signed `actionGuard.enabled` is `true`);
+`advisory` is neither enforcing while the Claude Code hook is wired and the
+signed guard is on in Watch only; `off` is none of these. The word after a host is that host's own configured gate. For
+OpenClaw, `observe-only` is a collapsed label: the plugin entry is not disabled
+but is not armed to block, which covers `enforce: false` and also a disabled
+`actionGuard` or `interceptor`. `off` is a disabled plugin entry. For Claude
+Code, `advisory` is the hook wired with the signed guard on in Watch only
+(ordinary dangerous calls run with a logged warning; catastrophic calls and
+calls that would change the guard itself are still denied), and `off` is the
+hook wired with the signed guard not on. `Guard off` beside
+`observe-only` is consistent, and doctor prints this legend under the table
+whenever a host shows one of those words.
+
+The OpenClaw "multiple install dirs" warning lists every
+`~/.openclaw/npm/projects/*` directory it found and which one OpenClaw's install
+index names as the install. The index records an install, not what the running
+gateway loaded. The row's opening sentence still says "prune the stale
+duplicate" (older wording), but it does not identify which directory is stale,
+and the row says so: doctor does not say which, if any, is stale or safe to
+delete, so inspect each before removing anything by hand. It prints no removal
+command; `shieldcortex repair` remains the remedy.
 
 ## Uninstall
 

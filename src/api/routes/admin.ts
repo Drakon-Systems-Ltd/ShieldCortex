@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from 'express';
 import { getDatabase } from '../../database/init.js';
 import { getCloudConfig, getDeviceId, getDeviceName } from '../../cloud/config.js';
+import { prepareQuarantineSyncPayload, quarantineRowToSyncEntry } from '../../cloud/quarantine-sync.js';
 import { queryAgentOperations, queryAgentRegistry, queryAgentTimeline, queryAuditLogs, getAuditStats } from '../../defence/audit/queries.js';
 import {
   approveQuarantineItem,
@@ -526,7 +527,8 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
       if (!result) {
         return res.status(404).json({ error: 'Quarantine entry not found or already reviewed' });
       }
-      res.json({ success: true, ...result });
+      // #824: an approval the re-scan refused ends `rejected`; don't report success.
+      res.json({ ...result, success: result.status === 'approved' });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
@@ -609,13 +611,19 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
       }
 
       let synced = 0;
+      let skipped = 0;
       const errors: string[] = [];
       for (const row of rows) {
         try {
-          const indicators: string[] = (() => {
-            try { return JSON.parse((row.threat_indicators as string) ?? '[]'); }
-            catch { return []; }
-          })();
+          // Same gate as the automatic quarantine sync: project filter,
+          // `excludeSensitive` (CONFIDENTIAL+ dropped), `contentMode:
+          // 'metadata'`, and credential redaction. A manual bulk sync must
+          // never ship more than the automatic path would.
+          const payload = prepareQuarantineSyncPayload(quarantineRowToSyncEntry(row));
+          if (!payload) {
+            skipped++;
+            continue;
+          }
 
           const response = await fetch(`${config.cloudBaseUrl}/v1/quarantine/ingest`, {
             method: 'POST',
@@ -623,16 +631,7 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
               'Content-Type': 'application/json',
               Authorization: `Bearer ${config.cloudApiKey}`,
             },
-            body: JSON.stringify({
-              original_content: row.original_content,
-              original_title: row.original_title ?? undefined,
-              source_type: row.source_type ?? 'unknown',
-              source_identifier: row.source_identifier ?? 'unknown',
-              reason: row.reason ?? 'Unknown reason',
-              threat_indicators: indicators,
-              anomaly_score: row.anomaly_score ?? 0,
-              firewall_result: row.firewall_result ?? 'QUARANTINE',
-            }),
+            body: JSON.stringify(payload),
             signal: AbortSignal.timeout(10_000),
           });
 
@@ -647,7 +646,7 @@ export function registerAdminRoutes(app: Express, deps: AdminRouteDeps): void {
         }
       }
 
-      res.json({ synced, total: rows.length, errors: errors.length > 0 ? errors : undefined });
+      res.json({ synced, skipped, total: rows.length, errors: errors.length > 0 ? errors : undefined });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

@@ -1,5 +1,4 @@
 import { describe, expect, it } from '@jest/globals';
-// @ts-expect-error -- importing a .mjs hook utility
 import { truncatePreservingWords } from '../../scripts/lib/truncate.mjs';
 
 /**
@@ -78,8 +77,9 @@ describe('truncatePreservingWords', () => {
   });
 
   it('returns non-strings unchanged (defensive)', () => {
-    expect(truncatePreservingWords(undefined, 100)).toBeUndefined();
-    expect(truncatePreservingWords(null, 100)).toBeNull();
+    // Deliberately feed non-string values to the runtime guard.
+    expect(truncatePreservingWords(undefined as unknown as string, 100)).toBeUndefined();
+    expect(truncatePreservingWords(null as unknown as string, 100)).toBeNull();
     expect(truncatePreservingWords(42 as unknown as string, 100)).toBe(42);
   });
 });

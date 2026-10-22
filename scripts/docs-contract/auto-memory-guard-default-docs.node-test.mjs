@@ -92,7 +92,10 @@ describe('source facts the docs describe', () => {
     assert.ok(cfg.includes('autoMemory: raw.openclawAutoMemory === true,'));
     assert.ok(blockAfter(cfg, 'export function isProactiveRecallEnabled()').includes('return raw.proactiveRecall === true;'));
     assert.ok(cfg.includes('const planeOn = raw.openclawAutoMemory === true || raw.proactiveRecall === true;'));
-    assert.match(blockAfter(cfg, 'export function getActionGuardCoreConfig()'), /enabled:\s*merged\.enabled === true/);
+    // The getter (and the read-only reader beside it) delegate to one pure
+    // resolver since #782; the "off unless exactly true" rule lives there.
+    assert.match(blockAfter(cfg, 'export function getActionGuardCoreConfig()'), /return resolveActionGuardCore\(readRawConfig\(\)\);/);
+    assert.match(blockAfter(cfg, 'function resolveActionGuardCore('), /enabled:\s*merged\.enabled === true/);
   });
 
   it('the OpenClaw plugin reads auto-memory strictly and ships the guard disabled', () => {

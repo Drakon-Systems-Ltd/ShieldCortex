@@ -362,7 +362,7 @@ export function ReviewQueueView() {
                       <div className="mt-0.5 line-clamp-1 text-xs text-[var(--sc-text-dim)]">{m.content}</div>
                       <div className="mt-1 flex flex-wrap gap-1.5">
                         {buildReasons(m, activeQueue).map((r, i) => (
-                          <span key={i} className="rounded-full bg-[var(--sc-surface-interactive)] px-2 py-0.5 text-[10px] uppercase tracking-wide text-[var(--sc-text-muted)]">
+                          <span key={i} className="rounded-full bg-[var(--sc-surface-interactive)] px-2 py-0.5 text-xs text-[var(--sc-text-muted)]">
                             {r.label}
                           </span>
                         ))}
@@ -445,7 +445,7 @@ export function ReviewQueueView() {
               <div key={`${item.memoryA.id}-${item.memoryB.id}`} className="rounded-xl border border-[var(--sc-amber)]/20 bg-[var(--sc-bg)]/60 p-4">
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <div className="text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Score</div>
+                    <div className="text-xs text-[var(--sc-text-muted)]">Score</div>
                     <div className="text-lg font-semibold text-[var(--sc-text)]">{Math.round(item.score * 100)}%</div>
                   </div>
                   <div className="text-right text-xs text-[var(--sc-text-muted)]">
@@ -460,7 +460,7 @@ export function ReviewQueueView() {
                     const other = idx === 0 ? item.memoryB : item.memoryA;
                     return (
                       <div key={memory.id} className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface)]/70 p-3">
-                        <div className="text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">{idx === 0 ? 'A' : 'B'}</div>
+                        <div className="text-xs text-[var(--sc-text-muted)]">{idx === 0 ? 'A' : 'B'}</div>
                         <div className="mt-1 text-sm font-medium text-[var(--sc-text)]">{memory.title}</div>
                         <div className="mt-1 line-clamp-2 text-xs text-[var(--sc-text-dim)]">{memory.content}</div>
                         <div className="mt-2 text-xs text-[var(--sc-text-muted)]">

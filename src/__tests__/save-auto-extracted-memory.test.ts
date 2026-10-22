@@ -4,8 +4,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
-// @ts-expect-error -- importing a .mjs hook util
 import { saveAutoExtractedMemory } from '../../scripts/lib/save-memory.mjs';
+import { classifySensitivity } from '../defence/sensitivity/index.js';
 import {
   FIXTURE_VECTOR_BYTES,
   FIXTURE_VECTOR_HEAD,
@@ -130,6 +130,45 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
     expect(rows[0].content).toContain('Pat Example');
     expect(Array.isArray(JSON.parse(rows[0].tags))).toBe(true);
     expect(['CONFIDENTIAL', 'RESTRICTED', 'SECRET']).toContain(rows[0].sensitivity_level);
+  });
+
+  it('memory admission holds a PERSONAL input containing a credential', async () => {
+    const secret = 'sk-' + 'abcdefghijklmnopqrstuvwxyz';
+    const memory = makeMemory({
+      title: 'March plans',
+      content: `Surprise birthday trip for my wife in March. ${secret}`,
+    });
+    expect(classifySensitivity(memory.content, memory.title).level).toBe('PERSONAL');
+
+    // Unlike prompt capture, memory admission blocks this credential. Do not
+    // weaken that decision just to exercise the subsequent redaction floor.
+    await saveAutoExtractedMemory(db, memory, 'p', { source: 'session-end-hook' });
+    expect(db.prepare('SELECT id FROM memories').all()).toHaveLength(0);
+    const held = db.prepare('SELECT firewall_result, reason FROM quarantine')
+      .all() as Array<{ firewall_result: string; reason: string }>;
+    expect(held).toHaveLength(1);
+    expect(held[0].firewall_result).toBe('BLOCK');
+    expect(held[0].reason).toContain('credential leak');
+  });
+
+  it('#858: a PERSONAL memory with redacted identifiers is stored CONFIDENTIAL', async () => {
+    const memory = makeMemory({
+      title: 'March plans',
+      content: 'Surprise birthday trip for my wife in March.',
+      // Tags are redacted at persistence, but not part of the title/content
+      // classifier input. This reaches the PERSONAL → CONFIDENTIAL floor.
+      tags: ['auto-extracted', 'NI QQ123456C'],
+    });
+    expect(classifySensitivity(memory.content, memory.title).level).toBe('PERSONAL');
+
+    await saveAutoExtractedMemory(db, memory, 'p', { source: 'session-end-hook' });
+    const rows = db.prepare('SELECT content, tags, sensitivity_level FROM memories')
+      .all() as Array<{ content: string; tags: string; sensitivity_level: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].content).toBe(memory.content);
+    expect(rows[0].tags).not.toContain('QQ123456C');
+    expect(rows[0].tags).toContain('[REDACTED:ni-number]');
+    expect(rows[0].sensitivity_level).toBe('CONFIDENTIAL');
   });
 
   // #510 bounded dedupe of redacted candidates: identical redacted text is a

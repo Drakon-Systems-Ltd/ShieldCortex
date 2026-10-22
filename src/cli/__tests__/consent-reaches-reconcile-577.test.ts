@@ -142,7 +142,7 @@ describe('#577 — repair: consent arrives at the reconcile boundary', () => {
       await runRepair(['--help'], { env: {} });
       expect(process.exitCode).toBe(0);
     } finally {
-      process.exitCode = prevExit;
+      process.exitCode = prevExit ?? undefined;
     }
     expect(calls).toEqual([]);
   });

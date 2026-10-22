@@ -734,7 +734,7 @@ export function analyse(events, parse) {
     unknown: {
       total: unknown.length, signalless: signalless.length, reasons: sortedObj(unknownReasons),
       neverLoggedSignals: [...NEVER_LOGGED_SIGNALS],
-      note: 'Signals outside the notify allowlist are written as redacted-signal; security-config-write signals are among them, so they are structurally invisible here.',
+      note: 'Signals outside the notify allowlist are written as redacted-signal. The security-config-write signals touch-guard-config and disable-action-guard are logged by name from #874 on; rows written before it still show redacted-signal for them.',
     },
     redactedSignals: { label: REDACTED_SIGNAL_LABEL, occurrences: outsideVocabOccurrences, events: outsideVocabEvents },
     known: { total: known.length, schemaRejectOnly: schemaOnlyKnown },

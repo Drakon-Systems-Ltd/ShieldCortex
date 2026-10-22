@@ -108,6 +108,7 @@ describe('doctor Iron Dome profile on an initialised singleton (#516)', () => {
   it('peek and the loader agree on the effective policy', () => {
     store(needsNormalising({ killPhrase: 'my private stop trigger' }));
     const peeked = ironDome.peekEffectiveIronDomeConfig();
+    if (!peeked) throw new Error('expected effective config');
     expect(peeked.trustedChannels).toEqual(['terminal', 'cli', 'dashboard']);
     expect(ironDome.getEffectiveIronDomeConfig()).toEqual(peeked);
   });

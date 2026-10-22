@@ -61,11 +61,25 @@ const assertQualifiedExceptions = (t) => {
   assert.doesNotMatch(t, /\bany call\b|\bevery call\b/i);
 };
 
+/** Hermes ignores the gate, but enforcing is conditional on its own setting. */
+const HERMES_QUALIFIED = /enforces immediately unless its own enforce setting \(SHIELDCORTEX_ENFORCE\) opts it out/;
+const assertHermesQualified = (t) => {
+  assert.match(t, HERMES_QUALIFIED);
+  assert.match(t, /does not change that setting/);
+  assert.doesNotMatch(t, /enforces immediately(?! unless its own enforce setting \(SHIELDCORTEX_ENFORCE\))/);
+};
+
 describe('source: Hermes enforce is independent of the shared config switch', () => {
   it('Hermes resolves enforce from SHIELDCORTEX_ENFORCE', () => {
     const src = read('plugins', 'hermes', 'shieldcortex', '__init__.py');
     assert.match(src, /resolve_enforce\(os\.environ\.get\("SHIELDCORTEX_ENFORCE"\)\)/);
     assert.doesNotMatch(src, /actionGuard/);
+  });
+
+  it('resolve_enforce is on unless an explicit opt-out word', () => {
+    const src = read('plugins', 'hermes', 'shieldcortex', 'policy.py');
+    assert.match(src, /_ENFORCE_OPTOUT = frozenset\(/);
+    assert.match(src, /return \(value or ""\)\.strip\(\)\.lower\(\) not in _ENFORCE_OPTOUT/);
   });
 
   it('the advisory flag still writes only enforce:false / readinessGate:false', () => {
@@ -96,14 +110,20 @@ describe('config --action-guard-enforce-when-ready confirmation message', () => 
     assertQualifiedExceptions(t);
   });
 
-  it('keeps the Hermes-ignores-the-gate qualifier', () => {
-    assert.match(t, /the Hermes plugin does not implement the gate and enforces immediately/);
+  it('says Hermes ignores the gate without promising it enforces regardless of SHIELDCORTEX_ENFORCE', () => {
+    assert.match(t, /the Hermes plugin does not implement the gate/);
+    assertHermesQualified(t);
   });
 });
 
 describe('config --help Action Guard lines', () => {
-  const help = between(SRC, "'  --action-guard-enforce-when-ready", "'  --action-guard-notify-openclaw");
-  const advisory = literals(help.slice(help.indexOf("'  --action-guard-advisory")));
+  // `config --help` text lives in the CONFIG_HELP template literal (#767 moved it
+  // out of src/cloud/cli.ts); collapse the help-line padding before matching.
+  const HELP_SRC = read('src', 'cli', 'dispatch-help.ts');
+  const flat = (s) => s.replace(/\s+/g, ' ');
+  const configHelp = between(HELP_SRC, 'export const CONFIG_HELP = `', '`;');
+  const help = between(configHelp, '  --action-guard-enforce-when-ready', '  --action-guard-notify-openclaw');
+  const advisory = flat(help.slice(help.indexOf('  --action-guard-advisory')));
 
   it('watch-only help line names the floor and Hermes independence', () => {
     assertQualifiedExceptions(advisory);
@@ -112,7 +132,67 @@ describe('config --help Action Guard lines', () => {
   });
 
   it('shadow help line scopes logging to ordinary dangerous ops', () => {
-    assert.match(literals(help), /Log ordinary dangerous ops \(shadow\)/);
+    assert.match(flat(help), /Log ordinary dangerous ops \(shadow\)/);
+  });
+
+  it('shadow help line qualifies Hermes by its own SHIELDCORTEX_ENFORCE setting', () => {
+    const shadow = flat(help.slice(0, help.indexOf('  --action-guard-advisory')));
+    assert.match(shadow, /Hermes ignores the gate/);
+    assertHermesQualified(shadow);
+  });
+});
+
+describe('Hermes outage fallback documentation', () => {
+  // Static source/copy contract only; this does not exercise the runtime gate.
+  it('source keeps self-protection and catastrophic floors, plus dangerous matches when enforcing', () => {
+    const plugin = read('plugins', 'hermes', 'shieldcortex', '__init__.py');
+    const policy = read('plugins', 'hermes', 'shieldcortex', 'policy.py');
+    assert.match(plugin, /fallback_denies = fallback_blocked or fallback_self_protected or \(fallback_dangerous and enforce\)/);
+    const actionFallback = between(policy, '    if not verdict.available:', '    if verdict.decision == "block":');
+    assert.match(actionFallback, /if fallback_self_protected:/);
+    assert.match(actionFallback, /return tool_call_decision\([\s\S]*enforce=enforce,[\s\S]*fallback_blocked=fallback_blocked,[\s\S]*fallback_dangerous=fallback_dangerous,/);
+    const toolFallback = between(policy, '    if not verdict.available:', '    if not enforce:');
+    assert.match(toolFallback, /if fallback_blocked:/);
+    assert.match(toolFallback, /if fallback_dangerous and enforce:/);
+  });
+
+  for (const file of ['README.md', 'CHANGELOG.md']) {
+    it(`${file} distinguishes default-enforcing and advisory outage tiers`, () => {
+      const paragraph = read(file).split('\n').find((line) => file === 'README.md'
+        ? line.startsWith('Hermes gates tool calls')
+        : line.startsWith('- **README "Where it can block":'));
+      assert.ok(paragraph, `no Hermes gate paragraph in ${file}`);
+      assert.match(paragraph, /enforces by default/);
+      assert.match(paragraph, /While the API is unreachable, its bounded fallback scan blocks the self-protection and catastrophic shapes it recognises in every mode, and recognised dangerous shapes while enforcing \(the default\)\./);
+      assert.match(paragraph, /In advisory mode, only the recognised self-protection and catastrophic shapes are blocked by the fallback\./);
+      assert.doesNotMatch(paragraph, /bounded fallback scan blocks only/);
+    });
+  }
+
+  it('plugin README names the same outage fallback tiers as the main README', () => {
+    const plugin = read('plugins', 'hermes', 'shieldcortex', 'README.md').replace(/\s+/g, ' ');
+    assert.match(plugin, /While the API is unreachable, its bounded fallback scan blocks the self-protection and catastrophic shapes it recognises in every mode, and recognised dangerous shapes while enforcing \(the default\)\./);
+    assert.match(plugin, /In advisory mode, only the recognised self-protection and catastrophic shapes are blocked by the fallback\./);
+    assert.doesNotMatch(plugin, /still denies the unambiguous catastrophic shapes/);
+  });
+
+  it('outage log label names the deciding fallback tier', () => {
+    const plugin = read('plugins', 'hermes', 'shieldcortex', '__init__.py');
+    assert.match(plugin, /FALLBACK_BLOCK \(self-protection\)/);
+    // Precedence mirrors policy.action_guard_decision: self-protection, then
+    // catastrophic, then dangerous-while-enforcing.
+    const order = [
+      /if fallback_self_protected:\s+tier = "FALLBACK_BLOCK \(self-protection\)"/,
+      /elif fallback_blocked:\s+tier = "FALLBACK_BLOCK \(catastrophic\)"/,
+      /elif fallback_dangerous and enforce:\s+tier = "FALLBACK_BLOCK \(dangerous\)"/,
+    ];
+    let at = -1;
+    for (const re of order) {
+      const m = re.exec(plugin);
+      assert.ok(m, `missing tier branch ${re}`);
+      assert.ok(m.index > at, `tier branch out of order: ${re}`);
+      at = m.index;
+    }
   });
 });
 
@@ -122,6 +202,14 @@ describe('CHANGELOG', () => {
     // release time; the contract is its wording, not which heading it sits under.
     const bullet = read('CHANGELOG.md').split('\n').find((l) => l.startsWith('- **') && /config` watch only copy/i.test(l));
     assert.ok(bullet, 'no config watch only copy bullet in CHANGELOG.md');
+    assert.match(bullet, /SHIELDCORTEX_ENFORCE/);
+    assert.match(bullet, /not runtime proof/);
+  });
+
+  it('Docs (Unreleased, or the release that shipped it) names the enforce-when-ready Hermes qualification', () => {
+    // Same rule as above: the bullet moves into a versioned section at release time.
+    const bullet = read('CHANGELOG.md').split('\n').find((l) => l.startsWith('- **') && /enforce-when-ready` copy: Hermes/i.test(l));
+    assert.ok(bullet, 'no enforce-when-ready Hermes copy bullet');
     assert.match(bullet, /SHIELDCORTEX_ENFORCE/);
     assert.match(bullet, /not runtime proof/);
   });

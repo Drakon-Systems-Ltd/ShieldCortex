@@ -482,15 +482,18 @@ async function loadGuard() {
  * Optional by construction: if the module is missing the hook behaves exactly
  * as it did before, degrading to `opaque-script-invocation` rather than
  * failing on a partial dist.
+ *
+ * `base` is the directory a relative script path resolves against — see
+ * {@link scriptResolutionBase}.
  */
-async function loadScriptResolver() {
+async function loadScriptResolver(base) {
   const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'script-source-resolver.js')).href
     );
     return typeof mod.createScriptSourceResolver === 'function'
-      ? mod.createScriptSourceResolver(process.cwd())
+      ? mod.createScriptSourceResolver(base)
       : undefined;
   } catch {
     return undefined;
@@ -502,8 +505,11 @@ async function loadScriptResolver() {
  * resolver above, and meaningless without it: an exemption only exists where
  * a fold would have happened. Missing module, empty config, malformed
  * entries — all degrade to "no exemptions", never to an error.
+ *
+ * Takes the SAME `base` as the resolver: the pin is bound to the file whose
+ * bytes were folded, so the two must agree on which file a relative path names.
  */
-async function loadReviewedScriptCheck(rawEntries) {
+async function loadReviewedScriptCheck(rawEntries, base) {
   if (!Array.isArray(rawEntries) || rawEntries.length === 0) return undefined;
   const distRoot = hookDistRoot();
   try {
@@ -511,11 +517,37 @@ async function loadReviewedScriptCheck(rawEntries) {
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'reviewed-scripts.js')).href
     );
     return typeof mod.createReviewedScriptCheck === 'function'
-      ? mod.createReviewedScriptCheck(rawEntries, process.cwd())
+      ? mod.createReviewedScriptCheck(rawEntries, base)
       : undefined;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The directory a relative invoked-script path resolves against (#634).
+ *
+ * The command starts in the directory Claude Code reports per call as payload
+ * `cwd`. Claude Code's published contract also runs hook handlers in its
+ * current directory, so on an undisturbed host the two agree; they diverge
+ * when something in between moves the hook process (a wrapper or harness
+ * that changes directory before exec'ing it). Resolving against the process
+ * cwd then folds an unrelated same-named file — or finds nothing and goes
+ * opaque — instead of the script the command will actually execute. Payload
+ * `cwd` is the per-call value, so it is the one to trust.
+ *
+ * Only an absolute string is taken. Anything else (absent, empty, relative,
+ * NUL-bearing, absurdly long) falls back to `process.cwd()`, which is what the
+ * hook used for every call before this. A relative value is refused rather
+ * than resolved, because resolving it would silently re-anchor it on the very
+ * process cwd this exists to stop trusting. No stat: a reported directory
+ * that does not exist resolves nothing and degrades to opaque, exactly as a
+ * missing script does.
+ */
+function scriptResolutionBase(rawCwd) {
+  if (typeof rawCwd !== 'string' || rawCwd.length === 0 || rawCwd.length > 4096) return process.cwd();
+  if (rawCwd.includes('\0') || !isAbsolute(rawCwd)) return process.cwd();
+  return rawCwd;
 }
 
 /**
@@ -1035,7 +1067,7 @@ const SAFE_SIGNALS = new Set([
   'pipe-download-to-shell', 'pipe-download-stdin-exec', 'pipe-download-module-exec',
   'recursive-perms-on-root', 'shred-device', 'git-delete-branch',
   'stop-process-or-service', 'modify-network-firewall', 'install-package-global',
-  'modify-scheduler', 'truncate-to-zero', 'wipe-history-or-logs',
+  'modify-scheduler', 'truncate-to-zero', 'wipe-history-or-logs', 'destroy-data-or-infra',
   'touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger', 'modify-shell-startup',
   'dd-overwrite', 'recursive-perms-system-dir', 'registry-code-exec',
   'decode-pipe-to-shell', 'change-permissions', 'git-mutate',
@@ -1050,6 +1082,9 @@ const SAFE_SIGNALS = new Set([
   'write-content-dangerous', 'delete-critical-path', 'session-lease',
   // #509: the enforce-when-ready gate's own demotion and promotion notices.
   'readiness-demoted', 'readiness-promoted',
+  // #874: the other two self-protection floor signals. Guard reason codes,
+  // not operator data; redacted, a floor denial could not name its signal.
+  'touch-guard-config', 'disable-action-guard',
 ]);
 /**
  * #436 — the only tiers that deny with no operator affordance. Everything the
@@ -1194,17 +1229,25 @@ function sessionKeySalt() {
 }
 
 function sessionKeyFor(value) {
-  if (typeof value !== 'string' || !value.trim()) return undefined;
+  if (typeof value !== 'string') return undefined;
+  // Keep canonicalisation in sync with src/defence/iron-dome/session-guard.ts
+  // and scripts/stop-hook.mjs.
+  // Reject lone surrogates before UTF-8 can alias them with U+FFFD.
+  const id = value.trim();
+  if (!id || (typeof id.isWellFormed === 'function' ? !id.isWellFormed() : /[\uD800-\uDFFF]/u.test(id))) return undefined;
   const salt = sessionKeySalt();
   if (!salt) return undefined;
-  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${value}`).digest('hex').slice(0, 16)}`;
+  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${id}`).digest('hex').slice(0, 16)}`;
 }
 
 function hookSessionExtras(hookData, permissionMode) {
   const extra = {};
   const rawSessionId = typeof hookData?.session_id === 'string' ? hookData.session_id : hookData?.sessionId;
-  const sessionKey = sessionKeyFor(rawSessionId);
-  if (sessionKey) extra.sessionKey = sessionKey;
+  if (typeof rawSessionId === 'string' && rawSessionId.trim()) {
+    const sessionKey = sessionKeyFor(rawSessionId);
+    if (sessionKey) extra.sessionKey = sessionKey;
+    else extra.namedIdentityUnresolved = true;
+  }
   const safeMode = safePermissionMode(permissionMode);
   if (safeMode) extra.permissionMode = safeMode;
   return extra;
@@ -1631,6 +1674,12 @@ function safeGuardOutcomeReason(verdict, outcome, event) {
       : 'Action Guard warning in advisory mode; inspect local audit for details.';
   }
   if (outcome === 'denied_no_prompt_surface') {
+    // #874: under Watch only (advisory) the ordinary dangerous tier never gets
+    // here; only the self-protection floor does. Say so, instead of implying
+    // the posture asked for an approval it does not ask for.
+    if (verdict?.advisoryFloor === true) {
+      return 'Action Guard is in Watch only (advisory), but this call would change the guard\'s own state or config or switch it off, which Watch only still holds; this session has no prompt surface, so the tool call was denied.';
+    }
     return 'Action Guard required approval but this session has no prompt surface; the tool call was denied.';
   }
   if (String(verdict?.reason ?? '').toLowerCase().includes('guard unavailable')) {
@@ -2308,6 +2357,9 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   { re: /\bdd\b[^|;&\n]*\bof=/i, signal: 'dd-overwrite' },
   { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:etc|usr|var|home|bin|sbin|boot|lib|lib64|opt|root)(?:\/\*?)?(?:\s|$)/i, signal: 'recursive-perms-system-dir' },
   { re: /\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)/i, signal: 'truncate-to-zero' },
+  // #503: database / cloud / infrastructure teardown. Every one of these scored `allow` (benign) — the destruction tiers were filesystem-centric. Command position only, so prose and grep for these words stay quiet; an opening quote counts as a command start so `bash -c` / `ssh host '…'` wrappers are still seen. `dataQuotes`: a match inside a quoted argument of a data command (`grep "…"`, `echo '…'`, `git commit -m "…"`) is a mention, as in the real guard — see fallbackDataQuoteRanges. SQL verbs only behind a database client; DELETE gated only with no WHERE.
+  // #503 ReDoS: A verb's second gap stops at the next copy of that verb (`(?!\sdelete\b)`), so a verb-dense line with no separator is linear, not quadratic; the matches and spans are unchanged, because the greedy gap already picked the last verb before the target. That rule holds only when the verb ends on the binary's own line, so two spellings keep the plain gap: a verb reached through its own newline (the `(?<=\n)` arm), and a newline INSIDE the two-word `s3 rm` (the `(?=[^\S\n]*\n)` arm; the stopping arm takes same-line `[^\S\n]+` only). Each runs at most once per start, so the row stays linear.
+  { re: /(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:[\w.~-]*\/)*(?:(?:psql|mysql|mariadb|sqlite3|sqlcmd|duckdb|clickhouse(?:-client)?|cockroach)\b[^\n]*\b(?:drop\s+(?:database|schema|table)\b|truncate\s+(?:table\s+)?(?!-)[\w."`[\]]|delete\s+from\s+[\w."`[\]]+\s*(?:;|["']|$))|dropdb\b|mysqladmin\b[^|;&\n]*\sdrop\b|mongo(?:sh)?\b[^\n]*(?:dropDatabase|\.drop)\s*\(|redis-cli\b[^|;&\n]*\bflush(?:all|db)\b|(?:terraform|tofu|terragrunt)\b[^|;&\n]*\s(?:destroy\b|(?<=\n)apply\b[^|;&\n]*\s-destroy\b|apply\b(?:(?!\sapply\b)[^|;&\n])*\s-destroy\b)|pulumi\b[^|;&\n]*\s(?:destroy|down)\b|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s(?:ns|namespaces?|pvc?|persistentvolumes?|persistentvolumeclaims?|deploy(?:ments?)?|statefulsets?|sts|nodes?|crds?|customresourcedefinitions?|all)\b(?![-.])|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s--all\b|helm\b[^|;&\n]*\s(?:uninstall|delete)\b|aws\b[^|;&\n]*\s(?:terminate-instances|delete-[\w-]+|rb|(?<=\n)s3\s+rm\b[^|;&\n]*\s--recursive|s3(?=[^\S\n]*\n)\s+rm\b[^|;&\n]*\s--recursive|s3[^\S\n]+rm\b(?:(?!\ss3\s+rm\b)[^|;&\n])*\s--recursive)\b|gcloud\b[^|;&\n]*\sdelete\b|gsutil\b[^|;&\n]*\s(?:rb\b|(?<=\n)rm\b[^|;&\n]*\s-\w*r|rm\b(?:(?!\srm\b)[^|;&\n])*\s-\w*r)|az\b[^|;&\n]*\s(?:group|vm)\s+delete\b|doctl\b[^|;&\n]*\s(?:delete|rm)\b|gh\s+(?:repo\s+delete\b|api\b[^|;&\n]*(?:-X|--method)[\s=]*DELETE\b)|docker(?:-compose)?\b[^|;&\n]*\s(?:system\s+prune|volume\s+(?:prune|rm)|(?<=\n)down\b[^|;&\n]*\s(?:-v|--volumes)\b|down\b(?:(?!\sdown\b)[^|;&\n])*\s(?:-v|--volumes)\b)|(?:flyctl|fly)\s+(?:apps?\s+(?:destroy|delete)|destroy|volumes?\s+(?:destroy|delete)|postgres\s+(?:destroy|delete))\b|heroku\s+(?:apps:destroy|pg:reset)\b|vercel\s+(?:rm|remove)\b|wrangler\s+delete\b)/i, signal: 'destroy-data-or-infra', dataQuotes: true },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   // #505: `.ssh` behind any home root + `authorized_keys` as a path segment — mirrors the guard row.
   { re: /\/etc\/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|\/home\/[^\s\/'"]+|\/root|\/Users\/[^\s\/'"]+)\/\.ssh(?![\w.-])|(?:^|[\s'"=:\/])\.ssh\/authorized_keys2?\b|\/authorized_keys2?\b|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
@@ -2515,6 +2567,108 @@ function fallbackWriteTargetMatch(toolInput, toolName) {
   return null;
 }
 
+// ── #503: quoted DATA, ported to the blunt fallback ─────────────────────────
+//
+// The destroy-data-or-infra row counts an opening quote as a command start, so
+// `bash -c '…'` and `ssh host '…'` wrappers are seen. The real guard then
+// drops a match that lies inside a quoted argument of a data command
+// (`classifyWithCtx`: DATA_COMMAND / TEXT_FLAG in tool-action-guard.ts). The
+// fallback had no such step, so `grep -F "<teardown>" RUNBOOK.md` gated here
+// and allowed with the guard up. This mirrors that step, narrower and
+// fail-closed:
+//  - no quote is data when the text has nested execution or eval, or pipes
+//    into anything but a read-only filter (grep, head, sort, jq, tee, …);
+//  - a quote is data only when its statement's command word is a data command,
+//    or it is the value of a long text flag on a non-executor;
+//  - a match is dropped only when it lies inside ONE data quote; an unclosed
+//    quote is never data;
+//  - no quote is data when the text pairs quotes the shell does not (review
+//    R3 on #626): a quote in a comment, an ANSI-C `$'…'`, heredoc text, or
+//    `${…}` with its own nested quotes.
+// Used only by rows tagged `dataQuotes`. Kept in sync with
+// plugins/openclaw/interceptor.ts and plugins/hermes/shieldcortex/sc_client.py.
+
+/** The guard's DATA_COMMAND (here ending at a word break: `ptpython` is not `pt`), TEXT_FLAG and EXEC_COMMAND_WORD sets. */
+const FALLBACK_DATA_COMMAND_RE = /^(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)/i;
+const FALLBACK_TEXT_FLAG_RE = /(?:^|\s)--(?:text|body|message|comment|description|title|content|caption|note|summary|prompt|subject)(?:=|\s+)$/i;
+const FALLBACK_EXEC_WORD_RE = /^(?:bash|sh|zsh|ksh|dash|ash|python[\d.]*|node|nodejs|ruby|perl|php|eval|exec|source|ssh|scp|docker|podman|kubectl|nsenter|chroot|busybox|xargs|find|flock|watch|make|awk|sed|su|runuser|systemd-run|at|batch)$/i;
+/** A pipe into anything but a read-only filter (`echo "…" | bash`, `| "sh"`, `| b\\ash`) — `||` is not a pipe. */
+const FALLBACK_UNSAFE_PIPE_RE = /(?<!\|)\|(?!\|)&?(?![ \t]*(?:grep|egrep|fgrep|zgrep|rg|ag|ack|head|tail|less|more|wc|sort|uniq|cut|tr|jq|cat|tee|column|nl|fold|fmt)(?:[ \t\n|;&)]|$))/;
+/** Syntax whose quotes the walk below would mis-pair: ANSI-C `$'…'`, a heredoc, `${…}`. */
+const FALLBACK_QUOTE_UNMODELLED_RE = /\$'|<<|\$\{/;
+/** A `#` after one of these (or at the start) opens a comment. */
+const FALLBACK_WORD_BREAK = ' \t\n\r\v\f;&|()<>';
+/** A command word further back than this from its own quote is not recognised (the quote stays executed). */
+const FALLBACK_QUOTE_PREFIX_CAP = 512;
+/** Inert matches looked past before the row fails closed. */
+const FALLBACK_INERT_MATCH_CAP = 64;
+
+/** `[open, close + 1)` of every quoted data argument, or [] when none can be trusted. */
+function fallbackDataQuoteRanges(text) {
+  if (FALLBACK_NESTED_EXEC_RE.test(text) || FALLBACK_QUOTE_UNMODELLED_RE.test(text)) return [];
+  const ranges = [];
+  // Quote contents blanked, so the pipe check below never reads quoted text.
+  let unquoted = '';
+  let q = null;
+  let open = -1;
+  let stmtStart = 0;
+  let commentCheckedTo = 0;   // end of the last line already found free of quotes after a `#`
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    // Bash escaping: `\` escapes the next char outside quotes and inside "…".
+    if (c === '\\' && q !== "'") { unquoted += q ? '  ' : text.slice(i, i + 2); i++; continue; }
+    if (q) {
+      unquoted += ' ';
+      if (c !== q) continue;
+      const prefix = text.slice(stmtStart, open);
+      if (open - stmtStart <= FALLBACK_QUOTE_PREFIX_CAP) {
+        const bare = prefix.replace(/^\s+/, '').replace(/^(?:\w+=\S*\s+)*/, '').replace(/^(?:sudo|doas)\s+/, '');
+        const isAssignment = /(?:^|\s)(?:export\s+|local\s+|declare\s+\S+\s+)?\w+(?:\[[^\]]*\])?\+?=$/.test(prefix);
+        const word = bare.split(/\s+/)[0] ?? '';
+        if (!isAssignment && (FALLBACK_DATA_COMMAND_RE.test(bare)
+          || (FALLBACK_TEXT_FLAG_RE.test(prefix) && !FALLBACK_EXEC_WORD_RE.test(word)))) {
+          ranges.push([open, i + 1]);
+        }
+      }
+      q = null;
+      continue;
+    }
+    unquoted += c;
+    if (c === '"' || c === "'") { q = c; open = i; continue; }
+    if (c === ';' || c === '\n' || c === '|' || c === '&' || c === '(') stmtStart = i + 1;
+    else if (c === '#' && i >= commentCheckedTo && (i === 0 || FALLBACK_WORD_BREAK.includes(text[i - 1]))) {
+      // A comment runs to the end of the line, and a quote in it is no quote
+      // to the shell. Rather than model it (a `\ #` is not one), trust no
+      // quote at all when one is there. Kept walking either way.
+      const eol = text.indexOf('\n', i);
+      commentCheckedTo = eol < 0 ? text.length : eol;
+      const line = text.slice(i, commentCheckedTo);
+      if (line.includes('"') || line.includes("'")) return [];
+    }
+  }
+  return FALLBACK_UNSAFE_PIPE_RE.test(unquoted) ? [] : ranges;
+}
+
+/** True when `re` matches somewhere outside a quoted data argument. */
+function fallbackExecutedMatch(re, text) {
+  const g = new RegExp(re.source, re.flags.replace('g', '') + 'g');
+  let ranges = null;
+  let inert = 0;
+  for (let from = 0; from <= text.length;) {
+    g.lastIndex = from;
+    const m = text.matchAll(g).next().value;   // matchAll starts at lastIndex
+    if (!m) return false;
+    ranges ??= fallbackDataQuoteRanges(text);
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+    if (!ranges.some(([a, b]) => start >= a && end <= b)) return true;
+    if (++inert >= FALLBACK_INERT_MATCH_CAP) return true;   // fail closed
+    // Overlapping re-scan: a match starting inside this one is still checked.
+    from = start + 1;
+  }
+  return false;
+}
+
 /** First matching dangerous signal for the WS2 fallback, or null (issue #59). */
 function fallbackDangerousMatch(toolInput, toolName) {
   const writeTarget = fallbackWriteTargetMatch(toolInput, toolName);
@@ -2522,9 +2676,9 @@ function fallbackDangerousMatch(toolInput, toolName) {
   const text = fallbackExecSurface(toolInput);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
-  for (const { re, signal, lockPath } of FALLBACK_DANGEROUS_PATTERNS) {
+  for (const { re, signal, lockPath, dataQuotes } of FALLBACK_DANGEROUS_PATTERNS) {
     if (lockReadOnly && lockPath === true) continue;
-    if (re.test(text)) return signal;
+    if (dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
   }
   return null;
 }
@@ -3003,16 +3157,38 @@ process.stdin.on('end', async () => {
     // become a new way to deny everything — while state UNreadability fails
     // closed to 'unknown' inside the store itself.
     const harnessPid = resolveHarnessPid();
-    const leaseSelf = baseExtra.sessionKey || `ppid:${harnessPid}`;
+    // Blank/missing ids keep the process holder. A nonblank id whose key cannot
+    // be derived must not fall through to that holder — OpenClaw refuses, and
+    // sharing ppid would let two invalid named ids re-enter each other.
+    const leaseSelf = baseExtra.namedIdentityUnresolved
+      ? null
+      : (baseExtra.sessionKey || `ppid:${harnessPid}`);
     let leaseGate = null;
     try {
       const lease = await loadLease();
       if (lease) {
-        leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, holderPid: harnessPid });
-        if (leaseGate && leaseGate.ledgerChanged) {
-          console.error(
-            `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,
-          );
+        if (leaseSelf === null) {
+          const scope = typeof lease.scopeForToolCall === 'function'
+            ? lease.scopeForToolCall(toolName, toolInput)
+            : 'session-identity';
+          if (scope != null) {
+            leaseGate = {
+              scope,
+              decision: {
+                verdict: 'unknown',
+                reason:
+                  `this session's identity could not be derived, so ShieldCortex cannot tell whether ` +
+                  `another session holds ${scope} — refusing rather than acting under a shared or guessed identity`,
+              },
+            };
+          }
+        } else {
+          leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, holderPid: harnessPid });
+          if (leaseGate && leaseGate.ledgerChanged) {
+            console.error(
+              `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,
+            );
+          }
         }
         if (leaseGate && leaseGate.decision.verdict !== 'allow') {
           writeAuditEntry(safeToolName(toolName), {
@@ -3037,11 +3213,14 @@ process.stdin.on('end', async () => {
       return;
     }
 
-    const resolveScriptSource = await loadScriptResolver();
+    // #634: resolve against the harness-reported per-call cwd, not this
+    // process's own — see scriptResolutionBase.
+    const scriptBase = scriptResolutionBase(hookData.cwd);
+    const resolveScriptSource = await loadScriptResolver(scriptBase);
     // #189: the allowlist check only rides along when a resolver exists —
     // without a resolver nothing folds, so there is nothing to exempt.
     const isReviewedScript = resolveScriptSource
-      ? await loadReviewedScriptCheck(cfg.reviewedScripts)
+      ? await loadReviewedScriptCheck(cfg.reviewedScripts, scriptBase)
       : undefined;
     let verdict;
     try {
@@ -3076,7 +3255,7 @@ process.stdin.on('end', async () => {
       } else {
         try {
           // Pin every row this call writes to the adapter + policy version in
-          // force: only same-version rows count as readiness evidence.
+          // force: evidence is keyed on its policy hash (#719).
           const pin = readinessMod.currentReadinessPin();
           if (pin) baseExtra.readinessPin = pin;
           const resolved = readinessMod.resolveReadiness({
@@ -3233,7 +3412,9 @@ process.stdin.on('end', async () => {
         actionId,
       });
       recordNotifyAudit(toolName, verdict, toolInput, { ...baseExtra, actionId }, notified);
-      console.error(`[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} — ${safeGuardOutcomeReason(verdict, 'warned', 'action_guard_warning')}`);
+      // #874: the one warning line names the signals, so the transcript says
+      // what was let through without anyone opening the audit.
+      console.error(`[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} — ${safeGuardOutcomeReason(verdict, 'warned', 'action_guard_warning')} [${safeSignalList(verdict.signals).join(', ')}]`);
       process.exit(0); // Advisory: warn, emit no decision.
     }
 
@@ -3435,7 +3616,9 @@ process.stdin.on('end', async () => {
     // already approved, or a call the judge hardened, is unaffected by this.
     await emitApprovalRequired(
       toolName,
-      verdict,
+      // #874: an advisory host reaches here only through the self-protection
+      // floor (or an unscanned call); the flag lets the denial say which.
+      !cfg.enforce && selfProtected && !unscannedBlock ? { ...verdict, advisoryFloor: true } : verdict,
       toolInput,
       permissionMode,
       'require_approval',

@@ -84,9 +84,25 @@ export function firewallPill(
   return pillFor(status, confirmed);
 }
 
-/** Action Guard (Iron Dome) pill: on / off, with the honest overrides. */
-export function guardPill(status: QueryStatus, enabled: boolean | undefined): Pill {
-  return pillFor(status, enabled ? { state: 'ok', text: 'on' } : { state: 'off', text: 'off' });
+/**
+ * Iron Dome pill. `/api/iron-dome/status` measures Iron Dome only — Action
+ * Guard has its own configuration plane that no dashboard endpoint exposes —
+ * so this is never an aggregate "protection level" (#693).
+ *
+ * Only a confirmed boolean `true` is green. A non-boolean `enabled` (malformed
+ * payload) is unknown, not truthy-on, and a failed refetch drops a last-known
+ * "on" to "unconfirmed" rather than keeping the word on screen; a last-known
+ * "off" stays off — a problem is still a problem.
+ */
+export function ironDomePill(status: QueryStatus, enabled: unknown, onText = 'on'): Pill {
+  if (status === 'pending' || status === 'unavailable') return pillFor(status, { state: 'unknown', text: '' });
+  if (typeof enabled !== 'boolean') return { state: 'unknown', text: 'unknown (unreadable status)' };
+  if (status === 'stale') {
+    return enabled
+      ? { state: 'warn', text: 'unconfirmed · refetch failed' }
+      : { state: 'off', text: 'off · stale (refetch failed)' };
+  }
+  return enabled ? { state: 'ok', text: onText } : { state: 'off', text: 'off' };
 }
 
 /**
@@ -95,8 +111,8 @@ export function guardPill(status: QueryStatus, enabled: boolean | undefined): Pi
  * on), so this row mirrors the module state the Protection → Status tab derives —
  * labelled as such rather than pretending to a switch that does not exist.
  */
-export function scanningPill(status: QueryStatus, enabled: boolean | undefined): Pill {
-  return pillFor(status, enabled ? { state: 'ok', text: 'on (injection scanner)' } : { state: 'off', text: 'off' });
+export function scanningPill(status: QueryStatus, enabled: unknown): Pill {
+  return ironDomePill(status, enabled, 'on (injection scanner)');
 }
 
 /** Operations (control) pill: emergency stop > paused > mode. */

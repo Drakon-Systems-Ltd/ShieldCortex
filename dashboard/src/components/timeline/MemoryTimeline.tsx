@@ -155,7 +155,7 @@ export function MemoryTimeline() {
           containerClassName="w-56"
         />
         <div className="flex items-center gap-1.5">
-          <span className="text-[11px] uppercase tracking-wide text-[var(--sc-text-muted)]">Type</span>
+          <span className="text-xs text-[var(--sc-text-muted)]">Type</span>
           {TYPE_FILTER_OPTIONS.map((opt) => (
             <button
               key={opt.value}
@@ -174,7 +174,7 @@ export function MemoryTimeline() {
           ))}
         </div>
         <div className="flex flex-wrap items-center gap-1">
-          <span className="text-[11px] uppercase tracking-wide text-[var(--sc-text-muted)]">Category</span>
+          <span className="text-xs text-[var(--sc-text-muted)]">Category</span>
           {ALL_CATEGORIES.map((cat) => {
             const active = selectedCategories.has(cat);
             const colour = memoryCategoryHex(theme, cat);
@@ -230,7 +230,7 @@ export function MemoryTimeline() {
         <ol className="space-y-6">
           {groups.map((group) => (
             <li key={group.key}>
-              <div className="sticky top-0 z-[1] -mx-1 mb-2 bg-[var(--sc-bg)] px-1 py-1 text-xs font-semibold uppercase tracking-wide text-[var(--sc-text-muted)]">
+              <div className="sticky top-0 z-[1] -mx-1 mb-2 bg-[var(--sc-bg)] px-1 py-1 text-xs font-semibold text-[var(--sc-text-muted)]">
                 {group.label}
               </div>
               <ul className="space-y-2 border-l border-[var(--sc-border)] pl-4">
@@ -251,21 +251,21 @@ export function MemoryTimeline() {
                           {memory.pinned && <Pin size={11} aria-label="Pinned" className="mr-1 inline text-[var(--sc-primary)]" />}
                           {memory.title}
                         </h3>
-                        <span className="shrink-0 text-[11px] tabular-nums text-[var(--sc-text-muted)]">
+                        <span className="shrink-0 text-xs tabular-nums text-[var(--sc-text-muted)]">
                           {formatTime(memory.createdAt)}
                         </span>
                       </div>
                       <p className="mb-2 line-clamp-2 text-xs text-[var(--sc-text-dim)]">{memory.content}</p>
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span
-                          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
+                          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium"
                           style={{ color: colour, background: `${colour}1a` }}
                         >
                           {memory.category}
                         </span>
                         <Badge variant="muted">{MEMORY_TYPE_LABELS[memory.type] ?? memory.type}</Badge>
                         {memory.status && memory.status !== 'active' && <Badge variant="amber">{memory.status}</Badge>}
-                        <span className="text-[10px] tabular-nums text-[var(--sc-text-muted)]">
+                        <span className="text-xs tabular-nums text-[var(--sc-text-muted)]">
                           salience {Math.round(memory.salience * 100)}%
                         </span>
                       </div>

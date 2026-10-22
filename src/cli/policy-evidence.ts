@@ -16,6 +16,7 @@
  */
 
 import { collectPostureRecords, type CollectOptions } from '../posture/collect.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
 import {
   COMPLETENESS_LIMITATION,
   HOST_INTEGRITY_LIMITATION,
@@ -81,5 +82,5 @@ export function runPolicyEvidence(
     return { code: 2, output: `Unknown option: ${a}\n\n${USAGE}` };
   }
   const evidence = buildPolicyEvidence(opts);
-  return { code: 0, output: JSON.stringify(evidence, null, compact ? 0 : 2) };
+  return { code: 0, output: stringifyJsonTerminalSafe(evidence, compact ? 0 : 2)! };
 }

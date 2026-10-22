@@ -88,7 +88,7 @@ async function withConsole(fn: () => Promise<void>): Promise<{ out: string[]; er
     process.stdout.write = origOut;
     process.stderr.write = origErr;
     process.exit = origExit;
-    process.exitCode = prevExit;
+    process.exitCode = prevExit ?? undefined;
   }
 }
 
@@ -138,7 +138,7 @@ describe('#577 — update accepts and threads --allow-conversation-access', () =
       launch: async (_bin: string, args: string[]) => { launched = args; return 0; },
     });
     expect(launched.slice(1)).toEqual(['update', '--allow-conversation-access']);
-    const run = jest.fn(async () => {});
+    const run = jest.fn(async (_options?: unknown) => {});
     const s = sink();
     await withConsole(async () => {
       await handleUpdateCommand(launched.slice(2), { run, env: {}, log: s.log, error: s.error });
@@ -187,7 +187,7 @@ describe('#577 — wantsHelp distinguishes the help verb from an option value', 
     expect(wantsHelp(['--help'])).toBe(true);
     expect(wantsHelp(['-h'])).toBe(true);
     expect(wantsHelp(['skill', 'install', '--help'])).toBe(true);
-    expect(wantsHelp(['prune', '--project', 'acme', '--help'], { valueFlags: ['--project'] })).toBe(true);
+    expect(wantsHelp(['prune', '--project', 'acme', '--help'], { values: { '--project': { value: 'unless-double-dash', occurrence: 'first' } } })).toBe(true);
     expect(wantsHelp(['--force', '-h'])).toBe(true);
   });
 
@@ -200,8 +200,8 @@ describe('#577 — wantsHelp distinguishes the help verb from an option value', 
   });
 
   it('the value of a value-taking option is never the verb', () => {
-    expect(wantsHelp(['--agent', 'help'], { valueFlags: ['--agent'] })).toBe(false);
-    expect(wantsHelp(['--source', 'help'], { valueFlags: ['--source'] })).toBe(false);
+    expect(wantsHelp(['--agent', 'help'], { values: { '--agent': { value: 'unless-dash', occurrence: 'first' } } })).toBe(false);
+    expect(wantsHelp(['--source', 'help'], { values: { '--source': { value: 'always', occurrence: 'first' } } })).toBe(false);
     // …and without the list it would be, which is why each gate passes its own.
     expect(wantsHelp(['--agent', 'help'])).toBe(true);
   });
@@ -255,8 +255,8 @@ describe('#577 — wantsHelp distinguishes the help verb from an option value', 
 
 describe('#577 — `openclaw skill install --agent help` installs for the agent "help"', () => {
   it('reaches the skill installer with the agent id instead of printing usage', async () => {
-    const skillInstall = jest.fn(async (_home: string, _agent?: string) => true);
-    const install = jest.fn(async () => {});
+    const skillInstall = jest.fn(async (_home?: string, _agent?: string) => true);
+    const install = jest.fn(async (_options?: unknown) => {});
     const { out } = await withConsole(async () => {
       await handleOpenClawCommand('skill', ['install', '--agent', 'help'], { install, skillInstall });
     });
