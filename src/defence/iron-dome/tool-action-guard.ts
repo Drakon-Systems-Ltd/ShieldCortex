@@ -5065,9 +5065,12 @@ const ENV_SETTING_WORD_RE = /^(?:read|readarray|mapfile|declare|typeset|local|re
 /**
  * Words that set a variable only with a flag: `printf -v NAME`, `wait -p NAME`,
  * `command -p`. A Map, so a token such as `constructor` or `__proto__` finds
- * nothing rather than an inherited object property.
+ * nothing rather than an inherited object property. A printf `%n` conversion
+ * (with any flags, width, precision or length between: `%5n`, `%ln`, and `%%n`
+ * too) stores into the variable its argument names (`printf %n PATH`), so it
+ * counts as `-v` does.
  */
-const ENV_SETTING_WITH_FLAG: ReadonlyMap<string, RegExp> = new Map([['printf', /^-v/], ['wait', /^-p/], ['command', /^-[A-Za-z]*p/]]);
+const ENV_SETTING_WITH_FLAG: ReadonlyMap<string, RegExp> = new Map([['printf', /^-v|%[-+ #0'I\d.*]*[hlLqjzZt]*n/], ['wait', /^-p/], ['command', /^-[A-Za-z]*p/]]);
 /**
  * #885 — verbs whose operands are only read or only name a directory or text,
  * so naming an interpreter path (`ls -l /usr/local/bin/python3`, `which
@@ -5184,12 +5187,21 @@ function interpreterShadow(surface: string): InterpreterShadow {
     // One pass: a flag word arms its flag test for the tokens after it. A
     // standalone `.` is treated like `source`, anywhere in the statement, so
     // `if . f` / `while . f` / `coproc . f` cannot hide it from command position.
+    // A printf format word built from an expansion cannot be shown free of
+    // `%n`: an expansion in an option or the format word counts as `-v` does.
     const armed = new Set<RegExp>();
+    let printfFormatPending = false;
     for (const t of tokens) {
       if (t === '.' || ENV_SETTING_WORD_RE.test(t)) return 'env';
       for (const flag of armed) if (flag.test(t)) return 'env';
-      const flag = ENV_SETTING_WITH_FLAG.get(commandBaseName(t));
+      if (printfFormatPending) {
+        if (/[$`]/.test(t)) return 'env';
+        if (!t.startsWith('-')) printfFormatPending = false;
+      }
+      const base = commandBaseName(t);
+      const flag = ENV_SETTING_WITH_FLAG.get(base);
       if (flag instanceof RegExp) armed.add(flag);
+      if (base === 'printf') printfFormatPending = true;
     }
   }
   return INTERPRETER_LOOKUP_RE.test(surface) || INTERPRETER_LOOKUP_RE.test(dequoted) ? 'lookup' : 'none';

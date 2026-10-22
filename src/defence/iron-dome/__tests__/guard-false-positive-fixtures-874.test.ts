@@ -660,6 +660,36 @@ describe('#874 (e) long interpreter files and the re-scan budget', () => {
     expect(v.signals).toContain('stop-process-or-service');
   });
 
+  // Review r9: a printf `%n` conversion stores into the variable its argument
+  // names, and a format word built from an expansion may hold one, so either
+  // withdraws attestation the way `printf -v` does. Classifier input only.
+  const PRINTF_STORES = [
+    'printf %n PATH',
+    "printf '%5n' PATH",
+    'printf %ln PATH',
+    'printf %%n PATH',
+    'printf "$FMT" PATH',
+    'printf -- "$FMT" PATH',
+  ];
+  it.each(PRINTF_STORES.flatMap(p => [
+    `${p}; python3 scripts/dual.py`,
+    `${p} && python3 scripts/dual.py`,
+    `${p}; ./scripts/absdual.py`,
+  ]))('a printf that may store into a variable stays gated: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
+  it.each([
+    "printf '%s\\n' \"$X\"; python3 scripts/dual.py",
+    "printf 'done\\n'; python3 scripts/dual.py",
+    "printf '%s\\n' \"$X\"; ./scripts/absdual.py",
+    "printf 'done\\n' && ./scripts/absdual.py",
+  ])('a printf with a literal format free of %%n keeps the mention relief: %s', (command) => {
+    expect(run(command).decision).toBe('allow');
+  });
+
   it.each([
     'ls -l /usr/local/bin/python3 && python3 scripts/dual.py',
     'cd "$REPO" && python3 scripts/dual.py',
