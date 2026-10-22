@@ -2,7 +2,9 @@
  * #383 — embedding model cache integrity + heal helpers.
  *
  * Xenova/all-MiniLM-L6-v2 is cached under
- *   ~/.cache/shieldcortex/models/Xenova/all-MiniLM-L6-v2/onnx/model.onnx
+ *   <root>/Xenova/all-MiniLM-L6-v2/onnx/model.onnx
+ * where <root> is SHIELDCORTEX_MODEL_DIR or ~/.cache/shieldcortex/models
+ * (see model-config.ts — the single resolver, #632).
  *
  * A truncated download (Edith, May→Aug 2026) left a ~50 MB file that every
  * launch retried forever. Doctor only checked "directory non-empty", so the
@@ -27,9 +29,21 @@ import {
   writeFileSync,
   type Stats,
 } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { finished } from 'node:stream/promises';
+
+import {
+  EmbeddingConfigError,
+  boundForDisplay,
+  defaultEmbeddingCacheRoot,
+  resolveEmbeddingCacheRoot,
+  resolveEmbeddingMirror,
+  resolveEmbeddingModelConfig,
+  resolveEmbeddingsOffline,
+  type EmbeddingModelConfig,
+} from './model-config.js';
+
+export { defaultEmbeddingCacheRoot };
 
 /** HuggingFace / transformers.js model id we pin for memory embeddings. */
 export const EMBEDDING_MODEL_ID = 'Xenova/all-MiniLM-L6-v2';
@@ -53,6 +67,8 @@ export const EMBEDDING_ONNX_RELATIVE = join(
 );
 
 export type ModelCacheStatus =
+  /** #632: SHIELDCORTEX_MODEL_DIR is invalid — no directory was inspected. */
+  | 'misconfigured'
   | 'missing'
   | 'ok'
   | 'size_mismatch'
@@ -81,11 +97,13 @@ export interface ModelCachePaths {
   sidecarPath: string;
 }
 
-export function defaultEmbeddingCacheRoot(home = homedir()): string {
-  return join(home, '.cache', 'shieldcortex', 'models');
-}
-
-export function resolveEmbeddingModelPaths(cacheRoot = defaultEmbeddingCacheRoot()): ModelCachePaths {
+/**
+ * Throws EmbeddingConfigError when no cacheRoot is passed and
+ * SHIELDCORTEX_MODEL_DIR is invalid. An explicit cacheRoot always wins.
+ */
+export function resolveEmbeddingModelPaths(
+  cacheRoot = resolveEmbeddingCacheRoot().cacheRoot,
+): ModelCachePaths {
   const onnxPath = join(cacheRoot, EMBEDDING_ONNX_RELATIVE);
   return {
     cacheRoot,
@@ -103,6 +121,18 @@ export interface ModelCacheSidecar {
   /** File identity binding — stale sidecar must not green-lie after replace. */
   mtimeMs: number;
   ino: number;
+}
+
+/** Resolve paths without throwing: inspect/quarantine must never throw. */
+function resolvePathsOrConfigError(
+  cacheRoot: string | undefined,
+): { paths: ModelCachePaths; error?: undefined } | { paths?: undefined; error: string } {
+  try {
+    return { paths: resolveEmbeddingModelPaths(cacheRoot ?? resolveEmbeddingCacheRoot().cacheRoot) };
+  } catch (err) {
+    if (err instanceof EmbeddingConfigError) return { error: err.message };
+    throw err;
+  }
 }
 
 function isNodeError(err: unknown): err is NodeJS.ErrnoException {
@@ -176,7 +206,18 @@ export async function inspectEmbeddingModelCache(
     now?: () => Date;
   } = {},
 ): Promise<ModelCacheInspection> {
-  const paths = resolveEmbeddingModelPaths(opts.cacheRoot ?? defaultEmbeddingCacheRoot());
+  const resolved = resolvePathsOrConfigError(opts.cacheRoot);
+  if (!resolved.paths) {
+    return {
+      status: 'misconfigured',
+      cacheDir: '',
+      onnxPath: '',
+      expectedBytes: EMBEDDING_ONNX_EXPECTED_BYTES,
+      expectedSha256: EMBEDDING_ONNX_EXPECTED_SHA256,
+      detail: resolved.error,
+    };
+  }
+  const paths = resolved.paths;
   const base = {
     cacheDir: paths.modelDir,
     onnxPath: paths.onnxPath,
@@ -275,29 +316,96 @@ export const EMBEDDING_REQUIRED_SIBLINGS = [
   'tokenizer_config.json',
 ] as const;
 
-/**
- * Hook-safe local completeness: ONNX integrity PLUS tokenizer/config siblings.
- * inspectEmbeddingModelCache() alone is not enough — a valid model.onnx with
- * missing tokenizer.json still enters the worker with allowRemoteModels=true.
- */
-export async function inspectEmbeddingHookReady(
-  opts: { cacheRoot?: string } = {},
-): Promise<{ ready: boolean; reason: string; missing: string[] }> {
-  const insp = await inspectEmbeddingModelCache(opts);
-  if (insp.status !== 'ok') {
-    return { ready: false, reason: insp.status, missing: [] };
-  }
+/** Required tokenizer/config files absent (or empty) under a model directory. */
+export function missingEmbeddingSiblings(modelDir: string): string[] {
   const missing: string[] = [];
   for (const name of EMBEDDING_REQUIRED_SIBLINGS) {
-    const p = join(insp.cacheDir, name);
+    const p = join(modelDir, name);
     try {
       if (!existsSync(p) || statSync(p).size === 0) missing.push(name);
     } catch {
       missing.push(name);
     }
   }
-  if (missing.length) {
-    return { ready: false, reason: `missing siblings: ${missing.join(', ')}`, missing };
+  return missing;
+}
+
+export type EmbeddingReadiness =
+  | {
+      /** The worker would refuse this configuration before importing the library. */
+      configError: string;
+      config?: undefined;
+      inspection?: undefined;
+      missingSiblings?: undefined;
+    }
+  | {
+      configError?: undefined;
+      config: EmbeddingModelConfig;
+      inspection: ModelCacheInspection;
+      /** Only checked when the weight itself is ok. */
+      missingSiblings: string[];
+    };
+
+/**
+ * #632: the configuration the worker will use (root, offline flag, mirror),
+ * resolved by the worker's own resolver, plus the cache it points at. Every
+ * consumer that decides whether embedding work is possible — doctor's
+ * Embeddings row, its semantic-coverage advice, the hook readiness gate —
+ * starts here, so none of them can admit a configuration the worker rejects.
+ *
+ * An explicit cacheRoot still wins over SHIELDCORTEX_MODEL_DIR (so an invalid
+ * MODEL_DIR is not an error for that caller), but the offline flag and mirror
+ * are always validated: the worker reads them from the environment regardless.
+ * Never throws for configuration; configError is already non-echoing.
+ */
+export async function inspectEmbeddingReadiness(
+  opts: {
+    cacheRoot?: string;
+    env?: Record<string, string | undefined>;
+    home?: string;
+    forceSha?: boolean;
+  } = {},
+): Promise<EmbeddingReadiness> {
+  const env = opts.env ?? process.env;
+  let config: EmbeddingModelConfig;
+  try {
+    config = opts.cacheRoot !== undefined
+      ? {
+          cacheRoot: opts.cacheRoot,
+          cacheRootSource: 'argument',
+          offline: resolveEmbeddingsOffline(env),
+          remoteHost: resolveEmbeddingMirror(env),
+        }
+      : resolveEmbeddingModelConfig(env, opts.home);
+  } catch (err) {
+    if (err instanceof EmbeddingConfigError) return { configError: err.message };
+    throw err;
+  }
+  const inspection = await inspectEmbeddingModelCache({ cacheRoot: config.cacheRoot, forceSha: opts.forceSha });
+  const missingSiblings = inspection.status === 'ok' ? missingEmbeddingSiblings(inspection.cacheDir) : [];
+  return { config, inspection, missingSiblings };
+}
+
+/**
+ * Hook-safe local completeness: valid configuration, ONNX integrity PLUS
+ * tokenizer/config siblings. inspectEmbeddingModelCache() alone is not enough —
+ * a valid model.onnx with missing tokenizer.json still enters the worker with
+ * allowRemoteModels=true, and a complete cache under an invalid offline flag or
+ * HF_ENDPOINT is refused by the worker (#632). `misconfigured` lets a caller
+ * report that once instead of per row.
+ */
+export async function inspectEmbeddingHookReady(
+  opts: { cacheRoot?: string; env?: Record<string, string | undefined>; home?: string } = {},
+): Promise<{ ready: boolean; reason: string; missing: string[]; misconfigured?: true }> {
+  const r = await inspectEmbeddingReadiness(opts);
+  if (r.configError !== undefined) {
+    return { ready: false, reason: `misconfigured: ${r.configError}`, missing: [], misconfigured: true };
+  }
+  if (r.inspection.status !== 'ok') {
+    return { ready: false, reason: r.inspection.status, missing: [] };
+  }
+  if (r.missingSiblings.length) {
+    return { ready: false, reason: `missing siblings: ${r.missingSiblings.join(', ')}`, missing: r.missingSiblings };
   }
   return { ready: true, reason: 'ok', missing: [] };
 }
@@ -333,7 +441,11 @@ export function quarantineEmbeddingOnnx(
     stamp?: string;
   } = {},
 ): { quarantinedPath: string | null; onnxPath: string; detail: string } {
-  const paths = resolveEmbeddingModelPaths(opts.cacheRoot ?? defaultEmbeddingCacheRoot());
+  const resolved = resolvePathsOrConfigError(opts.cacheRoot);
+  if (!resolved.paths) {
+    return { quarantinedPath: null, onnxPath: '', detail: resolved.error };
+  }
+  const paths = resolved.paths;
   if (!existsSync(paths.onnxPath)) {
     return {
       quarantinedPath: null,
@@ -424,49 +536,176 @@ export function resetModelCacheHealLatchForTests(): void {
   healAttemptedThisProcess = false;
 }
 
-export function formatModelCacheDoctorMessage(insp: ModelCacheInspection): {
+/** Where operators find the offline provisioning steps (docs/ is not in the npm tarball). */
+export const OFFLINE_EMBEDDINGS_DOC_URL =
+  'https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/offline-embeddings.md';
+
+/**
+ * Optional doctor context (#632). Without it the wording is the pre-#632
+ * online default, so existing callers are unchanged.
+ */
+export interface ModelCacheDoctorContext {
+  offline?: boolean;
+  /** Present when the caller checked tokenizer/config siblings. */
+  missingSiblings?: string[];
+  cacheRootSource?: EmbeddingModelConfig['cacheRootSource'];
+  remoteHost?: string | null;
+}
+
+function doctorConfigSuffix(insp: ModelCacheInspection, ctx: ModelCacheDoctorContext): string {
+  const parts: string[] = [];
+  if (ctx.offline) parts.push('offline: SHIELDCORTEX_EMBEDDINGS_OFFLINE is set, no model download');
+  if (ctx.cacheRootSource === 'SHIELDCORTEX_MODEL_DIR' && insp.cacheDir) {
+    parts.push(`model dir from SHIELDCORTEX_MODEL_DIR: ${boundForDisplay(insp.cacheDir)}`);
+  }
+  if (!ctx.offline && ctx.remoteHost) parts.push(`downloads from HF_ENDPOINT mirror ${boundForDisplay(ctx.remoteHost)}`);
+  return parts.length ? ` [${parts.join('; ')}]` : '';
+}
+
+/**
+ * Where offline provisioning puts the files. insp.cacheDir is already the
+ * model directory (<root>/Xenova/all-MiniLM-L6-v2), so the advice names the
+ * files that go INSIDE it — copying "the model directory into" it would nest a
+ * second all-MiniLM-L6-v2 that the loader never reads.
+ */
+function offlineProvisionFix(insp: ModelCacheInspection, what: string): string {
+  const modelDir = boundForDisplay(insp.cacheDir);
+  const root = boundForDisplay(dirname(dirname(insp.cacheDir)));
+  return `${what} so they sit directly in ${modelDir}/ ` +
+    `(${EMBEDDING_REQUIRED_SIBLINGS.join(', ')}, onnx/model.onnx); the cache root is ${root}. ` +
+    `Do not copy an all-MiniLM-L6-v2 directory into ${modelDir}/ itself. See ${OFFLINE_EMBEDDINGS_DOC_URL}`;
+}
+
+export function formatModelCacheDoctorMessage(
+  insp: ModelCacheInspection,
+  ctx: ModelCacheDoctorContext = {},
+): {
   status: 'pass' | 'warn' | 'info' | 'fail';
   message: string;
   fix?: string;
 } {
+  const base = formatModelCacheDoctorCore(insp, ctx);
+  return { ...base, message: base.message + doctorConfigSuffix(insp, ctx) };
+}
+
+function formatModelCacheDoctorCore(
+  insp: ModelCacheInspection,
+  ctx: ModelCacheDoctorContext,
+): {
+  status: 'pass' | 'warn' | 'info' | 'fail';
+  message: string;
+  fix?: string;
+} {
+  const offline = ctx.offline === true;
   switch (insp.status) {
+    case 'misconfigured':
+      return {
+        status: 'warn',
+        message: `embedding model configuration is invalid — ${insp.detail ?? 'unknown error'}; embeddings will not load`,
+        fix: `Set SHIELDCORTEX_MODEL_DIR to an absolute path (or ~/…), or unset it. See ${OFFLINE_EMBEDDINGS_DOC_URL}`,
+      };
     case 'missing':
+      if (offline) {
+        return {
+          status: 'warn',
+          message:
+            'model not cached and offline mode forbids downloading it — semantic search/dedup are unavailable until the cache is provisioned',
+          fix: offlineProvisionFix(insp, 'Copy the verified Xenova/all-MiniLM-L6-v2 model files'),
+        };
+      }
       return {
         status: 'info',
         message: 'model not cached — will download on first recall',
       };
-    case 'ok':
+    case 'ok': {
+      const missing = ctx.missingSiblings ?? [];
+      if (missing.length) {
+        if (offline) {
+          return {
+            status: 'warn',
+            message:
+              `model weight ok but ${missing.join(', ')} missing and offline mode forbids fetching them — the model will not load`,
+            fix: offlineProvisionFix(insp, `Add the missing file(s) (${missing.join(', ')}) from a verified copy`),
+          };
+        }
+        return {
+          status: 'info',
+          message: `model weight ok; ${missing.join(', ')} missing — will download on first recall`,
+        };
+      }
+      // Integrity of files on disk only. Doctor never loads the model, so it
+      // must not read as "semantic inference is working" (#632).
       if (insp.verifiedVia === 'live_sha') {
         return {
           status: 'pass',
-          message: `model cached and live-sha verified (${insp.bytes ?? EMBEDDING_ONNX_EXPECTED_BYTES} bytes)`,
+          message: `model cached and live-sha verified (${insp.bytes ?? EMBEDDING_ONNX_EXPECTED_BYTES} bytes) — files only, inference not exercised`,
         };
       }
       return {
         status: 'pass',
         message:
           `model cached; size + sidecar attestation ok (${insp.bytes ?? EMBEDDING_ONNX_EXPECTED_BYTES} bytes) ` +
-          `— not a live content hash this run`,
+          `— not a live content hash this run; files only, inference not exercised`,
       };
+    }
     case 'size_mismatch':
     case 'sha_mismatch':
+      if (offline) {
+        return {
+          status: 'warn',
+          message:
+            `embedding model cache is corrupt (${insp.detail ?? insp.status}) — offline mode will not re-download it, so semantic search/dedup are unavailable`,
+          fix:
+            `Replace ${boundForDisplay(insp.onnxPath)} with a verified copy (${EMBEDDING_ONNX_EXPECTED_BYTES} bytes, sha256 ${EMBEDDING_ONNX_EXPECTED_SHA256.slice(0, 12)}…). ` +
+            `See ${OFFLINE_EMBEDDINGS_DOC_URL}`,
+        };
+      }
       return {
         status: 'warn',
         message:
           `embedding model cache is corrupt (${insp.detail ?? insp.status}) — semantic search/dedup may be degraded until it is re-downloaded`,
         fix:
           'Let the next preload quarantine the bad weight and re-download, or: ' +
+          // Left unbounded: a runnable command must name the real file. The
+          // root is already control-free and length-capped by the resolver.
           `mv "${insp.onnxPath}" "${insp.onnxPath}.bak-manual" && shieldcortex doctor`,
       };
     case 'unreadable':
       return {
         status: 'warn',
         message: `embedding model cache unreadable — ${insp.detail ?? 'unknown error'}`,
-        fix: `Check permissions on ${insp.cacheDir}`,
+        fix: `Check permissions on ${boundForDisplay(insp.cacheDir)}`,
       };
     default: {
       const _exhaustive: never = insp.status;
       return { status: 'warn', message: `unexpected model cache status: ${_exhaustive}` };
     }
   }
+}
+
+/**
+ * Doctor's Embeddings row (#632): one resolver for root, offline and mirror,
+ * integrity + sibling inspection, no download, no model load. Never throws.
+ */
+export async function inspectEmbeddingModelForDoctor(
+  opts: { env?: Record<string, string | undefined>; home?: string; forceSha?: boolean } = {},
+): Promise<{ status: 'pass' | 'warn' | 'info' | 'fail'; message: string; fix?: string; inspection?: ModelCacheInspection }> {
+  const r = await inspectEmbeddingReadiness({ env: opts.env, home: opts.home, forceSha: opts.forceSha });
+  if (r.configError !== undefined) {
+    return {
+      status: 'warn',
+      message: `embedding model configuration is invalid — ${r.configError}; embeddings will not load`,
+      fix: `Fix or unset the variable named above. See ${OFFLINE_EMBEDDINGS_DOC_URL}`,
+    };
+  }
+  const { config, inspection, missingSiblings } = r;
+  return {
+    ...formatModelCacheDoctorMessage(inspection, {
+      offline: config.offline,
+      missingSiblings,
+      cacheRootSource: config.cacheRootSource,
+      remoteHost: config.remoteHost,
+    }),
+    inspection,
+  };
 }

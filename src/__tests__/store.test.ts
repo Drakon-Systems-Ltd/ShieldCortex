@@ -236,6 +236,24 @@ describe('Temporal Decay', () => {
       decayedScore: 0.8,
       scope: 'project',
       transferable: false,
+      uuid: 'fixture-memory',
+      updatedAt: new Date(),
+      status: 'active',
+      pinned: false,
+      reviewedAt: null,
+      reviewedBy: null,
+      sourceKind: 'user',
+      captureMethod: 'manual',
+      trustScore: 1,
+      sensitivityLevel: 'INTERNAL',
+      source: null,
+      cloudExcluded: false,
+      memoryPurpose: 'project',
+      memoryScope: 'private',
+      hostId: null,
+      agentId: null,
+      captureLayer: null,
+      sourceAttested: null,
       ...overrides,
     };
   }
@@ -1020,7 +1038,8 @@ describe('Semantic Linking', () => {
 
         const updated = updateMemory(memory.id, {
           scope: 'global',
-          project: null,
+          // Global-scope clearing is accepted by the runtime update path.
+          project: null as unknown as string,
           reviewedBy: 'test-review',
         });
 

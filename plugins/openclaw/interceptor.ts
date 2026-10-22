@@ -1612,8 +1612,15 @@ interface InterceptorOptions {
     ledgerChanged?: { fromHash: string; toHash: string };
   } | null;
   /** #227: release a lease this call minted early, when the guard then blocks
-   *  the action. Best-effort; a hold self-heals at its TTL if this is absent. */
-  releaseActionLease?: (toolName: string, args: Record<string, unknown>, sessionId: string | undefined) => void;
+   *  the action. Best-effort; a hold self-heals at its TTL if this is absent.
+   *  #854: `gate` is the object checkActionLease returned for this call, so
+   *  the release acts as the identity that acquired. */
+  releaseActionLease?: (
+    toolName: string,
+    args: Record<string, unknown>,
+    sessionId: string | undefined,
+    gate?: object,
+  ) => void;
   /** Approval broker (#143), injected from `shieldcortex/defence` at runtime.
    *  Absent, or present with `config.enabled: false`, means no model is ever
    *  consulted and the guard behaves exactly as it did before #143. */
@@ -2311,7 +2318,7 @@ export function createInterceptor(
       // #227: release any lease this call minted early — a blocked action must
       // not leave a hold on that scope (self-heals at TTL if release fails).
       if (leaseGate?.acquired) {
-        try { options?.releaseActionLease?.(context.toolName, context.arguments || {}, context.sessionId); } catch { /* self-heals */ }
+        try { options?.releaseActionLease?.(context.toolName, context.arguments || {}, context.sessionId, leaseGate); } catch { /* self-heals */ }
       }
       emitAudit({ ...base, action: 'auto_deny', outcome: 'auto_denied' }, call);
       // Surface the block to the gateway log (journald). Blocks are recorded in

@@ -34,6 +34,7 @@ import { createRequire } from 'module';
 // import this file, and they must stay loadable on precisely the host whose
 // binding is broken.
 import { isPackagedPrebuildLoadError } from '../database/native-load-classify.js';
+import { sanitiseDisplayField } from '../cli/term-ui.js';
 
 const require = createRequire(import.meta.url);
 
@@ -50,7 +51,8 @@ export interface EnsureResult {
   error?: string;
   /** Captured rebuild output, when a rebuild was attempted. */
   rebuildOutput?: string;
-  /** Full copy-paste remediation, present when status is 'failed'. */
+  /** Full copy-paste remediation, present when status is 'failed'. Display
+   * text: the install dir in it is already display-sanitised (#799). */
   remediation?: string;
 }
 
@@ -232,6 +234,16 @@ export function nativeBindingRemediation(installDir: string, error?: unknown): s
 }
 
 /**
+ * `nativeBindingRemediation` for the terminal. The install dir is a host
+ * value: it goes through `sanitiseDisplayField` BEFORE it is composed into the
+ * multi-line text, so a line break inside it is shown as ⏎ and can never
+ * become a separate remediation line (#799). Identical for an ordinary path.
+ */
+export function nativeBindingDisplayRemediation(installDir: string, error?: unknown): string {
+  return nativeBindingRemediation(sanitiseDisplayField(installDir), error);
+}
+
+/**
  * Verify the binding; if it fails, rebuild in the install dir and re-verify.
  * - 'ok'     — loaded first try (no rebuild).
  * - 'healed' — rebuilt and now loads.
@@ -266,7 +278,7 @@ export async function ensureNativeBinding(deps: Partial<BindingDeps> = {}): Prom
     return {
       status: 'failed',
       error: first.error,
-      remediation: nativeBindingRemediation(dir, first.error),
+      remediation: nativeBindingDisplayRemediation(dir, first.error),
     };
   }
 
@@ -280,7 +292,7 @@ export async function ensureNativeBinding(deps: Partial<BindingDeps> = {}): Prom
       status: 'failed',
       error: afterNormal.error,
       rebuildOutput: normal.output,
-      remediation: nativeBindingRemediation(dir, afterNormal.error),
+      remediation: nativeBindingDisplayRemediation(dir, afterNormal.error),
     };
   }
 
@@ -296,6 +308,6 @@ export async function ensureNativeBinding(deps: Partial<BindingDeps> = {}): Prom
     status: 'failed',
     error: finalError,
     rebuildOutput: sourceBuild.output,
-    remediation: nativeBindingRemediation(dir, finalError),
+    remediation: nativeBindingDisplayRemediation(dir, finalError),
   };
 }

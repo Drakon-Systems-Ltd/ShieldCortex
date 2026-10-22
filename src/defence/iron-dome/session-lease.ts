@@ -231,6 +231,10 @@ export function checkSessionLease(input: LeaseCheckInput): LeaseDecision {
         };
       }
       const ageSec = held.acquiredAtMs != null ? Math.round((nowMs - held.acquiredAtMs) / 1000) : null;
+      // An sc- holder is a pseudonymous salted HMAC key: a stable correlator,
+      // not a reversible session id. It may appear in this refusal's logs and
+      // audit rows, but the raw session id must never be logged beside it.
+      // Legacy/raw and per-process fallback holders retain their existing shape.
       return {
         verdict: 'held',
         reason:
@@ -268,10 +272,9 @@ export function leasePermits(decision: LeaseDecision): boolean {
  * Anchored on a COMMAND BOUNDARY (start, or after a shell separator/env
  * prefix — the guard's own `(?:^|[;&|(\n]|\$\()` idiom), so a scope word that
  * merely appears inside a quoted argument (`echo "how to npm publish"`, `grep
- * "npm publish"`) does NOT match. The install check is order-independent: a
- * package manager on the surface + an install verb + a global marker anywhere,
- * because `npm --global install` and `npm --location=global install` are real
- * global installs that a fixed `npm install … -g` order silently missed.
+ * "npm publish"`) does NOT match. The install check requires a
+ * package manager's own install subcommand and global marker in one shell
+ * stage. Ambiguous shell syntax retains the older whole-surface rule.
  */
 const CMD_BOUNDARY = '(?:^|[\\n;&|(]|\\$\\()\\s*(?:\\w+=\\S*\\s+)*(?:sudo\\s+)?';
 const PKG_MGR = '(?:npm|pnpm|yarn|bun)';
@@ -1219,19 +1222,211 @@ export function securityConfigWriteShape(command: string): boolean {
 }
 
 /**
- * A fleet-host install, evasion-resistant: a package manager (or `openclaw
- * plugins install`) invoked at a command boundary, with an install verb AND a
- * global marker present ANYWHERE on the surface — so flag order cannot defeat
- * it. Local `npm install`/`npm ci` (no global marker) is deliberately NOT an
- * install-scope action.
+ * Main's whole-surface install rule, retained exactly for ambiguous shell
+ * syntax. It requires a package manager, verb, and global marker anywhere.
  */
-function isGlobalInstall(command: string): boolean {
-  if (new RegExp(`${CMD_BOUNDARY}openclaw\\s+plugins\\s+(?:install|add)\\b`, 'i').test(command)) return true;
+function legacyIsGlobalInstall(command: string): boolean {
   const pkgInvoked = new RegExp(`${CMD_BOUNDARY}${PKG_MGR}\\b`, 'i').test(command);
   if (!pkgInvoked) return false;
   const hasInstallVerb = /\b(?:install|i|add)\b/i.test(command);
   const hasGlobalMarker = /(?:\s-g\b|--global\b|--location[=\s]+global\b)/i.test(command);
   return hasInstallVerb && hasGlobalMarker;
+}
+
+const INSTALL_SUBCOMMANDS = new Set([
+  'install', 'i', 'in', 'ins', 'inst', 'insta', 'instal',
+  'isnt', 'isnta', 'isntal', 'isntall', 'add',
+]);
+const GLOBAL_INSTALL_MARKER_RE = /^(?:-g\b|--global\b|--location=global\b)/i;
+/** Standalone-runner options that never take a separate value. */
+const RUNNER_BOOLEAN_OPTIONS = new Set([
+  '-y', '--yes', '--no', '--no-install', '--ignore-existing', '-q', '--quiet',
+  '--silent', '--bun', '--no-bun',
+]);
+const INSTALL_STAGE_PREFIXES = new Set(['sudo', '{', '!', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time', 'eval']);
+/**
+ * A package-manager command word. The tokenizer keeps a redirection attached
+ * to the word (`npm>log`), so the name may be followed by one; that shape is
+ * recognised here and fails closed in finishStage (#752).
+ */
+const PKG_MGR_WORD_RE = /^(?:npm|pnpm|yarn|bun)(?:$|[<>]|&>)/i;
+
+/**
+ * A global install needs a package manager's install subcommand and global
+ * marker in the same stage. Shell comments end at a newline, and closed quote
+ * spans are scanned recursively for commands passed to a shell. Substitution
+ * frames preserve the outer stage while their inner stages are scanned;
+ * subshell parentheses bound stages. Env assignments and shell prefix words
+ * are skipped before the package manager. Runner subcommands and redirections
+ * on the command word or before the subcommand fail closed. Ambiguous syntax
+ * fails closed by OR-ing the whole-surface rule with both parsed rules.
+ */
+function isGlobalInstall(command: string): boolean {
+  return isGlobalInstallAtDepth(command, 0);
+}
+
+function isGlobalInstallAtDepth(command: string, depth: number): boolean {
+  if (new RegExp(`${CMD_BOUNDARY}openclaw\\s+plugins\\s+(?:install|add)\\b`, 'i').test(command)) return true;
+
+  type SavedStage = {
+    tokens: string[];
+    token: string;
+    tokenStarted: boolean;
+    quote: string;
+    quoteStart: number;
+    expansion: boolean;
+  };
+  type Frame = { kind: 'subshell' } | { kind: 'subst'; saved: SavedStage };
+  let tokens: string[] = [];
+  let token = '';
+  let tokenStarted = false;
+  let quote = '';
+  let quoteStart = -1;
+  let unsafe = /\b(?:eval|xargs)\b/i.test(command);
+  let expansion = false;
+  let foundInstall = false;
+  let globalExpansion = false;
+  const frames: Frame[] = [];
+
+  const finishToken = () => {
+    if (tokenStarted) tokens.push(token);
+    token = '';
+    tokenStarted = false;
+  };
+  const finishStage = () => {
+    finishToken();
+    let index = 0;
+    while (index < tokens.length &&
+      (/^\w+=/.test(tokens[index]!) || INSTALL_STAGE_PREFIXES.has(tokens[index]!.toLowerCase()))) index++;
+    // Standalone runners (`npx`, `pnpx`, `bunx`) run the command after their
+    // own options: `npx -y npm i -g x` is npm's global install. The first
+    // command token after the runner's own options is the inner stage; later
+    // operands (`npx echo npm i -g`) are never promoted (#748 r4/r5).
+    if (/^(?:npx|pnpx|bunx)$/i.test(tokens[index] ?? '')) {
+      let k = index + 1;
+      // An unrecognised option may take a separate value, so the command is
+      // either the next word or the one after it: fail closed on both.
+      let ambiguous = false;
+      for (; k < tokens.length; k++) {
+        const opt = tokens[k]!.toLowerCase();
+        if (opt === '--') { k++; break; }
+        // `-p npm` / `--package npm` names the package to fetch, not the
+        // command; `-c` / `--call` values are quoted spans scanned on their own.
+        if (/^(?:-p|--package|-c|--call)$/.test(opt)) { k++; continue; }
+        if (!opt.startsWith('-')) break;
+        if (!opt.includes('=') && !RUNNER_BOOLEAN_OPTIONS.has(opt)) ambiguous = true;
+      }
+      if (PKG_MGR_WORD_RE.test(tokens[k] ?? '')) index = k;
+      else if (ambiguous && PKG_MGR_WORD_RE.test(tokens[k + 1] ?? '')) index = k + 1;
+    }
+    if (PKG_MGR_WORD_RE.test(tokens[index] ?? '')) {
+      if (expansion) unsafe = true;
+      // A redirection attached to the command word (`npm>log install -g x`)
+      // may be followed by its target as a separate word: fail closed.
+      if (!/^(?:npm|pnpm|yarn|bun)$/i.test(tokens[index]!)) unsafe = true;
+      let global = false;
+      let subcommand: string | undefined;
+      let unknownOption = false;
+      let bareInstall = false;
+      for (let i = index + 1; i < tokens.length; i++) {
+        const arg = tokens[i]!.toLowerCase();
+        const globalMarker = GLOBAL_INSTALL_MARKER_RE.test(arg);
+        if (globalMarker) global = true;
+        if (subcommand === undefined && /[<>]/.test(arg)) unsafe = true;
+        if (arg === '--location') {
+          if (/^global\b/i.test(tokens[i + 1] ?? '')) global = true;
+          i++; // The value of --location is not a subcommand.
+          continue;
+        }
+        if (arg.startsWith('-')) {
+          if (subcommand === undefined && !globalMarker) unknownOption = true;
+          continue;
+        }
+        if (INSTALL_SUBCOMMANDS.has(arg)) bareInstall = true;
+        if (subcommand === undefined) subcommand = arg;
+      }
+      if (subcommand === 'exec' || subcommand === 'x' || subcommand === 'dlx' || subcommand === 'explore') unsafe = true;
+      if (global && expansion) globalExpansion = true;
+      if (global && (INSTALL_SUBCOMMANDS.has(subcommand ?? '') || (unknownOption && bareInstall))) foundInstall = true;
+    }
+    tokens = [];
+    expansion = false;
+  };
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (ch === '\x60') unsafe = true;
+    if (!quote && ch === '#' && !tokenStarted) {
+      while (i < command.length && command[i] !== '\n') i++;
+      if (i === command.length) break;
+      i--; // Let the newline finish the stage on the next iteration.
+      continue;
+    }
+    if (ch === '\\' && command[i + 1] === '\n') { i++; continue; }
+    if (ch === '\\' && quote !== '\x27' && i + 1 < command.length) {
+      token += command[++i];
+      tokenStarted = true;
+      continue;
+    }
+    if (ch === '$' && command[i + 1] === '(' && quote !== '\x27') {
+      frames.push({ kind: 'subst', saved: { tokens, token, tokenStarted, quote, quoteStart, expansion } });
+      tokens = [];
+      token = '';
+      tokenStarted = false;
+      quote = '';
+      quoteStart = -1;
+      expansion = false;
+      i++;
+      continue;
+    }
+    if (!quote && ch === '(') {
+      finishStage();
+      frames.push({ kind: 'subshell' });
+      continue;
+    }
+    if (!quote && ch === ')') {
+      finishStage();
+      const frame = frames.pop();
+      if (frame?.kind === 'subst') {
+        ({ tokens, token, tokenStarted, quote, quoteStart, expansion } = frame.saved);
+        token += 'x';
+        tokenStarted = true;
+        expansion = true;
+      }
+      continue;
+    }
+    if (ch === '\x27' || ch === '\x22') {
+      if (!quote) { quote = ch; quoteStart = i; tokenStarted = true; continue; }
+      if (quote === ch) {
+        const span = command.slice(quoteStart + 1, i);
+        if (depth < 4 ? isGlobalInstallAtDepth(span, depth + 1) : legacyIsGlobalInstall(span)) foundInstall = true;
+        quote = '';
+        quoteStart = -1;
+        continue;
+      }
+    }
+    if (ch === '$' && quote !== '\x27' && /[\w{(@*#?\x27\x22]/.test(command[i + 1] ?? '')) expansion = true;
+    // ANSI-C and locale quoting (a dollar sign before a quote) is a quoted word,
+    // so dollar + quoted -g is the word -g: drop the dollar sign.
+    if (ch === '$' && !quote && /[\x27\x22]/.test(command[i + 1] ?? '')) { tokenStarted = true; continue; }
+    if (!quote && /[\s;&|]/.test(ch)) {
+      if ((ch === '&' && (command[i - 1] === '>' || command[i - 1] === '<' || command[i + 1] === '>')) ||
+          (ch === '|' && command[i - 1] === '>')) {
+        token += ch;
+        tokenStarted = true;
+        continue;
+      }
+      if (ch === ';' || ch === '&' || ch === '|' || ch === '\n') finishStage();
+      else finishToken();
+      continue;
+    }
+    token += ch;
+    tokenStarted = true;
+  }
+  finishStage();
+  return quote || frames.some((frame) => frame.kind === 'subst') || unsafe
+    ? legacyIsGlobalInstall(command) || foundInstall || globalExpansion
+    : foundInstall;
 }
 
 /** File paths whose EDITS are security-config actions regardless of tool. */

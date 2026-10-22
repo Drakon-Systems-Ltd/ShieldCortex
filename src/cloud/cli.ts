@@ -1,3 +1,4 @@
+import { CLOUD_HELP, CONFIG_HELP } from '../cli/dispatch-help.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import type { OpenClawPluginGuardSync } from '../setup/openclaw-plugin-guard-sync.js';
 import {
@@ -38,8 +39,12 @@ import {
   setAutoMemorySamplingTurns,
   NATIVE_INJECT_CONTRACTS,
   MEMORY_PLANE_VALUES,
+  ConfigIntegrityRefusal,
+  previewConfigResign,
+  resignTamperedConfig,
   type DefenceMode,
 } from './config.js';
+import { parseResignArgs, type ResignArgs } from './resign-args.js';
 import type { RankerEngine } from '../memory/types.js';
 
 const VALID_RANKER_ENGINES: RankerEngine[] = ['rrf', 'legacy'];
@@ -56,7 +61,34 @@ import { initReadinessTransitions } from '../defence/iron-dome/guard-readiness.j
 const VALID_MODES: DefenceMode[] = ['strict', 'balanced', 'permissive'];
 const VALID_VERIFY_MODES = ['advisory', 'enforce'] as const;
 
-export function handleCloudConfig(args: string[]): void {
+export function handleCloudConfig(args: string[]): void | Promise<void> {
+  // #647: review and deliberately re-sign a tampered config.json. Handled
+  // alone and first: it is never combined with a setting change, and any
+  // recovery-shaped token (`--resign`, `--confirm`, or an `=` spelling of
+  // either) routes here, so a malformed request is rejected instead of falling
+  // through to the setters. The confirmed re-sign is async (it opens the audit
+  // log); everything else stays sync.
+  const resign = parseResignArgs(args);
+  if (resign.kind !== 'not-resign') {
+    return handleResign(resign);
+  }
+
+  // #647: a setter on a config.json that fails its integrity check refuses
+  // rather than re-signing it. That is an expected outcome with an actionable
+  // message, not a crash — and the first refusal stops the run, so a later
+  // flag in the same command cannot half-apply.
+  try {
+    handleCloudConfigFlags(args);
+  } catch (err) {
+    if (err instanceof ConfigIntegrityRefusal) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+function handleCloudConfigFlags(args: string[]): void {
   if (args.includes('--cloud-status')) {
     const config = getCloudConfig();
     const mode = getDefenceMode();
@@ -452,7 +484,8 @@ export function handleCloudConfig(args: string[]): void {
         'Catastrophic ops block in every posture, and in shadow calls the guard recognises as changing its own state/config ' +
         'or disabling it are still held or blocked. Check progress: shieldcortex guard readiness. ' +
         'The Claude Code hook and the OpenClaw plugin are each measured and promoted on their own calls; ' +
-        'the Hermes plugin does not implement the gate and enforces immediately.',
+        'the Hermes plugin does not implement the gate and enforces immediately unless its own enforce setting ' +
+        '(SHIELDCORTEX_ENFORCE) opts it out; this flag does not change that setting.',
     );
     // Start the durable transition record. Only a CHANGE of posture adds an
     // entry; re-running this on an enforce-when-ready install cannot clear a
@@ -641,62 +674,7 @@ export function handleCloudConfig(args: string[]): void {
   }
 
   if (!changed) {
-    console.log('Usage: shieldcortex config [options]');
-    console.log('');
-    console.log('Options:');
-    console.log('  --mode <mode>          Set defence mode (strict|balanced|permissive)');
-    console.log('  --cloud-api-key <key>  Set cloud API key');
-    console.log('  --cloud-url <url>      Set cloud base URL');
-    console.log('  --cloud-enable         Enable cloud sync');
-    console.log('  --cloud-disable        Disable cloud sync');
-    console.log('  --cloud-include-sensitive  Sync CONFIDENTIAL+ memories (off by default since v4.27)');
-    console.log('  --cloud-exclude-sensitive  Stop syncing CONFIDENTIAL+ memories (default)');
-    console.log('  --cloud-status         Show current configuration');
-    console.log('  --openclaw-auto-memory <true|false>  Extract memories from OpenClaw LLM output (off when unset)');
-    console.log('  --proactive-recall <true|false>  Inject SC memory into prompts (off when unset — adds latency)');
-    console.log('                            A fresh global npm install (not CI) with no ~/.shieldcortex/config.json');
-    console.log('                            writes both as true. An existing config.json is never changed, so an');
-    console.log('                            upgrade keeps your current values; a key it does not set stays off');
-    console.log('  --ranker <rrf|legacy>  Hybrid retrieval engine (default: rrf; SHIELDCORTEX_RANKER env overrides)');
-    console.log('  --self-heal <true|false>  Let the cortex-memory hook repair its own install at gateway bootstrap');
-    console.log('                            (default: true; false = warn-only. SHIELDCORTEX_SKIP_SELF_HEAL=1 also opts out)');
-    console.log('  --dashboard-update-check <true|false>  Let the dashboard ask the npm registry for the latest version');
-    console.log(`                            (default: true; false = no lookup, reported as disabled. ${DASHBOARD_UPDATE_CHECK_SKIP_ENV}=1 also opts out.`);
-    console.log('                            Only this lookup — not an offline mode)');
-    console.log('  --tool-firewall-enforce   Redact/withhold threatening tool output before the agent sees it');
-    console.log('  --tool-firewall-advisory  Log tool-output threats but deliver intact (default)');
-    console.log('  --tool-firewall-off / --tool-firewall-on  Disable / enable tool-output scanning');
-    console.log('  --allow-revoke-by-source / --disallow-revoke-by-source  Enable/disable destructive forget --fromSource (default: disabled)');
-    console.log('  --policy-status          Show the OS-owned policy lock: pinned keys, or why there is none');
-    console.log('  --action-guard-enable    Turn Action Guard on, keeping the current enforce/advisory setting (default: off)');
-    console.log('  --action-guard-disable   Turn Action Guard off entirely — tool calls are NOT gated (the default)');
-    console.log('  --action-guard-enforce   Gate dangerous ops (approval/block) from now on; also enables the guard');
-    console.log('  --action-guard-enforce-when-ready  Log ordinary dangerous ops (shadow) until two readiness proxies hold here');
-    console.log('                           (≤ 2% would-stop, ≥ 98% of approvals answered by a human) AND reviewed');
-    console.log('                           effectiveness evidence exists for this version — always required, none');
-    console.log('                           published yet, so it stays in shadow today. Needs a webhook;');
-    console.log('                           progress: shieldcortex guard readiness. Claude Code hook and OpenClaw');
-    console.log('                           plugin, each measured on its own calls; Hermes ignores the gate and');
-    console.log('                           enforces immediately. Also enables the guard');
-    console.log('  --action-guard-advisory  Watch only — ordinary dangerous ops log but are not gated. Still held or');
-    console.log('                           blocked, including catastrophic ops and calls the guard recognises as');
-    console.log('                           changing its own state/config or disabling it. Hermes has its own');
-    console.log('                           enforce setting (SHIELDCORTEX_ENFORCE), which this does not change');
-    console.log('  --action-guard-notify-openclaw  Notify Action Guard denials via the native OpenClaw approval card');
-    console.log('  --action-guard-notify-webhook <https-url>  Notify Action Guard denials to an https webhook');
-    console.log('  --action-guard-notify-disable   Disable Action Guard denial notifications');
-    console.log('  --memory-inject-contract <sc_only|disable_native_inject>  Set the memory-inject native contract (signed write)');
-    console.log('  --memory-plane <dual_legacy|import_only|sc_canonical>  Set memory.plane (signed write; stamps planeSetAt)');
-    console.log('  --memory-host-posture <mcp_sidecar_no_inject|bus_contract>  Honest sidecar (also turns inject off) or bus-contract posture (signed write)');
-    console.log('  --memory-host-runtime <openclaw|claude_code|hermes>[,…]  Declare the bound host runtime(s) doctor must prove (signed write)');
-    console.log('  --auto-memory-sampling <n>  Stop-hook sampling cadence in turns (1-20, ≤ 5 recommended; signed write)');
-    console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
-    console.log('');
-    console.log('LLM Verification:');
-    console.log('  --verify-enable        Enable LLM verification (requires cloud + verify scope)');
-    console.log('  --verify-disable       Disable LLM verification');
-    console.log('  --verify-mode <mode>   Set verify mode (advisory|enforce)');
-    console.log('  --verify-timeout <ms>  Set verify timeout in ms (1000-30000)');
+    console.log(CONFIG_HELP);
   }
 }
 
@@ -741,7 +719,93 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
     return;
   }
 
-  console.log('Usage: shieldcortex cloud sync --full');
+  console.log(CLOUD_HELP);
+}
+
+/**
+ * `shieldcortex config --resign [--confirm <sha256>]` (#647).
+ *
+ * Without `--confirm` it is a preview and writes nothing. It prints the verdict,
+ * the full sha256 of the bytes on disk and the NAMES of the settings that would
+ * leave the strict fail-closed posture — never their values, because
+ * config.json can hold credentials. The operator reads the file themselves.
+ * With `--confirm` it re-signs the parse of exactly those bytes (see
+ * resignTamperedConfig). The argument grammar is parseResignArgs (resign-args.ts).
+ *
+ * Exit codes: 0 previewed, or re-signed AND recorded; 1 refused, nothing
+ * re-signed (a refusal at the last check before the rename has already
+ * written the backup of the reviewed bytes, and keeps it); 2 re-signed but the
+ * audit record was NOT written.
+ */
+function handleResign(resign: Exclude<ResignArgs, { kind: 'not-resign' }>): void | Promise<void> {
+  if (resign.kind === 'reject') {
+    console.error(resign.message);
+    process.exit(1);
+  }
+  if (resign.kind === 'help') {
+    console.log('Usage: shieldcortex config --resign                     Preview (writes nothing)');
+    console.log('       shieldcortex config --resign --confirm <sha256>  Re-sign the parse of exactly the previewed bytes');
+    console.log('--confirm may come before --resign; one --help/-h prints this; nothing else is accepted.');
+    console.log('A change to the file visible at the last check before the rename is refused. Best effort: a');
+    console.log('writer between that check and the rename is overwritten with the signed parse of the bytes you');
+    console.log('confirmed, and the backup of those reviewed bytes is kept.');
+    console.log('Exit codes: 0 previewed, or re-signed and recorded; 1 refused, nothing re-signed;');
+    console.log('            2 re-signed but the config_resigned audit row was NOT recorded.');
+    return;
+  }
+  if (resign.kind === 'confirm') return confirmResign(resign.sha256);
+
+  const preview = previewConfigResign();
+  console.log(`config.json integrity: ${preview.verdict}`);
+  console.log(`  File: ${preview.path}`);
+  if (preview.verdict !== 'tampered') {
+    if (preview.verdict === 'malformed' || preview.verdict === 'unreadable') {
+      console.log('  It cannot be parsed, so it cannot be reviewed or re-signed. Fix it or restore a backup.');
+      process.exit(1);
+    }
+    console.log('  Nothing to re-sign.');
+    return;
+  }
+  console.log(`  sha256: ${preview.sha256}`);
+  console.log('  Re-signing trusts this file exactly as it is now. This preview does not print its values —');
+  console.log('  read the file yourself before you confirm.');
+  console.log(`  Settings that would leave the strict fail-closed posture: ${preview.loosenedKeys.length > 0 ? preview.loosenedKeys.join(', ') : 'none'}`);
+  if (preview.lockRefusal) {
+    console.log(`  Will be REFUSED by the policy lock: ${preview.lockRefusal}`);
+    return;
+  }
+  if (preview.unauthorisedKeys.length > 0) {
+    console.log(`  Will be REFUSED: ${preview.unauthorisedKeys.join(', ')} — no verified policy lock covers them (lock: ${preview.lockStatus}).`);
+    console.log('  Restore a backup whose signature still verifies, or move config.json aside and re-apply');
+    console.log('  those settings with their own commands.');
+    return;
+  }
+  console.log(`  To re-sign these exact bytes: shieldcortex config --resign --confirm ${preview.sha256}`);
+}
+
+async function confirmResign(value: string): Promise<void> {
+  let result: Awaited<ReturnType<typeof resignTamperedConfig>>;
+  try {
+    result = await resignTamperedConfig(value);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+  console.log(`Re-signed ${result.path} (was: tampered).`);
+  console.log(`  Backup of the reviewed bytes: ${result.backupPath}`);
+  console.log(`  sha256 before: ${result.previousSha256}`);
+  console.log(`  sha256 after:  ${result.newSha256}`);
+  console.log(`  Settings now taken from the file instead of the strict posture: ${result.loosenedKeys.length > 0 ? result.loosenedKeys.join(', ') : 'none'}`);
+  if (result.audit.recorded) {
+    console.log(`  Recorded in the audit log as config_resigned (row ${result.audit.rowId}, ${result.audit.location}).`);
+    console.log('  Confirm with `shieldcortex doctor`.');
+    return;
+  }
+  // The write cannot be un-done honestly at this point — putting the tampered
+  // bytes back is another unrecorded write. Say exactly what happened instead.
+  console.error(`  AUDIT NOT RECORDED: the re-sign above IS in force, but its config_resigned row was not written to ${result.audit.location}: ${result.audit.error}.`);
+  console.error(`  Keep ${result.backupPath} and the two sha256 values above: they are the only record of this re-sign.`);
+  process.exit(2);
 }
 
 /**

@@ -810,7 +810,9 @@ export function summarisePosture(records: readonly PostureRecord[]): PostureSumm
 
 const POSTURE_TEXT: Record<ConfiguredPosture, string> = {
   enforce: 'posture enforce (self-reported)',
-  advisory: 'posture advisory — warns, does not block',
+  // #874: never printed bare — see postureText. "does not block" is only
+  // claimed when this instance's own deny count says so.
+  advisory: 'posture advisory',
   'intentionally-off': 'posture intentionally off by configuration',
   unavailable: 'posture unavailable — no gate can run here',
   unknown: 'posture unknown',
@@ -846,6 +848,25 @@ function denialText(d: DenialEvidence): string {
 }
 
 /**
+ * #874: the posture phrase, scoped to the evidence. An advisory gate still
+ * denies the catastrophic tier and the self-protection floor, so "does not
+ * block" is only said when this instance's own reported deny count is zero —
+ * every decision it reported, which covers any last-N window — and the count
+ * is current. A nonzero count says how many; an unreadable or stale count says
+ * that, rather than claiming either.
+ */
+function postureText(r: PostureRecord): string {
+  const configured = r.configured_posture.value;
+  if (configured !== 'advisory') return POSTURE_TEXT[configured];
+  const count = r.incidents.value;
+  if (r.membership !== 'current' || typeof count !== 'number' || !Number.isInteger(count) || count < 0) {
+    return 'posture advisory — warns; this instance\'s deny record is unreadable or not current, so whether it has blocked is unknown';
+  }
+  if (count === 0) return 'posture advisory — warns, does not block (no deny in any decision this instance reported)';
+  return `posture advisory — warns, but this instance reported ${count} denied call${count === 1 ? '' : 's'}`;
+}
+
+/**
  * One operator-readable line. Never says "enforced", "protected" or
  * "proves": the strongest thing this can say is what the process reported.
  */
@@ -860,10 +881,10 @@ export function renderPostureLine(r: PostureRecord): string {
     LOADED_TEXT[r.runtime_loaded.value],
   ];
   if (r.membership === 'current') {
-    parts.push(POSTURE_TEXT[r.configured_posture.value], SCANNER_TEXT[r.scanner.value], denialText(r.observed_denial));
+    parts.push(postureText(r), SCANNER_TEXT[r.scanner.value], denialText(r.observed_denial));
     if (r.liveness.value === 'per-call') parts.push('per-call hook, last call within max_age');
   } else {
-    parts.push(POSTURE_TEXT[r.configured_posture.value]);
+    parts.push(postureText(r));
   }
   const why = r.runtime_loaded.note ?? (r.membership !== 'current' ? r.liveness.note : null);
   if (why && r.runtime_loaded.value !== 'yes') parts.push(why);

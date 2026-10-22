@@ -227,7 +227,17 @@ export interface ActionGuardOutcomeNotification {
 }
 
 /** Every shape a channel can be handed. */
-export type AnyOperatorNotification = OperatorNotification | ConversationThreatNotification | ActionGuardOutcomeNotification;
+export interface MaintenanceFailNotification {
+  event: 'maintenance_fail';
+  checks: Array<{ label: string; status: 'fail'; message: string }>;
+}
+
+/** Only doctor's already-rendered check names and messages; never memory rows. */
+export function buildMaintenanceFailNotification(checks: MaintenanceFailNotification['checks']): MaintenanceFailNotification {
+  return { event: 'maintenance_fail', checks: checks.map(({ label, message }) => ({ label, status: 'fail', message })) };
+}
+
+export type AnyOperatorNotification = OperatorNotification | ConversationThreatNotification | ActionGuardOutcomeNotification | MaintenanceFailNotification;
 
 export function isActionGuardOutcomeNotification(
   n: AnyOperatorNotification,
@@ -470,10 +480,15 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   // (r5) promoting itself to enforcing — both announced when they happen.
   // r8: a surface starting its record, watching first.
   'readiness-demoted', 'readiness-promoted', 'readiness-started',
+  // #874: parity with the hook — the other two self-protection floor signals.
+  'touch-guard-config', 'disable-action-guard',
 ]);
 const SAFE_ACTION_GUARD_OUTCOMES = new Set([
   'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',
   'readiness_demoted', 'readiness_promoted', 'readiness_started',
+  // #673: the session-end report of recorded approval timeouts. Report only —
+  // it has its own reason below, never the advisory-warning copy.
+  'approval_expiry_digest',
 ]);
 const SAFE_ACTION_GUARD_SEVERITIES = new Set(['critical', 'dangerous', 'high', 'medium', 'low', 'benign', 'unknown']);
 
@@ -505,7 +520,30 @@ function safeActionGuardSignals(signals: unknown): string[] {
   return out.filter((signal, index) => out.indexOf(signal) === index).slice(0, 25);
 }
 
+/**
+ * #673 — the closed-set projection the outcome notification already applies,
+ * exported so the expiry digest renders the SAME membership decisions rather
+ * than a second vocabulary. An unknown tool is `tool`, an unknown signal is
+ * `redacted-signal`, severity comes from its closed set.
+ */
+export function projectActionGuardFields(input: {
+  tool?: unknown;
+  signals?: unknown;
+  severity?: unknown;
+  event?: ActionGuardOutcomeEvent;
+}): { tool: string; signals: string[]; severity: string } {
+  return {
+    tool: safeActionGuardTool(input.tool),
+    signals: safeActionGuardSignals(input.signals),
+    severity: safeActionGuardSeverity(input.severity, input.event === 'action_guard_denial' ? 'action_guard_denial' : 'action_guard_warning'),
+  };
+}
+
+export const APPROVAL_EXPIRY_DIGEST_REASON =
+  'Approval timeouts recorded in one OpenClaw session; report only; nothing was approved.';
+
 function safeActionGuardReason(event: ActionGuardOutcomeEvent, outcome: string): string {
+  if (outcome === 'approval_expiry_digest') return APPROVAL_EXPIRY_DIGEST_REASON;
   if (event === 'action_guard_warning') {
     if (outcome === 'readiness_demoted') {
       return 'Action Guard (enforce when ready) was DEMOTED to shadow mode: dangerous tool calls are now logged but NOT stopped, because this install no longer meets its readiness conditions. Run `shieldcortex guard readiness` for details.';
@@ -702,6 +740,9 @@ export function formatActionGuardOutcomeNotification(n: ActionGuardOutcomeNotifi
  *  richer presentation (inline buttons, etc.) from the structured
  *  `OperatorNotification` instead — this is the lowest common denominator. */
 export function formatOperatorNotification(n: AnyOperatorNotification): string {
+  if (n.event === 'maintenance_fail') {
+    return ['ShieldCortex maintenance: doctor checks failed', ...n.checks.map(c => `${c.label}: ${c.status} — ${c.message}`)].join('\n');
+  }
   // #242/#243 terminal guard alerts have no hash and no command. They are not
   // approval requests; the operator gets a redacted incident report and enough
   // session identity to find the real row locally.

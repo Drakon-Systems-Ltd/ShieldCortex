@@ -1,6 +1,6 @@
 import { jest } from '@jest/globals';
 import Database from 'better-sqlite3';
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync } from 'fs';
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { homedir, tmpdir } from 'os';
 import { __databaseTestUtils } from '../database/init.js';
@@ -347,6 +347,33 @@ describe('database integrity recovery', () => {
 
       errorSpy.mockRestore();
       rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('refuses a live startup lock before creating a database when requested', async () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'shieldcortex-db-'));
+      const dbPath = join(tempDir, 'memories.db');
+      const lockPath = `${dbPath}.lock`;
+      const lockBody = JSON.stringify({ pid: process.pid, entryPath: '/tmp/other-shieldcortex.js' });
+      const { initDatabase, closeDatabase, holdsStartupLock, StartupLockHeldError } = await import('../database/init.js');
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        writeFileSync(lockPath, lockBody);
+        expect(() => initDatabase(dbPath, { refuseIfLocked: true })).toThrow(StartupLockHeldError);
+        expect(holdsStartupLock()).toBe(false);
+        expect(existsSync(dbPath)).toBe(false);
+        expect(readFileSync(lockPath, 'utf8')).toBe(lockBody);
+        expect(readdirSync(tempDir)).toEqual(['memories.db.lock']);
+
+        const opened = initDatabase(dbPath);
+        expect(opened.open).toBe(true);
+        expect(existsSync(dbPath)).toBe(true);
+        closeDatabase();
+        expect(readFileSync(lockPath, 'utf8')).toBe(lockBody);
+      } finally {
+        closeDatabase();
+        errorSpy.mockRestore();
+        rmSync(tempDir, { recursive: true, force: true });
+      }
     });
   });
 

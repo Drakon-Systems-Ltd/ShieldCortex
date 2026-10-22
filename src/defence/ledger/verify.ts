@@ -49,6 +49,7 @@ export interface LedgerProblem {
   seq: number | null;
   kind: LedgerProblemKind;
   detail: string;
+  cause?: 'legacy-project-backfill';
 }
 
 export interface LedgerEpochInfo {
@@ -185,8 +186,8 @@ export function verifyLedger(
   const heartbeatIntervalMs = opts.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_MS;
   const report = emptyReport(heartbeatIntervalMs, now);
   const problems = report.problems;
-  const problem = (epoch: number | null, seq: number | null, kind: LedgerProblemKind, detail: string): void => {
-    problems.push({ epoch, seq, kind, detail });
+  const problem = (epoch: number | null, seq: number | null, kind: LedgerProblemKind, detail: string, cause?: LedgerProblem['cause']): void => {
+    problems.push({ epoch, seq, kind, detail, ...(cause ? { cause } : {}) });
   };
 
   if (!tableExists(db, 'ledger_meta') || !tableExists(db, 'ledger_marker')) {
@@ -363,7 +364,22 @@ export function verifyLedger(
         digest = null;
       }
       if (digest !== r.content_digest) {
-        problem(epoch, s, 'digest-mismatch', `row content no longer matches its content_digest (${r.table})`);
+        let legacyProjectBackfill = false;
+        if (r.table === 'defence_audit' && r.raw.project != null) {
+          try {
+            legacyProjectBackfill = contentDigest(auditRowContent({ ...r.raw, project: null }, r.ledger_id, r.epoch)) === r.content_digest;
+          } catch { /* Preserve the ordinary mismatch when the alternate digest cannot be computed. */ }
+        }
+        if (legacyProjectBackfill) {
+          problem(epoch, s, 'digest-mismatch',
+            'row content no longer matches its content_digest (defence_audit)',
+            'legacy-project-backfill');
+        } else {
+          problem(epoch, s, 'digest-mismatch', `row content no longer matches its content_digest (${r.table})`);
+        }
+        if (legacyProjectBackfill && rowHash(r.prev_hash, s, r.content_digest) !== r.row_hash) {
+          problem(epoch, s, 'row-hash-mismatch', 'row_hash does not match prev_hash, seq and content_digest');
+        }
       } else if (rowHash(r.prev_hash, s, r.content_digest) !== r.row_hash) {
         problem(epoch, s, 'row-hash-mismatch', 'row_hash does not match prev_hash, seq and content_digest');
       }
@@ -477,6 +493,18 @@ function where(p: LedgerProblem): string {
   return 'ledger';
 }
 
+/** True only when the entire inconsistent report has the same backfill cause. */
+export function allProblemsAreLegacyProjectBackfill(r: LedgerReport): boolean {
+  return r.status === 'inconsistent' && r.problems.length > 0 &&
+    r.problems.every((p) => p.cause === 'legacy-project-backfill');
+}
+
+function displayDetail(p: LedgerProblem, wholeReportIsBackfill: boolean): string {
+  return wholeReportIsBackfill && p.cause === 'legacy-project-backfill'
+    ? 'row matches its digest once project is reset to NULL; likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in project; no digest field other than project changed'
+    : p.detail;
+}
+
 /** One-line summary used by the doctor row. */
 export function summariseLedgerReport(r: LedgerReport): string {
   if (r.status === 'unchained') {
@@ -485,7 +513,11 @@ export function summariseLedgerReport(r: LedgerReport): string {
   }
   if (r.status === 'inconsistent') {
     const f = r.firstBad!;
-    return `inconsistent — first bad: ${where(f)} (${f.kind}: ${f.detail}); ${r.problems.length} problem(s)`;
+    const wholeReportIsBackfill = allProblemsAreLegacyProjectBackfill(r);
+    return `inconsistent — first bad: ${where(f)} (${f.kind}: ${displayDetail(f, wholeReportIsBackfill)}); ${r.problems.length} problem(s)` +
+      (wholeReportIsBackfill
+        ? '; every problem is likely explained by a legacy project backfill (an older ShieldCortex copy, 5.2.1 or earlier, filled in project on chained rows; no digest field other than project changed)'
+        : '');
   }
   const head = r.head ? `head epoch ${r.head.epoch} seq ${r.head.seq}` : 'no head';
   const extras: string[] = [];
@@ -509,7 +541,11 @@ export function formatLedgerReport(r: LedgerReport): string {
   }
   if (r.problems.length) {
     out.push('  Problems:');
-    for (const p of r.problems) out.push(`    - ${where(p)}: ${p.kind} — ${p.detail}`);
+    const wholeReportIsBackfill = allProblemsAreLegacyProjectBackfill(r);
+    for (const p of r.problems) out.push(`    - ${where(p)}: ${p.kind}${wholeReportIsBackfill && p.cause ? ` [cause: ${p.cause}]` : ''} — ${displayDetail(p, wholeReportIsBackfill)}`);
+    if (wholeReportIsBackfill) {
+      out.push('  Likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in `project` on chained rows; no digest field other than `project` changed in those rows; find and remove or upgrade the old copy before any repair.');
+    }
   }
   const u = r.unchainedHistory;
   if (u && (u.count > 0 || u.coverageStartsAt)) {

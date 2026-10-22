@@ -6,7 +6,7 @@
  */
 
 import { useEffect, useRef, useCallback, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, type QueryClient, type QueryKey } from '@tanstack/react-query';
 import { getApiToken, invalidateApiToken } from './auth';
 import { shouldInvalidateTokenOnClose } from './ws-helpers';
 
@@ -56,6 +56,28 @@ interface UseMemoryWebSocketOptions {
   onMessage?: (event: WebSocketMessage) => void;
 }
 
+/**
+ * Every query behind the Needs you inbox and its always-mounted badge (#692).
+ * Held back and memories to check do not poll while the socket is connected,
+ * and scanner stats are refreshed on xray_detection between their polls.
+ */
+export const NEEDS_YOU_QUERY_KEYS: readonly QueryKey[] = [['quarantine'], ['review-queue'], ['xray-findings-stats']];
+
+/**
+ * Refetch after a change the server just announced. `invalidateQueries` alone
+ * is not enough for a first fetch still in flight: React Query hands back that
+ * fetch's promise, whose response may predate the change, and its success
+ * clears the invalidation, so a pre-event zero would stand. Cancel such a
+ * fetch first so the refetch reads post-event state (#692).
+ */
+export function refetchAfterChange(queryClient: QueryClient, queryKey: QueryKey): void {
+  void queryClient.cancelQueries({
+    queryKey,
+    predicate: (q) => q.state.data === undefined && q.state.fetchStatus === 'fetching',
+  });
+  void queryClient.invalidateQueries({ queryKey });
+}
+
 // Reconnection configuration
 const INITIAL_RECONNECT_DELAY = 1000; // 1 second
 const MAX_RECONNECT_DELAY = 30000; // 30 seconds max
@@ -78,6 +100,9 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
   const connectGenerationRef = useRef(0);
   const [isConnected, setIsConnected] = useState(false);
   const [connectionFailed, setConnectionFailed] = useState(false);
+  // When the current socket opened; data fetched before it may predate events
+  // missed while disconnected.
+  const [connectedAt, setConnectedAt] = useState<number | undefined>(undefined);
   const [lastEvent, setLastEvent] = useState<{
     type: WebSocketEventType;
     data?: unknown;
@@ -118,6 +143,11 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
 
       ws.onopen = () => {
         setIsConnected(true);
+        // Events sent while there was no socket are not replayed, and these
+        // queries stop polling once connected: reconcile them now, every open,
+        // so a count from before the gap is not kept as current (#692).
+        setConnectedAt(Date.now());
+        for (const key of NEEDS_YOU_QUERY_KEYS) refetchAfterChange(queryClient, key);
         // Reset reconnect state on successful connection
         reconnectAttemptsRef.current = 0;
         reconnectDelayRef.current = INITIAL_RECONNECT_DELAY;
@@ -143,14 +173,17 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
               queryClient.invalidateQueries({ queryKey: ['memories'] });
               queryClient.invalidateQueries({ queryKey: ['stats'] });
               queryClient.invalidateQueries({ queryKey: ['links'] });
+              refetchAfterChange(queryClient, ['review-queue']);
               break;
 
             case 'memory_created':
             case 'memory_updated':
             case 'memory_deleted':
-              // Memory changed, refresh memories list
+              // Memory changed, refresh memories list — and the review queue
+              // behind the always-mounted Needs you badge (#692).
               queryClient.invalidateQueries({ queryKey: ['memories'] });
               queryClient.invalidateQueries({ queryKey: ['stats'] });
+              refetchAfterChange(queryClient, ['review-queue']);
               break;
 
             case 'consolidation_complete':
@@ -158,6 +191,7 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
               queryClient.invalidateQueries({ queryKey: ['memories'] });
               queryClient.invalidateQueries({ queryKey: ['stats'] });
               queryClient.invalidateQueries({ queryKey: ['links'] });
+              refetchAfterChange(queryClient, ['review-queue']);
               break;
 
             case 'decay_tick':
@@ -177,6 +211,7 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
               queryClient.invalidateQueries({ queryKey: ['memories'] });
               queryClient.invalidateQueries({ queryKey: ['stats'] });
               queryClient.invalidateQueries({ queryKey: ['links'] });
+              refetchAfterChange(queryClient, ['review-queue']);
               break;
 
             case 'defence_event':
@@ -189,7 +224,7 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
               queryClient.invalidateQueries({ queryKey: ['agent-operations'] });
               queryClient.invalidateQueries({ queryKey: ['audit-logs'] });
               queryClient.invalidateQueries({ queryKey: ['audit-stats'] });
-              queryClient.invalidateQueries({ queryKey: ['quarantine'] });
+              refetchAfterChange(queryClient, ['quarantine']);
               break;
 
             case 'kill_switch_activated':
@@ -227,6 +262,8 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
               queryClient.invalidateQueries({ queryKey: ['xray-activity'] });
               queryClient.invalidateQueries({ queryKey: ['xray-watch-sessions'] });
               queryClient.invalidateQueries({ queryKey: ['xray-findings'] });
+              // ['xray-findings'] does not prefix-match the stats key.
+              refetchAfterChange(queryClient, ['xray-findings-stats']);
               queryClient.invalidateQueries({ queryKey: ['xray-status'] });
               break;
           }
@@ -317,6 +354,7 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
 
   return {
     isConnected,
+    connectedAt: isConnected ? connectedAt : undefined,
     connectionFailed,
     lastEvent,
     reconnect: manualReconnect,

@@ -162,6 +162,9 @@ import path from 'path';
 /** The manifest key our plugin declares — the thing that can collide. */
 export const HERMES_PLUGIN_NAME = 'shieldcortex';
 
+/** The probe's answer when no Hermes Python interpreter could be located. */
+export const NO_HERMES_INTERPRETER = 'no Hermes interpreter found';
+
 /** How long the Hermes probe may take before we give up on an answer. */
 const PROBE_TIMEOUT_MS = 8_000;
 
@@ -363,6 +366,15 @@ export interface HermesPluginScan {
   fromHermes: boolean;
   /** Why Hermes could not be asked, verbatim. Null when `fromHermes`. */
   undeterminedReason: string | null;
+  /**
+   * True when Hermes could not be asked because no interpreter was found at
+   * all (#651) — every candidate statted as absent and no `hermes` launcher on
+   * PATH (#651 r2) — as opposed to one that was found and failed, a candidate
+   * that could not be read, or a launcher with no usable interpreter. A structured fact so callers never parse
+   * `undeterminedReason`. On its own it proves nothing about whether Hermes is
+   * installed: a host can have an agent home and a broken or moved venv.
+   */
+  noInterpreter: boolean;
   /**
    * The paths that could not be read, with their errors (#569 r6). Non-empty
    * implies `fromHermes === false`; it is the reason-with-detail behind
@@ -568,28 +580,115 @@ export function hermesPluginRoots(hermesHome: string): string[] {
  * null when neither is there, which is the signal to fall back.
  */
 export function resolveHermesInterpreter(hermesHome: string): string | null {
+  const search = searchHermesInterpreter(hermesHome);
+  return search.kind === 'found' ? search.interpreter : null;
+}
+
+/**
+ * Where the interpreter search ended (#651 r2). `absent` only when every
+ * candidate was positively missing (stat ENOENT/ENOTDIR with no dangling
+ * symlink on the walked path, #651 r3) and PATH held no `hermes` launcher;
+ * `undetermined` names the first candidate that could not be statted, was
+ * something other than a file, was or sat under a dangling symlink, or a
+ * launcher that exists but gives no usable interpreter (unreadable, `env`
+ * shebang, missing target). Absence is a conclusion doctor draws from this, so
+ * uncertainty must not read as it.
+ */
+export type HermesInterpreterSearch =
+  | { kind: 'found'; interpreter: string }
+  | { kind: 'absent' }
+  | { kind: 'undetermined'; path: string };
+
+export function searchHermesInterpreter(hermesHome: string): HermesInterpreterSearch {
   const venv = path.join(hermesHome, 'hermes-agent', '.venv');
   const candidates = [
     path.join(venv, 'bin', 'python3'),
     path.join(venv, 'bin', 'python'),
     path.join(venv, 'Scripts', 'python.exe'),
   ];
+  let uncertain: string | null = null;
   for (const candidate of candidates) {
-    if (isFile(candidate)) return candidate;
+    const state = fileState(candidate);
+    if (state === 'file') return { kind: 'found', interpreter: candidate };
+    if (state !== 'absent' && uncertain === null) uncertain = candidate;
   }
-  return shebangInterpreter(hermesOnPath());
+  const onPath = hermesOnPath();
+  if (uncertain === null) uncertain = onPath.uncertain;
+  if (onPath.launcher !== null) {
+    const interpreter = shebangInterpreter(onPath.launcher);
+    if (interpreter !== null) return { kind: 'found', interpreter };
+    if (uncertain === null) uncertain = onPath.launcher;
+  }
+  return uncertain === null ? { kind: 'absent' } : { kind: 'undetermined', path: uncertain };
 }
 
-/** The `hermes` launcher on PATH, or null. */
-function hermesOnPath(): string | null {
+/**
+ * `isFile` with its failures kept apart: absent, or there but not (knowably) a
+ * file. `stat` follows links, so its ENOENT is ambiguous: the path may truly be
+ * missing, or a symlink on it (the leaf, or an ancestor such as
+ * `hermes-agent/` itself) may point nowhere. Only the first is absence (#651
+ * r3); a broken link is something the user has, and stays `other`. A link that
+ * resolves to a regular file is still `file`, so a normal venv `python3`
+ * symlink keeps being found in the same candidate order.
+ */
+function fileState(target: string): 'file' | 'absent' | 'other' {
+  try {
+    return fs.statSync(target).isFile() ? 'file' : 'other';
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') return 'other';
+    return missingWithoutDanglingLink(target) ? 'absent' : 'other';
+  }
+}
+
+/**
+ * Walk `target` one component at a time with `lstat`. True only when the walk
+ * reaches a component that does not exist (or whose parent is not a
+ * directory) without first passing a symlink that fails to resolve. Any other
+ * outcome — a dangling or unresolvable link, an unreadable step, or a walk that
+ * finds every component present — is not positive evidence of absence.
+ */
+function missingWithoutDanglingLink(target: string): boolean {
+  const abs = path.resolve(target);
+  const { root } = path.parse(abs);
+  let cur = root;
+  for (const part of abs.slice(root.length).split(path.sep)) {
+    if (part === '') continue;
+    cur = path.join(cur, part);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(cur);
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      return code === 'ENOENT' || code === 'ENOTDIR';
+    }
+    if (st.isSymbolicLink()) {
+      try {
+        fs.statSync(cur);
+      } catch {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * The `hermes` launcher on PATH, or null — plus the first PATH candidate
+ * before it that could not be statted or was not a file.
+ */
+function hermesOnPath(): { launcher: string | null; uncertain: string | null } {
   const raw = process.env.PATH;
-  if (typeof raw !== 'string' || raw === '') return null;
+  let uncertain: string | null = null;
+  if (typeof raw !== 'string' || raw === '') return { launcher: null, uncertain };
   for (const entry of raw.split(path.delimiter)) {
     if (entry === '') continue;
     const candidate = path.join(entry, 'hermes');
-    if (isFile(candidate)) return candidate;
+    const state = fileState(candidate);
+    if (state === 'file') return { launcher: candidate, uncertain };
+    if (state === 'other' && uncertain === null) uncertain = candidate;
   }
-  return null;
+  return { launcher: null, uncertain };
 }
 
 /**
@@ -1148,14 +1247,26 @@ export interface HermesProbeResult {
 export function probeHermesDiscovery(
   env: HermesEnvironment,
   opts: HermesScanOptions = {},
-): HermesProbeResult | { error: string } {
+): HermesProbeResult | { error: string; noInterpreter?: true } {
   // The interpreter is LOOKED FOR under the best-effort home. That is a search
   // for something to ask, not an answer: a wrong guess here costs a venv
   // lookup and falls through to the `hermes` launcher on PATH.
   const searchHome = resolveHermesHome(env);
-  const interpreter =
-    opts.interpreter !== undefined ? opts.interpreter : resolveHermesInterpreter(searchHome);
-  if (interpreter === null) return { error: 'no Hermes interpreter found' };
+  // `noInterpreter` only for a search that met nothing but absence (#651 r2);
+  // an unreadable candidate, an unusable launcher or a dangling link is not
+  // "none found". The error text stays NO_HERMES_INTERPRETER in every no-answer
+  // case, as on main, so `update`'s plain "couldn't find Hermes' Python" row is
+  // unchanged; the doctor's absence downgrade reads only the structured flag.
+  let interpreter: string;
+  if (opts.interpreter !== undefined) {
+    if (opts.interpreter === null) return { error: NO_HERMES_INTERPRETER, noInterpreter: true };
+    interpreter = opts.interpreter;
+  } else {
+    const search = searchHermesInterpreter(searchHome);
+    if (search.kind === 'absent') return { error: NO_HERMES_INTERPRETER, noInterpreter: true };
+    if (search.kind === 'undetermined') return { error: NO_HERMES_INTERPRETER };
+    interpreter = search.interpreter;
+  }
 
   const payload = JSON.stringify({
     name: HERMES_PLUGIN_NAME,
@@ -1463,6 +1574,7 @@ export function scanHermesPluginCopies(
     present: homeState === 'dir',
     fromHermes: false,
     undeterminedReason: null as string | null,
+    noInterpreter: false,
     undetermined: [] as HermesUndetermined[],
     roots: [] as HermesPluginRootScan[],
     copies: [] as HermesPluginCopy[],
@@ -1501,6 +1613,7 @@ export function scanHermesPluginCopies(
     return {
       ...base,
       undeterminedReason: probe.error,
+      noInterpreter: probe.noInterpreter === true,
       hintRoots: hermesPluginRoots(guessedHome).map((root) => ({
         root,
         dirs: hintDirsInRoot(root),

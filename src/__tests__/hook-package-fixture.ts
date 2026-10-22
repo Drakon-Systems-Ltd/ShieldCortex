@@ -250,8 +250,14 @@ export interface EmbedPlan {
    * raised while validating or storing the vector is a failure and loud.
    */
   branded?: boolean;
-  /** What the fixture cache-health gate reports. Defaults to ready. */
-  cacheReady?: boolean;
+  /**
+   * What the fixture cache-health gate reports. Defaults to ready.
+   *
+   * 'real' delegates to the REAL compiled `inspectEmbeddingHookReady`, so the
+   * gate answers from the child's own environment and an on-disk cache the
+   * case provisioned (#632). The embedder is still the fixture's.
+   */
+  cacheReady?: boolean | 'real';
   /**
    * Hold the answer for this many ms before the mode below decides it.
    *
@@ -407,12 +413,15 @@ const FIXTURE_MODEL_CACHE_JS = `
 // Everything except the hook-readiness gate is the real model-cache module: the
 // gate is the one thing a package with no 90MB ONNX file on disk cannot answer
 // honestly, and the one thing a test needs to control to reach the embed step.
+// A plan with cacheReady 'real' hands the decision back to the real gate.
 import { readPlan } from './fixture-plan.js';
+import { inspectEmbeddingHookReady as realInspectEmbeddingHookReady } from './model-cache.real.js';
 
 export * from './model-cache.real.js';
 
-export async function inspectEmbeddingHookReady() {
+export async function inspectEmbeddingHookReady(...args) {
   const plan = readPlan();
+  if (plan.cacheReady === 'real') return realInspectEmbeddingHookReady(...args);
   return { ready: plan.cacheReady !== false, reason: 'hook package fixture' };
 }
 `;

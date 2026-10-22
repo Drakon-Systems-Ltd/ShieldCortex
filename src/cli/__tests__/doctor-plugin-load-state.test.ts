@@ -73,7 +73,9 @@ describe('checkOpenClawPluginLoadState', () => {
     setup({ enabled: true, roster: [{ pluginId: 'brave', enabled: true }], onDisk: '4.47.2', recordVersion: '4.47.2' });
     const r = await checkOpenClawPluginLoadState(home, '4.47.2');
     expect(r.status).toBe('warn');
-    expect(r.message).toMatch(/unproven|roster/i);
+    // Plain words since the calm-update-screen change: a check that could
+    // not run, never a fault.
+    expect(r.message).toMatch(/couldn't confirm the gateway loaded the plugin/i);
     expect(r.message).not.toMatch(/UNPROTECTED/);
   });
 
@@ -98,7 +100,7 @@ describe('checkOpenClawPluginLoadState', () => {
     fs.writeFileSync(path.join(home, '.openclaw', 'state', 'openclaw.sqlite'), 'not a sqlite database at all');
     const r = await checkOpenClawPluginLoadState(home, '4.47.2');
     expect(r.status).toBe('warn');
-    expect(r.message).toMatch(/cannot read|unreadable|roster/i);
+    expect(r.message).toMatch(/couldn't read OpenClaw's plugin list/i);
     expect(r.message).not.toMatch(/UNPROTECTED/);
     expect(r.fix).toMatch(/repair/i);
   });

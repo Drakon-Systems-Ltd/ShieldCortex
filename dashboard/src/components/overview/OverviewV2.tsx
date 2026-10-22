@@ -21,7 +21,7 @@ import {
   combineStatus,
   countText,
   firewallPill,
-  guardPill,
+  ironDomePill,
   operationsPill,
   queryStatus,
   scanningPill,
@@ -127,7 +127,7 @@ export function OverviewV2() {
     xray: queryStatus(xray),
     update: queryStatus(update),
   };
-  const guard = guardPill(st.ironDome, ironDome.data?.enabled);
+  const ironDomeRow = ironDomePill(st.ironDome, ironDome.data?.enabled);
   const scanning = scanningPill(st.ironDome, ironDome.data?.enabled);
   const operations = operationsPill(st.control, control.data);
   const firewall = firewallPill(st.defence, defence.data);
@@ -235,9 +235,10 @@ export function OverviewV2() {
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           <Tile icon={<Shield size={15} aria-hidden />} title="Protection" href="/protection">
             {/* /api/iron-dome/status reports Iron Dome, not Action Guard (which no
-                dashboard endpoint exposes) — label it for what it is and offer no
-                activate command from here (TARS review, PR #491). */}
-            <TileRow label="Protection level" pill={guard.state} pillText={guard.text}
+                dashboard endpoint exposes) — label it for what it is, say Guard is
+                not covered, and offer no activate command from here (TARS review,
+                PR #491; #693). */}
+            <TileRow label="Iron Dome" pill={ironDomeRow.state} pillText={ironDomeRow.text}
               onRetry={ironDome.isError ? () => ironDome.refetch() : undefined} />
             <TileRow label="Conversation scanning" pill={scanning.state} pillText={scanning.text}
               onRetry={ironDome.isError ? () => ironDome.refetch() : undefined} />
@@ -245,6 +246,7 @@ export function OverviewV2() {
               onRetry={control.isError ? () => control.refetch() : undefined} />
             <TileRow label="Write firewall" pill={firewall.state} pillText={firewall.text}
               onRetry={defence.isError ? () => defence.refetch() : undefined} />
+            <p className="text-xs text-[var(--sc-text-muted)]">Action Guard status is not shown here — these rows do not cover it.</p>
           </Tile>
 
           <Tile icon={<Database size={15} aria-hidden />} title="Memory" href="/memory">

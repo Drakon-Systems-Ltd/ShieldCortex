@@ -16,7 +16,7 @@ import { detectRelationConflicts, resolveConflict } from '../threat-graph/confli
 import { graphRankFromQuery } from '../memory/ranker/graph-rank.js';
 import { registerGraphRoutes } from '../api/routes/graph.js';
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 function entity(name: string): number {
