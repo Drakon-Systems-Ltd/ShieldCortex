@@ -26,7 +26,14 @@ import { describeProtectedAudit, type ProtectedAuditEvent } from '../defence/iro
 export interface RecoveryAuditSink {
   /** The audit database file the row goes to. */
   location: string;
-  /** Write one row and return its id. Throws when the row was not written — never a silent -1. */
+  /**
+   * Write one row and return its id. Throws when the row was not written —
+   * never a silent -1. The id means the insert succeeded, which is a committed
+   * row only when no transaction is open on the database: a caller that reuses
+   * a database it already holds inside its own transaction gets an id that
+   * rolls back with that transaction. The `config --resign` CLI opens a fresh
+   * database and holds no transaction.
+   */
   record(event: ProtectedAuditEvent): number;
   /** Close the database if this sink opened it. Never throws. */
   close(): void;

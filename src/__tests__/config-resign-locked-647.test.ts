@@ -26,12 +26,17 @@ const auditSpy = jest.fn<(entry: AuditEntry) => void>();
 const guardSyncSpy = jest.fn(() => ({ status: 'skipped' as const, reason: 'no-entry' as const }));
 
 jest.unstable_mockModule('../defence/iron-dome/audit.js', () => ({ logIronDomeAudit: auditSpy }));
+/** How many times the re-sign opened its audit sink: a refused re-sign never does. */
+let sinkOpens = 0;
 jest.unstable_mockModule('../cloud/recovery-audit.js', () => ({
-  openRecoveryAuditSink: async () => ({
-    location: '/test/memories.db',
-    record: (event: ProtectedAuditEvent) => { auditSpy(describeProtectedAudit(event)); return 1; },
-    close: () => undefined,
-  }),
+  openRecoveryAuditSink: async () => {
+    sinkOpens += 1;
+    return {
+      location: '/test/memories.db',
+      record: (event: ProtectedAuditEvent) => { auditSpy(describeProtectedAudit(event)); return 1; },
+      close: () => undefined,
+    };
+  },
 }));
 jest.unstable_mockModule('../setup/openclaw-plugin-guard-sync.js', () => ({
   syncOpenClawPluginActionGuard: guardSyncSpy,
@@ -53,6 +58,7 @@ beforeAll(async () => {
 
 let configDir: string;
 let openclawHome: string;
+let logs: string[] = [];
 let prevConfigDir: string | undefined;
 let prevOpenclawHome: string | undefined;
 
@@ -113,8 +119,10 @@ beforeEach(() => {
   process.env.OPENCLAW_HOME = openclawHome;
   auditSpy.mockClear();
   guardSyncSpy.mockClear();
+  sinkOpens = 0;
+  logs = [];
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
-  jest.spyOn(console, 'log').mockImplementation(() => undefined);
+  jest.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(' ')); });
 });
 
 afterEach(() => {
@@ -191,5 +199,114 @@ describe('#647 §8.4 with a verified lock: the lock is the authority, the re-sig
     expect(fs.readFileSync(configFile()).equals(edited)).toBe(true);
     await flushAudit();
     expect(auditSpy.mock.calls.map((c) => c[0]).filter((e) => e.reason.startsWith('config_resigned'))).toHaveLength(0);
+  });
+});
+
+/**
+ * Round-1 review B1: the admission must read the RAW file. A verified lock
+ * drops `readinessGate` from the effective view and an unverifiable one forces
+ * the strict posture over both Action Guard blocks, so a comparison of
+ * lock-applied views saw nothing — while the re-sign signed the raw values,
+ * to take effect the day the lock goes away.
+ */
+describe('#647 a lock never masks a hand edit the re-sign would sign', () => {
+  const UNVERIFIABLE: PolicyLockState = {
+    status: 'unverifiable', path: LOCK_PATH, reason: 'schema-failed', detail: `${LOCK_PATH}: test`,
+  };
+  /** A verified lock pinning exactly the strict posture the file otherwise has. */
+  const STRICT_LOCK: PolicyLockState = {
+    status: 'locked',
+    path: LOCK_PATH,
+    policy: {
+      version: 1,
+      actionGuard: { enabled: true, enforce: true, autoApprove: [], broker: { enabled: false }, reviewedScripts: [] },
+      defenceMode: 'strict',
+    } as never,
+  };
+  const LOCKS: Record<string, PolicyLockState> = {
+    absent: { status: 'absent', path: LOCK_PATH },
+    locked: STRICT_LOCK,
+    unverifiable: UNVERIFIABLE,
+  };
+
+  /** A signed strict config whose ONLY hand edit is `edit`. */
+  async function strictThenEdit(edit: (cfg: Record<string, any>) => void): Promise<Buffer> {
+    lockState = { status: 'absent', path: LOCK_PATH };
+    const seed = await freshConfig();
+    seed.setActionGuardCoreConfig({ enabled: true, enforce: true });
+    seed.setDefenceMode('strict');
+    const onDisk = readOnDisk();
+    edit(onDisk);
+    fs.writeFileSync(configFile(), JSON.stringify(onDisk, null, 2) + '\n');
+    auditSpy.mockClear();
+    return fs.readFileSync(configFile());
+  }
+
+  async function expectRefusedEverywhere(edited: Buffer): Promise<void> {
+    const config = await freshConfig();
+    expect(config.inspectConfigIntegrity().verdict).toBe('tampered');
+    const preview = config.previewConfigResign();
+    expect(preview.lockRefusal !== null || preview.unauthorisedKeys.length > 0).toBe(true);
+
+    // The CLI preview says REFUSED and does not offer the confirm command.
+    const cli = await import('../cloud/cli.js');
+    logs = [];
+    await cli.handleCloudConfig(['--resign']);
+    const out = logs.join('\n');
+    expect(out).toMatch(/Will be REFUSED/);
+    expect(out).not.toMatch(/--resign --confirm/);
+
+    await expect(config.resignTamperedConfig(preview.sha256!)).rejects.toThrow(/Not re-signing|Refusing to loosen/);
+    expect(fs.readFileSync(configFile()).equals(edited)).toBe(true);
+    expect(fs.readdirSync(configDir).filter((n) => n.includes('.bak-resign-'))).toEqual([]);
+    expect(sinkOpens).toBe(0);
+    await flushAudit();
+    expect(auditSpy.mock.calls.map((c) => c[0]).filter((e) => e.reason.startsWith('config_resigned'))).toHaveLength(0);
+  }
+
+  it.each(Object.keys(LOCKS))('readinessGate: true is the only edit, lock %s: REFUSED, nothing written', async (status) => {
+    const edited = await strictThenEdit((cfg) => { cfg.actionGuard.readinessGate = true; });
+    lockState = LOCKS[status];
+    const config = await freshConfig();
+    const preview = config.previewConfigResign();
+    expect(preview.lockRefusal).toBeNull();
+    expect(preview.unauthorisedKeys).toEqual(['actionGuard.readinessGate']);
+    expect(preview.loosenedKeys).toContain('actionGuard.readinessGate');
+    await expectRefusedEverywhere(edited);
+  });
+
+  it.each(Object.keys(LOCKS))('alias-only readinessGate: true, lock %s: REFUSED, nothing written', async (status) => {
+    const edited = await strictThenEdit((cfg) => { cfg.interceptor = { actionGuard: { readinessGate: true } }; });
+    lockState = LOCKS[status];
+    const config = await freshConfig();
+    expect(config.previewConfigResign().unauthorisedKeys).toEqual(['actionGuard.readinessGate']);
+    await expectRefusedEverywhere(edited);
+  });
+
+  const ALIAS_LOOSENINGS: Array<[string, Record<string, unknown>]> = [
+    ['enabled: false', { enabled: false }],
+    ['enforce: false', { enforce: false }],
+    ['a non-empty autoApprove', { autoApprove: ['git_status'] }],
+    ['broker.enabled: true', { broker: { enabled: true } }],
+    ['a non-empty reviewedScripts', { reviewedScripts: PINS }],
+  ];
+  const ALIAS_CASES = ['locked', 'unverifiable'].flatMap((status) =>
+    ALIAS_LOOSENINGS.map(([label, alias]) => [status, label, alias] as const));
+
+  it.each(ALIAS_CASES)('lock %s, alias-only %s (top-level strict): REFUSED, nothing written', async (status, _label, alias) => {
+    const edited = await strictThenEdit((cfg) => { cfg.interceptor = { actionGuard: alias }; });
+    lockState = LOCKS[status];
+    await expectRefusedEverywhere(edited);
+  });
+
+  it('the same strict file with no hand-edited loosening still re-signs under a verified lock (the fix is not a blanket refusal)', async () => {
+    await strictThenEdit((cfg) => { cfg.proactiveRecall = true; });
+    lockState = STRICT_LOCK;
+    const config = await freshConfig();
+    const preview = config.previewConfigResign();
+    expect(preview.unauthorisedKeys).toEqual([]);
+    expect(preview.lockRefusal).toBeNull();
+    const result = await config.resignTamperedConfig(preview.sha256!);
+    expect(result.audit.recorded).toBe(true);
   });
 });
