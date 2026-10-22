@@ -1,7 +1,7 @@
 /**
  * #647 — the surfaces around the config write gate: doctor's integrity row and
  * `--fix-action-guard`, the reviewed-script allowlist's whole-list write, and
- * the `shieldcortex config` CLI's refusal exit.
+ * the `shieldcortex config` CLI (refusal exit and `--resign`).
  *
  * Doctor must not report a laundered config as clean, must name the verdict
  * outright, and must not prescribe the laundering path ("re-run the flags, they
@@ -10,20 +10,28 @@
  *
  * Isolation: per-test SHIELDCORTEX_CONFIG_DIR, SHIELDCORTEX_PROTECTED_ROOT and
  * OPENCLAW_HOME under os.tmpdir(), os.homedir() spied to the same temp tree
- * (doctor's Claude wiring probe), the iron-dome audit logger and the OpenClaw
+ * (doctor's Claude wiring probe), the iron-dome audit logger, the re-sign's
+ * audit sink (driven for real in config-resign-audit-dist-647) and the OpenClaw
  * plugin guard sync mocked. Modules are imported once, after the mocks are
  * registered; per-test state is reset through clearCloudConfigCache().
  */
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { createHash } from 'crypto';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, jest } from '@jest/globals';
 
 type AuditEntry = { action: string; allowed: boolean; reason: string };
 const auditSpy = jest.fn<(entry: AuditEntry) => void>();
 const guardSyncSpy = jest.fn(() => ({ status: 'skipped' as const, reason: 'no-entry' as const }));
 
+type SinkEvent = { outcome: string; detail?: string };
+const sinkRecord = jest.fn<(event: SinkEvent) => number>();
+const openSinkSpy = jest.fn<() => Promise<{ location: string; record: typeof sinkRecord; close: () => void }>>();
+const SINK_LOCATION = '/test/memories.db';
+
 jest.unstable_mockModule('../../defence/iron-dome/audit.js', () => ({ logIronDomeAudit: auditSpy }));
+jest.unstable_mockModule('../../cloud/recovery-audit.js', () => ({ openRecoveryAuditSink: openSinkSpy }));
 jest.unstable_mockModule('../../setup/openclaw-plugin-guard-sync.js', () => ({
   syncOpenClawPluginActionGuard: guardSyncSpy,
 }));
@@ -58,6 +66,7 @@ let logs: string[];
 
 const configFile = () => path.join(configDir, 'config.json');
 const readOnDisk = (): Record<string, any> => JSON.parse(fs.readFileSync(configFile(), 'utf-8'));
+const sha256 = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 
 function integrityRow() {
   return doctor.policyLockRows().find((r) => r.label.includes('config integrity'))!;
@@ -75,6 +84,22 @@ function tamperedFixture(edit?: (cfg: Record<string, any>) => void): Buffer {
   fs.writeFileSync(configFile(), JSON.stringify(onDisk, null, 2) + '\n');
   config.clearCloudConfigCache();
   guardSyncSpy.mockClear();
+  return fs.readFileSync(configFile());
+}
+
+/** handleCloudConfig is sync except for a confirmed re-sign; one shape for both. */
+async function runCli(args: string[]): Promise<void> {
+  await cli.handleCloudConfig(args);
+}
+
+/** A signed config with a credential, then a hand edit no lock or floor holds. */
+function benignTamper(): Buffer {
+  config.setCloudConfig({ cloudApiKey: SENTINEL });
+  config.setActionGuardCoreConfig({ enabled: true, enforce: true });
+  const onDisk = readOnDisk();
+  onDisk.proactiveRecall = true;
+  fs.writeFileSync(configFile(), JSON.stringify(onDisk, null, 2) + '\n');
+  config.clearCloudConfigCache();
   return fs.readFileSync(configFile());
 }
 
@@ -105,6 +130,10 @@ beforeEach(() => {
   config.clearCloudConfigCache();
   auditSpy.mockClear();
   guardSyncSpy.mockClear();
+  sinkRecord.mockReset();
+  sinkRecord.mockReturnValue(42);
+  openSinkSpy.mockReset();
+  openSinkSpy.mockImplementation(async () => ({ location: SINK_LOCATION, record: sinkRecord, close: () => undefined }));
 });
 
 afterEach(() => {
@@ -124,8 +153,7 @@ describe('#647 doctor names the integrity verdict', () => {
     expect(row.status).toBe('fail');
     expect(row.message).toMatch(/verdict: tampered/);
     expect(row.message).toMatch(/config writes are refused/);
-    expect(row.fix).toMatch(/move config\.json aside \(keep it\) and rebuild it through the setters/);
-    expect(row.fix).toMatch(/2026-09-16-501-policy-lock\.md §8\.7/);
+    expect(row.fix).toMatch(/config --resign/);
     expect(row.fix).toMatch(/Do not re-run/);
     expect(row.fix).not.toMatch(/\(they re-sign\)|Re-write the affected settings/);
   });
@@ -171,7 +199,6 @@ describe('#647 doctor --fix-action-guard refuses a tampered file before any side
     expect(fix.changed).toBe(false);
     expect(fix.backupPath).toBeUndefined();
     expect(fix.message).toMatch(/tampered/);
-    expect(fix.message).toMatch(/moving config\.json aside and rebuilding it through the setters/);
     expect(fs.readFileSync(configFile()).equals(before)).toBe(true);
     expect(fs.readdirSync(configDir).sort()).toEqual(entriesBefore);
     expect(fs.readdirSync(configDir).some((n) => n.includes('.bak-fix-209-'))).toBe(false);
@@ -211,7 +238,222 @@ describe('#647 shieldcortex config CLI', () => {
     expect(() => cli.handleCloudConfig(['--mode', 'strict'])).toThrow('exit');
     expect(process.exit).toHaveBeenCalledWith(1);
     expect(errors.join('\n')).toMatch(/Refusing to write .*verdict: tampered/s);
-    expect(errors.join('\n')).toMatch(/rebuilding it through the setters/);
     expect(fs.readFileSync(configFile()).equals(before)).toBe(true);
+  });
+
+  it('--resign previews: verdict, full sha256, key names — never a config value — and writes nothing', () => {
+    const before = tamperedFixture();
+    cli.handleCloudConfig(['--resign']);
+    const out = logs.join('\n');
+    expect(out).toMatch(/config\.json integrity: tampered/);
+    expect(out).toContain(sha256(before));
+    expect(out).toMatch(/actionGuard\.enabled/);
+    expect(out).toMatch(/Will be REFUSED/);
+    expect(out).not.toContain(SENTINEL);
+    expect(out).not.toContain('git_status');
+    expect(fs.readFileSync(configFile()).equals(before)).toBe(true);
+    expect(fs.readdirSync(configDir).some((n) => n.includes('.bak-resign-'))).toBe(false);
+  });
+
+  it('--resign --confirm needs a value and the full hash', async () => {
+    tamperedFixture();
+    mockExit();
+    await expect(runCli(['--resign', '--confirm'])).rejects.toThrow('exit');
+    await expect(runCli(['--resign', '--confirm', 'abc123'])).rejects.toThrow('exit');
+    expect(errors.join('\n')).toMatch(/full 64-character/);
+    expect(openSinkSpy).not.toHaveBeenCalled();
+  });
+
+  it('--resign --confirm <sha256> re-signs a benign tamper, prints the backup and the audit row, and doctor reads valid', async () => {
+    const bytes = benignTamper();
+
+    await runCli(['--resign', '--confirm', sha256(bytes)]);
+    const out = logs.join('\n');
+    expect(out).toMatch(/Re-signed .*\(was: tampered\)/);
+    expect(out).toContain(`Recorded in the audit log as config_resigned (row 42, ${SINK_LOCATION})`);
+    const backup = fs.readdirSync(configDir).find((n) => n.includes('.bak-resign-'));
+    expect(backup).toBeDefined();
+    expect(fs.readFileSync(path.join(configDir, backup!)).equals(bytes)).toBe(true);
+    expect(out).not.toContain(SENTINEL);
+    config.clearCloudConfigCache();
+    expect(integrityRow().message).toMatch(/verdict: valid/);
+    expect(sinkRecord.mock.calls.map((c) => c[0].outcome)).toEqual(['config_resigned']);
+  });
+
+  it('an audit log that cannot be opened: exit 1, says so, nothing written', async () => {
+    const bytes = benignTamper();
+    openSinkSpy.mockImplementationOnce(async () => { throw new Error('unable to open database file'); });
+    mockExit();
+    await expect(runCli(['--resign', '--confirm', sha256(bytes)])).rejects.toThrow('exit');
+    expect(process.exit).toHaveBeenCalledWith(1);
+    expect(errors.join('\n')).toMatch(/audit log that must record a re-sign could not be opened.*Nothing was written/s);
+    expect(logs.join('\n')).not.toMatch(/Re-signed|Recorded/);
+    expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
+    expect(fs.readdirSync(configDir).some((n) => n.includes('.bak-resign-'))).toBe(false);
+  });
+
+  it('a row that fails after the write: exit 2, "AUDIT NOT RECORDED", never "Recorded", backup kept', async () => {
+    const bytes = benignTamper();
+    sinkRecord.mockImplementationOnce(() => { throw new Error(`the audit row could not be written to ${SINK_LOCATION}`); });
+    mockExit();
+    await expect(runCli(['--resign', '--confirm', sha256(bytes)])).rejects.toThrow('exit');
+    expect(process.exit).toHaveBeenCalledWith(2);
+    expect(logs.join('\n')).toMatch(/Re-signed .*\(was: tampered\)/);
+    expect(logs.join('\n')).not.toMatch(/Recorded in the audit log/);
+    const err = errors.join('\n');
+    expect(err).toMatch(/AUDIT NOT RECORDED: the re-sign above IS in force/);
+    expect(err).toContain(`the audit row could not be written to ${SINK_LOCATION}`);
+    const backup = fs.readdirSync(configDir).find((n) => n.includes('.bak-resign-'));
+    expect(err).toContain(backup!);
+    expect(fs.readFileSync(path.join(configDir, backup!)).equals(bytes)).toBe(true);
+  });
+
+  it('--resign takes nothing else: a setting flag beside it is rejected by NAME, not silently dropped', async () => {
+    const bytes = benignTamper();
+    mockExit();
+    await expect(runCli(['--resign', '--action-guard-notify-webhook', 'https://hooks.example/SECRET_647']))
+      .rejects.toThrow('exit');
+    await expect(runCli(['--resign', '--confirm', sha256(bytes), '--mode', 'permissive'])).rejects.toThrow('exit');
+    await expect(runCli(['--resign', '--confirm', sha256(bytes), '--confirm', sha256(bytes)])).rejects.toThrow('exit');
+    const err = errors.join('\n');
+    expect(err).toMatch(/takes only `--confirm <sha256>`, not --action-guard-notify-webhook/);
+    expect(err).toMatch(/not --mode/);
+    expect(err).toMatch(/, once/);
+    expect(err).not.toContain('SECRET_647');
+    expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
+    expect(openSinkSpy).not.toHaveBeenCalled();
+  });
+
+  it('--resign --help prints usage and writes nothing', async () => {
+    const bytes = benignTamper();
+    await runCli(['--resign', '--confirm', sha256(bytes), '--help']);
+    expect(logs.join('\n')).toMatch(/Usage: shieldcortex config --resign/);
+    expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
+    expect(openSinkSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Round-1 review B3: every recovery-shaped invocation is the recovery
+ * handler's, and only the exact grammar is accepted. `SHA` is replaced with the
+ * real hash of the fixture. A `--help` beside anything unsupported is still a
+ * rejection, both in the handler and in the global help gate that runs first.
+ */
+describe('#647 config --resign argument grammar, exhaustively', () => {
+  const REJECTED: string[][] = [
+    ['--resign', '--mode', 'balanced'],
+    ['--mode', 'balanced', '--resign'],
+    ['--resign', '--mode', 'balanced', '--help'],
+    ['--help', '--resign', '--mode', 'balanced'],
+    ['--resign', '-h', '--proactive-recall', 'true'],
+    ['--resign', '--confirm', 'SHA', '--mode', 'strict', '--help'],
+    ['--resign', '--help', '--confirm', 'SHA', '--proactive-recall', 'true'],
+    ['--resign', '--confirm', 'SHA', 'extra'],
+    ['extra', '--resign'],
+    ['--resign', 'help'],
+    ['--resign=1'],
+    ['--resign='],
+    ['--resign=1', '--help'],
+    ['--resign=1', '--proactive-recall', 'true'],
+    ['--resign', '--resign=1'],
+    ['--resign', '--confirm=SHA'],
+    ['--confirm=SHA', '--resign'],
+    ['--resign', '--confirm=SHA', '--help'],
+    ['--resign=SHA', '--confirm', 'SHA'],
+    ['--confirm', 'SHA'],
+    ['--confirm', 'SHA', '--help'],
+    ['--confirm=SHA'],
+    ['--resign', '--resign'],
+    ['--resign', '--resign', '--help'],
+    ['--resign', '--confirm', 'SHA', '--confirm', 'SHA'],
+    ['--resign', '--confirm'],
+    ['--resign', '--confirm', '--help'],
+    ['--resign', '--confirm', '-h'],
+    // Round-2 review B3: `--help` and `-h` are one option, so a second
+    // occurrence in any spelling is a repeated flag, not usage.
+    ['--resign', '--help', '--help'],
+    ['--resign', '-h', '-h'],
+    ['--resign', '--help', '-h'],
+    ['-h', '--resign', '--help'],
+    ['--resign', '--confirm', 'SHA', '--help', '--help'],
+    ['--resign', '--confirm', 'SHA', '-h', '-h'],
+    ['--help', '--confirm', 'SHA', '--resign', '-h'],
+  ];
+  const HELP: string[][] = [
+    ['--resign', '--help'],
+    ['--help', '--resign'],
+    ['-h', '--resign'],
+    ['--resign', '-h'],
+    ['--resign', '--confirm', 'SHA', '--help'],
+    ['--help', '--resign', '--confirm', 'SHA'],
+    ['--resign', '-h', '--confirm', 'SHA'],
+  ];
+  const withSha = (args: string[], sha: string) => args.map((a) => a.replace('SHA', sha));
+
+  it.each(REJECTED.map((a) => [a.join(' '), a]))('rejected: config %s → exit 1, nothing written, no usage, no values echoed', async (_label, template) => {
+    const bytes = benignTamper();
+    const sha = sha256(bytes);
+    mockExit();
+    await expect(runCli(withSha(template as string[], sha))).rejects.toThrow('exit');
+    expect(process.exit).toHaveBeenCalledWith(1);
+    expect(logs.join('\n')).not.toMatch(/Usage:|config\.json integrity:/);
+    const err = errors.join('\n');
+    expect(err).toMatch(/Nothing was written/);
+    expect(err).not.toContain(sha);
+    expect(err).not.toMatch(/balanced|strict|\btrue\b/);
+    expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
+    expect(fs.readdirSync(configDir).some((n) => n.includes('.bak-resign-'))).toBe(false);
+    expect(openSinkSpy).not.toHaveBeenCalled();
+    // The global help gate defers to the handler: it does not print usage either.
+    const { dispatchHelp } = await import('../dispatch-help.js');
+    const printed: string[] = [];
+    expect(dispatchHelp(['config', ...withSha(template as string[], sha)], (m) => printed.push(m))).toBe(false);
+    expect(printed).toEqual([]);
+  });
+
+  it.each(HELP.map((a) => [a.join(' '), a]))('help: config %s → recovery usage, nothing written', async (_label, template) => {
+    const bytes = benignTamper();
+    await runCli(withSha(template as string[], sha256(bytes)));
+    expect(logs.join('\n')).toMatch(/Usage: shieldcortex config --resign/);
+    expect(logs.join('\n')).toMatch(/2 re-signed but the config_resigned audit row was NOT recorded/);
+    expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
+    expect(openSinkSpy).not.toHaveBeenCalled();
+  });
+
+  it('a repeated help flag is named as one, in either spelling, and never echoes the hash', async () => {
+    const { parseResignArgs } = await import('../../cloud/resign-args.js');
+    const sha = 'a'.repeat(64);
+    for (const args of [['--resign', '--help', '--help'], ['--resign', '-h', '--confirm', sha, '--help']]) {
+      const parsed = parseResignArgs(args);
+      expect(parsed.kind).toBe('reject');
+      expect(parsed.kind === 'reject' && parsed.message).toMatch(/`--help` \/ `-h` once/);
+      expect(parsed.kind === 'reject' && parsed.message).not.toContain(sha);
+    }
+  });
+
+  it('--resign=1 --proactive-recall true on a VALID config does not reach the ordinary setter', async () => {
+    config.setProactiveRecall(false);
+    config.clearCloudConfigCache();
+    const bytes = fs.readFileSync(configFile());
+    mockExit();
+    await expect(runCli(['--resign=1', '--proactive-recall', 'true'])).rejects.toThrow('exit');
+    expect(process.exit).toHaveBeenCalledWith(1);
+    expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
+    config.clearCloudConfigCache();
+    expect(config.isProactiveRecallEnabled()).toBe(false);
+  });
+
+  it('flag order does not matter for the accepted forms: --confirm <sha> --resign re-signs', async () => {
+    const bytes = benignTamper();
+    await runCli(['--confirm', sha256(bytes), '--resign']);
+    expect(logs.join('\n')).toMatch(/Re-signed .*\(was: tampered\)/);
+    expect(openSinkSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('the global help gate still answers plain config help', async () => {
+    const { dispatchHelp } = await import('../dispatch-help.js');
+    const printed: string[] = [];
+    expect(dispatchHelp(['config', '--help'], (m) => printed.push(m))).toBe(true);
+    expect(printed.join('\n')).toMatch(/--resign --confirm <sha256>/);
   });
 });
