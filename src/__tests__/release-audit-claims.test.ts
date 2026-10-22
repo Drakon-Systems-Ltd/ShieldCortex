@@ -188,6 +188,22 @@ describe('#466 hermetic — the SKILL.md security claim is structurally honest',
     expect(parseClaim().waived).toBe(ids.size);
   });
 
+  it('states the same counts in the SKILL.md trust table as in the frontmatter claim', () => {
+    // #901 review: the frontmatter was updated but the Provenance & Trust row
+    // kept the old count, so the published skill contradicted itself.
+    const claim = parseClaim();
+    const rows = readFileSync(SKILL_MD, 'utf8')
+      .split(/\r?\n/)
+      .filter((line) => /^\|\s*\*\*npm audit\*\*\s*\|/.test(line));
+    expect(rows).toHaveLength(1);
+    const m = /(\d+) unwaived production advisor(?:y|ies), (\d+) waived\b/.exec(rows[0]);
+    expect(m).not.toBeNull();
+    expect({ unwaived: Number(m![1]), waived: Number(m![2]) }).toEqual({
+      unwaived: claim.unwaived,
+      waived: claim.waived,
+    });
+  });
+
   it('names, in the claim, every GHSA id the waiver file lists', () => {
     const waivers = parseWaivers(waiverMarkdown);
     const claim = parseClaim().raw;
@@ -233,7 +249,7 @@ describe('#466 hermetic — the SKILL.md security claim is structurally honest',
       ghsa: ['GHSA-f88m-g3jw-g9cj', 'GHSA-rgj7-g3m4-5g8c', 'GHSA-wq5f-xc86-pv6w'],
       severity: 'high', reviewed: '2026-10-06', expires: '2026-12-12', issue: 466,
     });
-    const prose = waiverMarkdown.split('### SC-WAIVER-466-sharp')[1]?.split('### SC-WAIVER-639-sprintf-js')[0];
+    const prose = waiverMarkdown.split('### SC-WAIVER-466-sharp')[1]?.split('## Retired waivers')[0];
     expect(prose).toBeDefined();
     for (const value of [
       '1124066', '1193725', '1241331', 'GHSA-f88m-g3jw-g9cj', 'GHSA-rgj7-g3m4-5g8c', 'GHSA-wq5f-xc86-pv6w',
