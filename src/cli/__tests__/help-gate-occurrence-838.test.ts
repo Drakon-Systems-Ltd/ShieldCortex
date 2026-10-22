@@ -88,6 +88,7 @@ const FIRST: Probe[] = [
     ['--verify-mode', 'verifyModeIdx'], ['--verify-timeout', 'verifyTimeoutIdx'],
     ['--openclaw-auto-memory', 'openclawAutoMemoryIdx'], ['--ranker', 'rankerIdx'],
     ['--proactive-recall', 'proactiveRecallIdx'], ['--self-heal', 'selfHealIdx'],
+    ['--dashboard-update-check', 'dashboardUpdateCheckIdx'],
     ['--action-guard-notify-webhook', 'agNotifyWebhookIdx'], ['--memory-inject-contract', 'memInjectContractIdx'],
     ['--memory-plane', 'memPlaneIdx'], ['--memory-host-posture', 'hostPostureIdx'],
     ['--memory-host-runtime', 'hostRuntimeIdx'], ['--auto-memory-sampling', 'autoMemSamplingIdx'],

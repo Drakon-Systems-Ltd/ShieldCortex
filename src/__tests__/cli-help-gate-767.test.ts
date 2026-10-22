@@ -629,7 +629,7 @@ describe('#767 round 3 — each option is read the way its own parser reads it',
       ...prefixed('config', {
         '--mode': 'always', '--cloud-api-key': 'always', '--cloud-url': 'always', '--verify-mode': 'always',
         '--verify-timeout': 'always', '--openclaw-auto-memory': 'always', '--ranker': 'always',
-        '--proactive-recall': 'always', '--self-heal': 'always',
+        '--proactive-recall': 'always', '--self-heal': 'always', '--dashboard-update-check': 'always',
         '--action-guard-notify-webhook': 'unless-double-dash', '--memory-inject-contract': 'unless-double-dash',
         '--memory-plane': 'unless-double-dash', '--memory-host-posture': 'unless-double-dash',
         '--memory-host-runtime': 'unless-double-dash', '--auto-memory-sampling': 'unless-double-dash',

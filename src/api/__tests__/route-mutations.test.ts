@@ -138,6 +138,7 @@ describe('API route mutation regressions', () => {
         }),
         getOpenClawMemoryConfig: () => state.openclawMemory,
         getOpenClawAutoMemory: () => state.openclawMemory.autoMemory,
+        getDashboardUpdateCheckSetting: () => true,
         getToolResponseScanConfig: () => ({
           scanToolResponses: false,
           toolResponseMode: 'advisory',

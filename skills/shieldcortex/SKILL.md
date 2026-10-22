@@ -36,9 +36,13 @@ permissions:
     and config in ~/.shieldcortex/. Network: local-first — outbound only for
     the embedding-model download when it is not cached (huggingface.co;
     disable with SHIELDCORTEX_SKIP_EMBEDDINGS=1), Cloud sync (opt-in),
-    licence-key validation when a key is activated, explicit update
-    checks/updates and X-Ray package lookups (npm registry), URLs you ask
-    `env scan` to fetch, and webhooks you configure. Credentials: optional
+    licence-key validation when a key is activated, and the npm registry for
+    the dashboard Overview's automatic latest-version lookup (on by default;
+    turn off with `shieldcortex config --dashboard-update-check false` or
+    SHIELDCORTEX_SKIP_UPDATE_CHECK=1), the OpenClaw hook's `npx -y
+    shieldcortex` fallback when no local binary is found, explicit updates
+    and X-Ray package lookups; plus URLs you ask `env scan` to fetch and
+    webhooks you configure (full list in network_endpoints). Credentials: optional
     Cloud API key for team sync (not required for local use).
   paths_read:
     - ~/.shieldcortex/ (own config and memory database)

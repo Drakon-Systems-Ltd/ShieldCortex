@@ -415,7 +415,7 @@ const PROTECT_SPEC = helpSpec({ '--config': first('unless-double-dash'), '--agen
  * `config`: every option `handleCloudConfig` (src/cloud/cli.ts) reads the
  * following token of. The values are enums, keys, URLs and numbers; a bare
  * `help` after any of them is that option's (invalid) value, and the handler is
- * the one to refuse it. Nine of them read `args[idx + 1]` whenever it is
+ * the one to refuse it. Ten of them read `args[idx + 1]` whenever it is
  * truthy and refuse it as INVALID; the six signed-write and webhook options
  * refuse a `--`-leading token as MISSING without reading it.
  */
@@ -429,6 +429,7 @@ const CONFIG_SPEC = helpSpec({
   '--ranker': first('always'),
   '--proactive-recall': first('always'),
   '--self-heal': first('always'),
+  '--dashboard-update-check': first('always'),
   '--action-guard-notify-webhook': first('unless-double-dash'),
   '--memory-inject-contract': first('unless-double-dash'),
   '--memory-plane': first('unless-double-dash'),
