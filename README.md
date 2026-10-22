@@ -61,6 +61,8 @@ For manual storage and memory hygiene, run `shieldcortex maintain`. It consolida
 
 If npm skipped the package's lifecycle scripts (for example `--ignore-scripts`, or `ignore-scripts=true` in an npm config), ShieldCortex's postinstall did not run. On a global install that step wires no host. It prints the next step, checks that the database engine loads, writes a default `~/.shieldcortex/config.json` when none exists, refreshes an OpenClaw integration that is already present, and on macOS restarts a dashboard service still running an older build. Skipping it does not skip onboarding: run `shieldcortex setup`, then `shieldcortex doctor`. Without that config file, prompt-time recall stays off until you turn it on. [What postinstall does](docs/openclaw-integration.md#install-time-refresh-postinstall).
 
+Semantic search downloads a small embedding model on first use. For air-gapped hosts or a mirror, see [Offline embedding cache](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/offline-embeddings.md). It covers the embedding model only, not every network feature.
+
 ## Where it can block
 
 Action Guard stays off until you turn it on. That shared setting is the tool gate for Claude Code and OpenClaw. A bare `sudo shieldcortex protect` turns it on and pins that posture. [Policy lock](docs/UPDATING.md#policy-lock). The Hermes plugin does not read the shared setting; it has its own (below).

@@ -649,6 +649,8 @@ const EMBED_DISPOSE_TIMEOUT_MS = pickDeadlineMs('SHIELDCORTEX_HOOK_EMBED_DISPOSE
 let _embedCache = null;
 let _embedCacheKey = null;
 let _warnedEmbedUnavailable = false;
+/** #632: an invalid embedding configuration is reported once per process, not per row. */
+let _warnedEmbedMisconfigured = false;
 
 /**
  * Set once this process has proven it cannot shut the embedder down.
@@ -745,6 +747,18 @@ async function embeddingCacheIsHealthy() {
     const inspect = mod.inspectEmbeddingHookReady || null;
     if (typeof inspect !== 'function') return false;
     const ready = await inspect();
+    // #632: readiness validates the worker's whole configuration (root,
+    // offline flag, HF_ENDPOINT). A setting the worker would refuse is a
+    // configuration condition: say so once, bounded, and skip the embed rather
+    // than starting a worker that is known to refuse every row. The reason
+    // names a variable, never its value; the scrub is belt-and-braces.
+    if (ready && ready.misconfigured === true && !_warnedEmbedMisconfigured) {
+      _warnedEmbedMisconfigured = true;
+      const reason = String(ready.reason || 'misconfigured')
+        .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, '?')
+        .slice(0, 300);
+      process.stderr.write(`[shieldcortex save-memory] embeddings skipped — embedding configuration invalid (${reason}); rows stored without vectors until it is fixed (see \`shieldcortex doctor\`)\n`);
+    }
     return Boolean(ready && ready.ready === true);
   } catch {
     return false;
@@ -816,7 +830,9 @@ async function embedStoredRow(db, memoryId, text) {
     if (await isShutdownCancellation(err)) return;
     // Absent worker / explicitly disabled embeddings are configuration, not
     // failure — say it once and stay quiet, exactly as store.ts does.
-    if (/Embedding worker unavailable|Embeddings disabled via/i.test(msg)) {
+    // #632: "Embedding configuration invalid" is the worker refusing a setting
+    // the readiness gate normally catches first; it is configuration too.
+    if (/Embedding worker unavailable|Embeddings disabled via|Embedding configuration invalid/i.test(msg)) {
       if (!_warnedEmbedUnavailable) {
         _warnedEmbedUnavailable = true;
         process.stderr.write(`[shieldcortex save-memory] embeddings unavailable — rows stored without vectors (${msg})\n`);
