@@ -332,3 +332,108 @@ describe('#647 shieldcortex config CLI', () => {
     expect(openSinkSpy).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Round-1 review B3: every recovery-shaped invocation is the recovery
+ * handler's, and only the exact grammar is accepted. `SHA` is replaced with the
+ * real hash of the fixture. A `--help` beside anything unsupported is still a
+ * rejection, both in the handler and in the global help gate that runs first.
+ */
+describe('#647 config --resign argument grammar, exhaustively', () => {
+  const REJECTED: string[][] = [
+    ['--resign', '--mode', 'balanced'],
+    ['--mode', 'balanced', '--resign'],
+    ['--resign', '--mode', 'balanced', '--help'],
+    ['--help', '--resign', '--mode', 'balanced'],
+    ['--resign', '-h', '--proactive-recall', 'true'],
+    ['--resign', '--confirm', 'SHA', '--mode', 'strict', '--help'],
+    ['--resign', '--help', '--confirm', 'SHA', '--proactive-recall', 'true'],
+    ['--resign', '--confirm', 'SHA', 'extra'],
+    ['extra', '--resign'],
+    ['--resign', 'help'],
+    ['--resign=1'],
+    ['--resign='],
+    ['--resign=1', '--help'],
+    ['--resign=1', '--proactive-recall', 'true'],
+    ['--resign', '--resign=1'],
+    ['--resign', '--confirm=SHA'],
+    ['--confirm=SHA', '--resign'],
+    ['--resign', '--confirm=SHA', '--help'],
+    ['--resign=SHA', '--confirm', 'SHA'],
+    ['--confirm', 'SHA'],
+    ['--confirm', 'SHA', '--help'],
+    ['--confirm=SHA'],
+    ['--resign', '--resign'],
+    ['--resign', '--resign', '--help'],
+    ['--resign', '--confirm', 'SHA', '--confirm', 'SHA'],
+    ['--resign', '--confirm'],
+    ['--resign', '--confirm', '--help'],
+    ['--resign', '--confirm', '-h'],
+  ];
+  const HELP: string[][] = [
+    ['--resign', '--help'],
+    ['--help', '--resign'],
+    ['-h', '--resign'],
+    ['--resign', '-h'],
+    ['--resign', '--confirm', 'SHA', '--help'],
+    ['--help', '--resign', '--confirm', 'SHA'],
+    ['--resign', '-h', '--confirm', 'SHA'],
+  ];
+  const withSha = (args: string[], sha: string) => args.map((a) => a.replace('SHA', sha));
+
+  it.each(REJECTED.map((a) => [a.join(' '), a]))('rejected: config %s → exit 1, nothing written, no usage, no values echoed', async (_label, template) => {
+    const bytes = benignTamper();
+    const sha = sha256(bytes);
+    mockExit();
+    await expect(runCli(withSha(template as string[], sha))).rejects.toThrow('exit');
+    expect(process.exit).toHaveBeenCalledWith(1);
+    expect(logs.join('\n')).not.toMatch(/Usage:|config\.json integrity:/);
+    const err = errors.join('\n');
+    expect(err).toMatch(/Nothing was written/);
+    expect(err).not.toContain(sha);
+    expect(err).not.toMatch(/balanced|strict|\btrue\b/);
+    expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
+    expect(fs.readdirSync(configDir).some((n) => n.includes('.bak-resign-'))).toBe(false);
+    expect(openSinkSpy).not.toHaveBeenCalled();
+    // The global help gate defers to the handler: it does not print usage either.
+    const { dispatchHelp } = await import('../dispatch-help.js');
+    const printed: string[] = [];
+    expect(dispatchHelp(['config', ...withSha(template as string[], sha)], (m) => printed.push(m))).toBe(false);
+    expect(printed).toEqual([]);
+  });
+
+  it.each(HELP.map((a) => [a.join(' '), a]))('help: config %s → recovery usage, nothing written', async (_label, template) => {
+    const bytes = benignTamper();
+    await runCli(withSha(template as string[], sha256(bytes)));
+    expect(logs.join('\n')).toMatch(/Usage: shieldcortex config --resign/);
+    expect(logs.join('\n')).toMatch(/2 re-signed but the config_resigned audit row was NOT recorded/);
+    expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
+    expect(openSinkSpy).not.toHaveBeenCalled();
+  });
+
+  it('--resign=1 --proactive-recall true on a VALID config does not reach the ordinary setter', async () => {
+    config.setProactiveRecall(false);
+    config.clearCloudConfigCache();
+    const bytes = fs.readFileSync(configFile());
+    mockExit();
+    await expect(runCli(['--resign=1', '--proactive-recall', 'true'])).rejects.toThrow('exit');
+    expect(process.exit).toHaveBeenCalledWith(1);
+    expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
+    config.clearCloudConfigCache();
+    expect(config.isProactiveRecallEnabled()).toBe(false);
+  });
+
+  it('flag order does not matter for the accepted forms: --confirm <sha> --resign re-signs', async () => {
+    const bytes = benignTamper();
+    await runCli(['--confirm', sha256(bytes), '--resign']);
+    expect(logs.join('\n')).toMatch(/Re-signed .*\(was: tampered\)/);
+    expect(openSinkSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('the global help gate still answers plain config help', async () => {
+    const { dispatchHelp } = await import('../dispatch-help.js');
+    const printed: string[] = [];
+    expect(dispatchHelp(['config', '--help'], (m) => printed.push(m))).toBe(true);
+    expect(printed.join('\n')).toMatch(/--resign --confirm <sha256>/);
+  });
+});
