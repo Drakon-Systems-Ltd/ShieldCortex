@@ -4,6 +4,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { fileURLToPath } from 'url';
 import Database from 'better-sqlite3';
+import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import { runDefencePipelineWithVerify } from '../defence/pipeline.js';
@@ -17,6 +18,24 @@ import type { DefenceSource } from '../defence/types.js';
 
 const __dirname = join(fileURLToPath(import.meta.url), '..');
 const repoRoot = join(__dirname, '..', '..');
+const pipelinePath = join(repoRoot, 'src', 'defence', 'pipeline.ts');
+
+/**
+ * Every exported `runDefencePipeline*` entry point, classified (#861). The
+ * key set must EQUAL the callable `runDefencePipeline*` exports of
+ * src/defence/pipeline.ts (derived below with the TypeScript compiler, never
+ * by importing the pipeline), so adding or removing an export without a row
+ * here fails. `optionsPosition` is the 1-based position of the `options`
+ * parameter that carries `sourceAttested`; a NEVER-ATTEST caller may pass at
+ * most `optionsPosition - 1` positional arguments to that entry point.
+ */
+const PIPELINE_ENTRY_POINTS: Readonly<Record<string, { optionsPosition: number }>> = {
+  runDefencePipeline: { optionsPosition: 6 },
+  runDefencePipelinePreviewInternal: { optionsPosition: 6 },
+  runDefencePipelineTransactionalInternal: { optionsPosition: 7 },
+  runDefencePipelineWithVerify: { optionsPosition: 6 },
+};
+const ENTRY_PREFIX = 'runDefencePipeline';
 
 /**
  * Phase 3 of the attestation gap: the remaining runDefencePipeline callers.
@@ -168,6 +187,20 @@ describe('phase 3 — remaining pipeline callers', () => {
       }
     });
 
+    // #861: the literal `runDefencePipeline(` scan above cannot see the other
+    // entry points (or an aliased import). This AST scan covers every
+    // classified entry point, with that entry's own positional limit.
+    it.each(files)('%s calls only classified pipeline entry points, each without options', (rel) => {
+      const scan = scanPipelineEntryCalls(readFileSync(join(repoRoot, rel), 'utf8'), rel);
+      expect(scan.problems).toEqual([]);
+      expect(scan.calls.length).toBeGreaterThan(0);
+      for (const call of scan.calls) {
+        expect(Object.keys(PIPELINE_ENTRY_POINTS)).toContain(call.entry);
+        expect(call.spread).toBe(false);
+        expect(call.argCount).toBeLessThanOrEqual(PIPELINE_ENTRY_POINTS[call.entry].optionsPosition - 1);
+      }
+    });
+
     it('behavioural: the langchain guard scan leaves attestation NULL', () => {
       const guard = new ShieldCortexGuard();
       guard.scan('harmless content scanned via the langchain integration', 'note');
@@ -191,6 +224,250 @@ describe('phase 3 — remaining pipeline callers', () => {
     });
   });
 });
+
+describe('#861 — the pipeline entry-point table is exhaustive', () => {
+  it('the classified table EQUALS the runDefencePipeline* exports of pipeline.ts', () => {
+    const exported = exportedEntryPoints(pipelinePath, ts.createCompilerHost(ENTRY_SCAN_OPTIONS));
+    // Non-vacuous: the derivation must see the base entry point.
+    expect(exported.map(e => e.name)).toContain('runDefencePipeline');
+    expect(diffEntryTable(exported.map(e => e.name), Object.keys(PIPELINE_ENTRY_POINTS)))
+      .toEqual({ missing: [], obsolete: [] });
+  });
+
+  it('each row\'s optionsPosition matches the declared `options` parameter', () => {
+    const exported = exportedEntryPoints(pipelinePath, ts.createCompilerHost(ENTRY_SCAN_OPTIONS));
+    expect(exported.length).toBe(Object.keys(PIPELINE_ENTRY_POINTS).length);
+    for (const entry of exported) {
+      expect({ name: entry.name, optionsPosition: entry.optionsPosition })
+        .toEqual({ name: entry.name, optionsPosition: PIPELINE_ENTRY_POINTS[entry.name]?.optionsPosition });
+    }
+  });
+
+  describe('controls on in-memory fixtures', () => {
+    const table = Object.keys(PIPELINE_ENTRY_POINTS);
+    const fixture = [
+      'export function runDefencePipeline(a: string, options?: object) { return a; }',
+      'export function runDefencePipelinePreviewInternal(a: string, options?: object) { return a; }',
+      'export function runDefencePipelineTransactionalInternal(a: string, b: unknown[], options?: object) { return a; }',
+      'export async function runDefencePipelineWithVerify(a: string, options?: object) { return a; }',
+      '// export function runDefencePipelineInComment() {}',
+      '/* export function runDefencePipelineInBlockComment() {} */',
+      "const prose = 'export function runDefencePipelineInString() {}';",
+      'function runDefencePipelineInternal() { return prose; }',
+      'export type runDefencePipelineTypeOnly = () => void;',
+      'export interface runDefencePipelineInterface { (): void }',
+      'export const runDefencePipelineLimit = 5;',
+    ].join('\n');
+
+    function namesOf(files: Record<string, string>): string[] {
+      return exportedEntryPoints('/virtual/pipeline.ts', virtualHost(files)).map(e => e.name);
+    }
+
+    it('comments, strings, private and type-only look-alikes are not exports; the base fixture matches the table', () => {
+      expect(namesOf({ '/virtual/pipeline.ts': fixture })).toEqual([...table].sort());
+      expect(diffEntryTable(namesOf({ '/virtual/pipeline.ts': fixture }), table))
+        .toEqual({ missing: [], obsolete: [] });
+    });
+
+    it('a benign new export with no callers and no table row is a mismatch', () => {
+      const names = namesOf({ '/virtual/pipeline.ts': `${fixture}\nexport function runDefencePipelineFoo() {}` });
+      expect(diffEntryTable(names, table)).toEqual({ missing: ['runDefencePipelineFoo'], obsolete: [] });
+    });
+
+    it('adding the row restores equality', () => {
+      const names = namesOf({ '/virtual/pipeline.ts': `${fixture}\nexport function runDefencePipelineFoo() {}` });
+      expect(diffEntryTable(names, [...table, 'runDefencePipelineFoo'])).toEqual({ missing: [], obsolete: [] });
+    });
+
+    it('an extra (obsolete) table row is a mismatch', () => {
+      expect(diffEntryTable(namesOf({ '/virtual/pipeline.ts': fixture }), [...table, 'runDefencePipelineGone']))
+        .toEqual({ missing: [], obsolete: ['runDefencePipelineGone'] });
+    });
+
+    it('alias, re-export, star re-export and callable const forms are recognised', () => {
+      const names = namesOf({
+        '/virtual/pipeline.ts': [
+          fixture,
+          'function inner() {}',
+          'export { inner as runDefencePipelineY };',
+          "export { runDefencePipelineZ } from './other.js';",
+          "export * from './star.js';",
+          'export const runDefencePipelineArrow = (a: string) => a;',
+        ].join('\n'),
+        '/virtual/other.ts': 'export function runDefencePipelineZ() {}',
+        '/virtual/star.ts': 'export function runDefencePipelineStar() {}\nexport const unrelated = 1;',
+      });
+      expect(diffEntryTable(names, table)).toEqual({
+        missing: ['runDefencePipelineArrow', 'runDefencePipelineStar', 'runDefencePipelineY', 'runDefencePipelineZ'],
+        obsolete: [],
+      });
+    });
+
+    it('a re-export whose module cannot be resolved throws instead of being dropped', () => {
+      expect(() => namesOf({ '/virtual/pipeline.ts': `${fixture}\nexport * from './missing.js';` }))
+        .toThrow(/cannot resolve re-export/);
+    });
+
+    it('the options position is read from the declaration, not assumed', () => {
+      const entries = exportedEntryPoints('/virtual/pipeline.ts', virtualHost({ '/virtual/pipeline.ts': fixture }));
+      expect(entries.find(e => e.name === 'runDefencePipelineTransactionalInternal')?.optionsPosition).toBe(3);
+      expect(entries.find(e => e.name === 'runDefencePipeline')?.optionsPosition).toBe(2);
+    });
+
+    it('the caller scan maps aliased imports and rejects unknown names, spreads and escaped references', () => {
+      const scan = scanPipelineEntryCalls([
+        "import { runDefencePipelineWithVerify as verify, runDefencePipeline } from '../defence/pipeline.js';",
+        "import * as pipeline from '../defence/pipeline.js';",
+        'verify(a, b, c, d, e, opts);',
+        'runDefencePipeline(...args);',
+        'runDefencePipelineMystery(a);',
+        'const escaped = runDefencePipeline;',
+        '// runDefencePipeline(a, b, c, d, e, opts) in a comment is not a call',
+      ].join('\n'), 'fixture.ts');
+      expect(scan.calls.map(c => ({ entry: c.entry, argCount: c.argCount, spread: c.spread }))).toEqual([
+        { entry: 'runDefencePipelineWithVerify', argCount: 6, spread: false },
+        { entry: 'runDefencePipeline', argCount: 1, spread: true },
+        { entry: 'runDefencePipelineMystery', argCount: 1, spread: false },
+      ]);
+      expect(Object.keys(PIPELINE_ENTRY_POINTS)).not.toContain('runDefencePipelineMystery');
+      expect(scan.problems).toEqual([
+        'fixture.ts: namespace/default import of the pipeline module',
+        'fixture.ts: runDefencePipeline referenced other than as a direct call',
+      ]);
+    });
+  });
+});
+
+const ENTRY_SCAN_OPTIONS: ts.CompilerOptions = {
+  target: ts.ScriptTarget.ES2022,
+  module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.Bundler,
+  noEmit: true,
+  skipLibCheck: true,
+  types: [],
+};
+
+/** A compiler host serving only the given in-memory files (plus the default lib). */
+function virtualHost(files: Record<string, string>): ts.CompilerHost {
+  const base = ts.createCompilerHost(ENTRY_SCAN_OPTIONS);
+  return {
+    ...base,
+    fileExists: (f) => f in files || base.fileExists(f),
+    directoryExists: (d) => Object.keys(files).some(f => f.startsWith(`${d}/`)) || (base.directoryExists?.(d) ?? false),
+    readFile: (f) => (f in files ? files[f] : base.readFile(f)),
+    getSourceFile: (f, lang, onError, shouldCreate) => (f in files
+      ? ts.createSourceFile(f, files[f], lang, true)
+      : base.getSourceFile(f, lang, onError, shouldCreate)),
+  };
+}
+
+/**
+ * The callable value exports of `file` named `runDefencePipeline*`, sorted,
+ * with aliases and re-exports resolved. An export the checker cannot resolve
+ * counts (fail-closed); type-only exports and non-callable values do not.
+ */
+function exportedEntryPoints(file: string, host: ts.CompilerHost): Array<{ name: string; optionsPosition?: number }> {
+  const program = ts.createProgram([file], ENTRY_SCAN_OPTIONS, host);
+  const checker = program.getTypeChecker();
+  const source = program.getSourceFile(file);
+  if (!source) throw new Error(`cannot load ${file}`);
+  const moduleSymbol = checker.getSymbolAtLocation(source);
+  if (!moduleSymbol) throw new Error(`${file} is not a module`);
+  // Fail closed: an `export ... from` whose module does not resolve would
+  // silently drop its names from getExportsOfModule.
+  for (const stmt of source.statements) {
+    if (ts.isExportDeclaration(stmt) && stmt.moduleSpecifier
+      && !checker.getSymbolAtLocation(stmt.moduleSpecifier)) {
+      throw new Error(`${file}: cannot resolve re-export from ${stmt.moduleSpecifier.getText(source)}`);
+    }
+  }
+  const out: Array<{ name: string; optionsPosition?: number }> = [];
+  for (const sym of checker.getExportsOfModule(moduleSymbol)) {
+    const name = sym.getName();
+    if (!name.startsWith(ENTRY_PREFIX)) continue;
+    const target = sym.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym;
+    const decl = target.valueDeclaration ?? target.declarations?.[0];
+    let callable: boolean;
+    if (checker.isUnknownSymbol(target) || !decl) callable = true;
+    else if (!(target.flags & ts.SymbolFlags.Value)) callable = false;
+    else if (target.flags & ts.SymbolFlags.Function) callable = true;
+    else {
+      const type = checker.getTypeOfSymbolAtLocation(target, decl);
+      callable = type.getCallSignatures().length > 0 || (type.flags & ts.TypeFlags.Any) !== 0;
+    }
+    if (!callable) continue;
+    let optionsPosition: number | undefined;
+    if (decl && ts.isFunctionLike(decl)) {
+      const index = decl.parameters.findIndex(p => ts.isIdentifier(p.name) && p.name.text === 'options');
+      if (index !== -1) optionsPosition = index + 1;
+    }
+    out.push({ name, optionsPosition });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Exported names with no table row (`missing`) and rows with no export (`obsolete`). */
+function diffEntryTable(exported: string[], tableKeys: string[]): { missing: string[]; obsolete: string[] } {
+  return {
+    missing: exported.filter(n => !tableKeys.includes(n)).sort(),
+    obsolete: tableKeys.filter(n => !exported.includes(n)).sort(),
+  };
+}
+
+/**
+ * Every call to a pipeline entry point in `src`, by AST: named imports from a
+ * `pipeline` module are mapped back to their exported name (so an alias cannot
+ * hide a call), and any other callee named `runDefencePipeline*` is reported
+ * under its own name for the caller to reject. A namespace/default import, or
+ * an imported entry point used other than as a direct callee, is a problem —
+ * its argument count could not be pinned.
+ */
+function scanPipelineEntryCalls(src: string, label: string): {
+  calls: Array<{ entry: string; argCount: number; spread: boolean }>;
+  problems: string[];
+} {
+  const sf = ts.createSourceFile(label, src, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+  const imported = new Map<string, string>();
+  const problems: string[] = [];
+  for (const stmt of sf.statements) {
+    if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier)) continue;
+    if (!/(^|\/)pipeline(\.js)?$/.test(stmt.moduleSpecifier.text)) continue;
+    const clause = stmt.importClause;
+    if (!clause || clause.isTypeOnly) continue;
+    if (clause.name || (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings))) {
+      problems.push(`${label}: namespace/default import of the pipeline module`);
+    }
+    if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+      for (const el of clause.namedBindings.elements) {
+        const exportedName = (el.propertyName ?? el.name).text;
+        if (!el.isTypeOnly && exportedName.startsWith(ENTRY_PREFIX)) imported.set(el.name.text, exportedName);
+      }
+    }
+  }
+  const calls: Array<{ entry: string; argCount: number; spread: boolean }> = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const calleeName = ts.isIdentifier(callee) ? callee.text
+        : ts.isPropertyAccessExpression(callee) ? callee.name.text : undefined;
+      const entry = calleeName && (imported.get(calleeName)
+        ?? (calleeName.startsWith(ENTRY_PREFIX) ? calleeName : undefined));
+      if (entry) {
+        calls.push({ entry, argCount: node.arguments.length, spread: node.arguments.some(ts.isSpreadElement) });
+      }
+    } else if (ts.isIdentifier(node) && imported.has(node.text)) {
+      const parent = node.parent;
+      const isCallee = ts.isCallExpression(parent) && parent.expression === node;
+      const isImportBinding = ts.isImportSpecifier(parent);
+      if (!isCallee && !isImportBinding) {
+        problems.push(`${label}: ${imported.get(node.text)} referenced other than as a direct call`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return { calls, problems };
+}
 
 /**
  * Extract the argument text of every `name(...)` call in `src` (balanced-paren
