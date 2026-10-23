@@ -155,7 +155,7 @@ describe('checkStaleShieldCortexCopies (#674)', () => {
     ]);
   });
 
-  it('still reads a regular package.json just under the 64 KiB limit', async () => {
+  it('still reads a regular package.json at the 64 KiB limit', async () => {
     const base = JSON.stringify({ ...sc('5.2.1'), pad: '' });
     const body = JSON.stringify({ ...sc('5.2.1'), pad: 'x'.repeat(64 * 1024 - base.length) });
     expect(Buffer.byteLength(body)).toBe(64 * 1024);
