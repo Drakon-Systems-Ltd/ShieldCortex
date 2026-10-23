@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **#674 `shieldcortex doctor` warns about old ShieldCortex copies that could share your database.** A new `Stale ShieldCortex copies` row reads the `package.json` version of `shieldcortex` copies in the global npm prefixes, nvm node versions, the npx cache and OpenClaw's plugin tree, and warns on any copy at 5.2.1 or older, which can try to rewrite chained audit rows at start-up and still adds unchained rows and checkpoint-less deletes that `shieldcortex ledger verify` reports. It is read-only and detects only; it does not search project dependency trees (details: `docs/UPDATING.md`, "Older copies sharing a chained database").
+
 ### Fixed
 - **The withdrawn `sprintf-js` advisory waiver is retired.** GitHub withdrew GHSA-hp3w-g68c-fv3c (npm `1241202`) on 2026-10-22, so the live production audit now reports 3 waived advisories, not 4, and the audit-claims test failed on the stale count. The waiver record and its prose are removed (a short retired note stays in `docs/security/audit-waivers.md`), and the published audit claim now reads 0 unwaived; 3 waived (the `sharp` set). No dependency or code change.
 - **#898 The transitive `ip-address` dependency is updated to 10.7.4.** A newly published advisory (GHSA-rxp7-6hxx-x8q5, quadratic-time matching of a zone identifier in `Address6`) covered the 10.7.2 copy in the lockfile, so the live production audit reported one unwaived advisory and the audit-claims test failed. Only the lockfile entry changed; the audit claim (0 unwaived production advisories; 4 waived) holds again.
