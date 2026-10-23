@@ -60,6 +60,7 @@ or set `SHIELDCORTEX_SKIP_UPDATE_CHECK=1` for the dashboard/API process. The das
 - **The dashboard's update check can be turned off (#631).** See [Dashboard update check](#dashboard-update-check) above. It stays on by default; when off, the dashboard says the check is off instead of looking up a newer release. Nothing to do on upgrade.
 - **5.12.1 — `ip-address` updated to 10.7.4 (#898).** Clears a newly published advisory (GHSA-rxp7-6hxx-x8q5) in a transitive dependency; only the lockfile changed. Nothing to do on upgrade.
 - **5.12.1 — The bundled skill file syncs to ClawHub again (#893).** One line in the skill's frontmatter was read as a key/value pair and rejected by the ClawHub publish step; the wording is fixed. No behaviour change. Nothing to do on upgrade.
+- **5.12.1 — A withdrawn advisory's waiver is retired.** GitHub withdrew the `sprintf-js` advisory GHSA-hp3w-g68c-fv3c, so the production audit now shows 0 unwaived and 3 waived advisories (all `sharp`); reachability notes are in [audit-waivers.md](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/security/audit-waivers.md). No dependency or code change. Nothing to do on upgrade.
 
 <a id="whats-new-in-511"></a>
 
