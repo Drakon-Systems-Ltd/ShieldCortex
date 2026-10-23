@@ -51,6 +51,15 @@ or set `SHIELDCORTEX_SKIP_UPDATE_CHECK=1` for the dashboard/API process. The das
 5. **Background service** — if you ran `shieldcortex service install`, check `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`). Linux and macOS restart the service; Windows schedules it for the next login.
 6. **Doctor** — `shieldcortex doctor` warns when the OpenClaw plugin or Hermes copy is behind the package and names the command to run. It exits 1 on a failure (`--strict` also fails on warnings). Repairs are opt-in flags: `--fix-project-keys`, `--fix-action-guard`, `--fix-hermes-plugin-copies`.
 
+<a id="whats-new-in-513"></a>
+
+## What's new in 5.13
+
+- **`shieldcortex doctor` warns about old ShieldCortex copies that could share your database (#674).** A new `Stale ShieldCortex copies` row reads the version of `shieldcortex` copies in fixed install locations (global npm prefixes, nvm node versions, the npx cache, OpenClaw's plugin tree) and warns on any copy at 5.2.1 or older, naming its path and how to update or remove it. It is read-only and does not search project dependency trees; see [Older copies sharing a chained database](#mixed-version-ledger). With `--strict`, that warning makes doctor exit 1. Nothing to do on upgrade unless it lists a copy.
+- **`ip-address` updated to 10.7.4 (#898).** Clears a newly published advisory (GHSA-rxp7-6hxx-x8q5) in a transitive dependency; only the lockfile changed. Nothing to do on upgrade.
+- **The bundled skill file syncs to ClawHub again (#893).** One line in the skill's frontmatter was read as a key/value pair and rejected by the ClawHub publish step; the wording is fixed. No behaviour change. Nothing to do on upgrade.
+- **A withdrawn advisory's waiver is retired.** GitHub withdrew the `sprintf-js` advisory GHSA-hp3w-g68c-fv3c, so the production audit now shows 0 unwaived and 3 waived advisories (all `sharp`); reachability notes are in [audit-waivers.md](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/security/audit-waivers.md). No dependency or code change. Nothing to do on upgrade.
+
 <a id="whats-new-in-512"></a>
 
 ## What's new in 5.12
