@@ -1353,6 +1353,40 @@ function isMissingCode(code: string): boolean {
   return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
+const MAX_CANDIDATE_PACKAGE_JSON_BYTES = 64 * 1024;
+
+/**
+ * Read a candidate copy's package.json without blocking: opened non-blocking
+ * so a FIFO with no writer cannot hang doctor, and only a regular file of at
+ * most 64 KiB is read, from the descriptor that was checked.
+ */
+function readCandidatePackageJson(file: string): { ok: true; raw: string } | { ok: false; reason: string } {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+  } catch (err: unknown) {
+    const code = errCode(err);
+    return { ok: false, reason: code === 'ENOENT' ? 'no package.json' : `package.json unreadable (${code})` };
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return { ok: false, reason: 'package.json is not a regular file' };
+    if (st.size > MAX_CANDIDATE_PACKAGE_JSON_BYTES) return { ok: false, reason: 'package.json is larger than 64 KiB' };
+    const buf = Buffer.alloc(MAX_CANDIDATE_PACKAGE_JSON_BYTES);
+    let len = 0;
+    while (len < buf.length) {
+      const n = fs.readSync(fd, buf, len, buf.length - len, null);
+      if (n === 0) break;
+      len += n;
+    }
+    return { ok: true, raw: buf.toString('utf-8', 0, len) };
+  } catch (err: unknown) {
+    return { ok: false, reason: `package.json unreadable (${errCode(err)})` };
+  } finally {
+    try { fs.closeSync(fd); } catch { /* nothing to recover */ }
+  }
+}
+
 /**
  * Discover `shieldcortex` package copies in the fixed install roots and read
  * each version from its package.json. Read-only and fail-soft: every error is
@@ -1417,14 +1451,12 @@ export function scanStaleShieldCortexCopies(
     if (seen.has(real)) continue;
     seen.add(real);
 
-    let raw: string;
-    try {
-      raw = fs.readFileSync(path.join(dir, 'package.json'), 'utf-8');
-    } catch (err: unknown) {
-      const code = errCode(err);
-      copies.push({ dir, kind, state: 'unknown', reason: code === 'ENOENT' ? 'no package.json' : `package.json unreadable (${code})` });
+    const read = readCandidatePackageJson(path.join(dir, 'package.json'));
+    if (!read.ok) {
+      copies.push({ dir, kind, state: 'unknown', reason: read.reason });
       continue;
     }
+    const raw = read.raw;
     let parsed: { name?: unknown; version?: unknown };
     try {
       parsed = JSON.parse(raw) as { name?: unknown; version?: unknown };
