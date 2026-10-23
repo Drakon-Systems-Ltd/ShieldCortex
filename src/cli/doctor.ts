@@ -1295,6 +1295,235 @@ export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promis
   }
 }
 
+// ── Check: stale ShieldCortex copies (#674 part 2) ──────────────────
+/**
+ * An older ShieldCortex copy (5.2.1 or earlier) that opens the shared database
+ * runs a start-up `project` backfill that does not skip chained audit rows.
+ * Part 1 (#796) made the database refuse that rewrite once a current build has
+ * opened it, but nothing told the operator the old copy was still there — and
+ * it still adds unchained audit rows and deletes rows without a checkpoint,
+ * which `ledger verify` reports and nothing blocks.
+ *
+ * This row looks for `shieldcortex` package directories in the fixed install
+ * roots the rest of the doctor (and the OpenClaw plugin's runtime resolver)
+ * already know about — global npm prefixes, nvm node versions, the npx cache,
+ * and OpenClaw's npm tree and extension copies — and reads each one's
+ * `package.json` version. It never runs a copy, never opens a database and
+ * never writes. A project's own dependency tree is not searched: there is no
+ * fixed root for it, and a filesystem walk is not what a doctor should do.
+ *
+ * Hermes plugin copies are not ShieldCortex package copies: the Hermes plugin
+ * talks to the local API and never opens the database, so they are not listed.
+ *
+ * WARN, not FAIL: the copy may never run again, and only the operator knows.
+ * A copy whose version cannot be read is "version unknown", never stale.
+ */
+export const STALE_COPIES_LABEL = 'Stale ShieldCortex copies';
+
+/** Last release whose start-up backfill rewrites chained rows (#674). */
+export const LAST_PRE_CHAIN_VERSION = '5.2.1';
+
+/** Global npm prefixes outside $HOME, matching the plugin's runtime resolver. */
+const SYSTEM_SHIELDCORTEX_PACKAGE_DIRS = [
+  '/usr/lib/node_modules/shieldcortex',
+  '/usr/local/lib/node_modules/shieldcortex',
+  '/opt/homebrew/lib/node_modules/shieldcortex',
+];
+
+type CopyKind = 'global' | 'npx' | 'openclaw-bare' | 'openclaw-plugin';
+
+interface CopyCandidate { dir: string; kind: CopyKind }
+
+export type StaleCopyFinding =
+  | { dir: string; kind: CopyKind; state: 'stale' | 'current'; version: string }
+  | { dir: string; kind: CopyKind; state: 'unknown'; reason: string };
+
+export interface StaleCopyScan {
+  copies: StaleCopyFinding[];
+  /** Install roots that exist but could not be listed or statted. */
+  uninspectable: Array<{ path: string; code: string }>;
+}
+
+function errCode(err: unknown): string {
+  return (err as NodeJS.ErrnoException)?.code ?? 'UNKNOWN';
+}
+
+/** ENOENT/ENOTDIR mean "not there"; anything else is "could not inspect". */
+function isMissingCode(code: string): boolean {
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+/**
+ * Discover `shieldcortex` package copies in the fixed install roots and read
+ * each version from its package.json. Read-only and fail-soft: every error is
+ * recorded, none is thrown. `systemPackageDirs` is a test seam for the
+ * absolute global prefixes, which a test must not read on a real host.
+ */
+export function scanStaleShieldCortexCopies(
+  home: string = os.homedir(),
+  opts: { systemPackageDirs?: string[] } = {},
+): StaleCopyScan {
+  const uninspectable: StaleCopyScan['uninspectable'] = [];
+  const candidates: CopyCandidate[] = [];
+
+  /** Children of `dir` (names), or [] when it is absent or unreadable. */
+  const list = (dir: string, filter: (name: string) => boolean = () => true): string[] => {
+    try {
+      return fs.readdirSync(dir).filter(filter).sort();
+    } catch (err: unknown) {
+      const code = errCode(err);
+      if (!isMissingCode(code)) uninspectable.push({ path: dir, code });
+      return [];
+    }
+  };
+
+  for (const dir of opts.systemPackageDirs ?? SYSTEM_SHIELDCORTEX_PACKAGE_DIRS) {
+    candidates.push({ dir, kind: 'global' });
+  }
+  for (const prefix of ['.npm-global', '.local']) {
+    candidates.push({ dir: path.join(home, prefix, 'lib', 'node_modules', 'shieldcortex'), kind: 'global' });
+  }
+  const nvmVersions = path.join(home, '.nvm', 'versions', 'node');
+  for (const v of list(nvmVersions)) {
+    candidates.push({ dir: path.join(nvmVersions, v, 'lib', 'node_modules', 'shieldcortex'), kind: 'global' });
+  }
+  const npxCache = path.join(home, '.npm', '_npx');
+  for (const h of list(npxCache)) {
+    candidates.push({ dir: path.join(npxCache, h, 'node_modules', 'shieldcortex'), kind: 'npx' });
+  }
+  const openclaw = path.join(home, '.openclaw');
+  candidates.push({ dir: path.join(openclaw, 'npm', 'node_modules', 'shieldcortex'), kind: 'openclaw-bare' });
+  const ocProjects = path.join(openclaw, 'npm', 'projects');
+  for (const p of list(ocProjects, (n) => n.includes('shieldcortex-realtime'))) {
+    candidates.push({ dir: path.join(ocProjects, p, 'node_modules', 'shieldcortex'), kind: 'openclaw-plugin' });
+  }
+  const ocExtensions = path.join(openclaw, 'extensions');
+  for (const e of list(ocExtensions, (n) => n.includes('shieldcortex-realtime'))) {
+    candidates.push({ dir: path.join(ocExtensions, e, 'node_modules', 'shieldcortex'), kind: 'openclaw-plugin' });
+  }
+
+  const copies: StaleCopyFinding[] = [];
+  const seen = new Set<string>();
+  for (const { dir, kind } of candidates) {
+    try {
+      if (!fs.statSync(dir).isDirectory()) continue;
+    } catch (err: unknown) {
+      const code = errCode(err);
+      if (!isMissingCode(code)) uninspectable.push({ path: dir, code });
+      continue;
+    }
+    let real = dir;
+    try { real = fs.realpathSync(dir); } catch { /* keep the listed path */ }
+    if (seen.has(real)) continue;
+    seen.add(real);
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(path.join(dir, 'package.json'), 'utf-8');
+    } catch (err: unknown) {
+      const code = errCode(err);
+      copies.push({ dir, kind, state: 'unknown', reason: code === 'ENOENT' ? 'no package.json' : `package.json unreadable (${code})` });
+      continue;
+    }
+    let parsed: { name?: unknown; version?: unknown };
+    try {
+      parsed = JSON.parse(raw) as { name?: unknown; version?: unknown };
+    } catch {
+      copies.push({ dir, kind, state: 'unknown', reason: 'package.json is not valid JSON' });
+      continue;
+    }
+    // A directory named shieldcortex that declares another package is not a copy.
+    if (typeof parsed?.name === 'string' && parsed.name !== 'shieldcortex') continue;
+    const version = typeof parsed?.version === 'string' ? semver.valid(parsed.version) : null;
+    if (!version) {
+      copies.push({ dir, kind, state: 'unknown', reason: 'package.json has no valid semver version' });
+      continue;
+    }
+    copies.push({ dir, kind, state: semver.lte(version, LAST_PRE_CHAIN_VERSION) ? 'stale' : 'current', version });
+  }
+  return { copies, uninspectable };
+}
+
+/** Home-relative display against the scanned home, not the process's. */
+function showUnder(home: string, target: string): string {
+  return target === home || target.startsWith(home + path.sep) ? '~' + target.slice(home.length) : target;
+}
+
+function staleCopyRemedy(home: string, copy: CopyCandidate): string {
+  const shown = showUnder(home, copy.dir);
+  switch (copy.kind) {
+    case 'global':
+      return `${shown}: update it with \`npm install -g shieldcortex@latest\` using the npm that owns that prefix, or remove it with \`npm uninstall -g shieldcortex\``;
+    case 'npx':
+      return `${shown}: remove that npx cache entry (\`rm -rf ${showUnder(home, path.dirname(path.dirname(copy.dir)))}\`); a command pinned to an old version (\`npx shieldcortex@5.x\`) fetches it again, so update the pin too`;
+    case 'openclaw-bare':
+      return `${shown}: remove it; the supported OpenClaw install is @drakon-systems/shieldcortex-realtime`;
+    case 'openclaw-plugin':
+      return `${shown}: update it (\`npm install shieldcortex@latest\` in ${showUnder(home, path.dirname(path.dirname(copy.dir)))}) or remove it`;
+  }
+}
+
+export async function checkStaleShieldCortexCopies(
+  home: string = os.homedir(),
+  opts: { systemPackageDirs?: string[] } = {},
+): Promise<CheckResult> {
+  const label = STALE_COPIES_LABEL;
+  let scan: StaleCopyScan;
+  try {
+    scan = scanStaleShieldCortexCopies(home, opts);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label, status: 'info', message: `could not inspect install roots — ${msg}` };
+  }
+  const stale = scan.copies.flatMap((c) => (c.state === 'stale' ? [c] : []));
+  const unknown = scan.copies.flatMap((c) => (c.state === 'unknown' ? [c] : []));
+  const current = scan.copies.filter((c) => c.state === 'current');
+
+  const notes: string[] = [];
+  if (unknown.length > 0) {
+    notes.push(`version unknown: ${unknown.map((c) => `${showUnder(home, c.dir)} (${c.reason})`).join(', ')}`);
+  }
+  if (scan.uninspectable.length > 0) {
+    notes.push(`could not inspect: ${scan.uninspectable.map((u) => `${showUnder(home, u.path)} (${u.code})`).join(', ')}`);
+  }
+  const tail = notes.length > 0 ? ` — ${notes.join('; ')}` : '';
+
+  if (stale.length > 0) {
+    return {
+      label,
+      status: 'warn',
+      message:
+        `${stale.length} ShieldCortex copy(ies) at ${LAST_PRE_CHAIN_VERSION} or older: ` +
+        stale.map((c) => `${showUnder(home, c.dir)} (v${c.version} ≤ ${LAST_PRE_CHAIN_VERSION})`).join(', ') +
+        `. If one opens the shared database, its start-up backfill tries to rewrite the project of chained ` +
+        `audit rows (refused once a current build has opened that database), and it still adds unchained ` +
+        `audit rows and deletes rows without a checkpoint, which \`shieldcortex ledger verify\` reports (#674)` +
+        tail,
+      fix: `Update or remove each old copy — ${stale.map((c) => staleCopyRemedy(home, c)).join('; ')}.`,
+    };
+  }
+
+  if (unknown.length > 0 || scan.uninspectable.length > 0) {
+    return {
+      label,
+      status: 'info',
+      message: `no copy at ${LAST_PRE_CHAIN_VERSION} or older found, but not every copy could be checked${tail}`,
+      ...(scan.uninspectable.length > 0
+        ? { fix: 'Give the user running the doctor permission to list the named paths, then re-run `shieldcortex doctor`.' }
+        : {}),
+    };
+  }
+
+  if (current.length > 0) {
+    return {
+      label,
+      status: 'pass',
+      message: `${current.length} ShieldCortex copy(ies) found in the checked install roots, all newer than ${LAST_PRE_CHAIN_VERSION}`,
+    };
+  }
+  return { label, status: 'pass', message: 'clean (no ShieldCortex copies in the checked install roots)' };
+}
+
 export async function checkThreatGraph(
   opts: { lagWarnThreshold?: number; enabled?: boolean; nowMs?: number; sweepStaleMs?: number } = {},
 ): Promise<CheckResult> {
@@ -9483,6 +9712,7 @@ export async function runDoctor(
     checkThreatGraph,
     checkAttestationCoverage,
     checkChainedLedger,
+    async () => checkStaleShieldCortexCopies(), // #674: an old copy can rewrite chained audit rows
     checkClaudeCodeVersion,
     checkModelCache,
   ];
