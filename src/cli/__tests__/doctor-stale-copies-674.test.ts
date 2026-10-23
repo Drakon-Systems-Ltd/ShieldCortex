@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -129,7 +130,38 @@ describe('checkStaleShieldCortexCopies (#674)', () => {
     fs.mkdirSync(path.join(dir, 'package.json'));
     const r = await run();
     expect(r.status).toBe('info');
-    expect(r.message).toMatch(/package\.json unreadable \(EISDIR\)/);
+    // POSIX opens the directory and rejects it by type; Windows fails the open.
+    expect(r.message).toMatch(/package\.json (is not a regular file|unreadable \(EISDIR\))/);
+  });
+
+  // #905 — a named pipe with no writer must not block the scan.
+  (process.platform === 'win32' ? it.skip : it)('reports a FIFO package.json as not a regular file instead of waiting on it (POSIX only: mkfifo)', async () => {
+    const dir = makeCopy(npxCopy('fifo'), null);
+    execFileSync('mkfifo', [path.join(dir, 'package.json')]);
+    const scan = scanStaleShieldCortexCopies(home, { systemPackageDirs: [path.join(sys, 'shieldcortex')] });
+    expect(scan.copies).toEqual([
+      { dir, kind: 'npx', state: 'unknown', reason: 'package.json is not a regular file' },
+    ]);
+    const r = await run();
+    expect(r.status).toBe('info');
+    expect(r.message).toMatch(/version unknown: ~\/\.npm\/_npx\/fifo\/node_modules\/shieldcortex \(package\.json is not a regular file\)/);
+  });
+
+  it('reports a package.json larger than 64 KiB as version unknown without parsing it', async () => {
+    const dir = makeCopy(npxCopy('big'), JSON.stringify({ ...sc('5.2.1'), pad: 'x'.repeat(64 * 1024) }));
+    const scan = scanStaleShieldCortexCopies(home, { systemPackageDirs: [path.join(sys, 'shieldcortex')] });
+    expect(scan.copies).toEqual([
+      { dir, kind: 'npx', state: 'unknown', reason: 'package.json is larger than 64 KiB' },
+    ]);
+  });
+
+  it('still reads a regular package.json at the 64 KiB limit', async () => {
+    const base = JSON.stringify({ ...sc('5.2.1'), pad: '' });
+    const body = JSON.stringify({ ...sc('5.2.1'), pad: 'x'.repeat(64 * 1024 - base.length) });
+    expect(Buffer.byteLength(body)).toBe(64 * 1024);
+    const dir = makeCopy(npxCopy('edge'), body);
+    const scan = scanStaleShieldCortexCopies(home, { systemPackageDirs: [path.join(sys, 'shieldcortex')] });
+    expect(scan.copies).toEqual([{ dir, kind: 'npx', state: 'stale', version: '5.2.1' }]);
   });
 
   it('still warns on a stale copy when another copy is version unknown', async () => {
