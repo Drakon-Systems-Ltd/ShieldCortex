@@ -1537,9 +1537,12 @@ function mutateRawConfig(
   // configured, not the values the policy lock is currently forcing on top of
   // it. Writing the locked view back would freeze an OS-owned floor into the
   // local file, where it would outlive the lock that produced it.
-  const { data, parseFailed, integrity } = readRawConfigStateUnlocked();
-  // A symlink first, dangling or not (#878): a dangling one also reads as
-  // unreadable below, but the reason to give is the link.
+  //
+  // A symlink first, dangling or not (#878), and before that read: the read
+  // itself writes when it adopts an unsigned file (`.integrity-key`,
+  // `.config-sig`) or self-heals a stale one, and the refusal says nothing was
+  // written. A dangling link also reads as unreadable, but the reason to give
+  // is the link.
   const configFile = getConfigFile();
   if (configIsSymlink(configFile)) {
     if (!symlinkWriteRefusalWarned) {
@@ -1549,6 +1552,7 @@ function mutateRawConfig(
     if (onParseFail === 'throw') throw new Error(configSymlinkRefusalMessage(configFile));
     return false;
   }
+  const { data, parseFailed, integrity } = readRawConfigStateUnlocked();
   if (parseFailed) {
     console.error('[ShieldCortex] config.json is unreadable — refusing to overwrite (would wipe settings incl. cloudApiKey). Fix or remove the file.');
     if (onParseFail === 'throw') {

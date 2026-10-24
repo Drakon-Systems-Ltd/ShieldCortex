@@ -149,6 +149,36 @@ describe('#878 item 1: a symlink at config.json is never replaced', () => {
     expect(fs.lstatSync(configFile()).isSymbolicLink()).toBe(true);
     expect(fs.readFileSync(target).equals(targetBefore)).toBe(true);
   });
+
+  it('live, to an unsigned target: the refusal comes before the read that would adopt it', async () => {
+    // Unsigned: the ordinary read adopts it, minting `.integrity-key` and
+    // writing `.config-sig`. The setters must refuse before that read.
+    const target = path.join(configDir, 'target.json');
+    fs.writeFileSync(target, JSON.stringify({ defenceMode: 'strict' }, null, 2) + '\n');
+    fs.symlinkSync(target, configFile());
+    const entriesBefore = fs.readdirSync(configDir).sort();
+    expect(entriesBefore).toEqual(['config.json', 'target.json']);
+    const targetBefore = fs.readFileSync(target);
+    const config = await freshConfig();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const unchanged = (): void => {
+      expect(fs.readdirSync(configDir).sort()).toEqual(entriesBefore);
+      expect(fs.readFileSync(target).equals(targetBefore)).toBe(true);
+      expect(fs.lstatSync(configFile()).isSymbolicLink()).toBe(true);
+      expect(fs.readlinkSync(configFile())).toBe(target);
+    };
+
+    // Skip policy: no throw, the once-per-process symlink line, nothing written.
+    expect(() => config.setCloudIronDomeCache({ patterns: [] })).not.toThrow();
+    expect(errorSpy.mock.calls.filter((c) => /symbolic link/.test(String(c[0])))).toHaveLength(1);
+    unchanged();
+
+    // Throw policy: the refusal, and it is true that nothing was written.
+    expect(() => config.setDefenceMode('balanced')).toThrow(/symbolic link.*Nothing was written/s);
+    unchanged();
+    // Still once per process.
+    expect(errorSpy.mock.calls.filter((c) => /symbolic link/.test(String(c[0])))).toHaveLength(1);
+  });
 });
 
 describe('#878 item 1: a symlink that appears mid-write', () => {
