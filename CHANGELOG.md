@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **#878 `shieldcortex doctor`'s Action Guard readiness rows read `config.json` without side effects, and an in-place edit of `config.json` at the same size with its mtime restored is now re-read and integrity-checked instead of being answered from the config cache.**
+
 ## [5.13.0] - 2026-10-23
 
 Minor on 5.12.0. `shieldcortex doctor` gains a read-only `Stale ShieldCortex copies` row that warns about ShieldCortex copies at 5.2.1 or older in fixed install locations, which can share the chained audit database and still add unchained rows and checkpoint-less deletes that `shieldcortex ledger verify` reports (#674, PR #903). The transitive `ip-address` dependency moves to 10.7.4 to clear a newly published advisory (GHSA-rxp7-6hxx-x8q5; #898, PR #899), the bundled skill file's frontmatter no longer breaks ClawHub sync (#893, PR #896), and the waiver for the `sprintf-js` advisory that GitHub withdrew on 2026-10-22 is retired, so the published audit claim now reads 0 unwaived; 3 waived (PR #901). A dashboard refactor deletes 14 page stubs for hidden paths whose redirects the existing server redirects already supersede, so the hidden-routes config is the only redirect source; the redirect targets users get are unchanged (#689, PR #902). Minor rather than patch: a new doctor check. On a machine that has such an old copy, the new row is a warning, so `shieldcortex doctor --strict` exits 1 until the copy is updated or removed. No new configuration and no other behaviour change. Node floor unchanged.

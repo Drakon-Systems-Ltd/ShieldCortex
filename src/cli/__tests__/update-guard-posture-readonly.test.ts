@@ -407,8 +407,11 @@ describe('a config with no signature yet is unknown read-only, never off', () =>
 
   // B3-R3: empty/whitespace early-return used to skip the cache-disagreement
   // check, so a file blanked in place (same size, mtime restored) read as off
-  // while the getter still served cached strict-ON.
-  (asRoot ? it.skip : it)('B3-R3: emptying config.json in place after a cached strict verdict is unknown, not off', async () => {
+  // while the getter still served cached strict-ON. #878 r2 keys the cache on
+  // ctime too, which nothing restores: the getter re-reads the blanked file,
+  // so the two readers agree on what is now enforced instead of disagreeing.
+  // (The disagreement check stays for filesystems that do not track ctime.)
+  (asRoot ? it.skip : it)('B3-R3: emptying config.json in place after a cached strict verdict is re-read by both readers', async () => {
     try {
       writeConfig({ actionGuard: { enabled: false } });
       const { config } = await fresh();
@@ -417,23 +420,19 @@ describe('a config with no signature yet is unknown read-only, never off', () =>
       fs.chmodSync(configDir, 0o700);
       const cfg = file('config.json');
       const st = fs.statSync(cfg);
-      // In place and at the same size: #878 keys the cache on inode and size
-      // as well as mtime, so only a same-size blanking still hits it.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30); // coarse ctime clock
       fs.writeFileSync(cfg, ' '.repeat(st.size - 1) + '\n');
       fs.utimesSync(cfg, st.atime, st.mtime);
-      expect(config.readActionGuardCoreConfigReadOnly()).toBeNull();
+      const after = fs.statSync(cfg);
+      expect([after.ino, after.size]).toEqual([st.ino, st.size]);
+      expect(Math.abs(after.mtimeMs - st.mtimeMs)).toBeLessThan(1); // within the read-only tolerance
+      expect(after.ctimeMs).not.toBe(st.ctimeMs);
+      // The getter no longer answers from its cached strict verdict...
+      expect(config.getActionGuardCoreConfig().enabled).toBe(false);
+      // ...so the read-only reader has nothing to disagree with.
+      expect(config.readActionGuardCoreConfigReadOnly()).toEqual({ enabled: false, enforce: true, readinessGate: false });
       const update = await import('../update.js');
-      const guard = await update.readGuardSwitch();
-      expect(guard).toBe('unknown');
-      const { buildUpdateSummary } = await import('../update-summary.js');
-      const summary = buildUpdateSummary({
-        fromVersion: '5.9.0', toVersion: '5.10.0', packageState: 'updated',
-        engine: { ok: true }, plugin: { status: 'ok' }, skill: { status: 'ok' },
-        guardOn: guard !== 'off', guardUnknown: guard === 'unknown',
-        protection: { status: 'ok' },
-      });
-      expect(summary.headline).toBe('check');
-      expect(summary.rows.find((r) => r.label === 'Guard')).toMatchObject({ mark: 'check' });
+      expect(await update.readGuardSwitch()).toBe('off');
     } finally {
       fs.chmodSync(configDir, 0o700);
     }

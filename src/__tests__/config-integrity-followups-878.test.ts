@@ -40,7 +40,18 @@ const countingReadFileSync = ((file: unknown, ...rest: unknown[]) => {
   if (typeof file === 'string' && path.basename(file) === 'config.json') configReads++;
   return (realFs.readFileSync as (...args: unknown[]) => unknown)(file, ...rest);
 }) as typeof realFs.readFileSync;
-const countingFs = { ...realFs, readFileSync: countingReadFileSync };
+// Runs once when a config temp file is written, before it is renamed into place.
+let onTempWrite: (() => void) | null = null;
+const hookedWriteFileSync = ((file: unknown, ...rest: unknown[]) => {
+  const out = (realFs.writeFileSync as (...args: unknown[]) => unknown)(file, ...rest);
+  if (typeof file === 'string' && path.basename(file).startsWith('config.json.tmp-') && onTempWrite) {
+    const hook = onTempWrite;
+    onTempWrite = null;
+    hook();
+  }
+  return out;
+}) as typeof realFs.writeFileSync;
+const countingFs = { ...realFs, readFileSync: countingReadFileSync, writeFileSync: hookedWriteFileSync };
 jest.unstable_mockModule('fs', () => ({ ...countingFs, default: countingFs }));
 
 type ConfigModule = typeof import('../cloud/config.js');
@@ -74,6 +85,7 @@ beforeEach(() => {
   process.env[PROTECTED_ROOT_ENV] = protectedRoot;
   process.env.OPENCLAW_HOME = openclawHome;
   configReads = 0;
+  onTempWrite = null;
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
   jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
@@ -139,6 +151,38 @@ describe('#878 item 1: a symlink at config.json is never replaced', () => {
   });
 });
 
+describe('#878 item 1: a symlink that appears mid-write', () => {
+  /** Swap config.json for a link to it while the writer's temp file is being written. */
+  function linkDuringWrite(target: string): void {
+    onTempWrite = () => {
+      fs.renameSync(configFile(), target);
+      fs.symlinkSync(target, configFile());
+    };
+  }
+
+  it('a skip-policy writer declines without throwing; the link and its target are unchanged', async () => {
+    const config = await freshConfig();
+    config.setCloudConfig({ cloudApiKey: SENTINEL });
+    const target = path.join(configDir, 'real-config.json');
+    const bytes = fs.readFileSync(configFile());
+    linkDuringWrite(target);
+
+    expect(() => config.setCloudIronDomeCache({ patterns: ['p'] })).not.toThrow();
+    expect(onTempWrite).toBeNull(); // the hook ran: the link appeared after the initial check
+    expect(fs.lstatSync(configFile()).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(target).equals(bytes)).toBe(true);
+    expect(fs.readdirSync(configDir).filter((n) => n.includes('.tmp-'))).toEqual([]);
+  });
+
+  it('a throw-policy setter still throws the symlink refusal', async () => {
+    const config = await freshConfig();
+    config.setCloudConfig({ cloudApiKey: SENTINEL });
+    linkDuringWrite(path.join(configDir, 'real-config.json'));
+    expect(() => config.setDefenceMode('strict')).toThrow(/symbolic link/);
+    expect(fs.lstatSync(configFile()).isSymbolicLink()).toBe(true);
+  });
+});
+
 describe('#878 item 2: the raw-config cache key is the file, not its mtime', () => {
   /** A signed config, mtime pinned, cache primed through the mutating reader. */
   async function primed(): Promise<{ config: ConfigModule; signed: string }> {
@@ -173,6 +217,32 @@ describe('#878 item 2: the raw-config cache key is the file, not its mtime', () 
     expect(config.isConfigTampered()).toBe(true);
     expect(() => config.addTrustedSkill('/skills/x.md')).toThrow(config.ConfigIntegrityRefusal);
     expect(fs.readFileSync(configFile(), 'utf-8')).toBe(edited);
+  });
+
+  it('same inode, size and mtime, different bytes: re-read, tampered, writers refuse or skip', async () => {
+    const { config, signed } = await primed();
+    const edited = signed.replace(SENTINEL, SENTINEL.slice(0, -1) + 'X');
+    expect(edited.length).toBe(signed.length);
+    const before = fs.statSync(configFile());
+    // Let the kernel's coarse timestamp clock move on, so the edit's ctime
+    // differs from the primed file's even without fine-grained timestamps.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
+    fs.writeFileSync(configFile(), edited); // in place: same inode, same size
+    fs.utimesSync(configFile(), FIXED_MTIME_S, FIXED_MTIME_S);
+    const after = fs.statSync(configFile());
+    // Every field the old cache key compared is preserved; only ctime moved.
+    expect([after.dev, after.ino, after.size, after.mtimeMs]).toEqual([before.dev, before.ino, before.size, before.mtimeMs]);
+    expect(after.ctimeMs).not.toBe(before.ctimeMs);
+
+    const reads = configReads;
+    expect(config.readRawConfig().defenceMode).toBe('strict');
+    expect(configReads).toBeGreaterThan(reads); // re-read, not the cached verdict
+    expect(config.isConfigTampered()).toBe(true);
+    expect(() => config.addTrustedSkill('/skills/x.md')).toThrow(config.ConfigIntegrityRefusal);
+    expect(() => config.setCloudIronDomeCache({ patterns: ['p'] })).not.toThrow();
+    expect(config.getDeviceId()).toEqual(expect.any(String));
+    expect(fs.readFileSync(configFile(), 'utf-8')).toBe(edited);
+    expect(config.isConfigTampered()).toBe(true);
   });
 
   it('same size and mtime, different inode: re-read, tampered, and the writer refuses', async () => {

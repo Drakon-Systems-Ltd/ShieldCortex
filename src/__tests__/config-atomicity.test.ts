@@ -225,7 +225,7 @@ describe('config atomicity + integrity hardening', () => {
 
   // ── Fix 3: mtime-cached reads ───────────────────────────────────────
   describe('mtime-cached readRawConfig', () => {
-    it('serves the cached value when the file is unchanged, and invalidates on write', async () => {
+    it('re-reads an in-place same-size edit with the mtime restored, and invalidates on write', async () => {
       const config = await import('../cloud/config.js');
       config.setCloudConfig({ cloudApiKey: 'cached-value' });
       config.clearCloudConfigCache();
@@ -238,30 +238,35 @@ describe('config atomicity + integrity hardening', () => {
       const mtime = 1_700_000_000;
       utimesSync(configFile, mtime, mtime);
 
-      // Prime the cache (records mtimeMs = mtime * 1000, an exact integer).
+      // Prime the cache.
       const first = config.readRawConfig();
       expect(first.cloudApiKey).toBe('cached-value');
+      expect(config.isConfigTampered()).toBe(false);
 
-      // Mutate the on-disk bytes OUT OF BAND (no public API) but keep the
-      // cache key unchanged: same file (in place, same inode), same size
-      // (#878 keys on dev/inode/size too — padded with trailing whitespace,
-      // which JSON.parse ignores) and the mtime reset to its previous value.
-      // A correct cache must return the OLD cached value, not re-read these bytes.
-      const cachedSize = statSync(configFile).size;
-      const sneaky = JSON.stringify({ cloudApiKey: 'sneaky-disk-edit' }, null, 2);
-      expect(sneaky.length).toBeLessThan(cachedSize);
-      writeFileSync(configFile, sneaky.padEnd(cachedSize - 1, ' ') + '\n');
+      // Mutate the on-disk bytes OUT OF BAND (no public API), keeping every
+      // field the cache key used to compare: same file (in place, same inode),
+      // same size (a same-length value; the stale `_sig` kept) and the mtime
+      // reset to its previous value. Only ctime moves, and nothing restores it
+      // (#878), so the edit is re-read and fails its signature — it is not
+      // answered with the cached value and its old `valid` verdict.
+      const signed = readFileSync(configFile, 'utf-8');
+      const edited = signed.replace('"cached-value"', '"sneaky-edit!"');
+      expect(edited.length).toBe(signed.length);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30); // coarse ctime clock
+      writeFileSync(configFile, edited);
       utimesSync(configFile, mtime, mtime);
-      expect(statSync(configFile).size).toBe(cachedSize);
       const second = config.readRawConfig();
-      expect(second.cloudApiKey).toBe('cached-value'); // served from cache
+      expect(second.cloudApiKey).toBe('sneaky-edit!');
+      expect(config.isConfigTampered()).toBe(true);
+      // The writer refuses the edited bytes and leaves them on disk.
+      expect(() => config.setCloudConfig({ cloudApiKey: 'new-value' })).toThrow(config.ConfigIntegrityRefusal);
+      expect(readFileSync(configFile, 'utf-8')).toBe(edited);
 
-      // Bump the mtime forward → cache key changes → real re-read.
-      utimesSync(configFile, mtime + 5, mtime + 5);
-      const third = config.readRawConfig();
-      expect(third.cloudApiKey).toBe('sneaky-disk-edit');
-
-      // A write through the public API must invalidate the cache too.
+      // The original signed bytes back → valid again, and a write through the
+      // public API invalidates the cache.
+      writeFileSync(configFile, signed);
+      expect(config.readRawConfig().cloudApiKey).toBe('cached-value');
+      expect(config.isConfigTampered()).toBe(false);
       config.setCloudConfig({ cloudApiKey: 'new-value' });
       expect(config.readRawConfig().cloudApiKey).toBe('new-value');
     });

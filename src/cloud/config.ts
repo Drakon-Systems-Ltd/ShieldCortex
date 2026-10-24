@@ -129,10 +129,11 @@ function sameCacheMtime(a: number | null, b: number | null): boolean {
 }
 
 /**
- * True when `b` is the same file, at the same size and mtime, as the cached
- * `a` (#878). `mtimeTolerance` keeps the sub-millisecond slack
+ * True when `b` is the same file, at the same size, mtime and ctime, as the
+ * cached `a` (#878). `mtimeTolerance` keeps the sub-millisecond slack
  * {@link sameCacheMtime} gives a utimes-restored mtime; without it the mtime
- * must match exactly, as the mutating cache hit always required.
+ * must match exactly, as the mutating cache hit always required. ctime always
+ * matches exactly: nothing restores it, so a file it moved on is re-read.
  */
 function sameCacheFile(
   a: FileIdentity | null,
@@ -140,7 +141,7 @@ function sameCacheFile(
   opts: { mtimeTolerance?: boolean } = {},
 ): boolean {
   if (a === null || b === null) return false;
-  if (a.dev !== b.dev || a.ino !== b.ino || a.size !== b.size) return false;
+  if (a.dev !== b.dev || a.ino !== b.ino || a.size !== b.size || a.ctimeMs !== b.ctimeMs) return false;
   return opts.mtimeTolerance ? sameCacheMtime(a.mtimeMs, b.mtimeMs) : a.mtimeMs === b.mtimeMs;
 }
 
@@ -812,13 +813,19 @@ export function inspectConfigIntegrity(): ConfigIntegrityReport {
   return { path, verdict };
 }
 
-interface FileIdentity { dev: number; ino: number; size: number; mtimeMs: number }
+/**
+ * `ctimeMs` is in the key because user space cannot set it (#878): an in-place
+ * edit at the same size with the mtime restored by `utimes` keeps dev, ino,
+ * size and mtime, but moves ctime. Where a filesystem does not track ctime it
+ * reads constant, and the key is no weaker than without it.
+ */
+interface FileIdentity { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }
 
 /** What identifies the file at `path` now (following a leaf symlink), or null if it cannot be stat'd. */
 function fileIdentity(path: string): FileIdentity | null {
   try {
     const st = statSync(path);
-    return { dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs };
+    return { dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs };
   } catch {
     return null;
   }
@@ -1463,7 +1470,15 @@ function configIsSymlink(configFile: string): boolean {
  * (#878). Refuse instead, before anything touches disk.
  */
 function refuseIfConfigIsSymlink(configFile: string): void {
-  if (configIsSymlink(configFile)) throw new Error(configSymlinkRefusalMessage(configFile));
+  if (configIsSymlink(configFile)) throw new ConfigSymlinkRefusal(configFile);
+}
+
+/** Typed so a skip-policy writer can decline a link that appeared mid-write (#878). */
+class ConfigSymlinkRefusal extends Error {
+  constructor(configFile: string) {
+    super(configSymlinkRefusalMessage(configFile));
+    this.name = 'ConfigSymlinkRefusal';
+  }
 }
 
 function configSymlinkRefusalMessage(configFile: string): string {
@@ -1550,7 +1565,19 @@ function mutateRawConfig(
     return false;
   }
   fn(data);
-  writeRawConfig(data);
+  try {
+    writeRawConfig(data);
+  } catch (err) {
+    // A link put in place after the check above: same policy as one found by it.
+    if (err instanceof ConfigSymlinkRefusal && onParseFail === 'skip') {
+      if (!symlinkWriteRefusalWarned) {
+        symlinkWriteRefusalWarned = true;
+        console.error(`[ShieldCortex] ${err.message}`);
+      }
+      return false;
+    }
+    throw err;
+  }
   return true;
 }
 
@@ -1777,6 +1804,12 @@ export function inspectActionGuardCoreConfig(): ActionGuardCoreConfig | null {
   try {
     const state = readRawConfigState({ readOnly: true });
     if (state.parseFailed || state.readFailed) return null;
+    // `unverified` is deliberately not a null here. It covers two cases: the
+    // unsigned adoption above, and a fresh read whose verdict differs from the
+    // mutating cache warmed earlier in this process. For the second, doctor
+    // answers from the bytes on disk — what the next process to read the file
+    // will enforce — not from this process's cache, unlike
+    // readActionGuardCoreConfigReadOnly, which reports it as unknown.
     return resolveActionGuardCore(state.data);
   } catch {
     return null;
