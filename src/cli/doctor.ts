@@ -126,9 +126,10 @@ import {
 // loaded with a runtime `import()` inside runDoctorAiSection() below, so a
 // plain `shieldcortex doctor` never touches either module.
 import {
-  getActionGuardCoreConfig,
+  ConfigIntegrityRefusal,
   getConfigDir,
   hasTrustedMemorySidecarPosture,
+  inspectActionGuardCoreConfig,
   inspectConfigIntegrity,
   readRawConfig,
   migrateInterceptorActionGuardAlias,
@@ -4828,16 +4829,12 @@ function openclawGatePosture(live: ReturnType<typeof readOpenClawPluginGuardLive
 
 /** #536: any live enforcing plane, not only the OpenClaw plugin flags. */
 export function readHostGatePlanes(hostHome?: string): HostGatePlanes {
-  let signedEnabled = false;
-  let signedEnforce = false;
-  try {
-    const core = getActionGuardCoreConfig();
-    signedEnabled = core.enabled;
-    signedEnforce = core.enabled && core.enforce;
-  } catch {
-    signedEnabled = false;
-    signedEnforce = false;
-  }
+  // #878: the side-effect-free reader. getActionGuardCoreConfig() adopts an
+  // unsigned file and self-heals a stale signature, so doctor asking the
+  // question used to change the file it was reporting on.
+  const core = inspectActionGuardCoreConfig();
+  const signedEnabled = core?.enabled === true;
+  const signedEnforce = signedEnabled && core?.enforce === true;
   return {
     signedEnabled,
     signedEnforce,
@@ -5207,9 +5204,9 @@ export function policyLockRows(): CheckResult[] {
   const rows: CheckResult[] = [];
   const label = 'Action guard';
 
-  // #647: inspected FIRST and without side effects — the accessor below may
-  // adopt an unsigned file or self-heal a stale signature, and the row should
-  // name what was on disk when doctor looked, not what the look turned it into.
+  // #647: inspected FIRST and without side effects, so the row names what was
+  // on disk when doctor looked. #878: every read below is side-effect free
+  // too — nothing here adopts an unsigned file or self-heals a stale one.
   const integrity = inspectConfigIntegrity();
   const state = readPolicyLock({ audit: false, warn: false });
   const summary = describePolicyLock(state);
@@ -5217,9 +5214,7 @@ export function policyLockRows(): CheckResult[] {
   // Guard off, the OpenClaw plugin was off, and this row still FAILed because
   // config.json said enabled:true. FAIL only when a live plane is actually
   // gating — otherwise operators panic-uninstall a healthy box.
-  const signedOn = (() => {
-    try { return getActionGuardCoreConfig().enabled; } catch { return false; }
-  })();
+  const signedOn = inspectActionGuardCoreConfig()?.enabled === true;
   const pluginLive = readOpenClawPluginGuardLive();
   const pluginOff = pluginPlaneDisarmed(pluginLive);
   const planes = readHostGatePlanes();
@@ -5397,7 +5392,22 @@ export function fixActionGuardConfig(): { changed: boolean; backupPath?: string;
   // migrated file is re-signed with a fresh `_sig`. The previous bare
   // fs.writeFileSync here carried the stale signature through, so running the
   // fix ITSELF tripped the integrity check and forced strict mode.
-  migrateInterceptorActionGuardAlias();
+  try {
+    migrateInterceptorActionGuardAlias();
+  } catch (err) {
+    // #878: the file was inspected above, but it can still fail its integrity
+    // check by the time the migration reads it again. Say that, not the
+    // generic refusal: the migration wrote nothing, and the backup holds the
+    // bytes as they were before.
+    if (err instanceof ConfigIntegrityRefusal) {
+      throw new Error(
+        `not migrating: ${configPath} changed during the migration — it passed the integrity check when doctor ` +
+        'inspected it, and failed it (verdict: tampered) when the migration read it again. Nothing was written. ' +
+        `The backup taken before the change is at ${backupPath}. Review the file with \`shieldcortex config --resign\``,
+      );
+    }
+    throw err;
+  }
   return {
     changed: true,
     backupPath,
@@ -5441,13 +5451,10 @@ export async function checkActionGuardReadiness(
     return readinessRowsForSurface(summary, '');
   }
   if (!deps.summaries) {
-    // Cheap pre-check: no gate configured → no audit read at all.
-    try {
-      const core = getActionGuardCoreConfig();
-      if (!core.enabled || !core.enforce || !core.readinessGate) return [];
-    } catch {
-      return [];
-    }
+    // Cheap pre-check: no gate configured → no audit read at all. Read-only
+    // (#878), like every other doctor read of the core config.
+    const core = inspectActionGuardCoreConfig();
+    if (!core || !core.enabled || !core.enforce || !core.readinessGate) return [];
   }
   let summaries: import('./guard.js').ReadinessSummary[];
   try {

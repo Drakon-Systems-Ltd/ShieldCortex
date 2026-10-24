@@ -406,8 +406,8 @@ describe('a config with no signature yet is unknown read-only, never off', () =>
   });
 
   // B3-R3: empty/whitespace early-return used to skip the cache-disagreement
-  // check, so a file emptied in place (mtime restored) read as off while the
-  // getter still served cached strict-ON.
+  // check, so a file blanked in place (same size, mtime restored) read as off
+  // while the getter still served cached strict-ON.
   (asRoot ? it.skip : it)('B3-R3: emptying config.json in place after a cached strict verdict is unknown, not off', async () => {
     try {
       writeConfig({ actionGuard: { enabled: false } });
@@ -417,7 +417,9 @@ describe('a config with no signature yet is unknown read-only, never off', () =>
       fs.chmodSync(configDir, 0o700);
       const cfg = file('config.json');
       const st = fs.statSync(cfg);
-      fs.writeFileSync(cfg, '  \n');
+      // In place and at the same size: #878 keys the cache on inode and size
+      // as well as mtime, so only a same-size blanking still hits it.
+      fs.writeFileSync(cfg, ' '.repeat(st.size - 1) + '\n');
       fs.utimesSync(cfg, st.atime, st.mtime);
       expect(config.readActionGuardCoreConfigReadOnly()).toBeNull();
       const update = await import('../update.js');

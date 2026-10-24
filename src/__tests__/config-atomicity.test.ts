@@ -242,11 +242,17 @@ describe('config atomicity + integrity hardening', () => {
       const first = config.readRawConfig();
       expect(first.cloudApiKey).toBe('cached-value');
 
-      // Mutate the on-disk bytes OUT OF BAND (no public API) but reset the
-      // mtime to its previous value so the cache key is unchanged. A correct
-      // mtime cache must return the OLD cached value, not re-read these bytes.
-      writeFileSync(configFile, JSON.stringify({ cloudApiKey: 'sneaky-disk-edit' }, null, 2) + '\n');
+      // Mutate the on-disk bytes OUT OF BAND (no public API) but keep the
+      // cache key unchanged: same file (in place, same inode), same size
+      // (#878 keys on dev/inode/size too — padded with trailing whitespace,
+      // which JSON.parse ignores) and the mtime reset to its previous value.
+      // A correct cache must return the OLD cached value, not re-read these bytes.
+      const cachedSize = statSync(configFile).size;
+      const sneaky = JSON.stringify({ cloudApiKey: 'sneaky-disk-edit' }, null, 2);
+      expect(sneaky.length).toBeLessThan(cachedSize);
+      writeFileSync(configFile, sneaky.padEnd(cachedSize - 1, ' ') + '\n');
       utimesSync(configFile, mtime, mtime);
+      expect(statSync(configFile).size).toBe(cachedSize);
       const second = config.readRawConfig();
       expect(second.cloudApiKey).toBe('cached-value'); // served from cache
 
@@ -334,7 +340,6 @@ describe('config atomicity + integrity hardening', () => {
       { name: 'setCloudSyncControls', policy: 'throw', invoke: (c) => c.setCloudSyncControls({ contentMode: 'metadata' }) },
       { name: 'addTrustedSkill', policy: 'throw', invoke: (c) => c.addTrustedSkill('/some/new/skill.md') },
       { name: 'removeTrustedSkill', policy: 'throw', invoke: (c) => c.removeTrustedSkill('/some/skill.md') },
-      { name: 'setCloudIronDomeCache', policy: 'throw', invoke: (c) => c.setCloudIronDomeCache({ patterns: [] }) },
       { name: 'setProactiveRecall', policy: 'throw', invoke: (c) => c.setProactiveRecall(true) },
       { name: 'restore410Defaults', policy: 'throw', invoke: (c) => c.restore410Defaults() },
       { name: 'setVerifyConfig', policy: 'throw', invoke: (c) => c.setVerifyConfig({ verifyEnabled: true }) },
@@ -350,6 +355,7 @@ describe('config atomicity + integrity hardening', () => {
       { name: 'getDeviceId (lazy persist)', policy: 'skip', invoke: (c) => { c.getDeviceId(); } },
       { name: 'getDeviceName (lazy persist)', policy: 'skip', invoke: (c) => { c.getDeviceName(); } },
       { name: 'updateLastSyncAt → persistLastSyncAt', policy: 'skip', invoke: (c) => { c.updateLastSyncAt(); c.flushLastSyncAt(); } },
+      { name: 'setCloudIronDomeCache (iron-dome-sync, #878)', policy: 'skip', invoke: (c) => c.setCloudIronDomeCache({ patterns: [] }) },
     ];
 
     for (const w of writers) {
