@@ -1688,22 +1688,38 @@ function safeGuardOutcomeReason(verdict, outcome, event) {
   return 'Action Guard denied the tool call; inspect local audit for details.';
 }
 
-function terminalDecisionReason(verdict, outcome, event) {
+/** The hook's own actionId shape (mintActionId); anything else stays a placeholder. */
+const AGENT_ACTION_ID = /^act-[0-9a-f]{16}$/;
+
+function terminalDecisionReason(verdict, outcome, event, { actionId, agentNotice, held } = {}) {
   const signals = safeSignalList(verdict?.signals);
   const suffix = signals.length > 0 ? ` [${signals.join(', ')}]` : '';
+  const id = typeof actionId === 'string' && AGENT_ACTION_ID.test(actionId) ? actionId : '<actionId>';
   const nextStep = outcome === 'denied_no_prompt_surface'
     ? (
       // UX: tell the AGENT what to do next — pinned lane or one-shot human approve.
       // Never steer toward enforce:false / broad autoApprove (#386).
-      ' Headless session: do NOT retry freehand network/gh/curl. '
+      // #853 N1 — "do not retry" would contradict a held card's one allowed
+      // retry; what is ruled out is a freehand workaround.
+      ' Headless session: do NOT work around this with a freehand network/gh/curl call. '
       + 'If a reviewed/pinned work-lane script exists for this job, run that path instead. '
-      + 'Otherwise wait for operator: shieldcortex approve --denial <actionId> (one-shot), or an Approve-once card if raised. '
+      // #853 U1 — the retry plane's notice (card handed off, or why there is
+      // none) is what the model reads; stderr alone may never reach it.
+      + (typeof agentNotice === 'string' && agentNotice
+        ? `${agentNotice} `
+        : `Otherwise wait for operator: shieldcortex approve --denial ${id} (one-shot), or an Approve-once card if raised. `)
       + 'Do not set actionGuard.enforce:false.'
     )
     : '';
   const severity = safeSeverity(verdict?.severity, event);
   const severityPrefix = severity === 'critical' ? 'Catastrophic-tier. ' : '';
-  return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${nextStep}${suffix}`;
+  // #853 §4.1 — a held card's machine-readable marker is the reason's LAST
+  // line, so a launcher can match it without parsing prose. Only with a real
+  // actionId: a placeholder would be a marker nothing can resolve.
+  const heldLine = outcome === 'denied_no_prompt_surface' && held === true && id !== '<actionId>'
+    ? `\nHELD ${id}`
+    : '';
+  return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${nextStep}${suffix}${heldLine}`;
 }
 
 function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey, actionId, notify }) {
@@ -1841,6 +1857,9 @@ async function raiseRetryCard(retry, notify, ctx) {
     // does; until such a caller exists, the card stays silent about it rather
     // than printing a number nobody measured.
     const params = retry.mod.buildRetryCardParams({
+      // #853 — What / Why / Who leads when the card builder is loaded; absent,
+      // the builder keeps the #310 redacted-surface layout.
+      ...(ctx.card ? { card: ctx.card } : {}),
       tool: ctx.tool,
       signals: ctx.signals,
       redactedSurface: ctx.redactedSurface,
@@ -1873,6 +1892,52 @@ async function raiseRetryCard(retry, notify, ctx) {
       try { closeSync(nonceFd); } catch { /* ignore */ }
     }
   }
+}
+
+/**
+ * #853 — the What / Why / Who for a held (#310) retry card, built on this box
+ * like the live-hold card (#648): every target through the credential
+ * redactor. The waiter's card is the only consumer; the webhook and audit
+ * rows keep the values-free surface. Never throws; undefined falls back to
+ * the #310 layout.
+ */
+function heldRetryCardFor(notify, { toolName, toolInput, verdict, sessionKey, cwd }) {
+  if (typeof notify?.buildApprovalCard !== 'function') return undefined;
+  try {
+    return notify.buildApprovalCard({
+      tool: String(toolName ?? ''),
+      input: toolInput,
+      signals: Array.isArray(verdict?.signals) ? verdict.signals.map(String) : [],
+      plane: 'claude-code',
+      sessionId: notificationContext(sessionKey).sessionId,
+      cwd: typeof cwd === 'string' ? cwd : undefined,
+      agentPid: process.ppid,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * #853 — what the AGENT is told after a retry card is raised. Honest on all
+ * three counts: the call did not run; the card was handed to a detached
+ * waiter, which is NOT proof it reached the operator; and "Allow one retry"
+ * only takes effect if this same call is retried inside the grant window —
+ * the hook cannot pause a call, so nothing here waits for the tap and nothing
+ * runs by itself. A one-shot worker is asked to end with `HELD <actionId>`
+ * for its launcher (§4.1); the hook never claims the launcher acts on it.
+ */
+function retryCardAgentNotice(tool, actionId, ttlMs) {
+  const minutes = Math.max(1, Math.round(Number(ttlMs) / 60_000) || 1);
+  return `${tool} did NOT run (${actionId}); it is held for the operator. An approve-once card was handed to the operator's card channel — delivery is not confirmed. `
+    + `If they choose "Allow one retry", ONE retry of this SAME call, unchanged and from the same directory, within ${minutes}m of their decision is let through; nothing runs unless that retry happens. A retry before they decide is refused again; if they deny or do not answer, nothing runs. `
+    + `If you are a one-shot worker that cannot retry, end your final output with this exact line on its own: HELD ${actionId}`;
+}
+
+/** #853 — the no-card counterpart: retry cards are on, but none was raised. */
+function noRetryCardAgentNotice(reason, actionId) {
+  return `This call did NOT run. No Approve card (${reason || 'unknown'}) for ${actionId}. `
+    + `Use a pinned work lane if one exists, or ask the operator for: shieldcortex approve --denial ${actionId}`;
 }
 
 /**
@@ -1981,6 +2046,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
   // Only for an event that survived the suppression check, and only once the
   // digest window whose START it shares has been read (R3 rule 7).
   let retryCard = null;
+  let agentNotice = null;
   if (retry && retry?.config?.retryCards === true && retryStep?.ok && !retrySuppressed) {
     try {
       retryCard = await raiseRetryCard(retry, notify, {
@@ -1990,21 +2056,20 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
         signals: safeSignalList(verdict?.signals),
         redactedSurface: redactedActionSurface(toolName, toolInput),
         cwd: retryStep.row?.originScope?.cwd,
+        card: heldRetryCardFor(notify, { toolName, toolInput, verdict, sessionKey, cwd: retryStep.row?.originScope?.cwd }),
         ...retryBudgetWindow(digestDecision),
       });
     } catch {
       retryCard = { raised: false, reason: 'card path error' };
     }
+    // #853 U1 — the same text goes to the model (permissionDecisionReason,
+    // via the caller) and to stderr for the operator's terminal.
     if (retryCard?.raised) {
-      console.error(
-        `[shieldcortex] Approve-once card raised for ${safeToolName(toolName)} (${id}) — operator can tap Approve once or Deny. Do not freehand-retry network.`,
-      );
+      agentNotice = retryCardAgentNotice(safeToolName(toolName), id, retry.config.retryGrantTtlMs);
     } else if (retry?.config?.retryCards === true && retryCard && !retryCard.raised) {
-      console.error(
-        `[shieldcortex] No Approve card (${retryCard.reason || 'unknown'}) for ${id}. `
-        + 'Use a pinned work lane if one exists, or: shieldcortex approve --denial ' + id,
-      );
+      agentNotice = noRetryCardAgentNotice(retryCard.reason, id);
     }
+    if (agentNotice) console.error(`[shieldcortex] ${agentNotice}`);
   }
 
   if (retrySuppressed) {
@@ -2141,6 +2206,8 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
     attempts: deliveryResult?.attempts ?? [],
     notify: notifyStatus,
     actionId: id,
+    agentNotice,
+    held: retryCard?.raised === true,
   };
 }
 
@@ -2990,7 +3057,11 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
   console.error(
     `[shieldcortex] action-guard DENIED ${safeToolName(toolName)}: approval required, but ${noPromptSurface} — denying rather than raising a prompt nothing will answer.`,
   );
-  emitDecision('deny', terminalDecisionReason({ ...auditVerdict, reason }, 'denied_no_prompt_surface', 'action_guard_denial'));
+  emitDecision('deny', terminalDecisionReason({ ...auditVerdict, reason }, 'denied_no_prompt_surface', 'action_guard_denial', {
+    actionId: notified?.actionId ?? actionId,
+    agentNotice: notified?.agentNotice,
+    held: notified?.held === true,
+  }));
 }
 
 /**
