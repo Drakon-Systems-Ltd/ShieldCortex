@@ -201,9 +201,10 @@ export function labelHistoryMessage(msg: unknown): LabelledInputs {
  * Every text this hook will scan for one `llm_input` event, each with the
  * origin it was declared under.
  *
- * The live `prompt` is the turn the host attributes to the sender, so it is
- * `user` — the same judgement the conversation-trust layer already makes
- * about a turn. History is labelled per message and bounded to the last
+ * A bare `prompt` can be a host-assembled bundle (including quoted history),
+ * not just the sender's words. The hook exposes no attested origin for its
+ * constituent spans, so retain `unknown`. Text markers MUST NOT grant trust
+ * or change provenance. Structured history is labelled per message and bounded to the last
  * {@link HISTORY_SCAN_LIMIT}, as before.
  */
 export function labelLlmInput(event: {
@@ -212,7 +213,7 @@ export function labelLlmInput(event: {
 }): LabelledInputs {
   const out: LabelledInput[] = [];
   if (typeof event?.prompt === 'string' && event.prompt) {
-    out.push({ text: event.prompt, label: 'user' });
+    out.push({ text: event.prompt, label: 'unknown' });
   }
   const history = Array.isArray(event?.historyMessages) ? event.historyMessages : [];
   const labelled: LabelledInput[] = [];

@@ -304,10 +304,11 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     name: 'Heroku API Key',
     type: 'api_key',
     provider: 'heroku',
-    regex: /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/g,
+    // A UUID alone is a public identifier, not evidence of a Heroku key.
+    // Require same-line provider context; capture only the credential value.
+    regex: /\bheroku(?:[_ -](?:api[_ -]?)?key|[_ -]token)?\b[^\r\n]{0,64}?\b([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\b/gi,
     severity: 'low',
     confidence: 0.30,
-    // UUIDs are very common — only flagged as low confidence
   },
   // Hugging Face
   {
