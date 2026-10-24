@@ -22,7 +22,14 @@ import { execFile } from 'node:child_process';
 import { randomBytes, randomInt } from 'node:crypto';
 import readline from 'node:readline/promises';
 
-import { actionGuardPosture, getActionGuardCoreConfig, readRawConfig, type ActionGuardPosture } from '../cloud/config.js';
+import {
+  actionGuardPosture,
+  getActionGuardCoreConfig,
+  inspectActionGuardCoreConfig,
+  readRawConfig,
+  type ActionGuardCoreConfig,
+  type ActionGuardPosture,
+} from '../cloud/config.js';
 import { readPolicyLock } from '../defence/iron-dome/policy-lock.js';
 import {
   DEFAULT_PRIOR_POLICY_CARRY,
@@ -118,9 +125,10 @@ export interface ReadinessSummary {
   lastPromotion: PromotionNotice | null;
 }
 
-function rawActionGuard(): Record<string, unknown> {
+/** `readOnly` (doctor, #878): no legacy-signature adoption, key mint or self-heal rewrite. */
+function rawActionGuard(opts: { readOnly?: boolean } = {}): Record<string, unknown> {
   try {
-    const raw = readRawConfig();
+    const raw = readRawConfig({ readOnly: opts.readOnly === true });
     const g = raw.actionGuard;
     return g && typeof g === 'object' && !Array.isArray(g) ? (g as Record<string, unknown>) : {};
   } catch {
@@ -137,13 +145,25 @@ function lockPresent(): boolean {
   }
 }
 
-export function buildReadinessSummary(opts: { now?: number; home?: string; adapter?: ReadinessAdapter } = {}): ReadinessSummary {
+/** What an unreadable or unparseable config resolves to on the ordinary read path. */
+const UNREADABLE_CORE: ActionGuardCoreConfig = { enabled: false, enforce: true, readinessGate: false };
+
+/**
+ * `readOnly` (#878): every config read in the summary goes through the
+ * side-effect-free readers, so doctor's readiness row cannot adopt a legacy
+ * signature, mint `.integrity-key` or self-heal `config.json`. The `guard`
+ * command and its other callers keep the ordinary (mutating) reads.
+ */
+export function buildReadinessSummary(
+  opts: { now?: number; home?: string; adapter?: ReadinessAdapter; readOnly?: boolean } = {},
+): ReadinessSummary {
   const now = opts.now ?? Date.now();
   const adapter = opts.adapter ?? 'claude-code-hook';
-  const core = getActionGuardCoreConfig();
+  const readOnly = opts.readOnly === true;
+  const core = readOnly ? (inspectActionGuardCoreConfig() ?? UNREADABLE_CORE) : getActionGuardCoreConfig();
   const lockOverrides = core.readinessGate && lockPresent();
   const posture = lockOverrides ? 'enforce' : actionGuardPosture(core);
-  const rawGuard = rawActionGuard();
+  const rawGuard = rawActionGuard({ readOnly });
   const channel = describeHumanChannel(rawGuard.notify);
   // `home` pins the evidence tree (tests); production reads the configured
   // root plus the hook's home-directory audit.
@@ -182,7 +202,7 @@ export function buildReadinessSummary(opts: { now?: number; home?: string; adapt
 }
 
 /** #509 r7: one summary per gated surface (Claude Code hook, OpenClaw). */
-export function buildReadinessSummaries(opts: { now?: number; home?: string } = {}): ReadinessSummary[] {
+export function buildReadinessSummaries(opts: { now?: number; home?: string; readOnly?: boolean } = {}): ReadinessSummary[] {
   return READINESS_ADAPTERS.map((adapter) => buildReadinessSummary({ ...opts, adapter }));
 }
 
