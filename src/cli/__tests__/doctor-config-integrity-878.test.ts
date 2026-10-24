@@ -146,6 +146,51 @@ describe('#878 doctor reads the Action Guard config without side effects', () =>
     expectUnchanged(before);
   });
 
+  describe('unsigned with Guard off: doctor and the runtime getter agree', () => {
+    const OFF = { enabled: false, enforce: false };
+    const keyDir = () => path.join(configDir, '.integrity-key');
+
+    /** The getter's answer, in a fresh module so no cached key can carry the adoption. */
+    async function runtimeCore(): Promise<{ enabled: boolean; enforce: boolean }> {
+      jest.resetModules();
+      const fresh = await import('../../cloud/config.js');
+      fresh.clearCloudConfigCache();
+      return fresh.getActionGuardCoreConfig();
+    }
+
+    it('adoptable: the plane reports the adopted Guard-off, as the getter does', async () => {
+      const before = unsignedFixture(OFF);
+      expect(doctor.readHostGatePlanes()).toMatchObject({ signedEnabled: false, signedEnforce: false });
+      expect(config.inspectActionGuardCoreConfig()).toMatchObject({ enabled: false });
+      expectUnchanged(before);
+      expect(await runtimeCore()).toMatchObject({ enabled: false });
+    });
+
+    it('`.integrity-key` is a directory: the plane does not report Guard off while the getter enforces', async () => {
+      const before = unsignedFixture(OFF);
+      fs.mkdirSync(keyDir());
+      const dirBefore = { ...before, entries: fs.readdirSync(configDir).sort() };
+      const keyDirEntries = fs.readdirSync(keyDir());
+
+      const planes = doctor.readHostGatePlanes();
+      const inspected = config.inspectActionGuardCoreConfig();
+      await runDoctorActionGuardChecks();
+      // Doctor wrote nothing, and the directory is still a directory, still empty.
+      expectUnchanged(dirBefore);
+      expect(fs.statSync(keyDir()).isDirectory()).toBe(true);
+      expect(fs.readdirSync(keyDir())).toEqual(keyDirEntries);
+
+      // Adoption cannot succeed, so the getter classifies the file tampered.
+      const runtime = await runtimeCore();
+      expect(runtime).toMatchObject({ enabled: true, enforce: true });
+      expect(inspected).not.toBeNull();
+      expect(inspected!.enabled).toBe(runtime.enabled);
+      expect(inspected!.enforce).toBe(runtime.enforce);
+      expect(planes.signedEnabled).toBe(runtime.enabled);
+      expect(fs.statSync(keyDir()).isDirectory()).toBe(true);
+    });
+  });
+
   it('self-heal: no re-sign — config.json bytes, mtime and the legacy signature are unchanged', async () => {
     const before = selfHealFixture();
     await runDoctorActionGuardChecks();

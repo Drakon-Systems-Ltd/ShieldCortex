@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync, lstatSync, renameSync, rmSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync, lstatSync, renameSync, rmSync, accessSync, constants as fsConstants } from 'fs';
 import { join, resolve } from 'path';
 import { homedir, hostname } from 'os';
 import { randomUUID, randomBytes, createHash, createHmac, timingSafeEqual } from 'crypto';
@@ -1801,22 +1801,80 @@ export function readActionGuardCoreConfigReadOnly(): ActionGuardCoreConfig | nul
  * ordinary read will adopt it — as trusted — rather than as unknown, since
  * doctor's integrity row already says that is what will happen. Nothing is
  * adopted, re-signed, self-healed or cached, so running doctor cannot change
- * the file it is reporting on. `null` only when the file exists but could not
- * be read or parsed.
+ * the file it is reporting on.
+ *
+ * That answer is given only when a read-only look finds nothing in the way of
+ * the adoption (see {@link unsignedAdoptionOutlook}). A directory at
+ * `.integrity-key` makes it fail, so the getter will classify the file
+ * tampered: answered as that strict posture. Anything else in the way is
+ * `null` (unknown), as is a file that exists but could not be read or parsed.
  */
 export function inspectActionGuardCoreConfig(): ActionGuardCoreConfig | null {
   try {
     const state = readRawConfigState({ readOnly: true });
     if (state.parseFailed || state.readFailed) return null;
-    // `unverified` is deliberately not a null here. It covers two cases: the
+    // `unverified` is otherwise not a null here. It covers two cases: the
     // unsigned adoption above, and a fresh read whose verdict differs from the
     // mutating cache warmed earlier in this process. For the second, doctor
     // answers from the bytes on disk — what the next process to read the file
     // will enforce — not from this process's cache, unlike
     // readActionGuardCoreConfigReadOnly, which reports it as unknown.
+    if (state.integrity === 'unverified') {
+      const outlook = unsignedAdoptionOutlook();
+      if (outlook === 'unknown') return null;
+      if (outlook === 'fails') {
+        // What a failed adoption leaves the getter with: the tampered view.
+        const unlocked = readRawConfigStateUnlocked({ readOnly: true });
+        if (unlocked.parseFailed || unlocked.readFailed) return null;
+        return resolveActionGuardCore(
+          applyPolicyLock(applyStrictFailClosedPosture(unlocked.data), readPolicyLock({ audit: false })),
+        );
+      }
+    }
     return resolveActionGuardCore(state.data);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Read-only: what stands in the way of the ordinary read adopting an unsigned
+ * config, which reads or mints `.integrity-key` and then writes `.config-sig`
+ * (#878). `'fails'` only where the failure does not depend on privileges: a
+ * directory at the key path fails both the read and the mint. `'unknown'` for
+ * any other obstacle visible without writing (a non-file key, a dangling link
+ * at either path, a directory that is not writable). `'unobstructed'` is not a
+ * promise that the writes will succeed — only that nothing here says otherwise.
+ */
+function unsignedAdoptionOutlook(): 'unobstructed' | 'fails' | 'unknown' {
+  const keyFile = getIntegrityKeyFile();
+  if (!(cachedIntegrityKey && cachedIntegrityKeyFile === keyFile)) {
+    try {
+      const st = statSync(keyFile);
+      if (st.isDirectory()) return 'fails';
+      if (!st.isFile()) return 'unknown';
+      accessSync(keyFile, fsConstants.R_OK);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return 'unknown';
+      if (lstatExists(keyFile)) return 'unknown'; // a dangling link
+    }
+  }
+  if (lstatExists(getSigFile())) return 'unknown'; // a dangling link (existsSync said no file)
+  // `.config-sig` is always written, and a missing key is minted beside it.
+  try {
+    accessSync(getConfigDir(), fsConstants.W_OK | fsConstants.X_OK);
+  } catch {
+    return 'unknown';
+  }
+  return 'unobstructed';
+}
+
+function lstatExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
   }
 }
 
