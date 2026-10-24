@@ -3,32 +3,41 @@
 **Status:** Design only. No source change in this branch.
 **Issue:** #907 (raised by Michael, 23 Oct 2026). **Author:** TARS (improvement loop).
 **Relates to:** ADR-002 (`docs/architecture/ADR-002-provenance-first-enforcement.md`) — this
-is one DENY row and one HOLD row under that ADR's effect decision, plus the
-provenance store the ADR's §2.2 taint contract already assumes. ADR-001's
-intent-first law, catastrophe hard-stops and credential non-exfil rule are
-unchanged.
+is one DENY row and two HOLD rows under that ADR's effect decision, plus a provenance store.
+ADR-002's §2.2 taint store is **not wired** (`session-taint-lineage.ts` says so); this design
+does not depend on it for any floor row and does not claim it (§4, Q1). ADR-001's intent-first
+law, catastrophe hard-stops and credential non-exfil rule are unchanged.
 
-> **Invariant up front (ADR-002 / M1).** The Guard is **OFF by default**. Everything
-> below is a rule that applies *only when the Guard is enabled*. Nothing here turns
-> the Guard on, changes its default posture, or changes who it is on for. "Routine
-> work never trips the Guard" is a hard constraint on the decision table in §4, not
-> an aspiration — and §4 is explicit that an *honest* always-deny floor cannot cover
-> the issue's compile-then-run case without blocking routine coding work, so that
-> case is a door (HOLD), not the floor, and the floor is narrowed to the cases with
-> no routine analogue.
+> **Invariant up front (ADR-002 / M1).** The Guard is **OFF by default**. Everything below is a
+> rule that applies *only when the Guard is enabled*. Nothing here turns the Guard on, changes
+> its default posture, or changes who it is on for. The **floor** (rows A/C/D) is held to "never
+> fires on routine work": it fires only on directly-written native bytes, never on a compiler's
+> output. The issue's compile-then-run case is **not** in the floor; it is row B, whose verdict
+> is owner question Q1 (AUDIT recommended — and AUDIT is **not** a door). The **unknown door**
+> (row J) is a new HOLD on routine work in one place, stated plainly rather than hidden: a native
+> binary at a project-local path whose production the guard did not observe — a pre-existing
+> `./target/debug/app`, a build driver's output — is held (§4.2, §9).
 
-> **Round-2 note (review fold).** Round 1 (Astra `gpt-6-astra-900k`, Grok `grok-4.7`)
-> returned CHANGES REQUESTED. This revision folds every blocker. The three design
-> decisions that moved are called out where they land: (1) the ledger records a
-> write-family target **regardless of extension or content** — the native-vs-source
-> distinction is made at *exec time* by a header read, not at *write time* by the
-> old script-path/executable-content predicates, which do not recognise native bytes
-> (§3.1, §3.4); (2) "not found in the ledger" has **one** meaning — unknown provenance
-> → the existing brokerable door, never ALLOW; the ALLOW rows fire on a **positive**
-> pre-existing/installed signal, not on absence (§3.1, §4); (3) on a Hermes outage the
-> ledger-dependent floor rows A/C **fail open (allow) for unmatched shapes** — this is
-> ADR-002 §own documented partial fail-open, not a door; the earlier "fall to a door"
-> claim was wrong and is removed (§6, Q4).
+> **Round-3 note (last fold under the cap).** Round 2 (Astra, Grok) returned CHANGES REQUESTED.
+> This revision **removes or narrows** claims rather than adding coverage. The moves, each stated
+> once and referenced elsewhere:
+> 1. **Rule H** (§3.1): install-root location never certifies non-agent authorship by itself.
+>    Relief at an install root is reached only through a **complete** per-session record of
+>    write-family targets inside install roots; a write into an install root that cannot be
+>    durably recorded is held instead of proceeding unrecorded. Loss, eviction and overflow of
+>    those records are made impossible by construction or fail to the door.
+> 2. **Rule P** (§3.1): a record is **intent**; a header at exec proves **format**, not
+>    authorship. A record counts as the producer of the current bytes only if the file's content
+>    identity changed after the recorded call. An unproved record — a failed write, a metadata-only
+>    `chmod`, a failed compile — is treated as **no record**. An unproved compile label can no
+>    longer weaken the floor.
+> 3. **Build drivers are demoted** (§3.4): only a recognised compiler with a literal, resolvable
+>    `-o` output gets compile lineage. `cargo`/`go test`/`make`/`npm run build`/`pip install`
+>    outputs are **unsupported-output**: a later exec of them is row J, not row B.
+> 4. **"Not in the ledger"** means unknown **only for a native image at a non-install path** (§3.1).
+> 5. **Taint (B′)** is not wired; B′ HOLD is not a PR 1 result (§4, Q1).
+> 6. **Hermes** coverage is stated per inspected surface and per `enforce` (§6).
+> 7. §10 residuals now state the **actual** verdict (several were wrong-direction in round 2).
 
 ---
 
@@ -44,28 +53,21 @@ effect. It lists four shapes:
    execute permission, Node native addons, `dlopen`/`LD_PRELOAD` of a just-written `.so`);
 4. generate code at runtime and execute it from writable memory.
 
-Shapes 1, 3 and 4 have **no routine developer analogue** *in the directly-written form*.
-Nobody hand-writes an ELF or Mach-O and runs it, remaps a freshly written buffer as
-executable, or `LD_PRELOAD`s a `.so` they produced **by hand** (not by a compiler), as
-part of ordinary work. Those directly-written forms are the floor. The qualifier
-matters: a `.so`/`.node` that a **guard-observed compiler/build driver produced** from
-agent source is shape 2, not shape 1/3 — it carries compile lineage and is a door, not
-the floor (this is the round-1 B3 contradiction, resolved in §2 and row C of §4).
+Shapes 1, 3 and 4 have **few routine developer analogues** *in the directly-written form*.
+Nobody hand-writes an ELF or Mach-O and runs it, or `LD_PRELOAD`s a `.so` they produced **by
+hand** (not by a compiler), as part of ordinary work. Executable-memory shapes (shape 4) do have
+benign analogues — JIT, FFI and test code — and §4.2 counts them as false-positive surface. A
+`.so`/`.node` that a **guard-observed compiler** produced is shape 2, not shape 1/3 (§2).
 
-Shape 2 is the tension the design has to be honest about. **Compiling source the agent
-just wrote and running the output is both the attack path and the single most common
-thing a coding agent does.** `gcc foo.c -o foo && ./foo`, `cargo build && cargo run`,
-`go build ./... && ./app`, `npm run build && node dist/app.js` — where the agent
-authored `foo.c`/the Rust/the Go in this same session — are routine. The guard cannot
-tell a Rowhammer proof-of-concept's source from a legitimate helper's source by reading
-the content; both are "native code the agent wrote, compiled, and ran."
+Shape 2 is the tension. **Compiling source the agent just wrote and running the output is both
+the attack path and the single most common thing a coding agent does.** The guard cannot tell a
+Rowhammer proof-of-concept's source from a legitimate helper's source by reading the content.
 
 **Therefore an honest always-deny floor cannot include shape 2 without blocking routine
-compile-and-test.** Per the issue's own M1 framing and ADR-002's three-valued discipline,
-shape 2 is handled as a *door* (HOLD → the existing brokerable dangerous approval), not as
-the floor, and the default for shape 2 in an **untainted** session is an open owner
-question (§10, Q1). This is stated plainly rather than papered over with an allowlist of
-command names, which ADR-002 §2.4 forbids.
+compile-and-test.** Shape 2 is row B, whose verdict is owner question Q1 (AUDIT recommended,
+HOLD or DENY the alternatives). AUDIT is a logged, unenforced verdict — not a door. This is
+stated plainly rather than papered over with an allowlist of command names, which ADR-002 §2.4
+forbids.
 
 ---
 
@@ -76,436 +78,402 @@ may name more"):
 
 | effect kind | what it covers |
 |---|---|
-| `native-exec-of-agent-artifact` | executing, loading, or mapping-as-executable a native artifact the **agent created or modified in this session**, where the artifact did **not** come from a guard-observed compile/build of agent-authored *source* — i.e. directly-written native bytes, a `dlopen`/`LD_PRELOAD` of an agent-**written** (not compiler-produced) shared object, or mapping agent-written bytes as executable memory. **DENY floor.** |
+| `native-exec-of-agent-artifact` | executing, loading, or mapping-as-executable a native artifact whose current bytes the guard has **evidence the agent produced in this session by a write-family call** (Rule P, §3.1), and which did **not** come from a guard-observed compile — or mapping just-written bytes as executable memory (text-decidable). **DENY floor.** |
 
 and one signal that is **not** the floor:
 
 | signal | what it covers | tier |
 |---|---|---|
-| `exec-of-agent-compiled-artifact` | agent wrote *source*, the guard observed a compile/build of that source into an output, and the **agent** then runs or loads that output within the session (shape 2, **including a built `.node`/`.so` loaded via `require`/`dlopen`**) | HOLD (door), or AUDIT in an untainted session — see §4 and Q1 |
+| `exec-of-agent-compiled-artifact` | the agent ran a recognised compiler with a literal, resolvable `-o` output (§3.4), Rule P shows that compile produced the current bytes, and the **agent** then runs or loads that output (shape 2, including a compiled `.so`/`.node` loaded via `dlopen`/`require` when the load is visible) | Q1: AUDIT recommended, or HOLD, or DENY |
 
-**The compile-lineage boundary (round-1 B3).** The *only* thing that separates a floor DENY
-(row A/C) from the shape-2 door (row B) for the **same bytes at the same path** is whether
-the guard **observed a compile/build** that produced them. A `.so`/`.node` the agent wrote
-byte-for-byte with a write tool and never compiled is the floor; a `.so`/`.node` a
-guard-observed `cc`/`rustc`/`node-gyp`/`cargo` produced from agent source is the door. Row C
-in §4 carries this exception explicitly, identically to the effect-kind definition above, so
-the two cannot disagree.
+**The compile-lineage boundary.** For the same bytes at the same path, the only thing that
+separates floor (row A/C) from row B is whether Rule P names a **compiled-output** record or an
+**agent-written** record as the producer. An unproved compile record is no record (Rule P), so a
+failed compile over directly-written native bytes leaves the write record as the producer and the
+floor still fires. Row C carries the same rule, so the two cannot disagree.
 
 Signal vocabulary (kebab-case, mirrors `opaque-script-invocation`, `write-content-catastrophic`):
 
 - `native-exec-of-agent-artifact` — umbrella signal on the floor verdict.
-- `exec-agent-written-native-bytes` — shape 1 (an agent-written file whose on-disk
-  bytes are a native image: ELF / Mach-O / PE / a raw-byte blob with no reviewable source,
-  **and with no observed compile lineage**).
+- `exec-agent-written-native-bytes` — shape 1 (row A).
 - `map-exec-agent-written-memory` — shape 4 and the `mmap`/`mprotect` + execute and
-  ctypes/cffi-call-into-buffer forms of shape 3. **Decidable from program body text.**
-- `load-agent-written-native-object` — `dlopen`/`LD_PRELOAD`/`DYLD_INSERT_LIBRARIES`/
-  `require` of an agent-**written** `.so`/`.dylib`/`.node` **with no observed compile lineage**.
-- `exec-of-agent-compiled-artifact` — shape 2 (door, not floor).
+  ctypes/cffi-call-into-buffer forms of shape 3 (row D). **Decidable from inspected body text
+  only** — see §6 for which surface each plane actually inspects.
+- `load-agent-written-native-object` — shape 3 loader form (row C).
+- `exec-of-agent-compiled-artifact` — shape 2 (row B).
 - `unclassified-executable` — ADR-002's own name for the unknown-provenance door (row J);
-  reused here, not a new vocabulary.
+  reused, not new vocabulary.
 
-These names must be added to the signal allowlists so audit rows show the signal instead of
-`redacted-signal`. The concrete destinations (round-1 N4): `SAFE_SIGNALS` in
-`scripts/pre-tool-hook.mjs` (hook deny/ask rows), `SAFE_ACTION_GUARD_SIGNALS` in
-`src/defence/iron-dome/operator-notify.ts` (the shared notification mirror), and
-`SAFE_SUMMARY_SIGNALS` in `scripts/stop-hook.mjs` (stop-summary). Hermes carries bounded
-string signals already (`sc_client.py`), not a SAFE-signal table, and OpenClaw has no
-separate signal table — so "Hermes/OpenClaw equivalents" is **not** a set of tables to edit;
-those planes surface the signal through their existing bounded-string paths.
+These names are added to `SAFE_SIGNALS` in `scripts/pre-tool-hook.mjs`,
+`SAFE_ACTION_GUARD_SIGNALS` in `src/defence/iron-dome/operator-notify.ts`, and
+`SAFE_SUMMARY_SIGNALS` in `scripts/stop-hook.mjs`. Hermes carries bounded string signals
+(`sc_client.py`) and OpenClaw has no separate signal table, so there are no further tables to edit.
 
 ---
 
-## 3. Provenance data model (content-free, bounded, cross-call, cross-plane)
+## 3. Provenance data model (content-free, bounded, cross-call)
 
-### 3.1 The agent-artifact ledger — three provenance states, not two
+### 3.1 The agent-artifact ledger, Rule P, Rule H, and the total classifier
 
-A per-session record of what the agent wrote and what those writes produced. It is the
-typed host fact that §4's ledger-dependent rows read; it is **not** derivable from command
-text (invariant 5).
+A per-session record of the write-family and compile calls the guard saw. It is the typed host
+fact the ledger-dependent rows read; it is **not** derivable from command text (invariant 5).
 
 ```
 AgentArtifactLedger (keyed by host-owned sessionKey)
-  entries: Array<{
-    pathHash:   string   // HMAC(salt, canonical-abs-path), NOT the path
-    kind:       'agent-written' | 'compiled-output'
-    srcHashes?: string[] // for compiled-output: pathHashes of the source inputs
-    at:         number   // ms, for FIFO eviction only
+  general: Array<{                 // JSON file, FIFO-bounded
+    pathHash: string               // HMAC(salt, canonical-abs-path), NOT the path
+    kind:     'agent-written' | 'compiled-output'
+    preId:    ContentId | 'absent' // content identity of the path at the pre-gate
+    at:       number               // ms, ordering + FIFO eviction only
   }>
-  tombstones: Array<string>   // pathHashes evicted/overflowed — see "Eviction" below
+  pins: <sessionDir>/pin/<pathHash>.<seq>   // one create-once file per record whose
+                                            // target is inside an install root (Rule H);
+                                            // body = { kind, preId, at }; never evicted
+ContentId = { dev, ino, size, mtimeMs }     // stat fields; ctime deliberately excluded so a
+                                            // metadata-only chmod/chown does not count
 ```
 
-**Round-1 B1/B2: three distinct provenance states, not an absent-vs-present binary.**
-A path at exec time is classified into exactly one of:
+**Rule P — production evidence (the one rule for "did this record produce these bytes").**
+The pre-gate sees a call's **intent**, not its completion (§3.4). A header read at exec proves
+the bytes are a native **format**; it does not prove who wrote them. So a record is evidence that
+the recorded call produced the current bytes only if the path's current `ContentId` **differs**
+from the record's `preId`. For a path with several records (newest first, per-path window of 4),
+the **producer** is the newest record whose `preId` differs from the current `ContentId`. If no
+record in the window qualifies — the write failed, was refused by another gate, was a
+metadata-only `chmod`, or the compile never produced — the path has **no producer**, which is
+treated **exactly as no record**. Consequences:
 
-1. **Positively agent-authored.** A `pathHash` match of `kind: 'agent-written'` (recorded by
-   §3.4's write-family capture) **and** a header read (§4.1) that says the on-disk bytes are
-   a native image, **and** no `compiled-output` lineage for that path → **floor (rows A/C).**
-2. **Positively pre-existing / not-agent.** The path is affirmatively recognised as a
-   non-agent artifact by a **positive** host signal — it sits in a recognised install root
-   (`isInstalledBinaryPath` / `INSTALLED_BIN_DIR_RE`, which already covers `/usr/bin`,
-   Homebrew/Cellar, `~/.cargo/bin`, `node_modules/.bin`, …), or is a package-tree entry
-   point, or is a system path — **and** carries no `agent-written` record → **no floor, no
-   door; current behaviour (rows F/G/H).** This is a positive "known clean" signal, never
-   mere absence from the ledger.
-3. **Unknown.** Everything else: a native-image header at a non-install, non-system path with
-   no `agent-written` record and no recognised-pre-existing signal (e.g. an evicted agent
-   write, a file created through an unrecorded exec-surface path in §3.4, a race that lost the
-   write record) → **HOLD (door), row J.** Unknown is the fail-closed default and is **never**
-   ALLOW.
+- a failed write against an existing native file leaves its `preId` equal to the old file's
+  identity → unproved → the old bytes are not attributed to the agent (round-2 B2 example 1);
+- a failed compile over directly-written native bytes leaves the compile record unproved → the
+  older write record is the producer → floor, not row B (round-2 B2 example 2);
+- `chmod`/`chown` on existing native bytes changes ctime only → unproved (round-2 B2 example 3).
 
-This is the round-1 correction: "proven non-agent/pre-existing", "positively agent-authored"
-and "unknown" are three states established by three different positive signals. The floor
-fires only on state 1; ALLOW (current behaviour) is reached only on state 2's positive
-signal; state 3 is the door. "Not in the ledger" is **not** itself an ALLOW reason anywhere.
+What Rule P does **not** prove: that the recorded call, rather than a later **unrecorded** writer
+in the same session, made the change. A change after a recorded intent is attributed to that
+record. That is a classification limit, listed in §10 with its actual verdict.
 
-- **Content-free in audit (invariant 4).** The ledger stores **hashes of paths**, never
-  path text and never file contents. A denial's audit row names the *effect* and the
-  *signal*, and at most a `fmtSpan`-bounded fragment of the **command** the operator can
-  already see — exactly as the self-protection floor does today. The ledger itself never
-  reaches an audit row. This mirrors the rule that `secret-egress` contributes no span.
-- **Keyed by host-owned session identity (invariant 4).** The key is `sessionKeyFor(id)`
-  — the same HMAC the hook, `session-guard.ts` and `stop-hook.mjs` already compute from
-  the host's `session_id`. A content-asserted identity is refused, exactly as
-  `session-taint-lineage.ts` refuses one. A call whose session id cannot be derived
-  (`namedIdentityUnresolved`, **or an absent key** — `hookSessionExtras` only sets
-  `namedIdentityUnresolved` for a *non-empty unresolved* id, so the new code must also treat
-  an **absent** `sessionKey` as "no ledger") gets **no ledger**: every artifact read is then
-  state 3 (unknown) → the door, never allow.
-- **Bounded — these are NEW bounds, not inherited lease-store constants (round-1 N1).**
-  The **store mechanism** (flat JSON, atomic tmp+rename, `0o600`, corrupt-as-empty, TTL)
-  mirrors `session-lease-store.ts`. The **caps do not**: the lease store's own bounds are a
-  TTL and best-effort last-writer-wins concurrency, keyed by a shared `leases/leases.json`
-  by scope — it defines no max-entry/max-session/per-file cap and is not a per-session file.
-  This store is a **deliberate new layout** (one file per `sessionKey`) with its **own**
-  bounds, stated here as new constants in the pure core: a max entry count per session
-  (proposed 512), a max distinct sessions, a max tombstone count, a per-file byte cap on the
-  hashed input, and a TTL. None of these is "a constant the lease store already has."
-- **Eviction fails toward *unknown*, with a tombstone so it cannot silently become ALLOW
-  (round-1 B1).** When the entry cap is hit the oldest `agent-written`/`compiled-output`
-  entry is dropped **and its `pathHash` is pushed onto the bounded `tombstones` ring.** A
-  later exec of an evicted path then matches a tombstone → state 3 (unknown) → **door**, not
-  a clean allow. If the tombstone ring itself overflows, the state-2 install-location
-  discriminator is the backstop: an evicted agent artifact lives at a **project-local /
-  non-install** path, so it fails the positive pre-existing test and still lands in state 3
-  (door), never state 2 (allow). The floor (`native-exec-of-agent-artifact`) is asserted only
-  on a **positive state-1 match**; an eviction can only *weaken* to the door — it can neither
-  manufacture a DENY (no state-1 record remains) nor a silent allow (tombstone + install-path
-  backstop keep it in state 3). This is the single, consistent eviction rule required by both
-  reviewers.
+**Rule H — install-root relief requires complete install-root history (the one rule for
+"location").** `isInstalledBinaryPath` (`tool-action-guard.ts:4813`) is a path-string test:
+`INSTALLED_BIN_DIR_RE` plus "extensionless". It covers user-writable roots (`~/.local/bin`,
+`~/.cargo/bin`, `node_modules/.bin`, …), and its own rationale (`:4790-4797`) concedes files can be
+planted there. **Location alone never certifies non-agent authorship.** Relief is justified only
+by a positive completeness fact about this session's writes into those roots:
+
+1. Every write-family call whose resolved target is inside an install root is recorded as a
+   **pin**: a create-once file (`O_CREAT|O_EXCL`) named by `pathHash` and a sequence number. Pins
+   are never FIFO-evicted and never read-modify-written, so the general store's
+   last-writer-wins race, corrupt-as-empty read and cap eviction cannot drop one.
+2. The pin is persisted **before** the write call is let through. If it cannot be persisted —
+   no session key, unwritable store, pin cap reached (proposed 256 per session) — the write call
+   itself is **held** (row J) instead of proceeding unrecorded.
+3. At exec, if the session's pin directory cannot be listed, install-root relief is withdrawn
+   for that session: a no-producer native image at an install root is state 3 (door).
+
+Under Rule H, an install-root native image with no producing record is state 2 only because the
+guard positively knows no recognised write-family call in this session produced it. The rule's
+limits — unrecorded exec-surface creators, cross-session/TTL, widenable holds on non-enforcing
+hosts — are §10 residuals with their real verdict (allow), not covered cases.
+
+**The total classifier.** For an exec/load target the guard resolves to a path `p` (§3.4, §5):
+
+| step | condition | state | rows |
+|---|---|---|---|
+| 0 | `p`'s header is not a native image (script/text), or `p` cannot be read | **outside this design** — current behaviour (including the existing opaque-script audit) | — |
+| 1 | native image; Rule P producer is `agent-written` | **1 — agent-produced** | A / C (floor) |
+| 1c | native image; Rule P producer is `compiled-output` | **1c — compile-lineage subtype** | B |
+| 2 | native image; no producer; `p` passes `isInstalledBinaryPath`; Rule H history complete | **2 — install-root, no session write** | F/G: current behaviour |
+| 3 | native image; no producer; any other case (non-install path, or Rule H incomplete) | **3 — unknown** | J (door) |
+
+So the three authorship states are 1 / 2 / 3, with 1c as the compile-lineage subtype of an
+observed producer. **"Not in the ledger" has exactly one meaning: for a native image at a
+non-install path (or at an install root without complete history) it is unknown → row J.** For a
+non-native target it means nothing to this design: the target is outside the classifier and
+keeps current behaviour. There is no sentence elsewhere in this document that overrides this table.
+
+- **Content-free in audit (invariant 4).** The ledger stores **hashes of paths** and stat
+  identities, never path text and never file contents. A denial's audit row names the *effect*
+  and the *signal*, and at most a `fmtSpan`-bounded fragment of the **command** the operator can
+  already see. The ledger never reaches an audit row.
+- **Keyed by host-owned session identity.** The key is `sessionKeyFor(id)` — the HMAC the hook,
+  `session-guard.ts` and `stop-hook.mjs` already compute from the host's `session_id`.
+  `hookSessionExtras` sets `namedIdentityUnresolved` only for a *non-empty unresolved* id, so the
+  new code treats an **absent** key the same as an unresolved one: no ledger. With no ledger,
+  every native image at a non-install path is state 3, and every install-root write is held
+  under Rule H step 2.
+- **Bounded — new bounds, not inherited lease-store constants.** The store mechanism (flat JSON,
+  atomic tmp+rename, `0o600`, TTL) mirrors `session-lease-store.ts`; the layout (one directory per
+  `sessionKey`) and caps do not. New constants in the pure core: general entries per session
+  (proposed 512), per-path window (4), pins per session (256), max distinct sessions, TTL measured
+  from the session's last ledger activity.
+- **Loss of a general record fails toward the door, by the classifier, with no tombstone
+  needed.** A general record covers only non-install targets (install-root targets are pins).
+  If it is evicted, lost to a race, or read as corrupt-empty, its path has no producer and is a
+  native image at a non-install path → state 3 → row J. It can neither manufacture a DENY (no
+  producer remains) nor reach state 2 (wrong location). The round-2 tombstone ring and its
+  "install-path backstop" assertion are **removed**: Rule H replaces them.
 
 ### 3.2 Where it lives and how a separate-process hook shares it
 
-Store **mechanism** follows `session-lease-store.ts`: **flat JSON, not SQLite**, under
-`~/.shieldcortex/` (honouring `SHIELDCORTEX_*`), atomic tmp+rename at `0o600`, corrupt
-read as empty, TTL discipline. **Layout differs** (§3.1 N1): one file per `sessionKey`, not
-a single scope-keyed `leases.json`. Rationale for the mechanism is identical: the Claude
-Code hook has no DB on its hot path, and a store one plane cannot read is a plane that
-silently does not bind.
-
-Cross-process sharing is the same mechanism the lease store relies on: each hook
-invocation is a **separate process** that reads and writes the same per-session file keyed
-by `sessionKey`. Concurrency is **best-effort between honest sessions**, stated as a
-decision not a surprise: two writes can race last-writer-wins.
-
-**What a lost write record does (round-1 B1/B2 — corrected from the earlier draft).** A lost
-`agent-written` record does **not** leave the floor rows free to read on-disk bytes "without
-the ledger." Rows A and C need **both** the authorship record **and** the header read (§4.1);
-row D needs **neither** (it is text-decidable). So a lost record for an A/C candidate means
-the path is no longer state-1 agent-authored; with a native header at a non-install path it
-becomes **state 3 (unknown) → door** (via the tombstone/install-path discriminator above),
-**never a silent allow and never a floor DENY.** The earlier claim that "floor cases A/C/D do
-not depend on a prior write record — they read on-disk bytes at exec time" was wrong for A/C
-and is removed; it holds only for D.
+Flat files, not SQLite, under `~/.shieldcortex/` (honouring `SHIELDCORTEX_*`): the Claude Code
+hook has no DB on its hot path, and a store one plane cannot read is a plane that silently does
+not bind. Each hook invocation is a **separate process** reading the same per-session directory.
+The general JSON is best-effort last-writer-wins between concurrent calls; by §3.1 a lost general
+record lands in row J. Pins are create-once files and have no read-modify-write race.
 
 ### 3.3 Two split cores (same discipline as `session-taint-lineage.ts` + `session-lease-store.ts`)
 
 - **Pure core** `src/defence/iron-dome/agent-artifact-provenance.ts`: record/query/evict
-  arithmetic, hashing, the compile-lineage edge, the three-state classifier, caps,
-  tombstones. No I/O, no clock except injected, no host. Unit-testable like
-  `session-taint-lineage.ts`.
+  arithmetic, hashing, Rule P producer selection, Rule H completeness, the total classifier,
+  caps, native-header classification over injected bytes. No I/O, injected clock.
 - **fs layer** `src/defence/iron-dome/agent-artifact-store.ts`: the one entry point both
-  planes call, atomic writes, TTL, corrupt-as-empty. Modelled on `session-lease-store.ts`.
+  planes call; atomic writes, create-once pins, stat, TTL, corrupt-as-empty for the general file.
 
 ### 3.4 Capture point — forced by there being no PostToolUse hook
 
-**Measured fact (round-1 N2, corrected).** There is no **post-tool completion** hook on any
-enforcement adapter. `src/setup/settings-hooks.ts` registers `PreToolUse`, `SessionStart`,
-`UserPromptSubmit`, `PreCompact` by default (`SessionEnd` is explicitly removed from defaults;
-`Stop` is opt-in per ADR-002's adapter table) — **no `PostToolUse`.** OpenClaw registers
-`before_tool_call`, plus `session_end`, `agent_end`, `llm_input`, `llm_output`,
-`before_agent_run` — but **no `after_tool_call`.** Hermes `__init__.py` registers
-`pre_tool_call` only; its docstring marks `transform_tool_result` as future phase 2. The
-observation this design depends on is narrow and true: **no registered post-tool completion
-hook on these enforcement adapters** — not "the host ecosystem cannot support one."
-
-Consequence: provenance is recorded at the **pre-gate of the write/compile call itself**,
-because the guard already sees that call before it runs. **This records INTENT, not completion
-(round-1 B2 / smaller item):** the pre-tool hook fires before the tool runs, so a write/compile
-that then fails, is refused by another gate, or never executes still leaves a record. This is
-a deliberately accepted limit, bounded as follows:
-
-- **For the floor (A/C):** the record alone never denies — the **exec-time header read** is the
-  second required fact. A failed write leaves no native bytes (or leaves the old file); the
-  header read governs, so an intent record for a write that did not land cannot by itself
-  manufacture a floor DENY. Direction: fail-safe.
-- **For the door (B):** a `compiled-output` label minted for a compile that then failed, or a
-  path whose bytes are later replaced, can mis-label lineage. Direction is toward the **door**
-  (benign over-gating), never a silent allow. Listed as a residual in §10.
+**Measured fact.** No enforcement adapter registers a post-tool completion hook.
+`src/setup/settings-hooks.ts` registers `PreToolUse`, `SessionStart`, `UserPromptSubmit`,
+`PreCompact` by default; OpenClaw registers `before_tool_call` plus `session_end`, `agent_end`,
+`llm_input`, `llm_output`, `before_agent_run`, but no `after_tool_call`; Hermes registers
+`pre_tool_call` only. So recording happens at the pre-gate of the write/compile call, and the
+record is **intent**. Completion is reconciled later, at the exec that matters, by Rule P's
+content-identity comparison — not by any completion observation, which no adapter has.
 
 Capture rules:
 
-- **Any write-family tool call** (`WRITE_TOOLS` already recognises write/edit/create/`mkdir`/
-  `mv`/`cp`/`chmod`/…) whose target path resolves → record `agent-written` for that path
-  **regardless of extension or content.** This is the round-1 B1 fix: the old
-  `isScriptLikeWritePath` / `writeContentLooksExecutable` predicates recognise script suffixes
-  and a shebang **only** — not `.so`/`.o`/`.node`/`.dylib`/extensionless images or ELF/Mach-O/PE
-  magic — so they cannot record a native artifact. The native-vs-source distinction is **not**
-  made here; it is made at exec time by the header read (§4.1). Recording every write-tool
-  target as `agent-written` is cheap (a path hash) and is what lets the exec-time header read
-  decide floor-vs-door honestly.
-- **A compile/build-delegate invocation in the exec surface** whose output target is resolvable
-  → record `compiled-output` with `srcHashes` linking the source inputs. The recognised class
-  is the compilers (`gcc`/`clang`/`cc`/`rustc`/`go build`/`zig`/`ghc`/`nvcc`…) **and the build
-  drivers that delegate to them** (`make`/`cmake`/`ninja`/`node-gyp`/`cargo`/`go`), added as a
-  recognised command class the same way the installer family (`PACKAGE_INSTALLERS`) is. Program
-  position is read with the existing `detectScriptInvocations` / `tokeniseStatement` /
-  `commandBaseName` machinery; **no new regex family** (invariant 5). This is **not** a
-  command-name *exemption* (ADR-002 §2.4 forbids those): these commands are not allowlisted to
-  ALLOW — they are recognised to attach **compile lineage** so their output lands on the **door**
-  (row B) rather than being mistaken for a directly-written native artifact (floor). Classifying
-  a build driver's output as shape 2 is what keeps `cargo test` / `go test` / `make check` /
-  `npm run build` of a native addon / `pip install` of an extension out of the floor.
+- **Any write-family tool call** (`WRITE_TOOLS`, `tool-action-guard.ts:133`) whose target path
+  resolves → stat the target for `preId`, then record `agent-written` (a pin if the target is
+  inside an install root, else a general entry), **regardless of extension or content**. The
+  native-vs-source distinction is made at exec by the header read; whether the call changed the
+  bytes is decided at exec by Rule P. The old `isScriptLikeWritePath` /
+  `writeContentLooksExecutable` predicates (script suffix / shebang only) are not used for this.
+- **A recognised compiler with a literal, resolvable output.** Supported output-resolution
+  contract, and nothing wider: the program position (read with `detectScriptInvocations` /
+  `tokeniseStatement` / `commandBaseName`, no new regex family) is one of `cc`, `gcc`, `g++`,
+  `c++`, `clang`, `clang++`, `zig cc`, `nvcc`, `ghc`, `rustc`, `go build`, **and** the statement
+  carries a literal `-o <path>` / `-o<path>` operand that resolves against the call's cwd →
+  record `compiled-output` for that path with its `preId`. This is not a command-name exemption:
+  nothing is allowed by name; the name only says where to look for the output operand.
+- **Unsupported output — honest result.** A compiler with no literal `-o` (`cc foo.c` → `a.out`),
+  and every build driver (`make`, `cmake`, `ninja`, `node-gyp`, `cargo`, `go test`, `go run`,
+  `npm run build`, `pip install`), records **nothing**: PR 1 cannot name their output path. The
+  outer invocation keeps current behaviour (the driver binary is an installed tool; its children
+  are unseen, ADR-002 §2.3 outer-gate limitation). A **later, separate** agent exec of their
+  output that the guard resolves to a native image at a non-install path is **state 3 → row J
+  (HOLD)** — not row B. Build-output-directory awareness is Q3 / PR 2.
 
-**Exec-surface creation paths that are NOT recorded (explicit residuals, round-1 B1/N7).**
-These create or deliver a file through the **exec family** (Bash/shell), not a `WRITE_TOOLS`
-call, so no `agent-written` record is minted. At a later exec, each lands in **state 3
-(unknown) → door** if it has a native header at a non-install path, or is simply not seen as an
-artifact at all:
+**Exec-surface creation paths that are NOT recorded.** These create a file through the exec
+family (Bash/shell), not a `WRITE_TOOLS` call, so no record is minted:
 
-1. shell redirection (`> file`, `>> file`), here-docs to a file;
+1. shell redirection and here-docs to a file;
 2. `dd`, `printf`, `tee`, `base64 -d`, `xxd -r` writing bytes to a path;
 3. `curl`/`wget`/`fetch` downloading a file;
-4. an interpreter writing a file inline (`python -c 'open(...).write(...)'`, `node -e`);
-5. a build driver or package lifecycle whose **child** exec is never seen as a tool call
-   (`make` running a recipe, a wheel's `postinstall`) — the outer call is recorded as
-   `compiled-output` only when its own `-o`/output is resolvable; outputs produced by an
-   unresolved child are not;
-6. **same-command write-and-exec** (`> f; ./f` or `gcc x.c -o x && ./x` in one Bash call): the
-   pre-gate fires before the file exists, so the header read misses; one approval releases both
-   halves. Governed by Q1's compile-then-run default for the compile form; the raw-bytes form is
-   caught only when its bytes are **inline** and text-decidable (row D) — otherwise a residual.
+4. an interpreter writing a file inline;
+5. a build driver or package lifecycle child (see "Unsupported output");
+6. **same-command write-and-exec** (a redirect then an exec of the same file, or a compile then
+   an exec of its output, in one Bash call): the pre-gate runs before the file exists, so there
+   is no header to read.
 
-None of these is claimed as covered by the floor. They are enumerated in §10 as residuals, with
-the door (state 3) as the fail-closed catch for the native-header-at-non-install-path subset.
+The verdict each actually gets is in §10. In short: if the file is created at a non-install path
+and a **later, separate** call execs it as a native image, it is row J; if it is created inside an
+install root, or execed in the same call, it keeps **current behaviour (allow)**.
 
-Recording is done by the **caller** (hook/interceptor), not inside `evaluateToolCall`,
-preserving that function's purity — the same split as the injected `resolveScriptSource`.
-The pure guard receives a **reader** (see §5).
+Recording is done by the **caller** (hook/interceptor), not inside `evaluateToolCall`, preserving
+that function's purity — the same split as the injected `resolveScriptSource`.
 
 ---
 
 ## 4. Decision table
 
-Let `A` = the artifact being executed/loaded/mapped. Columns: provenance state (from the
-three-state classifier of §3.1, i.e. ledger + on-disk header + install-location signal), who
-runs it (DefenceSource band), session taint (ADR-002 §2.2).
+`A` = the artifact being executed/loaded/mapped; "state" is the §3.1 classifier. There is **no
+taint column**: no PR 1 adapter supplies the ADR-002 taint fact (see B′).
 
-| # | Case | Provenance signal | Taint | Verdict | Rationale |
-|---|---|---|---|---|---|
-| A | State-1 agent-authored file whose on-disk bytes are a native image (ELF/Mach-O/PE/raw blob), executed — **no guard-observed compile lineage** | `exec-agent-written-native-bytes` | any | **DENY (floor)** | shape 1; no routine analogue — nobody hand-writes a binary and runs it |
-| C | `dlopen`/`LD_PRELOAD`/`DYLD_INSERT_LIBRARIES`/`require` of a state-1 agent-**written** object **with no guard-observed compile lineage** | `load-agent-written-native-object` | any | **DENY (floor)** | shape 3 (loader form); a built `.node`/`.so` is row B, not here (round-1 B3) |
-| D | Program body maps agent-written/just-generated bytes as executable memory (`mmap` PROT_EXEC, `mprotect` +X on a writable buffer, ctypes/cffi call into a written buffer) | `map-exec-agent-written-memory` | any | **DENY (floor)** | shape 4; **text-decidable** from the program body the guard already folds; needs no ledger |
-| B | Agent wrote *source*, guard observed its compile/build (compiler **or** build driver), **agent** runs or loads the output this session | `exec-of-agent-compiled-artifact` | untainted | **AUDIT by default** (owner Q1: or HOLD, or DENY) | shape 2; routine compile-test — floor-denying this breaks M1 |
-| B′ | Same as B | `exec-of-agent-compiled-artifact` | tainted | **HOLD** | ADR-002 §2.2 already holds every privileged effect in a tainted session; native-exec only sharpens the reason |
-| E | **Operator** (user/cli band) runs the build output the agent compiled | positive band signal | any | **no floor/door; current behaviour** | the issue's "when the user, not the agent, runs it" — subject to Q2's band caveat |
-| F | State-2 pre-existing installed tool executed (`git`, `node`, `python`, system `cc`), recognised install root, no `agent-written` record | positive install-root signal | untainted | **no floor/door; current behaviour** | explicit non-false-positive in the issue; ALLOW on a positive signal, not on absence |
-| G | State-2 package-manager install tree (`node_modules/.bin/*`, a wheel's entry point), recognised, not agent-authored | positive package-tree signal | untainted | **no floor/door; current behaviour** | install trees are not agent-authored |
-| H | Interpreter running an **existing** (not agent-written, no `agent-written` record) script | no provenance match | untainted | **no floor/door; current behaviour** | existing behaviour; no provenance match |
-| I | Build tool writes the project's **declared build output** and the **operator** runs it | positive band signal | any | **no floor/door; current behaviour** | row E generalised to build systems — subject to Q2/Q3 |
-| J | State-3 unknown: agent-written-exec where ledger evicted (tombstoned) / session id absent or unresolved / native header at a non-install path with no recognised-pre-existing signal / an unrecorded exec-surface creation (§3.4) | `unclassified-executable` | any | **HOLD (door)** | three-valued unknown → existing brokerable dangerous door, never ALLOW and never a fake catastrophic (invariant 3) |
+| # | Case | State / signal | Verdict | Rationale |
+|---|---|---|---|---|
+| A | Exec of a native image whose Rule P producer is an `agent-written` record | 1 / `exec-agent-written-native-bytes` | **DENY (floor)** | shape 1; the guard observed the agent's write change these bytes and no compile produced them |
+| C | `dlopen`/`LD_PRELOAD`/`DYLD_INSERT_LIBRARIES`/`require` of a native object (resolved target) whose producer is `agent-written` | 1 / `load-agent-written-native-object` | **DENY (floor)** | shape 3 loader form; a compiled object is row B |
+| D | Inspected program body maps written/just-generated bytes as executable memory (`mmap` PROT_EXEC, `mprotect` +X, ctypes/cffi call into a buffer) | `map-exec-agent-written-memory` | **DENY (floor)** | shape 4; text-decidable **from the body the plane inspects** (§6); needs no ledger; a body the plane does not inspect is current behaviour (§10) |
+| B | Agent runs/loads a native image whose producer is a `compiled-output` record (§3.4 supported contract) | 1c / `exec-of-agent-compiled-artifact` | **Q1** (AUDIT recommended; HOLD; DENY) | shape 2; routine compile-test |
+| B′ | Same as B in a session ADR-002 would call tainted | — | **Not a PR 1 row.** | the ADR §2.2 taint store is not wired (`session-taint-lineage.ts:16-17`); no PR 1 adapter can tell B from B′ (Q1 note) |
+| E | The build output the agent compiled, run from the user/cli **band** | band-attested, **not** human-attested (Q2) | **no new gate; current behaviour** | the band is process identity; it never relieves a floor match (floor DENY takes precedence regardless of band) |
+| F | Installed tool (`git`, `node`, `python`, system `cc`) — native image at an install root, no producer, Rule H complete | 2 | **no new gate; current behaviour** | non-false-positive in the issue; relief by Rule H, not by absence |
+| G | `node_modules/.bin/<tool>` (the only package-tree arm `INSTALLED_BIN_DIR_RE` has) — native, no producer, Rule H complete | 2 | **no new gate; current behaviour** | a wheel entry point or `.venv/bin` tool is **not** in the regex: if native it is state 3 (row J); if a script it is outside the classifier |
+| H | Interpreter running an existing script | outside the classifier (the script is not a native image) | **current behaviour** | an interpreted script is not a native artifact; only row D's body match can apply to it. Installed-interpreter location says nothing about the script's provenance |
+| I | Build tool writes a declared build output, run from the user/cli band | band-attested (Q2/Q3) | **no new gate; current behaviour** | row E generalised — subject to Q2/Q3 |
+| J | Native image, no producer, not state 2: non-install path; or install root with Rule H incomplete; or no session key; also a write-family call into an install root that cannot be pinned (Rule H step 2) | 3 / `unclassified-executable` | **HOLD (door)** | ADR-002 §2.4 fail-closed rule for an executable effect of unknown provenance |
 
-**Precedence** is ADR-002's DENY > HOLD > AUDIT. A floor row (A/C/D) denies at any taint
-state with no approval path, exactly like the catastrophic tier (`TERMINAL_BLOCK_SEVERITIES`,
-the doorless branch in `pre-tool-hook.mjs`). The floor is **provenance-blind only in the
-sense that taint does not matter** — it still requires a positive state-1 artifact match plus
-the exec-time header read (A/C) or a text-decidable body (D); it is not a text pattern.
+**Precedence** is ADR-002's DENY > HOLD > AUDIT. A floor row denies at any taint state with no
+approval path, on the terminal branch (`TERMINAL_BLOCK_SEVERITIES`, the doorless branch in
+`pre-tool-hook.mjs:3307`). The floor is not a text pattern for A/C: it requires a Rule P producer
+plus a native header.
 
-**"ALLOW" is not a fourth decision tier (round-1 N4 / Grok#4).** ADR-002 §2.4's decision set is
-**DENY / HOLD / AUDIT only.** Rows E–I are therefore **not** a new ALLOW verdict: they are
-"**no floor match, no door — the call keeps its existing behaviour (no new gate),**" i.e. the
-pre-AUDIT baseline this design does not touch. Not blocking installed tools and package-manager
-bins (invariant 2) needs no new tier; it is the absence of a match. The floor adds a DENY row,
-the door adds/uses a HOLD row, shape 2 lands in AUDIT (Q1) — that is the whole of what this
-design adds to the three-valued decision.
+**"ALLOW" is not a fourth decision tier.** ADR-002 §2.4's decision set is DENY / HOLD / AUDIT.
+Rows E–I are "no new gate — the call keeps its existing behaviour", not a new verdict.
 
-**Three-valued mapping (invariant 3):** state-1 native-of-agent-artifact → DENY (rows A/C/D);
-state-2 positive-pre-existing / operator-run → current behaviour (rows E–I, unchanged); state-3
-unknown (row J) → the existing dangerous `require_approval` door, **never** a fabricated
-catastrophic and **never** a silent allow. There is no path from "not in the ledger" to a clean
-allow.
+**Three-valued mapping, scoped to the core decision contract.** In the pure evaluator with a
+ledger view and a header reader supplied: state 1 → DENY; state 1c → Q1; state 2 → current
+behaviour; state 3 → the existing `require_approval` door, never a fabricated catastrophic.
+Where an **adapter** cannot supply those inputs or cannot enforce the door, the outcome is that
+adapter's, listed next to the acceptance rows in §6 and §9 — the core contract does not claim it.
 
 ### 4.1 Rows needing a typed host fact rather than text (invariant 5)
 
-- **A, C** — need **both** host facts: the **ledger** (is this path a state-1 `agent-written`
-  artifact, with no `compiled-output` lineage) **and** a **magic-byte read of the file header**
-  (are the on-disk bytes a native image), injected like `resolveScriptSource` at the hook
-  boundary. **Neither alone suffices**, and neither is decidable from the command string.
-  Header-alone would be wrong twice: it would miss authorship (denying installed `git`/`node`,
-  whose headers are ELF) and it would make the ledger pointless. The ledger is **necessary** for
-  the agent-authored half; the header is **necessary** for the native-image half. A lost ledger
-  record for an A/C candidate → state 3 (door), per §3.2.
-- **D** — **text-decidable** from the program body the guard already folds; **no host fact
-  needed and no ledger needed.** This is why row D is the one floor row Hermes' text-only outage
-  fallback can keep (§6).
-- **B/B′** — the source→compile→run lineage is a ledger fact (the compile edge recorded in
-  §3.4).
-- **E/I** — "did the operator or the agent run this" is the **DefenceSource band** (host
-  fact, resolved by `resolve-tool-source.ts` / `env-detector.ts`). **Round-1 B5 caveat (Q2):**
-  that band is *process* identity — `env-detector.ts` labels a direct Claude Code / Codex CLI as
-  `type: cli`, and ADR-002 §1.2 states an operator's tool request and a prompt-injected model's
-  request **inside the same session share the same band**. So the band does **not** by itself
-  prove a *human*, rather than the agent, ran the output. "is the target the declared build
-  output" needs project build config (host fact), see Q3. Both are owner questions, not facts
-  PR 1 can assert; see Q2/Q3.
+- **A, C** — need the **ledger** (Rule P producer), a **stat** of the target (current
+  `ContentId`), and a **header read**. Neither header nor record alone suffices: header alone
+  would deny installed `git`; a record alone is only intent.
+- **D** — text-decidable from the body the plane inspects; no ledger.
+- **B** — Rule P producer of kind `compiled-output`.
+- **E/I** — DefenceSource band (`resolve-tool-source.ts` / `env-detector.ts`). The band is
+  process identity: `env-detector.ts` labels a direct Claude Code / Codex CLI `type: cli`, and
+  ADR-002 §1.2 says an operator's request and an injected model's request in one session share
+  the band. It is **band-attested, not human-attested** (Q2). "Declared build output" needs a
+  build-config fact (Q3).
 
-### 4.2 False-positive surface and how it is measured
+### 4.2 False-positive surface (what the non-FP bar does and does not cover)
 
-The false-positive surface is **row B in an untainted session** — the agent compiling/building
-and running its own source. Under the recommended default (B = AUDIT) that surface audits and
-does not block. The honest scope of the "no blocked builds" claim (round-1 B3): this holds for
-the flows the control set in §8 actually exercises — a compiler build-and-run, a build-driver
-build-and-run (`cargo test`, `go test`, `make check`, `npm` native-addon build, `pip` extension
-build), and a built `.node` loaded via `require`. It is **not** a measured false-positive *rate*
-over production traffic, and it does not claim "zero blocked builds" for build shapes outside
-that control set. If the owner chooses B = HOLD (Q1), the surface is "one bounded approval per
-distinct compile-then-run chain."
+What the design **does not** gate (benign controls in §8): installed tools at install roots with
+complete Rule H history; non-native targets (scripts, data files); outer build-driver invocations;
+a supported compile followed by an exec of its output under Q1 = AUDIT.
 
-Measurement reuses existing machinery, within its real limits (round-1 N5):
+What the design **does** gate on routine work, stated so "no false positives on pre-existing
+tools" cannot be read as covering it:
 
-- the §5A logged-signal replay (`scripts/guard-policy-replay.mjs` /
-  `scripts/replay-guard-corpus.mts`) is a **signal-set / STOP-event** comparison over truncated
-  previews — it **cannot** reconstruct the new facts (artifact bytes, authorship, compile
-  completion, taint) from existing logs. Taint-dependent and artifact-dependent rows stay
-  "cannot be determined from the log" (ADR-002 §5A rule: provenance is never manufactured for
-  the replay). What the replay **can** report is which recorded allowed events carry a
-  write/compile/exec command shape at all — a scoping signal, not a flip rate.
-- the `guard-effect-fixtures` harness (§5B) is an **in-process simulation** (per its own README),
-  not proof of host/provenance enforcement; the benign controls below are executed against both
-  current and proposed policy and independently reviewed;
-- `guard-precision-corpus.ts` gets the benign compile-and-test **and build-driver** rows added
-  so a regression that floor-denies a routine build fails CI.
+- **Row J holds pre-existing project-local native binaries** (yesterday's `./target/debug/app`, a
+  vendored `./bin/tool`) and **build-driver outputs** (`cargo build && ./target/debug/x`, a
+  `node-gyp` `.node` loaded by a visible `require`) when a later, separate agent call execs them.
+  Today those are an opaque-script **allow** at the sensitive tier (`tool-action-guard.ts:7318-7325`);
+  under this design they are `require_approval`. When the Guard is enabled it enforces by default
+  (`pre-tool-hook.mjs:79`), so this is a real trip on routine work — the priced cost of ADR-002's
+  "unknown executable is HOLD" rule. It is not claimed as met by the non-FP bar (§9).
+- **Row D can match benign executable-memory shapes** (JIT, FFI, test code); the §8 row-D fixture
+  is itself benign no-op bytes. No benign row-D control is claimed; this surface is unmeasured.
+- **Row A fires on placed, not authored, native bytes**: a write-family `cp`/`mv` of an existing
+  binary to a non-install path, then an exec of it, has an `agent-written` producer. Rare in
+  routine work, unmeasured.
+- **Row B** under Q1 = HOLD is one bounded approval per compile-then-run chain.
 
-The floor's acceptance bar, pre-registered and **narrowed to the control set**: **zero**
-benign-control rows (§8) denied; the **three directly-written floor shapes** (A/C/D) denied with
-a plain-English reason. Shape 2 (compile-then-run) is **not** in the floor's DENY bar — it is the
-door (§9, Q1).
+Measurement, within its real limits:
+
+- `scripts/guard-policy-replay.mjs` compares **signal sets** over logged events and
+  `scripts/replay-guard-corpus.mts` replays **truncated STOP-event previews**;
+  `guard-effect-fixtures/README.md` says its log carries no command. None of them can reconstruct
+  authorship, content identity, compile completion or taint, and **none is a corpus of allowed
+  calls with commands**. So the replay cannot measure this design's flip rate, and it cannot list
+  which allowed events carried write/compile/exec shapes. That scope is **unknown** until a
+  suitable allowed-call corpus exists; none is claimed here.
+- the `guard-effect-fixtures` harness is an **in-process simulation** (its own README), not
+  proof of host enforcement;
+- `guard-precision-corpus.ts` gets the benign compile-and-test rows so a regression that
+  floor-denies a supported compile output fails CI.
+
+Acceptance bar, pre-registered and narrowed to the control set: **zero** §8 benign controls hit
+the **floor**; the three directly-written shapes (A/C/D) denied with a plain-English reason on the
+planes listed in §9. Row J holding project-local binaries is **expected**, not a pass of the non-FP
+bar.
 
 ---
 
 ## 5. Surfaces to change (every file and call site)
 
-**PR 1 (the floor + ledger + three-valued door):**
+**PR 1 (the floor + ledger + door, Claude Code hook and OpenClaw):**
 
-- `src/defence/iron-dome/agent-artifact-provenance.ts` **(new, pure core)** — ledger
-  record/query/evict, path hashing, compile-lineage edge, the three-state classifier,
-  native-image magic-byte classifier helper (operates on an injected header read, stays pure),
-  caps, tombstones.
-- `src/defence/iron-dome/agent-artifact-store.ts` **(new, fs layer)** — per-session flat
-  JSON, atomic tmp+rename `0o600`, TTL, corrupt-as-empty; one entry point each for
-  *record-write*, *record-compile*, *query*.
+- `src/defence/iron-dome/agent-artifact-provenance.ts` **(new, pure core)** — §3.3.
+- `src/defence/iron-dome/agent-artifact-store.ts` **(new, fs layer)** — §3.3.
 - `src/defence/iron-dome/tool-action-guard.ts`:
-  - new `ToolGuardOptions` members (injected, caller-supplied, never throwing):
-    `agentArtifactLedger?: (sessionKey) => LedgerView` (read) and
-    `readFileHeader?: (path) => Uint8Array | null` (magic-byte read for rows A/C). These add a
-    ledger reader and a header reader; they are **not** an attested-actor input — the actor
-    question (E/I) stays the DefenceSource band and its Q2 limit.
-  - new classifier `classifyNativeExec(execSurface, ledger, headerReader)` returning the
-    §2 signals and the three §3.1 states; built on `detectScriptInvocations` /
-    `tokeniseStatement` / `commandBaseName` / `EXEC_WRAPPER` / `SCRIPT_INTERPRETER` /
-    `isInstalledBinaryPath` and the existing body-fold regions — **no new regex family**.
-  - wire into `evaluateToolCall`: floor rows A/C/D land on the catastrophic/terminal branch
-    (block, doorless); row J lands on the `require_approval` branch; row B emits the
-    `exec-of-agent-compiled-artifact` signal at AUDIT/HOLD per Q1.
-  - **do not** extend `GUARD_SELF_PROTECTION_SIGNALS` — this is a separate floor; but mirror
-    its "enforced in every posture" standing for rows A/C/D by rating them at a terminal
-    severity (`TERMINAL_BLOCK_SEVERITIES`).
+  - new `ToolGuardOptions` members, injected per call by the caller, never throwing:
+    - `artifactView?: AgentArtifactView` — the caller has **already bound** the session: it is the
+      loaded ledger for this call's `sessionKey` (general entries + pin listing + a
+      `pinsReadable` flag), or `null` when there is no key. The pure evaluator never derives a
+      key and never receives one; a key asserted in content cannot reach it.
+    - `statPath?: (absPath) => ContentId | null` and `readFileHeader?: (absPath) => Uint8Array | null`.
+    - `cwd?: string` — the call's working directory, already validated by the caller
+      (hook: `pre-tool-hook.mjs:540-549` rules; OpenClaw: `toolCallCwd(context)`).
+  - **Canonicalisation:** a program-position or loader-target token containing `/` is resolved
+    against `cwd`, `~` expanded, and the parent directory `realpath`ed; the basename is kept
+    (so a symlink target is what the header read sees). **Bare names are not resolved through
+    PATH** in PR 1 — a bare-name exec of a planted binary is a §10 residual.
+  - **Missing-input precedence:** if `artifactView` is `undefined` (an adapter that does not
+    wire it — Hermes API in PR 1, any older caller) the native classifier **does not run** and
+    the call keeps today's behaviour; this is adapter non-coverage, recorded in §6/§9, not an
+    allow claim. If `artifactView` is `null` (no session key) the classifier runs with no
+    producers and Rule H incomplete. If `statPath` or `readFileHeader` returns `null` for the
+    target, the target is outside the classifier (step 0).
+  - new classifier `classifyNativeExec(execSurface, view, statPath, readFileHeader, cwd)` built on
+    `detectScriptInvocations` / `tokeniseStatement` / `commandBaseName` / `EXEC_WRAPPER` /
+    `SCRIPT_INTERPRETER` / `isInstalledBinaryPath` and the existing body-fold regions — no new
+    regex family.
+  - wire into `evaluateToolCall`: A/C/D on the terminal branch (block, terminal severity —
+    **not** added to `GUARD_SELF_PROTECTION_SIGNALS`); J on `require_approval`; B at Q1's tier.
 - `scripts/pre-tool-hook.mjs`:
-  - at the write/compile pre-gate, call the store's record entry points keyed by
-    `baseExtra.sessionKey`; **skip when `namedIdentityUnresolved` OR when `sessionKey` is
-    absent** (round-1 N-item: an absent key is not flagged `namedIdentityUnresolved`);
-  - inject `agentArtifactLedger` + `readFileHeader` into the `evaluateToolCall` options
-    object (4th arg) alongside `resolveScriptSource`;
-  - add the new signal names to `SAFE_SIGNALS`;
-  - **non-widenable floor vs widenable door (round-1 B4).** Floor rows A/C/D are rated terminal,
-    so they exit at the `TERMINAL_BLOCK_SEVERITIES` branch **before** the `autoApprove`, shadow
-    (enforce-when-ready) and `enforce:false` advisory widenings — those three cannot turn a floor
-    DENY into an allow/warn. Row J is an ordinary `require_approval` and **is** subject to those
-    widenings: on an advisory, shadow, or standing-`autoApprove` Claude host, an unknown-exec
-    (row J) can be warned or auto-approved exactly as any dangerous verdict can. This is the
-    honest limit — row J's door is as widenable as the dangerous tier it reuses; it is not a
-    new non-widenable semantics.
-- `plugins/openclaw/interceptor.ts` — inject via the **action-evaluator** seam, not
-  `runDefencePipeline` (round-1 N3): the evaluator is a distinct `createInterceptor` option
-  (`index.ts` ~4811, the 3rd arg's `evaluateToolCall`) called directly at `interceptor.ts` ~2169;
-  `runDefencePipeline` is the separate content/memory pipeline. Record writes/compiles in the
-  `before_tool_call` path. The injected inputs still need session key, caller cwd, PATH
-  resolution and the header reader spelled out at that seam.
-- `plugins/openclaw/provenance.ts` / `session-taint.ts` — no behaviour change required for
-  PR 1; the agent-write record is a natural provenance input, noted not required.
-- `src/api/visualization-server.ts` (`POST /api/v1/action-guard`) — **today accepts `tool` +
-  `args` only**, with no resolver or state options. PR 1 extends it to accept the host-owned
-  session id and forward it; holding the store server-side so Hermes shares it is **PR 2**
-  (§6, cross-plane table). Forwarding an id alone is not full provenance.
-- `plugins/hermes/shieldcortex/sc_client.py` — forward session id to the API; add a
-  **text-only** `fallback_native_exec_memory_match` (row D) for the outage path, analogous
-  to `fallback_catastrophic_match`. **Rows A/C cannot be served by the outage fallback** (no
-  ledger, no header read) and, per `policy.py`, an unmatched outage shape **fails open (allow)**,
-  not to a door — see §6 and Q4. This PR does **not** change that fail-open contract.
-- `plugins/hermes/shieldcortex/policy.py` + `__init__.py` — thread the session id through
-  `pre_tool_call`. No change to the unavailable→None(allow) path for unmatched shapes.
-- Tests: `src/defence/iron-dome/__tests__/native-exec-of-agent-artifact-907.test.ts`
-  (pure core + classifier + three-state + tombstone eviction), an enforcement-surface-parity
-  fixture, and the benign + build-driver rows added to `guard-precision-corpus.ts`.
+  - at the write/compile pre-gate, stat the target and call the store's record entry points
+    keyed by `baseExtra.sessionKey`; when `namedIdentityUnresolved` **or** the key is absent,
+    record nothing and apply Rule H step 2 to install-root targets;
+  - build `artifactView` for this call's key and inject it with `statPath`, `readFileHeader`
+    and `cwd` into the 4th `evaluateToolCall` argument beside `resolveScriptSource`;
+  - add the signal names to `SAFE_SIGNALS`;
+  - **non-widenable floor vs widenable door.** Floor rows exit at the
+    `TERMINAL_BLOCK_SEVERITIES` branch (`:3307`) before the `autoApprove`, shadow and
+    `enforce:false` advisory widenings. Row J (and Rule H's held install-root write) is an
+    ordinary `require_approval` and **is** widenable: on an advisory, shadow or
+    standing-`autoApprove` host it warns or auto-approves, and Rule H's guarantee does not hold
+    there (§10).
+- `plugins/openclaw/interceptor.ts` — the action-evaluator call at `:2169-2176` (the 3rd
+  `createInterceptor` argument, `index.ts` ~4811, not `runDefencePipeline`). The interceptor
+  derives the key from `context.sessionId` with the same host-owned keying it already uses for
+  its stores, builds `artifactView`, and passes it with `statPath`, `readFileHeader` and
+  `cwd: toolCallCwd(context)`. Writes/compiles are recorded in the same `before_tool_call` path.
+  Existing OpenClaw detection-taint escalation (`:2182-2218`, `session-taint.ts:156-167`) is
+  untouched: it raises a `sensitive` verdict to `require_approval` and a `dangerous` one to
+  `block` for a bounded window after a scan hit, and fails soft. It is **not** ADR-002 provenance
+  taint and is not claimed as B′.
+- `src/api/visualization-server.ts` (`POST /api/v1/action-guard`, `:566-577`) accepts `tool` +
+  `args` only and calls `evaluateToolCall` with **no options** (no resolver, no view). PR 1
+  extends it to accept the host-owned session id and forward it; it does **not** hold the store
+  (PR 2).
+- `plugins/hermes/shieldcortex/sc_client.py` — forward the session id; add a text-only
+  `fallback_native_exec_memory_match` (row D shape) to the outage path, wired like
+  `fallback_catastrophic_match` (unconditional when it matches). It reads only
+  `fallback_surface(args)` (§6).
+- `plugins/hermes/shieldcortex/policy.py` + `__init__.py` — thread the session id and the new
+  fallback flag. No change to the unmatched-outage `None` path or to `enforce` handling.
+- Tests: `src/defence/iron-dome/__tests__/native-exec-of-agent-artifact-907.test.ts` (pure core:
+  Rule P, Rule H, total classifier), the §8 rows, and benign rows in `guard-precision-corpus.ts`.
+  **Adapter-fixture obligation (implementation, not simulation):** at least one multi-call test
+  per wired adapter that drives the **real** hook process (`pre-tool-hook.mjs` as a subprocess)
+  and the real OpenClaw interceptor across separate calls against real files under a test-pinned
+  home, covering write → exec (A), failed-write → exec (Rule P), and install-root write → exec
+  (Rule H). The `guard-effect-fixtures` simulation does not discharge this.
 
-**PR 2 (plane parity + store wiring):** finish Hermes/API **server-side store** so row B/J
-ledger logic (not just the text-decidable floor) holds under Hermes; cross-plane parity tests.
-Note this does **not** close the Hermes-**outage** gap: an unavailable server cannot supply its
-store (round-1 B4), so A/C outage behaviour is the §6/Q4 residual regardless of PR 2.
+**PR 2 (Hermes API-up store + build-output awareness):** server-side store and view so A/C/B/J
+evaluate on the Hermes **API-up** path; cross-plane parity tests; Q3 build-output-directory
+awareness. PR 2 does **not** close the Hermes outage case: an unavailable server cannot supply its
+store.
 
-**PR 3 (separate follow-up issue — doctor shared-host warning, issue item 4):** see §7.
+**Separate prerequisite (not PR 1 or PR 2):** ADR-002 taint wiring. Until it lands, B′ does not
+exist as a verdict (§4, Q1).
 
-**PR 4 (separate follow-up issue — egress tightening, issue item 5):** allow-list egress
-destinations for code-executing sessions. Out of scope for the first PR; filed separately.
+**PR 3 (separate issue — doctor shared-host warning, issue item 4):** §7.
+**PR 4 (separate issue — egress tightening, issue item 5).**
 
 ---
 
 ## 6. Cross-plane behaviour (invariant 4)
 
-| plane | capture | floor (A/C/D) | door (B/J) |
+Coverage is stated **per inspected surface and per posture**. "Inline body" = program text
+present in the tool call's own arguments; "file body" = the contents of a script the call runs.
+
+| plane | A / C | D | B / J |
 |---|---|---|---|
-| Claude Code hook | pre-gate record keyed by `sessionKey` | full (ledger + header read) | full; row J is widenable (autoApprove/shadow/advisory), floor is not |
-| OpenClaw interceptor | pre-gate record via action-evaluator seam | full | full (same posture limits as the hook) |
-| Hermes (API up) | PR 2: API holds store | full (PR 2) | B/J via `require_approval`→**block** (Hermes has no card); PR 1 forwards id only |
-| Hermes (outage fallback) | none | **row D only** (text-decidable); **A/C unmatched → fail open (allow)** | B/J unmatched → **fail open (allow)** |
+| Claude Code hook | PR 1: **block**, any posture (terminal) | PR 1: **block**, any posture, for inline bodies and file bodies the hook folds (`resolveScriptSource`, within `MAX_SCRIPT_BYTES`/`MAX_FOLDED_BYTES`); an unfolded or over-cap body keeps current behaviour | PR 1: `require_approval` → ask; **widenable** by advisory/shadow/`autoApprove` |
+| OpenClaw interceptor | PR 1: **block** (terminal) | PR 1: as hook (it injects `resolveScriptSource` too) | PR 1: same posture limits as the hook |
+| Hermes, API up | **not covered in PR 1** (the API evaluates with no view); PR 2: `block` | PR 1: **inline body only** — the API passes no script resolver, so a file body is not read → **block** on a match | PR 2. Then `require_approval` → **block when `enforce`** (default on) or a self-protection signal is present; with `SHIELDCORTEX_ENFORCE=0` it returns `None` → **allow** (`policy.py:124-127`). The new signals are not self-protection signals |
+| Hermes, outage | **not covered** — unmatched → `None` → **allow** (`policy.py:77`) | **inline text only, within `fallback_surface`**: the selected keys (`command`, `code`, `script`, …; **not** a write tool's `content`), joined and truncated to 4096 chars (`sc_client.py:131-157`). A match blocks unconditionally. A **file body** (write-then-run) and a body beyond the cap are **not covered → allow** | not covered → **allow** |
 
-**The honest Hermes statement, in the ADR-002 style (round-1 B4).** On the Hermes outage path
-`policy.py` returns `None` (allow) for any shape the text fallback does not match, and Hermes
-has **no approval prompt** — so there is **no door on this plane for an unmatched shape.** The
-ledger-dependent floor rows A/C are unmatched text shapes, so on an outage they **fail open
-(allow)**, not to a door. Only row D (text-decidable) denies on outage, and only the
-catastrophic fallback denies unconditionally; a dangerous match denies when `enforce` is on.
-This is ADR-002 §own documented behaviour ("partial fail-open, loudly audited" — the Hermes row
-of the §5C adapter table), recorded here as a **measured residual**, not a pass. The earlier
-draft's "A/C fall to the dangerous door" / "brokerable door, not to allow" on outage was
-**incorrect against `policy.py`** and is removed.
-
-**API-up wording corrected.** When the API is up, `policy.py` maps `require_approval` to a
-**block** (fail-closed, stricter than a door, because Hermes has no approval card) — not to an
-approval prompt. So "door = full" was the wrong word for the API-up Hermes cell; it is
-"require_approval → block." §5C-style coverage records Hermes-outage as "floor partial (row D
-only), A/C fail open," never as a pass.
+**The honest Hermes statement.** Hermes has no approval prompt and no door for an unmatched
+outage shape; ADR-002 records its outage behaviour as "partial fail-open, loudly audited". On
+outage this design adds exactly one thing: an inline-text row-D match within the fallback surface.
+It does **not** make the write-then-run form of row D outage-safe, and it does not give A/C/B/J any
+outage coverage. On API-up, Hermes A/C/B/J arrive with PR 2; row D API-up is inline text only.
 
 ---
 
@@ -529,63 +497,58 @@ Issue item 4. Modelled on `checkStaleShieldCortexCopies` in `src/cli/doctor.ts`
 
 ## 8. Test plan (GitHub CI; benign fixtures only)
 
-All fixtures run in CI via the existing Jest + `guard-effect-fixtures` harness (an in-process
-simulation — round-1 N5). **Payload literals are not needed** — the exploit rows are described
-by *shape*; benign fixtures are real files. Remembering the repo's CI gotchas: fixtures write
-under the test-pinned home, never `$HOME/.shieldcortex`, and avoid `os.tmpdir()` for any
-watch-adjacent path.
+Fixtures run in CI via Jest + the `guard-effect-fixtures` harness (an in-process simulation) plus
+the §5 adapter-fixture obligation. Exploit rows are described by *shape*; benign fixtures are real
+files. Fixtures write under the test-pinned home, never `$HOME/.shieldcortex`, and avoid
+`os.tmpdir()` for watch-adjacent paths. Expected columns are **Claude hook + OpenClaw** unless a
+row says otherwise.
 
-**Acceptance rows from #907 (the three directly-written shapes are DENY; compile-then-run is the
-door):**
+**Acceptance rows from #907:**
 
-- **(a) agent writes and runs a compiled binary** → fixture: a write tool records a file
-  whose bytes carry a native-image magic header (a tiny benign ELF/Mach-O stub committed as
-  a fixture, or a `chmod +x` of agent-written bytes), then an exec of that path →
-  `exec-agent-written-native-bytes` → **DENY**, plain-English reason.
-- **(b) compile-then-run across two calls** → call 1: agent writes `helper.c` (benign
-  "hello") and runs `cc helper.c -o helper` (records `compiled-output` linked to the
-  source); call 2: agent runs `./helper` → `exec-of-agent-compiled-artifact` → **HOLD in a
-  tainted session / AUDIT (or Q1 verdict) untainted** — **NOT a DENY** (see §9). Proves
-  cross-call linkage via the store.
-- **(c) LD_PRELOAD of a just-written library** → agent **writes** `libx.so` byte-for-byte
-  (benign, no compile observed), then a command sets the preload env and runs any program →
-  `load-agent-written-native-object` → **DENY**.
-- **(d) Python mapping executable memory** → a program body containing the `mmap`
-  PROT_EXEC / `mprotect` +X / ctypes-call-into-buffer *shape* (benign no-op bytes) folded
-  from a write-then-run or a `-c`/heredoc → `map-exec-agent-written-memory` → **DENY**.
-  This row needs no ledger and is the Hermes-outage-safe one.
+- **(a) agent writes and runs a compiled binary** → a write tool **creates** a new file (`preId`
+  absent) whose bytes carry a native magic header (a tiny benign committed stub), then a separate
+  call execs it → **DENY** `exec-agent-written-native-bytes`. (A `chmod` alone is not this
+  fixture — Rule P makes it unproved.)
+- **(b) compile-then-run across two calls** → call 1 writes `helper.c` and runs
+  `cc helper.c -o helper`; call 2 runs `./helper` → `exec-of-agent-compiled-artifact` at **Q1's
+  verdict** — **not** DENY (§9). No taint variant: B′ is not a PR 1 row.
+- **(c) LD_PRELOAD of a just-written library** → a write tool creates `libx.so` (no compile), then
+  a command sets the preload variable to it and runs a program → **DENY**
+  `load-agent-written-native-object`.
+- **(d) Python mapping executable memory** → the `mmap` PROT_EXEC / `mprotect` +X /
+  ctypes-call-into-buffer *shape* with benign no-op bytes, as (i) an inline `-c`/heredoc body and
+  (ii) a written script then run → **DENY** on the hook and OpenClaw for both. Hermes: (i) only,
+  API-up and outage (outage only within 4096 chars of the fallback surface); (ii) is **not**
+  covered on Hermes and is asserted as **allow** on the outage path so the gap is visible.
 
-**Benign controls (must all keep current behaviour / not trip the floor):**
+**Rule P / Rule H controls:**
 
-- running installed `git`, `node`, `python` on a **pre-existing** (not agent-written)
-  script (rows F/H — state-2 positive install-root/no-record signal);
-- `node_modules/.bin/<tool>` and a pip console-script entry point not authored by the
-  agent (row G);
-- the **operator** (user/cli band) running the build output the agent compiled (row E — with the
-  Q2 band caveat noted, this is "band says cli", not a proven human);
-- a build tool writing the declared build output, operator-run (row I);
-- an agent writing a **data** file (`.json`/`.md`/`.csv`) and a later command reading it
-  (must not be mistaken for a native artifact — reuses `INERT_WRITE_TARGET`);
-- **build-driver flows the floor must not deny (round-1 B3):** `cargo test`, `go test`,
-  `make check`, an `npm run build` of a native addon, and a `pip install` of an extension — each
-  as the agent running the outer command, with a following agent exec/load of the output. All
-  must resolve to **row B (door/AUDIT per Q1)** via the compile-lineage record, **never floor**;
-- a **built** `.node` addon `require`d in the same session → **row B** (compile lineage), not
-  floor row C (this is the round-1 B3 scenario-D fix, asserted as a control);
-- the full benign compile-and-test flow in a **tainted** session is HOLD (expected), proving
-  the floor did not escalate it to DENY.
+- failed write against an existing native file (simulated by recording, then not changing the
+  file) → exec → **row J** at a non-install path, **current behaviour** at an install root — never DENY;
+- `chmod +x` (write-family) of an existing native file → same as above;
+- direct write of native bytes, then a supported compile to the same path that does not change the
+  file → exec → **DENY** (compile record unproved; write record is producer);
+- supported compile that does change the file → exec → **row B**;
+- write-family call creating a native file inside `~/.local/bin` (test-pinned home) → exec →
+  **DENY** (pinned producer), and the same after filling the general store past its cap → still
+  **DENY** (pins are not evicted);
+- install-root write with the store made unwritable → the **write call** is **row J**;
+- pin directory unreadable at exec → install-root native with no producer → **row J**;
+- general record evicted / store corrupt → non-install native exec → **row J**, not DENY, not allow;
+- unresolved or absent session id → non-install native exec → **row J**; install-root write held;
+- cross-process: a record made by one hook process is visible to the exec check in another.
 
-**Store/eviction/unknown controls:**
+**Benign controls (must not hit the floor):**
 
-- evict-then-exec → the previously-recorded path is tombstoned → **row J door**, **not** allow
-  and **not** a floor DENY (proves eviction fails toward *unknown*);
-- unresolved **or absent** session id → no ledger → row J door;
-- a native-header file at a **non-install project-local** path with no record (state 3) → row J
-  door, not allow (proves "not in ledger" is never ALLOW);
-- a native-header file in a **recognised install root** with no record (state 2) → current
-  behaviour, not a door (proves installed tools are not floor-denied or door-held);
-- cross-process: write recorded in process 1 is visible to the exec check in process 2
-  (two separate hook invocations against the same store file).
+- installed `git`, `node`, `python` running a pre-existing script (F, H);
+- `node_modules/.bin/<tool>` not written by the agent (G);
+- the user/cli band running a compiled output (E — band-attested, Q2);
+- a data file written then read (`INERT_WRITE_TARGET`);
+- **build drivers**: `cargo test`, `go test`, `make check`, `npm run build` of a native addon,
+  `pip install` of an extension — the **outer** call keeps **current behaviour**; a **following
+  separate** agent exec of the output, where the guard resolves it, is **row J (HOLD)**, asserted
+  as such. These controls prove "never floor"; they do **not** prove "not gated";
+- a **supported** compile (`cc x.c -o x`) then a separate exec → **row B**, never floor.
 
 ---
 
@@ -593,20 +556,17 @@ door):**
 
 | #907 acceptance | met by PR 1? |
 |---|---|
-| Fixture: agent writes+runs a compiled binary → denied, plain reason | **Yes** (row A) |
-| Fixture: compile-then-run across two calls → **denied** | **No — consciously narrowed to HOLD/AUDIT (door), pending owner Q1.** Floor-denying this would block routine compile-and-test (M1); the issue's DENY is not met by design, not by omission |
-| Fixture: LD_PRELOAD of a just-written library → denied | **Yes** (row C) |
-| Fixture: Python mapping executable memory → denied | **Yes** (row D) |
-| No false positives on installed/pre-existing tools | **Yes, for the §8 control set** (rows E–I + the data-file, build-driver, built-addon and state-2/3 controls); not a measured production false-positive rate |
-| Doctor reports the shared-host risk | **No — separate PR 3** (issue item 4), by design |
+| Fixture: agent writes+runs a compiled binary → denied, plain reason | **Yes on Claude Code hook and OpenClaw.** Hermes: **No** in PR 1 (API-up is PR 2; outage never) |
+| Fixture: compile-then-run across two calls → **denied** | **No.** Row B at Q1's verdict (AUDIT recommended). Not met by design |
+| Fixture: LD_PRELOAD of a just-written library → denied | **Yes on Claude Code hook and OpenClaw.** Hermes: **No** in PR 1 |
+| Fixture: Python mapping executable memory → denied | **Yes on Claude Code hook and OpenClaw** (inline and folded file body, within scan caps). Hermes: **inline body only** (API-up and outage, outage within 4096 chars); write-then-run file body **not met** on Hermes |
+| No false positives on installed/pre-existing tools | **Partly.** Met for installed tools at install roots (Rule H complete), non-native targets, and outer build-driver invocations: none hits the floor or the door. **Not met** for pre-existing **project-local** native binaries and build-driver outputs: those are held at row J (§4.2). Not a measured production rate |
+| Doctor reports the shared-host risk | **No — separate PR 3** |
 
-So PR 1 meets the three directly-written DENY fixtures (a, c, d) and the installed-tool
-non-false-positive bar **for the control set**. It does **not** meet the issue's "compile-then-run
-→ denied" row: that row is **consciously narrowed** to the door, pending the owner's Q1 decision,
-because an honest floor cannot deny it without blocking routine builds. The doctor report (item 4)
-and egress tightening (item 5) are separate deliverables (PR 3 / PR 4). This is stated so PR 1 is
-not claimed to close the whole issue, and so §9, §10-Q1, §11 and the summary all say the same
-thing about the compile-then-run row (round-1 B7).
+So PR 1 meets the three directly-written DENY fixtures **on the Claude Code hook and OpenClaw
+only**, with Hermes limited to inline row D. It does not meet compile-then-run → denied, the
+Hermes A/C rows, the Hermes file-body row D, the non-FP bar for project-local binaries, or the
+doctor row. §1, §4.2, §11 and the invariant box say the same thing.
 
 ---
 
@@ -614,98 +574,92 @@ thing about the compile-then-run row (round-1 B7).
 
 ### Owner questions (numbered, recommended option first)
 
-1. **Default verdict for shape 2 (row B) in an *untainted* session.** Options: (a) AUDIT —
-   record, do not block; (b) HOLD — one bounded approval per compile-then-run chain; (c)
-   DENY — floor it too. **Recommend (a) AUDIT** for the first PR: it satisfies M1 ("routine
-   work never trips the Guard"), keeps the control-set false-positive surface at no blocked
-   builds, and still produces the signal and the audit trail the owner needs to decide later.
-   (b) is the ADR-002-consistent tightening **only after** the §2.5 narrowing gate (5A+5B+5C)
-   is met — it is not an ADR-sequenced default now, and HOLD is not "a later tightening of an
-   AUDIT default" in ADR-002's own text (round-1 B6/Grok#3). (c) is rejected as dishonest
-   against M1 unless the owner explicitly accepts blocking routine builds. **ADR note:**
-   ADR-002 §2.4 holds an `unclassified-executable`/`unresolved` effect at **HOLD minimum in
-   every session**; a compiled binary whose effects the mapper cannot resolve is such an effect.
-   Recommending AUDIT for row B is therefore a **conscious owner departure** from ADR-002's
-   HOLD-minimum for this one well-provenanced shape, justified by M1 — it is labelled as a
-   departure here, not presented as already ADR-consistent.
-2. **Operator-vs-agent discriminator for rows E/I (round-1 B5).** The DefenceSource band is
-   *process* identity; ADR-002 §1.2 says an operator request and an injected-model request in
-   the same session share it, so `type: cli` does **not** prove a human ran the output. Options:
-   (a) keep rows E/I on the band but **label them "band-attested, not human-attested"** and do
-   not treat the band as a provenance *exception* that overrides the floor — the floor (A/C/D)
-   keeps DENY precedence regardless of band; (b) require a genuine per-action host-attested
-   human-execution fact before E/I relieve anything; (c) drop E/I from guarded tool calls
-   entirely. **Recommend (a)** for PR 1: E/I are "no new gate" rows (current behaviour), and the
-   floor's DENY precedence is independent of band, so a mislabelled band cannot grant the agent a
-   floor exemption. (b) is the correct long-term fact and is deferred to the actor-attestation
-   work. This also means row E/I never *weaken* the floor — they only describe where no floor
-   match exists.
-3. **"Declared build output" definition (rows E/I).** Needs a project build-config fact to
-   know the build dir. Recommend: for PR 1, rely on the **band** (operator-run, with the Q2
-   caveat) rather than the build-dir fact, and defer build-dir awareness to PR 2 so PR 1 ships
-   without a new config surface.
-4. **Hermes outage floor coverage (round-1 B4).** On the text-only fallback, rows A/C are
-   unmatched shapes and `policy.py` **fails open (allow)** for them; Hermes has no approval
-   prompt, so there is **no door** on this plane for an unmatched shape. Recommend **accepting
-   this as a documented residual** for PR 1 (ADR-002 already documents Hermes partial fail-open),
-   recording it as a measured coverage gap, **not** closing it with a claim of a door that the
-   plane does not have. PR 2's server-side store does **not** fix the *outage* case — an
-   unavailable server cannot supply its store. The honest first-PR change is: row D denies on
-   outage via the new text matcher; A/C do not, and that is the residual.
-5. **Native-image detection fidelity.** Magic-byte reads catch ELF/Mach-O/PE; a raw-shellcode
-   blob with no recognisable header is caught only when it reaches row D's exec-memory shape.
-   Recommend: treat a state-1 agent-written file that is executed directly *and* is non-text (NUL
-   bytes, as `foldScriptSources` already detects at exec) as `exec-agent-written-native-bytes`
-   even without a known magic number — fail toward the floor for direct exec of agent-written
-   binary blobs.
+1. **Default verdict for row B.** Options: (a) AUDIT — record, do not block; (b) HOLD — one
+   bounded approval per compile-then-run chain; (c) DENY — floor it too. **Recommend (a)** for
+   PR 1 so supported compile-and-test does not trip the Guard. **What ADR-002 actually says:** an
+   executable effect the mapper cannot resolve is `unclassified-executable` / `code-exec-opaque`,
+   **HOLD at minimum in every session** (§2.4), and the move of any class **toward AUDIT** is
+   gated on §2.5 (5A + 5B + 5C), which has not passed. So (b) HOLD is the ADR-consistent position
+   **now**; (a) AUDIT is a **conscious owner departure** from it, justified only by M1. (c) is
+   rejected unless the owner accepts blocking routine builds. **Taint note (fact, not a new
+   option):** ADR-002 allows AUDIT only in an *untainted* session, and no PR 1 adapter can
+   establish "untainted" — the §2.2 store is not wired, the Claude hook and Hermes read no taint,
+   and OpenClaw's detection-triggered taint is a different contract that fails soft. Unknown
+   taint is not clean. So choosing (a) for PR 1 means AUDIT **regardless of taint**, a further
+   departure the owner is accepting, until taint wiring lands. (OpenClaw's existing escalation
+   would still raise a `sensitive` AUDIT row to `require_approval` inside its bounded window.)
+2. **Operator-vs-agent discriminator for rows E/I.** The band is process identity, not a human
+   fact. Options: (a) keep E/I on the band, labelled "band-attested, not human-attested", with
+   floor DENY precedence independent of band; (b) require a per-action host-attested human fact;
+   (c) drop E/I. **Recommend (a)** for PR 1; (b) is the long-term fact.
+3. **"Declared build output" definition (rows E/I).** Recommend the band for PR 1 and build-dir
+   awareness in PR 2.
+4. **Hermes outage floor coverage.** Recommend accepting, as a documented residual, that on
+   outage A/C/B/J and file-body row D **allow** (§6); the only outage addition is inline-text row
+   D. PR 2's store does not fix the outage case.
+5. **Native-image detection fidelity.** Magic-byte reads catch ELF/Mach-O/PE. Recommend treating
+   a NUL-bearing target with a Rule P `agent-written` producer as a native image even without a
+   known magic number.
 
 ### Residuals (static coverage deductions — not attacks executed in this review)
 
-- **Unrecorded exec-surface creation (§3.4):** shell redirection, `dd`/`printf`/`tee`/`base64
-  -d`, downloads (`curl`/`wget`), interpreter inline file writes, and unsupported write schemas —
-  no `agent-written` record; caught only as state-3 **door** when a native header sits at a
-  non-install path, else not seen as an artifact.
-- **Same-command write-and-exec / compile-and-exec** in one Bash call (`> f; ./f`,
-  `gcc x.c -o x && ./x`): the pre-gate fires before the file exists; one approval releases both
-  halves; governed by Q1 for the compile form, text-decidable (row D) only for inline-bytes.
-- **Pre-gate records intent, not completion:** a `compiled-output` label for a compile that then
-  failed, or a path whose bytes are later overwritten by an unrecorded writer, can mis-label
-  lineage — direction is toward the **door** (benign over-gating) for row B, and the exec-time
-  header read governs the floor, so neither direction is a silent allow (§3.4).
-- **Build-recipe / package-lifecycle / native-loader child exec** not observed as a tool call —
-  ADR-002 §210's outer-gate limitation; an inner call a build recipe or loader makes is outside
-  the gate on adapters that observe the outer invocation only.
-- **Bare-PATH execution and extensionless install-root relief** inherited from
-  `detectScriptInvocations` / `isInstalledBinaryPath` — a later-modified target inside such a
-  tree is a state-2 path by location, so a genuine agent modification of a file *inside* an
-  install root is a residual (positive pre-existing signal can mask an agent write there).
-- **Bounded parsing / folding limits:** a body beyond the `MAX_SCRIPT_BYTES` / `MAX_FOLDED_BYTES`
-  scan cap, a truncated Hermes fallback surface (4096-char cap), or a raw fallback body that is
-  absent — row D may miss; such a miss is unknown, not allow-by-design.
-- **Compile-to-native remains an intentional door (Q1), not a floor** — it carries the same
-  harmful effect the floor seeks to reduce; this is the accepted M1 trade, not a covered case.
-- **Same-UID evasion:** direct mutation of the same-UID-writable ledger, hard-link aliases, file
-  replacement after inspection, a symlink/rename/second-interpreter indirection, and identity of
-  files across session/TTL boundaries — the same residual the self-protection floor documents.
-  Not all of these are "determined same-UID evasion": several (redirection, build recipes) are
-  ordinary tool paths and are listed above as such.
+Each line states the **actual** verdict. "Classification limit" = the evidence is misread;
+"observation limit" = the call is never seen.
+
+- **Unrecorded exec-surface creators (§3.4 items 1–4)** — observation limit. Created at a
+  non-install path and execed by a later separate call → **row J**. Created **inside an install
+  root** → state 2 → **current behaviour (allow)**; Rule H covers write-family calls only.
+- **Same-command write-and-exec** (redirect-then-exec or compile-then-exec in one Bash call) —
+  observation limit. The pre-gate runs before the file exists: no header, no producer, no row
+  fires → **current behaviour (allow)** (today's opaque-script audit at the sensitive tier). Not
+  "one approval"; nothing is held. Row D catches it only when an exec-memory shape is in the
+  inspected inline body.
+- **Unrecorded writer after a recorded intent** — classification limit of Rule P. A failed
+  recorded write followed by an unrecorded write of native bytes → attributed to the record →
+  **DENY** (bytes are still agent-delivered). A failed supported compile followed by an
+  unrecorded native write → attributed to the compile → **row B (Q1 verdict)**, i.e. a
+  directly-written binary can escape the floor this way. Not benign over-gating.
+- **Same-UID `ContentId` forgery** (restoring `mtime`/`size` after a write) can make a producing
+  write look unproved → **row J** at a non-install path, **allow** at an install root.
+- **Unsupported build outputs** — by design (§3.4): a later separate exec → **row J (HOLD)**;
+  same-call or child exec → **allow**.
+- **Build-recipe / package-lifecycle / native-loader child exec** not seen as a tool call —
+  ADR-002's outer-gate limitation → **allow**.
+- **Loads inside an inspected-only-by-name program** (a `require` inside a test runner, an
+  import of an extension) are not resolved as load targets → **allow**.
+- **Bare-name PATH exec** is not resolved in PR 1 → **allow** (current behaviour).
+- **Rule H on non-enforcing hosts** — on advisory, shadow or `autoApprove` hosts the held
+  install-root write is widened to warn/approve and proceeds **unrecorded**; its later exec is
+  state 2 → **allow**. An install-root write released by a genuine approval also proceeds
+  unrecorded; the approval is the authority.
+- **Cross-session / TTL** — a native file written into an install root in session S1 and execed in
+  S2, or after S1's directory expired, has no pin in the executing session → **allow**.
+- **Row D bounded inspection** — a body beyond `MAX_SCRIPT_BYTES`/`MAX_FOLDED_BYTES`, NUL-bearing,
+  or unresolved is folded as **opaque** (`tool-action-guard.ts:5118-5119`) → **allow** at the
+  sensitive tier (`:7318-7325`), not fail-closed. On Hermes, a body outside the fallback surface
+  or beyond 4096 chars is unmatched → **allow** (`policy.py:77`).
+- **Compile-to-native is row B, not the floor (Q1)** — it carries the harmful effect the floor
+  seeks to reduce; the accepted M1 trade.
+- **Same-UID evasion** — direct mutation or deletion of the ledger/pins, hard-link aliases, file
+  replacement after inspection, symlink/rename/second-interpreter indirection — the same residual
+  the self-protection floor documents.
 - **Scope honesty (issue "Context").** This narrows the "agent-authored native code reaches the
-  CPU" path. It does **not** stop hardware flaws, does not isolate a shared CPU. The doctor
+  CPU" path. It does **not** stop hardware flaws and does not isolate a shared CPU. The doctor
   warning (PR 3) and egress tightening (PR 4) are the complementary, separate controls.
 
 ---
 
 ## 11. PR ordering summary
 
-1. **PR 1** — effect class + floor DENY (rows A/C/D) + agent-artifact ledger (pure core,
-   fs store, three-state classifier, tombstones, Claude + OpenClaw wiring) + three-valued door
-   (rows B/J) + Hermes session-id forwarding and text-only row-D fallback + the §8 test plan +
-   benign/build-driver corpus. **Meets the three directly-written DENY fixtures (a, c, d) and the
-   installed-tool non-false-positive bar for the control set.** Does **not** meet the issue's
-   "compile-then-run → denied" row (consciously narrowed to the door, pending Q1), the doctor
-   report (PR 3), or egress tightening (PR 4).
-2. **PR 2** — Hermes/API **server-side** store so the ledger-dependent floor and door hold under
-   Hermes **when the API is up** (the outage case stays the §6/Q4 residual); cross-plane parity;
-   build-output-dir awareness (Q3).
-3. **PR 3** *(separate issue)* — doctor `Code-execution host isolation` warning (issue item 4).
-4. **PR 4** *(separate issue)* — egress allow-listing for code-executing sessions (issue item 5).
+1. **PR 1** — effect class + floor DENY (A/C/D) + ledger (pure core, fs store, Rule P, Rule H,
+   total classifier, Claude hook + OpenClaw wiring) + door (J) + row B at Q1's verdict + Hermes
+   session-id forwarding and inline-text row-D outage fallback + §8 tests + adapter fixtures.
+   **Meets** the three directly-written DENY fixtures on the Claude Code hook and OpenClaw, and
+   inline row D on Hermes. **Does not meet** compile-then-run → denied, Hermes A/C, Hermes
+   file-body row D, the non-FP bar for project-local native binaries (held at row J), or the
+   doctor row.
+2. **PR 2** — Hermes API-up store (A/C/B/J on Hermes when the API is up; outage unchanged);
+   cross-plane parity; build-output-dir awareness (Q3).
+3. **Separate prerequisite** — ADR-002 taint wiring; until then B′ is not a verdict.
+4. **PR 3** *(separate issue)* — doctor `Code-execution host isolation` warning (issue item 4).
+5. **PR 4** *(separate issue)* — egress allow-listing for code-executing sessions (issue item 5).
