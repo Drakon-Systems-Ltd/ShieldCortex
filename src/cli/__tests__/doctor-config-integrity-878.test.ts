@@ -191,6 +191,69 @@ describe('#878 doctor reads the Action Guard config without side effects', () =>
     });
   });
 
+  describe('unsigned with Guard on and an obstacle doctor cannot resolve without writing', () => {
+    const GUARD_OFF_TEXT = 'Guard is off on this host';
+    const ON = { enabled: true, enforce: true };
+    const WATCH = { enabled: true, enforce: false };
+
+    /** The Claude Code hook, so a signed Enforce is a live plane and the lock row says so. */
+    function wireClaudeHook(): void {
+      const dir = path.join(tmp, 'home', '.claude');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({
+        hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'shieldcortex hook pre-tool-use' }] }] },
+      }));
+    }
+
+    function lockRowMessage(): string {
+      return doctor.policyLockRows().find((r) => r.label === 'Action guard policy lock')!.message;
+    }
+
+    /** `.config-sig` a dangling link into an existing, writable directory; `.integrity-key` a normal file. */
+    function danglingSigFixture(guard: Record<string, unknown>): Snapshot {
+      const before = unsignedFixture(guard);
+      fs.writeFileSync(path.join(configDir, '.integrity-key'), 'a'.repeat(64) + '\n');
+      fs.mkdirSync(path.join(tmp, 'sig-target'));
+      fs.symlinkSync(path.join(tmp, 'sig-target', 'config-sig'), path.join(configDir, '.config-sig'));
+      config.clearCloudConfigCache();
+      return { ...before, entries: fs.readdirSync(configDir).sort() };
+    }
+
+    const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
+
+    itNonRoot('config dir not writable: the plane and the lock row report the Guard the file declares', async () => {
+      wireClaudeHook();
+      const before = unsignedFixture(ON);
+      fs.chmodSync(configDir, 0o500);
+      try {
+        expect(doctor.readHostGatePlanes()).toMatchObject({ signedEnabled: true, signedEnforce: true });
+        expect(lockRowMessage()).not.toContain(GUARD_OFF_TEXT);
+        await runDoctorActionGuardChecks();
+        expectUnchanged(before);
+      } finally {
+        fs.chmodSync(configDir, 0o700);
+      }
+    });
+
+    it('dangling `.config-sig`: the plane reports the file\'s own enabled and enforce', async () => {
+      const before = danglingSigFixture(WATCH);
+      expect(doctor.readHostGatePlanes()).toMatchObject({ signedEnabled: true, signedEnforce: false });
+      expectUnchanged(before);
+      // The link still dangles: the inspector wrote nothing through it.
+      expect(fs.existsSync(path.join(tmp, 'sig-target', 'config-sig'))).toBe(false);
+    });
+
+    it('dangling `.config-sig`, Enforce on: the lock row does not say Guard is off', async () => {
+      wireClaudeHook();
+      const before = danglingSigFixture(ON);
+      expect(doctor.readHostGatePlanes()).toMatchObject({ signedEnabled: true, signedEnforce: true });
+      expect(lockRowMessage()).not.toContain(GUARD_OFF_TEXT);
+      await runDoctorActionGuardChecks();
+      expectUnchanged(before);
+      expect(fs.existsSync(path.join(tmp, 'sig-target', 'config-sig'))).toBe(false);
+    });
+  });
+
   it('self-heal: no re-sign — config.json bytes, mtime and the legacy signature are unchanged', async () => {
     const before = selfHealFixture();
     await runDoctorActionGuardChecks();

@@ -1803,11 +1803,14 @@ export function readActionGuardCoreConfigReadOnly(): ActionGuardCoreConfig | nul
  * adopted, re-signed, self-healed or cached, so running doctor cannot change
  * the file it is reporting on.
  *
- * That answer is given only when a read-only look finds nothing in the way of
- * the adoption (see {@link unsignedAdoptionOutlook}). A directory at
- * `.integrity-key` makes it fail, so the getter will classify the file
- * tampered: answered as that strict posture. Anything else in the way is
- * `null` (unknown), as is a file that exists but could not be read or parsed.
+ * A directory at `.integrity-key` makes the adoption fail (see
+ * {@link unsignedAdoptionOutlook}), so the getter will classify the file
+ * tampered: answered as that strict posture. Any other obstacle leaves the
+ * outcome unknown without a write; that is answered as the file reads too,
+ * because the getter then either adopts it (and enforces what it says) or
+ * fails the adoption (and enforces the stricter tampered view), so the file's
+ * own value does not report Guard off for a file that says on. `null` is kept
+ * for a file that exists but could not be read or parsed.
  */
 export function inspectActionGuardCoreConfig(): ActionGuardCoreConfig | null {
   try {
@@ -1821,7 +1824,6 @@ export function inspectActionGuardCoreConfig(): ActionGuardCoreConfig | null {
     // readActionGuardCoreConfigReadOnly, which reports it as unknown.
     if (state.integrity === 'unverified') {
       const outlook = unsignedAdoptionOutlook();
-      if (outlook === 'unknown') return null;
       if (outlook === 'fails') {
         // What a failed adoption leaves the getter with: the tampered view.
         const unlocked = readRawConfigStateUnlocked({ readOnly: true });
@@ -1843,8 +1845,11 @@ export function inspectActionGuardCoreConfig(): ActionGuardCoreConfig | null {
  * (#878). `'fails'` only where the failure does not depend on privileges: a
  * directory at the key path fails both the read and the mint. `'unknown'` for
  * any other obstacle visible without writing (a non-file key, a dangling link
- * at either path, a directory that is not writable). `'unobstructed'` is not a
- * promise that the writes will succeed — only that nothing here says otherwise.
+ * at either path, a directory that is not writable); the inspector answers
+ * that, like `'unobstructed'`, with the file's own value, since either outcome
+ * of the adoption enforces at least what the file says. `'unobstructed'` is
+ * not a promise that the writes will succeed — only that nothing here says
+ * otherwise.
  */
 function unsignedAdoptionOutlook(): 'unobstructed' | 'fails' | 'unknown' {
   const keyFile = getIntegrityKeyFile();
