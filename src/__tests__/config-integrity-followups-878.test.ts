@@ -181,6 +181,85 @@ describe('#878 item 1: a symlink at config.json is never replaced', () => {
   });
 });
 
+describe('#878 item 1: a reader that persists reads without side effects behind a link', () => {
+  // getDeviceId/getDeviceName (and the getCloudSyncControls migration) read,
+  // then persist through the skip-policy writer. The ordinary read adopts an
+  // unsigned target — `.integrity-key`, `.config-sig` — so it must not run
+  // before a write that is refused with "Nothing was written".
+  type Persisting = 'getDeviceId' | 'getDeviceName';
+  const persisting: Persisting[] = ['getDeviceId', 'getDeviceName'];
+
+  function snapshot(target: string | null): { entries: string[]; target: Buffer | null } {
+    return {
+      entries: fs.readdirSync(configDir).sort(),
+      target: target !== null && fs.existsSync(target) ? fs.readFileSync(target) : null,
+    };
+  }
+
+  function errorLines(spy: { mock: { calls: unknown[][] } }): string[] {
+    return spy.mock.calls.map((c) => String(c[0]));
+  }
+
+  it.each(persisting)('%s, live link to an unsigned target: nothing is written, and the refusal says so truly', async (fn) => {
+    const target = path.join(configDir, 'target.json');
+    fs.writeFileSync(target, JSON.stringify({ defenceMode: 'balanced' }) + '\n');
+    fs.symlinkSync(target, configFile());
+    const before = snapshot(target);
+    expect(before.entries).toEqual(['config.json', 'target.json']);
+    const config = await freshConfig();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const value = config[fn]();
+    expect(typeof value).toBe('string');
+    expect(value.length).toBeGreaterThan(0);
+    expect(snapshot(target)).toEqual(before);
+    expect(fs.lstatSync(configFile()).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(configFile())).toBe(target);
+    // The one line said is the link refusal, and "Nothing was written" is true.
+    expect(errorLines(errorSpy).filter((l) => /symbolic link/.test(l))).toHaveLength(1);
+    expect(errorLines(errorSpy).find((l) => /symbolic link/.test(l))).toMatch(/Nothing was written/);
+    // The same identity for the rest of the run, still without writing.
+    expect(config[fn]()).toBe(value);
+    expect(snapshot(target)).toEqual(before);
+  });
+
+  it.each(persisting)('%s, dangling link: nothing is written and no link target appears', async (fn) => {
+    const target = path.join(configDir, 'elsewhere', 'config.json');
+    fs.symlinkSync(target, configFile());
+    const before = snapshot(target);
+    const config = await freshConfig();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const value = config[fn]();
+    expect(value.length).toBeGreaterThan(0);
+    expect(snapshot(target)).toEqual(before);
+    expect(fs.existsSync(target)).toBe(false);
+    expect(fs.readlinkSync(configFile())).toBe(target);
+    expect(errorLines(errorSpy).some((l) => /NOT persisted/.test(l))).toBe(true);
+  });
+
+  it.each(persisting)('%s, regular unsigned file: still adopted and persisted', async (fn) => {
+    fs.writeFileSync(configFile(), JSON.stringify({ defenceMode: 'balanced' }) + '\n');
+    const config = await freshConfig();
+    const value = config[fn]();
+    const key = fn === 'getDeviceId' ? 'deviceId' : 'deviceName';
+    expect(JSON.parse(fs.readFileSync(configFile(), 'utf-8'))[key]).toBe(value);
+    expect(fs.lstatSync(configFile()).isFile()).toBe(true);
+    expect((await freshConfig())[fn]()).toBe(value);
+  });
+
+  it('getCloudSyncControls, live link to an unsigned cloud-enabled target: the migration writes nothing', async () => {
+    const target = path.join(configDir, 'target.json');
+    fs.writeFileSync(target, JSON.stringify({ cloudEnabled: true }) + '\n');
+    fs.symlinkSync(target, configFile());
+    const before = snapshot(target);
+    const config = await freshConfig();
+
+    expect(config.getCloudSyncControls().excludeSensitive).toBe(true);
+    expect(snapshot(target)).toEqual(before);
+  });
+});
+
 describe('#878 item 1: a symlink that appears mid-write', () => {
   /** Swap config.json for a link to it while the writer's temp file is being written. */
   function linkDuringWrite(target: string): void {
