@@ -151,7 +151,7 @@
     "safe-regex2": "^5.0.0",
     "semver": "^7.7.0",
     "ws": "^8.18.0",
-    "zod": "^3.23.0"
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "^3.7.2"
