@@ -5458,7 +5458,7 @@ export async function checkActionGuardReadiness(
   }
   let summaries: import('./guard.js').ReadinessSummary[];
   try {
-    summaries = deps.summaries ? deps.summaries() : (await import('./guard.js')).buildReadinessSummaries();
+    summaries = deps.summaries ? deps.summaries() : (await import('./guard.js')).buildReadinessSummaries({ readOnly: true });
   } catch (err) {
     return [{ label, status: 'warn', message: `could not compute readiness (${(err as Error).message})` }];
   }

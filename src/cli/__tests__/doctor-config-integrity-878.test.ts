@@ -70,8 +70,8 @@ function expectUnchanged(before: Snapshot): void {
 }
 
 /** A config with no signature at all (pre-v4.32): the next ordinary read adopts it. */
-function unsignedFixture(): Snapshot {
-  fs.writeFileSync(configFile(), JSON.stringify({ actionGuard: { enabled: true, enforce: true } }, null, 2) + '\n');
+function unsignedFixture(guard: Record<string, unknown> = { enabled: true, enforce: true }): Snapshot {
+  fs.writeFileSync(configFile(), JSON.stringify({ actionGuard: guard }, null, 2) + '\n');
   fs.utimesSync(configFile(), FIXED_MTIME_S, FIXED_MTIME_S);
   config.clearCloudConfigCache();
   return snapshot();
@@ -81,10 +81,10 @@ function unsignedFixture(): Snapshot {
  * A stale embedded `_sig` beside a legacy whole-file `.config-sig` that still
  * authenticates the exact bytes: the next ordinary read re-signs it.
  */
-function selfHealFixture(): Snapshot {
+function selfHealFixture(guard: Record<string, unknown> = { enabled: true, enforce: true }): Snapshot {
   config.setDefenceMode('balanced'); // mints the integrity key
   const key = fs.readFileSync(path.join(configDir, '.integrity-key'), 'utf-8').trim();
-  const content = JSON.stringify({ actionGuard: { enabled: true, enforce: true }, _sig: 'f'.repeat(64) }, null, 2) + '\n';
+  const content = JSON.stringify({ actionGuard: guard, _sig: 'f'.repeat(64) }, null, 2) + '\n';
   fs.writeFileSync(configFile(), content);
   fs.writeFileSync(path.join(configDir, '.config-sig'), createHmac('sha256', key).update(content, 'utf-8').digest('hex'));
   fs.utimesSync(configFile(), FIXED_MTIME_S, FIXED_MTIME_S);
@@ -153,6 +153,34 @@ describe('#878 doctor reads the Action Guard config without side effects', () =>
     expect(config.inspectConfigIntegrity().verdict).toBe('self-heal');
     expect(doctor.readHostGatePlanes()).toMatchObject({ signedEnabled: true, signedEnforce: true });
     expectUnchanged(before);
+  });
+});
+
+describe('#878 doctor\'s readiness rows read the config without side effects', () => {
+  // `readinessGate: true` is what takes checkActionGuardReadiness past its
+  // pre-check into the real buildReadinessSummaries() path (no injected summaries).
+  const GATED = { enabled: true, enforce: true, readinessGate: true };
+  const exists = (name: string) => fs.existsSync(path.join(configDir, name));
+
+  it('unsigned: no `.config-sig` adopted, no `.integrity-key` minted, config.json unchanged', async () => {
+    const before = unsignedFixture(GATED);
+    expect(exists('.config-sig')).toBe(false);
+    expect(exists('.integrity-key')).toBe(false);
+    const rows = await doctor.checkActionGuardReadiness();
+    expect(rows.length).toBeGreaterThan(0);
+    expect(exists('.config-sig')).toBe(false);
+    expect(exists('.integrity-key')).toBe(false);
+    expectUnchanged(before);
+  });
+
+  it('self-heal: config.json is not re-signed and the legacy `.config-sig` is kept', async () => {
+    const before = selfHealFixture(GATED);
+    const legacySig = fs.readFileSync(path.join(configDir, '.config-sig'));
+    const rows = await doctor.checkActionGuardReadiness();
+    expect(rows.length).toBeGreaterThan(0);
+    expect(fs.readFileSync(path.join(configDir, '.config-sig')).equals(legacySig)).toBe(true);
+    expectUnchanged(before);
+    expect(config.inspectConfigIntegrity().verdict).toBe('self-heal');
   });
 });
 
