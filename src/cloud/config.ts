@@ -424,7 +424,7 @@ export function getCloudSyncControls(): CloudSyncControls {
   // and NOT write — readRawConfigState preserves `parseFailed` so the one-shot
   // migration below never runs against a `{}` derived from a corrupt file
   // (which would persist a near-empty, signed config and wipe cloudApiKey).
-  const { data: raw, parseFailed } = readRawConfigStateBeforeSkipWrite();
+  const { data: raw, parseFailed } = readRawConfigStateBeforeWrite();
 
   // One-shot v4.27 migration: pre-upgrade configs with cloud sync enabled
   // were silently shipping CONFIDENTIAL+ content because `excludeSensitive`
@@ -1464,15 +1464,20 @@ function configIsSymlink(configFile: string): boolean {
 }
 
 /**
- * The read a reader that may then persist through `mutateRawConfig(..., 'skip')`
- * starts from (#878). The ordinary read writes when it adopts an unsigned file
+ * The read a caller that may then write through `mutateRawConfig` starts from
+ * (#878). The ordinary read writes when it adopts an unsigned file
  * (`.integrity-key`, `.config-sig`) or self-heals a stale one; behind a
- * symlinked `config.json` the persist that follows is refused with "Nothing
- * was written", so the read must not have written either. A regular file reads
+ * symlinked `config.json` the write that follows is refused with "Nothing was
+ * written", so the read must not have written either. A regular file reads
  * exactly as before.
  */
-function readRawConfigStateBeforeSkipWrite(): RawConfigState {
+function readRawConfigStateBeforeWrite(): RawConfigState {
   return readRawConfigState({ readOnly: configIsSymlink(getConfigFile()) });
+}
+
+/** {@link readRawConfigStateBeforeWrite}, data only, for callers outside this module. */
+export function readRawConfigBeforeWrite(): Record<string, unknown> {
+  return readRawConfigStateBeforeWrite().data;
 }
 
 /**
@@ -2829,7 +2834,7 @@ export function setRevokeBySourceEnabled(enabled: boolean): void {
 let unpersistedDeviceId: string | null = null;
 
 export function getDeviceId(): string {
-  const { data: raw, parseFailed } = readRawConfigStateBeforeSkipWrite();
+  const { data: raw, parseFailed } = readRawConfigStateBeforeWrite();
   if (typeof raw.deviceId === 'string' && raw.deviceId) {
     return raw.deviceId;
   }
@@ -2858,7 +2863,7 @@ export function getDeviceId(): string {
  * Stores in config on first call; reads from config thereafter.
  */
 export function getDeviceName(): string {
-  const { data: raw, parseFailed } = readRawConfigStateBeforeSkipWrite();
+  const { data: raw, parseFailed } = readRawConfigStateBeforeWrite();
   if (typeof raw.deviceName === 'string' && raw.deviceName) {
     return raw.deviceName;
   }

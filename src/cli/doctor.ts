@@ -131,7 +131,7 @@ import {
   hasTrustedMemorySidecarPosture,
   inspectActionGuardCoreConfig,
   inspectConfigIntegrity,
-  readRawConfig,
+  readRawConfigBeforeWrite,
   migrateInterceptorActionGuardAlias,
 } from '../cloud/config.js';
 import { resolveMemoryConfig } from '../memory/config.js';
@@ -5377,7 +5377,7 @@ export function fixActionGuardConfig(): { changed: boolean; backupPath?: string;
         're-sign it. Nothing was changed. Review it with `shieldcortex config --resign` first',
     };
   }
-  const raw = readRawConfig();
+  const raw = readRawConfigBeforeWrite();
   const isBlock = (v: unknown): v is Record<string, unknown> =>
     !!v && typeof v === 'object' && !Array.isArray(v);
   const alias = isBlock(raw?.interceptor) && isBlock(raw.interceptor.actionGuard)

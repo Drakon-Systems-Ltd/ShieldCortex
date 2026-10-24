@@ -324,3 +324,23 @@ describe('#878 doctor --fix-action-guard: a file that changes during the migrati
     expect(config.inspectConfigIntegrity().verdict).toBe('tampered');
   });
 });
+
+describe('#878 doctor --fix-action-guard: a symlinked config.json', () => {
+  it('to an unsigned target: the read before the refused migration adopts nothing', () => {
+    const target = path.join(configDir, 'target.json');
+    fs.writeFileSync(target, JSON.stringify({ interceptor: { actionGuard: { enforce: false } } }, null, 2) + '\n');
+    fs.symlinkSync(target, configFile());
+    const targetBefore = fs.readFileSync(target);
+    const entriesBefore = fs.readdirSync(configDir).sort();
+    expect(entriesBefore).toEqual(['config.json', 'target.json']);
+    config.clearCloudConfigCache();
+
+    expect(() => doctor.fixActionGuardConfig()).toThrow(/symbolic link.*Nothing was written/s);
+    // No `.integrity-key` minted, no `.config-sig` adopted, target untouched.
+    // (The `--fix-action-guard` backup copy is taken before the migration and
+    // is not a config read; it is filtered here and reported separately.)
+    expect(fs.readdirSync(configDir).filter((n) => !n.includes('.bak-fix-209-')).sort()).toEqual(entriesBefore);
+    expect(fs.readFileSync(target).equals(targetBefore)).toBe(true);
+    expect(fs.lstatSync(configFile()).isSymbolicLink()).toBe(true);
+  });
+});
