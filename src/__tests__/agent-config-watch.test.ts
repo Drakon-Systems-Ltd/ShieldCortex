@@ -195,12 +195,17 @@ describe('agent config watch (#916)', () => {
     expect(rows[0].detail).toMatch(/timed out/);
   });
 
-  it('(g2) a thrown read error fails open with one ledger row', async () => {
+  it('(g2) a thrown read error is a per-file health error, never raw error text', async () => {
     await run();
+    const before = loadAgentConfigState(home).files;
     const r = await run({ snapshot: () => { throw new Error('EACCES fixture'); } });
-    expect(r.errors).toBe(1);
-    expect(rows).toHaveLength(1);
+    // every watched path failed: one health error per file, baselines kept
+    expect(r.errors).toBeGreaterThan(1);
+    expect(rows.length).toBe(r.errors);
+    expect(rows.every((x) => x.kind === 'health-error' && x.detail === 'read-error (unclassified)')).toBe(true);
+    expect(JSON.stringify(rows)).not.toContain('fixture');
     expect(notes).toHaveLength(0);
+    expect(loadAgentConfigState(home).files).toEqual(before);
   });
 
   it('(g3) undelivered notification keeps the change pending and re-sends next run', async () => {

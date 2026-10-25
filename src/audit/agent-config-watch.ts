@@ -12,7 +12,10 @@
  *    KIND of change plus a sanitised entry name, never a command or a path
  *    inside the entry (it may be the injected payload).
  *  - Fail open: any error becomes one ledger row; the host agent is never
- *    blocked or delayed (the runner is detached and time-budgeted).
+ *    blocked or delayed (the runner is detached and time-budgeted). A file
+ *    that cannot be read or parsed is a per-file health error (fixed category,
+ *    never contents or raw error text); it keeps its baseline and the other
+ *    files are still checked. Nothing is committed after the deadline.
  *  - First run records a baseline silently. A project root seen for the first
  *    time is baselined silently too (a fresh clone is not an attack); a new
  *    watched file in an already-baselined root IS reported.
@@ -36,8 +39,14 @@ export interface AgentConfigWatchState {
   roots: string[];
   files: Record<string, FileSnapshot>;
   lastCheckAt?: string;
-  /** ISO time of the last detected unexpected change (doctor shows this). */
+  /** ISO time an unexpected change was last DETECTED (delivered or not). */
+  lastDetectedAt?: string;
+  /** ISO time an unexpected change was last reported AND recorded (baseline advanced). */
   lastChangeAt?: string;
+  /** Files whose detected change is not yet reported/recorded; retried next run. */
+  pendingChanges?: number;
+  /** Per-file health error category from the last run (read or parse failure). */
+  fileErrors?: Record<string, string>;
 }
 
 // ── Watched set (config, not scattered paths) ───────────────────────────────
@@ -134,7 +143,7 @@ function sha(s: string): string {
 }
 
 /** Canonical JSON: sorted keys, so key order never counts as a change. */
-function canonical(v: unknown): string {
+export function canonical(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
   if (v && typeof v === 'object') {
     const o = v as Record<string, unknown>;
@@ -360,76 +369,152 @@ export interface AgentConfigWatchResult {
 
 const DEFAULT_TOTAL_BUDGET_MS = 5_000;
 
-async function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const t = new Promise<never>((_, rej) => {
-    timer = setTimeout(() => rej(new Error(`timed out after ${ms}ms`)), ms);
-    timer.unref?.();
-  });
-  try { return await Promise.race([p, t]); } finally { if (timer) clearTimeout(timer); }
+class DeadlineError extends Error {
+  constructor(ms: number) {
+    super(`timed out after ${ms}ms`);
+    this.name = 'DeadlineError';
+  }
 }
 
-function sameSnapshot(a: FileSnapshot | undefined, b: FileSnapshot): boolean {
-  return canonical(a ?? {}) === canonical(b);
+/**
+ * Fixed-vocabulary category for a thrown error. Raw error text never reaches
+ * the ledger (it may carry a URL token, a path or file contents); only an
+ * errno-style code such as EISDIR is kept, because that alphabet is closed.
+ */
+export function errorCategory(err: unknown): string {
+  if (err instanceof DeadlineError) return 'timeout';
+  const code = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && /^E[A-Z0-9_]{1,24}$/.test(code) ? code : 'unclassified';
+}
+
+/** Semantic snapshot equality, shared with the own-write helper: key order never counts. */
+export function sameSnapshot(a: FileSnapshot | undefined, b: FileSnapshot | undefined): boolean {
+  return canonical(a ?? {}) === canonical(b ?? {});
 }
 
 export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<AgentConfigWatchResult> {
   const now = deps.now ?? Date.now;
   const result: AgentConfigWatchResult = { baselined: false, notified: 0, errors: 0 };
-  const safeLedger = (row: AgentConfigLedgerRow): void => { try { deps.ledger(row); } catch { /* ledger is best effort */ } };
+  /** True when the row was recorded; a `false` return or a throw both count as not recorded. */
+  const safeLedger = (row: AgentConfigLedgerRow): boolean => {
+    try { return deps.ledger(row) !== false; } catch { return false; }
+  };
   const budget = deps.totalBudgetMs ?? DEFAULT_TOTAL_BUDGET_MS;
   const roots = [...new Set(deps.projectRoots.map((r) => path.resolve(r)))];
   const take = deps.snapshot ?? snapshotFile;
+  // Commit guard: once the deadline fires (or the run fails), the abandoned body
+  // must not notify, log or save anything after this function has returned.
+  let expired = false;
 
+  const body = async (): Promise<void> => {
+    const state = loadAgentConfigState(deps.home);
+    const firstRun = !state.initialised;
+    const knownRoots = new Set(state.roots);
+    const next: AgentConfigWatchState = { ...state, version: 1, initialised: true, files: { ...state.files }, roots: [...new Set([...state.roots, ...roots])] };
+    const changedFiles: Array<{ file: string; spec: WatchedFileSpec; before: FileSnapshot; after: FileSnapshot }> = [];
+    const health: Record<string, string> = {};
+
+    for (const w of watchedPaths(deps.home, roots)) {
+      if (expired) return;
+      let after: FileSnapshot;
+      try {
+        after = await take(w.file, w.spec);
+      } catch (err) {
+        // One unreadable file (EISDIR, EACCES...) keeps ITS baseline and is
+        // reported as a health error; every other file is still checked.
+        health[w.file] = `read-error (${errorCategory(err)})`;
+        continue;
+      }
+      if (expired) return;
+      if (isUnparseable(after)) health[w.file] = 'parse-error';
+      const known = Object.prototype.hasOwnProperty.call(state.files, w.file);
+      // Baseline silently: first run, or a project root we have not seen before.
+      if (firstRun || (w.root && !knownRoots.has(w.root))) { next.files[w.file] = after; continue; }
+      const before = known ? state.files[w.file] : {};
+      if (!sameSnapshot(before, after)) changedFiles.push({ file: w.file, spec: w.spec, before, after });
+      else if (!known) next.files[w.file] = after;
+    }
+
+    // Health errors are reported on every path, first run included (a malformed
+    // file baselined silently is still a disabled tripwire). One ledger row per
+    // new or changed condition; result.errors counts every affected file per run.
+    const prevErrors = state.fileErrors ?? {};
+    const nextErrors: Record<string, string> = {};
+    for (const [file, category] of Object.entries(health)) {
+      if (expired) return;
+      result.errors++;
+      if (prevErrors[file] === category) { nextErrors[file] = category; continue; }
+      if (safeLedger({ file: displayPath(file, deps.home), keyPath: '', kind: 'health-error', detail: category, outcome: 'error' })) nextErrors[file] = category;
+    }
+    next.fileErrors = nextErrors;
+
+    if (firstRun) result.baselined = true;
+    let pending = 0;
+    for (const c of changedFiles) {
+      if (expired) return;
+      const changes = diffSnapshots(c.spec, c.before, c.after);
+      const shown = displayPath(c.file, deps.home);
+      if (changes.length === 0) { next.files[c.file] = c.after; continue; }
+      next.lastDetectedAt = new Date(now()).toISOString();
+      const note: AgentConfigNotification = {
+        file: shown,
+        changes: changes.slice(0, 3).map((x) => ({ label: changeLabel(x), name: x.name })),
+        changeCount: changes.length,
+      };
+      try {
+        await deps.notify(note);
+      } catch (err) {
+        if (expired) return;
+        // Not delivered: keep the old baseline so the change is re-sent next session.
+        result.errors++;
+        pending++;
+        safeLedger({ file: shown, keyPath: changes[0].keyPath, kind: 'notify-error', detail: `notification not delivered (${errorCategory(err)})`, outcome: 'error' });
+        continue;
+      }
+      if (expired) return;
+      result.notified++;
+      let recorded = true;
+      for (const x of changes) {
+        if (!safeLedger({ file: shown, keyPath: x.keyPath, kind: changeLabel(x), detail: `entry=${safeEntryName(x.name)}`, outcome: 'change' })) recorded = false;
+      }
+      if (!recorded) {
+        // The audit row is the durable record: without it, do not advance the
+        // baseline, so the next run re-reports and re-records the change.
+        result.errors++;
+        pending++;
+        continue;
+      }
+      next.files[c.file] = c.after;
+      next.lastChangeAt = new Date(now()).toISOString();
+    }
+    next.pendingChanges = pending;
+    next.lastCheckAt = new Date(now()).toISOString();
+    if (expired) return;
+    saveAgentConfigState(deps.home, next);
+  };
+
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, rej) => {
+    timer = setTimeout(() => { expired = true; rej(new DeadlineError(budget)); }, budget);
+    timer.unref?.();
+  });
+  const running = body();
+  running.catch(() => undefined); // a late rejection after the deadline is not unhandled
   try {
-    const body = async (): Promise<void> => {
-      const state = loadAgentConfigState(deps.home);
-      const firstRun = !state.initialised;
-      const knownRoots = new Set(state.roots);
-      const next: AgentConfigWatchState = { ...state, version: 1, initialised: true, files: { ...state.files }, roots: [...new Set([...state.roots, ...roots])] };
-      const changedFiles: Array<{ file: string; spec: WatchedFileSpec; before: FileSnapshot; after: FileSnapshot }> = [];
-
-      for (const w of watchedPaths(deps.home, roots)) {
-        const after = await take(w.file, w.spec);
-        const known = Object.prototype.hasOwnProperty.call(state.files, w.file);
-        // Baseline silently: first run, or a project root we have not seen before.
-        if (firstRun || (w.root && !knownRoots.has(w.root))) { next.files[w.file] = after; continue; }
-        const before = known ? state.files[w.file] : {};
-        if (!sameSnapshot(before, after)) changedFiles.push({ file: w.file, spec: w.spec, before, after });
-        else if (!known) next.files[w.file] = after;
-      }
-
-      if (firstRun) result.baselined = true;
-      for (const c of changedFiles) {
-        const changes = diffSnapshots(c.spec, c.before, c.after);
-        const shown = displayPath(c.file, deps.home);
-        if (changes.length === 0) { next.files[c.file] = c.after; continue; }
-        const note: AgentConfigNotification = {
-          file: shown,
-          changes: changes.slice(0, 3).map((x) => ({ label: changeLabel(x), name: x.name })),
-          changeCount: changes.length,
-        };
-        try {
-          await deps.notify(note);
-        } catch (err) {
-          // Not delivered: keep the old baseline so the change is re-sent next session.
-          result.errors++;
-          safeLedger({ file: shown, keyPath: changes[0].keyPath, kind: 'notify-error', detail: `notification not delivered: ${err instanceof Error ? err.message : String(err)}`.slice(0, 200), outcome: 'error' });
-          continue;
-        }
-        result.notified++;
-        for (const x of changes) safeLedger({ file: shown, keyPath: x.keyPath, kind: changeLabel(x), detail: `entry=${safeEntryName(x.name)}`, outcome: 'change' });
-        next.files[c.file] = c.after;
-        next.lastChangeAt = new Date(now()).toISOString();
-      }
-      next.lastCheckAt = new Date(now()).toISOString();
-      saveAgentConfigState(deps.home, next);
-    };
-    await withDeadline(body(), budget);
+    await Promise.race([running, deadline]);
   } catch (err) {
     // Fail open: one ledger row, no notification, baseline untouched.
+    expired = true;
     result.errors++;
-    safeLedger({ file: '(agent config watch)', keyPath: '', kind: 'error', detail: (err instanceof Error ? err.message : String(err)).slice(0, 200), outcome: 'error' });
+    safeLedger({
+      file: '(agent config watch)',
+      keyPath: '',
+      kind: 'error',
+      detail: err instanceof DeadlineError ? `timed out after ${budget}ms` : `check failed (${errorCategory(err)})`,
+      outcome: 'error',
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   return result;
 }
