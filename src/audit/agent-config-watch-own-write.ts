@@ -14,6 +14,7 @@ import path from 'path';
 import {
   agentConfigWatchEnabled,
   loadAgentConfigState,
+  sameSnapshot,
   saveAgentConfigState,
   snapshotFile,
   specForPath,
@@ -44,7 +45,8 @@ export function withOwnConfigWrite(filePath: string, write: () => void, home: st
     const fresh = loadAgentConfigState(home);
     const baseline = fresh.files[key];
     if (baseline === undefined) return; // not baselined yet: the next run baselines silently
-    if (JSON.stringify(baseline) !== JSON.stringify(pre)) return; // foreign drift: leave it to alert
+    // Same semantic equality as the check: a harmless key reorder is not drift.
+    if (!sameSnapshot(baseline, pre)) return; // foreign drift: leave it to alert
     fresh.files[key] = snapshotFile(filePath, spec);
     saveAgentConfigState(home, fresh);
   } catch { /* never break the installer */ }

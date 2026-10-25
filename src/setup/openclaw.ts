@@ -36,6 +36,7 @@ import { acquireUpdateLock, stageAndPublish, type UpdateLock } from './host-swap
 import { helpGate } from '../cli/help-gate.js';
 import { COMMAND_HELP_SPECS } from '../cli/wants-help.js';
 import { resolveConversationAccessConsent } from './conversation-access-consent.js';
+import { withOwnConfigWrite } from '../audit/agent-config-watch-own-write.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -783,7 +784,8 @@ function cleanupLegacyPlugin(): void {
     if (config.plugins && Object.keys(config.plugins).length === 0) delete config.plugins;
 
     if (changed) {
-      fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+      // #916: ShieldCortex's own write of a watched config records its own baseline.
+      withOwnConfigWrite(configPath, () => fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8'), path.dirname(path.dirname(configPath)));
       console.log('Cleaned up legacy plugin entries from openclaw.json');
     }
   } catch {
@@ -1094,7 +1096,7 @@ export function trustLocalPlugin(
 
     config.plugins = newPlugins;
 
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+    withOwnConfigWrite(configPath, () => fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8'), path.dirname(path.dirname(configPath)));
     return true;
   } catch {
     return false;
@@ -1785,7 +1787,7 @@ function uninstallPlugin(): boolean {
         if (config.plugins?.entries?.[pluginId]) {
           delete config.plugins.entries[pluginId];
         }
-        fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+        withOwnConfigWrite(configPath, () => fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8'), path.dirname(path.dirname(configPath)));
       }
     }
     fs.rmSync(destDir, { recursive: true });
@@ -2801,8 +2803,10 @@ export async function repairOpenClawPlugin(): Promise<void> {
       if (installs && Object.prototype.hasOwnProperty.call(installs, pluginId)) {
         delete installs[pluginId];
         const tmp = `${configPath}.tmp`;
-        fs.writeFileSync(tmp, JSON.stringify(current, null, 2), 'utf-8');
-        fs.renameSync(tmp, configPath);
+        withOwnConfigWrite(configPath, () => {
+          fs.writeFileSync(tmp, JSON.stringify(current, null, 2), 'utf-8');
+          fs.renameSync(tmp, configPath);
+        }, path.dirname(path.dirname(configPath)));
         console.log(`  ✓ cleared hooks.internal.installs.${pluginId} (legacy 4.18.3 hook-pack pin)`);
       } else {
         console.log(`  (no hooks.internal.installs.${pluginId} entry to clear)`);
@@ -2860,8 +2864,10 @@ export async function repairOpenClawPlugin(): Promise<void> {
 
       // Atomic write.
       const tmp = `${configPath}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(current, null, 2), 'utf-8');
-      fs.renameSync(tmp, configPath);
+      withOwnConfigWrite(configPath, () => {
+        fs.writeFileSync(tmp, JSON.stringify(current, null, 2), 'utf-8');
+        fs.renameSync(tmp, configPath);
+      }, path.dirname(path.dirname(configPath)));
       console.log('Restored customer plugin config:');
       if (configSnapshot.entry) console.log(`  ✓ plugins.entries.${pluginId} restored`);
       if (configSnapshot.allowed) console.log(`  ✓ plugins.allow membership restored`);

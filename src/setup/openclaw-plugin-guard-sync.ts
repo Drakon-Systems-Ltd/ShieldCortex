@@ -27,8 +27,10 @@
  *     for anyone reading it by hand.
  */
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 import { openClawConfigPath } from './openclaw.js';
+import { withOwnConfigWrite } from '../audit/agent-config-watch-own-write.js';
 import {
   assertPolicyLockAllows,
   PolicyLockRefusal,
@@ -133,8 +135,11 @@ export function syncOpenClawPluginActionGuard(updates: {
 
   const tmp = `${configPath}.${process.pid}.tmp`;
   try {
-    writeFileSync(tmp, `${JSON.stringify(root, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    renameSync(tmp, configPath);
+    // #916: ShieldCortex's own write of a watched config records its own baseline.
+    withOwnConfigWrite(configPath, () => {
+      writeFileSync(tmp, `${JSON.stringify(root, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+      renameSync(tmp, configPath);
+    }, dirname(dirname(configPath)));
   } catch {
     try { unlinkSync(tmp); } catch { /* leftover tmp is owner-only */ }
     return { status: 'skipped', reason: 'unwritable' };
