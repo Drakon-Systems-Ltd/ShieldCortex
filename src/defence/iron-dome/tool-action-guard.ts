@@ -2854,7 +2854,8 @@ function secretHintExecutedIn(text: string, region: ScanRegion, overCap = false)
       data = data ?? scriptDataRanges(text, region);
       const inData = data.some(({ range: [s, e] }) => identStart >= s && b <= e);
       if (overCap && region.lang !== 'sh') {
-        if (!inData && OVER_CAP_NAME_LANGS.has(region.lang) && OVER_CAP_IDENTIFIER_VALUE.test(m[0])) continue;
+        if (!inData && OVER_CAP_NAME_LANGS.has(region.lang) && region.pathRunAsOther !== true
+          && OVER_CAP_IDENTIFIER_VALUE.test(m[0])) continue;
         return true;
       }
       if (inData) continue;
@@ -3126,6 +3127,13 @@ interface ScanRegion {
    * e.g. `scripts/github-backup.sh → resilience/sync-code-backup.sh`.
    */
   chain?: string;
+  /**
+   * #920 review r5 — the file is run by path somewhere in the call and its
+   * shebang does not name `lang`'s interpreter (another one, or none: the
+   * shell then runs it), so `lang` is only an extension guess. Such a region
+   * never gets the over-cap identifier relief.
+   */
+  pathRunAsOther?: boolean;
 }
 
 /**
@@ -4988,6 +4996,23 @@ function langFromPath(path: string): ScriptLang {
   }
 }
 
+/**
+ * #920 review r5 — the language the kernel runs a path-invoked file as, read
+ * from its shebang (`#!/usr/bin/perl`, `#!/usr/bin/env -S python3 -u`), or
+ * `null` when byte 0 is not `#!` (the shell then runs the file itself). An
+ * interpreter this file does not know reads as `sh`, never as python/node.
+ */
+function langFromShebang(src: string): ScriptLang | null {
+  if (!src.startsWith('#!')) return null;
+  const words = src.slice(2).split('\n', 1)[0].trim().split(/\s+/);
+  let k = 0;
+  if (commandBaseName(words[0] ?? '') === 'env') {
+    k = 1;
+    while (k < words.length && (words[k].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k]))) k++;
+  }
+  return langFromInterpreter(commandBaseName(words[k] ?? ''));
+}
+
 /** A path token worth resolving: explicitly relative/absolute/home-anchored. */
 function looksLikePathToken(tok: string): boolean {
   return /^(?:\.{1,2}\/|\/|~\/)/.test(tok) && !/^\/dev\//.test(tok);
@@ -5109,7 +5134,18 @@ export function detectScriptInvocation(execSurface: string, depth = 0): string[]
  * lines are not — see `SCRIPT_LANG_RULES` and `buildSpanCtx`.
  */
 export function detectScriptInvocations(execSurface: string, depth = 0): DetectedScript[] {
-  const found: DetectedScript[] = [];
+  return detectScriptInvocationsVia(execSurface, depth).map(({ path, lang }) => ({ path, lang }));
+}
+
+/**
+ * #920 review r5 — a detected script plus whether ANY invocation of it ran it
+ * by path (`./f.py`), where the kernel picks the interpreter from the shebang
+ * and the language here is only an extension guess. Internal to the fold.
+ */
+interface DetectedScriptVia extends DetectedScript { viaPath: boolean; }
+
+function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScriptVia[] {
+  const found: DetectedScriptVia[] = [];
   if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
 
   // #713: the whole-command heredoc data-read relief is NOT applied here. It is
@@ -5120,7 +5156,7 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   // scanning, never less.
   const surface = maskSinkFreeInlinePrograms(execSurface);
 
-  const add = (p: string, lang?: ScriptLang): void => {
+  const add = (p: string, lang?: ScriptLang, viaPath = false): void => {
     const clean = p.trim();
     if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
     const resolved = lang ?? langFromPath(clean);
@@ -5131,9 +5167,12 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
     // and turning a catastrophic block into an allow. Keeping both is strictly
     // more entries and every consumer treats extra invocations as more
     // dangerous, not less, so this only ever moves fail-closed.
-    if (found.some(f => f.path === clean && f.lang === resolved)) return;
+    // A path invocation folded into an existing entry keeps its flag: the
+    // kernel still runs that file by its shebang (#920 review r5).
+    const seen = found.find(f => f.path === clean && f.lang === resolved);
+    if (seen) { seen.viaPath ||= viaPath; return; }
     if (found.length >= MAX_DETECTED_SCRIPTS) return;
-    found.push({ path: clean, lang: resolved });
+    found.push({ path: clean, lang: resolved, viaPath });
   };
 
   for (const stmt of splitCommandStatements(surface)) {
@@ -5167,7 +5206,7 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
             // The inline program itself is already in the exec surface (and
             // already scanned); only follow a file invocation NESTED in it.
             if (/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(base)) {
-              for (const nested of detectScriptInvocations(tokens[j + 1] ?? '', depth + 1)) add(nested.path, nested.lang);
+              for (const nested of detectScriptInvocationsVia(tokens[j + 1] ?? '', depth + 1)) add(nested.path, nested.lang, nested.viaPath);
             }
             break;
           }
@@ -5186,7 +5225,9 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
     // language every rule is written for). An installed CLI's shim is the one
     // exception (#199): its body is the launcher's plumbing, not the operator's
     // command, and the bare-name spelling of the same call never folds at all.
-    if (looksLikePathToken(cmd) && !isInstalledBinaryPath(cmd)) add(cmd);
+    // The entry is flagged `viaPath` so the fold, which does read the file,
+    // can check that guess against the shebang (#920 review r5).
+    if (looksLikePathToken(cmd) && !isInstalledBinaryPath(cmd)) add(cmd, undefined, true);
   }
   return found;
 }
@@ -5284,14 +5325,14 @@ function foldScriptSources(
   isReviewedScript?: (scriptPath: string, source: string) => boolean,
   subst?: SubstitutionState,
 ): ScriptFold {
-  const roots = detectScriptInvocations(execCommand);
+  const roots = detectScriptInvocationsVia(execCommand);
   if (roots.length === 0) return { content: '', opaque: false, regions: [], reviewed: [], unreadSensitive: [] };
   if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [], reviewed: [], unreadSensitive: [] };
 
   const visited = new Set<string>();
   // #184: carry the invocation chain so a nested match can name every hop.
-  const queue: Array<{ path: string; lang: ScriptLang; depth: number; chain: string[] }> =
-    roots.map(r => ({ path: r.path, lang: r.lang, depth: 1, chain: [r.path] }));
+  const queue: Array<{ path: string; lang: ScriptLang; viaPath: boolean; depth: number; chain: string[] }> =
+    roots.map(r => ({ path: r.path, lang: r.lang, viaPath: r.viaPath, depth: 1, chain: [r.path] }));
   const parts: string[] = [];
   const regions: ScanRegion[] = [];
   const reviewed: string[] = [];
@@ -5299,11 +5340,23 @@ function foldScriptSources(
   let total = 0;
   let cursor = 0;                                       // offset of the next part within `content`
   let opaque = false;
+  // #920 review r5: shebang language per folded path, so a path invocation
+  // that meets an already-folded file (`python3 x.py; ./x.py`) still marks it.
+  const shebangLang = new Map<string, ScriptLang | null>();
+  const markPathRun = (path: string): void => {
+    if (!shebangLang.has(path)) return;
+    for (const r of regions) {
+      if (r.sourcePath === path && shebangLang.get(path) !== r.lang) r.pathRunAsOther = true;
+    }
+  };
 
   while (queue.length > 0) {
     const next = queue.shift();
     if (!next) break;
-    if (visited.has(next.path)) continue;              // cycle guard
+    if (visited.has(next.path)) {                      // cycle guard
+      if (next.viaPath) markPathRun(next.path);
+      continue;
+    }
     visited.add(next.path);
     if (visited.size > MAX_SCRIPTS_PER_CALL) { opaque = true; break; }
     // #702: a sensitive path is never READ, on any plane. Recorded as opaque
@@ -5330,6 +5383,7 @@ function foldScriptSources(
     if (src.length === 0) continue;                     // empty file — nothing to scan, not a gap
     if (src.includes('\0')) { opaque = true; continue; }        // binary
     if (src.length > MAX_SCRIPT_BYTES || total + src.length > MAX_FOLDED_BYTES) { opaque = true; continue; }
+    shebangLang.set(next.path, langFromShebang(src));
 
     // Reviewed-script allowlist (#189): checked HERE, against the exact bytes
     // just resolved — hash-then-fold on the same read, so there is no window
@@ -5414,13 +5468,13 @@ function foldScriptSources(
       // of entries that can reach here is bounded by the root-owned lock's
       // ceiling rather than by the same-UID config alone.
       const nestedOfReviewed = next.lang === 'sh' || hasShellOutSink(reviewedScan, next.lang, true)
-        ? detectScriptInvocations(reviewedScan)
+        ? detectScriptInvocationsVia(reviewedScan)
         : [];
       if (nestedOfReviewed.length > 0) {
         if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
         else for (const n of nestedOfReviewed) {
           if (!visited.has(n.path)) {
-            queue.push({ path: n.path, lang: n.lang, depth: next.depth + 1, chain: [...next.chain, n.path] });
+            queue.push({ path: n.path, lang: n.lang, viaPath: n.viaPath, depth: next.depth + 1, chain: [...next.chain, n.path] });
           }
         }
       }
@@ -5441,6 +5495,7 @@ function foldScriptSources(
       sourcePath: next.path,
       chain: next.chain.join(' → '),
     });
+    if (next.viaPath) markPathRun(next.path);
     cursor += scan.length;
     parts.push(scan);
 
@@ -5453,12 +5508,12 @@ function foldScriptSources(
     // on an unmasked sink-bearing program, so the three planes agree. Comments
     // are already blanked from `scan`, so a path mentioned in a docstring is
     // not followed.
-    const nested = next.lang === 'sh' || hasSink ? detectScriptInvocations(scan) : [];
+    const nested = next.lang === 'sh' || hasSink ? detectScriptInvocationsVia(scan) : [];
     if (nested.length > 0) {
       if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;         // depth exceeded — say so
       else for (const n of nested) {
         if (!visited.has(n.path)) {
-          queue.push({ path: n.path, lang: n.lang, depth: next.depth + 1, chain: [...next.chain, n.path] });
+          queue.push({ path: n.path, lang: n.lang, viaPath: n.viaPath, depth: next.depth + 1, chain: [...next.chain, n.path] });
         }
       }
     }
@@ -7257,7 +7312,8 @@ function evaluateToolCallCore(
   // own offsets still say which bytes are interpreter source. Review r3:
   // there the folded source keeps the shell hint and only a bare identifier
   // value outside a comment or string is relieved (`OVER_CAP_IDENTIFIER_VALUE`),
-  // and only in Python / Node source (`OVER_CAP_NAME_LANGS`, review r4).
+  // and only in Python / Node source (`OVER_CAP_NAME_LANGS`, review r4) that
+  // really runs as Python / Node (`pathRunAsOther`, review r5).
   const secretOverCap = regions.length === 0 && foldRegions.length > 0;
   const secretSlices: ScanRegion[] = regions.length > 0
     ? regions
