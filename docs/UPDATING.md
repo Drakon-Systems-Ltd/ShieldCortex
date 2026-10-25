@@ -51,6 +51,14 @@ or set `SHIELDCORTEX_SKIP_UPDATE_CHECK=1` for the dashboard/API process. The das
 5. **Background service** — if you ran `shieldcortex service install`, check `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`). Linux and macOS restart the service; Windows schedules it for the next login.
 6. **Doctor** — `shieldcortex doctor` warns when the OpenClaw plugin or Hermes copy is behind the package and names the command to run. It exits 1 on a failure (`--strict` also fails on warnings). Repairs are opt-in flags: `--fix-project-keys`, `--fix-action-guard`, `--fix-hermes-plugin-copies`.
 
+<a id="whats-new-in-514"></a>
+
+## What's new in 5.14
+
+- **The MCP tool-description check now runs by itself at each Claude Code session start (#915).** A background process starts the local (stdio) MCP servers in your user-level configs (never a project-local one), at most once per 6 hours per server unless its launch config changed, and compares their tool descriptions with the last check. When a description changed, or a new or changed one looks suspicious, it sends one plain `mcp_tool_change` message to the `actionGuard.notify` webhook (names only, never the description text; Action Guard itself does not need to be on) and records the finding in a new `mcp_tool_findings` table. With no webhook configured the finding is kept as pending and retried at the next session start. Session start does not wait for it. To turn it off, set `"sessionStart": { "mcpToolCheck": false }` in `~/.shieldcortex/config.json`; there is no CLI setter yet, and a hand edit makes the file fail its signature check (see `shieldcortex config --resign`). `shieldcortex mcp scan` now keeps one tool-hash baseline per config file; older baselines are carried over on the first scan.
+- **The ClawHub skill no longer runs `npx` (#931).** Its memory hook now needs `shieldcortex` and `mcporter` installed on `PATH` (`npm install -g shieldcortex mcporter`) and logs which one is missing instead of downloading it. The hook in the npm package is unchanged. Nothing to do on upgrade unless you use the ClawHub skill without those installs.
+- **Action Guard: plain reads of the guard's own config files no longer hold the command beside them (#920).** For example `shieldcortex guard --help; grep -n PreToolUse ~/.claude/settings.json` is allowed instead of held for approval. Writes, redirects, other programs and other files keep the hold, and nothing that 5.13 blocks is allowed. Action Guard stays off by default. Nothing to do on upgrade.
+
 <a id="whats-new-in-513"></a>
 
 ## What's new in 5.13

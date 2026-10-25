@@ -237,7 +237,58 @@ export function buildMaintenanceFailNotification(checks: MaintenanceFailNotifica
   return { event: 'maintenance_fail', checks: checks.map(({ label, message }) => ({ label, status: 'fail', message })) };
 }
 
-export type AnyOperatorNotification = OperatorNotification | ConversationThreatNotification | ActionGuardOutcomeNotification | MaintenanceFailNotification;
+/**
+ * A changed or suspicious MCP tool description (#915). Plain and values-free:
+ * it names the server and tool(s) and a short fixed reason, never the
+ * description text (which may be the injected instructions). There is no hash,
+ * no held call and nothing to approve, so no Approve/Deny affordance exists.
+ */
+export interface McpToolChangeNotification {
+  event: 'mcp_tool_change';
+  kind: 'changed' | 'suspicious';
+  server: string;
+  tools: string[];
+  /** Total affected tools; may exceed `tools.length` when the list is capped. */
+  toolCount: number;
+  /** Fixed-vocabulary reason, only for kind 'suspicious'. */
+  reason?: string;
+}
+
+const MCP_NAME_MAX = 64;
+const MCP_TOOLS_SHOWN = 3;
+/** Tool and server names are server-controlled: keep a safe charset and length. */
+function safeMcpName(raw: unknown): string {
+  const cleaned = String(raw ?? '').replace(/[^A-Za-z0-9_.:\/@ -]/g, '?').trim();
+  return (cleaned || 'unknown').slice(0, MCP_NAME_MAX);
+}
+
+export function buildMcpToolChangeNotification(input: {
+  kind: 'changed' | 'suspicious';
+  server: string;
+  tools: string[];
+  reason?: string;
+}): McpToolChangeNotification {
+  const n: McpToolChangeNotification = {
+    event: 'mcp_tool_change',
+    kind: input.kind === 'suspicious' ? 'suspicious' : 'changed',
+    server: safeMcpName(input.server),
+    tools: input.tools.slice(0, MCP_TOOLS_SHOWN).map(safeMcpName),
+    toolCount: input.tools.length,
+  };
+  if (n.kind === 'suspicious' && input.reason) n.reason = input.reason.replace(/[^A-Za-z0-9 ,;.-]/g, '').slice(0, 80);
+  return n;
+}
+
+export function formatMcpToolChangeNotification(n: McpToolChangeNotification): string {
+  const extra = n.toolCount - n.tools.length;
+  const names = n.tools.join(', ') + (extra > 0 ? ` and ${extra} more` : '');
+  const subject = n.toolCount === 1 ? `the tool ${names}` : `the tools ${names}`;
+  return n.kind === 'changed'
+    ? `ShieldCortex: ${subject} on ${n.server} changed ${n.toolCount === 1 ? 'its' : 'their'} description since you last used ${n.toolCount === 1 ? 'it' : 'them'}.`
+    : `ShieldCortex: ${subject} on ${n.server} looks suspicious${n.reason ? `: ${n.reason}` : ''}.`;
+}
+
+export type AnyOperatorNotification = OperatorNotification | ConversationThreatNotification | ActionGuardOutcomeNotification | MaintenanceFailNotification | McpToolChangeNotification;
 
 export function isActionGuardOutcomeNotification(
   n: AnyOperatorNotification,
@@ -740,6 +791,7 @@ export function formatActionGuardOutcomeNotification(n: ActionGuardOutcomeNotifi
  *  richer presentation (inline buttons, etc.) from the structured
  *  `OperatorNotification` instead — this is the lowest common denominator. */
 export function formatOperatorNotification(n: AnyOperatorNotification): string {
+  if (n.event === 'mcp_tool_change') return formatMcpToolChangeNotification(n);
   if (n.event === 'maintenance_fail') {
     return ['ShieldCortex maintenance: doctor checks failed', ...n.checks.map(c => `${c.label}: ${c.status} — ${c.message}`)].join('\n');
   }
