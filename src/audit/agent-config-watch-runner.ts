@@ -43,9 +43,35 @@ export function makeAgentConfigLedger(log: (entry: Parameters<typeof import('../
   };
 }
 
-/** `channels` replaces the configured notification channels (test seam for the transport only). */
-export async function main(overrides: { channels?: NotifyChannel[] } = {}): Promise<void> {
-  const home = os.homedir();
+/**
+ * The session's project root arrives as `--project-root <abs path>` from the
+ * session-start launcher (the hook payload cwd, which can differ from the
+ * launcher's own process cwd). Relative or missing values are ignored.
+ */
+export function projectRootFromArgv(argv: readonly string[]): string | undefined {
+  const i = argv.indexOf('--project-root');
+  const v = i >= 0 ? argv[i + 1] : undefined;
+  return typeof v === 'string' && path.isAbsolute(v) ? v : undefined;
+}
+
+/**
+ * Whole-child deadline: the 5s check budget only covers the check body, so the
+ * detached child also gets a hard stop covering imports, DB init and channel
+ * setup. A hung child can never linger past this.
+ */
+export const CHILD_DEADLINE_MS = 20_000;
+export function armChildDeadline(ms: number = CHILD_DEADLINE_MS, exit: () => void = () => process.exit(0)): NodeJS.Timeout {
+  const t = setTimeout(exit, ms);
+  t.unref?.();
+  return t;
+}
+
+/**
+ * `channels` replaces the configured notification channels (test seam for the
+ * transport only); `projectRoot` / `home` replace the argv root and os.homedir().
+ */
+export async function main(overrides: { channels?: NotifyChannel[]; projectRoot?: string; home?: string; argv?: readonly string[] } = {}): Promise<void> {
+  const home = overrides.home ?? os.homedir();
   let config: Record<string, unknown> = {};
   try { config = JSON.parse(fs.readFileSync(path.join(home, '.shieldcortex', 'config.json'), 'utf-8')); } catch { /* defaults */ }
   if (!agentConfigWatchEnabled(config)) return;
@@ -58,15 +84,17 @@ export async function main(overrides: { channels?: NotifyChannel[] } = {}): Prom
   const { makeAutoCheckNotify } = await import('./mcp-tools-autocheck-runner.js');
   const channels = overrides.channels ?? await configuredChannels();
   const send = makeAutoCheckNotify(channels, deliverOperatorNotification);
+  const root = overrides.projectRoot ?? projectRootFromArgv(overrides.argv ?? process.argv) ?? process.cwd();
 
   await runAgentConfigWatch({
     home,
-    projectRoots: resolveProjectRoots(config),
+    projectRoots: resolveProjectRoots(config, root),
     notify: (n: AgentConfigNotification) => send(buildAgentConfigChangeNotification(n)),
     ledger: makeAgentConfigLedger(logAudit),
   });
 }
 
 if (process.argv[1] && /agent-config-watch-runner\.js$/.test(process.argv[1])) {
+  armChildDeadline();
   main().catch(() => undefined).finally(() => process.exit(0));
 }

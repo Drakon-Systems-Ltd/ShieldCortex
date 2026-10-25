@@ -246,8 +246,9 @@ process.stdin.on('end', async () => {
     // cannot delay or break session start; opt out via sessionStart.mcpToolCheck=false.
     maybeSpawnToolCheck(config);
     // #916: background agent-config change watch; same detached, fail-open shape.
-    // Opt out via sessionStart.agentConfigWatch=false.
-    maybeSpawnAgentConfigWatch(config);
+    // Opt out via sessionStart.agentConfigWatch=false. The payload cwd is the
+    // session's project root; pass it explicitly (the hook's own cwd can differ).
+    maybeSpawnAgentConfigWatch(config, { cwd });
     // v4.11.0: default preamble off. The memory list is the signal — prescriptive
     // "use remember proactively" text is drumbeat noise. Opt in via
     // config.sessionStart.preamble = 'minimal' | 'full'.
