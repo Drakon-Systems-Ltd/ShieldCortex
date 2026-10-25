@@ -3957,6 +3957,57 @@ const CLOSED_READ_SENSITIVE_BARE_RE = new RegExp(String.raw`^(?:id_[\w.-]*|ident
  */
 const CLOSED_READ_SENSITIVE_HOME_DIR_RE = new RegExp(String.raw`^(?:~[^\/]*|\$\{?HOME\}?|\/home\/[^\/]+|\/root|\/Users\/[^\/]+)\/(?:${CLOSED_READ_SENSITIVE_HOME_DIR_SRC})(?:\/|$)`, 'i');
 
+/**
+ * #920 review r15 — the relief's decider. A filename deny-list grew a round
+ * at a time (keys, `.aws`, `.gnupg`) and still missed `~/.kube/config`,
+ * `~/.docker/config.json`, `~/.npmrc`, `~/.netrc`, `/etc/ssh/ssh_host_*_key`,
+ * `/etc/ssl/private/*`. So a read stage takes part in the relief only when
+ * every operand is proven to be one of the guard-sensitive FILES the relief
+ * exists for: the Claude settings (and `.local`), the OpenClaw config and
+ * the ShieldCortex config, spelled from `~/`, `/home/<user>/`, `/root/` or
+ * `/Users/<user>/`. Not their directories (`grep -r x ~/.claude` also reads
+ * `.credentials.json`) and not any other file, however harmless: `cat
+ * README.md` beside a settings read keeps the floor as on main.
+ *
+ * Every other word must be a no-argument flag cluster for the verb, so an
+ * option cannot carry a file glued on (`grep -fconfig`, `jq -Lx`) or take
+ * the next word as a value the allow-list never judges; or the one data word
+ * of a `grep` (pattern) or `jq` (filter), which is the first non-option word.
+ * A `grep` with `-e`/`-f` has no such word and fails. The deny-list checks in
+ * `closedReadWordRefusesMask` still run first as extra belt.
+ */
+const CLOSED_READ_FLOOR_FILE_RE = /^(?:~|\/home\/[A-Za-z0-9._-]+|\/root|\/Users\/[A-Za-z0-9._-]+)\/(?:\.claude\/settings(?:\.local)?\.json|\.openclaw\/openclaw\.json|\.shieldcortex\/config\.json)$/;
+const CLOSED_READ_FLAG_RE: Record<string, RegExp> = {
+  ls: /^-[aAdFhlLrRsStU1]+$/,
+  dir: /^-[aAdFhlLrRsStU1]+$/,
+  cat: /^-[AbeEnstTuv]+$/,
+  head: /^-(?:[qv]+|\d+)$/,
+  tail: /^-(?:[qv]+|\d+)$/,
+  wc: /^-[clmwL]+$/,
+  stat: /^-[LtF]+$/,
+  du: /^-[abchklLmsSx]+$/,
+  grep: CLOSED_READ_GREP_FLAGS_RE,
+  egrep: CLOSED_READ_GREP_FLAGS_RE,
+  fgrep: CLOSED_READ_GREP_FLAGS_RE,
+  jq: /^-[acCejMnrRsS]+$/,
+};
+function closedReadStageReadsOnlyFloorFiles(argv: string[]): boolean {
+  const flags = CLOSED_READ_FLAG_RE[argv[0] ?? ''];
+  if (!flags) return false;
+  const hasDataWord = /^(?:grep|egrep|fgrep|jq)$/.test(argv[0]!);
+  let dataSeen = false;
+  for (const w of argv.slice(1)) {
+    if (w.startsWith('-')) {
+      if (!flags.test(w)) return false;
+    } else if (hasDataWord && !dataSeen) {
+      dataSeen = true;
+    } else if (!CLOSED_READ_FLOOR_FILE_RE.test(w)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function closedReadWordIsNonCanonicalPath(word: string): boolean {
   if (!word.includes('/')) return false;
   const parts = word.split('/');
@@ -3991,6 +4042,9 @@ export function closedReadPipelineMask(execCommand: string, command: string, raw
   const cmd = String(execCommand || '');
   if (!cmd || cmd !== command || command !== rawCommand) return null;
   if (CLOSED_READ_VETO_RE.test(cmd)) return null;
+  // #920 r15: a quoted leading `~` is a literal cwd-relative directory, not
+  // home, though its quote-removed word passes CLOSED_READ_FLOOR_FILE_RE.
+  if (/['"]~/.test(cmd)) return null;
   if (STORE_NESTED_EXEC_RE.test(cmd) || POLICY_LOCK_ENV_SEAM_RE.test(cmd)) return null;
   // Top-level statements with their offsets, quote-aware.
   const spans: Array<[number, number]> = [];
@@ -4042,6 +4096,9 @@ export function closedReadPipelineMask(execCommand: string, command: string, raw
         }
         if (/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(argv[0] ?? '')) return null;
         if (argv[0] === CLOSED_READ_DOT_SOURCE) return null;
+        // #920 r15: any read stage, masked or left as a sibling, must name
+        // only the guard's own files; anything else keeps the floor.
+        if (GUARD_CONFIG_READONLY_VERB_RE.test(argv[0] ?? '') && !closedReadStageReadsOnlyFloorFiles(argv)) return null;
       }
     }
     if (parsed.length !== 1 || !stagesAreClosedSetReads(parsed[0]!)) continue;

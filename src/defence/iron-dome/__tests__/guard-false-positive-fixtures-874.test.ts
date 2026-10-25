@@ -324,8 +324,10 @@ describe('#874 (d) closed-set reads next to another statement', () => {
   });
 
   it('`.` is data after jq or ls but a source builtin in command position', () => {
-    expect(closedReadPipelineMask('jq . f.json', 'jq . f.json', 'jq . f.json')).not.toBeNull();
-    expect(closedReadPipelineMask('ls .', 'ls .', 'ls .')).not.toBeNull();
+    const jq = 'jq . ~/.claude/settings.json';
+    expect(closedReadPipelineMask(jq, jq, jq)).not.toBeNull();
+    // #920 r15: `ls .` names a directory, not a guard file, so it is not masked.
+    expect(closedReadPipelineMask('ls .', 'ls .', 'ls .')).toBeNull();
     expect(closedReadPipelineMask('. ./x; ls', '. ./x; ls', '. ./x; ls')).toBeNull();
   });
 
@@ -535,6 +537,44 @@ describe('#874 (d) closed-set reads next to another statement', () => {
     expect(v.signals).toEqual(expect.arrayContaining(['touch-sensitive-path', 'disable-action-guard']));
   });
 
+  // #920 review r15: the relief is decided by an allow-list of the guard's
+  // own files, not a deny-list of credential names. Every operand of every
+  // read stage must be one of them, so a store no deny-list named keeps
+  // origin/main cb49f4fc's require_approval / [disable-action-guard].
+  const R15_STORES = [
+    '~/.kube/config',
+    '~/.docker/config.json',
+    '~/.config/gcloud/application_default_credentials.json',
+    '~/.npmrc',
+    '~/.netrc',
+    '/etc/ssh/ssh_host_rsa_key',
+    '/etc/ssl/private/server.key',
+  ];
+  it.each([
+    ...R15_STORES.map(p => `cat ~/.claude/settings.json ${p}; shieldcortex guard --help`),
+    ...R15_STORES.map(p => `cat ~/.claude/settings.json; cat ${p}; shieldcortex guard --help`),
+    ...R15_STORES.map(p => `grep -n x ~/.openclaw/openclaw.json ${p}; openclaw models list`),
+    ...R15_STORES.map(p => `jq . ~/.shieldcortex/config.json ${p}; pwd`),
+    // Any other file, however harmless, and the floor files' directories.
+    'cat ~/.claude/settings.json README.md; shieldcortex guard --help',
+    'cat ~/.claude/settings.json; grep -c x TODO.md; shieldcortex guard --help',
+    'grep -r x ~/.claude ~/.claude/settings.json; shieldcortex guard --help',
+    'ls -la ~/.claude ~/.claude/settings.json; shieldcortex guard --help',
+    'cat ~/.claude/settings.json /home/u/.claude/.credentials.json; shieldcortex guard --help',
+    // An option that carries or takes a file the allow-list never judges.
+    'grep -fconfig ~/.claude/settings.json; shieldcortex guard --help',
+    'grep -f ~/.kube/config ~/.claude/settings.json; shieldcortex guard --help',
+    'jq -Lx . ~/.claude/settings.json; shieldcortex guard --help',
+    'head -n 5 ~/.claude/settings.json; shieldcortex guard --help',
+    'cat -- ~/.claude/settings.json; shieldcortex guard --help',
+    // A quoted leading `~` is a cwd-relative directory, not home.
+    'cat "~/.claude/settings.json"; shieldcortex guard --help',
+  ])('a read of anything but the guard files keeps the hold as on origin/main: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toEqual([command.includes('.shieldcortex/') ? 'touch-guard-config' : 'disable-action-guard']);
+  });
+
   it.each([
     'cat ~/.claude/settings.json; shieldcortex guard --help',
     "cat ~/.claude/'settings.json'; shieldcortex guard --help",
@@ -543,6 +583,9 @@ describe('#874 (d) closed-set reads next to another statement', () => {
     'cat ~/.claude/settings.json | head -3 | wc -l; shieldcortex guard --help',
     'cat ~/.shieldcortex/config.json; shieldcortex guard --help',
     'ls ~/.openclaw/openclaw.json; shieldcortex guard --help',
+    'cat ~/.claude/settings.local.json /home/u/.claude/settings.json; shieldcortex guard --help',
+    'head -3 /root/.openclaw/openclaw.json; tail -q /Users/m/.shieldcortex/config.json; pwd',
+    "jq -r '.hooks' ~/.claude/settings.json; echo done-ok",
   ])('the settings-only read is still relieved: %s', (command) => {
     const v = run(command);
     expect(v.decision).toBe('allow');
@@ -622,11 +665,10 @@ describe('#874 (f) real-effect oracle for the relieved read pipelines', () => {
     'grep -n PreToolUse ~/.claude/settings.json',
     "grep -oE '\"claude-cli/[^\"]+\"' ~/.openclaw/openclaw.json",
     'grep -n claude-cli ~/.openclaw/openclaw.json',
-    'grep -n -i "password: rotate monthly" TODO.md',
-    'grep -n -i "npm-publish" DECISIONS.md | tail -4',
+    'grep -n -i "PreToolUse" ~/.claude/settings.json | tail -4',
     'cat ~/.claude/settings.json | head -3 | wc -l',
     'jq . ~/.openclaw/openclaw.json',
-    'ls -la ~/.claude; du -sh ~/.openclaw; stat ~/.claude/settings.json',
+    'ls -la ~/.claude/settings.json; du -sh ~/.openclaw/openclaw.json; stat ~/.claude/settings.json',
   ];
   let home: string;
   const snapshot = (root: string): string => {
@@ -646,8 +688,6 @@ describe('#874 (f) real-effect oracle for the relieved read pipelines', () => {
     fs.mkdirSync(path.join(home, '.openclaw'));
     fs.writeFileSync(path.join(home, '.claude', 'settings.json'), '{"hooks":{"PreToolUse":[]}}\n');
     fs.writeFileSync(path.join(home, '.openclaw', 'openclaw.json'), '{"model":"claude-cli/opus"}\n');
-    fs.writeFileSync(path.join(home, 'TODO.md'), 'password: rotate monthly\n');
-    fs.writeFileSync(path.join(home, 'DECISIONS.md'), 'npm-publish ok\n');
   });
   afterAll(() => fs.rmSync(home, { recursive: true, force: true }));
 
@@ -664,6 +704,15 @@ describe('#874 (f) real-effect oracle for the relieved read pipelines', () => {
     // Statements are blanked; the separators between them stay (the mask is
     // length-preserving and only ever blanks whole statements).
     expect((masked ?? 'x').replace(/[\s;]|&&|\|\|/g, '')).toBe('');
+  });
+
+  // #920 r15: a read of any file but the guard's own is never masked.
+  it.each([
+    'grep -n -i "password: rotate monthly" TODO.md',
+    'grep -n -i "npm-publish" DECISIONS.md | tail -4',
+    'ls -la ~/.claude; du -sh ~/.openclaw',
+  ])('%s is not masked', (command) => {
+    expect(closedReadPipelineMask(command, command, command)).toBeNull();
   });
 });
 
@@ -756,6 +805,7 @@ describe('#874 (d3) only an allow-listed sibling releases the floor', () => {
     'shieldcortex --help; grep -n PreToolUse ~/.claude/settings.json',
     'grep -n claude-cli ~/.openclaw/openclaw.json && openclaw models list',
     "grep -oE '\"claude-cli/[^\"]+\"' ~/.openclaw/openclaw.json && openclaw models list",
+    // Every statement a read: origin/main's policy-lock read carve-out.
     `${READ}; grep -c x TODO.md | wc -l`,
   ])('an allow-listed sibling still releases it: %s', (command) => {
     const v = run(command);
