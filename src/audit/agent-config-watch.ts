@@ -23,6 +23,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { parseToml } from './toml-lite.js';
 
 /** Entries of one section: id -> sorted list of entry hashes. */
 export type SectionMap = Record<string, string[]>;
@@ -177,29 +178,25 @@ function sectionFrom(kind: SectionKind, value: unknown): SectionMap {
   return out;
 }
 
-/** Minimal TOML reader for `[mcp_servers.x]`-style tables: hash each table body per top-level name. */
-function tomlSection(raw: string, prefix: string): SectionMap {
-  const bodies: Record<string, string[]> = {};
-  let current: string | null = null;
-  for (const line of raw.split(/\r?\n/)) {
-    const t = line.trim();
-    const header = /^\[\[?([^\]]+)\]?\]$/.exec(t);
-    if (header) {
-      const parts = header[1].split('.').map((s) => s.trim().replace(/^"|"$/g, ''));
-      current = parts[0] === prefix && parts[1] !== undefined ? parts[1] : parts[0] === prefix ? '(table)' : null;
-      if (current !== null) (bodies[current] ??= []).push(`[${header[1]}]`);
-      continue;
-    }
-    if (current !== null && t && !t.startsWith('#')) bodies[current].push(t);
-  }
-  const out: SectionMap = {};
-  for (const [name, lines] of Object.entries(bodies)) out[name] = [sha(lines.join('\n'))];
-  return out;
+/** Section key for a file whose contents could not be parsed (opaque content hash). */
+export const UNPARSEABLE = '_file';
+
+function unparseable(raw: string): FileSnapshot {
+  return { [UNPARSEABLE]: { unreadable: [sha(raw)] } };
 }
 
-const UNPARSEABLE = '_file';
+/** True when a snapshot is the parse-failure marker. */
+export function isUnparseable(snap: FileSnapshot): boolean {
+  return Object.prototype.hasOwnProperty.call(snap, UNPARSEABLE);
+}
 
-/** Snapshot one file's security-relevant keys. Absent file = empty snapshot. */
+/**
+ * Snapshot one file's security-relevant keys. Absent file = empty snapshot.
+ * A file that exists but cannot be parsed becomes the `_file` marker (its
+ * contents hashed, never stored), which the check reports as a parse error.
+ * A read failure other than "absent" THROWS: the caller keeps that file's
+ * baseline and reports a read error.
+ */
 export function snapshotFile(filePath: string, spec: WatchedFileSpec): FileSnapshot {
   let raw: string;
   try {
@@ -208,20 +205,13 @@ export function snapshotFile(filePath: string, spec: WatchedFileSpec): FileSnaps
     if ((err as NodeJS.ErrnoException).code === 'ENOENT' || (err as NodeJS.ErrnoException).code === 'ENOTDIR') return {};
     throw err;
   }
-  const snap: FileSnapshot = {};
-  if (spec.format === 'toml') {
-    for (const s of spec.sections) {
-      const m = tomlSection(raw, s.keyPath);
-      if (Object.keys(m).length) snap[s.keyPath] = m;
-    }
-    return snap;
-  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(spec.format === 'jsonc' ? stripJsonc(raw) : raw);
+    parsed = spec.format === 'toml' ? parseToml(raw) : JSON.parse(spec.format === 'jsonc' ? stripJsonc(raw) : raw);
   } catch {
-    return { [UNPARSEABLE]: { unreadable: [sha(raw)] } };
+    return unparseable(raw);
   }
+  const snap: FileSnapshot = {};
   for (const s of spec.sections) {
     const m = sectionFrom(s.kind, getPath(parsed, s.keyPath));
     if (Object.keys(m).length) snap[s.keyPath] = m;
