@@ -1,0 +1,82 @@
+/**
+ * Detached entry point for the automatic MCP tool-description check (#915).
+ * Spawned (unref'd, stdio ignored) by scripts/session-start-hook.mjs so session
+ * start never waits on it. Exits 0 on every path.
+ */
+
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { discoverMcpServers } from './mcp-config-scanner.js';
+import {
+  runAutoToolCheck,
+  type AutoCheckState,
+  type AutoCheckLedgerRow,
+} from './mcp-tools-autocheck.js';
+
+export function autoCheckEnabled(config: Record<string, unknown>): boolean {
+  const ss = config.sessionStart;
+  if (ss && typeof ss === 'object' && (ss as Record<string, unknown>).mcpToolCheck === false) return false;
+  return true;
+}
+
+export async function main(): Promise<void> {
+  const home = os.homedir();
+  const dataDir = path.join(home, '.shieldcortex');
+  let config: Record<string, unknown> = {};
+  try { config = JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf-8')); } catch { /* defaults */ }
+  if (!autoCheckEnabled(config)) return;
+
+  const servers = discoverMcpServers();
+  if (servers.length === 0) return;
+
+  const { initDatabase } = await import('../database/init.js');
+  const dbPath = process.env.CLAUDE_MEMORY_DB || path.join(dataDir, 'memories.db');
+  const db = initDatabase(dbPath);
+  const { SqliteToolHashStore } = await import('./mcp-tool-hash-store.js');
+  const store = new SqliteToolHashStore(db);
+  const { logAudit } = await import('../defence/audit/logger.js');
+  const { deliverOperatorNotification } = await import('../defence/iron-dome/operator-notify.js');
+  const { configuredChannels } = await import('../cli/maintain.js');
+  const channels = await configuredChannels();
+
+  const statePath = path.join(dataDir, 'state', 'mcp-tool-check.json');
+  const ss = (config.sessionStart ?? {}) as Record<string, unknown>;
+  const intervalHours = typeof ss.mcpToolCheckIntervalHours === 'number' && ss.mcpToolCheckIntervalHours > 0 ? ss.mcpToolCheckIntervalHours : undefined;
+
+  await runAutoToolCheck({
+    servers,
+    store,
+    intervalHours,
+    notify: async (n) => { if (channels.length > 0) await deliverOperatorNotification(n, { channels }); },
+    ledger: (row: AutoCheckLedgerRow) => {
+      logAudit({
+        memory_id: null,
+        project: null,
+        timestamp: new Date().toISOString(),
+        source_type: 'mcp-tools',
+        source_identifier: row.server,
+        trust_score: row.kind === 'suspicious' ? 0.1 : row.kind === 'changed' ? 0.5 : 1,
+        sensitivity_level: 'internal',
+        firewall_result: row.kind === 'suspicious' ? 'QUARANTINE' : 'ALLOW',
+        operation: 'review',
+        anomaly_score: row.kind === 'suspicious' ? 0.9 : row.kind === 'changed' ? 0.5 : 0,
+        threat_indicators: JSON.stringify(row.kind === 'error' ? [] : [`mcp_tool_${row.kind}`]),
+        blocked_patterns: '[]',
+        reason: `mcp tool check (${row.kind}): ${row.detail}`.slice(0, 500),
+        fragmentation_score: null,
+        pipeline_duration_ms: null,
+      });
+    },
+    loadState: (): AutoCheckState => JSON.parse(fs.readFileSync(statePath, 'utf-8')),
+    saveState: (s) => {
+      fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(statePath, JSON.stringify(s), { mode: 0o600 });
+    },
+  });
+}
+
+// Run when executed directly (not when imported by tests).
+if (process.argv[1] && /mcp-tools-autocheck-runner\.js$/.test(process.argv[1])) {
+  main().catch(() => undefined).finally(() => process.exit(0));
+}

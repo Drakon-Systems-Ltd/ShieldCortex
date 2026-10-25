@@ -28,6 +28,7 @@ import { orderByEffectiveSalience } from './lib/session-context.mjs';
 import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
 import { buildStartPack, readInjectConfig, selectInjectCandidates, PACK_HEADER } from './lib/inject-pack.mjs';
 import { flattenRecallField, recallFrameTail } from './lib/recall-frame.mjs';
+import { maybeSpawnToolCheck } from './lib/mcp-tool-check-spawn.mjs';
 
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
 const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
@@ -240,6 +241,9 @@ process.stdin.on('end', async () => {
     }
 
     const config = loadConfig();
+    // #915: background MCP tool-description check. Detached and fail-open, so it
+    // cannot delay or break session start; opt out via sessionStart.mcpToolCheck=false.
+    maybeSpawnToolCheck(config);
     // v4.11.0: default preamble off. The memory list is the signal — prescriptive
     // "use remember proactively" text is drumbeat noise. Opt in via
     // config.sessionStart.preamble = 'minimal' | 'full'.
