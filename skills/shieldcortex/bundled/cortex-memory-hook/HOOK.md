@@ -3,7 +3,7 @@ name: cortex-memory
 description: "Persistent brain-like memory via ShieldCortex — recalls past knowledge, with optional auto-save"
 homepage: https://github.com/Drakon-Systems-Ltd/ShieldCortex
 metadata:
-  { "openclaw": { "emoji": "🧠", "events": ["command:new", "command:stop", "agent:bootstrap"], "requires": { "bins": ["npx"] }, "install": [{ "id": "community", "kind": "community", "label": "ShieldCortex" }] } }
+  { "openclaw": { "emoji": "🧠", "events": ["command:new", "command:stop", "agent:bootstrap"], "requires": { "bins": ["shieldcortex", "mcporter"] }, "install": [{ "id": "community", "kind": "community", "label": "ShieldCortex" }] } }
 ---
 
 # Cortex Memory Hook
@@ -115,13 +115,13 @@ The config file does not install this hook. It runs only once the hook is instal
 Disable auto-save with CLI:
 
 ```bash
-npx shieldcortex config --openclaw-auto-memory false
+shieldcortex config --openclaw-auto-memory false
 ```
 
 Re-enable it:
 
 ```bash
-npx shieldcortex config --openclaw-auto-memory true
+shieldcortex config --openclaw-auto-memory true
 ```
 
 Or set directly in config:
@@ -136,9 +136,9 @@ in `~/.shieldcortex/config.json`.
 
 ## Requirements
 
-- **npx** must be available (Node.js installed)
-- ShieldCortex installs automatically on first use via `npx -y shieldcortex`
-- mcporter must be available for MCP tool calls
+- **shieldcortex** must be installed and on `PATH` (`npm install -g shieldcortex`), or set `binaryPath` in `~/.shieldcortex/config.json`
+- **mcporter** must be on `PATH` for MCP tool calls (`npm install -g mcporter`)
+- This hook never downloads or installs packages: without a local ShieldCortex it logs a warning and stays inert
 
 ## Database
 
