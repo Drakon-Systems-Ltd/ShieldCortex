@@ -354,6 +354,71 @@ describe('#874 (d) closed-set reads next to another statement', () => {
     expect(v.signals).toEqual(['disable-action-guard']);
   });
 
+  // #920 review r10: the same key or credential spelled with a `.`/`..`
+  // component or a repeated slash. The relief refuses any such word, so each
+  // row keeps origin/main cb49f4fc's require_approval / [disable-action-guard].
+  const R10_PATHS = [
+    '~/./.ssh/id_ed25519',
+    '~//.ssh/id_ed25519',
+    '~/././.ssh/id_ed25519',
+    "~/./.s's'h/id_ed25519",
+    "~//.s's'h/id_ed25519",
+    '/home/example/./.ssh/id_ed25519',
+    '/home/example//.ssh/id_ed25519',
+    '/home/u/./.ssh/id_ed25519',
+    '/home/u//.ssh/id_ed25519',
+    '/root/./.ssh/id_ed25519',
+    '/Users/m/./.ssh/id_ed25519',
+    '~/./.ssh/id_ecdsa',
+    '~//.ssh/id_dsa',
+    '~/foo/../.ssh/id_ed25519',
+    '~/.aws/./credentials',
+    '~/.aws//credentials',
+    "~/.aws/./creden'tials'",
+    "~/.aws//creden'tials'",
+    '/etc/./passwd',
+    '/etc//shadow',
+    '/etc/./sudoers',
+  ];
+  it.each([
+    ...R10_PATHS.map(p => `cat ~/.claude/settings.json ${p}; shieldcortex guard --help`),
+    ...["~/./.s's'h/id_ed25519", '~//.ssh/id_ed25519', '~/./.ssh/id_ed25519', "~/.aws/./creden'tials'", '~/.aws//credentials']
+      .flatMap(p => [
+        `cat ~/.claude/settings.json; cat ${p}; openclaw models list`,
+        `grep -f ${p} ~/.claude/settings.json; shieldcortex guard --help`,
+      ]),
+    'jq . ~/.claude/settings.json ~/./.ssh/id_ed25519; shieldcortex guard --help',
+    'cat ~/.claude/settings.json ~/./.ssh/id_ed25519; openclaw models list',
+    'cat ~/.claude/settings.json ~/./.ssh/id_ed25519; pwd',
+    'cat ~/.claude/settings.local.json ~/./.ssh/id_ed25519; shieldcortex guard --help',
+    'grep -n x ~/.openclaw/openclaw.json ~/./.ssh/id_ed25519; shieldcortex guard --help',
+  ])('a non-canonically spelled key read keeps the hold as on origin/main: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toEqual(['disable-action-guard']);
+  });
+
+  // The refusal is lexical and fails closed: a non-path word with `//` (a jq
+  // alternative) or a `./`-relative path also loses the relief, as on main.
+  it.each([
+    "jq '.hooks // empty' ~/.claude/settings.json; shieldcortex guard --help",
+    'cat ./.claude/settings.json; shieldcortex guard --help',
+  ])('a non-canonical word refuses the relief even when harmless: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toEqual(['disable-action-guard']);
+  });
+
+  it.each([
+    'cat ~/.claude/settings.json ~/.ssh/id_rsa; shieldcortex guard --help',
+    'cat ~/.claude/settings.json ~/.aws/credentials; shieldcortex guard --help',
+    'cat ~/.claude/settings.json /etc/passwd; shieldcortex guard --help',
+  ])('a literal sensitive-path control keeps both signals: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toEqual(expect.arrayContaining(['touch-sensitive-path', 'disable-action-guard']));
+  });
+
   it('the literal-key control keeps both signals', () => {
     const v = run('cat ~/.claude/settings.json ~/.ssh/id_ed25519; shieldcortex guard --help');
     expect(v.decision).toBe('require_approval');
@@ -364,6 +429,10 @@ describe('#874 (d) closed-set reads next to another statement', () => {
     'cat ~/.claude/settings.json; shieldcortex guard --help',
     "cat ~/.claude/'settings.json'; shieldcortex guard --help",
     "grep -n 'Pre.*Use' ~/.claude/settings.json; shieldcortex guard --help",
+    'shieldcortex guard --help; grep -n PreToolUse ~/.claude/settings.json',
+    'cat ~/.claude/settings.json | head -3 | wc -l; shieldcortex guard --help',
+    'cat ~/.shieldcortex/config.json; shieldcortex guard --help',
+    'ls ~/.openclaw/openclaw.json; shieldcortex guard --help',
   ])('the settings-only read is still relieved: %s', (command) => {
     const v = run(command);
     expect(v.decision).toBe('allow');

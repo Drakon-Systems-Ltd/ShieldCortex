@@ -3887,6 +3887,35 @@ const CLOSED_READ_VETO_WORD_RE = /^(?:if|then|else|elif|fi|for|while|until|do|do
 const CLOSED_READ_DOT_SOURCE = '.';
 
 /**
+ * #874 D5 / #920 — whether one quote-removed word of a would-be masked
+ * statement withdraws the whole relief: a veto word, a word naming a
+ * sensitive path, or a word spelled as a non-canonical path.
+ *
+ * The `touch-sensitive-path` rule judges the raw text and only the literal
+ * spelling, so `~/.s's'h/id_ed25519` (review r9) and `~/./.ssh/id_ed25519`,
+ * `~//.ssh/…`, `~/foo/../.ssh/…`, `/etc/./passwd` (review r10) all slip past
+ * it. Rather than chase each spelling, any word with an empty interior
+ * component (`//`) or a `.`/`..` component anywhere (`./x`, `a/./b`, `a/..`)
+ * refuses the relief, so the call is judged as on main. This fails closed:
+ * it also refuses words that are not paths at all (a jq `//` operator, a URL
+ * in a grep pattern) — those calls lose the relief, never gain one. No
+ * normalisation is attempted, so no symlink or `..` semantics are assumed.
+ */
+function closedReadWordRefusesMask(word: string): boolean {
+  if (CLOSED_READ_VETO_WORD_RE.test(word) || SENSITIVE_PATH_RE.test(word)) return true;
+  return closedReadWordIsNonCanonicalPath(word);
+}
+
+function closedReadWordIsNonCanonicalPath(word: string): boolean {
+  if (!word.includes('/')) return false;
+  const parts = word.split('/');
+  return parts.some((p, i) => p === '.' || p === '..'
+    // A leading '' is the root of an absolute path, a trailing '' a
+    // trailing slash; any other empty part is a repeated slash.
+    || (p === '' && i > 0 && i < parts.length - 1));
+}
+
+/**
  * #874 D5 — `execCommand` with every top-level statement that is a
  * CLOSED-SET READ PIPELINE replaced by same-length spaces, or null when no
  * statement qualifies or the command is outside the grammar.
@@ -3946,8 +3975,7 @@ export function closedReadPipelineMask(execCommand: string, command: string, raw
         // Outside the grammar: judge its words for the vetoes only.
         for (const w of stmt.split(/[\s|;&]+/)) {
           const bare = w.replace(/['"]/g, '');
-          if (CLOSED_READ_VETO_WORD_RE.test(bare) || SENSITIVE_PATH_RE.test(bare)
-            || /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(w)) return null;
+          if (closedReadWordRefusesMask(bare) || /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(w)) return null;
         }
         for (const stage of stmt.split('|')) {
           if ((stage.trim().split(/\s+/)[0] ?? '').replace(/['"]/g, '') === CLOSED_READ_DOT_SOURCE) return null;
@@ -3958,10 +3986,7 @@ export function closedReadPipelineMask(execCommand: string, command: string, raw
     for (const stages of parsed) {
       for (const argv of stages) {
         for (const w of argv) {
-          // #920 review r9: the `touch-sensitive-path` rule judges the raw
-          // text, so `~/.s's'h/id_ed25519` slips past it. A quote-removed
-          // word naming a sensitive path withdraws the whole relief.
-          if (CLOSED_READ_VETO_WORD_RE.test(w) || SENSITIVE_PATH_RE.test(w)) return null;
+          if (closedReadWordRefusesMask(w)) return null;
         }
         if (/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(argv[0] ?? '')) return null;
         if (argv[0] === CLOSED_READ_DOT_SOURCE) return null;
