@@ -52,6 +52,7 @@ export interface WebhookNotifyChannelOptions {
  *  caller with no `event` at all keeps getting the header it has always got. */
 function eventOf(n: AnyOperatorNotification): string {
   if (n.event === 'maintenance_fail') return 'maintenance_fail';
+  if (n.event === 'mcp_tool_change') return 'mcp_tool_change';
   if (n.event === 'denied_no_prompt_surface') return 'denied_no_prompt_surface';
   if (n.event === 'conversation_threat') return 'conversation_threat';
   if (n.event === 'action_guard_denial') return 'action_guard_denial';
@@ -84,6 +85,7 @@ function buildConversationPayload(n: ConversationThreatNotification): Record<str
 
 function buildPayload(n: AnyOperatorNotification): Record<string, unknown> {
   if (n.event === 'maintenance_fail') return { event: n.event, checks: n.checks, text: formatOperatorNotification(n), ts: new Date().toISOString() };
+  if (n.event === 'mcp_tool_change') return { event: n.event, kind: n.kind, server: n.server, tools: n.tools, toolCount: n.toolCount, ...(n.reason ? { reason: n.reason } : {}), text: formatOperatorNotification(n), ts: new Date().toISOString() };
   if (isConversationThreatNotification(n)) return buildConversationPayload(n);
   if (isActionGuardOutcomeNotification(n)) return buildActionGuardPayload(n);
   return buildApprovalPayload(n);

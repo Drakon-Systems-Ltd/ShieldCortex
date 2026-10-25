@@ -45,7 +45,7 @@ export const forgetSchema = strictObject({
     identifier: z.string(),
   }).optional().describe('Caller identity for access control'),
   fromSource: z.string().optional()
-    .describe('Revoke-by-source: delete all memories written by this source. Exact "type:identifier", or a "type:*" / "type:" prefix to revoke a whole source type. Authorised by the trust-hierarchy revoke ACL (you must own the source or outrank it). Distinct from `source` (the caller).'),
+    .describe('Revoke-by-source: delete all memories written by this source. Exact "type:identifier", or a "type:*" / "type:" prefix to revoke a whole source type. Requires the trust-hierarchy revoke ACL (you must own the source or outrank it). Distinct from `source` (the caller).'),
 });
 
 export type ForgetInput = z.infer<typeof forgetSchema>;
