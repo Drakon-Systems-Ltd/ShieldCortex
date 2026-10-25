@@ -5715,6 +5715,22 @@ export async function checkCronDenials(deps: CronDenialCheckDeps = {}): Promise<
  * A below-floor build is a `fail`, not a warning: on that box the guard's
  * dangerous tier is decorative, and the operator has no other signal that it is.
  */
+/**
+ * #916: agent configuration watch status. Info only, never a failure: it shows
+ * whether the watch is on and when it last saw an unexpected change.
+ */
+export async function checkAgentConfigWatch(home: string = os.homedir()): Promise<CheckResult> {
+  const label = 'Agent config watch';
+  const { agentConfigWatchEnabled, loadAgentConfigState } = await import('../audit/agent-config-watch.js');
+  let config: unknown = {};
+  try { config = JSON.parse(fs.readFileSync(path.join(home, '.shieldcortex', 'config.json'), 'utf-8')); } catch { /* defaults */ }
+  if (!agentConfigWatchEnabled(config)) return { label, status: 'info', message: 'off (sessionStart.agentConfigWatch is false)' };
+  const state = loadAgentConfigState(home);
+  if (!state.initialised) return { label, status: 'info', message: 'on; no baseline yet (recorded silently at the next session start)' };
+  const last = state.lastChangeAt ? `last unexpected change detected ${state.lastChangeAt}` : 'no unexpected change detected';
+  return { label, status: 'pass', message: `on; watching ${Object.keys(state.files).length} config file(s); ${last}` };
+}
+
 export async function checkClaudeCodeVersion(
   deps: DetectClaudeCodeDeps = {},
 ): Promise<CheckResult> {
@@ -9746,6 +9762,7 @@ export async function runDoctor(
     checkChainedLedger,
     async () => checkStaleShieldCortexCopies(), // #674: an old copy can rewrite chained audit rows
     checkClaudeCodeVersion,
+    checkAgentConfigWatch,
     checkModelCache,
   ];
 

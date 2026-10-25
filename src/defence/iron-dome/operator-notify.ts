@@ -288,7 +288,36 @@ export function formatMcpToolChangeNotification(n: McpToolChangeNotification): s
     : `ShieldCortex: ${subject} on ${n.server} looks suspicious${n.reason ? `: ${n.reason}` : ''}.`;
 }
 
-export type AnyOperatorNotification = OperatorNotification | ConversationThreatNotification | ActionGuardOutcomeNotification | MaintenanceFailNotification | McpToolChangeNotification;
+/**
+ * An unexpected change to an agent or editor config file (#916). Plain and
+ * values-free: the file, the kind of change and a sanitised entry name, never
+ * the command or value (which may be the injected payload). No hash, no held
+ * call, nothing to approve, so no Approve/Deny affordance.
+ */
+export interface AgentConfigChangeNotification {
+  event: 'agent_config_change';
+  file: string;
+  changes: Array<{ label: string; name: string }>;
+  changeCount: number;
+}
+
+export function buildAgentConfigChangeNotification(input: { file: string; changes: Array<{ label: string; name: string }>; changeCount: number }): AgentConfigChangeNotification {
+  const safe = (raw: unknown, max: number): string => (String(raw ?? '').replace(/[^A-Za-z0-9_.:\/@ ~-]/g, '?').trim() || 'unknown').slice(0, max);
+  return {
+    event: 'agent_config_change',
+    file: safe(input.file, 120),
+    changes: input.changes.slice(0, 3).map((c) => ({ label: safe(c.label, 40), name: safe(c.name, 64) })),
+    changeCount: Math.max(input.changeCount, input.changes.length),
+  };
+}
+
+export function formatAgentConfigChangeNotification(n: AgentConfigChangeNotification): string {
+  const shown = n.changes.map((c) => `${c.label} (${c.name})`).join(', ');
+  const extra = n.changeCount - n.changes.length;
+  return `ShieldCortex: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}. If you did not make this change, review the file.`;
+}
+
+export type AnyOperatorNotification = OperatorNotification | ConversationThreatNotification | ActionGuardOutcomeNotification | MaintenanceFailNotification | McpToolChangeNotification | AgentConfigChangeNotification;
 
 export function isActionGuardOutcomeNotification(
   n: AnyOperatorNotification,
@@ -792,6 +821,7 @@ export function formatActionGuardOutcomeNotification(n: ActionGuardOutcomeNotifi
  *  `OperatorNotification` instead — this is the lowest common denominator. */
 export function formatOperatorNotification(n: AnyOperatorNotification): string {
   if (n.event === 'mcp_tool_change') return formatMcpToolChangeNotification(n);
+  if (n.event === 'agent_config_change') return formatAgentConfigChangeNotification(n);
   if (n.event === 'maintenance_fail') {
     return ['ShieldCortex maintenance: doctor checks failed', ...n.checks.map(c => `${c.label}: ${c.status} — ${c.message}`)].join('\n');
   }
