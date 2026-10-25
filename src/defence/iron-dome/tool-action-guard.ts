@@ -3984,6 +3984,51 @@ function closedReadStageMayWrite(argv: string[]): boolean {
   return argv.slice(1).some(a => a === '--in-place' || /^-[A-Za-z]*i/.test(a));
 }
 
+/**
+ * #874 D5 review r1 — programs that open a connection themselves (clients,
+ * servers, tunnels, lookups, remote shells and copies, cloud and container
+ * CLIs, fetch-and-run launchers). Matched against the basename of every word
+ * of a statement left after the mask, so a wrapper (`timeout 5 curl`) or a
+ * quote-joined name (`cu'r'l`, judged after quote removal) is caught.
+ */
+const CLOSED_READ_NET_TOOL_RE = /^(?:curl|wget|wget2|fetch|aria2c|axel|lftp|ftp|sftp|tftp|ftpget|ftpput|nc|ncat|netcat|socat|websocat|wscat|telnet|ssh|scp|sshpass|ssh-copy-id|mosh|rsync|rclone|openssl|gnutls-cli|ssl_client|http|https|httpie|xh|grpcurl|lynx|links|elinks|w3m|dig|nslookup|host|whois|ping|ping6|traceroute|tracepath|mtr|nmap|sendmail|mail|mailx|mutt|smbclient|ldapsearch|redis-cli|psql|mysql|mongo|mongosh|sqlcmd|gh|hub|glab|aws|gcloud|gsutil|az|kubectl|helm|docker|podman|nerdctl|ngrok|cloudflared|tailscale|torsocks|proxychains|proxychains4|npx|pnpx|bunx|uvx|pipx)$/i;
+/**
+ * #874 D5 review r1 — programs whose network use cannot be read off their
+ * argv: language runtimes (`python3 -m http.server`, `node -e …`, a script
+ * file), shells (`sh -c …`) and multi-call binaries (`busybox telnet`). Any
+ * of these left after the mask keeps the floor.
+ */
+const CLOSED_READ_OPAQUE_RUNNER_RE = /^(?:python[0-9.]*|pypy[0-9.]*|node|nodejs|deno|bun|ruby|irb|perl|php|lua|luajit|tclsh|wish|rscript|julia|pwsh|powershell|osascript|java|jshell|groovy|kotlin|scala|dotnet|go|swift|elixir|erl|iex|runghc|sh|bash|zsh|dash|ksh|mksh|ash|fish|csh|tcsh|busybox|toybox|make|gmake|just|task)$/i;
+/** #874 D5 review r1 — package and VCS subcommands that fetch or publish. */
+const CLOSED_READ_NET_SUBCOMMAND_RE = /^(?:install|i|add|ci|update|upgrade|up|fetch|get|download|publish|clone|pull|push|ls-remote|remote|submodule|send-email|login|sync|exec|dlx|x|search|info|view|outdated|audit)$/i;
+const CLOSED_READ_PKG_TOOL_RE = /^(?:git|npm|pnpm|yarn|pip|pip[0-9.]+|uv|poetry|pipenv|conda|mamba|gem|bundle|cargo|composer|apt|apt-get|brew|dnf|yum|apk|pacman|snap|flatpak|port|nix|nix-env)$/i;
+
+/**
+ * #874 D5 review r1 — may a statement left after `closedReadPipelineMask`
+ * blanked the reads make a network connection? Judged on the quote-removed
+ * argv the mask's own parser produces, not on raw text, so `cu'r'l` is
+ * `curl`. Fails closed: text outside the parser's grammar, a folded or
+ * opaque script, a URL-shaped word, a runtime or shell, or a package/VCS
+ * subcommand that fetches all answer true.
+ */
+function closedReadSiblingMayReachNetwork(masked: string, folded: boolean): boolean {
+  if (folded) return true;
+  const parsed = guardConfigStatements(masked, { quotedAny: true });
+  if (parsed === null) return true;
+  for (const stages of parsed) {
+    for (const argv of stages) {
+      // A word may itself be a command line (`watch 'curl x'`); judge its
+      // pieces too, with any quote still in it removed.
+      const words = argv.flatMap(w => [w, ...w.replace(/['"]/g, '').split(/[\s;&|]+/)]).filter(Boolean);
+      const bases = words.map(w => w.split('/').pop() ?? w);
+      if (words.some(w => w.includes('://'))) return true;
+      if (bases.some(b => CLOSED_READ_NET_TOOL_RE.test(b) || CLOSED_READ_OPAQUE_RUNNER_RE.test(b))) return true;
+      if (bases.some(b => CLOSED_READ_PKG_TOOL_RE.test(b)) && bases.some(b => CLOSED_READ_NET_SUBCOMMAND_RE.test(b))) return true;
+    }
+  }
+  return false;
+}
+
 /** Characters a guard-config read argument may contain, unquoted. */
 const GUARD_CONFIG_WORD_CHAR_RE = /[A-Za-z0-9_./@%+,:=*?[\]~-]/;
 
@@ -7459,7 +7504,12 @@ function evaluateToolCallCore(
     // Conservative beyond the design: a call that still reaches the network
     // once the reads are blanked keeps the floor (#522 G4 "a read with a
     // hostile sibling"), even though the read's output cannot reach it.
-    if (rm !== null && !EXTERNAL_EGRESS.test(rm.egressCommand) && !EXTERNAL_EGRESS.test(url)) {
+    // Review r1: judged on the quote-removed argv (`cu'r'l`), against what a
+    // tool does (`ssh`, `python3 -m http.server`, `busybox telnet`), and any
+    // folded or opaque script keeps the floor too.
+    if (rm !== null && !EXTERNAL_EGRESS.test(rm.egressCommand) && !EXTERNAL_EGRESS.test(url)
+        && !closedReadSiblingMayReachNetwork(rm.egressCommand,
+          Boolean(fold.content) || fold.opaque || subst.opaque)) {
       dangerSignals = dangerSignals.filter(sig => guardDirSignals.includes(sig)
         || matchSpansClassified(DANGEROUS.filter(p => p.signal === sig), rm.surface, regions).length > 0);
     }
