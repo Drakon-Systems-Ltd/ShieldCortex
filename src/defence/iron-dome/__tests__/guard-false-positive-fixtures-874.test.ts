@@ -643,6 +643,38 @@ describe('#874 (d) closed-set reads next to another statement', () => {
     expect(v.decision).toBe('allow');
     expect(v.signals).toEqual([]);
   });
+
+  // #920 review r18: a jq filter with a module directive loads a module from
+  // jq's search path (`~/.jq`, …), a file the allow-list never judged, so
+  // each keeps origin/main cb49f4fc's require_approval / [disable-action-guard].
+  it.each([
+    `jq 'include "r17fixture"; .' ~/.claude/settings.json; shieldcortex guard --help`,
+    `jq 'import "r17fixture" as m; .' ~/.claude/settings.json; shieldcortex guard --help`,
+    `jq 'import "r17fixture" as $d; .' ~/.claude/settings.json; shieldcortex guard --help`,
+    `jq -r 'include "r17fixture"; .hooks' ~/.claude/settings.json; shieldcortex guard --help`,
+    `jq '"r17fixture" | modulemeta' ~/.claude/settings.json; shieldcortex guard --help`,
+    `cat ~/.claude/settings.json | jq 'include "r17fixture"; .'; shieldcortex guard --help`,
+    `cat ~/.claude/settings.json | jq 'import "r17fixture" as m; .'; shieldcortex guard --help`,
+    'jq -L dir . ~/.claude/settings.json; shieldcortex guard --help',
+    'jq -L/tmp/m . ~/.claude/settings.json; shieldcortex guard --help',
+    'jq --library-path dir . ~/.claude/settings.json; shieldcortex guard --help',
+    'cat ~/.claude/settings.json | jq -L dir .; shieldcortex guard --help',
+  ])('a jq stage that can load a module keeps the hold as on origin/main: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toEqual(['disable-action-guard']);
+  });
+
+  it.each([
+    'jq . ~/.claude/settings.json; shieldcortex guard --help',
+    'jq .hooks ~/.claude/settings.json; shieldcortex guard --help',
+    "jq -r '.a.b' ~/.claude/settings.json; shieldcortex guard --help",
+    'cat ~/.claude/settings.json | jq .hooks; shieldcortex guard --help',
+  ])('a plain jq filter is still relieved: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('allow');
+    expect(v.signals).toEqual([]);
+  });
 });
 
 /**

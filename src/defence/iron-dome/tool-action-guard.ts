@@ -3991,6 +3991,14 @@ const CLOSED_READ_FLAG_RE: Record<string, RegExp> = {
   fgrep: CLOSED_READ_GREP_FLAGS_RE,
   jq: /^-[acCejMnrRsS]+$/,
 };
+/**
+ * #920 review r18 — a jq filter that can load a module. `include`/`import`
+ * read a `.jq`/`.json` file from jq's search path (`~/.jq`, …) and
+ * `modulemeta` reads one by name, so such a filter is not a settings-only
+ * read. Matched as a bare word anywhere in the filter, so it fails closed
+ * (`.import` is refused too). `-L`/`--library-path` already fail the flags.
+ */
+const CLOSED_READ_JQ_MODULE_RE = /\b(?:include|import|modulemeta)\b/;
 function closedReadStageReadsOnlyFloorFiles(argv: string[]): boolean {
   const flags = CLOSED_READ_FLAG_RE[argv[0] ?? ''];
   if (!flags) return false;
@@ -4001,6 +4009,7 @@ function closedReadStageReadsOnlyFloorFiles(argv: string[]): boolean {
     if (w.startsWith('-')) {
       if (!flags.test(w)) return false;
     } else if (hasDataWord && !dataSeen) {
+      if (argv[0] === 'jq' && CLOSED_READ_JQ_MODULE_RE.test(w)) return false;
       dataSeen = true;
     } else if (!CLOSED_READ_FLOOR_FILE_RE.test(w)) {
       return false;
