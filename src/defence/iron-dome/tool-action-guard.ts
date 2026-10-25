@@ -2816,7 +2816,9 @@ function secretHintExecutedIn(text: string, region: ScanRegion): boolean {
   const hint = region.lang === 'sh' ? SECRET_HINT : FOLDED_SOURCE_SECRET_HINT;
   const slice = text.slice(region.start, region.end);
   const g = new RegExp(hint.source, hint.flags.includes('g') ? hint.flags : `${hint.flags}g`);
-  const data = region.lang === 'sh' ? [] : scriptDataRanges(text, region);
+  // #874 D2: lexed only on the first assignment-shaped hit, so a clean large
+  // file costs one regex pass.
+  let data: ScriptDataRange[] | null = region.lang === 'sh' ? [] : null;
   let m: RegExpExecArray | null;
   while ((m = g.exec(slice)) !== null) {
     if (m[0].length === 0) { g.lastIndex++; continue; }
@@ -2830,7 +2832,10 @@ function secretHintExecutedIn(text: string, region: ScanRegion): boolean {
     // identifier so the opener quote does not poke out of the data range.
     const ident = m[0].search(/(?:password|secret)/i);
     const identStart = a + (ident >= 0 ? ident : 0);
-    if (assignment && data.some(({ range: [s, e] }) => identStart >= s && b <= e)) continue;
+    if (assignment) {
+      data = data ?? scriptDataRanges(text, region);
+      if (data.some(({ range: [s, e] }) => identStart >= s && b <= e)) continue;
+    }
     return true;
   }
   return false;
@@ -3748,7 +3753,11 @@ const STORE_MUTATION_RE = new RegExp(
 );
 
 /** Nested execution keeps the gate. */
-const STORE_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\/|\bfunction\b|[\w.-]+\s*\(\s*\)\s*\{/i;
+// The function-definition arm starts only at a word start (#874 review): any
+// match starting mid-word has one starting at that word's start, so this is
+// the same test, but a long word is scanned once rather than from every
+// offset (linear, not quadratic).
+const STORE_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\/|\bfunction\b|(?<![\w.-])[\w.-]+\s*\(\s*\)\s*\{/i;
 
 /**
  * Split on statement separators without treating `2>&1` / `>&` / `|&` as
@@ -3839,18 +3848,140 @@ export function guardConfigAccessIsReadOnly(text: string): boolean {
   if (/[$`\\]/.test(cmd)) return false;
   const statements = guardConfigStatements(cmd);
   if (!statements || statements.length === 0) return false;
-  for (const stages of statements) {
-    for (const argv of stages) {
-      if (!GUARD_CONFIG_READONLY_VERB_RE.test(argv[0] ?? '')) return false;
-      for (const arg of argv.slice(1)) {
-        if (arg.startsWith('-') && arg.includes('=')) return false;
-        // `~` only as a leading home reference, never mid-word or `~user`.
-        const tilde = arg.indexOf('~');
-        if (tilde > 0 || (tilde === 0 && arg.length > 1 && arg[1] !== '/')) return false;
-      }
+  return statements.every(stagesAreClosedSetReads);
+}
+
+/**
+ * Every stage of one pipeline is a bare GUARD_CONFIG_READONLY_VERB_RE verb
+ * followed by plain words: no `--opt=value` spelling, and `~` only as a
+ * leading `~/`. Shared by the #879 config carve-out and the #874 D5 mask.
+ */
+function stagesAreClosedSetReads(stages: string[][]): boolean {
+  for (const argv of stages) {
+    if (!GUARD_CONFIG_READONLY_VERB_RE.test(argv[0] ?? '')) return false;
+    for (const arg of argv.slice(1)) {
+      if (arg.startsWith('-') && arg.includes('=')) return false;
+      // `~` only as a leading home reference, never mid-word or `~user`.
+      const tilde = arg.indexOf('~');
+      if (tilde > 0 || (tilde === 0 && arg.length > 1 && arg[1] !== '/')) return false;
     }
   }
   return true;
+}
+
+/**
+ * #874 D5 — whole-command vetoes for `closedReadPipelineMask`. Any of these
+ * means a plain-looking read may not be what runs, or its output may go
+ * somewhere other than the tool result: a heredoc, an escape or expansion, a
+ * carriage return, a background job or `|&`, process substitution, a grouping
+ * or subshell, or a redirect anywhere in the command.
+ */
+const CLOSED_READ_VETO_RE = /<<|[\\`$\r(){}<>]|(?<!&)&(?!&)/;
+/**
+ * #874 D5 — a word that turns the command into a compound one (whose loop or
+ * group may pipe or redirect a masked read's output) or changes how later
+ * words are found or run (an assignment, an exported preload, a changed
+ * directory or PATH lookup). Judged on every word of the command, quoted or
+ * not, so it over-rejects (`grep done f`) rather than parse shell grammar.
+ */
+const CLOSED_READ_VETO_WORD_RE = /^(?:if|then|else|elif|fi|for|while|until|do|done|case|esac|select|function|time|coproc|in|!|\[\[|\]\]|export|declare|typeset|readonly|local|set|unset|alias|unalias|shopt|enable|hash|builtin|command|exec|eval|source|trap|ulimit|umask|cd|pushd|popd|env|sudo|doas|nohup|xargs)$/;
+/**
+ * #874 D5 — `.` sources a file only in command position; as an argument it is
+ * data (`jq .`, `ls .`). Checked on the first word of every pipeline stage.
+ */
+const CLOSED_READ_DOT_SOURCE = '.';
+
+/**
+ * #874 D5 — `execCommand` with every top-level statement that is a
+ * CLOSED-SET READ PIPELINE replaced by same-length spaces, or null when no
+ * statement qualifies or the command is outside the grammar.
+ *
+ * A qualifying statement is one pipeline whose every stage passes
+ * `stagesAreClosedSetReads`: a bare `ls`/`dir`/`cat`/`head`/`tail`/`wc`/
+ * `stat`/`du`/`grep`/`egrep`/`fgrep`/`jq` with plain arguments (quoted
+ * arguments may hold any character but newline, because `$`, backtick and
+ * backslash are vetoed command-wide). None of those verbs writes a file, runs
+ * a program or opens a socket from its arguments, and a pipe into any other
+ * stage disqualifies the pipeline, so the statement's output reaches only the
+ * tool result and nothing it names can reach another statement. The caller
+ * re-checks a rule on the masked text; that answers "would this call match
+ * without the plain reads?".
+ *
+ * `command` is the command before comment/print/heredoc stripping and
+ * `rawCommand` the one before `${IFS}` deobfuscation. The mask applies only
+ * when neither step changed anything, so the mask's offsets and the shell's
+ * view of the text are the same bytes.
+ */
+export function closedReadPipelineMask(execCommand: string, command: string, rawCommand: string): string | null {
+  const cmd = String(execCommand || '');
+  if (!cmd || cmd !== command || command !== rawCommand) return null;
+  if (CLOSED_READ_VETO_RE.test(cmd)) return null;
+  if (STORE_NESTED_EXEC_RE.test(cmd) || POLICY_LOCK_ENV_SEAM_RE.test(cmd)) return null;
+  // Top-level statements with their offsets, quote-aware.
+  const spans: Array<[number, number]> = [];
+  let quote = '';
+  let from = 0;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (quote) {
+      if (c === quote) quote = '';
+      else if (c === '\n') return null;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; continue; }
+    const two = cmd.slice(i, i + 2);
+    if (c === '\n' || c === ';' || two === '&&' || two === '||') {
+      spans.push([from, i]);
+      if (two === '&&' || two === '||') i++;
+      from = i + 1;
+    }
+  }
+  if (quote) return null;
+  spans.push([from, cmd.length]);
+  let out = cmd;
+  let masked = false;
+  for (const [a, b] of spans) {
+    const stmt = cmd.slice(a, b);
+    const parsed = guardConfigStatements(stmt, { quotedAny: true });
+    if (parsed === null) {
+      if (stmt.trim()) {
+        // Outside the grammar: judge its words for the vetoes only.
+        for (const w of stmt.split(/[\s|;&]+/)) {
+          if (CLOSED_READ_VETO_WORD_RE.test(w.replace(/['"]/g, '')) || /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(w)) return null;
+        }
+        for (const stage of stmt.split('|')) {
+          if ((stage.trim().split(/\s+/)[0] ?? '').replace(/['"]/g, '') === CLOSED_READ_DOT_SOURCE) return null;
+        }
+      }
+      continue;
+    }
+    for (const stages of parsed) {
+      for (const argv of stages) {
+        for (const w of argv) {
+          if (CLOSED_READ_VETO_WORD_RE.test(w)) return null;
+        }
+        if (/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(argv[0] ?? '')) return null;
+        if (argv[0] === CLOSED_READ_DOT_SOURCE) return null;
+      }
+    }
+    if (parsed.length !== 1 || !stagesAreClosedSetReads(parsed[0]!)) continue;
+    if (parsed[0]!.some(closedReadStageMayWrite)) continue;
+    out = out.slice(0, a) + ' '.repeat(b - a) + out.slice(b);
+    masked = true;
+  }
+  return masked ? out : null;
+}
+
+/**
+ * #874 D5 — a closed-set stage spelled with an option that writes or edits in
+ * place (`jq -i`, `--in-place`, in the jq builds and wrappers that have it).
+ * Any short-option cluster holding `i` counts for jq, so `-ri` is caught too.
+ * Such a stage keeps its statement out of the mask; the #879 carve-out is not
+ * changed by this.
+ */
+function closedReadStageMayWrite(argv: string[]): boolean {
+  if (argv[0] !== 'jq') return false;
+  return argv.slice(1).some(a => a === '--in-place' || /^-[A-Za-z]*i/.test(a));
 }
 
 /** Characters a guard-config read argument may contain, unquoted. */
@@ -3864,7 +3995,7 @@ const GUARD_CONFIG_WORD_CHAR_RE = /[A-Za-z0-9_./@%+,:=*?[\]~-]/;
  * character (inside quotes a space is also allowed). The caller has already
  * refused `$`, backtick and backslash, so no quoted span can expand.
  */
-function guardConfigStatements(cmd: string): string[][][] | null {
+function guardConfigStatements(cmd: string, opts: { quotedAny?: boolean } = {}): string[][][] | null {
   const statements: string[][][] = [];
   let stages: string[][] = [];
   let argv: string[] = [];
@@ -3892,7 +4023,10 @@ function guardConfigStatements(cmd: string): string[][][] | null {
     const c = cmd[i]!;
     if (quote) {
       if (c === quote) quote = '';
-      else if (c === ' ' || GUARD_CONFIG_WORD_CHAR_RE.test(c)) tok = (tok ?? '') + c;
+      // #874 D5: with `quotedAny`, any character but a newline is literal
+      // inside quotes. Sound only because the caller vetoes `$`, backtick and
+      // backslash command-wide, so nothing inside a quote can expand.
+      else if (c === ' ' || GUARD_CONFIG_WORD_CHAR_RE.test(c) || (opts.quotedAny && c !== '\n')) tok = (tok ?? '') + c;
       else return null;
       continue;
     }
@@ -6921,18 +7055,40 @@ function evaluateToolCallCore(
   // Over the classification cap the span classifier fails closed and never
   // consults the region map, so building one is pure cost — skip it. This keeps
   // the pathological 50k-command path (issue #86-redos) at its measured budget.
+  // The fold's regions in scan-surface offsets. Computed whatever the size:
+  // over the cap the span classifier has no region map, but the secret hint
+  // (#874 D2) still needs to know which bytes came from which file.
+  const foldRegions: ScanRegion[] = fold.regions.map(r => ({
+    ...r,
+    start: r.start + execSurface.length + 1,            // +1 for the '\n' join
+    end: r.end + execSurface.length + 1,
+  }));
   const scriptRegions: ScanRegion[] = scanSurface.length > SPAN_CLASSIFY_CAP ? [] : [
     ...interpreterHeredocRegions(execCommand),
     ...inlineProgramRegions(execCommand),
-    ...fold.regions.map(r => ({
-      ...r,
-      start: r.start + execSurface.length + 1,          // +1 for the '\n' join
-      end: r.end + execSurface.length + 1,
-    })),
+    ...foldRegions,
   ];
   const regions = scriptRegions.length > 0
     ? withShellComplement(scriptRegions, scanSurface.length)
     : [];
+  // #874 D5/D6: the same call with every closed-set read pipeline blanked out
+  // (`closedReadPipelineMask`), length-preserving so `regions` still apply.
+  // Computed on first use; null when the command has no such pipeline or is
+  // outside the mask's grammar. Only ever used to WITHDRAW a floor or
+  // secret-egress signal that the unmasked surface also produced.
+  let readMasked: { surface: string; egressCommand: string } | null | undefined;
+  const closedReadMasked = (): { surface: string; egressCommand: string } | null => {
+    if (readMasked === undefined) {
+      const m = family === 'exec' ? closedReadPipelineMask(execCommand, command, rawCommand) : null;
+      readMasked = m === null || !execSurface.startsWith(execCommand) ? null : {
+        surface: fold.content
+          ? `${m}${execSurface.slice(execCommand.length)}\n${fold.content}`
+          : `${m}${execSurface.slice(execCommand.length)}`,
+        egressCommand: fold.content ? `${m}\n${fold.content}` : m,
+      };
+    }
+    return readMasked;
+  };
   // Recorded at the lowest surfaced tier when a script's contents could not be
   // read (no resolver, unreadable, oversized, binary, too deep). Never a gate on
   // its own — the doctor/selfcheck probes and plenty of legitimate calls hit it.
@@ -7015,16 +7171,33 @@ function evaluateToolCallCore(
   // uses FOLDED_SOURCE_SECRET_HINT (quoted literals / key material only).
   // Matches wholly inside a comment or string are payload, not a credential
   // in flight. Tool args stay on the command-line hint — they are values.
-  let secretSighted = SECRET_HINT.test(rawStringArgs(args));
-  if (!secretSighted) {
-    const slices = regions.length > 0
-      ? regions
+  // #874 D2: over the classification cap `regions` is empty, which judged a
+  // whole long Python file by the SHELL hint — an unquoted
+  // `password = imap_password` became a credential in flight. The cap bounds
+  // the span classifier's cost; it is not a language boundary, so the fold's
+  // own offsets still say which bytes are interpreter source.
+  const secretSlices: ScanRegion[] = regions.length > 0
+    ? regions
+    : foldRegions.length > 0
+      ? withShellComplement(foldRegions, scanSurface.length)
       : [{ start: 0, end: scanSurface.length, lang: 'sh' as const, hasSink: false, folded: false }];
-    secretSighted = slices.some((r) => secretHintExecutedIn(scanSurface, r));
-  }
+  const argsSecret = SECRET_HINT.test(rawStringArgs(args));
+  const secretSighted = argsSecret || secretSlices.some((r) => secretHintExecutedIn(scanSurface, r));
   if (egress && secretSighted && externalDestination) {
-    return withReview(verdict('block', 'catastrophic', family, 'data_exfiltration',
-      'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]));
+    // #874 D6: a closed-set read pipeline (a plain `grep`/`cat`/… on plain
+    // arguments, alone or piped only into those) opens no socket, writes no
+    // file and feeds no other process, so a secret-shaped grep PATTERN that
+    // appears only there is not a credential this call can carry off-host.
+    // Withdrawn only when the secret itself disappears with those pipelines
+    // blanked. A URL or egress word that sits only in a read does not
+    // withdraw it: the secret is then elsewhere in the call and may travel.
+    const rm = closedReadMasked();
+    const holdsWithoutReads = rm === null || argsSecret
+      || secretSlices.some((r) => secretHintExecutedIn(rm.surface, r));
+    if (holdsWithoutReads) {
+      return withReview(verdict('block', 'catastrophic', family, 'data_exfiltration',
+        'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]));
+    }
   }
 
   const canonical = ACTION_BY_FAMILY[family];
@@ -7266,6 +7439,30 @@ function evaluateToolCallCore(
       span: `command is ${command.length} chars (cap ${OVERSIZED_COMMAND_LENGTH})`,
       tier: 'executed',
     });
+  }
+  // #874 D5: a floor signal raised only by a closed-set read pipeline (see
+  // `closedReadPipelineMask`) next to an unrelated statement — `shieldcortex
+  // guard --help; grep -n PreToolUse <claude settings>` — is dropped when the
+  // same rule no longer matches with those pipelines blanked. The carve-outs
+  // above need EVERY statement to be a read; this one needs only the
+  // statements that name the path to be reads. It applies only when floor
+  // signals are ALL that is left, so a read next to any other recognised
+  // dangerous statement keeps the floor in every posture. The #500 command
+  // shapes and the #509 r5 cd-relative / guard-dir rules still apply to the
+  // whole call. `touch-sensitive-path` is not a floor signal and is never
+  // relieved: reading a key is the risk. Nor is a call that still makes a
+  // network request once the reads are blanked.
+  if (dangerSignals.length > 0
+      && dangerSignals.every(sig => GUARD_SELF_PROTECTION_SIGNALS.includes(sig))
+      && !guardDisableInvoked(scanSurface)) {
+    const rm = closedReadMasked();
+    // Conservative beyond the design: a call that still reaches the network
+    // once the reads are blanked keeps the floor (#522 G4 "a read with a
+    // hostile sibling"), even though the read's output cannot reach it.
+    if (rm !== null && !EXTERNAL_EGRESS.test(rm.egressCommand) && !EXTERNAL_EGRESS.test(url)) {
+      dangerSignals = dangerSignals.filter(sig => guardDirSignals.includes(sig)
+        || matchSpansClassified(DANGEROUS.filter(p => p.signal === sig), rm.surface, regions).length > 0);
+    }
   }
   if (dangerSignals.length > 0) {
     const action = dangerActionFor(dangerSignals, family);

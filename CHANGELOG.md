@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Action Guard: a plain read of a guard-sensitive file no longer holds an unrelated command beside it (#920, part of #874).** A `ls`, `cat`, `head`, `tail`, `wc`, `stat`, `du`, `grep` or `jq` on plain arguments (alone or piped only into those), such as `shieldcortex guard --help; grep -n PreToolUse ~/.claude/settings.json`, is judged as a read, and a secret-shaped search pattern in such a read (`grep -n "password: …" TODO.md`) no longer counts as secret exfiltration; an unquoted assignment such as `password = imap_password` in a long interpreter file is no longer read as a credential either. A read that is redirected, piped into anything else, edits in place (`jq -i`), uses expansions, grouping or background jobs, or sits next to a command that makes a network request keeps the old treatment, as does a read of a key or credential file.
+
 ## [5.13.1] - 2026-10-24
 
 Patch on 5.13.0. Production dependencies are refreshed to clear newly published advisories: `zod` 3.25.76 to 4.6.7, the transitive `body-parser` 2.3.0 to 2.4.0 (with `qs` 6.16.1 and `iconv-lite` 0.7.3), and `fast-uri` 3.1.8 to 3.1.9 (PR #909). The published production audit reads 0 unwaived; 3 waived. One validation result changes: non-finite numbers such as `Infinity` (for example the JSON literal `1e999`) are now rejected in unbounded numeric tool inputs and the judge's `itemId`, and take the existing invalid-input path; finite values are unaffected. No production source change, no new configuration. Node floor unchanged.
