@@ -49,6 +49,64 @@ describe('#911 UUIDs and credential-only instruction taint', () => {
       expect.objectContaining({ provider: 'heroku' }),
     ]));
   });
+  // #914 r2: the Heroku match is the UUID alone, so it cannot shadow a
+  // stronger rule whose span covers the same context — explicit assignments
+  // stay high/blocked as they were before #911, and an unrelated secret inside
+  // the context window keeps its own finding.
+  it.each([
+    ['HEROKU_API_KEY=' + uuid, 'HEROKU_[REDACTED-env_secret]'],
+    ['heroku token: ' + uuid, 'heroku [REDACTED-env_secret]'],
+  ])('keeps the stronger assignment finding for %s', (text, redacted) => {
+    const result = scanForCredentials(text);
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'env_secret', severity: 'high', action: 'blocked' }),
+    ]));
+    expect(result.redactedContent).toBe(redacted);
+  });
+  it('does not let the Heroku context window swallow an unrelated password', () => {
+    const result = scanForCredentials('heroku password=TestPass123 ' + uuid);
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'env_secret', severity: 'high', action: 'blocked', position: 7 }),
+      expect.objectContaining({ provider: 'heroku', position: 28 }),
+    ]));
+    expect(result.redactedContent).toBe('heroku [REDACTED-env_secret] [REDACTED-api_key-heroku]');
+  });
+  it('records the Heroku range on the UUID only', () => {
+    const result = scanForCredentials('see heroku key: ' + uuid + ' now');
+    expect(result.findings).toEqual([expect.objectContaining({ provider: 'heroku', position: 16 })]);
+    expect(result.redactedContent).toBe('see heroku key: [REDACTED-api_key-heroku] now');
+  });
+  // The separator-collapsed pass erases line breaks and distance, so context-
+  // bound rules stay out of it: no borrowed context across a newline or past
+  // the 64-character window.
+  it.each([
+    ['colon then newline', 'heroku:\ncall-' + uuid],
+    ['CRLF', 'heroku:\r\n' + uuid],
+    ['over the window', 'heroku:' + ' '.repeat(100) + 'call-' + uuid],
+    ['over the window, no spaces', 'heroku:' + 'x'.repeat(65) + ' ' + uuid],
+  ])('does not flag a UUID without same-line context in range: %s', (_name, text) => {
+    const result = scanForCredentials(text);
+    expect(result.findings).toEqual([]);
+    expect(result.redactedContent).toBeUndefined();
+  });
+  it('flags a UUID at the edge of the 64-character window', () => {
+    // 64 characters between the provider word and the UUID: `:`, 62 × `x`, ` `.
+    const text = 'heroku:' + 'x'.repeat(62) + ' ' + uuid;
+    expect(scanForCredentials(text).findings).toEqual([expect.objectContaining({ provider: 'heroku' })]);
+  });
+  it.each([
+    ['repeated', uuid],
+    ['distinct', 'abcdef01-2345-4678-9abc-def012345678'],
+  ])('redacts every contextual UUID on the line, including in enforce output: %s', (_name, second) => {
+    const text = 'heroku tokens: ' + uuid + ', ' + second;
+    const result = scanForCredentials(text);
+    expect(result.findings.filter(f => f.provider === 'heroku')).toHaveLength(2);
+    expect(result.redactedContent).toBe('heroku tokens: [REDACTED-api_key-heroku], [REDACTED-api_key-heroku]');
+    const scan = scanToolResponse('openclaw-realtime', text, 'enforce');
+    expect(scan.sanitisedContent).not.toBeNull();
+    expect(scan.sanitisedContent).not.toContain(uuid);
+    expect(scan.sanitisedContent).not.toContain(second);
+  });
   it('keeps low-confidence exposure visible without instruction taint', () => {
     const scan = scanToolResponse('openclaw-realtime', 'heroku token: ' + uuid, 'advisory');
     expect(scan.clean).toBe(false);
