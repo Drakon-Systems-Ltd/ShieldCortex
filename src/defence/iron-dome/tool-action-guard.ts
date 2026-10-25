@@ -2810,10 +2810,21 @@ const FOLDED_SOURCE_SECRET_HINT = new RegExp(
   `(?:${SECRET_VALUE_SHAPE}|(?:^|[^A-Za-z0-9_])(?:password|secret)["']?\\s*[=:]\\s*["'][^"'\\n]{6,}["'])`,
   'i',
 );
+/**
+ * #874 review r2 — the folded-source hint plus an UNQUOTED literal that cannot
+ * be an identifier (`password = 12345678`). Used only for a folded file judged
+ * over the classification cap, where the command-line hint used to apply and
+ * caught that shape; an identifier value (`password = imap_password`) is
+ * still not a hint.
+ */
+const FOLDED_SOURCE_LARGE_SECRET_HINT = new RegExp(
+  `(?:${FOLDED_SOURCE_SECRET_HINT.source}|(?:^|[^A-Za-z0-9_])(?:password|secret)["']?\\s*[=:]\\s*-?[0-9][A-Za-z0-9_+\\-/]{5,}(?![A-Za-z0-9_+\\-/.(]))`,
+  'i',
+);
 
 /** True when a secret hint in this region is not wholly a comment/string. */
-function secretHintExecutedIn(text: string, region: ScanRegion): boolean {
-  const hint = region.lang === 'sh' ? SECRET_HINT : FOLDED_SOURCE_SECRET_HINT;
+function secretHintExecutedIn(text: string, region: ScanRegion, overCap = false): boolean {
+  const hint = region.lang === 'sh' ? SECRET_HINT : overCap ? FOLDED_SOURCE_LARGE_SECRET_HINT : FOLDED_SOURCE_SECRET_HINT;
   const slice = text.slice(region.start, region.end);
   const g = new RegExp(hint.source, hint.flags.includes('g') ? hint.flags : `${hint.flags}g`);
   // #874 D2: lexed only on the first assignment-shaped hit, so a clean large
@@ -3985,31 +3996,37 @@ function closedReadStageMayWrite(argv: string[]): boolean {
 }
 
 /**
- * #874 D5 review r1 — programs that open a connection themselves (clients,
- * servers, tunnels, lookups, remote shells and copies, cloud and container
- * CLIs, fetch-and-run launchers). Matched against the basename of every word
- * of a statement left after the mask, so a wrapper (`timeout 5 curl`) or a
- * quote-joined name (`cu'r'l`, judged after quote removal) is caught.
+ * #874 D5 review r2 — the sibling shapes the floor relief may release, by
+ * exact program name. An allow-set, not a list of network tools: rounds 1
+ * and 2 each found a spelling a deny-list missed (`/usr/bin/cu?l`, a
+ * versioned runtime, `gawk`, `git -c alias.x=push`). A stage passes only
+ * when its program is
+ *   - a closed-set read (`stagesAreClosedSetReads`, not a writing `jq`),
+ *   - `shieldcortex [<sub>…] --help`, or
+ *   - `openclaw models list`.
+ * Anything else — an unlisted program, a path or a glob/expansion in the
+ * program position, any runtime, shell, package manager or VCS — may reach
+ * the network. `git` is not listed even for `status`/`log`: a repo's
+ * `core.fsmonitor` or diff driver runs an arbitrary program, and a partial
+ * clone fetches missing objects on `show`/`diff`/`log -p`.
  */
-const CLOSED_READ_NET_TOOL_RE = /^(?:curl|wget|wget2|fetch|aria2c|axel|lftp|ftp|sftp|tftp|ftpget|ftpput|nc|ncat|netcat|socat|websocat|wscat|telnet|ssh|scp|sshpass|ssh-copy-id|mosh|rsync|rclone|openssl|gnutls-cli|ssl_client|http|https|httpie|xh|grpcurl|lynx|links|elinks|w3m|dig|nslookup|host|whois|ping|ping6|traceroute|tracepath|mtr|nmap|sendmail|mail|mailx|mutt|smbclient|ldapsearch|redis-cli|psql|mysql|mongo|mongosh|sqlcmd|gh|hub|glab|aws|gcloud|gsutil|az|kubectl|helm|docker|podman|nerdctl|ngrok|cloudflared|tailscale|torsocks|proxychains|proxychains4|npx|pnpx|bunx|uvx|pipx)$/i;
-/**
- * #874 D5 review r1 — programs whose network use cannot be read off their
- * argv: language runtimes (`python3 -m http.server`, `node -e …`, a script
- * file), shells (`sh -c …`) and multi-call binaries (`busybox telnet`). Any
- * of these left after the mask keeps the floor.
- */
-const CLOSED_READ_OPAQUE_RUNNER_RE = /^(?:python[0-9.]*|pypy[0-9.]*|node|nodejs|deno|bun|ruby|irb|perl|php|lua|luajit|tclsh|wish|rscript|julia|pwsh|powershell|osascript|java|jshell|groovy|kotlin|scala|dotnet|go|swift|elixir|erl|iex|runghc|sh|bash|zsh|dash|ksh|mksh|ash|fish|csh|tcsh|busybox|toybox|make|gmake|just|task)$/i;
-/** #874 D5 review r1 — package and VCS subcommands that fetch or publish. */
-const CLOSED_READ_NET_SUBCOMMAND_RE = /^(?:install|i|add|ci|update|upgrade|up|fetch|get|download|publish|clone|pull|push|ls-remote|remote|submodule|send-email|login|sync|exec|dlx|x|search|info|view|outdated|audit)$/i;
-const CLOSED_READ_PKG_TOOL_RE = /^(?:git|npm|pnpm|yarn|pip|pip[0-9.]+|uv|poetry|pipenv|conda|mamba|gem|bundle|cargo|composer|apt|apt-get|brew|dnf|yum|apk|pacman|snap|flatpak|port|nix|nix-env)$/i;
+function closedReadSiblingStageIsLocal(argv: string[]): boolean {
+  const [prog, ...rest] = argv;
+  if (stagesAreClosedSetReads([argv]) && !closedReadStageMayWrite(argv)) return true;
+  if (prog === 'shieldcortex') {
+    return rest.includes('--help') && rest.every(a => a === '--help' || /^[a-z][a-z0-9-]*$/.test(a));
+  }
+  if (prog === 'openclaw') return rest.length === 2 && rest[0] === 'models' && rest[1] === 'list';
+  return false;
+}
 
 /**
- * #874 D5 review r1 — may a statement left after `closedReadPipelineMask`
+ * #874 D5 review r1/r2 — may a statement left after `closedReadPipelineMask`
  * blanked the reads make a network connection? Judged on the quote-removed
- * argv the mask's own parser produces, not on raw text, so `cu'r'l` is
- * `curl`. Fails closed: text outside the parser's grammar, a folded or
- * opaque script, a URL-shaped word, a runtime or shell, or a package/VCS
- * subcommand that fetches all answer true.
+ * argv the mask's own parser produces, so `cu'r'l` is `curl`. Fails closed:
+ * text outside the parser's grammar, a folded or opaque script, a URL-shaped
+ * word, or any stage `closedReadSiblingStageIsLocal` does not accept answers
+ * true.
  */
 function closedReadSiblingMayReachNetwork(masked: string, folded: boolean): boolean {
   if (folded) return true;
@@ -4017,13 +4034,8 @@ function closedReadSiblingMayReachNetwork(masked: string, folded: boolean): bool
   if (parsed === null) return true;
   for (const stages of parsed) {
     for (const argv of stages) {
-      // A word may itself be a command line (`watch 'curl x'`); judge its
-      // pieces too, with any quote still in it removed.
-      const words = argv.flatMap(w => [w, ...w.replace(/['"]/g, '').split(/[\s;&|]+/)]).filter(Boolean);
-      const bases = words.map(w => w.split('/').pop() ?? w);
-      if (words.some(w => w.includes('://'))) return true;
-      if (bases.some(b => CLOSED_READ_NET_TOOL_RE.test(b) || CLOSED_READ_OPAQUE_RUNNER_RE.test(b))) return true;
-      if (bases.some(b => CLOSED_READ_PKG_TOOL_RE.test(b)) && bases.some(b => CLOSED_READ_NET_SUBCOMMAND_RE.test(b))) return true;
+      if (argv.some(w => w.includes('://'))) return true;
+      if (!closedReadSiblingStageIsLocal(argv)) return true;
     }
   }
   return false;
@@ -7220,14 +7232,17 @@ function evaluateToolCallCore(
   // whole long Python file by the SHELL hint — an unquoted
   // `password = imap_password` became a credential in flight. The cap bounds
   // the span classifier's cost; it is not a language boundary, so the fold's
-  // own offsets still say which bytes are interpreter source.
+  // own offsets still say which bytes are interpreter source. Review r2:
+  // there the folded source is also judged for an unquoted non-identifier
+  // literal (`password = 12345678`), which the shell hint used to catch.
+  const secretOverCap = regions.length === 0 && foldRegions.length > 0;
   const secretSlices: ScanRegion[] = regions.length > 0
     ? regions
     : foldRegions.length > 0
       ? withShellComplement(foldRegions, scanSurface.length)
       : [{ start: 0, end: scanSurface.length, lang: 'sh' as const, hasSink: false, folded: false }];
   const argsSecret = SECRET_HINT.test(rawStringArgs(args));
-  const secretSighted = argsSecret || secretSlices.some((r) => secretHintExecutedIn(scanSurface, r));
+  const secretSighted = argsSecret || secretSlices.some((r) => secretHintExecutedIn(scanSurface, r, secretOverCap));
   if (egress && secretSighted && externalDestination) {
     // #874 D6: a closed-set read pipeline (a plain `grep`/`cat`/… on plain
     // arguments, alone or piped only into those) opens no socket, writes no
@@ -7238,7 +7253,7 @@ function evaluateToolCallCore(
     // withdraw it: the secret is then elsewhere in the call and may travel.
     const rm = closedReadMasked();
     const holdsWithoutReads = rm === null || argsSecret
-      || secretSlices.some((r) => secretHintExecutedIn(rm.surface, r));
+      || secretSlices.some((r) => secretHintExecutedIn(rm.surface, r, secretOverCap));
     if (holdsWithoutReads) {
       return withReview(verdict('block', 'catastrophic', family, 'data_exfiltration',
         'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]));
@@ -7504,9 +7519,9 @@ function evaluateToolCallCore(
     // Conservative beyond the design: a call that still reaches the network
     // once the reads are blanked keeps the floor (#522 G4 "a read with a
     // hostile sibling"), even though the read's output cannot reach it.
-    // Review r1: judged on the quote-removed argv (`cu'r'l`), against what a
-    // tool does (`ssh`, `python3 -m http.server`, `busybox telnet`), and any
-    // folded or opaque script keeps the floor too.
+    // Review r1: judged on the quote-removed argv (`cu'r'l`), and any folded
+    // or opaque script keeps the floor too. Review r2: every sibling stage
+    // must be on an allow-set of local programs; anything unlisted keeps it.
     if (rm !== null && !EXTERNAL_EGRESS.test(rm.egressCommand) && !EXTERNAL_EGRESS.test(url)
         && !closedReadSiblingMayReachNetwork(rm.egressCommand,
           Boolean(fold.content) || fold.opaque || subst.opaque)) {
