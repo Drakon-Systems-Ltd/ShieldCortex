@@ -2810,33 +2810,13 @@ const FOLDED_SOURCE_SECRET_HINT = new RegExp(
   `(?:${SECRET_VALUE_SHAPE}|(?:^|[^A-Za-z0-9_])(?:password|secret)["']?\\s*[=:]\\s*["'][^"'\\n]{6,}["'])`,
   'i',
 );
-/**
- * #874 review r3 — over the classification cap a folded interpreter file is
- * judged by the command-line hint (`SECRET_HINT`), exactly as origin/main
- * judged the whole surface there. The one shape withdrawn is an assignment
- * whose value is a bare identifier (`password = imap_password`) that does not
- * sit wholly inside a comment or string: in source that is a name, not key
- * material. A quoted, signed or digit-led value, a `client_secret =` suffix
- * match, and any assignment inside a string (a serialized body is sent as
- * data) all keep the block.
- */
-const OVER_CAP_IDENTIFIER_VALUE = /(?:password|secret)["']?\s*[=:]\s*[A-Za-z_][A-Za-z0-9_]*$/i;
-/**
- * #874 review r4 — the languages where a bare identifier on the RHS is a name
- * reference (an unbound one raises NameError / ReferenceError). Perl treats a
- * bareword as the string itself without `use strict`; PHP and Ruby keep
- * origin/main's hold as well, so the relief never applies to them.
- */
-const OVER_CAP_NAME_LANGS: ReadonlySet<ScriptLang> = new Set<ScriptLang>(['python', 'node']);
 
 /** True when a secret hint in this region is not wholly a comment/string. */
-function secretHintExecutedIn(text: string, region: ScanRegion, overCap = false): boolean {
-  const hint = region.lang === 'sh' || overCap ? SECRET_HINT : FOLDED_SOURCE_SECRET_HINT;
+function secretHintExecutedIn(text: string, region: ScanRegion): boolean {
+  const hint = region.lang === 'sh' ? SECRET_HINT : FOLDED_SOURCE_SECRET_HINT;
   const slice = text.slice(region.start, region.end);
   const g = new RegExp(hint.source, hint.flags.includes('g') ? hint.flags : `${hint.flags}g`);
-  // #874 D2: lexed only on the first assignment-shaped hit, so a clean large
-  // file costs one regex pass.
-  let data: ScriptDataRange[] | null = region.lang === 'sh' ? [] : null;
+  const data = region.lang === 'sh' ? [] : scriptDataRanges(text, region);
   let m: RegExpExecArray | null;
   while ((m = g.exec(slice)) !== null) {
     if (m[0].length === 0) { g.lastIndex++; continue; }
@@ -2850,16 +2830,7 @@ function secretHintExecutedIn(text: string, region: ScanRegion, overCap = false)
     // identifier so the opener quote does not poke out of the data range.
     const ident = m[0].search(/(?:password|secret)/i);
     const identStart = a + (ident >= 0 ? ident : 0);
-    if (assignment) {
-      data = data ?? scriptDataRanges(text, region);
-      const inData = data.some(({ range: [s, e] }) => identStart >= s && b <= e);
-      if (overCap && region.lang !== 'sh') {
-        if (!inData && OVER_CAP_NAME_LANGS.has(region.lang) && region.pathRunAsOther !== true
-          && OVER_CAP_IDENTIFIER_VALUE.test(m[0])) continue;
-        return true;
-      }
-      if (inData) continue;
-    }
+    if (assignment && data.some(({ range: [s, e] }) => identStart >= s && b <= e)) continue;
     return true;
   }
   return false;
@@ -3127,13 +3098,6 @@ interface ScanRegion {
    * e.g. `scripts/github-backup.sh → resilience/sync-code-backup.sh`.
    */
   chain?: string;
-  /**
-   * #920 review r5 — the file is run by path somewhere in the call and its
-   * shebang does not name `lang`'s interpreter (another one, or none: the
-   * shell then runs it), so `lang` is only an extension guess. Such a region
-   * never gets the over-cap identifier relief.
-   */
-  pathRunAsOther?: boolean;
 }
 
 /**
@@ -4996,23 +4960,6 @@ function langFromPath(path: string): ScriptLang {
   }
 }
 
-/**
- * #920 review r5 — the language the kernel runs a path-invoked file as, read
- * from its shebang (`#!/usr/bin/perl`, `#!/usr/bin/env -S python3 -u`), or
- * `null` when byte 0 is not `#!` (the shell then runs the file itself). An
- * interpreter this file does not know reads as `sh`, never as python/node.
- */
-function langFromShebang(src: string): ScriptLang | null {
-  if (!src.startsWith('#!')) return null;
-  const words = src.slice(2).split('\n', 1)[0].trim().split(/\s+/);
-  let k = 0;
-  if (commandBaseName(words[0] ?? '') === 'env') {
-    k = 1;
-    while (k < words.length && (words[k].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k]))) k++;
-  }
-  return langFromInterpreter(commandBaseName(words[k] ?? ''));
-}
-
 /** A path token worth resolving: explicitly relative/absolute/home-anchored. */
 function looksLikePathToken(tok: string): boolean {
   return /^(?:\.{1,2}\/|\/|~\/)/.test(tok) && !/^\/dev\//.test(tok);
@@ -5134,18 +5081,7 @@ export function detectScriptInvocation(execSurface: string, depth = 0): string[]
  * lines are not — see `SCRIPT_LANG_RULES` and `buildSpanCtx`.
  */
 export function detectScriptInvocations(execSurface: string, depth = 0): DetectedScript[] {
-  return detectScriptInvocationsVia(execSurface, depth).map(({ path, lang }) => ({ path, lang }));
-}
-
-/**
- * #920 review r5 — a detected script plus whether ANY invocation of it ran it
- * by path (`./f.py`), where the kernel picks the interpreter from the shebang
- * and the language here is only an extension guess. Internal to the fold.
- */
-interface DetectedScriptVia extends DetectedScript { viaPath: boolean; }
-
-function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScriptVia[] {
-  const found: DetectedScriptVia[] = [];
+  const found: DetectedScript[] = [];
   if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
 
   // #713: the whole-command heredoc data-read relief is NOT applied here. It is
@@ -5156,7 +5092,7 @@ function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScr
   // scanning, never less.
   const surface = maskSinkFreeInlinePrograms(execSurface);
 
-  const add = (p: string, lang?: ScriptLang, viaPath = false): void => {
+  const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
     if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
     const resolved = lang ?? langFromPath(clean);
@@ -5167,12 +5103,9 @@ function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScr
     // and turning a catastrophic block into an allow. Keeping both is strictly
     // more entries and every consumer treats extra invocations as more
     // dangerous, not less, so this only ever moves fail-closed.
-    // A path invocation folded into an existing entry keeps its flag: the
-    // kernel still runs that file by its shebang (#920 review r5).
-    const seen = found.find(f => f.path === clean && f.lang === resolved);
-    if (seen) { seen.viaPath ||= viaPath; return; }
+    if (found.some(f => f.path === clean && f.lang === resolved)) return;
     if (found.length >= MAX_DETECTED_SCRIPTS) return;
-    found.push({ path: clean, lang: resolved, viaPath });
+    found.push({ path: clean, lang: resolved });
   };
 
   for (const stmt of splitCommandStatements(surface)) {
@@ -5206,7 +5139,7 @@ function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScr
             // The inline program itself is already in the exec surface (and
             // already scanned); only follow a file invocation NESTED in it.
             if (/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(base)) {
-              for (const nested of detectScriptInvocationsVia(tokens[j + 1] ?? '', depth + 1)) add(nested.path, nested.lang, nested.viaPath);
+              for (const nested of detectScriptInvocations(tokens[j + 1] ?? '', depth + 1)) add(nested.path, nested.lang);
             }
             break;
           }
@@ -5225,9 +5158,7 @@ function detectScriptInvocationsVia(execSurface: string, depth = 0): DetectedScr
     // language every rule is written for). An installed CLI's shim is the one
     // exception (#199): its body is the launcher's plumbing, not the operator's
     // command, and the bare-name spelling of the same call never folds at all.
-    // The entry is flagged `viaPath` so the fold, which does read the file,
-    // can check that guess against the shebang (#920 review r5).
-    if (looksLikePathToken(cmd) && !isInstalledBinaryPath(cmd)) add(cmd, undefined, true);
+    if (looksLikePathToken(cmd) && !isInstalledBinaryPath(cmd)) add(cmd);
   }
   return found;
 }
@@ -5325,14 +5256,14 @@ function foldScriptSources(
   isReviewedScript?: (scriptPath: string, source: string) => boolean,
   subst?: SubstitutionState,
 ): ScriptFold {
-  const roots = detectScriptInvocationsVia(execCommand);
+  const roots = detectScriptInvocations(execCommand);
   if (roots.length === 0) return { content: '', opaque: false, regions: [], reviewed: [], unreadSensitive: [] };
   if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [], reviewed: [], unreadSensitive: [] };
 
   const visited = new Set<string>();
   // #184: carry the invocation chain so a nested match can name every hop.
-  const queue: Array<{ path: string; lang: ScriptLang; viaPath: boolean; depth: number; chain: string[] }> =
-    roots.map(r => ({ path: r.path, lang: r.lang, viaPath: r.viaPath, depth: 1, chain: [r.path] }));
+  const queue: Array<{ path: string; lang: ScriptLang; depth: number; chain: string[] }> =
+    roots.map(r => ({ path: r.path, lang: r.lang, depth: 1, chain: [r.path] }));
   const parts: string[] = [];
   const regions: ScanRegion[] = [];
   const reviewed: string[] = [];
@@ -5340,38 +5271,11 @@ function foldScriptSources(
   let total = 0;
   let cursor = 0;                                       // offset of the next part within `content`
   let opaque = false;
-  // #920 review r5: shebang language per folded path, so a path invocation
-  // that meets an already-folded file (`python3 x.py; ./x.py`) still marks it.
-  const shebangLang = new Map<string, ScriptLang | null>();
-  const markPathRun = (path: string): void => {
-    if (!shebangLang.has(path)) return;
-    for (const r of regions) {
-      if (r.sourcePath === path && shebangLang.get(path) !== r.lang) r.pathRunAsOther = true;
-    }
-  };
-  // #920 r6: a nested path-run of an already-folded file must still mark
-  // pathRunAsOther. Skipping those children left `python3 ./x.py; bash run.sh`
-  // (run.sh calls `./x.py`) on the named-interpreter language. Queue unseen
-  // paths; if already visited, mark when this discovery is a path-run.
-  const enqueueNested = (
-    n: DetectedScriptVia,
-    depth: number,
-    chain: string[],
-  ): void => {
-    if (!visited.has(n.path)) {
-      queue.push({ path: n.path, lang: n.lang, viaPath: n.viaPath, depth, chain });
-    } else if (n.viaPath) {
-      markPathRun(n.path);
-    }
-  };
 
   while (queue.length > 0) {
     const next = queue.shift();
     if (!next) break;
-    if (visited.has(next.path)) {                      // cycle guard
-      if (next.viaPath) markPathRun(next.path);
-      continue;
-    }
+    if (visited.has(next.path)) continue;              // cycle guard
     visited.add(next.path);
     if (visited.size > MAX_SCRIPTS_PER_CALL) { opaque = true; break; }
     // #702: a sensitive path is never READ, on any plane. Recorded as opaque
@@ -5398,7 +5302,6 @@ function foldScriptSources(
     if (src.length === 0) continue;                     // empty file — nothing to scan, not a gap
     if (src.includes('\0')) { opaque = true; continue; }        // binary
     if (src.length > MAX_SCRIPT_BYTES || total + src.length > MAX_FOLDED_BYTES) { opaque = true; continue; }
-    shebangLang.set(next.path, langFromShebang(src));
 
     // Reviewed-script allowlist (#189): checked HERE, against the exact bytes
     // just resolved — hash-then-fold on the same read, so there is no window
@@ -5483,12 +5386,14 @@ function foldScriptSources(
       // of entries that can reach here is bounded by the root-owned lock's
       // ceiling rather than by the same-UID config alone.
       const nestedOfReviewed = next.lang === 'sh' || hasShellOutSink(reviewedScan, next.lang, true)
-        ? detectScriptInvocationsVia(reviewedScan)
+        ? detectScriptInvocations(reviewedScan)
         : [];
       if (nestedOfReviewed.length > 0) {
         if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
         else for (const n of nestedOfReviewed) {
-          enqueueNested(n, next.depth + 1, [...next.chain, n.path]);
+          if (!visited.has(n.path)) {
+            queue.push({ path: n.path, lang: n.lang, depth: next.depth + 1, chain: [...next.chain, n.path] });
+          }
         }
       }
       continue;
@@ -5508,7 +5413,6 @@ function foldScriptSources(
       sourcePath: next.path,
       chain: next.chain.join(' → '),
     });
-    if (next.viaPath) markPathRun(next.path);
     cursor += scan.length;
     parts.push(scan);
 
@@ -5521,11 +5425,13 @@ function foldScriptSources(
     // on an unmasked sink-bearing program, so the three planes agree. Comments
     // are already blanked from `scan`, so a path mentioned in a docstring is
     // not followed.
-    const nested = next.lang === 'sh' || hasSink ? detectScriptInvocationsVia(scan) : [];
+    const nested = next.lang === 'sh' || hasSink ? detectScriptInvocations(scan) : [];
     if (nested.length > 0) {
       if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;         // depth exceeded — say so
       else for (const n of nested) {
-        enqueueNested(n, next.depth + 1, [...next.chain, n.path]);
+        if (!visited.has(n.path)) {
+          queue.push({ path: n.path, lang: n.lang, depth: next.depth + 1, chain: [...next.chain, n.path] });
+        }
       }
     }
   }
@@ -7200,27 +7106,23 @@ function evaluateToolCallCore(
   // Over the classification cap the span classifier fails closed and never
   // consults the region map, so building one is pure cost — skip it. This keeps
   // the pathological 50k-command path (issue #86-redos) at its measured budget.
-  // The fold's regions in scan-surface offsets. Computed whatever the size:
-  // over the cap the span classifier has no region map, but the secret hint
-  // (#874 D2) still needs to know which bytes came from which file.
-  const foldRegions: ScanRegion[] = fold.regions.map(r => ({
-    ...r,
-    start: r.start + execSurface.length + 1,            // +1 for the '\n' join
-    end: r.end + execSurface.length + 1,
-  }));
   const scriptRegions: ScanRegion[] = scanSurface.length > SPAN_CLASSIFY_CAP ? [] : [
     ...interpreterHeredocRegions(execCommand),
     ...inlineProgramRegions(execCommand),
-    ...foldRegions,
+    ...fold.regions.map(r => ({
+      ...r,
+      start: r.start + execSurface.length + 1,          // +1 for the '\n' join
+      end: r.end + execSurface.length + 1,
+    })),
   ];
   const regions = scriptRegions.length > 0
     ? withShellComplement(scriptRegions, scanSurface.length)
     : [];
-  // #874 D5/D6: the same call with every closed-set read pipeline blanked out
+  // #874 D5: the same call with every closed-set read pipeline blanked out
   // (`closedReadPipelineMask`), length-preserving so `regions` still apply.
   // Computed on first use; null when the command has no such pipeline or is
-  // outside the mask's grammar. Only ever used to WITHDRAW a floor or
-  // secret-egress signal that the unmasked surface also produced.
+  // outside the mask's grammar. Only ever used to WITHDRAW a floor signal
+  // that the unmasked surface also produced; never a catastrophic block.
   let readMasked: { surface: string; egressCommand: string } | null | undefined;
   const closedReadMasked = (): { surface: string; egressCommand: string } | null => {
     if (readMasked === undefined) {
@@ -7316,38 +7218,16 @@ function evaluateToolCallCore(
   // uses FOLDED_SOURCE_SECRET_HINT (quoted literals / key material only).
   // Matches wholly inside a comment or string are payload, not a credential
   // in flight. Tool args stay on the command-line hint — they are values.
-  // #874 D2: over the classification cap `regions` is empty, which judged a
-  // whole long Python file by the SHELL hint — an unquoted
-  // `password = imap_password` became a credential in flight. The cap bounds
-  // the span classifier's cost; it is not a language boundary, so the fold's
-  // own offsets still say which bytes are interpreter source. Review r3:
-  // there the folded source keeps the shell hint and only a bare identifier
-  // value outside a comment or string is relieved (`OVER_CAP_IDENTIFIER_VALUE`),
-  // and only in Python / Node source (`OVER_CAP_NAME_LANGS`, review r4) that
-  // really runs as Python / Node (`pathRunAsOther`, review r5).
-  const secretOverCap = regions.length === 0 && foldRegions.length > 0;
-  const secretSlices: ScanRegion[] = regions.length > 0
-    ? regions
-    : foldRegions.length > 0
-      ? withShellComplement(foldRegions, scanSurface.length)
+  let secretSighted = SECRET_HINT.test(rawStringArgs(args));
+  if (!secretSighted) {
+    const slices = regions.length > 0
+      ? regions
       : [{ start: 0, end: scanSurface.length, lang: 'sh' as const, hasSink: false, folded: false }];
-  const argsSecret = SECRET_HINT.test(rawStringArgs(args));
-  const secretSighted = argsSecret || secretSlices.some((r) => secretHintExecutedIn(scanSurface, r, secretOverCap));
+    secretSighted = slices.some((r) => secretHintExecutedIn(scanSurface, r));
+  }
   if (egress && secretSighted && externalDestination) {
-    // #874 D6: a closed-set read pipeline (a plain `grep`/`cat`/… on plain
-    // arguments, alone or piped only into those) opens no socket, writes no
-    // file and feeds no other process, so a secret-shaped grep PATTERN that
-    // appears only there is not a credential this call can carry off-host.
-    // Withdrawn only when the secret itself disappears with those pipelines
-    // blanked. A URL or egress word that sits only in a read does not
-    // withdraw it: the secret is then elsewhere in the call and may travel.
-    const rm = closedReadMasked();
-    const holdsWithoutReads = rm === null || argsSecret
-      || secretSlices.some((r) => secretHintExecutedIn(rm.surface, r, secretOverCap));
-    if (holdsWithoutReads) {
-      return withReview(verdict('block', 'catastrophic', family, 'data_exfiltration',
-        'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]));
-    }
+    return withReview(verdict('block', 'catastrophic', family, 'data_exfiltration',
+      'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]));
   }
 
   const canonical = ACTION_BY_FAMILY[family];
