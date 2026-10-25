@@ -17,7 +17,8 @@ import {
   type ToolHashStore,
   type McpToolsScanReport,
 } from '../audit/mcp-tools-scanner.js';
-import { SqliteToolHashStore } from '../audit/mcp-tool-hash-store.js';
+import { discoverMcpServers } from '../audit/mcp-config-scanner.js';
+import { SqliteToolHashStore, migrateLegacyToolHashes } from '../audit/mcp-tool-hash-store.js';
 import { toSarif } from '../xray/sarif.js';
 import { stringifyJsonTerminalSafe } from './term-ui.js';
 
@@ -78,6 +79,8 @@ async function runScan(args: string[]): Promise<void> {
     const dbPath = process.env.CLAUDE_MEMORY_DB || path.join(os.homedir(), '.shieldcortex', 'memories.db');
     const { initDatabase } = await import('../database/init.js');
     const db = initDatabase(dbPath);
+    // Seed pre-scoping baselines into every source that defines the name (#925).
+    migrateLegacyToolHashes(db, discoverMcpServers({ includeShadowed: true }));
     store = new SqliteToolHashStore(db);
   } catch (err) {
     if (!options.json && !options.sarif) {

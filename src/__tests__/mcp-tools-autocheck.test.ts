@@ -143,7 +143,7 @@ describe('automatic MCP tool check (#915)', () => {
         expect(res.notified).toBe(0);
         expect(res.errors).toBe(1);
         expect(stored.get('files', 't')).toBe(before);
-        expect(h.rows.map((r) => r.kind)).toEqual(['changed', 'error']);
+        expect(h.rows.map((r) => r.kind)).toEqual(['error']); // no alert row before delivery (#925)
         expect(JSON.stringify(h.getState())).toBe(stateBefore); // no checkpoint advanced
         // channels recover: the same drift is alerted again and now committed
         const again = harness({ ...{}, store: stored, tools: () => [{ name: 't', description: 'b' }], notify: makeAutoCheckNotify([okChannel], deliverOperatorNotification) });
@@ -265,6 +265,41 @@ describe('automatic MCP tool check (#915)', () => {
     expect(retry.notified).toBe(1);
     expect(h.notes).toHaveLength(1);
     expect(store.get('files', 't')).not.toBe(before);
+  });
+
+  it('(#925-B) a failed delivery then a successful retry leaves exactly one alert row', async () => {
+    let desc = 'a';
+    let failing = false;
+    const h = harness({
+      tools: () => [{ name: 't', description: desc }],
+      notify: (n) => { if (failing) throw new Error('webhook down'); h.notes.push(n); },
+    });
+    await runAutoToolCheck(h.deps);
+    desc = 'b'; failing = true;
+    await runAutoToolCheck(h.deps);
+    expect(h.rows.map((r) => r.kind)).toEqual(['error']);      // error row kept, no alert row yet
+    failing = false;
+    await runAutoToolCheck(h.deps);
+    expect(h.rows.filter((r) => r.kind === 'changed')).toHaveLength(1);
+    expect(h.rows.filter((r) => r.kind === 'error')).toHaveLength(1);
+    expect(h.notes).toHaveLength(1);
+  });
+
+  it('(#925-A) the auto check keeps a separate baseline per config source', async () => {
+    const store = memStore();
+    const globalSrv = { ...SERVER, sourcePath: '/home/u/.claude.json' };
+    const projectSrv = { ...SERVER, sourcePath: '/repo/.claude/mcp.json' };
+    let desc = 'global version';
+    const g = harness({ store, servers: [globalSrv], tools: () => [{ name: 't', description: desc }] });
+    await runAutoToolCheck(g.deps);                       // global baseline
+    const p = harness({ store, servers: [projectSrv], tools: () => [{ name: 't', description: 'project version' }] });
+    await runAutoToolCheck(p.deps);                       // project baseline, same name
+    expect(p.notes).toHaveLength(0);                      // no false alert
+    await runAutoToolCheck(g.deps);                       // global again, unchanged
+    expect(g.notes).toHaveLength(0);
+    desc = 'global rug-pull';
+    await runAutoToolCheck(g.deps);
+    expect(g.notes).toHaveLength(1);                      // real drift still alerts
   });
 
   it('(#925-4) the runner opens the DB with no explicit path so the unsafe-runtime guard applies', () => {

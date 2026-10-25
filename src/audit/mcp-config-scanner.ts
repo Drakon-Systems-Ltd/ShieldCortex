@@ -310,10 +310,16 @@ export interface DiscoverMcpServersOptions {
    * config must never cause its commands to be spawned without approval (#925).
    */
   includeProject?: boolean;
+  /**
+   * Return every definition of a server name across sources instead of only the
+   * first (used to seed per-source hash baselines, #925). Default false.
+   */
+  includeShadowed?: boolean;
 }
 
 export function discoverMcpServers(options: DiscoverMcpServersOptions = {}): DiscoveredMcpServer[] {
   const includeProject = options.includeProject !== false;
+  const includeShadowed = options.includeShadowed === true;
   const out: DiscoveredMcpServer[] = [];
   const seen = new Set<string>();
 
@@ -331,7 +337,7 @@ export function discoverMcpServers(options: DiscoverMcpServersOptions = {}): Dis
     if (location.path.endsWith('.toml')) {
       const servers = parseTomlServersStructured(content);
       for (const [name, cfg] of Object.entries(servers)) {
-        if (!cfg.command || seen.has(name)) continue;
+        if (!cfg.command || (!includeShadowed && seen.has(name))) continue;
         seen.add(name);
         out.push({ name, source: location.name, sourcePath: location.path, command: cfg.command, args: cfg.args, env: cfg.env });
       }
@@ -346,7 +352,7 @@ export function discoverMcpServers(options: DiscoverMcpServersOptions = {}): Dis
     }
 
     for (const [name, raw] of Object.entries(extractServers(config))) {
-      if (seen.has(name) || !raw || typeof raw !== 'object') continue;
+      if ((!includeShadowed && seen.has(name)) || !raw || typeof raw !== 'object') continue;
       const entry = raw as Record<string, unknown>;
       const command = typeof entry.command === 'string' ? entry.command : undefined;
       // Skip remote servers (url/sse/http) — they can't be spawned locally.

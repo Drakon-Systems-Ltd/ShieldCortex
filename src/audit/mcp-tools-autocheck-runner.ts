@@ -68,7 +68,9 @@ export async function main(): Promise<void> {
 
   const { initDatabase } = await import('../database/init.js');
   const db = openAutoCheckDb(initDatabase);
-  const { SqliteToolHashStore } = await import('./mcp-tool-hash-store.js');
+  const { SqliteToolHashStore, migrateLegacyToolHashes } = await import('./mcp-tool-hash-store.js');
+  // Seed pre-scoping baselines into every source (project included) that defines the name (#925).
+  migrateLegacyToolHashes(db as never, discoverMcpServers({ includeShadowed: true }));
   const store = new SqliteToolHashStore(db);
   const { logAudit } = await import('../defence/audit/logger.js');
   const { deliverOperatorNotification } = await import('../defence/iron-dome/operator-notify.js');

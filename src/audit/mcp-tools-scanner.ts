@@ -24,6 +24,7 @@ import { createHash } from 'crypto';
 import { detectInstructions } from '../defence/firewall/instruction-detector.js';
 import { detectEncoding } from '../defence/firewall/encoding-detector.js';
 import { detectSkillThreats } from '../defence/skill-scanner/patterns.js';
+import { scopeHashStore } from './mcp-tool-hash-store.js';
 import { discoverMcpServers, type DiscoveredMcpServer } from './mcp-config-scanner.js';
 import type { AuditFinding, AuditSeverity } from './types.js';
 
@@ -326,7 +327,8 @@ export async function scanMcpTools(
     try {
       const tools = await fetchServerTools(server);
       toolsScanned += tools.length;
-      const result = scanToolList(server.name, tools, store);
+      // Baselines are per config source: project and global never share one (#925).
+      const result = scanToolList(server.name, tools, scopeHashStore(store, server.sourcePath));
       findings.push(...result.findings);
       drift.push(...result.drift);
     } catch (err) {
