@@ -32,7 +32,7 @@ let rows: AgentConfigLedgerRow[];
 const settings = () => path.join(home, '.claude', 'settings.json');
 const toml = () => path.join(home, '.codex', 'config.toml');
 const tasks = () => path.join(project, '.vscode', 'tasks.json');
-const put = (p: string, s: string) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, s); };
+const put = (p: string, s: string): string => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, s); return s; };
 const putJson = (p: string, v: unknown) => put(p, JSON.stringify(v, null, 2));
 const readJson = (p: string) => JSON.parse(fs.readFileSync(p, 'utf-8'));
 
@@ -158,7 +158,7 @@ describe('finding 4: own-write equality is semantic', () => {
     withOwnConfigWrite(settings(), () => {
       const t = readJson(settings());
       t.hooks.PreToolUse = [{ hooks: [{ type: 'command', command: 'shieldcortex hook pre-tool' }] }];
-      putJson(settings(), t);
+      return putJson(settings(), t);
     }, home);
     await run();
     expect(notes).toHaveLength(0);

@@ -5720,13 +5720,18 @@ export async function checkCronDenials(deps: CronDenialCheckDeps = {}): Promise<
  * watch is on, when it last detected an unexpected change, and warns when a
  * detected change is still undelivered or a watched file cannot be read/parsed.
  */
-export async function checkAgentConfigWatch(home: string = os.homedir()): Promise<CheckResult> {
+export async function checkAgentConfigWatch(home?: string): Promise<CheckResult> {
   const label = 'Agent config watch';
-  const { agentConfigWatchEnabled, loadAgentConfigState } = await import('../audit/agent-config-watch.js');
+  const { agentConfigWatchEnabled, agentConfigWatchHome, loadAgentConfigStateChecked } = await import('../audit/agent-config-watch.js');
+  home ??= agentConfigWatchHome();
   let config: unknown = {};
   try { config = JSON.parse(fs.readFileSync(path.join(home, '.shieldcortex', 'config.json'), 'utf-8')); } catch { /* defaults */ }
   if (!agentConfigWatchEnabled(config)) return { label, status: 'info', message: 'off (sessionStart.agentConfigWatch is false)' };
-  const state = loadAgentConfigState(home);
+  const { state, integrity } = loadAgentConfigStateChecked(home);
+  // #928: a baseline that fails its signature check is never trusted; the next
+  // session start alerts and re-baselines. Same-user tampering is detectable
+  // here, not preventable (the key is readable by the same user).
+  if (integrity === 'untrusted') return { label, status: 'warn', message: 'on; the stored baseline failed its integrity check (modified outside ShieldCortex); the next session start alerts and re-baselines — review your agent config files' };
   if (!state.initialised) return { label, status: 'info', message: 'on; no baseline yet (recorded silently at the next session start)' };
   // Detection and delivery are tracked separately: a change whose notification
   // or audit row failed is still "detected", and shown as pending.

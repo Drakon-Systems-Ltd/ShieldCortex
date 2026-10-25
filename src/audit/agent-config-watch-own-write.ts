@@ -6,18 +6,28 @@
  * not alert. Fail-safe in both directions: it never throws into the writer, and
  * it only advances the baseline when the file matched the baseline BEFORE the
  * write, so a foreign edit that landed earlier still alerts at the next check.
+ *
+ * The write callback returns the exact text it wrote, and the new baseline is
+ * derived from those bytes (#928 round 1), not from re-reading the file: a
+ * same-user writer that races in after our write is not recorded as ours, it
+ * alerts at the next check. A callback that returns nothing advances nothing.
+ *
+ * `home` defaults to `agentConfigWatchHome()`, the same home the runner and the
+ * doctor check use, so the rebaseline always lands in the state file the check
+ * reads. Callers must not derive it from OPENCLAW_HOME or similar.
  */
 
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import {
   agentConfigWatchEnabled,
-  loadAgentConfigState,
+  agentConfigWatchHome,
+  loadAgentConfigStateChecked,
   sameSnapshot,
   saveAgentConfigState,
+  snapshotContent,
   snapshotFile,
-  specForPath,
+  watchedEntryForPath,
   type FileSnapshot,
 } from './agent-config-watch.js';
 
@@ -25,29 +35,31 @@ function readConfig(home: string): unknown {
   try { return JSON.parse(fs.readFileSync(path.join(home, '.shieldcortex', 'config.json'), 'utf-8')); } catch { return {}; }
 }
 
-export function withOwnConfigWrite(filePath: string, write: () => void, home: string = os.homedir()): void {
+export function withOwnConfigWrite(filePath: string, write: () => string, home: string = agentConfigWatchHome()): void {
   let pre: FileSnapshot | undefined;
-  let state: ReturnType<typeof loadAgentConfigState> | undefined;
-  let spec: ReturnType<typeof specForPath>;
+  let entry: ReturnType<typeof watchedEntryForPath>;
   try {
     if (agentConfigWatchEnabled(readConfig(home))) {
-      state = loadAgentConfigState(home);
-      spec = specForPath(filePath, home, state.roots);
-      if (spec && state.initialised) pre = snapshotFile(filePath, spec);
+      const loaded = loadAgentConfigStateChecked(home);
+      // An untrusted baseline is left for the check to report, never re-signed here.
+      if (loaded.integrity === 'ok' && loaded.state.initialised) {
+        entry = watchedEntryForPath(filePath, home, loaded.state.roots);
+        if (entry) pre = snapshotFile(filePath, entry.spec);
+      }
     }
   } catch { pre = undefined; }
 
-  write(); // a failing write propagates exactly as before
+  const written = write(); // a failing write propagates exactly as before
 
   try {
-    if (!state || !spec || !pre) return;
-    const key = path.resolve(filePath);
-    const fresh = loadAgentConfigState(home);
-    const baseline = fresh.files[key];
+    if (!entry || !pre || typeof written !== 'string') return;
+    const fresh = loadAgentConfigStateChecked(home);
+    if (fresh.integrity !== 'ok') return;
+    const baseline = fresh.state.files[entry.file];
     if (baseline === undefined) return; // not baselined yet: the next run baselines silently
     // Same semantic equality as the check: a harmless key reorder is not drift.
     if (!sameSnapshot(baseline, pre)) return; // foreign drift: leave it to alert
-    fresh.files[key] = snapshotFile(filePath, spec);
-    saveAgentConfigState(home, fresh);
+    fresh.state.files[entry.file] = snapshotContent(written, entry.spec);
+    saveAgentConfigState(home, fresh.state);
   } catch { /* never break the installer */ }
 }

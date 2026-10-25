@@ -206,7 +206,7 @@ export function migrateSettings(): { mcpSwapped: number; hooksSwapped: number } 
 
   if (mcpSwapped > 0 || hooksSwapped > 0) {
     // #916: ShieldCortex's own write of a watched config records its own baseline.
-    withOwnConfigWrite(SETTINGS_PATH, () => fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + '\n', 'utf-8'));
+    withOwnConfigWrite(SETTINGS_PATH, () => { const out = JSON.stringify(settings, null, 2) + '\n'; fs.writeFileSync(SETTINGS_PATH, out, 'utf-8'); return out; });
     console.log(`  Settings saved.`);
   } else {
     console.log('  Settings: no old references found (already migrated or fresh install).');

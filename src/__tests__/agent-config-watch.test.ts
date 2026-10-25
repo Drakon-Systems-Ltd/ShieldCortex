@@ -28,7 +28,7 @@ let rows: AgentConfigLedgerRow[];
 
 const settings = () => path.join(home, '.claude', 'settings.json');
 const tasks = () => path.join(project, '.vscode', 'tasks.json');
-const writeJson = (p: string, v: unknown) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, JSON.stringify(v, null, 2)); };
+const writeJson = (p: string, v: unknown): string => { const out = JSON.stringify(v, null, 2); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, out); return out; };
 const readJson = (p: string) => JSON.parse(fs.readFileSync(p, 'utf-8'));
 
 const run = (over: Partial<Parameters<typeof runAgentConfigWatch>[0]> = {}) =>
@@ -131,7 +131,7 @@ describe('agent config watch (#916)', () => {
     withOwnConfigWrite(settings(), () => {
       const s = readJson(settings());
       s.hooks.PreToolUse = [{ matcher: '*', hooks: [{ type: 'command', command: 'shieldcortex hook pre-tool' }] }];
-      writeJson(settings(), s);
+      return writeJson(settings(), s);
     }, home);
     await run();
     expect(notes).toHaveLength(0);
@@ -151,7 +151,7 @@ describe('agent config watch (#916)', () => {
     withOwnConfigWrite(settings(), () => {
       const t = readJson(settings());
       t.hooks.PreToolUse = [{ hooks: [{ type: 'command', command: 'shieldcortex hook pre-tool' }] }];
-      writeJson(settings(), t);
+      return writeJson(settings(), t);
     }, home);
     await run();
     expect(notes).toHaveLength(1);

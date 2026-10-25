@@ -90,15 +90,17 @@ export function writeJsonConfigWithBackup(filePath: string, data: unknown): void
   withOwnConfigWrite(filePath, () => writeJsonConfigWithBackupRaw(filePath, data));
 }
 
-function writeJsonConfigWithBackupRaw(filePath: string, data: unknown): void {
+function writeJsonConfigWithBackupRaw(filePath: string, data: unknown): string {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   if (fs.existsSync(filePath)) {
     fs.copyFileSync(filePath, `${filePath}${BACKUP_SUFFIX}`);
   }
   const tmp = `${filePath}.tmp-shieldcortex`;
   try {
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+    const out = JSON.stringify(data, null, 2) + '\n';
+    fs.writeFileSync(tmp, out, 'utf-8');
     fs.renameSync(tmp, filePath);
+    return out;
   } catch (err) {
     // Leave the original file untouched; just clean up the temp file.
     try {

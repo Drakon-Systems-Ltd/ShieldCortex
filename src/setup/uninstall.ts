@@ -130,7 +130,7 @@ export function removeHooks(): void {
   }
 
   if (removed > 0) {
-    withOwnConfigWrite(SETTINGS_PATH, () => fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + '\n', 'utf-8'));
+    withOwnConfigWrite(SETTINGS_PATH, () => { const out = JSON.stringify(settings, null, 2) + '\n'; fs.writeFileSync(SETTINGS_PATH, out, 'utf-8'); return out; });
     console.log(`Hooks: removed ${removed} hook(s) from ~/.claude/settings.json`);
   } else {
     console.log('Hooks: no ShieldCortex hooks found in settings.json.');
@@ -204,7 +204,7 @@ export function removeMcpEntry(): void {
   }
 
   delete config.mcpServers.memory;
-  withOwnConfigWrite(mcpPath, () => fs.writeFileSync(mcpPath, JSON.stringify(config, null, 2) + '\n', 'utf-8'));
+  withOwnConfigWrite(mcpPath, () => { const out = JSON.stringify(config, null, 2) + '\n'; fs.writeFileSync(mcpPath, out, 'utf-8'); return out; });
   console.log('MCP: removed shieldcortex entry from ~/.claude.json.');
 }
 

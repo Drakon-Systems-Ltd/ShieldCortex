@@ -5,10 +5,10 @@
  */
 
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import {
   agentConfigWatchEnabled,
+  agentConfigWatchHome,
   resolveProjectRoots,
   runAgentConfigWatch,
   type AgentConfigLedgerRow,
@@ -68,10 +68,10 @@ export function armChildDeadline(ms: number = CHILD_DEADLINE_MS, exit: () => voi
 
 /**
  * `channels` replaces the configured notification channels (test seam for the
- * transport only); `projectRoot` / `home` replace the argv root and os.homedir().
+ * transport only); `projectRoot` / `home` replace the argv root and agentConfigWatchHome().
  */
 export async function main(overrides: { channels?: NotifyChannel[]; projectRoot?: string; home?: string; argv?: readonly string[] } = {}): Promise<void> {
-  const home = overrides.home ?? os.homedir();
+  const home = overrides.home ?? agentConfigWatchHome();
   let config: Record<string, unknown> = {};
   try { config = JSON.parse(fs.readFileSync(path.join(home, '.shieldcortex', 'config.json'), 'utf-8')); } catch { /* defaults */ }
   if (!agentConfigWatchEnabled(config)) return;

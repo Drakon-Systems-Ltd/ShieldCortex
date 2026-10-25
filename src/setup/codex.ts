@@ -43,8 +43,10 @@ function writeConfig(content: string): void {
   // #916: ShieldCortex's own write of a watched agent config records its own
   // baseline, so a Codex install/uninstall does not alert as an unexpected change.
   withOwnConfigWrite(configPath, () => {
+    const out = content.endsWith('\n') ? content : `${content}\n`;
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
-    fs.writeFileSync(configPath, content.endsWith('\n') ? content : `${content}\n`, 'utf-8');
+    fs.writeFileSync(configPath, out, 'utf-8');
+    return out;
   });
 }
 

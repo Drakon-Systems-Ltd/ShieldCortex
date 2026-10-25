@@ -25,6 +25,7 @@
 
 import crypto from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { parseToml } from './toml-lite.js';
 
@@ -161,6 +162,9 @@ function getPath(obj: unknown, keyPath: string): unknown {
   return cur;
 }
 
+/** Entry name for a hooks value that is an array (TOML `[[hooks]]`). */
+export const HOOK_ARRAY_ENTRY = 'hooks-array';
+
 function sectionFrom(kind: SectionKind, value: unknown): SectionMap {
   const out: SectionMap = {};
   if (value === undefined || value === null) return out;
@@ -172,11 +176,17 @@ function sectionFrom(kind: SectionKind, value: unknown): SectionMap {
       (out[label] ??= []).push(sha(canonical(t)));
     });
   } else if (kind === 'hooks') {
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
+    if (Array.isArray(value)) {
+      // TOML `[[hooks]]` (an array of tables): one bucket, so an added,
+      // removed or edited entry still shows up in the set diff.
+      if (value.length) out[HOOK_ARRAY_ENTRY] = value.map((e) => sha(canonical(e)));
+    } else if (typeof value === 'object') {
       for (const [event, entries] of Object.entries(value as Record<string, unknown>)) {
         const list = Array.isArray(entries) ? entries : [entries];
         out[event] = list.map((e) => sha(canonical(e))).sort();
       }
+    } else {
+      out['(value)'] = [sha(canonical(value))];
     }
   } else if (value && typeof value === 'object' && !Array.isArray(value)) {
     for (const [name, entry] of Object.entries(value as Record<string, unknown>)) out[name] = [sha(canonical(entry))];
@@ -199,21 +209,54 @@ export function isUnparseable(snap: FileSnapshot): boolean {
   return Object.prototype.hasOwnProperty.call(snap, UNPARSEABLE);
 }
 
+/** Largest watched config file read; a bigger one is a per-file read error (EFBIG). */
+export const MAX_WATCHED_FILE_BYTES = 1024 * 1024;
+
+function codedError(code: string, message: string): NodeJS.ErrnoException {
+  const err = new Error(message) as NodeJS.ErrnoException;
+  err.code = code;
+  return err;
+}
+
 /**
- * Snapshot one file's security-relevant keys. Absent file = empty snapshot.
- * A file that exists but cannot be parsed becomes the `_file` marker (its
- * contents hashed, never stored), which the check reports as a parse error.
- * A read failure other than "absent" THROWS: the caller keeps that file's
- * baseline and reports a read error.
+ * Read a regular file, at most `max` bytes, without ever blocking on a special
+ * file (#928 round 1, blocker 3). A blocking `readFileSync` of a FIFO or
+ * /dev/zero pins the event loop, so neither the check budget nor the child
+ * deadline can fire. The open is O_NONBLOCK (a FIFO open returns at once), the
+ * fd is fstat'd, and only a regular file is read: a directory is EISDIR, any
+ * other type (FIFO, device, socket, a symlink to one) is ENOTREG, and an
+ * oversize file is EFBIG. Symlinks to regular files are followed (dotfile
+ * managers symlink these configs).
  */
-export function snapshotFile(filePath: string, spec: WatchedFileSpec): FileSnapshot {
-  let raw: string;
+export function readRegularFileBounded(filePath: string, max: number = MAX_WATCHED_FILE_BYTES): string {
+  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
   try {
-    raw = fs.readFileSync(filePath, 'utf-8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT' || (err as NodeJS.ErrnoException).code === 'ENOTDIR') return {};
-    throw err;
+    const st = fs.fstatSync(fd);
+    if (st.isDirectory()) throw codedError('EISDIR', 'is a directory');
+    if (!st.isFile()) throw codedError('ENOTREG', 'not a regular file');
+    if (st.size > max) throw codedError('EFBIG', 'file too large');
+    // The size can change after fstat: read at most max+1 bytes and re-check.
+    const buf = Buffer.alloc(Math.min(st.size, max) + 1);
+    let total = 0;
+    for (;;) {
+      if (total === buf.length) break;
+      const n = fs.readSync(fd, buf, total, buf.length - total, null);
+      if (n === 0) break;
+      total += n;
+    }
+    if (total > max) throw codedError('EFBIG', 'file too large');
+    return buf.subarray(0, total).toString('utf-8');
+  } finally {
+    fs.closeSync(fd);
   }
+}
+
+/**
+ * Snapshot of one file's security-relevant keys from its raw contents. Shared
+ * by the check and the own-write helper (which derives the new baseline from
+ * the bytes it wrote, not from a second read of the file).
+ */
+export function snapshotContent(raw: string, spec: WatchedFileSpec): FileSnapshot {
   let parsed: unknown;
   try {
     parsed = spec.format === 'toml' ? parseToml(raw) : JSON.parse(spec.format === 'jsonc' ? stripJsonc(raw) : raw);
@@ -226,6 +269,24 @@ export function snapshotFile(filePath: string, spec: WatchedFileSpec): FileSnaps
     if (Object.keys(m).length) snap[s.keyPath] = m;
   }
   return snap;
+}
+
+/**
+ * Snapshot one file's security-relevant keys. Absent file = empty snapshot.
+ * A file that exists but cannot be parsed becomes the `_file` marker (its
+ * contents hashed, never stored), which the check reports as a parse error.
+ * A read failure other than "absent" THROWS (EISDIR, ENOTREG, EFBIG, EACCES...):
+ * the caller keeps that file's baseline and reports a read error.
+ */
+export function snapshotFile(filePath: string, spec: WatchedFileSpec): FileSnapshot {
+  let raw: string;
+  try {
+    raw = readRegularFileBounded(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT' || (err as NodeJS.ErrnoException).code === 'ENOTDIR') return {};
+    throw err;
+  }
+  return snapshotContent(raw, spec);
 }
 
 // ── Diff ────────────────────────────────────────────────────────────────────
@@ -296,28 +357,172 @@ export function displayPath(p: string, home: string): string {
 
 // ── State ───────────────────────────────────────────────────────────────────
 
+/**
+ * The one home the watch uses everywhere: the runner, the doctor check and
+ * the own-write helper (#928 round 1). OpenClaw's installer resolves its own
+ * home through OPENCLAW_HOME / SUDO_USER; the watch does not, so an own write
+ * and the check always read and write the SAME state file.
+ */
+export function agentConfigWatchHome(): string {
+  return os.homedir();
+}
+
 export function agentConfigStatePath(home: string): string {
   return path.join(home, '.shieldcortex', 'state', 'agent-config-watch.json');
+}
+
+/** HMAC key for the baseline, kept apart from the state file (0700 dir, 0600 file). */
+export function agentConfigKeyPath(home: string): string {
+  return path.join(home, '.shieldcortex', 'keys', 'agent-config-watch.key');
 }
 
 export function emptyState(): AgentConfigWatchState {
   return { version: 1, initialised: false, roots: [], files: {} };
 }
 
-export function loadAgentConfigState(home: string): AgentConfigWatchState {
+/**
+ * Baseline integrity (#928 round 1, blocker 1). The state is signed with an
+ * HMAC whose key lives in a separate owner-only file. This is tamper-EVIDENCE,
+ * not tamper-proofing: anything running as the same user can read the key and
+ * re-sign. What it does stop is the cheap attack the review reproduced, a
+ * payload that rewrites the baseline JSON to hide its own config edit; that
+ * now raises a "baseline untrusted" alert instead of suppressing one.
+ *  - `fresh`: no state and no key (first run on this home).
+ *  - `ok`: state present and its signature verifies.
+ *  - `untrusted`: unsigned, bad signature, unreadable/malformed state, a
+ *    symlinked state file, or a state deleted while its key remains.
+ */
+export type StateIntegrity = 'fresh' | 'ok' | 'untrusted';
+
+export interface LoadedAgentConfigState {
+  state: AgentConfigWatchState;
+  integrity: StateIntegrity;
+}
+
+const MAX_STATE_BYTES = 8 * 1024 * 1024;
+const MAC_DOMAIN = 'shieldcortex-agent-config-watch:v1:';
+
+function macOf(key: Buffer, body: unknown): string {
+  return crypto.createHmac('sha256', key).update(MAC_DOMAIN + canonical(body)).digest('hex');
+}
+
+function readKey(home: string): Buffer | null {
   try {
-    const s = JSON.parse(fs.readFileSync(agentConfigStatePath(home), 'utf-8')) as AgentConfigWatchState;
-    if (s && s.version === 1 && s.files && typeof s.files === 'object' && Array.isArray(s.roots)) return s;
-  } catch { /* fresh */ }
-  return emptyState();
+    const raw = readRegularFileBounded(agentConfigKeyPath(home), 1024).trim();
+    return /^[0-9a-f]{64}$/i.test(raw) ? Buffer.from(raw, 'hex') : null;
+  } catch {
+    return null;
+  }
+}
+
+function keyExists(home: string): boolean {
+  try { fs.lstatSync(agentConfigKeyPath(home)); return true; } catch { return false; }
+}
+
+function isState(s: unknown): s is AgentConfigWatchState {
+  const o = s as AgentConfigWatchState | null;
+  return !!o && typeof o === 'object' && o.version === 1 && !!o.files && typeof o.files === 'object' && Array.isArray(o.roots);
+}
+
+export function loadAgentConfigStateChecked(home: string): LoadedAgentConfigState {
+  const untrusted: LoadedAgentConfigState = { state: emptyState(), integrity: 'untrusted' };
+  const p = agentConfigStatePath(home);
+  let raw: string;
+  try {
+    if (fs.lstatSync(p).isSymbolicLink()) return untrusted;
+    raw = readRegularFileBounded(p, MAX_STATE_BYTES);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return keyExists(home) ? untrusted : { state: emptyState(), integrity: 'fresh' };
+    return untrusted;
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return untrusted; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return untrusted;
+  const { mac, ...body } = parsed as Record<string, unknown>;
+  const key = readKey(home);
+  if (!key || typeof mac !== 'string' || !/^[0-9a-f]{64}$/.test(mac)) return untrusted;
+  const want = Buffer.from(macOf(key, body), 'hex');
+  if (!crypto.timingSafeEqual(want, Buffer.from(mac, 'hex'))) return untrusted;
+  if (!isState(body)) return untrusted;
+  return { state: body, integrity: 'ok' };
+}
+
+/** The verified state, or an empty one when it is absent or untrusted. */
+export function loadAgentConfigState(home: string): AgentConfigWatchState {
+  return loadAgentConfigStateChecked(home).state;
+}
+
+/**
+ * Create (0700) and verify a directory the watcher owns: never a symlink,
+ * always a real directory, owned by this user. Anything else refuses the
+ * write (EUNSAFEPATH) rather than following it somewhere else.
+ */
+function ensureOwnedDir(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const st = fs.lstatSync(dir);
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  if (st.isSymbolicLink() || !st.isDirectory() || (uid !== undefined && st.uid !== uid)) {
+    throw codedError('EUNSAFEPATH', 'state directory is not an owned directory');
+  }
+}
+
+/**
+ * Replace `target` with `content` via an exclusive, unpredictable temp file
+ * in the same owned directory (#928 round 1, blocker 2): O_CREAT|O_EXCL|
+ * O_NOFOLLOW so a planted temp or symlink is never written through, and a
+ * target that is anything but a regular file is refused, never replaced.
+ */
+function writeOwnedFileAtomic(target: string, content: string): void {
+  const dir = path.dirname(target);
+  ensureOwnedDir(path.dirname(dir)); // ~/.shieldcortex
+  ensureOwnedDir(dir);
+  try {
+    if (!fs.lstatSync(target).isFile()) throw codedError('EUNSAFEPATH', 'state target is not a regular file');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  const tmp = path.join(dir, `.${path.basename(target)}.${crypto.randomBytes(12).toString('hex')}.tmp`);
+  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0);
+  const fd = fs.openSync(tmp, flags, 0o600);
+  try {
+    try {
+      fs.writeSync(fd, content);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch { /* already renamed or gone */ }
+    throw err;
+  }
+}
+
+/** The baseline key, created once (exclusive create; a racing creator wins). */
+function ensureKey(home: string): Buffer {
+  const existing = readKey(home);
+  if (existing) return existing;
+  const p = agentConfigKeyPath(home);
+  ensureOwnedDir(path.dirname(path.dirname(p)));
+  ensureOwnedDir(path.dirname(p));
+  const key = crypto.randomBytes(32);
+  try {
+    const fd = fs.openSync(p, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
+    try { fs.writeSync(fd, `${key.toString('hex')}\n`); } finally { fs.closeSync(fd); }
+    return key;
+  } catch (err) {
+    const raced = readKey(home);
+    if (raced) return raced;
+    throw err;
+  }
 }
 
 export function saveAgentConfigState(home: string, state: AgentConfigWatchState): void {
-  const p = agentConfigStatePath(home);
-  fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
-  const tmp = `${p}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
-  fs.renameSync(tmp, p);
+  const key = ensureKey(home);
+  // Sign exactly what a reader will parse back (undefined fields dropped).
+  const body = JSON.parse(JSON.stringify({ ...state, mac: undefined })) as Record<string, unknown>;
+  writeOwnedFileAtomic(agentConfigStatePath(home), JSON.stringify({ ...body, mac: macOf(key, body) }));
 }
 
 /** Opt-out: `sessionStart.agentConfigWatch: false` (default on). */
@@ -336,10 +541,24 @@ export function watchedPaths(home: string, roots: string[]): Array<{ file: strin
   return out;
 }
 
-/** Match a path against the watched set (used by the own-write helper). */
+function realOrResolved(p: string): string {
+  try { return path.join(fs.realpathSync(path.dirname(p)), path.basename(p)); } catch { return path.resolve(p); }
+}
+
+/**
+ * Match a path against the watched set (used by the own-write helper). The
+ * match is by real directory, so a writer that reached the file through a
+ * different spelling (a symlinked OPENCLAW_HOME) still hits the entry, and the
+ * returned `file` is the key the check itself uses in the state.
+ */
+export function watchedEntryForPath(filePath: string, home: string, roots: string[]): { file: string; spec: WatchedFileSpec } | undefined {
+  const target = realOrResolved(filePath);
+  const hit = watchedPaths(home, roots).find((w) => path.resolve(w.file) === path.resolve(filePath) || realOrResolved(w.file) === target);
+  return hit ? { file: hit.file, spec: hit.spec } : undefined;
+}
+
 export function specForPath(filePath: string, home: string, roots: string[]): WatchedFileSpec | undefined {
-  const target = path.resolve(filePath);
-  return watchedPaths(home, roots).find((w) => path.resolve(w.file) === target)?.spec;
+  return watchedEntryForPath(filePath, home, roots)?.spec;
 }
 
 // ── Check ───────────────────────────────────────────────────────────────────
@@ -365,7 +584,12 @@ export interface AgentConfigWatchResult {
   baselined: boolean;
   notified: number;
   errors: number;
+  /** The stored baseline failed its integrity check this run. */
+  untrustedBaseline?: boolean;
 }
+
+/** Notification label for a baseline that failed its integrity check. */
+export const BASELINE_UNTRUSTED_LABEL = 'watch baseline untrusted';
 
 const DEFAULT_TOTAL_BUDGET_MS = 5_000;
 
@@ -407,7 +631,12 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
   let expired = false;
 
   const body = async (): Promise<void> => {
-    const state = loadAgentConfigState(deps.home);
+    const loaded = loadAgentConfigStateChecked(deps.home);
+    // An untrusted baseline is never diffed against and never silently
+    // replaced: every file is re-baselined only after the operator has been
+    // told (below); until then nothing is saved and the next run re-alerts.
+    const untrusted = loaded.integrity === 'untrusted';
+    const state = loaded.state;
     const firstRun = !state.initialised;
     const knownRoots = new Set(state.roots);
     const next: AgentConfigWatchState = { ...state, version: 1, initialised: true, files: { ...state.files }, roots: [...new Set([...state.roots, ...roots])] };
@@ -489,6 +718,26 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
     }
     next.pendingChanges = pending;
     next.lastCheckAt = new Date(now()).toISOString();
+    if (untrusted) {
+      result.untrustedBaseline = true;
+      next.lastDetectedAt = next.lastCheckAt;
+      const shown = displayPath(agentConfigStatePath(deps.home), deps.home);
+      try {
+        await deps.notify({ file: shown, changes: [{ label: BASELINE_UNTRUSTED_LABEL, name: 'review all agent configs' }], changeCount: 1 });
+      } catch (err) {
+        if (expired) return;
+        result.errors++;
+        safeLedger({ file: shown, keyPath: '', kind: 'notify-error', detail: `notification not delivered (${errorCategory(err)})`, outcome: 'error' });
+        return; // not told: keep the untrusted state so the next run re-alerts
+      }
+      if (expired) return;
+      result.notified++;
+      if (!safeLedger({ file: shown, keyPath: '', kind: 'baseline-untrusted', detail: 'signature missing or invalid; re-baselined after notifying', outcome: 'error' })) {
+        result.errors++;
+        return;
+      }
+      next.lastChangeAt = next.lastCheckAt;
+    }
     if (expired) return;
     saveAgentConfigState(deps.home, next);
   };
