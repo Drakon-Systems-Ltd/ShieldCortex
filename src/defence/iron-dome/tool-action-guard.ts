@@ -3748,7 +3748,11 @@ const STORE_MUTATION_RE = new RegExp(
 );
 
 /** Nested execution keeps the gate. */
-const STORE_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\/|\bfunction\b|[\w.-]+\s*\(\s*\)\s*\{/i;
+// The function-definition arm starts only at a word start (#874 review): any
+// match starting mid-word has one starting at that word's start, so this is
+// the same test, but a long word is scanned once rather than from every
+// offset (linear, not quadratic).
+const STORE_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\/|\bfunction\b|(?<![\w.-])[\w.-]+\s*\(\s*\)\s*\{/i;
 
 /**
  * Split on statement separators without treating `2>&1` / `>&` / `|&` as
@@ -3839,18 +3843,367 @@ export function guardConfigAccessIsReadOnly(text: string): boolean {
   if (/[$`\\]/.test(cmd)) return false;
   const statements = guardConfigStatements(cmd);
   if (!statements || statements.length === 0) return false;
-  for (const stages of statements) {
-    for (const argv of stages) {
-      if (!GUARD_CONFIG_READONLY_VERB_RE.test(argv[0] ?? '')) return false;
-      for (const arg of argv.slice(1)) {
-        if (arg.startsWith('-') && arg.includes('=')) return false;
-        // `~` only as a leading home reference, never mid-word or `~user`.
-        const tilde = arg.indexOf('~');
-        if (tilde > 0 || (tilde === 0 && arg.length > 1 && arg[1] !== '/')) return false;
-      }
+  return statements.every(stagesAreClosedSetReads);
+}
+
+/**
+ * Every stage of one pipeline is a bare GUARD_CONFIG_READONLY_VERB_RE verb
+ * followed by plain words: no `--opt=value` spelling, and `~` only as a
+ * leading `~/`. Shared by the #879 config carve-out and the #874 D5 mask.
+ */
+function stagesAreClosedSetReads(stages: string[][]): boolean {
+  for (const argv of stages) {
+    if (!GUARD_CONFIG_READONLY_VERB_RE.test(argv[0] ?? '')) return false;
+    for (const arg of argv.slice(1)) {
+      if (arg.startsWith('-') && arg.includes('=')) return false;
+      // `~` only as a leading home reference, never mid-word or `~user`.
+      const tilde = arg.indexOf('~');
+      if (tilde > 0 || (tilde === 0 && arg.length > 1 && arg[1] !== '/')) return false;
     }
   }
   return true;
+}
+
+/**
+ * #874 D5 — whole-command vetoes for `closedReadPipelineMask`. Any of these
+ * means a plain-looking read may not be what runs, or its output may go
+ * somewhere other than the tool result: a heredoc, an escape or expansion, a
+ * carriage return, a background job or `|&`, process substitution, a grouping
+ * or subshell, or a redirect anywhere in the command.
+ */
+const CLOSED_READ_VETO_RE = /<<|[\\`$\r(){}<>]|(?<!&)&(?!&)/;
+/**
+ * #874 D5 — a word that turns the command into a compound one (whose loop or
+ * group may pipe or redirect a masked read's output) or changes how later
+ * words are found or run (an assignment, an exported preload, a changed
+ * directory or PATH lookup). Judged on every word of the command, quoted or
+ * not, so it over-rejects (`grep done f`) rather than parse shell grammar.
+ */
+const CLOSED_READ_VETO_WORD_RE = /^(?:if|then|else|elif|fi|for|while|until|do|done|case|esac|select|function|time|coproc|in|!|\[\[|\]\]|export|declare|typeset|readonly|local|set|unset|alias|unalias|shopt|enable|hash|builtin|command|exec|eval|source|trap|ulimit|umask|cd|pushd|popd|env|sudo|doas|nohup|xargs)$/;
+/**
+ * #874 D5 — `.` sources a file only in command position; as an argument it is
+ * data (`jq .`, `ls .`). Checked on the first word of every pipeline stage.
+ */
+const CLOSED_READ_DOT_SOURCE = '.';
+
+/**
+ * #874 D5 / #920 — whether one quote-removed word of a would-be masked
+ * statement withdraws the whole relief: a veto word, a word naming a
+ * sensitive path, or a word spelled as a non-canonical path.
+ *
+ * The `touch-sensitive-path` rule judges the raw text and only the literal
+ * spelling, so `~/.s's'h/id_ed25519` (review r9) and `~/./.ssh/id_ed25519`,
+ * `~//.ssh/…`, `~/foo/../.ssh/…`, `/etc/./passwd` (review r10) all slip past
+ * it. Rather than chase each spelling, any word with an empty interior
+ * component (`//`) or a `.`/`..` component anywhere (`./x`, `a/./b`, `a/..`)
+ * refuses the relief, so the call is judged as on main. This fails closed:
+ * it also refuses words that are not paths at all (a jq `//` operator, a URL
+ * in a grep pattern) — those calls lose the relief, never gain one. No
+ * normalisation is attempted, so no symlink or `..` semantics are assumed.
+ */
+function closedReadWordRefusesMask(word: string, isGrepPattern = false): boolean {
+  if (CLOSED_READ_VETO_WORD_RE.test(word) || SENSITIVE_PATH_RE.test(word)) return true;
+  if (CLOSED_READ_SENSITIVE_BARE_RE.test(word) || CLOSED_READ_SENSITIVE_HOME_DIR_RE.test(word)) return true;
+  // #920 review r11: a relative multi-segment word resolves against an
+  // unknown cwd, so `.ssh/id_ed25519` from $HOME or `etc/shadow` from `/`
+  // names a key the home- or root-anchored rule never sees. Any relative
+  // word holding a `/` refuses the relief; `cat .claude/settings.json`
+  // loses it too (judged as on main). A grep pattern is never opened, so
+  // only it is spared (`grep -oE '"cli/[^"]+"' f`).
+  if (!isGrepPattern && word.includes('/') && !word.startsWith('/') && !word.startsWith('~')) return true;
+  return closedReadWordIsNonCanonicalPath(word);
+}
+
+/**
+ * #920 review r12 — the argv index of a grep-family stage's positional
+ * pattern, or -1. Only when every option is a cluster of flags that take no
+ * argument and none supplies the pattern (`-e`) or a pattern file (`-f`);
+ * GNU grep permutes options, so one anywhere means no positional pattern.
+ * Anything else (a long option, `--`, `-A 3`) gets -1 and every operand is
+ * judged as a path.
+ */
+const CLOSED_READ_GREP_FLAGS_RE = /^-[abcEFGhHiIlLnoPqrRsTuUvVwxyzZ]+$/;
+function closedReadGrepPatternIndex(argv: string[]): number {
+  if (!/^(?:grep|egrep|fgrep)$/.test(argv[0] ?? '')) return -1;
+  let at = -1;
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a.startsWith('-')) {
+      if (!CLOSED_READ_GREP_FLAGS_RE.test(a)) return -1;
+    } else if (at < 0) {
+      at = i;
+    }
+  }
+  return at;
+}
+
+/**
+ * #920 review r12 — a bare word that is the name of a key or credential file,
+ * or of a directory holding them, which a cwd of `~`, `~/.ssh`, `~/.aws` or
+ * `/etc` turns into a sensitive read. Fails closed: `grep -n passwd f` loses
+ * the relief too. Other names inside such a directory (`config`,
+ * `known_hosts`) are not listed; the cwd cannot be known lexically.
+ */
+const CLOSED_READ_SENSITIVE_HOME_DIRS = ['.ssh', '.aws', '.gnupg'];
+const CLOSED_READ_SENSITIVE_HOME_DIR_SRC = CLOSED_READ_SENSITIVE_HOME_DIRS.map(d => d.replace(/\./g, '\\.')).join('|');
+const CLOSED_READ_SENSITIVE_BARE_RE = new RegExp(String.raw`^(?:id_[\w.-]*|identity|authorized_keys2?|credentials|passwd|shadow|gshadow|sudoers|master\.passwd|${CLOSED_READ_SENSITIVE_HOME_DIR_SRC})$`, 'i');
+/**
+ * #920 review r13 — the same key directories behind a home root (`~`,
+ * `~user`, `$HOME`, `${HOME}`, `/home/x`, `/root`, `/Users/x`), the directory
+ * itself or anything under it. `SENSITIVE_PATH_RE` names only `~/.ssh` and
+ * `.aws/credentials`, so `~/.gnupg/private-keys-v1.d/x.key` or
+ * `~/.aws/config` would otherwise be relieved while their relative spellings
+ * are refused. Relief-local: the global rule is unchanged.
+ */
+const CLOSED_READ_SENSITIVE_HOME_DIR_RE = new RegExp(String.raw`^(?:~[^\/]*|\$\{?HOME\}?|\/home\/[^\/]+|\/root|\/Users\/[^\/]+)\/(?:${CLOSED_READ_SENSITIVE_HOME_DIR_SRC})(?:\/|$)`, 'i');
+
+/**
+ * #920 review r15 — the relief's decider. A filename deny-list grew a round
+ * at a time (keys, `.aws`, `.gnupg`) and still missed `~/.kube/config`,
+ * `~/.docker/config.json`, `~/.npmrc`, `~/.netrc`, `/etc/ssh/ssh_host_*_key`,
+ * `/etc/ssl/private/*`. So a read stage takes part in the relief only when
+ * every operand is proven to be one of the guard-sensitive FILES the relief
+ * exists for: the Claude settings (and `.local`), the OpenClaw config and
+ * the ShieldCortex config, spelled from `~/`, `/home/<user>/`, `/root/` or
+ * `/Users/<user>/`. Not their directories (`grep -r x ~/.claude` also reads
+ * `.credentials.json`) and not any other file, however harmless: `cat
+ * README.md` beside a settings read keeps the floor as on main.
+ *
+ * Every other word must be a no-argument flag cluster for the verb, so an
+ * option cannot carry a file glued on (`grep -fconfig`, `jq -Lx`) or take
+ * the next word as a value the allow-list never judges; or the one data word
+ * of a `grep` (pattern) or `jq` (filter), which is the first non-option word.
+ * A `grep` with `-e`/`-f` has no such word and fails. The deny-list checks in
+ * `closedReadWordRefusesMask` still run first as extra belt.
+ */
+const CLOSED_READ_FLOOR_FILE_RE = /^(?:~|\/home\/[A-Za-z0-9._-]+|\/root|\/Users\/[A-Za-z0-9._-]+)\/(?:\.claude\/settings(?:\.local)?\.json|\.openclaw\/openclaw\.json|\.shieldcortex\/config\.json)$/;
+const CLOSED_READ_FLAG_RE: Record<string, RegExp> = {
+  ls: /^-[aAdFhlLrRsStU1]+$/,
+  dir: /^-[aAdFhlLrRsStU1]+$/,
+  cat: /^-[AbeEnstTuv]+$/,
+  head: /^-(?:[qv]+|\d+)$/,
+  tail: /^-(?:[qv]+|\d+)$/,
+  wc: /^-[clmwL]+$/,
+  stat: /^-[LtF]+$/,
+  du: /^-[abchklLmsSx]+$/,
+  grep: CLOSED_READ_GREP_FLAGS_RE,
+  egrep: CLOSED_READ_GREP_FLAGS_RE,
+  fgrep: CLOSED_READ_GREP_FLAGS_RE,
+  jq: /^-[acCejMnrRsS]+$/,
+};
+/**
+ * #920 review r18 — a jq filter that can load a module. `include`/`import`
+ * read a `.jq`/`.json` file from jq's search path (`~/.jq`, …) and
+ * `modulemeta` reads one by name, so such a filter is not a settings-only
+ * read. Matched as a bare word anywhere in the filter, so it fails closed
+ * (`.import` is refused too). `-L`/`--library-path` already fail the flags.
+ */
+const CLOSED_READ_JQ_MODULE_RE = /\b(?:include|import|modulemeta)\b/;
+function closedReadStageReadsOnlyFloorFiles(argv: string[]): boolean {
+  const flags = CLOSED_READ_FLAG_RE[argv[0] ?? ''];
+  if (!flags) return false;
+  const hasDataWord = /^(?:grep|egrep|fgrep|jq)$/.test(argv[0]!);
+  let dataSeen = false;
+  let fileSeen = false;
+  for (const w of argv.slice(1)) {
+    if (w.startsWith('-')) {
+      if (!flags.test(w)) return false;
+    } else if (hasDataWord && !dataSeen) {
+      if (argv[0] === 'jq' && CLOSED_READ_JQ_MODULE_RE.test(w)) return false;
+      dataSeen = true;
+    } else if (!CLOSED_READ_FLOOR_FILE_RE.test(w)) {
+      return false;
+    } else {
+      fileSeen = true;
+    }
+  }
+  return fileSeen || !closedReadStageDefaultsToDirectory(argv);
+}
+
+/**
+ * #920 review r16 — whether a read stage with no file operand reads a
+ * directory rather than stdin. `ls`, `dir` and `du` list the cwd, and a
+ * recursive grep (`r`/`R` in any flag cluster) searches `.` ("With no FILE,
+ * read '.' if recursive"), so `grep -r x` beside a settings read would walk
+ * whatever the cwd holds. Such a stage needs an explicit allow-listed file.
+ * `cat`, `head`, `tail`, `wc`, `jq` and a non-recursive grep read stdin, and
+ * `stat` with no operand fails; those stay relieved. The long spellings
+ * (`--recursive`, `--directories=recurse`) already fail the flag classes.
+ */
+function closedReadStageDefaultsToDirectory(argv: string[]): boolean {
+  const verb = argv[0] ?? '';
+  if (verb === 'ls' || verb === 'dir' || verb === 'du') return true;
+  if (!/^(?:grep|egrep|fgrep)$/.test(verb)) return false;
+  return argv.slice(1).some(a => /^-[^-]*[rR]/.test(a));
+}
+
+function closedReadWordIsNonCanonicalPath(word: string): boolean {
+  if (!word.includes('/')) return false;
+  const parts = word.split('/');
+  return parts.some((p, i) => p === '.' || p === '..'
+    // A leading '' is the root of an absolute path, a trailing '' a
+    // trailing slash; any other empty part is a repeated slash.
+    || (p === '' && i > 0 && i < parts.length - 1));
+}
+
+/**
+ * #874 D5 — `execCommand` with every top-level statement that is a
+ * CLOSED-SET READ PIPELINE replaced by same-length spaces, or null when no
+ * statement qualifies or the command is outside the grammar.
+ *
+ * A qualifying statement is one pipeline whose every stage passes
+ * `stagesAreClosedSetReads`: a bare `ls`/`dir`/`cat`/`head`/`tail`/`wc`/
+ * `stat`/`du`/`grep`/`egrep`/`fgrep`/`jq` with plain arguments (quoted
+ * arguments may hold any character but newline, because `$`, backtick and
+ * backslash are vetoed command-wide). None of those verbs writes a file, runs
+ * a program or opens a socket from its arguments, and a pipe into any other
+ * stage disqualifies the pipeline, so the statement's output reaches only the
+ * tool result and nothing it names can reach another statement. The caller
+ * re-checks a rule on the masked text; that answers "would this call match
+ * without the plain reads?".
+ *
+ * `command` is the command before comment/print/heredoc stripping and
+ * `rawCommand` the one before `${IFS}` deobfuscation. The mask applies only
+ * when neither step changed anything, so the mask's offsets and the shell's
+ * view of the text are the same bytes.
+ */
+export function closedReadPipelineMask(execCommand: string, command: string, rawCommand: string): string | null {
+  const cmd = String(execCommand || '');
+  if (!cmd || cmd !== command || command !== rawCommand) return null;
+  if (CLOSED_READ_VETO_RE.test(cmd)) return null;
+  // #920 r15: a quoted leading `~` is a literal cwd-relative directory, not
+  // home, though its quote-removed word passes CLOSED_READ_FLOOR_FILE_RE.
+  if (/['"]~/.test(cmd)) return null;
+  if (STORE_NESTED_EXEC_RE.test(cmd) || POLICY_LOCK_ENV_SEAM_RE.test(cmd)) return null;
+  // Top-level statements with their offsets, quote-aware.
+  const spans: Array<[number, number]> = [];
+  let quote = '';
+  let from = 0;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (quote) {
+      if (c === quote) quote = '';
+      else if (c === '\n') return null;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; continue; }
+    // #920 review r9: an unquoted glob character means a word may expand to
+    // a path the sensitive-path rule never saw (`~/.s?h/id_ed25519`).
+    if (c === '*' || c === '?' || c === '[') return null;
+    const two = cmd.slice(i, i + 2);
+    if (c === '\n' || c === ';' || two === '&&' || two === '||') {
+      spans.push([from, i]);
+      if (two === '&&' || two === '||') i++;
+      from = i + 1;
+    }
+  }
+  if (quote) return null;
+  spans.push([from, cmd.length]);
+  let out = cmd;
+  let masked = false;
+  for (const [a, b] of spans) {
+    const stmt = cmd.slice(a, b);
+    const parsed = guardConfigStatements(stmt, { quotedAny: true });
+    if (parsed === null) {
+      if (stmt.trim()) {
+        // Outside the grammar: judge its words for the vetoes only.
+        for (const w of stmt.split(/[\s|;&]+/)) {
+          const bare = w.replace(/['"]/g, '');
+          if (closedReadWordRefusesMask(bare) || /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(w)) return null;
+        }
+        for (const stage of stmt.split('|')) {
+          if ((stage.trim().split(/\s+/)[0] ?? '').replace(/['"]/g, '') === CLOSED_READ_DOT_SOURCE) return null;
+        }
+      }
+      continue;
+    }
+    for (const stages of parsed) {
+      for (const argv of stages) {
+        const pattern = closedReadGrepPatternIndex(argv);
+        for (let i = 0; i < argv.length; i++) {
+          if (closedReadWordRefusesMask(argv[i]!, i === pattern)) return null;
+        }
+        if (/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(argv[0] ?? '')) return null;
+        if (argv[0] === CLOSED_READ_DOT_SOURCE) return null;
+        // #920 r15: any read stage, masked or left as a sibling, must name
+        // only the guard's own files; anything else keeps the floor.
+        if (GUARD_CONFIG_READONLY_VERB_RE.test(argv[0] ?? '') && !closedReadStageReadsOnlyFloorFiles(argv)) return null;
+      }
+    }
+    if (parsed.length !== 1 || !stagesAreClosedSetReads(parsed[0]!)) continue;
+    if (parsed[0]!.some(closedReadStageMayWrite)) continue;
+    out = out.slice(0, a) + ' '.repeat(b - a) + out.slice(b);
+    masked = true;
+  }
+  return masked ? out : null;
+}
+
+/**
+ * #874 D5 — a closed-set stage spelled with an option that writes or edits in
+ * place (`jq -i`, `--in-place`, in the jq builds and wrappers that have it).
+ * Any short-option cluster holding `i` counts for jq, so `-ri` is caught too.
+ * Such a stage keeps its statement out of the mask; the #879 carve-out is not
+ * changed by this.
+ */
+function closedReadStageMayWrite(argv: string[]): boolean {
+  if (argv[0] !== 'jq') return false;
+  return argv.slice(1).some(a => a === '--in-place' || /^-[A-Za-z]*i/.test(a));
+}
+
+/**
+ * #874 D5 review r2 — the sibling shapes the floor relief may release, by
+ * exact program name. An allow-set, not a list of network tools: rounds 1
+ * and 2 each found a spelling a deny-list missed (`/usr/bin/cu?l`, a
+ * versioned runtime, `gawk`, `git -c alias.x=push`). A stage passes only
+ * when its program is
+ *   - a closed-set read (`stagesAreClosedSetReads`, not a writing `jq`),
+ *   - `shieldcortex [<sub>…] --help` (any subcommand: `--help` prints
+ *     usage and runs nothing, so `update --help` is accepted too),
+ *   - `openclaw models list`,
+ *   - `pwd` or `true` with no arguments, or
+ *   - `echo` with plain words only (review r3): letters, digits and
+ *     `_ . , : @ % + = / -`, so no redirection, glob, tilde, `$`, backtick,
+ *     backslash or brace survives quote removal.
+ * Anything else — an unlisted program, a path or a glob/expansion in the
+ * program position, any runtime, shell, package manager or VCS — may reach
+ * the network. `git` is not listed even for `status`/`log`: a repo's
+ * `core.fsmonitor` or diff driver runs an arbitrary program, and a partial
+ * clone fetches missing objects on `show`/`diff`/`log -p`.
+ */
+function closedReadSiblingStageIsLocal(argv: string[]): boolean {
+  const [prog, ...rest] = argv;
+  if (stagesAreClosedSetReads([argv]) && !closedReadStageMayWrite(argv)) return true;
+  if (prog === 'shieldcortex') {
+    return rest.includes('--help') && rest.every(a => a === '--help' || /^[a-z][a-z0-9-]*$/.test(a));
+  }
+  if (prog === 'openclaw') return rest.length === 2 && rest[0] === 'models' && rest[1] === 'list';
+  if (prog === 'pwd' || prog === 'true') return rest.length === 0;
+  if (prog === 'echo') return rest.every(a => CLOSED_READ_SIBLING_ECHO_WORD_RE.test(a));
+  return false;
+}
+
+/** A plain `echo` word for `closedReadSiblingStageIsLocal`. */
+const CLOSED_READ_SIBLING_ECHO_WORD_RE = /^[A-Za-z0-9_.,:@%+=\/-]+$/;
+
+/**
+ * #874 D5 review r1/r2 — may a statement left after `closedReadPipelineMask`
+ * blanked the reads make a network connection? Judged on the quote-removed
+ * argv the mask's own parser produces, so `cu'r'l` is `curl`. Fails closed:
+ * text outside the parser's grammar, a folded or opaque script, a URL-shaped
+ * word, or any stage `closedReadSiblingStageIsLocal` does not accept answers
+ * true.
+ */
+function closedReadSiblingMayReachNetwork(masked: string, folded: boolean): boolean {
+  if (folded) return true;
+  const parsed = guardConfigStatements(masked, { quotedAny: true });
+  if (parsed === null) return true;
+  for (const stages of parsed) {
+    for (const argv of stages) {
+      if (argv.some(w => w.includes('://'))) return true;
+      if (!closedReadSiblingStageIsLocal(argv)) return true;
+    }
+  }
+  return false;
 }
 
 /** Characters a guard-config read argument may contain, unquoted. */
@@ -3864,7 +4217,7 @@ const GUARD_CONFIG_WORD_CHAR_RE = /[A-Za-z0-9_./@%+,:=*?[\]~-]/;
  * character (inside quotes a space is also allowed). The caller has already
  * refused `$`, backtick and backslash, so no quoted span can expand.
  */
-function guardConfigStatements(cmd: string): string[][][] | null {
+function guardConfigStatements(cmd: string, opts: { quotedAny?: boolean } = {}): string[][][] | null {
   const statements: string[][][] = [];
   let stages: string[][] = [];
   let argv: string[] = [];
@@ -3892,7 +4245,10 @@ function guardConfigStatements(cmd: string): string[][][] | null {
     const c = cmd[i]!;
     if (quote) {
       if (c === quote) quote = '';
-      else if (c === ' ' || GUARD_CONFIG_WORD_CHAR_RE.test(c)) tok = (tok ?? '') + c;
+      // #874 D5: with `quotedAny`, any character but a newline is literal
+      // inside quotes. Sound only because the caller vetoes `$`, backtick and
+      // backslash command-wide, so nothing inside a quote can expand.
+      else if (c === ' ' || GUARD_CONFIG_WORD_CHAR_RE.test(c) || (opts.quotedAny && c !== '\n')) tok = (tok ?? '') + c;
       else return null;
       continue;
     }
@@ -6933,6 +7289,24 @@ function evaluateToolCallCore(
   const regions = scriptRegions.length > 0
     ? withShellComplement(scriptRegions, scanSurface.length)
     : [];
+  // #874 D5: the same call with every closed-set read pipeline blanked out
+  // (`closedReadPipelineMask`), length-preserving so `regions` still apply.
+  // Computed on first use; null when the command has no such pipeline or is
+  // outside the mask's grammar. Only ever used to WITHDRAW a floor signal
+  // that the unmasked surface also produced; never a catastrophic block.
+  let readMasked: { surface: string; egressCommand: string } | null | undefined;
+  const closedReadMasked = (): { surface: string; egressCommand: string } | null => {
+    if (readMasked === undefined) {
+      const m = family === 'exec' ? closedReadPipelineMask(execCommand, command, rawCommand) : null;
+      readMasked = m === null || !execSurface.startsWith(execCommand) ? null : {
+        surface: fold.content
+          ? `${m}${execSurface.slice(execCommand.length)}\n${fold.content}`
+          : `${m}${execSurface.slice(execCommand.length)}`,
+        egressCommand: fold.content ? `${m}\n${fold.content}` : m,
+      };
+    }
+    return readMasked;
+  };
   // Recorded at the lowest surfaced tier when a script's contents could not be
   // read (no resolver, unreadable, oversized, binary, too deep). Never a gate on
   // its own — the doctor/selfcheck probes and plenty of legitimate calls hit it.
@@ -7266,6 +7640,36 @@ function evaluateToolCallCore(
       span: `command is ${command.length} chars (cap ${OVERSIZED_COMMAND_LENGTH})`,
       tier: 'executed',
     });
+  }
+  // #874 D5: a floor signal raised only by a closed-set read pipeline (see
+  // `closedReadPipelineMask`) next to an unrelated statement — `shieldcortex
+  // guard --help; grep -n PreToolUse <claude settings>` — is dropped when the
+  // same rule no longer matches with those pipelines blanked. The carve-outs
+  // above need EVERY statement to be a read; this one needs only the
+  // statements that name the path to be reads. It applies only when floor
+  // signals are ALL that is left, so a read next to any other recognised
+  // dangerous statement keeps the floor in every posture. The #500 command
+  // shapes and the #509 r5 cd-relative / guard-dir rules still apply to the
+  // whole call. `touch-sensitive-path` is not a floor signal and is never
+  // relieved: reading a key is the risk, and the mask refuses a call whose
+  // quote-removed words name one or whose words still glob (review r9). Nor
+  // is a call that still makes a network request once the reads are blanked.
+  if (dangerSignals.length > 0
+      && dangerSignals.every(sig => GUARD_SELF_PROTECTION_SIGNALS.includes(sig))
+      && !guardDisableInvoked(scanSurface)) {
+    const rm = closedReadMasked();
+    // Conservative beyond the design: a call that still reaches the network
+    // once the reads are blanked keeps the floor (#522 G4 "a read with a
+    // hostile sibling"), even though the read's output cannot reach it.
+    // Review r1: judged on the quote-removed argv (`cu'r'l`), and any folded
+    // or opaque script keeps the floor too. Review r2: every sibling stage
+    // must be on an allow-set of local programs; anything unlisted keeps it.
+    if (rm !== null && !EXTERNAL_EGRESS.test(rm.egressCommand) && !EXTERNAL_EGRESS.test(url)
+        && !closedReadSiblingMayReachNetwork(rm.egressCommand,
+          Boolean(fold.content) || fold.opaque || subst.opaque)) {
+      dangerSignals = dangerSignals.filter(sig => guardDirSignals.includes(sig)
+        || matchSpansClassified(DANGEROUS.filter(p => p.signal === sig), rm.surface, regions).length > 0);
+    }
   }
   if (dangerSignals.length > 0) {
     const action = dangerActionFor(dangerSignals, family);
