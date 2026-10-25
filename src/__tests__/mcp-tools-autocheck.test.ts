@@ -12,8 +12,8 @@ import {
   type AutoCheckLedgerRow,
   type AutoCheckState,
 } from '../audit/mcp-tools-autocheck.js';
-import { autoCheckEnabled, discoverAutoCheckServers, openAutoCheckDb } from '../audit/mcp-tools-autocheck-runner.js';
-import { formatOperatorNotification, type McpToolChangeNotification } from '../defence/iron-dome/operator-notify.js';
+import { autoCheckEnabled, discoverAutoCheckServers, makeAutoCheckNotify, openAutoCheckDb } from '../audit/mcp-tools-autocheck-runner.js';
+import { deliverOperatorNotification, formatOperatorNotification, type McpToolChangeNotification, type NotifyChannel } from '../defence/iron-dome/operator-notify.js';
 import type { McpToolDescriptor, ToolHashStore } from '../audit/mcp-tools-scanner.js';
 // @ts-expect-error plain .mjs helper
 import { maybeSpawnToolCheck, mcpToolCheckEnabled } from '../../scripts/lib/mcp-tool-check-spawn.mjs';
@@ -115,6 +115,49 @@ describe('automatic MCP tool check (#915)', () => {
     await runAutoToolCheck(h.deps);
     desc = 'b';
     await expect(runAutoToolCheck(h.deps)).resolves.toBeDefined();
+  });
+
+  describe('real deliverOperatorNotification return contract (#925-3)', () => {
+    const failingChannel: NotifyChannel = { name: 'down', send: async () => ({ delivered: false, reason: 'transport failed' }) };
+    const okChannel: NotifyChannel = { name: 'up', send: async () => ({ delivered: true }) };
+
+    async function driftRun(channels: NotifyChannel[]) {
+      let desc = 'a';
+      const stored = memStore();
+      const h = harness({
+        store: stored,
+        tools: () => [{ name: 't', description: desc }],
+        notify: makeAutoCheckNotify(channels, deliverOperatorNotification),
+      });
+      await runAutoToolCheck(h.deps); // first sight, silent
+      const before = stored.get('files', 't');
+      const stateBefore = JSON.stringify(h.getState());
+      desc = 'b';
+      const res = await runAutoToolCheck(h.deps);
+      return { h, res, stored, before, stateBefore };
+    }
+
+    for (const [label, channels] of [['all channels fail', [failingChannel]], ['zero channels configured', []]] as const) {
+      it(`${label}: alert not counted, hashes uncommitted, error row left, re-sent next run`, async () => {
+        const { h, res, stored, before, stateBefore } = await driftRun([...channels]);
+        expect(res.notified).toBe(0);
+        expect(res.errors).toBe(1);
+        expect(stored.get('files', 't')).toBe(before);
+        expect(h.rows.map((r) => r.kind)).toEqual(['changed', 'error']);
+        expect(JSON.stringify(h.getState())).toBe(stateBefore); // no checkpoint advanced
+        // channels recover: the same drift is alerted again and now committed
+        const again = harness({ ...{}, store: stored, tools: () => [{ name: 't', description: 'b' }], notify: makeAutoCheckNotify([okChannel], deliverOperatorNotification) });
+        const res2 = await runAutoToolCheck(again.deps);
+        expect(res2.notified).toBe(1);
+        expect(res2.errors).toBe(0);
+      });
+    }
+
+    it('a delivering channel counts the alert and commits', async () => {
+      const { res } = await driftRun([okChannel]);
+      expect(res.notified).toBe(1);
+      expect(res.errors).toBe(0);
+    });
   });
 
   it('(d) session start is not delayed: the launcher returns immediately even if the child never exits', () => {

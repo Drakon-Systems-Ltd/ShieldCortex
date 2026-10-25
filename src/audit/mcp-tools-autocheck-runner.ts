@@ -21,6 +21,24 @@ export function autoCheckEnabled(config: Record<string, unknown>): boolean {
 }
 
 /**
+ * Build the runner's `notify`. `deliverOperatorNotification` does not throw when
+ * every channel fails (it returns `deliveredVia: null`), and with no channels
+ * configured there is nothing to deliver to. Both mean the alert was NOT
+ * delivered, so throw: runAutoToolCheck then leaves hashes uncommitted, does not
+ * count the alert as notified, and writes an error ledger row (re-sent next run).
+ */
+export function makeAutoCheckNotify<N>(
+  channels: unknown[],
+  deliver: (n: N, deps: { channels: any[] }) => Promise<{ deliveredVia: string | null }>,
+): (n: N) => Promise<void> {
+  return async (n) => {
+    if (channels.length === 0) throw new Error('no operator notification channel configured');
+    const res = await deliver(n, { channels });
+    if (!res || res.deliveredVia == null) throw new Error('operator notification not delivered via any channel');
+  };
+}
+
+/**
  * Global/user configs only: a project-local config is repo-controlled and must
  * never be spawned automatically on session start (#925).
  */
@@ -65,7 +83,7 @@ export async function main(): Promise<void> {
     servers,
     store,
     intervalHours,
-    notify: async (n) => { if (channels.length > 0) await deliverOperatorNotification(n, { channels }); },
+    notify: makeAutoCheckNotify(channels, deliverOperatorNotification),
     ledger: (row: AutoCheckLedgerRow) => {
       logAudit({
         memory_id: null,
