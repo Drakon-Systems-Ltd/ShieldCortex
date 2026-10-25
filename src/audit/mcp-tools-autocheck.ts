@@ -34,13 +34,29 @@ export const DEFAULT_TOTAL_BUDGET_MS = 20_000;
 
 export interface AutoCheckState {
   servers: Record<string, { checkedAt: number; configHash: string }>;
+  /**
+   * Alerts that could not be delivered, keyed by server + kind + finding hash.
+   * Exists only to dedupe the durable `pending` ledger row across failed runs;
+   * cleared for a server once its alerts are delivered.
+   */
+  pending?: Record<string, { server: string }>;
+}
+
+/** Structured finding carried by `pending` rows so the finding survives an undeliverable alert. */
+export interface AutoCheckFinding {
+  alertKind: 'changed' | 'suspicious';
+  source?: string;
+  severity: string;
+  tools: { tool: string; field?: string; indicators: string[] }[];
 }
 
 export interface AutoCheckLedgerRow {
   server: string;
-  kind: 'changed' | 'suspicious' | 'error';
+  /** `pending` = finding detected but the alert could not be delivered; re-sent next run. */
+  kind: 'changed' | 'suspicious' | 'error' | 'pending';
   /** Detail for the ledger: tool names, fields and indicator categories. Never raw description text. */
   detail: string;
+  finding?: AutoCheckFinding;
 }
 
 export interface AutoCheckDeps {
@@ -148,22 +164,75 @@ export async function runAutoToolCheck(deps: AutoCheckDeps): Promise<AutoCheckRe
       }
       const changedOnly = [...changed].filter((t) => !suspiciousByTool.has(t));
 
+      const SEV = ['info', 'low', 'medium', 'high', 'critical'];
+      const sevOf = (tool: string): string => findings
+        .filter((f) => f.toolName === tool)
+        .map((f) => f.severity as string)
+        .reduce((m, v) => (SEV.indexOf(v) > SEV.indexOf(m) ? v : m), 'medium');
+      const maxSev = (tools: string[]): string => tools.map(sevOf).reduce((m, v) => (SEV.indexOf(v) > SEV.indexOf(m) ? v : m), 'medium');
+
+      interface Alert { kind: 'suspicious' | 'changed'; notification: McpToolChangeNotification; detail: string; finding: AutoCheckFinding }
+      const alerts: Alert[] = [];
       if (suspiciousByTool.size > 0) {
         const toolNames = [...suspiciousByTool.keys()];
-        const notification = buildMcpToolChangeNotification({
-          kind: 'suspicious', server: server.name, tools: toolNames,
-          reason: reasonFromIndicators([...suspiciousIndicators.values()].flat()),
+        alerts.push({
+          kind: 'suspicious',
+          notification: buildMcpToolChangeNotification({
+            kind: 'suspicious', server: server.name, tools: toolNames,
+            reason: reasonFromIndicators([...suspiciousIndicators.values()].flat()),
+          }),
+          detail: [...suspiciousByTool.entries()].map(([t, d]) => `${t}: ${d.join(', ')}`).join('; '),
+          finding: {
+            alertKind: 'suspicious', source: server.sourcePath, severity: maxSev(toolNames),
+            tools: findings
+              .filter((f) => f.toolName !== undefined && f.field !== undefined && suspiciousByTool.has(f.toolName))
+              .map((f) => ({ tool: f.toolName as string, field: f.field, indicators: f.indicators ?? ['flagged'] })),
+          },
         });
-        await Promise.resolve(deps.notify(notification));
-        result.notified++;
-        // Ledger only after successful delivery: a retried alert must not duplicate the row.
-        safeLedger({ server: server.name, kind: 'suspicious', detail: [...suspiciousByTool.entries()].map(([t, d]) => `${t}: ${d.join(', ')}`).join('; ') });
       }
       if (changedOnly.length > 0) {
-        const notification = buildMcpToolChangeNotification({ kind: 'changed', server: server.name, tools: changedOnly });
-        await Promise.resolve(deps.notify(notification));
+        alerts.push({
+          kind: 'changed',
+          notification: buildMcpToolChangeNotification({ kind: 'changed', server: server.name, tools: changedOnly }),
+          detail: `tools=${changedOnly.join(',')}; hash changed since last check`,
+          finding: {
+            alertKind: 'changed', source: server.sourcePath, severity: maxSev(changedOnly),
+            tools: changedOnly.map((t) => ({ tool: t, field: 'description', indicators: ['hash-changed'] })),
+          },
+        });
+      }
+
+      // Alerts are delivered in order. If one fails, the finding must not be lost
+      // just because notification is unavailable: record every undelivered alert
+      // as a deduped `pending` row (full finding), then fail the server so hashes
+      // stay uncommitted and the alert is re-sent next run.
+      // Known residual: if `suspicious` is delivered and `changed` then fails, the
+      // retry re-sends `suspicious` (over-alert, never a missed alert); follow-up
+      // tracked on PR #925.
+      for (let i = 0; i < alerts.length; i++) {
+        const al = alerts[i];
+        try {
+          await Promise.resolve(deps.notify(al.notification));
+        } catch (err) {
+          state.pending = state.pending ?? {};
+          for (const un of alerts.slice(i)) {
+            const key = `${server.name}\u0000${un.kind}\u0000${createHash('sha256').update(JSON.stringify([server.sourcePath ?? null, un.detail])).digest('hex')}`;
+            if (state.pending[key]) continue;
+            state.pending[key] = { server: server.name };
+            safeLedger({
+              server: server.name, kind: 'pending',
+              detail: `undelivered ${un.kind} alert (source=${server.sourcePath ?? 'unknown'}, severity=${un.finding.severity}): ${un.detail}`,
+              finding: un.finding,
+            });
+          }
+          throw err;
+        }
         result.notified++;
-        safeLedger({ server: server.name, kind: 'changed', detail: `tools=${changedOnly.join(',')}; hash changed since last check` });
+        // Ledger only after successful delivery: a retried alert must not duplicate the row.
+        safeLedger({ server: server.name, kind: al.kind, detail: al.detail, finding: al.finding });
+      }
+      if (state.pending) {
+        for (const [k, v] of Object.entries(state.pending)) if (v.server === server.name) delete state.pending[k];
       }
       // Delivery succeeded (or nothing needed delivering): now persist drift + state.
       for (const p of pending.values()) baseline.set(p.server, p.tool, p.hash, p.changed);

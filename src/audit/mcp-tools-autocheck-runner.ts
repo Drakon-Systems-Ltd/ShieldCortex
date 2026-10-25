@@ -87,18 +87,20 @@ export async function main(): Promise<void> {
     intervalHours,
     notify: makeAutoCheckNotify(channels, deliverOperatorNotification),
     ledger: (row: AutoCheckLedgerRow) => {
+      // A pending row carries the finding it could not deliver; score it like that finding.
+      const alertKind = row.kind === 'pending' ? row.finding?.alertKind : row.kind;
       logAudit({
         memory_id: null,
         project: null,
         timestamp: new Date().toISOString(),
         source_type: 'mcp-tools',
         source_identifier: row.server,
-        trust_score: row.kind === 'suspicious' ? 0.1 : row.kind === 'changed' ? 0.5 : 1,
+        trust_score: alertKind === 'suspicious' ? 0.1 : alertKind === 'changed' ? 0.5 : 1,
         sensitivity_level: 'internal',
-        firewall_result: row.kind === 'suspicious' ? 'QUARANTINE' : 'ALLOW',
+        firewall_result: alertKind === 'suspicious' ? 'QUARANTINE' : 'ALLOW',
         operation: 'review',
-        anomaly_score: row.kind === 'suspicious' ? 0.9 : row.kind === 'changed' ? 0.5 : 0,
-        threat_indicators: JSON.stringify(row.kind === 'error' ? [] : [`mcp_tool_${row.kind}`]),
+        anomaly_score: alertKind === 'suspicious' ? 0.9 : alertKind === 'changed' ? 0.5 : 0,
+        threat_indicators: JSON.stringify(row.kind === 'error' ? [] : row.kind === 'pending' ? ['mcp_tool_pending_alert', `mcp_tool_${alertKind}`] : [`mcp_tool_${row.kind}`]),
         blocked_patterns: '[]',
         reason: `mcp tool check (${row.kind}): ${row.detail}`.slice(0, 500),
         fragmentation_score: null,

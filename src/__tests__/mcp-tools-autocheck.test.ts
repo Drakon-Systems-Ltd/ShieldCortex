@@ -131,20 +131,20 @@ describe('automatic MCP tool check (#915)', () => {
       });
       await runAutoToolCheck(h.deps); // first sight, silent
       const before = stored.get('files', 't');
-      const stateBefore = JSON.stringify(h.getState());
+      const stateBefore = JSON.stringify(h.getState().servers);
       desc = 'b';
       const res = await runAutoToolCheck(h.deps);
       return { h, res, stored, before, stateBefore };
     }
 
     for (const [label, channels] of [['all channels fail', [failingChannel]], ['zero channels configured', []]] as const) {
-      it(`${label}: alert not counted, hashes uncommitted, error row left, re-sent next run`, async () => {
+      it(`${label}: alert not counted, hashes uncommitted, finding recorded as pending, re-sent next run`, async () => {
         const { h, res, stored, before, stateBefore } = await driftRun([...channels]);
         expect(res.notified).toBe(0);
         expect(res.errors).toBe(1);
         expect(stored.get('files', 't')).toBe(before);
-        expect(h.rows.map((r) => r.kind)).toEqual(['error']); // no alert row before delivery (#925)
-        expect(JSON.stringify(h.getState())).toBe(stateBefore); // no checkpoint advanced
+        expect(h.rows.map((r) => r.kind)).toEqual(['pending', 'error']); // finding kept durably, no alert row before delivery (#925)
+        expect(JSON.stringify(h.getState().servers)).toBe(stateBefore); // no checkpoint advanced
         // channels recover: the same drift is alerted again and now committed
         const again = harness({ ...{}, store: stored, tools: () => [{ name: 't', description: 'b' }], notify: makeAutoCheckNotify([okChannel], deliverOperatorNotification) });
         const res2 = await runAutoToolCheck(again.deps);
@@ -277,7 +277,7 @@ describe('automatic MCP tool check (#915)', () => {
     await runAutoToolCheck(h.deps);
     desc = 'b'; failing = true;
     await runAutoToolCheck(h.deps);
-    expect(h.rows.map((r) => r.kind)).toEqual(['error']);      // error row kept, no alert row yet
+    expect(h.rows.map((r) => r.kind)).toEqual(['pending', 'error']); // pending + error kept, no alert row yet
     failing = false;
     await runAutoToolCheck(h.deps);
     expect(h.rows.filter((r) => r.kind === 'changed')).toHaveLength(1);
@@ -312,5 +312,60 @@ describe('automatic MCP tool check (#915)', () => {
       if (prev === undefined) delete process.env.CLAUDE_MEMORY_DB; else process.env.CLAUDE_MEMORY_DB = prev;
     }
     expect(calls).toEqual([[]]);
+  });
+
+  describe('(#925 fix4) undeliverable alerts are durably recorded', () => {
+    const POISONED = [{ name: 'read_file', description: POISON }];
+    const down = () => { throw new Error('no operator notification channel configured'); };
+
+    it('zero channels: the suspicious finding is recorded with tool, field, severity, indicators; hashes not advanced', async () => {
+      const store = memStore();
+      const h = harness({ store, tools: () => POISONED, notify: makeAutoCheckNotify([], deliverOperatorNotification) });
+      const res = await runAutoToolCheck(h.deps);
+      expect(res.notified).toBe(0);
+      const pending = h.rows.filter((r) => r.kind === 'pending');
+      expect(pending).toHaveLength(1);
+      expect(pending[0].finding).toMatchObject({ alertKind: 'suspicious', severity: expect.stringMatching(/^(high|critical)$/) });
+      expect(pending[0].finding?.tools[0]).toMatchObject({ tool: 'read_file', field: 'description' });
+      expect(pending[0].finding?.tools[0].indicators.length).toBeGreaterThan(0);
+      expect(pending[0].detail).toContain('read_file');
+      expect(store.get('files', 'read_file')).toBeUndefined(); // hash not advanced
+      expect(h.getState().servers.files).toBeUndefined();
+    });
+
+    it('three consecutive failed runs leave exactly one pending row', async () => {
+      const h = harness({ tools: () => POISONED, notify: down });
+      for (let i = 0; i < 3; i++) await runAutoToolCheck(h.deps);
+      expect(h.rows.filter((r) => r.kind === 'pending')).toHaveLength(1);
+      expect(h.rows.filter((r) => r.kind === 'suspicious' || r.kind === 'changed')).toHaveLength(0);
+    });
+
+    it('recovery writes exactly one final alert row and clears pending state', async () => {
+      let up = false;
+      const h = harness({ tools: () => POISONED, notify: (n) => { if (!up) down(); h.notes.push(n); } });
+      for (let i = 0; i < 3; i++) await runAutoToolCheck(h.deps);
+      up = true;
+      await runAutoToolCheck(h.deps);
+      expect(h.rows.filter((r) => r.kind === 'suspicious')).toHaveLength(1);
+      expect(h.rows.filter((r) => r.kind === 'pending')).toHaveLength(1);
+      expect(Object.keys(h.getState().pending ?? {})).toHaveLength(0);
+      await runAutoToolCheck(h.deps); // quiet afterwards
+      expect(h.rows.filter((r) => r.kind === 'suspicious')).toHaveLength(1);
+    });
+
+    it('a changed (non-suspicious) drift is recorded as pending too', async () => {
+      let desc = 'a';
+      let up = false;
+      const h = harness({ tools: () => [{ name: 't', description: desc }], notify: (n) => { if (!up) down(); h.notes.push(n); } });
+      await runAutoToolCheck(h.deps);
+      desc = 'b';
+      await runAutoToolCheck(h.deps); await runAutoToolCheck(h.deps);
+      const pending = h.rows.filter((r) => r.kind === 'pending');
+      expect(pending).toHaveLength(1);
+      expect(pending[0].finding).toMatchObject({ alertKind: 'changed' });
+      up = true;
+      await runAutoToolCheck(h.deps);
+      expect(h.rows.filter((r) => r.kind === 'changed')).toHaveLength(1);
+    });
   });
 });

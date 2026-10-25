@@ -80,7 +80,7 @@ export function migrateLegacyToolHashes(
 
   const legacy = db.prepare(
     `SELECT server_name, tool_name, content_hash, first_seen, last_seen, last_changed
-       FROM mcp_tool_hashes WHERE server_name NOT LIKE 'src' || char(0) || '%'`,
+       FROM mcp_tool_hashes WHERE substr(CAST(server_name AS BLOB), 1, 4) != CAST('src' || char(0) AS BLOB)`,
   ).all() as Array<{ server_name: string; tool_name: string; content_hash: string; first_seen: string | null; last_seen: string | null; last_changed: string | null }>;
   const seed = db.prepare(
     `INSERT OR IGNORE INTO mcp_tool_hashes (server_name, tool_name, content_hash, first_seen, last_seen, last_changed)

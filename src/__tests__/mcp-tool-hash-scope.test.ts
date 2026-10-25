@@ -77,3 +77,36 @@ describe('per-source MCP hash baselines (#925 A)', () => {
     expect(names).toHaveLength(2);
   });
 });
+
+describe('legacy server names that collide with the scoped-key prefix (#925 fix4)', () => {
+  it('legacy rows for servers named src and SRC both migrate and alert on change, with no case folding', () => {
+    const d = db();
+    const store = new SqliteToolHashStore(d);
+    store.set('src', 'read_file', hashTool(tool('orig-lower')), false);
+    store.set('SRC', 'read_file', hashTool(tool('orig-upper')), false);
+    expect(migrateLegacyToolHashes(d, [
+      { name: 'src', sourcePath: GLOBAL },
+      { name: 'SRC', sourcePath: GLOBAL },
+    ])).toBe(2);
+    const lower = scanToolList('src', [tool('rug-pulled')], scopeHashStore(store, GLOBAL));
+    const upper = scanToolList('SRC', [tool('rug-pulled')], scopeHashStore(store, GLOBAL));
+    expect(changedCount(lower)).toBe(1);
+    expect(changedCount(upper)).toBe(1);
+    // no case folding: each baseline is its own
+    const d2 = db();
+    const s2 = new SqliteToolHashStore(d2);
+    s2.set('src', 'read_file', hashTool(tool('A')), false);
+    s2.set('SRC', 'read_file', hashTool(tool('B')), false);
+    migrateLegacyToolHashes(d2, [{ name: 'src', sourcePath: GLOBAL }, { name: 'SRC', sourcePath: GLOBAL }]);
+    expect(scopeHashStore(s2, GLOBAL).get('src', 'read_file')).toBe(hashTool(tool('A')));
+    expect(scopeHashStore(s2, GLOBAL).get('SRC', 'read_file')).toBe(hashTool(tool('B')));
+  });
+
+  it('already-scoped rows are not re-migrated as legacy', () => {
+    const d = db();
+    const store = new SqliteToolHashStore(d);
+    scopeHashStore(store, GLOBAL).set('files', 'read_file', 'h', false);
+    expect(migrateLegacyToolHashes(d, [{ name: 'files', sourcePath: GLOBAL }])).toBe(0);
+    expect(rows(d)).toHaveLength(1);
+  });
+});
