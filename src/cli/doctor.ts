@@ -5716,8 +5716,9 @@ export async function checkCronDenials(deps: CronDenialCheckDeps = {}): Promise<
  * dangerous tier is decorative, and the operator has no other signal that it is.
  */
 /**
- * #916: agent configuration watch status. Info only, never a failure: it shows
- * whether the watch is on and when it last saw an unexpected change.
+ * #916: agent configuration watch status. Never a failure: it shows whether the
+ * watch is on, when it last detected an unexpected change, and warns when a
+ * detected change is still undelivered or a watched file cannot be read/parsed.
  */
 export async function checkAgentConfigWatch(home: string = os.homedir()): Promise<CheckResult> {
   const label = 'Agent config watch';
@@ -5727,8 +5728,17 @@ export async function checkAgentConfigWatch(home: string = os.homedir()): Promis
   if (!agentConfigWatchEnabled(config)) return { label, status: 'info', message: 'off (sessionStart.agentConfigWatch is false)' };
   const state = loadAgentConfigState(home);
   if (!state.initialised) return { label, status: 'info', message: 'on; no baseline yet (recorded silently at the next session start)' };
-  const last = state.lastChangeAt ? `last unexpected change detected ${state.lastChangeAt}` : 'no unexpected change detected';
-  return { label, status: 'pass', message: `on; watching ${Object.keys(state.files).length} config file(s); ${last}` };
+  // Detection and delivery are tracked separately: a change whose notification
+  // or audit row failed is still "detected", and shown as pending.
+  const detectedAt = state.lastDetectedAt ?? state.lastChangeAt;
+  const parts = [`on; watching ${Object.keys(state.files).length} config file(s)`];
+  parts.push(detectedAt ? `last unexpected change detected ${detectedAt}` : 'no unexpected change detected');
+  if (state.lastChangeAt && state.lastChangeAt !== detectedAt) parts.push(`last reported ${state.lastChangeAt}`);
+  const pending = typeof state.pendingChanges === 'number' ? state.pendingChanges : 0;
+  if (pending > 0) parts.push(`${pending} detected change(s) not yet reported; retried at the next session start`);
+  const unhealthy = Object.keys(state.fileErrors ?? {}).length;
+  if (unhealthy > 0) parts.push(`${unhealthy} watched file(s) could not be read or parsed (see the audit log)`);
+  return { label, status: pending > 0 || unhealthy > 0 ? 'warn' : 'pass', message: parts.join('; ') };
 }
 
 export async function checkClaudeCodeVersion(
