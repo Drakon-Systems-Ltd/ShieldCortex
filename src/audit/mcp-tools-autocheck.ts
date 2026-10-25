@@ -208,7 +208,7 @@ export async function runAutoToolCheck(deps: AutoCheckDeps): Promise<AutoCheckRe
       // stay uncommitted and the alert is re-sent next run.
       // Known residual: if `suspicious` is delivered and `changed` then fails, the
       // retry re-sends `suspicious` (over-alert, never a missed alert); follow-up
-      // tracked on PR #925.
+      // tracked on issue #926.
       for (let i = 0; i < alerts.length; i++) {
         const al = alerts[i];
         try {

@@ -829,6 +829,29 @@ export function runMigrations(database: Database.Database): void {
     logIfUnexpectedDdlError(err, 'mcp_tool_hashes');
   }
 
+  // Migration: #925 — mcp_tool_findings (structured findings of the automatic
+  // MCP tool check, incl. undelivered `pending` alerts). A separate table, not a
+  // defence_audit column: defence_audit rows are hash-chained. Idempotent.
+  try {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_tool_findings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        audit_id INTEGER,
+        server_name TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('changed', 'suspicious', 'error', 'pending')),
+        alert_kind TEXT,
+        source TEXT,
+        severity TEXT,
+        finding_json TEXT,
+        detail TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_findings_server ON mcp_tool_findings(server_name, kind, created_at);
+    `);
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'mcp_tool_findings');
+  }
+
   // Migration: provenance ledger (v4.39.0) — add an `operation` discriminator
   // (read/write/delete) and a `content_hash` (write-time tamper-evidence) to
   // defence_audit, a `content_hash` to memories, and an index on memories.source

@@ -13,6 +13,8 @@ import {
   type AutoCheckState,
   type AutoCheckLedgerRow,
 } from './mcp-tools-autocheck.js';
+import type { NotifyChannel } from '../defence/iron-dome/operator-notify.js';
+import { recordAutoCheckRow } from './mcp-tool-findings-store.js';
 
 export function autoCheckEnabled(config: Record<string, unknown>): boolean {
   const ss = config.sessionStart;
@@ -56,7 +58,44 @@ export function openAutoCheckDb<T>(init: (dbPath?: string) => T): T {
   return init();
 }
 
-export async function main(): Promise<void> {
+/**
+ * The runner's ledger adapter: one scored `defence_audit` row (truncated reason)
+ * plus the full structured finding in `mcp_tool_findings` (#925). The findings
+ * write is independent of the audit write, so neither can hide the other.
+ */
+export function makeAutoCheckLedger(
+  db: { prepare(sql: string): { run(...params: unknown[]): unknown } },
+  log: (entry: Parameters<typeof import('../defence/audit/logger.js').logAudit>[0]) => number,
+): (row: AutoCheckLedgerRow) => void {
+  return (row) => {
+    // A pending row carries the finding it could not deliver; score it like that finding.
+    const alertKind = row.kind === 'pending' ? row.finding?.alertKind : row.kind;
+    let auditId: number | null = null;
+    try {
+      auditId = log({
+        memory_id: null,
+        project: null,
+        timestamp: new Date().toISOString(),
+        source_type: 'mcp-tools',
+        source_identifier: row.server,
+        trust_score: alertKind === 'suspicious' ? 0.1 : alertKind === 'changed' ? 0.5 : 1,
+        sensitivity_level: 'internal',
+        firewall_result: alertKind === 'suspicious' ? 'QUARANTINE' : 'ALLOW',
+        operation: 'review',
+        anomaly_score: alertKind === 'suspicious' ? 0.9 : alertKind === 'changed' ? 0.5 : 0,
+        threat_indicators: JSON.stringify(row.kind === 'error' ? [] : row.kind === 'pending' ? ['mcp_tool_pending_alert', `mcp_tool_${alertKind}`] : [`mcp_tool_${row.kind}`]),
+        blocked_patterns: '[]',
+        reason: `mcp tool check (${row.kind}): ${row.detail}`.slice(0, 500),
+        fragmentation_score: null,
+        pipeline_duration_ms: null,
+      });
+    } catch { /* audit write is best effort; the findings row below is the record */ }
+    recordAutoCheckRow(db, row, auditId);
+  };
+}
+
+/** `channels` replaces the configured notification channels (test seam for the transport only). */
+export async function main(overrides: { channels?: NotifyChannel[] } = {}): Promise<void> {
   const home = os.homedir();
   const dataDir = path.join(home, '.shieldcortex');
   let config: Record<string, unknown> = {};
@@ -75,7 +114,7 @@ export async function main(): Promise<void> {
   const { logAudit } = await import('../defence/audit/logger.js');
   const { deliverOperatorNotification } = await import('../defence/iron-dome/operator-notify.js');
   const { configuredChannels } = await import('../cli/maintain.js');
-  const channels = await configuredChannels();
+  const channels = overrides.channels ?? await configuredChannels();
 
   const statePath = path.join(dataDir, 'state', 'mcp-tool-check.json');
   const ss = (config.sessionStart ?? {}) as Record<string, unknown>;
@@ -86,27 +125,7 @@ export async function main(): Promise<void> {
     store,
     intervalHours,
     notify: makeAutoCheckNotify(channels, deliverOperatorNotification),
-    ledger: (row: AutoCheckLedgerRow) => {
-      // A pending row carries the finding it could not deliver; score it like that finding.
-      const alertKind = row.kind === 'pending' ? row.finding?.alertKind : row.kind;
-      logAudit({
-        memory_id: null,
-        project: null,
-        timestamp: new Date().toISOString(),
-        source_type: 'mcp-tools',
-        source_identifier: row.server,
-        trust_score: alertKind === 'suspicious' ? 0.1 : alertKind === 'changed' ? 0.5 : 1,
-        sensitivity_level: 'internal',
-        firewall_result: alertKind === 'suspicious' ? 'QUARANTINE' : 'ALLOW',
-        operation: 'review',
-        anomaly_score: alertKind === 'suspicious' ? 0.9 : alertKind === 'changed' ? 0.5 : 0,
-        threat_indicators: JSON.stringify(row.kind === 'error' ? [] : row.kind === 'pending' ? ['mcp_tool_pending_alert', `mcp_tool_${alertKind}`] : [`mcp_tool_${row.kind}`]),
-        blocked_patterns: '[]',
-        reason: `mcp tool check (${row.kind}): ${row.detail}`.slice(0, 500),
-        fragmentation_score: null,
-        pipeline_duration_ms: null,
-      });
-    },
+    ledger: makeAutoCheckLedger(db as never, logAudit),
     loadState: (): AutoCheckState => JSON.parse(fs.readFileSync(statePath, 'utf-8')),
     saveState: (s) => {
       fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
