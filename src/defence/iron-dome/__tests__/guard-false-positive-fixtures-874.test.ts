@@ -591,6 +591,58 @@ describe('#874 (d) closed-set reads next to another statement', () => {
     expect(v.decision).toBe('allow');
     expect(v.signals).toEqual([]);
   });
+
+  // #920 review r16: a stage with no file operand is not proven settings-only
+  // when its verb then reads a directory. A recursive grep searches `.` and
+  // `ls`/`dir`/`du` list the cwd, so each keeps origin/main cb49f4fc's
+  // require_approval / [disable-action-guard].
+  it.each([
+    'cat ~/.claude/settings.json; grep -r x; shieldcortex guard --help',
+    'cat ~/.claude/settings.json; grep -R x; shieldcortex guard --help',
+    'cat ~/.claude/settings.json; grep -nri x; shieldcortex guard --help',
+    'cat ~/.claude/settings.json; grep -iR x; shieldcortex guard --help',
+    'cat ~/.claude/settings.json; egrep -r x; shieldcortex guard --help',
+    'cat ~/.claude/settings.json; fgrep -R x; shieldcortex guard --help',
+    'cat ~/.claude/settings.json | grep -r x; shieldcortex guard --help',
+    'cat ~/.claude/settings.json | head -3 | grep -rn x; shieldcortex guard --help',
+    'grep -r ~/.claude/settings.json; shieldcortex guard --help',
+    'cat ~/.claude/settings.json; ls; shieldcortex guard --help',
+    'cat ~/.claude/settings.json; ls -la; shieldcortex guard --help',
+    'cat ~/.claude/settings.json; ls -R; shieldcortex guard --help',
+    'cat ~/.claude/settings.json; dir; shieldcortex guard --help',
+    'cat ~/.claude/settings.json; du; shieldcortex guard --help',
+    'cat ~/.claude/settings.json; du -a; shieldcortex guard --help',
+    'cat ~/.claude/settings.json | ls; shieldcortex guard --help',
+  ])('an implicit directory read keeps the hold as on origin/main: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toEqual(['disable-action-guard']);
+  });
+
+  it.each([
+    'cat ~/.claude/settings.json; grep -r x ~/.ssh; shieldcortex guard --help',
+    'cat ~/.claude/settings.json; grep -r x ~/.gnupg; shieldcortex guard --help',
+  ])('a named key directory keeps the hold: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toEqual(expect.arrayContaining(['disable-action-guard']));
+  });
+
+  it.each([
+    'cat ~/.claude/settings.json; shieldcortex guard --help',
+    "grep -n 'Pre.*Use' ~/.claude/settings.json; shieldcortex guard --help",
+    'grep -r x ~/.claude/settings.json; shieldcortex guard --help',
+    'cat ~/.claude/settings.json | head -3; shieldcortex guard --help',
+    'cat ~/.claude/settings.json | wc -l; shieldcortex guard --help',
+    'cat ~/.claude/settings.json | tail | cat; shieldcortex guard --help',
+    "cat ~/.claude/settings.json | grep -in 'hook'; shieldcortex guard --help",
+    'cat ~/.claude/settings.json | jq .hooks; shieldcortex guard --help',
+    'ls -la ~/.claude/settings.json; du -a ~/.claude/settings.json; shieldcortex guard --help',
+  ])('a stdin-only or explicit-file stage is still relieved: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('allow');
+    expect(v.signals).toEqual([]);
+  });
 });
 
 /**

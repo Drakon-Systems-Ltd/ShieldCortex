@@ -3996,6 +3996,7 @@ function closedReadStageReadsOnlyFloorFiles(argv: string[]): boolean {
   if (!flags) return false;
   const hasDataWord = /^(?:grep|egrep|fgrep|jq)$/.test(argv[0]!);
   let dataSeen = false;
+  let fileSeen = false;
   for (const w of argv.slice(1)) {
     if (w.startsWith('-')) {
       if (!flags.test(w)) return false;
@@ -4003,9 +4004,28 @@ function closedReadStageReadsOnlyFloorFiles(argv: string[]): boolean {
       dataSeen = true;
     } else if (!CLOSED_READ_FLOOR_FILE_RE.test(w)) {
       return false;
+    } else {
+      fileSeen = true;
     }
   }
-  return true;
+  return fileSeen || !closedReadStageDefaultsToDirectory(argv);
+}
+
+/**
+ * #920 review r16 — whether a read stage with no file operand reads a
+ * directory rather than stdin. `ls`, `dir` and `du` list the cwd, and a
+ * recursive grep (`r`/`R` in any flag cluster) searches `.` ("With no FILE,
+ * read '.' if recursive"), so `grep -r x` beside a settings read would walk
+ * whatever the cwd holds. Such a stage needs an explicit allow-listed file.
+ * `cat`, `head`, `tail`, `wc`, `jq` and a non-recursive grep read stdin, and
+ * `stat` with no operand fails; those stay relieved. The long spellings
+ * (`--recursive`, `--directories=recurse`) already fail the flag classes.
+ */
+function closedReadStageDefaultsToDirectory(argv: string[]): boolean {
+  const verb = argv[0] ?? '';
+  if (verb === 'ls' || verb === 'dir' || verb === 'du') return true;
+  if (!/^(?:grep|egrep|fgrep)$/.test(verb)) return false;
+  return argv.slice(1).some(a => /^-[^-]*[rR]/.test(a));
 }
 
 function closedReadWordIsNonCanonicalPath(word: string): boolean {
