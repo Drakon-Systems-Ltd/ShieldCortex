@@ -3924,6 +3924,9 @@ export function closedReadPipelineMask(execCommand: string, command: string, raw
       continue;
     }
     if (c === "'" || c === '"') { quote = c; continue; }
+    // #920 review r9: an unquoted glob character means a word may expand to
+    // a path the sensitive-path rule never saw (`~/.s?h/id_ed25519`).
+    if (c === '*' || c === '?' || c === '[') return null;
     const two = cmd.slice(i, i + 2);
     if (c === '\n' || c === ';' || two === '&&' || two === '||') {
       spans.push([from, i]);
@@ -3942,7 +3945,9 @@ export function closedReadPipelineMask(execCommand: string, command: string, raw
       if (stmt.trim()) {
         // Outside the grammar: judge its words for the vetoes only.
         for (const w of stmt.split(/[\s|;&]+/)) {
-          if (CLOSED_READ_VETO_WORD_RE.test(w.replace(/['"]/g, '')) || /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(w)) return null;
+          const bare = w.replace(/['"]/g, '');
+          if (CLOSED_READ_VETO_WORD_RE.test(bare) || SENSITIVE_PATH_RE.test(bare)
+            || /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(w)) return null;
         }
         for (const stage of stmt.split('|')) {
           if ((stage.trim().split(/\s+/)[0] ?? '').replace(/['"]/g, '') === CLOSED_READ_DOT_SOURCE) return null;
@@ -3953,7 +3958,10 @@ export function closedReadPipelineMask(execCommand: string, command: string, raw
     for (const stages of parsed) {
       for (const argv of stages) {
         for (const w of argv) {
-          if (CLOSED_READ_VETO_WORD_RE.test(w)) return null;
+          // #920 review r9: the `touch-sensitive-path` rule judges the raw
+          // text, so `~/.s's'h/id_ed25519` slips past it. A quote-removed
+          // word naming a sensitive path withdraws the whole relief.
+          if (CLOSED_READ_VETO_WORD_RE.test(w) || SENSITIVE_PATH_RE.test(w)) return null;
         }
         if (/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(argv[0] ?? '')) return null;
         if (argv[0] === CLOSED_READ_DOT_SOURCE) return null;
@@ -7480,8 +7488,9 @@ function evaluateToolCallCore(
   // dangerous statement keeps the floor in every posture. The #500 command
   // shapes and the #509 r5 cd-relative / guard-dir rules still apply to the
   // whole call. `touch-sensitive-path` is not a floor signal and is never
-  // relieved: reading a key is the risk. Nor is a call that still makes a
-  // network request once the reads are blanked.
+  // relieved: reading a key is the risk, and the mask refuses a call whose
+  // quote-removed words name one or whose words still glob (review r9). Nor
+  // is a call that still makes a network request once the reads are blanked.
   if (dangerSignals.length > 0
       && dangerSignals.every(sig => GUARD_SELF_PROTECTION_SIGNALS.includes(sig))
       && !guardDisableInvoked(scanSurface)) {

@@ -334,6 +334,41 @@ describe('#874 (d) closed-set reads next to another statement', () => {
     expect(v.decision).not.toBe('allow');
     expect(v.signals).toContain('touch-sensitive-path');
   });
+
+  // #920 review r9: the raw-text `touch-sensitive-path` rule misses a key
+  // spelled with quotes or a glob, so the relief itself refuses a read whose
+  // quote-removed argument names one, or whose argument still expands. Each
+  // row is require_approval / [disable-action-guard] on origin/main cb49f4fc.
+  it.each([
+    "cat ~/.claude/settings.json ~/.s's'h/id_ed25519; shieldcortex guard --help",
+    "cat ~/.claude/settings.json; cat ~/.s's'h/id_ed25519; openclaw models list",
+    "grep -f ~/.s's'h/id_ed25519 ~/.claude/settings.json; shieldcortex guard --help",
+    "cat ~/.claude/settings.json ~/.s's'h/id_r's'a; shieldcortex guard --help",
+    "cat ~/.claude/settings.json ~/.aws/creden'tials'; shieldcortex guard --help",
+    'cat ~/.claude/settings.json ~/.s?h/id_ed25519; shieldcortex guard --help',
+    'cat ~/.claude/settings.json ~/.s[s]h/id_ed25519; shieldcortex guard --help',
+    'cat ~/.claude/settings.json ~/.s*/id_ed25519; shieldcortex guard --help',
+  ])('a quoted or globbed key read keeps the hold as on origin/main: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toEqual(['disable-action-guard']);
+  });
+
+  it('the literal-key control keeps both signals', () => {
+    const v = run('cat ~/.claude/settings.json ~/.ssh/id_ed25519; shieldcortex guard --help');
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toEqual(expect.arrayContaining(['touch-sensitive-path', 'disable-action-guard']));
+  });
+
+  it.each([
+    'cat ~/.claude/settings.json; shieldcortex guard --help',
+    "cat ~/.claude/'settings.json'; shieldcortex guard --help",
+    "grep -n 'Pre.*Use' ~/.claude/settings.json; shieldcortex guard --help",
+  ])('the settings-only read is still relieved: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('allow');
+    expect(v.signals).toEqual([]);
+  });
 });
 
 /**
