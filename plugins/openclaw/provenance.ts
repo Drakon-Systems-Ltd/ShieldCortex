@@ -205,7 +205,9 @@ export function labelHistoryMessage(msg: unknown): LabelledInputs {
  * not just the sender's words. The hook exposes no attested origin for its
  * constituent spans, so retain `unknown`. Text markers MUST NOT grant trust
  * or change provenance. Structured history is labelled per message and bounded to the last
- * {@link HISTORY_SCAN_LIMIT}, as before.
+ * {@link HISTORY_SCAN_LIMIT}, as before. The prompt, when present, is always
+ * the FIRST input: `scanLlmInput` relies on that to apply the #353 automation
+ * session exemption to the prompt alone.
  */
 export function labelLlmInput(event: {
   prompt?: unknown;

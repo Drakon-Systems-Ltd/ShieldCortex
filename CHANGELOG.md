@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **#911 Tool-call UUIDs are no longer reported as Heroku credentials, and credential-only findings no longer taint the conversation.** The Heroku rule now needs a same-line Heroku identifier within 64 characters before the UUID; the match and its redaction range cover the UUID alone, every UUID on such a line is checked and redacted, and the separator-collapsed pass does not run the rule. Explicit assignments such as `HEROKU_API_KEY=<uuid>` keep their high-severity, blocked finding, and a match contained in an earlier range is now skipped only when that range is of equal or higher severity. A tool-response summary whose only layer is credentials is still reported and redacted, but no longer marks session taint; any other layer keeps the existing policy. The OpenClaw `llm_input` prompt is labelled `unknown` instead of `user`, and the internal-content exemption applies to it only on a host-minted isolated cron or heartbeat session key, so a direct message that opens with `Read HEARTBEAT.md` or `System:` is now scanned (details: `docs/security/conversation-provenance-911.md`).
+
 ## [5.13.1] - 2026-10-24
 
 Patch on 5.13.0. Production dependencies are refreshed to clear newly published advisories: `zod` 3.25.76 to 4.6.7, the transitive `body-parser` 2.3.0 to 2.4.0 (with `qs` 6.16.1 and `iconv-lite` 0.7.3), and `fast-uri` 3.1.8 to 3.1.9 (PR #909). The published production audit reads 0 unwaived; 3 waived. One validation result changes: non-finite numbers such as `Infinity` (for example the JSON literal `1e999`) are now rejected in unbounded numeric tool inputs and the judge's `itemId`, and take the existing invalid-input path; finite values are unaffected. No production source change, no new configuration. Node floor unchanged.
