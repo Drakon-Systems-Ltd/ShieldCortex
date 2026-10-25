@@ -93,6 +93,10 @@ describe('#911 UUIDs and credential-only instruction taint', () => {
     ['CRLF', 'heroku:\r\n' + uuid],
     ['over the window', 'heroku:' + ' '.repeat(100) + 'call-' + uuid],
     ['over the window, no spaces', 'heroku:' + 'x'.repeat(65) + ' ' + uuid],
+    // A split UUID glued to `call-` is not a bare UUID token once collapsed,
+    // so only keeping the rule out of that pass stops the borrowed context.
+    ['split UUID after a newline', 'heroku:\ncall-' + uuid.slice(0, 4) + ' ' + uuid.slice(4)],
+    ['split UUID over the window', 'heroku:' + ' '.repeat(100) + 'call-' + uuid.slice(0, 4) + ' ' + uuid.slice(4)],
   ])('does not flag a UUID without same-line context in range: %s', (_name, text) => {
     const result = scanForCredentials(text);
     expect(result.findings).toEqual([]);
