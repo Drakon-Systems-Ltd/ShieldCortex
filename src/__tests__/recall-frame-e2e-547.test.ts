@@ -254,6 +254,17 @@ describe('#547 e2e: the OpenClaw hook pushes the real server output, framed once
       '',
     ].join('\n'));
     chmodSync(join(binDir, 'npx'), 0o755);
+    // The ClawHub-bundled copy (#931) calls `mcporter` directly instead of
+    // `npx mcporter`; this stub records the same argv shape (with the leading
+    // 'mcporter') so both copies satisfy one assertion.
+    writeFileSync(join(binDir, 'mcporter'), [
+      '#!/usr/bin/env node',
+      `require('node:fs').writeFileSync(${JSON.stringify(argvLog)}, JSON.stringify(['mcporter', ...process.argv.slice(2)]));`,
+      "if (process.argv[2] !== 'call' || process.argv[5] !== 'recall') process.exit(2);",
+      `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(fixture)}, 'utf8'));`,
+      '',
+    ].join('\n'));
+    chmodSync(join(binDir, 'mcporter'), 0o755);
 
     // OpenClaw jiti-loads handler.ts; transpile that exact source beside its
     // runtime.mjs sibling and execute it, rather than a test double.

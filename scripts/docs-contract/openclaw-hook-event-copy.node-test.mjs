@@ -46,9 +46,15 @@ const HOOK_DIRS = [
 ];
 
 const EXPECTED_EVENTS = ['command:new', 'command:stop', 'agent:bootstrap'];
-const EXPECTED_METADATA_LINE =
+const metadataLine = (bins) =>
   '  { "openclaw": { "emoji": "🧠", "events": ["command:new", "command:stop", "agent:bootstrap"], ' +
-  '"requires": { "bins": ["npx"] }, "install": [{ "id": "community", "kind": "community", "label": "ShieldCortex" }] } }';
+  `"requires": { "bins": ${bins} }, "install": [{ "id": "community", "kind": "community", "label": "ShieldCortex" }] } }`;
+// The npm-shipped hook still falls back to `npx -y shieldcortex`; the ClawHub
+// bundle runs only local `shieldcortex` + `mcporter` from PATH (#931).
+const EXPECTED_METADATA_LINE = {
+  'hooks/openclaw/cortex-memory': metadataLine('["npx"]'),
+  'skills/shieldcortex/bundled/cortex-memory-hook': metadataLine('["shieldcortex", "mcporter"]'),
+};
 
 /** Parse the `metadata:` JSON out of a HOOK.md YAML frontmatter block. */
 function manifest(src) {
@@ -72,7 +78,7 @@ describe('manifest subscriptions (unchanged)', () => {
   for (const dir of HOOK_DIRS) {
     it(`${dir.join('/')}: metadata line is byte-identical and events are exactly new/stop/bootstrap`, () => {
       const { line, metadata } = manifest(read(...dir, 'HOOK.md'));
-      assert.equal(line, EXPECTED_METADATA_LINE);
+      assert.equal(line, EXPECTED_METADATA_LINE[dir.join('/')]);
       assert.deepEqual(metadata.openclaw.events, EXPECTED_EVENTS);
       assert.ok(!metadata.openclaw.events.some((e) => e === 'message' || e.startsWith('message:')));
       assert.ok(!metadata.openclaw.events.includes('command'), 'bare command family must stay unsubscribed');
