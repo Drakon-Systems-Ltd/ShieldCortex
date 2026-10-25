@@ -66,7 +66,7 @@ export function openAutoCheckDb<T>(init: (dbPath?: string) => T): T {
 export function makeAutoCheckLedger(
   db: { prepare(sql: string): { run(...params: unknown[]): unknown } },
   log: (entry: Parameters<typeof import('../defence/audit/logger.js').logAudit>[0]) => number,
-): (row: AutoCheckLedgerRow) => void {
+): (row: AutoCheckLedgerRow) => boolean {
   return (row) => {
     // A pending row carries the finding it could not deliver; score it like that finding.
     const alertKind = row.kind === 'pending' ? row.finding?.alertKind : row.kind;
@@ -90,7 +90,14 @@ export function makeAutoCheckLedger(
         pipeline_duration_ms: null,
       });
     } catch { /* audit write is best effort; the findings row below is the record */ }
-    recordAutoCheckRow(db, row, auditId);
+    // The findings row is the durable record: report whether it was written so the
+    // runner never commits a dedupe marker / hash drift for a finding that was not.
+    try {
+      recordAutoCheckRow(db, row, auditId);
+      return true;
+    } catch {
+      return false;
+    }
   };
 }
 

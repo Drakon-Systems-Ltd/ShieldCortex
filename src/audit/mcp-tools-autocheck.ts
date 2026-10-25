@@ -64,7 +64,12 @@ export interface AutoCheckDeps {
   store: ToolHashStore;
   fetchTools?: (server: AutoCheckDeps['servers'][number], timeoutMs: number) => Promise<McpToolDescriptor[]>;
   notify: (n: McpToolChangeNotification) => Promise<void> | void;
-  ledger: (row: AutoCheckLedgerRow) => void;
+  /**
+   * Record one ledger row. Returns `false` (or throws) when the durable findings
+   * write failed; any other return means it was written. The runner commits a
+   * dedupe marker / hash drift only AFTER a successful write.
+   */
+  ledger: (row: AutoCheckLedgerRow) => boolean | void;
   loadState: () => AutoCheckState;
   saveState: (s: AutoCheckState) => void;
   now?: () => number;
@@ -118,8 +123,11 @@ export async function runAutoToolCheck(deps: AutoCheckDeps): Promise<AutoCheckRe
   try { state = deps.loadState(); } catch { /* fresh state */ }
   if (!state || typeof state.servers !== 'object') state = { servers: {} };
 
-  // A broken ledger must not stop drift persistence (that would re-alert forever).
-  const safeLedger = (row: AutoCheckLedgerRow): void => { try { deps.ledger(row); } catch { /* fail open */ } };
+  // A ledger failure never escapes the check, but it is OBSERVABLE: false = not
+  // recorded. Callers must not commit a marker or advance hashes on false.
+  const safeLedger = (row: AutoCheckLedgerRow): boolean => {
+    try { return deps.ledger(row) !== false; } catch { return false; }
+  };
 
   for (const server of deps.servers) {
     const remaining = budget - (now() - started);
@@ -218,18 +226,24 @@ export async function runAutoToolCheck(deps: AutoCheckDeps): Promise<AutoCheckRe
           for (const un of alerts.slice(i)) {
             const key = `${server.name}\u0000${un.kind}\u0000${createHash('sha256').update(JSON.stringify([server.sourcePath ?? null, un.detail])).digest('hex')}`;
             if (state.pending[key]) continue;
-            state.pending[key] = { server: server.name };
-            safeLedger({
+            // Dedupe marker only AFTER the full finding is durably written: if the
+            // INSERT failed, the next run must try to record it again.
+            const written = safeLedger({
               server: server.name, kind: 'pending',
               detail: `undelivered ${un.kind} alert (source=${server.sourcePath ?? 'unknown'}, severity=${un.finding.severity}): ${un.detail}`,
               finding: un.finding,
             });
+            if (written) state.pending[key] = { server: server.name };
           }
           throw err;
         }
         result.notified++;
         // Ledger only after successful delivery: a retried alert must not duplicate the row.
-        safeLedger({ server: server.name, kind: al.kind, detail: al.detail, finding: al.finding });
+        // If the findings write fails, do not commit hashes/state: the server is retried
+        // (the alert may be re-sent: over-alert, never a finding with no durable record).
+        if (!safeLedger({ server: server.name, kind: al.kind, detail: al.detail, finding: al.finding })) {
+          throw new Error('findings ledger write failed after delivery');
+        }
       }
       if (state.pending) {
         for (const [k, v] of Object.entries(state.pending)) if (v.server === server.name) delete state.pending[k];

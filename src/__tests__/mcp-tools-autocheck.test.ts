@@ -285,6 +285,25 @@ describe('automatic MCP tool check (#915)', () => {
     expect(h.notes).toHaveLength(1);
   });
 
+  it('(#925 fix6) a pending finding whose ledger write returns false gets no dedupe marker, so the next run records it', async () => {
+    let desc = 'a';
+    let writable = false;
+    const h = harness({
+      tools: () => [{ name: 't', description: desc }],
+      notify: () => { throw new Error('webhook down'); },
+      ledger: (r) => { if (r.kind === 'pending' && !writable) return false; h.rows.push(r); return true; },
+    });
+    await runAutoToolCheck(h.deps);
+    desc = 'b';
+    await runAutoToolCheck(h.deps);
+    expect(h.rows.filter((r) => r.kind === 'pending')).toHaveLength(0);
+    expect(h.getState().pending ?? {}).toEqual({});
+    writable = true;
+    await runAutoToolCheck(h.deps);
+    expect(h.rows.filter((r) => r.kind === 'pending')).toHaveLength(1);
+    expect(Object.keys(h.getState().pending ?? {})).toHaveLength(1);
+  });
+
   it('(#925-A) the auto check keeps a separate baseline per config source', async () => {
     const store = memStore();
     const globalSrv = { ...SERVER, sourcePath: '/home/u/.claude.json' };

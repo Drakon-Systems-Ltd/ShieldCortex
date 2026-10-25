@@ -51,6 +51,17 @@ const CHILD_JS = `
 import fs from 'fs';
 import os from 'os';
 if (!process.env.SC_TEST_HOME || os.homedir() !== process.env.SC_TEST_HOME) { console.error('refusing: HOME is not the test home'); process.exit(3); }
+if (process.env.SC_FAIL_FINDINGS_INSERT === '1') {
+  // Fault injection at the statement layer: the real better-sqlite3 prepare() throws for the
+  // findings INSERT only (as a locked/full DB would). Autocheck logic is untouched.
+  const { createRequire } = await import('module');
+  const Database = createRequire(${JSON.stringify(RUNNER_JS)})('better-sqlite3');
+  const realPrepare = Database.prototype.prepare;
+  Database.prototype.prepare = function (sql, ...rest) {
+    if (/INSERT\\s+INTO\\s+mcp_tool_findings/i.test(String(sql))) throw new Error('SQLITE_FULL: injected findings INSERT failure');
+    return realPrepare.call(this, sql, ...rest);
+  };
+}
 const { main } = await import(${JSON.stringify(RUNNER_JS)});
 const channels = process.env.SC_CHANNELS === '0' ? [] : [{
   name: 'stub-transport',
@@ -75,12 +86,12 @@ function dbRead<T>(sql: string): T[] {
 const findings = (kind: string) => dbRead<{ kind: string; finding_json: string | null; detail: string; severity: string | null; source: string | null; audit_id: number | null; alert_kind: string | null }>(
   `SELECT * FROM mcp_tool_findings WHERE kind = '${kind}' ORDER BY id`);
 
-async function run(channels: 'stub' | 'none'): Promise<void> {
+async function run(channels: 'stub' | 'none', failInsert = false): Promise<void> {
   await new Promise((r) => setTimeout(r, 25)); // tiny interval below: let it lapse
   if (up) fs.writeFileSync(path.join(home, 'up.flag'), ''); else fs.rmSync(path.join(home, 'up.flag'), { force: true });
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? '', HOME: home, SC_TEST_HOME: home, SC_UP_FLAG: path.join(home, 'up.flag'),
-    SC_SENT_LOG: path.join(home, 'sent.log'), SC_CHANNELS: channels === 'none' ? '0' : '1',
+    SC_SENT_LOG: path.join(home, 'sent.log'), SC_CHANNELS: channels === 'none' ? '0' : '1', SC_FAIL_FINDINGS_INSERT: failInsert ? '1' : '0',
     SHIELDCORTEX_ALLOW_UNSAFE_RUNTIME: '1', // ambient only: silences the checkout guard, passes no DB path
   };
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', CHILD_JS], { env, encoding: 'utf-8', timeout: 60_000 });
@@ -184,5 +195,69 @@ describe('(#925 fix5) production path: runner → real ledger adapter → real D
     up = true;
     await run('stub');
     expect(findings('changed')).toHaveLength(1);
+  });
+});
+
+describe('(#925 fix6) the pending dedupe marker is committed only after the findings INSERT succeeds', () => {
+  const stateFile = () => path.join(home, '.shieldcortex', 'state', 'mcp-tool-check.json');
+  const pendingMarkers = () => Object.keys((JSON.parse(fs.readFileSync(stateFile(), 'utf-8')).pending ?? {}) as Record<string, unknown>);
+
+  it('findings INSERT fails + notify fails, then INSERT works + notify still fails: exactly one complete pending row', async () => {
+    setTools(wide());
+    up = false;
+
+    await run('stub', true); // run 1: INSERT throws, transport down
+    expect(findings('pending')).toHaveLength(0);
+    expect(pendingMarkers()).toHaveLength(0); // no marker for a finding that was not recorded
+    expect(dbRead(`SELECT * FROM mcp_tool_hashes`)).toHaveLength(0);
+    expect(sentCount()).toBe(0);
+
+    await run('stub', false); // run 2: INSERT works, transport still down
+    const pending = findings('pending');
+    expect(pending).toHaveLength(1); // not skipped forever by a stale marker
+    const f = JSON.parse(pending[0].finding_json as string);
+    expect(f.alertKind).toBe('suspicious');
+    expect(new Set(f.tools.map((t: { tool: string }) => t.tool))).toEqual(new Set([`read_${LONG}`, `write_${LONG}`]));
+    expect(f.tools.some((t: { field: string }) => t.field !== 'description')).toBe(true);
+    for (const t of f.tools) expect(t.indicators.length).toBeGreaterThan(0);
+    expect(pending[0].detail).toContain(`read_${LONG}`);
+    expect(pending[0].detail.length).toBeGreaterThan(500);
+    expect(dbRead(`SELECT * FROM mcp_tool_hashes`)).toHaveLength(0); // hashes not advanced
+    expect(pendingMarkers()).toHaveLength(1); // marker present now
+    expect(pendingMarkers()[0].startsWith('files\u0000suspicious\u0000')).toBe(true);
+
+    await run('stub', false); // run 3: still down: deduped, no second row
+    expect(findings('pending')).toHaveLength(1);
+    expect(pendingMarkers()).toHaveLength(1);
+  });
+
+  it('recovery after the repaired INSERT writes exactly one final row, advances hashes and clears the marker', async () => {
+    setTools(wide());
+    up = false;
+    await run('stub', true);
+    await run('stub', false);
+    expect(findings('pending')).toHaveLength(1);
+
+    up = true;
+    await run('stub', false);
+    const fin = findings('suspicious');
+    expect(fin).toHaveLength(1);
+    expect(JSON.parse(fin[0].finding_json as string)).toEqual(JSON.parse(findings('pending')[0].finding_json as string));
+    expect(findings('pending')).toHaveLength(1);
+    expect(dbRead(`SELECT * FROM mcp_tool_hashes`).length).toBeGreaterThan(0);
+    expect(pendingMarkers()).toHaveLength(0);
+    expect(sentCount()).toBe(1);
+  });
+
+  it('if the final-row INSERT fails after a delivered alert, hashes are not advanced and the alert row is retried', async () => {
+    setTools(wide());
+    await run('stub', true); // delivered, but the findings INSERT fails
+    expect(findings('suspicious')).toHaveLength(0);
+    expect(dbRead(`SELECT * FROM mcp_tool_hashes`)).toHaveLength(0);
+    await run('stub', false); // retried: the record now lands, once
+    expect(findings('suspicious')).toHaveLength(1);
+    expect(dbRead(`SELECT * FROM mcp_tool_hashes`).length).toBeGreaterThan(0);
+    await run('stub', false); // quiet
+    expect(findings('suspicious')).toHaveLength(1);
   });
 });
