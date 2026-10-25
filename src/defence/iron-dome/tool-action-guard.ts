@@ -5349,6 +5349,21 @@ function foldScriptSources(
       if (r.sourcePath === path && shebangLang.get(path) !== r.lang) r.pathRunAsOther = true;
     }
   };
+  // #920 r6: a nested path-run of an already-folded file must still mark
+  // pathRunAsOther. Skipping those children left `python3 ./x.py; bash run.sh`
+  // (run.sh calls `./x.py`) on the named-interpreter language. Queue unseen
+  // paths; if already visited, mark when this discovery is a path-run.
+  const enqueueNested = (
+    n: DetectedScriptVia,
+    depth: number,
+    chain: string[],
+  ): void => {
+    if (!visited.has(n.path)) {
+      queue.push({ path: n.path, lang: n.lang, viaPath: n.viaPath, depth, chain });
+    } else if (n.viaPath) {
+      markPathRun(n.path);
+    }
+  };
 
   while (queue.length > 0) {
     const next = queue.shift();
@@ -5473,9 +5488,7 @@ function foldScriptSources(
       if (nestedOfReviewed.length > 0) {
         if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
         else for (const n of nestedOfReviewed) {
-          if (!visited.has(n.path)) {
-            queue.push({ path: n.path, lang: n.lang, viaPath: n.viaPath, depth: next.depth + 1, chain: [...next.chain, n.path] });
-          }
+          enqueueNested(n, next.depth + 1, [...next.chain, n.path]);
         }
       }
       continue;
@@ -5512,9 +5525,7 @@ function foldScriptSources(
     if (nested.length > 0) {
       if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;         // depth exceeded — say so
       else for (const n of nested) {
-        if (!visited.has(n.path)) {
-          queue.push({ path: n.path, lang: n.lang, viaPath: n.viaPath, depth: next.depth + 1, chain: [...next.chain, n.path] });
-        }
+        enqueueNested(n, next.depth + 1, [...next.chain, n.path]);
       }
     }
   }

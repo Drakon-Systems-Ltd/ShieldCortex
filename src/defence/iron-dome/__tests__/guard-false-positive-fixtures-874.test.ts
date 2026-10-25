@@ -894,6 +894,12 @@ describe('#874 (e5) a path-run file is judged by its shebang, not its extension'
     './shebang.py; python3 shebang.py',
     `bash -c './shebang.py'`,
     'bash run.sh',
+    // #920 r6: a path-run nested in a later script still counts even if a
+    // named interpreter already visited the same path.
+    'python3 ./shebang.py; bash run.sh',
+    'python3 ./shebang.py; sh run.sh',
+    'python3 ./shebang.py; source run.sh',
+    'python3 ./shebang.py; . ./run.sh',
     // Controls: already held before this change.
     'perl shebang.py',
     'perl envshebang.py',
