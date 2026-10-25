@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -68,6 +69,19 @@ export function createOpenClawRuntime({
     return "unknown";
   }
 
+  // PATH lookup without spawning `which`: walk PATH for an executable file.
+  async function findOnPath(name) {
+    for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+      if (!dir) continue;
+      const candidate = path.join(dir, name);
+      try {
+        await fs.access(candidate, fsConstants.X_OK);
+        return candidate;
+      } catch {}
+    }
+    return null;
+  }
+
   async function resolveServerCmd() {
     if (resolvedServerCmd) return resolvedServerCmd;
 
@@ -81,22 +95,18 @@ export function createOpenClawRuntime({
       }
     } catch {}
 
-    try {
-      const { execFileSync } = await import("node:child_process");
-      const bin = execFileSync("which", ["shieldcortex"], {
-        encoding: "utf-8",
-        timeout: 3000,
-      }).trim();
-      if (bin) {
-        resolvedServerCmd = bin;
-        console.log(`${logPrefix} Using global install: ${bin}`);
-        return resolvedServerCmd;
-      }
-    } catch {}
+    const bin = await findOnPath("shieldcortex");
+    if (bin) {
+      resolvedServerCmd = bin;
+      console.log(`${logPrefix} Using global install: ${bin}`);
+      return resolvedServerCmd;
+    }
 
-    resolvedServerCmd = "npx -y shieldcortex";
-    console.log(`${logPrefix} Falling back to npx -y shieldcortex (slow path)`);
-    return resolvedServerCmd;
+    // The ClawHub-bundled hook never fetches-and-runs a package on first use
+    // (ClawHub's static scan flags that). With no local install the hook stays
+    // inert until `npm install -g shieldcortex`.
+    console.warn(`${logPrefix} ShieldCortex is not installed locally. Run: npm install -g shieldcortex`);
+    return null;
   }
 
   // ==================== CHUNKER WRAPPER RESOLUTION ====================
@@ -110,12 +120,12 @@ export function createOpenClawRuntime({
 
   /**
    * Resolve the ShieldCortex package root from the resolved server command.
-   * Returns null when there is no resolvable local install (npx fallback).
+   * Returns null when there is no resolvable local install.
    * @returns {Promise<string|null>}
    */
   async function resolvePackageRoot() {
     const cmd = await resolveServerCmd();
-    if (!cmd || cmd.startsWith("npx")) return null; // no local install
+    if (!cmd) return null; // no local install
     const real = await fs.realpath(cmd).catch(() => cmd); // .../dist/index.js
     return path.resolve(path.dirname(real), ".."); // -> package root
   }
@@ -168,6 +178,14 @@ export function createOpenClawRuntime({
 
   async function callCortex(tool, args = {}, options = { retries: 0, timeout: 15000 }) {
     const serverCmd = await resolveServerCmd();
+    const mcporterBin = serverCmd ? await findOnPath("mcporter") : null;
+    if (!serverCmd || !mcporterBin) {
+      if (serverCmd && lastCallErrorType !== "mcporter-missing") {
+        lastCallErrorType = "mcporter-missing";
+        console.warn(`${logPrefix} mcporter not found on PATH. Run: npm install -g mcporter`);
+      }
+      return null;
+    }
 
     return new Promise((resolve) => {
       // Pass arguments as a single `--args <json>` payload, NOT as per-key
@@ -179,14 +197,14 @@ export function createOpenClawRuntime({
       // colons, spaces, and newlines in content without the `key:value`
       // splitter misreading them. execFile passes argv elements directly (no
       // shell), so the JSON string needs no further quoting/escaping.
-      const cmdArgs = ["mcporter", "call", "--stdio", serverCmd, tool, "--args", JSON.stringify(args)];
+      const cmdArgs = ["call", "--stdio", serverCmd, tool, "--args", JSON.stringify(args)];
 
       let attempts = 0;
       const maxAttempts = (options.retries || 0) + 1;
 
       function attempt() {
         attempts++;
-        execFile("npx", cmdArgs, {
+        execFile(mcporterBin, cmdArgs, {
           timeout: options.timeout || 15000,
           maxBuffer: 256 * 1024,
         }, (err, stdout) => {
