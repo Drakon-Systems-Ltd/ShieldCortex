@@ -2,13 +2,17 @@
  * #915 — automatic MCP tool-description check at session start.
  */
 import { describe, expect, it } from '@jest/globals';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { discoverMcpServers } from '../audit/mcp-config-scanner.js';
 import {
   runAutoToolCheck,
   type AutoCheckDeps,
   type AutoCheckLedgerRow,
   type AutoCheckState,
 } from '../audit/mcp-tools-autocheck.js';
-import { autoCheckEnabled } from '../audit/mcp-tools-autocheck-runner.js';
+import { autoCheckEnabled, discoverAutoCheckServers, openAutoCheckDb } from '../audit/mcp-tools-autocheck-runner.js';
 import { formatOperatorNotification, type McpToolChangeNotification } from '../defence/iron-dome/operator-notify.js';
 import type { McpToolDescriptor, ToolHashStore } from '../audit/mcp-tools-scanner.js';
 // @ts-expect-error plain .mjs helper
@@ -158,5 +162,77 @@ describe('automatic MCP tool check (#915)', () => {
     desc = 'b';
     await runAutoToolCheck(h.deps);
     expect(h.notes[0].tools[0]).not.toMatch(/[\n<>]/);
+  });
+
+  // ── #925 review fixes ──
+
+  it('(#925-1) automatic discovery never returns project-local configs; manual discovery still does', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sc925-'));
+    const proj = path.join(root, 'proj');
+    for (const d of [path.join(proj, '.claude'), path.join(proj, '.vscode'), path.join(proj, '.cursor')]) fs.mkdirSync(d, { recursive: true });
+    const cfg = (name: string) => JSON.stringify({ mcpServers: { [name]: { command: 'node', args: [name] } } });
+    fs.writeFileSync(path.join(proj, '.claude', 'mcp.json'), cfg('evil-claude'));
+    fs.writeFileSync(path.join(proj, '.vscode', 'mcp.json'), cfg('evil-vscode'));
+    fs.writeFileSync(path.join(proj, '.cursor', 'mcp.json'), cfg('evil-cursor'));
+    fs.writeFileSync(path.join(proj, '.claude.json'), cfg('evil-dotjson'));
+    const oldCwd = process.cwd();
+    try {
+      process.chdir(proj);
+      // os.homedir() is not overridable from jest, so assert on the project-owned servers only.
+      const evil = (list: { name: string; sourcePath: string }[]) => list.filter((x) => x.name.startsWith('evil-')).map((x) => x.name).sort();
+      expect(evil(discoverAutoCheckServers())).toEqual([]);
+      expect(evil(discoverMcpServers({ includeProject: false }))).toEqual([]);
+      expect(evil(discoverMcpServers())).toEqual(['evil-claude', 'evil-cursor', 'evil-dotjson', 'evil-vscode']);
+    } finally {
+      process.chdir(oldCwd);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('(#925-2) a crafted property name cannot dodge the suspicious alert', async () => {
+    // Property name chosen so a greedy title regex would mis-split tool/field.
+    const crafted = 'a" (b';
+    const h = harness({ tools: () => [{ name: 'read_file', description: 'Reads a file.', inputSchema: { properties: { [crafted]: { description: POISON } } } }] });
+    await runAutoToolCheck(h.deps);
+    expect(h.notes).toHaveLength(1);
+    expect(h.notes[0]).toMatchObject({ kind: 'suspicious', tools: ['read_file'] });
+    expect(h.rows[0].detail).toContain('read_file:');
+  });
+
+  it('(#925-3) a failed delivery persists no drift hash, is not counted as notified, surfaces an error and is retried', async () => {
+    let desc = 'a';
+    let failing = false;
+    const store = memStore();
+    const h = harness({
+      store,
+      tools: () => [{ name: 't', description: desc }],
+      notify: (n) => { if (failing) throw new Error('webhook down'); h.notes.push(n); },
+    });
+    await runAutoToolCheck(h.deps);          // first sight, benign: stored
+    const before = store.get('files', 't');
+    desc = 'b'; failing = true;
+    const res = await runAutoToolCheck(h.deps);
+    expect(res.notified).toBe(0);
+    expect(res.errors).toBe(1);
+    expect(store.get('files', 't')).toBe(before);              // hash NOT advanced
+    expect(h.rows.some((r) => r.kind === 'error' && /webhook down/.test(r.detail))).toBe(true);
+    expect(h.getState().servers.files).toBeDefined();           // state untouched from first run
+    failing = false;
+    const retry = await runAutoToolCheck(h.deps);                // alert is not lost
+    expect(retry.notified).toBe(1);
+    expect(h.notes).toHaveLength(1);
+    expect(store.get('files', 't')).not.toBe(before);
+  });
+
+  it('(#925-4) the runner opens the DB with no explicit path so the unsafe-runtime guard applies', () => {
+    const calls: unknown[][] = [];
+    const prev = process.env.CLAUDE_MEMORY_DB;
+    process.env.CLAUDE_MEMORY_DB = '/tmp/ambient-should-not-be-passed.db';
+    try {
+      openAutoCheckDb((...args: unknown[]) => { calls.push(args); return 1; });
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_MEMORY_DB; else process.env.CLAUDE_MEMORY_DB = prev;
+    }
+    expect(calls).toEqual([[]]);
   });
 });

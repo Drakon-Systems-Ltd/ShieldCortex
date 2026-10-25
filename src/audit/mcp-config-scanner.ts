@@ -61,6 +61,8 @@ const DANGEROUS_FLAGS = [
 interface ConfigLocation {
   path: string;
   name: string;
+  /** True for files resolved against the current working directory (repo-controlled). */
+  project?: boolean;
 }
 
 function getConfigLocations(): ConfigLocation[] {
@@ -70,18 +72,18 @@ function getConfigLocations(): ConfigLocation[] {
   return [
     // Claude Code / OpenClaw
     { path: join(home, '.claude', 'mcp.json'), name: 'Claude Code (global)' },
-    { path: join(cwd, '.claude', 'mcp.json'), name: 'Claude Code (project)' },
+    { path: join(cwd, '.claude', 'mcp.json'), name: 'Claude Code (project)', project: true },
     { path: join(home, '.claude.json'), name: 'Claude Code (~/.claude.json)' },
-    { path: join(cwd, '.claude.json'), name: 'Claude Code (project .claude.json)' },
+    { path: join(cwd, '.claude.json'), name: 'Claude Code (project .claude.json)', project: true },
     { path: join(home, '.openclaw', 'mcp.json'), name: 'OpenClaw (global)' },
     // Claude Desktop
     { path: join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'), name: 'Claude Desktop' },
     // VS Code / Copilot
     { path: join(home, '.vscode', 'mcp.json'), name: 'VS Code (global)' },
-    { path: join(cwd, '.vscode', 'mcp.json'), name: 'VS Code (project)' },
+    { path: join(cwd, '.vscode', 'mcp.json'), name: 'VS Code (project)', project: true },
     // Cursor
     { path: join(home, '.cursor', 'mcp.json'), name: 'Cursor (global)' },
-    { path: join(cwd, '.cursor', 'mcp.json'), name: 'Cursor (project)' },
+    { path: join(cwd, '.cursor', 'mcp.json'), name: 'Cursor (project)', project: true },
     // Windsurf
     { path: join(home, '.windsurf', 'mcp.json'), name: 'Windsurf (global)' },
     // Codex
@@ -301,11 +303,22 @@ function parseTomlServersStructured(content: string): Record<string, { command?:
  * Servers are de-duplicated by name (first config wins) so the same logical
  * server defined in both a global and project config isn't scanned twice.
  */
-export function discoverMcpServers(): DiscoveredMcpServer[] {
+export interface DiscoverMcpServersOptions {
+  /**
+   * Include project-local configs (resolved against cwd). Default true for the
+   * manual scan. The automatic session-start check passes false: a repo-controlled
+   * config must never cause its commands to be spawned without approval (#925).
+   */
+  includeProject?: boolean;
+}
+
+export function discoverMcpServers(options: DiscoverMcpServersOptions = {}): DiscoveredMcpServer[] {
+  const includeProject = options.includeProject !== false;
   const out: DiscoveredMcpServer[] = [];
   const seen = new Set<string>();
 
   for (const location of getConfigLocations()) {
+    if (location.project && !includeProject) continue;
     if (!existsSync(location.path)) continue;
 
     let content: string;

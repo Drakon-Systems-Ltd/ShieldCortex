@@ -178,6 +178,9 @@ export function scanToolFields(serverName: string, tool: McpToolDescriptor): Aud
         `Tool descriptions are read by the model every turn — hidden instructions here are a tool-poisoning / line-jumping attack.`,
       matchedText: snippet(text),
       learnMoreUrl: LEARN_MORE,
+      toolName: tool.name,
+      field,
+      indicators,
     });
   }
 

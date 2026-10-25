@@ -20,6 +20,24 @@ export function autoCheckEnabled(config: Record<string, unknown>): boolean {
   return true;
 }
 
+/**
+ * Global/user configs only: a project-local config is repo-controlled and must
+ * never be spawned automatically on session start (#925).
+ */
+export function discoverAutoCheckServers() {
+  return discoverMcpServers({ includeProject: false });
+}
+
+/**
+ * Open the memories DB with the default/ambient resolution. Passing an explicit
+ * path would count as "operator chose this DB" and skip the unsafe-runtime guard
+ * in database/init.ts (npx cache / project checkout); with no argument the guard
+ * applies and initDatabase throws, which main() swallows (fail open).
+ */
+export function openAutoCheckDb<T>(init: (dbPath?: string) => T): T {
+  return init();
+}
+
 export async function main(): Promise<void> {
   const home = os.homedir();
   const dataDir = path.join(home, '.shieldcortex');
@@ -27,12 +45,11 @@ export async function main(): Promise<void> {
   try { config = JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf-8')); } catch { /* defaults */ }
   if (!autoCheckEnabled(config)) return;
 
-  const servers = discoverMcpServers();
+  const servers = discoverAutoCheckServers();
   if (servers.length === 0) return;
 
   const { initDatabase } = await import('../database/init.js');
-  const dbPath = process.env.CLAUDE_MEMORY_DB || path.join(dataDir, 'memories.db');
-  const db = initDatabase(dbPath);
+  const db = openAutoCheckDb(initDatabase);
   const { SqliteToolHashStore } = await import('./mcp-tool-hash-store.js');
   const store = new SqliteToolHashStore(db);
   const { logAudit } = await import('../defence/audit/logger.js');

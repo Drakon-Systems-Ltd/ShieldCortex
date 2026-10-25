@@ -70,8 +70,8 @@ export function configHashOf(s: Pick<DiscoveredMcpServer, 'command' | 'args' | '
 }
 
 /** Coarse, fixed-vocabulary reason from scanner indicator prefixes. */
-function reasonFromIndicators(descriptions: string[]): string {
-  const all = descriptions.join(' ');
+function reasonFromIndicators(indicators: string[]): string {
+  const all = indicators.join(' ');
   const parts: string[] = [];
   if (all.includes('instruction:')) parts.push('instruction-like text');
   if (all.includes('skill:')) parts.push('risky command pattern');
@@ -101,6 +101,9 @@ export async function runAutoToolCheck(deps: AutoCheckDeps): Promise<AutoCheckRe
   try { state = deps.loadState(); } catch { /* fresh state */ }
   if (!state || typeof state.servers !== 'object') state = { servers: {} };
 
+  // A broken ledger must not stop drift persistence (that would re-alert forever).
+  const safeLedger = (row: AutoCheckLedgerRow): void => { try { deps.ledger(row); } catch { /* fail open */ } };
+
   for (const server of deps.servers) {
     const remaining = budget - (now() - started);
     const cfgHash = configHashOf(server);
@@ -113,22 +116,32 @@ export async function runAutoToolCheck(deps: AutoCheckDeps): Promise<AutoCheckRe
       if (remaining <= 0) throw new Error('total time budget exhausted');
       const tools = await withDeadline(fetchTools(server, Math.min(serverTimeout, remaining)), Math.min(serverTimeout, remaining) + 250);
       result.checked++;
-      const { findings, drift } = scanToolList(server.name, tools, deps.store);
+      // Buffer hash writes: drift is only persisted once every notification for
+      // this server was delivered, so a failed delivery is retried next run.
+      const pending = new Map<string, { server: string; tool: string; hash: string; changed: boolean }>();
+      const bufferedStore: ToolHashStore = {
+        get: (s, t) => pending.get(`${s}\u0000${t}`)?.hash ?? deps.store.get(s, t),
+        set: (s, t, h, c) => { pending.set(`${s}\u0000${t}`, { server: s, tool: t, hash: h, changed: c }); },
+      };
+      const { findings, drift } = scanToolList(server.name, tools, bufferedStore);
 
       const changed = new Set(drift.filter((d) => d.status === 'changed').map((d) => d.tool));
       const fresh = new Set(drift.filter((d) => d.status === 'new').map((d) => d.tool));
       // A suspicious tool is reported when it is new or changed; an unchanged
       // suspicious tool was already reported when it first appeared.
       const suspiciousByTool = new Map<string, string[]>();
+      const suspiciousIndicators = new Map<string, string[]>();
       for (const f of findings) {
-        const m = /^Suspicious content in MCP tool "(.*)" \((.*)\)$/.exec(f.title);
-        if (!m) continue;
-        const [, tool, field] = m;
+        // Structured fields only: never parse the display title (#925).
+        if (f.toolName === undefined || f.field === undefined) continue;
+        const tool = f.toolName;
         if (!changed.has(tool) && !fresh.has(tool)) continue;
         const list = suspiciousByTool.get(tool) ?? [];
-        const ind = /containing (.+?)\. Tool descriptions/.exec(f.description)?.[1] ?? 'flagged';
-        list.push(`${field} [${ind}]`);
+        list.push(`${f.field} [${(f.indicators ?? ['flagged']).join(', ')}]`);
         suspiciousByTool.set(tool, list);
+        const inds = suspiciousIndicators.get(tool) ?? [];
+        inds.push(...(f.indicators ?? []));
+        suspiciousIndicators.set(tool, inds);
       }
       const changedOnly = [...changed].filter((t) => !suspiciousByTool.has(t));
 
@@ -136,23 +149,25 @@ export async function runAutoToolCheck(deps: AutoCheckDeps): Promise<AutoCheckRe
         const toolNames = [...suspiciousByTool.keys()];
         const notification = buildMcpToolChangeNotification({
           kind: 'suspicious', server: server.name, tools: toolNames,
-          reason: reasonFromIndicators([...suspiciousByTool.values()].flat()),
+          reason: reasonFromIndicators([...suspiciousIndicators.values()].flat()),
         });
-        deps.ledger({ server: server.name, kind: 'suspicious', detail: [...suspiciousByTool.entries()].map(([t, d]) => `${t}: ${d.join(', ')}`).join('; ') });
-        await Promise.resolve(deps.notify(notification)).catch(() => undefined);
+        safeLedger({ server: server.name, kind: 'suspicious', detail: [...suspiciousByTool.entries()].map(([t, d]) => `${t}: ${d.join(', ')}`).join('; ') });
+        await Promise.resolve(deps.notify(notification));
         result.notified++;
       }
       if (changedOnly.length > 0) {
         const notification = buildMcpToolChangeNotification({ kind: 'changed', server: server.name, tools: changedOnly });
-        deps.ledger({ server: server.name, kind: 'changed', detail: `tools=${changedOnly.join(',')}; hash changed since last check` });
-        await Promise.resolve(deps.notify(notification)).catch(() => undefined);
+        safeLedger({ server: server.name, kind: 'changed', detail: `tools=${changedOnly.join(',')}; hash changed since last check` });
+        await Promise.resolve(deps.notify(notification));
         result.notified++;
       }
+      // Delivery succeeded (or nothing needed delivering): now persist drift + state.
+      for (const p of pending.values()) deps.store.set(p.server, p.tool, p.hash, p.changed);
       state.servers[server.name] = { checkedAt: now(), configHash: cfgHash };
     } catch (err) {
       result.errors++;
       try {
-        deps.ledger({ server: server.name, kind: 'error', detail: `tool check did not complete: ${err instanceof Error ? err.message : String(err)}`.slice(0, 200) });
+        deps.ledger({ server: server.name, kind: 'error', detail: `tool check or alert delivery did not complete (will retry): ${err instanceof Error ? err.message : String(err)}`.slice(0, 200) });
       } catch { /* fail open */ }
     }
   }
