@@ -3903,7 +3903,7 @@ const CLOSED_READ_DOT_SOURCE = '.';
  */
 function closedReadWordRefusesMask(word: string, isGrepPattern = false): boolean {
   if (CLOSED_READ_VETO_WORD_RE.test(word) || SENSITIVE_PATH_RE.test(word)) return true;
-  if (CLOSED_READ_SENSITIVE_BARE_RE.test(word)) return true;
+  if (CLOSED_READ_SENSITIVE_BARE_RE.test(word) || CLOSED_READ_SENSITIVE_HOME_DIR_RE.test(word)) return true;
   // #920 review r11: a relative multi-segment word resolves against an
   // unknown cwd, so `.ssh/id_ed25519` from $HOME or `etc/shadow` from `/`
   // names a key the home- or root-anchored rule never sees. Any relative
@@ -3944,7 +3944,18 @@ function closedReadGrepPatternIndex(argv: string[]): number {
  * the relief too. Other names inside such a directory (`config`,
  * `known_hosts`) are not listed; the cwd cannot be known lexically.
  */
-const CLOSED_READ_SENSITIVE_BARE_RE = /^(?:id_[\w.-]*|identity|authorized_keys2?|credentials|passwd|shadow|gshadow|sudoers|master\.passwd|\.ssh|\.aws|\.gnupg)$/i;
+const CLOSED_READ_SENSITIVE_HOME_DIRS = ['.ssh', '.aws', '.gnupg'];
+const CLOSED_READ_SENSITIVE_HOME_DIR_SRC = CLOSED_READ_SENSITIVE_HOME_DIRS.map(d => d.replace(/\./g, '\\.')).join('|');
+const CLOSED_READ_SENSITIVE_BARE_RE = new RegExp(String.raw`^(?:id_[\w.-]*|identity|authorized_keys2?|credentials|passwd|shadow|gshadow|sudoers|master\.passwd|${CLOSED_READ_SENSITIVE_HOME_DIR_SRC})$`, 'i');
+/**
+ * #920 review r13 — the same key directories behind a home root (`~`,
+ * `~user`, `$HOME`, `${HOME}`, `/home/x`, `/root`, `/Users/x`), the directory
+ * itself or anything under it. `SENSITIVE_PATH_RE` names only `~/.ssh` and
+ * `.aws/credentials`, so `~/.gnupg/private-keys-v1.d/x.key` or
+ * `~/.aws/config` would otherwise be relieved while their relative spellings
+ * are refused. Relief-local: the global rule is unchanged.
+ */
+const CLOSED_READ_SENSITIVE_HOME_DIR_RE = new RegExp(String.raw`^(?:~[^\/]*|\$\{?HOME\}?|\/home\/[^\/]+|\/root|\/Users\/[^\/]+)\/(?:${CLOSED_READ_SENSITIVE_HOME_DIR_SRC})(?:\/|$)`, 'i');
 
 function closedReadWordIsNonCanonicalPath(word: string): boolean {
   if (!word.includes('/')) return false;

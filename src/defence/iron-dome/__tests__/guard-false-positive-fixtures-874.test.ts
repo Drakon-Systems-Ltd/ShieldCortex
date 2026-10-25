@@ -450,6 +450,48 @@ describe('#874 (d) closed-set reads next to another statement', () => {
     expect(v.signals).toEqual(['disable-action-guard']);
   });
 
+  // #920 review r13: the home-anchored and absolute spellings of the same
+  // key directories (`.ssh`, `.aws`, `.gnupg`) that the relative rows above
+  // refuse. `SENSITIVE_PATH_RE` has no GnuPG or `.aws/config` path, so only
+  // the relief-local veto keeps origin/main cb49f4fc's hold here.
+  const R13_ANCHORED = [
+    '~/.gnupg/private-keys-v1.d/x.key',
+    '~/.gnupg/secring.gpg',
+    '~/.gnupg/pubring.kbx',
+    '~/.gnupg',
+    '~/.gnupg/',
+    '~root/.gnupg/secring.gpg',
+    '/home/x/.gnupg/private-keys-v1.d/x.key',
+    '/root/.gnupg/secring.gpg',
+    '/Users/x/.gnupg/private-keys-v1.d/x.key',
+    "'~/.gnupg/private-keys-v1.d/x.key'",
+    '~/.aws/config',
+    '/home/x/.aws/config',
+    '/root/.aws/sso/cache/x.json',
+    '/Users/x/.aws/config',
+  ];
+  it.each([
+    ...R13_ANCHORED.map(p => `cat ~/.claude/settings.json ${p}; shieldcortex guard --help`),
+    'cat ~/.claude/settings.json; cat ~/.gnupg/private-keys-v1.d/x.key; openclaw models list',
+    'grep -r x ~/.claude/settings.json ~/.gnupg; shieldcortex guard --help',
+    'ls ~/.claude/settings.json ~/.gnupg; shieldcortex guard --help',
+  ])('a home-anchored key-directory read keeps the hold as on origin/main: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toEqual(['disable-action-guard']);
+  });
+
+  it.each([
+    'cat ~/.claude/settings.json ~/.ssh/id_ed25519; shieldcortex guard --help',
+    'cat ~/.claude/settings.json /home/x/.ssh/id_ed25519; shieldcortex guard --help',
+    'cat ~/.claude/settings.json /root/.ssh/config; shieldcortex guard --help',
+    'cat ~/.claude/settings.json ~/.aws/credentials; shieldcortex guard --help',
+  ])('a home-anchored literal sensitive-path control keeps both signals: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toEqual(expect.arrayContaining(['touch-sensitive-path', 'disable-action-guard']));
+  });
+
   it.each([
     'cat ~/.claude/settings.json .ssh/id_rsa; shieldcortex guard --help',
     'cat ~/.claude/settings.json .ssh/authorized_keys; shieldcortex guard --help',
