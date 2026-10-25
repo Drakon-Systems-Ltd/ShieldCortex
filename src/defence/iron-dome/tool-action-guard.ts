@@ -2811,20 +2811,20 @@ const FOLDED_SOURCE_SECRET_HINT = new RegExp(
   'i',
 );
 /**
- * #874 review r2 — the folded-source hint plus an UNQUOTED literal that cannot
- * be an identifier (`password = 12345678`). Used only for a folded file judged
- * over the classification cap, where the command-line hint used to apply and
- * caught that shape; an identifier value (`password = imap_password`) is
- * still not a hint.
+ * #874 review r3 — over the classification cap a folded interpreter file is
+ * judged by the command-line hint (`SECRET_HINT`), exactly as origin/main
+ * judged the whole surface there. The one shape withdrawn is an assignment
+ * whose value is a bare identifier (`password = imap_password`) that does not
+ * sit wholly inside a comment or string: in source that is a name, not key
+ * material. A quoted, signed or digit-led value, a `client_secret =` suffix
+ * match, and any assignment inside a string (a serialized body is sent as
+ * data) all keep the block.
  */
-const FOLDED_SOURCE_LARGE_SECRET_HINT = new RegExp(
-  `(?:${FOLDED_SOURCE_SECRET_HINT.source}|(?:^|[^A-Za-z0-9_])(?:password|secret)["']?\\s*[=:]\\s*-?[0-9][A-Za-z0-9_+\\-/]{5,}(?![A-Za-z0-9_+\\-/.(]))`,
-  'i',
-);
+const OVER_CAP_IDENTIFIER_VALUE = /(?:password|secret)["']?\s*[=:]\s*[A-Za-z_][A-Za-z0-9_]*$/i;
 
 /** True when a secret hint in this region is not wholly a comment/string. */
 function secretHintExecutedIn(text: string, region: ScanRegion, overCap = false): boolean {
-  const hint = region.lang === 'sh' ? SECRET_HINT : overCap ? FOLDED_SOURCE_LARGE_SECRET_HINT : FOLDED_SOURCE_SECRET_HINT;
+  const hint = region.lang === 'sh' || overCap ? SECRET_HINT : FOLDED_SOURCE_SECRET_HINT;
   const slice = text.slice(region.start, region.end);
   const g = new RegExp(hint.source, hint.flags.includes('g') ? hint.flags : `${hint.flags}g`);
   // #874 D2: lexed only on the first assignment-shaped hit, so a clean large
@@ -2845,7 +2845,12 @@ function secretHintExecutedIn(text: string, region: ScanRegion, overCap = false)
     const identStart = a + (ident >= 0 ? ident : 0);
     if (assignment) {
       data = data ?? scriptDataRanges(text, region);
-      if (data.some(({ range: [s, e] }) => identStart >= s && b <= e)) continue;
+      const inData = data.some(({ range: [s, e] }) => identStart >= s && b <= e);
+      if (overCap && region.lang !== 'sh') {
+        if (!inData && OVER_CAP_IDENTIFIER_VALUE.test(m[0])) continue;
+        return true;
+      }
+      if (inData) continue;
     }
     return true;
   }
@@ -4002,8 +4007,13 @@ function closedReadStageMayWrite(argv: string[]): boolean {
  * versioned runtime, `gawk`, `git -c alias.x=push`). A stage passes only
  * when its program is
  *   - a closed-set read (`stagesAreClosedSetReads`, not a writing `jq`),
- *   - `shieldcortex [<sub>…] --help`, or
- *   - `openclaw models list`.
+ *   - `shieldcortex [<sub>…] --help` (any subcommand: `--help` prints
+ *     usage and runs nothing, so `update --help` is accepted too),
+ *   - `openclaw models list`,
+ *   - `pwd` or `true` with no arguments, or
+ *   - `echo` with plain words only (review r3): letters, digits and
+ *     `_ . , : @ % + = / -`, so no redirection, glob, tilde, `$`, backtick,
+ *     backslash or brace survives quote removal.
  * Anything else — an unlisted program, a path or a glob/expansion in the
  * program position, any runtime, shell, package manager or VCS — may reach
  * the network. `git` is not listed even for `status`/`log`: a repo's
@@ -4017,8 +4027,13 @@ function closedReadSiblingStageIsLocal(argv: string[]): boolean {
     return rest.includes('--help') && rest.every(a => a === '--help' || /^[a-z][a-z0-9-]*$/.test(a));
   }
   if (prog === 'openclaw') return rest.length === 2 && rest[0] === 'models' && rest[1] === 'list';
+  if (prog === 'pwd' || prog === 'true') return rest.length === 0;
+  if (prog === 'echo') return rest.every(a => CLOSED_READ_SIBLING_ECHO_WORD_RE.test(a));
   return false;
 }
+
+/** A plain `echo` word for `closedReadSiblingStageIsLocal`. */
+const CLOSED_READ_SIBLING_ECHO_WORD_RE = /^[A-Za-z0-9_.,:@%+=\/-]+$/;
 
 /**
  * #874 D5 review r1/r2 — may a statement left after `closedReadPipelineMask`
@@ -7232,9 +7247,9 @@ function evaluateToolCallCore(
   // whole long Python file by the SHELL hint — an unquoted
   // `password = imap_password` became a credential in flight. The cap bounds
   // the span classifier's cost; it is not a language boundary, so the fold's
-  // own offsets still say which bytes are interpreter source. Review r2:
-  // there the folded source is also judged for an unquoted non-identifier
-  // literal (`password = 12345678`), which the shell hint used to catch.
+  // own offsets still say which bytes are interpreter source. Review r3:
+  // there the folded source keeps the shell hint and only a bare identifier
+  // value outside a comment or string is relieved (`OVER_CAP_IDENTIFIER_VALUE`).
   const secretOverCap = regions.length === 0 && foldRegions.length > 0;
   const secretSlices: ScanRegion[] = regions.length > 0
     ? regions
