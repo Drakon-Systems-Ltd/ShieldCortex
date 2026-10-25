@@ -75,27 +75,57 @@ export const WATCHED_FILES: readonly WatchedFileSpec[] = Object.freeze([
 
 // ── Parsing ─────────────────────────────────────────────────────────────────
 
-/** Strip // and block comments and trailing commas without touching strings. */
+/**
+ * Strip // and block comments, then trailing commas, without touching string
+ * contents. Both passes track JSON string state, so `"echo ,]"` stays
+ * `"echo ,]"`. A comment becomes one space (never glues two tokens together);
+ * an unterminated block comment throws so the file is reported as unparseable.
+ */
 export function stripJsonc(src: string): string {
-  let out = '';
+  let noComments = '';
   let i = 0;
   let inStr = false;
   while (i < src.length) {
     const c = src[i];
     if (inStr) {
-      out += c;
-      if (c === '\\') { out += src[i + 1] ?? ''; i += 2; continue; }
+      noComments += c;
+      if (c === '\\') { noComments += src[i + 1] ?? ''; i += 2; continue; }
       if (c === '"') inStr = false;
       i++;
       continue;
     }
-    if (c === '"') { inStr = true; out += c; i++; continue; }
-    if (c === '/' && src[i + 1] === '/') { while (i < src.length && src[i] !== '\n') i++; continue; }
-    if (c === '/' && src[i + 1] === '*') { i += 2; while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++; i += 2; continue; }
-    out += c;
+    if (c === '"') { inStr = true; noComments += c; i++; continue; }
+    if (c === '/' && src[i + 1] === '/') { while (i < src.length && src[i] !== '\n') i++; noComments += ' '; continue; }
+    if (c === '/' && src[i + 1] === '*') {
+      const end = src.indexOf('*/', i + 2);
+      if (end === -1) throw new SyntaxError('unterminated block comment');
+      i = end + 2;
+      noComments += ' ';
+      continue;
+    }
+    noComments += c;
     i++;
   }
-  return out.replace(/,(\s*[}\]])/g, '$1');
+  // Pass 2: drop a comma only when, outside a string, the next non-space is } or ].
+  let out = '';
+  inStr = false;
+  for (let j = 0; j < noComments.length; j++) {
+    const c = noComments[j];
+    if (inStr) {
+      out += c;
+      if (c === '\\') { out += noComments[j + 1] ?? ''; j++; continue; }
+      if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; out += c; continue; }
+    if (c === ',') {
+      let k = j + 1;
+      while (k < noComments.length && /\s/.test(noComments[k])) k++;
+      if (noComments[k] === '}' || noComments[k] === ']') continue;
+    }
+    out += c;
+  }
+  return out;
 }
 
 function sha(s: string): string {
