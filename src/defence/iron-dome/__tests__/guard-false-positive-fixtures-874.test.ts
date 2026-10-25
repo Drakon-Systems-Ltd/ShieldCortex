@@ -398,11 +398,79 @@ describe('#874 (d) closed-set reads next to another statement', () => {
     expect(v.signals).toEqual(['disable-action-guard']);
   });
 
+  // #920 review r11/r12: a relative multi-segment word (`.ssh/id_ed25519`
+  // from $HOME, `etc/shadow` from `/`) or a bare key/credential name
+  // (`id_ed25519` from ~/.ssh) resolves against an unknown cwd, which the
+  // home- or root-anchored rule never sees. Each row keeps origin/main
+  // cb49f4fc's require_approval / [disable-action-guard].
+  const R12_REL_PATHS = [
+    '.ssh/id_ed25519',
+    '.ssh/id_ecdsa',
+    '.ssh/config',
+    '.ssh/',
+    '.aws/config',
+    '.claude/settings.json',
+    '.gnupg/private-keys-v1.d/x.key',
+    'home/u/.ssh/id_ed25519',
+    'etc/passwd',
+    'etc/shadow',
+    'foo/bar',
+    "'.ssh'/id_ed25519",
+    '".ssh/id_ed25519"',
+  ];
+  const R12_BARE = [
+    'id_ed25519', 'id_ecdsa', 'id_dsa', 'id_ed25519.pub', 'authorized_keys',
+    'credentials', 'passwd', 'shadow', 'sudoers', '.ssh', '.aws', '.gnupg',
+  ];
+  it.each([
+    ...R12_REL_PATHS.map(p => `cat ~/.claude/settings.json ${p}; shieldcortex guard --help`),
+    ...['.ssh/id_ed25519', '.ssh/id_ecdsa', '.ssh/config'].flatMap(p => [
+      `cat ~/.claude/settings.json; cat ${p}; openclaw models list`,
+      `grep -f ${p} ~/.claude/settings.json; shieldcortex guard --help`,
+      `grep -r x ~/.claude/settings.json ${p}; shieldcortex guard --help`,
+    ]),
+    ...R12_BARE.map(p => `cat ~/.claude/settings.json ${p}; shieldcortex guard --help`),
+    'ls ~/.claude/settings.json .ssh; shieldcortex guard --help',
+    // Only an unambiguous grep pattern is spared; `-e`/`-f` anywhere (GNU
+    // grep permutes), an option taking a value, a long option or `--` means
+    // every operand is judged as a path.
+    'grep -e x .ssh/id_ed25519 ~/.claude/settings.json; shieldcortex guard --help',
+    'grep x -f .ssh/id_ed25519 ~/.claude/settings.json; shieldcortex guard --help',
+    'grep .ssh/id_ed25519 -f x ~/.claude/settings.json; shieldcortex guard --help',
+    'grep -rf .ssh/id_ed25519 ~/.claude/settings.json; shieldcortex guard --help',
+    'grep -A 3 x .ssh/id_ed25519 ~/.claude/settings.json; shieldcortex guard --help',
+    'grep -m1 x .ssh/id_ed25519 ~/.claude/settings.json; shieldcortex guard --help',
+    'grep --color x .ssh/id_ed25519 ~/.claude/settings.json; shieldcortex guard --help',
+    'grep -- x .ssh/id_ed25519 ~/.claude/settings.json; shieldcortex guard --help',
+    'grep -n x ~/.claude/settings.json .ssh/id_ed25519; shieldcortex guard --help',
+    `grep -oE x ~/.claude/settings.json '"cli/[^"]+"'; shieldcortex guard --help`,
+  ])('a cwd-relative key read keeps the hold as on origin/main: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toEqual(['disable-action-guard']);
+  });
+
+  it.each([
+    'cat ~/.claude/settings.json .ssh/id_rsa; shieldcortex guard --help',
+    'cat ~/.claude/settings.json .ssh/authorized_keys; shieldcortex guard --help',
+    'cat ~/.claude/settings.json .aws/credentials; shieldcortex guard --help',
+    'cat ~/.claude/settings.json id_rsa; shieldcortex guard --help',
+    'cat ~/.claude/settings.json .env; shieldcortex guard --help',
+  ])('a relative literal sensitive-path control keeps both signals: %s', (command) => {
+    const v = run(command);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toEqual(expect.arrayContaining(['touch-sensitive-path', 'disable-action-guard']));
+  });
+
   // The refusal is lexical and fails closed: a non-path word with `//` (a jq
-  // alternative) or a `./`-relative path also loses the relief, as on main.
+  // alternative) or a relative path also loses the relief, as on main.
   it.each([
     "jq '.hooks // empty' ~/.claude/settings.json; shieldcortex guard --help",
     'cat ./.claude/settings.json; shieldcortex guard --help',
+    'cat .claude/settings.json; shieldcortex guard --help',
+    `grep -e '"cli/[^"]+"' ~/.claude/settings.json; shieldcortex guard --help`,
+    'grep id_ed25519 ~/.claude/settings.json; shieldcortex guard --help',
+    "jq '.a/2' ~/.claude/settings.json; shieldcortex guard --help",
   ])('a non-canonical word refuses the relief even when harmless: %s', (command) => {
     const v = run(command);
     expect(v.decision).toBe('require_approval');
@@ -493,6 +561,9 @@ describe('#874 (d2) a network-making sibling keeps the floor', () => {
   it.each([
     'shieldcortex guard --help; grep -n PreToolUse ~/.claude/settings.json',
     'grep -n claude-cli ~/.openclaw/openclaw.json && openclaw models list',
+    // #920 r12: a grep pattern holding a `/` is spared the relative-path refusal.
+    'grep -n .ssh/id_ed25519 ~/.claude/settings.json; shieldcortex guard --help',
+    "grep -ri 'a/b' ~/.claude/settings.json; shieldcortex guard --help",
   ])('the claimed relief still holds: %s', (command) => {
     const v = run(command);
     expect(v.decision).toBe('allow');

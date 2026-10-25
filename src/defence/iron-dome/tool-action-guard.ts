@@ -3901,10 +3901,50 @@ const CLOSED_READ_DOT_SOURCE = '.';
  * in a grep pattern) — those calls lose the relief, never gain one. No
  * normalisation is attempted, so no symlink or `..` semantics are assumed.
  */
-function closedReadWordRefusesMask(word: string): boolean {
+function closedReadWordRefusesMask(word: string, isGrepPattern = false): boolean {
   if (CLOSED_READ_VETO_WORD_RE.test(word) || SENSITIVE_PATH_RE.test(word)) return true;
+  if (CLOSED_READ_SENSITIVE_BARE_RE.test(word)) return true;
+  // #920 review r11: a relative multi-segment word resolves against an
+  // unknown cwd, so `.ssh/id_ed25519` from $HOME or `etc/shadow` from `/`
+  // names a key the home- or root-anchored rule never sees. Any relative
+  // word holding a `/` refuses the relief; `cat .claude/settings.json`
+  // loses it too (judged as on main). A grep pattern is never opened, so
+  // only it is spared (`grep -oE '"cli/[^"]+"' f`).
+  if (!isGrepPattern && word.includes('/') && !word.startsWith('/') && !word.startsWith('~')) return true;
   return closedReadWordIsNonCanonicalPath(word);
 }
+
+/**
+ * #920 review r12 — the argv index of a grep-family stage's positional
+ * pattern, or -1. Only when every option is a cluster of flags that take no
+ * argument and none supplies the pattern (`-e`) or a pattern file (`-f`);
+ * GNU grep permutes options, so one anywhere means no positional pattern.
+ * Anything else (a long option, `--`, `-A 3`) gets -1 and every operand is
+ * judged as a path.
+ */
+const CLOSED_READ_GREP_FLAGS_RE = /^-[abcEFGhHiIlLnoPqrRsTuUvVwxyzZ]+$/;
+function closedReadGrepPatternIndex(argv: string[]): number {
+  if (!/^(?:grep|egrep|fgrep)$/.test(argv[0] ?? '')) return -1;
+  let at = -1;
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a.startsWith('-')) {
+      if (!CLOSED_READ_GREP_FLAGS_RE.test(a)) return -1;
+    } else if (at < 0) {
+      at = i;
+    }
+  }
+  return at;
+}
+
+/**
+ * #920 review r12 — a bare word that is the name of a key or credential file,
+ * or of a directory holding them, which a cwd of `~`, `~/.ssh`, `~/.aws` or
+ * `/etc` turns into a sensitive read. Fails closed: `grep -n passwd f` loses
+ * the relief too. Other names inside such a directory (`config`,
+ * `known_hosts`) are not listed; the cwd cannot be known lexically.
+ */
+const CLOSED_READ_SENSITIVE_BARE_RE = /^(?:id_[\w.-]*|identity|authorized_keys2?|credentials|passwd|shadow|gshadow|sudoers|master\.passwd|\.ssh|\.aws|\.gnupg)$/i;
 
 function closedReadWordIsNonCanonicalPath(word: string): boolean {
   if (!word.includes('/')) return false;
@@ -3985,8 +4025,9 @@ export function closedReadPipelineMask(execCommand: string, command: string, raw
     }
     for (const stages of parsed) {
       for (const argv of stages) {
-        for (const w of argv) {
-          if (closedReadWordRefusesMask(w)) return null;
+        const pattern = closedReadGrepPatternIndex(argv);
+        for (let i = 0; i < argv.length; i++) {
+          if (closedReadWordRefusesMask(argv[i]!, i === pattern)) return null;
         }
         if (/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(argv[0] ?? '')) return null;
         if (argv[0] === CLOSED_READ_DOT_SOURCE) return null;
