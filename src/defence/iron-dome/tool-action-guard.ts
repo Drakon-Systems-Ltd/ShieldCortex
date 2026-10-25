@@ -2821,6 +2821,13 @@ const FOLDED_SOURCE_SECRET_HINT = new RegExp(
  * data) all keep the block.
  */
 const OVER_CAP_IDENTIFIER_VALUE = /(?:password|secret)["']?\s*[=:]\s*[A-Za-z_][A-Za-z0-9_]*$/i;
+/**
+ * #874 review r4 — the languages where a bare identifier on the RHS is a name
+ * reference (an unbound one raises NameError / ReferenceError). Perl treats a
+ * bareword as the string itself without `use strict`; PHP and Ruby keep
+ * origin/main's hold as well, so the relief never applies to them.
+ */
+const OVER_CAP_NAME_LANGS: ReadonlySet<ScriptLang> = new Set<ScriptLang>(['python', 'node']);
 
 /** True when a secret hint in this region is not wholly a comment/string. */
 function secretHintExecutedIn(text: string, region: ScanRegion, overCap = false): boolean {
@@ -2847,7 +2854,7 @@ function secretHintExecutedIn(text: string, region: ScanRegion, overCap = false)
       data = data ?? scriptDataRanges(text, region);
       const inData = data.some(({ range: [s, e] }) => identStart >= s && b <= e);
       if (overCap && region.lang !== 'sh') {
-        if (!inData && OVER_CAP_IDENTIFIER_VALUE.test(m[0])) continue;
+        if (!inData && OVER_CAP_NAME_LANGS.has(region.lang) && OVER_CAP_IDENTIFIER_VALUE.test(m[0])) continue;
         return true;
       }
       if (inData) continue;
@@ -7249,7 +7256,8 @@ function evaluateToolCallCore(
   // the span classifier's cost; it is not a language boundary, so the fold's
   // own offsets still say which bytes are interpreter source. Review r3:
   // there the folded source keeps the shell hint and only a bare identifier
-  // value outside a comment or string is relieved (`OVER_CAP_IDENTIFIER_VALUE`).
+  // value outside a comment or string is relieved (`OVER_CAP_IDENTIFIER_VALUE`),
+  // and only in Python / Node source (`OVER_CAP_NAME_LANGS`, review r4).
   const secretOverCap = regions.length === 0 && foldRegions.length > 0;
   const secretSlices: ScanRegion[] = regions.length > 0
     ? regions
