@@ -71,6 +71,15 @@ describe('#911 UUIDs and credential-only instruction taint', () => {
     ]));
     expect(result.redactedContent).toBe('heroku [REDACTED-env_secret] [REDACTED-api_key-heroku]');
   });
+  it('never drops a stronger finding contained in a weaker range', () => {
+    const result = scanForCredentials('wrap[CORE-1234]', { customPatterns: [
+      { name: 'synthetic-wrapper', type: 'api_key', regex: /wrap\[[^\]]+\]/g, severity: 'low', confidence: 0.3 },
+      { name: 'synthetic-core', type: 'api_key', provider: 'core', regex: /CORE-[0-9]{4}/g, severity: 'critical', confidence: 0.99 },
+    ] });
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider: 'core', severity: 'critical', action: 'blocked' }),
+    ]));
+  });
   it('records the Heroku range on the UUID only', () => {
     const result = scanForCredentials('see heroku key: ' + uuid + ' now');
     expect(result.findings).toEqual([expect.objectContaining({ provider: 'heroku', position: 16 })]);
