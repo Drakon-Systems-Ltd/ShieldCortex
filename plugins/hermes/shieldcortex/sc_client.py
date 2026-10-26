@@ -68,6 +68,15 @@ def fallback_catastrophic_match(content: str) -> bool:
 # Quoted data is a mention here too: see fallback_dangerous_match.
 _FALLBACK_DESTROY_ROW = re.compile(r'''(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:[\w.~-]*/)*(?:(?:psql|mysql|mariadb|sqlite3|sqlcmd|duckdb|clickhouse(?:-client)?|cockroach)\b[^\n]*\b(?:drop\s+(?:database|schema|table)\b|truncate\s+(?:table\s+)?(?!-)[\w."`[\]]|delete\s+from\s+[\w."`[\]]+\s*(?:;|["']|$))|dropdb\b|mysqladmin\b[^|;&\n]*\sdrop\b|mongo(?:sh)?\b[^\n]*(?:dropDatabase|\.drop)\s*\(|redis-cli\b[^|;&\n]*\bflush(?:all|db)\b|(?:terraform|tofu|terragrunt)\b[^|;&\n]*\s(?:destroy\b|(?<=\n)apply\b[^|;&\n]*\s-destroy\b|apply\b(?:(?!\sapply\b)[^|;&\n])*\s-destroy\b)|pulumi\b[^|;&\n]*\s(?:destroy|down)\b|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s(?:ns|namespaces?|pvc?|persistentvolumes?|persistentvolumeclaims?|deploy(?:ments?)?|statefulsets?|sts|nodes?|crds?|customresourcedefinitions?|all)\b(?![-.])|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s--all\b|helm\b[^|;&\n]*\s(?:uninstall|delete)\b|aws\b[^|;&\n]*\s(?:terminate-instances|delete-[\w-]+|rb|(?<=\n)s3\s+rm\b[^|;&\n]*\s--recursive|s3(?=[^\S\n]*\n)\s+rm\b[^|;&\n]*\s--recursive|s3[^\S\n]+rm\b(?:(?!\ss3\s+rm\b)[^|;&\n])*\s--recursive)\b|gcloud\b[^|;&\n]*\sdelete\b|gsutil\b[^|;&\n]*\s(?:rb\b|(?<=\n)rm\b[^|;&\n]*\s-\w*r|rm\b(?:(?!\srm\b)[^|;&\n])*\s-\w*r)|az\b[^|;&\n]*\s(?:group|vm)\s+delete\b|doctl\b[^|;&\n]*\s(?:delete|rm)\b|gh\s+(?:repo\s+delete\b|api\b[^|;&\n]*(?:-X|--method)[\s=]*DELETE\b)|docker(?:-compose)?\b[^|;&\n]*\s(?:system\s+prune|volume\s+(?:prune|rm)|(?<=\n)down\b[^|;&\n]*\s(?:-v|--volumes)\b|down\b(?:(?!\sdown\b)[^|;&\n])*\s(?:-v|--volumes)\b)|(?:flyctl|fly)\s+(?:apps?\s+(?:destroy|delete)|destroy|volumes?\s+(?:destroy|delete)|postgres\s+(?:destroy|delete))\b|heroku\s+(?:apps:destroy|pg:reset)\b|vercel\s+(?:rm|remove)\b|wrangler\s+delete\b)''', re.I)
 
+# #922: `guard posture off|advisory` is a loosening INVOCATION, not vocabulary —
+# the posture row of the other two fallbacks. The phrase counts only behind a
+# command-position invoker (shieldcortex, a wrapper, or a `$var` command), after
+# a statement start or inside a shell `-c` / eval body, so an echo/grep/cat/gh
+# --body mention stays off. Decoration inside a word, a quoted flag, and an
+# expansion or glob anywhere in the target are read as the core's
+# loosensGuardPostureAt reads them. Quoted data is a mention here too.
+_FALLBACK_POSTURE_ROW = re.compile(r'''(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid|if|then|elif|else|while|until|do|!|\w+=[^\s;&|({`]*|-[^\s;&|({`]+|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*/)?shieldcortex(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?:[ \t]+['"\\]*-[^\s;&|$`*?[\]{}]*)*[ \t]+(?:[^\s;&|]*[$`*?[\]{}]|(?:['"\\]*o['"\\]*f['"\\]*f['"\\]*|['"\\]*a['"\\]*d['"\\]*v['"\\]*i['"\\]*s['"\\]*o['"\\]*r['"\\]*y['"\\]*)(?=$|[\s;&|)`]))''', re.I)
+
 # Dangerous tier of the fail-closed fallback (issue #59) — ported from
 # tool-action-guard.ts's DANGEROUS list, kept in sync with the OpenClaw
 # interceptor + Claude Code hook. Blocked (enforcing) when the scanner is
@@ -112,7 +121,8 @@ _FALLBACK_DANGEROUS = [
     re.compile(r"(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b", re.I),
     re.compile(r"(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b", re.I),
     re.compile(r"\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)", re.I),
-    re.compile(r"--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b|\bguard\s+posture(?:\s+-[\w-]+)*\s+['\"]?(?:(?:off|advisory)(?=$|[\s'\";&|)])|[$`*?\[{])", re.I),
+    re.compile(r"--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b", re.I),
+    _FALLBACK_POSTURE_ROW,
     re.compile(r"\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems/shieldcortex-realtime)\b", re.I),
     re.compile(r"\.shieldcortex[\\/]+config\.json\b", re.I),
 ]
@@ -170,7 +180,7 @@ def fallback_surface(args: dict) -> str:
 # quote; an unclosed quote is never data; no quote is data when the text pairs
 # quotes the shell does not (review R3 on #626): a quote in a comment, an
 # ANSI-C `$'...'`, heredoc text, or `${...}` with its own nested quotes.
-# Used only for _FALLBACK_DESTROY_ROW.
+# Used only for _FALLBACK_DESTROY_ROW and _FALLBACK_POSTURE_ROW.
 # Kept in sync with plugins/openclaw/interceptor.ts and scripts/pre-tool-hook.mjs.
 _FALLBACK_NESTED_EXEC = re.compile(r"\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+/|\bfunction\b|[\w.-]+\s*\(\s*\)\s*\{", re.I)
 _FALLBACK_DATA_COMMAND = re.compile(r"(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)", re.I)
@@ -251,7 +261,7 @@ def fallback_dangerous_match(content: str) -> bool:
     if not content:
         return False
     return any(
-        _fallback_executed_match(p, content) if p is _FALLBACK_DESTROY_ROW else p.search(content)
+        _fallback_executed_match(p, content) if p is _FALLBACK_DESTROY_ROW or p is _FALLBACK_POSTURE_ROW else p.search(content)
         for p in _FALLBACK_DANGEROUS
     )
 
@@ -301,7 +311,9 @@ _FALLBACK_SELF_PROTECTION = [
         re.I,
     ), False),
     (re.compile(r"\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b", re.I), False),
-    (re.compile(r"--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b|\bguard\s+posture(?:\s+-[\w-]+)*\s+['\"]?(?:(?:off|advisory)(?=$|[\s'\";&|)])|[$`*?\[{])", re.I), False),
+    (re.compile(r"--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b", re.I), False),
+    # #922: lock_path=True — pure inspection runs no invoker (see _FALLBACK_POSTURE_ROW).
+    (_FALLBACK_POSTURE_ROW, True),
     (re.compile(r"\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems/shieldcortex-realtime)\b", re.I), False),
     (re.compile(r"\.shieldcortex[\\/]+config\.json\b", re.I), False),
     (re.compile(r"\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=", re.I), False),
@@ -366,7 +378,11 @@ def fallback_self_protection_match(content: str, tool_name=None) -> bool:
     if not content:
         return False
     lock_read_only = _fallback_lock_access_is_read_only(content, tool_name)
-    return any(p.search(content) for p, lock_path in _FALLBACK_SELF_PROTECTION if not (lock_path and lock_read_only))
+    return any(
+        _fallback_executed_match(p, content) if p is _FALLBACK_POSTURE_ROW else p.search(content)
+        for p, lock_path in _FALLBACK_SELF_PROTECTION
+        if not (lock_path and lock_read_only)
+    )
 
 
 # #505: startup-file WRITE target, ported to the blunt fallback. The real guard

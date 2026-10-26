@@ -2381,7 +2381,17 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   // Session-lease ledger + store (#227): a freeze an agent can edit is not a freeze.
   { re: /\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b/i, signal: 'touch-decisions-ledger' },
   // #500: outage fallback must gate self-disable / global uninstall / config.json writes.
-  { re: /--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b|\bguard\s+posture(?:\s+-[\w-]+)*\s+['"]?(?:(?:off|advisory)(?=$|[\s'";&|)])|[$`*?\[{])/i, signal: 'disable-action-guard' },
+  { re: /--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b/i, signal: 'disable-action-guard' },
+  // #922: `guard posture off|advisory` is a loosening INVOCATION, not vocabulary.
+  // The phrase counts only behind a command-position invoker (shieldcortex, a
+  // wrapper such as npx/node/env/sudo, or a `$var` command), after a statement
+  // start or inside a shell `-c` / eval body, so an echo/grep/cat/gh --body
+  // mention stays off. Quote/backslash decoration inside a word, a quoted flag,
+  // and an expansion or glob anywhere in the target are read as the core's
+  // loosensGuardPostureAt reads them. `dataQuotes`: a hit inside a data quote
+  // (`echo "x; shieldcortex …"`) is a mention. `lockPath`: pure inspection runs
+  // no invoker, so the lock-read exemption drops it as well.
+  { re: /(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid|if|then|elif|else|while|until|do|!|\w+=[^\s;&|({`]*|-[^\s;&|({`]+|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?shieldcortex(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?:[ \t]+['"\\]*-[^\s;&|$`*?[\]{}]*)*[ \t]+(?:[^\s;&|]*[$`*?[\]{}]|(?:['"\\]*o['"\\]*f['"\\]*f['"\\]*|['"\\]*a['"\\]*d['"\\]*v['"\\]*i['"\\]*s['"\\]*o['"\\]*r['"\\]*y['"\\]*)(?=$|[\s;&|)`]))/i, signal: 'disable-action-guard', lockPath: true, dataQuotes: true },
   { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)\b/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
   // #501: the policy lock's own attack surface. The two environment seams that
@@ -2464,7 +2474,8 @@ function handleUnknownInput() {
 // was written to stop. These mirror it, fail-closed, with no dependency on the
 // dist.
 //
-// Scope: this drops ONLY the two lock-PATH rows below (tagged `lockPath`).
+// Scope: this drops ONLY the rows tagged `lockPath`: the lock-PATH rows and
+// the #922 posture-invocation row (pure inspection runs no invoker).
 // The env-seam row, the #500 command shapes and every other signal are
 // untouched, so `rm`, `tee`, `cp`, `sed -i`, a redirect and `chmod` onto those
 // paths still gate here exactly as they did.
@@ -2702,10 +2713,10 @@ function fallbackSelfProtectionMatch(toolInput, toolName) {
   const text = fallbackExecSurface(toolInput);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
-  for (const { re, signal, lockPath } of FALLBACK_DANGEROUS_PATTERNS) {
+  for (const { re, signal, lockPath, dataQuotes } of FALLBACK_DANGEROUS_PATTERNS) {
     if (!FALLBACK_SELF_PROTECTION_SIGNALS.includes(signal)) continue;
     if (lockReadOnly && lockPath === true) continue;
-    if (re.test(text)) return signal;
+    if (dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
   }
   return null;
 }

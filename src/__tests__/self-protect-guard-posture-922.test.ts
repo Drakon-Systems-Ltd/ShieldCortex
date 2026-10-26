@@ -4,7 +4,9 @@
  * on every surface BEFORE any writer exists: the core argv walk, the Claude
  * Code hook's outage table, the OpenClaw interceptor's outage table and both
  * Hermes outage lists. `guard posture enforce` (a tightening) and the bare
- * read-only form stay off it.
+ * read-only form stay off it, and so does a data-only mention of the phrase
+ * (echo / grep / cat / gh --body): the outage rows need an invocation-position
+ * invoker before it, as the core walk does.
  *
  * Literals are assembled at runtime (#444 convention) so the live guard
  * scanning this file's own write does not gate it.
@@ -20,7 +22,9 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const hookSrc = fs.readFileSync(path.join(repoRoot, 'scripts', 'pre-tool-hook.mjs'), 'utf-8');
 
 const SC = 'shield' + 'cortex';
-const GP = 'guard ' + 'posture';
+const G = 'gu' + 'ard';
+const P = 'pos' + 'ture';
+const GP = `${G} ${P}`;
 
 const POSITIVES = [
   `${SC} ${GP} off`,
@@ -37,6 +41,33 @@ const POSITIVES = [
   `${SC} ${GP} "$(echo off)"`,
   `echo hi && ${SC} ${GP} off`,
   `cat /etc/${SC}/policy.json; ${SC} ${GP} off`,
+  // #922 r1: shell spellings whose argv is still the loosening.
+  `$X "${G}" "${P}" off`,
+  `$X ${G} "${P}" off`,
+  `"$X" '${G}' '${P}' advisory`,
+  `\${X} ${GP} off`,
+  `$(which ${SC}) ${GP} off`,
+  `${SC} "${G}" "${P}" off`,
+  `${SC} ${G} "${P}" advisory`,
+  `${SC} g\\uard ${P} off`,
+  `${SC} ${GP} o"ff"`,
+  `${SC} ${GP} o\\ff`,
+  `${SC} ${GP} adv'isory'`,
+  `${SC} ${GP} o*`,
+  `${SC} ${GP} o\${T}`,
+  `${SC} ${GP} off*`,
+  `${SC} ${GP} of[f]`,
+  `${SC} ${GP} \`echo off\``,
+  `${SC} ${GP} "--dry-run" off`,
+  `${SC} ${GP} '--dry-run' advisory`,
+  `bash -lc '${SC} ${GP} off'`,
+  `eval '${SC} ${GP} off'`,
+  `sudo ${SC} ${GP} off`,
+  `env A=1 ${SC} ${GP} off`,
+  `node ./${SC}.js ${GP} off`,
+  `{ ${SC} ${GP} off; }`,
+  `if ${SC} ${GP} off; then :; fi`,
+  `${SC}\t${G}\t${P}\toff`,
 ];
 const NEGATIVES = [
   `${SC} ${GP}`,
@@ -45,6 +76,24 @@ const NEGATIVES = [
   `${SC} ${GP} enforce --dry-run`,
   `${SC} guard readiness`,
   'ls -la',
+  `${SC} "${G}" "${P}" enforce`,
+  `$X ${GP} enforce`,
+  `${SC} ${GP} offline`,
+  // #922 r1: data-only mentions of the phrase stay off the floor everywhere.
+  `echo "${SC} ${GP} off"`,
+  `echo ${SC} ${GP} off`,
+  `echo ${GP} off`,
+  `grep -F "${SC} ${GP} off" README.md`,
+  `grep -c '${SC} ${GP} off' CHANGELOG.md`,
+  `cat file | grep '${GP} off'`,
+  `cat "${SC} ${GP} off"`,
+  `gh issue create --body "${SC} ${GP} off"`,
+  `gh pr comment 1 --body 'run: ${SC} ${GP} advisory'`,
+  `echo "x; ${SC} ${GP} off"`,
+  `git commit -m "docs: ${SC} ${GP} off"`,
+  `grep -F '${GP} off' /etc/${SC}/policy.json`,
+  `grep -F '${SC} ${GP} off' /etc/${SC}/policy.json`,
+  `cat /etc/${SC}/policy.json`,
 ];
 
 const onFloor = (signals: readonly string[] | undefined) =>
@@ -76,9 +125,27 @@ describe('#922 — guard posture loosening is on the self-protection floor (core
     expect({ command, floor: onFloor(v.signals) }).toEqual({ command, floor: false });
   });
 
-  it('`guard posture offline` (not a posture word) is not read as `off`', () => {
-    const v = evaluateToolCall('Bash', { command: `${SC} ${GP} offline` }, { enabled: true, enforce: true } as never);
-    expect(v.signals ?? []).not.toContain('disable-action-guard');
+  it('a wrapper-dense command costs the same with or without the posture words (no walk cliff)', () => {
+    // Differential, not a tuned absolute cap: the same `nice env nohup` corpus
+    // (#500's ReDoS shape) with the trigger words and with a same-length decoy.
+    // Before r1 the trigger admitted an O(tokens²) walk: ~6 s against ~10 ms.
+    const pad = 'nice env nohup '.repeat(2200);
+    const hot = `${pad}${GP} off`;
+    const cold = `${pad}${'gu' + 'arx'} ${'pos' + 'turx'} off`;
+    const cfg = { enabled: true, enforce: true } as never;
+    const median = (command: string): number => {
+      evaluateToolCall('Bash', { command }, cfg);   // warm up
+      const runs: number[] = [];
+      for (let k = 0; k < 5; k++) {
+        const t0 = performance.now();
+        evaluateToolCall('Bash', { command }, cfg);
+        runs.push(performance.now() - t0);
+      }
+      return runs.sort((a, b) => a - b)[2];
+    };
+    const tCold = median(cold);
+    const tHot = median(hot);
+    expect({ hot: tHot, bounded: tHot <= tCold * 10 + 25 }).toEqual({ hot: tHot, bounded: true });
   });
 });
 

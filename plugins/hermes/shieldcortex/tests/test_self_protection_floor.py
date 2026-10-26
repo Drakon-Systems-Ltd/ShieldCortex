@@ -41,12 +41,18 @@ class SelfProtectionFloor(unittest.TestCase):
             "bash -c 'shieldcortex guard posture off'",
             "$X guard posture off",
             "shieldcortex guard posture $T",
+            '$X "guard" "posture" off',
+            'shieldcortex guard posture o"ff"',
+            "shieldcortex guard posture o*",
         ):
             self.assertTrue(fallback_self_protection_match(cmd), cmd)
         for cmd in (
             "shieldcortex guard posture enforce",
             "shieldcortex guard posture",
             "shieldcortex guard posture --json",
+            'echo "shieldcortex guard posture off"',
+            'grep -F "shieldcortex guard posture off" README.md',
+            "gh issue create --body 'shieldcortex guard posture off'",
         ):
             self.assertFalse(fallback_self_protection_match(cmd), cmd)
         v = ActionGuardVerdict("allow", [], "down", available=False)
