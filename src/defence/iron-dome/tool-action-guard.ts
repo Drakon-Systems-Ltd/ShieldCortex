@@ -4644,8 +4644,9 @@ const ATTESTED_CLASSIFY_CAP = 512;
  * were short. At most ATTESTED_CLASSIFY_CAP matches are decided that way.
  * Every other match — the command line itself, a nested file, a path-target
  * rule, a match straddling the file's edge — takes the original path: the
- * shared budget under the cap, `executed` over it. So nothing outside the
- * attested file is judged more leniently than `matchSpansClassified` judges it.
+ * shared budget under the cap, `executed` over it. In-file hits still drain
+ * that shared budget so a later match *outside* the file is not judged more
+ * leniently than `matchSpansClassified` would have judged it (#921 Astra B2).
  */
 function matchSpansClassifiedAttested(
   patterns: Pattern[],
@@ -4682,7 +4683,11 @@ function matchSpansClassifiedAttested(
         : cRaw;
       if (c === 'executed') { best = { span: m[0], tier: 'executed', at: s }; break; }
       if (c === 'payload' && best === null) best = { span: m[0], tier: 'payload', at: s };
-      if (inFile) { attestedLeft--; continue; }
+      if (inFile) {
+        attestedLeft--;
+        if (text.length > LARGE_SURFACE) sharedBudget--;
+        continue;
+      }
       if (firstBudgetMatch && sharedBudget <= 0) { best = { span: m[0], tier: 'executed', at: s }; break; }
       firstBudgetMatch = false;
       sharedBudget--;

@@ -1094,6 +1094,16 @@ describe('#921 whole-command interpreter attestation', () => {
     fs.writeFileSync(path.join(dir, 'scripts', 'absdual.py'), dual('#!/usr/bin/python3'));
     fs.writeFileSync(path.join(dir, 'scripts', 'action_lease.py'), lease);
     fs.writeFileSync(path.join(dir, 'scripts', 'verify_dist_patches.py'), verifier);
+    fs.writeFileSync(path.join(dir, 'scripts', 'budget.py'), [
+      'PAD = "' + 'a'.repeat(9000) + '"',
+      'ADVICE = "rm item"',
+      'ADVICE = "rm item"',
+      'ADVICE = "rm item"',
+      'ADVICE = "rm item"',
+      'ADVICE = "rm item"',
+      'ADVICE = "rm item"',
+      '',
+    ].join('\n'));
   });
   afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -1188,6 +1198,19 @@ describe('#921 whole-command interpreter attestation', () => {
     expect(v.signals).toContain(signal);
   });
 
+  it('does not attest a quoted script path that discovery would split (#921 Astra B1)', () => {
+    const quoted = "python3 'scripts/verify_dist_patches.py;other'";
+    expect(isWholeCommandInterpreterInvocation(quoted)).toBe(false);
+    const v = run(quoted);
+    expect(v.decision).not.toBe('allow');
+  });
+
+  it('does not drop a command-line path-target because in-file mentions drained no budget (#921 Astra B2)', () => {
+    const v = run('python3 scripts/budget.py https://example.invalid/.ssh/id_rsa');
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('touch-sensitive-path');
+  });
+
   it('decides on the raw text: quoted separators are data, unquoted ones are siblings', () => {
     expect(isWholeCommandInterpreterInvocation(FIXTURE_7)).toBe(true);
     expect(isWholeCommandInterpreterInvocation(FIXTURE_8)).toBe(true);
@@ -1202,7 +1225,9 @@ describe('#921 whole-command interpreter attestation', () => {
       'PATH=/tmp/evil python3 x.py', 'env python3 x.py', 'sudo python3 x.py', '/usr/bin/python3 x.py',
       '"python3" x.py', 'bash x.sh', './x.py', 'python3 x.py # c', 'python3 x.py "open',
       '(python3 x.py)', 'python3 x.py\x00', 'python3 scripts/x[a].py', 'python3 scripts/*.py',
-      'python3 scripts/x?.py', 'python3 scripts/{a,b}.py', '',
+      'python3 scripts/x?.py', 'python3 scripts/{a,b}.py',
+      "python3 'scripts/verify_dist_patches.py;other'",
+      'python3 "scripts/x.py;other"', '',
     ]) expect([raw, isWholeCommandInterpreterInvocation(raw)]).toEqual([raw, false]);
   });
 });
