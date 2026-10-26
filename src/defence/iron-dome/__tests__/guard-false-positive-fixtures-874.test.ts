@@ -1223,6 +1223,75 @@ describe('#921 whole-command interpreter attestation', () => {
     }
   });
 
+  // #937: Bash splits words on ASCII space, tab and newline only. A script
+  // operand ending in a non-breaking or other Unicode space names a DIFFERENT
+  // file from the one without it; JavaScript trim() dropped that last
+  // character and attested the shorter, benign verifier instead of the file
+  // that runs.
+  it.each([
+    ['U+00A0', '\u00a0'],
+    ['U+2003', '\u2003'],
+    ['U+3000', '\u3000'],
+  ])('holds the file the shell runs when the operand ends with %s (#937)', (_name, sp) => {
+    fs.writeFileSync(path.join(dir, 'scripts', `verify_dist_patches.py${sp}`), [
+      '#!/usr/bin/env python3', 'DOC = """', prose, '"""', 'import os', 'os.system("systemctl stop nginx")', '',
+    ].join('\n'));
+    for (const command of [`${FIXTURE_8}${sp}`, `${FIXTURE_8}${sp} --flag`]) {
+      const v = run(command);
+      expect([command, v.decision]).not.toEqual([command, 'allow']);
+      expect(v.signals).toContain('stop-process-or-service');
+    }
+  });
+
+  it('trims only ASCII shell blanks around the whole command (#937)', () => {
+    expect(isWholeCommandInterpreterInvocation(` \t${FIXTURE_8} \t\n`)).toBe(true);
+    for (const raw of [`\u00a0${FIXTURE_8}`, `\u2003${FIXTURE_8}`, `\u3000${FIXTURE_8}`, `${FIXTURE_8}\r`]) {
+      expect([raw, isWholeCommandInterpreterInvocation(raw)]).toEqual([raw, false]);
+    }
+  });
+
+  it('still attests a plain ASCII operand padded with ASCII shell blanks (#937 r1)', () => {
+    expect(run(FIXTURE_8).decision).toBe('allow');
+    const v = run(` \t${FIXTURE_8} \t\n`);
+    expect(v.decision).toBe('allow');
+    expect(v.signals).not.toContain('stop-process-or-service');
+  });
+
+  // #937 r1: the comment stripper and the inline-program masker run on the
+  // scan text before discovery and use JavaScript `\s`, which matches U+00A0,
+  // U+2003, U+2028 and U+FEFF. Bash keeps those inside the word, so `#other`
+  // is not a comment and `-c` is not an option, yet discovery bound the
+  // shorter name. Each layout gives the shorter name the benign long verifier
+  // and every other candidate a real stop, so attesting the shorter name is
+  // the only way to reach allow.
+  const sinkSource = ['#!/usr/bin/env python3', 'import os', 'os.system("systemctl stop nginx")', ''].join('\n');
+  it.each([
+    ['U+00A0 before #other', 'cut-nbsp.py', '\u00a0', '#other'],
+    ['U+2003 before #other', 'cut-emsp.py', '\u2003', '#other'],
+    ['U+FEFF before #other', 'cut-bom.py', '\ufeff', '#other'],
+    ['U+2028 before #other', 'cut-ls.py', '\u2028', '#other'],
+  ])('does not attest a name cut short by comment stripping: %s (#937 r1)', (_name, base, sp, tail) => {
+    fs.writeFileSync(path.join(dir, 'scripts', base), sinkSource);
+    fs.writeFileSync(path.join(dir, 'scripts', `${base}${sp}`), verifier);
+    fs.writeFileSync(path.join(dir, 'scripts', `${base}${sp}${tail}`), sinkSource);
+    const command = `python3 scripts/${base}${sp}${tail}`;
+    expect([command, isWholeCommandInterpreterInvocation(command)]).toEqual([command, false]);
+    expect([command, run(command).decision]).toEqual([command, 'require_approval']);
+  });
+
+  it.each([
+    ['U+00A0', '\u00a0'],
+    ['U+2003', '\u2003'],
+    ['U+FEFF', '\ufeff'],
+  ])('does not attest a name cut short by inline-program masking: %s (#937 r1)', (_name, sp) => {
+    fs.writeFileSync(path.join(dir, 'scripts', `python3${sp}-c`), sinkSource);
+    fs.writeFileSync(path.join(dir, 'scripts', `python3${sp}-c${sp}`), verifier);
+    fs.writeFileSync(path.join(dir, 'scripts', `python3${sp}-c${sp}marker.py`), sinkSource);
+    const command = `python3 scripts/python3${sp}-c${sp}marker.py`;
+    expect([command, isWholeCommandInterpreterInvocation(command)]).toEqual([command, false]);
+    expect([command, run(command).decision]).toEqual([command, 'require_approval']);
+  });
+
   it('does not drop a command-line path-target because in-file mentions drained no budget (#921 Astra B2)', () => {
     const v = run('python3 scripts/budget.py https://example.invalid/.ssh/id_rsa');
     expect(v.decision).not.toBe('allow');
