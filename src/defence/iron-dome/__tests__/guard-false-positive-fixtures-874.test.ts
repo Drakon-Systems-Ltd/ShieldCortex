@@ -1223,6 +1223,33 @@ describe('#921 whole-command interpreter attestation', () => {
     }
   });
 
+  // #937: Bash splits words on ASCII space, tab and newline only. A script
+  // operand ending in a non-breaking or other Unicode space names a DIFFERENT
+  // file from the one without it; JavaScript trim() dropped that last
+  // character and attested the shorter, benign verifier instead of the file
+  // that runs.
+  it.each([
+    ['U+00A0', '\u00a0'],
+    ['U+2003', '\u2003'],
+    ['U+3000', '\u3000'],
+  ])('attests the file the shell runs when the operand ends with %s (#937)', (_name, sp) => {
+    fs.writeFileSync(path.join(dir, 'scripts', `verify_dist_patches.py${sp}`), [
+      '#!/usr/bin/env python3', 'DOC = """', prose, '"""', 'import os', 'os.system("systemctl stop nginx")', '',
+    ].join('\n'));
+    for (const command of [`${FIXTURE_8}${sp}`, `${FIXTURE_8}${sp} --flag`]) {
+      const v = run(command);
+      expect([command, v.decision]).not.toEqual([command, 'allow']);
+      expect(v.signals).toContain('stop-process-or-service');
+    }
+  });
+
+  it('trims only ASCII shell blanks around the whole command (#937)', () => {
+    expect(isWholeCommandInterpreterInvocation(` \t${FIXTURE_8} \t\n`)).toBe(true);
+    for (const raw of [`\u00a0${FIXTURE_8}`, `\u2003${FIXTURE_8}`, `\u3000${FIXTURE_8}`, `${FIXTURE_8}\r`]) {
+      expect([raw, isWholeCommandInterpreterInvocation(raw)]).toEqual([raw, false]);
+    }
+  });
+
   it('does not drop a command-line path-target because in-file mentions drained no budget (#921 Astra B2)', () => {
     const v = run('python3 scripts/budget.py https://example.invalid/.ssh/id_rsa');
     expect(v.decision).not.toBe('allow');

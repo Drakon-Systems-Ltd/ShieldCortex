@@ -5266,6 +5266,22 @@ function isInlineProgramFlag(interp: string, flag: string): boolean {
   return false;
 }
 
+/**
+ * Strip leading and trailing space, tab and newline: the blanks Bash splits
+ * words on. Not `String.prototype.trim()`, which also drops a non-breaking or
+ * other Unicode space that Bash keeps as part of the word, so `x.py\u00a0`
+ * would name a different file from the one that runs (#937). Hand-rolled so it
+ * stays linear on long input.
+ */
+function trimShellBlanks(s: string): string {
+  const blank = (c: string) => c === ' ' || c === '\t' || c === '\n';
+  let start = 0;
+  let end = s.length;
+  while (start < end && blank(s[start])) start++;
+  while (end > start && blank(s[end - 1])) end--;
+  return s.slice(start, end);
+}
+
 /** Split shell text into candidate statements. Command substitution, subshells
  *  and backticks open a new statement, exactly like `;`. */
 function splitCommandStatements(text: string): string[] {
@@ -5347,7 +5363,7 @@ const WHOLE_COMMAND_INTERPRETER = /^(?:python(?:\d(?:\.\d+)?)?|node|nodejs)$/;
  */
 export function isWholeCommandInterpreterInvocation(rawCommand: string): boolean {
   if (typeof rawCommand !== 'string' || rawCommand.length > OVERSIZED_COMMAND_LENGTH) return false;
-  const text = rawCommand.trim();
+  const text = trimShellBlanks(rawCommand);
   let i = 0;
   while (i < text.length && text[i] !== ' ' && text[i] !== '\t') i++;
   if (!WHOLE_COMMAND_INTERPRETER.test(text.slice(0, i))) return false;
@@ -5424,7 +5440,7 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const surface = maskSinkFreeInlinePrograms(execSurface);
 
   const add = (p: string, lang?: ScriptLang): void => {
-    const clean = p.trim();
+    const clean = trimShellBlanks(p);
     if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
     const resolved = lang ?? langFromPath(clean);
     // De-duplicate on path AND language. Keying on path alone discarded a
