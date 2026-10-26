@@ -997,8 +997,10 @@ function fallbackWriteTargetMatch(args: Record<string, unknown> | undefined, too
 // Used only by rows tagged `dataQuotes`. Kept in sync with
 // scripts/pre-tool-hook.mjs and plugins/hermes/shieldcortex/sc_client.py.
 
-/** The guard's DATA_COMMAND (here ending at a word break: `ptpython` is not `pt`), TEXT_FLAG and EXEC_COMMAND_WORD sets. */
-const FALLBACK_DATA_COMMAND_RE = /^(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)/i;
+/** The guard's DATA_COMMAND (here ending at a word break: `ptpython` is not `pt`), TEXT_FLAG and EXEC_COMMAND_WORD sets.
+ *  #922 r3: plus `cat`, whose quoted operand is a filename, never executed — the
+ *  plain split a `#` or a write sibling forces must not read `cat 'a; x'` as `x`. */
+const FALLBACK_DATA_COMMAND_RE = /^(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|cat|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)/i;
 const FALLBACK_TEXT_FLAG_RE = /(?:^|\s)--(?:text|body|message|comment|description|title|content|caption|note|summary|prompt|subject)(?:=|\s+)$/i;
 const FALLBACK_EXEC_WORD_RE = /^(?:bash|sh|zsh|ksh|dash|ash|python[\d.]*|node|nodejs|ruby|perl|php|eval|exec|source|ssh|scp|docker|podman|kubectl|nsenter|chroot|busybox|xargs|find|flock|watch|make|awk|sed|su|runuser|systemd-run|at|batch)$/i;
 /** A pipe into anything but a read-only filter (`echo "…" | bash`, `| "sh"`, `| b\\ash`) — `||` is not a pipe. */

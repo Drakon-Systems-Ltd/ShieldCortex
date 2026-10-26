@@ -187,7 +187,8 @@ def fallback_surface(args: dict) -> str:
 # Used only for _FALLBACK_DESTROY_ROW and _FALLBACK_POSTURE_ROW.
 # Kept in sync with plugins/openclaw/interceptor.ts and scripts/pre-tool-hook.mjs.
 _FALLBACK_NESTED_EXEC = re.compile(r"\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+/|\bfunction\b|[\w.-]+\s*\(\s*\)\s*\{", re.I)
-_FALLBACK_DATA_COMMAND = re.compile(r"(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)", re.I)
+# #922 r3: plus `cat`, whose quoted operand is a filename, never executed.
+_FALLBACK_DATA_COMMAND = re.compile(r"(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|cat|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)", re.I)
 _FALLBACK_TEXT_FLAG = re.compile(r"(?:^|\s)--(?:text|body|message|comment|description|title|content|caption|note|summary|prompt|subject)(?:=|\s+)$", re.I)
 _FALLBACK_EXEC_WORD = re.compile(r"(?:bash|sh|zsh|ksh|dash|ash|python[\d.]*|node|nodejs|ruby|perl|php|eval|exec|source|ssh|scp|docker|podman|kubectl|nsenter|chroot|busybox|xargs|find|flock|watch|make|awk|sed|su|runuser|systemd-run|at|batch)", re.I)
 _FALLBACK_UNSAFE_PIPE = re.compile(r"(?<!\|)\|(?!\|)&?(?![ \t]*(?:grep|egrep|fgrep|zgrep|rg|ag|ack|head|tail|less|more|wc|sort|uniq|cut|tr|jq|cat|tee|column|nl|fold|fmt)(?:[ \t\n|;&)]|$))")  # `||` is not a pipe

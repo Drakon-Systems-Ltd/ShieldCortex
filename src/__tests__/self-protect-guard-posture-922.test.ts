@@ -80,6 +80,15 @@ const POSITIVES = [
   `env -i echo ${SC} ${GP} off`,
   // The executable counterpart of the quoted filename below: the `;` is real.
   `cat notes; ${SC} "${G}" "${P}" off`,
+  // #922 r3 (R3-B1): the unquoted counterparts of the composed quoted-filename
+  // rows below — a real `;` before the wrapper is a real invocation.
+  `cat x; env -u FOO ${SC} ${GP} off`,
+  `cat 'a'; ${SC} ${GP} off`,
+  `cat notes; env -u FOO ${SC} ${GP} off; touch output`,
+  `cat notes# ; /usr/bin/env ${SC} ${GP} off`,
+  `cat 'notes#'; shield"cortex" ${GP} off`,
+  `cat "$(${SC} ${GP} off)"`,
+  `cat \`${SC} ${GP} off\``,
 ];
 const NEGATIVES = [
   `${SC} ${GP}`,
@@ -111,6 +120,13 @@ const NEGATIVES = [
   `echo -u FOO ${SC} ${GP} off`,
   `sudo -u nobody echo ${SC} ${GP} off`,
   `echo bash -c '${SC} ${GP} off'`,
+  // #922 r3 (R3-B1): a quoted cat filename stays data when a write sibling, a
+  // redirect or a `#` (the plain split) defeats the whole-surface read exemption.
+  `cat 'notes; env -u FOO ${SC} ${GP} off'; touch output`,
+  `cat 'notes; env -u FOO ${SC} ${GP} off' > output`,
+  `cat 'notes#; env -u FOO ${SC} ${GP} off'`,
+  `cat 'notes#; /usr/bin/env ${SC} ${GP} off'`,
+  `cat 'notes#; shield"cortex" ${GP} off'`,
 ];
 
 const onFloor = (signals: readonly string[] | undefined) =>
