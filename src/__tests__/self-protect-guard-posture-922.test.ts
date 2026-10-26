@@ -68,6 +68,18 @@ const POSITIVES = [
   `{ ${SC} ${GP} off; }`,
   `if ${SC} ${GP} off; then :; fi`,
   `${SC}\t${G}\t${P}\toff`,
+  // #922 r2: wrapper option values, path-qualified/quoted wrappers, a
+  // quote-fragmented invoker and bash value options, as the core reads them.
+  `env -u FOO ${SC} ${GP} off`,
+  `/usr/bin/env ${SC} ${GP} advisory`,
+  `"env" ${SC} ${GP} off`,
+  `shield"cortex" ${GP} off`,
+  `sudo -u nobody ${SC} ${GP} off`,
+  `bash -O extglob -c '${SC} ${GP} off'`,
+  `bash --rcfile /tmp/x -c '${SC} ${GP} off'`,
+  `env -i echo ${SC} ${GP} off`,
+  // The executable counterpart of the quoted filename below: the `;` is real.
+  `cat notes; ${SC} "${G}" "${P}" off`,
 ];
 const NEGATIVES = [
   `${SC} ${GP}`,
@@ -94,6 +106,11 @@ const NEGATIVES = [
   `grep -F '${GP} off' /etc/${SC}/policy.json`,
   `grep -F '${SC} ${GP} off' /etc/${SC}/policy.json`,
   `cat /etc/${SC}/policy.json`,
+  // #922 r2: one single-quoted filename — its `;` and inner quotes are data.
+  `cat 'notes; ${SC} "${G}" "${P}" off'`,
+  `echo -u FOO ${SC} ${GP} off`,
+  `sudo -u nobody echo ${SC} ${GP} off`,
+  `echo bash -c '${SC} ${GP} off'`,
 ];
 
 const onFloor = (signals: readonly string[] | undefined) =>
@@ -178,13 +195,20 @@ describe('#922 — every outage fallback agrees with the core on the same table'
       'import sc_client as c',
       'table = json.loads(sys.stdin.read())',
       'print(json.dumps([{"command": t, "floor": bool(c.fallback_self_protection_match(t)),',
-      '  "dangerous": any(p.search(t) for p in c._FALLBACK_DANGEROUS)} for t in table]))',
+      '  "dangerous": bool(c.fallback_dangerous_match(t))} for t in table]))',
     ].join('\n');
     const run = spawnSync('python3', ['-W', 'error', '-c', script], { input: JSON.stringify(table), encoding: 'utf8', timeout: 60_000 });
     expect({ status: run.status, stderr: run.status === 0 ? '' : run.stderr }).toEqual({ status: 0, stderr: '' });
     const rows = JSON.parse(run.stdout.trim().split('\n').pop() as string) as Array<{ command: string; floor: boolean; dangerous: boolean }>;
     expect(rows.map(({ command, floor }) => ({ command, floor }))).toEqual(core);
-    // Every floor hit is also on the dangerous list, so the outage scan sees it.
-    for (const r of rows) if (r.floor) expect({ command: r.command, dangerous: r.dangerous }).toEqual({ command: r.command, dangerous: true });
+    // The public dangerous matcher, on both halves of the table: every floor
+    // hit is dangerous too, so the outage scan sees it; any other row is
+    // dangerous exactly when the core does not allow it (an ordinary sudo row),
+    // so a data mention gains no outage block.
+    const expected = rows.map(({ command, floor }) => ({
+      command,
+      dangerous: floor || evaluateToolCall('Bash', { command }, { enabled: true, enforce: true } as never).decision !== 'allow',
+    }));
+    expect(rows.map(({ command, dangerous }) => ({ command, dangerous }))).toEqual(expected);
   });
 });

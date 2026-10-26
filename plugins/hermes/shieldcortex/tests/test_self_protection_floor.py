@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sc_client import (  # noqa: E402
     SELF_PROTECTION_SIGNALS,
     ActionGuardVerdict,
+    fallback_dangerous_match,
     fallback_self_protection_match,
 )
 from policy import action_guard_decision  # noqa: E402
@@ -44,8 +45,19 @@ class SelfProtectionFloor(unittest.TestCase):
             '$X "guard" "posture" off',
             'shieldcortex guard posture o"ff"',
             "shieldcortex guard posture o*",
+            # #922 r2: wrapper values, path/quoted wrappers, a fragmented invoker.
+            "env -u FOO shieldcortex guard posture off",
+            "/usr/bin/env shieldcortex guard posture advisory",
+            '"env" shieldcortex guard posture off',
+            'shield"cortex" guard posture off',
+            "sudo -u nobody shieldcortex guard posture off",
+            "bash -O extglob -c 'shieldcortex guard posture off'",
+            "bash --rcfile /tmp/x -c 'shieldcortex guard posture off'",
+            'cat notes; shieldcortex "guard" "posture" off',
         ):
             self.assertTrue(fallback_self_protection_match(cmd), cmd)
+            if "posture" in cmd:  # the posture row is on both lists; the store rows only on this one
+                self.assertTrue(fallback_dangerous_match(cmd), cmd)
         for cmd in (
             "shieldcortex guard posture enforce",
             "shieldcortex guard posture",
@@ -53,8 +65,12 @@ class SelfProtectionFloor(unittest.TestCase):
             'echo "shieldcortex guard posture off"',
             'grep -F "shieldcortex guard posture off" README.md',
             "gh issue create --body 'shieldcortex guard posture off'",
+            # #922 r2: one single-quoted filename; its `;` is data.
+            "cat 'notes; shieldcortex \"guard\" \"posture\" off'",
+            "echo bash -c 'shieldcortex guard posture off'",
         ):
             self.assertFalse(fallback_self_protection_match(cmd), cmd)
+            self.assertFalse(fallback_dangerous_match(cmd), cmd)
         v = ActionGuardVerdict("allow", [], "down", available=False)
         d = action_guard_decision(v, enforce=False, fallback_dangerous=True, fallback_self_protected=True)
         self.assertEqual(d["action"], "block")

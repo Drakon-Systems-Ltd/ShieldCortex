@@ -74,8 +74,12 @@ _FALLBACK_DESTROY_ROW = re.compile(r'''(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(
 # a statement start or inside a shell `-c` / eval body, so an echo/grep/cat/gh
 # --body mention stays off. Decoration inside a word, a quoted flag, and an
 # expansion or glob anywhere in the target are read as the core's
-# loosensGuardPostureAt reads them. Quoted data is a mention here too.
-_FALLBACK_POSTURE_ROW = re.compile(r'''(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid|if|then|elif|else|while|until|do|!|\w+=[^\s;&|({`]*|-[^\s;&|({`]+|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*/)?shieldcortex(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?:[ \t]+['"\\]*-[^\s;&|$`*?[\]{}]*)*[ \t]+(?:[^\s;&|]*[$`*?[\]{}]|(?:['"\\]*o['"\\]*f['"\\]*f['"\\]*|['"\\]*a['"\\]*d['"\\]*v['"\\]*i['"\\]*s['"\\]*o['"\\]*r['"\\]*y['"\\]*)(?=$|[\s;&|)`]))''', re.I)
+# loosensGuardPostureAt reads them. #922 r2: path-qualified or quoted wrappers,
+# one bare value per flag (`env -u FOO`), a quote-fragmented `shieldcortex` and
+# bash value options (`bash -O extglob -c`) as in the other two rows; a flag
+# value can be no other prefix token nor an invoker, so the repetition stays linear.
+# Quoted data is a mention here too.
+_FALLBACK_POSTURE_ROW = re.compile(r'''(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:(?:[-+]O|--rcfile|--init-file)[ \t]+[^\s;&|-][^\s;&|]*[ \t]+|-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:['"\\]*(?:[^\s;&|'"({`]*/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!)|\w+=[^\s;&|({`]*|-[^\s;&|({`]+(?:[ \t]+(?!(?:['"\\]*(?:[^\s;&|'"({`]*/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!))[ \t]|\w+=|\d|-|['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-])))[^\s;&|({`]+)?|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?:[ \t]+['"\\]*-[^\s;&|$`*?[\]{}]*)*[ \t]+(?:[^\s;&|]*[$`*?[\]{}]|(?:['"\\]*o['"\\]*f['"\\]*f['"\\]*|['"\\]*a['"\\]*d['"\\]*v['"\\]*i['"\\]*s['"\\]*o['"\\]*r['"\\]*y['"\\]*)(?=$|[\s;&|)`]))''', re.I)
 
 # Dangerous tier of the fail-closed fallback (issue #59) — ported from
 # tool-action-guard.ts's DANGEROUS list, kept in sync with the OpenClaw
@@ -260,9 +264,13 @@ def fallback_dangerous_match(content: str) -> bool:
     """True when `content` matches a recognised-dangerous shape (fail-closed when enforcing)."""
     if not content:
         return False
+    # #922 r2: the posture row is a lock-path row here too, as in the other two
+    # fallbacks' dangerous scan: pure inspection runs no invoker.
+    lock_read_only = _fallback_lock_access_is_read_only(content)
     return any(
         _fallback_executed_match(p, content) if p is _FALLBACK_DESTROY_ROW or p is _FALLBACK_POSTURE_ROW else p.search(content)
         for p in _FALLBACK_DANGEROUS
+        if not (p is _FALLBACK_POSTURE_ROW and lock_read_only)
     )
 
 
@@ -344,6 +352,41 @@ def _fallback_git_stage_writes(stage: str) -> bool:
     return False
 
 
+# Quoting the stage split cannot pair as the shell does: ANSI-C `$'...'`, a heredoc, `${...}`, a `#` comment.
+_FALLBACK_LOCK_SPLIT_UNMODELLED = re.compile(r"\$'|<<|\$\{|#")
+
+
+def _fallback_lock_stages(text: str):
+    """Statements and pipeline stages split on newline ; & | OUTSIDE quotes (#922 r2):
+    `cat 'notes; x'` is one read of one file. Unmodelled quoting keeps the plain
+    split; an unclosed quote is None (never a read). Mirrors fallbackLockStages."""
+    if _FALLBACK_LOCK_SPLIT_UNMODELLED.search(text):
+        return re.split(r"[\n;&|]+", text)
+    out, cur, q, i, n = [], [], None, 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and q != "'":
+            cur.append(text[i:i + 2])
+            i += 2
+            continue
+        if q:
+            cur.append(c)
+            if c == q:
+                q = None
+        elif c in "\n;&|":
+            out.append("".join(cur))
+            cur = []
+        else:
+            if c in "\"'":
+                q = c
+            cur.append(c)
+        i += 1
+    if q:
+        return None
+    out.append("".join(cur))
+    return out
+
+
 def _fallback_lock_access_is_read_only(text: str, tool_name=None) -> bool:
     if not text or _FALLBACK_LOCK_ENV_SEAM.search(text):
         return False
@@ -352,8 +395,11 @@ def _fallback_lock_access_is_read_only(text: str, tool_name=None) -> bool:
         return True
     if _FALLBACK_REDIRECT.search(text) or _FALLBACK_NESTED_EXEC.search(text):
         return False
+    stages = _fallback_lock_stages(text)
+    if stages is None:
+        return False
     saw_stage = False
-    for raw in re.split(r"[\n;&|]+", text):
+    for raw in stages:
         stage = raw.strip()
         if not stage:
             continue

@@ -2388,10 +2388,15 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   // start or inside a shell `-c` / eval body, so an echo/grep/cat/gh --body
   // mention stays off. Quote/backslash decoration inside a word, a quoted flag,
   // and an expansion or glob anywhere in the target are read as the core's
-  // loosensGuardPostureAt reads them. `dataQuotes`: a hit inside a data quote
-  // (`echo "x; shieldcortex …"`) is a mention. `lockPath`: pure inspection runs
+  // loosensGuardPostureAt reads them. #922 r2: a wrapper may be path-qualified
+  // or quoted (`/usr/bin/env`, `"env"`), a flag may take one bare value
+  // (`env -u FOO`, `sudo -u nobody`, as commandPositions reads it), `shieldcortex`
+  // may be quote-fragmented, and bash value options are stepped over
+  // (`bash -O extglob -c`). A flag value can be no other prefix token nor an
+  // invoker, so the repetition has one parse and stays linear. `dataQuotes`: a
+  // hit inside a data quote (`echo "x; shieldcortex …"`) is a mention. `lockPath`: pure inspection runs
   // no invoker, so the lock-read exemption drops it as well.
-  { re: /(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid|if|then|elif|else|while|until|do|!|\w+=[^\s;&|({`]*|-[^\s;&|({`]+|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?shieldcortex(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?:[ \t]+['"\\]*-[^\s;&|$`*?[\]{}]*)*[ \t]+(?:[^\s;&|]*[$`*?[\]{}]|(?:['"\\]*o['"\\]*f['"\\]*f['"\\]*|['"\\]*a['"\\]*d['"\\]*v['"\\]*i['"\\]*s['"\\]*o['"\\]*r['"\\]*y['"\\]*)(?=$|[\s;&|)`]))/i, signal: 'disable-action-guard', lockPath: true, dataQuotes: true },
+  { re: /(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:(?:[-+]O|--rcfile|--init-file)[ \t]+[^\s;&|-][^\s;&|]*[ \t]+|-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!)|\w+=[^\s;&|({`]*|-[^\s;&|({`]+(?:[ \t]+(?!(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!))[ \t]|\w+=|\d|-|['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-])))[^\s;&|({`]+)?|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?:[ \t]+['"\\]*-[^\s;&|$`*?[\]{}]*)*[ \t]+(?:[^\s;&|]*[$`*?[\]{}]|(?:['"\\]*o['"\\]*f['"\\]*f['"\\]*|['"\\]*a['"\\]*d['"\\]*v['"\\]*i['"\\]*s['"\\]*o['"\\]*r['"\\]*y['"\\]*)(?=$|[\s;&|)`]))/i, signal: 'disable-action-guard', lockPath: true, dataQuotes: true },
   { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)\b/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
   // #501: the policy lock's own attack surface. The two environment seams that
@@ -2510,12 +2515,40 @@ const FALLBACK_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\/|\b
 /** Assigning an env seam decides WHICH reader runs — never a read. */
 const FALLBACK_LOCK_ENV_SEAM_RE = /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i;
 
+/** Quoting the stage split cannot pair as the shell does: ANSI-C `$'…'`, a heredoc, `${…}`, a `#` comment. */
+const FALLBACK_LOCK_SPLIT_UNMODELLED_RE = /\$'|<<|\$\{|#/;
+
+/**
+ * The statements and pipeline stages of `text`, split on `\n ; & |` OUTSIDE
+ * quotes (#922 r2): `cat 'notes; x'` is one read of one file, not a read and
+ * an `x`. Text holding quoting this walk does not model keeps the plain split
+ * (every separator counts), and an unclosed quote is null — never a read.
+ */
+function fallbackLockStages(text) {
+  if (FALLBACK_LOCK_SPLIT_UNMODELLED_RE.test(text)) return text.split(/[\n;&|]+/);
+  const out = [];
+  let cur = '';
+  let q = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '\\' && q !== "'") { cur += text.slice(i, i + 2); i++; continue; }
+    if (q) { cur += c; if (c === q) q = null; continue; }
+    if (c === '"' || c === "'") q = c;
+    if (c === '\n' || c === ';' || c === '&' || c === '|') { out.push(cur); cur = ''; continue; }
+    cur += c;
+  }
+  if (q) return null;
+  out.push(cur);
+  return out;
+}
+
 /**
  * True when the whole surface is pure inspection of a lock path. Fail-closed on
  * an env-seam assignment, a redirect, nested execution, and any unknown verb in
  * any stage of any statement — the same rule the real guard applies, with the
  * statement split done conservatively (`&` and `|` both separate, so a
- * pipeline stage or a backgrounded sibling must ALSO be a read).
+ * pipeline stage or a backgrounded sibling must ALSO be a read). A separator
+ * inside quotes is data (#922 r2): see fallbackLockStages.
  */
 function fallbackLockPathAccessIsReadOnly(text, toolName) {
   if (!text) return false;
@@ -2523,8 +2556,10 @@ function fallbackLockPathAccessIsReadOnly(text, toolName) {
   const seg = String(toolName || '').toLowerCase().split(/__|\.|:|\//).filter(Boolean).pop() || '';
   if (seg && FALLBACK_READ_TOOLS.test(seg)) return true;
   if (FALLBACK_REDIRECT_RE.test(text) || FALLBACK_NESTED_EXEC_RE.test(text)) return false;
+  const stages = fallbackLockStages(text);
+  if (!stages) return false;
   let sawStage = false;
-  for (const raw of text.split(/[\n;&|]+/)) {
+  for (const raw of stages) {
     const stage = raw.trim();
     if (!stage) continue;
     sawStage = true;
