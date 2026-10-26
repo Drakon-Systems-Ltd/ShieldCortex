@@ -51,6 +51,14 @@ or set `SHIELDCORTEX_SKIP_UPDATE_CHECK=1` for the dashboard/API process. The das
 5. **Background service** — if you ran `shieldcortex service install`, check `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`). Linux and macOS restart the service; Windows schedules it for the next login.
 6. **Doctor** — `shieldcortex doctor` warns when the OpenClaw plugin or Hermes copy is behind the package and names the command to run. It exits 1 on a failure (`--strict` also fails on warnings). Repairs are opt-in flags: `--fix-project-keys`, `--fix-action-guard`, `--fix-hermes-plugin-copies`.
 
+<a id="whats-new-in-515"></a>
+
+## What's new in 5.15
+
+- **`shieldcortex guard posture` shows each plane's Action Guard posture (#922 part 1).** One line each for the Claude Code hook, the OpenClaw plugin and Hermes (its self-report); a plane that is not installed shows `absent`. It exits 0 when the planes agree and 4 when they disagree, and `--json` prints the same reading. It only reads configuration files and self-reports and writes nothing; `guard posture off|advisory|enforce` is a usage error in this release.
+- **Doctor shows one `Action guard posture` row (#922).** It replaces the `Action guard config` disabled and warn-mode rows and is ❌ when the Claude Code hook and the OpenClaw plugin disagree, or when a current Hermes self-report is looser than them. The HOSTS header says `Guard mixed` exactly when that row fails. `doctor --strict` can now grade a box differently, because the row follows what the present planes resolve to rather than `config.json` alone. Doctor never changes posture itself.
+- **Fewer false alarms (PRs #914, #935, #938).** Tool-call IDs that look like UUIDs are no longer flagged as Heroku API keys; an explicit `HEROKU_API_KEY=<uuid>` is still blocked. A tool response whose only finding is a credential is still redacted but no longer marks the session as tainted. Under Action Guard, a long `python3 scripts/x.py …` or `node x.js` run on its own is judged by what its code does, not by commands mentioned in its help text; that applies only when the script name is plain ASCII and is exactly the file Bash runs. Nothing to do on upgrade.
+
 <a id="whats-new-in-514"></a>
 
 ## What's new in 5.14
