@@ -28,9 +28,10 @@ function between(src: string, start: string, end: string): string {
 
 describe('recall lane docs — bounded claims (#729)', () => {
   it('README no longer claims PERSONAL notes never reach automated lanes', () => {
-    const readme = read('README.md');
+    // The recall-lane paragraph moved from the README to docs/README-DETAILS.md.
+    const readme = read('README.md') + '\n' + read('docs/README-DETAILS.md');
     expect(readme).not.toMatch(/never reach them/);
-    const line = readme.split('\n').find((l) => l.includes('docs/UPDATING.md#recall-lanes'));
+    const line = readme.split('\n').find((l) => l.includes('UPDATING.md#recall-lanes'));
     expect(line).toBeDefined();
     expect(line).toContain('`UserPromptSubmit` hook');
     expect(line).toMatch(/detected as a cron job, subagent or liveness probe, or pinned/);

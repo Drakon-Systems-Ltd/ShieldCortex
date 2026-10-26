@@ -158,7 +158,7 @@ describe('Hermes outage fallback documentation', () => {
 
   for (const file of ['README.md', 'CHANGELOG.md']) {
     it(`${file} distinguishes default-enforcing and advisory outage tiers`, () => {
-      const paragraph = read(file).split('\n').find((line) => file === 'README.md'
+      const paragraph = read(file === 'README.md' ? 'docs/README-DETAILS.md' : file).split('\n').find((line) => file === 'README.md'
         ? line.startsWith('Hermes gates tool calls')
         : line.startsWith('- **README "Where it can block":'));
       assert.ok(paragraph, `no Hermes gate paragraph in ${file}`);
