@@ -23,7 +23,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
-import { closedReadPipelineMask, evaluateToolCall } from '../tool-action-guard.js';
+import { closedReadPipelineMask, evaluateToolCall, isWholeCommandInterpreterInvocation } from '../tool-action-guard.js';
 import { createScriptSourceResolver } from '../script-source-resolver.js';
 
 const bash = (command: string) => evaluateToolCall('Bash', { command });
@@ -1000,4 +1000,377 @@ describe('#920 removed reliefs: what origin/main blocks stays blocked', () => {
     expect(v.severity).toBe('catastrophic');
     expect(v.signals).toContain('secret-egress');
   }, 120_000);
+});
+
+/**
+ * #921 (#874 cut B) — a workspace script run by a named interpreter is judged
+ * by what its code does only when that invocation is the WHOLE command
+ * (`isWholeCommandInterpreterInvocation`, on the raw text). Every #882 review
+ * round (r1–r10) was a sibling changing what `python3` resolves to; with no
+ * sibling allowed there is no such family, so those rows are pinned here as
+ * must-hold and the two sole-command fixtures (7, 8) keep their relief.
+ *
+ * The fixtures are LONG on purpose: a short file is already judged by its
+ * code on origin/main, whatever surrounds it. A long one ran the shared
+ * re-scan budget out (or passed the 32 KB classification cap) and every
+ * mention in its strings became an action — the live fixture 7 card.
+ */
+describe('#921 whole-command interpreter attestation', () => {
+  let dir: string;
+  const run = (command: string) => evaluateToolCall('Bash', { command }, undefined,
+    { resolveScriptSource: createScriptSourceResolver(dir) });
+
+  let prose = '';
+  for (let i = 0; prose.length < 9000; i++) prose += `note ${i}: neutral prose about mailbox housekeeping and reporting.\n`;
+  // Dual-purpose (#882): a Python docstring to python3, a `systemctl stop` to a
+  // shell. Who runs it decides what it does.
+  const dual = (shebang: string) => [shebang, 'DOC = """', prose,
+    'rm the lock, kill the gateway, rm the cache, unlink it, kill it, rm it',
+    '"""', 'systemctl stop nginx', ''].join('\n');
+  const leaseNotes = Array.from({ length: 600 }, (_, i) =>
+    `# changelog ${i}: lease file format note, nothing executes here.`).join('\n');
+  // Fixture 7's shape: the workspace lease script writes one JSON file under
+  // the workspace. Its docstring and hint strings name the deletes, stops and
+  // scheduler edits an operator must NOT use to clear a lease.
+  const lease = [
+    '#!/usr/bin/env python3',
+    '"""Workspace action lease.',
+    '',
+    'Take a lease before a risky step (npm publish, tag push). The lease is one JSON',
+    'file under state/leases/. Notes for operators:',
+    '  - a stale lease is released with `release`, never by hand: do not rm -f the file;',
+    '  - do not systemctl --user stop openclaw-gateway to clear a holder;',
+    '  - a leaked scheduler entry is removed with crontab -e, never crontab -r;',
+    '  - never pkill -f the holder process.',
+    '"""',
+    'import argparse, json, pathlib, time',
+    'ROOT = pathlib.Path(__file__).resolve().parent.parent',
+    'LEASES = ROOT / "state" / "leases"',
+    'STALE_HINT = "stale lease: run release, do not rm state/leases/*.json or kill -9 the holder"',
+    'SCHED_HINT = "if a scheduler leaked, crontab -l to inspect; crontab -r is never the fix"',
+    'STOP_HINT = "do not systemctl stop the gateway to break a lease"',
+    leaseNotes,
+    'def main():',
+    '    p = argparse.ArgumentParser(epilog=STALE_HINT + "; " + SCHED_HINT + "; " + STOP_HINT)',
+    '    p.add_argument("op", choices=["acquire", "release"])',
+    '    p.add_argument("action")',
+    '    p.add_argument("--reason", default="")',
+    '    a = p.parse_args()',
+    '    LEASES.mkdir(parents=True, exist_ok=True)',
+    '    out = LEASES / f"{a.action}.json"',
+    '    out.write_text(json.dumps({"action": a.action, "reason": a.reason, "ts": time.time()}))',
+    '    print(f"lease {a.op}d: {out}")',
+    'if __name__ == "__main__":',
+    '    main()',
+    '',
+  ].join('\n');
+  // Fixture 8's verifier, with the long advice table a real one grows.
+  const verifier = [
+    '#!/usr/bin/env python3',
+    '"""Read-only verifier: reports whether dist patches are present."""',
+    'import pathlib, sys',
+    'ROOT = pathlib.Path(__file__).resolve().parent.parent',
+    'ADVICE = {',
+    ...Array.from({ length: 120 }, (_, i) =>
+      `    "patch-${i}": "missing: run npm i -g openclaw@latest, then systemctl --user stop openclaw-gateway and start it",`),
+    '}',
+    'failed = False',
+    'for p in sorted((ROOT / "dist").glob("*.mjs")):',
+    '    if "PATCHED" not in p.read_text():',
+    '        print(f"FAIL {p.name}: {ADVICE.get(p.stem, \'reinstall\')}")',
+    '        failed = True',
+    'sys.exit(1 if failed else 0)',
+    '',
+  ].join('\n');
+
+  const FIXTURE_7 = 'python3 scripts/action_lease.py acquire npm-publish --reason "ShieldCortex v5.10.7 release: '
+    + 'merge PR #873 + tag push; independent review APPROVE 5585509013; Michael TG 7314"';
+  const FIXTURE_8 = 'python3 scripts/verify_dist_patches.py';
+
+  beforeAll(() => {
+    dir = fs.mkdtempSync(path.join('/tmp', 'sc-921-whole-command-'));
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    fs.writeFileSync(path.join(dir, 'scripts', 'dual.py'), dual('#!/usr/bin/env python3'));
+    fs.writeFileSync(path.join(dir, 'scripts', 'absdual.py'), dual('#!/usr/bin/python3'));
+    fs.writeFileSync(path.join(dir, 'scripts', 'action_lease.py'), lease);
+    fs.writeFileSync(path.join(dir, 'scripts', 'verify_dist_patches.py'), verifier);
+    fs.writeFileSync(path.join(dir, 'scripts', 'budget.py'), [
+      'PAD = "' + 'a'.repeat(9000) + '"',
+      'ADVICE = "rm item"',
+      'ADVICE = "rm item"',
+      'ADVICE = "rm item"',
+      'ADVICE = "rm item"',
+      'ADVICE = "rm item"',
+      'ADVICE = "rm item"',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(dir, 'scripts', 'parent.py'), [
+      ...Array.from({ length: 63 }, () => 'ADVICE = "rm item"'),
+      'import os',
+      'os.system("./child.py")',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(dir, 'child.py'), 'print("rm item")\n');
+  });
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  it('the fixtures are long enough to exhaust the shared budget; the lease is over the classification cap', () => {
+    expect(lease.length).toBeGreaterThan(32_768);
+    expect(verifier.length).toBeGreaterThan(8_192);
+    expect(dual('#!/usr/bin/env python3').length).toBeGreaterThan(8_192);
+  });
+
+  it('fixture 7 (sole command, quoted `;` and `#` in --reason) is allowed with no card', () => {
+    const v = run(FIXTURE_7);
+    expect(v.decision).toBe('allow');
+    for (const s of ['file-delete', 'stop-process-or-service', 'modify-scheduler']) expect(v.signals).not.toContain(s);
+  });
+
+  it('fixture 8 (sole command, long verifier) is allowed with no dangerous-tier signal', () => {
+    const v = run(FIXTURE_8);
+    expect(v.decision).toBe('allow');
+    for (const s of DANGEROUS_TIER_SIGNALS) expect(v.signals).not.toContain(s);
+  });
+
+  it('python3 running the dual-purpose file as the whole command is judged as Python', () => {
+    const v = run('python3 scripts/dual.py');
+    expect(v.decision).toBe('allow');
+    for (const s of DANGEROUS_TIER_SIGNALS) expect(v.signals).not.toContain(s);
+  });
+
+  // Every under-gating row from the #882 r1–r10 reviews: a sibling that may
+  // change what `python3` (or an env shebang's lookup) resolves to.
+  const SIBLING_PREFIXES = [
+    'printf "%n" PATH',
+    "printf '%n' PATH",
+    'printf %n PATH',
+    'printf -v PATH /tmp/evil',
+    'printf>/dev/null "$(cat fmt)" PATH',
+    'printf>/dev/null "%n" PATH',
+    'printf>/dev/null `cat fmt` PATH',
+    'printf>/dev/null -v PATH /tmp/evil',
+    '"printf">/dev/null "%n" PATH',
+    'printf "$(cat fmt)" PATH',
+    'printf $(cat fmt) PATH',
+    'printf `cat fmt` PATH',
+    'printf "`cat fmt`" PATH',
+    'printf -- "`cat fmt`" PATH',
+    'printf -- `cat fmt` PATH',
+    'printf "$(echo %n)" PATH',
+    'printf >/dev/null "$FMT" PATH',
+    'printf > /dev/null "$FMT" PATH',
+    'printf 2>/dev/null "$FMT" PATH',
+    'printf \\\n%n PATH',
+    'printf \\\n  %n PATH',
+    'printf \\\n"$FMT" PATH',
+    'printf \\\n`cat fmt` PATH',
+    'printf >/dev/null \\\n  "$FMT" PATH',
+    'printf "a;b"$(cat fmt)"c|d" PATH',
+    'printf "%s;$FMT" PATH',
+  ];
+  const MUST_HOLD = SIBLING_PREFIXES.flatMap(prefix => ['; ', ' && '].flatMap(join =>
+    ['python3 scripts/dual.py', './scripts/absdual.py'].map(tail => `${prefix}${join}${tail}`)));
+
+  it.each([
+    ...MUST_HOLD,
+    'PATH=/tmp/evil python3 scripts/dual.py',
+    'PATH=/tmp/evil ./scripts/absdual.py',
+  ])('a sibling or prefix withdraws attestation: %j', (command) => {
+    const v = run(command);
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
+  it.each([
+    ['python3 scripts/dual.py; echo done', 'stop-process-or-service'],
+    ['echo start; python3 scripts/dual.py', 'stop-process-or-service'],
+    [`${FIXTURE_8} && true`, 'stop-process-or-service'],
+    [`${FIXTURE_8} | cat`, 'stop-process-or-service'],
+    [`env ${FIXTURE_8}`, 'stop-process-or-service'],
+    [`command ${FIXTURE_8}`, 'stop-process-or-service'],
+    [`/usr/bin/${FIXTURE_8}`, 'stop-process-or-service'],
+    ['python3 scripts/action_lease.py acquire x --reason y > /tmp/out', 'stop-process-or-service'],
+    ['python3 scripts/action_lease.py acquire x --reason y 2>&1', 'stop-process-or-service'],
+    ['python3 scripts/action_lease.py acquire x --reason "$(date)"', 'stop-process-or-service'],
+    ['python3 scripts/action_lease.py acquire x --reason `date`', 'stop-process-or-service'],
+    ['python3 scripts/action_lease.py acquire x --reason ${R}', 'stop-process-or-service'],
+    ['python3 scripts/action_lease.py acquire x \\\n  --reason y', 'stop-process-or-service'],
+    ['python3 scripts/action_lease.py acquire x --reason y\necho done', 'stop-process-or-service'],
+    ['python3 scripts/action_lease.py acquire x --reason y # trailing', 'stop-process-or-service'],
+    ['(python3 scripts/action_lease.py acquire x --reason y)', 'stop-process-or-service'],
+    ['python3 scripts/action_lease.py acquire x --reason "unterminated', 'stop-process-or-service'],
+  ])('not the whole command, so the long file is not attested: %j', (command, signal) => {
+    const v = run(command);
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain(signal);
+  });
+
+  it('does not attest a quoted script path that discovery would split (#921 Astra B1)', () => {
+    const quoted = "python3 'scripts/verify_dist_patches.py;other'";
+    expect(isWholeCommandInterpreterInvocation(quoted)).toBe(false);
+    const v = run(quoted);
+    expect(v.decision).not.toBe('allow');
+  });
+
+  it('does not attest a partially quoted script operand (#921 Astra B1 follow-up)', () => {
+    for (const raw of [
+      "python3 scripts/verify_dist_patches.py';other'",
+      'python3 scripts/verify_dist_patches.py";other"',
+      "python3 scripts/'verify_dist_patches.py;other'",
+    ]) {
+      expect([raw, isWholeCommandInterpreterInvocation(raw)]).toEqual([raw, false]);
+      expect(run(raw).decision).not.toBe('allow');
+    }
+  });
+
+  it('does not drop a command-line path-target because in-file mentions drained no budget (#921 Astra B2)', () => {
+    const v = run('python3 scripts/budget.py https://example.invalid/.ssh/id_rsa');
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('touch-sensitive-path');
+  });
+
+  it('does not drop a nested child past the per-pattern cap (#921 Astra B2 follow-up)', () => {
+    const v = run('python3 scripts/parent.py');
+    expect(v.decision).not.toBe('allow');
+    const m = v.matches?.find(x => x.signal === 'file-delete' && /child\.py/.test(String(x.source ?? x.chain ?? '')));
+    expect(m).toBeDefined();
+  });
+
+  it('decides on the raw text: quoted separators are data, unquoted ones are siblings', () => {
+    expect(isWholeCommandInterpreterInvocation(FIXTURE_7)).toBe(true);
+    expect(isWholeCommandInterpreterInvocation(FIXTURE_8)).toBe(true);
+    expect(isWholeCommandInterpreterInvocation("node scripts/x.mjs --msg 'a; b | c > d $(e) `f`'")).toBe(true);
+    expect(isWholeCommandInterpreterInvocation('python3.12 scripts/x.py --tag=#1')).toBe(true);
+    expect(isWholeCommandInterpreterInvocation("python3 scripts/x.py --glob '*.py' --re \"a[0-9]{2}\"")).toBe(true);
+    for (const raw of [
+      'python3 x.py; true', 'python3 x.py && true', 'python3 x.py || true', 'python3 x.py | cat',
+      'python3 x.py &', 'python3 x.py\ntrue', 'python3 x.py \\\n--flag', 'python3 x.py > out',
+      'python3 x.py 2>/dev/null', 'python3 x.py < in', 'python3 x.py "$(date)"', 'python3 x.py "${X}"',
+      'python3 x.py `date`', 'python3 x.py "`date`"', 'python3 x.py $X', 'python3 x.py "a\\"b"',
+      'PATH=/tmp/evil python3 x.py', 'env python3 x.py', 'sudo python3 x.py', '/usr/bin/python3 x.py',
+      '"python3" x.py', 'bash x.sh', './x.py', 'python3 x.py # c', 'python3 x.py "open',
+      '(python3 x.py)', 'python3 x.py\x00', 'python3 scripts/x[a].py', 'python3 scripts/*.py',
+      'python3 scripts/x?.py', 'python3 scripts/{a,b}.py',
+      "python3 'scripts/verify_dist_patches.py;other'",
+      'python3 "scripts/x.py;other"', '',
+    ]) expect([raw, isWholeCommandInterpreterInvocation(raw)]).toEqual([raw, false]);
+  });
+});
+
+/**
+ * #921 review (Grok, 044c83f) — what the whole-command check must refuse beyond
+ * siblings, and what attestation costs at the fold ceiling.
+ */
+describe('#921 review: interpreter options, tilde, interpreter names', () => {
+  it('an option before the script withdraws attestation (preload / module / inline code)', () => {
+    for (const raw of [
+      'node -r ./other.js x.js', 'node --require ./other.js x.js', 'node --import ./other.mjs x.mjs',
+      'node --loader ./l.mjs x.mjs', 'node --experimental-loader ./l.mjs x.mjs', 'nodejs -r ./o.js x.js',
+      'python3 -m mod', 'python3 -m mod scripts/x.py', 'python3 -c pass', 'python3 -u scripts/x.py',
+      'python3 "-m" mod', "python3 '-m' mod", "python3 ''-m mod", 'python3 "scripts/x.py"', 'python3',
+      'python3   ', 'node --inspect x.js',
+    ]) expect([raw, isWholeCommandInterpreterInvocation(raw)]).toEqual([raw, false]);
+    // Options AFTER the script are the script's own arguments.
+    expect(isWholeCommandInterpreterInvocation('node scripts/x.js -r ./other.js --import y')).toBe(true);
+    expect(isWholeCommandInterpreterInvocation('python3 scripts/x.py -m mod -c pass')).toBe(true);
+  });
+
+  it('an unquoted tilde withdraws attestation; a quoted one is data', () => {
+    for (const raw of ['python3 ~/x.py', 'python3 ~root/x.py', 'python3 scripts/x.py ~/out', 'python3 scripts/x.py --out=~/o']) {
+      expect([raw, isWholeCommandInterpreterInvocation(raw)]).toEqual([raw, false]);
+    }
+    expect(isWholeCommandInterpreterInvocation("python3 scripts/x.py --out '~/o'")).toBe(true);
+    expect(isWholeCommandInterpreterInvocation('python3 scripts/x.py --out "~/o"')).toBe(true);
+  });
+
+  it('accepts python, pythonN and pythonN.M only', () => {
+    for (const ok of ['python', 'python3', 'python3.12', 'python2.7', 'node', 'nodejs']) {
+      expect([ok, isWholeCommandInterpreterInvocation(`${ok} scripts/x.py`)]).toEqual([ok, true]);
+    }
+    for (const bad of ['python.5', 'python3.', 'python33', 'python3.12.1', 'python3x', 'nodejs2', 'pypy3']) {
+      expect([bad, isWholeCommandInterpreterInvocation(`${bad} scripts/x.py`)]).toEqual([bad, false]);
+    }
+  });
+});
+
+describe('#921 review: attestation cost at the fold ceiling', () => {
+  // Same discipline as #86-redos: minima of interleaved batches against the
+  // path every call took before #921 (`env python3`, never attested), so a
+  // shared runner's noise only inflates a sample, plus a hang ceiling.
+  // Measured on the TARS A1 box: 55 ms attested vs 46 ms old at 256 KB.
+  const MAX_RATIO = 4;
+  const HANG_DETECTOR_MS = 2000;
+  const MAX_FOLDED = 262_144;
+  let dir: string;
+  const run = (command: string) => evaluateToolCall('Bash', { command }, undefined,
+    { resolveScriptSource: createScriptSourceResolver(dir) });
+
+  // DANGEROUS-tier text only (catastrophic rules are unchanged by #921 and would
+  // block before the attested scan mattered). Built from fragments so the
+  // source file itself is not a payload.
+  const J = (...p: string[]) => p.join('');
+  const LINE = [J('system', 'ctl stop nginx'), J('pki', 'll -f gateway'), J('ki', 'll -9 1'),
+    J('cron', 'tab -r'), J('npm i ', '-g left-pad')].join('; ') + '\n';
+  /** A python file just under the fold ceiling: `lines` dangerous lines in a docstring, prose after. */
+  const docstringFile = (lines: number): string => {
+    const wrap = (b: string) => `#!/usr/bin/env python3\nDOC = """\n${b}"""\nprint(1)\n`;
+    let body = '';
+    for (let i = 0; i < lines && wrap(body).length + 200 < MAX_FOLDED; i++) body += `step ${i}: ${LINE}`;
+    while (wrap(body).length + 200 < MAX_FOLDED) body += 'neutral prose about mailbox housekeeping and reporting.\n';
+    return wrap(body);
+  };
+  const FULL = docstringFile(Number.MAX_SAFE_INTEGER); // every line dangerous: > ATTESTED_CLASSIFY_CAP matches
+  const FEW = docstringFile(60);                       // 300 matches: inside the cap
+
+  beforeAll(() => {
+    dir = fs.mkdtempSync(path.join('/tmp', 'sc-921-cost-'));
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    fs.writeFileSync(path.join(dir, 'scripts', 'full.py'), FULL);
+    fs.writeFileSync(path.join(dir, 'scripts', 'few.py'), FEW);
+  });
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  function costRatio(attested: string, baseline: string): { ratio: number; worstMs: number } {
+    run(attested); run(baseline);
+    let ratio = Infinity;
+    let worstMs = 0;
+    for (let attempt = 0; attempt < 3 && ratio >= MAX_RATIO; attempt++) {
+      let a = Infinity;
+      let b = Infinity;
+      for (let k = 0; k < 5; k++) {
+        let t = performance.now(); run(attested); const am = performance.now() - t;
+        t = performance.now(); run(baseline); const bm = performance.now() - t;
+        a = Math.min(a, am); b = Math.min(b, bm); worstMs = Math.max(worstMs, am);
+      }
+      ratio = Math.min(ratio, a / Math.max(b, 1));
+    }
+    return { ratio, worstMs };
+  }
+
+  it('the files sit at the fold ceiling and are folded, not opaque', () => {
+    for (const f of [FULL, FEW]) {
+      expect(f.length).toBeGreaterThan(MAX_FOLDED - 1024);
+      expect(f.length).toBeLessThanOrEqual(MAX_FOLDED);
+    }
+    expect(run('python3 scripts/full.py').signals).not.toContain('opaque-script-invocation');
+  });
+
+  it('every line dangerous: bounded cost, and past the cap it falls back to the old verdict', () => {
+    const { ratio, worstMs } = costRatio('python3 scripts/full.py', 'env python3 scripts/full.py');
+    expect(ratio).toBeLessThan(MAX_RATIO);
+    expect(worstMs).toBeLessThan(HANG_DETECTOR_MS);
+    const v = run('python3 scripts/full.py');
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
+  it('dangerous text inside the cap: bounded cost, judged as the docstring it is', () => {
+    const { ratio, worstMs } = costRatio('python3 scripts/few.py', 'env python3 scripts/few.py');
+    expect(ratio).toBeLessThan(MAX_RATIO);
+    expect(worstMs).toBeLessThan(HANG_DETECTOR_MS);
+    const v = run('python3 scripts/few.py');
+    expect(v.decision).toBe('allow');
+    for (const s of DANGEROUS_TIER_SIGNALS) expect(v.signals).not.toContain(s);
+    expect(run('env python3 scripts/few.py').signals).toContain('stop-process-or-service');
+  });
 });
