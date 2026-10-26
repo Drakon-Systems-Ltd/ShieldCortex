@@ -35,8 +35,20 @@ class SelfProtectionFloor(unittest.TestCase):
             "cp forged.json ~/.shieldcortex/approvals/guard-readiness.json",
             "shieldcortex config --action-guard-disable",
             "echo {} > ~/.shieldcortex/config.json",
+            # #922: a posture loosening, including a target it cannot read.
+            "shieldcortex guard posture off",
+            "npx shieldcortex guard posture advisory",
+            "bash -c 'shieldcortex guard posture off'",
+            "$X guard posture off",
+            "shieldcortex guard posture $T",
         ):
             self.assertTrue(fallback_self_protection_match(cmd), cmd)
+        for cmd in (
+            "shieldcortex guard posture enforce",
+            "shieldcortex guard posture",
+            "shieldcortex guard posture --json",
+        ):
+            self.assertFalse(fallback_self_protection_match(cmd), cmd)
         v = ActionGuardVerdict("allow", [], "down", available=False)
         d = action_guard_decision(v, enforce=False, fallback_dangerous=True, fallback_self_protected=True)
         self.assertEqual(d["action"], "block")

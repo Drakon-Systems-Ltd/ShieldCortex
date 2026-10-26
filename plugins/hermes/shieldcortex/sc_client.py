@@ -112,7 +112,7 @@ _FALLBACK_DANGEROUS = [
     re.compile(r"(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b", re.I),
     re.compile(r"(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b", re.I),
     re.compile(r"\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)", re.I),
-    re.compile(r"--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b", re.I),
+    re.compile(r"--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b|\bguard\s+posture(?:\s+-[\w-]+)*\s+['\"]?(?:(?:off|advisory)(?=$|[\s'\";&|)])|[$`*?\[{])", re.I),
     re.compile(r"\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems/shieldcortex-realtime)\b", re.I),
     re.compile(r"\.shieldcortex[\\/]+config\.json\b", re.I),
 ]
@@ -301,7 +301,7 @@ _FALLBACK_SELF_PROTECTION = [
         re.I,
     ), False),
     (re.compile(r"\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b", re.I), False),
-    (re.compile(r"--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b", re.I), False),
+    (re.compile(r"--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b|\bguard\s+posture(?:\s+-[\w-]+)*\s+['\"]?(?:(?:off|advisory)(?=$|[\s'\";&|)])|[$`*?\[{])", re.I), False),
     (re.compile(r"\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems/shieldcortex-realtime)\b", re.I), False),
     (re.compile(r"\.shieldcortex[\\/]+config\.json\b", re.I), False),
     (re.compile(r"\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=", re.I), False),

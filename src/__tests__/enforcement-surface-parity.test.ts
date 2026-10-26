@@ -520,6 +520,11 @@ describe('#509 r5 finding 9 — the Hermes outage floor DECIDES like the core fl
     'echo {} > ~/.shieldcortex/config.json',
     'echo x >> ~/.shieldcortex/DECISIONS.md',
     'shieldcortex config --action-guard-disable',
+    // #922: a posture loosening is on the floor; a tightening and the read are not.
+    'shieldcortex guard posture off',
+    'npx shieldcortex guard posture advisory',
+    'shieldcortex guard posture enforce',
+    'shieldcortex guard posture',
     'npm uninstall -g shieldcortex',
     'cat ~/.claude/settings.json',
     'ls /etc/shieldcortex',

@@ -84,6 +84,7 @@ describe('interceptor — Action Guard wiring', () => {
       { command: 'echo {} >> ~/.shieldcortex/approvals/guard-readiness-transitions.jsonl' },
       { command: 'echo {} > ~/.shieldcortex/config.json' },
       { command: 'shieldcortex config --action-guard-disable' },
+      { command: 'shieldcortex guard posture advisory' },
     ]) {
       await expect(i.handleToolCall({ toolName: 'Bash', arguments: args, requireApproval: async () => false })).rejects.toThrow(/denied by user/);
     }

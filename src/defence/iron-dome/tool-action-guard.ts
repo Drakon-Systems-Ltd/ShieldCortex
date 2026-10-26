@@ -1800,7 +1800,8 @@ function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
  * systemInstallInvoked). One pass over tokens per statement.
  *
  * CLI disable: command-position shieldcortex (or npx/node wrapper, or $var
- * fail-closed) plus a disable/advisory/deactivate flag in the rest. #509:
+ * fail-closed) plus a disable/advisory/deactivate flag in the rest, or
+ * #922 `guard posture off|advisory` (see argvLoosensGuardPosture). #509:
  * `--action-guard-enforce-when-ready` is in the same class — on an enforcing
  * install it drops to shadow until readiness is proven. From off it is a
  * tightening and ungated (a disabled guard does not run). From watch only it
@@ -1822,6 +1823,27 @@ function stripTokDecor(tok: string): string {
 function isGuardDisableFlag(tok: string): boolean {
   const t = stripTokDecor(tok);
   return /^--action-guard-(?:disable|advisory|enforce-when-ready)$/i.test(t);
+}
+/**
+ * #922: `guard posture off|advisory` is a loosening invocation, so it sits on
+ * the same floor as `--action-guard-disable`. The target is the first
+ * non-flag argument after `guard posture`; a `$var`, command substitution or
+ * glob there cannot be read statically and is held (fail-closed). `enforce`
+ * and the bare read-only form are not flagged.
+ */
+function argvLoosensGuardPosture(rest: readonly string[]): boolean {
+  for (let i = 0; i + 1 < rest.length; i++) {
+    if (!/^guard$/i.test(stripTokDecor(rest[i])) || !/^posture$/i.test(stripTokDecor(rest[i + 1]))) continue;
+    for (let j = i + 2; j < rest.length; j++) {
+      const raw = rest[j];
+      if (/[$`*?[\]{}]/.test(raw)) return true;
+      const t = stripTokDecor(raw);
+      if (t.startsWith('-')) continue;
+      if (/^(?:off|advisory)$/i.test(t)) return true;
+      break;
+    }
+  }
+  return false;
 }
 function argvIsGlobalUninstallOfGuard(rest: readonly string[], base: string): boolean {
   let verb: string | null = null;
@@ -1868,7 +1890,9 @@ function guardDisableInvoked(text: string, depth = 0): boolean {
   // wrapper-dense ReDoS corpus (`nice env nohup` x 1100) has neither, and
   // walking it as argv is O(statements x tokens) for no gain. $PM uninstall
   // of a non-literal package is #504-adjacent and already un-gated.
-  if (depth === 0 && !/shieldcortex/i.test(text)) return false;
+  // #922: `$X guard posture off` names neither, so its subcommand pair also
+  // admits the walk (the $var command position is fail-closed below).
+  if (depth === 0 && !/shieldcortex|\bguard\s+posture\b/i.test(text)) return false;
   if (depth < MAX_INLINE_RECURSION) {
     for (const body of collectExecutableBodies(text)) {
       if (body && guardDisableInvoked(body, depth + 1)) return true;
@@ -1890,6 +1914,7 @@ function guardDisableInvoked(text: string, depth = 0): boolean {
       const rest = tokens.slice(i + 1);
       const restHasDisable =
         rest.some(isGuardDisableFlag)
+        || argvLoosensGuardPosture(rest)
         || rest.some((a, idx) => /^iron-dome$/i.test(stripTokDecor(a)) && /^deactivate$/i.test(stripTokDecor(rest[idx + 1] ?? '')));
       const binIsGuard = GUARD_BIN.test(base) || GUARD_BIN.test(commandBaseName(base));
       const wrapperThenGuard = /^(?:npx|node|env)$/i.test(base) && rest.some(a => GUARD_BIN.test(commandBaseName(a)) || a.startsWith('$') || a.includes('$('));
