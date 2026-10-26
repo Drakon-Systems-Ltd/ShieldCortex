@@ -147,13 +147,24 @@ function runtimeBase(inputs: PostureInputs): Record<string, unknown> {
   return inputs.signedRaw ?? {};
 }
 
+/**
+ * The hook's view: lock, then the #209 fold. pre-tool-hook.mjs honours
+ * readinessGate only when no lock file is present (`inlinePolicyLockPresent`),
+ * whichever block it came from — `applyPolicyLock` strips the top-level key,
+ * not the alias one, so it is dropped here too.
+ */
+function lockedGuardOf(raw: Record<string, unknown>, lock: PolicyLockState): Record<string, unknown> {
+  const guard = guardOf(applyPolicyLock(raw, lock));
+  if (lockPresent(lock)) delete guard.readinessGate;
+  return guard;
+}
+
 function resolveHook(inputs: PostureInputs): PlaneResult | null {
   if (!inputs.claudeWired) return null;
-  const locked = applyPolicyLock(runtimeBase(inputs), inputs.lock);
   return {
     plane: 'claude',
     label: PLANE_LABEL.claude,
-    posture: postureOfGuard(guardOf(locked)),
+    posture: postureOfGuard(lockedGuardOf(runtimeBase(inputs), inputs.lock)),
     source: 'config.json actionGuard',
     overrides: lockPresent(inputs.lock) ? ['policy lock applied'] : [],
   };
@@ -167,6 +178,33 @@ function openclawEntry(raw: Record<string, unknown>): Record<string, unknown> | 
     if (isBlock(entries[id])) return entries[id] as Record<string, unknown>;
   }
   return null;
+}
+
+const PLUGIN_GUARD_BOOLEANS = ['enabled', 'enforce', 'readinessGate'] as const;
+
+/**
+ * plugins/openclaw/index.ts `normaliseActionGuardBlock`, for the keys a posture
+ * reads: a non-boolean is DROPPED (the #112 `"false"` typo must not change the
+ * plugin), so it cannot change this report either. Differs from the hook on
+ * purpose — the hook's bare parse reads `enforce !== false`.
+ */
+function pluginGuardBlock(raw: unknown): Record<string, boolean> {
+  if (!isBlock(raw)) return {};
+  const out: Record<string, boolean> = {};
+  for (const k of PLUGIN_GUARD_BOOLEANS) {
+    if (typeof raw[k] === 'boolean') out[k] = raw[k] as boolean;
+  }
+  return out;
+}
+
+/**
+ * plugins/openclaw/index.ts `normaliseConfig` for one file: each block is
+ * validated BEFORE the #209 alias fold, so an invalid top-level key does not
+ * hide a valid alias value.
+ */
+function pluginGuardOf(raw: Record<string, unknown>): Record<string, boolean> {
+  const interceptor = isBlock(raw.interceptor) ? raw.interceptor : {};
+  return { ...pluginGuardBlock(interceptor.actionGuard), ...pluginGuardBlock(raw.actionGuard) };
 }
 
 function resolveOpenClaw(inputs: PostureInputs): PlaneResult | null {
@@ -184,17 +222,20 @@ function resolveOpenClaw(inputs: PostureInputs): PlaneResult | null {
   const entry = openclawEntry(oc.raw);
   if (!entry) return null;
 
-  const base = runtimeBase(inputs);
-  const baseGuard = guardOf(base);
+  // Validated per file, then merged (mergeConfigs): entry wins per key; the
+  // readiness gate comes from the base only.
+  const baseGuard = pluginGuardOf(runtimeBase(inputs));
   const config = isBlock(entry.config) ? entry.config : {};
-  const entryGuard = guardOf(config);
-  // mergeConfigs: entry wins per key; the readiness gate comes from the base only.
+  const entryGuard = pluginGuardOf(config);
   const merged: Record<string, unknown> = { ...baseGuard, ...entryGuard };
   if (baseGuard.readinessGate === true) merged.readinessGate = true;
   else delete merged.readinessGate;
   const entryInterceptor = isBlock(config.interceptor) ? config.interceptor : {};
 
-  // applyPolicyLockToPluginConfig: the lock over the merge.
+  // applyPolicyLockToPluginConfig: the lock over the merge. It also re-arms
+  // the interceptor whenever the locked guard is enabled (withGuardPosture), so
+  // a shield-file `interceptor.enabled:false` cannot leave an enabled guard
+  // ungated — and with the guard not enabled the posture is off regardless.
   const lockedGuard = guardOf(applyPolicyLock({ actionGuard: merged }, inputs.lock));
   // register(): an entry `interceptor.enabled:false` on a host with no lock
   // means before_tool_call is never registered — no gate, whatever the guard
@@ -223,8 +264,9 @@ function resolveOpenClaw(inputs: PostureInputs): PlaneResult | null {
 }
 
 function hermesValue(r: PostureRecord): PlanePosture | null {
-  // Only a fresh self-report from a process that has not ended.
-  if (r.configured_posture.method !== 'process-self-report' || r.membership === 'ended') return null;
+  // Only a self-report from a process shown to be running now (#613
+  // `postureLevel`): an unverified or unobserved one is unknown, not its claim.
+  if (r.configured_posture.method !== 'process-self-report' || r.membership !== 'current') return null;
   if (r.runtime_loaded.value === 'no') return 'off';
   switch (r.configured_posture.value) {
     case 'enforce': return 'enforce';
@@ -249,14 +291,13 @@ function resolveHermes(inputs: PostureInputs): PlaneResult | null {
       overrides: [],
     };
   }
-  const unverified = recs.some((r) => hermesValue(r) !== null && r.membership !== 'current');
   return {
     plane: 'hermes',
     label: PLANE_LABEL.hermes,
     // The loosest value is the one that matters for a gate.
     posture: distinct[0],
     ...(distinct.length > 1 ? { values: distinct } : {}),
-    source: unverified ? 'self-report, liveness unverified' : 'self-report',
+    source: 'self-report',
     overrides: [],
   };
 }
@@ -265,14 +306,14 @@ function resolveHermes(inputs: PostureInputs): PlaneResult | null {
 function signedPosture(inputs: PostureInputs): PlanePosture | null {
   const v = inputs.integrity;
   if (v === 'tampered' || v === 'unreadable' || v === 'malformed' || v === 'unverified') return null;
-  return postureOfGuard(guardOf(applyPolicyLock(inputs.signedRaw ?? {}, inputs.lock)));
+  return postureOfGuard(lockedGuardOf(inputs.signedRaw ?? {}, inputs.lock));
 }
 
 /** The view the old `Action guard config` row graded: strict on tamper, lock applied. */
 function gradedPosture(inputs: PostureInputs): PlanePosture {
   const raw = inputs.signedRaw ?? {};
   const trusted = inputs.integrity === 'tampered' ? applyStrictFailClosedPosture(raw) : raw;
-  return postureOfGuard(guardOf(applyPolicyLock(trusted, inputs.lock)));
+  return postureOfGuard(lockedGuardOf(trusted, inputs.lock));
 }
 
 function gradedKeyOf(inputs: PostureInputs, graded: PlanePosture): string | null {
@@ -377,7 +418,9 @@ export function readPostureInputs(opts: ReadPostureOptions = {}): PostureInputs 
   }
   return {
     signedRaw,
-    integrity: inspectConfigIntegrity().verdict,
+    // The integrity reader only knows the default config dir; a different
+    // file cannot be graded against it, so it is not called valid.
+    integrity: path.resolve(configDir) === path.resolve(getConfigDir()) ? inspectConfigIntegrity().verdict : 'unverified',
     lock: readPolicyLock({ audit: false, warn: false }),
     claudeWired: claudeToolGateWired(opts.home),
     openclaw: readOpenClawInput(opts.openclawPath === undefined ? defaultOpenClawConfigPath() : opts.openclawPath),

@@ -116,6 +116,27 @@ describe('#922 resolvePlanePostures — the #634 shape and other overlays', () =
     expect(posturesOf(r).openclaw).toBe('advisory');
   });
 
+  it('PR939 B1: a non-boolean entry key is dropped like the plugin drops it; the signed value survives, no override note', () => {
+    for (const bad of ['false', 0, null, 'off']) {
+      const r = resolvePlanePostures(inputs({
+        signedRaw: { actionGuard: { enabled: true, enforce: false } },
+        openclaw: { state: 'ok', raw: entry({ actionGuard: { enforce: bad, enabled: String(bad) } }) },
+      }));
+      expect(posturesOf(r)).toEqual({ claude: 'advisory', openclaw: 'advisory' });
+      expect(r.planes.find((p) => p.plane === 'openclaw')!.overrides).toEqual([]);
+    }
+  });
+
+  it('PR939 B1: an invalid top-level key does not hide a valid alias value on the plugin plane; the hook keeps its bare parse', () => {
+    const r = resolvePlanePostures(inputs({
+      signedRaw: { actionGuard: { enabled: true, enforce: 'no' }, interceptor: { actionGuard: { enforce: false } } },
+      openclaw: { state: 'ok', raw: entry({}) },
+    }));
+    // Hook: top-level wins on the bare value, and "no" !== false → enforce.
+    // Plugin: "no" is dropped before the fold, so the alias false stands.
+    expect(posturesOf(r)).toEqual({ claude: 'enforce', openclaw: 'advisory' });
+  });
+
   it('entry enabled:true under a signed off → plugin enforce, hook off → mismatch', () => {
     const r = resolvePlanePostures(inputs({ openclaw: { state: 'ok', raw: entry({ actionGuard: { enabled: true } }) } }));
     expect(posturesOf(r)).toEqual({ claude: 'off', openclaw: 'enforce' });
@@ -209,6 +230,25 @@ describe('#922 resolvePlanePostures — policy lock and tamper', () => {
   });
 });
 
+describe('PR939 B3: a locked host ignores the alias readinessGate, like the hook', () => {
+  const signed = { interceptor: { actionGuard: { enabled: true, enforce: true, readinessGate: true } } };
+
+  it('unlocked: the alias readinessGate is honoured on the hook plane', () => {
+    expect(posturesOf(resolvePlanePostures(inputs({ signedRaw: signed }))).claude).toBe('enforce-when-ready');
+  });
+
+  it.each([
+    ['locked', lockPinning({})],
+    ['unverifiable', { status: 'unverifiable', path: '/etc/shieldcortex/policy.json', reason: 'parse-failed', detail: 'x' } as PolicyLockState],
+  ])('%s: hook plane enforce, signed enforce, and no false "planes disagree" with OpenClaw', (_n, lock) => {
+    const r = resolvePlanePostures(inputs({ signedRaw: signed, lock, openclaw: { state: 'ok', raw: entry({}) } }));
+    expect(posturesOf(r)).toEqual({ claude: 'enforce', openclaw: 'enforce' });
+    expect(r.signed).toBe('enforce');
+    expect(r.verdict).toBe('agree');
+    expect(guardPostureRow(r).status).toBe('pass');
+  });
+});
+
 describe('#922 resolvePlanePostures — Hermes from #613 self-reports', () => {
   it('Hermes looser than the hook → mismatch', () => {
     const r = resolvePlanePostures(inputs({ signedRaw: { actionGuard: { enabled: true } }, postureRecords: [hermes('advisory')] }));
@@ -268,6 +308,22 @@ describe('#922 resolvePlanePostures — Hermes from #613 self-reports', () => {
       const r = resolvePlanePostures(inputs({ signedRaw: { actionGuard: { enabled: true } }, postureRecords: [rec] }));
       expect(posturesOf(r)).toEqual({ claude: 'enforce', hermes: null });
       expect(r.verdict).toBe('agree');
+    }
+  });
+
+  it('PR939 B2: an unverified self-report (liveness unsupported → unobserved) is unknown, never its claimed enforce', () => {
+    for (const claim of ['enforce', 'advisory']) {
+      const rec = deriveToolGateRecord({
+        runtime: 'hermes', profile: 'default', installed: 'yes',
+        read: { kind: 'valid', report: reportBody({ configured_posture: claim }) as unknown as SelfReport },
+        liveness: 'unsupported', nowMs: NOW,
+      });
+      expect(rec.membership).toBe('unobserved');
+      const r = resolvePlanePostures(inputs({ signedRaw: {}, postureRecords: [rec] }));
+      expect(posturesOf(r)).toEqual({ claude: 'off', hermes: null });
+      expect(r.verdict).toBe('agree');
+      const row = guardPostureRow(r);
+      expect(row.fix).toMatch(/Do not enable Action Guard/);
     }
   });
 

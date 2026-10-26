@@ -4998,6 +4998,16 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     return results;
   }
 
+  // #922: one posture row for every gate plane, replacing the signed-only
+  // disabled / warn-mode rows. Same resolver as `shieldcortex guard posture`.
+  // Ahead of the config parse below: that parse throws on a malformed
+  // config.json, and the posture reader handles one itself.
+  const pluginLive = readOpenClawPluginGuardLive();
+  const pluginOff = pluginPlaneDisarmed(pluginLive);
+  const pluginOffFix =
+    'Do not add a webhook and do not enable Action Guard from this line. Signed config, plugin entry, and running interceptor are three planes. Headless denials staying local is expected while Guard is off.';
+  results.push(checkGuardPosture({ pluginOffFix: pluginOff ? pluginOffFix : undefined }));
+
   // 2. Config resolution (#209). Both surfaces now resolve ONE effective
   //    config: top-level `actionGuard` governs, `interceptor.actionGuard` is
   //    a deprecated per-key gap-fill alias, top-level wins on conflict. This
@@ -5030,16 +5040,8 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       : null;
     const merged = { ...(alias ?? {}), ...(top ?? {}) };
     const effective = { enabled: merged.enabled === true, enforce: merged.enforce !== false };
-    const pluginLive = readOpenClawPluginGuardLive();
-    const pluginOff = pluginPlaneDisarmed(pluginLive);
     const planes = readHostGatePlanes();
     const claudeGating = claudePlaneEnforcing(planes);
-    const pluginOffFix =
-      'Do not add a webhook and do not enable Action Guard from this line. Signed config, plugin entry, and running interceptor are three planes. Headless denials staying local is expected while Guard is off.';
-
-    // #922: one posture row for every gate plane, replacing the signed-only
-    // disabled / warn-mode rows. Same resolver as `shieldcortex guard posture`.
-    results.push(checkGuardPosture({ pluginOffFix: pluginOff ? pluginOffFix : undefined }));
 
     // #242 Defect B: enforce-on + no notify channel is how unattended denials
     // vanished for eight days while lastRunStatus stayed ok.
