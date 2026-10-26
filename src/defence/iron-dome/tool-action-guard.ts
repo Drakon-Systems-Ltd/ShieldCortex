@@ -5300,7 +5300,7 @@ const MAX_DETECTED_SCRIPTS = 8;
 const MAX_INLINE_RECURSION = 2;
 
 /** The interpreters whole-command attestation (#921) recognises, as a bare command word. */
-const WHOLE_COMMAND_INTERPRETER = /^(?:python\d?(?:\.\d+)?|node|nodejs)$/;
+const WHOLE_COMMAND_INTERPRETER = /^(?:python(?:\d(?:\.\d+)?)?|node|nodejs)$/;
 
 /**
  * #921 (#874 cut B) — is this RAW command text one named-interpreter
@@ -5317,12 +5317,17 @@ const WHOLE_COMMAND_INTERPRETER = /^(?:python\d?(?:\.\d+)?|node|nodejs)$/;
  *   - the first word is a bare `python`/`python3`/`python3.x`/`node`/`nodejs`
  *     — so no environment prefix (`PATH=… python3`), no `env`/`sudo`/`command`
  *     wrapper and no path to some other binary;
+ *   - the first argument is the script itself, unquoted and starting with a
+ *     letter, digit, `_`, `.` or `/` — so no interpreter option runs code the
+ *     guard never folded (`node -r ./other.js`, `--import`, `--loader`,
+ *     `python3 -m mod`, `-c …`), quoted or not;
  *   - outside quotes: no `;` `&` `|` (siblings, background, pipes), no `<` `>`
  *     (redirection, glued or spaced), no `(` `)` (subshells), no `$` or
  *     backtick (substitution, `${…}`, variables), no backslash (escapes and
  *     line continuation), no `*` `?` `[` `{` (a glob or brace expansion can
- *     run a different file than the one the guard read), no `#` comment, and
- *     no newline or other control character;
+ *     run a different file than the one the guard read), no `~` (tilde
+ *     expansion names a file by the caller's HOME, not by the text the guard
+ *     resolved), no `#` comment, and no newline or other control character;
  *   - inside double quotes: no `$`, backtick or backslash — the shell expands
  *     those there too;
  *   - single quotes are literal; every quote is closed.
@@ -5338,6 +5343,8 @@ export function isWholeCommandInterpreterInvocation(rawCommand: string): boolean
   let i = 0;
   while (i < text.length && text[i] !== ' ' && text[i] !== '\t') i++;
   if (!WHOLE_COMMAND_INTERPRETER.test(text.slice(0, i))) return false;
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++;
+  if (!/^[A-Za-z0-9_./]$/.test(text[i] ?? '')) return false;
   let quote = '';
   let wordStart = true;
   for (; i < text.length; i++) {
@@ -5354,7 +5361,7 @@ export function isWholeCommandInterpreterInvocation(rawCommand: string): boolean
     if (ch === ' ' || ch === '\t') { wordStart = true; continue; }
     if (ch === "'" || ch === '"') { quote = ch; wordStart = false; continue; }
     if (ch.charCodeAt(0) < 0x20 || ch === '\x7f') return false;
-    if (';&|<>()$`\\*?[{'.includes(ch)) return false;
+    if (';&|<>()$`\\*?[{~'.includes(ch)) return false;
     if (ch === '#' && wordStart) return false;
     wordStart = false;
   }

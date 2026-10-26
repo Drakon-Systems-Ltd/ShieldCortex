@@ -1206,3 +1206,121 @@ describe('#921 whole-command interpreter attestation', () => {
     ]) expect([raw, isWholeCommandInterpreterInvocation(raw)]).toEqual([raw, false]);
   });
 });
+
+/**
+ * #921 review (Grok, 044c83f) — what the whole-command check must refuse beyond
+ * siblings, and what attestation costs at the fold ceiling.
+ */
+describe('#921 review: interpreter options, tilde, interpreter names', () => {
+  it('an option before the script withdraws attestation (preload / module / inline code)', () => {
+    for (const raw of [
+      'node -r ./other.js x.js', 'node --require ./other.js x.js', 'node --import ./other.mjs x.mjs',
+      'node --loader ./l.mjs x.mjs', 'node --experimental-loader ./l.mjs x.mjs', 'nodejs -r ./o.js x.js',
+      'python3 -m mod', 'python3 -m mod scripts/x.py', 'python3 -c pass', 'python3 -u scripts/x.py',
+      'python3 "-m" mod', "python3 '-m' mod", "python3 ''-m mod", 'python3 "scripts/x.py"', 'python3',
+      'python3   ', 'node --inspect x.js',
+    ]) expect([raw, isWholeCommandInterpreterInvocation(raw)]).toEqual([raw, false]);
+    // Options AFTER the script are the script's own arguments.
+    expect(isWholeCommandInterpreterInvocation('node scripts/x.js -r ./other.js --import y')).toBe(true);
+    expect(isWholeCommandInterpreterInvocation('python3 scripts/x.py -m mod -c pass')).toBe(true);
+  });
+
+  it('an unquoted tilde withdraws attestation; a quoted one is data', () => {
+    for (const raw of ['python3 ~/x.py', 'python3 ~root/x.py', 'python3 scripts/x.py ~/out', 'python3 scripts/x.py --out=~/o']) {
+      expect([raw, isWholeCommandInterpreterInvocation(raw)]).toEqual([raw, false]);
+    }
+    expect(isWholeCommandInterpreterInvocation("python3 scripts/x.py --out '~/o'")).toBe(true);
+    expect(isWholeCommandInterpreterInvocation('python3 scripts/x.py --out "~/o"')).toBe(true);
+  });
+
+  it('accepts python, pythonN and pythonN.M only', () => {
+    for (const ok of ['python', 'python3', 'python3.12', 'python2.7', 'node', 'nodejs']) {
+      expect([ok, isWholeCommandInterpreterInvocation(`${ok} scripts/x.py`)]).toEqual([ok, true]);
+    }
+    for (const bad of ['python.5', 'python3.', 'python33', 'python3.12.1', 'python3x', 'nodejs2', 'pypy3']) {
+      expect([bad, isWholeCommandInterpreterInvocation(`${bad} scripts/x.py`)]).toEqual([bad, false]);
+    }
+  });
+});
+
+describe('#921 review: attestation cost at the fold ceiling', () => {
+  // Same discipline as #86-redos: minima of interleaved batches against the
+  // path every call took before #921 (`env python3`, never attested), so a
+  // shared runner's noise only inflates a sample, plus a hang ceiling.
+  // Measured on the TARS A1 box: 55 ms attested vs 46 ms old at 256 KB.
+  const MAX_RATIO = 4;
+  const HANG_DETECTOR_MS = 2000;
+  const MAX_FOLDED = 262_144;
+  let dir: string;
+  const run = (command: string) => evaluateToolCall('Bash', { command }, undefined,
+    { resolveScriptSource: createScriptSourceResolver(dir) });
+
+  // DANGEROUS-tier text only (catastrophic rules are unchanged by #921 and would
+  // block before the attested scan mattered). Built from fragments so the
+  // source file itself is not a payload.
+  const J = (...p: string[]) => p.join('');
+  const LINE = [J('system', 'ctl stop nginx'), J('pki', 'll -f gateway'), J('ki', 'll -9 1'),
+    J('cron', 'tab -r'), J('npm i ', '-g left-pad')].join('; ') + '\n';
+  /** A python file just under the fold ceiling: `lines` dangerous lines in a docstring, prose after. */
+  const docstringFile = (lines: number): string => {
+    const wrap = (b: string) => `#!/usr/bin/env python3\nDOC = """\n${b}"""\nprint(1)\n`;
+    let body = '';
+    for (let i = 0; i < lines && wrap(body).length + 200 < MAX_FOLDED; i++) body += `step ${i}: ${LINE}`;
+    while (wrap(body).length + 200 < MAX_FOLDED) body += 'neutral prose about mailbox housekeeping and reporting.\n';
+    return wrap(body);
+  };
+  const FULL = docstringFile(Number.MAX_SAFE_INTEGER); // every line dangerous: > ATTESTED_CLASSIFY_CAP matches
+  const FEW = docstringFile(60);                       // 300 matches: inside the cap
+
+  beforeAll(() => {
+    dir = fs.mkdtempSync(path.join('/tmp', 'sc-921-cost-'));
+    fs.mkdirSync(path.join(dir, 'scripts'));
+    fs.writeFileSync(path.join(dir, 'scripts', 'full.py'), FULL);
+    fs.writeFileSync(path.join(dir, 'scripts', 'few.py'), FEW);
+  });
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  function costRatio(attested: string, baseline: string): { ratio: number; worstMs: number } {
+    run(attested); run(baseline);
+    let ratio = Infinity;
+    let worstMs = 0;
+    for (let attempt = 0; attempt < 3 && ratio >= MAX_RATIO; attempt++) {
+      let a = Infinity;
+      let b = Infinity;
+      for (let k = 0; k < 5; k++) {
+        let t = performance.now(); run(attested); const am = performance.now() - t;
+        t = performance.now(); run(baseline); const bm = performance.now() - t;
+        a = Math.min(a, am); b = Math.min(b, bm); worstMs = Math.max(worstMs, am);
+      }
+      ratio = Math.min(ratio, a / Math.max(b, 1));
+    }
+    return { ratio, worstMs };
+  }
+
+  it('the files sit at the fold ceiling and are folded, not opaque', () => {
+    for (const f of [FULL, FEW]) {
+      expect(f.length).toBeGreaterThan(MAX_FOLDED - 1024);
+      expect(f.length).toBeLessThanOrEqual(MAX_FOLDED);
+    }
+    expect(run('python3 scripts/full.py').signals).not.toContain('opaque-script-invocation');
+  });
+
+  it('every line dangerous: bounded cost, and past the cap it falls back to the old verdict', () => {
+    const { ratio, worstMs } = costRatio('python3 scripts/full.py', 'env python3 scripts/full.py');
+    expect(ratio).toBeLessThan(MAX_RATIO);
+    expect(worstMs).toBeLessThan(HANG_DETECTOR_MS);
+    const v = run('python3 scripts/full.py');
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
+  it('dangerous text inside the cap: bounded cost, judged as the docstring it is', () => {
+    const { ratio, worstMs } = costRatio('python3 scripts/few.py', 'env python3 scripts/few.py');
+    expect(ratio).toBeLessThan(MAX_RATIO);
+    expect(worstMs).toBeLessThan(HANG_DETECTOR_MS);
+    const v = run('python3 scripts/few.py');
+    expect(v.decision).toBe('allow');
+    for (const s of DANGEROUS_TIER_SIGNALS) expect(v.signals).not.toContain(s);
+    expect(run('env python3 scripts/few.py').signals).toContain('stop-process-or-service');
+  });
+});
