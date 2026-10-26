@@ -235,20 +235,24 @@ process.stdin.on('end', async () => {
     }
 
     const cwd = hookData.cwd || process.cwd();
+    const config = loadConfig();
+    // #916: background agent-config change watch. Detached and fail-open, so it
+    // cannot delay or break session start; opt out via sessionStart.agentConfigWatch=false.
+    // The payload cwd is the session's project root; pass it explicitly (the
+    // hook's own cwd can differ). Launched BEFORE the project-key gate: it
+    // guards user-level settings too, and a generic cwd such as OpenClaw's
+    // ~/.openclaw/workspace has no project key (#928 r2).
+    maybeSpawnAgentConfigWatch(config, { cwd });
+
     const project = deriveProjectKey(cwd);
 
     if (!project) {
       process.exit(0);
     }
 
-    const config = loadConfig();
-    // #915: background MCP tool-description check. Detached and fail-open, so it
-    // cannot delay or break session start; opt out via sessionStart.mcpToolCheck=false.
+    // #915: background MCP tool-description check; same detached, fail-open
+    // shape. Opt out via sessionStart.mcpToolCheck=false.
     maybeSpawnToolCheck(config);
-    // #916: background agent-config change watch; same detached, fail-open shape.
-    // Opt out via sessionStart.agentConfigWatch=false. The payload cwd is the
-    // session's project root; pass it explicitly (the hook's own cwd can differ).
-    maybeSpawnAgentConfigWatch(config, { cwd });
     // v4.11.0: default preamble off. The memory list is the signal — prescriptive
     // "use remember proactively" text is drumbeat noise. Opt in via
     // config.sessionStart.preamble = 'minimal' | 'full'.
