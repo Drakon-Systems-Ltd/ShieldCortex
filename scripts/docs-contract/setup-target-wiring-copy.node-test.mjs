@@ -236,8 +236,8 @@ describe('src/index.ts top-level --help setup entry', () => {
 });
 
 describe('docs: the targeted form is described as wiring without asking', () => {
-  it('README.md install section names the files setup claude can write', () => {
-    const para = read('README.md').split('\n').find((l) => l.startsWith('`setup` is the onboarding command:'));
+  it('docs/README-DETAILS.md install notes (moved from the README) name the files setup claude can write', () => {
+    const para = read('docs/README-DETAILS.md').split('\n').find((l) => l.startsWith('`setup` is the onboarding command:'));
     assert.ok(para, 'README setup paragraph not found');
     assert.match(para, /runs the Claude Code install without asking/);
     for (const p of CLAUDE_INSTALL_PATHS) assert.ok(para.includes('`' + p + '`'), `README missing ${p}`);

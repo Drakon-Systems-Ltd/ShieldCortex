@@ -36,7 +36,7 @@ describe('5.0.0 breaking notice — visible before anyone updates', () => {
     // One line in Install, before the command, with the upgrade page linked.
     // The EBADENGINE / engine-strict / Node 20 / Node 23 / database-engine
     // wording moved off the front page; it must still be in the docs.
-    const section = readme.indexOf('## Install');
+    const section = readme.indexOf('## Quick start');
     const npm = readme.indexOf('npm install -g shieldcortex', section);
     expect(section).toBeGreaterThan(0);
     expect(npm).toBeGreaterThan(section);

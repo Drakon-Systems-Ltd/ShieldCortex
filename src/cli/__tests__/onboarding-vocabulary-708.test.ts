@@ -156,7 +156,10 @@ describe('#708 — help text describes install and quickstart accurately', () =>
 
 describe('#708 — README agrees with the code', () => {
   const readme = read('README.md');
-  const install = readme.slice(readme.indexOf('## Install'), readme.indexOf('## Where it can block'));
+  // The install steps stay on the front page; the caveat paragraphs moved to docs/README-DETAILS.md (README revamp).
+  const quick = readme.slice(readme.indexOf('## Quick start'), readme.indexOf('## Where it can block'));
+  const details = read('docs', 'README-DETAILS.md');
+  const install = quick + '\n' + details.slice(details.indexOf('## Install notes'), details.indexOf('## Where it can block: host notes'));
 
   it('the install steps onboard with setup', () => {
     expect(install).toMatch(/```bash\nnpm install -g shieldcortex\nshieldcortex setup\nshieldcortex doctor\n```/);
