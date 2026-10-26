@@ -8,6 +8,7 @@ import {
   doctorExitCode,
   hermesConfirmedAbsent,
   readHostGatePlanes,
+  readHostGatePlanesWithPosture,
   renderPluginLoadVerdict,
   withDuplicateInstallEvidence,
 } from '../doctor.js';
@@ -380,7 +381,8 @@ describe('#651 r2 — HOSTS legend matches the configuration that produced the r
   }
 
   function hostsText(): string {
-    const planes = readHostGatePlanes(home);
+    // #922: the header doctor prints carries the posture row's verdict.
+    const planes = readHostGatePlanesWithPosture(home);
     const table = scanHostTable(home, { openclawBinaryPresent: () => true });
     return formatHostTable(table, '0.0.0', planes).join('\n');
   }
@@ -398,7 +400,7 @@ describe('#651 r2 — HOSTS legend matches the configuration that produced the r
     expect(text).toContain('Guard off');
     expect(text).toMatch(/observe-only = entry not disabled but not\s+armed to block \(enforce false, or actionGuard\/interceptor disabled\)/);
     expect(text).not.toMatch(/observe-only = enabled/);
-    expect(text).toMatch(/not Hermes,\s+not a live check/);
+    expect(text).toMatch(/configured posture, not a live check/);
   });
 
   it('Claude Code enforcing beside an observe-only plugin is "Guard mixed", and the legend defines mixed', () => {
@@ -407,7 +409,7 @@ describe('#651 r2 — HOSTS legend matches the configuration that produced the r
     openclawEntry({ enabled: true, config: { actionGuard: { enabled: false } } });
     const text = hostsText();
     expect(text).toContain('Guard mixed');
-    expect(text).toMatch(/mixed = Claude Code enforcing, OpenClaw observe-only\/off/);
+    expect(text).toMatch(/mixed = the Action guard\s+posture row fails/);
   });
 
   it('a disabled plugin entry shows off, which the legend defines as entry disabled', () => {

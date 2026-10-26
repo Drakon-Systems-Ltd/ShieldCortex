@@ -450,13 +450,36 @@ unreadable `config.json` as well as a real off, and a signed off does not prove
 the OpenClaw plane is off, because the plugin's own config can enable the
 guard. A live gate with no lock stays ❌.
 
-The HOSTS table header (`Guard on/off/mixed/advisory`) is computed from the configured
-Claude Code hook and OpenClaw plugin only; Hermes feeds it nothing, and it is
-not a check of running processes. `mixed` is the Claude Code hook enforcing
-while OpenClaw is observe-only or off; `on` is otherwise at least one of the two
-enforcing (OpenClaw counts only when signed `actionGuard.enabled` is `true`);
-`advisory` is neither enforcing while the Claude Code hook is wired and the
-signed guard is on in Watch only; `off` is none of these. The word after a host is that host's own configured gate. For
+**Action guard posture** (#922) is one row for every gate plane on the box.
+The Claude Code hook is read the way the hook reads it: `config.json`
+`actionGuard` (the deprecated `interceptor.actionGuard` fills gaps), then the
+policy lock. The OpenClaw plugin is read the way the plugin reads it: the
+`openclaw.json` plugin entry merged over that same config, then the lock; an
+entry `interceptor.enabled: false` on a host with no lock, or a disabled entry,
+reads as off. Hermes does not read `config.json`; its posture is
+`SHIELDCORTEX_ENFORCE` in the Hermes gateway environment, so the row uses only
+a current Hermes self-report (#613) and shows Hermes as unknown without one.
+The row is ❌ when the hook and the plugin disagree (for example signed enforce
+with an entry `enforce: false`) or when Hermes reports a looser posture than
+them; Hermes reporting a tighter one (for example enforcing on a box where the
+signed guard is off) is shown, not failed. When they agree, off and advisory are
+⚠️ and enforce is ✅, as the old `Action guard config` row was; this row
+replaces it. A ❌ names `shieldcortex config --action-guard-disable` or
+`--action-guard-advisory` only when that rewrites the signed posture onto the
+plugin entry (best effort, then a gateway restart) and turns nothing on;
+otherwise it names no posture command.
+`shieldcortex guard posture` prints the same reading (exit 0 when the planes
+agree, 4 when they disagree, `--json` for machine output) and writes nothing.
+Both read files and self-reports: OpenClaw reads its entry at gateway start, so
+the row describes configuration, not the running processes.
+
+The HOSTS table header (`Guard on/off/mixed/advisory`) is configured posture,
+not a check of running processes. `mixed` is exactly the `Action guard
+posture` row failing. Otherwise `on` is the hook and the plugin agreeing on
+enforce (with no resolved reading: at least one of the two enforcing, OpenClaw
+counting only when signed `actionGuard.enabled` is `true`); `advisory` is not
+on while the Claude Code hook is wired and the signed guard is on in Watch only;
+`off` is none of these. The word after a host is that host's own configured gate. For
 OpenClaw, `observe-only` is a collapsed label: the plugin entry is not disabled
 but is not armed to block, which covers `enforce: false` and also a disabled
 `actionGuard` or `interceptor`. `off` is a disabled plugin entry. For Claude

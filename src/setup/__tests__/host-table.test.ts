@@ -149,8 +149,9 @@ describe('host table', () => {
     const text = lines.join('\n');
     expect(text).toContain('Guard off');
     expect(text).toMatch(/OpenClaw.*observe-only/);
-    expect(text).toMatch(/Header Guard on\/off\/mixed\/advisory: configured Claude Code hook and OpenClaw plugin only \(not Hermes,/);
-    expect(text).toMatch(/mixed = Claude Code enforcing, OpenClaw observe-only\/off/);
+    // #922: mixed is the Action guard posture row failing; Hermes feeds it.
+    expect(text).toMatch(/Header Guard on\/off\/mixed\/advisory: configured posture, not a live check/);
+    expect(text).toMatch(/mixed = the Action guard\s+posture row fails/);
     // #651 r2: observe-only is a collapsed label — a disarmed guard or
     // interceptor shows it too — so the legend never says it means "enabled".
     expect(text).toMatch(/actionGuard\/interceptor disabled/);
@@ -191,6 +192,21 @@ describe('host table', () => {
     expect(guardHeadlineFromPlanes({ ...base, signedEnabled: true, signedEnforce: true })).toBe('on');
     expect(guardHeadlineFromPlanes({ claudeWired: false, openclaw: 'unknown', signedEnabled: true, signedEnforce: false })).toBe('off');
     expect(guardHeadlineFromPlanes({ claudeWired: true, openclaw: 'enforcing', signedEnabled: true, signedEnforce: false })).toBe('on');
+  });
+
+  it('#922 with the posture verdict supplied, mixed is exactly a mismatch and on needs an agreed enforce', () => {
+    const base: HostGatePlanes = { claudeWired: true, openclaw: 'observe-only', signedEnabled: true, signedEnforce: true };
+    // The old rule called this mixed; the resolver says the lock (or merge) makes them agree.
+    expect(guardHeadlineFromPlanes({ ...base, postureMismatch: false, postureNodeReference: 'enforce' })).toBe('on');
+    expect(guardHeadlineFromPlanes({ ...base, postureMismatch: true, postureNodeReference: null })).toBe('mixed');
+    // Hermes looser: the hook/plugin agree, the row still FAILs, so the header is mixed.
+    expect(guardHeadlineFromPlanes({ ...base, openclaw: 'enforcing', postureMismatch: true, postureNodeReference: 'enforce' })).toBe('mixed');
+    // Signed advisory with a silent plugin entry: the old word said "enforcing"; both planes are advisory.
+    const advisory: HostGatePlanes = { claudeWired: true, openclaw: 'enforcing', signedEnabled: true, signedEnforce: false };
+    expect(guardHeadlineFromPlanes(advisory)).toBe('on');
+    expect(guardHeadlineFromPlanes({ ...advisory, postureMismatch: false, postureNodeReference: 'advisory' })).toBe('advisory');
+    // No hook/plugin reading at all: the old rule decides, minus its own mixed.
+    expect(guardHeadlineFromPlanes({ ...base, postureMismatch: false, postureNodeReference: null })).toBe('on');
   });
 
   it('#651 prints no legend when no row shows a gate word', () => {

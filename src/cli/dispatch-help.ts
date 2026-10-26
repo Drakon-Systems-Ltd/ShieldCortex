@@ -267,7 +267,19 @@ quarantine counts, memory quality and hook activity. Opens the memory database
 export const GUARD_HELP = `Usage: shieldcortex guard readiness [--surface claude-code|openclaw] [--json]
                                   Show the enforce-when-ready readiness conditions, per surface (#509)
        shieldcortex guard test-approval [--surface claude-code|openclaw]
-                                  Send a synthetic approval request through your channel`;
+                                  Send a synthetic approval request through your channel
+       shieldcortex guard posture [--json]
+                                  Show each gate plane's effective Action Guard posture (read-only;
+                                  exit 0 when the planes agree, 4 when they disagree)
+
+Where each plane reads its posture (guard posture changes none of them):
+  Claude Code hook   ~/.shieldcortex/config.json actionGuard, then the policy lock
+                     (set with shieldcortex config --action-guard-*)
+  OpenClaw plugin    the same, with the openclaw.json plugin entry
+                     (plugins.entries.shieldcortex-realtime.config) merged over it, then the lock;
+                     read at gateway start
+  Hermes             SHIELDCORTEX_ENFORCE in the Hermes gateway environment, not config.json;
+                     doctor sees only its self-report`;
 
 export const MEMORY_HELP = `Usage: shieldcortex memory <subcommand> [args]
 
