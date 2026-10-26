@@ -5341,10 +5341,14 @@ const WHOLE_COMMAND_INTERPRETER = /^(?:python(?:\d(?:\.\d+)?)?|node|nodejs)$/;
  *   - the first word is a bare `python`/`python3`/`python3.x`/`node`/`nodejs`
  *     — so no environment prefix (`PATH=… python3`), no `env`/`sudo`/`command`
  *     wrapper and no path to some other binary;
- *   - the first argument is the script itself, unquoted and starting with a
- *     letter, digit, `_`, `.` or `/` — so no interpreter option runs code the
- *     guard never folded (`node -r ./other.js`, `--import`, `--loader`,
- *     `python3 -m mod`, `-c …`), quoted or not;
+ *   - the first argument is the script itself, unquoted, printable ASCII and
+ *     starting with a letter, digit, `_`, `.` or `/` — so no interpreter
+ *     option runs code the guard never folded (`node -r ./other.js`,
+ *     `--import`, `--loader`, `python3 -m mod`, `-c …`), quoted or not. A
+ *     non-ASCII character is refused because Bash keeps U+00A0, U+2003, U+FEFF
+ *     and the like inside the word while the guard's comment and inline-program
+ *     recognisers use JavaScript `\s` and would cut the name short there
+ *     (#937);
  *   - outside quotes: no `;` `&` `|` (siblings, background, pipes), no `<` `>`
  *     (redirection, glued or spaced), no `(` `)` (subshells), no `$` or
  *     backtick (substitution, `${…}`, variables), no backslash (escapes and
@@ -5362,23 +5366,35 @@ const WHOLE_COMMAND_INTERPRETER = /^(?:python(?:\d(?:\.\d+)?)?|node|nodejs)$/;
  * call had before this check existed.
  */
 export function isWholeCommandInterpreterInvocation(rawCommand: string): boolean {
-  if (typeof rawCommand !== 'string' || rawCommand.length > OVERSIZED_COMMAND_LENGTH) return false;
+  return wholeCommandScriptOperand(rawCommand) !== null;
+}
+
+/**
+ * The script operand, exactly as Bash will see it, of a command that
+ * `isWholeCommandInterpreterInvocation` accepts; null otherwise. The caller
+ * binds the attested root to this text so that no preprocessing pass can
+ * vouch for a shorter or shifted name (#937).
+ */
+function wholeCommandScriptOperand(rawCommand: string): string | null {
+  if (typeof rawCommand !== 'string' || rawCommand.length > OVERSIZED_COMMAND_LENGTH) return null;
   const text = trimShellBlanks(rawCommand);
   let i = 0;
   while (i < text.length && text[i] !== ' ' && text[i] !== '\t') i++;
-  if (!WHOLE_COMMAND_INTERPRETER.test(text.slice(0, i))) return false;
+  if (!WHOLE_COMMAND_INTERPRETER.test(text.slice(0, i))) return null;
   while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++;
-  if (!/^[A-Za-z0-9_./]$/.test(text[i] ?? '')) return false;
+  if (!/^[A-Za-z0-9_./]$/.test(text[i] ?? '')) return null;
+  const operandStart = i;
   // The whole first operand must stay unquoted. A quote glued onto an
   // otherwise-plain prefix (`scripts/x.py';other'`) is still one shell word,
   // and quote-blind discovery would bind a different path (#921 Astra B1).
   while (i < text.length && text[i] !== ' ' && text[i] !== '\t') {
     const ch = text[i];
-    if (ch === "'" || ch === '"') return false;
-    if (ch.charCodeAt(0) < 0x20 || ch === '\x7f') return false;
-    if (';&|<>()$`\\*?[{~'.includes(ch)) return false;
+    if (ch === "'" || ch === '"') return null;
+    if (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) > 0x7e) return null;
+    if (';&|<>()$`\\*?[{~'.includes(ch)) return null;
     i++;
   }
+  const operand = text.slice(operandStart, i);
   let quote = '';
   let wordStart = true;
   for (; i < text.length; i++) {
@@ -5389,17 +5405,17 @@ export function isWholeCommandInterpreterInvocation(rawCommand: string): boolean
     }
     if (quote === '"') {
       if (ch === '"') quote = '';
-      else if (ch === '$' || ch === '`' || ch === '\\') return false;
+      else if (ch === '$' || ch === '`' || ch === '\\') return null;
       continue;
     }
     if (ch === ' ' || ch === '\t') { wordStart = true; continue; }
     if (ch === "'" || ch === '"') { quote = ch; wordStart = false; continue; }
-    if (ch.charCodeAt(0) < 0x20 || ch === '\x7f') return false;
-    if (';&|<>()$`\\*?[{~'.includes(ch)) return false;
-    if (ch === '#' && wordStart) return false;
+    if (ch.charCodeAt(0) < 0x20 || ch === '\x7f') return null;
+    if (';&|<>()$`\\*?[{~'.includes(ch)) return null;
+    if (ch === '#' && wordStart) return null;
     wordStart = false;
   }
-  return quote === '';
+  return quote === '' ? operand : null;
 }
 
 /**
@@ -7473,11 +7489,16 @@ function evaluateToolCallCore(
   // never qualifies). Only the DANGEROUS scan below uses it, to judge that one
   // file as if it were short (`matchSpansClassifiedAttested`). Every other
   // call, and every other reader of `regions`, is unchanged.
-  const wholeCommandRoots = family === 'exec' && rawCommand === originalCommand
-    && fold.regions.length > 0 && isWholeCommandInterpreterInvocation(originalCommand)
+  // The discovered root must be, character for character, the operand Bash
+  // runs: comment stripping and inline-program masking rewrite the scan text
+  // first, and a root they shortened or shifted is never attested (#937).
+  const wholeCommandOperand = family === 'exec' && rawCommand === originalCommand
+    && fold.regions.length > 0 ? wholeCommandScriptOperand(originalCommand) : null;
+  const wholeCommandRoots = wholeCommandOperand !== null
     ? detectScriptInvocations(dataReadHeredocDiscoverySurface(rawCommand, execCommand))
     : [];
   const attestedRoot = wholeCommandRoots.length === 1 && wholeCommandRoots[0].lang !== 'sh'
+    && wholeCommandRoots[0].path === wholeCommandOperand
     ? wholeCommandRoots[0]
     : null;
   const attestedRegions = attestedRoot === null
