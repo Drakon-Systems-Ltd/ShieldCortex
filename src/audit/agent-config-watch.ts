@@ -358,7 +358,9 @@ function getPath(obj: unknown, keyPath: string): unknown {
 export const HOOK_ARRAY_ENTRY = 'hooks-array';
 
 function sectionFrom(kind: SectionKind, value: unknown): SectionMap {
-  const out: SectionMap = {};
+  // Keys are entry names from the watched file: a null prototype keeps
+  // `__proto__`, `constructor`, `toString`... as ordinary entries (#928 r2).
+  const out: SectionMap = Object.create(null);
   if (value === undefined || value === null) return out;
   if (kind === 'tasks') {
     const list = Array.isArray(value) ? value : [];
@@ -526,17 +528,26 @@ export interface ConfigChange {
   name: string;
 }
 
+/**
+ * Own-property lookup. A baseline restored from disk is plain JSON-parsed
+ * objects, so `m[name]` for a missing `constructor` or `toString` would return
+ * the inherited Object.prototype member instead of "absent" (#928 r2).
+ */
+function own<T>(m: Record<string, T> | undefined, key: string): T | undefined {
+  return m && Object.prototype.hasOwnProperty.call(m, key) ? m[key] : undefined;
+}
+
 export function diffSnapshots(spec: WatchedFileSpec, before: FileSnapshot, after: FileSnapshot): ConfigChange[] {
   const changes: ConfigChange[] = [];
   const keyPaths = new Set([...Object.keys(before), ...Object.keys(after)]);
   for (const keyPath of keyPaths) {
     const sec = spec.sections.find((s) => s.keyPath === keyPath);
     const section: ConfigChange['section'] = sec?.kind ?? 'file';
-    const b = before[keyPath] ?? {};
-    const a = after[keyPath] ?? {};
-    for (const name of new Set([...Object.keys(b), ...Object.keys(a)])) {
-      const bi = b[name];
-      const ai = a[name];
+    const b = own(before, keyPath);
+    const a = own(after, keyPath);
+    for (const name of new Set([...Object.keys(b ?? {}), ...Object.keys(a ?? {})])) {
+      const bi = own(b, name);
+      const ai = own(a, name);
       if (!bi && ai) { changes.push({ keyPath, section, kind: 'added', name }); continue; }
       if (bi && !ai) { changes.push({ keyPath, section, kind: 'removed', name }); continue; }
       if (!bi || !ai || bi.join() === ai.join()) continue;
