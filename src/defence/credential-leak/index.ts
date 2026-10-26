@@ -894,7 +894,7 @@ function scanCollapsedView(
 
   // ── Discovery ──
   for (const pattern of patterns) {
-    if (patternConsultsWhitespace(pattern)) continue;
+    if (patternConsultsWhitespace(pattern) || pattern.requiresContext) continue;
 
     const compiled = compilePattern(pattern);
     const regex = compiled.global;
@@ -1058,15 +1058,19 @@ export function scanForCredentials(
       // strings / API keys (those can contain the word "example" in a host).
       if (pattern.type === 'env_secret' && isDocumentationPlaceholder(secretValue)) continue;
 
-      // Skip if this range is already covered by a higher-priority pattern
+      // Skip if this range is already covered by a higher-priority pattern of
+      // equal or higher severity. Suppression only goes downward: a weaker
+      // range must never hide a stronger finding inside it (#914).
       const start = match.index;
       const end = start + fullMatch.length;
-      if (matchedRanges.some(r => start >= r.start && end <= r.end)) continue;
+      const rank = SEVERITY_RANK[pattern.severity];
+      if (matchedRanges.some(r => start >= r.start && end <= r.end && SEVERITY_RANK[r.severity ?? 'low'] >= rank)) continue;
 
       // Skip well-known PUBLIC identifiers (git SHA / UUID). Generic hex rules
       // match a substring of these, so expand to the full token before testing
-      // (Phase 17 A5 / #205 empty digests).
-      if (matchIsWellKnownNonSecret(content, start, end)) continue;
+      // (Phase 17 A5 / #205 empty digests). A context-bound pattern's evidence
+      // is its context, not the value's shape, so the filter does not apply.
+      if (!pattern.requiresContext && matchIsWellKnownNonSecret(content, start, end)) continue;
 
       const action = actionForSeverity(pattern.severity, cfg);
       const redacted = redactMatch(secretValue, pattern.type);
