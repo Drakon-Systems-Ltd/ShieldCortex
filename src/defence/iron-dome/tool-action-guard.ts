@@ -1233,6 +1233,29 @@ function gitAtCommandPosition(tokens: readonly string[], i: number): boolean {
   }
   return true;
 }
+/**
+ * gitAtCommandPosition for EVERY index in one pass: `out[i]` equals
+ * `gitAtCommandPosition(tokens, i)`. The per-index form rescans the prefix, so
+ * a walk that asks it at each token is O(tokens²) on a wrapper-dense statement
+ * (`nice env nohup` x 1100, where every token is at command position).
+ */
+function commandPositions(tokens: readonly string[]): boolean[] {
+  const out: boolean[] = new Array(tokens.length).fill(false);
+  let sawWrapper = false;
+  let prevWasFlag = false;
+  for (let k = 0; k < tokens.length; k++) {
+    out[k] = true;
+    const t = tokens[k];
+    const base = commandBaseName(t);
+    if (COMMAND_WRAPPER.test(base)) { sawWrapper = true; prevWasFlag = false; continue; }
+    if (CMD_PREFIX_KEYWORD.test(base)) { prevWasFlag = false; continue; }
+    if (/^\w+=/.test(t)) { prevWasFlag = false; continue; }
+    if (t.startsWith('-')) { prevWasFlag = true; continue; }
+    if (sawWrapper && (prevWasFlag || /^\d+(?:\.\d+)?[smhd]?$/.test(t))) { prevWasFlag = false; continue; }
+    break;                                                 // every later index is an argument
+  }
+  return out;
+}
 
 /**
  * git's actual SUBCOMMAND and the args that follow it, or null. The subcommand
@@ -1800,7 +1823,8 @@ function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
  * systemInstallInvoked). One pass over tokens per statement.
  *
  * CLI disable: command-position shieldcortex (or npx/node wrapper, or $var
- * fail-closed) plus a disable/advisory/deactivate flag in the rest. #509:
+ * fail-closed) plus a disable/advisory/deactivate flag in the rest, or
+ * #922 `guard posture off|advisory` (see loosensGuardPostureAt). #509:
  * `--action-guard-enforce-when-ready` is in the same class — on an enforcing
  * install it drops to shadow until readiness is proven. From off it is a
  * tightening and ungated (a disabled guard does not run). From watch only it
@@ -1823,6 +1847,31 @@ function isGuardDisableFlag(tok: string): boolean {
   const t = stripTokDecor(tok);
   return /^--action-guard-(?:disable|advisory|enforce-when-ready)$/i.test(t);
 }
+/**
+ * #922: `guard posture off|advisory` is a loosening invocation, so it sits on
+ * the same floor as `--action-guard-disable`. The target is the first
+ * non-flag argument after `guard posture`; a `$var`, command substitution or
+ * glob there cannot be read statically and is held (fail-closed). `enforce`
+ * and the bare read-only form are not flagged.
+ */
+function loosensGuardPostureAt(tokens: readonly string[], i: number): boolean {
+  if (i + 1 >= tokens.length) return false;
+  if (!/^guard$/i.test(stripTokDecor(tokens[i])) || !/^posture$/i.test(stripTokDecor(tokens[i + 1]))) return false;
+  for (let j = i + 2; j < tokens.length; j++) {
+    const raw = tokens[j];
+    if (/[$`*?[\]{}]/.test(raw)) return true;
+    const t = stripTokDecor(raw);
+    if (t.startsWith('-')) continue;
+    return /^(?:off|advisory)$/i.test(t);
+  }
+  return false;
+}
+/**
+ * #922 r1: a cheap, linear spelling of `guard posture` that survives the
+ * quoting the argv walk strips (`"guard" "posture"`, `g\uard`, `po'sture'`),
+ * so the cheap reject cannot drop `$X "guard" "posture" off` before the walk.
+ */
+const GUARD_POSTURE_SPELLING = /g['"\\]*u['"\\]*a['"\\]*r['"\\]*d[\s'"\\]+p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e/i;
 function argvIsGlobalUninstallOfGuard(rest: readonly string[], base: string): boolean {
   let verb: string | null = null;
   let isGlobal = false;
@@ -1868,7 +1917,13 @@ function guardDisableInvoked(text: string, depth = 0): boolean {
   // wrapper-dense ReDoS corpus (`nice env nohup` x 1100) has neither, and
   // walking it as argv is O(statements x tokens) for no gain. $PM uninstall
   // of a non-literal package is #504-adjacent and already un-gated.
-  if (depth === 0 && !/shieldcortex/i.test(text)) return false;
+  // #922: `$X guard posture off` names neither, so its subcommand pair also
+  // admits the walk (the $var command position is fail-closed below).
+  // #922 r1: the walk below is linear in tokens (one command-position pass,
+  // suffix flags instead of a rest-slice per token), so admitting it costs
+  // the wrapper-dense corpus nothing; the quote-tolerant spelling keeps the
+  // quoted variable-command form in.
+  if (depth === 0 && !/shieldcortex/i.test(text) && !GUARD_POSTURE_SPELLING.test(text)) return false;
   if (depth < MAX_INLINE_RECURSION) {
     for (const body of collectExecutableBodies(text)) {
       if (body && guardDisableInvoked(body, depth + 1)) return true;
@@ -1880,23 +1935,35 @@ function guardDisableInvoked(text: string, depth = 0): boolean {
       return tok;
     });
     if (walkInlineShell(tokens, depth, guardDisableInvoked)) return true;
-    for (let i = 0; i < tokens.length; i++) {
-      if (!gitAtCommandPosition(tokens, i)) continue;
+    // Suffix flags: disableFrom[k] / guardRefFrom[k] say whether tokens[k..]
+    // carry a disable shape / a guard reference, so each command position
+    // reads its `rest` in O(1) instead of rescanning it.
+    const n = tokens.length;
+    const disableFrom: boolean[] = new Array(n + 1).fill(false);
+    const guardRefFrom: boolean[] = new Array(n + 1).fill(false);
+    for (let k = n - 1; k >= 0; k--) {
+      const a = tokens[k];
+      disableFrom[k] = disableFrom[k + 1]
+        || isGuardDisableFlag(a)
+        || (/^iron-dome$/i.test(stripTokDecor(a)) && /^deactivate$/i.test(stripTokDecor(tokens[k + 1] ?? '')))
+        || loosensGuardPostureAt(tokens, k);
+      guardRefFrom[k] = guardRefFrom[k + 1] || GUARD_BIN.test(commandBaseName(a)) || a.startsWith('$') || a.includes('$(');
+    }
+    const atCommand = commandPositions(tokens);
+    for (let i = 0; i < n; i++) {
+      if (!atCommand[i]) continue;
       const base = commandBaseName(tokens[i]);
       if (/^eval$/i.test(base)) {
         if (guardDisableInvoked(tokens.slice(i + 1).join(' '), depth + 1)) return true;
         continue;
       }
-      const rest = tokens.slice(i + 1);
-      const restHasDisable =
-        rest.some(isGuardDisableFlag)
-        || rest.some((a, idx) => /^iron-dome$/i.test(stripTokDecor(a)) && /^deactivate$/i.test(stripTokDecor(rest[idx + 1] ?? '')));
+      const restHasDisable = disableFrom[i + 1];
       const binIsGuard = GUARD_BIN.test(base) || GUARD_BIN.test(commandBaseName(base));
-      const wrapperThenGuard = /^(?:npx|node|env)$/i.test(base) && rest.some(a => GUARD_BIN.test(commandBaseName(a)) || a.startsWith('$') || a.includes('$('));
+      const wrapperThenGuard = /^(?:npx|node|env)$/i.test(base) && guardRefFrom[i + 1];
       if ((binIsGuard || wrapperThenGuard || tokens[i].startsWith('$')) && restHasDisable) return true;
       if (NPM_FAMILY.test(base) || /^(?:npx|corepack)$/i.test(base)) {
-        if (argvIsGlobalUninstallOfGuard(rest, base)) return true;
-      } else if (tokens[i].startsWith('$') && argvIsGlobalUninstallOfGuard(rest, 'npm')) {
+        if (argvIsGlobalUninstallOfGuard(tokens.slice(i + 1), base)) return true;
+      } else if (tokens[i].startsWith('$') && argvIsGlobalUninstallOfGuard(tokens.slice(i + 1), 'npm')) {
         return true;
       }
     }

@@ -161,7 +161,8 @@ describe('#509 r3 finding 1 — the enforce-when-ready flag is enforcement-loose
     expect(jsRule('scripts/pre-tool-hook.mjs').test(flag)).toBe(true);
     expect(jsRule('plugins/openclaw/interceptor.ts').test(flag)).toBe(true);
     const py = readFileSync(join(REPO, 'plugins/hermes/shieldcortex/sc_client.py'), 'utf8');
-    const pm = /re\.compile\(r"(--action-guard-\(\?:[^"]+)"/.exec(py);
+    // The whole raw-string body: an escaped quote (`\"`) inside it does not end it.
+    const pm = /re\.compile\(r"(--action-guard-\(\?:(?:[^"\\]|\\.)*)"/.exec(py);
     expect(pm).not.toBeNull();
     expect(new RegExp(pm![1], 'i').test(flag)).toBe(true);
   });

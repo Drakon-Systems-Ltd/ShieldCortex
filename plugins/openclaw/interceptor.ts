@@ -753,6 +753,21 @@ const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?
   { re: /\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b/i, signal: 'touch-decisions-ledger' },
   // #500: outage fallback must gate self-disable / global uninstall / config.json writes.
   { re: /--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b/i, signal: 'disable-action-guard' },
+  // #922: `guard posture off|advisory` is a loosening INVOCATION, not vocabulary.
+  // The phrase counts only behind a command-position invoker (shieldcortex, a
+  // wrapper such as npx/node/env/sudo, or a `$var` command), after a statement
+  // start or inside a shell `-c` / eval body, so an echo/grep/cat/gh --body
+  // mention stays off. Quote/backslash decoration inside a word, a quoted flag,
+  // and an expansion or glob anywhere in the target are read as the core's
+  // loosensGuardPostureAt reads them. #922 r2: a wrapper may be path-qualified
+  // or quoted (`/usr/bin/env`, `"env"`), a flag may take one bare value
+  // (`env -u FOO`, `sudo -u nobody`, as commandPositions reads it), `shieldcortex`
+  // may be quote-fragmented, and bash value options are stepped over
+  // (`bash -O extglob -c`). A flag value can be no other prefix token nor an
+  // invoker, so the repetition has one parse and stays linear. `dataQuotes`: a
+  // hit inside a data quote (`echo "x; shieldcortex …"`) is a mention. `lockPath`: pure inspection runs
+  // no invoker, so the lock-read exemption drops it as well.
+  { re: /(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:(?:[-+]O|--rcfile|--init-file)[ \t]+[^\s;&|-][^\s;&|]*[ \t]+|-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!)|\w+=[^\s;&|({`]*|-[^\s;&|({`]+(?:[ \t]+(?!(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!))[ \t]|\w+=|\d|-|['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-])))[^\s;&|({`]+)?|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?:[ \t]+['"\\]*-[^\s;&|$`*?[\]{}]*)*[ \t]+(?:[^\s;&|]*[$`*?[\]{}]|(?:['"\\]*o['"\\]*f['"\\]*f['"\\]*|['"\\]*a['"\\]*d['"\\]*v['"\\]*i['"\\]*s['"\\]*o['"\\]*r['"\\]*y['"\\]*)(?=$|[\s;&|)`]))/i, signal: 'disable-action-guard', lockPath: true, dataQuotes: true },
   { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)\b/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
   // #501: the policy lock's own attack surface. The two environment seams that
@@ -826,7 +841,8 @@ function fallbackCatastrophicMatch(args: Record<string, unknown> | undefined): b
 // was written to stop. These mirror it, fail-closed, with no dependency on the
 // dist.
 //
-// Scope: this drops ONLY the two lock-PATH rows below (tagged `lockPath`).
+// Scope: this drops ONLY the rows tagged `lockPath`: the lock-PATH rows and
+// the #922 posture-invocation row (pure inspection runs no invoker).
 // The env-seam row, the #500 command shapes and every other signal are
 // untouched, so `rm`, `tee`, `cp`, `sed -i`, a redirect and `chmod` onto those
 // paths still gate here exactly as they did.
@@ -861,12 +877,40 @@ const FALLBACK_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\/|\b
 /** Assigning an env seam decides WHICH reader runs — never a read. */
 const FALLBACK_LOCK_ENV_SEAM_RE = /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i;
 
+/** Quoting the stage split cannot pair as the shell does: ANSI-C `$'…'`, a heredoc, `${…}`, a `#` comment. */
+const FALLBACK_LOCK_SPLIT_UNMODELLED_RE = /\$'|<<|\$\{|#/;
+
+/**
+ * The statements and pipeline stages of `text`, split on `\n ; & |` OUTSIDE
+ * quotes (#922 r2): `cat 'notes; x'` is one read of one file, not a read and
+ * an `x`. Text holding quoting this walk does not model keeps the plain split
+ * (every separator counts), and an unclosed quote is null — never a read.
+ */
+function fallbackLockStages(text: string): string[] | null {
+  if (FALLBACK_LOCK_SPLIT_UNMODELLED_RE.test(text)) return text.split(/[\n;&|]+/);
+  const out: string[] = [];
+  let cur = '';
+  let q: string | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '\\' && q !== "'") { cur += text.slice(i, i + 2); i++; continue; }
+    if (q) { cur += c; if (c === q) q = null; continue; }
+    if (c === '"' || c === "'") q = c;
+    if (c === '\n' || c === ';' || c === '&' || c === '|') { out.push(cur); cur = ''; continue; }
+    cur += c;
+  }
+  if (q) return null;
+  out.push(cur);
+  return out;
+}
+
 /**
  * True when the whole surface is pure inspection of a lock path. Fail-closed on
  * an env-seam assignment, a redirect, nested execution, and any unknown verb in
  * any stage of any statement — the same rule the real guard applies, with the
  * statement split done conservatively (`&` and `|` both separate, so a
- * pipeline stage or a backgrounded sibling must ALSO be a read).
+ * pipeline stage or a backgrounded sibling must ALSO be a read). A separator
+ * inside quotes is data (#922 r2): see fallbackLockStages.
  */
 function fallbackLockPathAccessIsReadOnly(text: string, toolName: string | undefined): boolean {
   if (!text) return false;
@@ -874,8 +918,10 @@ function fallbackLockPathAccessIsReadOnly(text: string, toolName: string | undef
   const seg = String(toolName || '').toLowerCase().split(/__|\.|:|\//).filter(Boolean).pop() || '';
   if (seg && FALLBACK_READ_TOOLS.test(seg)) return true;
   if (FALLBACK_REDIRECT_RE.test(text) || FALLBACK_NESTED_EXEC_RE.test(text)) return false;
+  const stages = fallbackLockStages(text);
+  if (!stages) return false;
   let sawStage = false;
-  for (const raw of text.split(/[\n;&|]+/)) {
+  for (const raw of stages) {
     const stage = raw.trim();
     if (!stage) continue;
     sawStage = true;
@@ -951,8 +997,10 @@ function fallbackWriteTargetMatch(args: Record<string, unknown> | undefined, too
 // Used only by rows tagged `dataQuotes`. Kept in sync with
 // scripts/pre-tool-hook.mjs and plugins/hermes/shieldcortex/sc_client.py.
 
-/** The guard's DATA_COMMAND (here ending at a word break: `ptpython` is not `pt`), TEXT_FLAG and EXEC_COMMAND_WORD sets. */
-const FALLBACK_DATA_COMMAND_RE = /^(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)/i;
+/** The guard's DATA_COMMAND (here ending at a word break: `ptpython` is not `pt`), TEXT_FLAG and EXEC_COMMAND_WORD sets.
+ *  #922 r3: plus `cat`, whose quoted operand is a filename, never executed — the
+ *  plain split a `#` or a write sibling forces must not read `cat 'a; x'` as `x`. */
+const FALLBACK_DATA_COMMAND_RE = /^(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|cat|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)/i;
 const FALLBACK_TEXT_FLAG_RE = /(?:^|\s)--(?:text|body|message|comment|description|title|content|caption|note|summary|prompt|subject)(?:=|\s+)$/i;
 const FALLBACK_EXEC_WORD_RE = /^(?:bash|sh|zsh|ksh|dash|ash|python[\d.]*|node|nodejs|ruby|perl|php|eval|exec|source|ssh|scp|docker|podman|kubectl|nsenter|chroot|busybox|xargs|find|flock|watch|make|awk|sed|su|runuser|systemd-run|at|batch)$/i;
 /** A pipe into anything but a read-only filter (`echo "…" | bash`, `| "sh"`, `| b\\ash`) — `||` is not a pipe. */
@@ -1061,10 +1109,10 @@ export function fallbackSelfProtectionMatch(args: Record<string, unknown> | unde
   const text = fallbackExecSurface(args);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
-  for (const { re, signal, lockPath } of FALLBACK_DANGEROUS_PATTERNS) {
+  for (const { re, signal, lockPath, dataQuotes } of FALLBACK_DANGEROUS_PATTERNS) {
     if (!SELF_PROTECTION_SIGNALS.includes(signal)) continue;
     if (lockReadOnly && lockPath === true) continue;
-    if (re.test(text)) return signal;
+    if (dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
   }
   return null;
 }

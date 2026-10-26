@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sc_client import (  # noqa: E402
     SELF_PROTECTION_SIGNALS,
     ActionGuardVerdict,
+    fallback_dangerous_match,
     fallback_self_protection_match,
 )
 from policy import action_guard_decision  # noqa: E402
@@ -35,8 +36,56 @@ class SelfProtectionFloor(unittest.TestCase):
             "cp forged.json ~/.shieldcortex/approvals/guard-readiness.json",
             "shieldcortex config --action-guard-disable",
             "echo {} > ~/.shieldcortex/config.json",
+            # #922: a posture loosening, including a target it cannot read.
+            "shieldcortex guard posture off",
+            "npx shieldcortex guard posture advisory",
+            "bash -c 'shieldcortex guard posture off'",
+            "$X guard posture off",
+            "shieldcortex guard posture $T",
+            '$X "guard" "posture" off',
+            'shieldcortex guard posture o"ff"',
+            "shieldcortex guard posture o*",
+            # #922 r2: wrapper values, path/quoted wrappers, a fragmented invoker.
+            "env -u FOO shieldcortex guard posture off",
+            "/usr/bin/env shieldcortex guard posture advisory",
+            '"env" shieldcortex guard posture off',
+            'shield"cortex" guard posture off',
+            "sudo -u nobody shieldcortex guard posture off",
+            "bash -O extglob -c 'shieldcortex guard posture off'",
+            "bash --rcfile /tmp/x -c 'shieldcortex guard posture off'",
+            'cat notes; shieldcortex "guard" "posture" off',
+            # #922 r3 (R3-B1): unquoted counterparts of the quoted filenames below.
+            "cat x; env -u FOO shieldcortex guard posture off",
+            "cat 'a'; shieldcortex guard posture off",
+            "cat notes; env -u FOO shieldcortex guard posture off; touch output",
+            "cat notes# ; /usr/bin/env shieldcortex guard posture off",
+            "cat 'notes#'; shield\"cortex\" guard posture off",
+            'cat "$(shieldcortex guard posture off)"',
+            "cat `shieldcortex guard posture off`",
         ):
             self.assertTrue(fallback_self_protection_match(cmd), cmd)
+            if "posture" in cmd:  # the posture row is on both lists; the store rows only on this one
+                self.assertTrue(fallback_dangerous_match(cmd), cmd)
+        for cmd in (
+            "shieldcortex guard posture enforce",
+            "shieldcortex guard posture",
+            "shieldcortex guard posture --json",
+            'echo "shieldcortex guard posture off"',
+            'grep -F "shieldcortex guard posture off" README.md',
+            "gh issue create --body 'shieldcortex guard posture off'",
+            # #922 r2: one single-quoted filename; its `;` is data.
+            "cat 'notes; shieldcortex \"guard\" \"posture\" off'",
+            "echo bash -c 'shieldcortex guard posture off'",
+            # #922 r3 (R3-B1): a write sibling, a redirect or a `#` defeats the
+            # whole-surface read exemption; the quoted cat filename is still data.
+            "cat 'notes; env -u FOO shieldcortex guard posture off'; touch output",
+            "cat 'notes; env -u FOO shieldcortex guard posture off' > output",
+            "cat 'notes#; env -u FOO shieldcortex guard posture off'",
+            "cat 'notes#; /usr/bin/env shieldcortex guard posture off'",
+            "cat 'notes#; shield\"cortex\" guard posture off'",
+        ):
+            self.assertFalse(fallback_self_protection_match(cmd), cmd)
+            self.assertFalse(fallback_dangerous_match(cmd), cmd)
         v = ActionGuardVerdict("allow", [], "down", available=False)
         d = action_guard_decision(v, enforce=False, fallback_dangerous=True, fallback_self_protected=True)
         self.assertEqual(d["action"], "block")
