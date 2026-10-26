@@ -164,6 +164,14 @@ import {
   type OpenClawGatePosture,
 } from '../setup/host-table.js';
 import { collectPostureRecords, type CollectOptions } from '../posture/collect.js';
+import { openClawEffectiveHome } from '../setup/openclaw-effective-home.js';
+import {
+  GUARD_POSTURE_LABEL,
+  guardPostureRow,
+  readGuardPosture,
+  type PostureReport,
+  type ReadPostureOptions,
+} from '../guard/posture-switch.js';
 import {
   postureLevel,
   renderPostureLine,
@@ -4846,6 +4854,20 @@ export function readHostGatePlanes(hostHome?: string): HostGatePlanes {
   };
 }
 
+/**
+ * #922: the planes plus the posture row's verdict, so the header says
+ * `Guard mixed` exactly when the `Action guard posture` row FAILs.
+ */
+export function readHostGatePlanesWithPosture(hostHome?: string): HostGatePlanes {
+  const planes = readHostGatePlanes(hostHome);
+  try {
+    const report = readGuardPosture({ home: hostHome });
+    return { ...planes, postureMismatch: report.verdict === 'mismatch', postureNodeReference: report.nodeReference };
+  } catch {
+    return planes;
+  }
+}
+
 // ── Check: runtime posture (#613) ──────────────────────
 /**
  * One row per posture record from the typed posture module — one per
@@ -4892,6 +4914,35 @@ export async function checkRuntimePosture(opts: CollectOptions = {}): Promise<Ch
         ' self-reports are host-local evidence, not attestation — full records: `shieldcortex policy-evidence`',
   });
   return rows;
+}
+
+// ── Check: Action Guard posture across planes (#922) ──
+/**
+ * One row for the EFFECTIVE posture of every present gate plane: the Claude
+ * Code hook, the OpenClaw plugin (entry merged over the signed config, then the
+ * lock) and Hermes (its #613 self-report only — Hermes does not read
+ * config.json). Hook and plugin disagreeing, or Hermes looser than them, is a
+ * FAIL. Hermes tighter than them is shown, not failed. Off / advisory stay
+ * `warn` with the old "do not enable from this warning" text. Read-only.
+ */
+export function checkGuardPosture(
+  opts: { read?: ReadPostureOptions; pluginOffFix?: string; report?: PostureReport } = {},
+): CheckResult {
+  let report: PostureReport;
+  try {
+    report = opts.report ?? readGuardPosture(opts.read);
+  } catch (err) {
+    return {
+      label: GUARD_POSTURE_LABEL,
+      status: 'warn',
+      message: `the Action Guard posture could not be read (${(err as Error).message})`,
+    };
+  }
+  const row = guardPostureRow(report);
+  if (row.status === 'warn' && opts.pluginOffFix && row.fix?.startsWith('Action Guard is advisory')) {
+    return { ...row, fix: opts.pluginOffFix };
+  }
+  return row;
 }
 
 export async function checkActionGuard(): Promise<CheckResult[]> {
@@ -4979,9 +5030,6 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       : null;
     const merged = { ...(alias ?? {}), ...(top ?? {}) };
     const effective = { enabled: merged.enabled === true, enforce: merged.enforce !== false };
-    // Which key set this value — top-level when it has the key, else the alias.
-    const provenance = (k: string) =>
-      top && k in top ? `actionGuard.${k}` : `interceptor.actionGuard.${k}`;
     const pluginLive = readOpenClawPluginGuardLive();
     const pluginOff = pluginPlaneDisarmed(pluginLive);
     const planes = readHostGatePlanes();
@@ -4989,23 +5037,9 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     const pluginOffFix =
       'Do not add a webhook and do not enable Action Guard from this line. Signed config, plugin entry, and running interceptor are three planes. Headless denials staying local is expected while Guard is off.';
 
-    if (!effective.enabled) {
-      results.push({
-        label: `${label} config`,
-        status: 'warn',
-        message: `Action Guard is disabled in config (\`${provenance('enabled')}: false\`) — tool calls are not gated on either surface`,
-        fix: 'Action Guard is off. That is the default. Do not enable Action Guard from this warning. Do not add a webhook.',
-      });
-    } else if (!effective.enforce) {
-      results.push({
-        label: `${label} config`,
-        status: 'warn',
-        message: `Action Guard runs in warn-mode (\`${provenance('enforce')}: false\`) on both surfaces — dangerous ops log but are not gated (catastrophic still blocks)`,
-        fix: pluginOff
-          ? pluginOffFix
-          : 'Action Guard is advisory. Do not run --action-guard-enforce from this warning. Enable only after the review loop says yes.',
-      });
-    }
+    // #922: one posture row for every gate plane, replacing the signed-only
+    // disabled / warn-mode rows. Same resolver as `shieldcortex guard posture`.
+    results.push(checkGuardPosture({ pluginOffFix: pluginOff ? pluginOffFix : undefined }));
 
     // #242 Defect B: enforce-on + no notify channel is how unattended denials
     // vanished for eight days while lastRunStatus stayed ok.
@@ -7418,49 +7452,6 @@ export function probeOpenClawHooksDirClaim(
     }
   }
   return identical ? { kind: 'identical' } : { kind: 'none' };
-}
-
-/**
- * OpenClaw-effective home for expanding `~` in OpenClaw paths — mirror of
- * resolveRawHomeDir (openclaw/src/infra/home-dir.ts): OPENCLAW_HOME (itself
- * `~`-expandable against HOME/USERPROFILE) > HOME > USERPROFILE >
- * os.homedir().
- *
- * #393 SOL r4 B2: a non-`~`, non-absolute OPENCLAW_HOME is returned verbatim
- * by resolveRawHomeDir and then path.resolve()d against the OPENCLAW PROCESS
- * cwd (home-dir.ts resolveEffectiveHomeDir) — doctor resolving it against its
- * OWN cwd probed a decoy tree while OpenClaw ran from another. The same
- * cwd-fallback fires when nothing resolves at all (resolveRequiredHomeDir).
- * Both shapes are unresolvable for doctor: OpenClaw stays bound with buses
- * unknown, never probed against a guessed root.
- */
-function openClawEffectiveHome(): { home: string } | { unresolvable: string } {
-  const norm = (v: string | undefined): string | undefined => {
-    const t = v?.trim();
-    return t ? t : undefined;
-  };
-  const safeHomedir = (): string | undefined => {
-    try {
-      return norm(os.homedir());
-    } catch {
-      return undefined;
-    }
-  };
-  const explicit = norm(process.env.OPENCLAW_HOME);
-  if (explicit) {
-    if (/^~($|[\\/])/.test(explicit)) {
-      const fallback = norm(process.env.HOME) ?? norm(process.env.USERPROFILE) ?? safeHomedir();
-      if (fallback) return { home: path.resolve(explicit.replace(/^~(?=$|[\\/])/, fallback)) };
-      return { unresolvable: `OPENCLAW_HOME="${explicit}" has no HOME/USERPROFILE/homedir to expand ~ against — OpenClaw falls back to its own process cwd, which doctor cannot know` };
-    }
-    if (!path.isAbsolute(explicit)) {
-      return { unresolvable: `OPENCLAW_HOME="${explicit}" is relative (\`~user\` included) — OpenClaw resolves it against its own process cwd, which doctor cannot know` };
-    }
-    return { home: path.resolve(explicit) };
-  }
-  const home = norm(process.env.HOME) ?? norm(process.env.USERPROFILE) ?? safeHomedir();
-  if (home) return { home: path.resolve(home) };
-  return { unresolvable: 'no OPENCLAW_HOME/HOME/USERPROFILE and os.homedir() unavailable — OpenClaw falls back to its own process cwd, which doctor cannot know' };
 }
 
 /**
@@ -9917,7 +9908,7 @@ export async function runDoctor(
     color: shouldColorDoctor(),
     style,
     width: Number(process.env.COLUMNS || process.stdout?.columns || 80) || 80,
-    hostTableLines: formatHostTable(hostTable, String(pkg.version ?? ''), readHostGatePlanes()),
+    hostTableLines: formatHostTable(hostTable, String(pkg.version ?? ''), readHostGatePlanesWithPosture()),
     nextCommand,
   });
   for (const line of reportLines) console.log(line);

@@ -623,7 +623,7 @@ describe('doctor — NOTIFY fail tracks the live OpenClaw plane, not leftover si
     expect(notify!.status).toBe('warn');
     expect(notify!.fix ?? '').not.toMatch(/--action-guard-notify-webhook/);
     expect(notify!.fix ?? '').toMatch(/do not add a webhook/i);
-    const config = results.find((r) => r.label === 'Action guard config');
+    const config = results.find((r) => r.label === 'Action guard posture');
     expect(config?.fix ?? '').not.toMatch(/--action-guard-enable/);
     expect(config?.fix ?? '').toMatch(/do not enable Action Guard/i);
   });
@@ -631,7 +631,7 @@ describe('doctor — NOTIFY fail tracks the live OpenClaw plane, not leftover si
   it('WARNs without --action-guard-enable when Guard is off and plugin plane is unproven', async () => {
     writeConfig({ actionGuard: { enabled: false } });
     const results = await checkActionGuard();
-    const config = results.find((r) => r.label === 'Action guard config');
+    const config = results.find((r) => r.label === 'Action guard posture');
     expect(config?.status).toBe('warn');
     expect(config?.fix ?? '').not.toMatch(/--action-guard-enable/);
     expect(config?.fix ?? '').toMatch(/Do not enable Action Guard/i);
