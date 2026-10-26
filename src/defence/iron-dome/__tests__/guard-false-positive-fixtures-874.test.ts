@@ -1104,6 +1104,13 @@ describe('#921 whole-command interpreter attestation', () => {
       'ADVICE = "rm item"',
       '',
     ].join('\n'));
+    fs.writeFileSync(path.join(dir, 'scripts', 'parent.py'), [
+      ...Array.from({ length: 63 }, () => 'ADVICE = "rm item"'),
+      'import os',
+      'os.system("./child.py")',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(dir, 'child.py'), 'print("rm item")\n');
   });
   afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -1205,10 +1212,28 @@ describe('#921 whole-command interpreter attestation', () => {
     expect(v.decision).not.toBe('allow');
   });
 
+  it('does not attest a partially quoted script operand (#921 Astra B1 follow-up)', () => {
+    for (const raw of [
+      "python3 scripts/verify_dist_patches.py';other'",
+      'python3 scripts/verify_dist_patches.py";other"',
+      "python3 scripts/'verify_dist_patches.py;other'",
+    ]) {
+      expect([raw, isWholeCommandInterpreterInvocation(raw)]).toEqual([raw, false]);
+      expect(run(raw).decision).not.toBe('allow');
+    }
+  });
+
   it('does not drop a command-line path-target because in-file mentions drained no budget (#921 Astra B2)', () => {
     const v = run('python3 scripts/budget.py https://example.invalid/.ssh/id_rsa');
     expect(v.decision).not.toBe('allow');
     expect(v.signals).toContain('touch-sensitive-path');
+  });
+
+  it('does not drop a nested child past the per-pattern cap (#921 Astra B2 follow-up)', () => {
+    const v = run('python3 scripts/parent.py');
+    expect(v.decision).not.toBe('allow');
+    const m = v.matches?.find(x => x.signal === 'file-delete' && /child\.py/.test(String(x.source ?? x.chain ?? '')));
+    expect(m).toBeDefined();
   });
 
   it('decides on the raw text: quoted separators are data, unquoted ones are siblings', () => {

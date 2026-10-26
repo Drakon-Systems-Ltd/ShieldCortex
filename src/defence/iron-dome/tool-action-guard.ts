@@ -4686,6 +4686,9 @@ function matchSpansClassifiedAttested(
       if (inFile) {
         attestedLeft--;
         if (text.length > LARGE_SURFACE) sharedBudget--;
+        // Count toward the original per-pattern cap so a later match *outside*
+        // the file still fail-closes at MAX_CLASSIFY_ITERS (#921 Astra B2 follow-up).
+        iters++;
         continue;
       }
       if (firstBudgetMatch && sharedBudget <= 0) { best = { span: m[0], tier: 'executed', at: s }; break; }
@@ -5350,6 +5353,16 @@ export function isWholeCommandInterpreterInvocation(rawCommand: string): boolean
   if (!WHOLE_COMMAND_INTERPRETER.test(text.slice(0, i))) return false;
   while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++;
   if (!/^[A-Za-z0-9_./]$/.test(text[i] ?? '')) return false;
+  // The whole first operand must stay unquoted. A quote glued onto an
+  // otherwise-plain prefix (`scripts/x.py';other'`) is still one shell word,
+  // and quote-blind discovery would bind a different path (#921 Astra B1).
+  while (i < text.length && text[i] !== ' ' && text[i] !== '\t') {
+    const ch = text[i];
+    if (ch === "'" || ch === '"') return false;
+    if (ch.charCodeAt(0) < 0x20 || ch === '\x7f') return false;
+    if (';&|<>()$`\\*?[{~'.includes(ch)) return false;
+    i++;
+  }
   let quote = '';
   let wordStart = true;
   for (; i < text.length; i++) {
