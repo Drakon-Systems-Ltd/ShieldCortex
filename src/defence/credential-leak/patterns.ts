@@ -24,6 +24,15 @@ export interface CredentialPattern {
    * not reported as a split key.
    */
   collapsedValuePattern?: RegExp;
+  /**
+   * #914 — the value's shape is not evidence on its own (a UUID); a lookbehind
+   * in `regex` supplies the provider context that is. Because the context is
+   * the evidence, the well-known public-identifier filter (UUID / git SHA) is
+   * not applied to its matches. The separator-collapsed pass never runs it:
+   * collapsing erases the line breaks and distances the context is bounded by,
+   * so it would borrow context the original text does not have.
+   */
+  requiresContext?: boolean;
 }
 
 export type CredentialType =
@@ -304,10 +313,15 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     name: 'Heroku API Key',
     type: 'api_key',
     provider: 'heroku',
-    regex: /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/g,
+    // A UUID alone is a public identifier, not evidence of a Heroku key.
+    // Require same-line provider context within 64 characters before it. The
+    // context is a LOOKBEHIND so the match — the redaction range and the
+    // overlap test against other patterns — is the UUID alone, and every UUID
+    // on the line is checked independently (#914).
+    regex: /(?<=\bheroku(?:[_ -](?:api[_ -]?)?key|[_ -]token)?\b[^\r\n]{0,64}?)\b[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\b/gi,
     severity: 'low',
     confidence: 0.30,
-    // UUIDs are very common — only flagged as low confidence
+    requiresContext: true,
   },
   // Hugging Face
   {

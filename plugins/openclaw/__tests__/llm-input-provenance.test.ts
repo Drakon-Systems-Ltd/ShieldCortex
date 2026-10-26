@@ -122,9 +122,9 @@ afterEach(() => {
 });
 
 describe('labelLlmInput — origin classification from the event shape', () => {
-  it('labels the live prompt `user`', () => {
+  it('keeps the unsegmented live prompt `unknown`', () => {
     expect(labelLlmInput(event()).inputs).toEqual([
-      { text: 'Summarise the deploy status page for me please, in two sentences.', label: 'user' },
+      { text: 'Summarise the deploy status page for me please, in two sentences.', label: 'unknown' },
     ]);
   });
 
@@ -139,8 +139,8 @@ describe('labelLlmInput — origin classification from the event shape', () => {
     // the user. A host that flattens tool results into user-role strings
     // would otherwise silence L2 AND never move the honesty counter. Both
     // labels are L2-off, so the only thing that changes is what the operator
-    // is told. The prompt itself stays `user` — the host attributes the turn.
-    expect(labelled.map((l) => l.label)).toEqual(['user', 'unknown', 'user']);
+    // is told. The unsegmented prompt also stays unknown (#911).
+    expect(labelled.map((l) => l.label)).toEqual(['unknown', 'unknown', 'user']);
   });
 
   it('labels tool-result blocks and tool-role messages `tool_result`', () => {
@@ -262,7 +262,7 @@ describe('scanLlmInput — end to end through the hook', () => {
     await scanLlmInput(event({
       historyMessages: [{ role: 'developer', content: AGENT_DIRECTED }],
     }), { agentId: 'openclaw' });
-    expect(__getProvenanceUndeclaredCountForTest()).toBe(1);
+    expect(__getProvenanceUndeclaredCountForTest()).toBe(2);
     expect(auditRows().filter((r) => r.type === 'threat')).toHaveLength(0);
   });
 
@@ -325,7 +325,7 @@ describe('shieldcortex-status — the provenance plane is reportable', () => {
     plugin.register(api);
     if (!handler) throw new Error('status command was not registered');
     const status = await (handler as () => Promise<{ text: string }>)();
-    expect(status.text).toMatch(/Provenance: llm_input labelled \(user \/ tool_result\); 1 undeclared/);
+    expect(status.text).toMatch(/Provenance: llm_input labelled \(user \/ tool_result\); 2 undeclared/);
   });
 });
 
@@ -459,7 +459,7 @@ describe('scanLlmInput — nested, inherited and spoofed ingress', () => {
         { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'image', source: { data: 'x' } }] }] },
       ],
     }), { agentId: 'openclaw' });
-    expect(__getProvenanceUndeclaredCountForTest()).toBe(before + 1);
+    expect(__getProvenanceUndeclaredCountForTest()).toBe(before + 2);
   });
 });
 
