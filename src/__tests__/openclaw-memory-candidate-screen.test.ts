@@ -35,11 +35,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const TWINS = [
   path.join(REPO_ROOT, 'hooks', 'openclaw', 'cortex-memory', 'handler.ts'),
-  path.join(REPO_ROOT, 'skills', 'shieldcortex', 'bundled', 'cortex-memory-hook', 'handler.ts'),
 ];
 const RUNTIME_TWINS = [
   path.join(REPO_ROOT, 'hooks', 'openclaw', 'cortex-memory', 'runtime.mjs'),
-  path.join(REPO_ROOT, 'skills', 'shieldcortex', 'bundled', 'cortex-memory-hook', 'runtime.mjs'),
 ];
 
 describe('screenMemoryCandidate — pure, dependency-injected', () => {

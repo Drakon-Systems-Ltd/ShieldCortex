@@ -136,7 +136,6 @@ describe('one declared OpenClaw floor (#821)', () => {
 
   it.each([
     ['plugins/openclaw/openclaw.plugin.json'],
-    ['skills/shieldcortex/bundled/openclaw-plugin/openclaw.plugin.json'],
   ])('%s engines.openclaw names that floor', (manifestPath) => {
     expect(readJson(...manifestPath.split('/')).engines.openclaw).toBe(floor);
   });

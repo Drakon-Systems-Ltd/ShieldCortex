@@ -268,7 +268,7 @@ describe('docs: the targeted form is described as wiring without asking', () => 
   // The HOOK.md copies say `shieldcortex setup`, which asks before wiring —
   // the bare command, so that stays true (pinned by the memory-default
   // contract); this only checks no copy grew a targeted-form claim.
-  for (const dir of [['hooks', 'openclaw', 'cortex-memory'], ['skills', 'shieldcortex', 'bundled', 'cortex-memory-hook']]) {
+  for (const dir of [['hooks', 'openclaw', 'cortex-memory']]) {
     it(`${dir.join('/')}/HOOK.md does not say setup <host> asks`, () => {
       assert.doesNotMatch(read(...dir, 'HOOK.md'), /setup (claude|openclaw|hermes|copilot|codex)`?,? which asks/);
     });

@@ -99,7 +99,7 @@ describe('bundled OpenClaw hook — start-pack runtime', () => {
     // then execute the resulting module rather than a test double.
     tmpSourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-isolated-bundled-hook-'));
     const skillsDir = tmpSourceDir;
-    const bundledDir = path.join(repoRoot, 'skills', 'shieldcortex', 'bundled', 'cortex-memory-hook');
+    const bundledDir = path.join(repoRoot, 'hooks', 'openclaw', 'cortex-memory');
     const transpiled = ts.transpileModule(
       fs.readFileSync(path.join(bundledDir, 'handler.ts'), 'utf-8'),
       { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } },
