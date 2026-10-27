@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.15.2] - 2026-10-27
+
+Patch on 5.15.1. Documentation only: the skill's SKILL.md now describes the OpenClaw hook's package resolution as it is (#946, PR #947). No change to the hook, Action Guard, install or configuration, no schema change. Action Guard stays off by default. Node floor unchanged.
+
 ### Fixed
 - **#946 SKILL.md now describes the npm-shipped OpenClaw hook's package resolution as it is.** The "Subprocess execution" bullet said the `cortex-memory` hook only runs local binaries, never downloads or installs a package, and stays inert when `shieldcortex` or `mcporter` is missing. The hook in `hooks/openclaw/cortex-memory/runtime.mjs` starts mcporter as `npx mcporter call --stdio <server> …` (no `--yes` or `--no`, so npm can fetch `mcporter` from the registry when it is not installed) and, with no accessible configured `binaryPath` and no `shieldcortex` on `PATH`, uses `npx -y shieldcortex` as the server, which can fetch `shieldcortex` from the registry. The bullet now says so and names `npm install -g shieldcortex mcporter` to keep both lookups local. A new docs contract (`scripts/docs-contract/openclaw-hook-package-resolution-copy.node-test.mjs`) pins the copy against the runtime source and a fake-`npx` run of the hook. Documentation only: no change to the hook, Action Guard, install or configuration.
 
