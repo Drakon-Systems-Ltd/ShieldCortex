@@ -261,6 +261,26 @@ def _fallback_executed_match(rx, text: str) -> bool:
         pos = m.start() + 1  # overlapping re-scan: a match starting inside this one is still checked
 
 
+# #943 B2: the call as Bash splits it -- an unescaped backslash-newline deleted,
+# a redirection word (operator plus target) blanked, heredocs and process
+# substitution untouched -- so `guard posture off>/dev/null` and a continuation
+# before `posture`/`off` read as the core's foldShellGlue reads them. Only ever
+# an ADDED reading for the posture row; mirrors the other two fallbacks.
+_FALLBACK_SHELL_CONTINUATION = re.compile(r"(?<!\\)((?:\\\\)*)\\\n")
+_FALLBACK_SHELL_REDIRECTION = re.compile(r"""(?<![<>\\])(?:(?<![^\s;&|(])\d+|&)?(?:>>|>\||>&|<&|<>|>|<)(?![<>(])[ \t]*(?:"[^"\n]*"|'[^'\n]*'|[^\s;&|<>()'"`]+)*""")
+
+
+def _fallback_fold_shell_glue(text: str) -> str:
+    return _FALLBACK_SHELL_REDIRECTION.sub(" ", _FALLBACK_SHELL_CONTINUATION.sub(r"\1", text))
+
+
+def _fallback_posture_match(text: str) -> bool:
+    """The posture row on the call as written, then as Bash splits it."""
+    return _fallback_executed_match(_FALLBACK_POSTURE_ROW, text) or _fallback_executed_match(
+        _FALLBACK_POSTURE_ROW, _fallback_fold_shell_glue(text)
+    )
+
+
 def fallback_dangerous_match(content: str) -> bool:
     """True when `content` matches a recognised-dangerous shape (fail-closed when enforcing)."""
     if not content:
@@ -269,7 +289,9 @@ def fallback_dangerous_match(content: str) -> bool:
     # fallbacks' dangerous scan: pure inspection runs no invoker.
     lock_read_only = _fallback_lock_access_is_read_only(content)
     return any(
-        _fallback_executed_match(p, content) if p is _FALLBACK_DESTROY_ROW or p is _FALLBACK_POSTURE_ROW else p.search(content)
+        _fallback_posture_match(content) if p is _FALLBACK_POSTURE_ROW
+        else _fallback_executed_match(p, content) if p is _FALLBACK_DESTROY_ROW
+        else p.search(content)
         for p in _FALLBACK_DANGEROUS
         if not (p is _FALLBACK_POSTURE_ROW and lock_read_only)
     )
@@ -426,7 +448,7 @@ def fallback_self_protection_match(content: str, tool_name=None) -> bool:
         return False
     lock_read_only = _fallback_lock_access_is_read_only(content, tool_name)
     return any(
-        _fallback_executed_match(p, content) if p is _FALLBACK_POSTURE_ROW else p.search(content)
+        _fallback_posture_match(content) if p is _FALLBACK_POSTURE_ROW else p.search(content)
         for p, lock_path in _FALLBACK_SELF_PROTECTION
         if not (lock_path and lock_read_only)
     )

@@ -89,6 +89,22 @@ const POSITIVES = [
   `cat 'notes#'; shield"cortex" ${GP} off`,
   `cat "$(${SC} ${GP} off)"`,
   `cat \`${SC} ${GP} off\``,
+  // #943 review B2: a redirection ends the word it is glued to, and Bash
+  // deletes a backslash-newline, so the argv is still the loosening.
+  `${SC} ${GP} off>/dev/null`,
+  `${SC} ${GP} advisory>/dev/null`,
+  `${SC} ${GP} off</dev/null`,
+  `${SC} ${GP} off>>log`,
+  `${SC} ${GP} off 2>/dev/null`,
+  `${SC} ${GP} 2>/dev/null off`,
+  `${SC} ${GP} >/dev/null advisory`,
+  `${SC} ${GP} >"a b" off`,
+  `${SC} ${G} \\\n${P} off`,
+  `${SC} ${GP} \\\noff`,
+  `${SC} ${GP} \\\nadvisory>/dev/null`,
+  `${SC} \\\n${GP} off`,
+  `bash -c '${SC} ${GP} off>/dev/null'`,
+  `npx ${SC} ${GP} advisory>/dev/null`,
 ];
 const NEGATIVES = [
   `${SC} ${GP}`,
@@ -127,6 +143,18 @@ const NEGATIVES = [
   `cat 'notes#; env -u FOO ${SC} ${GP} off'`,
   `cat 'notes#; /usr/bin/env ${SC} ${GP} off'`,
   `cat 'notes#; shield"cortex" ${GP} off'`,
+  // #943 review B2: the same shell spellings around a tightening, the read,
+  // a redirect whose TARGET is the word, and a mention stay off the floor.
+  `${SC} ${GP} enforce>/dev/null`,
+  `${SC} ${GP}>/dev/null`,
+  `${SC} ${GP} --json>/dev/null`,
+  `${SC} ${GP} \\\nenforce`,
+  `${SC} ${GP} \\\n--json`,
+  `${SC} ${GP} >off`,
+  `${SC} ${GP} off2>/dev/null`,
+  `${SC} ${GP} offline>/dev/null`,
+  `echo "${SC} ${GP} off>/dev/null"`,
+  `echo ${SC} ${G} \\\n${P} off`,
 ];
 
 const onFloor = (signals: readonly string[] | undefined) =>

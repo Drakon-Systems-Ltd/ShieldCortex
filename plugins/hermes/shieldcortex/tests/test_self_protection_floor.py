@@ -92,6 +92,56 @@ class SelfProtectionFloor(unittest.TestCase):
         self.assertIsNone(action_guard_decision(v, enforce=False, fallback_dangerous=True))
         self.assertFalse(fallback_self_protection_match("ls -la"))
 
+    def test_posture_shell_glue_advisory_outage_policy(self):
+        """#943 review B2: a redirection glued to the target and a
+        backslash-newline before `posture` or the target still reach the
+        advisory-outage block, through the real fallbacks and the real policy;
+        the tightening, the read and a mention stay allowed."""
+        down = ActionGuardVerdict("allow", [], "down", available=False)
+
+        def outage(cmd):
+            return action_guard_decision(
+                down,
+                enforce=False,
+                fallback_dangerous=fallback_dangerous_match(cmd),
+                fallback_self_protected=fallback_self_protection_match(cmd),
+            )
+
+        for cmd in (
+            "shieldcortex guard posture off>/dev/null",
+            "shieldcortex guard posture advisory>/dev/null",
+            "shieldcortex guard posture off</dev/null",
+            "shieldcortex guard posture off>>log",
+            "shieldcortex guard posture 2>/dev/null off",
+            "shieldcortex guard posture >/dev/null advisory",
+            "shieldcortex guard \\\nposture off",
+            "shieldcortex guard posture \\\noff",
+            "shieldcortex guard posture \\\nadvisory>/dev/null",
+            "shieldcortex \\\nguard posture off",
+            "bash -c 'shieldcortex guard posture off>/dev/null'",
+            # The existing disable flag, held the same way (parity control).
+            "shieldcortex config --action-guard-disable>/dev/null",
+        ):
+            self.assertTrue(fallback_self_protection_match(cmd), cmd)
+            d = outage(cmd)
+            self.assertIsNotNone(d, cmd)
+            self.assertEqual(d["action"], "block", cmd)
+        for cmd in (
+            "shieldcortex guard posture enforce",
+            "shieldcortex guard posture",
+            "shieldcortex guard posture enforce>/dev/null",
+            "shieldcortex guard posture>/dev/null",
+            "shieldcortex guard posture --json>/dev/null",
+            "shieldcortex guard posture \\\nenforce",
+            "shieldcortex guard posture >off",
+            "shieldcortex guard posture off2>/dev/null",
+            'echo "shieldcortex guard posture off>/dev/null"',
+            "echo shieldcortex guard \\\nposture off",
+        ):
+            self.assertFalse(fallback_self_protection_match(cmd), cmd)
+            self.assertFalse(fallback_dangerous_match(cmd), cmd)
+            self.assertIsNone(outage(cmd), cmd)
+
 
 class OutageFloorLockPaths(unittest.TestCase):
     """#509 r5 finding 9: with SHIELDCORTEX_ENFORCE=0 and the scanner down,

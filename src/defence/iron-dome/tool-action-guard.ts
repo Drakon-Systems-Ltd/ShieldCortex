@@ -1911,7 +1911,32 @@ function walkInlineShell(tokens: readonly string[], depth: number, fn: (body: st
   }
   return false;
 }
+/**
+ * #943 review B2 — shell token boundaries the argv walk does not see. Bash
+ * deletes an unescaped backslash-newline, and a redirection ends the word it
+ * is glued to: `posture off>/dev/null` runs with the argument `off`, and
+ * `posture \<newline>off` with `posture off`. Folding continuations and
+ * blanking redirection words (operator plus target, heredoc and process
+ * substitution untouched) gives the argv a second, shell-faithful spelling.
+ * Only ever ADDED to the raw reading (`guardDisableInvoked` holds when either
+ * holds), so it can raise a verdict, never lower one. Linear: one pass each,
+ * and the target's segments are disjoint by their first character. Mirrored
+ * byte-for-byte by the three outage fallbacks' posture row.
+ */
+const SHELL_CONTINUATION = /(?<!\\)((?:\\\\)*)\\\n/g;
+const SHELL_REDIRECTION = /(?<![<>\\])(?:(?<![^\s;&|(])\d+|&)?(?:>>|>\||>&|<&|<>|>|<)(?![<>(])[ \t]*(?:"[^"\n]*"|'[^'\n]*'|[^\s;&|<>()'"`]+)*/g;
+export function foldShellGlue(text: string): string {
+  return text.replace(SHELL_CONTINUATION, '$1').replace(SHELL_REDIRECTION, ' ');
+}
+
 function guardDisableInvoked(text: string, depth = 0): boolean {
+  if (guardDisableInvokedAsWritten(text, depth)) return true;
+  if (depth !== 0 || !/[<>]|\\\n/.test(text)) return false;
+  const glued = foldShellGlue(text);
+  return glued !== text && guardDisableInvokedAsWritten(glued, depth);
+}
+
+function guardDisableInvokedAsWritten(text: string, depth: number): boolean {
   if (depth > MAX_INLINE_RECURSION + 2) return true;
   // Cheap reject: every claimed surface names the package or binary. The
   // wrapper-dense ReDoS corpus (`nice env nohup` x 1100) has neither, and

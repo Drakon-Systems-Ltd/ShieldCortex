@@ -715,7 +715,7 @@ const FALLBACK_CATASTROPHIC_PATTERNS: RegExp[] = [
 // `isGatedNpxBunx` (shape-based, #96), not by a DANGEROUS pattern, and a blunt
 // fallback matching them would over-gate `npx tsc`; `uvx`/`dlx` (unconditional)
 // ARE covered. Mirrored in scripts/pre-tool-hook.mjs + hermes/sc_client.py.
-const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?: true; dataQuotes?: true }> = [
+const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?: true; dataQuotes?: true; shellGlue?: true }> = [
   { re: /\brm\b|\bunlink\b|\brmdir\b|(?:(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?|\bxargs\s+(?:-{1,2}\S+\s+)*|-exec\s+)shred\b/i, signal: 'file-delete' },
   { re: /\bsudo\b|\bdoas\b|\bsu\s/i, signal: 'privilege-escalation' },
   { re: /\bgit\b[^|\n]*\bpush\b[^|\n]*(--force\b|-f\b|\+)/i, signal: 'git-force-push' },
@@ -766,8 +766,10 @@ const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?
   // (`bash -O extglob -c`). A flag value can be no other prefix token nor an
   // invoker, so the repetition has one parse and stays linear. `dataQuotes`: a
   // hit inside a data quote (`echo "x; shieldcortex …"`) is a mention. `lockPath`: pure inspection runs
-  // no invoker, so the lock-read exemption drops it as well.
-  { re: /(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:(?:[-+]O|--rcfile|--init-file)[ \t]+[^\s;&|-][^\s;&|]*[ \t]+|-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!)|\w+=[^\s;&|({`]*|-[^\s;&|({`]+(?:[ \t]+(?!(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!))[ \t]|\w+=|\d|-|['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-])))[^\s;&|({`]+)?|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?:[ \t]+['"\\]*-[^\s;&|$`*?[\]{}]*)*[ \t]+(?:[^\s;&|]*[$`*?[\]{}]|(?:['"\\]*o['"\\]*f['"\\]*f['"\\]*|['"\\]*a['"\\]*d['"\\]*v['"\\]*i['"\\]*s['"\\]*o['"\\]*r['"\\]*y['"\\]*)(?=$|[\s;&|)`]))/i, signal: 'disable-action-guard', lockPath: true, dataQuotes: true },
+  // no invoker, so the lock-read exemption drops it as well. `shellGlue` (#943 B2):
+  // the row also reads the call as Bash splits it (continuations folded,
+  // redirections blanked: `posture off>/dev/null`), as the core walk does.
+  { re: /(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:(?:[-+]O|--rcfile|--init-file)[ \t]+[^\s;&|-][^\s;&|]*[ \t]+|-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!)|\w+=[^\s;&|({`]*|-[^\s;&|({`]+(?:[ \t]+(?!(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!))[ \t]|\w+=|\d|-|['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-])))[^\s;&|({`]+)?|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?:[ \t]+['"\\]*-[^\s;&|$`*?[\]{}]*)*[ \t]+(?:[^\s;&|]*[$`*?[\]{}]|(?:['"\\]*o['"\\]*f['"\\]*f['"\\]*|['"\\]*a['"\\]*d['"\\]*v['"\\]*i['"\\]*s['"\\]*o['"\\]*r['"\\]*y['"\\]*)(?=$|[\s;&|)`]))/i, signal: 'disable-action-guard', lockPath: true, dataQuotes: true, shellGlue: true },
   { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)\b/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
   // #501: the policy lock's own attack surface. The two environment seams that
@@ -1080,15 +1082,26 @@ function fallbackExecutedMatch(re: RegExp, text: string): boolean {
   return false;
 }
 
+// #943 B2: the call as Bash splits it — an unescaped backslash-newline
+// deleted, a redirection word (operator plus target) blanked, heredocs and
+// process substitution untouched. Byte-for-byte the core's `foldShellGlue`
+// (tool-action-guard.ts); only ever an ADDED reading for `shellGlue` rows.
+const FALLBACK_SHELL_CONTINUATION = /(?<!\\)((?:\\\\)*)\\\n/g;
+const FALLBACK_SHELL_REDIRECTION = /(?<![<>\\])(?:(?<![^\s;&|(])\d+|&)?(?:>>|>\||>&|<&|<>|>|<)(?![<>(])[ \t]*(?:"[^"\n]*"|'[^'\n]*'|[^\s;&|<>()'"`]+)*/g;
+function fallbackFoldShellGlue(text: string): string {
+  return text.replace(FALLBACK_SHELL_CONTINUATION, '$1').replace(FALLBACK_SHELL_REDIRECTION, ' ');
+}
+
 function fallbackDangerousMatch(args: Record<string, unknown> | undefined, toolName?: string): string | null {
   const writeTarget = fallbackWriteTargetMatch(args, toolName);
   if (writeTarget) return writeTarget;
   const text = fallbackExecSurface(args);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
-  for (const { re, signal, lockPath, dataQuotes } of FALLBACK_DANGEROUS_PATTERNS) {
+  for (const { re, signal, lockPath, dataQuotes, shellGlue } of FALLBACK_DANGEROUS_PATTERNS) {
     if (lockReadOnly && lockPath === true) continue;
     if (dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
+    if (shellGlue === true && fallbackExecutedMatch(re, fallbackFoldShellGlue(text))) return signal;
   }
   return null;
 }
@@ -1109,10 +1122,11 @@ export function fallbackSelfProtectionMatch(args: Record<string, unknown> | unde
   const text = fallbackExecSurface(args);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
-  for (const { re, signal, lockPath, dataQuotes } of FALLBACK_DANGEROUS_PATTERNS) {
+  for (const { re, signal, lockPath, dataQuotes, shellGlue } of FALLBACK_DANGEROUS_PATTERNS) {
     if (!SELF_PROTECTION_SIGNALS.includes(signal)) continue;
     if (lockReadOnly && lockPath === true) continue;
     if (dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
+    if (shellGlue === true && fallbackExecutedMatch(re, fallbackFoldShellGlue(text))) return signal;
   }
   return null;
 }
