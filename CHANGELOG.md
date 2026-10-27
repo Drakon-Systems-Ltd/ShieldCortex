@@ -7,8 +7,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Changed
-- **The ClawHub skill is now instructions only (SKILL.md); the `bundled/` hook and plugin copies are gone from `skills/shieldcortex`.** ClawHub's static scan flagged `execFile(mcporterBin, ...)` in the bundled hook (`suspicious.dangerous_exec`) and held v5.14.0 in review, so ClawHub kept serving 5.11.0. The hook and OpenClaw plugin still ship unchanged in the `shieldcortex` and `@drakon-systems/shieldcortex-realtime` npm packages; SKILL.md now says to install them from npm. ClawHub installers no longer receive a copy of the hook or plugin from the skill: run `npm install -g shieldcortex` and `shieldcortex quickstart`. A new guard test fails if any file under `skills/shieldcortex` contains `child_process`, `execFile`, `spawn(` or `exec(`.
+## [5.15.1] - 2026-10-27
+
+Patch on 5.15.0. The ClawHub skill is submitted as instructions only: `skills/shieldcortex` now contains SKILL.md and no bundled hook or plugin runtime code, so the listing no longer carries the `execFile` call that ClawHub's static scan flagged (PR #944). No change to the npm packages' hook, plugin or CLI behaviour, no new configuration, no schema change. Action Guard stays off by default. Node floor unchanged.
+
+### Fixed
+- **The ClawHub skill is now instructions only (SKILL.md); the `bundled/` hook and plugin copies are gone from `skills/shieldcortex` (PR #944).** ClawHub's static scan flagged `execFile(mcporterBin, ...)` in the bundled hook (`suspicious.dangerous_exec`) and held v5.14.0 in review, so ClawHub kept serving 5.11.0. The hook and OpenClaw plugin still ship unchanged in the `shieldcortex` and `@drakon-systems/shieldcortex-realtime` npm packages; SKILL.md now says to install them from npm. ClawHub installers no longer receive a copy of the hook or plugin from the skill: run `npm install -g shieldcortex` and `shieldcortex quickstart`.
 
 ## [5.15.0] - 2026-10-26
 
