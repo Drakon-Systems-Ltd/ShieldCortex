@@ -193,7 +193,43 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
     ],
   },
 
-  // 7. Stealth instruction — hidden instructions using formatting tricks
+  // 7. Agent config tamper — instructions to redirect model/API traffic or
+  //    rewrite the agent's own configuration. Every pattern needs an
+  //    imperative verb (or a literal config block / dangerous setting), so a
+  //    prose mention such as "ANTHROPIC_BASE_URL is supported for proxies"
+  //    does not match. Verbs and targets are kept on one line ([^\n]) and
+  //    length-capped.
+  {
+    name: 'agent_config_tamper',
+    weight: 0.9,
+    patterns: [
+      // Set/override an API endpoint or proxy variable.
+      /\b(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT)\b/,
+      /\b(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)\b/,
+      // VAR=https://... assignment lines for an endpoint variable.
+      /^\s*(?:export\s+)?[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)\s*=\s*["']?https?:\/\//m,
+      // Write/modify an agent config file.
+      /\b(write|add|append|put|insert|create|edit|modify|update|change|set|merge|patch|overwrite|replace|configure|save|store)\b[^\n]{0,80}(?:\.claude\/settings[\w.-]*\.json|\.claude\/hooks|\.codex\/config\.toml|\.cursor\/mcp\.json|\.gemini\/settings\.json|\.windsurf\/mcp[\w.-]*\.json|(?<![\w-])mcp\.json\b)/i,
+      /(?:>>?|\btee\b(?:\s+-a)?)\s*\S*(?:\.claude\/settings[\w.-]*\.json|\.codex\/config\.toml|\.cursor\/mcp\.json|\.gemini\/settings\.json)/i,
+      // Add MCP servers or hooks.
+      /\b(add|register|install|configure|append|insert|enable)\b[^\n]{0,40}\b(?:mcp\s+servers?|mcpServers|mcp_servers)\b/i,
+      /\[mcp_servers\.[\w-]+\]/,
+      /["']mcpServers["']\s*:\s*\{/,
+      // A Claude-style hooks block keyed by event name (a bare "hooks": {…}
+      // also appears in benign enable/disable docs, so require an event).
+      /["']hooks["']\s*:\s*\{\s*["'](?:PreToolUse|PostToolUse|SessionStart|SessionEnd|UserPromptSubmit|Stop|SubagentStop|Notification|PreCompact)["']/,
+      // Turn off sandbox / approval settings.
+      /(?<!(?:never|not|avoid|n't|without)\s+(?:\w+\s+){0,2})--dangerously-(?:skip-permissions|bypass-approvals-and-sandbox)\b/i,
+      /(?<!(?:never|not|avoid|n't|without)\s+(?:\w+\s+){0,2})\bapproval[_-]policy\s*[=:]\s*["']?never\b/i,
+      /(?<!(?:never|not|avoid|n't|without)\s+(?:\w+\s+){0,2})\bsandbox[_-]mode\s*[=:]\s*["']?danger-full-access\b/i,
+      /["']?defaultMode["']?\s*[=:]\s*["']?bypassPermissions\b/,
+      /\bskipDangerousModePermissionPrompt\b|\benableAllProjectMcpServers\b/,
+      /\b(?:turn|switch|set)\s+(?:off|the)\s+(?:the\s+)?(?:sandbox|approval)/i,
+      /\bsandbox\s*[=:]\s*["']?(?:false|off|disabled)\b/i,
+    ],
+  },
+
+  // 8. Stealth instruction — hidden instructions using formatting tricks
   {
     name: 'stealth_instruction',
     weight: 0.85,

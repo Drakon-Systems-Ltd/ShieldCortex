@@ -46,6 +46,7 @@ export const HARD_SIGNAL_PATTERNS: ReadonlySet<string> = new Set([
   'scope_escalation',
   // ── Configuration mutation / persistence ──
   'persistence',
+  'agent_config_tamper',
   // ── Code-level hard evidence (only reachable via code formats; listed so a
   //    mis-detected code format is never silently capped) ──
   'filesystem_access',
