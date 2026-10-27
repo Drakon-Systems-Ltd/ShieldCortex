@@ -1849,10 +1849,16 @@ function isGuardDisableFlag(tok: string): boolean {
 }
 /**
  * #922: `guard posture off|advisory` is a loosening invocation, so it sits on
- * the same floor as `--action-guard-disable`. The target is the first
- * non-flag argument after `guard posture`; a `$var`, command substitution or
- * glob there cannot be read statically and is held (fail-closed). `enforce`
- * and the bare read-only form are not flagged.
+ * the same floor as `--action-guard-disable`. `enforce` and the bare
+ * read-only form are not flagged.
+ *
+ * #943 r2 B2: fail closed on the whole rest of the statement instead of
+ * reading the target. Redirections are not parsed (`>a\ b off`, `off<<<x`,
+ * `> >(cat) off` all ran as `posture off` while a redirection reader missed
+ * them): any later token carrying an expansion or glob, or any later word
+ * that is `off`/`advisory` once quotes, backslashes and redirection/grouping
+ * punctuation are dropped, is a loosening. A redirect target named `off` is
+ * held too — the price of not parsing.
  */
 function loosensGuardPostureAt(tokens: readonly string[], i: number): boolean {
   if (i + 1 >= tokens.length) return false;
@@ -1860,9 +1866,7 @@ function loosensGuardPostureAt(tokens: readonly string[], i: number): boolean {
   for (let j = i + 2; j < tokens.length; j++) {
     const raw = tokens[j];
     if (/[$`*?[\]{}]/.test(raw)) return true;
-    const t = stripTokDecor(raw);
-    if (t.startsWith('-')) continue;
-    return /^(?:off|advisory)$/i.test(t);
+    if (stripTokDecor(raw).split(/[\s<>()&|;]+/).some(w => /^(?:off|advisory)$/i.test(w))) return true;
   }
   return false;
 }
@@ -1912,26 +1916,22 @@ function walkInlineShell(tokens: readonly string[], depth: number, fn: (body: st
   return false;
 }
 /**
- * #943 review B2 — shell token boundaries the argv walk does not see. Bash
- * deletes an unescaped backslash-newline, and a redirection ends the word it
- * is glued to: `posture off>/dev/null` runs with the argument `off`, and
- * `posture \<newline>off` with `posture off`. Folding continuations and
- * blanking redirection words (operator plus target, heredoc and process
- * substitution untouched) gives the argv a second, shell-faithful spelling.
- * Only ever ADDED to the raw reading (`guardDisableInvoked` holds when either
- * holds), so it can raise a verdict, never lower one. Linear: one pass each,
- * and the target's segments are disjoint by their first character. Mirrored
- * byte-for-byte by the three outage fallbacks' posture row.
+ * #943 review B2 / r2 — the second reading the argv walk gets. Bash deletes a
+ * backslash-newline (`guard \<newline>posture off`), and an `&` or `|` glued
+ * to `<`/`>` (`>&2`, `<&3`, `&>`, `>|`) belongs to the redirection, not a
+ * statement break, so `posture >&2 off` is one statement. Nothing else is
+ * folded: redirection targets are not parsed (loosensGuardPostureAt fails
+ * closed on the rest of the statement instead). Only ever ADDED to the raw
+ * reading, so it can raise a verdict, never lower one. Mirrored by the three
+ * outage fallbacks' posture tail.
  */
-const SHELL_CONTINUATION = /(?<!\\)((?:\\\\)*)\\\n/g;
-const SHELL_REDIRECTION = /(?<![<>\\])(?:(?<![^\s;&|(])\d+|&)?(?:>>|>\||>&|<&|<>|>|<)(?![<>(])[ \t]*(?:"[^"\n]*"|'[^'\n]*'|[^\s;&|<>()'"`]+)*/g;
 export function foldShellGlue(text: string): string {
-  return text.replace(SHELL_CONTINUATION, '$1').replace(SHELL_REDIRECTION, ' ');
+  return text.replace(/\\\r?\n/g, '').replace(/([<>])[&|]|&(?=>)/g, (_m, op: string | undefined) => `${op ?? ''} `);
 }
 
 function guardDisableInvoked(text: string, depth = 0): boolean {
   if (guardDisableInvokedAsWritten(text, depth)) return true;
-  if (depth !== 0 || !/[<>]|\\\n/.test(text)) return false;
+  if (depth !== 0 || !/\\\r?\n|[<>][&|]|&>/.test(text)) return false;
   const glued = foldShellGlue(text);
   return glued !== text && guardDisableInvokedAsWritten(glued, depth);
 }
@@ -4724,25 +4724,37 @@ function matchSpansClassified(
 const ATTESTED_CLASSIFY_CAP = 512;
 
 /**
- * #943 review B1 — a way to reach a shell-out under a name SHELL_OUT_SINK does
- * not see. `from os import system as launch` then `launch("systemctl stop x")`
- * leaves the region sink-free, so its literals classify as mentions. A short
- * file had that gap already; attestation (#921) must not extend it to a long
- * file that the shared budget used to fail closed. A file matching any of
- * these is never attested and takes the original path. Deliberately generous:
- * a false hit only withholds the long-file relief.
- *   - Python: a from-import out of a shell-capable module (bare or aliased —
- *     a bare `from os import system` can be rebound), the module itself bound
- *     under another name (`import os as o`, `o = os`), dynamic import, and
- *     asyncio's subprocess helpers.
- *   - JavaScript: a non-literal or dynamic module load, and process bindings.
+ * #943 review B1 (r1 + r2) — a long file keeps the attested relief ONLY when it
+ * cannot reach a shell-out under a name SHELL_OUT_SINK does not see. r1 tried an
+ * exclusion list of alias spellings; r2 reviewers walked straight past it with
+ * a backslash-newline `from os`, an attribute call (`os[...]["sys"+"tem"]`,
+ * `vars(os)[...]`, `operator.attrgetter(...)(os)`), `posix`, and a split
+ * `require("child" + "_process")`. Chasing spellings does not converge.
+ *
+ * Inverted to fail closed: relief is WITHHELD whenever the file so much as
+ * names a shell-capable module or a reflection/dynamic-import mechanism that
+ * could bind one, or carries a logical-line continuation that splits any sink
+ * or import spelling across physical lines. Attestation only ever judged a
+ * long file as a short one would be judged; the direct sinks SHELL_OUT_SINK
+ * already recognises are held with or without relief, so withholding it from a
+ * file that merely mentions `os` costs nothing but a long read-only script's
+ * fast path — exactly the conservative trade the review asked for. A file with
+ * no such reference at all (the #921 print-only / docstring shape) keeps it.
  */
-const UNACCOUNTED_EXEC_ALIAS = new RegExp([
-  String.raw`\bfrom\s+(?:os|posix|nt|pty|commands|subprocess|popen2|asyncio|multiprocessing)(?:\.\w+)*\s+import\b`,
-  String.raw`\bimport\b[^\n]*\b(?:os|posix|nt|pty|commands|subprocess|popen2|asyncio|multiprocessing)\s+as\b`,
-  String.raw`=\s*(?:os|posix|nt|pty|commands|subprocess|asyncio)\s*(?:$|[\n;,)\]}])`,
-  String.raw`\bimportlib\b|\bsys\.modules\b|\bcreate_subprocess_\w+|\bbuiltins\b|\b__builtins__\b`,
-  String.raw`\brequire\s*\(\s*[^'"\s)]|\bimport\s*\(|\bprocess\.(?:binding|dlopen|_linkedBinding)\b|\bmodule\.constructor\b|\bcreateRequire\b`,
+const UNACCOUNTED_EXEC_REACH = new RegExp([
+  // Any logical-line continuation: the sink/import scan reads physical lines,
+  // so a backslash-newline can split a `from os import` or a sink call in two.
+  String.raw`\\\r?\n`,
+  // Python: a shell-capable module by name (so any attribute reach into it is
+  // covered at the root), plus the reflection and dynamic-import mechanisms
+  // that reach one under a name the sink recognizer never sees, and the
+  // exec/eval builtins.
+  String.raw`\b(?:os|posix|nt|pty|commands|subprocess|popen2|asyncio|multiprocessing|ctypes)\b`,
+  String.raw`\b(?:importlib|__import__|__builtins__|builtins|getattr|setattr|vars|globals|locals|operator|compile)\b`,
+  String.raw`\bsys\.modules\b|__getattribute__|__dict__|\b(?:exec|eval)\s*\(`,
+  // JavaScript: any module load or process/global reflection, literal or not.
+  String.raw`\brequire\b|\bimport\s*\(|\bchild_process\b|\bcreateRequire\b`,
+  String.raw`\bprocess\s*(?:\.\s*\w|\[)|\bmodule\s*(?:\.\s*\w|\[)|\bglobalThis\b|\bFunction\s*\(`,
 ].join('|'), 'm');
 
 /**
@@ -7620,10 +7632,11 @@ function evaluateToolCallCore(
     : regions.length > 0 ? regions : withShellComplement(buildScriptRegions(), scanSurface.length);
   const attestedCandidate = attestedRoot === null ? undefined : attestedRegions.find(r => r.folded
     && r.lang === attestedRoot.lang && r.sourcePath === attestedRoot.path && r.chain === attestedRoot.path);
-  // #943 B1: a file that can reach a shell-out under a name the sink
-  // recognizer does not see is not judged as a short file would be.
+  // #943 B1: a file that could reach a shell-out under a name the sink
+  // recognizer does not see is not judged as a short file would be. The relief
+  // applies only to a file with no shell-capable module reach at all.
   const attestedFile = attestedCandidate
-    && !UNACCOUNTED_EXEC_ALIAS.test(scanSurface.slice(attestedCandidate.start, attestedCandidate.end))
+    && !UNACCOUNTED_EXEC_REACH.test(scanSurface.slice(attestedCandidate.start, attestedCandidate.end))
     ? attestedCandidate
     : undefined;
   // #874 D5: the same call with every closed-set read pipeline blanked out

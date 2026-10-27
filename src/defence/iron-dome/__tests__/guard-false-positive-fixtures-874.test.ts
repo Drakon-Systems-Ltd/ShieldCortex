@@ -1370,12 +1370,11 @@ describe('#921 review: interpreter options, tilde, interpreter names', () => {
  * surface failed closed; attestation allowed it. A file that can reach a sink
  * under a name the recognizer does not see is no longer attested.
  */
-describe('#943 B1: attestation withheld from a file with an unaccounted exec alias', () => {
+describe('#943 B1: attestation withheld from any file with a shell-capable reach', () => {
   const PAD = 'PAD = "' + 'a'.repeat(40000) + '"\n';
-  const run = (source: string) => evaluateToolCall(
-    'Bash', { command: 'python3 scripts/review.py' }, undefined,
-    { resolveScriptSource: (p: string) => (p === 'scripts/review.py' ? source : null) },
-  );
+  const run = (source: string, cmd = 'python3 scripts/review.py', scriptPath = 'scripts/review.py') =>
+    evaluateToolCall('Bash', { command: cmd }, undefined,
+      { resolveScriptSource: (q: string) => (q === scriptPath ? source : null) });
 
   it('the exact reviewer reproducer is held as on v5.14.0', () => {
     const source = PAD + 'from os import system as launch\n' + 'launch("systemctl stop nginx")\n';
@@ -1385,15 +1384,42 @@ describe('#943 B1: attestation withheld from a file with an unaccounted exec ali
     expect(v.signals).toContain('stop-process-or-service');
   });
 
+  // r1 alias shapes plus the r2 reviewers' spellings that walked straight past
+  // the old exclusion regex: a logical-line continuation splitting `from`/`os`/
+  // `import`, attribute lookups that never spell a recognised sink, `posix`,
+  // `operator`, and dynamic import. Inverting to a fail-closed allowlist holds
+  // the whole class: any shell-capable module or reflection reference withholds
+  // the long-file relief, so the over-cap path fails closed as on v5.14.0.
   it.each([
     ['bare from-import, rebound', 'from os import system\nlaunch = system\nlaunch("systemctl stop nginx")\n'],
     ['module alias', 'import os as o\no.system("systemctl stop nginx")\n'],
-    ['module rebound', 'import os\no = os\no.system("systemctl stop nginx")\n'],
+    ['module rebound', 'import os\no = os\ngetattr(o, "sys" + "tem")("systemctl stop nginx")\n'],
     ['pty from-import', 'from pty import spawn as s\ns(["sh", "-c", "systemctl stop nginx"])\n'],
-    ['importlib', 'import importlib\nimportlib.import_module("os").system("systemctl stop nginx")\n'],
+    ['importlib', 'import importlib\nlaunch = importlib.import_module("os")\nlaunch.popen("systemctl stop nginx")\n'],
     ['asyncio subprocess helper', 'import asyncio\nasyncio.run(asyncio.create_subprocess_shell("systemctl stop nginx"))\n'],
-  ])('a padded alias shape stays held: %s', (_label, body) => {
+    // #943 r2 (Astra): a logical-line continuation the old regex did not fold.
+    ['continuation between os and import', 'from os \\\nimport system as launch\nlaunch("systemctl stop nginx")\n'],
+    ['continuation between from and os', 'from \\\nos import system as launch\nlaunch("systemctl stop nginx")\n'],
+    // #943 r2 (Grok): attribute reach that never spells a recognised sink.
+    ['__dict__ attribute lookup', 'import os\nos.__dict__["sys" + "tem"]("systemctl stop nginx")\n'],
+    ['__getattribute__', 'import os\nos.__getattribute__("sys" + "tem")("systemctl stop nginx")\n'],
+    ['vars(os)', 'import os\nvars(os)["sys" + "tem"]("systemctl stop nginx")\n'],
+    ['operator.attrgetter', 'import os, operator\noperator.attrgetter("sys" + "tem")(os)("systemctl stop nginx")\n'],
+    ['posix module', 'import posix\nposix.__dict__["sys" + "tem"]("systemctl stop nginx")\n'],
+  ])('a padded Python reach stays held: %s', (_label, body) => {
     const v = run(PAD + body);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
+  // #943 r2 (Grok): the JavaScript side — a split `require`, a dynamic import
+  // and `createRequire`, none of which the old regex's literal-require test saw.
+  it.each([
+    ['split require', 'const cp = require("child" + "_process")\ncp["exec" + "Sync"]("systemctl stop nginx")\n'],
+    ['dynamic import', 'import("child_process").then(cp => cp.execSync("systemctl stop nginx"))\n'],
+    ['createRequire', 'const r = require("module").createRequire(__filename)\nr("child_process").execSync("systemctl stop nginx")\n'],
+  ])('a padded node reach stays held: %s', (_label, body) => {
+    const v = run('PAD = "' + 'a'.repeat(40000) + '"\n' + body, 'node scripts/review.mjs', 'scripts/review.mjs');
     expect(v.decision).toBe('require_approval');
     expect(v.signals).toContain('stop-process-or-service');
   });
@@ -1404,10 +1430,27 @@ describe('#943 B1: attestation withheld from a file with an unaccounted exec ali
     expect(v.signals).toContain('stop-process-or-service');
   });
 
+  // Grok r2 control: a benign `from os import path` is held too — the price of
+  // the fail-closed allowlist. Naming `os` at all withholds the relief, so the
+  // over-cap printed phrase fails closed; this is the conservative trade.
+  it('control: a padded `from os import path` plus a printed phrase is held', () => {
+    const v = run(PAD + 'from os import path\nprint("systemctl stop nginx", path.sep)\n');
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
   it('control: a padded print-only mention keeps the #921 relief', () => {
     const v = run(PAD + 'print("systemctl stop nginx")\n');
     expect(v.decision).toBe('allow');
     expect(v.signals).not.toContain('stop-process-or-service');
+  });
+
+  // The relief survives a long read-only script that names no shell-capable
+  // module and has no continuation (the #921 docstring shape).
+  it('control: a padded docstring-only script keeps the #921 relief', () => {
+    const v = run(PAD + 'DOC = """run: systemctl stop nginx; crontab -r; rm -rf cache"""\nprint(len(DOC))\n');
+    expect(v.decision).toBe('allow');
+    for (const sig of DANGEROUS_TIER_SIGNALS) expect(v.signals).not.toContain(sig);
   });
 });
 

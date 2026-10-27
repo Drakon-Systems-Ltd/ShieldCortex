@@ -105,6 +105,30 @@ const POSITIVES = [
   `${SC} \\\n${GP} off`,
   `bash -c '${SC} ${GP} off>/dev/null'`,
   `npx ${SC} ${GP} advisory>/dev/null`,
+  // #943 r2 B2: redirections are no longer parsed. Any `off`/`advisory` word
+  // later in the same statement holds, whatever redirection or escape sits
+  // between (the r2 reviewers' reproducers, each confirmed by Bash argv).
+  ...['off', 'advisory'].flatMap((t) => [
+    `${SC} ${GP} >a\\ b ${t}`,
+    `${SC} ${GP} >a\\;b ${t}`,
+    `${SC} ${GP} ${t}<<<text`,
+    `${SC} ${GP} <<<text ${t}`,
+    `${SC} ${GP} > >(cat) ${t}`,
+    `${SC} ${GP} ${t}<<<''`,
+    `${SC} ${GP} ${t}<<EOF\nEOF`,
+    `${SC} ${GP} ${t}<<'EOF'\nEOF`,
+    `${SC} ${GP} ${t}<<-EOF\nEOF`,
+    `bash -c '${SC} ${GP} ${t}<<<""'`,
+    `${SC} ${GP} >&2 ${t}`,
+    `${SC} ${GP} &>/dev/null ${t}`,
+    `${SC} ${GP} >|f ${t}`,
+    `${SC} ${GP} >"a;b" ${t}`,
+    `${SC} ${GP} ${t[0]}\\\n${t.slice(1)}`,
+  ]),
+  // Fail-closed price of not parsing: a redirect TARGET named `off` holds, and
+  // so does an expansion anywhere later in the statement.
+  `${SC} ${GP} >off`,
+  `${SC} ${GP} --json > "$OUT"`,
 ];
 const NEGATIVES = [
   `${SC} ${GP}`,
@@ -150,11 +174,22 @@ const NEGATIVES = [
   `${SC} ${GP} --json>/dev/null`,
   `${SC} ${GP} \\\nenforce`,
   `${SC} ${GP} \\\n--json`,
-  `${SC} ${GP} >off`,
   `${SC} ${GP} off2>/dev/null`,
   `${SC} ${GP} offline>/dev/null`,
   `echo "${SC} ${GP} off>/dev/null"`,
   `echo ${SC} ${G} \\\n${P} off`,
+  // #943 r2 B2: the word must be in the SAME statement; the read-only forms
+  // with pipes, descriptor duplication and here-input stay off the floor.
+  `${SC} ${GP} --json | grep advisory`,
+  `${SC} ${GP} | grep -i off`,
+  `${SC} ${GP} && echo off`,
+  `${SC} ${GP}; echo advisory`,
+  `${SC} ${GP} --json 2>&1`,
+  `${SC} ${GP} --json >&2`,
+  `${SC} ${GP} enforce<<<''`,
+  `${SC} ${GP} enforce &>/dev/null`,
+  `${SC} ${GP} <<EOF\noff\nEOF`,
+  `echo "${SC} ${GP} >a\\ b off"`,
 ];
 
 const onFloor = (signals: readonly string[] | undefined) =>
