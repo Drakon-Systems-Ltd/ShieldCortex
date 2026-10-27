@@ -337,13 +337,18 @@ describe('#466 — the reader can read this repository’s real workflows', () =
   });
 });
 
-describe('#897 — a plain key may contain a `:` that is not followed by whitespace', () => {
+describe('#897 — YAML’s key rule is an option; the gate keeps the narrow one', () => {
   // YAML ends an implicit key at the first `: `, not at the first `:`. The
-  // reader used to treat any line with a `:` inside its key as opaque, which
-  // read the SKILL.md item that broke the 5.12.0 ClawHub publish as a string
-  // where every real YAML parser reads a mapping (#893).
-  it('reads a URL item whose prose carries ": " as the one-key mapping YAML sees', () => {
-    expect(parseWorkflow('- https://registry.npmjs.org (via npm subprocess: the dashboard Overview)')).toEqual({
+  // reader's own rule ends it at the first `:` of any kind, which read the
+  // SKILL.md item that broke the 5.12.0 ClawHub publish as an opaque string
+  // where every real YAML parser reads a mapping (#893). `keyRule: 'yaml'`
+  // reads it as the mapping. The default stays the narrow rule, because
+  // review found two documents the wide one turns from refused into
+  // permitted (next block).
+  const stray = '- https://registry.npmjs.org (via npm subprocess: the dashboard Overview)';
+
+  it('reads a URL item whose prose carries ": " as the one-key mapping YAML sees, under keyRule yaml', () => {
+    expect(parseWorkflow(stray, { keyRule: 'yaml' })).toEqual({
       kind: 'seq',
       items: [
         {
@@ -354,21 +359,81 @@ describe('#897 — a plain key may contain a `:` that is not followed by whitesp
     });
   });
 
-  it('keeps a URL item with no ": " a string, port and all', () => {
-    expect(parseWorkflow('- http://localhost:3001 (local REST API — loopback only)')).toEqual({
+  it('keeps the same item an opaque string under the default rule, exactly as before #897', () => {
+    const opaque = { kind: 'seq', items: [{ kind: 'scalar', value: stray.slice(2) }] };
+    expect(parseWorkflow(stray)).toEqual(opaque);
+    expect(parseWorkflow(stray, { keyRule: 'workflow' })).toEqual(opaque);
+  });
+
+  it('keeps a URL item with no ": " a string under both rules, port and all', () => {
+    const item = '- http://localhost:3001 (local REST API — loopback only)';
+    const read = { kind: 'seq', items: [{ kind: 'scalar', value: item.slice(2) }] };
+    expect(parseWorkflow(item)).toEqual(read);
+    expect(parseWorkflow(item, { keyRule: 'yaml' })).toEqual(read);
+  });
+
+  it('reads a key written with a colon inside it under keyRule yaml, and not under the default', () => {
+    expect(parseWorkflow('a:b: c', { keyRule: 'yaml' })).toEqual({
+      kind: 'map',
+      entries: [['a:b', { kind: 'scalar', value: 'c' }]],
+    });
+    expect(parseWorkflow('a:b: c')).toEqual({ kind: 'scalar', value: 'a:b: c' });
+  });
+
+  it('never starts a plain key with a quote under keyRule yaml, so a quoted item carrying ": " stays a string', () => {
+    // A real parser reads `- "a (b: c)"` as the string `a (b: c)`; a plain
+    // key that could begin with `"` would read it as a mapping keyed `"a (b`.
+    expect(parseWorkflow('- "https://host (prose: more)"', { keyRule: 'yaml' })).toEqual({
       kind: 'seq',
-      items: [{ kind: 'scalar', value: 'http://localhost:3001 (local REST API — loopback only)' }],
+      items: [{ kind: 'scalar', value: '"https://host (prose: more)"' }],
+    });
+    // While a quoted KEY is still a key.
+    expect(parseWorkflow('"a": b', { keyRule: 'yaml' })).toEqual({
+      kind: 'map',
+      entries: [['a', { kind: 'scalar', value: 'b' }]],
     });
   });
 
-  it('reads a key written with a colon inside it', () => {
-    expect(parseWorkflow('a:b: c')).toEqual({ kind: 'map', entries: [['a:b', { kind: 'scalar', value: 'c' }]] });
+  it('still ends run: and uses: at their first ": " under both rules, so a URL in a command is untouched', () => {
+    const doc = steps('- run: curl https://example.com/a:b', '- uses: acme/scan@v1');
+    const expected = ['curl https://example.com/a:b', 'acme/scan@v1'];
+    expect(surface(doc)).toEqual(expected);
+    expect(executableSurface(parseWorkflow(doc, { keyRule: 'yaml' })).map((step) => step.value)).toEqual(expected);
+  });
+});
+
+describe('#897 review — the wide key rule must not reach the executable surface', () => {
+  // Review of the first #897 draft, which had widened the one key rule for
+  // every caller: both documents below were opaque on main and refused, and
+  // became mappings with a collected `run: snyk test` — a refused scanner
+  // claim turned permitted. Neither is a workflow GitHub Actions would run (a
+  // job id may not contain `:`; a step may not carry an unknown key), so the
+  // only correct answer is the one main gave. Pinned so the key rule the gate
+  // parses with can never silently become the wide one.
+  const colonJobId = ['jobs:', '  scan:disabled:', '    steps:', '      - run: snyk test'].join('\n');
+  const urlFirstKey = [
+    'jobs:',
+    '  ci:',
+    '    steps:',
+    '      - https://example.invalid: label',
+    '        run: snyk test',
+  ].join('\n');
+
+  it.each([
+    ['a job id carrying a `:`', colonJobId],
+    ['a step whose first key is a URL', urlFirstKey],
+  ])('refuses %s exactly as main did: no surface, no scanner', (_label, doc) => {
+    const collected = workflowExecutableSteps(doc);
+    expect(collected).toEqual([]);
+    expect(invokesScanner(collected, 'snyk')).toBe(false);
+    expect(workflowExecutableText(doc)).toBe('');
   });
 
-  it('still ends run: and uses: at their first ": ", so a URL in a command is untouched', () => {
-    expect(surface(steps('- run: curl https://example.com/a:b', '- uses: acme/scan@v1'))).toEqual([
-      'curl https://example.com/a:b',
-      'acme/scan@v1',
-    ]);
+  it('would collect the step from both under keyRule yaml, which is why the gate never parses with it', () => {
+    for (const doc of [colonJobId, urlFirstKey]) {
+      expect(executableSurface(parseWorkflow(doc, { keyRule: 'yaml' })).map((step) => step.value)).toEqual([
+        'snyk test',
+      ]);
+    }
   });
 });

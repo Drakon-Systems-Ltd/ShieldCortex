@@ -879,10 +879,11 @@ describe('#466 hermetic — the live leg tells drift apart from unavailability',
 // carried a `: ` in its prose. YAML ends an implicit key at a colon followed
 // by whitespace, so the item became a one-entry mapping, and ClawHub, which
 // wants a list of strings, rejected the skill — after the tag, not before it
-// (#893, text fixed in #896). This pins the shape with the same subset reader
-// the scanner rule uses. It follows YAML's plain-scalar rule, which is what
-// makes `https://host (prose: more)` a mapping and `http://localhost:3001
-// (loopback)` a string.
+// (#893, text fixed in #896). This pins the shape with the scanner rule's
+// subset reader under its `yaml` key rule, which follows YAML's plain-scalar
+// rule: `https://host (prose: more)` is a mapping and `http://localhost:3001
+// (loopback)` is a string. The scanner rule itself keeps the reader's narrower
+// default — see the reader for why the two must not share one rule.
 
 /** The YAML between the opening and closing `---` lines of SKILL.md. */
 function skillFrontmatter(text: string = readFileSync(SKILL_MD, 'utf8')): string {
@@ -890,6 +891,9 @@ function skillFrontmatter(text: string = readFileSync(SKILL_MD, 'utf8')): string
   if (!front) throw new Error('SKILL.md has no YAML frontmatter');
   return front[1];
 }
+
+/** The frontmatter as a real YAML parser would shape it. */
+const parseFrontmatter = (yaml: string): WorkflowNode => parseWorkflow(yaml, { keyRule: 'yaml' });
 
 /**
  * The `permissions.<field>` lists ClawHub reads as lists of strings. `env` is
@@ -903,21 +907,71 @@ function childOf(node: WorkflowNode | undefined, key: string): WorkflowNode | un
   return node.entries.find(([name]) => name === key)?.[1];
 }
 
-/** How a non-string item reads, so a red test names the stray colon. */
-function readsAs(node: WorkflowNode): string {
+/**
+ * Spellings a YAML parser decodes to something other than a string. YAML 1.1
+ * and 1.2 both, since ClawHub's parser is not ours to know: `yes`/`on`/`y`
+ * are booleans to a 1.1 reader, `0o17` an integer to a 1.2 one, and a value
+ * either of them would hand the schema as a non-string must not pass here.
+ */
+const NULL_SCALAR = /^(?:~|null)$/i;
+const BOOL_SCALAR = /^(?:true|false|yes|no|on|off|y|n)$/i;
+const NUMBER_SCALAR =
+  /^[-+]?(?:\.inf|\.nan|0x[0-9a-f_]+|0o?[0-7_]+|0b[01_]+|(?:\.\d|\d)[\d_]*(?:\.[\d_]*)?(?:e[-+]?\d+)?|\d[\d_]*(?::[0-5]?\d)+(?:\.\d*)?)$/i;
+const TIMESTAMP_SCALAR = /^\d{4}-\d\d?-\d\d?(?:$|[tT ])/;
+/** `&anchor`, `*alias`, `!tag`, `|`/`>` block headers and YAML's reserved indicators. */
+const UNDECODED_LEAD = /^[&*!|>%@`?,\]}]/;
+
+/**
+ * Why a standalone sequence scalar is not a non-empty string, or `undefined`
+ * when it decodes to one.
+ *
+ * The reader hands a standalone item back exactly as written: `- ""` arrives
+ * as the two characters `""`, `- false` as the word `false`, `- []` as `[]`.
+ * All three passed the first #897 draft's "non-empty scalar" check, and a real
+ * parser decodes them to an empty string, a boolean and an empty list — none
+ * of which ClawHub accepts in a list of strings. So the raw spelling is
+ * decoded far enough to tell a string from everything else, and anything this
+ * does not decode (an escape inside quotes, a tag, an alias, a quote left
+ * open) is refused by name rather than waved through: red and looked at is
+ * the direction the 5.12.0 publish lacked.
+ */
+function notAString(raw: string): string | undefined {
+  const text = raw.trim();
+  if (text === '') return 'an empty value';
+  const quote = text[0] === '"' || text[0] === "'" ? text[0] : undefined;
+  if (quote) {
+    if (text.length < 2 || text.at(-1) !== quote) return `an unterminated ${quote}-quoted scalar`;
+    const inner = text.slice(1, -1);
+    if (inner.includes(quote) || (quote === '"' && inner.includes('\\'))) {
+      return `a ${quote}-quoted scalar with escapes this check does not decode`;
+    }
+    return inner.trim() === '' ? 'an empty string' : undefined;
+  }
+  if (text[0] === '[') return 'a flow sequence';
+  if (text[0] === '{') return 'a flow mapping';
+  if (UNDECODED_LEAD.test(text)) return `a scalar form this check does not decode (leading \`${text[0]}\`)`;
+  if (NULL_SCALAR.test(text)) return 'null';
+  if (BOOL_SCALAR.test(text)) return 'a boolean';
+  if (NUMBER_SCALAR.test(text)) return 'a number';
+  if (TIMESTAMP_SCALAR.test(text)) return 'a timestamp';
+  return undefined;
+}
+
+/** How an item that is not a non-empty string reads, so a red test names the stray colon. */
+function readsAs(node: WorkflowNode): string | undefined {
   if (node.kind === 'map') return `a mapping with key "${node.entries[0]?.[0] ?? ''}"`;
   if (node.kind === 'seq') return `a list of ${node.items.length}`;
-  return 'an empty value';
+  return notAString(node.value);
 }
 
 /**
- * Every item under a string-list permission field that did not parse as a
+ * Every item under a string-list permission field that did not decode to a
  * non-empty string, one line each. Empty when the frontmatter is sound. A
  * missing or non-list field is a problem too, so an edit that renames or
  * flattens a field cannot pass on nothing.
  */
 function permissionListProblems(frontmatter: string): string[] {
-  const permissions = childOf(parseWorkflow(frontmatter), 'permissions');
+  const permissions = childOf(parseFrontmatter(frontmatter), 'permissions');
   const problems: string[] = [];
   for (const field of PERMISSION_STRING_LISTS) {
     const list = childOf(permissions, field);
@@ -926,11 +980,19 @@ function permissionListProblems(frontmatter: string): string[] {
       continue;
     }
     list.items.forEach((item, index) => {
-      if (item.kind === 'scalar' && item.value !== '') return;
-      problems.push(`permissions.${field}[${index}] is ${readsAs(item)}, not a string`);
+      const problem = readsAs(item);
+      if (problem !== undefined) problems.push(`permissions.${field}[${index}] is ${problem}, not a string`);
     });
   }
   return problems;
+}
+
+/** A frontmatter whose three string-list fields each hold exactly the items given. */
+function permissionsWith(items: Record<(typeof PERMISSION_STRING_LISTS)[number], string[]>): string {
+  return [
+    'permissions:',
+    ...PERMISSION_STRING_LISTS.flatMap((field) => [`  ${field}:`, ...items[field].map((item) => `    - ${item}`)]),
+  ].join('\n');
 }
 
 describe('#897 hermetic — the SKILL.md permission lists parse as lists of strings', () => {
@@ -939,7 +1001,7 @@ describe('#897 hermetic — the SKILL.md permission lists parse as lists of stri
   });
 
   it('is not vacuous: each field is present in the real SKILL.md and has items', () => {
-    const permissions = childOf(parseWorkflow(skillFrontmatter()), 'permissions');
+    const permissions = childOf(parseFrontmatter(skillFrontmatter()), 'permissions');
     for (const field of PERMISSION_STRING_LISTS) {
       const list = childOf(permissions, field);
       if (list?.kind !== 'seq') throw new Error(`permissions.${field} is not a list`);
@@ -1002,12 +1064,71 @@ describe('#897 hermetic — the SKILL.md permission lists parse as lists of stri
     ]);
   });
 
+  // #897 review: a standalone item reaches this check as its raw spelling, so
+  // a first draft that asked only for a non-empty scalar accepted `''`, `""`,
+  // `[]`, `{}`, `false` and `42` — every one a non-string to the parser that
+  // rejected 5.12.0. Each is now refused by name.
+  it.each([
+    ["''", 'an empty string'],
+    ['""', 'an empty string'],
+    ['"   "', 'an empty string'],
+    ['[]', 'a flow sequence'],
+    ['[a, b]', 'a flow sequence'],
+    ['{}', 'a flow mapping'],
+    ['~', 'null'],
+    ['null', 'null'],
+    ['NULL', 'null'],
+    ['false', 'a boolean'],
+    ['True', 'a boolean'],
+    ['yes', 'a boolean'],
+    ['off', 'a boolean'],
+    ['42', 'a number'],
+    ['-1', 'a number'],
+    ['1.5', 'a number'],
+    ['1e3', 'a number'],
+    ['0x1F', 'a number'],
+    ['0o17', 'a number'],
+    ['.inf', 'a number'],
+    ['1:30', 'a number'],
+    ['2001-12-14', 'a timestamp'],
+    ['*alias', 'a scalar form this check does not decode (leading `*`)'],
+    ['&anchor value', 'a scalar form this check does not decode (leading `&`)'],
+    ['!!str 42', 'a scalar form this check does not decode (leading `!`)'],
+    ['|', 'a scalar form this check does not decode (leading `|`)'],
+    ['"open', 'an unterminated "-quoted scalar'],
+    ["'it''s'", "a '-quoted scalar with escapes this check does not decode"],
+    ['"tab\\there"', 'a "-quoted scalar with escapes this check does not decode'],
+  ])('refuses the non-string item %s in every string-list field (negative control)', (item, problem) => {
+    const sound = '~/.shieldcortex/ (own config and memory database)';
+    expect(
+      permissionListProblems(
+        permissionsWith({ paths_read: [sound, item], paths_write: [item], network_endpoints: [item, sound] }),
+      ),
+    ).toEqual([
+      `permissions.paths_read[1] is ${problem}, not a string`,
+      `permissions.paths_write[0] is ${problem}, not a string`,
+      `permissions.network_endpoints[0] is ${problem}, not a string`,
+    ]);
+  });
+
+  it('accepts what a parser decodes to a non-empty string, quoted or plain (positive control)', () => {
+    expect(
+      permissionListProblems(
+        permissionsWith({
+          paths_read: ['~/.shieldcortex/ (own config and memory database)', '"~/.claude/ (quoted: with a colon)"'],
+          paths_write: ["'~/.cache/shieldcortex/models (single-quoted)'", '$CWD/.env (the env-scanner — reads, never writes)'],
+          network_endpoints: ['http://localhost:3001 (local REST API + WebSocket — loopback only)', '"https://x"', '1Password'],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
   it('keeps permissions.env as a list of one-key NAME: description mappings', () => {
-    const env = childOf(childOf(parseWorkflow(skillFrontmatter()), 'permissions'), 'env');
+    const env = childOf(childOf(parseFrontmatter(skillFrontmatter()), 'permissions'), 'env');
     if (env?.kind !== 'seq') throw new Error('permissions.env is not a list');
     expect(env.items.length).toBeGreaterThan(0);
     for (const item of env.items) {
-      if (item.kind !== 'map') throw new Error(`permissions.env item is ${readsAs(item)}`);
+      if (item.kind !== 'map') throw new Error(`permissions.env item is ${readsAs(item) ?? 'a string'}`);
       expect(item.entries.map(([name]) => name)).toEqual([expect.stringMatching(/^[A-Z][A-Z0-9_]*$/)]);
     }
   });
