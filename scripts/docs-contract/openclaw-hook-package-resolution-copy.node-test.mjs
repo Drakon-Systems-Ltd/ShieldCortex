@@ -116,3 +116,21 @@ describe('skills/shieldcortex/SKILL.md subprocess disclosure', () => {
     assert.match(bullet, /`npm install -g shieldcortex mcporter`/);
   });
 });
+
+describe('skills/shieldcortex/SKILL.md outbound summaries include hook package resolution', () => {
+  const text = oneLine(read('skills', 'shieldcortex', 'SKILL.md'));
+
+  it('drops the stale fixed counts', () => {
+    assert.doesNotMatch(text, /Two outbound requests can still happen by default/);
+    assert.doesNotMatch(text, /registry\.npmjs\.org \(two paths/);
+  });
+
+  it('names the hook npx resolution in every outbound inventory', () => {
+    assert.match(text, /outbound only for .*the OpenClaw `cortex-memory` hook's npx package resolution/);
+    assert.match(text, /registry\.npmjs\.org \(three paths .*whenever an enabled hook path calls the bridge/);
+    assert.match(text, /Nothing else dials out except .*the OpenClaw hook's npx package resolution/);
+    assert.match(text, /\(3\) On hosts with the OpenClaw `cortex-memory` hook enabled/);
+    assert.match(text, /on hosts with the OpenClaw hook enabled, its npx package resolution/);
+    assert.match(text, /X-Ray package lookups and the OpenClaw hook's npx package resolution \(the package name appears in the URL\)/);
+  });
+});
