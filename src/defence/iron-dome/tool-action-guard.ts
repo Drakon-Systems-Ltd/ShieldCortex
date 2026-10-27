@@ -4720,121 +4720,6 @@ function matchSpansClassified(
   return out;
 }
 
-/** #921: how many matches one call may classify inside an attested file without the shared budget. */
-const ATTESTED_CLASSIFY_CAP = 512;
-
-/**
- * #943 review B1 (r1 + r2) — a long file keeps the attested relief ONLY when it
- * cannot reach a shell-out under a name SHELL_OUT_SINK does not see. r1 tried an
- * exclusion list of alias spellings; r2 reviewers walked straight past it with
- * a backslash-newline `from os`, an attribute call (`os[...]["sys"+"tem"]`,
- * `vars(os)[...]`, `operator.attrgetter(...)(os)`), `posix`, and a split
- * `require("child" + "_process")`. Chasing spellings does not converge.
- *
- * Inverted to fail closed: relief is WITHHELD whenever the file so much as
- * names a shell-capable module or a reflection/dynamic-import mechanism that
- * could bind one, or carries a logical-line continuation that splits any sink
- * or import spelling across physical lines. Attestation only ever judged a
- * long file as a short one would be judged; the direct sinks SHELL_OUT_SINK
- * already recognises are held with or without relief, so withholding it from a
- * file that merely mentions `os` costs nothing but a long read-only script's
- * fast path — exactly the conservative trade the review asked for. A file with
- * no such reference at all (the #921 print-only / docstring shape) keeps it.
- */
-const UNACCOUNTED_EXEC_REACH = new RegExp([
-  // Any logical-line continuation: the sink/import scan reads physical lines,
-  // so a backslash-newline can split a `from os import` or a sink call in two.
-  String.raw`\\\r?\n`,
-  // Python: a shell-capable module by name (so any attribute reach into it is
-  // covered at the root), plus the reflection and dynamic-import mechanisms
-  // that reach one under a name the sink recognizer never sees, and the
-  // exec/eval builtins.
-  String.raw`\b(?:os|posix|nt|pty|commands|subprocess|popen2|asyncio|multiprocessing|ctypes)\b`,
-  String.raw`\b(?:importlib|__import__|__builtins__|builtins|getattr|setattr|vars|globals|locals|operator|compile)\b`,
-  String.raw`\bsys\.modules\b|__getattribute__|__dict__|\b(?:exec|eval)\s*\(`,
-  // JavaScript: any module load or process/global reflection, literal or not.
-  String.raw`\brequire\b|\bimport\s*\(|\bchild_process\b|\bcreateRequire\b`,
-  String.raw`\bprocess\s*(?:\.\s*\w|\[)|\bmodule\s*(?:\.\s*\w|\[)|\bglobalThis\b|\bFunction\s*\(`,
-].join('|'), 'm');
-
-/**
- * #921 (#874 cut B) — `matchSpansClassified` for the DANGEROUS scan of a call
- * that `isWholeCommandInterpreterInvocation` vouched for. `attested` is the
- * folded file that one invocation runs; `regions` must include it (and is
- * built without the length cap by the caller).
- *
- * A match wholly inside `attested` is classified by the same
- * `classifyWithCtx` a short file gets, without spending the shared re-scan
- * budget and whatever the surface length — so a long read-only script is
- * judged by what its code does, exactly as the same script would be if it
- * were short. At most ATTESTED_CLASSIFY_CAP matches are decided that way.
- * Every other match — the command line itself, a nested file, a path-target
- * rule, a match straddling the file's edge — takes the original path: the
- * shared budget under the cap, `executed` over it. In-file hits still drain
- * that shared budget so a later match *outside* the file is not judged more
- * leniently than `matchSpansClassified` would have judged it (#921 Astra B2).
- */
-function matchSpansClassifiedAttested(
-  patterns: Pattern[],
-  text: string,
-  regions: readonly ScanRegion[],
-  attested: ScanRegion,
-): ClassifiedMatch[] {
-  const out: ClassifiedMatch[] = [];
-  const overCap = text.length > SPAN_CLASSIFY_CAP;
-  const ctx = buildSpanCtx(text, regions);
-  let sharedBudget = text.length > LARGE_SURFACE ? MAX_CLASSIFY_ITERS_LARGE : Infinity;
-  let attestedLeft = ATTESTED_CLASSIFY_CAP;
-  for (const p of patterns) {
-    // Over the cap, the same pre-filter `matchSpans` applies there.
-    if (overCap && p.signal === 'install-package-global' && !/(?:-g|global)/i.test(text)) continue;
-    const pathTarget = PATH_TARGET_SIGNALS.has(p.signal);
-    const g = p.re.global ? p.re : new RegExp(p.re.source, p.re.flags + 'g');
-    let best: { span: string; tier: MatchTier; at: number } | null = null;
-    // The first match outside the file is the original fast path (free when
-    // executed, fail-closed on an empty budget); every later one spends one
-    // unit, as the original re-scan does.
-    let firstBudgetMatch = true;
-    let iters = 0;
-    for (const m of text.matchAll(g)) {
-      const s = m.index ?? 0;
-      const e = s + m[0].length;
-      const inFile = !pathTarget && attestedLeft > 0 && s >= attested.start && e <= attested.end;
-      if (!inFile && overCap) { best = { span: m[0], tier: 'executed', at: s }; break; }
-      const cRaw = classifyWithCtx(ctx, s, e, text, pathTarget);
-      const c = (cRaw === 'mention'
-        && p.signal === 'recursive-force-delete'
-        && INTERPRETER_RECURSIVE_DELETE_SPAN.test(m[0]))
-        ? 'executed' as const
-        : cRaw;
-      if (c === 'executed') { best = { span: m[0], tier: 'executed', at: s }; break; }
-      if (c === 'payload' && best === null) best = { span: m[0], tier: 'payload', at: s };
-      if (inFile) {
-        attestedLeft--;
-        if (text.length > LARGE_SURFACE) sharedBudget--;
-        // Count toward the original per-pattern cap so a later match *outside*
-        // the file still fail-closes at MAX_CLASSIFY_ITERS (#921 Astra B2 follow-up).
-        iters++;
-        continue;
-      }
-      if (firstBudgetMatch && sharedBudget <= 0) { best = { span: m[0], tier: 'executed', at: s }; break; }
-      firstBudgetMatch = false;
-      sharedBudget--;
-      if (++iters >= MAX_CLASSIFY_ITERS || sharedBudget <= 0) {
-        best = { span: m[0], tier: 'executed', at: s };
-        break;
-      }  // fail-closed
-    }
-    if (best !== null) {
-      out.push(withProvenance(
-        { signal: p.signal, span: fmtSpan(best.span), tier: best.tier },
-        text, best.at, regions,
-      ));
-    }
-  }
-  return out;
-}
-
 // Remediation hints keyed by signal — turn an opaque "failure policy: deny" into
 // an actionable message that names the rule, the matched span, and the fix
 // (issue #73 item 5).
@@ -5392,22 +5277,6 @@ function isInlineProgramFlag(interp: string, flag: string): boolean {
   return false;
 }
 
-/**
- * Strip leading and trailing space, tab and newline: the blanks Bash splits
- * words on. Not `String.prototype.trim()`, which also drops a non-breaking or
- * other Unicode space that Bash keeps as part of the word, so `x.py\u00a0`
- * would name a different file from the one that runs (#937). Hand-rolled so it
- * stays linear on long input.
- */
-function trimShellBlanks(s: string): string {
-  const blank = (c: string) => c === ' ' || c === '\t' || c === '\n';
-  let start = 0;
-  let end = s.length;
-  while (start < end && blank(s[start])) start++;
-  while (end > start && blank(s[end - 1])) end--;
-  return s.slice(start, end);
-}
-
 /** Split shell text into candidate statements. Command substitution, subshells
  *  and backticks open a new statement, exactly like `;`. */
 function splitCommandStatements(text: string): string[] {
@@ -5449,101 +5318,6 @@ const MAX_DETECTED_SCRIPTS = 8;
 /** How deep to look inside `sh -c '…'` strings for a nested file invocation. */
 const MAX_INLINE_RECURSION = 2;
 
-/** The interpreters whole-command attestation (#921) recognises, as a bare command word. */
-const WHOLE_COMMAND_INTERPRETER = /^(?:python(?:\d(?:\.\d+)?)?|node|nodejs)$/;
-
-/**
- * #921 (#874 cut B) — is this RAW command text one named-interpreter
- * invocation and nothing else?
- *
- * The only question it answers is whether anything else in the call could
- * change which binary `python3` / `node` resolves to, or what it runs. Every
- * round of #882 was a sibling doing exactly that (a `printf %n PATH` store, a
- * `-v` store, a substituted format, a glued redirect, a backslash-newline),
- * so instead of recognising each sibling this refuses to vouch for any call
- * that HAS one. Checked on the text as written, before statement splitting,
- * quote removal or `$(…)` expansion, in one forward pass:
- *
- *   - the first word is a bare `python`/`python3`/`python3.x`/`node`/`nodejs`
- *     — so no environment prefix (`PATH=… python3`), no `env`/`sudo`/`command`
- *     wrapper and no path to some other binary;
- *   - the first argument is the script itself, unquoted, printable ASCII and
- *     starting with a letter, digit, `_`, `.` or `/` — so no interpreter
- *     option runs code the guard never folded (`node -r ./other.js`,
- *     `--import`, `--loader`, `python3 -m mod`, `-c …`), quoted or not. A
- *     non-ASCII character is refused because Bash keeps U+00A0, U+2003, U+FEFF
- *     and the like inside the word while the guard's comment and inline-program
- *     recognisers use JavaScript `\s` and would cut the name short there
- *     (#937);
- *   - outside quotes: no `;` `&` `|` (siblings, background, pipes), no `<` `>`
- *     (redirection, glued or spaced), no `(` `)` (subshells), no `$` or
- *     backtick (substitution, `${…}`, variables), no backslash (escapes and
- *     line continuation), no `*` `?` `[` `{` (a glob or brace expansion can
- *     run a different file than the one the guard read), no `~` (tilde
- *     expansion names a file by the caller's HOME, not by the text the guard
- *     resolved), no `#` comment, and no newline or other control character;
- *   - inside double quotes: no `$`, backtick or backslash — the shell expands
- *     those there too;
- *   - single quotes are literal; every quote is closed.
- *
- * Quote-aware only so that a `;` inside a quoted `--reason "…; …"` argument
- * is data, not a sibling. It is not a shell parser: anything it cannot prove
- * is one plain invocation answers false, and false is the treatment every
- * call had before this check existed.
- */
-export function isWholeCommandInterpreterInvocation(rawCommand: string): boolean {
-  return wholeCommandScriptOperand(rawCommand) !== null;
-}
-
-/**
- * The script operand, exactly as Bash will see it, of a command that
- * `isWholeCommandInterpreterInvocation` accepts; null otherwise. The caller
- * binds the attested root to this text so that no preprocessing pass can
- * vouch for a shorter or shifted name (#937).
- */
-function wholeCommandScriptOperand(rawCommand: string): string | null {
-  if (typeof rawCommand !== 'string' || rawCommand.length > OVERSIZED_COMMAND_LENGTH) return null;
-  const text = trimShellBlanks(rawCommand);
-  let i = 0;
-  while (i < text.length && text[i] !== ' ' && text[i] !== '\t') i++;
-  if (!WHOLE_COMMAND_INTERPRETER.test(text.slice(0, i))) return null;
-  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++;
-  if (!/^[A-Za-z0-9_./]$/.test(text[i] ?? '')) return null;
-  const operandStart = i;
-  // The whole first operand must stay unquoted. A quote glued onto an
-  // otherwise-plain prefix (`scripts/x.py';other'`) is still one shell word,
-  // and quote-blind discovery would bind a different path (#921 Astra B1).
-  while (i < text.length && text[i] !== ' ' && text[i] !== '\t') {
-    const ch = text[i];
-    if (ch === "'" || ch === '"') return null;
-    if (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) > 0x7e) return null;
-    if (';&|<>()$`\\*?[{~'.includes(ch)) return null;
-    i++;
-  }
-  const operand = text.slice(operandStart, i);
-  let quote = '';
-  let wordStart = true;
-  for (; i < text.length; i++) {
-    const ch = text[i];
-    if (quote === "'") {
-      if (ch === "'") quote = '';
-      continue;
-    }
-    if (quote === '"') {
-      if (ch === '"') quote = '';
-      else if (ch === '$' || ch === '`' || ch === '\\') return null;
-      continue;
-    }
-    if (ch === ' ' || ch === '\t') { wordStart = true; continue; }
-    if (ch === "'" || ch === '"') { quote = ch; wordStart = false; continue; }
-    if (ch.charCodeAt(0) < 0x20 || ch === '\x7f') return null;
-    if (';&|<>()$`\\*?[{~'.includes(ch)) return null;
-    if (ch === '#' && wordStart) return null;
-    wordStart = false;
-  }
-  return quote === '' ? operand : null;
-}
-
 /**
  * Paths of script FILES this command executes — the targets whose contents the
  * danger rules never saw before.
@@ -5582,7 +5356,7 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const surface = maskSinkFreeInlinePrograms(execSurface);
 
   const add = (p: string, lang?: ScriptLang): void => {
-    const clean = trimShellBlanks(p);
+    const clean = p.trim();
     if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
     const resolved = lang ?? langFromPath(clean);
     // De-duplicate on path AND language. Keying on path alone discarded a
@@ -7595,7 +7369,7 @@ function evaluateToolCallCore(
   // Over the classification cap the span classifier fails closed and never
   // consults the region map, so building one is pure cost — skip it. This keeps
   // the pathological 50k-command path (issue #86-redos) at its measured budget.
-  const buildScriptRegions = (): ScanRegion[] => [
+  const scriptRegions: ScanRegion[] = scanSurface.length > SPAN_CLASSIFY_CAP ? [] : [
     ...interpreterHeredocRegions(execCommand),
     ...inlineProgramRegions(execCommand),
     ...fold.regions.map(r => ({
@@ -7604,41 +7378,9 @@ function evaluateToolCallCore(
       end: r.end + execSurface.length + 1,
     })),
   ];
-  const scriptRegions: ScanRegion[] = scanSurface.length > SPAN_CLASSIFY_CAP ? [] : buildScriptRegions();
   const regions = scriptRegions.length > 0
     ? withShellComplement(scriptRegions, scanSurface.length)
     : [];
-  // #921 (#874 cut B): the folded file a whole-command interpreter invocation
-  // runs — `python3 scripts/x.py …` with nothing else in the call that could
-  // change which binary runs it (`isWholeCommandInterpreterInvocation`, on the
-  // text as the caller wrote it, so the expanded pass of a `$(…)` command
-  // never qualifies). Only the DANGEROUS scan below uses it, to judge that one
-  // file as if it were short (`matchSpansClassifiedAttested`). Every other
-  // call, and every other reader of `regions`, is unchanged.
-  // The discovered root must be, character for character, the operand Bash
-  // runs: comment stripping and inline-program masking rewrite the scan text
-  // first, and a root they shortened or shifted is never attested (#937).
-  const wholeCommandOperand = family === 'exec' && rawCommand === originalCommand
-    && fold.regions.length > 0 ? wholeCommandScriptOperand(originalCommand) : null;
-  const wholeCommandRoots = wholeCommandOperand !== null
-    ? detectScriptInvocations(dataReadHeredocDiscoverySurface(rawCommand, execCommand))
-    : [];
-  const attestedRoot = wholeCommandRoots.length === 1 && wholeCommandRoots[0].lang !== 'sh'
-    && wholeCommandRoots[0].path === wholeCommandOperand
-    ? wholeCommandRoots[0]
-    : null;
-  const attestedRegions = attestedRoot === null
-    ? []
-    : regions.length > 0 ? regions : withShellComplement(buildScriptRegions(), scanSurface.length);
-  const attestedCandidate = attestedRoot === null ? undefined : attestedRegions.find(r => r.folded
-    && r.lang === attestedRoot.lang && r.sourcePath === attestedRoot.path && r.chain === attestedRoot.path);
-  // #943 B1: a file that could reach a shell-out under a name the sink
-  // recognizer does not see is not judged as a short file would be. The relief
-  // applies only to a file with no shell-capable module reach at all.
-  const attestedFile = attestedCandidate
-    && !UNACCOUNTED_EXEC_REACH.test(scanSurface.slice(attestedCandidate.start, attestedCandidate.end))
-    ? attestedCandidate
-    : undefined;
   // #874 D5: the same call with every closed-set read pipeline blanked out
   // (`closedReadPipelineMask`), length-preserving so `regions` still apply.
   // Computed on first use; null when the command has no such pipeline or is
@@ -7777,10 +7519,7 @@ function evaluateToolCallCore(
   //     IS the access), so `id_rsa` in folded source is untouched by this.
   // Demoted, not dropped: the signals are surfaced at the sensitive tier below
   // so the match stays auditable instead of vanishing.
-  // #921: a whole-command invocation's own file is judged as a short file would be.
-  const dangerClassified = attestedFile
-    ? matchSpansClassifiedAttested(DANGEROUS, scanSurface, attestedRegions, attestedFile)
-    : matchSpansClassified(DANGEROUS, scanSurface, regions);
+  const dangerClassified = matchSpansClassified(DANGEROUS, scanSurface, regions);
   const dangerPayloadOnly = dangerClassified.filter(m => m.tier === 'payload');
   const dangerMatches = [...catastrophicPayload, ...dangerClassified.filter(m => m.tier === 'executed')]
     // #170: same target-not-verb principle as the catastrophic tier. A delete
