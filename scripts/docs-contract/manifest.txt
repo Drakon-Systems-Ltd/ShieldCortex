@@ -6,5 +6,6 @@ cloud-cli-watch-only-copy.node-test.mjs
 docs-contract-manifest-guard.node-test.mjs
 memory-default-hook-update-copy.node-test.mjs
 openclaw-hook-event-copy.node-test.mjs
+openclaw-hook-package-resolution-copy.node-test.mjs
 setup-target-wiring-copy.node-test.mjs
 watch-only-self-protection-copy.node-test.mjs
