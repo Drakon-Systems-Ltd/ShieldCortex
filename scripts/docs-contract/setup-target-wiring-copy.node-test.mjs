@@ -23,6 +23,13 @@
  * between the borders has the same visible width once the colour escapes
  * are stripped.
  *
+ * #839 (round-2 review of #774, finding B4): the shared path inventory also
+ * names the Claude Code hooks settings file, and each copy surface is pinned
+ * to disclose that file's .bak-shieldcortex backup sibling — the help in the
+ * sentence under its table, the README by path. A negative control strips
+ * each disclosure from the shipped copy and checks the matching assertion
+ * fails, so the pin cannot silently become a no-op.
+ *
  * Text only: files are read and matched. Nothing here runs postinstall, setup,
  * install, quickstart or a hook, and nothing touches the home directory.
  * Dependency-free (node:test) and NOT part of the Jest suite:
@@ -80,13 +87,61 @@ function asyncFnBody(src, marker) {
 // literal spells it with (postinstall.mjs is read as source, not executed).
 const stripAnsi = (s) => s.replace(/(?:\x1b|\\x1b)\[[0-9;]*m/g, '');
 
+const CLAUDE_SETTINGS_FILE = '~/.claude/settings.json';
+const CLAUDE_SETTINGS_BACKUP = '~/.claude/settings.json.bak-shieldcortex';
+// Every path the Claude Code install writes, in help-table order. The
+// settings file is listed as a primary path; its backup sibling is disclosed
+// differently per surface (see the two *SettingsBackup helpers), so it is
+// not in this list.
 const CLAUDE_INSTALL_PATHS = [
   '~/.claude/CLAUDE.md',
   '~/.claude.json',
   '~/.claude.json.bak-shieldcortex',
+  CLAUDE_SETTINGS_FILE,
   '~/.claude/hooks/cortex-memory/',
 ];
 const CLAUDE_HOOKS_FILE_MARK = 'Claude Code hooks';
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+
+const helpInstallParagraph = () => between(
+  between(read('src', 'cli', 'setup-dispatch.ts'), 'export const SETUP_HELP = `', '`;'),
+  'install is the Claude Code install', 'quickstart [target]');
+const readmeSetupParagraph = () => {
+  const para = read('README.md').split('\n').find((l) => l.startsWith('`setup` is the onboarding command:'));
+  assert.ok(para, 'README setup paragraph not found');
+  return para;
+};
+
+/** The help install paragraph has a table row for every inventory path. */
+function assertHelpNamesInstallPaths(para) {
+  assert.match(para, /Without asking, the Claude Code install can write:/);
+  for (const p of CLAUDE_INSTALL_PATHS) {
+    assert.match(para, new RegExp(`^  ${escapeRe(p)}\\s+\\S`, 'm'), `missing ${p}`);
+  }
+}
+
+/**
+ * The help discloses the settings backup in prose rather than as a table row:
+ * the settings row is described as the Claude Code hooks file, and the
+ * sentence under the table says that file keeps a .bak-shieldcortex sibling.
+ */
+function assertHelpSettingsBackup(para) {
+  assert.match(para, new RegExp(`^  ${escapeRe(CLAUDE_SETTINGS_FILE)}\\s+${CLAUDE_HOOKS_FILE_MARK}$`, 'm'),
+    `help row for ${CLAUDE_SETTINGS_FILE} is not described as "${CLAUDE_HOOKS_FILE_MARK}"`);
+  assert.match(para, /^The Claude Code hooks file keeps a \.bak-shieldcortex sibling when replaced\.$/m,
+    'help does not say the Claude Code hooks file keeps a .bak-shieldcortex sibling');
+}
+
+/** The README setup paragraph names every inventory path in backticks. */
+function assertReadmeNamesInstallPaths(para) {
+  for (const p of CLAUDE_INSTALL_PATHS) assert.ok(para.includes('`' + p + '`'), `README missing ${p}`);
+}
+
+/** The README names the settings backup sibling by path, scoped to a replace. */
+function assertReadmeSettingsBackup(para) {
+  assert.ok(para.includes('`' + CLAUDE_SETTINGS_FILE + '` and `' + CLAUDE_SETTINGS_BACKUP + '` if it replaces the file'),
+    `README missing ${CLAUDE_SETTINGS_BACKUP} next to ${CLAUDE_SETTINGS_FILE}`);
+}
 
 describe('source facts the copy describes', () => {
   const quickstart = read('src', 'setup', 'quickstart.ts');
@@ -196,10 +251,9 @@ describe('src/cli/setup-dispatch.ts SETUP_HELP', () => {
 
   it('the install paragraph names each file the Claude Code install writes', () => {
     const para = between(help, 'install is the Claude Code install', 'quickstart [target]');
-    assert.match(para, /Without asking, the Claude Code install can write:/);
-    for (const p of CLAUDE_INSTALL_PATHS) {
-      assert.match(para, new RegExp(`^  ${p.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}\\s+\\S`, 'm'), `missing ${p}`);
-    }
+    assert.equal(para, helpInstallParagraph());
+    assertHelpNamesInstallPaths(para);
+    assertHelpSettingsBackup(para);
     assert.match(para, /mcpServers.memory/);
     assert.match(oneLine(para), /HOOK.md, handler.ts, runtime.mjs/);
     assert.match(para, /any detected hook root already has cortex-memory/);
@@ -237,10 +291,10 @@ describe('src/index.ts top-level --help setup entry', () => {
 
 describe('docs: the targeted form is described as wiring without asking', () => {
   it('README.md install section names the files setup claude can write', () => {
-    const para = read('README.md').split('\n').find((l) => l.startsWith('`setup` is the onboarding command:'));
-    assert.ok(para, 'README setup paragraph not found');
+    const para = readmeSetupParagraph();
     assert.match(para, /runs the Claude Code install without asking/);
-    for (const p of CLAUDE_INSTALL_PATHS) assert.ok(para.includes('`' + p + '`'), `README missing ${p}`);
+    assertReadmeNamesInstallPaths(para);
+    assertReadmeSettingsBackup(para);
     assert.match(para, /unless any detected hook root already has a cortex-memory directory/);
     assert.match(para, /writable OpenClaw root/);
     assert.match(para, /may restart the gateway/);
@@ -273,6 +327,54 @@ describe('docs: the targeted form is described as wiring without asking', () => 
       assert.doesNotMatch(read(...dir, 'HOOK.md'), /setup (claude|openclaw|hermes|copilot|codex)`?,? which asks/);
     });
   }
+});
+
+describe('negative control: copy that drops the settings file or its backup fails (#839)', () => {
+  const help = helpInstallParagraph();
+  const readme = readmeSetupParagraph();
+  /** `text` minus every line matching `re`; the control must remove something. */
+  const dropLines = (text, re) => {
+    const out = text.split('\n').filter((l) => !re.test(l)).join('\n');
+    assert.notEqual(out, text, `control removed nothing for ${re}`);
+    return out;
+  };
+  /** `text` minus the one `needle`; the control must find it in the shipped copy. */
+  const dropText = (text, needle) => {
+    assert.ok(text.includes(needle), `control needle not in shipped copy: ${needle}`);
+    return text.replace(needle, '');
+  };
+
+  it('the shipped copy passes every pinned assertion', () => {
+    assertHelpNamesInstallPaths(help);
+    assertHelpSettingsBackup(help);
+    assertReadmeNamesInstallPaths(readme);
+    assertReadmeSettingsBackup(readme);
+  });
+
+  it('help without the settings row fails the inventory check', () => {
+    const stripped = dropLines(help, new RegExp(`^  ${escapeRe(CLAUDE_SETTINGS_FILE)}\\s`));
+    assert.throws(() => assertHelpNamesInstallPaths(stripped), { message: `missing ${CLAUDE_SETTINGS_FILE}` });
+    assert.throws(() => assertHelpSettingsBackup(stripped));
+  });
+
+  it('help without the backup sentence still lists the row but fails the backup check', () => {
+    const stripped = dropLines(help, /keeps a \.bak-shieldcortex sibling when replaced\./);
+    assertHelpNamesInstallPaths(stripped);
+    assert.throws(() => assertHelpSettingsBackup(stripped), /\.bak-shieldcortex sibling/);
+  });
+
+  it('README without the settings file fails the inventory check', () => {
+    const stripped = dropText(readme,
+      '`' + CLAUDE_SETTINGS_FILE + '` and `' + CLAUDE_SETTINGS_BACKUP + '` if it replaces the file, ');
+    assert.throws(() => assertReadmeNamesInstallPaths(stripped), { message: `README missing ${CLAUDE_SETTINGS_FILE}` });
+    assert.throws(() => assertReadmeSettingsBackup(stripped));
+  });
+
+  it('README without the backup sibling still names the file but fails the backup check', () => {
+    const stripped = dropText(readme, ' and `' + CLAUDE_SETTINGS_BACKUP + '` if it replaces the file');
+    assertReadmeNamesInstallPaths(stripped);
+    assert.throws(() => assertReadmeSettingsBackup(stripped), { message: new RegExp(`README missing ${escapeRe(CLAUDE_SETTINGS_BACKUP)}`) });
+  });
 });
 
 describe('CHANGELOG.md #766 bullet (Unreleased, or the release that ships it)', () => {
