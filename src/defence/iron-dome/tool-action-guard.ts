@@ -4699,6 +4699,28 @@ function matchSpansClassified(
 const ATTESTED_CLASSIFY_CAP = 512;
 
 /**
+ * #943 review B1 — a way to reach a shell-out under a name SHELL_OUT_SINK does
+ * not see. `from os import system as launch` then `launch("systemctl stop x")`
+ * leaves the region sink-free, so its literals classify as mentions. A short
+ * file had that gap already; attestation (#921) must not extend it to a long
+ * file that the shared budget used to fail closed. A file matching any of
+ * these is never attested and takes the original path. Deliberately generous:
+ * a false hit only withholds the long-file relief.
+ *   - Python: a from-import out of a shell-capable module (bare or aliased —
+ *     a bare `from os import system` can be rebound), the module itself bound
+ *     under another name (`import os as o`, `o = os`), dynamic import, and
+ *     asyncio's subprocess helpers.
+ *   - JavaScript: a non-literal or dynamic module load, and process bindings.
+ */
+const UNACCOUNTED_EXEC_ALIAS = new RegExp([
+  String.raw`\bfrom\s+(?:os|posix|nt|pty|commands|subprocess|popen2|asyncio|multiprocessing)(?:\.\w+)*\s+import\b`,
+  String.raw`\bimport\b[^\n]*\b(?:os|posix|nt|pty|commands|subprocess|popen2|asyncio|multiprocessing)\s+as\b`,
+  String.raw`=\s*(?:os|posix|nt|pty|commands|subprocess|asyncio)\s*(?:$|[\n;,)\]}])`,
+  String.raw`\bimportlib\b|\bsys\.modules\b|\bcreate_subprocess_\w+|\bbuiltins\b|\b__builtins__\b`,
+  String.raw`\brequire\s*\(\s*[^'"\s)]|\bimport\s*\(|\bprocess\.(?:binding|dlopen|_linkedBinding)\b|\bmodule\.constructor\b|\bcreateRequire\b`,
+].join('|'), 'm');
+
+/**
  * #921 (#874 cut B) — `matchSpansClassified` for the DANGEROUS scan of a call
  * that `isWholeCommandInterpreterInvocation` vouched for. `attested` is the
  * folded file that one invocation runs; `regions` must include it (and is
@@ -7571,8 +7593,14 @@ function evaluateToolCallCore(
   const attestedRegions = attestedRoot === null
     ? []
     : regions.length > 0 ? regions : withShellComplement(buildScriptRegions(), scanSurface.length);
-  const attestedFile = attestedRoot === null ? undefined : attestedRegions.find(r => r.folded
+  const attestedCandidate = attestedRoot === null ? undefined : attestedRegions.find(r => r.folded
     && r.lang === attestedRoot.lang && r.sourcePath === attestedRoot.path && r.chain === attestedRoot.path);
+  // #943 B1: a file that can reach a shell-out under a name the sink
+  // recognizer does not see is not judged as a short file would be.
+  const attestedFile = attestedCandidate
+    && !UNACCOUNTED_EXEC_ALIAS.test(scanSurface.slice(attestedCandidate.start, attestedCandidate.end))
+    ? attestedCandidate
+    : undefined;
   // #874 D5: the same call with every closed-set read pipeline blanked out
   // (`closedReadPipelineMask`), length-preserving so `regions` still apply.
   // Computed on first use; null when the command has no such pipeline or is

@@ -1362,6 +1362,55 @@ describe('#921 review: interpreter options, tilde, interpreter names', () => {
   });
 });
 
+/**
+ * #943 release review B1 (Astra) — attestation judged a long file as a short
+ * one, and a short file does not see a shell-out reached through an alias
+ * (`from os import system as launch`). v5.14.0 held this exact 40,072-char
+ * script (`require_approval`, `stop-process-or-service`) because the long
+ * surface failed closed; attestation allowed it. A file that can reach a sink
+ * under a name the recognizer does not see is no longer attested.
+ */
+describe('#943 B1: attestation withheld from a file with an unaccounted exec alias', () => {
+  const PAD = 'PAD = "' + 'a'.repeat(40000) + '"\n';
+  const run = (source: string) => evaluateToolCall(
+    'Bash', { command: 'python3 scripts/review.py' }, { enabled: true, enforce: true },
+    { resolveScriptSource: (p: string) => (p === 'scripts/review.py' ? source : null) },
+  );
+
+  it('the exact reviewer reproducer is held as on v5.14.0', () => {
+    const source = PAD + 'from os import system as launch\n' + 'launch("systemctl stop nginx")\n';
+    expect(source.length).toBe(40072);
+    const v = run(source);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
+  it.each([
+    ['bare from-import, rebound', 'from os import system\nlaunch = system\nlaunch("systemctl stop nginx")\n'],
+    ['module alias', 'import os as o\no.system("systemctl stop nginx")\n'],
+    ['module rebound', 'import os\no = os\no.system("systemctl stop nginx")\n'],
+    ['pty from-import', 'from pty import spawn as s\ns(["sh", "-c", "systemctl stop nginx"])\n'],
+    ['importlib', 'import importlib\nimportlib.import_module("os").system("systemctl stop nginx")\n'],
+    ['asyncio subprocess helper', 'import asyncio\nasyncio.run(asyncio.create_subprocess_shell("systemctl stop nginx"))\n'],
+  ])('a padded alias shape stays held: %s', (_label, body) => {
+    const v = run(PAD + body);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
+  it('control: a padded direct sink is held', () => {
+    const v = run(PAD + 'import os\nos.system("systemctl stop nginx")\n');
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toContain('stop-process-or-service');
+  });
+
+  it('control: a padded print-only mention keeps the #921 relief', () => {
+    const v = run(PAD + 'print("systemctl stop nginx")\n');
+    expect(v.decision).toBe('allow');
+    expect(v.signals).not.toContain('stop-process-or-service');
+  });
+});
+
 describe('#921 review: attestation cost at the fold ceiling', () => {
   // Same discipline as #86-redos: minima of interleaved batches against the
   // path every call took before #921 (`env python3`, never attested), so a
