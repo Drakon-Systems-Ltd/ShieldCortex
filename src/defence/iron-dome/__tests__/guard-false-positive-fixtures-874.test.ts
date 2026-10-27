@@ -1373,7 +1373,7 @@ describe('#921 review: interpreter options, tilde, interpreter names', () => {
 describe('#943 B1: attestation withheld from a file with an unaccounted exec alias', () => {
   const PAD = 'PAD = "' + 'a'.repeat(40000) + '"\n';
   const run = (source: string) => evaluateToolCall(
-    'Bash', { command: 'python3 scripts/review.py' }, { enabled: true, enforce: true },
+    'Bash', { command: 'python3 scripts/review.py' }, undefined,
     { resolveScriptSource: (p: string) => (p === 'scripts/review.py' ? source : null) },
   );
 
