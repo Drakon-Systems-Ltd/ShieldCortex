@@ -92,6 +92,105 @@ class SelfProtectionFloor(unittest.TestCase):
         self.assertIsNone(action_guard_decision(v, enforce=False, fallback_dangerous=True))
         self.assertFalse(fallback_self_protection_match("ls -la"))
 
+    def test_posture_shell_glue_advisory_outage_policy(self):
+        """#943 review B2: a redirection glued to the target and a
+        backslash-newline before `posture` or the target still reach the
+        advisory-outage block, through the real fallbacks and the real policy;
+        the tightening, the read and a mention stay allowed."""
+        down = ActionGuardVerdict("allow", [], "down", available=False)
+
+        def outage(cmd):
+            return action_guard_decision(
+                down,
+                enforce=False,
+                fallback_dangerous=fallback_dangerous_match(cmd),
+                fallback_self_protected=fallback_self_protection_match(cmd),
+            )
+
+        for cmd in (
+            "shieldcortex guard posture off>/dev/null",
+            "shieldcortex guard posture advisory>/dev/null",
+            "shieldcortex guard posture off</dev/null",
+            "shieldcortex guard posture off>>log",
+            "shieldcortex guard posture 2>/dev/null off",
+            "shieldcortex guard posture >/dev/null advisory",
+            "shieldcortex guard \\\nposture off",
+            "shieldcortex guard posture \\\noff",
+            "shieldcortex guard posture \\\nadvisory>/dev/null",
+            "shieldcortex \\\nguard posture off",
+            "bash -c 'shieldcortex guard posture off>/dev/null'",
+            # The existing disable flag, held the same way (parity control).
+            "shieldcortex config --action-guard-disable>/dev/null",
+            "shieldcortex config >a\\ b --action-guard-disable",
+            # #943 r2 B2: redirections are not parsed; any `off`/`advisory` word
+            # later in the statement holds (the r2 reviewers' reproducers).
+            *[
+                cmd
+                for t in ("off", "advisory")
+                for cmd in (
+                    f"shieldcortex guard posture >a\\ b {t}",
+                    f"shieldcortex guard posture >a\\;b {t}",
+                    f"shieldcortex guard posture {t}<<<text",
+                    f"shieldcortex guard posture <<<text {t}",
+                    f"shieldcortex guard posture > >(cat) {t}",
+                    f"shieldcortex guard posture {t}<<<''",
+                    f"shieldcortex guard posture {t}<<EOF\nEOF",
+                    f"shieldcortex guard posture {t}<<'EOF'\nEOF",
+                    f"shieldcortex guard posture {t}<<-EOF\nEOF",
+                    f"bash -c 'shieldcortex guard posture {t}<<<\"\"'",
+                    f"shieldcortex guard posture >&2 {t}",
+                    f"shieldcortex guard posture &>/dev/null {t}",
+                    f"shieldcortex guard posture >|f {t}",
+                    f"shieldcortex guard posture >\"a;b\" {t}",
+                    f"shieldcortex guard posture {t[0]}\\\n{t[1:]}",
+                )
+            ],
+            # Fail-closed price of not parsing: a redirect target named `off`.
+            "shieldcortex guard posture >off",
+            # #943 r3 B2: the word check reads the whole rest of the command,
+            # past a `;` inside a process substitution, any later statement
+            # and a `#` comment (accepted over-hold for the later-echo forms).
+            *[
+                cmd
+                for t in ("off", "advisory")
+                for cmd in (
+                    f"shieldcortex guard posture > >(true; cat) {t}",
+                    f"shieldcortex guard posture > >(cat) {t}; true",
+                    f"shieldcortex guard posture enforce # {t}",
+                    f"shieldcortex guard posture --json | grep {t}",
+                    f"shieldcortex guard posture && echo {t}",
+                    f"shieldcortex guard posture <<EOF\n{t}\nEOF",
+                )
+            ],
+            # Parity control: the existing disable flag in the same position.
+            "shieldcortex config > >(true; cat) --action-guard-disable",
+        ):
+            self.assertTrue(fallback_self_protection_match(cmd), cmd)
+            d = outage(cmd)
+            self.assertIsNotNone(d, cmd)
+            self.assertEqual(d["action"], "block", cmd)
+        for cmd in (
+            "shieldcortex guard posture enforce",
+            "shieldcortex guard posture",
+            "shieldcortex guard posture enforce>/dev/null",
+            "shieldcortex guard posture>/dev/null",
+            "shieldcortex guard posture --json>/dev/null",
+            "shieldcortex guard posture \\\nenforce",
+            "shieldcortex guard posture off2>/dev/null",
+            'echo "shieldcortex guard posture off>/dev/null"',
+            "echo shieldcortex guard \\\nposture off",
+            # The read-only forms with no `off`/`advisory` word anywhere after.
+            "shieldcortex guard posture --json",
+            "shieldcortex guard posture --json 2>&1",
+            "shieldcortex guard posture --json >&2",
+            "shieldcortex guard posture enforce<<<''",
+            "shieldcortex guard posture --json | grep -c offline",
+            'echo "shieldcortex guard posture >a\\ b off"',
+        ):
+            self.assertFalse(fallback_self_protection_match(cmd), cmd)
+            self.assertFalse(fallback_dangerous_match(cmd), cmd)
+            self.assertIsNone(outage(cmd), cmd)
+
 
 class OutageFloorLockPaths(unittest.TestCase):
     """#509 r5 finding 9: with SHIELDCORTEX_ENFORCE=0 and the scanner down,

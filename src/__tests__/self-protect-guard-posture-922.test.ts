@@ -89,6 +89,66 @@ const POSITIVES = [
   `cat 'notes#'; shield"cortex" ${GP} off`,
   `cat "$(${SC} ${GP} off)"`,
   `cat \`${SC} ${GP} off\``,
+  // #943 review B2: a redirection ends the word it is glued to, and Bash
+  // deletes a backslash-newline, so the argv is still the loosening.
+  `${SC} ${GP} off>/dev/null`,
+  `${SC} ${GP} advisory>/dev/null`,
+  `${SC} ${GP} off</dev/null`,
+  `${SC} ${GP} off>>log`,
+  `${SC} ${GP} off 2>/dev/null`,
+  `${SC} ${GP} 2>/dev/null off`,
+  `${SC} ${GP} >/dev/null advisory`,
+  `${SC} ${GP} >"a b" off`,
+  `${SC} ${G} \\\n${P} off`,
+  `${SC} ${GP} \\\noff`,
+  `${SC} ${GP} \\\nadvisory>/dev/null`,
+  `${SC} \\\n${GP} off`,
+  `bash -c '${SC} ${GP} off>/dev/null'`,
+  `npx ${SC} ${GP} advisory>/dev/null`,
+  // #943 r2 B2: redirections are no longer parsed. Any `off`/`advisory` word
+  // later in the same statement holds, whatever redirection or escape sits
+  // between (the r2 reviewers' reproducers, each confirmed by Bash argv).
+  ...['off', 'advisory'].flatMap((t) => [
+    `${SC} ${GP} >a\\ b ${t}`,
+    `${SC} ${GP} >a\\;b ${t}`,
+    `${SC} ${GP} ${t}<<<text`,
+    `${SC} ${GP} <<<text ${t}`,
+    `${SC} ${GP} > >(cat) ${t}`,
+    `${SC} ${GP} ${t}<<<''`,
+    `${SC} ${GP} ${t}<<EOF\nEOF`,
+    `${SC} ${GP} ${t}<<'EOF'\nEOF`,
+    `${SC} ${GP} ${t}<<-EOF\nEOF`,
+    `bash -c '${SC} ${GP} ${t}<<<""'`,
+    `${SC} ${GP} >&2 ${t}`,
+    `${SC} ${GP} &>/dev/null ${t}`,
+    `${SC} ${GP} >|f ${t}`,
+    `${SC} ${GP} >"a;b" ${t}`,
+    `${SC} ${GP} ${t[0]}\\\n${t.slice(1)}`,
+  ]),
+  // Fail-closed price of not parsing: a redirect TARGET named `off` holds, and
+  // so does an expansion anywhere later in the statement.
+  `${SC} ${GP} >off`,
+  `${SC} ${GP} --json > "$OUT"`,
+  // #943 r3 B2: the word check reads the WHOLE rest of the command after the
+  // invocation, not the statement: a `;` inside a process substitution does
+  // not end `posture` (Bash argv is `posture off`), and neither does any other
+  // separator, subshell or `#` comment. Over-hold is the accepted price — the
+  // later `echo off` / `grep advisory` forms below were allowed before r3.
+  ...['off', 'advisory'].flatMap((t) => [
+    `${SC} ${GP} > >(true; cat) ${t}`,
+    `${SC} ${GP} > >(cat) ${t}; true`,
+    `${SC} ${GP} > >(true && cat) ${t}`,
+    `${SC} ${GP} > >(true || cat) ${t}`,
+    `${SC} ${GP} > >(true\ncat) ${t}`,
+    `${SC} ${GP} > >(echo $(true; echo x)) ${t}`,
+    `${SC} ${GP} $(true; echo x) ${t}`,
+    `${SC} ${GP} enforce # ${t}`,
+    `${SC} ${GP} --json | grep ${t}`,
+    `${SC} ${GP} && echo ${t}`,
+    `${SC} ${GP}; echo ${t}`,
+    `${SC} ${GP} <<EOF\n${t}\nEOF`,
+    `bash -c '${SC} ${GP} > >(true; cat) ${t}'`,
+  ]),
 ];
 const NEGATIVES = [
   `${SC} ${GP}`,
@@ -127,6 +187,25 @@ const NEGATIVES = [
   `cat 'notes#; env -u FOO ${SC} ${GP} off'`,
   `cat 'notes#; /usr/bin/env ${SC} ${GP} off'`,
   `cat 'notes#; shield"cortex" ${GP} off'`,
+  // #943 review B2: the same shell spellings around a tightening, the read,
+  // a redirect whose TARGET is the word, and a mention stay off the floor.
+  `${SC} ${GP} enforce>/dev/null`,
+  `${SC} ${GP}>/dev/null`,
+  `${SC} ${GP} --json>/dev/null`,
+  `${SC} ${GP} \\\nenforce`,
+  `${SC} ${GP} \\\n--json`,
+  `${SC} ${GP} off2>/dev/null`,
+  `${SC} ${GP} offline>/dev/null`,
+  `echo "${SC} ${GP} off>/dev/null"`,
+  `echo ${SC} ${G} \\\n${P} off`,
+  // The read-only forms with descriptor duplication and here-input stay off
+  // the floor when no `off`/`advisory` word follows anywhere.
+  `${SC} ${GP} --json 2>&1`,
+  `${SC} ${GP} --json >&2`,
+  `${SC} ${GP} enforce<<<''`,
+  `${SC} ${GP} enforce &>/dev/null`,
+  `${SC} ${GP} --json | grep -c offline`,
+  `echo "${SC} ${GP} >a\\ b off"`,
 ];
 
 const onFloor = (signals: readonly string[] | undefined) =>

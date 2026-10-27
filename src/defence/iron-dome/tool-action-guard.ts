@@ -1849,10 +1849,16 @@ function isGuardDisableFlag(tok: string): boolean {
 }
 /**
  * #922: `guard posture off|advisory` is a loosening invocation, so it sits on
- * the same floor as `--action-guard-disable`. The target is the first
- * non-flag argument after `guard posture`; a `$var`, command substitution or
- * glob there cannot be read statically and is held (fail-closed). `enforce`
- * and the bare read-only form are not flagged.
+ * the same floor as `--action-guard-disable`. `enforce` and the bare
+ * read-only form are not flagged.
+ *
+ * #943 r2 B2: fail closed on the whole rest of the statement instead of
+ * reading the target. Redirections are not parsed (`>a\ b off`, `off<<<x`,
+ * `> >(cat) off` all ran as `posture off` while a redirection reader missed
+ * them): any later token carrying an expansion or glob, or any later word
+ * that is `off`/`advisory` once quotes, backslashes and redirection/grouping
+ * punctuation are dropped, is a loosening. A redirect target named `off` is
+ * held too — the price of not parsing.
  */
 function loosensGuardPostureAt(tokens: readonly string[], i: number): boolean {
   if (i + 1 >= tokens.length) return false;
@@ -1860,9 +1866,7 @@ function loosensGuardPostureAt(tokens: readonly string[], i: number): boolean {
   for (let j = i + 2; j < tokens.length; j++) {
     const raw = tokens[j];
     if (/[$`*?[\]{}]/.test(raw)) return true;
-    const t = stripTokDecor(raw);
-    if (t.startsWith('-')) continue;
-    return /^(?:off|advisory)$/i.test(t);
+    if (stripTokDecor(raw).split(/[\s<>()&|;]+/).some(w => /^(?:off|advisory)$/i.test(w))) return true;
   }
   return false;
 }
@@ -1911,7 +1915,53 @@ function walkInlineShell(tokens: readonly string[], depth: number, fn: (body: st
   }
   return false;
 }
+/**
+ * #943 review B2 / r2 — the second reading the argv walk gets. Bash deletes a
+ * backslash-newline (`guard \<newline>posture off`), and an `&` or `|` glued
+ * to `<`/`>` (`>&2`, `<&3`, `&>`, `>|`) belongs to the redirection, not a
+ * statement break, so `posture >&2 off` is one statement. Nothing else is
+ * folded: redirection targets are not parsed (loosensGuardPostureAt fails
+ * closed on the rest of the statement instead). Only ever ADDED to the raw
+ * reading, so it can raise a verdict, never lower one. Mirrored by the three
+ * outage fallbacks' posture tail.
+ */
+export function foldShellGlue(text: string): string {
+  return text.replace(/\\\r?\n/g, '').replace(/([<>])[&|]|&(?=>)/g, (_m, op: string | undefined) => `${op ?? ''} `);
+}
+
+/**
+ * #943 r3 B2 — `guard posture` followed ANYWHERE later in the tool call by
+ * `off`/`advisory` as a word. Statement splitting is not trusted for this:
+ * `posture > >(true; cat) off` runs as `posture off`, but a splitter ends the
+ * statement at the `;` inside the process substitution. So the word check
+ * reads the whole rest of the command after the first `guard posture`
+ * spelling — past `;`, `&&`, `||`, newlines, `)`, nested `>(…)`/`$(…)`, and
+ * `#` comments (the command as written, before comment stripping) — once
+ * backslash-newlines, quotes and backslashes are dropped. Whether that
+ * spelling is an invocation at all is left to the argv walk, asked with an
+ * `off` target placed right after each spelling. A later `echo off` or a
+ * redirect target named `off` is held too: the accepted over-hold. A pure
+ * print (`commandScanText` returns '' for it) runs nothing and is skipped.
+ */
+function guardPostureLoosenedAnywhere(command: string): boolean {
+  if (!command || isPurePrint(command)) return false;
+  const text = foldShellGlue(command);
+  const spelling = new RegExp(`${GUARD_POSTURE_SPELLING.source}['"]*`, 'gi');
+  const first = spelling.exec(text);
+  if (first === null) return false;
+  const rest = text.slice(first.index + first[0].length);
+  if (!rest.replace(/['"\\]/g, '').split(/[\s<>()&|;]+/).some(w => /^(?:off|advisory)$/i.test(w))) return false;
+  return guardDisableInvokedAsWritten(text.replace(spelling, m => `${m} off`), 0);
+}
+
 function guardDisableInvoked(text: string, depth = 0): boolean {
+  if (guardDisableInvokedAsWritten(text, depth)) return true;
+  if (depth !== 0 || !/\\\r?\n|[<>][&|]|&>/.test(text)) return false;
+  const glued = foldShellGlue(text);
+  return glued !== text && guardDisableInvokedAsWritten(glued, depth);
+}
+
+function guardDisableInvokedAsWritten(text: string, depth: number): boolean {
   if (depth > MAX_INLINE_RECURSION + 2) return true;
   // Cheap reject: every claimed surface names the package or binary. The
   // wrapper-dense ReDoS corpus (`nice env nohup` x 1100) has neither, and
@@ -4695,87 +4745,6 @@ function matchSpansClassified(
   return out;
 }
 
-/** #921: how many matches one call may classify inside an attested file without the shared budget. */
-const ATTESTED_CLASSIFY_CAP = 512;
-
-/**
- * #921 (#874 cut B) — `matchSpansClassified` for the DANGEROUS scan of a call
- * that `isWholeCommandInterpreterInvocation` vouched for. `attested` is the
- * folded file that one invocation runs; `regions` must include it (and is
- * built without the length cap by the caller).
- *
- * A match wholly inside `attested` is classified by the same
- * `classifyWithCtx` a short file gets, without spending the shared re-scan
- * budget and whatever the surface length — so a long read-only script is
- * judged by what its code does, exactly as the same script would be if it
- * were short. At most ATTESTED_CLASSIFY_CAP matches are decided that way.
- * Every other match — the command line itself, a nested file, a path-target
- * rule, a match straddling the file's edge — takes the original path: the
- * shared budget under the cap, `executed` over it. In-file hits still drain
- * that shared budget so a later match *outside* the file is not judged more
- * leniently than `matchSpansClassified` would have judged it (#921 Astra B2).
- */
-function matchSpansClassifiedAttested(
-  patterns: Pattern[],
-  text: string,
-  regions: readonly ScanRegion[],
-  attested: ScanRegion,
-): ClassifiedMatch[] {
-  const out: ClassifiedMatch[] = [];
-  const overCap = text.length > SPAN_CLASSIFY_CAP;
-  const ctx = buildSpanCtx(text, regions);
-  let sharedBudget = text.length > LARGE_SURFACE ? MAX_CLASSIFY_ITERS_LARGE : Infinity;
-  let attestedLeft = ATTESTED_CLASSIFY_CAP;
-  for (const p of patterns) {
-    // Over the cap, the same pre-filter `matchSpans` applies there.
-    if (overCap && p.signal === 'install-package-global' && !/(?:-g|global)/i.test(text)) continue;
-    const pathTarget = PATH_TARGET_SIGNALS.has(p.signal);
-    const g = p.re.global ? p.re : new RegExp(p.re.source, p.re.flags + 'g');
-    let best: { span: string; tier: MatchTier; at: number } | null = null;
-    // The first match outside the file is the original fast path (free when
-    // executed, fail-closed on an empty budget); every later one spends one
-    // unit, as the original re-scan does.
-    let firstBudgetMatch = true;
-    let iters = 0;
-    for (const m of text.matchAll(g)) {
-      const s = m.index ?? 0;
-      const e = s + m[0].length;
-      const inFile = !pathTarget && attestedLeft > 0 && s >= attested.start && e <= attested.end;
-      if (!inFile && overCap) { best = { span: m[0], tier: 'executed', at: s }; break; }
-      const cRaw = classifyWithCtx(ctx, s, e, text, pathTarget);
-      const c = (cRaw === 'mention'
-        && p.signal === 'recursive-force-delete'
-        && INTERPRETER_RECURSIVE_DELETE_SPAN.test(m[0]))
-        ? 'executed' as const
-        : cRaw;
-      if (c === 'executed') { best = { span: m[0], tier: 'executed', at: s }; break; }
-      if (c === 'payload' && best === null) best = { span: m[0], tier: 'payload', at: s };
-      if (inFile) {
-        attestedLeft--;
-        if (text.length > LARGE_SURFACE) sharedBudget--;
-        // Count toward the original per-pattern cap so a later match *outside*
-        // the file still fail-closes at MAX_CLASSIFY_ITERS (#921 Astra B2 follow-up).
-        iters++;
-        continue;
-      }
-      if (firstBudgetMatch && sharedBudget <= 0) { best = { span: m[0], tier: 'executed', at: s }; break; }
-      firstBudgetMatch = false;
-      sharedBudget--;
-      if (++iters >= MAX_CLASSIFY_ITERS || sharedBudget <= 0) {
-        best = { span: m[0], tier: 'executed', at: s };
-        break;
-      }  // fail-closed
-    }
-    if (best !== null) {
-      out.push(withProvenance(
-        { signal: p.signal, span: fmtSpan(best.span), tier: best.tier },
-        text, best.at, regions,
-      ));
-    }
-  }
-  return out;
-}
-
 // Remediation hints keyed by signal — turn an opaque "failure policy: deny" into
 // an actionable message that names the rule, the matched span, and the fix
 // (issue #73 item 5).
@@ -5333,22 +5302,6 @@ function isInlineProgramFlag(interp: string, flag: string): boolean {
   return false;
 }
 
-/**
- * Strip leading and trailing space, tab and newline: the blanks Bash splits
- * words on. Not `String.prototype.trim()`, which also drops a non-breaking or
- * other Unicode space that Bash keeps as part of the word, so `x.py\u00a0`
- * would name a different file from the one that runs (#937). Hand-rolled so it
- * stays linear on long input.
- */
-function trimShellBlanks(s: string): string {
-  const blank = (c: string) => c === ' ' || c === '\t' || c === '\n';
-  let start = 0;
-  let end = s.length;
-  while (start < end && blank(s[start])) start++;
-  while (end > start && blank(s[end - 1])) end--;
-  return s.slice(start, end);
-}
-
 /** Split shell text into candidate statements. Command substitution, subshells
  *  and backticks open a new statement, exactly like `;`. */
 function splitCommandStatements(text: string): string[] {
@@ -5390,101 +5343,6 @@ const MAX_DETECTED_SCRIPTS = 8;
 /** How deep to look inside `sh -c '…'` strings for a nested file invocation. */
 const MAX_INLINE_RECURSION = 2;
 
-/** The interpreters whole-command attestation (#921) recognises, as a bare command word. */
-const WHOLE_COMMAND_INTERPRETER = /^(?:python(?:\d(?:\.\d+)?)?|node|nodejs)$/;
-
-/**
- * #921 (#874 cut B) — is this RAW command text one named-interpreter
- * invocation and nothing else?
- *
- * The only question it answers is whether anything else in the call could
- * change which binary `python3` / `node` resolves to, or what it runs. Every
- * round of #882 was a sibling doing exactly that (a `printf %n PATH` store, a
- * `-v` store, a substituted format, a glued redirect, a backslash-newline),
- * so instead of recognising each sibling this refuses to vouch for any call
- * that HAS one. Checked on the text as written, before statement splitting,
- * quote removal or `$(…)` expansion, in one forward pass:
- *
- *   - the first word is a bare `python`/`python3`/`python3.x`/`node`/`nodejs`
- *     — so no environment prefix (`PATH=… python3`), no `env`/`sudo`/`command`
- *     wrapper and no path to some other binary;
- *   - the first argument is the script itself, unquoted, printable ASCII and
- *     starting with a letter, digit, `_`, `.` or `/` — so no interpreter
- *     option runs code the guard never folded (`node -r ./other.js`,
- *     `--import`, `--loader`, `python3 -m mod`, `-c …`), quoted or not. A
- *     non-ASCII character is refused because Bash keeps U+00A0, U+2003, U+FEFF
- *     and the like inside the word while the guard's comment and inline-program
- *     recognisers use JavaScript `\s` and would cut the name short there
- *     (#937);
- *   - outside quotes: no `;` `&` `|` (siblings, background, pipes), no `<` `>`
- *     (redirection, glued or spaced), no `(` `)` (subshells), no `$` or
- *     backtick (substitution, `${…}`, variables), no backslash (escapes and
- *     line continuation), no `*` `?` `[` `{` (a glob or brace expansion can
- *     run a different file than the one the guard read), no `~` (tilde
- *     expansion names a file by the caller's HOME, not by the text the guard
- *     resolved), no `#` comment, and no newline or other control character;
- *   - inside double quotes: no `$`, backtick or backslash — the shell expands
- *     those there too;
- *   - single quotes are literal; every quote is closed.
- *
- * Quote-aware only so that a `;` inside a quoted `--reason "…; …"` argument
- * is data, not a sibling. It is not a shell parser: anything it cannot prove
- * is one plain invocation answers false, and false is the treatment every
- * call had before this check existed.
- */
-export function isWholeCommandInterpreterInvocation(rawCommand: string): boolean {
-  return wholeCommandScriptOperand(rawCommand) !== null;
-}
-
-/**
- * The script operand, exactly as Bash will see it, of a command that
- * `isWholeCommandInterpreterInvocation` accepts; null otherwise. The caller
- * binds the attested root to this text so that no preprocessing pass can
- * vouch for a shorter or shifted name (#937).
- */
-function wholeCommandScriptOperand(rawCommand: string): string | null {
-  if (typeof rawCommand !== 'string' || rawCommand.length > OVERSIZED_COMMAND_LENGTH) return null;
-  const text = trimShellBlanks(rawCommand);
-  let i = 0;
-  while (i < text.length && text[i] !== ' ' && text[i] !== '\t') i++;
-  if (!WHOLE_COMMAND_INTERPRETER.test(text.slice(0, i))) return null;
-  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++;
-  if (!/^[A-Za-z0-9_./]$/.test(text[i] ?? '')) return null;
-  const operandStart = i;
-  // The whole first operand must stay unquoted. A quote glued onto an
-  // otherwise-plain prefix (`scripts/x.py';other'`) is still one shell word,
-  // and quote-blind discovery would bind a different path (#921 Astra B1).
-  while (i < text.length && text[i] !== ' ' && text[i] !== '\t') {
-    const ch = text[i];
-    if (ch === "'" || ch === '"') return null;
-    if (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) > 0x7e) return null;
-    if (';&|<>()$`\\*?[{~'.includes(ch)) return null;
-    i++;
-  }
-  const operand = text.slice(operandStart, i);
-  let quote = '';
-  let wordStart = true;
-  for (; i < text.length; i++) {
-    const ch = text[i];
-    if (quote === "'") {
-      if (ch === "'") quote = '';
-      continue;
-    }
-    if (quote === '"') {
-      if (ch === '"') quote = '';
-      else if (ch === '$' || ch === '`' || ch === '\\') return null;
-      continue;
-    }
-    if (ch === ' ' || ch === '\t') { wordStart = true; continue; }
-    if (ch === "'" || ch === '"') { quote = ch; wordStart = false; continue; }
-    if (ch.charCodeAt(0) < 0x20 || ch === '\x7f') return null;
-    if (';&|<>()$`\\*?[{~'.includes(ch)) return null;
-    if (ch === '#' && wordStart) return null;
-    wordStart = false;
-  }
-  return quote === '' ? operand : null;
-}
-
 /**
  * Paths of script FILES this command executes — the targets whose contents the
  * danger rules never saw before.
@@ -5523,7 +5381,7 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const surface = maskSinkFreeInlinePrograms(execSurface);
 
   const add = (p: string, lang?: ScriptLang): void => {
-    const clean = trimShellBlanks(p);
+    const clean = p.trim();
     if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
     const resolved = lang ?? langFromPath(clean);
     // De-duplicate on path AND language. Keying on path alone discarded a
@@ -7526,6 +7384,11 @@ function evaluateToolCallCore(
   // Folded script source is appended, never substituted: the command surface is
   // scanned exactly as before, so no existing verdict can change direction.
   const scanSurface = fold.content ? `${execSurface}\n${fold.content}` : execSurface;
+  // #500 self-protection, plus the #943 r3 B2 whole-command posture reading on
+  // the command as written (comments included). Computed on first use.
+  let selfDisable: boolean | undefined;
+  const selfDisableInvoked = (): boolean =>
+    (selfDisable ??= guardDisableInvoked(scanSurface) || guardPostureLoosenedAnywhere(command));
 
   // Which slices of `scanSurface` are SHELL and which are interpreter SOURCE
   // (issue #89). Every rule below is written for shell command text; a folded
@@ -7536,7 +7399,7 @@ function evaluateToolCallCore(
   // Over the classification cap the span classifier fails closed and never
   // consults the region map, so building one is pure cost — skip it. This keeps
   // the pathological 50k-command path (issue #86-redos) at its measured budget.
-  const buildScriptRegions = (): ScanRegion[] => [
+  const scriptRegions: ScanRegion[] = scanSurface.length > SPAN_CLASSIFY_CAP ? [] : [
     ...interpreterHeredocRegions(execCommand),
     ...inlineProgramRegions(execCommand),
     ...fold.regions.map(r => ({
@@ -7545,34 +7408,9 @@ function evaluateToolCallCore(
       end: r.end + execSurface.length + 1,
     })),
   ];
-  const scriptRegions: ScanRegion[] = scanSurface.length > SPAN_CLASSIFY_CAP ? [] : buildScriptRegions();
   const regions = scriptRegions.length > 0
     ? withShellComplement(scriptRegions, scanSurface.length)
     : [];
-  // #921 (#874 cut B): the folded file a whole-command interpreter invocation
-  // runs — `python3 scripts/x.py …` with nothing else in the call that could
-  // change which binary runs it (`isWholeCommandInterpreterInvocation`, on the
-  // text as the caller wrote it, so the expanded pass of a `$(…)` command
-  // never qualifies). Only the DANGEROUS scan below uses it, to judge that one
-  // file as if it were short (`matchSpansClassifiedAttested`). Every other
-  // call, and every other reader of `regions`, is unchanged.
-  // The discovered root must be, character for character, the operand Bash
-  // runs: comment stripping and inline-program masking rewrite the scan text
-  // first, and a root they shortened or shifted is never attested (#937).
-  const wholeCommandOperand = family === 'exec' && rawCommand === originalCommand
-    && fold.regions.length > 0 ? wholeCommandScriptOperand(originalCommand) : null;
-  const wholeCommandRoots = wholeCommandOperand !== null
-    ? detectScriptInvocations(dataReadHeredocDiscoverySurface(rawCommand, execCommand))
-    : [];
-  const attestedRoot = wholeCommandRoots.length === 1 && wholeCommandRoots[0].lang !== 'sh'
-    && wholeCommandRoots[0].path === wholeCommandOperand
-    ? wholeCommandRoots[0]
-    : null;
-  const attestedRegions = attestedRoot === null
-    ? []
-    : regions.length > 0 ? regions : withShellComplement(buildScriptRegions(), scanSurface.length);
-  const attestedFile = attestedRoot === null ? undefined : attestedRegions.find(r => r.folded
-    && r.lang === attestedRoot.lang && r.sourcePath === attestedRoot.path && r.chain === attestedRoot.path);
   // #874 D5: the same call with every closed-set read pipeline blanked out
   // (`closedReadPipelineMask`), length-preserving so `regions` still apply.
   // Computed on first use; null when the command has no such pipeline or is
@@ -7711,10 +7549,7 @@ function evaluateToolCallCore(
   //     IS the access), so `id_rsa` in folded source is untouched by this.
   // Demoted, not dropped: the signals are surfaced at the sensitive tier below
   // so the match stays auditable instead of vanishing.
-  // #921: a whole-command invocation's own file is judged as a short file would be.
-  const dangerClassified = attestedFile
-    ? matchSpansClassifiedAttested(DANGEROUS, scanSurface, attestedRegions, attestedFile)
-    : matchSpansClassified(DANGEROUS, scanSurface, regions);
+  const dangerClassified = matchSpansClassified(DANGEROUS, scanSurface, regions);
   const dangerPayloadOnly = dangerClassified.filter(m => m.tier === 'payload');
   const dangerMatches = [...catastrophicPayload, ...dangerClassified.filter(m => m.tier === 'executed')]
     // #170: same target-not-verb principle as the catastrophic tier. A delete
@@ -7792,7 +7627,7 @@ function evaluateToolCallCore(
   // The argv parser also strips flag quoting, so the `git branch "-d" "-f"`
   // evasion is confirmed rather than slipped.
   // #500: self-protection is proposed by the argv walk, not a table regex.
-  if (!dangerSignals.includes('disable-action-guard') && guardDisableInvoked(scanSurface)) {
+  if (!dangerSignals.includes('disable-action-guard') && selfDisableInvoked()) {
     dangerSignals.push('disable-action-guard');
     dangerSpan = dangerSpan ?? 'guard self-protection';
     if (!dangerEvidence.has('disable-action-guard')) {
@@ -7840,7 +7675,7 @@ function evaluateToolCallCore(
   if (dangerSignals.includes('disable-action-guard')
       && policyLockAccessIsReadOnly(scanSurface)
       && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
-      && !guardDisableInvoked(scanSurface)) {
+      && !selfDisableInvoked()) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'disable-action-guard');
   }
   // #874: pure shell inspection of the guard's own config is not a rewrite of
@@ -7849,7 +7684,7 @@ function evaluateToolCallCore(
   if (dangerSignals.includes('touch-guard-config')
       && guardConfigAccessIsReadOnly(scanSurface)
       && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
-      && !guardDisableInvoked(scanSurface)) {
+      && !selfDisableInvoked()) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'touch-guard-config');
   }
   // External egress is a potential exfil vector — but only when the call carries
@@ -7943,7 +7778,7 @@ function evaluateToolCallCore(
   // is a call that still makes a network request once the reads are blanked.
   if (dangerSignals.length > 0
       && dangerSignals.every(sig => GUARD_SELF_PROTECTION_SIGNALS.includes(sig))
-      && !guardDisableInvoked(scanSurface)) {
+      && !selfDisableInvoked()) {
     const rm = closedReadMasked();
     // Conservative beyond the design: a call that still reaches the network
     // once the reads are blanked keeps the floor (#522 G4 "a read with a
