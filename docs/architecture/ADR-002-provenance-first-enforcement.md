@@ -15,7 +15,7 @@
 | v2 round 2 | fe9541a2 | Section 2.4 restructured into three disjoint effect sets with precedence DENY > HOLD > AUDIT; Sections 2.1/2.2 restated as a taint and lineage contract (unknown provenance fails closed, taint is transitive by content, taint state bound to host-owned session identity); Section 2.5 narrowing gate now requires 5A and 5B and 5C; the "SC already sees every tool response" assertion replaced by the measured per-adapter coverage table in Section 5C; Section 8 records the alternative not taken |
 | v2 round 3 | this revision | Section 2.4 recast as a decision over (effect kinds, targets, session taint) with a minimum effect taxonomy and a fail-closed unclassified branch, and round 2's static-disjointness rule withdrawn; Section 2.3 gains **opaque-invocation approval** as a distinct mode with immutable execution identity and execution-time revalidation; Section 5C's Hermes row corrected against source (partial fail-open, not blanket); Section 5B's controls split into enforcement-off effect witnesses and taint controls, and the acceptance bars pre-registered as engineering bars; Section 5A qualified as descriptive; Section 4's tainted-session consequence corrected |
 
-> **Nothing in this document is the operator's acceptance of the trade-offs; that decision is pending.**
+> **Operator decision recorded (2026-09-29):** the trade-offs in Section 8 were accepted as recommended. This records the design decision only and switches no enforcement on; go-live stays gated on the Section 5B bars and on 5A + 5B + 5C per adapter.
 
 Numbering note: this is the first file under `docs/architecture/`. Earlier decision records live under `docs/design/` (for example `ADR-2026-08-19-retry-control.md`) and keep their names; "ADR-001" is the label #556 gives the intent-first doctrine, not a file.
 
@@ -520,7 +520,9 @@ Section 2.5's narrowing is gated on 5A having been reviewed, 5B having been exec
 
 ---
 
-## 8. Open for the operator's decision
+## 8. Operator decisions (accepted 2026-09-29)
+
+The operator accepted each item below as recommended, including this ADR's default of HOLD rather than the alternative not taken. The list is kept as the record of what was decided.
 
 - Accept the session-taint trade (Section 2.2) and its false-positive class, including fail-closed unknown provenance and transitivity by content, or reject it and keep text-gating as the general effect gate.
 - Accept the effect decision of Section 2.4 — a total, single-valued function of (effect kinds, targets, session taint) with precedence DENY > HOLD > AUDIT — including the minimum effect taxonomy, the fail-closed treatment of an unclassified executable effect, and the rule that no program is exempted by name.
@@ -530,4 +532,4 @@ Section 2.5's narrowing is gated on 5A having been reviewed, 5B having been exec
 - Accept that narrowing of the dangerous tier is gated on Sections 5A, 5B and 5C together, that building fixtures is not passing them, and that the dangerous tier keeps its current behaviour until then, per adapter.
 - Confirm that the session-lease family stays outside this decision, that the lease wins over a bounded approval, and that #554 is tracked separately.
 
-> **Nothing in this document is the operator's acceptance of the trade-offs; that decision is pending.**
+> **Operator decision recorded (2026-09-29):** the trade-offs in Section 8 were accepted as recommended. This records the design decision only and switches no enforcement on; go-live stays gated on the Section 5B bars and on 5A + 5B + 5C per adapter.
