@@ -1929,6 +1929,31 @@ export function foldShellGlue(text: string): string {
   return text.replace(/\\\r?\n/g, '').replace(/([<>])[&|]|&(?=>)/g, (_m, op: string | undefined) => `${op ?? ''} `);
 }
 
+/**
+ * #943 r3 B2 — `guard posture` followed ANYWHERE later in the tool call by
+ * `off`/`advisory` as a word. Statement splitting is not trusted for this:
+ * `posture > >(true; cat) off` runs as `posture off`, but a splitter ends the
+ * statement at the `;` inside the process substitution. So the word check
+ * reads the whole rest of the command after the first `guard posture`
+ * spelling — past `;`, `&&`, `||`, newlines, `)`, nested `>(…)`/`$(…)`, and
+ * `#` comments (the command as written, before comment stripping) — once
+ * backslash-newlines, quotes and backslashes are dropped. Whether that
+ * spelling is an invocation at all is left to the argv walk, asked with an
+ * `off` target placed right after each spelling. A later `echo off` or a
+ * redirect target named `off` is held too: the accepted over-hold. A pure
+ * print (`commandScanText` returns '' for it) runs nothing and is skipped.
+ */
+function guardPostureLoosenedAnywhere(command: string): boolean {
+  if (!command || isPurePrint(command)) return false;
+  const text = foldShellGlue(command);
+  const spelling = new RegExp(`${GUARD_POSTURE_SPELLING.source}['"]*`, 'gi');
+  const first = spelling.exec(text);
+  if (first === null) return false;
+  const rest = text.slice(first.index + first[0].length);
+  if (!rest.replace(/['"\\]/g, '').split(/[\s<>()&|;]+/).some(w => /^(?:off|advisory)$/i.test(w))) return false;
+  return guardDisableInvokedAsWritten(text.replace(spelling, m => `${m} off`), 0);
+}
+
 function guardDisableInvoked(text: string, depth = 0): boolean {
   if (guardDisableInvokedAsWritten(text, depth)) return true;
   if (depth !== 0 || !/\\\r?\n|[<>][&|]|&>/.test(text)) return false;
@@ -7359,6 +7384,11 @@ function evaluateToolCallCore(
   // Folded script source is appended, never substituted: the command surface is
   // scanned exactly as before, so no existing verdict can change direction.
   const scanSurface = fold.content ? `${execSurface}\n${fold.content}` : execSurface;
+  // #500 self-protection, plus the #943 r3 B2 whole-command posture reading on
+  // the command as written (comments included). Computed on first use.
+  let selfDisable: boolean | undefined;
+  const selfDisableInvoked = (): boolean =>
+    (selfDisable ??= guardDisableInvoked(scanSurface) || guardPostureLoosenedAnywhere(command));
 
   // Which slices of `scanSurface` are SHELL and which are interpreter SOURCE
   // (issue #89). Every rule below is written for shell command text; a folded
@@ -7597,7 +7627,7 @@ function evaluateToolCallCore(
   // The argv parser also strips flag quoting, so the `git branch "-d" "-f"`
   // evasion is confirmed rather than slipped.
   // #500: self-protection is proposed by the argv walk, not a table regex.
-  if (!dangerSignals.includes('disable-action-guard') && guardDisableInvoked(scanSurface)) {
+  if (!dangerSignals.includes('disable-action-guard') && selfDisableInvoked()) {
     dangerSignals.push('disable-action-guard');
     dangerSpan = dangerSpan ?? 'guard self-protection';
     if (!dangerEvidence.has('disable-action-guard')) {
@@ -7645,7 +7675,7 @@ function evaluateToolCallCore(
   if (dangerSignals.includes('disable-action-guard')
       && policyLockAccessIsReadOnly(scanSurface)
       && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
-      && !guardDisableInvoked(scanSurface)) {
+      && !selfDisableInvoked()) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'disable-action-guard');
   }
   // #874: pure shell inspection of the guard's own config is not a rewrite of
@@ -7654,7 +7684,7 @@ function evaluateToolCallCore(
   if (dangerSignals.includes('touch-guard-config')
       && guardConfigAccessIsReadOnly(scanSurface)
       && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
-      && !guardDisableInvoked(scanSurface)) {
+      && !selfDisableInvoked()) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'touch-guard-config');
   }
   // External egress is a potential exfil vector — but only when the call carries
@@ -7748,7 +7778,7 @@ function evaluateToolCallCore(
   // is a call that still makes a network request once the reads are blanked.
   if (dangerSignals.length > 0
       && dangerSignals.every(sig => GUARD_SELF_PROTECTION_SIGNALS.includes(sig))
-      && !guardDisableInvoked(scanSurface)) {
+      && !selfDisableInvoked()) {
     const rm = closedReadMasked();
     // Conservative beyond the design: a call that still reaches the network
     // once the reads are blanked keeps the floor (#522 G4 "a read with a

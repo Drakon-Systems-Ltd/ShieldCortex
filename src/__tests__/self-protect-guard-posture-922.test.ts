@@ -129,6 +129,26 @@ const POSITIVES = [
   // so does an expansion anywhere later in the statement.
   `${SC} ${GP} >off`,
   `${SC} ${GP} --json > "$OUT"`,
+  // #943 r3 B2: the word check reads the WHOLE rest of the command after the
+  // invocation, not the statement: a `;` inside a process substitution does
+  // not end `posture` (Bash argv is `posture off`), and neither does any other
+  // separator, subshell or `#` comment. Over-hold is the accepted price — the
+  // later `echo off` / `grep advisory` forms below were allowed before r3.
+  ...['off', 'advisory'].flatMap((t) => [
+    `${SC} ${GP} > >(true; cat) ${t}`,
+    `${SC} ${GP} > >(cat) ${t}; true`,
+    `${SC} ${GP} > >(true && cat) ${t}`,
+    `${SC} ${GP} > >(true || cat) ${t}`,
+    `${SC} ${GP} > >(true\ncat) ${t}`,
+    `${SC} ${GP} > >(echo $(true; echo x)) ${t}`,
+    `${SC} ${GP} $(true; echo x) ${t}`,
+    `${SC} ${GP} enforce # ${t}`,
+    `${SC} ${GP} --json | grep ${t}`,
+    `${SC} ${GP} && echo ${t}`,
+    `${SC} ${GP}; echo ${t}`,
+    `${SC} ${GP} <<EOF\n${t}\nEOF`,
+    `bash -c '${SC} ${GP} > >(true; cat) ${t}'`,
+  ]),
 ];
 const NEGATIVES = [
   `${SC} ${GP}`,
@@ -178,17 +198,13 @@ const NEGATIVES = [
   `${SC} ${GP} offline>/dev/null`,
   `echo "${SC} ${GP} off>/dev/null"`,
   `echo ${SC} ${G} \\\n${P} off`,
-  // #943 r2 B2: the word must be in the SAME statement; the read-only forms
-  // with pipes, descriptor duplication and here-input stay off the floor.
-  `${SC} ${GP} --json | grep advisory`,
-  `${SC} ${GP} | grep -i off`,
-  `${SC} ${GP} && echo off`,
-  `${SC} ${GP}; echo advisory`,
+  // The read-only forms with descriptor duplication and here-input stay off
+  // the floor when no `off`/`advisory` word follows anywhere.
   `${SC} ${GP} --json 2>&1`,
   `${SC} ${GP} --json >&2`,
   `${SC} ${GP} enforce<<<''`,
   `${SC} ${GP} enforce &>/dev/null`,
-  `${SC} ${GP} <<EOF\noff\nEOF`,
+  `${SC} ${GP} --json | grep -c offline`,
   `echo "${SC} ${GP} >a\\ b off"`,
 ];
 

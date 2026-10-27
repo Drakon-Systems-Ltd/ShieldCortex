@@ -268,9 +268,13 @@ def _fallback_executed_match(rx, text: str, accept=None) -> bool:
 # `> >(cat) off` all run as `posture off`). Backslash-newlines are deleted;
 # the statement ends at the first unquoted, unescaped `;`, newline, or `&`/`|`
 # that is not glued to `<`/`>` (`>&2`, `&>`, `>|` stay inside it). Any
-# expansion or glob in it, or `off`/`advisory` as a word once quotes,
-# backslashes and redirection/grouping punctuation are dropped, is a
-# loosening. Mirrors the other two fallbacks and the core's loosensGuardPostureAt.
+# expansion or glob in that statement is a loosening. #943 r3 B2: `off` or
+# `advisory` as a word (once quotes, backslashes and redirection/grouping
+# punctuation are dropped) is a loosening ANYWHERE in the rest of the command,
+# not only in the statement -- `posture > >(true; cat) off` runs as `posture
+# off` though a `;` sits inside the process substitution -- and `#` comment
+# text counts. Mirrors the other two fallbacks and the core's
+# guardPostureLoosenedAnywhere.
 _FALLBACK_SHELL_CONTINUATION = re.compile(r"\\\r?\n")
 _FALLBACK_POSTURE_UNRESOLVED = re.compile(r"[$`*?[\]{}]")
 _FALLBACK_POSTURE_WORD_SPLIT = re.compile(r"[\s<>()&|;]+")
@@ -299,7 +303,9 @@ def _fallback_posture_tail_loosens(rest: str) -> bool:
     stmt = s[:end]
     if _FALLBACK_POSTURE_UNRESOLVED.search(stmt):
         return True
-    words = _FALLBACK_POSTURE_WORD_SPLIT.split(re.sub(r"['\"\\]", "", stmt))
+    # #943 r3 B2: the word check reads the whole rest of the command, past the
+    # statement end (a `;` inside `> >(true; cat)` does not end `posture`).
+    words = _FALLBACK_POSTURE_WORD_SPLIT.split(re.sub(r"['\"\\]", "", s))
     return any(w.lower() in ("off", "advisory") for w in words)
 
 

@@ -2725,9 +2725,12 @@ function fallbackExecutedMatch(re, text, accept) {
 // `> >(cat) off` all run as `posture off`). Backslash-newlines are deleted;
 // the statement ends at the first unquoted, unescaped `;`, newline, or `&`/`|`
 // that is not glued to `<`/`>` (`>&2`, `&>`, `>|` stay inside it). Any
-// expansion or glob in it, or `off`/`advisory` as a word once quotes,
-// backslashes and redirection/grouping punctuation are dropped, is a
-// loosening. Same reading as the core's loosensGuardPostureAt.
+// expansion or glob in that statement is a loosening. #943 r3 B2: `off` or
+// `advisory` as a word (once quotes, backslashes and redirection/grouping
+// punctuation are dropped) is a loosening ANYWHERE in the rest of the command,
+// not only in the statement — `posture > >(true; cat) off` runs as `posture
+// off` though a `;` sits inside the process substitution — and `#` comment
+// text counts. Same reading as the core's guardPostureLoosenedAnywhere.
 function fallbackPostureTailLoosens(rest) {
   const s = rest.replace(/\\\r?\n/g, '');
   let q = null;
@@ -2742,7 +2745,7 @@ function fallbackPostureTailLoosens(rest) {
   }
   const stmt = s.slice(0, end);
   return /[$`*?[\]{}]/.test(stmt)
-    || stmt.replace(/['"\\]/g, '').split(/[\s<>()&|;]+/).some(w => /^(?:off|advisory)$/i.test(w));
+    || s.replace(/['"\\]/g, '').split(/[\s<>()&|;]+/).some(w => /^(?:off|advisory)$/i.test(w));
 }
 function fallbackPostureMatch(re, text) {
   const tail = (t) => (end) => fallbackPostureTailLoosens(t.slice(end));

@@ -147,6 +147,23 @@ class SelfProtectionFloor(unittest.TestCase):
             ],
             # Fail-closed price of not parsing: a redirect target named `off`.
             "shieldcortex guard posture >off",
+            # #943 r3 B2: the word check reads the whole rest of the command,
+            # past a `;` inside a process substitution, any later statement
+            # and a `#` comment (accepted over-hold for the later-echo forms).
+            *[
+                cmd
+                for t in ("off", "advisory")
+                for cmd in (
+                    f"shieldcortex guard posture > >(true; cat) {t}",
+                    f"shieldcortex guard posture > >(cat) {t}; true",
+                    f"shieldcortex guard posture enforce # {t}",
+                    f"shieldcortex guard posture --json | grep {t}",
+                    f"shieldcortex guard posture && echo {t}",
+                    f"shieldcortex guard posture <<EOF\n{t}\nEOF",
+                )
+            ],
+            # Parity control: the existing disable flag in the same position.
+            "shieldcortex config > >(true; cat) --action-guard-disable",
         ):
             self.assertTrue(fallback_self_protection_match(cmd), cmd)
             d = outage(cmd)
@@ -162,13 +179,12 @@ class SelfProtectionFloor(unittest.TestCase):
             "shieldcortex guard posture off2>/dev/null",
             'echo "shieldcortex guard posture off>/dev/null"',
             "echo shieldcortex guard \\\nposture off",
-            # #943 r2 B2: a word in a LATER statement, and the read-only forms.
-            "shieldcortex guard posture --json | grep advisory",
-            "shieldcortex guard posture && echo off",
+            # The read-only forms with no `off`/`advisory` word anywhere after.
+            "shieldcortex guard posture --json",
             "shieldcortex guard posture --json 2>&1",
             "shieldcortex guard posture --json >&2",
             "shieldcortex guard posture enforce<<<''",
-            "shieldcortex guard posture <<EOF\noff\nEOF",
+            "shieldcortex guard posture --json | grep -c offline",
             'echo "shieldcortex guard posture >a\\ b off"',
         ):
             self.assertFalse(fallback_self_protection_match(cmd), cmd)
