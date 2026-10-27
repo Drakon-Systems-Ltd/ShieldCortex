@@ -202,7 +202,6 @@ describe('#547 e2e: the MCP server, spawned over stdio, returns framed recall', 
 describe('#547 e2e: the OpenClaw hook pushes the real server output, framed once', () => {
   const HOOK_COPIES: Array<[string, string]> = [
     ['hooks/openclaw/cortex-memory', join(repoRoot, 'hooks', 'openclaw', 'cortex-memory')],
-    ['skills/shieldcortex/bundled/cortex-memory-hook', join(repoRoot, 'skills', 'shieldcortex', 'bundled', 'cortex-memory-hook')],
   ];
   const USER_MESSAGE = 'what is the deploy runbook for the service rollout';
   const sandboxes: string[] = [];

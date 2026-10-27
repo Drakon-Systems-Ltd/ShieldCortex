@@ -42,18 +42,16 @@ const oneLine = (s) => s.replace(/\s+/g, ' ');
 
 const HOOK_DIRS = [
   ['hooks', 'openclaw', 'cortex-memory'],
-  ['skills', 'shieldcortex', 'bundled', 'cortex-memory-hook'],
 ];
 
 const EXPECTED_EVENTS = ['command:new', 'command:stop', 'agent:bootstrap'];
 const metadataLine = (bins) =>
   '  { "openclaw": { "emoji": "🧠", "events": ["command:new", "command:stop", "agent:bootstrap"], ' +
   `"requires": { "bins": ${bins} }, "install": [{ "id": "community", "kind": "community", "label": "ShieldCortex" }] } }`;
-// The npm-shipped hook still falls back to `npx -y shieldcortex`; the ClawHub
-// bundle runs only local `shieldcortex` + `mcporter` from PATH (#931).
+// The npm-shipped hook still falls back to `npx -y shieldcortex`. The ClawHub
+// skill no longer bundles a hook at all (#931 follow-up).
 const EXPECTED_METADATA_LINE = {
   'hooks/openclaw/cortex-memory': metadataLine('["npx"]'),
-  'skills/shieldcortex/bundled/cortex-memory-hook': metadataLine('["shieldcortex", "mcporter"]'),
 };
 
 /** Parse the `metadata:` JSON out of a HOOK.md YAML frontmatter block. */
