@@ -78,8 +78,10 @@ _FALLBACK_DESTROY_ROW = re.compile(r'''(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(
 # one bare value per flag (`env -u FOO`), a quote-fragmented `shieldcortex` and
 # bash value options (`bash -O extglob -c`) as in the other two rows; a flag
 # value can be no other prefix token nor an invoker, so the repetition stays linear.
-# Quoted data is a mention here too.
-_FALLBACK_POSTURE_ROW = re.compile(r'''(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:(?:[-+]O|--rcfile|--init-file)[ \t]+[^\s;&|-][^\s;&|]*[ \t]+|-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:['"\\]*(?:[^\s;&|'"({`]*/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!)|\w+=[^\s;&|({`]*|-[^\s;&|({`]+(?:[ \t]+(?!(?:['"\\]*(?:[^\s;&|'"({`]*/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!))[ \t]|\w+=|\d|-|['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-])))[^\s;&|({`]+)?|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?:[ \t]+['"\\]*-[^\s;&|$`*?[\]{}]*)*[ \t]+(?:[^\s;&|]*[$`*?[\]{}]|(?:['"\\]*o['"\\]*f['"\\]*f['"\\]*|['"\\]*a['"\\]*d['"\\]*v['"\\]*i['"\\]*s['"\\]*o['"\\]*r['"\\]*y['"\\]*)(?=$|[\s;&|)`]))''', re.I)
+# Quoted data is a mention here too. #943 r2 B2: the row matches the invocation
+# up to `guard posture`; _fallback_posture_tail_loosens reads the rest of the
+# statement, fail-closed, without parsing redirections.
+_FALLBACK_POSTURE_ROW = re.compile(r'''(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:(?:[-+]O|--rcfile|--init-file)[ \t]+[^\s;&|-][^\s;&|]*[ \t]+|-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:['"\\]*(?:[^\s;&|'"({`]*/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!)|\w+=[^\s;&|({`]*|-[^\s;&|({`]+(?:[ \t]+(?!(?:['"\\]*(?:[^\s;&|'"({`]*/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!))[ \t]|\w+=|\d|-|['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-])))[^\s;&|({`]+)?|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?=$|[\s;&|<>()`])''', re.I)
 
 # Dangerous tier of the fail-closed fallback (issue #59) — ported from
 # tool-action-guard.ts's DANGEROUS list, kept in sync with the OpenClaw
@@ -244,8 +246,8 @@ def _fallback_data_quote_ranges(text: str) -> list:
     return [] if _FALLBACK_UNSAFE_PIPE.search("".join(unquoted)) else ranges
 
 
-def _fallback_executed_match(rx, text: str) -> bool:
-    """True when `rx` matches somewhere outside a quoted data argument."""
+def _fallback_executed_match(rx, text: str, accept=None) -> bool:
+    """True when `rx` matches somewhere outside a quoted data argument (and `accept`, if given, takes its end)."""
     ranges, inert, pos = None, 0, 0
     while True:
         m = rx.search(text, pos)
@@ -253,12 +255,68 @@ def _fallback_executed_match(rx, text: str) -> bool:
             return False
         if ranges is None:
             ranges = _fallback_data_quote_ranges(text)
-        if not any(a <= m.start() and m.end() <= b for a, b in ranges):
+        if not any(a <= m.start() and m.end() <= b for a, b in ranges) and (accept is None or accept(m.end())):
             return True
         inert += 1
         if inert >= _FALLBACK_INERT_MATCH_CAP:
             return True  # fail closed
         pos = m.start() + 1  # overlapping re-scan: a match starting inside this one is still checked
+
+
+# #943 r2 B2: the rest of the statement after a `guard posture` invocation,
+# read fail-closed -- no redirection parsing (`>a\ b off`, `off<<<x`,
+# `> >(cat) off` all run as `posture off`). Backslash-newlines are deleted;
+# the statement ends at the first unquoted, unescaped `;`, newline, or `&`/`|`
+# that is not glued to `<`/`>` (`>&2`, `&>`, `>|` stay inside it). Any
+# expansion or glob in that statement is a loosening. #943 r3 B2: `off` or
+# `advisory` as a word (once quotes, backslashes and redirection/grouping
+# punctuation are dropped) is a loosening ANYWHERE in the rest of the command,
+# not only in the statement -- `posture > >(true; cat) off` runs as `posture
+# off` though a `;` sits inside the process substitution -- and `#` comment
+# text counts. Mirrors the other two fallbacks and the core's
+# guardPostureLoosenedAnywhere.
+_FALLBACK_SHELL_CONTINUATION = re.compile(r"\\\r?\n")
+_FALLBACK_POSTURE_UNRESOLVED = re.compile(r"[$`*?[\]{}]")
+_FALLBACK_POSTURE_WORD_SPLIT = re.compile(r"[\s<>()&|;]+")
+
+
+def _fallback_posture_tail_loosens(rest: str) -> bool:
+    s = _FALLBACK_SHELL_CONTINUATION.sub("", rest)
+    q, end, i, n = None, len(s), 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == "\\" and q != "'":
+            i += 2
+            continue
+        if q:
+            if c == q:
+                q = None
+        elif c in "\"'":
+            q = c
+        elif c in ";\n\r":
+            end = i
+            break
+        elif c in "&|" and (i == 0 or s[i - 1] not in "<>") and (i + 1 >= n or s[i + 1] != ">"):
+            end = i
+            break
+        i += 1
+    stmt = s[:end]
+    if _FALLBACK_POSTURE_UNRESOLVED.search(stmt):
+        return True
+    # #943 r3 B2: the word check reads the whole rest of the command, past the
+    # statement end (a `;` inside `> >(true; cat)` does not end `posture`).
+    words = _FALLBACK_POSTURE_WORD_SPLIT.split(re.sub(r"['\"\\]", "", s))
+    return any(w.lower() in ("off", "advisory") for w in words)
+
+
+def _fallback_posture_match(text: str) -> bool:
+    """The posture invocation, with a loosening in the rest of its statement."""
+    if _fallback_executed_match(_FALLBACK_POSTURE_ROW, text, lambda end: _fallback_posture_tail_loosens(text[end:])):
+        return True
+    folded = _FALLBACK_SHELL_CONTINUATION.sub("", text)  # `guard \<newline>posture`
+    return folded != text and _fallback_executed_match(
+        _FALLBACK_POSTURE_ROW, folded, lambda end: _fallback_posture_tail_loosens(folded[end:])
+    )
 
 
 def fallback_dangerous_match(content: str) -> bool:
@@ -269,7 +327,9 @@ def fallback_dangerous_match(content: str) -> bool:
     # fallbacks' dangerous scan: pure inspection runs no invoker.
     lock_read_only = _fallback_lock_access_is_read_only(content)
     return any(
-        _fallback_executed_match(p, content) if p is _FALLBACK_DESTROY_ROW or p is _FALLBACK_POSTURE_ROW else p.search(content)
+        _fallback_posture_match(content) if p is _FALLBACK_POSTURE_ROW
+        else _fallback_executed_match(p, content) if p is _FALLBACK_DESTROY_ROW
+        else p.search(content)
         for p in _FALLBACK_DANGEROUS
         if not (p is _FALLBACK_POSTURE_ROW and lock_read_only)
     )
@@ -426,7 +486,7 @@ def fallback_self_protection_match(content: str, tool_name=None) -> bool:
         return False
     lock_read_only = _fallback_lock_access_is_read_only(content, tool_name)
     return any(
-        _fallback_executed_match(p, content) if p is _FALLBACK_POSTURE_ROW else p.search(content)
+        _fallback_posture_match(content) if p is _FALLBACK_POSTURE_ROW else p.search(content)
         for p, lock_path in _FALLBACK_SELF_PROTECTION
         if not (lock_path and lock_read_only)
     )

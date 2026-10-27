@@ -715,7 +715,7 @@ const FALLBACK_CATASTROPHIC_PATTERNS: RegExp[] = [
 // `isGatedNpxBunx` (shape-based, #96), not by a DANGEROUS pattern, and a blunt
 // fallback matching them would over-gate `npx tsc`; `uvx`/`dlx` (unconditional)
 // ARE covered. Mirrored in scripts/pre-tool-hook.mjs + hermes/sc_client.py.
-const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?: true; dataQuotes?: true }> = [
+const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?: true; dataQuotes?: true; postureTail?: true }> = [
   { re: /\brm\b|\bunlink\b|\brmdir\b|(?:(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?|\bxargs\s+(?:-{1,2}\S+\s+)*|-exec\s+)shred\b/i, signal: 'file-delete' },
   { re: /\bsudo\b|\bdoas\b|\bsu\s/i, signal: 'privilege-escalation' },
   { re: /\bgit\b[^|\n]*\bpush\b[^|\n]*(--force\b|-f\b|\+)/i, signal: 'git-force-push' },
@@ -766,8 +766,11 @@ const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?
   // (`bash -O extglob -c`). A flag value can be no other prefix token nor an
   // invoker, so the repetition has one parse and stays linear. `dataQuotes`: a
   // hit inside a data quote (`echo "x; shieldcortex …"`) is a mention. `lockPath`: pure inspection runs
-  // no invoker, so the lock-read exemption drops it as well.
-  { re: /(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:(?:[-+]O|--rcfile|--init-file)[ \t]+[^\s;&|-][^\s;&|]*[ \t]+|-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!)|\w+=[^\s;&|({`]*|-[^\s;&|({`]+(?:[ \t]+(?!(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!))[ \t]|\w+=|\d|-|['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-])))[^\s;&|({`]+)?|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?:[ \t]+['"\\]*-[^\s;&|$`*?[\]{}]*)*[ \t]+(?:[^\s;&|]*[$`*?[\]{}]|(?:['"\\]*o['"\\]*f['"\\]*f['"\\]*|['"\\]*a['"\\]*d['"\\]*v['"\\]*i['"\\]*s['"\\]*o['"\\]*r['"\\]*y['"\\]*)(?=$|[\s;&|)`]))/i, signal: 'disable-action-guard', lockPath: true, dataQuotes: true },
+  // no invoker, so the lock-read exemption drops it as well. `postureTail` (#943 r2 B2):
+  // the row matches the invocation up to `guard posture`; the rest of that
+  // statement is read by fallbackPostureTailLoosens, fail-closed, without
+  // parsing redirections, as the core walk does.
+  { re: /(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:(?:[-+]O|--rcfile|--init-file)[ \t]+[^\s;&|-][^\s;&|]*[ \t]+|-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!)|\w+=[^\s;&|({`]*|-[^\s;&|({`]+(?:[ \t]+(?!(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!))[ \t]|\w+=|\d|-|['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-])))[^\s;&|({`]+)?|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?=$|[\s;&|<>()`])/i, signal: 'disable-action-guard', lockPath: true, dataQuotes: true, postureTail: true },
   { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)\b/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
   // #501: the policy lock's own attack surface. The two environment seams that
@@ -1060,8 +1063,8 @@ function fallbackDataQuoteRanges(text: string): Array<[number, number]> {
   return FALLBACK_UNSAFE_PIPE_RE.test(unquoted) ? [] : ranges;
 }
 
-/** True when `re` matches somewhere outside a quoted data argument. */
-function fallbackExecutedMatch(re: RegExp, text: string): boolean {
+/** True when `re` matches somewhere outside a quoted data argument (and `accept`, if given, takes its end). */
+function fallbackExecutedMatch(re: RegExp, text: string, accept?: (end: number) => boolean): boolean {
   const g = new RegExp(re.source, re.flags.replace('g', '') + 'g');
   let ranges: Array<[number, number]> | null = null;
   let inert = 0;
@@ -1072,12 +1075,46 @@ function fallbackExecutedMatch(re: RegExp, text: string): boolean {
     ranges ??= fallbackDataQuoteRanges(text);
     const start = m.index ?? 0;
     const end = start + m[0].length;
-    if (!ranges.some(([a, b]) => start >= a && end <= b)) return true;
+    if (!ranges.some(([a, b]) => start >= a && end <= b) && (!accept || accept(end))) return true;
     if (++inert >= FALLBACK_INERT_MATCH_CAP) return true;   // fail closed
     // Overlapping re-scan: a match starting inside this one is still checked.
     from = start + 1;
   }
   return false;
+}
+
+// #943 r2 B2: the rest of the statement after a `guard posture` invocation,
+// read fail-closed — no redirection parsing (`>a\ b off`, `off<<<x`,
+// `> >(cat) off` all run as `posture off`). Backslash-newlines are deleted;
+// the statement ends at the first unquoted, unescaped `;`, newline, or `&`/`|`
+// that is not glued to `<`/`>` (`>&2`, `&>`, `>|` stay inside it). Any
+// expansion or glob in that statement is a loosening. #943 r3 B2: `off` or
+// `advisory` as a word (once quotes, backslashes and redirection/grouping
+// punctuation are dropped) is a loosening ANYWHERE in the rest of the command,
+// not only in the statement — `posture > >(true; cat) off` runs as `posture
+// off` though a `;` sits inside the process substitution — and `#` comment
+// text counts. Same reading as the core's guardPostureLoosenedAnywhere.
+function fallbackPostureTailLoosens(rest: string): boolean {
+  const s = rest.replace(/\\\r?\n/g, '');
+  let q: string | null = null;
+  let end = s.length;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '\\' && q !== "'") { i++; continue; }
+    if (q) { if (c === q) q = null; continue; }
+    if (c === '"' || c === "'") { q = c; continue; }
+    if (c === ';' || c === '\n' || c === '\r') { end = i; break; }
+    if ((c === '&' || c === '|') && s[i - 1] !== '<' && s[i - 1] !== '>' && s[i + 1] !== '>') { end = i; break; }
+  }
+  const stmt = s.slice(0, end);
+  return /[$`*?[\]{}]/.test(stmt)
+    || s.replace(/['"\\]/g, '').split(/[\s<>()&|;]+/).some(w => /^(?:off|advisory)$/i.test(w));
+}
+function fallbackPostureMatch(re: RegExp, text: string): boolean {
+  const tail = (t: string) => (end: number) => fallbackPostureTailLoosens(t.slice(end));
+  if (fallbackExecutedMatch(re, text, tail(text))) return true;
+  const folded = text.replace(/\\\r?\n/g, '');   // `guard \<newline>posture`
+  return folded !== text && fallbackExecutedMatch(re, folded, tail(folded));
 }
 
 function fallbackDangerousMatch(args: Record<string, unknown> | undefined, toolName?: string): string | null {
@@ -1086,9 +1123,10 @@ function fallbackDangerousMatch(args: Record<string, unknown> | undefined, toolN
   const text = fallbackExecSurface(args);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
-  for (const { re, signal, lockPath, dataQuotes } of FALLBACK_DANGEROUS_PATTERNS) {
+  for (const { re, signal, lockPath, dataQuotes, postureTail } of FALLBACK_DANGEROUS_PATTERNS) {
     if (lockReadOnly && lockPath === true) continue;
-    if (dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
+    if (postureTail === true ? fallbackPostureMatch(re, text)
+      : dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
   }
   return null;
 }
@@ -1109,10 +1147,11 @@ export function fallbackSelfProtectionMatch(args: Record<string, unknown> | unde
   const text = fallbackExecSurface(args);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
-  for (const { re, signal, lockPath, dataQuotes } of FALLBACK_DANGEROUS_PATTERNS) {
+  for (const { re, signal, lockPath, dataQuotes, postureTail } of FALLBACK_DANGEROUS_PATTERNS) {
     if (!SELF_PROTECTION_SIGNALS.includes(signal)) continue;
     if (lockReadOnly && lockPath === true) continue;
-    if (dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
+    if (postureTail === true ? fallbackPostureMatch(re, text)
+      : dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
   }
   return null;
 }
