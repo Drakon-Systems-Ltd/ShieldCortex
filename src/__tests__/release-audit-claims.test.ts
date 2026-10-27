@@ -43,7 +43,12 @@ import { afterEach, describe, expect, it } from '@jest/globals';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { invokesScanner, workflowExecutableSteps } from './support/workflow-executable-surface.js';
+import {
+  invokesScanner,
+  parseWorkflow,
+  workflowExecutableSteps,
+  type WorkflowNode,
+} from './support/workflow-executable-surface.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..', '..');
@@ -865,5 +870,145 @@ describe('#466 hermetic — the live leg tells drift apart from unavailability',
     }, false);
     expect(liveAuditTitle(outcome)).toContain('first line');
     expect(liveAuditTitle(outcome)).not.toContain('second line');
+  });
+});
+
+// ── #897: the permission lists must survive a real YAML parse ───────────────
+//
+// The 5.12.0 ClawHub publish failed because one `network_endpoints` item
+// carried a `: ` in its prose. YAML ends an implicit key at a colon followed
+// by whitespace, so the item became a one-entry mapping, and ClawHub, which
+// wants a list of strings, rejected the skill — after the tag, not before it
+// (#893, text fixed in #896). This pins the shape with the same subset reader
+// the scanner rule uses. It follows YAML's plain-scalar rule, which is what
+// makes `https://host (prose: more)` a mapping and `http://localhost:3001
+// (loopback)` a string.
+
+/** The YAML between the opening and closing `---` lines of SKILL.md. */
+function skillFrontmatter(text: string = readFileSync(SKILL_MD, 'utf8')): string {
+  const front = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!front) throw new Error('SKILL.md has no YAML frontmatter');
+  return front[1];
+}
+
+/**
+ * The `permissions.<field>` lists ClawHub reads as lists of strings. `env` is
+ * not one of them: its items are `NAME: description` mappings by design, and
+ * the last test below pins that shape so nobody "fixes" it into strings.
+ */
+const PERMISSION_STRING_LISTS = ['paths_read', 'paths_write', 'network_endpoints'] as const;
+
+function childOf(node: WorkflowNode | undefined, key: string): WorkflowNode | undefined {
+  if (node?.kind !== 'map') return undefined;
+  return node.entries.find(([name]) => name === key)?.[1];
+}
+
+/** How a non-string item reads, so a red test names the stray colon. */
+function readsAs(node: WorkflowNode): string {
+  if (node.kind === 'map') return `a mapping with key "${node.entries[0]?.[0] ?? ''}"`;
+  if (node.kind === 'seq') return `a list of ${node.items.length}`;
+  return 'an empty value';
+}
+
+/**
+ * Every item under a string-list permission field that did not parse as a
+ * non-empty string, one line each. Empty when the frontmatter is sound. A
+ * missing or non-list field is a problem too, so an edit that renames or
+ * flattens a field cannot pass on nothing.
+ */
+function permissionListProblems(frontmatter: string): string[] {
+  const permissions = childOf(parseWorkflow(frontmatter), 'permissions');
+  const problems: string[] = [];
+  for (const field of PERMISSION_STRING_LISTS) {
+    const list = childOf(permissions, field);
+    if (list?.kind !== 'seq') {
+      problems.push(`permissions.${field} is ${list ? `a ${list.kind}` : 'missing'}, not a list`);
+      continue;
+    }
+    list.items.forEach((item, index) => {
+      if (item.kind === 'scalar' && item.value !== '') return;
+      problems.push(`permissions.${field}[${index}] is ${readsAs(item)}, not a string`);
+    });
+  }
+  return problems;
+}
+
+describe('#897 hermetic — the SKILL.md permission lists parse as lists of strings', () => {
+  it('reads every string-list permission field of the real SKILL.md as non-empty strings', () => {
+    expect(permissionListProblems(skillFrontmatter())).toEqual([]);
+  });
+
+  it('is not vacuous: each field is present in the real SKILL.md and has items', () => {
+    const permissions = childOf(parseWorkflow(skillFrontmatter()), 'permissions');
+    for (const field of PERMISSION_STRING_LISTS) {
+      const list = childOf(permissions, field);
+      if (list?.kind !== 'seq') throw new Error(`permissions.${field} is not a list`);
+      expect({ field, items: list.items.length }).not.toEqual({ field, items: 0 });
+    }
+  });
+
+  it('fails on the item that broke the 5.12.0 ClawHub publish (negative control)', () => {
+    // The pre-#896 `network_endpoints` item, shortened after its stray colon.
+    const control = [
+      'permissions:',
+      '  paths_read:',
+      '    - ~/.shieldcortex/ (own config and memory database)',
+      '  paths_write:',
+      '    - ~/.shieldcortex/ (memory DB, config)',
+      '  network_endpoints:',
+      '    - https://api.shieldcortex.ai (Cloud sync — only when Cloud sync is enabled)',
+      '    - https://registry.npmjs.org (three paths — update checks and updates via npm subprocess: the dashboard Overview looks up the latest version automatically while open)',
+      '    - http://localhost:3001 (local REST API + WebSocket — loopback only)',
+    ].join('\n');
+    expect(permissionListProblems(control)).toEqual([
+      'permissions.network_endpoints[1] is a mapping with key ' +
+        '"https://registry.npmjs.org (three paths — update checks and updates via npm subprocess", not a string',
+    ]);
+  });
+
+  it('fails on the same stray colon added to the real frontmatter', () => {
+    const real = skillFrontmatter();
+    const added = real.replace(
+      /^  network_endpoints:$/m,
+      '  network_endpoints:\n    - https://example.invalid (one path: the colon that broke 5.12.0)',
+    );
+    expect(added).not.toBe(real);
+    expect(permissionListProblems(added)).toEqual([
+      expect.stringContaining('permissions.network_endpoints[0] is a mapping'),
+    ]);
+  });
+
+  it('applies the same rule to paths_read and paths_write', () => {
+    const control = [
+      'permissions:',
+      '  paths_read:',
+      '    - ~/.claude/ (project memory files: MCP config)',
+      '  paths_write:',
+      '    - ~/.shieldcortex/ (memory DB: config)',
+      '  network_endpoints:',
+      '    - https://api.shieldcortex.ai',
+    ].join('\n');
+    expect(permissionListProblems(control)).toEqual([
+      expect.stringContaining('permissions.paths_read[0] is a mapping'),
+      expect.stringContaining('permissions.paths_write[0] is a mapping'),
+    ]);
+  });
+
+  it('reports a missing or non-list field rather than passing on nothing', () => {
+    expect(permissionListProblems('permissions:\n  filesystem: readwrite\n  paths_read: none\n')).toEqual([
+      'permissions.paths_read is a scalar, not a list',
+      'permissions.paths_write is missing, not a list',
+      'permissions.network_endpoints is missing, not a list',
+    ]);
+  });
+
+  it('keeps permissions.env as a list of one-key NAME: description mappings', () => {
+    const env = childOf(childOf(parseWorkflow(skillFrontmatter()), 'permissions'), 'env');
+    if (env?.kind !== 'seq') throw new Error('permissions.env is not a list');
+    expect(env.items.length).toBeGreaterThan(0);
+    for (const item of env.items) {
+      if (item.kind !== 'map') throw new Error(`permissions.env item is ${readsAs(item)}`);
+      expect(item.entries.map(([name]) => name)).toEqual([expect.stringMatching(/^[A-Z][A-Z0-9_]*$/)]);
+    }
   });
 });

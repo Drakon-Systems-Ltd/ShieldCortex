@@ -100,7 +100,18 @@ function blockScalarHeader(value: string): boolean {
   return /^[|>][+-]?\d*$/.test(value.trim());
 }
 
-const KEY = /^("[^"]*"|'[^']*'|[^:#]+?)\s*:(\s.*|)$/;
+/**
+ * `key: value`, `"key": value`, `key:` — a mapping entry. A plain key ends at
+ * the first `:` that whitespace or the end of the line follows, which is
+ * YAML's rule: a `:` glued to what comes after it (`https://host`,
+ * `localhost:3001`, `a:b`) stays part of the key. Before #897 any `:` ended
+ * the key, so a line whose key held a URL was opaque — read as a string where
+ * every real YAML parser reads a mapping, which is the shape that broke the
+ * 5.12.0 ClawHub publish (#893). For the scanner rule the change can only add
+ * entries whose keys contain a `:`, and `run`, `uses`, `if`, `jobs` and
+ * `steps` do not.
+ */
+const KEY = /^("[^"]*"|'[^']*'|(?:[^:#]|:(?!\s))+?)\s*:(\s.*|)$/;
 
 function unquote(value: string): string {
   const trimmed = value.trim();

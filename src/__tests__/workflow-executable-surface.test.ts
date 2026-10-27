@@ -336,3 +336,39 @@ describe('#466 — the reader can read this repository’s real workflows', () =
     expect(invokesScanner(all, 'npm')).toBe(true);
   });
 });
+
+describe('#897 — a plain key may contain a `:` that is not followed by whitespace', () => {
+  // YAML ends an implicit key at the first `: `, not at the first `:`. The
+  // reader used to treat any line with a `:` inside its key as opaque, which
+  // read the SKILL.md item that broke the 5.12.0 ClawHub publish as a string
+  // where every real YAML parser reads a mapping (#893).
+  it('reads a URL item whose prose carries ": " as the one-key mapping YAML sees', () => {
+    expect(parseWorkflow('- https://registry.npmjs.org (via npm subprocess: the dashboard Overview)')).toEqual({
+      kind: 'seq',
+      items: [
+        {
+          kind: 'map',
+          entries: [['https://registry.npmjs.org (via npm subprocess', { kind: 'scalar', value: 'the dashboard Overview)' }]],
+        },
+      ],
+    });
+  });
+
+  it('keeps a URL item with no ": " a string, port and all', () => {
+    expect(parseWorkflow('- http://localhost:3001 (local REST API — loopback only)')).toEqual({
+      kind: 'seq',
+      items: [{ kind: 'scalar', value: 'http://localhost:3001 (local REST API — loopback only)' }],
+    });
+  });
+
+  it('reads a key written with a colon inside it', () => {
+    expect(parseWorkflow('a:b: c')).toEqual({ kind: 'map', entries: [['a:b', { kind: 'scalar', value: 'c' }]] });
+  });
+
+  it('still ends run: and uses: at their first ": ", so a URL in a command is untouched', () => {
+    expect(surface(steps('- run: curl https://example.com/a:b', '- uses: acme/scan@v1'))).toEqual([
+      'curl https://example.com/a:b',
+      'acme/scan@v1',
+    ]);
+  });
+});
