@@ -1,9 +1,8 @@
 /**
  * Docs/source contract: what the cortex-memory hook's copy says it does on
- * OpenClaw, checked against the events the two shipped manifests subscribe.
+ * OpenClaw, checked against the events the shipped manifest subscribes.
  *
- * The manifests (hooks/openclaw/cortex-memory/HOOK.md and the ClawHub-bundled
- * skills/shieldcortex/bundled/cortex-memory-hook/HOOK.md) declare
+ * The manifest (hooks/openclaw/cortex-memory/HOOK.md) declares
  * `metadata.openclaw.events`. That list is pinned here unchanged. The copy must
  * then:
  *   - describe session-end capture only for subscribed commands (`/new`,
