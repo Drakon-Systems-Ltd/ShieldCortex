@@ -1,6 +1,6 @@
 # ADR-002: Provenance-first enforcement (v2)
 
-**Status:** Proposed
+**Status:** Accepted (operator decision, 2026-09-29 — the seven §8 answers accepted as recommended; this records the design decision only and switches no enforcement on: go-live stays gated on the §5B bars and per-adapter 5A+5B+5C)
 **Date:** 2026-09-22
 **Author of v1:** TARS (issue #556). **v2 fold:** author-side objections recorded on #556 and the convergence agreed between the two on 2026-09-22.
 **Reviewer:** TARS. **Decision:** operator.
