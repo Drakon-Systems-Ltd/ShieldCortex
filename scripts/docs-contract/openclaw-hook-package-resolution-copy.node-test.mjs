@@ -110,7 +110,8 @@ describe('skills/shieldcortex/SKILL.md subprocess disclosure', () => {
   });
 
   it('discloses the server resolution order and the npx -y shieldcortex fallback', () => {
-    assert.match(bullet, /uses the `binaryPath` set in `~\/\.shieldcortex\/config\.json` when that file exists, else a `shieldcortex` found on `PATH`, else `npx -y shieldcortex`/);
+    assert.match(bullet, /uses the configured `binaryPath` \(from `~\/\.shieldcortex\/config\.json`, or `\$SHIELDCORTEX_CONFIG_DIR\/config\.json` when set\) only if that path is accessible, else a `shieldcortex` found on `PATH`, else `npx -y shieldcortex`/);
+    assert.doesNotMatch(bullet, /when that file exists/);
     assert.match(bullet, /which can download the `shieldcortex` package from the npm registry and run it/);
     assert.match(bullet, /`npm install -g shieldcortex mcporter`/);
   });
