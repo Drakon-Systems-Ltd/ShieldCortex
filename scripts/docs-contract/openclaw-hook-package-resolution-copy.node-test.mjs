@@ -117,20 +117,61 @@ describe('skills/shieldcortex/SKILL.md subprocess disclosure', () => {
   });
 });
 
-describe('skills/shieldcortex/SKILL.md outbound summaries include hook package resolution', () => {
-  const text = oneLine(read('skills', 'shieldcortex', 'SKILL.md'));
+// Each outbound inventory is checked inside its own section, so removing the
+// hook mention from one surface fails even while every other surface keeps it.
+const HOOK = /npx package resolution/;
+const SURFACES = {
+  'permissions justification': {
+    extract: (md) => { const m = md.match(/\n  justification: >\n((?: {4}.*\n)+)/); return m && m[1]; },
+    pattern: /outbound only for [\s\S]*the OpenClaw `cortex-memory` hook's npx package resolution/,
+  },
+  'registry endpoint entry': {
+    extract: (md) => md.split('\n').find((l) => l.startsWith('    - https://registry.npmjs.org')),
+    pattern: /\(three paths [\s\S]*hook's npx package resolution[\s\S]*whenever an enabled hook path calls the bridge/,
+  },
+  'dependencies row': {
+    extract: (md) => md.split('\n').find((l) => l.startsWith('| **Dependencies**')),
+    pattern: /Nothing else dials out except [^|]*the OpenClaw hook's npx package resolution/,
+  },
+  'default outbound list': {
+    extract: (md) => md.split('\n').find((l) => l.startsWith('- **Outbound connections that happen by default.**')),
+    pattern: /\(3\) On hosts with the OpenClaw `cortex-memory` hook enabled, [^.]*npx package resolution/,
+  },
+  'privacy introduction': {
+    extract: (md) => md.split('\n').find((l) => l.startsWith('ShieldCortex is **local-first**')),
+    pattern: /on hosts with the OpenClaw hook enabled, its npx package resolution/,
+  },
+  'data-flow bullet': {
+    extract: (md) => md.split('\n').find((l) => l.startsWith('- Does **not** send your data')),
+    pattern: /X-Ray package lookups and the OpenClaw hook's npx package resolution \(the package name appears in the URL\)/,
+  },
+};
+const surfaceOk = (md, { extract, pattern }) => { const sec = extract(md); return Boolean(sec) && pattern.test(oneLine(sec)); };
 
-  it('drops the stale fixed counts', () => {
+describe('skills/shieldcortex/SKILL.md outbound summaries include hook package resolution', () => {
+  const md = read('skills', 'shieldcortex', 'SKILL.md');
+  const text = oneLine(md);
+
+  it('drops the stale fixed counts and the unconditional offline promise', () => {
     assert.doesNotMatch(text, /Two outbound requests can still happen by default/);
     assert.doesNotMatch(text, /registry\.npmjs\.org \(two paths/);
+    assert.doesNotMatch(text, /keeps? both lookups local/);
   });
 
-  it('names the hook npx resolution in every outbound inventory', () => {
-    assert.match(text, /outbound only for .*the OpenClaw `cortex-memory` hook's npx package resolution/);
-    assert.match(text, /registry\.npmjs\.org \(three paths .*whenever an enabled hook path calls the bridge/);
-    assert.match(text, /Nothing else dials out except .*the OpenClaw hook's npx package resolution/);
-    assert.match(text, /\(3\) On hosts with the OpenClaw `cortex-memory` hook enabled/);
-    assert.match(text, /on hosts with the OpenClaw hook enabled, its npx package resolution/);
-    assert.match(text, /X-Ray package lookups and the OpenClaw hook's npx package resolution \(the package name appears in the URL\)/);
-  });
+  for (const [name, surface] of Object.entries(SURFACES)) {
+    it(`${name} names the hook npx resolution within its own section`, () => {
+      assert.ok(surface.extract(md), `${name}: section not found`);
+      assert.ok(surfaceOk(md, surface), `${name}: hook npx resolution missing`);
+    });
+
+    it(`${name} check fails when only that section loses the mention`, () => {
+      const sec = surface.extract(md);
+      const stripped = md.replace(sec, sec.split(HOOK).join('REMOVED'));
+      assert.notEqual(stripped, md);
+      assert.equal(surfaceOk(stripped, surface), false);
+      for (const [other, o] of Object.entries(SURFACES)) {
+        if (other !== name) assert.ok(surfaceOk(stripped, o), `${other} should still pass`);
+      }
+    });
+  }
 });
