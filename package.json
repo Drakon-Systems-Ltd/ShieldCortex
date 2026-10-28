@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "5.15.1",
+  "version": "5.15.3",
   "description": "Trustworthy memory and security for AI agents. Memory firewall for any host that writes through it; runtime tool gates on Claude Code, OpenClaw, and Hermes.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -166,6 +166,7 @@
     "@types/semver": "^7.7.0",
     "@types/ws": "^8.5.13",
     "jest": "^30.2.0",
+    "js-yaml": "^3.15.2",
     "ts-jest": "^29.4.6",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
