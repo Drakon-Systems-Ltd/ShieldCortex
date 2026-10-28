@@ -31,6 +31,38 @@ at session start in a detached, time-bounded child. Source:
   `EFBIG`. Both are reported as health errors and the other files are still
   checked.
 
+## Planted instruction files and the settings they target (Oct 2026)
+
+Forever Security showed a web page can drop `AGENTS.md` into `~/Downloads`
+without a click; a coding agent later opened there obeys it, weakening Codex's
+approval/sandbox/trust settings or pointing Claude Code at an attacker
+"gateway" that receives the live login token. The watch covers both halves,
+all reported as **high severity** (listed first, "HIGH SEVERITY" in the text,
+anomaly 0.9 in the ledger). Values are never shown.
+
+- **Codex `~/.codex/config.toml`**: `codex-sandbox` (`approval_policy`,
+  `sandbox_mode`, top level and per `[profiles.*]`), `codex-trust` (each
+  `[projects."<path>"] trust_level`, named by path), `codex-provider`
+  (`model_provider`, each `[model_providers.*] base_url`).
+- **Claude Code settings**: `endpoint-redirect` for `env` keys
+  `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_VERTEX_BASE_URL`, `HTTP_PROXY`,
+  `HTTPS_PROXY`, `ALL_PROXY`, `NODE_EXTRA_CA_CERTS` (any case) and top-level
+  `apiKeyHelper`. Other env keys stay ordinary "environment variable" changes.
+- **Planted files**: `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`,
+  `.claude/settings.json`, `.claude/settings.local.json` and one level of a
+  `.codex/` directory, in `~/Downloads`, `~/Desktop`, `$HOME` (instruction files
+  only; the real `~/.claude` and `~/.codex` are watched above) and `/tmp` (top
+  level). Fixed names only, nothing is walked. Whole-file hash; `.codex/`
+  entries by name, type, size and mtime. A drop directory seen for the first
+  time is baselined silently; after that an added or changed file alerts
+  (`planted-instructions` / `planted-agent-config`) and a removal is silent.
+
+Limits: detection is at session start, not live. A file planted and acted on
+within one session is reported only at the next session start, after the
+agent may already have obeyed it. Instruction files elsewhere (a cloned repo,
+a subfolder of Downloads) are not checked.
+
 ## Stated non-goals
 
 - **Same-user tampering is detectable only in its cheap form.** This is

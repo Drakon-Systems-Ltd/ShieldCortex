@@ -48,27 +48,127 @@ export interface AgentConfigWatchState {
   pendingChanges?: number;
   /** Per-file health error category from the last run (read or parse failure). */
   fileErrors?: Record<string, string>;
+  /** High-risk drop directories already baselined (planted instruction files). */
+  dropzones?: string[];
 }
 
 // ── Watched set (config, not scattered paths) ───────────────────────────────
 
-export type SectionKind = 'hooks' | 'mcpServers' | 'env' | 'tasks' | 'plugins';
+export type SectionKind =
+  | 'hooks' | 'mcpServers' | 'env' | 'tasks' | 'plugins'
+  // Forever Security planted-AGENTS.md attack (Oct 2026): settings an
+  // instruction file talks an agent into changing so it persists machine-wide.
+  | 'endpointRedirect' | 'codexSandbox' | 'codexTrust' | 'codexProvider'
+  | 'plantedInstructions' | 'plantedAgentConfig';
+
+/** Kinds that redirect traffic or credentials, or weaken an agent's sandbox or trust. */
+export const HIGH_SEVERITY_KINDS: ReadonlySet<SectionKind> = new Set<SectionKind>([
+  'endpointRedirect', 'codexSandbox', 'codexTrust', 'codexProvider', 'plantedInstructions', 'plantedAgentConfig',
+]);
+
+export interface WatchedSectionSpec {
+  /** Dotted key path (or a stable virtual id when `extract` is set). */
+  keyPath: string;
+  kind: SectionKind;
+  /** Builds the name -> value map to hash from the parsed file (default: the value at keyPath). */
+  extract?: (parsed: unknown) => unknown;
+}
 
 export interface WatchedFileSpec {
   id: string;
-  scope: 'user' | 'project';
-  /** Path relative to the home (user) or the project root (project). */
+  scope: 'user' | 'project' | 'dropzone';
+  /** Path relative to the home (user), the project root (project) or the drop directory (dropzone). */
   relPath: string;
-  format: 'json' | 'jsonc' | 'toml';
+  /** `raw` hashes the whole file, `dir` lists one directory level (names, type, size, mtime). */
+  format: 'json' | 'jsonc' | 'toml' | 'raw' | 'dir';
   /** Dotted key paths to hash; the section kind decides how it is diffed. */
-  sections: Array<{ keyPath: string; kind: SectionKind }>;
+  sections: WatchedSectionSpec[];
+  /** Removals are recorded silently (a cleaned-up Downloads folder is not an attack). */
+  ignoreRemovals?: boolean;
+}
+
+/**
+ * Env keys that send Claude Code's traffic or credentials somewhere else. A
+ * change to one is `endpoint-redirect`, not a generic env change: pointing
+ * ANTHROPIC_BASE_URL at an attacker "gateway" hands it the live login token.
+ * Matched case-insensitively (proxy variables are conventionally either case).
+ */
+export const REDIRECT_ENV_KEYS: readonly string[] = Object.freeze([
+  'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
+  'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_VERTEX_BASE_URL',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NODE_EXTRA_CA_CERTS',
+]);
+const REDIRECT_ENV = new Set(REDIRECT_ENV_KEYS.map((k) => k.toUpperCase()));
+const isRedirectEnv = (k: string): boolean => REDIRECT_ENV.has(k.toUpperCase());
+
+function plainObject(v: unknown): Record<string, unknown> | undefined {
+  return v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : undefined;
+}
+
+/** Claude Code `env`, minus the redirect keys (those are their own section). */
+function claudeEnvOrdinary(parsed: unknown): unknown {
+  const env = plainObject(getPath(parsed, 'env'));
+  if (!env) return getPath(parsed, 'env');
+  return Object.fromEntries(Object.entries(env).filter(([k]) => !isRedirectEnv(k)));
+}
+
+/** Redirect env keys plus `apiKeyHelper` (a command whose output becomes the API key). */
+function claudeEndpointRedirect(parsed: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const env = plainObject(getPath(parsed, 'env'));
+  if (env) for (const [k, v] of Object.entries(env)) if (isRedirectEnv(k)) out[k] = v;
+  const helper = getPath(parsed, 'apiKeyHelper');
+  if (helper !== undefined) out.apiKeyHelper = helper;
+  return out;
+}
+
+const CLAUDE_SETTINGS_SECTIONS: WatchedSectionSpec[] = [
+  { keyPath: 'hooks', kind: 'hooks' },
+  { keyPath: 'env', kind: 'env', extract: claudeEnvOrdinary },
+  { keyPath: 'env+apiKeyHelper (redirect)', kind: 'endpointRedirect', extract: claudeEndpointRedirect },
+  { keyPath: 'mcpServers', kind: 'mcpServers' },
+];
+
+/** Codex `approval_policy` / `sandbox_mode`, top level and per `[profiles.<name>]`. */
+function codexSandbox(parsed: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const root = plainObject(parsed) ?? {};
+  for (const k of ['approval_policy', 'sandbox_mode']) if (root[k] !== undefined) out[k] = root[k];
+  for (const [name, prof] of Object.entries(plainObject(root.profiles) ?? {})) {
+    const p = plainObject(prof);
+    if (!p) continue;
+    for (const k of ['approval_policy', 'sandbox_mode']) if (p[k] !== undefined) out[`profiles.${name}.${k}`] = p[k];
+  }
+  return out;
+}
+
+/** Codex `[projects."<path>"] trust_level`, one entry per project path. */
+function codexTrust(parsed: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [dir, proj] of Object.entries(plainObject(getPath(parsed, 'projects')) ?? {})) {
+    const p = plainObject(proj);
+    if (p && p.trust_level !== undefined) out[dir] = p.trust_level;
+  }
+  return out;
+}
+
+/** Codex `model_provider` and every `[model_providers.<name>] base_url`. */
+function codexProvider(parsed: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const root = plainObject(parsed) ?? {};
+  if (root.model_provider !== undefined) out.model_provider = root.model_provider;
+  for (const [name, prov] of Object.entries(plainObject(root.model_providers) ?? {})) {
+    const p = plainObject(prov);
+    if (p && p.base_url !== undefined) out[`model_providers.${name}.base_url`] = p.base_url;
+  }
+  return out;
 }
 
 export const WATCHED_FILES: readonly WatchedFileSpec[] = Object.freeze([
   // Claude Code
   ...(['settings.json', 'settings.local.json'] as const).flatMap((f) => ([
-    { id: `claude-${f}`, scope: 'user' as const, relPath: path.join('.claude', f), format: 'json' as const, sections: [{ keyPath: 'hooks', kind: 'hooks' as const }, { keyPath: 'env', kind: 'env' as const }, { keyPath: 'mcpServers', kind: 'mcpServers' as const }] },
-    { id: `claude-project-${f}`, scope: 'project' as const, relPath: path.join('.claude', f), format: 'json' as const, sections: [{ keyPath: 'hooks', kind: 'hooks' as const }, { keyPath: 'env', kind: 'env' as const }, { keyPath: 'mcpServers', kind: 'mcpServers' as const }] },
+    { id: `claude-${f}`, scope: 'user' as const, relPath: path.join('.claude', f), format: 'json' as const, sections: CLAUDE_SETTINGS_SECTIONS },
+    { id: `claude-project-${f}`, scope: 'project' as const, relPath: path.join('.claude', f), format: 'json' as const, sections: CLAUDE_SETTINGS_SECTIONS },
   ])),
   { id: 'claude-json', scope: 'user', relPath: '.claude.json', format: 'json', sections: [{ keyPath: 'mcpServers', kind: 'mcpServers' }] },
   { id: 'claude-project-mcp', scope: 'project', relPath: '.mcp.json', format: 'json', sections: [{ keyPath: 'mcpServers', kind: 'mcpServers' }] },
@@ -78,11 +178,48 @@ export const WATCHED_FILES: readonly WatchedFileSpec[] = Object.freeze([
   // Cursor
   { id: 'cursor-mcp', scope: 'user', relPath: path.join('.cursor', 'mcp.json'), format: 'json', sections: [{ keyPath: 'mcpServers', kind: 'mcpServers' }] },
   { id: 'cursor-project-mcp', scope: 'project', relPath: path.join('.cursor', 'mcp.json'), format: 'json', sections: [{ keyPath: 'mcpServers', kind: 'mcpServers' }] },
-  // Codex (TOML: only [mcp_servers.*] and [hooks*] tables are read)
-  { id: 'codex-config', scope: 'user', relPath: path.join('.codex', 'config.toml'), format: 'toml', sections: [{ keyPath: 'mcp_servers', kind: 'mcpServers' }, { keyPath: 'hooks', kind: 'hooks' }] },
+  // Codex: [mcp_servers.*], hooks tables, and the approval/sandbox, project
+  // trust and model-provider settings a planted AGENTS.md got Codex to change.
+  { id: 'codex-config', scope: 'user', relPath: path.join('.codex', 'config.toml'), format: 'toml', sections: [
+    { keyPath: 'mcp_servers', kind: 'mcpServers' },
+    { keyPath: 'hooks', kind: 'hooks' },
+    { keyPath: 'approval_policy+sandbox_mode', kind: 'codexSandbox', extract: codexSandbox },
+    { keyPath: 'projects.*.trust_level', kind: 'codexTrust', extract: codexTrust },
+    { keyPath: 'model_provider+model_providers.*.base_url', kind: 'codexProvider', extract: codexProvider },
+  ] },
   // Editor tasks
   { id: 'vscode-tasks', scope: 'project', relPath: path.join('.vscode', 'tasks.json'), format: 'jsonc', sections: [{ keyPath: 'tasks', kind: 'tasks' }] },
 ]);
+
+/**
+ * Planted instruction files (Forever Security, Oct 2026): a web page can drop
+ * AGENTS.md into ~/Downloads without a click, and an agent later opened there
+ * obeys it. These fixed names are checked in each drop directory; nothing is
+ * walked (the only listing is one level of a `.codex/` directory). The whole
+ * file is hashed, never read for meaning, and removals are silent.
+ */
+export const DROPZONE_FILES: readonly WatchedFileSpec[] = Object.freeze([
+  ...(['AGENTS.md', 'AGENTS.override.md', 'CLAUDE.md'] as const).map((f) => (
+    { id: `planted-${f}`, scope: 'dropzone' as const, relPath: f, format: 'raw' as const, ignoreRemovals: true, sections: [{ keyPath: 'instructions', kind: 'plantedInstructions' as const }] }
+  )),
+  ...(['settings.json', 'settings.local.json'] as const).map((f) => (
+    { id: `planted-claude-${f}`, scope: 'dropzone' as const, relPath: path.join('.claude', f), format: 'raw' as const, ignoreRemovals: true, sections: [{ keyPath: 'agent-config', kind: 'plantedAgentConfig' as const }] }
+  )),
+  { id: 'planted-codex-dir', scope: 'dropzone', relPath: '.codex', format: 'dir', ignoreRemovals: true, sections: [{ keyPath: 'agent-config', kind: 'plantedAgentConfig' }] },
+]);
+
+/** Spec ids checked in the home directory itself (its real .claude/.codex are watched above). */
+const HOME_DROPZONE_IDS = new Set(['planted-AGENTS.md', 'planted-AGENTS.override.md', 'planted-CLAUDE.md']);
+
+/** Default drop directories: ~/Downloads, ~/Desktop, the home directory and /tmp (top level only). */
+export function defaultDropzoneDirs(home: string): string[] {
+  const dirs = [path.join(home, 'Downloads'), path.join(home, 'Desktop'), home];
+  if (process.platform !== 'win32') dirs.push('/tmp');
+  return dirs;
+}
+
+/** State key prefix: a dropzone file never shares a key with a project-scope file at the same path. */
+const DROPZONE_KEY_PREFIX = 'planted:';
 
 // ── Parsing ─────────────────────────────────────────────────────────────────
 
@@ -257,6 +394,8 @@ export function readRegularFileBounded(filePath: string, max: number = MAX_WATCH
  * the bytes it wrote, not from a second read of the file).
  */
 export function snapshotContent(raw: string, spec: WatchedFileSpec): FileSnapshot {
+  if (spec.format === 'raw') return { [spec.sections[0].keyPath]: { [path.basename(spec.relPath)]: [sha(raw)] } };
+  if (spec.format === 'dir') throw new TypeError('a dir spec has no file content');
   let parsed: unknown;
   try {
     parsed = spec.format === 'toml' ? parseToml(raw) : JSON.parse(spec.format === 'jsonc' ? stripJsonc(raw) : raw);
@@ -265,7 +404,7 @@ export function snapshotContent(raw: string, spec: WatchedFileSpec): FileSnapsho
   }
   const snap: FileSnapshot = {};
   for (const s of spec.sections) {
-    const m = sectionFrom(s.kind, getPath(parsed, s.keyPath));
+    const m = sectionFrom(s.kind, s.extract ? s.extract(parsed) : getPath(parsed, s.keyPath));
     if (Object.keys(m).length) snap[s.keyPath] = m;
   }
   return snap;
@@ -278,7 +417,38 @@ export function snapshotContent(raw: string, spec: WatchedFileSpec): FileSnapsho
  * A read failure other than "absent" THROWS (EISDIR, ENOTREG, EFBIG, EACCES...):
  * the caller keeps that file's baseline and reports a read error.
  */
+/** Most entries of a planted `.codex/` directory listed; the rest collapse into one marker. */
+export const MAX_DIR_ENTRIES = 64;
+
+/**
+ * One level of a directory: entry name -> hash of (type, size, mtime). Never
+ * reads entry contents and never descends. A non-directory at the path
+ * (a planted file named `.codex`) is itself recorded as one entry.
+ */
+function snapshotDir(dirPath: string, spec: WatchedFileSpec): FileSnapshot {
+  const st = fs.lstatSync(dirPath); // ENOENT propagates to the caller
+  const key = spec.sections[0].keyPath;
+  if (!st.isDirectory()) return { [key]: { '(not a directory)': [sha(`${st.mode}:${st.size}:${st.mtimeMs}`)] } };
+  const names = fs.readdirSync(dirPath).sort();
+  const entries: SectionMap = {};
+  for (const name of names.slice(0, MAX_DIR_ENTRIES)) {
+    let sig = 'gone';
+    try { const e = fs.lstatSync(path.join(dirPath, name)); sig = `${e.isDirectory() ? 'd' : e.isFile() ? 'f' : 'o'}:${e.size}:${e.mtimeMs}`; } catch { /* raced away */ }
+    entries[name] = [sha(sig)];
+  }
+  if (names.length > MAX_DIR_ENTRIES) entries['(more entries)'] = [sha(names.slice(MAX_DIR_ENTRIES).join('\n'))];
+  return { [key]: entries };
+}
+
 export function snapshotFile(filePath: string, spec: WatchedFileSpec): FileSnapshot {
+  if (spec.format === 'dir') {
+    try {
+      return snapshotDir(filePath, spec);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT' || (err as NodeJS.ErrnoException).code === 'ENOTDIR') return {};
+      throw err;
+    }
+  }
   let raw: string;
   try {
     raw = readRegularFileBounded(filePath);
@@ -331,12 +501,24 @@ const SECTION_LABEL: Record<ConfigChange['section'], string> = {
   env: 'environment variable',
   tasks: 'task',
   plugins: 'plugin registration',
+  endpointRedirect: 'endpoint-redirect',
+  codexSandbox: 'codex-sandbox',
+  codexTrust: 'codex-trust',
+  codexProvider: 'codex-provider',
+  plantedInstructions: 'planted-instructions',
+  plantedAgentConfig: 'planted-agent-config',
   file: 'file contents',
 };
 
 /** Fixed-vocabulary label, e.g. "hook added". */
 export function changeLabel(c: ConfigChange): string {
   return `${SECTION_LABEL[c.section]} ${c.kind}`;
+}
+
+export type ChangeSeverity = 'high' | 'normal';
+
+export function changeSeverity(c: ConfigChange): ChangeSeverity {
+  return c.section !== 'file' && HIGH_SEVERITY_KINDS.has(c.section) ? 'high' : 'normal';
 }
 
 // ── Display + ledger types ──────────────────────────────────────────────────
@@ -348,6 +530,8 @@ export interface AgentConfigLedgerRow {
   kind: string;
   detail: string;
   outcome: 'change' | 'error';
+  /** `high` for a redirect, sandbox/trust weakening or planted file. */
+  severity?: ChangeSeverity;
 }
 
 export function displayPath(p: string, home: string): string {
@@ -541,6 +725,20 @@ export function watchedPaths(home: string, roots: string[]): Array<{ file: strin
   return out;
 }
 
+/** Planted-file candidates for each drop directory (fixed names, no walking). */
+export function dropzonePaths(home: string, dirs: string[]): Array<{ key: string; file: string; spec: WatchedFileSpec; dropzone: string; root?: undefined }> {
+  const out: Array<{ key: string; file: string; spec: WatchedFileSpec; dropzone: string; root?: undefined }> = [];
+  const homeDir = path.resolve(home);
+  for (const dir of dirs) {
+    for (const spec of DROPZONE_FILES) {
+      if (path.resolve(dir) === homeDir && !HOME_DROPZONE_IDS.has(spec.id)) continue;
+      const file = path.join(dir, spec.relPath);
+      out.push({ key: `${DROPZONE_KEY_PREFIX}${file}`, file, spec, dropzone: dir });
+    }
+  }
+  return out;
+}
+
 function realOrResolved(p: string): string {
   try { return path.join(fs.realpathSync(path.dirname(p)), path.basename(p)); } catch { return path.resolve(p); }
 }
@@ -567,6 +765,8 @@ export interface AgentConfigNotification {
   file: string;
   changes: Array<{ label: string; name: string }>;
   changeCount: number;
+  /** `high` when any change is a high-severity kind (those are listed first). */
+  severity?: ChangeSeverity;
 }
 
 export interface AgentConfigWatchDeps {
@@ -578,6 +778,8 @@ export interface AgentConfigWatchDeps {
   totalBudgetMs?: number;
   /** Test seam: replaces the file reader. */
   snapshot?: (file: string, spec: WatchedFileSpec) => FileSnapshot | Promise<FileSnapshot>;
+  /** Drop directories checked for planted instruction files (default `defaultDropzoneDirs(home)`). */
+  dropzoneDirs?: string[];
 }
 
 export interface AgentConfigWatchResult {
@@ -626,6 +828,7 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
   const budget = deps.totalBudgetMs ?? DEFAULT_TOTAL_BUDGET_MS;
   const roots = [...new Set(deps.projectRoots.map((r) => path.resolve(r)))];
   const take = deps.snapshot ?? snapshotFile;
+  const dropzones = [...new Set((deps.dropzoneDirs ?? defaultDropzoneDirs(deps.home)).map((d) => path.resolve(d)))];
   // Commit guard: once the deadline fires (or the run fails), the abandoned body
   // must not notify, log or save anything after this function has returned.
   let expired = false;
@@ -639,11 +842,16 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
     const state = loaded.state;
     const firstRun = !state.initialised;
     const knownRoots = new Set(state.roots);
-    const next: AgentConfigWatchState = { ...state, version: 1, initialised: true, files: { ...state.files }, roots: [...new Set([...state.roots, ...roots])] };
-    const changedFiles: Array<{ file: string; spec: WatchedFileSpec; before: FileSnapshot; after: FileSnapshot }> = [];
-    const health: Record<string, string> = {};
+    const knownDropzones = new Set(state.dropzones ?? []);
+    const next: AgentConfigWatchState = { ...state, version: 1, initialised: true, files: { ...state.files }, roots: [...new Set([...state.roots, ...roots])], dropzones: [...new Set([...(state.dropzones ?? []), ...dropzones])] };
+    const changedFiles: Array<{ key: string; file: string; spec: WatchedFileSpec; before: FileSnapshot; after: FileSnapshot }> = [];
+    const health: Record<string, { file: string; category: string }> = {};
+    const targets = [
+      ...watchedPaths(deps.home, roots).map((w) => ({ ...w, key: w.file, dropzone: undefined as string | undefined })),
+      ...dropzonePaths(deps.home, dropzones),
+    ];
 
-    for (const w of watchedPaths(deps.home, roots)) {
+    for (const w of targets) {
       if (expired) return;
       let after: FileSnapshot;
       try {
@@ -651,17 +859,17 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
       } catch (err) {
         // One unreadable file (EISDIR, EACCES...) keeps ITS baseline and is
         // reported as a health error; every other file is still checked.
-        health[w.file] = `read-error (${errorCategory(err)})`;
+        health[w.key] = { file: w.file, category: `read-error (${errorCategory(err)})` };
         continue;
       }
       if (expired) return;
-      if (isUnparseable(after)) health[w.file] = 'parse-error';
-      const known = Object.prototype.hasOwnProperty.call(state.files, w.file);
-      // Baseline silently: first run, or a project root we have not seen before.
-      if (firstRun || (w.root && !knownRoots.has(w.root))) { next.files[w.file] = after; continue; }
-      const before = known ? state.files[w.file] : {};
-      if (!sameSnapshot(before, after)) changedFiles.push({ file: w.file, spec: w.spec, before, after });
-      else if (!known) next.files[w.file] = after;
+      if (isUnparseable(after)) health[w.key] = { file: w.file, category: 'parse-error' };
+      const known = Object.prototype.hasOwnProperty.call(state.files, w.key);
+      // Baseline silently: first run, or a project root / drop directory we have not seen before.
+      if (firstRun || (w.root && !knownRoots.has(w.root)) || (w.dropzone && !knownDropzones.has(w.dropzone))) { next.files[w.key] = after; continue; }
+      const before = known ? state.files[w.key] : {};
+      if (!sameSnapshot(before, after)) changedFiles.push({ key: w.key, file: w.file, spec: w.spec, before, after });
+      else if (!known) next.files[w.key] = after;
     }
 
     // Health errors are reported on every path, first run included (a malformed
@@ -669,11 +877,11 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
     // new or changed condition; result.errors counts every affected file per run.
     const prevErrors = state.fileErrors ?? {};
     const nextErrors: Record<string, string> = {};
-    for (const [file, category] of Object.entries(health)) {
+    for (const [key, { file, category }] of Object.entries(health)) {
       if (expired) return;
       result.errors++;
-      if (prevErrors[file] === category) { nextErrors[file] = category; continue; }
-      if (safeLedger({ file: displayPath(file, deps.home), keyPath: '', kind: 'health-error', detail: category, outcome: 'error' })) nextErrors[file] = category;
+      if (prevErrors[key] === category) { nextErrors[key] = category; continue; }
+      if (safeLedger({ file: displayPath(file, deps.home), keyPath: '', kind: 'health-error', detail: category, outcome: 'error' })) nextErrors[key] = category;
     }
     next.fileErrors = nextErrors;
 
@@ -681,14 +889,19 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
     let pending = 0;
     for (const c of changedFiles) {
       if (expired) return;
-      const changes = diffSnapshots(c.spec, c.before, c.after);
+      // High-severity kinds first, so they are always among the three shown.
+      const changes = diffSnapshots(c.spec, c.before, c.after)
+        .filter((x) => !(c.spec.ignoreRemovals && x.kind === 'removed'))
+        .sort((x, y) => Number(changeSeverity(y) === 'high') - Number(changeSeverity(x) === 'high'));
       const shown = displayPath(c.file, deps.home);
-      if (changes.length === 0) { next.files[c.file] = c.after; continue; }
+      if (changes.length === 0) { next.files[c.key] = c.after; continue; }
       next.lastDetectedAt = new Date(now()).toISOString();
+      const severity: ChangeSeverity = changes.some((x) => changeSeverity(x) === 'high') ? 'high' : 'normal';
       const note: AgentConfigNotification = {
         file: shown,
         changes: changes.slice(0, 3).map((x) => ({ label: changeLabel(x), name: x.name })),
         changeCount: changes.length,
+        ...(severity === 'high' ? { severity } : {}),
       };
       try {
         await deps.notify(note);
@@ -704,7 +917,7 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
       result.notified++;
       let recorded = true;
       for (const x of changes) {
-        if (!safeLedger({ file: shown, keyPath: x.keyPath, kind: changeLabel(x), detail: `entry=${safeEntryName(x.name)}`, outcome: 'change' })) recorded = false;
+        if (!safeLedger({ file: shown, keyPath: x.keyPath, kind: changeLabel(x), detail: `entry=${safeEntryName(x.name)}`, outcome: 'change', severity: changeSeverity(x) })) recorded = false;
       }
       if (!recorded) {
         // The audit row is the durable record: without it, do not advance the
@@ -713,7 +926,7 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
         pending++;
         continue;
       }
-      next.files[c.file] = c.after;
+      next.files[c.key] = c.after;
       next.lastChangeAt = new Date(now()).toISOString();
     }
     next.pendingChanges = pending;

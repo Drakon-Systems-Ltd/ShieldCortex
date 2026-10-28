@@ -299,21 +299,27 @@ export interface AgentConfigChangeNotification {
   file: string;
   changes: Array<{ label: string; name: string }>;
   changeCount: number;
+  /** `high`: a traffic/credential redirect, sandbox or trust weakening, or a planted instruction file. */
+  severity?: 'high';
 }
 
-export function buildAgentConfigChangeNotification(input: { file: string; changes: Array<{ label: string; name: string }>; changeCount: number }): AgentConfigChangeNotification {
+export function buildAgentConfigChangeNotification(input: { file: string; changes: Array<{ label: string; name: string }>; changeCount: number; severity?: string }): AgentConfigChangeNotification {
   const safe = (raw: unknown, max: number): string => (String(raw ?? '').replace(/[^A-Za-z0-9_.:\/@ ~-]/g, '?').trim() || 'unknown').slice(0, max);
   return {
     event: 'agent_config_change',
     file: safe(input.file, 120),
     changes: input.changes.slice(0, 3).map((c) => ({ label: safe(c.label, 40), name: safe(c.name, 64) })),
     changeCount: Math.max(input.changeCount, input.changes.length),
+    ...(input.severity === 'high' ? { severity: 'high' as const } : {}),
   };
 }
 
 export function formatAgentConfigChangeNotification(n: AgentConfigChangeNotification): string {
   const shown = n.changes.map((c) => `${c.label} (${c.name})`).join(', ');
   const extra = n.changeCount - n.changes.length;
+  if (n.severity === 'high') {
+    return `ShieldCortex HIGH SEVERITY: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}. This can redirect your agent's traffic or credentials, weaken its sandbox, or plant instructions it will obey. If you did not make this change, review the file before starting an agent.`;
+  }
   return `ShieldCortex: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}. If you did not make this change, review the file.`;
 }
 

@@ -87,7 +87,7 @@ function buildConversationPayload(n: ConversationThreatNotification): Record<str
 function buildPayload(n: AnyOperatorNotification): Record<string, unknown> {
   if (n.event === 'maintenance_fail') return { event: n.event, checks: n.checks, text: formatOperatorNotification(n), ts: new Date().toISOString() };
   if (n.event === 'mcp_tool_change') return { event: n.event, kind: n.kind, server: n.server, tools: n.tools, toolCount: n.toolCount, ...(n.reason ? { reason: n.reason } : {}), text: formatOperatorNotification(n), ts: new Date().toISOString() };
-  if (n.event === 'agent_config_change') return { event: n.event, file: n.file, changes: n.changes, changeCount: n.changeCount, text: formatOperatorNotification(n), ts: new Date().toISOString() };
+  if (n.event === 'agent_config_change') return { event: n.event, file: n.file, changes: n.changes, changeCount: n.changeCount, ...(n.severity ? { severity: n.severity } : {}), text: formatOperatorNotification(n), ts: new Date().toISOString() };
   if (isConversationThreatNotification(n)) return buildConversationPayload(n);
   if (isActionGuardOutcomeNotification(n)) return buildActionGuardPayload(n);
   return buildApprovalPayload(n);
