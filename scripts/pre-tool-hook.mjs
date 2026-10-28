@@ -1109,6 +1109,9 @@ const SAFE_SIGNALS = new Set([
   'write-content-dangerous', 'delete-critical-path', 'session-lease',
   // #509: the enforce-when-ready gate's own demotion and promotion notices.
   'readiness-demoted', 'readiness-promoted',
+  // #874: the other two self-protection floor signals. Guard reason codes,
+  // not operator data; redacted, a floor denial could not name its signal.
+  'touch-guard-config', 'disable-action-guard',
 ]);
 /**
  * #436 — the only tiers that deny with no operator affordance. Everything the
@@ -1253,17 +1256,25 @@ function sessionKeySalt() {
 }
 
 function sessionKeyFor(value) {
-  if (typeof value !== 'string' || !value.trim()) return undefined;
+  if (typeof value !== 'string') return undefined;
+  // Keep canonicalisation in sync with src/defence/iron-dome/session-guard.ts
+  // and scripts/stop-hook.mjs.
+  // Reject lone surrogates before UTF-8 can alias them with U+FFFD.
+  const id = value.trim();
+  if (!id || (typeof id.isWellFormed === 'function' ? !id.isWellFormed() : /[\uD800-\uDFFF]/u.test(id))) return undefined;
   const salt = sessionKeySalt();
   if (!salt) return undefined;
-  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${value}`).digest('hex').slice(0, 16)}`;
+  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${id}`).digest('hex').slice(0, 16)}`;
 }
 
 function hookSessionExtras(hookData, permissionMode) {
   const extra = {};
   const rawSessionId = typeof hookData?.session_id === 'string' ? hookData.session_id : hookData?.sessionId;
-  const sessionKey = sessionKeyFor(rawSessionId);
-  if (sessionKey) extra.sessionKey = sessionKey;
+  if (typeof rawSessionId === 'string' && rawSessionId.trim()) {
+    const sessionKey = sessionKeyFor(rawSessionId);
+    if (sessionKey) extra.sessionKey = sessionKey;
+    else extra.namedIdentityUnresolved = true;
+  }
   const safeMode = safePermissionMode(permissionMode);
   if (safeMode) extra.permissionMode = safeMode;
   return extra;
@@ -1690,6 +1701,12 @@ function safeGuardOutcomeReason(verdict, outcome, event) {
       : 'Action Guard warning in advisory mode; inspect local audit for details.';
   }
   if (outcome === 'denied_no_prompt_surface') {
+    // #874: under Watch only (advisory) the ordinary dangerous tier never gets
+    // here; only the self-protection floor does. Say so, instead of implying
+    // the posture asked for an approval it does not ask for.
+    if (verdict?.advisoryFloor === true) {
+      return 'Action Guard is in Watch only (advisory), but this call would change the guard\'s own state or config or switch it off, which Watch only still holds; this session has no prompt surface, so the tool call was denied.';
+    }
     return 'Action Guard required approval but this session has no prompt surface; the tool call was denied.';
   }
   if (outcome === 'held_no_prompt_surface') {
@@ -2510,6 +2527,24 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   { re: /\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b/i, signal: 'touch-decisions-ledger' },
   // #500: outage fallback must gate self-disable / global uninstall / config.json writes.
   { re: /--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b/i, signal: 'disable-action-guard' },
+  // #922: `guard posture off|advisory` is a loosening INVOCATION, not vocabulary.
+  // The phrase counts only behind a command-position invoker (shieldcortex, a
+  // wrapper such as npx/node/env/sudo, or a `$var` command), after a statement
+  // start or inside a shell `-c` / eval body, so an echo/grep/cat/gh --body
+  // mention stays off. Quote/backslash decoration inside a word, a quoted flag,
+  // and an expansion or glob anywhere in the target are read as the core's
+  // loosensGuardPostureAt reads them. #922 r2: a wrapper may be path-qualified
+  // or quoted (`/usr/bin/env`, `"env"`), a flag may take one bare value
+  // (`env -u FOO`, `sudo -u nobody`, as commandPositions reads it), `shieldcortex`
+  // may be quote-fragmented, and bash value options are stepped over
+  // (`bash -O extglob -c`). A flag value can be no other prefix token nor an
+  // invoker, so the repetition has one parse and stays linear. `dataQuotes`: a
+  // hit inside a data quote (`echo "x; shieldcortex …"`) is a mention. `lockPath`: pure inspection runs
+  // no invoker, so the lock-read exemption drops it as well. `postureTail` (#943 r2 B2):
+  // the row matches the invocation up to `guard posture`; the rest of that
+  // statement is read by fallbackPostureTailLoosens, fail-closed, without
+  // parsing redirections, as the core walk does.
+  { re: /(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:(?:[-+]O|--rcfile|--init-file)[ \t]+[^\s;&|-][^\s;&|]*[ \t]+|-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!)|\w+=[^\s;&|({`]*|-[^\s;&|({`]+(?:[ \t]+(?!(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!))[ \t]|\w+=|\d|-|['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-])))[^\s;&|({`]+)?|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?=$|[\s;&|<>()`])/i, signal: 'disable-action-guard', lockPath: true, dataQuotes: true, postureTail: true },
   { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)\b/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
   // #501: the policy lock's own attack surface. The two environment seams that
@@ -2592,7 +2627,8 @@ function handleUnknownInput() {
 // was written to stop. These mirror it, fail-closed, with no dependency on the
 // dist.
 //
-// Scope: this drops ONLY the two lock-PATH rows below (tagged `lockPath`).
+// Scope: this drops ONLY the rows tagged `lockPath`: the lock-PATH rows and
+// the #922 posture-invocation row (pure inspection runs no invoker).
 // The env-seam row, the #500 command shapes and every other signal are
 // untouched, so `rm`, `tee`, `cp`, `sed -i`, a redirect and `chmod` onto those
 // paths still gate here exactly as they did.
@@ -2627,12 +2663,40 @@ const FALLBACK_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\/|\b
 /** Assigning an env seam decides WHICH reader runs — never a read. */
 const FALLBACK_LOCK_ENV_SEAM_RE = /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i;
 
+/** Quoting the stage split cannot pair as the shell does: ANSI-C `$'…'`, a heredoc, `${…}`, a `#` comment. */
+const FALLBACK_LOCK_SPLIT_UNMODELLED_RE = /\$'|<<|\$\{|#/;
+
+/**
+ * The statements and pipeline stages of `text`, split on `\n ; & |` OUTSIDE
+ * quotes (#922 r2): `cat 'notes; x'` is one read of one file, not a read and
+ * an `x`. Text holding quoting this walk does not model keeps the plain split
+ * (every separator counts), and an unclosed quote is null — never a read.
+ */
+function fallbackLockStages(text) {
+  if (FALLBACK_LOCK_SPLIT_UNMODELLED_RE.test(text)) return text.split(/[\n;&|]+/);
+  const out = [];
+  let cur = '';
+  let q = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '\\' && q !== "'") { cur += text.slice(i, i + 2); i++; continue; }
+    if (q) { cur += c; if (c === q) q = null; continue; }
+    if (c === '"' || c === "'") q = c;
+    if (c === '\n' || c === ';' || c === '&' || c === '|') { out.push(cur); cur = ''; continue; }
+    cur += c;
+  }
+  if (q) return null;
+  out.push(cur);
+  return out;
+}
+
 /**
  * True when the whole surface is pure inspection of a lock path. Fail-closed on
  * an env-seam assignment, a redirect, nested execution, and any unknown verb in
  * any stage of any statement — the same rule the real guard applies, with the
  * statement split done conservatively (`&` and `|` both separate, so a
- * pipeline stage or a backgrounded sibling must ALSO be a read).
+ * pipeline stage or a backgrounded sibling must ALSO be a read). A separator
+ * inside quotes is data (#922 r2): see fallbackLockStages.
  */
 function fallbackLockPathAccessIsReadOnly(text, toolName) {
   if (!text) return false;
@@ -2640,8 +2704,10 @@ function fallbackLockPathAccessIsReadOnly(text, toolName) {
   const seg = String(toolName || '').toLowerCase().split(/__|\.|:|\//).filter(Boolean).pop() || '';
   if (seg && FALLBACK_READ_TOOLS.test(seg)) return true;
   if (FALLBACK_REDIRECT_RE.test(text) || FALLBACK_NESTED_EXEC_RE.test(text)) return false;
+  const stages = fallbackLockStages(text);
+  if (!stages) return false;
   let sawStage = false;
-  for (const raw of text.split(/[\n;&|]+/)) {
+  for (const raw of stages) {
     const stage = raw.trim();
     if (!stage) continue;
     sawStage = true;
@@ -2716,8 +2782,10 @@ function fallbackWriteTargetMatch(toolInput, toolName) {
 // Used only by rows tagged `dataQuotes`. Kept in sync with
 // plugins/openclaw/interceptor.ts and plugins/hermes/shieldcortex/sc_client.py.
 
-/** The guard's DATA_COMMAND (here ending at a word break: `ptpython` is not `pt`), TEXT_FLAG and EXEC_COMMAND_WORD sets. */
-const FALLBACK_DATA_COMMAND_RE = /^(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)/i;
+/** The guard's DATA_COMMAND (here ending at a word break: `ptpython` is not `pt`), TEXT_FLAG and EXEC_COMMAND_WORD sets.
+ *  #922 r3: plus `cat`, whose quoted operand is a filename, never executed — the
+ *  plain split a `#` or a write sibling forces must not read `cat 'a; x'` as `x`. */
+const FALLBACK_DATA_COMMAND_RE = /^(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|cat|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)/i;
 const FALLBACK_TEXT_FLAG_RE = /(?:^|\s)--(?:text|body|message|comment|description|title|content|caption|note|summary|prompt|subject)(?:=|\s+)$/i;
 const FALLBACK_EXEC_WORD_RE = /^(?:bash|sh|zsh|ksh|dash|ash|python[\d.]*|node|nodejs|ruby|perl|php|eval|exec|source|ssh|scp|docker|podman|kubectl|nsenter|chroot|busybox|xargs|find|flock|watch|make|awk|sed|su|runuser|systemd-run|at|batch)$/i;
 /** A pipe into anything but a read-only filter (`echo "…" | bash`, `| "sh"`, `| b\\ash`) — `||` is not a pipe. */
@@ -2777,8 +2845,8 @@ function fallbackDataQuoteRanges(text) {
   return FALLBACK_UNSAFE_PIPE_RE.test(unquoted) ? [] : ranges;
 }
 
-/** True when `re` matches somewhere outside a quoted data argument. */
-function fallbackExecutedMatch(re, text) {
+/** True when `re` matches somewhere outside a quoted data argument (and `accept`, if given, takes its end). */
+function fallbackExecutedMatch(re, text, accept) {
   const g = new RegExp(re.source, re.flags.replace('g', '') + 'g');
   let ranges = null;
   let inert = 0;
@@ -2789,12 +2857,46 @@ function fallbackExecutedMatch(re, text) {
     ranges ??= fallbackDataQuoteRanges(text);
     const start = m.index ?? 0;
     const end = start + m[0].length;
-    if (!ranges.some(([a, b]) => start >= a && end <= b)) return true;
+    if (!ranges.some(([a, b]) => start >= a && end <= b) && (!accept || accept(end))) return true;
     if (++inert >= FALLBACK_INERT_MATCH_CAP) return true;   // fail closed
     // Overlapping re-scan: a match starting inside this one is still checked.
     from = start + 1;
   }
   return false;
+}
+
+// #943 r2 B2: the rest of the statement after a `guard posture` invocation,
+// read fail-closed — no redirection parsing (`>a\ b off`, `off<<<x`,
+// `> >(cat) off` all run as `posture off`). Backslash-newlines are deleted;
+// the statement ends at the first unquoted, unescaped `;`, newline, or `&`/`|`
+// that is not glued to `<`/`>` (`>&2`, `&>`, `>|` stay inside it). Any
+// expansion or glob in that statement is a loosening. #943 r3 B2: `off` or
+// `advisory` as a word (once quotes, backslashes and redirection/grouping
+// punctuation are dropped) is a loosening ANYWHERE in the rest of the command,
+// not only in the statement — `posture > >(true; cat) off` runs as `posture
+// off` though a `;` sits inside the process substitution — and `#` comment
+// text counts. Same reading as the core's guardPostureLoosenedAnywhere.
+function fallbackPostureTailLoosens(rest) {
+  const s = rest.replace(/\\\r?\n/g, '');
+  let q = null;
+  let end = s.length;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '\\' && q !== "'") { i++; continue; }
+    if (q) { if (c === q) q = null; continue; }
+    if (c === '"' || c === "'") { q = c; continue; }
+    if (c === ';' || c === '\n' || c === '\r') { end = i; break; }
+    if ((c === '&' || c === '|') && s[i - 1] !== '<' && s[i - 1] !== '>' && s[i + 1] !== '>') { end = i; break; }
+  }
+  const stmt = s.slice(0, end);
+  return /[$`*?[\]{}]/.test(stmt)
+    || s.replace(/['"\\]/g, '').split(/[\s<>()&|;]+/).some(w => /^(?:off|advisory)$/i.test(w));
+}
+function fallbackPostureMatch(re, text) {
+  const tail = (t) => (end) => fallbackPostureTailLoosens(t.slice(end));
+  if (fallbackExecutedMatch(re, text, tail(text))) return true;
+  const folded = text.replace(/\\\r?\n/g, '');   // `guard \<newline>posture`
+  return folded !== text && fallbackExecutedMatch(re, folded, tail(folded));
 }
 
 /** First matching dangerous signal for the WS2 fallback, or null (issue #59). */
@@ -2804,9 +2906,10 @@ function fallbackDangerousMatch(toolInput, toolName) {
   const text = fallbackExecSurface(toolInput);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
-  for (const { re, signal, lockPath, dataQuotes } of FALLBACK_DANGEROUS_PATTERNS) {
+  for (const { re, signal, lockPath, dataQuotes, postureTail } of FALLBACK_DANGEROUS_PATTERNS) {
     if (lockReadOnly && lockPath === true) continue;
-    if (dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
+    if (postureTail === true ? fallbackPostureMatch(re, text)
+      : dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
   }
   return null;
 }
@@ -2830,10 +2933,11 @@ function fallbackSelfProtectionMatch(toolInput, toolName) {
   const text = fallbackExecSurface(toolInput);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
-  for (const { re, signal, lockPath } of FALLBACK_DANGEROUS_PATTERNS) {
+  for (const { re, signal, lockPath, dataQuotes, postureTail } of FALLBACK_DANGEROUS_PATTERNS) {
     if (!FALLBACK_SELF_PROTECTION_SIGNALS.includes(signal)) continue;
     if (lockReadOnly && lockPath === true) continue;
-    if (re.test(text)) return signal;
+    if (postureTail === true ? fallbackPostureMatch(re, text)
+      : dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
   }
   return null;
 }
@@ -3309,16 +3413,38 @@ process.stdin.on('end', async () => {
     // become a new way to deny everything — while state UNreadability fails
     // closed to 'unknown' inside the store itself.
     const harnessPid = resolveHarnessPid();
-    const leaseSelf = baseExtra.sessionKey || `ppid:${harnessPid}`;
+    // Blank/missing ids keep the process holder. A nonblank id whose key cannot
+    // be derived must not fall through to that holder — OpenClaw refuses, and
+    // sharing ppid would let two invalid named ids re-enter each other.
+    const leaseSelf = baseExtra.namedIdentityUnresolved
+      ? null
+      : (baseExtra.sessionKey || `ppid:${harnessPid}`);
     let leaseGate = null;
     try {
       const lease = await loadLease();
       if (lease) {
-        leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, holderPid: harnessPid });
-        if (leaseGate && leaseGate.ledgerChanged) {
-          console.error(
-            `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,
-          );
+        if (leaseSelf === null) {
+          const scope = typeof lease.scopeForToolCall === 'function'
+            ? lease.scopeForToolCall(toolName, toolInput)
+            : 'session-identity';
+          if (scope != null) {
+            leaseGate = {
+              scope,
+              decision: {
+                verdict: 'unknown',
+                reason:
+                  `this session's identity could not be derived, so ShieldCortex cannot tell whether ` +
+                  `another session holds ${scope} — refusing rather than acting under a shared or guessed identity`,
+              },
+            };
+          }
+        } else {
+          leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, holderPid: harnessPid });
+          if (leaseGate && leaseGate.ledgerChanged) {
+            console.error(
+              `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,
+            );
+          }
         }
         if (leaseGate && leaseGate.decision.verdict !== 'allow') {
           writeAuditEntry(safeToolName(toolName), {
@@ -3542,7 +3668,9 @@ process.stdin.on('end', async () => {
         actionId,
       });
       recordNotifyAudit(toolName, verdict, toolInput, { ...baseExtra, actionId }, notified);
-      console.error(`[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} — ${safeGuardOutcomeReason(verdict, 'warned', 'action_guard_warning')}`);
+      // #874: the one warning line names the signals, so the transcript says
+      // what was let through without anyone opening the audit.
+      console.error(`[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} — ${safeGuardOutcomeReason(verdict, 'warned', 'action_guard_warning')} [${safeSignalList(verdict.signals).join(', ')}]`);
       process.exit(0); // Advisory: warn, emit no decision.
     }
 
@@ -3744,7 +3872,9 @@ process.stdin.on('end', async () => {
     // already approved, or a call the judge hardened, is unaffected by this.
     await emitApprovalRequired(
       toolName,
-      verdict,
+      // #874: an advisory host reaches here only through the self-protection
+      // floor (or an unscanned call); the flag lets the denial say which.
+      !cfg.enforce && selfProtected && !unscannedBlock ? { ...verdict, advisoryFloor: true } : verdict,
       toolInput,
       permissionMode,
       'require_approval',

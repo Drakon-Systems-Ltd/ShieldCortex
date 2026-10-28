@@ -15,6 +15,12 @@
  * `synthetic` reach row. TTY-only, like `approve`: an agent with piped stdio
  * must not be able to spam unanswerable cards (each one would count against
  * approval reachability and force a demotion).
+ *
+ * `posture` (#922, read-only) prints the effective Action Guard posture of
+ * each gate plane — Claude Code hook, OpenClaw plugin, Hermes — from the same
+ * resolver as doctor's `Action guard posture` row. Exit 0 when the planes
+ * agree (or none is present), 4 when they disagree. It takes no posture
+ * argument: there is no writer in this release.
  */
 
 import { GUARD_HELP } from './dispatch-help.js';
@@ -24,6 +30,7 @@ import readline from 'node:readline/promises';
 
 import { actionGuardPosture, getActionGuardCoreConfig, readRawConfig, type ActionGuardPosture } from '../cloud/config.js';
 import { readPolicyLock } from '../defence/iron-dome/policy-lock.js';
+import { formatGuardPostureLines, guardPostureRow, readGuardPosture } from '../guard/posture-switch.js';
 import {
   DEFAULT_PRIOR_POLICY_CARRY,
   INTERVENTION_MAX_RATE,
@@ -500,6 +507,30 @@ function report(answer: ReachAnswer, log: (l: string) => void): { code: number; 
   return { code: 1, answer };
 }
 
+// ==================== posture (#922, read-only) ====================
+
+/** Exit code when the planes disagree, matching the design's read-only form. */
+export const GUARD_POSTURE_MISMATCH_EXIT = 4;
+
+function runGuardPosture(args: string[], opts: { home?: string }): number {
+  const unexpected = args.filter((a) => a !== '--json');
+  if (unexpected.length > 0) {
+    console.error(
+      `\`shieldcortex guard posture\` only reads; it takes no posture argument in this release (got: ${unexpected.join(' ')}).`,
+    );
+    console.error(GUARD_HELP);
+    return 1;
+  }
+  const report = readGuardPosture({ home: opts.home });
+  const code = report.verdict === 'mismatch' ? GUARD_POSTURE_MISMATCH_EXIT : 0;
+  if (args.includes('--json')) {
+    console.log(stringifyJsonTerminalSafe({ ...report, row: guardPostureRow(report) }, 2));
+  } else {
+    for (const line of formatGuardPostureLines(report)) console.log(line);
+  }
+  return code;
+}
+
 // ==================== dispatcher ====================
 
 export async function runGuardCommand(argv: string[], opts: { home?: string } = {}): Promise<number> {
@@ -536,6 +567,9 @@ export async function runGuardCommand(argv: string[], opts: { home?: string } = 
   }
   if (sub === 'test-approval') {
     return (await runTestApproval({ adapter: surface })).code;
+  }
+  if (sub === 'posture') {
+    return runGuardPosture(argv.slice(1), opts);
   }
   console.log(GUARD_HELP);
   return sub === '--help' || sub === '-h' || sub === 'help' ? 0 : 1;

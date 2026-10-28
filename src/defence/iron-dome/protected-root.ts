@@ -43,6 +43,12 @@ export const PROTECTED_AUDIT_OUTCOMES = [
   'policy_unlocked',
   /** A write was refused because a verified lock covers the key. */
   'policy_refused',
+  /**
+   * #647: an operator deliberately re-signed a `tampered` config.json after
+   * reviewing it (`shieldcortex config --resign`). Records the previous verdict
+   * and both hashes so "who signed this, and from what" has an answer.
+   */
+  'config_resigned',
 ] as const;
 
 export type ProtectedAuditOutcome = (typeof PROTECTED_AUDIT_OUTCOMES)[number];
@@ -71,17 +77,29 @@ export interface ProtectedAuditEvent {
  * `logIronDomeAudit` itself — an audit row is evidence, never a gate.
  */
 export function emitProtectedAudit(event: ProtectedAuditEvent): void {
-  const allowed = event.outcome === 'policy_locked' || event.outcome === 'policy_unlocked';
+  const row = describeProtectedAudit(event);
+  void import('./audit.js')
+    .then(({ logIronDomeAudit }) => {
+      logIronDomeAudit(row);
+    })
+    .catch(() => { /* best-effort: evidence, never a gate */ });
+}
+
+/**
+ * The iron-dome audit row a protected-root event becomes. Shared by the
+ * best-effort {@link emitProtectedAudit} and by the one caller that must know
+ * its row was written (#647 `config --resign`, src/cloud/recovery-audit.ts),
+ * so both write the same row shape.
+ */
+export function describeProtectedAudit(event: ProtectedAuditEvent): { action: string; allowed: boolean; reason: string } {
+  const allowed = event.outcome === 'policy_locked' || event.outcome === 'policy_unlocked'
+    || event.outcome === 'config_resigned';
   const reason =
     `${event.outcome}` +
     (event.path ? ` path=${event.path}` : '') +
     (event.reason ? ` reason=${event.reason}` : '') +
     (event.detail ? ` — ${event.detail}` : '');
-  void import('./audit.js')
-    .then(({ logIronDomeAudit }) => {
-      logIronDomeAudit({ action: PROTECTED_AUDIT_ACTION, allowed, reason });
-    })
-    .catch(() => { /* best-effort: evidence, never a gate */ });
+  return { action: PROTECTED_AUDIT_ACTION, allowed, reason };
 }
 
 // ── The filesystem seam ───────────────────────────────

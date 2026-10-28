@@ -24,7 +24,7 @@
  * `off`, which is read before any scanner, audit write or cloud call.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
@@ -141,11 +141,31 @@ type DefenceModule = {
   /** #260 — session-guard index + degraded-run summary. Optional so an older
    *  installed dist degrades to "no index" rather than crashing the hook. */
   sessionKeyFor?: (value: string | undefined, opts?: { home?: string; salt?: string }) => string | null;
+  /** #854 — the lease identity both planes act as. Optional: an older dist
+   *  falls back to sessionKeyFor, which is the same formula. */
+  leaseIdentityFor?: (rawSessionId: string | null | undefined, opts?: { home?: string; salt?: string }) => string | null;
   appendSessionGuardIndex?: (opts: { home?: string; entry: Record<string, unknown> }) => boolean;
   recordActionGuardDegraded?: (
     rawSessionId: string | undefined,
     opts?: { home?: string; salt?: string; origin?: string },
   ) => { recorded: boolean; count: number; sessionKey?: string; existing?: boolean };
+  /** #673 — the reporting-only expiry digest. All optional: an older dist
+   *  without them sends nothing and writes nothing at session_end. */
+  readSessionGuardIndexBounded?: (sessionKey: string, opts?: { home?: string }) => {
+    rows: Array<Record<string, unknown>>; truncated: boolean; corrupt: number; oversized: number; unsafe: boolean;
+  };
+  appendExpiryDigestRecord?: (
+    sessionKey: string,
+    record: {
+      digestId: string; phase: 'local_only' | 'attempt' | 'receipt'; observed: number; rendered: number;
+      complete: boolean; transport: 'webhook' | null; status?: 'delivered' | 'failed';
+    },
+    opts?: { home?: string },
+  ) => boolean;
+  buildApprovalExpiryDigest?: (
+    read: { rows: Array<Record<string, unknown>>; truncated: boolean; corrupt: number; oversized: number },
+    opts: { sessionKey: string; hostVersion?: unknown; blockingHosts?: ReadonlySet<string> },
+  ) => { observed: number; rendered: number; complete: boolean; alreadyDigested: boolean; text: string };
   /** #224 — stamp binding fields on a realtime audit row. Optional so an
    *  older installed package degrades to unbound records, not a crash. */
   attachEnforcementBinding?: (
@@ -416,6 +436,7 @@ export function __resetConfigStateForTest(): void {
   _conversationAccessGranted = false;
   _gatewayNotifyContext = null;
   _hostRuntimeVersion = null;
+  _expiryDigestInFlight.clear();
   __resetScanUnavailableAlertState();
 }
 
@@ -2786,6 +2807,87 @@ export function isInternalContent(text: string, sessionId?: string | null): bool
   return matchesSkipPatterns(inner);
 }
 
+type InterceptorRuntimeOptions = NonNullable<Parameters<typeof createInterceptor>[2]>;
+type ActionLeaseGate = NonNullable<ReturnType<NonNullable<InterceptorRuntimeOptions['checkActionLease']>>>;
+
+/**
+ * #854: the interceptor's lease adapters. The holder is the SAME identity the
+ * Claude Code hook leases as — `leaseIdentityFor` (or, on an older dist,
+ * `sessionKeyFor`, the same formula) — never the raw sessionId, which can
+ * never equal an `sc-…` holder and so refused this session's own lease as
+ * "held by another session". A blank id maps to '' and gets the store's
+ * per-process fallback, as before.
+ *
+ * A NONBLANK id whose key cannot be derived (no usable salt) is refused for
+ * every scoped call: it must not become '', a raw id or the per-process
+ * fallback, which would let two named sessions of this process share a hold.
+ * The refusal is a decision, not a throw — the interceptor treats a throw as
+ * "no lease".
+ *
+ * Release reuses the identity acquire used for that gate, captured when the
+ * lease was taken, so a salt lost or changed in between can never point the
+ * release at a different holder. Without a captured identity it re-derives,
+ * and does nothing when that fails.
+ */
+export function actionLeaseAdapters(
+  defenceMod: DefenceModule | null | undefined,
+): Pick<InterceptorRuntimeOptions, 'checkActionLease' | 'releaseActionLease'> {
+  const mod = defenceMod as (DefenceModule & Record<string, unknown>) | null | undefined;
+  const evaluate = mod?.evaluateToolCallLease as
+    | ((toolName: string, args: Record<string, unknown>, opts: { self: string }) => ActionLeaseGate | null)
+    | undefined;
+  const release = mod?.releaseToolCallLease as
+    | ((toolName: string, args: Record<string, unknown>, opts: { self: string }) => void)
+    | undefined;
+  const scopeFor = mod?.scopeForToolCall as
+    | ((toolName: string, args: Record<string, unknown>) => string | null)
+    | undefined;
+  /** null = a nonblank id whose identity could not be derived. */
+  const identity = (sessionId: string | undefined): string | null => {
+    if (typeof mod?.leaseIdentityFor === 'function') return mod.leaseIdentityFor(sessionId);
+    if (typeof mod?.sessionKeyFor === 'function') {
+      if (typeof sessionId !== 'string' || !sessionId.trim()) return '';
+      return mod.sessionKeyFor(sessionId);
+    }
+    // Compatibility only: raw ids are used when dist predates #856 and has
+    // neither identity export. Such a dist cannot promise hook-plane parity.
+    return sessionId ?? '';
+  };
+  const acquiredAs = new WeakMap<object, string>();
+  return {
+    checkActionLease: typeof evaluate === 'function'
+      ? (toolName, args, sessionId) => {
+          const self = identity(sessionId);
+          if (self === null) {
+            // Unscoped calls stay lease-free. Without a scope classifier there
+            // is no way to tell, so every call is treated as scoped.
+            const scope = typeof scopeFor === 'function' ? scopeFor(toolName, args) : 'session-identity';
+            if (scope == null) return null;
+            return {
+              scope,
+              decision: {
+                verdict: 'unknown',
+                reason:
+                  `this session's identity could not be derived, so ShieldCortex cannot tell whether ` +
+                  `another session holds ${scope} — refusing rather than acting under a shared or guessed identity`,
+              },
+            };
+          }
+          const gate = evaluate(toolName, args, { self });
+          if (gate?.acquired) acquiredAs.set(gate, self);
+          return gate;
+        }
+      : undefined,
+    releaseActionLease: typeof release === 'function'
+      ? (toolName, args, sessionId, gate) => {
+          const self = gate ? acquiredAs.get(gate) : identity(sessionId);
+          if (typeof self !== 'string') return;
+          release(toolName, args, { self });
+        }
+      : undefined,
+  };
+}
+
 function resolveHookSessionId(
   event: { sessionId?: string } | undefined,
   ctx?: AgentCtx,
@@ -2846,6 +2948,9 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
     // Counted with the undeclared ones, because they are the same operator
     // fact: this host sends a shape the provenance layer does not cover.
     _provenanceUndeclared += unreadableToolBlocks;
+    // `labelLlmInput` emits the prompt first, when there is one.
+    const promptIndex = typeof event?.prompt === 'string' && event.prompt ? 0 : -1;
+    const automationSession = isTrustedAutomationSession(sessionId);
     const labelled = inputs.filter(
       // #r2/B5: the internal-message exemption is for content the HOST
       // generated — boot checks, heartbeats, its own system notices — and the
@@ -2854,7 +2959,18 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
       // to tool output let untrusted bytes buy their way out of BOTH scanners
       // by claiming to be a system message. Tool-origin and unclassifiable
       // content is now always scanned; only the host-attributed turn may skip.
-      input => input.text && (input.label !== 'user' || !isInternalContent(input.text, sessionId)),
+      //
+      // #914: the bare prompt is `unknown` — a host-assembled string with no
+      // per-span origin — so it no longer gets the text-only exemption either:
+      // a DM opening with `Read HEARTBEAT.md` or `System:` must not buy its way
+      // past the scanner. What still attests a host-generated prompt is the
+      // session key the host minted for its own isolated cron / heartbeat run
+      // (#353), a structured field, not prompt text. Only there may the
+      // internal-content check skip the prompt.
+      (input, i) => input.text && !(
+        (input.label === 'user' || (i === promptIndex && automationSession))
+        && isInternalContent(input.text, sessionId)
+      ),
     );
     for (const labelledInput of labelled) {
       const text = labelledInput.text;
@@ -3250,6 +3366,138 @@ function buildOperatorNotifyChannels(
 }
 
 type DeliveryResult = { deliveredVia: string | null; attempts: Array<{ channel: string; result: { delivered: boolean; reason?: string } }> };
+
+/**
+ * #673 — OpenClaw host versions whose timeout-to-block path has been
+ * established by a PINNED host-contract fixture. Only these get the entry
+ * clause "OpenClaw blocked this tool call (skipped)"; every other version —
+ * including the ones whose published source was inspected during design —
+ * gets the neutral "not verified by ShieldCortex" clause. Empty on purpose:
+ * no pinned fixture exists yet, and source inspection is not runtime
+ * evidence. Adding a version here requires that fixture.
+ */
+export const INSPECTED_BLOCKING_HOSTS: ReadonlySet<string> = Object.freeze(new Set<string>());
+
+/** Session ids with a digest in flight in THIS process. Reserved
+ *  synchronously, before the first await, so duplicate or concurrent
+ *  session_end callbacks make at most one attempt here. Not cross-process. */
+const _expiryDigestInFlight = new Set<string>();
+
+type ExpiryDigestDeps = {
+  mod?: DefenceModule | null;
+  rawNotify?: unknown;
+  hostVersion?: string | null;
+};
+
+/**
+ * #673 — at session_end, report the recorded `card_timeout` outcomes of ONE
+ * host session to the ONE configured webhook. Reporting only: it reads the
+ * session index, never the approval store, and touches no request, decision
+ * or enforcement path. Fire-and-forget from session_end (#112); never throws.
+ *
+ * Order: reserve → bounded read → stop if any digest row already exists →
+ * stop if nothing recorded → local_only when there is no webhook → append
+ * `attempt` (no send if that fails) → one send, no failover, no retry →
+ * append `receipt`. A missing receipt reads as "completion unknown".
+ */
+function deliverExpiryDigest(
+  event: { sessionId?: string; sessionKey?: string } | undefined,
+  ctx: AgentCtx | undefined,
+  deps: ExpiryDigestDeps = {},
+): Promise<void> {
+  const fromEvent = typeof event?.sessionId === 'string' ? event.sessionId.trim() : '';
+  const fromCtx = typeof ctx?.sessionId === 'string' ? ctx.sessionId.trim() : '';
+  if (fromEvent && fromCtx && fromEvent !== fromCtx) {
+    console.error('[shieldcortex] expiry digest skipped: conflicting session identity');
+    return Promise.resolve();
+  }
+  // The tool path's own precedence and trimming, so the HMAC matches the key
+  // the interceptor stamped on the timeout rows.
+  const sessionId = resolveHookSessionId(event, ctx);
+  if (!sessionId) return Promise.resolve();
+  if (_expiryDigestInFlight.has(sessionId)) return Promise.resolve();
+  _expiryDigestInFlight.add(sessionId);
+  return runExpiryDigest(sessionId, deps)
+    .catch(() => { /* reporting only — never wedge session_end */ })
+    .finally(() => { _expiryDigestInFlight.delete(sessionId); });
+}
+
+async function runExpiryDigest(sessionId: string, deps: ExpiryDigestDeps): Promise<void> {
+  const mod = 'mod' in deps ? deps.mod : await getDefenceModule();
+  if (!mod || typeof mod.sessionKeyFor !== 'function' || typeof mod.readSessionGuardIndexBounded !== 'function'
+    || typeof mod.buildApprovalExpiryDigest !== 'function' || typeof mod.appendExpiryDigestRecord !== 'function') {
+    return;
+  }
+  const sessionKey = mod.sessionKeyFor(sessionId);
+  if (!sessionKey || !/^sc-[a-f0-9]{16}$/.test(sessionKey)) return;
+
+  const read = mod.readSessionGuardIndexBounded(sessionKey);
+  const hostVersion = 'hostVersion' in deps ? deps.hostVersion : _hostRuntimeVersion;
+  const digest = mod.buildApprovalExpiryDigest(read, { sessionKey, hostVersion, blockingHosts: INSPECTED_BLOCKING_HOSTS });
+  // Any digest row (local_only, attempt or receipt) means this session's
+  // digest was already assembled or attempted. A #260 summary is not one.
+  if (digest.alreadyDigested) return;
+  if (digest.observed === 0) return;
+
+  const digestId = randomBytes(16).toString('hex');
+  const base = { digestId, observed: digest.observed, rendered: digest.rendered, complete: digest.complete };
+
+  const rawNotify = 'rawNotify' in deps ? deps.rawNotify : (await loadConfig()).interceptor?.actionGuard?.notify;
+  const notify = typeof mod.normaliseNotifyConfig === 'function' ? mod.normaliseNotifyConfig(rawNotify) : null;
+  // Exactly one configured webhook. Never the gateway adapter (it renders
+  // approve/deny controls) and never the approval channel.
+  const webhook = notify?.enabled && notify.webhookUrl && typeof mod.createWebhookNotifyChannel === 'function'
+    && typeof mod.deliverOperatorNotification === 'function' && typeof mod.buildActionGuardOutcomeNotification === 'function'
+    ? { url: notify.webhookUrl, secret: notify.webhookSecret, timeoutMs: notify.timeoutMs }
+    : null;
+  if (!webhook) {
+    mod.appendExpiryDigestRecord(sessionKey, { ...base, phase: 'local_only', transport: null });
+    return;
+  }
+  // Recorded BEFORE the send: a send that leaves no record could repeat on
+  // the next session_end in another process.
+  if (!mod.appendExpiryDigestRecord(sessionKey, { ...base, phase: 'attempt', transport: 'webhook' })) return;
+
+  let delivered = false;
+  try {
+    const n = mod.buildActionGuardOutcomeNotification!({
+      event: 'action_guard_warning',
+      outcome: 'approval_expiry_digest',
+      tool: 'tool',
+      surface: 'redacted action surface',
+      signals: [],
+      severity: 'medium',
+      reason: '',
+      origin: 'openclaw-interceptor',
+      sessionId: sessionKey,
+      detectedAt: new Date().toISOString(),
+    });
+    const channel = mod.createWebhookNotifyChannel!({ url: webhook.url, secret: webhook.secret });
+    const result = await mod.deliverOperatorNotification!({ ...n, digestText: digest.text }, {
+      channels: [channel],
+      timeoutMs: Math.min(webhook.timeoutMs ?? CONVERSATION_NOTIFY_MAX_MS, CONVERSATION_NOTIFY_MAX_MS),
+    });
+    delivered = result?.deliveredVia === channel.name && typeof channel.name === 'string';
+  } catch {
+    delivered = false;
+  }
+  if (!delivered) {
+    console.error('[shieldcortex] expiry digest not acknowledged by the webhook; it may still arrive late; not retried');
+  }
+  mod.appendExpiryDigestRecord(sessionKey, {
+    ...base, phase: 'receipt', transport: 'webhook', status: delivered ? 'delivered' : 'failed',
+  });
+}
+
+/** Test seam (jest only): run the #673 digest with injected module, raw
+ *  notify config and host version, and await it. */
+export function __deliverExpiryDigestForTest(
+  event: { sessionId?: string; sessionKey?: string } | undefined,
+  ctx: AgentCtx | undefined,
+  deps: ExpiryDigestDeps = {},
+): Promise<void> {
+  return deliverExpiryDigest(event, ctx, deps);
+}
 
 /** The adapter the OpenClaw interceptor resolves readiness as (#509 r7). */
 export const OPENCLAW_READINESS_ADAPTER = 'openclaw-interceptor';
@@ -4599,14 +4847,9 @@ export default {
           // injected through the same runtime seam as evaluateToolCall. Older
           // installed packages without the export simply leave the option
           // undefined (no lease plane — the capability-honesty surface says so).
-          checkActionLease: typeof (defenceMod as any)?.evaluateToolCallLease === 'function'
-            ? (toolName, args, sessionId) =>
-                (defenceMod as any).evaluateToolCallLease(toolName, args, { self: sessionId ?? '' })
-            : undefined,
-          releaseActionLease: typeof (defenceMod as any)?.releaseToolCallLease === 'function'
-            ? (toolName, args, sessionId) =>
-                (defenceMod as any).releaseToolCallLease(toolName, args, { self: sessionId ?? '' })
-            : undefined,
+          // #854: both adapters act as the SAME identity the Claude Code hook
+          // leases as — see actionLeaseAdapters.
+          ...actionLeaseAdapters(defenceMod),
           // #260: the session-guard index. Same formula as the Claude Code
           // hook. Absent on an older dist — then emitAudit still stamps origin
           // but does not write an index nobody would summarise.
@@ -4757,6 +5000,10 @@ export default {
         // this is a notification hook. The write is best-effort and
         // idempotent with agent_end below.
         summariseGuardSession(endedSession, 'openclaw-session-end');
+        // #673: reporting-only digest of this session's recorded approval
+        // timeouts. Fire-and-forget — never awaited, so session_end still
+        // cannot block (#112). Independent of the #260 summary above.
+        try { void deliverExpiryDigest(event, ctx); } catch { /* never wedge */ }
       });
     } catch {
       // session_end may not be a supported hook — TTL safety net handles this

@@ -49,17 +49,17 @@ describe('#604 publish.yml — the exact gate expressions are pinned', () => {
   });
   it('Create GitHub Release', () => {
     expect(IFS['Create GitHub Release']).toBe(
-      "${{ !cancelled() && steps.release_ready.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
+      "${{ !cancelled() && steps.release_ready.outcome == 'success' && steps.npm_shape.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
     );
   });
   it('Install ClawHub CLI', () => {
     expect(IFS['Install ClawHub CLI']).toBe(
-      "${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
+      "${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && steps.npm_shape.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
     );
   });
   it('Sync + verify ClawHub', () => {
     expect(IFS['Sync + verify ClawHub']).toBe(
-      "${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && steps.clawhub_cli.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
+      "${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && steps.npm_shape.outcome == 'success' && steps.clawhub_cli.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
     );
   });
   it('the propagation wait and the tarball-shape check are separate steps', () => {
@@ -85,11 +85,16 @@ const cancelled = (steps: Steps) => Object.values(steps).includes('cancelled');
 const outcome = (steps: Steps, id: string): Outcome => steps[id] ?? 'skipped';
 
 const gates = {
+  shape: (s: Steps) => !cancelled(s)
+    && (outcome(s, 'publish_plugin') === 'success' || outcome(s, 'release_ready') === 'success'),
   release: (s: Steps) => !cancelled(s) && outcome(s, 'release_ready') === 'success'
+    && outcome(s, 'npm_shape') === 'success'
     && (successSoFar(s, 'release') || outcome(s, 'npm_propagation') === 'failure'),
   clawhub_cli: (s: Steps) => !cancelled(s) && outcome(s, 'release_ready') === 'success'
+    && outcome(s, 'npm_shape') === 'success'
     && (successSoFar(s, 'clawhub_cli') || outcome(s, 'npm_propagation') === 'failure'),
   clawhub_sync: (s: Steps) => !cancelled(s) && outcome(s, 'release_ready') === 'success'
+    && outcome(s, 'npm_shape') === 'success'
     && outcome(s, 'clawhub_cli') === 'success'
     && (successSoFar(s, 'clawhub_sync') || outcome(s, 'npm_propagation') === 'failure'),
 };
@@ -102,7 +107,8 @@ function job(script: Partial<Steps>): Steps {
     if (id === 'clawhub_cli') { s[id] = gates.clawhub_cli(s) ? (script[id] ?? 'success') : 'skipped'; continue; }
     if (id === 'clawhub_sync') { s[id] = gates.clawhub_sync(s) ? (script[id] ?? 'success') : 'skipped'; continue; }
     if (id === 'release_ready') { s[id] = successSoFar(s, id) && !cancelled(s) ? 'success' : 'skipped'; continue; }
-    if (id === 'npm_propagation' || id === 'npm_shape') {
+    if (id === 'npm_shape') { s[id] = gates.shape(s) ? (script[id] ?? 'success') : 'skipped'; continue; }
+    if (id === 'npm_propagation') {
       s[id] = successSoFar(s, id) && !cancelled(s) ? (script[id] ?? 'success') : 'skipped';
       continue;
     }
@@ -123,7 +129,9 @@ describe('#604 publish.yml — release and ClawHub run behind a propagation time
   });
   it('propagation timeout: the ONE failure they run behind', () => {
     const s = job({ npm_propagation: 'failure' });
-    expect(s.npm_shape).toBe('skipped');
+    expect(s.npm_shape).toBe('success');
+    expect(s.npm_propagation).toBe('failure');
+    expect(successSoFar(s, 'end')).toBe(false);
     expect([s.release, s.clawhub_cli, s.clawhub_sync]).toEqual(['success', 'success', 'success']);
   });
   it('earlier gate failure (red npm test): both publishes skipped is NOT readiness — nothing runs', () => {
@@ -156,11 +164,16 @@ describe('#604 publish.yml — release and ClawHub run behind a propagation time
     const s = job({ npm_propagation: 'cancelled' });
     expect([s.release, s.clawhub_cli, s.clawhub_sync]).toEqual(['skipped', 'skipped', 'skipped']);
   });
-  it('propagation timeout: tarball shape is UNVERIFIED on that branch (skipped, not passed) — documented, not hidden', () => {
-    const s = job({ npm_propagation: 'failure' });
-    expect(s.npm_shape).toBe('skipped');
-    expect(s.npm_shape).not.toBe('success');
-    expect([s.release, s.clawhub_sync]).toEqual(['success', 'success']);
+  it('propagation timeout plus bad tarball: shape still fails and blocks release + ClawHub (#871)', () => {
+    const s = job({ npm_propagation: 'failure', npm_shape: 'failure' });
+    expect(s.npm_shape).toBe('failure');
+    expect(successSoFar(s, 'end')).toBe(false);
+    expect([s.release, s.clawhub_cli, s.clawhub_sync]).toEqual(['skipped', 'skipped', 'skipped']);
+  });
+  it('already-published rerun still checks the tarball after a propagation timeout (#871)', () => {
+    const s = job({ publish_root: 'skipped', publish_plugin: 'skipped', npm_propagation: 'failure' });
+    expect(s.npm_shape).toBe('success');
+    expect([s.release, s.clawhub_cli, s.clawhub_sync]).toEqual(['success', 'success', 'success']);
   });
   it('propagation timeout + failed GitHub Release: ClawHub recovery is independent of the Release step (by design, #200)', () => {
     const s = job({ npm_propagation: 'failure', release: 'failure' });

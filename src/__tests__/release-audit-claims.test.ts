@@ -43,6 +43,7 @@ import { afterEach, describe, expect, it } from '@jest/globals';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import yaml from 'js-yaml';
 import { invokesScanner, workflowExecutableSteps } from './support/workflow-executable-surface.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -188,6 +189,22 @@ describe('#466 hermetic — the SKILL.md security claim is structurally honest',
     expect(parseClaim().waived).toBe(ids.size);
   });
 
+  it('states the same counts in the SKILL.md trust table as in the frontmatter claim', () => {
+    // #901 review: the frontmatter was updated but the Provenance & Trust row
+    // kept the old count, so the published skill contradicted itself.
+    const claim = parseClaim();
+    const rows = readFileSync(SKILL_MD, 'utf8')
+      .split(/\r?\n/)
+      .filter((line) => /^\|\s*\*\*npm audit\*\*\s*\|/.test(line));
+    expect(rows).toHaveLength(1);
+    const m = /(\d+) unwaived production advisor(?:y|ies), (\d+) waived\b/.exec(rows[0]);
+    expect(m).not.toBeNull();
+    expect({ unwaived: Number(m![1]), waived: Number(m![2]) }).toEqual({
+      unwaived: claim.unwaived,
+      waived: claim.waived,
+    });
+  });
+
   it('names, in the claim, every GHSA id the waiver file lists', () => {
     const waivers = parseWaivers(waiverMarkdown);
     const claim = parseClaim().raw;
@@ -212,19 +229,6 @@ describe('#466 hermetic — the SKILL.md security claim is structurally honest',
     })).toBe(true);
   });
 
-  it('keeps the sprintf-js waiver record in sync with its prose', () => {
-    const waiver = parseWaivers(waiverMarkdown).find((w) => w.id === 'SC-WAIVER-639-sprintf-js');
-    expect(waiver).toMatchObject({
-      package: 'sprintf-js', advisories: [1241202], ghsa: ['GHSA-hp3w-g68c-fv3c'],
-      severity: 'moderate', reviewed: '2026-10-06', expires: '2027-01-06', issue: 639,
-    });
-    const prose = waiverMarkdown.split('### SC-WAIVER-639-sprintf-js')[1]?.split('## Waiver records')[0];
-    expect(prose).toBeDefined();
-    for (const value of ['1241202', 'GHSA-hp3w-g68c-fv3c', 'moderate', '2026-10-06', '2027-01-06']) {
-      expect(prose).toContain(value);
-    }
-  });
-
   it('locks every @modelcontextprotocol/sdk copy above the OAuth credential advisory range', () => {
     const lock = JSON.parse(readFileSync(join(REPO_ROOT, 'package-lock.json'), 'utf8')) as {
       packages: Record<string, { version?: string }>;
@@ -246,7 +250,7 @@ describe('#466 hermetic — the SKILL.md security claim is structurally honest',
       ghsa: ['GHSA-f88m-g3jw-g9cj', 'GHSA-rgj7-g3m4-5g8c', 'GHSA-wq5f-xc86-pv6w'],
       severity: 'high', reviewed: '2026-10-06', expires: '2026-12-12', issue: 466,
     });
-    const prose = waiverMarkdown.split('### SC-WAIVER-466-sharp')[1]?.split('### SC-WAIVER-639-sprintf-js')[0];
+    const prose = waiverMarkdown.split('### SC-WAIVER-466-sharp')[1]?.split('## Retired waivers')[0];
     expect(prose).toBeDefined();
     for (const value of [
       '1124066', '1193725', '1241331', 'GHSA-f88m-g3jw-g9cj', 'GHSA-rgj7-g3m4-5g8c', 'GHSA-wq5f-xc86-pv6w',
@@ -862,5 +866,285 @@ describe('#466 hermetic — the live leg tells drift apart from unavailability',
     }, false);
     expect(liveAuditTitle(outcome)).toContain('first line');
     expect(liveAuditTitle(outcome)).not.toContain('second line');
+  });
+});
+
+// ── #897: the permission lists must survive a real YAML parse ───────────────
+//
+// The 5.12.0 ClawHub publish failed because one `network_endpoints` item
+// carried a `: ` in its prose. YAML ends an implicit key at a colon followed
+// by whitespace, so the item became a one-entry mapping, and ClawHub, which
+// wants a list of strings, rejected the skill — after the tag, not before it
+// (#893, text fixed in #896). This reads the frontmatter with js-yaml, a real
+// parser, and holds every string-list permission field to a list of non-empty
+// strings, so the next stray colon fails CI instead of the publish.
+//
+// A real parser, and not the scanner rule's subset reader: that reader is a
+// fail-closed model of workflow files, and #897 review found what it reads
+// differently from a parser — a duplicate key (it keeps both; a parser refuses
+// the document), a key carrying `#` or opening with `:` (opaque to it; a
+// mapping to a parser). ClawHub runs a parser, so this contract does too, and
+// a document the parser refuses fails here by the parser's own message, which
+// names the line.
+
+/** The YAML between the opening and closing `---` lines of SKILL.md. */
+function skillFrontmatter(text: string = readFileSync(SKILL_MD, 'utf8')): string {
+  const front = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!front) throw new Error('SKILL.md has no YAML frontmatter');
+  return front[1];
+}
+
+/**
+ * The frontmatter as a parser shapes it. `safeLoad` throws a `YAMLException`
+ * on anything YAML refuses, duplicate keys included, and nothing here catches
+ * it: a refused document has no shape to check.
+ */
+const parseFrontmatter = (frontmatter: string): unknown => yaml.safeLoad(frontmatter);
+
+/**
+ * The `permissions.<field>` lists ClawHub reads as lists of strings. `env` is
+ * not one of them: its items are `NAME: description` mappings by design, and
+ * the last test below pins that shape so nobody "fixes" it into strings.
+ */
+const PERMISSION_STRING_LISTS = ['paths_read', 'paths_write', 'network_endpoints'] as const;
+type PermissionStringList = (typeof PERMISSION_STRING_LISTS)[number];
+
+/** A decoded mapping: an object that is neither a list nor a timestamp. */
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && !(value instanceof Date);
+}
+
+function childOf(node: unknown, key: string): unknown {
+  return isMapping(node) ? node[key] : undefined;
+}
+
+/**
+ * How a decoded value that is not a non-empty string reads, so a red test
+ * names what the parser made of the item — or `undefined` when it is one.
+ */
+function notAString(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    if (value === '') return 'an empty string';
+    return value.trim() === '' ? 'a blank string' : undefined;
+  }
+  if (value === null || value === undefined) return 'null';
+  if (Array.isArray(value)) return `a list of ${value.length}`;
+  if (value instanceof Date) return 'a timestamp';
+  if (isMapping(value)) {
+    const keys = Object.keys(value);
+    if (keys.length === 0) return 'an empty mapping';
+    return `a mapping with key${keys.length === 1 ? '' : 's'} ${keys.map((key) => `"${key}"`).join(', ')}`;
+  }
+  return `a ${typeof value}`;
+}
+
+/**
+ * Every item under a string-list permission field that did not decode to a
+ * non-empty string, one line each. Empty when the frontmatter is sound. A
+ * missing or non-list field is a problem too, so an edit that renames or
+ * flattens a field cannot pass on nothing.
+ */
+function permissionListProblems(frontmatter: string): string[] {
+  const permissions = childOf(parseFrontmatter(frontmatter), 'permissions');
+  const problems: string[] = [];
+  for (const field of PERMISSION_STRING_LISTS) {
+    const list = childOf(permissions, field);
+    if (!Array.isArray(list)) {
+      const reads = list === undefined ? 'missing' : (notAString(list) ?? 'a string');
+      problems.push(`permissions.${field} is ${reads}, not a list`);
+      continue;
+    }
+    list.forEach((item, index) => {
+      const problem = notAString(item);
+      if (problem !== undefined) problems.push(`permissions.${field}[${index}] is ${problem}, not a string`);
+    });
+  }
+  return problems;
+}
+
+/** A frontmatter whose three string-list fields each hold exactly the items given. */
+function permissionsWith(items: Record<PermissionStringList, string[]>): string {
+  return [
+    'permissions:',
+    ...PERMISSION_STRING_LISTS.flatMap((field) => [`  ${field}:`, ...items[field].map((item) => `    - ${item}`)]),
+  ].join('\n');
+}
+
+/**
+ * The real frontmatter with `lines` inserted directly under, or directly
+ * before, its `permissions.<field>:` line — the edit a contributor would make.
+ */
+function realFrontmatterWith(field: PermissionStringList, where: 'under' | 'before', ...lines: string[]): string {
+  const real = skillFrontmatter();
+  const marker = `\n  ${field}:\n`;
+  if (!real.includes(marker)) throw new Error(`permissions.${field} is not in the real frontmatter`);
+  const block = `${lines.join('\n')}\n`;
+  return real.replace(marker, where === 'under' ? `${marker}${block}` : `\n${block}  ${field}:\n`);
+}
+
+describe('#897 hermetic — the SKILL.md permission lists parse as lists of strings', () => {
+  it('reads every string-list permission field of the real SKILL.md as non-empty strings', () => {
+    expect(permissionListProblems(skillFrontmatter())).toEqual([]);
+  });
+
+  it('is not vacuous: each field is present in the real SKILL.md and has items', () => {
+    const permissions = childOf(parseFrontmatter(skillFrontmatter()), 'permissions');
+    for (const field of PERMISSION_STRING_LISTS) {
+      const list = childOf(permissions, field);
+      if (!Array.isArray(list)) throw new Error(`permissions.${field} is not a list`);
+      expect({ field, items: list.length }).not.toEqual({ field, items: 0 });
+    }
+  });
+
+  it('fails on the item that broke the 5.12.0 ClawHub publish (negative control)', () => {
+    // The pre-#896 `network_endpoints` item, shortened after its stray colon.
+    const control = [
+      'permissions:',
+      '  paths_read:',
+      '    - ~/.shieldcortex/ (own config and memory database)',
+      '  paths_write:',
+      '    - ~/.shieldcortex/ (memory DB, config)',
+      '  network_endpoints:',
+      '    - https://api.shieldcortex.ai (Cloud sync — only when Cloud sync is enabled)',
+      '    - https://registry.npmjs.org (three paths — update checks and updates via npm subprocess: the dashboard Overview looks up the latest version automatically while open)',
+      '    - http://localhost:3001 (local REST API + WebSocket — loopback only)',
+    ].join('\n');
+    expect(permissionListProblems(control)).toEqual([
+      'permissions.network_endpoints[1] is a mapping with key ' +
+        '"https://registry.npmjs.org (three paths — update checks and updates via npm subprocess", not a string',
+    ]);
+  });
+
+  // #897 review: three spellings the subset reader behind the first drafts
+  // accepted as strings. The first is the 5.12.0 shape; the other two carry a
+  // key the reader's plain-key rule could not see (`#` inside it, `:` first)
+  // and a parser can. Each is added to the real frontmatter, where it must
+  // be the only problem reported.
+  it.each([
+    ['https://example.invalid (one path: the colon that broke 5.12.0)', 'https://example.invalid (one path'],
+    ['https://example.invalid/#anchor (note: text)', 'https://example.invalid/#anchor (note'],
+    [':foo: bar', ':foo'],
+  ])('fails on the mapping-shaped item %s added to the real frontmatter', (item, key) => {
+    expect(permissionListProblems(realFrontmatterWith('network_endpoints', 'under', `    - ${item}`))).toEqual([
+      `permissions.network_endpoints[0] is a mapping with key "${key}", not a string`,
+    ]);
+  });
+
+  it('applies the same rule to paths_read and paths_write', () => {
+    const control = [
+      'permissions:',
+      '  paths_read:',
+      '    - ~/.claude/ (project memory files: MCP config)',
+      '  paths_write:',
+      '    - ~/.shieldcortex/ (memory DB: config)',
+      '  network_endpoints:',
+      '    - https://api.shieldcortex.ai',
+    ].join('\n');
+    expect(permissionListProblems(control)).toEqual([
+      'permissions.paths_read[0] is a mapping with key "~/.claude/ (project memory files", not a string',
+      'permissions.paths_write[0] is a mapping with key "~/.shieldcortex/ (memory DB", not a string',
+    ]);
+  });
+
+  it('reports a missing or non-list field rather than passing on nothing', () => {
+    const control = ['permissions:', '  filesystem: readwrite', '  paths_read: none', '  paths_write:'].join('\n');
+    expect(permissionListProblems(control)).toEqual([
+      'permissions.paths_read is a string, not a list',
+      'permissions.paths_write is null, not a list',
+      'permissions.network_endpoints is missing, not a list',
+    ]);
+  });
+
+  // #897 review: a first draft asked only for a non-empty scalar and accepted
+  // `''`, `""`, `[]`, `{}`, `false` and `42` — every one a non-string to the
+  // parser that rejected 5.12.0. Each is now refused by what it decodes to.
+  it.each([
+    ["''", 'an empty string'],
+    ['""', 'an empty string'],
+    ['"   "', 'a blank string'],
+    ['[]', 'a list of 0'],
+    ['[a, b]', 'a list of 2'],
+    ['{}', 'an empty mapping'],
+    ['{a: b, c: d}', 'a mapping with keys "a", "c"'],
+    ['~', 'null'],
+    ['null', 'null'],
+    ['false', 'a boolean'],
+    ['True', 'a boolean'],
+    ['42', 'a number'],
+    ['-1', 'a number'],
+    ['1.5', 'a number'],
+    ['1e3', 'a number'],
+    ['0x1F', 'a number'],
+    ['.inf', 'a number'],
+    ['2001-12-14', 'a timestamp'],
+  ])('refuses the non-string item %s in every string-list field (negative control)', (item, problem) => {
+    const sound = '~/.shieldcortex/ (own config and memory database)';
+    expect(
+      permissionListProblems(
+        permissionsWith({ paths_read: [sound, item], paths_write: [item], network_endpoints: [item, sound] }),
+      ),
+    ).toEqual([
+      `permissions.paths_read[1] is ${problem}, not a string`,
+      `permissions.paths_write[0] is ${problem}, not a string`,
+      `permissions.network_endpoints[0] is ${problem}, not a string`,
+    ]);
+  });
+
+  it('accepts what the parser decodes to a non-empty string, quoted or plain (positive control)', () => {
+    expect(
+      permissionListProblems(
+        permissionsWith({
+          paths_read: ['~/.shieldcortex/ (own config and memory database)', '"~/.claude/ (quoted: with a colon)"'],
+          paths_write: [
+            "'~/.cache/shieldcortex/models (single-quoted; it''s escaped)'",
+            '$CWD/.env (the env-scanner — reads, never writes)',
+          ],
+          network_endpoints: [
+            'http://localhost:3001 (local REST API + WebSocket — loopback only)',
+            '"https://x"',
+            '1Password',
+            '!!str 42',
+          ],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  // #897 review: the subset reader kept a duplicate key and read the first,
+  // so the contract stayed green on a document js-yaml refuses — CI green,
+  // ClawHub red after the tag, the failure this contract exists to prevent.
+  // A parser throws, and the throw reaches the test with the parser's reason.
+  it.each([
+    [
+      'a second paths_read (duplicate key)',
+      () => realFrontmatterWith('paths_write', 'before', '  paths_read:', '    - ~/.shieldcortex/ (a second paths_read)'),
+      'duplicated mapping key',
+    ],
+    [
+      'an item indented under nothing',
+      () => realFrontmatterWith('network_endpoints', 'under', '    - https://example.invalid', '        stray: continuation'),
+      'bad indentation of a sequence entry',
+    ],
+    [
+      'an alias of nothing',
+      () => realFrontmatterWith('network_endpoints', 'under', '    - *nothing'),
+      'unidentified alias "nothing"',
+    ],
+  ])('fails on %s in the real frontmatter by the parser’s own refusal', (_label, mutate, reason) => {
+    const mutated = mutate();
+    expect(mutated).not.toBe(skillFrontmatter());
+    expect(() => permissionListProblems(mutated)).toThrow(yaml.YAMLException);
+    expect(() => permissionListProblems(mutated)).toThrow(reason);
+  });
+
+  it('keeps permissions.env as a list of one-key NAME: description mappings', () => {
+    const env = childOf(childOf(parseFrontmatter(skillFrontmatter()), 'permissions'), 'env');
+    if (!Array.isArray(env)) throw new Error('permissions.env is not a list');
+    expect(env.length).toBeGreaterThan(0);
+    for (const item of env) {
+      if (!isMapping(item)) throw new Error(`permissions.env item is ${notAString(item) ?? 'a string'}`);
+      expect(Object.keys(item)).toEqual([expect.stringMatching(/^[A-Z][A-Z0-9_]*$/)]);
+      expect(notAString(Object.values(item)[0])).toBeUndefined();
+    }
   });
 });

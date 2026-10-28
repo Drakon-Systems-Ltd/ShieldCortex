@@ -25,6 +25,7 @@ import {
   operationsPill,
   queryStatus,
   scanningPill,
+  updateCheckRow,
 } from '@/lib/query-status';
 import { cn } from '@/lib/utils';
 
@@ -179,15 +180,19 @@ export function OverviewV2() {
     note('licence', st.license);
 
     note('update check', st.update);
-    if (update.data?.updateAvailable) {
-      items.push({
-        label: `Newer version available — v${update.data.latestVersion}`,
-        detail: `Running v${update.data.runningVersion ?? update.data.currentVersion}.`,
-        href: '/settings?tab=admin',
-      });
+    // A disabled or failed lookup is said as such (#631), so the absence of an
+    // update row is never read as "up to date".
+    const notices: string[] = [];
+    const updateRow = update.data ? updateCheckRow(update.data) : undefined;
+    if (updateRow?.kind === 'item') {
+      items.push({ label: updateRow.label, detail: updateRow.detail, href: '/settings?tab=admin' });
+    } else if (updateRow?.kind === 'notice') {
+      notices.push(updateRow.text);
+    } else if (updateRow?.kind === 'unavailable' && !unavailable.includes('update check')) {
+      unavailable.push('update check');
     }
 
-    return { items, unavailable, pending, stale };
+    return { items, unavailable, pending, stale, notices };
   }, [st.quarantine, st.contradictions, st.review, st.license, st.update, quarantine.data, contradictions.data, review.data, update.data]);
 
   // ── Activity feed (WS-fed, last 50, filterable) ──────────
@@ -321,6 +326,9 @@ export function OverviewV2() {
                   </div>
                   <ArrowRight size={14} aria-hidden className="mt-1 shrink-0 text-[var(--sc-text-muted)] transition-transform group-hover:translate-x-0.5" />
                 </Link>
+              ))}
+              {needsYou.notices.map((text) => (
+                <p key={text} className="text-xs text-[var(--sc-text-muted)]">{text}</p>
               ))}
               {needsYou.unavailable.map((src) => (
                 <p key={src} className="text-xs italic text-[var(--sc-warn)]">{src} status unavailable — this list may be incomplete.</p>

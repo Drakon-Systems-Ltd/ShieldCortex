@@ -132,6 +132,11 @@ jobs:
       # commit. A missing tag (v4.54.15 at issue time) leaves the artefact
       # unbound to source. Tag-push already has the tag; workflow_dispatch
       # from main must still see it locally after fetch.
+      # #881: the tag must also point at the commit being published. A ref of
+      # refs/tags/* (tag push, or workflow_dispatch run on a tag) must name
+      # v<version> and resolve to GITHUB_SHA. workflow_dispatch from a branch
+      # builds the checked-out HEAD, so v<version> must resolve to HEAD.
+      # rev-list -n 1 peels annotated tags to their commit.
       - name: Require matching git tag
         run: |
           VERSION=$(node -p "require('./package.json').version")
@@ -141,8 +146,24 @@ jobs:
             echo "::error::No git tag ${TAG} for package.json version ${VERSION}. Tag the release commit before publishing (#472)."
             exit 1
           fi
-          TAG_COMMIT=$(git rev-list -n 1 "${TAG}")
+          TAG_COMMIT=$(git rev-list -n 1 "refs/tags/${TAG}")
           echo "Tag ${TAG} -> ${TAG_COMMIT}"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            if [[ "${GITHUB_REF_NAME}" != "${TAG}" ]]; then
+              echo "::error::Triggering tag ${GITHUB_REF_NAME} does not match package.json version tag ${TAG} (#881)."
+              exit 1
+            fi
+            EXPECTED_COMMIT="${GITHUB_SHA}"
+            EXPECTED_LABEL="GITHUB_SHA"
+          else
+            EXPECTED_COMMIT=$(git rev-parse HEAD)
+            EXPECTED_LABEL="checked-out HEAD"
+          fi
+          if [[ "${TAG_COMMIT}" != "${EXPECTED_COMMIT}" ]]; then
+            echo "::error::Tag ${TAG} points at ${TAG_COMMIT}, but ${EXPECTED_LABEL} is ${EXPECTED_COMMIT}. Refusing to publish a version whose tag is on a different commit (#881)."
+            exit 1
+          fi
+          echo "Tag ${TAG} matches ${EXPECTED_LABEL} ${EXPECTED_COMMIT}"
 
       - name: Publish to npm
         if: steps.version_check.outputs.already_published == 'false'
@@ -183,6 +204,7 @@ jobs:
           fi
 
       - name: Publish plugin to npm
+        id: publish_plugin
         if: steps.plugin_version_check.outputs.plugin_already_published == 'false'
         run: cd plugins/openclaw && npm publish --access public --provenance
 
@@ -213,21 +235,15 @@ jobs:
       # took ~7.5 min for the ROOT package to list even though it was published
       # first (plugin listed 23:21Z, root 23:28Z), so the old 3-min window ended
       # this job red with both packages landed and ClawHub sync skipped (#604).
-      # Poll for up to 10 min.
+      # Allow 120 polls, 10s apart (#871); npm request time is additional.
+      # Prefer online reads on every attempt.
       #
-      # Two steps, not one (#604): this one can only fail on the registry not
-      # listing a version the publish steps already accepted, so the release and
-      # ClawHub steps below may run behind its failure. The tarball-shape step
-      # after it is a real defect check and they must NOT run behind that.
-      #
-      # Scope of that recovery branch, stated plainly (Tars review r2): when
-      # propagation times out the shape step is SKIPPED, not passed — the
-      # release and the ClawHub sync then ship with the plugin tarball shape
-      # UNVERIFIED (ClawHub ships the skill dir, not that tarball; the GitHub
-      # Release is notes + tag). And the ClawHub steps are independent of the
-      # GitHub Release step: a failed Release behind a propagation timeout does
-      # not block CLI install/sync — that is the standing "ClawHub stays
-      # independent" design from #200, kept on purpose and pinned by test.
+      # Two steps, not one (#604): a version-visibility timeout keeps the job
+      # red, but does not skip the plugin tarball check (#871). Release and
+      # ClawHub recovery require a successful shape check, even after timeout.
+      # ClawHub remains independent of the GitHub Release step: a failed
+      # Release behind a propagation timeout does not block CLI install/sync
+      # when the tarball shape passed (#200).
       - name: Verify both packages landed on npm at the expected version
         id: npm_propagation
         env:
@@ -239,23 +255,22 @@ jobs:
           echo "Expected main:   $MAIN"
           echo "Expected plugin: $PLUGIN"
 
-          # Poll npm until both packages report the expected version (max 10 min).
-          # Tarball replication lags published metadata, so poll the published
-          # tag too — a missing tarball is the actual blocker for `npm install`.
-          for i in $(seq 1 60); do
-            MAIN_LATEST=$(npm view shieldcortex@$MAIN version 2>/dev/null || echo "")
-            PLUGIN_LATEST=$(npm view @drakon-systems/shieldcortex-realtime@$PLUGIN version 2>/dev/null || echo "")
+          # Poll exact versions with online reads (120 attempts, 10s apart).
+          # This is best-effort visibility hardening, not proof of why a read was empty.
+          for i in $(seq 1 120); do
+            MAIN_LATEST=$(npm view --prefer-online shieldcortex@$MAIN version 2>/dev/null || echo "")
+            PLUGIN_LATEST=$(npm view --prefer-online @drakon-systems/shieldcortex-realtime@$PLUGIN version 2>/dev/null || echo "")
             if [ "$MAIN_LATEST" = "$MAIN" ] && [ "$PLUGIN_LATEST" = "$PLUGIN" ]; then
-              echo "Both packages visible on npm after ${i}0s"
+              echo "Both packages visible on npm at attempt ${i}"
               break
             fi
-            echo "Waiting for npm propagation (${i}/60, $((i*10))s) — main=$MAIN_LATEST plugin=$PLUGIN_LATEST"
+            echo "Waiting for npm propagation (${i}/120, $((i*10))s) — main=$MAIN_LATEST plugin=$PLUGIN_LATEST"
             sleep 10
           done
 
           # Final assertion — fail loudly if anything is still missing.
-          MAIN_LATEST=$(npm view shieldcortex@$MAIN version 2>/dev/null || echo "")
-          PLUGIN_LATEST=$(npm view @drakon-systems/shieldcortex-realtime@$PLUGIN version 2>/dev/null || echo "")
+          MAIN_LATEST=$(npm view --prefer-online shieldcortex@$MAIN version 2>/dev/null || echo "")
+          PLUGIN_LATEST=$(npm view --prefer-online @drakon-systems/shieldcortex-realtime@$PLUGIN version 2>/dev/null || echo "")
           if [ "$MAIN_LATEST" != "$MAIN" ]; then
             echo "::error::Main package not on npm at expected version (got: '$MAIN_LATEST')"
             exit 1
@@ -267,6 +282,8 @@ jobs:
 
       - name: Verify plugin tarball shape
         id: npm_shape
+        # A failed version wait must not skip this check; reruns also verify existing packages.
+        if: ${{ !cancelled() && (steps.publish_plugin.outcome == 'success' || steps.release_ready.outcome == 'success') }}
         run: |
           set -e
           PLUGIN=$(node -p "require('./plugins/openclaw/package.json').version")
@@ -305,7 +322,7 @@ jobs:
       # Also runs behind an npm propagation timeout (#604) — see the ClawHub
       # gate below for why that one failure is let through and no other.
       - name: Create GitHub Release
-        if: ${{ !cancelled() && steps.release_ready.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}
+        if: ${{ !cancelled() && steps.release_ready.outcome == 'success' && steps.npm_shape.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
@@ -333,7 +350,7 @@ jobs:
       # that never published.
       - name: Install ClawHub CLI
         id: clawhub_cli
-        if: ${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}
+        if: ${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && steps.npm_shape.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}
         run: npm install -g clawhub
 
       # Publish + verify in one place (scripts/clawhub-sync.mjs), so the release
@@ -353,11 +370,26 @@ jobs:
       # Both failures are red, but they say which one happened — republishing a
       # 'pending' version just burns a version number on an "already exists".
       - name: Sync + verify ClawHub
-        if: ${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && steps.clawhub_cli.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}
+        if: ${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && steps.npm_shape.outcome == 'success' && steps.clawhub_cli.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
           RELEASE_VERSION: ${{ steps.tag.outputs.version }}
-        run: node scripts/clawhub-sync.mjs --wait 30
+        run: |
+          # Exit 2 = uploaded or submitted but held (security scan / moderation
+          # queue): surface it as a warning naming the version, not a red step.
+          # Any other non-zero exit (1 never landed, 3 unreadable) stays a failure.
+          set +e
+          node scripts/clawhub-sync.mjs --wait 30
+          code=$?
+          set -e
+          if [ "$code" -eq 2 ]; then
+            v="${RELEASE_VERSION#v}"
+            echo "::warning title=ClawHub: held in review::shieldcortex $v was submitted but ClawHub is still serving an older version (pending security scans / review). Inspect the findings with: clawhub scan download shieldcortex --version $v"
+            echo "### ⏳ ClawHub: shieldcortex $v held in review" >> "$GITHUB_STEP_SUMMARY"
+            echo "Run \`clawhub scan download shieldcortex --version $v\` to read the scan findings. Do not republish." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          exit "$code"
 
       - name: Skip ClawHub sync (missing token)
         if: env.HAS_CLAWHUB_TOKEN != 'true'

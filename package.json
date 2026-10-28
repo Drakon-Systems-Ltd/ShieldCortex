@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "5.10.5",
+  "version": "5.15.3",
   "description": "Trustworthy memory and security for AI agents. Memory firewall for any host that writes through it; runtime tool gates on Claude Code, OpenClaw, and Hermes.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -144,14 +144,14 @@
     "node": "^22.14.0 || >=24.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "better-sqlite3": "^13.0.3",
     "cors": "^2.8.5",
     "express": "^5.2.1",
     "safe-regex2": "^5.0.0",
     "semver": "^7.7.0",
     "ws": "^8.18.0",
-    "zod": "^3.23.0"
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "^3.7.2"
@@ -166,6 +166,7 @@
     "@types/semver": "^7.7.0",
     "@types/ws": "^8.5.13",
     "jest": "^30.2.0",
+    "js-yaml": "^3.15.2",
     "ts-jest": "^29.4.6",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"

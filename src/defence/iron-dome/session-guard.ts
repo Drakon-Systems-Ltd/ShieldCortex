@@ -11,9 +11,12 @@
  * requires origin, sessionKey and a degraded outcome.
  */
 import { createHmac, randomBytes } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync,
+  openSync, readdirSync, readFileSync, readSync, writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export const GUARD_DEGRADED_OUTCOMES = new Set([
   'auto_denied',
@@ -66,23 +69,82 @@ function auditDirFor(home?: string): string {
 
 /** Same formula as scripts/pre-tool-hook.mjs and scripts/stop-hook.mjs. */
 export function sessionKeyFor(value: string | undefined, opts: SessionGuardOptions = {}): string | null {
-  if (typeof value !== 'string' || !value.trim()) return null;
+  if (typeof value !== 'string') return null;
+  // Keep canonicalisation in sync with scripts/pre-tool-hook.mjs and
+  // scripts/stop-hook.mjs.
+  // Reject lone surrogates before UTF-8 can alias them with U+FFFD.
+  const id: string & { isWellFormed?: () => boolean } = value.trim();
+  if (!id || (typeof id.isWellFormed === 'function' ? !id.isWellFormed() : /[\uD800-\uDFFF]/u.test(id))) return null;
   const salt = opts.salt ?? sessionKeySalt(opts.home);
   if (!salt) return null;
-  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${value}`).digest('hex').slice(0, 16)}`;
+  return `sc-${createHmac('sha256', salt).update(`action-guard-session:${id}`).digest('hex').slice(0, 16)}`;
 }
 
+/** Same slot range as MAX_SESSION_SALT_RECOVERY_ATTEMPTS in the hooks. */
+const MAX_SESSION_SALT_RECOVERY_ATTEMPTS = 256;
+
+function readExistingSessionSalt(file: string): string | null {
+  try {
+    const st = lstatSync(file);
+    if (!st.isFile() || st.isSymbolicLink()) return null;
+    const salt = readFileSync(file, 'utf8').trim();
+    return /^[a-f0-9]{64}$/i.test(salt) ? salt.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+function legacySessionSaltFiles(primary: string): string[] {
+  return [primary, `${primary}.recovered`, `${primary}.recovered2`, `${primary}.recovered3`];
+}
+
+function discoveredSessionSaltFiles(primary: string): string[] {
+  try {
+    const entries: Array<{ slot: number; file: string }> = [];
+    for (const name of readdirSync(dirname(primary))) {
+      const match = name.match(/^action-guard-session-salt\.recovered(\d+)$/);
+      if (!match) continue;
+      const slot = Number(match[1]);
+      if (!Number.isInteger(slot) || String(slot) !== match[1]) continue;
+      if (slot < 4 || slot >= 4 + MAX_SESSION_SALT_RECOVERY_ATTEMPTS) continue;
+      entries.push({ slot, file: join(dirname(primary), name) });
+    }
+    entries.sort((a, b) => a.slot - b.slot);
+    return entries.map((entry) => entry.file);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * #854: the salt is half of the session identity, so this must find the SAME
+ * file the hooks find — same candidate files, same order (env, primary, the
+ * three legacy `.recovered*` slots, then discovered `.recoveredN`). Reading only
+ * the primary meant a corrupt primary gave this plane a fresh, unpersisted salt
+ * on every call while the hook used `.recovered`: one session, two identities.
+ *
+ * Recovery slots are READ here, never written — publishing them is the hooks'
+ * job. The one write is the pre-#854 first-run mint of an ABSENT primary.
+ * A primary that exists but is unusable, with no valid recovery slot, returns
+ * null: the identity cannot be derived, and a caller must not invent one.
+ */
 export function sessionKeySalt(home?: string): string | null {
   const fromEnv = process.env.SHIELDCORTEX_SESSION_SALT;
   if (typeof fromEnv === 'string' && /^[a-f0-9]{64}$/i.test(fromEnv)) return fromEnv.toLowerCase();
   try {
     const dir = join(stateHome(home), '.shieldcortex');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Match ensureDirectoryNoSymlink in scripts/pre-tool-hook.mjs: the salt
+    // parent is the sole component below home. Home itself and its ancestors
+    // are not checked; an explicit env salt above still takes precedence.
+    const st = lstatSync(dir);
+    if (!st.isDirectory() || st.isSymbolicLink()) return null;
     const primary = join(dir, 'action-guard-session-salt');
-    if (existsSync(primary)) {
-      const existing = readFileSync(primary, 'utf8').trim().toLowerCase();
-      if (/^[a-f0-9]{64}$/.test(existing)) return existing;
+    for (const file of [...legacySessionSaltFiles(primary), ...discoveredSessionSaltFiles(primary)]) {
+      const existing = readExistingSessionSalt(file);
+      if (existing) return existing;
     }
+    if (!primaryIsAbsent(primary)) return null;
     const salt = randomBytes(32).toString('hex');
     try {
       writeFileSync(primary, `${salt}\n`, { flag: 'wx', mode: 0o600 });
@@ -96,6 +158,15 @@ export function sessionKeySalt(home?: string): string | null {
     }
   } catch {
     return null;
+  }
+}
+
+function primaryIsAbsent(primary: string): boolean {
+  try {
+    lstatSync(primary);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === 'ENOENT';
   }
 }
 
@@ -189,5 +260,177 @@ function readJsonl(file: string): Array<Record<string, unknown>> {
     });
   } catch {
     return [];
+  }
+}
+
+// ── #673: bounded index reader + content-free digest receipts ──────────────
+//
+// Reporting only. Nothing here reads or changes approval state: the reader
+// takes the tail of ONE per-session index file, and the writer appends a
+// closed, content-free row that every existing consumer ignores (no degraded
+// `outcome`, no `action_guard_degraded`, `recordKind:'digest'`).
+
+export const EXPIRY_DIGEST_MAX_INDEX_BYTES = 1024 * 1024;
+export const EXPIRY_DIGEST_MAX_INDEX_LINES = 5_000;
+export const EXPIRY_DIGEST_MAX_LINE_BYTES = 16 * 1024;
+
+export interface BoundedIndexRead {
+  rows: Array<Record<string, unknown>>;
+  /** The byte window or line cap cut the file, or reading ended early. */
+  truncated: boolean;
+  /** Lines that were not a JSON object. */
+  corrupt: number;
+  /** Lines over EXPIRY_DIGEST_MAX_LINE_BYTES, skipped unparsed. */
+  oversized: number;
+  /** The path exists but is not a regular file (symlink, FIFO, directory…). */
+  unsafe: boolean;
+}
+
+const SESSION_KEY_RE = /^sc-[a-f0-9]{16}$/;
+
+/**
+ * Read at most the last 1 MiB / 5,000 lines of `session-guard/<key>.jsonl`.
+ * Rows are appended, so the newest evidence (timeouts, summary, receipts) is
+ * at the end. Only a regular file is opened (no symlink is followed), so a
+ * FIFO or link planted at the path cannot block or redirect the read.
+ */
+export function readSessionGuardIndexBounded(
+  sessionKey: string,
+  opts: { home?: string } = {},
+): BoundedIndexRead {
+  const out: BoundedIndexRead = { rows: [], truncated: false, corrupt: 0, oversized: 0, unsafe: false };
+  if (typeof sessionKey !== 'string' || !SESSION_KEY_RE.test(sessionKey)) return out;
+  const file = join(auditDirFor(opts.home), 'session-guard', `${sessionKey}.jsonl`);
+  let fd: number | undefined;
+  try {
+    const pre = (() => { try { return lstatSync(file); } catch { return null; } })();
+    if (!pre) return out;
+    if (!pre.isFile()) { out.unsafe = true; return out; }
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    const nonBlock = typeof fsConstants.O_NONBLOCK === 'number' ? fsConstants.O_NONBLOCK : 0;
+    fd = openSync(file, fsConstants.O_RDONLY | noFollow | nonBlock);
+    const st = fstatSync(fd);
+    if (!st.isFile()) { out.unsafe = true; return out; }
+    const size = st.size;
+    const start = Math.max(0, size - EXPIRY_DIGEST_MAX_INDEX_BYTES);
+    const length = size - start;
+    const buf = Buffer.alloc(length);
+    let read = 0;
+    while (read < length) {
+      const n = readSync(fd, buf, read, length - read, start + read);
+      if (n <= 0) break;
+      read += n;
+    }
+    if (read < length) out.truncated = true;
+    let text = buf.subarray(0, read).toString('utf8');
+    if (start > 0) {
+      out.truncated = true;
+      // The window began mid-file: its first line is a fragment.
+      const nl = text.indexOf('\n');
+      text = nl === -1 ? '' : text.slice(nl + 1);
+    }
+    let lines = text.split('\n').filter((l) => l.trim());
+    if (lines.length > EXPIRY_DIGEST_MAX_INDEX_LINES) {
+      out.truncated = true;
+      lines = lines.slice(lines.length - EXPIRY_DIGEST_MAX_INDEX_LINES);
+    }
+    for (const line of lines) {
+      if (Buffer.byteLength(line, 'utf8') > EXPIRY_DIGEST_MAX_LINE_BYTES) { out.oversized += 1; continue; }
+      try {
+        const parsed = JSON.parse(line) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          out.rows.push(parsed as Record<string, unknown>);
+        } else {
+          out.corrupt += 1;
+        }
+      } catch {
+        out.corrupt += 1;
+      }
+    }
+    return out;
+  } catch {
+    // Unreadable is not "empty": the caller treats it as partial evidence.
+    out.unsafe = true;
+    return out;
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+export type ExpiryDigestPhase = 'local_only' | 'attempt' | 'receipt';
+
+export interface ExpiryDigestRecordInput {
+  digestId: string;
+  phase: ExpiryDigestPhase;
+  observed: number;
+  rendered: number;
+  complete: boolean;
+  transport: 'webhook' | null;
+  status?: 'delivered' | 'failed';
+}
+
+export function isExpiryDigestRecord(row: Record<string, unknown>, sessionKey: string): boolean {
+  return row.recordKind === 'digest' && row.sessionKey === sessionKey;
+}
+
+function appendDigestLine(file: string, line: string): void {
+  let fd: number | undefined;
+  try {
+    // Without these flags we cannot promise no link following or FIFO wait.
+    if (typeof fsConstants.O_NOFOLLOW !== 'number' || typeof fsConstants.O_NONBLOCK !== 'number') {
+      throw new Error('Safe digest append is unavailable');
+    }
+    fd = openSync(file, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT
+      | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK, 0o600);
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error('Digest sink is not a regular file');
+    // A write-only descriptor cannot inspect the tail. A conservative newline
+    // separates even a torn final record; readers already ignore blank lines.
+    appendFileSync(fd, `${st.size > 0 ? '\n' : ''}${line}`);
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+/**
+ * Append one content-free digest row to the session index and mirror it to
+ * the day's realtime stream, like the #260 summary row. Closed field set: no
+ * tool, signal, text, URL, error or channel diagnostic. Never throws.
+ */
+export function appendExpiryDigestRecord(
+  sessionKey: string,
+  record: ExpiryDigestRecordInput,
+  opts: { home?: string } = {},
+): boolean {
+  if (typeof sessionKey !== 'string' || !SESSION_KEY_RE.test(sessionKey)) return false;
+  if (!/^[a-f0-9]{32}$/.test(String(record?.digestId ?? ''))) return false;
+  const phase = record.phase;
+  if (phase !== 'local_only' && phase !== 'attempt' && phase !== 'receipt') return false;
+  const count = (v: unknown) => (Number.isSafeInteger(v) && (v as number) >= 0 ? (v as number) : 0);
+  const row: Record<string, unknown> = {
+    recordKind: 'digest',
+    type: 'expiry_digest',
+    origin: 'openclaw-session-end',
+    sessionKey,
+    digestId: record.digestId,
+    phase,
+    observed: count(record.observed),
+    rendered: count(record.rendered),
+    complete: record.complete === true,
+    transport: record.transport === 'webhook' ? 'webhook' : null,
+  };
+  if (phase === 'receipt') row.status = record.status === 'delivered' ? 'delivered' : 'failed';
+  const ts = new Date().toISOString();
+  row.ts = ts;
+  try {
+    const auditDir = auditDirFor(opts.home);
+    mkdirSync(join(auditDir, 'session-guard'), { recursive: true, mode: 0o700 });
+    const line = `${JSON.stringify(row)}\n`;
+    appendDigestLine(join(auditDir, 'session-guard', `${sessionKey}.jsonl`), line);
+    // The realtime mirror is a copy; the index row above is the receipt.
+    try { appendDigestLine(join(auditDir, `realtime-${ts.slice(0, 10)}.jsonl`), line); } catch { /* mirror only */ }
+    return true;
+  } catch {
+    return false;
   }
 }

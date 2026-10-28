@@ -12,6 +12,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { NAV_ITEMS, activeNavHref, visibleNavItems } from '@/components/layout/route-config';
 import { PROTECTION_TAB_DEFS, protectionTabHref, protectionTabs } from '@/components/protection/protection-tabs';
 import { MEMORY_TAB_DEFS, memoryTabHref, memoryTabs } from '@/components/memory/memory-tabs';
+import { SETTINGS_TABS } from '@/components/settings/SettingsView';
 import nextConfig from '../../../../next.config';
 
 const mockReplace = jest.fn();
@@ -51,6 +52,13 @@ function withQuery(ui: React.ReactElement) {
 const APP_DIR = path.join(__dirname, '../../../app/(dashboard)');
 const pageExists = (route: string) => fs.existsSync(path.join(APP_DIR, route, 'page.tsx'));
 const KEPT_PAGES = ['/overview', '/needs-you', '/memory', '/memory/replay', '/protection', '/xray', '/settings'];
+// `?tab=` ids each tabbed page actually renders. Path-backed tabs (Replay,
+// Scanner) are not query tabs, so a `?tab=` of them would land on the default.
+const QUERY_TABS: Record<string, readonly string[]> = {
+  '/memory': MEMORY_TAB_DEFS.map((t) => t.id).filter((id) => id !== 'replay'),
+  '/protection': PROTECTION_TAB_DEFS.map((t) => t.id).filter((id) => id !== 'scanner'),
+  '/settings': SETTINGS_TABS,
+};
 
 describe('hidden-routes config', () => {
   it('sends every hidden route to a kept page that exists', () => {
@@ -58,6 +66,8 @@ describe('hidden-routes config', () => {
       const target = new URL(r.redirectTo, 'http://x');
       expect(pageExists(target.pathname)).toBe(true);
       expect(isHiddenRoute(target.pathname, target.searchParams.get('tab'))).toBe(false);
+      const tab = target.searchParams.get('tab');
+      if (tab !== null) expect(QUERY_TABS[target.pathname] ?? []).toContain(tab);
       expect(r.reason.length).toBeGreaterThan(0);
     }
   });

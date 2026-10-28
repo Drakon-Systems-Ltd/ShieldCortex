@@ -19,6 +19,14 @@ package on every release; the CI publish step also overrides via
 `--version "$RELEASE_VERSION"`, so the registry is always at the latest
 release tag even if a local bump is missed.
 
+## No executable code in the skill
+
+`skills/shieldcortex/` is the whole ClawHub upload set (`scripts/clawhub-sync.mjs`
+publishes the directory), and ClawHub's static scan holds a release in manual
+review for any process-spawning API. The skill is therefore SKILL.md only; the
+cortex-memory hook and OpenClaw plugin ship in the npm packages. A test in
+`src/__tests__/skill-bundle-no-exec-931.test.ts` enforces this.
+
 ## Maintenance
 
 When ShieldCortex positioning, safety wording, install guidance, or scope

@@ -393,9 +393,9 @@ describe('#767 — free text and forwarded arguments are never a help request', 
     // The primitive itself: a value position is a value only when the caller
     // says the option takes one — without the list, `--help` anywhere counts,
     // which is what the handler-gated commands with all-boolean options rely on.
-    expect(wantsHelp(['--content', '--help'], { values: { '--content': 'always' } })).toBe(false);
+    expect(wantsHelp(['--content', '--help'], { values: { '--content': { value: 'always', occurrence: 'first' } } })).toBe(false);
     expect(wantsHelp(['--content', '--help'])).toBe(true);
-    expect(wantsHelp(['verb', 'arg', '--help'], { values: { '--content': 'always' } })).toBe(true);
+    expect(wantsHelp(['verb', 'arg', '--help'], { values: { '--content': { value: 'always', occurrence: 'first' } } })).toBe(true);
   });
 
   it('r2 B2: `hook <name>` — the first argument is a hook name, so `hook help` runs the hook named help', () => {
@@ -571,7 +571,7 @@ describe('#767 round 3 — each option is read the way its own parser reads it',
     // embed-backfill --limit: always — read whatever it is, then refused as a non-integer.
     expect(parseEmbedBackfillLimit(['--limit', '--help'])).toEqual({ ok: false, error: expect.stringContaining('positive integer') });
     expect(parseEmbedBackfillLimit(['--limit', '5'])).toEqual({ ok: true, limit: 5 });
-    expect(COMMAND_HELP_SPECS.memories.verbs!['embed-backfill'].values['--limit']).toBe('always');
+    expect(COMMAND_HELP_SPECS.memories.verbs!['embed-backfill'].values['--limit'].value).toBe('always');
   });
 
   it('B4: `--dir` is scan-skills\' option; on every other inline/server command `--dir --help` is a help flag', () => {
@@ -609,9 +609,9 @@ describe('#767 round 3 — each option is read the way its own parser reads it',
     const table: Record<string, ValueRule> = {};
     for (const command of Object.keys(COMMAND_HELP_SPECS).sort() as GatedCommand[]) {
       const row = COMMAND_HELP_SPECS[command];
-      for (const [flag, rule] of Object.entries(row.values)) table[`${command} ${flag}`] = rule;
+      for (const [flag, rule] of Object.entries(row.values)) table[`${command} ${flag}`] = rule.value;
       for (const [verb, verbRow] of Object.entries(row.verbs ?? {})) {
-        for (const [flag, rule] of Object.entries(verbRow.values)) table[`${command} ${verb} ${flag}`] = rule;
+        for (const [flag, rule] of Object.entries(verbRow.values)) table[`${command} ${verb} ${flag}`] = rule.value;
       }
     }
     const global: Record<string, ValueRule> = { '--db': 'always', '--mode': 'always' };
@@ -629,7 +629,7 @@ describe('#767 round 3 — each option is read the way its own parser reads it',
       ...prefixed('config', {
         '--mode': 'always', '--cloud-api-key': 'always', '--cloud-url': 'always', '--verify-mode': 'always',
         '--verify-timeout': 'always', '--openclaw-auto-memory': 'always', '--ranker': 'always',
-        '--proactive-recall': 'always', '--self-heal': 'always',
+        '--proactive-recall': 'always', '--self-heal': 'always', '--dashboard-update-check': 'always',
         '--action-guard-notify-webhook': 'unless-double-dash', '--memory-inject-contract': 'unless-double-dash',
         '--memory-plane': 'unless-double-dash', '--memory-host-posture': 'unless-double-dash',
         '--memory-host-runtime': 'unless-double-dash', '--auto-memory-sampling': 'unless-double-dash',

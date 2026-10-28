@@ -1,9 +1,8 @@
 /**
  * Docs/source contract: what the cortex-memory hook's copy says it does on
- * OpenClaw, checked against the events the two shipped manifests subscribe.
+ * OpenClaw, checked against the events the shipped manifest subscribes.
  *
- * The manifests (hooks/openclaw/cortex-memory/HOOK.md and the ClawHub-bundled
- * skills/shieldcortex/bundled/cortex-memory-hook/HOOK.md) declare
+ * The manifest (hooks/openclaw/cortex-memory/HOOK.md) declares
  * `metadata.openclaw.events`. That list is pinned here unchanged. The copy must
  * then:
  *   - describe session-end capture only for subscribed commands (`/new`,
@@ -42,13 +41,17 @@ const oneLine = (s) => s.replace(/\s+/g, ' ');
 
 const HOOK_DIRS = [
   ['hooks', 'openclaw', 'cortex-memory'],
-  ['skills', 'shieldcortex', 'bundled', 'cortex-memory-hook'],
 ];
 
 const EXPECTED_EVENTS = ['command:new', 'command:stop', 'agent:bootstrap'];
-const EXPECTED_METADATA_LINE =
+const metadataLine = (bins) =>
   '  { "openclaw": { "emoji": "🧠", "events": ["command:new", "command:stop", "agent:bootstrap"], ' +
-  '"requires": { "bins": ["npx"] }, "install": [{ "id": "community", "kind": "community", "label": "ShieldCortex" }] } }';
+  `"requires": { "bins": ${bins} }, "install": [{ "id": "community", "kind": "community", "label": "ShieldCortex" }] } }`;
+// The npm-shipped hook still falls back to `npx -y shieldcortex`. The ClawHub
+// skill no longer bundles a hook at all (#931 follow-up).
+const EXPECTED_METADATA_LINE = {
+  'hooks/openclaw/cortex-memory': metadataLine('["npx"]'),
+};
 
 /** Parse the `metadata:` JSON out of a HOOK.md YAML frontmatter block. */
 function manifest(src) {
@@ -72,7 +75,7 @@ describe('manifest subscriptions (unchanged)', () => {
   for (const dir of HOOK_DIRS) {
     it(`${dir.join('/')}: metadata line is byte-identical and events are exactly new/stop/bootstrap`, () => {
       const { line, metadata } = manifest(read(...dir, 'HOOK.md'));
-      assert.equal(line, EXPECTED_METADATA_LINE);
+      assert.equal(line, EXPECTED_METADATA_LINE[dir.join('/')]);
       assert.deepEqual(metadata.openclaw.events, EXPECTED_EVENTS);
       assert.ok(!metadata.openclaw.events.some((e) => e === 'message' || e.startsWith('message:')));
       assert.ok(!metadata.openclaw.events.includes('command'), 'bare command family must stay unsubscribed');

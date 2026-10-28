@@ -30,8 +30,12 @@
  * with `--` and leaves it unread, so `sessions prune --days --help` was a help
  * request to the handler, a swallowed value to the gate, and a prune with the
  * default window to the operator. Every value-taking option therefore carries
- * its parser's rule (`ValueRule`), and a command whose verbs parse the same
+ * its parser's rule (`ValueFlagRule`), and a command whose verbs parse the same
  * option differently carries a row per verb (`CommandHelpSpec.verbs`).
+ * #838 also records which occurrence is read: indexOf readers use the first,
+ * streaming readers visit every occurrence, and embed-backfill's readFlag
+ * prefers an equals form anywhere in argv. An ignored duplicate cannot hide
+ * the help flag after it; a first occurrence whose value is -h still can.
  *
  * `COMMAND_HELP_SPECS` is that table, once, for every gate — see
  * `argvWantsHelp` and `commandWantsHelp`. `wantsHelp` itself stays the
@@ -70,12 +74,28 @@ export type ValueRule =
    */
   | 'unless-dash';
 
+/** Which occurrence the parser reads, independently of the value's shape (#838). */
+export interface ValueFlagRule {
+  readonly value: ValueRule;
+  readonly occurrence: 'first' | 'every';
+  /** readFlag in embed-backfill prefers any --flag=value over a separate flag. */
+  readonly equalsPrecedence?: true;
+}
+
 /** The value-taking options of one argv shape, each with its parser's rule. */
-export type ValueRules = Readonly<Record<string, ValueRule>>;
+export type ValueRules = Readonly<Record<string, ValueFlagRule>>;
+
+function first(value: ValueRule, equalsPrecedence?: true): ValueFlagRule {
+  return { value, occurrence: 'first', ...(equalsPrecedence ? { equalsPrecedence } : {}) };
+}
+
+function every(value: ValueRule): ValueFlagRule {
+  return { value, occurrence: 'every' };
+}
 
 /** Whether the parser behind `rule` reads `next` as the option's value. */
-export function consumesAsValue(rule: ValueRule, next: string | undefined): boolean {
-  switch (rule) {
+export function consumesAsValue(rule: ValueRule | ValueFlagRule, next: string | undefined): boolean {
+  switch (typeof rule === 'string' ? rule : rule.value) {
     case 'always':
       return next !== undefined;
     case 'unless-double-dash':
@@ -124,31 +144,39 @@ export interface WantsHelpOptions {
   everyLongFlagTakesValue?: boolean;
 }
 
-function ruleFor(token: string, values: ValueRules, everyLongFlagTakesValue: boolean | undefined): ValueRule | undefined {
+function ruleFor(token: string, values: ValueRules, everyLongFlagTakesValue: boolean | undefined): ValueFlagRule | undefined {
   if (hasOwn(values, token)) return values[token];
-  if (everyLongFlagTakesValue && token.startsWith('--')) return 'always';
+  if (everyLongFlagTakesValue && token.startsWith('--')) return every('always');
   return undefined;
 }
 
 export function wantsHelp(args: readonly string[], options: WantsHelpOptions = {}): boolean {
   const values = options.values ?? {};
   const verbDepth = options.verbDepth ?? 1;
-  let positional = 0;
+  // indexOf readers search raw argv independently of streaming readers. A
+  // token can be both one reader's value and another reader's flag (#838).
+  const valuePositions = new Set<number>();
+  for (const [flag, rule] of Object.entries(values)) {
+    if (rule.occurrence !== 'first') continue;
+    const index = args.indexOf(flag);
+    if (index === -1 || (rule.equalsPrecedence && args.some((a) => a.startsWith(`${flag}=`)))) continue;
+    if (consumesAsValue(rule, args[index + 1])) valuePositions.add(index + 1);
+  }
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    // An explicit help flag counts at any OPTION position. A token in a VALUE
-    // position never reaches this line — the branch below steps over it — so
-    // `--content --help` is content spelled "--help", not a request for usage.
-    if (a === '--help' || a === '-h') return true;
-    // `--flag value` — step over the value exactly when the parser would read
-    // the token as one; a token the parser leaves unread is read here on its
-    // own turn. `--flag=value` is one token and falls through to the option
-    // branch below.
+    if (a === '--help' || a === '-h') continue;
     const rule = ruleFor(a, values, options.everyLongFlagTakesValue);
-    if (rule !== undefined) {
-      if (consumesAsValue(rule, args[i + 1])) i++;
-      continue;
+    if (rule?.occurrence === 'every' && consumesAsValue(rule, args[i + 1])) {
+      valuePositions.add(++i);
     }
+  }
+  let positional = 0;
+  for (let i = 0; i < args.length; i++) {
+    if (valuePositions.has(i)) continue;
+    const a = args[i];
+    // Only help in an OPTION position counts; both kinds of value reader have
+    // already marked the tokens they consume, including literal help values.
+    if (a === '--help' || a === '-h') return true;
     if (a.startsWith('-') && a !== '-') continue;
     positional += 1;
     // A bare `help` is the help verb only in a verb slot. Past the verb slots it
@@ -172,7 +200,7 @@ export function wantsHelp(args: readonly string[], options: WantsHelpOptions = {
  * --help" to the gates and reached server startup. `SCAN_SKILLS_SPEC` is the one
  * row that carries it.
  */
-export const GLOBAL_VALUES: ValueRules = { '--db': 'always', '--mode': 'always' };
+export const GLOBAL_VALUES: ValueRules = { '--db': every('always'), '--mode': every('always') };
 
 /** The flags of `GLOBAL_VALUES`, for the tests that enumerate the global inventory. */
 export const GLOBAL_VALUE_FLAGS: readonly string[] = Object.keys(GLOBAL_VALUES);
@@ -263,7 +291,7 @@ export function helpSpec(values: ValueRules, shape: HelpSpecShape = {}): Command
  * not start with `--` (src/cli/audit.ts). `--deps-path help` is a path to scan
  * (#577); `--deps-path --help` is a help request (#767 round 3).
  */
-const AUDIT_SPEC = helpSpec({ '--deps-path': 'unless-double-dash' });
+const AUDIT_SPEC = helpSpec({ '--deps-path': every('unless-double-dash') });
 
 /**
  * `allowlist`: `scan`'s path/glob options and `add --note help` — a reviewer's
@@ -274,11 +302,11 @@ const AUDIT_SPEC = helpSpec({ '--deps-path': 'unless-double-dash' });
  */
 const ALLOWLIST_SPEC = helpSpec(
   {
-    '--glob': 'unless-dash',
-    '--hermes-cron': 'unless-dash',
-    '--openclaw-cron': 'unless-dash',
-    '--openclaw-cron-db': 'unless-dash',
-    '--note': 'unless-dash',
+    '--glob': every('unless-dash'),
+    '--hermes-cron': every('unless-dash'),
+    '--openclaw-cron': every('unless-dash'),
+    '--openclaw-cron-db': every('unless-dash'),
+    '--note': first('unless-dash'),
   },
   { stripDoubleDash: true },
 );
@@ -289,7 +317,7 @@ const ALLOWLIST_SPEC = helpSpec(
  * value (rejected later, as a number); `--days --help` is the help request that
  * round 2 swallowed and ran a prune on (#767 round 3, B3).
  */
-const SESSIONS_SPEC = helpSpec({ '--days': 'unless-double-dash' });
+const SESSIONS_SPEC = helpSpec({ '--days': first('unless-double-dash') });
 
 /**
  * `memories`: a row per verb, because the verbs parse the same options
@@ -315,27 +343,27 @@ const SESSIONS_SPEC = helpSpec({ '--days': 'unless-double-dash' });
 const MEMORIES_SPEC = helpSpec({}, {
   verbDepth: Number.POSITIVE_INFINITY,
   verbs: {
-    'migrate-legacy': helpSpec({ '--source': 'always' }),
+    'migrate-legacy': helpSpec({ '--source': first('always') }),
     prune: helpSpec({
-      '--salience-lte': 'unless-double-dash',
-      '--older-than': 'unless-double-dash',
-      '--project': 'unless-double-dash',
+      '--salience-lte': first('unless-double-dash'),
+      '--older-than': first('unless-double-dash'),
+      '--project': first('unless-double-dash'),
     }),
-    dedupe: helpSpec({ '--project': 'unless-double-dash', '--limit': 'unless-double-dash' }),
+    dedupe: helpSpec({ '--project': first('unless-double-dash'), '--limit': first('unless-double-dash') }),
     'repair-project-keys': helpSpec({
-      '--map': 'always',
-      '--scan-paths': 'unless-double-dash',
-      '--project': 'unless-double-dash',
-      '--db': 'unless-double-dash',
+      '--map': every('always'),
+      '--scan-paths': first('unless-double-dash'),
+      '--project': first('unless-double-dash'),
+      '--db': first('unless-double-dash'),
     }),
-    purge: helpSpec({ '--backup-dir': 'unless-double-dash' }),
-    recalc: helpSpec({ '--backup-dir': 'unless-double-dash', '--db': 'unless-double-dash' }),
+    purge: helpSpec({ '--backup-dir': first('unless-double-dash') }),
+    recalc: helpSpec({ '--backup-dir': first('unless-double-dash'), '--db': first('unless-double-dash') }),
     'import-native': helpSpec(
-      { '--host-id': 'unless-dash', '--agent-id': 'unless-dash', '--project': 'unless-dash' },
+      { '--host-id': every('unless-dash'), '--agent-id': every('unless-dash'), '--project': every('unless-dash') },
       { doubleDashEndsOptions: true },
     ),
-    'embed-backfill': helpSpec({ '--limit': 'always', '--project': 'unless-dash' }),
-    reclassify: helpSpec({ '--project': 'unless-dash' }),
+    'embed-backfill': helpSpec({ '--limit': first('always', true), '--project': first('unless-dash', true) }),
+    reclassify: helpSpec({ '--project': first('unless-dash') }),
   },
 });
 
@@ -344,7 +372,7 @@ const MEMORIES_SPEC = helpSpec({}, {
  * installs for the agent "help"; an id starting with `-` is refused as missing
  * (src/setup/openclaw.ts), so `--agent --help` is a help request.
  */
-const OPENCLAW_SPEC = helpSpec({ '--agent': 'unless-dash' });
+const OPENCLAW_SPEC = helpSpec({ '--agent': first('unless-dash') });
 
 /**
  * The strict-parser commands, `hermes`, and every command whose options are all
@@ -369,7 +397,7 @@ const INDEX_SPEC = helpSpec(GLOBAL_VALUES);
  * it is, so `--dir --help` scans a directory named "--help" and `--dir x --help`
  * asks for usage.
  */
-const SCAN_SKILLS_SPEC = helpSpec({ ...GLOBAL_VALUES, '--dir': 'always' });
+const SCAN_SKILLS_SPEC = helpSpec({ ...GLOBAL_VALUES, '--dir': first('always') });
 
 /** `scan-skill <path>`: inline like the above, but its first positional is a file. */
 const SCAN_SKILL_SPEC = helpSpec(GLOBAL_VALUES, { verbDepth: 0 });
@@ -381,36 +409,37 @@ const SCAN_SKILL_SPEC = helpSpec(GLOBAL_VALUES, { verbDepth: 0 });
  * `--config --help` a help request; `--agent-uid --help` is the uid "--help"
  * (#767).
  */
-const PROTECT_SPEC = helpSpec({ '--config': 'unless-double-dash', '--agent-uid': 'always' });
+const PROTECT_SPEC = helpSpec({ '--config': first('unless-double-dash'), '--agent-uid': first('always') });
 
 /**
  * `config`: every option `handleCloudConfig` (src/cloud/cli.ts) reads the
  * following token of. The values are enums, keys, URLs and numbers; a bare
  * `help` after any of them is that option's (invalid) value, and the handler is
- * the one to refuse it. Nine of them read `args[idx + 1]` whenever it is
+ * the one to refuse it. Ten of them read `args[idx + 1]` whenever it is
  * truthy and refuse it as INVALID; the six signed-write and webhook options
  * refuse a `--`-leading token as MISSING without reading it.
  */
 const CONFIG_SPEC = helpSpec({
-  '--mode': 'always',
-  '--cloud-api-key': 'always',
-  '--cloud-url': 'always',
-  '--verify-mode': 'always',
-  '--verify-timeout': 'always',
-  '--openclaw-auto-memory': 'always',
-  '--ranker': 'always',
-  '--proactive-recall': 'always',
-  '--self-heal': 'always',
-  '--action-guard-notify-webhook': 'unless-double-dash',
-  '--memory-inject-contract': 'unless-double-dash',
-  '--memory-plane': 'unless-double-dash',
-  '--memory-host-posture': 'unless-double-dash',
-  '--memory-host-runtime': 'unless-double-dash',
-  '--auto-memory-sampling': 'unless-double-dash',
+  '--mode': first('always'),
+  '--cloud-api-key': first('always'),
+  '--cloud-url': first('always'),
+  '--verify-mode': first('always'),
+  '--verify-timeout': first('always'),
+  '--openclaw-auto-memory': first('always'),
+  '--ranker': first('always'),
+  '--proactive-recall': first('always'),
+  '--self-heal': first('always'),
+  '--dashboard-update-check': first('always'),
+  '--action-guard-notify-webhook': first('unless-double-dash'),
+  '--memory-inject-contract': first('unless-double-dash'),
+  '--memory-plane': first('unless-double-dash'),
+  '--memory-host-posture': first('unless-double-dash'),
+  '--memory-host-runtime': first('unless-double-dash'),
+  '--auto-memory-sampling': first('unless-double-dash'),
 });
 
 /** `review-copilot annotate --id <id> | --pending [--limit N]`: `Number(args[idx + 1])`. */
-const REVIEW_COPILOT_SPEC = helpSpec({ '--id': 'always', '--limit': 'always' });
+const REVIEW_COPILOT_SPEC = helpSpec({ '--id': first('always'), '--limit': first('always') });
 
 /**
  * `remember "<title>" --content <text> …`: the first positional is the memory's
@@ -418,30 +447,30 @@ const REVIEW_COPILOT_SPEC = helpSpec({ '--id': 'always', '--limit': 'always' });
  * `parseFlag` reads the next token whatever it is: `--content --help` is content.
  */
 const REMEMBER_SPEC = helpSpec(
-  { '--content': 'always', '--category': 'always', '--importance': 'always', '--tags': 'always', '--project': 'always' },
+  { '--content': first('always'), '--category': first('always'), '--importance': first('always'), '--tags': first('always'), '--project': first('always') },
   { verbDepth: 0 },
 );
 
 /** `approve [<hash>] [--ttl N] [--attempt <id>] …`; the handler drops bare `--`. */
-const APPROVE_SPEC = helpSpec({ '--ttl': 'always', '--attempt': 'always' }, { stripDoubleDash: true });
+const APPROVE_SPEC = helpSpec({ '--ttl': first('always'), '--attempt': first('always') }, { stripDoubleDash: true });
 
 /** `deny [<hash>] [--attempt <id>]`; the handler drops bare `--`. */
-const DENY_SPEC = helpSpec({ '--attempt': 'always' }, { stripDoubleDash: true });
+const DENY_SPEC = helpSpec({ '--attempt': first('always') }, { stripDoubleDash: true });
 
 /** `freeze <scope> --reason <every following token>`. */
 const FREEZE_SPEC = helpSpec({}, { restFlags: ['--reason'] });
 
 /** `guard readiness|test-approval [--surface claude-code|openclaw]`: `argv[surfaceAt + 1]`. */
-const GUARD_SPEC = helpSpec({ '--surface': 'always' });
+const GUARD_SPEC = helpSpec({ '--surface': first('always') });
 
 /** `memory downvote <id> --reason <text>` / `memory list --purpose X --category X --limit N`: `parseFlag`. */
-const MEMORY_SPEC = helpSpec({ '--reason': 'always', '--purpose': 'always', '--category': 'always', '--limit': 'always' });
+const MEMORY_SPEC = helpSpec({ '--reason': first('always'), '--purpose': first('always'), '--category': first('always'), '--limit': first('always') });
 
 /** `inspect last-precompact|last-recall [--history N]`: `parseFlag`. */
-const INSPECT_SPEC = helpSpec({ '--history': 'always' });
+const INSPECT_SPEC = helpSpec({ '--history': first('always') });
 
 /** `iron-dome activate --profile X`, `scan --text X | --file X`, `audit --search X`: `args[idx + 1]`. */
-const IRON_DOME_SPEC = helpSpec({ '--profile': 'always', '--text': 'always', '--file': 'always', '--search': 'always' });
+const IRON_DOME_SPEC = helpSpec({ '--profile': first('always'), '--text': first('always'), '--file': first('always'), '--search': first('always') });
 
 /**
  * `scan "<text>" [--source=TYPE] [--identifier=ID]`: the text is data (no verb
@@ -450,7 +479,7 @@ const IRON_DOME_SPEC = helpSpec({ '--profile': 'always', '--text': 'always', '--
  * request.
  */
 const SCAN_SPEC = helpSpec(
-  { '--source': 'unless-dash', '--identifier': 'unless-dash' },
+  { '--source': every('unless-dash'), '--identifier': every('unless-dash') },
   { verbDepth: 0, doubleDashEndsOptions: true },
 );
 

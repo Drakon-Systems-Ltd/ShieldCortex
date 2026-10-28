@@ -5,12 +5,20 @@ import { fileURLToPath } from 'url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
 import { saveAutoExtractedMemory } from '../../scripts/lib/save-memory.mjs';
+import { classifySensitivity } from '../defence/sensitivity/index.js';
 import {
   FIXTURE_VECTOR_BYTES,
   FIXTURE_VECTOR_HEAD,
   createHookPackage,
   runHook,
 } from './hook-package-fixture.js';
+import {
+  EMBEDDING_MODEL_ID,
+  EMBEDDING_ONNX_EXPECTED_BYTES,
+  EMBEDDING_ONNX_EXPECTED_SHA256,
+  resolveEmbeddingModelPaths,
+  writeModelCacheSidecar,
+} from '../embeddings/model-cache.js';
 
 /**
  * v4.12.4's auto-extract path silently failed every insert with
@@ -122,6 +130,45 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
     expect(rows[0].content).toContain('Pat Example');
     expect(Array.isArray(JSON.parse(rows[0].tags))).toBe(true);
     expect(['CONFIDENTIAL', 'RESTRICTED', 'SECRET']).toContain(rows[0].sensitivity_level);
+  });
+
+  it('memory admission holds a PERSONAL input containing a credential', async () => {
+    const secret = 'sk-' + 'abcdefghijklmnopqrstuvwxyz';
+    const memory = makeMemory({
+      title: 'March plans',
+      content: `Surprise birthday trip for my wife in March. ${secret}`,
+    });
+    expect(classifySensitivity(memory.content, memory.title).level).toBe('PERSONAL');
+
+    // Unlike prompt capture, memory admission blocks this credential. Do not
+    // weaken that decision just to exercise the subsequent redaction floor.
+    await saveAutoExtractedMemory(db, memory, 'p', { source: 'session-end-hook' });
+    expect(db.prepare('SELECT id FROM memories').all()).toHaveLength(0);
+    const held = db.prepare('SELECT firewall_result, reason FROM quarantine')
+      .all() as Array<{ firewall_result: string; reason: string }>;
+    expect(held).toHaveLength(1);
+    expect(held[0].firewall_result).toBe('BLOCK');
+    expect(held[0].reason).toContain('credential leak');
+  });
+
+  it('#858: a PERSONAL memory with redacted identifiers is stored CONFIDENTIAL', async () => {
+    const memory = makeMemory({
+      title: 'March plans',
+      content: 'Surprise birthday trip for my wife in March.',
+      // Tags are redacted at persistence, but not part of the title/content
+      // classifier input. This reaches the PERSONAL → CONFIDENTIAL floor.
+      tags: ['auto-extracted', 'NI QQ123456C'],
+    });
+    expect(classifySensitivity(memory.content, memory.title).level).toBe('PERSONAL');
+
+    await saveAutoExtractedMemory(db, memory, 'p', { source: 'session-end-hook' });
+    const rows = db.prepare('SELECT content, tags, sensitivity_level FROM memories')
+      .all() as Array<{ content: string; tags: string; sensitivity_level: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].content).toBe(memory.content);
+    expect(rows[0].tags).not.toContain('QQ123456C');
+    expect(rows[0].tags).toContain('[REDACTED:ni-number]');
+    expect(rows[0].sensitivity_level).toBe('CONFIDENTIAL');
   });
 
   // #510 bounded dedupe of redacted candidates: identical redacted text is a
@@ -346,6 +393,77 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
    * losing the vector, so the embed step is best-effort by construction and the
    * backfill is what guarantees eventual coverage.
    */
+  /**
+   * #632 F3: the REAL readiness gate (cacheReady 'real'), inside a real hook
+   * process, against a complete throwaway cache under SHIELDCORTEX_MODEL_DIR.
+   * A sparse file stands in for the 90 MB weight, with a sidecar bound to it.
+   * The embedder is still the fixture's, so nothing loads ONNX.
+   */
+  function provisionCache(): string {
+    const root = path.join(tempDir, 'models');
+    const { onnxPath, sidecarPath, modelDir } = resolveEmbeddingModelPaths(root);
+    fs.mkdirSync(path.dirname(onnxPath), { recursive: true });
+    const fd = fs.openSync(onnxPath, 'w');
+    try {
+      fs.ftruncateSync(fd, EMBEDDING_ONNX_EXPECTED_BYTES);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const st = fs.statSync(onnxPath);
+    writeModelCacheSidecar(sidecarPath, {
+      sha256: EMBEDDING_ONNX_EXPECTED_SHA256,
+      bytes: EMBEDDING_ONNX_EXPECTED_BYTES,
+      modelId: EMBEDDING_MODEL_ID,
+      verifiedAt: '2026-10-01T00:00:00.000Z',
+      mtimeMs: st.mtimeMs,
+      ino: st.ino,
+    });
+    for (const name of ['config.json', 'tokenizer.json', 'tokenizer_config.json']) {
+      fs.writeFileSync(path.join(modelDir, name), '{"x":1}');
+    }
+    return root;
+  }
+
+  it('#632: control — the real readiness gate admits a valid configuration and complete cache', () => {
+    const root = provisionCache();
+    const run = runHook({
+      dir: tempDir,
+      pkgRoot: hookPackage,
+      plan: { mode: 'vector', cacheReady: 'real' },
+      env: { SHIELDCORTEX_MODEL_DIR: root, SHIELDCORTEX_EMBEDDINGS_OFFLINE: '1' },
+      rows: 3,
+      title: 'CFG ok',
+    });
+    expect(run.events.filter((e) => e === 'generateEmbedding')).toHaveLength(3);
+    expect(run.rows.map((r) => r.len)).toEqual([FIXTURE_VECTOR_BYTES, FIXTURE_VECTOR_BYTES, FIXTURE_VECTOR_BYTES]);
+  }, 180_000);
+
+  it.each([
+    ['HF_ENDPOINT', 'not-a-url SECRETMARKER'],
+    ['SHIELDCORTEX_EMBEDDINGS_OFFLINE', 'maybe-SECRETMARKER'],
+    ['SHIELDCORTEX_MODEL_DIR', 'models\nFORGED_STATUS SECRETMARKER'],
+  ])('#632: invalid %s — the hook skips embedding, says so once, and never echoes the value', (key, value) => {
+    const root = provisionCache();
+    const run = runHook({
+      dir: tempDir,
+      pkgRoot: hookPackage,
+      plan: { mode: 'vector', cacheReady: 'real' },
+      env: { SHIELDCORTEX_MODEL_DIR: root, [key]: value },
+      rows: 3,
+      title: 'CFG bad',
+    });
+    // Rows stored, no vectors, and the embedder was never asked.
+    expect(run.rows.map((r) => r.len)).toEqual([null, null, null]);
+    expect(run.events).not.toContain('generateEmbedding');
+    const lines = run.stderr.split('\n').filter((l) => l.includes('embedding configuration invalid'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(`misconfigured: ${key}`);
+    expect(lines[0].length).toBeLessThan(500);
+    expect(run.stderr).not.toContain('embedding failed for memory');
+    expect(run.stderr).not.toContain('SECRETMARKER');
+    expect(run.stderr).not.toContain('FORGED_STATUS');
+  }, 180_000);
+
   it('#458: a disabled embedder still stores the row (best-effort, never fail-closed)', async () => {
     expect(process.env.SHIELDCORTEX_SKIP_EMBEDDINGS).toBe('1');
 
