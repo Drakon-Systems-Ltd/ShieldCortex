@@ -1,6 +1,6 @@
 # #579 — Durable realtime consumption evidence, round 2 (design proposal, not approved implementation)
 
-**Status:** design proposal for independent review. Nothing in this document is implemented, tested or approved. It authorises no code change, no retention, no compression, no deletion, no archive and no database rebuild, migration or modification. **Disk reclaimed by this design: zero bytes.** #579 stays open.
+**Status:** design proposal for independent review. The proposed feature is not implemented or approved; the future executable plan is unrun. Separate bounded design-model checks are recorded below. It authorises no code change, no retention, no compression, no deletion, no archive and no database rebuild, migration or modification. **Disk reclaimed by this design: zero bytes.** #579 stays open.
 
 **Base:** `main` at `cbe011ef9cecb3f27babf638ef156fc5bcb450a9` (28 Oct 2026). Every line citation below is to that commit. Source reading only; see §10 for what was not run.
 
@@ -10,7 +10,7 @@
 
 ## 0. One-paragraph summary
 
-The realtime ledger (`src/threat-graph/realtime-ledger.ts`) is the only reader that advances a cursor over `~/.shieldcortex/audit/realtime-YYYY-MM-DD.jsonl`. This design adds one observation table, `realtime_file_evidence`, written **only inside the ledger's existing apply transaction**, recording for each file the SHA-256 of the exact byte prefix whose lines the ledger decided, the `(dev, ino)` of the descriptor those bytes came through, the directory identity it was listed from, and sticky non-affirmative states for oversize, held, changed, replaced and unverifiable files. Evidence is bound to the current graph generation by SQLite triggers that fire for any code version, and to the current **database incarnation** by a stamp that dump recovery inherently resets (`PRAGMA user_version`, which `.dump` does not carry; observed in §5.2). The read path keeps today's **stat-before-open** oversize decision so the floor policy is unchanged. Nothing reads the table in production. The one affirmative state means only "the ledger committed decisions for exactly these bytes, in this graph generation and database incarnation". It is **not** cleanup permission, and it says nothing about stop-hook recovery evidence, other readers, writers still holding descriptors, or days that are no longer on disk.
+The realtime ledger (`src/threat-graph/realtime-ledger.ts`) is the only reader that advances a cursor over `~/.shieldcortex/audit/realtime-YYYY-MM-DD.jsonl`. This design adds one observation table, `realtime_file_evidence`, inserted/upserted **only inside the ledger's existing apply transaction** (initialization may invalidate imported rows before collection), recording for each file the SHA-256 of the exact byte prefix whose lines the ledger decided, the `(dev, ino)` of the descriptor those bytes came through, the directory identity it was listed from, and sticky non-affirmative states for oversize, held, changed, replaced and unverifiable files. Evidence is bound to the current graph generation by SQLite triggers that fire for any code version, and to the current **database incarnation** by a stamp that dump recovery inherently resets (`PRAGMA user_version`, which `.dump` does not carry; observed in §5.2). The read path keeps today's **stat-before-open** oversize decision so the floor policy is unchanged. Nothing reads the table in production. The one affirmative state means only "the ledger committed decisions for exactly these bytes, in this graph generation and database incarnation". It is **not** cleanup permission, and it says nothing about stop-hook recovery evidence, other readers, writers still holding descriptors, or days that are no longer on disk.
 
 ---
 
@@ -23,7 +23,7 @@ The realtime ledger (`src/threat-graph/realtime-ledger.ts`) is the only reader t
 | Directory sample missing on batch-cut and hold commit paths; `ino` coerced through Number (Grok R1) | Second sample taken on every return that can commit, `bigint` → decimal text; missing or different sample ⇒ no evidence rows | §5.4 |
 | Short read, `EAGAIN`, non-regular file treated as EOF (Grok R2, Astra N2) | Bounded read loop; `EINTR` retried; any other error ⇒ `unavailable` hold; non-regular ⇒ hold; growth past the cap during the read ⇒ decision point D1 | §5.3 |
 | Resume-row recheck needs a column list and must not abort fresh reads (Grok R2) | Exact column list; recheck only when `startLine > 0` | §5.6 |
-| Dump-recovery invalidation is neither legacy-safe nor crash-complete (Astra F1) | Evidence incarnation stamp in `user_version`; rows carry it; mismatch ⇒ untrusted and purged; covers pre-1B recovery and interruption because the header reset is a property of the new file, not a step that must run | §5.2 |
+| Dump-recovery invalidation is neither legacy-safe nor crash-complete (Astra F1) | Evidence incarnation stamp in `user_version`; rows carry it; zero header ⇒ UNKNOWN, followed by mandatory atomic invalidation before initialization; covers pre-1B recovery and interruption without a recovery post-step | §5.2 |
 | Verifier claims exceed its inputs (Astra N1, Grok "defer verify") | 1B-verify removed from the implementable slice; contract for a future classifier written down as spec only | §5.10 |
 | "At most 64 MB" not enforced (Astra N2) | Stated honestly; bounded-read decision D1 | §5.3, §8 |
 | Directory endpoint equality is not a pin (Astra N3) | Wording changed to "endpoint observation"; prefix check also binds `dir_dev/dir_ino` | §5.4, §5.5 |
@@ -92,9 +92,9 @@ Only the ledger advances a cursor. The others are reader-visible horizons that l
 
 - **I1 Never false-affirmative.** No row reaches `consumed` for a file that is unconsumed, partially read, oversize-skipped, held, changed in place, replaced, symlinked, multi-linked, non-regular, read through a descriptor that does not match the listed name, or resumed from a prefix the evidence did not itself re-hash.
 - **I2 Projection-neutral.** With the feature present, nodes, edges, cursor, floors, holds, halts, tail exclusion and error strings are byte-identical to today for every regular-file fixture. The only permitted projection change is the non-regular hold (§5.3) and, if D1 is accepted, a file that grows past the cap *during* the read.
-- **I3 Transaction coupling.** Evidence rows commit in the same `BEGIN IMMEDIATE` as the cursor write, after the raw compare-and-set; a failed CAS, a failed resume-row recheck, or a thrown apply writes no evidence.
+- **I3 Transaction coupling.** Evidence inserts/upserts commit in the same `BEGIN IMMEDIATE` as the cursor write, after the raw compare-and-set; a failed CAS, a failed resume-row recheck, or a thrown apply writes no evidence. Earlier initialization invalidation (§5.2) is separate and is not rolled back by an apply failure.
 - **I4 Generation binding.** Any reset of the graph (`clearGraph` from any code version, hand-run `UPDATE ... last_rt_cursor = ''`, loss or recreation of the state row) deletes all evidence atomically with the reset.
-- **I5 Incarnation binding.** Evidence written in one database incarnation is never trusted in another. Dump recovery (new or pre-1B code), interrupted recovery, and a fresh file all start a new incarnation. A byte-for-byte file copy (backup restore) keeps the incarnation, because it is a consistent snapshot of cursor and evidence together.
+- **I5 Incarnation binding.** Evidence written in one database incarnation is never trusted in another. Dump recovery (new or pre-1B code), interrupted recovery, and a fresh file all start a new incarnation. A consistent backup snapshot copied byte-for-byte preserves logical graph/cursor/evidence continuity; arbitrary copies are not certified. In-place REINDEX/VACUUM preserves continuity, not proof of completeness after corruption (§5.9).
 - **I6 Stat-before-open.** The oversize decision is taken from the following `stat` exactly as today, before any `open`; a stat-able, unopenable oversize file floors and never holds; a within-cap file whose open or read fails holds exactly as today (stage `read`).
 - **I7 Directory binding.** Rows are written only when the directory identity sampled before listing equals the identity sampled on the committing return path; both stored as decimal text from `bigint` stats; the prefix check compares them too.
 - **I8 Skip evidence persists.** Oversize files get a sticky `skipped_oversize` row in the run that commits the floor (a floor always commits, `:223`); a held file never gains an affirmative row and, when earlier progress commits, gets a sticky `held` row if it has none; absence of a row is UNKNOWN. No stored state ever promotes a skipped or held file.
@@ -151,30 +151,32 @@ Why triggers rather than a delete in `clearGraph` alone: an older installed buil
 
 **Problem.** A dump-recovered database can carry evidence rows and a state row from a partially recovered graph. In new code a `DELETE` after `freshDb.exec(dumpOutput)` is a separate step that a crash can skip, and a **pre-1B build** performing the recovery has no such step at all. The triggers do not help: `.dump` emits each table's `INSERT`s before any `CREATE TRIGGER` and wraps the whole import in one transaction, so no trigger fires during import. Observed on this host with SQLite 3.45.1 against an in-memory fixture: `CREATE TABLE s …; INSERT INTO s …; CREATE TABLE e …; INSERT INTO e …; CREATE TRIGGER t …; COMMIT;`.
 
-**Mechanism.** Use a property that recovery resets by construction rather than a step that must run. `sqlite3 .dump` emits schema and data only; it does **not** emit `PRAGMA user_version` (observed on this host: a database with `user_version = 12345` dumps with only `PRAGMA foreign_keys=OFF;`). The repository already relies on this (`migrations.ts:1058-1059`: "a `.dump`-restored database keeps tables, not `user_version`"). Nothing in `src/`, `scripts/` or the OpenClaw plugin sets `user_version` or `application_id` today (grep at `cbe011ef`). So:
+**Mechanism.** Use a header reset that recovery performs by construction, plus mandatory atomic invalidation at evidence-aware initialization; never rely on an optional recovery post-step. `sqlite3 .dump` emits schema and data only; it does **not** emit `PRAGMA user_version` (observed on this host: a database with `user_version = 12345` dumps with only `PRAGMA foreign_keys=OFF;`). The repository already relies on this (`migrations.ts:1058-1059`: "a `.dump`-restored database keeps tables, not `user_version`"). Nothing in `src/`, `scripts/` or the OpenClaw plugin sets `user_version` or `application_id` today (grep at `cbe011ef`). So:
 
-1. **Reservation.** `PRAGMA user_version` is reserved for the evidence incarnation. A comment in `schema.sql` and in `migrations.ts` states it. Any future use must go through the same helper. §7 N1 pins that a fresh database keeps `user_version = 0` until the ledger first commits.
-2. **Assignment.** At the start of every ledger run, after `assertNotInTransaction` and before listing, `ensureEvidenceIncarnation(db)` runs one `BEGIN IMMEDIATE`: read `user_version`; if it is `0`, set it to a uniformly random integer in `[1, 2^31 - 1]` (`crypto.randomInt`); return the value. On every later run it is a read. Two processes racing on `0` each assign under the immediate lock; the second sees non-zero and keeps it. `PRAGMA user_version = N` is a page-1 write inside the transaction; §7 N2 pins that it rolls back with the transaction.
-3. **Stamping.** Every evidence row written in a commit carries the run's incarnation. The apply transaction re-reads `user_version`; if it differs from the run's value, nothing is written (same as a failed CAS).
-4. **Trust rule.** A row is trusted (eligible for the prefix check or, in a future classifier, for the affirmative code) only when `row.incarnation == current user_version`. Any other row is UNKNOWN.
-5. **Purge.** Inside every committing apply, after the cursor write: `DELETE FROM realtime_file_evidence WHERE incarnation != ?`. Hygiene only; correctness rests on rule 4.
+1. **Reservation and timing.** Reserve `PRAGMA user_version` for evidence. Fresh initialization leaves it zero until the first ledger **run**, not the first apply commit. At each run's start, after `assertNotInTransaction` and before evidence use or listing, call `ensureEvidenceIncarnation(db)`. Initialization is separate from apply; a no-progress run can initialize. Read-only classifiers never initialize.
+2. **Deterministic initialization boundary.** Under one `BEGIN IMMEDIATE`, read the header. At zero, unconditionally `DELETE FROM realtime_file_evidence` **before** setting `PRAGMA user_version = 1`, then commit both together. §5.1 must have created the table first. Failure of either operation rolls back and stops the run before collection/apply; never continue with a usable header. Valid non-zero positive signed-31-bit markers remain unchanged; invalid/unreadable markers fail closed. Racing initializers serialize: the second sees the committed marker and does not clear newly written evidence. No randomness or globally unique identifier is claimed. Reusing marker 1, even if imported rows carry 1, is safe because no imported row survives the transaction making the header usable. Never cache evidence across initialization; collect snapshots afterwards.
+3. **Stamping.** Every evidence upsert carries the run's marker. Apply re-reads the header; a different value aborts before projection/evidence writes, like a failed CAS. Marker equality alone is not global identity proof: safety also requires rule 2. Live file replacement/concurrent restore is unsupported, not certified by this protocol.
+4. **Trust rule.** Prefix checks and future affirmative classification require a valid **non-zero** current header and `row.incarnation == current user_version`. At zero every row is UNKNOWN, including an imported row stamped zero. Read-only classifiers return UNKNOWN without initialization. Mismatched rows are UNKNOWN.
+5. **Mismatch hygiene.** Each committing apply, after cursor write, deletes rows whose incarnation differs from the marker. This is hygiene, distinct from mandatory rule 2. Present wrong-incarnation rows are not treated as absent before apply: P5 (or earlier sticky precedence) still applies.
 
-**Lifecycle table (source-derived, not run).**
+**Lifecycle table (contract; implementation not run).**
 
-| Event | `user_version` afterwards | Old rows |
+| Event | Header | Old rows |
 |---|---|---|
-| Fresh database | `0` → assigned on first ledger run | none |
-| Ordinary reopen, process restart, WAL checkpoint | unchanged | trusted (same incarnation) |
-| Backup restore by file copy (`init.ts:238-240`) | copied with the file | trusted: cursor and evidence come from the same snapshot |
-| Dump recovery by **new** code, completed | new file ⇒ `0` ⇒ new value on first ledger run | untrusted, purged on first commit |
-| Dump recovery by new code, **interrupted** after import | same: the new file's header is already `0` | untrusted |
-| Dump recovery by a **pre-1B** build | same: the property belongs to SQLite, not to the recovering code | untrusted once any evidence-aware build runs |
-| Repair "recreated" / fresh create | `0`, empty table | none |
-| `clearGraph` by any build | unchanged | deleted by trigger (I4) |
-| Downgrade to a pre-1B build | unchanged | rows persist; triggers still fire; nothing trusts them until an evidence-aware build runs |
-| Collision (new random value equals the old one) | probability about 2⁻³¹ per recovery | accepted; stated here so it is not discovered later |
+| Fresh database | zero → 1 on first ledger run | none |
+| Ordinary reopen, restart, WAL checkpoint | unchanged | same-incarnation eligibility only |
+| Consistent backup snapshot restored by file copy | copied with snapshot | continuity preserved; arbitrary/concurrent copies not certified |
+| Completed new-code dump recovery | new file zero → 1 on first ledger run | UNKNOWN at zero; all deleted before initialization commits |
+| New-code recovery interrupted after import | already zero | same; no recovery post-step required |
+| Pre-1B dump recovery, including interruption after import | already zero | same on first evidence-aware run, even if older code advanced cursor |
+| Recreation/fresh create | zero, empty table | none |
+| In-place REINDEX/VACUUM repair | unchanged | continuity preserved, not proof of completeness after corruption (§5.9) |
+| Graph reset by any build | unchanged | deleted by trigger (I4) |
+| Downgrade to pre-1B | unchanged | rows persist; triggers fire; no evidence consumer in that build |
+| Imported marker equals assigned 1 | zero → 1 | deterministically deleted before assignment; no collision exception |
+| Failure during initialization | rollback to zero or both operations committed | never committed usable marker with imported rows retained |
 
-Optional hardening (not required for I5): new-code `attemptDumpRecovery` may also delete evidence rows after a successful import. It must not be relied on.
+Optional new-code post-import deletion is redundant. **Mandatory rule 2 belongs to evidence-aware initialization**, not the recovering code. This contract authorizes no actual repair, import, restore or database operation.
 
 ### 5.3 Read path (`realtime-plane.ts`): stat-before-open, bounded fd read, identity
 
@@ -256,7 +258,7 @@ Covered by the three triggers (§5.1) plus an optional explicit `DELETE` in new-
 
 ### 5.10 Future classifier contract (spec only; not in the implementable slice)
 
-Any later read-only verifier must: read `cursor`, `user_version` and the row in one read transaction; probe the **named** file in the **recorded** directory (`dir_dev/dir_ino` compared first); open with `O_NOFOLLOW`, `fstat`, re-hash exactly `covered_bytes` through a bounded loop with its own independent size limit (never an allocation sized by the row), then `fstat`/`lstat` again; then re-read `cursor`, `user_version` and the row and require all three unchanged. Malformed cursor ⇒ every file `UNKNOWN_PLANE`. Any missing, inconsistent or mismatched input ⇒ UNKNOWN. The only affirmative code means: "the ledger committed decisions for exactly these bytes in this generation and incarnation, and a bounded read just now reproduced the digest with no detected endpoint change". It is point-in-time, excludes no writer holding a descriptor, and is not cleanup permission.
+Any later read-only verifier must first require `status === 'consumed'`, `malformed_lines === 0` (missing, invalid or non-zero ⇒ UNKNOWN), a valid non-zero header matching the row, and positive complete coverage (`covered_bytes === observed_bytes > 0`). These are necessary, not sufficient: it must also read `cursor`, `user_version` and the row in one read transaction; probe the **named** file in the **recorded** directory (`dir_dev/dir_ino` compared first); open with `O_NOFOLLOW`, `fstat`, re-hash exactly `covered_bytes` through a bounded loop with its own independent size limit (never an allocation sized by the row), then `fstat`/`lstat` again; then re-read `cursor`, `user_version` and the row and require all three unchanged. Malformed cursor ⇒ every file `UNKNOWN_PLANE`. Any missing, inconsistent or mismatched input ⇒ UNKNOWN. The only affirmative code means: "the ledger committed decisions for exactly these bytes in this generation and incarnation, and a bounded read just now reproduced the digest with no detected endpoint change". It is point-in-time, excludes no writer holding a descriptor, and is not cleanup permission.
 
 ---
 
@@ -334,7 +336,7 @@ Legend: ✔ addressed as evidence input only; — not addressed; gate names: **G
 | L8 | pre-existing cursor `D:k` with no rows (simulated upgrade) | D ⇒ `unverified_prefix`; earlier files no row; later files genuine |
 | L9 | oversize file (small `maxFileBytes`) | `skipped_oversize`, NULL identity; floor/cursor/errors identical to 1A T1 |
 | L10 | unreadable listed D after earlier progress | earlier rows written; D ⇒ `held`; later files no row; projection identical to 1A barrier suite |
-| L11 | unreadable D with no earlier progress | no transaction, no rows (seam asserts zero DB writes) |
+| L11 | unreadable D with no earlier progress | no **apply** transaction, projection/cursor writes or evidence upserts. With initialized header and existing state: zero data writes. At header zero: separate initialization clears imported evidence and sets marker even with no progress; assert those writes only. Account for state-row setup separately. |
 | L12 | D becomes readable after L10 | decided from `startLine`; `held` stays if `startLine > 0` (P4); fresh read replaces it if `startLine = 0` |
 | L13 | empty file and tail-only file in a committing run | `empty_observed`, `partial(0)` |
 | L14 | symlinked `realtime-D.jsonl` → regular file | projection unchanged; `unverified_identity` |
@@ -364,15 +366,24 @@ Legend: ✔ addressed as evidence input only; — not addressed; gate names: **G
 | N1 | fresh `initDatabase` | `user_version = 0` until the first ledger run; non-zero afterwards; stable across reopen |
 | N2 | `PRAGMA user_version = N` inside a transaction that throws | value unchanged after rollback |
 | N3 | two connections race on `0` | both end with the same value; no row ever carries a value other than the final one after one committing run each |
-| N4 | simulated recovery: copy schema and all rows (including state and evidence) into a new file via `ATTACH` + `INSERT … SELECT`, leave `user_version = 0`, reopen | rows untrusted: cursor-file resume ⇒ `unverified_prefix`; first commit purges them |
+| N4 | simulated recovery: copy schema and all rows (including state and evidence) into a new file via `ATTACH` + `INSERT … SELECT`, leave `user_version = 0`, reopen | all rows UNKNOWN at zero; initialization deletes imported rows before setting marker 1, preserving cursor/graph. Resume with `startLine > 0` now has **no row** ⇒ `unverified_prefix`; earlier cursor-skipped files have no row |
 | N5 | same as N4 but using the real `sqlite3 .dump` + import when the CLI is present (`skip` otherwise) | identical result |
 | N6 | N4 variant omitting some `threat_nodes` rows (partial recovery) | identical result; nothing re-trusts the old rows |
 | N7 | interruption: stop after the import step of a simulated new-code recovery, reopen without any post-step | identical result |
 | N8 | both entry paths: startup corrupt-DB recovery and `repairDatabase()` on a fixture made corrupt | identical result |
 | N9 | backup restore by `copyFileSync` of a healthy file | same `user_version`; rows trusted; resume chain continues |
 | N10 | downgrade simulation: run a reset through raw SQL with the table present | triggers fire; `user_version` untouched |
+| N11 | forced collision: imported consumed row stamped 1, retained cursor, omitted graph rows, header zero; completed/interrupted import and pre-1B recovery without a post-step | UNKNOWN before initialization; after assignment of 1, imported rows absent. Resume ⇒ unverified_prefix, never chained consumed; earlier files absent. No probability assumption. |
+| N12 | failure after deletion or marker assignment before commit; retry and successful control | rollback leaves zero header and untrusted imported rows; retry clears them. Success commits marker 1 with no imported rows. |
+| N13 | valid non-zero header, present consumed/partial row of another incarnation, otherwise matching prefix | mismatch ⇒ changed (P5). Missing-row control ⇒ unverified_prefix. Wrong-incarnation sticky control follows P4, remains UNKNOWN and may be removed by hygiene. |
+| N14 | read-only classifier, zero header, row stamped zero or 1 | UNKNOWN, no writes or initialization |
+| N15 | in-place REINDEX/VACUUM on healthy synthetic fixture | marker and logical graph/cursor/evidence unchanged; no completeness claim for corruption |
 
-### 7.6 Regression
+### 7.6 Future classifier tests (spec only)
+
+A later classifier must test a malformed but newline-terminated row with otherwise matching consumed status, coverage, cursor, incarnation, identity and digest: UNKNOWN because `malformed_lines === 1`. The valid-line control with `malformed_lines === 0` may be affirmative only if every other predicate holds. Missing/negative/non-integer counts, zero/mismatched headers and non-consumed statuses require separate UNKNOWN controls. No verifier implementation is included here.
+
+### 7.7 Regression
 
 `threat-graph-lease-jsonl.test.ts`, `realtime-ledger-barrier-579.test.ts`, `realtime-plane-cursor-579.test.ts`, `realtime-plane-reader-579.test.ts` and all `threat-graph-*` suites must stay green with only mechanical seam-name updates. L1's golden comparison is the executable form of I2.
 
@@ -410,14 +421,20 @@ Title: `feat(threat-graph): record exact-byte realtime consumption evidence (#57
 5. `src/threat-graph/projector.ts` `clearGraph`: optional explicit `DELETE` (D3). No `PROJECTOR_VERSION` change.
 6. Tests §7.1–7.5; seam renames in the 1A suites; one paragraph in `docs/design/2026-08-11-threat-graph.md` beside the Slice 1A paragraph stating "observation only; not cleanup permission".
 
-PR promise: "The realtime ledger records, in the same transaction as its cursor, the SHA-256, descriptor identity and directory identity of the exact bytes it decided from each realtime file, stamped with the database's evidence incarnation, with sticky non-affirmative states for oversize, held, changed, replaced or unverifiable files. Evidence is cleared on every graph reset and distrusted after any database recovery. Nothing reads it in production, nothing is compressed or deleted, zero disk reduction; #579 stays open."
+PR promise: "The realtime ledger records, in the same transaction as its cursor, the SHA-256, descriptor identity and directory identity of the exact bytes it decided from each realtime file, stamped with the database's evidence incarnation, with sticky non-affirmative states for oversize, held, changed, replaced or unverifiable files. Evidence is cleared on every graph reset and distrusted after dump/reimport or recreation, with imported evidence atomically invalidated before zero-header initialization. Consistent snapshot file-copy restore and in-place REINDEX/VACUUM preserve continuity, not proof of graph completeness. Nothing reads it in production, no audit file is compressed or deleted, zero disk reduction; #579 stays open."
 
 ---
 
-## 10. Not run, and refusals in this pass
+## 10. Original authoring-pass checks and refusals
 
 **NOT RUN:** build, typecheck, lint, Jest, fixtures, CLI/API/worker, live audit or database reads, compression, rename, unlink, replay, rebuild, migration, any write to a ShieldCortex database. Every behaviour above is derived from source at `cbe011ef`. The two SQLite observations in §5.2 were made against **in-memory** fixtures with the host's `sqlite3 3.45.1`, with no file created and no ShieldCortex code involved.
 
 **Refusal recorded:** one shell command in this pass ended with a recursive force delete of a scratch directory and was denied by the host Action Guard (`Catastrophic-tier … [recursive-force-delete]`). The delete was not retried in any form; the fixture was re-done in memory so no directory existed to remove. No read or write of this document or of repository files was refused.
 
 **Writes this pass:** this document only, on a documentation branch. No source, schema, test, guard, config or database change.
+
+## 11. Documentation repair verification
+
+The repair replaces probabilistic marker safety with mandatory atomic invalidation at zero-header initialization, adds the malformed-count classifier predicate, and reconciles initialization-on-run, missing-row/wrong-incarnation test oracles and recovery categories. All unresolved G1–G5 gates and D1–D3 decisions remain; no implementation or operational action is authorized.
+
+A bounded Python SQLite `:memory:` model (no ShieldCortex code or file database) retained cursor/evidence, omitted graph rows and forced imported marker 1 to equal the assigned marker. Commit left header 1 and zero imported rows. Rollback after deletion and after marker assignment each restored header zero and one untrusted imported row; cursor stayed unchanged. These three checks passed; they are not lifecycle integration tests or proof of an implementation. Documentation diff whitespace check passed. No build/full suite was needed for this design-only edit; CI and independent exact-head review remain gates.
