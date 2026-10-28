@@ -35,6 +35,8 @@ const run = (over: Partial<Parameters<typeof runAgentConfigWatch>[0]> = {}) =>
   runAgentConfigWatch({
     home,
     projectRoots: [project],
+    // Never the default drop directories: those include the real /tmp.
+    dropzoneDirs: [],
     notify: async (n) => { notes.push(n); },
     ledger: (r) => { rows.push(r); return true; },
     ...over,

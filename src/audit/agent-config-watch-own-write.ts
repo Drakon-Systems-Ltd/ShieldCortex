@@ -25,6 +25,7 @@ import {
   loadAgentConfigStateChecked,
   sameSnapshot,
   saveAgentConfigState,
+  sectionVersionsFor,
   snapshotContent,
   snapshotFile,
   watchedEntryForPath,
@@ -60,6 +61,7 @@ export function withOwnConfigWrite(filePath: string, write: () => string, home: 
     // Same semantic equality as the check: a harmless key reorder is not drift.
     if (!sameSnapshot(baseline, pre)) return; // foreign drift: leave it to alert
     fresh.state.files[entry.file] = snapshotContent(written, entry.spec);
+    fresh.state.sectionVersions = { ...(fresh.state.sectionVersions ?? {}), [entry.file]: sectionVersionsFor(entry.spec) };
     saveAgentConfigState(home, fresh.state);
   } catch { /* never break the installer */ }
 }

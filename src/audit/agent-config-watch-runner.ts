@@ -68,9 +68,10 @@ export function armChildDeadline(ms: number = CHILD_DEADLINE_MS, exit: () => voi
 
 /**
  * `channels` replaces the configured notification channels (test seam for the
- * transport only); `projectRoot` / `home` replace the argv root and agentConfigWatchHome().
+ * transport only); `projectRoot` / `home` replace the argv root and agentConfigWatchHome();
+ * `dropzoneDirs` replaces the default drop directories (tests never scan the real /tmp).
  */
-export async function main(overrides: { channels?: NotifyChannel[]; projectRoot?: string; home?: string; argv?: readonly string[] } = {}): Promise<void> {
+export async function main(overrides: { channels?: NotifyChannel[]; projectRoot?: string; home?: string; argv?: readonly string[]; dropzoneDirs?: string[] } = {}): Promise<void> {
   const home = overrides.home ?? agentConfigWatchHome();
   let config: Record<string, unknown> = {};
   try { config = JSON.parse(fs.readFileSync(path.join(home, '.shieldcortex', 'config.json'), 'utf-8')); } catch { /* defaults */ }
@@ -91,6 +92,7 @@ export async function main(overrides: { channels?: NotifyChannel[]; projectRoot?
     projectRoots: resolveProjectRoots(config, root),
     notify: (n: AgentConfigNotification) => send(buildAgentConfigChangeNotification(n)),
     ledger: makeAgentConfigLedger(logAudit),
+    ...(overrides.dropzoneDirs ? { dropzoneDirs: overrides.dropzoneDirs } : {}),
   });
 }
 

@@ -47,6 +47,8 @@ const run = (over: Partial<Parameters<typeof runAgentConfigWatch>[0]> = {}) =>
   runAgentConfigWatch({
     home,
     projectRoots: [project],
+    // Never the default drop directories: those include the real /tmp.
+    dropzoneDirs: [],
     notify: async (n) => { notes.push(n); },
     ledger: (r) => { rows.push(r); return true; },
     ...over,
@@ -191,7 +193,7 @@ import { armChildDeadline } from ${JSON.stringify(path.join(repoRoot, 'src', 'au
 const [home, project] = process.argv.slice(2);
 armChildDeadline(${CHILD_DEADLINE}, () => { process.stdout.write('DEADLINE\\n'); process.exit(3); });
 const rows: unknown[] = [];
-const r = await runAgentConfigWatch({ home, projectRoots: [project], notify: async () => {}, ledger: (row) => { rows.push(row); return true; }, totalBudgetMs: 2000 });
+const r = await runAgentConfigWatch({ home, projectRoots: [project], dropzoneDirs: [], notify: async () => {}, ledger: (row) => { rows.push(row); return true; }, totalBudgetMs: 2000 });
 process.stdout.write(JSON.stringify({ r, rows }) + '\\n');
 process.exit(0);
 `);

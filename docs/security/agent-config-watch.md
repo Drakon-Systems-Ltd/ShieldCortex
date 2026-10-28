@@ -58,6 +58,17 @@ anomaly 0.9 in the ledger). Values are never shown.
   time is baselined silently; after that an added or changed file alerts
   (`planted-instructions` / `planted-agent-config`) and a removal is silent.
 
+Upgrading is silent. The stored state records a version per section and
+file. A section added to an existing file (the Codex settings, the redirect
+section) or whose extraction changed (`env`, now without the redirect keys)
+is re-baselined without an alert the first time the new build sees it. The
+`env` split is exact (an entry's hash does not depend on its section), so an
+existing `ANTHROPIC_BASE_URL` never shows as "environment variable removed"
+plus "endpoint-redirect added", while a redirect value edited before the
+first post-upgrade check still alerts. The Codex sections and `apiKeyHelper`
+were never watched before, so their first post-upgrade value is the baseline.
+Drop directories new to the state baseline silently as above.
+
 Limits: detection is at session start, not live. A file planted and acted on
 within one session is reported only at the next session start, after the
 agent may already have obeyed it. Instruction files elsewhere (a cloned repo,

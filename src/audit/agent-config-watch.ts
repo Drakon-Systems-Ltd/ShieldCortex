@@ -50,6 +50,12 @@ export interface AgentConfigWatchState {
   fileErrors?: Record<string, string>;
   /** High-risk drop directories already baselined (planted instruction files). */
   dropzones?: string[];
+  /**
+   * Per state key: section keyPath -> the section version its stored entries
+   * were taken with. A known file with no record predates the record (every
+   * section version 1). See `migrateBaseline`.
+   */
+  sectionVersions?: Record<string, Record<string, number>>;
 }
 
 // ── Watched set (config, not scattered paths) ───────────────────────────────
@@ -72,6 +78,19 @@ export interface WatchedSectionSpec {
   kind: SectionKind;
   /** Builds the name -> value map to hash from the parsed file (default: the value at keyPath). */
   extract?: (parsed: unknown) => unknown;
+  /**
+   * Bumped when a section is added to an existing file spec or its extraction
+   * changes (default 1). A stored baseline taken at an older version is
+   * re-baselined silently for that section, so an upgrade never alerts on
+   * settings the user already had.
+   */
+  version?: number;
+  /**
+   * Exact migration from a version-1 baseline, when the old entries carry the
+   * information (same per-entry hashes, different section). Without it, the
+   * section takes the current value as its baseline.
+   */
+  fromV1?: (stored: FileSnapshot, current: FileSnapshot) => SectionMap;
 }
 
 export interface WatchedFileSpec {
@@ -98,6 +117,8 @@ export const REDIRECT_ENV_KEYS: readonly string[] = Object.freeze([
   'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_VERTEX_BASE_URL',
   'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NODE_EXTRA_CA_CERTS',
 ]);
+/** Claude Code setting whose command output becomes the API key (part of the redirect section). */
+export const API_KEY_HELPER_KEY = 'apiKeyHelper';
 const REDIRECT_ENV = new Set(REDIRECT_ENV_KEYS.map((k) => k.toUpperCase()));
 const isRedirectEnv = (k: string): boolean => REDIRECT_ENV.has(k.toUpperCase());
 
@@ -117,27 +138,54 @@ function claudeEndpointRedirect(parsed: unknown): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   const env = plainObject(getPath(parsed, 'env'));
   if (env) for (const [k, v] of Object.entries(env)) if (isRedirectEnv(k)) out[k] = v;
-  const helper = getPath(parsed, 'apiKeyHelper');
-  if (helper !== undefined) out.apiKeyHelper = helper;
+  const helper = getPath(parsed, API_KEY_HELPER_KEY);
+  if (helper !== undefined) out[API_KEY_HELPER_KEY] = helper;
   return out;
+}
+
+const CLAUDE_REDIRECT_SECTION = 'env+apiKeyHelper (redirect)';
+
+/** Version-1 `env` entries split by key: the redirect keys keep their old hashes in their new section. */
+function splitV1Env(stored: FileSnapshot, redirect: boolean): SectionMap {
+  return Object.fromEntries(Object.entries(stored.env ?? {}).filter(([k]) => isRedirectEnv(k) === redirect));
 }
 
 const CLAUDE_SETTINGS_SECTIONS: WatchedSectionSpec[] = [
   { keyPath: 'hooks', kind: 'hooks' },
-  { keyPath: 'env', kind: 'env', extract: claudeEnvOrdinary },
-  { keyPath: 'env+apiKeyHelper (redirect)', kind: 'endpointRedirect', extract: claudeEndpointRedirect },
+  // v2: the redirect keys moved out of `env` into their own section. Both
+  // migrate exactly (an entry's hash does not depend on its section), so an
+  // edit made just before the upgrade run still alerts; only apiKeyHelper,
+  // never watched before, takes its current value.
+  { keyPath: 'env', kind: 'env', extract: claudeEnvOrdinary, version: 2, fromV1: (stored) => splitV1Env(stored, false) },
+  {
+    keyPath: CLAUDE_REDIRECT_SECTION, kind: 'endpointRedirect', extract: claudeEndpointRedirect, version: 2,
+    fromV1: (stored, current) => {
+      const out = splitV1Env(stored, true);
+      const helper = current[CLAUDE_REDIRECT_SECTION]?.[API_KEY_HELPER_KEY];
+      if (helper) out[API_KEY_HELPER_KEY] = helper;
+      return out;
+    },
+  },
   { keyPath: 'mcpServers', kind: 'mcpServers' },
 ];
+
+/** Codex keys that loosen approval or the sandbox (top level and per `[profiles.<name>]`). */
+export const CODEX_SANDBOX_KEYS: readonly string[] = Object.freeze(['approval_policy', 'sandbox_mode']);
+/** Codex per-project key under `[projects."<path>"]`. */
+export const CODEX_TRUST_KEY = 'trust_level';
+/** Codex provider selector and the per-provider endpoint under `[model_providers.<name>]`. */
+export const CODEX_PROVIDER_KEY = 'model_provider';
+export const CODEX_PROVIDER_URL_KEY = 'base_url';
 
 /** Codex `approval_policy` / `sandbox_mode`, top level and per `[profiles.<name>]`. */
 function codexSandbox(parsed: unknown): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   const root = plainObject(parsed) ?? {};
-  for (const k of ['approval_policy', 'sandbox_mode']) if (root[k] !== undefined) out[k] = root[k];
+  for (const k of CODEX_SANDBOX_KEYS) if (root[k] !== undefined) out[k] = root[k];
   for (const [name, prof] of Object.entries(plainObject(root.profiles) ?? {})) {
     const p = plainObject(prof);
     if (!p) continue;
-    for (const k of ['approval_policy', 'sandbox_mode']) if (p[k] !== undefined) out[`profiles.${name}.${k}`] = p[k];
+    for (const k of CODEX_SANDBOX_KEYS) if (p[k] !== undefined) out[`profiles.${name}.${k}`] = p[k];
   }
   return out;
 }
@@ -147,7 +195,7 @@ function codexTrust(parsed: unknown): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [dir, proj] of Object.entries(plainObject(getPath(parsed, 'projects')) ?? {})) {
     const p = plainObject(proj);
-    if (p && p.trust_level !== undefined) out[dir] = p.trust_level;
+    if (p && p[CODEX_TRUST_KEY] !== undefined) out[dir] = p[CODEX_TRUST_KEY];
   }
   return out;
 }
@@ -156,10 +204,10 @@ function codexTrust(parsed: unknown): Record<string, unknown> {
 function codexProvider(parsed: unknown): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   const root = plainObject(parsed) ?? {};
-  if (root.model_provider !== undefined) out.model_provider = root.model_provider;
+  if (root[CODEX_PROVIDER_KEY] !== undefined) out[CODEX_PROVIDER_KEY] = root[CODEX_PROVIDER_KEY];
   for (const [name, prov] of Object.entries(plainObject(root.model_providers) ?? {})) {
     const p = plainObject(prov);
-    if (p && p.base_url !== undefined) out[`model_providers.${name}.base_url`] = p.base_url;
+    if (p && p[CODEX_PROVIDER_URL_KEY] !== undefined) out[`model_providers.${name}.${CODEX_PROVIDER_URL_KEY}`] = p[CODEX_PROVIDER_URL_KEY];
   }
   return out;
 }
@@ -183,9 +231,9 @@ export const WATCHED_FILES: readonly WatchedFileSpec[] = Object.freeze([
   { id: 'codex-config', scope: 'user', relPath: path.join('.codex', 'config.toml'), format: 'toml', sections: [
     { keyPath: 'mcp_servers', kind: 'mcpServers' },
     { keyPath: 'hooks', kind: 'hooks' },
-    { keyPath: 'approval_policy+sandbox_mode', kind: 'codexSandbox', extract: codexSandbox },
-    { keyPath: 'projects.*.trust_level', kind: 'codexTrust', extract: codexTrust },
-    { keyPath: 'model_provider+model_providers.*.base_url', kind: 'codexProvider', extract: codexProvider },
+    { keyPath: 'approval_policy+sandbox_mode', kind: 'codexSandbox', extract: codexSandbox, version: 2 },
+    { keyPath: 'projects.*.trust_level', kind: 'codexTrust', extract: codexTrust, version: 2 },
+    { keyPath: 'model_provider+model_providers.*.base_url', kind: 'codexProvider', extract: codexProvider, version: 2 },
   ] },
   // Editor tasks
   { id: 'vscode-tasks', scope: 'project', relPath: path.join('.vscode', 'tasks.json'), format: 'jsonc', sections: [{ keyPath: 'tasks', kind: 'tasks' }] },
@@ -198,18 +246,25 @@ export const WATCHED_FILES: readonly WatchedFileSpec[] = Object.freeze([
  * walked (the only listing is one level of a `.codex/` directory). The whole
  * file is hashed, never read for meaning, and removals are silent.
  */
+/** Instruction file names checked in each drop directory (also in the home directory itself). */
+export const PLANTED_INSTRUCTION_FILES: readonly string[] = Object.freeze(['AGENTS.md', 'AGENTS.override.md', 'CLAUDE.md']);
+/** Claude settings checked under `<drop dir>/.claude/` (not in the home directory: those are watched above). */
+export const PLANTED_CLAUDE_SETTINGS_FILES: readonly string[] = Object.freeze(['settings.json', 'settings.local.json']);
+/** Directory listed one level deep in each drop directory (not in the home directory). */
+export const PLANTED_CODEX_DIR = '.codex';
+
 export const DROPZONE_FILES: readonly WatchedFileSpec[] = Object.freeze([
-  ...(['AGENTS.md', 'AGENTS.override.md', 'CLAUDE.md'] as const).map((f) => (
+  ...PLANTED_INSTRUCTION_FILES.map((f) => (
     { id: `planted-${f}`, scope: 'dropzone' as const, relPath: f, format: 'raw' as const, ignoreRemovals: true, sections: [{ keyPath: 'instructions', kind: 'plantedInstructions' as const }] }
   )),
-  ...(['settings.json', 'settings.local.json'] as const).map((f) => (
+  ...PLANTED_CLAUDE_SETTINGS_FILES.map((f) => (
     { id: `planted-claude-${f}`, scope: 'dropzone' as const, relPath: path.join('.claude', f), format: 'raw' as const, ignoreRemovals: true, sections: [{ keyPath: 'agent-config', kind: 'plantedAgentConfig' as const }] }
   )),
-  { id: 'planted-codex-dir', scope: 'dropzone', relPath: '.codex', format: 'dir', ignoreRemovals: true, sections: [{ keyPath: 'agent-config', kind: 'plantedAgentConfig' }] },
+  { id: 'planted-codex-dir', scope: 'dropzone', relPath: PLANTED_CODEX_DIR, format: 'dir', ignoreRemovals: true, sections: [{ keyPath: 'agent-config', kind: 'plantedAgentConfig' }] },
 ]);
 
 /** Spec ids checked in the home directory itself (its real .claude/.codex are watched above). */
-const HOME_DROPZONE_IDS = new Set(['planted-AGENTS.md', 'planted-AGENTS.override.md', 'planted-CLAUDE.md']);
+const HOME_DROPZONE_IDS = new Set(PLANTED_INSTRUCTION_FILES.map((f) => `planted-${f}`));
 
 /** Default drop directories: ~/Downloads, ~/Desktop, the home directory and /tmp (top level only). */
 export function defaultDropzoneDirs(home: string): string[] {
@@ -759,6 +814,36 @@ export function specForPath(filePath: string, home: string, roots: string[]): Wa
   return watchedEntryForPath(filePath, home, roots)?.spec;
 }
 
+// ── Section versions (upgrade baselining) ───────────────────────────────────
+
+/** The current version of every section of a spec, as recorded in the state. */
+export function sectionVersionsFor(spec: WatchedFileSpec): Record<string, number> {
+  return Object.fromEntries(spec.sections.map((s) => [s.keyPath, s.version ?? 1]));
+}
+
+/**
+ * Upgrade baselining (#928 scope extension). A section whose stored version
+ * differs from the spec's (a section new to this file spec, or one whose
+ * extraction changed) is re-derived from the stored entries when its
+ * `fromV1` can do that exactly; otherwise it takes the CURRENT value as its
+ * baseline, silently (there is nothing stored to compare it with). Every other section keeps its
+ * stored entries, so a real change there still alerts. A known file without a
+ * version record predates the record: every section counts as version 1.
+ * Returns the stored snapshot unchanged when nothing needs migrating.
+ */
+export function migrateBaseline(spec: WatchedFileSpec, stored: FileSnapshot, current: FileSnapshot, recorded: Record<string, number> | undefined): FileSnapshot {
+  let out: FileSnapshot | undefined;
+  for (const s of spec.sections) {
+    const from = recorded?.[s.keyPath] ?? 1;
+    if (from === (s.version ?? 1)) continue;
+    out ??= { ...stored };
+    const taken = from === 1 && s.fromV1 ? s.fromV1(stored, current) : current[s.keyPath];
+    if (taken && Object.keys(taken).length) out[s.keyPath] = taken;
+    else delete out[s.keyPath];
+  }
+  return out ?? stored;
+}
+
 // ── Check ───────────────────────────────────────────────────────────────────
 
 export interface AgentConfigNotification {
@@ -843,7 +928,8 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
     const firstRun = !state.initialised;
     const knownRoots = new Set(state.roots);
     const knownDropzones = new Set(state.dropzones ?? []);
-    const next: AgentConfigWatchState = { ...state, version: 1, initialised: true, files: { ...state.files }, roots: [...new Set([...state.roots, ...roots])], dropzones: [...new Set([...(state.dropzones ?? []), ...dropzones])] };
+    const next: AgentConfigWatchState = { ...state, version: 1, initialised: true, files: { ...state.files }, roots: [...new Set([...state.roots, ...roots])], dropzones: [...new Set([...(state.dropzones ?? []), ...dropzones])], sectionVersions: { ...(state.sectionVersions ?? {}) } };
+    const versions = next.sectionVersions!;
     const changedFiles: Array<{ key: string; file: string; spec: WatchedFileSpec; before: FileSnapshot; after: FileSnapshot }> = [];
     const health: Record<string, { file: string; category: string }> = {};
     const targets = [
@@ -863,11 +949,26 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
         continue;
       }
       if (expired) return;
-      if (isUnparseable(after)) health[w.key] = { file: w.file, category: 'parse-error' };
+      const unparseable = isUnparseable(after);
+      if (unparseable) health[w.key] = { file: w.file, category: 'parse-error' };
       const known = Object.prototype.hasOwnProperty.call(state.files, w.key);
       // Baseline silently: first run, or a project root / drop directory we have not seen before.
-      if (firstRun || (w.root && !knownRoots.has(w.root)) || (w.dropzone && !knownDropzones.has(w.dropzone))) { next.files[w.key] = after; continue; }
-      const before = known ? state.files[w.key] : {};
+      if (firstRun || (w.root && !knownRoots.has(w.root)) || (w.dropzone && !knownDropzones.has(w.dropzone))) {
+        next.files[w.key] = after;
+        if (!unparseable) versions[w.key] = sectionVersionsFor(w.spec);
+        continue;
+      }
+      let before = known ? state.files[w.key] : {};
+      // Sections new since the stored baseline was taken baseline silently
+      // (an upgrade is not an attack). An unparseable file has no sections to
+      // take: it keeps its record and migrates once it parses again.
+      if (!unparseable) {
+        if (known) {
+          const migrated = migrateBaseline(w.spec, before, after, state.sectionVersions?.[w.key]);
+          if (migrated !== before) { before = migrated; next.files[w.key] = migrated; }
+        }
+        versions[w.key] = sectionVersionsFor(w.spec);
+      }
       if (!sameSnapshot(before, after)) changedFiles.push({ key: w.key, file: w.file, spec: w.spec, before, after });
       else if (!known) next.files[w.key] = after;
     }
