@@ -62,7 +62,7 @@ The realtime ledger (`src/threat-graph/realtime-ledger.ts`) is the only reader t
 | Fresh DB: `runMigrations` returns early (no `memories` table), then canonical schema | `src/database/migrations.ts:79-86`; `src/database/init.ts:1206-1209` | created by schema |
 | Upgraded DB: migrations, then canonical schema (`IF NOT EXISTS`) on every open | `init.ts:1206-1209` | created by schema; guarded migration is belt-and-braces |
 | Bundled/inline fallback when `schema.sql` is absent | `init.ts:956-967`; `src/database/inline-schema.ts:227` (state table) | must mirror DDL exactly |
-| Dump recovery (startup path and `repairDatabase`) | `init.ts:781-812`; callers `:1099-1101`, `:1371-1381` | rows reimported from a possibly partial DB; `.dump` emits data before triggers (§5.2) |
+| Dump recovery (startup path, and `repairDatabase` only after its `REINDEX`/`VACUUM` recheck still fails) | `init.ts:781-812`; callers `:1099-1101`, `:1371-1381` (the `repairDatabase` dump branch starts at `:1371`; the successful in-place return at `:1353` is not dump recovery, see N15) | rows reimported from a possibly partial DB; `.dump` emits data before triggers (§5.2) |
 | Backup restore (file copy) | `init.ts:238-240` (`copyFileSync`) | header preserved (§5.2) |
 | Repair "recreated" / fresh | `init.ts:1383-1399` | empty table |
 | Read-only inspection opens | `init.ts:160-163` | never create, never write |
@@ -370,7 +370,8 @@ Legend: ✔ addressed as evidence input only; — not addressed; gate names: **G
 | N5 | same as N4 but using the real `sqlite3 .dump` + import when the CLI is present (`skip` otherwise) | identical result |
 | N6 | N4 variant omitting some `threat_nodes` rows (partial recovery) | identical result; nothing re-trusts the old rows |
 | N7 | interruption: stop after the import step of a simulated new-code recovery, reopen without any post-step | identical result |
-| N8 | both entry paths: startup corrupt-DB recovery and `repairDatabase()` on a fixture made corrupt | identical result |
+| N8a | dump-recovery entry paths: startup corrupt-DB recovery (`init.ts:1099`, straight to dump), and `repairDatabase()` on a fixture whose integrity check still fails after `REINDEX`/`VACUUM` so the `:1371` dump branch runs | identical to N7/N11 result |
+| N8b | `repairDatabase()` on a fixture whose integrity check fails but passes after `REINDEX`/`VACUUM` (returns `repaired` at `init.ts:1353`, no dump) | identical to N15: marker, graph, cursor and evidence unchanged; no invalidation; no completeness claim |
 | N9 | backup restore by `copyFileSync` of a healthy file | same `user_version`; rows trusted; resume chain continues |
 | N10 | downgrade simulation: run a reset through raw SQL with the table present | triggers fire; `user_version` untouched |
 | N11 | forced collision: imported consumed row stamped 1, retained cursor, omitted graph rows, header zero; completed/interrupted import and pre-1B recovery without a post-step | UNKNOWN before initialization; after assignment of 1, imported rows absent. Resume ⇒ unverified_prefix, never chained consumed; earlier files absent. No probability assumption. |
