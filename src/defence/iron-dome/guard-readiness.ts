@@ -751,6 +751,7 @@ const STOP_OUTCOMES = new Set([
   'would_block',
   'asked',
   'denied_no_prompt_surface',
+  'held_no_prompt_surface',
   'warned',
   'auto_denied',
 ]);

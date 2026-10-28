@@ -1231,6 +1231,93 @@ function isSecretEgress(signals: string[]): boolean {
   });
 }
 
+/** One card line: control characters and line breaks become spaces (the
+ *  fields crossed a process boundary since approval-card.ts built them), then
+ *  clipped with an ellipsis. Empty in → empty out. */
+function clipCardField(text: unknown, max: number): string {
+  const flat = String(text ?? '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (max <= 1) return '';
+  return flat.length <= max ? flat : `${flat.slice(0, max - 1).trimEnd()}…`;
+}
+
+/** Split `room` characters across fields: a field that fits its fair share
+ *  keeps its full length and hands the rest back; the fields still too long
+ *  share what is left, the first (What) taking any odd remainder. The caps
+ *  never sum past `room`. */
+function shareCardRoom(lengths: number[], room: number): number[] {
+  const caps = lengths.map(() => 0);
+  let open = lengths.map((_, i) => i);
+  let left = room;
+  for (;;) {
+    const fair = Math.floor(left / Math.max(1, open.length));
+    const fits = open.filter((i) => lengths[i] <= fair);
+    if (fits.length === 0) break;
+    for (const i of fits) { caps[i] = lengths[i]; left -= lengths[i]; }
+    open = open.filter((i) => lengths[i] > fair);
+    if (open.length === 0) return caps;
+  }
+  const fair = Math.floor(left / open.length);
+  open.forEach((i) => { caps[i] = fair; });
+  caps[open[0]] += left - fair * open.length;
+  return caps;
+}
+
+/**
+ * #853 — the HELD card: one plain-English card for an action that was held
+ * on a box with no prompt surface. Same 256-character budget and the same
+ * spending order as the #310 copy: the OUTCOME line — what Approve does, and
+ * that Deny or silence means nothing runs — is mandatory and never truncated,
+ * because it is what makes a tap safe to make. What / Why / Who share
+ * whatever is left; What is clipped last.
+ *
+ * No surface text is printed here at all, secret-egress or not: the What
+ * line is approval-card.ts's redactor-passed summary (#648), not the command.
+ */
+function buildHeldCardFields(input: RetryCardCopyInput): RetryCardFields | null {
+  const card = input.card;
+  if (!card || typeof card !== 'object') return null;
+  const what = clipCardField(card.action, CARD_DESCRIPTION_MAX);
+  const why = clipCardField(card.reason, CARD_DESCRIPTION_MAX);
+  const who = clipCardField(card.who, CARD_DESCRIPTION_MAX);
+  if (!what || !why || !who) return null;
+
+  const tool = String(input.tool || 'tool').slice(0, 32);
+  const rawTitle = `Held, not run: approve once? ${tool}`;
+  const title = rawTitle.length <= CARD_TITLE_MAX ? rawTitle : `${rawTitle.slice(0, CARD_TITLE_MAX - 1)}…`;
+
+  const grantMinutes = Math.max(1, Math.round(input.ttlMs / 60_000));
+  const cardMinutes = Math.max(1, Math.round(RETRY_CARD_LIFETIME_MS / 60_000));
+  // Approve ALLOWS a retry; it never runs the call by itself.
+  const outcome =
+    `Outcome: held, NOT run. Approve = allows ONE retry within ${grantMinutes}m (${scopeTail(input.cwd)}). `
+    + `Deny, or no answer in ${cardMinutes}m = nothing runs.`;
+
+  // " | " between four parts, plus the three labels.
+  const labels = 'What: '.length + 'Why: '.length + 'Who: '.length;
+  const room = CARD_DESCRIPTION_MAX - outcome.length - 3 * 3 - labels;
+  // Not enough room for a useful line each: fall back to the #310 copy rather
+  // than ever cutting into the outcome line.
+  if (room < 36) return null;
+  const [whatCap, whyCap, whoCap] = shareCardRoom([what.length, why.length, who.length], room);
+  const parts = [
+    `What: ${clipCardField(what, whatCap)}`,
+    `Why: ${clipCardField(why, whyCap)}`,
+    `Who: ${clipCardField(who, whoCap)}`,
+    outcome,
+  ];
+  const surfaceTruncated = what.length > whatCap || why.length > whyCap || who.length > whoCap;
+  return {
+    title,
+    description: parts.join(' | '),
+    surfaceWithheld: true,
+    surfaceTruncated,
+  };
+}
+
 /** Last two path segments, bounded — enough for an operator to recognise the
  *  job without spending the description budget on a deep path. */
 export function scopeTail(cwd?: string): string {
@@ -1250,6 +1337,11 @@ export interface RetryCardCopyInput {
   /** When the schedule that produced this denial fires less often than the
    *  grant can be spent, the card must SAY so (design: card copy). */
   cronIntervalMs?: number;
+  /** #853 — the plain-English What / Why / Who (approval-card.ts
+   *  `buildApprovalCard`, built on this box with targets already through the
+   *  credential redactor). Present → the HELD card copy; absent (older dist,
+   *  or a summariser that threw) → the #310 copy, unchanged. */
+  card?: { action: string; reason: string; who: string };
 }
 
 export interface RetryCardFields {
@@ -1274,6 +1366,8 @@ export interface RetryCardFields {
  * the audit row: the card is the CONTROL, the webhook is the RECORD.
  */
 export function buildRetryCardFields(input: RetryCardCopyInput): RetryCardFields {
+  const held = buildHeldCardFields(input);
+  if (held) return held;
   const tool = String(input.tool || 'tool').slice(0, 32);
   const topSignal = String(input.signals?.[0] ?? 'action-guard').slice(0, 32);
   const rawTitle = `Approve once? ${tool} · ${topSignal}`;

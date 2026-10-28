@@ -998,6 +998,33 @@ function approvalCardFor(notify, channel, { toolName, toolInput, verdict, sessio
   }
 }
 
+/**
+ * #853 — the held card's What / Why / Who for a call that could not be asked
+ * about in-session. The same #648 summariser the live-hold card uses, with
+ * the same redaction; only ever handed to the retry-card waiter, never to the
+ * webhook (which keeps its values-free surface). Never throws.
+ */
+function heldCardFor(notify, { toolName, toolInput, verdict, sessionKey, cwd }) {
+  if (typeof notify?.buildApprovalCard !== 'function') return undefined;
+  try {
+    const card = notify.buildApprovalCard({
+      tool: String(toolName ?? ''),
+      input: toolInput,
+      signals: Array.isArray(verdict?.signals) ? verdict.signals.map(String) : [],
+      plane: 'claude-code',
+      sessionId: notificationContext(sessionKey).sessionId,
+      cwd: typeof cwd === 'string' ? cwd : undefined,
+      agentPid: process.ppid,
+    });
+    if (!card || typeof card.action !== 'string' || typeof card.reason !== 'string' || typeof card.who !== 'string') {
+      return undefined;
+    }
+    return { action: card.action, reason: card.reason, who: card.who };
+  } catch {
+    return undefined;
+  }
+}
+
 async function pingOperator(notify, { toolName, toolInput, verdict, hash, noPromptSurface, sessionKey, attemptId, cwd }) {
   if (!notify) return null;
   const denied = typeof noPromptSurface === 'string' && noPromptSurface.length > 0;
@@ -1108,7 +1135,7 @@ function isSchemaInvalid(verdict) {
     || (Array.isArray(verdict?.signals) && verdict.signals.includes('invalid-tool-input'));
 }
 const MAX_SESSION_SALT_RECOVERY_ATTEMPTS = 256;
-const GUARD_DEGRADED_OUTCOMES = new Set(['auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed']);
+const GUARD_DEGRADED_OUTCOMES = new Set(['auto_denied', 'denied_no_prompt_surface', 'held_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed']);
 const SAFE_BROKER_OUTCOMES = new Set(['harden', 'pre_clear', 'hold', 'unavailable', 'not_brokerable']);
 const SAFE_JUDGE_ASSESSMENTS = new Set(['approve', 'deny', 'hold', 'uncertain', 'in_context', 'out_of_context', 'benign', 'unavailable']);
 /** #143 residual — why a judge is 'unavailable'. Allowlisted, like every other
@@ -1665,27 +1692,90 @@ function safeGuardOutcomeReason(verdict, outcome, event) {
   if (outcome === 'denied_no_prompt_surface') {
     return 'Action Guard required approval but this session has no prompt surface; the tool call was denied.';
   }
+  if (outcome === 'held_no_prompt_surface') {
+    // #853: held, NOT run. Approval grants one scoped retry; it never runs
+    // the call by itself.
+    return 'Action Guard required approval but this session has no prompt surface; the tool call was held (not run) under an owner approval card.';
+  }
   if (String(verdict?.reason ?? '').toLowerCase().includes('guard unavailable')) {
     return 'Action Guard was unavailable and fallback policy denied the tool call; inspect local audit for details.';
   }
   return 'Action Guard denied the tool call; inspect local audit for details.';
 }
 
-function terminalDecisionReason(verdict, outcome, event) {
+/** #853 — why a no-prompt-surface call got NO card, in words safe for the
+ *  agent and the operator. Never names a value from the tool input. */
+const NO_CARD_REASONS = Object.freeze({
+  'retry-cards-off': 'approval cards are off on this host (actionGuard.retryCards)',
+  'no-openclaw-card-channel': 'no card channel is configured on this host',
+  'budget-exhausted': "this window's card budget is spent",
+  'grant-live': 'an approval for this exact action is already live and unspent',
+  suppressed: 'the owner denied this exact action recently',
+  unscopeable: 'the session has no working directory to scope an approval to',
+  'not-found': 'the retry record could not be found',
+  locked: 'the retry store was busy',
+  unwritable: 'the retry store could not be written',
+  'no-key': 'the retry store key is unavailable',
+});
+
+function noCardReasonFor(retry, retryCard, notify) {
+  if (!retry) return 'the retry plane is unavailable on this host';
+  if (retry.config?.retryCards !== true) return NO_CARD_REASONS['retry-cards-off'];
+  if (!retryCard) return 'the denial could not be recorded for a card';
+  const reason = String(retryCard.reason ?? '');
+  if (Object.hasOwn(NO_CARD_REASONS, reason)) return NO_CARD_REASONS[reason];
+  if (reason.startsWith('waiter failed to start')) return 'the card process failed to start';
+  if (!notify?.openclawBin) return NO_CARD_REASONS['no-openclaw-card-channel'];
+  return 'the card was not raised';
+}
+
+/** Card lifetime in whole minutes, for agent copy only. */
+function wholeMinutes(ms, fallback) {
+  const n = Number(ms);
+  return Number.isFinite(n) && n > 0 ? Math.max(1, Math.round(n / 60_000)) : fallback;
+}
+
+/**
+ * The agent-facing reason. `disposition` is the #853 result of the card step
+ * (alertGuardOutcome's return): `hold` set → HELD copy; otherwise the
+ * denial copy, plus why no card was requested when that is known. A held
+ * call is still a `deny` decision to the harness (a per-call hook must decide
+ * NOW) — what changes is that the agent is told the truth: it did not fail,
+ * it is waiting on the owner, and approval grants ONE retry, not a run.
+ */
+function terminalDecisionReason(verdict, outcome, event, disposition = null) {
   const signals = safeSignalList(verdict?.signals);
   const suffix = signals.length > 0 ? ` [${signals.join(', ')}]` : '';
-  const nextStep = outcome === 'denied_no_prompt_surface'
-    ? (
-      // UX: tell the AGENT what to do next — pinned lane or one-shot human approve.
-      // Never steer toward enforce:false / broad autoApprove (#386).
-      ' Headless session: do NOT retry freehand network/gh/curl. '
-      + 'If a reviewed/pinned work-lane script exists for this job, run that path instead. '
-      + 'Otherwise wait for operator: shieldcortex approve --denial <actionId> (one-shot), or an Approve-once card if raised. '
-      + 'Do not set actionGuard.enforce:false.'
-    )
-    : '';
   const severity = safeSeverity(verdict?.severity, event);
   const severityPrefix = severity === 'critical' ? 'Catastrophic-tier. ' : '';
+  const hold = disposition?.hold;
+  if (outcome === 'held_no_prompt_surface' && hold) {
+    const grantMin = wholeMinutes(hold.ttlMs, 15);
+    const cardLine = hold.card === 'open'
+      ? 'An approval card for this exact action is already open with the owner (no second card is sent). '
+      : 'An approval card for this exact action has been requested for the owner (requested, not confirmed delivered). ';
+    return `ShieldCortex Action Guard: ${severityPrefix}HELD, not run — this session has no prompt surface, so nobody here can approve it. `
+      + cardLine
+      + 'Approval does NOT run it for you: it allows ONE retry of this same call, from this same directory, '
+      + `within ${grantMin}m of the approval. Deny, or no answer before the card expires, means nothing ran. `
+      + 'Do not work around the hold or freehand-retry network/gh/curl; report it as waiting on owner approval, '
+      + 'and retry this exact call only once the owner has approved. '
+      + 'Do not set actionGuard.enforce:false.'
+      + suffix;
+  }
+  let nextStep = '';
+  if (outcome === 'denied_no_prompt_surface') {
+    // UX: tell the AGENT what to do next — pinned lane or one-shot human approve.
+    // Never steer toward enforce:false / broad autoApprove (#386).
+    // #853: never claim a card that was not requested.
+    const why = typeof disposition?.noCardReason === 'string'
+      ? ` No approval card was requested: ${disposition.noCardReason}.`
+      : '';
+    nextStep = `${why} Headless session: do NOT retry freehand network/gh/curl. `
+      + 'If a reviewed/pinned work-lane script exists for this job, run that path instead. '
+      + 'Otherwise wait for operator: shieldcortex approve --denial <actionId> (one-shot). '
+      + 'Do not set actionGuard.enforce:false.';
+  }
   return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${nextStep}${suffix}`;
 }
 
@@ -1829,6 +1919,9 @@ async function raiseRetryCard(retry, notify, ctx) {
       redactedSurface: ctx.redactedSurface,
       cwd: ctx.cwd,
       ttlMs: retry.config.retryGrantTtlMs,
+      // #853: the plain-English What / Why / Who. Undefined on an older dist
+      // (no approval-card module) — the card then keeps the #310 copy.
+      ...(ctx.card ? { card: ctx.card } : {}),
     });
     const child = spawn(
       process.execPath,
@@ -1878,16 +1971,27 @@ function retryBudgetWindow(digestDecision) {
   return { windowStartMs: Math.floor(nowMs / windowMs) * windowMs, windowMs };
 }
 
-async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict, outcome, event, sessionKey, actionId, retryCtx }) {
+async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict, outcome, event, sessionKey, actionId, retryCtx, onDisposition }) {
   const id = actionId || mintActionId();
   // #284 dual-review blocker (SOL): write the denial row FIRST with notify pending,
   // then attempt delivery and append/update status. A hang/crash during notify must
   // not drop the forensics row that operators open first (denials.jsonl).
-  const pendingRow = buildLocalGuardOutcome({
-    toolName, toolInput, verdict, outcome, event, sessionKey, actionId: id,
-    notify: { status: 'pending', deliveredVia: null },
-  });
-  recordLocalGuardOutcome(pendingRow);
+  //
+  // #853: a no-prompt-surface row is the one exception, and only by the few
+  // bounded local steps below (module import, fingerprint, digest, card
+  // claim + detached spawn — no network): whether it is HELD or DENIED is not
+  // known until the card step has run, and writing `denied_no_prompt_surface`
+  // for an action a card is now holding is exactly the false row #853 is
+  // about. The pending row still precedes delivery, which is what can hang.
+  const noSurface = outcome === 'denied_no_prompt_surface';
+  let pendingRow = null;
+  if (!noSurface) {
+    pendingRow = buildLocalGuardOutcome({
+      toolName, toolInput, verdict, outcome, event, sessionKey, actionId: id,
+      notify: { status: 'pending', deliveredVia: null },
+    });
+    recordLocalGuardOutcome(pendingRow);
+  }
 
   let notify = null;
   try {
@@ -1973,6 +2077,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
         signals: safeSignalList(verdict?.signals),
         redactedSurface: redactedActionSurface(toolName, toolInput),
         cwd: retryStep.row?.originScope?.cwd,
+        card: heldCardFor(notify, { toolName, toolInput, verdict, sessionKey, cwd: retryCtx?.cwd }),
         ...retryBudgetWindow(digestDecision),
       });
     } catch {
@@ -1980,7 +2085,11 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
     }
     if (retryCard?.raised) {
       console.error(
-        `[shieldcortex] Approve-once card raised for ${safeToolName(toolName)} (${id}) — operator can tap Approve once or Deny. Do not freehand-retry network.`,
+        `[shieldcortex] Approve-once card requested for ${safeToolName(toolName)} (${id}) — operator can tap Approve once or Deny. Do not freehand-retry network.`,
+      );
+    } else if (retryCard?.reason === 'already-claimed') {
+      console.error(
+        `[shieldcortex] ${safeToolName(toolName)} (${id}) is already held under an open card for this exact action — no second card.`,
       );
     } else if (retry?.config?.retryCards === true && retryCard && !retryCard.raised) {
       console.error(
@@ -1988,6 +2097,29 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
         + 'Use a pinned work lane if one exists, or: shieldcortex approve --denial ' + id,
       );
     }
+  }
+
+  // #853 — HELD, not silently denied: an approval card for this exact action
+  // was requested just now, or one is still open from an earlier attempt
+  // (`already-claimed`: one card per action identity — the dedupe key is the
+  // #310 fingerprint, the #118 call hash plus the canonical harness cwd).
+  // Anything else — cards off, no card transport, budget spent, the owner's
+  // own Deny, a store that could not be written — is still a denial, and
+  // says so: nothing here may claim a card that was not requested.
+  const held = noSurface && !retrySuppressed
+    && (retryCard?.raised === true || retryCard?.reason === 'already-claimed');
+  const rowOutcome = held ? 'held_no_prompt_surface' : outcome;
+  if (!pendingRow) {
+    pendingRow = buildLocalGuardOutcome({
+      toolName, toolInput, verdict, outcome: rowOutcome, event, sessionKey, actionId: id,
+      notify: { status: 'pending', deliveredVia: null },
+    });
+    recordLocalGuardOutcome(pendingRow);
+  }
+  // #853: the caller's terminal audit row, written with the TRUE outcome and
+  // still before delivery (which is what can hang). Never allowed to throw.
+  if (typeof onDisposition === 'function') {
+    try { onDisposition(rowOutcome); } catch { /* the denials.jsonl row above stands */ }
   }
 
   if (retrySuppressed) {
@@ -2114,7 +2246,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
   // so operators can see both "denied" and "were they told" without losing the
   // first row if delivery hangs.
   const finalRow = buildLocalGuardOutcome({
-    toolName, toolInput, verdict, outcome, event, sessionKey, actionId: id,
+    toolName, toolInput, verdict, outcome: rowOutcome, event, sessionKey, actionId: id,
     notify: notifyStatus,
   });
   recordLocalGuardOutcome(finalRow);
@@ -2124,6 +2256,19 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
     attempts: deliveryResult?.attempts ?? [],
     notify: notifyStatus,
     actionId: id,
+    outcome: rowOutcome,
+    // #853: what the AGENT is told next (terminalDecisionReason). `card` is
+    // 'requested' (spawned now — requested, not known delivered) or 'open'
+    // (an earlier card for this exact action is still live). Never 'sent'.
+    hold: held
+      ? { card: retryCard?.raised === true ? 'requested' : 'open', ttlMs: retry?.config?.retryGrantTtlMs }
+      : null,
+    ...(retrySuppressed && typeof retryStep?.suppressedUntilMs === 'number'
+      ? { suppressedUntilMs: retryStep.suppressedUntilMs }
+      : {}),
+    ...(noSurface && !held && !retrySuppressed
+      ? { noCardReason: noCardReasonFor(retry, retryCard, notify) }
+      : {}),
   };
 }
 
@@ -2949,31 +3094,55 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
     emitDecision('ask', safeDiagnosticApprovalReason(reason));
     return;
   }
-  const actionId = writeTerminalOutcomeAudit(toolName, { ...auditVerdict, reason }, toolInput, action, 'denied_no_prompt_surface', 'action_guard_denial', {
-    ...baseExtra,
-    ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}),
-    noPromptSurfaceReason: noPromptSurface,
-    ...broker,
-  });
-  const notified = await alertGuardOutcome(notify, {
-    toolName,
-    toolInput,
-    verdict: { ...auditVerdict, reason },
-    outcome: 'denied_no_prompt_surface',
-    event: 'action_guard_denial',
-    sessionKey: baseExtra.sessionKey,
-    actionId,
-    // #310. Null on every caller but the real dangerous-tier path: a DEGRADED
-    // guard (handleDegradedGuard) mints no retry affordance, because a scan
-    // that could not run is not a verdict an operator should be offered a
-    // one-tap retry of.
-    retryCtx,
-  });
+  // #853: the terminal audit row waits for the card step — `held_` when a
+  // card is holding this exact action, `denied_` otherwise — but is still
+  // written before delivery (alertGuardOutcome's onDisposition), and is
+  // written as a denial here if that step never got that far.
+  const actionId = baseExtra.actionId || mintActionId();
+  let terminalWritten = false;
+  const writeTerminal = (terminalOutcome) => {
+    if (terminalWritten) return;
+    terminalWritten = true;
+    writeTerminalOutcomeAudit(toolName, { ...auditVerdict, reason }, toolInput, action, terminalOutcome, 'action_guard_denial', {
+      ...baseExtra,
+      actionId,
+      ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}),
+      noPromptSurfaceReason: noPromptSurface,
+      ...broker,
+    });
+  };
+  let notified = null;
+  try {
+    notified = await alertGuardOutcome(notify, {
+      toolName,
+      toolInput,
+      verdict: { ...auditVerdict, reason },
+      outcome: 'denied_no_prompt_surface',
+      event: 'action_guard_denial',
+      sessionKey: baseExtra.sessionKey,
+      actionId,
+      // #310. Null on every caller but the real dangerous-tier path: a DEGRADED
+      // guard (handleDegradedGuard) mints no retry affordance, because a scan
+      // that could not run is not a verdict an operator should be offered a
+      // one-tap retry of.
+      retryCtx,
+      onDisposition: writeTerminal,
+    });
+  } finally {
+    writeTerminal('denied_no_prompt_surface');
+  }
   recordNotifyAudit(toolName, { ...auditVerdict, reason }, toolInput, { ...baseExtra, actionId }, notified);
-  console.error(
-    `[shieldcortex] action-guard DENIED ${safeToolName(toolName)}: approval required, but ${noPromptSurface} — denying rather than raising a prompt nothing will answer.`,
-  );
-  emitDecision('deny', terminalDecisionReason({ ...auditVerdict, reason }, 'denied_no_prompt_surface', 'action_guard_denial'));
+  const outcome = notified?.outcome === 'held_no_prompt_surface' ? 'held_no_prompt_surface' : 'denied_no_prompt_surface';
+  if (outcome === 'held_no_prompt_surface') {
+    console.error(
+      `[shieldcortex] action-guard HELD ${safeToolName(toolName)} (${actionId}): approval required, but ${noPromptSurface} — not run; owner approval card ${notified.hold?.card === 'open' ? 'already open' : 'requested'}. Approval grants one scoped retry.`,
+    );
+  } else {
+    console.error(
+      `[shieldcortex] action-guard DENIED ${safeToolName(toolName)}: approval required, but ${noPromptSurface} — denying rather than raising a prompt nothing will answer.`,
+    );
+  }
+  emitDecision('deny', terminalDecisionReason({ ...auditVerdict, reason }, outcome, 'action_guard_denial', notified));
 }
 
 /**

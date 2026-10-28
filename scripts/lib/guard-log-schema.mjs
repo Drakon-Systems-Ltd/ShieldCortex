@@ -58,9 +58,13 @@ const SIGNAL_SET = new Set(GUARD_SIGNAL_VOCABULARY);
 
 /** Record contracts. A row is a DENIAL only if BOTH its event and outcome say so. */
 export const EVENT_ENUM = Object.freeze(['action_guard_denial', 'action_guard_warning']);
-export const DENIAL_OUTCOMES = Object.freeze(['auto_denied', 'denied_no_prompt_surface', 'failure_denied']);
+// #853: `held_no_prompt_surface` is a stop too — the call did not run; an
+// owner card may later grant ONE scoped retry (a `retry_granted` row).
+export const DENIAL_OUTCOMES = Object.freeze(['auto_denied', 'denied_no_prompt_surface', 'held_no_prompt_surface', 'failure_denied']);
 export const WARNING_OUTCOMES = Object.freeze(['warned', 'failure_allowed']);
-export const RETRY_OUTCOMES = Object.freeze(['retry_granted', 'retry_denied', 'retry_grant_failed']);
+// #853: `retry_expired` (card unanswered/closed — nothing ran) and
+// `retry_card_failed` (card never delivered — nothing ran) grant nothing.
+export const RETRY_OUTCOMES = Object.freeze(['retry_granted', 'retry_denied', 'retry_grant_failed', 'retry_expired', 'retry_card_failed']);
 export const OUTCOME_ENUM = Object.freeze([...DENIAL_OUTCOMES, ...WARNING_OUTCOMES, ...RETRY_OUTCOMES]);
 
 export const NOTIFY_STATUS_ENUM = Object.freeze([

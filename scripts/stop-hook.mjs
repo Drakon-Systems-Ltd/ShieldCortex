@@ -179,6 +179,7 @@ const MAX_SESSION_SALT_RECOVERY_ATTEMPTS = 256;
 const GUARD_DEGRADED_OUTCOMES = new Set([
   'auto_denied',
   'denied_no_prompt_surface',
+  'held_no_prompt_surface',
   'failure_denied',
   'warned',
   'failure_allowed',

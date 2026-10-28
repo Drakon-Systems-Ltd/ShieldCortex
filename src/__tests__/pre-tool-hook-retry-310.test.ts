@@ -247,7 +247,7 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     expect(body).not.toContain('budget_exhausted');
     expect(body).toMatch(/held \(headless/i);
     expect(body).toMatch(/No Approve card/i);
-    expect(r.stderr).not.toMatch(/retry card raised|Approve-once card raised/);
+    expect(r.stderr).not.toMatch(/retry card raised|Approve-once card (raised|requested)/);
   });
 
   it('stays card-dark for a config that merely mentions retryCards without true', () => {

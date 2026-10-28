@@ -22,6 +22,11 @@
  *   'deny'        → recordDenySuppression(fingerprint)   — windowed silence
  *   anything else → NOTHING
  *
+ * #853: an expired (or host-closed) card still changes NOTHING in the store,
+ * but it is now REPORTED — a `retry_expired` row that says nothing ran — and a
+ * card request the gateway refused leaves a `retry_card_failed` row, so a card
+ * the agent was told had been requested never disappears silently.
+ *
  * "Anything else" is load-bearing, same as #143: a timed-out card comes back
  * as `decision: null`, and silence from a human is not a "no" — the
  * fingerprint simply ages out on its own retention. A gateway error, an
@@ -92,7 +97,8 @@ export type RetryWaiterReceipt =
   | { phase: 'failed'; reason: string }
   | { phase: 'granted'; actionId?: string }
   | { phase: 'grant_failed'; reason: string; actionId?: string }
-  | { phase: 'denied'; untilMs: number; actionId?: string };
+  | { phase: 'denied'; untilMs: number; actionId?: string }
+  | { phase: 'expired'; actionId?: string };
 
 export type RetryWaiterOutcome =
   | { acted: 'granted'; id: string }
@@ -275,6 +281,27 @@ export async function runRetryWaiter(
     // Deliberately NOT cleared: the launcher's poll window is short, and a
     // fast failure must still be readable when it looks.
     writeReceipt(args.receiptPath, { phase: 'failed', reason });
+    // #853: the hook told the agent a card was REQUESTED, never that one was
+    // delivered. This row is where the operator learns how it ended. A wait
+    // the process timer killed may have reached the owner and simply gone
+    // unanswered — that is an expiry, not a failed delivery, and neither
+    // claim is made beyond what is known. The gateway's error text is not
+    // copied: it is host output, not our copy.
+    const timedOut = err instanceof Error
+      && ((err as { killed?: boolean }).killed === true || (err as { signal?: unknown }).signal === 'SIGKILL');
+    appendOutcome(
+      {
+        event: 'action_guard_denial',
+        outcome: timedOut ? 'retry_expired' : 'retry_card_failed',
+        origin: 'claude-code-hook',
+        reason: timedOut
+          ? 'the held-action card got no answer before the wait ended; nothing ran'
+          : 'the held-action approval card request failed and may not have reached the owner; the action has NOT run',
+        nextStep: `shieldcortex approve --denial ${args.actionId ?? '<actionId>'}`,
+        ...(args.actionId ? { actionId: args.actionId } : {}),
+      },
+      { home: deps.home },
+    );
     return { acted: 'nothing', reason };
   }
 
@@ -362,10 +389,38 @@ export async function runRetryWaiter(
     return { acted: 'denied', untilMs: outcome.untilMs };
   }
 
+  if (decision === null || decision === 'timeout' || decision === 'cancelled') {
+    // #853: still NOTHING in the store — silence is not consent, and it is
+    // not a no either; the claim ages out and the epoch advances on its own.
+    // What changes is that the expiry is REPORTED, and says plainly that
+    // nothing ran, instead of the card vanishing without a trace.
+    writeReceipt(args.receiptPath, {
+      phase: 'expired',
+      ...(args.actionId ? { actionId: args.actionId } : {}),
+    });
+    appendOutcome(
+      {
+        event: 'action_guard_denial',
+        outcome: 'retry_expired',
+        origin: 'claude-code-hook',
+        reason: decision === 'cancelled'
+          ? 'the held-action card was closed without an answer; nothing ran'
+          : 'the held-action card expired unanswered; nothing ran',
+        nextStep: `shieldcortex approve --denial ${args.actionId ?? '<actionId>'}`,
+        ...(args.actionId ? { actionId: args.actionId } : {}),
+      },
+      { home: deps.home },
+    );
+    return {
+      acted: 'nothing',
+      reason: `no actionable decision (${decision === 'cancelled' ? 'card closed unanswered' : 'card expired unanswered'})`,
+    };
+  }
+
   clearReceipt(args.receiptPath);
   return {
     acted: 'nothing',
-    reason: `no actionable decision (${decision === null ? 'card expired unanswered' : String(decision)})`,
+    reason: `no actionable decision (${String(decision)})`,
   };
 }
 

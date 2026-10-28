@@ -482,7 +482,7 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   'readiness-demoted', 'readiness-promoted', 'readiness-started',
 ]);
 const SAFE_ACTION_GUARD_OUTCOMES = new Set([
-  'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',
+  'auto_denied', 'denied_no_prompt_surface', 'held_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',
   'readiness_demoted', 'readiness_promoted', 'readiness_started',
 ]);
 const SAFE_ACTION_GUARD_SEVERITIES = new Set(['critical', 'dangerous', 'high', 'medium', 'low', 'benign', 'unknown']);
@@ -532,6 +532,9 @@ function safeActionGuardReason(event: ActionGuardOutcomeEvent, outcome: string):
   }
   if (outcome === 'denied_no_prompt_surface') {
     return 'Action Guard required approval but this session has no prompt surface; the tool call was denied.';
+  }
+  if (outcome === 'held_no_prompt_surface') {
+    return 'Action Guard required approval but this session has no prompt surface; the tool call was held (not run) under an owner approval card.';
   }
   if (outcome === 'failure_denied') {
     return 'Action Guard was unavailable and fallback policy denied the tool call; inspect local audit for details.';
@@ -675,9 +678,12 @@ export function formatActionGuardOutcomeNotification(n: ActionGuardOutcomeNotifi
   }
   const denied = n.event === 'action_guard_denial';
   const headless = n.outcome === 'denied_no_prompt_surface';
+  const heldHeadless = n.outcome === 'held_no_prompt_surface';
   const lines = [
     denied
-      ? headless
+      ? heldHeadless
+        ? '🛡️ ShieldCortex — HELD, not run (headless session): an approval card was requested separately'
+        : headless
         ? '🛡️ ShieldCortex — DENIED (headless session): nothing is waiting for approval'
         : '🛡️ ShieldCortex — Action Guard BLOCKED a tool call'
       : '🛡️ ShieldCortex — Action Guard warning: advisory-mode tool call ran',
