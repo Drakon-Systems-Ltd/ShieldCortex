@@ -336,3 +336,40 @@ describe('#466 — the reader can read this repository’s real workflows', () =
     expect(invokesScanner(all, 'npm')).toBe(true);
   });
 });
+
+describe('#897 — the reader is not a YAML parser, and the gate keeps it that way', () => {
+  // YAML ends a plain key at the first `: `; this reader ends it at the first
+  // `:` of any kind. So the SKILL.md item that broke the 5.12.0 ClawHub
+  // publish (#893) is an opaque string here where every real parser reads a
+  // one-key mapping — which is why the #897 contract in release-audit-claims
+  // reads that frontmatter with js-yaml and not with this. The reader must
+  // not be widened to match: the first #897 draft did, and both documents
+  // below, opaque on main and refused, became mappings with a collected
+  // `run: snyk test` — a refused scanner claim turned permitted. Neither is a
+  // workflow GitHub Actions would run (a job id may not contain `:`; a step
+  // may not carry an unknown key), so the only correct answer is the one main
+  // gives. Pinned so the key rule the gate parses with cannot silently widen.
+  it('reads the item that broke the 5.12.0 publish as an opaque string, not the mapping YAML sees', () => {
+    const stray = '- https://registry.npmjs.org (via npm subprocess: the dashboard Overview)';
+    expect(parseWorkflow(stray)).toEqual({ kind: 'seq', items: [{ kind: 'scalar', value: stray.slice(2) }] });
+  });
+
+  const colonJobId = ['jobs:', '  scan:disabled:', '    steps:', '      - run: snyk test'].join('\n');
+  const urlFirstKey = [
+    'jobs:',
+    '  ci:',
+    '    steps:',
+    '      - https://example.invalid: label',
+    '        run: snyk test',
+  ].join('\n');
+
+  it.each([
+    ['a job id carrying a `:`', colonJobId],
+    ['a step whose first key is a URL', urlFirstKey],
+  ])('refuses %s exactly as main does: no surface, no scanner', (_label, doc) => {
+    const collected = workflowExecutableSteps(doc);
+    expect(collected).toEqual([]);
+    expect(invokesScanner(collected, 'snyk')).toBe(false);
+    expect(workflowExecutableText(doc)).toBe('');
+  });
+});
