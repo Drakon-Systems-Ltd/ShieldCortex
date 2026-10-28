@@ -144,21 +144,29 @@ function describeInstallEnd(err: unknown, timeoutMs: number): string {
  * Two OpenClaw install endings that are NOT a finished plugin swap (#952), read
  * off the child's own words before any end-state check. Each says exactly what
  * is wrong, and neither is finished by the `openclaw plugins install --force …`
- * re-run that #604 names for an ordinary timeout or non-zero exit:
+ * re-run that #604 names for an ordinary timeout or non-zero exit. Both
+ * patterns are OpenClaw's exact refusal wording (gateway/credentials.ts and
+ * gateway/server-plugin-reload-cleanup.ts), not a looser paraphrase: OpenClaw
+ * also says a bare "did not settle" about other things (an unsettled gateway
+ * start, an approval), and a secret reference can be mentioned without being
+ * refused.
  *
- *  - `secret-ref`: a config value (`gateway.auth.token`) is a secret reference
- *    this command path cannot resolve, so the install never ran. The same
- *    command from the same shell fails the same way — the fix is a login shell
- *    that has the gateway secrets loaded. Nothing here loads a secret.
- *  - `drain`: the files were saved, then OpenClaw refused the swap because the
- *    admitted work did not settle — "the previous plugin generation stays
- *    active". The on-disk version already equals the CLI's, so the #604
- *    end-state read used to call the step **ok** while the gateway still ran
- *    the old plugin.
+ *  - `secret-ref`: "<path> is configured as a secret reference but is
+ *    unavailable in this command path." The install never ran, and the same
+ *    command from the same environment fails the same way. An env-sourced
+ *    reference resolves from the variable its id names, and this CLI hands
+ *    `openclaw` its own environment unchanged — so the fix is an environment
+ *    in which that reference resolves. Nothing here loads a secret.
+ *  - `drain`: "plugin <id> admitted work did not settle within 60s; the
+ *    previous plugin generation stays active." The files were saved and the
+ *    on-disk version already equals the CLI's, so the #604 end-state read used
+ *    to call the step **ok** while the gateway still ran the old plugin.
+ *    OpenClaw's own refusal names the recovery, `openclaw plugins reload <id>
+ *    --wait`, which waits for the admitted work without a deadline.
  */
 export function classifyOpenClawInstallEnding(text: string): 'secret-ref' | 'drain' | null {
-  if (/secret reference but is unavailable|is configured as a secret reference/i.test(text)) return 'secret-ref';
-  if (/did not settle|previous plugin generation stays active/i.test(text)) return 'drain';
+  if (/is configured as a secret reference but is unavailable/i.test(text)) return 'secret-ref';
+  if (/admitted work did not settle|previous plugin generation stays active/i.test(text)) return 'drain';
   return null;
 }
 
@@ -684,6 +692,14 @@ export function isRealtimePluginRegistered(home: string): boolean {
 
 const PLUGIN_INSTALL_ARGS = ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@latest'];
 const PLUGIN_RERUN = `openclaw ${PLUGIN_INSTALL_ARGS.join(' ')}`;
+/**
+ * #952: the command that finishes a swap OpenClaw refused because the previous
+ * generation's admitted work had not settled. It is the recovery OpenClaw's own
+ * refusal names; `--wait` waits for that work without a deadline. The OpenClaw
+ * plugins *tool* offers no equivalent — its action enum is `reload`, nothing
+ * more — so the advice names the CLI command, not a tool action.
+ */
+const PLUGIN_RELOAD_WAIT = 'openclaw plugins reload shieldcortex-realtime --wait';
 
 /** A read of what a step actually left on the host: a version, or why none could be read. */
 export type EndState = { version: string } | { version: null; reason: string };
@@ -879,7 +895,7 @@ async function stepOpenClawPluginLocked(
           summary: `not applied — ${key} is a gateway secret reference and this CLI path does not load gateway secrets`,
           detail: [
             ...report.detail,
-            'run `shieldcortex update` from a login shell that already has those secrets loaded',
+            'run `shieldcortex update` from a shell whose environment resolves that reference (an env-sourced reference reads the variable its id names); this CLI hands `openclaw` its environment unchanged and loads no secrets',
             ...purgeDetail,
           ],
           truncated: report.truncated,
@@ -889,10 +905,10 @@ async function stepOpenClawPluginLocked(
       if (ending === 'drain') {
         return {
           status: 'warn' as const,
-          summary: 'files saved — the previous plugin generation stays active until the gateway reloads after the current agent turn',
+          summary: 'files saved — the previous plugin generation stays active until a reload settles its admitted work',
           detail: [
             ...report.detail,
-            'do not re-run `openclaw plugins install --force`; after the current turn, reload with the OpenClaw plugins tool `reloadAndResume` (reload after turn cleanup)',
+            `do not re-run \`openclaw plugins install --force\`; run \`${PLUGIN_RELOAD_WAIT}\` to wait for the admitted work to settle and finish the swap (the recovery OpenClaw's refusal names)`,
             ...purgeDetail,
           ],
           truncated: report.truncated,
