@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **#952 `shieldcortex update` no longer reports a finished OpenClaw plugin update after a secret-reference refusal or an unsettled plugin swap.** When `openclaw plugins install` refuses because `gateway.auth.token` is configured as a secret reference that is unavailable in that command path, the OpenClaw plugin step now says so, is reported unfinished (exit 1) and tells you to run `shieldcortex update` from a login shell that already has the gateway secrets loaded. It no longer names the same `openclaw plugins install --force …` as the fix, and it loads no secrets itself. When OpenClaw saves the plugin files but reports that the admitted work did not settle and the previous plugin generation stays active, the step is reported unfinished as "files saved" even though the on-disk version already matches the CLI; it used to read that version and report the step ok while the gateway still ran the old plugin. It now says not to re-run the force install and to reload after the current turn with the OpenClaw plugins tool `reloadAndResume`. An ordinary timeout or non-zero exit whose target version landed is still reported installed (#604), and an invalid-config exit still shows OpenClaw's own message (#221).
+
 ## [5.15.2] - 2026-10-27
 
 Patch on 5.15.1. Documentation only: the skill's SKILL.md now describes the OpenClaw hook's package resolution as it is (#946, PR #947). No change to the hook, Action Guard, install or configuration, no schema change. Action Guard stays off by default. Node floor unchanged.

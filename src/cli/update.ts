@@ -140,6 +140,28 @@ function describeInstallEnd(err: unknown, timeoutMs: number): string {
   return 'did not finish';
 }
 
+/**
+ * Two OpenClaw install endings that are NOT a finished plugin swap (#952), read
+ * off the child's own words before any end-state check. Each says exactly what
+ * is wrong, and neither is finished by the `openclaw plugins install --force …`
+ * re-run that #604 names for an ordinary timeout or non-zero exit:
+ *
+ *  - `secret-ref`: a config value (`gateway.auth.token`) is a secret reference
+ *    this command path cannot resolve, so the install never ran. The same
+ *    command from the same shell fails the same way — the fix is a login shell
+ *    that has the gateway secrets loaded. Nothing here loads a secret.
+ *  - `drain`: the files were saved, then OpenClaw refused the swap because the
+ *    admitted work did not settle — "the previous plugin generation stays
+ *    active". The on-disk version already equals the CLI's, so the #604
+ *    end-state read used to call the step **ok** while the gateway still ran
+ *    the old plugin.
+ */
+export function classifyOpenClawInstallEnding(text: string): 'secret-ref' | 'drain' | null {
+  if (/secret reference but is unavailable|is configured as a secret reference/i.test(text)) return 'secret-ref';
+  if (/did not settle|previous plugin generation stays active/i.test(text)) return 'drain';
+  return null;
+}
+
 /** A step left unresolved: what it was and the exact command that finishes it. */
 export interface UnresolvedStep {
   label: string;
@@ -844,6 +866,39 @@ async function stepOpenClawPluginLocked(
         ? [sanitiseForReport(`also: could not remove legacy extension at ${extDir}: ${purgeFailure}`, { home })]
         : [];
       const e = err as CapturedError;
+      // #952: what the child SAID outranks what it left behind. Both endings
+      // below can leave the target version on disk, and the #604 read would
+      // then report a finished swap that did not happen. Neither is fixed by
+      // the force install, so neither sets `rerun`.
+      const said = [e?.stderr ?? '', e?.stdout ?? '', report.reason, ...report.detail].join('\n');
+      const ending = classifyOpenClawInstallEnding(said);
+      if (ending === 'secret-ref') {
+        const key = /\bgateway\.auth\.token\b/.test(said) ? 'gateway.auth.token' : 'a gateway config value';
+        return {
+          status: 'warn' as const,
+          summary: `not applied — ${key} is a gateway secret reference and this CLI path does not load gateway secrets`,
+          detail: [
+            ...report.detail,
+            'run `shieldcortex update` from a login shell that already has those secrets loaded',
+            ...purgeDetail,
+          ],
+          truncated: report.truncated,
+          unfinished: true,
+        };
+      }
+      if (ending === 'drain') {
+        return {
+          status: 'warn' as const,
+          summary: 'files saved — the previous plugin generation stays active until the gateway reloads after the current agent turn',
+          detail: [
+            ...report.detail,
+            'do not re-run `openclaw plugins install --force`; after the current turn, reload with the OpenClaw plugins tool `reloadAndResume` (reload after turn cleanup)',
+            ...purgeDetail,
+          ],
+          truncated: report.truncated,
+          unfinished: true,
+        };
+      }
       // #604: a timeout or a non-zero exit says how the CHILD ended, not what it
       // left behind. Read the end state before calling the step failed.
       if (!e?.spawnFailed && (e?.timedOut || typeof e?.exitCode === 'number')) {
