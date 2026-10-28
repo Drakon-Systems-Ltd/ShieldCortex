@@ -100,41 +100,7 @@ function blockScalarHeader(value: string): boolean {
   return /^[|>][+-]?\d*$/.test(value.trim());
 }
 
-/**
- * `key: value`, `"key": value`, `key:` — a mapping entry, under the rule the
- * scanner gate has always used: a plain key ends at the FIRST `:`, so a line
- * whose key carries a `:` matches nothing and is opaque — a string that
- * `executableSurface` ignores, nested lines and all.
- *
- * That is narrower than YAML, and it stays that way on purpose. Widening the
- * key rule widens what reads as a mapping, and #897 review showed that buying
- * evidence the gate had refused: a job spelled `scan:disabled:` and a step
- * whose first key was a URL were both opaque under this rule and both became
- * mappings — with a collected `run: snyk test` — under YAML's. Neither is a
- * workflow GitHub would run, so neither may back a claim. The gate must not
- * accept on one branch what it refused on the last; #897 needed YAML's rule
- * for SKILL.md's frontmatter and has it as an option instead. See `YAML_KEY`.
- */
-const WORKFLOW_KEY = /^("[^"]*"|'[^']*'|[^:#]+?)\s*:(\s.*|)$/;
-
-/**
- * The same entry under YAML's own rule: a plain key ends at the first `:`
- * that whitespace or the end of the line follows, and never starts with a
- * quote. So `https://host (prose: more)` is a one-key mapping — the shape
- * that broke the 5.12.0 ClawHub publish (#893) — while `http://localhost:3001
- * (loopback)` and `"https://host (prose: more)"` are strings. This is what a
- * real parser reads, and it is used only where that is the question. It is
- * never the rule behind the executable surface.
- */
-const YAML_KEY = /^("[^"]*"|'[^']*'|[^:#"'](?:[^:#]|:(?!\s))*?)\s*:(\s.*|)$/;
-
-/**
- * Which rule ends a plain key. `workflow` is the gate's and the default;
- * `yaml` is YAML's, for callers asking what a real parser sees.
- */
-export type KeyRule = 'workflow' | 'yaml';
-
-const KEY_RULES: Readonly<Record<KeyRule, RegExp>> = { workflow: WORKFLOW_KEY, yaml: YAML_KEY };
+const KEY = /^("[^"]*"|'[^']*'|[^:#]+?)\s*:(\s.*|)$/;
 
 function unquote(value: string): string {
   const trimmed = value.trim();
@@ -148,12 +114,7 @@ function unquote(value: string): string {
  * Parse the lines from `start` that belong to a node at column `indent`.
  * Returns the node and the index of the first line that does not.
  */
-function parseNode(
-  lines: SourceLine[],
-  start: number,
-  indent: number,
-  keyRule: RegExp,
-): { node: WorkflowNode; next: number } {
+function parseNode(lines: SourceLine[], start: number, indent: number): { node: WorkflowNode; next: number } {
   if (start >= lines.length || lines[start].indent < indent) {
     return { node: { kind: 'scalar', value: '' }, next: start };
   }
@@ -166,7 +127,7 @@ function parseNode(
       const inline = lines[i].body.slice(1).trimStart();
       if (inline === '') {
         // `-` alone: the item is whatever is indented under it.
-        const { node, next } = parseNode(lines, i + 1, indent + 1, keyRule);
+        const { node, next } = parseNode(lines, i + 1, indent + 1);
         items.push(node);
         i = next;
         continue;
@@ -175,7 +136,7 @@ function parseNode(
       const itemIndent = indent + (lines[i].body.length - inline.length);
       const rewritten: SourceLine[] = [...lines];
       rewritten[i] = { indent: itemIndent, body: inline };
-      const { node, next } = parseNode(rewritten, i, itemIndent, keyRule);
+      const { node, next } = parseNode(rewritten, i, itemIndent);
       items.push(node);
       i = next;
     }
@@ -183,7 +144,7 @@ function parseNode(
   }
 
   // Mapping: a run of `key: ...` entries at this column.
-  const match = lines[start].body.match(keyRule);
+  const match = lines[start].body.match(KEY);
   if (!match) {
     // Not something this reader models (a multi-line flow collection, say).
     // Consume it and everything nested under it, contributing nothing.
@@ -195,9 +156,9 @@ function parseNode(
   const entries: Array<[string, WorkflowNode]> = [];
   let i = start;
   while (i < lines.length && lines[i].indent === indent) {
-    const entry = lines[i].body.match(keyRule);
+    const entry = lines[i].body.match(KEY);
     if (!entry) break;
-    const name = unquote(entry[1]);
+    const key = unquote(entry[1]);
     const inlineValue = entry[2].trim();
     if (blockScalarHeader(inlineValue)) {
       const bodyLines: string[] = [];
@@ -212,12 +173,12 @@ function parseNode(
       // Joining a folded scalar with `\n` would manufacture a second statement
       // that the workflow never runs.
       const folded = inlineValue.trim().startsWith('>');
-      entries.push([name, { kind: 'scalar', value: bodyLines.join(folded ? ' ' : '\n') }]);
+      entries.push([key, { kind: 'scalar', value: bodyLines.join(folded ? ' ' : '\n') }]);
       i = j;
       continue;
     }
     if (inlineValue !== '') {
-      entries.push([name, { kind: 'scalar', value: unquote(inlineValue) }]);
+      entries.push([key, { kind: 'scalar', value: unquote(inlineValue) }]);
       // A key with an inline value owns nothing nested; skip any continuation.
       let j = i + 1;
       while (j < lines.length && lines[j].indent > indent) j++;
@@ -233,26 +194,21 @@ function parseNode(
         (lines[childStart].indent === indent &&
           (lines[childStart].body === '-' || lines[childStart].body.startsWith('- '))))
     ) {
-      const { node, next } = parseNode(lines, childStart, lines[childStart].indent, keyRule);
-      entries.push([name, node]);
+      const { node, next } = parseNode(lines, childStart, lines[childStart].indent);
+      entries.push([key, node]);
       i = next;
       continue;
     }
-    entries.push([name, { kind: 'scalar', value: '' }]);
+    entries.push([key, { kind: 'scalar', value: '' }]);
     i = childStart;
   }
   return { node: { kind: 'map', entries }, next: i };
 }
 
-/**
- * Read one document. The default `keyRule` is the gate's; `workflowExecutableSteps`
- * never passes another, so nothing on the executable surface depends on the
- * caller remembering to leave it alone.
- */
-export function parseWorkflow(text: string, options: { keyRule?: KeyRule } = {}): WorkflowNode {
+export function parseWorkflow(text: string): WorkflowNode {
   const lines = readLines(text);
   if (lines.length === 0) return { kind: 'map', entries: [] };
-  return parseNode(lines, 0, lines[0].indent, KEY_RULES[options.keyRule ?? 'workflow']).node;
+  return parseNode(lines, 0, lines[0].indent).node;
 }
 
 /** The spellings GitHub Actions reads as an unconditionally false `if:`. */
