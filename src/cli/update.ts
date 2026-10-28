@@ -110,6 +110,15 @@ interface StepResult {
    * instead of closing the run on a bare "✓ done".
    */
   rerun?: string;
+  /**
+   * The command that finishes this step when repeating its own install would
+   * NOT (#952): a drain the force install cannot settle, or a secret reference
+   * the same environment cannot resolve. Like `rerun` it puts the step on the
+   * footer's unresolved list — an unfinished step must never close the run on a
+   * bare "✓ done" — but it is never offered as a re-run. `note` says where or
+   * how to run it.
+   */
+  recovery?: { command: string; note?: string };
   /** Machine-readable cause, for plain wording on the closing screen only. */
   reason?: string;
   /** Plugin-check facts for the closing screen (protection step only). */
@@ -173,7 +182,24 @@ export function classifyOpenClawInstallEnding(text: string): 'secret-ref' | 'dra
 /** A step left unresolved: what it was and the exact command that finishes it. */
 export interface UnresolvedStep {
   label: string;
+  /** The command that finishes the step — a re-run, or a step's `recovery`. */
   rerun: string;
+  /** 'run' for a `recovery` command, which is not a repeat of the step (#952). */
+  verb?: 'run';
+  note?: string;
+}
+
+/**
+ * Every step that could not confirm its own end state (#604) or that left its
+ * work unfinished with a recovery other than a re-run (#952), with the command
+ * that finishes it. The footer and the closing panel both name them.
+ */
+export function collectUnresolved(steps: Array<{ label: string; result: StepResult }>): UnresolvedStep[] {
+  return steps.flatMap(({ label, result }): UnresolvedStep[] => {
+    if (result.rerun) return [{ label, rerun: result.rerun }];
+    if (result.recovery) return [{ label, rerun: result.recovery.command, verb: 'run', note: result.recovery.note }];
+    return [];
+  });
 }
 
 /**
@@ -404,7 +430,8 @@ export function footer(
       `  ${paint('yellow', '⚠')}  ${paint('bold', 'done')}  ${paint('gray', `in ${elapsed} · ${n} step${n === 1 ? '' : 's'} unresolved`)}${mainUpdated ? `  ${paint('cyan', '·')}  ${paint('yellow', 'restart Claude Code / OpenClaw gateway')}` : ''}\n`,
     );
     for (const u of unresolved) {
-      process.stdout.write(`     ${paint('gray', `${u.label}: re-run`)} ${sanitiseDisplayField(u.rerun)}\n`);
+      const note = u.note ? ` ${paint('gray', `— ${sanitiseDisplayField(u.note)}`)}` : '';
+      process.stdout.write(`     ${paint('gray', `${u.label}: ${u.verb ?? 're-run'}`)} ${sanitiseDisplayField(u.rerun)}${note}\n`);
     }
     process.stdout.write('\n');
   } else if (mainUpdated) {
@@ -700,6 +727,8 @@ const PLUGIN_RERUN = `openclaw ${PLUGIN_INSTALL_ARGS.join(' ')}`;
  * more — so the advice names the CLI command, not a tool action.
  */
 const PLUGIN_RELOAD_WAIT = 'openclaw plugins reload shieldcortex-realtime --wait';
+/** Where the secret-reference recovery has to run (#952). */
+const SECRET_REF_NOTE = 'from a shell whose environment resolves the gateway secret reference';
 
 /** A read of what a step actually left on the host: a version, or why none could be read. */
 export type EndState = { version: string } | { version: null; reason: string };
@@ -885,7 +914,8 @@ async function stepOpenClawPluginLocked(
       // #952: what the child SAID outranks what it left behind. Both endings
       // below can leave the target version on disk, and the #604 read would
       // then report a finished swap that did not happen. Neither is fixed by
-      // the force install, so neither sets `rerun`.
+      // the force install, so neither sets `rerun`; each names its own
+      // `recovery` instead, so the footer still lists the step as unresolved.
       const said = [e?.stderr ?? '', e?.stdout ?? '', report.reason, ...report.detail].join('\n');
       const ending = classifyOpenClawInstallEnding(said);
       if (ending === 'secret-ref') {
@@ -900,6 +930,7 @@ async function stepOpenClawPluginLocked(
           ],
           truncated: report.truncated,
           unfinished: true,
+          recovery: { command: 'shieldcortex update', note: SECRET_REF_NOTE },
         };
       }
       if (ending === 'drain') {
@@ -913,6 +944,7 @@ async function stepOpenClawPluginLocked(
           ],
           truncated: report.truncated,
           unfinished: true,
+          recovery: { command: PLUGIN_RELOAD_WAIT },
         };
       }
       // #604: a timeout or a non-zero exit says how the CHILD ended, not what it
@@ -1656,12 +1688,12 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   await stepClaudeHooks(home);
   await stepStatePermissions();
 
-  // #604: every step that could not confirm its own end state, with the exact
-  // command that finishes it — the footer and the closing panel both name them.
-  const unresolved: UnresolvedStep[] = [
+  // #604/#952: every step left unresolved, with the exact command that
+  // finishes it — the footer and the closing panel both name them.
+  const unresolved: UnresolvedStep[] = collectUnresolved([
     { label: 'OpenClaw plugin', result: pluginResult },
     { label: 'OpenClaw skill', result: skillResult },
-  ].flatMap(({ label, result }) => (result.rerun ? [{ label, rerun: result.rerun }] : []));
+  ]);
   footer(Date.now() - flowStart, mainUpdated, latest, unresolved);
 
   const protection: StepResult = reexecFailed
@@ -1827,7 +1859,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
       packagedPrebuild: engineResult.packagedPrebuild,
       remediation: engineResult.remediation,
     },
-    plugin: { status: pluginResult.status, rerun: pluginResult.rerun },
+    plugin: { status: pluginResult.status, rerun: pluginResult.rerun, recovery: pluginResult.recovery },
     skill: { status: skillResult.status, rerun: skillResult.rerun },
     hook: { status: hookResult.status },
     hermes: { status: hermesResult.status, reason: hermesResult.reason },
