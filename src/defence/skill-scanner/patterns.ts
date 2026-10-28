@@ -80,6 +80,14 @@ function runPatternGroups(content: string, groups: PatternGroup[]): SkillThreatR
 
 // ── Skill Instruction Patterns ───────────────────────────────────────────────
 
+// Agent configuration files an instruction file may try to rewrite, and the
+// verbs that make such a mention an instruction (shared by the one-line and
+// the Markdown two-line rows of `agent_config_tamper`).
+const AGENT_CONFIG_FILE =
+  String.raw`(?:\.claude\/settings[\w.-]*\.json|\.claude\/hooks|\.codex\/config\.toml|\.cursor\/mcp\.json|\.gemini\/settings\.json|\.windsurf\/mcp[\w.-]*\.json|(?<![\w-])mcp\.json\b)`;
+const CONFIG_WRITE_VERB =
+  String.raw`\b(?:write|add|append|put|insert|create|edit|modify|update|change|set|merge|patch|overwrite|replace|configure|save|store)\b`;
+
 const SKILL_PATTERN_GROUPS: PatternGroup[] = [
   // 1. Tool injection — instructions to run shell commands or write files
   {
@@ -195,21 +203,43 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
 
   // 7. Agent config tamper — instructions to redirect model/API traffic or
   //    rewrite the agent's own configuration. Every pattern needs an
-  //    imperative verb (or a literal config block / dangerous setting), so a
-  //    prose mention such as "ANTHROPIC_BASE_URL is supported for proxies"
-  //    does not match. Verbs and targets are kept on one line ([^\n]) and
-  //    length-capped.
+  //    imperative verb, a literal assignment with a URL value, or a literal
+  //    config block / dangerous setting, so a prose mention such as
+  //    "ANTHROPIC_BASE_URL is supported for proxies" does not match. Every
+  //    quantifier is length-capped; the only row that crosses a line break
+  //    (verb line ending in a colon, path on one of the next three lines) is
+  //    capped per line and never uses `^` with the `m` flag or a `\s*` run,
+  //    which the 5.4.1 newline-run gate (newline-run-redos-541.test.ts)
+  //    showed rescans a 100 KB blank run from every newline.
   {
     name: 'agent_config_tamper',
     weight: 0.9,
     patterns: [
-      // Set/override an API endpoint or proxy variable.
+      // Set/override an API endpoint or proxy variable (imperative verb on
+      // the same line as the variable name).
       /\b(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT)\b/,
       /\b(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)\b/,
-      // VAR=https://... assignment lines for an endpoint variable.
-      /^\s*(?:export\s+)?[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)\s*=\s*["']?https?:\/\//m,
-      // Write/modify an agent config file.
-      /\b(write|add|append|put|insert|create|edit|modify|update|change|set|merge|patch|overwrite|replace|configure|save|store)\b[^\n]{0,80}(?:\.claude\/settings[\w.-]*\.json|\.claude\/hooks|\.codex\/config\.toml|\.cursor\/mcp\.json|\.gemini\/settings\.json|\.windsurf\/mcp[\w.-]*\.json|(?<![\w-])mcp\.json\b)/i,
+      // Literal assignment of an endpoint or proxy variable to a URL, in the
+      // shapes an instruction file uses: `VAR=https://…`, `export VAR=…`,
+      // `"VAR": "https://…"`, `VAR: https://…`, including the lowercase
+      // proxy names. The value must carry a scheme, so a bare mention
+      // ("HTTPS_PROXY is honoured") or a placeholder (`HTTPS_PROXY=<url>`)
+      // does not match. Horizontal whitespace only around the separator.
+      /(?<![\w.$-])["']?(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT|HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)["']?[ \t]*[=:][ \t]*["']?(?:https?|socks[45]?h?):\/\//,
+      // Write/modify an agent config file, verb and path on one line.
+      new RegExp(`${CONFIG_WRITE_VERB}[^\\n]{0,80}${AGENT_CONFIG_FILE}`, 'i'),
+      // The same instruction in ordinary Markdown: the verb line ends with a
+      // colon and the path sits on one of the next three lines, on its own
+      // (optionally as a list item, in backticks/bold, or inside a code fence
+      // opened on the line between). At most two blank/fence lines may sit in
+      // between and every line segment is capped, so this never bridges
+      // unrelated paragraphs or a whole code block (#121).
+      new RegExp(
+        `${CONFIG_WRITE_VERB}[^\\n]{0,80}:(?:\\*{1,2}|_{1,2})?[ \\t]*\\r?\\n` +
+          `(?:[ \\t]*\\r?\\n|[ \\t]*\`\`\`[^\\n]{0,20}\\r?\\n){0,2}` +
+          `[ \\t]*(?:[-*+]|\\d+[.)])?[ \\t]*[\`"'*_]{0,2}[\\w~$./\\\\-]{0,60}?${AGENT_CONFIG_FILE}`,
+        'i',
+      ),
       /(?:>>?|\btee\b(?:\s+-a)?)\s*\S*(?:\.claude\/settings[\w.-]*\.json|\.codex\/config\.toml|\.cursor\/mcp\.json|\.gemini\/settings\.json)/i,
       // Add MCP servers or hooks.
       /\b(add|register|install|configure|append|insert|enable)\b[^\n]{0,40}\b(?:mcp\s+servers?|mcpServers|mcp_servers)\b/i,
