@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { classifyOpenClawInstallEnding, stepOpenClawPlugin } from '../cli/update.js';
+import { classifyOpenClawInstallEnding, collectUnresolved, footer, stepOpenClawPlugin, updateVerdict } from '../cli/update.js';
+import { buildUpdateSummary } from '../cli/update-summary.js';
 import type { CapturedError } from '../integrations/child-output.js';
 
 /**
@@ -248,6 +249,106 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
     ['an invalid config', INVALID_CONFIG_STDERR, null],
   ] as const)('classifier: %s', (_label, text, want) => {
     expect(classifyOpenClawInstallEnding(text)).toBe(want);
+  });
+
+  /**
+   * Release review r1 (B1/N1): neither ending sets `rerun`, and the footer's
+   * unresolved list used to be built from `rerun` alone — so a run whose only
+   * open step was one of these closed on a green "✓ done", and the calm summary
+   * fell back to `shieldcortex update` (the force install again) for a drain.
+   * Each ending now carries its own `recovery`, which the footer lists and the
+   * summary offers as the fix, without bringing back the force install.
+   */
+  describe('the unfinished step reaches the footer and the closing summary', () => {
+    function captureFooter(mainUpdated: boolean, unresolved: ReturnType<typeof collectUnresolved>): string {
+      const calls: string[] = [];
+      const original = process.stdout.write.bind(process.stdout);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdout as any).write = (chunk: any) => { calls.push(String(chunk)); return true; };
+      try {
+        footer(1000, mainUpdated, { version: CLI }, unresolved);
+      } finally {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (process.stdout as any).write = original;
+      }
+      // eslint-disable-next-line no-control-regex
+      return calls.join('').replace(/\x1b\[[0-9;]*m/g, '');
+    }
+
+    const ENDINGS = [
+      {
+        name: 'secret-ref',
+        stderr: SECRET_REF_STDERR,
+        command: 'shieldcortex update',
+        note: /environment resolves the gateway secret reference/,
+      },
+      { name: 'drain', stderr: DRAIN_STDERR, command: RELOAD_WAIT, note: null },
+    ] as const;
+
+    describe.each(ENDINGS)('$name', ({ stderr, command, note }) => {
+      async function plugin() {
+        // The plugin on disk already matches the CLI — the case that used to read as finished.
+        const f = scripted({ stderr }, CLI);
+        return stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => CLI, readCliVersion: () => CLI });
+      }
+
+      it('is collected as unresolved with its own recovery, never the force install', async () => {
+        const r = await plugin();
+        const unresolved = collectUnresolved([
+          { label: 'OpenClaw plugin', result: r },
+          { label: 'OpenClaw skill', result: { status: 'ok', summary: 'v5.15.2 installed' } },
+        ]);
+        expect(unresolved).toHaveLength(1);
+        expect(unresolved[0]).toMatchObject({ label: 'OpenClaw plugin', rerun: command, verb: 'run' });
+        expect(unresolved[0].rerun).not.toContain('plugins install --force');
+        // The verdict is untouched: still non-zero, still a step-level warning.
+        expect(r.status).toBe('warn');
+        expect(updateVerdict({ failed: false, attention: true, unfinished: r.unfinished === true }).exitCode).toBe(1);
+      });
+
+      it.each([
+        ['already on the latest package', false],
+        ['a newly updated package', true],
+      ])('the footer names it instead of a bare "✓ done" (%s)', async (_label, mainUpdated) => {
+        const r = await plugin();
+        const out = captureFooter(mainUpdated, collectUnresolved([
+          { label: 'OpenClaw plugin', result: r },
+          { label: 'OpenClaw skill', result: { status: 'ok', summary: 'v5.15.2 installed' } },
+        ]));
+        expect(out).not.toContain('✓');
+        expect(out).not.toContain('already on latest');
+        expect(out).toContain('1 step unresolved');
+        expect(out).toContain(`OpenClaw plugin: run ${command}`);
+        expect(out).not.toContain('re-run');
+        expect(out).not.toContain('plugins install --force');
+        if (note) expect(out).toMatch(note);
+      });
+
+      it.each([['current'], ['updated']] as const)('the closing summary offers the same recovery (package %s)', async (packageState) => {
+        const r = await plugin();
+        const summary = buildUpdateSummary({
+          fromVersion: '5.15.1',
+          toVersion: CLI,
+          packageState,
+          engine: { ok: true },
+          plugin: { status: r.status, rerun: r.rerun, recovery: r.recovery },
+          skill: { status: 'ok' },
+          guardOn: false,
+          protection: { status: 'ok', loaded: 'yes', versionOk: true, pluginVersion: CLI },
+        });
+        const row = summary.rows.find((x) => x.label === 'OpenClaw');
+        expect(row).toMatchObject({ mark: 'check', text: 'plugin couldn\'t be updated', command, commandLabel: 'Fix' });
+        if (note) expect(row?.commandNote).toMatch(note);
+        else expect(row?.commandNote).toBeUndefined();
+      });
+    });
+
+    it('an ordinary re-run is still listed as a re-run', () => {
+      const out = captureFooter(false, collectUnresolved([
+        { label: 'OpenClaw plugin', result: { status: 'warn', summary: 'update failed', rerun: FORCE_INSTALL, unfinished: true } },
+      ]));
+      expect(out).toContain(`OpenClaw plugin: re-run ${FORCE_INSTALL}`);
+    });
   });
 
   it('#604 still holds: an ordinary timeout whose target version landed is reported installed', async () => {
