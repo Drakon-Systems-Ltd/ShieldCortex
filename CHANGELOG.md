@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.15.4] - 2026-10-29
+
+Patch on 5.15.3. Dependency security update only: the lockfile moves the transitive `@hono/node-server` from 2.0.12 to 2.1.5 past GHSA-rmxm-3fg6-px4f (PR #960). No ShieldCortex source change, no change to Action Guard, install or configuration, no schema change. Action Guard stays off by default. Node floor unchanged.
+
 ### Security
 - **`@hono/node-server` 2.0.12 → 2.1.5 (GHSA-rmxm-3fg6-px4f).** Transitive via `@modelcontextprotocol/sdk`. npm advisory 1243661: `serveStatic` decoded the request path twice, so middleware on static paths could be skipped. No ShieldCortex source change. The SKILL.md production-audit claim stays 0 unwaived / 3 waived (`sharp`).
 
