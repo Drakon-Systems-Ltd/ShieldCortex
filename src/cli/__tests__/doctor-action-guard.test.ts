@@ -4,6 +4,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { checkActionGuard, doctorExitCode, fixActionGuardConfig, policyLockRows } from '../doctor.js';
 import { normaliseWebhookUrl } from '../../defence/iron-dome/notify-config.js';
+import { reportBody, writeReport } from '../../posture/__tests__/self-report-fixture.js';
 import { handleCloudConfig } from '../../cloud/cli.js';
 import {
   getConfigDir,
@@ -623,7 +624,7 @@ describe('doctor — NOTIFY fail tracks the live OpenClaw plane, not leftover si
     expect(notify!.status).toBe('warn');
     expect(notify!.fix ?? '').not.toMatch(/--action-guard-notify-webhook/);
     expect(notify!.fix ?? '').toMatch(/do not add a webhook/i);
-    const config = results.find((r) => r.label === 'Action guard config');
+    const config = results.find((r) => r.label === 'Action guard posture');
     expect(config?.fix ?? '').not.toMatch(/--action-guard-enable/);
     expect(config?.fix ?? '').toMatch(/do not enable Action Guard/i);
   });
@@ -631,10 +632,46 @@ describe('doctor — NOTIFY fail tracks the live OpenClaw plane, not leftover si
   it('WARNs without --action-guard-enable when Guard is off and plugin plane is unproven', async () => {
     writeConfig({ actionGuard: { enabled: false } });
     const results = await checkActionGuard();
-    const config = results.find((r) => r.label === 'Action guard config');
+    const config = results.find((r) => r.label === 'Action guard posture');
     expect(config?.status).toBe('warn');
     expect(config?.fix ?? '').not.toMatch(/--action-guard-enable/);
     expect(config?.fix ?? '').toMatch(/Do not enable Action Guard/i);
+  });
+
+  // PR939: the macOS-only failure of the test above. The per-worker config
+  // sandbox outlives a test file, so a Hermes self-report another suite wrote
+  // can sit in <configDir>/posture. Where the pid's start cannot be checked
+  // (macOS always; here a report with no start token) it reads as
+  // `unobserved`, and its claimed advisory was taken as the Hermes plane.
+  it('an unverifiable Hermes self-report does not turn a signed-off row into advisory', async () => {
+    writeConfig({ actionGuard: { enabled: false } });
+    const now = new Date().toISOString();
+    const body = reportBody({
+      configured_posture: 'advisory',
+      heartbeat_at: now,
+      instance: { key: `p${process.pid}-sx`, pid: process.pid, process_start: null, started_at: now, liveness: 'process' },
+    });
+    const posture = path.join(getConfigDir(), 'posture');
+    writeReport(getConfigDir(), body);
+    try {
+      const results = await checkActionGuard();
+      const config = results.find((r) => r.label === 'Action guard posture');
+      expect(config?.status).toBe('warn');
+      expect(config?.message ?? '').not.toMatch(/^advisory/);
+      expect(config?.fix ?? '').toMatch(/Do not enable Action Guard/i);
+    } finally {
+      fs.rmSync(posture, { recursive: true, force: true });
+    }
+  });
+
+  it('a malformed config.json still gets the posture row (PR939 N1)', async () => {
+    fs.mkdirSync(path.dirname(configPath()), { recursive: true });
+    fs.writeFileSync(configPath(), '{not-json');
+    clearCloudConfigCache();
+    const results = await checkActionGuard();
+    const config = results.find((r) => r.label === 'Action guard posture');
+    expect(config).toBeDefined();
+    expect(config!.fix ?? '').not.toMatch(/--action-guard-(enable|enforce)/);
   });
 
   it('still FAILs when openclaw.json is unreadable garbage — cannot prove the plugin is off', async () => {

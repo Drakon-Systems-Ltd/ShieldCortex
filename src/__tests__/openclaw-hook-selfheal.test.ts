@@ -24,9 +24,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..');
 
 const HOOK_DIR = path.join(repoRoot, 'hooks', 'openclaw', 'cortex-memory');
-const BUNDLED_HOOK_DIR = path.join(
-  repoRoot, 'skills', 'shieldcortex', 'bundled', 'cortex-memory-hook',
-);
 const INSTALLER = path.join(repoRoot, 'src', 'setup', 'openclaw.ts');
 
 /**
@@ -103,7 +100,6 @@ describe('cortex-memory self-heal — copied file set is complete (#109)', () =>
   it('declaration files are never copied or installed', () => {
     const consumers = [
       fs.readFileSync(path.join(HOOK_DIR, 'handler.ts'), 'utf-8'),
-      fs.readFileSync(path.join(BUNDLED_HOOK_DIR, 'handler.ts'), 'utf-8'),
       fs.readFileSync(INSTALLER, 'utf-8'),
     ];
     for (const source of consumers) {
@@ -116,29 +112,12 @@ describe('cortex-memory self-heal — copied file set is complete (#109)', () =>
     expect(parseStringArrayConst(source, 'HOOK_FILES')).toEqual(manifest);
   });
 
-  it('the bundled skill copy carries the same complete manifest', () => {
-    const source = fs.readFileSync(path.join(BUNDLED_HOOK_DIR, 'handler.ts'), 'utf-8');
-    expect(parseStringArrayConst(source, 'HOOK_FILES')).toEqual(manifestOf(BUNDLED_HOOK_DIR));
-    // The bundled copy is the one that most often runs from an unexpected path
-    // (skills-only installs), i.e. the copy that actually performs a migration.
-    expect(manifestOf(BUNDLED_HOOK_DIR)).toEqual(manifest);
-  });
-
-  it('the bundled self-heal source carries the exact managed start-pack emitter', () => {
-    const managed = bootstrapEmitterSource(HOOK_DIR);
-    const bundled = bootstrapEmitterSource(BUNDLED_HOOK_DIR);
-    expect(bundled).toBe(managed);
-    expect(bundled).toMatch(/buildStartPack/);
-    expect(bundled).toMatch(/readInjectConfig/);
-    expect(bundled).toMatch(/selectInjectCandidates/);
-  });
-
   it('the installer copies the same set the hook expects', () => {
     const source = fs.readFileSync(INSTALLER, 'utf-8');
     expect(parseStringArrayConst(source, 'HOOK_FILES')).toEqual(manifest);
   });
 
-  for (const [label, dir] of [['hook', HOOK_DIR], ['bundled', BUNDLED_HOOK_DIR]] as const) {
+  for (const [label, dir] of [['hook', HOOK_DIR]] as const) {
     it(`${label}: the self-copy iterates HOOK_FILES, never a literal subset`, () => {
       const body = selfHealSource(dir);
       expect(body).toMatch(/for\s*\(const file of HOOK_FILES\)/);
@@ -195,7 +174,7 @@ describe('cortex-memory self-heal — opt-out gate (#108)', () => {
     expect(isSelfHealEnabled({ selfHeal: true }, { [SELF_HEAL_SKIP_ENV]: '1' })).toBe(false);
   });
 
-  for (const [label, dir] of [['hook', HOOK_DIR], ['bundled', BUNDLED_HOOK_DIR]] as const) {
+  for (const [label, dir] of [['hook', HOOK_DIR]] as const) {
     it(`${label}: the gate is resolved before anything is written`, () => {
       const body = selfHealSource(dir);
       const gate = body.indexOf('await isSelfHealEnabled()');

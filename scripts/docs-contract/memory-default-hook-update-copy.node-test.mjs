@@ -55,7 +55,6 @@ const oneLine = (s) => s.replace(/\s+/g, ' ');
 
 const HOOK_DIRS = [
   ['hooks', 'openclaw', 'cortex-memory'],
-  ['skills', 'shieldcortex', 'bundled', 'cortex-memory-hook'],
 ];
 
 describe('source facts the copy describes', () => {

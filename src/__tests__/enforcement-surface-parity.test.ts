@@ -520,6 +520,26 @@ describe('#509 r5 finding 9 — the Hermes outage floor DECIDES like the core fl
     'echo {} > ~/.shieldcortex/config.json',
     'echo x >> ~/.shieldcortex/DECISIONS.md',
     'shieldcortex config --action-guard-disable',
+    // #922: a posture loosening is on the floor; a tightening and the read are not.
+    'shieldcortex guard posture off',
+    'npx shieldcortex guard posture advisory',
+    'shieldcortex guard posture enforce',
+    'shieldcortex guard posture',
+    // #922 r1: quoted subcommands, quote fragments, prefixed globs/vars, a
+    // quoted flag and a quoted-variable command are loosenings; data-only
+    // mentions of the phrase are not.
+    'shieldcortex "guard" "posture" off',
+    '$X "guard" "posture" off',
+    'shieldcortex guard posture o"ff"',
+    'shieldcortex guard posture o\\ff',
+    'shieldcortex guard posture o*',
+    'shieldcortex guard posture o${T}',
+    'shieldcortex guard posture "--dry-run" advisory',
+    'echo "shieldcortex guard posture off"',
+    'grep -F "shieldcortex guard posture off" README.md',
+    "cat file | grep 'guard posture off'",
+    'gh issue create --body "shieldcortex guard posture off"',
+    "grep -F 'guard posture off' /etc/shieldcortex/policy.json",
     'npm uninstall -g shieldcortex',
     'cat ~/.claude/settings.json',
     'ls /etc/shieldcortex',

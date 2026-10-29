@@ -1233,6 +1233,29 @@ function gitAtCommandPosition(tokens: readonly string[], i: number): boolean {
   }
   return true;
 }
+/**
+ * gitAtCommandPosition for EVERY index in one pass: `out[i]` equals
+ * `gitAtCommandPosition(tokens, i)`. The per-index form rescans the prefix, so
+ * a walk that asks it at each token is O(tokens²) on a wrapper-dense statement
+ * (`nice env nohup` x 1100, where every token is at command position).
+ */
+function commandPositions(tokens: readonly string[]): boolean[] {
+  const out: boolean[] = new Array(tokens.length).fill(false);
+  let sawWrapper = false;
+  let prevWasFlag = false;
+  for (let k = 0; k < tokens.length; k++) {
+    out[k] = true;
+    const t = tokens[k];
+    const base = commandBaseName(t);
+    if (COMMAND_WRAPPER.test(base)) { sawWrapper = true; prevWasFlag = false; continue; }
+    if (CMD_PREFIX_KEYWORD.test(base)) { prevWasFlag = false; continue; }
+    if (/^\w+=/.test(t)) { prevWasFlag = false; continue; }
+    if (t.startsWith('-')) { prevWasFlag = true; continue; }
+    if (sawWrapper && (prevWasFlag || /^\d+(?:\.\d+)?[smhd]?$/.test(t))) { prevWasFlag = false; continue; }
+    break;                                                 // every later index is an argument
+  }
+  return out;
+}
 
 /**
  * git's actual SUBCOMMAND and the args that follow it, or null. The subcommand
@@ -1800,7 +1823,8 @@ function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
  * systemInstallInvoked). One pass over tokens per statement.
  *
  * CLI disable: command-position shieldcortex (or npx/node wrapper, or $var
- * fail-closed) plus a disable/advisory/deactivate flag in the rest. #509:
+ * fail-closed) plus a disable/advisory/deactivate flag in the rest, or
+ * #922 `guard posture off|advisory` (see loosensGuardPostureAt). #509:
  * `--action-guard-enforce-when-ready` is in the same class — on an enforcing
  * install it drops to shadow until readiness is proven. From off it is a
  * tightening and ungated (a disabled guard does not run). From watch only it
@@ -1823,6 +1847,35 @@ function isGuardDisableFlag(tok: string): boolean {
   const t = stripTokDecor(tok);
   return /^--action-guard-(?:disable|advisory|enforce-when-ready)$/i.test(t);
 }
+/**
+ * #922: `guard posture off|advisory` is a loosening invocation, so it sits on
+ * the same floor as `--action-guard-disable`. `enforce` and the bare
+ * read-only form are not flagged.
+ *
+ * #943 r2 B2: fail closed on the whole rest of the statement instead of
+ * reading the target. Redirections are not parsed (`>a\ b off`, `off<<<x`,
+ * `> >(cat) off` all ran as `posture off` while a redirection reader missed
+ * them): any later token carrying an expansion or glob, or any later word
+ * that is `off`/`advisory` once quotes, backslashes and redirection/grouping
+ * punctuation are dropped, is a loosening. A redirect target named `off` is
+ * held too — the price of not parsing.
+ */
+function loosensGuardPostureAt(tokens: readonly string[], i: number): boolean {
+  if (i + 1 >= tokens.length) return false;
+  if (!/^guard$/i.test(stripTokDecor(tokens[i])) || !/^posture$/i.test(stripTokDecor(tokens[i + 1]))) return false;
+  for (let j = i + 2; j < tokens.length; j++) {
+    const raw = tokens[j];
+    if (/[$`*?[\]{}]/.test(raw)) return true;
+    if (stripTokDecor(raw).split(/[\s<>()&|;]+/).some(w => /^(?:off|advisory)$/i.test(w))) return true;
+  }
+  return false;
+}
+/**
+ * #922 r1: a cheap, linear spelling of `guard posture` that survives the
+ * quoting the argv walk strips (`"guard" "posture"`, `g\uard`, `po'sture'`),
+ * so the cheap reject cannot drop `$X "guard" "posture" off` before the walk.
+ */
+const GUARD_POSTURE_SPELLING = /g['"\\]*u['"\\]*a['"\\]*r['"\\]*d[\s'"\\]+p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e/i;
 function argvIsGlobalUninstallOfGuard(rest: readonly string[], base: string): boolean {
   let verb: string | null = null;
   let isGlobal = false;
@@ -1862,13 +1915,65 @@ function walkInlineShell(tokens: readonly string[], depth: number, fn: (body: st
   }
   return false;
 }
+/**
+ * #943 review B2 / r2 — the second reading the argv walk gets. Bash deletes a
+ * backslash-newline (`guard \<newline>posture off`), and an `&` or `|` glued
+ * to `<`/`>` (`>&2`, `<&3`, `&>`, `>|`) belongs to the redirection, not a
+ * statement break, so `posture >&2 off` is one statement. Nothing else is
+ * folded: redirection targets are not parsed (loosensGuardPostureAt fails
+ * closed on the rest of the statement instead). Only ever ADDED to the raw
+ * reading, so it can raise a verdict, never lower one. Mirrored by the three
+ * outage fallbacks' posture tail.
+ */
+export function foldShellGlue(text: string): string {
+  return text.replace(/\\\r?\n/g, '').replace(/([<>])[&|]|&(?=>)/g, (_m, op: string | undefined) => `${op ?? ''} `);
+}
+
+/**
+ * #943 r3 B2 — `guard posture` followed ANYWHERE later in the tool call by
+ * `off`/`advisory` as a word. Statement splitting is not trusted for this:
+ * `posture > >(true; cat) off` runs as `posture off`, but a splitter ends the
+ * statement at the `;` inside the process substitution. So the word check
+ * reads the whole rest of the command after the first `guard posture`
+ * spelling — past `;`, `&&`, `||`, newlines, `)`, nested `>(…)`/`$(…)`, and
+ * `#` comments (the command as written, before comment stripping) — once
+ * backslash-newlines, quotes and backslashes are dropped. Whether that
+ * spelling is an invocation at all is left to the argv walk, asked with an
+ * `off` target placed right after each spelling. A later `echo off` or a
+ * redirect target named `off` is held too: the accepted over-hold. A pure
+ * print (`commandScanText` returns '' for it) runs nothing and is skipped.
+ */
+function guardPostureLoosenedAnywhere(command: string): boolean {
+  if (!command || isPurePrint(command)) return false;
+  const text = foldShellGlue(command);
+  const spelling = new RegExp(`${GUARD_POSTURE_SPELLING.source}['"]*`, 'gi');
+  const first = spelling.exec(text);
+  if (first === null) return false;
+  const rest = text.slice(first.index + first[0].length);
+  if (!rest.replace(/['"\\]/g, '').split(/[\s<>()&|;]+/).some(w => /^(?:off|advisory)$/i.test(w))) return false;
+  return guardDisableInvokedAsWritten(text.replace(spelling, m => `${m} off`), 0);
+}
+
 function guardDisableInvoked(text: string, depth = 0): boolean {
+  if (guardDisableInvokedAsWritten(text, depth)) return true;
+  if (depth !== 0 || !/\\\r?\n|[<>][&|]|&>/.test(text)) return false;
+  const glued = foldShellGlue(text);
+  return glued !== text && guardDisableInvokedAsWritten(glued, depth);
+}
+
+function guardDisableInvokedAsWritten(text: string, depth: number): boolean {
   if (depth > MAX_INLINE_RECURSION + 2) return true;
   // Cheap reject: every claimed surface names the package or binary. The
   // wrapper-dense ReDoS corpus (`nice env nohup` x 1100) has neither, and
   // walking it as argv is O(statements x tokens) for no gain. $PM uninstall
   // of a non-literal package is #504-adjacent and already un-gated.
-  if (depth === 0 && !/shieldcortex/i.test(text)) return false;
+  // #922: `$X guard posture off` names neither, so its subcommand pair also
+  // admits the walk (the $var command position is fail-closed below).
+  // #922 r1: the walk below is linear in tokens (one command-position pass,
+  // suffix flags instead of a rest-slice per token), so admitting it costs
+  // the wrapper-dense corpus nothing; the quote-tolerant spelling keeps the
+  // quoted variable-command form in.
+  if (depth === 0 && !/shieldcortex/i.test(text) && !GUARD_POSTURE_SPELLING.test(text)) return false;
   if (depth < MAX_INLINE_RECURSION) {
     for (const body of collectExecutableBodies(text)) {
       if (body && guardDisableInvoked(body, depth + 1)) return true;
@@ -1880,23 +1985,35 @@ function guardDisableInvoked(text: string, depth = 0): boolean {
       return tok;
     });
     if (walkInlineShell(tokens, depth, guardDisableInvoked)) return true;
-    for (let i = 0; i < tokens.length; i++) {
-      if (!gitAtCommandPosition(tokens, i)) continue;
+    // Suffix flags: disableFrom[k] / guardRefFrom[k] say whether tokens[k..]
+    // carry a disable shape / a guard reference, so each command position
+    // reads its `rest` in O(1) instead of rescanning it.
+    const n = tokens.length;
+    const disableFrom: boolean[] = new Array(n + 1).fill(false);
+    const guardRefFrom: boolean[] = new Array(n + 1).fill(false);
+    for (let k = n - 1; k >= 0; k--) {
+      const a = tokens[k];
+      disableFrom[k] = disableFrom[k + 1]
+        || isGuardDisableFlag(a)
+        || (/^iron-dome$/i.test(stripTokDecor(a)) && /^deactivate$/i.test(stripTokDecor(tokens[k + 1] ?? '')))
+        || loosensGuardPostureAt(tokens, k);
+      guardRefFrom[k] = guardRefFrom[k + 1] || GUARD_BIN.test(commandBaseName(a)) || a.startsWith('$') || a.includes('$(');
+    }
+    const atCommand = commandPositions(tokens);
+    for (let i = 0; i < n; i++) {
+      if (!atCommand[i]) continue;
       const base = commandBaseName(tokens[i]);
       if (/^eval$/i.test(base)) {
         if (guardDisableInvoked(tokens.slice(i + 1).join(' '), depth + 1)) return true;
         continue;
       }
-      const rest = tokens.slice(i + 1);
-      const restHasDisable =
-        rest.some(isGuardDisableFlag)
-        || rest.some((a, idx) => /^iron-dome$/i.test(stripTokDecor(a)) && /^deactivate$/i.test(stripTokDecor(rest[idx + 1] ?? '')));
+      const restHasDisable = disableFrom[i + 1];
       const binIsGuard = GUARD_BIN.test(base) || GUARD_BIN.test(commandBaseName(base));
-      const wrapperThenGuard = /^(?:npx|node|env)$/i.test(base) && rest.some(a => GUARD_BIN.test(commandBaseName(a)) || a.startsWith('$') || a.includes('$('));
+      const wrapperThenGuard = /^(?:npx|node|env)$/i.test(base) && guardRefFrom[i + 1];
       if ((binIsGuard || wrapperThenGuard || tokens[i].startsWith('$')) && restHasDisable) return true;
       if (NPM_FAMILY.test(base) || /^(?:npx|corepack)$/i.test(base)) {
-        if (argvIsGlobalUninstallOfGuard(rest, base)) return true;
-      } else if (tokens[i].startsWith('$') && argvIsGlobalUninstallOfGuard(rest, 'npm')) {
+        if (argvIsGlobalUninstallOfGuard(tokens.slice(i + 1), base)) return true;
+      } else if (tokens[i].startsWith('$') && argvIsGlobalUninstallOfGuard(tokens.slice(i + 1), 'npm')) {
         return true;
       }
     }
@@ -7267,6 +7384,11 @@ function evaluateToolCallCore(
   // Folded script source is appended, never substituted: the command surface is
   // scanned exactly as before, so no existing verdict can change direction.
   const scanSurface = fold.content ? `${execSurface}\n${fold.content}` : execSurface;
+  // #500 self-protection, plus the #943 r3 B2 whole-command posture reading on
+  // the command as written (comments included). Computed on first use.
+  let selfDisable: boolean | undefined;
+  const selfDisableInvoked = (): boolean =>
+    (selfDisable ??= guardDisableInvoked(scanSurface) || guardPostureLoosenedAnywhere(command));
 
   // Which slices of `scanSurface` are SHELL and which are interpreter SOURCE
   // (issue #89). Every rule below is written for shell command text; a folded
@@ -7505,7 +7627,7 @@ function evaluateToolCallCore(
   // The argv parser also strips flag quoting, so the `git branch "-d" "-f"`
   // evasion is confirmed rather than slipped.
   // #500: self-protection is proposed by the argv walk, not a table regex.
-  if (!dangerSignals.includes('disable-action-guard') && guardDisableInvoked(scanSurface)) {
+  if (!dangerSignals.includes('disable-action-guard') && selfDisableInvoked()) {
     dangerSignals.push('disable-action-guard');
     dangerSpan = dangerSpan ?? 'guard self-protection';
     if (!dangerEvidence.has('disable-action-guard')) {
@@ -7553,7 +7675,7 @@ function evaluateToolCallCore(
   if (dangerSignals.includes('disable-action-guard')
       && policyLockAccessIsReadOnly(scanSurface)
       && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
-      && !guardDisableInvoked(scanSurface)) {
+      && !selfDisableInvoked()) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'disable-action-guard');
   }
   // #874: pure shell inspection of the guard's own config is not a rewrite of
@@ -7562,7 +7684,7 @@ function evaluateToolCallCore(
   if (dangerSignals.includes('touch-guard-config')
       && guardConfigAccessIsReadOnly(scanSurface)
       && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
-      && !guardDisableInvoked(scanSurface)) {
+      && !selfDisableInvoked()) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'touch-guard-config');
   }
   // External egress is a potential exfil vector — but only when the call carries
@@ -7656,7 +7778,7 @@ function evaluateToolCallCore(
   // is a call that still makes a network request once the reads are blanked.
   if (dangerSignals.length > 0
       && dangerSignals.every(sig => GUARD_SELF_PROTECTION_SIGNALS.includes(sig))
-      && !guardDisableInvoked(scanSurface)) {
+      && !selfDisableInvoked()) {
     const rm = closedReadMasked();
     // Conservative beyond the design: a call that still reaches the network
     // once the reads are blanked keeps the floor (#522 G4 "a read with a

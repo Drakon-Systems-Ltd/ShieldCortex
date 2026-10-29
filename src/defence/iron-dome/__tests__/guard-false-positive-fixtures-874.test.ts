@@ -1001,3 +1001,87 @@ describe('#920 removed reliefs: what origin/main blocks stays blocked', () => {
     expect(v.signals).toContain('secret-egress');
   }, 120_000);
 });
+
+/**
+ * #943 review r3 — the #921 long-script relief (whole-command attestation) is
+ * removed from v5.15.0: three review rounds found a long script that reaches a
+ * shell-out by a spelling the relief's exclusion list did not name. An over-cap
+ * script is held exactly as on v5.14.0. Every reviewer reproducer from rounds
+ * 1-3 is pinned here, together with the v5.14.0-held controls; the short
+ * print-only file keeps its v5.14.0 verdict.
+ */
+describe('#943 r3 B1: no long-script relief — over-cap scripts are held as on v5.14.0', () => {
+  const PAD = 'PAD = "' + 'a'.repeat(40000) + '"\n';
+  const JS_PAD = 'const PAD = "' + 'a'.repeat(40000) + '"\n';
+  const run = (source: string, cmd = 'python3 scripts/review.py', scriptPath = 'scripts/review.py') =>
+    evaluateToolCall('Bash', { command: cmd }, undefined,
+      { resolveScriptSource: (q: string) => (q === scriptPath ? source : null) });
+  const held = (v: ReturnType<typeof run>) => {
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toContain('stop-process-or-service');
+  };
+
+  it.each([
+    // r1
+    ['from-import alias', 'from os import system as launch\nlaunch("systemctl stop nginx")\n'],
+    ['bare from-import, rebound', 'from os import system\nlaunch = system\nlaunch("systemctl stop nginx")\n'],
+    ['module alias', 'import os as o\no.system("systemctl stop nginx")\n'],
+    ['module rebound + getattr', 'import os\no = os\ngetattr(o, "sys" + "tem")("systemctl stop nginx")\n'],
+    ['pty from-import', 'from pty import spawn as s\ns(["sh", "-c", "systemctl stop nginx"])\n'],
+    ['importlib', 'import importlib\nlaunch = importlib.import_module("os")\nlaunch.popen("systemctl stop nginx")\n'],
+    ['asyncio subprocess helper', 'import asyncio\nasyncio.run(asyncio.create_subprocess_shell("systemctl stop nginx"))\n'],
+    // r2
+    ['continuation between os and import', 'from os \\\nimport system as launch\nlaunch("systemctl stop nginx")\n'],
+    ['continuation between from and os', 'from \\\nos import system as launch\nlaunch("systemctl stop nginx")\n'],
+    ['__dict__ attribute lookup', 'import os\nos.__dict__["sys" + "tem"]("systemctl stop nginx")\n'],
+    ['__getattribute__', 'import os\nos.__getattribute__("sys" + "tem")("systemctl stop nginx")\n'],
+    ['vars(os)', 'import os\nvars(os)["sys" + "tem"]("systemctl stop nginx")\n'],
+    ['operator.attrgetter', 'import os, operator\noperator.attrgetter("sys" + "tem")(os)("systemctl stop nginx")\n'],
+    ['posix module', 'import posix\nposix.__dict__["sys" + "tem"]("systemctl stop nginx")\n'],
+    // r3 (Grok): builtin system through _wrap_close.__init__.__globals__
+    ['_wrap_close __globals__',
+      'fn = None\nfor c in ().__class__.__bases__[0].__subclasses__():\n'
+      + '    if c.__name__ == "_wrap_close":\n        fn = c.__init__.__globals__["sys"+"tem"]\n        break\n'
+      + 'fn("systemctl stop nginx")\n'],
+    // r3 (Astra): spaced sys . modules with a split key
+    ['spaced sys.modules, split key', 'import sys\nlaunch = sys . modules["o"+"s"].system\nlaunch("systemctl stop nginx")\n'],
+    // r3 (Astra): NFKC fullwidth module identifier
+    ['fullwidth identifier alias', 'from ｏｓ import system as launch\nlaunch("systemctl stop nginx")\n'],
+    // r3 (Grok nit): underscore-prefixed process / ctypes modules
+    ['_posixsubprocess', 'import _posixsubprocess\nprint("systemctl stop nginx")\n'],
+    ['_ctypes', 'import _ctypes\nprint("systemctl stop nginx")\n'],
+  ])('a padded Python script stays held: %s', (_label, body) => {
+    held(run(PAD + body));
+  });
+
+  it.each([
+    ['split require', 'const cp = require("child" + "_process")\ncp["exec" + "Sync"]("systemctl stop nginx")\n'],
+    ['dynamic import', 'import("child_process").then(cp => cp.execSync("systemctl stop nginx"))\n'],
+    ['createRequire', 'const r = require("module").createRequire(__filename)\nr("child_process").execSync("systemctl stop nginx")\n'],
+    // r3 (Astra): static import with an escaped module specifier
+    ['escaped static import specifier', "import { exec as launch } from 'node:child\\u005fprocess'\nlaunch(\"systemctl stop nginx\")\n"],
+  ])('a padded node script stays held: %s', (_label, body) => {
+    held(run(JS_PAD + body, 'node scripts/review.mjs', 'scripts/review.mjs'));
+  });
+
+  // v5.14.0-held controls: with the relief gone, the over-cap fail-closed path
+  // holds every padded script, read-only or not.
+  it.each([
+    ['direct sink', 'import os\nos.system("systemctl stop nginx")\n'],
+    ['from os import path plus a printed phrase', 'from os import path\nprint("systemctl stop nginx", path.sep)\n'],
+    ['print-only mention', 'print("systemctl stop nginx")\n'],
+    ['docstring-only', 'DOC = """run: systemctl stop nginx; crontab -r; rm -rf cache"""\nprint(len(DOC))\n'],
+  ])('control: a padded %s is held as on v5.14.0', (_label, body) => {
+    held(run(PAD + body));
+  });
+
+  it('control: a short print-only script keeps its v5.14.0 verdict (allowed)', () => {
+    const v = run('print("systemctl stop nginx")\n');
+    expect(v.decision).toBe('allow');
+    expect(v.signals).not.toContain('stop-process-or-service');
+  });
+
+  it('control: a short direct sink is held', () => {
+    held(run('import os\nos.system("systemctl stop nginx")\n'));
+  });
+});

@@ -2948,6 +2948,9 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
     // Counted with the undeclared ones, because they are the same operator
     // fact: this host sends a shape the provenance layer does not cover.
     _provenanceUndeclared += unreadableToolBlocks;
+    // `labelLlmInput` emits the prompt first, when there is one.
+    const promptIndex = typeof event?.prompt === 'string' && event.prompt ? 0 : -1;
+    const automationSession = isTrustedAutomationSession(sessionId);
     const labelled = inputs.filter(
       // #r2/B5: the internal-message exemption is for content the HOST
       // generated — boot checks, heartbeats, its own system notices — and the
@@ -2956,7 +2959,18 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
       // to tool output let untrusted bytes buy their way out of BOTH scanners
       // by claiming to be a system message. Tool-origin and unclassifiable
       // content is now always scanned; only the host-attributed turn may skip.
-      input => input.text && (input.label !== 'user' || !isInternalContent(input.text, sessionId)),
+      //
+      // #914: the bare prompt is `unknown` — a host-assembled string with no
+      // per-span origin — so it no longer gets the text-only exemption either:
+      // a DM opening with `Read HEARTBEAT.md` or `System:` must not buy its way
+      // past the scanner. What still attests a host-generated prompt is the
+      // session key the host minted for its own isolated cron / heartbeat run
+      // (#353), a structured field, not prompt text. Only there may the
+      // internal-content check skip the prompt.
+      (input, i) => input.text && !(
+        (input.label === 'user' || (i === promptIndex && automationSession))
+        && isInternalContent(input.text, sessionId)
+      ),
     );
     for (const labelledInput of labelled) {
       const text = labelledInput.text;
