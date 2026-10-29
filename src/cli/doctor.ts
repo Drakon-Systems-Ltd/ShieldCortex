@@ -5751,6 +5751,37 @@ export async function checkCronDenials(deps: CronDenialCheckDeps = {}): Promise<
  * A below-floor build is a `fail`, not a warning: on that box the guard's
  * dangerous tier is decorative, and the operator has no other signal that it is.
  */
+/**
+ * #916: agent configuration watch status. Never a failure: it shows whether the
+ * watch is on, when it last detected an unexpected change, and warns when a
+ * detected change is still undelivered or a watched file cannot be read/parsed.
+ */
+export async function checkAgentConfigWatch(home?: string): Promise<CheckResult> {
+  const label = 'Agent config watch';
+  const { agentConfigWatchEnabled, agentConfigWatchHome, loadAgentConfigStateChecked } = await import('../audit/agent-config-watch.js');
+  home ??= agentConfigWatchHome();
+  let config: unknown = {};
+  try { config = JSON.parse(fs.readFileSync(path.join(home, '.shieldcortex', 'config.json'), 'utf-8')); } catch { /* defaults */ }
+  if (!agentConfigWatchEnabled(config)) return { label, status: 'info', message: 'off (sessionStart.agentConfigWatch is false)' };
+  const { state, integrity } = loadAgentConfigStateChecked(home);
+  // #928: a baseline that fails its signature check is never trusted; the next
+  // session start alerts and re-baselines. Same-user tampering is detectable
+  // here, not preventable (the key is readable by the same user).
+  if (integrity === 'untrusted') return { label, status: 'warn', message: 'on; the stored baseline failed its integrity check (modified outside ShieldCortex); the next session start alerts and re-baselines — review your agent config files' };
+  if (!state.initialised) return { label, status: 'info', message: 'on; no baseline yet (recorded silently at the next session start)' };
+  // Detection and delivery are tracked separately: a change whose notification
+  // or audit row failed is still "detected", and shown as pending.
+  const detectedAt = state.lastDetectedAt ?? state.lastChangeAt;
+  const parts = [`on; watching ${Object.keys(state.files).length} config file(s)`];
+  parts.push(detectedAt ? `last unexpected change detected ${detectedAt}` : 'no unexpected change detected');
+  if (state.lastChangeAt && state.lastChangeAt !== detectedAt) parts.push(`last reported ${state.lastChangeAt}`);
+  const pending = typeof state.pendingChanges === 'number' ? state.pendingChanges : 0;
+  if (pending > 0) parts.push(`${pending} detected change(s) not yet reported; retried at the next session start`);
+  const unhealthy = Object.keys(state.fileErrors ?? {}).length;
+  if (unhealthy > 0) parts.push(`${unhealthy} watched file(s) could not be read or parsed (see the audit log)`);
+  return { label, status: pending > 0 || unhealthy > 0 ? 'warn' : 'pass', message: parts.join('; ') };
+}
+
 export async function checkClaudeCodeVersion(
   deps: DetectClaudeCodeDeps = {},
 ): Promise<CheckResult> {
@@ -9739,6 +9770,7 @@ export async function runDoctor(
     checkChainedLedger,
     async () => checkStaleShieldCortexCopies(), // #674: an old copy can rewrite chained audit rows
     checkClaudeCodeVersion,
+    checkAgentConfigWatch,
     checkModelCache,
   ];
 
