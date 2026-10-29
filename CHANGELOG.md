@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+- **`@hono/node-server` 2.0.12 → 2.1.5 (GHSA-rmxm-3fg6-px4f).** Transitive via `@modelcontextprotocol/sdk`. npm advisory 1243661: `serveStatic` decoded the request path twice, so middleware on static paths could be skipped. No ShieldCortex source change. The SKILL.md production-audit claim stays 0 unwaived / 3 waived (`sharp`).
+
 ## [5.15.3] - 2026-10-28
 
 Patch on 5.15.2. `shieldcortex update` no longer reports the OpenClaw plugin step as finished when OpenClaw refused the install over an unavailable `gateway.auth.token` secret reference, or saved the plugin files while the previous plugin generation stayed active (#952, PR #955). Also a test-only change pinning the SKILL.md permission lists (#897, PR #954), which adds `js-yaml` as a devDependency only. No change to Action Guard, install or configuration, no schema change. Action Guard stays off by default. Node floor unchanged.
