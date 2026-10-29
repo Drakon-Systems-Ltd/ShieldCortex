@@ -119,7 +119,7 @@ describe('end to end through the signed on-disk baseline (#928 r2)', () => {
   let notes: AgentConfigNotification[];
   const settings = () => path.join(home, '.claude', 'settings.json');
   const write = (raw: string) => { fs.mkdirSync(path.dirname(settings()), { recursive: true }); fs.writeFileSync(settings(), raw); };
-  const run = () => runAgentConfigWatch({ home, projectRoots: [project], notify: async (n) => { notes.push(n); }, ledger: () => true });
+  const run = () => runAgentConfigWatch({ home, projectRoots: [project], dropzoneDirs: [path.join(home, 'drop')], notify: async (n) => { notes.push(n); }, ledger: () => true });
 
   beforeEach(() => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-928r2-home-'));

@@ -135,7 +135,7 @@ function claudeEnvOrdinary(parsed: unknown): unknown {
 
 /** Redirect env keys plus `apiKeyHelper` (a command whose output becomes the API key). */
 function claudeEndpointRedirect(parsed: unknown): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  const out: Record<string, unknown> = Object.create(null);
   const env = plainObject(getPath(parsed, 'env'));
   if (env) for (const [k, v] of Object.entries(env)) if (isRedirectEnv(k)) out[k] = v;
   const helper = getPath(parsed, API_KEY_HELPER_KEY);
@@ -179,7 +179,7 @@ export const CODEX_PROVIDER_URL_KEY = 'base_url';
 
 /** Codex `approval_policy` / `sandbox_mode`, top level and per `[profiles.<name>]`. */
 function codexSandbox(parsed: unknown): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  const out: Record<string, unknown> = Object.create(null);
   const root = plainObject(parsed) ?? {};
   for (const k of CODEX_SANDBOX_KEYS) if (root[k] !== undefined) out[k] = root[k];
   for (const [name, prof] of Object.entries(plainObject(root.profiles) ?? {})) {
@@ -192,7 +192,7 @@ function codexSandbox(parsed: unknown): Record<string, unknown> {
 
 /** Codex `[projects."<path>"] trust_level`, one entry per project path. */
 function codexTrust(parsed: unknown): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  const out: Record<string, unknown> = Object.create(null);
   for (const [dir, proj] of Object.entries(plainObject(getPath(parsed, 'projects')) ?? {})) {
     const p = plainObject(proj);
     if (p && p[CODEX_TRUST_KEY] !== undefined) out[dir] = p[CODEX_TRUST_KEY];
@@ -202,7 +202,7 @@ function codexTrust(parsed: unknown): Record<string, unknown> {
 
 /** Codex `model_provider` and every `[model_providers.<name>] base_url`. */
 function codexProvider(parsed: unknown): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  const out: Record<string, unknown> = Object.create(null);
   const root = plainObject(parsed) ?? {};
   if (root[CODEX_PROVIDER_KEY] !== undefined) out[CODEX_PROVIDER_KEY] = root[CODEX_PROVIDER_KEY];
   for (const [name, prov] of Object.entries(plainObject(root.model_providers) ?? {})) {
@@ -459,7 +459,7 @@ export function snapshotContent(raw: string, spec: WatchedFileSpec): FileSnapsho
   } catch {
     return unparseable(raw);
   }
-  const snap: FileSnapshot = {};
+  const snap: FileSnapshot = Object.create(null);
   for (const s of spec.sections) {
     const m = sectionFrom(s.kind, s.extract ? s.extract(parsed) : getPath(parsed, s.keyPath));
     if (Object.keys(m).length) snap[s.keyPath] = m;
@@ -487,7 +487,7 @@ function snapshotDir(dirPath: string, spec: WatchedFileSpec): FileSnapshot {
   const key = spec.sections[0].keyPath;
   if (!st.isDirectory()) return { [key]: { '(not a directory)': [sha(`${st.mode}:${st.size}:${st.mtimeMs}`)] } };
   const names = fs.readdirSync(dirPath).sort();
-  const entries: SectionMap = {};
+  const entries: SectionMap = Object.create(null);
   for (const name of names.slice(0, MAX_DIR_ENTRIES)) {
     let sig = 'gone';
     try { const e = fs.lstatSync(path.join(dirPath, name)); sig = `${e.isDirectory() ? 'd' : e.isFile() ? 'f' : 'o'}:${e.size}:${e.mtimeMs}`; } catch { /* raced away */ }
@@ -827,6 +827,19 @@ export function specForPath(filePath: string, home: string, roots: string[]): Wa
 
 // ── Section versions (upgrade baselining) ───────────────────────────────────
 
+/**
+ * Pseudo-section recorded in `sectionVersions` for a baseline this build took
+ * while the file could not be parsed. It means "nothing known", not "version
+ * 1": on recovery every section is diffed against empty, at its own severity
+ * (#928 r3, B3). Not a real section name, so it can never collide with one.
+ */
+export const BASELINE_UNPARSEABLE = '(baseline taken while unparseable)';
+
+/** The version record for a baseline taken while the file was unparseable. */
+export function unparseableVersions(): Record<string, number> {
+  return { [BASELINE_UNPARSEABLE]: 1 };
+}
+
 /** The current version of every section of a spec, as recorded in the state. */
 export function sectionVersionsFor(spec: WatchedFileSpec): Record<string, number> {
   return Object.fromEntries(spec.sections.map((s) => [s.keyPath, s.version ?? 1]));
@@ -843,9 +856,12 @@ export function sectionVersionsFor(spec: WatchedFileSpec): Record<string, number
  * Returns the stored snapshot unchanged when nothing needs migrating.
  */
 export function migrateBaseline(spec: WatchedFileSpec, stored: FileSnapshot, current: FileSnapshot, recorded: Record<string, number> | undefined): FileSnapshot {
+  // A baseline this build took while the file was unparseable holds nothing:
+  // never adopt current values for it, let the diff report them all.
+  if (recorded && Object.prototype.hasOwnProperty.call(recorded, BASELINE_UNPARSEABLE)) return stored;
   let out: FileSnapshot | undefined;
   for (const s of spec.sections) {
-    const from = recorded?.[s.keyPath] ?? 1;
+    const from = (recorded && Object.prototype.hasOwnProperty.call(recorded, s.keyPath) ? recorded[s.keyPath] : undefined) ?? 1;
     if (from === (s.version ?? 1)) continue;
     out ??= { ...stored };
     const taken = from === 1 && s.fromV1 ? s.fromV1(stored, current) : current[s.keyPath];
@@ -966,7 +982,7 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
       // Baseline silently: first run, or a project root / drop directory we have not seen before.
       if (firstRun || (w.root && !knownRoots.has(w.root)) || (w.dropzone && !knownDropzones.has(w.dropzone))) {
         next.files[w.key] = after;
-        if (!unparseable) versions[w.key] = sectionVersionsFor(w.spec);
+        versions[w.key] = unparseable ? unparseableVersions() : sectionVersionsFor(w.spec);
         continue;
       }
       let before = known ? state.files[w.key] : {};
@@ -975,7 +991,7 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
       // take: it keeps its record and migrates once it parses again.
       if (!unparseable) {
         if (known) {
-          const migrated = migrateBaseline(w.spec, before, after, state.sectionVersions?.[w.key]);
+          const migrated = migrateBaseline(w.spec, before, after, own(state.sectionVersions, w.key));
           if (migrated !== before) { before = migrated; next.files[w.key] = migrated; }
         }
         versions[w.key] = sectionVersionsFor(w.spec);
@@ -1001,45 +1017,61 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
     let pending = 0;
     for (const c of changedFiles) {
       if (expired) return;
-      // High-severity kinds first, so they are always among the three shown.
-      const changes = diffSnapshots(c.spec, c.before, c.after)
-        .filter((x) => !(c.spec.ignoreRemovals && x.kind === 'removed'))
-        .sort((x, y) => Number(changeSeverity(y) === 'high') - Number(changeSeverity(x) === 'high'));
-      const shown = displayPath(c.file, deps.home);
-      if (changes.length === 0) { next.files[c.key] = c.after; continue; }
-      next.lastDetectedAt = new Date(now()).toISOString();
-      const severity: ChangeSeverity = changes.some((x) => changeSeverity(x) === 'high') ? 'high' : 'normal';
-      const note: AgentConfigNotification = {
-        file: shown,
-        changes: changes.slice(0, 3).map((x) => ({ label: changeLabel(x), name: x.name })),
-        changeCount: changes.length,
-        ...(severity === 'high' ? { severity } : {}),
-      };
+      // One file's failure (a diff that throws...) must not stop the others
+      // or lose what was already delivered: it keeps its baseline and re-alerts.
       try {
-        await deps.notify(note);
+        // High-severity kinds first, so they are always among the three shown.
+        const changes = diffSnapshots(c.spec, c.before, c.after)
+          .filter((x) => !(c.spec.ignoreRemovals && x.kind === 'removed'))
+          .sort((x, y) => Number(changeSeverity(y) === 'high') - Number(changeSeverity(x) === 'high'));
+        const shown = displayPath(c.file, deps.home);
+        if (changes.length === 0) { next.files[c.key] = c.after; continue; }
+        next.lastDetectedAt = new Date(now()).toISOString();
+        const severity: ChangeSeverity = changes.some((x) => changeSeverity(x) === 'high') ? 'high' : 'normal';
+        const note: AgentConfigNotification = {
+          file: shown,
+          changes: changes.slice(0, 3).map((x) => ({ label: changeLabel(x), name: x.name })),
+          changeCount: changes.length,
+          ...(severity === 'high' ? { severity } : {}),
+        };
+        try {
+          await deps.notify(note);
+        } catch (err) {
+          if (expired) return;
+          // Not delivered: keep the old baseline so the change is re-sent next session.
+          result.errors++;
+          pending++;
+          safeLedger({ file: shown, keyPath: changes[0].keyPath, kind: 'notify-error', detail: `notification not delivered (${errorCategory(err)})`, outcome: 'error' });
+          continue;
+        }
+        if (expired) return;
+        result.notified++;
+        let recorded = true;
+        for (const x of changes) {
+          if (!safeLedger({ file: shown, keyPath: x.keyPath, kind: changeLabel(x), detail: `entry=${safeEntryName(x.name)}`, outcome: 'change', severity: changeSeverity(x) })) recorded = false;
+        }
+        if (!recorded) {
+          // The audit row is the durable record: without it, do not advance the
+          // baseline, so the next run re-reports and re-records the change.
+          result.errors++;
+          pending++;
+          continue;
+        }
+        next.files[c.key] = c.after;
+        next.lastChangeAt = new Date(now()).toISOString();
       } catch (err) {
         if (expired) return;
-        // Not delivered: keep the old baseline so the change is re-sent next session.
         result.errors++;
         pending++;
-        safeLedger({ file: shown, keyPath: changes[0].keyPath, kind: 'notify-error', detail: `notification not delivered (${errorCategory(err)})`, outcome: 'error' });
-        continue;
+        safeLedger({ file: displayPath(c.file, deps.home), keyPath: '', kind: 'error', detail: `check failed (${errorCategory(err)})`, outcome: 'error' });
       }
-      if (expired) return;
-      result.notified++;
-      let recorded = true;
-      for (const x of changes) {
-        if (!safeLedger({ file: shown, keyPath: x.keyPath, kind: changeLabel(x), detail: `entry=${safeEntryName(x.name)}`, outcome: 'change', severity: changeSeverity(x) })) recorded = false;
-      }
-      if (!recorded) {
-        // The audit row is the durable record: without it, do not advance the
-        // baseline, so the next run re-reports and re-records the change.
-        result.errors++;
-        pending++;
-        continue;
-      }
-      next.files[c.key] = c.after;
-      next.lastChangeAt = new Date(now()).toISOString();
+    }
+    // A baseline that IS the unreadable marker holds no sections: record that,
+    // so a later recovery is diffed in full, never adopted as "pre-upgrade v1".
+    // (A real baseline kept because the notice was undelivered keeps its record.)
+    for (const w of targets) {
+      const saved = own(next.files, w.key);
+      if (saved && isUnparseable(saved)) versions[w.key] = unparseableVersions();
     }
     next.pendingChanges = pending;
     next.lastCheckAt = new Date(now()).toISOString();
