@@ -7,6 +7,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.15.4] - 2026-10-29
+
+Patch on 5.15.3. Dependency security update only: the lockfile moves the transitive `@hono/node-server` from 2.0.12 to 2.1.5 past GHSA-rmxm-3fg6-px4f (PR #960). No ShieldCortex source change, no change to Action Guard, install or configuration, no schema change. Action Guard stays off by default. Node floor unchanged.
+
+### Security
+- **`@hono/node-server` 2.0.12 → 2.1.5 (GHSA-rmxm-3fg6-px4f).** Transitive via `@modelcontextprotocol/sdk`. npm advisory 1243661: `serveStatic` decoded the request path twice, so middleware on static paths could be skipped. No ShieldCortex source change. The SKILL.md production-audit claim stays 0 unwaived / 3 waived (`sharp`).
+
+## [5.15.3] - 2026-10-28
+
+Patch on 5.15.2. `shieldcortex update` no longer reports the OpenClaw plugin step as finished when OpenClaw refused the install over an unavailable `gateway.auth.token` secret reference, or saved the plugin files while the previous plugin generation stayed active (#952, PR #955). Also a test-only change pinning the SKILL.md permission lists (#897, PR #954), which adds `js-yaml` as a devDependency only. No change to Action Guard, install or configuration, no schema change. Action Guard stays off by default. Node floor unchanged.
+
+### Fixed
+- **#952 `shieldcortex update` no longer reports a finished OpenClaw plugin update after a secret-reference refusal or an unsettled plugin swap.** When `openclaw plugins install` refuses because `gateway.auth.token` is configured as a secret reference that is unavailable in that command path, the OpenClaw plugin step now says so, is reported unfinished (exit 1) and tells you to run `shieldcortex update` from a shell whose environment resolves that reference (an env-sourced reference reads the variable its id names), with OpenClaw's own `Fix:` lines shown alongside. It no longer names the same `openclaw plugins install --force …` as the fix, and it loads no secrets itself. When OpenClaw saves the plugin files but reports that the admitted work did not settle and the previous plugin generation stays active, the step is reported unfinished as "files saved" even though the on-disk version already matches the CLI; it used to read that version and report the step ok while the gateway still ran the old plugin. It now says not to re-run the force install and names the recovery OpenClaw's own refusal names, `openclaw plugins reload shieldcortex-realtime --wait`, which waits for the admitted work to settle and finishes the swap. An ordinary timeout or non-zero exit whose target version landed is still reported installed (#604), and an invalid-config exit still shows OpenClaw's own message (#221).
+
 ## [5.15.2] - 2026-10-27
 
 Patch on 5.15.1. Documentation only: the skill's SKILL.md now describes the OpenClaw hook's package resolution as it is (#946, PR #947). No change to the hook, Action Guard, install or configuration, no schema change. Action Guard stays off by default. Node floor unchanged.

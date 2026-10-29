@@ -50,7 +50,8 @@ export interface UpdateSummaryInput {
   packageState: 'updated' | 'current' | 'unknown' | 'failed';
   engine: { ok: boolean; packagedPrebuild?: boolean; remediation?: string | null };
   /** OpenClaw plugin step. 'skip' = OpenClaw plugin not installed. */
-  plugin: { status: SummaryStepStatus; rerun?: string };
+  /** `recovery`: the fix when re-running the install is not one (#952). */
+  plugin: { status: SummaryStepStatus; rerun?: string; recovery?: { command: string; note?: string } };
   skill: { status: SummaryStepStatus; rerun?: string };
   hook?: { status: SummaryStepStatus };
   hermes?: { status: SummaryStepStatus; reason?: string };
@@ -203,8 +204,9 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
         mark: 'check',
         text: 'plugin couldn\'t be updated',
         why: 'OpenClaw keeps running the previous plugin.',
-        command: input.plugin.rerun ?? 'shieldcortex update',
+        command: input.plugin.rerun ?? input.plugin.recovery?.command ?? 'shieldcortex update',
         commandLabel: 'Fix',
+        commandNote: input.plugin.rerun ? undefined : input.plugin.recovery?.note,
       });
     } else if (pluginBehind) {
       const expected = sanitiseDisplayField(p.expectedVersion || input.toVersion);

@@ -110,6 +110,15 @@ interface StepResult {
    * instead of closing the run on a bare "✓ done".
    */
   rerun?: string;
+  /**
+   * The command that finishes this step when repeating its own install would
+   * NOT (#952): a drain the force install cannot settle, or a secret reference
+   * the same environment cannot resolve. Like `rerun` it puts the step on the
+   * footer's unresolved list — an unfinished step must never close the run on a
+   * bare "✓ done" — but it is never offered as a re-run. `note` says where or
+   * how to run it.
+   */
+  recovery?: { command: string; note?: string };
   /** Machine-readable cause, for plain wording on the closing screen only. */
   reason?: string;
   /** Plugin-check facts for the closing screen (protection step only). */
@@ -140,10 +149,57 @@ function describeInstallEnd(err: unknown, timeoutMs: number): string {
   return 'did not finish';
 }
 
+/**
+ * Two OpenClaw install endings that are NOT a finished plugin swap (#952), read
+ * off the child's own words before any end-state check. Each says exactly what
+ * is wrong, and neither is finished by the `openclaw plugins install --force …`
+ * re-run that #604 names for an ordinary timeout or non-zero exit. Both
+ * patterns are OpenClaw's exact refusal wording (gateway/credentials.ts and
+ * gateway/server-plugin-reload-cleanup.ts), not a looser paraphrase: OpenClaw
+ * also says a bare "did not settle" about other things (an unsettled gateway
+ * start, an approval), and a secret reference can be mentioned without being
+ * refused.
+ *
+ *  - `secret-ref`: "<path> is configured as a secret reference but is
+ *    unavailable in this command path." The install never ran, and the same
+ *    command from the same environment fails the same way. An env-sourced
+ *    reference resolves from the variable its id names, and this CLI hands
+ *    `openclaw` its own environment unchanged — so the fix is an environment
+ *    in which that reference resolves. Nothing here loads a secret.
+ *  - `drain`: "plugin <id> admitted work did not settle within 60s; the
+ *    previous plugin generation stays active." The files were saved and the
+ *    on-disk version already equals the CLI's, so the #604 end-state read used
+ *    to call the step **ok** while the gateway still ran the old plugin.
+ *    OpenClaw's own refusal names the recovery, `openclaw plugins reload <id>
+ *    --wait`, which waits for the admitted work without a deadline.
+ */
+export function classifyOpenClawInstallEnding(text: string): 'secret-ref' | 'drain' | null {
+  if (/is configured as a secret reference but is unavailable/i.test(text)) return 'secret-ref';
+  if (/admitted work did not settle|previous plugin generation stays active/i.test(text)) return 'drain';
+  return null;
+}
+
 /** A step left unresolved: what it was and the exact command that finishes it. */
 export interface UnresolvedStep {
   label: string;
+  /** The command that finishes the step — a re-run, or a step's `recovery`. */
   rerun: string;
+  /** 'run' for a `recovery` command, which is not a repeat of the step (#952). */
+  verb?: 'run';
+  note?: string;
+}
+
+/**
+ * Every step that could not confirm its own end state (#604) or that left its
+ * work unfinished with a recovery other than a re-run (#952), with the command
+ * that finishes it. The footer and the closing panel both name them.
+ */
+export function collectUnresolved(steps: Array<{ label: string; result: StepResult }>): UnresolvedStep[] {
+  return steps.flatMap(({ label, result }): UnresolvedStep[] => {
+    if (result.rerun) return [{ label, rerun: result.rerun }];
+    if (result.recovery) return [{ label, rerun: result.recovery.command, verb: 'run', note: result.recovery.note }];
+    return [];
+  });
 }
 
 /**
@@ -374,7 +430,8 @@ export function footer(
       `  ${paint('yellow', '⚠')}  ${paint('bold', 'done')}  ${paint('gray', `in ${elapsed} · ${n} step${n === 1 ? '' : 's'} unresolved`)}${mainUpdated ? `  ${paint('cyan', '·')}  ${paint('yellow', 'restart Claude Code / OpenClaw gateway')}` : ''}\n`,
     );
     for (const u of unresolved) {
-      process.stdout.write(`     ${paint('gray', `${u.label}: re-run`)} ${sanitiseDisplayField(u.rerun)}\n`);
+      const note = u.note ? ` ${paint('gray', `— ${sanitiseDisplayField(u.note)}`)}` : '';
+      process.stdout.write(`     ${paint('gray', `${u.label}: ${u.verb ?? 're-run'}`)} ${sanitiseDisplayField(u.rerun)}${note}\n`);
     }
     process.stdout.write('\n');
   } else if (mainUpdated) {
@@ -662,6 +719,16 @@ export function isRealtimePluginRegistered(home: string): boolean {
 
 const PLUGIN_INSTALL_ARGS = ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@latest'];
 const PLUGIN_RERUN = `openclaw ${PLUGIN_INSTALL_ARGS.join(' ')}`;
+/**
+ * #952: the command that finishes a swap OpenClaw refused because the previous
+ * generation's admitted work had not settled. It is the recovery OpenClaw's own
+ * refusal names; `--wait` waits for that work without a deadline. The OpenClaw
+ * plugins *tool* offers no equivalent — its action enum is `reload`, nothing
+ * more — so the advice names the CLI command, not a tool action.
+ */
+const PLUGIN_RELOAD_WAIT = 'openclaw plugins reload shieldcortex-realtime --wait';
+/** Where the secret-reference recovery has to run (#952). */
+const SECRET_REF_NOTE = 'from a shell whose environment resolves the gateway secret reference';
 
 /** A read of what a step actually left on the host: a version, or why none could be read. */
 export type EndState = { version: string } | { version: null; reason: string };
@@ -844,6 +911,42 @@ async function stepOpenClawPluginLocked(
         ? [sanitiseForReport(`also: could not remove legacy extension at ${extDir}: ${purgeFailure}`, { home })]
         : [];
       const e = err as CapturedError;
+      // #952: what the child SAID outranks what it left behind. Both endings
+      // below can leave the target version on disk, and the #604 read would
+      // then report a finished swap that did not happen. Neither is fixed by
+      // the force install, so neither sets `rerun`; each names its own
+      // `recovery` instead, so the footer still lists the step as unresolved.
+      const said = [e?.stderr ?? '', e?.stdout ?? '', report.reason, ...report.detail].join('\n');
+      const ending = classifyOpenClawInstallEnding(said);
+      if (ending === 'secret-ref') {
+        const key = /\bgateway\.auth\.token\b/.test(said) ? 'gateway.auth.token' : 'a gateway config value';
+        return {
+          status: 'warn' as const,
+          summary: `not applied — ${key} is a gateway secret reference and this CLI path does not load gateway secrets`,
+          detail: [
+            ...report.detail,
+            'run `shieldcortex update` from a shell whose environment resolves that reference (an env-sourced reference reads the variable its id names); this CLI hands `openclaw` its environment unchanged and loads no secrets',
+            ...purgeDetail,
+          ],
+          truncated: report.truncated,
+          unfinished: true,
+          recovery: { command: 'shieldcortex update', note: SECRET_REF_NOTE },
+        };
+      }
+      if (ending === 'drain') {
+        return {
+          status: 'warn' as const,
+          summary: 'files saved — the previous plugin generation stays active until a reload settles its admitted work',
+          detail: [
+            ...report.detail,
+            `do not re-run \`openclaw plugins install --force\`; run \`${PLUGIN_RELOAD_WAIT}\` to wait for the admitted work to settle and finish the swap (the recovery OpenClaw's refusal names)`,
+            ...purgeDetail,
+          ],
+          truncated: report.truncated,
+          unfinished: true,
+          recovery: { command: PLUGIN_RELOAD_WAIT },
+        };
+      }
       // #604: a timeout or a non-zero exit says how the CHILD ended, not what it
       // left behind. Read the end state before calling the step failed.
       if (!e?.spawnFailed && (e?.timedOut || typeof e?.exitCode === 'number')) {
@@ -1585,12 +1688,12 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   await stepClaudeHooks(home);
   await stepStatePermissions();
 
-  // #604: every step that could not confirm its own end state, with the exact
-  // command that finishes it — the footer and the closing panel both name them.
-  const unresolved: UnresolvedStep[] = [
+  // #604/#952: every step left unresolved, with the exact command that
+  // finishes it — the footer and the closing panel both name them.
+  const unresolved: UnresolvedStep[] = collectUnresolved([
     { label: 'OpenClaw plugin', result: pluginResult },
     { label: 'OpenClaw skill', result: skillResult },
-  ].flatMap(({ label, result }) => (result.rerun ? [{ label, rerun: result.rerun }] : []));
+  ]);
   footer(Date.now() - flowStart, mainUpdated, latest, unresolved);
 
   const protection: StepResult = reexecFailed
@@ -1756,7 +1859,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
       packagedPrebuild: engineResult.packagedPrebuild,
       remediation: engineResult.remediation,
     },
-    plugin: { status: pluginResult.status, rerun: pluginResult.rerun },
+    plugin: { status: pluginResult.status, rerun: pluginResult.rerun, recovery: pluginResult.recovery },
     skill: { status: skillResult.status, rerun: skillResult.rerun },
     hook: { status: hookResult.status },
     hermes: { status: hermesResult.status, reason: hermesResult.reason },
