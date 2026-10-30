@@ -230,6 +230,31 @@ function hookDistRoot() {
 }
 
 /**
+ * Where the #923 owner-present detector reads process state. The synthetic
+ * tree seam is gated exactly like `SHIELDCORTEX_DIST_ROOT` above: never
+ * honoured with a policy lock on disk.
+ */
+function hookProcRoot() {
+  if (inlinePolicyLockPresent()) return '/proc';
+  const override = process.env.SHIELDCORTEX_TEST_PROC_ROOT?.trim();
+  return override && isAbsolute(override) ? override : '/proc';
+}
+
+/**
+ * #923 owner-present verdict. Loaded lazily so a missing or broken detector
+ * module is "unproven" — today's deny — never a crash and never an allow.
+ */
+async function proveOwnerPresent(hookData) {
+  try {
+    const mod = await import('./lib/owner-tty.mjs');
+    const result = mod.proveOwnerPresentHarness({ hookData, procRoot: hookProcRoot() });
+    return result && result.proven === true ? result : { proven: false };
+  } catch {
+    return { proven: false };
+  }
+}
+
+/**
  * Load the policy-lock reader from dist. Null when the build predates #501 or
  * is incomplete — which is exactly the case {@link inlinePolicyLockPresent}
  * exists to cover.
@@ -1669,6 +1694,9 @@ function safeDiagnosticReason(reason) {
 
 function safeGuardOutcomeReason(verdict, outcome, event) {
   if (event === 'action_guard_warning') {
+    if (verdict?.ownerPresentTty === true) {
+      return 'Action Guard warning: no prompt surface, but the session runs in an owner-present terminal, so this dangerous tool call was logged and allowed (#923); inspect local audit for details.';
+    }
     return outcome === 'failure_allowed'
       ? 'Action Guard was unavailable and advisory mode allowed a dangerous tool call; inspect local audit for details.'
       : 'Action Guard warning in advisory mode; inspect local audit for details.';
@@ -3620,6 +3648,38 @@ process.stdin.on('end', async () => {
     }
 
     const noPromptSurfaceForHold = noPromptSurfaceReason(permissionMode);
+
+    // #923 (principle 4 of #875): no prompt surface, but a human owns the
+    // terminal the harness runs in — log, don't deny. Only the ordinary
+    // dangerous tier: catastrophic exited above, and the self-protection floor
+    // and unscanned calls keep the deny below. Proof is about the HARNESS
+    // (scripts/lib/owner-tty.mjs), never this hook's own fds; anything it
+    // cannot prove — a subagent, a cron, an agent-launched or pty-wrapped
+    // Claude, another platform — falls through to today's deny.
+    if (noPromptSurfaceForHold && !unscannedBlock && !selfProtected
+      && verdict.severity === 'dangerous' && verdict.decision === 'require_approval') {
+      const owner = await proveOwnerPresent(hookData);
+      if (owner.proven) {
+        const ownerVerdict = { ...verdict, ownerPresentTty: true };
+        const actionId = writeTerminalOutcomeAudit(toolName, ownerVerdict, toolInput, 'warn', 'warned', 'action_guard_warning', {
+          ...baseExtra,
+          noPromptSurfaceReason: noPromptSurfaceForHold,
+          logOnlyReason: 'owner-present-tty',
+        });
+        const notified = await alertGuardOutcome(getNotify(), {
+          toolName,
+          toolInput,
+          verdict: ownerVerdict,
+          outcome: 'warned',
+          event: 'action_guard_warning',
+          sessionKey: baseExtra.sessionKey,
+          actionId,
+        });
+        recordNotifyAudit(toolName, ownerVerdict, toolInput, { ...baseExtra, actionId }, notified);
+        console.error(`[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} — ${safeGuardOutcomeReason(ownerVerdict, 'warned', 'action_guard_warning')} [${safeSignalList(verdict.signals).join(', ')}]`);
+        process.exit(0); // Log-only: warn, emit no decision.
+      }
+    }
 
     // hold / not_brokerable / no broker at all → the pre-#143 refusal, intact
     // only when something can actually hold. Promptless denials are terminal:
