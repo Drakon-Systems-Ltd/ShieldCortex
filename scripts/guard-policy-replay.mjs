@@ -164,7 +164,7 @@ const DENIAL_SET = new Set(DENIAL_OUTCOMES);
 const WARNING_SET = new Set(WARNING_OUTCOMES);
 const RETRY_SET = new Set(RETRY_OUTCOMES);
 const EVENT_SET = new Set(EVENT_ENUM);
-const STOPPED_OUTCOMES = new Set(['auto_denied', 'denied_no_prompt_surface', 'held_no_prompt_surface', 'failure_denied']);
+const STOPPED_OUTCOMES = new Set(['auto_denied', 'denied_no_prompt_surface', 'failure_denied']);
 const CLAIM_SET = new Set(DELIVERY_CLAIM_STATUSES);
 
 /** Public-safe signal name (kept as an export for the tests): membership, not syntax. */

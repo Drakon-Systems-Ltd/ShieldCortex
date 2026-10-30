@@ -21,8 +21,6 @@ import { dirname, join } from 'node:path';
 export const GUARD_DEGRADED_OUTCOMES = new Set([
   'auto_denied',
   'denied_no_prompt_surface',
-  // #853: held under an owner card — still a call that did not run.
-  'held_no_prompt_surface',
   'failure_denied',
   'failure_allowed',
   'warned',
