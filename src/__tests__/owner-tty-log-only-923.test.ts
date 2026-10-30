@@ -734,6 +734,12 @@ describe('#923 detector unit seams (injected in-memory readers)', () => {
       expect(proveWith(rows, phased(rows, 400, { ...rows[400], ppid: 1 }, 3))).toEqual({ proven: false, reason: 'ancestor changed during the check' });
     });
 
+    it('the harness reparented after the walk, before the session-leader read, is denied', () => {
+      const rows = aged(tree());
+      // 500's stat: harness-pid resolution (1), harness read (2), re-read on the walk's first hop (3), re-read on harness → leader (4).
+      expect(proveWith(rows, phased(rows, 500, { ...rows[500], ppid: 1 }, 3))).toEqual({ proven: false, reason: 'ancestor changed during the check' });
+    });
+
     it('a child whose own pid was recycled between reads (start time changed) is denied', () => {
       const rows = aged(tree());
       expect(proveWith(rows, phased(rows, 300, { ...rows[300], start: 5000 }))).toEqual({ proven: false, reason: 'ancestor changed during the check' });
