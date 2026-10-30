@@ -39,14 +39,19 @@ at session start in a detached, time-bounded child. Source:
 | OpenClaw | `~/.openclaw/openclaw.json`, `~/.openclaw/mcp.json` | | hooks, MCP servers, plugin registrations |
 | Cursor | `~/.cursor/mcp.json` | `.cursor/mcp.json` | MCP servers |
 | Codex | `~/.codex/config.toml` | | hooks, MCP servers, sandbox, trust, provider |
-| Gemini CLI (#965) | `~/.gemini/settings.json` | `.gemini/settings.json` | hooks, MCP servers |
+| Gemini CLI (#965) | `~/.gemini/settings.json` | `.gemini/settings.json` | hooks, MCP servers, command settings (`tools.discoveryCommand`, `tools.callCommand`, `mcp.serverCommand`) |
 | VS Code | | `.vscode/tasks.json` | tasks |
 
 Gemini CLI's base-URL overrides are environment variables or `.env` entries,
 not `settings.json` keys, so there is no Gemini redirect section. The
 system-wide Gemini settings file is not watched. The Gemini files were added
 after the watch shipped: the first run that knows them baselines them
-silently, so upgrading does not alert on settings you already had.
+silently, so upgrading does not alert on settings you already had. For the
+project file this is per project root: a run checks only its session's
+project, so each known project is baselined silently the first time a run
+visits it after the upgrade. Not yet watched: Gemini's
+`general.defaultApprovalMode`, `security.folderTrust.enabled`,
+`hooksConfig.enabled/disabled` and `.gemini/.env`.
 
 ## Planted instruction files and the settings they target (Oct 2026)
 

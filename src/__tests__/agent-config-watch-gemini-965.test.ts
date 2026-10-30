@@ -13,6 +13,7 @@ import os from 'os';
 import path from 'path';
 import {
   DROPZONE_FILES,
+  GEMINI_COMMAND_KEYS,
   GEMINI_SETTINGS_REL,
   PLANTED_GEMINI_SETTINGS_FILES,
   PLANTED_INSTRUCTION_FILES,
@@ -41,9 +42,9 @@ const projectSettings = () => path.join(project, GEMINI_SETTINGS_REL);
 const writeFile = (p: string, text: string): void => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); };
 const writeJson = (p: string, v: unknown): void => writeFile(p, JSON.stringify(v, null, 2));
 const hook = (n: string) => ({ hooks: [{ type: 'command', command: val(n) }] });
-const run = () => runAgentConfigWatch({
+const run = (root: string = project) => runAgentConfigWatch({
   home,
-  projectRoots: [project],
+  projectRoots: [root],
   dropzoneDirs: [drop],
   notify: async (n) => { notes.push(n); },
   ledger: (r) => { rows.push(r); return true; },
@@ -71,7 +72,7 @@ describe('Gemini CLI specs', () => {
     for (const id of ['gemini-settings', 'gemini-project-settings']) {
       const spec = WATCHED_FILES.find((w) => w.id === id);
       expect(spec?.relPath).toBe(GEMINI_SETTINGS_REL);
-      expect(spec?.sections.map((s) => [s.keyPath, s.kind])).toEqual([['hooks', 'hooks'], ['mcpServers', 'mcpServers']]);
+      expect(spec?.sections.map((s) => [s.keyPath, s.kind])).toEqual([['hooks', 'hooks'], ['mcpServers', 'mcpServers'], [GEMINI_COMMAND_KEYS.join('+'), 'commands']]);
     }
     expect(WATCHED_FILES.find((w) => w.id === 'gemini-settings')?.scope).toBe('user');
     expect(WATCHED_FILES.find((w) => w.id === 'gemini-project-settings')?.scope).toBe('project');
@@ -94,6 +95,24 @@ describe('Gemini CLI alerts', () => {
     writeJson(file(), { hooks: { BeforeTool: [hook('a')], SessionStart: [hook('planted')] }, mcpServers: { known: { command: val('k') }, evil: { command: val('e') } } });
     await run();
     expect(labels().sort()).toEqual(['MCP server added', 'hook added']);
+    expect(JSON.stringify(notes)).not.toContain('fixture-value-965');
+  });
+
+  it.each([['user', userSettings], ['project', projectSettings]] as const)('%s: setting or changing a shell-command key alerts, an unrelated key does not', async (_n, file) => {
+    expect(GEMINI_COMMAND_KEYS).toEqual(['tools.discoveryCommand', 'tools.callCommand', 'mcp.serverCommand']);
+    writeJson(file(), { tools: { discoveryCommand: val('d') }, ui: { theme: 'a' } });
+    await run();
+    writeJson(file(), { tools: { discoveryCommand: val('d') }, ui: { theme: 'b' } });
+    expect((await run()).notified).toBe(0);
+
+    writeJson(file(), { tools: { discoveryCommand: val('d2'), callCommand: val('c') }, mcp: { serverCommand: val('s') }, ui: { theme: 'b' } });
+    await run();
+    expect(notes).toHaveLength(1);
+    expect(notes[0].changes.map((c) => `${c.label}:${c.name}`).sort()).toEqual([
+      'command setting added:mcp.serverCommand',
+      'command setting added:tools.callCommand',
+      'command setting changed:tools.discoveryCommand',
+    ]);
     expect(JSON.stringify(notes)).not.toContain('fixture-value-965');
   });
 
@@ -135,11 +154,29 @@ describe('upgrade: silent first sight (bug-A pattern from #928)', () => {
     const r = await run();
     expect(r.notified).toBe(0);
     expect(notes).toHaveLength(0);
-    expect(loadAgentConfigState(home).baselinedSpecs).toEqual(expect.arrayContaining(GEMINI_SPEC_IDS));
+    expect(loadAgentConfigState(home).baselinedSpecs).toEqual(expect.arrayContaining(
+      GEMINI_SPEC_IDS.map((id) => (id === 'gemini-project-settings' ? `${id}@${project}` : id)),
+    ));
 
     writeJson(userSettings(), { hooks: { BeforeTool: [hook('u')], Stop: [hook('planted')] }, mcpServers: { mine: { command: val('m') } } });
     await run();
     expect(labels()).toEqual(['hook added']);
+  });
+
+  it('pre-existing project B Gemini settings do not alert when B is first revisited after the upgrade', async () => {
+    const projA = project;
+    const projB = path.join(sandbox, 'projB');
+    fs.mkdirSync(projB, { recursive: true });
+    await run(projA); await run(projB); // pre-upgrade: both roots known
+    writeJson(path.join(projB, GEMINI_SETTINGS_REL), { mcpServers: { mine: { command: val('b') } } });
+    stripGeminiFromState(); // as a pre-#965 build would leave it
+    await run(projA); // the upgrade run happens in A
+    await run(projB); // the user later opens B
+    expect(labels()).toEqual([]);
+
+    writeJson(path.join(projB, GEMINI_SETTINGS_REL), { mcpServers: { mine: { command: val('b') }, evil: { command: val('e') } } });
+    await run(projB);
+    expect(labels()).toEqual(['MCP server added']);
   });
 
   it('a Gemini file appearing after the spec was baselined is reported', async () => {
