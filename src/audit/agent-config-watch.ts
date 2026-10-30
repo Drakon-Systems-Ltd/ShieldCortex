@@ -56,6 +56,13 @@ export interface AgentConfigWatchState {
    * section version 1). See `migrateBaseline`.
    */
   sectionVersions?: Record<string, Record<string, number>>;
+  /**
+   * Ids of `silentFirstSight` file specs this state has already baselined. A
+   * spec introduced after the state was written is absent here, so its files
+   * are baselined silently once, everywhere, instead of alerting an upgrading
+   * user about settings they already had (#965).
+   */
+  baselinedSpecs?: string[];
 }
 
 // ── Watched set (config, not scattered paths) ───────────────────────────────
@@ -104,6 +111,11 @@ export interface WatchedFileSpec {
   sections: WatchedSectionSpec[];
   /** Removals are recorded silently (a cleaned-up Downloads folder is not an attack). */
   ignoreRemovals?: boolean;
+  /**
+   * A spec added after the watch shipped: the first run that knows it
+   * baselines every one of its files silently (see `baselinedSpecs`).
+   */
+  silentFirstSight?: boolean;
 }
 
 /**
@@ -212,6 +224,13 @@ function codexProvider(parsed: unknown): Record<string, unknown> {
   return out;
 }
 
+/** Gemini CLI settings file, under `~` (user) or the project root (project). */
+export const GEMINI_SETTINGS_REL = path.join('.gemini', 'settings.json');
+const GEMINI_SETTINGS_SECTIONS: WatchedSectionSpec[] = [
+  { keyPath: 'hooks', kind: 'hooks' },
+  { keyPath: 'mcpServers', kind: 'mcpServers' },
+];
+
 export const WATCHED_FILES: readonly WatchedFileSpec[] = Object.freeze([
   // Claude Code
   ...(['settings.json', 'settings.local.json'] as const).flatMap((f) => ([
@@ -235,6 +254,13 @@ export const WATCHED_FILES: readonly WatchedFileSpec[] = Object.freeze([
     { keyPath: 'projects.*.trust_level', kind: 'codexTrust', extract: codexTrust, version: 2 },
     { keyPath: 'model_provider+model_providers.*.base_url', kind: 'codexProvider', extract: codexProvider, version: 2 },
   ] },
+  // Gemini CLI (#965): user and project settings.json, same `hooks` and
+  // `mcpServers` keys as Claude. The base-URL overrides Gemini documents are
+  // environment variables (.env files), not settings.json keys, so there is
+  // no redirect section here.
+  ...(['gemini-settings', 'gemini-project-settings'] as const).map((id) => (
+    { id, scope: id === 'gemini-settings' ? 'user' as const : 'project' as const, relPath: GEMINI_SETTINGS_REL, format: 'json' as const, silentFirstSight: true, sections: GEMINI_SETTINGS_SECTIONS }
+  )),
   // Editor tasks
   { id: 'vscode-tasks', scope: 'project', relPath: path.join('.vscode', 'tasks.json'), format: 'jsonc', sections: [{ keyPath: 'tasks', kind: 'tasks' }] },
 ]);
@@ -247,18 +273,23 @@ export const WATCHED_FILES: readonly WatchedFileSpec[] = Object.freeze([
  * file is hashed, never read for meaning, and removals are silent.
  */
 /** Instruction file names checked in each drop directory (also in the home directory itself). */
-export const PLANTED_INSTRUCTION_FILES: readonly string[] = Object.freeze(['AGENTS.md', 'AGENTS.override.md', 'CLAUDE.md']);
+export const PLANTED_INSTRUCTION_FILES: readonly string[] = Object.freeze(['AGENTS.md', 'AGENTS.override.md', 'CLAUDE.md', 'GEMINI.md']);
 /** Claude settings checked under `<drop dir>/.claude/` (not in the home directory: those are watched above). */
 export const PLANTED_CLAUDE_SETTINGS_FILES: readonly string[] = Object.freeze(['settings.json', 'settings.local.json']);
+/** Gemini CLI settings checked under `<drop dir>/.gemini/` (not in the home directory: watched above). */
+export const PLANTED_GEMINI_SETTINGS_FILES: readonly string[] = Object.freeze(['settings.json']);
 /** Directory listed one level deep in each drop directory (not in the home directory). */
 export const PLANTED_CODEX_DIR = '.codex';
 
 export const DROPZONE_FILES: readonly WatchedFileSpec[] = Object.freeze([
   ...PLANTED_INSTRUCTION_FILES.map((f) => (
-    { id: `planted-${f}`, scope: 'dropzone' as const, relPath: f, format: 'raw' as const, ignoreRemovals: true, sections: [{ keyPath: 'instructions', kind: 'plantedInstructions' as const }] }
+    { id: `planted-${f}`, scope: 'dropzone' as const, relPath: f, format: 'raw' as const, ignoreRemovals: true, ...(f === 'GEMINI.md' ? { silentFirstSight: true } : {}), sections: [{ keyPath: 'instructions', kind: 'plantedInstructions' as const }] }
   )),
   ...PLANTED_CLAUDE_SETTINGS_FILES.map((f) => (
     { id: `planted-claude-${f}`, scope: 'dropzone' as const, relPath: path.join('.claude', f), format: 'raw' as const, ignoreRemovals: true, sections: [{ keyPath: 'agent-config', kind: 'plantedAgentConfig' as const }] }
+  )),
+  ...PLANTED_GEMINI_SETTINGS_FILES.map((f) => (
+    { id: `planted-gemini-${f}`, scope: 'dropzone' as const, relPath: path.join('.gemini', f), format: 'raw' as const, ignoreRemovals: true, silentFirstSight: true, sections: [{ keyPath: 'agent-config', kind: 'plantedAgentConfig' as const }] }
   )),
   { id: 'planted-codex-dir', scope: 'dropzone', relPath: PLANTED_CODEX_DIR, format: 'dir', ignoreRemovals: true, sections: [{ keyPath: 'agent-config', kind: 'plantedAgentConfig' }] },
 ]);
@@ -955,8 +986,10 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
     const firstRun = !state.initialised;
     const knownRoots = new Set(state.roots);
     const knownDropzones = new Set(state.dropzones ?? []);
+    const baselinedSpecs = new Set(state.baselinedSpecs ?? []);
     const next: AgentConfigWatchState = { ...state, version: 1, initialised: true, files: { ...state.files }, roots: [...new Set([...state.roots, ...roots])], dropzones: [...new Set([...(state.dropzones ?? []), ...dropzones])], sectionVersions: { ...(state.sectionVersions ?? {}) } };
     const versions = next.sectionVersions!;
+    next.baselinedSpecs = [...new Set([...baselinedSpecs, ...[...WATCHED_FILES, ...DROPZONE_FILES].filter((x) => x.silentFirstSight).map((x) => x.id)])];
     const changedFiles: Array<{ key: string; file: string; spec: WatchedFileSpec; before: FileSnapshot; after: FileSnapshot }> = [];
     const health: Record<string, { file: string; category: string }> = {};
     const targets = [
@@ -979,8 +1012,9 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
       const unparseable = isUnparseable(after);
       if (unparseable) health[w.key] = { file: w.file, category: 'parse-error' };
       const known = Object.prototype.hasOwnProperty.call(state.files, w.key);
-      // Baseline silently: first run, or a project root / drop directory we have not seen before.
-      if (firstRun || (w.root && !knownRoots.has(w.root)) || (w.dropzone && !knownDropzones.has(w.dropzone))) {
+      // Baseline silently: first run, a project root / drop directory we have not seen before,
+      // or a file spec introduced since this state was written (#965).
+      if (firstRun || (w.spec.silentFirstSight && !baselinedSpecs.has(w.spec.id)) || (w.root && !knownRoots.has(w.root)) || (w.dropzone && !knownDropzones.has(w.dropzone))) {
         next.files[w.key] = after;
         versions[w.key] = unparseable ? unparseableVersions() : sectionVersionsFor(w.spec);
         continue;

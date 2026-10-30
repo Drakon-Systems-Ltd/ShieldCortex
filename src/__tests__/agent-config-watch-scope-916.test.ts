@@ -22,6 +22,7 @@ import {
   CODEX_TRUST_KEY,
   DROPZONE_FILES,
   PLANTED_CLAUDE_SETTINGS_FILES,
+  PLANTED_GEMINI_SETTINGS_FILES,
   PLANTED_CODEX_DIR,
   PLANTED_INSTRUCTION_FILES,
   REDIRECT_ENV_KEYS,
@@ -144,6 +145,7 @@ describe('exported watch lists (single source of truth)', () => {
     expect(rel).toEqual([
       ...PLANTED_INSTRUCTION_FILES,
       ...PLANTED_CLAUDE_SETTINGS_FILES.map((f) => path.join('.claude', f)),
+      ...PLANTED_GEMINI_SETTINGS_FILES.map((f) => path.join('.gemini', f)),
       PLANTED_CODEX_DIR,
     ].sort());
   });

@@ -31,6 +31,23 @@ at session start in a detached, time-bounded child. Source:
   `EFBIG`. Both are reported as health errors and the other files are still
   checked.
 
+## Watched files
+
+| Tool | User file | Project file | Keys |
+|---|---|---|---|
+| Claude Code | `~/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.claude.json` | `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json` | hooks, MCP servers, env, `apiKeyHelper` |
+| OpenClaw | `~/.openclaw/openclaw.json`, `~/.openclaw/mcp.json` | | hooks, MCP servers, plugin registrations |
+| Cursor | `~/.cursor/mcp.json` | `.cursor/mcp.json` | MCP servers |
+| Codex | `~/.codex/config.toml` | | hooks, MCP servers, sandbox, trust, provider |
+| Gemini CLI (#965) | `~/.gemini/settings.json` | `.gemini/settings.json` | hooks, MCP servers |
+| VS Code | | `.vscode/tasks.json` | tasks |
+
+Gemini CLI's base-URL overrides are environment variables or `.env` entries,
+not `settings.json` keys, so there is no Gemini redirect section. The
+system-wide Gemini settings file is not watched. The Gemini files were added
+after the watch shipped: the first run that knows them baselines them
+silently, so upgrading does not alert on settings you already had.
+
 ## Planted instruction files and the settings they target (Oct 2026)
 
 Forever Security showed a web page can drop `AGENTS.md` into `~/Downloads`
@@ -50,7 +67,8 @@ anomaly 0.9 in the ledger). Values are never shown.
   `HTTPS_PROXY`, `ALL_PROXY`, `NODE_EXTRA_CA_CERTS` (any case) and top-level
   `apiKeyHelper`. Other env keys stay ordinary "environment variable" changes.
 - **Planted files**: `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`,
-  `.claude/settings.json`, `.claude/settings.local.json` and one level of a
+  `GEMINI.md`, `.claude/settings.json`, `.claude/settings.local.json`,
+  `.gemini/settings.json` (#965) and one level of a
   `.codex/` directory, in `~/Downloads`, `~/Desktop`, `$HOME` (instruction files
   only; the real `~/.claude` and `~/.codex` are watched above) and `/tmp` (top
   level). Fixed names only, nothing is walked. Whole-file hash; `.codex/`
