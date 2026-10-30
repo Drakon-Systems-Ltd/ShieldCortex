@@ -230,24 +230,15 @@ function hookDistRoot() {
 }
 
 /**
- * Where the #923 owner-present detector reads process state. The synthetic
- * tree seam is gated exactly like `SHIELDCORTEX_DIST_ROOT` above: never
- * honoured with a policy lock on disk.
- */
-function hookProcRoot() {
-  if (inlinePolicyLockPresent()) return '/proc';
-  const override = process.env.SHIELDCORTEX_TEST_PROC_ROOT?.trim();
-  return override && isAbsolute(override) ? override : '/proc';
-}
-
-/**
  * #923 owner-present verdict. Loaded lazily so a missing or broken detector
  * module is "unproven" — today's deny — never a crash and never an allow.
+ * The detector always reads the real /proc: there is no environment seam
+ * (#923 review finding 6); tests inject readers into the detector directly.
  */
 async function proveOwnerPresent(hookData) {
   try {
     const mod = await import('./lib/owner-tty.mjs');
-    const result = mod.proveOwnerPresentHarness({ hookData, procRoot: hookProcRoot() });
+    const result = mod.proveOwnerPresentHarness({ hookData });
     return result && result.proven === true ? result : { proven: false };
   } catch {
     return { proven: false };
@@ -3656,7 +3647,9 @@ process.stdin.on('end', async () => {
     // (scripts/lib/owner-tty.mjs), never this hook's own fds; anything it
     // cannot prove — a subagent, a cron, an agent-launched or pty-wrapped
     // Claude, another platform — falls through to today's deny.
-    if (noPromptSurfaceForHold && !unscannedBlock && !selfProtected
+    // `bypassPermissions` never enters: the owner chose no guard prompts at
+    // all, and #923 keeps its deny (review finding 1).
+    if (noPromptSurfaceForHold && permissionMode !== 'bypassPermissions' && !unscannedBlock && !selfProtected
       && verdict.severity === 'dangerous' && verdict.decision === 'require_approval') {
       const owner = await proveOwnerPresent(hookData);
       if (owner.proven) {
