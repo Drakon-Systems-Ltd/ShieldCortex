@@ -792,6 +792,62 @@ const MODIFY_SHELL_STARTUP_RE = new RegExp(String.raw`(?:(?:>>?|>\|)(?:[ \t]|\\\
  */
 export const CLAUDE_TRANSCRIPT_PATH_RE = /\.claude[\\/]+projects[\\/]+(?:[^\s;&|<>'"`]*?[\\/])?(?:subagents(?=$|[\\/\s;&|<>'"`)])|[^\s;&|<>'"`\\/]*\.jsonl\b)/i;
 
+/**
+ * #923 r5: `p` with `.` and empty segments dropped and `..` collapsed, purely
+ * lexically. `<home>/.claude/./projects/p/s.jsonl`, `.claude//projects` and
+ * `.claude/x/../projects` all name the transcript the regex above names. A
+ * symlink alias and a target reached after an earlier `cd` are NOT resolved
+ * (no filesystem read here); those stay the documented residual.
+ */
+export function lexicalPathNormalise(p: string): string {
+  const s = p.replace(/\\/g, '/');
+  const abs = s.startsWith('/');
+  const out: string[] = [];
+  for (const seg of s.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      if (out.length > 0 && out[out.length - 1] !== '..') out.pop();
+      else if (!abs) out.push('..');
+      continue;
+    }
+    out.push(seg);
+  }
+  return (abs ? '/' : '') + out.join('/');
+}
+
+/** Every `.claude`-bearing word of `text`, lexically normalised (#923 r5). */
+function normalisedClaudeWords(text: string): string[] {
+  return String(text || '').split(/[\s;&|<>'"`()=,]+/)
+    .filter(w => /\.claude/i.test(w))
+    .map(lexicalPathNormalise);
+}
+
+/**
+ * #923 r5: true when `text` names a Claude Code transcript in any lexical
+ * spelling — the regex on the text as written, or on any `.claude` word of it
+ * after `lexicalPathNormalise`. Only ever adds a match to the raw regex.
+ */
+export function claudeTranscriptNamed(text: string): boolean {
+  if (CLAUDE_TRANSCRIPT_PATH_RE.test(text)) return true;
+  return normalisedClaudeWords(text).some(w => CLAUDE_TRANSCRIPT_PATH_RE.test(w));
+}
+
+/**
+ * #923 r5: every path-bearing value of a tool input. `extractPath` is
+ * first-wins, so a decoy `path` hid NotebookEdit's `notebook_path`; the
+ * transcript floor reads them all. (A camelCase `notebookPath` is not a
+ * PATH_KEY: the annotate pass strips it before this runs, and Claude Code's
+ * NotebookEdit does not read it.)
+ */
+export function extractAllPaths(args: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const k of PATH_KEYS) {
+    const v = args?.[k];
+    if (typeof v === 'string' && v.length > 0) out.push(v);
+  }
+  return out;
+}
+
 const DANGEROUS: Pattern[] = [
   // `shred` is anchored to command position (issue #89 remainder): start of
   // statement, after a separator/subshell, after sudo/env-assignment prefixes,
@@ -3979,13 +4035,13 @@ export function guardConfigAccessIsReadOnly(text: string): boolean {
  * reading the transcript changes nothing.
  */
 export function claudeTranscriptAccessIsReadOnly(text: string): boolean {
-  return closedSetReadAccess(text, CLAUDE_TRANSCRIPT_PATH_RE);
+  return closedSetReadAccess(text, claudeTranscriptNamed);
 }
 
 /** The #879 closed-set read test, for the path `pathRe` names. */
-function closedSetReadAccess(text: string, pathRe: RegExp): boolean {
+function closedSetReadAccess(text: string, pathRe: RegExp | ((s: string) => boolean)): boolean {
   const cmd = String(text || '');
-  if (!pathRe.test(cmd)) return false;
+  if (!(typeof pathRe === 'function' ? pathRe(cmd) : pathRe.test(cmd))) return false;
   if (STORE_MUTATION_RE.test(cmd)) return false;
   if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
   // Expansion and escapes are the ways a plain-looking word stops being one.
@@ -7355,6 +7411,10 @@ function evaluateToolCallCore(
         memoryProseMentions = hits.dangerous;
       } else if (hits.dangerous.length > 0) {
         const signals = ['write-content-dangerous', ...hits.dangerous.map(m => m.signal)];
+        // #923 r5 (I1): this early return skips the path rows, so a dangerous
+        // body written INTO a transcript would lose the floor signal and be
+        // log-only-able under owner-present. Keep the target's floor.
+        if (extractAllPaths(args).some(claudeTranscriptNamed)) signals.push('touch-claude-transcript');
         const span = hits.dangerous[0]?.span;
         const reason = memory
           ? buildReason('memory-write payload is a dangerous command', signals, span)
@@ -7722,6 +7782,14 @@ function evaluateToolCallCore(
       && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
       && !selfDisableInvoked()) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'touch-guard-config');
+  }
+  // #923 r5: the table row matches the transcript as SPELLED, on the first
+  // path key only. Floor any lexical alias (`.claude/./projects`, `//`, `..`)
+  // and any path key (a decoy `path` beside NotebookEdit's `notebook_path`).
+  if (!dangerSignals.includes('touch-claude-transcript')
+      && claudeTranscriptNamed([scanSurface, ...extractAllPaths(args)].join('\n'))) {
+    dangerSignals.push('touch-claude-transcript');
+    dangerSpan = dangerSpan ?? 'claude transcript';
   }
   // #923 r3: pure shell inspection of a Claude Code transcript is not a write.
   // Same three conditions; Write/Edit never pass.

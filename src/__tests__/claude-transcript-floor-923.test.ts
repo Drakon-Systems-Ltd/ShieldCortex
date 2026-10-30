@@ -115,3 +115,99 @@ describe('#923 r3 — the hook outage fallback floors transcript writes too', ()
     expect(run(tool, input)).toBeUndefined();
   });
 });
+
+/**
+ * #923 r5 — the floor is judged on the file targeted, not on its spelling and
+ * not on the first path key alone (r4 Astra B1, Grok blocker, Astra I1).
+ */
+const ALIAS_DOT = '/home/owner/.claude/./projects/-home-owner-work/0b7c-session.jsonl';
+const ALIAS_SLASH = '/home/owner/.claude//projects/-home-owner-work//0b7c-session.jsonl';
+const ALIAS_DOTDOT = '/home/owner/.claude/x/../projects/-home-owner-work/0b7c-session.jsonl';
+const DECOY = '/tmp/harmless.txt';
+
+const R5_WRITES: Array<[string, string, Record<string, unknown>]> = [
+  ...([['/./', ALIAS_DOT], ['//', ALIAS_SLASH], ['..', ALIAS_DOTDOT]] as const).flatMap(([label, a]) => [
+    ['Bash', `sudo cp onto a ${label} alias`, { command: `sudo cp /tmp/forged.jsonl ${a}` }],
+    ['Bash', `cp onto a ${label} alias`, { command: `cp /tmp/forged.jsonl ${a}` }],
+    ['Write', `Write a ${label} alias`, { file_path: a, content: '{}\n' }],
+    ['Edit', `Edit a ${label} alias`, { file_path: a, old_string: 'a', new_string: 'b' }],
+    ['NotebookEdit', `NotebookEdit a ${label} alias`, { notebook_path: a, new_source: 'x' }],
+  ] as Array<[string, string, Record<string, unknown>]>),
+  ['Bash', 'redirect onto a ~ /./ alias', { command: "echo '{}' > ~/.claude/./projects/-home-owner-work/0b7c-session.jsonl" }],
+  ['NotebookEdit', 'decoy path, then notebook_path', { path: DECOY, notebook_path: T, new_source: 'x' }],
+  ['NotebookEdit', 'notebook_path, then decoy path', { notebook_path: T, path: DECOY, new_source: 'x' }],
+  ['NotebookEdit', 'decoy file_path beside notebook_path', { file_path: DECOY, notebook_path: T, new_source: 'x' }],
+  ['NotebookEdit', 'decoy path beside an aliased notebook_path', { path: DECOY, notebook_path: ALIAS_DOT, new_source: 'x' }],
+  ['Write', 'decoy path, then file_path', { path: DECOY, file_path: T, content: '{}\n' }],
+  ['Write', 'transcript path, then decoy file_path', { path: T, file_path: DECOY, content: '{}\n' }],
+  ['Edit', 'decoy path, then file_path', { path: DECOY, file_path: T, old_string: 'a', new_string: 'b' }],
+  ['Edit', 'transcript path, then decoy file_path', { path: T, file_path: DECOY, old_string: 'a', new_string: 'b' }],
+];
+
+const R5_NOT_FLOORED: Array<[string, string, Record<string, unknown>]> = [
+  ['Write', 'an ordinary write', { file_path: '/home/owner/work/notes.txt', content: 'x' }],
+  ['Write', 'an ordinary write through a /./ spelling', { file_path: '/home/owner/./work/notes.txt', content: 'x' }],
+  ['Write', 'auto-memory through a /./ alias', { file_path: '/home/owner/.claude/./projects/-home-owner-work/memory/MEMORY.md', content: 'x' }],
+  ['NotebookEdit', 'an ordinary notebook beside an ordinary path', { path: DECOY, notebook_path: '/home/owner/work/a.ipynb', new_source: 'x' }],
+  ['Read', 'Read a /./ alias', { file_path: ALIAS_DOT }],
+  ['Bash', 'cat a /./ alias', { command: `cat ${ALIAS_DOT}` }],
+  ['Bash', 'tail a .. alias', { command: `tail -n 5 ${ALIAS_DOTDOT}` }],
+];
+
+describe('#923 r5 — alias spellings and every path key reach the floor (live classifier)', () => {
+  it.each(R5_WRITES)('%s: %s is floored', (tool, _label, input) => {
+    const v = evaluateToolCall(tool, input, cfg);
+    expect(v.signals).toContain('touch-claude-transcript');
+    expect(isGuardSelfProtectionVerdict(v.signals)).toBe(true);
+    expect(v.decision).not.toBe('allow');
+  });
+
+  it.each(R5_NOT_FLOORED)('%s: %s is not floored', (tool, _label, input) => {
+    const v = evaluateToolCall(tool, input, cfg);
+    expect(v.signals ?? []).not.toContain('touch-claude-transcript');
+    expect(isGuardSelfProtectionVerdict(v.signals)).toBe(false);
+  });
+
+  it.each([['canonical', T], ['/./ alias', ALIAS_DOT]])(
+    'a dangerous Write body into the %s transcript keeps the floor signal (I1)', (_label, target) => {
+      const v = evaluateToolCall('Write', { file_path: target, content: '#!/bin/sh\nsudo systemctl stop nginx\n' }, cfg);
+      expect(v.signals).toContain('write-content-dangerous');
+      expect(v.signals).toContain('touch-claude-transcript');
+      expect(isGuardSelfProtectionVerdict(v.signals)).toBe(true);
+    });
+
+  it('a dangerous Write body to an ordinary script carries no transcript signal', () => {
+    const v = evaluateToolCall('Write', { file_path: '/home/owner/work/x.sh', content: '#!/bin/sh\nsudo systemctl stop nginx\n' }, cfg);
+    expect(v.signals).toContain('write-content-dangerous');
+    expect(v.signals).not.toContain('touch-claude-transcript');
+  });
+});
+
+describe('#923 r5 — the hook outage fallback floors alias and decoy spellings', () => {
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'sc-923-r5-'));
+    mkdirSync(join(home, '.shieldcortex'), { recursive: true });
+    writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: false } }));
+  });
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  function run(tool: string, input: Record<string, unknown>): string | undefined {
+    const r = spawnSync(process.execPath, [HOOK], {
+      input: JSON.stringify({ session_id: 's', cwd: '/tmp', hook_event_name: 'PreToolUse', permission_mode: 'bypassPermissions', tool_name: tool, tool_input: input }),
+      env: { ...process.env, HOME: home, SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex'), SHIELDCORTEX_DIST_ROOT: join(home, 'no-dist') },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    const out = (r.stdout ?? '').trim();
+    return out ? JSON.parse(out).hookSpecificOutput?.permissionDecision : undefined;
+  }
+
+  it.each(R5_WRITES)('%s: %s is denied with the guard unloaded', (tool, _label, input) => {
+    expect(run(tool, input)).toBe('deny');
+  });
+
+  it.each(R5_NOT_FLOORED)('%s: %s passes with the guard unloaded', (tool, _label, input) => {
+    expect(run(tool, input)).toBeUndefined();
+  });
+});

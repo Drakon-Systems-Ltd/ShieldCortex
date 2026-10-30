@@ -349,6 +349,46 @@ describe('#923 owner-present harness TTY is log-only on the no-prompt-surface br
     expect(decisionOf(result.stdout).permissionDecisionReason).toMatch(/disable-action-guard/);
   });
 
+  // (5'') #923 r5: the transcript floor is judged on the file targeted. An
+  // alias spelling, a decoy path key, or a dangerous Write body must never
+  // downgrade a transcript write to owner-present log-only. Each has a
+  // positive control on an ordinary file, so the proof is known to pass.
+  describe('#923 r5: transcript aliases and decoys are never log-only', () => {
+    const alias = () => `${home}/.claude/./projects/p/${SESSION}.jsonl`;
+    const tool = (name: string, input: Record<string, unknown>) => ({ tool_name: name, tool_input: input });
+    const BODY = `#!/bin/sh\n${DANGEROUS}\n`;
+
+    itLinux('control: a dangerous Bash copy onto an ordinary file is log-only', async () => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      expectLogOnly(await runInstalled(call(`${DANGEROUS}; cp /tmp/forged.jsonl /tmp/other.jsonl`, 'dontAsk')));
+    });
+    itLinux('control: a dangerous Write body to an ordinary script is log-only', async () => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      expectLogOnly(await runInstalled(call('', 'dontAsk', tool('Write', { file_path: '/tmp/x.sh', content: BODY }))));
+    });
+    it('Bash cp onto a /./ alias of the transcript is denied, not logged', async () => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      const result = await runInstalled(call(`${DANGEROUS}; cp /tmp/forged.jsonl ${alias()}`, 'dontAsk'));
+      expectDenyNotLogged(result);
+      expect(decisionOf(result.stdout).permissionDecisionReason).toMatch(/touch-claude-transcript/);
+    });
+    it('Write to a /./ alias of the transcript is denied, not logged', async () => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      expectDenyNotLogged(await runInstalled(call('', 'dontAsk', tool('Write', { file_path: alias(), content: '{}\n' }))));
+    });
+    it.each([['path'], ['file_path']])('NotebookEdit of the transcript beside a decoy %s is denied, not logged', async (key) => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      expectDenyNotLogged(await runInstalled(call('', 'dontAsk',
+        tool('NotebookEdit', { [key]: '/tmp/harmless.txt', notebook_path: transcriptPath, new_source: 'x' }))));
+    });
+    it('a dangerous Write body into the canonical transcript is denied, not logged (I1)', async () => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      const result = await runInstalled(call('', 'dontAsk', tool('Write', { file_path: transcriptPath, content: BODY })));
+      expectDenyNotLogged(result);
+      expect(decisionOf(result.stdout).permissionDecisionReason).toMatch(/touch-claude-transcript/);
+    });
+  });
+
   // (5') unscanned: a tool input the schema rejects is never widened
   it('owner-present TTY + unscanned (schema-invalid) tool input still denies', async () => {
     writeTree(procRoot, ownerTree(HARNESS));

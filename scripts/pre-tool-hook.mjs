@@ -2779,6 +2779,35 @@ function fallbackPostureMatch(re, text) {
   return folded !== text && fallbackExecutedMatch(re, folded, tail(folded));
 }
 
+/**
+ * #923 r5: the guard's `lexicalPathNormalise` / `claudeTranscriptNamed`,
+ * duplicated for the outage path. `.claude/./projects`, `.claude//projects`
+ * and `..` spellings name the same transcript the row names; symlinks and an
+ * earlier `cd` are not resolved (the documented residual). The surface is
+ * already every FALLBACK_SURFACE_KEYS value, so a decoy key hides nothing.
+ */
+function fallbackLexicalPathNormalise(p) {
+  const s = p.replace(/\\/g, '/');
+  const abs = s.startsWith('/');
+  const out = [];
+  for (const seg of s.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      if (out.length > 0 && out[out.length - 1] !== '..') out.pop();
+      else if (!abs) out.push('..');
+      continue;
+    }
+    out.push(seg);
+  }
+  return (abs ? '/' : '') + out.join('/');
+}
+function fallbackTranscriptRowMatch(re, text) {
+  if (re.test(text)) return true;
+  return text.split(/[\s;&|<>'"`()=,]+/)
+    .filter((w) => /\.claude/i.test(w))
+    .some((w) => re.test(fallbackLexicalPathNormalise(w)));
+}
+
 /** First matching dangerous signal for the WS2 fallback, or null (issue #59). */
 function fallbackDangerousMatch(toolInput, toolName) {
   const writeTarget = fallbackWriteTargetMatch(toolInput, toolName);
@@ -2789,7 +2818,9 @@ function fallbackDangerousMatch(toolInput, toolName) {
   for (const { re, signal, lockPath, dataQuotes, postureTail } of FALLBACK_DANGEROUS_PATTERNS) {
     if (lockReadOnly && lockPath === true) continue;
     if (postureTail === true ? fallbackPostureMatch(re, text)
-      : dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
+      : dataQuotes === true ? fallbackExecutedMatch(re, text)
+        : signal === 'touch-claude-transcript' ? fallbackTranscriptRowMatch(re, text)
+          : re.test(text)) return signal;
   }
   return null;
 }
@@ -2817,7 +2848,9 @@ function fallbackSelfProtectionMatch(toolInput, toolName) {
     if (!FALLBACK_SELF_PROTECTION_SIGNALS.includes(signal)) continue;
     if (lockReadOnly && lockPath === true) continue;
     if (postureTail === true ? fallbackPostureMatch(re, text)
-      : dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
+      : dataQuotes === true ? fallbackExecutedMatch(re, text)
+        : signal === 'touch-claude-transcript' ? fallbackTranscriptRowMatch(re, text)
+          : re.test(text)) return signal;
   }
   return null;
 }
