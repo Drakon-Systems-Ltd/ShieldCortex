@@ -54,9 +54,20 @@
  *      login, a per-session sshd whose parent is a root-owned sshd, or a
  *      terminal emulator whose readable exe is an exact allowlisted path.
  *
- * comm is self-set (prctl, exec of a symlink), so it only ever ADDS a deny;
- * identity comes from the exe link and the uids in status. The deny lists of
- * checks 7 and 8 match comm OR the exe's basename.
+ *   9. Every child → parent hop above (the ancestry walk, harness → session
+ *      leader, leader → its parent, per-session sshd → root sshd) survives pid
+ *      reuse (`hopFailure`): the parent started no later than the child, and
+ *      the child's stat, re-read after the parent's, still names that parent
+ *      and the same start time. /proc reads are not atomic, and a recycled
+ *      pid can be a genuine root sshd the attacker summoned.
+ *
+ * The controls are the root anchor and the exe-path allowlist of check 8 and
+ * the transcript provenance of check 2. comm is self-set (prctl, exec of a
+ * symlink), so it only ever ADDS a deny; identity comes from the exe link and
+ * the uids in status. The interpreter / pty-tool / agent / scheduler deny
+ * lists of checks 7 and 8 match comm OR the exe's basename, and are defence
+ * in depth, NOT a control: a copied interpreter (`cp python3 /tmp/x`) plus
+ * PR_SET_NAME evades both.
  *
  * There is no environment seam. Tests hand `proveOwnerPresentHarness` in-memory
  * proc file / link readers and a transcript reader; the hook always uses /proc.
@@ -161,7 +172,8 @@ function exePath(proc) {
 /**
  * Deny-list match on EITHER comm or the basename of the executable (so a
  * `python3.12` renamed to `bash` is still python). Additive: an unreadable exe
- * leaves comm as the only signal, it never clears one.
+ * leaves comm as the only signal, it never clears one. Defence in depth only:
+ * a renamed copy of an interpreter matches neither.
  */
 function procNameIn(proc, list) {
   const exe = exePath(proc);
@@ -217,22 +229,36 @@ export function parseStatusUids(statusBuf) {
 }
 
 /**
- * One process, or null when any field the decision needs is unreadable: a
- * missing stat, an unparseable field, an unreadable or empty cmdline, a status
- * without a full `Uid:` line. `exe` is null when the link cannot be read.
+ * The stat fields the proof needs, or null when the stat is missing or any of
+ * them is absent or not a decimal integer. After the `)` that closes comm,
+ * rest[0] is field 3 (state), so ppid is field 4 and starttime (field 22,
+ * clock ticks since boot) is rest[19].
  */
-export function readProc(readProcFile, pid, readProcLink = () => null) {
-  const statBuf = readProcFile(pid, 'stat');
+function parseStat(statBuf) {
   if (!statBuf) return null;
   const stat = statBuf.toString('utf8');
   const open = stat.indexOf('(');
   const close = stat.lastIndexOf(')');
   if (open < 0 || close < open) return null;
-  // fields after comm: state(0) ppid(1) pgrp(2) session(3) tty_nr(4) tpgid(5)
+  // fields after comm: state(0) ppid(1) pgrp(2) session(3) tty_nr(4) tpgid(5) … starttime(19)
   const rest = stat.slice(close + 2).trim().split(/\s+/);
   // `Number('')` is 0: a truncated stat must not read as "no tty" / pid 0.
   const [ppid, pgrp, sid, tty, tpgid] = [1, 2, 3, 4, 5].map((i) => (/^-?\d+$/.test(rest[i] ?? '') ? Number(rest[i]) : NaN));
   if (![ppid, pgrp, sid, tty, tpgid].every(Number.isInteger)) return null;
+  const starttime = /^\d+$/.test(rest[19] ?? '') ? Number(rest[19]) : NaN;
+  if (!Number.isSafeInteger(starttime)) return null;
+  return { ppid, pgrp, sid, tty, tpgid, starttime, comm: stat.slice(open + 1, close) };
+}
+
+/**
+ * One process, or null when any field the decision needs is unreadable: a
+ * missing stat, an unparseable field (starttime included), an unreadable or
+ * empty cmdline, a status without a full `Uid:` line. `exe` is null when the
+ * link cannot be read.
+ */
+export function readProc(readProcFile, pid, readProcLink = () => null) {
+  const stat = parseStat(readProcFile(pid, 'stat'));
+  if (!stat) return null;
   const cmdline = readProcFile(pid, 'cmdline');
   if (!cmdline) return null;
   const argv = cmdline.toString('utf8').split('\0').filter(Boolean);
@@ -240,7 +266,30 @@ export function readProc(readProcFile, pid, readProcLink = () => null) {
   const uids = parseStatusUids(readProcFile(pid, 'status'));
   if (!uids) return null;
   const exe = readProcLink(pid, 'exe');
-  return { pid, ppid, pgrp, sid, tty, tpgid, comm: stat.slice(open + 1, close), argv, uids, exe: typeof exe === 'string' && exe ? exe : null };
+  return { pid, ...stat, argv, uids, exe: typeof exe === 'string' && exe ? exe : null };
+}
+
+/**
+ * PID-reuse guard for one trusted child → parent hop, called only AFTER every
+ * read of `parent` (stat, cmdline, status, exe) the decision uses. Each read
+ * is a separate syscall, so between the child's stat and the parent's status
+ * the real parent can exit and its pid be recycled — e.g. by a fresh root
+ * sshd for an `ssh localhost` the attacker opened. Null when the hop holds,
+ * else why not:
+ *
+ *   - the parent started after the child: a pid number cannot be the parent
+ *     of a process older than itself, so it was recycled;
+ *   - the child's stat, re-read now, names another parent or another start
+ *     time: the parent exited (the child was reparented) or the child pid
+ *     itself was recycled while we read;
+ *   - the re-read fails: unproven.
+ */
+function hopFailure(readProcFile, child, parent) {
+  if (parent.starttime > child.starttime) return 'ancestor pid was reused';
+  const again = parseStat(readProcFile(child.pid, 'stat'));
+  if (!again) return 'ancestor re-read unreadable';
+  if (again.ppid !== child.ppid || again.starttime !== child.starttime) return 'ancestor changed during the check';
+  return null;
 }
 
 /** Names in the process's environ, or null when it cannot be read. */
@@ -374,6 +423,7 @@ export function proveOwnerPresentHarness({
   if (provenance) return no(provenance);
 
   const read = (pid) => readProc(readProcFile, pid, readProcLink);
+  const hop = (child, parent) => hopFailure(readProcFile, child, parent);
   const harnessPid = resolveHarnessPid(parentPid, (pid) => {
     const p = read(pid);
     return p && validPid(p.ppid) ? { ppid: p.ppid, argv: p.argv } : null;
@@ -392,18 +442,20 @@ export function proveOwnerPresentHarness({
   if (hasAgentMarker(envNames)) return no('harness was launched by an agent');
   if (envNames.some((n) => MULTIPLEXER_ENV.includes(n))) return no('harness runs under a terminal multiplexer');
 
-  let pid = harness.ppid;
-  for (let hop = 0; validPid(pid); hop++) {
-    if (hop >= MAX_ANCESTRY) return no('ancestry too deep');
-    const p = read(pid);
+  let child = harness;
+  for (let depth = 0; validPid(child.ppid); depth++) {
+    if (depth >= MAX_ANCESTRY) return no('ancestry too deep');
+    const p = read(child.ppid);
     if (!p) return no('ancestor unreadable');
+    const reused = hop(child, p);
+    if (reused) return no(reused);
     // A node-run Claude Code (`node …/@anthropic-ai/claude-code/cli.js`) has
     // comm `node`, so the comm list alone misses it under a scrubbed env.
     if (procNameIn(p, AGENT_PROCESS_NAMES) || isClaudeHarness(p)) return no('harness is nested under an agent');
     if (procNameIn(p, PTY_TOOL_NAMES)) return no('harness runs under a pty tool');
     if (procNameIn(p, SCHEDULER_NAMES)) return no('harness runs under a scheduler');
     if (isMultiplexer(p)) return no('harness runs under a terminal multiplexer');
-    pid = p.ppid;
+    child = p;
   }
 
   if (!validPid(harness.sid)) return no('harness session unknown');
@@ -414,12 +466,17 @@ export function proveOwnerPresentHarness({
     if (!nameIn(leader.comm, SHELL_NAMES)) return no('session leader is not a shell');
     if (harness.ppid !== leader.pid) return no('harness is not started by its session shell');
     if (leader.tty !== harness.tty) return no('session leader is on another terminal');
+    const reused = hop(harness, leader);
+    if (reused) return no(reused);
   }
   if (!validPid(leader.ppid)) return no('session leader parent unknown');
   const leaderParent = read(leader.ppid);
   if (!leaderParent) return no('session leader parent unreadable');
+  // The walk above vetted these pids, but this is a fresh read: re-anchor it.
+  const reused = hop(leader, leaderParent);
+  if (reused) return no(reused);
   if (procNameIn(leaderParent, PTY_INTERPRETER_NAMES)) return no('session leader spawned by an interpreter');
-  const login = loginParentFailure(leaderParent, read);
+  const login = loginParentFailure(leaderParent, read, hop);
   if (login) return no(login);
   return { proven: true, harnessPid };
 }
@@ -440,7 +497,7 @@ export function proveOwnerPresentHarness({
  *
  * Anything else — an unreadable exe with no root anchor included — is unproven.
  */
-function loginParentFailure(parent, read) {
+function loginParentFailure(parent, read, hop) {
   if (isRootOwned(parent)) {
     return nameIn(parent.comm, ROOT_LOGIN_PARENT_NAMES) ? null : 'session leader parent is root but not sshd or login';
   }
@@ -448,6 +505,8 @@ function loginParentFailure(parent, read) {
     if (!validPid(parent.ppid)) return 'sshd session is not under a root sshd';
     const monitor = read(parent.ppid);
     if (!monitor) return 'sshd session parent unreadable';
+    const reused = hop(parent, monitor);
+    if (reused) return reused;
     if (!isRootOwned(monitor) || !nameIn(monitor.comm, SSHD_NAMES)) return 'sshd session is not under a root sshd';
     return null;
   }

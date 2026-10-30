@@ -50,6 +50,8 @@ type Proc = {
   uid?: number;
   /** Target of the `exe` link; absent = unreadable (non-dumpable, root, or EACCES). */
   exe?: string;
+  /** stat field 22, clock ticks since boot (default 1000: every row started in the same tick). */
+  start?: number;
   /** Files of this row that cannot be read (finding 7). */
   unreadable?: Array<'stat' | 'cmdline' | 'environ' | 'status'>;
 };
@@ -79,7 +81,7 @@ function decisionOf(stdout: string): { permissionDecision?: string; permissionDe
 function statLine(pid: number | string, p: Proc): string {
   const pgrp = p.pgrp ?? Number(pid);
   const tpgid = p.tpgid ?? (p.tty === 0 ? -1 : pgrp);
-  return `${pid} (${p.comm}) S ${p.ppid} ${pgrp} ${p.sid} ${p.tty} ${tpgid} 4194560 0 0 0 0 0 0 0 0 20 0 1 0\n`;
+  return `${pid} (${p.comm}) S ${p.ppid} ${pgrp} ${p.sid} ${p.tty} ${tpgid} 4194560 0 0 0 0 0 0 0 0 20 0 1 0 ${p.start ?? 1000} 0 0\n`;
 }
 
 function rowFiles(pid: number | string, p: Proc): Record<string, string> {
@@ -315,6 +317,7 @@ describe('#923 owner-present harness TTY is log-only on the no-prompt-surface br
     ['round 3 finding 1: "sshd" under a user-owned systemd --user', () => writeTree(procRoot, ownerTree(HARNESS, { sshd: { ppid: 3000 } }, DAEMON_PARENT)), {}],
     ['round 3 finding 1: comm sshd but exe python3', () => writeTree(procRoot, ownerTree(HARNESS, { sshd: { exe: '/usr/bin/python3.12' } })), {}],
     ['round 3 finding 1: comm xterm, exe unreadable', () => writeTree(procRoot, ownerTree(HARNESS, { sshd: { comm: 'xterm', ppid: 1 } })), {}],
+    ['round 4 pid reuse: the root sshd started after its sshd session', () => writeTree(procRoot, ownerTree(HARNESS, { sshd: { start: 900 } })), {}],
   ])('unproven owner presence keeps the deny: %s', async (_label, setup, extra) => {
     setup();
     expectNoPromptDeny(await runInstalled(call(DANGEROUS, 'dontAsk', extra)));
@@ -659,6 +662,103 @@ describe('#923 detector unit seams (injected in-memory readers)', () => {
         expect(p).toMatch(/^\/usr\/(?:bin|lib|lib64|libexec)\/[A-Za-z0-9._/-]+[A-Za-z0-9]$/);
         expect(p).not.toMatch(/[*?]/);
       }
+    });
+  });
+
+  // Round 4 (Grok): pid-reuse TOCTOU. Every /proc read is its own syscall, so
+  // a parent can exit and its pid be recycled — by a genuine root sshd for an
+  // `ssh localhost` the attacker opened — between the child's stat and the
+  // parent's status. `phased` serves `later` for every file of `pid` once its
+  // stat has been read `reads` times: the recycle lands mid-proof.
+  describe('round 4: child → parent hops survive pid reuse', () => {
+    const ROOT_SSHD: Proc = { comm: 'sshd', ppid: 1, sid: 250, tty: 0, uid: 0, argv: ['sshd: owner [priv]'] };
+    const proveWith = (rows: Rows, readProcFile: (pid: number, file: string) => Buffer | null) => proveOwnerPresentHarness({
+      hookData: payload(), platform: 'linux', readProcFile, readProcLink: memLink(rows), readTranscript: topLevel(), parentPid: 500, selfPid: 600,
+    });
+    function phased(rows: Rows, pid: number, later: Proc | null, reads = 1) {
+      const before = memProc(rows);
+      const after = later === null ? () => null : memProc({ ...rows, [pid]: later });
+      let n = 0;
+      return (p: number, file: string) => {
+        if (p === pid && file === 'stat') n++;
+        return p === pid && n > reads ? after(p, file) : before(p, file);
+      };
+    }
+    // Sane, strictly increasing start times: root sshd < sshd session < shell < claude.
+    const aged = (r: Rows): Rows => ({ ...r, 250: { ...r[250], start: 100 }, 300: { ...r[300], start: 200 }, 400: { ...r[400], start: 300 }, 500: { ...r[500], start: 400 } });
+
+    it.each<[string, Rows]>([
+      ['OpenSSH 9.6 (sshd → sshd), increasing start times', aged(tree())],
+      ['OpenSSH >= 9.8 (sshd-session → sshd-session), increasing start times', aged({
+        ...tree(),
+        250: { ...ROOT_SSHD, comm: 'sshd-session', argv: ['sshd-session: owner [priv]'] },
+        300: { comm: 'sshd-session', ppid: 250, sid: 300, tty: 0, argv: ['sshd-session: owner@pts/0'] },
+      })],
+      ['every process started in the same clock tick', tree()],
+    ])('proven: %s', (_label, rows) => {
+      expect(prove(rows)).toEqual({ proven: true, harnessPid: 500 });
+    });
+
+    it('a root sshd anchor younger than its sshd session is a reused pid', () => {
+      const rows = aged(tree());
+      expect(prove({ ...rows, 250: { ...rows[250], start: 250 } })).toEqual({ proven: false, reason: 'ancestor pid was reused' });
+    });
+
+    it('the root sshd pid recycled after the ancestry walk, before the anchor read, is caught on the anchor hop', () => {
+      const rows = aged(tree());
+      // Walk reads 250 once; the anchor read in loginParentFailure is the second.
+      expect(proveWith(rows, phased(rows, 250, { ...rows[250], start: 9000 }))).toEqual({ proven: false, reason: 'ancestor pid was reused' });
+    });
+
+    it('a root-owned login parent recycled after the walk (younger than the leader) is denied', () => {
+      const rows: Rows = { ...aged(tree()), 300: { comm: 'login', ppid: 1, sid: 300, tty: TTY, uid: 0, argv: ['/bin/login', '-p', '--'], start: 200 } };
+      delete rows[250];
+      expect(prove(rows)).toEqual({ proven: true, harnessPid: 500 });
+      expect(proveWith(rows, phased(rows, 300, { ...rows[300], start: 9000 }))).toEqual({ proven: false, reason: 'ancestor pid was reused' });
+    });
+
+    it('a root-owned login parent statically younger than the leader is denied', () => {
+      const rows: Rows = { ...aged(tree()), 300: { comm: 'login', ppid: 1, sid: 300, tty: TTY, uid: 0, argv: ['/bin/login', '-p', '--'], start: 350 } };
+      delete rows[250];
+      expect(prove(rows)).toEqual({ proven: false, reason: 'ancestor pid was reused' });
+    });
+
+    it('the sshd session reparented between its first and second stat read (its parent exited) is denied', () => {
+      const rows = aged(tree());
+      expect(proveWith(rows, phased(rows, 300, { ...rows[300], ppid: 1 }))).toEqual({ proven: false, reason: 'ancestor changed during the check' });
+    });
+
+    it('the leader reparented after the walk, before the leader-parent read, is denied', () => {
+      const rows = aged(tree());
+      // 400's stat: walk read (1), re-read on the 400 → 300 hop (2), session-leader read (3), re-read on leader → parent (4).
+      expect(proveWith(rows, phased(rows, 400, { ...rows[400], ppid: 1 }, 3))).toEqual({ proven: false, reason: 'ancestor changed during the check' });
+    });
+
+    it('a child whose own pid was recycled between reads (start time changed) is denied', () => {
+      const rows = aged(tree());
+      expect(proveWith(rows, phased(rows, 300, { ...rows[300], start: 5000 }))).toEqual({ proven: false, reason: 'ancestor changed during the check' });
+    });
+
+    it('a child whose stat vanishes on the re-read is unproven', () => {
+      const rows = aged(tree());
+      expect(proveWith(rows, phased(rows, 300, null))).toEqual({ proven: false, reason: 'ancestor re-read unreadable' });
+    });
+
+    it.each<[string, string, string]>([
+      ['harness stat has no starttime', '500 (claude) S 400 500 400 34816 500 4194560 0 0 0 0 0 0 0 0 20 0 1 0\n', 'harness unreadable'],
+      ['harness starttime is not a number', '500 (claude) S 400 500 400 34816 500 4194560 0 0 0 0 0 0 0 0 20 0 1 0 abc 0 0\n', 'harness unreadable'],
+      ['harness starttime is negative', '500 (claude) S 400 500 400 34816 500 4194560 0 0 0 0 0 0 0 0 20 0 1 0 -5 0 0\n', 'harness unreadable'],
+    ])('missing or malformed starttime is unproven: %s', (_label, stat, reason) => {
+      const rows = tree();
+      const read = memProc(rows);
+      expect(proveWith(rows, (pid, file) => (pid === 500 && file === 'stat' ? Buffer.from(stat) : read(pid, file)))).toEqual({ proven: false, reason });
+    });
+
+    it('an ancestor with a malformed starttime is unreadable', () => {
+      const rows = tree();
+      const read = memProc(rows);
+      const bad = (pid: number, file: string) => (pid === 250 && file === 'stat' ? Buffer.from('250 (sshd) S 1 250 250 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 1e3 0 0\n') : read(pid, file));
+      expect(proveWith(rows, bad)).toEqual({ proven: false, reason: 'ancestor unreadable' });
     });
   });
 
