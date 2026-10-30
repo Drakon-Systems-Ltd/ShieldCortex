@@ -12,6 +12,7 @@ import os from 'os';
 import { execSync } from 'child_process';
 import { getBetterSqlite3 } from '../database/better-sqlite3-guard.js';
 import { helpGate } from '../cli/help-gate.js';
+import { withOwnConfigWrite } from '../audit/agent-config-watch-own-write.js';
 
 const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
 const CLAUDE_MD_PATH = path.join(os.homedir(), '.claude', 'CLAUDE.md');
@@ -204,7 +205,8 @@ export function migrateSettings(): { mcpSwapped: number; hooksSwapped: number } 
   }
 
   if (mcpSwapped > 0 || hooksSwapped > 0) {
-    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+    // #916: ShieldCortex's own write of a watched config records its own baseline.
+    withOwnConfigWrite(SETTINGS_PATH, () => { const out = JSON.stringify(settings, null, 2) + '\n'; fs.writeFileSync(SETTINGS_PATH, out, 'utf-8'); return out; });
     console.log(`  Settings saved.`);
   } else {
     console.log('  Settings: no old references found (already migrated or fresh install).');
