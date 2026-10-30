@@ -29,6 +29,11 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const HOOK_PATH = path.resolve(REPO_ROOT, 'scripts', 'pre-tool-hook.mjs');
 const DANGEROUS = 'sudo systemctl stop nginx';
 const TTY = 34816; // /dev/pts/0
+// The detector proves owner presence on Linux only; elsewhere the same tree is
+// unproven and keeps the deny, so log-only expectations are Linux-gated.
+const ON_LINUX = process.platform === 'linux';
+const itLinux = ON_LINUX ? it : it.skip;
+const itNonLinux = ON_LINUX ? it.skip : it;
 
 type HookResult = { stdout: string; stderr: string; code: number };
 type Proc = { comm: string; ppid: number; sid: number; tty: number; argv?: string[]; env?: string[] | null };
@@ -77,6 +82,15 @@ function writeTree(root: string, rows: Record<number, Proc>): void {
     if (p.env !== null) fs.writeFileSync(path.join(dir, 'environ'), (p.env ?? ['HOME=/home/owner', 'PATH=/usr/bin', 'TERM=xterm-256color']).join('\0') + '\0');
   }
 }
+
+/**
+ * Node-run Claude Code (comm `node`, npm cli path in argv) → sh → the owner
+ * tree's login shell: a nested harness whose own env was scrubbed (`env -i`).
+ */
+const NODE_CLAUDE_ANCESTOR: Record<number, Proc> = {
+  3050: { comm: 'node', ppid: 3100, sid: 3100, tty: 0, argv: ['node', '/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js'] },
+  3060: { comm: 'sh', ppid: 3050, sid: 3060, tty: 0, argv: ['/bin/sh', '-c', 'env -i claude'] },
+};
 
 /**
  * Synthetic owner-present tree: sshd → login bash (session leader, pts/0) →
@@ -138,11 +152,20 @@ describe('#923 owner-present harness TTY is log-only on the no-prompt-surface br
   }
 
   // (1) synthetic owner-present harness TTY
-  it.each([['bypassPermissions'], ['dontAsk'], [undefined]])(
+  itLinux.each([['bypassPermissions'], ['dontAsk'], [undefined]])(
     'synthetic owner-present harness TTY: ordinary dangerous call is logged, not denied (mode %s)',
     async (mode) => {
       writeTree(procRoot, ownerTree());
       expectLogOnly(await runHook(call(DANGEROUS, mode), env));
+    },
+  );
+
+  // (1') off Linux the same owner-present tree is unproven: today's deny
+  itNonLinux.each([['bypassPermissions'], ['dontAsk'], [undefined]])(
+    'non-linux: the same synthetic owner-present tree still denies (mode %s)',
+    async (mode) => {
+      writeTree(procRoot, ownerTree());
+      await expectNoPromptDeny(await runHook(call(DANGEROUS, mode), env));
     },
   );
 
@@ -194,6 +217,7 @@ describe('#923 owner-present harness TTY is log-only on the no-prompt-surface br
     ['harness launched with CLAUDECODE in its environment', () => writeTree(procRoot, ownerTree({ harness: { env: ['HOME=/home/owner', 'CLAUDECODE=1'] } })), {}],
     ['harness launched by the Agent SDK', () => writeTree(procRoot, ownerTree({ harness: { env: ['HOME=/home/owner', 'CLAUDE_CODE_ENTRYPOINT=sdk-ts'] } })), {}],
     ['harness nested under another claude', () => writeTree(procRoot, ownerTree({ shell: { ppid: 3050 } }, { 3050: { comm: 'claude', ppid: 3100, sid: 3200, tty: TTY } })), {}],
+    ['harness nested under a node-run claude (cli.js argv), env scrubbed', () => writeTree(procRoot, ownerTree({ shell: { ppid: 3060 } }, NODE_CLAUDE_ANCESTOR)), {}],
     ['harness under cron', () => writeTree(procRoot, ownerTree({ shell: { ppid: 3050 } }, { 3050: { comm: 'cron', ppid: 1, sid: 3050, tty: 0 } })), {}],
     ['harness under script(1)', () => writeTree(procRoot, ownerTree({ shell: { ppid: 3050 } }, { 3050: { comm: 'script', ppid: 3100, sid: 3100, tty: 0 } })), {}],
     ['session leader spawned by python (pty.spawn)', () => writeTree(procRoot, ownerTree({ shell: { ppid: 3050 } }, { 3050: { comm: 'python3', ppid: 3100, sid: 3100, tty: 0 } })), {}],
@@ -239,7 +263,7 @@ describe('#923 owner-present harness TTY is log-only on the no-prompt-surface br
     }
     const mutantEnv = () => ({ ...env, SHIELDCORTEX_DIST_ROOT: path.join(REPO_ROOT, 'dist') });
 
-    it('control: the unmutated copy reproduces (1)', async () => {
+    itLinux('control: the unmutated copy reproduces (1)', async () => {
       writeTree(procRoot, ownerTree());
       const hookPath = mutantInstall('return { proven: true, harnessPid };', 'return { proven: true, harnessPid };');
       expectLogOnly(await runHook(call(DANGEROUS, 'bypassPermissions'), mutantEnv(), { hookPath }));
@@ -251,7 +275,7 @@ describe('#923 owner-present harness TTY is log-only on the no-prompt-surface br
       await expectNoPromptDeny(await runHook(call(DANGEROUS, 'bypassPermissions'), mutantEnv(), { hookPath }));
     });
 
-    it('tty_nr check removed → (9) would be allowed, so (9) pins it', async () => {
+    itLinux('tty_nr check removed → (9) would be allowed, so (9) pins it', async () => {
       writeTree(procRoot, ownerTree({ harness: { tty: 0 }, shell: { tty: 0 } }));
       const hookPath = mutantInstall('if (harness.tty === 0)', 'if (false)');
       expectLogOnly(await runHook(call(DANGEROUS, 'bypassPermissions'), mutantEnv(), { hookPath }));
@@ -291,6 +315,23 @@ describe('#923 detector unit seams', () => {
     writeTree(root, { ...tree(), 550: { comm: 'sh', ppid: 500, sid: 400, tty: TTY, argv: ['/bin/sh', '-c', 'node hook.mjs'] } });
     expect(proveOwnerPresentHarness({ hookData: {}, platform: 'linux', procRoot: root, parentPid: 550, selfPid: 600 }).proven).toBe(true);
     expect(proveOwnerPresentHarness({ hookData: {}, platform: 'linux', procRoot: root, parentPid: 0, selfPid: 600 }).proven).toBe(false);
+  });
+
+  it('an ancestor recognised as Claude Code by argv (comm node) is nested, not owner-present', () => {
+    // sh between the node ancestor and the login shell keeps the session
+    // leader's parent from being an interpreter, so only the argv check bites.
+    const nested = (argv: string[]): Record<number, Proc> => ({
+      ...tree(),
+      400: { ...tree()[400], ppid: 360 },
+      350: { comm: 'node', ppid: 300, sid: 300, tty: 0, argv },
+      360: { comm: 'sh', ppid: 350, sid: 360, tty: 0, argv: ['/bin/sh', '-c', 'env -i claude'] },
+    });
+    const prove = () => proveOwnerPresentHarness({ hookData: {}, platform: 'linux', procRoot: root, parentPid: 500, selfPid: 600 });
+    writeTree(root, nested(['node', '/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js']));
+    expect(prove()).toEqual({ proven: false, reason: 'harness is nested under an agent' });
+    fs.rmSync(root, { recursive: true, force: true });
+    writeTree(root, nested(['node', '/srv/runner.js']));
+    expect(prove()).toEqual({ proven: true, harnessPid: 500 });
   });
 
   it('harness env markers track approve-provenance, narrowing only CLAUDE_CODE_', () => {

@@ -21,9 +21,10 @@
  *   5. The harness's own launch environment (`/proc/<pid>/environ`) carries no
  *      agent marker. A human's shell launches a top-level Claude without one; a
  *      Claude started from another agent's tool call inherits `CLAUDECODE` etc.
- *   6. No ancestor of the harness, up to init, is an agent host, a pty tool or
- *      a scheduler (cron/at), and the harness session leader was not spawned
- *      by a bare interpreter (the `pty.spawn` shape). An unreadable ancestor is
+ *   6. No ancestor of the harness, up to init, is an agent host (by comm, or by
+ *      the Claude Code argv0 / npm cli path of check 3), a pty tool or a
+ *      scheduler (cron/at), and the harness session leader was not spawned by a
+ *      bare interpreter (the `pty.spawn` shape). An unreadable ancestor is
  *      unproven.
  *   7. The hook payload carries no subagent marker (`agent_id`, `agent_type`,
  *      a `/subagents/` transcript, a `:subagent:` / `:cron:` session key).
@@ -175,7 +176,9 @@ export function proveOwnerPresentHarness({
     if (hop >= MAX_ANCESTRY) return no('ancestry too deep');
     const p = read(pid);
     if (!p) return no('ancestor unreadable');
-    if (nameIn(p.comm, AGENT_PROCESS_NAMES)) return no('harness is nested under an agent');
+    // A node-run Claude Code (`node …/@anthropic-ai/claude-code/cli.js`) has
+    // comm `node`, so the comm list alone misses it under a scrubbed env.
+    if (nameIn(p.comm, AGENT_PROCESS_NAMES) || isClaudeHarness(p)) return no('harness is nested under an agent');
     if (nameIn(p.comm, PTY_TOOL_NAMES)) return no('harness runs under a pty tool');
     if (nameIn(p.comm, SCHEDULER_NAMES)) return no('harness runs under a scheduler');
     pid = p.ppid;
