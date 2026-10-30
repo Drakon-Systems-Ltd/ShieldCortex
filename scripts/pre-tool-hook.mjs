@@ -2801,11 +2801,48 @@ function fallbackLexicalPathNormalise(p) {
   }
   return (abs ? '/' : '') + out.join('/');
 }
+/** #923 r6: the guard's `shellWords` — split at unquoted shell separators only. */
+function fallbackShellWords(text) {
+  const out = [];
+  let cur = '';
+  let q = null;
+  let inWord = false;
+  for (const c of String(text || '')) {
+    if (q) { if (c === q) q = null; else cur += c; continue; }
+    if (c === '"' || c === "'") { q = c; inWord = true; continue; }
+    if (/[\s;&|<>()`]/.test(c)) { if (inWord) out.push(cur); cur = ''; inWord = false; continue; }
+    cur += c;
+    inWord = true;
+  }
+  if (inWord) out.push(cur);
+  return out;
+}
 function fallbackTranscriptRowMatch(re, text) {
   if (re.test(text)) return true;
-  return text.split(/[\s;&|<>'"`()=,]+/)
+  return [...text.split(/[\s;&|<>'"`()=,]+/), ...fallbackShellWords(text)]
     .filter((w) => /\.claude/i.test(w))
     .some((w) => re.test(fallbackLexicalPathNormalise(w)));
+}
+
+/** Path-bearing surface keys: the guard's PATH_KEYS. */
+const FALLBACK_TRANSCRIPT_PATH_KEYS = ['path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory', 'notebook_path'];
+const FALLBACK_TRANSCRIPT_ROW_RE = FALLBACK_DANGEROUS_PATTERNS.find((r) => r.signal === 'touch-claude-transcript').re;
+
+/**
+ * #923 r6: the guard's `claudeTranscriptPathNamed` over every path key, each
+ * value normalised whole as one path (a comma or `=` in a component is part of
+ * it). A non-read tool whose path key names a transcript is floored even when
+ * a `command: 'ls'` beside it makes the joined surface parse as a read — the
+ * lock-path read skip below is for shell inspection only.
+ */
+function fallbackTranscriptPathKeyMatch(toolInput, toolName) {
+  const seg = String(toolName || '').toLowerCase().split(/__|\.|:|\//).filter(Boolean).pop() || '';
+  if (seg && FALLBACK_READ_TOOLS.test(seg)) return false;
+  return FALLBACK_TRANSCRIPT_PATH_KEYS.some((k) => {
+    const v = toolInput?.[k];
+    return typeof v === 'string' && v.length > 0
+      && (FALLBACK_TRANSCRIPT_ROW_RE.test(v) || FALLBACK_TRANSCRIPT_ROW_RE.test(fallbackLexicalPathNormalise(v)));
+  });
 }
 
 /** First matching dangerous signal for the WS2 fallback, or null (issue #59). */
@@ -2814,6 +2851,7 @@ function fallbackDangerousMatch(toolInput, toolName) {
   if (writeTarget) return writeTarget;
   const text = fallbackExecSurface(toolInput);
   if (!text) return null;
+  if (fallbackTranscriptPathKeyMatch(toolInput, toolName)) return 'touch-claude-transcript';
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
   for (const { re, signal, lockPath, dataQuotes, postureTail } of FALLBACK_DANGEROUS_PATTERNS) {
     if (lockReadOnly && lockPath === true) continue;
@@ -2843,6 +2881,7 @@ function selfProtectionSignals(guard) {
 function fallbackSelfProtectionMatch(toolInput, toolName) {
   const text = fallbackExecSurface(toolInput);
   if (!text) return null;
+  if (fallbackTranscriptPathKeyMatch(toolInput, toolName)) return 'touch-claude-transcript';
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
   for (const { re, signal, lockPath, dataQuotes, postureTail } of FALLBACK_DANGEROUS_PATTERNS) {
     if (!FALLBACK_SELF_PROTECTION_SIGNALS.includes(signal)) continue;

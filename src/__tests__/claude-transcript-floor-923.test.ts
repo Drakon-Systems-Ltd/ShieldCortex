@@ -211,3 +211,98 @@ describe('#923 r5 — the hook outage fallback floors alias and decoy spellings'
     expect(run(tool, input)).toBeUndefined();
   });
 });
+
+/**
+ * #923 r6 — a structured path is judged whole, and a command key never reads a
+ * write-family target off the floor (r5 Astra B1, Grok blocker). A comma, `=`,
+ * space or paren in a directory component is part of the path; splitting
+ * there before normalising lost the transcript. And `command: 'ls'` beside a
+ * Write's transcript `file_path` made the joined surface parse as a read.
+ */
+const DELIMITED: Array<[string, string]> = [
+  ['x,y/..', '/home/owner/.claude/x,y/../projects/-home-owner-work/0b7c-session.jsonl'],
+  ['a=b/..', '/home/owner/.claude/a=b/../projects/-home-owner-work/0b7c-session.jsonl'],
+  ['a b/..', '/home/owner/.claude/a b/../projects/-home-owner-work/0b7c-session.jsonl'],
+  ['(x)/..', '/home/owner/.claude/(x)/../projects/-home-owner-work/0b7c-session.jsonl'],
+];
+
+const R6_WRITES: Array<[string, string, Record<string, unknown>]> = [
+  ...DELIMITED.flatMap(([label, a]) => [
+    ['Write', `Write a ${label} alias`, { file_path: a, content: '{}\n' }],
+    ['Edit', `Edit a ${label} alias`, { file_path: a, old_string: 'a', new_string: 'b' }],
+    ['NotebookEdit', `NotebookEdit a ${label} alias`, { notebook_path: a, new_source: 'x' }],
+    ['Bash', `sudo cp onto a quoted ${label} alias`, { command: `sudo cp /tmp/forged.jsonl "${a}"` }],
+  ] as Array<[string, string, Record<string, unknown>]>),
+  ['Bash', 'cp onto an unquoted x,y/.. alias', { command: `cp /tmp/forged.jsonl ${DELIMITED[0][1]}` }],
+  ['Bash', 'cp onto an unquoted a=b/.. alias', { command: `cp /tmp/forged.jsonl ${DELIMITED[1][1]}` }],
+  ...([['canonical', T], ['/./ alias', ALIAS_DOT], ['x,y/.. alias', DELIMITED[0][1]]] as const).flatMap(([label, a]) => [
+    ['Write', `command 'ls' beside a ${label} file_path`, { command: 'ls', file_path: a, content: '{}\n' }],
+    ['Write', `command 'cat' beside a ${label} file_path`, { command: 'cat', file_path: a, content: '{}\n' }],
+    ['Write', `cmd 'ls' beside a ${label} file_path`, { cmd: 'ls', file_path: a, content: '{}\n' }],
+    ['Edit', `command 'ls' beside a ${label} file_path`, { command: 'ls', file_path: a, old_string: 'a', new_string: 'b' }],
+    ['Edit', `command 'cat /tmp/x' beside a ${label} file_path`, { command: 'cat /tmp/x', file_path: a, old_string: 'a', new_string: 'b' }],
+    ['MultiEdit', `command 'ls' beside a ${label} file_path`, { command: 'ls', file_path: a, edits: [{ old_string: 'a', new_string: 'b' }] }],
+    ['NotebookEdit', `command 'ls' beside a ${label} notebook_path`, { command: 'ls', notebook_path: a, new_source: 'x' }],
+  ] as Array<[string, string, Record<string, unknown>]>),
+];
+
+const R6_NOT_FLOORED: Array<[string, string, Record<string, unknown>]> = [
+  // `(x)/..` is left out: a paren anywhere fails the closed-set read bar
+  // (nested-exec veto), so that `cat` stays floored — an over-deny, never a bypass.
+  ...DELIMITED.slice(0, 3).map(([label, a]) => ['Bash', `cat a quoted ${label} alias`, { command: `cat "${a}"` }] as [string, string, Record<string, unknown>]),
+  ['Bash', 'ls the transcript', { command: `ls -l ${T}` }],
+  ['Bash', 'ls a /./ alias', { command: `ls ${ALIAS_DOT}` }],
+  ['Write', "an ordinary write beside command 'ls'", { command: 'ls', file_path: '/home/owner/work/notes.txt', content: 'x' }],
+  ['Write', 'an ordinary write through a comma directory', { file_path: '/home/owner/work/x,y/../notes.txt', content: 'x' }],
+  ['Write', 'auto-memory through an x,y/.. alias', { file_path: '/home/owner/.claude/x,y/../projects/-home-owner-work/memory/MEMORY.md', content: 'x' }],
+];
+
+describe('#923 r6 — whole-path normalisation and no command-key read carve-out for writes (live classifier)', () => {
+  it.each(R6_WRITES)('%s: %s is floored', (tool, _label, input) => {
+    const v = evaluateToolCall(tool, input, cfg);
+    expect(v.signals).toContain('touch-claude-transcript');
+    expect(isGuardSelfProtectionVerdict(v.signals)).toBe(true);
+    expect(v.decision).not.toBe('allow');
+  });
+
+  it.each(R6_NOT_FLOORED)('%s: %s is not floored', (tool, _label, input) => {
+    const v = evaluateToolCall(tool, input, cfg);
+    expect(v.signals ?? []).not.toContain('touch-claude-transcript');
+    expect(isGuardSelfProtectionVerdict(v.signals)).toBe(false);
+  });
+
+  it('a dangerous Write body into an x,y/.. alias keeps the floor signal', () => {
+    const v = evaluateToolCall('Write', { file_path: DELIMITED[0][1], content: '#!/bin/sh\nsudo systemctl stop nginx\n' }, cfg);
+    expect(v.signals).toContain('write-content-dangerous');
+    expect(v.signals).toContain('touch-claude-transcript');
+  });
+});
+
+describe('#923 r6 — the hook outage fallback judges paths whole and keeps writes floored', () => {
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'sc-923-r6-'));
+    mkdirSync(join(home, '.shieldcortex'), { recursive: true });
+    writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: false } }));
+  });
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  function run(tool: string, input: Record<string, unknown>): string | undefined {
+    const r = spawnSync(process.execPath, [HOOK], {
+      input: JSON.stringify({ session_id: 's', cwd: '/tmp', hook_event_name: 'PreToolUse', permission_mode: 'bypassPermissions', tool_name: tool, tool_input: input }),
+      env: { ...process.env, HOME: home, SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex'), SHIELDCORTEX_DIST_ROOT: join(home, 'no-dist') },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    const out = (r.stdout ?? '').trim();
+    return out ? JSON.parse(out).hookSpecificOutput?.permissionDecision : undefined;
+  }
+
+  it.each(R6_WRITES)('%s: %s is denied with the guard unloaded', (tool, _label, input) => {
+    expect(run(tool, input)).toBe('deny');
+  });
+
+  it.each(R6_NOT_FLOORED)('%s: %s passes with the guard unloaded', (tool, _label, input) => {
+    expect(run(tool, input)).toBeUndefined();
+  });
+});

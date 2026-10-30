@@ -815,9 +815,35 @@ export function lexicalPathNormalise(p: string): string {
   return (abs ? '/' : '') + out.join('/');
 }
 
-/** Every `.claude`-bearing word of `text`, lexically normalised (#923 r5). */
+/**
+ * #923 r6: the words of shell text the way the shell splits them — at
+ * unquoted whitespace and `;&|<>()` and backtick only, quotes removed and
+ * their contents kept whole. A comma, `=` or quoted space is part of a path
+ * (`.claude/x,y/../projects`), so splitting there lost the transcript.
+ */
+function shellWords(text: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let q: string | null = null;
+  let inWord = false;
+  for (const c of String(text || '')) {
+    if (q) { if (c === q) q = null; else cur += c; continue; }
+    if (c === '"' || c === "'") { q = c; inWord = true; continue; }
+    if (/[\s;&|<>()`]/.test(c)) { if (inWord) out.push(cur); cur = ''; inWord = false; continue; }
+    cur += c;
+    inWord = true;
+  }
+  if (inWord) out.push(cur);
+  return out;
+}
+
+/**
+ * Every `.claude`-bearing word of `text`, lexically normalised (#923 r5).
+ * r6: the shell's own words as well as the r5 split, so a path with a comma,
+ * `=`, paren or quoted space in a component still names its transcript.
+ */
 function normalisedClaudeWords(text: string): string[] {
-  return String(text || '').split(/[\s;&|<>'"`()=,]+/)
+  return [...String(text || '').split(/[\s;&|<>'"`()=,]+/), ...shellWords(text)]
     .filter(w => /\.claude/i.test(w))
     .map(lexicalPathNormalise);
 }
@@ -830,6 +856,16 @@ function normalisedClaudeWords(text: string): string[] {
 export function claudeTranscriptNamed(text: string): boolean {
   if (CLAUDE_TRANSCRIPT_PATH_RE.test(text)) return true;
   return normalisedClaudeWords(text).some(w => CLAUDE_TRANSCRIPT_PATH_RE.test(w));
+}
+
+/**
+ * #923 r6: true when ONE structured path value (a `file_path`, never command
+ * text) names a transcript. The whole value is normalised as a single path,
+ * never split into words: `<home>/.claude/x,y/../projects/p/s.jsonl` is that
+ * transcript, whatever punctuation its components carry.
+ */
+export function claudeTranscriptPathNamed(p: string): boolean {
+  return CLAUDE_TRANSCRIPT_PATH_RE.test(p) || CLAUDE_TRANSCRIPT_PATH_RE.test(lexicalPathNormalise(p));
 }
 
 /**
@@ -7414,7 +7450,7 @@ function evaluateToolCallCore(
         // #923 r5 (I1): this early return skips the path rows, so a dangerous
         // body written INTO a transcript would lose the floor signal and be
         // log-only-able under owner-present. Keep the target's floor.
-        if (extractAllPaths(args).some(claudeTranscriptNamed)) signals.push('touch-claude-transcript');
+        if (extractAllPaths(args).some(claudeTranscriptPathNamed)) signals.push('touch-claude-transcript');
         const span = hits.dangerous[0]?.span;
         const reason = memory
           ? buildReason('memory-write payload is a dangerous command', signals, span)
@@ -7786,14 +7822,20 @@ function evaluateToolCallCore(
   // #923 r5: the table row matches the transcript as SPELLED, on the first
   // path key only. Floor any lexical alias (`.claude/./projects`, `//`, `..`)
   // and any path key (a decoy `path` beside NotebookEdit's `notebook_path`).
+  // r6: each path key is normalised whole, as one path; only command text is
+  // split into words.
+  const transcriptPathKey = extractAllPaths(args).some(claudeTranscriptPathNamed);
   if (!dangerSignals.includes('touch-claude-transcript')
-      && claudeTranscriptNamed([scanSurface, ...extractAllPaths(args)].join('\n'))) {
+      && (transcriptPathKey || claudeTranscriptNamed(scanSurface))) {
     dangerSignals.push('touch-claude-transcript');
     dangerSpan = dangerSpan ?? 'claude transcript';
   }
   // #923 r3: pure shell inspection of a Claude Code transcript is not a write.
-  // Same three conditions; Write/Edit never pass.
+  // Same three conditions, and r6: only when the transcript is named by the
+  // command, never by a path key. A Write/Edit/MultiEdit/NotebookEdit whose
+  // target is the transcript stays floored even beside `command: 'ls'`.
   if (dangerSignals.includes('touch-claude-transcript')
+      && !transcriptPathKey
       && claudeTranscriptAccessIsReadOnly(scanSurface)
       && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
       && !selfDisableInvoked()) {
