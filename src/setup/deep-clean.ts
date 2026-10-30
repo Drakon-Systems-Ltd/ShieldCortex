@@ -22,6 +22,7 @@ import path from 'path';
 import os from 'os';
 import { execFileSync, execSync } from 'child_process';
 import { gatewayRestartCommand } from './gateway-restart-command.js';
+import { withOwnConfigWrite } from '../audit/agent-config-watch-own-write.js';
 
 const PLUGIN_ID = 'shieldcortex-realtime';
 const HOOK_NAME = 'cortex-memory';
@@ -116,8 +117,14 @@ function readJsonOrNull(file: string): Record<string, unknown> | null {
 }
 
 function writeJson(file: string, data: unknown): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  // #916 / #928: deep-clean edits ~/.openclaw/openclaw.json and other watched
+  // configs; an own write records its own baseline instead of alerting.
+  withOwnConfigWrite(file, () => {
+    const out = JSON.stringify(data, null, 2) + '\n';
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, out, 'utf-8');
+    return out;
+  });
 }
 
 function getPath(root: unknown, keyPath: string[]): unknown {

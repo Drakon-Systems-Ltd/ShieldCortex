@@ -11,6 +11,7 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { resolveMcpServerCommand } from './json-config.js';
+import { withOwnConfigWrite } from '../audit/agent-config-watch-own-write.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,8 +40,14 @@ function readConfig(): string {
 
 function writeConfig(content: string): void {
   const configPath = getCodexConfigPath();
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, content.endsWith('\n') ? content : `${content}\n`, 'utf-8');
+  // #916: ShieldCortex's own write of a watched agent config records its own
+  // baseline, so a Codex install/uninstall does not alert as an unexpected change.
+  withOwnConfigWrite(configPath, () => {
+    const out = content.endsWith('\n') ? content : `${content}\n`;
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, out, 'utf-8');
+    return out;
+  });
 }
 
 function escapeTomlString(value: string): string {
