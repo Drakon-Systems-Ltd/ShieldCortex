@@ -24,7 +24,7 @@ import { fileURLToPath } from 'url';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 // The hook imports this published .mjs file; keep the unit cases on the same module.
 // @ts-ignore no declaration is emitted for scripts outside the TS build
-import { proveOwnerPresentHarness, HARNESS_AGENT_ENV_MARKERS } from '../../scripts/lib/owner-tty.mjs';
+import { proveOwnerPresentHarness, HARNESS_AGENT_ENV_MARKERS, TERMINAL_EXE_PATHS } from '../../scripts/lib/owner-tty.mjs';
 import { AGENT_ENV_MARKERS } from '../cli/approve-provenance.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -46,8 +46,12 @@ type HookResult = { stdout: string; stderr: string; code: number };
 type Proc = {
   comm: string; ppid: number; sid: number; tty: number;
   pgrp?: number; tpgid?: number; argv?: string[]; env?: string[] | null;
+  /** All four uids in `status` (default 1000, the owner). */
+  uid?: number;
+  /** Target of the `exe` link; absent = unreadable (non-dumpable, root, or EACCES). */
+  exe?: string;
   /** Files of this row that cannot be read (finding 7). */
-  unreadable?: Array<'stat' | 'cmdline' | 'environ'>;
+  unreadable?: Array<'stat' | 'cmdline' | 'environ' | 'status'>;
 };
 type Rows = Record<number, Proc>;
 
@@ -82,18 +86,21 @@ function rowFiles(pid: number | string, p: Proc): Record<string, string> {
   const files: Record<string, string> = {
     stat: statLine(pid, p),
     cmdline: (p.argv ?? [p.comm]).join('\0') + '\0',
+    status: `Name:\t${p.comm}\nUid:\t${p.uid ?? 1000}\t${p.uid ?? 1000}\t${p.uid ?? 1000}\t${p.uid ?? 1000}\nGid:\t1000\t1000\t1000\t1000\n`,
   };
   if (p.env !== null) files.environ = (p.env ?? ['HOME=/home/owner', 'PATH=/usr/bin', 'TERM=xterm-256color']).join('\0') + '\0';
   for (const f of p.unreadable ?? []) delete files[f];
   return files;
 }
 
-/** Write a synthetic proc tree: one `<root>/<pid>/{stat,cmdline,environ}` per row. */
+/** Write a synthetic proc tree: one `<root>/<pid>/{stat,cmdline,status,environ,exe}` per row. */
 function writeTree(root: string, rows: Rows): void {
   for (const [pid, p] of Object.entries(rows)) {
     const dir = path.join(root, pid);
     fs.mkdirSync(dir, { recursive: true });
     for (const [name, body] of Object.entries(rowFiles(pid, p))) fs.writeFileSync(path.join(dir, name), body);
+    // A dangling link is fine: the detector reads the link, it never follows it.
+    if (p.exe !== undefined) fs.symlinkSync(p.exe, path.join(dir, 'exe'));
   }
 }
 
@@ -107,6 +114,11 @@ function memProc(rows: Rows): (pid: number, file: string) => Buffer | null {
   };
 }
 
+/** The same tree's `exe` links as an injected `(pid, link) => string | null` reader. */
+function memLink(rows: Rows): (pid: number, link: string) => string | null {
+  return (pid, link) => (link === 'exe' ? rows[pid]?.exe ?? null : null);
+}
+
 /** One transcript record for the call being vetted; top-level interactive CLI unless overridden. */
 function transcriptRecord(over: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -117,12 +129,15 @@ function transcriptRecord(over: Record<string, unknown> = {}): string {
 }
 
 /**
- * Synthetic owner-present tree: sshd → login bash (session leader, pts/0) →
- * claude (foreground job). The harness row is keyed on `harnessPid`.
+ * Synthetic owner-present tree, OpenSSH 9.6 shape: root `sshd: owner [priv]`
+ * → user-owned, non-dumpable (exe unreadable) `sshd: owner@pts/0` → login bash
+ * (session leader, pts/0) → claude (foreground job). The harness row is keyed
+ * on `harnessPid`.
  */
 function ownerTree(harnessPid: number, over: Partial<Record<'harness' | 'shell' | 'sshd', Partial<Proc>>> = {}, extra: Rows = {}): Rows {
   return {
-    3100: { comm: 'sshd', ppid: 1, sid: 3100, tty: 0, argv: ['sshd: owner@pts/0'], ...over.sshd },
+    3000: { comm: 'sshd', ppid: 1, sid: 3000, tty: 0, uid: 0, argv: ['sshd: owner [priv]'] },
+    3100: { comm: 'sshd', ppid: 3000, sid: 3100, tty: 0, argv: ['sshd: owner@pts/0'], ...over.sshd },
     3200: { comm: 'bash', ppid: 3100, sid: 3200, tty: TTY, tpgid: harnessPid, argv: ['-bash'], ...over.shell },
     [harnessPid]: { comm: 'claude', ppid: 3200, sid: 3200, tty: TTY, argv: ['claude'], ...over.harness },
     ...extra,
@@ -134,6 +149,9 @@ const NODE_CLAUDE_ANCESTOR: Rows = {
   3050: { comm: 'node', ppid: 3100, sid: 3100, tty: 0, argv: ['node', '/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js'] },
   3060: { comm: 'sh', ppid: 3050, sid: 3060, tty: 0, argv: ['/bin/sh', '-c', 'env -i claude'] },
 };
+
+/** A same-uid `systemd --user` in the root sshd's slot: what a setsid + double-fork daemon reparents to. */
+const DAEMON_PARENT: Rows = { 3000: { comm: 'systemd', ppid: 1, sid: 3000, tty: 0, argv: ['/usr/lib/systemd/systemd', '--user'] } };
 
 describe('#923 owner-present harness TTY is log-only on the no-prompt-surface branch', () => {
   let home: string;
@@ -293,6 +311,10 @@ describe('#923 owner-present harness TTY is log-only on the no-prompt-surface br
       fs.writeFileSync(transcriptPath, `${transcriptRecord({ isSidechain: true })}\n`);
     }, {}],
     ['finding 7: harness cmdline unreadable (comm claude)', () => writeTree(procRoot, ownerTree(HARNESS, { harness: { unreadable: ['cmdline'] } })), {}],
+    ['round 3 finding 1: daemonised driver renamed "sshd", reparented to init', () => writeTree(procRoot, ownerTree(HARNESS, { sshd: { ppid: 1 } })), {}],
+    ['round 3 finding 1: "sshd" under a user-owned systemd --user', () => writeTree(procRoot, ownerTree(HARNESS, { sshd: { ppid: 3000 } }, DAEMON_PARENT)), {}],
+    ['round 3 finding 1: comm sshd but exe python3', () => writeTree(procRoot, ownerTree(HARNESS, { sshd: { exe: '/usr/bin/python3.12' } })), {}],
+    ['round 3 finding 1: comm xterm, exe unreadable', () => writeTree(procRoot, ownerTree(HARNESS, { sshd: { comm: 'xterm', ppid: 1 } })), {}],
   ])('unproven owner presence keeps the deny: %s', async (_label, setup, extra) => {
     setup();
     expectNoPromptDeny(await runInstalled(call(DANGEROUS, 'dontAsk', extra)));
@@ -383,6 +405,20 @@ describe('#923 owner-present harness TTY is log-only on the no-prompt-surface br
       expectLogOnly(await runInstalled(call(DANGEROUS, 'dontAsk'), ['if (harness.tty === 0)', 'if (false)']));
     });
 
+    itLinux('root-sshd anchor removed → a "sshd" under systemd --user would be logged, so the anchor is what denies it', async () => {
+      writeTree(procRoot, ownerTree(HARNESS, { sshd: { ppid: 3000 } }, DAEMON_PARENT));
+      expectLogOnly(await runInstalled(call(DANGEROUS, 'dontAsk'),
+        ["if (!isRootOwned(monitor) || !nameIn(monitor.comm, SSHD_NAMES)) return 'sshd session is not under a root sshd';", '']));
+    });
+
+    itLinux('exe interpreter check removed → comm "sshd" with exe python3 under a root sshd would be logged', async () => {
+      writeTree(procRoot, ownerTree(HARNESS, { sshd: { exe: '/usr/bin/python3.12' } }));
+      expectNoPromptDeny(await runInstalled(call(DANGEROUS, 'dontAsk')));
+      fs.rmSync(path.join(home, '.shieldcortex', 'audit'), { recursive: true, force: true });
+      expectLogOnly(await runInstalled(call(DANGEROUS, 'dontAsk'),
+        ['return nameIn(proc.comm, list) || (exe !== null && nameIn(exe, list));', 'return nameIn(proc.comm, list);']));
+    });
+
     it('a missing detector module fails closed', async () => {
       writeTree(procRoot, ownerTree(HARNESS));
       expectNoPromptDeny(await runInstalled(call(DANGEROUS, 'dontAsk'), ['import { resolveHarnessPid }', 'import { resolveHarnessPid, NOPE }']));
@@ -392,7 +428,8 @@ describe('#923 owner-present harness TTY is log-only on the no-prompt-surface br
 
 describe('#923 detector unit seams (injected in-memory readers)', () => {
   const tree = (): Rows => ({
-    300: { comm: 'sshd', ppid: 1, sid: 300, tty: 0 },
+    250: { comm: 'sshd', ppid: 1, sid: 250, tty: 0, uid: 0, argv: ['sshd: owner [priv]'] },
+    300: { comm: 'sshd', ppid: 250, sid: 300, tty: 0, argv: ['sshd: owner@pts/0'] },
     400: { comm: 'bash', ppid: 300, sid: 400, tty: TTY, tpgid: 500, argv: ['-bash'] },
     500: { comm: 'claude', ppid: 400, sid: 400, tty: TTY, argv: ['claude'] },
   });
@@ -405,6 +442,7 @@ describe('#923 detector unit seams (injected in-memory readers)', () => {
       hookData: opts.hookData ?? payload(),
       platform: opts.platform ?? 'linux',
       readProcFile: memProc(rows),
+      readProcLink: memLink(rows),
       readTranscript: opts.readTranscript ?? topLevel(),
       parentPid: opts.parentPid ?? 500,
       selfPid: 600,
@@ -416,7 +454,7 @@ describe('#923 detector unit seams (injected in-memory readers)', () => {
   });
 
   it('claude as its own session leader directly under sshd (`ssh -t host claude`) is proven', () => {
-    expect(prove({ 300: tree()[300], 500: { comm: 'claude', ppid: 300, sid: 500, tty: TTY, argv: ['claude'] } }))
+    expect(prove({ 250: tree()[250], 300: tree()[300], 500: { comm: 'claude', ppid: 300, sid: 500, tty: TTY, argv: ['claude'] } }))
       .toEqual({ proven: true, harnessPid: 500 });
   });
 
@@ -433,7 +471,7 @@ describe('#923 detector unit seams (injected in-memory readers)', () => {
   it('an ancestor recognised as Claude Code by argv (comm node) is nested, not owner-present', () => {
     const rows: Rows = {
       ...tree(),
-      300: { comm: 'sshd', ppid: 360, sid: 300, tty: 0 },
+      250: { comm: 'sshd', ppid: 360, sid: 250, tty: 0, uid: 0 },
       350: { comm: 'node', ppid: 1, sid: 350, tty: 0, argv: ['node', '/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js'] },
       360: { comm: 'sh', ppid: 350, sid: 360, tty: 0, argv: ['/bin/sh', '-c', 'env -i sshd'] },
     };
@@ -482,10 +520,11 @@ describe('#923 detector unit seams (injected in-memory readers)', () => {
     ['an unrecognised parent', { comm: 'runner', ppid: 300, sid: 300, tty: 0, argv: ['runner'] }],
   ])('finding 3: claude as session leader spawned by %s is unproven', (_label, parent) => {
     expect(prove({
+      250: tree()[250],
       300: tree()[300],
       350: parent,
       500: { comm: 'claude', ppid: 350, sid: 500, tty: TTY, argv: ['claude'] },
-    })).toEqual({ proven: false, reason: expect.stringMatching(/spawned by an interpreter|not started by a login or terminal/) });
+    })).toEqual({ proven: false, reason: expect.stringMatching(/spawned by an interpreter|terminal executable unreadable/) });
   });
 
   it.each<[string, (r: Rows) => Rows]>([
@@ -532,13 +571,104 @@ describe('#923 detector unit seams (injected in-memory readers)', () => {
     expect(prove(mutate(tree()))).toEqual({ proven: false, reason: expect.stringMatching(/unreadable/) });
   });
 
+  // Round 3 finding 1: comm is self-set. Identity is the exe link and the
+  // status uids; comm only ever adds a deny. `leader(parent)` puts `parent`
+  // (pid 300) under login bash 400 → claude 500, with `extra` rows above it.
+  describe('round 3 finding 1: session leader parent is anchored on exe and uids, not comm', () => {
+    const leader = (parent: Proc, extra: Rows = {}): Rows => ({ ...extra, 300: parent, 400: tree()[400], 500: tree()[500] });
+    const ROOT_SSHD: Proc = { comm: 'sshd', ppid: 1, sid: 250, tty: 0, uid: 0, argv: ['sshd: owner [priv]'] };
+
+    it.each<[string, Rows, string]>([
+      ['comm sshd, exe /usr/bin/python3, user-owned, parent init',
+        leader({ comm: 'sshd', ppid: 1, sid: 300, tty: 0, exe: '/usr/bin/python3' }), 'session leader spawned by an interpreter'],
+      ['comm sshd, exe unreadable (non-dumpable), user-owned, parent systemd --user (uid 1001)',
+        leader({ comm: 'sshd', ppid: 200, sid: 300, tty: 0 }, { 200: { comm: 'systemd', ppid: 1, sid: 200, tty: 0, uid: 1001, argv: ['/usr/lib/systemd/systemd', '--user'] } }),
+        'sshd session is not under a root sshd'],
+      ['comm sshd, exe unreadable, parent pid 1', leader({ comm: 'sshd', ppid: 1, sid: 300, tty: 0 }), 'sshd session is not under a root sshd'],
+      ['comm sshd-session, exe unreadable, parent a user-owned "sshd"',
+        leader({ comm: 'sshd-session', ppid: 250, sid: 300, tty: 0 }, { 250: { ...ROOT_SSHD, uid: 1000 } }), 'sshd session is not under a root sshd'],
+      ['comm sshd under a root parent that is not sshd',
+        leader({ comm: 'sshd', ppid: 250, sid: 300, tty: 0 }, { 250: { ...ROOT_SSHD, comm: 'polkitd' } }), 'sshd session is not under a root sshd'],
+      ['root sshd parent with a mixed uid set (euid 0 only)',
+        leader({ comm: 'sshd', ppid: 250, sid: 300, tty: 0 }, { 250: ROOT_SSHD }), ''],
+      // The ancestry walk reads the same row first, so it names the refusal.
+      ['comm sshd, the root parent unreadable', leader({ comm: 'sshd', ppid: 250, sid: 300, tty: 0 }), 'ancestor unreadable'],
+      ['root-owned, but comm is not sshd or login', leader({ comm: 'bash', ppid: 1, sid: 300, tty: 0, uid: 0 }), 'session leader parent is root but not sshd or login'],
+      ['comm gnome-terminal-, exe /home/x/bin/gnome-terminal-server (not an allowlisted path)',
+        leader({ comm: 'gnome-terminal-', ppid: 200, sid: 300, tty: 0, exe: '/home/x/bin/gnome-terminal-server' }, { 200: { comm: 'systemd', ppid: 1, sid: 200, tty: 0, argv: ['systemd', '--user'] } }),
+        'session leader not started by a login or terminal'],
+      ['comm xterm, exe unreadable', leader({ comm: 'xterm', ppid: 1, sid: 300, tty: 0 }), 'terminal executable unreadable'],
+      ['comm xterm, exe /usr/bin/xterm but a path-prefix lookalike (/usr/bin/xterm-evil)',
+        leader({ comm: 'xterm', ppid: 1, sid: 300, tty: 0, exe: '/usr/bin/xterm-evil' }), 'session leader not started by a login or terminal'],
+      ['interpreter by exe, comm renamed bash', leader({ comm: 'bash', ppid: 1, sid: 300, tty: 0, exe: '/usr/bin/python3.12' }), 'session leader spawned by an interpreter'],
+      ['interpreter by exe, comm renamed sshd, under a real root sshd',
+        leader({ comm: 'sshd', ppid: 250, sid: 300, tty: 0, exe: '/usr/bin/python3.12' }, { 250: ROOT_SSHD }), 'session leader spawned by an interpreter'],
+      ['interpreter by exe (deleted), comm renamed xterm', leader({ comm: 'xterm', ppid: 1, sid: 300, tty: 0, exe: '/usr/bin/node (deleted)' }), 'session leader spawned by an interpreter'],
+    ])('unproven: %s', (label, rows, reason) => {
+      if (label.startsWith('root sshd parent with a mixed uid set')) {
+        // euid 0 alone is not root-owned: rewrite the status to real 1000, effective 0.
+        const read = memProc(rows);
+        const mixed = (pid: number, file: string) => (pid === 250 && file === 'status'
+          ? Buffer.from('Name:\tsshd\nUid:\t1000\t0\t0\t0\n') : read(pid, file));
+        expect(proveOwnerPresentHarness({
+          hookData: payload(), platform: 'linux', readProcFile: mixed, readProcLink: memLink(rows), readTranscript: topLevel(), parentPid: 500, selfPid: 600,
+        })).toEqual({ proven: false, reason: 'sshd session is not under a root sshd' });
+        return;
+      }
+      expect(prove(rows)).toEqual({ proven: false, reason });
+    });
+
+    it.each<[string, Rows]>([
+      ['OpenSSH 9.6: user-owned non-dumpable sshd under a root sshd (not pid 1)', leader({ comm: 'sshd', ppid: 250, sid: 300, tty: 0, argv: ['sshd: owner@pts/0'] }, { 250: ROOT_SSHD })],
+      ['OpenSSH >= 9.8: user-owned non-dumpable sshd-session under a root sshd-session',
+        leader({ comm: 'sshd-session', ppid: 250, sid: 300, tty: 0, argv: ['sshd-session: owner@pts/0'] }, { 250: { ...ROOT_SSHD, comm: 'sshd-session', argv: ['sshd-session: owner [priv]'] } })],
+      ['root-owned login as the session leader parent', leader({ comm: 'login', ppid: 1, sid: 300, tty: TTY, uid: 0, argv: ['/bin/login', '-p', '--'] })],
+      ['root-owned sshd as the session leader parent (root login)', leader({ comm: 'sshd', ppid: 1, sid: 300, tty: 0, uid: 0 })],
+      ['terminal emulator with a readable allowlisted exe',
+        leader({ comm: 'gnome-terminal-', ppid: 200, sid: 300, tty: 0, exe: '/usr/libexec/gnome-terminal-server', argv: ['/usr/libexec/gnome-terminal-server'] },
+          { 200: { comm: 'systemd', ppid: 1, sid: 200, tty: 0, argv: ['/usr/lib/systemd/systemd', '--user'] } })],
+      ['terminal emulator whose comm differs from its allowlisted exe', leader({ comm: 'kitty-wrapper', ppid: 1, sid: 300, tty: 0, exe: '/usr/lib/kitty/bin/kitty' })],
+    ])('proven: %s', (_label, rows) => {
+      expect(prove(rows)).toEqual({ proven: true, harnessPid: 500 });
+    });
+
+    it('a pty tool in the ancestry is found by exe when its comm was renamed', () => {
+      const rows = leader({ comm: 'sshd', ppid: 250, sid: 300, tty: 0 }, { 250: { ...ROOT_SSHD, ppid: 240 }, 240: { comm: 'bash', ppid: 1, sid: 240, tty: 0, exe: '/usr/bin/script' } });
+      expect(prove(rows)).toEqual({ proven: false, reason: 'harness runs under a pty tool' });
+      expect(prove({ ...rows, 240: { ...rows[240], exe: '/usr/bin/expect' } })).toEqual({ proven: false, reason: 'harness runs under a pty tool' });
+      expect(prove({ ...rows, 240: { ...rows[240], exe: '/usr/bin/bash' } })).toEqual({ proven: true, harnessPid: 500 });
+    });
+
+    it('a multiplexer or scheduler in the ancestry is found by exe when its comm was renamed', () => {
+      const rows = leader({ comm: 'sshd', ppid: 250, sid: 300, tty: 0 }, { 250: { ...ROOT_SSHD, ppid: 240 }, 240: { comm: 'bash', ppid: 1, sid: 240, tty: 0, exe: '/usr/bin/tmux' } });
+      expect(prove(rows)).toEqual({ proven: false, reason: 'harness runs under a terminal multiplexer' });
+      expect(prove({ ...rows, 240: { ...rows[240], exe: '/usr/sbin/cron' } })).toEqual({ proven: false, reason: 'harness runs under a scheduler' });
+    });
+
+    it('a process whose status has no full Uid line is unreadable, never root', () => {
+      const rows = leader({ comm: 'sshd', ppid: 250, sid: 300, tty: 0 }, { 250: ROOT_SSHD });
+      const read = memProc(rows);
+      const noUid = (pid: number, file: string) => (pid === 250 && file === 'status' ? Buffer.from('Name:\tsshd\nUid:\t0\t0\n') : read(pid, file));
+      expect(proveOwnerPresentHarness({
+        hookData: payload(), platform: 'linux', readProcFile: noUid, readProcLink: memLink(rows), readTranscript: topLevel(), parentPid: 500, selfPid: 600,
+      })).toEqual({ proven: false, reason: 'ancestor unreadable' });
+    });
+
+    it('the terminal allowlist is exact absolute paths: no globs, no directories, nothing under /home or /tmp', () => {
+      for (const p of TERMINAL_EXE_PATHS as readonly string[]) {
+        expect(p).toMatch(/^\/usr\/(?:bin|lib|lib64|libexec)\/[A-Za-z0-9._/-]+[A-Za-z0-9]$/);
+        expect(p).not.toMatch(/[*?]/);
+      }
+    });
+  });
+
   it('finding 7: a harness whose stat lacks tpgid is unproven', () => {
     const rows = tree();
     const read = memProc(rows);
     const truncated = (pid: number, file: string) => (pid === 500 && file === 'stat'
       ? Buffer.from(`500 (claude) S 400 500 400 ${TTY}\n`) : read(pid, file));
     expect(proveOwnerPresentHarness({
-      hookData: payload(), platform: 'linux', readProcFile: truncated, readTranscript: topLevel(), parentPid: 500, selfPid: 600,
+      hookData: payload(), platform: 'linux', readProcFile: truncated, readProcLink: memLink(rows), readTranscript: topLevel(), parentPid: 500, selfPid: 600,
     })).toEqual({ proven: false, reason: 'harness unreadable' });
   });
 });

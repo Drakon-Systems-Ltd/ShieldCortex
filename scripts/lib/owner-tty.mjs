@@ -20,8 +20,17 @@
  *      `sessionId` and the interactive `entrypoint: "cli"`. A subagent's call
  *      is recorded in its own `subagents/` transcript (or, on older builds, as
  *      a sidechain record), so a missing marker alone never proves anything.
+ *      LIVE ORDERING (#923 r3, Claude Code 2.1.314): in an interactive session
+ *      the assistant record is written to `<session_id>.jsonl` only AFTER this
+ *      hook returns — absent at hook start, still absent with the hook holding
+ *      the call for 6 s (print mode likewise, and it is `entrypoint:
+ *      "sdk-cli"` anyway). So on that build this check never passes and the
+ *      whole proof is unproven: fail-closed dead code, kept so that a build
+ *      which records the call first (or a payload with a positive top-level
+ *      marker) is not silently trusted on a missing subagent marker.
  *   3. The harness pid resolves (scripts/lib/harness-pid.mjs) to a pid > 1 that
- *      is not this process, and its stat, cmdline and environ are all readable.
+ *      is not this process, and its stat, cmdline, status and environ are all
+ *      readable.
  *   4. The harness is Claude Code (`claude` comm/argv0, or the npm cli path)
  *      launched interactively: no `-p` / `--print` (alone or in a short-flag
  *      cluster), no `--output-format` / `--input-format`, and not launched in
@@ -39,14 +48,20 @@
  *      of a human cannot be proven, so any multiplexer is unproven).
  *   8. The session is a human's login: the session leader is either the harness
  *      itself or a shell that is the harness's direct parent on the same
- *      terminal, and the leader's parent is sshd, login or a known terminal
- *      emulator — never an interpreter (the `pty.spawn` shape) or anything
- *      else.
+ *      terminal, and the leader's parent is never an interpreter (the
+ *      `pty.spawn` shape, by comm OR by exe) and is anchored by evidence the
+ *      session's uid cannot forge (`loginParentFailure`): a root-owned sshd /
+ *      login, a per-session sshd whose parent is a root-owned sshd, or a
+ *      terminal emulator whose readable exe is an exact allowlisted path.
  *
- * There is no environment seam. Tests hand `proveOwnerPresentHarness` an
- * in-memory proc reader and transcript reader; the hook always uses /proc.
+ * comm is self-set (prctl, exec of a symlink), so it only ever ADDS a deny;
+ * identity comes from the exe link and the uids in status. The deny lists of
+ * checks 7 and 8 match comm OR the exe's basename.
+ *
+ * There is no environment seam. Tests hand `proveOwnerPresentHarness` in-memory
+ * proc file / link readers and a transcript reader; the hook always uses /proc.
  */
-import { closeSync, constants, fstatSync, openSync, readFileSync, readSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readFileSync, readlinkSync, readSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { resolveHarnessPid } from './harness-pid.mjs';
 
@@ -90,15 +105,40 @@ const MULTIPLEXER_ENV = ['TMUX', 'TMUX_PANE', 'STY', 'ZELLIJ'];
 /** Interactive shells that may lead the harness's session. */
 const SHELL_NAMES = ['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh', 'mksh', 'tcsh', 'csh', 'ash'];
 /**
- * What may have started the session leader: a remote or console login, or a
- * terminal emulator (comm is cut at 15 bytes: `gnome-terminal-`).
+ * Terminal emulators, by the kernel's resolved path of their executable
+ * (`/proc/<pid>/exe`). Exact paths only: no globs, no prefixes, nothing under a
+ * user-writable directory. comm is set by the process itself (prctl, or exec
+ * of a symlink), so it never proves a terminal. Script-run terminals
+ * (terminator, guake: exe is python) are absent on purpose — they are
+ * indistinguishable from a `pty.spawn` driver and are refused by the
+ * interpreter check anyway.
  */
-const LOGIN_PARENT_NAMES = [
-  'sshd', 'sshd-session', 'login',
-  'gnome-terminal-', 'gnome-terminal-server', 'kgx', 'ptyxis-agent', 'konsole', 'xterm', 'uxterm', 'alacritty',
-  'kitty', 'wezterm-gui', 'foot', 'ghostty', 'terminator', 'tilix', 'xfce4-terminal', 'mate-terminal',
-  'lxterminal', 'qterminal', 'urxvt', 'rxvt', 'sakura', 'terminology', 'st',
-];
+export const TERMINAL_EXE_PATHS = Object.freeze([
+  '/usr/libexec/gnome-terminal-server', '/usr/lib/gnome-terminal/gnome-terminal-server', '/usr/lib/gnome-terminal-server',
+  '/usr/bin/kgx',
+  '/usr/libexec/ptyxis-agent', '/usr/lib/ptyxis-agent',
+  '/usr/bin/konsole',
+  '/usr/bin/xterm',
+  '/usr/bin/alacritty',
+  '/usr/bin/kitty', '/usr/lib/kitty/bin/kitty', '/usr/lib64/kitty/bin/kitty',
+  '/usr/bin/wezterm-gui',
+  '/usr/bin/foot',
+  '/usr/bin/ghostty',
+  '/usr/bin/tilix',
+  '/usr/bin/xfce4-terminal',
+  '/usr/bin/mate-terminal',
+  '/usr/bin/lxterminal',
+  '/usr/bin/qterminal',
+  '/usr/bin/urxvt', '/usr/bin/rxvt-unicode', '/usr/bin/urxvtd',
+  '/usr/bin/rxvt',
+  '/usr/bin/sakura',
+  '/usr/bin/terminology',
+  '/usr/bin/st',
+]);
+/** SSH per-session processes (OpenSSH < 9.8: `sshd`; >= 9.8: `sshd-session`). */
+const SSHD_NAMES = ['sshd', 'sshd-session'];
+/** What a ROOT-owned session leader parent may be: comm of a root process is not user-forgeable. */
+const ROOT_LOGIN_PARENT_NAMES = ['sshd', 'sshd-session', 'login'];
 const MAX_ANCESTRY = 64;
 
 const validPid = (pid) => Number.isInteger(pid) && pid > 1;
@@ -113,10 +153,33 @@ function nameIn(comm, list) {
   return list.includes(raw) || list.includes(bare);
 }
 
-function isMultiplexer(proc) {
-  return MULTIPLEXER_RE.test(String(proc.comm).toLowerCase())
-    || MULTIPLEXER_RE.test(nameOf(proc.argv[0]).raw);
+/** The kernel's exe path with a ` (deleted)` suffix dropped; null when unreadable. */
+function exePath(proc) {
+  return typeof proc.exe === 'string' && proc.exe ? proc.exe.replace(/ \(deleted\)$/, '') : null;
 }
+
+/**
+ * Deny-list match on EITHER comm or the basename of the executable (so a
+ * `python3.12` renamed to `bash` is still python). Additive: an unreadable exe
+ * leaves comm as the only signal, it never clears one.
+ */
+function procNameIn(proc, list) {
+  const exe = exePath(proc);
+  return nameIn(proc.comm, list) || (exe !== null && nameIn(exe, list));
+}
+
+function isMultiplexer(proc) {
+  const exe = exePath(proc);
+  return MULTIPLEXER_RE.test(String(proc.comm).toLowerCase())
+    || MULTIPLEXER_RE.test(nameOf(proc.argv[0]).raw)
+    || (exe !== null && MULTIPLEXER_RE.test(nameOf(exe).raw));
+}
+
+const allUids = (proc, pred) => Array.isArray(proc.uids) && proc.uids.length === 4 && proc.uids.every(pred);
+/** Real, effective, saved and fs uid all 0. A same-uid process cannot create one. */
+const isRootOwned = (proc) => allUids(proc, (u) => u === 0);
+/** No uid is 0 (a mixed set, e.g. a setuid binary mid-transition, is neither). */
+const isUserOwned = (proc) => allUids(proc, (u) => u !== 0);
 
 /** `(pid, file) => Buffer | null` over the real /proc. */
 export function procFileReader(root = PROC_ROOT) {
@@ -130,10 +193,35 @@ export function procFileReader(root = PROC_ROOT) {
 }
 
 /**
- * One process, or null when any field the decision needs is unreadable: a
- * missing stat, an unparseable field, an unreadable or empty cmdline.
+ * `(pid, link) => string | null` over the real /proc. The kernel's `exe` link
+ * is already the resolved path of the executable. It is unreadable (EACCES)
+ * for a non-dumpable process — OpenSSH's per-session sshd, `systemd --user`,
+ * anything root — and an attacker can make its own process non-dumpable, so
+ * null never means "trusted".
  */
-export function readProc(readProcFile, pid) {
+export function procLinkReader(root = PROC_ROOT) {
+  return (pid, link) => {
+    try {
+      return readlinkSync(join(root, String(pid), link));
+    } catch {
+      return null;
+    }
+  };
+}
+
+/** `[real, effective, saved, fs]` from the `Uid:` line of a status file, or null. */
+export function parseStatusUids(statusBuf) {
+  if (!statusBuf) return null;
+  const m = /^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$/m.exec(statusBuf.toString('utf8'));
+  return m ? m.slice(1, 5).map(Number) : null;
+}
+
+/**
+ * One process, or null when any field the decision needs is unreadable: a
+ * missing stat, an unparseable field, an unreadable or empty cmdline, a status
+ * without a full `Uid:` line. `exe` is null when the link cannot be read.
+ */
+export function readProc(readProcFile, pid, readProcLink = () => null) {
   const statBuf = readProcFile(pid, 'stat');
   if (!statBuf) return null;
   const stat = statBuf.toString('utf8');
@@ -149,7 +237,10 @@ export function readProc(readProcFile, pid) {
   if (!cmdline) return null;
   const argv = cmdline.toString('utf8').split('\0').filter(Boolean);
   if (argv.length === 0) return null;
-  return { pid, ppid, pgrp, sid, tty, tpgid, comm: stat.slice(open + 1, close), argv };
+  const uids = parseStatusUids(readProcFile(pid, 'status'));
+  if (!uids) return null;
+  const exe = readProcLink(pid, 'exe');
+  return { pid, ppid, pgrp, sid, tty, tpgid, comm: stat.slice(open + 1, close), argv, uids, exe: typeof exe === 'string' && exe ? exe : null };
 }
 
 /** Names in the process's environ, or null when it cannot be read. */
@@ -270,6 +361,7 @@ export function proveOwnerPresentHarness({
   hookData,
   platform = process.platform,
   readProcFile = procFileReader(),
+  readProcLink = procLinkReader(),
   readTranscript = readTranscriptTail,
   parentPid = process.ppid,
   selfPid = process.pid,
@@ -281,7 +373,7 @@ export function proveOwnerPresentHarness({
   const provenance = topLevelProvenanceFailure(hookData, readTranscript);
   if (provenance) return no(provenance);
 
-  const read = (pid) => readProc(readProcFile, pid);
+  const read = (pid) => readProc(readProcFile, pid, readProcLink);
   const harnessPid = resolveHarnessPid(parentPid, (pid) => {
     const p = read(pid);
     return p && validPid(p.ppid) ? { ppid: p.ppid, argv: p.argv } : null;
@@ -307,9 +399,9 @@ export function proveOwnerPresentHarness({
     if (!p) return no('ancestor unreadable');
     // A node-run Claude Code (`node …/@anthropic-ai/claude-code/cli.js`) has
     // comm `node`, so the comm list alone misses it under a scrubbed env.
-    if (nameIn(p.comm, AGENT_PROCESS_NAMES) || isClaudeHarness(p)) return no('harness is nested under an agent');
-    if (nameIn(p.comm, PTY_TOOL_NAMES)) return no('harness runs under a pty tool');
-    if (nameIn(p.comm, SCHEDULER_NAMES)) return no('harness runs under a scheduler');
+    if (procNameIn(p, AGENT_PROCESS_NAMES) || isClaudeHarness(p)) return no('harness is nested under an agent');
+    if (procNameIn(p, PTY_TOOL_NAMES)) return no('harness runs under a pty tool');
+    if (procNameIn(p, SCHEDULER_NAMES)) return no('harness runs under a scheduler');
     if (isMultiplexer(p)) return no('harness runs under a terminal multiplexer');
     pid = p.ppid;
   }
@@ -326,7 +418,42 @@ export function proveOwnerPresentHarness({
   if (!validPid(leader.ppid)) return no('session leader parent unknown');
   const leaderParent = read(leader.ppid);
   if (!leaderParent) return no('session leader parent unreadable');
-  if (nameIn(leaderParent.comm, PTY_INTERPRETER_NAMES)) return no('session leader spawned by an interpreter');
-  if (!nameIn(leaderParent.comm, LOGIN_PARENT_NAMES)) return no('session leader not started by a login or terminal');
+  if (procNameIn(leaderParent, PTY_INTERPRETER_NAMES)) return no('session leader spawned by an interpreter');
+  const login = loginParentFailure(leaderParent, read);
+  if (login) return no(login);
   return { proven: true, harnessPid };
+}
+
+/**
+ * Check 8's anchor: null when the session leader's parent is a login or a
+ * terminal by evidence the session's own uid cannot forge, else why not.
+ *
+ *   (A) SSH or console login anchored on root. Either the parent is itself
+ *       root-owned (all four uids 0) with comm sshd / sshd-session / login, or
+ *       it is the per-session sshd / sshd-session whose own parent is a
+ *       root-owned sshd / sshd-session that is not init. That per-session
+ *       process runs as the user and is non-dumpable, so its exe is
+ *       unreadable; the root parent is what a same-uid daemon (reparented to
+ *       init or `systemd --user`) cannot fake.
+ *   (B) A user-owned terminal emulator whose READABLE exe is an exact path in
+ *       TERMINAL_EXE_PATHS.
+ *
+ * Anything else — an unreadable exe with no root anchor included — is unproven.
+ */
+function loginParentFailure(parent, read) {
+  if (isRootOwned(parent)) {
+    return nameIn(parent.comm, ROOT_LOGIN_PARENT_NAMES) ? null : 'session leader parent is root but not sshd or login';
+  }
+  if (nameIn(parent.comm, SSHD_NAMES)) {
+    if (!validPid(parent.ppid)) return 'sshd session is not under a root sshd';
+    const monitor = read(parent.ppid);
+    if (!monitor) return 'sshd session parent unreadable';
+    if (!isRootOwned(monitor) || !nameIn(monitor.comm, SSHD_NAMES)) return 'sshd session is not under a root sshd';
+    return null;
+  }
+  if (!isUserOwned(parent)) return 'session leader not started by a login or terminal';
+  const exe = exePath(parent);
+  if (exe === null) return 'terminal executable unreadable';
+  if (!TERMINAL_EXE_PATHS.includes(exe)) return 'session leader not started by a login or terminal';
+  return null;
 }
