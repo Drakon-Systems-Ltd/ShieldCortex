@@ -780,6 +780,18 @@ const SENSITIVE_PATH_RE = new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|$
 // (#505 Option A; the residual is #588).
 const MODIFY_SHELL_STARTUP_RE = new RegExp(String.raw`(?:(?:>>?|>\|)(?:[ \t]|\\\n)*|\btee\b(?:(?:[ \t]|\\\n)+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|"[^"\n]*"|[^\s'"|;&<>\\-][^\s'"|;&<>\\]*))*(?:[ \t]|\\\n)+|\bsed\b(?=[^|;&\n]*[ \t](?:-[a-zA-Z]*i|--in-place))[^|;&\n]*(?:[ \t]|\\\n)+)['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})|\b(?:cp|mv|install)\b[^|;&\n]*(?:[ \t]|\\\n)+['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})['"]?\s*(?=$|[|;&\n])`, 'i');
 
+/**
+ * #923 r3: Claude Code's session transcripts — any `*.jsonl` beneath
+ * `.claude/projects/`, and anything under a `subagents/` directory there. The
+ * #923 owner-present proof reads `<session_id>.jsonl` to prove a call is
+ * top-level, so a tool call that writes a transcript could forge that proof.
+ * Deliberately NOT the whole of `.claude/projects/`: Claude Code's auto-memory
+ * (`.claude/projects/<p>/memory/*.md`) is written by agents on purpose. Only
+ * the default `.claude` home is named; a custom `CLAUDE_CONFIG_DIR` is not
+ * resolved here (the guard resolves no Claude home from the environment).
+ */
+export const CLAUDE_TRANSCRIPT_PATH_RE = /\.claude[\\/]+projects[\\/]+(?:[^\s;&|<>'"`]*?[\\/])?(?:subagents(?=$|[\\/\s;&|<>'"`)])|[^\s;&|<>'"`\\/]*\.jsonl\b)/i;
+
 const DANGEROUS: Pattern[] = [
   // `shred` is anchored to command position (issue #89 remainder): start of
   // statement, after a separator/subshell, after sudo/env-assignment prefixes,
@@ -1042,6 +1054,12 @@ const DANGEROUS: Pattern[] = [
   // five regex rounds traded a bypass for a false deny for a backtracking
   // path). Config-path stays a PATH_TARGET rule.
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
+  // #923 r3: a tool call must not write the Claude Code transcript the
+  // owner-present proof reads (a race that copies a subagent's tool_use into
+  // `<session_id>.jsonl` as a top-level record). Pure shell inspection is
+  // carved out at the verdict site, as for the config; the Read tool never
+  // reaches this table.
+  { re: CLAUDE_TRANSCRIPT_PATH_RE, signal: 'touch-claude-transcript' },
   // #501: the policy LOCK's own attack surface — the three shapes the #501
   // adversarial review found the guard had no signal for at all.
   //
@@ -3952,8 +3970,22 @@ export function policyLockAccessIsReadOnly(text: string): boolean {
  * The caller still refuses the carve-out when a #500 command shape is present.
  */
 export function guardConfigAccessIsReadOnly(text: string): boolean {
+  return closedSetReadAccess(text, GUARD_CONFIG_PATH_RE);
+}
+
+/**
+ * #923 r3: true when the whole command is pure shell inspection of a Claude
+ * Code transcript (`tail`/`grep`/`jq` …). Exactly the config's closed-set bar:
+ * reading the transcript changes nothing.
+ */
+export function claudeTranscriptAccessIsReadOnly(text: string): boolean {
+  return closedSetReadAccess(text, CLAUDE_TRANSCRIPT_PATH_RE);
+}
+
+/** The #879 closed-set read test, for the path `pathRe` names. */
+function closedSetReadAccess(text: string, pathRe: RegExp): boolean {
   const cmd = String(text || '');
-  if (!GUARD_CONFIG_PATH_RE.test(cmd)) return false;
+  if (!pathRe.test(cmd)) return false;
   if (STORE_MUTATION_RE.test(cmd)) return false;
   if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
   // Expansion and escapes are the ways a plain-looking word stops being one.
@@ -4574,7 +4606,7 @@ export function guardDirItselfMutated(surface: string): boolean {
 // goes through `matchSpans`, so this set cannot widen them.
 const PATH_TARGET_SIGNALS = new Set([
   'touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config',
-  'disable-action-guard',
+  'disable-action-guard', 'touch-claude-transcript',
 ]);
 
 /**
@@ -4601,6 +4633,9 @@ const PATH_TARGET_SIGNALS = new Set([
  *   - `disable-action-guard`   the disable/advisory/enforce-when-ready flags,
  *                              uninstall, and the #501/#505 policy-lock and
  *                              settings/env seams
+ *   - `touch-claude-transcript` Claude Code's session / subagent transcripts
+ *                              under ~/.claude/projects, which the #923
+ *                              owner-present proof reads (not the memory/ dirs)
  *
  * The ONE list. The Claude Code hook reads it from this module; its outage
  * fallback, the OpenClaw interceptor and the Hermes client carry duplicates
@@ -4611,6 +4646,7 @@ export const GUARD_SELF_PROTECTION_SIGNALS: readonly string[] = Object.freeze([
   'touch-decisions-ledger',
   'touch-guard-config',
   'disable-action-guard',
+  'touch-claude-transcript',
 ]);
 
 /** True when a verdict's signals put it on the self-protection floor. */
@@ -7686,6 +7722,14 @@ function evaluateToolCallCore(
       && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
       && !selfDisableInvoked()) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'touch-guard-config');
+  }
+  // #923 r3: pure shell inspection of a Claude Code transcript is not a write.
+  // Same three conditions; Write/Edit never pass.
+  if (dangerSignals.includes('touch-claude-transcript')
+      && claudeTranscriptAccessIsReadOnly(scanSurface)
+      && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
+      && !selfDisableInvoked()) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'touch-claude-transcript');
   }
   // External egress is a potential exfil vector — but only when the call carries
   // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing

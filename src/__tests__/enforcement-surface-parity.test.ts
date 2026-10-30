@@ -401,7 +401,8 @@ describe("#501 — the lock's own attack surface is signalled on BOTH fallback t
     const required: Array<[string, RegExp]> = [
       ['the two env seams', /SHIELDCORTEX_\(\?:DIST_ROOT\|PROTECTED_ROOT\)/],
       ['the protected root', /etc\\\/shieldcortex/],
-      ['the Claude Code settings file', /\\\.claude\[/],
+      // #923 r3: the transcript row also begins `\.claude[`; name the settings file.
+      ['the Claude Code settings file', /\\\.claude\[[^\]]*\]\+settings/],
     ];
     for (const [name, src] of [['hook', hookSrc], ['interceptor', pluginSrc]] as const) {
       const rows = fallbackRows(src);
@@ -470,7 +471,7 @@ describe('#509 R4-1 — the guard self-protection floor is ONE list, duplicated 
   it('the hook fallback, the OpenClaw plugin and the Hermes client carry exactly the exported list', async () => {
     const { GUARD_SELF_PROTECTION_SIGNALS } = await import('../defence/iron-dome/tool-action-guard.js');
     const canonical = [...GUARD_SELF_PROTECTION_SIGNALS];
-    expect(canonical).toEqual(['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard']);
+    expect(canonical).toEqual(['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard', 'touch-claude-transcript']);
     expect(listAfter(hookSrc, /const FALLBACK_SELF_PROTECTION_SIGNALS = \[/)).toEqual(canonical);
     expect(listAfter(pluginSrc, /export const SELF_PROTECTION_SIGNALS: readonly string\[\] = \[/)).toEqual(canonical);
     expect(listAfter(hermesClientSrc, /^SELF_PROTECTION_SIGNALS = \(/m)).toEqual(canonical);
@@ -496,7 +497,7 @@ describe('#509 R4-1 — the guard self-protection floor is ONE list, duplicated 
   });
 
   it('every hook fallback row carrying a floor signal is also a dangerous row (the outage scan sees it)', () => {
-    for (const sig of ['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard']) {
+    for (const sig of ['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard', 'touch-claude-transcript']) {
       expect({ sig, inHook: hookSrc.includes(`signal: '${sig}'`), inPlugin: pluginSrc.includes(`signal: '${sig}'`) })
         .toEqual({ sig, inHook: true, inPlugin: true });
     }
@@ -520,6 +521,11 @@ describe('#509 r5 finding 9 — the Hermes outage floor DECIDES like the core fl
     'echo {} > ~/.shieldcortex/config.json',
     'echo x >> ~/.shieldcortex/DECISIONS.md',
     'shieldcortex config --action-guard-disable',
+    // #923 r3: a transcript write is on the floor; its read and an auto-memory write are not.
+    'echo {} >> ~/.claude/projects/p/s.jsonl',
+    'cp forged.jsonl ~/.claude/projects/p/s/subagents/agent-1.jsonl',
+    'tail -n 5 ~/.claude/projects/p/s.jsonl',
+    'echo note >> ~/.claude/projects/p/memory/MEMORY.md',
     // #922: a posture loosening is on the floor; a tightening and the read are not.
     'shieldcortex guard posture off',
     'npx shieldcortex guard posture advisory',

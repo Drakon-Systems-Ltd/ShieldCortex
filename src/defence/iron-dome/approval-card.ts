@@ -91,6 +91,7 @@ export const SIGNAL_PHRASES: Readonly<Record<string, string>> = Object.freeze({
   'touch-decisions-ledger': 'touches the decisions ledger or action leases',
   'touch-guard-config': "changes ShieldCortex's own settings",
   'disable-action-guard': 'could switch off or weaken ShieldCortex',
+  'touch-claude-transcript': "writes a Claude Code session transcript ShieldCortex reads as evidence",
   'modify-shell-startup': 'changes a file that runs every time a shell starts',
   // Data leaving the machine.
   'external-egress': 'sends data off this machine',
@@ -213,6 +214,7 @@ export const SIGNAL_CLASSES: Readonly<Record<string, SignalClass>> = Object.free
   'touch-decisions-ledger': 'target',
   'touch-guard-config': 'target',
   'disable-action-guard': 'target',
+  'touch-claude-transcript': 'target',
   'modify-shell-startup': 'target',
   'external-egress': 'send',
   'network-egress': 'send',

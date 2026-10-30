@@ -74,6 +74,10 @@ export const COMMAND_KEYS = [
 
 export const PATH_KEYS = [
   'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
+  // #923 r3: Claude Code's NotebookEdit names its target here; unread, every
+  // path-target floor (config, approvals, transcripts) missed it. Last, so it
+  // never wins over a spelling above.
+  'notebook_path',
 ] as const;
 
 export const URL_KEYS = ['url', 'uri', 'endpoint', 'href', 'host', 'to', 'cc', 'bcc'] as const;
