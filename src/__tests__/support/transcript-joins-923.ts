@@ -50,6 +50,22 @@ export function joinedSpellings(H: string, SRC: string, F: string): Array<[strin
     ['cp into the transcript directory', `cp ${srcAs} ${H}/.claude/projects/p/`],
     ['cp -t the transcript directory', `cp -t ${H}/.claude/projects/p ${srcAs}`],
     ['cp into a joined transcript directory', `A=${H}/.cla; cp ${srcAs} \${A}ude/projects/p`],
+    // r12 (r11 Astra B1 A-D, N2; r11 Grok B1/B2): effect-backed rows for the
+    // superset model. Each runs in the scratch home and must write the
+    // canonical inode; each must be floored on both planes.
+    ['declare A=…', `declare A=${H}/.cla; cp ${SRC} \${A}${tail}`],
+    ['assignment behind ||', `false || A=${H}/.cla; cp ${SRC} \${A}${tail}`],
+    ['${x:+…} holds the anchor', `x=1; cp ${SRC} ${H}/\${x:+.cla}${tail}`],
+    ['reassignment before the copy', `A=/tmp/none; A=${H}/.cla; cp ${SRC} \${A}${tail}`],
+    ['reassignment after the copy', `A=${H}/.cla; cp ${SRC} \${A}${tail}; A=/tmp/none`],
+    ['repeated += chain', `A=${H}/.cl; A+=au; A+=de/proj; A+=ects/p/${F.replace(/onl$/, '')}; A+=onl; cp ${SRC} "$A"`],
+    ['POSIX bracket class [[:alpha:]]', `cp ${SRC} ${H}/.cl[[:alpha:]]ude/proj[e]cts/p/${F}`],
+    ['extglob repetition +(a|u)', `shopt -s extglob\ncp ${SRC} ${H}/.cl+(a|u)de/proj[e]cts/p/${F}`],
+    ['basename across glob parts', `cp ${srcAs.replace(/\.jsonl$/, '.js[o]nl')} ${H}/.cl[a]ude/proj[e]cts/p`],
+    ['glob inside a quoted assignment value', `A='.cl*/projects/p/${F}'; cp ${SRC} ${H}/$A`],
+    ['glob inside printf output', `cp ${SRC} ${H}/$(printf %s '.cl*/projects/p/${F}')`],
+    ['path-qualified /bin/cp into the directory', `/bin/cp ${srcAs} ${H}/.claude/projects/p/`],
+    ['env cp into the directory', `env cp ${srcAs} ${H}/.claude/projects/p/`],
   ];
 }
 
@@ -62,5 +78,10 @@ export function joinedControls(H: string, SRC: string, F: string): Array<[string
     ['expansion only before a literal .claude tail (auto-memory)', `cp ${SRC} $HOME/.claude/projects/p/memory/MEMORY.md`],
     ['an ordinary glob copy', 'cp src/*.ts dist/'],
     ['composed glob onto auto-memory, not a transcript', `cp ${SRC} ${H}/.cl*/proj*/p/memory/MEMORY.md`],
+    // r12 controls: the superset model must not swallow ordinary shapes.
+    ['+= chain naming an ordinary file', `A=/tmp/x; A+=/y; A+=.jsonl; cp ${SRC} "$A"`],
+    ['path-qualified cp of an ordinary file', '/bin/cp notes.txt /tmp/out/'],
+    ['rsync of an ordinary tree', 'rsync -a src/ /tmp/dest/'],
+    ['POSIX class on an ordinary path', 'cp a[[:digit:]].txt /tmp/out/'],
   ];
 }
