@@ -16,6 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawnSync } from 'node:child_process';
+import { lexicalPathNormalise, shellWords } from '../../scripts/lib/shell-words.mjs';
 import { evaluateToolCall, GUARD_SELF_PROTECTION_SIGNALS } from '../defence/iron-dome/tool-action-guard.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -211,6 +212,12 @@ const NEGATIVES = [
 const onFloor = (signals: readonly string[] | undefined) =>
   (signals ?? []).some((s) => GUARD_SELF_PROTECTION_SIGNALS.includes(s));
 
+/** r8: since r7 the outage section calls the shared tokenizer the hook imports
+ *  (`import { lexicalPathNormalise as fallbackLexicalPathNormalise, shellWords as
+ *  fallbackShellWords } from './lib/shell-words.mjs'`). The evaluated slice has no
+ *  imports, so the REAL exports are handed in under the hook's own alias names. */
+const HOOK_SECTION_IMPORTS = ['fallbackShellWords', 'fallbackLexicalPathNormalise'] as const;
+
 type Match = (args: Record<string, unknown>, toolName?: string) => string | null;
 
 /** The hook is a script: evaluate the SHIPPED text of its pure outage section
@@ -220,7 +227,7 @@ function hookMatch(): Match {
   const end = hookSrc.indexOf('// ==================== AUDIT (local JSONL)');
   expect(start).toBeGreaterThan(0);
   expect(end).toBeGreaterThan(start);
-  return new Function(`${hookSrc.slice(start, end)}\nreturn fallbackSelfProtectionMatch;`)() as Match;
+  return new Function(...HOOK_SECTION_IMPORTS, `${hookSrc.slice(start, end)}\nreturn fallbackSelfProtectionMatch;`)(shellWords, lexicalPathNormalise) as Match;
 }
 
 describe('#922 — guard posture loosening is on the self-protection floor (core argv walk)', () => {
