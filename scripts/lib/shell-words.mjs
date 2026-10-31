@@ -302,6 +302,13 @@ function classAt(s, i) {
   const from = j;
   if (s[j] === ']') j++;
   while (j < s.length && s[j] !== ']') {
+    // r12: `[:alpha:]`, `[=a=]`, `[.a.]` inside a bracket expression.
+    if (s[j] === '[' && /[:=.]/.test(s[j + 1] ?? '')) {
+      const close = s.indexOf(`${s[j + 1]}]`, j + 2);
+      if (close < 0 || /[\s'"\\`$/;&|<>()]/.test(s.slice(j + 2, close))) return null;
+      j = close + 2;
+      continue;
+    }
     if (/[\s'"\\`$*?[{/;&|<>()]/.test(s[j])) return null;
     j++;
   }
@@ -549,6 +556,12 @@ const COMPUTED_TRANSCRIPT_LEAF_RE = /\u0000.*(?:\.jsonl\b|(?:^|\/)subagents(?=$|
 /** Glob items inside a candidate (plain strings are literal text). */
 const STAR = { g: 'star' };
 const ONE = { g: 'one' };
+/**
+ * r12: ANY run of non-`/` characters, a leading `.` included. The superset
+ * item for a piece the model does not enumerate exactly (extglob repetition
+ * `+(…)`/`*(…)`/`!(…)`).
+ */
+const SEG = { g: 'seg' };
 const CAND_CAP = 256;
 const BRACE_CAP = 64;
 const BUDGET = 4096;
@@ -693,10 +706,11 @@ function partCandidates(p, ctx, depth) {
     case 'one': return [[ONE]];
     case 'class': return [[{ g: 'class', neg: p.neg, set: p.set }]];
     case 'ext':
-      if (p.op === '!') return [[STAR]];
-      return [...p.alts.flatMap((a) => textCandidates(a, ctx, depth)), ...(p.op === '?' || p.op === '*' ? [[]] : [])];
+      // r12: repetition and negation are not enumerated: any segment run.
+      if (p.op === '!' || p.op === '+' || p.op === '*') return [[SEG]];
+      return [...p.alts.flatMap((a) => textCandidates(a, ctx, depth)), ...(p.op === '?' ? [[]] : [])];
     case 'exp': return expansionCandidates(p, ctx, depth);
-    default: return [[]];
+    default: ctx.overflow = true; return [[]]; // r12: unknown part: incomplete
   }
 }
 
@@ -706,28 +720,42 @@ function nameCandidates(name, ctx, depth) {
   if (ctx.names.has(key)) return ctx.names.get(key);
   const out = [[]];
   const all = ctx.assign.get(name);
-  if (!all || depth >= NESTED_DEPTH || ctx.overflow) return out;
-  // The first and last few assignments: a padded run of `A=…` cannot fan out.
-  const vals = all.length > 16 ? [...all.slice(0, 8), ...all.slice(-8)] : all;
-  const base = [];
-  const appends = [];
-  for (const v of vals) {
+  if (!all) return out;
+  if (depth >= NESTED_DEPTH || ctx.overflow) { ctx.overflow = true; return out; }
+  // r12: the assignments are folded IN ORDER. Any of them may be skipped
+  // (`||`, `if`, a function never called), so after each one the value set is
+  // the union of "skipped" and "ran": `A=v` adds v, `A+=v` adds every earlier
+  // value with v appended. That is a superset of the reachable values;
+  // anything past the caps marks the scan incomplete (refused).
+  if (all.length > 16) { ctx.overflow = true; return out; }
+  let states = out;
+  for (const v of all) {
     const cands = v.printf ? printfCandidates(v.printf, v.args, ctx, depth + 1) : wordCandidates(v.parts, ctx, depth + 1);
-    const into = v.append ? appends : base;
-    for (const c of cands) if (into.length < CAND_CAP) into.push(c);
+    const next = states.slice();
+    for (const c of cands) {
+      for (const prev of v.append ? states : [[]]) {
+        if (next.length >= CAND_CAP || spend(ctx)) { ctx.overflow = true; break; }
+        next.push(cat(prev, c));
+      }
+    }
+    states = next;
   }
-  for (const b of base) if (out.length < CAND_CAP) out.push(b);
-  for (const a of appends) for (const b of [[], ...base]) if (out.length < CAND_CAP && !spend(ctx)) out.push(cat(b, a));
-  ctx.names.set(key, out);
-  return out;
+  ctx.names.set(key, states);
+  return states;
 }
 
-/** Every choice of one candidate per argument (each list trimmed), capped. */
-function choices(lists, cap = 32) {
+/** r12: the first `n` of `list`; dropping any marks the scan incomplete. */
+function keep(list, n, ctx) {
+  if (list.length > n) ctx.overflow = true;
+  return list.slice(0, n);
+}
+
+/** Every choice of one candidate per argument, capped (past it: incomplete). */
+function choices(lists, ctx, cap = 32) {
   let acc = [[]];
   for (const opts of lists) {
     const next = [];
-    for (const a of acc) for (const o of opts.slice(0, 4)) if (next.length < cap) next.push([...a, o]);
+    for (const a of acc) for (const o of keep(opts, 4, ctx)) { if (next.length < cap) next.push([...a, o]); else ctx.overflow = true; }
     acc = next;
   }
   return acc;
@@ -738,8 +766,8 @@ function printfCandidates(fmtParts, argParts, ctx, depth) {
   const fmts = wordCandidates(fmtParts, ctx, depth).filter((c) => c.every((x) => typeof x === 'string'));
   const args = argParts.map((a) => wordCandidates(a, ctx, depth));
   const out = [];
-  for (const f of fmts.slice(0, 4)) {
-    for (const argv of choices(args)) out.push(...formatPrintf(decodeEscapes(f.join('')), argv));
+  for (const f of keep(fmts, 4, ctx)) {
+    for (const argv of choices(args, ctx)) out.push(...formatPrintf(decodeEscapes(f.join('')), argv));
   }
   return out.length ? out : [[]];
 }
@@ -766,7 +794,7 @@ function formatPrintf(fmt, argv) {
 function commandOutputCandidates(body, ctx, depth) {
   const out = [[], [body]];
   if (depth >= NESTED_DEPTH) return out;
-  for (const stmt of statements(parseCached(body).seq).slice(0, 4)) {
+  for (const stmt of keep(statements(parseCached(body).seq), 4, ctx)) {
     const words = stmt.words;
     if (words.length === 0) continue;
     const head = partsText(words[0].parts) ?? '';
@@ -774,7 +802,7 @@ function commandOutputCandidates(body, ctx, depth) {
     if (head === 'echo') {
       let esc = false;
       while (args.length && /^-[neE]+$/.test(partsText(args[0].parts) ?? '')) { esc = esc || /e/.test(partsText(args[0].parts)); args = args.slice(1); }
-      for (const c of product(args.map((w) => wordCandidates(w.parts, ctx, depth + 1).slice(0, 8)), ' ', ctx)) {
+      for (const c of product(args.map((w) => keep(wordCandidates(w.parts, ctx, depth + 1), 8, ctx)), ' ', ctx)) {
         out.push(c, ...(esc && c.every((x) => typeof x === 'string') ? [[decodeEscapes(c.join(''))]] : []));
       }
       continue;
@@ -783,10 +811,10 @@ function commandOutputCandidates(body, ctx, depth) {
       out.push(...printfCandidates(args[0].parts, args.slice(1).map((w) => w.parts), ctx, depth + 1));
       continue;
     }
-    for (const w of words) out.push(...wordCandidates(w.parts, ctx, depth + 1).slice(0, 8));
-    out.push(...product(args.map((w) => wordCandidates(w.parts, ctx, depth + 1).slice(0, 8)), '', ctx));
+    for (const w of words) out.push(...keep(wordCandidates(w.parts, ctx, depth + 1), 8, ctx));
+    out.push(...product(args.map((w) => keep(wordCandidates(w.parts, ctx, depth + 1), 8, ctx)), '', ctx));
   }
-  return out.slice(0, CAND_CAP);
+  return keep(out, CAND_CAP, ctx);
 }
 
 /** `${…}`: the parameter's values, plus its `:-`/`:=`/`:+`/`:?` word. */
@@ -802,18 +830,18 @@ function braceParamCandidates(body, ctx, depth) {
     const rep = /^\/\/?[^/]*\/(.*)$/s.exec(m[3]);
     if (rep) out.push(...textCandidates(rep[1], ctx, depth));
   }
-  return out.slice(0, CAND_CAP);
+  return keep(out, CAND_CAP, ctx);
 }
 
 function expansionCandidates(p, ctx, depth) {
-  if (depth >= NESTED_DEPTH || ctx.overflow) return [[]];
+  if (depth >= NESTED_DEPTH || ctx.overflow) { ctx.overflow = true; return [[]]; }
   switch (p.type) {
     case 'arith': return [['1']];
     case 'proc': return [['/dev/fd/63']];
     case 'param': return nameCandidates(p.name, ctx, depth);
     case 'brace-param': return braceParamCandidates(p.body, ctx, depth);
     case 'cmd': return commandOutputCandidates(p.body, ctx, depth);
-    default: return [[]];
+    default: ctx.overflow = true; return [[]];
   }
 }
 
@@ -886,7 +914,7 @@ function classSource(it) {
 
 function itemSource(it) {
   if (typeof it === 'string') return it.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-  if (it.g === 'star') return '[^/]*';
+  if (it.g === 'star' || it.g === 'seg') return '[^/]*';
   if (it.g === 'one') return '[^/]';
   return classSource(it);
 }
@@ -900,7 +928,7 @@ function leadingDotOk(seg, dotglob) {
   const first = seg[0];
   if (first === undefined) return false;
   if (typeof first === 'string') return first[0] === '.';
-  return dotglob || first.g === 'class';
+  return dotglob || first.g === 'class' || first.g === 'seg';
 }
 
 function segmentMatches(seg, name, dotglob) {
@@ -911,13 +939,13 @@ function segmentMatches(seg, name, dotglob) {
 /** One item accepts the character `ch`. */
 function itemAccepts(it, ch) {
   if (typeof it === 'string') return it.toLowerCase() === ch.toLowerCase();
-  if (it.g === 'one') return true;
+  if (it.g === 'one' || it.g === 'seg') return true;
   try { return new RegExp(`^${classSource(it)}$`, 'i').test(ch); } catch { return true; }
 }
 
 /** The segment may name a file whose name holds `.jsonl` at a word boundary. */
 function segmentMayBeJsonl(seg) {
-  if (seg.some((it) => typeof it !== 'string' && it.g === 'star')) return true;
+  if (seg.some((it) => typeof it !== 'string' && (it.g === 'star' || it.g === 'seg'))) return true;
   const chars = seg.flatMap((it) => (typeof it === 'string' ? [...it] : [it]));
   const want = '.jsonl';
   for (let k = 0; k + want.length <= chars.length; k++) {
@@ -953,13 +981,61 @@ function globMayNameTranscript(items, dotglob) {
   return false;
 }
 
+/**
+ * r12: glob syntax inside a VALUE (a quoted assignment, `printf` output) is
+ * still applied by the shell when the expansion is unquoted. Re-read the
+ * value's `*`, `?`, `[…]` and extglob `@(…)`-forms as glob items (superset:
+ * a bracket is any one non-`/` character, an extglob any segment run). The
+ * literal reading is judged too, so both quoted and unquoted uses are covered.
+ */
+function dataGlobItems(items) {
+  const out = [];
+  for (const it of items) {
+    if (typeof it !== 'string' || !/[*?[]/.test(it)) { out.push(it); continue; }
+    let lit = '';
+    const flush = () => { if (lit) out.push(lit); lit = ''; };
+    for (let i = 0; i < it.length; i++) {
+      const ch = it[i];
+      if (/[?*+@!]/.test(ch) && it[i + 1] === '(') {
+        const close = it.indexOf(')', i + 2);
+        if (close > 0) { flush(); out.push(SEG); i = close; continue; }
+      }
+      if (ch === '*') { flush(); out.push(STAR); continue; }
+      if (ch === '?') { flush(); out.push(ONE); continue; }
+      if (ch === '[') {
+        const close = it.indexOf(']', i + 2);
+        if (close > 0 && !it.slice(i, close).includes('/')) { flush(); out.push({ g: 'class', neg: true, set: '' }); i = close; continue; }
+      }
+      lit += ch;
+    }
+    flush();
+  }
+  return out;
+}
+
 /** The transcript named-check on ONE joined candidate. */
 function candidateNamesTranscript(items, dotglob) {
   if (items.every((x) => typeof x === 'string')) {
     const t = items.join('');
-    return CLAUDE_TRANSCRIPT_NAMED_RE.test(t) || CLAUDE_TRANSCRIPT_NAMED_RE.test(lexicalPathNormalise(t));
+    if (CLAUDE_TRANSCRIPT_NAMED_RE.test(t) || CLAUDE_TRANSCRIPT_NAMED_RE.test(lexicalPathNormalise(t))) return true;
+    if (!/[*?[]/.test(t)) return false;
   }
-  return globMayNameTranscript(items, dotglob);
+  return globMayNameTranscript(dataGlobItems(items), dotglob);
+}
+
+/** r12: the basename of a candidate: every item after its last `/`. */
+function candidateBasename(items) {
+  const out = [];
+  for (let n = items.length - 1; n >= 0; n--) {
+    const it = items[n];
+    if (typeof it === 'string' && it.includes('/')) {
+      const tail = it.slice(it.lastIndexOf('/') + 1);
+      if (tail) out.unshift(tail);
+      break;
+    }
+    out.unshift(it);
+  }
+  return out;
 }
 
 /** A parameter or command expansion: its value may come from anywhere. */
@@ -978,8 +1054,6 @@ function literalClaudeTail(parts) {
   return /\.claude/i.test(t) && !/(?:^|\/)\.\.(?:\/|$)/.test(t);
 }
 
-/** Commands that copy a source INTO a directory operand (`cp s dir/`, `-t dir`). */
-const INTO_DIR_COMMANDS = new Set(['cp', 'mv', 'install', 'ln']);
 
 /**
  * r11 sweep: `cp src <home>/.claude/projects/p/` and `cp -t <dir> src` write
@@ -992,7 +1066,10 @@ function intoDirectoryMayNameTranscript(levels, ctx, dotglob, budget) {
   for (const { seq } of levels) {
     for (const { words } of statements(seq)) {
       const texts = words.map((w) => partsText(w.parts));
-      const at = texts.findIndex((t) => t !== null && INTO_DIR_COMMANDS.has(t));
+      // r12: ANY command may compose `dir/basename(src)` (`/bin/cp`, `rsync`,
+      // `sudo cp`, a wrapper): command identity is not judged. Every word
+      // after the first non-assignment word is an operand.
+      const at = texts.findIndex((t) => t === null || !ASSIGN_RE.test(t));
       if (at < 0) continue;
       let dest = null;
       const operands = [];
@@ -1012,13 +1089,12 @@ function intoDirectoryMayNameTranscript(levels, ctx, dotglob, budget) {
       const dests = wordCandidates(dest.parts, ctx, 0).filter((d) => {
         if (explicit) return true;
         const last = d[d.length - 1];
-        if (typeof last !== 'string') return false;
+        if (typeof last !== 'string') return true; // r12: a glob tail may be a directory
         return last.endsWith('/') || !last.split('/').pop().includes('.');
       });
       for (const src of operands) {
-        for (const sc of wordCandidates(src.parts, ctx, 0).slice(0, 16)) {
-          const last = sc[sc.length - 1];
-          const base = typeof last === 'string' ? [last.split('/').pop()] : [last];
+        for (const sc of keep(wordCandidates(src.parts, ctx, 0), 16, ctx)) {
+          const base = candidateBasename(sc);
           for (const d of dests) {
             if (++budget.n > BUDGET) { ctx.overflow = true; return false; }
             if (candidateNamesTranscript(cat(d, ['/', ...base]), dotglob)) return true;
@@ -1070,7 +1146,9 @@ function joinedScan(raw) {
     if (budget.n > BUDGET) { ctx.overflow = true; break; }
   }
   if (!ctx.overflow && intoDirectoryMayNameTranscript(levels, ctx, dotglob, budget)) return true;
-  return ctx.overflow && evidence;
+  // r12: an incomplete evaluation (cap, depth, trimmed list, unknown part)
+  // proves nothing: refused whatever the literal fragments say.
+  return ctx.overflow;
 }
 
 /**
