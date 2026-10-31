@@ -3459,9 +3459,10 @@ export const HERMES_PLUGIN_COPIES_LABEL = 'Hermes plugin copies';
 const HERMES_UNDETERMINED_FIX =
   'Install Hermes, or point the doctor at its python. Until Hermes\' own discovery can be ' +
   'reached this row cannot say which copy the gateway loads, and ' +
-  '`--fix-hermes-plugin-copies` moves nothing. The interpreter is looked for at ' +
-  '`$HERMES_HOME/hermes-agent/.venv/bin/python3`, then at the shebang of the `hermes` ' +
-  'launcher on PATH.';
+  '`--fix-hermes-plugin-copies` moves nothing. Hermes is asked through its launcher at ' +
+  '`$HERMES_HOME/hermes-agent/.hermes/bin/hermes`, then through the `hermes` launcher on ' +
+  'PATH, and only then through the legacy `$HERMES_HOME/hermes-agent/.venv` Python — which is ' +
+  'skipped when it is older than the launcher.';
 
 /** The remedy for "part of the tree could not be read", said once (#569 r6). */
 const HERMES_UNREADABLE_FIX =

@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **#971 `shieldcortex update` refreshes the Hermes plugin on launcher-based Hermes installs.** On a current Hermes install, `hermes` is a launcher at `$HERMES_HOME/hermes-agent/.hermes/bin/hermes` that runs a bundled Python. When an old `hermes-agent/.venv` was still on disk, ShieldCortex asked that venv Python instead. The venv could not import Hermes' dependencies (`No module named 'ruamel'`), so the update wrote nothing and Hermes kept running the previous plugin copy. ShieldCortex now asks the launcher first, then `hermes` on PATH, and only then the venv. The launcher is asked for its own Python (`--print-runtime-command`), and Hermes' own bootstrap is loaded before the plugin scan runs. A venv older than the launcher is skipped and named as stale. A candidate that cannot import Hermes passes to the next one, and the error names every path tried, in order. If Hermes still cannot be asked and the only ShieldCortex copy under the Hermes home is `$HERMES_HOME/plugins/shieldcortex`, with no symlink on the write path, `update` refreshes that copy and moves the old one to `backups/`. With more than one copy, a profile home, or project plugins possibly enabled, it still writes nothing. The plugin is never enabled in Hermes' config. The doctor's remedy text now describes the new order.
+
 ## [5.17.0] - 2026-10-30
 
 Minor on 5.16.0. The agent config watch added in 5.16.0 now also covers Gemini CLI: its user and project `settings.json`, a planted `GEMINI.md`, and a planted `.gemini/settings.json` in the drop directories (#965, PR #966). Minor rather than patch: the watch checks more files, so a change to a Gemini file can now send an `agent_config_change` notification. No new configuration key, no new webhook event, no schema change. The baseline state file gains a `baselinedSpecs` list. Action Guard stays off by default. Node floor unchanged.
