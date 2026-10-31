@@ -69,7 +69,7 @@ import { resolveHarnessPid } from './lib/harness-pid.mjs';
 // #923 r7: the guard's own shell-word tokenizer and path normaliser — one file
 // both planes import, so the outage scan splits and collapses a word exactly as
 // the live guard does.
-import { lexicalPathNormalise as fallbackLexicalPathNormalise, shellWords as fallbackShellWords } from './lib/shell-words.mjs';
+import { claudeWordExpands as fallbackClaudeWordExpands, lexicalPathNormalise as fallbackLexicalPathNormalise, shellWords as fallbackShellWords } from './lib/shell-words.mjs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { homedir, tmpdir } from 'os';
 import { spawn } from 'child_process';
@@ -2796,9 +2796,14 @@ function fallbackPostureMatch(re, text) {
  */
 function fallbackTranscriptRowMatch(re, text) {
   if (re.test(text)) return true;
-  return fallbackShellWords(text)
+  if (fallbackShellWords(text)
     .filter((w) => /\.claude/i.test(w))
-    .some((w) => re.test(w) || re.test(fallbackLexicalPathNormalise(w)));
+    .some((w) => re.test(w) || re.test(fallbackLexicalPathNormalise(w)))) return true;
+  // r10: the live guard's closed-set refusal, from the same module: a `.claude`
+  // word the shell expands after the anchor (`x$((1))y/../projects/…`,
+  // backticks, `${…}`, `$v`, globs, `{a,b}`, mid-word `<(…)`) is floored as a
+  // transcript, not left to whichever other row happens to match.
+  return fallbackClaudeWordExpands(text);
 }
 
 /** Path-bearing surface keys: the guard's PATH_KEYS. */

@@ -17,7 +17,7 @@
  */
 import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -444,6 +444,178 @@ describe('#923 r7 — the hook outage fallback uses the same words', () => {
 });
 
 /**
+ * #923 r10 — the floor judges the command AS TYPED, through the shared
+ * tokenizer, never a transformed copy of it.
+ *
+ * r9 Astra B1: `.claude/x$((1))y/../projects/…` (and `$((1+0))`,
+ * `$(printf 1)`, backticks, `${unset:-1y}`) is the transcript once bash
+ * expands it; the typed word matched nothing. A `.claude` word the shell
+ * computes is now refused as a transcript (scripts/lib/shell-words.mjs
+ * `claudeWordExpands`), on both planes; nothing is executed.
+ * r9 Grok blocker: the live floor read `commandScanText`, whose `#` strip is
+ * quote-blind, so `echo "hello #" > <t>` lost its target. The floor and its
+ * read carve-out now read the raw command; a real unquoted comment naming a
+ * transcript is floored too (accepted over-deny).
+ */
+const R10_H = '/home/owner/.claude';
+const R10_LEAF = 'projects/-home-owner-work/0b7c-session.jsonl';
+const R10_EXPANSIONS: Array<[string, string]> = [
+  ['$((1))', `${R10_H}/x$((1))y/../${R10_LEAF}`],
+  ['$((1+0))', `${R10_H}/x$((1+0))y/../${R10_LEAF}`],
+  ['$(printf 1)', `${R10_H}/x$(printf 1)y/../${R10_LEAF}`],
+  ['backticks', `${R10_H}/x\`printf 1\`y/../${R10_LEAF}`],
+  ['${unset:-1y}', `${R10_H}/x\${unset:-1y}/../${R10_LEAF}`],
+  ['$VAR component', `${R10_H}/$P/-home-owner-work/0b7c-session.jsonl`],
+  ['double-quoted $(…)', `"${R10_H}/$(echo projects)/-home-owner-work/0b7c-session.jsonl"`],
+  ['glob', `${R10_H}/proj*/-home-owner-work/0b7c-session.jsonl`],
+  ['mid-word <(…)', `${R10_H}/x<(true)/../../../../${R10_LEAF}`],
+  ['glob builds .claude', `/home/owner/.cl*/${R10_LEAF}`],
+];
+const R10_WRITES: Array<[string, string, Record<string, unknown>]> = [
+  ...R10_EXPANSIONS.flatMap(([label, op]) => [
+    ['Bash', `cp onto the ${label} alias`, { command: `cp /tmp/forged.jsonl ${op}` }],
+    ['Bash', `sudo cp onto the ${label} alias`, { command: `sudo cp /tmp/forged.jsonl ${op}` }],
+  ] as Array<[string, string, Record<string, unknown>]>),
+  ['Bash', 'tee onto a brace-expanded alias', { command: `tee ${R10_H}/{x,projects}/-home-owner-work/0b7c-session.jsonl < /tmp/forged.jsonl` }],
+  ['Bash', 'bash -c with the $((1)) alias', { command: `bash -c 'cp /tmp/forged.jsonl ${R10_H}/x$((1))y/../${R10_LEAF}'` }],
+  ['Bash', 'a heredoc onto the $((1)) alias', { command: `cat <<EOF > ${R10_H}/x$((1))y/../${R10_LEAF}\n{}\nEOF` }],
+  ['Bash', 'a variable assigned .claude/projects in the same command', { command: `C=${R10_H}/projects; cp /tmp/forged.jsonl $C/-home-owner-work/0b7c-session.jsonl` }],
+  // r9 Grok blocker: a quoted `#` before the target.
+  ['Bash', 'echo "hello #" redirect', { command: `echo "hello #" > ${R10_H}/${R10_LEAF}` }],
+  ['Bash', 'cp "src #" (double quotes)', { command: `cp "/tmp/forged.jsonl #" ${R10_H}/${R10_LEAF}` }],
+  ['Bash', "cp 'src #' (single quotes)", { command: `cp '/tmp/forged.jsonl #' ${R10_H}/${R10_LEAF}` }],
+  ['Bash', "cp $'src #' (ANSI-C)", { command: `cp $'/tmp/forged.jsonl #' ${R10_H}/${R10_LEAF}` }],
+  ['Bash', 'tee "/x #"', { command: `tee "/x #" ${R10_H}/${R10_LEAF} < /tmp/forged.jsonl` }],
+  ['Bash', 'echo "a #" onto the escaped-space alias', { command: String.raw`echo "a #" > ${R10_H}/x\ y/../${R10_LEAF}` }],
+  // A real unquoted comment naming a transcript: bash writes nothing, the floor over-denies (accepted).
+  ['Bash', 'a real unquoted comment naming the transcript (accepted over-deny)', { command: `echo hi # > ${R10_H}/${R10_LEAF}` }],
+];
+const R10_NOT_FLOORED: Array<[string, string, Record<string, unknown>]> = [
+  ['Bash', 'cat a glob alias of the transcript', { command: `cat ${R10_H}/proj*/-home-owner-work/0b7c-session.jsonl` }],
+  ['Bash', 'ls .claude/*', { command: `ls ${R10_H}/*` }],
+  ['Bash', 'echo "hello #" onto an ordinary file', { command: 'echo "hello #" > /tmp/notes.txt' }],
+  ['Bash', 'cp "src #" onto an ordinary file', { command: 'cp "/tmp/forged.jsonl #" /tmp/other.jsonl' }],
+  ['Bash', 'an arithmetic alias outside .claude', { command: 'cp /tmp/forged.jsonl /tmp/x$((1))y/../other.jsonl' }],
+  ['Bash', 'a computed .jsonl with no .claude named', { command: 'X=/tmp; cp /tmp/forged.jsonl $X/out.jsonl' }],
+  ['Bash', 'a pure print naming the transcript', { command: `echo ${R10_H}/${R10_LEAF}` }],
+];
+
+for (const enforce of [true, false]) {
+  describe(`#923 r10 — expansion and quoted-# spellings reach the floor (live classifier, enforce=${enforce})`, () => {
+    const c = { enabled: true, enforce } as any;
+    it.each(R10_WRITES)('%s: %s is floored', (tool, _label, input) => {
+      const v = evaluateToolCall(tool, input, c);
+      expect(v.signals).toContain('touch-claude-transcript');
+      expect(isGuardSelfProtectionVerdict(v.signals)).toBe(true);
+      expect(v.decision).not.toBe('allow');
+    });
+    it.each(R10_NOT_FLOORED)('%s: %s is not floored', (tool, _label, input) => {
+      const v = evaluateToolCall(tool, input, c);
+      expect(v.signals ?? []).not.toContain('touch-claude-transcript');
+      expect(isGuardSelfProtectionVerdict(v.signals)).toBe(false);
+    });
+  });
+}
+
+describe('#923 r10 — the hook outage fallback agrees (dist missing)', () => {
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'sc-923-r10-'));
+    mkdirSync(join(home, '.shieldcortex'), { recursive: true });
+  });
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  function run(tool: string, input: Record<string, unknown>, enforce: boolean, mode: string): { decision?: string; reason?: string } {
+    writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce } }));
+    const r = spawnSync(process.execPath, [HOOK], {
+      input: JSON.stringify({ session_id: 's', cwd: '/tmp', hook_event_name: 'PreToolUse', permission_mode: mode, tool_name: tool, tool_input: input }),
+      env: { ...process.env, HOME: home, SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex'), SHIELDCORTEX_DIST_ROOT: join(home, 'no-dist') },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    const out = (r.stdout ?? '').trim();
+    const h = out ? JSON.parse(out).hookSpecificOutput : undefined;
+    return { decision: h?.permissionDecision, reason: h?.permissionDecisionReason };
+  }
+
+  for (const enforce of [true, false]) {
+    it.each(R10_WRITES)(`enforce=${enforce} dontAsk: %s: %s is denied as the transcript floor`, (tool, _label, input) => {
+      const r = run(tool, input, enforce, 'dontAsk');
+      expect(r.decision).toBe('deny');
+      expect(r.reason).toMatch(/touch-claude-transcript/);
+    });
+  }
+  it.each(R10_NOT_FLOORED)('%s: %s passes with the guard unloaded', (tool, _label, input) => {
+    expect(run(tool, input, false, 'bypassPermissions').decision).toBeUndefined();
+  });
+});
+
+/**
+ * #923 r10 — same inode, real effect. bash runs each spelling as an
+ * UNPRIVILEGED copy of inert JSON inside a scratch home (never the real one),
+ * and the canonical transcript's inode must be the one written; then both
+ * planes must floor the identical command text.
+ */
+const itBash = process.platform === 'win32' ? it.skip : it;
+describe('#923 r10 — same-inode effect oracle', () => {
+  let root: string;
+  let H: string;
+  let T: string;
+  let SRC: string;
+  const CANON = '{"canonical":true}\n';
+  beforeEach(() => {
+    root = mkdtempSync(join('/tmp', 'sc-923-r10-inode-'));
+    H = join(root, 'home');
+    T = join(H, '.claude', 'projects', 'p', 's.jsonl');
+    SRC = join(root, 'forged.jsonl');
+    mkdirSync(dirname(T), { recursive: true });
+    for (const d of ['x1y', 'x y']) mkdirSync(join(H, '.claude', d), { recursive: true });
+    writeFileSync(T, CANON);
+    writeFileSync(SRC, '{"forged":true}\n');
+    writeFileSync(`${SRC} #`, '{"forged":true}\n');
+    mkdirSync(join(H, '.shieldcortex'), { recursive: true });
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  const SPELLINGS: Array<[string, () => string]> = [
+    ['x$((1))y', () => `cp ${SRC} ${H}/.claude/x$((1))y/../projects/p/s.jsonl`],
+    ['x$((1+0))y', () => `cp ${SRC} ${H}/.claude/x$((1+0))y/../projects/p/s.jsonl`],
+    ['x$(printf 1)y', () => `cp ${SRC} ${H}/.claude/x$(printf 1)y/../projects/p/s.jsonl`],
+    ['x`printf 1`y', () => `cp ${SRC} ${H}/.claude/x\`printf 1\`y/../projects/p/s.jsonl`],
+    ['x${unset:-1y}', () => `cp ${SRC} ${H}/.claude/x\${unset:-1y}/../projects/p/s.jsonl`],
+    ['echo "hello #" >', () => `echo "hello #" > ${T}`],
+    ['cp "src #"', () => `cp "${SRC} #" ${T}`],
+    ["cp 'src #'", () => `cp '${SRC} #' ${T}`],
+    ["cp $'src #'", () => `cp $'${SRC} #' ${T}`],
+    ['tee "x #"', () => `tee "${root}/x #" ${T} < ${SRC}`],
+    ['echo "a #" > escaped-space alias', () => String.raw`echo "a #" > ${H}/.claude/x\ y/../projects/p/s.jsonl`],
+  ];
+
+  itBash.each(SPELLINGS)('%s writes the canonical inode and both planes floor it', (_label, cmd) => {
+    const command = cmd();
+    const ino = statSync(T).ino;
+    const r = spawnSync('bash', ['--noprofile', '--norc', '-c', command], { cwd: root, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: H }, encoding: 'utf8', timeout: 10_000 });
+    expect(r.status).toBe(0);
+    expect(statSync(T).ino).toBe(ino);
+    expect(readFileSync(T, 'utf8')).not.toBe(CANON);
+    for (const enforce of [true, false]) {
+      const v = evaluateToolCall('Bash', { command }, { enabled: true, enforce } as any);
+      expect({ enforce, signals: v.signals ?? [] }).toEqual({ enforce, signals: expect.arrayContaining(['touch-claude-transcript']) });
+      writeFileSync(join(H, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce } }));
+      const h = spawnSync(process.execPath, [HOOK], {
+        input: JSON.stringify({ session_id: 's', cwd: root, hook_event_name: 'PreToolUse', permission_mode: 'dontAsk', tool_name: 'Bash', tool_input: { command } }),
+        env: { ...process.env, HOME: H, SHIELDCORTEX_CONFIG_DIR: join(H, '.shieldcortex'), SHIELDCORTEX_DIST_ROOT: join(root, 'no-dist') },
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      const out = JSON.parse((h.stdout ?? '').trim() || '{}').hookSpecificOutput ?? {};
+      expect({ enforce, decision: out.permissionDecision }).toEqual({ enforce, decision: 'deny' });
+      expect(out.permissionDecisionReason).toMatch(/touch-claude-transcript/);
+    }
+  });
+});
+
+/**
  * #923 documented residuals (CHANGELOG #923; tool-action-guard.ts beside
  * CLAUDE_TRANSCRIPT_PATH_RE): the floor is lexical, so these spellings of the
  * transcript are NOT floored. Pinned here so the gap is stated in the suite,
@@ -456,6 +628,10 @@ describe('#923 documented residuals (not resolved lexically)', () => {
     ['CLAUDE_CONFIG_DIR', 'a custom Claude home', { file_path: '/srv/claude-home/projects/-home-owner-work/0b7c-session.jsonl', content: '{}\n' }],
     ['camelCase notebookPath', 'NotebookEdit with notebookPath (not a PATH_KEY)', { notebookPath: T, new_source: 'x' }],
     ['space in the project component', 'Claude Code never generates one; the regex stops at whitespace', { file_path: '/home/owner/.claude/projects/my proj/0b7c-session.jsonl', content: '{}\n' }],
+    // r10: the command never spells `.claude` or a transcript tail; the value
+    // comes from the environment or a file the guard does not evaluate.
+    ['environment variable', 'a whole transcript path held in a variable set outside the command', { command: 'cp /tmp/forged.jsonl $SC_TRANSCRIPT' }],
+    ['substitution from a file', 'a whole transcript path read from a file', { command: 'cp /tmp/forged.jsonl $(cat /tmp/path-file)' }],
   ])('residual (%s): %s is not floored', (_name, _label, input) => {
     const tool = 'command' in input ? 'Bash' : 'notebookPath' in input ? 'NotebookEdit' : 'Write';
     expect(evaluateToolCall(tool, input, cfg).signals ?? []).not.toContain('touch-claude-transcript');

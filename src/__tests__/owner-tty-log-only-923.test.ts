@@ -434,6 +434,57 @@ describe('#923 owner-present harness TTY is log-only on the no-prompt-surface br
     });
   });
 
+  // (5'''') #923 r10 (r9 Astra B1, r9 Grok blocker): the floor judged a
+  // transformed string. An unquoted `$((1))` / `$(printf 1)` / backtick /
+  // `${…}` inside the operand, or a quoted `#` before the target (which the
+  // quote-blind comment strip removed with the target), wrote the transcript
+  // while a proven owner terminal logged it or the guard allowed it. Both
+  // planes, enforce on and off, must deny with no owner-present audit row.
+  describe('#923 r10: expansion and quoted-# transcript spellings are never log-only', () => {
+    const leaf = () => `projects/p/${SESSION}.jsonl`;
+    const SPELLINGS: Array<[string, () => string]> = [
+      ['x$((1))y', () => `sudo cp /tmp/forged.jsonl ${home}/.claude/x$((1))y/../${leaf()}`],
+      ['x$((1+0))y', () => `sudo cp /tmp/forged.jsonl ${home}/.claude/x$((1+0))y/../${leaf()}`],
+      ['x$(printf 1)y', () => `sudo cp /tmp/forged.jsonl ${home}/.claude/x$(printf 1)y/../${leaf()}`],
+      ['backtick', () => `sudo cp /tmp/forged.jsonl ${home}/.claude/x\`printf 1\`y/../${leaf()}`],
+      ['${unset:-1y}', () => `sudo cp /tmp/forged.jsonl ${home}/.claude/x\${unset:-1y}/../${leaf()}`],
+      ['quoted-# echo redirect', () => `${DANGEROUS}; echo "hello #" > ${transcriptPath}`],
+      ['quoted-# cp source (double)', () => `${DANGEROUS}; cp "/tmp/forged.jsonl #" ${transcriptPath}`],
+      ['quoted-# cp source (single)', () => `${DANGEROUS}; cp '/tmp/forged.jsonl #' ${transcriptPath}`],
+      ["quoted-# cp source ($'…')", () => `${DANGEROUS}; cp $'/tmp/forged.jsonl #' ${transcriptPath}`],
+      ['quoted-# tee', () => `${DANGEROUS}; tee "/tmp/x #" ${transcriptPath} < /tmp/forged.jsonl`],
+      ['escaped-space alias with quoted #', () => String.raw`${DANGEROUS}; echo "a #" > ${home}/.claude/x\ y/../${leaf()}`],
+    ];
+    const setEnforce = (enforce: boolean) => fs.writeFileSync(path.join(home, '.shieldcortex', 'config.json'),
+      JSON.stringify({ actionGuard: { enabled: true, enforce } }));
+
+    itLinux('control: a dangerous call plus a quoted-# echo onto an ordinary file is log-only', async () => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      expectLogOnly(await runInstalled(call(`${DANGEROUS}; echo "hello #" > /tmp/notes.txt`, 'dontAsk')));
+    });
+    itLinux('control: a dangerous call plus an arithmetic alias outside .claude is log-only', async () => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      expectLogOnly(await runInstalled(call(`${DANGEROUS}; cp /tmp/forged.jsonl /tmp/x$((1))y/../other.jsonl`, 'dontAsk')));
+    });
+    for (const enforce of [true, false]) {
+      it.each(SPELLINGS)(`enforce=${enforce}: %s is denied live, not logged`, async (_label, command) => {
+        setEnforce(enforce);
+        writeTree(procRoot, ownerTree(HARNESS));
+        const result = await runInstalled(call(command(), 'dontAsk'));
+        expectDenyNotLogged(result);
+        expect(decisionOf(result.stdout).permissionDecisionReason).toMatch(/touch-claude-transcript/);
+      });
+      it.each(SPELLINGS)(`enforce=${enforce}: with dist missing, %s is denied as the transcript floor, not logged`, async (_label, command) => {
+        setEnforce(enforce);
+        writeTree(procRoot, ownerTree(HARNESS));
+        const result = await runHook(call(command(), 'dontAsk'),
+          { ...env, SHIELDCORTEX_DIST_ROOT: path.join(home, 'no-dist') }, { hookPath: install() });
+        expectDenyNotLogged(result);
+        expect(decisionOf(result.stdout).permissionDecisionReason).toMatch(/touch-claude-transcript/);
+      });
+    }
+  });
+
   // (5') unscanned: a tool input the schema rejects is never widened
   it('owner-present TTY + unscanned (schema-invalid) tool input still denies', async () => {
     writeTree(procRoot, ownerTree(HARNESS));

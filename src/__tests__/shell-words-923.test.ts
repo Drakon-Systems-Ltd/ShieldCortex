@@ -17,7 +17,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { lexicalPathNormalise, shellTokens, shellWords } from '../../scripts/lib/shell-words.mjs';
+import { claudeWordExpands, EXPANSION_MARK, expansionWords, lexicalPathNormalise, shellTokens, shellWords } from '../../scripts/lib/shell-words.mjs';
 import { lexicalPathNormalise as guardNormalise, claudeTranscriptNamed } from '../defence/iron-dome/tool-action-guard.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -164,5 +164,72 @@ describe('#923 r7 — both planes import the one module (no copy to drift)', () 
       expect(built).toMatch(/from '\.\.\/\.\.\/\.\.\/scripts\/lib\/shell-words\.mjs'/);
       expect(resolve(dirname(distGuard), '../../../scripts/lib/shell-words.mjs')).toBe(join(repoRoot, 'scripts', 'lib', 'shell-words.mjs'));
     }
+  });
+});
+
+/**
+ * #923 r10 (r9 Astra B1, N1) — words the shell EXPANDS before the command
+ * sees them. `.claude/x$((1))y/../projects/p/s.jsonl` writes the transcript
+ * once bash computes `x1y`; the typed word never matched. `expansionWords`
+ * keeps each expansion INSIDE its word (as a mark) and `claudeWordExpands` is
+ * the closed-set refusal both planes share. Nothing here is executed.
+ */
+describe('#923 r10 — expansion-aware words and the shared refusal', () => {
+  const L = 'projects/p/s.jsonl';
+  const M = EXPANSION_MARK;
+
+  it.each<[string, string]>([
+    ['x$((1))y', `x${M}y`],
+    ['x$(printf 1)y', `x${M}y`],
+    ['x`printf 1`y', `x${M}y`],
+    ['x${unset:-1y}', `x${M}`],
+    ['x$v/y', `x${M}/y`],
+    ['"a/$(echo p q)/z"', `a/${M}/z`],
+    ['a/x<(true)/b', `a/x${M}/b`],
+    ['a/proj*/b', `a/proj${M}/b`],
+    ['a/{x,y}', `a/${M}x,y}`],
+    ["'a/$x'", 'a/$x'],
+    ['a\\$x', 'a$x'],
+    ["$'a\\x20b'", 'a b'],
+  ])('%s is one word: %j', (text, value) => {
+    expect(expansionWords(text)[0].value).toBe(value);
+  });
+
+  it.each<[string, string]>([
+    ['arithmetic', `cp s /h/.claude/x$((1))y/../${L}`],
+    ['arithmetic +0', `cp s /h/.claude/x$((1+0))y/../${L}`],
+    ['command substitution', `cp s /h/.claude/x$(printf 1)y/../${L}`],
+    ['backticks', `cp s /h/.claude/x\`printf 1\`y/../${L}`],
+    ['parameter default', `cp s /h/.claude/x\${unset:-1y}/../${L}`],
+    ['plain parameter', `cp s /h/.claude/$P/p/s.jsonl`],
+    ['double-quoted substitution', `cp s "/h/.claude/$(echo projects)/p/s.jsonl"`],
+    ['mid-word process substitution', `cp s /h/.claude/x<(true)/../../../../${L}`],
+    ['glob', `cp s /h/.claude/proj*/p/s.jsonl`],
+    ['brace expansion', `tee /h/.claude/{x,projects}/p/s.jsonl`],
+    ['bash -c single-quoted', `bash -c 'cp s /h/.claude/x$((1))y/../${L}'`],
+    ['eval double-quoted', `eval "cp s /h/.claude/x\\$((1))y/../${L}"`],
+    ['glob builds .claude', `cp s /h/.cl*/${L}`],
+    ['substitution builds .claude', `cp s /h/.cla$(echo ude)/${L}`],
+    ['parameter builds .claude', `D=/h/.cl; cp s \${D}aude/${L}`],
+    ['parameter holds the .claude dir', `cp s $C/${L}`],
+    ['.. climbs out of a substitution', `cp s $(echo a/b)/../${L}`],
+    ['parameter assigned .claude/projects in the command', `C=/h/.claude/projects; cp s $C/p/s.jsonl`],
+    // An escaped `$` is literal HERE, but the unescaped word may be an inner
+    // shell's text (`bash -c cp\ s\ …\$((1))…`, `eval`), so it is rescanned
+    // and refused: an accepted over-deny of a `.claude` path spelled with `$`.
+    ['escaped dollar (rescanned as possible inner-shell text)', 'cp s /h/.claude/x\\$y'],
+  ])('refused: %s', (_label, text) => {
+    expect(claudeWordExpands(text)).toBe(true);
+    expect(claudeTranscriptNamed(text)).toBe(true);
+  });
+
+  it.each<[string, string]>([
+    ['literal transcript (the path regex judges it)', `cp s /h/.claude/${L}`],
+    ['expansion only before .claude', 'cp s $HOME/.claude/settings.json'],
+    ['an ordinary computed .jsonl, no .claude named', 'X=/tmp; cp s $X/out.jsonl'],
+    ['an ordinary computed projects dir, not a transcript leaf', 'ls $HOME/projects'],
+    ['no .claude at all', 'cp s /tmp/x$((1))y'],
+  ])('not refused: %s', (_label, text) => {
+    expect(claudeWordExpands(text)).toBe(false);
   });
 });

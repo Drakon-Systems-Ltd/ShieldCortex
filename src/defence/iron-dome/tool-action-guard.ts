@@ -44,6 +44,7 @@ import { bodyIsAllDataRead } from './heredoc-data-read.js';
 // pre-tool hook's dist-outage fallback (scripts/pre-tool-hook.mjs imports the
 // same file), so both planes split and collapse a command word identically.
 import {
+  claudeWordExpands,
   lexicalPathNormalise as sharedLexicalPathNormalise,
   shellTokens,
   shellWords,
@@ -833,7 +834,13 @@ function normalisedClaudeWords(text: string): string[] {
  */
 export function claudeTranscriptNamed(text: string): boolean {
   if (CLAUDE_TRANSCRIPT_PATH_RE.test(text)) return true;
-  return normalisedClaudeWords(text).some(w => CLAUDE_TRANSCRIPT_PATH_RE.test(w));
+  if (normalisedClaudeWords(text).some(w => CLAUDE_TRANSCRIPT_PATH_RE.test(w))) return true;
+  // r10: a `.claude` word the shell expands after the anchor
+  // (`.claude/x$((1))y/../projects/…`, `` `…` ``, `${…}`, `$v`, globs,
+  // `{a,b}`, mid-word `<(…)`) may be the transcript once expanded; the typed
+  // text cannot say it is not. Closed-set refusal, shared with the outage
+  // path (scripts/lib/shell-words.mjs `claudeWordExpands`); nothing is run.
+  return claudeWordExpands(String(text || ''));
 }
 
 /**
@@ -7871,8 +7878,15 @@ function evaluateToolCallCore(
   // r6: each path key is normalised whole, as one path; only command text is
   // split into words.
   const transcriptPathKey = extractAllPaths(args).some(claudeTranscriptPathNamed);
+  // r10: the floor judges the command AS TYPED, never `commandScanText`'s
+  // comment-stripped copy: that strip is quote-blind, so `echo "a #" > <t>`
+  // and `cp "/tmp/f #" <t>` lost the target before this line. A real unquoted
+  // comment that names a transcript is floored too (an accepted over-deny).
+  // A pure print still runs nothing and stays unjudged, as before.
+  const transcriptCommands = isPurePrint(command) ? [] : [...new Set([command, rawCommand])];
+  const transcriptSurface = [...transcriptCommands, path, url, fold.content].filter(Boolean).join('\n');
   if (!dangerSignals.includes('touch-claude-transcript')
-      && (transcriptPathKey || claudeTranscriptNamed(scanSurface))) {
+      && (transcriptPathKey || claudeTranscriptNamed(scanSurface) || claudeTranscriptNamed(transcriptSurface))) {
     dangerSignals.push('touch-claude-transcript');
     dangerSpan = dangerSpan ?? 'claude transcript';
   }
@@ -7880,9 +7894,12 @@ function evaluateToolCallCore(
   // Same three conditions, and r6: only when the transcript is named by the
   // command, never by a path key. A Write/Edit/MultiEdit/NotebookEdit whose
   // target is the transcript stays floored even beside `command: 'ls'`.
+  // r10: the carve-out reads the same typed command the floor judged, so a
+  // comment or an expansion the strip hid cannot make a write look like a read.
   if (dangerSignals.includes('touch-claude-transcript')
       && !transcriptPathKey
       && claudeTranscriptAccessIsReadOnly(scanSurface)
+      && (transcriptSurface === '' || claudeTranscriptAccessIsReadOnly(transcriptSurface))
       && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
       && !selfDisableInvoked()) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'touch-claude-transcript');

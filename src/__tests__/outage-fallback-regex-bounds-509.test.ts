@@ -26,7 +26,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { performance } from 'node:perf_hooks';
 import { spawnSync } from 'node:child_process';
-import { lexicalPathNormalise, shellWords } from '../../scripts/lib/shell-words.mjs';
+import { claudeWordExpands, lexicalPathNormalise, shellWords } from '../../scripts/lib/shell-words.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const hookSrc = fs.readFileSync(path.join(repoRoot, 'scripts', 'pre-tool-hook.mjs'), 'utf-8');
@@ -48,8 +48,10 @@ const RM = 'r' + 'm';
 /** r8: since r7 the outage section calls the shared tokenizer the hook imports
  *  (`import { lexicalPathNormalise as fallbackLexicalPathNormalise, shellWords as
  *  fallbackShellWords } from './lib/shell-words.mjs'`). The evaluated slice has no
- *  imports, so the REAL exports are handed in under the hook's own alias names. */
-const HOOK_SECTION_IMPORTS = ['fallbackShellWords', 'fallbackLexicalPathNormalise'] as const;
+ *  imports, so the REAL exports are handed in under the hook's own alias names.
+ *  r10: plus `claudeWordExpands as fallbackClaudeWordExpands`, the shared
+ *  expansion refusal. */
+const HOOK_SECTION_IMPORTS = ['fallbackShellWords', 'fallbackLexicalPathNormalise', 'fallbackClaudeWordExpands'] as const;
 
 type Match = (args: Record<string, unknown>, toolName?: string) => string | null;
 
@@ -61,7 +63,7 @@ function hookEntry(): { match: Match; cap: number } {
   const end = hookSrc.indexOf('// ==================== AUDIT (local JSONL)');
   expect(start).toBeGreaterThan(0);
   expect(end).toBeGreaterThan(start);
-  const api = new Function(...HOOK_SECTION_IMPORTS, `${hookSrc.slice(start, end)}\nreturn { match: fallbackSelfProtectionMatch, cap: FALLBACK_SCAN_CAP };`)(shellWords, lexicalPathNormalise);
+  const api = new Function(...HOOK_SECTION_IMPORTS, `${hookSrc.slice(start, end)}\nreturn { match: fallbackSelfProtectionMatch, cap: FALLBACK_SCAN_CAP };`)(shellWords, lexicalPathNormalise, claudeWordExpands);
   return api as { match: Match; cap: number };
 }
 
