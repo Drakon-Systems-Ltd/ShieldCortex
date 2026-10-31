@@ -729,8 +729,28 @@ describe('#923 r11 — same-inode effect oracle (joined spellings, r7 alias pair
     }
   }
 
+  // `cp -t DIR SRC` is GNU coreutils only; BSD cp (macOS) rejects `-t` as an
+  // illegal option, so that row has no effect to observe there. Probe the
+  // host cp once; where it lacks `-t` the row still asserts both planes
+  // floor the command, it just skips the effect step (r11b, macOS CI).
+  const cpHasTargetDir = (() => {
+    const d = mkdtempSync(join(tmpdir(), 'sc-923-cp-t-'));
+    try {
+      writeFileSync(join(d, 'a'), 'a');
+      mkdirSync(join(d, 'out'));
+      return spawnSync('cp', ['-t', join(d, 'out'), join(d, 'a')], { encoding: 'utf8', timeout: 10_000 }).status === 0;
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  })();
+
   itBash.each(joinedSpellings('H', 'SRC', 's.jsonl').map(([label]) => [label]))('%s writes the canonical inode and both planes floor it', (label) => {
     const command = joinedSpellings(H, SRC, 's.jsonl').find(([l]) => l === label)![1];
+    if (/^cp -t /.test(label) && !cpHasTargetDir) {
+      // Host cp has no -t (BSD/macOS): nothing to execute; the floor still holds.
+      bothPlanesFloor(command);
+      return;
+    }
     const ino = statSync(T).ino;
     const r = bash(command);
     expect({ status: r.status, stderr: r.stderr }).toEqual({ status: 0, stderr: '' });
@@ -759,8 +779,10 @@ describe('#923 r11 — same-inode effect oracle (joined spellings, r7 alias pair
     for (const spelling of [escaped, quoted]) {
       const rp = bash(`realpath -- ${spelling}`);
       expect({ spelling, status: rp.status, path: rp.stdout.trim() }).toEqual({ spelling, status: 0, path: canon });
-      const st = bash(`stat -c %i -- ${spelling}`);
-      expect({ spelling, ino: Number(st.stdout.trim()) }).toEqual({ spelling, ino });
+      // Same real inode, portably: `test A -ef B` compares device+inode on
+      // both GNU and BSD (GNU-only `stat -c %i` returns nothing on macOS).
+      const same = bash(`test ${spelling} -ef ${JSON.stringify(T)}`);
+      expect({ spelling, sameInode: same.status }).toEqual({ spelling, sameInode: 0 });
       writeFileSync(T, CANON);
       const command = `cp ${SRC} ${spelling}`;
       expect(bash(command).status).toBe(0);
