@@ -387,6 +387,51 @@ describe('#923 owner-present harness TTY is log-only on the no-prompt-surface br
       expectDenyNotLogged(result);
       expect(decisionOf(result.stdout).permissionDecisionReason).toMatch(/touch-claude-transcript/);
     });
+    // r4 Astra B1, reproduction 2, exactly: a privileged copy onto the /./ alias.
+    it('r4 Astra B1: sudo cp onto a /./ alias of the transcript is denied, not logged', async () => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      const result = await runInstalled(call(`sudo cp /tmp/forged.jsonl ${alias()}`, 'dontAsk'));
+      expectDenyNotLogged(result);
+      expect(decisionOf(result.stdout).permissionDecisionReason).toMatch(/touch-claude-transcript/);
+    });
+  });
+
+  // (5''') #923 r7 (r6 Astra B1, r6 Grok blocker): a backslash-escaped operand
+  // is one shell word. `sudo cp src <home>/.claude/x\ y/../projects/p/<s>.jsonl`
+  // was require_approval with privilege-escalation only, so a proven owner
+  // terminal logged it and let it run. The quoted spelling of the same file
+  // was denied. Both must now be denied, live and with dist missing.
+  describe('#923 r7: escaped and quoted transcript aliases are never log-only', () => {
+    const leaf = () => `projects/p/${SESSION}.jsonl`;
+    const SPELLINGS: Array<[string, () => string]> = [
+      ['escaped space', () => `${home}/.claude/x\\ y/../${leaf()}`],
+      ['quoted space', () => `"${home}/.claude/x y/../${leaf()}"`],
+      ['escaped paren', () => `${home}/.claude/x\\(y\\)/../${leaf()}`],
+      ['quoted paren', () => `"${home}/.claude/x(y)/../${leaf()}"`],
+      ['escaped comma', () => `${home}/.claude/x\\,y/../${leaf()}`],
+      ['escaped equals', () => `${home}/.claude/a\\=b/../${leaf()}`],
+    ];
+
+    itLinux('control: a privileged copy onto an ordinary escaped-space file is log-only', async () => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      expectLogOnly(await runInstalled(call(`${DANGEROUS}; sudo cp /tmp/forged.jsonl /tmp/x\\ y/../other.jsonl`, 'dontAsk')));
+    });
+    it.each(SPELLINGS)('sudo cp onto the %s alias is denied, not logged', async (_label, target) => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      const result = await runInstalled(call(`sudo cp /tmp/forged.jsonl ${target()}`, 'dontAsk'));
+      expectDenyNotLogged(result);
+      expect(decisionOf(result.stdout).permissionDecisionReason).toMatch(/touch-claude-transcript/);
+    });
+    it.each(SPELLINGS)('a dangerous call plus cp onto the %s alias is denied, not logged', async (_label, target) => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      expectDenyNotLogged(await runInstalled(call(`${DANGEROUS}; cp /tmp/forged.jsonl ${target()}`, 'dontAsk')));
+    });
+    it.each(SPELLINGS)('with dist missing, sudo cp onto the %s alias is denied, not logged', async (_label, target) => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      const result = await runHook(call(`sudo cp /tmp/forged.jsonl ${target()}`, 'dontAsk'),
+        { ...env, SHIELDCORTEX_DIST_ROOT: path.join(home, 'no-dist') }, { hookPath: install() });
+      expectDenyNotLogged(result);
+    });
   });
 
   // (5') unscanned: a tool input the schema rejects is never widened
@@ -413,7 +458,7 @@ describe('#923 owner-present harness TTY is log-only on the no-prompt-surface br
   });
 
   // (7) prompting modes unchanged
-  it.each([['default'], ['acceptEdits'], ['plan']])('prompting mode %s still asks with an owner-present TTY', async (mode) => {
+  it.each([['default'], ['manual'], ['acceptEdits'], ['plan'], ['auto']])('prompting mode %s still asks with an owner-present TTY', async (mode) => {
     writeTree(procRoot, ownerTree(HARNESS));
     const result = await runInstalled(call(DANGEROUS, mode));
     expect(decisionOf(result.stdout).permissionDecision).toBe('ask');
@@ -805,6 +850,99 @@ describe('#923 detector unit seams (injected in-memory readers)', () => {
       const read = memProc(rows);
       const bad = (pid: number, file: string) => (pid === 250 && file === 'stat' ? Buffer.from('250 (sshd) S 1 250 250 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 1e3 0 0\n') : read(pid, file));
       expect(proveWith(rows, bad)).toEqual({ proven: false, reason: 'ancestor unreadable' });
+    });
+  });
+
+  // #923 r7: pins for earlier reviewer rows that had no test of their own
+  // (r1 Grok blocker reproductions 1-4, r2 Astra A/B, r2 Grok bypass forms,
+  // r2 Astra multiplexer markers, r4 Grok same-uid `login`). Each must stay
+  // unproven; `tree()` itself is the positive control (proven above).
+  describe('r7: earlier reviewer rows pinned', () => {
+    const CONNECTED = tree();
+    /** The refusal each row must keep (observed and reviewed in r7, not just "unproven"). */
+    const R7_REASONS: Record<string, string> = {
+      'r1 Grok repro 2: orphan harness, python3 session leader off-chain': 'session leader is not a shell',
+      'r1 Grok repro 2: orphan harness, script(1) session leader off-chain': 'session leader is not a shell',
+      'r1 Grok repro 3: orphan harness, bash leader whose parent is claude': 'harness is not started by its session shell',
+      'r1 Grok repro 3: orphan harness, bash leader with hermes two hops up': 'harness is not started by its session shell',
+      'r2 Astra B: orphan harness whose leader parent is unreadable': 'harness is not started by its session shell',
+      'r1 Grok repro 1: python3 session leader under systemd --user': 'session leader is not a shell',
+      'r1 Grok: script(1) as the session leader on the chain': 'harness runs under a pty tool',
+      'r1 Grok: hermes on the chain above the login shell': 'harness is nested under an agent',
+      'r2 Grok: harness is its own session leader and its parent row is missing': 'ancestor unreadable',
+      'r2 Astra: zellij ancestor': 'harness runs under a terminal multiplexer',
+      'r2 Astra: TMUX_PANE in the harness environment': 'harness runs under a terminal multiplexer',
+      'r2 Astra: ZELLIJ in the harness environment': 'harness runs under a terminal multiplexer',
+      'r4 Grok: a same-uid (1000) comm login as the leader parent': 'terminal executable unreadable',
+    };
+    it.each<[string, Rows]>([
+      // r1 Grok repro 2 / r2 Astra B: orphan harness (ppid 1) whose sid names a leader outside the ppid chain.
+      ['r1 Grok repro 2: orphan harness, python3 session leader off-chain', {
+        200: { comm: 'systemd', ppid: 1, sid: 200, tty: 0, argv: ['/usr/lib/systemd/systemd', '--user'] },
+        400: { comm: 'python3', ppid: 200, sid: 400, tty: TTY, argv: ['python3', 'pty_drive.py'] },
+        500: { comm: 'claude', ppid: 1, sid: 400, tty: TTY, argv: ['claude'] },
+      }],
+      ['r1 Grok repro 2: orphan harness, script(1) session leader off-chain', {
+        200: { comm: 'systemd', ppid: 1, sid: 200, tty: 0, argv: ['/usr/lib/systemd/systemd', '--user'] },
+        400: { comm: 'script', ppid: 200, sid: 400, tty: TTY, argv: ['script', '-q', '/dev/null'] },
+        500: { comm: 'claude', ppid: 1, sid: 400, tty: TTY, argv: ['claude'] },
+      }],
+      // r1 Grok repro 3 / r2 Astra B: orphan harness, bash leader with an agent above it.
+      ['r1 Grok repro 3: orphan harness, bash leader whose parent is claude', {
+        380: { comm: 'claude', ppid: 1, sid: 380, tty: 0, argv: ['claude'] },
+        400: { comm: 'bash', ppid: 380, sid: 400, tty: TTY, argv: ['bash'] },
+        500: { comm: 'claude', ppid: 1, sid: 400, tty: TTY, argv: ['claude'] },
+      }],
+      ['r1 Grok repro 3: orphan harness, bash leader with hermes two hops up', {
+        370: { comm: 'hermes', ppid: 1, sid: 370, tty: 0, argv: ['hermes'] },
+        380: { comm: 'sh', ppid: 370, sid: 370, tty: 0, argv: ['/bin/sh', '-c', 'bash'] },
+        400: { comm: 'bash', ppid: 380, sid: 400, tty: TTY, argv: ['bash'] },
+        500: { comm: 'claude', ppid: 1, sid: 400, tty: TTY, argv: ['claude'] },
+      }],
+      ['r2 Astra B: orphan harness whose leader parent is unreadable', {
+        250: CONNECTED[250], 300: { ...CONNECTED[300], unreadable: ['stat'] }, 400: CONNECTED[400],
+        500: { ...CONNECTED[500], ppid: 1 },
+      }],
+      // r1 Grok repro 1, connected form: systemd --user → python3 (leader, owns the pty) → claude.
+      ['r1 Grok repro 1: python3 session leader under systemd --user', {
+        200: { comm: 'systemd', ppid: 1, sid: 200, tty: 0, argv: ['/usr/lib/systemd/systemd', '--user'] },
+        400: { comm: 'python3', ppid: 200, sid: 400, tty: TTY, tpgid: 500, argv: ['python3', 'pty_drive.py'] },
+        500: { comm: 'claude', ppid: 400, sid: 400, tty: TTY, argv: ['claude'] },
+      }],
+      ['r1 Grok: script(1) as the session leader on the chain', {
+        ...CONNECTED, 400: { ...CONNECTED[400], comm: 'script', argv: ['script', '-q', '/dev/null'] },
+      }],
+      ['r1 Grok: hermes on the chain above the login shell', {
+        ...CONNECTED, 350: { comm: 'hermes', ppid: 300, sid: 300, tty: 0, argv: ['hermes'] }, 400: { ...CONNECTED[400], ppid: 350 },
+      }],
+      ['r2 Grok: harness is its own session leader and its parent row is missing', {
+        250: CONNECTED[250], 300: CONNECTED[300], 500: { comm: 'claude', ppid: 350, sid: 500, tty: TTY, argv: ['claude'] },
+      }],
+      ['r2 Astra: zellij ancestor', { ...CONNECTED, 300: { comm: 'zellij', ppid: 1, sid: 300, tty: 0, argv: ['zellij'] } }],
+      ['r2 Astra: TMUX_PANE in the harness environment', { ...CONNECTED, 500: { ...CONNECTED[500], env: ['HOME=/h', 'TMUX_PANE=%1'] } }],
+      ['r2 Astra: ZELLIJ in the harness environment', { ...CONNECTED, 500: { ...CONNECTED[500], env: ['HOME=/h', 'ZELLIJ=0'] } }],
+      ['r4 Grok: a same-uid (1000) comm login as the leader parent', {
+        300: { comm: 'login', ppid: 1, sid: 300, tty: TTY, argv: ['/bin/login', '-p', '--'] }, 400: CONNECTED[400], 500: CONNECTED[500],
+      }],
+    ])('unproven: %s', (label, rows) => {
+      expect(prove(rows)).toEqual({ proven: false, reason: R7_REASONS[label] });
+    });
+
+    // r2 Astra A / r2 Grok: every bypass spelling, reached through the transient `sh -c` hook launcher.
+    it.each<[string, string[]]>([
+      ['--dangerously-skip-permissions=', ['claude', '--dangerously-skip-permissions=']],
+      ['--dangerously-skip-permissions=true', ['claude', '--dangerously-skip-permissions=true']],
+      ['--dangerously-skip-permissions then a separate true', ['claude', '--dangerously-skip-permissions', 'true']],
+      ['node cli.js --dangerously-skip-permissions', ['node', '/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js', '--dangerously-skip-permissions']],
+      ['node cli.js --permission-mode bypassPermissions', ['node', '/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js', '--permission-mode', 'bypassPermissions']],
+    ])('r2 bypass launch through the sh -c hop is unproven: %s', (_label, argv) => {
+      const rows: Rows = {
+        ...tree(),
+        500: { ...tree()[500], comm: argv[0] === 'node' ? 'node' : 'claude', argv },
+        550: { comm: 'sh', ppid: 500, sid: 400, tty: TTY, argv: ['/bin/sh', '-c', 'node hook.mjs'] },
+      };
+      expect(prove(rows, { parentPid: 550 })).toEqual({ proven: false, reason: 'harness was launched in bypass mode' });
+      expect(prove({ ...rows, 500: tree()[500] }, { parentPid: 550 })).toEqual({ proven: true, harnessPid: 500 });
     });
   });
 

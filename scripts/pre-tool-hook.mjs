@@ -66,6 +66,10 @@
 import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
 import { mkdirSecure } from './lib/state-perms.mjs';
 import { resolveHarnessPid } from './lib/harness-pid.mjs';
+// #923 r7: the guard's own shell-word tokenizer and path normaliser — one file
+// both planes import, so the outage scan splits and collapses a word exactly as
+// the live guard does.
+import { lexicalPathNormalise as fallbackLexicalPathNormalise, shellWords as fallbackShellWords } from './lib/shell-words.mjs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { homedir, tmpdir } from 'os';
 import { spawn } from 'child_process';
@@ -2780,48 +2784,21 @@ function fallbackPostureMatch(re, text) {
 }
 
 /**
- * #923 r5: the guard's `lexicalPathNormalise` / `claudeTranscriptNamed`,
- * duplicated for the outage path. `.claude/./projects`, `.claude//projects`
- * and `..` spellings name the same transcript the row names; symlinks and an
- * earlier `cd` are not resolved (the documented residual). The surface is
- * already every FALLBACK_SURFACE_KEYS value, so a decoy key hides nothing.
+ * #923 r5: the guard's `claudeTranscriptNamed` for the outage path.
+ * `.claude/./projects`, `.claude//projects` and `..` spellings name the same
+ * transcript the row names; symlinks and an earlier `cd` are not resolved (the
+ * documented residual). The surface is already every FALLBACK_SURFACE_KEYS
+ * value, so a decoy key hides nothing.
+ * r7: the words and the `..` collapse come from scripts/lib/shell-words.mjs,
+ * the SAME module the live guard imports (no duplicate to drift): quotes
+ * removed and backslash escapes honoured before collapsing, and a backslash is
+ * never turned into a separator.
  */
-function fallbackLexicalPathNormalise(p) {
-  const s = p.replace(/\\/g, '/');
-  const abs = s.startsWith('/');
-  const out = [];
-  for (const seg of s.split('/')) {
-    if (seg === '' || seg === '.') continue;
-    if (seg === '..') {
-      if (out.length > 0 && out[out.length - 1] !== '..') out.pop();
-      else if (!abs) out.push('..');
-      continue;
-    }
-    out.push(seg);
-  }
-  return (abs ? '/' : '') + out.join('/');
-}
-/** #923 r6: the guard's `shellWords` — split at unquoted shell separators only. */
-function fallbackShellWords(text) {
-  const out = [];
-  let cur = '';
-  let q = null;
-  let inWord = false;
-  for (const c of String(text || '')) {
-    if (q) { if (c === q) q = null; else cur += c; continue; }
-    if (c === '"' || c === "'") { q = c; inWord = true; continue; }
-    if (/[\s;&|<>()`]/.test(c)) { if (inWord) out.push(cur); cur = ''; inWord = false; continue; }
-    cur += c;
-    inWord = true;
-  }
-  if (inWord) out.push(cur);
-  return out;
-}
 function fallbackTranscriptRowMatch(re, text) {
   if (re.test(text)) return true;
-  return [...text.split(/[\s;&|<>'"`()=,]+/), ...fallbackShellWords(text)]
+  return fallbackShellWords(text)
     .filter((w) => /\.claude/i.test(w))
-    .some((w) => re.test(fallbackLexicalPathNormalise(w)));
+    .some((w) => re.test(w) || re.test(fallbackLexicalPathNormalise(w)));
 }
 
 /** Path-bearing surface keys: the guard's PATH_KEYS. */

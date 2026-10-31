@@ -198,7 +198,7 @@ describe('#613 a self-report failure never changes a decision', () => {
     fs.mkdirSync(path.join(dir, 'scripts', 'lib'), { recursive: true });
     fs.copyFileSync(HOOK_PATH, path.join(dir, 'scripts', 'pre-tool-hook.mjs'));
     // The hook's static lib imports — everything except the writer under test.
-    for (const dep of ['state-perms.mjs', 'harness-pid.mjs']) {
+    for (const dep of ['state-perms.mjs', 'harness-pid.mjs', 'shell-words.mjs']) {
       fs.copyFileSync(path.join(REPO, 'scripts', 'lib', dep), path.join(dir, 'scripts', 'lib', dep));
     }
     if (writer !== null) fs.writeFileSync(path.join(dir, 'scripts', 'lib', 'posture-self-report.mjs'), writer);

@@ -40,6 +40,14 @@ import {
 import type { ContractDriftObservation } from './tool-input-schema.js';
 import { forEachWindow } from '../scan-windows.js';
 import { bodyIsAllDataRead } from './heredoc-data-read.js';
+// #923 r7: the ONE shell-word tokenizer and path normaliser, shared with the
+// pre-tool hook's dist-outage fallback (scripts/pre-tool-hook.mjs imports the
+// same file), so both planes split and collapse a command word identically.
+import {
+  lexicalPathNormalise as sharedLexicalPathNormalise,
+  shellTokens,
+  shellWords,
+} from '../../../scripts/lib/shell-words.mjs';
 
 export type ToolGuardDecision = 'allow' | 'require_approval' | 'block';
 export type ToolGuardSeverity = 'benign' | 'sensitive' | 'dangerous' | 'catastrophic';
@@ -798,54 +806,24 @@ export const CLAUDE_TRANSCRIPT_PATH_RE = /\.claude[\\/]+projects[\\/]+(?:[^\s;&|
  * `.claude/x/../projects` all name the transcript the regex above names. A
  * symlink alias and a target reached after an earlier `cd` are NOT resolved
  * (no filesystem read here); those stay the documented residual.
+ * r7: the shared implementation (scripts/lib/shell-words.mjs). A backslash is
+ * a filename character, never a separator: `.claude/x\y/..` collapses `x\y`.
  */
 export function lexicalPathNormalise(p: string): string {
-  const s = p.replace(/\\/g, '/');
-  const abs = s.startsWith('/');
-  const out: string[] = [];
-  for (const seg of s.split('/')) {
-    if (seg === '' || seg === '.') continue;
-    if (seg === '..') {
-      if (out.length > 0 && out[out.length - 1] !== '..') out.pop();
-      else if (!abs) out.push('..');
-      continue;
-    }
-    out.push(seg);
-  }
-  return (abs ? '/' : '') + out.join('/');
+  return sharedLexicalPathNormalise(p);
 }
 
 /**
- * #923 r6: the words of shell text the way the shell splits them — at
- * unquoted whitespace and `;&|<>()` and backtick only, quotes removed and
- * their contents kept whole. A comma, `=` or quoted space is part of a path
- * (`.claude/x,y/../projects`), so splitting there lost the transcript.
- */
-function shellWords(text: string): string[] {
-  const out: string[] = [];
-  let cur = '';
-  let q: string | null = null;
-  let inWord = false;
-  for (const c of String(text || '')) {
-    if (q) { if (c === q) q = null; else cur += c; continue; }
-    if (c === '"' || c === "'") { q = c; inWord = true; continue; }
-    if (/[\s;&|<>()`]/.test(c)) { if (inWord) out.push(cur); cur = ''; inWord = false; continue; }
-    cur += c;
-    inWord = true;
-  }
-  if (inWord) out.push(cur);
-  return out;
-}
-
-/**
- * Every `.claude`-bearing word of `text`, lexically normalised (#923 r5).
- * r6: the shell's own words as well as the r5 split, so a path with a comma,
- * `=`, paren or quoted space in a component still names its transcript.
+ * Every `.claude`-bearing word of `text`, as written and lexically normalised.
+ * r7: the words are the shell's own (scripts/lib/shell-words.mjs): quotes
+ * removed, backslash escapes honoured, then `.`/`..` collapsed on each whole
+ * word. `.claude/x\ y/../projects/p/s.jsonl` is ONE word, `.claude/x y/../…`,
+ * exactly as `".claude/x y/../…"` is, so both spellings judge the same.
  */
 function normalisedClaudeWords(text: string): string[] {
-  return [...String(text || '').split(/[\s;&|<>'"`()=,]+/), ...shellWords(text)]
+  return shellWords(String(text || ''))
     .filter(w => /\.claude/i.test(w))
-    .map(lexicalPathNormalise);
+    .flatMap(w => [w, lexicalPathNormalise(w)]);
 }
 
 /**
@@ -4067,11 +4045,79 @@ export function guardConfigAccessIsReadOnly(text: string): boolean {
 
 /**
  * #923 r3: true when the whole command is pure shell inspection of a Claude
- * Code transcript (`tail`/`grep`/`jq` …). Exactly the config's closed-set bar:
+ * Code transcript (`tail`/`grep`/`jq` …). The config's closed-set bar:
  * reading the transcript changes nothing.
+ *
+ * r7: judged on the SAME shell words that found the transcript
+ * (`shellReadStatements`, built on scripts/lib/shell-words.mjs), not on the
+ * #879 splitter, which refuses any backslash and any quoted paren. So
+ * `cat .claude/x\ y/../projects/p/s.jsonl` and `cat ".claude/x y/../…"` — one
+ * file, one argv — get one verdict. The vetoes are otherwise the #879 ones:
+ * no mutation verb or redirect anywhere, no nested execution, no `$` or
+ * backtick at all (escaped or not), no carriage return, and every stage a bare
+ * read verb with plain arguments.
  */
 export function claudeTranscriptAccessIsReadOnly(text: string): boolean {
-  return closedSetReadAccess(text, claudeTranscriptNamed);
+  const cmd = String(text || '');
+  if (!claudeTranscriptNamed(cmd)) return false;
+  if (STORE_MUTATION_RE.test(cmd)) return false;
+  if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
+  if (/[$`\r]/.test(cmd)) return false;
+  const statements = shellReadStatements(cmd);
+  if (!statements || statements.length === 0) return false;
+  return statements.every(stagesAreClosedSetReads);
+}
+
+/** #923 r7: the only operators a closed-set read may contain. */
+const SHELL_READ_SEPARATORS = new Set([';', '\n', '&&', '||']);
+/**
+ * #923 r7: unquoted, unescaped characters a closed-set read word may not carry:
+ * expansion (`$`), brace expansion / grouping (`{`, `}`), history or pipeline
+ * negation (`!`), a comment (`#`) and a carriage return.
+ */
+const SHELL_READ_BARE_VETO_RE = /[${}!#\r]/;
+
+/**
+ * #923 r7: `cmd` as statements → pipeline stages → argv, from the shared
+ * shell tokens (quotes removed, escapes honoured). Null — never a read — on an
+ * open quote, any operator other than `;`, newline, `&&`, `||` and `|`
+ * (redirects, `&`, `|&`, subshells, backticks), an empty pipeline stage or
+ * statement side, or a word with unmodelled live syntax.
+ */
+function shellReadStatements(cmd: string): string[][][] | null {
+  const { tokens, complete } = shellTokens(cmd);
+  if (!complete) return null;
+  const statements: string[][][] = [];
+  let stages: string[][] = [];
+  let argv: string[] = [];
+  let pending: 'pipe' | 'list' | null = null;
+  for (const t of tokens) {
+    if (t.type === 'word') {
+      if (SHELL_READ_BARE_VETO_RE.test(t.bare)) return null;
+      argv.push(t.value);
+      pending = null;
+      continue;
+    }
+    if (t.value === '|') {
+      if (argv.length === 0) return null;
+      stages.push(argv);
+      argv = [];
+      pending = 'pipe';
+      continue;
+    }
+    if (!SHELL_READ_SEPARATORS.has(t.value)) return null;
+    if (pending) return null;
+    if (argv.length > 0) stages.push(argv);
+    argv = [];
+    if (stages.length > 0) statements.push(stages);
+    else if (t.value === '&&' || t.value === '||') return null;
+    stages = [];
+    pending = t.value === '&&' || t.value === '||' ? 'list' : null;
+  }
+  if (pending) return null;
+  if (argv.length > 0) stages.push(argv);
+  if (stages.length > 0) statements.push(stages);
+  return statements;
 }
 
 /** The #879 closed-set read test, for the path `pathRe` names. */
