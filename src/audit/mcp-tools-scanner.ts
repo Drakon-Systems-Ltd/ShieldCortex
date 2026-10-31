@@ -28,7 +28,7 @@ import { scopeHashStore } from './mcp-tool-hash-store.js';
 import { discoverMcpServers, type DiscoveredMcpServer } from './mcp-config-scanner.js';
 import type { AuditFinding, AuditSeverity } from './types.js';
 
-const LEARN_MORE = 'https://shieldcortex.ai/docs/threats/mcp-tool-poisoning';
+const LEARN_MORE = 'https://shieldcortex.ai/docs#audit';
 const SCANNER_NAME = 'mcp-tools';
 const CONNECT_TIMEOUT_MS = 10_000;
 

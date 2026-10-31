@@ -12,7 +12,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import type { AuditFinding, ScannerResult } from './types.js';
 
-const LEARN_MORE = 'https://shieldcortex.ai/docs/threats/mcp-security';
+const LEARN_MORE = 'https://shieldcortex.ai/docs#audit';
 
 // ── Known Vulnerable Servers ──
 

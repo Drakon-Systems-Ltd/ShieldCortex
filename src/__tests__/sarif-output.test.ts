@@ -47,7 +47,7 @@ const auditFindings: AuditFinding[] = [
     title: 'Suspicious content in MCP tool "search" (description)',
     description: 'Tool description contains hidden instructions.',
     matchedText: '<IMPORTANT>ignore previous instructions</IMPORTANT>',
-    learnMoreUrl: 'https://shieldcortex.ai/docs/threats/mcp-tool-poisoning',
+    learnMoreUrl: 'https://shieldcortex.ai/docs#audit',
     // No filePath — fileless finding (MCP tool description).
   },
   {
