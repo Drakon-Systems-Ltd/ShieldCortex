@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import {
   hintDirsInRoot,
   probeHermesDiscovery,
+  hermesAskPlan,
   resolveHermesInterpreter,
   scanHermesPluginCopies,
 } from '../hermes-plugins.js';
@@ -338,8 +339,23 @@ afterAll(() => {
   else process.env.HERMES_HOME = savedHermesHome;
 });
 
-/** The Hermes interpreter this box can offer, resolved once. */
-const interpreter = resolveHermesInterpreter(path.join(os.homedir(), '.hermes'));
+/**
+ * A BARE Hermes Python this box can offer, resolved once — never the launcher
+ * (#971). These cases point the probe at fixture homes, and asking through
+ * the launcher runs `hermes_bootstrap`, which provisions a full dependency set
+ * for every data root it has not seen: gigabytes per fixture, and a timeout.
+ * A stale venv still imports `hermes_cli` well enough for a parity check, so
+ * it counts here even though discovery would skip it.
+ */
+const interpreter = (() => {
+  const plan = hermesAskPlan(path.join(os.homedir(), '.hermes'));
+  const bare = [
+    ...plan.launchers.filter((c) => c.kind === 'python').map((c) => c.path),
+    ...plan.venvs.map((c) => c.path),
+    ...plan.stale.map((s) => s.path),
+  ];
+  return bare[0] ?? null;
+})();
 
 /**
  * Force the "no Hermes to ask" path. A box WITH a working Hermes would never
@@ -496,15 +512,21 @@ describePrimary(`primary path via Hermes itself (${interpreter ?? 'no interprete
 });
 
 describe('interpreter resolution (#569)', () => {
-  it('prefers the agent virtualenv inside the Hermes home', () => {
+  it('asks the agent virtualenv inside the Hermes home when there is no launcher', () => {
     const fake = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-hermes-interp-'));
+    const savedPath = process.env.PATH;
     try {
+      // No `hermes` on PATH and no `hermes-agent/.hermes/bin/hermes`: the
+      // legacy layout, where the venv is the only thing to ask (#971).
+      process.env.PATH = path.join(fake, 'no-bin');
       const bin = path.join(fake, 'hermes-agent', '.venv', 'bin');
       fs.mkdirSync(bin, { recursive: true });
       const python = path.join(bin, 'python3');
       fs.writeFileSync(python, '#!/bin/sh\n');
       expect(resolveHermesInterpreter(fake)).toBe(python);
     } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
       fs.rmSync(fake, { recursive: true, force: true });
     }
   });

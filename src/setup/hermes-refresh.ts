@@ -71,6 +71,7 @@ import {
   HERMES_PLUGIN_NAME,
   protectedDirs,
   scanHermesPluginCopies,
+  soleConventionalHermesCopy,
   undeterminedSummary,
   type HermesPluginScan,
   type HermesScanOptions,
@@ -363,11 +364,20 @@ export function refreshHermesPluginCopies(
     if (!hermesPluginPresentAt(standardHermesTarget(scan.hermesHome))) {
       return { status: 'not-installed', summary: 'Hermes plugin not installed', detail: [], refreshed: [] };
     }
+    // #971: one narrow exception. When the ONLY thing under this home that
+    // could be our plugin is the conventional install, there is no "which
+    // copy" question left to get wrong, and leaving it on the previous release
+    // is the failure. Anything more — a second copy, a profile home, an
+    // unreadable listing, a link on the write path — keeps the #569 refusal.
+    const sole = soleConventionalHermesCopy(scan.hermesHome);
+    if ('dir' in sole) {
+      return refreshSoleCopy(scan, sole.dir, { sourceDir, now });
+    }
     const undetermined = warn(
       `could not determine which copy Hermes loads — nothing written (${FIX_POINTER})`,
       [scan.undeterminedReason ?? 'reason unrecorded'],
     );
-    return scan.undeterminedReason === NO_HERMES_INTERPRETER
+    return (scan.undeterminedReason ?? '').startsWith(NO_HERMES_INTERPRETER)
       ? { ...undetermined, reason: 'no-interpreter' }
       : undetermined;
   }
@@ -474,6 +484,65 @@ export function refreshHermesPluginCopies(
   }
 
   return publishJobs({ jobs, scan, sourceDir, stamp, now });
+}
+
+/**
+ * The #971 fallback: Hermes could not be asked, and the conventional install
+ * is the only possible copy under this home. Same preflight as the ordinary
+ * path — every component of the write path, and the copy's own tree, checked
+ * for links before the first write — and the same publish: staged beside the
+ * plugins root, swapped in under the home's lock, the previous copy MOVED to
+ * `<home>/backups/`. Nothing is enabled; nothing is created.
+ */
+function refreshSoleCopy(
+  scan: HermesPluginScan,
+  dir: string,
+  opts: { sourceDir: string; now: Date },
+): HermesRefreshResult {
+  const why = scan.undeterminedReason ?? 'reason unrecorded';
+  const verdict = hermesPluginCopyStale(dir, opts.sourceDir);
+  if (!verdict.comparable) {
+    return warn('packaged Hermes plugin source not found — nothing to compare against');
+  }
+  if (!verdict.stale) {
+    return { status: 'current', summary: 'current (1 copy)', detail: [], refreshed: [] };
+  }
+  const root = path.dirname(dir);
+  const owner = path.dirname(root);
+  const refusal = writePathRefusal(scan, [backupsUnder(owner), root, dir, owner]);
+  if (refusal !== null) return warn(refusal, [why]);
+  const { link, exhausted, unreadable } = findLinkInTree(dir, { left: SYMLINK_PREFLIGHT_ENTRY_BUDGET });
+  if (unreadable !== null) {
+    return warn(`${unreadable.path} could not be read (${unreadable.error}) — nothing written (${FIX_POINTER})`, [why]);
+  }
+  if (link !== null) {
+    return warn(`${link} is a symlink — nothing written (${FIX_POINTER})`, [why]);
+  }
+  if (exhausted) {
+    return warn(
+      `${dir} could not be checked for symlinks (more than ${SYMLINK_PREFLIGHT_ENTRY_BUDGET} entries) — nothing written`,
+      [why],
+    );
+  }
+  const stamp = opts.now.toISOString().replace(/[:.]/g, '-');
+  const result = publishJobs({
+    jobs: [{ dir, root, owner }],
+    scan,
+    sourceDir: opts.sourceDir,
+    stamp,
+    now: opts.now,
+  });
+  const didRefresh = result.refreshed.some((r) => path.resolve(r.dir) === path.resolve(dir));
+  const selection = didRefresh
+    ? `${dir} is the only copy under ${scan.hermesHome}, so it was the one refreshed`
+    : `${dir} is the only copy under ${scan.hermesHome}, so it was the one selected`;
+  return {
+    ...result,
+    detail: [
+      ...result.detail,
+      `Hermes' own discovery could not be asked (${why}); ${selection}`,
+    ],
+  };
 }
 
 /**
