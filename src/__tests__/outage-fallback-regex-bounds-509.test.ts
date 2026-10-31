@@ -189,7 +189,11 @@ describe('#509 r8 — the capped entry point stays inside its budget on patholog
         const { ms, result } = best(() => match({ command: text }, 'Bash'));
         return { surface, shape, ms, signal: result };
       });
-      expect(report.map((r) => ({ ...r, under: r.ms < BUDGET_MS }))).toEqual(report.map((r) => ({ ...r, signal: null, under: true })));
+      // #923 r12: a scan that runs out of budget refuses unconditionally, so
+      // a pathological shape may come back as the transcript floor (a
+      // documented false freeze), never as any other match.
+      const ok = (s: unknown) => (s === 'touch-claude-transcript' ? null : s);
+      expect(report.map((r) => ({ ...r, signal: ok(r.signal), under: r.ms < BUDGET_MS }))).toEqual(report.map((r) => ({ ...r, signal: null, under: true })));
     }
   });
 });
