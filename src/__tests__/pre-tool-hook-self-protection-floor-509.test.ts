@@ -172,12 +172,15 @@ describe('#509 R4-1 — the guard self-protection floor through the real hook', 
     ];
   }
 
-  /** Every write must be HELD: `ask` where a prompt can be raised, `deny`
-   *  where it cannot. Never a silent pass, never a would-hold row. */
+  /** Every write must be STOPPED in every posture. #853 ruling §1
+   *  (issuecomment-6313152247): guard self-protection is ALWAYS-BLOCK —
+   *  "deny now", so not even a live prompt (`ask`) may release it; `deny`
+   *  whether or not a prompt surface exists. Never a silent pass, never a
+   *  would-hold row. */
   function expectAllHeld(label: string): void {
     for (const [tool, input] of guardStateWrites()) {
       const asked = runHook(tool, input, 'default');
-      expect({ label, tool, input, decision: asked.decision }).toEqual({ label, tool, input, decision: 'ask' });
+      expect({ label, tool, input, decision: asked.decision }).toEqual({ label, tool, input, decision: 'deny' });
       const denied = runHook(tool, input, 'bypassPermissions');
       expect({ label, tool, input, decision: denied.decision }).toEqual({ label, tool, input, decision: 'deny' });
     }
@@ -249,7 +252,7 @@ describe('#509 R4-1 — the guard self-protection floor through the real hook', 
       for (const [tool, input] of [appendInit, writeCache]) {
         expect({ mode, tool, d: runHook(tool, input, 'bypassPermissions').decision }).toEqual({ mode, tool, d: 'deny' });
         expect({ mode, tool, d: runHook(tool, input, 'dontAsk').decision }).toEqual({ mode, tool, d: 'deny' });
-        expect({ mode, tool, d: runHook(tool, input, 'default').decision }).toEqual({ mode, tool, d: 'ask' });
+        expect({ mode, tool, d: runHook(tool, input, 'default').decision }).toEqual({ mode, tool, d: 'deny' });
       }
       // The hook only decides; nothing it did wrote a forged entry.
       expect(stateSnapshot().includes('"forged"')).toBe(false);
@@ -270,13 +273,13 @@ describe('#509 R4-1 — the guard self-protection floor through the real hook', 
         seedReadyHistory();
         expect(runHook('Bash', BENIGN).stderr).toMatch(/now ENFORCING/);
       }
-      expect({ mode, d: runHook('Bash', write, 'default').decision }).toEqual({ mode, d: 'ask' });
+      expect({ mode, d: runHook('Bash', write, 'default').decision }).toEqual({ mode, d: 'deny' });
       expect({ mode, d: runHook('Bash', write, 'bypassPermissions').decision }).toEqual({ mode, d: 'deny' });
       expect(rows().some((r) => r.type === 'intercept' && r.outcome === 'approved')).toBe(false);
     }
     // Plain enforce too; and the allowlist still works for an ordinary op.
     writeConfig({ enabled: true, enforce: true, autoApprove: ['exec', 'touch-approval-store'] });
-    expect(runHook('Bash', write, 'default').decision).toBe('ask');
+    expect(runHook('Bash', write, 'default').decision).toBe('deny');
     writeConfig({ enabled: true, enforce: true, autoApprove: ['privilege-escalation'] });
     expect(runHook('Bash', DANGEROUS, 'default').decision).toBeUndefined();
   });
@@ -292,7 +295,7 @@ describe('#509 R4-1 — the guard self-protection floor through the real hook', 
       { command: 'mv ~/.shieldcortex/approvals /tmp/x' },
     ];
     for (const input of writes) {
-      expect({ input, d: runHook('Bash', input, 'default').decision }).toEqual({ input, d: 'ask' });
+      expect({ input, d: runHook('Bash', input, 'default').decision }).toEqual({ input, d: 'deny' });
       expect({ input, d: runHook('Bash', input, 'bypassPermissions').decision }).toEqual({ input, d: 'deny' });
     }
     // (Pure inspection after the cd is covered at the classifier:

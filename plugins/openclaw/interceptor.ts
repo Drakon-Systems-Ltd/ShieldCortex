@@ -1141,6 +1141,16 @@ function isSelfProtectionVerdict(signals: readonly string[] | undefined): boolea
   return Array.isArray(signals) && signals.some(s => SELF_PROTECTION_SIGNALS.includes(s));
 }
 
+/** #853 ruling §1 (issuecomment-6313152247) ALWAYS-BLOCK signals the
+ *  classifier rates dangerous — kept verbatim with the Claude Code hook's
+ *  RULING_ALWAYS_BLOCK_SIGNALS (pinned by enforcement-surface-parity). */
+export const RULING_ALWAYS_BLOCK_SIGNALS: readonly string[] = ['secret-egress', 'secret-egress-fold', 'modify-network-firewall'];
+
+function isAlwaysBlockVerdict(signals: readonly string[] | undefined): boolean {
+  return isSelfProtectionVerdict(signals)
+    || (Array.isArray(signals) && signals.some(s => RULING_ALWAYS_BLOCK_SIGNALS.includes(s)));
+}
+
 /** A self-protection signal the WS2 fallback scan matches over EVERY row, or null.
  *  Exported so the regression suite drives the capped entry point itself. */
 export function fallbackSelfProtectionMatch(args: Record<string, unknown> | undefined, toolName?: string): string | null {
@@ -2426,6 +2436,14 @@ export function createInterceptor(
     // broker pre-clear, and every failure-policy exit below (unattended,
     // approver error) DENIES it whatever `failurePolicy` says.
     const selfProtected = isSelfProtectionVerdict(v.signals);
+    // #853 ruling §1: ALWAYS-BLOCK — deny now, in every posture and mode. No
+    // allowlist, shadow, advisory, broker, card or approver releases it;
+    // "only a policy edit by the owner changes this". Parity with the hook.
+    if (isAlwaysBlockVerdict(v.signals)) {
+      emitAudit({ ...base, action: 'require_approval', outcome: 'auto_denied' }, call);
+      log.warn(`[shieldcortex] action-guard DENIED ${context.toolName}: always-block — no approval, grant or card can release it [${v.signals.join(', ')}]`);
+      throw new Error(`ShieldCortex: tool call blocked — always-block action (${v.signals.join(', ')}); only a policy edit by the owner changes this`);
+    }
     const autoApprove = actionGuardCfg.autoApprove ?? [];
     if (autoApprove.length > 0 && !unscannedBlock && !selfProtected) {
       const hay = [v.family, v.action, ...v.signals].map(s => String(s).toLowerCase());

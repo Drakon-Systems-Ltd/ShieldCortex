@@ -8247,6 +8247,71 @@ async function checkHookTimeouts(): Promise<CheckResult> {
   }
 }
 
+// ── Check: approval route (#853) ──────────────────────────
+/**
+ * #853 ruling (issuecomment-6313152247 §3): under enforce, a headless session
+ * whose approvals have NO card route treats approvable calls as ADVISORY —
+ * allowed and logged, not held — and doctor must say so in red. With a card
+ * route, a hook timeout too short to hold safely means those calls are
+ * denied instead of held; that is a warning.
+ */
+export async function checkApprovalRoute(): Promise<CheckResult> {
+  const label = 'Approval route';
+  try {
+    const configPath = path.join(getConfigDir(), 'config.json');
+    const onDisk = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
+    // The enforced view, as checkActionGuard reads it (#501 / #647).
+    const trusted = inspectConfigIntegrity().verdict === 'tampered' ? applyStrictFailClosedPosture(onDisk) : onDisk;
+    const raw = applyPolicyLock(trusted, readPolicyLock({ audit: false, warn: false }));
+    const top = isConfigBlock(raw?.actionGuard) ? (raw.actionGuard as Record<string, unknown>) : null;
+    const interceptor = isConfigBlock(raw?.interceptor) ? (raw.interceptor as Record<string, unknown>) : null;
+    const alias = isConfigBlock(interceptor?.actionGuard) ? (interceptor!.actionGuard as Record<string, unknown>) : null;
+    const merged = { ...(alias ?? {}), ...(top ?? {}) };
+    if (merged.enabled !== true) return { label, status: 'info', message: 'skipped (Action Guard off)' };
+    if (merged.enforce === false) {
+      return { label, status: 'info', message: 'advisory posture: approvable calls are allowed and logged, never held' };
+    }
+    const notify = isConfigBlock(merged.notify) ? (merged.notify as Record<string, unknown>) : null;
+    const routed = notify?.enabled === true && notify?.openclaw === true;
+    if (!routed) {
+      return {
+        label,
+        status: 'fail',
+        message: 'approvals have no route — under enforce, headless sessions run approvable calls as ADVISORY (allowed and logged, not held)',
+        fix: 'Configure an OpenClaw approval-card route: set actionGuard.notify.enabled and actionGuard.notify.openclaw to true, with a reachable `openclaw` gateway',
+      };
+    }
+    const held = await import('../defence/iron-dome/held-action.js');
+    // No live harness here: report what the settings files say. The hook
+    // itself additionally requires the harness argv (and holds nothing
+    // without it — e.g. on macOS), which doctor states in the pass message.
+    const timeout = held.readPreToolHookTimeout({ projectDir: process.env.CLAUDE_PROJECT_DIR, assumeNoArgvFlags: true });
+    const holdSeconds = held.normaliseHoldSeconds(merged.holdSeconds);
+    const window = held.holdWindowMs({ holdSeconds, hookTimeoutSeconds: timeout.seconds, elapsedMs: 0 });
+    if (window === 0) {
+      return {
+        label,
+        status: 'warn',
+        message: timeout.seconds === null
+          ? 'card route configured, but no Claude Code pre-tool hook timeout was found — headless approvable calls are denied, not held'
+          : `card route configured, but the pre-tool hook timeout (${timeout.seconds}s) is too short to hold — headless approvable calls are denied, not held`,
+        fix: `Re-run \`shieldcortex setup claude\` (pre-tool timeout ${held.requiredPreToolTimeoutSeconds(holdSeconds)}s)`,
+      };
+    }
+    if (process.platform !== 'linux') {
+      return {
+        label,
+        status: 'warn',
+        message: 'card route configured, but holds need the Claude Code command line from /proc (Linux) — on this platform headless approvable calls are denied, not held',
+      };
+    }
+    return { label, status: 'pass', message: `card route configured; headless approvable calls are held up to ${Math.round(window / 1000)}s` };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label, status: 'info', message: `check skipped — ${msg}` };
+  }
+}
+
 // ── Check: recall lane pin (#718 / #722) ─────────────────
 /**
  * Prompt recall scopes itself by lane (interactive / cron / automation /
@@ -9727,6 +9792,7 @@ export async function runDoctor(
     checkSemanticCoverage, // #458: how much of the store semantic recall can actually see
     checkHooks,
     checkHookTimeouts,
+    checkApprovalRoute,
     async () => checkRecallLanePin(),
     async () => checkRecallRepetition(), // #717: same top-k on every recent interactive recall
     checkAutoMemoryHooks,

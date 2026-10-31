@@ -26,13 +26,19 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { grantRetry } from '../defence/iron-dome/retry-control.js';
+import { grantRetry, hashToolCall as retryHash, recordDenialFingerprint } from '../defence/iron-dome/retry-control.js';
+import { approveRequest, hashToolCall as approvalHash, listApprovals, recordPending } from '../defence/iron-dome/action-approvals.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(repoRoot, 'scripts', 'pre-tool-hook.mjs');
 const REAL_DIST = join(repoRoot, 'dist', 'defence', 'iron-dome');
 
 const IRREVERSIBLE = { command: 'sudo modprobe softdog' };
+// #853 ruling §1: always-block — guard self-protection. No grant of any kind
+// may release it, and none is ever minted for it.
+const ALWAYS_BLOCK = { command: 'shieldcortex config --action-guard-disable' };
+// (An unscanned call is NOT on the ruling's always-block list: #436 keeps
+// its exact-input grant — pinned in pre-tool-hook-shell-control-436.)
 /** Assembled character by character, deliberately: this file is scanned by
  *  the very guard it exercises, and the literal reads as the real thing. */
 const CATASTROPHIC = { command: ['r', 'm', ' ', '-', 'r', 'f', ' ', '/'].join('') };
@@ -231,7 +237,7 @@ describe('#310 — retry control through the real Claude Code hook', () => {
   // Cards stay dark until retryCards is exactly true.
 
   it('cards stay off by default — denial is still terminal, but a fingerprint is left', () => {
-    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl() } });
+    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl(), openclaw: true } });
     const r = runHook(IRREVERSIBLE);
 
     expect(r.decision).toBe('deny');
@@ -251,7 +257,7 @@ describe('#310 — retry control through the real Claude Code hook', () => {
   });
 
   it('stays card-dark for a config that merely mentions retryCards without true', () => {
-    writeConfig({ retryCards: 'yes', notify: { enabled: true, webhookUrl: webhookUrl() } });
+    writeConfig({ retryCards: 'yes', notify: { enabled: true, webhookUrl: webhookUrl(), openclaw: true } });
     const r = runHook(IRREVERSIBLE);
 
     expect(r.decision).toBe('deny');
@@ -263,7 +269,7 @@ describe('#310 — retry control through the real Claude Code hook', () => {
   });
 
   it('#378 TTY --denial grant is consumable with cards off', () => {
-    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl() } });
+    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl(), openclaw: true } });
     expect(runHook(IRREVERSIBLE).decision).toBe('deny');
     const row = store()!.rows[0];
     expect(row.claim).toBeUndefined();
@@ -280,7 +286,9 @@ describe('#310 — retry control through the real Claude Code hook', () => {
   // ── Fingerprint, and only a fingerprint ────────────────────────────────
 
   it('a denial mints a FINGERPRINT and nothing spendable', () => {
-    writeConfig(retryConfig());
+    // #853: a configured card route (hold fails closed in this dist) so the
+    // dangerous call is denied; cards off so nothing is claimed.
+    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl(), openclaw: true } });
     const r = runHook(IRREVERSIBLE);
 
     expect(r.decision).toBe('deny');
@@ -296,7 +304,7 @@ describe('#310 — retry control through the real Claude Code hook', () => {
   });
 
   it('remints under one identity — same row, same epoch, alias index grows', () => {
-    writeConfig(retryConfig());
+    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl(), openclaw: true } });
     runHook(IRREVERSIBLE);
     runHook(IRREVERSIBLE);
     runHook(IRREVERSIBLE);
@@ -317,7 +325,7 @@ describe('#310 — retry control through the real Claude Code hook', () => {
   });
 
   it('scopes the fingerprint to the HARNESS cwd, never to anything in tool input', () => {
-    writeConfig(retryConfig());
+    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl(), openclaw: true } });
     runHook({ command: 'sudo modprobe softdog', cwd: '/etc' });
     const rows = store()!.rows;
     expect(rows[0].originScope.cwd).not.toBe('/etc');
@@ -494,5 +502,73 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     // And no spendable token in the alert or the forensics rows.
     expect(JSON.stringify(evidence())).not.toContain(hmac);
     expect(JSON.stringify(denialRows())).not.toContain(hmac);
+  });
+
+  // ── #853 ruling §1: always-block is never released by a grant ──────────
+
+  describe('always-block (#853 ruling §1): no grant of any kind releases it', () => {
+    it.each([
+      ['guard self-protection', ALWAYS_BLOCK],
+    ])('%s: no fingerprint, no card, no approve-hash is ever minted', (_label, input) => {
+      writeConfig(retryConfig({ openclaw: true }));
+      const r = runHook(input);
+      expect(r.decision).toBe('deny');
+      expect(store()?.rows ?? []).toHaveLength(0);
+      expect(r.reason ?? '').not.toMatch(/shieldcortex approve|Approve-once card/);
+      expect(r.reason).toMatch(/Always-block: no approval, retry grant or card can release this call/);
+      expect(r.stderr).not.toMatch(/Approve-once card|retry card raised/);
+      expect(r.stderr).toMatch(/always-block category/);
+      // Interactive: still only the live prompt — no pending record, no hash.
+      const asked = runHook(input, { permissionMode: 'default' });
+      expect(asked.decision === 'ask' || asked.decision === 'deny').toBe(true);
+      expect(asked.reason ?? '').not.toMatch(/shieldcortex approve/);
+      expect(listApprovals({ home })).toHaveLength(0);
+    });
+
+    it.each([
+      ['guard self-protection', ALWAYS_BLOCK],
+    ])('%s: a planted #310 retry grant (card or `approve --denial`) is NEVER spent', (_label, input) => {
+      writeConfig(retryConfig({ openclaw: true }));
+      const fp = recordDenialFingerprint({ hash: retryHash('Bash', input), tool: 'Bash', cwd: jobCwd, actionId: 'act-planted' }, { home });
+      expect(fp.ok).toBe(true);
+      const granted = grantRetry({ id: fp.id! }, { isInteractive: true }, { home });
+      expect(granted.ok).toBe(true);
+
+      for (const mode of ['bypassPermissions', 'default']) {
+        const r = runHook(input, { permissionMode: mode });
+        expect(r.decision).not.toBeUndefined();
+        expect(r.stderr).not.toContain('consumed operator RETRY grant');
+      }
+      expect(auditRows().some((row) => row.outcome === 'approved')).toBe(false);
+      // The grant is still there, unspent — it was never honoured.
+      const row = store()!.rows.find((x) => x.id === fp.id);
+      expect(row?.grant).toBeDefined();
+    });
+
+    it.each([
+      ['guard self-protection', ALWAYS_BLOCK],
+    ])('%s: a planted #118 one-shot `approve <hash>` is NEVER spent', (_label, input) => {
+      writeConfig(retryConfig({ openclaw: true }));
+      recordPending({ tool: 'Bash', input, summary: 'planted', signals: [] }, { home });
+      const approved = approveRequest(approvalHash('Bash', input), { home });
+      expect(approved.ok).toBe(true);
+
+      for (const mode of ['bypassPermissions', 'default']) {
+        const r = runHook(input, { permissionMode: mode });
+        expect(r.decision).not.toBeUndefined();
+        expect(r.stderr).not.toContain('consumed operator approval');
+      }
+      expect(auditRows().some((row) => row.outcome === 'approved')).toBe(false);
+      expect(listApprovals({ home }).some((a) => a.approvedAt)).toBe(true);
+    });
+
+    it('the same planted grants still release an APPROVABLE call (no over-blocking)', () => {
+      writeConfig(retryConfig({ openclaw: true }));
+      recordPending({ tool: 'Bash', input: IRREVERSIBLE, summary: 'planted', signals: [] }, { home });
+      expect(approveRequest(approvalHash('Bash', IRREVERSIBLE), { home }).ok).toBe(true);
+      const r = runHook(IRREVERSIBLE);
+      expect(r.decision).toBeUndefined();
+      expect(r.stderr).toContain('consumed operator approval');
+    });
   });
 });

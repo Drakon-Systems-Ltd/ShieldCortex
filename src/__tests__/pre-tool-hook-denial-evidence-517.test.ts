@@ -187,7 +187,11 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
     mkdirSync(join(home, '.shieldcortex'), { recursive: true });
     writeFileSync(
       join(home, '.shieldcortex', 'config.json'),
-      JSON.stringify({ actionGuard: { enabled: true, enforce: true } }),
+      // #853: an OpenClaw card route is CONFIGURED so a headless dangerous
+      // call is denied (with no route it is advisory). This substitute dist
+      // cannot assemble that route, so the hold fails closed to the denial
+      // record this suite reads.
+      JSON.stringify({ actionGuard: { enabled: true, enforce: true, notify: { enabled: true, openclaw: true } } }),
     );
     substituteDist = mkdtempSync(join(tmpdir(), 'sc-517-evidence-dist-'));
     mkdirSync(join(substituteDist, 'defence', 'iron-dome'), { recursive: true });
