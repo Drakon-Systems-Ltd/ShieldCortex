@@ -67,6 +67,20 @@ function decisionOf(stdout: string): { permissionDecision?: string; permissionDe
   return parsed.hookSpecificOutput;
 }
 
+/** #853 — a denial's reason names its OWN actionId, so two runs of the same
+ *  call differ in exactly that id. Everything else must be byte-identical. */
+function withoutActionId(d: ReturnType<typeof decisionOf>): ReturnType<typeof decisionOf> {
+  return typeof d.permissionDecisionReason === 'string'
+    ? { ...d, permissionDecisionReason: d.permissionDecisionReason.replace(/\bact-[0-9a-f]{16}\b/g, 'act-<id>') }
+    : d;
+}
+
+function expectOwnActionId(d: ReturnType<typeof decisionOf>): void {
+  const ids = d.permissionDecisionReason?.match(/\bact-[0-9a-f]{16}\b/g) ?? [];
+  expect(ids).toHaveLength(1);
+  expect(d.permissionDecisionReason).toContain(`shieldcortex approve --denial ${ids[0]}`);
+}
+
 describe('Action Guard hook — prompt-surface rule', () => {
   const originalHome = process.env.HOME;
   const originalConfigDir = process.env.SHIELDCORTEX_CONFIG_DIR;
@@ -440,13 +454,22 @@ describe('Action Guard hook — prompt-surface rule', () => {
         return decisionOf(result.stdout);
       }
 
+      function expectStableDecision(before: ReturnType<typeof decisionOf>, after: ReturnType<typeof decisionOf>): void {
+        expect(before.permissionDecision).toBe(expectedDecision);
+        expect(after.permissionDecision).toBe(expectedDecision);
+        if (expectedDecision === 'deny') {
+          expectOwnActionId(before);
+          expectOwnActionId(after);
+        }
+        expect(withoutActionId(after)).toEqual(withoutActionId(before));
+      }
+
       it('a receiver returning 500 changes nothing', async () => {
         const before = await baseline();
         mode = 'error';
         writeNotifyConfig();
         const after = decisionOf((await runHook(call(DANGEROUS_COMMAND, permissionMode))).stdout);
-        expect(after.permissionDecision).toBe(expectedDecision);
-        expect(after).toEqual(before);
+        expectStableDecision(before, after);
       });
 
       it('a receiver that never responds is cut off at the deadline and changes nothing', async () => {
@@ -455,7 +478,7 @@ describe('Action Guard hook — prompt-surface rule', () => {
         writeNotifyConfig();
         const started = Date.now();
         const after = decisionOf((await runHook(call(DANGEROUS_COMMAND, permissionMode))).stdout);
-        expect(after).toEqual(before);
+        expectStableDecision(before, after);
         // Bounded by notify.timeoutMs (600ms) plus process start-up — nowhere
         // near an unbounded wait on a dead receiver.
         expect(Date.now() - started).toBeLessThan(15_000);
@@ -469,7 +492,7 @@ describe('Action Guard hook — prompt-surface rule', () => {
           notify: { enabled: true, webhookUrl: 'http://127.0.0.1:1/hook', timeoutMs: 600 },
         });
         const after = decisionOf((await runHook(call(DANGEROUS_COMMAND, permissionMode))).stdout);
-        expect(after).toEqual(before);
+        expectStableDecision(before, after);
       });
     });
 
