@@ -515,7 +515,7 @@ describe('#310 — retry control through the real Claude Code hook', () => {
       expect(r.decision).toBe('deny');
       expect(store()?.rows ?? []).toHaveLength(0);
       expect(r.reason ?? '').not.toMatch(/shieldcortex approve|Approve-once card/);
-      expect(r.reason).toMatch(/Always-block: no approval, retry grant or card can release this call/);
+      expect(r.reason).toMatch(/ALWAYS-BLOCK — this action is never approvable from a prompt, approval, retry grant or card/);
       expect(r.stderr).not.toMatch(/Approve-once card|retry card raised/);
       expect(r.stderr).toMatch(/always-block category/);
       // Interactive: still only the live prompt — no pending record, no hash.

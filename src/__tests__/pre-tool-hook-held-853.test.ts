@@ -315,6 +315,29 @@ describe('#853 Plane A — the hook holds the original call under one card', () 
     expect(outcomes()).not.toContain('approved');
   }, 40_000);
 
+  it.each([
+    ['enforce', true],
+    ['advisory', false],
+  ])('ruling §3: headless always-block under %s is AUTO_DENIED, never logged as denied_no_prompt_surface', (_label, enforce) => {
+    writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({
+      actionGuard: { enabled: true, enforce, notify: { enabled: true, openclaw: true } },
+    }));
+    for (const mode of ['bypassPermissions', 'default']) {
+      const r = runHook({ command: 'shieldcortex config --action-guard-disable' }, mode);
+      expect(r.decision).toBe('deny');
+      expect(r.reason).toMatch(/^ShieldCortex Action Guard: ALWAYS-BLOCK/);
+      expect(r.reason).not.toMatch(/no prompt surface/);
+      if (!enforce) expect(r.reason).toMatch(/Watch only \(advisory\) still refuses this/);
+    }
+    // The prompt surface played no part: same outcome both ways, and the
+    // headless row still says which surface it lacked.
+    const rows = auditRows().filter((r) => r.type === 'intercept' && r.outcome === 'auto_denied');
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.noPromptSurfaceReason ?? null)).toEqual(['bypassPermissions mode shows no prompt', null]);
+    expect(outcomes()).not.toContain('denied_no_prompt_surface');
+    expect(cardParams().filter((c) => /is held, not run/.test(String(c.title)))).toHaveLength(0);
+  }, 60_000);
+
   it('an interactive session still gets ASK and is never held', () => {
     const r = runHook(DANGEROUS, 'default');
     expect(r.decision).toBe('ask');

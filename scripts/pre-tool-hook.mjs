@@ -3321,14 +3321,18 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
   const safeBroker = safeBrokerAudit(brokerAudit);
   const broker = safeBroker ? { broker: safeBroker } : {};
   const noPromptSurface = noPromptSurfaceReason(permissionMode);
-  if (!noPromptSurface && auditVerdict?.alwaysBlock === true) {
+  if (auditVerdict?.alwaysBlock === true) {
     // #853 ruling §1: always-block is "deny now, loud" — a live prompt is a
     // release path too, so it is never offered. Only a policy edit by the
-    // owner changes this.
+    // owner changes this. The same outcome with or without a prompt surface:
+    // the surface played no part in the refusal, so it is never logged as
+    // `denied_no_prompt_surface` (ruling §3: advisory must never produce one,
+    // and the acceptance count of those rows must mean "could have been held").
     const verdict = { ...auditVerdict, reason };
     const actionId = writeTerminalOutcomeAudit(toolName, verdict, toolInput, action, 'auto_denied', 'action_guard_denial', {
       ...baseExtra,
       ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}),
+      ...(noPromptSurface ? { noPromptSurfaceReason: noPromptSurface } : {}),
       alwaysBlock: true,
       ...broker,
     });
@@ -3338,7 +3342,12 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
     recordNotifyAudit(toolName, verdict, toolInput, { ...baseExtra, actionId }, notified);
     console.error(`[shieldcortex] action-guard DENIED ${safeToolName(toolName)} (${actionId}): always-block — no prompt, approval, grant or card can release it.`);
     const signals = safeSignalList(verdict.signals);
+    // #874: under Watch only the floor is the only thing that refuses; say so.
+    const posture = auditVerdict.advisoryFloor === true
+      ? 'Watch only (advisory) still refuses this, because it would change the guard\'s own state or config or switch it off. '
+      : '';
     emitDecision('deny', 'ShieldCortex Action Guard: ALWAYS-BLOCK — this action is never approvable from a prompt, approval, retry grant or card; '
+      + posture
       + 'only a policy edit by the owner changes this. Do not work around it or retry it; report it as not run.'
       + (signals.length > 0 ? ` [${signals.join(', ')}]` : ''));
     return { handled: true, decision: 'deny', state: 'always-block', actionId };
