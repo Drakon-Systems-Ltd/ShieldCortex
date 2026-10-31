@@ -532,12 +532,15 @@ function refreshSoleCopy(
     stamp,
     now: opts.now,
   });
+  const didRefresh = result.refreshed.some((r) => path.resolve(r.dir) === path.resolve(dir));
+  const selection = didRefresh
+    ? `${dir} is the only copy under ${scan.hermesHome}, so it was the one refreshed`
+    : `${dir} is the only copy under ${scan.hermesHome}, so it was the one selected`;
   return {
     ...result,
     detail: [
       ...result.detail,
-      `Hermes' own discovery could not be asked (${why}); ${dir} is the only copy under ` +
-        `${scan.hermesHome}, so it was the one refreshed`,
+      `Hermes' own discovery could not be asked (${why}); ${selection}`,
     ],
   };
 }

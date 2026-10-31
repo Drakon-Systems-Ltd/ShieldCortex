@@ -1880,18 +1880,18 @@ export function hintDirsInRoot(root: string): string[] {
  *
  * Answers only for the strictest layout there is: the conventional
  * `<home>/plugins/shieldcortex`, with its manifest, and NOTHING else under
- * this home that could be a copy — no `shieldcortex*` sibling, no other
- * directory whose manifest mentions us, in `plugins/` or any profile's
- * `plugins/`, one category level deep included. Every listing and every
- * manifest read must succeed: an unreadable one is not an empty one. A home
- * that is itself a profile is declined outright, because its sibling roots
- * are exactly what only Hermes can name; so is a host that may have project
- * plugins switched on.
+ * this home that might be a plugin copy — no `shieldcortex*` sibling, and no
+ * other directory that carries a Hermes plugin manifest, in `plugins/` or any
+ * profile's `plugins/`, one category level deep included. Absence of the
+ * `shieldcortex` bytes in a manifest is not proof it is not ours (escaped
+ * names, a name past the read cap). Every listing and every manifest read
+ * must succeed: an unreadable one is not an empty one. A home that is itself
+ * a profile is declined outright, because its sibling roots are exactly what
+ * only Hermes can name; so is a host that may have project plugins switched
+ * on.
  *
- * This is a substring test, not a parse, and it is deliberately one-sided:
- * anything that MIGHT be a second copy counts as one. It decides only whether
- * the single conventional install may be brought forward; it never produces
- * a winner, a shadow or a move.
+ * This decides only whether the single conventional install may be brought
+ * forward; it never produces a winner, a shadow or a move.
  */
 export function soleConventionalHermesCopy(hermesHome: string): { dir: string } | { declined: string } {
   if (process.env.HERMES_ENABLE_PROJECT_PLUGINS !== undefined) {
@@ -1929,9 +1929,11 @@ export function soleConventionalHermesCopy(hermesHome: string): { dir: string } 
         }
         continue;
       }
-      const text = readHead(manifest, HINT_BYTE_CAP);
-      if (text === null) return `${manifest} could not be read`;
-      if (text.includes(HERMES_PLUGIN_NAME)) copies.push(child);
+      // Any other manifest-bearing directory might be ours. A substring miss
+      // is not proof it is not (`name: "shieldcorte\u0078"`, or the name past
+      // the read cap). Count it and let the sole-copy check decline.
+      if (readHead(manifest, HINT_BYTE_CAP) === null) return `${manifest} could not be read`;
+      copies.push(child);
     }
     return null;
   };

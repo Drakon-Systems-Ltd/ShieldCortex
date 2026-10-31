@@ -440,6 +440,32 @@ describe('refreshHermesPluginCopies on a launcher install with a stale venv (#97
     expect(snapshot(hermes)).toEqual(before);
   });
 
+  it('discovery cannot be asked + escaped-name second copy: writes nothing', () => {
+    makeLauncher({ reply: cannotImport() });
+    installStaleCopy();
+    const extra = path.join(plugins, 'zz-old');
+    fs.mkdirSync(extra);
+    fs.writeFileSync(path.join(extra, 'plugin.yaml'), 'name: "shieldcorte\\u0078"\n');
+    const before = snapshot(hermes);
+    const result = refreshHermesPluginCopies(home, { now: FROZEN });
+    expect(result.status).toBe('warn');
+    expect(result.refreshed).toEqual([]);
+    expect(snapshot(hermes)).toEqual(before);
+  });
+
+  it('discovery cannot be asked + any other manifest-bearing plugin: writes nothing', () => {
+    makeLauncher({ reply: cannotImport() });
+    installStaleCopy();
+    const extra = path.join(plugins, 'ekho');
+    fs.mkdirSync(extra);
+    fs.writeFileSync(path.join(extra, 'plugin.yaml'), 'name: ekho\n');
+    const before = snapshot(hermes);
+    const result = refreshHermesPluginCopies(home, { now: FROZEN });
+    expect(result.status).toBe('warn');
+    expect(result.refreshed).toEqual([]);
+    expect(snapshot(hermes)).toEqual(before);
+  });
+
   it('discovery cannot be asked + a second copy in a profile: writes nothing', () => {
     makeLauncher({ reply: cannotImport() });
     installStaleCopy();
