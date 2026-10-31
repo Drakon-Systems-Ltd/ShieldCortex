@@ -26,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 // @ts-ignore no declaration is emitted for scripts outside the TS build
 import { proveOwnerPresentHarness, HARNESS_AGENT_ENV_MARKERS, TERMINAL_EXE_PATHS } from '../../scripts/lib/owner-tty.mjs';
 import { AGENT_ENV_MARKERS } from '../cli/approve-provenance.js';
+import { joinedControls, joinedSpellings } from './support/transcript-joins-923.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -478,6 +479,42 @@ describe('#923 owner-present harness TTY is log-only on the no-prompt-surface br
         setEnforce(enforce);
         writeTree(procRoot, ownerTree(HARNESS));
         const result = await runHook(call(command(), 'dontAsk'),
+          { ...env, SHIELDCORTEX_DIST_ROOT: path.join(home, 'no-dist') }, { hookPath: install() });
+        expectDenyNotLogged(result);
+        expect(decisionOf(result.stdout).permissionDecisionReason).toMatch(/touch-claude-transcript/);
+      });
+    }
+  });
+
+  // (5''''') #923 r11 (r10 Grok BLOCKER, r10 Astra B1): the anchors were
+  // split across an expansion (`.cla${unset:-ude/projects/…}`, `$A$B`, a
+  // composed glob), so no piece named the transcript and a dangerous call
+  // carrying the write was owner-present log-only. Both planes, enforce on and
+  // off, must deny with no owner-present audit row.
+  describe('#923 r11: joined transcript spellings are never log-only', () => {
+    const rows = () => joinedSpellings(home, '/tmp/forged.jsonl', `${SESSION}.jsonl`);
+    const LABELS = joinedSpellings('H', 'S', 'F').map(([label]) => [label] as [string]);
+    const commandOf = (label: string) => `${DANGEROUS}; ${rows().find(([l]) => l === label)![1]}`;
+    const setEnforce = (enforce: boolean) => fs.writeFileSync(path.join(home, '.shieldcortex', 'config.json'),
+      JSON.stringify({ actionGuard: { enabled: true, enforce } }));
+
+    itLinux('control: a dangerous call plus joined variables naming an ordinary file is log-only', async () => {
+      writeTree(procRoot, ownerTree(HARNESS));
+      const [, control] = joinedControls(home, '/tmp/forged.jsonl', `${SESSION}.jsonl`)[0];
+      expectLogOnly(await runInstalled(call(`${DANGEROUS}; ${control}`, 'dontAsk')));
+    });
+    for (const enforce of [true, false]) {
+      it.each(LABELS)(`enforce=${enforce}: %s is denied live, not logged`, async (label) => {
+        setEnforce(enforce);
+        writeTree(procRoot, ownerTree(HARNESS));
+        const result = await runInstalled(call(commandOf(label), 'dontAsk'));
+        expectDenyNotLogged(result);
+        expect(decisionOf(result.stdout).permissionDecisionReason).toMatch(/touch-claude-transcript/);
+      });
+      it.each(LABELS)(`enforce=${enforce}: with dist missing, %s is denied as the transcript floor, not logged`, async (label) => {
+        setEnforce(enforce);
+        writeTree(procRoot, ownerTree(HARNESS));
+        const result = await runHook(call(commandOf(label), 'dontAsk'),
           { ...env, SHIELDCORTEX_DIST_ROOT: path.join(home, 'no-dist') }, { hookPath: install() });
         expectDenyNotLogged(result);
         expect(decisionOf(result.stdout).permissionDecisionReason).toMatch(/touch-claude-transcript/);

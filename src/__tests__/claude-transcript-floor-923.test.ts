@@ -17,11 +17,12 @@
  */
 import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { evaluateToolCall, GUARD_SELF_PROTECTION_SIGNALS, isGuardSelfProtectionVerdict } from '../defence/iron-dome/tool-action-guard.js';
+import { joinedControls, joinedSpellings } from './support/transcript-joins-923.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(repoRoot, 'scripts', 'pre-tool-hook.mjs');
@@ -564,7 +565,8 @@ describe('#923 r10 — same-inode effect oracle', () => {
   let SRC: string;
   const CANON = '{"canonical":true}\n';
   beforeEach(() => {
-    root = mkdtempSync(join('/tmp', 'sc-923-r10-inode-'));
+    // r11 (r10 Astra): the scratch root honours TMPDIR, never a hardcoded /tmp.
+    root = mkdtempSync(join(tmpdir(), 'sc-923-r10-inode-'));
     H = join(root, 'home');
     T = join(H, '.claude', 'projects', 'p', 's.jsonl');
     SRC = join(root, 'forged.jsonl');
@@ -611,6 +613,160 @@ describe('#923 r10 — same-inode effect oracle', () => {
       const out = JSON.parse((h.stdout ?? '').trim() || '{}').hookSpecificOutput ?? {};
       expect({ enforce, decision: out.permissionDecision }).toEqual({ enforce, decision: 'deny' });
       expect(out.permissionDecisionReason).toMatch(/touch-claude-transcript/);
+    }
+  });
+});
+
+/**
+ * #923 r11 (r10 Grok BLOCKER, r10 Astra B1) — anchors split across an
+ * expansion. `cp src /h/.cla${unset:-ude/projects/p/s.jsonl}`,
+ * `.cla$(printf %s ude/…)`, `A=/h/.cla; B=ude/…; cp src $A$B` and the
+ * composed glob `.cl[a]ude/proj[e]cts/…` all wrote the transcript while every
+ * piece of the word, judged alone, named nothing. The shared refusal now
+ * JOINS the pieces (scripts/lib/shell-words.mjs
+ * `claudeJoinedWordMayBeTranscript`) on both planes; nothing is executed.
+ */
+const R11_WRITES = joinedSpellings('/home/owner', '/tmp/forged.jsonl', '0b7c-session.jsonl');
+const R11_NOT_FLOORED = joinedControls('/home/owner', '/tmp/forged.jsonl', '0b7c-session.jsonl');
+
+for (const enforce of [true, false]) {
+  describe(`#923 r11 — joined spellings reach the floor (live classifier, enforce=${enforce})`, () => {
+    const c = { enabled: true, enforce } as any;
+    it.each(R11_WRITES)('%s is floored', (_label, command) => {
+      for (const cmd of [command, `sudo ${command}`]) {
+        const v = evaluateToolCall('Bash', { command: cmd }, c);
+        expect({ cmd, signals: v.signals ?? [] }).toEqual({ cmd, signals: expect.arrayContaining(['touch-claude-transcript']) });
+        expect(isGuardSelfProtectionVerdict(v.signals)).toBe(true);
+        expect(v.decision).not.toBe('allow');
+      }
+    });
+    it.each(R11_NOT_FLOORED)('%s is not floored', (_label, command) => {
+      const v = evaluateToolCall('Bash', { command }, c);
+      expect(v.signals ?? []).not.toContain('touch-claude-transcript');
+    });
+  });
+}
+
+describe('#923 r11 — the hook outage fallback agrees on joined spellings (dist missing)', () => {
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'sc-923-r11-'));
+    mkdirSync(join(home, '.shieldcortex'), { recursive: true });
+  });
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  function run(command: string, enforce: boolean, mode: string): { decision?: string; reason?: string } {
+    writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce } }));
+    const r = spawnSync(process.execPath, [HOOK], {
+      input: JSON.stringify({ session_id: 's', cwd: '/tmp', hook_event_name: 'PreToolUse', permission_mode: mode, tool_name: 'Bash', tool_input: { command } }),
+      env: { ...process.env, HOME: home, SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex'), SHIELDCORTEX_DIST_ROOT: join(home, 'no-dist') },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    const out = (r.stdout ?? '').trim();
+    const h = out ? JSON.parse(out).hookSpecificOutput : undefined;
+    return { decision: h?.permissionDecision, reason: h?.permissionDecisionReason };
+  }
+
+  for (const enforce of [true, false]) {
+    it.each(R11_WRITES)(`enforce=${enforce} dontAsk: %s is denied as the transcript floor`, (_label, command) => {
+      const r = run(command, enforce, 'dontAsk');
+      expect(r.decision).toBe('deny');
+      expect(r.reason).toMatch(/touch-claude-transcript/);
+    });
+  }
+  it.each(R11_NOT_FLOORED)('%s passes with the guard unloaded', (_label, command) => {
+    expect(run(command, false, 'bypassPermissions').decision).toBeUndefined();
+  });
+});
+
+/**
+ * #923 r11 — real effect for the joined spellings, and (r10 Astra N1) a real
+ * same-inode check for the r7 escaped-vs-quoted alias pairs: the alias
+ * directories are created, bash resolves each spelling (`realpath`) to the
+ * canonical transcript, an unprivileged copy changes that inode's content,
+ * and both planes floor the identical text. Scratch HOME under tmpdir()
+ * (TMPDIR), never the real home.
+ */
+describe('#923 r11 — same-inode effect oracle (joined spellings, r7 alias pairs)', () => {
+  let root: string;
+  let H: string;
+  let T: string;
+  let SRC: string;
+  const CANON = '{"canonical":true}\n';
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'sc-923-r11-inode-'));
+    H = join(root, 'home');
+    T = join(H, '.claude', 'projects', 'p', 's.jsonl');
+    SRC = join(root, 'forged.jsonl');
+    mkdirSync(dirname(T), { recursive: true });
+    mkdirSync(join(H, '.claude', 'projects', 'x1y'), { recursive: true });
+    for (const d of ['x y', 'x(y)', 'x,y', 'a=b', 'a b/c d', 'x\ty']) mkdirSync(join(H, '.claude', d), { recursive: true });
+    writeFileSync(T, CANON);
+    writeFileSync(SRC, '{"forged":true}\n');
+    writeFileSync(join(root, 's.jsonl'), '{"forged":true}\n');
+    mkdirSync(join(H, '.shieldcortex'), { recursive: true });
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  const bash = (command: string) => spawnSync('bash', ['--noprofile', '--norc', '-c', command],
+    { cwd: root, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: H }, encoding: 'utf8', timeout: 10_000 });
+
+  function bothPlanesFloor(command: string): void {
+    for (const enforce of [true, false]) {
+      const v = evaluateToolCall('Bash', { command }, { enabled: true, enforce } as any);
+      expect({ enforce, signals: v.signals ?? [] }).toEqual({ enforce, signals: expect.arrayContaining(['touch-claude-transcript']) });
+      writeFileSync(join(H, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce } }));
+      const h = spawnSync(process.execPath, [HOOK], {
+        input: JSON.stringify({ session_id: 's', cwd: root, hook_event_name: 'PreToolUse', permission_mode: 'dontAsk', tool_name: 'Bash', tool_input: { command } }),
+        env: { ...process.env, HOME: H, SHIELDCORTEX_CONFIG_DIR: join(H, '.shieldcortex'), SHIELDCORTEX_DIST_ROOT: join(root, 'no-dist') },
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      const out = JSON.parse((h.stdout ?? '').trim() || '{}').hookSpecificOutput ?? {};
+      expect({ enforce, decision: out.permissionDecision }).toEqual({ enforce, decision: 'deny' });
+      expect(out.permissionDecisionReason).toMatch(/touch-claude-transcript/);
+    }
+  }
+
+  itBash.each(joinedSpellings('H', 'SRC', 's.jsonl').map(([label]) => [label]))('%s writes the canonical inode and both planes floor it', (label) => {
+    const command = joinedSpellings(H, SRC, 's.jsonl').find(([l]) => l === label)![1];
+    const ino = statSync(T).ino;
+    const r = bash(command);
+    expect({ status: r.status, stderr: r.stderr }).toEqual({ status: 0, stderr: '' });
+    expect(statSync(T).ino).toBe(ino);
+    expect(readFileSync(T, 'utf8')).toBe('{"forged":true}\n');
+    bothPlanesFloor(command);
+  });
+
+  // r10 Astra N1: the r7 pairs, as REAL directories, resolve to the same inode.
+  const pairs = (h: string): Array<[string, string, string]> => {
+    const c = `${h}/.claude`;
+    const leaf = 'projects/p/s.jsonl';
+    return [
+      ['space', String.raw`${c}/x\ y/../${leaf}`, `"${c}/x y/../${leaf}"`],
+      ['paren', String.raw`${c}/x\(y\)/../${leaf}`, `"${c}/x(y)/../${leaf}"`],
+      ['comma', String.raw`${c}/x\,y/../${leaf}`, `"${c}/x,y/../${leaf}"`],
+      ['equals', String.raw`${c}/a\=b/../${leaf}`, `"${c}/a=b/../${leaf}"`],
+      ['two escaped spaces', String.raw`${c}/a\ b/c\ d/../../${leaf}`, `'${c}/a b/c d/../../${leaf}'`],
+      ['escaped tab', `${c}/x\\\ty/../${leaf}`, `"${c}/x\ty/../${leaf}"`],
+    ];
+  };
+  itBash.each(pairs('H').map(([label]) => [label]))('r7 %s pair: escaped and quoted spellings are the same real inode, written, and floored', (label) => {
+    const [, escaped, quoted] = pairs(H).find(([l]) => l === label)!;
+    const canon = realpathSync(T);
+    const ino = statSync(T).ino;
+    for (const spelling of [escaped, quoted]) {
+      const rp = bash(`realpath -- ${spelling}`);
+      expect({ spelling, status: rp.status, path: rp.stdout.trim() }).toEqual({ spelling, status: 0, path: canon });
+      const st = bash(`stat -c %i -- ${spelling}`);
+      expect({ spelling, ino: Number(st.stdout.trim()) }).toEqual({ spelling, ino });
+      writeFileSync(T, CANON);
+      const command = `cp ${SRC} ${spelling}`;
+      expect(bash(command).status).toBe(0);
+      expect(statSync(T).ino).toBe(ino);
+      expect(readFileSync(T, 'utf8')).toBe('{"forged":true}\n');
+      bothPlanesFloor(command);
     }
   });
 });

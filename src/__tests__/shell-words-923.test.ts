@@ -17,8 +17,9 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { claudeWordExpands, EXPANSION_MARK, expansionWords, lexicalPathNormalise, shellTokens, shellWords } from '../../scripts/lib/shell-words.mjs';
-import { lexicalPathNormalise as guardNormalise, claudeTranscriptNamed } from '../defence/iron-dome/tool-action-guard.js';
+import { CLAUDE_TRANSCRIPT_NAMED_RE, claudeJoinedWordMayBeTranscript, claudeWordExpands, EXPANSION_MARK, expansionWords, lexicalPathNormalise, shellTokens, shellWords } from '../../scripts/lib/shell-words.mjs';
+import { CLAUDE_TRANSCRIPT_PATH_RE, lexicalPathNormalise as guardNormalise, claudeTranscriptNamed } from '../defence/iron-dome/tool-action-guard.js';
+import { joinedControls, joinedSpellings } from './support/transcript-joins-923.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const words = (s: string) => shellTokens(s).tokens.filter(t => t.type === 'word').map(t => t.value);
@@ -231,5 +232,62 @@ describe('#923 r10 — expansion-aware words and the shared refusal', () => {
     ['no .claude at all', 'cp s /tmp/x$((1))y'],
   ])('not refused: %s', (_label, text) => {
     expect(claudeWordExpands(text)).toBe(false);
+  });
+});
+
+/**
+ * #923 r11 (r10 Grok BLOCKER, r10 Astra B1) — JOIN the pieces. r10 judged the
+ * marked word and each expansion body as unrelated words; the shell joins
+ * them. `claudeJoinedWordMayBeTranscript` rebuilds the word from its literal
+ * parts plus every value the command spells for each expansion (assignment,
+ * `${v:-word}`, what an echo/printf body prints, the body text, empty) and
+ * brace alternatives, and judges every cross-product with the guard's own
+ * transcript regex (glob items by a segment matcher). A value or command
+ * expansion in a command holding both a `.claude`-ish and a `projects`/
+ * `.jsonl` fragment is refused outright. Nothing is executed.
+ */
+describe('#923 r11 — the joined candidate', () => {
+  const H = '/home/owner';
+
+  it('judges joins with the guard\'s own transcript regex (equal source)', () => {
+    expect(CLAUDE_TRANSCRIPT_NAMED_RE.source).toBe(CLAUDE_TRANSCRIPT_PATH_RE.source);
+    expect(CLAUDE_TRANSCRIPT_NAMED_RE.flags).toBe(CLAUDE_TRANSCRIPT_PATH_RE.flags);
+  });
+
+  it.each(joinedSpellings(H, '/tmp/forged.jsonl', 's.jsonl'))('refused: %s', (label, text) => {
+    // The NUL row expands nothing: the tokenizer's own cut makes it the
+    // literal transcript word, which the path regex names.
+    if (!/NUL/.test(label)) expect(claudeWordExpands(text)).toBe(true);
+    expect(claudeTranscriptNamed(text)).toBe(true);
+  });
+
+  // The precise join alone (no fragment backstop) names these: each piece is
+  // assembled from values the command itself spells.
+  it.each<[string, string]>([
+    ['${…:-word}', `cp s ${H}/.cla\${u:-ude/projects/p/s.jsonl}`],
+    ['$(printf %s …)', `cp s ${H}/.cla$(printf %s ude/projects/p/s.jsonl)`],
+    ['A=…; B=…; $A$B', `A=${H}/.cla; B=ude/projects/p/s.jsonl; cp s $A$B`],
+    ['A+= append', `A=${H}/.cl; A+=a; cp s \${A}ude/projects/p/s.jsonl`],
+    ['composed glob', `cp s ${H}/.cl[a]ude/proj[e]cts/p/s.jsonl`],
+    ['brace alternatives', `cp s ${H}/.cl{x,a}ude/projects/p/s.jsonl`],
+    ['printf octal escapes', "cp s $(printf '\\056\\143laude')/projects/p/s.jsonl"],
+    ['printf -v with a three-way split', `printf -v A %s%s%s ${H}/.cl au de/projects/p/s.jsonl; cp s "$A"`],
+  ])('joined: %s', (_label, text) => {
+    expect(claudeJoinedWordMayBeTranscript(text)).toBe(true);
+  });
+
+  it.each(joinedControls(H, '/tmp/forged.jsonl', 's.jsonl').filter(([l]) => !/\(a read\)/.test(l)))('not refused: %s', (_label, text) => {
+    expect(claudeWordExpands(text)).toBe(false);
+  });
+
+  it('a glob never matches a leading dot: .c*/… is refused, */projects/… is not', () => {
+    expect(claudeJoinedWordMayBeTranscript(`cp s ${H}/.c*/projects/p/s.jsonl`)).toBe(true);
+    expect(claudeJoinedWordMayBeTranscript(`cp s ${H}/*/projects/p/s.jsonl`)).toBe(false);
+    expect(claudeJoinedWordMayBeTranscript(`shopt -s dotglob; cp s ${H}/*/projects/p/s.jsonl`)).toBe(true);
+  });
+
+  it('bash cuts an ANSI-C string at a NUL, and so does the tokenizer', () => {
+    expect(words("$'.claude\\0junk'/projects")).toEqual(['.claude/projects']);
+    expect(words("$'a\\x00b'c")).toEqual(['ac']);
   });
 });
