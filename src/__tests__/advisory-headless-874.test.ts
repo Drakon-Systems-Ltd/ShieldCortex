@@ -163,11 +163,14 @@ describe('#874 advisory posture on a session with no prompt surface', () => {
       expect(d.permissionDecisionReason).not.toMatch(/Watch only/);
     });
 
-    it('a guard-config write keeps the enforce wording, now with its signal named', async () => {
+    it('a guard-config write is ALWAYS-BLOCK under enforce too, with its signal named', async () => {
       const result = await runHook(call('echo {} > ~/.shieldcortex/config.json', 'bypassPermissions'), env);
       const d = decisionOf(result.stdout);
       expect(d.permissionDecision).toBe('deny');
-      expect(d.permissionDecisionReason).toMatch(/required approval but this session has no prompt surface/);
+      // #853 ruling §1: the refusal does not depend on the prompt surface, so
+      // the copy does not blame one.
+      expect(d.permissionDecisionReason).toMatch(/^ShieldCortex Action Guard: ALWAYS-BLOCK/);
+      expect(d.permissionDecisionReason).not.toMatch(/no prompt surface|Watch only/);
       expect(d.permissionDecisionReason).toMatch(/touch-guard-config/);
     });
 

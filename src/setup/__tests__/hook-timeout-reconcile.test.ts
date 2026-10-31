@@ -137,4 +137,29 @@ describe('setupHooks reconciles existing hook timeouts to canonical', () => {
 
     expect(userPromptSubmitTimeout()).toBe(30);
   });
+
+  it('#853: PreToolUse is sized for a held call, and an old 10 s entry is bumped to it', async () => {
+    writeSettings({
+      hooks: {
+        PreToolUse: [{
+          matcher: '*',
+          hooks: [{ type: 'command', command: 'shieldcortex hook pre-tool', timeout: 10 }],
+        }],
+      },
+    });
+
+    jest.spyOn(os, 'homedir').mockReturnValue(tmpHome);
+    const { setupHooks, CANONICAL_HOOK_TIMEOUTS } = await import('../settings-hooks.js');
+    const { requiredPreToolTimeoutSeconds } = await import('../../defence/iron-dome/held-action.js');
+    expect(CANONICAL_HOOK_TIMEOUTS.PreToolUse).toBe(requiredPreToolTimeoutSeconds());
+    expect(CANONICAL_HOOK_TIMEOUTS.PreToolUse).toBe(135);
+    setupHooks();
+
+    const settings = readSettings() as {
+      hooks?: { PreToolUse?: Array<{ hooks?: Array<{ command?: string; timeout?: number }> }> };
+    };
+    const timeouts = (settings.hooks?.PreToolUse ?? []).flatMap((e) => e.hooks ?? [])
+      .filter((h) => String(h.command).includes('shieldcortex')).map((h) => h.timeout);
+    expect(timeouts).toEqual([135]);
+  });
 });

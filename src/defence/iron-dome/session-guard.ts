@@ -22,6 +22,12 @@ export const GUARD_DEGRADED_OUTCOMES = new Set([
   'auto_denied',
   'denied_no_prompt_surface',
   'failure_denied',
+  // #853: held calls that did not run, and a hold whose outcome is unknown.
+  'held_denied',
+  'held_expired',
+  'held_card_failed',
+  'held_duplicate',
+  'hold_cancelled',
   'failure_allowed',
   'warned',
   'denied',

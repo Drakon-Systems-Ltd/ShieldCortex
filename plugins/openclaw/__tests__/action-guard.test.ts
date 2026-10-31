@@ -86,7 +86,10 @@ describe('interceptor — Action Guard wiring', () => {
       { command: 'shieldcortex config --action-guard-disable' },
       { command: 'shieldcortex guard posture advisory' },
     ]) {
-      await expect(i.handleToolCall({ toolName: 'Bash', arguments: args, requireApproval: async () => false })).rejects.toThrow(/denied by user/);
+      // #853 ruling §1: ALWAYS-BLOCK — denied before any approver is asked.
+      let asked = 0;
+      await expect(i.handleToolCall({ toolName: 'Bash', arguments: args, requireApproval: async () => { asked += 1; return true; } })).rejects.toThrow(/always-block/);
+      expect({ args, asked }).toEqual({ args, asked: 0 });
     }
     // The posture still means something for an ordinary dangerous op.
     await expect(

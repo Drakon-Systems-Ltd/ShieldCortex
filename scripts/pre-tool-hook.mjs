@@ -410,6 +410,9 @@ function flattenActionGuardConfig(config) {
       // are always-on when the dist module is complete. `retryCards` must be
       // exactly true to raise a card; absent or junk means DNP stays terminal
       // with a fingerprint and no card (the soak-dark default).
+      // #853 Plane A hold window, RAW — clamped only by normaliseHoldSeconds
+      // in dist (held-action.ts). Anything junk is the default, never "off".
+      holdSeconds: raw.holdSeconds,
       retry: {
         retryCards: raw.retryCards,
         retryGrantTtlMs: raw.retryGrantTtlMs,
@@ -564,6 +567,28 @@ async function loadApprovals() {
     return typeof mod.consumeApproval === 'function' && typeof mod.recordPending === 'function'
       ? mod
       : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load the #853 held-action module. Null unless every piece is present: a
+ * dist without it keeps the no-prompt-surface DENY exactly as before, which
+ * is the safe direction (nothing held, nothing run).
+ */
+async function loadHeldAction() {
+  const distRoot = hookDistRoot();
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'held-action.js')).href
+    );
+    const required = [
+      'normaliseHoldSeconds', 'holdWindowMs', 'readPreToolHookTimeout', 'readProcessArgv',
+      'holdKey', 'claimHold', 'buildHeldCardParams', 'awaitHeldDecision', 'heldRefusalReason',
+      'abortWhenOrphaned',
+    ];
+    return required.every((fn) => typeof mod[fn] === 'function') ? mod : null;
   } catch {
     return null;
   }
@@ -1111,7 +1136,28 @@ function isSchemaInvalid(verdict) {
     || (Array.isArray(verdict?.signals) && verdict.signals.includes('invalid-tool-input'));
 }
 const MAX_SESSION_SALT_RECOVERY_ATTEMPTS = 256;
-const GUARD_DEGRADED_OUTCOMES = new Set(['auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed']);
+/** #853 ruling §1 (issuecomment-6313152247) ALWAYS-BLOCK items the
+ *  classifier rates dangerous, where the signal itself IS the always-block
+ *  shape: credential exfiltration, firewall rule changes. Released by
+ *  NOTHING — no allowlist, shadow, advisory, broker, grant, card or prompt. */
+const RULING_ALWAYS_BLOCK_SIGNALS = new Set([
+  'secret-egress', 'secret-egress-fold', 'modify-network-firewall',
+]);
+/** Signals that CONTAIN a ruling always-block case but cannot tell it from
+ *  its approvable or log-only neighbours (a protected branch, the gateway
+ *  process, authorized_keys, `rm -rf $HOME` vs `rm -rf build/`). Never held
+ *  and never no-route-advisory — those calls keep the pre-#853 headless
+ *  denial exactly — but not hard-blocked either, which would deny ordinary
+ *  work the ruling calls log-only. Reviewed against the live denial log. */
+const NOT_HOLDABLE_SIGNALS = new Set([
+  'git-force-push', 'stop-process-or-service', 'touch-sensitive-path', 'recursive-force-delete',
+  'destroy-data-or-infra', 'wipe-history-or-logs',
+]);
+const GUARD_DEGRADED_OUTCOMES = new Set([
+  'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',
+  // #853: held calls that did not run, and a hold whose outcome is unknown.
+  'held_denied', 'held_expired', 'held_card_failed', 'held_duplicate', 'hold_cancelled',
+]);
 const SAFE_BROKER_OUTCOMES = new Set(['harden', 'pre_clear', 'hold', 'unavailable', 'not_brokerable']);
 const SAFE_JUDGE_ASSESSMENTS = new Set(['approve', 'deny', 'hold', 'uncertain', 'in_context', 'out_of_context', 'benign', 'unavailable']);
 /** #143 residual — why a judge is 'unavailable'. Allowlisted, like every other
@@ -1682,6 +1728,10 @@ function safeGuardOutcomeReason(verdict, outcome, event) {
     }
     return 'Action Guard required approval but this session has no prompt surface; the tool call was denied.';
   }
+  if (outcome === 'held_denied') return 'Action Guard held the tool call under an owner approval card; the owner denied it and it did not run.';
+  if (outcome === 'held_expired') return 'Action Guard held the tool call under an owner approval card; the card expired unanswered and it did not run.';
+  if (outcome === 'held_card_failed') return 'Action Guard held the tool call, but the owner approval card could not be raised or answered; it did not run.';
+  if (outcome === 'held_duplicate') return 'Action Guard refused a duplicate of a call already held or recently refused on its approval card; no second card; it did not run.';
   if (String(verdict?.reason ?? '').toLowerCase().includes('guard unavailable')) {
     return 'Action Guard was unavailable and fallback policy denied the tool call; inspect local audit for details.';
   }
@@ -1691,7 +1741,11 @@ function safeGuardOutcomeReason(verdict, outcome, event) {
 function terminalDecisionReason(verdict, outcome, event) {
   const signals = safeSignalList(verdict?.signals);
   const suffix = signals.length > 0 ? ` [${signals.join(', ')}]` : '';
-  const nextStep = outcome === 'denied_no_prompt_surface'
+  const nextStep = outcome === 'denied_no_prompt_surface' && verdict?.alwaysBlock === true
+    // #853 ruling §1: never point at a grant that cannot release this call.
+    ? ' Always-block: no approval, retry grant or card can release this call; only a policy edit by the owner changes it. '
+      + 'Do not work around it or retry it; report it as not run.'
+    : outcome === 'denied_no_prompt_surface'
     ? (
       // UX: tell the AGENT what to do next — pinned lane or one-shot human approve.
       // Never steer toward enforce:false / broad autoApprove (#386).
@@ -3024,6 +3078,233 @@ function posture(fn, ...args) {
   }
 }
 
+/** #853 — the card's What / Why / Who, from the #648 summariser. A dist
+ *  without it (or a throw) gets a values-free fallback, never a raw input. */
+function heldCardSummary(notify, { toolName, toolInput, verdict, sessionKey, cwd }) {
+  const fallback = {
+    action: `Run ${safeToolName(toolName)}`,
+    reason: safeSignalList(verdict?.signals).join(', ') || 'needs approval',
+    who: 'a Claude Code session with no prompt surface',
+  };
+  if (typeof notify?.buildApprovalCard !== 'function') return fallback;
+  try {
+    const card = notify.buildApprovalCard({
+      tool: String(toolName ?? ''),
+      input: toolInput,
+      signals: Array.isArray(verdict?.signals) ? verdict.signals.map(String) : [],
+      plane: 'claude-code',
+      sessionId: notificationContext(sessionKey).sessionId,
+      cwd: typeof cwd === 'string' ? cwd : undefined,
+      agentPid: process.ppid,
+    });
+    if (!card || typeof card.action !== 'string' || typeof card.reason !== 'string' || typeof card.who !== 'string') {
+      return fallback;
+    }
+    return { action: card.action, reason: card.reason, who: card.who };
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * #853 — the denials.jsonl forensics row for a held call that did not run
+ * (#284: the row operators open first). `notify` is only what is KNOWN: an
+ * owner Deny proves the card reached them; a refused duplicate was folded
+ * into the card already open; a failed request is an error. An expiry or a
+ * cancel proves neither way, so it carries no notify claim at all.
+ */
+/** #853 review: a held call that did not run is NOT a
+ *  `denied_no_prompt_surface` — a card WAS the surface. Each end state has
+ *  its own outcome (all stops; see guard-log-schema DENIAL_OUTCOMES). */
+function heldOutcomeFor(state) {
+  if (state === 'denied') return 'held_denied';
+  if (state === 'expired') return 'held_expired';
+  if (state === 'open' || state === 'recently-denied' || state === 'recently-expired') return 'held_duplicate';
+  return 'held_card_failed';
+}
+
+function recordHeldDenial({ toolName, toolInput, verdict, sessionKey, actionId, state }) {
+  let notify;
+  if (state === 'denied') notify = { status: 'delivered', deliveredVia: 'openclaw-approval' };
+  else if (state === 'card_failed') notify = { status: 'error', deliveredVia: null };
+  else if (state === 'open' || state === 'recently-denied' || state === 'recently-expired') notify = { status: 'coalesced', deliveredVia: null };
+  try {
+    recordLocalGuardOutcome(buildLocalGuardOutcome({
+      toolName, toolInput, verdict, outcome: heldOutcomeFor(state), event: 'action_guard_denial', sessionKey, actionId,
+      ...(notify ? { notify } : {}),
+    }));
+  } catch {
+    /* the audit row stands; the forensics sink reports its own failure */
+  }
+}
+
+/** #853 reach evidence for a card the hook itself held open. */
+const HELD_REACH_ANSWER = Object.freeze({
+  approved: 'approve', denied: 'deny', expired: 'timeout', cancelled: 'unreached', card_failed: 'unreached',
+});
+
+/**
+ * #853 Plane A — HOLD the original call under one owner card instead of
+ * denying it for want of a prompt surface; Approve answers `allow` to THIS
+ * call, anything else answers `deny`. Nothing is granted for later and
+ * nothing is written that could allow a call (see held-action.ts).
+ *
+ * Returns:
+ *   null — no hold attempted (no card channel, no dist module, no call hash,
+ *          not the real dangerous tier). The caller's deny path is unchanged.
+ *   { handled: false, note } — a hold was wanted but is not possible (hook
+ *          timeout too short, store unwritable). The caller denies as before
+ *          and appends `note`.
+ *   { handled: true, ... } — a decision has been emitted here.
+ */
+async function tryHoldForOwner(holdCtx, ctx) {
+  const { toolName, toolInput, verdict, action, notify, auditExtra, noPromptSurface } = ctx;
+  if (!holdCtx || action !== 'require_approval') return null;
+  // Ruling §1: always-block (self-protection floor, unscanned) is never
+  // held and never advisory — a card could approve what may not be approved.
+  if (holdCtx.approvable !== true) return null;
+  // Ruling §3: enforce + headless + NO card route → treat as advisory,
+  // never a silent deny. Only the approvable category; always-block stays.
+  // "Configured" is the operator's config, not whether the transport loaded:
+  // a card route that is configured but cannot be assembled (missing dist,
+  // no binary) fails CLOSED to the honest denial, never to advisory.
+  if (holdCtx.cardRouteConfigured !== true) return { noRoute: true };
+  if (!notify?.openclawBin) return null;
+  const mod = await loadHeldAction();
+  if (!mod) return null;
+  let callHash = null;
+  try { callHash = typeof holdCtx.hashToolCall === 'function' ? holdCtx.hashToolCall(toolName, toolInput) : null; } catch { callHash = null; }
+  if (typeof callHash !== 'string' || callHash.length === 0) return null;
+
+  const actionId = auditExtra.actionId || mintActionId();
+  let windowMs = 0;
+  let budgetKind = 'no-budget';
+  try {
+    const timeout = mod.readPreToolHookTimeout({
+      projectDir: process.env.CLAUDE_PROJECT_DIR || holdCtx.cwd,
+      parentArgv: mod.readProcessArgv(holdCtx.harnessPid),
+    });
+    // #853 review: hold only on a PROVEN budget. An unreadable or unknown
+    // harness, or a settings source we could not read, is not a budget.
+    if (timeout.reason === 'harness-unproven' || timeout.reason === 'settings-unreadable') budgetKind = 'harness-unproven';
+    windowMs = mod.holdWindowMs({
+      holdSeconds: holdCtx.holdSeconds,
+      hookTimeoutSeconds: timeout.seconds,
+      elapsedMs: process.uptime() * 1000,
+    });
+  } catch {
+    windowMs = 0;
+  }
+  if (!(windowMs > 0)) {
+    return { handled: false, actionId, state: budgetKind, note: mod.heldRefusalReason(budgetKind, { actionId }) };
+  }
+  const claim = mod.claimHold(mod.holdKey(callHash, holdCtx.cwd), { actionId, windowMs });
+  if (!claim.ok && claim.reason === 'store-unavailable') {
+    return { handled: false, actionId, state: 'store-unavailable', note: mod.heldRefusalReason('store-unavailable', { actionId }) };
+  }
+
+  const signals = safeSignalList(verdict?.signals);
+  const suffix = signals.length > 0 ? ` [${signals.join(', ')}]` : '';
+  const severityPrefix = safeSeverity(verdict?.severity, 'action_guard_denial') === 'critical' ? 'Catastrophic-tier. ' : '';
+  const extra = { ...auditExtra, actionId };
+
+  if (!claim.ok) {
+    // One card per action identity: an open card, or the owner's recent
+    // refusal of this exact call, answers a second attempt with no new card.
+    writeTerminalOutcomeAudit(toolName, verdict, toolInput, action, heldOutcomeFor(claim.reason), 'action_guard_denial', {
+      ...extra, hold: { state: claim.reason, heldActionId: claim.heldActionId },
+    });
+    recordHeldDenial({ toolName, toolInput, verdict, sessionKey: auditExtra.sessionKey, actionId, state: claim.reason });
+    console.error(
+      `[shieldcortex] action-guard DENIED ${safeToolName(toolName)} (${actionId}): an identical call ${claim.reason === 'open' ? 'is already held' : 'was refused recently'} (${claim.heldActionId}); no second card.`,
+    );
+    emitDecision('deny', `ShieldCortex Action Guard: ${severityPrefix}${mod.heldRefusalReason(claim.reason, { actionId, heldActionId: claim.heldActionId })}${suffix}`);
+    return { handled: true, decision: 'deny', state: claim.reason, actionId, callHash };
+  }
+
+  writeAuditEntry(
+    safeToolName(toolName),
+    safeApprovalVerdict(verdict),
+    redactedAuditArgs(toolName, toolInput),
+    action,
+    'held',
+    { ...extra, hold: { state: 'open', windowMs } },
+  );
+  console.error(
+    `[shieldcortex] action-guard HOLDING ${safeToolName(toolName)} (${actionId}): approval required, but ${noPromptSurface}. `
+    + `Owner approval card requested; the call has NOT run and waits up to ${Math.round(windowMs / 1000)} s.`,
+  );
+
+  const params = mod.buildHeldCardParams({
+    tool: safeToolName(toolName),
+    actionId,
+    windowMs,
+    summary: heldCardSummary(notify, { toolName, toolInput, verdict, sessionKey: auditExtra.sessionKey, cwd: holdCtx.rawCwd }),
+  });
+  const controller = new AbortController();
+  const stopWatch = mod.abortWhenOrphaned(controller);
+  const onSignal = () => controller.abort();
+  const signalNames = ['SIGTERM', 'SIGINT', 'SIGHUP'];
+  for (const sig of signalNames) process.on(sig, onSignal);
+  let decision;
+  try {
+    decision = await mod.awaitHeldDecision({
+      openclawBin: notify.openclawBin,
+      params,
+      windowMs,
+      signal: controller.signal,
+      ...(holdCtx.spawnImpl ? { spawnImpl: holdCtx.spawnImpl } : {}),
+    });
+  } catch {
+    decision = { kind: 'card_failed', reason: 'request-failed' };
+  } finally {
+    stopWatch();
+    for (const sig of signalNames) process.off(sig, onSignal);
+  }
+  const state = decision?.kind ?? 'card_failed';
+  try { claim.finish(state); } catch { /* the dedupe record is advisory */ }
+
+  if (state === 'cancelled') {
+    // Cancelled means the harness or a signal ended the hold. If the harness
+    // killed the launcher on its own timeout it may have RUN the call
+    // (#884 C2), so nothing here may claim it did not: no denial row, no
+    // "nothing ran" — an intercept row that says the outcome is unknown.
+    writeAuditEntry(
+      safeToolName(toolName),
+      safeApprovalVerdict(verdict),
+      redactedAuditArgs(toolName, toolInput),
+      action,
+      'hold_cancelled',
+      { ...extra, hold: { state, windowMs, ranUnknown: true } },
+    );
+    console.error(`[shieldcortex] action-guard: hold on ${safeToolName(toolName)} (${actionId}) was CANCELLED before the owner answered; whether the harness ran it is unknown.`);
+    emitDecision('deny', `ShieldCortex Action Guard: ${severityPrefix}${mod.heldRefusalReason(state, { actionId, windowMs })}${suffix}`);
+    return { handled: true, decision: 'deny', state, actionId, callHash };
+  }
+
+  if (state === 'approved') {
+    writeAuditEntry(
+      safeToolName(toolName),
+      safeAllowAuditVerdict(verdict, 'approved'),
+      redactedAuditArgs(toolName, toolInput),
+      action,
+      'approved',
+      { ...extra, hold: { state, windowMs } },
+    );
+    console.error(`[shieldcortex] action-guard: owner APPROVED held ${safeToolName(toolName)} (${actionId}) on its card — running it once now.`);
+    emitDecision('allow', `ShieldCortex Action Guard: the owner approved this held call on its approval card (actionId ${actionId}); it runs once, now.`);
+    return { handled: true, decision: 'allow', state, actionId, callHash };
+  }
+  writeTerminalOutcomeAudit(toolName, verdict, toolInput, action, heldOutcomeFor(state), 'action_guard_denial', {
+    ...extra,
+    hold: { state, windowMs, ...(decision?.reason ? { cardFailure: decision.reason } : {}) },
+  });
+  recordHeldDenial({ toolName, toolInput, verdict, sessionKey: auditExtra.sessionKey, actionId, state });
+  console.error(`[shieldcortex] action-guard DENIED held ${safeToolName(toolName)} (${actionId}): card ${state} — nothing ran.`);
+  emitDecision('deny', `ShieldCortex Action Guard: ${severityPrefix}${mod.heldRefusalReason(state, { actionId, windowMs })}${suffix}`);
+  return { handled: true, decision: 'deny', state, actionId, callHash };
+}
+
 /**
  * Emit the dangerous-tier outcome: "ask" where Claude Code will raise a prompt,
  * "deny" where it will not (see the prompt-surface rule in the header).
@@ -3032,7 +3313,7 @@ function posture(fn, ...args) {
  * differs — so `action` is unchanged and the distinction lives in `outcome`
  * plus the recorded `permissionMode`.
  */
-async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissionMode, action, reason, brokerAudit, notify = null, baseExtra = {}, retryCtx = null) {
+async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissionMode, action, reason, brokerAudit, notify = null, baseExtra = {}, retryCtx = null, holdCtx = null) {
   // `brokerAudit` rides along so a brokered call keeps its judge verdict on the
   // row whichever way this goes (#143 + #139): "was a model consulted, and did
   // the harness even have a prompt surface?" must both be answerable from one
@@ -3040,6 +3321,37 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
   const safeBroker = safeBrokerAudit(brokerAudit);
   const broker = safeBroker ? { broker: safeBroker } : {};
   const noPromptSurface = noPromptSurfaceReason(permissionMode);
+  if (auditVerdict?.alwaysBlock === true) {
+    // #853 ruling §1: always-block is "deny now, loud" — a live prompt is a
+    // release path too, so it is never offered. Only a policy edit by the
+    // owner changes this. The same outcome with or without a prompt surface:
+    // the surface played no part in the refusal, so it is never logged as
+    // `denied_no_prompt_surface` (ruling §3: advisory must never produce one,
+    // and the acceptance count of those rows must mean "could have been held").
+    const verdict = { ...auditVerdict, reason };
+    const actionId = writeTerminalOutcomeAudit(toolName, verdict, toolInput, action, 'auto_denied', 'action_guard_denial', {
+      ...baseExtra,
+      ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}),
+      ...(noPromptSurface ? { noPromptSurfaceReason: noPromptSurface } : {}),
+      alwaysBlock: true,
+      ...broker,
+    });
+    const notified = await alertGuardOutcome(notify, {
+      toolName, toolInput, verdict, outcome: 'auto_denied', event: 'action_guard_denial', sessionKey: baseExtra.sessionKey, actionId,
+    });
+    recordNotifyAudit(toolName, verdict, toolInput, { ...baseExtra, actionId }, notified);
+    console.error(`[shieldcortex] action-guard DENIED ${safeToolName(toolName)} (${actionId}): always-block — no prompt, approval, grant or card can release it.`);
+    const signals = safeSignalList(verdict.signals);
+    // #874: under Watch only the floor is the only thing that refuses; say so.
+    const posture = auditVerdict.advisoryFloor === true
+      ? 'Watch only (advisory) still refuses this, because it would change the guard\'s own state or config or switch it off. '
+      : '';
+    emitDecision('deny', 'ShieldCortex Action Guard: ALWAYS-BLOCK — this action is never approvable from a prompt, approval, retry grant or card; '
+      + posture
+      + 'only a policy edit by the owner changes this. Do not work around it or retry it; report it as not run.'
+      + (signals.length > 0 ? ` [${signals.join(', ')}]` : ''));
+    return { handled: true, decision: 'deny', state: 'always-block', actionId };
+  }
   if (!noPromptSurface) {
     const displayVerdict = safeApprovalVerdict(auditVerdict);
     writeAuditEntry(
@@ -3053,10 +3365,56 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
     emitDecision('ask', safeDiagnosticApprovalReason(reason));
     return;
   }
+  // #853 Plane A: hold the call under one owner card where a card channel
+  // exists. Only the real dangerous tier passes a holdCtx.
+  let hold = null;
+  try {
+    hold = await tryHoldForOwner(holdCtx, {
+      toolName,
+      toolInput,
+      verdict: { ...auditVerdict, reason },
+      action,
+      notify,
+      noPromptSurface,
+      auditExtra: {
+        ...baseExtra,
+        ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}),
+        noPromptSurfaceReason: noPromptSurface,
+        ...broker,
+      },
+    });
+  } catch {
+    hold = null;
+  }
+  if (hold?.handled) return hold;
+  if (hold?.noRoute) {
+    // #853 ruling §3: approvals have no route to the owner on this host, so
+    // an approvable call under enforce is ADVISORY here — allow, log and
+    // notify, exactly as Watch-only would. Never `denied_no_prompt_surface`.
+    const verdict = { ...auditVerdict, reason };
+    const advisoryId = writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'warn', 'warned', 'action_guard_warning', {
+      ...baseExtra,
+      ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}),
+      noPromptSurfaceReason: noPromptSurface,
+      hold: { state: 'no-card-route' },
+      ...broker,
+    });
+    const notified = await alertGuardOutcome(notify, {
+      toolName, toolInput, verdict, outcome: 'warned', event: 'action_guard_warning', sessionKey: baseExtra.sessionKey, actionId: advisoryId,
+    });
+    recordNotifyAudit(toolName, verdict, toolInput, { ...baseExtra, actionId: advisoryId }, notified);
+    console.error(
+      `[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} needs approval, but ${noPromptSurface} and approvals have NO card route on this host — `
+      + `advisory: allowed and logged (${advisoryId}) [${safeSignalList(verdict.signals).join(', ')}]. Configure an OpenClaw card route to hold these instead.`,
+    );
+    return { handled: true, decision: 'advisory', state: 'no-card-route', actionId: advisoryId };
+  }
   const actionId = writeTerminalOutcomeAudit(toolName, { ...auditVerdict, reason }, toolInput, action, 'denied_no_prompt_surface', 'action_guard_denial', {
     ...baseExtra,
+    ...(hold?.actionId ? { actionId: hold.actionId } : {}),
     ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}),
     noPromptSurfaceReason: noPromptSurface,
+    ...(hold?.state ? { hold: { state: hold.state } } : {}),
     ...broker,
   });
   const notified = await alertGuardOutcome(notify, {
@@ -3077,7 +3435,9 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
   console.error(
     `[shieldcortex] action-guard DENIED ${safeToolName(toolName)}: approval required, but ${noPromptSurface} — denying rather than raising a prompt nothing will answer.`,
   );
-  emitDecision('deny', terminalDecisionReason({ ...auditVerdict, reason }, 'denied_no_prompt_surface', 'action_guard_denial'));
+  const holdNote = typeof hold?.note === 'string' ? ` ${hold.note}` : '';
+  emitDecision('deny', `${terminalDecisionReason({ ...auditVerdict, reason }, 'denied_no_prompt_surface', 'action_guard_denial')}${holdNote}`);
+  return null;
 }
 
 /**
@@ -3147,7 +3507,12 @@ async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permis
     console.error(`[shieldcortex] ⚠️ action-guard UNAVAILABLE (${failureSummary}) — gating DANGEROUS ${safeToolName(toolName)} [${safeSignalList([dangerousSignal]).join(', ')}] (fail-closed)`);
     await emitApprovalRequired(
       toolName,
-      { severity: 'dangerous', decision: 'require_approval', signals: ['fallback-scan', dangerousSignal] },
+      {
+        severity: 'dangerous', decision: 'require_approval', signals: ['fallback-scan', dangerousSignal],
+        // #853 ruling §1: the guard's own state is always-block even when the
+        // guard could not scan — no prompt may release it.
+        ...(selfProtectSignal ? { alwaysBlock: true } : {}),
+      },
       toolInput,
       permissionMode,
       'gate_degraded',
@@ -3442,6 +3807,19 @@ process.stdin.on('end', async () => {
     // the agent forge the very evidence that keeps the guard in shadow.
     const floorSignals = selfProtectionSignals(guard);
     const selfProtected = Array.isArray(verdict.signals) && verdict.signals.some((s) => floorSignals.includes(s));
+    // #853 ruling §1 (issuecomment-6313152247): ALWAYS-BLOCK — the
+    // self-protection floor, and any call the guard could not scan. No grant
+    // may release one: not a #118 one-shot `approve <hash>`, not a #310 retry
+    // card or `approve --denial`, not a held card. "Only a policy edit by the
+    // owner changes this." Fail-closed both ways: no grant is ever MINTED for
+    // one (no pending record, no hash, no fingerprint, no card), and a grant
+    // that exists anyway (legacy, forged, or minted before this check) is
+    // never SPENT on one.
+    const rulingAlwaysBlockSignal = Array.isArray(verdict.signals)
+      && verdict.signals.some((s) => RULING_ALWAYS_BLOCK_SIGNALS.has(s));
+    const notHoldableSignal = Array.isArray(verdict.signals)
+      && verdict.signals.some((s) => NOT_HOLDABLE_SIGNALS.has(s));
+    const alwaysBlock = selfProtected || rulingAlwaysBlockSignal;
 
     // require_approval — the dangerous tier.
     // Per-operator autoApprove allowlist (family / action / signal match, same
@@ -3449,7 +3827,7 @@ process.stdin.on('end', async () => {
     // above — nor (#509 r5) to the self-protection floor: no standing
     // allowlist entry may approve a write to the guard's own state.
     const autoApprove = cfg.autoApprove ?? [];
-    if (autoApprove.length > 0 && !unscannedBlock && !selfProtected) {
+    if (autoApprove.length > 0 && !unscannedBlock && !alwaysBlock) {
       const hay = [verdict.family, verdict.action, ...verdict.signals].map((s) => String(s).toLowerCase());
       const matched = autoApprove.some((a) => {
         const n = a.toLowerCase();
@@ -3470,7 +3848,7 @@ process.stdin.on('end', async () => {
     // catastrophic tier returned above, and an unscanned schema rejection
     // (#436) is NOT shadowed — "could not look" is never an allow — and neither
     // is the guard self-protection floor (R4-1, `selfProtected` above).
-    if (shadow && !unscannedBlock && !selfProtected) {
+    if (shadow && !unscannedBlock && !alwaysBlock) {
       const wouldOutcome = noPromptSurfaceReason(permissionMode) ? 'would_block' : 'would_hold';
       writeAuditEntry(
         safeToolName(toolName),
@@ -3487,7 +3865,7 @@ process.stdin.on('end', async () => {
       process.exit(0);
     }
 
-    if (!cfg.enforce && !unscannedBlock && !selfProtected) {
+    if (!cfg.enforce && !unscannedBlock && !alwaysBlock) {
       const actionId = writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'warn', 'warned', 'action_guard_warning', baseExtra);
       const notified = await alertGuardOutcome(getNotify(), {
         toolName,
@@ -3513,14 +3891,15 @@ process.stdin.on('end', async () => {
     // `actionGuard.retryCards === true` at the raise site.
     const retryPlane = await loadRetryControl(cfg.retry);
     const retryOriginCwd = retryPlane ? retryPlane.mod.canonicaliseCwd(hookData.cwd) : undefined;
-    const retryCtx = retryPlane ? { rawConfig: cfg.retry, cwd: retryOriginCwd } : null;
+    // Always-block → no retryCtx: no fingerprint, so no `--denial` target and no card.
+    const retryCtx = retryPlane && !alwaysBlock ? { rawConfig: cfg.retry, cwd: retryOriginCwd } : null;
 
     // One-shot exact-command approval (#118). An operator who ran
     // `shieldcortex approve <hash>` in a terminal gets exactly one pass for
     // exactly this call; the approval is spent here. Everything else falls
     // through to the normal refusal, which now carries the hash to approve.
     const approvals = await loadApprovals();
-    if (approvals) {
+    if (approvals && !alwaysBlock) {
       try {
         const spent = approvals.consumeApproval(toolName, toolInput);
         if (spent) {
@@ -3550,7 +3929,7 @@ process.stdin.on('end', async () => {
     // The origin is computed HERE, from this hook's own context — the harness
     // payload's cwd (realpath-canonicalised) and the tool name — and never
     // from tool input, which the agent controls.
-    if (retryPlane) {
+    if (retryPlane && !alwaysBlock) {
       try {
         const spentRetry = retryPlane.mod.consumeRetryGrant(
           {
@@ -3609,7 +3988,7 @@ process.stdin.on('end', async () => {
 
     // #509 r5: the broker cannot pre-clear the self-protection floor either;
     // only a human answer releases a write to the guard's own state.
-    if (brokered?.outcome === 'pre_clear' && !unscannedBlock && !selfProtected) {
+    if (brokered?.outcome === 'pre_clear' && !unscannedBlock && !alwaysBlock) {
       const brokerAudit = safeBrokerAudit(brokered.audit);
       writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'approved'), redactedAuditArgs(toolName, toolInput), 'require_approval', 'approved', { ...baseExtra, ...(brokerAudit ? { broker: brokerAudit } : {}) });
       console.error(`[shieldcortex] approval broker PRE-CLEARED ${safeToolName(toolName)}: ${safeDiagnosticReason(brokered.reason)} [${safeSignalList(verdict.signals).join(', ')}]`);
@@ -3627,7 +4006,7 @@ process.stdin.on('end', async () => {
     // #509: the pending record mints this attempt's reach correlation id; the
     // request row below carries it and the human's answer binds to it.
     let reachAttemptId;
-    if (approvals && !noPromptSurfaceForHold) {
+    if (approvals && !noPromptSurfaceForHold && !alwaysBlock) {
       try {
         const pending = approvals.recordPending({
           tool: toolName,
@@ -3643,7 +4022,12 @@ process.stdin.on('end', async () => {
 
     const displayVerdict = safeApprovalVerdict(verdict);
     let message = `ShieldCortex Action Guard: ${displayVerdict.reason} [${displayVerdict.signals.join(', ')}]`;
-    if (approvals && !noPromptSurfaceForHold) {
+    if (alwaysBlock) {
+      console.error(
+        `[shieldcortex] action-guard: ${safeToolName(toolName)} is in the always-block category — no one-shot approval, retry grant or card can release it; only a policy edit by the owner changes this.`,
+      );
+    }
+    if (approvals && !noPromptSurfaceForHold && !alwaysBlock) {
       let fullHash;
       try {
         fullHash = approvals.hashToolCall(toolName, toolInput);
@@ -3701,11 +4085,15 @@ process.stdin.on('end', async () => {
     // Placed at the END of the chain on purpose: the one-shot approval (#118)
     // and the broker (#143) both get their say first, so an operator who
     // already approved, or a call the judge hardened, is unaffected by this.
-    await emitApprovalRequired(
+    const held = await emitApprovalRequired(
       toolName,
       // #874: an advisory host reaches here only through the self-protection
       // floor (or an unscanned call); the flag lets the denial say which.
-      !cfg.enforce && selfProtected && !unscannedBlock ? { ...verdict, advisoryFloor: true } : verdict,
+      {
+        ...verdict,
+        ...(!cfg.enforce && alwaysBlock && !unscannedBlock ? { advisoryFloor: true } : {}),
+        ...(alwaysBlock ? { alwaysBlock: true } : {}),
+      },
       toolInput,
       permissionMode,
       'require_approval',
@@ -3714,7 +4102,26 @@ process.stdin.on('end', async () => {
       await getNotify(),
       baseExtra,
       retryCtx,
+      // #853: only the real dangerous tier may hold. `approvable` is the
+      // ruling's approvable category: not the self-protection floor and not
+      // an unscanned call (both always-block), so only these can ever take
+      // the no-card-route advisory path.
+      {
+        approvable: !alwaysBlock && !unscannedBlock && !notHoldableSignal,
+        cardRouteConfigured: cfg.notify?.enabled === true && cfg.notify?.openclaw === true,
+        hashToolCall: approvals && typeof approvals.hashToolCall === 'function' ? approvals.hashToolCall : null,
+        cwd: retryOriginCwd ?? (typeof hookData.cwd === 'string' ? resolve(hookData.cwd) : undefined),
+        rawCwd: hookData.cwd,
+        holdSeconds: cfg.holdSeconds,
+        harnessPid,
+      },
     );
+    if (held?.handled) {
+      // #853: the owner's card answered (or did not) — record what reached them.
+      const answer = held.state && Object.hasOwn(HELD_REACH_ANSWER, held.state) ? HELD_REACH_ANSWER[held.state] : null;
+      if (answer) await recordReachEvidence(cfg, held.callHash ?? mintActionId(), 'resolved', answer, answer === 'unreached' ? null : 'openclaw-approval', undefined);
+      process.exit(0);
+    }
     // #509: a denial for want of a prompt surface put no decision to a human
     // at all — for approval reachability that is a request that did NOT reach
     // one. (Same pure function emitApprovalRequired just branched on.)

@@ -234,6 +234,19 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     expect(enforced.stderr).toMatch(/now ENFORCING/);
     const promoted = rows().filter((r) => r.type === 'readiness_transition');
     expect(promoted.map((r) => r.to)).toEqual(['enforcing']);
+    // #853 ruling (issuecomment-6313152247 §3): enforcing + headless with NO
+    // card route configured is ADVISORY — allowed, logged, never a silent
+    // deny — even on a promoted install.
+    const noRoute = runHook(DANGEROUS, 'bypassPermissions');
+    expect(noRoute.decision).toBeUndefined();
+    expect(noRoute.stderr).toMatch(/NO card route/);
+    const advisoryRow = rows().filter((r) => r.type === 'intercept' && r.outcome === 'warned').at(-1);
+    expect((advisoryRow?.hold as Record<string, unknown> | undefined)?.state).toBe('no-card-route');
+    expect(rows().some((r) => r.outcome === 'denied_no_prompt_surface')).toBe(false);
+    // With a card route configured, the promoted guard really does stop the
+    // same headless call: this build has no held-action module, so the hold
+    // fails CLOSED to the denial.
+    writeConfig({ readinessGate: true, notify: { enabled: true, openclaw: true, webhookUrl: `http://fake-webhook.invalid/h?evidence=${encodeURIComponent(evidenceFile)}` } });
     const blocked = runHook(DANGEROUS, 'bypassPermissions');
     expect(blocked.decision).toBe('deny');
   });
@@ -403,7 +416,8 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     const gate = src.indexOf('const whenReady = cfg.enforce && cfg.readinessGate === true');
     const lease = src.indexOf("leaseGate && leaseGate.decision.verdict !== 'allow'");
     const terminal = src.indexOf("if (verdict.decision === 'block' && TERMINAL_BLOCK_SEVERITIES.has(verdict.severity))");
-    const shadowBranch = src.indexOf('if (shadow && !unscannedBlock && !selfProtected)');
+    // #853: the floor is now the wider always-block set (self-protection ⊂ alwaysBlock).
+    const shadowBranch = src.indexOf('if (shadow && !unscannedBlock && !alwaysBlock)');
     for (const at of [gate, lease, terminal, shadowBranch]) expect(at).toBeGreaterThan(-1);
     expect(lease).toBeLessThan(gate);
     expect(gate).toBeLessThan(terminal);
@@ -421,14 +435,16 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
 
   it('r3 finding 1: on a plain-enforcing install, `config --action-guard-enforce-when-ready` needs approval like --action-guard-advisory', () => {
     writeConfig({});
+    // #853 ruling §1: a guard-posture flag is self-protection — ALWAYS-BLOCK,
+    // denied even where a prompt could be raised (no live-prompt release).
     const asked = runHook(WHEN_READY_FLAG, 'default');
-    expect(asked.decision).toBe('ask');
+    expect(asked.decision).toBe('deny');
     const audited = rows().filter((r) => r.type === 'intercept' && r.action === 'require_approval');
     // (The signal name itself is not on the audit's safe-signal list, so the
     // row records the gated verdict, not which rule fired.)
     expect(audited).toHaveLength(1);
     expect(runHook(WHEN_READY_FLAG, 'bypassPermissions').decision).toBe('deny');
-    expect(runHook({ command: 'shieldcortex config --action-guard-advisory' }, 'default').decision).toBe('ask');
+    expect(runHook({ command: 'shieldcortex config --action-guard-advisory' }, 'default').decision).toBe('deny');
   });
 
   it('r3 finding 1: from OFF it is a tightening and stays ungated; from watch-only the R4-1 self-protection floor holds it', () => {
@@ -438,7 +454,8 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     // floor in EVERY posture — watch-only too. A tightening held for approval
     // is the disclosed cost (design doc, residuals).
     writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: false } }));
-    expect(runHook(WHEN_READY_FLAG, 'default').decision).toBe('ask');
+    // #853 ruling §1: always-block, so denied, not asked.
+    expect(runHook(WHEN_READY_FLAG, 'default').decision).toBe('deny');
   });
 
   it('r3 finding 2: promoted, then a forged fresh shadow cache + failing evidence ⇒ a LOUD demotion through the hook, never a silent one', () => {

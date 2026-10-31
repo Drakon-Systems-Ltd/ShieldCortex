@@ -476,9 +476,18 @@ describe('#509 R4-1 — the guard self-protection floor is ONE list, duplicated 
     expect(listAfter(hermesClientSrc, /^SELF_PROTECTION_SIGNALS = \(/m)).toEqual(canonical);
   });
 
+  it('#853: the ruling always-block signal list is the same on the hook and the plugin', () => {
+    const hookList = listAfter(hookSrc, /const RULING_ALWAYS_BLOCK_SIGNALS = new Set\(\[/);
+    const pluginList = listAfter(pluginSrc, /export const RULING_ALWAYS_BLOCK_SIGNALS: readonly string\[\] = \[/);
+    expect(hookList).toEqual(['secret-egress', 'secret-egress-fold', 'modify-network-firewall']);
+    expect(pluginList).toEqual(hookList);
+  });
+
   it('every surface consults the floor before its shadow/advisory allow', () => {
-    expect(hookSrc).toMatch(/if \(shadow && !unscannedBlock && !selfProtected\)/);
-    expect(hookSrc).toMatch(/if \(!cfg\.enforce && !unscannedBlock && !selfProtected\)/);
+    // #853: the hook's floor is the always-block set (self-protection ⊂ alwaysBlock).
+    expect(hookSrc).toMatch(/const alwaysBlock = selfProtected \|\| rulingAlwaysBlockSignal;/);
+    expect(hookSrc).toMatch(/if \(shadow && !unscannedBlock && !alwaysBlock\)/);
+    expect(hookSrc).toMatch(/if \(!cfg\.enforce && !unscannedBlock && !alwaysBlock\)/);
     expect(hookSrc).toMatch(/if \(!cfg\.enforce && !selfProtectSignal\)/);
     expect(pluginSrc).toMatch(/const selfProtected = isSelfProtectionVerdict\(v\.signals\);/);
     expect(pluginSrc).toMatch(/!actionGuardCfg\.enforce && !unscannedBlock && !selfProtected\)/);
@@ -486,8 +495,16 @@ describe('#509 R4-1 — the guard self-protection floor is ONE list, duplicated 
   });
 
   it('r5 finding 3: every auto-approval and failure-allow exit consults the floor, in both planes', () => {
-    expect(hookSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected\)/);
-    expect(hookSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected/);
+    expect(hookSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !alwaysBlock\)/);
+    expect(hookSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !alwaysBlock/);
+    // #853: both grant-consume exits are closed to always-block too.
+    expect(hookSrc).toMatch(/if \(approvals && !alwaysBlock\)/);
+    expect(hookSrc).toMatch(/if \(retryPlane && !alwaysBlock\)/);
+    // The plugin denies always-block before ANY of its release exits.
+    const early = pluginSrc.indexOf('if (isAlwaysBlockVerdict(v.signals)) {');
+    expect(early).toBeGreaterThan(-1);
+    expect(early).toBeLessThan(pluginSrc.indexOf('if (autoApprove.length > 0 && !unscannedBlock && !selfProtected)'));
+    expect(early).toBeLessThan(pluginSrc.indexOf('if (gate.shadow && !unscannedBlock && !selfProtected)'));
     expect(pluginSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected\)/);
     expect(pluginSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected/);
     expect(pluginSrc).toMatch(/const deny = failAction === 'deny' \|\| brokerDenies \|\| selfProtected;/);
@@ -873,7 +890,9 @@ describe('#509 r7 — hook and interceptor decide alike in shadow, promoted and 
     }
   }
 
-  const FLOORS = { 'self-protection floor': 'card', 'unscanned (schema-invalid)': 'card', catastrophic: 'blocked', 'lease (frozen scope)': 'blocked' };
+  // #853 ruling §1: the self-protection floor is ALWAYS-BLOCK — denied now on
+  // both planes, never put on a card (a card cannot approve it).
+  const FLOORS = { 'self-protection floor': 'blocked', 'unscanned (schema-invalid)': 'card', catastrophic: 'blocked', 'lease (frozen scope)': 'blocked' };
   const SHADOWED = { dangerous: 'allowed', benign: 'allowed', ...FLOORS };
   const ENFORCED = { dangerous: 'card', benign: 'allowed', ...FLOORS };
   const EXPECTED: Record<'shadow' | 'promoted' | 'demoted', Record<string, string>> = {

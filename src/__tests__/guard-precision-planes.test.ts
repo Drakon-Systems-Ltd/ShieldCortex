@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import type { Request, Response } from 'express';
-import { evaluateToolCall } from '../defence/iron-dome/tool-action-guard.js';
+import { evaluateToolCall, GUARD_SELF_PROTECTION_SIGNALS } from '../defence/iron-dome/tool-action-guard.js';
 import {
   GUARD_PRECISION_CORPUS,
   type GuardCorpusEntry,
@@ -38,6 +38,14 @@ const HERMES_INIT = path.join(REPO, 'plugins', 'hermes', 'shieldcortex', '__init
 const HERMES_CLIENT = path.join(REPO, 'plugins', 'hermes', 'shieldcortex', 'sc_client.py');
 
 type PlaneDecision = 'allow' | 'require_approval' | 'block';
+
+/** The hook's RULING_ALWAYS_BLOCK_SIGNALS, read from its source so the two cannot drift. */
+const HOOK_ALWAYS_BLOCK_SIGNALS: string[] = (() => {
+  const src = fs.readFileSync(HOOK_PATH, 'utf8');
+  const m = /const RULING_ALWAYS_BLOCK_SIGNALS = new Set\(\[([^\]]*)\]/.exec(src);
+  if (!m) throw new Error('RULING_ALWAYS_BLOCK_SIGNALS not found in the hook');
+  return [...m[1].matchAll(/'([a-z-]+)'/g)].map((x) => x[1]);
+})();
 interface PlaneVerdict {
   decision: PlaneDecision;
   signals: string[];
@@ -234,7 +242,14 @@ describe('three-plane precision — same evaluateToolCall verdict on every runti
       if (interceptor.decision !== core.decision || !sameSignals(interceptor.signals, core.signals)) {
         mismatches.push({ plane: 'openclaw-interceptor', command: label, core, interceptor });
       }
-      if (hook.decision !== core.decision) {
+      // #853 ruling §1: the hook adds one POLICY layer over the classifier —
+      // an always-block verdict (self-protection, or a ruling always-block
+      // signal) is denied even where a prompt could be raised. The classifier
+      // verdict itself must still agree; only that mapping differs.
+      const alwaysBlock = core.decision === 'require_approval'
+        && core.signals.some((sig) => GUARD_SELF_PROTECTION_SIGNALS.includes(sig) || HOOK_ALWAYS_BLOCK_SIGNALS.includes(sig));
+      const expectedHook = alwaysBlock ? 'block' : core.decision;
+      if (hook.decision !== expectedHook) {
         mismatches.push({ plane: 'claude-code-hook', command: label, coreDecision: core.decision, hookDecision: hook.decision });
       }
       if ('error' in hermes) {
