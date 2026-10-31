@@ -213,7 +213,6 @@ describe('#647 explicit setters REFUSE on a tampered config and change nothing',
     ['setActionGuardNotifyConfig', (c) => c.setActionGuardNotifyConfig({ enabled: true })],
     ['setActionGuardCoreConfig', (c) => c.setActionGuardCoreConfig({ enabled: true, enforce: true })],
     ['migrateInterceptorActionGuardAlias (doctor --fix-action-guard)', (c) => c.migrateInterceptorActionGuardAlias()],
-    ['setCloudIronDomeCache (throw-policy; its one caller swallows the throw)', (c) => c.setCloudIronDomeCache({ patterns: [] })],
     ['setVerifyConfig', (c) => c.setVerifyConfig({ verifyEnabled: false })],
     ['setReviewCopilotConfig', (c) => c.setReviewCopilotConfig({ enabled: false })],
     ['setRankerConfig', (c) => c.setRankerConfig({ engine: 'rrf' })],
@@ -258,7 +257,7 @@ describe('#647 explicit setters REFUSE on a tampered config and change nothing',
 });
 
 describe('#647 automatic writers SKIP on a tampered config, without a storm', () => {
-  it('device id / name, last-sync stamp and the sync-defaults migration all skip, none throws, nothing is written', async () => {
+  it('device id / name, last-sync stamp, the sync-defaults migration and the cloud cache all skip, none throws, nothing is written', async () => {
     const { config, before } = await tamperedFixture();
 
     const id1 = config.getDeviceId();
@@ -279,6 +278,10 @@ describe('#647 automatic writers SKIP on a tampered config, without a storm', ()
     // cloudEnabled is true with no excludeSensitive / migration stamp: the
     // v4.27 migration wants to write. It must answer from memory instead.
     expect(config.getCloudSyncControls().excludeSensitive).toBe(true);
+
+    // The cloud Iron Dome cache write (skip-policy since #878; its one caller
+    // also swallows any throw) does not re-sign the tampered file either.
+    expect(() => config.setCloudIronDomeCache({ patterns: [] })).not.toThrow();
 
     expectUnchanged(before);
     // Actionable, once — however many automatic writes were skipped.

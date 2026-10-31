@@ -225,7 +225,7 @@ describe('config atomicity + integrity hardening', () => {
 
   // ── Fix 3: mtime-cached reads ───────────────────────────────────────
   describe('mtime-cached readRawConfig', () => {
-    it('serves the cached value when the file is unchanged, and invalidates on write', async () => {
+    it('re-reads an in-place same-size edit with the mtime restored, and invalidates on write', async () => {
       const config = await import('../cloud/config.js');
       config.setCloudConfig({ cloudApiKey: 'cached-value' });
       config.clearCloudConfigCache();
@@ -238,24 +238,35 @@ describe('config atomicity + integrity hardening', () => {
       const mtime = 1_700_000_000;
       utimesSync(configFile, mtime, mtime);
 
-      // Prime the cache (records mtimeMs = mtime * 1000, an exact integer).
+      // Prime the cache.
       const first = config.readRawConfig();
       expect(first.cloudApiKey).toBe('cached-value');
+      expect(config.isConfigTampered()).toBe(false);
 
-      // Mutate the on-disk bytes OUT OF BAND (no public API) but reset the
-      // mtime to its previous value so the cache key is unchanged. A correct
-      // mtime cache must return the OLD cached value, not re-read these bytes.
-      writeFileSync(configFile, JSON.stringify({ cloudApiKey: 'sneaky-disk-edit' }, null, 2) + '\n');
+      // Mutate the on-disk bytes OUT OF BAND (no public API), keeping every
+      // field the cache key used to compare: same file (in place, same inode),
+      // same size (a same-length value; the stale `_sig` kept) and the mtime
+      // reset to its previous value. Only ctime moves, and nothing restores it
+      // (#878), so the edit is re-read and fails its signature — it is not
+      // answered with the cached value and its old `valid` verdict.
+      const signed = readFileSync(configFile, 'utf-8');
+      const edited = signed.replace('"cached-value"', '"sneaky-edit!"');
+      expect(edited.length).toBe(signed.length);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30); // coarse ctime clock
+      writeFileSync(configFile, edited);
       utimesSync(configFile, mtime, mtime);
       const second = config.readRawConfig();
-      expect(second.cloudApiKey).toBe('cached-value'); // served from cache
+      expect(second.cloudApiKey).toBe('sneaky-edit!');
+      expect(config.isConfigTampered()).toBe(true);
+      // The writer refuses the edited bytes and leaves them on disk.
+      expect(() => config.setCloudConfig({ cloudApiKey: 'new-value' })).toThrow(config.ConfigIntegrityRefusal);
+      expect(readFileSync(configFile, 'utf-8')).toBe(edited);
 
-      // Bump the mtime forward → cache key changes → real re-read.
-      utimesSync(configFile, mtime + 5, mtime + 5);
-      const third = config.readRawConfig();
-      expect(third.cloudApiKey).toBe('sneaky-disk-edit');
-
-      // A write through the public API must invalidate the cache too.
+      // The original signed bytes back → valid again, and a write through the
+      // public API invalidates the cache.
+      writeFileSync(configFile, signed);
+      expect(config.readRawConfig().cloudApiKey).toBe('cached-value');
+      expect(config.isConfigTampered()).toBe(false);
       config.setCloudConfig({ cloudApiKey: 'new-value' });
       expect(config.readRawConfig().cloudApiKey).toBe('new-value');
     });
@@ -334,7 +345,6 @@ describe('config atomicity + integrity hardening', () => {
       { name: 'setCloudSyncControls', policy: 'throw', invoke: (c) => c.setCloudSyncControls({ contentMode: 'metadata' }) },
       { name: 'addTrustedSkill', policy: 'throw', invoke: (c) => c.addTrustedSkill('/some/new/skill.md') },
       { name: 'removeTrustedSkill', policy: 'throw', invoke: (c) => c.removeTrustedSkill('/some/skill.md') },
-      { name: 'setCloudIronDomeCache', policy: 'throw', invoke: (c) => c.setCloudIronDomeCache({ patterns: [] }) },
       { name: 'setProactiveRecall', policy: 'throw', invoke: (c) => c.setProactiveRecall(true) },
       { name: 'restore410Defaults', policy: 'throw', invoke: (c) => c.restore410Defaults() },
       { name: 'setVerifyConfig', policy: 'throw', invoke: (c) => c.setVerifyConfig({ verifyEnabled: true }) },
@@ -350,6 +360,7 @@ describe('config atomicity + integrity hardening', () => {
       { name: 'getDeviceId (lazy persist)', policy: 'skip', invoke: (c) => { c.getDeviceId(); } },
       { name: 'getDeviceName (lazy persist)', policy: 'skip', invoke: (c) => { c.getDeviceName(); } },
       { name: 'updateLastSyncAt → persistLastSyncAt', policy: 'skip', invoke: (c) => { c.updateLastSyncAt(); c.flushLastSyncAt(); } },
+      { name: 'setCloudIronDomeCache (iron-dome-sync, #878)', policy: 'skip', invoke: (c) => c.setCloudIronDomeCache({ patterns: [] }) },
     ];
 
     for (const w of writers) {
