@@ -40,6 +40,15 @@ import {
 import type { ContractDriftObservation } from './tool-input-schema.js';
 import { forEachWindow } from '../scan-windows.js';
 import { bodyIsAllDataRead } from './heredoc-data-read.js';
+// #923 r7: the ONE shell-word tokenizer and path normaliser, shared with the
+// pre-tool hook's dist-outage fallback (scripts/pre-tool-hook.mjs imports the
+// same file), so both planes split and collapse a command word identically.
+import {
+  claudeWordExpands,
+  lexicalPathNormalise as sharedLexicalPathNormalise,
+  shellTokens,
+  shellWords,
+} from '../../../scripts/lib/shell-words.mjs';
 
 export type ToolGuardDecision = 'allow' | 'require_approval' | 'block';
 export type ToolGuardSeverity = 'benign' | 'sensitive' | 'dangerous' | 'catastrophic';
@@ -780,6 +789,86 @@ const SENSITIVE_PATH_RE = new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|$
 // (#505 Option A; the residual is #588).
 const MODIFY_SHELL_STARTUP_RE = new RegExp(String.raw`(?:(?:>>?|>\|)(?:[ \t]|\\\n)*|\btee\b(?:(?:[ \t]|\\\n)+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|"[^"\n]*"|[^\s'"|;&<>\\-][^\s'"|;&<>\\]*))*(?:[ \t]|\\\n)+|\bsed\b(?=[^|;&\n]*[ \t](?:-[a-zA-Z]*i|--in-place))[^|;&\n]*(?:[ \t]|\\\n)+)['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})|\b(?:cp|mv|install)\b[^|;&\n]*(?:[ \t]|\\\n)+['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})['"]?\s*(?=$|[|;&\n])`, 'i');
 
+/**
+ * #923 r3: Claude Code's session transcripts — any `*.jsonl` beneath
+ * `.claude/projects/`, and anything under a `subagents/` directory there. The
+ * #923 owner-present proof reads `<session_id>.jsonl` to prove a call is
+ * top-level, so a tool call that writes a transcript could forge that proof.
+ * Deliberately NOT the whole of `.claude/projects/`: Claude Code's auto-memory
+ * (`.claude/projects/<p>/memory/*.md`) is written by agents on purpose. Only
+ * the default `.claude` home is named; a custom `CLAUDE_CONFIG_DIR` is not
+ * resolved here (the guard resolves no Claude home from the environment).
+ */
+export const CLAUDE_TRANSCRIPT_PATH_RE = /\.claude[\\/]+projects[\\/]+(?:[^\s;&|<>'"`]*?[\\/])?(?:subagents(?=$|[\\/\s;&|<>'"`)])|[^\s;&|<>'"`\\/]*\.jsonl\b)/i;
+
+/**
+ * #923 r5: `p` with `.` and empty segments dropped and `..` collapsed, purely
+ * lexically. `<home>/.claude/./projects/p/s.jsonl`, `.claude//projects` and
+ * `.claude/x/../projects` all name the transcript the regex above names. A
+ * symlink alias and a target reached after an earlier `cd` are NOT resolved
+ * (no filesystem read here); those stay the documented residual.
+ * r7: the shared implementation (scripts/lib/shell-words.mjs). A backslash is
+ * a filename character, never a separator: `.claude/x\y/..` collapses `x\y`.
+ */
+export function lexicalPathNormalise(p: string): string {
+  return sharedLexicalPathNormalise(p);
+}
+
+/**
+ * Every `.claude`-bearing word of `text`, as written and lexically normalised.
+ * r7: the words are the shell's own (scripts/lib/shell-words.mjs): quotes
+ * removed, backslash escapes honoured, then `.`/`..` collapsed on each whole
+ * word. `.claude/x\ y/../projects/p/s.jsonl` is ONE word, `.claude/x y/../…`,
+ * exactly as `".claude/x y/../…"` is, so both spellings judge the same.
+ */
+function normalisedClaudeWords(text: string): string[] {
+  return shellWords(String(text || ''))
+    .filter(w => /\.claude/i.test(w))
+    .flatMap(w => [w, lexicalPathNormalise(w)]);
+}
+
+/**
+ * #923 r5: true when `text` names a Claude Code transcript in any lexical
+ * spelling — the regex on the text as written, or on any `.claude` word of it
+ * after `lexicalPathNormalise`. Only ever adds a match to the raw regex.
+ */
+export function claudeTranscriptNamed(text: string): boolean {
+  if (CLAUDE_TRANSCRIPT_PATH_RE.test(text)) return true;
+  if (normalisedClaudeWords(text).some(w => CLAUDE_TRANSCRIPT_PATH_RE.test(w))) return true;
+  // r10: a `.claude` word the shell expands after the anchor
+  // (`.claude/x$((1))y/../projects/…`, `` `…` ``, `${…}`, `$v`, globs,
+  // `{a,b}`, mid-word `<(…)`) may be the transcript once expanded; the typed
+  // text cannot say it is not. Closed-set refusal, shared with the outage
+  // path (scripts/lib/shell-words.mjs `claudeWordExpands`); nothing is run.
+  return claudeWordExpands(String(text || ''));
+}
+
+/**
+ * #923 r6: true when ONE structured path value (a `file_path`, never command
+ * text) names a transcript. The whole value is normalised as a single path,
+ * never split into words: `<home>/.claude/x,y/../projects/p/s.jsonl` is that
+ * transcript, whatever punctuation its components carry.
+ */
+export function claudeTranscriptPathNamed(p: string): boolean {
+  return CLAUDE_TRANSCRIPT_PATH_RE.test(p) || CLAUDE_TRANSCRIPT_PATH_RE.test(lexicalPathNormalise(p));
+}
+
+/**
+ * #923 r5: every path-bearing value of a tool input. `extractPath` is
+ * first-wins, so a decoy `path` hid NotebookEdit's `notebook_path`; the
+ * transcript floor reads them all. (A camelCase `notebookPath` is not a
+ * PATH_KEY: the annotate pass strips it before this runs, and Claude Code's
+ * NotebookEdit does not read it.)
+ */
+export function extractAllPaths(args: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const k of PATH_KEYS) {
+    const v = args?.[k];
+    if (typeof v === 'string' && v.length > 0) out.push(v);
+  }
+  return out;
+}
+
 const DANGEROUS: Pattern[] = [
   // `shred` is anchored to command position (issue #89 remainder): start of
   // statement, after a separator/subshell, after sudo/env-assignment prefixes,
@@ -1042,6 +1131,12 @@ const DANGEROUS: Pattern[] = [
   // five regex rounds traded a bypass for a false deny for a backtracking
   // path). Config-path stays a PATH_TARGET rule.
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
+  // #923 r3: a tool call must not write the Claude Code transcript the
+  // owner-present proof reads (a race that copies a subagent's tool_use into
+  // `<session_id>.jsonl` as a top-level record). Pure shell inspection is
+  // carved out at the verdict site, as for the config; the Read tool never
+  // reaches this table.
+  { re: CLAUDE_TRANSCRIPT_PATH_RE, signal: 'touch-claude-transcript' },
   // #501: the policy LOCK's own attack surface — the three shapes the #501
   // adversarial review found the guard had no signal for at all.
   //
@@ -3952,8 +4047,90 @@ export function policyLockAccessIsReadOnly(text: string): boolean {
  * The caller still refuses the carve-out when a #500 command shape is present.
  */
 export function guardConfigAccessIsReadOnly(text: string): boolean {
+  return closedSetReadAccess(text, GUARD_CONFIG_PATH_RE);
+}
+
+/**
+ * #923 r3: true when the whole command is pure shell inspection of a Claude
+ * Code transcript (`tail`/`grep`/`jq` …). The config's closed-set bar:
+ * reading the transcript changes nothing.
+ *
+ * r7: judged on the SAME shell words that found the transcript
+ * (`shellReadStatements`, built on scripts/lib/shell-words.mjs), not on the
+ * #879 splitter, which refuses any backslash and any quoted paren. So
+ * `cat .claude/x\ y/../projects/p/s.jsonl` and `cat ".claude/x y/../…"` — one
+ * file, one argv — get one verdict. The vetoes are otherwise the #879 ones:
+ * no mutation verb or redirect anywhere, no nested execution, no `$` or
+ * backtick at all (escaped or not), no carriage return, and every stage a bare
+ * read verb with plain arguments.
+ */
+export function claudeTranscriptAccessIsReadOnly(text: string): boolean {
   const cmd = String(text || '');
-  if (!GUARD_CONFIG_PATH_RE.test(cmd)) return false;
+  if (!claudeTranscriptNamed(cmd)) return false;
+  if (STORE_MUTATION_RE.test(cmd)) return false;
+  if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
+  if (/[$`\r]/.test(cmd)) return false;
+  const statements = shellReadStatements(cmd);
+  if (!statements || statements.length === 0) return false;
+  return statements.every(stagesAreClosedSetReads);
+}
+
+/** #923 r7: the only operators a closed-set read may contain. */
+const SHELL_READ_SEPARATORS = new Set([';', '\n', '&&', '||']);
+/**
+ * #923 r7: unquoted, unescaped characters a closed-set read word may not carry:
+ * expansion (`$`), brace expansion / grouping (`{`, `}`), history or pipeline
+ * negation (`!`), a comment (`#`) and a carriage return.
+ */
+const SHELL_READ_BARE_VETO_RE = /[${}!#\r]/;
+
+/**
+ * #923 r7: `cmd` as statements → pipeline stages → argv, from the shared
+ * shell tokens (quotes removed, escapes honoured). Null — never a read — on an
+ * open quote, any operator other than `;`, newline, `&&`, `||` and `|`
+ * (redirects, `&`, `|&`, subshells, backticks), an empty pipeline stage or
+ * statement side, or a word with unmodelled live syntax.
+ */
+function shellReadStatements(cmd: string): string[][][] | null {
+  const { tokens, complete } = shellTokens(cmd);
+  if (!complete) return null;
+  const statements: string[][][] = [];
+  let stages: string[][] = [];
+  let argv: string[] = [];
+  let pending: 'pipe' | 'list' | null = null;
+  for (const t of tokens) {
+    if (t.type === 'word') {
+      if (SHELL_READ_BARE_VETO_RE.test(t.bare)) return null;
+      argv.push(t.value);
+      pending = null;
+      continue;
+    }
+    if (t.value === '|') {
+      if (argv.length === 0) return null;
+      stages.push(argv);
+      argv = [];
+      pending = 'pipe';
+      continue;
+    }
+    if (!SHELL_READ_SEPARATORS.has(t.value)) return null;
+    if (pending) return null;
+    if (argv.length > 0) stages.push(argv);
+    argv = [];
+    if (stages.length > 0) statements.push(stages);
+    else if (t.value === '&&' || t.value === '||') return null;
+    stages = [];
+    pending = t.value === '&&' || t.value === '||' ? 'list' : null;
+  }
+  if (pending) return null;
+  if (argv.length > 0) stages.push(argv);
+  if (stages.length > 0) statements.push(stages);
+  return statements;
+}
+
+/** The #879 closed-set read test, for the path `pathRe` names. */
+function closedSetReadAccess(text: string, pathRe: RegExp | ((s: string) => boolean)): boolean {
+  const cmd = String(text || '');
+  if (!(typeof pathRe === 'function' ? pathRe(cmd) : pathRe.test(cmd))) return false;
   if (STORE_MUTATION_RE.test(cmd)) return false;
   if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
   // Expansion and escapes are the ways a plain-looking word stops being one.
@@ -4574,7 +4751,7 @@ export function guardDirItselfMutated(surface: string): boolean {
 // goes through `matchSpans`, so this set cannot widen them.
 const PATH_TARGET_SIGNALS = new Set([
   'touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config',
-  'disable-action-guard',
+  'disable-action-guard', 'touch-claude-transcript',
 ]);
 
 /**
@@ -4601,6 +4778,9 @@ const PATH_TARGET_SIGNALS = new Set([
  *   - `disable-action-guard`   the disable/advisory/enforce-when-ready flags,
  *                              uninstall, and the #501/#505 policy-lock and
  *                              settings/env seams
+ *   - `touch-claude-transcript` Claude Code's session / subagent transcripts
+ *                              under ~/.claude/projects, which the #923
+ *                              owner-present proof reads (not the memory/ dirs)
  *
  * The ONE list. The Claude Code hook reads it from this module; its outage
  * fallback, the OpenClaw interceptor and the Hermes client carry duplicates
@@ -4611,6 +4791,7 @@ export const GUARD_SELF_PROTECTION_SIGNALS: readonly string[] = Object.freeze([
   'touch-decisions-ledger',
   'touch-guard-config',
   'disable-action-guard',
+  'touch-claude-transcript',
 ]);
 
 /** True when a verdict's signals put it on the self-protection floor. */
@@ -7319,6 +7500,10 @@ function evaluateToolCallCore(
         memoryProseMentions = hits.dangerous;
       } else if (hits.dangerous.length > 0) {
         const signals = ['write-content-dangerous', ...hits.dangerous.map(m => m.signal)];
+        // #923 r5 (I1): this early return skips the path rows, so a dangerous
+        // body written INTO a transcript would lose the floor signal and be
+        // log-only-able under owner-present. Keep the target's floor.
+        if (extractAllPaths(args).some(claudeTranscriptPathNamed)) signals.push('touch-claude-transcript');
         const span = hits.dangerous[0]?.span;
         const reason = memory
           ? buildReason('memory-write payload is a dangerous command', signals, span)
@@ -7686,6 +7871,38 @@ function evaluateToolCallCore(
       && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
       && !selfDisableInvoked()) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'touch-guard-config');
+  }
+  // #923 r5: the table row matches the transcript as SPELLED, on the first
+  // path key only. Floor any lexical alias (`.claude/./projects`, `//`, `..`)
+  // and any path key (a decoy `path` beside NotebookEdit's `notebook_path`).
+  // r6: each path key is normalised whole, as one path; only command text is
+  // split into words.
+  const transcriptPathKey = extractAllPaths(args).some(claudeTranscriptPathNamed);
+  // r10: the floor judges the command AS TYPED, never `commandScanText`'s
+  // comment-stripped copy: that strip is quote-blind, so `echo "a #" > <t>`
+  // and `cp "/tmp/f #" <t>` lost the target before this line. A real unquoted
+  // comment that names a transcript is floored too (an accepted over-deny).
+  // A pure print still runs nothing and stays unjudged, as before.
+  const transcriptCommands = isPurePrint(command) ? [] : [...new Set([command, rawCommand])];
+  const transcriptSurface = [...transcriptCommands, path, url, fold.content].filter(Boolean).join('\n');
+  if (!dangerSignals.includes('touch-claude-transcript')
+      && (transcriptPathKey || claudeTranscriptNamed(scanSurface) || claudeTranscriptNamed(transcriptSurface))) {
+    dangerSignals.push('touch-claude-transcript');
+    dangerSpan = dangerSpan ?? 'claude transcript';
+  }
+  // #923 r3: pure shell inspection of a Claude Code transcript is not a write.
+  // Same three conditions, and r6: only when the transcript is named by the
+  // command, never by a path key. A Write/Edit/MultiEdit/NotebookEdit whose
+  // target is the transcript stays floored even beside `command: 'ls'`.
+  // r10: the carve-out reads the same typed command the floor judged, so a
+  // comment or an expansion the strip hid cannot make a write look like a read.
+  if (dangerSignals.includes('touch-claude-transcript')
+      && !transcriptPathKey
+      && claudeTranscriptAccessIsReadOnly(scanSurface)
+      && (transcriptSurface === '' || claudeTranscriptAccessIsReadOnly(transcriptSurface))
+      && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
+      && !selfDisableInvoked()) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'touch-claude-transcript');
   }
   // External egress is a potential exfil vector — but only when the call carries
   // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing

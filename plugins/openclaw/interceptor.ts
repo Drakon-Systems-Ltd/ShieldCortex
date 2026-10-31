@@ -773,6 +773,10 @@ const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?
   { re: /(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:(?:[-+]O|--rcfile|--init-file)[ \t]+[^\s;&|-][^\s;&|]*[ \t]+|-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!)|\w+=[^\s;&|({`]*|-[^\s;&|({`]+(?:[ \t]+(?!(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!))[ \t]|\w+=|\d|-|['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-])))[^\s;&|({`]+)?|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?=$|[\s;&|<>()`])/i, signal: 'disable-action-guard', lockPath: true, dataQuotes: true, postureTail: true },
   { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)\b/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
+  // #923 r3: Claude Code session / subagent transcripts (not the memory/ dirs).
+  // Same expression as the guard's CLAUDE_TRANSCRIPT_PATH_RE. `lockPath`: pure
+  // inspection (and the Read tool) reads the transcript, it never writes it.
+  { re: /\.claude[\\/]+projects[\\/]+(?:[^\s;&|<>'"`]*?[\\/])?(?:subagents(?=$|[\\/\s;&|<>'"`)])|[^\s;&|<>'"`\\/]*\.jsonl\b)/i, signal: 'touch-claude-transcript', lockPath: true },
   // #501: the policy lock's own attack surface. The two environment seams that
   // decide WHICH policy-lock reader runs and which root it reads; the protected
   // root and its pointer; and `~/.claude/settings.json`, whose `env` stanza is
@@ -794,7 +798,7 @@ const FALLBACK_SURFACE_KEYS = [
   'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
   // #509 r6 S2: OpenClaw `process` typed-shell payloads (the guard reads them too).
   'data', 'text', 'literal',
-  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
+  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory', 'notebook_path',
   'url', 'uri', 'endpoint', 'href', 'host', 'to',
 ];
 
@@ -1135,7 +1139,7 @@ function fallbackDangerousMatch(args: Record<string, unknown> | undefined, toolN
 // `GUARD_SELF_PROTECTION_SIGNALS` (this plugin does not import the guard
 // module); held equal by enforcement-surface-parity. A verdict carrying one of
 // these is enforced even under `enforce:false` advisory.
-export const SELF_PROTECTION_SIGNALS: readonly string[] = ['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard'];
+export const SELF_PROTECTION_SIGNALS: readonly string[] = ['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard', 'touch-claude-transcript'];
 
 function isSelfProtectionVerdict(signals: readonly string[] | undefined): boolean {
   return Array.isArray(signals) && signals.some(s => SELF_PROTECTION_SIGNALS.includes(s));

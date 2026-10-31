@@ -169,6 +169,9 @@ describe('#509 R4-1 — the guard self-protection floor through the real hook', 
       ['Write', { file_path: join(shieldDir(), 'config.json'), content: '{"actionGuard":{"enabled":false}}' }],
       ['Bash', { command: 'shieldcortex config --action-guard-disable' }],
       ['Bash', { command: 'shieldcortex guard posture off' }],
+      // #923 r3: the Claude Code transcript the owner-present proof reads.
+      ['Write', { file_path: join(home, '.claude', 'projects', 'p', 'sc-509.jsonl'), content: '{}\n' }],
+      ['Bash', { command: 'tail -f ~/.claude/projects/p/s/subagents/agent-1.jsonl >> ~/.claude/projects/p/sc-509.jsonl' }],
     ];
   }
 
@@ -229,6 +232,19 @@ describe('#509 R4-1 — the guard self-protection floor through the real hook', 
     expectAllHeld('enforcing');
     writeConfig({ enforce: false });
     expectAllHeld('watch-only');
+  });
+
+  it('#923 r3: a transcript READ and an auto-memory WRITE are not on the floor (watch-only passes them)', () => {
+    writeConfig({ enforce: false });
+    for (const [tool, input] of [
+      ['Read', { file_path: join(home, '.claude', 'projects', 'p', 'sc-509.jsonl') }],
+      ['Bash', { command: 'tail -n 5 ~/.claude/projects/p/sc-509.jsonl' }],
+      ['Write', { file_path: join(home, '.claude', 'projects', 'p', 'memory', 'MEMORY.md'), content: '- note\n' }],
+      ['Edit', { file_path: join(home, '.claude', 'projects', 'p', 'memory', 'MEMORY.md'), old_string: 'a', new_string: 'b' }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      const r = runHook(tool, input, 'bypassPermissions');
+      expect({ tool, input, decision: r.decision }).toEqual({ tool, input, decision: undefined });
+    }
   });
 
   it('the r2 forgery (promotion aged out, forged init → shadow + fresh shadow cache) cannot be performed through the hook in any mode', () => {

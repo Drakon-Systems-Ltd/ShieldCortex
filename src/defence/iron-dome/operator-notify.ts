@@ -568,6 +568,8 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   'readiness-demoted', 'readiness-promoted', 'readiness-started',
   // #874: parity with the hook — the other two self-protection floor signals.
   'touch-guard-config', 'disable-action-guard',
+  // #923 r3: the transcript floor signal.
+  'touch-claude-transcript',
 ]);
 const SAFE_ACTION_GUARD_OUTCOMES = new Set([
   'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',

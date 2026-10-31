@@ -38,7 +38,7 @@ export const LAUNCHER_SURFACE_KEYS = [
   'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
   // #509 r6 S2: OpenClaw `process` typed-shell payloads (the guard reads them too).
   'data', 'text', 'literal',
-  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
+  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory', 'notebook_path',
   'url', 'uri', 'endpoint', 'href', 'host', 'to',
 ];
 

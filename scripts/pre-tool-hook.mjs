@@ -66,6 +66,10 @@
 import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
 import { mkdirSecure } from './lib/state-perms.mjs';
 import { resolveHarnessPid } from './lib/harness-pid.mjs';
+// #923 r7: the guard's own shell-word tokenizer and path normaliser — one file
+// both planes import, so the outage scan splits and collapses a word exactly as
+// the live guard does.
+import { claudeWordExpands as fallbackClaudeWordExpands, lexicalPathNormalise as fallbackLexicalPathNormalise, shellWords as fallbackShellWords } from './lib/shell-words.mjs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { homedir, tmpdir } from 'os';
 import { spawn } from 'child_process';
@@ -227,6 +231,22 @@ function hookDistRoot() {
   const shipped = resolve(here, '..', 'dist');
   if (inlinePolicyLockPresent()) return shipped;
   return process.env.SHIELDCORTEX_DIST_ROOT ?? shipped;
+}
+
+/**
+ * #923 owner-present verdict. Loaded lazily so a missing or broken detector
+ * module is "unproven" — today's deny — never a crash and never an allow.
+ * The detector always reads the real /proc: there is no environment seam
+ * (#923 review finding 6); tests inject readers into the detector directly.
+ */
+async function proveOwnerPresent(hookData) {
+  try {
+    const mod = await import('./lib/owner-tty.mjs');
+    const result = mod.proveOwnerPresentHarness({ hookData });
+    return result && result.proven === true ? result : { proven: false };
+  } catch {
+    return { proven: false };
+  }
 }
 
 /**
@@ -1085,6 +1105,8 @@ const SAFE_SIGNALS = new Set([
   // #874: the other two self-protection floor signals. Guard reason codes,
   // not operator data; redacted, a floor denial could not name its signal.
   'touch-guard-config', 'disable-action-guard',
+  // #923 r3: the transcript floor signal.
+  'touch-claude-transcript',
 ]);
 /**
  * #436 — the only tiers that deny with no operator affordance. Everything the
@@ -1669,6 +1691,9 @@ function safeDiagnosticReason(reason) {
 
 function safeGuardOutcomeReason(verdict, outcome, event) {
   if (event === 'action_guard_warning') {
+    if (verdict?.ownerPresentTty === true) {
+      return 'Action Guard warning: no prompt surface, but the session runs in an owner-present terminal, so this dangerous tool call was logged and allowed (#923); inspect local audit for details.';
+    }
     return outcome === 'failure_allowed'
       ? 'Action Guard was unavailable and advisory mode allowed a dangerous tool call; inspect local audit for details.'
       : 'Action Guard warning in advisory mode; inspect local audit for details.';
@@ -2402,6 +2427,10 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   { re: /(?:^|[;&|(\n`{]|\$\(|\b(?:bash|sh|zsh|ksh|dash|ash)[ \t]+(?:(?:[-+]O|--rcfile|--init-file)[ \t]+[^\s;&|-][^\s;&|]*[ \t]+|-[^\s;&|]+[ \t]+)*?-\w*c[ \t]+['"]|\beval[ \t]+['"])[ \t]*(?:(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!)|\w+=[^\s;&|({`]*|-[^\s;&|({`]+(?:[ \t]+(?!(?:['"\\]*(?:[^\s;&|'"({`]*\/)?(?:sudo|doas|env|npx|bunx|pnpx|node|nohup|nice|ionice|xargs|command|builtin|exec|eval|time|timeout|stdbuf|setsid)['"\\]*|(?:if|then|elif|else|while|until|do|!))[ \t]|\w+=|\d|-|['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-])))[^\s;&|({`]+)?|\d+(?:\.\d+)?[smhd]?)[ \t]+)*['"\\]*(?:\$(?:\{[^\s;&|{}]*\}|\(?)|(?:[^\s;&|'"({`]*\/)?s['"\\]*h['"\\]*i['"\\]*e['"\\]*l['"\\]*d['"\\]*c['"\\]*o['"\\]*r['"\\]*t['"\\]*e['"\\]*x(?:\.[cm]?js)?(?![\w.@-]))[^\s;&|({`]*(?:[ \t]+[^\s;&|({`]+)*?[ \t]+['"\\]*g['"\\]*u['"\\]*a['"\\]*r['"\\]*d['"\\]*[ \t]+['"\\]*p['"\\]*o['"\\]*s['"\\]*t['"\\]*u['"\\]*r['"\\]*e['"\\]*(?=$|[\s;&|<>()`])/i, signal: 'disable-action-guard', lockPath: true, dataQuotes: true, postureTail: true },
   { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)\b/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
+  // #923 r3: Claude Code session / subagent transcripts (not the memory/ dirs).
+  // Same expression as the guard's CLAUDE_TRANSCRIPT_PATH_RE. `lockPath`: pure
+  // inspection (and the Read tool) reads the transcript, it never writes it.
+  { re: /\.claude[\\/]+projects[\\/]+(?:[^\s;&|<>'"`]*?[\\/])?(?:subagents(?=$|[\\/\s;&|<>'"`)])|[^\s;&|<>'"`\\/]*\.jsonl\b)/i, signal: 'touch-claude-transcript', lockPath: true },
   // #501: the policy lock's own attack surface. The two environment seams that
   // decide WHICH policy-lock reader runs and which root it reads; the protected
   // root and its pointer; and `~/.claude/settings.json`, whose `env` stanza is
@@ -2424,7 +2453,7 @@ const FALLBACK_SURFACE_KEYS = [
   'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
   // #509 r6 S2: OpenClaw `process` typed-shell payloads (the guard reads them too).
   'data', 'text', 'literal',
-  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
+  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory', 'notebook_path',
   'url', 'uri', 'endpoint', 'href', 'host', 'to',
 ];
 
@@ -2754,17 +2783,64 @@ function fallbackPostureMatch(re, text) {
   return folded !== text && fallbackExecutedMatch(re, folded, tail(folded));
 }
 
+/**
+ * #923 r5: the guard's `claudeTranscriptNamed` for the outage path.
+ * `.claude/./projects`, `.claude//projects` and `..` spellings name the same
+ * transcript the row names; symlinks and an earlier `cd` are not resolved (the
+ * documented residual). The surface is already every FALLBACK_SURFACE_KEYS
+ * value, so a decoy key hides nothing.
+ * r7: the words and the `..` collapse come from scripts/lib/shell-words.mjs,
+ * the SAME module the live guard imports (no duplicate to drift): quotes
+ * removed and backslash escapes honoured before collapsing, and a backslash is
+ * never turned into a separator.
+ */
+function fallbackTranscriptRowMatch(re, text) {
+  if (re.test(text)) return true;
+  if (fallbackShellWords(text)
+    .filter((w) => /\.claude/i.test(w))
+    .some((w) => re.test(w) || re.test(fallbackLexicalPathNormalise(w)))) return true;
+  // r10: the live guard's closed-set refusal, from the same module: a `.claude`
+  // word the shell expands after the anchor (`x$((1))y/../projects/…`,
+  // backticks, `${…}`, `$v`, globs, `{a,b}`, mid-word `<(…)`) is floored as a
+  // transcript, not left to whichever other row happens to match.
+  return fallbackClaudeWordExpands(text);
+}
+
+/** Path-bearing surface keys: the guard's PATH_KEYS. */
+const FALLBACK_TRANSCRIPT_PATH_KEYS = ['path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory', 'notebook_path'];
+const FALLBACK_TRANSCRIPT_ROW_RE = FALLBACK_DANGEROUS_PATTERNS.find((r) => r.signal === 'touch-claude-transcript').re;
+
+/**
+ * #923 r6: the guard's `claudeTranscriptPathNamed` over every path key, each
+ * value normalised whole as one path (a comma or `=` in a component is part of
+ * it). A non-read tool whose path key names a transcript is floored even when
+ * a `command: 'ls'` beside it makes the joined surface parse as a read — the
+ * lock-path read skip below is for shell inspection only.
+ */
+function fallbackTranscriptPathKeyMatch(toolInput, toolName) {
+  const seg = String(toolName || '').toLowerCase().split(/__|\.|:|\//).filter(Boolean).pop() || '';
+  if (seg && FALLBACK_READ_TOOLS.test(seg)) return false;
+  return FALLBACK_TRANSCRIPT_PATH_KEYS.some((k) => {
+    const v = toolInput?.[k];
+    return typeof v === 'string' && v.length > 0
+      && (FALLBACK_TRANSCRIPT_ROW_RE.test(v) || FALLBACK_TRANSCRIPT_ROW_RE.test(fallbackLexicalPathNormalise(v)));
+  });
+}
+
 /** First matching dangerous signal for the WS2 fallback, or null (issue #59). */
 function fallbackDangerousMatch(toolInput, toolName) {
   const writeTarget = fallbackWriteTargetMatch(toolInput, toolName);
   if (writeTarget) return writeTarget;
   const text = fallbackExecSurface(toolInput);
   if (!text) return null;
+  if (fallbackTranscriptPathKeyMatch(toolInput, toolName)) return 'touch-claude-transcript';
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
   for (const { re, signal, lockPath, dataQuotes, postureTail } of FALLBACK_DANGEROUS_PATTERNS) {
     if (lockReadOnly && lockPath === true) continue;
     if (postureTail === true ? fallbackPostureMatch(re, text)
-      : dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
+      : dataQuotes === true ? fallbackExecutedMatch(re, text)
+        : signal === 'touch-claude-transcript' ? fallbackTranscriptRowMatch(re, text)
+          : re.test(text)) return signal;
   }
   return null;
 }
@@ -2773,7 +2849,7 @@ function fallbackDangerousMatch(toolInput, toolName) {
 // tool-action-guard.ts `GUARD_SELF_PROTECTION_SIGNALS` for the outage path,
 // where the dist module is exactly what failed to load; the live path reads
 // the guard's own export. Held equal by enforcement-surface-parity.
-const FALLBACK_SELF_PROTECTION_SIGNALS = ['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard'];
+const FALLBACK_SELF_PROTECTION_SIGNALS = ['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard', 'touch-claude-transcript'];
 
 /** The self-protection signals the live guard exports, else the duplicate. */
 function selfProtectionSignals(guard) {
@@ -2787,12 +2863,15 @@ function selfProtectionSignals(guard) {
 function fallbackSelfProtectionMatch(toolInput, toolName) {
   const text = fallbackExecSurface(toolInput);
   if (!text) return null;
+  if (fallbackTranscriptPathKeyMatch(toolInput, toolName)) return 'touch-claude-transcript';
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
   for (const { re, signal, lockPath, dataQuotes, postureTail } of FALLBACK_DANGEROUS_PATTERNS) {
     if (!FALLBACK_SELF_PROTECTION_SIGNALS.includes(signal)) continue;
     if (lockReadOnly && lockPath === true) continue;
     if (postureTail === true ? fallbackPostureMatch(re, text)
-      : dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
+      : dataQuotes === true ? fallbackExecutedMatch(re, text)
+        : signal === 'touch-claude-transcript' ? fallbackTranscriptRowMatch(re, text)
+          : re.test(text)) return signal;
   }
   return null;
 }
@@ -3620,6 +3699,40 @@ process.stdin.on('end', async () => {
     }
 
     const noPromptSurfaceForHold = noPromptSurfaceReason(permissionMode);
+
+    // #923 (principle 4 of #875): no prompt surface, but a human owns the
+    // terminal the harness runs in — log, don't deny. Only the ordinary
+    // dangerous tier: catastrophic exited above, and the self-protection floor
+    // and unscanned calls keep the deny below. Proof is about the HARNESS
+    // (scripts/lib/owner-tty.mjs), never this hook's own fds; anything it
+    // cannot prove — a subagent, a cron, an agent-launched or pty-wrapped
+    // Claude, another platform — falls through to today's deny.
+    // `bypassPermissions` never enters: the owner chose no guard prompts at
+    // all, and #923 keeps its deny (review finding 1).
+    if (noPromptSurfaceForHold && permissionMode !== 'bypassPermissions' && !unscannedBlock && !selfProtected
+      && verdict.severity === 'dangerous' && verdict.decision === 'require_approval') {
+      const owner = await proveOwnerPresent(hookData);
+      if (owner.proven) {
+        const ownerVerdict = { ...verdict, ownerPresentTty: true };
+        const actionId = writeTerminalOutcomeAudit(toolName, ownerVerdict, toolInput, 'warn', 'warned', 'action_guard_warning', {
+          ...baseExtra,
+          noPromptSurfaceReason: noPromptSurfaceForHold,
+          logOnlyReason: 'owner-present-tty',
+        });
+        const notified = await alertGuardOutcome(getNotify(), {
+          toolName,
+          toolInput,
+          verdict: ownerVerdict,
+          outcome: 'warned',
+          event: 'action_guard_warning',
+          sessionKey: baseExtra.sessionKey,
+          actionId,
+        });
+        recordNotifyAudit(toolName, ownerVerdict, toolInput, { ...baseExtra, actionId }, notified);
+        console.error(`[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} — ${safeGuardOutcomeReason(ownerVerdict, 'warned', 'action_guard_warning')} [${safeSignalList(verdict.signals).join(', ')}]`);
+        process.exit(0); // Log-only: warn, emit no decision.
+      }
+    }
 
     // hold / not_brokerable / no broker at all → the pre-#143 refusal, intact
     // only when something can actually hold. Promptless denials are terminal:
