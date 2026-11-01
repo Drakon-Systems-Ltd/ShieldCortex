@@ -23,18 +23,77 @@ export function isSelfHealEnabled(config, env = process.env) {
   return config?.selfHeal !== false;
 }
 
+/**
+ * The strict fail-closed posture over a parsed config (#878). Mirrors
+ * `applyStrictFailClosedPosture` in src/defence/iron-dome/policy-lock.ts key
+ * for key — Action Guard on + enforcing, no auto-approve, broker off, no
+ * reviewed-script exemptions, no readiness gate, defenceMode strict, and the
+ * deprecated `interceptor.actionGuard` alias stripped of those keys so its
+ * per-key gap-fill (#209) cannot bring one back. This file is copied into
+ * OpenClaw hook directories and cannot import dist.
+ */
+function strictFailClosedPosture(raw) {
+  const isBlock = (v) => v && typeof v === "object" && !Array.isArray(v);
+  const out = { ...raw };
+  const guard = isBlock(out.actionGuard) ? { ...out.actionGuard } : {};
+  guard.enabled = true;
+  guard.enforce = true;
+  guard.autoApprove = [];
+  guard.broker = { ...(isBlock(guard.broker) ? guard.broker : {}), enabled: false };
+  guard.reviewedScripts = [];
+  delete guard.readinessGate;
+  out.actionGuard = guard;
+  out.defenceMode = "strict";
+  if (isBlock(out.interceptor) && isBlock(out.interceptor.actionGuard)) {
+    const alias = { ...out.interceptor.actionGuard };
+    for (const key of ["enabled", "enforce", "autoApprove", "broker", "reviewedScripts", "readinessGate"]) delete alias[key];
+    out.interceptor = { ...out.interceptor, actionGuard: alias };
+  }
+  return out;
+}
+
 export function createOpenClawRuntime({
   logPrefix = "[shieldcortex]",
   configPath = path.join(process.env.SHIELDCORTEX_CONFIG_DIR?.trim() || path.join(homedir(), ".shieldcortex"), "config.json"),
 } = {}) {
-  let shieldConfig = null;
+  let rawShieldConfig = null;
+  let rawShieldConfigParsed = false;
   let shieldConfigMtime = 0;
+  let shieldConfig = null;
+  let shieldConfigLinkedUnsigned = false;
   let resolvedServerCmd = null;
   let lastCallErrorType = null;
 
+  // #878: is config.json a symbolic link whose target carries no signature?
+  // Mirrors src/cloud/config.ts (readRawConfigStateUnlocked → readRawConfigState):
+  // an unsigned file behind a link is never adopted, so its verdict is unknown
+  // and unknown is enforced as the strict fail-closed posture — never Guard
+  // off. "Unsigned" is checkConfigIntegrity's: no embedded `_sig` string and no
+  // legacy `.config-sig`. A signed target is honoured, as a regular file is
+  // (this path verifies no HMAC on either). A dangling link has no bytes to
+  // take a posture from and reads `{}`, as src reads it. Keep in step with
+  // scripts/pre-tool-hook.mjs (configIsLinkedUnsigned).
+  async function linkedUnsigned(parsed) {
+    try {
+      if (!(await fs.lstat(configPath)).isSymbolicLink()) return false;
+    } catch {
+      return false;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    if (typeof parsed._sig === "string") return false;
+    try {
+      await fs.stat(path.join(path.dirname(configPath), ".config-sig"));
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
   // mtime-gated cache: re-read on every call if the config file's modified
   // time has advanced. Lets dashboard / CLI toggles take effect on the next
-  // event without an OpenClaw gateway restart.
+  // event without an OpenClaw gateway restart. The link check runs on every
+  // call too (one lstat): swapping a regular file for a link to bytes with the
+  // same mtime must not keep serving the regular file's posture.
   async function loadShieldConfig() {
     let mtime = 0;
     try {
@@ -44,16 +103,29 @@ export function createOpenClawRuntime({
       mtime = 0;
     }
 
-    if (shieldConfig && mtime === shieldConfigMtime) return shieldConfig;
-
-    // Plain JSON. The CLI HMAC-signs this file, but nothing on this path
-    // verifies the signature: callers must not describe it as signed (#509 r8).
-    try {
-      shieldConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
-    } catch {
-      shieldConfig = {};
+    if (!rawShieldConfig || mtime !== shieldConfigMtime) {
+      // Plain JSON. The CLI HMAC-signs this file, but nothing on this path
+      // verifies the signature: callers must not describe it as signed (#509 r8).
+      try {
+        rawShieldConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
+        rawShieldConfigParsed = true;
+      } catch {
+        // Unreadable (a dangling link included), empty or corrupt: `{}`, as
+        // src reads all three. No bytes, so nothing to hold strict either.
+        rawShieldConfig = {};
+        rawShieldConfigParsed = false;
+      }
+      shieldConfigMtime = mtime;
+      shieldConfig = null;
     }
-    shieldConfigMtime = mtime;
+
+    // The returned object's identity changes only when the bytes or the link
+    // verdict do: the plugin re-merges on identity change.
+    const linked = rawShieldConfigParsed && (await linkedUnsigned(rawShieldConfig));
+    if (!shieldConfig || linked !== shieldConfigLinkedUnsigned) {
+      shieldConfigLinkedUnsigned = linked;
+      shieldConfig = linked ? strictFailClosedPosture(rawShieldConfig) : rawShieldConfig;
+    }
     return shieldConfig;
   }
 

@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - **#878 Config integrity follow-ups.** A symlinked `config.json` (live or dangling) is no longer adopted, self-healed or replaced (writes refuse it, and an unsigned one is held at the strict posture), the config cache notices a same-size edit that kept the mtime, `doctor` writes nothing and says `Guard unknown` rather than `off` when the posture depends on a signature not yet adopted, and the cloud Iron Dome cache write skips a bad config instead of throwing.
+- **#878 The Claude Code hook and the OpenClaw runtime now agree with that strict posture.** Both used to take `enabled: false` / `enforce: false` straight from the target of a symlinked, unsigned `config.json` while the CLI and `doctor` held it strict. They now hold it strict too: Guard on and enforcing, no auto-approve, broker off, no readiness gate. A signed target, a regular file and a dangling link read as before. The strict posture the hook applies when a policy lock cannot be verified now also drops `readinessGate`, as the dist implementation already did.
 
 ## [5.17.1] - 2026-10-31
 

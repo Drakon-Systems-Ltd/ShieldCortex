@@ -279,6 +279,10 @@ function inlineStrictPosture(config) {
     actionGuard: { ...(config.actionGuard ?? {}), ...INLINE_STRICT_POSTURE.actionGuard },
     defenceMode: INLINE_STRICT_POSTURE.defenceMode,
   };
+  // #509 enforce-when-ready runs in shadow until proven — not strict. Dropped
+  // here exactly as `applyStrictFailClosedPosture` drops it in dist (#878: a
+  // kept `readinessGate: true` let the "strict" posture run in shadow).
+  delete out.actionGuard.readinessGate;
   // #522 (GPT-6 round-6, item 1), the second spelling. The deprecated
   // `interceptor.actionGuard` alias gap-fills per key in
   // flattenActionGuardConfig (#209). Every pinned key is now present on the
@@ -290,6 +294,7 @@ function inlineStrictPosture(config) {
   if (isBlock(out.interceptor) && isBlock(out.interceptor.actionGuard)) {
     const alias = { ...out.interceptor.actionGuard };
     for (const key of Object.keys(INLINE_STRICT_POSTURE.actionGuard)) delete alias[key];
+    delete alias.readinessGate;
     out.interceptor = { ...out.interceptor, actionGuard: alias };
   }
   return out;
@@ -338,17 +343,51 @@ async function applyHookPolicyLock(config) {
   }
 }
 
+/**
+ * Is `config.json` a symbolic link whose target carries no signature? (#878)
+ *
+ * Mirrors the src rule in `readRawConfigStateUnlocked` / `readRawConfigState`
+ * (src/cloud/config.ts): the read layer never adopts (signs) an unsigned file
+ * behind a link, so its integrity verdict is `unverified` — unknown — and
+ * unknown is enforced as the strict fail-closed posture, never Guard off.
+ * "Unsigned" is exactly what `checkConfigIntegrity` calls unsigned: no
+ * embedded `_sig` string and no legacy `.config-sig` beside the config. A
+ * SIGNED link target is honoured here as it is for a regular file; this hook
+ * does not verify the HMAC on either (pre-existing, and not this rule).
+ *
+ * A dangling link is not caught here: there are no target bytes to take a
+ * posture from, and src reads it as unreadable → `{}`, which this hook's
+ * `existsSync` branch also yields. Keep in step with
+ * hooks/openclaw/cortex-memory/runtime.mjs (`linkedUnsigned`); standalone
+ * scripts cannot import src.
+ */
+function configIsLinkedUnsigned(configPath, parsed) {
+  try {
+    if (!lstatSync(configPath).isSymbolicLink()) return false;
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  if (typeof parsed._sig === 'string') return false;
+  return !existsSync(join(dirname(configPath), '.config-sig'));
+}
+
 async function loadActionGuardConfig() {
   let parsed = null;
+  let linkedUnsigned = false;
   try {
     const configPath = join(hookConfigDir(), 'config.json');
     if (existsSync(configPath)) parsed = JSON.parse(readFileSync(configPath, 'utf-8'));
+    linkedUnsigned = configIsLinkedUnsigned(configPath, parsed);
   } catch {
     // Unreadable/corrupt config → the guard's own defaults, exactly as before.
     // Enforce-by-default means a corrupt config must not silently disable it.
     parsed = null;
   }
-  const config = await applyHookPolicyLock(parsed ?? {});
+  // #878: a linked, unsigned config.json is held strict, as src holds it —
+  // its own enabled/enforce/readinessGate are never read.
+  const base = linkedUnsigned ? inlineStrictPosture(parsed) : (parsed ?? {});
+  const config = await applyHookPolicyLock(base);
   return flattenActionGuardConfig(config);
 }
 
