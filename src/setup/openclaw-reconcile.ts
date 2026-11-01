@@ -338,9 +338,12 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
 
   const stepResults: StepResult[] = [];
   let selfCheckResult: SelfCheckRunResult | undefined;
-  // #977 review: when the latest gateway-affecting change started. A reused
-  // restart requested before it never loaded that change.
+  // #977 review: when the latest gateway-affecting change LANDED, in this pass
+  // or an earlier one. A reused restart requested before that moment never
+  // loaded it. Only a step that changed something counts: a write that failed
+  // left the world as the restart found it, so the readiness path still holds.
   let lastChangeAtMs: number | undefined = options.lastChangeAtMs;
+  const noteChange = (): void => { lastChangeAtMs = Date.now(); };
   let restartPending = false;
 
   if (!apply) {
@@ -349,9 +352,6 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   }
 
   for (const step of plan) {
-    // Every step other than the reload and the self-check changes what the
-    // gateway must load: plugin install/update/enable, registration, prune.
-    if (step.kind !== 'self-check' && step.kind !== 'gateway-reload') lastChangeAtMs = Date.now();
     if (step.kind === 'self-check') {
       selfCheckResult = await selfCheck(home, pluginId);
       stepResults.push({ kind: step.kind, ok: selfCheckResult.ok, detail: selfCheckResult.reasons.join('; ') });
@@ -398,7 +398,7 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
       if (r.restarted && predatesChange) {
         restartPending = true;
         restart = 'pending';
-        detail = 'restart pending — this run restarted the gateway before these changes, and a second restart is not issued in the same run (#977)';
+        detail = `changes applied after this run's gateway restart — the running gateway has not loaded them; restart the gateway once more to load them: ${manualGatewayRestartCommand()}`;
         messages.push(
           `gateway restart pending: changes made after this run's gateway restart are not loaded yet, so protection is NOT confirmed until the gateway restarts once more: ${manualGatewayRestartCommand()}`,
         );
@@ -421,6 +421,7 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
         r = { ok: false, detail: `restore failed: ${err instanceof Error ? err.message : String(err)}` };
       }
       stepResults.push({ kind: step.kind, ok: r.ok, detail: r.detail });
+      if (r.ok) noteChange();
       if (!r.ok) {
         messages.push(
           `SECURITY: could not restore the plugin registration in openclaw.json: ${r.detail} — the host stays UNPROTECTED until the plugin is registered again`,
@@ -430,14 +431,18 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     }
     if (step.kind === 'prune-duplicate-dirs') {
       let ok = true;
+      let pruned = 0;
       for (const d of step.dirs ?? []) {
         try {
           pruneDir(home, d);
+          pruned += 1;
         } catch (err) {
           ok = false;
           messages.push(`prune failed for ${d}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+      // A partial prune still changed the world the running gateway booted from.
+      if (pruned > 0) noteChange();
       stepResults.push({ kind: step.kind, ok, detail: `pruned ${(step.dirs ?? []).length} dir(s)` });
       continue;
     }
@@ -468,6 +473,7 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     });
     const summary = summarised.lines[0] ?? '';
     stepResults.push({ kind: step.kind, ok, detail: summary });
+    if (ok) noteChange();
     if (!ok) messages.push(`command failed (openclaw ${(step.command ?? []).join(' ')}): ${summary}`);
   }
 

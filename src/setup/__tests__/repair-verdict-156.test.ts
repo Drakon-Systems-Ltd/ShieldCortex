@@ -117,6 +117,8 @@ describe('#156 — no internal vocabulary reaches the headline', () => {
     { applied: true, canaryConsented: false, selfCheck: { ok: false, rosterState: 'loaded' as const, canaryProof: false, versionProof: true } },
     { applied: true, canaryConsented: true, selfCheck: { ok: false, rosterState: 'loaded' as const, versionProof: false } },
     { applied: true, canaryConsented: true, readinessUnproven: true },
+    // #977 review: a passing self-check read a gateway that predates this run's changes.
+    { applied: true, canaryConsented: true, restartPending: true, restartCommand: 'systemctl --user restart openclaw-gateway', selfCheck: { ok: true, rosterState: 'loaded' as const, canaryProof: true, versionProof: true } },
     { applied: false, canaryConsented: false },
   ];
 

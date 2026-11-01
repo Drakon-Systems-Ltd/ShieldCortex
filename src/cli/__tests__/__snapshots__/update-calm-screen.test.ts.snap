@@ -101,6 +101,54 @@ Update failed - 1 problem to fix
                        Fix: shieldcortex repair
   [ok]  Skill          updated
   [off] Guard          off (the default)
+                       Turn on: shieldcortex config --action-guard-enable
+
+ShieldCortex updated to 5.9.0 - 1 thing to check
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [!]   OpenClaw       plugin 5.9.0 installed, gateway restart failed
+                       OpenClaw may still be running the previous plugin.
+                       Fix: systemctl --user restart openclaw-gateway
+  [ok]  Skill          updated
+  [off] Guard          off (the default)
+                       Turn on: shieldcortex config --action-guard-enable
+
+ShieldCortex updated to 5.9.0 - 1 thing to check
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [!]   OpenClaw       plugin 5.9.0 installed, gateway restart timed out
+                       The gateway may still be starting; don't restart it again
+                       yet.
+                       Check: shieldcortex doctor
+  [ok]  Skill          updated
+  [off] Guard          off (the default)
+                       Turn on: shieldcortex config --action-guard-enable
+
+ShieldCortex updated to 5.9.0 - 1 thing to check
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [!]   OpenClaw       plugin 5.9.0 installed, gateway restarted but not
+                       confirmed back up
+                       The gateway wasn't seen coming back, so protection isn't
+                       confirmed.
+                       Check: shieldcortex doctor
+  [ok]  Skill          updated
+  [off] Guard          off (the default)
+                       Turn on: shieldcortex config --action-guard-enable
+
+ShieldCortex updated to 5.9.0 - 1 thing to check
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [!]   OpenClaw       plugin 5.9.0 installed, gateway needs one more restart
+                       This run's plugin changes load only after one more
+                       gateway restart.
+                       Fix: systemctl --user restart openclaw-gateway
+  [ok]  Skill          updated
+  [off] Guard          off (the default)
                        Turn on: shieldcortex config --action-guard-enable"
 `;
 
@@ -222,4 +270,60 @@ exports[`update summary: five scenarios g: gateway without plugin, plugin step w
   ✗ Guard          on, but OpenClaw isn't running the plugin
                    Risky tool calls in OpenClaw are not being stopped.
                    Fix: shieldcortex repair"
+`;
+
+exports[`update summary: five scenarios h: gateway restart failed (snapshot) 1`] = `
+"ShieldCortex updated to 5.9.0 — 1 thing to check
+
+  ✓ Package        5.9.0
+  ✓ Engine         ready
+  ! OpenClaw       plugin 5.9.0 installed, gateway restart failed
+                   OpenClaw may still be running the previous plugin.
+                   Fix: systemctl --user restart openclaw-gateway
+  ✓ Skill          updated
+  ○ Guard          off (the default)
+                   Turn on: shieldcortex config --action-guard-enable"
+`;
+
+exports[`update summary: five scenarios h: gateway restart not confirmed back up (snapshot) 1`] = `
+"ShieldCortex updated to 5.9.0 — 1 thing to check
+
+  ✓ Package        5.9.0
+  ✓ Engine         ready
+  ! OpenClaw       plugin 5.9.0 installed, gateway restarted but not confirmed
+                   back up
+                   The gateway wasn't seen coming back, so protection isn't
+                   confirmed.
+                   Check: shieldcortex doctor
+  ✓ Skill          updated
+  ○ Guard          off (the default)
+                   Turn on: shieldcortex config --action-guard-enable"
+`;
+
+exports[`update summary: five scenarios h: gateway restart still needed (snapshot) 1`] = `
+"ShieldCortex updated to 5.9.0 — 1 thing to check
+
+  ✓ Package        5.9.0
+  ✓ Engine         ready
+  ! OpenClaw       plugin 5.9.0 installed, gateway needs one more restart
+                   This run's plugin changes load only after one more gateway
+                   restart.
+                   Fix: systemctl --user restart openclaw-gateway
+  ✓ Skill          updated
+  ○ Guard          off (the default)
+                   Turn on: shieldcortex config --action-guard-enable"
+`;
+
+exports[`update summary: five scenarios h: gateway restart timed out (snapshot) 1`] = `
+"ShieldCortex updated to 5.9.0 — 1 thing to check
+
+  ✓ Package        5.9.0
+  ✓ Engine         ready
+  ! OpenClaw       plugin 5.9.0 installed, gateway restart timed out
+                   The gateway may still be starting; don't restart it again
+                   yet.
+                   Check: shieldcortex doctor
+  ✓ Skill          updated
+  ○ Guard          off (the default)
+                   Turn on: shieldcortex config --action-guard-enable"
 `;

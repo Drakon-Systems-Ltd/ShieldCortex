@@ -248,15 +248,17 @@ describe('#977 — restartOpenClawGateway goes through the process latch', () =>
     const reloads = result.stepResults.filter((s) => s.kind === 'gateway-reload');
     expect(reloads.length).toBe(2);
     expect(exec.calls).toBe(1);
-    // The installer's restart predates both passes' registration writes, so
-    // neither pass may call it a completed reload (#977 review).
+    // The reuse-with-nothing-changed case (#977 review): both restores FAILED,
+    // so nothing was applied after the installer's restart and the readiness
+    // path still speaks for the running gateway.
     for (const s of reloads) {
-      expect(s.ok).toBe(false);
-      expect(s.restart).toBe('pending');
-      expect(s.detail).toMatch(/restart pending/);
+      expect(s.ok).toBe(true);
+      expect(s.detail).toMatch(/not repeated/);
+      expect(s.restart).toBe('completed');
     }
-    expect(result.ok).toBe(false);
-    // Readiness is still measured from the ONE restart, not from each pass.
+    expect(protectionFactsFromReconcile(result).gatewayRestart).toBe('completed');
+    expect(result.messages.join('\n')).not.toMatch(/gateway restart pending/);
+    // Readiness is measured from the ONE restart, not from each pass.
     expect(waits).toEqual([first.requestedAtMs, first.requestedAtMs]);
   });
 });
@@ -311,8 +313,11 @@ describe('#977 review — a reused restart that predates later changes is owed, 
     const reloads = result.stepResults.filter((s) => s.kind === 'gateway-reload');
     expect(reloads.map((s) => s.restart)).toEqual(['completed', 'pending']);
     expect(reloads.map((s) => s.ok)).toEqual([true, false]);
+    expect(reloads[1].detail).toContain(manualGatewayRestartCommand());
+    expect(reloads[1].detail).not.toMatch(/ready/);
     expect(result.ok).toBe(false);
     expect(result.messages.join('\n')).toMatch(/gateway restart pending/);
+    expect(result.messages.join('\n')).not.toMatch(/reconciled: plugin confirmed/);
 
     const ledger = protectionLedgerFromReconcile(result);
     expect(ledger.outcome).not.toBe('protected');
@@ -333,6 +338,24 @@ describe('#977 review — a reused restart that predates later changes is owed, 
     expect(exec.calls).toBe(1);
     expect(protectionFactsFromReconcile(result).gatewayRestart).toBe('pending');
     expect(result.ok).toBe(false);
+  });
+
+  it('a step that failed changed nothing: the reused restart keeps the readiness path', async () => {
+    const once = createGatewayRestartOnce();
+    const exec = countingExec();
+    await once.run(exec); // an earlier step's restart
+    const result = await reconcileOpenClawPluginState(baseOptions({
+      restoreRegistration: () => ({ ok: false, detail: 'write did not land' }),
+      reloadGateway: () => once.run(exec) as Promise<GatewayReloadResult>,
+      selfCheck: async () => absent as never,
+    }));
+    expect(exec.calls).toBe(1);
+    const reloads = result.stepResults.filter((s) => s.kind === 'gateway-reload');
+    expect(reloads.length).toBeGreaterThan(0);
+    for (const s of reloads) expect(s).toMatchObject({ ok: true, restart: 'completed' });
+    expect(protectionFactsFromReconcile(result).gatewayRestart).toBe('completed');
+    expect(result.messages.join('\n')).not.toMatch(/gateway restart pending/);
+    expect(result.ok).toBe(false); // the failed restore is the finding, not the restart
   });
 
   it('a reused restart requested AFTER the last change did load it — completed, not pending', async () => {

@@ -69,6 +69,15 @@ const GATEWAY_WITHOUT_PLUGIN: UpdateSummaryInput['protection'] = {
   nextCommand: 'shieldcortex repair',
 };
 const PLUGIN_STEP_WARN: UpdateSummaryInput['plugin'] = { status: 'warn', rerun: 'shieldcortex update' };
+// PR #979 review: the run's one gateway restart did not end well, or is still
+// owed. The plugin files are in place; whether the gateway runs them is open.
+const RESTART_COMMAND = 'systemctl --user restart openclaw-gateway';
+function restartOutcome(
+  gatewayRestart: NonNullable<UpdateSummaryInput['protection']['gatewayRestart']>,
+  over: Partial<UpdateSummaryInput['protection']> = {},
+): UpdateSummaryInput['protection'] {
+  return { ...base().protection, gatewayRestart, restartCommand: RESTART_COMMAND, ...over };
+}
 
 const SCENARIOS: Record<string, UpdateSummaryInput> = {
   'a: all OK, Guard off': base(),
@@ -89,6 +98,12 @@ const SCENARIOS: Record<string, UpdateSummaryInput> = {
   // green Guard row; the proven-absent plugin must stay red.
   'g: gateway without plugin, plugin step warned, Guard on': base({ guardOn: true, plugin: PLUGIN_STEP_WARN, protection: GATEWAY_WITHOUT_PLUGIN }),
   'g: gateway without plugin, plugin step warned, Guard off': base({ plugin: PLUGIN_STEP_WARN, protection: GATEWAY_WITHOUT_PLUGIN }),
+  // PR #979 review: a restart that failed, timed out, was not confirmed back
+  // up, or is still owed is a yellow row to check, never a green tick.
+  'h: gateway restart failed': base({ protection: restartOutcome('failed') }),
+  'h: gateway restart timed out': base({ protection: restartOutcome('timed-out') }),
+  'h: gateway restart not confirmed back up': base({ protection: restartOutcome('unconfirmed') }),
+  'h: gateway restart still needed': base({ protection: restartOutcome('pending') }),
 };
 
 const EXPECTED_HEADLINE: Record<string, 'updated' | 'check' | 'failed'> = {
@@ -101,6 +116,10 @@ const EXPECTED_HEADLINE: Record<string, 'updated' | 'check' | 'failed'> = {
   'f: plugin behind, Guard on': 'check',
   'g: gateway without plugin, plugin step warned, Guard on': 'failed',
   'g: gateway without plugin, plugin step warned, Guard off': 'failed',
+  'h: gateway restart failed': 'check',
+  'h: gateway restart timed out': 'check',
+  'h: gateway restart not confirmed back up': 'check',
+  'h: gateway restart still needed': 'check',
 };
 
 function screen(input: UpdateSummaryInput, opts: { color?: boolean; ascii?: boolean } = {}): string[] {
@@ -306,6 +325,58 @@ describe('a gateway that started without the plugin is always red (#773 follow-u
     const summary = buildUpdateSummary(input);
     expect(summary.rows.find((r) => r.label === 'OpenClaw')?.command).toBe('shieldcortex repair');
     expect(summary.rows.find((r) => r.label === 'Guard')?.command).toBe('shieldcortex repair');
+  });
+});
+
+describe('a gateway restart that did not end well is a row to check (PR #979 review)', () => {
+  const CASES = [
+    ['failed', 'gateway restart failed', RESTART_COMMAND, 'Fix'],
+    ['pending', 'gateway needs one more restart', RESTART_COMMAND, 'Fix'],
+    // A restart may still be in flight: restarting again is the #977 hazard.
+    ['timed-out', 'gateway restart timed out', 'shieldcortex doctor', 'Check'],
+    ['unconfirmed', 'gateway restarted but not confirmed back up', 'shieldcortex doctor', 'Check'],
+  ] as const;
+
+  for (const [outcome, clause, command, label] of CASES) {
+    for (const status of ['ok', 'unproven'] as const) {
+      it(`${outcome}, plugin check ${status}: yellow OpenClaw row with a why and "${label}: ${command}"`, () => {
+        const input = base({ protection: restartOutcome(outcome, { status, loaded: status === 'ok' ? 'yes' : 'unknown' }) });
+        const summary = buildUpdateSummary(input);
+        const oc = summary.rows.filter((r) => r.label === 'OpenClaw');
+        expect(oc).toHaveLength(1);
+        expect(oc[0]).toMatchObject({ mark: 'check', command, commandLabel: label });
+        expect(oc[0].text).toBe('plugin 5.9.0 ' + (status === 'ok' ? 'loaded' : 'installed') + ', ' + clause);
+        expect(String(oc[0].why).split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(12);
+        expect(summary.headline).toBe('check');
+        const ascii = screen(input, { ascii: true }).join('\n');
+        expect(ascii).toContain('[!]   OpenClaw');
+        expect(ascii).not.toContain('[ok]  OpenClaw');
+        expect(screen(input).join('\n')).not.toMatch(/✓ OpenClaw/);
+      });
+    }
+  }
+
+  it('a completed restart stays green, with no command', () => {
+    for (const status of ['ok', 'unproven'] as const) {
+      const row = buildUpdateSummary(base({ protection: restartOutcome('completed', { status }) })).rows.find((r) => r.label === 'OpenClaw');
+      expect(row).toMatchObject({ mark: 'ok' });
+      expect(row?.text).toMatch(/, gateway restarted$/);
+      expect(row?.command).toBeUndefined();
+    }
+  });
+
+  it('without a verified restart command for the platform, failed and pending fall back to doctor', () => {
+    for (const outcome of ['failed', 'pending'] as const) {
+      const row = buildUpdateSummary(base({ protection: { ...base().protection, gatewayRestart: outcome } })).rows.find((r) => r.label === 'OpenClaw');
+      expect(row).toMatchObject({ mark: 'check', command: 'shieldcortex doctor', commandLabel: 'Check' });
+    }
+  });
+
+  it('the absent plugin (red) and a plugin behind this CLI (yellow, install fix) still win over the restart row', () => {
+    const absent = buildUpdateSummary(base({ protection: { ...GATEWAY_WITHOUT_PLUGIN, gatewayRestart: 'failed', restartCommand: RESTART_COMMAND } }));
+    expect(absent.rows.find((r) => r.label === 'OpenClaw')).toMatchObject({ mark: 'fail', command: 'shieldcortex repair' });
+    const behind = buildUpdateSummary(base({ protection: { ...PLUGIN_BEHIND, gatewayRestart: 'pending', restartCommand: RESTART_COMMAND } }));
+    expect(behind.rows.find((r) => r.label === 'OpenClaw')).toMatchObject({ mark: 'check', command: PLUGIN_INSTALL_COMMAND });
   });
 });
 
