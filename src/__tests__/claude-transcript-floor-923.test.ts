@@ -17,7 +17,7 @@
  */
 import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -677,6 +677,69 @@ describe('#923 r11 — the hook outage fallback agrees on joined spellings (dist
   }
   it.each(R11_NOT_FLOORED)('%s passes with the guard unloaded', (_label, command) => {
     expect(run(command, false, 'bypassPermissions').decision).toBeUndefined();
+  });
+});
+
+/**
+ * #923 r13 (CI red on PR964): the hook imported scripts/lib/shell-words.mjs
+ * STATICALLY. A hook copy without that module (the #878 and #613 suites copy
+ * only state-perms + harness-pid) died at ESM link time with exit 1, which
+ * Claude Code reads as allow. The parser is now loaded lazily and a missing
+ * module fails STRICT on the outage plane: the hook still runs to exit 0, a
+ * non-read exec surface is floored as the transcript, a read is unaffected.
+ */
+describe('#923 r13 — a hook copy without the shell-word module never crashes and fails strict', () => {
+  let root: string;
+  let hookCopy: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'sc-923-r13-copy-'));
+    const scripts = join(root, 'scripts');
+    mkdirSync(join(scripts, 'lib'), { recursive: true });
+    copyFileSync(HOOK, join(scripts, 'pre-tool-hook.mjs'));
+    for (const dep of ['state-perms.mjs', 'harness-pid.mjs']) copyFileSync(join(repoRoot, 'scripts', 'lib', dep), join(scripts, 'lib', dep));
+    hookCopy = join(scripts, 'pre-tool-hook.mjs');
+    mkdirSync(join(root, 'home', '.shieldcortex'), { recursive: true });
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  function run(command: string, enforce: boolean, distRoot: string): { code: number | null; decision?: string; reason?: string; stderr: string } {
+    const home = join(root, 'home');
+    writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce } }));
+    const r = spawnSync(process.execPath, [hookCopy], {
+      input: JSON.stringify({ session_id: 's', cwd: '/tmp', hook_event_name: 'PreToolUse', permission_mode: 'dontAsk', tool_name: 'Bash', tool_input: { command } }),
+      env: { ...process.env, HOME: home, SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex'), SHIELDCORTEX_DIST_ROOT: distRoot },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    const line = (r.stdout ?? '').split('\n').find((l) => l.trim().startsWith('{'));
+    const h = line ? JSON.parse(line).hookSpecificOutput : undefined;
+    return { code: r.status, decision: h?.permissionDecision, reason: h?.permissionDecisionReason, stderr: r.stderr ?? '' };
+  }
+
+  for (const enforce of [true, false]) {
+    it(`enforce=${enforce}, dist missing: a transcript write is denied as the floor, exit 0`, () => {
+      const r = run(`cp /tmp/forged.jsonl ${T}`, enforce, join(root, 'no-dist'));
+      expect(r.code).toBe(0);
+      expect(r.decision).toBe('deny');
+      expect(r.reason).toMatch(/touch-claude-transcript/);
+    });
+    it(`enforce=${enforce}, dist missing: a computed write the parser would judge is held strict, exit 0`, () => {
+      const r = run('A=/tmp/x; cp /tmp/a "$A"', enforce, join(root, 'no-dist'));
+      expect(r.code).toBe(0);
+      expect(r.decision).toBe('deny');
+      expect(r.reason).toMatch(/touch-claude-transcript/);
+      expect(r.stderr).toMatch(/shell-word parser .* could not be loaded/);
+    });
+  }
+  it('dist missing: reading a transcript is not floored', () => {
+    const r = run(`cat ${T}`, true, join(root, 'no-dist'));
+    expect(r.code).toBe(0);
+    expect(r.decision).toBeUndefined();
+  });
+  it('dist present: the live guard does not need the module (ordinary copy allowed, transcript write denied)', () => {
+    const dist = join(repoRoot, 'dist');
+    expect(run('cp /tmp/a /tmp/b', true, dist)).toMatchObject({ code: 0, decision: undefined });
+    expect(run(`cp /tmp/forged.jsonl ${T}`, true, dist)).toMatchObject({ code: 0, decision: 'deny' });
   });
 });
 

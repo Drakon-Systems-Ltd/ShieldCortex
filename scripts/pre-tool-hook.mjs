@@ -66,10 +66,6 @@
 import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
 import { mkdirSecure } from './lib/state-perms.mjs';
 import { resolveHarnessPid } from './lib/harness-pid.mjs';
-// #923 r7: the guard's own shell-word tokenizer and path normaliser — one file
-// both planes import, so the outage scan splits and collapses a word exactly as
-// the live guard does.
-import { claudeWordExpands as fallbackClaudeWordExpands, lexicalPathNormalise as fallbackLexicalPathNormalise, shellWords as fallbackShellWords } from './lib/shell-words.mjs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { homedir, tmpdir } from 'os';
 import { spawn } from 'child_process';
@@ -77,6 +73,50 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { createHash, createHmac, randomBytes } from 'crypto';
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+// #923 r7: the guard's own shell-word tokenizer and path normaliser — one file
+// both planes import, so the outage scan splits and collapses a word exactly as
+// the live guard does.
+// r13: loaded LAZILY and caught, never as a static import. A static import of
+// a module missing from a hook copy (a partial install, a test copy) fails at
+// ESM link time: the process exits 1 before any code here runs, and Claude
+// Code reads a non-2 exit as "allow" — the launcher only scans for the
+// catastrophic tier. A missing parser now FAILS STRICT on the only plane that
+// uses it (the dist-outage fallback): every exec surface that reaches the
+// transcript row is floored, and any path-key value mentioning `.claude` is
+// judged as the transcript. The live guard does not use these wrappers.
+let fallbackShellWordsModule = null;
+try {
+  fallbackShellWordsModule = await import('./lib/shell-words.mjs');
+} catch {
+  fallbackShellWordsModule = null;
+}
+let fallbackShellWordsMissingNoted = false;
+function noteFallbackShellWordsMissing() {
+  if (fallbackShellWordsMissingNoted) return;
+  fallbackShellWordsMissingNoted = true;
+  process.stderr.write(
+    '[shieldcortex] the shell-word parser (scripts/lib/shell-words.mjs) could not be loaded — ' +
+    'holding the outage transcript floor strict. Run `shieldcortex repair` to restore the install.\n',
+  );
+}
+/** A judged path that names the transcript: the strict stand-in when the parser is missing. */
+const FALLBACK_STRICT_TRANSCRIPT_PATH = '/.claude/projects/parser-unavailable/strict.jsonl';
+function fallbackShellWords(text) {
+  if (fallbackShellWordsModule) return fallbackShellWordsModule.shellWords(text);
+  noteFallbackShellWordsMissing();
+  return String(text ?? '').split(/\s+/).filter(Boolean);
+}
+function fallbackLexicalPathNormalise(p) {
+  if (fallbackShellWordsModule) return fallbackShellWordsModule.lexicalPathNormalise(p);
+  noteFallbackShellWordsMissing();
+  return /\.claude/i.test(String(p ?? '')) ? FALLBACK_STRICT_TRANSCRIPT_PATH : String(p ?? '');
+}
+function fallbackClaudeWordExpands(text) {
+  if (fallbackShellWordsModule) return fallbackShellWordsModule.claudeWordExpands(text);
+  noteFallbackShellWordsMissing();
+  return true;
+}
 
 // ==================== CONFIG ====================
 
