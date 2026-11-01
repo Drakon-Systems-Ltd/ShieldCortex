@@ -14,6 +14,7 @@
 import {
   actionGuardPosture,
   ConfigIntegrityRefusal,
+  ConfigSymlinkRefusal,
   getActionGuardCoreConfig,
   getActionGuardNotifyConfig,
   setActionGuardCoreConfig,
@@ -151,8 +152,9 @@ export async function offerActionGuardPosture(deps: PostureDeps): Promise<Postur
     (deps.apply ?? defaultApply)(picked.choice);
   } catch (err) {
     // #647: a tampered config.json refuses the write rather than re-signing
-    // it — same treatment as a lock refusal: say why, change nothing.
-    if (err instanceof PolicyLockRefusal || err instanceof ConfigIntegrityRefusal) {
+    // it — same treatment as a lock refusal: say why, change nothing. #878: so
+    // does a symlinked one (the write would replace the link).
+    if (err instanceof PolicyLockRefusal || err instanceof ConfigIntegrityRefusal || err instanceof ConfigSymlinkRefusal) {
       log(err.message);
       return null;
     }

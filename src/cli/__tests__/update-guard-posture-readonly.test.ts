@@ -408,7 +408,12 @@ describe('a config with no signature yet is unknown read-only, never off', () =>
   // B3-R3: empty/whitespace early-return used to skip the cache-disagreement
   // check, so a file emptied in place (mtime restored) read as off while the
   // getter still served cached strict-ON.
-  (asRoot ? it.skip : it)('B3-R3: emptying config.json in place after a cached strict verdict is unknown, not off', async () => {
+  // #878 item 2 keys the cache on the file's identity (size and ctime
+  // included), which an in-place blanking changes whatever mtime is restored:
+  // the getter re-reads the blanked file instead of serving its cached strict
+  // verdict, so both readers agree on what is now enforced. (The disagreement
+  // check stays for a filesystem that does not track ctime.)
+  (asRoot ? it.skip : it)('B3-R3: emptying config.json in place after a cached strict verdict is re-read by both readers', async () => {
     try {
       writeConfig({ actionGuard: { enabled: false } });
       const { config } = await fresh();
@@ -419,19 +424,12 @@ describe('a config with no signature yet is unknown read-only, never off', () =>
       const st = fs.statSync(cfg);
       fs.writeFileSync(cfg, '  \n');
       fs.utimesSync(cfg, st.atime, st.mtime);
-      expect(config.readActionGuardCoreConfigReadOnly()).toBeNull();
+      // The getter no longer answers from its cached strict verdict...
+      expect(config.getActionGuardCoreConfig().enabled).toBe(false);
+      // ...so the read-only reader has nothing to disagree with.
+      expect(config.readActionGuardCoreConfigReadOnly()).toEqual({ enabled: false, enforce: true, readinessGate: false });
       const update = await import('../update.js');
-      const guard = await update.readGuardSwitch();
-      expect(guard).toBe('unknown');
-      const { buildUpdateSummary } = await import('../update-summary.js');
-      const summary = buildUpdateSummary({
-        fromVersion: '5.9.0', toVersion: '5.10.0', packageState: 'updated',
-        engine: { ok: true }, plugin: { status: 'ok' }, skill: { status: 'ok' },
-        guardOn: guard !== 'off', guardUnknown: guard === 'unknown',
-        protection: { status: 'ok' },
-      });
-      expect(summary.headline).toBe('check');
-      expect(summary.rows.find((r) => r.label === 'Guard')).toMatchObject({ mark: 'check' });
+      expect(await update.readGuardSwitch()).toBe('off');
     } finally {
       fs.chmodSync(configDir, 0o700);
     }

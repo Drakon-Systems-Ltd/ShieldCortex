@@ -17,6 +17,8 @@ import { readLatestBootRoster, findRegistrationSince, findGatewayAttributedRegis
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveRepairConsent } from './repair-consent.js';
 import { evaluateToolCall } from '../defence/iron-dome/tool-action-guard.js';
+import { applyStrictFailClosedPosture } from '../defence/iron-dome/policy-lock.js';
+import { configIsLinkedUnauthenticated } from '../../scripts/lib/config-authenticity.mjs';
 
 /**
  * Honest-state post-install/enable self-check (#74 deliverable 2).
@@ -543,15 +545,31 @@ const benignPipeline = () => ({
 export function resolveBoxInterceptorConfig(home: string, defaults: unknown): unknown {
   const base = (defaults && typeof defaults === 'object' ? defaults : {}) as Record<string, unknown>;
   try {
-    const raw = JSON.parse(fs.readFileSync(path.join(home, '.shieldcortex', 'config.json'), 'utf-8'));
-    const overrides = raw?.interceptor;
-    if (!overrides || typeof overrides !== 'object') return { ...base };
+    const configFile = path.join(home, '.shieldcortex', 'config.json');
+    const text = fs.readFileSync(configFile, 'utf-8');
+    let raw = JSON.parse(text);
+    // #878 r4/r5: the runtime holds a symlinked config.json that no signature
+    // authenticates at the strict fail-closed posture (runtime.mjs
+    // linkedUnauthenticated). The canary must be built with that posture, not
+    // the link target's own values: the strict top-level guard is laid over
+    // the alias it strips. Same verifier as the hook: the HMAC recomputed with
+    // the `.integrity-key` beside the link, never `_sig`/`.config-sig` presence.
+    const strict = configIsLinkedUnauthenticated(configFile, raw, text);
+    if (strict) raw = applyStrictFailClosedPosture(raw);
+    const strictGuard = strict ? (raw.actionGuard as Record<string, unknown>) : undefined;
+    const overrides = raw?.interceptor && typeof raw.interceptor === 'object' ? raw.interceptor : null;
+    if (!overrides && !strictGuard) return { ...base };
+    const ov = overrides ?? {};
     return {
       ...base,
-      enabled: overrides.enabled ?? (base.enabled as boolean | undefined),
-      severityActions: { ...(base.severityActions as object | undefined), ...(overrides.severityActions ?? {}) },
-      failurePolicy: { ...(base.failurePolicy as object | undefined), ...(overrides.failurePolicy ?? {}) },
-      actionGuard: { ...(base.actionGuard as object | undefined ?? { enabled: false, enforce: true, autoApprove: [] }), ...(overrides.actionGuard ?? {}) },
+      enabled: ov.enabled ?? (base.enabled as boolean | undefined),
+      severityActions: { ...(base.severityActions as object | undefined), ...(ov.severityActions ?? {}) },
+      failurePolicy: { ...(base.failurePolicy as object | undefined), ...(ov.failurePolicy ?? {}) },
+      actionGuard: {
+        ...(base.actionGuard as object | undefined ?? { enabled: false, enforce: true, autoApprove: [] }),
+        ...(ov.actionGuard ?? {}),
+        ...(strictGuard ?? {}),
+      },
     };
   } catch {
     return { ...base };

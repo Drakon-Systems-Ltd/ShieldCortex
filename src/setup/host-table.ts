@@ -43,6 +43,14 @@ export interface HostGatePlanes {
   signedEnforce: boolean;
   /** Signed config enabled, even in warn-mode. OpenClaw liveGating uses this today. */
   signedEnabled: boolean;
+  /**
+   * #878: the signed posture is unknown — it depends on a signature adoption
+   * that has not happened (an unsigned config.json, or one behind a symlink,
+   * which is never adopted). `signedEnabled`/`signedEnforce` are then false
+   * but mean "not proven", and the headline says `unknown`, never `off`. The
+   * runtime holds an unadoptable file at the strict posture.
+   */
+  signedUnknown?: boolean;
   claudeWired: boolean;
   openclaw: OpenClawGatePosture;
   /**
@@ -59,7 +67,7 @@ export interface HostGatePlanes {
   postureNodeReference?: 'off' | 'advisory' | 'enforce-when-ready' | 'enforce' | null;
 }
 
-export type GuardHeadline = 'off' | 'on' | 'mixed' | 'advisory';
+export type GuardHeadline = 'off' | 'on' | 'mixed' | 'advisory' | 'unknown';
 
 export interface HostTableDeps {
   openclawBinaryPresent?: (home: string) => boolean;
@@ -191,6 +199,8 @@ export function guardHeadlineFromPlanes(planes: HostGatePlanes): GuardHeadline {
   const ocEnforcing = planes.signedEnabled && planes.openclaw === 'enforcing';
   const ocObserve = planes.openclaw === 'observe-only' || planes.openclaw === 'off';
   if (planes.postureMismatch === true) return 'mixed';
+  // #878: an unknown signed posture is not off, whatever the planes below say.
+  if (planes.signedUnknown === true) return 'unknown';
   const agreed = planes.postureMismatch === false ? planes.postureNodeReference ?? null : null;
   if (agreed !== null) {
     // #922: the resolved hook/plugin posture decides `on`.
@@ -441,6 +451,8 @@ export const HOST_TABLE_GATE_LEGEND: readonly string[] = [
   '  Claude Code advisory = hook wired, signed guard on in Watch only (ordinary dangerous calls run',
   '  with a logged warning; catastrophic calls and changes to the guard itself are still denied);',
   '  Claude Code off = hook wired, signed guard not on.',
+  '  unknown (header or Claude Code) = the signed posture depends on a signature not yet adopted',
+  '  (an unsigned or symlinked config.json; see the config integrity row) — not off.',
 ];
 
 export function formatHostTable(table: HostTable, version?: string, planes?: HostGatePlanes): string[] {
@@ -448,7 +460,8 @@ export function formatHostTable(table: HostTable, version?: string, planes?: Hos
   const headline = planes ? guardHeadlineFromPlanes(planes) : 'off';
   const guardLabel = headline === 'on' ? 'Guard on'
     : headline === 'mixed' ? 'Guard mixed'
-      : headline === 'advisory' ? 'Guard advisory' : 'Guard off';
+      : headline === 'advisory' ? 'Guard advisory'
+        : headline === 'unknown' ? 'Guard unknown' : 'Guard off';
   lines.push(version ? `ShieldCortex  ${version}    ${guardLabel}` : `ShieldCortex    ${guardLabel}`);
   lines.push('');
   const width = Math.max(...table.rows.map((r) => r.label.length), 10);
@@ -482,6 +495,7 @@ function rowGatePosture(r: HostRow, planes?: HostGatePlanes): string | undefined
   if (!planes || !r.present || r.kind !== 'bound') return undefined;
   if (r.id === 'claude') {
     if (!planes.claudeWired) return undefined;
+    if (planes.signedUnknown === true) return 'unknown';
     return planes.signedEnforce ? 'enforcing' : claudePlaneAdvisory(planes) ? 'advisory' : 'off';
   }
   if (r.id === 'openclaw') {
