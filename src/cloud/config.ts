@@ -105,6 +105,13 @@ let cachedRawConfigIdentity: FileIdentity | null = null;
 // answer with the same verdict as the read that populated it — before this a
 // hit reported a tampered file as an ordinary writable one.
 let cachedRawConfigIntegrity: ConfigIntegrity | null = null;
+// #878 r4: whether config.json was a symbolic link when the cache was filled.
+// fileIdentity follows the link, so it names only the target; a regular file
+// moved aside and linked back keeps the target's identity. The entry's link
+// state is part of the key, so that swap re-reads instead of answering with
+// the verdict a regular file earned. Mirrors the runtime's entry key
+// (hooks/openclaw/cortex-memory/runtime.mjs configIdentityKey).
+let cachedRawConfigLinked: boolean | null = null;
 
 /** True when a read-only read of these bytes disagrees with the mutating reader's cache. */
 function readOnlyDisagreesWithCache(
@@ -601,6 +608,7 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
       cachedRawConfig !== null &&
       cachedRawConfigFile === configFile &&
       sameCacheFile(cachedRawConfigIdentity, identity) &&
+      cachedRawConfigLinked === linked &&
       cachedRawConfigIntegrity !== null
     ) {
       configTampered = cachedRawConfigIntegrity === 'tampered';
@@ -711,6 +719,7 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
       cachedRawConfigFile = configFile;
       cachedRawConfigIdentity = identityForCache;
       cachedRawConfigIntegrity = verdict;
+      cachedRawConfigLinked = linked;
     }
 
     // A read-only read does not take the cache, but the mutating reader will
@@ -1540,6 +1549,7 @@ function invalidateRawConfigCache(): void {
   cachedRawConfigFile = null;
   cachedRawConfigIdentity = null;
   cachedRawConfigIntegrity = null;
+  cachedRawConfigLinked = null;
 }
 
 /**

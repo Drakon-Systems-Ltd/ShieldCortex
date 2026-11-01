@@ -17,6 +17,7 @@ import { readLatestBootRoster, findRegistrationSince, findGatewayAttributedRegis
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveRepairConsent } from './repair-consent.js';
 import { evaluateToolCall } from '../defence/iron-dome/tool-action-guard.js';
+import { applyStrictFailClosedPosture } from '../defence/iron-dome/policy-lock.js';
 
 /**
  * Honest-state post-install/enable self-check (#74 deliverable 2).
@@ -543,19 +544,49 @@ const benignPipeline = () => ({
 export function resolveBoxInterceptorConfig(home: string, defaults: unknown): unknown {
   const base = (defaults && typeof defaults === 'object' ? defaults : {}) as Record<string, unknown>;
   try {
-    const raw = JSON.parse(fs.readFileSync(path.join(home, '.shieldcortex', 'config.json'), 'utf-8'));
-    const overrides = raw?.interceptor;
-    if (!overrides || typeof overrides !== 'object') return { ...base };
+    const configFile = path.join(home, '.shieldcortex', 'config.json');
+    let raw = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
+    // #878 r4: the runtime holds an unsigned config.json behind a symlink at
+    // the strict fail-closed posture (runtime.mjs linkedUnsigned). The canary
+    // must be built with that posture, not the link target's own values: the
+    // strict top-level guard is laid over the alias it strips.
+    const strict = configIsLinkedUnsigned(configFile, raw);
+    if (strict) raw = applyStrictFailClosedPosture(raw);
+    const strictGuard = strict ? (raw.actionGuard as Record<string, unknown>) : undefined;
+    const overrides = raw?.interceptor && typeof raw.interceptor === 'object' ? raw.interceptor : null;
+    if (!overrides && !strictGuard) return { ...base };
+    const ov = overrides ?? {};
     return {
       ...base,
-      enabled: overrides.enabled ?? (base.enabled as boolean | undefined),
-      severityActions: { ...(base.severityActions as object | undefined), ...(overrides.severityActions ?? {}) },
-      failurePolicy: { ...(base.failurePolicy as object | undefined), ...(overrides.failurePolicy ?? {}) },
-      actionGuard: { ...(base.actionGuard as object | undefined ?? { enabled: false, enforce: true, autoApprove: [] }), ...(overrides.actionGuard ?? {}) },
+      enabled: ov.enabled ?? (base.enabled as boolean | undefined),
+      severityActions: { ...(base.severityActions as object | undefined), ...(ov.severityActions ?? {}) },
+      failurePolicy: { ...(base.failurePolicy as object | undefined), ...(ov.failurePolicy ?? {}) },
+      actionGuard: {
+        ...(base.actionGuard as object | undefined ?? { enabled: false, enforce: true, autoApprove: [] }),
+        ...(ov.actionGuard ?? {}),
+        ...(strictGuard ?? {}),
+      },
     };
   } catch {
     return { ...base };
   }
+}
+
+/**
+ * #878: is `config.json` a symbolic link whose target carries no signature —
+ * no embedded `_sig` string and no legacy `.config-sig` beside the link?
+ * runtime.mjs `linkedUnsigned` and pre-tool-hook.mjs `configIsLinkedUnsigned`,
+ * for the synthetic canary. A dangling link never parses, so never gets here.
+ */
+function configIsLinkedUnsigned(configFile: string, parsed: unknown): boolean {
+  try {
+    if (!fs.lstatSync(configFile).isSymbolicLink()) return false;
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  if (typeof (parsed as Record<string, unknown>)._sig === 'string') return false;
+  return !fs.existsSync(path.join(path.dirname(configFile), '.config-sig'));
 }
 
 export async function dispatchCanaryThroughInstalledInterceptor(

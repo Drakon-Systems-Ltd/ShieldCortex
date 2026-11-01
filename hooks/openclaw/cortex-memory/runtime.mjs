@@ -58,7 +58,7 @@ export function createOpenClawRuntime({
 } = {}) {
   let rawShieldConfig = null;
   let rawShieldConfigParsed = false;
-  let shieldConfigMtime = 0;
+  let shieldConfigKey = null;
   let shieldConfig = null;
   let shieldConfigLinkedUnsigned = false;
   let resolvedServerCmd = null;
@@ -89,21 +89,48 @@ export function createOpenClawRuntime({
     }
   }
 
-  // mtime-gated cache: re-read on every call if the config file's modified
-  // time has advanced. Lets dashboard / CLI toggles take effect on the next
-  // event without an OpenClaw gateway restart. The link check runs on every
-  // call too (one lstat): swapping a regular file for a link to bytes with the
-  // same mtime must not keep serving the regular file's posture.
-  async function loadShieldConfig() {
-    let mtime = 0;
+  // #878 r4: the cache key for the bytes and their parse status. mtime alone
+  // was not enough: a warm runtime swapped from a signed (or empty, malformed,
+  // array) file to an unsigned link with the same mtime kept serving the OLD
+  // parsed object, so linkedUnsigned judged the old bytes and Guard stayed off
+  // while a fresh runtime and src held strict. The key is the identity
+  // (dev, ino, size, mtime, ctime — ns, so a utimes-restored mtime is no cover;
+  // user space cannot set ctime) of the config.json ENTRY (lstat: file or link,
+  // and which link), the link text, and the identity of the file the link
+  // FOLLOWS to (stat). Any change to any of them drops the cached bytes, parse
+  // status and posture and re-reads before the unsigned-link verdict is taken.
+  // Keep in step with src/cloud/config.ts (fileIdentity, cachedRawConfigLinked).
+  async function configIdentityKey() {
+    const id = (st) => `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+    let entry;
     try {
-      const stats = await fs.stat(configPath);
-      mtime = stats.mtimeMs;
-    } catch {
-      mtime = 0;
+      entry = await fs.lstat(configPath, { bigint: true });
+    } catch (err) {
+      return `absent:${err?.code ?? "?"}`;
     }
+    if (!entry.isSymbolicLink()) return `entry:${id(entry)}`;
+    let text = "";
+    try {
+      text = await fs.readlink(configPath);
+    } catch {}
+    let target;
+    try {
+      target = id(await fs.stat(configPath, { bigint: true }));
+    } catch (err) {
+      target = `dangling:${err?.code ?? "?"}`;
+    }
+    return `link:${id(entry)}|${JSON.stringify(text)}|${target}`;
+  }
 
-    if (!rawShieldConfig || mtime !== shieldConfigMtime) {
+  // Identity-gated cache: re-read whenever the config entry or its target
+  // changes. Lets dashboard / CLI toggles take effect on the next event
+  // without an OpenClaw gateway restart. The key is taken BEFORE the read, so
+  // a change that lands between the two re-reads on the next call. The link
+  // verdict runs on every call against the CURRENT bytes (its own lstat).
+  async function loadShieldConfig() {
+    const key = await configIdentityKey();
+
+    if (key !== shieldConfigKey) {
       // Plain JSON. The CLI HMAC-signs this file, but nothing on this path
       // verifies the signature: callers must not describe it as signed (#509 r8).
       try {
@@ -115,7 +142,7 @@ export function createOpenClawRuntime({
         rawShieldConfig = {};
         rawShieldConfigParsed = false;
       }
-      shieldConfigMtime = mtime;
+      shieldConfigKey = key;
       shieldConfig = null;
     }
 

@@ -162,9 +162,19 @@ function lockPresent(lock: PolicyLockState): boolean {
  * (the runtime's `loadShieldConfig`) verifies `_sig`, so a tampered file is
  * what they run on; only the policy lock changes it. Doctor's integrity row
  * reports the tamper itself.
+ *
+ * #878 r4: one exception both readers DO apply — an unsigned config.json
+ * behind a symbolic link (`unverified` because adoption is blocked by the
+ * link) is held at the strict fail-closed posture, before the lock and the
+ * #209 fold (scripts/pre-tool-hook.mjs configIsLinkedUnsigned, runtime.mjs
+ * linkedUnsigned). The planes must report that, not the target's own values.
  */
 function runtimeBase(inputs: PostureInputs): Record<string, unknown> {
-  return inputs.signedRaw ?? {};
+  const raw = inputs.signedRaw ?? {};
+  if (inputs.signedRaw !== null && inputs.integrity === 'unverified' && inputs.integrityAdoption === 'linked') {
+    return applyStrictFailClosedPosture(raw);
+  }
+  return raw;
 }
 
 /**

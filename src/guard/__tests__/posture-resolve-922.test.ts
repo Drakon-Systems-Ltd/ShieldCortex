@@ -401,3 +401,42 @@ describe('#922 guardPostureRow — status and honest fixes', () => {
     expect(checked).toBeGreaterThan(20);
   });
 });
+
+/**
+ * #878 r4 N1: an unsigned config.json behind a symbolic link (`unverified`,
+ * adoption blocked by the link) is what the hook and the OpenClaw runtime hold
+ * strict, before the lock and the #209 fold. The planes report that posture,
+ * not the link target's own Guard-off values.
+ */
+describe('#878 r4 resolvePlanePostures — unsigned linked config.json', () => {
+  const OFF = { actionGuard: { enabled: false, enforce: false } };
+  const linked = (over: Partial<PostureInputs> = {}) =>
+    inputs({ signedRaw: OFF, integrity: 'unverified', integrityAdoption: 'linked', openclaw: { state: 'ok', raw: entry({}) }, ...over });
+
+  it('hook and plugin planes are strict (enforce), agreeing with the graded posture', () => {
+    const r = resolvePlanePostures(linked());
+    expect(r.signed).toBeNull();
+    expect(r.graded).toBe('enforce');
+    expect(posturesOf(r)).toEqual({ claude: 'enforce', openclaw: 'enforce' });
+    expect(r.verdict).toBe('agree');
+  });
+
+  it('the alias spelling cannot bring Guard off back, and a readiness gate is dropped', () => {
+    const r = resolvePlanePostures(linked({
+      signedRaw: { actionGuard: { readinessGate: true }, interceptor: { actionGuard: { enabled: false, enforce: false } } },
+    }));
+    expect(posturesOf(r)).toEqual({ claude: 'enforce', openclaw: 'enforce' });
+  });
+
+  it('control: an unadoptable REGULAR file (fails/unknown) keeps the bare-parse planes', () => {
+    for (const integrityAdoption of ['fails', 'unknown'] as const) {
+      const r = resolvePlanePostures(linked({ integrityAdoption }));
+      expect(posturesOf(r)).toEqual({ claude: 'off', openclaw: 'off' });
+    }
+  });
+
+  it('control: a signed (valid) file is its own value on both planes', () => {
+    const r = resolvePlanePostures(inputs({ signedRaw: OFF, openclaw: { state: 'ok', raw: entry({}) } }));
+    expect(posturesOf(r)).toEqual({ claude: 'off', openclaw: 'off' });
+  });
+});
