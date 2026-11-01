@@ -160,3 +160,33 @@ describe('#156 — no internal vocabulary reaches the headline', () => {
     }
   });
 });
+
+describe('#977 review — an owed restart is never advised while readiness is unproven', () => {
+  const cmd = 'systemctl --user restart openclaw-gateway';
+  for (const selfCheck of [
+    undefined,
+    { ok: true, rosterState: 'loaded' as const, canaryProof: true, versionProof: true },
+    { ok: false, rosterState: 'unproven' as const, canaryProof: false, versionProof: true },
+  ]) {
+    it(`restartPending + readinessUnproven → doctor (selfCheck ${selfCheck ? (selfCheck.ok ? 'ok' : 'unproven') : 'absent'})`, () => {
+      const v = summariseRepair({
+        applied: true,
+        canaryConsented: true,
+        ...(selfCheck ? { selfCheck } : {}),
+        readinessUnproven: true,
+        restartPending: true,
+        restartCommand: cmd,
+      });
+      expect(v.outcome).not.toBe('protected');
+      expect(v.nextCommand).toBe('shieldcortex doctor');
+      const all = renderRepairHeadline(v).join('\n');
+      expect(all).not.toContain(cmd);
+      expect(all).not.toMatch(/Restart the gateway|restart it once more/);
+    });
+  }
+
+  it('restartPending with readiness proven still names the restart command', () => {
+    const v = summariseRepair({ applied: true, canaryConsented: true, restartPending: true, restartCommand: cmd });
+    expect(v.nextCommand).toBe(cmd);
+  });
+});

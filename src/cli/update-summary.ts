@@ -82,6 +82,8 @@ export interface UpdateSummaryInput {
      * a failed or still-owed restart. Absent → `shieldcortex doctor`.
      */
     restartCommand?: string;
+    /** #977 review: changes landed after the run's one restart and are not loaded. */
+    changesUnloaded?: boolean;
     /** The one command the check suggests. */
     nextCommand?: string;
   };
@@ -156,7 +158,10 @@ export function gatewayRestartClause(outcome: UpdateSummaryInput['protection']['
 function restartAttention(
   outcome: UpdateSummaryInput['protection']['gatewayRestart'],
   restartCommand: string | undefined,
+  changesUnloaded = false,
 ): Pick<UpdateSummaryRow, 'why' | 'command' | 'commandLabel'> | null {
+  // Unproven readiness outranks a restart owed: say both, advise doctor.
+  const later = changesUnloaded ? ' Later changes aren\'t loaded yet either.' : '';
   const restart = restartCommand
     ? { command: restartCommand, commandLabel: 'Fix' }
     : { command: 'shieldcortex doctor', commandLabel: 'Check' };
@@ -166,9 +171,9 @@ function restartAttention(
     case 'pending':
       return { why: 'This run\'s plugin changes load only after one more gateway restart.', ...restart };
     case 'timed-out':
-      return { why: 'The gateway may still be starting; don\'t restart it again yet.', command: 'shieldcortex doctor', commandLabel: 'Check' };
+      return { why: 'The gateway may still be starting; don\'t restart it again yet.' + later, command: 'shieldcortex doctor', commandLabel: 'Check' };
     case 'unconfirmed':
-      return { why: 'The gateway wasn\'t seen coming back, so protection isn\'t confirmed.', command: 'shieldcortex doctor', commandLabel: 'Check' };
+      return { why: 'The gateway wasn\'t seen coming back, so protection isn\'t confirmed.' + later, command: 'shieldcortex doctor', commandLabel: 'Check' };
     default:
       return null;
   }
@@ -241,7 +246,7 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
   const pluginStepFailed = input.plugin.status === 'warn' || input.plugin.status === 'failed';
   if (pluginInstalled) {
     const reloaded = gatewayRestartClause(p.gatewayRestart);
-    const restartIssue = restartAttention(p.gatewayRestart, p.restartCommand);
+    const restartIssue = restartAttention(p.gatewayRestart, p.restartCommand, p.changesUnloaded === true);
     if (pluginAbsent) {
       rows.push({
         label: 'OpenClaw',

@@ -24,6 +24,7 @@ import {
 import {
   reconcileOpenClawPluginState,
   protectionFactsFromReconcile,
+  gatewayRestartOutcomeFromSteps,
   protectionLedgerFromReconcile,
   manualGatewayRestartCommand,
   type GatewayReloadResult,
@@ -504,5 +505,140 @@ describe('#977 — restart outcome reaches the closing screen', () => {
   it('says nothing about a restart when no outcome is given — even if gatewayReloaded is set', () => {
     expect(openClawText({})).toBe('plugin 5.17.1 loaded');
     expect(openClawText({ gatewayReloaded: true })).toBe('plugin 5.17.1 loaded');
+  });
+});
+
+describe('#977 review r3 — an unproven restart that predates later changes is never "restart it now"', () => {
+  const PLUGIN = 'shieldcortex-realtime';
+  const wiped: ReconcileInput = {
+    pluginId: PLUGIN,
+    expectedVersion: '4.50.0',
+    config: { enabled: null, inAllow: false, readable: true, present: true },
+    installsJson: { version: '4.50.0', installPath: '/x' },
+    index: {
+      installRecords: { [PLUGIN]: { source: 'npm', version: '4.50.0', installPath: '/x' } },
+      plugins: [],
+      warning: null,
+    },
+    onDiskVersion: '4.50.0',
+    projectDirs: [],
+    liveRoster: [],
+  };
+  const absent = { ok: false, rosterState: 'absent', rosterProof: false, canaryProof: false, versionProof: true, reasons: ['not loaded'] };
+  const proven = { ok: true, rosterState: 'loaded', rosterProof: true, canaryProof: true, versionProof: true, reasons: [] };
+  const RESTART = /systemctl|launchctl|openclaw gateway restart|restart the gateway once more|Restart the gateway/i;
+
+  for (const [reason, expected] of [['timeout', 'timed-out'], ['unobservable', 'unconfirmed']] as const) {
+    it(`pass 1 readiness ${reason}, pass 2 changes and reuses: stays ${expected}, doctor not a restart, one exec`, async () => {
+      const once = createGatewayRestartOnce();
+      const exec = countingExec();
+      let selfChecks = 0;
+      const result = await reconcileOpenClawPluginState({
+        home: '/tmp/sc-977-never-read',
+        pluginId: PLUGIN,
+        expectedVersion: '4.50.0',
+        apply: true,
+        grantConversationAccess: false,
+        readState: () => ({ input: wiped, verdict: reconcilePluginState(wiped) }),
+        // Lands in BOTH passes — pass 2's lands after the run's one restart.
+        restoreRegistration: () => ({ ok: true, detail: 'restored' }),
+        runCommand: () => ({ status: 0, output: 'ok' }),
+        reloadGateway: () => once.run(exec) as Promise<GatewayReloadResult>,
+        waitForGateway: async () => ({ ready: false, reason, waitedMs: 90_000 }),
+        // Pass 2's self-check may even look proven: it read an unproven gateway.
+        selfCheck: async () => ((selfChecks += 1) === 1 ? absent : proven) as never,
+      });
+      expect(result.passes).toBe(2);
+      expect(exec.calls).toBe(1); // exactly one real restart
+      const reloads = result.stepResults.filter((s) => s.kind === 'gateway-reload');
+      expect(reloads.map((s) => s.restart)).toEqual([expected, expected]);
+      expect(reloads[1].ok).toBe(false);
+      expect(reloads[1].changesUnloaded).toBe(true);
+      expect(reloads[1].detail).toMatch(/not confirmed loaded/);
+      expect(reloads[1].detail).toMatch(/shieldcortex doctor/);
+      expect(reloads[1].detail).not.toContain(manualGatewayRestartCommand());
+      expect(result.ok).toBe(false);
+      const messages = result.messages.join('\n');
+      expect(messages).not.toMatch(/gateway restart pending/);
+      expect(messages).not.toContain(manualGatewayRestartCommand());
+      expect(messages).not.toMatch(/reconciled: plugin confirmed/);
+      expect(messages).toMatch(/shieldcortex doctor/);
+
+      const facts = protectionFactsFromReconcile(result);
+      expect(facts.gatewayRestart).toBe(expected);
+      expect(facts.restartCommand).toBeUndefined();
+      expect(facts.changesUnloaded).toBe(true);
+
+      const ledger = protectionLedgerFromReconcile(result);
+      expect(ledger.outcome).not.toBe('protected');
+      expect(ledger.status).not.toBe('ok');
+      expect(ledger.facts.gatewayRestart).toBe(expected);
+      expect(ledger.facts.restartCommand).toBeUndefined();
+      expect(ledger.facts.nextCommand).toBe('shieldcortex doctor');
+      expect(ledger.detail.join('\n')).not.toMatch(RESTART);
+      expect(ledger.detail.join('\n')).not.toContain(manualGatewayRestartCommand());
+
+      // The closing screen, fed exactly as update.ts feeds it.
+      const summary = buildUpdateSummary({
+        fromVersion: '5.17.0',
+        toVersion: '5.17.1',
+        packageState: 'updated',
+        engine: { ok: true },
+        plugin: { status: 'ok' },
+        skill: { status: 'ok' },
+        guardOn: false,
+        protection: {
+          status: ledger.status,
+          loaded: ledger.facts.loaded,
+          pluginVersion: ledger.facts.pluginVersion,
+          gatewayRestart: ledger.facts.gatewayRestart,
+          ...(ledger.facts.restartCommand ? { restartCommand: ledger.facts.restartCommand } : {}),
+          ...(ledger.facts.changesUnloaded ? { changesUnloaded: true } : {}),
+          nextCommand: ledger.facts.nextCommand,
+        },
+      });
+      const row = summary.rows.find((r) => r.label === 'OpenClaw')!;
+      expect(row.mark).not.toBe('ok');
+      expect(row).toMatchObject({ command: 'shieldcortex doctor', commandLabel: 'Check' });
+      expect(row.why).toMatch(/Later changes aren't loaded yet/);
+      expect(`${row.text} ${row.why}`).not.toMatch(/one more restart/);
+      expect(JSON.stringify(summary)).not.toContain(manualGatewayRestartCommand());
+    });
+  }
+
+  it('gatewayRestartOutcomeFromSteps: unsafe readiness outranks pending, pending outranks the last outcome', () => {
+    const r = (restart: StepResult['restart'], ok = restart === 'completed'): StepResult =>
+      ({ kind: 'gateway-reload', ok, detail: 'x', restart });
+    expect(gatewayRestartOutcomeFromSteps([])).toBeUndefined();
+    expect(gatewayRestartOutcomeFromSteps([r('timed-out'), r('pending')])).toBe('timed-out');
+    expect(gatewayRestartOutcomeFromSteps([r('pending'), r('timed-out')])).toBe('timed-out');
+    expect(gatewayRestartOutcomeFromSteps([r('unconfirmed'), r('pending')])).toBe('unconfirmed');
+    expect(gatewayRestartOutcomeFromSteps([r('pending'), r('unconfirmed')])).toBe('unconfirmed');
+    expect(gatewayRestartOutcomeFromSteps([r('unconfirmed'), r('timed-out')])).toBe('timed-out');
+    expect(gatewayRestartOutcomeFromSteps([r('pending'), r('completed')])).toBe('pending');
+    expect(gatewayRestartOutcomeFromSteps([r('completed'), r('pending')])).toBe('pending');
+    expect(gatewayRestartOutcomeFromSteps([r('failed'), r('completed')])).toBe('completed');
+    expect(gatewayRestartOutcomeFromSteps([r('completed'), r('skipped', false)])).toBe('skipped');
+    // Legacy step shapes still read their readiness from the detail text.
+    expect(gatewayRestartOutcomeFromSteps([
+      { kind: 'gateway-reload', ok: true, detail: 'reloaded, but readiness timed out — x' },
+      r('pending'),
+    ])).toBe('timed-out');
+  });
+
+  it('summariseRepair: restartPending with readiness unproven gives doctor, never restart advice', () => {
+    const v = summariseRepair({
+      applied: true,
+      canaryConsented: true,
+      selfCheck: { ok: true, rosterState: 'loaded', canaryProof: true, versionProof: true },
+      readinessUnproven: true,
+      restartPending: true,
+      restartCommand: 'systemctl --user restart openclaw-gateway',
+    });
+    expect(v.outcome).not.toBe('protected');
+    expect(v.nextCommand).toBe('shieldcortex doctor');
+    expect(v.headline).not.toMatch(/Restart the gateway|restart it once more|systemctl/);
+    expect(v.headline).toMatch(/not loaded yet/);
+    expect(v.headline).toMatch(/not confirmed back up/);
   });
 });

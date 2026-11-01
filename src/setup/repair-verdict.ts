@@ -58,7 +58,10 @@ export interface RepairVerdictInput {
    * after it, so the running gateway has not loaded them.
    */
   restartPending?: boolean;
-  /** The manual restart command to suggest with `restartPending`. */
+  /**
+   * The manual restart command to suggest with `restartPending`. Ignored when
+   * `readinessUnproven` is also set: then the next step is always doctor.
+   */
   restartCommand?: string;
   onDiskVersion?: string | null;
   expectedVersion?: string;
@@ -125,6 +128,15 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
 
   // #977 review: whatever the self-check saw, it saw a gateway that has not
   // loaded this run's changes. Not proof of protection; one restart owed.
+  if (input.restartPending && input.readinessUnproven) {
+    // The run's one restart may still be starting or draining. Restarting
+    // into that window is the #977 hazard: check first, never restart.
+    return {
+      outcome: 'unknown',
+      headline: 'This run\'s plugin changes are not loaded yet, and the gateway restart was not confirmed back up — it may still be starting. Do not restart it yet; check it with shieldcortex doctor first.',
+      nextCommand: 'shieldcortex doctor',
+    };
+  }
   if (input.restartPending) {
     return {
       outcome: 'unknown',
