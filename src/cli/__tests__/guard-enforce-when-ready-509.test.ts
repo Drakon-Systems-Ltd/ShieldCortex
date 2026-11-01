@@ -539,7 +539,9 @@ describe('#509 r8 N4 — the OpenClaw config source is described as what it is',
     const runtime = readFileSync(join(repo, 'hooks/openclaw/cortex-memory/runtime.mjs'), 'utf8');
     // The loader parses config.json as plain JSON — no signature check.
     expect(runtime).toMatch(/JSON\.parse\(await fs\.readFile\(configPath/);
-    expect(runtime).not.toMatch(/_sig/);
+    // It may test whether a `_sig` string is PRESENT (to hold an unsigned symlinked
+    // config strict, #878) but must never verify one: no HMAC / crypto in the loader.
+    expect(runtime).not.toMatch(/createHmac|timingSafeEqual|node:crypto|verifyConfig/);
     for (const f of ['plugins/openclaw/index.ts', 'docs/design/2026-09-28-509-enforce-when-ready.md']) {
       expect(readFileSync(join(repo, f), 'utf8')).not.toMatch(/the signed file the CLI writes/);
     }
