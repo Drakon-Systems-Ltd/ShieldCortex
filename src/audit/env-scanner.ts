@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import type { AuditFinding, ScannerResult } from './types.js';
 import { scanForCredentials } from '../defence/credential-leak/index.js';
 
-const LEARN_MORE = 'https://shieldcortex.ai/docs/threats/secret-exposure';
+const LEARN_MORE = 'https://shieldcortex.ai/docs#audit';
 
 /** .env file patterns */
 const ENV_FILE_PATTERNS = [
