@@ -24,7 +24,14 @@
 import fs from 'fs';
 import path from 'path';
 
-import { getConfigDir, inspectConfigIntegrity, type ConfigIntegrityReport } from '../cloud/config.js';
+import {
+  configPostureOutlook,
+  describeAdoptionBlock,
+  getConfigDir,
+  inspectConfigIntegrity,
+  type ConfigIntegrityReport,
+  type UnsignedAdoptionBlock,
+} from '../cloud/config.js';
 import {
   applyPolicyLock,
   applyStrictFailClosedPosture,
@@ -68,6 +75,19 @@ export interface PostureInputs {
   /** `config.json` parsed the way the hook parses it; null when absent or unparsable. */
   signedRaw: Record<string, unknown> | null;
   integrity: ConfigIntegrityReport['verdict'];
+  /**
+   * #878: why an unsigned config.json cannot be adopted (integrity is then
+   * `unverified`), from {@link inspectConfigIntegrity}. The signed posture is
+   * unknown and is graded as the strict posture the runtime holds — never as
+   * the file's own values.
+   */
+  integrityAdoption?: UnsignedAdoptionBlock;
+  /**
+   * #878 r5: config.json is a symbolic link ({@link inspectConfigIntegrity}'s
+   * `linked`). The hook and the runtime hold a linked file strict unless its
+   * signature authenticates it (`valid` / `self-heal`).
+   */
+  integrityLinked?: boolean;
   lock: PolicyLockState;
   claudeWired: boolean;
   openclaw: OpenClawInput;
@@ -96,7 +116,13 @@ export interface PostureReport {
   /** Signed posture with the lock applied, or null when the signed file cannot be trusted. */
   signed: PlanePosture | null;
   integrity: ConfigIntegrityReport['verdict'];
-  /** The posture doctor's status grades (strict on tamper, lock applied — the old config-row view). */
+  /** #878: see {@link PostureInputs.integrityAdoption}. */
+  integrityAdoption?: UnsignedAdoptionBlock;
+  /**
+   * The posture doctor's status grades (lock applied — the old config-row
+   * view): strict on tamper, and strict for an unsigned file that cannot be
+   * adopted (#878), which the runtime holds strict.
+   */
   graded: PlanePosture;
   /** The config key behind `graded` when it is off/advisory: top-level, else the #209 alias. */
   gradedKey: string | null;
@@ -142,9 +168,27 @@ function lockPresent(lock: PolicyLockState): boolean {
  * (the runtime's `loadShieldConfig`) verifies `_sig`, so a tampered file is
  * what they run on; only the policy lock changes it. Doctor's integrity row
  * reports the tamper itself.
+ *
+ * #878 r4/r5: one exception both readers DO apply — a config.json behind a
+ * symbolic link that no signature authenticates is held at the strict
+ * fail-closed posture, before the lock and the #209 fold. Unsigned
+ * (`unverified`, adoption blocked by the link) and, since r5, `tampered`: both
+ * readers recompute the HMAC for a link (scripts/lib/config-authenticity.mjs,
+ * the same check as checkConfigIntegrity), so a dummy `_sig` or a junk
+ * `.config-sig` no longer passes. Only `valid` / `self-heal` are honoured. The
+ * planes must report that, not the target's own values. A regular tampered
+ * file is still what the readers run on (above).
  */
 function runtimeBase(inputs: PostureInputs): Record<string, unknown> {
-  return inputs.signedRaw ?? {};
+  const raw = inputs.signedRaw ?? {};
+  if (inputs.signedRaw === null) return raw;
+  if (inputs.integrity === 'unverified' && inputs.integrityAdoption === 'linked') {
+    return applyStrictFailClosedPosture(raw);
+  }
+  if (inputs.integrityLinked === true && inputs.integrity !== 'valid' && inputs.integrity !== 'self-heal') {
+    return applyStrictFailClosedPosture(raw);
+  }
+  return raw;
 }
 
 /**
@@ -302,17 +346,27 @@ function resolveHermes(inputs: PostureInputs): PlaneResult | null {
   };
 }
 
+/** The integrity report these inputs carry, in the shape {@link configPostureOutlook} reads. */
+function outlookOf(inputs: PostureInputs): ReturnType<typeof configPostureOutlook> {
+  return configPostureOutlook({ verdict: inputs.integrity, adoption: inputs.integrityAdoption });
+}
+
 /** The signed posture, lock applied — null when the file cannot be trusted. */
 function signedPosture(inputs: PostureInputs): PlanePosture | null {
   const v = inputs.integrity;
-  if (v === 'tampered' || v === 'unreadable' || v === 'malformed' || v === 'unverified') return null;
+  if (v === 'unreadable' || v === 'malformed' || v === 'unverified') return null;
+  if (outlookOf(inputs) !== 'file') return null;
   return postureOfGuard(lockedGuardOf(inputs.signedRaw ?? {}, inputs.lock));
 }
 
-/** The view the old `Action guard config` row graded: strict on tamper, lock applied. */
+/**
+ * The view the old `Action guard config` row graded, lock applied: the
+ * strict posture wherever the runtime enforces it over the file's values —
+ * tampered, and (#878) an unsigned file that cannot be adopted.
+ */
 function gradedPosture(inputs: PostureInputs): PlanePosture {
   const raw = inputs.signedRaw ?? {};
-  const trusted = inputs.integrity === 'tampered' ? applyStrictFailClosedPosture(raw) : raw;
+  const trusted = outlookOf(inputs) === 'file' ? raw : applyStrictFailClosedPosture(raw);
   return postureOfGuard(lockedGuardOf(trusted, inputs.lock));
 }
 
@@ -356,6 +410,7 @@ export function resolvePlanePostures(inputs: PostureInputs): PostureReport {
   return {
     signed: signedPosture(inputs),
     integrity: inputs.integrity,
+    ...(inputs.integrityAdoption ? { integrityAdoption: inputs.integrityAdoption } : {}),
     graded,
     gradedKey: gradedKeyOf(inputs, graded),
     planes,
@@ -403,6 +458,14 @@ export function defaultOpenClawConfigPath(): string | null {
 
 export function readPostureInputs(opts: ReadPostureOptions = {}): PostureInputs {
   const configDir = opts.configDir ?? getConfigDir();
+  // The integrity reader only knows the default config dir; a different file
+  // cannot be graded against it, so it is not called valid. #878: its report
+  // is the one outlook every grading decision below reads.
+  const integrity: Pick<ConfigIntegrityReport, 'verdict' | 'adoption'> & { linked?: boolean } =
+    path.resolve(configDir) === path.resolve(getConfigDir()) ? inspectConfigIntegrity() : { verdict: 'unverified' };
+  // The hook's own view of the file (a bare parse, as pre-tool-hook.mjs reads
+  // it): what the hook and plugin PLANES resolve from. It decides no signed or
+  // graded posture by itself — those go through `integrity` above.
   let signedRaw: Record<string, unknown> | null = null;
   try {
     const parsed = JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'), 'utf-8')) as unknown;
@@ -418,9 +481,9 @@ export function readPostureInputs(opts: ReadPostureOptions = {}): PostureInputs 
   }
   return {
     signedRaw,
-    // The integrity reader only knows the default config dir; a different
-    // file cannot be graded against it, so it is not called valid.
-    integrity: path.resolve(configDir) === path.resolve(getConfigDir()) ? inspectConfigIntegrity().verdict : 'unverified',
+    integrity: integrity.verdict,
+    ...(integrity.adoption ? { integrityAdoption: integrity.adoption } : {}),
+    ...(integrity.linked ? { integrityLinked: true } : {}),
     lock: readPolicyLock({ audit: false, warn: false }),
     claudeWired: claudeToolGateWired(opts.home),
     openclaw: readOpenClawInput(opts.openclawPath === undefined ? defaultOpenClawConfigPath() : opts.openclawPath),
@@ -447,6 +510,8 @@ export interface GuardPostureRow {
   status: 'pass' | 'warn' | 'fail';
   message: string;
   fix?: string;
+  /** #878: see DoctorReportItem.postureUnknown — the report prints this row's own fix. */
+  postureUnknown?: true;
 }
 
 const OFF_FIX = 'Action Guard is off. That is the default. Do not enable Action Guard from this warning. Do not add a webhook.';
@@ -480,7 +545,21 @@ function mismatchFix(report: PostureReport): string {
     hermesNote;
 }
 
+/**
+ * #878: the fix for any non-pass row while the signed posture is unknown
+ * because config.json cannot be adopted. It names no posture command: the
+ * operator resolves the integrity row first.
+ */
+const UNKNOWN_FIX =
+  'The signed Action Guard posture is unknown until config.json can be adopted (see the config integrity row); ' +
+  'the runtime holds the strict fail-closed posture meanwhile. Resolve that row first. This row names no posture ' +
+  'command and does not enable Action Guard.';
+
 function signedClause(report: PostureReport): string {
+  if (report.signed === null && report.integrityAdoption) {
+    return `signed posture unknown (integrity: unverified — ${describeAdoptionBlock(report.integrityAdoption)}; ` +
+      'the runtime holds the strict fail-closed posture)';
+  }
   if (report.signed === null) return `signed posture unknown (integrity: ${report.integrity})`;
   if (report.graded === 'off') return `Action Guard is off in signed config (\`${report.gradedKey}\` is not true)`;
   if (report.graded === 'advisory') return `signed config runs in warn-mode (\`${report.gradedKey}: false\`)`;
@@ -500,7 +579,12 @@ export function guardPostureRow(report: PostureReport): GuardPostureRow {
     };
   }
   const graded = report.verdict === 'none' ? report.graded : report.reference ?? report.graded;
-  const status: GuardPostureRow['status'] = graded === 'off' || graded === 'advisory' ? 'warn' : 'pass';
+  // #878: with no plane compared, an unknown signed posture is all there is
+  // to report — a warn, never a pass (the strict grade is what the runtime
+  // holds, not a posture anyone chose or can confirm here).
+  const signedUnknown = configPostureOutlook({ verdict: report.integrity, adoption: report.integrityAdoption }) === 'unknown';
+  const status: GuardPostureRow['status'] =
+    graded === 'off' || graded === 'advisory' || (signedUnknown && report.verdict === 'none') ? 'warn' : 'pass';
   const unknown = report.planes.filter((p) => p.posture === null);
   const known = report.planes.filter((p) => p.posture !== null);
   const signed = signedClause(report);
@@ -525,6 +609,9 @@ export function guardPostureRow(report: PostureReport): GuardPostureRow {
     message += `; ${signed}`;
   }
   if (status === 'pass') return { label, status, message };
+  if (report.integrityAdoption) {
+    return { label, status, message, fix: UNKNOWN_FIX, ...(signedUnknown ? { postureUnknown: true as const } : {}) };
+  }
   return { label, status, message, fix: graded === 'off' ? OFF_FIX : ADVISORY_FIX };
 }
 

@@ -279,6 +279,10 @@ function inlineStrictPosture(config) {
     actionGuard: { ...(config.actionGuard ?? {}), ...INLINE_STRICT_POSTURE.actionGuard },
     defenceMode: INLINE_STRICT_POSTURE.defenceMode,
   };
+  // #509 enforce-when-ready runs in shadow until proven — not strict. Dropped
+  // here exactly as `applyStrictFailClosedPosture` drops it in dist (#878: a
+  // kept `readinessGate: true` let the "strict" posture run in shadow).
+  delete out.actionGuard.readinessGate;
   // #522 (GPT-6 round-6, item 1), the second spelling. The deprecated
   // `interceptor.actionGuard` alias gap-fills per key in
   // flattenActionGuardConfig (#209). Every pinned key is now present on the
@@ -290,6 +294,7 @@ function inlineStrictPosture(config) {
   if (isBlock(out.interceptor) && isBlock(out.interceptor.actionGuard)) {
     const alias = { ...out.interceptor.actionGuard };
     for (const key of Object.keys(INLINE_STRICT_POSTURE.actionGuard)) delete alias[key];
+    delete alias.readinessGate;
     out.interceptor = { ...out.interceptor, actionGuard: alias };
   }
   return out;
@@ -338,17 +343,70 @@ async function applyHookPolicyLock(config) {
   }
 }
 
+/**
+ * Does a symlinked config.json have to be held strict? (#878 r5)
+ *
+ * A regular file returns false without loading anything (unchanged path; the
+ * hook does not verify a regular file's signature, #509). For a link the
+ * answer is the shared verifier's (scripts/lib/config-authenticity.mjs — the
+ * HMAC recomputed with the local `.integrity-key` exactly as src's
+ * checkConfigIntegrity does; a `_sig` string or a `.config-sig` file that does
+ * not verify is not a signature). It is imported lazily, and only for a link,
+ * so a missing or broken module cannot crash the hook — and cannot fail OPEN
+ * either: a link whose authenticity cannot be checked is held strict.
+ */
+let configAuthenticityModule;
+async function configLinkedStrict(configPath, parsed, raw) {
+  try {
+    if (!lstatSync(configPath).isSymbolicLink()) return false;
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  if (configAuthenticityModule === undefined) {
+    try {
+      configAuthenticityModule = await import('./lib/config-authenticity.mjs');
+    } catch {
+      configAuthenticityModule = null;
+    }
+  }
+  if (!configAuthenticityModule) {
+    process.stderr.write(
+      '[shieldcortex] config.json is a symbolic link and the signature verifier could not be loaded — ' +
+      'holding the strict fail-closed posture. Run `shieldcortex repair` to restore the install.\n',
+    );
+    return true;
+  }
+  try {
+    return configAuthenticityModule.configIsLinkedUnauthenticated(configPath, parsed, raw);
+  } catch {
+    return true;
+  }
+}
+
 async function loadActionGuardConfig() {
   let parsed = null;
+  let linkedStrict = false;
   try {
     const configPath = join(hookConfigDir(), 'config.json');
-    if (existsSync(configPath)) parsed = JSON.parse(readFileSync(configPath, 'utf-8'));
+    if (existsSync(configPath)) {
+      const raw = readFileSync(configPath, 'utf-8');
+      parsed = JSON.parse(raw);
+      // #878: a symlinked config.json is in force only when a signature
+      // AUTHENTICATES its bytes, as src holds it: the read layer never adopts
+      // or self-heals through a link (configLinkedStrict above). A dangling
+      // link fails existsSync and reads `{}`, as src reads it.
+      linkedStrict = await configLinkedStrict(configPath, parsed, raw);
+    }
   } catch {
     // Unreadable/corrupt config → the guard's own defaults, exactly as before.
     // Enforce-by-default means a corrupt config must not silently disable it.
     parsed = null;
   }
-  const config = await applyHookPolicyLock(parsed ?? {});
+  // #878: a linked config.json no signature authenticates is held strict, as
+  // src holds it — its own enabled/enforce/readinessGate are never read.
+  const base = linkedStrict ? inlineStrictPosture(parsed) : (parsed ?? {});
+  const config = await applyHookPolicyLock(base);
   return flattenActionGuardConfig(config);
 }
 

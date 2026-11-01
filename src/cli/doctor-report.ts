@@ -69,6 +69,13 @@ export interface DoctorReportItem {
    * commands that would confuse the default report (PR #773).
    */
   verboseNote?: string;
+  /**
+   * #878: the row is about a signed Action Guard posture that is UNKNOWN (an
+   * unsigned config.json the read layer cannot adopt). The report prints the
+   * row's own fix and never derives a "Guard is off" next step from its
+   * message text — that text names notify / denial-capable sinks too.
+   */
+  postureUnknown?: true;
 }
 
 export interface FormatDoctorReportOpts {
@@ -165,6 +172,9 @@ export function themeForLabel(label: string): string {
  * checks that are one operator decision — collapse them.
  */
 export function collapseKey(item: DoctorReportItem): string {
+  // #878: an unknown-posture row never merges with a known-posture one — the
+  // merged group would carry one marker for two different next steps.
+  if (item.postureUnknown) return `${item.status}:posture-unknown:${item.label}`;
   const theme = themeForLabel(item.label);
   // Same posture decision, two check sites.
   if (theme === 'SCAN' || /conversation scanning/i.test(item.label) || /conversation scanning/i.test(item.message)) {
@@ -336,9 +346,15 @@ interface ThemeGroup {
   fixNoteWithCommands?: true;
   /** --verbose only; see DoctorReportItem.verboseNote. */
   verboseNotes: string[];
+  /** See DoctorReportItem.postureUnknown. */
+  postureUnknown?: true;
   count: number;
   labels: string[];
 }
+
+/** The next step for an unknown-posture warn whose own fix cannot be printed. */
+export const UNKNOWN_POSTURE_GUIDANCE =
+  'The signed Action Guard posture is unknown. Resolve the config integrity row first. Do not enable Action Guard from this warning.';
 
 /** Plain-English next step when a warn has no safe copy-paste command. */
 export function honestyGuidance(g: {
@@ -346,7 +362,15 @@ export function honestyGuidance(g: {
   what: string;
   why: string;
   fixNote: string;
+  postureUnknown?: true;
 }): string {
+  // #878: structured, ahead of every text match below. An unknown signed
+  // posture is not "Guard is off": print the row's own fix.
+  if (g.postureUnknown) {
+    return g.fixNote && !isHonestyForbiddenCommand(g.fixNote)
+      ? cleanWhy(g.fixNote)
+      : UNKNOWN_POSTURE_GUIDANCE;
+  }
   const blob = `${g.theme} ${g.what} ${g.why} ${g.fixNote}`.toLowerCase();
   if (g.theme === 'SCAN' || /conversation scanning/.test(blob)) {
     return '';
@@ -377,6 +401,7 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
       fixNote: it.fix ?? '',
       ...(it.fixNoteWithCommands ? { fixNoteWithCommands: true as const } : {}),
       verboseNotes: it.verboseNote ? [it.verboseNote] : [],
+      ...(it.postureUnknown ? { postureUnknown: true as const } : {}),
       count: 1,
       labels: [it.label],
     }));
@@ -397,6 +422,7 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
         fixNote: it.fix ?? '',
         ...(it.fixNoteWithCommands ? { fixNoteWithCommands: true as const } : {}),
         verboseNotes: it.verboseNote ? [it.verboseNote] : [],
+        ...(it.postureUnknown ? { postureUnknown: true as const } : {}),
         count: 1,
         labels: [it.label],
       };
