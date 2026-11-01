@@ -18,24 +18,37 @@
  * OPENCLAW_HOME and HOME under os.tmpdir(), and a fresh module registry (so
  * per-process state such as the ephemeral device id and the one-shot warnings
  * cannot leak between cases). The iron-dome audit logger, the recovery audit
- * sink and the OpenClaw plugin guard sync are mocked.
+ * sink and the OpenClaw plugin guard sync are mocked. `fs` is a pass-through
+ * owned by this test that counts reads of config.json, so the cache cases can
+ * assert real read counts; nothing in shipped code knows it exists.
  */
-import fs from 'fs';
+import * as realFs from 'fs';
 import os from 'os';
 import path from 'path';
-import { createHmac, randomBytes } from 'crypto';
+import { createHash, createHmac, randomBytes } from 'crypto';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { PROTECTED_ROOT_ENV } from '../defence/iron-dome/protected-root.js';
 
+type Sink = { location: string; record: (row: unknown) => number; close: () => void };
 const auditSpy = jest.fn();
 const guardSyncSpy = jest.fn(() => ({ status: 'skipped' as const, reason: 'no-entry' as const }));
-const openSinkSpy = jest.fn(async () => { throw new Error('not used here'); });
+const openSinkSpy = jest.fn<() => Promise<Sink>>(async () => { throw new Error('not used here'); });
 
 jest.unstable_mockModule('../defence/iron-dome/audit.js', () => ({ logIronDomeAudit: auditSpy }));
 jest.unstable_mockModule('../cloud/recovery-audit.js', () => ({ openRecoveryAuditSink: openSinkSpy }));
 jest.unstable_mockModule('../setup/openclaw-plugin-guard-sync.js', () => ({
   syncOpenClawPluginActionGuard: guardSyncSpy,
 }));
+
+let configReads = 0;
+const countingReadFileSync = ((p: unknown, ...rest: unknown[]) => {
+  if (typeof p === 'string' && path.basename(p) === 'config.json') configReads += 1;
+  return (realFs.readFileSync as (...args: unknown[]) => unknown)(p, ...rest);
+}) as typeof realFs.readFileSync;
+const countingFs = { ...realFs, readFileSync: countingReadFileSync };
+jest.unstable_mockModule('fs', () => ({ ...countingFs, default: countingFs }));
+
+const fs = realFs;
 
 type ConfigModule = typeof import('../cloud/config.js');
 
@@ -120,6 +133,9 @@ beforeEach(() => {
   process.env[PROTECTED_ROOT_ENV] = protectedRoot;
   process.env.OPENCLAW_HOME = openclawHome;
   process.env.HOME = home;
+  configReads = 0;
+  openSinkSpy.mockReset();
+  openSinkSpy.mockImplementation(async () => { throw new Error('not used here'); });
   errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
   jest.spyOn(console, 'warn').mockImplementation(() => undefined);
   jest.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -471,16 +487,234 @@ describe('#878 item 2: a same-size in-place edit with the mtime restored is re-r
     expect(fs.statSync(configFile()).ino).toBe(ino);
 
     // Re-read: the stale `_sig` no longer matches, so it is tampered → strict.
+    configReads = 0;
     expect(config.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: false });
+    expect(configReads).toBe(1);
     expect(config.isConfigTampered()).toBe(true);
   });
 
-  it('control: with nothing changed the getter keeps answering from its cache', async () => {
+  it('control: with nothing changed the getter answers from its cache — config.json is not read again', async () => {
     regularUnsigned({});
     const config = await freshConfig();
     config.setActionGuardCoreConfig({ enabled: true, enforce: false });
-    expect(config.getActionGuardCoreConfig()).toMatchObject({ enabled: true, enforce: false });
-    expect(config.getActionGuardCoreConfig()).toMatchObject({ enabled: true, enforce: false });
+    expect(config.getActionGuardCoreConfig()).toMatchObject({ enabled: true, enforce: false }); // populates the cache
+    configReads = 0;
+    for (let i = 0; i < 5; i += 1) {
+      expect(config.getActionGuardCoreConfig()).toMatchObject({ enabled: true, enforce: false });
+    }
+    expect(configReads).toBe(0);
     expect(config.isConfigTampered()).toBe(false);
+  });
+
+  /** Re-sign `obj` the way writeRawConfig does, with the key on disk (same layout, same size). */
+  function signedBytes(obj: Record<string, unknown>): string {
+    const key = fs.readFileSync(file('.integrity-key'), 'utf-8').trim();
+    const rest = { ...obj };
+    delete rest._sig;
+    const sig = createHmac('sha256', key).update(JSON.stringify(rest, null, 2), 'utf-8').digest('hex');
+    return JSON.stringify({ ...rest, _sig: sig }, null, 2) + '\n';
+  }
+
+  it('N2: getCloudConfig re-derives after another writer\'s same-size, validly signed edit with the mtime restored', async () => {
+    regularUnsigned({});
+    const config = await freshConfig();
+    config.setCloudConfig({ cloudEnabled: true, cloudApiKey: 'k', cloudBaseUrl: 'https://aaaa.invalid' });
+    const mtime = 1_700_000_000;
+    fs.utimesSync(configFile(), mtime, mtime);
+    expect(config.getCloudConfig().cloudBaseUrl).toBe('https://aaaa.invalid'); // derived and cached
+
+    const onDisk = JSON.parse(fs.readFileSync(configFile(), 'utf-8'));
+    const edited = signedBytes({ ...onDisk, cloudBaseUrl: 'https://bbbb.invalid' });
+    expect(edited.length).toBe(fs.statSync(configFile()).size);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30); // coarse ctime clock
+    fs.writeFileSync(configFile(), edited);
+    fs.utimesSync(configFile(), mtime, mtime);
+
+    expect(config.getCloudConfig().cloudBaseUrl).toBe('https://bbbb.invalid');
+    expect(config.isConfigTampered()).toBe(false);
+  });
+
+  it('N2 control: with nothing changed getCloudConfig answers from its derived cache without reading config.json', async () => {
+    regularUnsigned({});
+    const config = await freshConfig();
+    config.setCloudConfig({ cloudEnabled: true, cloudApiKey: 'k' });
+    const first = config.getCloudConfig();
+    configReads = 0;
+    expect(config.getCloudConfig()).toBe(first);
+    expect(configReads).toBe(0);
+  });
+});
+
+// ── Round-1 fold: the rows the restart had not pinned ───────────────────
+
+describe('#878 getCloudSyncControls (the v4.27 migration reader) writes nothing through a link', () => {
+  const PRE_MIGRATION = { cloudEnabled: true, cloudApiKey: 'k' };
+
+  it('live unsigned link: the safe default is answered in memory, the migration is not persisted, directory unchanged', async () => {
+    liveUnsignedLink(PRE_MIGRATION);
+    const before = snapshot();
+    const config = await freshConfig();
+    expect(config.getCloudSyncControls().excludeSensitive).toBe(true);
+    expect(snapshot()).toEqual(before);
+    expectLinkIntact();
+    expect(errors()).toMatch(/symbolic link.*Nothing was written/s);
+  });
+
+  it('dangling link: defaults, nothing written, target never created', async () => {
+    const target = danglingLink();
+    const before = snapshot();
+    const config = await freshConfig();
+    expect(config.getCloudSyncControls()).toEqual({
+      projectMode: 'all', projects: [], contentMode: 'full', excludeSensitive: true,
+    });
+    expect(snapshot()).toEqual(before);
+    expect(fs.existsSync(target)).toBe(false);
+  });
+
+  it('regular-file control: the migration is persisted and signed', async () => {
+    regularUnsigned(PRE_MIGRATION);
+    const config = await freshConfig();
+    expect(config.getCloudSyncControls().excludeSensitive).toBe(true);
+    const onDisk = JSON.parse(fs.readFileSync(configFile(), 'utf-8'));
+    expect(onDisk.cloudSyncExcludeSensitive).toBe(true);
+    expect(onDisk.cloudSyncDefaultsMigratedAt).toEqual(expect.any(String));
+    expect(onDisk._sig).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe('#878 config --resign refuses a symlinked config.json before any backup, audit or write', () => {
+  /** Tampered (the embedded `_sig` is wrong) but strict-shaped, so nothing else refuses the re-sign. */
+  const TAMPERED = bytes({ defenceMode: 'strict', actionGuard: { enabled: true, enforce: true }, _sig: 'b'.repeat(64) });
+  const sha = (b: string) => createHash('sha256').update(b, 'utf-8').digest('hex');
+
+  it('live link to a tampered target: the preview says refused; the confirm throws the link refusal; nothing written', async () => {
+    fs.writeFileSync(file('.integrity-key'), randomBytes(32).toString('hex'), { mode: 0o600 });
+    fs.writeFileSync(file('target.json'), TAMPERED);
+    fs.symlinkSync(file('target.json'), configFile());
+    const before = snapshot();
+    const config = await freshConfig();
+    // A working audit sink, so that only the link refusal can stop the backup.
+    openSinkSpy.mockImplementationOnce(async () => ({ location: 'test-sink', record: () => 1, close: () => undefined }));
+    const preview = config.previewConfigResign();
+    expect(preview).toMatchObject({ verdict: 'tampered', linked: true, unauthorisedKeys: [], lockRefusal: null });
+    expect(preview.sha256).toBe(sha(TAMPERED));
+
+    let thrown: unknown;
+    try { await config.resignTamperedConfig(preview.sha256!); } catch (err) { thrown = err; }
+    expect(thrown).toBeInstanceOf(config.ConfigSymlinkRefusal);
+    expect((thrown as Error).message).toMatch(/symbolic link.*Nothing was written/s);
+    // The message is true: no backup, nothing else either — and the audit log was never opened.
+    expect(snapshot()).toEqual(before);
+    expect(fs.readdirSync(configDir).some((n) => n.includes('.bak-resign-'))).toBe(false);
+    expect(openSinkSpy).not.toHaveBeenCalled();
+    expectLinkIntact();
+  });
+
+  it('dangling link: the confirm throws the link refusal, not "not tampered"; target never created', async () => {
+    const target = danglingLink();
+    const before = snapshot();
+    const config = await freshConfig();
+    expect(config.previewConfigResign()).toMatchObject({ verdict: 'unreadable', linked: true });
+    await expect(config.resignTamperedConfig('c'.repeat(64))).rejects.toBeInstanceOf(config.ConfigSymlinkRefusal);
+    expect(openSinkSpy).not.toHaveBeenCalled();
+    expect(snapshot()).toEqual(before);
+    expect(fs.existsSync(target)).toBe(false);
+  });
+
+  it('regular-file control: the same tampered bytes are backed up, re-signed and recorded', async () => {
+    fs.writeFileSync(file('.integrity-key'), randomBytes(32).toString('hex'), { mode: 0o600 });
+    fs.writeFileSync(configFile(), TAMPERED);
+    const config = await freshConfig();
+    const record = jest.fn((_row: unknown) => 41);
+    openSinkSpy.mockImplementationOnce(async () => ({ location: 'test-sink', record, close: () => undefined }));
+    const preview = config.previewConfigResign();
+    expect(preview).toMatchObject({ verdict: 'tampered', linked: false, unauthorisedKeys: [], lockRefusal: null });
+
+    const result = await config.resignTamperedConfig(preview.sha256!, { now: new Date('2026-11-01T00:00:00.000Z') });
+    expect(fs.readdirSync(configDir).sort()).toEqual([
+      '.integrity-key', 'config.json', 'config.json.bak-resign-2026-11-01T00-00-00-000Z',
+    ]);
+    expect(fs.readFileSync(result.backupPath, 'utf-8')).toBe(TAMPERED);
+    expect(config.inspectConfigIntegrity().verdict).toBe('valid');
+    expect(result.audit).toMatchObject({ recorded: true, rowId: 41 });
+  });
+});
+
+describe('#878 resolveLedgerConfig: the read-only seam doctor\'s chained-ledger check uses writes nothing', () => {
+  const LEDGER = { defenceMode: 'balanced', ledger: { heartbeatMinutes: 5 } };
+  const cases: Array<[string, () => void]> = [
+    ['regular unsigned', () => regularUnsigned(LEDGER)],
+    ['regular self-heal', () => fs.writeFileSync(configFile(), selfHealBytes(LEDGER))],
+    ['regular, embedded _sig with no key', () => fs.writeFileSync(configFile(), bytes({ ...LEDGER, _sig: 'a'.repeat(64) }))],
+    ['live unsigned link', () => liveUnsignedLink(LEDGER)],
+  ];
+
+  for (const [name, arrange] of cases) {
+    it(`${name}: resolveLedgerConfig({ readOnly: true }) reads the setting and leaves the directory unchanged`, async () => {
+      arrange();
+      const before = snapshot();
+      await freshConfig();
+      const { resolveLedgerConfig } = await import('../defence/ledger/config.js');
+      expect(resolveLedgerConfig({ readOnly: true }).heartbeatIntervalMs).toBe(5 * 60_000);
+      expect(snapshot()).toEqual(before);
+    });
+  }
+
+  it('control: the ledger writer\'s ordinary read still adopts an unsigned regular file', async () => {
+    regularUnsigned(LEDGER);
+    await freshConfig();
+    const { resolveLedgerConfig } = await import('../defence/ledger/config.js');
+    expect(resolveLedgerConfig().heartbeatIntervalMs).toBe(5 * 60_000);
+    expect(fs.readdirSync(configDir).sort()).toEqual(['.config-sig', '.integrity-key', 'config.json']);
+  });
+});
+
+describe('#878 inspectConfigIntegrity: one outlook for an unsigned file, shared with the core-config inspector', () => {
+  it('regular and unobstructed: unsigned, graded by the file', async () => {
+    regularUnsigned({ actionGuard: { enabled: false } });
+    const config = await freshConfig();
+    const report = config.inspectConfigIntegrity();
+    expect(report).toEqual({ path: configFile(), verdict: 'unsigned', linked: false });
+    expect(config.configPostureOutlook(report)).toBe('file');
+    expect(fs.readdirSync(configDir)).toEqual(['config.json']);
+  });
+
+  it('behind a live link: unverified (linked), outlook unknown — and the core inspector says unknown too', async () => {
+    liveUnsignedLink({ actionGuard: { enabled: false } });
+    const before = snapshot();
+    const config = await freshConfig();
+    const report = config.inspectConfigIntegrity();
+    expect(report).toEqual({ path: configFile(), verdict: 'unverified', adoption: 'linked', linked: true });
+    expect(config.configPostureOutlook(report)).toBe('unknown');
+    expect(config.inspectActionGuardCoreConfig()).toBe('unknown');
+    expect(snapshot()).toEqual(before);
+  });
+
+  it('a .integrity-key directory: unverified (fails), outlook strict — and the core inspector answers strict', async () => {
+    regularUnsigned({ actionGuard: { enabled: false } });
+    fs.mkdirSync(file('.integrity-key'));
+    const config = await freshConfig();
+    const report = config.inspectConfigIntegrity();
+    expect(report).toMatchObject({ verdict: 'unverified', adoption: 'fails', linked: false });
+    expect(config.configPostureOutlook(report)).toBe('strict');
+    expect(config.inspectActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: false });
+  });
+
+  (asRoot ? it.skip : it)('an unwritable config directory: unverified (unknown), outlook unknown, as the core inspector says', async () => {
+    regularUnsigned({ actionGuard: { enabled: false } });
+    fs.chmodSync(configDir, 0o500);
+    const config = await freshConfig();
+    const report = config.inspectConfigIntegrity();
+    expect(report).toMatchObject({ verdict: 'unverified', adoption: 'unknown' });
+    expect(config.configPostureOutlook(report)).toBe('unknown');
+    expect(config.inspectActionGuardCoreConfig()).toBe('unknown');
+  });
+
+  it('tampered is strict; absent, valid, malformed and unreadable are graded as the runtime reads them', async () => {
+    const config = await freshConfig();
+    expect(config.configPostureOutlook({ verdict: 'tampered' })).toBe('strict');
+    for (const verdict of ['absent', 'valid', 'self-heal', 'malformed', 'unreadable'] as const) {
+      expect(config.configPostureOutlook({ verdict })).toBe('file');
+    }
   });
 });

@@ -87,6 +87,7 @@ const DEFAULT_REVIEW_COPILOT_CONFIG: ReviewCopilotConfig = {
 // Cache to avoid repeated file reads
 let cachedConfig: CloudConfig | null = null;
 let cachedConfigFile: string | null = null;
+let cachedConfigIdentity: FileIdentity | null = null;
 
 // Raw-config cache keyed on (file path, dev, inode, size, mtimeMs, ctimeMs).
 // The defence pipeline reads the config on every scan via getDefenceMode() and
@@ -372,7 +373,12 @@ export function isConfigTampered(): boolean {
 
 export function getCloudConfig(): CloudConfig {
   const configFile = getConfigFile();
-  if (cachedConfig && cachedConfigFile === configFile) return cachedConfig;
+  // #878: keyed on the file's identity, as the raw cache is — keyed on the
+  // path alone, an external edit (same size, mtime restored or not) kept
+  // serving the cloud fields this process cached first.
+  const identity = fileIdentity(configFile);
+  const unchanged = identity === null ? cachedConfigIdentity === null : sameCacheFile(cachedConfigIdentity, identity);
+  if (cachedConfig && cachedConfigFile === configFile && unchanged) return cachedConfig;
 
   // Route through the shared, mtime-cached, integrity-verified read so the
   // cloud config reflects the same view (and `_sig` stripping) as every other
@@ -384,6 +390,9 @@ export function getCloudConfig(): CloudConfig {
     cloudEnabled: (raw.cloudEnabled as boolean | undefined) ?? false,
   };
   cachedConfigFile = configFile;
+  // Captured before the read: a read that rewrote the file (adoption leaves
+  // config.json alone; a self-heal does not) misses next time and re-derives.
+  cachedConfigIdentity = identity;
   return cachedConfig;
 }
 
@@ -789,20 +798,88 @@ export function readRawConfig(options: { readOnly?: boolean } = {}): Record<stri
 
 // ── Integrity inspection and deliberate re-sign (#647) ──
 
+/**
+ * Why an unsigned config.json cannot be adopted (#878), from
+ * {@link unsignedAdoptionOutlook}:
+ *  - `linked`  config.json is a symbolic link; the read layer never adopts
+ *              through one, and the runtime holds the file at the strict posture.
+ *  - `fails`   the integrity-key path is a directory: adoption fails whatever
+ *              the privileges, and the runtime reads the file as tampered (strict).
+ *  - `unknown` something visible without writing may stop the adoption (a
+ *              non-file key, a dangling sidecar link, a config directory this
+ *              user cannot write); if it does, the runtime reads it tampered.
+ */
+export type UnsignedAdoptionBlock = 'linked' | 'fails' | 'unknown';
+
 export interface ConfigIntegrityReport {
   /**
    * The verdict, with one more word than {@link ConfigIntegrity}: `unsigned`
-   * is a file with no signature at all, which the next ordinary read adopts
-   * as trusted (pre-v4.32 compatibility). Inspection reports it instead of
-   * adopting it.
+   * is a file with no signature at all whose adoption nothing obstructs, so
+   * the next ordinary read adopts it as trusted (pre-v4.32 compatibility).
+   * Inspection reports it instead of adopting it.
+   *
+   * #878: an unsigned file the ordinary read will NOT adopt is `unverified`,
+   * with {@link adoption} naming why — never `unsigned`, so no reader can take
+   * "unsigned" to mean "the file's own values are about to be in force" for a
+   * file the runtime holds strict. This is the one place that outlook is
+   * decided; every doctor row that grades the file's values reads it here.
    */
   verdict: ConfigIntegrity | 'unsigned';
   path: string;
+  /** Set exactly when `verdict` is `unverified` because an unsigned file cannot be adopted. */
+  adoption?: UnsignedAdoptionBlock;
+  /** config.json is a symbolic link: nothing is adopted, self-healed or written through it. */
+  linked: boolean;
+}
+
+/**
+ * What a reader that grades config.json's own values must do with this
+ * report (#647, #878):
+ *  - `file`    grade the file's values: they are in force, or (an unobstructed
+ *              `unsigned`) will be after the next ordinary read adopts them.
+ *              Absent, malformed and unreadable files resolve as the runtime
+ *              reads them.
+ *  - `strict`  the runtime enforces the strict fail-closed posture over them:
+ *              `tampered`, and an unsigned file whose adoption `fails` (the
+ *              runtime reads it tampered).
+ *  - `unknown` an unsigned file that is not adopted (`linked`) or may not be
+ *              (`unknown`): rendered as unknown, graded as the strict posture
+ *              the runtime holds, and never as the file's own values.
+ *
+ * {@link inspectActionGuardCoreConfig} decides through the same mapping
+ * ({@link outlookOfAdoption}), so doctor's headline and its rows agree.
+ */
+export type ConfigPostureOutlook = 'file' | 'strict' | 'unknown';
+
+export function configPostureOutlook(report: Pick<ConfigIntegrityReport, 'verdict' | 'adoption'>): ConfigPostureOutlook {
+  if (report.verdict === 'tampered') return 'strict';
+  if (report.verdict === 'unverified' && report.adoption !== undefined) return outlookOfAdoption(report.adoption);
+  return 'file';
+}
+
+/** An unsigned file's posture outlook, from its adoption block (undefined: unobstructed). */
+function outlookOfAdoption(block: UnsignedAdoptionBlock | undefined): ConfigPostureOutlook {
+  if (block === undefined) return 'file';
+  return block === 'fails' ? 'strict' : 'unknown';
+}
+
+/** Plain words for an {@link UnsignedAdoptionBlock}, for doctor rows. */
+export function describeAdoptionBlock(block: UnsignedAdoptionBlock): string {
+  switch (block) {
+    case 'linked':
+      return 'config.json is a symbolic link to a file with no signature, which is never adopted (nothing is written beside a link)';
+    case 'fails':
+      return 'config.json has no signature and cannot be adopted: the integrity key path (.integrity-key) is a directory, so the runtime reads it as tampered';
+    default:
+      return 'config.json has no signature, and its adoption may not succeed (a non-file or dangling .integrity-key/.config-sig, or a config directory this user cannot write)';
+  }
 }
 
 interface ConfigBytes {
   path: string;
   verdict: ConfigIntegrity | 'unsigned';
+  adoption?: UnsignedAdoptionBlock;
+  linked: boolean;
   bytes: Buffer | null;
   data: Record<string, unknown> | null;
 }
@@ -810,31 +887,40 @@ interface ConfigBytes {
 function readConfigBytesNoSideEffects(): ConfigBytes {
   const path = getConfigFile();
   // lstat, as the readers do (#878): a dangling symlink is not an absent file.
+  let linked: boolean;
   try {
-    lstatSync(path);
+    linked = lstatSync(path).isSymbolicLink();
   } catch (err) {
     const absent = (err as NodeJS.ErrnoException).code === 'ENOENT';
-    return { path, verdict: absent ? 'absent' : 'unreadable', bytes: null, data: null };
+    return { path, verdict: absent ? 'absent' : 'unreadable', linked: false, bytes: null, data: null };
   }
   let bytes: Buffer;
   try {
     bytes = readFileSync(path);
   } catch {
-    return { path, verdict: 'unreadable', bytes: null, data: null };
+    return { path, verdict: 'unreadable', linked, bytes: null, data: null };
   }
   const content = bytes.toString('utf-8');
-  if (content.trim().length === 0) return { path, verdict: 'absent', bytes, data: null };
+  if (content.trim().length === 0) return { path, verdict: 'absent', linked, bytes, data: null };
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
   } catch {
-    return { path, verdict: 'malformed', bytes, data: null };
+    return { path, verdict: 'malformed', linked, bytes, data: null };
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { path, verdict: 'malformed', bytes, data: null };
+    return { path, verdict: 'malformed', linked, bytes, data: null };
   }
   const data = parsed as Record<string, unknown>;
-  return { path, verdict: checkConfigIntegrity(data, content, { sideEffects: false }), bytes, data };
+  const verdict = checkConfigIntegrity(data, content, { sideEffects: false });
+  if (verdict === 'unsigned') {
+    // #878: `unsigned` promises that the next ordinary read adopts the file.
+    // Where it will not, the answer is unverified, with the reason — the same
+    // outlook inspectActionGuardCoreConfig acts on.
+    const outlook = unsignedAdoptionOutlook();
+    if (outlook !== 'unobstructed') return { path, verdict: 'unverified', adoption: outlook, linked, bytes, data };
+  }
+  return { path, verdict, linked, bytes, data };
 }
 
 /**
@@ -845,8 +931,8 @@ function readConfigBytesNoSideEffects(): ConfigBytes {
  * that asking the question never changes the answer.
  */
 export function inspectConfigIntegrity(): ConfigIntegrityReport {
-  const { path, verdict } = readConfigBytesNoSideEffects();
-  return { path, verdict };
+  const { path, verdict, adoption, linked } = readConfigBytesNoSideEffects();
+  return { path, verdict, linked, ...(adoption ? { adoption } : {}) };
 }
 
 /**
@@ -1038,6 +1124,12 @@ export interface ConfigResignPreview {
   lockStatus: PolicyLockState['status'];
   /** The policy lock's refusal of a value the file declares, if any (the re-sign would be refused). */
   lockRefusal: string | null;
+  /**
+   * #878: config.json is a symbolic link (dangling or not). The re-sign is
+   * refused before anything is written — no backup, no temp file — because
+   * its write would replace the link with a regular file.
+   */
+  linked: boolean;
 }
 
 /**
@@ -1071,6 +1163,7 @@ export function previewConfigResign(): ConfigResignPreview {
     unauthorisedKeys: effects.unauthorisedKeys,
     lockStatus: lock.status,
     lockRefusal,
+    linked: read.linked || configIsSymlink(read.path),
   };
 }
 
@@ -1104,6 +1197,8 @@ export interface ConfigResignResult {
  * re-serialised with a fresh `_sig` — not a byte copy; the backup is the byte
  * copy. What it will not do:
  *   - sign a file that is not `tampered` (nothing to recover, or not parseable);
+ *   - touch anything when config.json is a symbolic link, dangling or not
+ *     (#878): refused first, before the audit log, the backup or any write;
  *   - loosen a key the policy lock forbids — the same refusal, audited as
  *     `policy_refused`, that the setters apply, asked of the values in BOTH
  *     Action Guard blocks of the raw file;
@@ -1237,6 +1332,12 @@ function admitResign(confirm: string): {
   loosenedKeys: string[];
   previousSha256: string;
 } {
+  // #878: a symlinked config.json (dangling or not) is never written — the
+  // write would replace the link — so refuse it FIRST: before the audit log
+  // is opened and before the backup copy, so "Nothing was written" is true of
+  // the whole command. writeRawConfig's own refusal comes after the backup.
+  const configFile = getConfigFile();
+  if (configIsSymlink(configFile)) throw new ConfigSymlinkRefusal(configFile);
   const read = readConfigBytesNoSideEffects();
   if (!read.bytes || read.verdict !== 'tampered' || !read.data) {
     throw new Error(
@@ -1328,6 +1429,13 @@ function refuseIfPolicyLockForbids(updates: Array<{ key: ProtectedPolicyKey; val
  * about the memory keys therefore answers `false`: silence from the authority
  * is not permission. `protect` writes the whole protected set, so that state
  * only arises from a hand-written partial lock. Unlocked hosts are unchanged.
+ *
+ * #878: read-only, because its only callers are doctor rows and doctor writes
+ * nothing. The lock is read without auditing, and the signature is checked
+ * with `sideEffects: false`: before this, a config carrying an embedded `_sig`
+ * with no `.integrity-key` beside it minted a fresh key (behind a symlinked
+ * config.json too) just to conclude `false`. With no key there is nothing to
+ * verify against, so the answer is the same `false`, and nothing is written.
  */
 export function hasTrustedMemorySidecarPosture(
   raw: Record<string, unknown>,
@@ -1337,7 +1445,7 @@ export function hasTrustedMemorySidecarPosture(
     const effectivePath = getConfigFile();
     if (resolve(configPath) !== resolve(effectivePath)) return false;
 
-    const lock = getPolicyLockState();
+    const lock = readPolicyLock({ audit: false, warn: false });
     if (lock.status === 'locked' || lock.status === 'unverifiable') {
       const coverage = policyLockCoverage(lock);
       return (
@@ -1355,7 +1463,9 @@ export function hasTrustedMemorySidecarPosture(
     // `self-heal` means the embedded signature is invalid even if a legacy
     // external signature authenticates the general config bytes, so it is not
     // sufficient here either.
-    if (typeof parsed._sig !== 'string' || checkConfigIntegrity(parsed, content) !== 'valid') return false;
+    if (typeof parsed._sig !== 'string' || checkConfigIntegrity(parsed, content, { sideEffects: false }) !== 'valid') {
+      return false;
+    }
 
     const memory = parsed.memory && typeof parsed.memory === 'object' && !Array.isArray(parsed.memory)
       ? parsed.memory as Record<string, unknown>
@@ -1856,13 +1966,16 @@ export function inspectActionGuardCoreConfig(): ActionGuardCoreConfig | 'unknown
     // A fresh read whose verdict differs from this process's mutating cache:
     // which of the two the runtime enforces depends on that cache. Unknown.
     if (state.integrity !== 'unverified') return 'unknown';
-    // An unsigned file: what the runtime enforces depends on the adoption.
-    switch (unsignedAdoptionOutlook()) {
-      case 'unobstructed':
+    // An unsigned file: what the runtime enforces depends on the adoption —
+    // the same outlook, through the same mapping, inspectConfigIntegrity
+    // reports and every doctor row grades by (#878).
+    const adoption = unsignedAdoptionOutlook();
+    switch (outlookOfAdoption(adoption === 'unobstructed' ? undefined : adoption)) {
+      case 'file':
         // The next ordinary read adopts it and enforces what it says (doctor's
         // integrity row says that is what will happen).
         return resolveActionGuardCore(state.data);
-      case 'fails': {
+      case 'strict': {
         // A failed adoption is classified tampered: the strict view.
         const unlocked = readRawConfigStateUnlocked({ readOnly: true });
         if (unlocked.parseFailed || unlocked.readFailed) return 'unknown';
