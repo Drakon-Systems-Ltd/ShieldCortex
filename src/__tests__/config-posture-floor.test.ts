@@ -211,6 +211,26 @@ describe('B: blank or broken bytes after an enforcing read do not relax the post
     expect(posture(config)).toEqual({ guard: GUARD_ON, mode: 'strict' });
   });
 
+  // Release review N3/N1: the blank case above already reported unknown; the
+  // other no-data states read-only reported the `{}` they found — Guard off —
+  // while the getter in the same process enforced the held posture.
+  for (const [name, breakIt] of [
+    ['lstat EIO', () => { fail.lstat = true; fail.read = true; }],
+    ['read EIO', () => { fail.read = true; }],
+    ['malformed bytes', () => replaceKeepingMtime('{"actionGuard": {"enabled": fal')],
+    ['non-object JSON', () => replaceKeepingMtime('[]')],
+  ] as const) {
+    it(`after an enforcing read, ${name}: the read-only inspector reports unknown, not off`, async () => {
+      writeSigned(ENFORCING);
+      const config = await freshConfig();
+      expect(posture(config)).toEqual({ guard: GUARD_ON, mode: 'strict' });
+      breakIt();
+      expect(posture(config)).toEqual({ guard: GUARD_ON, mode: 'strict' });
+      expect(config.readActionGuardCoreConfigReadOnly()).toBeNull();
+      expect(config.inspectActionGuardCoreConfig()).toBe('unknown');
+    });
+  }
+
   it('a strict posture from a tampered read is held strict, not as the tampered bytes', async () => {
     fs.writeFileSync(configFile(), JSON.stringify({ defenceMode: 'permissive', actionGuard: { enabled: false }, _sig: '0'.repeat(64) }, null, 2));
     const config = await freshConfig();
@@ -276,6 +296,8 @@ describe('controls: the fresh-install and deliberate-change contracts are unchan
     // established in this process to hold).
     expect(posture(config)).toEqual({ guard: GUARD_OFF, mode: 'balanced' });
     expect(config.readActionGuardCoreConfigReadOnly()).toBeNull();
+    // Nothing established, so the inspector agrees with the runtime: off.
+    expect(config.inspectActionGuardCoreConfig()).toEqual(GUARD_OFF);
     expect(() => config.setDefenceMode('permissive')).toThrow(/refusing to overwrite/);
     fail.read = false;
     expect(fs.readFileSync(configFile(), 'utf-8')).toBe(before);

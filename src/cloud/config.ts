@@ -122,9 +122,15 @@ let cachedRawConfigLinked: boolean | null = null;
 // missing file and a fresh install read exactly as before.
 let establishedPosture: { file: string; content: string; integrity: ConfigIntegrity } | null = null;
 
-/** A no-data read of `configFile`, held at the posture this process established from it. */
+/**
+ * A no-data read of `configFile`, held at the posture this process established
+ * from it. A read-only read is not held, but it cannot call the `{}` it found
+ * "off" either while the getter enforces the held posture: `unverified`, which
+ * the inspector reports as unknown.
+ */
 function holdEstablished(configFile: string, options: { readOnly?: boolean }, state: RawConfigState): RawConfigState {
-  if (options.readOnly || establishedPosture?.file !== configFile) return state;
+  if (establishedPosture?.file !== configFile) return state;
+  if (options.readOnly) return { ...state, unverified: true };
   const data = JSON.parse(establishedPosture.content) as Record<string, unknown>;
   delete data._sig;
   configTampered = establishedPosture.integrity === 'tampered';
@@ -627,7 +633,7 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
     }
     if (options.readOnly) {
       configTampered = false;
-      return { data: {}, parseFailed: true, readFailed: true, integrity: 'unreadable' };
+      return holdEstablished(configFile, options, { data: {}, parseFailed: true, readFailed: true, integrity: 'unreadable' });
     }
     linked = null;
   }
@@ -2042,7 +2048,9 @@ export function readActionGuardCoreConfigReadOnly(): ActionGuardCoreConfig | nul
  *
  * A file that exists but cannot be read or parsed resolves exactly as the
  * runtime reads it ({} under the lock), unlike
- * {@link readActionGuardCoreConfigReadOnly}, which reports it as `null`.
+ * {@link readActionGuardCoreConfigReadOnly}, which reports it as `null` —
+ * unless this process established a posture from the file earlier: the
+ * getter holds that posture then, so this answers `'unknown'`, not off.
  */
 export function inspectActionGuardCoreConfig(): ActionGuardCoreConfig | 'unknown' {
   try {
