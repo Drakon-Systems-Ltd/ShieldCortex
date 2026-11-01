@@ -523,6 +523,20 @@ export interface GatewayRestartResult {
    * was requested. Compare it with a change's ticket to know which came first.
    */
   requestedSeq?: number;
+  /**
+   * The service-manager command did not return within its timeout. The
+   * restart may have been issued and still be draining the stop: uncertain
+   * (check with doctor), never a failure that invites a second restart.
+   */
+  timedOut?: boolean;
+}
+
+/** A failed restart command; a timeout (ETIMEDOUT, killed by SIGTERM) is `timedOut`, not a failure. */
+export function gatewayRestartExecFailure(method: string, err: unknown): GatewayRestartResult {
+  const e = err as { code?: unknown; signal?: unknown };
+  const timedOut = e?.code === 'ETIMEDOUT' || e?.signal === 'SIGTERM';
+  const detail = err instanceof Error ? err.message : String(err);
+  return { attempted: true, restarted: false, method, detail, ...(timedOut ? { timedOut: true } : {}) };
 }
 
 /**
@@ -647,12 +661,7 @@ function execGatewayRestartCommand(): GatewayRestartResult {
       });
       return { attempted: true, restarted: true, method: 'systemctl --user' };
     } catch (err) {
-      return {
-        attempted: true,
-        restarted: false,
-        method: 'systemctl --user',
-        detail: (err as Error).message,
-      };
+      return gatewayRestartExecFailure('systemctl --user', err);
     }
   }
 
@@ -665,12 +674,7 @@ function execGatewayRestartCommand(): GatewayRestartResult {
       });
       return { attempted: true, restarted: true, method: 'launchctl kickstart' };
     } catch (err) {
-      return {
-        attempted: true,
-        restarted: false,
-        method: 'launchctl kickstart',
-        detail: (err as Error).message,
-      };
+      return gatewayRestartExecFailure('launchctl kickstart', err);
     }
   }
 

@@ -409,11 +409,11 @@ describe('a config with no signature yet is unknown read-only, never off', () =>
   // check, so a file emptied in place (mtime restored) read as off while the
   // getter still served cached strict-ON.
   // #878 item 2 keys the cache on the file's identity (size and ctime
-  // included), which an in-place blanking changes whatever mtime is restored:
-  // the getter re-reads the blanked file instead of serving its cached strict
-  // verdict, so both readers agree on what is now enforced. (The disagreement
-  // check stays for a filesystem that does not track ctime.)
-  (asRoot ? it.skip : it)('B3-R3: emptying config.json in place after a cached strict verdict is re-read by both readers', async () => {
+  // included), so the getter now re-reads the blanked file — and must not read
+  // it as "no config yet": this process already enforced strict from it. The
+  // getter holds that posture; the read-only reader, which cannot know what
+  // the getter holds, says unknown, never off.
+  (asRoot ? it.skip : it)('B3-R3: emptying config.json in place after a cached strict verdict holds strict and is unknown, not off', async () => {
     try {
       writeConfig({ actionGuard: { enabled: false } });
       const { config } = await fresh();
@@ -424,12 +424,24 @@ describe('a config with no signature yet is unknown read-only, never off', () =>
       const st = fs.statSync(cfg);
       fs.writeFileSync(cfg, '  \n');
       fs.utimesSync(cfg, st.atime, st.mtime);
-      // The getter no longer answers from its cached strict verdict...
-      expect(config.getActionGuardCoreConfig().enabled).toBe(false);
-      // ...so the read-only reader has nothing to disagree with.
-      expect(config.readActionGuardCoreConfigReadOnly()).toEqual({ enabled: false, enforce: true, readinessGate: false });
+      // The floor this process established is preserved, not relaxed to off.
+      expect(config.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: false });
+      expect(config.getDefenceMode()).toBe('strict');
+      expect(config.readActionGuardCoreConfigReadOnly()).toBeNull();
       const update = await import('../update.js');
-      expect(await update.readGuardSwitch()).toBe('off');
+      const guard = await update.readGuardSwitch();
+      expect(guard).toBe('unknown');
+      const { buildUpdateSummary } = await import('../update-summary.js');
+      const summary = buildUpdateSummary({
+        fromVersion: '5.9.0', toVersion: '5.10.0', packageState: 'updated',
+        engine: { ok: true }, plugin: { status: 'ok' }, skill: { status: 'ok' },
+        guardOn: guard !== 'off', guardUnknown: guard === 'unknown',
+        protection: { status: 'ok' },
+      });
+      expect(summary.headline).toBe('check');
+      expect(summary.rows.find((r) => r.label === 'Guard')).toMatchObject({ mark: 'check' });
+      // Still the blank bytes: no incidental write turned them into a signed default-off file.
+      expect(fs.readFileSync(cfg, 'utf-8')).toBe('  \n');
     } finally {
       fs.chmodSync(configDir, 0o700);
     }
