@@ -44,6 +44,30 @@ export interface StepResult {
   kind: ReconcileStep['kind'];
   ok: boolean;
   detail: string;
+  /** #977: `gateway-reload` steps only — what the restart came to. */
+  restart?: GatewayRestartOutcome;
+}
+
+/**
+ * #977 — what the run's gateway restart came to, for the closing screen.
+ *   completed   restart issued and the gateway came back ready
+ *   timed-out   restart issued, readiness wait timed out
+ *   unconfirmed restart issued, readiness could not be observed (NOT a timeout)
+ *   failed      the restart command itself failed
+ *   skipped     a reload was wanted but not run (non-interactive / test runner)
+ */
+export type GatewayRestartOutcome = 'completed' | 'timed-out' | 'unconfirmed' | 'failed' | 'skipped';
+
+/** Result shape of the injectable gateway reload. */
+export interface GatewayReloadResult {
+  restarted: boolean;
+  detail?: string;
+  /** False when nothing was exec'd (consent gate, test runner). */
+  attempted?: boolean;
+  /** #977: an earlier request in this process already exec'd; this is its outcome. */
+  reused?: boolean;
+  /** #977: when that one exec was requested — readiness is measured from it. */
+  requestedAtMs?: number;
 }
 
 /** #156 — one extra detect→remediate pass when the first did not converge. */
@@ -83,7 +107,7 @@ export interface ReconcileOptions {
   /** Injectable openclaw executor (defaults to a guarded spawnSync). */
   runCommand?: (argv: string[]) => { status: number; output: string };
   /** Injectable gateway reload (defaults to the guarded restartOpenClawGateway). */
-  reloadGateway?: () => Promise<{ restarted: boolean; detail?: string }>;
+  reloadGateway?: () => Promise<GatewayReloadResult>;
   /** Injectable self-check (defaults to runPluginSelfCheck). */
   selfCheck?: (home: string, pluginId: string) => Promise<SelfCheckRunResult>;
   /** Injectable duplicate-dir pruner (defaults to rm -rf of the project dir). */
@@ -224,10 +248,19 @@ async function defaultRestoreRegistration(
   return { ok: r.registered, detail: r.detail };
 }
 
-async function defaultReloadGateway(): Promise<{ restarted: boolean; detail?: string }> {
+async function defaultReloadGateway(): Promise<GatewayReloadResult> {
   const { restartOpenClawGateway } = await import('./deep-clean.js');
+  // #977: restartOpenClawGateway execs at most once per process, so pass 2 of
+  // the converge loop gets pass 1's restart back (`reused`) instead of a
+  // second `systemctl restart` landing on a gateway still draining its stop.
   const r = await restartOpenClawGateway();
-  return { restarted: r.restarted, detail: r.detail };
+  return {
+    restarted: r.restarted,
+    detail: r.detail,
+    attempted: r.attempted,
+    ...(r.reused ? { reused: true } : {}),
+    ...(r.requestedAtMs !== undefined ? { requestedAtMs: r.requestedAtMs } : {}),
+  };
 }
 
 export async function reconcileOpenClawPluginState(options: ReconcileOptions): Promise<ReconcileExecResult> {
@@ -313,16 +346,26 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
       // current and 29/32 green. The remediation had worked; the report was
       // reading the pre-restart world.
       let detail = r.detail ?? (r.restarted ? 'reloaded' : 'not reloaded');
+      let restart: GatewayRestartOutcome = r.restarted
+        ? 'completed'
+        : r.attempted === false || /skipped|suppressed/i.test(r.detail ?? '')
+          ? 'skipped'
+          : 'failed';
       if (r.restarted) {
-        const readiness = await waitForGateway({ startedAfterMs: reloadRequestedAt });
+        // #977: a reused restart was requested earlier in this process; the
+        // gateway it started booted after THAT moment, not after this pass.
+        const readiness = await waitForGateway({ startedAfterMs: r.requestedAtMs ?? reloadRequestedAt });
+        const timedOut = !readiness.ready && readiness.reason === 'timeout';
+        restart = readiness.ready ? 'completed' : timedOut ? 'timed-out' : 'unconfirmed';
         detail = readiness.ready
           ? `reloaded and ready in ${(readiness.waitedMs / 1000).toFixed(1)}s`
           // Not proven ready is NOT the same claim as broken — on a host whose
           // boot-lifecycle table is unreadable we cannot bound the evidence at
           // all, and asserting failure there is the #142 overreach again.
-          : `reloaded, but readiness ${readiness.reason === 'timeout' ? 'timed out' : 'could not be observed'} — the checks below may be reading a gateway that is still starting`;
+          : `reloaded, but readiness ${timedOut ? 'timed out' : 'could not be observed'} — the checks below may be reading a gateway that is still starting`;
+        if (r.reused) detail = `${detail} (restart issued earlier in this run, not repeated)`;
       }
-      stepResults.push({ kind: step.kind, ok: r.restarted, detail });
+      stepResults.push({ kind: step.kind, ok: r.restarted, detail, restart });
       continue;
     }
     // #222/#226: restore a wiped openclaw.json registration. The writer is
@@ -594,7 +637,26 @@ export interface ProtectionFacts {
   /** The plugin version this CLI expects (its own version). */
   expectedVersion?: string | null;
   gatewayReloaded: boolean;
+  /**
+   * #977: what the run's one gateway restart came to. Absent when no reload
+   * was asked for. With two converge passes it is the LAST reload step's —
+   * the latest readiness evidence about the same single restart.
+   */
+  gatewayRestart?: GatewayRestartOutcome;
   nextCommand?: string;
+}
+
+/** #977: the restart outcome the closing screen reports, or undefined. */
+export function gatewayRestartOutcomeFromSteps(stepResults: StepResult[]): GatewayRestartOutcome | undefined {
+  const reloads = stepResults.filter((s) => s.kind === 'gateway-reload');
+  const last = reloads[reloads.length - 1];
+  if (!last) return undefined;
+  if (last.restart) return last.restart;
+  // Older/injected step shapes without the structured field.
+  if (!last.ok) return /skipped|suppressed/i.test(last.detail) ? 'skipped' : 'failed';
+  if (/readiness timed out/.test(last.detail)) return 'timed-out';
+  if (/readiness could not be observed/.test(last.detail)) return 'unconfirmed';
+  return 'completed';
 }
 
 export function protectionFactsFromReconcile(
@@ -604,12 +666,14 @@ export function protectionFactsFromReconcile(
   const sc = result.selfCheck;
   const verStep = result.stepResults.find((s) => s.kind === 'openclaw-update' && s.ok);
   const fromStep = verStep?.detail.match(/(\d+\.\d+\.\d+)/)?.[1] ?? null;
+  const restartOutcome = gatewayRestartOutcomeFromSteps(result.stepResults);
   return {
     loaded: sc?.rosterState === 'loaded' ? 'yes' : sc?.rosterState === 'absent' ? 'no' : 'unknown',
     ...(sc && sc.versionProof === false ? { versionOk: false } : {}),
     pluginVersion: fromStep ?? (result.postVerdict ?? result.verdict).onDiskVersion ?? null,
     expectedVersion: (result.postVerdict ?? result.verdict).expectedVersion ?? null,
     gatewayReloaded: result.stepResults.some((s) => s.kind === 'gateway-reload' && s.ok),
+    ...(restartOutcome ? { gatewayRestart: restartOutcome } : {}),
     ...(nextCommand ? { nextCommand } : {}),
   };
 }

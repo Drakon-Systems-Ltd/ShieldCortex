@@ -42,6 +42,7 @@ function base(over: Partial<UpdateSummaryInput> = {}): UpdateSummaryInput {
       loaded: 'unknown',
       pluginVersion: '5.9.0',
       gatewayReloaded: true,
+      gatewayRestart: 'completed',
       nextCommand: 'shieldcortex doctor --ai',
     },
     ...over,
@@ -73,7 +74,7 @@ const SCENARIOS: Record<string, UpdateSummaryInput> = {
   'a: all OK, Guard off': base(),
   'b: all OK, Guard on and proven': base({
     guardOn: true,
-    protection: { status: 'ok', loaded: 'yes', pluginVersion: '5.9.0', gatewayReloaded: true },
+    protection: { status: 'ok', loaded: 'yes', pluginVersion: '5.9.0', gatewayReloaded: true, gatewayRestart: 'completed' },
   }),
   'c: Guard on, plugin load not confirmed': base({ guardOn: true }),
   'd: Hermes present, no interpreter': base({ hermes: { status: 'warn', reason: 'no-interpreter' } }),

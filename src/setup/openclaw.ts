@@ -2216,7 +2216,10 @@ async function writeOpenClawInstall(
     const { restartOpenClawGateway } = await import('./deep-clean.js');
     const result = await restartOpenClawGateway();
     console.log('');
-    if (result.restarted) {
+    if (result.restarted && result.reused) {
+      // #977: one restart per process — a second exec would land mid-stop.
+      console.log('OpenClaw gateway was already restarted earlier in this run; not restarting it again.');
+    } else if (result.restarted) {
       console.log(`OpenClaw gateway restarted via ${result.method}.`);
     } else if (result.attempted) {
       console.warn(`OpenClaw gateway restart via ${result.method} failed: ${result.detail ?? 'unknown'}`);

@@ -1872,6 +1872,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
       pluginVersion: protection.facts?.pluginVersion ?? null,
       expectedVersion: protection.facts?.expectedVersion ?? null,
       gatewayReloaded: protection.facts?.gatewayReloaded,
+      gatewayRestart: protection.facts?.gatewayRestart,
       nextCommand: protection.facts?.nextCommand ?? nextFromGuard[0] ?? (reexecFailed ? 'shieldcortex update' : undefined),
     },
     projectKeysAmbiguous: keyAttention,

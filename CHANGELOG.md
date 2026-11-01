@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **#977 `shieldcortex update` restarts the OpenClaw gateway at most once per run.** One update run could issue two `systemctl --user restart openclaw-gateway` calls about 19 seconds apart: when the plugin check did not settle on its first pass, the second pass asked for another restart while the first stop was still draining. The gateway then exited with an error and the agent database refused every turn until `shieldcortex doctor --fix`. The restart command now runs at most once per process. A later request in the same run (the second pass, or the installer's own restart) waits for that one restart and reuses its outcome instead of running the command again, and the gateway readiness wait is measured from that one restart. The consent rules are unchanged: headless runs still skip the restart unless `SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1` is set or stdin is a terminal, and test runs and `SHIELDCORTEX_SKIP_GATEWAY_RESTART=1` still never run it. The closing screen of `update` now says whether that restart completed, timed out, failed, or was skipped (or that it restarted but could not be confirmed back up), instead of saying "gateway reloaded" even when the gateway never came back ready. Nothing about a restart is shown when no restart was needed. Action Guard posture is unchanged (still off by default). No configuration or schema change. Node floor unchanged.
+
 ## [5.17.1] - 2026-10-31
 
 Patch on 5.17.0. `shieldcortex update` now refreshes the Hermes plugin on launcher-based Hermes installs that still have an old `hermes-agent/.venv` on disk (#971, PR #972). When Hermes still cannot be asked, `update` may now refresh a single conventional plugin copy it used to leave alone (details below). No change to Action Guard, the agent config watch or configuration, no schema change. Action Guard stays off by default. Node floor unchanged.

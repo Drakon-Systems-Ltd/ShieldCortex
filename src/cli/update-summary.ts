@@ -70,6 +70,13 @@ export interface UpdateSummaryInput {
     /** The plugin version this CLI expects (the CLI's own version). */
     expectedVersion?: string | null;
     gatewayReloaded?: boolean;
+    /**
+     * What the run's one gateway restart came to. Absent when no reload was
+     * asked for — then the screen says nothing about a restart. This, not
+     * `gatewayReloaded`, decides the restart clause: `gatewayReloaded` is
+     * true even when the gateway never came back ready.
+     */
+    gatewayRestart?: 'completed' | 'timed-out' | 'unconfirmed' | 'failed' | 'skipped';
     /** The one command the check suggests. */
     nextCommand?: string;
   };
@@ -118,6 +125,18 @@ function engineFixCommand(engine: UpdateSummaryInput['engine']): string {
   // The non-prebuild remediation leads with one copy-paste rebuild command.
   if (/npm run build-release/.test(first)) return sanitiseDisplayField(first);
   return 'shieldcortex doctor';
+}
+
+/** One short clause about the run's gateway restart, or '' when none was asked for. */
+export function gatewayRestartClause(outcome: UpdateSummaryInput['protection']['gatewayRestart']): string {
+  switch (outcome) {
+    case 'completed': return ', gateway restarted';
+    case 'timed-out': return ', gateway restart timed out';
+    case 'unconfirmed': return ', gateway restarted but not confirmed back up';
+    case 'failed': return ', gateway restart failed';
+    case 'skipped': return ', gateway restart skipped';
+    default: return '';
+  }
 }
 
 /**
@@ -186,7 +205,7 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
   const pluginAbsent = p.status === 'failed';
   const pluginStepFailed = input.plugin.status === 'warn' || input.plugin.status === 'failed';
   if (pluginInstalled) {
-    const reloaded = p.gatewayReloaded ? ', gateway reloaded' : '';
+    const reloaded = gatewayRestartClause(p.gatewayRestart);
     if (pluginAbsent) {
       rows.push({
         label: 'OpenClaw',
