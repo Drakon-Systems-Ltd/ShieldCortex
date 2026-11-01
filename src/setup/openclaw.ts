@@ -1983,6 +1983,9 @@ async function writeOpenClawInstall(
   home: string,
   locked: ReadonlySet<string>,
 ): Promise<void> {
+  // #977 review: a restart reused from before this moment did not load
+  // anything written below.
+  const writesStartedAtMs = Date.now();
   const hooksDirs = findAllHooksDirs(locked);
   // Every write below this line that touches `~/.openclaw` — the config
   // cleanup, the snapshot, the plugin, the registration, the restart — is
@@ -2218,7 +2221,14 @@ async function writeOpenClawInstall(
     console.log('');
     if (result.restarted && result.reused) {
       // #977: one restart per process — a second exec would land mid-stop.
-      console.log('OpenClaw gateway was already restarted earlier in this run; not restarting it again.');
+      // But a restart from before these writes did not load them: say so.
+      if (result.requestedAtMs === undefined || result.requestedAtMs <= writesStartedAtMs) {
+        console.warn('OpenClaw gateway was already restarted earlier in this run, before this install —');
+        console.warn('not restarting it twice in one run. Restart it once more so the new plugin/hook take effect:');
+        console.warn(`  ${gatewayRestartAdvice()}`);
+      } else {
+        console.log('OpenClaw gateway was already restarted earlier in this run; not restarting it again.');
+      }
     } else if (result.restarted) {
       console.log(`OpenClaw gateway restarted via ${result.method}.`);
     } else if (result.attempted) {

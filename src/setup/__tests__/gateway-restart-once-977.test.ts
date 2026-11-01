@@ -24,9 +24,14 @@ import {
 import {
   reconcileOpenClawPluginState,
   protectionFactsFromReconcile,
+  protectionLedgerFromReconcile,
+  manualGatewayRestartCommand,
+  type GatewayReloadResult,
   type ReconcileExecResult,
+  type ReconcileOptions,
   type StepResult,
 } from '../openclaw-reconcile.js';
+import { summariseRepair } from '../repair-verdict.js';
 import { reconcilePluginState, type ReconcileInput } from '../../integrations/openclaw-plugin-index.js';
 import { buildUpdateSummary, type UpdateSummaryInput } from '../../cli/update-summary.js';
 
@@ -243,13 +248,123 @@ describe('#977 — restartOpenClawGateway goes through the process latch', () =>
     const reloads = result.stepResults.filter((s) => s.kind === 'gateway-reload');
     expect(reloads.length).toBe(2);
     expect(exec.calls).toBe(1);
+    // The installer's restart predates both passes' registration writes, so
+    // neither pass may call it a completed reload (#977 review).
     for (const s of reloads) {
-      expect(s.ok).toBe(true);
-      expect(s.detail).toMatch(/not repeated/);
-      expect(s.restart).toBe('completed');
+      expect(s.ok).toBe(false);
+      expect(s.restart).toBe('pending');
+      expect(s.detail).toMatch(/restart pending/);
     }
-    // Readiness is measured from the ONE restart, not from each pass.
+    expect(result.ok).toBe(false);
+    // Readiness is still measured from the ONE restart, not from each pass.
     expect(waits).toEqual([first.requestedAtMs, first.requestedAtMs]);
+  });
+});
+
+describe('#977 review — a reused restart that predates later changes is owed, not completed', () => {
+  const PLUGIN = 'shieldcortex-realtime';
+  // Registration wiped: every pass plans restore-registration → reload → self-check.
+  const wiped: ReconcileInput = {
+    pluginId: PLUGIN,
+    expectedVersion: '4.50.0',
+    config: { enabled: null, inAllow: false, readable: true, present: true },
+    installsJson: { version: '4.50.0', installPath: '/x' },
+    index: {
+      installRecords: { [PLUGIN]: { source: 'npm', version: '4.50.0', installPath: '/x' } },
+      plugins: [],
+      warning: null,
+    },
+    onDiskVersion: '4.50.0',
+    projectDirs: [],
+    liveRoster: [],
+  };
+  const absent = { ok: false, rosterState: 'absent', rosterProof: false, canaryProof: false, versionProof: true, reasons: ['not loaded'] };
+  const proven = { ok: true, rosterState: 'loaded', rosterProof: true, canaryProof: true, versionProof: true, reasons: [] };
+
+  function baseOptions(over: Partial<ReconcileOptions>): ReconcileOptions {
+    return {
+      home: '/tmp/sc-977-never-read',
+      pluginId: PLUGIN,
+      expectedVersion: '4.50.0',
+      apply: true,
+      grantConversationAccess: false,
+      readState: () => ({ input: wiped, verdict: reconcilePluginState(wiped) }),
+      restoreRegistration: () => ({ ok: true, detail: 'restored' }),
+      runCommand: () => ({ status: 0, output: 'ok' }),
+      waitForGateway: async () => ({ ready: true, waitedMs: 5 }),
+      ...over,
+    };
+  }
+
+  it('two passes: pass 1 restarts, pass 2 re-registers after it — pass 2 reports a pending restart and nothing claims protection', async () => {
+    const once = createGatewayRestartOnce();
+    const exec = countingExec();
+    let selfChecks = 0;
+    const result = await reconcileOpenClawPluginState(baseOptions({
+      reloadGateway: () => once.run(exec) as Promise<GatewayReloadResult>,
+      // Pass 1 sees the plugin absent; pass 2's self-check reads the gateway
+      // pass 1's restart started — it may even look proven. It must not count.
+      selfCheck: async () => ((selfChecks += 1) === 1 ? absent : proven) as never,
+    }));
+    expect(result.passes).toBe(2);
+    expect(exec.calls).toBe(1); // the one-restart rule still holds
+    const reloads = result.stepResults.filter((s) => s.kind === 'gateway-reload');
+    expect(reloads.map((s) => s.restart)).toEqual(['completed', 'pending']);
+    expect(reloads.map((s) => s.ok)).toEqual([true, false]);
+    expect(result.ok).toBe(false);
+    expect(result.messages.join('\n')).toMatch(/gateway restart pending/);
+
+    const ledger = protectionLedgerFromReconcile(result);
+    expect(ledger.outcome).not.toBe('protected');
+    expect(ledger.status).not.toBe('ok');
+    expect(ledger.facts.gatewayRestart).toBe('pending');
+    expect(ledger.detail.join(' ')).not.toMatch(/^Protected/);
+    expect(ledger.facts.nextCommand).toBe(manualGatewayRestartCommand());
+  });
+
+  it('an earlier step restarted before pass 1 changed anything: the restart is owed, still one exec', async () => {
+    const once = createGatewayRestartOnce();
+    const exec = countingExec();
+    await once.run(exec); // an earlier step's restart (e.g. the installer)
+    const result = await reconcileOpenClawPluginState(baseOptions({
+      reloadGateway: () => once.run(exec) as Promise<GatewayReloadResult>,
+      selfCheck: async () => absent as never,
+    }));
+    expect(exec.calls).toBe(1);
+    expect(protectionFactsFromReconcile(result).gatewayRestart).toBe('pending');
+    expect(result.ok).toBe(false);
+  });
+
+  it('a reused restart requested AFTER the last change did load it — completed, not pending', async () => {
+    const later = Date.now() + 60_000;
+    const result = await reconcileOpenClawPluginState(baseOptions({
+      reloadGateway: async () => ({ restarted: true, attempted: true, reused: true, requestedAtMs: later }),
+      selfCheck: async () => proven as never,
+    }));
+    const reloads = result.stepResults.filter((s) => s.kind === 'gateway-reload');
+    expect(reloads.map((s) => s.restart)).toEqual(['completed']);
+    expect(result.ok).toBe(true);
+  });
+
+  it('a fresh (non-reused) restart after changes is never pending', async () => {
+    const result = await reconcileOpenClawPluginState(baseOptions({
+      reloadGateway: async () => ({ restarted: true, attempted: true, requestedAtMs: Date.now() }),
+      selfCheck: async () => proven as never,
+    }));
+    expect(result.stepResults.find((s) => s.kind === 'gateway-reload')?.restart).toBe('completed');
+    expect(result.ok).toBe(true);
+  });
+
+  it('summariseRepair never says protected while a restart is owed', () => {
+    const v = summariseRepair({
+      applied: true,
+      canaryConsented: true,
+      selfCheck: { ok: true, rosterState: 'loaded', canaryProof: true, versionProof: true },
+      restartPending: true,
+      restartCommand: 'systemctl --user restart openclaw-gateway',
+    });
+    expect(v.outcome).not.toBe('protected');
+    expect(v.nextCommand).toBe('systemctl --user restart openclaw-gateway');
   });
 });
 
@@ -326,6 +441,41 @@ describe('#977 — restart outcome reaches the closing screen', () => {
     const text = openClawText({ gatewayReloaded: true, gatewayRestart: 'unconfirmed' });
     expect(text).not.toMatch(/timed out/);
     expect(text).toMatch(/gateway restarted but not confirmed back up/);
+  });
+
+  function openClawRow(protection: Partial<UpdateSummaryInput['protection']>) {
+    return buildUpdateSummary(summaryInput(protection)).rows.find((r) => r.label === 'OpenClaw')!;
+  }
+
+  it('#977 review: failed / timed-out / unconfirmed / pending restarts are never a green row', () => {
+    for (const outcome of ['failed', 'timed-out', 'unconfirmed', 'pending'] as const) {
+      for (const status of ['ok', 'unproven'] as const) {
+        const row = openClawRow({ status, gatewayRestart: outcome, restartCommand: 'systemctl --user restart openclaw-gateway' });
+        expect(row.mark).toBe('check');
+        expect(row.command).toBeTruthy();
+        expect(row.why).toBeTruthy();
+      }
+    }
+    const headline = buildUpdateSummary(summaryInput({ gatewayRestart: 'timed-out' })).headline;
+    expect(headline).toBe('check');
+  });
+
+  it('#977 review: the next action is safe for each outcome', () => {
+    const cmd = 'systemctl --user restart openclaw-gateway';
+    // Nothing restarted, or the one restart finished before later changes: restart.
+    expect(openClawRow({ gatewayRestart: 'failed', restartCommand: cmd })).toMatchObject({ command: cmd, commandLabel: 'Fix' });
+    expect(openClawRow({ gatewayRestart: 'pending', restartCommand: cmd })).toMatchObject({ command: cmd, commandLabel: 'Fix' });
+    // A restart may still be in flight: restarting again is the #977 hazard.
+    expect(openClawRow({ gatewayRestart: 'timed-out', restartCommand: cmd })).toMatchObject({ command: 'shieldcortex doctor', commandLabel: 'Check' });
+    expect(openClawRow({ gatewayRestart: 'unconfirmed', restartCommand: cmd })).toMatchObject({ command: 'shieldcortex doctor', commandLabel: 'Check' });
+    // No verified restart command on this platform: fall back to doctor.
+    expect(openClawRow({ gatewayRestart: 'failed' })).toMatchObject({ command: 'shieldcortex doctor', commandLabel: 'Check' });
+    expect(openClawText({ gatewayRestart: 'pending' })).toBe('plugin 5.17.1 loaded, gateway needs one more restart');
+  });
+
+  it('completed and skipped stay green', () => {
+    expect(openClawRow({ gatewayRestart: 'completed' }).mark).toBe('ok');
+    expect(openClawRow({ gatewayRestart: 'skipped' }).mark).toBe('ok');
   });
 
   it('says nothing about a restart when no outcome is given — even if gatewayReloaded is set', () => {

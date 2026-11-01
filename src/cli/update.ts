@@ -1873,6 +1873,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
       expectedVersion: protection.facts?.expectedVersion ?? null,
       gatewayReloaded: protection.facts?.gatewayReloaded,
       gatewayRestart: protection.facts?.gatewayRestart,
+      ...(protection.facts?.restartCommand ? { restartCommand: protection.facts.restartCommand } : {}),
       nextCommand: protection.facts?.nextCommand ?? nextFromGuard[0] ?? (reexecFailed ? 'shieldcortex update' : undefined),
     },
     projectKeysAmbiguous: keyAttention,

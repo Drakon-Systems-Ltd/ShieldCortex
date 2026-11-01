@@ -53,6 +53,13 @@ export interface RepairVerdictInput {
   canaryConsented: boolean;
   /** True when the gateway was restarted but never proved ready. */
   readinessUnproven?: boolean;
+  /**
+   * #977 review: this run's one gateway restart happened before changes made
+   * after it, so the running gateway has not loaded them.
+   */
+  restartPending?: boolean;
+  /** The manual restart command to suggest with `restartPending`. */
+  restartCommand?: string;
   onDiskVersion?: string | null;
   expectedVersion?: string;
 }
@@ -113,6 +120,16 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
       outcome: 'unprotected',
       headline: 'Not protected by the build you expect: an older version is installed than the one this CLI ships.',
       nextCommand: 'npm i -g shieldcortex@latest && shieldcortex repair',
+    };
+  }
+
+  // #977 review: whatever the self-check saw, it saw a gateway that has not
+  // loaded this run's changes. Not proof of protection; one restart owed.
+  if (input.restartPending) {
+    return {
+      outcome: 'unknown',
+      headline: 'This run\'s plugin changes are not loaded yet: the gateway was restarted before them, and a second restart is not issued in one run. Restart the gateway once more, then run shieldcortex doctor.',
+      nextCommand: input.restartCommand ?? 'shieldcortex doctor',
     };
   }
 
