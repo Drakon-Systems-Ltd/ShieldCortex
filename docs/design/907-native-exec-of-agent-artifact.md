@@ -20,8 +20,12 @@ law, catastrophe hard-stops and credential non-exfil rule are unchanged.
 > the floor; it is row B, whose verdict is owner question Q1 (AUDIT recommended — and AUDIT is
 > **not** a door). The **unknown door** (row J) is a new HOLD on routine work, stated plainly
 > rather than hidden: a native binary at a project-local path whose production the guard did not
-> observe — a pre-existing `./target/debug/app`, a build driver's output — is held; and in a
-> session whose history is incomplete, every resolved native exec is held (§4.2, §9).
+> observe — a pre-existing `./target/debug/app`, a build driver's output — is held; and a
+> resolved native exec is held while its history is incomplete — **every** one in the session
+> when the incompleteness is session-wide (record cap, an `unresolved.*` record, an unlistable
+> record directory), only the **queried path** when it is path-local (a damaged or
+> still-publishing record for that path), and only **one check** when the record listing changed
+> during that check's inspection (§3.1, §4.2, §9).
 
 > **Round-3 note (last fold under the cap).** Round 2 (Astra, Grok) returned CHANGES REQUESTED.
 > This revision **removes or narrows** claims rather than adding coverage. The moves, each stated
@@ -57,6 +61,18 @@ law, catastrophe hard-stops and credential non-exfil rule are unchanged.
 >    **no** producer and is state 3 (row J): never a compile exemption, never a floor DENY.
 > 4. **One canonicaliser** for record and query (§3.4); compiler names that are two tokens are
 >    dropped; cwd and stat failure contracts are stated (§5).
+
+> **Post-freeze note (resume fold after round 4).** Round 4: Grok APPROVE; Astra CHANGES
+> REQUESTED with one blocker (R4-B1): the record listing was read **before** the target's stat and
+> header, so a record published in between was missing from a view that was still certified
+> complete. This fold adds no store, lock or hook. It adds one condition to the completeness test,
+> §3.1 item 5, the **observation boundary**: the core lists the record directory again after the
+> target's stat and header read and compares. A re-list that differs or fails means incomplete
+> history (row J), never complete. §8 gains the three R4-B1 interleavings as controls. §10 states
+> the interleaving the boundary does **not** close (a change landing after the stat). Two wording
+> nits: §3.2's uniqueness claim is limited to the same-`preId` case, and the header and acceptance
+> summary (§9, §11) separate session-wide from path-local incompleteness. **Owner question Q1
+> (row B default) is still open** for the owner; this fold does not settle it.
 
 ---
 
@@ -160,8 +176,8 @@ released only **after** the rename returns. If any step fails, the call is **hel
 rather than proceeding unrecorded. With no session key nothing is recorded and nothing is held:
 every native exec is already state 3 (see "Keyed by host-owned session identity").
 
-**Complete history.** For an exec target `p`, the session's history is **complete for `p`** iff
-all of:
+**Complete history.** For an exec target `p` inspected by one exec check, the session's history
+is **complete for `p`** iff all of:
 
 1. the session's `rec/` directory lists (a not-found directory — a session that has recorded
    nothing — is complete and empty; any other listing error is incomplete);
@@ -169,11 +185,34 @@ all of:
 3. the entry count is below the cap (proposed 4096 per session) — at the cap, further calls
    proceed **unrecorded**, so a full directory is incomplete by definition;
 4. every entry for `p`'s `pathHash` is a final (not `.tmp`) entry that reads, parses, and has a
-   `preId` other than `'unknown'`.
+   `preId` other than `'unknown'`;
+5. the record directory, listed again **after** the check's `statPath` and `readFileHeader`
+   calls (`relist`, §5), has exactly the entry names of the listing the view was built from. A
+   re-list that differs or fails is incomplete, never complete (the **observation boundary**,
+   below).
 
 Any failure makes history incomplete for `p` — an unreadable, unparseable, truncated or
 still-being-published record withdraws relief exactly as an unlistable directory does. Failures 1–3
-are session-wide; failure 4 is scoped to `p`.
+are session-wide; failure 4 is scoped to `p`; failure 5 is scoped to the call being checked (the
+next exec check lists afresh).
+
+**Observation boundary (item 5).** Completeness and the inspected `ContentId` must describe the
+same moment. A recorded call is released only after its record's rename returns (Publication), so
+any recorded change that the target's stat can reflect had a final record in the directory
+**before** that stat, and so in the re-list taken after it. If the re-list equals the first
+listing, that record is in the view. If the record is missing from the view, the two listings
+differ and history is incomplete (state 3, row J for a native image). Records are never removed
+or rewritten, so comparing entry names is enough; removal by a same-UID process is the §10
+tampering residual. This closes the three round-4 B1 interleavings (§8): a failed write followed
+by a compile against the same identity, a stale compile record read in place of a newer direct
+write, and a stale empty listing read in place of the session's first write to an install-root
+target. It relies on a completed `rename` being
+visible to a later listing by another process on the same host (a local filesystem); a store on a
+filesystem without that guarantee is outside the claim. **What it does not close:** it binds the
+view to the stat, not to the header read and not to the bytes the exec later runs. A change that
+lands **after** the stat is not seen by this check, whether it comes from an unrecorded writer, a
+held call released unrecorded, or a recorded call whose record was already in the first listing or
+is published only after the re-list (§10, "Change after the stat").
 
 **Rule P — production evidence (the one rule for "did this record produce these bytes").**
 The pre-gate sees a call's **intent**, not its completion (§3.4). A header read at exec proves
@@ -221,9 +260,10 @@ recognised write-family or supported-compile call in this session changed `p`'s 
 the records the classifier actually read: every record for `p` was read, none has a `preId`
 differing from `p`'s current identity, and no recognised call was let through without a published
 record (publication failure holds the call; the cap and unresolved targets make history
-incomplete). The rule's limits — unrecorded exec-surface creators, cross-session/TTL, holds
-widened on non-enforcing hosts or released by approval — are §10 residuals with their real
-verdict, not covered cases.
+incomplete; a record published between the first listing and the re-list fails item 5). The
+sentence holds **as of the target's stat**. The rule's limits — unrecorded exec-surface creators,
+cross-session/TTL, holds widened on non-enforcing hosts or released by approval, a change landing
+after the stat — are §10 residuals with their real verdict, not covered cases.
 
 **The total classifier.** For an exec/load target the guard resolves to a path `p` (§3.4, §5):
 
@@ -261,8 +301,10 @@ overrides this table.
 - **Loss cannot be partial except by same-UID tampering.** No record is evicted, rewritten or
   merged, so the round-3 B2 shapes (a race or corrupt read dropping a newer record and leaving an
   older one) have no mechanism. A record that cannot be published holds its call; a damaged
-  record makes history incomplete (state 3); a full store makes history incomplete. Deletion of
-  individual record files by a same-UID process is the §10 same-UID residual. The round-2
+  record makes history incomplete (state 3); a full store makes history incomplete. A record
+  published after a reader listed the directory but before it stat'd the target is caught by the
+  re-list (item 5, round-4 B1). Deletion of individual record files by a same-UID process is the
+  §10 same-UID residual. The round-2
   tombstone ring and the round-3 general JSON store are **removed**.
 
 ### 3.2 Where it lives and how a separate-process hook shares it
@@ -272,8 +314,13 @@ hook has no DB on its hot path, and a store one plane cannot read is a plane tha
 not bind. Each hook invocation is a **separate process** reading the same per-session directory.
 Records are create-once files with unique names, so concurrent calls cannot overwrite each other;
 a record still being published is a `.tmp` entry and makes history incomplete for its path until
-the rename lands. Pre-gate order is not effect order for parallel calls; Rule P's uniqueness test
-(§3.1) is what keeps that from naming a producer.
+the rename lands. A record published while an exec check is inspecting its target is caught by
+that check's re-list (§3.1 item 5). Pre-gate order is not effect order for parallel calls. Rule
+P's uniqueness test (§3.1) keeps that from naming a producer **only** when the two records were
+pre-gated against the **same** identity with different kinds. When a call with a stale `preId`
+lands after a newer one (different `preId`s), Rule P can still name the wrong producer. That is
+the disclosed §10 residual "Parallel calls to one path with different `preId`s", with its actual
+verdicts.
 
 ### 3.3 Two split cores (same discipline as `session-taint-lineage.ts` + `session-lease-store.ts`)
 
@@ -439,11 +486,15 @@ tools" cannot be read as covering it:
   binary to a non-install path, then an exec of it, has an `agent-written` producer. Rare in
   routine work, unmeasured.
 - **Row B** under Q1 = HOLD is one bounded approval per compile-then-run chain.
-- **Incomplete history holds what it would otherwise relieve.** A session that reaches the record
-  cap (4096), or records an `unresolved.*` target (e.g. a relative write path on an OpenClaw call
-  with no usable cwd), holds every later resolved native exec in that session at row J —
-  including a spelt install-root path such as `node_modules/.bin/<tool>`. A failed or
-  ambiguous chain (failed write then compile to the same path) is row J rather than row B.
+- **Incomplete history holds what it would otherwise relieve.** Session-wide: a session that
+  reaches the record cap (4096), records an `unresolved.*` target (e.g. a relative write path on
+  an OpenClaw call with no usable cwd), or whose record directory cannot be listed, holds every
+  later resolved native exec in that session at row J — including a spelt install-root path such
+  as `node_modules/.bin/<tool>`. Path-local: a damaged or still-publishing record holds execs of
+  its own path only. Per check: a record published **anywhere** in the session between an exec
+  check's first listing and its re-list (§3.1 item 5) holds that check at row J; the next check
+  lists afresh. How often that window is hit is unmeasured. A failed or ambiguous chain (failed
+  write then compile to the same path) is row J rather than row B.
 - **A broken store holds writes.** With a session key but an unwritable store, every recognised
   write-family or supported-compile call with a path is held (row J). That is a loud failure
   mode, not routine work, and it is the price of never letting a call through unrecorded.
@@ -479,10 +530,14 @@ bar.
   - new `ToolGuardOptions` members, injected per call by the caller, never throwing:
     - `artifactView?: AgentArtifactView` — the caller has **already bound** the session: it is the
       listing of this call's `sessionKey` record directory as the store read it — each entry's
-      name and either its parsed body or a `damaged` marker, plus a `listable` flag — or `null`
-      when there is no key. The core applies the §3.1 complete-history test to it; the caller
-      never pre-filters damaged entries out. The pure evaluator never derives a key and never
-      receives one; a key asserted in content cannot reach it.
+      name and either its parsed body or a `damaged` marker, plus a `listable` flag and a
+      `relist()` function — or `null` when there is no key. `relist()` lists the same directory
+      again and returns its entry names (`[]` for not-found, `null` for any other error; it never
+      throws). The core calls it **once per evaluated call, after** every `statPath` /
+      `readFileHeader` call for that call's targets, and applies §3.1 item 5; a missing `relist`
+      counts as a failed re-list. The core applies the §3.1 complete-history test to the view;
+      the caller never pre-filters damaged entries out. The pure evaluator never derives a key
+      and never receives one; a key asserted in content cannot reach it.
     - `statPath?: (absPath) => ContentId | 'absent' | null` — `'absent'` **only** when `lstat`
       of the final component fails with not-found (`ENOENT`/`ENOTDIR`); `null` for every other
       failure (`EACCES`, `EIO`, `ELOOP`, …). An I/O error is never reported as absent.
@@ -665,6 +720,29 @@ the session holds no record for the path before the control's first call):
   writes are not held;
 - cross-process: a record made by one hook process is visible to the exec check in another.
 
+**Observation-boundary controls (round-4 B1, §3.1 item 5).** Pure core, driven by test-owned
+injected callbacks (no production test switch): the target's `statPath` callback first publishes
+the interleaved call's record to the store fake and applies its change to the file, then stats.
+So the record lands after the first listing and before the re-list.
+
+- **same `preId`, failed write then compile** — non-install path; existing native file at
+  identity `I0`; listed record: a failed write `W` (`agent-written`, `preId` `I0`). Interleaved: a
+  supported compile `C` (`compiled-output`, `preId` `I0`) that changes the file → **row J**, never
+  DENY, never row B (the same outcome as the stable-listing control above);
+- **stale compile record, newer direct write** — non-install path; listed record: a supported
+  compile `C_old` that created the file (`preId` absent). Interleaved: a direct write `W`
+  (`agent-written`, `preId` = `C_old`'s output identity) that changes the file → **row J**, not
+  row B. The same two records listed before the check (no interleaving) → **DENY**;
+- **stale empty listing, first write at an install root** — inside `~/.local/bin` (test-pinned
+  home); no `rec/` directory. Interleaved: the session's first write-family call, creating an
+  extensionless native file at the target → **row J**, not state 2. The same record listed before
+  the check → **DENY** (as the `~/.local/bin` control above);
+- `relist` returns `null` with an otherwise complete history → **row J**;
+- a record for an **unrelated** path published during the check → **row J** for that check (the
+  priced cost, §4.2); a following check with a stable listing → that path's normal verdict.
+
+Before this fold, the first three gave row A, row B and state 2 respectively.
+
 **Benign controls (must not hit the floor):**
 
 - installed `git`, `node`, `python` running a pre-existing script (F, H);
@@ -688,15 +766,17 @@ the session holds no record for the path before the control's first call):
 | Fixture: compile-then-run across two calls → **denied** | **No.** Row B at Q1's verdict (AUDIT recommended). Not met by design |
 | Fixture: LD_PRELOAD of a just-written library → denied | **Yes on Claude Code hook and OpenClaw.** Hermes: **No** in PR 1 |
 | Fixture: Python mapping executable memory → denied | **Yes on Claude Code hook and OpenClaw** (inline and folded file body, within scan caps). Hermes: **inline body only** (API-up and outage, outage within 4096 chars); write-then-run file body **not met** on Hermes |
-| No false positives on installed/pre-existing tools | **Partly.** Met for installed tools at install roots with complete history and outer build-driver invocations: neither hits the floor or the door. Non-native targets are outside the A/C/B/J classifier, but row D's body match still applies to an inspected script body, and that benign surface is unmeasured (§4.2). **Not met** for pre-existing **project-local** native binaries and build-driver outputs (held at row J), nor for any resolved native exec in a session whose history is incomplete (§4.2). Not a measured production rate |
+| No false positives on installed/pre-existing tools | **Partly.** Met for installed tools at install roots with complete history and outer build-driver invocations: neither hits the floor or the door. Non-native targets are outside the A/C/B/J classifier, but row D's body match still applies to an inspected script body, and that benign surface is unmeasured (§4.2). **Not met** for pre-existing **project-local** native binaries and build-driver outputs (held at row J), nor for resolved native execs with incomplete history (held at row J): every one in the session when the incompleteness is session-wide (record cap, `unresolved.*`, unlistable directory); only the queried path's exec when it is path-local (a damaged or still-publishing record for that path); only that one check when the record listing changed during it (§3.1 items 1–5, §4.2). Not a measured production rate |
 | Doctor reports the shared-host risk | **No — separate PR 3** |
 
 So PR 1 meets the three directly-written DENY fixtures **on the Claude Code hook and OpenClaw
-only**, with Hermes limited to inline row D. Rows A and C are met **when session history is
-complete for the path** (§3.1); with incomplete or ambiguous history the same fixtures are held at
-row J instead — door, not floor, and not allow. It does not meet compile-then-run → denied, the
-Hermes A/C rows, the Hermes file-body row D, the non-FP bar for project-local binaries, or the
-doctor row. §1, §4.2, §11 and the invariant box say the same thing.
+only**, with Hermes limited to inline row D. Rows A and C are met **when history is complete for
+the path** (§3.1 items 1–5: no session-wide failure, the path's own records intact, and a record
+listing that did not change during the check); with incomplete or ambiguous history the same
+fixtures are held at row J instead — door, not floor, and not allow. It does not meet
+compile-then-run → denied, the Hermes A/C rows, the Hermes file-body row D, the non-FP bar for
+project-local binaries or for native execs with incomplete history (session-wide, or for the
+queried path), or the doctor row. §1, §4.2, §11 and the invariant box say the same thing.
 
 ---
 
@@ -762,7 +842,22 @@ Each line states the **actual** verdict. "Classification limit" = the evidence i
   time; the uniqueness test catches two intents against the **same** identity, not interleavings
   where a stale-`preId` call lands after a newer one. Misattribution between `agent-written` and
   `compiled-output` is possible in that interleaving (an agent issuing a write and a compile to
-  the same output path in parallel). Not observed in routine work; unmeasured.
+  the same output path in parallel). Actual verdicts: a compiler's output can be floor-**DENIED**
+  as row A/C, or directly-written bytes can get **row B** (Q1's verdict) instead of the floor. The
+  §3.1 observation boundary does not change this: both records are in a stable view. Not observed
+  in routine work; unmeasured.
+- **Change after the stat (check-to-use)** — observation limit of any pre-gate. §3.1 item 5 binds
+  the record view to the target's stat, not to the header read or to the bytes the exec later
+  runs. Some changes to `p` land after the stat and are not seen by this check: changes by an
+  unrecorded writer, by a held call released unrecorded, or by a recorded call whose record was
+  already in the first listing or is published only after the re-list. (A listed record whose
+  `preId` equals the stat'd identity is not a candidate. One whose `preId` differs can be named
+  before its effect lands, which is the different-`preId` residual above.) Actual verdict: that of
+  the stat'd identity against the view (A/C DENY, row B, row J, state 2 **allow**, or step 0
+  current behaviour when the target was absent or not native), while different bytes may run. A
+  header read after such a change can pair the new bytes' format with the old identity. A later,
+  separate exec check sees the change.
+  The same-UID "file replacement after inspection" line below is the tampering form of this.
 - **Same-UID `ContentId` forgery** (restoring `mtime`/`size` after a write) can make a producing
   write look unproved → **row J** at a non-install path, **allow** at an install root.
 - **Unsupported build outputs** — by design (§3.4): a later separate exec → **row J (HOLD)**;
@@ -798,10 +893,11 @@ Each line states the **actual** verdict. "Classification limit" = the evidence i
    one canonicaliser, complete-history test, Rule P, Rule H, total classifier, Claude hook +
    OpenClaw wiring) + door (J) + row B at Q1's verdict + Hermes
    session-id forwarding and inline-text row-D outage fallback + §8 tests + adapter fixtures.
-   **Meets** the three directly-written DENY fixtures on the Claude Code hook and OpenClaw, and
-   inline row D on Hermes. **Does not meet** compile-then-run → denied, Hermes A/C, Hermes
-   file-body row D, the non-FP bar for project-local native binaries (held at row J), or the
-   doctor row.
+   **Meets** the three directly-written DENY fixtures on the Claude Code hook and OpenClaw (A/C
+   when history is complete for the path, §9), and inline row D on Hermes. **Does not meet**
+   compile-then-run → denied, Hermes A/C, Hermes file-body row D, the non-FP bar for
+   project-local native binaries (held at row J) or for native execs with incomplete history,
+   session-wide or for the queried path (held at row J), or the doctor row.
 2. **PR 2** — Hermes API-up store (A/C/B/J on Hermes when the API is up; outage unchanged);
    cross-plane parity; build-output-dir awareness (Q3).
 3. **Separate prerequisite** — ADR-002 taint wiring; until then B′ is not a verdict.
