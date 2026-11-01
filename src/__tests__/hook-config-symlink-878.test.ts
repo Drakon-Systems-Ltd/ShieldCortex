@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';
-import { lstatSync, mkdtempSync, mkdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { copyFileSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,8 +33,8 @@ const ALIAS_OFF = { interceptor: { actionGuard: { enabled: false, enforce: false
 
 // A genuinely signed body: the HMAC src/cloud/config.ts verifies (canonical
 // body = the object without `_sig`, `JSON.stringify(rest, null, 2)`), keyed by
-// the `.integrity-key` written beside config.json. The hook and runtime only
-// test `_sig` presence; src independently accepts these as signed.
+// the `.integrity-key` written beside config.json. Since r5 the hook and
+// runtime recompute that HMAC for a link, as src does.
 const FIXTURE_KEY = 'a'.repeat(64);
 function signedBody(body: Record<string, unknown>): Record<string, unknown> {
   return { ...body, _sig: createHmac('sha256', FIXTURE_KEY).update(JSON.stringify(body, null, 2)).digest('hex') };
@@ -76,8 +76,8 @@ function linkTo(shape: Shape, body: Record<string, unknown>): void {
   }
 }
 
-function runInstalledHook(): { decision?: string; reason?: string; code: number; signal: string | null; stderr: string; error?: Error } {
-  const run = spawnSync('/bin/sh', ['-c', INSTALLED_COMMAND], {
+function runInstalledHook(command = INSTALLED_COMMAND): { decision?: string; reason?: string; code: number; signal: string | null; stderr: string; error?: Error } {
+  const run = spawnSync('/bin/sh', ['-c', command], {
     input: JSON.stringify({
       session_id: 'sc-878-hook-link',
       cwd: home,
@@ -116,8 +116,8 @@ function runInstalledHook(): { decision?: string; reason?: string; code: number;
  * N3: an absent decision must mean "allowed", not "the process failed". The
  * hook launched, ran to completion and exited 0 on every path here.
  */
-function runHookOk(): ReturnType<typeof runInstalledHook> {
-  const run = runInstalledHook();
+function runHookOk(command?: string): ReturnType<typeof runInstalledHook> {
+  const run = runInstalledHook(command);
   expect(run.error).toBeUndefined();
   expect(run.signal).toBeNull();
   expect({ code: run.code, stderr: run.stderr }).toMatchObject({ code: 0 });
@@ -388,5 +388,184 @@ describe('#878 r4 N2 — resolveBoxInterceptorConfig, symlinked config.json', ()
   it('control: a regular unsigned file with the alias set off is honoured', async () => {
     writeFileSync(join(configDir, 'config.json'), JSON.stringify(ALIAS_OFF));
     expect((await resolve()).actionGuard).toMatchObject({ enabled: false, enforce: false });
+  });
+});
+
+/**
+ * #878 r5 B1 — presence is not a signature. The hook and the runtime used to
+ * honour a symlinked config.json whenever its target carried ANY `_sig` string
+ * or a `.config-sig` file merely existed beside it (empty, junk, a directory),
+ * while src recomputed the HMAC, found it `tampered` and held strict. All
+ * three non-src readers now go through one verifier
+ * (scripts/lib/config-authenticity.mjs; runtime.mjs carries a pinned copy)
+ * that recomputes the HMAC as checkConfigIntegrity does. Every fixture writes
+ * a real `.integrity-key` unless the row is about a missing one, so the deny
+ * is the signature failing, not the key being absent.
+ */
+describe('#878 r5 B1 — symlinked config.json: only a verifying signature is honoured', () => {
+  const OFF_BOTH = { actionGuard: { enabled: false }, interceptor: { actionGuard: { enabled: false, enforce: false } } };
+  const hmac = (s: string) => createHmac('sha256', FIXTURE_KEY).update(s).digest('hex');
+  const sidecar = (content: string) => writeFileSync(join(configDir, '.config-sig'), content, { mode: 0o600 });
+  const linkRaw = (body: Record<string, unknown>) => linkTo('relative', body);
+
+  type Row = { name: string; plant: () => void; src: 'tampered' | 'unverified' | 'valid' | 'self-heal'; shared: string };
+  const BAD: Row[] = [
+    { name: 'empty `_sig` string', plant: () => { writeIntegrityKey(); linkRaw({ ...OFF_BOTH, _sig: '' }); }, src: 'tampered', shared: 'tampered' },
+    { name: 'junk `_sig` string', plant: () => { writeIntegrityKey(); linkRaw({ ...OFF_BOTH, _sig: 'deadbeef' }); }, src: 'tampered', shared: 'tampered' },
+    { name: 'forged 64-hex `_sig`', plant: () => { writeIntegrityKey(); linkRaw({ ...OFF_BOTH, _sig: 'f'.repeat(64) }); }, src: 'tampered', shared: 'tampered' },
+    {
+      name: 'genuine `_sig` lifted from a different (enforcing) body',
+      plant: () => { writeIntegrityKey(); linkRaw({ ...OFF_BOTH, _sig: signedBody({ actionGuard: { enabled: true, enforce: true } })._sig }); },
+      src: 'tampered', shared: 'tampered',
+    },
+    { name: 'empty `.config-sig`', plant: () => { writeIntegrityKey(); linkRaw(OFF_BOTH); sidecar(''); }, src: 'tampered', shared: 'tampered' },
+    { name: 'junk `.config-sig`', plant: () => { writeIntegrityKey(); linkRaw(OFF_BOTH); sidecar('00'); }, src: 'tampered', shared: 'tampered' },
+    {
+      name: '`.config-sig` is a directory',
+      plant: () => { writeIntegrityKey(); linkRaw(OFF_BOTH); mkdirSync(join(configDir, '.config-sig')); },
+      src: 'tampered', shared: 'tampered',
+    },
+    {
+      name: 'junk `_sig` + empty `.config-sig` (no self-heal from an empty sidecar)',
+      plant: () => { writeIntegrityKey(); linkRaw({ ...OFF_BOTH, _sig: 'x' }); sidecar(''); },
+      src: 'tampered', shared: 'tampered',
+    },
+    { name: 'numeric `_sig` (not a string: legacy scheme, no sidecar)', plant: () => { writeIntegrityKey(); linkRaw({ ...OFF_BOTH, _sig: 1 }); }, src: 'unverified', shared: 'unsigned' },
+    { name: 'genuine `_sig` but no `.integrity-key` to verify it with', plant: () => { linkRaw(signedBody(OFF_BOTH)); }, src: 'tampered', shared: 'tampered' },
+  ];
+  const GOOD: Row[] = [
+    { name: 'genuine embedded `_sig`', plant: () => { writeIntegrityKey(); linkRaw(signedBody(OFF_BOTH)); }, src: 'valid', shared: 'valid' },
+    {
+      name: 'genuine legacy `.config-sig` over the exact bytes',
+      plant: () => { writeIntegrityKey(); linkRaw(OFF_BOTH); sidecar(hmac(JSON.stringify(OFF_BOTH))); },
+      src: 'valid', shared: 'valid',
+    },
+    {
+      name: 'self-heal: stale `_sig`, genuine legacy `.config-sig` over the exact bytes',
+      plant: () => {
+        writeIntegrityKey();
+        const body = { ...OFF_BOTH, _sig: 'deadbeef' };
+        linkRaw(body);
+        sidecar(hmac(JSON.stringify(body)));
+      },
+      src: 'self-heal', shared: 'self-heal',
+    },
+  ];
+
+  describe('installed Claude Code hook (/bin/sh -c "<node> dist/index.js hook pre-tool")', () => {
+    for (const row of BAD) {
+      it(`${row.name}: denied (strict), not allowed as Guard off`, () => {
+        row.plant();
+        expect(runHookOk().decision).toBe('deny');
+      });
+    }
+    for (const row of GOOD) {
+      it(`control: ${row.name}: honoured (no decision)`, () => {
+        row.plant();
+        expect(runHookOk().decision).toBeUndefined();
+      });
+    }
+  });
+
+  describe('OpenClaw runtime loadShieldConfig', () => {
+    for (const row of BAD) {
+      it(`${row.name}: strict posture`, async () => {
+        row.plant();
+        const cfg = await (await runtimeFor(join(configDir, 'config.json'))).loadShieldConfig();
+        expect(cfg.actionGuard).toMatchObject({ enabled: true, enforce: true, autoApprove: [], reviewedScripts: [] });
+        expect(cfg.defenceMode).toBe('strict');
+        expect(cfg.interceptor.actionGuard).toEqual({});
+      });
+    }
+    for (const row of GOOD) {
+      it(`control: ${row.name}: the target's own value`, async () => {
+        row.plant();
+        const cfg = await (await runtimeFor(join(configDir, 'config.json'))).loadShieldConfig();
+        expect(cfg.actionGuard).toEqual({ enabled: false });
+        expect(cfg.defenceMode).toBeUndefined();
+      });
+    }
+
+    it('a warm runtime re-verifies when only a sidecar changes: genuine legacy sig → junk sig is strict', async () => {
+      writeIntegrityKey();
+      linkRaw(OFF_BOTH);
+      sidecar(hmac(JSON.stringify(OFF_BOTH)));
+      const runtime = await runtimeFor(join(configDir, 'config.json'));
+      expect((await runtime.loadShieldConfig()).actionGuard).toEqual({ enabled: false });
+      sidecar('00');
+      expect((await runtime.loadShieldConfig()).actionGuard).toMatchObject({ enabled: true, enforce: true });
+    });
+  });
+
+  describe('resolveBoxInterceptorConfig (the synthetic canary)', () => {
+    const DEFAULTS = { enabled: true, actionGuard: { enabled: false, enforce: true, autoApprove: [] } };
+    const resolveBox = async () => {
+      const { resolveBoxInterceptorConfig } = await import('../setup/openclaw-selfcheck.js');
+      return resolveBoxInterceptorConfig(home, DEFAULTS) as Record<string, any>;
+    };
+    for (const row of BAD) {
+      it(`${row.name}: enabled + enforcing`, async () => {
+        row.plant();
+        expect((await resolveBox()).actionGuard).toMatchObject({ enabled: true, enforce: true, autoApprove: [] });
+      });
+    }
+    for (const row of GOOD) {
+      it(`control: ${row.name}: the alias's own Guard-off values`, async () => {
+        row.plant();
+        expect((await resolveBox()).actionGuard).toMatchObject({ enabled: false, enforce: false });
+      });
+    }
+  });
+
+  describe('one check: the shared verifier gives src checkConfigIntegrity\'s verdict', () => {
+    for (const row of [...BAD, ...GOOD]) {
+      it(`${row.name}: src ${row.src}, shared verifier ${row.shared}`, async () => {
+        row.plant();
+        const { inspectConfigIntegrity } = await import('../cloud/config.js');
+        const { configSignatureVerdictAt } = await import('../../scripts/lib/config-authenticity.mjs');
+        const prev = process.env.SHIELDCORTEX_CONFIG_DIR;
+        process.env.SHIELDCORTEX_CONFIG_DIR = configDir;
+        let report;
+        try {
+          report = inspectConfigIntegrity();
+        } finally {
+          if (prev === undefined) delete process.env.SHIELDCORTEX_CONFIG_DIR;
+          else process.env.SHIELDCORTEX_CONFIG_DIR = prev;
+        }
+        expect({ verdict: report.verdict, linked: report.linked }).toEqual({ verdict: row.src, linked: true });
+        const configPath = join(configDir, 'config.json');
+        const raw = readFileSync(configPath, 'utf-8');
+        expect(configSignatureVerdictAt(configPath, JSON.parse(raw), raw)).toBe(row.shared);
+      });
+    }
+  });
+
+  it('fail strict: a hook copy without the verifier module holds even a GENUINELY signed link strict', () => {
+    // The verifier is imported lazily, only for a link; a missing module must
+    // neither crash the hook (fail open) nor honour an unverifiable link.
+    const copy = join(home, 'hook-copy', 'scripts');
+    mkdirSync(join(copy, 'lib'), { recursive: true });
+    copyFileSync(join(repoRoot, 'scripts', 'pre-tool-hook.mjs'), join(copy, 'pre-tool-hook.mjs'));
+    for (const dep of ['state-perms.mjs', 'harness-pid.mjs']) copyFileSync(join(repoRoot, 'scripts', 'lib', dep), join(copy, 'lib', dep));
+    writeIntegrityKey();
+    linkRaw(signedBody(OFF_BOTH));
+    const command = `${process.execPath} ${join(copy, 'pre-tool-hook.mjs')}`;
+    const run = runHookOk(command);
+    expect(run.decision).toBe('deny');
+    expect(run.stderr).toMatch(/signature verifier could not be loaded/);
+    // Control: the same fixture through the real install is honoured.
+    expect(runHookOk().decision).toBeUndefined();
+  });
+
+  it('the runtime\'s pinned verifier is byte-identical to scripts/lib/config-authenticity.mjs', () => {
+    const region = (file: string) => {
+      const text = readFileSync(join(repoRoot, file), 'utf-8');
+      const begin = text.indexOf('// BEGIN config-signature-verdict');
+      const end = text.indexOf('// END config-signature-verdict');
+      expect(begin).toBeGreaterThanOrEqual(0);
+      expect(end).toBeGreaterThan(begin);
+      return text.slice(begin, end);
+    };
+    expect(region('hooks/openclaw/cortex-memory/runtime.mjs')).toBe(region('scripts/lib/config-authenticity.mjs'));
   });
 });

@@ -82,6 +82,12 @@ export interface PostureInputs {
    * the file's own values.
    */
   integrityAdoption?: UnsignedAdoptionBlock;
+  /**
+   * #878 r5: config.json is a symbolic link ({@link inspectConfigIntegrity}'s
+   * `linked`). The hook and the runtime hold a linked file strict unless its
+   * signature authenticates it (`valid` / `self-heal`).
+   */
+  integrityLinked?: boolean;
   lock: PolicyLockState;
   claudeWired: boolean;
   openclaw: OpenClawInput;
@@ -163,15 +169,23 @@ function lockPresent(lock: PolicyLockState): boolean {
  * what they run on; only the policy lock changes it. Doctor's integrity row
  * reports the tamper itself.
  *
- * #878 r4: one exception both readers DO apply — an unsigned config.json
- * behind a symbolic link (`unverified` because adoption is blocked by the
- * link) is held at the strict fail-closed posture, before the lock and the
- * #209 fold (scripts/pre-tool-hook.mjs configIsLinkedUnsigned, runtime.mjs
- * linkedUnsigned). The planes must report that, not the target's own values.
+ * #878 r4/r5: one exception both readers DO apply — a config.json behind a
+ * symbolic link that no signature authenticates is held at the strict
+ * fail-closed posture, before the lock and the #209 fold. Unsigned
+ * (`unverified`, adoption blocked by the link) and, since r5, `tampered`: both
+ * readers recompute the HMAC for a link (scripts/lib/config-authenticity.mjs,
+ * the same check as checkConfigIntegrity), so a dummy `_sig` or a junk
+ * `.config-sig` no longer passes. Only `valid` / `self-heal` are honoured. The
+ * planes must report that, not the target's own values. A regular tampered
+ * file is still what the readers run on (above).
  */
 function runtimeBase(inputs: PostureInputs): Record<string, unknown> {
   const raw = inputs.signedRaw ?? {};
-  if (inputs.signedRaw !== null && inputs.integrity === 'unverified' && inputs.integrityAdoption === 'linked') {
+  if (inputs.signedRaw === null) return raw;
+  if (inputs.integrity === 'unverified' && inputs.integrityAdoption === 'linked') {
+    return applyStrictFailClosedPosture(raw);
+  }
+  if (inputs.integrityLinked === true && inputs.integrity !== 'valid' && inputs.integrity !== 'self-heal') {
     return applyStrictFailClosedPosture(raw);
   }
   return raw;
@@ -447,7 +461,7 @@ export function readPostureInputs(opts: ReadPostureOptions = {}): PostureInputs 
   // The integrity reader only knows the default config dir; a different file
   // cannot be graded against it, so it is not called valid. #878: its report
   // is the one outlook every grading decision below reads.
-  const integrity: Pick<ConfigIntegrityReport, 'verdict' | 'adoption'> =
+  const integrity: Pick<ConfigIntegrityReport, 'verdict' | 'adoption'> & { linked?: boolean } =
     path.resolve(configDir) === path.resolve(getConfigDir()) ? inspectConfigIntegrity() : { verdict: 'unverified' };
   // The hook's own view of the file (a bare parse, as pre-tool-hook.mjs reads
   // it): what the hook and plugin PLANES resolve from. It decides no signed or
@@ -469,6 +483,7 @@ export function readPostureInputs(opts: ReadPostureOptions = {}): PostureInputs 
     signedRaw,
     integrity: integrity.verdict,
     ...(integrity.adoption ? { integrityAdoption: integrity.adoption } : {}),
+    ...(integrity.linked ? { integrityLinked: true } : {}),
     lock: readPolicyLock({ audit: false, warn: false }),
     claudeWired: claudeToolGateWired(opts.home),
     openclaw: readOpenClawInput(opts.openclawPath === undefined ? defaultOpenClawConfigPath() : opts.openclawPath),

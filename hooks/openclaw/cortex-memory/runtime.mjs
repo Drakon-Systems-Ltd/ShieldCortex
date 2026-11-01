@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -52,47 +53,120 @@ function strictFailClosedPosture(raw) {
   return out;
 }
 
+// #878 r5: the signature verifier for a SYMLINKED config.json. This file is
+// copied alone into OpenClaw hook directories and cannot import
+// scripts/lib/config-authenticity.mjs, so the region between the markers is a
+// byte-identical copy of that module's (a test fails on drift). It recomputes
+// the HMAC exactly as src's checkConfigIntegrity does; presence of a `_sig`
+// string or a `.config-sig` file is not a signature.
+// BEGIN config-signature-verdict (#878 r5; pinned copy in hooks/openclaw/cortex-memory/runtime.mjs)
+/**
+ * checkConfigIntegrity's verdict (src/cloud/config.ts) over bytes and sidecars
+ * already read: the same key use (the trimmed `.integrity-key` text as the HMAC
+ * key), the same embedded body (the object minus `_sig`,
+ * `JSON.stringify(rest, null, 2)`), the same legacy scheme (a `.config-sig`
+ * HMAC over the exact file bytes, used whenever `_sig` is not a string), the
+ * same self-heal rule and a constant-time compare.
+ *
+ * `key`: the trimmed key text, or null when it is missing, unreadable or empty
+ * (an empty key fails strict here; src's read-only inspector reads it the same
+ * way). `legacySig`: undefined when `.config-sig` does not exist, null when it
+ * exists but cannot be read (a directory, permissions), else its trimmed text.
+ * Returns `valid`, `self-heal`, `tampered` or `unsigned` (no signature at all).
+ */
+export function configSignatureVerdict({ parsed, raw, key, legacySig }) {
+  const equalHex = (stored, computed) => {
+    const a = Buffer.from(stored, "utf-8");
+    const b = Buffer.from(computed, "utf-8");
+    return a.length === b.length && timingSafeEqual(a, b);
+  };
+  try {
+    const sign = (body) => {
+      if (typeof key !== "string" || key.length === 0) throw new Error("no integrity key");
+      return createHmac("sha256", key).update(body, "utf-8").digest("hex");
+    };
+    if (typeof parsed._sig === "string") {
+      const rest = { ...parsed };
+      delete rest._sig;
+      if (equalHex(parsed._sig, sign(JSON.stringify(rest, null, 2)))) return "valid";
+      if (typeof legacySig === "string" && equalHex(legacySig, sign(raw))) return "self-heal";
+      return "tampered";
+    }
+    if (legacySig === undefined) return "unsigned";
+    if (typeof legacySig !== "string") return "tampered";
+    return equalHex(legacySig, sign(raw)) ? "valid" : "tampered";
+  } catch {
+    return "tampered";
+  }
+}
+
+/** A verdict under which a symlinked config.json's own values are in force. */
+export function verdictAuthenticates(verdict) {
+  return verdict === "valid" || verdict === "self-heal";
+}
+// END config-signature-verdict
+
 export function createOpenClawRuntime({
   logPrefix = "[shieldcortex]",
   configPath = path.join(process.env.SHIELDCORTEX_CONFIG_DIR?.trim() || path.join(homedir(), ".shieldcortex"), "config.json"),
 } = {}) {
   let rawShieldConfig = null;
   let rawShieldConfigParsed = false;
+  let rawShieldConfigText = "";
   let shieldConfigKey = null;
   let shieldConfig = null;
   let shieldConfigLinkedUnsigned = false;
   let resolvedServerCmd = null;
   let lastCallErrorType = null;
 
-  // #878: is config.json a symbolic link whose target carries no signature?
-  // Mirrors src/cloud/config.ts (readRawConfigStateUnlocked → readRawConfigState):
-  // an unsigned file behind a link is never adopted, so its verdict is unknown
-  // and unknown is enforced as the strict fail-closed posture — never Guard
-  // off. "Unsigned" is checkConfigIntegrity's: no embedded `_sig` string and no
-  // legacy `.config-sig`. A signed target is honoured, as a regular file is
-  // (this path verifies no HMAC on either). A dangling link has no bytes to
-  // take a posture from and reads `{}`, as src reads it. Keep in step with
-  // scripts/pre-tool-hook.mjs (configIsLinkedUnsigned).
-  async function linkedUnsigned(parsed) {
+  // #878: is config.json a symbolic link whose bytes no signature
+  // authenticates? Mirrors src/cloud/config.ts (readRawConfigStateUnlocked →
+  // readRawConfigState): the read layer never adopts (signs) or self-heals
+  // through a link, so a linked file is in force only when an existing
+  // signature authenticates it — r5: the HMAC recomputed with the local
+  // `.integrity-key` (configSignatureVerdict above), never the mere presence of
+  // a `_sig` string or a `.config-sig` file, which the link's target or a
+  // stray sidecar can supply. Anything else is held at the strict fail-closed
+  // posture — never Guard off. A regular file is still taken as plain JSON
+  // (no HMAC check on it, #509). A dangling link has no bytes to take a
+  // posture from and reads `{}`, as src reads it. Same rule, same verifier:
+  // scripts/pre-tool-hook.mjs and src/setup/openclaw-selfcheck.ts, through
+  // scripts/lib/config-authenticity.mjs.
+  async function readSidecar(file) {
+    try {
+      await fs.stat(file);
+    } catch {
+      return undefined;
+    }
+    try {
+      return (await fs.readFile(file, "utf-8")).trim();
+    } catch {
+      return null;
+    }
+  }
+
+  async function linkedUnauthenticated(parsed, raw) {
     try {
       if (!(await fs.lstat(configPath)).isSymbolicLink()) return false;
     } catch {
       return false;
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
-    if (typeof parsed._sig === "string") return false;
-    try {
-      await fs.stat(path.join(path.dirname(configPath), ".config-sig"));
-      return false;
-    } catch {
-      return true;
-    }
+    const dir = path.dirname(configPath);
+    const key = await readSidecar(path.join(dir, ".integrity-key"));
+    const verdict = configSignatureVerdict({
+      parsed,
+      raw,
+      key: typeof key === "string" ? key : null,
+      legacySig: await readSidecar(path.join(dir, ".config-sig")),
+    });
+    return !verdictAuthenticates(verdict);
   }
 
   // #878 r4: the cache key for the bytes and their parse status. mtime alone
   // was not enough: a warm runtime swapped from a signed (or empty, malformed,
   // array) file to an unsigned link with the same mtime kept serving the OLD
-  // parsed object, so linkedUnsigned judged the old bytes and Guard stayed off
+  // parsed object, so the link verdict judged the old bytes and Guard stayed off
   // while a fresh runtime and src held strict. The key is the identity
   // (dev, ino, size, mtime, ctime — ns, so a utimes-restored mtime is no cover;
   // user space cannot set ctime) of the config.json ENTRY (lstat: file or link,
@@ -131,15 +205,20 @@ export function createOpenClawRuntime({
     const key = await configIdentityKey();
 
     if (key !== shieldConfigKey) {
-      // Plain JSON. The CLI HMAC-signs this file, but nothing on this path
-      // verifies the signature: callers must not describe it as signed (#509 r8).
+      // Plain JSON. The CLI HMAC-signs this file, but a REGULAR file's
+      // signature is not verified on this path: callers must not describe it
+      // as signed (#509 r8). Only a symlinked file's is, and only to decide
+      // whether it is held strict (#878 r5, linkedUnauthenticated); the text
+      // is kept because the legacy signature covers the exact bytes.
       try {
-        rawShieldConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
+        rawShieldConfigText = await fs.readFile(configPath, "utf-8");
+        rawShieldConfig = JSON.parse(rawShieldConfigText);
         rawShieldConfigParsed = true;
       } catch {
         // Unreadable (a dangling link included), empty or corrupt: `{}`, as
         // src reads all three. No bytes, so nothing to hold strict either.
         rawShieldConfig = {};
+        rawShieldConfigText = "";
         rawShieldConfigParsed = false;
       }
       shieldConfigKey = key;
@@ -148,7 +227,7 @@ export function createOpenClawRuntime({
 
     // The returned object's identity changes only when the bytes or the link
     // verdict do: the plugin re-merges on identity change.
-    const linked = rawShieldConfigParsed && (await linkedUnsigned(rawShieldConfig));
+    const linked = rawShieldConfigParsed && (await linkedUnauthenticated(rawShieldConfig, rawShieldConfigText));
     if (!shieldConfig || linked !== shieldConfigLinkedUnsigned) {
       shieldConfigLinkedUnsigned = linked;
       shieldConfig = linked ? strictFailClosedPosture(rawShieldConfig) : rawShieldConfig;

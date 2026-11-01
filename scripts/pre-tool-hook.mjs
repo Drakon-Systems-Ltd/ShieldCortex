@@ -344,49 +344,68 @@ async function applyHookPolicyLock(config) {
 }
 
 /**
- * Is `config.json` a symbolic link whose target carries no signature? (#878)
+ * Does a symlinked config.json have to be held strict? (#878 r5)
  *
- * Mirrors the src rule in `readRawConfigStateUnlocked` / `readRawConfigState`
- * (src/cloud/config.ts): the read layer never adopts (signs) an unsigned file
- * behind a link, so its integrity verdict is `unverified` — unknown — and
- * unknown is enforced as the strict fail-closed posture, never Guard off.
- * "Unsigned" is exactly what `checkConfigIntegrity` calls unsigned: no
- * embedded `_sig` string and no legacy `.config-sig` beside the config. A
- * SIGNED link target is honoured here as it is for a regular file; this hook
- * does not verify the HMAC on either (pre-existing, and not this rule).
- *
- * A dangling link is not caught here: there are no target bytes to take a
- * posture from, and src reads it as unreadable → `{}`, which this hook's
- * `existsSync` branch also yields. Keep in step with
- * hooks/openclaw/cortex-memory/runtime.mjs (`linkedUnsigned`); standalone
- * scripts cannot import src.
+ * A regular file returns false without loading anything (unchanged path; the
+ * hook does not verify a regular file's signature, #509). For a link the
+ * answer is the shared verifier's (scripts/lib/config-authenticity.mjs — the
+ * HMAC recomputed with the local `.integrity-key` exactly as src's
+ * checkConfigIntegrity does; a `_sig` string or a `.config-sig` file that does
+ * not verify is not a signature). It is imported lazily, and only for a link,
+ * so a missing or broken module cannot crash the hook — and cannot fail OPEN
+ * either: a link whose authenticity cannot be checked is held strict.
  */
-function configIsLinkedUnsigned(configPath, parsed) {
+let configAuthenticityModule;
+async function configLinkedStrict(configPath, parsed, raw) {
   try {
     if (!lstatSync(configPath).isSymbolicLink()) return false;
   } catch {
     return false;
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
-  if (typeof parsed._sig === 'string') return false;
-  return !existsSync(join(dirname(configPath), '.config-sig'));
+  if (configAuthenticityModule === undefined) {
+    try {
+      configAuthenticityModule = await import('./lib/config-authenticity.mjs');
+    } catch {
+      configAuthenticityModule = null;
+    }
+  }
+  if (!configAuthenticityModule) {
+    process.stderr.write(
+      '[shieldcortex] config.json is a symbolic link and the signature verifier could not be loaded — ' +
+      'holding the strict fail-closed posture. Run `shieldcortex repair` to restore the install.\n',
+    );
+    return true;
+  }
+  try {
+    return configAuthenticityModule.configIsLinkedUnauthenticated(configPath, parsed, raw);
+  } catch {
+    return true;
+  }
 }
 
 async function loadActionGuardConfig() {
   let parsed = null;
-  let linkedUnsigned = false;
+  let linkedStrict = false;
   try {
     const configPath = join(hookConfigDir(), 'config.json');
-    if (existsSync(configPath)) parsed = JSON.parse(readFileSync(configPath, 'utf-8'));
-    linkedUnsigned = configIsLinkedUnsigned(configPath, parsed);
+    if (existsSync(configPath)) {
+      const raw = readFileSync(configPath, 'utf-8');
+      parsed = JSON.parse(raw);
+      // #878: a symlinked config.json is in force only when a signature
+      // AUTHENTICATES its bytes, as src holds it: the read layer never adopts
+      // or self-heals through a link (configLinkedStrict above). A dangling
+      // link fails existsSync and reads `{}`, as src reads it.
+      linkedStrict = await configLinkedStrict(configPath, parsed, raw);
+    }
   } catch {
     // Unreadable/corrupt config → the guard's own defaults, exactly as before.
     // Enforce-by-default means a corrupt config must not silently disable it.
     parsed = null;
   }
-  // #878: a linked, unsigned config.json is held strict, as src holds it —
-  // its own enabled/enforce/readinessGate are never read.
-  const base = linkedUnsigned ? inlineStrictPosture(parsed) : (parsed ?? {});
+  // #878: a linked config.json no signature authenticates is held strict, as
+  // src holds it — its own enabled/enforce/readinessGate are never read.
+  const base = linkedStrict ? inlineStrictPosture(parsed) : (parsed ?? {});
   const config = await applyHookPolicyLock(base);
   return flattenActionGuardConfig(config);
 }
