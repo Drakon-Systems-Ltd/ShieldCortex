@@ -2233,6 +2233,9 @@ async function writeOpenClawInstall(
       }
     } else if (result.restarted) {
       console.log(`OpenClaw gateway restarted via ${result.method}.`);
+    } else if (result.timedOut) {
+      console.warn(`OpenClaw gateway restart via ${result.method} timed out; the gateway may still be restarting.`);
+      console.warn('Check it with `shieldcortex doctor` before restarting it again.');
     } else if (result.attempted) {
       console.warn(`OpenClaw gateway restart via ${result.method} failed: ${result.detail ?? 'unknown'}`);
       console.warn('Restart it manually so the new plugin/hook take effect:');
