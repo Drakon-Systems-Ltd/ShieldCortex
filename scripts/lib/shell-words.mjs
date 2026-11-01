@@ -309,7 +309,12 @@ function classAt(s, i) {
       j = close + 2;
       continue;
     }
-    if (/[\s'"\\`$*?[{/;&|<>()]/.test(s[j])) return null;
+    // r13 (r13 Astra B1): `? * [ {` are LITERAL members inside `[…]`
+    // (`[[:alpha:]?]`, `[![:digit:]*]`, `[[:alpha:][]`): the same closer the
+    // typed word uses must accept them, not stop at the first inner `]`. Only
+    // the genuinely-impossible characters — whitespace, quote, backslash, `$`,
+    // backtick, `/`, and the command operators — end the bracket expression.
+    if (/[\s'"\\`$/;&|<>()]/.test(s[j])) return null;
     j++;
   }
   if (j >= s.length || j === from) return null;
@@ -726,19 +731,46 @@ function partCandidates(p, ctx, depth) {
   }
 }
 
-/** Values a parameter takes in this command, plus unset (empty). */
+/**
+ * r13: whether the command ITSELF binds or influences `name` — by any means,
+ * computed or not. The coarse textual superset (`ctx.boundNames`) is included
+ * so an unknown binder syntax still counts. A name with no binding mention in
+ * the command is EXTERNAL (false here).
+ */
+function nameInfluenced(name, ctx) {
+  return ctx.assign.has(name) || ctx.arrayNames.has(name) || ctx.splitNames.has(name)
+    || ctx.uncomputed.has(name) || ctx.boundNames.has(name)
+    || (ctx.positionalsBound && /^(?:[0-9]+|[@*])$/.test(name));
+}
+
+/**
+ * Values a parameter takes in this command, plus unset (empty).
+ *
+ * r13 — the model is INVERTED: a reference is COMPLETE only when the command
+ * binds the name through a form the model fully computes into literal parts
+ * (`NAME=`, `+=`, `export`/`local NAME=`, `printf -v NAME`, single-name
+ * `read <<<`, `for NAME in`) and binds it no other way. Anything else the
+ * command binds — a compound array, a field-split `read`, a `set`/function/
+ * `bash -c` positional, a nameref, a subscripted assignment, a binder the
+ * model does not model — is INCOMPLETE (ANY → floor). A name the command does
+ * not bind at all is EXTERNAL (empty): the documented, unfloored residual.
+ */
 function nameCandidates(name, ctx, depth) {
   const key = `${name}\u0000${depth}`;
   if (ctx.names.has(key)) return ctx.names.get(key);
   const out = [[]];
-  // r12b: a name the command influences but the model cannot resolve — a
-  // compound-array element, a field-split `read` name, or (when `set …` ran)
-  // a positional `$1..`/`$@`/`$*` — is INCOMPLETE: its value can be any path.
-  // An EXTERNAL name the command never sets stays the unfloored residual.
-  if (ctx.arrayNames.has(name) || ctx.splitNames.has(name)
+  // Bound by a form the model cannot resolve → any path. (positional after
+  // `set`/`bash -c`/`sh -c`/a function; compound array; field-split `read`;
+  // nameref; subscripted/`mapfile`/`readarray` binding — all in `uncomputed`.)
+  if (ctx.uncomputed.has(name) || ctx.arrayNames.has(name) || ctx.splitNames.has(name)
       || (ctx.positionalsBound && /^(?:[0-9]+|[@*])$/.test(name))) return [[ANY]];
   const all = ctx.assign.get(name);
-  if (!all) return out;
+  if (!all) {
+    // Not computed. Bound somewhere by a form the structured pass did not model
+    // (an unknown binder, a binding behind a keyword the coarse net saw) →
+    // INCOMPLETE, fail closed. Never mentioned as a binding target → external.
+    return ctx.boundNames.has(name) ? [[ANY]] : out;
+  }
   if (depth >= NESTED_DEPTH || ctx.overflow) { ctx.overflow = true; return out; }
   // r12: the assignments are folded IN ORDER. Any of them may be skipped
   // (`||`, `if`, a function never called), so after each one the value set is
@@ -835,26 +867,40 @@ function commandOutputCandidates(body, ctx, depth) {
   return keep(out, CAND_CAP, ctx);
 }
 
-/** `${…}`: the parameter's values, plus its `:-`/`:=`/`:+`/`:?` word. */
+/**
+ * `${…}`: the parameter's values, plus its `:-`/`:=`/`:+`/`:?` word.
+ *
+ * r13 — INVERTED, matching `nameCandidates`. A PLAIN `${NAME}` is exactly the
+ * name's candidates (computed, ANY or external). A prefix (`!` indirection,
+ * `#` length) or ANY operator (`/pat/rep`, `#`/`##`, `%`/`%%`, `:off:len`,
+ * `^`/`,`, `[idx]`, `@Q`, …) is a value the model does NOT compute: when the
+ * command influences the base it is INCOMPLETE (ANY → floor), and when the
+ * base is external it stays the residual. The `:-`/`:=`/`:+`/`:?` default
+ * word and a `/pat/rep` replacement are spelled literally, so they are still
+ * offered as candidates in their own right.
+ */
 function braceParamCandidates(body, ctx, depth) {
   const m = /^([#!]?)([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])(.*)$/s.exec(body);
   const out = [[], [body]];
-  if (!m) return out;
-  out.push(...nameCandidates(m[2], ctx, depth));
-  const op = /^(:?[-=+?])(.*)$/s.exec(m[3]);
+  if (!m) { ctx.overflow = true; return out; } // an unparseable `${…}`: incomplete
+  const prefix = m[1];
+  const base = m[2];
+  const rest = m[3];
+  if (prefix === '' && rest === '') {
+    out.push(...nameCandidates(base, ctx, depth));
+    return keep(out, CAND_CAP, ctx);
+  }
+  // A prefix or an operator is present: the result is not the base's value.
+  const op = /^(:?[-=+?])(.*)$/s.exec(rest);
   if (op) out.push(...textCandidates(op[2], ctx, depth));
   else {
-    // `${v/pat/rep}`, `${v#pre}`, `${v:1:2}`…: the pieces it could leave.
-    const rep = /^\/\/?[^/]*\/(.*)$/s.exec(m[3]);
+    const rep = /^\/\/?[^/]*\/(.*)$/s.exec(rest);
     if (rep) out.push(...textCandidates(rep[1], ctx, depth));
-    // r12b: a transform the model does not compute (`/pat/rep`, `#`/`##`,
-    // `%`/`%%`, `:off:len`, `^`/`,`, an array index) on a value the COMMAND
-    // influences is INCOMPLETE — the result can be any path. An external base
-    // the command never sets keeps the unfloored residual.
-    const influenced = ctx.assign.has(m[2]) || ctx.arrayNames.has(m[2]) || ctx.splitNames.has(m[2])
-      || (ctx.positionalsBound && /^(?:[0-9]+|[@*])$/.test(m[2]));
-    if (m[3] !== '' && influenced) out.push([ANY]);
   }
+  // `!`/`#`/an operator on a base the COMMAND influences is INCOMPLETE — the
+  // result can be any path (indirection `${!N}`, length, a subscript `${A[i]}`,
+  // a transform). An external base the command never binds keeps the residual.
+  if (nameInfluenced(base, ctx)) out.push([ANY]);
   return keep(out, CAND_CAP, ctx);
 }
 
@@ -892,27 +938,89 @@ function statements(seq) {
 const ARRAY_ASSIGN_RE = /^([A-Za-z_]\w*)\+?=$/;
 /** Command wrappers that run the word after them (and their args) as a command. */
 const CMD_PREFIX = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 'nice', 'nohup', 'setsid', 'stdbuf', 'ionice', 'time', 'timeout']);
+/**
+ * r13: shell keywords a statement can start with (after `;`/newline/`&&`/`||`
+ * splitting). Skipped when finding the command head, so a binder behind a
+ * keyword (`if …; then set -- …; fi`) is still recognised.
+ */
+const SHELL_KEYWORDS = new Set(['then', 'do', 'else', 'elif', 'in', '{', '}', '!', 'time', '(', ')']);
+/** r13: the shells whose `-c` argument binds positional parameters from this command. */
+const SHELL_DASH_C = new Set(['sh', 'bash', 'dash', 'ksh', 'ksh93', 'mksh', 'zsh', 'ash', 'busybox']);
+
+/**
+ * r13: a COARSE textual superset of every name the command binds, and the
+ * subset it binds in a form the model cannot compute. Scanned over the raw
+ * text of every level so an unknown binder syntax still errs CLOSED — the
+ * brief's rule. Precision is the structured pass's job; this is the safety net
+ * that keeps "binding behind syntax we did not model" incomplete rather than
+ * mistaking it for an external value.
+ *   - `bound`      name appears as an assignment target (`N=`, `N[i]=`, `N+=`),
+ *     a `for N`, or an identifier operand of declare/typeset/local/readonly/
+ *     export/read/mapfile/readarray/`printf -v`.
+ *   - `uncomputed` of those, the ones that are definitely unresolvable: a
+ *     subscripted assignment (`N[i]=`, `printf -v 'N[i]'`), a nameref
+ *     (`declare -n N`), a mapfile/readarray array. `read` stays out of
+ *     `uncomputed` here — the structured pass computes a single `read <<<`.
+ *   - `hasFunction` a function definition appears (`f() {`/`function f`), so a
+ *     positional reference is bound by the command's own call.
+ */
+const COARSE_ASSIGN_RE = /(?:^|[\s;&|()<>{}!'"`])([A-Za-z_]\w*)(\[[^\]]*\])?\+?=/g;
+const COARSE_FOR_RE = /\bfor\s+([A-Za-z_]\w*)/g;
+const COARSE_BUILTIN_RE = /\b(declare|typeset|local|readonly|export|read|mapfile|readarray)\b([^\n;&|]*)/g;
+const COARSE_PRINTF_V_RE = /\bprintf\b[^\n;&|]*?\s-v\s*['"]?([A-Za-z_]\w*)(\[[^\]]*\])?/g;
+const COARSE_FUNC_RE = /(?:^|[\s;&|])(?:function\s+[A-Za-z_]\w*|[A-Za-z_]\w*\s*\(\s*\))/;
+function coarseBinders(texts) {
+  const bound = new Set();
+  const uncomputed = new Set();
+  let hasFunction = false;
+  for (const T of texts) {
+    for (const m of T.matchAll(COARSE_ASSIGN_RE)) { bound.add(m[1]); if (m[2]) uncomputed.add(m[1]); }
+    for (const m of T.matchAll(COARSE_FOR_RE)) bound.add(m[1]);
+    for (const m of T.matchAll(COARSE_BUILTIN_RE)) {
+      const builtin = m[1];
+      const arrayLike = builtin === 'mapfile' || builtin === 'readarray';
+      let nameref = false;
+      for (const tok of m[2].split(/\s+/)) {
+        const t0 = tok.replace(/^['"]+/, '');
+        if (!t0) continue;
+        if (t0.startsWith('-')) { if (/^-\w*n/.test(t0)) nameref = true; continue; }
+        const mm = /^([A-Za-z_]\w*)(\[[^\]]*\])?/.exec(t0);
+        if (!mm) continue;
+        bound.add(mm[1]);
+        if (mm[2] || nameref || arrayLike) uncomputed.add(mm[1]);
+      }
+    }
+    for (const m of T.matchAll(COARSE_PRINTF_V_RE)) { bound.add(m[1]); if (m[2]) uncomputed.add(m[1]); }
+    if (COARSE_FUNC_RE.test(T)) hasFunction = true;
+  }
+  return { bound, uncomputed, hasFunction };
+}
 
 /**
  * Same-command assignments: every way the command itself sets a NAME.
- * Returns `{ assign, arrayNames, splitNames, positionalsBound }`:
+ * Returns `{ assign, arrayNames, splitNames, uncomputed, boundNames,
+ * positionalsBound }`:
  *   - `assign`    values the model can COMPUTE (`NAME=`, `export`/`local`,
  *     `NAME+=`, `printf -v`, a single-name `read <<<`, `for NAME in`).
- *   - `arrayNames` names bound by a compound array `NAME=(…)`: their element
- *     values are not modelled (r12b).
- *   - `splitNames` names bound by a FIELD-SPLIT `read A B C …` (two or more
- *     names): the IFS split is not modelled (r12b).
- *   - `positionalsBound` a `set …` set the positional parameters `$1..`,
- *     `$@`, `$*` (r12b).
- * The last three are values the command influences but the model cannot
- * resolve — a reference to one is INCOMPLETE and must be refused, never
- * treated as empty or as its pre-transform value.
+ *   - `arrayNames` names bound by a compound array `NAME=(…)` (r12b).
+ *   - `splitNames` names bound by a FIELD-SPLIT `read A B C …` (r12b).
+ *   - `uncomputed` (r13) names bound in a form the model cannot resolve: a
+ *     nameref (`declare -n`), a `mapfile`/`readarray`/`read -a` array, a
+ *     subscripted assignment, and (coarse net) any binder syntax not modelled.
+ *   - `boundNames` (r13) the coarse textual superset of every bound name.
+ *   - `positionalsBound` a `set …`, a `bash -c`/`sh -c`, or a function call
+ *     binds the positional parameters `$1..`, `$@`, `$*`.
+ * A reference to any name in the first four (or a positional when bound) that
+ * is not fully computed is INCOMPLETE and refused, never treated as empty or
+ * as its pre-transform value. A name in NONE of these is external (unfloored).
  */
-function collectAssignments(levels) {
+function collectAssignments(levels, texts = []) {
   const assign = new Map();
   const arrayNames = new Set();
   const splitNames = new Set();
-  let positionalsBound = false;
+  const coarse = coarseBinders(texts);
+  const uncomputed = new Set(coarse.uncomputed);
+  let positionalsBound = coarse.hasFunction;
   const add = (name, v) => { if (!assign.has(name)) assign.set(name, []); assign.get(name).push(v); };
   for (const { seq } of levels) {
     // r12b: a compound array `NAME=(…)` tokenises as the word `NAME=` (its
@@ -939,16 +1047,35 @@ function collectAssignments(levels) {
       // r12b: skip command-prefix wrappers (`sudo`, `env`, `command`, …) and
       // their leading flags/`VAR=val` args so `set`/`read`/… are recognised
       // behind a prefix (`sudo set -- …`), exactly as the shell runs them.
+      // r13: also skip leading shell keywords (`then`, `do`, `else`, `{`, …)
+      // so a binder behind one (`if …; then set -- …`) is still recognised.
       let head = first;
-      while (CMD_PREFIX.has(texts[head] ?? '')) {
-        head++;
-        while (head < texts.length && texts[head] !== null && (texts[head].startsWith('-') || ASSIGN_RE.test(texts[head]))) head++;
+      for (let moved = true; moved;) {
+        moved = false;
+        while (SHELL_KEYWORDS.has(texts[head] ?? '')) { head++; moved = true; }
+        while (CMD_PREFIX.has(texts[head] ?? '')) {
+          head++; moved = true;
+          while (head < texts.length && texts[head] !== null && (texts[head].startsWith('-') || ASSIGN_RE.test(texts[head]))) head++;
+        }
       }
       if (head >= words.length) continue;
       const cmd = texts[head];
-      // r12b: `set …` (with operands) sets the positional parameters; `$1..`,
-      // `$@`, `$*` are then command-bound but not modelled.
-      if (cmd === 'set' && words.length > head + 1) positionalsBound = true;
+      const cmdBase = cmd === null ? '' : cmd.split('/').pop();
+      // r12b: `set …` sets the positional parameters; `$1..`, `$@`, `$*` are
+      // then command-bound but not modelled. r13: only when it actually binds
+      // them — a `--` or a bare (non-option) first operand — so `set -e`,
+      // `set -o pipefail` and `set -euo pipefail` (shell OPTIONS, no
+      // positionals) are not mistaken for a binding.
+      if (cmd === 'set') {
+        const args = texts.slice(head + 1).filter((t) => t !== null);
+        const firstArg = args[0];
+        if (args.includes('--') || (firstArg !== undefined && firstArg !== '' && !firstArg.startsWith('-') && !firstArg.startsWith('+'))) {
+          positionalsBound = true;
+        }
+      }
+      // r13 (r13 Grok BLOCKER 1): a `bash -c '…' _ a b c` / `sh -c` binds the
+      // `-c` script's positionals from the trailing operands of THIS command.
+      if (SHELL_DASH_C.has(cmdBase) && texts.slice(head + 1).some((t) => t === '-c')) positionalsBound = true;
       if (cmd === 'printf') {
         for (let n = head + 1; n < words.length; n++) {
           const t = texts[n];
@@ -961,19 +1088,46 @@ function collectAssignments(levels) {
         }
       }
       if (cmd === 'read') {
+        const flags = texts.slice(head + 1).filter((t) => t && t.startsWith('-'));
         const names = texts.slice(head + 1).filter((t) => t && /^[A-Za-z_]\w*$/.test(t));
+        // r13: `read -a NAME` / `read -A NAME` bind an ARRAY; the elements are
+        // not modelled, so the name is uncomputed (`$NAME`, `${NAME[i]}` ANY).
+        if (flags.some((f) => /^-\w*[aA]/.test(f))) for (const name of names) uncomputed.add(name);
         // r12b: two or more names field-SPLIT the input on IFS; the split is
         // not modelled, so each name is uncomputed. A single name takes the
         // whole line (the model computes that from a `<<<` herestring).
-        if (names.length >= 2) for (const name of names) splitNames.add(name);
+        else if (names.length >= 2) for (const name of names) splitNames.add(name);
         else for (const name of names) for (const h of herestrings) add(name, { parts: h.parts });
+      }
+      // r13 (r13 Grok BLOCKER 1): `mapfile`/`readarray` bind an array the model
+      // cannot compute. The last non-flag operand is the array name, else the
+      // default `MAPFILE`.
+      if (cmd === 'mapfile' || cmd === 'readarray') {
+        const ops = texts.slice(head + 1).filter((t) => t && !t.startsWith('-') && /^[A-Za-z_]\w*$/.test(t));
+        if (ops.length) for (const name of ops) uncomputed.add(name);
+        else uncomputed.add('MAPFILE');
+      }
+      // r13 (r13 Grok BLOCKER 1): `declare -n`/`typeset -n`/`local -n` (and the
+      // same with combined flags) bind a NAMEREF: `$N` expands to the value of
+      // the variable NAMED by N, which the model does not resolve — uncomputed,
+      // even though `N=target` also tokenises as a plain assignment above.
+      if ((cmd === 'declare' || cmd === 'typeset' || cmd === 'local' || cmd === 'readonly' || cmd === 'export')
+          && texts.slice(head + 1).some((t) => t && /^-\w*n/.test(t))) {
+        for (const t of texts.slice(head + 1)) {
+          if (!t || t.startsWith('-')) continue;
+          const nm = /^([A-Za-z_]\w*)/.exec(t);
+          if (nm) uncomputed.add(nm[1]);
+        }
       }
       if (cmd === 'for' && texts[head + 2] === 'in' && /^[A-Za-z_]\w*$/.test(texts[head + 1] ?? '')) {
         for (const w of words.slice(head + 3)) if (partsText(w.parts) !== 'do') add(texts[head + 1], { parts: w.parts });
       }
     }
   }
-  return { assign, arrayNames, splitNames, positionalsBound };
+  // r13: a name the coarse net saw bound but the structured pass could not
+  // compute is uncomputed too (fail closed). A name that IS computed stays
+  // computed — `nameCandidates` consults `uncomputed`/`arrayNames`/… first.
+  return { assign, arrayNames, splitNames, uncomputed, boundNames: coarse.bound, positionalsBound };
 }
 
 // ── the glob matcher: can this glob candidate expand to a transcript? ──────
@@ -1079,14 +1233,19 @@ function dataGlobItems(items) {
         // way `classAt` does for a typed word — skipping POSIX `[:class:]`,
         // `[=a=]` and `[.a.]`, whose inner `]` is NOT the closer — not at the
         // first `]`. `.cl[[:alpha:]]` is one class, never a class plus a stray
-        // `]`. The same closer judges a typed word and a value-carried glob.
+        // `]`. r13: classAt now also accepts literal `? * [ {` members, so the
+        // same closer judges a typed word and a value-carried glob.
         const cls = classAt(it, i);
         if (cls && !it.slice(i, cls.end).includes('/')) { flush(); out.push({ g: 'class', neg: cls.neg, set: cls.set }); i = cls.end - 1; continue; }
-        // classAt rejects exotic contents (a space/quote inside): keep the
-        // old crude any-char class (closer at the first `]`) so the superset
-        // never shrinks — POSIX classes are already handled above.
-        const close = it.indexOf(']', i + 2);
-        if (!cls && close > 0 && !it.slice(i, close).includes('/')) { flush(); out.push({ g: 'class', neg: true, set: '' }); i = close; continue; }
+        // r13 (r13 Astra B1): classAt refuses a bracket expression it cannot
+        // represent (a space/quote/`$`/backtick inside). When a closing `]`
+        // exists in this segment it IS a bracket expression the shell would
+        // expand and the model cannot follow — INCOMPLETE (ANY). NEVER fall
+        // back to the first inner `]` and reinterpret the rest as a wildcard.
+        const rest = it.slice(i + 1);
+        const segEnd = rest.search(/\//);
+        const seg = segEnd < 0 ? rest : rest.slice(0, segEnd);
+        if (!cls && seg.includes(']')) { flush(); out.push(ANY); i = i + 1 + seg.indexOf(']'); continue; }
       }
       lit += ch;
     }
@@ -1096,18 +1255,25 @@ function dataGlobItems(items) {
 }
 
 /** The transcript named-check on ONE joined candidate. */
+const isAnyItem = (x) => typeof x === 'object' && x !== null && x.g === 'any';
 function candidateNamesTranscript(items, dotglob) {
   // r12b: a candidate holding an ANY item is a value the command influences
   // but the model could not compute (a `set --` positional, an array element,
-  // a field-split `read` name, an uncomputed parameter transform). That value
-  // can be any path, including the transcript, so the candidate is refused.
-  if (items.some((x) => typeof x === 'object' && x !== null && x.g === 'any')) return true;
+  // a field-split `read` name, an uncomputed parameter transform, a nameref,
+  // an indirection, a binder the model does not model). That value can be any
+  // path, including the transcript, so the candidate is refused.
+  if (items.some(isAnyItem)) return true;
+  // r13 (r13 Astra B1): a value-carried bracket expression the shared
+  // recogniser cannot represent becomes ANY here too — never the first-`]`
+  // fallback that silently clears the write.
+  const globbed = dataGlobItems(items);
+  if (globbed.some(isAnyItem)) return true;
   if (items.every((x) => typeof x === 'string')) {
     const t = items.join('');
     if (CLAUDE_TRANSCRIPT_NAMED_RE.test(t) || CLAUDE_TRANSCRIPT_NAMED_RE.test(lexicalPathNormalise(t))) return true;
     if (!/[*?[]/.test(t)) return false;
   }
-  return globMayNameTranscript(dataGlobItems(items), dotglob);
+  return globMayNameTranscript(globbed, dotglob);
 }
 
 /** r12: the basename of a candidate: every item after its last `/`. */
@@ -1213,8 +1379,12 @@ export function claudeJoinedWordMayBeTranscript(text) {
 }
 
 function joinedScan(raw) {
-  const levels = parsedLevels(raw);
-  const ctx = { ...collectAssignments(levels), overflow: false, work: 0, names: new Map() };
+  const seen = new Set();
+  const levels = parsedLevels(raw, 0, [], seen);
+  // r13: the coarse binder net scans the raw text of every level (the command
+  // and each nested `bash -c`/substitution body), so a binder behind unknown
+  // syntax errs closed.
+  const ctx = { ...collectAssignments(levels, [...seen]), overflow: false, work: 0, names: new Map() };
   const dotglob = /dotglob|GLOBIGNORE/.test(raw);
   const words = levels.flatMap((l) => l.seq.filter((t) => t.type === 'word'));
   const evidenceText = [raw, ...words.map((w) => w.value.split(EXPANSION_MARK).join(''))].join('\n');

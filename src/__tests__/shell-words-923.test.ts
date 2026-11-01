@@ -140,10 +140,20 @@ describe('#923 r7 — both planes import the one module (no copy to drift)', () 
   const hook = readFileSync(join(repoRoot, 'scripts', 'pre-tool-hook.mjs'), 'utf8');
   const guard = readFileSync(join(repoRoot, 'src', 'defence', 'iron-dome', 'tool-action-guard.ts'), 'utf8');
 
-  it('the pre-tool hook imports scripts/lib/shell-words.mjs and defines no tokenizer of its own', () => {
-    expect(hook).toMatch(/from '\.\/lib\/shell-words\.mjs'/);
-    expect(hook).not.toMatch(/function fallbackShellWords\b/);
-    expect(hook).not.toMatch(/function fallbackLexicalPathNormalise\b/);
+  it('the pre-tool hook loads scripts/lib/shell-words.mjs (lazily) and defines no tokenizer of its own', () => {
+    // r13: loaded with a caught `await import(...)`, not a static import — a
+    // hook copy without the module must FAIL STRICT, never crash into a
+    // non-2 exit Claude Code reads as allow (hook-config-symlink-878).
+    expect(hook).toMatch(/await import\('\.\/lib\/shell-words\.mjs'\)/);
+    expect(hook).not.toMatch(/import \{[^}]*\} from '\.\/lib\/shell-words\.mjs'/);
+    // The wrappers only DELEGATE to the one module (no second tokenizer to
+    // drift); when the module is absent they fall back to a deliberately strict
+    // stand-in, not a parallel re-implementation of the splitter/normaliser.
+    expect(hook).toMatch(/fallbackShellWordsModule\.shellWords\(/);
+    expect(hook).toMatch(/fallbackShellWordsModule\.lexicalPathNormalise\(/);
+    expect(hook).toMatch(/fallbackShellWordsModule\.claudeWordExpands\(/);
+    expect(hook).not.toMatch(/function shellTokens\b/);
+    expect(hook).not.toMatch(/const OPS =/);
   });
 
   it('the live guard imports the same file and defines no tokenizer of its own', () => {
