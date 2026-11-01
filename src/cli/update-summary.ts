@@ -70,6 +70,20 @@ export interface UpdateSummaryInput {
     /** The plugin version this CLI expects (the CLI's own version). */
     expectedVersion?: string | null;
     gatewayReloaded?: boolean;
+    /**
+     * What the run's one gateway restart came to. Absent when no reload was
+     * asked for — then the screen says nothing about a restart. This, not
+     * `gatewayReloaded`, decides the restart clause: `gatewayReloaded` is
+     * true even when the gateway never came back ready.
+     */
+    gatewayRestart?: 'completed' | 'timed-out' | 'unconfirmed' | 'failed' | 'skipped' | 'pending';
+    /**
+     * #977 review: the manual gateway restart command for this platform, for
+     * a failed or still-owed restart. Absent → `shieldcortex doctor`.
+     */
+    restartCommand?: string;
+    /** #977 review: changes landed after the run's one restart and are not loaded. */
+    changesUnloaded?: boolean;
     /** The one command the check suggests. */
     nextCommand?: string;
   };
@@ -118,6 +132,51 @@ function engineFixCommand(engine: UpdateSummaryInput['engine']): string {
   // The non-prebuild remediation leads with one copy-paste rebuild command.
   if (/npm run build-release/.test(first)) return sanitiseDisplayField(first);
   return 'shieldcortex doctor';
+}
+
+/** One short clause about the run's gateway restart, or '' when none was asked for. */
+export function gatewayRestartClause(outcome: UpdateSummaryInput['protection']['gatewayRestart']): string {
+  switch (outcome) {
+    case 'completed': return ', gateway restarted';
+    case 'timed-out': return ', gateway restart timed out';
+    case 'unconfirmed': return ', gateway restarted but not confirmed back up';
+    case 'failed': return ', gateway restart failed';
+    case 'skipped': return ', gateway restart skipped';
+    case 'pending': return ', gateway needs one more restart';
+    default: return '';
+  }
+}
+
+/**
+ * #977 review: a restart that did not come back proven, or one still owed,
+ * is never a green tick. Each gets one safe next action:
+ *   failed       nothing restarted, so a manual restart is safe → restart
+ *   pending      the run's one restart finished before later changes → restart
+ *   timed-out /  a restart IS in flight or may be; restarting again is the
+ *   unconfirmed  exact #977 mid-drain hazard → check with doctor instead
+ */
+function restartAttention(
+  outcome: UpdateSummaryInput['protection']['gatewayRestart'],
+  restartCommand: string | undefined,
+  changesUnloaded = false,
+): Pick<UpdateSummaryRow, 'why' | 'command' | 'commandLabel'> | null {
+  // Unproven readiness outranks a restart owed: say both, advise doctor.
+  const later = changesUnloaded ? ' Later changes aren\'t loaded yet either.' : '';
+  const restart = restartCommand
+    ? { command: restartCommand, commandLabel: 'Fix' }
+    : { command: 'shieldcortex doctor', commandLabel: 'Check' };
+  switch (outcome) {
+    case 'failed':
+      return { why: 'OpenClaw may still be running the previous plugin.', ...restart };
+    case 'pending':
+      return { why: 'This run\'s plugin changes load only after one more gateway restart.', ...restart };
+    case 'timed-out':
+      return { why: 'The gateway may still be starting; don\'t restart it again yet.' + later, command: 'shieldcortex doctor', commandLabel: 'Check' };
+    case 'unconfirmed':
+      return { why: 'The gateway wasn\'t seen coming back, so protection isn\'t confirmed.' + later, command: 'shieldcortex doctor', commandLabel: 'Check' };
+    default:
+      return null;
+  }
 }
 
 /**
@@ -186,7 +245,8 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
   const pluginAbsent = p.status === 'failed';
   const pluginStepFailed = input.plugin.status === 'warn' || input.plugin.status === 'failed';
   if (pluginInstalled) {
-    const reloaded = p.gatewayReloaded ? ', gateway reloaded' : '';
+    const reloaded = gatewayRestartClause(p.gatewayRestart);
+    const restartIssue = restartAttention(p.gatewayRestart, p.restartCommand, p.changesUnloaded === true);
     if (pluginAbsent) {
       rows.push({
         label: 'OpenClaw',
@@ -219,6 +279,15 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
         why: 'OpenClaw doesn\'t have this update\'s fixes yet.',
         command: pluginFixCommand,
         commandLabel: 'Fix',
+      });
+    } else if (restartIssue) {
+      // Yellow: the plugin is in place, but the restart that loads it did not
+      // come back proven (or is still owed). Never a green row (#977 review).
+      rows.push({
+        label: 'OpenClaw',
+        mark: 'check',
+        text: 'plugin ' + (pv ? pv + ' ' : '') + (p.status === 'ok' ? 'loaded' : 'installed') + reloaded,
+        ...restartIssue,
       });
     } else if (p.status === 'ok') {
       rows.push({ label: 'OpenClaw', mark: 'ok', text: 'plugin ' + (pv ? pv + ' ' : '') + 'loaded' + reloaded });
