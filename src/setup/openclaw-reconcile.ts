@@ -91,6 +91,8 @@ export interface GatewayReloadResult {
   requestedAtMs?: number;
   /** #977 review: that exec's causal ticket — ordering is decided from it alone. */
   requestedSeq?: number;
+  /** The service-manager command timed out: the restart may still be in progress. */
+  timedOut?: boolean;
 }
 
 /** #156 — one extra detect→remediate pass when the first did not converge. */
@@ -290,6 +292,7 @@ async function defaultReloadGateway(): Promise<GatewayReloadResult> {
     ...(r.reused ? { reused: true } : {}),
     ...(r.requestedAtMs !== undefined ? { requestedAtMs: r.requestedAtMs } : {}),
     ...(r.requestedSeq !== undefined ? { requestedSeq: r.requestedSeq } : {}),
+    ...(r.timedOut ? { timedOut: true } : {}),
   };
 }
 
@@ -385,11 +388,19 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
       // current and 29/32 green. The remediation had worked; the report was
       // reading the pre-restart world.
       let detail = r.detail ?? (r.restarted ? 'reloaded' : 'not reloaded');
+      // A timed-out service-manager command may have restarted the gateway:
+      // the same "may still be starting, don't restart again" outcome as a
+      // readiness timeout, never 'failed' (which offers a restart command).
       let restart: GatewayRestartOutcome = r.restarted
         ? 'completed'
-        : r.attempted === false || /skipped|suppressed/i.test(r.detail ?? '')
-          ? 'skipped'
-          : 'failed';
+        : r.timedOut
+          ? 'timed-out'
+          : r.attempted === false || /skipped|suppressed/i.test(r.detail ?? '')
+            ? 'skipped'
+            : 'failed';
+      if (r.timedOut) {
+        detail = `restart command timed out, so the gateway may still be restarting — check with shieldcortex doctor before restarting it again (${detail})`;
+      }
       if (r.restarted) {
         // #977: a reused restart was requested earlier in this process; the
         // gateway it started booted after THAT moment, not after this pass.

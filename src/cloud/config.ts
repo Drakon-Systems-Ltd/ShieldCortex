@@ -113,6 +113,25 @@ let cachedRawConfigIntegrity: ConfigIntegrity | null = null;
 // (hooks/openclaw/cortex-memory/runtime.mjs configIdentityKey).
 let cachedRawConfigLinked: boolean | null = null;
 
+// The posture this process last established from config.json: the bytes of
+// the last mutating read that parsed an object (any verdict) or of the last
+// write. Not a cache, and a write never starts from it. A later read that finds
+// the file blank, unreadable or malformed is `held` at it instead of reading
+// `{}` (Guard off, balanced): a newly observed error or blank state never
+// relaxes a posture already in force. Seeing the file absent clears it, so a
+// missing file and a fresh install read exactly as before.
+let establishedPosture: { file: string; content: string; integrity: ConfigIntegrity } | null = null;
+
+/** A no-data read of `configFile`, held at the posture this process established from it. */
+function holdEstablished(configFile: string, options: { readOnly?: boolean }, state: RawConfigState): RawConfigState {
+  if (options.readOnly || establishedPosture?.file !== configFile) return state;
+  const data = JSON.parse(establishedPosture.content) as Record<string, unknown>;
+  delete data._sig;
+  configTampered = establishedPosture.integrity === 'tampered';
+  // parseFailed: nothing may write over a file this process cannot account for.
+  return { ...state, parseFailed: true, held: { data, integrity: establishedPosture.integrity } };
+}
+
 /** True when a read-only read of these bytes disagrees with the mutating reader's cache. */
 function readOnlyDisagreesWithCache(
   configFile: string,
@@ -329,7 +348,9 @@ function readIntegrityKeyNoMint(): string | null {
  * read as absent (and were then overwritten), and a cache hit forgot that the
  * file it had cached was tampered.
  *
- *  - `absent`     no file, or an empty one — safe to create.
+ *  - `absent`     no file, or an empty one — safe to create (an empty one this
+ *                 process had already read a posture from is held, not created
+ *                 over: see establishedPosture).
  *  - `valid`      a signature verifies (or an unsigned legacy file was adopted).
  *  - `self-heal`  the embedded `_sig` is stale but the legacy whole-file sig
  *                 still authenticates the exact bytes; re-signed on read.
@@ -520,11 +541,21 @@ interface RawConfigState {
   data: Record<string, unknown>;
   /**
    * True when the file EXISTS but could not be parsed or read (corrupt /
-   * mid-write torn read / non-object JSON / unreadable). Callers that persist
-   * (getDeviceId/getDeviceName) MUST NOT write when this is set — overwriting
-   * would wipe cloudApiKey and every other setting that the file still holds.
+   * mid-write torn read / non-object JSON / unreadable), when the read is
+   * {@link held}, or when config.json could not be lstat'ed (whether it is a
+   * link is unknown, and nothing is written through a link, #878). Callers
+   * that persist (getDeviceId/getDeviceName) MUST NOT write when this is set —
+   * overwriting would wipe cloudApiKey and every other setting that the file
+   * still holds.
    */
   parseFailed: boolean;
+  /**
+   * Mutating reads only: the file is blank, unreadable or malformed now, but
+   * this process established a posture from it earlier (see
+   * establishedPosture). `data` is still `{}`; the effective view enforces
+   * these bytes and verdict instead.
+   */
+  held?: { data: Record<string, unknown>; integrity: ConfigIntegrity };
   /** The integrity verdict these bytes were classified with (#647). */
   integrity: ConfigIntegrity;
   /**
@@ -576,18 +607,29 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
   // as "no config" — Guard off on the read-only path, and on the mutating path
   // an `absent` verdict that let the next setter rename a regular file over
   // the link (#878). Only ENOENT on the directory entry itself is absent; any
-  // other lstat error (EACCES, ENOTDIR, ELOOP, ...) is unreadable. A present
-  // symlink whose target cannot be read fails later in readFileSync and is
-  // also unreadable.
-  let linked: boolean;
+  // other lstat error (EACCES, ENOTDIR, ELOOP, EIO, ...) is unreadable to a
+  // read-only read. A present symlink whose target cannot be read fails later
+  // in readFileSync and is also unreadable.
+  //
+  // The mutating read does not stop at an lstat error: it says nothing about
+  // the bytes, and returning `{}` turned an EIO on a signed enforcing config
+  // into Guard off / balanced. It reads on with the link state unknown
+  // (`linked === null`): the no-write path, as for a link, and parseFailed so
+  // nothing writes after it. A file that cannot be read either fails below.
+  let linked: boolean | null;
   try {
     linked = lstatSync(configFile).isSymbolicLink();
   } catch (err) {
-    configTampered = false;
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      configTampered = false;
+      if (!options.readOnly) establishedPosture = null;
       return { data: {}, parseFailed: false, integrity: 'absent' };
     }
-    return { data: {}, parseFailed: true, readFailed: true, integrity: 'unreadable' };
+    if (options.readOnly) {
+      configTampered = false;
+      return { data: {}, parseFailed: true, readFailed: true, integrity: 'unreadable' };
+    }
+    linked = null;
   }
 
   // #878: the read layer never writes through a symlinked config.json. The
@@ -596,7 +638,8 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
   // it is refused for a link, so the read takes the no-write path instead.
   // This is the one place that rule lives: getters, getter-then-setter pairs,
   // the lazy device writers and mutateRawConfig's own read all inherit it.
-  const noWrite = options.readOnly === true || linked;
+  const noWrite = options.readOnly === true || linked !== false;
+  const unknownLink = linked === null;
 
   // A read-only caller does not take the cache: a hit would hide a permission
   // lost since the last read.
@@ -612,6 +655,11 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
       cachedRawConfigIntegrity !== null
     ) {
       configTampered = cachedRawConfigIntegrity === 'tampered';
+      // The read that filled the cache established this posture; re-establish
+      // it if an absent read (or another config dir) has cleared it since.
+      if (establishedPosture?.file !== configFile) {
+        establishedPosture = { file: configFile, content: JSON.stringify(cachedRawConfig), integrity: cachedRawConfigIntegrity };
+      }
       // Return a shallow copy so callers can mutate freely without poisoning
       // the cache (accessors push to arrays / set fields before writing back).
       return { data: { ...cachedRawConfig }, parseFailed: false, integrity: cachedRawConfigIntegrity };
@@ -629,17 +677,21 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
 
     const content = readFileSync(configFile, 'utf-8');
     // An empty or whitespace-only file is treated as "no config yet", not a
-    // parse failure. On the read-only path that still has to disagree with a
-    // warm mutating cache for the same file (B3-R3): blanking the file in
-    // place with its mtime restored would otherwise report Guard off while
-    // getActionGuardCoreConfig() still serves the cached strict-ON verdict.
+    // parse failure — unless this process established a posture from the file
+    // earlier: then the mutating read is held at it, and the read-only read
+    // disagrees with the getter (B3-R3: blanking the file in place, mtime
+    // restored or not, must not report Guard off while the getter enforces
+    // more). The cache check stays for a filesystem that does not track ctime.
     if (content.trim().length === 0) {
       configTampered = false;
       const data: Record<string, unknown> = {};
-      if (options.readOnly && readOnlyDisagreesWithCache(configFile, identityForCache, data, 'absent')) {
+      if (
+        options.readOnly &&
+        (readOnlyDisagreesWithCache(configFile, identityForCache, data, 'absent') || establishedPosture?.file === configFile)
+      ) {
         return { data, parseFailed: false, integrity: 'absent', unverified: true };
       }
-      return { data, parseFailed: false, integrity: 'absent' };
+      return holdEstablished(configFile, options, { data, parseFailed: unknownLink, integrity: 'absent' });
     }
 
     let parsed: unknown;
@@ -650,14 +702,14 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
       // signal parseFailed so persisters skip the write and we never clobber
       // a momentarily-unreadable config.
       configTampered = false;
-      return { data: {}, parseFailed: true, integrity: 'malformed' };
+      return holdEstablished(configFile, options, { data: {}, parseFailed: true, integrity: 'malformed' });
     }
     // `null`, an array or a scalar parses but is not a config. It used to
     // fall into the catch below and read as ABSENT — writable, and so
     // overwritten by the next setter. It is malformed, like a torn write.
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       configTampered = false;
-      return { data: {}, parseFailed: true, integrity: 'malformed' };
+      return holdEstablished(configFile, options, { data: {}, parseFailed: true, integrity: 'malformed' });
     }
     const data = parsed as Record<string, unknown>;
 
@@ -666,12 +718,15 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
     const verdict = checkConfigIntegrity(data, content, { readOnly: noWrite });
     if (verdict === 'unverified') {
       // Only a no-write read gets here: an unsigned file whose adoption has not
-      // run. On the runtime path that is a symlinked config.json, and
-      // readRawConfigState holds it at the strict posture (#878 design: an
-      // unknown verdict is never Guard off).
-      if (!options.readOnly) warnUnsignedSymlinkOnce(configFile);
+      // run. On the runtime path that is a symlinked config.json (or one whose
+      // link state is unknown), and readRawConfigState holds it at the strict
+      // posture (#878 design: an unknown verdict is never Guard off).
+      if (!options.readOnly) {
+        warnUnsignedSymlinkOnce(configFile, linked);
+        establishedPosture = { file: configFile, content, integrity: 'unverified' };
+      }
       delete data._sig;
-      return { data, parseFailed: false, integrity: 'unverified', unverified: true };
+      return { data, parseFailed: unknownLink, integrity: 'unverified', unverified: true };
     }
     configTampered = verdict === 'tampered';
     if (verdict === 'tampered') {
@@ -705,16 +760,21 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
       // — re-hitting this same 'self-heal' verdict before the write lands and
       // recursing. The direct write is what keeps it one-shot. It is never the
       // tampered path (#647): 'self-heal' requires a signature over these bytes.
+      // A heal that lands re-establishes the posture from what it wrote.
+      establishedPosture = { file: configFile, content, integrity: 'self-heal' };
       try {
         writeRawConfig({ ...data });
       } catch { /* best-effort: a failed heal just re-checks on the next read */ }
       return { data, parseFailed: false, integrity: 'self-heal' };
     }
 
+    if (!options.readOnly) establishedPosture = { file: configFile, content, integrity: verdict };
+
     // Populate the identity cache from the parsed (sig-stripped) object, keyed
     // on the identity captured BEFORE the read (matches the bytes actually
     // parsed), together with the verdict so a cache hit answers the same way.
-    if (identityForCache !== null && !options.readOnly) {
+    // Not with the link state unknown: the next read lstats again.
+    if (identityForCache !== null && !options.readOnly && !unknownLink) {
       cachedRawConfig = { ...data };
       cachedRawConfigFile = configFile;
       cachedRawConfigIdentity = identityForCache;
@@ -730,23 +790,31 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
       return { data, parseFailed: false, integrity: verdict, unverified: true };
     }
 
-    return { data, parseFailed: false, integrity: verdict };
+    return { data, parseFailed: unknownLink, integrity: verdict };
   } catch {
     // A file that EXISTS but cannot be read (EACCES, EISDIR, EIO, a dangling
     // symlink) is not an absent one: treating it as absent let the next setter
     // rename a fresh near-empty config over it (#647, #878). Read-only, like a
     // parse failure.
     configTampered = false;
-    return { data: {}, parseFailed: true, readFailed: true, integrity: 'unreadable' };
+    return holdEstablished(configFile, options, { data: {}, parseFailed: true, readFailed: true, integrity: 'unreadable' });
   }
 }
 
 let unsignedSymlinkWarned = false;
 
-/** One line per process: why a symlinked, unsigned config.json reads strict (#878). */
-function warnUnsignedSymlinkOnce(configFile: string): void {
+/** One line per process: why a symlinked (or unlstat-able), unsigned config.json reads strict (#878). */
+function warnUnsignedSymlinkOnce(configFile: string, linked: boolean | null): void {
   if (unsignedSymlinkWarned) return;
   unsignedSymlinkWarned = true;
+  if (linked === null) {
+    console.error(
+      `[ShieldCortex] ${configFile} has no signature and could not be lstat'ed, so whether it is a symbolic ` +
+      'link is unknown. It is not adopted (nothing is written through a link), so its verdict is unknown and ' +
+      'the strict fail-closed posture applies.',
+    );
+    return;
+  }
   console.error(
     `[ShieldCortex] ${configFile} is a symbolic link to a file with no signature. It is not adopted ` +
     '(nothing is written beside a link), so its verdict is unknown and the strict fail-closed posture ' +
@@ -785,8 +853,12 @@ function readRawConfigState(options: { readOnly?: boolean } = {}): RawConfigStat
   // and unknown is enforced as the same strict posture — never Guard off.
   // Read-only callers get the file's own data plus `unverified` and report
   // the posture as unknown instead.
-  const strict = state.integrity === 'tampered' || (!options.readOnly && state.integrity === 'unverified');
-  const base = strict ? applyStrictFailClosedPosture(state.data) : state.data;
+  // A `held` read (the file is blank, unreadable or malformed now, after this
+  // process established a posture from it) enforces that posture, by the same
+  // rules, instead of the `{}` the file now yields.
+  const view = state.held ?? state;
+  const strict = view.integrity === 'tampered' || (!options.readOnly && view.integrity === 'unverified');
+  const base = strict ? applyStrictFailClosedPosture(view.data) : view.data;
   const lock = options.readOnly ? readPolicyLock({ audit: false }) : getPolicyLockState();
   const locked = applyPolicyLock(base, lock);
   return locked === state.data ? state : { ...state, data: locked };
@@ -1605,6 +1677,9 @@ function writeRawConfig(raw: Record<string, unknown>, beforeReplace?: () => void
   cachedConfig = null;
   cachedConfigFile = null;
   invalidateRawConfigCache();
+  // A deliberate, signed write is the posture now in force (an authenticated
+  // switch to off included).
+  establishedPosture = { file: configFile, content: out, integrity: 'valid' };
   // Clear tamper flag on legitimate write
   configTampered = false;
   return Buffer.from(out, 'utf-8');

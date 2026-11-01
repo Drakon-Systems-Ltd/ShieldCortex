@@ -344,6 +344,9 @@ export async function uninstallAll(options?: {
       if (gateway) {
         if (gateway.restarted) {
           console.log(`\nOpenClaw gateway restarted via ${gateway.method}.`);
+        } else if (gateway.timedOut) {
+          console.warn(`\nOpenClaw gateway restart via ${gateway.method} timed out; the gateway may still be restarting.`);
+          console.warn('Check it with `shieldcortex doctor` before restarting it again.');
         } else if (gateway.attempted) {
           console.warn(`\nOpenClaw gateway restart via ${gateway.method} failed: ${gateway.detail ?? 'unknown'}`);
           console.warn('Restart it manually for the cleanup to take effect.');
