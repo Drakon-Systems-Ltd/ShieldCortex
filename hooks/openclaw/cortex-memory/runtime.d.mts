@@ -1,4 +1,6 @@
 export const SELF_HEAL_SKIP_ENV: 'SHIELDCORTEX_SKIP_SELF_HEAL';
+export const configSignatureVerdict: typeof import('../../../scripts/lib/config-authenticity.mjs').configSignatureVerdict;
+export const verdictAuthenticates: typeof import('../../../scripts/lib/config-authenticity.mjs').verdictAuthenticates;
 export function isSelfHealEnabled(config: { selfHeal?: boolean } | null | undefined, env?: NodeJS.ProcessEnv): boolean;
 export function createOpenClawRuntime(opts?: { logPrefix?: string; configPath?: string }): {
   callCortex: (tool: string, args?: Record<string, unknown>, options?: { retries?: number; timeout?: number }) => Promise<string | null>;

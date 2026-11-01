@@ -537,9 +537,18 @@ describe('#509 r8 N4 — the OpenClaw config source is described as what it is',
   it('nothing calls the shield config the plugin reads a "signed file": the plugin never checks its `_sig`', () => {
     const repo = resolve(here, '../../..');
     const runtime = readFileSync(join(repo, 'hooks/openclaw/cortex-memory/runtime.mjs'), 'utf8');
-    // The loader parses config.json as plain JSON — no signature check.
-    expect(runtime).toMatch(/JSON\.parse\(await fs\.readFile\(configPath/);
-    expect(runtime).not.toMatch(/_sig/);
+    // The loader parses config.json as plain JSON — no signature check on a
+    // regular file.
+    expect(runtime).toMatch(/rawShieldConfigText = await fs\.readFile\(configPath[^\n]*\n\s*rawShieldConfig = JSON\.parse\(rawShieldConfigText\)/);
+    // #878 r5: the HMAC is recomputed ONLY to decide whether a SYMLINKED file is
+    // held strict (presence of `_sig` is not a signature). The verifier lives in
+    // the pinned region and is called from exactly one place, behind the lstat
+    // link test — so the regular-file path still verifies nothing.
+    const outsideRegion = runtime.replace(/\/\/ BEGIN config-signature-verdict[\s\S]*?\/\/ END config-signature-verdict/, '');
+    expect(outsideRegion).not.toMatch(/createHmac\(|timingSafeEqual\(/);
+    expect(outsideRegion.match(/configSignatureVerdict\(/g)).toHaveLength(1);
+    const linkFn = outsideRegion.slice(outsideRegion.indexOf('async function linkedUnauthenticated('));
+    expect(linkFn.slice(0, linkFn.indexOf('configSignatureVerdict('))).toMatch(/isSymbolicLink\(\)\) return false/);
     for (const f of ['plugins/openclaw/index.ts', 'docs/design/2026-09-28-509-enforce-when-ready.md']) {
       expect(readFileSync(join(repo, f), 'utf8')).not.toMatch(/the signed file the CLI writes/);
     }
