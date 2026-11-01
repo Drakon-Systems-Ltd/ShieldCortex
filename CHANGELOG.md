@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **#878 Config integrity follow-ups.** A symlinked `config.json` (live or dangling) is no longer adopted, self-healed or replaced (writes refuse it, and an unsigned one is held at the strict posture), the config cache notices a same-size edit that kept the mtime, `doctor` writes nothing and says `Guard unknown` rather than `off` when the posture depends on a signature not yet adopted, and the cloud Iron Dome cache write skips a bad config instead of throwing.
+
 ## [5.17.1] - 2026-10-31
 
 Patch on 5.17.0. `shieldcortex update` now refreshes the Hermes plugin on launcher-based Hermes installs that still have an old `hermes-agent/.venv` on disk (#971, PR #972). When Hermes still cannot be asked, `update` may now refresh a single conventional plugin copy it used to leave alone (details below). No change to Action Guard, the agent config watch or configuration, no schema change. Action Guard stays off by default. Node floor unchanged.
