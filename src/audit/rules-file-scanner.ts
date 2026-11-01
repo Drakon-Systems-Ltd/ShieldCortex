@@ -16,7 +16,7 @@ import { homedir } from 'os';
 import type { AuditFinding, ScannerResult, AuditSeverity } from './types.js';
 import { scanSkill, discoverSkillFiles } from '../defence/skill-scanner/index.js';
 
-const LEARN_MORE = 'https://shieldcortex.ai/docs/threats/rules-file-backdoor';
+const LEARN_MORE = 'https://shieldcortex.ai/docs#audit';
 
 // ── ShieldCortex Own-Hook Whitelist ──
 
