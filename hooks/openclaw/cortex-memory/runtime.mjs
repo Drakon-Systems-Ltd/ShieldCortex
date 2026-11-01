@@ -110,17 +110,23 @@ export function createOpenClawRuntime({
   logPrefix = "[shieldcortex]",
   configPath = path.join(process.env.SHIELDCORTEX_CONFIG_DIR?.trim() || path.join(homedir(), ".shieldcortex"), "config.json"),
 } = {}) {
-  // The current bytes' config object, or null when the last read under
-  // `shieldConfigKey` yielded none (absent, blank, unreadable, malformed).
-  let rawShieldConfig = null;
-  let rawShieldConfigText = "";
-  let shieldConfigKey = null;
+  // The last read of config.json that describes the entry it was taken from:
+  // `{ key, raw, text }` — the entry's identity key (configIdentityKey), the
+  // object its bytes parsed to (null: no config — absent, blank, malformed,
+  // non-object, unreadable) and those bytes. Replaced whole, only after the
+  // entry was seen unchanged around the read (loadShieldConfigExclusive).
+  let lastRead = null;
+  // The effective object for `lastRead.raw` (the strict view when the entry is
+  // an unsigned link) and the link verdict it was built under; null until built.
   let shieldConfig = null;
   let shieldConfigLinkedUnsigned = false;
   // The posture this runtime last established from config.json: the effective
   // object (strict view included) of the last read whose bytes parsed to an
   // object. Not a cache — see holdEstablishedPosture.
   let establishedShieldConfig = null;
+  // The answer while nothing is established: one object, so its identity is
+  // stable across calls and the plugin does not re-merge on every call.
+  let defaultShieldConfig = null;
   let resolvedServerCmd = null;
   let lastCallErrorType = null;
 
@@ -151,12 +157,12 @@ export function createOpenClawRuntime({
     }
   }
 
-  async function linkedUnauthenticated(parsed, raw) {
-    try {
-      if (!(await fs.lstat(configPath)).isSymbolicLink()) return false;
-    } catch {
-      return false;
-    }
+  // `entry`: the lstat of config.json taken by this load (configEntrySnapshot),
+  // so the verdict is about the same entry the bytes were read from. No lstat
+  // of its own: a second lstat that failed used to answer "not a link" and
+  // hand back the target's own values (#983 review).
+  async function linkedUnauthenticated(entry, parsed, raw) {
+    if (!entry.isSymbolicLink()) return false;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
     const dir = path.dirname(configPath);
     const key = await readSidecar(path.join(dir, ".integrity-key"));
@@ -182,14 +188,8 @@ export function createOpenClawRuntime({
   // a re-read that finds no config holds the established posture instead of
   // reading `{}` (holdEstablishedPosture).
   // Keep in step with src/cloud/config.ts (fileIdentity, cachedRawConfigLinked).
-  async function configIdentityKey() {
+  async function configIdentityKey(entry) {
     const id = (st) => `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
-    let entry;
-    try {
-      entry = await fs.lstat(configPath, { bigint: true });
-    } catch (err) {
-      return `absent:${err?.code ?? "?"}`;
-    }
     if (!entry.isSymbolicLink()) return `entry:${id(entry)}`;
     let text = "";
     try {
@@ -204,76 +204,147 @@ export function createOpenClawRuntime({
     return `link:${id(entry)}|${JSON.stringify(text)}|${target}`;
   }
 
-  // The key configIdentityKey gives when the config.json ENTRY does not exist.
+  // The key of a config.json ENTRY that does not exist.
   const ABSENT_ENTRY_KEY = "absent:ENOENT";
 
   /**
-   * The answer for a read of config.json that yielded no config — blank or
-   * whitespace, malformed, non-object JSON, or unreadable (EIO, EACCES,
-   * EISDIR, a dangling link): the posture this runtime established, HELD, or
-   * `{}` when it has established none. Mirrors src/cloud/config.ts
-   * holdEstablished (#981): a newly observed error or blank state never
-   * relaxes a posture already in force. The held object is the established
-   * one itself, so its identity does not change and the plugin neither
-   * re-merges nor rebuilds the interceptor (plugins/openclaw/index.ts
-   * loadConfig / initInterceptor). Before this, #878 r4's identity key
-   * (ctime included) missed on an in-place blank that restored the mtime,
-   * and the re-read answered `{}`: Action Guard off at the gate, where
-   * v5.17.1's mtime-only cache had answered with the enforcing object.
-   *
-   * Only an absent ENTRY clears it (loadShieldConfig): the documented
-   * move-aside recovery, and a fresh install reads exactly as before.
+   * One lstat of the config.json ENTRY (#983 review):
+   * - `{ state: "absent", key }`: ENOENT — there is no config.json;
+   * - `{ state: "unknown" }`: any other lstat error (EIO, EACCES, ...) —
+   *   whether the entry exists, and whether it is a link, is unknown. No key:
+   *   nothing is cached under a fault, so a change that lands while it lasts
+   *   is seen once lstat works again;
+   * - `{ state: "present", entry, key }`: its lstat and identity key.
    */
-  function holdEstablishedPosture() {
-    return establishedShieldConfig ?? {};
+  async function configEntrySnapshot() {
+    let entry;
+    try {
+      entry = await fs.lstat(configPath, { bigint: true });
+    } catch (err) {
+      return err?.code === "ENOENT" ? { state: "absent", key: ABSENT_ENTRY_KEY } : { state: "unknown" };
+    }
+    return { state: "present", entry, key: await configIdentityKey(entry) };
   }
 
-  // Identity-gated cache: re-read whenever the config entry or its target
-  // changes. Lets dashboard / CLI toggles take effect on the next event
-  // without an OpenClaw gateway restart. The key is taken BEFORE the read, so
-  // a change that lands between the two re-reads on the next call. The link
-  // verdict runs on every call against the CURRENT bytes (its own lstat).
-  async function loadShieldConfig() {
-    const key = await configIdentityKey();
+  // Plain JSON. The CLI HMAC-signs this file, but a REGULAR file's signature
+  // is not verified on this path: callers must not describe it as signed
+  // (#509 r8). Only a symlinked file's is, and only to decide whether it is
+  // held strict (#878 r5, linkedUnauthenticated); the text is kept because the
+  // legacy signature covers the exact bytes. `null`, an array or a scalar
+  // parses but is not a config: malformed, as src reads it.
+  async function readConfigBytes() {
+    let rawShieldConfigText = "";
+    let rawShieldConfig = null;
+    try {
+      rawShieldConfigText = await fs.readFile(configPath, "utf-8");
+      rawShieldConfig = JSON.parse(rawShieldConfigText);
+    } catch {
+      rawShieldConfig = null;
+    }
+    if (!rawShieldConfig || typeof rawShieldConfig !== "object" || Array.isArray(rawShieldConfig)) {
+      return { raw: null, text: "" };
+    }
+    return { raw: rawShieldConfig, text: rawShieldConfigText };
+  }
 
-    if (key !== shieldConfigKey) {
-      shieldConfigKey = key;
-      // lstat ENOENT on the entry itself: config.json is gone. Any other lstat
-      // error (EIO, EACCES, ...) says nothing about the bytes: read on, and a
-      // read that fails too is held below.
-      if (key === ABSENT_ENTRY_KEY) establishedShieldConfig = null;
-      // Plain JSON. The CLI HMAC-signs this file, but a REGULAR file's
-      // signature is not verified on this path: callers must not describe it
-      // as signed (#509 r8). Only a symlinked file's is, and only to decide
-      // whether it is held strict (#878 r5, linkedUnauthenticated); the text
-      // is kept because the legacy signature covers the exact bytes.
-      try {
-        rawShieldConfigText = await fs.readFile(configPath, "utf-8");
-        rawShieldConfig = JSON.parse(rawShieldConfigText);
-      } catch {
-        rawShieldConfig = null;
+  /**
+   * The answer for a load of config.json that yields no config — blank or
+   * whitespace, malformed, non-object JSON, unreadable (EIO, EACCES, EISDIR, a
+   * dangling link), or an entry that cannot be lstat'd (#983 review): the
+   * posture this runtime established, HELD, or `{}` when it has established
+   * none. Mirrors src/cloud/config.ts holdEstablished (#981): a newly observed
+   * error or blank state never relaxes a posture already in force. The held
+   * object is the established one itself, so its identity does not change and
+   * the plugin neither re-merges nor rebuilds the interceptor
+   * (plugins/openclaw/index.ts loadConfig / initInterceptor). Before this,
+   * #878 r4's identity key (ctime included) missed on an in-place blank that
+   * restored the mtime, and the re-read answered `{}`: Action Guard off at the
+   * gate, where v5.17.1's mtime-only cache had answered with the enforcing
+   * object.
+   *
+   * Only an absent ENTRY (lstat ENOENT) clears it: the documented move-aside
+   * recovery, and a fresh install reads exactly as before.
+   */
+  function holdEstablishedPosture() {
+    if (establishedShieldConfig) return establishedShieldConfig;
+    if (!defaultShieldConfig) defaultShieldConfig = {};
+    return defaultShieldConfig;
+  }
+
+  // How many times a load re-reads when config.json changes under its read
+  // before it holds instead (the next load tries again).
+  const READ_ATTEMPTS = 3;
+
+  /**
+   * One load, with no other load in flight (loadShieldConfig). Identity-gated
+   * cache: re-read whenever the config entry or its target changes, so
+   * dashboard / CLI toggles take effect on the next event without an OpenClaw
+   * gateway restart.
+   *
+   * #983 review: the bytes and the verdict over them come from one entry. The
+   * entry is lstat'd before the read and again after it; the bytes are cached
+   * and judged only when both lstats succeed with the same key, and the link
+   * verdict uses that lstat. An lstat that fails with anything but ENOENT
+   * takes nothing from the bytes: it holds (holdEstablishedPosture). Before,
+   * an lstat error keyed `absent:EIO`, re-read the bytes, and a second lstat
+   * that failed too answered "not a link" — the unsigned link's own Guard-off
+   * values became the established posture, and a later blank held them.
+   */
+  async function loadShieldConfigExclusive() {
+    for (let attempt = 1; ; attempt += 1) {
+      const before = await configEntrySnapshot();
+      if (before.state === "unknown") return holdEstablishedPosture();
+      if (before.state === "absent") {
+        // config.json is gone: the established posture goes with it.
+        lastRead = { key: before.key, raw: null, text: "" };
+        shieldConfig = null;
+        establishedShieldConfig = null;
+        return holdEstablishedPosture();
       }
-      // `null`, an array or a scalar parses but is not a config: malformed,
-      // as src reads it.
-      if (!rawShieldConfig || typeof rawShieldConfig !== "object" || Array.isArray(rawShieldConfig)) {
-        rawShieldConfig = null;
-        rawShieldConfigText = "";
+      if (lastRead?.key !== before.key) {
+        const { raw, text } = await readConfigBytes();
+        const after = await configEntrySnapshot();
+        if (after.state === "unknown") return holdEstablishedPosture();
+        if (after.key !== before.key) {
+          // Changed under the read: these bytes may not be that entry's.
+          if (attempt < READ_ATTEMPTS) continue;
+          return holdEstablishedPosture();
+        }
+        lastRead = { key: before.key, raw, text };
+        shieldConfig = null;
       }
       // No bytes to judge, so no link verdict either: the held posture (or
       // `{}`) stands until the key moves again.
-      shieldConfig = rawShieldConfig === null ? holdEstablishedPosture() : null;
-    }
-    if (rawShieldConfig === null) return shieldConfig;
+      if (lastRead.raw === null) return holdEstablishedPosture();
 
-    // The returned object's identity changes only when the bytes or the link
-    // verdict do: the plugin re-merges on identity change.
-    const linked = await linkedUnauthenticated(rawShieldConfig, rawShieldConfigText);
-    if (!shieldConfig || linked !== shieldConfigLinkedUnsigned) {
-      shieldConfigLinkedUnsigned = linked;
-      shieldConfig = linked ? strictFailClosedPosture(rawShieldConfig) : rawShieldConfig;
+      // The returned object's identity changes only when the bytes or the link
+      // verdict do: the plugin re-merges on identity change. The verdict runs
+      // on every load: a sidecar (.integrity-key, .config-sig) can change
+      // without the entry's key moving.
+      const linked = await linkedUnauthenticated(before.entry, lastRead.raw, lastRead.text);
+      if (!shieldConfig || linked !== shieldConfigLinkedUnsigned) {
+        shieldConfigLinkedUnsigned = linked;
+        shieldConfig = linked ? strictFailClosedPosture(lastRead.raw) : lastRead.raw;
+      }
+      establishedShieldConfig = shieldConfig;
+      return shieldConfig;
     }
-    establishedShieldConfig = shieldConfig;
-    return shieldConfig;
+  }
+
+  // #983 review: loads run one at a time, each after the previous one has
+  // finished. Two tool calls read config.json together on a busy gateway;
+  // with interleaved loads one could judge the previous file's bytes against
+  // the current entry (an unsigned link's Guard-off values taken as a regular
+  // file's) and make them the established posture, or put back the posture a
+  // removal had just cleared. A load never calls back into this queue.
+  let loadQueue = Promise.resolve();
+  function loadShieldConfig() {
+    const load = loadQueue.then(loadShieldConfigExclusive);
+    loadQueue = load.then(
+      () => undefined,
+      () => undefined,
+    );
+    return load;
   }
 
   function isOpenClawAutoMemoryEnabled(config) {

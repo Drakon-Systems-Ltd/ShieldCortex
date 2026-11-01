@@ -16,8 +16,9 @@
  * Each warm case pins the mtime by assertion, so only the identity key (ctime,
  * size) can see the change. The read faults come from a pass-through over
  * `node:fs/promises` owned by this test that fails lstat/readFile of THIS
- * test's config.json with EIO when armed; nothing in shipped code knows it
- * exists. The fresh-install contract is pinned beside it: a missing, blank,
+ * test's config.json with EIO when armed (or parks one readFile of it until
+ * released, to overlap two reads); nothing in shipped code knows it exists.
+ * The fresh-install contract is pinned beside it: a missing, blank,
  * malformed or unreadable file on a cold runtime reads `{}` (Guard off by
  * default), removing the file clears the hold, and a valid new file — Guard
  * off included — takes effect.
@@ -28,8 +29,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 
-/** Which syscalls on this test's config.json fail with EIO right now, and how often they did. */
-const fault = { path: '', lstat: false, read: false, hits: 0 };
+/**
+ * Which syscalls on this test's config.json fail with EIO right now, and how
+ * often they did. `lstatPass`: how many armed lstats still go through before
+ * the rest fail (a fault that starts between two lstats of one read).
+ * `parkRead`: the next readFile of config.json waits for `release()`.
+ */
+const fault = {
+  path: '',
+  lstat: false,
+  lstatPass: 0,
+  read: false,
+  hits: 0,
+  parkRead: null as null | { parked: boolean; released: Promise<void> },
+};
 const eio = (syscall: string, p: string): NodeJS.ErrnoException =>
   Object.assign(new Error(`EIO: i/o error, ${syscall} '${p}'`), { code: 'EIO', errno: -5, syscall, path: p });
 const armed = (on: boolean, p: unknown): p is string => on && typeof p === 'string' && p === fault.path;
@@ -37,8 +50,12 @@ const faultyFsp = {
   ...realFsp,
   lstat: ((p: unknown, ...rest: unknown[]) => {
     if (armed(fault.lstat, p)) {
-      fault.hits += 1;
-      return Promise.reject(eio('lstat', p));
+      if (fault.lstatPass > 0) {
+        fault.lstatPass -= 1;
+      } else {
+        fault.hits += 1;
+        return Promise.reject(eio('lstat', p));
+      }
     }
     return (realFsp.lstat as (...a: unknown[]) => Promise<unknown>)(p, ...rest);
   }) as typeof realFsp.lstat,
@@ -46,6 +63,11 @@ const faultyFsp = {
     if (armed(fault.read, p)) {
       fault.hits += 1;
       return Promise.reject(eio('open', p));
+    }
+    const park = fault.parkRead;
+    if (park && !park.parked && p === fault.path) {
+      park.parked = true;
+      return park.released.then(() => (realFsp.readFile as (...a: unknown[]) => Promise<unknown>)(p, ...rest));
     }
     return (realFsp.readFile as (...a: unknown[]) => Promise<unknown>)(p, ...rest);
   }) as typeof realFsp.readFile,
@@ -76,13 +98,16 @@ beforeEach(() => {
   mkdirSync(configDir, { recursive: true });
   fault.path = configPath();
   fault.lstat = false;
+  fault.lstatPass = 0;
   fault.read = false;
   fault.hits = 0;
+  fault.parkRead = null;
 });
 
 afterEach(() => {
   fault.lstat = false;
   fault.read = false;
+  fault.parkRead = null;
   try {
     chmodSync(configPath(), 0o600);
   } catch { /* gone, a directory, or a link */ }
@@ -135,6 +160,50 @@ async function expectHeld(runtime: Runtime, first: Record<string, any>): Promise
   expect(held.actionGuard).toEqual({ enabled: true, enforce: true });
   expect(held.defenceMode).toBe('strict');
   expect(await runtime.loadShieldConfig()).toBe(first);
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const expectStrict = (cfg: Record<string, any>): void => {
+  expect(cfg.actionGuard).toMatchObject({ enabled: true, enforce: true });
+  expect(cfg.defenceMode).toBe('strict');
+};
+
+/** A warm runtime holding the strict posture over an unsigned link whose target says Guard off. */
+async function warmUnsignedLink(): Promise<{ runtime: Runtime; first: Record<string, any>; target: string }> {
+  const target = join(home, 'target.json');
+  writeFileSync(target, JSON.stringify(GUARD_OFF));
+  pin(target);
+  symlinkSync(target, configPath());
+  const runtime = await runtimeFor(configPath());
+  const first = await runtime.loadShieldConfig();
+  expectStrict(first);
+  return { runtime, first, target };
+}
+
+/** Atomically replace the config.json entry (a link here) with a regular blank file: no ENOENT in between. */
+function renameBlankOverEntry(): void {
+  const replacement = join(configDir, 'replacement.json');
+  writeFileSync(replacement, '   ');
+  renameSync(replacement, configPath());
+  expect(lstatSync(configPath()).isFile()).toBe(true);
+}
+
+/**
+ * Two loads in flight at once — two tool calls reading config.json together —
+ * with the first readFile of config.json parked until one load settles or
+ * 100 ms pass. `parked`: a read really was in flight while the other load ran.
+ */
+async function overlappingLoads(runtime: Runtime): Promise<{ a: Record<string, any>; b: Record<string, any>; parked: boolean }> {
+  let release!: () => void;
+  const park = { parked: false, released: new Promise<void>((resolve) => { release = resolve; }) };
+  fault.parkRead = park;
+  const pa = runtime.loadShieldConfig();
+  const pb = runtime.loadShieldConfig();
+  await Promise.race([pa, pb, sleep(100)]).finally(release);
+  const [a, b] = await Promise.all([pa, pb]);
+  fault.parkRead = null;
+  return { a, b, parked: park.parked };
 }
 
 describe('warm runtime: a no-data read after an enforcing read holds the established posture', () => {
@@ -237,13 +306,133 @@ describe('warm runtime: a no-data read after an enforcing read holds the establi
   });
 });
 
-describe('controls: the fresh-install and deliberate-change contract is unchanged', () => {
-  it('lstat EIO with the enforcing bytes still readable: enforcing (read from the bytes)', async () => {
-    const { runtime } = await warmEnforcing();
+describe('warm runtime: an lstat fault on the config.json entry holds the established posture (#983 review)', () => {
+  it('unsigned link held strict, lstat EIO with the Guard-off target still readable: the same strict object, and again after recovery', async () => {
+    const { runtime, first } = await warmUnsignedLink();
     fault.lstat = true;
-    const cfg = await runtime.loadShieldConfig();
-    expect(cfg).toEqual(ENFORCING);
+    expect(await runtime.loadShieldConfig()).toBe(first);
+    expect(await runtime.loadShieldConfig()).toBe(first);
     expect(fault.hits).toBeGreaterThan(0);
+    fault.lstat = false;
+    const recovered = await runtime.loadShieldConfig();
+    expect(recovered).toBe(first);
+    expectStrict(recovered);
+  });
+
+  it('the target turns blank while the lstat fault persists, then the fault clears: still the ORIGINAL strict object', async () => {
+    const { runtime, first, target } = await warmUnsignedLink();
+    fault.lstat = true;
+    expect(await runtime.loadShieldConfig()).toBe(first);
+    await tick();
+    writeFileSync(target, '   ');
+    pin(target);
+    expect(await runtime.loadShieldConfig()).toBe(first);
+    expect(fault.hits).toBeGreaterThan(0);
+    fault.lstat = false;
+    const recovered = await runtime.loadShieldConfig();
+    expect(recovered).toBe(first);
+    expectStrict(recovered);
+    expect(await runtime.loadShieldConfig()).toBe(first);
+  });
+
+  it('an lstat that fails after the identity lstat succeeded (entry unchanged): held strict, not the target taken as a regular file', async () => {
+    const { runtime, first } = await warmUnsignedLink();
+    fault.lstat = true;
+    fault.lstatPass = 1;
+    expect(await runtime.loadShieldConfig()).toBe(first);
+    expect(fault.lstatPass).toBe(0); // the first lstat of the call went through
+    fault.lstat = false;
+    expect(await runtime.loadShieldConfig()).toBe(first);
+  });
+
+  it('the target changes and the lstat after the read fails: held, then the new bytes are judged as the link they are', async () => {
+    const { runtime, first, target } = await warmUnsignedLink();
+    await tick();
+    writeFileSync(target, JSON.stringify({ ...GUARD_OFF, openclawAutoMemory: true }));
+    pin(target);
+    fault.lstat = true;
+    fault.lstatPass = 1;
+    expect(await runtime.loadShieldConfig()).toBe(first);
+    expect(fault.hits).toBeGreaterThan(0);
+    fault.lstat = false;
+    const next = await runtime.loadShieldConfig();
+    expect(next).not.toBe(first);
+    expectStrict(next);
+    expect(next.openclawAutoMemory).toBe(true);
+  });
+
+  it('a valid Guard-off file that lands while lstat fails waits for lstat: held until then, then in force', async () => {
+    const { runtime, first } = await warmEnforcing();
+    fault.lstat = true;
+    await replaceInPlace(JSON.stringify(GUARD_OFF));
+    await expectHeld(runtime, first);
+    expect(fault.hits).toBeGreaterThan(0);
+    fault.lstat = false;
+    expect(await runtime.loadShieldConfig()).toEqual(GUARD_OFF);
+  });
+});
+
+describe('overlapping loads (two tool calls at once) answer from one consistent read (#983 review)', () => {
+  it('a blank regular file renamed over the unsigned link, read by two loads at once: both and the next hold the strict object', async () => {
+    const { runtime, first } = await warmUnsignedLink();
+    renameBlankOverEntry();
+    const { a, b, parked } = await overlappingLoads(runtime);
+    expect(parked).toBe(true);
+    expect(a).toBe(first);
+    expect(b).toBe(first);
+    expect(await runtime.loadShieldConfig()).toBe(first);
+  });
+
+  it('control: the same rename read by one load at a time holds the strict object', async () => {
+    const { runtime, first } = await warmUnsignedLink();
+    renameBlankOverEntry();
+    expect(await runtime.loadShieldConfig()).toBe(first);
+    expect(await runtime.loadShieldConfig()).toBe(first);
+  });
+
+  it('config.json removed, read by two loads at once: both and the next read {} — the removal is not undone by the overlap', async () => {
+    const { runtime } = await warmEnforcing();
+    rmSync(configPath());
+    const { a, b } = await overlappingLoads(runtime);
+    expect(a).toEqual({});
+    expect(b).toEqual({});
+    expect(await runtime.loadShieldConfig()).toEqual({});
+    // Cleared, not merely masked: a blank file after the removal is a fresh blank.
+    writeConfig('   ');
+    expect(await runtime.loadShieldConfig()).toEqual({});
+  });
+
+  it('control: a valid Guard-off file read by two loads at once takes effect for both', async () => {
+    const { runtime, first } = await warmEnforcing();
+    await replaceInPlace(JSON.stringify(GUARD_OFF));
+    const { a, b, parked } = await overlappingLoads(runtime);
+    expect(parked).toBe(true);
+    expect(a).not.toBe(first);
+    expect(a).toEqual(GUARD_OFF);
+    expect(b).toBe(a);
+  });
+});
+
+describe('controls: the fresh-install and deliberate-change contract is unchanged', () => {
+  it('regular enforcing file, lstat EIO with the bytes still readable: enforcing — the same object, held while the entry is unknown', async () => {
+    const { runtime, first } = await warmEnforcing();
+    fault.lstat = true;
+    await expectHeld(runtime, first);
+    expect(fault.hits).toBeGreaterThan(0);
+    fault.lstat = false;
+    expect(await runtime.loadShieldConfig()).toBe(first);
+  });
+
+  it('cold start, lstat EIO (nothing established): {} — no posture is taken from an entry that cannot be lstat\'d; the file takes effect once it can', async () => {
+    writeConfig(ENFORCING);
+    fault.lstat = true;
+    const runtime = await runtimeFor(configPath());
+    const cfg = await runtime.loadShieldConfig();
+    expect(cfg).toEqual({});
+    expect(await runtime.loadShieldConfig()).toBe(cfg);
+    expect(fault.hits).toBeGreaterThan(0);
+    fault.lstat = false;
+    expect(await runtime.loadShieldConfig()).toEqual(ENFORCING);
   });
 
   it('removing config.json (ENOENT) clears the hold: {} — the documented move-aside recovery', async () => {

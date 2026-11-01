@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, promises as fsPromises, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
@@ -88,6 +88,41 @@ async function registerWithRealRuntime(): Promise<Hooks> {
 
 const gated = (result: any): boolean => Boolean(result && (result.requireApproval || result.block));
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+type FsFn = (...args: any[]) => any;
+/**
+ * Route `node:fs/promises` <name> calls on THIS test's config.json through
+ * `wrap` (every other path untouched) until the returned restore runs. The
+ * runtime imports that module's default object, which is this one.
+ */
+function interceptConfig(name: 'lstat' | 'readFile', wrap: (orig: FsFn, args: any[]) => any): () => void {
+  const target = fsPromises as unknown as Record<string, FsFn>;
+  const orig = target[name];
+  target[name] = (...args: any[]) => (args[0] === configPath() ? wrap(orig, args) : orig(...args));
+  return () => { target[name] = orig; };
+}
+
+const eio = (): NodeJS.ErrnoException => Object.assign(new Error('test-injected EIO'), { code: 'EIO' });
+
+/** The real plugin over an unsigned link whose target says Guard off: the runtime holds it strict, so it is gated. */
+async function warmUnsignedLinkGate(): Promise<{ hooks: Hooks; target: string }> {
+  const target = join(root, 'unsigned-target.json');
+  writeFileSync(target, JSON.stringify({ actionGuard: { enabled: false } }));
+  symlinkSync(target, configPath());
+  const hooks = await registerWithRealRuntime();
+  expect(gated(await hooks['before_tool_call'](GATED))).toBe(true);
+  return { hooks, target };
+}
+
+/** Atomically replace the link with a whitespace-only regular file (no ENOENT in between). */
+function renameBlankOverLink(): void {
+  const replacement = join(configDir, 'replacement.json');
+  writeFileSync(replacement, '   ');
+  renameSync(replacement, configPath());
+  expect(lstatSync(configPath()).isFile()).toBe(true);
+}
+
 describe('plugin gate over the real runtime: a blanked or unreadable config.json keeps the gate', () => {
   it('same-mtime whitespace blank after an enforcing read: still gated', async () => {
     const text = JSON.stringify(ENFORCING, null, 2);
@@ -138,5 +173,88 @@ describe('plugin gate over the real runtime: a blanked or unreadable config.json
     writeFileSync(configPath(), '   ', { mode: 0o600 });
     const hooks = await registerWithRealRuntime();
     expect(gated(await hooks['before_tool_call'](GATED))).toBe(false);
+  });
+});
+
+describe('plugin gate over the real runtime: lstat faults and overlapping reads keep the strict gate (#983 review)', () => {
+  it('unsigned link held strict, lstat EIO on config.json with the Guard-off target readable: still gated, and after recovery', async () => {
+    const { hooks } = await warmUnsignedLinkGate();
+    let hits = 0;
+    const restore = interceptConfig('lstat', () => {
+      hits += 1;
+      return Promise.reject(eio());
+    });
+    let during = false;
+    try {
+      during = gated(await hooks['before_tool_call'](GATED));
+    } finally {
+      restore();
+    }
+    const recovered = gated(await hooks['before_tool_call'](GATED));
+    expect(hits).toBeGreaterThan(0);
+    expect({ during, recovered }).toEqual({ during: true, recovered: true });
+  });
+
+  it('target blanked while the lstat fault persists, then the fault clears: gated throughout', async () => {
+    const { hooks, target } = await warmUnsignedLinkGate();
+    let hits = 0;
+    const restore = interceptConfig('lstat', () => {
+      hits += 1;
+      return Promise.reject(eio());
+    });
+    let during = false;
+    let blankDuring = false;
+    try {
+      during = gated(await hooks['before_tool_call'](GATED));
+      await tick();
+      writeFileSync(target, '   ');
+      blankDuring = gated(await hooks['before_tool_call'](GATED));
+    } finally {
+      restore();
+    }
+    const recovered = gated(await hooks['before_tool_call'](GATED));
+    expect(hits).toBeGreaterThan(0);
+    expect({ during, blankDuring, recovered }).toEqual({ during: true, blankDuring: true, recovered: true });
+  });
+
+  it('a blank regular file renamed over the unsigned link while another tool call is reading: every call stays gated', async () => {
+    const { hooks } = await warmUnsignedLinkGate();
+    renameBlankOverLink();
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    let began!: () => void;
+    const parked = new Promise<void>((resolve) => { began = resolve; });
+    let fired = false;
+    const restore = interceptConfig('readFile', (orig, args) => {
+      if (fired) return orig(...args);
+      fired = true;
+      began();
+      return released.then(() => orig(...args));
+    });
+    let pending: Promise<any> = Promise.resolve();
+    let second = false;
+    try {
+      // The first call parks inside its config read; the second runs while it is parked.
+      pending = hooks['before_tool_call'](GATED);
+      await Promise.race([parked, pending]);
+      const secondCall = hooks['before_tool_call'](GATED);
+      await Promise.race([secondCall, sleep(150)]);
+      release();
+      second = gated(await secondCall);
+    } finally {
+      release();
+      restore();
+    }
+    const completed = gated(await pending);
+    const subsequent = gated(await hooks['before_tool_call'](GATED));
+    expect(fired).toBe(true);
+    expect({ second, completed, subsequent }).toEqual({ second: true, completed: true, subsequent: true });
+  });
+
+  it('control: the same rename with one tool call at a time stays gated', async () => {
+    const { hooks } = await warmUnsignedLinkGate();
+    renameBlankOverLink();
+    expect(gated(await hooks['before_tool_call'](GATED))).toBe(true);
+    expect(gated(await hooks['before_tool_call'](GATED))).toBe(true);
   });
 });
