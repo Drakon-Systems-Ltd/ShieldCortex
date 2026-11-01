@@ -110,12 +110,17 @@ export function createOpenClawRuntime({
   logPrefix = "[shieldcortex]",
   configPath = path.join(process.env.SHIELDCORTEX_CONFIG_DIR?.trim() || path.join(homedir(), ".shieldcortex"), "config.json"),
 } = {}) {
+  // The current bytes' config object, or null when the last read under
+  // `shieldConfigKey` yielded none (absent, blank, unreadable, malformed).
   let rawShieldConfig = null;
-  let rawShieldConfigParsed = false;
   let rawShieldConfigText = "";
   let shieldConfigKey = null;
   let shieldConfig = null;
   let shieldConfigLinkedUnsigned = false;
+  // The posture this runtime last established from config.json: the effective
+  // object (strict view included) of the last read whose bytes parsed to an
+  // object. Not a cache — see holdEstablishedPosture.
+  let establishedShieldConfig = null;
   let resolvedServerCmd = null;
   let lastCallErrorType = null;
 
@@ -129,7 +134,8 @@ export function createOpenClawRuntime({
   // stray sidecar can supply. Anything else is held at the strict fail-closed
   // posture — never Guard off. A regular file is still taken as plain JSON
   // (no HMAC check on it, #509). A dangling link has no bytes to take a
-  // posture from and reads `{}`, as src reads it. Same rule, same verifier:
+  // posture from: `{}` on a first read, the established posture afterwards
+  // (holdEstablishedPosture), as src reads it. Same rule, same verifier:
   // scripts/pre-tool-hook.mjs and src/setup/openclaw-selfcheck.ts, through
   // scripts/lib/config-authenticity.mjs.
   async function readSidecar(file) {
@@ -172,7 +178,9 @@ export function createOpenClawRuntime({
   // user space cannot set ctime) of the config.json ENTRY (lstat: file or link,
   // and which link), the link text, and the identity of the file the link
   // FOLLOWS to (stat). Any change to any of them drops the cached bytes, parse
-  // status and posture and re-reads before the unsigned-link verdict is taken.
+  // status and posture and re-reads before the unsigned-link verdict is taken;
+  // a re-read that finds no config holds the established posture instead of
+  // reading `{}` (holdEstablishedPosture).
   // Keep in step with src/cloud/config.ts (fileIdentity, cachedRawConfigLinked).
   async function configIdentityKey() {
     const id = (st) => `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
@@ -196,6 +204,30 @@ export function createOpenClawRuntime({
     return `link:${id(entry)}|${JSON.stringify(text)}|${target}`;
   }
 
+  // The key configIdentityKey gives when the config.json ENTRY does not exist.
+  const ABSENT_ENTRY_KEY = "absent:ENOENT";
+
+  /**
+   * The answer for a read of config.json that yielded no config — blank or
+   * whitespace, malformed, non-object JSON, or unreadable (EIO, EACCES,
+   * EISDIR, a dangling link): the posture this runtime established, HELD, or
+   * `{}` when it has established none. Mirrors src/cloud/config.ts
+   * holdEstablished (#981): a newly observed error or blank state never
+   * relaxes a posture already in force. The held object is the established
+   * one itself, so its identity does not change and the plugin neither
+   * re-merges nor rebuilds the interceptor (plugins/openclaw/index.ts
+   * loadConfig / initInterceptor). Before this, #878 r4's identity key
+   * (ctime included) missed on an in-place blank that restored the mtime,
+   * and the re-read answered `{}`: Action Guard off at the gate, where
+   * v5.17.1's mtime-only cache had answered with the enforcing object.
+   *
+   * Only an absent ENTRY clears it (loadShieldConfig): the documented
+   * move-aside recovery, and a fresh install reads exactly as before.
+   */
+  function holdEstablishedPosture() {
+    return establishedShieldConfig ?? {};
+  }
+
   // Identity-gated cache: re-read whenever the config entry or its target
   // changes. Lets dashboard / CLI toggles take effect on the next event
   // without an OpenClaw gateway restart. The key is taken BEFORE the read, so
@@ -205,6 +237,11 @@ export function createOpenClawRuntime({
     const key = await configIdentityKey();
 
     if (key !== shieldConfigKey) {
+      shieldConfigKey = key;
+      // lstat ENOENT on the entry itself: config.json is gone. Any other lstat
+      // error (EIO, EACCES, ...) says nothing about the bytes: read on, and a
+      // read that fails too is held below.
+      if (key === ABSENT_ENTRY_KEY) establishedShieldConfig = null;
       // Plain JSON. The CLI HMAC-signs this file, but a REGULAR file's
       // signature is not verified on this path: callers must not describe it
       // as signed (#509 r8). Only a symlinked file's is, and only to decide
@@ -213,25 +250,29 @@ export function createOpenClawRuntime({
       try {
         rawShieldConfigText = await fs.readFile(configPath, "utf-8");
         rawShieldConfig = JSON.parse(rawShieldConfigText);
-        rawShieldConfigParsed = true;
       } catch {
-        // Unreadable (a dangling link included), empty or corrupt: `{}`, as
-        // src reads all three. No bytes, so nothing to hold strict either.
-        rawShieldConfig = {};
-        rawShieldConfigText = "";
-        rawShieldConfigParsed = false;
+        rawShieldConfig = null;
       }
-      shieldConfigKey = key;
-      shieldConfig = null;
+      // `null`, an array or a scalar parses but is not a config: malformed,
+      // as src reads it.
+      if (!rawShieldConfig || typeof rawShieldConfig !== "object" || Array.isArray(rawShieldConfig)) {
+        rawShieldConfig = null;
+        rawShieldConfigText = "";
+      }
+      // No bytes to judge, so no link verdict either: the held posture (or
+      // `{}`) stands until the key moves again.
+      shieldConfig = rawShieldConfig === null ? holdEstablishedPosture() : null;
     }
+    if (rawShieldConfig === null) return shieldConfig;
 
     // The returned object's identity changes only when the bytes or the link
     // verdict do: the plugin re-merges on identity change.
-    const linked = rawShieldConfigParsed && (await linkedUnauthenticated(rawShieldConfig, rawShieldConfigText));
+    const linked = await linkedUnauthenticated(rawShieldConfig, rawShieldConfigText);
     if (!shieldConfig || linked !== shieldConfigLinkedUnsigned) {
       shieldConfigLinkedUnsigned = linked;
       shieldConfig = linked ? strictFailClosedPosture(rawShieldConfig) : rawShieldConfig;
     }
+    establishedShieldConfig = shieldConfig;
     return shieldConfig;
   }
 
