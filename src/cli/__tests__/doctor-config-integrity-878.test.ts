@@ -380,6 +380,7 @@ describe('#878 design: an unknown signed posture is rendered unknown, never off'
           `signed posture unknown (integrity: unverified — ${LINKED}; the runtime holds the strict fail-closed ` +
           'posture); no gate plane is installed on this box',
         fix: UNKNOWN_FIX,
+        postureUnknown: true,
       });
 
       expect(row('Action guard notify')).toEqual({
@@ -393,6 +394,7 @@ describe('#878 design: an unknown signed posture is rendered unknown, never off'
         fix:
           'The signed Action Guard posture is unknown until config.json can be adopted: resolve the config ' +
           'integrity row first. Do not enable Action Guard from this line.',
+        postureUnknown: true,
       });
 
       const lock = row('Action guard policy lock');
@@ -499,6 +501,91 @@ describe('#878 design: an unknown signed posture is rendered unknown, never off'
     const { doctor } = await fresh();
     const integrity = doctor.policyLockRows().find((r) => r.label === 'Action guard config integrity')!;
     expect(integrity.message).toMatch(/^verdict: self-heal — .*NOT re-signed while config\.json is a symbolic link/s);
+  });
+});
+
+describe('#878 r2: the human report prints an unknown-posture row own fix, never "Guard is off"', () => {
+  const HONESTY_OFF = 'Guard is off or the plugin is off';
+  const NOTIFY_UNKNOWN_FIX =
+    'The signed Action Guard posture is unknown until config.json can be adopted: resolve the config ' +
+    'integrity row first. Do not enable Action Guard from this line.';
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
+  /** The default and --verbose human reports, the way runDoctor builds them, whitespace-collapsed. */
+  async function reports(rows: Awaited<ReturnType<Doctor['checkActionGuard']>>): Promise<Record<string, string>> {
+    const { formatDoctorReport, sanitiseDoctorRowsForDisplay } = await import('../doctor-report.js');
+    const display = sanitiseDoctorRowsForDisplay(rows);
+    const render = (verbose: boolean) =>
+      formatDoctorReport(display, { verbose, width: 240, color: false }).join('\n').replace(/\s+/g, ' ');
+    return { default: render(false), verbose: render(true) };
+  }
+
+  async function expectUnknownRendered(): Promise<void> {
+    const { doctor } = await fresh();
+    const rows = await doctor.checkActionGuard();
+    const notify = rows.find((r) => r.label === 'Action guard notify')!;
+    expect(notify).toMatchObject({ status: 'warn', fix: NOTIFY_UNKNOWN_FIX, postureUnknown: true });
+    // The trap: the unknown message still names the notify sink, which the
+    // text-matched honesty guidance reads as "Guard is off".
+    expect(notify.message).toMatch(/denial-capable/);
+    const marked = rows.filter((r) => r.postureUnknown && r.status === 'warn');
+    expect(marked.map((r) => r.label).sort()).toEqual([
+      'Action guard config integrity',
+      'Action guard notify',
+      'Action guard policy lock',
+      'Action guard posture',
+    ]);
+    for (const [mode, out] of Object.entries(await reports(rows))) {
+      expect({ mode, honestyOff: out.includes(HONESTY_OFF) }).toEqual({ mode, honestyOff: false });
+      expect({ mode, notifyFix: out.includes(NOTIFY_UNKNOWN_FIX) }).toEqual({ mode, notifyFix: true });
+      // Every unknown-posture warn prints its own fix (backticks stripped, as the report does).
+      for (const r of marked) {
+        expect({ mode, label: r.label, printed: out.includes(r.fix!.replace(/`/g, '').replace(/\s+/g, ' ').trim()) })
+          .toEqual({ mode, label: r.label, printed: true });
+      }
+    }
+  }
+
+  function linkTo(guard: Record<string, unknown>): void {
+    fs.writeFileSync(file('target.json'), bytes({ defenceMode: 'balanced', actionGuard: guard }));
+    fs.symlinkSync(file('target.json'), configFile());
+  }
+
+  it('live symlink to an unsigned enabled:false target', async () => {
+    linkTo({ enabled: false });
+    await expectUnknownRendered();
+  });
+
+  it('live symlink to an unsigned enabled:true target', async () => {
+    linkTo({ enabled: true });
+    await expectUnknownRendered();
+  });
+
+  (asRoot ? it.skip : it)('an unwritable config directory over an unsigned regular file', async () => {
+    fs.writeFileSync(configFile(), bytes({ defenceMode: 'balanced', actionGuard: { enabled: false } }));
+    fs.chmodSync(configDir, 0o500);
+    try {
+      const { config } = await fresh();
+      expect(config.inspectConfigIntegrity()).toMatchObject({ verdict: 'unverified', adoption: 'unknown' });
+      await expectUnknownRendered();
+    } finally {
+      fs.chmodSync(configDir, 0o700);
+    }
+  });
+
+  it('control: a genuinely-off SIGNED config still prints the honesty guidance, unmarked', async () => {
+    fs.writeFileSync(configFile(), bytes({ defenceMode: 'balanced', actionGuard: { enabled: false } }));
+    (await fresh()).config.getActionGuardCoreConfig(); // adopt + sign, as the runtime would
+    expect(fs.readdirSync(configDir).sort()).toEqual(['.config-sig', '.integrity-key', 'config.json']);
+    const { doctor, config } = await fresh();
+    expect(config.inspectConfigIntegrity().verdict).not.toBe('unverified');
+    const rows = await doctor.checkActionGuard();
+    expect(rows.filter((r) => r.postureUnknown)).toEqual([]);
+    expect(rows.find((r) => r.label === 'Action guard notify')?.status).toBe('warn');
+    for (const out of Object.values(await reports(rows))) {
+      expect(out).toContain(HONESTY_OFF);
+      expect(out).not.toContain(NOTIFY_UNKNOWN_FIX);
+    }
   });
 });
 

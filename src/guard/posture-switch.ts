@@ -485,6 +485,8 @@ export interface GuardPostureRow {
   status: 'pass' | 'warn' | 'fail';
   message: string;
   fix?: string;
+  /** #878: see DoctorReportItem.postureUnknown — the report prints this row's own fix. */
+  postureUnknown?: true;
 }
 
 const OFF_FIX = 'Action Guard is off. That is the default. Do not enable Action Guard from this warning. Do not add a webhook.';
@@ -582,7 +584,9 @@ export function guardPostureRow(report: PostureReport): GuardPostureRow {
     message += `; ${signed}`;
   }
   if (status === 'pass') return { label, status, message };
-  if (report.integrityAdoption) return { label, status, message, fix: UNKNOWN_FIX };
+  if (report.integrityAdoption) {
+    return { label, status, message, fix: UNKNOWN_FIX, ...(signedUnknown ? { postureUnknown: true as const } : {}) };
+  }
   return { label, status, message, fix: graded === 'off' ? OFF_FIX : ADVISORY_FIX };
 }
 

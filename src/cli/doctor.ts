@@ -223,6 +223,8 @@ export interface CheckResult {
   fixNoteWithCommands?: true;
   /** See DoctorReportItem.verboseNote — printed only with --verbose. */
   verboseNote?: string;
+  /** See DoctorReportItem.postureUnknown (#878) — the report prints this row's own fix. */
+  postureUnknown?: true;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
@@ -5182,6 +5184,10 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
               ? 'The signed Action Guard posture is unknown until config.json can be adopted: resolve the config ' +
                 'integrity row first. Do not enable Action Guard from this line.'
               : pluginOffFix,
+          // #878: armed is false whenever signedUnknown, so this row's fix is
+          // the unknown one above; the report must print it, not a
+          // "Guard is off" step matched from the notify wording.
+          ...(signedUnknown ? { postureUnknown: true as const } : {}),
         });
       }
 
@@ -5335,6 +5341,7 @@ export function policyLockRows(): CheckResult[] {
             // #878: unknown is not off — do not say "while Guard is off".
             ? 'Do not run protect from this warning. A root lock is optional; resolve the config integrity row first. Do not uninstall.'
             : 'Do not run protect from this warning. A root lock is optional while Guard is off. Do not uninstall.',
+        ...(!liveGating && signedUnknown ? { postureUnknown: true as const } : {}),
       });
       break;
     case 'unsupported':
@@ -5426,6 +5433,8 @@ export function policyLockRows(): CheckResult[] {
               'mints a key and adopts the file. Then re-run doctor.'
             : 'Check that this user can write the config directory and that .integrity-key and .config-sig, if present, ' +
               'are regular files. Then re-run doctor.',
+        // #878: 'fails' is the strict outlook (known); every other block is unknown.
+        ...(block !== 'fails' ? { postureUnknown: true as const } : {}),
       });
       break;
     }
@@ -5585,6 +5594,7 @@ export async function checkActionGuardReadiness(
         message:
           'not evaluated: the signed Action Guard posture is unknown (config.json has no signature it can adopt; ' +
           'see the config integrity row)',
+        postureUnknown: true,
       }];
     }
     if (!core.enabled || !core.enforce || !core.readinessGate) return [];
