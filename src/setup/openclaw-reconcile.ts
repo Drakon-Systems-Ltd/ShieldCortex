@@ -19,6 +19,7 @@ import { resolveRepairConsent } from './repair-consent.js';
 import { resolveConversationAccessConsent } from './conversation-access-consent.js';
 import { summariseCommandOutput } from '../integrations/child-output.js';
 import { gatewayBootLogAdvice, gatewayRestartCommand } from './gateway-restart-command.js';
+import { nextCausalSeq } from './causal-seq.js';
 
 /**
  * The #74 metadata reconciler orchestrator.
@@ -88,6 +89,8 @@ export interface GatewayReloadResult {
   reused?: boolean;
   /** #977: when that one exec was requested — readiness is measured from it. */
   requestedAtMs?: number;
+  /** #977 review: that exec's causal ticket — ordering is decided from it alone. */
+  requestedSeq?: number;
 }
 
 /** #156 — one extra detect→remediate pass when the first did not converge. */
@@ -168,11 +171,11 @@ export interface ReconcileOptions {
   /** Internal: which converge pass this is (1-based). */
   pass?: number;
   /**
-   * Internal (#977 review): when the latest gateway-affecting change of an
-   * EARLIER pass started (epoch ms). A restart reused from before that moment
-   * did not load it, even if this pass changes nothing itself.
+   * Internal (#977 review): the causal ticket (`nextCausalSeq`) of the latest
+   * gateway-affecting change of an EARLIER pass. A reused restart whose ticket
+   * is older did not load it, even if this pass changes nothing itself.
    */
-  lastChangeAtMs?: number;
+  lastChangeSeq?: number;
 }
 
 function defaultApply(): boolean {
@@ -286,6 +289,7 @@ async function defaultReloadGateway(): Promise<GatewayReloadResult> {
     attempted: r.attempted,
     ...(r.reused ? { reused: true } : {}),
     ...(r.requestedAtMs !== undefined ? { requestedAtMs: r.requestedAtMs } : {}),
+    ...(r.requestedSeq !== undefined ? { requestedSeq: r.requestedSeq } : {}),
   };
 }
 
@@ -347,12 +351,14 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
 
   const stepResults: StepResult[] = [];
   let selfCheckResult: SelfCheckRunResult | undefined;
-  // #977 review: when the latest gateway-affecting change LANDED, in this pass
-  // or an earlier one. A reused restart requested before that moment never
-  // loaded it. Only a step that changed something counts: a write that failed
-  // left the world as the restart found it, so the readiness path still holds.
-  let lastChangeAtMs: number | undefined = options.lastChangeAtMs;
-  const noteChange = (): void => { lastChangeAtMs = Date.now(); };
+  // #977 review: the causal ticket of the latest gateway-affecting change that
+  // LANDED, in this pass or an earlier one. A reused restart with an older
+  // ticket never loaded it. Tickets, not epoch ms: a change and a restart in
+  // the same millisecond tie on the clock, and neither `<` nor `<=` orders
+  // both cases right. Only a step that changed something counts: a write that
+  // failed left the world as the restart found it, so readiness still holds.
+  let lastChangeSeq: number | undefined = options.lastChangeSeq;
+  const noteChange = (): void => { lastChangeSeq = nextCausalSeq(); };
   let restartPending = false;
 
   if (!apply) {
@@ -401,9 +407,10 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
       // #977 review: a reused restart requested before a change made since
       // (this pass, or an earlier one) never loaded that change. Keep the
       // one-restart rule, but say a restart is still owed — never "completed".
-      // Missing timestamp on a reused restart: assume it predates the change.
-      const predatesChange = r.reused === true && lastChangeAtMs !== undefined
-        && (r.requestedAtMs === undefined || r.requestedAtMs <= lastChangeAtMs);
+      // Ordered by causal ticket only. Missing ticket on a reused restart:
+      // assume it predates the change.
+      const predatesChange = r.reused === true && lastChangeSeq !== undefined
+        && (r.requestedSeq === undefined || r.requestedSeq < lastChangeSeq);
       const unloaded = r.restarted && predatesChange;
       if (unloaded && restart === 'completed') {
         restartPending = true;
@@ -543,7 +550,7 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     const retry = await reconcileOpenClawPluginState({
       ...options,
       pass: pass + 1,
-      ...(lastChangeAtMs !== undefined ? { lastChangeAtMs } : {}),
+      ...(lastChangeSeq !== undefined ? { lastChangeSeq } : {}),
     });
     return {
       verdict,

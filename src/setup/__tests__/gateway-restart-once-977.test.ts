@@ -13,7 +13,8 @@
  * PATH points nowhere for the tests that open the consent gates, so even a
  * broken latch could not find `systemctl` / `launchctl`.
  */
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
+import { nextCausalSeq } from '../causal-seq.js';
 import {
   createGatewayRestartOnce,
   processGatewayRestartLatch,
@@ -79,6 +80,21 @@ describe('#977 — once-per-run restart coordinator (pure)', () => {
     expect(pass2.requestedAtMs).toBe(pass1.requestedAtMs);
     expect(later.requestedAtMs).toBe(pass1.requestedAtMs);
     expect(pass2.reused).toBe(true);
+    // #977 review: the causal ticket is the first request's, on every reuse.
+    expect(typeof pass1.requestedSeq).toBe('number');
+    expect(pass2.requestedSeq).toBe(pass1.requestedSeq);
+    expect(later.requestedSeq).toBe(pass1.requestedSeq);
+  });
+
+  it('the causal ticket is taken at request time and survives a throwing exec', async () => {
+    const once = createGatewayRestartOnce();
+    const before = nextCausalSeq();
+    const r1 = await once.run(() => { throw new Error('boom'); });
+    const after = nextCausalSeq();
+    const r2 = await once.run(() => OK);
+    expect(r1.requestedSeq).toBeGreaterThan(before);
+    expect(r1.requestedSeq).toBeLessThan(after);
+    expect(r2).toMatchObject({ reused: true, requestedSeq: r1.requestedSeq });
   });
 
   it('two overlapping requests share one in-flight execution', async () => {
@@ -362,7 +378,8 @@ describe('#977 review — a reused restart that predates later changes is owed, 
   it('a reused restart requested AFTER the last change did load it — completed, not pending', async () => {
     const later = Date.now() + 60_000;
     const result = await reconcileOpenClawPluginState(baseOptions({
-      reloadGateway: async () => ({ restarted: true, attempted: true, reused: true, requestedAtMs: later }),
+      // Ticket taken at reload time — after restore-registration's change.
+      reloadGateway: async () => ({ restarted: true, attempted: true, reused: true, requestedAtMs: later, requestedSeq: nextCausalSeq() }),
       selfCheck: async () => proven as never,
     }));
     const reloads = result.stepResults.filter((s) => s.kind === 'gateway-reload');
@@ -372,11 +389,20 @@ describe('#977 review — a reused restart that predates later changes is owed, 
 
   it('a fresh (non-reused) restart after changes is never pending', async () => {
     const result = await reconcileOpenClawPluginState(baseOptions({
-      reloadGateway: async () => ({ restarted: true, attempted: true, requestedAtMs: Date.now() }),
+      reloadGateway: async () => ({ restarted: true, attempted: true, requestedAtMs: Date.now(), requestedSeq: nextCausalSeq() }),
       selfCheck: async () => proven as never,
     }));
     expect(result.stepResults.find((s) => s.kind === 'gateway-reload')?.restart).toBe('completed');
     expect(result.ok).toBe(true);
+  });
+
+  it('a reused restart with no causal ticket after a change stays conservative: pending', async () => {
+    const result = await reconcileOpenClawPluginState(baseOptions({
+      reloadGateway: async () => ({ restarted: true, attempted: true, reused: true, requestedAtMs: Date.now() + 60_000 }),
+      selfCheck: async () => proven as never,
+    }));
+    expect(protectionFactsFromReconcile(result).gatewayRestart).toBe('pending');
+    expect(result.ok).toBe(false);
   });
 
   it('summariseRepair never says protected while a restart is owed', () => {
@@ -640,5 +666,90 @@ describe('#977 review r3 — an unproven restart that predates later changes is 
     expect(v.headline).not.toMatch(/Restart the gateway|restart it once more|systemctl/);
     expect(v.headline).toMatch(/not loaded yet/);
     expect(v.headline).toMatch(/not confirmed back up/);
+  });
+});
+
+describe('#977 review 5727106863 — change/restart order is causal, not wall-clock', () => {
+  const PLUGIN = 'shieldcortex-realtime';
+  const wiped: ReconcileInput = {
+    pluginId: PLUGIN,
+    expectedVersion: '4.50.0',
+    config: { enabled: null, inAllow: false, readable: true, present: true },
+    installsJson: { version: '4.50.0', installPath: '/x' },
+    index: {
+      installRecords: { [PLUGIN]: { source: 'npm', version: '4.50.0', installPath: '/x' } },
+      plugins: [],
+      warning: null,
+    },
+    onDiskVersion: '4.50.0',
+    projectDirs: [],
+    liveRoster: [],
+  };
+  const absent = { ok: false, rosterState: 'absent', rosterProof: false, canaryProof: false, versionProof: true, reasons: ['not loaded'] };
+  const PINNED_MS = 1_790_000_000_000;
+
+  beforeEach(() => {
+    // Every event below lands in the same millisecond.
+    jest.spyOn(Date, 'now').mockReturnValue(PINNED_MS);
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function options(over: Partial<ReconcileOptions>): ReconcileOptions {
+    return {
+      home: '/tmp/sc-977-never-read',
+      pluginId: PLUGIN,
+      expectedVersion: '4.50.0',
+      apply: true,
+      grantConversationAccess: false,
+      readState: () => ({ input: wiped, verdict: reconcilePluginState(wiped) }),
+      runCommand: () => ({ status: 0, output: 'ok' }),
+      waitForGateway: async () => ({ ready: true, waitedMs: 0 }),
+      selfCheck: async () => absent as never,
+      ...over,
+    };
+  }
+
+  it('the counter is strictly increasing even with the clock frozen', () => {
+    const seen = Array.from({ length: 50 }, () => nextCausalSeq());
+    for (let i = 1; i < seen.length; i += 1) expect(seen[i]).toBeGreaterThan(seen[i - 1]);
+    expect(Date.now()).toBe(PINNED_MS);
+  });
+
+  it('change → restart in the same ms, then pass 2 changes nothing: the reused restart loaded the change — completed, not pending', async () => {
+    const once = createGatewayRestartOnce();
+    const exec = countingExec();
+    let restores = 0;
+    const result = await reconcileOpenClawPluginState(options({
+      // Pass 1's restore lands; pass 2's write fails (no new change).
+      restoreRegistration: () => ((restores += 1) === 1
+        ? { ok: true, detail: 'restored' }
+        : { ok: false, detail: 'write did not land' }),
+      reloadGateway: () => once.run(exec) as Promise<GatewayReloadResult>,
+    }));
+    expect(result.passes).toBe(2);
+    expect(exec.calls).toBe(1);
+    const reloads = result.stepResults.filter((s) => s.kind === 'gateway-reload');
+    expect(reloads.map((s) => s.restart)).toEqual(['completed', 'completed']);
+    expect(protectionFactsFromReconcile(result).gatewayRestart).toBe('completed');
+    expect(protectionLedgerFromReconcile(result).facts.gatewayRestart).not.toBe('pending');
+    expect(result.messages.join('\n')).not.toMatch(/gateway restart pending/);
+  });
+
+  it('restart → change in the same ms: the reused restart did NOT load the change — pending', async () => {
+    const once = createGatewayRestartOnce();
+    const exec = countingExec();
+    await once.run(exec); // an earlier step's restart, same millisecond
+    const result = await reconcileOpenClawPluginState(options({
+      restoreRegistration: () => ({ ok: true, detail: 'restored' }),
+      reloadGateway: () => once.run(exec) as Promise<GatewayReloadResult>,
+    }));
+    expect(exec.calls).toBe(1);
+    const reloads = result.stepResults.filter((s) => s.kind === 'gateway-reload');
+    expect(reloads[0].restart).toBe('pending');
+    expect(protectionFactsFromReconcile(result).gatewayRestart).toBe('pending');
+    expect(result.ok).toBe(false);
+    expect(result.messages.join('\n')).toMatch(/gateway restart pending/);
   });
 });

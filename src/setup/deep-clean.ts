@@ -23,6 +23,7 @@ import os from 'os';
 import { execFileSync, execSync } from 'child_process';
 import { gatewayRestartCommand } from './gateway-restart-command.js';
 import { withOwnConfigWrite } from '../audit/agent-config-watch-own-write.js';
+import { nextCausalSeq } from './causal-seq.js';
 
 const PLUGIN_ID = 'shieldcortex-realtime';
 const HOOK_NAME = 'cortex-memory';
@@ -512,8 +513,16 @@ export interface GatewayRestartResult {
    * the same process already did — the outcome is that earlier one's.
    */
   reused?: boolean;
-  /** #977: when the one exec of this process was requested (epoch ms). */
+  /**
+   * #977: when the one exec of this process was requested (epoch ms). Used
+   * only to bound readiness evidence — never to order events.
+   */
   requestedAtMs?: number;
+  /**
+   * #977 review: the causal ticket (`nextCausalSeq`) taken when the one exec
+   * was requested. Compare it with a change's ticket to know which came first.
+   */
+  requestedSeq?: number;
 }
 
 /**
@@ -540,18 +549,20 @@ export function createGatewayRestartOnce(): {
     run(exec) {
       if (inflight) return inflight.then((r) => ({ ...r, reused: true }));
       const requestedAtMs = Date.now();
+      const requestedSeq = nextCausalSeq();
       // Assigned synchronously, before exec runs, so a second call made in
       // the same tick already sees the latch.
       inflight = Promise.resolve()
         .then(exec)
         .then(
-          (r) => ({ ...r, requestedAtMs }),
+          (r) => ({ ...r, requestedAtMs, requestedSeq }),
           (err: unknown): GatewayRestartResult => ({
             attempted: true,
             restarted: false,
             method: 'unknown',
             detail: err instanceof Error ? err.message : String(err),
             requestedAtMs,
+            requestedSeq,
           }),
         );
       return inflight;
