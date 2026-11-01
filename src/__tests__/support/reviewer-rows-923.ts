@@ -377,5 +377,36 @@ export function reviewerRows(H: string, SRC: string, F: string): ReviewerRow[] {
   add('r11-grok-N6-1', 11, 'grok', '`cp src <home>/.claude/projects/my.proj` (last segment contains a dot, no trailing slash) is not treated as a directory.', 'Bash',
     bash(`cp ${srcAs} ${C}/projects/my.proj`), 'residual');
 
+  // ── round 12 (r12 astra B1, r12 grok B1/B2) ───────────────────────────────
+  // r12 Astra B1 / r12 Grok B1: a POSIX bracket class carried as a VALUE the
+  // shell pathname-expands (`[[:alpha:]]`). dataGlobItems must close the
+  // bracket expression the way classAt does, not at the first `]`.
+  {
+    const cls = `.cl[[:alpha:]][[:alpha:]][[:alpha:]][[:alpha:]]/${LEAF}`;
+    const b1a = `A='${cls}'; cp ${SRC} ${H}/$A`;
+    add('r12-astra-B1-1', 12, 'astra', "`A='.cl[[:alpha:]]…/projects/p/s.jsonl'; cp <src> $H/$A` — value POSIX class, no literal anchor", 'Bash', bash(b1a), 'floor', { effect: b1a });
+    const b1b = `cp ${SRC} ${H}/$(printf %s '${cls}')`;
+    add('r12-grok-B1-1', 12, 'grok', "`cp <src> $H/$(printf %s '.cl[[:alpha:]]…')` — POSIX class in printf output", 'Bash', bash(b1b), 'floor', { effect: b1b });
+    add('r12-grok-B1-ctl', 12, 'grok', 'Control, floored: data `.cl[a][u][d][e]/projects/p/s.jsonl` bracket classes', 'Bash',
+      bash(`A='.cl[a][u][d][e]/${LEAF}'; cp ${SRC} ${H}/$A`), 'floor');
+  }
+  // r12 Grok B2: a path the shell COMPUTES from pieces the command spells —
+  // an uncomputed parameter transform, or a name bound by set/read/arrays the
+  // model cannot resolve. Each is INCOMPLETE and must floor, never clear.
+  {
+    const sub = `P=${H}/.cl_ZZ_/${LEAF}; cp ${SRC} \${P/_ZZ_/aude}`;
+    add('r12-grok-B2-subst', 12, 'grok', '`${P/XX/aude}` pattern substitution on an assigned value is not the stored value', 'Bash', bash(sub), 'floor', { effect: sub });
+    add('r12-grok-B2-subst-q', 12, 'grok', '`"${P/XX/aude}"` quoted — pattern substitution needs no pathname expansion', 'Bash',
+      bash(`P=${H}/.cl_ZZ_/${LEAF}; cp ${SRC} "\${P/_ZZ_/aude}"`), 'floor');
+    const setp = `set -- .cl aude /${LEAF}; cp ${SRC} "${H}/$1$2$3"`;
+    add('r12-grok-B2-set', 12, 'grok', '`set -- .cl aude /projects/p/s.jsonl` then `$1$2$3` are not the empty string', 'Bash', bash(setp), 'floor', { effect: setp });
+    const arr = `A=(.cl aude /${LEAF}); cp ${SRC} "${H}/\${A[0]}\${A[1]}\${A[2]}"`;
+    add('r12-grok-B2-array', 12, 'grok', '`A=(.cl aude /projects/p/s.jsonl)` then `${A[0]}${A[1]}${A[2]}`', 'Bash', bash(arr), 'floor', { effect: arr });
+    const rd = `read A B C <<< '.cl aude /${LEAF}'; cp ${SRC} "${H}/$A$B$C"`;
+    add('r12-grok-B2-read', 12, 'grok', '`read A B C <<< "…"` field-split then `$A$B$C`', 'Bash', bash(rd), 'floor', { effect: rd });
+    add('r12-grok-B2-ctl-ext', 12, 'grok', 'Residual (unfloored): a value the command does not spell — `cp <src> $SC_TRANSCRIPT`', 'Bash',
+      bash(`cp ${SRC} $SC_TRANSCRIPT`), 'residual');
+  }
+
   return rows;
 }

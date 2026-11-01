@@ -562,6 +562,18 @@ const ONE = { g: 'one' };
  * `+(…)`/`*(…)`/`!(…)`).
  */
 const SEG = { g: 'seg' };
+/**
+ * r12b: ANY run of ANY characters, `/` included — the superset item for a
+ * value the model cannot compute but the command itself influences: a
+ * positional `$1..` after `set --`, a compound-array element `${A[i]}`, a
+ * field-split `read A B C` name, a parameter transform (`${v/p/r}`, `${v#p}`,
+ * `${v:o:l}`, …) whose result is not computed. Unlike SEG it may span path
+ * separators, so a candidate holding one may be ANY path: it is judged as
+ * naming a transcript (refuse), never cleared. A purely EXTERNAL value the
+ * command does not spell (`$SC_TRANSCRIPT`, `$(cat f)`) is NOT this item —
+ * that stays the documented, unfloored residual.
+ */
+const ANY = { g: 'any' };
 const CAND_CAP = 256;
 const BRACE_CAP = 64;
 const BUDGET = 4096;
@@ -719,6 +731,12 @@ function nameCandidates(name, ctx, depth) {
   const key = `${name}\u0000${depth}`;
   if (ctx.names.has(key)) return ctx.names.get(key);
   const out = [[]];
+  // r12b: a name the command influences but the model cannot resolve — a
+  // compound-array element, a field-split `read` name, or (when `set …` ran)
+  // a positional `$1..`/`$@`/`$*` — is INCOMPLETE: its value can be any path.
+  // An EXTERNAL name the command never sets stays the unfloored residual.
+  if (ctx.arrayNames.has(name) || ctx.splitNames.has(name)
+      || (ctx.positionalsBound && /^(?:[0-9]+|[@*])$/.test(name))) return [[ANY]];
   const all = ctx.assign.get(name);
   if (!all) return out;
   if (depth >= NESTED_DEPTH || ctx.overflow) { ctx.overflow = true; return out; }
@@ -829,6 +847,13 @@ function braceParamCandidates(body, ctx, depth) {
     // `${v/pat/rep}`, `${v#pre}`, `${v:1:2}`…: the pieces it could leave.
     const rep = /^\/\/?[^/]*\/(.*)$/s.exec(m[3]);
     if (rep) out.push(...textCandidates(rep[1], ctx, depth));
+    // r12b: a transform the model does not compute (`/pat/rep`, `#`/`##`,
+    // `%`/`%%`, `:off:len`, `^`/`,`, an array index) on a value the COMMAND
+    // influences is INCOMPLETE — the result can be any path. An external base
+    // the command never sets keeps the unfloored residual.
+    const influenced = ctx.assign.has(m[2]) || ctx.arrayNames.has(m[2]) || ctx.splitNames.has(m[2])
+      || (ctx.positionalsBound && /^(?:[0-9]+|[@*])$/.test(m[2]));
+    if (m[3] !== '' && influenced) out.push([ANY]);
   }
   return keep(out, CAND_CAP, ctx);
 }
@@ -864,11 +889,42 @@ function statements(seq) {
   return out;
 }
 
-/** Same-command assignments: every way the command itself sets a NAME. */
+const ARRAY_ASSIGN_RE = /^([A-Za-z_]\w*)\+?=$/;
+/** Command wrappers that run the word after them (and their args) as a command. */
+const CMD_PREFIX = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 'nice', 'nohup', 'setsid', 'stdbuf', 'ionice', 'time', 'timeout']);
+
+/**
+ * Same-command assignments: every way the command itself sets a NAME.
+ * Returns `{ assign, arrayNames, splitNames, positionalsBound }`:
+ *   - `assign`    values the model can COMPUTE (`NAME=`, `export`/`local`,
+ *     `NAME+=`, `printf -v`, a single-name `read <<<`, `for NAME in`).
+ *   - `arrayNames` names bound by a compound array `NAME=(…)`: their element
+ *     values are not modelled (r12b).
+ *   - `splitNames` names bound by a FIELD-SPLIT `read A B C …` (two or more
+ *     names): the IFS split is not modelled (r12b).
+ *   - `positionalsBound` a `set …` set the positional parameters `$1..`,
+ *     `$@`, `$*` (r12b).
+ * The last three are values the command influences but the model cannot
+ * resolve — a reference to one is INCOMPLETE and must be refused, never
+ * treated as empty or as its pre-transform value.
+ */
 function collectAssignments(levels) {
   const assign = new Map();
+  const arrayNames = new Set();
+  const splitNames = new Set();
+  let positionalsBound = false;
   const add = (name, v) => { if (!assign.has(name)) assign.set(name, []); assign.get(name).push(v); };
   for (const { seq } of levels) {
+    // r12b: a compound array `NAME=(…)` tokenises as the word `NAME=` (its
+    // value ends at the `(` operator) immediately followed by op `(`. The
+    // element values are not modelled, so the name is uncomputed.
+    for (let n = 0; n + 1 < seq.length; n++) {
+      const t = seq[n];
+      const nx = seq[n + 1];
+      const am = t && t.type === 'word' && t.parts[0] && t.parts[0].k === 'lit' && t.parts.length === 1
+        ? ARRAY_ASSIGN_RE.exec(t.parts[0].t) : null;
+      if (am && nx && nx.type === 'op' && nx.value === '(') arrayNames.add(am[1]);
+    }
     for (const { words, herestrings } of statements(seq)) {
       for (const w of words) {
         const first = w.parts[0];
@@ -878,9 +934,21 @@ function collectAssignments(levels) {
         add(m[1], { append: m[2] === '+', parts: [...(rest ? [{ k: 'lit', t: rest }] : []), ...w.parts.slice(1)] });
       }
       const texts = words.map((w) => partsText(w.parts));
-      const head = texts.findIndex((t) => t !== null && !ASSIGN_RE.test(t));
-      if (head < 0) continue;
+      const first = texts.findIndex((t) => t !== null && !ASSIGN_RE.test(t));
+      if (first < 0) continue;
+      // r12b: skip command-prefix wrappers (`sudo`, `env`, `command`, …) and
+      // their leading flags/`VAR=val` args so `set`/`read`/… are recognised
+      // behind a prefix (`sudo set -- …`), exactly as the shell runs them.
+      let head = first;
+      while (CMD_PREFIX.has(texts[head] ?? '')) {
+        head++;
+        while (head < texts.length && texts[head] !== null && (texts[head].startsWith('-') || ASSIGN_RE.test(texts[head]))) head++;
+      }
+      if (head >= words.length) continue;
       const cmd = texts[head];
+      // r12b: `set …` (with operands) sets the positional parameters; `$1..`,
+      // `$@`, `$*` are then command-bound but not modelled.
+      if (cmd === 'set' && words.length > head + 1) positionalsBound = true;
       if (cmd === 'printf') {
         for (let n = head + 1; n < words.length; n++) {
           const t = texts[n];
@@ -894,14 +962,18 @@ function collectAssignments(levels) {
       }
       if (cmd === 'read') {
         const names = texts.slice(head + 1).filter((t) => t && /^[A-Za-z_]\w*$/.test(t));
-        for (const name of names) for (const h of herestrings) add(name, { parts: h.parts });
+        // r12b: two or more names field-SPLIT the input on IFS; the split is
+        // not modelled, so each name is uncomputed. A single name takes the
+        // whole line (the model computes that from a `<<<` herestring).
+        if (names.length >= 2) for (const name of names) splitNames.add(name);
+        else for (const name of names) for (const h of herestrings) add(name, { parts: h.parts });
       }
       if (cmd === 'for' && texts[head + 2] === 'in' && /^[A-Za-z_]\w*$/.test(texts[head + 1] ?? '')) {
         for (const w of words.slice(head + 3)) if (partsText(w.parts) !== 'do') add(texts[head + 1], { parts: w.parts });
       }
     }
   }
-  return assign;
+  return { assign, arrayNames, splitNames, positionalsBound };
 }
 
 // ── the glob matcher: can this glob candidate expand to a transcript? ──────
@@ -1003,8 +1075,18 @@ function dataGlobItems(items) {
       if (ch === '*') { flush(); out.push(STAR); continue; }
       if (ch === '?') { flush(); out.push(ONE); continue; }
       if (ch === '[') {
+        // r12b (r12 Astra B1, r12 Grok B1): close the bracket expression the
+        // way `classAt` does for a typed word — skipping POSIX `[:class:]`,
+        // `[=a=]` and `[.a.]`, whose inner `]` is NOT the closer — not at the
+        // first `]`. `.cl[[:alpha:]]` is one class, never a class plus a stray
+        // `]`. The same closer judges a typed word and a value-carried glob.
+        const cls = classAt(it, i);
+        if (cls && !it.slice(i, cls.end).includes('/')) { flush(); out.push({ g: 'class', neg: cls.neg, set: cls.set }); i = cls.end - 1; continue; }
+        // classAt rejects exotic contents (a space/quote inside): keep the
+        // old crude any-char class (closer at the first `]`) so the superset
+        // never shrinks — POSIX classes are already handled above.
         const close = it.indexOf(']', i + 2);
-        if (close > 0 && !it.slice(i, close).includes('/')) { flush(); out.push({ g: 'class', neg: true, set: '' }); i = close; continue; }
+        if (!cls && close > 0 && !it.slice(i, close).includes('/')) { flush(); out.push({ g: 'class', neg: true, set: '' }); i = close; continue; }
       }
       lit += ch;
     }
@@ -1015,6 +1097,11 @@ function dataGlobItems(items) {
 
 /** The transcript named-check on ONE joined candidate. */
 function candidateNamesTranscript(items, dotglob) {
+  // r12b: a candidate holding an ANY item is a value the command influences
+  // but the model could not compute (a `set --` positional, an array element,
+  // a field-split `read` name, an uncomputed parameter transform). That value
+  // can be any path, including the transcript, so the candidate is refused.
+  if (items.some((x) => typeof x === 'object' && x !== null && x.g === 'any')) return true;
   if (items.every((x) => typeof x === 'string')) {
     const t = items.join('');
     if (CLAUDE_TRANSCRIPT_NAMED_RE.test(t) || CLAUDE_TRANSCRIPT_NAMED_RE.test(lexicalPathNormalise(t))) return true;
@@ -1127,7 +1214,7 @@ export function claudeJoinedWordMayBeTranscript(text) {
 
 function joinedScan(raw) {
   const levels = parsedLevels(raw);
-  const ctx = { assign: collectAssignments(levels), overflow: false, work: 0, names: new Map() };
+  const ctx = { ...collectAssignments(levels), overflow: false, work: 0, names: new Map() };
   const dotglob = /dotglob|GLOBIGNORE/.test(raw);
   const words = levels.flatMap((l) => l.seq.filter((t) => t.type === 'word'));
   const evidenceText = [raw, ...words.map((w) => w.value.split(EXPANSION_MARK).join(''))].join('\n');

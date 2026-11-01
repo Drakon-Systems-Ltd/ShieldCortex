@@ -66,6 +66,20 @@ export function joinedSpellings(H: string, SRC: string, F: string): Array<[strin
     ['glob inside printf output', `cp ${SRC} ${H}/$(printf %s '.cl*/projects/p/${F}')`],
     ['path-qualified /bin/cp into the directory', `/bin/cp ${srcAs} ${H}/.claude/projects/p/`],
     ['env cp into the directory', `env cp ${srcAs} ${H}/.claude/projects/p/`],
+    // r12b (r12 Astra B1, r12 Grok B1): a POSIX bracket class carried as a
+    // VALUE the shell pathname-expands. dataGlobItems must close the bracket
+    // expression the way classAt does for a typed word, not at the first `]`.
+    ['POSIX class [[:alpha:]] inside an assignment value', `A='.cl[[:alpha:]][[:alpha:]][[:alpha:]][[:alpha:]]/projects/p/${F}'; cp ${SRC} ${H}/$A`],
+    ['POSIX class [[:alpha:]] inside printf output', `cp ${SRC} ${H}/$(printf %s '.cl[[:alpha:]][[:alpha:]][[:alpha:]][[:alpha:]]/projects/p/${F}')`],
+    // r12b (r12 Grok B2): a path the shell COMPUTES from pieces the command
+    // spells. The model must treat an uncomputed parameter transform, and any
+    // name bound by set/read/arrays it cannot resolve, as INCOMPLETE (refuse),
+    // never as a finished empty or original value.
+    ['${P/…/…} pattern substitution builds .claude', `P=${H}/.cl_ZZ_/projects/p/${F}; cp ${SRC} \${P/_ZZ_/aude}`],
+    ['quoted ${P/…/…} pattern substitution builds .claude', `P=${H}/.cl_ZZ_/projects/p/${F}; cp ${SRC} "\${P/_ZZ_/aude}"`],
+    ['set -- positionals then $1$2$3', `set -- .cl aude /projects/p/${F}; cp ${SRC} "${H}/$1$2$3"`],
+    ['compound array then ${A[0]}${A[1]}${A[2]}', `A=(.cl aude /projects/p/${F}); cp ${SRC} "${H}/\${A[0]}\${A[1]}\${A[2]}"`],
+    ['field-split read then $A$B$C', `read A B C <<< '.cl aude /projects/p/${F}'; cp ${SRC} "${H}/$A$B$C"`],
   ];
 }
 
