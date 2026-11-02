@@ -139,9 +139,12 @@ export function createOpenClawRuntime({
   // a `_sig` string or a `.config-sig` file, which the link's target or a
   // stray sidecar can supply. Anything else is held at the strict fail-closed
   // posture — never Guard off. A regular file is still taken as plain JSON
-  // (no HMAC check on it, #509). A dangling link has no bytes to take a
-  // posture from: `{}` on a first read, the established posture afterwards
-  // (holdEstablishedPosture), as src reads it. Same rule, same verifier:
+  // (no HMAC check on it, #509). An entry whose kind is UNKNOWN (its lstat
+  // failed with anything but ENOENT, or its bytes could not be pinned to one
+  // entry) may be a link, so its bytes are judged as a link's are, never taken
+  // as a regular file's (judgeUnattributed). A dangling link has no bytes to
+  // take a posture from: `{}` on a first read, the established posture
+  // afterwards (holdEstablishedPosture), as src reads it. Same rule, same verifier:
   // scripts/pre-tool-hook.mjs and src/setup/openclaw-selfcheck.ts, through
   // scripts/lib/config-authenticity.mjs.
   async function readSidecar(file) {
@@ -157,12 +160,9 @@ export function createOpenClawRuntime({
     }
   }
 
-  // `entry`: the lstat of config.json taken by this load (configEntrySnapshot),
-  // so the verdict is about the same entry the bytes were read from. No lstat
-  // of its own: a second lstat that failed used to answer "not a link" and
-  // hand back the target's own values (#983 review).
-  async function linkedUnauthenticated(entry, parsed, raw) {
-    if (!entry.isSymbolicLink()) return false;
+  // Do these bytes lack a signature the local `.integrity-key` verifies? The
+  // question asked of a link's bytes, and of bytes whose entry is unknown.
+  async function bytesUnauthenticated(parsed, raw) {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
     const dir = path.dirname(configPath);
     const key = await readSidecar(path.join(dir, ".integrity-key"));
@@ -173,6 +173,15 @@ export function createOpenClawRuntime({
       legacySig: await readSidecar(path.join(dir, ".config-sig")),
     });
     return !verdictAuthenticates(verdict);
+  }
+
+  // `entry`: the lstat of config.json taken by this load (configEntrySnapshot),
+  // so the verdict is about the same entry the bytes were read from. No lstat
+  // of its own: a second lstat that failed used to answer "not a link" and
+  // hand back the target's own values (#983 review).
+  async function linkedUnauthenticated(entry, parsed, raw) {
+    if (!entry.isSymbolicLink()) return false;
+    return bytesUnauthenticated(parsed, raw);
   }
 
   // #878 r4: the cache key for the bytes and their parse status. mtime alone
@@ -250,10 +259,11 @@ export function createOpenClawRuntime({
   /**
    * The answer for a load of config.json that yields no config — blank or
    * whitespace, malformed, non-object JSON, unreadable (EIO, EACCES, EISDIR, a
-   * dangling link), or an entry that cannot be lstat'd (#983 review): the
-   * posture this runtime established, HELD, or `{}` when it has established
-   * none. Mirrors src/cloud/config.ts holdEstablished (#981): a newly observed
-   * error or blank state never relaxes a posture already in force. The held
+   * dangling link) — and, once a posture is established, for an entry that
+   * cannot be lstat'd (#983 review; judgeUnattributed): the posture this
+   * runtime established, HELD, or `{}` when it has established none. Mirrors
+   * src/cloud/config.ts holdEstablished (#981): a newly observed error or
+   * blank state never relaxes a posture already in force. The held
    * object is the established one itself, so its identity does not change and
    * the plugin neither re-merges nor rebuilds the interceptor
    * (plugins/openclaw/index.ts loadConfig / initInterceptor). Before this,
@@ -271,8 +281,43 @@ export function createOpenClawRuntime({
     return defaultShieldConfig;
   }
 
+  /**
+   * The answer for a load whose bytes cannot be pinned to one known
+   * config.json entry (v5.17.2 release review r3 B1): an lstat of the entry
+   * failed with anything but ENOENT, before the read or after it, or the entry
+   * changed under every read attempt.
+   *
+   * Once a posture is established it is HELD, as for any fault
+   * (holdEstablishedPosture): a change that lands while the entry is unknown —
+   * a signed Guard-off file included — waits until it can be lstat'd.
+   *
+   * With none established, the bytes are read (or the ones just read are
+   * used) and judged as a link's would be, because the entry may be one: a
+   * signature the local `.integrity-key` verifies puts them in force; an
+   * unsigned or mis-signed object is held at the strict fail-closed posture,
+   * as src's mutating reader holds an unknown link state (`linked === null`,
+   * src/cloud/config.ts). Never "the lstat failed, so it is a regular file":
+   * that read an unsigned link's Guard-off target as the config (#983 review).
+   * Before this, #983 answered `{}` here without reading anything — Guard off
+   * on a cold gateway whose readable, signed config.json enforces, where
+   * v5.17.1 read it as enforcing. Bytes that yield no config (blank, malformed,
+   * unreadable) still read `{}`, the unreadable-from-the-start default.
+   *
+   * What it answers becomes the established posture (a later blank holds it;
+   * ENOENT clears it). Nothing is cached under the entry's key: the next load
+   * whose entry can be lstat'd reads and judges it afresh. Nothing is written.
+   */
+  async function judgeUnattributed(bytes) {
+    if (establishedShieldConfig) return establishedShieldConfig;
+    const { raw, text } = bytes ?? (await readConfigBytes());
+    if (raw === null) return holdEstablishedPosture();
+    establishedShieldConfig = (await bytesUnauthenticated(raw, text)) ? strictFailClosedPosture(raw) : raw;
+    return establishedShieldConfig;
+  }
+
   // How many times a load re-reads when config.json changes under its read
-  // before it holds instead (the next load tries again).
+  // before it takes the last bytes as unattributed (judgeUnattributed: held
+  // once a posture is established; the next load tries again).
   const READ_ATTEMPTS = 3;
 
   /**
@@ -283,17 +328,20 @@ export function createOpenClawRuntime({
    *
    * #983 review: the bytes and the verdict over them come from one entry. The
    * entry is lstat'd before the read and again after it; the bytes are cached
-   * and judged only when both lstats succeed with the same key, and the link
-   * verdict uses that lstat. An lstat that fails with anything but ENOENT
-   * takes nothing from the bytes: it holds (holdEstablishedPosture). Before,
-   * an lstat error keyed `absent:EIO`, re-read the bytes, and a second lstat
-   * that failed too answered "not a link" — the unsigned link's own Guard-off
-   * values became the established posture, and a later blank held them.
+   * and judged as that entry's only when both lstats succeed with the same
+   * key, and the link verdict uses that lstat. Bytes that cannot be pinned to
+   * one entry — an lstat that fails with anything but ENOENT, before or after
+   * the read, or an entry that changes under every attempt — are never taken
+   * as a regular file's: judgeUnattributed holds the established posture, or
+   * with none judges them as a link's. Before #983, an lstat error keyed
+   * `absent:EIO`, re-read the bytes, and a second lstat that failed too
+   * answered "not a link" — the unsigned link's own Guard-off values became
+   * the established posture, and a later blank held them.
    */
   async function loadShieldConfigExclusive() {
     for (let attempt = 1; ; attempt += 1) {
       const before = await configEntrySnapshot();
-      if (before.state === "unknown") return holdEstablishedPosture();
+      if (before.state === "unknown") return judgeUnattributed(null);
       if (before.state === "absent") {
         // config.json is gone: the established posture goes with it.
         lastRead = { key: before.key, raw: null, text: "" };
@@ -302,15 +350,15 @@ export function createOpenClawRuntime({
         return holdEstablishedPosture();
       }
       if (lastRead?.key !== before.key) {
-        const { raw, text } = await readConfigBytes();
+        const bytes = await readConfigBytes();
         const after = await configEntrySnapshot();
-        if (after.state === "unknown") return holdEstablishedPosture();
+        if (after.state === "unknown") return judgeUnattributed(bytes);
         if (after.key !== before.key) {
           // Changed under the read: these bytes may not be that entry's.
           if (attempt < READ_ATTEMPTS) continue;
-          return holdEstablishedPosture();
+          return judgeUnattributed(bytes);
         }
-        lastRead = { key: before.key, raw, text };
+        lastRead = { key: before.key, raw: bytes.raw, text: bytes.text };
         shieldConfig = null;
       }
       // No bytes to judge, so no link verdict either: the held posture (or
