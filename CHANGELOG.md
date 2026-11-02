@@ -7,8 +7,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.17.3] - 2026-11-02
+
+Patch on 5.17.2. Release tooling only: the ClawHub sync step no longer reports a held upload as a failed publish, and retries a ClawHub write throttle once (#985, PR #986). A held version stays pending, not published, until ClawHub serves it. No change to the npm package's runtime code, Action Guard, configuration or schema. Action Guard stays off by default. Node floor unchanged.
+
 ### Fixed
-- **ClawHub sync: a held version is pending, not a failed publish (#985).** On 5.17.2 the first `clawhub publish` landed but was held for scan/review, so the public index did not list it; the retry read `absent`, republished, got `HTTP 400: Version 5.17.2 already exists`, and the step went red with "the publish did not land". `scripts/clawhub-sync.mjs` now treats a non-zero publish whose output names the target version as already existing as submitted: it keeps polling and exits 2 (held, no republish needed) instead of 1. Any other publish failure, including other HTTP 400s (upload-ticket failure, a different version "already exists"), still exits 1. A ClawHub write throttle (`Too many writes ... (reset in Ns)`) is retried once after the reported window, capped at 120s; a second throttle still fails.
+- **ClawHub sync: a held version is pending, not a failed publish (#985, PR #986).** On 5.17.2 the first `clawhub publish` landed but was held for scan/review, so the public index did not list it; the retry read `absent`, republished, got `HTTP 400: Version 5.17.2 already exists`, and the step went red with "the publish did not land". `scripts/clawhub-sync.mjs` now treats a non-zero publish whose output names the target version as already existing as submitted: it does not republish and keeps polling, exiting 0 if ClawHub starts serving the version within the wait and 2 (held/pending, not published) otherwise, instead of 1. Any other publish failure, including other HTTP 400s (upload-ticket failure, a different version "already exists"), still exits 1. A ClawHub write throttle (`Too many writes ... (reset in Ns)`) is retried once after the reported window plus 5s, capped at 120s; a second throttle still fails.
 
 ## [5.17.2] - 2026-11-02
 
