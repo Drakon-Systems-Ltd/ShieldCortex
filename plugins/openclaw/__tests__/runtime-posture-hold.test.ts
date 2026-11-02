@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, promises as fsPromises, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -257,4 +258,50 @@ describe('plugin gate over the real runtime: lstat faults and overlapping reads 
     expect(gated(await hooks['before_tool_call'](GATED))).toBe(true);
     expect(gated(await hooks['before_tool_call'](GATED))).toBe(true);
   });
+});
+
+describe('plugin gate over the real runtime: a cold gateway whose config.json cannot be lstat\'d (v5.17.2 release review r3 B1)', () => {
+  // The CLI's signature over the object minus `_sig`, keyed by the local `.integrity-key`.
+  const KEY = 'c'.repeat(64);
+  function writeSigned(body: Record<string, unknown>): void {
+    writeFileSync(join(configDir, '.integrity-key'), KEY, { mode: 0o600 });
+    const sig = createHmac('sha256', KEY).update(JSON.stringify(body, null, 2)).digest('hex');
+    writeFileSync(configPath(), JSON.stringify({ ...body, _sig: sig }, null, 2), { mode: 0o600 });
+  }
+
+  /** Register and make the first tool call with every lstat of config.json failing EIO after `pass` go through. */
+  async function firstCallUnderLstatFault(pass: number): Promise<{ gatedFirst: boolean; hits: number }> {
+    let hits = 0;
+    let passes = pass;
+    const restore = interceptConfig('lstat', (orig, args) => {
+      if (passes > 0) {
+        passes -= 1;
+        return orig(...args);
+      }
+      hits += 1;
+      return Promise.reject(eio());
+    });
+    try {
+      const hooks = await registerWithRealRuntime();
+      return { gatedFirst: gated(await hooks['before_tool_call'](GATED)), hits };
+    } finally {
+      restore();
+    }
+  }
+
+  for (const [where, pass] of [['first entry snapshot', 0], ['post-read entry snapshot', 1]] as const) {
+    it(`signed enforcing config.json, lstat EIO at the ${where}: gated from the first tool call (v5.17.1 gated it; #983 let it through)`, async () => {
+      writeSigned(ENFORCING);
+      const { gatedFirst, hits } = await firstCallUnderLstatFault(pass);
+      expect(hits).toBeGreaterThan(0);
+      expect(gatedFirst).toBe(true);
+    });
+
+    it(`control: signed default-off config.json, lstat EIO at the ${where}: not gated — Guard stays off`, async () => {
+      writeSigned({ actionGuard: { enabled: false } });
+      const { gatedFirst, hits } = await firstCallUnderLstatFault(pass);
+      expect(hits).toBeGreaterThan(0);
+      expect(gatedFirst).toBe(false);
+    });
+  }
 });

@@ -22,9 +22,18 @@
  * malformed or unreadable file on a cold runtime reads `{}` (Guard off by
  * default), removing the file clears the hold, and a valid new file — Guard
  * off included — takes effect.
+ *
+ * A cold runtime whose config.json ENTRY cannot be lstat'd (or whose bytes
+ * cannot be pinned to one entry) is not one of those: the bytes are readable.
+ * v5.17.2 release review r3 B1: #983 answered it `{}` without reading them,
+ * where v5.17.1 and #981 read a signed enforcing file as enforcing. It now
+ * reads them and judges them as a link would be judged (the link state is
+ * unknown): a signature the local `.integrity-key` verifies puts them in
+ * force, anything else is held strict.
  */
+import { createHmac } from 'node:crypto';
 import * as realFsp from 'node:fs/promises';
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
@@ -34,6 +43,9 @@ import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals
  * often they did. `lstatPass`: how many armed lstats still go through before
  * the rest fail (a fault that starts between two lstats of one read).
  * `parkRead`: the next readFile of config.json waits for `release()`.
+ * `reads`: readFile calls on config.json that reached the disk.
+ * `afterRead`: runs after each such read resolves (an entry replaced under
+ * every read).
  */
 const fault = {
   path: '',
@@ -41,6 +53,8 @@ const fault = {
   lstatPass: 0,
   read: false,
   hits: 0,
+  reads: 0,
+  afterRead: null as null | (() => void),
   parkRead: null as null | { parked: boolean; released: Promise<void> },
 };
 const eio = (syscall: string, p: string): NodeJS.ErrnoException =>
@@ -64,12 +78,19 @@ const faultyFsp = {
       fault.hits += 1;
       return Promise.reject(eio('open', p));
     }
+    const read = () => {
+      const pending = (realFsp.readFile as (...a: unknown[]) => Promise<unknown>)(p, ...rest);
+      if (p !== fault.path) return pending;
+      fault.reads += 1;
+      const after = fault.afterRead;
+      return after ? pending.then((bytes) => { after(); return bytes; }) : pending;
+    };
     const park = fault.parkRead;
     if (park && !park.parked && p === fault.path) {
       park.parked = true;
-      return park.released.then(() => (realFsp.readFile as (...a: unknown[]) => Promise<unknown>)(p, ...rest));
+      return park.released.then(read);
     }
-    return (realFsp.readFile as (...a: unknown[]) => Promise<unknown>)(p, ...rest);
+    return read();
   }) as typeof realFsp.readFile,
 };
 jest.unstable_mockModule('node:fs/promises', () => ({ ...faultyFsp, default: faultyFsp }));
@@ -101,12 +122,15 @@ beforeEach(() => {
   fault.lstatPass = 0;
   fault.read = false;
   fault.hits = 0;
+  fault.reads = 0;
+  fault.afterRead = null;
   fault.parkRead = null;
 });
 
 afterEach(() => {
   fault.lstat = false;
   fault.read = false;
+  fault.afterRead = null;
   fault.parkRead = null;
   try {
     chmodSync(configPath(), 0o600);
@@ -168,6 +192,47 @@ const expectStrict = (cfg: Record<string, any>): void => {
   expect(cfg.actionGuard).toMatchObject({ enabled: true, enforce: true });
   expect(cfg.defenceMode).toBe('strict');
 };
+
+/** The whole strict fail-closed posture over `raw` (runtime.mjs strictFailClosedPosture, spelled out). */
+const strictOf = (raw: Record<string, any>): Record<string, any> => ({
+  ...raw,
+  defenceMode: 'strict',
+  actionGuard: { ...(raw.actionGuard ?? {}), enabled: true, enforce: true, autoApprove: [], broker: { enabled: false }, reviewedScripts: [] },
+});
+
+// The CLI's signature: HMAC-SHA256 with the local `.integrity-key` over the
+// object minus `_sig`, `JSON.stringify(rest, null, 2)` (checkConfigIntegrity).
+const KEY = 'a'.repeat(64);
+const signed = (body: Record<string, unknown>): Record<string, unknown> => ({
+  ...body,
+  _sig: createHmac('sha256', KEY).update(JSON.stringify(body, null, 2)).digest('hex'),
+});
+
+/** A regular config.json the CLI signed, with its `.integrity-key` beside it. */
+function writeSignedConfig(body: Record<string, unknown>): string {
+  writeFileSync(join(configDir, '.integrity-key'), KEY, { mode: 0o600 });
+  return writeConfig(signed(body));
+}
+
+/**
+ * What a fresh runtime reads from config.json with no fault armed — the
+ * answer v5.17.1 also gave a cold lstat fault over these bytes (it read them
+ * and took them as a regular file; release review r3 B1 harness). Resets the
+ * read counter after.
+ */
+async function unfaultedBaseline(): Promise<Record<string, any>> {
+  expect(fault.lstat || fault.read).toBe(false);
+  const cfg = await (await runtimeFor(configPath())).loadShieldConfig();
+  fault.reads = 0;
+  return cfg;
+}
+
+/** Replace the config.json entry with a new inode holding the same bytes (no ENOENT in between). */
+function churnEntry(): void {
+  const replacement = join(configDir, 'churn.json');
+  writeFileSync(replacement, readFileSync(configPath()));
+  renameSync(replacement, configPath());
+}
 
 /** A warm runtime holding the strict posture over an unsigned link whose target says Guard off. */
 async function warmUnsignedLink(): Promise<{ runtime: Runtime; first: Record<string, any>; target: string }> {
@@ -423,12 +488,12 @@ describe('controls: the fresh-install and deliberate-change contract is unchange
     expect(await runtime.loadShieldConfig()).toBe(first);
   });
 
-  it('cold start, lstat EIO (nothing established): {} — no posture is taken from an entry that cannot be lstat\'d; the file takes effect once it can', async () => {
+  it('cold start, lstat EIO, unsigned regular enforcing file: strict, not {} — an entry that cannot be lstat\'d is judged like a link; the file reads as itself once it can be lstat\'d', async () => {
     writeConfig(ENFORCING);
     fault.lstat = true;
     const runtime = await runtimeFor(configPath());
     const cfg = await runtime.loadShieldConfig();
-    expect(cfg).toEqual({});
+    expect(cfg).toEqual(strictOf(ENFORCING));
     expect(await runtime.loadShieldConfig()).toBe(cfg);
     expect(fault.hits).toBeGreaterThan(0);
     fault.lstat = false;
@@ -494,6 +559,149 @@ describe('controls: the fresh-install and deliberate-change contract is unchange
       expect(cfg).toEqual({});
       // Stable identity while nothing changes: no re-merge per call.
       expect(await runtime.loadShieldConfig()).toBe(cfg);
+    });
+  }
+});
+
+describe('cold runtime: readable bytes behind an entry that cannot be lstat\'d are read, not answered {} (v5.17.2 release review r3 B1)', () => {
+  // Where the lstat fails: before the read (the first entry snapshot), or
+  // after it (the snapshot that pins the bytes to that entry).
+  const WHERE = [
+    ['first snapshot', 0],
+    ['post-read snapshot', 1],
+  ] as const;
+
+  for (const [where, pass] of WHERE) {
+    it(`${where} lstat EIO, signed enforcing regular file: the bytes' own enforcing posture — what an unfaulted read (and v5.17.1) gives — and the bytes were read`, async () => {
+      writeSignedConfig(ENFORCING);
+      const baseline = await unfaultedBaseline();
+      expect(baseline.actionGuard).toEqual({ enabled: true, enforce: true });
+      expect(baseline.defenceMode).toBe('strict');
+
+      fault.lstat = true;
+      fault.lstatPass = pass;
+      const runtime = await runtimeFor(configPath());
+      const cfg = await runtime.loadShieldConfig();
+      expect(fault.hits).toBeGreaterThan(0);
+      expect(fault.lstatPass).toBe(0);
+      // Read once, as the release review's harness counted (v5.17.1: 1; #983: 0).
+      expect(fault.reads).toBe(1);
+      expect(cfg).toEqual(baseline);
+      // Stable identity while the fault lasts: the plugin does not re-merge per call.
+      expect(await runtime.loadShieldConfig()).toBe(cfg);
+      fault.lstat = false;
+      expect(await runtime.loadShieldConfig()).toEqual(baseline);
+    });
+
+    it(`${where} lstat EIO, unsigned link to a Guard-off target: strict — the unknown entry is not taken as a regular file`, async () => {
+      const target = join(home, 'target.json');
+      writeFileSync(target, JSON.stringify(GUARD_OFF));
+      symlinkSync(target, configPath());
+      fault.lstat = true;
+      fault.lstatPass = pass;
+      const runtime = await runtimeFor(configPath());
+      const cfg = await runtime.loadShieldConfig();
+      expect(fault.hits).toBeGreaterThan(0);
+      expect(cfg).toEqual(strictOf(GUARD_OFF));
+      fault.lstat = false;
+      expect(await runtime.loadShieldConfig()).toEqual(strictOf(GUARD_OFF));
+    });
+
+    it(`${where} lstat EIO, unsigned or mis-signed regular Guard-off file: strict — no signature, no Guard off while the entry is unknown`, async () => {
+      writeFileSync(join(configDir, '.integrity-key'), KEY, { mode: 0o600 });
+      for (const body of [GUARD_OFF, { ...GUARD_OFF, _sig: 'f'.repeat(64) }]) {
+        writeConfig(body);
+        fault.lstat = true;
+        fault.lstatPass = pass;
+        const cfg = await (await runtimeFor(configPath())).loadShieldConfig();
+        fault.lstat = false;
+        expectStrict(cfg);
+        expect(cfg.actionGuard.autoApprove).toEqual([]);
+      }
+    });
+
+    it(`control (${where}): a genuine signed default-off file stays off — the authenticated bytes, not strict`, async () => {
+      writeSignedConfig(GUARD_OFF);
+      const baseline = await unfaultedBaseline();
+      expect(baseline.actionGuard).toEqual({ enabled: false });
+      fault.lstat = true;
+      fault.lstatPass = pass;
+      const cfg = await (await runtimeFor(configPath())).loadShieldConfig();
+      expect(fault.hits).toBeGreaterThan(0);
+      expect(cfg).toEqual(baseline);
+      expect(cfg.defenceMode).toBeUndefined();
+    });
+
+    it(`control (${where}): warm floor — an enforcing posture is held while the lstat fault lasts, even over newly signed Guard-off bytes; they are honoured once it clears`, async () => {
+      writeSignedConfig(ENFORCING);
+      const runtime = await runtimeFor(configPath());
+      const first = await runtime.loadShieldConfig();
+      expect(first.actionGuard).toEqual({ enabled: true, enforce: true });
+      await tick();
+      writeSignedConfig(GUARD_OFF);
+      fault.lstat = true;
+      fault.lstatPass = pass;
+      expect(await runtime.loadShieldConfig()).toBe(first);
+      expect(fault.hits).toBeGreaterThan(0);
+      fault.lstat = false;
+      const next = await runtime.loadShieldConfig();
+      expect(next).not.toBe(first);
+      expect(next.actionGuard).toEqual({ enabled: false });
+    });
+  }
+
+  it('the posture read under the fault is the floor: a blank while it lasts and after it clears holds it; removing the file clears it', async () => {
+    const text = writeSignedConfig(ENFORCING);
+    fault.lstat = true;
+    const runtime = await runtimeFor(configPath());
+    const cfg = await runtime.loadShieldConfig();
+    expect(cfg.actionGuard).toEqual({ enabled: true, enforce: true });
+    await replaceInPlace(' '.repeat(Buffer.byteLength(text)));
+    expect(await runtime.loadShieldConfig()).toBe(cfg);
+    fault.lstat = false;
+    expect(await runtime.loadShieldConfig()).toBe(cfg);
+    rmSync(configPath());
+    expect(await runtime.loadShieldConfig()).toEqual({});
+  });
+
+  it('an entry replaced under every read (never pinned to one entry): signed enforcing bytes read enforcing, not {}; held after', async () => {
+    writeSignedConfig(ENFORCING);
+    const baseline = await unfaultedBaseline();
+    let churns = 0;
+    fault.afterRead = () => { churns += 1; churnEntry(); };
+    const runtime = await runtimeFor(configPath());
+    const cfg = await runtime.loadShieldConfig();
+    expect(churns).toBeGreaterThanOrEqual(3);
+    expect(cfg).toEqual(baseline);
+    expect(await runtime.loadShieldConfig()).toBe(cfg);
+  });
+
+  it('an unsigned link swapped in under every read: strict, not {} and not its target\'s Guard-off values', async () => {
+    const target = join(home, 'target.json');
+    writeFileSync(target, JSON.stringify(GUARD_OFF));
+    symlinkSync(target, configPath());
+    fault.afterRead = () => {
+      const next = join(configDir, 'link.next');
+      symlinkSync(target, next);
+      renameSync(next, configPath());
+    };
+    const cfg = await (await runtimeFor(configPath())).loadShieldConfig();
+    expect(cfg).toEqual(strictOf(GUARD_OFF));
+  });
+
+  for (const [name, setup] of [
+    ['lstat AND readFile EIO', () => { writeSignedConfig(ENFORCING); fault.read = true; }],
+    ['blank file', () => writeConfig('   ')],
+    ['malformed file', () => writeConfig('{not json')],
+  ] as const) {
+    it(`control: cold, lstat EIO, ${name} — no bytes to judge: {} (the unreadable-from-the-start default)`, async () => {
+      setup();
+      fault.lstat = true;
+      const runtime = await runtimeFor(configPath());
+      const cfg = await runtime.loadShieldConfig();
+      expect(cfg).toEqual({});
+      expect(await runtime.loadShieldConfig()).toBe(cfg);
+      expect(fault.hits).toBeGreaterThan(0);
     });
   }
 });
