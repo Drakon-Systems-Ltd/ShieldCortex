@@ -15,10 +15,24 @@
  * Two independent questions, both of which must come back clean:
  *
  *   1. **Environment.** Every agent host we integrate with stamps its child
- *      environment (`CLAUDECODE`, `HERMES_SESSION_ID`, `OPENCLAW_*`, `CODEX_*`,
- *      …). A pty wrapper inherits that environment. If any of those names is
- *      present, this process was launched by an agent, whatever device is on
- *      fd 0.
+ *      environment (`CLAUDECODE`, `HERMES_SESSION_ID`, `OPENCLAW_SHELL`,
+ *      `OPENCLAW_AGENT_ID`, `CODEX_*`, …). A pty wrapper inherits that
+ *      environment. If any of those CHILD MARKERS is present, this process was
+ *      launched by an agent, whatever device is on fd 0. Any `OPENCLAW_*`
+ *      name counts as a child marker unless it is on the short config-export
+ *      list below: unknown names still refuse.
+ *
+ *      **Config exports (#815 C).** A login profile can legitimately export
+ *      OpenClaw's own config locations (`OPENCLAW_HOME`, `OPENCLAW_STATE_DIR`,
+ *      `OPENCLAW_CONFIG_PATH`, `OPENCLAW_PROFILE`), so their presence is not
+ *      proof of an agent: the owner's own SSH shell carries them. They do not
+ *      refuse by themselves. They are also inherited by every agent child, so
+ *      when one is present the ancestry half below must positively vouch for
+ *      a human: the process tree must be readable (no env-only degrade on a
+ *      platform whose tree we cannot read), the session leader must be a
+ *      shell (or `login`) and its parent must be a live process other than
+ *      init (sshd, login, tmux, a terminal emulator). The init-parent
+ *      residual that is otherwise allowed (WSL, console) is refused here.
  *
  *   2. **Process ancestry.** Walk from this process to the session leader and
  *      on to PID 1. Refuse if the session leader is a pty *tool* rather than a
@@ -61,9 +75,16 @@ import { execFileSync } from 'node:child_process';
 // ── Signals ───────────────────────────────────────────
 
 /**
- * Environment names that an agent host stamps on its children. Presence of
- * ANY of these means "launched by an agent". Matched as exact names or
- * prefixes (a trailing `_` marks a prefix).
+ * Environment names that an agent host stamps on its children (CHILD
+ * markers). Presence of ANY of these means "launched by an agent". Matched as
+ * exact names or prefixes (a trailing `_` marks a prefix).
+ *
+ * `OPENCLAW_` stays a prefix on purpose: OpenClaw sets `OPENCLAW_SHELL=exec`
+ * on every exec-tool child, and ShieldCortex's own hooks treat
+ * `OPENCLAW_AGENT_ID`, `OPENCLAW_SESSION_ID` and `OPENCLAW_PARENT_PID` as
+ * proof of an agent child. Only the exact names in
+ * {@link OPENCLAW_CONFIG_EXPORTS} are carved out; any other `OPENCLAW_*`
+ * name, including ones OpenClaw adds later, is still a hard refusal.
  */
 export const AGENT_ENV_MARKERS: readonly string[] = [
   'CLAUDECODE',
@@ -78,6 +99,20 @@ export const AGENT_ENV_MARKERS: readonly string[] = [
   'AIDER_',
   'GEMINI_CLI',
   'COPILOT_AGENT',
+];
+
+/**
+ * OpenClaw config exports (#815 C): exact names a human's login profile may
+ * carry to point OpenClaw at its home, state, config file or profile. These
+ * are the names OpenClaw and ShieldCortex actually read. They do not refuse
+ * by themselves, but their presence makes the ancestry check strict (see
+ * {@link operatorProvenance}). Exact match only, never a prefix.
+ */
+export const OPENCLAW_CONFIG_EXPORTS: readonly string[] = [
+  'OPENCLAW_HOME',
+  'OPENCLAW_STATE_DIR',
+  'OPENCLAW_CONFIG_PATH',
+  'OPENCLAW_PROFILE',
 ];
 
 /**
@@ -279,7 +314,8 @@ export type ProvenanceReason =
   | 'pty-interpreter-leader'
   | 'no-session-leader'
   | 'orphaned-shell-leader'
-  | 'process-tree-unreadable';
+  | 'process-tree-unreadable'
+  | 'non-shell-session-leader';
 
 export interface ProvenanceVerdict {
   ok: boolean;
@@ -297,11 +333,19 @@ const MAX_WALK = 64;
  * agent's tool call? Cheap; called once per `approve` grant.
  *
  * On a platform with no readable process tree, only the environment half
- * runs — that is a weaker check and the verdict says so in `detail`.
+ * runs — that is a weaker check and the verdict says so in `detail`. With an
+ * OpenClaw config export in the environment there is no such degrade: an
+ * unreadable tree refuses (#815 C).
  */
 export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam()): ProvenanceVerdict {
-  // 1) Environment.
+  // 1) Environment. Child markers refuse outright; config exports are
+  // collected and make the ancestry check strict (#815 C).
+  const configExports: string[] = [];
   for (const name of Object.keys(seam.env)) {
+    if (OPENCLAW_CONFIG_EXPORTS.includes(name)) {
+      configExports.push(name);
+      continue;
+    }
     for (const marker of AGENT_ENV_MARKERS) {
       const hit = marker.endsWith('_') ? name.startsWith(marker) : name === marker;
       if (hit) {
@@ -314,10 +358,24 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
       }
     }
   }
+  const strict = configExports.length > 0;
+  const exportNote = strict
+    ? ` The environment carries ${configExports.sort().join(', ')}, which a login profile may export but every OpenClaw agent child also inherits, so this command needs a login session it can verify.`
+    : '';
 
   // 2) Ancestry.
   const self = seam.proc(seam.pid);
   const treePlatform = TREE_PLATFORMS.includes(seam.platform);
+  if (strict && !treePlatform) {
+    // The env-only degrade below would let an agent child that carries only
+    // the inherited config exports through unchecked. No degrade here.
+    return {
+      ok: false,
+      reason: 'process-tree-unreadable',
+      detail: `this platform's process tree cannot be read, so the ancestry cannot be checked.${exportNote}`,
+      chain: [],
+    };
+  }
   if (!self) {
     // Where we know how to read the tree, failing to is not "nothing to see":
     // an agent that can make the read fail must not inherit the degrade.
@@ -507,6 +565,32 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
     };
   }
 
+  // #815 C: an OpenClaw config export is advisory only from a session the
+  // tree positively vouches for. The leader must be a shell (or `login`, the
+  // Terminal.app leader), and its parent must be a live process that is not
+  // init: sshd, login, tmux, a terminal emulator. The WSL/console residual
+  // below is NOT extended to this case.
+  if (strict) {
+    const leaderName = basenameLower(leader.comm.replace(/^-/, ''));
+    if (!SHELL_NAMES.includes(leaderName) && leaderName !== 'login') {
+      return {
+        ok: false,
+        reason: 'non-shell-session-leader',
+        detail: `this session is led by "${leader.comm}" (pid ${leader.pid}), not a login shell.${exportNote}`,
+        chain,
+      };
+    }
+    if (leader.ppid <= 1 || leaderParent === null || nameIn(leaderParent.comm, INIT_NAMES)) {
+      const parentName = leaderParent ? `"${leaderParent.comm}"` : `pid ${leader.ppid}`;
+      return {
+        ok: false,
+        reason: 'orphaned-shell-leader',
+        detail: `this session is led by "${leader.comm}" (pid ${leader.pid}) whose parent is ${parentName}, not a terminal provider such as sshd, login or tmux.${exportNote}`,
+        chain,
+      };
+    }
+  }
+
   // Residual, not refused: a SHELL leader whose parent is init. That is
   // both "daemonise, openpty, exec bash" (GPT-6 r2) AND a WSL / console
   // login (bash's parent is init). Refusing it cards every WSL user.
@@ -516,7 +600,14 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
   // start a detached tmux session and drop out of the tree; refusing
   // multiplexers would card every human who uses one.
 
-  return { ok: true, reason: null, detail: 'interactive session led by a shell with no agent ancestor.', chain };
+  return {
+    ok: true,
+    reason: null,
+    detail: strict
+      ? `interactive login session led by a shell under a terminal provider, with no agent ancestor; OpenClaw config exports (${configExports.join(', ')}) allowed.`
+      : 'interactive session led by a shell with no agent ancestor.',
+    chain,
+  };
 }
 
 /** One operator-facing paragraph for a refusal. */
