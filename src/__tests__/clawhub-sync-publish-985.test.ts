@@ -73,7 +73,7 @@ afterEach(() => {
 });
 
 function runSync(responses: Response[]) {
-  const env = { ...process.env, npm_config_prefix: tmp, FAKE_CLAWHUB_LOG: log, FAKE_CLAWHUB_PUBLISH: JSON.stringify(responses) };
+  const env: NodeJS.ProcessEnv = { ...process.env, npm_config_prefix: tmp, FAKE_CLAWHUB_LOG: log, FAKE_CLAWHUB_PUBLISH: JSON.stringify(responses) };
   delete env.CLAWHUB_TOKEN;
   const res = spawnSync(process.execPath, [script], { cwd: root, env, encoding: 'utf8', timeout: 60_000 });
   const calls = existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as { at: number; args: string[] }) : [];
