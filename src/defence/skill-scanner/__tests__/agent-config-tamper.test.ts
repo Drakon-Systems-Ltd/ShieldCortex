@@ -5,7 +5,7 @@
 
 import { describe, it, expect } from '@jest/globals';
 import { scanSkillContent } from '../scan-skill.js';
-import { detectSkillThreats } from '../patterns.js';
+import { detectSkillThreats, skillPatternGroupRows } from '../patterns.js';
 import type { SkillFormat } from '../parser.js';
 
 const FORMATS: Array<[SkillFormat, string]> = [
@@ -316,4 +316,46 @@ describe('agent_config_tamper review of dcfc56e5', () => {
       expect(Number(process.hrtime.bigint() - start) / 1e6).toBeLessThan(2000);
     }
   });
+});
+
+// Node 22.14 CI (x64 and macOS arm64) measured 43-99 s per 100 KB blank input
+// at 3aa6ecf5, while Node 24 and linux arm64 stayed in milliseconds. The cause
+// was a negation lookbehind with an unbounded `\s+` / `(?:\w+\s+){0,2}`, which
+// the engine can re-scan backwards over the whole blank run at every position.
+// Timing alone is engine-dependent, so the shape is checked too.
+describe('agent_config_tamper rows are linear on blank runs, one by one', () => {
+  const rows = skillPatternGroupRows('agent_config_tamper');
+
+  it('has rows to check', () => {
+    expect(rows.length).toBeGreaterThan(10);
+  });
+
+  it('no lookbehind can span a line break or an unbounded whitespace run', () => {
+    for (const re of rows) {
+      for (const m of re.source.matchAll(/\(\?<!((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)/g)) {
+        const body = m[1];
+        expect({ re: re.source, body, hasNewlineClass: /\\s|\\n|\[\^/.test(body) }).toEqual({ re: re.source, body, hasNewlineClass: false });
+        expect({ re: re.source, body, unbounded: /[+*](?!\?)/.test(body) }).toEqual({ re: re.source, body, unbounded: false });
+      }
+    }
+  });
+
+  const INPUTS: Array<[string, string]> = [
+    ['newlines', '\n'.repeat(100_000)],
+    ['space-newline', ' \n'.repeat(50_000)],
+    ['spaces', ' '.repeat(100_000)],
+    ['tabs', '\t'.repeat(100_000)],
+    ['CRLF', '\r\n'.repeat(50_000)],
+    ['never-space run', 'never '.repeat(20_000)],
+  ];
+  for (const [label, input] of INPUTS) {
+    it(`each row stays under 200 ms on ${label}`, () => {
+      for (const re of rows) {
+        const start = process.hrtime.bigint();
+        re.test(input);
+        const ms = Number(process.hrtime.bigint() - start) / 1e6;
+        expect({ re: re.source, slow: ms >= 200 }).toEqual({ re: re.source, slow: false });
+      }
+    });
+  }
 });

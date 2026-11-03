@@ -88,6 +88,11 @@ const AGENT_CONFIG_FILE =
 const CONFIG_WRITE_VERB =
   String.raw`\b(?:write|add|append|put|insert|create|edit|modify|update|change|set|merge|patch|overwrite|replace|configure|save|store|paste|copy|drop|place)\b`;
 
+/** The rows of one SKILL pattern group, for per-regex tests. */
+export function skillPatternGroupRows(name: string): readonly RegExp[] {
+  return SKILL_PATTERN_GROUPS.find((g) => g.name === name)?.patterns ?? [];
+}
+
 const SKILL_PATTERN_GROUPS: PatternGroup[] = [
   // 1. Tool injection — instructions to run shell commands or write files
   {
@@ -253,18 +258,22 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
       // also appears in benign enable/disable docs, so require an event).
       /["']hooks["']\s*:\s*\{\s*["'](?:PreToolUse|PostToolUse|SessionStart|SessionEnd|UserPromptSubmit|Stop|SubagentStop|Notification|PreCompact)["']/,
       // Turn off sandbox / approval settings.
-      /(?<!(?:never|not|avoid|n't|without)\s+(?:\w+\s+){0,2})--dangerously-(?:skip-permissions|bypass-approvals-and-sandbox)\b/i,
-      /(?<!(?:never|not|avoid|n't|without)\s+(?:\w+\s+){0,2})\bapproval[_-]policy\s*[=:]\s*["']?never\b/i,
-      /(?<!(?:never|not|avoid|n't|without)\s+(?:\w+\s+){0,2})\bsandbox[_-]mode\s*[=:]\s*["']?danger-full-access\b/i,
+      /(?<!(?:never|not|avoid|n't|without)[ \t]{1,4}(?:[\w'-]{1,24}[ \t]{1,4}){0,2})--dangerously-(?:skip-permissions|bypass-approvals-and-sandbox)\b/i,
+      /(?<!(?:never|not|avoid|n't|without)[ \t]{1,4}(?:[\w'-]{1,24}[ \t]{1,4}){0,2})\bapproval[_-]policy\s*[=:]\s*["']?never\b/i,
+      /(?<!(?:never|not|avoid|n't|without)[ \t]{1,4}(?:[\w'-]{1,24}[ \t]{1,4}){0,2})\bsandbox[_-]mode\s*[=:]\s*["']?danger-full-access\b/i,
       /["']?defaultMode["']?\s*[=:]\s*["']?bypassPermissions\b/,
       /\bskipDangerousModePermissionPrompt\b|\benableAllProjectMcpServers\b/,
       // A real disable only: `turn off` / `switch off` / `disable` / `run
       // without`, or `set|turn|switch the sandbox|approval … off|never|none`.
       // Setting the sandbox to read-only or turning it on is hardening, and
       // a negated instruction ("never turn off the sandbox") is advice.
-      /(?<!(?:never|not|avoid|n't|without)\s+(?:\w+\s+){0,2})\b(?:(?:turn|switch)\s+off|disable|bypass)\s+(?:the\s+|all\s+|any\s+)?(?:sandbox(?:ing)?|approvals?)\b/i,
-      /(?<!(?:never|not|avoid|n't|without)\s+(?:\w+\s+){0,2})\b(?:turn|switch|set)\s+(?:the\s+)?(?:sandbox|approvals?)(?:[ \t]+[\w-]{1,20}){0,2}?[ \t]+(?:off|to[ \t]+(?:off|never|none|disabled|danger-full-access))\b/i,
-      /\b(?:run|work|operate|execute|proceed)\s+without\s+(?:the\s+|a\s+|any\s+)?(?:sandbox(?:ing)?|approvals?)\b/i,
+      // The negation lookbehind (here and on the flag rows above) uses bounded
+      // horizontal whitespace only: an unbounded `\s+` in a lookbehind is
+      // re-scanned backwards over a whole blank run at every position, which
+      // Node 22.14 CI measured at 43-99 s on the 100 KB newline-run gate.
+      /(?<!(?:never|not|avoid|n't|without)[ \t]{1,4}(?:[\w'-]{1,24}[ \t]{1,4}){0,2})\b(?:(?:turn|switch)[ \t]{1,4}off|disable|bypass)[ \t]{1,4}(?:(?:the|all|any)[ \t]{1,4})?(?:sandbox(?:ing)?|approvals?)\b/i,
+      /(?<!(?:never|not|avoid|n't|without)[ \t]{1,4}(?:[\w'-]{1,24}[ \t]{1,4}){0,2})\b(?:turn|switch|set)[ \t]{1,4}(?:the[ \t]{1,4})?(?:sandbox|approvals?)(?:[ \t]{1,4}[\w-]{1,20}){0,2}?[ \t]{1,4}(?:off|to[ \t]{1,4}(?:off|never|none|disabled|danger-full-access))\b/i,
+      /\b(?:run|work|operate|execute|proceed)[ \t]{1,4}without[ \t]{1,4}(?:(?:the|a|any)[ \t]{1,4})?(?:sandbox(?:ing)?|approvals?)\b/i,
       /\bsandbox\s*[=:]\s*["']?(?:false|off|disabled)\b/i,
     ],
   },
