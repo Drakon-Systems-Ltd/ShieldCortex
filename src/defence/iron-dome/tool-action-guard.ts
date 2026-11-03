@@ -4256,6 +4256,195 @@ export function closedReadPipelineMask(execCommand: string, command: string, raw
 }
 
 /**
+ * #629 — read-only inspection commands whose ARGUMENTS merely contain words
+ * the danger rules look for. A search pattern, a file name or a PR search
+ * query is data to these programs; the rules match the text anyway and rate
+ * the call as if the words were commands.
+ *
+ * `readOnlyInspectionMask` blanks (length-preserving) every top-level
+ * statement that is a pipeline made ONLY of read-only stages, so the rules
+ * judge what is left. It can only hide text from matching: a statement with a
+ * redirect, an expansion, a background job, a stage outside the lists below,
+ * an interpreter or shell on the far end of a pipe, a writing option, or a
+ * word naming a credential path is never blanked and is judged exactly as
+ * before. The read-only stages are:
+ *   - the closed-set reads (`stagesAreClosedSetReads`, not a writing `jq`);
+ *   - `sed` printing lines: only the print-style scripts of
+ *     `READONLY_SED_SCRIPT_RE`, no in-place, script-file or extra options;
+ *   - `find` using only the predicates in `READONLY_FIND_PREDICATES` (so none
+ *     that deletes, runs a program or writes a listing);
+ *   - `awk` with a program free of output redirection, pipes, process and
+ *     file functions, and no option beyond a field separator;
+ *   - `gh pr|issue|run|release|repo|workflow` list/view/diff/checks/status and
+ *     `gh search`, with an allow-listed set of flags.
+ */
+const READONLY_SED_SCRIPT_RE = /^(?:\d+(?:,(?:\d+|\$))?|\$|\/[^/\\]*\/I?(?:,(?:\d+|\/[^/\\]*\/))?)?[pP=]$/;
+const READONLY_SED_FLAG_RE = /^-[nEsrz]+$/;
+/** predicate -> number of value words it takes (find). Anything else refuses. */
+const READONLY_FIND_PREDICATES: Record<string, number> = {
+  '-name': 1, '-iname': 1, '-path': 1, '-ipath': 1, '-wholename': 1, '-iwholename': 1,
+  '-regex': 1, '-iregex': 1, '-type': 1, '-xtype': 1, '-maxdepth': 1, '-mindepth': 1,
+  '-mtime': 1, '-mmin': 1, '-atime': 1, '-amin': 1, '-ctime': 1, '-cmin': 1,
+  '-newer': 1, '-size': 1, '-user': 1, '-group': 1, '-perm': 1,
+  '-empty': 0, '-print': 0, '-print0': 0, '-o': 0, '-a': 0, '-not': 0, '-prune': 0,
+  '-true': 0, '-false': 0, '-readable': 0, '-writable': 0, '-executable': 0,
+};
+const READONLY_AWK_BAD_PROGRAM_RE = /system|getline|close\s*\(|fflush|[<>|]|ENVIRON|@|\bsrand\b|\/dev\/|\binplace\b/;
+const READONLY_GH_GROUPS = new Set(['pr', 'issue', 'run', 'release', 'repo', 'workflow']);
+const READONLY_GH_ACTIONS = new Set(['list', 'view', 'diff', 'checks', 'status']);
+const READONLY_GH_VALUE_FLAGS = new Set([
+  '--repo', '-R', '--json', '--jq', '-q', '--search', '-S', '--state', '-s', '--limit', '-L',
+  '--label', '-l', '--author', '-A', '--base', '-B', '--head', '-H', '--assignee', '-a',
+  '--branch', '-b', '--workflow', '-w', '--event', '-e', '--status', '--user', '-u', '--app',
+  '--milestone', '-m', '--mention', '--visibility', '--language', '--topic',
+]);
+const READONLY_GH_BOOL_FLAGS = new Set([
+  '--name-only', '--patch', '--comments', '-c', '--color', '--paginate', '--archived', '--no-archived',
+]);
+const READONLY_GH_SEARCH_KINDS = new Set(['issues', 'prs', 'repos', 'code', 'commits']);
+
+function readOnlyGhStage(argv: string[]): boolean {
+  let rest: string[];
+  if (argv[1] === 'search' && READONLY_GH_SEARCH_KINDS.has(argv[2] ?? '')) rest = argv.slice(3);
+  else if (READONLY_GH_GROUPS.has(argv[1] ?? '') && READONLY_GH_ACTIONS.has(argv[2] ?? '')) rest = argv.slice(3);
+  else return false;
+  for (let i = 0; i < rest.length; i++) {
+    const w = rest[i]!;
+    if (!w.startsWith('-')) continue; // a plain positional: number, branch, search word
+    const eq = w.indexOf('=');
+    const name = eq > 0 ? w.slice(0, eq) : w;
+    if (READONLY_GH_VALUE_FLAGS.has(name)) {
+      if (eq < 0) i++; // the value word is judged as data, not as a flag
+    } else if (!READONLY_GH_BOOL_FLAGS.has(w)) return false;
+  }
+  return true;
+}
+
+function readOnlyFindStage(argv: string[]): boolean {
+  let i = 1;
+  while (i < argv.length && /^-[LHP]$/.test(argv[i]!)) i++;
+  while (i < argv.length && !argv[i]!.startsWith('-')) i++; // start paths
+  while (i < argv.length) {
+    const arity = READONLY_FIND_PREDICATES[argv[i]!];
+    if (arity === undefined || i + arity >= argv.length) return false;
+    i += 1 + arity;
+  }
+  return true;
+}
+
+function readOnlySedStage(argv: string[]): boolean {
+  let i = 1;
+  while (i < argv.length && argv[i]!.startsWith('-')) {
+    if (!READONLY_SED_FLAG_RE.test(argv[i]!)) return false;
+    i++;
+  }
+  return i < argv.length && READONLY_SED_SCRIPT_RE.test(argv[i]!);
+}
+
+function readOnlyAwkStage(argv: string[]): boolean {
+  let i = 1;
+  if (argv[i] === '-F') i += 2;
+  else if (/^-F[^-=]/.test(argv[i] ?? '')) i++;
+  const program = argv[i];
+  return program !== undefined && !program.startsWith('-') && !READONLY_AWK_BAD_PROGRAM_RE.test(program);
+}
+
+function readOnlyInspectionStageIsRead(argv: string[]): boolean {
+  switch (argv[0]) {
+    case 'sed': return readOnlySedStage(argv);
+    case 'find': return readOnlyFindStage(argv);
+    case 'awk': return readOnlyAwkStage(argv);
+    case 'gh': return readOnlyGhStage(argv);
+    default: return stagesAreClosedSetReads([argv]) && !closedReadStageMayWrite(argv);
+  }
+}
+
+/**
+ * Words naming the guard's own files or the host agent settings. A read of
+ * these is what the self-protection floor covers (#874 keeps it separate), so
+ * a statement naming one is never blanked here.
+ */
+const READONLY_GUARD_FILE_WORD_RE = /\.claude(?:\/|$)|\.openclaw(?:\/|$)|openclaw\.json|\.shieldcortex|settings(?:\.local)?\.json|(?:^|\/)\.?config\.json$/i;
+const READONLY_FILE_OPERAND_VERB_RE = /^(?:ls|dir|cat|head|tail|wc|stat|du)$/;
+/** Words that name a credential file or key directory (any spelling the closed-read relief refuses). */
+function readOnlyWordNamesSensitivePath(word: string): boolean {
+  return SENSITIVE_PATH_RE.test(word) || CLOSED_READ_SENSITIVE_BARE_RE.test(word)
+    || CLOSED_READ_SENSITIVE_HOME_DIR_RE.test(word) || /(?:^|\/)\.(?:ssh|aws|gnupg|kube|docker|netrc|npmrc)(?:\/|$)/.test(word)
+    || READONLY_GUARD_FILE_WORD_RE.test(word)
+    || closedReadWordIsNonCanonicalPath(word);
+}
+
+export function readOnlyInspectionMask(execCommand: string, command: string, rawCommand: string): string | null {
+  const cmd = String(execCommand || '');
+  if (!cmd || cmd !== command || command !== rawCommand) return null;
+  if (/<<|[\r`]/.test(cmd) || STORE_NESTED_EXEC_RE.test(cmd) || POLICY_LOCK_ENV_SEAM_RE.test(cmd)) return null;
+  const spans: Array<[number, number]> = [];
+  let quote = '';
+  let from = 0;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (quote) {
+      if (c === quote) quote = '';
+      else if (c === '\n') return null;
+      else if (quote === '"' && (c === '$' || c === '\\')) return null;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; continue; }
+    // Outside quotes: no expansion, grouping, redirect, background, escape or glob.
+    if ('$\\(){}<>*?['.includes(c) || (c === '&' && cmd[i + 1] !== '&' && cmd[i - 1] !== '&')) return null;
+    const two = cmd.slice(i, i + 2);
+    if (c === '\n' || c === ';' || two === '&&' || two === '||') {
+      spans.push([from, i]);
+      if (two === '&&' || two === '||') i++;
+      from = i + 1;
+    }
+  }
+  if (quote) return null;
+  spans.push([from, cmd.length]);
+  let out = cmd;
+  let masked = false;
+  for (const [a, b] of spans) {
+    const stmt = cmd.slice(a, b);
+    if (!stmt.trim()) continue;
+    const parsed = guardConfigStatements(stmt, { quotedAny: true });
+    if (parsed === null) {
+      // Outside the grammar: judge its command-position words for the vetoes only.
+      for (const stage of stmt.split(/[|;&]+/)) {
+        const first = (stage.trim().split(/\s+/)[0] ?? '').replace(/['"]/g, '');
+        if (CLOSED_READ_VETO_WORD_RE.test(first) || first === CLOSED_READ_DOT_SOURCE || /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(first)) return null;
+      }
+      continue;
+    }
+    for (const stages of parsed) {
+      for (const argv of stages) {
+        const first = argv[0] ?? '';
+        if (CLOSED_READ_VETO_WORD_RE.test(first) || first === CLOSED_READ_DOT_SOURCE || /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(first)) return null;
+      }
+    }
+    if (parsed.length !== 1) continue;
+    const stages = parsed[0]!;
+    if (!stages.every(readOnlyInspectionStageIsRead)) continue;
+    // A secret-shaped word keeps the secret-egress reading of the whole call.
+    if (SECRET_HINT.test(stmt)) continue;
+    // A file-reading verb takes file names. An operand holding whitespace was
+    // quoted as a phrase, which is a command line in disguise, not a file.
+    if (stages.some(argv => READONLY_FILE_OPERAND_VERB_RE.test(argv[0] ?? '') && argv.slice(1).some(w => /\s/.test(w)))) continue;
+    // ...and its options must be the plain no-argument flags of that verb, so
+    // a spelled command fragment (`ls <delete verb> <flags> /`) is not read as
+    // a listing.
+    if (stages.some(argv => READONLY_FILE_OPERAND_VERB_RE.test(argv[0] ?? '')
+      && argv.slice(1).some(w => w.startsWith('-') && !CLOSED_READ_FLAG_RE[argv[0]!]!.test(w)))) continue;
+    // Plain operands only: a quoted leading `~` is a literal directory, and any
+    // word naming a credential path keeps the statement visible to the rules.
+    if (/['"]~/.test(stmt)) continue;
+    if (stages.some(argv => argv.slice(1).some(readOnlyWordNamesSensitivePath))) continue;
+    out = out.slice(0, a) + ' '.repeat(b - a) + out.slice(b);
+    masked = true;
+  }
+  return masked ? out : null;
+}
+
+/**
  * #874 D5 — a closed-set stage spelled with an option that writes or edits in
  * place (`jq -i`, `--in-place`, in the jq builds and wrappers that have it).
  * Any short-option cluster holding `i` counts for jq, so `-ri` is caught too.
@@ -7355,7 +7544,14 @@ function evaluateToolCallCore(
   // docs/data writes (a message body, runbook prose). #93 carves out script /
   // memory / shebang write targets above. See commandScanText for the
   // printed/commented-token suppression within a shell command.
-  const execCommand = commandScanText(command);
+  const scannedCommand = commandScanText(command);
+  // #629: read-only inspection statements (search/print/list) are blanked so
+  // their arguments are not rated as commands. Exec family only, and never
+  // when the remaining text can still reach the network.
+  const inspectionMasked = family === 'exec' ? readOnlyInspectionMask(scannedCommand, command, rawCommand) : null;
+  const execCommand = inspectionMasked !== null && !EXTERNAL_EGRESS.test(inspectionMasked)
+    ? inspectionMasked
+    : scannedCommand;
   const execSurface = [execCommand, path, url].filter(Boolean).join('   ');
 
   // Script-file invocation (issue #4): `bash deploy.sh` used to hide EVERY rule
@@ -7419,7 +7615,7 @@ function evaluateToolCallCore(
   let readMasked: { surface: string; egressCommand: string } | null | undefined;
   const closedReadMasked = (): { surface: string; egressCommand: string } | null => {
     if (readMasked === undefined) {
-      const m = family === 'exec' ? closedReadPipelineMask(execCommand, command, rawCommand) : null;
+      const m = family === 'exec' ? closedReadPipelineMask(scannedCommand, command, rawCommand) : null;
       readMasked = m === null || !execSurface.startsWith(execCommand) ? null : {
         surface: fold.content
           ? `${m}${execSurface.slice(execCommand.length)}\n${fold.content}`
