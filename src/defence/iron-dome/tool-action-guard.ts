@@ -4338,7 +4338,23 @@ function readOnlySedStage(argv: string[]): boolean {
     if (!READONLY_SED_FLAG_RE.test(argv[i]!)) return false;
     i++;
   }
-  return i < argv.length && READONLY_SED_SCRIPT_RE.test(argv[i]!);
+  if (!(i < argv.length && READONLY_SED_SCRIPT_RE.test(argv[i]!))) return false;
+  return noOptionWordsAfter(argv, i + 1);
+}
+
+/**
+ * GNU sed (and some awks) reorder options, so a dash word AFTER the script or
+ * program still acts as an option (`-e`, `-i`, `-f`, `--expression=`). Refuse
+ * any later word starting with '-' (a lone '-' is stdin); everything after a
+ * literal '--' is an operand.
+ */
+function noOptionWordsAfter(argv: string[], from: number): boolean {
+  for (let j = from; j < argv.length; j++) {
+    const w = argv[j]!;
+    if (w === '--') return true;
+    if (w.startsWith('-') && w !== '-') return false;
+  }
+  return true;
 }
 
 function readOnlyAwkStage(argv: string[]): boolean {
@@ -4346,7 +4362,8 @@ function readOnlyAwkStage(argv: string[]): boolean {
   if (argv[i] === '-F') i += 2;
   else if (/^-F[^-=]/.test(argv[i] ?? '')) i++;
   const program = argv[i];
-  return program !== undefined && !program.startsWith('-') && !READONLY_AWK_BAD_PROGRAM_RE.test(program);
+  return program !== undefined && !program.startsWith('-') && !READONLY_AWK_BAD_PROGRAM_RE.test(program)
+    && noOptionWordsAfter(argv, i + 1);
 }
 
 function readOnlyInspectionStageIsRead(argv: string[]): boolean {

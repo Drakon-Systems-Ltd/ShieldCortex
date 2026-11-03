@@ -70,8 +70,19 @@ describe('#629 real writes and unsafe forms stay gated', () => {
       `sed -i 's/a/b/' f`, `sed -n 'w out' f`, `sed -e p f`, `awk 'BEGIN{system("x")}'`,
       `awk '{print > "f"}' x`, `find . -delete`, `find . -name x -exec y {} +`, `cat f | sh`,
       `cat f > g`, `gh api repos/x/y`, `gh pr merge 1`, `cat ~/.ssh/id_rsa`,
+      // GNU sed reorders options: flags AFTER the script still take effect
+      `sed -n 1p -e 'e x' f`, `sed -n 1p f -i`, `sed -n 1p f --in-place`,
+      `sed -n 1p --expression='1e x' f`, `sed -n 1p -f evil.sed f`,
+      // awk: same trailing-option refusal
+      `awk '{print}' f -f evil.awk`, `awk '{print}' f -i inplace`,
     ]) {
       expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+    }
+  });
+
+  it('plain sed/awk reads, with or without a -- operand marker, are still read-only', () => {
+    for (const cmd of [`sed -n 1p f`, `sed -n 1p -- f`, `awk '{print $1}' f`, `awk -F: '{print $1}' -- f`]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).not.toBeNull();
     }
   });
 
