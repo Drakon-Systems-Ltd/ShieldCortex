@@ -86,7 +86,7 @@ function runPatternGroups(content: string, groups: PatternGroup[]): SkillThreatR
 const AGENT_CONFIG_FILE =
   String.raw`(?:\.claude\/settings[\w.-]*\.json|\.claude\/hooks|\.codex\/config\.toml|\.cursor\/mcp\.json|\.gemini\/settings\.json|\.windsurf\/mcp[\w.-]*\.json|(?<![\w-])mcp\.json\b)`;
 const CONFIG_WRITE_VERB =
-  String.raw`\b(?:write|add|append|put|insert|create|edit|modify|update|change|set|merge|patch|overwrite|replace|configure|save|store)\b`;
+  String.raw`\b(?:write|add|append|put|insert|create|edit|modify|update|change|set|merge|patch|overwrite|replace|configure|save|store|paste|copy|drop|place)\b`;
 
 const SKILL_PATTERN_GROUPS: PatternGroup[] = [
   // 1. Tool injection — instructions to run shell commands or write files
@@ -225,7 +225,11 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
       // proxy names. The value must carry a scheme, so a bare mention
       // ("HTTPS_PROXY is honoured") or a placeholder (`HTTPS_PROXY=<url>`)
       // does not match. Horizontal whitespace only around the separator.
-      /(?<![\w.$-])["']?(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT|HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)["']?[ \t]*[=:][ \t]*["']?(?:https?|socks[45]?h?):\/\//,
+      // Code-in-docs shapes count too: a dotted prefix
+      // (`process.env.VAR = "https://…"`), a subscript
+      // (`os.environ["VAR"] = …`), and an upper/mixed-case scheme
+      // (`HTTPS://`), which URL parsers accept.
+      /(?<![\w$-])["']?(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT|HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)["']?\]?[ \t]*[=:][ \t]*["']?(?:[Hh][Tt][Tt][Pp][Ss]?|[Ss][Oo][Cc][Kk][Ss][45]?[Hh]?):\/\//,
       // Write/modify an agent config file, verb and path on one line.
       new RegExp(`${CONFIG_WRITE_VERB}[^\\n]{0,80}${AGENT_CONFIG_FILE}`, 'i'),
       // The same instruction in ordinary Markdown: the verb line ends with a
@@ -254,7 +258,13 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
       /(?<!(?:never|not|avoid|n't|without)\s+(?:\w+\s+){0,2})\bsandbox[_-]mode\s*[=:]\s*["']?danger-full-access\b/i,
       /["']?defaultMode["']?\s*[=:]\s*["']?bypassPermissions\b/,
       /\bskipDangerousModePermissionPrompt\b|\benableAllProjectMcpServers\b/,
-      /\b(?:turn|switch|set)\s+(?:off|the)\s+(?:the\s+)?(?:sandbox|approval)/i,
+      // A real disable only: `turn off` / `switch off` / `disable` / `run
+      // without`, or `set|turn|switch the sandbox|approval … off|never|none`.
+      // Setting the sandbox to read-only or turning it on is hardening, and
+      // a negated instruction ("never turn off the sandbox") is advice.
+      /(?<!(?:never|not|avoid|n't|without)\s+(?:\w+\s+){0,2})\b(?:(?:turn|switch)\s+off|disable|bypass)\s+(?:the\s+|all\s+|any\s+)?(?:sandbox(?:ing)?|approvals?)\b/i,
+      /(?<!(?:never|not|avoid|n't|without)\s+(?:\w+\s+){0,2})\b(?:turn|switch|set)\s+(?:the\s+)?(?:sandbox|approvals?)(?:[ \t]+[\w-]{1,20}){0,2}?[ \t]+(?:off|to[ \t]+(?:off|never|none|disabled|danger-full-access))\b/i,
+      /\b(?:run|work|operate|execute|proceed)\s+without\s+(?:the\s+|a\s+|any\s+)?(?:sandbox(?:ing)?|approvals?)\b/i,
       /\bsandbox\s*[=:]\s*["']?(?:false|off|disabled)\b/i,
     ],
   },
