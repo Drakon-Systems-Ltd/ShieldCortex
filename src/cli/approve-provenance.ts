@@ -15,10 +15,28 @@
  * Two independent questions, both of which must come back clean:
  *
  *   1. **Environment.** Every agent host we integrate with stamps its child
- *      environment (`CLAUDECODE`, `HERMES_SESSION_ID`, `OPENCLAW_*`, `CODEX_*`,
- *      …). A pty wrapper inherits that environment. If any of those names is
- *      present, this process was launched by an agent, whatever device is on
- *      fd 0.
+ *      environment (`CLAUDECODE`, `HERMES_SESSION_ID`, `OPENCLAW_SHELL`,
+ *      `OPENCLAW_AGENT_ID`, `CODEX_*`, …). A pty wrapper inherits that
+ *      environment. If any of those CHILD MARKERS is present, this process was
+ *      launched by an agent, whatever device is on fd 0. Any `OPENCLAW_*`
+ *      name counts as a child marker unless it is on the short config-export
+ *      list below: unknown names still refuse.
+ *
+ *      **Config exports (#815 C).** A login profile can legitimately export
+ *      OpenClaw's own config locations (`OPENCLAW_HOME`, `OPENCLAW_STATE_DIR`,
+ *      `OPENCLAW_CONFIG_PATH`, `OPENCLAW_PROFILE`), so the owner's own shell
+ *      carries them. They tell an owner from an agent in neither direction:
+ *      what marks an agent child is its child markers and its ancestry, and
+ *      an agent able to strip its child markers can strip these as well. So
+ *      the scan skips them and NOTHING else reads the environment: an
+ *      environment whose only `OPENCLAW_*` names are config exports gets
+ *      exactly the verdict it would get with them unset. (A first cut made
+ *      them switch on extra ancestry refusals; those refused owners on ash,
+ *      inside a sudo PTY and on WSL, while an agent could skip them by
+ *      unsetting the exports.) The cost is the env-only residual: on a
+ *      platform whose tree is not read at all (Windows, FreeBSD; see
+ *      {@link operatorProvenance}), an OpenClaw descendant that carries the
+ *      exports but no child marker is no longer refused on the exports alone.
  *
  *   2. **Process ancestry.** Walk from this process to the session leader and
  *      on to PID 1. Refuse if the session leader is a pty *tool* rather than a
@@ -61,9 +79,16 @@ import { execFileSync } from 'node:child_process';
 // ── Signals ───────────────────────────────────────────
 
 /**
- * Environment names that an agent host stamps on its children. Presence of
- * ANY of these means "launched by an agent". Matched as exact names or
- * prefixes (a trailing `_` marks a prefix).
+ * Environment names that an agent host stamps on its children (CHILD
+ * markers). Presence of ANY of these means "launched by an agent". Matched as
+ * exact names or prefixes (a trailing `_` marks a prefix).
+ *
+ * `OPENCLAW_` stays a prefix on purpose: OpenClaw sets `OPENCLAW_SHELL=exec`
+ * on every exec-tool child, and ShieldCortex's own hooks treat
+ * `OPENCLAW_AGENT_ID`, `OPENCLAW_SESSION_ID` and `OPENCLAW_PARENT_PID` as
+ * proof of an agent child. Only the exact names in
+ * {@link OPENCLAW_CONFIG_EXPORTS} are carved out; any other `OPENCLAW_*`
+ * name, including ones OpenClaw adds later, is still a hard refusal.
  */
 export const AGENT_ENV_MARKERS: readonly string[] = [
   'CLAUDECODE',
@@ -78,6 +103,20 @@ export const AGENT_ENV_MARKERS: readonly string[] = [
   'AIDER_',
   'GEMINI_CLI',
   'COPILOT_AGENT',
+];
+
+/**
+ * OpenClaw config exports (#815 C): exact names a human's login profile may
+ * carry to point OpenClaw at its home, state, config file or profile. These
+ * are the names OpenClaw and ShieldCortex actually read. The environment scan
+ * skips them and they change no verdict (see {@link operatorProvenance}).
+ * Exact match only, never a prefix.
+ */
+export const OPENCLAW_CONFIG_EXPORTS: readonly string[] = [
+  'OPENCLAW_HOME',
+  'OPENCLAW_STATE_DIR',
+  'OPENCLAW_CONFIG_PATH',
+  'OPENCLAW_PROFILE',
 ];
 
 /**
@@ -300,8 +339,10 @@ const MAX_WALK = 64;
  * runs — that is a weaker check and the verdict says so in `detail`.
  */
 export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam()): ProvenanceVerdict {
-  // 1) Environment.
+  // 1) Environment. Child markers refuse outright. Config exports are
+  // skipped, and this loop is the only reader of the environment (#815 C).
   for (const name of Object.keys(seam.env)) {
+    if (OPENCLAW_CONFIG_EXPORTS.includes(name)) continue;
     for (const marker of AGENT_ENV_MARKERS) {
       const hit = marker.endsWith('_') ? name.startsWith(marker) : name === marker;
       if (hit) {
@@ -315,7 +356,14 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
     }
   }
 
-  // 2) Ancestry.
+  // 2) Ancestry. Handed the tree and nothing else, so no environment name can
+  // tighten or loosen it: config exports alone give exactly the verdict of
+  // an environment without them (#815 C fix round 1).
+  return ancestryProvenance({ pid: seam.pid, platform: seam.platform, proc: seam.proc });
+}
+
+/** The tree half of {@link operatorProvenance}. Never sees the environment. */
+function ancestryProvenance(seam: Omit<ProvenanceSeam, 'env'>): ProvenanceVerdict {
   const self = seam.proc(seam.pid);
   const treePlatform = TREE_PLATFORMS.includes(seam.platform);
   if (!self) {
@@ -516,7 +564,15 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
   // start a detached tmux session and drop out of the tree; refusing
   // multiplexers would card every human who uses one.
 
-  return { ok: true, reason: null, detail: 'interactive session led by a shell with no agent ancestor.', chain };
+  // Also not refused: a session leader that is not a shell we list (ash, nu,
+  // pwsh, the sudo monitor that leads a sudo PTY). Only the known-bad shapes
+  // above refuse, so a pass is the absence of those, not proof of a human.
+  return {
+    ok: true,
+    reason: null,
+    detail: 'interactive session with no agent marker, agent ancestor or manufactured terminal found; an unlisted terminal provider or a multiplexer is not refused, so this is not proof that a human opened the terminal.',
+    chain,
+  };
 }
 
 /** One operator-facing paragraph for a refusal. */

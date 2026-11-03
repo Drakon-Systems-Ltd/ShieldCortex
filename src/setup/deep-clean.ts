@@ -23,6 +23,7 @@ import os from 'os';
 import { execFileSync, execSync } from 'child_process';
 import { gatewayRestartCommand } from './gateway-restart-command.js';
 import { withOwnConfigWrite } from '../audit/agent-config-watch-own-write.js';
+import { nextCausalSeq } from './causal-seq.js';
 
 const PLUGIN_ID = 'shieldcortex-realtime';
 const HOOK_NAME = 'cortex-memory';
@@ -501,6 +502,99 @@ export function cleanResidue(report: ResidueReport, options: CleanOptions = {}):
   return result;
 }
 
+/** What one gateway restart request came back with. */
+export interface GatewayRestartResult {
+  attempted: boolean;
+  restarted: boolean;
+  method: string;
+  detail?: string;
+  /**
+   * #977: true when this request did NOT exec, because an earlier request in
+   * the same process already did — the outcome is that earlier one's.
+   */
+  reused?: boolean;
+  /**
+   * #977: when the one exec of this process was requested (epoch ms). Used
+   * only to bound readiness evidence — never to order events.
+   */
+  requestedAtMs?: number;
+  /**
+   * #977 review: the causal ticket (`nextCausalSeq`) taken when the one exec
+   * was requested. Compare it with a change's ticket to know which came first.
+   */
+  requestedSeq?: number;
+  /**
+   * The service-manager command did not return within its timeout. The
+   * restart may have been issued and still be draining the stop: uncertain
+   * (check with doctor), never a failure that invites a second restart.
+   */
+  timedOut?: boolean;
+}
+
+/** A failed restart command; a timeout (ETIMEDOUT, killed by SIGTERM) is `timedOut`, not a failure. */
+export function gatewayRestartExecFailure(method: string, err: unknown): GatewayRestartResult {
+  const e = err as { code?: unknown; signal?: unknown };
+  const timedOut = e?.code === 'ETIMEDOUT' || e?.signal === 'SIGTERM';
+  const detail = err instanceof Error ? err.message : String(err);
+  return { attempted: true, restarted: false, method, detail, ...(timedOut ? { timedOut: true } : {}) };
+}
+
+/**
+ * #977 — at most ONE gateway restart exec per process.
+ *
+ * One `shieldcortex update` issued two `systemctl --user restart` calls 19s
+ * apart: reconcile pass 2 (or a later installer step) asked again while the
+ * first stop was still draining (TimeoutStopUSec=330s). The second landed
+ * mid-stop, the gateway exited 1, and the agent DB refused every turn until a
+ * manual `doctor --fix`. A restart is a whole-host event; asking twice in one
+ * run never buys anything the first did not.
+ *
+ * The first `run` execs and its promise is kept for the life of the
+ * coordinator. Every later `run` — overlapping or long after the first has
+ * settled — awaits that same promise and gets its outcome back marked
+ * `reused`, without exec-ing. Pure: the exec is injected.
+ */
+export function createGatewayRestartOnce(): {
+  run(exec: () => GatewayRestartResult | Promise<GatewayRestartResult>): Promise<GatewayRestartResult>;
+  reset(): void;
+} {
+  let inflight: Promise<GatewayRestartResult> | undefined;
+  return {
+    run(exec) {
+      if (inflight) return inflight.then((r) => ({ ...r, reused: true }));
+      const requestedAtMs = Date.now();
+      const requestedSeq = nextCausalSeq();
+      // Assigned synchronously, before exec runs, so a second call made in
+      // the same tick already sees the latch.
+      inflight = Promise.resolve()
+        .then(exec)
+        .then(
+          (r) => ({ ...r, requestedAtMs, requestedSeq }),
+          (err: unknown): GatewayRestartResult => ({
+            attempted: true,
+            restarted: false,
+            method: 'unknown',
+            detail: err instanceof Error ? err.message : String(err),
+            requestedAtMs,
+            requestedSeq,
+          }),
+        );
+      return inflight;
+    },
+    reset() {
+      inflight = undefined;
+    },
+  };
+}
+
+/** The process-lifetime latch `restartOpenClawGateway` goes through (#977). */
+export const processGatewayRestartLatch = createGatewayRestartOnce();
+
+/** Test-only: forget this process's restart so suites stay isolated (#977). */
+export function resetGatewayRestartLatchForTests(): void {
+  processGatewayRestartLatch.reset();
+}
+
 /**
  * Best-effort restart of the OpenClaw gateway so the purged config takes
  * effect. Returns a structured report; never throws.
@@ -510,12 +604,7 @@ export function cleanResidue(report: ResidueReport, options: CleanOptions = {}):
  *   - macOS:  `launchctl kickstart -k gui/<uid>/ai.openclaw.gateway`
  *   - Fallback: skip with info message.
  */
-export async function restartOpenClawGateway(): Promise<{
-  attempted: boolean;
-  restarted: boolean;
-  method: string;
-  detail?: string;
-}> {
+export async function restartOpenClawGateway(): Promise<GatewayRestartResult> {
   // Restarting the gateway kills every in-flight agent turn on the host, so
   // this must never fire from a test runner — unmocked install-path tests were
   // bouncing live gateways during `npm test`.
@@ -550,6 +639,13 @@ export async function restartOpenClawGateway(): Promise<{
     };
   }
 
+  // #977: past the consent gates, at most one exec per process. Reconcile
+  // pass 2 and a later installer restart await the first one instead.
+  return processGatewayRestartLatch.run(execGatewayRestartCommand);
+}
+
+/** The one place the restart command is exec'd. Only reached via the latch. */
+function execGatewayRestartCommand(): GatewayRestartResult {
   const platform = process.platform;
   // The command strings themselves live in gateway-restart-command.ts, so the
   // advice `doctor` PRINTS and the command this EXECUTES cannot drift apart —
@@ -565,12 +661,7 @@ export async function restartOpenClawGateway(): Promise<{
       });
       return { attempted: true, restarted: true, method: 'systemctl --user' };
     } catch (err) {
-      return {
-        attempted: true,
-        restarted: false,
-        method: 'systemctl --user',
-        detail: (err as Error).message,
-      };
+      return gatewayRestartExecFailure('systemctl --user', err);
     }
   }
 
@@ -583,12 +674,7 @@ export async function restartOpenClawGateway(): Promise<{
       });
       return { attempted: true, restarted: true, method: 'launchctl kickstart' };
     } catch (err) {
-      return {
-        attempted: true,
-        restarted: false,
-        method: 'launchctl kickstart',
-        detail: (err as Error).message,
-      };
+      return gatewayRestartExecFailure('launchctl kickstart', err);
     }
   }
 

@@ -51,6 +51,12 @@ or set `SHIELDCORTEX_SKIP_UPDATE_CHECK=1` for the dashboard/API process. The das
 5. **Background service** — if you ran `shieldcortex service install`, check `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`). Linux and macOS restart the service; Windows schedules it for the next login.
 6. **Doctor** — `shieldcortex doctor` warns when the OpenClaw plugin or Hermes copy is behind the package and names the command to run. It exits 1 on a failure (`--strict` also fails on warnings). Repairs are opt-in flags: `--fix-project-keys`, `--fix-action-guard`, `--fix-hermes-plugin-copies`.
 
+<a id="whats-new-in-517"></a>
+
+## What's new in 5.17
+
+- **Agent config watch covers Gemini CLI (#965, PR #966).** The 5.16 [agent config watch](#whats-new-in-516) now also checks `~/.gemini/settings.json` and the session project's `.gemini/settings.json` for `hooks`, `mcpServers` and the settings that hold a command Gemini runs (`tools.discoveryCommand`, `tools.callCommand`, `mcp.serverCommand`), and treats a `GEMINI.md` in `~/Downloads`, `~/Desktop`, `$HOME` or `/tmp`, or a `.gemini/settings.json` in one of those except `$HOME`, as a planted file (high severity). Upgrading does not alert: the first run after the update records the Gemini files you already have as the baseline (per project, the first time a run visits it), so a change made before the upgrade is not reported. Not watched: Gemini's `.env` files and base-URL environment variables, the system-wide Gemini settings file, and the approval-mode, folder-trust and hook-enable settings. Detection is still at fresh Claude Code startup, not live. No new configuration. Limits: [agent config watch](security/agent-config-watch.md#watched-files).
+
 <a id="whats-new-in-516"></a>
 
 ## What's new in 5.16

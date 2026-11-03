@@ -12,6 +12,7 @@ import os from 'os';
 import { execSync, spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { gatewayRestartAdvice, gatewayBootLogAdvice } from './gateway-restart-command.js';
+import { nextCausalSeq } from './causal-seq.js';
 import {
   resolveRealtimePluginInstallPath,
   resolveRealtimeProjectDir,
@@ -1983,6 +1984,10 @@ async function writeOpenClawInstall(
   home: string,
   locked: ReadonlySet<string>,
 ): Promise<void> {
+  // #977 review: a restart reused from before this moment did not load
+  // anything written below. A causal ticket, not epoch ms — a restart in the
+  // same millisecond as this line would otherwise tie with it.
+  const writesStartedSeq = nextCausalSeq();
   const hooksDirs = findAllHooksDirs(locked);
   // Every write below this line that touches `~/.openclaw` — the config
   // cleanup, the snapshot, the plugin, the registration, the restart — is
@@ -2216,8 +2221,21 @@ async function writeOpenClawInstall(
     const { restartOpenClawGateway } = await import('./deep-clean.js');
     const result = await restartOpenClawGateway();
     console.log('');
-    if (result.restarted) {
+    if (result.restarted && result.reused) {
+      // #977: one restart per process — a second exec would land mid-stop.
+      // But a restart from before these writes did not load them: say so.
+      if (result.requestedSeq === undefined || result.requestedSeq < writesStartedSeq) {
+        console.warn('OpenClaw gateway was already restarted earlier in this run, before this install —');
+        console.warn('not restarting it twice in one run. Restart it once more so the new plugin/hook take effect:');
+        console.warn(`  ${gatewayRestartAdvice()}`);
+      } else {
+        console.log('OpenClaw gateway was already restarted earlier in this run; not restarting it again.');
+      }
+    } else if (result.restarted) {
       console.log(`OpenClaw gateway restarted via ${result.method}.`);
+    } else if (result.timedOut) {
+      console.warn(`OpenClaw gateway restart via ${result.method} timed out; the gateway may still be restarting.`);
+      console.warn('Check it with `shieldcortex doctor` before restarting it again.');
     } else if (result.attempted) {
       console.warn(`OpenClaw gateway restart via ${result.method} failed: ${result.detail ?? 'unknown'}`);
       console.warn('Restart it manually so the new plugin/hook take effect:');

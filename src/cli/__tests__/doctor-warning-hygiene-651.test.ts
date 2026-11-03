@@ -305,9 +305,10 @@ describe('#651 r2 — interpreter discovery uncertainty is not absence', () => {
     leftoverOnly();
     fs.symlinkSync(path.join(home, 'moved-away', 'hermes-agent'), path.join(hermes, 'hermes-agent'));
     const search = searchHermesInterpreter(hermes);
+    // The first candidate under the broken link is the launcher now (#971).
     expect(search).toEqual({
       kind: 'undetermined',
-      path: path.join(hermes, 'hermes-agent', '.venv', 'bin', 'python3'),
+      path: path.join(hermes, 'hermes-agent', '.hermes', 'bin', 'hermes'),
     });
     const scan = scanHermesPluginCopies({ home, hermesHome: null });
     expect(scan.noInterpreter).toBe(false);

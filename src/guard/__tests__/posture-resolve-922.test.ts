@@ -401,3 +401,73 @@ describe('#922 guardPostureRow — status and honest fixes', () => {
     expect(checked).toBeGreaterThan(20);
   });
 });
+
+/**
+ * #878 r4 N1: an unsigned config.json behind a symbolic link (`unverified`,
+ * adoption blocked by the link) is what the hook and the OpenClaw runtime hold
+ * strict, before the lock and the #209 fold. The planes report that posture,
+ * not the link target's own Guard-off values.
+ */
+describe('#878 r4 resolvePlanePostures — unsigned linked config.json', () => {
+  const OFF = { actionGuard: { enabled: false, enforce: false } };
+  const linked = (over: Partial<PostureInputs> = {}) =>
+    inputs({ signedRaw: OFF, integrity: 'unverified', integrityAdoption: 'linked', openclaw: { state: 'ok', raw: entry({}) }, ...over });
+
+  it('hook and plugin planes are strict (enforce), agreeing with the graded posture', () => {
+    const r = resolvePlanePostures(linked());
+    expect(r.signed).toBeNull();
+    expect(r.graded).toBe('enforce');
+    expect(posturesOf(r)).toEqual({ claude: 'enforce', openclaw: 'enforce' });
+    expect(r.verdict).toBe('agree');
+  });
+
+  it('the alias spelling cannot bring Guard off back, and a readiness gate is dropped', () => {
+    const r = resolvePlanePostures(linked({
+      signedRaw: { actionGuard: { readinessGate: true }, interceptor: { actionGuard: { enabled: false, enforce: false } } },
+    }));
+    expect(posturesOf(r)).toEqual({ claude: 'enforce', openclaw: 'enforce' });
+  });
+
+  it('control: an unadoptable REGULAR file (fails/unknown) keeps the bare-parse planes', () => {
+    for (const integrityAdoption of ['fails', 'unknown'] as const) {
+      const r = resolvePlanePostures(linked({ integrityAdoption }));
+      expect(posturesOf(r)).toEqual({ claude: 'off', openclaw: 'off' });
+    }
+  });
+
+  it('control: a signed (valid) file is its own value on both planes', () => {
+    const r = resolvePlanePostures(inputs({ signedRaw: OFF, openclaw: { state: 'ok', raw: entry({}) } }));
+    expect(posturesOf(r)).toEqual({ claude: 'off', openclaw: 'off' });
+  });
+});
+
+/**
+ * #878 r5: the hook and the OpenClaw runtime now recompute the HMAC for a
+ * symlinked config.json (scripts/lib/config-authenticity.mjs), so a linked
+ * file whose `_sig` / `.config-sig` does not verify (`tampered`) is held
+ * strict there too. The planes must report that posture.
+ */
+describe('#878 r5 resolvePlanePostures — linked config.json whose signature does not verify', () => {
+  const OFF = { actionGuard: { enabled: false, enforce: false } };
+  const linkedTampered = (over: Partial<PostureInputs> = {}) =>
+    inputs({ signedRaw: OFF, integrity: 'tampered', integrityLinked: true, openclaw: { state: 'ok', raw: entry({}) }, ...over });
+
+  it('linked + tampered: hook and plugin planes are strict (enforce), agreeing with the graded posture', () => {
+    const r = resolvePlanePostures(linkedTampered());
+    expect(r.graded).toBe('enforce');
+    expect(posturesOf(r)).toEqual({ claude: 'enforce', openclaw: 'enforce' });
+    expect(r.verdict).toBe('agree');
+  });
+
+  it('control: linked + valid / self-heal is the file\'s own value on both planes', () => {
+    for (const integrity of ['valid', 'self-heal'] as const) {
+      const r = resolvePlanePostures(linkedTampered({ integrity }));
+      expect(posturesOf(r)).toEqual({ claude: 'off', openclaw: 'off' });
+    }
+  });
+
+  it('control: a REGULAR tampered file keeps the bare-parse planes (the readers do not verify it, #509)', () => {
+    const r = resolvePlanePostures(linkedTampered({ integrityLinked: false }));
+    expect(posturesOf(r)).toEqual({ claude: 'off', openclaw: 'off' });
+  });
+});
