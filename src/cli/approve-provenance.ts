@@ -24,15 +24,19 @@
  *
  *      **Config exports (#815 C).** A login profile can legitimately export
  *      OpenClaw's own config locations (`OPENCLAW_HOME`, `OPENCLAW_STATE_DIR`,
- *      `OPENCLAW_CONFIG_PATH`, `OPENCLAW_PROFILE`), so their presence is not
- *      proof of an agent: the owner's own SSH shell carries them. They do not
- *      refuse by themselves. They are also inherited by every agent child, so
- *      when one is present the ancestry half below must positively vouch for
- *      a human: the process tree must be readable (no env-only degrade on a
- *      platform whose tree we cannot read), the session leader must be a
- *      shell (or `login`) and its parent must be a live process other than
- *      init (sshd, login, tmux, a terminal emulator). The init-parent
- *      residual that is otherwise allowed (WSL, console) is refused here.
+ *      `OPENCLAW_CONFIG_PATH`, `OPENCLAW_PROFILE`), so the owner's own shell
+ *      carries them. They tell an owner from an agent in neither direction:
+ *      what marks an agent child is its child markers and its ancestry, and
+ *      an agent able to strip its child markers can strip these as well. So
+ *      the scan skips them and NOTHING else reads the environment: an
+ *      environment whose only `OPENCLAW_*` names are config exports gets
+ *      exactly the verdict it would get with them unset. (A first cut made
+ *      them switch on extra ancestry refusals; those refused owners on ash,
+ *      inside a sudo PTY and on WSL, while an agent could skip them by
+ *      unsetting the exports.) The cost is the env-only residual: on a
+ *      platform whose tree is not read at all (Windows, FreeBSD; see
+ *      {@link operatorProvenance}), an OpenClaw descendant that carries the
+ *      exports but no child marker is no longer refused on the exports alone.
  *
  *   2. **Process ancestry.** Walk from this process to the session leader and
  *      on to PID 1. Refuse if the session leader is a pty *tool* rather than a
@@ -104,9 +108,9 @@ export const AGENT_ENV_MARKERS: readonly string[] = [
 /**
  * OpenClaw config exports (#815 C): exact names a human's login profile may
  * carry to point OpenClaw at its home, state, config file or profile. These
- * are the names OpenClaw and ShieldCortex actually read. They do not refuse
- * by themselves, but their presence makes the ancestry check strict (see
- * {@link operatorProvenance}). Exact match only, never a prefix.
+ * are the names OpenClaw and ShieldCortex actually read. The environment scan
+ * skips them and they change no verdict (see {@link operatorProvenance}).
+ * Exact match only, never a prefix.
  */
 export const OPENCLAW_CONFIG_EXPORTS: readonly string[] = [
   'OPENCLAW_HOME',
@@ -314,8 +318,7 @@ export type ProvenanceReason =
   | 'pty-interpreter-leader'
   | 'no-session-leader'
   | 'orphaned-shell-leader'
-  | 'process-tree-unreadable'
-  | 'non-shell-session-leader';
+  | 'process-tree-unreadable';
 
 export interface ProvenanceVerdict {
   ok: boolean;
@@ -333,19 +336,13 @@ const MAX_WALK = 64;
  * agent's tool call? Cheap; called once per `approve` grant.
  *
  * On a platform with no readable process tree, only the environment half
- * runs — that is a weaker check and the verdict says so in `detail`. With an
- * OpenClaw config export in the environment there is no such degrade: an
- * unreadable tree refuses (#815 C).
+ * runs — that is a weaker check and the verdict says so in `detail`.
  */
 export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam()): ProvenanceVerdict {
-  // 1) Environment. Child markers refuse outright; config exports are
-  // collected and make the ancestry check strict (#815 C).
-  const configExports: string[] = [];
+  // 1) Environment. Child markers refuse outright. Config exports are
+  // skipped, and this loop is the only reader of the environment (#815 C).
   for (const name of Object.keys(seam.env)) {
-    if (OPENCLAW_CONFIG_EXPORTS.includes(name)) {
-      configExports.push(name);
-      continue;
-    }
+    if (OPENCLAW_CONFIG_EXPORTS.includes(name)) continue;
     for (const marker of AGENT_ENV_MARKERS) {
       const hit = marker.endsWith('_') ? name.startsWith(marker) : name === marker;
       if (hit) {
@@ -358,24 +355,17 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
       }
     }
   }
-  const strict = configExports.length > 0;
-  const exportNote = strict
-    ? ` The environment carries ${configExports.sort().join(', ')}, which a login profile may export but every OpenClaw agent child also inherits, so this command needs a login session it can verify.`
-    : '';
 
-  // 2) Ancestry.
+  // 2) Ancestry. Handed the tree and nothing else, so no environment name can
+  // tighten or loosen it: config exports alone give exactly the verdict of
+  // an environment without them (#815 C fix round 1).
+  return ancestryProvenance({ pid: seam.pid, platform: seam.platform, proc: seam.proc });
+}
+
+/** The tree half of {@link operatorProvenance}. Never sees the environment. */
+function ancestryProvenance(seam: Omit<ProvenanceSeam, 'env'>): ProvenanceVerdict {
   const self = seam.proc(seam.pid);
   const treePlatform = TREE_PLATFORMS.includes(seam.platform);
-  if (strict && !treePlatform) {
-    // The env-only degrade below would let an agent child that carries only
-    // the inherited config exports through unchecked. No degrade here.
-    return {
-      ok: false,
-      reason: 'process-tree-unreadable',
-      detail: `this platform's process tree cannot be read, so the ancestry cannot be checked.${exportNote}`,
-      chain: [],
-    };
-  }
   if (!self) {
     // Where we know how to read the tree, failing to is not "nothing to see":
     // an agent that can make the read fail must not inherit the degrade.
@@ -565,32 +555,6 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
     };
   }
 
-  // #815 C: an OpenClaw config export is advisory only from a session the
-  // tree positively vouches for. The leader must be a shell (or `login`, the
-  // Terminal.app leader), and its parent must be a live process that is not
-  // init: sshd, login, tmux, a terminal emulator. The WSL/console residual
-  // below is NOT extended to this case.
-  if (strict) {
-    const leaderName = basenameLower(leader.comm.replace(/^-/, ''));
-    if (!SHELL_NAMES.includes(leaderName) && leaderName !== 'login') {
-      return {
-        ok: false,
-        reason: 'non-shell-session-leader',
-        detail: `this session is led by "${leader.comm}" (pid ${leader.pid}), not a login shell.${exportNote}`,
-        chain,
-      };
-    }
-    if (leader.ppid <= 1 || leaderParent === null || nameIn(leaderParent.comm, INIT_NAMES)) {
-      const parentName = leaderParent ? `"${leaderParent.comm}"` : `pid ${leader.ppid}`;
-      return {
-        ok: false,
-        reason: 'orphaned-shell-leader',
-        detail: `this session is led by "${leader.comm}" (pid ${leader.pid}) whose parent is ${parentName}, not a terminal provider such as sshd, login or tmux.${exportNote}`,
-        chain,
-      };
-    }
-  }
-
   // Residual, not refused: a SHELL leader whose parent is init. That is
   // both "daemonise, openpty, exec bash" (GPT-6 r2) AND a WSL / console
   // login (bash's parent is init). Refusing it cards every WSL user.
@@ -600,12 +564,13 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
   // start a detached tmux session and drop out of the tree; refusing
   // multiplexers would card every human who uses one.
 
+  // Also not refused: a session leader that is not a shell we list (ash, nu,
+  // pwsh, the sudo monitor that leads a sudo PTY). Only the known-bad shapes
+  // above refuse, so a pass is the absence of those, not proof of a human.
   return {
     ok: true,
     reason: null,
-    detail: strict
-      ? `interactive login session led by a shell under a terminal provider, with no agent ancestor; OpenClaw config exports (${configExports.join(', ')}) allowed.`
-      : 'interactive session led by a shell with no agent ancestor.',
+    detail: 'interactive session with no agent marker, agent ancestor or manufactured terminal found; an unlisted terminal provider or a multiplexer is not refused, so this is not proof that a human opened the terminal.',
     chain,
   };
 }
