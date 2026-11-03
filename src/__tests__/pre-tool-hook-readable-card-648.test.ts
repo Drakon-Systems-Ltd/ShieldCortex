@@ -206,12 +206,13 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     expect(description).toMatch(/Who: Claude Code on [A-Za-z0-9_…-]+ · session sc-[0-9a-f]{16}/);
   });
 
-  it('the card summary never rides on the webhook (notify stays values-free)', () => {
+  it('the notification keeps the values-free command surface beside the card', () => {
     writeConfig({ openclaw: true });
     runHook(SSH_READ);
     const n = cards()[0].notification;
-    // The notification's `command` is still the values-free surface the
-    // webhook would carry; only the card channel reads `card`.
+    // The notification's `command` is still the values-free surface; the
+    // readable summary rides separately on `card` (read by the card channel
+    // and, since #815 A, laid out as the webhook's versioned `card` block).
     expect(n.command).toBe('Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command');
   });
 
@@ -247,19 +248,71 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
   // harness before the #648 change. Random fields are pinned by the
   // normalisers above; every other byte must match.
 
-  it('webhook approval_requested body is byte-identical to main', () => {
+  // #815 A: the webhook body gains ONE key, `card`, appended last. Every
+  // pre-#815 byte is still compared against the golden; the card is asserted
+  // on its own below. denials.jsonl stays byte-identical and card-free.
+  function splitCard(body: string): { rest: string; card: Record<string, unknown> | undefined } {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    const keys = Object.keys(parsed);
+    if ('card' in parsed) expect(keys.at(-1)).toBe('card');
+    const { card, ...rest } = parsed;
+    return { rest: JSON.stringify(rest), card: card as Record<string, unknown> | undefined };
+  }
+  const WHO = /^Claude Code on [A-Za-z0-9_…-]+ · session sc-<session>$/;
+
+  it('webhook approval_requested body is byte-identical to main, plus the #815 card', () => {
     writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook' });
     expect(runHook(SSH_READ).decision).toBe('ask');
-    const bodies = lines(webhookEvidence).map(normaliseWebhookBody);
-    expect(bodies).toEqual([GOLDEN_WEBHOOK_ASK]);
+    const bodies = lines(webhookEvidence).map(normaliseWebhookBody).map(splitCard);
+    expect(bodies.map((b) => b.rest)).toEqual([GOLDEN_WEBHOOK_ASK]);
+    const card = bodies[0].card!;
+    expect(card).toMatchObject({
+      version: 1,
+      kind: 'approval',
+      what: 'Read a file in your SSH folder: "~/.ssh/config"',
+      why: 'touches a sensitive file (keys, passwords or credentials)',
+      approveCommand: 'shieldcortex approve 1d3e3c896ae2 --attempt <attempt>',
+      denyCommand: 'shieldcortex deny 1d3e3c896ae2 --attempt <attempt>',
+    });
+    expect(card.who).toMatch(WHO);
+    expect(card).not.toHaveProperty('actions');
   });
 
-  it('webhook denial body and denials.jsonl rows are byte-identical to main', () => {
+  it('webhook denial body and denials.jsonl rows are byte-identical to main, plus the #815 card', () => {
     writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
     expect(runHook(SSH_READ, { permissionMode: 'bypassPermissions' }).decision).toBe('deny');
-    const bodies = lines(webhookEvidence).map(normaliseWebhookBody);
-    expect(bodies).toEqual([GOLDEN_WEBHOOK_DNP]);
+    const bodies = lines(webhookEvidence).map(normaliseWebhookBody).map(splitCard);
+    expect(bodies.map((b) => b.rest)).toEqual([GOLDEN_WEBHOOK_DNP]);
+    const card = bodies[0].card!;
+    expect(card).toMatchObject({
+      version: 1,
+      kind: 'denial',
+      what: 'Read a file in your SSH folder: "~/.ssh/config"',
+      why: 'touches a sensitive file (keys, passwords or credentials)',
+      approveCommand: 'shieldcortex approve --denial act-<action>',
+      actions: [
+        { action: 'approve', label: 'Approve retry', actionId: 'act-<action>' },
+        { action: 'deny', label: 'Deny', actionId: 'act-<action>' },
+      ],
+    });
+    expect(card.who).toMatch(WHO);
+    // The card names the same action the alert's own actionId does.
+    expect(JSON.parse(bodies[0].rest).actionId).toBe('act-<action>');
     expect(denialRows()).toEqual(GOLDEN_DENIALS_DNP);
+    expect(denialRows().join('\n')).not.toContain('"card"');
+  });
+
+  it('#815 A: a credential-shaped command never puts the secret on the webhook card (headless denial)', () => {
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
+    const command = `git push --force https://bot:${GH}@github.com/acme/app.git main`;
+    expect(runHook({ command }, { permissionMode: 'bypassPermissions' }).decision).toBe('deny');
+    const raw = lines(webhookEvidence);
+    expect(raw).toHaveLength(1);
+    expect(raw[0]).toContain('"card":');
+    for (const needle of [GH, GH.slice(0, 12), GH.slice(-12), command]) {
+      expect(raw[0]).not.toContain(needle);
+      expect(denialRows().join('\n')).not.toContain(needle);
+    }
   });
 });
 

@@ -20,12 +20,13 @@
  *              (`SIGNAL_PHRASES`); an unknown id falls back to the id itself.
  *   3. WHO   — the agent, the box and the session.
  *
- * Scope, and the constraint that does NOT move: this is the ask/card path
- * only. Notify webhooks and `denials.jsonl` stay values-free (#284/#369/#517 —
- * `safeActionGuardSurface` in operator-notify.ts). Nothing in this module is
- * read by those writers; the card summary rides on `OperatorNotification.card`,
- * which the webhook payload builder does not copy, and the hook attaches it
- * only for the card channel.
+ * Scope, and the constraint that does NOT move: `denials.jsonl` and the
+ * values-free alert fields (`command`, `surface`, `text` — #284/#369/#517,
+ * `safeActionGuardSurface` in operator-notify.ts) never carry this summary.
+ * It rides on `OperatorNotification.card` / `ActionGuardOutcomeNotification
+ * .card` to two readers only: the OpenClaw card channel and, since #815 A,
+ * the webhook channel's versioned `card` block (webhook-notify-channel.ts),
+ * which carries these three redactor-passed lines and never the raw command.
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readlinkSync, statSync } from 'node:fs';

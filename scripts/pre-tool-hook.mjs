@@ -1032,13 +1032,13 @@ function safeDiagnosticApprovalReason(reason) {
 
 /**
  * #648 — the card's what/why/who, built on this box from the live tool input.
- * Only for a LIVE hold going to the interactive card channel: the webhook and
- * every denial path keep the values-free surface (#284/#369/#517), and they
- * never receive this object. Every target in it has been through the
- * credential redactor (approval-card.ts `safeTarget`). Never throws.
+ * Every target in it has been through the credential redactor (approval-card.ts
+ * `safeTarget`). Two readers: the interactive card channel and (#815 A) the
+ * webhook's versioned `card` block. The values-free `command` / `surface`
+ * fields and `denials.jsonl` never receive it. Never throws.
  */
 function approvalCardFor(notify, channel, { toolName, toolInput, verdict, sessionKey, cwd }) {
-  if (channel?.name !== 'openclaw-approval' || typeof notify?.buildApprovalCard !== 'function') return undefined;
+  if ((channel?.name !== 'openclaw-approval' && channel?.name !== 'webhook') || typeof notify?.buildApprovalCard !== 'function') return undefined;
   try {
     return notify.buildApprovalCard({
       tool: String(toolName ?? ''),
@@ -2090,7 +2090,13 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
     typeof notify.buildActionGuardOutcomeNotification === 'function'
   ) {
     try {
-      let notification = notify.buildActionGuardOutcomeNotification(pendingRow);
+      // #815 A: a headless denial carries the readable card to the webhook.
+      // Handed to the builder ONLY — `pendingRow` is the denials.jsonl row and
+      // stays values-free.
+      const card = outcome === 'denied_no_prompt_surface'
+        ? approvalCardFor(notify, notify.denialChannel, { toolName, toolInput, verdict, sessionKey, cwd: retryCtx?.cwd })
+        : undefined;
+      let notification = notify.buildActionGuardOutcomeNotification(card ? { ...pendingRow, card } : pendingRow);
       // Enrich first-of-window DNP with digest text when builder supports it.
       if (
         digestDecision?.action === 'notify' &&

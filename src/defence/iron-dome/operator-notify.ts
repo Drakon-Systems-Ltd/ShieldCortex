@@ -145,9 +145,11 @@ export interface OperatorNotification {
   /** #310 action id when this notification is a headless denial. */
   actionId?: string;
   /** #648 — the plain-English summary an approval CARD shows (what, why, who).
-   *  Only on 'approval_requested', and only read by the card channel
-   *  (openclaw-approval-channel.ts). The webhook payload builder copies fields
-   *  by name and never this one, so notify and denials stay values-free. */
+   *  Only on 'approval_requested'. Read by the card channel
+   *  (openclaw-approval-channel.ts) and, since #815 A, laid out by the webhook
+   *  channel as its versioned `card` block. Every target in it has been
+   *  through the credential redactor on the box; the values-free `command`
+   *  surface and `denials.jsonl` are unchanged. */
   card?: ApprovalCardSummary;
 }
 
@@ -224,6 +226,13 @@ export interface ActionGuardOutcomeNotification {
   sessionId?: string;
   origin?: string;
   detectedAt: string;
+  /** #815 A — the #648 plain-English what/why/who for the operator's chat.
+   *  Only on `action_guard_denial`, built on the box by approval-card.ts where
+   *  every target has been through the credential redactor, and bounded again
+   *  here (`boundedCard`). The webhook payload carries it as a versioned
+   *  `card` block; `denials.jsonl` never does — the hook hands it to this
+   *  builder only, never to the forensic row. */
+  card?: ApprovalCardSummary;
 }
 
 /** Every shape a channel can be handed. */
@@ -529,6 +538,8 @@ export interface ActionGuardOutcomeInput {
   origin?: string;
   /** ISO timestamp; supplied by the caller so a test can pin it. */
   detectedAt: string;
+  /** #815 A — see `ActionGuardOutcomeNotification.card`. Ignored on a warning. */
+  card?: ApprovalCardSummary;
 }
 
 const SAFE_ACTION_GUARD_TOOLS = new Set([
@@ -711,6 +722,12 @@ export function buildActionGuardOutcomeNotification(
   const origin = String(input.origin ?? '').trim();
   if (origin === 'claude-code-hook' || origin === 'openclaw-interceptor') {
     n.origin = origin;
+  }
+  // #815 A: a denial may carry the readable card; an advisory warning never
+  // does (nothing was stopped, so there is nothing to approve or explain).
+  if (event === 'action_guard_denial') {
+    const card = boundedCard((input as { card?: unknown }).card);
+    if (card) n.card = card;
   }
   return n;
 }
