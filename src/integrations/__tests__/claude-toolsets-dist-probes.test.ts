@@ -588,3 +588,30 @@ describe('dist probe B1 — the ref catalogue parse is linear on page text (#679
     expect(parsed.has('ref_5')).toBe(false);
   });
 });
+
+describe('dist probe — a host the URL parser maps to ASCII never reaches a card or audit row (#735 review B1)', () => {
+  // Built at runtime: fullwidth `sk-proj-…` parses to the ASCII key; an
+  // OpenAI-project shape, synthetic, no real secret.
+  const KEY = ['sk', 'proj', 'a1'.repeat(16)].join('-');
+  const wide = (s: string) => [...s].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join('');
+  const URL_ = `https://${wide(KEY)}.example/`;
+
+  it('observe: classify, confirm (callback card), urlPolicy and interception keep the host withheld and still run', async () => {
+    const { guard, events } = makeGuard();
+    const cards: string[] = [];
+    const navigate = { member: 'navigate', input: { url: URL_ }, toolUse: { id: 'toolu_fw' } };
+    expect(await guard.confirm(async (_ctx, card) => { cards.push(card.card); return true; })(navigate)).toBe(true);
+    expect(() => guard.urlPolicy()({}, URL_)).not.toThrow();
+    expect(guard.interceptRequest(URL_)).toBe('continue');
+    await guard.confirm()({ member: 'scroll', input: {}, tabURL: URL_ });
+    expect(cards[0]).toContain('redacted-host');
+    expect(events.map((e) => e.host)).toEqual(['redacted-host', 'redacted-host', 'redacted-host', 'redacted-host']);
+    expect(JSON.stringify({ cards, events, card: guard.classify(navigate).card })).not.toContain(KEY);
+  });
+
+  it('control: an ordinary host is shown', () => {
+    const { guard, events } = makeGuard();
+    guard.urlPolicy()({}, 'https://docs.example.com/x');
+    expect(events[0].host).toBe('docs.example.com');
+  });
+});

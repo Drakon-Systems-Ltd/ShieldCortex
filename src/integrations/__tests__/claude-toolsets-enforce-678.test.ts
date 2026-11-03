@@ -766,6 +766,263 @@ describe('review regressions (#678 P2)', () => {
     expect(events.filter((e) => e.host).every((e) => e.host === 'redacted-host')).toBe(true);
   });
 
+  // The URL parser maps these hosts to ASCII (and folds case) after the
+  // original-text check: the parsed host is checked too, in both cases.
+  const wide = (s: string) => [...s].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join('');
+  it.each([
+    ['fullwidth', `https://${wide(AWS_SHAPED_KEY)}.example.com/`],
+    ['soft-hyphenated', `https://${AWS_SHAPED_KEY.slice(0, 4)}­${AWS_SHAPED_KEY.slice(4)}.example.com/`],
+  ])('redacts a credential-shaped host the parser maps to ASCII (%s)', async (_label, url) => {
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { guard, events } = makeGuard({ mode });
+      const verdict = guard.classify(ctx('navigate', { url }));
+      expect(verdict.card).toContain('redacted-host');
+      await guard.confirm()(ctx('navigate', { url }));
+      await guard.confirm()(ctx('scroll', {}, { tabURL: url }));
+      if (mode === 'observe') {
+        expect(() => guard.urlPolicy()({}, url)).not.toThrow();
+      } else {
+        expect(() => guard.urlPolicy()({}, url)).toThrow();
+      }
+      guard.interceptRequest(url);
+      const surface = JSON.stringify({ card: verdict.card, scroll: guard.classify(ctx('scroll', {}, { tabURL: url })).card, events });
+      expect(surface).not.toMatch(new RegExp(AWS_SHAPED_KEY.slice(4), 'i'));
+      expect(events.filter((e) => e.host).map((e) => e.host)).toEqual(['redacted-host', 'redacted-host', 'redacted-host', 'redacted-host']);
+    }
+  });
+
+  it('a host the parser maps to ordinary ASCII or punycode is still shown', () => {
+    const { guard } = makeGuard({ mode: 'observe' });
+    expect(guard.classify(ctx('navigate', { url: `https://${wide('www')}.example.com/` })).card).toContain('www.example.com');
+    expect(guard.classify(ctx('navigate', { url: 'https://bücher.example/' })).card).toContain('xn--bcher-kva.example');
+  });
+
+  // Cards and audit hosts for one URL, plus the decisions an ordinary off-list host gets.
+  async function hostSurface(mode: 'observe' | 'enforce', url: string) {
+    const { guard, events } = makeGuard({ mode });
+    const verdict = guard.classify(ctx('navigate', { url }));
+    const scroll = guard.classify(ctx('scroll', {}, { tabURL: url }));
+    await guard.confirm()(ctx('navigate', { url }));
+    await guard.confirm()(ctx('scroll', {}, { tabURL: url }));
+    try { guard.urlPolicy()({}, url); } catch { /* the decision is asserted below */ }
+    const intercepted = guard.interceptRequest(url);
+    const ordinary = makeGuard({ mode }).guard;
+    expect(verdict.decision).toBe(ordinary.classify(ctx('navigate', { url: 'https://off-list.example/' })).decision);
+    expect(intercepted).toBe(ordinary.interceptRequest('https://off-list.example/'));
+    const hosts = events.filter((e) => e.host).map((e) => e.host);
+    expect(hosts).toHaveLength(4);
+    return { cards: [verdict.card, scroll.card], hosts, surface: JSON.stringify({ cards: [verdict.card, scroll.card], events }) };
+  }
+
+  // Mixed-case recognisers (JWT `eyJ`) need the mapped text with case kept;
+  // the parser's lowercase `eyja.eyja.a` and its uppercase both miss them.
+  const stop = '。';
+  it.each([
+    ['short', `https://ｅｙＪａ${stop}ｅｙＪａ${stop}ａ/`, 'eyja.eyja.a'],
+    ['segmented', `https://${wide('eyJhbGciOiJub25lIn0')}${stop}${wide('eyJhIjoxfQ')}${stop}${wide('abc')}/`, 'eyjhbgcioijub25lin0.eyjhijoxfq.abc'],
+  ])('redacts a JWT-shaped host the parser maps and lowercases (%s)', async (_label, url, folded) => {
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { cards, hosts, surface } = await hostSurface(mode, url);
+      for (const card of cards) expect(card).toContain('redacted-host');
+      expect(hosts).toEqual(['redacted-host', 'redacted-host', 'redacted-host', 'redacted-host']);
+      expect(surface.toLowerCase()).not.toContain(folded);
+    }
+  });
+
+  // A long internationalised label becomes a long punycode run: that is not a credential.
+  const longIdn = '書'.repeat(28);
+  it.each([
+    [`https://${longIdn}.example/`, 'example'],
+    [`https://${longIdn}.evil.example/`, 'evil.example'],
+  ])('shows the punycode of a long internationalised host %s', async (url, suffix) => {
+    const punycode = new URL(url).hostname;
+    expect(punycode).toMatch(new RegExp(`^xn--[a-z0-9-]{30,}\\.${suffix.replace('.', '\\.')}$`));
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { cards, hosts, surface } = await hostSurface(mode, url);
+      for (const card of cards) expect(card).toContain(`.${suffix}`);
+      expect(hosts).toEqual([punycode, punycode, punycode, punycode]);
+      expect(surface).not.toContain('redacted-host');
+    }
+  });
+
+  it('shows a long lowercase hyphenated host unchanged', async () => {
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { hosts } = await hostSurface(mode, 'https://ordinary-internal-service-discovery/');
+      expect(hosts).toEqual(Array(4).fill('ordinary-internal-service-discovery'));
+    }
+  });
+
+  it('a host mapped to ASCII displays the same as that ASCII typed directly', async () => {
+    const mapped = `https://${'ﬃ'.repeat(20)}.example/`;
+    const typed = `https://${'ffi'.repeat(20)}.example/`;
+    expect(new URL(mapped).hostname).toBe(new URL(typed).hostname);
+    for (const mode of ['observe', 'enforce'] as const) {
+      expect((await hostSurface(mode, mapped)).hosts).toEqual((await hostSurface(mode, typed)).hosts);
+    }
+  });
+
+  // The URL policy for an off-list host: observe lets it through, enforce refuses.
+  function expectOffListPolicy(mode: 'observe' | 'enforce', url: string) {
+    const { guard } = makeGuard({ mode });
+    if (mode === 'observe') {
+      expect(() => guard.urlPolicy()({}, url)).not.toThrow();
+    } else {
+      expect(() => guard.urlPolicy()({}, url)).toThrow();
+    }
+  }
+
+  // Like `hostSurface`, for URLs that may hold whitespace or control characters
+  // or that the parser rejects: both blocked outright, as before, and no host of theirs is shown.
+  async function witnessSurface(mode: 'observe' | 'enforce', url: string) {
+    let parsed: string | undefined;
+    try { parsed = new URL(url).hostname; } catch { parsed = undefined; }
+    const { guard, events } = makeGuard({ mode });
+    const verdict = guard.classify(ctx('navigate', { url }));
+    const scroll = guard.classify(ctx('scroll', {}, { tabURL: url }));
+    await guard.confirm()(ctx('navigate', { url }));
+    await guard.confirm()(ctx('scroll', {}, { tabURL: url }));
+    if (mode === 'observe') {
+      expect(() => guard.urlPolicy()({}, url)).not.toThrow();
+    } else {
+      expect(() => guard.urlPolicy()({}, url)).toThrow();
+    }
+    const intercepted = guard.interceptRequest(url);
+    const ordinary = makeGuard({ mode }).guard;
+    const offList = ordinary.classify(ctx('navigate', { url: 'https://off-list.example/' })).decision;
+    const blocked = /[\s\x00-\x1f\x7f]/.test(url) || parsed === undefined;
+    expect(verdict.decision).toBe(blocked ? 'block' : offList);
+    expect(intercepted).toBe(ordinary.interceptRequest('https://off-list.example/'));
+    const hosts = events.filter((e) => e.host).map((e) => e.host);
+    return { parsed, cards: [verdict.card, scroll.card], hosts, surface: JSON.stringify({ cards: [verdict.card, scroll.card], events }) };
+  }
+
+  // The scroll card names the tab's host. The navigate card for a URL with
+  // whitespace or a control character is the generic not-a-web-page card, which
+  // names no host; any other navigate card names the (withheld) host.
+  function expectCardsWithheld(url: string, [navigate, scroll]: string[]) {
+    expect(scroll).toContain('redacted-host');
+    if (/[\s\x00-\x1f\x7f]/.test(url)) {
+      expect(navigate.startsWith('Open an address that is not a web page? ShieldCortex does not allow this kind of address.')).toBe(true);
+    } else {
+      expect(navigate).toContain('redacted-host');
+    }
+  }
+
+  // Redacted on every card and audit host when parsed; when the parser rejects
+  // the URL, the only host shown is the current tab's, never the URL's.
+  async function expectJwtWitnessWithheld(url: string) {
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { parsed, cards, hosts, surface } = await witnessSurface(mode, url);
+      if (parsed === undefined) {
+        expect(hosts.length).toBeGreaterThan(0);
+        expect(hosts.every((h) => h === 'checkout.example.com')).toBe(true);
+      } else {
+        expect(parsed).toBe('eyja.eyja.a');
+        expectCardsWithheld(url, cards);
+        expect(hosts).toEqual(Array(4).fill('redacted-host'));
+      }
+      expect(surface.toLowerCase()).not.toContain('eyja.eyja.a');
+    }
+  }
+
+  // Characters the parser ignores (or, on some ICU versions, rejects) inside a
+  // JWT shape. The case-kept text is built from what the parser does with each
+  // character, so one it ignores is dropped there too.
+  const ignorable = [0x0009, 0x000a, 0x000d, 0x115f, 0x1160, 0x17b4, 0x17b5,
+    0x180b, 0x180c, 0x180d, 0x180e, 0x180f, 0x2061, 0x2062, 0x2063, 0x2064,
+    0x206a, 0x206b, 0x206c, 0x206d, 0x206e, 0x206f, 0x3164, 0xffa0, 0xe0100];
+  it.each(ignorable.flatMap((cp) => {
+    const ch = String.fromCodePoint(cp);
+    const label = cp.toString(16).toUpperCase().padStart(4, '0');
+    return [
+      [label, 'ascii', `https://e${ch}yJa.eyJa.a/`],
+      [label, 'fullwidth', `https://ｅ${ch}ｙＪａ${stop}ｅｙＪａ${stop}ａ/`],
+    ];
+  }))('a JWT-shaped host with U+%s inside (%s) is withheld or not shown at all', async (_cp, _form, url) => {
+    await expectJwtWitnessWithheld(url);
+  });
+
+  it.each([
+    ['U+180B in the fullwidth JWT shape', `https://ｅｙ᠋Ｊａ${stop}ｅｙＪａ${stop}ａ/`],
+    ['U+0009 in the ASCII JWT shape', 'https://e\tyJa.eyJa.a/'],
+    ['U+2061 in the ASCII JWT shape', 'https://e⁡yJa.eyJa.a/'],
+    ['U+0009 in the fullwidth JWT shape', `https://ｅ\tｙＪａ${stop}ｅｙＪａ${stop}ａ/`],
+    ['U+2061 in the fullwidth JWT shape', `https://ｅ⁡ｙＪａ${stop}ｅｙＪａ${stop}ａ/`],
+  ])('redacts the reviewed witness: %s', async (_label, url) => {
+    await expectJwtWitnessWithheld(url);
+  });
+
+  it('the U+180B witness parses on this runtime, so it is redacted rather than unparseable', async () => {
+    const url = `https://ｅｙ᠋Ｊａ${stop}ｅｙＪａ${stop}ａ/`;
+    expect(new URL(url).hostname).toBe('eyja.eyja.a');
+    for (const mode of ['observe', 'enforce'] as const) {
+      expect((await witnessSurface(mode, url)).hosts).toEqual(Array(4).fill('redacted-host'));
+    }
+  });
+
+  it('withholds a long opaque run split by a character the parser ignores, like the run typed directly', async () => {
+    const split = `https://${'ｑ'.repeat(16)}᠋${'ｑ'.repeat(16)}.example/`;
+    const typed = `https://${'q'.repeat(32)}.example/`;
+    expect(new URL(split).hostname).toBe(new URL(typed).hostname);
+    for (const mode of ['observe', 'enforce'] as const) {
+      expectOffListPolicy(mode, split);
+      const { cards, hosts, surface } = await hostSurface(mode, split);
+      for (const card of cards) expect(card).toContain('redacted-host');
+      expect(hosts).toEqual(Array(4).fill('redacted-host'));
+      expect(hosts).toEqual((await hostSurface(mode, typed)).hosts);
+      expect(surface).not.toContain('q'.repeat(20));
+    }
+  });
+
+  // A TAB between the slashes is stripped by the parser before it finds the
+  // host, so the host text the guard reads (empty) and the parsed host
+  // disagree. Only the mapping-equivalence check withholds this one.
+  it('withholds a host when its case-kept mapping and the parsed host disagree', async () => {
+    const url = 'https:/\t/eyJa.eyJa.a/';
+    expect(new URL(url).hostname).toBe('eyja.eyja.a');
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { cards, hosts, surface } = await witnessSurface(mode, url);
+      expectCardsWithheld(url, cards);
+      expect(hosts).toEqual(Array(4).fill('redacted-host'));
+      expect(surface.toLowerCase()).not.toContain('eyja.eyja.a');
+    }
+  });
+
+  // One internationalised label must not switch the check off for the whole
+  // host: the TAB hides every label from the raw text, and only the ASCII
+  // labels can be compared.
+  it.each([
+    ['a Unicode label', 'https:/\t/eyJa.eyJa.a.ü/'],
+    ['an A-label typed as punycode', 'https:/\t/eyJa.eyJa.a.xn--tda/'],
+    ['a fullwidth JWT shape and a Unicode label', `https:/\t/ｅｙＪａ${stop}ｅｙＪａ${stop}ａ${stop}ü/`],
+  ])('withholds a disagreeing host that also has %s', async (_label, url) => {
+    expect(new URL(url).hostname).toBe('eyja.eyja.a.xn--tda');
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { cards, hosts, surface } = await witnessSurface(mode, url);
+      expectCardsWithheld(url, cards);
+      expect(hosts).toEqual(Array(4).fill('redacted-host'));
+      expect(surface.toLowerCase()).not.toContain('eyja.eyja.a');
+    }
+  });
+
+  it.each([
+    ['an ASCII label beside an internationalised one', 'https://docs.münchen.example/', 'docs.xn--mnchen-3ya.example'],
+    ['a long internationalised host', `https://${longIdn}.example/`, new URL(`https://${longIdn}.example/`).hostname],
+    ['a long internationalised host with a longer suffix', `https://${longIdn}.evil.example/`, new URL(`https://${longIdn}.evil.example/`).hostname],
+    ['a long hyphenated host', 'https://ordinary-internal-service-discovery/', 'ordinary-internal-service-discovery'],
+    ['an internationalised host', 'https://münchen.example/', 'xn--mnchen-3ya.example'],
+    ['a plain ASCII host', 'https://Docs.Example.com/', 'docs.example.com'],
+    ['an IPv4 host the parser rewrites', 'https://0x8.8.8.8/', '8.8.8.8'],
+  ])('still shows %s', async (_label, url, expected) => {
+    for (const mode of ['observe', 'enforce'] as const) {
+      expectOffListPolicy(mode, url);
+      const { cards, hosts, surface } = await hostSurface(mode, url);
+      expect(hosts).toEqual(Array(4).fill(expected));
+      for (const card of cards) expect(card).toContain(expected.length <= 32 ? expected : expected.slice(-29));
+      expect(surface).not.toContain('redacted-host');
+    }
+  });
+
   it('a refused typing attempt still leaves text pending, so the next Enter holds', async () => {
     const { guard } = makeGuard();
     await readPage(guard);
@@ -800,5 +1057,32 @@ describe('review regressions (#678 P2)', () => {
       expect(guard.classify(ctx('file_upload', input)).card).toContain('Denied; nothing was uploaded.');
     }
     expect(guard.classify(ctx('file_upload', input)).card.length).toBeLessThanOrEqual(200);
+  });
+
+  it.each([
+    ['navigate', { url: 'javascript:alert(1)' }, 'nothing was opened'],
+    ['type', { text: AWS_SHAPED_KEY }, 'nothing was typed'],
+  ] as const)('%s block cards describe the actual outcome in each mode', async (member, input, enforced) => {
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { guard } = makeGuard({ mode });
+      const cards: string[] = [];
+      const toolUse = { id: `block_${member}_${mode}` };
+      const answer = await guard.confirm(async (_ctx, card) => { cards.push(card.card); return true; })(ctx(member, input, { toolUse }));
+      let ran = false;
+      const run = guard.execute({ toolUse }, member, input, async () => { ran = true; });
+      if (mode === 'observe') {
+        expect(answer).toBe(true);
+        await run;
+        expect(ran).toBe(true);
+        expect(cards[0]).toContain('In enforce mode this would be denied.');
+        expect(cards[0]).not.toMatch(/Denied|nothing was/);
+      } else {
+        expect(answer).toBe(false);
+        await expect(run).rejects.toThrow();
+        expect(ran).toBe(false);
+        expect(guard.classify(ctx(member, input)).card).toContain(`Denied; ${enforced}.`);
+      }
+      expect(JSON.stringify(cards)).not.toContain(AWS_SHAPED_KEY);
+    }
   });
 });
