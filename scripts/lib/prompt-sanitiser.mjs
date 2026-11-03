@@ -244,6 +244,101 @@ function stripOpenClawEnvelope(prompt) {
   return out === prompt ? null : out;
 }
 
+// ── OpenClaw 2026.10.x turn boilerplate (#992) ───────────────────────────
+// A CLI-backend turn carries more than the #717 envelope. Taken from the
+// 2026.10.9 emitters (RUNTIME_CONTEXT_* constants, labelRuntimeContextText,
+// buildHarnessVisibleReplyGuidance, buildUiPresentationPrompt):
+//   - closed `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>` … `<<<END_…>>>` blocks;
+//   - a trailing "OpenClaw runtime context:" … "End OpenClaw runtime context."
+//     block (OpenClaw escapes the footer inside the body, so the first footer
+//     line after the header ends it);
+//   - trailing visible-reply guidance paragraphs;
+//   - the leading "[Tue 2026-11-03 11:48 UTC] " envelope timestamp, which
+//     #717 only removed after a ⟦openclaw:ctx⟧ envelope.
+// The recall query is the first six distinct terms of the result, so the
+// timestamp alone filled four slots on every turn and the guidance filled the
+// rest of a short message: unrelated prompts recalled the same notes.
+const RUNTIME_CONTEXT_BEGIN_MARKER = '<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>';
+const RUNTIME_CONTEXT_END_MARKER = '<<<END_OPENCLAW_INTERNAL_CONTEXT>>>';
+const RUNTIME_CONTEXT_HEADER = 'OpenClaw runtime context:';
+const RUNTIME_CONTEXT_FOOTER = 'End OpenClaw runtime context.';
+// Opening sentence of each guidance paragraph OpenClaw appends after the
+// user's message. A paragraph is dropped only when it STARTS with one of
+// these and sits in the trailing run of boilerplate; the same sentence quoted
+// inside the owner's own paragraph, or followed by more owner text, is kept.
+const TRAILING_GUIDANCE_OPENERS = [
+  'Visible source replies are not automatically delivered for this run.',
+  'No source-conversation reply can be sent from this turn.',
+  'You can participate in the conversation throughout your work.',
+  'For the current source conversation, reply normally in your final assistant message;',
+  '`send`: `target` + `message`;',
+  '`send`: `message`; current source is default target.',
+  'Commentary is optional progress and may be hidden.',
+  '## UI Presentation\n',
+];
+
+/** Remove closed internal-context blocks: BEGIN and END each on their own line. */
+function stripInternalContextBlocks(lines) {
+  const out = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() === RUNTIME_CONTEXT_BEGIN_MARKER || lines[i].trimEnd().endsWith(` ${RUNTIME_CONTEXT_BEGIN_MARKER}`)) {
+      let end = i + 1;
+      while (end < lines.length && lines[end].trim() !== RUNTIME_CONTEXT_END_MARKER) end += 1;
+      if (end < lines.length) {
+        // Keep any text the line carried before the marker (the timestamp).
+        const before = lines[i].trimEnd().slice(0, -RUNTIME_CONTEXT_BEGIN_MARKER.length);
+        if (before.trim() !== '') out.push(before.trimEnd());
+        i = end;
+        continue;
+      }
+    }
+    out.push(lines[i]);
+  }
+  return out;
+}
+
+/** Remove a runtime-context block whose header and footer are each a whole line. */
+function stripRuntimeContextBlocks(lines) {
+  const out = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() === RUNTIME_CONTEXT_HEADER) {
+      let end = i + 1;
+      while (end < lines.length && lines[end].trim() !== RUNTIME_CONTEXT_FOOTER) end += 1;
+      if (end < lines.length) {
+        i = end;
+        continue;
+      }
+    }
+    out.push(lines[i]);
+  }
+  return out;
+}
+
+/**
+ * Strip OpenClaw 2026.10.x turn boilerplate around the owner's text (#992).
+ * Never returns null; returns the input unchanged when nothing matched.
+ */
+function stripOpenClawTurnBoilerplate(text) {
+  if (text.length === 0) return text;
+  let lines = text.replace(/\r\n/g, '\n').split('\n');
+  if (text.includes(RUNTIME_CONTEXT_BEGIN_MARKER)) lines = stripInternalContextBlocks(lines);
+  if (text.includes(RUNTIME_CONTEXT_HEADER)) lines = stripRuntimeContextBlocks(lines);
+
+  // Trailing guidance paragraphs, from the end backwards.
+  const paragraphs = lines.join('\n').split(/\n[ \t]*\n/);
+  while (paragraphs.length > 0) {
+    const last = paragraphs[paragraphs.length - 1].trim();
+    if (last === '') { paragraphs.pop(); continue; }
+    if (paragraphs.length > 1 && TRAILING_GUIDANCE_OPENERS.some((o) => (last + '\n').startsWith(o))) {
+      paragraphs.pop();
+      continue;
+    }
+    break;
+  }
+  const out = paragraphs.join('\n\n').trim().replace(LEADING_TIMESTAMP_PREFIX, '');
+  return out.trim() === text.trim() ? text : out;
+}
+
 /**
  * Strip framework metadata wrappers from a prompt.
  *
@@ -252,13 +347,38 @@ function stripOpenClawEnvelope(prompt) {
  *   was metadata. Never null/undefined.
  */
 export function sanitisePromptForRecall(prompt) {
+  return sanitise(prompt, true);
+}
+
+/**
+ * The prompt lane detection reads (#718): the same as sanitisePromptForRecall
+ * but WITHOUT the #992 turn-boilerplate step (only its leading-timestamp cut). OpenClaw puts lane markers such
+ * as "[Subagent Context]" inside the internal-context blocks that step
+ * removes, so detecting the lane on the recall text would turn a subagent
+ * turn into an interactive one and widen what it may recall.
+ *
+ * @param {string} prompt
+ * @returns {string}
+ */
+export function sanitisePromptForLaneDetection(prompt) {
+  return sanitise(prompt, false);
+}
+
+function sanitise(prompt, stripTurnBoilerplate) {
   if (typeof prompt !== 'string' || prompt.length === 0) return '';
+  // Lane text still loses the leading envelope timestamp: the lane markers are
+  // line-anchored, so "[Tue … UTC] Automated liveness check …" otherwise read
+  // as an interactive turn and fed the doctor's repetition sample (#992).
+  // Removing it can only let a marker match, i.e. only narrow the lane.
+  const finish = (text) => (stripTurnBoilerplate
+    ? stripOpenClawTurnBoilerplate(text.trim())
+    : text.trim().replace(LEADING_TIMESTAMP_PREFIX, '')).trim();
 
   // 0) OpenClaw 2026.9.x marker-keyed envelope (#717). When it matches, the
   //    remainder is the current user message and the legacy patterns below
   //    have nothing left to do.
   const fromEnvelope = stripOpenClawEnvelope(prompt);
-  if (fromEnvelope !== null) return fromEnvelope.trim();
+  if (fromEnvelope !== null) return finish(fromEnvelope);
 
   let working = prompt;
 
@@ -278,5 +398,6 @@ export function sanitisePromptForRecall(prompt) {
     working = working.replace(LEADING_FENCE, '');
   }
 
-  return working.trim();
+  // 3) OpenClaw 2026.10.x turn boilerplate (#992).
+  return finish(working);
 }
