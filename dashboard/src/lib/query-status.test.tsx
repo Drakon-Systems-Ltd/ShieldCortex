@@ -7,6 +7,8 @@ import {
   pillFor,
   queryStatus,
   scanningPill,
+  updateCheckOutcome,
+  updateCheckRow,
   type FirewallMode,
 } from './query-status';
 
@@ -105,5 +107,51 @@ describe('Iron Dome / scanning / operations pills', () => {
     expect(operationsPill('confirmed', { paused: true, mode: 'x' })).toEqual({ state: 'warn', text: 'paused' });
     expect(operationsPill('confirmed', { mode: 'autonomous' })).toEqual({ state: 'ok', text: 'autonomous' });
     expect(operationsPill('unavailable', undefined).state).toBe('unavailable');
+  });
+});
+
+describe('update check display (#631)', () => {
+  const base = { currentVersion: '5.3.1', runningVersion: '5.3.1' };
+
+  it('a disabled check is shown as off, never as up to date or available', () => {
+    const data = { ...base, latestVersion: null, updateAvailable: false, checkStatus: 'disabled' as const, checkDisabledBy: 'config' as const };
+    expect(updateCheckOutcome(data)).toBe('disabled');
+    expect(updateCheckRow(data)).toEqual({
+      kind: 'notice',
+      text: 'Automatic update check is off (dashboardUpdateCheck: false) — running v5.3.1; newer releases are not looked up.',
+    });
+  });
+
+  it('names the env switch when that is what disabled it', () => {
+    const row = updateCheckRow({ ...base, latestVersion: null, updateAvailable: false, checkStatus: 'disabled', checkDisabledBy: 'env' });
+    expect(row).toMatchObject({ kind: 'notice' });
+    expect((row as { text: string }).text).toContain('SHIELDCORTEX_SKIP_UPDATE_CHECK');
+  });
+
+  it('disabled wins even over a stale updateAvailable flag', () => {
+    expect(updateCheckOutcome({ ...base, latestVersion: '9.9.9', updateAvailable: true, checkStatus: 'disabled' })).toBe('disabled');
+  });
+
+  it('a failed lookup is unavailable, not clear', () => {
+    expect(updateCheckRow({ ...base, latestVersion: null, updateAvailable: false, checkStatus: 'failed' })).toEqual({ kind: 'unavailable' });
+  });
+
+  it('a newer version is an actionable item', () => {
+    expect(updateCheckRow({ ...base, latestVersion: '9.9.9', updateAvailable: true, checkStatus: 'ok' })).toEqual({
+      kind: 'item',
+      label: 'Newer version available — v9.9.9',
+      detail: 'Running v5.3.1.',
+    });
+  });
+
+  it('only a registry answer with no newer version is up to date (no row)', () => {
+    expect(updateCheckOutcome({ ...base, latestVersion: '5.3.1', updateAvailable: false, checkStatus: 'ok' })).toBe('up-to-date');
+    expect(updateCheckRow({ ...base, latestVersion: '5.3.1', updateAvailable: false, checkStatus: 'ok' })).toEqual({ kind: 'none' });
+  });
+
+  it('servers that predate checkStatus: null latestVersion was a failed lookup', () => {
+    expect(updateCheckOutcome({ ...base, latestVersion: null, updateAvailable: false })).toBe('failed');
+    expect(updateCheckOutcome({ ...base, latestVersion: '5.3.1', updateAvailable: false })).toBe('up-to-date');
+    expect(updateCheckOutcome({ ...base, latestVersion: '9.9.9', updateAvailable: true })).toBe('update-available');
   });
 });

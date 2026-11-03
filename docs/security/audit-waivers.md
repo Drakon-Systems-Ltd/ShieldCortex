@@ -200,71 +200,9 @@ true:
 Do **not** extend the expiry without re-doing the reachability greps above. If
 the codebase has grown an image path since, the reasoning is void.
 
-### SC-WAIVER-639-sprintf-js — `sprintf-js` unbounded precision denial of service
+## Retired waivers
 
-| | |
-|---|---|
-| **Advisory IDs** | `1241202` ([GHSA-hp3w-g68c-fv3c](https://github.com/advisories/GHSA-hp3w-g68c-fv3c)) |
-| **Severity** | moderate |
-| **Chain** | `shieldcortex` → `@huggingface/transformers@3.8.1` (**optionalDependencies**) → `onnxruntime-node@1.21.0` → `global-agent@3.0.0` → `roarr@2.15.4` → `sprintf-js@1.1.3` |
-| **Reviewed** | 2026-10-06 |
-| **Expires** | 2027-01-06 (the gate fails after this date until someone re-reviews) |
-| **Owner** | Michael Kyriacou (`author` in `package.json`) |
-
-#### Why there is no version to move to
-
-Measured on 2026-10-06 against the npm registry:
-
-```sh
-npm view sprintf-js dist-tags.latest          # 1.1.3
-npm view global-agent@3 version               # 3.0.0 (only 3.x release)
-npm view roarr@^2.15.3 version                # 2.15.4 (latest accepted)
-npm view @huggingface/transformers@3.8.1 dependencies.onnxruntime-node   # 1.21.0
-npm audit --omit=dev --json                   # sprintf-js range "<=1.1.3", source 1241202
-```
-
-`sprintf-js@1.1.3` is the latest published version, and the cached npm audit
-report marks `<=1.1.3` vulnerable. `roarr@2.15.4` is the latest 2.x release
-accepted by `global-agent@3.0.0`'s `^2.15.3`; it requires `sprintf-js: ^1.1.2`.
-`global-agent@3.0.0` is the only 3.x release accepted by
-`onnxruntime-node@1.21.0`'s `^3.0.0`. Transformers pins
-`onnxruntime-node: 1.21.0` exactly (`rg -n 'onnxruntime-node|global-agent|roarr|sprintf-js' package-lock.json`).
-Newer major versions of these packages cannot be selected by a lockfile
-refresh within this tree's ranges.
-
-#### Why it is not reachable in ShieldCortex
-
-The vulnerable call needs an attacker-controlled **format string** containing
-a huge precision value. `rg -n 'global-agent|roarr|sprintf'
-node_modules/@huggingface/transformers/node_modules/onnxruntime-node` found
-`global-agent` only in `script/install.js`, where it is required and bootstrapped
-to support proxy settings during binary installation. The same grep found no
-runtime import. `rg -n 'sprintf|global-agent|roarr' src scripts plugins hooks
-templates` found no ShieldCortex import or call to any of them. Inspection of
-`node_modules/global-agent/dist/` logging calls and
-`node_modules/roarr/dist/factories/createLogger.js` showed that `roarr` passes
-log message strings to `sprintf-js`, while `global-agent` supplies fixed format
-strings and puts request URLs, proxy settings, errors and headers in separate
-context values. Thus the measured ShieldCortex path does not pass an
-attacker-controlled format string to `sprintf-js`.
-
-#### Residual risk, stated honestly
-
-The vulnerable package remains installed when optional Transformers is
-installed. The ONNX install script loads `global-agent`, which loads `roarr`
-and `sprintf-js`; installation can process network and proxy data, and logging
-may process that data as values. A change to `global-agent` logging or another
-caller that supplies a variable format string could expose the vulnerable
-formatter. The grep and call-site inspection above establish the current path,
-not a guarantee about future dependency code or every execution environment.
-
-#### What retires this waiver
-
-Delete this section and its JSON record when a patched `sprintf-js` release is
-accepted by the chain, or an updated compatible chain removes `sprintf-js`, or
-ShieldCortex drops the optional Transformers dependency. Re-run the audit and
-the reachability checks before changing the waiver or its expiry. A new
-advisory ID is assessed separately by the release gate.
+- **SC-WAIVER-639-sprintf-js** (`1241202`, GHSA-hp3w-g68c-fv3c, `sprintf-js` precision denial of service) was retired on 2026-10-22: GitHub withdrew the advisory that day (`withdrawn_at` 2026-10-22T19:21:04Z), so `npm audit --omit=dev` no longer reports it and there is nothing left to waive. `sprintf-js@1.1.3` is still installed through the optional Transformers chain; a new advisory against it would be assessed afresh by the release gate.
 
 ## Waiver records
 
@@ -287,20 +225,6 @@ advisory ID is assessed separately by the release gate.
       "owner": "Michael Kyriacou (package.json author)",
       "retire_when": "ShieldCortex moves to an @huggingface/transformers release whose sharp range resolves >= 0.35.5 (4.3.1+), or the optional dependency is dropped",
       "issue": 466
-    },
-    {
-      "id": "SC-WAIVER-639-sprintf-js",
-      "package": "sprintf-js",
-      "advisories": [1241202],
-      "ghsa": ["GHSA-hp3w-g68c-fv3c"],
-      "severity": "moderate",
-      "chain": "shieldcortex -> @huggingface/transformers (optional) -> onnxruntime-node -> global-agent -> roarr -> sprintf-js",
-      "reason": "Unbounded precision format strings can cause denial of service; the measured ONNX install-script path uses global-agent logging with fixed format strings and ShieldCortex does not call sprintf-js.",
-      "reviewed": "2026-10-06",
-      "expires": "2027-01-06",
-      "owner": "Michael Kyriacou (package.json author)",
-      "retire_when": "a patched sprintf-js is reachable, the chain removes it, or the optional Transformers dependency is dropped",
-      "issue": 639
     }
   ]
 }

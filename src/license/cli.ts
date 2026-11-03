@@ -6,6 +6,7 @@
  * shieldcortex license deactivate
  */
 
+import { LICENSE_HELP } from '../cli/dispatch-help.js';
 import { activateLicense, deactivateLicense, getLicense, getLicenseFile } from './store.js';
 import { listFeatures } from './gate.js';
 import { validateOnceNow } from './validate.js';
@@ -149,14 +150,7 @@ export async function handleLicenseCommand(args: string[]): Promise<void> {
       handleDeactivate();
       break;
     default:
-      console.log(`\n${bold}ShieldCortex Licence${reset}`);
-      console.log('');
-      console.log('  shieldcortex license activate <key>  Activate a licence key');
-      console.log('  shieldcortex license status          Show current licence');
-      console.log('  shieldcortex license deactivate      Remove licence');
-      console.log('');
-      console.log(`  Enterprise licences: ${cyan}sales@drakonsystems.com${reset}`);
-      console.log();
+      console.log(LICENSE_HELP);
       break;
   }
 }

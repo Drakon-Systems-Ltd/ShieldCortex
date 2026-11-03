@@ -869,6 +869,8 @@ export function addMemory(
   const submittedContentHash = createContentHash(persisted.redacted ? persisted.fields.content : input.content);
   input = persisted.fields;
   const scannedSensitivity = defenceResult.sensitivity.level;
+  // Redaction floor: keep aligned with scripts/lib/capture-prompt.mjs and
+  // scripts/lib/save-memory.mjs (atLeastConfidential); never lower higher levels.
   const stampedSensitivity = persisted.redacted && (scannedSensitivity === 'PUBLIC' || scannedSensitivity === 'INTERNAL' || scannedSensitivity === 'PERSONAL')
     ? 'CONFIDENTIAL'
     : scannedSensitivity;

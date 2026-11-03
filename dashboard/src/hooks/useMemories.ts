@@ -349,8 +349,12 @@ export interface VersionInfo {
   latestVersion: string | null;
   updateAvailable: boolean;
   stale: boolean;
-  checkedAt: string;
+  /** Null when the registry lookup is disabled (#631). */
+  checkedAt: string | null;
   cacheHit: boolean;
+  /** Absent from servers that predate #631. */
+  checkStatus?: 'ok' | 'failed' | 'disabled';
+  checkDisabledBy?: 'config' | 'env';
 }
 
 // Update result from API

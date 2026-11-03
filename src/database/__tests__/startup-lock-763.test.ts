@@ -781,3 +781,59 @@ describe('#813 maintain after its lock record is replaced mid-run', () => {
     expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
   });
 });
+
+describe('#837 a retry that spells the database path differently', () => {
+  /** Leave a live record aside after a failed put-back, as in #763. */
+  const displaceLiveRecord = (): string => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    writeForeign(record(DEAD_PID));
+    const live = record(EPERM_PID);
+    hooks.beforeLockRename = () => { writeForeign(live); hooks.failLockCreate = true; };
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(asides()).toEqual([live]);
+    expect(realFs.existsSync(lockPath)).toBe(false);
+    return live;
+  };
+
+  it('strict mode refuses before opening SQLite and puts the live record back', () => {
+    const live = displaceLiveRecord();
+    const spelled = `${dir}${path.sep}.${path.sep}memories.db`;
+    expect(spelled).not.toBe(dbPath);
+
+    expect(() => initDatabase(spelled, { refuseIfLocked: true })).toThrow(StartupLockHeldError);
+    expect(holdsStartupLock()).toBe(false);
+    expect(isDatabaseInitialized()).toBe(false);
+    expect(realFs.existsSync(dbPath)).toBe(false);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+    expect(strays()).toEqual([]);
+  });
+
+  it('default mode does not take the lock and the live record stays recoverable', () => {
+    const live = displaceLiveRecord();
+    const spelled = `${dir}${path.sep}sub${path.sep}..${path.sep}memories.db`;
+    realFs.mkdirSync(path.join(dir, 'sub'));
+
+    hooks.failLockCreate = true; // The put-back still fails on this retry.
+    expect(() => __databaseTestUtils.acquireStartupLock(spelled)).not.toThrow();
+    expect(holdsStartupLock()).toBe(false);
+    expect(continuedAnyway()).toBe(true);
+    expect(realFs.existsSync(lockPath)).toBe(false);
+    expect(asides()).toEqual([live]);
+
+    // Once the transient error clears, the original spelling puts it back.
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+    expect(strays()).toEqual([]);
+  });
+
+  it('a symlinked parent directory names the same lock', () => {
+    const live = displaceLiveRecord();
+    const via = path.join(dir, 'via');
+    realFs.symlinkSync(dir, via, 'dir');
+
+    expect(() => __databaseTestUtils.acquireStartupLock(path.join(via, 'memories.db'), true)).toThrow(StartupLockHeldError);
+    expect(holdsStartupLock()).toBe(false);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+    expect(strays()).toEqual([]);
+  });
+});

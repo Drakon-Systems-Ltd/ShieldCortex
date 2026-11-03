@@ -60,7 +60,7 @@ export function IntegrationsView() {
             checked={data.openclawAutoMemory}
             pending={pendingKey === 'openclawAutoMemory'}
             disabled={isPending && pendingKey !== 'openclawAutoMemory'}
-            docsUrl="https://shieldcortex.ai/docs/integrations#openclaw-auto-memory"
+            docsUrl="https://shieldcortex.ai/docs#openclaw-config"
             onChange={(next) =>
               submit(
                 { openclawAutoMemory: next },
@@ -75,7 +75,7 @@ export function IntegrationsView() {
             checked={data.proactiveRecall}
             pending={pendingKey === 'proactiveRecall'}
             disabled={isPending && pendingKey !== 'proactiveRecall'}
-            docsUrl="https://shieldcortex.ai/docs/integrations#proactive-recall"
+            docsUrl="https://shieldcortex.ai/docs#how-it-works"
             onChange={(next) =>
               submit(
                 { proactiveRecall: next },

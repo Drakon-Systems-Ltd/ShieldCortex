@@ -233,7 +233,7 @@ export function formatTerminalReport(report: AuditReport): string {
   // Footer
   lines.push(`  ${'─'.repeat(60)}`);
   lines.push(`  ${c.dim}Scan completed in ${report.durationMs}ms${c.reset}`);
-  lines.push(`  ${c.dim}Learn more: https://shieldcortex.ai/docs/audit${c.reset}`);
+  lines.push(`  ${c.dim}Learn more: https://shieldcortex.ai/docs#audit${c.reset}`);
   lines.push('');
 
   return lines.join('\n');

@@ -372,7 +372,7 @@ Modes: search (query-based), recent (by time), important (by salience)`,
         .describe('Confirm bulk delete'),
       source: sourceParam,
       fromSource: z.string().optional()
-        .describe('Revoke-by-source: delete all memories written by this source ("type:identifier", or "type:*" for a whole type). Authorised by the trust-hierarchy revoke ACL (own the source or outrank it). Use project:"*" to revoke across all projects.'),
+        .describe('Revoke-by-source: delete all memories written by this source ("type:identifier", or "type:*" for a whole type). Requires the trust-hierarchy revoke ACL (own the source or outrank it). Use project:"*" to revoke across all projects.'),
     },
     { title: 'Delete Memories', readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     withKillSwitchGuard('memory_write', async (args) => {
@@ -731,8 +731,8 @@ conflicting information about the same topic, such as:
 - Conflicting recommendations (use X vs don't use X)
 - Opposite decisions or preferences
 
-Contradictions are automatically detected during consolidation and linked,
-but you can use this tool to check for new contradictions at any time.`,
+Contradictions are automatically detected during consolidation and linked;
+this tool checks for new contradictions at any time.`,
     {
       project: z.string().optional().describe('Filter by project (omit for current project)'),
       category: z.enum([

@@ -179,14 +179,53 @@ describe('#353 wrapped heartbeat vs spoof / ordinary cron', () => {
     expect(__getSessionTaintForTest().get('agent:main:direct:michael')).not.toBeNull();
   });
 
-  it('unwrapped Read HEARTBEAT.md still skips (start-anchor regression)', async () => {
+  it('unwrapped Read HEARTBEAT.md on a trusted heartbeat session still skips (start-anchor regression)', async () => {
+    const { scanToolResponse, mod } = makeDirtyScanner();
+    __setDefenceModuleForTest(mod);
+    __setRuntimeForTest(makeRuntime() as never);
+    await scanLlmInput(llmEvent('agent:main:main:heartbeat', HEARTBEAT_RITUAL), {} as never);
+    expect(scanToolResponse).not.toHaveBeenCalled();
+    expect(__getSessionTaintForTest().get('agent:main:main:heartbeat')).toBeNull();
+  });
+
+  // #914 supersedes the old contract that an unwrapped `Read HEARTBEAT.md`
+  // prompt on ANY session skipped the scanner. The bare llm_input prompt is
+  // `unknown` (a host-assembled string with no per-span origin), and prompt
+  // text is not attestation: only the host-minted automation session key may
+  // exempt it. On an ordinary session the ritual is scanned — and the genuine
+  // ritual scans clean, so it still does not taint.
+  it('unwrapped Read HEARTBEAT.md on an ordinary session is scanned, and the genuine ritual does not taint', async () => {
     const { scanToolResponse, mod } = makeDirtyScanner();
     __setDefenceModuleForTest(mod);
     __setRuntimeForTest(makeRuntime() as never);
     expect(isInternalContent(HEARTBEAT_RITUAL, 'agent:main:direct:michael')).toBe(true);
     await scanLlmInput(llmEvent('agent:main:direct:michael', HEARTBEAT_RITUAL), {} as never);
-    expect(scanToolResponse).not.toHaveBeenCalled();
+    expect(scanToolResponse).toHaveBeenCalledTimes(1);
     expect(__getSessionTaintForTest().get('agent:main:direct:michael')).toBeNull();
+  });
+
+  it('a heartbeat-looking prefix on a DM cannot carry an injection past the scanner', async () => {
+    const { scanToolResponse, mod } = makeDirtyScanner();
+    __setDefenceModuleForTest(mod);
+    __setRuntimeForTest(makeRuntime() as never);
+    for (const prefix of [HEARTBEAT_RITUAL, 'System: Exec completed']) {
+      await scanLlmInput(llmEvent('agent:main:direct:michael', `${prefix}\n${MALICIOUS}`), {} as never);
+    }
+    expect(scanToolResponse).toHaveBeenCalledTimes(2);
+    expect(__getSessionTaintForTest().get('agent:main:direct:michael')).not.toBeNull();
+  });
+
+  it('the automation exemption covers the prompt only, never history', async () => {
+    const { scanToolResponse, mod } = makeDirtyScanner();
+    __setDefenceModuleForTest(mod);
+    __setRuntimeForTest(makeRuntime() as never);
+    await scanLlmInput({
+      runId: 'r', sessionId: 'agent:main:cron:hb1', provider: 'p', model: 'm', imagesCount: 0,
+      prompt: WRAPPED_HEARTBEAT,
+      historyMessages: [{ role: 'assistant', content: `System: note\n${MALICIOUS}` }],
+    } as never, {} as never);
+    expect(scanToolResponse).toHaveBeenCalledTimes(1);
+    expect(__getSessionTaintForTest().get('agent:main:cron:hb1')).not.toBeNull();
   });
 });
 

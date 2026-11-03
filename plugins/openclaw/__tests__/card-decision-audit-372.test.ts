@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { GUARD_DEGRADED_OUTCOMES } from '../../../src/defence/iron-dome/session-guard.js';
+import { isApprovalTimeoutEntry } from '../../../src/defence/iron-dome/expiry-digest.js';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -363,6 +364,27 @@ describe('#372 plugin — the host decision reaches the audit stream', () => {
       outcome,
       origin: 'openclaw-interceptor',
     });
+  });
+
+  // #673: only a TIMEOUT the host reports can become an expiry-digest entry.
+  // An in-time answer, a deny, a cancel or an unknown value passed straight to
+  // onResolution never does. (A host that normalises an unknown resolution to
+  // TIMEOUT before calling us is the pinned host-contract layer, not this one.)
+  it.each([
+    ['allow-once', false],
+    ['allow-always', false],
+    ['deny', false],
+    ['cancelled', false],
+    ['allow-for-an-hour', false],
+    ['timeout', true],
+  ])('#673: resolving with %s is a digest entry: %s', async (decision, isEntry) => {
+    const { api, hooks } = makeApi({ interceptor: { actionGuard: { enabled: true } } });
+    plugin.register(api);
+    const request = await holdCard(hooks);
+    await request.onResolution(decision);
+    const key = 'sc-0123456789abcdef';
+    const entries = auditRows().filter((r) => isApprovalTimeoutEntry({ ...r, sessionKey: key }, key));
+    expect(entries).toHaveLength(isEntry ? 1 : 0);
   });
 
   it('a card the host resolves twice still yields one row', async () => {

@@ -516,5 +516,20 @@ export function getInlineSchema(): string {
       last_changed TEXT,
       PRIMARY KEY (server_name, tool_name)
     );
+
+    -- #925: structured findings of the automatic MCP tool check. Mirrors schema.sql.
+    CREATE TABLE IF NOT EXISTS mcp_tool_findings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      audit_id INTEGER,
+      server_name TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('changed', 'suspicious', 'error', 'pending')),
+      alert_kind TEXT,
+      source TEXT,
+      severity TEXT,
+      finding_json TEXT,
+      detail TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_mcp_tool_findings_server ON mcp_tool_findings(server_name, kind, created_at);
   `;
 }

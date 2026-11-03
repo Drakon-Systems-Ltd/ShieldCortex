@@ -9,7 +9,7 @@
  * This module runs the defence pipeline's credential redaction + sensitivity
  * classifier against the prompt BEFORE it lands in `session_events`, returning:
  *   - redactedText: prompt with credentials replaced by [REDACTED-…] markers
- *   - sensitivity: classifier level (PUBLIC | INTERNAL | CONFIDENTIAL | RESTRICTED)
+ *   - sensitivity: classifier level (PUBLIC | INTERNAL | PERSONAL | CONFIDENTIAL | RESTRICTED)
  *   - findings: credential scan findings (already-redacted match previews)
  *   - redactedCount: number of credentials that were rewritten
  *
@@ -92,8 +92,10 @@ export async function captureForSessionEvent(rawText) {
   // If credentials were found, force at least CONFIDENTIAL. The classifier
   // catches "api_key=" style markers but raw secret strings without context
   // can slip past it, and we never want a prompt full of secrets tagged
-  // PUBLIC or INTERNAL just because the surrounding text was unremarkable.
-  if (redactedCount > 0 && (sensitivity === 'PUBLIC' || sensitivity === 'INTERNAL')) {
+  // PUBLIC, INTERNAL or PERSONAL because the classifier missed the credential.
+  // Keep aligned with scripts/lib/save-memory.mjs (atLeastConfidential) and
+  // src/memory/store.ts (stampedSensitivity); never lower higher levels.
+  if (redactedCount > 0 && (sensitivity === 'PUBLIC' || sensitivity === 'INTERNAL' || sensitivity === 'PERSONAL')) {
     sensitivity = 'CONFIDENTIAL';
   }
 

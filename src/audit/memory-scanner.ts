@@ -23,7 +23,7 @@ import { attachFindingDetail, locateFirstMatch, shellQuoteArg } from './finding-
 import { isFrontmatterOnlyStealthHit } from './owner-memory.js';
 import { redactForPersistence } from '../defence/sensitivity/pii.js';
 
-const LEARN_MORE = 'https://shieldcortex.ai/docs/threats/memory-poisoning';
+const LEARN_MORE = 'https://shieldcortex.ai/docs#attack-vectors';
 
 // ── ShieldCortex Own-Hook Whitelist ──
 
@@ -632,7 +632,7 @@ function scanMemoryFile(file: DiscoveredMemoryFile): AuditFinding[] {
           description: `A ${cf.type} credential was found stored in agent memory. This could be exfiltrated by a malicious prompt.`,
           filePath,
           matchedText: cf.match,
-          learnMoreUrl: 'https://shieldcortex.ai/docs/threats/credential-leak',
+          learnMoreUrl: 'https://shieldcortex.ai/docs#attack-vectors',
         }, content, [`credential:${cf.type}`], cf.match));
       }
     }
@@ -776,7 +776,7 @@ function scanMemoryFileDetailed(file: DiscoveredMemoryFile): MemoryFileScanRecor
           description: `A ${cf.type} credential was found stored in agent memory. This could be exfiltrated by a malicious prompt.`,
           filePath: file.path,
           matchedText: cf.match,
-          learnMoreUrl: 'https://shieldcortex.ai/docs/threats/credential-leak',
+          learnMoreUrl: 'https://shieldcortex.ai/docs#attack-vectors',
         }, content, [`credential:${cf.type}`], cf.match));
         risk = mergeRisk(risk, severityToRisk(severity));
       }

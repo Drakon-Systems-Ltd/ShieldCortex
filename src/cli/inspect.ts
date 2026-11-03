@@ -10,6 +10,8 @@
  *   shieldcortex inspect last-precompact [--history N | --all]
  */
 
+import { INSPECT_HELP } from './dispatch-help.js';
+
 // ANSI colours — match doctor.ts conventions.
 const bold = '\x1b[1m';
 const reset = '\x1b[0m';
@@ -244,18 +246,7 @@ async function cmdLastRecall(args: string[]): Promise<number> {
 }
 
 function printHelp() {
-  console.log('Usage: shieldcortex inspect <subcommand>');
-  console.log('');
-  console.log('Subcommands:');
-  console.log('  last-precompact [--history N | --all]    Show extractor candidates from the last precompact run');
-  console.log('                                           --history N (0=newest, up to 9) — show slot N');
-  console.log('                                           --all — show every entry in the ring buffer (newest first)');
-  console.log('');
-  console.log('  last-recall [--history N | --all]        Show recall candidates from the last prompt-recall run');
-  console.log('                                           (requires proactiveRecall=true; logs prompt + per-candidate');
-  console.log('                                           FTS rank + effective salience + drop reason).');
-  console.log('                                           Note: prompts are stored locally at ~/.shieldcortex/recall-log/');
-  console.log('                                           — same trust boundary as memories.db.');
+  console.log(INSPECT_HELP);
 }
 
 export async function handleInspectCommand(args: string[]): Promise<void> {

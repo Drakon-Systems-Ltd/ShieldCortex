@@ -362,6 +362,14 @@ export function findDuplicateMemoryPairs(options?: {
   return pairs;
 }
 
+function mergeCurrentTags(keptRow: Record<string, unknown>, removedRow: Record<string, unknown>): string[] {
+  // Pair snapshots predate earlier merges in this pass. Both rows may have
+  // already absorbed tags that must survive even if their owner is now removed.
+  return redactForPersistence({
+    tags: [...new Set([...rowToMemory(keptRow).tags, ...rowToMemory(removedRow).tags])],
+  }).fields.tags;
+}
+
 /**
  * De-duplicate long-term memories found as duplicate PAIRS by
  * findDuplicateMemoryPairs (same project|category, similar title + >0.5 content
@@ -434,7 +442,7 @@ export function deduplicateMemories(options?: { dryRun?: boolean }): {
 
       if (!dryRun) {
         // Union the loser's tags onto the kept row (metadata only, non-lossy).
-        const mergedTags = redactForPersistence({ tags: [...new Set([...kept.tags, ...loser.tags])] }).fields.tags;
+        const mergedTags = mergeCurrentTags(keepA ? rowA : rowB, keepA ? rowB : rowA);
         db.prepare('UPDATE memories SET tags = ? WHERE id = ?')
           .run(JSON.stringify(mergedTags), kept.id);
 
@@ -1384,7 +1392,7 @@ export function consolidateMemories(): DreamModeResult {
         const removed = keepA ? memB : memA;
 
         // Merge tags from both onto the kept row (metadata only, non-lossy).
-        const mergedTags = redactForPersistence({ tags: [...new Set([...kept.tags, ...removed.tags])] }).fields.tags;
+        const mergedTags = mergeCurrentTags(keepA ? rowA : rowB, keepA ? rowB : rowA);
         db.prepare('UPDATE memories SET tags = ? WHERE id = ?')
           .run(JSON.stringify(mergedTags), kept.id);
 

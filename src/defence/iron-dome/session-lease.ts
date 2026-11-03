@@ -231,6 +231,10 @@ export function checkSessionLease(input: LeaseCheckInput): LeaseDecision {
         };
       }
       const ageSec = held.acquiredAtMs != null ? Math.round((nowMs - held.acquiredAtMs) / 1000) : null;
+      // An sc- holder is a pseudonymous salted HMAC key: a stable correlator,
+      // not a reversible session id. It may appear in this refusal's logs and
+      // audit rows, but the raw session id must never be logged beside it.
+      // Legacy/raw and per-process fallback holders retain their existing shape.
       return {
         verdict: 'held',
         reason:

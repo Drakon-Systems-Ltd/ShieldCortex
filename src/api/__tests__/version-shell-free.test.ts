@@ -16,20 +16,27 @@ const execFileSyncMock = jest.fn();
 const execFileMock = jest.fn();
 const execSyncMock = jest.fn();
 const execMock = jest.fn();
+const spawnMock = jest.fn();
+const spawnSyncMock = jest.fn();
 
 // The mock must provide every export the module under test could link,
 // including the shell-string APIs — so a regression back to them shows up
-// as a failed call-count assertion, not an ESM link error.
+// as a failed call-count assertion, not an ESM link error. spawn/spawnSync
+// are linked through the config reader version.ts uses for the #631 opt-out.
 jest.unstable_mockModule('child_process', () => ({
   execFileSync: execFileSyncMock,
   execFile: execFileMock,
   execSync: execSyncMock,
   exec: execMock,
+  spawn: spawnMock,
+  spawnSync: spawnSyncMock,
   default: {
     execFileSync: execFileSyncMock,
     execFile: execFileMock,
     execSync: execSyncMock,
     exec: execMock,
+    spawn: spawnMock,
+    spawnSync: spawnSyncMock,
   },
 }));
 

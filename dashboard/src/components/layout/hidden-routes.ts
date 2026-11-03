@@ -3,8 +3,9 @@
  *
  * A hidden route is taken out of navigation (sidebar, mobile bar, page tab
  * bars) and a direct URL to it is redirected server-side (next.config.ts
- * `redirects()`) to the nearest kept page. The page code stays in the tree:
- * to un-hide something, delete its line here.
+ * `redirects()`) to the nearest kept page. This list is the only thing that
+ * redirects a hidden path: no `page.tsx` stub sits behind one (a test checks
+ * that), so changing or deleting a line here changes or drops that redirect.
  *
  * `tab` scopes an entry to one tab of a tabbed page (`/protection?tab=x`);
  * without it the whole path is hidden. A hidden tab falls back to the page's

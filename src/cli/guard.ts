@@ -15,14 +15,29 @@
  * `synthetic` reach row. TTY-only, like `approve`: an agent with piped stdio
  * must not be able to spam unanswerable cards (each one would count against
  * approval reachability and force a demotion).
+ *
+ * `posture` (#922, read-only) prints the effective Action Guard posture of
+ * each gate plane — Claude Code hook, OpenClaw plugin, Hermes — from the same
+ * resolver as doctor's `Action guard posture` row. Exit 0 when the planes
+ * agree (or none is present), 4 when they disagree. It takes no posture
+ * argument: there is no writer in this release.
  */
 
+import { GUARD_HELP } from './dispatch-help.js';
 import { execFile } from 'node:child_process';
 import { randomBytes, randomInt } from 'node:crypto';
 import readline from 'node:readline/promises';
 
-import { actionGuardPosture, getActionGuardCoreConfig, readRawConfig, type ActionGuardPosture } from '../cloud/config.js';
+import {
+  actionGuardPosture,
+  getActionGuardCoreConfig,
+  inspectActionGuardCoreConfig,
+  readRawConfig,
+  type ActionGuardCoreConfig,
+  type ActionGuardPosture,
+} from '../cloud/config.js';
 import { readPolicyLock } from '../defence/iron-dome/policy-lock.js';
+import { formatGuardPostureLines, guardPostureRow, readGuardPosture } from '../guard/posture-switch.js';
 import {
   DEFAULT_PRIOR_POLICY_CARRY,
   INTERVENTION_MAX_RATE,
@@ -117,9 +132,10 @@ export interface ReadinessSummary {
   lastPromotion: PromotionNotice | null;
 }
 
-function rawActionGuard(): Record<string, unknown> {
+/** `readOnly` (doctor, #878): no legacy-signature adoption, key mint or self-heal rewrite. */
+function rawActionGuard(opts: { readOnly?: boolean } = {}): Record<string, unknown> {
   try {
-    const raw = readRawConfig();
+    const raw = readRawConfig({ readOnly: opts.readOnly === true });
     const g = raw.actionGuard;
     return g && typeof g === 'object' && !Array.isArray(g) ? (g as Record<string, unknown>) : {};
   } catch {
@@ -136,13 +152,32 @@ function lockPresent(): boolean {
   }
 }
 
-export function buildReadinessSummary(opts: { now?: number; home?: string; adapter?: ReadinessAdapter } = {}): ReadinessSummary {
+/**
+ * The posture an `unknown` read-only answer is summarised as (#878): the
+ * strict posture the runtime enforces when a verdict cannot be settled
+ * without a write — never off.
+ */
+const UNKNOWN_CORE_AS_ENFORCED: ActionGuardCoreConfig = { enabled: true, enforce: true, readinessGate: false };
+
+/**
+ * `readOnly` (#878): every config read in the summary goes through the
+ * side-effect-free readers, so doctor's readiness rows cannot adopt a legacy
+ * signature, mint `.integrity-key` or self-heal `config.json`. The `guard`
+ * command and its other callers keep the ordinary reads.
+ */
+export function buildReadinessSummary(
+  opts: { now?: number; home?: string; adapter?: ReadinessAdapter; readOnly?: boolean } = {},
+): ReadinessSummary {
   const now = opts.now ?? Date.now();
   const adapter = opts.adapter ?? 'claude-code-hook';
-  const core = getActionGuardCoreConfig();
+  const readOnly = opts.readOnly === true;
+  const inspected = readOnly ? inspectActionGuardCoreConfig() : null;
+  const core = inspected === null
+    ? getActionGuardCoreConfig()
+    : inspected === 'unknown' ? UNKNOWN_CORE_AS_ENFORCED : inspected;
   const lockOverrides = core.readinessGate && lockPresent();
   const posture = lockOverrides ? 'enforce' : actionGuardPosture(core);
-  const rawGuard = rawActionGuard();
+  const rawGuard = rawActionGuard({ readOnly });
   const channel = describeHumanChannel(rawGuard.notify);
   // `home` pins the evidence tree (tests); production reads the configured
   // root plus the hook's home-directory audit.
@@ -181,7 +216,7 @@ export function buildReadinessSummary(opts: { now?: number; home?: string; adapt
 }
 
 /** #509 r7: one summary per gated surface (Claude Code hook, OpenClaw). */
-export function buildReadinessSummaries(opts: { now?: number; home?: string } = {}): ReadinessSummary[] {
+export function buildReadinessSummaries(opts: { now?: number; home?: string; readOnly?: boolean } = {}): ReadinessSummary[] {
   return READINESS_ADAPTERS.map((adapter) => buildReadinessSummary({ ...opts, adapter }));
 }
 
@@ -499,6 +534,30 @@ function report(answer: ReachAnswer, log: (l: string) => void): { code: number; 
   return { code: 1, answer };
 }
 
+// ==================== posture (#922, read-only) ====================
+
+/** Exit code when the planes disagree, matching the design's read-only form. */
+export const GUARD_POSTURE_MISMATCH_EXIT = 4;
+
+function runGuardPosture(args: string[], opts: { home?: string }): number {
+  const unexpected = args.filter((a) => a !== '--json');
+  if (unexpected.length > 0) {
+    console.error(
+      `\`shieldcortex guard posture\` only reads; it takes no posture argument in this release (got: ${unexpected.join(' ')}).`,
+    );
+    console.error(GUARD_HELP);
+    return 1;
+  }
+  const report = readGuardPosture({ home: opts.home });
+  const code = report.verdict === 'mismatch' ? GUARD_POSTURE_MISMATCH_EXIT : 0;
+  if (args.includes('--json')) {
+    console.log(stringifyJsonTerminalSafe({ ...report, row: guardPostureRow(report) }, 2));
+  } else {
+    for (const line of formatGuardPostureLines(report)) console.log(line);
+  }
+  return code;
+}
+
 // ==================== dispatcher ====================
 
 export async function runGuardCommand(argv: string[], opts: { home?: string } = {}): Promise<number> {
@@ -536,9 +595,9 @@ export async function runGuardCommand(argv: string[], opts: { home?: string } = 
   if (sub === 'test-approval') {
     return (await runTestApproval({ adapter: surface })).code;
   }
-  console.log('Usage: shieldcortex guard readiness [--surface claude-code|openclaw] [--json]');
-  console.log('                                  Show the enforce-when-ready readiness conditions, per surface (#509)');
-  console.log('       shieldcortex guard test-approval [--surface claude-code|openclaw]');
-  console.log('                                  Send a synthetic approval request through your channel');
+  if (sub === 'posture') {
+    return runGuardPosture(argv.slice(1), opts);
+  }
+  console.log(GUARD_HELP);
   return sub === '--help' || sub === '-h' || sub === 'help' ? 0 : 1;
 }

@@ -121,8 +121,10 @@ const SEND_FAILED = 'Embedding worker request could not be sent';
  *   SC_TEST_TERMINATE_KILL_FLAG      'reject-before-exit' only: the thread of
  *                                    spawn N dies when `<flag>.N` exists, so the
  *                                    driver decides WHEN the exit arrives
- *   SC_TEST_POSTMESSAGE_FAIL_COUNT   how many postMessage() calls throw, from
- *                                    the first, counted across the process
+ *   SC_TEST_POSTMESSAGE_FAIL_COUNT   how many embed postMessage() calls throw,
+ *                                    from the first, counted across the process;
+ *                                    a 'load' is always sent, so a preload can
+ *                                    stand the worker up first
  *
  * In a fault mode it also exports `exitsDelivered()`, so a driver can wait for
  * the exit event the module was handed rather than sleep past where it lands.
@@ -178,7 +180,9 @@ const WORKER_SHIM = [
   '    // algorithm refuses raises. Counted across the process rather than per',
   '    // worker, so a scenario can fail exactly the first request and leave the',
   '    // worker itself untouched: postMessage throwing means nothing was sent.',
-  '    if (sendFailuresLeft > 0) {',
+  "    // Embeds only: a scenario warms its worker with a preload first, so the",
+  "    // timers it watches are not also counting that thread's cold start.",
+  "    if (sendFailuresLeft > 0 && args[0]?.type === 'embed') {",
   '      sendFailuresLeft -= 1;',
   "      throw new Error('fake postMessage failure');",
   '    }',
@@ -410,15 +414,19 @@ const DRIVER = [
   '    loadedAfter: isModelLoaded(),',
   '  });',
   "} else if (scenario === 'timeout-then-replacement') {",
+  '  const warmed = await warm(); // the hang is timed on a thread already up',
   "  let timeoutMessage = '';",
   "  try { await generateEmbedding('__HANG__'); } catch (e) { timeoutMessage = msgOf(e); }",
   '  const staleId = spawnedIds()[0];',
   '  const beatsBeforeReplacement = beatsFrom(staleId);',
-  '  let second = -1;',
-  "  let secondError = '';",
   '  // The replacement is created here — after the timed-out kill has landed,',
   '  // because this call waits it out. The dead thread\'s exit event still',
-  '  // arrives around now and must not poison worker B.',
+  '  // arrives around now and must not poison worker B. A preload, so worker B',
+  "  // is stood up under the load budget and the embeds after it are timed on",
+  "  // their own answers, not on worker B's cold start.",
+  '  const load = await warm();',
+  '  let second = -1;',
+  "  let secondError = '';",
   "  try { second = (await generateEmbedding('ok-after-timeout')).length; } catch (e) { secondError = msgOf(e); }",
   '  const loadedRightAfterReplacement = isModelLoaded();',
   '  // The kill we asked for logs nothing, so wait for the dead thread to stop',
@@ -437,8 +445,12 @@ const DRIVER = [
   '  const spawnedAfterThird = spawned();',
   '  await disposeModel();',
   '  out({',
+  '    warmState: warmed.state,',
+  '    warmMessage: warmed.message,',
   '    timeoutMessage,',
   '    beatsBeforeReplacement,',
+  '    loadState: load.state,',
+  '    loadMessage: load.message,',
   '    second,',
   '    secondError,',
   '    loadedRightAfterReplacement,',
@@ -908,6 +920,9 @@ const DRIVER = [
   '  // postMessage() throws for the FIRST request only. That request never',
   '  // reached the thread, so the worker is healthy — and the timeout timer the',
   '  // request armed a line earlier must not still be there to kill it.',
+  "  // Warmed first, so the timer that matters is armed on a thread already up",
+  "  // and the embeds after it are timed on their own answers, not a cold start.",
+  '  const warmed = await warm();',
   "  const sendFailed = await settleDims(generateEmbedding('send-fails'));",
   "  const okDuringWindow = await settleDims(generateEmbedding('ok-1'));",
   '  const spawnedDuringWindow = spawned();',
@@ -918,6 +933,8 @@ const DRIVER = [
   '  await disposeModel();',
   '  await delay(200);',
   '  out({',
+  '    warmState: warmed.state,',
+  '    warmMessage: warmed.message,',
   '    sendFailedState: sendFailed.state,',
   '    sendFailedMessage: sendFailed.message,',
   '    okDuringWindowState: okDuringWindow.state,',
@@ -933,6 +950,9 @@ const DRIVER = [
   '  // What an abandoned timer does to OTHER work: it terminates the worker a',
   '  // later request is sitting on, and settles that request with the timeout',
   "  // kill's collateral error, early, instead of with its own timeout.",
+  "  // Warmed first, so the hang below times out because it hangs, on a thread",
+  '  // already up, and not because that thread was still booting.',
+  '  const warmed = await warm();',
   "  const sendFailed = await settleDims(generateEmbedding('send-fails'));",
   '  const timeout = Number(process.env.SC_TEST_INFERENCE_TIMEOUT_MS);',
   '  await delay(Math.floor(timeout / 2)); // an abandoned timer fires mid-flight',
@@ -941,6 +961,8 @@ const DRIVER = [
   '  const hungMs = Date.now() - startedAt;',
   '  await delay(200);',
   '  out({',
+  '    warmState: warmed.state,',
+  '    warmMessage: warmed.message,',
   '    sendFailedState: sendFailed.state,',
   '    sendFailedMessage: sendFailed.message,',
   '    hungState: hung.state,',
@@ -1167,8 +1189,13 @@ describe('embedding worker — intentional disposal is not a crash', () => {
   it('a timed-out request fails loudly while its kill stays silent and replaceable', () => {
     const run = runScenario('timeout-then-replacement', { SC_TEST_INFERENCE_TIMEOUT_MS: '400' });
 
+    expect(run.result.warmMessage).toBe(''); // the hang ran on a thread already up
+    expect(run.result.warmState).toBe('resolved');
     expect(String(run.result.timeoutMessage)).toMatch(/embed timed out after 400ms/);
     expect(run.result.beatsBeforeReplacement as number).toBeGreaterThan(0); // heartbeat gate is live
+    // The replacement was stood up through the same gate, after the kill.
+    expect(run.result.loadMessage).toBe('');
+    expect(run.result.loadState).toBe('resolved');
     expect(run.result).toMatchObject({
       second: 3,
       secondError: '',
@@ -1543,6 +1570,8 @@ describe('embedding worker — intentional disposal is not a crash', () => {
       SC_TEST_POSTMESSAGE_FAIL_COUNT: '1',
     });
 
+    expect(run.result.warmMessage).toBe(''); // the send failed on a thread already up
+    expect(run.result.warmState).toBe('resolved');
     // 1. The caller is told, loudly, and told what actually happened.
     expect(run.result.sendFailedState).toBe('rejected');
     expect(String(run.result.sendFailedMessage)).toContain(SEND_FAILED);
@@ -1573,6 +1602,8 @@ describe('embedding worker — intentional disposal is not a crash', () => {
       SC_TEST_POSTMESSAGE_FAIL_COUNT: '1',
     });
 
+    expect(run.result.warmMessage).toBe(''); // the hang ran on a thread already up
+    expect(run.result.warmState).toBe('resolved');
     expect(run.result.sendFailedState).toBe('rejected');
     expect(String(run.result.sendFailedMessage)).toContain(SEND_FAILED);
     // The later request gets its OWN timeout, at its own deadline...

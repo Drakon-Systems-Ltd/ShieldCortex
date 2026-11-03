@@ -1078,9 +1078,12 @@ const SELF_HEAL_REPAIR_HINT = "Run `shieldcortex openclaw install` to do it your
 /**
  * Is the mutating self-heal allowed to write?
  *
- * An unreadable config resolves to `{}` inside loadShieldConfig, which the
- * predicate treats as enabled — the default preserves current behaviour. The
- * read-only staleness check runs either way; it never writes.
+ * A config that is missing, or unreadable from the first read, resolves to
+ * `{}` inside loadShieldConfig, which the predicate treats as enabled — the
+ * default preserves current behaviour. Once the runtime has read a config, a
+ * later blank, corrupt or unreadable file holds that config instead, so an
+ * explicit `"selfHeal": false` stays in force. The read-only staleness check
+ * runs either way; it never writes.
  */
 async function isSelfHealEnabled() {
   const config = await loadShieldConfig();

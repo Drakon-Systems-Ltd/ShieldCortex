@@ -6,6 +6,7 @@ import {
   claudeToolGateWired,
   formatHostTable,
   guardHeadlineFromPlanes,
+  hermesAgentHomeMarkersPresent,
   presentUnwired,
   repairJobsFor,
   scanHostTable,
@@ -130,6 +131,102 @@ describe('host table', () => {
     const text = formatHostTable(scanHostTable(h), '5.2.0', planes).join('\n');
     expect(text).toContain('Guard off');
     expect(text).not.toMatch(/action-guard-enable/i);
+  });
+
+  // #651: "Guard off" beside "observe-only" read as a contradiction.
+  it('#651 explains header Guard vs a host gate word when a row shows one', () => {
+    const h = home();
+    mkdirSync(join(h, '.openclaw'), { recursive: true });
+    enableOpenClaw(h);
+    const table = scanHostTable(h, { openclawBinaryPresent: () => true });
+    const planes: HostGatePlanes = {
+      signedEnabled: false,
+      signedEnforce: false,
+      claudeWired: false,
+      openclaw: 'observe-only',
+    };
+    const lines = formatHostTable(table, '5.4.0', planes);
+    const text = lines.join('\n');
+    expect(text).toContain('Guard off');
+    expect(text).toMatch(/OpenClaw.*observe-only/);
+    // #922: mixed is the Action guard posture row failing; Hermes feeds it.
+    expect(text).toMatch(/Header Guard on\/off\/mixed\/advisory: configured posture, not a live check/);
+    expect(text).toMatch(/mixed = the Action guard\s+posture row fails/);
+    // #651 r2: observe-only is a collapsed label — a disarmed guard or
+    // interceptor shows it too — so the legend never says it means "enabled".
+    expect(text).toMatch(/actionGuard\/interceptor disabled/);
+    expect(text).not.toMatch(/observe-only = enabled/);
+    // Display only: no command that would change posture.
+    expect(text).not.toMatch(/action-guard-enable|action-guard-enforce|iron-dome activate|shieldcortex config/i);
+  });
+
+  // #874: advisory is not off. The hook still scans, warns, and denies the
+  // catastrophic tier and the self-protection floor.
+  it('#874 Watch only on the Claude Code hook is Guard advisory, not Guard off', () => {
+    const h = home();
+    mkdirSync(join(h, '.claude'), { recursive: true });
+    writeFileSync(
+      join(h, '.claude', 'settings.json'),
+      JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: 'shieldcortex hook pre-tool' }] }] } }),
+    );
+    const planes: HostGatePlanes = {
+      signedEnabled: true,
+      signedEnforce: false,
+      claudeWired: claudeToolGateWired(h),
+      openclaw: 'unknown',
+    };
+    expect(guardHeadlineFromPlanes(planes)).toBe('advisory');
+    const text = formatHostTable(scanHostTable(h), '5.10.7', planes).join('\n');
+    expect(text).toContain('Guard advisory');
+    expect(text).not.toContain('Guard off');
+    expect(text).toMatch(/Claude Code.*advisory/);
+    expect(text).toMatch(/Claude Code\s+present\s+wired\s+memory \+ tool gate\s+advisory/);
+    expect(text).not.toMatch(/Claude Code\s+present\s+wired\s+memory \+ tool gate\s+off/);
+    expect(text).toMatch(/Claude Code advisory = hook wired, signed guard on in Watch only/);
+    expect(text).not.toMatch(/action-guard-enable|action-guard-enforce|iron-dome activate|shieldcortex config/i);
+  });
+
+  it('#874 a disabled signed guard with the hook wired is still Guard off; an enforcing plane still wins', () => {
+    const base = { claudeWired: true, openclaw: 'unknown' as const };
+    expect(guardHeadlineFromPlanes({ ...base, signedEnabled: false, signedEnforce: false })).toBe('off');
+    expect(guardHeadlineFromPlanes({ ...base, signedEnabled: true, signedEnforce: true })).toBe('on');
+    expect(guardHeadlineFromPlanes({ claudeWired: false, openclaw: 'unknown', signedEnabled: true, signedEnforce: false })).toBe('off');
+    expect(guardHeadlineFromPlanes({ claudeWired: true, openclaw: 'enforcing', signedEnabled: true, signedEnforce: false })).toBe('on');
+  });
+
+  it('#922 with the posture verdict supplied, mixed is exactly a mismatch and on needs an agreed enforce', () => {
+    const base: HostGatePlanes = { claudeWired: true, openclaw: 'observe-only', signedEnabled: true, signedEnforce: true };
+    // The old rule called this mixed; the resolver says the lock (or merge) makes them agree.
+    expect(guardHeadlineFromPlanes({ ...base, postureMismatch: false, postureNodeReference: 'enforce' })).toBe('on');
+    expect(guardHeadlineFromPlanes({ ...base, postureMismatch: true, postureNodeReference: null })).toBe('mixed');
+    // Hermes looser: the hook/plugin agree, the row still FAILs, so the header is mixed.
+    expect(guardHeadlineFromPlanes({ ...base, openclaw: 'enforcing', postureMismatch: true, postureNodeReference: 'enforce' })).toBe('mixed');
+    // Signed advisory with a silent plugin entry: the old word said "enforcing"; both planes are advisory.
+    const advisory: HostGatePlanes = { claudeWired: true, openclaw: 'enforcing', signedEnabled: true, signedEnforce: false };
+    expect(guardHeadlineFromPlanes(advisory)).toBe('on');
+    expect(guardHeadlineFromPlanes({ ...advisory, postureMismatch: false, postureNodeReference: 'advisory' })).toBe('advisory');
+    // No hook/plugin reading at all: the old rule decides, minus its own mixed.
+    expect(guardHeadlineFromPlanes({ ...base, postureMismatch: false, postureNodeReference: null })).toBe('on');
+  });
+
+  it('#651 prints no legend when no row shows a gate word', () => {
+    const h = home();
+    const planes: HostGatePlanes = {
+      signedEnabled: false, signedEnforce: false, claudeWired: false, openclaw: 'unknown',
+    };
+    expect(formatHostTable(scanHostTable(h), '5.4.0', planes).join('\n')).not.toMatch(/Header Guard/);
+    expect(formatHostTable(scanHostTable(h), '5.4.0').join('\n')).not.toMatch(/Header Guard/);
+  });
+
+  it('#651 exports the Hermes agent-home markers presence uses', () => {
+    const h = home();
+    const root = join(h, '.hermes');
+    mkdirSync(join(root, 'ekho-state'), { recursive: true });
+    expect(hermesAgentHomeMarkersPresent(root)).toBe(false);
+    expect(scanHostTable(h).rows.find((r) => r.id === 'hermes')!.present).toBe(false);
+    writeFileSync(join(root, 'SOUL.md'), 'x\n');
+    expect(hermesAgentHomeMarkersPresent(root)).toBe(true);
+    expect(scanHostTable(h).rows.find((r) => r.id === 'hermes')!.present).toBe(true);
   });
 
   it('repair brief names only the jobs and forbids Guard / conversation / import', () => {

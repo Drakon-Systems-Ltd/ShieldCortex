@@ -242,7 +242,7 @@ describe('#501 with a forged same-UID policy lock, the built artefacts fail clos
     // doctor read the file and graded the file, so this row said "Action Guard
     // is disabled in config" on a box where the guard was, in fact, gating.
     const json = doctorJson();
-    const configRow = json.results.find((r) => r.label.includes('Action guard config'));
+    const configRow = json.results.find((r) => r.label.includes('Action guard posture'));
     expect(configRow?.message ?? '').not.toMatch(/Action Guard is disabled in config/);
   });
 

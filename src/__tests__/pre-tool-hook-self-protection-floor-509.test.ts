@@ -168,6 +168,7 @@ describe('#509 R4-1 — the guard self-protection floor through the real hook', 
       ['Bash', { command: 'echo {} > ~/.shieldcortex/approvals/approvals.json' }],
       ['Write', { file_path: join(shieldDir(), 'config.json'), content: '{"actionGuard":{"enabled":false}}' }],
       ['Bash', { command: 'shieldcortex config --action-guard-disable' }],
+      ['Bash', { command: 'shieldcortex guard posture off' }],
     ];
   }
 

@@ -19,7 +19,7 @@ import { useUrlTab } from '@/hooks/useUrlTab';
 
 type SettingsTab = 'cloud' | 'integrations' | 'licence' | 'admin';
 
-const SETTINGS_TABS: SettingsTab[] = ['cloud', 'integrations', 'licence', 'admin'];
+export const SETTINGS_TABS: SettingsTab[] = ['cloud', 'integrations', 'licence', 'admin'];
 
 function SettingsContent() {
   const [tab, setTab] = useUrlTab<SettingsTab>('/settings', SETTINGS_TABS, 'cloud');

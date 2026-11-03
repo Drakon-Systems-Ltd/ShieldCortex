@@ -15,6 +15,7 @@
  * shows the same numbers the recall hook actually ranks by.
  */
 
+import { MEMORY_HELP } from './dispatch-help.js';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -334,13 +335,7 @@ function cmdRevertBackfill(): number {
 }
 
 function printHelp() {
-  console.log('Usage: shieldcortex memory <subcommand> [args]');
-  console.log('');
-  console.log('Subcommands:');
-  console.log('  show <id>                          Show a single memory with effective-salience breakdown');
-  console.log('  downvote <id> [--reason <text>]    Mark a memory unhelpful (reduces effective salience at recall)');
-  console.log('  list [--purpose X] [--category X] [--limit N]   Table view (default 20 rows)');
-  console.log('  revert-backfill                    Undo the v4.29.0 salience-wall clamp (restores pre-clamp salience)');
+  console.log(MEMORY_HELP);
 }
 
 export async function handleMemoryCommand(args: string[]): Promise<void> {

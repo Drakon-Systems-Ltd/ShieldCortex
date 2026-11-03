@@ -20,10 +20,15 @@ export interface LedgerConfig {
   keepSkeleton: boolean;
 }
 
-export function resolveLedgerConfig(): LedgerConfig {
+/**
+ * `readOnly` (#878): read config.json without changing it — no signature
+ * adoption, no integrity-key mint, no self-heal rewrite, no lock audit. Doctor
+ * passes it; the ledger writer keeps the ordinary read.
+ */
+export function resolveLedgerConfig(options: { readOnly?: boolean } = {}): LedgerConfig {
   let block: Record<string, unknown> = {};
   try {
-    const raw = readRawConfig().ledger;
+    const raw = readRawConfig({ readOnly: options.readOnly === true }).ledger;
     if (raw && typeof raw === 'object' && !Array.isArray(raw)) block = raw as Record<string, unknown>;
   } catch {
     // Unreadable config must never stop the ledger: fall back to defaults.

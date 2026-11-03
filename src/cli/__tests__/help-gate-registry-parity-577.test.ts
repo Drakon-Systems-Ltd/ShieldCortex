@@ -81,10 +81,18 @@ function handlerArgs(argv: string[]): { command: string; args: string[] } {
 describe('#577 — one value-flag table, read by every gate', () => {
   it('covers every command that owns a help gate', () => {
     // Keep the registry honest about its own scope: these are the command words
-    // `src/index.ts` dispatches to a handler with a gate (plus the two aliases).
+    // `src/index.ts` dispatches to a handler with a gate (plus the aliases), and
+    // since #767 every command the dispatcher's own gate answers for
+    // (src/cli/dispatch-help.ts) — cli-help-gate-767.test.ts derives the
+    // dispatched list from src/index.ts and checks each one is gated somewhere.
     expect(COMMANDS.sort()).toEqual([
-      'allowlist', 'audit', 'clawdbot', 'compact', 'hermes', 'logs', 'memories',
-      'migrate', 'openclaw', 'repair', 'sessions', 'uninstall', 'update', 'vacuum',
+      'allowlist', 'api', 'approve', 'audit', 'clawdbot', 'cloud', 'codex', 'compact',
+      'config', 'consolidate', 'copilot', 'cortex', 'dashboard', 'deny', 'env', 'freeze',
+      'graph', 'guard', 'hermes', 'hook', 'inspect', 'iron-dome', 'lease', 'licence',
+      'license', 'logs', 'memories', 'memory', 'migrate', 'openclaw', 'protect',
+      'quickstart', 'remember', 'repair', 'review-copilot', 'scan', 'scan-skill',
+      'scan-skills', 'service', 'sessions', 'stats', 'status', 'threat-graph',
+      'unfreeze', 'uninstall', 'update', 'vacuum', 'worker', 'xray', 'xray-preinstall',
     ]);
   });
 
@@ -101,6 +109,7 @@ describe('#577 — one value-flag table, read by every gate', () => {
   it('the documented aliases share their target\'s row object', () => {
     expect(COMMAND_HELP_SPECS.compact).toBe(COMMAND_HELP_SPECS.vacuum);
     expect(COMMAND_HELP_SPECS.clawdbot).toBe(COMMAND_HELP_SPECS.openclaw);
+    expect(COMMAND_HELP_SPECS.licence).toBe(COMMAND_HELP_SPECS.license);
   });
 
   it('global gate and handler gate reach the same verdict for every generated shape', () => {

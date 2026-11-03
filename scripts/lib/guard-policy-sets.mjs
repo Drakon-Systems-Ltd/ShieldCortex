@@ -103,13 +103,11 @@ export const SCHEMA_OR_SCAN_GAP = Object.freeze([
  * Signals the guard emits that the notify/denial writer does NOT keep
  * (`SAFE_ACTION_GUARD_SIGNALS` in `operator-notify.ts`). A row that carried
  * one of these shows `redacted-signal` in its place. Listed so the replay can
- * say WHICH classes are structurally invisible in the log — in particular the
- * two security-config-write signals, which means Half A can never count a
- * security-config write directly.
+ * say WHICH classes are structurally invisible in the log. (#874: the two
+ * security-config-write signals are logged by name from that release on; rows
+ * written before it still show `redacted-signal` for them.)
  */
 export const NEVER_LOGGED_SIGNALS = Object.freeze([
-  'touch-guard-config',
-  'disable-action-guard',
   'command-evidence-unscannable',
 ]);
 
