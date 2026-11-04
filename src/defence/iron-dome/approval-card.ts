@@ -35,7 +35,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import { homedir, hostname as osHostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { redactCredentials } from '../credential-leak/index.js';
+import { redactCredentials, scanForCredentials } from '../credential-leak/index.js';
 import { classifyFamily, evaluateToolCall, extractCommand, extractPath, extractUrl, normaliseToolName } from './tool-action-guard.js';
 
 /** What the card shows in place of a target that looks like a credential. */
@@ -424,6 +424,25 @@ function vendorShapeInAnyCase(text: string): boolean {
   return false;
 }
 
+/**
+ * #815 A fold 4: the redactor's NAMED shapes only — vendor keys, JWTs,
+ * private keys, connection strings, env-style assignments, split or whole —
+ * in every case, as `vendorShapeInAnyCase` reads them, but without its
+ * `high_entropy` net. The net is shape-blind (any 20+ character run of key
+ * characters above 4.5 bits a character), so on text whose spaces were taken
+ * out it reads prose: `Claude Code on <a macOS runner's generated name>`
+ * became one high-entropy token, and the whole WHO line was withheld. Every
+ * pattern match the redactor makes is reported as a finding of the pattern's
+ * own type, so a finding other than `high_entropy` is exactly a named shape.
+ * Throws what the redactor throws; every caller withholds on a throw.
+ */
+function namedShapeInAnyCase(text: string): boolean {
+  for (const view of new Set([text, text.toUpperCase(), text.toLowerCase()])) {
+    if (scanForCredentials(view).findings.some((f) => f.type !== 'high_entropy')) return true;
+  }
+  return false;
+}
+
 /** Whitespace other than the ASCII space (NBSP, U+3000, the U+2000 spaces,
  *  tabs …): a reader sees a word break and `flattenCardText` prints a plain
  *  space, but the shell does not split a word on it. */
@@ -450,21 +469,25 @@ const nfkc = (text: string): string => text.normalize('NFKC');
  *     strip runs on the written text first);
  *   - and every one of those with ALL whitespace removed (`tight`).
  *
- * The vendor redactor reads every view in every case (review B2). The named
- * generic shapes read every view but the tight ones. The long-opaque-run
- * heuristic reads the spaced views only, and only when `opaqueRuns` is on:
- * prose with its spaces taken out IS a long opaque run, so a tight view would
- * withhold every sentence. Throws what the redactor throws; every caller
- * withholds on a throw.
+ * The redactor's named shapes read every view in every case (review B2),
+ * the tight ones included. The named generic shapes (`namesSecret`) read
+ * every view but the tight ones. The two shape-blind heuristics — the
+ * redactor's entropy net and the long-opaque-run rule — read the spaced views
+ * only, and only when `heuristics` is on: prose with its spaces taken out IS
+ * a long opaque, high-entropy run, so a tight view judged on them would
+ * withhold every such sentence (fold 4: the WHO line of a macOS runner, whose
+ * generated name joined `Claude Code on` into one high-entropy token).
+ * Throws what the redactor throws; every caller withholds on a throw.
  *
  * Call sites: `safeTarget` (every target of every sentence: paths, hosts as
  * written, branches, remotes, ids), `safeHost` (a host the URL parser
- * rewrote, percent-decoded), `safeHostname` (the WHO line's box name, opaque
- * runs off), and `withholdSecretCardLine` (the egress gate on every card line
- * the webhook, and `boundedCard`, send off the box).
+ * rewrote, percent-decoded), `safeHostname` (the WHO line's box name: named
+ * shapes here, the entropy net per part), and `withholdSecretCardLine` (the
+ * egress gate on every card line the webhook, and `boundedCard`, send off
+ * the box).
  */
-export function credentialInAnyReading(text: string, opts: { opaqueRuns?: boolean } = {}): boolean {
-  const opaqueRuns = opts.opaqueRuns ?? true;
+export function credentialInAnyReading(text: string, opts: { heuristics?: boolean } = {}): boolean {
+  const heuristics = opts.heuristics ?? true;
   const spaced = new Set<string>();
   for (const base of [text, nfkc(text)]) {
     const joined = base.replace(CARD_HIDDEN_ALL, '').replace(CARD_LINE_BREAKS_ALL, '');
@@ -472,13 +495,13 @@ export function credentialInAnyReading(text: string, opts: { opaqueRuns?: boolea
     for (const view of [base, joined, unspaced, nfkc(unspaced)]) spaced.add(view);
   }
   for (const view of spaced) {
-    if (vendorShapeInAnyCase(view)) return true;
+    if (heuristics ? vendorShapeInAnyCase(view) : namedShapeInAnyCase(view)) return true;
     if (namesSecret(view)) return true;
-    if (opaqueRuns && hasOpaqueRun(view)) return true;
+    if (heuristics && hasOpaqueRun(view)) return true;
   }
   for (const view of spaced) {
     const tight = view.replace(ANY_SPACE_ALL, '');
-    if (!spaced.has(tight) && vendorShapeInAnyCase(tight)) return true;
+    if (!spaced.has(tight) && namedShapeInAnyCase(tight)) return true;
   }
   return false;
 }
@@ -2839,6 +2862,26 @@ export interface ApprovalCardWhoInput {
   sessionId?: string;
 }
 
+/**
+ * #815 A fold 4: the full redactor — its entropy net included — on each part
+ * of a hostname, in every reading of the name (as written, NFKC, unusual
+ * spaces removed). A host is `.`-separated labels of `-`-separated parts; a
+ * generated name (`Mac-mini-runner-<40 hex>`, `sat12-bq108-<uuid>-<serial>`)
+ * joins low-entropy parts into one token the net flags as a whole, while a
+ * key-shaped part is flagged on its own. The whole name is read for named
+ * shapes separately (`credentialInAnyReading`, heuristics off).
+ * Throws what the redactor throws; the caller withholds on a throw.
+ */
+function hostPartTripsRedactor(name: string): boolean {
+  const unspaced = name.replace(UNUSUAL_SPACE_ALL, '');
+  for (const reading of new Set([name, nfkc(name), unspaced, nfkc(unspaced)])) {
+    for (const part of reading.split(/[.\-\s]+/u)) {
+      if (part && vendorShapeInAnyCase(part)) return true;
+    }
+  }
+  return false;
+}
+
 function safeHostname(h: string | undefined): string {
   let name = h;
   if (name === undefined) {
@@ -2848,14 +2891,18 @@ function safeHostname(h: string | undefined): string {
   // #815 A review B2 (N2): the name is checked whole, as written, BEFORE it
   // is cut to its first label and middle-clipped. The clip cut a key-shaped
   // name down to a head and a tail no recogniser knows and still showed both.
-  // A name that trips the credential check is not printed at all.
-  // Review r4: the credential readings, not the target gate's long-opaque-run
-  // heuristic: CI and cloud boxes carry long generated kebab names
-  // (`Mac-mini-runner-<40 hex>`) that are not secrets and were shown
-  // middle-clipped before B2; only a credential-shaped name is withheld.
+  // A name that trips the credential check is not printed at all; the WHO
+  // line still names the agent and the session ("this machine").
+  // Review r4 / fold 4: named credential shapes in every reading of the
+  // whole name, and the redactor's entropy net one part at a time — not the
+  // long-opaque-run rule, and not the net over the joined name. CI and cloud
+  // boxes carry long generated names (`Mac-mini-runner-<40 hex>`,
+  // `sat12-bq108-<uuid>-<serial>`) that are not secrets, were shown
+  // middle-clipped before B2, and tripped those over the whole name at random.
   let credential: boolean;
   try {
-    credential = full.length > MAX_TARGET_CHARS || UNUSUAL_CHARS.test(full) || credentialInAnyReading(full, { opaqueRuns: false });
+    credential = full.length > MAX_TARGET_CHARS || UNUSUAL_CHARS.test(full)
+      || credentialInAnyReading(full, { heuristics: false }) || hostPartTripsRedactor(full);
   } catch {
     credential = true;
   }
@@ -2969,8 +3016,11 @@ const MAX_CARD_LINE_SCAN = 1024;
  * hidden characters, line breaks and spaces of every kind removed, so a key
  * split by a zero-width, control, NBSP or U+3000 character, or typed
  * full-width, is still seen whole. The vendor redactor reads each in every
- * case (review B2), so a case-folded key is still a key. `boundedCard` runs this on each line as it is received, before
- * it folds whitespace or cuts the line at 300 (review B2): any of those can
+ * case (review B2), so a case-folded key is still a key; with every space
+ * removed it is held to named shapes (fold 4: the entropy net reads a
+ * spaceless sentence as a token). `boundedCard` runs this on each line as it
+ * is received, before it folds whitespace or cuts the line at 300 (review
+ * B2): any of those can
  * turn a key into fragments no recogniser knows.
  *
  * A line that trips either reading is replaced whole by `WITHHELD_SECRET`

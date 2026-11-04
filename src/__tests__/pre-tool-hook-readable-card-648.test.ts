@@ -116,11 +116,26 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     );
   }
 
-  function runHook(input: Record<string, unknown>, opts: { tool?: string; permissionMode?: string } = {}) {
+  /** #815 A fold 4: a test-owned preload that pins THIS hook process's
+   *  `os.hostname()` (the WHO line's box name), so Linux CI drives the
+   *  generated names a macOS runner carries. Nothing in shipped code reads it. */
+  function hostnamePreload(name: string): string {
+    const file = join(home, 'hostname-preload.mjs');
+    writeFileSync(file, [
+      "import os from 'node:os';",
+      "import { syncBuiltinESMExports } from 'node:module';",
+      `os.hostname = () => ${JSON.stringify(name)};`,
+      'syncBuiltinESMExports();',
+    ].join('\n'));
+    return pathToFileURL(file).href;
+  }
+
+  function runHook(input: Record<string, unknown>, opts: { tool?: string; permissionMode?: string; hostname?: string } = {}) {
     // Git config the card builder may read comes from the fake HOME and the
     // job's own repository only: no GIT_CONFIG* override, no real XDG dir.
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/.test(k)));
-    const run = spawnSync('node', [HOOK], {
+    const args = opts.hostname === undefined ? [HOOK] : ['--import', hostnamePreload(opts.hostname), HOOK];
+    const run = spawnSync('node', args, {
       input: JSON.stringify({
         session_id: '648-session',
         cwd: jobCwd,
@@ -304,6 +319,51 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     expect(JSON.parse(bodies[0].rest).actionId).toBe('act-<action>');
     expect(denialRows()).toEqual(GOLDEN_DENIALS_DNP);
     expect(denialRows().join('\n')).not.toContain('"card"');
+  });
+
+  // #815 A fold 4: on the macOS runner the whole WHO line was withheld. The
+  // egress gate's every-space-removed reading ran the redactor's entropy net
+  // over `Claude Code on <the runner's generated name>`, one long token, and
+  // the hostname check's own entropy net made other generated names "this
+  // machine". The hook's os.hostname() is pinned below, so every CI runs these.
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const MAC_HOSTS: Array<[host: string, shown: string]> = [
+    ['Mac-1730678123456.local', 'Mac-1730678123456'],
+    ['iMac-Pro', 'iMac-Pro'],
+    ['Mac-4A6B2C1D8E.lan', 'Mac-4A6B2C1D8E'],
+    ['sat12-bq108-ee49b2ab-4824-1047-6e4e-63f098a4fbca-3D9B5B6AFE4B.local', 'sat12-b…3D9B5B6AFE4B'],
+    ['ghost-runner-66971413203657598', 'ghost-r…413203657598'],
+    ['Mac-mini-runner-e3b7f48922d7a40f510823bb5e6b3a72d6543729.local', 'Mac-min…3a72d6543729'],
+  ];
+
+  it.each(MAC_HOSTS)('#815 A fold 4: a macOS hostname (%s) is named on the held card, beside the session', (host, shown) => {
+    writeConfig({ openclaw: true });
+    expect(runHook(SSH_READ, { hostname: host }).decision).toBe('ask');
+    const got = cards();
+    expect(got).toHaveLength(1);
+    const { description } = got[0].card;
+    expect(description).toContain('Read a file in your SSH folder: "~/.ssh/config"');
+    expect(description).toMatch(new RegExp(`^Who: Claude Code on ${esc(shown)} · session sc-[0-9a-f]{16}$`, 'mu'));
+  });
+
+  it.each(MAC_HOSTS)('#815 A fold 4: a macOS hostname (%s) is named on the webhook card; the rest of the body is still main\'s', (host, shown) => {
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
+    expect(runHook(SSH_READ, { permissionMode: 'bypassPermissions', hostname: host }).decision).toBe('deny');
+    const bodies = lines(webhookEvidence).map(normaliseWebhookBody).map(splitCard);
+    expect(bodies.map((b) => b.rest)).toEqual([GOLDEN_WEBHOOK_DNP]);
+    expect(bodies[0].card!.who).toBe(`Claude Code on ${shown} · session sc-<session>`);
+    expect(bodies[0].card!.text).toContain(`Who:  Claude Code on ${shown} · session sc-<session>`);
+  });
+
+  it('#815 A fold 4: a credential-shaped hostname withholds the host only; the agent and the session stay', () => {
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
+    expect(runHook(SSH_READ, { permissionMode: 'bypassPermissions', hostname: `${AWS_ID}.local` }).decision).toBe('deny');
+    const raw = lines(webhookEvidence);
+    expect(raw).toHaveLength(1);
+    expect(splitCard(normaliseWebhookBody(raw[0])).card!.who).toBe('Claude Code on this machine · session sc-<session>');
+    for (const needle of [AWS_ID, AWS_ID.slice(0, 10), AWS_ID.slice(-10)]) {
+      expect(raw[0].toUpperCase()).not.toContain(needle.toUpperCase());
+    }
   });
 
   it('#815 A: a credential-shaped command never puts the secret on the webhook card (headless denial)', () => {

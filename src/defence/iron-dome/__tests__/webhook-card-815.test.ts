@@ -761,3 +761,118 @@ describe('#815 A review r4 — the WHO host: a credential-shaped name is withhel
     expect(who).toBe('Claude Code on this machine');
   });
 });
+
+describe('#815 A fold 4 (macOS CI) — a generated hostname reaches the WHO line: the host is named, the session kept', () => {
+  // The macOS runner's name withheld the WHOLE WHO line, agent and session
+  // too: with every space taken out, `Claude Code on <label>` is one long
+  // token, and the redactor's entropy net — no credential shape — flagged it.
+  // The same net turned other generated names into "this machine". Every row
+  // below failed at 3dadfcbc; none of them is credential-shaped.
+  const SESSION = 'sc-0123456789abcdef';
+  const TELEGRAM = 'agent:main:telegram:direct:1001234567890';
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const HOSTS: Array<[host: string, shown: string]> = [
+    ['Mac-1730678123456.local', 'Mac-1730678123456'],
+    ['Mac.local', 'Mac'],
+    ['iMac-Pro', 'iMac-Pro'],
+    ['Mac-4A6B2C1D8E.lan', 'Mac-4A6B2C1D8E'],
+    // The line gate's every-space-removed reading flagged these (the CI failure).
+    ['sat12-bq108-ee49b2ab-4824-1047-6e4e-63f098a4fbca-3D9B5B6AFE4B.local', 'sat12-b…3D9B5B6AFE4B'],
+    ['ghost-runner-66971413203657598', 'ghost-r…413203657598'],
+    // The hostname check's entropy net made these "this machine".
+    ['Mac-mini-runner-e3b7f48922d7a40f510823bb5e6b3a72d6543729.local', 'Mac-min…3a72d6543729'],
+    ['sat12-bq108-04f413a6-c5e2-1a3d-ec1c-f6826de1eafb-27EAFF3AB9D5.local', 'sat12-b…27EAFF3AB9D5'],
+  ];
+
+  it.each(HOSTS)('%s: named on the WHO line beside the session, and the egress gate passes the line unchanged', async (host, shown) => {
+    const who = describeWho({ plane: 'claude-code', host, sessionId: SESSION });
+    expect(who).toBe(`Claude Code on ${shown} · session ${SESSION}`);
+    expect(withholdSecretCardLine(who)).toBe(who);
+    for (const got of await overBothPaths({ ...CARD, who })) expect(got.card.who).toBe(who);
+    const oc = describeWho({ plane: 'openclaw', agentId: 'main', host, sessionId: TELEGRAM });
+    expect(oc).toMatch(new RegExp(`^OpenClaw agent "main" on ${esc(shown)} · Telegram chat #[0-9a-f]{8}$`, 'u'));
+    expect(withholdSecretCardLine(oc)).toBe(oc);
+  });
+
+  it('a seeded sweep of generated runner names: every one is named and every WHO line passes the gate', () => {
+    let seed = 0x815a4;
+    const rand = () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const run = (n: number, alphabet: string) => Array.from({ length: n }, () => alphabet[Math.floor(rand() * alphabet.length)]).join('');
+    const D = '0123456789';
+    const H = '0123456789abcdef';
+    const HU = '0123456789ABCDEF';
+    const shapes: Array<() => string> = [
+      () => `Mac-${run(13, D)}.local`,
+      () => `Mac-${run(10, HU)}.lan`,
+      () => `Mac-${run(16, H)}`,
+      () => `sat12-bq108-${run(8, H)}-${run(4, H)}-${run(4, H)}-${run(4, H)}-${run(12, H)}-${run(12, HU)}.local`,
+      () => `Mac-mini-runner-${run(40, H)}.local`,
+      () => `ghost-runner-${run(17, D)}`,
+      () => `runner-${run(8, D)}.local`,
+    ];
+    const failed: string[] = [];
+    for (const shape of shapes) {
+      for (let i = 0; i < 60; i += 1) {
+        const host = shape();
+        for (const who of [
+          describeWho({ plane: 'claude-code', host, sessionId: `sc-${run(16, H)}` }),
+          describeWho({ plane: 'openclaw', agentId: 'main', host, sessionId: TELEGRAM }),
+        ]) {
+          if (who.includes('this machine') || withholdSecretCardLine(who) !== who) failed.push(`${host} -> ${who}`);
+        }
+      }
+    }
+    expect(failed).toEqual([]);
+  });
+
+  describe('a credential-shaped hostname withholds the host only: the agent and the session stay', () => {
+    // Built at runtime so no secret-shaped literal is committed.
+    const KEY = ['AK', 'IA'].join('') + 'W7NQ4KPJ2XZT6RHM';
+    const GH = ['gh', 'p_'].join('') + 'Z'.repeat(4) + 'q7Lm2Xr9Tb4Vc8Nd1Fh6Jk3Wp5Ys0Ua';
+    const wide = (s: string) => [...s].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join('');
+    it.each([
+      ['an AWS key id', `${KEY}.local`],
+      ['the key in lower case', `${KEY.toLowerCase()}.local`],
+      ['the key full-width', wide(KEY)],
+      ['the key NBSP-split', `${KEY.slice(0, 10)} ${KEY.slice(10)}`],
+      ['a GitHub-token-like run (the entropy net reads it as one part)', GH],
+      ['a 32-hex run the redactor flags', `sat12-bq${'7'.repeat(20)}-${'a1b2c3d4'.repeat(4)}.local`],
+    ])('%s', async (_label, host) => {
+      const who = describeWho({ plane: 'claude-code', host, sessionId: SESSION });
+      expect(who).toBe(`Claude Code on this machine · session ${SESSION}`);
+      expect(withholdSecretCardLine(who)).toBe(who);
+      for (const got of await overBothPaths({ ...CARD, who })) expect(got.card.who).toBe(who);
+      const oc = describeWho({ plane: 'openclaw', agentId: 'main', host, sessionId: TELEGRAM });
+      expect(oc).toMatch(/^OpenClaw agent "main" on this machine · Telegram chat #[0-9a-f]{8}$/u);
+    });
+  });
+
+  describe('the every-space-removed reading still recognises a NAMED shape split by plain spaces', () => {
+    // Built at runtime so no secret-shaped literal is committed. `PAT` is a
+    // whole GitHub personal-token shape (36+ characters after the prefix).
+    const KEY = ['AK', 'IA'].join('') + 'W7NQ4KPJ2XZT6RHM';
+    const PAT = ['gh', 'p_'].join('') + 'Z'.repeat(4) + 'q7Lm2Xr9Tb4Vc8Nd1Fh6Jk3Wp5Ys0Ua' + 'Rw';
+    const JWT = `${['ey', 'J'].join('')}hbGciOiJIUzI1NiJ9.${['ey', 'J'].join('')}zdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U`;
+    /** Every `n` characters, a plain space: no fragment is long enough for a
+     *  fragment-sized reading to know it. */
+    const chunk = (s: string, n: number) => s.match(new RegExp(`.{1,${n}}`, 'gu'))!.join(' ');
+    it.each([
+      ['an AWS key id, every 4 characters', KEY, chunk(KEY, 4)],
+      ['a GitHub personal token, every 6 characters', PAT, chunk(PAT, 6)],
+      ['a JWT, every 8 characters', JWT, chunk(JWT, 8)],
+    ])('%s: the line is withheld whole on both paths', async (_label, secret, spaced) => {
+      for (const line of [`Claude Code on ${spaced} · session ${SESSION}`, `Read a file in your SSH folder: "~/.ssh/${spaced}"`]) {
+        expect(withholdSecretCardLine(line)).toBe(WITHHELD_SECRET);
+      }
+      for (const got of await overBothPaths({ ...CARD, who: `Claude Code on ${spaced} · session ${SESSION}` })) {
+        expect(got.card.who).toBe(WITHHELD_SECRET);
+        expect(got.body.replace(/\s+/g, '')).not.toContain(secret.slice(0, 12));
+      }
+    });
+  });
+});
