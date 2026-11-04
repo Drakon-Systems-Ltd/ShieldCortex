@@ -731,6 +731,18 @@ const CATASTROPHIC: Pattern[] = [
 ];
 
 /**
+ * #815 B: every signal name the CATASTROPHIC tier can emit, read straight off
+ * the pattern table above so it cannot drift. Consumers use it to keep the
+ * catastrophic tier terminal-only (one-tap approve refuses any denial that
+ * carries one). A name that is also emitted at a lower tier makes such a
+ * consumer refuse more, never less — the fail-closed direction.
+ */
+export const CATASTROPHIC_SIGNALS: readonly string[] = Object.freeze([
+  ...new Set(CATASTROPHIC.map(p => p.signal)),
+  'write-content-catastrophic',
+]);
+
+/**
  * Recognised-dangerous operations: effectful and worth a human nod, but not
  * automatically catastrophic. These map to an Iron Dome action and escalate to
  * `require_approval`.

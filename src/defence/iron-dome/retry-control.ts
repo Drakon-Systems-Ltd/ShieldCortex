@@ -156,7 +156,13 @@ export interface RetryGrant {
   approvedAt: number;
   ttlMs: number;
   epoch: number;
-  via: 'card' | 'tty';
+  /** `tap` (#815 B): a one-tap approve from the operator's chat, verified by
+   *  `approve-tap.ts` (HMAC with the separate approve secret, single-use
+   *  nonce, approver uid). Spent exactly like the other two. */
+  via: 'card' | 'tty' | 'tap';
+  /** Who answered, for a `tap` grant only: `telegram:<uid>`. Audit only —
+   *  never part of the spend predicate. */
+  approver?: string;
   /** The spend predicate: `{cwd, tool}` AND-matched (R3 rule 3). */
   origin: { cwd?: string; tool: string; anyOrigin?: boolean };
   consumedAt?: number;
@@ -1170,12 +1176,23 @@ export interface GrantRetryAuth {
   anyOrigin?: boolean;
   /** TTY only: grant despite a live deny suppression. Cards can never set it. */
   overrideDeny?: boolean;
+  /**
+   * #815 B — the one-tap path. Set ONLY by `verifyApproveTap` in
+   * approve-tap.ts, after it has verified the HMAC (made with the separate
+   * approve secret), the approver uid, and consumed the single-use nonce.
+   * Exclusive like a card: it can never carry the TTY flag or either
+   * widener, it is bound to the exact hash and deny epoch the nonce was
+   * minted for, and it never answers "already granted" as a success.
+   */
+  tap?: { approver: string; hash: string; epoch: number };
 }
 
 export type GrantRetryFailure =
   | 'not-found' | 'suppressed' | 'unscopeable' | 'claim-missing' | 'claim-expired'
   | 'claim-spent' | 'epoch-stale' | 'bad-nonce' | 'not-authenticated' | 'locked'
-  | 'unwritable' | 'no-key' | 'card-live';
+  | 'unwritable' | 'no-key' | 'card-live'
+  // #815 B, tap path only:
+  | 'hash-mismatch' | 'grant-live';
 
 export type GrantRetryOutcome =
   | { ok: true; alreadyGranted?: boolean; grant: RetryGrant; row: RetryRow; id: string }
@@ -1195,12 +1212,16 @@ interface GrantAttempt {
  * window between those two writes is a row that looks grantable and was never
  * granted.
  *
- * Authentication is not optional and has exactly two forms:
+ * Authentication is not optional and has exactly three forms:
  *   - card: the `claimNonce` minted at launch, HMAC-matched against a claim
  *     that is still live AND still on the current epoch. A corrupt/reset store
  *     has no claim record, so a stale card fails here before anything else.
  *   - TTY: `isInteractive` — the same gate `shieldcortex approve` has always
  *     used. A same-user process that merely imports this module has neither.
+ *   - tap (#815 B): `auth.tap`, passed only by approve-tap.ts after it has
+ *     verified the HMAC, the approver and the single-use nonce. Scoped exactly
+ *     like a card (no widener, no deny override), bound to the hash and epoch
+ *     the nonce was minted for.
  *
  * Deny beats an in-flight approve: a tap that lands after the operator already
  * denied is refused (`suppressed`) and audited, never honoured. Only the TTY
@@ -1215,7 +1236,21 @@ export function grantRetry(
   const ttlMs =
     boundedNumber(opts.ttlMs, MIN_RETRY_GRANT_TTL_MS, MAX_RETRY_GRANT_TTL_MS)
     ?? DEFAULT_RETRY_GRANT_TTL_MS;
-  const viaCard = typeof auth.nonce === 'string' && auth.nonce.length > 0;
+  const tapAuth = auth.tap && typeof auth.tap === 'object' ? auth.tap : undefined;
+  const viaTap = tapAuth !== undefined;
+  // A tap and a card nonce together is a confused caller: refuse rather than
+  // pick one (#815 B).
+  if (viaTap && typeof auth.nonce === 'string' && auth.nonce.length > 0) {
+    return { ok: false, reason: 'not-authenticated' };
+  }
+  if (viaTap && !(
+    typeof tapAuth.approver === 'string' && /^telegram:[1-9][0-9]{0,19}$/.test(tapAuth.approver)
+    && typeof tapAuth.hash === 'string' && /^[0-9a-f]{64}$/.test(tapAuth.hash)
+    && Number.isSafeInteger(tapAuth.epoch) && tapAuth.epoch >= 0
+  )) {
+    return { ok: false, reason: 'not-authenticated' };
+  }
+  const viaCard = !viaTap && typeof auth.nonce === 'string' && auth.nonce.length > 0;
   // Card authentication is EXCLUSIVE: a caller presenting a nonce is the
   // waiter, and the waiter never carries TTY privileges. Hard-drop the
   // interactive flag and both wideners the moment a nonce is present, so a
@@ -1223,11 +1258,11 @@ export function grantRetry(
   // smuggle --any-origin / --override-deny onto a card grant (SOL R-impl
   // blocker 2; spec B4 — the trust boundary is THIS function, not its
   // callers).
-  const viaTty = !viaCard && auth.isInteractive === true;
-  if (viaCard) {
+  const viaTty = !viaCard && !viaTap && auth.isInteractive === true;
+  if (viaCard || viaTap) {
     auth = { ...auth, isInteractive: false, anyOrigin: false, overrideDeny: false };
   }
-  if (!viaCard && !viaTty) return { ok: false, reason: 'not-authenticated' };
+  if (!viaCard && !viaTty && !viaTap) return { ok: false, reason: 'not-authenticated' };
 
   let presentedHmac: string | null = null;
   if (viaCard) {
@@ -1249,9 +1284,19 @@ export function grantRetry(
       if (!constantTimeEquals(row.claim.nonceHmac, presentedHmac as string)) {
         return { value: { failed: 'bad-nonce' }, commit: true };
       }
-    } else if (claimIsLive(row.claim, now) && !row.claim?.grantedAt) {
-      // One live door: a TTY grant must not sit beside an unanswered card.
-      return { value: { failed: 'card-live' }, commit: true };
+    } else {
+      if (viaTap) {
+        // #815 B: the nonce was minted for THIS exact call on THIS epoch. A
+        // different hash under the same alias, or an operator Deny since the
+        // nonce was minted (which advances the epoch), refuses the tap.
+        if (row.hash !== tapAuth!.hash) return { value: { failed: 'hash-mismatch' }, commit: true };
+        if (row.denyEpoch !== tapAuth!.epoch) return { value: { failed: 'epoch-stale' }, commit: true };
+      }
+      if (claimIsLive(row.claim, now) && !row.claim?.grantedAt) {
+        // One live door: a TTY grant (or a tap) must not sit beside an
+        // unanswered card.
+        return { value: { failed: 'card-live' }, commit: true };
+      }
     }
 
     const suppressed = suppressionIsLive(row, now);
@@ -1267,6 +1312,12 @@ export function grantRetry(
       // Cards NEVER get here (claimCardLaunch already refused an unscopeable
       // identity); this is the TTY path without --any-origin.
       return { value: { failed: 'unscopeable' }, commit: true };
+    }
+
+    if (viaTap && grantIsLive(row.grant, now)) {
+      // #815 B: a tap never answers "already granted" as a success — the
+      // retry is already authorised and unspent, so this tap adds nothing.
+      return { value: { failed: 'grant-live' }, commit: true };
     }
 
     if (grantIsLive(row.grant, now)) {
@@ -1297,7 +1348,8 @@ export function grantRetry(
       approvedAt: now,
       ttlMs,
       epoch: row.denyEpoch,
-      via: viaCard ? 'card' : 'tty',
+      via: viaCard ? 'card' : viaTap ? 'tap' : 'tty',
+      ...(viaTap ? { approver: tapAuth!.approver } : {}),
       origin: {
         ...(anyOrigin ? { anyOrigin: true } : {}),
         ...(row.originScope.cwd && !anyOrigin ? { cwd: row.originScope.cwd } : {}),
@@ -1307,7 +1359,7 @@ export function grantRetry(
     row.grant = grant;
     // The claim is KEPT and marked: it is what lets a double tap authenticate
     // and be answered idempotently, and what makes a third tap `claim-spent`.
-    if (row.claim) row.claim.grantedAt = now;
+    if (row.claim && !viaTap) row.claim.grantedAt = now;
     return { value: { row: { ...row }, grant: { ...grant } }, commit: true };
   });
 

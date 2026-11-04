@@ -120,7 +120,7 @@ const HANDLER_SOURCES: Record<GatedCommand | 'global', string[]> = {
   license: ['src/license/cli.ts'],
   licence: ['src/license/cli.ts'],
   stats: ['src/cli/stats-command.ts'],
-  guard: ['src/cli/guard.ts'],
+  guard: ['src/cli/guard.ts', 'src/cli/approve-tap.ts'],
   memory: ['src/cli/memory.ts'],
   inspect: ['src/cli/inspect.ts'],
   'iron-dome': ['src/cli/iron-dome.ts'],
