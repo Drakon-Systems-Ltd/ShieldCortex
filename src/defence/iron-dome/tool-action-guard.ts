@@ -731,15 +731,22 @@ const CATASTROPHIC: Pattern[] = [
 ];
 
 /**
- * #815 B: every signal name the CATASTROPHIC tier can emit, read straight off
- * the pattern table above so it cannot drift. Consumers use it to keep the
+ * #815 B: every signal name the catastrophic tier can emit: the pattern table
+ * above, plus the four names catastrophic verdicts carry from elsewhere. Consumers use it to keep the
  * catastrophic tier terminal-only (one-tap approve refuses any denial that
  * carries one). A name that is also emitted at a lower tier makes such a
  * consumer refuse more, never less — the fail-closed direction.
  */
 export const CATASTROPHIC_SIGNALS: readonly string[] = Object.freeze([
   ...new Set(CATASTROPHIC.map(p => p.signal)),
+  // Emitted at the catastrophic tier outside the pattern table (the write-
+  // content scan, the critical-path delete, `find … -delete`, and secret
+  // egress — see the `verdict('block', 'catastrophic', …)` sites below).
+  // Pinned by approve-tap-815's evaluator probes, which do not read this list.
   'write-content-catastrophic',
+  'delete-critical-path',
+  'recursive-find-delete',
+  'secret-egress',
 ]);
 
 /**

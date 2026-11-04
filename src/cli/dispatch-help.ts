@@ -271,10 +271,11 @@ export const GUARD_HELP = `Usage: shieldcortex guard readiness [--surface claude
        shieldcortex guard posture [--json]
                                   Show each gate plane's effective Action Guard posture (read-only;
                                   exit 0 when the planes agree, 4 when they disagree)
-       shieldcortex guard approve-tap [--check] [--home <agent-home>]
+       shieldcortex guard approve-tap --home <agent-home> --agent-uid <uid> --bridge-uid <uid> [--check]
                                   Serve the loopback POST /approve-tap endpoint for one-tap approve
-                                  from the operator's chat (#815 B; start as root, it drops to the
-                                  agent's user). --check only reports whether it can arm.
+                                  from the operator's chat (#815 B). Start as root: it keeps the
+                                  approve secret and runs each grant as the agent's user.
+                                  --check only reports whether it can arm.
 
 Where each plane reads its posture (guard posture changes none of them):
   Claude Code hook   ~/.shieldcortex/config.json actionGuard, then the policy lock

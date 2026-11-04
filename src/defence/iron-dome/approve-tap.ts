@@ -179,7 +179,7 @@ export type TapArmingFailure =
   | 'disabled' | 'unsupported-platform' | 'agent-is-root' | 'no-approver' | 'no-secret-path'
   | 'secret-missing' | 'secret-symlink' | 'secret-not-file' | 'secret-mode' | 'same-uid'
   | 'secret-root-owned' | 'secret-unreadable' | 'secret-malformed' | 'secret-is-webhook-secret'
-  | 'secret-stat-failed';
+  | 'secret-stat-failed' | 'secret-not-bridge-owned' | 'bad-bridge-uid';
 
 const OS_LOCK_POINTER =
   'On a single-user host the stronger boundary is the #501 OS lock (`sudo shieldcortex protect`), '
@@ -227,6 +227,12 @@ export function describeTapArmingFailure(reason: TapArmingFailure, ctx: { path?:
     case 'secret-is-webhook-secret':
       return 'One-tap approve is OFF: the approve secret is the same as the webhook secret. It must be a separate '
         + 'credential, so that holding the webhook key alone can never approve anything.';
+    case 'secret-not-bridge-owned':
+      return `One-tap approve is OFF: the approve secret${where} is owned by uid ${ctx.uid ?? '?'}, not the notify `
+        + 'bridge\'s user named by --bridge-uid. Only the bridge\'s own key is accepted.';
+    case 'bad-bridge-uid':
+      return 'One-tap approve is OFF: --bridge-uid must be the notify bridge\'s own unprivileged user, different '
+        + 'from the agent\'s user and not root.';
     case 'secret-stat-failed':
     default:
       return `One-tap approve is OFF: the approve secret${where} could not be checked.`;
@@ -397,7 +403,12 @@ export type TapSecretLoad =
  */
 export function loadApproveTapSecret(
   config: ApproveTapConfig,
-  opts: TapSecretDeps & { webhookSecret?: string } = {},
+  opts: TapSecretDeps & {
+    webhookSecret?: string;
+    /** The bridge's uid as the root-run endpoint was told it (never from the
+     *  agent-writable config). When given, the secret's owner must equal it. */
+    bridgeUid?: number;
+  } = {},
 ): TapSecretLoad {
   const pre = tapPreconditions(config, opts);
   if (!pre.ok) {
@@ -420,6 +431,10 @@ export function loadApproveTapSecret(
   }
   const bad = judgeSecretMeta({ ...opened, isSymbolicLink: false }, agentUid, path);
   if (bad && !bad.armed) return { ok: false, reason: bad.reason, message: bad.message };
+  if (opts.bridgeUid !== undefined) {
+    if (!Number.isInteger(opts.bridgeUid) || opts.bridgeUid <= 0 || opts.bridgeUid === agentUid) return fail('bad-bridge-uid');
+    if (opened.uid !== opts.bridgeUid) return fail('secret-not-bridge-owned', opened.uid);
+  }
   if (opened.bytes.length > SECRET_FILE_MAX_BYTES) return fail('secret-malformed');
   const text = opened.bytes.toString('utf8').trim();
   if (text.length < SECRET_MIN_CHARS || text.length > SECRET_MAX_CHARS || !SECRET_RE.test(text)) {
@@ -609,24 +624,48 @@ function sleepSync(ms: number): void {
   while (Date.now() < until) { /* bounded spin */ }
 }
 
-/** Same lock discipline as retry-control: an exclusive mkdir, bounded spin,
- *  stale takeover. Failing to lock is failing CLOSED. */
-function acquireNonceLock(home?: string): string | null {
+interface NonceLock {
+  path: string;
+  token: string;
+}
+
+/**
+ * An exclusive mkdir with a random owner token inside, bounded spin, stale
+ * takeover. Failing to lock is failing CLOSED.
+ *
+ * A stale lock is taken over by RENAMING it to a unique tombstone (only one
+ * contender's rename can succeed) rather than rmdir-then-mkdir, and every
+ * write re-checks the token (`stillHeld`) first: if another process ever did
+ * take the lock over while we held it, we refuse instead of writing over its
+ * update.
+ */
+function acquireNonceLock(home?: string): NonceLock | null {
   const p = noncesLockPath(home);
   try {
     mkdirSecure(approvalsDir(home));
   } catch {
     return null;
   }
+  const token = randomBytes(16).toString('hex');
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
     try {
       mkdirSync(p, { mode: 0o700 });
-      return p;
+      try {
+        writeFileSync(join(p, 'owner'), token, { mode: 0o600, flag: 'wx' });
+      } catch {
+        try { rmdirSync(p); } catch { /* leave it to go stale */ }
+        return null;
+      }
+      return { path: p, token };
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') return null;
       try {
         if (Date.now() - statSync(p).mtimeMs > LOCK_STALE_MS) {
-          try { rmdirSync(p); } catch { /* someone else got there first */ }
+          const tomb = `${p}.stale-${process.pid}-${randomBytes(4).toString('hex')}`;
+          try {
+            renameSync(p, tomb);
+            rmSync(tomb, { recursive: true, force: true });
+          } catch { /* another contender won the takeover */ }
           continue;
         }
       } catch {
@@ -638,9 +677,18 @@ function acquireNonceLock(home?: string): string | null {
   return null;
 }
 
-function releaseNonceLock(p: string | null): void {
-  if (!p) return;
-  try { rmdirSync(p); } catch { try { rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ } }
+function stillHeld(lock: NonceLock): boolean {
+  try {
+    return readFileSync(join(lock.path, 'owner'), 'utf8') === lock.token;
+  } catch {
+    return false;
+  }
+}
+
+function releaseNonceLock(lock: NonceLock | null): void {
+  if (!lock || !stillHeld(lock)) return; // never remove a lock we no longer own
+  try { rmSync(join(lock.path, 'owner'), { force: true }); } catch { /* ignore */ }
+  try { rmdirSync(lock.path); } catch { /* ignore */ }
 }
 
 // ── Mint ──────────────────────────────────────────────────────────────────
@@ -708,7 +756,7 @@ export function mintApproveTapNonce(input: { actionId: string }, opts: TapMintOp
     file.nonces.push({
       id: nonceId(nonce), actionId, argsHash: row.hash, rowId: row.id, epoch: row.denyEpoch, mintedAt: now, exp,
     });
-    if (!writeNonces(file, opts.home)) {
+    if (!stillHeld(lock) || !writeNonces(file, opts.home)) {
       return { ok: false, reason: 'unwritable', message: 'The tap store could not be written; no button was minted.' };
     }
   } finally {
@@ -731,7 +779,7 @@ export interface ApproveTapRequest {
 export type TapRefusal =
   | 'malformed' | 'not-armed' | 'bad-hmac' | 'wrong-approver' | 'expired' | 'unknown-nonce'
   | 'nonce-used' | 'nonce-mismatch' | 'nonce-too-long-lived' | 'args-mismatch' | 'unknown-action'
-  | 'terminal-only' | 'locked' | 'unwritable' | 'grant-refused';
+  | 'terminal-only' | 'locked' | 'unwritable' | 'grant-refused' | 'grant-refused-unspent';
 
 export type TapVerifyOutcome =
   | { ok: true; message: string; actionId: string; approver: string; grant: RetryGrant; row: RetryRow }
@@ -775,6 +823,7 @@ const REFUSAL_COPY: Record<TapRefusal, string> = {
   'locked': 'The approvals store is busy; try the button again in a moment. Nothing was approved.',
   'unwritable': 'The approvals store could not be written. Nothing was approved.',
   'grant-refused': 'The retry could not be authorised. The button is now spent; use the terminal command if you still want it.',
+  'grant-refused-unspent': 'The retry could not be authorised. Nothing was approved.',
 };
 
 function refusal(reason: TapRefusal, detail?: string): TapVerifyOutcome {
@@ -793,32 +842,76 @@ const GRANT_REFUSAL_DETAIL: Partial<Record<string, string>> = {
 
 /**
  * Verify one tap and, only if every check passes, write the retry grant.
+ * `authenticateApproveTap` (needs the key) then `applyAuthenticatedTap` (does
+ * not). The endpoint runs the two in different processes; see
+ * src/cli/approve-tap.ts.
  *
  * Order (each step refuses with a plain-English reason):
  *   1. shape — exactly six canonical fields;
  *   2. armed — same check as doctor/mint (same-UID, mode, approver set);
  *   3. HMAC — constant-time, over the canonical v1 message, approve secret;
- *   4. approver — equals `telegram:<configured uid>`;
+ *   4. approver — equals `telegram:<configured uid>`; exp not yet passed;
  *   5. under the nonce lock: the nonce exists for this action, is unused,
  *      its stored and presented exp agree, exp - mint <= 10 min, not expired;
  *   6. argsHash equals both the nonce's and the denial's exact hash;
- *   7. the denial is not catastrophic / self-protection-floor / unscanned;
+ *   7. the denial is not catastrophic / self-protection-floor / unscanned,
+ *      and the grant store would take it (no Deny since the card went out,
+ *      no retry already authorised, no other card open) — read-only;
  *   8. consume the nonce (written), then `grantRetry` with `auth.tap`.
- * Steps 1–7 write nothing.
+ * Steps 1–7 write nothing. Only a change that lands between step 7 and the
+ * grant's own lock (a Deny in that instant) can refuse after the nonce is
+ * spent; a busy or unwritable retry store un-spends it.
  */
 export function verifyApproveTap(raw: unknown, opts: TapVerifyOptions): TapVerifyOutcome {
+  const auth = authenticateApproveTap(raw, opts);
+  if (!auth.ok) return auth.refusal;
+  return applyAuthenticatedTap(auth.request, opts);
+}
+
+export type TapAuthentication =
+  | { ok: true; request: ApproveTapRequest }
+  | { ok: false; refusal: Extract<TapVerifyOutcome, { ok: false }> };
+
+/** Steps 1–4. Pure: reads the secret's metadata (arming) and nothing else. */
+export function authenticateApproveTap(
+  raw: unknown,
+  opts: Omit<TapVerifyOptions, 'home' | 'grantTtlMs'>,
+): TapAuthentication {
+  const fail = (r: TapVerifyOutcome): TapAuthentication => ({ ok: false, refusal: r as Extract<TapVerifyOutcome, { ok: false }> });
   const now = opts.now ?? Date.now();
   const req = parseApproveTapRequest(raw);
-  if (!req) return refusal('malformed');
+  if (!req) return fail(refusal('malformed'));
 
   const arming = checkApproveTapArming(opts.config, opts);
-  if (!arming.armed) return refusal('not-armed', arming.message);
-  if (!Buffer.isBuffer(opts.key) || opts.key.length < SECRET_MIN_CHARS) return refusal('not-armed');
+  if (!arming.armed) return fail(refusal('not-armed', arming.message));
+  if (!Buffer.isBuffer(opts.key) || opts.key.length < SECRET_MIN_CHARS) return fail(refusal('not-armed'));
 
   const expected = computeTapHmac(opts.key, req);
-  if (expected === null || !hexEqualConstantTime(expected, req.hmac)) return refusal('bad-hmac');
+  if (expected === null || !hexEqualConstantTime(expected, req.hmac)) return fail(refusal('bad-hmac'));
 
-  if (req.approver !== `telegram:${opts.config.approverTelegramUid}`) return refusal('wrong-approver');
+  if (req.approver !== `telegram:${opts.config.approverTelegramUid}`) return fail(refusal('wrong-approver'));
+  if (req.exp <= now) return fail(refusal('expired'));
+  return { ok: true, request: req };
+}
+
+function grantIsLiveAt(grant: RetryGrant | undefined, now: number): boolean {
+  return !!grant && !grant.consumedAt && now - grant.approvedAt < grant.ttlMs;
+}
+
+/**
+ * Steps 5–8 for a request `authenticateApproveTap` has ALREADY accepted. It
+ * holds no key and checks no MAC, so it must only ever be handed such a
+ * request — in the endpoint it runs in a keyless child as the agent's user.
+ * (A process of that user can write the grant store directly anyway; this
+ * adds nothing it could not already do.)
+ */
+export function applyAuthenticatedTap(
+  request: ApproveTapRequest,
+  opts: TapStoreOptions & { grantTtlMs?: number },
+): TapVerifyOutcome {
+  const now = opts.now ?? Date.now();
+  const req = parseApproveTapRequest(request);
+  if (!req) return refusal('malformed');
   if (req.exp <= now) return refusal('expired');
 
   const lock = acquireNonceLock(opts.home);
@@ -842,11 +935,21 @@ export function verifyApproveTap(raw: unknown, opts: TapVerifyOptions): TapVerif
     if (row.hash !== req.argsHash) return refusal('args-mismatch');
     const terminalOnly = tapTerminalOnlyReason(row.signals);
     if (terminalOnly) return refusal('terminal-only', describeTerminalOnly(terminalOnly));
+    // Read-only previews of what grantRetry would refuse, so that the
+    // ordinary refusals spend nothing.
+    if (suppressionIsLive(row, now) || row.denyEpoch !== rec.epoch) {
+      return refusal('grant-refused-unspent', GRANT_REFUSAL_DETAIL.suppressed);
+    }
+    if (grantIsLiveAt(row.grant, now)) return refusal('grant-refused-unspent', GRANT_REFUSAL_DETAIL['grant-live']);
+    if (row.claim && row.claim.expiresAt > now && !row.claim.grantedAt) {
+      return refusal('grant-refused-unspent', GRANT_REFUSAL_DETAIL['card-live']);
+    }
+    if (!row.originScope?.cwd) return refusal('grant-refused-unspent', GRANT_REFUSAL_DETAIL.unscopeable);
 
     // Spend the nonce BEFORE the grant: a crash between the two leaves a
     // spent nonce and no grant (fail closed), never a grant and a live nonce.
     rec.usedAt = now;
-    if (!writeNonces(file, opts.home)) return refusal('unwritable');
+    if (!stillHeld(lock) || !writeNonces(file, opts.home)) return refusal('unwritable');
 
     const granted = grantRetry(
       { id: row.id },
@@ -854,7 +957,13 @@ export function verifyApproveTap(raw: unknown, opts: TapVerifyOptions): TapVerif
       { home: opts.home, now, ttlMs: opts.grantTtlMs ?? DEFAULT_RETRY_GRANT_TTL_MS },
     );
     if (!granted.ok) {
-      if (granted.reason === 'locked') return refusal('grant-refused', 'The approvals store was busy.');
+      if (granted.reason === 'locked' || granted.reason === 'unwritable') {
+        // No decision was taken and no grant was written: un-spend the nonce
+        // (we still hold its lock) so the operator can tap again.
+        delete rec.usedAt;
+        if (stillHeld(lock)) writeNonces(file, opts.home);
+        return refusal(granted.reason === 'locked' ? 'locked' : 'unwritable');
+      }
       return refusal('grant-refused', GRANT_REFUSAL_DETAIL[granted.reason]);
     }
     const minutes = Math.max(1, Math.round(granted.grant.ttlMs / 60_000));
@@ -882,8 +991,13 @@ export function isLoopbackAddress(addr: string | undefined): boolean {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4);
 }
 
+/** What the HTTP layer needs from a verifier; a `TapVerifyOutcome` is one. */
+export type TapHandlerAnswer =
+  | { ok: true; message: string; approver: string }
+  | { ok: false; reason: string; message: string };
+
 export interface TapHandlerDeps {
-  verify: (body: unknown) => TapVerifyOutcome;
+  verify: (body: unknown) => TapHandlerAnswer;
   /** One line per request. Never receives the secret, the nonce or the HMAC. */
   log?: (line: string) => void;
 }
@@ -898,7 +1012,7 @@ function send(res: ServerResponse, status: number, body: Record<string, unknown>
   res.end(text);
 }
 
-const STATUS_FOR: Partial<Record<TapRefusal, number>> = {
+const STATUS_FOR: Partial<Record<string, number>> = {
   'malformed': 400,
   'not-armed': 503,
   'locked': 503,
@@ -972,11 +1086,11 @@ export function createApproveTapHandler(deps: TapHandlerDeps): (req: IncomingMes
         send(res, 400, { ok: false, reason: 'malformed', message: REFUSAL_COPY.malformed });
         return;
       }
-      let outcome: TapVerifyOutcome;
+      let outcome: TapHandlerAnswer;
       try {
         outcome = deps.verify(body);
       } catch {
-        outcome = refusal('unwritable');
+        outcome = { ok: false, reason: 'unwritable', message: REFUSAL_COPY.unwritable };
       }
       // The action id is logged only once it is known to be canonical.
       const parsed = parseApproveTapRequest(body);

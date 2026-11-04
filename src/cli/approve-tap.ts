@@ -2,76 +2,54 @@
  * `shieldcortex guard approve-tap` — host the loopback `POST /approve-tap`
  * endpoint for one-tap approve (#815 B), or `--check` whether it can arm.
  *
- * Why its own tiny server, not the dashboard API: the API server runs as the
- * agent's user, and the approve secret must NOT be readable by that user (a
- * same-UID agent could read the key and approve itself). So the endpoint
- * starts as root, opens the bridge-owned 0600 secret, then drops to the
- * agent's user — the owner of `<home>/.shieldcortex`, so the grant it writes
- * is owned exactly as `shieldcortex approve --denial` would own it — and only
- * then listens, on 127.0.0.1 only. After the drop the key exists only in this
- * process's memory; Linux marks a process that changed uid non-dumpable, so
- * the agent's user cannot ptrace it or read its memory.
+ *   sudo shieldcortex guard approve-tap --home /home/agent --agent-uid 1001 --bridge-uid 1002
  *
- * It refuses to start, with a plain-English reason, when:
- *   - the tap path cannot arm (same-UID secret, mode wider than 0600, no
- *     approver, root agent, …) — see `checkApproveTapArming`;
- *   - it is not root and so cannot both read the secret and write the
- *     agent's grant store.
+ * ## Why its own tiny server, and why it stays root
+ *
+ * The only existing local HTTP host is the dashboard API, which runs as the
+ * agent's user — and the approve secret must NOT be readable by that user.
+ * A process running as the agent's user that holds the key is no better:
+ * the agent may signal it, and SIGUSR1 opens Node's inspector inside it.
+ *
+ * So the process that holds the key stays root for its whole life (the
+ * agent cannot signal, trace or debug a root process). It reads the
+ * bridge-owned 0600 secret, checks every tap's shape, HMAC and approver
+ * itself, and only then hands the AUTHENTICATED request to a short-lived
+ * child spawned as the agent's user (`approve-tap-child.js`: uid/gid set by
+ * the spawn, empty environment, `--disable-sigusr1`). The child has no key;
+ * it does the nonce and grant checks and writes, so every store file stays
+ * owned exactly as `shieldcortex approve --denial` would own it.
+ *
+ * Both uids come from this command line, never from config.json (which the
+ * agent can edit): the agent's uid must own `<home>/.shieldcortex`, and the
+ * secret's owner must be the bridge's uid.
+ *
+ * It refuses to start, with a plain-English reason, when not root, when
+ * started under an inspector flag, or when the tap path cannot arm.
  */
 
-import { readFileSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { getConfigDir } from '../cloud/config.js';
 import {
+  authenticateApproveTap,
   checkApproveTapArming,
   createApproveTapHandler,
   loadApproveTapSecret,
   normaliseApproveTapConfig,
-  verifyApproveTap,
   APPROVE_TAP_PATH,
   type ApproveTapConfig,
+  type ApproveTapRequest,
+  type TapArmingDeps,
+  type TapHandlerAnswer,
+  type TapSecretDeps,
 } from '../defence/iron-dome/approve-tap.js';
+import type { TapChildAnswer, TapChildInput } from '../defence/iron-dome/approve-tap-child.js';
 
-export interface ProcessIdentityOps {
-  geteuid: () => number;
-  getuid: () => number;
-  setgroups: (groups: number[]) => void;
-  setgid: (gid: number) => void;
-  setuid: (uid: number) => void;
-}
-
-export type TapPrivilegePlan =
-  | { action: 'drop'; uid: number; gid: number }
-  | { action: 'refuse'; message: string };
-
-/**
- * What the endpoint must do with its own identity before it listens. Only
- * one shape is allowed to serve: started as root, dropping to the agent.
- */
-export function planTapServerPrivileges(input: { euid: number | null; agentUid: number; agentGid: number }): TapPrivilegePlan {
-  if (input.euid === null) {
-    return { action: 'refuse', message: 'This host has no user ids; the tap endpoint cannot run here.' };
-  }
-  if (input.agentUid === 0) {
-    return { action: 'refuse', message: 'The ShieldCortex home is owned by root, so the agent runs as root. One-tap approve cannot be made safe there.' };
-  }
-  if (input.euid === 0) return { action: 'drop', uid: input.agentUid, gid: input.agentGid };
-  if (input.euid === input.agentUid) {
-    return {
-      action: 'refuse',
-      message: 'The tap endpoint is running as the agent\'s own user. If this process can read the approve secret, '
-        + 'so can the agent. Start it as root; it drops to the agent\'s user after reading the secret.',
-    };
-  }
-  return {
-    action: 'refuse',
-    message: `The tap endpoint is running as uid ${input.euid}, which cannot write the agent's grant store. `
-      + 'Start it as root; it drops to the agent\'s user after reading the secret.',
-  };
-}
+const CHILD_TIMEOUT_MS = 10_000;
 
 function readConfigBlock(configPath: string): { approveTap: ApproveTapConfig; webhookSecret?: string } {
   let raw: Record<string, unknown> = {};
@@ -93,25 +71,69 @@ function readConfigBlock(configPath: string): { approveTap: ApproveTapConfig; we
   };
 }
 
+/** Any way of starting Node that opens an inspector the agent could reach. */
+export function inspectorRequested(execArgv: readonly string[], nodeOptions: string | undefined): boolean {
+  const flag = /^--(?:inspect|inspect-brk|inspect-port|inspect-wait|debug|debug-brk|debug-port)(?:=|$)/;
+  if (execArgv.some((a) => flag.test(a))) return true;
+  return (nodeOptions ?? '').split(/\s+/).some((a) => flag.test(a));
+}
+
+export interface TapChildRun {
+  uid: number;
+  gid: number;
+  input: TapChildInput;
+  /** Test seam: the built child entry. Default: beside this module in dist. */
+  childPath?: string;
+}
+
+/** Spawn the keyless child as the agent and return its one-line answer. */
+export function spawnTapChild(run: TapChildRun): TapHandlerAnswer {
+  const childPath = run.childPath ?? fileURLToPath(new URL('../defence/iron-dome/approve-tap-child.js', import.meta.url));
+  const res = spawnSync(process.execPath, ['--disable-sigusr1', childPath], {
+    uid: run.uid,
+    gid: run.gid,
+    input: JSON.stringify(run.input),
+    env: {},
+    cwd: '/',
+    timeout: CHILD_TIMEOUT_MS,
+    maxBuffer: 64 * 1024,
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  const fallback: TapHandlerAnswer = { ok: false, reason: 'unwritable', message: 'The approvals store could not be written. Nothing was approved.' };
+  if (res.error || res.status !== 0) return fallback;
+  try {
+    const answer = JSON.parse(String(res.stdout).trim().split('\n').pop() ?? '') as TapChildAnswer;
+    if (answer && answer.ok === true && typeof answer.message === 'string' && typeof answer.approver === 'string') {
+      return { ok: true, message: answer.message, approver: answer.approver };
+    }
+    if (answer && answer.ok === false && typeof answer.reason === 'string' && typeof answer.message === 'string') {
+      return { ok: false, reason: answer.reason, message: answer.message };
+    }
+  } catch {
+    /* fall through */
+  }
+  return fallback;
+}
+
 export interface ApproveTapCommandDeps {
   log?: (m: string) => void;
   error?: (m: string) => void;
-  proc?: ProcessIdentityOps;
-  /** Test seam: start nothing, return the server instead of waiting on it. */
+  geteuid?: () => number | null;
+  execArgv?: readonly string[];
+  nodeOptions?: string;
+  /** lstat of `<home>/.shieldcortex`. */
+  lstatHome?: (p: string) => { uid: number; gid: number; isDirectory: boolean; isSymbolicLink: boolean };
+  /** Arming / loading seams (tests run as one user). */
+  armingLstat?: TapArmingDeps['lstat'];
+  openSecret?: TapSecretDeps['openSecret'];
+  runChild?: (run: TapChildRun) => TapHandlerAnswer;
+  /** Test seam: listen and return instead of waiting for the server to close. */
   listen?: (server: Server, port: number) => Promise<void>;
+  onServer?: (server: Server) => void;
 }
 
-function defaultProc(): ProcessIdentityOps | undefined {
-  if (typeof process.geteuid !== 'function' || typeof process.setuid !== 'function'
-    || typeof process.setgid !== 'function' || typeof process.setgroups !== 'function'
-    || typeof process.getuid !== 'function') return undefined;
-  return {
-    geteuid: () => process.geteuid!(),
-    getuid: () => process.getuid!(),
-    setgroups: (g) => process.setgroups!(g),
-    setgid: (g) => process.setgid!(g),
-    setuid: (u) => process.setuid!(u),
-  };
+function asUid(v: string | undefined): number | null {
+  return v !== undefined && /^[0-9]{1,10}$/.test(v) ? Number(v) : null;
 }
 
 export async function runApproveTapCommand(argv: string[], deps: ApproveTapCommandDeps = {}): Promise<number> {
@@ -119,28 +141,49 @@ export async function runApproveTapCommand(argv: string[], deps: ApproveTapComma
   const err = deps.error ?? ((m: string) => console.error(m));
   const homeAt = argv.indexOf('--home');
   const homeArg = homeAt >= 0 ? argv[homeAt + 1] : undefined;
-  if (homeAt >= 0 && (!homeArg || homeArg.startsWith('--'))) {
-    err('--home expects the agent user\'s home directory, e.g. --home /home/agent');
+  if (!homeArg || homeArg.startsWith('--') || !homeArg.startsWith('/')) {
+    err('--home expects the agent user\'s home directory as an absolute path, e.g. --home /home/agent');
     return 1;
   }
-  const home = homeArg ?? homedir();
-  const configPath = homeArg ? join(homeArg, '.shieldcortex', 'config.json') : join(getConfigDir(), 'config.json');
-  const { approveTap, webhookSecret } = readConfigBlock(configPath);
+  const agentUidAt = argv.indexOf('--agent-uid');
+  const agentUid = asUid(agentUidAt >= 0 ? argv[agentUidAt + 1] : undefined);
+  const bridgeUidAt = argv.indexOf('--bridge-uid');
+  const bridgeUid = asUid(bridgeUidAt >= 0 ? argv[bridgeUidAt + 1] : undefined);
+  if (typeof agentUid !== 'number' || typeof bridgeUid !== 'number') {
+    err('--agent-uid <uid> and --bridge-uid <uid> are required: the user the agent runs as, and the notify '
+      + 'bridge\'s own user that owns the approve secret. They are read from this command line, never from config.');
+    return 1;
+  }
+  if (agentUid === 0 || bridgeUid === 0 || agentUid === bridgeUid) {
+    err('--agent-uid and --bridge-uid must be two different unprivileged users. If the agent and the bridge share a '
+      + 'user, one-tap approve cannot be made safe; use the #501 OS lock (`sudo shieldcortex protect`) and approve '
+      + 'from a terminal: `shieldcortex approve --denial <actionId>`.');
+    return 1;
+  }
 
-  // The agent's uid is the owner of its ShieldCortex home: that is the user
-  // the guard hook runs as and the owner of the grant store.
-  let agentUid: number;
+  const scHome = join(homeArg, '.shieldcortex');
   let agentGid: number;
   try {
-    const st = statSync(join(home, '.shieldcortex'));
-    agentUid = st.uid;
+    const st = (deps.lstatHome ?? ((p: string) => {
+      const s = lstatSync(p);
+      return { uid: s.uid, gid: s.gid, isDirectory: s.isDirectory(), isSymbolicLink: s.isSymbolicLink() };
+    }))(scHome);
+    if (st.isSymbolicLink || !st.isDirectory) {
+      err(`${scHome} is not a real directory; refusing.`);
+      return 1;
+    }
+    if (st.uid !== agentUid) {
+      err(`${scHome} is owned by uid ${st.uid}, not --agent-uid ${agentUid}; refusing.`);
+      return 1;
+    }
     agentGid = st.gid;
   } catch {
-    err(`No ShieldCortex home at ${join(home, '.shieldcortex')}. Pass --home <the agent user's home>.`);
+    err(`No ShieldCortex home at ${scHome}.`);
     return 1;
   }
 
-  const arming = checkApproveTapArming(approveTap, { agentUid });
+  const { approveTap, webhookSecret } = readConfigBlock(join(scHome, 'config.json'));
+  const arming = checkApproveTapArming(approveTap, { agentUid, ...(deps.armingLstat ? { lstat: deps.armingLstat } : {}) });
   if (argv.includes('--check')) {
     (arming.armed ? log : err)(arming.message);
     return arming.armed ? 0 : 1;
@@ -150,41 +193,45 @@ export async function runApproveTapCommand(argv: string[], deps: ApproveTapComma
     return 1;
   }
 
-  const proc = deps.proc ?? defaultProc();
-  const plan = planTapServerPrivileges({ euid: proc ? proc.geteuid() : null, agentUid, agentGid });
-  if (plan.action === 'refuse') {
-    err(plan.message);
+  const euid = (deps.geteuid ?? (() => (typeof process.geteuid === 'function' ? process.geteuid() : null)))();
+  if (euid !== 0) {
+    err('The tap endpoint must be started as root: it keeps the approve secret in a process the agent\'s user cannot '
+      + 'signal or debug, and runs each grant as the agent\'s user.');
+    return 1;
+  }
+  if (inspectorRequested(deps.execArgv ?? process.execArgv, deps.nodeOptions ?? process.env.NODE_OPTIONS)) {
+    err('Refusing to hold the approve secret in a process started with a Node inspector flag.');
     return 1;
   }
 
-  const loaded = loadApproveTapSecret(approveTap, { agentUid, ...(webhookSecret !== undefined ? { webhookSecret } : {}) });
+  const loaded = loadApproveTapSecret(approveTap, {
+    agentUid,
+    bridgeUid,
+    ...(webhookSecret !== undefined ? { webhookSecret } : {}),
+    ...(deps.openSecret ? { openSecret: deps.openSecret } : {}),
+  });
   if (!loaded.ok) {
     err(loaded.message);
     return 1;
   }
   const key = loaded.key;
-
-  // Drop BEFORE listening and before touching the grant store.
-  try {
-    proc!.setgroups([agentGid]);
-    proc!.setgid(agentGid);
-    proc!.setuid(agentUid);
-  } catch {
-    err('Could not drop to the agent\'s user; refusing to serve.');
-    return 1;
-  }
-  if (proc!.geteuid() !== agentUid || proc!.getuid() !== agentUid) {
-    err('The privilege drop did not take effect; refusing to serve.');
-    return 1;
-  }
+  const runChild = deps.runChild ?? spawnTapChild;
 
   const handler = createApproveTapHandler({
-    verify: (body) => verifyApproveTap(body, { config: approveTap, key, home, agentUid }),
+    verify: (body): TapHandlerAnswer => {
+      const auth = authenticateApproveTap(body, {
+        config: approveTap, key, agentUid, ...(deps.armingLstat ? { lstat: deps.armingLstat } : {}),
+      });
+      if (!auth.ok) return auth.refusal;
+      const request: ApproveTapRequest = auth.request;
+      return runChild({ uid: agentUid, gid: agentGid, input: { request, home: homeArg, expectUid: agentUid, expectGid: agentGid } });
+    },
     log: (line) => err(`[shieldcortex] ${new Date().toISOString()} ${line}`),
   });
   const server = createServer(handler);
   server.headersTimeout = 5_000;
   server.requestTimeout = 5_000;
+  deps.onServer?.(server);
   const listen = deps.listen ?? ((s: Server, port: number) => new Promise<void>((resolve, reject) => {
     s.once('error', reject);
     s.listen(port, '127.0.0.1', () => resolve());
@@ -192,10 +239,10 @@ export async function runApproveTapCommand(argv: string[], deps: ApproveTapComma
   try {
     await listen(server, approveTap.port);
   } catch {
-    err(`Could not listen on 127.0.0.1:${approveTap.port}.`);
+    err(`Could not listen on 127.0.0.1:${approveTap.port} (is something else already using it?).`);
     return 1;
   }
-  log(`[shieldcortex] one-tap approve listening on http://127.0.0.1:${approveTap.port}${APPROVE_TAP_PATH} (loopback only), as uid ${agentUid}.`);
+  log(`[shieldcortex] one-tap approve listening on http://127.0.0.1:${approveTap.port}${APPROVE_TAP_PATH} (loopback only); grants run as uid ${agentUid}.`);
   if (deps.listen) return 0;
   await new Promise<void>((resolve) => server.once('close', () => resolve()));
   return 0;

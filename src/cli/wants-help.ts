@@ -461,8 +461,14 @@ const DENY_SPEC = helpSpec({ '--attempt': first('always') }, { stripDoubleDash: 
 const FREEZE_SPEC = helpSpec({}, { restFlags: ['--reason'] });
 
 /** `guard readiness|test-approval [--surface claude-code|openclaw]`: `argv[surfaceAt + 1]`.
- *  `guard approve-tap [--home <dir>]` (#815 B) refuses a `--`-leading value. */
-const GUARD_SPEC = helpSpec({ '--surface': first('always'), '--home': first('unless-double-dash') });
+ *  `guard approve-tap --home <dir> --agent-uid <uid> --bridge-uid <uid>` (#815 B)
+ *  refuses a `--`-leading value for each. */
+const GUARD_SPEC = helpSpec({
+  '--surface': first('always'),
+  '--home': first('unless-double-dash'),
+  '--agent-uid': first('unless-double-dash'),
+  '--bridge-uid': first('unless-double-dash'),
+});
 
 /** `memory downvote <id> --reason <text>` / `memory list --purpose X --category X --limit N`: `parseFlag`. */
 const MEMORY_SPEC = helpSpec({ '--reason': first('always'), '--purpose': first('always'), '--category': first('always'), '--limit': first('always') });
