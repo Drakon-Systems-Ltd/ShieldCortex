@@ -46,6 +46,7 @@ import {
   recordDenySuppression,
   retryControlPath,
 } from '../retry-control.js';
+import { fencedStateFile } from './fenced-state-fixture.js';
 import { CATASTROPHIC_SIGNALS, GUARD_SELF_PROTECTION_SIGNALS, evaluateToolCall } from '../tool-action-guard.js';
 
 const MY_UID = process.geteuid!();
@@ -108,7 +109,8 @@ function verify(body: unknown, now = base + 1_000): TapVerifyOutcome {
 }
 
 function snapshot(): { retry: string | null; nonces: string | null } {
-  const read = (p: string) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
+  // The state each store holds (its newest generation), not the pointer.
+  const read = (p: string) => (existsSync(fencedStateFile(p)) ? readFileSync(fencedStateFile(p), 'utf8') : null);
   return { retry: read(retryControlPath(home)), nonces: read(approveTapNoncePath(home)) };
 }
 
@@ -250,10 +252,10 @@ describe('#815 B — refusals write nothing', () => {
     expect(tooLong).toMatchObject({ ok: false, reason: 'bad-lifetime' });
     // …so forge one straight into the store, as a same-UID writer could.
     const m = mintOk();
-    const file = JSON.parse(readFileSync(approveTapNoncePath(home), 'utf8'));
+    const file = JSON.parse(readFileSync(fencedStateFile(approveTapNoncePath(home)), 'utf8'));
     const forgedExp = m.mintedAt + APPROVE_TAP_MAX_NONCE_LIFETIME_MS + 60_000;
     file.nonces[0].exp = forgedExp;
-    writeFileSync(approveTapNoncePath(home), JSON.stringify(file), { mode: 0o600 });
+    writeFileSync(fencedStateFile(approveTapNoncePath(home)), JSON.stringify(file), { mode: 0o600 });
     expectRefusedUnchanged(tapFor(m, { exp: forgedExp }), 'nonce-too-long-lived');
   });
 
@@ -528,7 +530,7 @@ describe('#815 B — the secret never leaks', () => {
       await new Promise<void>((r) => server.close(() => r()));
     }
     seen.push(...logs);
-    seen.push(readFileSync(approveTapNoncePath(home), 'utf8'), readFileSync(retryControlPath(home), 'utf8'));
+    seen.push(readFileSync(fencedStateFile(approveTapNoncePath(home)), 'utf8'), readFileSync(fencedStateFile(retryControlPath(home)), 'utf8'));
 
     expect(seen.length).toBeGreaterThan(8);
     for (const s of seen) {
@@ -536,7 +538,7 @@ describe('#815 B — the secret never leaks', () => {
       expect(s).not.toContain(SECRET.slice(0, 16));
     }
     // The stores never hold the raw nonce or any HMAC.
-    const stores = readFileSync(approveTapNoncePath(home), 'utf8') + readFileSync(retryControlPath(home), 'utf8');
+    const stores = readFileSync(fencedStateFile(approveTapNoncePath(home)), 'utf8') + readFileSync(fencedStateFile(retryControlPath(home)), 'utf8');
     expect(stores).not.toContain(m.nonce);
     expect(stores).not.toContain(tapFor(m).hmac);
     // Logs name the outcome, never the nonce or the HMAC.
@@ -666,10 +668,10 @@ describe('#815 B — tap grants bind an exact versioned call digest', () => {
     const origin = { cwd, tool: 'Bash' };
     expect(consumeRetryGrant({ currentSignals: CURRENT, hash: HASH, origin }, { home, now: base + 2_000 })).toBeNull();
     // Rewrite the stored grant as an older/other version, as a same-UID writer could.
-    const raw = JSON.parse(readFileSync(retryControlPath(home), 'utf8'));
+    const raw = JSON.parse(readFileSync(fencedStateFile(retryControlPath(home)), 'utf8'));
     delete raw.fence;
     raw.rows[0].grant.exactDigestVersion = 0;
-    writeFileSync(retryControlPath(home), JSON.stringify(raw), { mode: 0o600 });
+    writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify(raw), { mode: 0o600 });
     expect(consumeRetryGrant({ currentSignals: CURRENT, hash: HASH, exactDigest: EXACT, origin }, { home, now: base + 2_000 })).toBeNull();
   });
 
@@ -688,10 +690,10 @@ describe('#815 B — tap grants bind an exact versioned call digest', () => {
       .toMatchObject({ ok: false, reason: 'hash-mismatch' });
     // A digest of another version is not this version's digest.
     seedDenial({ now: base + 400 });
-    const raw = JSON.parse(readFileSync(retryControlPath(home), 'utf8'));
+    const raw = JSON.parse(readFileSync(fencedStateFile(retryControlPath(home)), 'utf8'));
     delete raw.fence;
     raw.rows[0].exactDigestVersion = 2;
-    writeFileSync(retryControlPath(home), JSON.stringify(raw), { mode: 0o600 });
+    writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify(raw), { mode: 0o600 });
     expect(mint(base + 500)).toMatchObject({ ok: false, reason: 'unbound' });
   });
 

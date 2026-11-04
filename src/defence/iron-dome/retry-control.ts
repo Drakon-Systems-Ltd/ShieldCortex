@@ -23,8 +23,10 @@
  * ## One lock plane
  *
  * Fingerprints, deny suppression, launch claims, the card budget, grants and
- * grant consumption all live in ONE file guarded by ONE lock
- * (`~/.shieldcortex/approvals/retry-control.json` + `.lock`). The #118
+ * grant consumption all live in ONE store guarded by ONE lock: the newest
+ * generation under `~/.shieldcortex/approvals/retry-control.json.gen/`, with
+ * `retry-control.json` only a pointer to it and `.lock` the lock
+ * (fenced-store.ts). Deleting `retry-control.json` revokes nothing. The #118
  * approvals store keeps its own last-writer-wins RMW and stays LIVE-HOLD
  * ONLY — this module never touches it, and the live-hold path never touches
  * this one. That split is why #118/#143 behaviour is byte-identical with
@@ -449,14 +451,16 @@ function readStore(home?: string): RetryControlFile {
 }
 
 /** The store and the generation a commit built on it must succeed. */
-function readStoreSnapshot(home?: string): { file: RetryControlFile; base: number; onDisk: string | null } {
+function readStoreSnapshot(home?: string): {
+  file: RetryControlFile; base: number; onDisk: string | null; preFence: string | null | undefined;
+} {
   const snap = readFencedJson(retryControlPath(home));
   let onDisk: string | null = null;
   if (snap.fenced && snap.value && typeof snap.value === 'object') {
     const { fence: _fence, ...rest } = snap.value as Record<string, unknown>;
     onDisk = JSON.stringify(rest);
   }
-  return { file: parseStore(snap.value), base: snap.base, onDisk };
+  return { file: parseStore(snap.value), base: snap.base, onDisk, preFence: snap.preFence };
 }
 
 function parseStore(raw: unknown): RetryControlFile {
@@ -557,9 +561,12 @@ function storeOnDisk(file: RetryControlFile): Record<string, unknown> {
 }
 
 /** A fenced commit (fenced-store.ts): refused when any other writer has
- *  committed since `base` was read, so a stale holder cannot write back. */
-function writeStore(file: RetryControlFile, base: number, home?: string): boolean {
-  return commitFencedJson(retryControlPath(home), base, storeOnDisk(file));
+ *  committed since `base` was read, so a stale holder cannot write back.
+ *  The copy at `retryControlPath` is then a pointer with no rows, which a
+ *  release before the fence reads as an empty store: it never sees a grant
+ *  this store will also honour. */
+function writeStore(file: RetryControlFile, base: number, preFence: string | null | undefined, home?: string): boolean {
+  return commitFencedJson(retryControlPath(home), base, storeOnDisk(file), preFence);
 }
 
 type LockedResult<T> = { ok: true; value: T } | { ok: false; reason: 'locked' | 'unwritable' };
@@ -572,14 +579,14 @@ function withLock<T>(
   const lock = acquireLock(home);
   if (!lock) return { ok: false, reason: 'locked' };
   try {
-    const { file, base, onDisk } = readStoreSnapshot(home);
+    const { file, base, onDisk, preFence } = readStoreSnapshot(home);
     const { value, commit } = mutate(file);
     // A commit that would write back exactly the fenced state already on
     // disk is skipped (it would only advance the generation). Anything else —
     // a real change, the pre-fence store's first commit (its one migration,
     // fenced-store.ts), an edited or corrupt generation — is written.
     const changed = onDisk === null || JSON.stringify(storeOnDisk(file)) !== onDisk;
-    if (commit && changed && !writeStore(file, base, home)) return { ok: false, reason: 'unwritable' };
+    if (commit && changed && !writeStore(file, base, preFence, home)) return { ok: false, reason: 'unwritable' };
     return { ok: true, value };
   } catch {
     return { ok: false, reason: 'unwritable' };

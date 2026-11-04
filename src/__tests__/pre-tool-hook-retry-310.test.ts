@@ -27,6 +27,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { exactCallDigest, grantRetry } from '../defence/iron-dome/retry-control.js';
+import { fencedStateFile } from '../defence/iron-dome/__tests__/fenced-state-fixture.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(repoRoot, 'scripts', 'pre-tool-hook.mjs');
@@ -194,7 +195,9 @@ describe('#310 — retry control through the real Claude Code hook', () => {
   }
 
   function store(): RetryStore | null {
-    return existsSync(storePath()) ? (JSON.parse(readFileSync(storePath(), 'utf8')) as RetryStore) : null;
+    // The state is the newest generation; the store path holds a pointer.
+    const state = fencedStateFile(storePath());
+    return existsSync(state) ? (JSON.parse(readFileSync(state, 'utf8')) as RetryStore) : null;
   }
 
   function evidence(): Array<Record<string, unknown>> {
@@ -357,7 +360,7 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     expect(rows[0].grant).toBeUndefined();
     expect(rows[0].claim).toBeUndefined();
     // The command itself is never in the control record.
-    expect(readFileSync(storePath(), 'utf8')).not.toContain('modprobe');
+    expect(readFileSync(fencedStateFile(storePath()), 'utf8')).not.toContain('modprobe');
   });
 
   it('remints under one identity — same row, same epoch, alias index grows', () => {
@@ -545,7 +548,7 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     runHook(IRREVERSIBLE);
     expect(waitFor(() => (store()?.rows[0]?.claim ?? null) !== null)).toBe(true);
 
-    const onDisk = readFileSync(storePath(), 'utf8');
+    const onDisk = readFileSync(fencedStateFile(storePath()), 'utf8');
     const row = store()!.rows[0];
     const hmac = row.claim!.nonceHmac;
     expect(hmac).toMatch(/^[0-9a-f]{64}$/);

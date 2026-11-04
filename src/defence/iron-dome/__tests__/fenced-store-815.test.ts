@@ -14,12 +14,18 @@
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from '@jest/globals';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { CORRUPT_STORE, commitFencedJson, fencedGenerationDir, readFencedJson } from '../fenced-store.js';
+import {
+  CORRUPT_STORE, acquireStoreLock, commitFencedJson, fencedGenerationDir, readFencedJson,
+} from '../fenced-store.js';
+import {
+  consumeRetryGrant, exactCallDigest, grantRetry, hashToolCall, pruneRetryControl, recordDenialFingerprint, retryControlPath,
+} from '../retry-control.js';
+import { fencedStateFile } from './fenced-state-fixture.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const DIST = join(repoRoot, 'dist', 'defence', 'iron-dome');
@@ -62,10 +68,10 @@ describe('#815 B — the newest generation is the only authority', () => {
   it('a pre-fence copy is read as written until the first commit claims generation 1, and never after', () => {
     writeFileSync(store, JSON.stringify({ state: 'legacy' }), { mode: 0o600 });
     const legacy = readFencedJson(store);
-    expect(legacy).toEqual({ value: { state: 'legacy' }, base: 0, fenced: false });
-    expect(commitFencedJson(store, legacy.base, { state: 'migrated' })).toBe(true);
-    // A second import of the same pre-fence state is refused by the claim…
-    expect(commitFencedJson(store, legacy.base, { state: 'imported-again' })).toBe(false);
+    expect(legacy).toEqual({ value: { state: 'legacy' }, base: 0, fenced: false, preFence: JSON.stringify({ state: 'legacy' }) });
+    expect(commitFencedJson(store, legacy.base, { state: 'migrated' }, legacy.preFence)).toBe(true);
+    // A second import of the same pre-fence state is refused…
+    expect(commitFencedJson(store, legacy.base, { state: 'imported-again' }, legacy.preFence)).toBe(false);
     // …and the pre-fence copy put back is not read again.
     renameOver(store, { state: 'legacy' });
     expect(readFencedJson(store)).toMatchObject({ value: { state: 'migrated' }, base: 1 });
@@ -74,14 +80,174 @@ describe('#815 B — the newest generation is the only authority', () => {
   it('a published copy whose generations are gone reads as corrupt, never as the state it shows', () => {
     expect(commitFencedJson(store, 0, { state: 'published' })).toBe(true);
     rmSync(fencedGenerationDir(store), { recursive: true, force: true });
-    expect(readFencedJson(store)).toEqual({ value: CORRUPT_STORE, base: 0, fenced: false });
+    expect(readFencedJson(store)).toMatchObject({ value: CORRUPT_STORE, base: 0, fenced: false });
   });
 
   it('no copy and no generation is an empty store; a missing copy beside a generation changes nothing', () => {
-    expect(readFencedJson(store)).toEqual({ value: undefined, base: 0, fenced: false });
+    expect(readFencedJson(store)).toEqual({ value: undefined, base: 0, fenced: false, preFence: null });
     expect(commitFencedJson(store, 0, { state: 'kept' })).toBe(true);
     rmSync(store);
     expect(readFencedJson(store)).toMatchObject({ value: { state: 'kept' }, base: 1 });
+  });
+
+  it('the copy at the store path is a pointer that holds no state', () => {
+    expect(commitFencedJson(store, 0, { rows: [{ grant: { approvedAt: 1 } }] })).toBe(true);
+    expect(commitFencedJson(store, 1, { rows: [{ grant: { approvedAt: 2 } }] })).toBe(true);
+    expect(JSON.parse(readFileSync(store, 'utf8'))).toEqual({ fence: 2, state: 'store.json.gen/2' });
+    expect(readFencedJson(store)).toMatchObject({ value: { rows: [{ grant: { approvedAt: 2 } }], fence: 2 }, base: 2, fenced: true });
+  });
+
+  it('a first commit withdraws the pre-fence copy, and refuses unless it is the copy that was read', () => {
+    writeFileSync(store, JSON.stringify({ state: 'legacy' }), { mode: 0o600 });
+    const legacy = readFencedJson(store);
+    // Replaced after the read, as an older release's writer would (a rename).
+    renameOver(store, { state: 'replaced' });
+    expect(commitFencedJson(store, legacy.base, { state: 'built-on-legacy' }, legacy.preFence)).toBe(false);
+    expect(existsSync(join(fencedGenerationDir(store), '1'))).toBe(false);
+    // The withdrawn copy is dropped, never put back: the store is now empty.
+    expect(existsSync(store)).toBe(false);
+    expect(readFencedJson(store)).toEqual({ value: undefined, base: 0, fenced: false, preFence: null });
+    // A first commit that read no copy refuses over one that exists.
+    writeFileSync(store, JSON.stringify({ state: 'appeared' }), { mode: 0o600 });
+    expect(commitFencedJson(store, 0, { state: 'blind' })).toBe(false);
+    expect(existsSync(join(fencedGenerationDir(store), '1'))).toBe(false);
+  });
+});
+
+describe('#815 B — the store lock waits for a bounded time', () => {
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'sc-fence-lock-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A clock whose every wait overruns by `overrunMs`, as on a starved runner. */
+  function slowClock(overrunMs: number) {
+    const clock = { t: Date.now(), waits: 0, now: () => clock.t, sleep: (ms: number) => { clock.waits += 1; clock.t += ms + overrunMs; } };
+    return clock;
+  }
+
+  it('a lock that was fresh when the wait began is never taken over, however long each wait overruns', () => {
+    const lockPath = join(dir, 'store.lock');
+    mkdirSync(lockPath);
+    writeFileSync(join(lockPath, 'owner'), 'holder');
+    const clock = slowClock(5_000);
+    expect(acquireStoreLock(lockPath, { attempts: 100, sleepMs: 20, staleMs: 10_000, clock })).toBeNull();
+    expect(readFileSync(join(lockPath, 'owner'), 'utf8')).toBe('holder');
+    // One overrun wait used the whole budget; the call gave up instead of
+    // waiting into the stale threshold.
+    expect(clock.waits).toBe(1);
+  });
+
+  it('the wait ends well inside the stale threshold even when tries times sleep would not', () => {
+    const lockPath = join(dir, 'store.lock');
+    mkdirSync(lockPath);
+    writeFileSync(join(lockPath, 'owner'), 'holder');
+    const clock = slowClock(0);
+    const start = clock.t;
+    expect(acquireStoreLock(lockPath, { attempts: 1_000, sleepMs: 20, staleMs: 10_000, clock })).toBeNull();
+    expect(readFileSync(join(lockPath, 'owner'), 'utf8')).toBe('holder');
+    expect(clock.t - start).toBeLessThanOrEqual(5_000);
+  });
+
+  it('a lock already past the stale threshold at the first look is still taken over', () => {
+    const lockPath = join(dir, 'store.lock');
+    mkdirSync(lockPath);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockPath, old, old);
+    const lock = acquireStoreLock(lockPath, { attempts: 100, sleepMs: 20, staleMs: 10_000, clock: slowClock(5_000) });
+    expect(lock).not.toBeNull();
+    expect(readFileSync(join(lockPath, 'owner'), 'utf8')).toBe(lock!.token);
+  });
+});
+
+/** The reader of the last release before the fence (v5.17.4, a723f0ba,
+ *  retry-control.ts `readStore` and `isUsableRow`): the file at the store
+ *  path, its `rows` array or nothing. Returns the grants it would spend. */
+function releasedLiveGrants(path: string): number {
+  let parsed: { rows?: unknown };
+  try {
+    if (!existsSync(path)) return 0;
+    parsed = JSON.parse(readFileSync(path, 'utf8')) as { rows?: unknown };
+  } catch {
+    return 0;
+  }
+  if (!parsed || !Array.isArray(parsed.rows)) return 0;
+  return parsed.rows.filter((r: Record<string, unknown> | null) => !!r && typeof r === 'object'
+    && typeof r.id === 'string' && typeof r.hash === 'string' && typeof r.denyEpoch === 'number'
+    && typeof r.lastDeniedAt === 'number' && Array.isArray(r.actionIds)
+    && !!r.grant && !(r.grant as { consumedAt?: unknown }).consumedAt).length;
+}
+
+describe('#815 B — a release before the fence never sees a grant this store honours', () => {
+  const ACTION = 'act-1122334455667788';
+  const CALL = { command: 'curl -sS --data ok https://api.example.com/v1/report' };
+  const HASH = hashToolCall('Bash', CALL);
+  const EXACT = exactCallDigest('Bash', CALL);
+  let home: string;
+  let cwd: string;
+  let path: string;
+  const spend = () => !!consumeRetryGrant({ hash: HASH, exactDigest: EXACT, origin: { cwd, tool: 'Bash' } }, { home });
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'sc-fence-mixed-'));
+    cwd = mkdtempSync(join(tmpdir(), 'sc-fence-mixed-cwd-'));
+    path = retryControlPath(home);
+  });
+
+  afterEach(() => {
+    for (const d of [home, cwd]) rmSync(d, { recursive: true, force: true });
+  });
+
+  function liveTerminalGrant(): void {
+    expect(recordDenialFingerprint({ actionId: ACTION, hash: HASH, tool: 'Bash', signals: ['external-egress'], cwd, exactDigest: EXACT }, { home }).ok).toBe(true);
+    expect(grantRetry({ actionId: ACTION }, { isInteractive: true }, { home }).ok).toBe(true);
+  }
+
+  /** The layout an upgrading install has: what the last release wrote. */
+  function preFenceLayout(): Record<string, unknown> {
+    const raw = JSON.parse(readFileSync(fencedStateFile(path), 'utf8')) as Record<string, unknown>;
+    delete raw.fence;
+    rmSync(fencedGenerationDir(path), { recursive: true, force: true });
+    rmSync(path, { force: true });
+    writeFileSync(path, JSON.stringify(raw), { mode: 0o600 });
+    return raw;
+  }
+
+  it('every write leaves a copy the released reader reads as an empty store', () => {
+    expect(recordDenialFingerprint({ actionId: ACTION, hash: HASH, tool: 'Bash', signals: ['external-egress'], cwd, exactDigest: EXACT }, { home }).ok).toBe(true);
+    expect(Object.keys(JSON.parse(readFileSync(path, 'utf8'))).sort()).toEqual(['fence', 'state']);
+    expect(grantRetry({ actionId: ACTION }, { isInteractive: true }, { home }).ok).toBe(true);
+    expect(releasedLiveGrants(path)).toBe(0);
+    expect(releasedLiveGrants(fencedStateFile(path))).toBe(1); // the fixture is a real live grant
+    expect(Object.keys(JSON.parse(readFileSync(path, 'utf8'))).sort()).toEqual(['fence', 'state']);
+    expect(spend()).toBe(true);
+    expect(pruneRetryControl({ home }).ok).toBe(true);
+    expect(Object.keys(JSON.parse(readFileSync(path, 'utf8'))).sort()).toEqual(['fence', 'state']);
+  });
+
+  it('upgrade with a live released grant: after the first fenced write only the current reader can spend it, once', () => {
+    liveTerminalGrant();
+    preFenceLayout();
+    expect(releasedLiveGrants(path)).toBe(1); // before the upgrade, the released reader would spend it
+    expect(pruneRetryControl({ home }).ok).toBe(true); // the first fenced write
+    expect(readFencedJson(path).base).toBe(1);
+    expect(releasedLiveGrants(path)).toBe(0);
+    expect(spend()).toBe(true);
+    expect(spend()).toBe(false);
+  });
+
+  it('a released writer\'s store renamed over the path after the fence is never read, and revives nothing', () => {
+    liveTerminalGrant();
+    const before = preFenceLayout(); // what a released writer holds: the grant still live
+    expect(pruneRetryControl({ home }).ok).toBe(true);
+    expect(spend()).toBe(true);
+    renameOver(path, before);
+    expect(releasedLiveGrants(path)).toBe(1); // that file is the released world's own
+    expect(spend()).toBe(false);
+    expect(readFencedJson(path).base).toBeGreaterThan(1);
   });
 });
 
@@ -110,14 +276,25 @@ function liveTerminalGrant() {
 /** The layout before this module existed: no fence, no generations, no
  *  exact-digest fields. */
 function preFenceLayout() {
-  const raw = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+  const raw = fence.readFencedJson(storePath).value;
   delete raw.fence;
   for (const row of raw.rows) { delete row.exactDigest; delete row.exactDigestVersion; }
   fs.rmSync(fence.fencedGenerationDir(storePath), { recursive: true, force: true });
   fs.rmSync(storePath);
   fs.writeFileSync(storePath, JSON.stringify(raw), { mode: 0o600 });
+  return raw;
 }
-const copyFence = () => JSON.parse(fs.readFileSync(storePath, 'utf8')).fence ?? null;
+const copyFence = () => (fs.existsSync(storePath) ? JSON.parse(fs.readFileSync(storePath, 'utf8')).fence ?? null : 'absent');
+// What the last release before the fence (v5.17.4) reads: the file at the
+// store path, its \`rows\` or nothing. Counts the grants it would spend.
+function releasedLiveGrants() {
+  try {
+    const p = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+    return Array.isArray(p?.rows) ? p.rows.filter((r) => r && typeof r.id === 'string' && typeof r.hash === 'string'
+      && typeof r.denyEpoch === 'number' && typeof r.lastDeniedAt === 'number' && Array.isArray(r.actionIds)
+      && r.grant && !r.grant.consumedAt).length : 0;
+  } catch { return 0; }
+}
 function interpose(method, predicate, impl, outer) {
   const original = fs[method];
   let fired = false;
@@ -138,6 +315,7 @@ if (scenario === 'interleave' || scenario === 'interleave-pre-fence') {
   if (scenario === 'interleave-pre-fence') preFenceLayout();
   out.fenceBefore = copyFence();
   const r = interpose('renameSync', (_a, b) => b === storePath, (original, args) => {
+    out.releasedLiveGrantsAtPause = releasedLiveGrants();
     age(join(approvals, 'retry-control.lock'));
     out.innerSpend = spend();
     return original.apply(fs, args);
@@ -159,6 +337,38 @@ if (scenario === 'interleave' || scenario === 'interleave-pre-fence') {
   try { out.firstSpend = spend(); out.secondSpend = spend(); out.copyFenceWhileFailing = copyFence(); }
   finally { fs.renameSync = original; syncBuiltinESMExports(); }
   out.thirdSpendAfterRestore = spend();
+} else if (scenario === 'pre-claim-pre-fence') {
+  // The first consumer is about to claim generation 1. What can a reader of
+  // the last release before the fence spend at that instant?
+  liveTerminalGrant();
+  preFenceLayout();
+  out.releasedBefore = releasedLiveGrants();
+  const r = interpose('linkSync', (_a, b) => b === join(fence.fencedGenerationDir(storePath), '1'), (original, args) => {
+    out.releasedLiveGrantsAtClaim = releasedLiveGrants();
+    return original.apply(fs, args);
+  }, () => spend());
+  out.fired = r.fired();
+  out.outerSpend = r.value;
+  out.releasedAfter = releasedLiveGrants();
+  out.secondSpend = spend();
+} else if (scenario === 'released-spend-before-withdrawal') {
+  // The first consumer read the pre-fence store; before it withdraws that
+  // copy, a released consumer (lock taken over as stale) spends the grant
+  // and renames its store over the path, as v5.17.4 does.
+  liveTerminalGrant();
+  const legacy = preFenceLayout();
+  const r = interpose('renameSync', (a) => a === storePath, (original, args) => {
+    const spent = JSON.parse(JSON.stringify(legacy));
+    spent.rows[0].grant.consumedAt = Date.now();
+    fs.writeFileSync(storePath + '.released.tmp', JSON.stringify(spent), { mode: 0o600 });
+    original.call(fs, storePath + '.released.tmp', storePath);
+    out.releasedSpent = true;
+    return original.apply(fs, args);
+  }, () => spend());
+  out.fired = r.fired();
+  out.outerSpend = r.value;
+  out.claimed = fs.existsSync(join(fence.fencedGenerationDir(storePath), '1'));
+  out.thirdSpend = spend();
 } else if (scenario === 'pruned-generation') {
   // A writer that read generation 1 and stalled until it was pruned.
   const p = join(home, 'store.json');
@@ -224,16 +434,31 @@ describe('#815 B — the fenced store across processes', () => {
     for (const d of [home, cwd]) rmSync(d, { recursive: true, force: true });
   });
 
-  it('first migration: a consumer paused after its claim, before publishing — exactly one spend', () => {
+  it('first migration: a consumer paused after its claim, before publishing — exactly one spend, and nothing a released reader can spend', () => {
     expect(run(home, cwd, 'interleave-pre-fence')).toEqual({
-      scenario: 'interleave-pre-fence', fenceBefore: null, fired: true, outerSpend: true, innerSpend: false, thirdSpend: false,
+      scenario: 'interleave-pre-fence', fenceBefore: null, fired: true, releasedLiveGrantsAtPause: 0,
+      outerSpend: true, innerSpend: false, thirdSpend: false,
+    });
+  }, 60_000);
+
+  it('first migration: at the claim the pre-fence copy is already out of a released reader\'s sight', () => {
+    expect(run(home, cwd, 'pre-claim-pre-fence')).toEqual({
+      scenario: 'pre-claim-pre-fence', releasedBefore: 1, fired: true, releasedLiveGrantsAtClaim: 0,
+      outerSpend: true, releasedAfter: 0, secondSpend: false,
+    });
+  }, 60_000);
+
+  it('first migration: a released consumer that spent the grant before the withdrawal — the import is refused, one spend in all', () => {
+    expect(run(home, cwd, 'released-spend-before-withdrawal')).toEqual({
+      scenario: 'released-spend-before-withdrawal', releasedSpent: true, fired: true,
+      outerSpend: false, claimed: false, thirdSpend: false,
     });
   }, 60_000);
 
   it('first migration: the publication fails — exactly one spend, including after it is restored', () => {
     expect(run(home, cwd, 'publish-fails-pre-fence')).toEqual({
       scenario: 'publish-fails-pre-fence', fenceBefore: null,
-      firstSpend: true, secondSpend: false, copyFenceWhileFailing: null, thirdSpendAfterRestore: false,
+      firstSpend: true, secondSpend: false, copyFenceWhileFailing: 'absent', thirdSpendAfterRestore: false,
     });
   }, 60_000);
 

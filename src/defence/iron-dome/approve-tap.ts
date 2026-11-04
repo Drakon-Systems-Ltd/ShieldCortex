@@ -582,11 +582,12 @@ function parseNonces(raw: unknown): TapNonceFile {
 interface NonceSnapshot {
   file: TapNonceFile;
   base: number;
+  preFence: string | null | undefined;
 }
 
 function readNonces(home?: string): NonceSnapshot {
   const snap = readFencedJson(approveTapNoncePath(home));
-  return { file: parseNonces(snap.value), base: snap.base };
+  return { file: parseNonces(snap.value), base: snap.base, preFence: snap.preFence };
 }
 
 /**
@@ -597,9 +598,8 @@ function readNonces(home?: string): NonceSnapshot {
  * again.
  */
 function writeNonces(snap: NonceSnapshot, home?: string): boolean {
-  if (!commitFencedJson(approveTapNoncePath(home), snap.base, { version: snap.file.version, nonces: snap.file.nonces })) {
-    return false;
-  }
+  const value = { version: snap.file.version, nonces: snap.file.nonces };
+  if (!commitFencedJson(approveTapNoncePath(home), snap.base, value, snap.preFence)) return false;
   snap.base += 1;
   return true;
 }
