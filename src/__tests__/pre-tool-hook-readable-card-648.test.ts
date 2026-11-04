@@ -629,6 +629,115 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     expect(denialRows()).toEqual([]);
     expectNoR4Secret(raw, secret);
   });
+
+  // #815 A review r5 — the reviewers' r4 rows, through the real hook. B4 (Astra
+  // and Grok r4): a key with some or all of its characters written as `%XX`
+  // reached the card, because no recogniser read the decoded text. B5 (Astra
+  // r4): a key the shell split into two words showed its first word as the
+  // branch; the card builder chose that word before anything read the whole
+  // command. Every row is withheld whole, held and headless; the WHO line and
+  // the approve command stay; the legacy body and the denial rows are the
+  // base goldens byte for byte, but for `argc`: the guard's own count of the
+  // tokens in the span it matched, which differs with the command's shape.
+  const pct = (s: string, n = s.length) => [...s.slice(0, n)].map((c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`).join('') + s.slice(n);
+  const R5_AWS = ['AK', 'IA'].join('') + 'T3VQ7XWN4ZRK2PLD';
+  const R5_STS = ['AS', 'IA'].join('') + 'T3VQ7XWN4ZRK2PLD';
+  const R5_GH = ['ghp', '_'].join('') + ['t7K2mQ', 'z4R9vN', 'p6L3wB', 'h8D5xF', 'c1J0sA', 'y2U4eG'].join('');
+  const R5_SPLIT = `${R5_GH.slice(0, 20)} ${R5_GH.slice(20)}`;
+  const R5_READ2_WHAT = 'Read 2 files, including one in your SSH folder: (withheld: looks like a secret)';
+  const R5_ROWS: Array<[row: string, command: string, secret: string, what: string, argc: number]> = [
+    ['B4 (Astra r4): AWS key id, prefix as %XX, as a branch', `git push --force origin ${pct(R5_AWS, 4)}`, R5_AWS, R4_PUSH_WHAT, 3],
+    ['B4 (Astra r4): AWS key id, prefix as %XX, in an SSH-folder path', `cat ~/.ssh/${pct(R5_AWS, 4)}`, R5_AWS, R4_READ_WHAT, 1],
+    ['B4 (Astra r4): STS key id, prefix as %XX, as a branch', `git push --force origin ${pct(R5_STS, 4)}`, R5_STS, R4_PUSH_WHAT, 3],
+    ['B4 (Astra r4): STS key id, prefix as %XX, in an SSH-folder path', `cat ~/.ssh/${pct(R5_STS, 4)}`, R5_STS, R4_READ_WHAT, 1],
+    ['B4 (Grok r4): key id, first character as %XX, as a branch', `git push --force origin ${pct(R4_KEY_SPLIT, 1)}`, R4_KEY_SPLIT, R4_PUSH_WHAT, 3],
+    ['B4 (Grok r4): key id, first character as %XX, in an SSH-folder path', `cat ~/.ssh/${pct(R4_KEY_SPLIT, 1)}`, R4_KEY_SPLIT, R4_READ_WHAT, 1],
+    ['B4 (Grok r4): key id, prefix as %XX, as a branch', `git push --force origin ${pct(R4_KEY_SPLIT, 4)}`, R4_KEY_SPLIT, R4_PUSH_WHAT, 3],
+    ['B4 sibling (Astra r4): AWS key id, every character as %XX, as a branch', `git push --force origin ${pct(R5_AWS)}`, R5_AWS, R4_PUSH_WHAT, 3],
+    ['B4 sibling (Astra r4): GitHub token, every character as %XX, as a branch', `git push --force origin ${pct(R5_GH)}`, R5_GH, R4_PUSH_WHAT, 3],
+    ['B4 sibling: key id, first character as %XX twice over, as a branch', `git push --force origin %25${pct(R4_KEY_SPLIT, 1).slice(1)}`, R4_KEY_SPLIT, R4_PUSH_WHAT, 3],
+    ['B5 (Astra r4): GitHub token as two unquoted words, as a branch', `git push --force origin ${R5_SPLIT}`, R5_GH, R4_PUSH_WHAT, 3],
+    ['B5 (Astra r4): GitHub token as two quoted words, as a branch', `git push --force origin '${R5_GH.slice(0, 20)}' '${R5_GH.slice(20)}'`, R5_GH, R4_PUSH_WHAT, 6],
+    ['B5 (Astra r4): GitHub token split inside one quoted word, as a branch', `git push --force origin '${R5_SPLIT}'`, R5_GH, R4_PUSH_WHAT, 5],
+    ['B5 (Astra r4): contiguous GitHub token, as a branch', `git push --force origin ${R5_GH}`, R5_GH, R4_PUSH_WHAT, 3],
+    ['B5 sibling: GitHub token as two unquoted words, the first in an SSH-folder path', `cat ~/.ssh/${R5_SPLIT}`, R5_GH, R5_READ2_WHAT, 1],
+  ];
+  /** Raw, NFKC, %-decoded, every case and every 10-character window of the
+   *  secret: no fragment a reader could rebuild leaves the box. */
+  const decodeAll = (s: string) => {
+    let t = s;
+    for (let i = 0; i < 3; i += 1) t = t.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => { try { return decodeURIComponent(run); } catch { return run; } });
+    return t;
+  };
+  function expectNoR5Secret(raw: string[], secret: string): void {
+    const rowsRaw = lines(join(home, '.shieldcortex', 'denials.jsonl')).join('\n');
+    const windows = Array.from({ length: secret.length - 9 }, (_, i) => secret.slice(i, i + 10).toUpperCase());
+    for (const text of [...raw, rowsRaw]) {
+      for (const reading of [text, decodeAll(text)]) {
+        const read = reading.normalize('NFKC').toUpperCase();
+        expect(read).not.toContain(secret.toUpperCase());
+        for (const w of windows) expect(read).not.toContain(w);
+      }
+    }
+  }
+  const withArgc = (rows: string[], argc: number) => rows.map((r) => r.replace(/"argc":\d+/, `"argc":${argc}`));
+
+  it('#815 A review r5 control: an ordinary branch or path with a % in it, and a word beside a whole key, are still named', () => {
+    scratchRepo(ORDINARY_ORIGIN);
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
+    expect(runHook({ command: 'git push --force origin release/50%-off' }).decision).toBe('ask');
+    expect(runHook({ command: 'cat ~/.ssh/old%20config' }, { permissionMode: 'bypassPermissions' }).decision).toBe('deny');
+    expect(runHook({ command: `git push --force ${R4_KEY_SPLIT} main` }).decision).toBe('ask');
+    const got = lines(webhookEvidence).map((b) => splitCard(normaliseWebhookBody(b)).card as Record<string, string>);
+    expect(got.map((c) => [c.kind, c.what])).toEqual([
+      ['approval', 'Force-push to github.com (branch "release/50%-off") (git push --force)'],
+      ['denial', 'Read a file in your SSH folder: "~/.ssh/old%20config"'],
+      // A whole key in one word is withheld on its own: the word beside it is still named.
+      ['approval', 'Force-push to (withheld: looks like a secret) (branch "main") (git push --force)'],
+    ]);
+  });
+
+  it.each(R5_ROWS)('#815 A review r5: %s never reaches the webhook card (headless denial)', (_row, command, secret, what, argc) => {
+    scratchRepo(ORDINARY_ORIGIN);
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
+    expect(runHook({ command }, { permissionMode: 'bypassPermissions' }).decision).toBe('deny');
+    const raw = lines(webhookEvidence);
+    expect(raw).toHaveLength(1);
+    const { rest, card } = splitCard(normaliseWebhookBody(raw[0]));
+    const push = what === R4_PUSH_WHAT;
+    expect(rest).toBe(push ? GOLDEN_WEBHOOK_DNP_REMOTE : GOLDEN_WEBHOOK_DNP);
+    expect(card).toMatchObject({ version: 1, kind: 'denial', what, approveCommand: 'shieldcortex approve --denial act-<action>' });
+    expect(card!.who).toMatch(WHO);
+    expect(card!.text).toContain(`What: ${what}`);
+    expect(card!.text).toContain('  shieldcortex approve --denial act-<action>');
+    expect(denialRows()).toEqual(withArgc(push ? GOLDEN_DENIALS_DNP_REMOTE : GOLDEN_DENIALS_DNP, argc));
+    expect(denialRows().join('\n')).not.toContain('"card"');
+    expectNoR5Secret(raw, secret);
+  });
+
+  it.each(R5_ROWS)('#815 A review r5: %s never reaches the webhook card (held approval)', (_row, command, secret, what) => {
+    scratchRepo(ORDINARY_ORIGIN);
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook' });
+    expect(runHook({ command }).decision).toBe('ask');
+    const raw = lines(webhookEvidence);
+    expect(raw).toHaveLength(1);
+    const { rest, card } = splitCard(normaliseWebhookBody(raw[0]));
+    const hash = String(JSON.parse(rest).hash);
+    expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    const push = what === R4_PUSH_WHAT;
+    expect(rest).toBe(push ? withHash(GOLDEN_WEBHOOK_ASK_REMOTE, REMOTE_ASK_HASH, hash) : withHash(GOLDEN_WEBHOOK_ASK, ASK_HASH, hash));
+    expect(card).toMatchObject({
+      version: 1,
+      kind: 'approval',
+      what,
+      approveCommand: `shieldcortex approve ${hash.slice(0, 12)} --attempt <attempt>`,
+      denyCommand: `shieldcortex deny ${hash.slice(0, 12)} --attempt <attempt>`,
+    });
+    expect(card!.who).toMatch(WHO);
+    expect(card!.text).toContain(`What: ${what}`);
+    expect(denialRows()).toEqual([]);
+    expectNoR5Secret(raw, secret);
+  });
 });
 
 // The hash of `cat ~/.ssh/config`, as the ask golden below carries it.

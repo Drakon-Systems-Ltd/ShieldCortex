@@ -876,3 +876,116 @@ describe('#815 A fold 4 (macOS CI) — a generated hostname reaches the WHO line
     });
   });
 });
+
+describe('#815 A review r5 — a %XX-encoded key and a key split across words never reach the card', () => {
+  // Built at runtime so no secret-shaped literal is committed.
+  const AWS = ['AK', 'IA'].join('') + 'T3VQ7XWN4ZRK2PLD';
+  const STS = ['AS', 'IA'].join('') + 'T3VQ7XWN4ZRK2PLD';
+  const KEY = ['AK', 'IA'].join('') + 'W7NQ4KPJ2XZT6RHM';
+  const GH = ['ghp', '_'].join('') + ['t7K2mQ', 'z4R9vN', 'p6L3wB', 'h8D5xF', 'c1J0sA', 'y2U4eG'].join('');
+  const pct = (s: string, n = s.length) => [...s.slice(0, n)].map((c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`).join('') + s.slice(n);
+  const wide = (s: string) => [...s].map((c) => (c >= '!' && c <= '~' ? String.fromCharCode(c.charCodeAt(0) + 0xfee0) : c)).join('');
+  const decodeAll = (s: string) => {
+    let t = s;
+    for (let i = 0; i < 3; i += 1) t = t.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => { try { return decodeURIComponent(run); } catch { return run; } });
+    return t;
+  };
+  /** Raw and %-decoded, NFKC, every case, every 10-character window. */
+  function expectNoSecret(text: string, secret: string): void {
+    for (const reading of [text, decodeAll(text)]) {
+      const read = reading.normalize('NFKC').toUpperCase();
+      expect(read).not.toContain(secret.toUpperCase());
+      for (let i = 0; i + 10 <= secret.length; i += 1) expect(read).not.toContain(secret.slice(i, i + 10).toUpperCase());
+    }
+  }
+
+  // B4 at the egress gate: hand-built lines reach it without `safeTarget`, so
+  // the gate alone must read the decoded text (a field built across a process
+  // boundary). Astra r4 and Grok r4 rows, then their siblings.
+  const ENCODED: Array<[label: string, written: string, secret: string]> = [
+    ['AWS key id, prefix as %XX (Astra r4)', pct(AWS, 4), AWS],
+    ['STS key id, prefix as %XX (Astra r4)', pct(STS, 4), STS],
+    ['key id, first character as %XX (Grok r4)', pct(KEY, 1), KEY],
+    ['key id, prefix as %XX (Grok r4)', pct(KEY, 4), KEY],
+    ['AWS key id, every character as %XX (Astra r4)', pct(AWS), AWS],
+    ['GitHub token, every character as %XX (Astra r4)', pct(GH), GH],
+    ['key id, lower-case hex digits', pct(KEY, 4).toLowerCase() + KEY.slice(4), KEY],
+    ['key id, first character as %XX twice over', `%25${pct(KEY, 1).slice(1)}`, KEY],
+    ['key id, first character as a full-width %XX', `${wide(pct(KEY, 1).slice(0, 3))}${KEY.slice(1)}`, KEY],
+  ];
+
+  it.each(ENCODED)('%s as a branch: the line is withheld whole on both paths', async (_label, written, secret) => {
+    const action = `Force-push to github.com (branch "${written}") (git push --force)`;
+    expect(withholdSecretCardLine(action)).toBe(WITHHELD_SECRET);
+    for (const got of await overBothPaths({ ...CARD, action })) {
+      expect(got.card.what).toBe(WITHHELD_SECRET);
+      expect(got.card.who).toBe(CARD.who);
+      expectNoSecret(got.body, secret);
+    }
+  });
+
+  it.each(ENCODED)('%s in an SSH-folder path, WHY and WHO: each line is withheld whole', async (_label, written, secret) => {
+    for (const [field, out] of [['action', 'what'], ['reason', 'why'], ['who', 'who']] as const) {
+      const value = field === 'action' ? `Read a file in your SSH folder: "~/.ssh/${written}"` : `about ${written} now`;
+      for (const got of await overBothPaths({ ...CARD, [field]: value })) {
+        expect(got.card[out]).toBe(WITHHELD_SECRET);
+        expectNoSecret(got.body, secret);
+      }
+    }
+  });
+
+  it('controls: a stray, malformed or ordinary %XX does not withhold a line on its own', () => {
+    for (const line of [
+      'Read a file: "~/notes/100%-done.txt"',
+      'Force-push to github.com (branch "release/50%off") (git push --force)',
+      'Read a file: "~/notes/a%zz%4%"',
+      'Read a file: "~/Documents/My%20Notes.txt"',
+      'Read a file: "~/notes/%E2%82%AC-budget.txt"',
+      'Read a file: "~/notes/%FF%FE-bytes.bin"',
+    ]) expect(withholdSecretCardLine(line)).toBe(line);
+  });
+
+  // The real builder: B4 targets, and B5 — a key in two words. The card used
+  // to choose ONE operand (the first branch word) before any recogniser saw
+  // the whole command. The WHO line and both commands are unchanged.
+  const card = (command: string) => buildApprovalCard({
+    tool: 'Bash',
+    input: { command },
+    signals: evaluateToolCall('Bash', { command }).signals,
+    plane: 'claude-code',
+    host: 'jarvis',
+    sessionId: SESSION_ID,
+    gitSystemConfig: [],
+  });
+  const BRANCH_WITHHELD = /\(branch \(withheld: looks like a secret\)\) \(git push --force\)$/;
+  const BUILT: Array<[label: string, command: string, secret: string, what: RegExp]> = [
+    ['B4 (Astra r4): prefix as %XX, as a branch', `git push --force origin ${pct(AWS, 4)}`, AWS, BRANCH_WITHHELD],
+    ['B4 (Astra r4): prefix as %XX, in an SSH-folder path', `cat ~/.ssh/${pct(AWS, 4)}`, AWS, /^Read a file in your SSH folder: \(withheld: looks like a secret\)$/],
+    ['B4 (Grok r4): first character as %XX, as a branch', `git push --force origin ${pct(KEY, 1)}`, KEY, BRANCH_WITHHELD],
+    ['B4 (Astra r4): every character as %XX, as a branch', `git push --force origin ${pct(GH)}`, GH, BRANCH_WITHHELD],
+    ['B5 (Astra r4): two unquoted words, as a branch', `git push --force origin ${GH.slice(0, 20)} ${GH.slice(20)}`, GH, BRANCH_WITHHELD],
+    ['B5 (Astra r4): two quoted words, as a branch', `git push --force origin '${GH.slice(0, 20)}' '${GH.slice(20)}'`, GH, BRANCH_WITHHELD],
+    ['B5 (Astra r4): one quoted word with a space, as a branch', `git push --force origin '${GH.slice(0, 20)} ${GH.slice(20)}'`, GH, BRANCH_WITHHELD],
+    ['B5 (Astra r4): contiguous, as a branch', `git push --force origin ${GH}`, GH, BRANCH_WITHHELD],
+    ['B5 sibling: two unquoted words, the first in an SSH-folder path', `cat ~/.ssh/${GH.slice(0, 20)} ${GH.slice(20)}`, GH, /^Read 2 files, including one in your SSH folder: \(withheld: looks like a secret\)$/],
+    ['B5 sibling: two unquoted words as a branch to delete', `git branch -D ${GH.slice(0, 20)} ${GH.slice(20)}`, GH, /^Delete a git branch: \(withheld: looks like a secret\)$/],
+  ];
+
+  it.each(BUILT)('%s: the target is withheld whole, and nothing of the key leaves on either path', async (_label, command, secret, what) => {
+    const built = card(command);
+    expect(built.action).toMatch(what);
+    expectNoSecret(built.action, secret);
+    for (const got of await overBothPaths(built)) {
+      expect(got.card.what).toBe(built.action);
+      expect(got.card.who).toBe(`Claude Code on jarvis · session ${SESSION_ID}`);
+      expectNoSecret(got.body, secret);
+    }
+  });
+
+  it('controls: an ordinary branch or path is named, and so is a word beside a whole key', () => {
+    expect(card('git push --force origin release/50%-off').action).toMatch(/\(branch "release\/50%-off"\) \(git push --force\)$/);
+    expect(card('cat ~/.ssh/old%20config').action).toBe('Read a file in your SSH folder: "~/.ssh/old%20config"');
+    expect(card('git push --force origin feature/login-form main').action).toMatch(/\(branch "feature\/login-form"\) \(git push --force\)$/);
+    expect(card(`git push --force ${KEY} main`).action).toBe('Force-push to (withheld: looks like a secret) (branch "main") (git push --force)');
+  });
+});

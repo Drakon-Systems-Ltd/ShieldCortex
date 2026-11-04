@@ -451,6 +451,32 @@ const UNUSUAL_SPACE_ALL = /[^\S ]/gu;
 const ANY_SPACE_ALL = /[\s\u180e\u200b]/gu;
 const nfkc = (text: string): string => text.normalize('NFKC');
 
+/** #815 A review r5 (B4): rounds of `%XX` decoding read, so `%2541` is read
+ *  as `%41` and then as `A`. Each round is one more reading; three is the cap. */
+const PERCENT_DECODE_ROUNDS = 3;
+const PERCENT_RUN = /(?:%[0-9A-Fa-f]{2})+/g;
+const UTF8 = new TextDecoder('utf-8');
+
+/**
+ * #815 A review r5 (B4): the `%XX`-decoded readings of `text`, one per round
+ * until a round changes nothing (at most `PERCENT_DECODE_ROUNDS`). A reader,
+ * a browser or `decodeURIComponent` turns `%41KIA…` back into the key; the
+ * recognisers did not. Tolerant by design: a `%` not followed by two hex
+ * digits stays as written, and bytes that are not UTF-8 read as U+FFFD, so a
+ * stray `%` (`100%-done`) is never on its own a reason to withhold a line.
+ */
+function percentDecodedReadings(text: string): string[] {
+  const out: string[] = [];
+  let current = text;
+  for (let round = 0; round < PERCENT_DECODE_ROUNDS && current.includes('%'); round += 1) {
+    const next = current.replace(PERCENT_RUN, (run) => UTF8.decode(Uint8Array.from(run.slice(1).split('%'), (hex) => parseInt(hex, 16))));
+    if (next === current) break;
+    out.push(next);
+    current = next;
+  }
+  return out;
+}
+
 /**
  * #815 A review r4 — the class, not another spelling. Three rounds found a
  * tool-input-derived string that reached the card in a form no recogniser had
@@ -467,7 +493,12 @@ const nfkc = (text: string): string => text.normalize('NFKC');
  *   - each of those with every non-ASCII space removed as well, and that
  *     NFKC-normalised again (NBSP becomes a plain space under NFKC, so the
  *     strip runs on the written text first);
- *   - and every one of those with ALL whitespace removed (`tight`).
+ *   - and every one of those with ALL whitespace removed (`tight`);
+ *   - review r5 (B4): every view above `%XX`-decoded, round by round
+ *     (`percentDecodedReadings`), and each decoded text read again in all
+ *     of the readings above. This is the ONE decoder: `safeHost` reads a
+ *     percent-encoded host through it too, so the host and target paths
+ *     cannot drift apart.
  *
  * The redactor's named shapes read every view in every case (review B2),
  * the tight ones included. The named generic shapes (`namesSecret`) read
@@ -480,8 +511,8 @@ const nfkc = (text: string): string => text.normalize('NFKC');
  * Throws what the redactor throws; every caller withholds on a throw.
  *
  * Call sites: `safeTarget` (every target of every sentence: paths, hosts as
- * written, branches, remotes, ids), `safeHost` (a host the URL parser
- * rewrote, percent-decoded), `safeHostname` (the WHO line's box name: named
+ * written, branches, remotes, ids), `commandCarriesSplitCredential` (the
+ * whole command and its words joined, review r5), `safeHostname` (the WHO line's box name: named
  * shapes here, the entropy net per part), and `withholdSecretCardLine` (the
  * egress gate on every card line the webhook, and `boundedCard`, send off
  * the box).
@@ -489,10 +520,16 @@ const nfkc = (text: string): string => text.normalize('NFKC');
 export function credentialInAnyReading(text: string, opts: { heuristics?: boolean } = {}): boolean {
   const heuristics = opts.heuristics ?? true;
   const spaced = new Set<string>();
-  for (const base of [text, nfkc(text)]) {
+  const read = (base: string) => {
     const joined = base.replace(CARD_HIDDEN_ALL, '').replace(CARD_LINE_BREAKS_ALL, '');
     const unspaced = joined.replace(UNUSUAL_SPACE_ALL, '');
     for (const view of [base, joined, unspaced, nfkc(unspaced)]) spaced.add(view);
+  };
+  for (const base of [text, nfkc(text)]) read(base);
+  // Review r5 (B4): decoded after the hidden characters and the NFKC
+  // mapping are taken out, so `%4<U+200B>1` and a full-width `%` decode too.
+  for (const view of [...spaced]) {
+    for (const decoded of percentDecodedReadings(view)) for (const base of [decoded, nfkc(decoded)]) read(base);
   }
   for (const view of spaced) {
     if (heuristics ? vendorShapeInAnyCase(view) : namedShapeInAnyCase(view)) return true;
@@ -504,6 +541,55 @@ export function credentialInAnyReading(text: string, opts: { heuristics?: boolea
     if (!spaced.has(tight) && namedShapeInAnyCase(tight)) return true;
   }
   return false;
+}
+
+/**
+ * #815 A review r5 (B5): set by `describeShell`, for as long as it describes
+ * a command `commandCarriesSplitCredential` flags; `safeTarget` then withholds
+ * every target. Synchronous, and restored on the way out.
+ */
+let commandTargetsWithheld = false;
+
+/**
+ * #815 A review r5 (B5): a target read from this machine (a git config URL),
+ * not from the command, is checked as before even while the command's own
+ * targets are withheld.
+ */
+function notFromCommand<T>(read: () => T): T {
+  const outer = commandTargetsWithheld;
+  commandTargetsWithheld = false;
+  try {
+    return read();
+  } finally {
+    commandTargetsWithheld = outer;
+  }
+}
+
+/**
+ * #815 A review r5 (B5) — the whole command, before any operand is chosen.
+ * A card shows ONE operand of a command (the branch, the path), and that
+ * operand alone may be half of a key the shell split in two (`… origin
+ * <first 20> <rest>`): every recogniser passes it, and the card shows half
+ * the key. So the redactor's named shapes (`credentialInAnyReading`,
+ * heuristics off) read the WHOLE command as typed, and its words joined by a
+ * space (the tight reading joins them with nothing).
+ *
+ * A word that is credential-shaped on its own is withheld by `safeTarget`
+ * wherever it is shown, so it explains a hit by itself: those words are
+ * taken out, and the rest read again. Only a credential that still needs
+ * more than one word flags the command, and then every target the command
+ * supplies is withheld (`commandTargetsWithheld`) — not a partial. An
+ * ordinary word beside a whole key (`git push --force <key> main`) is still
+ * named. Throws what the redactor throws; the caller withholds on a throw.
+ */
+function commandCarriesSplitCredential(command: string, segments: readonly Segment[]): boolean {
+  const named = (text: string) => credentialInAnyReading(text, { heuristics: false });
+  const words = segments.flatMap((s) => [...s.words, ...s.reads, ...s.writes]);
+  if (!named(command) && !named(words.join(' '))) return false;
+  const whole = new Set(words.filter(named));
+  let residue = command;
+  for (const w of whole) residue = residue.split(w).join(' ');
+  return named(words.filter((w) => !whole.has(w)).join(' ')) || named(residue);
 }
 
 function middleClip(text: string, max: number): string {
@@ -523,8 +609,14 @@ function middleClip(text: string, max: number): string {
  * whole; a target is never partially masked, because a half-shown secret is
  * still a disclosure. The checks read the target as given: a caller that
  * shows a transformed form (case-folded, cut down) checks the original first.
+ *
+ * Review r5 (B5): while a command whose words together carry a credential is
+ * described (`commandTargetsWithheld`, set by `describeShell`), every target
+ * is withheld, before any of the checks below: one operand of a split key
+ * passes all of them, and is still half the key.
  */
 export function safeTarget(raw: unknown, maxLen = 60): string {
+  if (commandTargetsWithheld) return WITHHELD_SECRET;
   if (typeof raw !== 'string') return WITHHELD_SECRET;
   if (raw.length > MAX_TARGET_CHARS * 2) return WITHHELD_TOO_LONG;
   const text = raw.trim();
@@ -603,35 +695,21 @@ function hostOf(text: string): string | null {
  * case; for a URL, the parser's reading), and a transform can defeat a
  * recogniser — a lower-cased AWS key id matched nothing and reached the card,
  * where upper-casing gave it back. So the host is checked as WRITTEN first,
- * and a host the parser changed beyond case (percent-decoding, full-width or
- * ignored characters, IDNA) is withheld: the written text checked would not
- * be the text shown. Only then is the shown form checked (in every case) and
- * printed.
+ * in every reading of the parser's rewrites (percent-decoding, full-width or
+ * ignored characters). Only then is the shown form checked (in every case)
+ * and printed.
  */
 function safeHost(text: string): string | null {
   const parts = hostParts(text);
   if (!parts || !/^[a-z0-9.-]{1,253}$/.test(parts.host)) return null;
   if (/^[a-z][a-z0-9+.-]*:\/\/[^/\s@]+@/i.test(text) || /^[^@\s/]*:[^@\s/]*@/.test(text)) return WITHHELD_SECRET;
+  // #815 A review r4 (N4): a rewrite beyond case is not withheld blindly.
+  // `safeTarget` reads the written host in every reading the parser's
+  // mapping produces — NFKC, ignored characters removed and (review r5, B4)
+  // percent-decoded, by the one decoder every target uses. The shown host is
+  // then checked itself, in every case, below.
   const asWritten = safeTarget(parts.written, MAX_TARGET_CHARS);
   if (isWithheld(asWritten)) return asWritten;
-  if (parts.written.toLowerCase() !== parts.host) {
-    // #815 A review r4 (N4): a rewrite beyond case is no longer withheld
-    // blindly. `safeTarget` has read the written host in every reading the
-    // parser's mapping produces (NFKC, ignored characters removed); the
-    // parser also percent-decodes, so that reading is checked here. The
-    // shown host is then checked itself, in every case, below.
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(parts.written);
-    } catch {
-      return WITHHELD_UNUSUAL;
-    }
-    try {
-      if (credentialInAnyReading(decoded)) return WITHHELD_SECRET;
-    } catch {
-      return WITHHELD_SECRET;
-    }
-  }
   return safeTarget(parts.host);
 }
 
@@ -1835,7 +1913,7 @@ function gitRemoteHost(ctx: ShellContext, op: string, remoteArg: string | undefi
   const urls = remote.filter((e) => e.key === 'url').map((e) => e.value);
   const pushUrls = remote.filter((e) => e.key === 'pushurl').map((e) => e.value);
   const targets = op === 'push' ? (pushUrls.length > 0 ? pushUrls : urls) : urls.slice(0, 1);
-  const hosts = new Set(targets.map((u) => safeHost(u)));
+  const hosts = new Set(targets.map((u) => notFromCommand(() => safeHost(u))));
   if (hosts.size !== 1) return null;
   return [...hosts][0];
 }
@@ -2671,8 +2749,22 @@ function coversSignals(
  * pinned to that pipeline, and the step is chosen inside it. When nothing can
  * be pinned, the card says so instead of guessing. Last, every write to a
  * sensitive path must appear in the sentence, or it goes generic (R3).
+ *
+ * #815 A review r5 (B5): before any step is described, the whole command is
+ * read for a credential its words carry only together
+ * (`commandCarriesSplitCredential`); if one is found, every target the
+ * sentence would name is withheld.
  */
 export function describeShell(command: string, ctxIn: ShellContext): ActionDescription {
+  const outer = commandTargetsWithheld;
+  try {
+    return describeParsedShell(command, ctxIn);
+  } finally {
+    commandTargetsWithheld = outer;
+  }
+}
+
+function describeParsedShell(command: string, ctxIn: ShellContext): ActionDescription {
   const ctx: ShellContext = { ...ctxIn };
   const { segments, pipelines, truncated, doubts } = parseShell(command);
   const tooLong = truncated ? ` ${COMMAND_TOO_LONG}` : '';
@@ -2695,6 +2787,12 @@ export function describeShell(command: string, ctxIn: ShellContext): ActionDescr
   const outside = truncated || [...doubts].some((d) => OUTSIDE_UNDERSTOOD_SUBSET[d].effect === 'generic');
   if (GATE.enabled && outside) return generic();
   ctx.dropGitHost = doubts.has('git-repo-option');
+  // Review r5 (B5): the whole command, before any operand is chosen or cut.
+  try {
+    if (commandCarriesSplitCredential(command, segments)) commandTargetsWithheld = true;
+  } catch {
+    commandTargetsWithheld = true;
+  }
   const verdicts = new Map<string, readonly string[]>();
   const raises = (text: string, signal: string) => {
     if (!verdicts.has(text)) verdicts.set(text, guardOn(text).signals);
@@ -2756,7 +2854,8 @@ export function describeShell(command: string, ctxIn: ShellContext): ActionDescr
   // the WHAT goes generic rather than leave it out.
   const sensitiveWrites = steps.flatMap((s) => [...s.seg.writes, ...(writerOutputs(s.u.prog, s.u.args)?.outputs ?? [])]).filter(isSensitiveWrite);
   // A socket write is named by its host (`… to example.com`), never as a path.
-  const named = (w: string) => text.includes(quoted(w)) || text.includes(quoted(w, 40)) || (isSocketPath(w) && socketHost(w) !== null && text.includes(` to ${socketHost(w)}`));
+  // With every target withheld (review r5), no write can be shown named.
+  const named = (w: string) => !commandTargetsWithheld && (text.includes(quoted(w)) || text.includes(quoted(w, 40)) || (isSocketPath(w) && socketHost(w) !== null && text.includes(` to ${socketHost(w)}`)));
   if (GATE.enabled && sensitiveWrites.some((w) => !named(w))) {
     doubts.add('hidden-write');
     return generic();
