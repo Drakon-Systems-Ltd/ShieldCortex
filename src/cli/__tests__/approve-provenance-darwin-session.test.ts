@@ -20,12 +20,16 @@ import {
 interface FakeProc { ppid: number; tty: string; comm: string; stat: string }
 
 /** A fake `/bin/ps` that answers the two shapes the reader asks. */
-function fakePs(procs: Record<number, FakeProc>, opts: { failTty?: boolean } = {}): PsRunner & { calls: string[][] } {
+function fakePs(
+  procs: Record<number, FakeProc>,
+  opts: { failTty?: boolean; ttyOutput?: string } = {},
+): PsRunner & { calls: string[][] } {
   const calls: string[][] = [];
   const run = ((args: string[]) => {
     calls.push(args);
     if (args[0] === '-t') {
       if (opts.failTty) throw new Error('ps exited 1');
+      if (opts.ttyOutput !== undefined) return opts.ttyOutput; // raw table, as ps would print it
       const rows = Object.entries(procs).filter(([, p]) => p.tty === args[1]);
       if (rows.length === 0) throw new Error('ps exited 1'); // macOS ps exits 1 on no match
       return rows.map(([pid, p]) => `${pid} ${p.stat}`).join('\n') + '\n';
@@ -39,7 +43,7 @@ function fakePs(procs: Record<number, FakeProc>, opts: { failTty?: boolean } = {
   return run;
 }
 
-function verdict(procs: Record<number, FakeProc>, leaf: number, opts?: { failTty?: boolean }) {
+function verdict(procs: Record<number, FakeProc>, leaf: number, opts?: { failTty?: boolean; ttyOutput?: string }) {
   const ps = fakePs(procs, opts);
   const v = operatorProvenance({ pid: leaf, env: {}, platform: 'darwin', proc: makeDarwinProcReader(ps) });
   return { v, ps };
@@ -76,8 +80,75 @@ describe('darwinSessionLeaderFromPs', () => {
   it('two leaders on one tty is ambiguous → 0', () => {
     expect(darwinSessionLeaderFromPs('100 Ss\n200 Ss+\n')).toBe(0);
   });
-  it('ignores blank, header and malformed lines', () => {
-    expect(darwinSessionLeaderFromPs('\n  \nPID STAT\n300 Ss\ngarbage\n')).toBe(300);
+
+  // The evidence is exactly what `ps -t <tty> -o pid=,stat=` prints: one
+  // "<pid> <stat>" row per process and no header. Any other nonblank row
+  // means the table was not read whole, and a leader chosen from the rows
+  // that did parse is a leader chosen from partial evidence (#698). Only
+  // formatting — blank lines, padding, a CR — is ignored.
+  describe('malformed evidence rejects the whole lookup', () => {
+    it('a truncated second row (pid without STAT) could hide a second leader', () => {
+      expect(darwinSessionLeaderFromPs('300 Ss\n400\n')).toBe(0);
+    });
+    it('an extra column on a second leader row is not skipped over', () => {
+      expect(darwinSessionLeaderFromPs('300 Ss\n400 Ss extra\n')).toBe(0);
+    });
+    it('a STAT that merely contains "s" is not a session-leader mark', () => {
+      expect(darwinSessionLeaderFromPs('300 nonsense\n')).toBe(0);
+    });
+    it('a header row is foreign to pid=,stat= output and rejects', () => {
+      expect(darwinSessionLeaderFromPs('PID STAT\n300 Ss\n')).toBe(0);
+    });
+    it('an unparseable row rejects whether it comes before or after the leader', () => {
+      expect(darwinSessionLeaderFromPs('garbage\n300 Ss\n')).toBe(0);
+      expect(darwinSessionLeaderFromPs('300 Ss\ngarbage\n')).toBe(0);
+    });
+    it.each(['0 Ss\n', '-1 Ss\n', '12a Ss\n', '0300 Ss\n', '1.5 Ss\n', '1e3 Ss\n'])(
+      'invalid pid in %j rejects',
+      (rows) => {
+        expect(darwinSessionLeaderFromPs(rows)).toBe(0);
+      },
+    );
+    it.each(['300 ss\n', '300 s\n', '300 +s\n', '300 Q+\n', '300 S?\n', '300 Ss+s\n', '300 Sss\n', '300 S+s+\n', '300 sS\n'])(
+      'invalid STAT in %j rejects',
+      (rows) => {
+        expect(darwinSessionLeaderFromPs(rows)).toBe(0);
+      },
+    );
+    it('a malformed row rejects even when the parseable rows would refuse anyway', () => {
+      expect(darwinSessionLeaderFromPs('100 Ss\n200 Ss\n300\n')).toBe(0);
+    });
+    it('a malformed row rejects even with no leader among the parseable rows', () => {
+      expect(darwinSessionLeaderFromPs('100 S+\n200\n')).toBe(0);
+    });
+  });
+
+  describe('genuine Darwin forms are preserved', () => {
+    it('blank and whitespace-only lines, padding and CRLF are formatting, not evidence', () => {
+      expect(darwinSessionLeaderFromPs('\n  \n  300 Ss  \n\n')).toBe(300);
+      expect(darwinSessionLeaderFromPs('300 Ss\r\n301 S+\r\n')).toBe(300);
+      expect(darwinSessionLeaderFromPs('300 Ss')).toBe(300);
+    });
+    it.each(['Ss', 'Ss+', 'Is', 'Is+', 'Ss<', 'SsN', 'Ts', 'Us', 'Rs+', 'Ss+<', 'IsW', 'Zs'])(
+      'leader STAT %j is recognised',
+      (stat) => {
+        expect(darwinSessionLeaderFromPs(`300 ${stat}\n301 S+\n`)).toBe(300);
+      },
+    );
+    it.each(['S', 'S+', 'R+', 'I', 'T', 'U', 'Z', 'SN', 'S<', 'S>', 'SA', 'SE', 'SL', 'SV', 'SW', 'SX', 'R+<'])(
+      'non-leader STAT %j is valid and not a leader',
+      (stat) => {
+        expect(darwinSessionLeaderFromPs(`300 ${stat}\n`)).toBe(0);
+        expect(darwinSessionLeaderFromPs(`300 ${stat}\n301 Ss\n`)).toBe(301);
+      },
+    );
+    it('the uppercase S flag (FIFO page replacement) is not the lowercase leader mark', () => {
+      expect(darwinSessionLeaderFromPs('300 SS\n')).toBe(0);
+      expect(darwinSessionLeaderFromPs('300 SS\n301 Ss\n')).toBe(301);
+    });
+    it('a large but real pid is accepted', () => {
+      expect(darwinSessionLeaderFromPs('99998 Ss\n')).toBe(99998);
+    });
   });
 });
 
@@ -128,6 +199,16 @@ describe('macOS — discovery failures refuse', () => {
   it('two leaders on our tty refuses', () => {
     const procs = { ...SSH, 460: { ppid: 1, tty: 'ttys001', comm: 'zsh', stat: 'Ss' } };
     expect(verdict(procs, 450).v.reason).toBe('no-session-leader');
+  });
+  it('a tty table with a truncated row refuses instead of selecting from the rows that parsed (#698)', () => {
+    const { v } = verdict(SSH, 450, { ttyOutput: '401 Ss\n450\n' });
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('no-session-leader');
+  });
+  it('a tty table with a nonsense STAT refuses (#698)', () => {
+    const { v } = verdict(SSH, 450, { ttyOutput: '401 nonsense\n450 S+\n' });
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('no-session-leader');
   });
   it('our own process unreadable refuses', () => {
     const { v } = verdict(SSH, 9999);
