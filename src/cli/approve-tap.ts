@@ -25,7 +25,9 @@
  * secret's owner must be the bridge's uid.
  *
  * It refuses to start, with a plain-English reason, when not root, when
- * started under an inspector flag, or when the tap path cannot arm.
+ * started with any spelling of a Node inspector option (argv or NODE_OPTIONS,
+ * parsed as Node parses it), when an inspector is actually open in the
+ * process, or when the tap path cannot arm — all before the secret is read.
  */
 
 import { lstatSync, readFileSync } from 'node:fs';
@@ -71,11 +73,70 @@ function readConfigBlock(configPath: string): { approveTap: ApproveTapConfig; we
   };
 }
 
-/** Any way of starting Node that opens an inspector the agent could reach. */
+/**
+ * NODE_OPTIONS split the way Node itself splits it (ParseNodeOptionsEnvVar):
+ * a space separates options, a double-quoted run is part of one option,
+ * and inside quotes a backslash makes the next character literal. Null when
+ * a quote is left open (Node refuses to start on that; so do we).
+ */
+export function tokeniseNodeOptions(nodeOptions: string): string[] | null {
+  const out: string[] = [];
+  let cur = '';
+  let inString = false;
+  let started = false;
+  for (let i = 0; i < nodeOptions.length; i += 1) {
+    const c = nodeOptions[i];
+    if (c === '\\' && inString) {
+      if (i + 1 >= nodeOptions.length) return null;
+      cur += nodeOptions[i + 1];
+      i += 1;
+      started = true;
+    } else if (c === '"') {
+      inString = !inString;
+    } else if (c === ' ' && !inString) {
+      if (started) out.push(cur);
+      cur = '';
+      started = false;
+    } else {
+      cur += c;
+      started = true;
+    }
+  }
+  if (inString) return null;
+  if (started) out.push(cur);
+  return out;
+}
+
+/** True for any option Node would read as an inspector/debugger option:
+ *  `--inspect`, `--inspect-brk`, `--inspect-wait`, `--inspect-port`,
+ *  `--debug-port` and every other `--inspect*` / `--debug*` name, in either
+ *  spelling (Node treats `_` and `-` in option names alike). */
+function isInspectorOption(token: string): boolean {
+  if (!token.startsWith('--')) return false;
+  const name = token.slice(2).split('=')[0].replace(/_/g, '-');
+  return /^(?:inspect|debug)/.test(name);
+}
+
+/** Any way of starting Node that asks for an inspector the agent could reach. */
 export function inspectorRequested(execArgv: readonly string[], nodeOptions: string | undefined): boolean {
-  const flag = /^--(?:inspect|inspect-brk|inspect-port|inspect-wait|debug|debug-brk|debug-port)(?:=|$)/;
-  if (execArgv.some((a) => flag.test(a))) return true;
-  return (nodeOptions ?? '').split(/\s+/).some((a) => flag.test(a));
+  if (execArgv.some(isInspectorOption)) return true;
+  if (nodeOptions === undefined || nodeOptions === '') return false;
+  const tokens = tokeniseNodeOptions(nodeOptions);
+  return tokens === null || tokens.some(isInspectorOption);
+}
+
+/**
+ * Is an inspector actually open in THIS process right now? The ground truth
+ * whatever the spelling that opened it. Fails closed: if the inspector
+ * module cannot be loaded on a Node that has one, the answer is "open".
+ */
+export async function inspectorActive(): Promise<boolean> {
+  try {
+    const inspector = await import('node:inspector');
+    return inspector.url() !== undefined;
+  } catch {
+    return (process as { features?: { inspector?: boolean } }).features?.inspector !== false;
+  }
 }
 
 export interface TapChildRun {
@@ -121,6 +182,8 @@ export interface ApproveTapCommandDeps {
   geteuid?: () => number | null;
   execArgv?: readonly string[];
   nodeOptions?: string;
+  /** Test seam: is an inspector open in this process? Default: `inspectorActive`. */
+  inspectorActive?: () => boolean | Promise<boolean>;
   /** lstat of `<home>/.shieldcortex`. */
   lstatHome?: (p: string) => { uid: number; gid: number; isDirectory: boolean; isSymbolicLink: boolean };
   /** Arming / loading seams (tests run as one user). */
@@ -199,8 +262,13 @@ export async function runApproveTapCommand(argv: string[], deps: ApproveTapComma
       + 'signal or debug, and runs each grant as the agent\'s user.');
     return 1;
   }
+  // Both checks come BEFORE the secret is opened.
   if (inspectorRequested(deps.execArgv ?? process.execArgv, deps.nodeOptions ?? process.env.NODE_OPTIONS)) {
     err('Refusing to hold the approve secret in a process started with a Node inspector flag.');
+    return 1;
+  }
+  if (await (deps.inspectorActive ?? inspectorActive)()) {
+    err('Refusing to hold the approve secret: a Node inspector is open in this process.');
     return 1;
   }
 

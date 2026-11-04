@@ -15,7 +15,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { computeTapHmac, loadApproveTapSecret, mintApproveTapNonce, normaliseApproveTapConfig } from '../approve-tap.js';
-import { canonicaliseCwd, getRetryRow, hashToolCall, recordDenialFingerprint } from '../retry-control.js';
+import { canonicaliseCwd, exactCallDigest, getRetryRow, hashToolCall, recordDenialFingerprint } from '../retry-control.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const DIST_TAP = join(repoRoot, 'dist', 'defence', 'iron-dome', 'approve-tap.js');
@@ -23,6 +23,7 @@ const MY_UID = process.geteuid!();
 const OTHER_UID = MY_UID + 1 === 0 ? MY_UID + 2 : MY_UID + 1;
 const ACTION = 'act-00112233aabbccdd';
 const HASH = hashToolCall('Bash', { command: 'curl -sS https://api.example.com/v1/report' });
+const EXACT = exactCallDigest('Bash', { command: 'curl -sS https://api.example.com/v1/report' });
 
 const CHILD = `
 const [modUrl, payload] = process.argv.slice(1);
@@ -78,7 +79,7 @@ describe('#815 B — concurrent double submit across processes', () => {
     const config = normaliseApproveTapConfig(rawConfig);
     const loaded = loadApproveTapSecret(config, { agentUid: OTHER_UID });
     if (!loaded.ok) throw new Error(loaded.reason);
-    expect(recordDenialFingerprint({ hash: HASH, tool: 'Bash', actionId: ACTION, signals: ['network-egress'], cwd }, { home }).ok).toBe(true);
+    expect(recordDenialFingerprint({ hash: HASH, tool: 'Bash', actionId: ACTION, signals: ['external-egress'], cwd, exactDigest: EXACT }, { home }).ok).toBe(true);
     const m = mintApproveTapNonce({ actionId: ACTION }, { home, config, agentUid: OTHER_UID });
     if (!m.ok) throw new Error(m.reason);
     const fields = { actionId: ACTION, argsHash: m.argsHash, nonce: m.nonce, exp: m.exp, approver: 'telegram:42' };

@@ -147,6 +147,58 @@ export function hashToolCall(tool: string, input: unknown): string {
   return createHash('sha256').update(canonical).digest('hex');
 }
 
+/** Version of `exactCallDigest`'s form. A digest recorded under another
+ *  version never matches; bump it whenever the form below changes. */
+export const EXACT_CALL_DIGEST_VERSION = 1;
+const EXACT_CALL_DIGEST_DOMAIN = 'shieldcortex-exact-call/v1';
+
+/**
+ * Reviewed exclusions for the exact digest: `description` only, and only
+ * where `hashToolCall` already treats it as advisory (exec tools and the
+ * reviewed command surfaces). It is prose shown to the user; it never reaches
+ * what runs. (`timeout` is NOT excluded here: it changes how long the action
+ * may run.)
+ */
+const EXACT_DIGEST_ADVISORY_KEYS = new Set(['description']);
+
+function projectForExactDigest(tool: string, input: unknown): unknown {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const record = input as Record<string, unknown>;
+  if (classifyFamily(tool) !== 'exec' && !hasReviewedCommandSurface(tool, record)) return input;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(record)) {
+    if (!EXACT_DIGEST_ADVISORY_KEYS.has(key)) out[key] = record[key];
+  }
+  return out;
+}
+
+/** Sorted keys (key order carries no meaning in a JSON tool input); every
+ *  string, number and the tool name taken exactly as given. */
+function canonicaliseExact(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicaliseExact);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      out[key] = canonicaliseExact((value as Record<string, unknown>)[key]);
+    }
+    return out;
+  }
+  return value ?? null;
+}
+
+/**
+ * Exact, versioned digest of a tool call (#815 B). Unlike `hashToolCall`,
+ * which is deliberately tolerant so that one approval survives cosmetic
+ * re-spellings, this binds every byte of every execution-relevant field:
+ * any change to the tool name, a path, a payload or the command text gives a
+ * different digest. Used where a binding must hold exactly — the one-tap
+ * approve grant. The only exclusion is `EXACT_DIGEST_ADVISORY_KEYS`.
+ */
+export function exactCallDigest(tool: string, input: unknown): string {
+  const canonical = JSON.stringify([tool, canonicaliseExact(projectForExactDigest(tool, input))]);
+  return createHash('sha256').update(`${EXACT_CALL_DIGEST_DOMAIN}\n${canonical}`, 'utf8').digest('hex');
+}
+
 function canonicalise(value: unknown): unknown {
   if (typeof value === 'string') return value.replace(/\s+/g, ' ').trim();
   if (Array.isArray(value)) return value.map(canonicalise);

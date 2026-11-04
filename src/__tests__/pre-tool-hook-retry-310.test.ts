@@ -26,7 +26,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { grantRetry } from '../defence/iron-dome/retry-control.js';
+import { exactCallDigest, grantRetry } from '../defence/iron-dome/retry-control.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(repoRoot, 'scripts', 'pre-tool-hook.mjs');
@@ -49,7 +49,8 @@ interface RetryStore {
     originScope: { cwd?: string; sessionKey?: string };
     suppression?: { until: number };
     claim?: { nonceHmac: string; epoch: number };
-    grant?: { approvedAt: number; ttlMs: number; consumedAt?: number; origin: { cwd?: string; tool: string } };
+    grant?: { approvedAt: number; ttlMs: number; consumedAt?: number; via?: string; origin: { cwd?: string; tool: string } };
+    exactDigest?: string;
   }>;
   budget: { windowStartMs: number; cards: number; lostActionIds: string[] } | null;
 }
@@ -277,6 +278,29 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     expect(runHook(IRREVERSIBLE).decision).toBe('deny');
   });
 
+  it('#815 B a tap grant is spent by the hook only for the exact call it was granted for', () => {
+    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl() } });
+    expect(runHook(IRREVERSIBLE).decision).toBe('deny');
+    const row = store()!.rows[0];
+    // The hook records the exact digest of the denied call.
+    expect(row.exactDigest).toBe(exactCallDigest('Bash', IRREVERSIBLE));
+    const granted = grantRetry(
+      { id: row.id },
+      { tap: { approver: 'telegram:42', exactDigest: row.exactDigest!, epoch: row.denyEpoch } },
+      { home },
+    );
+    expect(granted).toMatchObject({ ok: true });
+
+    // A different spelling of the command does not spend it…
+    expect(runHook({ command: 'sudo  modprobe softdog' }).decision).toBe('deny');
+    expect(store()!.rows.find((r) => r.id === row.id)?.grant?.consumedAt).toBeUndefined();
+    // …the exact call does, once.
+    const retried = runHook(IRREVERSIBLE);
+    expect(retried.decision).toBeUndefined();
+    expect(retried.stderr).toContain('consumed operator RETRY grant');
+    expect(runHook(IRREVERSIBLE).decision).toBe('deny');
+  });
+
   // ── Fingerprint, and only a fingerprint ────────────────────────────────
 
   it('a denial mints a FINGERPRINT and nothing spendable', () => {
@@ -485,11 +509,14 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     const hmac = row.claim!.nonceHmac;
     expect(hmac).toMatch(/^[0-9a-f]{64}$/);
     // The ONLY 64-hex values on disk are the call hash (which is not spendable
-    // — #118 has always printed it) and the nonce HMAC. No raw nonce, and no
-    // second secret hiding beside it.
+    // — #118 has always printed it), the exact call digest (#815 B; a digest
+    // of the same call, equally unspendable) and the nonce HMAC. No raw
+    // nonce, and no second secret hiding beside it.
     const hexes = new Set((onDisk.match(/[0-9a-f]{64}/g) ?? []));
     hexes.delete(hmac);
     hexes.delete(row.hash);
+    expect(row.exactDigest).toMatch(/^[0-9a-f]{64}$/);
+    hexes.delete(row.exactDigest!);
     expect([...hexes]).toHaveLength(0);
     // And no spendable token in the alert or the forensics rows.
     expect(JSON.stringify(evidence())).not.toContain(hmac);

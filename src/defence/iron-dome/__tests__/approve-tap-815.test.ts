@@ -19,6 +19,7 @@ import {
   approveTapDoctorRow,
   approveTapNoncePath,
   canonicalTapMessage,
+  describeTapArmingFailure,
   checkApproveTapArming,
   computeTapHmac,
   createApproveTapHandler,
@@ -26,6 +27,7 @@ import {
   loadApproveTapSecret,
   mintApproveTapNonce,
   normaliseApproveTapConfig,
+  TAP_ELIGIBLE_SIGNALS,
   tapTerminalOnlyReason,
   verifyApproveTap,
   type ApproveTapConfig,
@@ -35,6 +37,7 @@ import {
 import {
   canonicaliseCwd,
   consumeRetryGrant,
+  exactCallDigest,
   getRetryRow,
   grantRetry,
   hashToolCall,
@@ -55,6 +58,7 @@ const SECRET = 'a1'.repeat(32);
 const WEBHOOK_SECRET = 'w3bh00k-secret-'.repeat(4);
 const CMD = { command: 'curl -sS https://api.example.com/v1/report' };
 const HASH = hashToolCall('Bash', CMD);
+const EXACT = exactCallDigest('Bash', CMD);
 
 let home: string;
 let cwd: string;
@@ -64,13 +68,16 @@ let config: ApproveTapConfig;
 let key: Buffer;
 let base: number;
 
-function seedDenial(opts: { actionId?: string; signals?: string[]; hash?: string; now?: number } = {}): void {
+function seedDenial(
+  opts: { actionId?: string; signals?: string[]; hash?: string; exactDigest?: string | null; now?: number } = {},
+): void {
   const res = recordDenialFingerprint(
     {
       hash: opts.hash ?? HASH,
       tool: 'Bash',
       actionId: opts.actionId ?? ACTION,
-      signals: opts.signals ?? ['network-egress'],
+      ...(opts.exactDigest === null ? {} : { exactDigest: opts.exactDigest ?? EXACT }),
+      signals: opts.signals ?? ['external-egress'],
       redactedSurface: 'curl -sS https://api.example.com/…',
       cwd,
     },
@@ -149,7 +156,7 @@ describe('#815 B — the canonical MAC form', () => {
 describe('#815 B — happy path', () => {
   it('writes the #310 retry grant with approver=telegram:<uid>, and the retry consumes it', () => {
     const m = mintOk();
-    expect(m.argsHash).toBe(HASH);
+    expect(m.argsHash).toBe(EXACT);
     expect(m.exp - m.mintedAt).toBeLessThanOrEqual(APPROVE_TAP_MAX_NONCE_LIFETIME_MS);
     expect(m.nonce).toMatch(/^[0-9a-f]{32}$/);
 
@@ -164,16 +171,16 @@ describe('#815 B — happy path', () => {
     expect(row?.grant).toMatchObject({ via: 'tap', approver: APPROVER, epoch: row?.denyEpoch });
 
     // The retry (same exact call, same directory) spends it — once.
-    const spent = consumeRetryGrant({ hash: HASH, origin: { cwd, tool: 'Bash' } }, { home, now: base + 2_000 });
+    const spent = consumeRetryGrant({ hash: HASH, exactDigest: EXACT, origin: { cwd, tool: 'Bash' } }, { home, now: base + 2_000 });
     expect(spent).toMatchObject({ via: 'tap', approver: APPROVER });
-    expect(consumeRetryGrant({ hash: HASH, origin: { cwd, tool: 'Bash' } }, { home, now: base + 3_000 })).toBeNull();
+    expect(consumeRetryGrant({ hash: HASH, exactDigest: EXACT, origin: { cwd, tool: 'Bash' } }, { home, now: base + 3_000 })).toBeNull();
   });
 
   it('a different directory or a different command cannot spend a tap grant', () => {
     const m = mintOk();
     expect(verify(tapFor(m)).ok).toBe(true);
-    expect(consumeRetryGrant({ hash: HASH, origin: { cwd: tmpdir(), tool: 'Bash' } }, { home, now: base + 2_000 })).toBeNull();
-    expect(consumeRetryGrant({ hash: hashToolCall('Bash', { command: 'id' }), origin: { cwd, tool: 'Bash' } }, { home, now: base + 2_000 })).toBeNull();
+    expect(consumeRetryGrant({ hash: HASH, exactDigest: EXACT, origin: { cwd: tmpdir(), tool: 'Bash' } }, { home, now: base + 2_000 })).toBeNull();
+    expect(consumeRetryGrant({ hash: hashToolCall('Bash', { command: 'id' }), exactDigest: exactCallDigest('Bash', { command: 'id' }), origin: { cwd, tool: 'Bash' } }, { home, now: base + 2_000 })).toBeNull();
   });
 });
 
@@ -254,7 +261,7 @@ describe('#815 B — refusals write nothing', () => {
     // No nonce can be minted for an action that is not on file.
     expect(mint(base, undefined, OTHER_ACTION)).toMatchObject({ ok: false, reason: 'not-found' });
     // A nonce nobody minted.
-    expectRefusedUnchanged(tapFor({ nonce: 'f'.repeat(32), exp: m.exp, argsHash: HASH }), 'unknown-nonce');
+    expectRefusedUnchanged(tapFor({ nonce: 'f'.repeat(32), exp: m.exp, argsHash: EXACT }), 'unknown-nonce');
   });
 
   it('a denial that left the store after the nonce was minted', () => {
@@ -274,7 +281,7 @@ describe('#815 B — refusals write nothing', () => {
   ])('a %s action (%s) gets no nonce, and a nonce minted before it became one is refused', (_tier, signal) => {
     const m = mintOk();
     // The denial is re-recorded with a terminal-only signal (a remint).
-    seedDenial({ signals: ['network-egress', signal], now: base + 100 });
+    seedDenial({ signals: ['external-egress', signal], now: base + 100 });
     expect(mint(base + 200)).toMatchObject({ ok: false, reason: 'terminal-only' });
     expectRefusedUnchanged(tapFor(m), 'terminal-only');
   });
@@ -305,12 +312,12 @@ describe('#815 B — refusals write nothing', () => {
 
   it('every self-protection and catastrophic signal is terminal-only; unknown or cut lists fail closed', () => {
     for (const s of GUARD_SELF_PROTECTION_SIGNALS) expect(tapTerminalOnlyReason([s])).toBe('self-protection-floor');
-    for (const s of CATASTROPHIC_SIGNALS) expect(tapTerminalOnlyReason(['network-egress', s])).toBe('catastrophic');
+    for (const s of CATASTROPHIC_SIGNALS) expect(tapTerminalOnlyReason(['external-egress', s])).toBe('catastrophic');
     expect(tapTerminalOnlyReason(['redacted-signal'])).toBe('unknown-signal');
     expect(tapTerminalOnlyReason([])).toBe('signals-incomplete');
     expect(tapTerminalOnlyReason(Array.from({ length: 8 }, (_, i) => `sig-${i}`))).toBe('signals-incomplete');
     expect(tapTerminalOnlyReason(['fallback-scan'])).toBe('unscanned');
-    expect(tapTerminalOnlyReason(['network-egress'])).toBeNull();
+    expect(tapTerminalOnlyReason(['external-egress'])).toBeNull();
   });
 });
 
@@ -320,7 +327,7 @@ describe('#815 B — single use', () => {
     const tap = tapFor(m);
     expect(verify(tap).ok).toBe(true);
     expect(verify(tap)).toMatchObject({ ok: false, reason: 'nonce-used' });
-    consumeRetryGrant({ hash: HASH, origin: { cwd, tool: 'Bash' } }, { home, now: base + 2_000 });
+    consumeRetryGrant({ hash: HASH, exactDigest: EXACT, origin: { cwd, tool: 'Bash' } }, { home, now: base + 2_000 });
     expect(verify(tap, base + 3_000)).toMatchObject({ ok: false, reason: 'nonce-used' });
     expect(getRetryRow({ actionId: ACTION }, { home })?.grant?.consumedAt).toBeDefined();
   });
@@ -400,10 +407,10 @@ describe('#815 B — single use', () => {
 describe('#815 B — grantRetry tap auth is exclusive', () => {
   it('a tap never carries a widener, never pairs with a card nonce, and must name the exact hash and epoch', () => {
     const row = getRetryRow({ actionId: ACTION }, { home })!;
-    const tap = { approver: APPROVER, hash: HASH, epoch: row.denyEpoch };
+    const tap = { approver: APPROVER, exactDigest: EXACT, epoch: row.denyEpoch };
     expect(grantRetry({ id: row.id }, { tap, nonce: 'x'.repeat(64) }, { home, now: base })).toMatchObject({ ok: false, reason: 'not-authenticated' });
     expect(grantRetry({ id: row.id }, { tap: { ...tap, approver: 'mallory' } }, { home, now: base })).toMatchObject({ ok: false, reason: 'not-authenticated' });
-    expect(grantRetry({ id: row.id }, { tap: { ...tap, hash: hashToolCall('Bash', { command: 'id' }) } }, { home, now: base })).toMatchObject({ ok: false, reason: 'hash-mismatch' });
+    expect(grantRetry({ id: row.id }, { tap: { ...tap, exactDigest: exactCallDigest('Bash', { command: 'id' }) } }, { home, now: base })).toMatchObject({ ok: false, reason: 'hash-mismatch' });
     expect(grantRetry({ id: row.id }, { tap: { ...tap, epoch: row.denyEpoch + 1 } }, { home, now: base })).toMatchObject({ ok: false, reason: 'epoch-stale' });
     const ok = grantRetry({ id: row.id }, { tap, isInteractive: true, anyOrigin: true, overrideDeny: true }, { home, now: base });
     expect(ok.ok).toBe(true);
@@ -605,5 +612,148 @@ describe('#815 B — doctor line', () => {
     expect(warn?.fix).toMatch(/shieldcortex protect/);
     const info = approveTapDoctorRow({ enabled: true, secretPath, approverTelegramUid: APPROVER_UID }, { agentUid: OTHER_UID });
     expect(info?.status).toBe('info');
+  });
+});
+
+describe('#815 B — tap grants bind an exact versioned call digest', () => {
+  /** Pairs of calls that differ only inside a quoted payload, a path, or the
+   *  command text. Each pair shares one retry row (the row is looked up by
+   *  the second call's own hash), so only the exact digest tells them apart. */
+  const PAIRS: Array<[string, string, Record<string, unknown>, Record<string, unknown>]> = [
+    ['payload whitespace', 'Bash',
+      { command: "curl -sS --data 'ok value' https://api.example.com/v1/report" },
+      { command: "curl -sS --data 'ok\nvalue' https://api.example.com/v1/report" }],
+    ['payload spacing', 'Bash',
+      { command: "curl -sS --data 'a b' https://api.example.com/v1/report" },
+      { command: "curl -sS --data 'a   b' https://api.example.com/v1/report" }],
+    ['path', 'Write', { file_path: '/tmp/sc tap/report.txt', content: 'x' }, { file_path: '/tmp/sc  tap/report.txt', content: 'x' }],
+    ['command text', 'Bash', { command: 'git push origin main' }, { command: 'git push origin\tmain' }],
+  ];
+
+  it.each(PAIRS)('%s: distinct digests, and a tap grant for one is never spent by the other', (_label, tool, a, b) => {
+    expect(exactCallDigest(tool, a)).not.toBe(exactCallDigest(tool, b));
+    expect(exactCallDigest(tool, a)).toBe(exactCallDigest(tool, JSON.parse(JSON.stringify(a))));
+    // Seed the denial of `a`, tap it, then present `b` (with b's own hash).
+    // Newer than the beforeEach denial, so the shared alias resolves to it.
+    seedDenial({ hash: hashToolCall(tool, a), exactDigest: exactCallDigest(tool, a), now: base + 50 });
+    const m = mintOk();
+    expect(m.argsHash).toBe(exactCallDigest(tool, a));
+    const tapped = verify(tapFor(m));
+    expect(tapped.ok).toBe(true);
+    const origin = { cwd, tool: 'Bash' };
+    expect(consumeRetryGrant({ hash: hashToolCall(tool, b), exactDigest: exactCallDigest(tool, b), origin }, { home, now: base + 2_000 })).toBeNull();
+    expect(consumeRetryGrant({ hash: hashToolCall(tool, a), exactDigest: exactCallDigest(tool, a), origin }, { home, now: base + 2_100 }))
+      .toMatchObject({ via: 'tap', exactDigest: exactCallDigest(tool, a) });
+  });
+
+  it('only `description` is excluded, and only on exec tools; the tool name and every other field count', () => {
+    const cmd = { command: 'curl -sS https://api.example.com/v1/report' };
+    expect(exactCallDigest('Bash', { ...cmd, description: 'one' })).toBe(exactCallDigest('Bash', { ...cmd, description: 'two' }));
+    expect(exactCallDigest('Bash', { ...cmd, timeout: 1000 })).not.toBe(exactCallDigest('Bash', { ...cmd, timeout: 2000 }));
+    expect(exactCallDigest('Bash', cmd)).not.toBe(exactCallDigest('bash', cmd));
+    expect(exactCallDigest('Write', { file_path: '/tmp/x', content: 'a', description: 'one' }))
+      .not.toBe(exactCallDigest('Write', { file_path: '/tmp/x', content: 'a', description: 'two' }));
+  });
+
+  it('the tolerant hash alone never spends a tap grant, and a grant without a current-version digest is never spent', () => {
+    const m = mintOk();
+    expect(verify(tapFor(m)).ok).toBe(true);
+    const origin = { cwd, tool: 'Bash' };
+    expect(consumeRetryGrant({ hash: HASH, origin }, { home, now: base + 2_000 })).toBeNull();
+    // Rewrite the stored grant as an older/other version, as a same-UID writer could.
+    const raw = JSON.parse(readFileSync(retryControlPath(home), 'utf8'));
+    delete raw.fence;
+    raw.rows[0].grant.exactDigestVersion = 0;
+    writeFileSync(retryControlPath(home), JSON.stringify(raw), { mode: 0o600 });
+    expect(consumeRetryGrant({ hash: HASH, exactDigest: EXACT, origin }, { home, now: base + 2_000 })).toBeNull();
+  });
+
+  it('a denial recorded without the exact digest (or under another version) cannot be tapped — no fallback', () => {
+    const m = mintOk();
+    // A remint that carries no digest clears it: the outstanding button is refused.
+    seedDenial({ exactDigest: null, now: base + 100 });
+    expect(getRetryRow({ actionId: ACTION }, { home })?.exactDigest).toBeUndefined();
+    const before = snapshot();
+    expect(verify(tapFor(m))).toMatchObject({ ok: false, reason: 'args-mismatch' });
+    expect(snapshot()).toEqual(before);
+    expect(mint(base + 200)).toMatchObject({ ok: false, reason: 'unbound' });
+    // The grant store refuses it on its own too.
+    const row = getRetryRow({ actionId: ACTION }, { home })!;
+    expect(grantRetry({ id: row.id }, { tap: { approver: APPROVER, exactDigest: EXACT, epoch: row.denyEpoch } }, { home, now: base + 300 }))
+      .toMatchObject({ ok: false, reason: 'hash-mismatch' });
+    // A digest of another version is not this version's digest.
+    seedDenial({ now: base + 400 });
+    const raw = JSON.parse(readFileSync(retryControlPath(home), 'utf8'));
+    delete raw.fence;
+    raw.rows[0].exactDigestVersion = 2;
+    writeFileSync(retryControlPath(home), JSON.stringify(raw), { mode: 0o600 });
+    expect(mint(base + 500)).toMatchObject({ ok: false, reason: 'unbound' });
+  });
+
+  it('a remint for a different exact call under the same row refuses the button minted for the first', () => {
+    const other = { command: 'curl -sS  https://api.example.com/v1/report' };
+    const m = mintOk();
+    seedDenial({ hash: HASH, exactDigest: exactCallDigest('Bash', other), now: base + 100 });
+    expect(verify(tapFor(m))).toMatchObject({ ok: false, reason: 'args-mismatch' });
+    expect(getRetryRow({ actionId: ACTION }, { home })?.grant).toBeUndefined();
+  });
+});
+
+describe('#815 B — terminal-only is enforced inside the grant transaction', () => {
+  it.each([
+    ['self-protection-floor', 'touch-approval-store'],
+    ['catastrophic', 'recursive-force-delete'],
+    ['unknown', 'future-signal'],
+  ])('grantRetry refuses a tap when the CURRENT row is %s (%s), even with the right digest and epoch', (_tier, signal) => {
+    const row0 = getRetryRow({ actionId: ACTION }, { home })!;
+    // The remint the tap path's preview could not see: same hash, identity and epoch.
+    seedDenial({ signals: ['external-egress', signal], now: base + 100 });
+    const row = getRetryRow({ actionId: ACTION }, { home })!;
+    expect(row.denyEpoch).toBe(row0.denyEpoch);
+    const before = snapshot();
+    expect(grantRetry({ id: row.id }, { tap: { approver: APPROVER, exactDigest: EXACT, epoch: row.denyEpoch } }, { home, now: base + 200 }))
+      .toMatchObject({ ok: false, reason: 'terminal-only' });
+    expect(snapshot()).toEqual(before);
+    expect(getRetryRow({ actionId: ACTION }, { home })?.grant).toBeUndefined();
+    // The terminal keeps its own authority over the same row.
+    expect(grantRetry({ id: row.id }, { isInteractive: true }, { home, now: base + 300 }).ok).toBe(true);
+  });
+});
+
+describe('#815 B — the tap-eligible registry', () => {
+  it('a well-formed name nobody reviewed is refused; opaque and fetched-code signals are terminal-only', () => {
+    expect(tapTerminalOnlyReason(['future-catastrophic'])).toBe('unknown-signal');
+    expect(tapTerminalOnlyReason(['external-egress', 'brand-new-signal'])).toBe('unknown-signal');
+    expect(tapTerminalOnlyReason(['network-egress'])).toBe('unknown-signal');
+    expect(tapTerminalOnlyReason(['opaque-script-invocation'])).toBe('unscanned');
+    expect(tapTerminalOnlyReason(['opaque-command-substitution'])).toBe('unscanned');
+    for (const s of ['pipe-download-to-shell', 'pipe-download-stdin-exec', 'pipe-download-module-exec', 'decode-pipe-to-shell', 'openclaw-process-mutate']) {
+      expect(tapTerminalOnlyReason([s])).not.toBeNull();
+    }
+    // A real unknown name on a real denial: no button.
+    seedDenial({ signals: ['external-egress', 'future-catastrophic'], now: base + 100 });
+    expect(mint(base + 200)).toMatchObject({ ok: false, reason: 'terminal-only', terminalOnly: 'unknown-signal' });
+  });
+
+  it('every registry entry is tappable alone and is in neither terminal-only tier', () => {
+    for (const s of TAP_ELIGIBLE_SIGNALS) {
+      expect({ s, catastrophic: CATASTROPHIC_SIGNALS.includes(s), floor: GUARD_SELF_PROTECTION_SIGNALS.includes(s), reason: tapTerminalOnlyReason([s]) })
+        .toEqual({ s, catastrophic: false, floor: false, reason: null });
+    }
+  });
+
+  it('a real require_approval verdict from the evaluator carries only registry signals and can be tapped', () => {
+    const v = evaluateToolCall('Bash', { command: "curl -sS --data 'ok value' https://api.example.com/v1/report" });
+    expect(v.decision).toBe('require_approval');
+    expect(tapTerminalOnlyReason(v.signals)).toBeNull();
+  });
+});
+
+describe('#815 B — operator copy', () => {
+  it('the unreadable-secret message describes the root key-holder and the keyless child', () => {
+    const text = describeTapArmingFailure('secret-unreadable', { path: '/x' });
+    expect(text).toMatch(/root/);
+    expect(text).toMatch(/keyless child/);
+    expect(text).not.toMatch(/drops to/);
   });
 });

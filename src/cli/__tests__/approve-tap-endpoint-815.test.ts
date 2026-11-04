@@ -13,15 +13,16 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import type { Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { inspectorRequested, runApproveTapCommand, spawnTapChild, type TapChildRun } from '../approve-tap.js';
+import { inspectorRequested, runApproveTapCommand, spawnTapChild, tokeniseNodeOptions, type TapChildRun } from '../approve-tap.js';
 import { computeTapHmac, mintApproveTapNonce, normaliseApproveTapConfig } from '../../defence/iron-dome/approve-tap.js';
 import { runTapChild } from '../../defence/iron-dome/approve-tap-child.js';
-import { canonicaliseCwd, getRetryRow, hashToolCall, recordDenialFingerprint } from '../../defence/iron-dome/retry-control.js';
+import { canonicaliseCwd, exactCallDigest, getRetryRow, hashToolCall, recordDenialFingerprint } from '../../defence/iron-dome/retry-control.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const DIST_CHILD = join(repoRoot, 'dist', 'defence', 'iron-dome', 'approve-tap-child.js');
+const DIST_CLI = join(repoRoot, 'dist', 'cli', 'approve-tap.js');
 const MY_UID = process.geteuid!();
 const MY_GID = process.getegid!();
 const AGENT = 41001;
@@ -29,6 +30,7 @@ const BRIDGE = 41002;
 const ACTION = 'act-aaaabbbbccccdddd';
 const SECRET = 'd4'.repeat(32);
 const HASH = hashToolCall('Bash', { command: 'curl -sS https://api.example.com/v1/report' });
+const EXACT = exactCallDigest('Bash', { command: 'curl -sS https://api.example.com/v1/report' });
 
 let home: string;
 let cwd: string;
@@ -94,6 +96,87 @@ describe('#815 B — endpoint start-up refusals', () => {
     expect(inspectorRequested(['--inspect-port=9229'], undefined)).toBe(true);
   });
 
+  it('reads inspector options the way Node does: quoted NODE_OPTIONS, `_` spellings, every inspect/debug name', () => {
+    expect(tokeniseNodeOptions('--a "--inspect=127.0.0.1:0" "--title=a b" x\\y')).toEqual(['--a', '--inspect=127.0.0.1:0', '--title=a b', 'x\\y']);
+    expect(tokeniseNodeOptions('"--ti\\"tle"')).toEqual(['--ti"tle']);
+    expect(tokeniseNodeOptions('"--inspect')).toBeNull();
+    for (const nodeOptions of [
+      '"--inspect=127.0.0.1:0"', '--max-old-space-size=99 "--inspect-brk"', '--inspect_brk=0', '--inspect_port=0',
+      '--debug_port=9229', '--debug-port=9229', '--inspect-wait', '"--insp"ect', '"--unterminated',
+    ]) {
+      expect({ nodeOptions, refused: inspectorRequested([], nodeOptions) }).toEqual({ nodeOptions, refused: true });
+    }
+    for (const execArgv of [['--inspect_brk=0'], ['--inspect_port=0'], ['--inspect-publish-uid=http'], ['--debug-port=1']]) {
+      expect(inspectorRequested(execArgv, '')).toBe(true);
+    }
+    expect(inspectorRequested(['--disable-sigusr1'], '--max-old-space-size=99 "--title=inspect me"')).toBe(false);
+  });
+
+  it('an inspector already open in the process is refused before the secret is opened', async () => {
+    let opened = 0;
+    const errors: string[] = [];
+    const out = await runApproveTapCommand(ARGS(), {
+      log: () => {}, error: (m) => errors.push(m), geteuid: () => 0, execArgv: [], nodeOptions: '',
+      inspectorActive: () => true,
+      lstatHome: asAgentHome, armingLstat: bridgeStat,
+      openSecret: () => { opened += 1; return bridgeOpen(); },
+      listen: async () => {},
+    });
+    expect(out).toBe(1);
+    expect(opened).toBe(0);
+    expect(errors.join('\n')).toMatch(/inspector is open/);
+  });
+
+  // Real Node processes, so Node's own option parser and inspector decide
+  // what is active; the root start and the users are injected as above.
+  const INSPECTOR_CHILD = `
+const [cliUrl, home, openAtRuntime] = process.argv.slice(1);
+const inspector = await import('node:inspector');
+if (openAtRuntime === '1') inspector.open(0, '127.0.0.1');
+const active = inspector.url() !== undefined;
+const mod = await import(cliUrl);
+let opened = 0;
+const errors = [];
+const code = await mod.runApproveTapCommand(['--home', home, '--agent-uid', '41001', '--bridge-uid', '41002'], {
+  geteuid: () => 0,
+  ...(openAtRuntime === '1' ? { execArgv: [], nodeOptions: '' } : {}),
+  lstatHome: () => ({ uid: 41001, gid: 5000, isDirectory: true, isSymbolicLink: false }),
+  armingLstat: () => ({ uid: 41002, mode: 0o100600, isFile: true, isSymbolicLink: false }),
+  openSecret: () => { opened += 1; return { uid: 41002, mode: 0o100600, isFile: true, bytes: Buffer.from('${SECRET}') }; },
+  listen: async () => {}, log: () => {}, error: (m) => errors.push(m),
+});
+inspector.close();
+process.stdout.write(JSON.stringify({ active, code, opened, errors }));
+`;
+  function runInspectorChild(env: Record<string, string>, nodeArgs: string[] = [], openAtRuntime = false) {
+    const res = spawnSync(process.execPath, [...nodeArgs, '--input-type=module', '-e', INSPECTOR_CHILD,
+      pathToFileURL(DIST_CLI).href, home, openAtRuntime ? '1' : '0'], {
+      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', ...env }, encoding: 'utf8', timeout: 30_000,
+    });
+    return JSON.parse(res.stdout) as { active: boolean; code: number; opened: number; errors: string[] };
+  }
+
+  it('real processes: a quoted NODE_OPTIONS inspector, `_` aliases and a runtime-opened inspector never reach the key', () => {
+    expect(existsSync(DIST_CLI)).toBe(true);
+    const quoted = runInspectorChild({ NODE_OPTIONS: '"--inspect=127.0.0.1:0"' });
+    expect(quoted).toMatchObject({ active: true, code: 1, opened: 0 });
+    for (const r of [
+      runInspectorChild({ NODE_OPTIONS: '--inspect_port=0' }),
+      runInspectorChild({}, ['--inspect_port=0']),
+    ]) {
+      // Node accepts the `_` spelling; no inspector is open, so only the
+      // option parser can see it.
+      expect(r).toMatchObject({ active: false, code: 1, opened: 0 });
+      expect(r.errors.join('\n')).toMatch(/inspector flag/);
+    }
+    // Opened after start, with no flag anywhere: only the live check sees it.
+    const runtime = runInspectorChild({}, [], true);
+    expect(runtime).toMatchObject({ active: true, code: 1, opened: 0 });
+    expect(runtime.errors.join('\n')).toMatch(/inspector is open/);
+    // Control: the same start with no inspector does load the key.
+    expect(runInspectorChild({})).toMatchObject({ active: false, code: 0, opened: 1 });
+  }, 60_000);
+
   it('refuses a secret not owned by --bridge-uid, even if config points at it', async () => {
     const errors: string[] = [];
     const out = await runApproveTapCommand(ARGS(), {
@@ -119,7 +202,7 @@ describe('#815 B — endpoint start-up refusals', () => {
 describe('#815 B — a served tap goes through the keyless child', () => {
   it('root checks the HMAC; the child, as the agent, writes the grant; the key never reaches the child', async () => {
     expect(existsSync(DIST_CHILD)).toBe(true);
-    expect(recordDenialFingerprint({ hash: HASH, tool: 'Bash', actionId: ACTION, signals: ['network-egress'], cwd }, { home }).ok).toBe(true);
+    expect(recordDenialFingerprint({ hash: HASH, tool: 'Bash', actionId: ACTION, signals: ['external-egress'], cwd, exactDigest: EXACT }, { home }).ok).toBe(true);
     const config = normaliseApproveTapConfig({ enabled: true, secretPath, approverTelegramUid: '777' });
     const m = mintApproveTapNonce({ actionId: ACTION }, { home, config, agentUid: AGENT, lstat: bridgeStat });
     if (!m.ok) throw new Error(m.reason);

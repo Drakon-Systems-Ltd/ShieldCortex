@@ -14,6 +14,10 @@
  *      `mintApproveTapNonce({ actionId })`. It mints a single-use 128-bit
  *      nonce bound to {actionId, argsHash, exp}, exp <= 10 minutes after the
  *      mint. The store keeps sha256(nonce), never the nonce itself.
+ *      `argsHash` is the EXACT, versioned call digest of the denied call
+ *      (`exactCallDigest`, action-approvals.ts) — every byte of every
+ *      execution-relevant field — recorded on the denial by the hook. A
+ *      denial without one cannot be tapped.
  *   2. The card carries `{actionId, nonce}` on its Approve button (card
  *      version 2, wired once #996 lands) and `argsHash` + `exp` beside it, all
  *      inside the webhook body the webhook secret already signs. The Telegram
@@ -25,8 +29,10 @@
  *      webhook secret) over `canonicalTapMessage` below.
  *   4. `verifyApproveTap` checks everything, consumes the nonce, and writes
  *      the same #310 retry grant `approve --denial` writes (`via: 'tap'`,
- *      `approver: 'telegram:<uid>'`). The next identical call in the same
- *      directory spends it, exactly as it spends a terminal grant.
+ *      `approver: 'telegram:<uid>'`, and the exact digest). The next call in
+ *      the same directory, by the same tool, whose exact digest is that one
+ *      spends it. It is a next-matching-retry grant scoped to {cwd, tool}
+ *      and bound to the exact digest — not a release of a held call.
  *
  * ## The canonical MAC form (v1)
  *
@@ -51,11 +57,14 @@
  * HMAC, the webhook secret used in place of the approve secret, a wrong
  * approver, an unknown/used/expired/over-long nonce, an argsHash that is not
  * the denied call's, an unknown action, and a catastrophic or
- * self-protection-floor action. Those two tiers stay terminal-only. Once all
- * of that has passed the nonce is spent first and the grant written second,
- * so a concurrent double submit sees a spent nonce; if the grant store then
+ * self-protection-floor action (or any signal outside the reviewed
+ * `TAP_ELIGIBLE_SIGNALS` registry). Those stay terminal-only. Once all of
+ * that has passed the nonce is spent first and the grant written second, so
+ * a concurrent double submit sees a spent nonce; if the grant store then
  * refuses (an operator Deny since the card went out, a live retry already
- * granted), the nonce stays spent and nothing is granted.
+ * granted, the row turned terminal-only in between), the nonce stays spent
+ * and nothing is granted. Both stores commit through fenced-store.ts, so a
+ * writer whose lock was taken over as stale cannot write an old state back.
  *
  * ## Same UID — the tap path refuses to arm
  *
@@ -74,33 +83,35 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import {
   closeSync,
   constants as fsConstants,
-  existsSync,
   fstatSync,
   lstatSync,
-  mkdirSync,
   openSync,
-  readFileSync,
   readSync,
-  renameSync,
-  rmSync,
-  rmdirSync,
-  statSync,
-  writeFileSync,
 } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join, isAbsolute } from 'node:path';
 
-import { mkdirSecure } from '../../setup/state-permissions.js';
 import { approvalsDir } from './action-approvals.js';
 import {
+  CORRUPT_STORE,
+  acquireStoreLock,
+  commitFencedJson,
+  readFencedJson,
+  releaseStoreLock,
+  type StoreLock,
+} from './fenced-store.js';
+import {
   DEFAULT_RETRY_GRANT_TTL_MS,
+  currentExactDigest,
   grantRetry,
   lookupRetryRow,
   suppressionIsLive,
   type RetryGrant,
   type RetryRow,
 } from './retry-control.js';
-import { CATASTROPHIC_SIGNALS, GUARD_SELF_PROTECTION_SIGNALS } from './tool-action-guard.js';
+import { tapTerminalOnlyReason, type TerminalOnlyReason } from './tap-eligibility.js';
+
+export { TAP_ELIGIBLE_SIGNALS, tapTerminalOnlyReason, type TerminalOnlyReason } from './tap-eligibility.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -133,15 +144,6 @@ const ROW_ID_RE = /^[0-9a-f]{32}$/;
 /** Printable ASCII without spaces: a secret is one token, not prose (and a
  *  multi-line file such as a private key is refused rather than adopted). */
 const SECRET_RE = /^[\x21-\x7e]+$/;
-
-/** A tool call the guard could not fully read: approve those from a terminal. */
-const UNSCANNED_SIGNALS: readonly string[] = Object.freeze([
-  'fallback-scan', 'invalid-tool-input', 'unknown-keys', 'not-object', 'nested-invalid',
-  'type-coercion', 'missing-handle',
-]);
-/** The retry store keeps at most this many signals per row; a full list may
- *  have been cut, so it cannot prove the floor is absent. */
-const RETRY_ROW_SIGNAL_CAP = 8;
 
 // ── Config ────────────────────────────────────────────────────────────────
 
@@ -219,8 +221,9 @@ export function describeTapArmingFailure(reason: TapArmingFailure, ctx: { path?:
       return `One-tap approve is OFF: the approve secret${where} is owned by root. It must belong to the `
         + 'notify bridge\'s own (unprivileged) user.';
     case 'secret-unreadable':
-      return `The approve secret${where} cannot be read by this process. The tap endpoint must start as root `
-        + '(it reads the secret, then drops to the agent\'s user before it listens).';
+      return `The approve secret${where} cannot be read by this process. Start the tap endpoint as root: it keeps `
+        + 'the secret in that root process for its whole life, and only a keyless child, spawned as the agent\'s '
+        + 'user for each tap, touches the agent\'s stores.';
     case 'secret-malformed':
       return `One-tap approve is OFF: the approve secret${where} is not a single token of ${SECRET_MIN_CHARS} to `
         + `${SECRET_MAX_CHARS} printable characters.`;
@@ -496,26 +499,10 @@ function hexEqualConstantTime(a: string, b: string): boolean {
 }
 
 // ── Terminal-only classification ──────────────────────────────────────────
-
-export type TerminalOnlyReason = 'self-protection-floor' | 'catastrophic' | 'unscanned' | 'unknown-signal' | 'signals-incomplete';
-
-/**
- * Why a denial with these signals may only be approved from a terminal, or
- * null when a tap may answer it. Fail closed: an unknown or redacted signal,
- * an empty list, or a list long enough to have been cut by the store all
- * refuse, because none of them proves the floor is absent.
- */
-export function tapTerminalOnlyReason(signals: readonly unknown[] | undefined): TerminalOnlyReason | null {
-  if (!Array.isArray(signals) || signals.length === 0 || signals.length >= RETRY_ROW_SIGNAL_CAP) {
-    return 'signals-incomplete';
-  }
-  const list = signals.map((s) => (typeof s === 'string' ? s : ''));
-  if (list.some((s) => GUARD_SELF_PROTECTION_SIGNALS.includes(s))) return 'self-protection-floor';
-  if (list.some((s) => CATASTROPHIC_SIGNALS.includes(s))) return 'catastrophic';
-  if (list.some((s) => UNSCANNED_SIGNALS.includes(s))) return 'unscanned';
-  if (list.some((s) => !/^[a-z0-9][a-z0-9-]{0,63}$/.test(s) || s === 'redacted-signal')) return 'unknown-signal';
-  return null;
-}
+//
+// `tapTerminalOnlyReason` and the reviewed `TAP_ELIGIBLE_SIGNALS` registry
+// live in tap-eligibility.ts, because `grantRetry` applies the same predicate
+// again on the current row inside its own locked transaction.
 
 function describeTerminalOnly(reason: TerminalOnlyReason): string {
   switch (reason) {
@@ -582,119 +569,55 @@ function isRecord(raw: unknown): raw is TapNonceRecord {
     && (r.usedAt === undefined || Number.isSafeInteger(r.usedAt));
 }
 
-function readNonces(home?: string): TapNonceFile {
-  try {
-    const p = approveTapNoncePath(home);
-    if (!existsSync(p)) return { version: 1, nonces: [] };
-    const parsed = JSON.parse(readFileSync(p, 'utf8')) as Partial<TapNonceFile>;
-    if (!parsed || !Array.isArray(parsed.nonces)) return { version: 1, nonces: [] };
-    // Bounded work on a hostile file; junk rows are dropped, never repaired.
-    return { version: 1, nonces: parsed.nonces.slice(-MAX_LIVE_TAP_NONCES * 4).filter(isRecord) };
-  } catch {
-    // Corrupt reads as EMPTY: every nonce is then unknown — the refusal side.
-    return { version: 1, nonces: [] };
-  }
+function parseNonces(raw: unknown): TapNonceFile {
+  if (raw === undefined || raw === CORRUPT_STORE) return { version: 1, nonces: [] };
+  const parsed = raw as Partial<TapNonceFile>;
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.nonces)) return { version: 1, nonces: [] };
+  // Bounded work on a hostile file; junk rows are dropped, never repaired.
+  // Corrupt reads as EMPTY: every nonce is then unknown — the refusal side.
+  return { version: 1, nonces: parsed.nonces.slice(-MAX_LIVE_TAP_NONCES * 4).filter(isRecord) };
 }
 
-function writeNonces(file: TapNonceFile, home?: string): boolean {
-  try {
-    mkdirSecure(approvalsDir(home));
-    const target = approveTapNoncePath(home);
-    const tmp = `${target}.${process.pid}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-    renameSync(tmp, target);
-    return true;
-  } catch {
-    return false;
-  }
+/** The nonce file and the generation the next commit must succeed. */
+interface NonceSnapshot {
+  file: TapNonceFile;
+  base: number;
 }
 
-const LOCK_ATTEMPTS = 100;
-const LOCK_SLEEP_MS = 20;
-const LOCK_STALE_MS = 10_000;
-
-function sleepSync(ms: number): void {
-  try {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-    return;
-  } catch {
-    /* fall through to a bounded spin */
-  }
-  const until = Date.now() + ms;
-  while (Date.now() < until) { /* bounded spin */ }
-}
-
-interface NonceLock {
-  path: string;
-  token: string;
+function readNonces(home?: string): NonceSnapshot {
+  const snap = readFencedJson(approveTapNoncePath(home));
+  return { file: parseNonces(snap.value), base: snap.base };
 }
 
 /**
- * An exclusive mkdir with a random owner token inside, bounded spin, stale
- * takeover. Failing to lock is failing CLOSED.
- *
- * A stale lock is taken over by RENAMING it to a unique tombstone (only one
- * contender's rename can succeed) rather than rmdir-then-mkdir, and every
- * write re-checks the token (`stillHeld`) first: if another process ever did
- * take the lock over while we held it, we refuse instead of writing over its
- * update.
+ * A fenced commit (fenced-store.ts). Refused when anyone else has committed
+ * since `snap` was read, which is what stops a holder whose lock was taken
+ * over as stale from writing an old snapshot back (and so un-spending a
+ * nonce). On success `snap.base` advances, so the same holder can commit
+ * again.
  */
-function acquireNonceLock(home?: string): NonceLock | null {
-  const p = noncesLockPath(home);
-  try {
-    mkdirSecure(approvalsDir(home));
-  } catch {
-    return null;
-  }
-  const token = randomBytes(16).toString('hex');
-  for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
-    try {
-      mkdirSync(p, { mode: 0o700 });
-      try {
-        writeFileSync(join(p, 'owner'), token, { mode: 0o600, flag: 'wx' });
-      } catch {
-        try { rmdirSync(p); } catch { /* leave it to go stale */ }
-        return null;
-      }
-      return { path: p, token };
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') return null;
-      try {
-        if (Date.now() - statSync(p).mtimeMs > LOCK_STALE_MS) {
-          const tomb = `${p}.stale-${process.pid}-${randomBytes(4).toString('hex')}`;
-          try {
-            renameSync(p, tomb);
-            rmSync(tomb, { recursive: true, force: true });
-          } catch { /* another contender won the takeover */ }
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      sleepSync(LOCK_SLEEP_MS);
-    }
-  }
-  return null;
-}
-
-function stillHeld(lock: NonceLock): boolean {
-  try {
-    return readFileSync(join(lock.path, 'owner'), 'utf8') === lock.token;
-  } catch {
+function writeNonces(snap: NonceSnapshot, home?: string): boolean {
+  if (!commitFencedJson(approveTapNoncePath(home), snap.base, { version: snap.file.version, nonces: snap.file.nonces })) {
     return false;
   }
+  snap.base += 1;
+  return true;
 }
 
-function releaseNonceLock(lock: NonceLock | null): void {
-  if (!lock || !stillHeld(lock)) return; // never remove a lock we no longer own
-  try { rmSync(join(lock.path, 'owner'), { force: true }); } catch { /* ignore */ }
-  try { rmdirSync(lock.path); } catch { /* ignore */ }
+const LOCK_OPTIONS = { attempts: 100, sleepMs: 20, staleMs: 10_000 };
+
+function acquireNonceLock(home?: string): StoreLock | null {
+  return acquireStoreLock(noncesLockPath(home), LOCK_OPTIONS);
+}
+
+function releaseNonceLock(lock: StoreLock | null): void {
+  releaseStoreLock(lock);
 }
 
 // ── Mint ──────────────────────────────────────────────────────────────────
 
 export type TapMintFailure =
-  | 'not-armed' | 'bad-action-id' | 'bad-lifetime' | 'not-found' | 'terminal-only' | 'unscopeable'
+  | 'not-armed' | 'bad-action-id' | 'bad-lifetime' | 'not-found' | 'terminal-only' | 'unbound' | 'unscopeable'
   | 'suppressed' | 'too-many' | 'locked' | 'unwritable';
 
 export type TapMintOutcome =
@@ -736,6 +659,15 @@ export function mintApproveTapNonce(input: { actionId: string }, opts: TapMintOp
   if (terminalOnly) {
     return { ok: false, reason: 'terminal-only', terminalOnly, message: describeTerminalOnly(terminalOnly) };
   }
+  const exactDigest = currentExactDigest(row);
+  if (!exactDigest) {
+    return {
+      ok: false,
+      reason: 'unbound',
+      message: 'This denial was recorded without an exact call digest, so a tap cannot bind it to the exact call. '
+        + `Approve it from a terminal: shieldcortex approve --denial ${actionId}`,
+    };
+  }
   if (!row.originScope?.cwd) {
     return { ok: false, reason: 'unscopeable', message: 'This denial has no recorded directory, so a tap cannot scope a retry.' };
   }
@@ -748,21 +680,21 @@ export function mintApproveTapNonce(input: { actionId: string }, opts: TapMintOp
   const lock = acquireNonceLock(opts.home);
   if (!lock) return { ok: false, reason: 'locked', message: 'The tap store is busy; no button was minted.' };
   try {
-    const file = readNonces(opts.home);
-    file.nonces = file.nonces.filter((n) => n.exp > now);
-    if (file.nonces.length >= MAX_LIVE_TAP_NONCES) {
+    const snap = readNonces(opts.home);
+    snap.file.nonces = snap.file.nonces.filter((n) => n.exp > now);
+    if (snap.file.nonces.length >= MAX_LIVE_TAP_NONCES) {
       return { ok: false, reason: 'too-many', message: 'Too many tap buttons are outstanding; no new one was minted.' };
     }
-    file.nonces.push({
-      id: nonceId(nonce), actionId, argsHash: row.hash, rowId: row.id, epoch: row.denyEpoch, mintedAt: now, exp,
+    snap.file.nonces.push({
+      id: nonceId(nonce), actionId, argsHash: exactDigest, rowId: row.id, epoch: row.denyEpoch, mintedAt: now, exp,
     });
-    if (!stillHeld(lock) || !writeNonces(file, opts.home)) {
+    if (!writeNonces(snap, opts.home)) {
       return { ok: false, reason: 'unwritable', message: 'The tap store could not be written; no button was minted.' };
     }
   } finally {
     releaseNonceLock(lock);
   }
-  return { ok: true, actionId, nonce, argsHash: row.hash, exp, mintedAt: now };
+  return { ok: true, actionId, nonce, argsHash: exactDigest, exp, mintedAt: now };
 }
 
 // ── Verify ────────────────────────────────────────────────────────────────
@@ -853,14 +785,18 @@ const GRANT_REFUSAL_DETAIL: Partial<Record<string, string>> = {
  *   4. approver — equals `telegram:<configured uid>`; exp not yet passed;
  *   5. under the nonce lock: the nonce exists for this action, is unused,
  *      its stored and presented exp agree, exp - mint <= 10 min, not expired;
- *   6. argsHash equals both the nonce's and the denial's exact hash;
- *   7. the denial is not catastrophic / self-protection-floor / unscanned,
- *      and the grant store would take it (no Deny since the card went out,
- *      no retry already authorised, no other card open) — read-only;
- *   8. consume the nonce (written), then `grantRetry` with `auth.tap`.
+ *   6. argsHash equals both the nonce's and the denial's exact call digest;
+ *   7. every signal is tap-eligible, and the grant store would take it (no
+ *      Deny since the card went out, no retry already authorised, no other
+ *      card open) — a read-only preview;
+ *   8. consume the nonce (a fenced write), then `grantRetry` with
+ *      `auth.tap`, which re-checks the exact digest, the epoch AND the
+ *      terminal-only predicate on the current row inside its own lock.
  * Steps 1–7 write nothing. Only a change that lands between step 7 and the
- * grant's own lock (a Deny in that instant) can refuse after the nonce is
- * spent; a busy or unwritable retry store un-spends it.
+ * grant's own lock (a Deny or a terminal-only remint in that instant) can
+ * refuse after the nonce is spent, and the nonce then stays spent. A retry
+ * store whose lock could not be taken un-spends it; one that could not be
+ * written does not (that commit may still have landed).
  */
 export function verifyApproveTap(raw: unknown, opts: TapVerifyOptions): TapVerifyOutcome {
   const auth = authenticateApproveTap(raw, opts);
@@ -917,9 +853,9 @@ export function applyAuthenticatedTap(
   const lock = acquireNonceLock(opts.home);
   if (!lock) return refusal('locked');
   try {
-    const file = readNonces(opts.home);
+    const snap = readNonces(opts.home);
     const id = nonceId(req.nonce);
-    const rec = file.nonces.find((n) => n.id === id);
+    const rec = snap.file.nonces.find((n) => n.id === id);
     if (!rec) return refusal('unknown-nonce');
     if (rec.actionId !== req.actionId) return refusal('nonce-mismatch');
     if (rec.usedAt !== undefined) return refusal('nonce-used');
@@ -932,7 +868,9 @@ export function applyAuthenticatedTap(
 
     const row = lookupRetryRow({ actionId: req.actionId }, { home: opts.home, now });
     if (!row || row.id !== rec.rowId || !row.actionIds.includes(req.actionId)) return refusal('unknown-action');
-    if (row.hash !== req.argsHash) return refusal('args-mismatch');
+    // The exact call digest of the row's latest denial, never the tolerant
+    // hash: a row without a current-version digest cannot be tapped.
+    if (currentExactDigest(row) !== req.argsHash) return refusal('args-mismatch');
     const terminalOnly = tapTerminalOnlyReason(row.signals);
     if (terminalOnly) return refusal('terminal-only', describeTerminalOnly(terminalOnly));
     // Read-only previews of what grantRetry would refuse, so that the
@@ -949,20 +887,31 @@ export function applyAuthenticatedTap(
     // Spend the nonce BEFORE the grant: a crash between the two leaves a
     // spent nonce and no grant (fail closed), never a grant and a live nonce.
     rec.usedAt = now;
-    if (!stillHeld(lock) || !writeNonces(file, opts.home)) return refusal('unwritable');
+    if (!writeNonces(snap, opts.home)) return refusal('unwritable');
 
     const granted = grantRetry(
       { id: row.id },
-      { tap: { approver: req.approver, hash: req.argsHash, epoch: rec.epoch } },
+      { tap: { approver: req.approver, exactDigest: req.argsHash, epoch: rec.epoch } },
       { home: opts.home, now, ttlMs: opts.grantTtlMs ?? DEFAULT_RETRY_GRANT_TTL_MS },
     );
     if (!granted.ok) {
-      if (granted.reason === 'locked' || granted.reason === 'unwritable') {
-        // No decision was taken and no grant was written: un-spend the nonce
-        // (we still hold its lock) so the operator can tap again.
+      if (granted.reason === 'locked') {
+        // The retry store's lock was never taken, so nothing was decided or
+        // written there: un-spend the nonce (a fenced commit, refused if
+        // anyone else has touched the nonce store since) so the operator can
+        // tap again. 'unwritable' is NOT un-spent: a fenced commit that
+        // reports failure is "not known to have committed", not "undone".
         delete rec.usedAt;
-        if (stillHeld(lock)) writeNonces(file, opts.home);
-        return refusal(granted.reason === 'locked' ? 'locked' : 'unwritable');
+        writeNonces(snap, opts.home);
+        return refusal('locked');
+      }
+      if (granted.reason === 'unwritable') return refusal('grant-refused', 'The approvals store could not be written.');
+      if (granted.reason === 'terminal-only') {
+        // The row became terminal-only after the preview above (a remint in
+        // between). Refused inside the grant's own transaction; the button
+        // stays spent.
+        const why = tapTerminalOnlyReason(lookupRetryRow({ id: row.id }, { home: opts.home, now })?.signals);
+        return refusal('terminal-only', describeTerminalOnly(why ?? 'signals-incomplete'));
       }
       return refusal('grant-refused', GRANT_REFUSAL_DETAIL[granted.reason]);
     }
