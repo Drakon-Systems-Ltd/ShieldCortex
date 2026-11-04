@@ -176,3 +176,68 @@ describe('#815 A review B1 — a remote NAME passes the credential redactor like
     expect(git('git fetch my-fork.2', NO_CWD)).toBe('Send data to the "my-fork.2" remote (git fetch)');
   });
 });
+
+describe('#815 A review B2 — a credential-shaped git HOST is withheld whole, before it is folded to lower case', () => {
+  // Built at runtime so no secret-shaped literal is committed.
+  const KEY = ['AK', 'IA'].join('') + 'W7NQ4KPJ2XZT6RHM';
+  const HOST = `${KEY}.example.invalid`;
+  const FORCE = `Force-push to ${WITHHELD_SECRET} (branch "main") (git push --force)`;
+  function expectNoKey(text: string): void {
+    expect(text).not.toContain(KEY);
+    expect(text).not.toContain(KEY.toLowerCase());
+    for (const needle of [KEY, KEY.slice(0, 8), KEY.slice(-8)]) expect(text.toUpperCase()).not.toContain(needle);
+  }
+
+  it.each([
+    ['typed URL', `git push --force https://${HOST}/acme/app.git main`, ORIGIN],
+    ['typed ssh:// URL', `git push --force ssh://git@${HOST}/acme/app.git main`, ORIGIN],
+    ['scp-style', `git push --force user@${HOST}:acme/app.git main`, ORIGIN],
+    ['configured url', 'git push --force origin main', `[remote "origin"]\n\turl = https://${HOST}/acme/app.git\n`],
+    ['configured scp url', 'git push --force origin main', `[remote "origin"]\n\turl = git@${HOST}:acme/app.git\n`],
+    ['configured pushurl', 'git push --force origin main', `${ORIGIN}\tpushurl = https://${HOST}/acme/app.git\n`],
+    ['the folded key, typed', `git push --force https://${HOST.toLowerCase()}/acme/app.git main`, ORIGIN],
+  ])('%s', (_form, command, config) => {
+    repoConfig(config);
+    const text = git(command, repo, ['git-force-push']);
+    expect(text).toBe(FORCE);
+    expectNoKey(text);
+  });
+
+  it('a clone and a fetch of the same host', () => {
+    repoConfig(`[remote "origin"]\n\turl = https://${HOST}/acme/app.git\n`);
+    for (const command of [`git clone https://${HOST}/acme/app.git`, 'git fetch origin', `git fetch git@${HOST}:acme/app.git`]) {
+      const text = git(command);
+      expect(text).toContain(WITHHELD_SECRET);
+      expectNoKey(text);
+    }
+  });
+
+  it('controls: an ordinary host is still named, in lower case', () => {
+    repoConfig('[remote "origin"]\n\turl = https://GitHub.com/acme/app.git\n');
+    expect(git('git push --force origin main', repo, ['git-force-push'])).toBe('Force-push to github.com (branch "main") (git push --force)');
+    expect(git('git push --force git@GitLab.example.com:acme/app.git main', repo, ['git-force-push']))
+      .toBe('Force-push to gitlab.example.com (branch "main") (git push --force)');
+  });
+
+  // Rows the round-2 review checked by hand, pinned so they stay checked.
+  it('round-2 review rows: STS, OpenAI and opaque remote names, a token branch, a split name, a token in a configured URL', () => {
+    const STS = ['AS', 'IA'].join('') + 'Q3XZ7LMN2PRT6VWY';
+    const OPENAI = ['sk', ''].join('-') + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o'; // 32: the remote-name shape's maximum
+    const OPAQUE = 'Zq7Lm2Xr9Tb4Vc8Nd1Fh6Jk3Wp5Ys0Ua';
+    const GH = ['gh', 'p_'].join('') + 'Z'.repeat(4) + 'q7Lm2Xr9Tb4Vc8Nd1Fh6Jk3Wp5Ys0Ua';
+    for (const name of [STS, OPENAI, OPAQUE]) {
+      expect(name.length).toBeLessThanOrEqual(32);
+      const text = git(`git push --force ${name} main`, NO_CWD, ['git-force-push']);
+      expect(text).toBe(FORCE);
+      expect(text).not.toContain(name.slice(0, 8));
+    }
+    const branch = git(`git push --force origin ${GH}`, NO_CWD, ['git-force-push']);
+    expect(branch).toBe(`Force-push to the "origin" remote (branch ${WITHHELD_SECRET}) (git push --force)`);
+    const split = git(`git push --force ${STS.slice(0, 4)}\u200b${STS.slice(4)} main`, NO_CWD, ['git-force-push']);
+    expect(split).not.toContain(STS.slice(4));
+    repoConfig(`[remote "origin"]\n\turl = https://bot:${GH}@github.com/acme/app.git\n`);
+    const userinfo = git('git push --force origin main', repo, ['git-force-push']);
+    expect(userinfo).toBe(FORCE);
+    expect(userinfo).not.toContain(GH.slice(0, 12));
+  });
+});

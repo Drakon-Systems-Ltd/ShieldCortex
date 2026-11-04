@@ -117,6 +117,9 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
   }
 
   function runHook(input: Record<string, unknown>, opts: { tool?: string; permissionMode?: string } = {}) {
+    // Git config the card builder may read comes from the fake HOME and the
+    // job's own repository only: no GIT_CONFIG* override, no real XDG dir.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/.test(k)));
     const run = spawnSync('node', [HOOK], {
       input: JSON.stringify({
         session_id: '648-session',
@@ -127,9 +130,10 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
         tool_input: input,
       }),
       env: {
-        ...process.env,
+        ...env,
         HOME: home,
         USERPROFILE: home,
+        XDG_CONFIG_HOME: join(home, '.config'),
         SHIELDCORTEX_DIST_ROOT: distRoot,
         SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex'),
       } as NodeJS.ProcessEnv,
@@ -371,6 +375,102 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     expect(denialRows()).toEqual([]);
     expectNoRemote(raw);
   });
+
+  // #815 A review B2 — the HOST, not the remote name. `hostOf` lower-cased a
+  // URL or scp host before the target gate saw it, and the AWS key-id shape is
+  // upper-case only, so the folded key passed every recogniser and the card
+  // read `Force-push to akia….example.invalid`: upper-casing that gives the
+  // key back exactly. Three destination forms, each on the held and the
+  // headless path. A scratch repository (config only; nothing runs git) lets
+  // the card builder establish the host. The legacy body and the denial rows
+  // are compared with goldens captured at the comparison base (1525b204),
+  // where no card existed: they differ from the remote-name goldens above
+  // only by the per-command hash.
+  const HOST_KEY = ['AK', 'IA'].join('') + 'W7NQ4KPJ2XZT6RHM';
+  const KEY_HOST = `${HOST_KEY}.example.invalid`;
+  const HOST_WHAT = 'Force-push to (withheld: looks like a secret) (branch "main") (git push --force)';
+  const ORDINARY_ORIGIN = 'https://github.com/acme/app.git';
+  const HOST_FORMS: Array<[form: string, command: string, origin: string, hash: string]> = [
+    ['typed URL', `git push --force https://${KEY_HOST}/acme/app.git main`, ORDINARY_ORIGIN, '6d9d6a34b0504681cae491ec34992357698909f6a5adf80cbdc5dc24b036b106'],
+    ['configured remote', 'git push --force origin main', `https://${KEY_HOST}/acme/app.git`, '3f33515788426f3b10a1e4eefaee2d56d386736c46c3c9c773a892c5ef54f13a'],
+    ['scp-style', `git push --force user@${KEY_HOST}:acme/app.git main`, ORDINARY_ORIGIN, 'e3f91de531bea670398ee6d1c154282f7490c6bfcd8c031260a16c7436c33a51'],
+  ];
+
+  function scratchRepo(originUrl: string): void {
+    mkdirSync(join(jobCwd, '.git', 'refs', 'heads'), { recursive: true });
+    mkdirSync(join(jobCwd, '.git', 'objects'), { recursive: true });
+    writeFileSync(join(jobCwd, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    writeFileSync(
+      join(jobCwd, '.git', 'config'),
+      `[core]\n\trepositoryformatversion = 0\n\tbare = false\n[remote "origin"]\n\turl = ${originUrl}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n`,
+    );
+  }
+  const askGolden = (hash: string) => GOLDEN_WEBHOOK_ASK_REMOTE
+    .split(REMOTE_ASK_HASH).join(hash)
+    .split(REMOTE_ASK_HASH.slice(0, 12)).join(hash.slice(0, 12));
+  /** The original key, the lower-cased form the card used to print, and the
+   *  reconstruction (upper-casing everything that left the box). */
+  function expectNoHostKey(raw: string[]): void {
+    const rowsRaw = lines(join(home, '.shieldcortex', 'denials.jsonl')).join('\n');
+    for (const text of [...raw, rowsRaw]) {
+      expect(text).not.toContain(HOST_KEY);
+      expect(text).not.toContain(HOST_KEY.toLowerCase());
+      for (const needle of [HOST_KEY, HOST_KEY.slice(0, 8), HOST_KEY.slice(-8)]) expect(text.toUpperCase()).not.toContain(needle);
+    }
+  }
+
+  it('control: an ordinary host is still named on both paths, so the withheld host below is the gate, not a dropped host', () => {
+    scratchRepo(ORDINARY_ORIGIN);
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
+    const what = 'Force-push to github.com (branch "main") (git push --force)';
+    expect(runHook({ command: `git push --force ${ORDINARY_ORIGIN} main` }).decision).toBe('ask');
+    expect(runHook({ command: 'git push --force origin main' }, { permissionMode: 'bypassPermissions' }).decision).toBe('deny');
+    expect(runHook({ command: 'git push --force git@github.com:acme/app.git main' }).decision).toBe('ask');
+    const got = lines(webhookEvidence).map((b) => splitCard(normaliseWebhookBody(b)).card as Record<string, string>);
+    expect(got.map((c) => [c.kind, c.what])).toEqual([['approval', what], ['denial', what], ['approval', what]]);
+  });
+
+  it.each(HOST_FORMS)('#815 A review B2: a credential-shaped host (%s) never reaches the webhook card (headless denial)', (_form, command, origin) => {
+    scratchRepo(origin);
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
+    expect(runHook({ command }, { permissionMode: 'bypassPermissions' }).decision).toBe('deny');
+    const raw = lines(webhookEvidence);
+    expect(raw).toHaveLength(1);
+    const { rest, card } = splitCard(normaliseWebhookBody(raw[0]));
+    expect(rest).toBe(GOLDEN_WEBHOOK_DNP_REMOTE);
+    expect(card).toMatchObject({
+      version: 1,
+      kind: 'denial',
+      what: HOST_WHAT,
+      why: 'pushes to a remote branch (may overwrite history)',
+      approveCommand: 'shieldcortex approve --denial act-<action>',
+    });
+    expect(card!.text).toContain(`What: ${HOST_WHAT}`);
+    expect(denialRows()).toEqual(GOLDEN_DENIALS_DNP_REMOTE);
+    expect(denialRows().join('\n')).not.toContain('"card"');
+    expectNoHostKey(raw);
+  });
+
+  it.each(HOST_FORMS)('#815 A review B2: a credential-shaped host (%s) never reaches the webhook card (held approval)', (_form, command, origin, hash) => {
+    scratchRepo(origin);
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook' });
+    expect(runHook({ command }).decision).toBe('ask');
+    const raw = lines(webhookEvidence);
+    expect(raw).toHaveLength(1);
+    const { rest, card } = splitCard(normaliseWebhookBody(raw[0]));
+    expect(rest).toBe(askGolden(hash));
+    expect(card).toMatchObject({
+      version: 1,
+      kind: 'approval',
+      what: HOST_WHAT,
+      why: 'pushes to a remote branch (may overwrite history)',
+      approveCommand: `shieldcortex approve ${hash.slice(0, 12)} --attempt <attempt>`,
+      denyCommand: `shieldcortex deny ${hash.slice(0, 12)} --attempt <attempt>`,
+    });
+    expect(card!.text).toContain(`What: ${HOST_WHAT}`);
+    expect(denialRows()).toEqual([]);
+    expectNoHostKey(raw);
+  });
 });
 
 const GOLDEN_WEBHOOK_ASK = "{\"event\":\"approval_requested\",\"hash\":\"1d3e3c896ae2a9a396eacda6e9c44cf16bb9d3b69550ec941f95ca76a9151178\",\"shortHash\":\"1d3e3c896ae2\",\"attemptId\":\"<attempt>\",\"tool\":\"Bash\",\"command\":\"Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\",\"signals\":[\"touch-sensitive-path\"],\"severity\":\"dangerous\",\"reason\":\"Action Guard requires approval; inspect local audit for details.\",\"judge\":null,\"text\":\"🛡️ ShieldCortex — approval needed\\n\\nTool:      Bash\\nCommand:   Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\\nTripped:   touch-sensitive-path\\nTier:      dangerous\\nReason:    Action Guard requires approval; inspect local audit for details.\\n\\nAI judge:  no judge ran — this verdict is rules-only\\n\\n[Approve]  shieldcortex approve 1d3e3c896ae2 --attempt <attempt>\\n[Deny]     shieldcortex deny 1d3e3c896ae2 --attempt <attempt>\",\"approveCommand\":\"shieldcortex approve 1d3e3c896ae2 --attempt <attempt>\",\"ts\":\"<ts>\",\"denyCommand\":\"shieldcortex deny 1d3e3c896ae2 --attempt <attempt>\",\"sessionId\":\"sc-<session>\"}";
@@ -383,6 +483,8 @@ const GOLDEN_DENIALS_DNP: string[] = [
 // #815 A review B1 — captured at the comparison base (1525b204) with the
 // reviewer's real-hook harness, normalised exactly as above.
 const GOLDEN_WEBHOOK_DNP_REMOTE = "{\"event\":\"action_guard_denial\",\"outcome\":\"denied_no_prompt_surface\",\"tool\":\"Bash\",\"surface\":\"Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\",\"signals\":[\"git-force-push\"],\"severity\":\"dangerous\",\"reason\":\"Action Guard required approval but this session has no prompt surface; the tool call was denied.\",\"correlationId\":\"act-<action>\",\"actionId\":\"act-<action>\",\"sessionId\":\"sc-<session>\",\"origin\":\"claude-code-hook\",\"detectedAt\":\"<ts>\",\"text\":\"ShieldCortex — held (headless, no prompt)\\n\\nWhat:    1 dangerous step(s) blocked in this 15m window\\nTools:   Bash×1\\nWhy:     git-force-push×1\\nLast:    act-<action>\\n\\nRetry:   No Approve card this time (retry cards off).\\n\\nOne-shot from a real terminal on that host:\\n  shieldcortex approve --denial act-<action>\\nThen retry the same action once. Approve is not forever.\\n\\nNote:    First hold in this window; further holds are quiet (coalesced).\\nForensics: ~/.shieldcortex/denials.jsonl (command not included here).\\nThis message is visibility — not a tappable Approve surface.\",\"ts\":\"<ts>\"}";
+// The hash of `git push --force <AKIA…> main`, as the ask golden below carries it.
+const REMOTE_ASK_HASH = '0b740047d8ed51addcaa4c5030f993a71dfdde02f1ca634c70da3de41b9e57c4';
 const GOLDEN_WEBHOOK_ASK_REMOTE = "{\"event\":\"approval_requested\",\"hash\":\"0b740047d8ed51addcaa4c5030f993a71dfdde02f1ca634c70da3de41b9e57c4\",\"shortHash\":\"0b740047d8ed\",\"attemptId\":\"<attempt>\",\"tool\":\"Bash\",\"command\":\"Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\",\"signals\":[\"git-force-push\"],\"severity\":\"dangerous\",\"reason\":\"Action Guard requires approval; inspect local audit for details.\",\"judge\":null,\"text\":\"🛡️ ShieldCortex — approval needed\\n\\nTool:      Bash\\nCommand:   Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\\nTripped:   git-force-push\\nTier:      dangerous\\nReason:    Action Guard requires approval; inspect local audit for details.\\n\\nAI judge:  no judge ran — this verdict is rules-only\\n\\n[Approve]  shieldcortex approve 0b740047d8ed --attempt <attempt>\\n[Deny]     shieldcortex deny 0b740047d8ed --attempt <attempt>\",\"approveCommand\":\"shieldcortex approve 0b740047d8ed --attempt <attempt>\",\"ts\":\"<ts>\",\"denyCommand\":\"shieldcortex deny 0b740047d8ed --attempt <attempt>\",\"sessionId\":\"sc-<session>\"}";
 const GOLDEN_DENIALS_DNP_REMOTE: string[] = [
   "{\"event\":\"action_guard_denial\",\"outcome\":\"denied_no_prompt_surface\",\"origin\":\"claude-code-hook\",\"tool\":\"Bash\",\"surface\":\"Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\",\"signals\":[\"git-force-push\"],\"matches\":[{\"signal\":\"git-force-push\",\"spanWithheld\":\"command-text\",\"argc\":3}],\"severity\":\"dangerous\",\"reason\":\"Action Guard required approval but this session has no prompt surface; the tool call was denied.\",\"sessionId\":\"sc-<session>\",\"actionId\":\"act-<action>\",\"correlationId\":\"act-<action>\",\"detectedAt\":\"<ts>\",\"notify\":{\"status\":\"pending\",\"deliveredVia\":null}}",

@@ -338,12 +338,43 @@ describe('#648 — WHO: agent, box, session', () => {
   });
 
   it("a long generated hostname (CI, cloud) is shortened, and the session still fits the card's WHO line", () => {
-    const host = `sat12-bq${'7'.repeat(20)}-${'a1b2c3d4'.repeat(4)}.local`;
+    // #815 A review B2 (N2): this used to be `sat12-bq${'7'.repeat(20)}-${'a1b2c3d4'.repeat(4)}`,
+    // whose 32-hex tail the credential redactor itself flags; the clip showed
+    // 12 characters of it. That case is now withheld (below); a long name
+    // with no credential shape is still shortened.
+    const host = `sat12-bq${'7'.repeat(14)}-runner.local`;
     const who = describeWho({ plane: 'claude-code', host, sessionId: 'sc-0123456789abcdef' });
-    expect(who).toMatch(/^Claude Code on sat12-b…[a-d0-9]{12} · session sc-0123456789abcdef$/);
+    expect(who).toMatch(/^Claude Code on sat12-b…7+-runner · session sc-0123456789abcdef$/);
     expect(describeWho({ plane: 'claude-code', host: 'veronica-box.tail1234.ts.net' })).toBe('Claude Code on veronica-box');
     const [, , whoLine] = formatApprovalCardLines({ action: 'x', reason: 'y', who }, { expiresInMs: 600_000 });
     expect(whoLine).toContain('session sc-0123456789abcdef');
+  });
+
+  describe('#815 A review B2 (N2): the hostname is checked whole, as written, before it is cut to a label and clipped', () => {
+    // Built at runtime so no secret-shaped literal is committed.
+    const KEY = ['AK', 'IA'].join('') + 'W7NQ4KPJ2XZT6RHM';
+    const GH = ['gh', 'p_'].join('') + 'Z'.repeat(4) + 'q7Lm2Xr9Tb4Vc8Nd1Fh6Jk3Wp5Ys0Ua';
+    it.each([
+      ['an AWS key id', KEY],
+      ['the same key in lower case', KEY.toLowerCase()],
+      ['a GitHub token the clip would cut to a fragment', GH],
+      ['a key in the first label of an FQDN', `${KEY}.corp.example`],
+      ['a key in a later label (never shown, still checked)', `build.${KEY}.internal`],
+      ['a 32-hex run the redactor flags', `sat12-bq${'7'.repeat(20)}-${'a1b2c3d4'.repeat(4)}.local`],
+    ])('%s: the WHO line says "this machine" and carries no fragment', (_label, host) => {
+      for (const plane of ['claude-code', 'openclaw'] as const) {
+        const who = describeWho({ plane, host, sessionId: 'sc-0123456789abcdef' });
+        expect(who).toMatch(/^(?:Claude Code|OpenClaw agent) on this machine(?: · session (?:sc-0123456789abcdef|#[0-9a-f]{8}))?$/);
+        for (const needle of [host.slice(0, 6), host.split('.')[0].slice(-6)]) expect(who.toUpperCase()).not.toContain(needle.toUpperCase());
+      }
+    });
+
+    it('ordinary hostnames are unchanged', () => {
+      for (const [host, shown] of [
+        ['jarvis', 'jarvis'], ['MacBook-Pro', 'MacBook-Pro'], ['ip-10-0-0-1.ec2.internal', 'ip-10-0-0-1'],
+        ['clawdbot1', 'clawdbot1'], ['asia-east1-runner.local', 'asia-east1-runner'],
+      ]) expect(describeWho({ plane: 'claude-code', host })).toBe(`Claude Code on ${shown}`);
+    });
   });
 });
 

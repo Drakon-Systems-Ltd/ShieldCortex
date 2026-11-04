@@ -396,6 +396,24 @@ export function looksSecretish(text: string): boolean {
   return false;
 }
 
+/**
+ * #815 A review B2: the vendor redactor, in every case. A card may show a
+ * case-folded form of what was typed (a host is printed in lower case), and
+ * folding defeats the case-sensitive vendor shapes: an AWS access-key id in
+ * lower case matches nothing, yet upper-casing the card text gives it back
+ * exactly. So the redactor reads the text as written AND upper- and
+ * lower-cased; any reading that trips it makes the text credential-shaped.
+ * (`looksSecretish` is case-blind already, apart from its lower-case kebab
+ * exemption, which must not be widened, so it reads the text as written.)
+ * Throws what the redactor throws; every caller withholds on a throw.
+ */
+function vendorShapeInAnyCase(text: string): boolean {
+  for (const view of new Set([text, text.toUpperCase(), text.toLowerCase()])) {
+    if (redactCredentials(view) !== view) return true;
+  }
+  return false;
+}
+
 function middleClip(text: string, max: number): string {
   if (text.length <= max) return text;
   const head = Math.ceil((max - 1) / 3);
@@ -408,9 +426,11 @@ function middleClip(text: string, max: number): string {
  * the length cap and the character check first, so no pattern ever runs on an
  * oversized or hostile candidate (#648 r2 S2, S9); then the credential redactor
  * (it owns the vendor shapes — AWS key ids, GitHub/Slack/Stripe tokens,
- * private-key blocks), then the generic shapes it does not own. Anything that
- * trips any of them is withheld whole; a target is never partially masked,
- * because a half-shown secret is still a disclosure.
+ * private-key blocks — read in every case, #815 A review B2), then the
+ * generic shapes it does not own. Anything that trips any of them is withheld
+ * whole; a target is never partially masked, because a half-shown secret is
+ * still a disclosure. The checks read the target as given: a caller that
+ * shows a transformed form (case-folded, cut down) checks the original first.
  */
 export function safeTarget(raw: unknown, maxLen = 60): string {
   if (typeof raw !== 'string') return WITHHELD_SECRET;
@@ -419,13 +439,11 @@ export function safeTarget(raw: unknown, maxLen = 60): string {
   if (!text) return WITHHELD_SECRET;
   if (text.length > MAX_TARGET_CHARS) return WITHHELD_TOO_LONG;
   if (UNUSUAL_CHARS.test(text)) return WITHHELD_UNUSUAL;
-  let redacted: string;
   try {
-    redacted = redactCredentials(text);
+    if (vendorShapeInAnyCase(text)) return WITHHELD_SECRET;
   } catch {
     return WITHHELD_SECRET;
   }
-  if (redacted !== text) return WITHHELD_SECRET;
   if (looksSecretish(text)) return WITHHELD_SECRET;
   let shown = text;
   if (HOME && HOME.length > 1 && (shown === HOME || shown.startsWith(`${HOME}/`))) shown = `~${shown.slice(HOME.length)}`;
@@ -447,34 +465,63 @@ function quoted(raw: unknown, maxLen = 60): string {
   return `"${shown}"`;
 }
 
-/** A host name from a URL, `user@host` or `user@host:path`, or null. */
-function hostOf(text: string): string | null {
+/**
+ * A host name from a URL, `user@host` or `user@host:path`, or null: `host` as
+ * the card shows it (lower case; for a URL, the parser's own reading), and
+ * `written`, the same span exactly as it was typed (#815 A review B2). For a
+ * URL that is the authority after `scheme://`, up to the first `/ ? # \`,
+ * after the last `@`, without a port — where the parser reads the host.
+ */
+function hostParts(text: string): { host: string; written: string } | null {
   const t = String(text ?? '').trim();
   if (!t || t.length > MAX_TARGET_CHARS) return null;
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t)) {
+    let host: string;
     try {
-      const h = new URL(t).hostname.toLowerCase();
-      return h || null;
+      host = new URL(t).hostname.toLowerCase();
     } catch {
       return null;
     }
+    if (!host) return null;
+    const authority = t.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#\\]*)/i)?.[1] ?? '';
+    const written = authority.slice(authority.lastIndexOf('@') + 1).replace(/:\d*$/, '');
+    return { host, written };
   }
-  const scp = /^(?:[^@\s/]+@)?([A-Za-z0-9.-]+\.[A-Za-z]{2,}|localhost|\d{1,3}(?:\.\d{1,3}){3}):/.exec(t);
-  if (scp) return scp[1].toLowerCase();
-  const at = /^[^@\s/]+@([A-Za-z0-9.-]+)$/.exec(t);
-  if (at) return at[1].toLowerCase();
+  const scp = t.match(/^(?:[^@\s/]+@)?([A-Za-z0-9.-]+\.[A-Za-z]{2,}|localhost|\d{1,3}(?:\.\d{1,3}){3}):/);
+  if (scp) return { host: scp[1].toLowerCase(), written: scp[1] };
+  const at = t.match(/^[^@\s/]+@([A-Za-z0-9.-]+)$/);
+  if (at) return { host: at[1].toLowerCase(), written: at[1] };
   return null;
 }
 
-/** The host only — never userinfo, path or query — after the target gate. A
- *  URL carrying credentials in its userinfo (`https://user:pass@…`,
- *  `https://<token>@…`) is withheld whole, host included. The path and query
- *  are never shown, so only the host itself goes through the redactor. */
+/** The host a destination names, as the card shows it, or null. */
+function hostOf(text: string): string | null {
+  return hostParts(text)?.host ?? null;
+}
+
+/**
+ * The host only — never userinfo, path or query — after the target gate. A
+ * URL carrying credentials in its userinfo (`https://user:pass@…`,
+ * `https://<token>@…`) is withheld whole, host included. The path and query
+ * are never shown, so only the host itself goes through the redactor.
+ *
+ * #815 A review B2: the shown host is a TRANSFORM of what was typed (lower
+ * case; for a URL, the parser's reading), and a transform can defeat a
+ * recogniser — a lower-cased AWS key id matched nothing and reached the card,
+ * where upper-casing gave it back. So the host is checked as WRITTEN first,
+ * and a host the parser changed beyond case (percent-decoding, full-width or
+ * ignored characters, IDNA) is withheld: the written text checked would not
+ * be the text shown. Only then is the shown form checked (in every case) and
+ * printed.
+ */
 function safeHost(text: string): string | null {
-  const h = hostOf(text);
-  if (!h || !/^[a-z0-9.-]{1,253}$/.test(h)) return null;
+  const parts = hostParts(text);
+  if (!parts || !/^[a-z0-9.-]{1,253}$/.test(parts.host)) return null;
   if (/^[a-z][a-z0-9+.-]*:\/\/[^/\s@]+@/i.test(text) || /^[^@\s/]*:[^@\s/]*@/.test(text)) return WITHHELD_SECRET;
-  return safeTarget(h);
+  const asWritten = safeTarget(parts.written, MAX_TARGET_CHARS);
+  if (isWithheld(asWritten)) return asWritten;
+  if (parts.written.toLowerCase() !== parts.host) return WITHHELD_UNUSUAL;
+  return safeTarget(parts.host);
 }
 
 const SENSITIVE_PATH_RE =
@@ -2709,10 +2756,16 @@ function safeHostname(h: string | undefined): string {
   if (name === undefined) {
     try { name = osHostname(); } catch { name = ''; }
   }
+  const full = String(name ?? '').trim();
+  // #815 A review B2 (N2): the name is checked whole, as written, BEFORE it
+  // is cut to its first label and middle-clipped. The clip cut a key-shaped
+  // name down to a head and a tail no recogniser knows and still showed both.
+  // A name that trips the target gate is not printed at all.
+  if (isWithheld(safeTarget(full, MAX_TARGET_CHARS))) return 'this machine';
   // The box's own label, not its FQDN: CI and cloud hosts carry long
   // generated names (`<id>.local`, `<id>.internal`), and a host that ate the
   // whole line would push the session off the card.
-  const short = String(name ?? '').trim().split('.')[0];
+  const short = full.split('.')[0];
   return /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/.test(short) ? middleClip(short, 20) : 'this machine';
 }
 
@@ -2798,8 +2851,9 @@ function clipLine(text: string, max: number): string {
 }
 
 /** A whole card line longer than this is withheld rather than scanned. No
- *  line the builders make comes near it, and a received card is already held
- *  to 300 characters a line (`boundedCard` in operator-notify.ts). */
+ *  line the builders make comes near it. A received card meets this gate
+ *  first, as received, and only then is held to 300 characters a line
+ *  (`boundedCard` in operator-notify.ts, #815 A review B2). */
 const MAX_CARD_LINE_SCAN = 1024;
 
 /**
@@ -2814,7 +2868,11 @@ const MAX_CARD_LINE_SCAN = 1024;
  * clip can cut a secret down to a fragment no recogniser knows and still
  * show half of it. Two readings are checked: the line as it will be shown
  * (flattened), and with line breaks and hidden characters removed, so a key
- * split by a zero-width or control character is still seen whole.
+ * split by a zero-width or control character is still seen whole. The vendor
+ * redactor reads each in every case (review B2), so a case-folded key is
+ * still a key. `boundedCard` runs this on each line as it is received, before
+ * it folds whitespace or cuts the line at 300 (review B2): any of those can
+ * turn a key into fragments no recogniser knows.
  *
  * A line that trips either reading is replaced whole by `WITHHELD_SECRET`
  * (one too long to scan, by `WITHHELD_TOO_LONG`); nothing is ever partially
@@ -2828,7 +2886,9 @@ export function withholdSecretCardLine(text: unknown): string {
   const joined = text.replace(CARD_HIDDEN_ALL, '').replace(CARD_LINE_BREAKS_ALL, '');
   for (const view of new Set([shown, joined])) {
     try {
-      if (redactCredentials(view) !== view) return WITHHELD_SECRET;
+      // #815 A review B2: in every case — a line may carry a case-folded
+      // form (a host) whose original the redactor would have known.
+      if (vendorShapeInAnyCase(view)) return WITHHELD_SECRET;
     } catch {
       return WITHHELD_SECRET;
     }

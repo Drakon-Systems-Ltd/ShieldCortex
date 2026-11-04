@@ -44,7 +44,7 @@
  *     not a rung of it.
  */
 
-import type { ApprovalCardSummary } from './approval-card.js';
+import { withholdSecretCardLine, type ApprovalCardSummary } from './approval-card.js';
 
 /**
  * What actually happened to the held call, from the operator's point of view.
@@ -453,11 +453,19 @@ function optionalText(v: unknown): string | undefined {
 }
 
 /** #648: the card summary crosses from the hook process as plain data — keep
- *  it to three bounded single-line strings or drop it entirely. */
+ *  it to three bounded single-line strings or drop it entirely.
+ *  #815 A review B2: each line meets the credential gate AS RECEIVED, before
+ *  whitespace is folded or the line is cut at 300 — folding split a key
+ *  across a line break into two halves no recogniser knows, and the cut left
+ *  the head of a key at the end of the line. A line that trips the gate is
+ *  withheld whole (`withholdSecretCardLine`); every channel then sees the
+ *  same withheld line. */
 function boundedCard(card: unknown): ApprovalCardSummary | undefined {
   if (!card || typeof card !== 'object') return undefined;
   const c = card as Record<string, unknown>;
-  const line = (v: unknown) => (typeof v === 'string' && v.trim() ? truncate(v.replace(/\s+/g, ' ').trim(), 300) : undefined);
+  const line = (v: unknown) => (typeof v === 'string' && v.trim()
+    ? truncate(withholdSecretCardLine(v).replace(/\s+/g, ' ').trim(), 300)
+    : undefined);
   const action = line(c.action);
   const reason = line(c.reason);
   const who = line(c.who);
