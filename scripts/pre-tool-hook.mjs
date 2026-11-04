@@ -3628,8 +3628,12 @@ process.stdin.on('end', async () => {
           {
             hash: retryPlane.mod.hashToolCall(toolName, toolInput),
             origin: { cwd: retryOriginCwd, tool: toolName },
-            // #815 B: a one-tap grant is spent only by this exact call.
+            // #815 B: a one-tap grant is spent only by this exact call, and
+            // only while the guard's verdict on it is still one a tap may
+            // answer. A verdict the guard reached no scanned conclusion about
+            // passes no list, which leaves a tap grant unspent.
             exactDigest: exactRetryDigest(retryPlane.mod, toolName, toolInput),
+            currentSignals: unscannedBlock ? undefined : safeSignalList(verdict.signals),
           },
           { home: homedir() },
         );

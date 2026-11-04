@@ -23,13 +23,30 @@
  * exists (a name pruned long ago can be claimed again by a very stale writer;
  * such a claim is not the newest and is withdrawn).
  *
- * `<store>` itself stays the readable copy the rest of the system and the
- * operator see, carrying `"fence": N`. A stale writer can still rename an
- * old copy over it, so readers never trust it alone: when its fence is older
- * than the newest generation they read the generation. A copy with NO fence
- * was written by something else (an older binary, a hand edit, a test) and is
- * taken as written, exactly as before this module existed. A missing copy is
- * an empty store.
+ * ## One authority: the newest generation
+ *
+ * Once any generation exists, the newest one IS the store, and readers read
+ * nothing else. `<store>` itself is only the copy published for the operator
+ * and older tools, renamed into place after the claim; no reader consults
+ * it — not when it is older than the newest generation (a stale writer's
+ * late rename, a publication that failed), and not when it carries no fence
+ * (something other than this module wrote it after the migration). So the
+ * claim alone is the commit, and a publication that fails changes nothing a
+ * reader can obtain. (Publishing renames the claimed file, so a published
+ * copy and its generation are one inode: writing that copy in place writes
+ * that generation.)
+ *
+ * ## Migration: the first claim imports the pre-fence store, once
+ *
+ * Before the first generation, the copy is all there is: a store an older
+ * release wrote (it had no generations) is read as written, and a missing
+ * copy is an empty store. The first commit builds on that state and claims
+ * generation 1; `link` lets exactly one writer do so, and from that instant
+ * the copy is never read again, so the import cannot repeat and cannot hand
+ * back anything that first commit consumed. A copy that carries a fence while
+ * no generation exists was published by this module and has lost the
+ * generations that gave it authority: it reads as corrupt — which every store
+ * here treats as empty, the refusal side — never as the state it shows.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -115,7 +132,13 @@ export function acquireStoreLock(lockPath: string, opts: StoreLockOptions): Stor
   return null;
 }
 
-/** Never removes a lock someone else now holds. */
+/**
+ * Best-effort release of an ADVISORY lock. The owner-token check and the
+ * removal are separate steps, so a holder paused between them can remove a
+ * successor's lock after a stale takeover, and a third contender can then
+ * take it while the successor still believes it holds it. Nothing may rely on
+ * the lock being exclusive; the fenced commit is what refuses the loser.
+ */
 export function releaseStoreLock(lock: StoreLock | null): void {
   if (!lock) return;
   try {
@@ -133,7 +156,8 @@ export function releaseStoreLock(lock: StoreLock | null): void {
  *  and the generation a commit built on it must claim the successor of. */
 export interface FencedSnapshot {
   value: unknown;
-  /** -1 when the generations cannot be listed: every commit is refused. */
+  /** -1 when the generations cannot be listed, or kept vanishing while
+   *  being read: every commit is refused. */
   base: number;
   /** True when `value` came from a commit made through this module. */
   fenced: boolean;
@@ -183,37 +207,46 @@ function parseOrCorrupt(text: string): unknown {
   }
 }
 
+/** Listing and reading are separate steps; a generation pruned (or a first
+ *  claim made) in between is retried this many times. */
+const READ_ATTEMPTS = 4;
+
 export function readFencedJson(storePath: string): FencedSnapshot {
   const dir = fencedGenerationDir(storePath);
-  let newest: number;
-  try {
-    newest = newestGeneration(dir);
-  } catch {
-    return { value: CORRUPT_STORE, base: -1, fenced: false };
+  for (let attempt = 1; attempt <= READ_ATTEMPTS; attempt += 1) {
+    let newest: number;
+    try {
+      newest = newestGeneration(dir);
+    } catch {
+      return { value: CORRUPT_STORE, base: -1, fenced: false };
+    }
+    if (newest > 0) {
+      // The generation is the committed state; the copy is never consulted.
+      let text: string;
+      try {
+        text = readFileSync(join(dir, String(newest)), 'utf8');
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') continue; // pruned since the listing
+        return { value: CORRUPT_STORE, base: newest, fenced: false };
+      }
+      const value = parseOrCorrupt(text);
+      return { value, base: newest, fenced: value !== CORRUPT_STORE && fenceOf(value) === newest };
+    }
+    // No generation yet: the pre-fence store (the migration source), or none.
+    let text: string;
+    try {
+      text = readFileSync(storePath, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { value: undefined, base: 0, fenced: false };
+      return { value: CORRUPT_STORE, base: 0, fenced: false };
+    }
+    const value = parseOrCorrupt(text);
+    if (value === CORRUPT_STORE || fenceOf(value) === undefined) return { value, base: 0, fenced: false };
+    // A published copy with no generation: a first claim landing right now
+    // (list again), or generations that are gone — then it has no authority.
+    if (attempt === READ_ATTEMPTS) return { value: CORRUPT_STORE, base: 0, fenced: false };
   }
-  let text: string | null;
-  try {
-    text = readFileSync(storePath, 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') return { value: CORRUPT_STORE, base: newest, fenced: false };
-    text = null;
-  }
-  // No readable copy: an empty store (deleted, or never published).
-  if (text === null) return { value: undefined, base: newest, fenced: false };
-  const value = parseOrCorrupt(text);
-  const fence = value === CORRUPT_STORE ? undefined : fenceOf(value);
-  // No fence: written by something other than this module — taken as written.
-  if (fence === undefined) return { value, base: newest, fenced: false };
-  if (fence >= newest) return { value, base: fence, fenced: true };
-  // The copy is behind the newest commit (a late rename by a stale writer, or
-  // a publish that failed): the generation is the truth.
-  try {
-    const gen = parseOrCorrupt(readFileSync(join(dir, String(newest)), 'utf8'));
-    if (gen !== CORRUPT_STORE && fenceOf(gen) === newest) return { value: gen, base: newest, fenced: true };
-  } catch {
-    /* fall through */
-  }
-  return { value: CORRUPT_STORE, base: newest, fenced: false };
+  return { value: CORRUPT_STORE, base: -1, fenced: false };
 }
 
 function removeQuietly(p: string): void {
@@ -242,11 +275,12 @@ function pruneGenerations(dir: string, newest: number, now: number): void {
 
 /**
  * Commit `value` as the successor of `base`. True only when this write IS
- * the newest committed state. False means it is not, and nothing a reader
- * sees came from it — with one exception a caller must respect: a writer
- * that was paused past the stale threshold AFTER claiming its generation can
- * be told false even though a later writer already built on its state. So
- * false is "not known to have committed", never "safe to undo".
+ * the newest committed state — every reader now obtains it, whether or not
+ * the readable copy could be published. False means it is not, and nothing a
+ * reader sees came from it — with one exception a caller must respect: a
+ * writer that was paused past the stale threshold AFTER claiming its
+ * generation can be told false even though a later writer already built on
+ * its state. So false is "not known to have committed", never "safe to undo".
  */
 export function commitFencedJson(storePath: string, base: number, value: Record<string, unknown>): boolean {
   if (!Number.isSafeInteger(base) || base < 0) return false;
@@ -282,7 +316,7 @@ export function commitFencedJson(storePath: string, base: number, value: Record<
     return false;
   }
   try {
-    renameSync(tmp, storePath); // the readable copy; readers fall back to the generation
+    renameSync(tmp, storePath); // the published copy only; no reader consults it
   } catch {
     removeQuietly(tmp);
   }

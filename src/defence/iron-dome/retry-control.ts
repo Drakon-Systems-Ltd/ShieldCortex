@@ -576,8 +576,8 @@ function withLock<T>(
     const { value, commit } = mutate(file);
     // A commit that would write back exactly the fenced state already on
     // disk is skipped (it would only advance the generation). Anything else —
-    // a real change, a store an older binary or a hand wrote, a corrupt one —
-    // is written as before.
+    // a real change, the pre-fence store's first commit (its one migration,
+    // fenced-store.ts), an edited or corrupt generation — is written.
     const changed = onDisk === null || JSON.stringify(storeOnDisk(file)) !== onDisk;
     if (commit && changed && !writeStore(file, base, home)) return { ok: false, reason: 'unwritable' };
     return { ok: true, value };
@@ -1437,6 +1437,13 @@ export function consumeRetryGrant(
     /** #815 B: `exactCallDigest(tool, input)` of THIS call. A `tap` grant is
      *  spent only when it equals the grant's own; without it, never. */
     exactDigest?: string;
+    /** #815 B: the signals of the guard's CURRENT verdict on this call. A
+     *  `tap` grant is re-checked against it when spent, with the predicate
+     *  the grant itself passed (`tapTerminalOnlyReason`); without it, or when
+     *  it is terminal-only, the grant is left unspent and nothing is
+     *  returned. Terminal and card grants keep their own authority and do
+     *  not read it. */
+    currentSignals?: readonly unknown[];
   },
   opts: RetryStoreOptions = {},
 ): ConsumedRetryGrant | null {
@@ -1449,6 +1456,7 @@ export function consumeRetryGrant(
   const exact = typeof args.exactDigest === 'string' && /^[0-9a-f]{64}$/.test(args.exactDigest)
     ? args.exactDigest
     : null;
+  const tapVerdictEligible = tapTerminalOnlyReason(args.currentSignals) === null;
 
   const result = withLock<ConsumedRetryGrant | null>(opts.home, (file) => {
     // Snapshotted so a no-op consume — the overwhelming majority, since every
@@ -1462,8 +1470,11 @@ export function consumeRetryGrant(
       if (!grantIsLive(r.grant, now)) return false;
       if (suppressionIsLive(r, now)) return false; // deny beats a live grant
       // #815 B: a tap grant is bound byte-for-byte; the tolerant hash alone
-      // never spends it.
-      if (r.grant!.via === 'tap' && (exact === null || currentExactDigest(r.grant) !== exact)) return false;
+      // never spends it. And the verdict on THIS call must still be one a tap
+      // may answer — refused here, before anything is spent or returned.
+      if (r.grant!.via === 'tap' && (!tapVerdictEligible || exact === null || currentExactDigest(r.grant) !== exact)) {
+        return false;
+      }
       const origin = r.grant!.origin;
       if (origin.tool !== tool) return false;
       if (origin.anyOrigin === true) return true; // TTY-only, confirmed

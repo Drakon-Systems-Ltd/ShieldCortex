@@ -34,6 +34,7 @@ import {
   type ApproveTapRequest,
   type TapVerifyOutcome,
 } from '../approve-tap.js';
+import { fencedGenerationDir } from '../fenced-store.js';
 import {
   canonicaliseCwd,
   consumeRetryGrant,
@@ -59,6 +60,8 @@ const WEBHOOK_SECRET = 'w3bh00k-secret-'.repeat(4);
 const CMD = { command: 'curl -sS https://api.example.com/v1/report' };
 const HASH = hashToolCall('Bash', CMD);
 const EXACT = exactCallDigest('Bash', CMD);
+/** The guard's current verdict on the retried call: the seeded denial's own. */
+const CURRENT = ['external-egress'];
 
 let home: string;
 let cwd: string;
@@ -171,16 +174,16 @@ describe('#815 B — happy path', () => {
     expect(row?.grant).toMatchObject({ via: 'tap', approver: APPROVER, epoch: row?.denyEpoch });
 
     // The retry (same exact call, same directory) spends it — once.
-    const spent = consumeRetryGrant({ hash: HASH, exactDigest: EXACT, origin: { cwd, tool: 'Bash' } }, { home, now: base + 2_000 });
+    const spent = consumeRetryGrant({ currentSignals: CURRENT, hash: HASH, exactDigest: EXACT, origin: { cwd, tool: 'Bash' } }, { home, now: base + 2_000 });
     expect(spent).toMatchObject({ via: 'tap', approver: APPROVER });
-    expect(consumeRetryGrant({ hash: HASH, exactDigest: EXACT, origin: { cwd, tool: 'Bash' } }, { home, now: base + 3_000 })).toBeNull();
+    expect(consumeRetryGrant({ currentSignals: CURRENT, hash: HASH, exactDigest: EXACT, origin: { cwd, tool: 'Bash' } }, { home, now: base + 3_000 })).toBeNull();
   });
 
   it('a different directory or a different command cannot spend a tap grant', () => {
     const m = mintOk();
     expect(verify(tapFor(m)).ok).toBe(true);
-    expect(consumeRetryGrant({ hash: HASH, exactDigest: EXACT, origin: { cwd: tmpdir(), tool: 'Bash' } }, { home, now: base + 2_000 })).toBeNull();
-    expect(consumeRetryGrant({ hash: hashToolCall('Bash', { command: 'id' }), exactDigest: exactCallDigest('Bash', { command: 'id' }), origin: { cwd, tool: 'Bash' } }, { home, now: base + 2_000 })).toBeNull();
+    expect(consumeRetryGrant({ currentSignals: CURRENT, hash: HASH, exactDigest: EXACT, origin: { cwd: tmpdir(), tool: 'Bash' } }, { home, now: base + 2_000 })).toBeNull();
+    expect(consumeRetryGrant({ currentSignals: CURRENT, hash: hashToolCall('Bash', { command: 'id' }), exactDigest: exactCallDigest('Bash', { command: 'id' }), origin: { cwd, tool: 'Bash' } }, { home, now: base + 2_000 })).toBeNull();
   });
 });
 
@@ -266,7 +269,9 @@ describe('#815 B — refusals write nothing', () => {
 
   it('a denial that left the store after the nonce was minted', () => {
     const m = mintOk();
+    // The whole store: the generations are what readers read.
     rmSync(retryControlPath(home));
+    rmSync(fencedGenerationDir(retryControlPath(home)), { recursive: true, force: true });
     const before = snapshot();
     const out = verify(tapFor(m));
     expect(out).toMatchObject({ ok: false, reason: 'unknown-action' });
@@ -327,7 +332,7 @@ describe('#815 B — single use', () => {
     const tap = tapFor(m);
     expect(verify(tap).ok).toBe(true);
     expect(verify(tap)).toMatchObject({ ok: false, reason: 'nonce-used' });
-    consumeRetryGrant({ hash: HASH, exactDigest: EXACT, origin: { cwd, tool: 'Bash' } }, { home, now: base + 2_000 });
+    consumeRetryGrant({ currentSignals: CURRENT, hash: HASH, exactDigest: EXACT, origin: { cwd, tool: 'Bash' } }, { home, now: base + 2_000 });
     expect(verify(tap, base + 3_000)).toMatchObject({ ok: false, reason: 'nonce-used' });
     expect(getRetryRow({ actionId: ACTION }, { home })?.grant?.consumedAt).toBeDefined();
   });
@@ -641,8 +646,8 @@ describe('#815 B — tap grants bind an exact versioned call digest', () => {
     const tapped = verify(tapFor(m));
     expect(tapped.ok).toBe(true);
     const origin = { cwd, tool: 'Bash' };
-    expect(consumeRetryGrant({ hash: hashToolCall(tool, b), exactDigest: exactCallDigest(tool, b), origin }, { home, now: base + 2_000 })).toBeNull();
-    expect(consumeRetryGrant({ hash: hashToolCall(tool, a), exactDigest: exactCallDigest(tool, a), origin }, { home, now: base + 2_100 }))
+    expect(consumeRetryGrant({ currentSignals: CURRENT, hash: hashToolCall(tool, b), exactDigest: exactCallDigest(tool, b), origin }, { home, now: base + 2_000 })).toBeNull();
+    expect(consumeRetryGrant({ currentSignals: CURRENT, hash: hashToolCall(tool, a), exactDigest: exactCallDigest(tool, a), origin }, { home, now: base + 2_100 }))
       .toMatchObject({ via: 'tap', exactDigest: exactCallDigest(tool, a) });
   });
 
@@ -659,13 +664,13 @@ describe('#815 B — tap grants bind an exact versioned call digest', () => {
     const m = mintOk();
     expect(verify(tapFor(m)).ok).toBe(true);
     const origin = { cwd, tool: 'Bash' };
-    expect(consumeRetryGrant({ hash: HASH, origin }, { home, now: base + 2_000 })).toBeNull();
+    expect(consumeRetryGrant({ currentSignals: CURRENT, hash: HASH, origin }, { home, now: base + 2_000 })).toBeNull();
     // Rewrite the stored grant as an older/other version, as a same-UID writer could.
     const raw = JSON.parse(readFileSync(retryControlPath(home), 'utf8'));
     delete raw.fence;
     raw.rows[0].grant.exactDigestVersion = 0;
     writeFileSync(retryControlPath(home), JSON.stringify(raw), { mode: 0o600 });
-    expect(consumeRetryGrant({ hash: HASH, exactDigest: EXACT, origin }, { home, now: base + 2_000 })).toBeNull();
+    expect(consumeRetryGrant({ currentSignals: CURRENT, hash: HASH, exactDigest: EXACT, origin }, { home, now: base + 2_000 })).toBeNull();
   });
 
   it('a denial recorded without the exact digest (or under another version) cannot be tapped — no fallback', () => {
@@ -717,6 +722,36 @@ describe('#815 B — terminal-only is enforced inside the grant transaction', ()
     expect(getRetryRow({ actionId: ACTION }, { home })?.grant).toBeUndefined();
     // The terminal keeps its own authority over the same row.
     expect(grantRetry({ id: row.id }, { isInteractive: true }, { home, now: base + 300 }).ok).toBe(true);
+  });
+});
+
+describe('#815 B — tap grants are re-checked against the current verdict when spent', () => {
+  const origin = () => ({ cwd, tool: 'Bash' });
+  const spendWith = (currentSignals: readonly unknown[] | undefined, now: number) =>
+    consumeRetryGrant({ hash: HASH, exactDigest: EXACT, origin: origin(), ...(currentSignals ? { currentSignals } : {}) }, { home, now });
+
+  it.each([
+    ['self-protection-floor', ['external-egress', 'touch-approval-store']],
+    ['catastrophic', ['external-egress', 'recursive-force-delete']],
+    ['unscanned', ['external-egress', 'opaque-script-invocation']],
+    ['unknown', ['external-egress', 'future-signal']],
+    ['incomplete', []],
+    ['absent', undefined],
+  ])('current verdict %s: the tap grant is left unspent and nothing is authorised', (_label, current) => {
+    expect(verify(tapFor(mintOk())).ok).toBe(true);
+    const before = snapshot();
+    expect(spendWith(current as readonly unknown[] | undefined, base + 2_000)).toBeNull();
+    expect(snapshot()).toEqual(before);
+    expect(getRetryRow({ actionId: ACTION }, { home })?.grant?.consumedAt).toBeUndefined();
+    // The same grant is still spent, once, by a verdict a tap may answer.
+    expect(spendWith(CURRENT, base + 2_100)).toMatchObject({ via: 'tap', approver: APPROVER });
+    expect(spendWith(CURRENT, base + 2_200)).toBeNull();
+  });
+
+  it('terminal grants keep their own authority: the current verdict is not read for them', () => {
+    const row = getRetryRow({ actionId: ACTION }, { home })!;
+    expect(grantRetry({ id: row.id }, { isInteractive: true }, { home, now: base + 100 }).ok).toBe(true);
+    expect(spendWith(['external-egress', 'touch-approval-store'], base + 2_000)).toMatchObject({ via: 'tty' });
   });
 });
 

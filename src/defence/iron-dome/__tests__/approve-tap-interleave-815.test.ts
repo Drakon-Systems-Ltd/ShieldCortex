@@ -36,7 +36,7 @@ const hash = rc.hashToolCall('Bash', CALL);
 const exactDigest = rc.exactCallDigest('Bash', CALL);
 const origin = { cwd, tool: 'Bash' };
 const opts = { home, config, key, agentUid };
-const spend = () => !!rc.consumeRetryGrant({ hash, exactDigest, origin }, { home });
+const spend = () => !!rc.consumeRetryGrant({ hash, exactDigest, origin, currentSignals: ['external-egress'] }, { home });
 
 if (!rc.recordDenialFingerprint({ actionId, hash, tool: 'Bash', signals: ['external-egress'], cwd, exactDigest }, { home }).ok) throw new Error('seed');
 const grantOnFile = () => rc.getRetryRow({ actionId }, { home })?.grant ?? null;

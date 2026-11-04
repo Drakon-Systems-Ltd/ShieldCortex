@@ -301,6 +301,47 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     expect(runHook(IRREVERSIBLE).decision).toBe('deny');
   });
 
+  it('#815 B a tap grant is re-checked against the current verdict when spent', () => {
+    // The real guard, with an overlay the test controls: while the overlay
+    // file exists, the verdict on the same call also carries its signals.
+    // It stands in for any reason the current verdict differs from the one
+    // the grant was made on; the call itself is byte-identical throughout.
+    const overlay = join(home, 'verdict-overlay.json');
+    const realGuard = pathToFileURL(join(REAL_DIST, 'tool-action-guard.js')).href;
+    writeFileSync(join(distRoot, 'defence', 'iron-dome', 'tool-action-guard.js'), [
+      `export * from ${JSON.stringify(realGuard)};`,
+      `import * as real from ${JSON.stringify(realGuard)};`,
+      "import { existsSync, readFileSync } from 'node:fs';",
+      'export function evaluateToolCall(...args) {',
+      '  const v = real.evaluateToolCall(...args);',
+      `  if (!existsSync(${JSON.stringify(overlay)})) return v;`,
+      `  return { ...v, signals: [...v.signals, ...JSON.parse(readFileSync(${JSON.stringify(overlay)}, 'utf8'))] };`,
+      '}',
+    ].join('\n'));
+    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl() } });
+    expect(runHook(IRREVERSIBLE).decision).toBe('deny');
+    const row = store()!.rows[0];
+    expect(grantRetry(
+      { id: row.id },
+      { tap: { approver: 'telegram:42', exactDigest: row.exactDigest!, epoch: row.denyEpoch } },
+      { home },
+    )).toMatchObject({ ok: true });
+
+    // The current verdict is now self-protection: denied, the grant unspent.
+    writeFileSync(overlay, JSON.stringify(['touch-approval-store']));
+    const refused = runHook(IRREVERSIBLE);
+    expect(refused.decision).toBe('deny');
+    expect(refused.stderr).not.toContain('consumed operator RETRY grant');
+    expect(store()!.rows.find((r) => r.id === row.id)?.grant?.consumedAt).toBeUndefined();
+
+    // Control — the verdict the grant was made on: allowed once.
+    rmSync(overlay);
+    const retried = runHook(IRREVERSIBLE);
+    expect(retried.decision).toBeUndefined();
+    expect(retried.stderr).toContain('consumed operator RETRY grant');
+    expect(runHook(IRREVERSIBLE).decision).toBe('deny');
+  });
+
   // ── Fingerprint, and only a fingerprint ────────────────────────────────
 
   it('a denial mints a FINGERPRINT and nothing spendable', () => {

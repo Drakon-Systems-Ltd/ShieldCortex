@@ -1,10 +1,12 @@
 /**
  * #815 B — which denials a one-tap approve may answer.
  *
- * One predicate, used twice: by the tap path's read-only preview (mint and
- * verify) and again by `grantRetry` on the CURRENT row inside the retry
+ * One predicate, used three times: by the tap path's read-only preview (mint
+ * and verify), again by `grantRetry` on the CURRENT row inside the retry
  * store's own locked transaction, so a denial that became terminal-only
- * between the preview and the grant is still refused.
+ * between the preview and the grant is still refused, and by
+ * `consumeRetryGrant` on the guard's current verdict for the call that would
+ * spend a tap grant.
  *
  * A tap may answer a denial only when EVERY signal on it is in the reviewed
  * registry below. Anything else — catastrophic, the self-protection floor,
