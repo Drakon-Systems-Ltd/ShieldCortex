@@ -370,6 +370,12 @@ const KEBAB_WORDS = /^[a-z]+(?:-[a-z]+)+$/;
  * one `indexOf` walk for URL userinfo, and a split for long opaque runs.
  */
 export function looksSecretish(text: string): boolean {
+  return namesSecret(text) || hasOpaqueRun(text);
+}
+
+/** The named shapes of `looksSecretish`: `KEY=value`, `--token <value>`, URL
+ *  userinfo. Everything but the long-opaque-run heuristic. */
+function namesSecret(text: string): boolean {
   const WORD = /[\w.-]+/g;
   for (let m = WORD.exec(text); m !== null; m = WORD.exec(text)) {
     const word = m[0];
@@ -389,7 +395,11 @@ export function looksSecretish(text: string): boolean {
     URL_USERINFO.lastIndex = at + 3;
     if (URL_USERINFO.test(text)) return true;
   }
-  // A long opaque run in any one segment of a path, host or argument.
+  return false;
+}
+
+/** A long opaque run in any one segment of a path, host or argument. */
+function hasOpaqueRun(text: string): boolean {
   for (const part of text.split(/[\/\\\s:@?&=#,;]+/)) {
     if (OPAQUE_RUN.test(part) && !KEBAB_WORDS.test(part)) return true;
   }
@@ -410,6 +420,65 @@ export function looksSecretish(text: string): boolean {
 function vendorShapeInAnyCase(text: string): boolean {
   for (const view of new Set([text, text.toUpperCase(), text.toLowerCase()])) {
     if (redactCredentials(view) !== view) return true;
+  }
+  return false;
+}
+
+/** Whitespace other than the ASCII space (NBSP, U+3000, the U+2000 spaces,
+ *  tabs …): a reader sees a word break and `flattenCardText` prints a plain
+ *  space, but the shell does not split a word on it. */
+const UNUSUAL_SPACE_ALL = /[^\S ]/gu;
+/** Every space of any kind, plus the two zero-width ones `\s` leaves out. */
+const ANY_SPACE_ALL = /[\s\u180e\u200b]/gu;
+const nfkc = (text: string): string => text.normalize('NFKC');
+
+/**
+ * #815 A review r4 — the class, not another spelling. Three rounds found a
+ * tool-input-derived string that reached the card in a form no recogniser had
+ * read: a remote name, a lower-cased host, a key split by NBSP or U+3000 or
+ * typed full-width / math-bold. A recogniser sees one string; a reader, a
+ * parser or a later transform (fold, flatten, clip) sees another. So a
+ * credential is looked for in EVERY reading those would produce, before any
+ * of them runs:
+ *
+ *   - as written, and NFKC-normalised (full-width and math-alphanumeric
+ *     letters and digits read as ASCII, compatibility spaces as U+0020);
+ *   - each with hidden, zero-width, soft-hyphen, bidi and line-break
+ *     characters removed;
+ *   - each of those with every non-ASCII space removed as well, and that
+ *     NFKC-normalised again (NBSP becomes a plain space under NFKC, so the
+ *     strip runs on the written text first);
+ *   - and every one of those with ALL whitespace removed (`tight`).
+ *
+ * The vendor redactor reads every view in every case (review B2). The named
+ * generic shapes read every view but the tight ones. The long-opaque-run
+ * heuristic reads the spaced views only, and only when `opaqueRuns` is on:
+ * prose with its spaces taken out IS a long opaque run, so a tight view would
+ * withhold every sentence. Throws what the redactor throws; every caller
+ * withholds on a throw.
+ *
+ * Call sites: `safeTarget` (every target of every sentence: paths, hosts as
+ * written, branches, remotes, ids), `safeHost` (a host the URL parser
+ * rewrote, percent-decoded), `safeHostname` (the WHO line's box name, opaque
+ * runs off), and `withholdSecretCardLine` (the egress gate on every card line
+ * the webhook, and `boundedCard`, send off the box).
+ */
+export function credentialInAnyReading(text: string, opts: { opaqueRuns?: boolean } = {}): boolean {
+  const opaqueRuns = opts.opaqueRuns ?? true;
+  const spaced = new Set<string>();
+  for (const base of [text, nfkc(text)]) {
+    const joined = base.replace(CARD_HIDDEN_ALL, '').replace(CARD_LINE_BREAKS_ALL, '');
+    const unspaced = joined.replace(UNUSUAL_SPACE_ALL, '');
+    for (const view of [base, joined, unspaced, nfkc(unspaced)]) spaced.add(view);
+  }
+  for (const view of spaced) {
+    if (vendorShapeInAnyCase(view)) return true;
+    if (namesSecret(view)) return true;
+    if (opaqueRuns && hasOpaqueRun(view)) return true;
+  }
+  for (const view of spaced) {
+    const tight = view.replace(ANY_SPACE_ALL, '');
+    if (!spaced.has(tight) && vendorShapeInAnyCase(tight)) return true;
   }
   return false;
 }
@@ -440,11 +509,13 @@ export function safeTarget(raw: unknown, maxLen = 60): string {
   if (text.length > MAX_TARGET_CHARS) return WITHHELD_TOO_LONG;
   if (UNUSUAL_CHARS.test(text)) return WITHHELD_UNUSUAL;
   try {
-    if (vendorShapeInAnyCase(text)) return WITHHELD_SECRET;
+    // #815 A review r4: in every reading — NFKC, spaces of any kind and
+    // hidden characters removed — so a sentence is never built around a
+    // full-width or NBSP-split credential.
+    if (credentialInAnyReading(text)) return WITHHELD_SECRET;
   } catch {
     return WITHHELD_SECRET;
   }
-  if (looksSecretish(text)) return WITHHELD_SECRET;
   let shown = text;
   if (HOME && HOME.length > 1 && (shown === HOME || shown.startsWith(`${HOME}/`))) shown = `~${shown.slice(HOME.length)}`;
   return middleClip(shown, maxLen);
@@ -520,7 +591,24 @@ function safeHost(text: string): string | null {
   if (/^[a-z][a-z0-9+.-]*:\/\/[^/\s@]+@/i.test(text) || /^[^@\s/]*:[^@\s/]*@/.test(text)) return WITHHELD_SECRET;
   const asWritten = safeTarget(parts.written, MAX_TARGET_CHARS);
   if (isWithheld(asWritten)) return asWritten;
-  if (parts.written.toLowerCase() !== parts.host) return WITHHELD_UNUSUAL;
+  if (parts.written.toLowerCase() !== parts.host) {
+    // #815 A review r4 (N4): a rewrite beyond case is no longer withheld
+    // blindly. `safeTarget` has read the written host in every reading the
+    // parser's mapping produces (NFKC, ignored characters removed); the
+    // parser also percent-decodes, so that reading is checked here. The
+    // shown host is then checked itself, in every case, below.
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(parts.written);
+    } catch {
+      return WITHHELD_UNUSUAL;
+    }
+    try {
+      if (credentialInAnyReading(decoded)) return WITHHELD_SECRET;
+    } catch {
+      return WITHHELD_SECRET;
+    }
+  }
   return safeTarget(parts.host);
 }
 
@@ -2760,8 +2848,18 @@ function safeHostname(h: string | undefined): string {
   // #815 A review B2 (N2): the name is checked whole, as written, BEFORE it
   // is cut to its first label and middle-clipped. The clip cut a key-shaped
   // name down to a head and a tail no recogniser knows and still showed both.
-  // A name that trips the target gate is not printed at all.
-  if (isWithheld(safeTarget(full, MAX_TARGET_CHARS))) return 'this machine';
+  // A name that trips the credential check is not printed at all.
+  // Review r4: the credential readings, not the target gate's long-opaque-run
+  // heuristic: CI and cloud boxes carry long generated kebab names
+  // (`Mac-mini-runner-<40 hex>`) that are not secrets and were shown
+  // middle-clipped before B2; only a credential-shaped name is withheld.
+  let credential: boolean;
+  try {
+    credential = full.length > MAX_TARGET_CHARS || UNUSUAL_CHARS.test(full) || credentialInAnyReading(full, { opaqueRuns: false });
+  } catch {
+    credential = true;
+  }
+  if (credential) return 'this machine';
   // The box's own label, not its FQDN: CI and cloud hosts carry long
   // generated names (`<id>.local`, `<id>.internal`), and a host that ate the
   // whole line would push the session off the card.
@@ -2866,11 +2964,12 @@ const MAX_CARD_LINE_SCAN = 1024;
  * built somewhere this module cannot see. So the line is put through the
  * credential redactor and the generic shapes again, BEFORE it is clipped — a
  * clip can cut a secret down to a fragment no recogniser knows and still
- * show half of it. Two readings are checked: the line as it will be shown
- * (flattened), and with line breaks and hidden characters removed, so a key
- * split by a zero-width or control character is still seen whole. The vendor
- * redactor reads each in every case (review B2), so a case-folded key is
- * still a key. `boundedCard` runs this on each line as it is received, before
+ * show half of it. Every reading `credentialInAnyReading` lists is checked
+ * (review r4): as received and as it will be shown (flattened), NFKC, with
+ * hidden characters, line breaks and spaces of every kind removed, so a key
+ * split by a zero-width, control, NBSP or U+3000 character, or typed
+ * full-width, is still seen whole. The vendor redactor reads each in every
+ * case (review B2), so a case-folded key is still a key. `boundedCard` runs this on each line as it is received, before
  * it folds whitespace or cuts the line at 300 (review B2): any of those can
  * turn a key into fragments no recogniser knows.
  *
@@ -2882,17 +2981,16 @@ const MAX_CARD_LINE_SCAN = 1024;
 export function withholdSecretCardLine(text: unknown): string {
   if (typeof text !== 'string') return WITHHELD_SECRET;
   if (text.length > MAX_CARD_LINE_SCAN) return WITHHELD_TOO_LONG;
-  const shown = flattenCardText(text);
-  const joined = text.replace(CARD_HIDDEN_ALL, '').replace(CARD_LINE_BREAKS_ALL, '');
-  for (const view of new Set([shown, joined])) {
+  // Review r4: every reading (`credentialInAnyReading`) of the line as
+  // received and as it will be shown (flattened) — NFKC, upper and lower case,
+  // hidden characters and spaces of every kind removed — so a key typed
+  // full-width or split by NBSP / U+3000 is seen whole before any fold or clip.
+  for (const view of new Set([text, flattenCardText(text)])) {
     try {
-      // #815 A review B2: in every case — a line may carry a case-folded
-      // form (a host) whose original the redactor would have known.
-      if (vendorShapeInAnyCase(view)) return WITHHELD_SECRET;
+      if (credentialInAnyReading(view)) return WITHHELD_SECRET;
     } catch {
       return WITHHELD_SECRET;
     }
-    if (looksSecretish(view)) return WITHHELD_SECRET;
   }
   return text;
 }

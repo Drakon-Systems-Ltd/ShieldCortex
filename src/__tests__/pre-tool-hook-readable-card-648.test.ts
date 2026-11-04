@@ -471,8 +471,108 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     expect(denialRows()).toEqual([]);
     expectNoHostKey(raw);
   });
+
+  // #815 A review r4 — the reviewers' r3 rows, through the real hook. A key
+  // split by NBSP or U+3000 (Grok r3), or typed full-width or math-bold
+  // (Astra r3 B3), as a branch or in an SSH-folder path, reached the webhook
+  // card because no recogniser read the form a reader (or NFKC) sees. Every
+  // row is withheld whole, held and headless, and the legacy body and the
+  // denial rows are the base goldens byte for byte.
+  const R4_KEY_SPLIT = ['AK', 'IA'].join('') + 'W7NQ4KPJ2XZT6RHM';
+  const R4_KEY_WIDE = ['AK', 'IA'].join('') + 'M6ZQ3RVN5TXP7LKH';
+  const R4_JWT = `${['ey', 'J'].join('')}hbGciOiJIUzI1NiJ9.${['ey', 'J'].join('')}zdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U`;
+  const wide = (s: string) => [...s].map((c) => (c >= '!' && c <= '~' ? String.fromCharCode(c.charCodeAt(0) + 0xfee0) : c)).join('');
+  const bold = (s: string) => [...s].map((c) => (/[A-Z]/.test(c) ? String.fromCodePoint(0x1d400 + c.charCodeAt(0) - 65)
+    : /[a-z]/.test(c) ? String.fromCodePoint(0x1d41a + c.charCodeAt(0) - 97)
+      : /[0-9]/.test(c) ? String.fromCodePoint(0x1d7ce + c.charCodeAt(0) - 48) : c)).join('');
+  const splitBy = (sep: string) => `${R4_KEY_SPLIT.slice(0, 10)}${sep}${R4_KEY_SPLIT.slice(10)}`;
+  const R4_PUSH_WHAT = 'Force-push to github.com (branch (withheld: looks like a secret)) (git push --force)';
+  const R4_READ_WHAT = 'Read a file in your SSH folder: (withheld: looks like a secret)';
+  const R4_ROWS: Array<[row: string, command: string, secret: string, what: string]> = [
+    ['Grok r3: NBSP-split branch', `git push --force origin ${splitBy('\u00a0')}`, R4_KEY_SPLIT, R4_PUSH_WHAT],
+    ['Grok r3: U+3000-split branch', `git push --force origin ${splitBy('\u3000')}`, R4_KEY_SPLIT, R4_PUSH_WHAT],
+    ['Astra r3 B3: full-width branch', `git push --force origin ${wide(R4_KEY_WIDE)}`, R4_KEY_WIDE, R4_PUSH_WHAT],
+    ['Astra r3 B3: math-bold branch', `git push --force origin ${bold(R4_KEY_WIDE)}`, R4_KEY_WIDE, R4_PUSH_WHAT],
+    ['Astra r3 B3: full-width JWT-shaped branch', `git push --force origin ${wide(R4_JWT)}`, R4_JWT, R4_PUSH_WHAT],
+    ['Astra r3 B3: full-width key in an SSH-folder path', `cat ~/.ssh/${wide(R4_KEY_WIDE)}`, R4_KEY_WIDE, R4_READ_WHAT],
+    ['Astra r3 B3: math-bold key in an SSH-folder path', `cat ~/.ssh/${bold(R4_KEY_WIDE)}`, R4_KEY_WIDE, R4_READ_WHAT],
+    ['Astra r3 B3: full-width JWT-shaped SSH-folder path', `cat ~/.ssh/${wide(R4_JWT)}`, R4_JWT, R4_READ_WHAT],
+    ['NBSP-split key in an SSH-folder path', `cat ~/.ssh/${splitBy('\u00a0')}`, R4_KEY_SPLIT, R4_READ_WHAT],
+    ['U+3000-split key in an SSH-folder path', `cat ~/.ssh/${splitBy('\u3000')}`, R4_KEY_SPLIT, R4_READ_WHAT],
+  ];
+  /** Raw bytes, NFKC, every case, and every 10-character window of the
+   *  secret (the split halves included): no meaningful fragment leaves. */
+  function expectNoR4Secret(raw: string[], secret: string): void {
+    const rowsRaw = lines(join(home, '.shieldcortex', 'denials.jsonl')).join('\n');
+    const windows = Array.from({ length: secret.length - 9 }, (_, i) => secret.slice(i, i + 10).toUpperCase());
+    for (const text of [...raw, rowsRaw]) {
+      const read = text.normalize('NFKC').toUpperCase();
+      expect(text).not.toContain(R4_KEY_SPLIT.slice(0, 10));
+      expect(text).not.toContain(R4_KEY_SPLIT.slice(10));
+      expect(text.normalize('NFKC')).not.toContain(secret);
+      for (const w of windows) expect(read).not.toContain(w);
+    }
+  }
+  const withHash = (golden: string, from: string, to: string) => golden
+    .split(from).join(to)
+    .split(from.slice(0, 12)).join(to.slice(0, 12));
+
+  it('#815 A review r4 control: an ordinary branch and an ordinary SSH-folder path are still named', () => {
+    scratchRepo(ORDINARY_ORIGIN);
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
+    expect(runHook({ command: 'git push --force upstream feature/login-form' }).decision).toBe('ask');
+    expect(runHook({ command: 'git push --force origin main' }, { permissionMode: 'bypassPermissions' }).decision).toBe('deny');
+    expect(runHook({ command: 'cat ~/.ssh/known_hosts' }).decision).toBe('ask');
+    const got = lines(webhookEvidence).map((b) => splitCard(normaliseWebhookBody(b)).card as Record<string, string>);
+    expect(got.map((c) => [c.kind, c.what])).toEqual([
+      ['approval', 'Force-push to the "upstream" remote (branch "feature/login-form") (git push --force)'],
+      ['denial', 'Force-push to github.com (branch "main") (git push --force)'],
+      ['approval', 'Read a file in your SSH folder: "~/.ssh/known_hosts"'],
+    ]);
+  });
+
+  it.each(R4_ROWS)('#815 A review r4: %s never reaches the webhook card (headless denial)', (_row, command, secret, what) => {
+    scratchRepo(ORDINARY_ORIGIN);
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
+    expect(runHook({ command }, { permissionMode: 'bypassPermissions' }).decision).toBe('deny');
+    const raw = lines(webhookEvidence);
+    expect(raw).toHaveLength(1);
+    const { rest, card } = splitCard(normaliseWebhookBody(raw[0]));
+    const push = what === R4_PUSH_WHAT;
+    expect(rest).toBe(push ? GOLDEN_WEBHOOK_DNP_REMOTE : GOLDEN_WEBHOOK_DNP);
+    expect(card).toMatchObject({ version: 1, kind: 'denial', what, approveCommand: 'shieldcortex approve --denial act-<action>' });
+    expect(card!.text).toContain(`What: ${what}`);
+    expect(denialRows()).toEqual(push ? GOLDEN_DENIALS_DNP_REMOTE : GOLDEN_DENIALS_DNP);
+    expect(denialRows().join('\n')).not.toContain('"card"');
+    expectNoR4Secret(raw, secret);
+  });
+
+  it.each(R4_ROWS)('#815 A review r4: %s never reaches the webhook card (held approval)', (_row, command, secret, what) => {
+    scratchRepo(ORDINARY_ORIGIN);
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook' });
+    expect(runHook({ command }).decision).toBe('ask');
+    const raw = lines(webhookEvidence);
+    expect(raw).toHaveLength(1);
+    const { rest, card } = splitCard(normaliseWebhookBody(raw[0]));
+    const hash = String(JSON.parse(rest).hash);
+    expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    const push = what === R4_PUSH_WHAT;
+    expect(rest).toBe(push ? withHash(GOLDEN_WEBHOOK_ASK_REMOTE, REMOTE_ASK_HASH, hash) : withHash(GOLDEN_WEBHOOK_ASK, ASK_HASH, hash));
+    expect(card).toMatchObject({
+      version: 1,
+      kind: 'approval',
+      what,
+      approveCommand: `shieldcortex approve ${hash.slice(0, 12)} --attempt <attempt>`,
+      denyCommand: `shieldcortex deny ${hash.slice(0, 12)} --attempt <attempt>`,
+    });
+    expect(card!.text).toContain(`What: ${what}`);
+    expect(denialRows()).toEqual([]);
+    expectNoR4Secret(raw, secret);
+  });
 });
 
+// The hash of `cat ~/.ssh/config`, as the ask golden below carries it.
+const ASK_HASH = '1d3e3c896ae2a9a396eacda6e9c44cf16bb9d3b69550ec941f95ca76a9151178';
 const GOLDEN_WEBHOOK_ASK = "{\"event\":\"approval_requested\",\"hash\":\"1d3e3c896ae2a9a396eacda6e9c44cf16bb9d3b69550ec941f95ca76a9151178\",\"shortHash\":\"1d3e3c896ae2\",\"attemptId\":\"<attempt>\",\"tool\":\"Bash\",\"command\":\"Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\",\"signals\":[\"touch-sensitive-path\"],\"severity\":\"dangerous\",\"reason\":\"Action Guard requires approval; inspect local audit for details.\",\"judge\":null,\"text\":\"🛡️ ShieldCortex — approval needed\\n\\nTool:      Bash\\nCommand:   Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\\nTripped:   touch-sensitive-path\\nTier:      dangerous\\nReason:    Action Guard requires approval; inspect local audit for details.\\n\\nAI judge:  no judge ran — this verdict is rules-only\\n\\n[Approve]  shieldcortex approve 1d3e3c896ae2 --attempt <attempt>\\n[Deny]     shieldcortex deny 1d3e3c896ae2 --attempt <attempt>\",\"approveCommand\":\"shieldcortex approve 1d3e3c896ae2 --attempt <attempt>\",\"ts\":\"<ts>\",\"denyCommand\":\"shieldcortex deny 1d3e3c896ae2 --attempt <attempt>\",\"sessionId\":\"sc-<session>\"}";
 const GOLDEN_WEBHOOK_DNP = "{\"event\":\"action_guard_denial\",\"outcome\":\"denied_no_prompt_surface\",\"tool\":\"Bash\",\"surface\":\"Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\",\"signals\":[\"touch-sensitive-path\"],\"severity\":\"dangerous\",\"reason\":\"Action Guard required approval but this session has no prompt surface; the tool call was denied.\",\"correlationId\":\"act-<action>\",\"actionId\":\"act-<action>\",\"sessionId\":\"sc-<session>\",\"origin\":\"claude-code-hook\",\"detectedAt\":\"<ts>\",\"text\":\"ShieldCortex — held (headless, no prompt)\\n\\nWhat:    1 dangerous step(s) blocked in this 15m window\\nTools:   Bash×1\\nWhy:     touch-sensitive-path×1\\nLast:    act-<action>\\n\\nRetry:   No Approve card this time (retry cards off).\\n\\nOne-shot from a real terminal on that host:\\n  shieldcortex approve --denial act-<action>\\nThen retry the same action once. Approve is not forever.\\n\\nNote:    First hold in this window; further holds are quiet (coalesced).\\nForensics: ~/.shieldcortex/denials.jsonl (command not included here).\\nThis message is visibility — not a tappable Approve surface.\",\"ts\":\"<ts>\"}";
 const GOLDEN_DENIALS_DNP: string[] = [

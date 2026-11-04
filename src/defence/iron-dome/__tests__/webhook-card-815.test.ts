@@ -31,6 +31,7 @@ import {
   buildApprovalCard,
   clipCardLine,
   describeSignals,
+  describeWho,
   withholdSecretCardLine,
   type ApprovalCardSummary,
 } from '../approval-card.js';
@@ -645,8 +646,17 @@ describe('#815 A review B2 — a credential is checked as written, before any fo
       // so only the written-equals-shown check withholds it. (Percent-encoded,
       // the entropy net already knows the written text.)
       const folded = (url: string) => card(`curl ${JSON.stringify(url)}`).action;
-      expect(folded(`https://${wide(JWT_HOST)}.example.invalid/x`)).toBe('Download from (withheld: unusual characters) (curl)');
+      // Review r4: the written host is now read NFKC-normalised as well, so
+      // the full-width JWT is recognised as written: withheld as a secret.
+      expect(folded(`https://${wide(JWT_HOST)}.example.invalid/x`)).toBe('Download from (withheld: looks like a secret) (curl)');
       expect(folded(`https://%65${JWT_HOST.slice(1)}.example.invalid/x`)).toBe('Download from (withheld: looks like a secret) (curl)');
+    });
+
+    it('review r4 (N4): a benign host the parser rewrites (percent-encoded, full-width, IDN) is named as the parser reads it', () => {
+      const wide = (s: string) => [...s].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join('');
+      expect(card('curl https://%63ollector.example.net/x').action).toBe('Download from collector.example.net (curl)');
+      expect(card(`curl https://${wide('collector')}.example.net/x`).action).toBe('Download from collector.example.net (curl)');
+      expect(card('curl https://b\u00fccher.example/x').action).toBe('Download from xn--bcher-kva.example (curl)');
     });
 
     it('controls: an ordinary host is still named, in lower case, whatever case it was typed in', () => {
@@ -654,5 +664,100 @@ describe('#815 A review B2 — a credential is checked as written, before any fo
       expect(card('ssh deploy@Build-01.example.com').action).toBe('Log in to build-01.example.com over SSH');
       expect(card('scp ./build.tgz deploy@asia-east1.example.com:/srv/').action).toBe('Copy files to asia-east1.example.com (scp)');
     });
+  });
+});
+
+describe('#815 A review r4 — the egress gate recognises a credential in every reading, before any fold or clip', () => {
+  // Built at runtime so no secret-shaped literal is committed.
+  const KEY = ['AK', 'IA'].join('') + 'W7NQ4KPJ2XZT6RHM';
+  const KEY_WIDE = ['AK', 'IA'].join('') + 'M6ZQ3RVN5TXP7LKH';
+  const JWT = `${['ey', 'J'].join('')}hbGciOiJIUzI1NiJ9.${['ey', 'J'].join('')}zdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U`;
+  const wide = (s: string) => [...s].map((c) => (c >= '!' && c <= '~' ? String.fromCharCode(c.charCodeAt(0) + 0xfee0) : c)).join('');
+  const bold = (s: string) => [...s].map((c) => (/[A-Z]/.test(c) ? String.fromCodePoint(0x1d400 + c.charCodeAt(0) - 65)
+    : /[a-z]/.test(c) ? String.fromCodePoint(0x1d41a + c.charCodeAt(0) - 97)
+      : /[0-9]/.test(c) ? String.fromCodePoint(0x1d7ce + c.charCodeAt(0) - 48) : c)).join('');
+  const split = (sep: string) => `${KEY.slice(0, 10)}${sep}${KEY.slice(10)}`;
+  /** Raw, NFKC, every case, every 10-character window. */
+  function expectNoSecret(text: string, secret: string): void {
+    const read = text.normalize('NFKC').toUpperCase();
+    expect(text.normalize('NFKC')).not.toContain(secret);
+    for (let i = 0; i + 10 <= secret.length; i += 1) expect(read).not.toContain(secret.slice(i, i + 10).toUpperCase());
+  }
+
+  // Hand-built lines: these reach the gate without `safeTarget`, so the gate
+  // alone must withhold them (a field built across a process boundary).
+  const ROWS: Array<[label: string, secretText: string, secret: string]> = [
+    ['NBSP-split key (Grok r3)', split('\u00a0'), KEY],
+    ['U+3000-split key (Grok r3)', split('\u3000'), KEY],
+    ['U+2007 figure-space-split key', split('\u2007'), KEY],
+    ['U+202F narrow-NBSP-split key', split('\u202f'), KEY],
+    ['ASCII-space-split key', split(' '), KEY],
+    ['soft-hyphen + NBSP split key', `${KEY.slice(0, 6)}\u00ad${KEY.slice(6, 12)}\u00a0${KEY.slice(12)}`, KEY],
+    ['full-width key (Astra r3 B3)', wide(KEY_WIDE), KEY_WIDE],
+    ['math-bold key (Astra r3 B3)', bold(KEY_WIDE), KEY_WIDE],
+    ['full-width key split by U+3000', `${wide(KEY_WIDE.slice(0, 8))}\u3000${wide(KEY_WIDE.slice(8))}`, KEY_WIDE],
+    ['full-width lower-case key', wide(KEY_WIDE.toLowerCase()), KEY_WIDE],
+    ['full-width JWT', wide(JWT), JWT],
+    ['math-bold JWT', bold(JWT), JWT],
+  ];
+
+  it.each(ROWS)('%s as a branch: the line is withheld whole on both paths', async (_label, secretText, secret) => {
+    const action = `Force-push to the "origin" remote (branch "${secretText}") (git push --force)`;
+    expect(withholdSecretCardLine(action)).toBe(WITHHELD_SECRET);
+    for (const got of await overBothPaths({ ...CARD, action })) {
+      expect(got.card.what).toBe(WITHHELD_SECRET);
+      expectNoSecret(got.body, secret);
+    }
+  });
+
+  it.each(ROWS)('%s in an SSH-folder path, WHY and WHO: each line is withheld whole', async (_label, secretText, secret) => {
+    for (const [field, out] of [['action', 'what'], ['reason', 'why'], ['who', 'who']] as const) {
+      const value = field === 'action' ? `Read a file in your SSH folder: "~/.ssh/${secretText}"` : `about ${secretText} now`;
+      for (const got of await overBothPaths({ ...CARD, [field]: value })) {
+        expect(got.card[out]).toBe(WITHHELD_SECRET);
+        expectNoSecret(got.body, secret);
+      }
+    }
+  });
+
+  it('a key the clip would cut, typed full-width, is withheld before the clip', async () => {
+    const action = `Force-push to the "origin" remote (branch "${'a'.repeat(100)}${wide(KEY_WIDE)}") (git push --force)`;
+    for (const got of await overBothPaths({ ...CARD, action })) {
+      expect(got.card.what).toBe(WITHHELD_SECRET);
+      expectNoSecret(got.body, KEY_WIDE);
+    }
+  });
+
+  it('controls: ordinary lines, hosts, remotes, branches and Unicode text come back unchanged', () => {
+    for (const line of [
+      'Force-push to github.com (branch "main") (git push --force)',
+      'Force-push to the "upstream" remote (branch "feature/login-form") (git push --force)',
+      'Push to the "origin" remote (branch "release/2026-11") (git push)',
+      'Send data to asia-east1-docker.pkg.dev (git fetch)',
+      'Read a file in your SSH folder: "~/.ssh/config"',
+      `Force-push to the "origin" remote (branch "${wide('main')}") (git push --force)`,
+      'Read a file: "~/Documents/My\u00a0Notes/2026 plan.txt"',
+      'Why: sends data off this machine; pushes to a remote branch (may overwrite history)',
+      'Who: Claude Code on jarvis · session sc-fedcba9876543210',
+      'Who: OpenClaw agent "main" on Mac-mini-runne…a1b2c3d · Telegram chat #062d87cd',
+      'Allow once or deny · expires in 10 min',
+    ]) expect(withholdSecretCardLine(line)).toBe(line);
+  });
+});
+
+describe('#815 A review r4 — the WHO host: a credential-shaped name is withheld, a long generated name is clipped', () => {
+  const KEY = ['AK', 'IA'].join('') + 'W7NQ4KPJ2XZT6RHM';
+  const wide = (s: string) => [...s].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join('');
+  it('a long generated kebab hostname is middle-clipped, as before B2', () => {
+    expect(describeWho({ plane: 'claude-code', host: `Mac-mini-runner-${'0a1b2c3d'.repeat(5)}.local` })).toMatch(/^Claude Code on Mac-min[a-z0-9-]*…[0-9a-f]+$/u);
+  });
+  it.each([
+    ['as written', `${KEY}.local`],
+    ['lower case', `${KEY.toLowerCase()}.local`],
+    ['full-width', wide(KEY)],
+    ['NBSP-split', `${KEY.slice(0, 10)}\u00a0${KEY.slice(10)}`],
+  ])('a key-shaped hostname (%s) is never printed', (_label, host) => {
+    const who = describeWho({ plane: 'claude-code', host });
+    expect(who).toBe('Claude Code on this machine');
   });
 });
