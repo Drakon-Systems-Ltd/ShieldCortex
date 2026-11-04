@@ -21,12 +21,19 @@
  *      answer only ever counts when it lands on the #118 approval store.
  *
  * #815 A: a held call or a headless denial can also carry a versioned `card`
- * block — the #648 plain-English what/why/who, the exact approve command, and
- * (denials only) the Approve/Deny choices bound to the action id. Version 1
- * has no tap path; see `WEBHOOK_CARD_VERSION`.
+ * block — a fixed-template what/why/who, the exact approve command, and
+ * (denials only) the Approve/Deny choices bound to the action id. The card
+ * never shows the call's target (see `cardLines`). Version 1 has no tap path;
+ * see `WEBHOOK_CARD_VERSION`.
  */
 import { createHmac } from 'node:crypto';
-import { clipCardLine, withholdSecretCardLine, type ApprovalCardSummary } from './approval-card.js';
+import {
+  clipCardLine,
+  fixedTemplateAction,
+  fixedTemplateReason,
+  withholdSecretCardLine,
+  type ApprovalCardSummary,
+} from './approval-card.js';
 import type {
   ActionGuardOutcomeNotification,
   AnyOperatorNotification,
@@ -119,8 +126,8 @@ export interface WebhookCard {
    *  'denial'   — the call is already refused; approving authorises a RETRY. */
   kind: 'approval' | 'denial';
   headline: string;
-  /** Plain-English WHAT, built on the box with every target redactor-passed,
-   *  and the whole line put through the redactor again before it is sent. */
+  /** Plain-English WHAT: one of the fixed `CARD_ACTION_TEMPLATES`. It never
+   *  names the target (no branch, path, host, URL or argument). */
   what: string;
   why: string;
   who: string;
@@ -148,20 +155,24 @@ const SHORT_HASH_SHAPE = /^[0-9a-f]{12}$/i;
 const ATTEMPT_ID_SHAPE = /^[0-9a-f]{8,64}$/i;
 
 /**
- * The card's three lines: the only card text built from the call and its
- * context (the rest is fixed wording or a shape-checked id).
- * #815 A review B1: each line goes through the credential redactor
- * (`withholdSecretCardLine`) whole, BEFORE it is clipped and before anything
- * is serialised, and a line that trips it is withheld whole. Nothing here
- * relies on the builder having redacted every field: the remote-name
- * fallback once skipped it, and this is the last point before the card
- * leaves the box. `text` is built from these lines only.
+ * The card's three lines. `text` is built from these lines only; everything
+ * else on the card is fixed wording or a shape-checked id.
+ *
+ * #815 A (descoped after review r5): the card never shows the call's target.
+ * WHAT is one of the fixed `CARD_ACTION_TEMPLATES` and WHY is made of the
+ * guard's fixed phrases; anything else handed in is replaced here, at the
+ * last point before the card leaves the box, whoever built it (the hook
+ * builds this card with `buildTemplateApprovalCard`). WHO is the agent, the
+ * box's own hostname (through its credential check) and the session id.
+ * Review B1, kept as defence in depth: each line also goes through the
+ * credential redactor (`withholdSecretCardLine`) whole, before it is clipped,
+ * and a line that trips it is withheld whole.
  */
 function cardLines(card: ApprovalCardSummary): { what: string; why: string; who: string } {
   const line = (text: string, max: number) => clipCardLine(withholdSecretCardLine(text), max);
   return {
-    what: line(card.action, CARD_WHAT_MAX),
-    why: line(card.reason, CARD_WHY_MAX),
+    what: line(fixedTemplateAction(card.action), CARD_WHAT_MAX),
+    why: line(fixedTemplateReason(card.reason), CARD_WHY_MAX),
     who: line(card.who, CARD_WHO_MAX),
   };
 }

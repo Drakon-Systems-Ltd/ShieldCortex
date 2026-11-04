@@ -146,11 +146,12 @@ export interface OperatorNotification {
   actionId?: string;
   /** #648 — the plain-English summary an approval CARD shows (what, why, who).
    *  Only on 'approval_requested'. Read by the card channel
-   *  (openclaw-approval-channel.ts) and, since #815 A, laid out by the webhook
-   *  channel as its versioned `card` block. Every target in it has been
-   *  through the credential redactor on the box, and the webhook puts each
-   *  whole line through it again before sending (review B1); the values-free
-   *  `command` surface and `denials.jsonl` are unchanged. */
+   *  (openclaw-approval-channel.ts), where every target in it has been
+   *  through the credential redactor on the box, and, since #815 A, laid out
+   *  by the webhook channel as its versioned `card` block: there the hook
+   *  hands a fixed-template card that never names the target, and the
+   *  webhook sends only fixed template lines whatever it is handed. The
+   *  values-free `command` surface and `denials.jsonl` are unchanged. */
   card?: ApprovalCardSummary;
 }
 
@@ -227,13 +228,13 @@ export interface ActionGuardOutcomeNotification {
   sessionId?: string;
   origin?: string;
   detectedAt: string;
-  /** #815 A — the #648 plain-English what/why/who for the operator's chat.
-   *  Only on `action_guard_denial`, built on the box by approval-card.ts where
-   *  every target has been through the credential redactor, and bounded again
-   *  here (`boundedCard`). The webhook payload carries it as a versioned
-   *  `card` block, each line put through the redactor again first (review
-   *  B1); `denials.jsonl` never does — the hook hands it to this builder
-   *  only, never to the forensic row. */
+  /** #815 A — the plain-English what/why/who for the operator's chat. Only
+   *  on `action_guard_denial`: the fixed-template card built on the box by
+   *  approval-card.ts (`buildTemplateApprovalCard`), which never names the
+   *  target, bounded again here (`boundedCard`). The webhook payload carries
+   *  it as a versioned `card` block of fixed template lines; `denials.jsonl`
+   *  never does — the hook hands it to this builder only, never to the
+   *  forensic row. */
   card?: ApprovalCardSummary;
 }
 

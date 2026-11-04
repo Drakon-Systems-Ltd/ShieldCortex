@@ -716,16 +716,36 @@ function safeHost(text: string): string | null {
 const SENSITIVE_PATH_RE =
   /(?:^|[\/~])\.ssh(?:\/|$)|authorized_keys|\bid_(?:rsa|dsa|ecdsa|ed25519)\b|\/etc\/(?:passwd|shadow|gshadow|sudoers)\b|\.aws\/|(?:^|\/)\.env(?:\.[\w.-]+)?$|\.gnupg|\.netrc|\.npmrc|\.pgpass|\.git-credentials|\.docker\/config\.json|\.kube\/config|\.shieldcortex(?:\/|$)/i;
 
+/** Where a sensitive file lives, in fixed words. ONE list: the #648 sentence
+ *  (`locationOf`) and the #815 A webhook template (`CARD_ACTION_TEMPLATES`)
+ *  both read it. */
+const CARD_PLACES = Object.freeze({
+  ssh: 'in your SSH folder',
+  aws: 'in your AWS folder',
+  gpg: 'in your GPG keyring',
+  shieldcortex: "in ShieldCortex's own folder",
+  accounts: 'holding system accounts or passwords',
+  secrets: 'of secret settings',
+  logins: 'holding saved logins',
+});
+type CardPlace = keyof typeof CARD_PLACES;
+
+/** Which of `CARD_PLACES` a path is in, or null. */
+function placeOf(path: string): CardPlace | null {
+  if (/(?:^|[\/~])\.ssh(?:\/|$)|authorized_keys|\bid_(?:rsa|dsa|ecdsa|ed25519)\b/i.test(path)) return 'ssh';
+  if (/\.aws\//i.test(path)) return 'aws';
+  if (/\.gnupg/i.test(path)) return 'gpg';
+  if (/\.shieldcortex(?:\/|$)/i.test(path)) return 'shieldcortex';
+  if (/\/etc\/(?:passwd|shadow|gshadow|sudoers)\b/i.test(path)) return 'accounts';
+  if (/(?:^|\/)\.env(?:\.[\w.-]+)?$/i.test(path)) return 'secrets';
+  if (/\.netrc|\.npmrc|\.pgpass|\.git-credentials|\.docker\/config\.json|\.kube\/config/i.test(path)) return 'logins';
+  return null;
+}
+
 /** Where a sensitive path lives, for the WHAT line ("… in your SSH folder"). */
 function locationOf(path: string): string {
-  if (/(?:^|[\/~])\.ssh(?:\/|$)|authorized_keys|\bid_(?:rsa|dsa|ecdsa|ed25519)\b/i.test(path)) return ' in your SSH folder';
-  if (/\.aws\//i.test(path)) return ' in your AWS folder';
-  if (/\.gnupg/i.test(path)) return ' in your GPG keyring';
-  if (/\.shieldcortex(?:\/|$)/i.test(path)) return " in ShieldCortex's own folder";
-  if (/\/etc\/(?:passwd|shadow|gshadow|sudoers)\b/i.test(path)) return ' holding system accounts or passwords';
-  if (/(?:^|\/)\.env(?:\.[\w.-]+)?$/i.test(path)) return ' of secret settings';
-  if (/\.netrc|\.npmrc|\.pgpass|\.git-credentials|\.docker\/config\.json|\.kube\/config/i.test(path)) return ' holding saved logins';
-  return '';
+  const place = placeOf(path);
+  return place ? ` ${CARD_PLACES[place]}` : '';
 }
 
 // ── Shell parsing: just enough to find the verb and its target ──────────────
@@ -1943,16 +1963,16 @@ function describeGit(args: string[], ctx: ShellContext): Described {
     const branch = sub === 'push' ? pos.slice(1).map((b) => b.replace(/^[+:]/, '')).find(Boolean) : undefined;
     const branchText = branch ? ` (branch ${quoted(branch, 40)})` : '';
     // The WHY line carries "may overwrite history"; the WHAT stays short.
-    if (force) return { category: 'git', sentence: `Force-push to ${where}${branchText} (git push --force)` };
-    if (del) return { category: 'git', sentence: `Delete a branch on ${where}${branchText} (git push --delete)` };
-    return { category: 'network', sentence: `Send data to ${where} (git ${sub})` };
+    if (force) return { category: 'git', kind: 'force-push', sentence: `Force-push to ${where}${branchText} (git push --force)` };
+    if (del) return { category: 'git', kind: 'delete-remote-branch', sentence: `Delete a branch on ${where}${branchText} (git push --delete)` };
+    return { category: 'network', kind: 'git-remote', sentence: `Send data to ${where} (git ${sub})` };
   }
   if (sub === 'branch' && rest.some((a) => /^(?:-D|-d|--delete)$/.test(a))) {
     const name = operands('git', rest)[0];
-    return { category: 'git', sentence: name ? `Delete a git branch: ${quoted(name, 40)}` : 'Delete a git branch' };
+    return { category: 'git', kind: 'delete-branch', sentence: name ? `Delete a git branch: ${quoted(name, 40)}` : 'Delete a git branch' };
   }
-  if (sub === 'reset' && rest.includes('--hard')) return { category: 'git', sentence: 'Throw away uncommitted changes (git reset --hard)' };
-  if (sub === 'clean') return { category: 'git', sentence: 'Delete untracked files in the repository (git clean)' };
+  if (sub === 'reset' && rest.includes('--hard')) return { category: 'git', kind: 'discard-changes', sentence: 'Throw away uncommitted changes (git reset --hard)' };
+  if (sub === 'clean') return { category: 'git', kind: 'clean-repo', sentence: 'Delete untracked files in the repository (git clean)' };
   return { category: 'git', sentence: sub && GIT_SUBCOMMANDS.has(sub) ? `Change the git repository (git ${sub})` : 'Change the git repository' };
 }
 
@@ -2010,6 +2030,9 @@ type Category =
 interface Described {
   category: Category;
   sentence: string;
+  /** #815 A: which fixed webhook template stands for it, where the category
+   *  alone is too coarse (a force-push, not just "git"). */
+  kind?: CardActionKind;
 }
 
 interface ShellContext {
@@ -2173,19 +2196,20 @@ function describeNetworkTool(prog: string, args: string[], ctx: ShellContext, wr
       || args.some((a) => /^(?:-X|--request=|--method=)(?:POST|PUT|PATCH|DELETE)$/i.test(a));
     const egress = ctx.signals.some((s) => /egress|exfil/.test(s));
     const verb = sends || egress ? 'Send data to' : 'Download from';
+    const kind: CardActionKind = sends || egress ? 'send' : 'download';
     // R3: where the download lands is part of WHAT it does.
     const outputs = [...(writerOutputs(prog, args)?.outputs ?? []), ...writes.filter((w) => !isBitBucket(w))];
     if (outputs.length > 0) {
       const dest = mostSensitive(outputs);
-      return { category: 'network', sentence: `${verb} ${host ?? 'a web address it could not show safely'} and write to ${quoted(dest)}${andMore(outputs.length - 1)}` };
+      return { category: 'network', kind, sentence: `${verb} ${host ?? 'a web address it could not show safely'} and write to ${quoted(dest)}${andMore(outputs.length - 1)}` };
     }
-    return { category: 'network', sentence: host ? `${verb} ${host} (${prog})` : `${verb} a web address it could not show safely (${prog})` };
+    return { category: 'network', kind, sentence: host ? `${verb} ${host} (${prog})` : `${verb} a web address it could not show safely (${prog})` };
   }
   if (prog === 'ssh' || prog === 'mosh') {
     // ssh options that consume the next word (`-p 22`, `-i <key>`) are not the destination.
     const dest = operands(prog, args)[0];
     const host = dest ? safeHost(dest.includes('@') ? dest : `x@${dest}`) : null;
-    return { category: 'network', sentence: host ? `Log in to ${host} over SSH` : 'Log in to another machine over SSH' };
+    return { category: 'network', kind: 'remote-login', sentence: host ? `Log in to ${host} over SSH` : 'Log in to another machine over SSH' };
   }
   if (COPY_REMOTE.has(prog)) {
     const pos = operands(prog, args);
@@ -2193,16 +2217,16 @@ function describeNetworkTool(prog: string, args: string[], ctx: ShellContext, wr
     if (remoteIdx === -1 && prog === 'rsync') return null;
     const host = remoteIdx !== -1 ? safeHost(pos[remoteIdx]) : null;
     const where = host ?? 'another machine';
-    return { category: 'network', sentence: remoteIdx === pos.length - 1 ? `Copy files to ${where} (${prog})` : `Copy files from ${where} (${prog})` };
+    return { category: 'network', kind: 'remote-copy', sentence: remoteIdx === pos.length - 1 ? `Copy files to ${where} (${prog})` : `Copy files from ${where} (${prog})` };
   }
   if (RAW_SOCKETS.has(prog)) {
     const host = operands(prog, args)
       .filter((a) => (/[A-Za-z]/.test(a) ? /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(a) : /^\d{1,3}(?:\.\d{1,3}){3}$/.test(a)))
       .map((a) => safeHost(`x@${a}`)).find((h) => h && !isWithheld(h));
-    return { category: 'network', sentence: host ? `Open a raw network connection to ${host} (${prog})` : `Open a raw network connection (${prog})` };
+    return { category: 'network', kind: 'raw-socket', sentence: host ? `Open a raw network connection to ${host} (${prog})` : `Open a raw network connection (${prog})` };
   }
   if ((prog === 'npm' || prog === 'pnpm' || prog === 'yarn') && args[0] === 'publish') {
-    return { category: 'network', sentence: `Publish a package to the ${prog} registry` };
+    return { category: 'network', kind: 'publish', sentence: `Publish a package to the ${prog} registry` };
   }
   return null;
 }
@@ -2348,7 +2372,7 @@ function describeProgram(step: Step, ctx: ShellContext): Described | null {
   if (READERS.has(prog)) {
     // `cat SRC > /dev/tcp/host/port` sends SRC to host (#648 r6 B2).
     const socket = socketSend(seg, step.u);
-    if (socket) return { category: 'network', sentence: sendPhrase(socket.files, socket.host) };
+    if (socket) return { category: 'network', kind: 'send', sentence: sendPhrase(socket.files, socket.host) };
     // `cat SRC > DST` copies SRC: the card names the source, not just the
     // harmless-looking destination (#648 r2 S3). `sort -o`, `uniq IN OUT`
     // and `xxd IN OUT` write as well (#648 r3 R3).
@@ -2374,8 +2398,8 @@ function describeProgram(step: Step, ctx: ShellContext): Described | null {
     const patternByFlag = args.some((a) => /^(?:-[ef]|--regexp|--file)(?:=.*)?$/.test(a));
     const files = patternByFlag ? pos : pos.slice(1);
     return files.length === 0
-      ? { category: 'read', sentence: `Search inside files (${prog})` }
-      : { category: 'read', sentence: pathPhrase('Search inside', files) };
+      ? { category: 'read', kind: 'search', sentence: `Search inside files (${prog})` }
+      : { category: 'read', kind: 'search', sentence: pathPhrase('Search inside', files) };
   }
   if (DELETERS.has(prog)) {
     const recursive = prog === 'rmdir' || args.some((a) => /^-[A-Za-z]*[rR][A-Za-z]*$/.test(a) || a === '--recursive');
@@ -2391,7 +2415,7 @@ function describeProgram(step: Step, ctx: ShellContext): Described | null {
       || args.some((a, i) => (a === '-exec' || a === '-execdir') && /^(?:rm|shred|unlink)$/.test(basename(args[i + 1] ?? '')));
     const root = args[0] && !args[0].startsWith('-') && !args[0].startsWith('(') && args[0] !== '!' ? quoted(args[0]) : null;
     if (deletes) return { category: 'delete', sentence: `Delete the files it finds under: ${root ?? 'the current folder'}` };
-    return { category: 'read', sentence: root ? `Search for files under: ${root}` : 'Search for files' };
+    return { category: 'read', kind: 'search', sentence: root ? `Search for files under: ${root}` : 'Search for files' };
   }
   if (prog === 'mv' || prog === 'cp' || prog === 'install' || prog === 'ln') {
     const p = parseArgs(prog, args);
@@ -2454,7 +2478,7 @@ function describeProgram(step: Step, ctx: ShellContext): Described | null {
   const install = describeInstall(prog, args);
   if (install) return install;
   if (RUNNERS.has(prog)) {
-    return { category: 'install', sentence: pos[0] ? `Download and run a package: ${quoted(pos[0], 40)} (${prog})` : `Download and run a package (${prog})` };
+    return { category: 'install', kind: 'run-package', sentence: pos[0] ? `Download and run a package: ${quoted(pos[0], 40)} (${prog})` : `Download and run a package (${prog})` };
   }
   const stop = describeStop(prog, args, ctx);
   if (stop) return stop;
@@ -2603,7 +2627,7 @@ function describeSendFlow(pipelineSteps: Step[]): Flow | null {
   const raw = RAW_SOCKETS.has(step.u.prog);
   const dest = sender.dest ?? (raw ? 'another machine' : NO_WEB_HOST);
   const sentence = files.length > 0 ? sendPhrase(files, dest) : `Send data to ${dest} (${step.u.prog})`;
-  return { category: 'network', sentence: withSudo(sentence, step), step, members: pipelineSteps };
+  return { category: 'network', kind: 'send', sentence: withSudo(sentence, step), step, members: pipelineSteps };
 }
 
 /** Does this WHAT show `cls`? Read from the sentence and its kind. */
@@ -2695,6 +2719,9 @@ export interface ActionDescription {
   confident: boolean;
   /** Which entries of `OUTSIDE_UNDERSTOOD_SUBSET` the command met. */
   doubts: readonly ShellDoubt[];
+  /** #815 A: the key of the fixed webhook WHAT (`CARD_ACTION_TEMPLATES`)
+   *  that stands for this action. A key, never text from the input. */
+  actionClass: CardActionClass;
 }
 
 /** The confidence gate's switch. Mutation checks only; nothing sets it off. */
@@ -2768,8 +2795,8 @@ function describeParsedShell(command: string, ctxIn: ShellContext): ActionDescri
   const ctx: ShellContext = { ...ctxIn };
   const { segments, pipelines, truncated, doubts } = parseShell(command);
   const tooLong = truncated ? ` ${COMMAND_TOO_LONG}` : '';
-  const generic = (): ActionDescription => ({ text: `${GENERIC_SHELL}${tooLong}`, confident: false, doubts: [...doubts] });
-  if (segments.length === 0) return { text: `${UNSUMMARISABLE_SHELL}${tooLong}`, confident: false, doubts: [...doubts] };
+  const generic = (): ActionDescription => ({ text: `${GENERIC_SHELL}${tooLong}`, confident: false, doubts: [...doubts], actionClass: 'shell' });
+  if (segments.length === 0) return { text: `${UNSUMMARISABLE_SHELL}${tooLong}`, confident: false, doubts: [...doubts], actionClass: 'shell' };
   if (segments.length > MAX_STEPS) doubts.add('too-many-steps');
   const steps: Step[] = [];
   let dirChanged = false;
@@ -2834,9 +2861,9 @@ function describeParsedShell(command: string, ctxIn: ShellContext): ActionDescri
         if (chosen) break;
       }
     }
-    if (!chosen) return { text: `${UNATTRIBUTED_SHELL}${tooLong}`, confident: false, doubts: [...doubts] };
+    if (!chosen) return { text: `${UNATTRIBUTED_SHELL}${tooLong}`, confident: false, doubts: [...doubts], actionClass: 'shell' };
   }
-  if (!chosen) return { text: `${UNSUMMARISABLE_SHELL}${tooLong}`, confident: false, doubts: [...doubts] };
+  if (!chosen) return { text: `${UNSUMMARISABLE_SHELL}${tooLong}`, confident: false, doubts: [...doubts], actionClass: 'shell' };
   // A download that is run is one action with the step that runs it.
   members ??= chosen.step.feed ? [chosen.step.feed, chosen.step] : [chosen.step];
   // R1 (#648 r5): every signal on the verdict is shown by the WHAT, and is
@@ -2860,7 +2887,7 @@ function describeParsedShell(command: string, ctxIn: ShellContext): ActionDescri
     doubts.add('hidden-write');
     return generic();
   }
-  return { text, confident: true, doubts: [...doubts] };
+  return { text, confident: true, doubts: [...doubts], actionClass: shellActionClass(chosen, members) };
 }
 
 // ── Non-shell tools ──────────────────────────────────────────────────────────
@@ -2904,45 +2931,46 @@ export function describeAction(a: ApprovalCardActionInput): ActionDescription {
   const signals = Array.isArray(a.signals) ? a.signals.map(String) : [];
   const ctx: ShellContext = { signals, cwd: a.cwd, agentPid: a.agentPid, procRoot: a.procRoot, gitSystemConfig: a.gitSystemConfig };
   const raw = String(a.tool ?? '');
-  const sure = (text: string): ActionDescription => ({ text, confident: true, doubts: [] });
+  const sure = (text: string, actionClass: CardActionClass): ActionDescription => ({ text, confident: true, doubts: [], actionClass });
   try {
     const n = normaliseToolName(raw);
-    if (/^(?:killshell|killbash|taskstop)$/.test(n)) return sure('Stop a background command it started');
+    if (/^(?:killshell|killbash|taskstop)$/.test(n)) return sure('Stop a background command it started', 'stop-background');
     if (raw.trim().toLowerCase() === 'process') {
       const verb = typeof args.action === 'string' ? args.action.trim().toLowerCase().replace(/_/g, '-') : '';
-      return sure(own(NATIVE_PROCESS_ACTIONS, verb) ?? 'Control a running command');
+      return sure(own(NATIVE_PROCESS_ACTIONS, verb) ?? 'Control a running command', 'process');
     }
-    if (n === 'websearch' || n === 'web_search') return sure('Search the web');
-    if (n === 'task' || n === 'sessions_spawn' || n === 'agent') return sure('Start a helper agent');
-    if (n === 'apply_patch') return sure('Apply a patch to files');
+    if (n === 'websearch' || n === 'web_search') return sure('Search the web', 'web-search');
+    if (n === 'task' || n === 'sessions_spawn' || n === 'agent') return sure('Start a helper agent', 'agent');
+    if (n === 'apply_patch') return sure('Apply a patch to files', 'patch');
     const family = classifyFamily(raw);
     if (family === 'exec') {
       const command = extractCommand(args);
-      return command ? describeShell(command, ctx) : { text: UNSUMMARISABLE_SHELL, confident: false, doubts: [] };
+      return command ? describeShell(command, ctx) : { text: UNSUMMARISABLE_SHELL, confident: false, doubts: [], actionClass: 'shell' };
     }
     const path = extractPath(args);
+    const at = path ? [path] : [];
     if (family === 'read') {
-      if (/^(?:glob|grep|search|find|ls|list|list_files)$/.test(n)) return sure(path ? `Search files in: ${quoted(path)}` : 'Search files in the current folder');
-      return sure(path ? pathPhrase('Read', [path]) : `Read a file (${safeToolLabel(raw)})`);
+      if (/^(?:glob|grep|search|find|ls|list|list_files)$/.test(n)) return sure(path ? `Search files in: ${quoted(path)}` : 'Search files in the current folder', placedClass('search', at));
+      return sure(path ? pathPhrase('Read', [path]) : `Read a file (${safeToolLabel(raw)})`, placedClass('read', at));
     }
     if (family === 'write') {
-      if (!path) return sure(`Change files (${safeToolLabel(raw)})`);
-      return sure(pathPhrase(/^(?:write|create|write_file)$/.test(n) ? 'Write' : 'Change', [path]));
+      if (!path) return sure(`Change files (${safeToolLabel(raw)})`, 'write');
+      return sure(pathPhrase(/^(?:write|create|write_file)$/.test(n) ? 'Write' : 'Change', [path]), placedClass('write', at));
     }
-    if (family === 'delete') return sure(path ? pathPhrase('Delete', [path]) : `Delete something (${safeToolLabel(raw)})`);
+    if (family === 'delete') return sure(path ? pathPhrase('Delete', [path]) : `Delete something (${safeToolLabel(raw)})`, placedClass('delete', at));
     if (family === 'network') {
       const url = extractUrl(args, raw);
       const first = url.split(/[\s,]+/)[0] ?? '';
       const host = first ? (safeHost(first) ?? safeHost(`https://${first.replace(/^[^@]*@/, '')}`)) : null;
-      if (/fetch|curl|wget|http|request|download/.test(n)) return sure(host ? `Fetch a web page from ${host}` : 'Fetch a web page');
-      return sure(host ? `Send data to ${host} (${safeToolLabel(raw)})` : `Send data off this machine (${safeToolLabel(raw)})`);
+      if (/fetch|curl|wget|http|request|download/.test(n)) return sure(host ? `Fetch a web page from ${host}` : 'Fetch a web page', 'web-fetch');
+      return sure(host ? `Send data to ${host} (${safeToolLabel(raw)})` : `Send data off this machine (${safeToolLabel(raw)})`, 'send');
     }
-    if (family === 'git') return sure(`Change the git repository (${safeToolLabel(raw)})`);
-    if (family === 'memory') return sure("Change the agent's memory");
+    if (family === 'git') return sure(`Change the git repository (${safeToolLabel(raw)})`, 'git');
+    if (family === 'memory') return sure("Change the agent's memory", 'memory');
   } catch {
     /* fall through to the honest line */
   }
-  return { text: `Use ${safeToolLabel(raw)} (details withheld: could not summarise safely)`, confident: false, doubts: [] };
+  return { text: `Use ${safeToolLabel(raw)} (details withheld: could not summarise safely)`, confident: false, doubts: [], actionClass: 'tool' };
 }
 
 // ── Line 3: who is asking ────────────────────────────────────────────────────
@@ -3053,6 +3081,149 @@ export function buildApprovalCard(input: ApprovalCardInput): ApprovalCardSummary
   return {
     action: describeAction(input).text,
     reason: describeSignals(input.signals),
+    who: describeWho(input),
+  };
+}
+
+// ── #815 A: the webhook card is a fixed template ────────────────────────────
+
+/**
+ * The webhook card never shows a target (#815 A, descoped after review r5).
+ * Its WHAT is one of these fixed sentences, picked by the KIND of action the
+ * builder parsed and, for a file, by which of `CARD_PLACES` it is in. No
+ * branch, path, host, URL, argument, operand, program or file name from the
+ * command or the tool input can reach it: every value is a literal, and the
+ * only way out is a lookup in `CARD_ACTION_TEMPLATES`.
+ */
+const CARD_ACTIONS = Object.freeze({
+  // Files. Each of these can also say where (`read:ssh`, "Read a file in your SSH folder").
+  read: 'Read a file',
+  search: 'Search files',
+  write: 'Create or change a file',
+  delete: 'Delete files',
+  move: 'Move or copy a file',
+  perms: 'Change who can access a file',
+  send: 'Send data off this machine',
+  // Git.
+  'force-push': 'Force-push to a remote',
+  'delete-remote-branch': 'Delete a branch on a remote',
+  'delete-branch': 'Delete a git branch',
+  'discard-changes': 'Throw away uncommitted git changes',
+  'clean-repo': 'Delete untracked files in a git repository',
+  'git-remote': 'Exchange data with a git remote',
+  git: 'Change a git repository',
+  // The network.
+  download: 'Download from the internet',
+  'remote-login': 'Log in to another machine over SSH',
+  'remote-copy': 'Copy files to or from another machine',
+  'raw-socket': 'Open a raw network connection',
+  publish: 'Publish a package to a registry',
+  network: 'Connect to another machine',
+  'fetch-run': 'Download code from the internet and run it',
+  // Software, programs and the machine.
+  install: 'Install software',
+  'run-package': 'Download and run a package',
+  stop: 'Stop a running program or service',
+  scheduler: 'Change scheduled jobs',
+  firewall: 'Change firewall or network rules',
+  disk: 'Change or erase a disk',
+  script: 'Run a program or script',
+  system: 'Restart or shut down this machine',
+  shell: 'Run a shell command',
+  // Tools other than the shell.
+  'stop-background': 'Stop a background command it started',
+  process: 'Control a running command',
+  'web-search': 'Search the web',
+  'web-fetch': 'Fetch a web page',
+  agent: 'Start a helper agent',
+  patch: 'Apply a patch to files',
+  memory: "Change the agent's memory",
+  tool: 'Use a tool',
+});
+export type CardActionKind = keyof typeof CARD_ACTIONS;
+const PLACED_KINDS = ['read', 'search', 'write', 'delete', 'move', 'perms', 'send'] as const;
+type PlacedKind = (typeof PLACED_KINDS)[number];
+/** An action class: a kind, or a file kind and its place (`read:ssh`). */
+export type CardActionClass = CardActionKind | `${PlacedKind}:${CardPlace}`;
+
+/** A shell step's kind when nothing finer was recorded (`Described.kind`). */
+const CATEGORY_KINDS: Readonly<Record<Category, CardActionKind>> = {
+  read: 'read', write: 'write', delete: 'delete', move: 'move', perms: 'perms', stop: 'stop', network: 'network',
+  'fetch-run': 'fetch-run', install: 'install', git: 'git', scheduler: 'scheduler', firewall: 'firewall', disk: 'disk',
+  script: 'script', system: 'system', other: 'shell',
+};
+
+function placedSentence(kind: PlacedKind, place: CardPlace): string {
+  const where = CARD_PLACES[place];
+  return kind === 'send' ? `Send a file ${where.replace(/^in /, 'from ')} off this machine` : `${CARD_ACTIONS[kind]} ${where}`;
+}
+
+/** Every WHAT the webhook card can carry: the closed set, by action class. */
+export const CARD_ACTION_TEMPLATES = Object.freeze({
+  ...CARD_ACTIONS,
+  ...Object.fromEntries(PLACED_KINDS.flatMap((kind) => (Object.keys(CARD_PLACES) as CardPlace[])
+    .map((place) => [`${kind}:${place}`, placedSentence(kind, place)]))),
+}) as Readonly<Record<CardActionClass, string>>;
+const CARD_ACTION_TEXTS: ReadonlySet<string> = new Set(Object.values(CARD_ACTION_TEMPLATES));
+
+/** A kind, with the place of the first path that is in one of `CARD_PLACES`
+ *  when it is a file kind. Only the key leaves; no path does. */
+function placedClass(kind: CardActionKind, paths: readonly string[]): CardActionClass {
+  if (!(PLACED_KINDS as readonly string[]).includes(kind)) return kind;
+  for (const path of paths) {
+    const place = placeOf(path);
+    if (place) return `${kind as PlacedKind}:${place}`;
+  }
+  return kind;
+}
+
+/** The class of the step(s) a confident shell WHAT stands for. The place is
+ *  read from every word and redirect of those steps (not URLs). */
+function shellActionClass(chosen: Described, members: readonly Step[]): CardActionClass {
+  const words = members.flatMap((s) => [...s.u.args, ...s.seg.reads, ...s.seg.writes]);
+  return placedClass(chosen.kind ?? CATEGORY_KINDS[chosen.category], words.filter((w) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(w)));
+}
+
+/** The webhook WHAT for an action class: a pure lookup in the closed set.
+ *  A class outside it reads as the generic "Use a tool". */
+export function cardActionTemplate(actionClass: unknown): string {
+  return own(CARD_ACTION_TEMPLATES, String(actionClass)) ?? CARD_ACTIONS.tool;
+}
+
+/** The webhook's own check at egress: a WHAT that is not one of the fixed
+ *  templates, whoever built it, is sent as the generic one. */
+export function fixedTemplateAction(text: unknown): string {
+  return typeof text === 'string' && CARD_ACTION_TEXTS.has(text) ? text : CARD_ACTIONS.tool;
+}
+
+const OTHER_RULE = SIGNAL_PHRASES['redacted-signal'];
+const CARD_REASON_TEXTS: ReadonlySet<string> = new Set([...Object.values(SIGNAL_PHRASES), 'matched a safety rule']);
+
+/** The webhook WHY: each reason one of the guard's fixed phrases
+ *  (`SIGNAL_PHRASES`) in its order, once. Anything else — an id the table
+ *  does not know, which `describeSignal` shows as the id — reads as "matched
+ *  another safety rule". */
+export function fixedTemplateReason(text: unknown): string {
+  const parts = (typeof text === 'string' ? text : '').split(REASON_SEPARATOR);
+  return [...new Set(parts.map((p) => (CARD_REASON_TEXTS.has(p) ? p : OTHER_RULE)))].join(REASON_SEPARATOR);
+}
+
+/**
+ * #815 A: the card the WEBHOOK carries. The WHAT is the fixed template for
+ * the action's class, the WHY the guard's own phrases, the WHO the agent, box
+ * and session (`describeWho`, never the tool input). It never names a target;
+ * the interactive card (`buildApprovalCard`, #648) still does.
+ */
+export function buildTemplateApprovalCard(input: ApprovalCardInput): ApprovalCardSummary {
+  let actionClass: CardActionClass = 'tool';
+  try {
+    actionClass = describeAction(input).actionClass;
+  } catch {
+    /* the generic template */
+  }
+  return {
+    action: cardActionTemplate(actionClass),
+    reason: fixedTemplateReason(describeSignals(input.signals)),
     who: describeWho(input),
   };
 }

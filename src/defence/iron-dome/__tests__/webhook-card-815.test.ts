@@ -4,8 +4,14 @@
  * The owner could not see a night of headless denials: when notify was wired
  * at all, what reached the chat was the values-free alert surface and nothing
  * a person could act on from a phone. The webhook now carries a versioned
- * `card` block — the #648 plain-English what/why/who, the exact approve
- * command, and (denials only) Approve/Deny choices bound to the action id.
+ * `card` block — a plain-English what/why/who, the exact approve command, and
+ * (denials only) Approve/Deny choices bound to the action id.
+ *
+ * Descoped after review r5: the card is a fixed template. WHAT is one of
+ * `CARD_ACTION_TEMPLATES` and WHY is made of the guard's fixed phrases; any
+ * other text handed to the webhook is replaced there, so the rows below that
+ * hand-build a line carrying a key now expect the fixed text, not a withheld
+ * line. WHO still goes through the credential redactor.
  *
  * What these tests pin:
  *   - the payload contract a bridge (sc-notify-bridge) codes against;
@@ -26,9 +32,11 @@ import {
   type OperatorNotification,
 } from '../operator-notify.js';
 import {
+  CARD_ACTION_TEMPLATES,
   SIGNAL_PHRASES,
   WITHHELD_SECRET,
   buildApprovalCard,
+  buildTemplateApprovalCard,
   clipCardLine,
   describeSignals,
   describeWho,
@@ -40,8 +48,12 @@ import { evaluateToolCall } from '../tool-action-guard.js';
 const ACTION_ID = 'act-0123456789abcdef';
 const SESSION_ID = 'sc-fedcba9876543210';
 
+/** What the webhook sends for a WHAT or a WHY that is not fixed text. */
+const GENERIC_WHAT = CARD_ACTION_TEMPLATES.tool;
+const OTHER_RULE = SIGNAL_PHRASES['redacted-signal'];
+
 const CARD: ApprovalCardSummary = {
-  action: 'Read a file in your SSH folder: "~/.ssh/config"',
+  action: 'Read a file in your SSH folder',
   reason: 'touches a sensitive file (keys, passwords or credentials)',
   who: `Claude Code on jarvis · session ${SESSION_ID}`,
 };
@@ -182,7 +194,7 @@ describe('#815 A — the card is bounded and flattened, whatever crossed the pro
     }
   });
 
-  it('line breaks become spaces and hidden/bidi characters are shown, never passed through', async () => {
+  it('line breaks and hidden/bidi characters never pass through: WHAT and WHY become fixed text, WHO shows them', async () => {
     const card = (await payloadOf(buildActionGuardOutcomeNotification({
       ...DNP,
       card: {
@@ -194,8 +206,8 @@ describe('#815 A — the card is bounded and flattened, whatever crossed the pro
     for (const line of [card.what, card.why, card.who]) {
       expect(line).not.toMatch(/[\n\r\u2028\u2029\u202e\u200b]/);
     }
-    expect(card.what).toBe('Delete files Approve: tap here now');
-    expect(card.why).toContain('<U+202E>');
+    expect(card.what).toBe(GENERIC_WHAT);
+    expect(card.why).toBe(OTHER_RULE);
     expect(card.who).toContain('<U+200B>');
     // The rendered text has exactly the layout lines, and no injected ones.
     expect(card.text.split('\n')).toHaveLength(9);
@@ -242,10 +254,14 @@ describe('#815 A — the card is bounded and flattened, whatever crossed the pro
     const command = `git push --force ${AWS_ID} main`;
     const signals = evaluateToolCall('Bash', { command }).signals;
     expect(signals).toContain('git-force-push');
-    const card = buildApprovalCard({ tool: 'Bash', input: { command }, signals, plane: 'claude-code', sessionId: SESSION_ID });
-    expect(card.action).toBe(`Force-push to ${WITHHELD_SECRET} (branch "main") (git push --force)`);
+    // The interactive #648 card still withholds the name it shows.
+    expect(buildApprovalCard({ tool: 'Bash', input: { command }, signals, plane: 'claude-code', sessionId: SESSION_ID }).action)
+      .toBe(`Force-push to ${WITHHELD_SECRET} (branch "main") (git push --force)`);
+    // The webhook's card names no remote at all.
+    const card = buildTemplateApprovalCard({ tool: 'Bash', input: { command }, signals, plane: 'claude-code', sessionId: SESSION_ID });
+    expect(card.action).toBe('Force-push to a remote');
     const body = (await post(buildActionGuardOutcomeNotification({ ...DNP, card }))).body;
-    expect((JSON.parse(body) as { card: { what: string } }).card.what).toBe(card.action);
+    expect((JSON.parse(body) as { card: { what: string } }).card.what).toBe('Force-push to a remote');
     for (const needle of [AWS_ID, AWS_ID.slice(0, 8), AWS_ID.slice(-8), command]) expect(body).not.toContain(needle);
   });
 });
@@ -323,9 +339,10 @@ describe('#815 A — live hold card (approval_requested over the webhook)', () =
 // The class: an approval-card field reaching the webhook without passing the
 // credential redactor. The builder's remote-name fallback was one instance; a
 // field from a future builder, or one that crossed a process boundary, would
-// be another. So the webhook puts EVERY card line through the redactor itself,
-// before the line is clipped and before anything is serialised. The cards
-// below are hand-built so they test that egress gate on its own.
+// be another. The webhook now sends only fixed text for WHAT and WHY,
+// whatever it is handed, and still puts EVERY card line through the redactor
+// itself, before the line is clipped and before anything is serialised. The
+// cards below are hand-built so they test the egress on its own.
 
 /** The raw body of a live hold (`approval_requested`) over the webhook. */
 async function holdBody(card: ApprovalCardSummary): Promise<string> {
@@ -370,15 +387,17 @@ describe('#815 A review B1 — every card line passes the credential redactor at
   const GH = ['gh', 'p_'].join('') + 'Z'.repeat(4) + 'q7Lm2Xr9Tb4Vc8Nd1Fh6Jk3Wp5Ys0Ua';
   const AWS_ID = ['AK', 'IA'].join('') + 'Q3XZ7LMN2PRT6VWY';
   const LINE_KEY = { action: 'what', reason: 'why', who: 'who' } as const;
+  /** WHAT and WHY are replaced by fixed text; WHO is withheld whole. */
+  const SENT = { action: GENERIC_WHAT, reason: OTHER_RULE, who: WITHHELD_SECRET } as const;
 
   it.each([
     ['action', GH], ['action', AWS_ID],
     ['reason', GH], ['reason', AWS_ID],
     ['who', GH], ['who', AWS_ID],
-  ] as const)('a secret in the card %s line is withheld whole on both paths (%#)', async (field, secret) => {
+  ] as const)('a secret in the card %s line never leaves, on both paths (%#)', async (field, secret) => {
     const card: ApprovalCardSummary = { ...CARD, [field]: `Push the release to ${secret} now` };
     for (const got of await overBothPaths(card)) {
-      expect(got.card[LINE_KEY[field]]).toBe(WITHHELD_SECRET);
+      expect(got.card[LINE_KEY[field]]).toBe(SENT[field]);
       // The other two lines are untouched.
       for (const [f, k] of Object.entries(LINE_KEY)) if (f !== field) expect(got.card[k]).toBe(CARD[f as keyof ApprovalCardSummary]);
       for (const needle of [secret, secret.slice(0, 12), secret.slice(-12)]) expect(got.body).not.toContain(needle);
@@ -390,8 +409,8 @@ describe('#815 A review B1 — every card line passes the credential redactor at
     // Precondition: clipping alone would have shown the secret's head.
     expect(clipCardLine(action, 160)).toContain(GH.slice(0, 12));
     for (const got of await overBothPaths({ ...CARD, action })) {
-      expect(got.card.what).toBe(WITHHELD_SECRET);
-      expect(got.card.text).toContain(`What: ${WITHHELD_SECRET}`);
+      expect(got.card.what).toBe(GENERIC_WHAT);
+      expect(got.card.text).toContain(`What: ${GENERIC_WHAT}`);
       expect(got.body).not.toContain(GH.slice(0, 12));
     }
   });
@@ -400,21 +419,21 @@ describe('#815 A review B1 — every card line passes the credential redactor at
     for (const split of ['​', '⁠', '\u0007']) {
       const action = `Read a file: "${AWS_ID.slice(0, 4)}${split}${AWS_ID.slice(4)}"`;
       for (const got of await overBothPaths({ ...CARD, action })) {
-        expect(got.card.what).toBe(WITHHELD_SECRET);
+        expect(got.card.what).toBe(GENERIC_WHAT);
         expect(got.body).not.toContain(AWS_ID.slice(4));
       }
     }
   });
 
-  it('withholding a line keeps the card honest: commands, buttons and layout are unchanged', async () => {
+  it('replacing a line keeps the card honest: commands, buttons and layout are unchanged', async () => {
     const [denial, hold] = await overBothPaths({ ...CARD, action: `Push to ${AWS_ID}` });
     expect(denial.card.approveCommand).toBe(`shieldcortex approve --denial ${ACTION_ID}`);
     expect(hold.card.approveCommand).toBe('shieldcortex approve cccccccccccc --attempt a1b2c3d4e5f6a7b8');
-    for (const got of [denial, hold]) expect(got.card.text.split('\n').slice(2, 5)).toEqual([`What: ${WITHHELD_SECRET}`, `Why:  ${CARD.reason}`, `Who:  ${CARD.who}`]);
+    for (const got of [denial, hold]) expect(got.card.text.split('\n').slice(2, 5)).toEqual([`What: ${GENERIC_WHAT}`, `Why:  ${CARD.reason}`, `Who:  ${CARD.who}`]);
   });
 
   // The gate must not cost the card its meaning: no reason phrase and no line
-  // the real builder makes for an ordinary command is withheld.
+  // the template builder makes for an ordinary command is withheld.
   it('every reason phrase, alone and all together, passes unchanged', async () => {
     // "All together": as many reasons as fit the 300-character bound the card
     // is held to when it is received, so the line reaches the gate whole.
@@ -442,8 +461,8 @@ describe('#815 A review B1 — every card line passes the credential redactor at
     'sudo systemctl stop nginx',
     'python3 scripts/deploy.py',
     'kill -9 4242',
-  ])('the real builder\'s lines for an ordinary command pass unchanged: %s', async (command) => {
-    const card = buildApprovalCard({
+  ])('the template builder\'s lines for an ordinary command pass unchanged: %s', async (command) => {
+    const card = buildTemplateApprovalCard({
       tool: 'Bash',
       input: { command },
       signals: evaluateToolCall('Bash', { command }).signals,
@@ -451,8 +470,9 @@ describe('#815 A review B1 — every card line passes the credential redactor at
       host: 'jarvis',
       sessionId: SESSION_ID,
     });
+    expect(Object.values(CARD_ACTION_TEMPLATES)).toContain(card.action);
     for (const got of await overBothPaths(card)) {
-      expect(got.card.what).toBe(clipCardLine(card.action, 160));
+      expect(got.card.what).toBe(card.action);
       expect(got.card.why).toBe(clipCardLine(card.reason, 240));
       expect(got.card.who).toBe(clipCardLine(card.who, 96));
       expect(got.card.what).not.toBe(WITHHELD_SECRET);
@@ -505,15 +525,17 @@ describe('#815 A — the live-hold card re-checks the ids its commands carry', (
 });
 
 describe('#815 A — a line of trailing markers keeps them, and stays inside the bound set when the card was received', () => {
+  // WHAT is a fixed template now, so the received line that can still carry
+  // markers is WHO.
   it('the overrun clipCardLine allows for its markers is capped by the 300-character line bound', async () => {
-    const action = `Delete files${' and 9 more'.repeat(26)}`;
-    expect(action.length).toBeLessThanOrEqual(300);
-    const got = (await payloadOf(buildActionGuardOutcomeNotification({ ...DNP, card: { ...CARD, action } }))).card as Record<string, string>;
-    expect(got.what.endsWith(' and 9 more')).toBe(true);
-    expect(got.what.length).toBeLessThanOrEqual(300);
+    const who = `Claude Code on jarvis${' and 9 more'.repeat(25)}`;
+    expect(who.length).toBeLessThanOrEqual(300);
+    const got = (await payloadOf(buildActionGuardOutcomeNotification({ ...DNP, card: { ...CARD, who } }))).card as Record<string, string>;
+    expect(got.who.endsWith(' and 9 more')).toBe(true);
+    expect(got.who.length).toBeLessThanOrEqual(300);
     // A longer line is cut at the bound first, and then clipped to its own.
-    const long = (await payloadOf(buildActionGuardOutcomeNotification({ ...DNP, card: { ...CARD, action: `Delete files${' and 9 more'.repeat(80)}` } }))).card as Record<string, string>;
-    expect(long.what.length).toBeLessThanOrEqual(160);
+    const long = (await payloadOf(buildActionGuardOutcomeNotification({ ...DNP, card: { ...CARD, who: `Claude Code on jarvis${' and 9 more'.repeat(80)}` } }))).card as Record<string, string>;
+    expect(long.who.length).toBeLessThanOrEqual(96);
   });
 });
 
@@ -542,18 +564,18 @@ describe('#815 A review B2 — a credential is checked as written, before any fo
     it.each([
       ['the folded key in a host', `Force-push to ${LOWER}.example.invalid (branch "main") (git push --force)`],
       ['a mixed-case key', `Push to ${KEY.slice(0, 2)}${LOWER.slice(2)}`],
-    ])('a hand-built action carrying %s is withheld whole on both paths', async (_label, action) => {
+    ])('a hand-built action carrying %s never leaves, on both paths', async (_label, action) => {
       for (const got of await overBothPaths({ ...CARD, action })) {
-        expect(got.card.what).toBe(WITHHELD_SECRET);
-        expect(got.card.text).toContain(`What: ${WITHHELD_SECRET}`);
+        expect(got.card.what).toBe(GENERIC_WHAT);
+        expect(got.card.text).toContain(`What: ${GENERIC_WHAT}`);
         expectNoKey(got.body);
       }
     });
 
-    it('the folded key in the WHY or WHO line is withheld whole too', async () => {
+    it('the folded key in the WHY or WHO line never leaves either', async () => {
       for (const field of ['reason', 'who'] as const) {
         for (const got of await overBothPaths({ ...CARD, [field]: `about ${LOWER} now` })) {
-          expect(got.card[field === 'reason' ? 'why' : 'who']).toBe(WITHHELD_SECRET);
+          expect(got.card[field === 'reason' ? 'why' : 'who']).toBe(field === 'reason' ? OTHER_RULE : WITHHELD_SECRET);
           expectNoKey(got.body);
         }
       }
@@ -573,29 +595,34 @@ describe('#815 A review B2 — a credential is checked as written, before any fo
     it.each([
       ['LF', '\n'], ['CR', '\r'], ['TAB', '\t'], ['VT', '\v'], ['FF', '\f'],
       ['U+2028', '\u2028'], ['U+2029', '\u2029'], ['BOM', '\ufeff'],
-    ])('a key split by %s is withheld whole on both paths', async (_label, split) => {
+    ])('a key split by %s never leaves, on both paths', async (_label, split) => {
       const action = `Force-push to the "${KEY.slice(0, 10)}${split}${KEY.slice(10)}" remote`;
       for (const got of await overBothPaths({ ...CARD, action })) {
-        expect(got.card.what).toBe(WITHHELD_SECRET);
+        expect(got.card.what).toBe(GENERIC_WHAT);
         for (const half of [KEY.slice(0, 10), KEY.slice(10)]) expect(got.body.toUpperCase()).not.toContain(half);
       }
     });
 
-    it.each([6, 10, 14, 18])('a key the 300-character cut would leave %i characters of is withheld whole on both paths', async (keep) => {
+    it.each([6, 10, 14, 18])('a key the 300-character cut would leave %i characters of never leaves, on both paths', async (keep) => {
       const pad = 'Run a step on the build box '.repeat(12);
-      const action = `${pad.slice(0, 300 - keep)}${KEY} and then report back`;
-      expect(action.indexOf(KEY)).toBe(300 - keep);
-      for (const got of await overBothPaths({ ...CARD, action })) {
-        expect(got.card.what).toBe(WITHHELD_SECRET);
+      const line = `${pad.slice(0, 300 - keep)}${KEY} and then report back`;
+      expect(line.indexOf(KEY)).toBe(300 - keep);
+      for (const got of await overBothPaths({ ...CARD, action: line })) {
+        expect(got.card.what).toBe(GENERIC_WHAT);
+        expect(got.body.toUpperCase()).not.toContain(KEY.slice(0, keep));
+      }
+      // WHO is not fixed text: the redactor withholds it before the cut.
+      for (const got of await overBothPaths({ ...CARD, who: line })) {
+        expect(got.card.who).toBe(WITHHELD_SECRET);
         expect(got.body.toUpperCase()).not.toContain(KEY.slice(0, keep));
       }
     });
 
     it('an ordinary long line is still cut at 300 and then clipped, as before', async () => {
-      const action = `Delete files${' and 9 more'.repeat(80)}`;
-      const got = (await payloadOf(buildActionGuardOutcomeNotification({ ...DNP, card: { ...CARD, action } }))).card as Record<string, string>;
-      expect(got.what).not.toBe(WITHHELD_SECRET);
-      expect(got.what.length).toBeLessThanOrEqual(160);
+      const who = `Claude Code on jarvis${' and 9 more'.repeat(80)}`;
+      const got = (await payloadOf(buildActionGuardOutcomeNotification({ ...DNP, card: { ...CARD, who } }))).card as Record<string, string>;
+      expect(got.who).not.toBe(WITHHELD_SECRET);
+      expect(got.who.length).toBeLessThanOrEqual(96);
     });
   });
 
@@ -701,29 +728,29 @@ describe('#815 A review r4 — the egress gate recognises a credential in every 
     ['math-bold JWT', bold(JWT), JWT],
   ];
 
-  it.each(ROWS)('%s as a branch: the line is withheld whole on both paths', async (_label, secretText, secret) => {
+  it.each(ROWS)('%s as a branch: the line never leaves, on both paths', async (_label, secretText, secret) => {
     const action = `Force-push to the "origin" remote (branch "${secretText}") (git push --force)`;
     expect(withholdSecretCardLine(action)).toBe(WITHHELD_SECRET);
     for (const got of await overBothPaths({ ...CARD, action })) {
-      expect(got.card.what).toBe(WITHHELD_SECRET);
+      expect(got.card.what).toBe(GENERIC_WHAT);
       expectNoSecret(got.body, secret);
     }
   });
 
-  it.each(ROWS)('%s in an SSH-folder path, WHY and WHO: each line is withheld whole', async (_label, secretText, secret) => {
-    for (const [field, out] of [['action', 'what'], ['reason', 'why'], ['who', 'who']] as const) {
+  it.each(ROWS)('%s in an SSH-folder path, WHY and WHO: no line carries it', async (_label, secretText, secret) => {
+    for (const [field, out, sent] of [['action', 'what', GENERIC_WHAT], ['reason', 'why', OTHER_RULE], ['who', 'who', WITHHELD_SECRET]] as const) {
       const value = field === 'action' ? `Read a file in your SSH folder: "~/.ssh/${secretText}"` : `about ${secretText} now`;
       for (const got of await overBothPaths({ ...CARD, [field]: value })) {
-        expect(got.card[out]).toBe(WITHHELD_SECRET);
+        expect(got.card[out]).toBe(sent);
         expectNoSecret(got.body, secret);
       }
     }
   });
 
-  it('a key the clip would cut, typed full-width, is withheld before the clip', async () => {
+  it('a key the clip would cut, typed full-width, never leaves', async () => {
     const action = `Force-push to the "origin" remote (branch "${'a'.repeat(100)}${wide(KEY_WIDE)}") (git push --force)`;
     for (const got of await overBothPaths({ ...CARD, action })) {
-      expect(got.card.what).toBe(WITHHELD_SECRET);
+      expect(got.card.what).toBe(GENERIC_WHAT);
       expectNoSecret(got.body, KEY_WIDE);
     }
   });
@@ -914,21 +941,21 @@ describe('#815 A review r5 — a %XX-encoded key and a key split across words ne
     ['key id, first character as a full-width %XX', `${wide(pct(KEY, 1).slice(0, 3))}${KEY.slice(1)}`, KEY],
   ];
 
-  it.each(ENCODED)('%s as a branch: the line is withheld whole on both paths', async (_label, written, secret) => {
+  it.each(ENCODED)('%s as a branch: the line never leaves, on both paths', async (_label, written, secret) => {
     const action = `Force-push to github.com (branch "${written}") (git push --force)`;
     expect(withholdSecretCardLine(action)).toBe(WITHHELD_SECRET);
     for (const got of await overBothPaths({ ...CARD, action })) {
-      expect(got.card.what).toBe(WITHHELD_SECRET);
+      expect(got.card.what).toBe(GENERIC_WHAT);
       expect(got.card.who).toBe(CARD.who);
       expectNoSecret(got.body, secret);
     }
   });
 
-  it.each(ENCODED)('%s in an SSH-folder path, WHY and WHO: each line is withheld whole', async (_label, written, secret) => {
-    for (const [field, out] of [['action', 'what'], ['reason', 'why'], ['who', 'who']] as const) {
+  it.each(ENCODED)('%s in an SSH-folder path, WHY and WHO: no line carries it', async (_label, written, secret) => {
+    for (const [field, out, sent] of [['action', 'what', GENERIC_WHAT], ['reason', 'why', OTHER_RULE], ['who', 'who', WITHHELD_SECRET]] as const) {
       const value = field === 'action' ? `Read a file in your SSH folder: "~/.ssh/${written}"` : `about ${written} now`;
       for (const got of await overBothPaths({ ...CARD, [field]: value })) {
-        expect(got.card[out]).toBe(WITHHELD_SECRET);
+        expect(got.card[out]).toBe(sent);
         expectNoSecret(got.body, secret);
       }
     }
@@ -945,40 +972,49 @@ describe('#815 A review r5 — a %XX-encoded key and a key split across words ne
     ]) expect(withholdSecretCardLine(line)).toBe(line);
   });
 
-  // The real builder: B4 targets, and B5 — a key in two words. The card used
-  // to choose ONE operand (the first branch word) before any recogniser saw
-  // the whole command. The WHO line and both commands are unchanged.
-  const card = (command: string) => buildApprovalCard({
+  // The real builders: B4 targets, and B5 — a key in two words. The #648
+  // card used to choose ONE operand (the first branch word) before any
+  // recogniser saw the whole command; it still withholds the target. The
+  // webhook's template card names no target at all. The WHO line and both
+  // commands are unchanged.
+  const input = (command: string) => ({
     tool: 'Bash',
     input: { command },
     signals: evaluateToolCall('Bash', { command }).signals,
-    plane: 'claude-code',
+    plane: 'claude-code' as const,
     host: 'jarvis',
     sessionId: SESSION_ID,
     gitSystemConfig: [],
   });
+  const card = (command: string) => buildApprovalCard(input(command));
   const BRANCH_WITHHELD = /\(branch \(withheld: looks like a secret\)\) \(git push --force\)$/;
-  const BUILT: Array<[label: string, command: string, secret: string, what: RegExp]> = [
-    ['B4 (Astra r4): prefix as %XX, as a branch', `git push --force origin ${pct(AWS, 4)}`, AWS, BRANCH_WITHHELD],
-    ['B4 (Astra r4): prefix as %XX, in an SSH-folder path', `cat ~/.ssh/${pct(AWS, 4)}`, AWS, /^Read a file in your SSH folder: \(withheld: looks like a secret\)$/],
-    ['B4 (Grok r4): first character as %XX, as a branch', `git push --force origin ${pct(KEY, 1)}`, KEY, BRANCH_WITHHELD],
-    ['B4 (Astra r4): every character as %XX, as a branch', `git push --force origin ${pct(GH)}`, GH, BRANCH_WITHHELD],
-    ['B5 (Astra r4): two unquoted words, as a branch', `git push --force origin ${GH.slice(0, 20)} ${GH.slice(20)}`, GH, BRANCH_WITHHELD],
-    ['B5 (Astra r4): two quoted words, as a branch', `git push --force origin '${GH.slice(0, 20)}' '${GH.slice(20)}'`, GH, BRANCH_WITHHELD],
-    ['B5 (Astra r4): one quoted word with a space, as a branch', `git push --force origin '${GH.slice(0, 20)} ${GH.slice(20)}'`, GH, BRANCH_WITHHELD],
-    ['B5 (Astra r4): contiguous, as a branch', `git push --force origin ${GH}`, GH, BRANCH_WITHHELD],
-    ['B5 sibling: two unquoted words, the first in an SSH-folder path', `cat ~/.ssh/${GH.slice(0, 20)} ${GH.slice(20)}`, GH, /^Read 2 files, including one in your SSH folder: \(withheld: looks like a secret\)$/],
-    ['B5 sibling: two unquoted words as a branch to delete', `git branch -D ${GH.slice(0, 20)} ${GH.slice(20)}`, GH, /^Delete a git branch: \(withheld: looks like a secret\)$/],
+  const FORCE_PUSH = 'Force-push to a remote';
+  const SSH_READ = 'Read a file in your SSH folder';
+  const BUILT: Array<[label: string, command: string, secret: string, what: RegExp, template: string]> = [
+    ['B4 (Astra r4): prefix as %XX, as a branch', `git push --force origin ${pct(AWS, 4)}`, AWS, BRANCH_WITHHELD, FORCE_PUSH],
+    ['B4 (Astra r4): prefix as %XX, in an SSH-folder path', `cat ~/.ssh/${pct(AWS, 4)}`, AWS, /^Read a file in your SSH folder: \(withheld: looks like a secret\)$/, SSH_READ],
+    ['B4 (Grok r4): first character as %XX, as a branch', `git push --force origin ${pct(KEY, 1)}`, KEY, BRANCH_WITHHELD, FORCE_PUSH],
+    ['B4 (Astra r4): every character as %XX, as a branch', `git push --force origin ${pct(GH)}`, GH, BRANCH_WITHHELD, FORCE_PUSH],
+    ['B5 (Astra r4): two unquoted words, as a branch', `git push --force origin ${GH.slice(0, 20)} ${GH.slice(20)}`, GH, BRANCH_WITHHELD, FORCE_PUSH],
+    ['B5 (Astra r4): two quoted words, as a branch', `git push --force origin '${GH.slice(0, 20)}' '${GH.slice(20)}'`, GH, BRANCH_WITHHELD, FORCE_PUSH],
+    ['B5 (Astra r4): one quoted word with a space, as a branch', `git push --force origin '${GH.slice(0, 20)} ${GH.slice(20)}'`, GH, BRANCH_WITHHELD, FORCE_PUSH],
+    ['B5 (Astra r4): contiguous, as a branch', `git push --force origin ${GH}`, GH, BRANCH_WITHHELD, FORCE_PUSH],
+    ['B5 sibling: two unquoted words, the first in an SSH-folder path', `cat ~/.ssh/${GH.slice(0, 20)} ${GH.slice(20)}`, GH, /^Read 2 files, including one in your SSH folder: \(withheld: looks like a secret\)$/, SSH_READ],
+    ['B5 sibling: two unquoted words as a branch to delete', `git branch -D ${GH.slice(0, 20)} ${GH.slice(20)}`, GH, /^Delete a git branch: \(withheld: looks like a secret\)$/, 'Delete a git branch'],
   ];
 
-  it.each(BUILT)('%s: the target is withheld whole, and nothing of the key leaves on either path', async (_label, command, secret, what) => {
+  it.each(BUILT)('%s: the webhook card is the fixed template, and nothing of the key leaves on either path', async (_label, command, secret, what, template) => {
     const built = card(command);
     expect(built.action).toMatch(what);
     expectNoSecret(built.action, secret);
-    for (const got of await overBothPaths(built)) {
-      expect(got.card.what).toBe(built.action);
-      expect(got.card.who).toBe(`Claude Code on jarvis · session ${SESSION_ID}`);
-      expectNoSecret(got.body, secret);
+    const fixed = buildTemplateApprovalCard(input(command));
+    expect(fixed.action).toBe(template);
+    for (const [handed, sent] of [[fixed, template], [built, GENERIC_WHAT]] as const) {
+      for (const got of await overBothPaths(handed)) {
+        expect(got.card.what).toBe(sent);
+        expect(got.card.who).toBe(`Claude Code on jarvis · session ${SESSION_ID}`);
+        expectNoSecret(got.body, secret);
+      }
     }
   });
 

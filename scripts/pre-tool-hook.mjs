@@ -947,6 +947,11 @@ async function loadNotify(rawNotifyConfig) {
       buildApprovalCard: typeof cardMod?.buildApprovalCard === 'function'
         ? cardMod.buildApprovalCard
         : null,
+      /** #815 A — the webhook's card: a fixed template that never names the
+       *  target. A dist without it sends no webhook card. */
+      buildTemplateApprovalCard: typeof cardMod?.buildTemplateApprovalCard === 'function'
+        ? cardMod.buildTemplateApprovalCard
+        : null,
       /** Where a denial goes when the primary channel cannot carry one. Null
        *  means an openclaw-only install: the denial reaches no channel, which
        *  is the honest outcome until a non-interactive gateway send path
@@ -1032,17 +1037,20 @@ function safeDiagnosticApprovalReason(reason) {
 
 /**
  * #648 — the card's what/why/who, built on this box from the live tool input.
- * Every target in it goes through the credential redactor as it is built
- * (approval-card.ts `safeTarget`). Two readers: the interactive card channel
- * and (#815 A) the webhook's versioned `card` block, which puts every whole
- * line through the redactor again before it is clipped or sent
- * (`withholdSecretCardLine`, review B1). The values-free `command` /
- * `surface` fields and `denials.jsonl` never receive it. Never throws.
+ * The interactive card channel gets the #648 card, whose targets go through
+ * the credential redactor as they are built (approval-card.ts `safeTarget`).
+ * #815 A: the webhook gets the fixed-template card instead
+ * (`buildTemplateApprovalCard`): a WHAT chosen by the kind of action, which
+ * never names the target. The values-free `command` / `surface` fields and
+ * `denials.jsonl` never receive either. Never throws.
  */
 function approvalCardFor(notify, channel, { toolName, toolInput, verdict, sessionKey, cwd }) {
-  if ((channel?.name !== 'openclaw-approval' && channel?.name !== 'webhook') || typeof notify?.buildApprovalCard !== 'function') return undefined;
+  const build = channel?.name === 'openclaw-approval' ? notify?.buildApprovalCard
+    : channel?.name === 'webhook' ? notify?.buildTemplateApprovalCard
+      : undefined;
+  if (typeof build !== 'function') return undefined;
   try {
-    return notify.buildApprovalCard({
+    return build({
       tool: String(toolName ?? ''),
       input: toolInput,
       signals: Array.isArray(verdict?.signals) ? verdict.signals.map(String) : [],
@@ -2092,8 +2100,8 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
     typeof notify.buildActionGuardOutcomeNotification === 'function'
   ) {
     try {
-      // #815 A: a headless denial carries the readable card to the webhook.
-      // Handed to the builder ONLY — `pendingRow` is the denials.jsonl row and
+      // #815 A: a headless denial carries the fixed-template card to the
+      // webhook (it never names the target). Handed to the builder ONLY — `pendingRow` is the denials.jsonl row and
       // stays values-free.
       const card = outcome === 'denied_no_prompt_surface'
         ? approvalCardFor(notify, notify.denialChannel, { toolName, toolInput, verdict, sessionKey, cwd: retryCtx?.cwd })

@@ -278,6 +278,9 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     return { rest: JSON.stringify(rest), card: card as Record<string, unknown> | undefined };
   }
   const WHO = /^Claude Code on [A-Za-z0-9_…-]+ · session sc-<session>$/;
+  /** A card without its WHO line: the box's own hostname, which a CI runner
+   *  names freely, is the one line that is not fixed text. */
+  const sansWho = (c: Record<string, string>) => JSON.stringify({ ...c, who: '', text: String(c.text).replace(/^Who: .*$/mu, '') });
 
   it('webhook approval_requested body is byte-identical to main, plus the #815 card', () => {
     writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook' });
@@ -288,7 +291,7 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     expect(card).toMatchObject({
       version: 1,
       kind: 'approval',
-      what: 'Read a file in your SSH folder: "~/.ssh/config"',
+      what: 'Read a file in your SSH folder',
       why: 'touches a sensitive file (keys, passwords or credentials)',
       approveCommand: 'shieldcortex approve 1d3e3c896ae2 --attempt <attempt>',
       denyCommand: 'shieldcortex deny 1d3e3c896ae2 --attempt <attempt>',
@@ -306,7 +309,7 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     expect(card).toMatchObject({
       version: 1,
       kind: 'denial',
-      what: 'Read a file in your SSH folder: "~/.ssh/config"',
+      what: 'Read a file in your SSH folder',
       why: 'touches a sensitive file (keys, passwords or credentials)',
       approveCommand: 'shieldcortex approve --denial act-<action>',
       actions: [
@@ -384,9 +387,10 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
   // out. The command is hook INPUT only; nothing runs git. The old-body and
   // denials goldens were captured at the comparison base (1525b204), where no
   // card existed, so they also prove the fix leaves every pre-#815 byte alone.
+  // Since the descope the webhook card is a fixed template: it names no remote.
   const REMOTE = ['AK', 'IA'].join('') + 'Q3XZ7LMN2PRT6VWY';
   const REMOTE_PUSH = { command: `git push --force ${REMOTE} main` };
-  const REMOTE_WHAT = 'Force-push to (withheld: looks like a secret) (branch "main") (git push --force)';
+  const REMOTE_WHAT = 'Force-push to a remote';
   function expectNoRemote(raw: string[]): void {
     const rows = denialRows().join('\n');
     for (const needle of [REMOTE, REMOTE.slice(0, 8), REMOTE.slice(-8), REMOTE_PUSH.command]) {
@@ -445,10 +449,10 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
   // the card builder establish the host. The legacy body and the denial rows
   // are compared with goldens captured at the comparison base (1525b204),
   // where no card existed: they differ from the remote-name goldens above
-  // only by the per-command hash.
+  // only by the per-command hash. Since the descope the card names no host.
   const HOST_KEY = ['AK', 'IA'].join('') + 'W7NQ4KPJ2XZT6RHM';
   const KEY_HOST = `${HOST_KEY}.example.invalid`;
-  const HOST_WHAT = 'Force-push to (withheld: looks like a secret) (branch "main") (git push --force)';
+  const HOST_WHAT = 'Force-push to a remote';
   const ORDINARY_ORIGIN = 'https://github.com/acme/app.git';
   const HOST_FORMS: Array<[form: string, command: string, origin: string, hash: string]> = [
     ['typed URL', `git push --force https://${KEY_HOST}/acme/app.git main`, ORDINARY_ORIGIN, '6d9d6a34b0504681cae491ec34992357698909f6a5adf80cbdc5dc24b036b106'],
@@ -479,15 +483,16 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     }
   }
 
-  it('control: an ordinary host is still named on both paths, so the withheld host below is the gate, not a dropped host', () => {
+  it('control: an ordinary host gets the same fixed WHAT on both paths: the webhook card names no host at all', () => {
     scratchRepo(ORDINARY_ORIGIN);
     writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
-    const what = 'Force-push to github.com (branch "main") (git push --force)';
+    const what = 'Force-push to a remote';
     expect(runHook({ command: `git push --force ${ORDINARY_ORIGIN} main` }).decision).toBe('ask');
     expect(runHook({ command: 'git push --force origin main' }, { permissionMode: 'bypassPermissions' }).decision).toBe('deny');
     expect(runHook({ command: 'git push --force git@github.com:acme/app.git main' }).decision).toBe('ask');
     const got = lines(webhookEvidence).map((b) => splitCard(normaliseWebhookBody(b)).card as Record<string, string>);
     expect(got.map((c) => [c.kind, c.what])).toEqual([['approval', what], ['denial', what], ['approval', what]]);
+    for (const c of got) expect(sansWho(c)).not.toMatch(/github|acme|main/);
   });
 
   it.each(HOST_FORMS)('#815 A review B2: a credential-shaped host (%s) never reaches the webhook card (headless denial)', (_form, command, origin) => {
@@ -535,9 +540,9 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
   // #815 A review r4 — the reviewers' r3 rows, through the real hook. A key
   // split by NBSP or U+3000 (Grok r3), or typed full-width or math-bold
   // (Astra r3 B3), as a branch or in an SSH-folder path, reached the webhook
-  // card because no recogniser read the form a reader (or NFKC) sees. Every
-  // row is withheld whole, held and headless, and the legacy body and the
-  // denial rows are the base goldens byte for byte.
+  // card because no recogniser read the form a reader (or NFKC) sees. Since
+  // the descope every row's card is the fixed template, held and headless,
+  // and the legacy body and the denial rows are the base goldens byte for byte.
   const R4_KEY_SPLIT = ['AK', 'IA'].join('') + 'W7NQ4KPJ2XZT6RHM';
   const R4_KEY_WIDE = ['AK', 'IA'].join('') + 'M6ZQ3RVN5TXP7LKH';
   const R4_JWT = `${['ey', 'J'].join('')}hbGciOiJIUzI1NiJ9.${['ey', 'J'].join('')}zdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U`;
@@ -546,8 +551,8 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     : /[a-z]/.test(c) ? String.fromCodePoint(0x1d41a + c.charCodeAt(0) - 97)
       : /[0-9]/.test(c) ? String.fromCodePoint(0x1d7ce + c.charCodeAt(0) - 48) : c)).join('');
   const splitBy = (sep: string) => `${R4_KEY_SPLIT.slice(0, 10)}${sep}${R4_KEY_SPLIT.slice(10)}`;
-  const R4_PUSH_WHAT = 'Force-push to github.com (branch (withheld: looks like a secret)) (git push --force)';
-  const R4_READ_WHAT = 'Read a file in your SSH folder: (withheld: looks like a secret)';
+  const R4_PUSH_WHAT = 'Force-push to a remote';
+  const R4_READ_WHAT = 'Read a file in your SSH folder';
   const R4_ROWS: Array<[row: string, command: string, secret: string, what: string]> = [
     ['Grok r3: NBSP-split branch', `git push --force origin ${splitBy('\u00a0')}`, R4_KEY_SPLIT, R4_PUSH_WHAT],
     ['Grok r3: U+3000-split branch', `git push --force origin ${splitBy('\u3000')}`, R4_KEY_SPLIT, R4_PUSH_WHAT],
@@ -577,7 +582,7 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     .split(from).join(to)
     .split(from.slice(0, 12)).join(to.slice(0, 12));
 
-  it('#815 A review r4 control: an ordinary branch and an ordinary SSH-folder path are still named', () => {
+  it('#815 A review r4 control: an ordinary branch and an ordinary SSH-folder path get the same fixed WHAT', () => {
     scratchRepo(ORDINARY_ORIGIN);
     writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
     expect(runHook({ command: 'git push --force upstream feature/login-form' }).decision).toBe('ask');
@@ -585,10 +590,11 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     expect(runHook({ command: 'cat ~/.ssh/known_hosts' }).decision).toBe('ask');
     const got = lines(webhookEvidence).map((b) => splitCard(normaliseWebhookBody(b)).card as Record<string, string>);
     expect(got.map((c) => [c.kind, c.what])).toEqual([
-      ['approval', 'Force-push to the "upstream" remote (branch "feature/login-form") (git push --force)'],
-      ['denial', 'Force-push to github.com (branch "main") (git push --force)'],
-      ['approval', 'Read a file in your SSH folder: "~/.ssh/known_hosts"'],
+      ['approval', R4_PUSH_WHAT],
+      ['denial', R4_PUSH_WHAT],
+      ['approval', R4_READ_WHAT],
     ]);
+    for (const c of got) expect(sansWho(c)).not.toMatch(/upstream|feature|login-form|github|known_hosts/);
   });
 
   it.each(R4_ROWS)('#815 A review r4: %s never reaches the webhook card (headless denial)', (_row, command, secret, what) => {
@@ -635,7 +641,8 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
   // reached the card, because no recogniser read the decoded text. B5 (Astra
   // r4): a key the shell split into two words showed its first word as the
   // branch; the card builder chose that word before anything read the whole
-  // command. Every row is withheld whole, held and headless; the WHO line and
+  // command. Since the descope every row's card is the fixed template, held
+  // and headless; the WHO line and
   // the approve command stay; the legacy body and the denial rows are the
   // base goldens byte for byte, but for `argc`: the guard's own count of the
   // tokens in the span it matched, which differs with the command's shape.
@@ -644,7 +651,7 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
   const R5_STS = ['AS', 'IA'].join('') + 'T3VQ7XWN4ZRK2PLD';
   const R5_GH = ['ghp', '_'].join('') + ['t7K2mQ', 'z4R9vN', 'p6L3wB', 'h8D5xF', 'c1J0sA', 'y2U4eG'].join('');
   const R5_SPLIT = `${R5_GH.slice(0, 20)} ${R5_GH.slice(20)}`;
-  const R5_READ2_WHAT = 'Read 2 files, including one in your SSH folder: (withheld: looks like a secret)';
+  const R5_READ2_WHAT = R4_READ_WHAT;
   const R5_ROWS: Array<[row: string, command: string, secret: string, what: string, argc: number]> = [
     ['B4 (Astra r4): AWS key id, prefix as %XX, as a branch', `git push --force origin ${pct(R5_AWS, 4)}`, R5_AWS, R4_PUSH_WHAT, 3],
     ['B4 (Astra r4): AWS key id, prefix as %XX, in an SSH-folder path', `cat ~/.ssh/${pct(R5_AWS, 4)}`, R5_AWS, R4_READ_WHAT, 1],
@@ -682,7 +689,7 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
   }
   const withArgc = (rows: string[], argc: number) => rows.map((r) => r.replace(/"argc":\d+/, `"argc":${argc}`));
 
-  it('#815 A review r5 control: an ordinary branch or path with a % in it, and a word beside a whole key, are still named', () => {
+  it('#815 A review r5 control: an ordinary branch or path with a % in it, and a word beside a whole key, get the fixed WHAT', () => {
     scratchRepo(ORDINARY_ORIGIN);
     writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
     expect(runHook({ command: 'git push --force origin release/50%-off' }).decision).toBe('ask');
@@ -690,11 +697,11 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     expect(runHook({ command: `git push --force ${R4_KEY_SPLIT} main` }).decision).toBe('ask');
     const got = lines(webhookEvidence).map((b) => splitCard(normaliseWebhookBody(b)).card as Record<string, string>);
     expect(got.map((c) => [c.kind, c.what])).toEqual([
-      ['approval', 'Force-push to github.com (branch "release/50%-off") (git push --force)'],
-      ['denial', 'Read a file in your SSH folder: "~/.ssh/old%20config"'],
-      // A whole key in one word is withheld on its own: the word beside it is still named.
-      ['approval', 'Force-push to (withheld: looks like a secret) (branch "main") (git push --force)'],
+      ['approval', R4_PUSH_WHAT],
+      ['denial', R4_READ_WHAT],
+      ['approval', R4_PUSH_WHAT],
     ]);
+    for (const c of got) expect(sansWho(c)).not.toMatch(/release|50%|old%20|config|github|main/);
   });
 
   it.each(R5_ROWS)('#815 A review r5: %s never reaches the webhook card (headless denial)', (_row, command, secret, what, argc) => {
