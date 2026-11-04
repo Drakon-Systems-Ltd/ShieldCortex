@@ -314,6 +314,63 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
       expect(denialRows().join('\n')).not.toContain(needle);
     }
   });
+
+  // #815 A review B1 — the reviewer's fixture. The card's remote-name fallback
+  // skipped the credential redactor, and the webhook card carried the name
+  // out. The command is hook INPUT only; nothing runs git. The old-body and
+  // denials goldens were captured at the comparison base (1525b204), where no
+  // card existed, so they also prove the fix leaves every pre-#815 byte alone.
+  const REMOTE = ['AK', 'IA'].join('') + 'Q3XZ7LMN2PRT6VWY';
+  const REMOTE_PUSH = { command: `git push --force ${REMOTE} main` };
+  const REMOTE_WHAT = 'Force-push to (withheld: looks like a secret) (branch "main") (git push --force)';
+  function expectNoRemote(raw: string[]): void {
+    const rows = denialRows().join('\n');
+    for (const needle of [REMOTE, REMOTE.slice(0, 8), REMOTE.slice(-8), REMOTE_PUSH.command]) {
+      for (const body of raw) expect(body).not.toContain(needle);
+      expect(rows).not.toContain(needle);
+    }
+  }
+
+  it('#815 A review B1: a credential-shaped git remote name never reaches the webhook card (headless denial)', () => {
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
+    expect(runHook(REMOTE_PUSH, { permissionMode: 'bypassPermissions' }).decision).toBe('deny');
+    const raw = lines(webhookEvidence);
+    expect(raw).toHaveLength(1);
+    const { rest, card } = splitCard(normaliseWebhookBody(raw[0]));
+    expect(rest).toBe(GOLDEN_WEBHOOK_DNP_REMOTE);
+    expect(card).toMatchObject({
+      version: 1,
+      kind: 'denial',
+      what: REMOTE_WHAT,
+      why: 'pushes to a remote branch (may overwrite history)',
+      approveCommand: 'shieldcortex approve --denial act-<action>',
+    });
+    expect(card!.text).toContain(`What: ${REMOTE_WHAT}`);
+    expect(denialRows()).toEqual(GOLDEN_DENIALS_DNP_REMOTE);
+    expect(denialRows().join('\n')).not.toContain('"card"');
+    expectNoRemote(raw);
+  });
+
+  it('#815 A review B1: a credential-shaped git remote name never reaches the webhook card (held approval)', () => {
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook' });
+    expect(runHook(REMOTE_PUSH).decision).toBe('ask');
+    const raw = lines(webhookEvidence);
+    expect(raw).toHaveLength(1);
+    const { rest, card } = splitCard(normaliseWebhookBody(raw[0]));
+    expect(rest).toBe(GOLDEN_WEBHOOK_ASK_REMOTE);
+    expect(card).toMatchObject({
+      version: 1,
+      kind: 'approval',
+      what: REMOTE_WHAT,
+      why: 'pushes to a remote branch (may overwrite history)',
+      approveCommand: 'shieldcortex approve 0b740047d8ed --attempt <attempt>',
+      denyCommand: 'shieldcortex deny 0b740047d8ed --attempt <attempt>',
+    });
+    expect(card!.text).toContain(`What: ${REMOTE_WHAT}`);
+    // A held call writes no denial row, at the base and now.
+    expect(denialRows()).toEqual([]);
+    expectNoRemote(raw);
+  });
 });
 
 const GOLDEN_WEBHOOK_ASK = "{\"event\":\"approval_requested\",\"hash\":\"1d3e3c896ae2a9a396eacda6e9c44cf16bb9d3b69550ec941f95ca76a9151178\",\"shortHash\":\"1d3e3c896ae2\",\"attemptId\":\"<attempt>\",\"tool\":\"Bash\",\"command\":\"Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\",\"signals\":[\"touch-sensitive-path\"],\"severity\":\"dangerous\",\"reason\":\"Action Guard requires approval; inspect local audit for details.\",\"judge\":null,\"text\":\"🛡️ ShieldCortex — approval needed\\n\\nTool:      Bash\\nCommand:   Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\\nTripped:   touch-sensitive-path\\nTier:      dangerous\\nReason:    Action Guard requires approval; inspect local audit for details.\\n\\nAI judge:  no judge ran — this verdict is rules-only\\n\\n[Approve]  shieldcortex approve 1d3e3c896ae2 --attempt <attempt>\\n[Deny]     shieldcortex deny 1d3e3c896ae2 --attempt <attempt>\",\"approveCommand\":\"shieldcortex approve 1d3e3c896ae2 --attempt <attempt>\",\"ts\":\"<ts>\",\"denyCommand\":\"shieldcortex deny 1d3e3c896ae2 --attempt <attempt>\",\"sessionId\":\"sc-<session>\"}";
@@ -321,4 +378,13 @@ const GOLDEN_WEBHOOK_DNP = "{\"event\":\"action_guard_denial\",\"outcome\":\"den
 const GOLDEN_DENIALS_DNP: string[] = [
   "{\"event\":\"action_guard_denial\",\"outcome\":\"denied_no_prompt_surface\",\"origin\":\"claude-code-hook\",\"tool\":\"Bash\",\"surface\":\"Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\",\"signals\":[\"touch-sensitive-path\"],\"matches\":[{\"signal\":\"touch-sensitive-path\",\"spanWithheld\":\"command-text\",\"argc\":1}],\"severity\":\"dangerous\",\"reason\":\"Action Guard required approval but this session has no prompt surface; the tool call was denied.\",\"sessionId\":\"sc-<session>\",\"actionId\":\"act-<action>\",\"correlationId\":\"act-<action>\",\"detectedAt\":\"<ts>\",\"notify\":{\"status\":\"pending\",\"deliveredVia\":null}}",
   "{\"event\":\"action_guard_denial\",\"outcome\":\"denied_no_prompt_surface\",\"origin\":\"claude-code-hook\",\"tool\":\"Bash\",\"surface\":\"Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\",\"signals\":[\"touch-sensitive-path\"],\"matches\":[{\"signal\":\"touch-sensitive-path\",\"spanWithheld\":\"command-text\",\"argc\":1}],\"severity\":\"dangerous\",\"reason\":\"Action Guard required approval but this session has no prompt surface; the tool call was denied.\",\"sessionId\":\"sc-<session>\",\"actionId\":\"act-<action>\",\"correlationId\":\"act-<action>\",\"detectedAt\":\"<ts>\",\"notify\":{\"status\":\"delivered\",\"deliveredVia\":\"webhook\"}}",
+];
+
+// #815 A review B1 — captured at the comparison base (1525b204) with the
+// reviewer's real-hook harness, normalised exactly as above.
+const GOLDEN_WEBHOOK_DNP_REMOTE = "{\"event\":\"action_guard_denial\",\"outcome\":\"denied_no_prompt_surface\",\"tool\":\"Bash\",\"surface\":\"Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\",\"signals\":[\"git-force-push\"],\"severity\":\"dangerous\",\"reason\":\"Action Guard required approval but this session has no prompt surface; the tool call was denied.\",\"correlationId\":\"act-<action>\",\"actionId\":\"act-<action>\",\"sessionId\":\"sc-<session>\",\"origin\":\"claude-code-hook\",\"detectedAt\":\"<ts>\",\"text\":\"ShieldCortex — held (headless, no prompt)\\n\\nWhat:    1 dangerous step(s) blocked in this 15m window\\nTools:   Bash×1\\nWhy:     git-force-push×1\\nLast:    act-<action>\\n\\nRetry:   No Approve card this time (retry cards off).\\n\\nOne-shot from a real terminal on that host:\\n  shieldcortex approve --denial act-<action>\\nThen retry the same action once. Approve is not forever.\\n\\nNote:    First hold in this window; further holds are quiet (coalesced).\\nForensics: ~/.shieldcortex/denials.jsonl (command not included here).\\nThis message is visibility — not a tappable Approve surface.\",\"ts\":\"<ts>\"}";
+const GOLDEN_WEBHOOK_ASK_REMOTE = "{\"event\":\"approval_requested\",\"hash\":\"0b740047d8ed51addcaa4c5030f993a71dfdde02f1ca634c70da3de41b9e57c4\",\"shortHash\":\"0b740047d8ed\",\"attemptId\":\"<attempt>\",\"tool\":\"Bash\",\"command\":\"Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\",\"signals\":[\"git-force-push\"],\"severity\":\"dangerous\",\"reason\":\"Action Guard requires approval; inspect local audit for details.\",\"judge\":null,\"text\":\"🛡️ ShieldCortex — approval needed\\n\\nTool:      Bash\\nCommand:   Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\\nTripped:   git-force-push\\nTier:      dangerous\\nReason:    Action Guard requires approval; inspect local audit for details.\\n\\nAI judge:  no judge ran — this verdict is rules-only\\n\\n[Approve]  shieldcortex approve 0b740047d8ed --attempt <attempt>\\n[Deny]     shieldcortex deny 0b740047d8ed --attempt <attempt>\",\"approveCommand\":\"shieldcortex approve 0b740047d8ed --attempt <attempt>\",\"ts\":\"<ts>\",\"denyCommand\":\"shieldcortex deny 0b740047d8ed --attempt <attempt>\",\"sessionId\":\"sc-<session>\"}";
+const GOLDEN_DENIALS_DNP_REMOTE: string[] = [
+  "{\"event\":\"action_guard_denial\",\"outcome\":\"denied_no_prompt_surface\",\"origin\":\"claude-code-hook\",\"tool\":\"Bash\",\"surface\":\"Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\",\"signals\":[\"git-force-push\"],\"matches\":[{\"signal\":\"git-force-push\",\"spanWithheld\":\"command-text\",\"argc\":3}],\"severity\":\"dangerous\",\"reason\":\"Action Guard required approval but this session has no prompt surface; the tool call was denied.\",\"sessionId\":\"sc-<session>\",\"actionId\":\"act-<action>\",\"correlationId\":\"act-<action>\",\"detectedAt\":\"<ts>\",\"notify\":{\"status\":\"pending\",\"deliveredVia\":null}}",
+  "{\"event\":\"action_guard_denial\",\"outcome\":\"denied_no_prompt_surface\",\"origin\":\"claude-code-hook\",\"tool\":\"Bash\",\"surface\":\"Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command\",\"signals\":[\"git-force-push\"],\"matches\":[{\"signal\":\"git-force-push\",\"spanWithheld\":\"command-text\",\"argc\":3}],\"severity\":\"dangerous\",\"reason\":\"Action Guard required approval but this session has no prompt surface; the tool call was denied.\",\"sessionId\":\"sc-<session>\",\"actionId\":\"act-<action>\",\"correlationId\":\"act-<action>\",\"detectedAt\":\"<ts>\",\"notify\":{\"status\":\"delivered\",\"deliveredVia\":\"webhook\"}}",
 ];

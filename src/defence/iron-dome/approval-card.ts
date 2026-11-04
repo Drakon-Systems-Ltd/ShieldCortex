@@ -26,7 +26,10 @@
  * It rides on `OperatorNotification.card` / `ActionGuardOutcomeNotification
  * .card` to two readers only: the OpenClaw card channel and, since #815 A,
  * the webhook channel's versioned `card` block (webhook-notify-channel.ts),
- * which carries these three redactor-passed lines and never the raw command.
+ * which carries these three lines and never the raw command. Every target is
+ * gated by `safeTarget` as a line is built; the webhook also puts each whole
+ * line through `withholdSecretCardLine` before it is clipped or sent, so a
+ * field that skipped the target gate cannot leave the box (#815 A review B1).
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readlinkSync, statSync } from 'node:fs';
@@ -1679,11 +1682,16 @@ function gitRemoteHost(ctx: ShellContext, op: string, remoteArg: string | undefi
   return [...hosts][0];
 }
 
-/** How the card names a remote it will not put a host on. */
+/** How the card names a remote it will not put a host on. The name is
+ *  command input like any other target, so it goes through the target gate
+ *  (#815 A review B1): a credential-shaped name is withheld whole. */
 function remoteLabel(op: string, remoteArg: string | undefined, entries: boolean): string {
   if (op === 'clone' || !entries) return 'a remote server';
   const name = remoteArg ?? 'origin';
-  return /^[A-Za-z0-9._-]{1,32}$/.test(name) ? `the "${name}" remote` : 'a remote server';
+  if (!/^[A-Za-z0-9._-]{1,32}$/.test(name)) return 'a remote server';
+  const shown = safeTarget(name, 32);
+  if (shown === name) return `the "${name}" remote`;
+  return isWithheld(shown) ? shown : 'a remote server';
 }
 
 function describeGit(args: string[], ctx: ShellContext): Described {
@@ -2719,7 +2727,9 @@ export function describeWho(w: ApprovalCardWhoInput): string {
   }
   const parts = session.split(':');
   const fromKey = parts[0] === 'agent' ? parts[1] : undefined;
-  const id = [w.agentId, fromKey].find((v) => typeof v === 'string' && /^[A-Za-z0-9_.-]{1,32}$/.test(v));
+  // The id is shown only whole and only once the target gate passes it
+  // (#815 A review B1): the shape check alone let a key-shaped id through.
+  const id = [w.agentId, fromKey].find((v) => typeof v === 'string' && /^[A-Za-z0-9_.-]{1,32}$/.test(v) && safeTarget(v, 32) === v);
   const agent = id ? `OpenClaw agent "${id}"` : 'OpenClaw agent';
   if (!session) return `${agent} on ${host}`;
   const kind = parts[0] === 'agent' ? parts[2] : undefined;
@@ -2785,6 +2795,46 @@ export function clipCardLine(text: unknown, max: number): string {
 
 function clipLine(text: string, max: number): string {
   return clipCardLine(text, max);
+}
+
+/** A whole card line longer than this is withheld rather than scanned. No
+ *  line the builders make comes near it, and a received card is already held
+ *  to 300 characters a line (`boundedCard` in operator-notify.ts). */
+const MAX_CARD_LINE_SCAN = 1024;
+
+/**
+ * #815 A (review B1): the credential gate for a WHOLE card line, for a
+ * channel that sends card text off the box (the webhook's `card` block).
+ *
+ * `safeTarget` guards each target as a sentence is built, but a field can
+ * still reach a channel without it: the remote-name fallback in
+ * `remoteLabel` once did, and a field that crossed a process boundary was
+ * built somewhere this module cannot see. So the line is put through the
+ * credential redactor and the generic shapes again, BEFORE it is clipped — a
+ * clip can cut a secret down to a fragment no recogniser knows and still
+ * show half of it. Two readings are checked: the line as it will be shown
+ * (flattened), and with line breaks and hidden characters removed, so a key
+ * split by a zero-width or control character is still seen whole.
+ *
+ * A line that trips either reading is replaced whole by `WITHHELD_SECRET`
+ * (one too long to scan, by `WITHHELD_TOO_LONG`); nothing is ever partially
+ * masked. Any other line is returned unchanged, for the caller to flatten and
+ * clip (`clipCardLine`).
+ */
+export function withholdSecretCardLine(text: unknown): string {
+  if (typeof text !== 'string') return WITHHELD_SECRET;
+  if (text.length > MAX_CARD_LINE_SCAN) return WITHHELD_TOO_LONG;
+  const shown = flattenCardText(text);
+  const joined = text.replace(CARD_HIDDEN_ALL, '').replace(CARD_LINE_BREAKS_ALL, '');
+  for (const view of new Set([shown, joined])) {
+    try {
+      if (redactCredentials(view) !== view) return WITHHELD_SECRET;
+    } catch {
+      return WITHHELD_SECRET;
+    }
+    if (looksSecretish(view)) return WITHHELD_SECRET;
+  }
+  return text;
 }
 
 function expiryText(ms: number): string {

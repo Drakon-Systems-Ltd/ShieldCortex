@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describeAction } from '../approval-card.js';
+import { WITHHELD_SECRET, describeAction } from '../approval-card.js';
 import { evaluateToolCall } from '../tool-action-guard.js';
 
 let root = '';
@@ -145,5 +145,34 @@ describe('#648 r3 R2 — the host is dropped whenever the config may rewrite it'
     expect(git('git clone https://github.com/acme/app.git', NO_CWD)).toBe('Send data to github.com (git clone)');
     writeFileSync(join(home, '.gitconfig'), '[url "https://mirror.example.net/"]\n\tinsteadOf = https://github.com/\n');
     expect(git('git clone https://github.com/acme/app.git', NO_CWD)).toBe('Send data to a remote server (git clone)');
+  });
+});
+
+describe('#815 A review B1 — a remote NAME passes the credential redactor like every other target', () => {
+  // Built at runtime so no secret-shaped literal is committed.
+  const AWS_ID = ['AK', 'IA'].join('') + 'Q3XZ7LMN2PRT6VWY';
+
+  it('a credential-shaped remote name is withheld whole, whether or not the repository config was read', () => {
+    repoConfig(ORIGIN);
+    for (const cwd of [repo, NO_CWD] as const) {
+      for (const command of [
+        `git push --force ${AWS_ID} main`,
+        `git push ${AWS_ID} main`,
+        `git push --delete ${AWS_ID} old`,
+        `git fetch ${AWS_ID}`,
+      ]) {
+        const text = git(command, cwd);
+        expect(text).toContain(WITHHELD_SECRET);
+        for (const needle of [AWS_ID, AWS_ID.slice(0, 8), AWS_ID.slice(-8)]) expect(text).not.toContain(needle);
+      }
+    }
+    // The reviewer's fixture, exactly: the remote is withheld, the rest of the line stays.
+    expect(git(`git push --force ${AWS_ID} main`, NO_CWD))
+      .toBe(`Force-push to ${WITHHELD_SECRET} (branch "main") (git push --force)`);
+  });
+
+  it('an ordinary remote name is still named', () => {
+    expect(git('git push --force upstream main', NO_CWD)).toBe('Force-push to the "upstream" remote (branch "main") (git push --force)');
+    expect(git('git fetch my-fork.2', NO_CWD)).toBe('Send data to the "my-fork.2" remote (git fetch)');
   });
 });

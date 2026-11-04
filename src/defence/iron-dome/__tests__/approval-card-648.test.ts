@@ -323,6 +323,16 @@ describe('#648 — WHO: agent, box, session', () => {
     expect(describeWho({ plane: 'openclaw', host: 'h', sessionId: 'agent:ops:cron:nightly' })).toMatch(/^OpenClaw agent "ops" on h · scheduled job #/);
   });
 
+  it('#815 A review B1: a credential-shaped agent id is not printed, from the config or the session key', () => {
+    // Built at runtime so no secret-shaped literal is committed.
+    const AWS_ID = ['AK', 'IA'].join('') + 'Q3XZ7LMN2PRT6VWY';
+    expect(describeWho({ plane: 'openclaw', agentId: AWS_ID, host: 'h' })).toBe('OpenClaw agent on h');
+    const who = describeWho({ plane: 'openclaw', host: 'h', sessionId: `agent:${AWS_ID}:cron:nightly` });
+    expect(who).toMatch(/^OpenClaw agent on h · scheduled job #[0-9a-f]{8}$/);
+    // A plain id is still named.
+    expect(describeWho({ plane: 'openclaw', agentId: 'ops-2', host: 'h' })).toBe('OpenClaw agent "ops-2" on h');
+  });
+
   it('a hostile hostname is not printed', () => {
     expect(describeWho({ plane: 'claude-code', host: 'evil\nhost' })).toBe('Claude Code on this machine');
   });

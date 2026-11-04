@@ -148,8 +148,9 @@ export interface OperatorNotification {
    *  Only on 'approval_requested'. Read by the card channel
    *  (openclaw-approval-channel.ts) and, since #815 A, laid out by the webhook
    *  channel as its versioned `card` block. Every target in it has been
-   *  through the credential redactor on the box; the values-free `command`
-   *  surface and `denials.jsonl` are unchanged. */
+   *  through the credential redactor on the box, and the webhook puts each
+   *  whole line through it again before sending (review B1); the values-free
+   *  `command` surface and `denials.jsonl` are unchanged. */
   card?: ApprovalCardSummary;
 }
 
@@ -230,8 +231,9 @@ export interface ActionGuardOutcomeNotification {
    *  Only on `action_guard_denial`, built on the box by approval-card.ts where
    *  every target has been through the credential redactor, and bounded again
    *  here (`boundedCard`). The webhook payload carries it as a versioned
-   *  `card` block; `denials.jsonl` never does — the hook hands it to this
-   *  builder only, never to the forensic row. */
+   *  `card` block, each line put through the redactor again first (review
+   *  B1); `denials.jsonl` never does — the hook hands it to this builder
+   *  only, never to the forensic row. */
   card?: ApprovalCardSummary;
 }
 

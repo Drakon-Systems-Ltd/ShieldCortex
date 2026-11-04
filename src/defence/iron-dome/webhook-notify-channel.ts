@@ -26,7 +26,7 @@
  * has no tap path; see `WEBHOOK_CARD_VERSION`.
  */
 import { createHmac } from 'node:crypto';
-import { clipCardLine, type ApprovalCardSummary } from './approval-card.js';
+import { clipCardLine, withholdSecretCardLine, type ApprovalCardSummary } from './approval-card.js';
 import type {
   ActionGuardOutcomeNotification,
   AnyOperatorNotification,
@@ -119,7 +119,8 @@ export interface WebhookCard {
    *  'denial'   — the call is already refused; approving authorises a RETRY. */
   kind: 'approval' | 'denial';
   headline: string;
-  /** Plain-English WHAT, built on the box with every target redactor-passed. */
+  /** Plain-English WHAT, built on the box with every target redactor-passed,
+   *  and the whole line put through the redactor again before it is sent. */
   what: string;
   why: string;
   who: string;
@@ -140,12 +141,28 @@ const CARD_WHAT_MAX = 160;
 const CARD_WHY_MAX = 240;
 const CARD_WHO_MAX = 96;
 const ACTION_ID_SHAPE = /^act-[a-f0-9]{16}$/;
+/** The ids a live-hold card's commands carry, re-checked here as the action
+ *  id is: `buildNotification` makes them this shape, a hand-built
+ *  notification need not. */
+const SHORT_HASH_SHAPE = /^[0-9a-f]{12}$/i;
+const ATTEMPT_ID_SHAPE = /^[0-9a-f]{8,64}$/i;
 
+/**
+ * The card's three lines: the only card text built from the call and its
+ * context (the rest is fixed wording or a shape-checked id).
+ * #815 A review B1: each line goes through the credential redactor
+ * (`withholdSecretCardLine`) whole, BEFORE it is clipped and before anything
+ * is serialised, and a line that trips it is withheld whole. Nothing here
+ * relies on the builder having redacted every field: the remote-name
+ * fallback once skipped it, and this is the last point before the card
+ * leaves the box. `text` is built from these lines only.
+ */
 function cardLines(card: ApprovalCardSummary): { what: string; why: string; who: string } {
+  const line = (text: string, max: number) => clipCardLine(withholdSecretCardLine(text), max);
   return {
-    what: clipCardLine(card.action, CARD_WHAT_MAX),
-    why: clipCardLine(card.reason, CARD_WHY_MAX),
-    who: clipCardLine(card.who, CARD_WHO_MAX),
+    what: line(card.action, CARD_WHAT_MAX),
+    why: line(card.reason, CARD_WHY_MAX),
+    who: line(card.who, CARD_WHO_MAX),
   };
 }
 
@@ -154,8 +171,13 @@ function cardText(headline: string, lines: { what: string; why: string; who: str
 }
 
 /** The card for a HELD call (approval_requested over the webhook). There is no
- *  action id on a live hold, so it carries the commands and no `actions`. */
-function buildApprovalCardBlock(n: OperatorNotification, card: ApprovalCardSummary): WebhookCard {
+ *  action id on a live hold, so it carries the commands and no `actions`. A
+ *  hash or attempt id that is not the shape `buildNotification` makes gets no
+ *  card: a card whose commands cannot be stated exactly is not sent. */
+function buildApprovalCardBlock(n: OperatorNotification, card: ApprovalCardSummary): WebhookCard | undefined {
+  if (typeof n.shortHash !== 'string' || !SHORT_HASH_SHAPE.test(n.shortHash)) return undefined;
+  // Truthiness as the commands below (and the top-level ones) read it.
+  if (n.attemptId && (typeof n.attemptId !== 'string' || !ATTEMPT_ID_SHAPE.test(n.attemptId))) return undefined;
   const lines = cardLines(card);
   const attemptArg = n.attemptId ? ` --attempt ${n.attemptId}` : '';
   const approveCommand = `shieldcortex approve ${n.shortHash}${attemptArg}`;
@@ -283,7 +305,10 @@ function buildApprovalPayload(n: OperatorNotification): Record<string, unknown> 
   // #815 A: the readable card for a live hold. `buildNotification` attaches a
   // card only to 'approval_requested'; the check is repeated so a hand-built
   // denial can never be given a live-hold card with a deny command on it.
-  if (!denied && n.card) payload.card = buildApprovalCardBlock(n, n.card);
+  if (!denied && n.card) {
+    const card = buildApprovalCardBlock(n, n.card);
+    if (card) payload.card = card;
+  }
   return payload;
 }
 

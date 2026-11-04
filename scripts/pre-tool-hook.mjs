@@ -1032,10 +1032,12 @@ function safeDiagnosticApprovalReason(reason) {
 
 /**
  * #648 — the card's what/why/who, built on this box from the live tool input.
- * Every target in it has been through the credential redactor (approval-card.ts
- * `safeTarget`). Two readers: the interactive card channel and (#815 A) the
- * webhook's versioned `card` block. The values-free `command` / `surface`
- * fields and `denials.jsonl` never receive it. Never throws.
+ * Every target in it goes through the credential redactor as it is built
+ * (approval-card.ts `safeTarget`). Two readers: the interactive card channel
+ * and (#815 A) the webhook's versioned `card` block, which puts every whole
+ * line through the redactor again before it is clipped or sent
+ * (`withholdSecretCardLine`, review B1). The values-free `command` /
+ * `surface` fields and `denials.jsonl` never receive it. Never throws.
  */
 function approvalCardFor(notify, channel, { toolName, toolInput, verdict, sessionKey, cwd }) {
   if ((channel?.name !== 'openclaw-approval' && channel?.name !== 'webhook') || typeof notify?.buildApprovalCard !== 'function') return undefined;

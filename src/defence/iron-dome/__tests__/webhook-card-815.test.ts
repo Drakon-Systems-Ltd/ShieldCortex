@@ -23,8 +23,17 @@ import {
   requestOperatorApproval,
   type ActionGuardOutcomeInput,
   type AnyOperatorNotification,
+  type OperatorNotification,
 } from '../operator-notify.js';
-import { buildApprovalCard, type ApprovalCardSummary } from '../approval-card.js';
+import {
+  SIGNAL_PHRASES,
+  WITHHELD_SECRET,
+  buildApprovalCard,
+  clipCardLine,
+  describeSignals,
+  type ApprovalCardSummary,
+} from '../approval-card.js';
+import { evaluateToolCall } from '../tool-action-guard.js';
 
 const ACTION_ID = 'act-0123456789abcdef';
 const SESSION_ID = 'sc-fedcba9876543210';
@@ -223,6 +232,20 @@ describe('#815 A — the card is bounded and flattened, whatever crossed the pro
     expect(body).not.toContain(secret.slice(-12));
     expect(body).not.toContain(command);
   });
+
+  it('#815 A review B1: a credential-shaped git remote name, with the guard\'s own signals, is withheld from the card', async () => {
+    // The guard's real signals (`git-force-push`), so the builder really
+    // describes the push rather than going generic — the remote-name fallback
+    // is reached, which is where the name skipped the redactor.
+    const command = `git push --force ${AWS_ID} main`;
+    const signals = evaluateToolCall('Bash', { command }).signals;
+    expect(signals).toContain('git-force-push');
+    const card = buildApprovalCard({ tool: 'Bash', input: { command }, signals, plane: 'claude-code', sessionId: SESSION_ID });
+    expect(card.action).toBe(`Force-push to ${WITHHELD_SECRET} (branch "main") (git push --force)`);
+    const body = (await post(buildActionGuardOutcomeNotification({ ...DNP, card }))).body;
+    expect((JSON.parse(body) as { card: { what: string } }).card.what).toBe(card.action);
+    for (const needle of [AWS_ID, AWS_ID.slice(0, 8), AWS_ID.slice(-8), command]) expect(body).not.toContain(needle);
+  });
 });
 
 describe('#815 A — live hold card (approval_requested over the webhook)', () => {
@@ -291,5 +314,203 @@ describe('#815 A — live hold card (approval_requested over the webhook)', () =
     expect(body.event).toBe('denied_no_prompt_surface');
     expect(body).not.toHaveProperty('card');
     expect(body).not.toHaveProperty('denyCommand');
+  });
+});
+
+// ── #815 A review B1 ────────────────────────────────────────────────────────
+// The class: an approval-card field reaching the webhook without passing the
+// credential redactor. The builder's remote-name fallback was one instance; a
+// field from a future builder, or one that crossed a process boundary, would
+// be another. So the webhook puts EVERY card line through the redactor itself,
+// before the line is clipped and before anything is serialised. The cards
+// below are hand-built so they test that egress gate on its own.
+
+/** The raw body of a live hold (`approval_requested`) over the webhook. */
+async function holdBody(card: ApprovalCardSummary): Promise<string> {
+  let body = '';
+  await requestOperatorApproval(
+    {
+      hash: 'c'.repeat(64),
+      attemptId: 'a1b2c3d4e5f6a7b8',
+      tool: 'Bash',
+      command: 'Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command',
+      signals: ['touch-sensitive-path'],
+      severity: 'dangerous',
+      reason: 'Action Guard requires approval; inspect local audit for details.',
+      sessionId: SESSION_ID,
+      card,
+    },
+    {
+      channel: createWebhookNotifyChannel({
+        url: 'https://bridge.example.invalid/sc',
+        fetchImpl: (async (_u: string, init: RequestInit) => {
+          body = String(init.body);
+          return { ok: true, status: 200 } as Response;
+        }) as unknown as typeof fetch,
+      }),
+    },
+  );
+  return body;
+}
+
+/** The same card over both webhook card paths: headless denial, then live hold. */
+async function overBothPaths(card: ApprovalCardSummary): Promise<Array<{ path: string; body: string; card: Record<string, string> }>> {
+  const denial = (await post(buildActionGuardOutcomeNotification({ ...DNP, card }))).body;
+  const hold = await holdBody(card);
+  return [['denial', denial], ['hold', hold]].map(([path, body]) => {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    expect(parsed).toHaveProperty('card');
+    return { path, body, card: parsed.card as Record<string, string> };
+  });
+}
+
+describe('#815 A review B1 — every card line passes the credential redactor at the webhook, before it is clipped', () => {
+  const GH = ['gh', 'p_'].join('') + 'Z'.repeat(4) + 'q7Lm2Xr9Tb4Vc8Nd1Fh6Jk3Wp5Ys0Ua';
+  const AWS_ID = ['AK', 'IA'].join('') + 'Q3XZ7LMN2PRT6VWY';
+  const LINE_KEY = { action: 'what', reason: 'why', who: 'who' } as const;
+
+  it.each([
+    ['action', GH], ['action', AWS_ID],
+    ['reason', GH], ['reason', AWS_ID],
+    ['who', GH], ['who', AWS_ID],
+  ] as const)('a secret in the card %s line is withheld whole on both paths (%#)', async (field, secret) => {
+    const card: ApprovalCardSummary = { ...CARD, [field]: `Push the release to ${secret} now` };
+    for (const got of await overBothPaths(card)) {
+      expect(got.card[LINE_KEY[field]]).toBe(WITHHELD_SECRET);
+      // The other two lines are untouched.
+      for (const [f, k] of Object.entries(LINE_KEY)) if (f !== field) expect(got.card[k]).toBe(CARD[f as keyof ApprovalCardSummary]);
+      for (const needle of [secret, secret.slice(0, 12), secret.slice(-12)]) expect(got.body).not.toContain(needle);
+    }
+  });
+
+  it('a secret the clip would cut in half is still withheld whole: the gate runs before the clip', async () => {
+    const action = `${'Read a file in the build folder '.repeat(2)}${GH} ${'and then the release folder '.repeat(3)}`.trim();
+    // Precondition: clipping alone would have shown the secret's head.
+    expect(clipCardLine(action, 160)).toContain(GH.slice(0, 12));
+    for (const got of await overBothPaths({ ...CARD, action })) {
+      expect(got.card.what).toBe(WITHHELD_SECRET);
+      expect(got.card.text).toContain(`What: ${WITHHELD_SECRET}`);
+      expect(got.body).not.toContain(GH.slice(0, 12));
+    }
+  });
+
+  it('a secret split by a hidden or control character is seen whole', async () => {
+    for (const split of ['​', '⁠', '\u0007']) {
+      const action = `Read a file: "${AWS_ID.slice(0, 4)}${split}${AWS_ID.slice(4)}"`;
+      for (const got of await overBothPaths({ ...CARD, action })) {
+        expect(got.card.what).toBe(WITHHELD_SECRET);
+        expect(got.body).not.toContain(AWS_ID.slice(4));
+      }
+    }
+  });
+
+  it('withholding a line keeps the card honest: commands, buttons and layout are unchanged', async () => {
+    const [denial, hold] = await overBothPaths({ ...CARD, action: `Push to ${AWS_ID}` });
+    expect(denial.card.approveCommand).toBe(`shieldcortex approve --denial ${ACTION_ID}`);
+    expect(hold.card.approveCommand).toBe('shieldcortex approve cccccccccccc --attempt a1b2c3d4e5f6a7b8');
+    for (const got of [denial, hold]) expect(got.card.text.split('\n').slice(2, 5)).toEqual([`What: ${WITHHELD_SECRET}`, `Why:  ${CARD.reason}`, `Who:  ${CARD.who}`]);
+  });
+
+  // The gate must not cost the card its meaning: no reason phrase and no line
+  // the real builder makes for an ordinary command is withheld.
+  it('every reason phrase, alone and all together, passes unchanged', async () => {
+    // "All together": as many reasons as fit the 300-character bound the card
+    // is held to when it is received, so the line reaches the gate whole.
+    const ids = Object.keys(SIGNAL_PHRASES);
+    let together = ids.length;
+    while (describeSignals(ids.slice(0, together)).length > 300) together -= 1;
+    expect(together).toBeGreaterThan(2);
+    const reasons = [...new Set(Object.values(SIGNAL_PHRASES)), describeSignals(ids.slice(0, together))];
+    for (const reason of reasons) {
+      const got = (await payloadOf(buildActionGuardOutcomeNotification({ ...DNP, card: { ...CARD, reason } }))).card as Record<string, string>;
+      expect(got.why).toBe(clipCardLine(reason, 240));
+    }
+  });
+
+  it.each([
+    'cat ~/.ssh/config',
+    'rm -rf ./build',
+    'git push --force origin main',
+    'git push --force upstream release/2026-11',
+    'curl -d @notes.txt https://example.com/in',
+    'chmod -R 777 /var/www',
+    'pkill -f "node server.js"',
+    'npm install -g typescript',
+    'cp ~/.aws/credentials /tmp/backup-credentials',
+    'sudo systemctl stop nginx',
+    'python3 scripts/deploy.py',
+    'kill -9 4242',
+  ])('the real builder\'s lines for an ordinary command pass unchanged: %s', async (command) => {
+    const card = buildApprovalCard({
+      tool: 'Bash',
+      input: { command },
+      signals: evaluateToolCall('Bash', { command }).signals,
+      plane: 'claude-code',
+      host: 'jarvis',
+      sessionId: SESSION_ID,
+    });
+    for (const got of await overBothPaths(card)) {
+      expect(got.card.what).toBe(clipCardLine(card.action, 160));
+      expect(got.card.why).toBe(clipCardLine(card.reason, 240));
+      expect(got.card.who).toBe(clipCardLine(card.who, 96));
+      expect(got.card.what).not.toBe(WITHHELD_SECRET);
+    }
+  });
+
+  it('an OpenClaw who line passes unchanged', async () => {
+    const who = buildApprovalCard({ tool: 'Bash', input: { command: 'ls' }, signals: [], plane: 'openclaw', agentId: 'main', host: 'clawdbot1', sessionId: 'agent:main:telegram:group:-1001234567890' }).who;
+    const got = (await payloadOf(buildActionGuardOutcomeNotification({ ...DNP, card: { ...CARD, who } }))).card as Record<string, string>;
+    expect(got.who).toBe(who);
+  });
+});
+
+describe('#815 A — the live-hold card re-checks the ids its commands carry', () => {
+  const held = (extra: Partial<OperatorNotification>): OperatorNotification => ({
+    event: 'approval_requested',
+    hash: 'c'.repeat(64),
+    shortHash: 'cccccccccccc',
+    attemptId: 'a1b2c3d4e5f6a7b8',
+    tool: 'Bash',
+    command: 'Bash: [redacted action surface; command not persisted to notify or denials.jsonl preview] fields=command',
+    signals: ['touch-sensitive-path'],
+    severity: 'dangerous',
+    reason: 'r',
+    judge: null,
+    fallbackHint: '',
+    card: CARD,
+    ...extra,
+  });
+
+  it('well-formed ids: the card is built', async () => {
+    expect(await payloadOf(held({}))).toHaveProperty('card');
+    expect(await payloadOf(held({ attemptId: undefined }))).toHaveProperty('card');
+  });
+
+  it('a hand-built notification whose hash or attempt id is not the expected hex gets no card', async () => {
+    for (const extra of [
+      { shortHash: 'ccc; rm -rf ~' },
+      { shortHash: 'c'.repeat(64) },
+      { attemptId: 'a1b2c3d4 && curl x' },
+      { attemptId: 'a1b2' },
+    ]) {
+      const body = await payloadOf(held(extra));
+      expect(body).not.toHaveProperty('card');
+      // Every pre-#815 key is still sent.
+      expect(body).toHaveProperty('approveCommand');
+      expect(body).toHaveProperty('denyCommand');
+    }
+  });
+});
+
+describe('#815 A — a line of trailing markers keeps them, and stays inside the bound set when the card was received', () => {
+  it('the overrun clipCardLine allows for its markers is capped by the 300-character line bound', async () => {
+    const action = `Delete files${' and 9 more'.repeat(26)}`;
+    expect(action.length).toBeLessThanOrEqual(300);
+    const got = (await payloadOf(buildActionGuardOutcomeNotification({ ...DNP, card: { ...CARD, action } }))).card as Record<string, string>;
+    expect(got.what.endsWith(' and 9 more')).toBe(true);
+    expect(got.what.length).toBeLessThanOrEqual(300);
+    // A longer line is cut at the bound first, and then clipped to its own.
+    const long = (await payloadOf(buildActionGuardOutcomeNotification({ ...DNP, card: { ...CARD, action: `Delete files${' and 9 more'.repeat(80)}` } }))).card as Record<string, string>;
+    expect(long.what.length).toBeLessThanOrEqual(160);
   });
 });
