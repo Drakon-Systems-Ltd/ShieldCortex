@@ -313,7 +313,13 @@ function determineBaseResult(
   // determineResult().
 
   // Skill-level threats (tool injection, scope escalation, agent manipulation, etc.)
-  if (skillThreats?.detected && skillThreats.confidence >= 0.8) {
+  // agent_config_tamper alone does not hard-block a trusted writer: a memory
+  // note is not an instruction file an agent auto-loads, and the category is
+  // prose-heavy ("configure HTTPS_PROXY only if ..."). It stays HIGH for
+  // instruction-file scans (scan-skill) and still blocks low-trust sources.
+  const tamperOnlyTrusted =
+    !lowTrust && skillThreats?.threats.length === 1 && skillThreats.threats[0] === 'agent_config_tamper';
+  if (skillThreats?.detected && skillThreats.confidence >= 0.8 && !tamperOnlyTrusted) {
     const result: FirewallResult = lowTrust ? 'BLOCK' : 'QUARANTINE';
     return {
       result,

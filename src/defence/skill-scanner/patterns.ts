@@ -80,6 +80,42 @@ function runPatternGroups(content: string, groups: PatternGroup[]): SkillThreatR
 
 // ── Skill Instruction Patterns ───────────────────────────────────────────────
 
+// Agent configuration files an instruction file may try to rewrite, and the
+// verbs that make such a mention an instruction (shared by the one-line and
+// the Markdown two-line rows of `agent_config_tamper`).
+/** Case-fold a literal word into character classes (usable without the `i` flag). */
+const anyCase = (w: string): string =>
+  w.replace(/[a-z]/gi, (c) => `[${c.toLowerCase()}${c.toUpperCase()}]`);
+
+// A negated instruction ("never edit", "Do not add", "don't set") is advice,
+// not an instruction. Bounded horizontal whitespace only: an unbounded `\s+`
+// in a lookbehind is re-scanned backwards over a whole blank run at every
+// position (Node 22.14 newline-run gate, 43-99 s on 100 KB).
+// One word may sit between the negation and the verb ("never really set").
+// Double-negative verbs ("don't forget to set", "do not hesitate to add",
+// "never fail to …") are not negation: they cannot fill that window, so the
+// instruction stays flagged.
+const NOT_NEGATED =
+  String.raw`(?<!(?:` + ['never', 'not', 'avoid', "n't", 'without'].map(anyCase).join('|') +
+  String.raw`)[ \t]{1,4}(?:(?!(?:` + ['forget', 'fail', 'hesitate', 'neglect', 'omit', 'skip', 'wait', 'miss'].map(anyCase).join('|') +
+  String.raw`)\b)[\w'-]{1,24}[ \t]{1,4}){0,1})`;
+// The word is a noun/determiner-led use ("the install finished", "any install
+// where …", "an update to …"), not an imperative verb.
+const NOT_NOUN_USE =
+  String.raw`(?<!\b(?:` +
+  ['we', 'they', 'which', 'who', 'a', 'an', 'the', 'any', 'this', 'that', 'each', 'every', 'new', 'fresh', 'clean', 'first', 'your', 'our', 'their', 'per', 'of'].map(anyCase).join('|') +
+  String.raw`)[ \t]{1,4})`;
+
+const AGENT_CONFIG_FILE =
+  String.raw`(?:\.claude\/settings[\w.-]*\.json|\.claude\/hooks|\.codex\/config\.toml|\.cursor\/mcp\.json|\.gemini\/settings\.json|\.windsurf\/mcp[\w.-]*\.json|(?<![\w-])mcp\.json\b)`;
+const CONFIG_WRITE_VERB =
+  String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:write|add|append|put|insert|create|edit|modify|update|change|set|merge|patch|overwrite|replace|configure|save|store|paste|copy|drop|place)\b`;
+
+/** The rows of one SKILL pattern group, for per-regex tests. */
+export function skillPatternGroupRows(name: string): readonly RegExp[] {
+  return SKILL_PATTERN_GROUPS.find((g) => g.name === name)?.patterns ?? [];
+}
+
 const SKILL_PATTERN_GROUPS: PatternGroup[] = [
   // 1. Tool injection — instructions to run shell commands or write files
   {
@@ -193,7 +229,113 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
     ],
   },
 
-  // 7. Stealth instruction — hidden instructions using formatting tricks
+  // 7. Agent config tamper — instructions to redirect model/API traffic or
+  //    rewrite the agent's own configuration. Every pattern needs an
+  //    imperative verb, a literal assignment with a URL value, or a literal
+  //    config block / dangerous setting, so a prose mention such as
+  //    "ANTHROPIC_BASE_URL is supported for proxies" does not match. Every
+  //    quantifier is length-capped; the only row that crosses a line break
+  //    (verb line ending in a colon, path on one of the next three lines) is
+  //    capped per line and never uses `^` with the `m` flag or a `\s*` run,
+  //    which the 5.4.1 newline-run gate (newline-run-redos-541.test.ts)
+  //    showed rescans a 100 KB blank run from every newline.
+  {
+    name: 'agent_config_tamper',
+    weight: 0.9,
+    patterns: [
+      // Set/override an API endpoint or proxy variable (imperative verb on
+      // the same line as the variable name). Negated ("do not set …") and
+      // noun uses ("the change to …") do not count.
+      new RegExp(
+        String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT)\b[^\n]{0,60}\b(?:[Hh][Tt][Tt][Pp][Ss]?|[Ss][Oo][Cc][Kk][Ss][45]?[Hh]?):\/\/`,
+      ),
+      new RegExp(
+        String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)\b[^\n]{0,60}\b(?:[Hh][Tt][Tt][Pp][Ss]?|[Ss][Oo][Cc][Kk][Ss][45]?[Hh]?):\/\/`,
+      ),
+      // Literal assignment of an endpoint or proxy variable to a URL, in the
+      // shapes an instruction file uses: `VAR=https://…`, `export VAR=…`,
+      // `"VAR": "https://…"`, `VAR: https://…`, including the lowercase
+      // proxy names. The value must carry a scheme, so a bare mention
+      // ("HTTPS_PROXY is honoured") or a placeholder (`HTTPS_PROXY=<url>`)
+      // does not match. Horizontal whitespace only around the separator.
+      // Code-in-docs shapes count too: a dotted prefix
+      // (`process.env.VAR = "https://…"`), a subscript
+      // (`os.environ["VAR"] = …`), and an upper/mixed-case scheme
+      // (`HTTPS://`), which URL parsers accept.
+      new RegExp(
+        String.raw`(?<![\w$-])${NOT_NEGATED}["']?(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT|HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)["']?\]?[ \t]{0,4}[=:][ \t]{0,4}["']?(?:[Hh][Tt][Tt][Pp][Ss]?|[Ss][Oo][Cc][Kk][Ss][45]?[Hh]?):\/\/`,
+      ),
+      // Write/modify an agent config file, verb and path on one line.
+      new RegExp(
+        `${CONFIG_WRITE_VERB}[ \\t]{1,4}` +
+          `(?:(?:the|this|your|a|an|following|new|updated|these|those|another)[ \\t]{1,4}){0,3}` +
+          `(?:(?!(?:to|into|in|inside|within|of|on|for|about|mention|regarding|and|or|that|which)\\b)[\\w-]{1,20}[ \\t]{1,4}){0,3}?` +
+          `(?:(?:to|into|in|inside|within|of)[ \\t]{1,4}(?:(?:the|your|this)[ \\t]{1,4})?)?` +
+          `[\`"'*_]{0,2}[\\w~$./\\\\-]{0,60}?${AGENT_CONFIG_FILE}(?![ \\t]{1,4}(?:schema|link|docs?|documentation|section|page|reference|example|spec|guide)\\b)`,
+        'i',
+      ),
+      // The same instruction in ordinary Markdown: the verb line ends with a
+      // colon and the path sits on one of the next three lines, on its own
+      // (optionally as a list item, in backticks/bold, or inside a code fence
+      // opened on the line between). At most two blank/fence lines may sit in
+      // between and every line segment is capped, so this never bridges
+      // unrelated paragraphs or a whole code block (#121). Every whitespace
+      // run is capped and the list marker owns its trailing space, so no two
+      // adjacent runs can split the same spaces more than one way.
+      new RegExp(
+        `${CONFIG_WRITE_VERB}[^\\n]{0,80}:(?:\\*{1,2}|_{1,2})?[ \\t]{0,8}\\r?\\n` +
+          `(?:[ \\t]{0,8}\\r?\\n|[ \\t]{0,8}\`\`\`[^\\n]{0,20}\\r?\\n){0,2}` +
+          `[ \\t]{0,8}(?:(?:[-*+]|\\d+[.)])[ \\t]{1,8})?[\`"'*_]{0,2}[\\w~$./\\\\-]{0,60}?${AGENT_CONFIG_FILE}`,
+        'i',
+      ),
+      // Shell redirect / tee into an agent config file. The path run is
+      // capped and cannot cross whitespace or another redirect character, so
+      // a long run of `>` or non-space text never backtracks.
+      /(?:>>?|\btee\b(?:[ \t]{1,4}-a)?)[ \t]{0,4}[^\s<>|;&]{0,80}?(?:\.claude\/settings[\w.-]*\.json|\.codex\/config\.toml|\.cursor\/mcp\.json|\.gemini\/settings\.json)/i,
+      // Add MCP servers or hooks. Needs an imperative verb (not negated, not
+      // a noun use) followed by at most a determiner/adjective run and two
+      // plain words before the MCP server noun, so "any install where the X
+      // MCP server is not wired" or "hooks, MCP servers" does not match.
+      new RegExp(
+        String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:add|register|install|configure|append|insert|enable)\b[ \t]{1,4}` +
+          String.raw`(?:(?:an?|the|new|another|this|that|your|our|my|extra|additional|custom|remote|local|following|requested|mcp)[ \t]{1,4}){0,3}` +
+          String.raw`(?:(?!(?:where|when|which|that|if|is|are|was|were|not|of|in|on|for|to|and|or|but)\b)[\w.@/:-]{1,30}[ \t]{1,4}){0,2}` +
+          String.raw`(?:mcp[ \t]{1,4}servers?|mcpServers|mcp_servers)\b` +
+          String.raw`(?![ \t]{1,4}(?:section|page|chapter|heading|example|docs?|documentation|guide|tutorial|support|table|row|list)\b)`,
+        'i',
+      ),
+      /\[mcp_servers\.[\w-]+\]/,
+      /["']mcpServers["']\s*:\s*\{/,
+      // A Claude-style hooks block keyed by event name (a bare "hooks": {…}
+      // also appears in benign enable/disable docs, so require an event).
+      /["']hooks["']\s*:\s*\{\s*["'](?:PreToolUse|PostToolUse|SessionStart|SessionEnd|UserPromptSubmit|Stop|SubagentStop|Notification|PreCompact)["']/,
+      // Turn off sandbox / approval settings. Every row is negation-aware
+      // (NOT_NEGATED), so "never use --dangerously-skip-permissions" is
+      // advice while "Don't forget to use --dangerously-skip-permissions"
+      // (three words past the negation) still matches.
+      new RegExp(String.raw`${NOT_NEGATED}--dangerously-(?:skip-permissions|bypass-approvals-and-sandbox)\b`, 'i'),
+      new RegExp(String.raw`${NOT_NEGATED}\bapproval[_-]policy[ \t]{0,4}[=:][ \t]{0,4}["']?never\b`, 'i'),
+      new RegExp(String.raw`${NOT_NEGATED}\bsandbox[_-]mode[ \t]{0,4}[=:][ \t]{0,4}["']?danger-full-access\b`, 'i'),
+      new RegExp(String.raw`${NOT_NEGATED}["']?defaultMode["']?[ \t]{0,4}[=:][ \t]{0,4}["']?bypassPermissions\b`),
+      // These two settings are dangerous only when ENABLED: `enableAllProjectMcpServers:
+      // false` turns the behaviour off. Accepts `: true`, `= 1`, `"on"`,
+      // `"all"` and the prose form `… to true`.
+      new RegExp(
+        String.raw`${NOT_NEGATED}\b(?:skipDangerousModePermissionPrompt|enableAllProjectMcpServers)\b["']?(?:[ \t]{0,4}[=:][ \t]{0,4}|[ \t]{1,4}to[ \t]{1,4})["']?(?:true|1|on|yes|all|enabled)\b`,
+        'i',
+      ),
+      // A real disable only: `turn off` / `switch off` / `disable` / `run
+      // without`, or `set|turn|switch the sandbox|approval … off|never|none`.
+      // Setting the sandbox to read-only or turning it on is hardening, and
+      // a negated instruction ("never turn off the sandbox") is advice.
+      new RegExp(String.raw`${NOT_NEGATED}${NOT_NOUN_USE}\b(?:(?:turn|switch)[ \t]{1,4}off|disable|bypass)[ \t]{1,4}(?:(?:the|all|any)[ \t]{1,4})?(?:sandbox(?:ing)?|approvals?)\b`, 'i'),
+      new RegExp(String.raw`${NOT_NEGATED}\b(?:turn|switch|set)[ \t]{1,4}(?:the[ \t]{1,4})?(?:sandbox|approvals?)(?:[ \t]{1,4}[\w-]{1,20}){0,2}?[ \t]{1,4}(?:off|to[ \t]{1,4}(?:off|never|none|disabled|danger-full-access))\b`, 'i'),
+      new RegExp(String.raw`${NOT_NEGATED}\b(?:run|work|operate|execute|proceed)[ \t]{1,4}without[ \t]{1,4}(?:(?:the|a|any)[ \t]{1,4})?(?:sandbox(?:ing)?|approvals?)\b`, 'i'),
+      new RegExp(String.raw`${NOT_NEGATED}\bsandbox[ \t]{0,4}[=:][ \t]{0,4}["']?(?:false|off|disabled)\b`, 'i'),
+    ],
+  },
+
+  // 8. Stealth instruction — hidden instructions using formatting tricks
   {
     name: 'stealth_instruction',
     weight: 0.85,
