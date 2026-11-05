@@ -82,6 +82,16 @@ describe('agent_config_tamper at memory admission', () => {
     it(`scanner still flags genuine tamper instruction as agent_config_tamper: ${text}`, () => {
       expect(detectSkillThreats(text).threats).toContain('agent_config_tamper');
     });
+  }
+
+  // A representative subset goes through the real admission path (each blocked
+  // write quarantines a row); every MALICIOUS line is covered by the scanner
+  // assertion above.
+  const REFUSED: string[] = [
+    MALICIOUS[0], MALICIOUS[1], MALICIOUS[3],
+    ...MALICIOUS.filter((t) => /forget|hesitate|fail to/i.test(t) && !/dangerously/.test(t)),
+  ];
+  for (const text of REFUSED) {
     it(`still refuses genuine tamper instruction from an unattributed writer: ${text}`, () => {
       expect(() => addMemory({ title: 'note', content: text })).toThrow(MemoryBlockedError);
     });
