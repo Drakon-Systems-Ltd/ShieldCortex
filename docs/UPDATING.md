@@ -51,6 +51,14 @@ or set `SHIELDCORTEX_SKIP_UPDATE_CHECK=1` for the dashboard/API process. The das
 5. **Background service** — if you ran `shieldcortex service install`, check `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`). Linux and macOS restart the service; Windows schedules it for the next login.
 6. **Doctor** — `shieldcortex doctor` warns when the OpenClaw plugin or Hermes copy is behind the package and names the command to run. It exits 1 on a failure (`--strict` also fails on warnings). Repairs are opt-in flags: `--fix-project-keys`, `--fix-action-guard`, `--fix-hermes-plugin-copies`.
 
+<a id="whats-new-in-518"></a>
+
+## What's new in 5.18
+
+- **Readable card on Action Guard webhook notifications (#815 A, PR #996).** When the Claude Code hook sends a headless denial (`action_guard_denial`, outcome `denied_no_prompt_surface`) or a held approval request (`approval_requested`) to the `actionGuard.notify` webhook, the body now ends with a `card` block (`version: 1`): a plain-English what, why and who from a fixed template, the exact command to allow it (`shieldcortex approve --denial <actionId>` for a denial; `shieldcortex approve <hash> --attempt <id>` or `shieldcortex deny …` for a held call), and a `text` rendering. The card never shows the call's target (no branch, path, host, URL or argument) and never the raw command. Version 1 has no one-tap approve: a receiver should show the command, not a button that pretends to approve. ShieldCortex only posts the card to the webhook you configured (`shieldcortex config --action-guard-notify-webhook <https-url>`); showing it in a chat needs a receiver that renders the `card` block. Existing webhook fields are unchanged and in the same order, and `denials.jsonl` is unchanged. Other denials, advisory warnings and the OpenClaw plugin's webhook messages carry no card.
+- **Doctor says it plainly.** On an enforcing host with no notify channel, the `shieldcortex doctor` notify row now adds that nobody is told when Action Guard blocks something while nobody is at a prompt. Same severity, same fix.
+- **Interactive approval card hardening.** The 5.6 approval card now also withholds a credential-shaped git remote name, git host, agent id or hostname. Ordinary names are still shown.
+
 <a id="whats-new-in-517"></a>
 
 ## What's new in 5.17

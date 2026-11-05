@@ -89,6 +89,8 @@ The optional enforce-when-ready posture runs the dangerous tier in shadow until 
 
 Approval cards (5.6+) say what a held action does, why it was held and who asked, in plain English, without the raw command. Database, cluster and cloud teardown commands now ask for approval (5.6+). [What's new in 5.6](docs/UPDATING.md#whats-new-in-56).
 
+From 5.18, when the Claude Code hook sends a headless denial or a held approval to your Action Guard webhook (`actionGuard.notify`), the body can also carry a fixed-template `card` (version 1) with the exact `shieldcortex approve` command. Version 1 has no one-tap approve, and nothing appears in a chat unless the receiver behind your webhook renders the card. [What's new in 5.18](docs/UPDATING.md#whats-new-in-518).
+
 `shieldcortex/toolsets` (5.8+) sits in front of a Claude SDK browser-use or computer-use driver and by default records what each click, keystroke, navigation and page read would trigger without changing what runs; `mode: 'enforce'` refuses the riskiest calls outright, holds risky ones (such as irreversible clicks after a page read) for your approval, and lets the rest run. [Quickstart](docs/quickstarts/claude-sdk-toolsets.md).
 
 ## Free and Cloud
