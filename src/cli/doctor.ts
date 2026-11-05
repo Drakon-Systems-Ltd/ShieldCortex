@@ -5158,10 +5158,16 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
           'for live require_approval holds) and does not replace the webhook for DNP. ' +
           'The CLI writes a signed config — hand-editing config.json invalidates its integrity signature and ' +
           "forces strict mode. OpenClaw lastRunStatus is not ShieldCortex's to write.";
+        // #815 A: the same fact in plain English, on the armed row only — the
+        // row that says this host is not safe as configured. Once per row; the
+        // row itself is one per doctor run.
+        const plainArmed = armed
+          ? ' In plain terms: when Action Guard blocks something while nobody is at a prompt, nobody is told.'
+          : '';
         results.push({
           label: `${label} notify`,
           status,
-          message: webhookRejected
+          message: (webhookRejected
             ? // The value is never echoed: it may be junk pasted from anywhere.
               `${prefix} no denial-capable notify sink (actionGuard.notify.webhookUrl is set but is not an ` +
               `http(s) URL the notify transport will deliver to` +
@@ -5178,7 +5184,7 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
                   `actionGuard.notify.webhookUrl is set but notify.enabled is not true, so the transport is off`
                 : `actionGuard.notify.webhookUrl unset${notifyOn ? '' : ', notify.enabled is not true'}`) +
               `) — unattended denials stay in the audit log and session-guard index only. ` +
-              `The #242 cron incidents were this shape.`,
+              `The #242 cron incidents were this shape.`) + plainArmed,
           fix: armed
             ? webhookFix
             : signedUnknown
