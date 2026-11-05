@@ -110,6 +110,8 @@ export const SIGNAL_PHRASES: Readonly<Record<string, string>> = Object.freeze({
   'install-package-global': 'installs software for the whole machine',
   'local-package-install': 'installs packages into this project',
   'registry-code-exec': 'downloads a package and runs it straight away',
+  'package-vetting': 'the package check found something to look at',
+  'known-malicious-package': 'installs a package listed as malicious',
   // Deleting and overwriting.
   'recursive-force-delete': 'deletes files permanently',
   'delete-root-or-home': 'deletes a whole home folder or disk',
@@ -229,6 +231,8 @@ export const SIGNAL_CLASSES: Readonly<Record<string, SignalClass>> = Object.free
   'install-package-global': 'install',
   'local-package-install': 'install',
   'registry-code-exec': 'install',
+  'package-vetting': 'none',
+  'known-malicious-package': 'install',
   'recursive-force-delete': 'delete',
   'delete-root-or-home': 'delete',
   'delete-critical-path': 'delete',
@@ -2629,6 +2633,13 @@ export interface ApprovalCardActionInput {
   procRoot?: string;
   /** Tests only: the system-level git config files (default: the real ones). */
   gitSystemConfig?: readonly string[];
+  /**
+   * #889: plain-English findings from the pre-install package check (OSV hit,
+   * version age, install scripts, "unchecked: …"). Built by `package-vetting`
+   * from a fixed vocabulary plus a registry-safe package name; still bounded
+   * and flattened here, because this line is read by a person deciding.
+   */
+  extraReasons?: readonly string[];
 }
 
 /** Line 1: what it wants to do, in plain English, naming the target — and
@@ -2741,10 +2752,21 @@ export interface ApprovalCardSummary {
 
 export interface ApprovalCardInput extends ApprovalCardActionInput, ApprovalCardWhoInput {}
 
+/** Most vetting reasons shown, and the longest one (#889). */
+const MAX_EXTRA_REASONS = 4;
+const MAX_EXTRA_REASON_LEN = 110;
+
 export function buildApprovalCard(input: ApprovalCardInput): ApprovalCardSummary {
+  const base = describeSignals(input.signals);
+  const extra = (Array.isArray(input.extraReasons) ? input.extraReasons : [])
+    .map((r) => flattenCardText(r).replace(/;/g, ','))
+    .filter(Boolean)
+    .slice(0, MAX_EXTRA_REASONS)
+    .map((r) => (r.length > MAX_EXTRA_REASON_LEN ? `${r.slice(0, MAX_EXTRA_REASON_LEN - 1).trimEnd()}…` : r));
   return {
     action: describeAction(input).text,
-    reason: describeSignals(input.signals),
+    // The package findings lead: they are the new information on an install card.
+    reason: extra.length ? [...extra, base].join(REASON_SEPARATOR) : base,
     who: describeWho(input),
   };
 }
