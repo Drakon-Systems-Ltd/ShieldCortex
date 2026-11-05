@@ -148,6 +148,9 @@ export type {
 // Tool Action Guard — gates what the agent DOES at runtime (shell/file/network/git).
 export { evaluateToolCall, classifyFamily, isCriticalPath, normaliseToolName, detectScriptInvocation } from './iron-dome/tool-action-guard.js';
 export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily, ToolGuardOptions } from './iron-dome/tool-action-guard.js';
+// #889: pre-install package vetting (OSV + registry), consumed by the hook and the OpenClaw plugin.
+export { vetToolCall, vetMcpServers, vetPackages, parseInstallCommands, applyVettingToVerdict, normalisePackageVettingConfig } from './iron-dome/package-vetting.js';
+export type { ToolVettingOutcome, PackageVettingConfig } from './iron-dome/package-vetting.js';
 // #648: the plain-English what/why/who an approval card shows. The OpenClaw
 // interceptor takes `buildApprovalCard` through its runtime seam.
 export { buildApprovalCard, describeAction, describeShell, describeSignal, describeSignals, describeWho, fitReasons, formatApprovalCardLines, GENERIC_SHELL, OUTSIDE_UNDERSTOOD_SUBSET, safeTarget, SIGNAL_CLASSES, SIGNAL_PHRASES, signalClass } from './iron-dome/approval-card.js';

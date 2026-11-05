@@ -515,6 +515,9 @@ interface InterceptorUserConfig {
     /** Reviewed-script allowlist (#189). Passed through RAW; validated
      *  entry-by-entry inside createReviewedScriptCheck. */
     reviewedScripts?: unknown[];
+    /** Pre-install package vetting (#889). Passed through RAW;
+     *  `normalisePackageVettingConfig` in the main package is the boundary. */
+    packageVetting?: Record<string, unknown>;
     /** Operator-notify transport (#143), reused by the #225 conversation sink.
      *  Passed through RAW for the same reason as `broker`: `normaliseNotifyConfig`
      *  in the main package is the single boundary that knows which values arm a
@@ -1432,6 +1435,15 @@ const ACTION_GUARD_JSON_SCHEMA = {
         timeoutMs: { type: "number", minimum: 500, maximum: 60000 },
       },
     },
+    // #889. normalisePackageVettingConfig in the main package has the last word.
+    packageVetting: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean" },
+        minAgeDays: { type: "number", minimum: 0, maximum: 365 },
+      },
+    },
     // #189. Each entry pins one script by absolute path + content hash;
     // createReviewedScriptCheck has the last word on every field.
     reviewedScripts: {
@@ -1731,6 +1743,10 @@ function normaliseActionGuardBlock(
   // boundary that shape-validates each entry.
   if (Array.isArray(rawGuard.reviewedScripts)) {
     guard.reviewedScripts = [...rawGuard.reviewedScripts];
+  }
+  // #889: passthrough; normalisePackageVettingConfig is the boundary.
+  if (rawGuard.packageVetting && typeof rawGuard.packageVetting === "object" && !Array.isArray(rawGuard.packageVetting)) {
+    guard.packageVetting = { ...(rawGuard.packageVetting as Record<string, unknown>) };
   }
   // #143/#225: the notify transport. Same passthrough discipline again —
   // normaliseNotifyConfig is the boundary. Shallow-copied rather than aliased
@@ -4830,6 +4846,14 @@ export default {
             ? ((defenceMod as any).evaluateToolCall as Parameters<typeof createInterceptor>[2] extends { evaluateToolCall?: infer E } ? E : never)
             : undefined,
           broker: resolveBrokerRuntime(defenceMod, interceptorConfig.actionGuard?.broker, api),
+          // #889: pre-install package vetting from the same runtime seam. Absent
+          // on an older dist: installs are then judged exactly as before.
+          packageVetting: typeof (defenceMod as any)?.vetToolCall === 'function' && typeof (defenceMod as any)?.applyVettingToVerdict === 'function'
+            ? {
+                vet: (toolName, args, cfg) => (defenceMod as any).vetToolCall(toolName, args, (defenceMod as any).normalisePackageVettingConfig?.(cfg) ?? {}),
+                apply: (v, outcome) => (defenceMod as any).applyVettingToVerdict(v, outcome),
+              }
+            : undefined,
           // #648: the plain-English card summary (what / why / who), from the
           // same runtime seam. Absent on an older dist: the card keeps its
           // previous layout.

@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Action Guard: pre-install package vetting via OSV, version age and install hooks (#889 phase 1).** An install the guard already sees (`npm`/`pnpm`/`yarn`/`bun` add or install, `npx`, `bunx`, `pnpm dlx`, `yarn dlx`, `pip`/`pip3`, `uv add`, `uv pip install`, `uvx`, `pipx`) now has its package and requested version resolved against the npm registry or PyPI and queried against OSV for that exact version. A `MAL-` (known malicious) hit is blocked at the catastrophic tier on every posture, including advisory and shadow. An OSV advisory, a version published less than `actionGuard.packageVetting.minAgeDays` (default 7) ago, an npm lifecycle script or a source-only PyPI release only adds plain-English reasons to the approval card and the audit row (`packageVetting`); age or hooks alone never block. A lookup that cannot finish within the 3 s budget is reported as `unchecked: <reason>`, never as clean, and fails open, except that an unexpired cached `MAL-` hit still blocks. Results are cached per `ecosystem@name@version` for 6 h under `~/.shieldcortex/state` (owner-only). The #916 agent-config watch applies the same check, report-only, to a newly added MCP server launched by `npx`/`uvx`. Wired into the Claude Code hook and the OpenClaw plugin; `actionGuard.packageVetting.enabled: false` turns it off. Deprecated/archived detection stays in #989. See `docs/security/package-vetting.md`.
+
 ## [5.17.4] - 2026-11-04
 
 Patch on 5.17.3. Claude SDK toolset cards and audit rows now withhold credential-shaped hosts that the URL parser maps to ASCII (#735 review B1, PR #840). PR #948 records operator acceptance in ADR-002 only. No configuration, schema or breaking API change; Action Guard stays off by default. Node floor unchanged.
