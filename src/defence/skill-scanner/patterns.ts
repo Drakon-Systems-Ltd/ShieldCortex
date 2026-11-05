@@ -83,10 +83,28 @@ function runPatternGroups(content: string, groups: PatternGroup[]): SkillThreatR
 // Agent configuration files an instruction file may try to rewrite, and the
 // verbs that make such a mention an instruction (shared by the one-line and
 // the Markdown two-line rows of `agent_config_tamper`).
+/** Case-fold a literal word into character classes (usable without the `i` flag). */
+const anyCase = (w: string): string =>
+  w.replace(/[a-z]/gi, (c) => `[${c.toLowerCase()}${c.toUpperCase()}]`);
+
+// A negated instruction ("never edit", "Do not add", "don't set") is advice,
+// not an instruction. Bounded horizontal whitespace only: an unbounded `\s+`
+// in a lookbehind is re-scanned backwards over a whole blank run at every
+// position (Node 22.14 newline-run gate, 43-99 s on 100 KB).
+const NOT_NEGATED =
+  String.raw`(?<!(?:` + ['never', 'not', 'avoid', "n't", 'without'].map(anyCase).join('|') +
+  String.raw`)[ \t]{1,4}(?:[\w'-]{1,24}[ \t]{1,4}){0,2})`;
+// The word is a noun/determiner-led use ("the install finished", "any install
+// where …", "an update to …"), not an imperative verb.
+const NOT_NOUN_USE =
+  String.raw`(?<!\b(?:` +
+  ['a', 'an', 'the', 'any', 'this', 'that', 'each', 'every', 'new', 'fresh', 'clean', 'first', 'your', 'our', 'their', 'per', 'of'].map(anyCase).join('|') +
+  String.raw`)[ \t]{1,4})`;
+
 const AGENT_CONFIG_FILE =
   String.raw`(?:\.claude\/settings[\w.-]*\.json|\.claude\/hooks|\.codex\/config\.toml|\.cursor\/mcp\.json|\.gemini\/settings\.json|\.windsurf\/mcp[\w.-]*\.json|(?<![\w-])mcp\.json\b)`;
 const CONFIG_WRITE_VERB =
-  String.raw`\b(?:write|add|append|put|insert|create|edit|modify|update|change|set|merge|patch|overwrite|replace|configure|save|store|paste|copy|drop|place)\b`;
+  String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:write|add|append|put|insert|create|edit|modify|update|change|set|merge|patch|overwrite|replace|configure|save|store|paste|copy|drop|place)\b`;
 
 /** The rows of one SKILL pattern group, for per-regex tests. */
 export function skillPatternGroupRows(name: string): readonly RegExp[] {
@@ -221,9 +239,14 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
     weight: 0.9,
     patterns: [
       // Set/override an API endpoint or proxy variable (imperative verb on
-      // the same line as the variable name).
-      /\b(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT)\b/,
-      /\b(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)\b/,
+      // the same line as the variable name). Negated ("do not set …") and
+      // noun uses ("the change to …") do not count.
+      new RegExp(
+        String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT)\b`,
+      ),
+      new RegExp(
+        String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)\b`,
+      ),
       // Literal assignment of an endpoint or proxy variable to a URL, in the
       // shapes an instruction file uses: `VAR=https://…`, `export VAR=…`,
       // `"VAR": "https://…"`, `VAR: https://…`, including the lowercase
@@ -234,7 +257,9 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
       // (`process.env.VAR = "https://…"`), a subscript
       // (`os.environ["VAR"] = …`), and an upper/mixed-case scheme
       // (`HTTPS://`), which URL parsers accept.
-      /(?<![\w$-])["']?(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT|HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)["']?\]?[ \t]*[=:][ \t]*["']?(?:[Hh][Tt][Tt][Pp][Ss]?|[Ss][Oo][Cc][Kk][Ss][45]?[Hh]?):\/\//,
+      new RegExp(
+        String.raw`(?<![\w$-])${NOT_NEGATED}["']?(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT|HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)["']?\]?[ \t]{0,4}[=:][ \t]{0,4}["']?(?:[Hh][Tt][Tt][Pp][Ss]?|[Ss][Oo][Cc][Kk][Ss][45]?[Hh]?):\/\/`,
+      ),
       // Write/modify an agent config file, verb and path on one line.
       new RegExp(`${CONFIG_WRITE_VERB}[^\\n]{0,80}${AGENT_CONFIG_FILE}`, 'i'),
       // The same instruction in ordinary Markdown: the verb line ends with a
@@ -242,39 +267,58 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
       // (optionally as a list item, in backticks/bold, or inside a code fence
       // opened on the line between). At most two blank/fence lines may sit in
       // between and every line segment is capped, so this never bridges
-      // unrelated paragraphs or a whole code block (#121).
+      // unrelated paragraphs or a whole code block (#121). Every whitespace
+      // run is capped and the list marker owns its trailing space, so no two
+      // adjacent runs can split the same spaces more than one way.
       new RegExp(
-        `${CONFIG_WRITE_VERB}[^\\n]{0,80}:(?:\\*{1,2}|_{1,2})?[ \\t]*\\r?\\n` +
-          `(?:[ \\t]*\\r?\\n|[ \\t]*\`\`\`[^\\n]{0,20}\\r?\\n){0,2}` +
-          `[ \\t]*(?:[-*+]|\\d+[.)])?[ \\t]*[\`"'*_]{0,2}[\\w~$./\\\\-]{0,60}?${AGENT_CONFIG_FILE}`,
+        `${CONFIG_WRITE_VERB}[^\\n]{0,80}:(?:\\*{1,2}|_{1,2})?[ \\t]{0,8}\\r?\\n` +
+          `(?:[ \\t]{0,8}\\r?\\n|[ \\t]{0,8}\`\`\`[^\\n]{0,20}\\r?\\n){0,2}` +
+          `[ \\t]{0,8}(?:(?:[-*+]|\\d+[.)])[ \\t]{1,8})?[\`"'*_]{0,2}[\\w~$./\\\\-]{0,60}?${AGENT_CONFIG_FILE}`,
         'i',
       ),
-      /(?:>>?|\btee\b(?:\s+-a)?)\s*\S*(?:\.claude\/settings[\w.-]*\.json|\.codex\/config\.toml|\.cursor\/mcp\.json|\.gemini\/settings\.json)/i,
-      // Add MCP servers or hooks.
-      /\b(add|register|install|configure|append|insert|enable)\b[^\n]{0,40}\b(?:mcp\s+servers?|mcpServers|mcp_servers)\b/i,
+      // Shell redirect / tee into an agent config file. The path run is
+      // capped and cannot cross whitespace or another redirect character, so
+      // a long run of `>` or non-space text never backtracks.
+      /(?:>>?|\btee\b(?:[ \t]{1,4}-a)?)[ \t]{0,4}[^\s<>|;&]{0,80}?(?:\.claude\/settings[\w.-]*\.json|\.codex\/config\.toml|\.cursor\/mcp\.json|\.gemini\/settings\.json)/i,
+      // Add MCP servers or hooks. Needs an imperative verb (not negated, not
+      // a noun use) followed by at most a determiner/adjective run and two
+      // plain words before the MCP server noun, so "any install where the X
+      // MCP server is not wired" or "hooks, MCP servers" does not match.
+      new RegExp(
+        String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:add|register|install|configure|append|insert|enable)\b[ \t]{1,4}` +
+          String.raw`(?:(?:an?|the|new|another|this|that|your|our|my|extra|additional|custom|remote|local|following|requested|mcp)[ \t]{1,4}){0,3}` +
+          String.raw`(?:(?!(?:where|when|which|that|if|is|are|was|were|not|of|in|on|for|to|and|or|but)\b)[\w.@/:-]{1,30}[ \t]{1,4}){0,2}` +
+          String.raw`(?:mcp[ \t]{1,4}servers?|mcpServers|mcp_servers)\b`,
+        'i',
+      ),
       /\[mcp_servers\.[\w-]+\]/,
       /["']mcpServers["']\s*:\s*\{/,
       // A Claude-style hooks block keyed by event name (a bare "hooks": {…}
       // also appears in benign enable/disable docs, so require an event).
       /["']hooks["']\s*:\s*\{\s*["'](?:PreToolUse|PostToolUse|SessionStart|SessionEnd|UserPromptSubmit|Stop|SubagentStop|Notification|PreCompact)["']/,
-      // Turn off sandbox / approval settings.
-      /(?<!(?:never|not|avoid|n't|without)[ \t]{1,4}(?:[\w'-]{1,24}[ \t]{1,4}){0,2})--dangerously-(?:skip-permissions|bypass-approvals-and-sandbox)\b/i,
-      /(?<!(?:never|not|avoid|n't|without)[ \t]{1,4}(?:[\w'-]{1,24}[ \t]{1,4}){0,2})\bapproval[_-]policy\s*[=:]\s*["']?never\b/i,
-      /(?<!(?:never|not|avoid|n't|without)[ \t]{1,4}(?:[\w'-]{1,24}[ \t]{1,4}){0,2})\bsandbox[_-]mode\s*[=:]\s*["']?danger-full-access\b/i,
-      /["']?defaultMode["']?\s*[=:]\s*["']?bypassPermissions\b/,
-      /\bskipDangerousModePermissionPrompt\b|\benableAllProjectMcpServers\b/,
+      // Turn off sandbox / approval settings. Every row is negation-aware
+      // (NOT_NEGATED), so "never use --dangerously-skip-permissions" is
+      // advice while "Don't forget to use --dangerously-skip-permissions"
+      // (three words past the negation) still matches.
+      new RegExp(String.raw`${NOT_NEGATED}--dangerously-(?:skip-permissions|bypass-approvals-and-sandbox)\b`, 'i'),
+      new RegExp(String.raw`${NOT_NEGATED}\bapproval[_-]policy[ \t]{0,4}[=:][ \t]{0,4}["']?never\b`, 'i'),
+      new RegExp(String.raw`${NOT_NEGATED}\bsandbox[_-]mode[ \t]{0,4}[=:][ \t]{0,4}["']?danger-full-access\b`, 'i'),
+      new RegExp(String.raw`${NOT_NEGATED}["']?defaultMode["']?[ \t]{0,4}[=:][ \t]{0,4}["']?bypassPermissions\b`),
+      // These two settings are dangerous only when ENABLED: `enableAllProjectMcpServers:
+      // false` turns the behaviour off. Accepts `: true`, `= 1`, `"on"`,
+      // `"all"` and the prose form `… to true`.
+      new RegExp(
+        String.raw`${NOT_NEGATED}\b(?:skipDangerousModePermissionPrompt|enableAllProjectMcpServers)\b["']?(?:[ \t]{0,4}[=:][ \t]{0,4}|[ \t]{1,4}to[ \t]{1,4})["']?(?:true|1|on|yes|all|enabled)\b`,
+        'i',
+      ),
       // A real disable only: `turn off` / `switch off` / `disable` / `run
       // without`, or `set|turn|switch the sandbox|approval … off|never|none`.
       // Setting the sandbox to read-only or turning it on is hardening, and
       // a negated instruction ("never turn off the sandbox") is advice.
-      // The negation lookbehind (here and on the flag rows above) uses bounded
-      // horizontal whitespace only: an unbounded `\s+` in a lookbehind is
-      // re-scanned backwards over a whole blank run at every position, which
-      // Node 22.14 CI measured at 43-99 s on the 100 KB newline-run gate.
-      /(?<!(?:never|not|avoid|n't|without)[ \t]{1,4}(?:[\w'-]{1,24}[ \t]{1,4}){0,2})\b(?:(?:turn|switch)[ \t]{1,4}off|disable|bypass)[ \t]{1,4}(?:(?:the|all|any)[ \t]{1,4})?(?:sandbox(?:ing)?|approvals?)\b/i,
-      /(?<!(?:never|not|avoid|n't|without)[ \t]{1,4}(?:[\w'-]{1,24}[ \t]{1,4}){0,2})\b(?:turn|switch|set)[ \t]{1,4}(?:the[ \t]{1,4})?(?:sandbox|approvals?)(?:[ \t]{1,4}[\w-]{1,20}){0,2}?[ \t]{1,4}(?:off|to[ \t]{1,4}(?:off|never|none|disabled|danger-full-access))\b/i,
-      /\b(?:run|work|operate|execute|proceed)[ \t]{1,4}without[ \t]{1,4}(?:(?:the|a|any)[ \t]{1,4})?(?:sandbox(?:ing)?|approvals?)\b/i,
-      /\bsandbox\s*[=:]\s*["']?(?:false|off|disabled)\b/i,
+      new RegExp(String.raw`${NOT_NEGATED}\b(?:(?:turn|switch)[ \t]{1,4}off|disable|bypass)[ \t]{1,4}(?:(?:the|all|any)[ \t]{1,4})?(?:sandbox(?:ing)?|approvals?)\b`, 'i'),
+      new RegExp(String.raw`${NOT_NEGATED}\b(?:turn|switch|set)[ \t]{1,4}(?:the[ \t]{1,4})?(?:sandbox|approvals?)(?:[ \t]{1,4}[\w-]{1,20}){0,2}?[ \t]{1,4}(?:off|to[ \t]{1,4}(?:off|never|none|disabled|danger-full-access))\b`, 'i'),
+      new RegExp(String.raw`${NOT_NEGATED}\b(?:run|work|operate|execute|proceed)[ \t]{1,4}without[ \t]{1,4}(?:(?:the|a|any)[ \t]{1,4})?(?:sandbox(?:ing)?|approvals?)\b`, 'i'),
+      new RegExp(String.raw`${NOT_NEGATED}\bsandbox[ \t]{0,4}[=:][ \t]{0,4}["']?(?:false|off|disabled)\b`, 'i'),
     ],
   },
 
