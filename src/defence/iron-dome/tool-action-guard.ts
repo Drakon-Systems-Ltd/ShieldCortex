@@ -4979,6 +4979,106 @@ function looksExternal(url: string, text: string): boolean {
   return /https?:\/\/[a-z0-9.-]+\.[a-z]{2,}/i.test(hay) || /[a-z0-9.-]+\.[a-z]{2,}\b/i.test(url);
 }
 
+// ── Issuer binding for secret-egress (issue #1001) ───────────────────────────
+//
+// The catastrophic `secret-egress` tier is demoted to an approval door in
+// exactly one shape: the credential's own SHAPE names its issuer, and EVERY
+// egress destination on the surface is that issuer's host. The binding is per
+// CREDENTIAL, never per destination — a credential whose shape names issuer A,
+// sent to issuer B's host, is a mismatch, not a match. Anything the table below
+// does not name — an unknown credential shape, more than one named issuer, a
+// single off-issuer destination — keeps the catastrophic wall, which is the
+// safe direction. A one-shot approval is still a GATE, not an allow: a token
+// can be exfiltrated through its own issuer (a public paste, a mail to an
+// outside recipient), and both leave a non-issuer destination on the surface
+// that this test already refuses.
+type IssuerId = 'github' | 'microsoft';
+
+// A host belongs to its issuer by SUFFIX, anchored at `$`, so a lookalike that
+// merely contains the issuer's name (`evil-github.com.attacker.net`) is not a
+// member — it ends in `attacker.net`.
+const ISSUER_HOSTS: Record<IssuerId, RegExp> = {
+  github: /(?:^|\.)github\.com$|(?:^|\.)githubusercontent\.com$/i,
+  microsoft: /(?:^|\.)microsoft\.com$|(?:^|\.)microsoftonline\.com$|(?:^|\.)windows\.net$|(?:^|\.)azure\.com$/i,
+};
+
+// GitHub token prefixes (classic/fine-grained PAT, OAuth, app, user, refresh).
+// The 20+ body chars are the same value shape `SECRET_VALUE_SHAPE` already
+// sights — the prefix is what names the issuer.
+const GITHUB_TOKEN_SHAPE = /\bgh[opsur]_[A-Za-z0-9]{20,}\b|\bgithub_pat_[0-9A-Za-z_]{20,}\b/;
+
+// A Microsoft-identity bearer token is a JWT whose DECODED payload names a
+// Microsoft identity issuer/audience. The bytes alone are not enough: a generic
+// JWT names no issuer and is never bound (so it stays catastrophic). Scan a
+// bounded number of JWT-shaped tokens and decode only the claims segment.
+const JWT_SHAPE = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)?/g;
+const MICROSOFT_IDENTITY_CLAIM = /login\.microsoftonline\.com|sts\.windows\.net|graph\.microsoft\.com/i;
+function microsoftBearerPresent(surface: string): boolean {
+  let scanned = 0;
+  for (const m of surface.matchAll(new RegExp(JWT_SHAPE.source, 'g'))) {
+    if (++scanned > 16) break;
+    const claims = m[0].split('.')[1];
+    if (!claims || claims.length > 4096) continue;
+    let json: string;
+    try { json = Buffer.from(claims, 'base64url').toString('utf8'); } catch { continue; }
+    if (MICROSOFT_IDENTITY_CLAIM.test(json)) return true;
+  }
+  return false;
+}
+
+/**
+ * Which issuers the SIGHTED credential shapes on this surface NAME. Empty when
+ * no shape names an issuer (an unknown shape); more than one when several do —
+ * neither is demotable, because there is no single issuer every destination
+ * could belong to.
+ */
+function credentialIssuers(surface: string): Set<IssuerId> {
+  const out = new Set<IssuerId>();
+  if (GITHUB_TOKEN_SHAPE.test(surface)) out.add('github');
+  if (microsoftBearerPresent(surface)) out.add('microsoft');
+  return out;
+}
+
+/**
+ * Every egress destination host NAMED on the surface: the host of each
+ * `scheme://host` URL, plus each recipient (a mail address contributes its
+ * domain; an opaque recipient token is carried verbatim so it can only ever
+ * FAIL an issuer match). This is the union the demotion test runs over — one
+ * off-issuer entry is enough to keep the wall.
+ */
+const URL_HOST_RE = /\bhttps?:\/\/([a-z0-9.\-]+)/gi;
+function egressDestinationHosts(surface: string, recipients: readonly string[]): string[] {
+  const hosts: string[] = [];
+  for (const m of surface.matchAll(new RegExp(URL_HOST_RE.source, 'gi'))) {
+    const host = m[1].split(':')[0].replace(/\.+$/, '').toLowerCase();
+    if (host) hosts.push(host);
+  }
+  for (const r of recipients) {
+    const at = r.indexOf('@');
+    if (at >= 0) { const d = r.slice(at + 1).trim().toLowerCase(); if (d) hosts.push(d); continue; }
+    const u = r.match(/\bhttps?:\/\/([a-z0-9.\-]+)/i);
+    if (u) { hosts.push(u[1].split(':')[0].toLowerCase()); continue; }
+    const token = r.trim().toLowerCase();
+    if (token) hosts.push(token);
+  }
+  return hosts;
+}
+
+/**
+ * The secret-egress demotion decision (issue #1001). True only when a SINGLE
+ * issuer is named by a sighted credential shape AND every egress destination on
+ * the surface is that issuer's host. Everything else is false — the caller
+ * keeps the catastrophic block.
+ */
+function secretEgressBoundToOwnIssuer(surface: string, recipients: readonly string[]): boolean {
+  const issuers = credentialIssuers(surface);
+  if (issuers.size !== 1) return false;
+  const [only] = issuers;
+  const dests = egressDestinationHosts(surface, recipients);
+  if (dests.length === 0) return false;
+  return dests.every(host => ISSUER_HOSTS[only].test(host));
+}
+
 // ── Use/mention discipline for shell commands ────────────────────────────────
 // A dangerous token inside a real shell command is only an *action* if it sits
 // in command position. If it is merely printed (`echo "rm -rf /"`) or commented
@@ -7519,6 +7619,17 @@ function evaluateToolCallCore(
     secretSighted = slices.some((r) => secretHintExecutedIn(scanSurface, r));
   }
   if (egress && secretSighted && externalDestination) {
+    // #1001: demote to an approval door ONLY when the credential shape names
+    // its issuer and EVERY egress destination — in the command, the folded
+    // body and the recipient list — is that issuer's host. Any other
+    // destination, an unknown shape, or an issuer mismatch keeps the
+    // catastrophic wall. This is a one-shot gate, never an allow: a token can
+    // still be exfiltrated through its own issuer, which always leaves a
+    // non-issuer destination this test refuses.
+    if (secretEgressBoundToOwnIssuer(scanSurface, recipientDestinations(args))) {
+      return withReview(verdict('require_approval', 'dangerous', family, 'data_exfiltration',
+        'credential bound for its own issuer — approve before it leaves the host', ['secret-egress', ...opaqueSignals]));
+    }
     return withReview(verdict('block', 'catastrophic', family, 'data_exfiltration',
       'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]));
   }
