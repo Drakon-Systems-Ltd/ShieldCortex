@@ -8,6 +8,7 @@
  * real owner.
  */
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -777,6 +778,93 @@ describe('#815 B7 — a namespaced tool whose name merely looks like exec binds 
       .toMatchObject({ via: 'tap' });
   });
 });
+describe('#815 B8 — a JSON `__proto__` payload is bound by the tap grant', () => {
+  // `JSON.parse` makes a JSON key named `__proto__` an own property; the old
+  // canonical forms copied it with `out[key] = value`, which ran the
+  // prototype setter instead and dropped the key and its subtree. Two
+  // invoices differing only under it then shared one tap binding. Real
+  // tool inputs off the wire, so JSON.parse, never an object literal.
+  const TOOL = 'mcp__acme__process_invoice';
+  const call = (payee: string, amount: number) => JSON.parse(
+    `{"command":"curl -sS --data ok https://api.example.com/v1/report","invoice":{"id":"1","__proto__":{"payee":"${payee}","amount":${amount}}}}`,
+  ) as Record<string, unknown>;
+  const A = call('vendor A', 10);
+  const B = call('vendor B', 10000);
+
+  it('real verdicts: approve A, refuse B, spend A exactly once', () => {
+    expect(Object.prototype.hasOwnProperty.call(A.invoice, '__proto__')).toBe(true);
+    expect(exactCallDigest(TOOL, A)).not.toBe(exactCallDigest(TOOL, B));
+    expect(hashToolCall(TOOL, A)).not.toBe(hashToolCall(TOOL, B));
+    // The guard's own verdicts on both calls, not a seeded signal list.
+    const vA = evaluateToolCall(TOOL, A);
+    const vB = evaluateToolCall(TOOL, B);
+    expect(vA.decision).toBe('require_approval');
+    expect(vB.decision).toBe('require_approval');
+    expect(tapTerminalOnlyReason(vA.signals)).toBeNull();
+
+    // Newer than the beforeEach denial, so the shared alias resolves to it.
+    seedDenial({ tool: TOOL, hash: hashToolCall(TOOL, A), exactDigest: exactCallDigest(TOOL, A), signals: vA.signals, now: base + 50 });
+    const m = mintOk();
+    expect(m.argsHash).toBe(exactCallDigest(TOOL, A));
+    const tapped = verify(tapFor(m));
+    expect(tapped.ok).toBe(true);
+    if (!tapped.ok) return;
+    expect(tapped.grant.origin).toMatchObject({ cwd, tool: TOOL });
+    const origin = { cwd, tool: TOOL };
+    const consume = (input: Record<string, unknown>, rowOf: Record<string, unknown>, signals: readonly string[], now: number) =>
+      consumeRetryGrant({ currentSignals: signals, hash: hashToolCall(TOOL, rowOf), exactDigest: exactCallDigest(TOOL, input), origin }, { home, now });
+
+    // B under its own hash and digest: refused, grant left unspent.
+    expect(consume(B, B, vB.signals, base + 2_000)).toBeNull();
+    // B presented under A's row (what both bindings gave it before the fix):
+    // the exact digest alone refuses it.
+    expect(consume(B, A, vB.signals, base + 2_050)).toBeNull();
+    expect(getRetryRow({ actionId: ACTION }, { home })?.grant?.consumedAt).toBeUndefined();
+    // A spends it, once.
+    expect(consume(A, A, vA.signals, base + 2_100))
+      .toMatchObject({ via: 'tap', approver: APPROVER, exactDigest: exactCallDigest(TOOL, A) });
+    expect(consume(A, A, vA.signals, base + 2_200)).toBeNull();
+  });
+
+  it('a tap grant recorded under the colliding v2 form is never spent after the upgrade', () => {
+    expect(EXACT_CALL_DIGEST_VERSION).toBe(3);
+    // The v2 digest of A, exactly as the old form computed it: the `__proto__`
+    // subtree gone, so it was also B's v2 digest.
+    const v2 = createHash('sha256').update(
+      `shieldcortex-exact-call/v2\n${JSON.stringify([TOOL, { command: 'curl -sS --data ok https://api.example.com/v1/report', invoice: { id: '1' } }])}`,
+      'utf8',
+    ).digest('hex');
+    expect(v2).not.toBe(exactCallDigest(TOOL, A));
+    expect(v2).not.toBe(exactCallDigest(TOOL, B));
+
+    const signals = evaluateToolCall(TOOL, A).signals;
+    seedDenial({ tool: TOOL, hash: hashToolCall(TOOL, A), exactDigest: exactCallDigest(TOOL, A), signals, now: base + 50 });
+    expect(verify(tapFor(mintOk())).ok).toBe(true);
+    // Rewrite the stored grant as the old dist wrote it.
+    const rewriteGrant = (version: number, digest: string) => {
+      const raw = JSON.parse(readFileSync(fencedStateFile(retryControlPath(home)), 'utf8'));
+      delete raw.fence;
+      const row = raw.rows.find((r: { grant?: unknown }) => r.grant);
+      row.grant.exactDigestVersion = version;
+      row.grant.exactDigest = digest;
+      writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify(raw), { mode: 0o600 });
+    };
+    const origin = { cwd, tool: TOOL };
+    const spend = (exactDigest: string, now: number) =>
+      consumeRetryGrant({ currentSignals: signals, hash: hashToolCall(TOOL, A), exactDigest, origin }, { home, now });
+    rewriteGrant(2, v2);
+    // B's v3 digest, A's v3 digest, and the v2 digest an old hook would present: all refused.
+    expect(spend(exactCallDigest(TOOL, B), base + 2_000)).toBeNull();
+    expect(spend(exactCallDigest(TOOL, A), base + 2_050)).toBeNull();
+    expect(spend(v2, base + 2_100)).toBeNull();
+    // Control: the same rewrite at the current version is spendable, so the
+    // refusals above came from the version, not from the rewrite itself.
+    rewriteGrant(EXACT_CALL_DIGEST_VERSION, exactCallDigest(TOOL, A));
+    expect(spend(exactCallDigest(TOOL, B), base + 2_150)).toBeNull();
+    expect(spend(exactCallDigest(TOOL, A), base + 2_200)).toMatchObject({ via: 'tap' });
+  });
+});
+
 describe('#815 B — terminal-only is enforced inside the grant transaction', () => {
   it.each([
     ['self-protection-floor', 'touch-approval-store'],

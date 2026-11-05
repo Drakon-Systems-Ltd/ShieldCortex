@@ -102,8 +102,9 @@ const EXEC_ADVISORY_KEYS = new Set(['description', 'timeout']);
 
 /**
  * First-party exec tool contracts whose advisory fields may be left out of an
- * approval binding (#201, #815 B7). EXACT raw names, matched byte for byte:
- * never `normaliseToolName`, never `classifyFamily`.
+ * approval binding (#201, #815 B7). Matched against the raw tool name byte
+ * for byte (no trimming, no case folding): never `normaliseToolName`, never
+ * `classifyFamily`.
  *
  * `classifyFamily` is a risk heuristic, not a contract registry. Its exec
  * pattern matches SUBSTRINGS (`run`, `process`, `exec`, `script`, `command`,
@@ -125,7 +126,10 @@ const FIRST_PARTY_EXEC_TOOLS: ReadonlySet<string> = new Set(['Bash']);
 
 /**
  * Reviewed non-exec tool contracts where `description` and `timeout` are
- * advisory to the named command field. This must stay an exact allowlist:
+ * advisory to the named command field. Keys are lowercase; a tool name is
+ * looked up after trimming and lowercasing it, so `Workflow` and ` workflow `
+ * match this entry and a namespaced name never does. This must stay an
+ * allowlist of whole names:
  * `extractCommand` deliberately treats broad keys such as `code` and `input`
  * as detection surfaces, but those keys are payload on many non-exec tools.
  * Using that heuristic here would let one approval cover changed payload.
@@ -135,11 +139,13 @@ const NON_EXEC_COMMAND_FIELDS: ReadonlyMap<string, ReadonlySet<string>> = new Ma
 ]);
 
 function hasReviewedCommandSurface(tool: string, input: Record<string, unknown>): boolean {
-  // Matched on the RAW tool name, deliberately NOT `normaliseToolName`.
-  // Normalising would map `mcp__evil__workflow` onto this entry, letting any
-  // MCP server claim a relief that was reviewed for exactly one first-party
-  // tool contract. Only an exact name qualifies; a namespaced look-alike keeps
-  // its full input bound.
+  // Matched on the raw tool name, only trimmed and lowercased; deliberately
+  // NOT `normaliseToolName`. Normalising would map `mcp__evil__workflow` onto
+  // this entry (it strips the namespace), letting any MCP server claim a
+  // relief that was reviewed for exactly one first-party tool contract. Only
+  // the whole name `workflow`, in any case, qualifies; a namespaced
+  // look-alike keeps its full input bound. (`Bash`, above, is stricter: byte
+  // for byte.)
   const fields = NON_EXEC_COMMAND_FIELDS.get(tool.trim().toLowerCase());
   if (!fields) return false;
   return [...fields].some((field) => typeof input[field] === 'string' && input[field].length > 0);
@@ -155,14 +161,34 @@ function hasReviewedAdvisoryFields(tool: string, input: Record<string, unknown>)
   return FIRST_PARTY_EXEC_TOOLS.has(tool) || hasReviewedCommandSurface(tool, input);
 }
 
+/**
+ * A fresh object for a projection or canonical form, and the only way a key
+ * is put on one (#815 B8). `JSON.parse` gives a JSON key named `__proto__`
+ * an ordinary own property, but `out[key] = value` on a plain `{}` runs
+ * `Object.prototype`'s `__proto__` setter instead: no own property is
+ * created, `JSON.stringify` never sees the key, and its whole subtree drops
+ * out of the binding. Two calls differing only under `__proto__` (an
+ * invoice's payee and amount) then shared one approval hash and one exact
+ * digest, so a tap grant for one was spent by the other. A null-prototype
+ * object has no such setter, and `defineProperty` creates an own data
+ * property whatever the key; together every own key of the input survives.
+ */
+function emptyRecord(): Record<string, unknown> {
+  return Object.create(null) as Record<string, unknown>;
+}
+
+function setOwn(out: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
 function projectForHash(tool: string, input: unknown): unknown {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const record = input as Record<string, unknown>;
   // Unknown and namespaced tools fail closed: their full input stays bound.
   if (!hasReviewedAdvisoryFields(tool, record)) return input;
-  const out: Record<string, unknown> = {};
+  const out = emptyRecord();
   for (const key of Object.keys(record)) {
-    if (!EXEC_ADVISORY_KEYS.has(key)) out[key] = record[key];
+    if (!EXEC_ADVISORY_KEYS.has(key)) setOwn(out, key, record[key]);
   }
   return out;
 }
@@ -183,9 +209,12 @@ export function hashToolCall(tool: string, input: unknown): string {
 /** Version of `exactCallDigest`'s form. A digest recorded under another
  *  version never matches; bump it whenever the form below changes.
  *  v2 (#815 B7): `description` is excluded only for the reviewed first-party
- *  contracts, no longer for every name `classifyFamily` reads as exec. */
-export const EXACT_CALL_DIGEST_VERSION = 2;
-const EXACT_CALL_DIGEST_DOMAIN = 'shieldcortex-exact-call/v2';
+ *  contracts, no longer for every name `classifyFamily` reads as exec.
+ *  v3 (#815 B8): a JSON key named `__proto__` is bound like any other key.
+ *  The v2 form dropped it with its subtree, so a v2 digest can stand for
+ *  several different calls; it is never spent again. */
+export const EXACT_CALL_DIGEST_VERSION = 3;
+const EXACT_CALL_DIGEST_DOMAIN = 'shieldcortex-exact-call/v3';
 
 /**
  * Reviewed exclusions for the exact digest: `description` only, and only on
@@ -199,21 +228,22 @@ function projectForExactDigest(tool: string, input: unknown): unknown {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const record = input as Record<string, unknown>;
   if (!hasReviewedAdvisoryFields(tool, record)) return input;
-  const out: Record<string, unknown> = {};
+  const out = emptyRecord();
   for (const key of Object.keys(record)) {
-    if (!EXACT_DIGEST_ADVISORY_KEYS.has(key)) out[key] = record[key];
+    if (!EXACT_DIGEST_ADVISORY_KEYS.has(key)) setOwn(out, key, record[key]);
   }
   return out;
 }
 
 /** Sorted keys (key order carries no meaning in a JSON tool input); every
- *  string, number and the tool name taken exactly as given. */
+ *  own key kept, `__proto__` included (#815 B8); every string, number and
+ *  the tool name taken exactly as given. */
 function canonicaliseExact(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicaliseExact);
   if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
+    const out = emptyRecord();
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      out[key] = canonicaliseExact((value as Record<string, unknown>)[key]);
+      setOwn(out, key, canonicaliseExact((value as Record<string, unknown>)[key]));
     }
     return out;
   }
@@ -237,9 +267,10 @@ function canonicalise(value: unknown): unknown {
   if (typeof value === 'string') return value.replace(/\s+/g, ' ').trim();
   if (Array.isArray(value)) return value.map(canonicalise);
   if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
+    // Every own key kept, `__proto__` included (#815 B8): see `setOwn`.
+    const out = emptyRecord();
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      out[key] = canonicalise((value as Record<string, unknown>)[key]);
+      setOwn(out, key, canonicalise((value as Record<string, unknown>)[key]));
     }
     return out;
   }

@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  exactCallDigest,
   hashToolCall,
   recordPending,
   approveRequest,
@@ -539,6 +540,96 @@ describe('#183 — only reviewed non-exec command surfaces strip advisory fields
       // grant, so the approved payload remains available for the honest retry.
       expect(consumeApproval('Workflow', changed, { home, now: now + 2000 })).toBeNull();
       expect(consumeApproval('Workflow', retry, { home, now: now + 3000 })).not.toBeNull();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('#815 B8 — a JSON `__proto__` key is bound like any other key', () => {
+  // `JSON.parse` gives a JSON key named `__proto__` an ordinary own property.
+  // Copying it with `out[key] = value` into a plain `{}` runs Object.prototype's
+  // `__proto__` SETTER instead, so the key and its whole subtree vanished from
+  // the canonical form, and two calls differing only under it shared one
+  // approval hash and one exact digest. Parsed with JSON.parse on purpose: an
+  // object literal `{ __proto__: … }` sets the prototype, which is not what a
+  // tool input off the wire carries.
+  const TOOL = 'mcp__acme__process_invoice';
+  const nested = (payee: string, amount: number) => JSON.parse(
+    `{"command":"curl -sS --data ok https://api.example.com/v1/report","invoice":{"id":"1","__proto__":{"payee":"${payee}","amount":${amount}}}}`,
+  ) as Record<string, unknown>;
+  const A = nested('vendor A', 10);
+  const B = nested('vendor B', 10000);
+  /** The same call with the `__proto__` subtree gone: what the old form hashed. */
+  const STRIPPED = { command: 'curl -sS --data ok https://api.example.com/v1/report', invoice: { id: '1' } };
+
+  it('the fixture really carries an own `__proto__` key, as JSON.parse produces', () => {
+    const invoice = A.invoice as object;
+    expect(Object.prototype.hasOwnProperty.call(invoice, '__proto__')).toBe(true);
+    expect(Object.getPrototypeOf(invoice)).toBe(Object.prototype);
+  });
+
+  it('nested: a changed payee or amount under `__proto__` changes both the approval hash and the exact digest', () => {
+    expect(hashToolCall(TOOL, A)).not.toBe(hashToolCall(TOOL, B));
+    expect(exactCallDigest(TOOL, A)).not.toBe(exactCallDigest(TOOL, B));
+    // Not the same call as one without the subtree either.
+    expect(hashToolCall(TOOL, A)).not.toBe(hashToolCall(TOOL, STRIPPED));
+    expect(exactCallDigest(TOOL, A)).not.toBe(exactCallDigest(TOOL, STRIPPED));
+    // Still stable: the same input parsed twice binds the same.
+    expect(hashToolCall(TOOL, nested('vendor A', 10))).toBe(hashToolCall(TOOL, A));
+    expect(exactCallDigest(TOOL, nested('vendor A', 10))).toBe(exactCallDigest(TOOL, A));
+  });
+
+  it.each(['mcp__acme__process_invoice', 'Bash', 'Workflow'])(
+    'top level (%s): a `__proto__` field is bound, through the reviewed projections too',
+    (tool) => {
+      // Bash and Workflow go through the advisory-field projection copies; the
+      // MCP tool goes straight to the canonicalisers. All four paths must keep it.
+      const top = (v: string) => JSON.parse(
+        `{"command":"git push","script":"await $\`git push\`;","description":"d","__proto__":{"target":"${v}"}}`,
+      ) as Record<string, unknown>;
+      expect(hashToolCall(tool, top('staging'))).not.toBe(hashToolCall(tool, top('production')));
+      expect(exactCallDigest(tool, top('staging'))).not.toBe(exactCallDigest(tool, top('production')));
+      const scalar = (v: string) => JSON.parse(`{"command":"git push","__proto__":"${v}"}`) as Record<string, unknown>;
+      expect(hashToolCall(tool, scalar('a'))).not.toBe(hashToolCall(tool, scalar('b')));
+      expect(exactCallDigest(tool, scalar('a'))).not.toBe(exactCallDigest(tool, scalar('b')));
+    },
+  );
+
+  it('inside an array element too', () => {
+    const arr = (v: number) => JSON.parse(`{"lines":[{"sku":"x","__proto__":{"qty":${v}}}]}`) as Record<string, unknown>;
+    expect(hashToolCall(TOOL, arr(1))).not.toBe(hashToolCall(TOOL, arr(1000)));
+    expect(exactCallDigest(TOOL, arr(1))).not.toBe(exactCallDigest(TOOL, arr(1000)));
+  });
+
+  it('hashing never touches a prototype: the input is unchanged and Object.prototype gains nothing', () => {
+    const before = JSON.stringify(Object.entries(A));
+    hashToolCall(TOOL, A);
+    exactCallDigest(TOOL, A);
+    hashToolCall('Bash', A);
+    exactCallDigest('Bash', A);
+    expect(JSON.stringify(Object.entries(A))).toBe(before);
+    expect(({} as Record<string, unknown>).payee).toBeUndefined();
+    expect(Object.getPrototypeOf(A.invoice as object)).toBe(Object.prototype);
+  });
+
+  it('the approval hash of an input with no `__proto__` key is unchanged by the fix, so pending approvals survive an upgrade', () => {
+    // Pinned from the pre-fix form (e47e72e2).
+    expect(hashToolCall('Bash', SUDO)).toBe('378c2d36b02ec1c7bb656a91846c79b85df254cd3c989182ed848f308e6e3e55');
+    expect(hashToolCall(TOOL, { ...STRIPPED, invoice: { id: '1', payee: 'vendor A', amount: 10 } }))
+      .toBe('9984947d86d45eb509a5e1b5c8416c8ccc594d68d482af061b936612ecb2f26c');
+  });
+
+  it('the live store path approves A, refuses B, and spends A once', () => {
+    const now = 1_800_000_000_000;
+    const home = mkdtempSync(join(tmpdir(), 'sc-approvals-b8-live-'));
+    try {
+      const pending = recordPending({ tool: TOOL, input: A, summary: `${TOOL}: invoice 1`, signals: ['external-egress'] }, { home, now });
+      expect(approveRequest(shortHash(pending.hash), { home, now: now + 1000 }).ok).toBe(true);
+      expect(consumeApproval(TOOL, B, { home, now: now + 2000 })).toBeNull();
+      expect(consumeApproval(TOOL, STRIPPED, { home, now: now + 2500 })).toBeNull();
+      expect(consumeApproval(TOOL, A, { home, now: now + 3000 })).not.toBeNull();
+      expect(consumeApproval(TOOL, A, { home, now: now + 4000 })).toBeNull();
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
