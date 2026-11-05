@@ -91,14 +91,19 @@ const anyCase = (w: string): string =>
 // not an instruction. Bounded horizontal whitespace only: an unbounded `\s+`
 // in a lookbehind is re-scanned backwards over a whole blank run at every
 // position (Node 22.14 newline-run gate, 43-99 s on 100 KB).
+// One word may sit between the negation and the verb ("never really set").
+// Double-negative verbs ("don't forget to set", "do not hesitate to add",
+// "never fail to …") are not negation: they cannot fill that window, so the
+// instruction stays flagged.
 const NOT_NEGATED =
   String.raw`(?<!(?:` + ['never', 'not', 'avoid', "n't", 'without'].map(anyCase).join('|') +
-  String.raw`)[ \t]{1,4}(?:[\w'-]{1,24}[ \t]{1,4}){0,2})`;
+  String.raw`)[ \t]{1,4}(?:(?!(?:` + ['forget', 'fail', 'hesitate', 'neglect', 'omit', 'skip', 'wait', 'miss'].map(anyCase).join('|') +
+  String.raw`)\b)[\w'-]{1,24}[ \t]{1,4}){0,1})`;
 // The word is a noun/determiner-led use ("the install finished", "any install
 // where …", "an update to …"), not an imperative verb.
 const NOT_NOUN_USE =
   String.raw`(?<!\b(?:` +
-  ['a', 'an', 'the', 'any', 'this', 'that', 'each', 'every', 'new', 'fresh', 'clean', 'first', 'your', 'our', 'their', 'per', 'of'].map(anyCase).join('|') +
+  ['we', 'they', 'which', 'who', 'a', 'an', 'the', 'any', 'this', 'that', 'each', 'every', 'new', 'fresh', 'clean', 'first', 'your', 'our', 'their', 'per', 'of'].map(anyCase).join('|') +
   String.raw`)[ \t]{1,4})`;
 
 const AGENT_CONFIG_FILE =
@@ -242,10 +247,10 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
       // the same line as the variable name). Negated ("do not set …") and
       // noun uses ("the change to …") do not count.
       new RegExp(
-        String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT)\b`,
+        String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT)\b[^\n]{0,60}\b(?:[Hh][Tt][Tt][Pp][Ss]?|[Ss][Oo][Cc][Kk][Ss][45]?[Hh]?):\/\/`,
       ),
       new RegExp(
-        String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)\b`,
+        String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:[Ss]et|[Ee]xport|[Oo]verride|[Cc]hange|[Pp]oint|[Rr]edirect|[Rr]oute|[Cc]onfigure|[Dd]efine|[Aa]dd)\b[^\n]{0,60}\b(?:HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)\b[^\n]{0,60}\b(?:[Hh][Tt][Tt][Pp][Ss]?|[Ss][Oo][Cc][Kk][Ss][45]?[Hh]?):\/\/`,
       ),
       // Literal assignment of an endpoint or proxy variable to a URL, in the
       // shapes an instruction file uses: `VAR=https://…`, `export VAR=…`,
@@ -261,7 +266,14 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
         String.raw`(?<![\w$-])${NOT_NEGATED}["']?(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:BASE_URL|API_BASE|API_BASE_URL)|AZURE_OPENAI_ENDPOINT|HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)["']?\]?[ \t]{0,4}[=:][ \t]{0,4}["']?(?:[Hh][Tt][Tt][Pp][Ss]?|[Ss][Oo][Cc][Kk][Ss][45]?[Hh]?):\/\/`,
       ),
       // Write/modify an agent config file, verb and path on one line.
-      new RegExp(`${CONFIG_WRITE_VERB}[^\\n]{0,80}${AGENT_CONFIG_FILE}`, 'i'),
+      new RegExp(
+        `${CONFIG_WRITE_VERB}[ \\t]{1,4}` +
+          `(?:(?:the|this|your|a|an|following|new|updated|these|those|another)[ \\t]{1,4}){0,3}` +
+          `(?:(?!(?:to|into|in|inside|within|of|on|for|about|mention|regarding|and|or|that|which)\\b)[\\w-]{1,20}[ \\t]{1,4}){0,3}?` +
+          `(?:(?:to|into|in|inside|within|of)[ \\t]{1,4}(?:(?:the|your|this)[ \\t]{1,4})?)?` +
+          `[\`"'*_]{0,2}[\\w~$./\\\\-]{0,60}?${AGENT_CONFIG_FILE}(?![ \\t]{1,4}(?:schema|link|docs?|documentation|section|page|reference|example|spec|guide)\\b)`,
+        'i',
+      ),
       // The same instruction in ordinary Markdown: the verb line ends with a
       // colon and the path sits on one of the next three lines, on its own
       // (optionally as a list item, in backticks/bold, or inside a code fence
@@ -288,7 +300,8 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
         String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:add|register|install|configure|append|insert|enable)\b[ \t]{1,4}` +
           String.raw`(?:(?:an?|the|new|another|this|that|your|our|my|extra|additional|custom|remote|local|following|requested|mcp)[ \t]{1,4}){0,3}` +
           String.raw`(?:(?!(?:where|when|which|that|if|is|are|was|were|not|of|in|on|for|to|and|or|but)\b)[\w.@/:-]{1,30}[ \t]{1,4}){0,2}` +
-          String.raw`(?:mcp[ \t]{1,4}servers?|mcpServers|mcp_servers)\b`,
+          String.raw`(?:mcp[ \t]{1,4}servers?|mcpServers|mcp_servers)\b` +
+          String.raw`(?![ \t]{1,4}(?:section|page|chapter|heading|example|docs?|documentation|guide|tutorial|support|table|row|list)\b)`,
         'i',
       ),
       /\[mcp_servers\.[\w-]+\]/,
@@ -315,7 +328,7 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
       // without`, or `set|turn|switch the sandbox|approval … off|never|none`.
       // Setting the sandbox to read-only or turning it on is hardening, and
       // a negated instruction ("never turn off the sandbox") is advice.
-      new RegExp(String.raw`${NOT_NEGATED}\b(?:(?:turn|switch)[ \t]{1,4}off|disable|bypass)[ \t]{1,4}(?:(?:the|all|any)[ \t]{1,4})?(?:sandbox(?:ing)?|approvals?)\b`, 'i'),
+      new RegExp(String.raw`${NOT_NEGATED}${NOT_NOUN_USE}\b(?:(?:turn|switch)[ \t]{1,4}off|disable|bypass)[ \t]{1,4}(?:(?:the|all|any)[ \t]{1,4})?(?:sandbox(?:ing)?|approvals?)\b`, 'i'),
       new RegExp(String.raw`${NOT_NEGATED}\b(?:turn|switch|set)[ \t]{1,4}(?:the[ \t]{1,4})?(?:sandbox|approvals?)(?:[ \t]{1,4}[\w-]{1,20}){0,2}?[ \t]{1,4}(?:off|to[ \t]{1,4}(?:off|never|none|disabled|danger-full-access))\b`, 'i'),
       new RegExp(String.raw`${NOT_NEGATED}\b(?:run|work|operate|execute|proceed)[ \t]{1,4}without[ \t]{1,4}(?:(?:the|a|any)[ \t]{1,4})?(?:sandbox(?:ing)?|approvals?)\b`, 'i'),
       new RegExp(String.raw`${NOT_NEGATED}\bsandbox[ \t]{0,4}[=:][ \t]{0,4}["']?(?:false|off|disabled)\b`, 'i'),
