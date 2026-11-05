@@ -598,6 +598,11 @@ export async function runGuardCommand(argv: string[], opts: { home?: string } = 
   if (sub === 'posture') {
     return runGuardPosture(argv.slice(1), opts);
   }
+  if (sub === 'approve-tap') {
+    // #815 B: lazy, so the other guard verbs never load the tap endpoint.
+    const { runApproveTapCommand } = await import('./approve-tap.js');
+    return runApproveTapCommand(argv.slice(1));
+  }
   console.log(GUARD_HELP);
   return sub === '--help' || sub === '-h' || sub === 'help' ? 0 : 1;
 }

@@ -657,6 +657,17 @@ async function loadRetryControl(rawRetry, digestWindowMs) {
   }
 }
 
+/** #815 B — the exact call digest, or undefined. Optional on purpose: a dist
+ *  without it (or a digest that throws) only makes a denial untappable and a
+ *  tap grant unspendable; it never changes a decision. */
+function exactRetryDigest(mod, toolName, toolInput) {
+  try {
+    return typeof mod?.exactCallDigest === 'function' ? mod.exactCallDigest(toolName, toolInput) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** #224 — optional: stamp binding fields. Missing dist degrades to unbound. */
 async function loadBinding() {
   const distRoot = hookDistRoot();
@@ -2004,6 +2015,9 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
             // From the HARNESS payload, never from tool input (design B3).
             cwd: retryCtx.cwd,
             sessionKey,
+            // #815 B: the exact call digest a one-tap grant binds to. Absent
+            // (older dist, or it threw) leaves the denial untappable.
+            exactDigest: exactRetryDigest(retry.mod, toolName, toolInput),
           },
           { home: homedir() },
         );
@@ -3630,6 +3644,12 @@ process.stdin.on('end', async () => {
           {
             hash: retryPlane.mod.hashToolCall(toolName, toolInput),
             origin: { cwd: retryOriginCwd, tool: toolName },
+            // #815 B: a one-tap grant is spent only by this exact call, and
+            // only while the guard's verdict on it is still one a tap may
+            // answer. A verdict the guard reached no scanned conclusion about
+            // passes no list, which leaves a tap grant unspent.
+            exactDigest: exactRetryDigest(retryPlane.mod, toolName, toolInput),
+            currentSignals: unscannedBlock ? undefined : safeSignalList(verdict.signals),
           },
           { home: homedir() },
         );

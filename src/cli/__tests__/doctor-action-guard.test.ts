@@ -991,3 +991,34 @@ describe('doctor — fixActionGuardConfig re-signs the migrated config (#275)', 
     if (fix.backupPath) fs.rmSync(fix.backupPath, { force: true });
   });
 });
+
+describe('doctor — one-tap approve (#815 B)', () => {
+  const tapRow = <T extends { label: string }>(results: T[]) => results.filter((r) => r.label === 'Action guard one-tap approve');
+
+  it('is silent when approveTap is not enabled', async () => {
+    writeConfig({ actionGuard: { enabled: true } });
+    expect(tapRow(await checkActionGuard())).toHaveLength(0);
+    writeConfig({ actionGuard: { enabled: true, approveTap: { enabled: 'true' } } });
+    expect(tapRow(await checkActionGuard())).toHaveLength(0);
+  });
+
+  it('warns once, never fails, and writes nothing on a same-UID host', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-tap-doctor-'));
+    try {
+      const secretPath = path.join(dir, 'approve.key');
+      // Owned by the user running doctor — the same-UID shape.
+      fs.writeFileSync(secretPath, `${'c3'.repeat(32)}\n`, { mode: 0o600 });
+      writeConfig({ actionGuard: { enabled: true, approveTap: { enabled: true, secretPath, approverTelegramUid: '42' } } });
+      const before = fs.readFileSync(configPath(), 'utf-8');
+      const rows = tapRow(await checkActionGuard());
+      expect(rows).toHaveLength(1);
+      expect(rows[0].status).toBe('warn');
+      expect(rows[0].message).toMatch(/same user the agent runs as/);
+      expect(rows[0].message).toMatch(/#501 OS lock/);
+      expect(rows[0].message).not.toContain('c3c3c3c3');
+      expect(fs.readFileSync(configPath(), 'utf-8')).toBe(before);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

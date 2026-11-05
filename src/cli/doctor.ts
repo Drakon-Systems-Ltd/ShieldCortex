@@ -143,6 +143,7 @@ import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/opencl
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
 import type { DoctorExplainerOutcome } from '../defence/iron-dome/doctor-explainer.js';
 import { normaliseWebhookUrl } from '../defence/iron-dome/notify-config.js';
+import { approveTapDoctorRow } from '../defence/iron-dome/approve-tap.js';
 import { DEFAULT_IRON_DOME_CONFIG, type IronDomeConfig } from '../defence/iron-dome/config.js';
 import { sharedSensitivitySqlPredicate } from '../defence/sensitivity/isolation.js';
 import {
@@ -5204,6 +5205,13 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       // harden or hold, but the human path is still the notify path.
       // Broker reporting stays gated on armed, exactly as before this change —
       // un-gating the DENIAL SINK check is the scope; the broker block is not.
+      // #815 B: one-tap approve. Silent unless `approveTap.enabled` is true;
+      // then one WARN line when it cannot arm (same-UID secret and the rest,
+      // in plain English), one INFO line when it can. Never FAIL, never
+      // writes config.
+      const tapRow = approveTapDoctorRow(merged.approveTap);
+      if (tapRow) results.push({ label: `${label} one-tap approve`, ...tapRow });
+
       const brokerBlock = armed && isBlock(merged.broker) ? merged.broker : null;
       if (brokerBlock) {
         results.push(

@@ -33,6 +33,7 @@ import {
   retryControlPath,
   retryStoreCapacity,
 } from '../../defence/iron-dome/retry-control.js';
+import { fencedStateFile } from '../../defence/iron-dome/__tests__/fenced-state-fixture.js';
 
 const HASH = hashToolCall('Bash', { command: 'sudo systemctl restart backup-daily' });
 const ACTION_ID = 'act-00000000000068cc';
@@ -204,7 +205,7 @@ describe('#682 — approve --denial across the 48h review window', () => {
 
   it('an identity the old 60m rule already erased is not revived', () => {
     mkdirSync(join(home, '.shieldcortex', 'approvals'), { recursive: true });
-    writeFileSync(retryControlPath(home), JSON.stringify({ version: 1, budget: null, rows: [] }));
+    writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify({ version: 1, budget: null, rows: [] }));
     const { code, text } = approve(['--denial', ACTION_ID], t0 + 2 * HOUR);
     expect(code).toBe(1);
     expect(text).toContain('No headless denial matches');
@@ -311,7 +312,7 @@ describe('#682 — approve --denial across the 48h review window', () => {
       expect(recordDenySuppression({ actionId: jobActionId(i) }, { home, now: at }).ok).toBe(true);
     }
     fill(1, MAX_RETRY_ROWS, () => at + 1);
-    const raw = JSON.parse(readFileSync(retryControlPath(home), 'utf8')) as {
+    const raw = JSON.parse(readFileSync(fencedStateFile(retryControlPath(home)), 'utf8')) as {
       rows: Array<{ actionIds: string[]; denyEpoch: number; suppression?: { at: number; until: number; via: string } }>;
     };
     expect(raw.rows).toHaveLength(MAX_RETRY_ROWS + 1);
@@ -320,7 +321,7 @@ describe('#682 — approve --denial across the 48h review window', () => {
     expect(last.suppression).toBeUndefined();
     last.denyEpoch += 1;
     last.suppression = { at: at + 1, until: at + 1 + (template.until - template.at), via: 'card' };
-    writeFileSync(retryControlPath(home), JSON.stringify(raw));
+    writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify(raw));
   }
 
   it('protected rows over the cap are listed as OVER the cap, not hidden', () => {
@@ -435,7 +436,7 @@ describe('#682 — approve --denial across the 48h review window', () => {
 
   it('a hostile receipt cannot inject terminal escapes into the answer', () => {
     mkdirSync(join(home, '.shieldcortex', 'approvals'), { recursive: true });
-    writeFileSync(retryControlPath(home), JSON.stringify({
+    writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify({
       version: 1, budget: null, rows: [],
       retired: [{
         id: 'f'.repeat(32), actionIds: ['act-00000000000068ce', '\u001b]8;;http://x\u0007click'],
@@ -447,6 +448,6 @@ describe('#682 — approve --denial across the 48h review window', () => {
     expect(text).toContain('Headless denial act-00000000000068ce (tool) expired');
     expect(text).toContain('an unknown time');
     expect(text).not.toMatch(/\u001b\]|\u001b\[2J|\u0007/);
-    expect(readFileSync(retryControlPath(home), 'utf8')).not.toContain('click');
+    expect(readFileSync(fencedStateFile(retryControlPath(home)), 'utf8')).not.toContain('click');
   });
 });
