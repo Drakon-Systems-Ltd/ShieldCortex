@@ -5009,7 +5009,13 @@ function looksExternal(url: string, text: string): boolean {
 //      an opaque body (`@file`, `name=@file`, `name@file`, stdin), an `@`
 //      anywhere in data, a non-ASCII host, an extra argument, a non-Python
 //      fold, a script run without `-I` (its own directory would shadow
-//      `requests`) — is not proof.
+//      `requests`) — is not proof. Nor is a body the issuer could decode into
+//      recipients the guard never read: a curl body must be ONE body flag,
+//      declared JSON, parsing as a JSON object, and no body or Python literal
+//      may carry a `MIME-Version` header or a base64-like run over 40
+//      characters (a whole bound credential excepted). A line continuation or
+//      a line break inside a quoted word refuses: the lexer pins argv only for
+//      text it reproduces exactly.
 //
 // A one-shot approval is still a GATE, not an allow: a credential can still be
 // published THROUGH its own issuer (a public gist), so the owner is asked every
@@ -5277,16 +5283,99 @@ function curlOptionValueProven(flag: string, value: string, issuer: IssuerId): b
   return !hasForeignDestinationSyntax(value, issuer);
 }
 
-/** One `curl` stage: allowlisted options, ≥1 operand, every operand an issuer URL. */
+// A run this long of base64 / base64url alphabet is an encoded payload, not
+// prose or an API path: an issuer can decode it into something the text checks
+// never saw (Graph `sendMail` takes a whole base64 MIME message, recipients
+// included, as a `text/plain` body).
+const OPAQUE_RUN = /[A-Za-z0-9+/=_-]{41,}/;
+
+/**
+ * True when `text` (a transmitted body, a Python literal) could carry a payload
+ * the destination checks cannot read: a `MIME-Version` header, or a base64-like
+ * run longer than 40 characters. Only proven issuer URL spans and WHOLE
+ * credentials bound to `issuer` are set aside — the credential is what the door
+ * exists to send; anything else long and encoded is opaque. A span is blanked
+ * only after it is verified, so a miss here can only refuse more.
+ */
+function carriesOpaquePayload(text: string, issuer: IssuerId): boolean {
+  if (/mime-version/i.test(text)) return true;
+  const spans = issuerUrlSpans(text, issuer);
+  if (spans === null) return true;
+  let rest = text;
+  const blank = (s: number, e: number): void => { rest = rest.slice(0, s) + ' '.repeat(e - s) + rest.slice(e); };
+  for (const [s, e] of spans) blank(s, e);
+  for (const hint of [SECRET_HINT, FOLDED_SOURCE_SECRET_HINT]) {
+    const g = new RegExp(hint.source, hint.flags.includes('g') ? hint.flags : `${hint.flags}g`);
+    for (const m of text.matchAll(g)) {
+      if (m[0].length === 0) continue;
+      const named = credentialIssuerAt(text, m.index!, m.index! + m[0].length);
+      if (named && named.issuer === issuer) blank(m.index!, named.end);
+    }
+  }
+  return OPAQUE_RUN.test(rest);
+}
+
+// Every curl option that puts a request body on the wire (`-d` is `--data`,
+// `-F` is `--form`). curl JOINS repeats (`--json` with nothing between the
+// pieces, the `--data*` family with `&`), so a stage may carry at most ONE.
+const CURL_BODY_FLAGS: ReadonlySet<string> = new Set([
+  '--json', '--data', '--data-raw', '--data-ascii', '--data-binary', '--data-urlencode', '--form',
+]);
+// The body flags whose argv value IS the transmitted body. `--data-urlencode`
+// encodes it and `--form` wraps it in multipart, so neither is judged.
+const CURL_VERBATIM_BODY_FLAGS: ReadonlySet<string> = new Set([
+  '--json', '--data', '--data-raw', '--data-ascii', '--data-binary',
+]);
+const JSON_CONTENT_TYPE = /^content-type:[ \t]*application\/json[ \t]*(?:;[ \t]*charset=utf-8[ \t]*)?$/i;
+
+/**
+ * A curl stage's request body is proven only when it is ONE verbatim body flag,
+ * the stage declares JSON (`--json`, or a `Content-Type: application/json`
+ * header — and every Content-Type header says exactly that), and the body
+ * parses as a JSON object carrying no opaque payload. Anything else — a
+ * `text/plain` base64 MIME message, a form, an encoded or multipart body, a
+ * second body flag — is a body whose recipients the guard cannot read. A stage
+ * with no body has nothing to prove.
+ */
+function curlBodyProven(
+  bodies: ReadonlyArray<{ flag: string; value: string }>,
+  headers: readonly string[],
+  issuer: IssuerId,
+): boolean {
+  if (bodies.length === 0) return true;
+  if (bodies.length > 1) return false;
+  const { flag, value } = bodies[0]!;
+  if (!CURL_VERBATIM_BODY_FLAGS.has(flag)) return false;
+  const types = headers.filter(h => /content-type/i.test(h));
+  if (!types.every(h => JSON_CONTENT_TYPE.test(h))) return false;
+  if (flag !== '--json' && types.length === 0) return false;
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { return false; }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  return !carriesOpaquePayload(value, issuer);                 // the raw text: duplicate keys included
+}
+
+/**
+ * One `curl` stage: allowlisted options, ≥1 operand, every operand an issuer
+ * URL, and a body (if any) proven by `curlBodyProven`.
+ */
 function curlStageProven(tokens: readonly string[], issuer: IssuerId): boolean {
   let urls = 0;
+  const bodies: Array<{ flag: string; value: string }> = [];
+  const headers: string[] = [];
+  const admit = (flag: string, value: string): boolean => {
+    if (!curlOptionValueProven(flag, value, issuer)) return false;
+    if (CURL_BODY_FLAGS.has(flag)) bodies.push({ flag, value });
+    if (flag === '--header') headers.push(value);
+    if (flag === '--url') urls++;
+    return true;
+  };
   for (let i = 1; i < tokens.length; i++) {
     const tok = tokens[i]!;
     if (tok.startsWith('--')) {
       if (CURL_BARE_FLAGS.has(tok)) continue;
       if (!CURL_VALUE_FLAGS.has(tok) || i + 1 >= tokens.length) return false;
-      if (!curlOptionValueProven(tok, tokens[++i]!, issuer)) return false;
-      if (tok === '--url') urls++;
+      if (!admit(tok, tokens[++i]!)) return false;
       continue;
     }
     if (tok.length > 1 && tok.startsWith('-')) {
@@ -5296,7 +5385,7 @@ function curlStageProven(tokens: readonly string[], issuer: IssuerId): boolean {
         const long = CURL_SHORT_VALUE[c];
         if (long === undefined) return false;
         const value = j + 1 < tok.length ? tok.slice(j + 1) : tokens[++i];
-        if (value === undefined || !curlOptionValueProven(long, value, issuer)) return false;
+        if (value === undefined || !admit(long, value)) return false;
         break;
       }
       continue;
@@ -5304,7 +5393,7 @@ function curlStageProven(tokens: readonly string[], issuer: IssuerId): boolean {
     if (!isWholeIssuerUrl(tok, issuer)) return false;          // schemeless, IP, other scheme, unclean
     urls++;
   }
-  return urls > 0;
+  return urls > 0 && curlBodyProven(bodies, headers, issuer);
 }
 
 /** Network-less filters a curl stage's OUTPUT may be piped through. */
@@ -5320,8 +5409,9 @@ const DOOR_BARE_CHAR = /[A-Za-z0-9_./:=,%+-]/;
  * that cannot be pinned. A word is EITHER bare (only `DOOR_BARE_CHAR`) OR one
  * whole quoted span (kept even when empty: `-H ""` is an argument); a quote
  * glued to other text, an unterminated quote, `$`/backtick/`\\`/`!` inside
- * double quotes, and any other unquoted character (`{ } * ? [ ] ~ # ( )`, …)
- * refuse. Stages split on unquoted `;`, `|`, `&` and newlines.
+ * double quotes, a newline or carriage return inside any quoted span, and any
+ * other unquoted character (`{ } * ? [ ] ~ # ( )`, …) refuse. Stages split on
+ * unquoted `;`, `|`, `&` and newlines.
  */
 function doorArgvStages(cmd: string): string[][] | null {
   const stages: string[][] = [];
@@ -5339,6 +5429,7 @@ function doorArgvStages(cmd: string): string[][] | null {
       if (close < 0) return null;
       const body = cmd.slice(i + 1, close);
       if (c === '"' && /[$`\\!]/.test(body)) return null;
+      if (/[\r\n]/.test(body)) return null;                    // a line break inside one word
       const next = cmd[close + 1];
       if (next !== undefined && !/[ \t\n\r;|&]/.test(next)) return null;   // glued suffix
       cur = body;
@@ -5366,10 +5457,13 @@ function doorArgvStages(cmd: string): string[][] | null {
  */
 function shellDestinationsProven(command: string, rawCommand: string, issuer: IssuerId): 'curl' | 'python' | null {
   if (rawCommand !== command) return null;                     // IFS obfuscation
-  const cmd = command.replace(/\\\r?\n/g, ' ');                // line continuations
-  if (/[$`<>\\]/.test(cmd) || /proxy|socks/i.test(cmd)) return null;
-  if (issuerUrlSpans(cmd, issuer) === null) return null;
-  const stages = doorArgvStages(cmd);
+  // A line continuation is refused on the RAW text, never rewritten: bash
+  // deletes `\<newline>` (no space) unquoted and inside double quotes, keeps
+  // it inside single quotes — no rewrite reproduces all three.
+  if (/\\\r?\n/.test(command)) return null;
+  if (/[$`<>\\]/.test(command) || /proxy|socks/i.test(command)) return null;
+  if (issuerUrlSpans(command, issuer) === null) return null;
+  const stages = doorArgvStages(command);
   if (stages === null || stages.length === 0) return null;
   if (stages.some(argv => argv.some(word => !everyCredentialNames(word, issuer)))) return null;
   if (stages.length === 1 && stages[0]!.length === 3 && stages[0]![0] === 'python3' && stages[0]![1] === '-I') return 'python';
@@ -5533,7 +5627,8 @@ function foldedClientProven(fold: ScriptFold, issuer: IssuerId): boolean {
     if (r.lang !== 'python' || !r.folded) return false;
     const toks = tokenisePythonSubset(fold.content.slice(r.start, r.end));
     if (!toks) return false;
-    if (toks.some(t => t.k === 'str' && (hasForeignDestinationSyntax(t.v, issuer) || !everyCredentialNames(t.v, issuer)))) return false;
+    if (toks.some(t => t.k === 'str' && (hasForeignDestinationSyntax(t.v, issuer) || !everyCredentialNames(t.v, issuer)
+      || carriesOpaquePayload(t.v, issuer)))) return false;
     const bound = new Set<string>();
     let stmt: PyTok[] = [];
     for (const tok of toks) {
