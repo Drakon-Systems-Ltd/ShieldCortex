@@ -35,7 +35,6 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'os';
 import { join } from 'path';
 
-import { classifyFamily } from './tool-action-guard.js';
 import { REACH_ANSWER_WINDOW_MS, newReachAttemptId, recordApprovalReach } from './guard-readiness.js';
 
 /** Default lifetime of an operator approval before it must be re-granted. */
@@ -85,20 +84,44 @@ export function shortHash(hash: string): string {
 }
 
 /**
- * Advisory fields on an EXEC tool call (#201). A Claude-harness Bash call
+ * Advisory fields on a first-party exec call (#201). A Claude Code Bash call
  * carries `description` (a free-text label the model re-words on every
  * attempt) and `timeout` — neither changes what executes, but hashing them
  * minted a fresh approval id per ATTEMPT, so `shieldcortex approve` could
  * never land: the operator approved hash A and the identical retry presented
- * hash B. Stripped for exec-family tools only: on any other tool a
- * `description` may be payload (an issue body, a PR description), where
- * approving one text must not release another.
+ * hash B. Stripped only for the reviewed contracts in
+ * `FIRST_PARTY_EXEC_TOOLS` and `NON_EXEC_COMMAND_FIELDS`: on any other tool a
+ * `description` may be payload (an issue body, a PR description, an invoice
+ * memo), where approving one text must not release another.
  *
  * Deliberately NOT stripped: `dangerouslyDisableSandbox`, `run_in_background`
  * — they change confinement/supervision, so an approval for the sandboxed
  * form must not release the unsandboxed one.
  */
 const EXEC_ADVISORY_KEYS = new Set(['description', 'timeout']);
+
+/**
+ * First-party exec tool contracts whose advisory fields may be left out of an
+ * approval binding (#201, #815 B7). EXACT raw names, matched byte for byte:
+ * never `normaliseToolName`, never `classifyFamily`.
+ *
+ * `classifyFamily` is a risk heuristic, not a contract registry. Its exec
+ * pattern matches SUBSTRINGS (`run`, `process`, `exec`, `script`, `command`,
+ * …) of the LAST segment of a namespaced name, so `mcp__acme__process_invoice`,
+ * `mcp__jira__run` and `mcp__evil__exec` all read as exec. Gating on it let
+ * any MCP server whose tool name contains one of those words have its
+ * `description` (on such a tool, possibly the payload: "pay vendor B 10000")
+ * dropped from both the approval hash and the exact tap digest, so an approval
+ * for one text released another. Only a contract a human reviewed qualifies;
+ * every other name, including a namespaced look-alike of a listed one
+ * (`mcp__evil__Bash`) and a differently cased one (`bash`), keeps every field
+ * bound.
+ *
+ * `Bash`: Claude Code's shell tool, the only exec tool the guard hook sees by
+ * a first-party name. Its `description` is a label and its `timeout` a
+ * supervision bound; neither reaches the command.
+ */
+const FIRST_PARTY_EXEC_TOOLS: ReadonlySet<string> = new Set(['Bash']);
 
 /**
  * Reviewed non-exec tool contracts where `description` and `timeout` are
@@ -112,21 +135,31 @@ const NON_EXEC_COMMAND_FIELDS: ReadonlyMap<string, ReadonlySet<string>> = new Ma
 ]);
 
 function hasReviewedCommandSurface(tool: string, input: Record<string, unknown>): boolean {
-  // Matched on the RAW tool name, deliberately NOT `normaliseToolName` (which
-  // classifyFamily above uses). Normalising would map `mcp__evil__workflow`
-  // onto this entry, letting any MCP server claim a relief that was reviewed
-  // for exactly one first-party tool contract. Only an exact name qualifies;
-  // a namespaced look-alike keeps its full input bound.
+  // Matched on the RAW tool name, deliberately NOT `normaliseToolName`.
+  // Normalising would map `mcp__evil__workflow` onto this entry, letting any
+  // MCP server claim a relief that was reviewed for exactly one first-party
+  // tool contract. Only an exact name qualifies; a namespaced look-alike keeps
+  // its full input bound.
   const fields = NON_EXEC_COMMAND_FIELDS.get(tool.trim().toLowerCase());
   if (!fields) return false;
   return [...fields].some((field) => typeof input[field] === 'string' && input[field].length > 0);
 }
 
+/**
+ * The ONE gate both projections below share (#815 B7): may this call's
+ * advisory fields be left out of its binding at all? Only for a reviewed
+ * first-party contract. Kept in one place so the tolerant hash and the exact
+ * digest cannot drift onto different tool sets again.
+ */
+function hasReviewedAdvisoryFields(tool: string, input: Record<string, unknown>): boolean {
+  return FIRST_PARTY_EXEC_TOOLS.has(tool) || hasReviewedCommandSurface(tool, input);
+}
+
 function projectForHash(tool: string, input: unknown): unknown {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const record = input as Record<string, unknown>;
-  // Unknown tools fail closed: keep their full input bound to the approval.
-  if (classifyFamily(tool) !== 'exec' && !hasReviewedCommandSurface(tool, record)) return input;
+  // Unknown and namespaced tools fail closed: their full input stays bound.
+  if (!hasReviewedAdvisoryFields(tool, record)) return input;
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(record)) {
     if (!EXEC_ADVISORY_KEYS.has(key)) out[key] = record[key];
@@ -138,9 +171,9 @@ function projectForHash(tool: string, input: unknown): unknown {
  * Canonical hash of the exact call. Stable across processes: object keys are
  * sorted, whitespace in string values is collapsed, and everything else is
  * JSON with no formatting. Two textually different-but-equivalent commands
- * (extra spaces) hash the same; a different command never does. Exec-tool
- * advisory fields are excluded (#201) so the hash is per COMMAND, not per
- * attempt.
+ * (extra spaces) hash the same; a different command never does. Advisory
+ * fields of a reviewed first-party contract are excluded (#201) so the hash
+ * is per COMMAND, not per attempt.
  */
 export function hashToolCall(tool: string, input: unknown): string {
   const canonical = JSON.stringify([tool, canonicalise(projectForHash(tool, input))]);
@@ -148,23 +181,24 @@ export function hashToolCall(tool: string, input: unknown): string {
 }
 
 /** Version of `exactCallDigest`'s form. A digest recorded under another
- *  version never matches; bump it whenever the form below changes. */
-export const EXACT_CALL_DIGEST_VERSION = 1;
-const EXACT_CALL_DIGEST_DOMAIN = 'shieldcortex-exact-call/v1';
+ *  version never matches; bump it whenever the form below changes.
+ *  v2 (#815 B7): `description` is excluded only for the reviewed first-party
+ *  contracts, no longer for every name `classifyFamily` reads as exec. */
+export const EXACT_CALL_DIGEST_VERSION = 2;
+const EXACT_CALL_DIGEST_DOMAIN = 'shieldcortex-exact-call/v2';
 
 /**
- * Reviewed exclusions for the exact digest: `description` only, and only
- * where `hashToolCall` already treats it as advisory (exec tools and the
- * reviewed command surfaces). It is prose shown to the user; it never reaches
- * what runs. (`timeout` is NOT excluded here: it changes how long the action
- * may run.)
+ * Reviewed exclusions for the exact digest: `description` only, and only on
+ * a reviewed first-party contract (`hasReviewedAdvisoryFields`). There it is
+ * prose shown to the user; it never reaches what runs. (`timeout` is NOT
+ * excluded here: it changes how long the action may run.)
  */
 const EXACT_DIGEST_ADVISORY_KEYS = new Set(['description']);
 
 function projectForExactDigest(tool: string, input: unknown): unknown {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const record = input as Record<string, unknown>;
-  if (classifyFamily(tool) !== 'exec' && !hasReviewedCommandSurface(tool, record)) return input;
+  if (!hasReviewedAdvisoryFields(tool, record)) return input;
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(record)) {
     if (!EXACT_DIGEST_ADVISORY_KEYS.has(key)) out[key] = record[key];

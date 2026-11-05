@@ -38,6 +38,7 @@ import { fencedGenerationDir } from '../fenced-store.js';
 import {
   canonicaliseCwd,
   consumeRetryGrant,
+  EXACT_CALL_DIGEST_VERSION,
   exactCallDigest,
   getRetryRow,
   grantRetry,
@@ -73,12 +74,12 @@ let key: Buffer;
 let base: number;
 
 function seedDenial(
-  opts: { actionId?: string; signals?: string[]; hash?: string; exactDigest?: string | null; now?: number } = {},
+  opts: { actionId?: string; signals?: string[]; hash?: string; exactDigest?: string | null; now?: number; tool?: string } = {},
 ): void {
   const res = recordDenialFingerprint(
     {
       hash: opts.hash ?? HASH,
-      tool: 'Bash',
+      tool: opts.tool ?? 'Bash',
       actionId: opts.actionId ?? ACTION,
       ...(opts.exactDigest === null ? {} : { exactDigest: opts.exactDigest ?? EXACT }),
       signals: opts.signals ?? ['external-egress'],
@@ -653,11 +654,13 @@ describe('#815 B — tap grants bind an exact versioned call digest', () => {
       .toMatchObject({ via: 'tap', exactDigest: exactCallDigest(tool, a) });
   });
 
-  it('only `description` is excluded, and only on exec tools; the tool name and every other field count', () => {
+  it('only `description` is excluded, and only on a reviewed first-party contract; the tool name and every other field count', () => {
     const cmd = { command: 'curl -sS https://api.example.com/v1/report' };
     expect(exactCallDigest('Bash', { ...cmd, description: 'one' })).toBe(exactCallDigest('Bash', { ...cmd, description: 'two' }));
     expect(exactCallDigest('Bash', { ...cmd, timeout: 1000 })).not.toBe(exactCallDigest('Bash', { ...cmd, timeout: 2000 }));
     expect(exactCallDigest('Bash', cmd)).not.toBe(exactCallDigest('bash', cmd));
+    // Not `Bash` byte for byte: no relief, description is bound.
+    expect(exactCallDigest('bash', { ...cmd, description: 'one' })).not.toBe(exactCallDigest('bash', { ...cmd, description: 'two' }));
     expect(exactCallDigest('Write', { file_path: '/tmp/x', content: 'a', description: 'one' }))
       .not.toBe(exactCallDigest('Write', { file_path: '/tmp/x', content: 'a', description: 'two' }));
   });
@@ -692,7 +695,7 @@ describe('#815 B — tap grants bind an exact versioned call digest', () => {
     seedDenial({ now: base + 400 });
     const raw = JSON.parse(readFileSync(fencedStateFile(retryControlPath(home)), 'utf8'));
     delete raw.fence;
-    raw.rows[0].exactDigestVersion = 2;
+    raw.rows[0].exactDigestVersion = EXACT_CALL_DIGEST_VERSION + 1;
     writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify(raw), { mode: 0o600 });
     expect(mint(base + 500)).toMatchObject({ ok: false, reason: 'unbound' });
   });
@@ -706,6 +709,74 @@ describe('#815 B — tap grants bind an exact versioned call digest', () => {
   });
 });
 
+
+describe('#815 B7 — a namespaced tool whose name merely looks like exec binds every field', () => {
+  // `classifyFamily` reads every one of these as exec, by a substring of the
+  // last MCP segment (`process`, `run`, `exec`, `bash`). On such a tool the
+  // `description` may BE the payload, so neither binding may drop it: only
+  // the reviewed first-party `Bash` (and the reviewed `Workflow` surface) may.
+  const A = { invoice: '1', description: 'pay vendor A 10' };
+  const B = { invoice: '1', description: 'pay vendor B 10000' };
+  const LOOKALIKES = ['mcp__acme__process_invoice', 'mcp__jira__run', 'mcp__evil__exec', 'mcp__evil__Bash', 'mcp__shell__run_command'];
+
+  it.each(LOOKALIKES)('%s: a changed description or timeout changes both the exact digest and the tolerant hash', (tool) => {
+    expect(exactCallDigest(tool, A)).not.toBe(exactCallDigest(tool, B));
+    expect(hashToolCall(tool, A)).not.toBe(hashToolCall(tool, B));
+    expect(exactCallDigest(tool, { ...A, timeout: 1000 })).not.toBe(exactCallDigest(tool, { ...A, timeout: 2000 }));
+    expect(hashToolCall(tool, { ...A, timeout: 1000 })).not.toBe(hashToolCall(tool, { ...A, timeout: 2000 }));
+    // A changed description is not the same call as no description either.
+    expect(exactCallDigest(tool, A)).not.toBe(exactCallDigest(tool, { invoice: '1' }));
+  });
+
+  it.each(['mcp__jira__run', 'mcp__acme__process_invoice'])('%s: approve A, refuse B, consume A exactly once', (tool) => {
+    const run = tool === 'mcp__jira__run';
+    const a = run ? { command: 'deploy', description: 'deploy to staging' } : A;
+    const b = run ? { command: 'deploy', description: 'deploy to production and drop the old cluster' } : B;
+    // Newer than the beforeEach denial, so the shared alias resolves to it.
+    seedDenial({ tool, hash: hashToolCall(tool, a), exactDigest: exactCallDigest(tool, a), now: base + 50 });
+    const m = mintOk();
+    expect(m.argsHash).toBe(exactCallDigest(tool, a));
+    const tapped = verify(tapFor(m));
+    expect(tapped.ok).toBe(true);
+    if (!tapped.ok) return;
+    expect(tapped.grant.origin).toMatchObject({ cwd, tool });
+    const origin = { cwd, tool };
+    const consume = (hash: string, exactDigest: string, now: number) =>
+      consumeRetryGrant({ currentSignals: CURRENT, hash, exactDigest, origin }, { home, now });
+
+    // B under its own hash and digest: refused.
+    expect(consume(hashToolCall(tool, b), exactCallDigest(tool, b), base + 2_000)).toBeNull();
+    // B presented under A's row (what the tolerant hash used to give it, when
+    // it dropped description too): the exact digest alone refuses it.
+    expect(consume(hashToolCall(tool, a), exactCallDigest(tool, b), base + 2_050)).toBeNull();
+    // A spends it, once.
+    expect(consume(hashToolCall(tool, a), exactCallDigest(tool, a), base + 2_100))
+      .toMatchObject({ via: 'tap', approver: APPROVER, exactDigest: exactCallDigest(tool, a) });
+    expect(consume(hashToolCall(tool, a), exactCallDigest(tool, a), base + 2_200)).toBeNull();
+  });
+
+  it('first-party Bash keeps its relief: description excluded from both bindings, timeout bound in the exact digest', () => {
+    const cmd = { command: 'curl -sS https://api.example.com/v1/report' };
+    const one = { ...cmd, description: 'Fetch the report' };
+    const two = { ...cmd, description: 'Retry: fetch the nightly report' };
+    expect(exactCallDigest('Bash', one)).toBe(exactCallDigest('Bash', two));
+    expect(exactCallDigest('Bash', one)).toBe(exactCallDigest('Bash', cmd));
+    expect(hashToolCall('Bash', one)).toBe(hashToolCall('Bash', two));
+    // #201: the tolerant hash still drops timeout; the exact digest never did.
+    expect(hashToolCall('Bash', { ...cmd, timeout: 1000 })).toBe(hashToolCall('Bash', { ...cmd, timeout: 2000 }));
+    expect(exactCallDigest('Bash', { ...cmd, timeout: 1000 })).not.toBe(exactCallDigest('Bash', { ...cmd, timeout: 2000 }));
+
+    // And the real tap path: a re-worded description on the retry spends it.
+    seedDenial({ hash: hashToolCall('Bash', one), exactDigest: exactCallDigest('Bash', one), now: base + 50 });
+    const m = mintOk();
+    expect(verify(tapFor(m)).ok).toBe(true);
+    const origin = { cwd, tool: 'Bash' };
+    expect(consumeRetryGrant({ currentSignals: CURRENT, hash: hashToolCall('Bash', { ...two, timeout: 5000 }), exactDigest: exactCallDigest('Bash', { ...two, timeout: 5000 }), origin }, { home, now: base + 2_000 }))
+      .toBeNull();
+    expect(consumeRetryGrant({ currentSignals: CURRENT, hash: hashToolCall('Bash', two), exactDigest: exactCallDigest('Bash', two), origin }, { home, now: base + 2_100 }))
+      .toMatchObject({ via: 'tap' });
+  });
+});
 describe('#815 B — terminal-only is enforced inside the grant transaction', () => {
   it.each([
     ['self-protection-floor', 'touch-approval-store'],

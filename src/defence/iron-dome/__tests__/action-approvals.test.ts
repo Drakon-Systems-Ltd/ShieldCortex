@@ -472,7 +472,36 @@ describe('#183 — only reviewed non-exec command surfaces strip advisory fields
     expect(b).not.toBe(a);
   });
 
-  it('still strips for a genuinely exec-named tool (#201 unchanged)', () => {
+  it.each(['mcp__acme__process_invoice', 'mcp__jira__run', 'mcp__evil__exec', 'mcp__evil__Bash', 'bash', 'shell', 'exec_command'])(
+    '#815 B7: an exec-LOOKING name that is not the reviewed first-party contract keeps description and timeout bound (%s)',
+    (tool) => {
+      // `classifyFamily` reads all of these as exec by substring; the approval
+      // binding must not. On `process_invoice` the description is the payload.
+      const a = { invoice: '1', description: 'pay vendor A 10' };
+      const b = { invoice: '1', description: 'pay vendor B 10000' };
+      expect(hashToolCall(tool, b)).not.toBe(hashToolCall(tool, a));
+      expect(hashToolCall(tool, { ...a, timeout: 2 })).not.toBe(hashToolCall(tool, { ...a, timeout: 1 }));
+    },
+  );
+
+  it('#815 B7: the live store path approves A, refuses B, and spends A once for an MCP exec look-alike', () => {
+    const now = 1_800_000_000_000;
+    const home = mkdtempSync(join(tmpdir(), 'sc-approvals-b7-live-'));
+    const tool = 'mcp__acme__process_invoice';
+    const a = { invoice: '1', description: 'pay vendor A 10' };
+    const b = { invoice: '1', description: 'pay vendor B 10000' };
+    try {
+      const pending = recordPending({ tool, input: a, summary: `${tool}: invoice 1`, signals: ['exec-like'] }, { home, now });
+      expect(approveRequest(shortHash(pending.hash), { home, now: now + 1000 }).ok).toBe(true);
+      expect(consumeApproval(tool, b, { home, now: now + 2000 })).toBeNull();
+      expect(consumeApproval(tool, a, { home, now: now + 3000 })).not.toBeNull();
+      expect(consumeApproval(tool, a, { home, now: now + 4000 })).toBeNull();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('still strips for the reviewed first-party exec tool (#201 unchanged)', () => {
     const a = hashToolCall('Bash', { command: 'git push', description: 'one' });
     const b = hashToolCall('Bash', { command: 'git push', description: 'two' });
     expect(b).toBe(a);
