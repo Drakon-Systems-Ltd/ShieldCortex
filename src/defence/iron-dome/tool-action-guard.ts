@@ -4982,101 +4982,513 @@ function looksExternal(url: string, text: string): boolean {
 // ── Issuer binding for secret-egress (issue #1001) ───────────────────────────
 //
 // The catastrophic `secret-egress` tier is demoted to an approval door in
-// exactly one shape: the credential's own SHAPE names its issuer, and EVERY
-// egress destination on the surface is that issuer's host. The binding is per
-// CREDENTIAL, never per destination — a credential whose shape names issuer A,
-// sent to issuer B's host, is a mismatch, not a match. Anything the table below
-// does not name — an unknown credential shape, more than one named issuer, a
-// single off-issuer destination — keeps the catastrophic wall, which is the
-// safe direction. A one-shot approval is still a GATE, not an allow: a token
-// can be exfiltrated through its own issuer (a public paste, a mail to an
-// outside recipient), and both leave a non-issuer destination on the surface
-// that this test already refuses.
+// exactly one shape, and only on POSITIVE evidence. Both halves must be proven;
+// anything unproven keeps the catastrophic wall, which is the safe direction.
+//
+//   1. CREDENTIALS — every credential the secret hint sights on the surface is
+//      recognised and names the SAME issuer (`sightedCredentialIssuer`). The
+//      accounting is per credential: an issuer-shaped literal never lends its
+//      identity to an unknown one beside it (`-d secret=…` next to a GitHub
+//      token is an unknown credential, so the wall stays).
+//   2. DESTINATIONS — the COMPLETE destination inventory is proven to be that
+//      issuer's hosts. The proof is a closed grammar, not a search for bad
+//      spellings: either a shell command made only of `curl` stages
+//      (allowlisted options, issuer-URL operands) and a few network-less
+//      output filters, or a lone `python3 <file>` whose folded source is
+//      nothing but `import requests`, `NAME = "<literal>"` and
+//      `requests.post("<issuer URL>", <kw>=<literal expression>)` statements.
+//      Whatever the grammar does not cover — another scheme, a schemeless or IP
+//      host, userinfo, an encoded or odd authority, a proxy / resolver /
+//      connect-to override, redirect following, a config file, a heredoc, an
+//      expansion, a computed or interpolated string, an opaque body (`@file`,
+//      stdin), a mail recipient anywhere, an extra argument, a non-Python
+//      fold — is not proof.
+//
+// A one-shot approval is still a GATE, not an allow: a credential can still be
+// published THROUGH its own issuer (a public gist), so the owner is asked every
+// time. What the guard cannot see at all (ambient environment, `.curlrc`,
+// modules the script imports) is not on the surface for this rule or any other.
 type IssuerId = 'github' | 'microsoft';
 
-// A host belongs to its issuer by SUFFIX, anchored at `$`, so a lookalike that
-// merely contains the issuer's name (`evil-github.com.attacker.net`) is not a
-// member — it ends in `attacker.net`.
-const ISSUER_HOSTS: Record<IssuerId, RegExp> = {
-  github: /(?:^|\.)github\.com$|(?:^|\.)githubusercontent\.com$/i,
-  microsoft: /(?:^|\.)microsoft\.com$|(?:^|\.)microsoftonline\.com$|(?:^|\.)windows\.net$|(?:^|\.)azure\.com$/i,
+// EXACT issuer hosts — never a suffix. A DNS suffix the issuer shares with its
+// customers (`*.cloudapp.azure.com`, `*.blob.core.windows.net`,
+// `*.web.core.windows.net`, …) names a customer's endpoint, not the issuer.
+const ISSUER_HOSTS: Record<IssuerId, ReadonlySet<string>> = {
+  github: new Set(['github.com', 'api.github.com', 'uploads.github.com']),
+  microsoft: new Set(['graph.microsoft.com', 'login.microsoftonline.com', 'sts.windows.net']),
 };
 
-// GitHub token prefixes (classic/fine-grained PAT, OAuth, app, user, refresh).
-// The 20+ body chars are the same value shape `SECRET_VALUE_SHAPE` already
-// sights — the prefix is what names the issuer.
-const GITHUB_TOKEN_SHAPE = /\bgh[opsur]_[A-Za-z0-9]{20,}\b|\bgithub_pat_[0-9A-Za-z_]{20,}\b/;
+// ── Credential accounting ────────────────────────────────────────────────────
 
-// A Microsoft-identity bearer token is a JWT whose DECODED payload names a
-// Microsoft identity issuer/audience. The bytes alone are not enough: a generic
-// JWT names no issuer and is never bound (so it stays catastrophic). Scan a
-// bounded number of JWT-shaped tokens and decode only the claims segment.
-const JWT_SHAPE = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)?/g;
-const MICROSOFT_IDENTITY_CLAIM = /login\.microsoftonline\.com|sts\.windows\.net|graph\.microsoft\.com/i;
-function microsoftBearerPresent(surface: string): boolean {
-  let scanned = 0;
-  for (const m of surface.matchAll(new RegExp(JWT_SHAPE.source, 'g'))) {
-    if (++scanned > 16) break;
-    const claims = m[0].split('.')[1];
-    if (!claims || claims.length > 4096) continue;
-    let json: string;
-    try { json = Buffer.from(claims, 'base64url').toString('utf8'); } catch { continue; }
-    if (MICROSOFT_IDENTITY_CLAIM.test(json)) return true;
-  }
-  return false;
+// A JWT's issuer is read ONLY from its decoded, JSON-parsed `iss`/`aud` claims:
+// `iss` must be an https URL on a Microsoft identity host, and EVERY `aud`
+// must be Microsoft Graph. A Microsoft hostname anywhere else in the payload (a
+// `note`, a lookalike `iss`, non-JSON text) binds nothing. No signature check:
+// this is a shape test that can only fail closed.
+const MICROSOFT_ISSUER_HOSTS: ReadonlySet<string> = new Set(['login.microsoftonline.com', 'sts.windows.net']);
+const MICROSOFT_GRAPH_AUDIENCES: ReadonlySet<string> = new Set([
+  'https://graph.microsoft.com',
+  'https://graph.microsoft.com/',
+  '00000003-0000-0000-c000-000000000000',                 // Microsoft Graph's app id
+]);
+const MAX_BOUND_JWT_LENGTH = 16_384;
+
+/** A base64url JSON-object segment, decoded strictly (canonical round trip). */
+function decodeJsonObjectSegment(seg: string): Record<string, unknown> | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(seg)) return null;
+  const bytes = Buffer.from(seg, 'base64url');
+  if (bytes.toString('base64url') !== seg) return null;   // non-canonical encoding
+  const json = bytes.toString('utf8');
+  if (Buffer.from(json, 'utf8').toString('base64url') !== seg) return null;  // not valid UTF-8
+  let value: unknown;
+  try { value = JSON.parse(json); } catch { return null; }
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function microsoftGraphClaims(claims: Record<string, unknown>): boolean {
+  const iss = claims.iss;
+  if (typeof iss !== 'string') return false;
+  const u = cleanHttpsUrlAt(iss, 0);
+  if (!u || u.end !== iss.length || !MICROSOFT_ISSUER_HOSTS.has(u.host)) return false;
+  const aud = claims.aud;
+  const auds: unknown[] = typeof aud === 'string' ? [aud] : Array.isArray(aud) ? aud : [];
+  return auds.length > 0 && auds.every(a => typeof a === 'string' && MICROSOFT_GRAPH_AUDIENCES.has(a));
+}
+
+/** End offset of the Microsoft-Graph-bound JWT starting at `at`, or -1. */
+function microsoftJwtEnd(text: string, at: number): number {
+  const re = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/y;
+  re.lastIndex = at;
+  const m = re.exec(text);
+  if (!m || m[0].length > MAX_BOUND_JWT_LENGTH) return -1;
+  const end = at + m[0].length;
+  if (end < text.length && /[A-Za-z0-9_.-]/.test(text[end]!)) return -1;   // a fourth segment, a longer token
+  const [h, p] = m[0].split('.');
+  const header = decodeJsonObjectSegment(h!);
+  const payload = decodeJsonObjectSegment(p!);
+  if (!header || typeof header.alg !== 'string' || !payload) return -1;
+  return microsoftGraphClaims(payload) ? end : -1;
 }
 
 /**
- * Which issuers the SIGHTED credential shapes on this surface NAME. Empty when
- * no shape names an issuer (an unknown shape); more than one when several do —
- * neither is demotable, because there is no single issuer every destination
- * could belong to.
+ * The issuer ONE sighted credential names, with the offset where it ends — or
+ * null when it names none (an unknown credential). `[a, b)` is the secret
+ * hint's own match, so this classifies exactly what was sighted.
+ *
+ * GitHub: only the `ghp_` prefix is bound, because it is the only GitHub prefix
+ * `SECRET_VALUE_SHAPE` sights (`github_pat_`, `gho_`, … never reach this tier).
+ * Case-sensitive, whole token. Microsoft: a JWT bound by `microsoftJwtEnd`.
+ * Everything else the hint sights (`sk-`, `AKIA`, `xox?-`, PEM, a
+ * `password`/`secret` assignment, a JWT for anyone else) is unknown.
  */
-function credentialIssuers(surface: string): Set<IssuerId> {
-  const out = new Set<IssuerId>();
-  if (GITHUB_TOKEN_SHAPE.test(surface)) out.add('github');
-  if (microsoftBearerPresent(surface)) out.add('microsoft');
+function credentialIssuerAt(text: string, a: number, b: number): { issuer: IssuerId; end: number } | null {
+  if (a > 0 && /[A-Za-z0-9_.-]/.test(text[a - 1]!)) return null;      // mid-token
+  const m = text.slice(a, b);
+  if (/^ghp_[A-Za-z0-9]{20,}$/.test(m)) {
+    return b < text.length && /[A-Za-z0-9_-]/.test(text[b]!) ? null : { issuer: 'github', end: b };
+  }
+  if (m.startsWith('eyJ')) {
+    const end = microsoftJwtEnd(text, a);
+    return end < 0 ? null : { issuer: 'microsoft', end };
+  }
+  return null;
+}
+
+/**
+ * The single issuer EVERY sighted credential names, or null. Runs the same
+ * hints over the same slices as `secretSighted` (shell hint on `sh`, folded-
+ * source hint on interpreter source), plus the shell hint over the raw command
+ * (heredoc bodies, comments and printed text included) — a superset, so it can
+ * only refuse more. Matches inside comments/strings count too. Zero credentials,
+ * one unknown credential, or two issuers → null.
+ */
+function sightedCredentialIssuer(
+  passes: ReadonlyArray<{ text: string; start: number; end: number; hint: RegExp }>,
+): IssuerId | null {
+  let issuer: IssuerId | null = null;
+  for (const { text, start, end, hint } of passes) {
+    const slice = text.slice(start, end);
+    const g = new RegExp(hint.source, hint.flags.includes('g') ? hint.flags : `${hint.flags}g`);
+    let m: RegExpExecArray | null;
+    while ((m = g.exec(slice)) !== null) {
+      if (m[0].length === 0) { g.lastIndex++; continue; }
+      const at = start + m.index;
+      const named = credentialIssuerAt(text, at, at + m[0].length);
+      if (!named || (issuer !== null && issuer !== named.issuer)) return null;
+      issuer = named.issuer;
+      g.lastIndex = Math.max(g.lastIndex, named.end - start);    // the token's own tail is not a second credential
+    }
+  }
+  return issuer;
+}
+
+// ── Destination proof ────────────────────────────────────────────────────────
+
+/**
+ * The canonical host of the `https://` URL starting at `at`, and where the URL
+ * token ends — or null. The authority must be a plain DNS name (letters,
+ * digits, `-`, `.`; one optional trailing dot; optional numeric port) CLOSED by
+ * `/`, so userinfo (`@`), percent-encoding, backslashes, IP-literal brackets,
+ * expansions and concatenation all fail lexically. The WHATWG URL parser must
+ * then agree on the same hostname with no credentials. Case, a trailing dot and
+ * a port are canonicalised, not refused.
+ */
+function cleanHttpsUrlAt(text: string, at: number): { host: string; end: number } | null {
+  if (text.slice(at, at + 8).toLowerCase() !== 'https://') return null;
+  const auth = /([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)\.?(?::(\d{1,5}))?\//y;
+  auth.lastIndex = at + 8;
+  const m = auth.exec(text);
+  if (!m) return null;
+  if (m[2] !== undefined && (Number(m[2]) < 1 || Number(m[2]) > 65535)) return null;
+  const host = m[1]!.toLowerCase();
+  let end = auth.lastIndex;
+  while (end < text.length && !/[\s"'`<>]/.test(text[end]!)) end++;
+  let parsed: URL;
+  try { parsed = new URL(text.slice(at, end)); } catch { return null; }
+  if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '') return null;
+  if (parsed.hostname.replace(/\.$/, '') !== host) return null;
+  return { host, end };
+}
+
+/**
+ * Spans of every `://` URL in `text` when EACH is a clean https URL on one of
+ * `issuer`'s hosts; null as soon as one is not (any other scheme — `http`,
+ * `ftp`, `socks5`, `git+https` — or any unclean authority).
+ */
+function issuerUrlSpans(text: string, issuer: IssuerId): Array<[number, number]> | null {
+  const spans: Array<[number, number]> = [];
+  let from = 0;
+  for (;;) {
+    const k = text.indexOf('://', from);
+    if (k < 0) return spans;
+    let s = k;
+    while (s > 0 && /[A-Za-z0-9+.-]/.test(text[s - 1]!)) s--;
+    const u = k - s === 5 ? cleanHttpsUrlAt(text, s) : null;
+    if (!u || !ISSUER_HOSTS[issuer].has(u.host)) return null;
+    spans.push([s, u.end]);
+    from = Math.max(k + 3, u.end);
+  }
+}
+
+/** True when `token` is, in its entirety, one clean https URL on `issuer`'s hosts. */
+function isWholeIssuerUrl(token: string, issuer: IssuerId): boolean {
+  const u = cleanHttpsUrlAt(token, 0);
+  return u !== null && u.end === token.length && ISSUER_HOSTS[issuer].has(u.host)
+    && issuerUrlSpans(token, issuer) !== null;
+}
+
+const HOST_PIECE = /^(?:[A-Za-z0-9-]+\.)+[A-Za-z][A-Za-z0-9-]*\.?$|^\d{1,3}(?:\.\d{1,3}){3}$/;
+/**
+ * True when DATA text (a header, a body, a literal) carries anything that could
+ * name a destination other than `issuer`: a non-issuer or unclean `://` URL, a
+ * leftover `//`, an `@` address or userinfo, an IP literal, or a host-shaped
+ * word. Issuer URLs and credential-shaped tokens are masked first.
+ */
+function hasForeignDestinationSyntax(text: string, issuer: IssuerId): boolean {
+  const spans = issuerUrlSpans(text, issuer);
+  if (spans === null) return true;
+  let masked = text;
+  for (const [s, e] of spans) masked = masked.slice(0, s) + ' '.repeat(e - s) + masked.slice(e);
+  masked = masked.replace(/eyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){1,2}|ghp_[A-Za-z0-9]+/g, ' ');
+  if (masked.includes('//') || /@[A-Za-z0-9[]/.test(masked) || /\[[0-9A-Fa-f:.]+\]/.test(masked)) return true;
+  return masked.split(/[\s"'`,;()[\]{}<>=&|\\\/:]+/).some(piece => HOST_PIECE.test(piece));
+}
+
+// curl options the shell grammar admits. Nothing here can change WHERE the
+// request goes: no proxy, `--resolve`/`--connect-to`, `-L`/`--location*`,
+// `-K`/`--config`, `--next`, unix socket, DoH, `-k`, no `-T` upload. Any other
+// option refuses.
+const CURL_BARE_FLAGS: ReadonlySet<string> = new Set([
+  '--silent', '--show-error', '--fail', '--fail-with-body', '--include', '--verbose',
+  '--head', '--get', '--compressed', '--no-buffer', '--globoff', '--progress-bar', '--remote-name',
+]);
+const CURL_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  '--header', '--request', '--data', '--data-raw', '--data-binary', '--data-ascii', '--data-urlencode',
+  '--json', '--form', '--output', '--write-out', '--user-agent', '--max-time', '--connect-timeout',
+  '--retry', '--user', '--url',
+]);
+const CURL_SHORT_BARE: ReadonlySet<string> = new Set(['s', 'S', 'f', 'i', 'v', 'I', 'G', 'N', 'g', '#', 'O']);
+const CURL_SHORT_VALUE: Readonly<Record<string, string>> = {
+  H: '--header', X: '--request', d: '--data', F: '--form', o: '--output',
+  w: '--write-out', A: '--user-agent', m: '--max-time', u: '--user',
+};
+
+/**
+ * A curl option value is proof only when it is fully on the surface. `--output`
+ * names a LOCAL path. Any `@file` / `@-` value (a body, a header list read
+ * from a file or stdin) is opaque — it could carry a recipient or a header the
+ * guard never sees — so it refuses, as does `-T` (not admitted at all).
+ */
+function curlOptionValueProven(flag: string, value: string, issuer: IssuerId): boolean {
+  if (flag === '--url') return isWholeIssuerUrl(value, issuer);
+  if (flag === '--output') return true;
+  if (value.startsWith('@')) return false;
+  return !hasForeignDestinationSyntax(value, issuer);
+}
+
+/** One `curl` stage: allowlisted options, ≥1 operand, every operand an issuer URL. */
+function curlStageProven(tokens: readonly string[], issuer: IssuerId): boolean {
+  let urls = 0;
+  for (let i = 1; i < tokens.length; i++) {
+    const tok = tokens[i]!;
+    if (tok.startsWith('--')) {
+      if (CURL_BARE_FLAGS.has(tok)) continue;
+      if (!CURL_VALUE_FLAGS.has(tok) || i + 1 >= tokens.length) return false;
+      if (!curlOptionValueProven(tok, tokens[++i]!, issuer)) return false;
+      if (tok === '--url') urls++;
+      continue;
+    }
+    if (tok.length > 1 && tok.startsWith('-')) {
+      for (let j = 1; j < tok.length; j++) {
+        const c = tok[j]!;
+        if (CURL_SHORT_BARE.has(c)) continue;
+        const long = CURL_SHORT_VALUE[c];
+        if (long === undefined) return false;
+        const value = j + 1 < tok.length ? tok.slice(j + 1) : tokens[++i];
+        if (value === undefined || !curlOptionValueProven(long, value, issuer)) return false;
+        break;
+      }
+      continue;
+    }
+    if (!isWholeIssuerUrl(tok, issuer)) return false;          // schemeless, IP, other scheme, unclean
+    urls++;
+  }
+  return urls > 0;
+}
+
+/** Network-less filters a curl stage's OUTPUT may be piped through. */
+const SHELL_DOOR_FILTERS: ReadonlySet<string> = new Set(['jq', 'grep', 'head', 'tail', 'wc']);
+const PYTHON_DOOR_INTERPRETERS: ReadonlySet<string> = new Set(['python', 'python3']);
+
+/**
+ * The shell half of the proof. 'curl' when every stage is a proven curl stage
+ * or a filter (and at least one curl stage exists); 'python' when the whole
+ * command is exactly `python3 <script>`; null otherwise. Refused outright:
+ * any expansion or substitution (`$`, backticks), redirection / heredoc /
+ * process substitution (`<`, `>`), a backslash, proxy vocabulary, an env
+ * assignment, or any other command word — including a path to `curl`.
+ */
+function shellDestinationsProven(command: string, rawCommand: string, issuer: IssuerId): 'curl' | 'python' | null {
+  if (rawCommand !== command) return null;                     // IFS obfuscation
+  const cmd = command.replace(/\\\r?\n/g, ' ');                // line continuations
+  if (/[$`<>\\]/.test(cmd) || /proxy|socks/i.test(cmd)) return null;
+  if (issuerUrlSpans(cmd, issuer) === null) return null;
+  const stages = quoteAwareStatementSpans(cmd).map(s => tokeniseStatement(s.text)).filter(t => t.length > 0);
+  if (stages.length === 0) return null;
+  if (stages.length === 1 && stages[0]!.length === 2 && PYTHON_DOOR_INTERPRETERS.has(stages[0]![0]!)) return 'python';
+  let curl = 0;
+  for (const tokens of stages) {
+    const verb = tokens[0]!;
+    if (verb === 'curl') {
+      if (!curlStageProven(tokens, issuer)) return null;
+      curl++;
+      continue;
+    }
+    if (!SHELL_DOOR_FILTERS.has(verb)) return null;            // env assignment, wrapper, any other program
+    if (tokens.slice(1).some(t => hasForeignDestinationSyntax(t, issuer))) return null;
+  }
+  return curl > 0 ? 'curl' : null;
+}
+
+// ── Folded Python: a closed statement grammar ───────────────────────────────
+
+type PyTok = { k: 'name' | 'str' | 'num' | 'op' | 'nl'; v: string };
+
+/**
+ * Tokenise the tiny Python subset the folded-client grammar admits. Returns
+ * null on anything outside it: a comment, a backslash (line continuation or an
+ * escape that could spell a host), a string prefix (`f""`, `b""`, `r""`), an
+ * unterminated string, or any operator other than `( ) [ ] { } , : + = .`.
+ */
+function tokenisePythonSubset(src: string): PyTok[] | null {
+  const out: PyTok[] = [];
+  let depth = 0;
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i]!;
+    if (c === ' ' || c === '\t') { i++; continue; }
+    if (c === '\n' || c === '\r') { if (depth === 0) out.push({ k: 'nl', v: '' }); i++; continue; }
+    if (c === '"' || c === "'") {
+      const q = src.startsWith(c.repeat(3), i) ? c.repeat(3) : c;
+      const close = src.indexOf(q, i + q.length);
+      if (close < 0) return null;
+      const body = src.slice(i + q.length, close);
+      if (body.includes('\\') || (q.length === 1 && /[\r\n]/.test(body))) return null;
+      out.push({ k: 'str', v: body });
+      i = close + q.length;
+      continue;
+    }
+    const name = /[A-Za-z_][A-Za-z0-9_]*/y;
+    name.lastIndex = i;
+    const nm = name.exec(src);
+    if (nm) {
+      const next = src[name.lastIndex];
+      if (next === '"' || next === "'") return null;           // string prefix
+      out.push({ k: 'name', v: nm[0] });
+      i = name.lastIndex;
+      continue;
+    }
+    const num = /[0-9]+(?:\.[0-9]+)?/y;
+    num.lastIndex = i;
+    const nu = num.exec(src);
+    if (nu) { out.push({ k: 'num', v: nu[0] }); i = num.lastIndex; continue; }
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) { if (--depth < 0) return null; }
+    else if (!',:+=.'.includes(c)) return null;
+    out.push({ k: 'op', v: c });
+    i++;
+  }
+  if (depth !== 0) return null;
+  out.push({ k: 'nl', v: '' });
   return out;
 }
 
+const REQUESTS_POST_KWARGS: ReadonlySet<string> = new Set(['headers', 'data', 'json', 'params', 'timeout']);
+const MAX_PY_EXPR_DEPTH = 32;
+
 /**
- * Every egress destination host NAMED on the surface: the host of each
- * `scheme://host` URL, plus each recipient (a mail address contributes its
- * domain; an opaque recipient token is carried verbatim so it can only ever
- * FAIL an issuer match). This is the union the demotion test runs over — one
- * off-issuer entry is enough to keep the wall.
+ * `expr := term ('+' term)*`; `term := str | num | bound NAME | True | False |
+ * None | {expr: expr, …} | [expr, …]`. No call, attribute, subscript,
+ * comprehension, lambda or star — so a value can only be data, never code that
+ * picks a destination or carries the credential somewhere else. Returns the
+ * index after the expression, or -1.
  */
-const URL_HOST_RE = /\bhttps?:\/\/([a-z0-9.\-]+)/gi;
-function egressDestinationHosts(surface: string, recipients: readonly string[]): string[] {
-  const hosts: string[] = [];
-  for (const m of surface.matchAll(new RegExp(URL_HOST_RE.source, 'gi'))) {
-    const host = m[1].split(':')[0].replace(/\.+$/, '').toLowerCase();
-    if (host) hosts.push(host);
-  }
-  for (const r of recipients) {
-    const at = r.indexOf('@');
-    if (at >= 0) { const d = r.slice(at + 1).trim().toLowerCase(); if (d) hosts.push(d); continue; }
-    const u = r.match(/\bhttps?:\/\/([a-z0-9.\-]+)/i);
-    if (u) { hosts.push(u[1].split(':')[0].toLowerCase()); continue; }
-    const token = r.trim().toLowerCase();
-    if (token) hosts.push(token);
-  }
-  return hosts;
+function parsePyExpr(t: readonly PyTok[], i: number, bound: ReadonlySet<string>, depth: number): number {
+  if (depth > MAX_PY_EXPR_DEPTH) return -1;
+  const isOp = (k: number, v: string): boolean => t[k]?.k === 'op' && t[k]!.v === v;
+  const term = (j: number): number => {
+    const tok = t[j];
+    if (!tok) return -1;
+    if (tok.k === 'str' || tok.k === 'num') return j + 1;
+    if (tok.k === 'name') return bound.has(tok.v) || tok.v === 'True' || tok.v === 'False' || tok.v === 'None' ? j + 1 : -1;
+    if (tok.k !== 'op' || (tok.v !== '{' && tok.v !== '[')) return -1;
+    const close = tok.v === '{' ? '}' : ']';
+    let k = j + 1;
+    while (t[k] && !isOp(k, close)) {
+      k = parsePyExpr(t, k, bound, depth + 1);
+      if (k < 0) return -1;
+      if (close === '}') {
+        if (!isOp(k, ':')) return -1;
+        k = parsePyExpr(t, k + 1, bound, depth + 1);
+        if (k < 0) return -1;
+      }
+      if (isOp(k, ',')) { k++; continue; }
+      if (!isOp(k, close)) return -1;
+    }
+    return t[k] ? k + 1 : -1;
+  };
+  let j = term(i);
+  while (j >= 0 && isOp(j, '+')) j = term(j + 1);
+  return j;
 }
 
 /**
- * The secret-egress demotion decision (issue #1001). True only when a SINGLE
- * issuer is named by a sighted credential shape AND every egress destination on
- * the surface is that issuer's host. Everything else is false — the caller
+ * `requests.post("<issuer URL>"[, kw=expr]*)` filling the WHOLE statement
+ * `s`. The destination is the literal first argument and nothing else; every
+ * keyword is from a closed data-only set (no `proxies`, `hooks`, `auth`,
+ * `verify`, `allow_redirects`, `**kwargs`), each at most once.
+ */
+function pyRequestsPostProven(s: readonly PyTok[], bound: ReadonlySet<string>, issuer: IssuerId): boolean {
+  const head = ['requests', '.', 'post', '('];
+  if (s.length < 6 || !head.every((v, n) => s[n]!.k !== 'str' && s[n]!.v === v)) return false;
+  const last = s[s.length - 1]!;
+  if (!(last.k === 'op' && last.v === ')')) return false;
+  const url = s[4]!;
+  if (url.k !== 'str' || !isWholeIssuerUrl(url.v, issuer)) return false;
+  let j = 5;
+  const seen = new Set<string>();
+  while (j < s.length - 1) {
+    if (!(s[j]!.k === 'op' && s[j]!.v === ',')) return false;
+    j++;
+    if (j === s.length - 1) break;                              // trailing comma
+    const kw = s[j]!;
+    if (kw.k !== 'name' || !REQUESTS_POST_KWARGS.has(kw.v) || seen.has(kw.v)) return false;
+    seen.add(kw.v);
+    if (!(s[j + 1]?.k === 'op' && s[j + 1]!.v === '=')) return false;
+    j = parsePyExpr(s, j + 2, bound, 0);
+    if (j < 0) return false;
+  }
+  return j === s.length - 1;
+}
+
+/**
+ * The folded half of the proof: every folded region is Python, and every
+ * statement in it is `import requests`, `NAME = "<literal>"`, or a proven
+ * `requests.post` — at least one of the last. Every string literal must also
+ * be free of foreign destination syntax (a recipient address, a host, a
+ * non-issuer URL). Names are bound only to literals and used only inside
+ * proven calls, so the credential has nowhere else to go.
+ */
+function foldedClientProven(fold: ScriptFold, issuer: IssuerId): boolean {
+  if (fold.regions.length === 0) return false;
+  let posts = 0;
+  for (const r of fold.regions) {
+    if (r.lang !== 'python' || !r.folded) return false;
+    const toks = tokenisePythonSubset(fold.content.slice(r.start, r.end));
+    if (!toks) return false;
+    if (toks.some(t => t.k === 'str' && hasForeignDestinationSyntax(t.v, issuer))) return false;
+    const bound = new Set<string>();
+    let stmt: PyTok[] = [];
+    for (const tok of toks) {
+      if (tok.k !== 'nl') { stmt.push(tok); continue; }
+      const s = stmt;
+      stmt = [];
+      if (s.length === 0) continue;
+      if (s.length === 2 && s[0]!.k === 'name' && s[0]!.v === 'import' && s[1]!.k === 'name' && s[1]!.v === 'requests') continue;
+      if (s.length === 3 && s[0]!.k === 'name' && s[1]!.k === 'op' && s[1]!.v === '=' && s[2]!.k === 'str'
+        && !['requests', 'import', 'True', 'False', 'None'].includes(s[0]!.v)) {
+        bound.add(s[0]!.v);
+        continue;
+      }
+      if (pyRequestsPostProven(s, bound, issuer)) { posts++; continue; }
+      return false;
+    }
+  }
+  return posts > 0;
+}
+
+interface IssuerDoorSurface {
+  command: string;
+  rawCommand: string;
+  url: string;
+  path: string;
+  args: Record<string, unknown>;
+  scanSurface: string;
+  hintSlices: readonly ScanRegion[];
+  fold: ScriptFold;
+  substOpaque: boolean;
+}
+
+/**
+ * The secret-egress demotion decision (issue #1001). True only when every
+ * sighted credential names ONE issuer and the complete destination inventory
+ * is proven to be that issuer's hosts. Everything else is false — the caller
  * keeps the catastrophic block.
  */
-function secretEgressBoundToOwnIssuer(surface: string, recipients: readonly string[]): boolean {
-  const issuers = credentialIssuers(surface);
-  if (issuers.size !== 1) return false;
-  const [only] = issuers;
-  const dests = egressDestinationHosts(surface, recipients);
-  if (dests.length === 0) return false;
-  return dests.every(host => ISSUER_HOSTS[only].test(host));
+function secretEgressBoundToOwnIssuer(s: IssuerDoorSurface): boolean {
+  // A structured url/path/recipient, an unreadable or review-exempted script,
+  // or a surface too large to classify: the inventory is not on the surface.
+  if (s.url || s.path || recipientDestinations(s.args).length > 0) return false;
+  if (s.fold.opaque || s.substOpaque || s.fold.reviewed.length > 0 || s.fold.unreadSensitive.length > 0) return false;
+  if (s.scanSurface.length > SPAN_CLASSIFY_CAP) return false;
+  const otherArgs = rawStringArgs(s.args);
+  if (SECRET_HINT.test(otherArgs)) return false;               // a credential outside the command
+
+  const issuer = sightedCredentialIssuer([
+    { text: s.command, start: 0, end: s.command.length, hint: SECRET_HINT },
+    ...s.hintSlices.map(r => ({
+      text: s.scanSurface, start: r.start, end: r.end,
+      hint: r.lang === 'sh' ? SECRET_HINT : FOLDED_SOURCE_SECRET_HINT,
+    })),
+  ]);
+  if (issuer === null || hasForeignDestinationSyntax(otherArgs, issuer)) return false;
+
+  const shell = shellDestinationsProven(s.command, s.rawCommand, issuer);
+  if (shell === 'curl') return s.fold.content === '' && s.fold.regions.length === 0;
+  if (shell === 'python') return foldedClientProven(s.fold, issuer);
+  return false;
 }
 
 // ── Use/mention discipline for shell commands ────────────────────────────────
@@ -7611,22 +8023,22 @@ function evaluateToolCallCore(
   // uses FOLDED_SOURCE_SECRET_HINT (quoted literals / key material only).
   // Matches wholly inside a comment or string are payload, not a credential
   // in flight. Tool args stay on the command-line hint — they are values.
+  const hintSlices: ScanRegion[] = regions.length > 0
+    ? regions
+    : [{ start: 0, end: scanSurface.length, lang: 'sh' as const, hasSink: false, folded: false }];
   let secretSighted = SECRET_HINT.test(rawStringArgs(args));
   if (!secretSighted) {
-    const slices = regions.length > 0
-      ? regions
-      : [{ start: 0, end: scanSurface.length, lang: 'sh' as const, hasSink: false, folded: false }];
-    secretSighted = slices.some((r) => secretHintExecutedIn(scanSurface, r));
+    secretSighted = hintSlices.some((r) => secretHintExecutedIn(scanSurface, r));
   }
   if (egress && secretSighted && externalDestination) {
-    // #1001: demote to an approval door ONLY when the credential shape names
-    // its issuer and EVERY egress destination — in the command, the folded
-    // body and the recipient list — is that issuer's host. Any other
-    // destination, an unknown shape, or an issuer mismatch keeps the
-    // catastrophic wall. This is a one-shot gate, never an allow: a token can
-    // still be exfiltrated through its own issuer, which always leaves a
-    // non-issuer destination this test refuses.
-    if (secretEgressBoundToOwnIssuer(scanSurface, recipientDestinations(args))) {
+    // #1001: demote to an approval door ONLY on positive evidence — every
+    // sighted credential names ONE issuer and the complete destination
+    // inventory (command, folded body, recipients) is proven to be that
+    // issuer's hosts. Anything unparsed, unknown, unresolved, foreign or
+    // mismatched keeps the catastrophic wall. A one-shot gate, never an allow.
+    if (secretEgressBoundToOwnIssuer({
+      command, rawCommand, url, path, args, scanSurface, hintSlices, fold, substOpaque: subst.opaque,
+    })) {
       return withReview(verdict('require_approval', 'dangerous', family, 'data_exfiltration',
         'credential bound for its own issuer — approve before it leaves the host', ['secret-egress', ...opaqueSignals]));
     }
