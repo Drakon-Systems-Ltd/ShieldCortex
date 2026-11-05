@@ -283,6 +283,13 @@ function inlineStrictPosture(config) {
   // here exactly as `applyStrictFailClosedPosture` drops it in dist (#878: a
   // kept `readinessGate: true` let the "strict" posture run in shadow).
   delete out.actionGuard.readinessGate;
+  // #889: the strict posture keeps the known-malicious package floor on, exactly as
+  // `applyStrictFailClosedPosture` does in dist.
+  if (out.actionGuard.packageVetting && typeof out.actionGuard.packageVetting === 'object' && !Array.isArray(out.actionGuard.packageVetting)) {
+    const pv = { ...out.actionGuard.packageVetting };
+    delete pv.enabled;
+    out.actionGuard.packageVetting = pv;
+  }
   // #522 (GPT-6 round-6, item 1), the second spelling. The deprecated
   // `interceptor.actionGuard` alias gap-fills per key in
   // flattenActionGuardConfig (#209). Every pinned key is now present on the
@@ -295,6 +302,11 @@ function inlineStrictPosture(config) {
     const alias = { ...out.interceptor.actionGuard };
     for (const key of Object.keys(INLINE_STRICT_POSTURE.actionGuard)) delete alias[key];
     delete alias.readinessGate;
+    if (alias.packageVetting && typeof alias.packageVetting === 'object' && !Array.isArray(alias.packageVetting)) {
+      const pv = { ...alias.packageVetting };
+      delete pv.enabled;
+      alias.packageVetting = pv;
+    }
     out.interceptor = { ...out.interceptor, actionGuard: alias };
   }
   return out;

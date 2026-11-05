@@ -54,6 +54,8 @@ interface World {
   npm: Record<string, NpmFix>;
   pypi: Record<string, PyFix>;
   osv: Record<string, string[]>; // `${ecosystem}@${name}@${version}` -> ids
+  /** OSV record id -> aliases (only /v1/query and /v1/vulns/<id> return these; querybatch never does). */
+  aliases?: Record<string, string[]>;
   calls: string[];
 }
 
@@ -66,8 +68,20 @@ function fetchFor(w: World): FetchLike {
     if (url === 'https://api.osv.dev/v1/query') {
       const q = JSON.parse(init!.body!);
       const ids = w.osv[`${q.package.ecosystem}@${q.package.name}@${q.version}`] ?? [];
-      return json(ids.length ? { vulns: ids.map((id) => ({ id, modified: '2026-11-05T00:00:00Z' })) } : {});
+      return json(ids.length ? { vulns: ids.map((id) => ({ id, modified: '2026-11-05T00:00:00Z', aliases: w.aliases?.[id] })) } : {});
     }
+    if (url === 'https://api.osv.dev/v1/querybatch') {
+      const { queries } = JSON.parse(init!.body!) as { queries: Array<{ package: { name: string; ecosystem: string }; version?: string }> };
+      return json({
+        results: queries.map((q) => {
+          const prefix = `${q.package.ecosystem}@${q.package.name}@`;
+          const ids = [...new Set(Object.entries(w.osv).filter(([k]) => (q.version ? k === `${prefix}${q.version}` : k.startsWith(prefix))).flatMap(([, v]) => v))];
+          return ids.length ? { vulns: ids.map((id) => ({ id, modified: '2026-11-05T00:00:00Z' })) } : {};
+        }),
+      });
+    }
+    const vuln = /^https:\/\/api\.osv\.dev\/v1\/vulns\/(.+)$/.exec(url);
+    if (vuln) return json({ id: decodeURIComponent(vuln[1]), aliases: w.aliases?.[decodeURIComponent(vuln[1])] ?? [] });
     const npm = /^https:\/\/registry\.npmjs\.org\/(.+)$/.exec(url);
     if (npm) {
       const name = decodeURIComponent(npm[1]);
@@ -343,29 +357,33 @@ describe('vetPackages — failure posture', () => {
 });
 
 describe('vetPackages — cache', () => {
-  it('caches per ecosystem@name@version with owner-only permissions and skips OSV on a hit', async () => {
+  it('caches only MAL- hits, per ecosystem@name@version, with owner-only permissions', async () => {
     const w = fixtureWorld();
-    await vetPackages([npmRef('legacy-lib', '2.1.0')], opts(w));
+    await vetPackages([npmRef('legacy-lib', '2.1.0'), npmRef('clean-lib', '4.2.1'), npmRef(MAL_NAME, '1.0.3')], opts(w));
     const file = path.join(stateDir, 'package-vetting-cache.json');
-    expect(Object.keys(JSON.parse(fs.readFileSync(file, 'utf-8')).entries)).toEqual(['npm@legacy-lib@2.1.0']);
+    expect(Object.keys(JSON.parse(fs.readFileSync(file, 'utf-8')).entries)).toEqual([`npm@${MAL_NAME}@1.0.3`]);
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     expect(fs.statSync(stateDir).mode & 0o777).toBe(0o700);
-    const osvBefore = w.calls.filter((c) => c.startsWith('POST')).length;
-    const again = await vetPackages([npmRef('legacy-lib', '2.1.0')], opts(w));
-    expect(w.calls.filter((c) => c.startsWith('POST')).length).toBe(osvBefore);
-    expect(again.packages[0].cached).toBe(true);
-    expect(again.reasons).toEqual(['OSV: GHSA-abcd-1234-wxyz affects this version']);
   });
 
-  it('expires after the TTL (6 h) and asks OSV again', async () => {
+  it('never serves a clean answer from cache: a MAL- id added later is seen on the next vet (review item 3)', async () => {
     const w = fixtureWorld();
-    await vetPackages([npmRef('legacy-lib', '2.1.0')], opts(w));
-    const posts = () => w.calls.filter((c) => c.startsWith('POST')).length;
-    const n = posts();
-    await vetPackages([npmRef('legacy-lib', '2.1.0')], { ...opts(w), nowMs: NOW + 5 * 3_600_000 });
-    expect(posts()).toBe(n);
-    await vetPackages([npmRef('legacy-lib', '2.1.0')], { ...opts(w), nowMs: NOW + 7 * 3_600_000 });
-    expect(posts()).toBe(n + 1);
+    const first = await vetPackages([npmRef('clean-lib', '4.2.1')], opts(w));
+    expect(first.malicious).toBe(false);
+    // OSV publishes a MAL- report for that exact version two hours later.
+    w.osv['npm@clean-lib@4.2.1'] = ['MAL-2026-99999'];
+    const second = await vetPackages([npmRef('clean-lib', '4.2.1')], { ...opts(w), nowMs: NOW + 2 * 3_600_000 });
+    expect(second.malicious).toBe(true);
+    expect(second.packages[0].cached).toBeUndefined();
+  });
+
+  it('a fresh clean answer evicts a stale cached MAL- hit for the same version', async () => {
+    const w = fixtureWorld();
+    await vetPackages([npmRef(MAL_NAME, '1.0.3')], opts(w));
+    delete w.osv[`npm@${MAL_NAME}@1.0.3`]; // report withdrawn
+    await vetPackages([npmRef(MAL_NAME, '1.0.3')], { ...opts(w), nowMs: NOW + 3_600_000 });
+    const off = await vetPackages([npmRef(MAL_NAME, '1.0.3')], { fetchImpl: offline, nowMs: NOW + 4 * 3_600_000, stateDir });
+    expect(off.malicious).toBe(false);
   });
 
   it('a cached MAL- hit still blocks while offline (exact, unpinned and matching range)', async () => {
@@ -475,5 +493,177 @@ describe('vetToolCall + applyVettingToVerdict', () => {
     expect(normalisePackageVettingConfig({ enabled: false, minAgeDays: 3 })).toEqual({ enabled: false, minAgeDays: 3 });
     expect(normalisePackageVettingConfig({ enabled: 'no', minAgeDays: -1 })).toEqual({});
     expect(normalisePackageVettingConfig(null)).toEqual({});
+  });
+});
+
+// ── review round 1 (TARS 5781824574): bypass regressions ───────────────────
+
+const CTRL = /[\x00-\x1f\x7f]/;
+
+describe('review item 1 — the MAL- check does not depend on the cap or the registry', () => {
+  const decoys = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7', 'h8'];
+
+  it('a MAL- package listed ninth is still malicious', async () => {
+    const w = fixtureWorld();
+    const cmd = j('npm', 'i', ...decoys, `${MAL_NAME}@1.0.3`);
+    const out = await vetToolCall('Bash', { command: cmd }, opts(w));
+    expect(out!.malicious).toBe(true);
+    expect(out!.reasons.join(' ')).toContain(MAL_ID);
+    // decoys stay "unchecked: more than 8 packages…"; the MAL package is reported with its id
+    const mal = out!.audit.find((a) => a.name === MAL_NAME)!;
+    expect(mal.kinds).toContain('malicious');
+    const v = applyVettingToVerdict({ decision: 'allow', severity: 'sensitive', signals: [], reason: 'x' }, out);
+    expect(v.decision).toBe('block');
+    expect(v.severity).toBe('catastrophic');
+  });
+
+  it('a ninth UNPINNED MAL- package is caught by the name-only batch query', async () => {
+    const w = fixtureWorld();
+    const res = await vetPackages([...decoys.map((d) => npmRef(d)), npmRef(MAL_NAME)], opts(w));
+    expect(res.malicious).toBe(true);
+  });
+
+  it('issues one querybatch covering every package, separate from the registry lookups', async () => {
+    const w = fixtureWorld();
+    await vetPackages([...decoys.map((d) => npmRef(d, '1.0.0')), npmRef(MAL_NAME, '1.0.3')], opts(w));
+    expect(w.calls.filter((c) => c === 'POST https://api.osv.dev/v1/querybatch')).toHaveLength(1);
+  });
+
+  it('registry exhaustion (every packument hangs) cannot hide a pinned MAL- package', async () => {
+    const w = fixtureWorld();
+    const inner = fetchFor(w);
+    const f: FetchLike = (url, init) => url.includes('registry.npmjs.org')
+      ? new Promise((_r, rej) => init?.signal?.addEventListener('abort', () => rej(new Error('aborted'))))
+      : inner(url, init);
+    const res = await vetPackages([npmRef('big-lib'), npmRef(MAL_NAME, '1.0.3')], { fetchImpl: f, nowMs: NOW, stateDir, budgetMs: 100 });
+    expect(res.malicious).toBe(true);
+    expect(res.packages.find((p) => p.ref.name === 'big-lib')!.status).toBe('unchecked');
+  });
+
+  it('batch failure on a ninth package is reported, not silently clean', async () => {
+    const w = fixtureWorld();
+    const inner = fetchFor(w);
+    const f: FetchLike = async (url, init) => (url.endsWith('/querybatch') ? { ok: false, status: 500, json: async () => ({}) } : inner(url, init));
+    const res = await vetPackages([...decoys.map((d) => npmRef(d)), npmRef(MAL_NAME, '1.0.3')], { fetchImpl: f, nowMs: NOW, stateDir });
+    expect(res.malicious).toBe(false);
+    expect(res.reasons.join(' ')).toMatch(/malicious-package check was unavailable/);
+  });
+
+  it('a name-only hit does not override a clean version-specific answer (unpinned compromised-version case)', async () => {
+    const w = fixtureWorld();
+    w.osv['npm@clean-lib@9.9.9'] = ['MAL-2026-1']; // an OLD/other version is malicious; the latest is 4.2.1
+    const res = await vetPackages([npmRef('clean-lib')], opts(w));
+    expect(res.malicious).toBe(false);
+  });
+});
+
+describe('review item 2 — npm aliases are vetted by their target', () => {
+  it('parses alias forms to the target package', () => {
+    const t = (c: string) => parseInstallCommands(c).map(tuple);
+    expect(t(j('npm', 'i', `foo@npm:${MAL_NAME}@1.0.3`))).toEqual([['npm', MAL_NAME, '1.0.3']]);
+    expect(t(j('npm', 'i', 'foo@npm:badpkg'))).toEqual([['npm', 'badpkg', null]]);
+    expect(t(j('npm', 'i', '@my/alias@npm:badpkg@^1.0.0'))).toEqual([['npm', 'badpkg', '^1.0.0']]);
+    expect(t(j('pnpm', 'add', 'npm:badpkg@2.0.0'))).toEqual([['npm', 'badpkg', '2.0.0']]);
+    expect(t(j('npm', 'i', 'foo@npm:npm:badpkg'))).toEqual([]);
+  });
+
+  it('an aliased MAL- package is blocked end to end', async () => {
+    const out = await vetToolCall('Bash', { command: j('npm', 'i', `foo@npm:${MAL_NAME}@1.0.3`) }, opts(fixtureWorld()));
+    expect(out!.malicious).toBe(true);
+  });
+});
+
+describe('review item 4 — raw spec text never reaches reasons, audit rows or the verdict', () => {
+  const evil = `1.0.0\x1b[31mX\nLINE2SENTINEL`;
+
+  it('npm: an unresolvable spec with ESC and newline is not echoed', async () => {
+    const w = fixtureWorld();
+    const out = await vetToolCall('Bash', { command: ['npm i ', `'legacy-lib@${evil}'`].join('') }, opts(w));
+    expect(out).not.toBeNull();
+    const blob = JSON.stringify(out) + out!.reasons.join('\n');
+    expect(blob).not.toContain('SENTINEL');
+    for (const r of out!.reasons) expect(r).not.toMatch(CTRL);
+    for (const a of out!.audit) for (const r of a.reasons) expect(r).not.toMatch(CTRL);
+    const v = applyVettingToVerdict({ decision: 'allow', severity: 'sensitive', signals: [], reason: 'base' }, out);
+    expect(v.reason).not.toMatch(CTRL);
+    expect(v.reason).not.toContain('SENTINEL');
+  });
+
+  it('uvx: an unresolvable @version with control characters is not echoed', async () => {
+    const out = await vetToolCall('Bash', { command: `uvx 'wheel-lib@${evil}'` }, opts(fixtureWorld()));
+    expect(out).not.toBeNull();
+    expect(out!.reasons.join('\n')).not.toContain('SENTINEL');
+    for (const r of out!.reasons) expect(r).not.toMatch(CTRL);
+  });
+
+  it('a registry that returns a control-character version string is rejected, not echoed', async () => {
+    const w = fixtureWorld();
+    const inner = fetchFor(w);
+    const f: FetchLike = async (url, init) => {
+      if (url.includes('registry.npmjs.org/evil-ver')) {
+        return { ok: true, status: 200, json: async () => ({ 'dist-tags': { latest: '1.0.0\x1b[31m' }, versions: { '1.0.0\x1b[31m': {} }, time: {} }) };
+      }
+      return inner(url, init);
+    };
+    const res = await vetPackages([npmRef('evil-ver')], { fetchImpl: f, nowMs: NOW, stateDir });
+    for (const r of res.reasons) expect(r).not.toMatch(CTRL);
+    expect(res.packages[0].status).toBe('unchecked');
+  });
+});
+
+describe('review item 5 — custom index detection', () => {
+  const custom = (c: string) => parseInstallCommands(c).map((r) => r.customIndex === true);
+  it.each([
+    ['flag before the verb (npm)', j('npm', '--registry', 'https://r.example', 'install', 'foo')],
+    ['flag before the verb, = form (npm)', j('npm', '--registry=https://r.example', 'install', 'foo')],
+    ['npm_config_registry env prefix', j('npm_config_registry=https://r.example', 'npm', 'i', 'foo')],
+    ['NPM_CONFIG_REGISTRY via env wrapper', j('env', 'NPM_CONFIG_REGISTRY=https://r.example', 'npm', 'i', 'foo')],
+    ['PIP_INDEX_URL env prefix', j('PIP_INDEX_URL=https://i.example', 'pip', 'install', 'foo')],
+    ['PIP_EXTRA_INDEX_URL env prefix', j('PIP_EXTRA_INDEX_URL=https://i.example', 'pip', 'install', 'foo')],
+    ['pip --index-url before the verb', j('pip', '--index-url', 'https://i.example', 'install', 'foo')],
+    ['pip3 -i before the verb', j('pip3', '-i', 'https://i.example', 'install', 'foo')],
+    ['UV_INDEX_URL env on uvx', j('UV_INDEX_URL=https://i.example', 'uvx', 'foo')],
+    ['uv --index-url before pip', j('uv', '--index-url', 'https://i.example', 'pip', 'install', 'foo')],
+    ['env prefix on a bash -c payload', j('PIP_INDEX_URL=https://i.example', 'bash', '-c', `'${j('pip', 'install', 'foo')}'`)],
+    ['pnpm dlx with registry before the verb', j('pnpm', '--registry', 'https://r.example', 'dlx', 'foo')],
+  ])('%s → customIndex', (_label, cmd) => {
+    expect(custom(cmd)).toEqual([true]);
+  });
+
+  it('an unrelated env var or a plain install is not customIndex (control)', () => {
+    expect(custom(j('FOO=bar', 'npm', 'i', 'foo'))).toEqual([false]);
+    expect(custom(j('npm', 'i', 'foo'))).toEqual([false]);
+    expect(custom(j('pip', 'install', 'foo'))).toEqual([false]);
+  });
+
+  it('is reported unchecked with no lookups', async () => {
+    const w = fixtureWorld();
+    const res = await vetCommandViaTool(w, j('npm_config_registry=https://r.example', 'npm', 'i', 'clean-lib'));
+    expect(res!.reasons[0]).toMatch(/^unchecked: installs from a custom package index/);
+    expect(w.calls).toEqual([]);
+  });
+});
+
+async function vetCommandViaTool(w: World, command: string) {
+  return vetToolCall('Bash', { command }, opts(w));
+}
+
+describe('review item 7 — MAL ids carried only as aliases', () => {
+  it('per-version query: a GHSA record aliasing a MAL- id is malicious', async () => {
+    const w = fixtureWorld();
+    w.osv['npm@clean-lib@4.2.1'] = ['GHSA-aaaa-bbbb-cccc'];
+    w.aliases = { 'GHSA-aaaa-bbbb-cccc': ['MAL-2026-9'] };
+    const res = await vetPackages([npmRef('clean-lib', '4.2.1')], opts(w));
+    expect(res.malicious).toBe(true);
+    expect(res.packages[0].malicious).toContain('MAL-2026-9');
+  });
+
+  it('batch path (ninth package): the alias is resolved through /v1/vulns/<id>', async () => {
+    const w = fixtureWorld();
+    w.osv['npm@clean-lib@4.2.1'] = ['GHSA-aaaa-bbbb-cccc'];
+    w.aliases = { 'GHSA-aaaa-bbbb-cccc': ['MAL-2026-9'] };
+    const decoys = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7', 'h8'].map((d) => npmRef(d, '1.0.0'));
+    const res = await vetPackages([...decoys, npmRef('clean-lib', '4.2.1')], opts(w));
+    expect(res.malicious).toBe(true);
   });
 });

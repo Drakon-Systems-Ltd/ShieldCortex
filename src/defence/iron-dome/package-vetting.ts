@@ -22,7 +22,14 @@
  * Failure posture: a lookup that cannot complete is reported as
  * `unchecked: <reason>`, never as clean, and the call proceeds (fail open) —
  * EXCEPT when a cached, unexpired `MAL-` hit for the package is on disk, which
- * still blocks while the network is away.
+ * still blocks while the network is away. Only `MAL-` hits are ever cached: a
+ * clean answer is never reused, because the window in which a report for a
+ * fresh version arrives is exactly the window a cached "clean" would hide.
+ *
+ * The malicious-package check does not depend on registry resolution or on the
+ * per-command package cap: one OSV `querybatch` covers EVERY package named in
+ * the command, on its own deadline, so padding a command with decoys or
+ * burning the registry budget cannot hide a `MAL-` package.
  *
  * Nothing here installs, downloads or executes a package: the only requests
  * are metadata GETs to the registry and one POST to OSV.
@@ -248,7 +255,12 @@ const NPM_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/i;
 
 /** `name@spec`, scoped-aware. Null when the token is not a registry package. */
 export function parseNpmSpecifier(token: string): { name: string; spec: string | null } | null {
-  if (!token || isNonRegistrySpec(token)) return null;
+  if (!token) return null;
+  // npm alias: `<alias>@npm:<real>[@spec]` (also a bare `npm:<real>[@spec]`).
+  // The alias name is irrelevant; the target is what gets installed, so vet it.
+  const alias = /^(?:(?:@[^@/\s]+\/)?[^@/\s:]+@)?npm:(.+)$/.exec(token);
+  if (alias) return /^npm:/.test(alias[1]) ? null : parseNpmSpecifier(alias[1]);
+  if (isNonRegistrySpec(token)) return null;
   const at = token.lastIndexOf('@');
   let name = token;
   let spec: string | null = null;
@@ -285,6 +297,9 @@ function parseUvxSpecifier(token: string): { name: string; spec: string | null }
 
 const MAX_DEPTH = 3;
 
+/** Environment variables that redirect an installer to a different registry/index. */
+const INDEX_ENV = /^(?:npm_config_(?:[^=]*:)?registry|PIP_(?:EXTRA_)?INDEX_URL|PIP_FIND_LINKS|UV_(?:DEFAULT_|EXTRA_)?INDEX(?:_URL)?|UV_FIND_LINKS)=/i;
+
 /**
  * Package installs named by a shell command: npm/pnpm/yarn/bun add or install,
  * npx/bunx/pnpm dlx/yarn dlx/npm exec, pip/pip3 install (also `python -m pip`),
@@ -299,12 +314,16 @@ export function parseInstallCommands(command: string, depth = 0): PackageRef[] {
   const refs: PackageRef[] = [];
   for (const stmt of splitStatements(command)) {
     let w = words(stmt);
+    let envIndex = false;
     // Leading VAR=value assignments and transparent wrappers.
     for (;;) {
-      if (w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0])) { w = w.slice(1); continue; }
+      if (w.length && /^[A-Za-z_][A-Za-z0-9_@:.-]*=/.test(w[0])) { if (INDEX_ENV.test(w[0])) envIndex = true; w = w.slice(1); continue; }
       if (w.length && WRAPPERS.has(path.basename(w[0]))) {
         w = w.slice(1);
-        while (w.length && (w[0].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0]) || /^\d+[smhd]?$/.test(w[0]))) w = w.slice(1);
+        while (w.length && (w[0].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_@:.-]*=/.test(w[0]) || /^\d+[smhd]?$/.test(w[0]))) {
+          if (INDEX_ENV.test(w[0])) envIndex = true;
+          w = w.slice(1);
+        }
         continue;
       }
       break;
@@ -312,28 +331,29 @@ export function parseInstallCommands(command: string, depth = 0): PackageRef[] {
     if (!w.length) continue;
     const bin = path.basename(w[0]);
     const rest = w.slice(1);
+    const stmtRefs: PackageRef[] = [];
 
     if (SHELLS.has(bin)) {
       const ci = rest.findIndex((x) => /^-[a-z]*c$/.test(x));
-      if (ci >= 0 && rest[ci + 1]) refs.push(...parseInstallCommands(rest[ci + 1], depth + 1));
-      continue;
-    }
-
-    if (NPM_FAMILY.has(bin)) {
-      refs.push(...parseNpmFamily(bin, rest));
+      if (ci >= 0 && rest[ci + 1]) stmtRefs.push(...parseInstallCommands(rest[ci + 1], depth + 1));
+    } else if (NPM_FAMILY.has(bin)) {
+      stmtRefs.push(...parseNpmFamily(bin, rest));
     } else if (bin === 'npx' || bin === 'bunx') {
-      refs.push(...parseNpx(bin, rest));
+      stmtRefs.push(...parseNpx(bin, rest));
     } else if (/^pip\d*(?:\.\d+)?$/.test(bin)) {
-      refs.push(...parsePip(bin, rest));
+      stmtRefs.push(...parsePip(bin, rest));
     } else if (/^python[\d.]*$/.test(bin) && rest[0] === '-m' && /^pip\d*$/.test(rest[1] ?? '')) {
-      refs.push(...parsePip('pip', rest.slice(2)));
+      stmtRefs.push(...parsePip('pip', rest.slice(2)));
     } else if (bin === 'uv') {
-      refs.push(...parseUv(rest));
+      stmtRefs.push(...parseUv(rest));
     } else if (bin === 'uvx') {
-      refs.push(...parseUvx('uvx', rest));
+      stmtRefs.push(...parseUvx('uvx', rest));
     } else if (bin === 'pipx') {
-      refs.push(...parsePipx(rest));
+      stmtRefs.push(...parsePipx(rest));
     }
+    // An index/registry env var set for this statement applies to every package it names.
+    if (envIndex) for (const r of stmtRefs) r.customIndex = true;
+    refs.push(...stmtRefs);
   }
   return refs;
 }
@@ -359,7 +379,9 @@ function pyRefs(installer: string, tokens: readonly string[], customIndex: boole
 function parseNpmFamily(bin: string, rest: string[]): PackageRef[] {
   // Find the subcommand: first non-flag word (yarn/pnpm `global add` tolerated).
   let i = 0;
+  let preIndex = false;
   while (i < rest.length && rest[i].startsWith('-')) {
+    if (INDEX_FLAGS_NPM.has(rest[i].split('=')[0])) preIndex = true;
     i += VALUE_FLAGS_NPM.has(rest[i]) && !rest[i].includes('=') ? 2 : 1;
   }
   let verb = rest[i];
@@ -367,79 +389,98 @@ function parseNpmFamily(bin: string, rest: string[]): PackageRef[] {
   if (bin === 'yarn' && verb === 'global') { i++; verb = rest[i]; }
   const after = rest.slice(i + 1);
   if (verb === 'dlx') {
-    return parseNpx(`${bin} dlx`, after);
+    return parseNpx(`${bin} dlx`, after, preIndex);
   }
-  if (bin === 'npm' && (verb === 'exec' || verb === 'x')) return parseNpx('npm exec', after);
+  if (bin === 'npm' && (verb === 'exec' || verb === 'x')) return parseNpx('npm exec', after, preIndex);
   if (!NPM_ADD_VERBS.has(verb)) return [];
   // `yarn install` / `pnpm install` / `npm ci` take no packages; `yarn add` does.
   if (bin === 'yarn' && verb !== 'add') return [];
   const a = collectArgs(after, VALUE_FLAGS_NPM, INDEX_FLAGS_NPM, new Set());
-  return npmRefs(`${bin} ${verb}`, a.positionals, a.customIndex);
+  return npmRefs(`${bin} ${verb}`, a.positionals, a.customIndex || preIndex);
 }
 
-function parseNpx(installer: string, rest: string[]): PackageRef[] {
+function parseNpx(installer: string, rest: string[], preIndex = false): PackageRef[] {
   const a = collectArgs(rest, VALUE_FLAGS_NPM, INDEX_FLAGS_NPM, new Set(['-p', '--package']));
+  const custom = a.customIndex || preIndex;
   // With -p/--package the positionals are the command to run, not packages.
-  if (a.packageFlags.length) return npmRefs(installer, a.packageFlags, a.customIndex);
+  if (a.packageFlags.length) return npmRefs(installer, a.packageFlags, custom);
   // Everything after the first positional belongs to the executed command.
-  return a.positionals.length ? npmRefs(installer, [a.positionals[0]], a.customIndex) : [];
+  return a.positionals.length ? npmRefs(installer, [a.positionals[0]], custom) : [];
 }
 
 function parsePip(bin: string, rest: string[]): PackageRef[] {
   let i = 0;
-  while (i < rest.length && rest[i].startsWith('-')) i += VALUE_FLAGS_PIP.has(rest[i]) && !rest[i].includes('=') ? 2 : 1;
+  let preIndex = false;
+  while (i < rest.length && rest[i].startsWith('-')) {
+    if (INDEX_FLAGS_PIP.has(rest[i].split('=')[0])) preIndex = true;
+    i += VALUE_FLAGS_PIP.has(rest[i]) && !rest[i].includes('=') ? 2 : 1;
+  }
   if (!PIP_VERBS.has(rest[i] ?? '')) return [];
   const a = collectArgs(rest.slice(i + 1), VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set());
-  return pyRefs(`${bin} install`, a.positionals, a.customIndex);
+  return pyRefs(`${bin} install`, a.positionals, a.customIndex || preIndex);
+}
+
+/** Index of the first non-flag word, skipping the values of value-taking flags; also reports an index flag seen before it. */
+function firstWord(args: readonly string[], valueFlags: ReadonlySet<string>, indexFlags: ReadonlySet<string>): { at: number; preIndex: boolean } {
+  let i = 0;
+  let preIndex = false;
+  while (i < args.length && args[i].startsWith('-')) {
+    if (indexFlags.has(args[i].split('=')[0])) preIndex = true;
+    i += valueFlags.has(args[i]) && !args[i].includes('=') ? 2 : 1;
+  }
+  return { at: i < args.length ? i : -1, preIndex };
 }
 
 function parseUv(rest: string[]): PackageRef[] {
-  const sub = rest.findIndex((x) => !x.startsWith('-'));
-  if (sub < 0) return [];
-  const verb = rest[sub];
-  const after = rest.slice(sub + 1);
+  const first = firstWord(rest, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP);
+  if (first.at < 0) return [];
+  const verb = rest[first.at];
+  const after = rest.slice(first.at + 1);
   if (verb === 'add') {
     const a = collectArgs(after, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set());
-    return pyRefs('uv add', a.positionals, a.customIndex);
+    return pyRefs('uv add', a.positionals, a.customIndex || first.preIndex);
   }
   if (verb === 'pip') {
-    const j = after.findIndex((x) => !x.startsWith('-'));
-    if (j >= 0 && after[j] === 'install') {
-      const a = collectArgs(after.slice(j + 1), VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set());
-      return pyRefs('uv pip install', a.positionals, a.customIndex);
+    const sec = firstWord(after, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP);
+    if (sec.at >= 0 && after[sec.at] === 'install') {
+      const a = collectArgs(after.slice(sec.at + 1), VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set());
+      return pyRefs('uv pip install', a.positionals, a.customIndex || first.preIndex || sec.preIndex);
     }
     return [];
   }
   if (verb === 'tool') {
-    const j = after.findIndex((x) => !x.startsWith('-'));
-    if (j >= 0 && after[j] === 'run') return parseUvx('uv tool run', after.slice(j + 1));
-    if (j >= 0 && after[j] === 'install') {
-      const a = collectArgs(after.slice(j + 1), VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set());
-      return pyRefs('uv tool install', a.positionals, a.customIndex, true);
+    const sec = firstWord(after, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP);
+    const pre = first.preIndex || sec.preIndex;
+    if (sec.at >= 0 && after[sec.at] === 'run') return parseUvx('uv tool run', after.slice(sec.at + 1), pre);
+    if (sec.at >= 0 && after[sec.at] === 'install') {
+      const a = collectArgs(after.slice(sec.at + 1), VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set());
+      return pyRefs('uv tool install', a.positionals, a.customIndex || pre, true);
     }
   }
   return [];
 }
 
-function parseUvx(installer: string, rest: string[]): PackageRef[] {
+function parseUvx(installer: string, rest: string[], preIndex = false): PackageRef[] {
   const a = collectArgs(rest, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set(['--from']));
-  if (a.packageFlags.length) return pyRefs(installer, a.packageFlags, a.customIndex, true);
-  return a.positionals.length ? pyRefs(installer, [a.positionals[0]], a.customIndex, true) : [];
+  const custom = a.customIndex || preIndex;
+  if (a.packageFlags.length) return pyRefs(installer, a.packageFlags, custom, true);
+  return a.positionals.length ? pyRefs(installer, [a.positionals[0]], custom, true) : [];
 }
 
 function parsePipx(rest: string[]): PackageRef[] {
-  const j = rest.findIndex((x) => !x.startsWith('-'));
-  if (j < 0) return [];
-  const verb = rest[j];
-  const after = rest.slice(j + 1);
+  const f = firstWord(rest, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP);
+  if (f.at < 0) return [];
+  const verb = rest[f.at];
+  const after = rest.slice(f.at + 1);
   if (verb === 'install') {
     const a = collectArgs(after, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set());
-    return pyRefs('pipx install', a.positionals.slice(0, 1), a.customIndex);
+    return pyRefs('pipx install', a.positionals.slice(0, 1), a.customIndex || f.preIndex);
   }
   if (verb === 'run') {
     const a = collectArgs(after, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set(['--spec']));
-    if (a.packageFlags.length) return pyRefs('pipx run', a.packageFlags, a.customIndex);
-    return a.positionals.length ? pyRefs('pipx run', [a.positionals[0]], a.customIndex) : [];
+    const custom = a.customIndex || f.preIndex;
+    if (a.packageFlags.length) return pyRefs('pipx run', a.packageFlags, custom);
+    return a.positionals.length ? pyRefs('pipx run', [a.positionals[0]], custom) : [];
   }
   return [];
 }
@@ -598,6 +639,11 @@ async function getJson(fetchImpl: FetchLike, url: string, signal: AbortSignal): 
   try { return await res.json(); } catch { throw new Unchecked('registry answer was not valid JSON'); }
 }
 
+/** A version string safe to show and to put in an audit row: no control characters, bounded. */
+function isSafeVersion(v: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9.!+_~-]{0,63}$/.test(v);
+}
+
 function errClass(err: unknown): string {
   const code = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
   return typeof code === 'string' && /^[A-Z0-9_]{2,30}$/.test(code) ? code : 'failed';
@@ -615,7 +661,8 @@ async function resolveNpm(ref: PackageRef, fetchImpl: FetchLike, signal: AbortSi
   if (typeof tags[spec] === 'string') version = tags[spec] as string;
   else if (semver.valid(spec)) version = semver.valid(spec)!;
   else if (semver.validRange(spec)) version = semver.maxSatisfying(Object.keys(versions), spec) ?? undefined;
-  if (!version || !versions[version]) throw new Unchecked(`could not resolve "${ref.spec ?? 'latest'}" to a published version`);
+  if (!version || !versions[version]) throw new Unchecked('could not resolve the requested version to a published version');
+  if (!isSafeVersion(version)) throw new Unchecked('registry returned an unrecognisable version');
   const manifest = obj(versions[version]);
   const scripts = obj(manifest.scripts);
   const hooks = NPM_HOOKS.filter((h) => typeof scripts[h] === 'string' && (scripts[h] as string).trim() !== '');
@@ -645,11 +692,12 @@ async function resolvePyPI(ref: PackageRef, fetchImpl: FetchLike, signal: AbortS
         .filter((v) => pyParts(v) && pySatisfies(v, ref.spec!))
         .sort((a, b) => pyCmp(pyParts(a)!, pyParts(b)!));
       const best = candidates[candidates.length - 1];
-      if (!best) throw new Unchecked(`could not resolve "${ref.spec}" to a released version`);
+      if (!best) throw new Unchecked('could not resolve the requested version to a released version');
       version = best;
       doc = { releases: project.releases, urls: obj(project.releases)[best] };
     }
   }
+  if (!isSafeVersion(version)) throw new Unchecked('registry returned an unrecognisable version');
   const files = (Array.isArray(doc.urls) ? doc.urls : Array.isArray(obj(doc.releases)[version]) ? obj(doc.releases)[version] as unknown[] : []).map(obj);
   const types = files.map((f) => f.packagetype);
   const sdistOnly = files.length > 0 && types.includes('sdist') && !types.includes('bdist_wheel');
@@ -676,9 +724,85 @@ async function queryOsv(ref: PackageRef, version: string, fetchImpl: FetchLike, 
   const ids: string[] = [];
   for (const v of vulns) {
     const o = obj(v);
-    if (typeof o.id === 'string' && !o.withdrawn && /^[A-Za-z0-9][A-Za-z0-9._:-]{2,60}$/.test(o.id)) ids.push(o.id);
+    if (o.withdrawn) continue;
+    if (typeof o.id === 'string' && OSV_ID.test(o.id)) ids.push(o.id);
+    // A record filed under another id (GHSA-…, PYSEC-…) can carry the MAL- id as an alias.
+    if (Array.isArray(o.aliases)) for (const a of o.aliases) if (typeof a === 'string' && a.startsWith('MAL-') && OSV_ID.test(a)) ids.push(a);
   }
   return [...new Set(ids)];
+}
+
+const OSV_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,60}$/;
+const MAX_BATCH = 500;
+const MAX_ALIAS_LOOKUPS = 6;
+
+/**
+ * One OSV `querybatch` for every package in the command, independent of the
+ * registry and of the per-command cap. A package with a known version is asked
+ * by name+version; otherwise by name alone (any `MAL-` entry for the package
+ * counts — a malicious-package report is almost always package-wide).
+ * Returns ids per query index, or null when the batch itself failed.
+ *
+ * The batch answer carries ids only, never aliases, so the (few) non-MAL ids it
+ * returns are fetched individually to see whether one is an alias of a `MAL-`
+ * record.
+ */
+async function queryOsvBatch(
+  queries: ReadonlyArray<{ ref: PackageRef; version: string | null }>,
+  fetchImpl: FetchLike,
+  signal: AbortSignal,
+): Promise<string[][] | null> {
+  if (!queries.length) return [];
+  try {
+    const sliced = queries.slice(0, MAX_BATCH);
+    const res = await fetchImpl('https://api.osv.dev/v1/querybatch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'user-agent': 'shieldcortex-package-vetting' },
+      body: JSON.stringify({
+        queries: sliced.map((q) => ({ package: { name: q.ref.name, ecosystem: q.ref.ecosystem }, ...(q.version ? { version: q.version } : {}) })),
+      }),
+      signal,
+    });
+    if (!res.ok) return null;
+    const results = obj(await res.json()).results;
+    if (!Array.isArray(results)) return null;
+    const out: string[][] = queries.map(() => []);
+    let aliasLookups = 0;
+    for (let i = 0; i < sliced.length; i++) {
+      const vulns = Array.isArray(obj(results[i]).vulns) ? obj(results[i]).vulns as unknown[] : [];
+      const ids: string[] = [];
+      for (const v of vulns) {
+        const id = obj(v).id;
+        if (typeof id !== 'string' || !OSV_ID.test(id)) continue;
+        ids.push(id);
+        if (!id.startsWith('MAL-') && aliasLookups < MAX_ALIAS_LOOKUPS) {
+          aliasLookups++;
+          try {
+            const r = await fetchImpl(`https://api.osv.dev/v1/vulns/${encodeURIComponent(id)}`, { headers: { accept: 'application/json', 'user-agent': 'shieldcortex-package-vetting' }, signal });
+            if (r.ok) {
+              const rec = obj(await r.json());
+              if (Array.isArray(rec.aliases)) for (const a of rec.aliases) if (typeof a === 'string' && a.startsWith('MAL-') && OSV_ID.test(a)) ids.push(a);
+            }
+          } catch { /* alias enrichment is best-effort */ }
+        }
+      }
+      out[i] = [...new Set(ids)];
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** The version a spec pins exactly, without asking a registry; null for tags, ranges and unpinned. */
+function pinnedVersion(ref: PackageRef): string | null {
+  if (!ref.spec) return null;
+  if (ref.ecosystem === 'npm') {
+    const v = semver.valid(ref.spec);
+    return v && isSafeVersion(v) ? v : null;
+  }
+  const m = /^===?([A-Za-z0-9.!+_-]+)$/.exec(ref.spec);
+  return m && !m[1].includes('*') && isSafeVersion(m[1]) ? m[1] : null;
 }
 
 // ── Findings ────────────────────────────────────────────────────────────────
@@ -700,7 +824,7 @@ function listIds(ids: string[], max = 3): string {
 
 function buildFindings(v: Omit<PackageVet, 'findings'>, minAgeDays: number, nowMs: number): VettingFinding[] {
   const out: VettingFinding[] = [];
-  const label = `${safeName(v.ref)}${v.version ? `@${v.version}` : ''}`;
+  const label = `${safeName(v.ref)}${v.version && isSafeVersion(v.version) ? `@${v.version}` : ''}`;
   if (v.status === 'unchecked') {
     out.push({ kind: 'unchecked', severity: 'advisory', reason: `unchecked: ${v.uncheckedReason ?? 'lookup failed'}` });
   }
@@ -734,50 +858,70 @@ function uncheckedVet(ref: PackageRef, reason: string, minAgeDays: number, nowMs
   return { ...base, findings: buildFindings(base, minAgeDays, nowMs) };
 }
 
+interface OneResult {
+  vet: PackageVet;
+  /** The version the registry resolved, when it did. */
+  version?: string;
+  /** `osvIds` came from a version-specific OSV query (not a name-only one). */
+  exact: boolean;
+}
+
 async function vetOne(ref: PackageRef, ctx: {
-  fetchImpl: FetchLike; signal: AbortSignal; minAgeDays: number; nowMs: number;
-  cache: CacheFile; ttlMs: number; opts: VetOptions; dirty: { v: boolean };
-}): Promise<PackageVet> {
-  const { fetchImpl, signal, minAgeDays, nowMs, cache, ttlMs } = ctx;
+  fetchImpl: FetchLike; regSignal: AbortSignal; osvSignal: AbortSignal; minAgeDays: number; nowMs: number;
+  cache: CacheFile; dirty: { v: boolean };
+}): Promise<OneResult> {
+  const { fetchImpl, regSignal, osvSignal, minAgeDays, nowMs, cache } = ctx;
   if (ref.customIndex) {
-    return uncheckedVet(ref, 'installs from a custom package index, which public records do not describe', minAgeDays, nowMs);
+    return { vet: uncheckedVet(ref, 'installs from a custom package index, which public records do not describe', minAgeDays, nowMs), exact: false };
+  }
+  let facts: Facts;
+  try {
+    facts = ref.ecosystem === 'npm' ? await resolveNpm(ref, fetchImpl, regSignal) : await resolvePyPI(ref, fetchImpl, regSignal);
+  } catch (err) {
+    return { vet: uncheckedVet(ref, err instanceof Unchecked ? err.message : 'lookup failed', minAgeDays, nowMs), exact: false };
   }
   try {
-    const facts = ref.ecosystem === 'npm' ? await resolveNpm(ref, fetchImpl, signal) : await resolvePyPI(ref, fetchImpl, signal);
-    const key = cacheKey(ref.ecosystem, ref.name, facts.version);
-    const hit = cache.entries[key];
-    let osvIds: string[];
-    let cached = false;
-    if (hit && nowMs - hit.at < ttlMs) { osvIds = hit.osvIds; cached = true; }
-    else {
-      osvIds = await queryOsv(ref, facts.version, fetchImpl, signal);
-      cache.entries[key] = { at: nowMs, ecosystem: ref.ecosystem, name: ref.name, version: facts.version, publishedAt: facts.publishedAt, osvIds, hooks: facts.hooks, sdistOnly: facts.sdistOnly };
-      ctx.dirty.v = true;
-    }
+    // A clean answer is never served from the cache: always ask OSV for this version.
+    const osvIds = await queryOsv(ref, facts.version, fetchImpl, osvSignal);
+    rememberMalicious(cache, ctx.dirty, ref, facts, osvIds, nowMs);
     const base = {
       ref, status: 'checked' as const, version: facts.version, publishedAt: facts.publishedAt, osvIds,
-      malicious: osvIds.filter((id) => id.startsWith('MAL-')), hooks: facts.hooks, sdistOnly: facts.sdistOnly, ...(cached ? { cached } : {}),
+      malicious: osvIds.filter((id) => id.startsWith('MAL-')), hooks: facts.hooks, sdistOnly: facts.sdistOnly,
     };
-    return { ...base, findings: buildFindings(base, minAgeDays, nowMs) };
+    return { vet: { ...base, findings: buildFindings(base, minAgeDays, nowMs) }, version: facts.version, exact: true };
   } catch (err) {
-    const reason = err instanceof Unchecked ? err.message : 'lookup failed';
-    const mal = cachedMaliciousFor(ref, cache, nowMs, ttlMs);
-    if (mal) {
-      // Offline, but a fresh record says this package is malicious: that still blocks.
-      const base = {
-        ref, status: 'checked' as const, version: mal.version, publishedAt: mal.publishedAt, osvIds: mal.osvIds,
-        malicious: mal.osvIds.filter((id) => id.startsWith('MAL-')), hooks: mal.hooks, sdistOnly: mal.sdistOnly, cached: true,
-      };
-      return { ...base, findings: buildFindings(base, minAgeDays, nowMs) };
-    }
-    return uncheckedVet(ref, reason, minAgeDays, nowMs);
+    return { vet: uncheckedVet(ref, err instanceof Unchecked ? err.message : 'lookup failed', minAgeDays, nowMs), version: facts.version, exact: false };
   }
+}
+
+/** Only `MAL-` hits are cached (for the offline block). A fresh clean answer evicts a stale hit for the same version. */
+function rememberMalicious(cache: CacheFile, dirty: { v: boolean }, ref: PackageRef, facts: Pick<Facts, 'version' | 'publishedAt' | 'hooks' | 'sdistOnly'>, osvIds: string[], nowMs: number): void {
+  const key = cacheKey(ref.ecosystem, ref.name, facts.version);
+  if (osvIds.some((id) => id.startsWith('MAL-'))) {
+    cache.entries[key] = { at: nowMs, ecosystem: ref.ecosystem, name: ref.name, version: facts.version, publishedAt: facts.publishedAt, osvIds, hooks: facts.hooks, sdistOnly: facts.sdistOnly };
+    dirty.v = true;
+  } else if (key in cache.entries) {
+    delete cache.entries[key];
+    dirty.v = true;
+  }
+}
+
+/** Vet with the malicious-package gate applied: extra `MAL-` ids found by the batch query or the cache. */
+function withMalicious(v: PackageVet, extra: string[], minAgeDays: number, nowMs: number, cached = false): PackageVet {
+  const mal = extra.filter((id) => id.startsWith('MAL-') && !v.osvIds.includes(id));
+  if (!mal.length) return v;
+  const base = { ...v, osvIds: [...v.osvIds, ...mal], malicious: [...v.malicious, ...mal], ...(cached ? { cached: true } : {}) } as Omit<PackageVet, 'findings'> & { findings?: VettingFinding[] };
+  delete base.findings;
+  return { ...base, findings: buildFindings(base, minAgeDays, nowMs) };
 }
 
 /**
  * Vet a set of package references. Never throws; a failed lookup is an
- * `unchecked` entry, never a clean one. One shared deadline covers every
- * request, so the whole call costs at most `budgetMs` of wall clock.
+ * `unchecked` entry, never a clean one. Registry lookups (capped at
+ * {@link MAX_PACKAGES_PER_COMMAND} packages) and the OSV malicious-package
+ * batch (every package) run on separate deadlines of `budgetMs` each, so
+ * neither padding the command nor slow registry answers can starve the
+ * malicious-package check.
  */
 export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions = {}): Promise<VettingResult> {
   const nowMs = opts.nowMs ?? Date.now();
@@ -791,19 +935,61 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
     if (!seen.has(k)) { seen.add(k); unique.push(r); }
   }
   const fetchImpl: FetchLike = opts.fetchImpl ?? ((url, init) => (globalThis as unknown as { fetch: FetchLike }).fetch(url, init));
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), budgetMs);
-  timer.unref?.();
+  const regCtl = new AbortController();
+  const osvCtl = new AbortController();
+  const regTimer = setTimeout(() => regCtl.abort(), budgetMs);
+  const osvTimer = setTimeout(() => osvCtl.abort(), budgetMs);
+  regTimer.unref?.();
+  osvTimer.unref?.();
   const cache = readCache(opts);
   const dirty = { v: false };
   const packages: PackageVet[] = [];
   try {
     const head = unique.slice(0, MAX_PACKAGES_PER_COMMAND);
-    const results = await Promise.all(head.map((ref) => vetOne(ref, { fetchImpl, signal: controller.signal, minAgeDays, nowMs, cache, ttlMs, opts, dirty }).catch(() => uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs))));
-    packages.push(...results);
-    for (const ref of unique.slice(MAX_PACKAGES_PER_COMMAND)) packages.push(uncheckedVet(ref, `more than ${MAX_PACKAGES_PER_COMMAND} packages in one command`, minAgeDays, nowMs));
+    // The malicious-package batch covers EVERY package (custom-index installs excepted: public records do not describe them).
+    const batchRefs = unique.filter((r) => !r.customIndex);
+    const batchP = queryOsvBatch(batchRefs.map((ref) => ({ ref, version: pinnedVersion(ref) })), fetchImpl, osvCtl.signal);
+    const headP = Promise.all(head.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, dirty })
+      .catch((): OneResult => ({ vet: uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs), exact: false }))));
+    const [batch, results] = await Promise.all([batchP, headP]);
+    const batchFor = (ref: PackageRef): string[] => {
+      const i = batchRefs.indexOf(ref);
+      return batch && i >= 0 ? batch[i].filter((id) => id.startsWith('MAL-')) : [];
+    };
+    unique.forEach((ref, idx) => {
+      const pinned = pinnedVersion(ref);
+      let vet: PackageVet;
+      if (idx < head.length) {
+        const r = results[idx];
+        // A name-only batch answer is a fallback: when the version-specific query answered, it is authoritative.
+        const malIds = r.exact && !pinned ? [] : batchFor(ref);
+        vet = withMalicious(r.vet, malIds, minAgeDays, nowMs);
+        if (malIds.length && pinned && !r.exact) {
+          rememberMalicious(cache, dirty, ref, { version: pinned, hooks: [], sdistOnly: false }, malIds, nowMs);
+        }
+      } else {
+        const reason = batch || ref.customIndex
+          ? `more than ${MAX_PACKAGES_PER_COMMAND} packages in one command`
+          : `more than ${MAX_PACKAGES_PER_COMMAND} packages in one command, and the malicious-package check was unavailable`;
+        vet = withMalicious(uncheckedVet(ref, reason, minAgeDays, nowMs), batchFor(ref), minAgeDays, nowMs);
+        if (pinned && vet.malicious.length) rememberMalicious(cache, dirty, ref, { version: pinned, hooks: [], sdistOnly: false }, vet.malicious, nowMs);
+      }
+      // Offline: a fresh cached MAL- record for this package still blocks.
+      if (vet.status === 'unchecked' && !vet.malicious.length && !ref.customIndex) {
+        const mal = cachedMaliciousFor(ref, cache, nowMs, ttlMs);
+        if (mal) {
+          const base = {
+            ref, status: 'checked' as const, version: mal.version, publishedAt: mal.publishedAt, osvIds: mal.osvIds,
+            malicious: mal.osvIds.filter((id) => id.startsWith('MAL-')), hooks: mal.hooks, sdistOnly: mal.sdistOnly, cached: true,
+          };
+          vet = { ...base, findings: buildFindings(base, minAgeDays, nowMs) };
+        }
+      }
+      packages.push(vet);
+    });
   } finally {
-    clearTimeout(timer);
+    clearTimeout(regTimer);
+    clearTimeout(osvTimer);
   }
   if (dirty.v) writeCache(opts, cache, nowMs, ttlMs);
   const all = packages.flatMap((p) => p.findings);
@@ -843,10 +1029,16 @@ export async function vetToolCall(
     if (!command) return null;
     const res = await vetCommand(command, opts);
     if (!res) return null;
+    // Defence in depth: every reason is built from a fixed vocabulary plus validated names/versions,
+    // but nothing that reaches an audit row or a verdict may carry a control character.
+    const clean = (r: string) => r.replace(/[^\x20-\x7e]/g, '?').slice(0, 240);
     return {
       malicious: res.malicious,
-      reasons: res.reasons,
-      audit: res.packages.map((p) => ({ ecosystem: p.ref.ecosystem, name: safeName(p.ref), version: p.version, status: p.status, kinds: p.findings.map((f) => f.kind), reasons: p.findings.map((f) => f.reason) })),
+      reasons: res.reasons.map(clean),
+      audit: res.packages.map((p) => ({
+        ecosystem: p.ref.ecosystem, name: safeName(p.ref), version: p.version && isSafeVersion(p.version) ? p.version : undefined,
+        status: p.status, kinds: p.findings.map((f) => f.kind), reasons: p.findings.map((f) => clean(f.reason)),
+      })),
     };
   } catch {
     return null;

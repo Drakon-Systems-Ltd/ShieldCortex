@@ -2157,6 +2157,13 @@ async function applyPolicyLockToPluginConfig(config: SCConfig): Promise<SCConfig
         'no auto-approve, broker off). Run `shieldcortex repair` to restore the install.',
       );
     }
+    // #889: the strict posture keeps the known-malicious package floor on.
+    const pv = (config.interceptor?.actionGuard as Record<string, unknown> | undefined)?.packageVetting;
+    if (pv && typeof pv === 'object' && !Array.isArray(pv)) {
+      const { enabled: _optOut, ...keep } = pv as Record<string, unknown>;
+      void _optOut;
+      return withGuardPosture(config, { ...INLINE_STRICT_GUARD_POSTURE, packageVetting: keep });
+    }
     return withGuardPosture(config, INLINE_STRICT_GUARD_POSTURE);
   };
 
