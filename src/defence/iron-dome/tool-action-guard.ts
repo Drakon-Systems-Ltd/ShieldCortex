@@ -4994,20 +4994,27 @@ function looksExternal(url: string, text: string): boolean {
 //      issuer's hosts. The proof is a closed grammar, not a search for bad
 //      spellings: either a shell command made only of `curl` stages
 //      (allowlisted options, issuer-URL operands) and a few network-less
-//      output filters, or a lone `python3 <file>` whose folded source is
+//      output filters, or a lone `python3 -I <file>` whose folded source is
 //      nothing but `import requests`, `NAME = "<literal>"` and
-//      `requests.post("<issuer URL>", <kw>=<literal expression>)` statements.
-//      Whatever the grammar does not cover — another scheme, a schemeless or IP
-//      host, userinfo, an encoded or odd authority, a proxy / resolver /
-//      connect-to override, redirect following, a config file, a heredoc, an
-//      expansion, a computed or interpolated string, an opaque body (`@file`,
-//      stdin), a mail recipient anywhere, an extra argument, a non-Python
-//      fold — is not proof.
+//      `requests.post("<issuer URL>", <kw>=<literal>, allow_redirects=False)`
+//      statements. The proof is over the VALUE each argument transmits: the
+//      shell half lexes the exact argv bash would build (and refuses any word
+//      whose argv it cannot pin — an unquoted glob/brace, a quote glued to
+//      other text); the Python half admits no `+`, so every value is ONE
+//      literal judged whole. Whatever the grammar does not cover — another
+//      scheme, a schemeless or IP host, userinfo, an encoded or odd authority,
+//      a proxy / resolver / connect-to override, redirect following (or a
+//      Python POST that does not explicitly refuse it), a config file, a
+//      heredoc, an expansion, a computed, concatenated or interpolated string,
+//      an opaque body (`@file`, `name=@file`, `name@file`, stdin), an `@`
+//      anywhere in data, a non-ASCII host, an extra argument, a non-Python
+//      fold, a script run without `-I` (its own directory would shadow
+//      `requests`) — is not proof.
 //
 // A one-shot approval is still a GATE, not an allow: a credential can still be
 // published THROUGH its own issuer (a public gist), so the owner is asked every
 // time. What the guard cannot see at all (ambient environment, `.curlrc`,
-// modules the script imports) is not on the surface for this rule or any other.
+// the installed site-packages) is not on the surface for this rule or any other.
 type IssuerId = 'github' | 'microsoft';
 
 // EXACT issuer hosts — never a suffix. A DNS suffix the issuer shares with its
@@ -5032,6 +5039,12 @@ const MICROSOFT_GRAPH_AUDIENCES: ReadonlySet<string> = new Set([
   '00000003-0000-0000-c000-000000000000',                 // Microsoft Graph's app id
 ]);
 const MAX_BOUND_JWT_LENGTH = 16_384;
+
+// A bound credential must be a WHOLE token in the value that carries it: only
+// these characters may sit immediately before / after it. `GH.evil`,
+// `GH-evil`, `xGH`, `GH;…` transmit a value that is not the claimed shape.
+const CREDENTIAL_BEFORE = /[\s"'`:=,{[]/;
+const CREDENTIAL_AFTER = /[\s"'`,}\]]/;
 
 /** A base64url JSON-object segment, decoded strictly (canonical round trip). */
 function decodeJsonObjectSegment(seg: string): Record<string, unknown> | null {
@@ -5064,7 +5077,7 @@ function microsoftJwtEnd(text: string, at: number): number {
   const m = re.exec(text);
   if (!m || m[0].length > MAX_BOUND_JWT_LENGTH) return -1;
   const end = at + m[0].length;
-  if (end < text.length && /[A-Za-z0-9_.-]/.test(text[end]!)) return -1;   // a fourth segment, a longer token
+  if (end < text.length && !CREDENTIAL_AFTER.test(text[end]!)) return -1;  // a fourth segment, a longer token, a glued suffix
   const [h, p] = m[0].split('.');
   const header = decodeJsonObjectSegment(h!);
   const payload = decodeJsonObjectSegment(p!);
@@ -5084,10 +5097,10 @@ function microsoftJwtEnd(text: string, at: number): number {
  * `password`/`secret` assignment, a JWT for anyone else) is unknown.
  */
 function credentialIssuerAt(text: string, a: number, b: number): { issuer: IssuerId; end: number } | null {
-  if (a > 0 && /[A-Za-z0-9_.-]/.test(text[a - 1]!)) return null;      // mid-token
+  if (a > 0 && !CREDENTIAL_BEFORE.test(text[a - 1]!)) return null;     // mid-token
   const m = text.slice(a, b);
   if (/^ghp_[A-Za-z0-9]{20,}$/.test(m)) {
-    return b < text.length && /[A-Za-z0-9_-]/.test(text[b]!) ? null : { issuer: 'github', end: b };
+    return b < text.length && !CREDENTIAL_AFTER.test(text[b]!) ? null : { issuer: 'github', end: b };
   }
   if (m.startsWith('eyJ')) {
     const end = microsoftJwtEnd(text, a);
@@ -5122,6 +5135,26 @@ function sightedCredentialIssuer(
     }
   }
   return issuer;
+}
+
+/**
+ * True when every credential either hint sights in ONE transmitted value (a
+ * lexed argv word, a Python literal) is a whole token naming `issuer`. Run on
+ * the value itself, not the raw spelling, so quote splicing cannot end a
+ * token early. Zero credentials is true.
+ */
+function everyCredentialNames(value: string, issuer: IssuerId): boolean {
+  for (const hint of [SECRET_HINT, FOLDED_SOURCE_SECRET_HINT]) {
+    const g = new RegExp(hint.source, hint.flags.includes('g') ? hint.flags : `${hint.flags}g`);
+    let m: RegExpExecArray | null;
+    while ((m = g.exec(value)) !== null) {
+      if (m[0].length === 0) { g.lastIndex++; continue; }
+      const named = credentialIssuerAt(value, m.index, m.index + m[0].length);
+      if (!named || named.issuer !== issuer) return false;
+      g.lastIndex = Math.max(g.lastIndex, named.end);
+    }
+  }
+  return true;
 }
 
 // ── Destination proof ────────────────────────────────────────────────────────
@@ -5168,7 +5201,7 @@ function issuerUrlSpans(text: string, issuer: IssuerId): Array<[number, number]>
     const u = k - s === 5 ? cleanHttpsUrlAt(text, s) : null;
     if (!u || !ISSUER_HOSTS[issuer].has(u.host)) return null;
     spans.push([s, u.end]);
-    from = Math.max(k + 3, u.end);
+    from = k + 3;                                              // a `://` inside this span is judged too
   }
 }
 
@@ -5179,21 +5212,36 @@ function isWholeIssuerUrl(token: string, issuer: IssuerId): boolean {
     && issuerUrlSpans(token, issuer) !== null;
 }
 
-const HOST_PIECE = /^(?:[A-Za-z0-9-]+\.)+[A-Za-z][A-Za-z0-9-]*\.?$|^\d{1,3}(?:\.\d{1,3}){3}$/;
+const HOST_PIECE = /^(?:[A-Za-z0-9_-]+\.)+[A-Za-z_][A-Za-z0-9_-]*\.?$|^\d{1,3}(?:\.\d{1,3}){3}$/;
+
+/**
+ * A piece that is, in its entirety, a credential bound to `issuer` — judged
+ * whole, never a substring. A bound Microsoft JWT carries a label longer than
+ * 63 characters (its claims segment), so it can never also be a DNS name.
+ */
+function isWholeBoundCredential(piece: string, issuer: IssuerId): boolean {
+  if (issuer === 'github') return /^ghp_[A-Za-z0-9]{20,}$/.test(piece);
+  return microsoftJwtEnd(piece, 0) === piece.length && piece.split('.').some(l => l.length > 63);
+}
+
 /**
  * True when DATA text (a header, a body, a literal) carries anything that could
- * name a destination other than `issuer`: a non-issuer or unclean `://` URL, a
- * leftover `//`, an `@` address or userinfo, an IP literal, or a host-shaped
- * word. Issuer URLs and credential-shaped tokens are masked first.
+ * name a destination other than `issuer`: non-ASCII, a non-issuer or unclean
+ * `://` URL, a leftover `//`, ANY `@` (an address, userinfo, a curl
+ * `@file` / `name=@file` / `name@file` read), percent-encoding, an IP literal,
+ * or a host-shaped word. Only proven issuer URL spans are set aside; nothing
+ * credential-shaped is masked — a word is exempt only when it is, whole, a
+ * bound credential for `issuer`.
  */
 function hasForeignDestinationSyntax(text: string, issuer: IssuerId): boolean {
+  if (/[^\x20-\x7e\t\r\n]/.test(text)) return true;      // non-ASCII / control: not judged by an ASCII grammar
   const spans = issuerUrlSpans(text, issuer);
   if (spans === null) return true;
-  let masked = text;
-  for (const [s, e] of spans) masked = masked.slice(0, s) + ' '.repeat(e - s) + masked.slice(e);
-  masked = masked.replace(/eyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){1,2}|ghp_[A-Za-z0-9]+/g, ' ');
-  if (masked.includes('//') || /@[A-Za-z0-9[]/.test(masked) || /\[[0-9A-Fa-f:.]+\]/.test(masked)) return true;
-  return masked.split(/[\s"'`,;()[\]{}<>=&|\\\/:]+/).some(piece => HOST_PIECE.test(piece));
+  let rest = text;
+  for (const [s, e] of spans) rest = rest.slice(0, s) + ' '.repeat(e - s) + rest.slice(e);
+  if (rest.includes('//') || rest.includes('@') || /%[0-9A-Fa-f]{2}/.test(rest) || /\[[0-9A-Fa-f:.]+\]/.test(rest)) return true;
+  return rest.split(/[\s"'`,;()[\]{}<>=&|\\\/:]+/)
+    .some(piece => HOST_PIECE.test(piece) && !isWholeBoundCredential(piece, issuer));
 }
 
 // curl options the shell grammar admits. Nothing here can change WHERE the
@@ -5217,14 +5265,15 @@ const CURL_SHORT_VALUE: Readonly<Record<string, string>> = {
 
 /**
  * A curl option value is proof only when it is fully on the surface. `--output`
- * names a LOCAL path. Any `@file` / `@-` value (a body, a header list read
- * from a file or stdin) is opaque — it could carry a recipient or a header the
- * guard never sees — so it refuses, as does `-T` (not admitted at all).
+ * names a LOCAL path. ANY `@` in a value refuses categorically: a leading
+ * `@file` / `@-`, `-F name=@file` / `name=@-`, `--data-urlencode name@file` —
+ * each is a body or header list read from a file or stdin the guard never
+ * sees. `-T` is not admitted at all.
  */
 function curlOptionValueProven(flag: string, value: string, issuer: IssuerId): boolean {
+  if (value.includes('@') || value.includes('<')) return false;
   if (flag === '--url') return isWholeIssuerUrl(value, issuer);
   if (flag === '--output') return true;
-  if (value.startsWith('@')) return false;
   return !hasForeignDestinationSyntax(value, issuer);
 }
 
@@ -5260,24 +5309,70 @@ function curlStageProven(tokens: readonly string[], issuer: IssuerId): boolean {
 
 /** Network-less filters a curl stage's OUTPUT may be piped through. */
 const SHELL_DOOR_FILTERS: ReadonlySet<string> = new Set(['jq', 'grep', 'head', 'tail', 'wc']);
-const PYTHON_DOOR_INTERPRETERS: ReadonlySet<string> = new Set(['python', 'python3']);
+
+// Characters an UNQUOTED door word may contain. None of them expands, globs,
+// brace-expands, comments, redirects or substitutes, so an unquoted word is
+// exactly one argv entry with exactly this text.
+const DOOR_BARE_CHAR = /[A-Za-z0-9_./:=,%+-]/;
 
 /**
- * The shell half of the proof. 'curl' when every stage is a proven curl stage
- * or a filter (and at least one curl stage exists); 'python' when the whole
- * command is exactly `python3 <script>`; null otherwise. Refused outright:
- * any expansion or substitution (`$`, backticks), redirection / heredoc /
- * process substitution (`<`, `>`), a backslash, proxy vocabulary, an env
- * assignment, or any other command word — including a path to `curl`.
+ * The exact argv of each pipeline stage, as bash would build it — or null when
+ * that cannot be pinned. A word is EITHER bare (only `DOOR_BARE_CHAR`) OR one
+ * whole quoted span (kept even when empty: `-H ""` is an argument); a quote
+ * glued to other text, an unterminated quote, `$`/backtick/`\\`/`!` inside
+ * double quotes, and any other unquoted character (`{ } * ? [ ] ~ # ( )`, …)
+ * refuse. Stages split on unquoted `;`, `|`, `&` and newlines.
+ */
+function doorArgvStages(cmd: string): string[][] | null {
+  const stages: string[][] = [];
+  let argv: string[] = [];
+  let cur: string | null = null;
+  const endWord = (): void => { if (cur !== null) argv.push(cur); cur = null; };
+  const endStage = (): void => { endWord(); if (argv.length > 0) stages.push(argv); argv = []; };
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (c === ' ' || c === '\t') { endWord(); continue; }
+    if (c === '\n' || c === '\r' || c === ';' || c === '|' || c === '&') { endStage(); continue; }
+    if (c === '"' || c === "'") {
+      if (cur !== null) return null;                           // quote glued to a bare prefix
+      const close = cmd.indexOf(c, i + 1);
+      if (close < 0) return null;
+      const body = cmd.slice(i + 1, close);
+      if (c === '"' && /[$`\\!]/.test(body)) return null;
+      const next = cmd[close + 1];
+      if (next !== undefined && !/[ \t\n\r;|&]/.test(next)) return null;   // glued suffix
+      cur = body;
+      i = close;
+      continue;
+    }
+    if (!DOOR_BARE_CHAR.test(c)) return null;
+    cur = (cur ?? '') + c;
+  }
+  endStage();
+  return stages;
+}
+
+/**
+ * The shell half of the proof, over the exact argv `doorArgvStages` pins.
+ * 'curl' when every stage is a proven curl stage or a filter (and at least one
+ * curl stage exists); 'python' when the whole command is exactly
+ * `python3 -I <script>` (isolated: the script's directory, the working
+ * directory and PYTHON* variables cannot shadow `requests`); null otherwise.
+ * Refused outright: any expansion or substitution (`$`, backticks), glob or
+ * brace word, redirection / heredoc / process substitution (`<`, `>`), a
+ * backslash, proxy vocabulary, an env assignment, or any other command word —
+ * including a path to `curl`. Every argv word must also carry only whole
+ * credentials naming `issuer`.
  */
 function shellDestinationsProven(command: string, rawCommand: string, issuer: IssuerId): 'curl' | 'python' | null {
   if (rawCommand !== command) return null;                     // IFS obfuscation
   const cmd = command.replace(/\\\r?\n/g, ' ');                // line continuations
   if (/[$`<>\\]/.test(cmd) || /proxy|socks/i.test(cmd)) return null;
   if (issuerUrlSpans(cmd, issuer) === null) return null;
-  const stages = quoteAwareStatementSpans(cmd).map(s => tokeniseStatement(s.text)).filter(t => t.length > 0);
-  if (stages.length === 0) return null;
-  if (stages.length === 1 && stages[0]!.length === 2 && PYTHON_DOOR_INTERPRETERS.has(stages[0]![0]!)) return 'python';
+  const stages = doorArgvStages(cmd);
+  if (stages === null || stages.length === 0) return null;
+  if (stages.some(argv => argv.some(word => !everyCredentialNames(word, issuer)))) return null;
+  if (stages.length === 1 && stages[0]!.length === 3 && stages[0]![0] === 'python3' && stages[0]![1] === '-I') return 'python';
   let curl = 0;
   for (const tokens of stages) {
     const verb = tokens[0]!;
@@ -5300,7 +5395,8 @@ type PyTok = { k: 'name' | 'str' | 'num' | 'op' | 'nl'; v: string };
  * Tokenise the tiny Python subset the folded-client grammar admits. Returns
  * null on anything outside it: a comment, a backslash (line continuation or an
  * escape that could spell a host), a string prefix (`f""`, `b""`, `r""`), an
- * unterminated string, or any operator other than `( ) [ ] { } , : + = .`.
+ * unterminated string, or any operator other than `( ) [ ] { } , : = .` — no
+ * `+`, so no value is ever computed from pieces.
  */
 function tokenisePythonSubset(src: string): PyTok[] | null {
   const out: PyTok[] = [];
@@ -5336,7 +5432,7 @@ function tokenisePythonSubset(src: string): PyTok[] | null {
     if (nu) { out.push({ k: 'num', v: nu[0] }); i = num.lastIndex; continue; }
     if ('([{'.includes(c)) depth++;
     else if (')]}'.includes(c)) { if (--depth < 0) return null; }
-    else if (!',:+=.'.includes(c)) return null;
+    else if (!',:=.'.includes(c)) return null;
     out.push({ k: 'op', v: c });
     i++;
   }
@@ -5346,14 +5442,18 @@ function tokenisePythonSubset(src: string): PyTok[] | null {
 }
 
 const REQUESTS_POST_KWARGS: ReadonlySet<string> = new Set(['headers', 'data', 'json', 'params', 'timeout']);
+// `requests` follows redirects by default (a 307/308 re-sends the body to
+// wherever the issuer points), so every admitted POST must say
+// `allow_redirects=False` — spelled exactly that way, never computed.
+const REQUESTS_NO_REDIRECT_KW = 'allow_redirects';
 const MAX_PY_EXPR_DEPTH = 32;
 
 /**
- * `expr := term ('+' term)*`; `term := str | num | bound NAME | True | False |
- * None | {expr: expr, …} | [expr, …]`. No call, attribute, subscript,
- * comprehension, lambda or star — so a value can only be data, never code that
- * picks a destination or carries the credential somewhere else. Returns the
- * index after the expression, or -1.
+ * `expr := str | num | bound NAME | True | False | None | {expr: expr, …} |
+ * [expr, …]`. No `+`, call, attribute, subscript, comprehension, lambda or
+ * star — so every string value is exactly ONE literal (directly, or through a
+ * name bound to one), and judging each literal judges the value transmitted.
+ * Returns the index after the expression, or -1.
  */
 function parsePyExpr(t: readonly PyTok[], i: number, bound: ReadonlySet<string>, depth: number): number {
   if (depth > MAX_PY_EXPR_DEPTH) return -1;
@@ -5379,16 +5479,15 @@ function parsePyExpr(t: readonly PyTok[], i: number, bound: ReadonlySet<string>,
     }
     return t[k] ? k + 1 : -1;
   };
-  let j = term(i);
-  while (j >= 0 && isOp(j, '+')) j = term(j + 1);
-  return j;
+  return term(i);
 }
 
 /**
- * `requests.post("<issuer URL>"[, kw=expr]*)` filling the WHOLE statement
- * `s`. The destination is the literal first argument and nothing else; every
- * keyword is from a closed data-only set (no `proxies`, `hooks`, `auth`,
- * `verify`, `allow_redirects`, `**kwargs`), each at most once.
+ * `requests.post("<issuer URL>"[, kw=expr]*, allow_redirects=False)` filling
+ * the WHOLE statement `s`. The destination is the literal first argument and
+ * nothing else; redirects are explicitly refused; every other keyword is from
+ * a closed data-only set (no `proxies`, `hooks`, `auth`, `verify`,
+ * `**kwargs`), each at most once.
  */
 function pyRequestsPostProven(s: readonly PyTok[], bound: ReadonlySet<string>, issuer: IssuerId): boolean {
   const head = ['requests', '.', 'post', '('];
@@ -5404,13 +5503,19 @@ function pyRequestsPostProven(s: readonly PyTok[], bound: ReadonlySet<string>, i
     j++;
     if (j === s.length - 1) break;                              // trailing comma
     const kw = s[j]!;
-    if (kw.k !== 'name' || !REQUESTS_POST_KWARGS.has(kw.v) || seen.has(kw.v)) return false;
-    seen.add(kw.v);
+    if (kw.k !== 'name' || seen.has(kw.v)) return false;
     if (!(s[j + 1]?.k === 'op' && s[j + 1]!.v === '=')) return false;
+    seen.add(kw.v);
+    if (kw.v === REQUESTS_NO_REDIRECT_KW) {
+      if (!(s[j + 2]?.k === 'name' && s[j + 2]!.v === 'False')) return false;
+      j += 3;
+      continue;
+    }
+    if (!REQUESTS_POST_KWARGS.has(kw.v)) return false;
     j = parsePyExpr(s, j + 2, bound, 0);
     if (j < 0) return false;
   }
-  return j === s.length - 1;
+  return j === s.length - 1 && seen.has(REQUESTS_NO_REDIRECT_KW);
 }
 
 /**
@@ -5428,7 +5533,7 @@ function foldedClientProven(fold: ScriptFold, issuer: IssuerId): boolean {
     if (r.lang !== 'python' || !r.folded) return false;
     const toks = tokenisePythonSubset(fold.content.slice(r.start, r.end));
     if (!toks) return false;
-    if (toks.some(t => t.k === 'str' && hasForeignDestinationSyntax(t.v, issuer))) return false;
+    if (toks.some(t => t.k === 'str' && (hasForeignDestinationSyntax(t.v, issuer) || !everyCredentialNames(t.v, issuer)))) return false;
     const bound = new Set<string>();
     let stmt: PyTok[] = [];
     for (const tok of toks) {
