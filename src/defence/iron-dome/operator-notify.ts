@@ -484,6 +484,10 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
 const SAFE_ACTION_GUARD_OUTCOMES = new Set([
   'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',
   'readiness_demoted', 'readiness_promoted', 'readiness_started',
+  // #853 Plane A: a DNP whose single retry card was handed off (or deduped
+  // onto a live one), and the three ways such a card ends without a run.
+  'held_for_retry', 'retry_card_expired', 'retry_card_failed', 'retry_denied',
+  'retry_grant_failed',
 ]);
 const SAFE_ACTION_GUARD_SEVERITIES = new Set(['critical', 'dangerous', 'high', 'medium', 'low', 'benign', 'unknown']);
 
@@ -532,6 +536,21 @@ function safeActionGuardReason(event: ActionGuardOutcomeEvent, outcome: string):
   }
   if (outcome === 'denied_no_prompt_surface') {
     return 'Action Guard required approval but this session has no prompt surface; the tool call was denied.';
+  }
+  if (outcome === 'held_for_retry') {
+    return 'Action Guard required approval but this session has no prompt surface; the tool call did NOT run and is held for one operator decision. Approve allows ONE retry of the same call; the tap itself runs nothing.';
+  }
+  if (outcome === 'retry_card_expired') {
+    return 'The held retry card expired unanswered. Nothing ran.';
+  }
+  if (outcome === 'retry_denied') {
+    return 'The operator denied the held retry card. Nothing ran.';
+  }
+  if (outcome === 'retry_grant_failed') {
+    return 'The operator allowed the held retry card, but the grant could not be recorded, so no retry is allowed. Nothing ran; authorise from a terminal with shieldcortex approve --denial <actionId> if wanted.';
+  }
+  if (outcome === 'retry_card_failed') {
+    return 'The held retry card could not be delivered or answered. Nothing ran; authorise from a terminal with shieldcortex approve --denial <actionId> if wanted.';
   }
   if (outcome === 'failure_denied') {
     return 'Action Guard was unavailable and fallback policy denied the tool call; inspect local audit for details.';
@@ -675,9 +694,12 @@ export function formatActionGuardOutcomeNotification(n: ActionGuardOutcomeNotifi
   }
   const denied = n.event === 'action_guard_denial';
   const headless = n.outcome === 'denied_no_prompt_surface';
+  const held = n.outcome === 'held_for_retry';
   const lines = [
     denied
-      ? headless
+      ? held
+        ? '🛡️ ShieldCortex — HELD (headless session): did NOT run; one retry card is pending your answer'
+        : headless
         ? '🛡️ ShieldCortex — DENIED (headless session): nothing is waiting for approval'
         : '🛡️ ShieldCortex — Action Guard BLOCKED a tool call'
       : '🛡️ ShieldCortex — Action Guard warning: advisory-mode tool call ran',
@@ -699,7 +721,9 @@ export function formatActionGuardOutcomeNotification(n: ActionGuardOutcomeNotifi
   lines.push(`At:        ${n.detectedAt}`);
   lines.push('');
   lines.push(
-    denied
+    held
+      ? 'The call was already refused. A separate card allows ONE retry of the same call if approved; the tap runs nothing, and Deny or no answer means nothing runs.'
+      : denied
       ? 'The call was already refused. No approval is pending; inspect the local audit row/session before authorising any retry.'
       : 'The call was allowed only because actionGuard.enforce=false. Treat this as a degraded-protection signal, not a clean pass.',
   );

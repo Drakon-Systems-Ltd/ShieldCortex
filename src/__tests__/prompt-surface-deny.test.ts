@@ -67,6 +67,12 @@ function decisionOf(stdout: string): { permissionDecision?: string; permissionDe
   return parsed.hookSpecificOutput;
 }
 
+/** #853 — a headless reason carries the denial's own (random) actionId, so a
+ *  "changes nothing" comparison across two runs ignores exactly that token. */
+function withoutActionId(d: ReturnType<typeof decisionOf>): ReturnType<typeof decisionOf> {
+  return { ...d, permissionDecisionReason: d.permissionDecisionReason?.replace(/act-[0-9a-f]{16}/g, 'act-<id>') };
+}
+
 describe('Action Guard hook — prompt-surface rule', () => {
   const originalHome = process.env.HOME;
   const originalConfigDir = process.env.SHIELDCORTEX_CONFIG_DIR;
@@ -446,7 +452,7 @@ describe('Action Guard hook — prompt-surface rule', () => {
         writeNotifyConfig();
         const after = decisionOf((await runHook(call(DANGEROUS_COMMAND, permissionMode))).stdout);
         expect(after.permissionDecision).toBe(expectedDecision);
-        expect(after).toEqual(before);
+        expect(withoutActionId(after)).toEqual(withoutActionId(before));
       });
 
       it('a receiver that never responds is cut off at the deadline and changes nothing', async () => {
@@ -455,7 +461,7 @@ describe('Action Guard hook — prompt-surface rule', () => {
         writeNotifyConfig();
         const started = Date.now();
         const after = decisionOf((await runHook(call(DANGEROUS_COMMAND, permissionMode))).stdout);
-        expect(after).toEqual(before);
+        expect(withoutActionId(after)).toEqual(withoutActionId(before));
         // Bounded by notify.timeoutMs (600ms) plus process start-up — nowhere
         // near an unbounded wait on a dead receiver.
         expect(Date.now() - started).toBeLessThan(15_000);
@@ -469,7 +475,7 @@ describe('Action Guard hook — prompt-surface rule', () => {
           notify: { enabled: true, webhookUrl: 'http://127.0.0.1:1/hook', timeoutMs: 600 },
         });
         const after = decisionOf((await runHook(call(DANGEROUS_COMMAND, permissionMode))).stdout);
-        expect(after).toEqual(before);
+        expect(withoutActionId(after)).toEqual(withoutActionId(before));
       });
     });
 

@@ -171,6 +171,12 @@ import {
   type CronDenialReport,
 } from './cron-denial-audit.js';
 import {
+  formatApprovedNotRunNotice,
+  heldFollowUpLine,
+  listApprovedNotRun,
+  listHeldFollowUps,
+} from '../defence/iron-dome/retry-control.js';
+import {
   evaluateRecallRepetition,
   REPEAT_MIN_SET_SIZE,
   REPEAT_SAMPLE_RUNS,
@@ -5202,6 +5208,51 @@ export async function checkCronDenials(deps: CronDenialCheckDeps = {}): Promise<
   };
 }
 
+// ── Check 8a-ter: held approvals, approved but not run (#853) ─
+/**
+ * Plane A (the Claude Code hook) cannot pause a call: an operator Approve on a
+ * held card only lets ONE retry of the same call through, in the same cwd,
+ * within the grant TTL. Every observed held row came from a one-shot
+ * `--print` worker, which exits on the deny — so an Approve with no re-run is
+ * a yes that nothing acted on. This check says so, and lists the "nothing
+ * ran" follow-ups that are still waiting for a send path.
+ *
+ * Read-only: listing a grant never spends, extends or re-scopes it. Silent
+ * (no row) when there is nothing to report, so a box with cards off is
+ * unchanged.
+ */
+export const HELD_APPROVALS_LABEL = 'Held approvals';
+
+export async function checkHeldApprovals(deps: { home?: string; now?: number } = {}): Promise<CheckResult[]> {
+  const label = HELD_APPROVALS_LABEL;
+  const opts = { ...(deps.home ? { home: deps.home } : {}), ...(typeof deps.now === 'number' ? { now: deps.now } : {}) };
+  const rows: CheckResult[] = [];
+  try {
+    const pending = listApprovedNotRun(opts);
+    if (pending.length > 0) {
+      rows.push({
+        label,
+        status: 'warn',
+        message: formatApprovedNotRunNotice(pending, deps.now).split('\n').map((l) => l.trim()).join(' · '),
+        fix: 'Re-run the job that ended with `HELD <actionId>` (the same call, in the same directory) before the grant expires, or let it lapse. Nothing runs on its own.',
+      });
+    }
+    const queued = listHeldFollowUps(opts);
+    if (queued.length > 0) {
+      rows.push({
+        label,
+        status: 'warn',
+        message: `${queued.length} "nothing ran" notice(s) not yet delivered: ${queued.slice(-5).map((f) => heldFollowUpLine(f).replace(/^ShieldCortex: /, '')).join(' · ')}`,
+        fix: 'They ride the next headless-denial notify. Set `actionGuard.notify.webhookUrl` to receive them as they happen.',
+      });
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    rows.push({ label, status: 'warn', message: `could not read the retry store — ${msg}` });
+  }
+  return rows;
+}
+
 // ── Check 8b: Claude Code enforcement floor ───────────────
 /**
  * The Action Guard's Claude Code surface is only as strong as the harness that
@@ -9186,6 +9237,7 @@ export async function runDoctor(
     checkActionGuardReadiness,
     checkIronDomeProfile,
     checkCronDenials,
+    checkHeldApprovals,
     checkThreatGraph,
     checkAttestationCoverage,
     checkChainedLedger,

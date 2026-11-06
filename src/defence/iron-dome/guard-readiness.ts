@@ -751,6 +751,8 @@ const STOP_OUTCOMES = new Set([
   'would_block',
   'asked',
   'denied_no_prompt_surface',
+  // #853: a headless denial whose retry card was handed off. Still refused.
+  'held_for_retry',
   'warned',
   'auto_denied',
 ]);

@@ -300,8 +300,10 @@ export function formatDnpDigestText(
   lines.push('');
   if (opts.retryCardRaised === true) {
     lines.push(
-      'Retry:   A separate Approve once / Deny card was raised on OpenClaw.',
-      '         Tap Approve once for a single scoped retry, or Deny to silence.',
+      // #853 fold 3 — the tap runs nothing on this plane; say so.
+      'Retry:   A separate allow-one-retry / Deny card was raised on OpenClaw.',
+      '         Approve allows ONE retry of the same call; the tap itself runs nothing.',
+      '         Deny, or no answer, means nothing runs.',
     );
   } else if (opts.retryCardReason) {
     lines.push(

@@ -643,10 +643,10 @@ describe('#310 retry control — the one lock plane', () => {
       ttlMs: 600_000,
     });
     expect(fields.title.length).toBeLessThanOrEqual(80);
-    expect(fields.title).toBe('Approve once? Bash · privilege-escalation');
+    expect(fields.title).toBe('Allow one retry? Bash · privilege-escalation');
     expect(fields.description.length).toBeLessThanOrEqual(256);
     // The trust copy is intact and FIRST.
-    expect(fields.description.startsWith('held headless — Approve = ONE retry (10m, jobs/nightly-backup)')).toBe(true);
+    expect(fields.description.startsWith('held headless — Approve allows ONE retry (10m, jobs/nightly-backup)')).toBe(true);
     expect(fields.surfaceTruncated).toBe(true);
     expect(fields.description.endsWith('…')).toBe(true);
   });

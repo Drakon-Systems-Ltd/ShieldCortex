@@ -18,6 +18,8 @@ import { join } from 'node:path';
 export const GUARD_DEGRADED_OUTCOMES = new Set([
   'auto_denied',
   'denied_no_prompt_surface',
+  // #853: refused now, one retry card pending — still a stop.
+  'held_for_retry',
   'failure_denied',
   'failure_allowed',
   'warned',

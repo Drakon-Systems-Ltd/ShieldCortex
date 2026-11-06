@@ -181,6 +181,16 @@ describe('#509 operational intervention rate (readiness proxy)', () => {
     expect(r.intervention.total).toBe(1030);
     expect(r.intervention.stops).toBe(19);
   });
+
+  it('#853 a held_for_retry denial is a stop, exactly like denied_no_prompt_surface', () => {
+    const rows = calls(1000, 0);
+    for (let i = 0; i < 5; i += 1) rows.push(call(NOW - DAY + i, 'held_for_retry'));
+    for (let i = 0; i < 5; i += 1) rows.push(call(NOW - DAY + 100 + i, 'denied_no_prompt_surface'));
+    write(rows);
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
+    expect(r.intervention.total).toBe(1010);
+    expect(r.intervention.stops).toBe(10);
+  });
 });
 
 describe('#509 approval reachability (readiness proxy)', () => {

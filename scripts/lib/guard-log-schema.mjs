@@ -58,7 +58,9 @@ const SIGNAL_SET = new Set(GUARD_SIGNAL_VOCABULARY);
 
 /** Record contracts. A row is a DENIAL only if BOTH its event and outcome say so. */
 export const EVENT_ENUM = Object.freeze(['action_guard_denial', 'action_guard_warning']);
-export const DENIAL_OUTCOMES = Object.freeze(['auto_denied', 'denied_no_prompt_surface', 'failure_denied']);
+// #853: `held_for_retry` is a headless denial whose one retry card was handed
+// off — the call was refused exactly like `denied_no_prompt_surface`.
+export const DENIAL_OUTCOMES = Object.freeze(['auto_denied', 'denied_no_prompt_surface', 'held_for_retry', 'failure_denied']);
 export const WARNING_OUTCOMES = Object.freeze(['warned', 'failure_allowed']);
 export const RETRY_OUTCOMES = Object.freeze(['retry_granted', 'retry_denied', 'retry_grant_failed']);
 export const OUTCOME_ENUM = Object.freeze([...DENIAL_OUTCOMES, ...WARNING_OUTCOMES, ...RETRY_OUTCOMES]);

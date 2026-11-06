@@ -28,6 +28,16 @@
  * unparseable response, or an unknown decision string ('allow-always' was
  * never offered) all end this process without touching the store.
  *
+ * #853 — "without touching the store" is not "without telling anyone". Every
+ * way a card ends WITHOUT an Approve (expired unanswered, denied, transport
+ * failed after `requesting`, an unreadable answer, an Approve
+ * the store refused) writes one `retry_card_expired` / `retry_denied` /
+ * `retry_card_failed` / `retry_grant_failed` row, retires this waiter's own
+ * claim (nobody can answer the card any more), and sends one no-button
+ * "nothing ran" follow-up (held-follow-up.ts). A failure before
+ * `requesting` sends nothing: no card was shown, and the hook — which polls
+ * the receipt — reports that denial as card-less instead.
+ *
  * `createOpenClawApprovalChannel` is deliberately NOT reused either: its
  * `send()` refuses `denied_no_prompt_surface` by design ("interactive-only —
  * this guard outcome has no decision left to offer"), which was true before
@@ -63,8 +73,15 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import {
+  HELD_FOLLOW_UP_OUTCOMES,
+  appendRetryOutcomeRow,
+  deliverHeldFollowUp,
+  type HeldFollowUpStatus,
+} from './held-follow-up.js';
+import {
   DEFAULT_RETRY_GRANT_TTL_MS,
   RETRY_CARD_LIFETIME_MS,
+  closeCardClaim,
   grantRetry,
   recordDenySuppression,
 } from './retry-control.js';
@@ -78,6 +95,8 @@ export interface RetryWaiterArgs {
   fingerprint: string;
   /** Alias for the operator copy — never used to authenticate anything. */
   actionId?: string;
+  /** The hook's safe tool label, for the follow-up copy only. */
+  tool?: string;
   openclawBin: string;
   receiptPath: string;
   /** Exactly one of these two is set by `parseRetryWaiterArgs`. */
@@ -89,7 +108,9 @@ export interface RetryWaiterArgs {
 
 export type RetryWaiterReceipt =
   | { phase: 'requesting' }
-  | { phase: 'failed'; reason: string }
+  /** `requested` — the failure came AFTER `requesting`, so a card may have
+   *  been shown: the hook must not re-label this denial as card-less. */
+  | { phase: 'failed'; reason: string; requested?: boolean }
   | { phase: 'granted'; actionId?: string }
   | { phase: 'grant_failed'; reason: string; actionId?: string }
   | { phase: 'denied'; untilMs: number; actionId?: string };
@@ -128,10 +149,12 @@ export function parseRetryWaiterArgs(argv: string[]): RetryWaiterArgs | null {
   if (!nonce && !hasFd) return null;
 
   const actionId = get('--action-id');
+  const tool = get('--tool');
   return {
     paramsB64,
     fingerprint: fingerprint.toLowerCase(),
     ...(actionId && /^act-[a-f0-9]{16}$/.test(actionId) ? { actionId } : {}),
+    ...(tool && /^[A-Za-z0-9_.:-]{1,64}$/.test(tool) ? { tool } : {}),
     openclawBin,
     receiptPath,
     ...(nonce ? { nonce } : {}),
@@ -177,37 +200,9 @@ function clearReceipt(path: string): void {
   try { rmSync(path, { force: true }); } catch { /* best-effort */ }
 }
 
-/**
- * The operator-visible half of the ack. `denials.jsonl` is the file operators
- * already open after a headless denial, so a retry outcome belongs on the same
- * line-oriented record — no new sink, no new route, nothing to configure.
- * Never carries the nonce, the hash, or the command.
- */
-export function appendRetryOutcomeRow(
-  row: Record<string, unknown>,
-  opts: { home?: string } = {},
-): boolean {
-  const file = join(opts.home ?? homedir(), '.shieldcortex', 'denials.jsonl');
-  let fd: number | undefined;
-  try {
-    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-    fd = openSync(
-      file,
-      constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | constants.O_NOFOLLOW,
-      0o600,
-    );
-    const st = fstatSync(fd);
-    if (!st.isFile() || st.nlink > 1) return false;
-    writeFileSync(fd, `${JSON.stringify({ ...row, detectedAt: new Date().toISOString() })}\n`);
-    return true;
-  } catch {
-    return false;
-  } finally {
-    if (fd !== undefined) {
-      try { closeSync(fd); } catch { /* ignore */ }
-    }
-  }
-}
+// The denials.jsonl row writer lives with the #853 follow-up code (one
+// writer, no import cycle); re-exported here for its existing callers.
+export { appendRetryOutcomeRow } from './held-follow-up.js';
 
 export interface RetryWaiterDeps {
   execFileImpl?: typeof execFile;
@@ -215,6 +210,10 @@ export interface RetryWaiterDeps {
   suppressImpl?: typeof recordDenySuppression;
   appendOutcomeImpl?: typeof appendRetryOutcomeRow;
   readNonceImpl?: (fd: number) => string | null;
+  /** #853 — the "nothing ran" follow-up sender. */
+  followUpImpl?: typeof deliverHeldFollowUp;
+  /** #853 — retires this waiter's own claim once its card is over. */
+  closeClaimImpl?: typeof closeCardClaim;
   waitTimeoutMs?: number;
   home?: string;
   now?: number;
@@ -234,6 +233,52 @@ export async function runRetryWaiter(
   const appendOutcome = deps.appendOutcomeImpl ?? appendRetryOutcomeRow;
   const readNonce = deps.readNonceImpl ?? readNonceFromFd;
   const waitTimeoutMs = deps.waitTimeoutMs ?? RETRY_WAIT_DECISION_TIMEOUT_MS;
+  const followUp = deps.followUpImpl ?? deliverHeldFollowUp;
+  const closeClaim = deps.closeClaimImpl ?? closeCardClaim;
+  const tool = args.tool ?? 'tool';
+  const ref = { id: args.fingerprint, ...(args.actionId ? { actionId: args.actionId } : {}) };
+  // Set once the claim nonce is read; `reportNothingRan` only runs after that.
+  let nonce: string | null = null;
+
+  /** #853 — one terminal row + one no-button follow-up for a card that ended
+   *  without a grant, after retiring this waiter's own (unanswered) claim.
+   *  Never throws; never touches a grant, a suppression or the budget. */
+  const reportNothingRan = async (
+    kind: 'expired' | 'denied' | 'failed' | 'grant_failed',
+    reason: string,
+    extra: Record<string, unknown> = {},
+  ): Promise<HeldFollowUpStatus> => {
+    // No waiter will answer this card any more: retire its claim first, so a
+    // remint is not deduped onto it and `approve --denial` is not refused as
+    // `card-live`. Best effort; at worst it lapses at `expiresAt` as before.
+    if (nonce) {
+      try { closeClaim(ref, { nonce }, { home: deps.home, now: deps.now }); } catch { /* lapses at expiresAt */ }
+    }
+    let status: HeldFollowUpStatus = 'dropped';
+    try {
+      status = await followUp(
+        { kind, tool, at: deps.now ?? Date.now(), ...(args.actionId ? { actionId: args.actionId } : {}) },
+        { home: deps.home },
+      );
+    } catch {
+      status = 'dropped';
+    }
+    appendOutcome(
+      {
+        event: 'action_guard_denial',
+        outcome: HELD_FOLLOW_UP_OUTCOMES[kind],
+        origin: 'claude-code-hook',
+        tool,
+        reason,
+        ...(kind === 'failed' || kind === 'grant_failed' ? { nextStep: `shieldcortex approve --denial ${args.actionId ?? '<actionId>'}` } : {}),
+        ...extra,
+        followUp: status,
+        ...(args.actionId ? { actionId: args.actionId } : {}),
+      },
+      { home: deps.home },
+    );
+    return status;
+  };
 
   let paramsJson: string;
   try {
@@ -246,7 +291,7 @@ export async function runRetryWaiter(
 
   // Read the nonce BEFORE dialling: a card we could never honour must not be
   // shown to a human at all.
-  const nonce = args.nonce ?? (typeof args.nonceFd === 'number' ? readNonce(args.nonceFd) : null);
+  nonce = args.nonce ?? (typeof args.nonceFd === 'number' ? readNonce(args.nonceFd) : null);
   if (!nonce) {
     writeReceipt(args.receiptPath, { phase: 'failed', reason: 'no claim nonce' });
     return { acted: 'nothing', reason: 'no claim nonce' };
@@ -274,7 +319,8 @@ export async function runRetryWaiter(
     const reason = `request failed: ${err instanceof Error ? err.message : String(err)}`;
     // Deliberately NOT cleared: the launcher's poll window is short, and a
     // fast failure must still be readable when it looks.
-    writeReceipt(args.receiptPath, { phase: 'failed', reason });
+    writeReceipt(args.receiptPath, { phase: 'failed', reason, requested: true });
+    await reportNothingRan('failed', 'the held retry card could not be delivered or answered (gateway call failed); nothing ran');
     return { acted: 'nothing', reason };
   }
 
@@ -283,10 +329,9 @@ export async function runRetryWaiter(
     decision = (JSON.parse(stdout) as { decision?: unknown })?.decision;
   } catch {
     clearReceipt(args.receiptPath);
+    await reportNothingRan('failed', 'the held retry card returned an unreadable answer; nothing ran');
     return { acted: 'nothing', reason: 'unparseable decision response' };
   }
-
-  const ref = { id: args.fingerprint, ...(args.actionId ? { actionId: args.actionId } : {}) };
 
   if (decision === 'allow-once') {
     const outcome = grantImpl(ref, { nonce }, { home: deps.home, now: deps.now, ttlMs: args.ttlMs });
@@ -298,16 +343,11 @@ export async function runRetryWaiter(
         reason: outcome.reason,
         ...(args.actionId ? { actionId: args.actionId } : {}),
       });
-      appendOutcome(
-        {
-          event: 'action_guard_denial',
-          outcome: 'retry_grant_failed',
-          origin: 'claude-code-hook',
-          reason: `retry grant refused (${outcome.reason}) after an operator Approve — authorise from a terminal instead`,
-          nextStep: `shieldcortex approve --denial ${args.actionId ?? '<actionId>'}`,
-          ...(args.actionId ? { actionId: args.actionId } : {}),
-        },
-        { home: deps.home },
+      // #853 — and tell them, once, with no buttons: an Allow that produced no
+      // grant must not sit in their chat reading as a yes.
+      await reportNothingRan(
+        'grant_failed',
+        `retry grant refused (${outcome.reason}) after an operator Approve; nothing ran — authorise from a terminal instead`,
       );
       return { acted: 'nothing', reason: `grant_failed:${outcome.reason}` };
     }
@@ -322,7 +362,9 @@ export async function runRetryWaiter(
         outcome: 'retry_granted',
         origin: 'claude-code-hook',
         tool: outcome.grant.origin.tool,
-        reason: `operator authorised ONE retry (${Math.max(1, Math.round(outcome.grant.ttlMs / 60_000))}m, scoped)`,
+        // #853 — approved is not run: nothing has run until the SAME call runs
+        // again (a one-shot worker must be re-launched).
+        reason: `operator authorised ONE retry (${Math.max(1, Math.round(outcome.grant.ttlMs / 60_000))}m, scoped); approved, not run: nothing runs until the same call is retried`,
         ...(args.actionId ? { actionId: args.actionId } : {}),
       },
       { home: deps.home },
@@ -341,7 +383,11 @@ export async function runRetryWaiter(
       writeReceipt(args.receiptPath, {
         phase: 'failed',
         reason: `suppression failed: ${outcome.reason}`,
+        requested: true,
       });
+      // The operator said no and nothing ran; only the silence could not be
+      // recorded. Report the Deny honestly rather than as a transport failure.
+      await reportNothingRan('denied', `operator denied the retry; nothing ran (silence could not be recorded: ${outcome.reason})`);
       return { acted: 'nothing', reason: `suppress_failed:${outcome.reason}` };
     }
     writeReceipt(args.receiptPath, {
@@ -349,20 +395,20 @@ export async function runRetryWaiter(
       untilMs: outcome.untilMs,
       ...(args.actionId ? { actionId: args.actionId } : {}),
     });
-    appendOutcome(
-      {
-        event: 'action_guard_denial',
-        outcome: 'retry_denied',
-        origin: 'claude-code-hook',
-        reason: `operator denied the retry; this action is silenced until ${new Date(outcome.untilMs).toISOString()}${outcome.revokedGrant ? ' (an unspent grant was revoked)' : ''}`,
-        ...(args.actionId ? { actionId: args.actionId } : {}),
-      },
-      { home: deps.home },
+    await reportNothingRan(
+      'denied',
+      `operator denied the retry; nothing ran; this action is silenced until ${new Date(outcome.untilMs).toISOString()}${outcome.revokedGrant ? ' (an unspent grant was revoked)' : ''}`,
     );
     return { acted: 'denied', untilMs: outcome.untilMs };
   }
 
   clearReceipt(args.receiptPath);
+  if (decision === null || decision === undefined || decision === 'timeout') {
+    await reportNothingRan('expired', 'the held retry card expired unanswered; nothing ran');
+  } else {
+    // Never guess what an unknown answer meant: nothing was granted.
+    await reportNothingRan('failed', 'the held retry card returned an unrecognised decision; nothing ran');
+  }
   return {
     acted: 'nothing',
     reason: `no actionable decision (${decision === null ? 'card expired unanswered' : String(decision)})`,

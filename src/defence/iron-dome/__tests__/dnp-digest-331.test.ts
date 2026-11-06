@@ -171,6 +171,9 @@ describe('formatDnpDigestText', () => {
       lastSessionIds: [],
       coalescedAfterNotify: false,
     }, { retryCardRaised: true, actionId: 'act-abcdef0123456789' });
-    expect(text).toMatch(/Approve once \/ Deny card was raised/i);
+    // #853 fold 3: the card allows one retry; the tap itself runs nothing.
+    expect(text).toMatch(/allow-one-retry \/ Deny card was raised/i);
+    expect(text).toContain('the tap itself runs nothing');
+    expect(text).not.toMatch(/\bRun it\b|will run|resum/i);
   });
 });

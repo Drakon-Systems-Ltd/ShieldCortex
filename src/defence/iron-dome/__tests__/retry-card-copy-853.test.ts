@@ -59,7 +59,7 @@ describe('#853 — held retry card copy', () => {
       expect(lines[1]).toMatch(/^Why: \S/);
       expect(lines[2]).toMatch(who);
       expect(lines[3]).toBe(heldCardOutcomeLine(600_000, '/srv/jobs/nightly'));
-      expect(fields.title).toBe('ShieldCortex held Bash — approve once? Card expires in 10m');
+      expect(fields.title).toBe('ShieldCortex held Bash — allow one retry? Card expires in 10m');
       expect(fields.surfaceTruncated).toBe(false);
       expect(fields.description.length).toBeLessThanOrEqual(256);
       expect(fields.title.length).toBeLessThanOrEqual(80);
@@ -72,7 +72,7 @@ describe('#853 — held retry card copy', () => {
 
   it('says what Approve buys and what Deny or silence means, in plain words', () => {
     const line = heldCardOutcomeLine(600_000, '/srv/jobs/nightly');
-    expect(line).toBe('Approve: runs ONCE if retried within 10m (jobs/nightly) · Deny or no reply: nothing runs');
+    expect(line).toBe('Allow: SAME call runs once if retried in 10m (jobs/nightly) · Deny or no reply: nothing runs');
   });
 
   it('cuts WHAT / WHY / WHO before the outcome line, however long they are', () => {
@@ -86,7 +86,7 @@ describe('#853 — held retry card copy', () => {
     expect(lines[0]).toMatch(/^What: delete x+…x+ archive\.tar$/);
     expect(lines[3]).toContain('Deny or no reply: nothing runs');
     expect(lines[3]).toContain('approve --denial <id> --ttl');
-    expect(lines[3].startsWith('Approve: runs ONCE if retried within 10m')).toBe(true);
+    expect(lines[3].startsWith('Allow: SAME call runs once if retried in 10m')).toBe(true);
     expect(lines[2]).toMatch(/^Who: agent x+…x+ sc-tail$/);
     expect(fields.surfaceTruncated).toBe(true);
   });
@@ -114,9 +114,45 @@ describe('#853 — held retry card copy', () => {
     const base = heldInput('sc-0123456789abcdef', 'claude-code');
     for (const card of [undefined, { action: '', reason: 'r', who: 'w' }, { action: 'a', reason: '  ', who: 'w' }]) {
       const fields = buildRetryCardFields({ ...base, card });
-      expect(fields.title).toBe('Approve once? Bash · dangerous-shell');
-      expect(fields.description.startsWith('held headless — Approve = ONE retry (10m, jobs/nightly)')).toBe(true);
+      expect(fields.title).toBe('Allow one retry? Bash · dangerous-shell');
+      expect(fields.description.startsWith('held headless — Approve allows ONE retry (10m, jobs/nightly)')).toBe(true);
     }
+  });
+
+  // CI red at 4f1995c: a GitHub runner's 20-char host name filled WHO's head,
+  // WHO was capped, and the plain middle cut landed on " · session".
+  it('keeps the session tag whole when a long host name and a long action force a WHO cut', () => {
+    const signals = ['dangerous-shell'];
+    const card = buildApprovalCard({
+      tool: 'Bash',
+      input: { command: `sudo modprobe softdog && ${'echo filler; '.repeat(30)}` },
+      signals,
+      plane: 'claude-code',
+      sessionId: 'sc-fb8709b40cbc10f6',
+      host: 'runnervm8k3b6abcdefg',
+      cwd: '/home/runner/work/ShieldCortex/ShieldCortex',
+    });
+    const fields = buildRetryCardFields({
+      card, tool: 'Bash', signals, redactedSurface: '', cwd: '/home/runner/work/ShieldCortex/ShieldCortex', ttlMs: 600_000,
+    });
+    const lines = fields.description.split('\n');
+    expect(lines[2]).toMatch(/^Who: Claude Code on .+ · session sc-fb8709b40cbc10f6$/);
+    expect(lines[3]).toBe(heldCardOutcomeLine(600_000, '/home/runner/work/ShieldCortex/ShieldCortex'));
+    expect(fields.description.length).toBeLessThanOrEqual(256);
+  });
+
+  it('never prints NaN minutes in the outcome line (N2)', () => {
+    for (const ttl of [Number.NaN, Number.POSITIVE_INFINITY * 0, undefined as unknown as number]) {
+      expect(heldCardOutcomeLine(ttl, '/srv/jobs/nightly')).toBe('Allow: SAME call runs once if retried in 1m (jobs/nightly) · Deny or no reply: nothing runs');
+      // The #310 fallback layout carries the same minutes; same guard.
+      const fields = buildRetryCardFields({ ...heldInput('sc-0123456789abcdef', 'claude-code'), card: undefined, ttlMs: ttl });
+      expect(fields.description.startsWith('held headless — Approve allows ONE retry (1m, jobs/nightly)')).toBe(true);
+    }
+  });
+
+  it('reports surfaceWithheld only when the target was actually withheld (N3)', () => {
+    expect(buildRetryCardFields(heldInput('sc-0123456789abcdef', 'claude-code')).surfaceWithheld).toBe(false);
+    expect(buildRetryCardFields(heldInput('sc-0123456789abcdef', 'claude-code', { signals: ['secret-egress'] })).surfaceWithheld).toBe(true);
   });
 
   it('still offers exactly allow-once and deny on the held layout', () => {

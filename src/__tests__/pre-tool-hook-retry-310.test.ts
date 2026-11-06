@@ -424,8 +424,8 @@ describe('#310 — retry control through the real Claude Code hook', () => {
       expect(lines[1]).toMatch(/^Why: \S/);
       expect(lines[2]).toMatch(/^Who: Claude Code on .+ · session sc-[0-9a-f]{16}$/);
       expect(lines[2]).not.toContain(sessionId);
-      expect(lines[3]).toMatch(/^Approve: runs ONCE if retried within 10m \(.+\) · Deny or no reply: nothing runs$/);
-      expect(String(params.title)).toBe('ShieldCortex held Bash — approve once? Card expires in 10m');
+      expect(lines[3]).toMatch(/^Allow: SAME call runs once if retried in 10m \(.+\) · Deny or no reply: nothing runs$/);
+      expect(String(params.title)).toBe('ShieldCortex held Bash — allow one retry? Card expires in 10m');
       expect(String(params.description).length).toBeLessThanOrEqual(256);
       expect(params.allowedDecisions).toEqual(['allow-once', 'deny']);
     });
@@ -438,7 +438,7 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     const actionId = String(denialRows()[0]?.actionId ?? '');
     expect(actionId).toMatch(/^act-[0-9a-f]{16}$/);
     const reason = String(denied.reason ?? '');
-    expect(reason).toContain(`This call did NOT run. No Approve card (no-openclaw-card-channel) for ${actionId}.`);
+    expect(reason).toContain(`This call did NOT run. No Approve card (no_channel) for ${actionId}.`);
     expect(reason).toContain(`shieldcortex approve --denial ${actionId}`);
     expect(reason).not.toContain('<actionId>');
     expect(reason).not.toMatch(/held for the operator|delivery is not confirmed/);
@@ -528,6 +528,250 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     const suppressed = store()!.rows.find((row) => row.suppression)!;
     expect(suppressed.grant).toBeUndefined();
     expect(suppressed.denyEpoch).toBeGreaterThan(0);
+  });
+
+  // ── #853 slice 2: outcome naming, dedupe, noCardReason, HELD line ──────
+  // Every case runs in bypassPermissions (the runHook default), the shape of
+  // all 34 clawdbot1 rows.
+
+  /** The resolved denial rows for one actionId (pending + final). */
+  function denialRowsFor(actionId: string): Array<Record<string, unknown>> {
+    return denialRows().filter((r) => r.actionId === actionId && (r.outcome === 'held_for_retry' || r.outcome === 'denied_no_prompt_surface'));
+  }
+
+  function auditDenialFor(actionId: string): Record<string, unknown> | undefined {
+    return auditRows().find((r) => r.actionId === actionId && r.action !== 'notify' && (r.outcome === 'held_for_retry' || r.outcome === 'denied_no_prompt_surface'));
+  }
+
+  function lastLine(text: string | undefined): string {
+    const lines = String(text ?? '').split('\n');
+    return lines[lines.length - 1];
+  }
+
+  /** The fake gateway answers only after `ms`, so the card stays live. */
+  function slowGateway(ms: number): void {
+    writeFileSync(openclawBin, `#!/bin/sh\nsleep ${ms / 1000}\ncat ${JSON.stringify(decisionFile)}\n`, { mode: 0o755 });
+  }
+
+  it('#853 a handed-off card names the denial held_for_retry, and the reason ENDS with HELD <actionId>', () => {
+    writeConfig(retryConfig({ openclaw: true }));
+    slowGateway(3_000);
+    const r = runHook(IRREVERSIBLE, { tool: 'Bash' });
+    expect(r.decision).toBe('deny');
+
+    const actionId = String(denialRows()[0]?.actionId ?? '');
+    expect(actionId).toMatch(/^act-[0-9a-f]{16}$/);
+    expect(lastLine(r.reason)).toBe(`HELD ${actionId}`);
+    expect(r.reason).toContain('did NOT run and is held for one operator decision');
+
+    const rows = denialRowsFor(actionId);
+    expect(rows.length).toBe(2);
+    for (const row of rows) {
+      expect(row.outcome).toBe('held_for_retry');
+      expect(row.noCardReason).toBeUndefined();
+      expect(row.cardDedupedTo).toBeUndefined();
+    }
+    const audit = auditDenialFor(actionId)!;
+    expect(audit.outcome).toBe('held_for_retry');
+    expect(audit.noCardReason).toBeUndefined();
+    expect(audit.permissionMode).toBe('bypassPermissions');
+    // No denied_no_prompt_surface row for this call anywhere.
+    expect(auditRows().some((row) => row.actionId === actionId && row.outcome === 'denied_no_prompt_surface')).toBe(false);
+    // The operator's alert is the held copy, not "nothing is waiting".
+    const body = JSON.stringify(evidence());
+    expect(body).toContain('held_for_retry');
+    expect(body).not.toContain('nothing is waiting for approval');
+  });
+
+  it('#853 Write is held the same way as Bash', () => {
+    writeConfig(retryConfig({ openclaw: true }));
+    slowGateway(3_000);
+    const r = runHook({ file_path: '/etc/sudoers.d/agent', content: 'agent ALL=(ALL) NOPASSWD: ALL\n' }, { tool: 'Write' });
+    expect(r.decision).toBe('deny');
+    const actionId = String(denialRows()[0]?.actionId ?? '');
+    expect(lastLine(r.reason)).toBe(`HELD ${actionId}`);
+    expect(auditDenialFor(actionId)?.outcome).toBe('held_for_retry');
+  });
+
+  it('#853 a second denial of the same identity rides the live card: held_for_retry + cardDedupedTo, one card', () => {
+    writeConfig(retryConfig({ openclaw: true }));
+    slowGateway(8_000);
+    const first = runHook(IRREVERSIBLE, { sessionId: 'worker-1' });
+    const firstId = String(denialRows()[0]?.actionId ?? '');
+    expect(lastLine(first.reason)).toBe(`HELD ${firstId}`);
+
+    const second = runHook(IRREVERSIBLE, { sessionId: 'worker-2' });
+    expect(second.decision).toBe('deny');
+    const secondId = String(denialRows().map((r) => r.actionId).find((id) => id !== firstId) ?? '');
+    expect(secondId).toMatch(/^act-[0-9a-f]{16}$/);
+
+    expect(store()!.budget!.cards).toBe(1);
+    for (const row of denialRowsFor(secondId)) {
+      expect(row.outcome).toBe('held_for_retry');
+      expect(row.cardDedupedTo).toBe(firstId);
+      expect(row.noCardReason).toBeUndefined();
+    }
+    expect(auditDenialFor(secondId)).toMatchObject({ outcome: 'held_for_retry', cardDedupedTo: firstId });
+    const reason = String(second.reason ?? '');
+    expect(reason).toContain(`Bash did NOT run (${secondId}); it is held for the operator on the card already pending for ${firstId} (no second card).`);
+    expect(reason).toContain('not confirmed');
+    expect(reason).not.toMatch(/\bdelivered\b|\bran\b/i);
+    // The launcher waits on the card the operator answers: the LIVE card's id,
+    // in both the last line and the one-shot handoff.
+    expect(lastLine(reason)).toBe(`HELD ${firstId}`);
+    expect(reason).toContain(`exactly: HELD ${firstId}`);
+    expect(reason).not.toContain(`HELD ${secondId}`);
+  });
+
+  it('#853 cards off (the default): the DNP rows are unchanged — no held name, no noCardReason, no HELD line', () => {
+    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl() } });
+    const r = runHook(IRREVERSIBLE);
+    expect(r.decision).toBe('deny');
+    const actionId = String(denialRows()[0]?.actionId ?? '');
+    for (const row of denialRowsFor(actionId)) {
+      expect(row.outcome).toBe('denied_no_prompt_surface');
+      expect(row).not.toHaveProperty('noCardReason');
+      expect(row).not.toHaveProperty('cardDedupedTo');
+    }
+    const audit = auditDenialFor(actionId)!;
+    expect(audit.outcome).toBe('denied_no_prompt_surface');
+    expect(audit).not.toHaveProperty('noCardReason');
+    expect(String(r.reason)).not.toMatch(/\nHELD /);
+  });
+
+  for (const [label, config, expected] of [
+    ['no card channel', () => retryConfig({ openclaw: false }), 'no_channel'],
+  ] as const) {
+    it(`#853 ${label}: stays denied_no_prompt_surface with noCardReason=${expected}, and no HELD line`, () => {
+      writeConfig(config() as Record<string, unknown>);
+      const r = runHook(IRREVERSIBLE);
+      expect(r.decision).toBe('deny');
+      const actionId = String(denialRows()[0]?.actionId ?? '');
+      const rows = denialRowsFor(actionId);
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) {
+        expect(row.outcome).toBe('denied_no_prompt_surface');
+        expect(row.noCardReason).toBe(expected);
+      }
+      expect(auditDenialFor(actionId)).toMatchObject({ outcome: 'denied_no_prompt_surface', noCardReason: expected });
+      expect(String(r.reason)).not.toMatch(/\nHELD /);
+    });
+  }
+
+  it('#853 budget exhausted: the fourth identity is DNP with noCardReason=budget_exhausted', () => {
+    writeConfig(retryConfig({ openclaw: true, digestWindowMs: 0 }));
+    slowGateway(8_000);
+    for (const c of [{ command: 'sudo modprobe softdog' }, { command: 'sudo rmmod softdog' }, { command: 'sudo insmod /tmp/one.ko' }]) {
+      expect(lastLine(runHook(c).reason)).toMatch(/^HELD act-[0-9a-f]{16}$/);
+    }
+    const r = runHook({ command: 'sudo insmod /tmp/two.ko' });
+    const ids = new Set(denialRows().map((row) => row.actionId));
+    const lastId = [...ids][ids.size - 1] as string;
+    expect(auditDenialFor(lastId)).toMatchObject({ outcome: 'denied_no_prompt_surface', noCardReason: 'budget_exhausted' });
+    expect(String(r.reason)).toContain(`No Approve card (budget_exhausted) for ${lastId}`);
+    expect(String(r.reason)).not.toMatch(/\nHELD /);
+  });
+
+  it('#853 a waiter that fails BEFORE requesting: card_spawn_failed, claim released, no HELD line', () => {
+    writeConfig(retryConfig({ openclaw: true }));
+    // A waiter stand-in that dies before dialling, exactly as the real one
+    // does on unreadable params or a missing nonce.
+    writeFileSync(
+      join(distRoot, 'defence', 'iron-dome', 'dnp-retry-waiter.js'),
+      [
+        "import { writeFileSync } from 'node:fs';",
+        "const a = process.argv; const p = a[a.indexOf('--receipt') + 1];",
+        "writeFileSync(p, JSON.stringify({ phase: 'failed', reason: 'no claim nonce' }));",
+      ].join('\n'),
+    );
+    const r = runHook(IRREVERSIBLE);
+    expect(r.decision).toBe('deny');
+    const actionId = String(denialRows()[0]?.actionId ?? '');
+    expect(auditDenialFor(actionId)).toMatchObject({ outcome: 'denied_no_prompt_surface', noCardReason: 'card_spawn_failed' });
+    expect(store()!.rows[0].claim).toBeUndefined();
+    expect(store()!.budget!.cards).toBe(0);
+    expect(String(r.reason)).toContain(`No Approve card (card_spawn_failed) for ${actionId}`);
+    expect(String(r.reason)).not.toMatch(/\nHELD /);
+  });
+
+  it('#853 card expires unanswered: retry_card_expired row, and the next notify says nothing ran', () => {
+    writeConfig(retryConfig({ openclaw: true, digestWindowMs: 0 }));
+    writeFileSync(decisionFile, JSON.stringify({ decision: null }));
+    runHook(IRREVERSIBLE);
+    const actionId = String(denialRows()[0]?.actionId ?? '');
+    expect(waitFor(() => denialRows().some((row) => row.outcome === 'retry_card_expired'))).toBe(true);
+    const expired = denialRows().find((row) => row.outcome === 'retry_card_expired')!;
+    expect(expired).toMatchObject({ actionId, tool: 'Bash' });
+    // The waiter's own webhook send leaves the box (the real channel, to an
+    // unreachable host here), so it falls back to the queue, and the next
+    // operator notify carries it. With this instant-answer fake gateway the
+    // queue can be drained by the SAME hook's alert, so the assertion is on
+    // "some alert said it, and the queue is empty", not on which one.
+    expect(expired.followUp).toBe('queued');
+    const notice = `card for Bash (${actionId}) expired unanswered. Nothing ran.`;
+    if (!JSON.stringify(evidence()).includes(notice)) runHook({ command: 'sudo rmmod softdog' });
+    expect(JSON.stringify(evidence())).toContain(notice);
+    const raw = JSON.parse(readFileSync(storePath(), 'utf8')) as { followUps?: Array<{ actionId?: string }> };
+    expect((raw.followUps ?? []).some((f) => f.actionId === actionId)).toBe(false);
+  });
+
+  it('#853 transport fails after requesting: the denial stays held_for_retry and retry_card_failed names --denial', () => {
+    writeConfig(retryConfig({ openclaw: true }));
+    writeFileSync(openclawBin, '#!/bin/sh\nsleep 0.3\nexit 1\n', { mode: 0o755 });
+    const r = runHook(IRREVERSIBLE);
+    const actionId = String(denialRows()[0]?.actionId ?? '');
+    expect(lastLine(r.reason)).toBe(`HELD ${actionId}`);
+    expect(auditDenialFor(actionId)?.outcome).toBe('held_for_retry');
+    expect(waitFor(() => denialRows().some((row) => row.outcome === 'retry_card_failed'))).toBe(true);
+    const failed = denialRows().find((row) => row.outcome === 'retry_card_failed')!;
+    expect(failed).toMatchObject({ actionId, nextStep: `shieldcortex approve --denial ${actionId}` });
+  });
+
+  it('#853 deny on a held card: retry_denied says nothing ran; a later retry is refused with no new card', () => {
+    writeConfig(retryConfig({ openclaw: true }));
+    writeFileSync(decisionFile, JSON.stringify({ decision: 'deny' }));
+    runHook(IRREVERSIBLE);
+    expect(waitFor(() => denialRows().some((row) => row.outcome === 'retry_denied'))).toBe(true);
+    expect(String(denialRows().find((row) => row.outcome === 'retry_denied')!.reason)).toContain('nothing ran');
+    const cards = store()!.budget!.cards;
+    const again = runHook(IRREVERSIBLE, { sessionId: 'worker-2' });
+    expect(again.decision).toBe('deny');
+    expect(store()!.budget!.cards).toBe(cards);
+    expect(String(again.reason)).not.toMatch(/\nHELD /);
+    const againId = String(denialRows().map((row) => row.actionId).filter(Boolean).pop());
+    expect(auditDenialFor(againId)).toMatchObject({ outcome: 'denied_no_prompt_surface', noCardReason: 'operator_denied_recently' });
+  });
+
+  it('#853 held → Approve → the identical retry spends the grant once, then is refused again', () => {
+    // Digest OFF so the second DNP below sends: with a window, it is coalesced
+    // (no notices ride it) and the assertion would race the waiter's grant
+    // against the FIRST hook's notify — red under full-suite load.
+    writeConfig(retryConfig({ openclaw: true, digestWindowMs: 0 }));
+    writeFileSync(decisionFile, JSON.stringify({ decision: 'allow-once' }));
+    const held = runHook(IRREVERSIBLE, { sessionId: 'cron-tick-1' });
+    expect(lastLine(held.reason)).toMatch(/^HELD act-[0-9a-f]{16}$/);
+    const heldId = lastLine(held.reason).slice('HELD '.length);
+    expect(waitFor(() => (store()?.rows[0]?.grant ?? null) !== null)).toBe(true);
+    // Fold 1: until something re-runs the call, the Allow is reported as
+    // "approved, not run" on the next operator notify — and reporting it
+    // spends nothing.
+    runHook({ command: 'sudo rmmod softdog' }, { sessionId: 'other-job' });
+    expect(waitFor(() => JSON.stringify(evidence()).includes(`${heldId} (Bash,`))).toBe(true);
+    const digest = JSON.stringify(evidence());
+    expect(digest).toContain('approved, not run');
+    expect(digest).not.toMatch(/\bRun it\b|will run|resum/);
+    expect(store()!.rows.find((r) => r.actionIds.includes(heldId))!.grant!.consumedAt).toBeUndefined();
+    const retried = runHook(IRREVERSIBLE, { sessionId: 'cron-tick-2' });
+    expect(retried.decision).toBeUndefined();
+    expect(runHook(IRREVERSIBLE, { sessionId: 'cron-tick-3' }).decision).toBe('deny');
+  });
+
+  it('#853 catastrophic: no held outcome, no noCardReason, no HELD line', () => {
+    writeConfig(retryConfig({ openclaw: true }));
+    const r = runHook(CATASTROPHIC, { sessionId: 'cron-nightly' });
+    expect(r.decision).toBe('deny');
+    expect(String(r.reason)).not.toMatch(/HELD|held/);
+    expect(auditRows().some((row) => row.outcome === 'held_for_retry' || row.noCardReason !== undefined)).toBe(false);
   });
 
   // ── The live-hold path is untouched ────────────────────────────────────

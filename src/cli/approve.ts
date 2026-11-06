@@ -49,6 +49,7 @@ import {
   scopeTail,
   type RetryRow,
 } from '../defence/iron-dome/retry-control.js';
+import { recordUnspentGrantExpiries } from '../defence/iron-dome/held-follow-up.js';
 
 const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
@@ -205,7 +206,11 @@ export function runApprove(argv: string[], deps: ApproveDeps = {}): number {
   // switched retry cards on is untouched.
   if (existsSync(retryControlPath(home))) {
     const swept = pruneRetryControl({ home, now });
-    if (swept.expired.length > 0) log(`${YELLOW}${formatUnspentExpiryNotice(swept.expired)}${RESET}\n`);
+    if (swept.expired.length > 0) {
+      log(`${YELLOW}${formatUnspentExpiryNotice(swept.expired)}${RESET}\n`);
+      // #853 — the sweep deleted these grants: keep the durable record.
+      recordUnspentGrantExpiries(swept.expired, { home });
+    }
   }
 
   if (denialIndex >= 0) {

@@ -183,6 +183,19 @@ interface RetryControlFile {
   version: 1;
   rows: RetryRow[];
   budget: RetryCardBudget | null;
+  /** #853 — "nothing ran" follow-ups the waiter could not deliver on the
+   *  spot. They ride the next operator notify, exactly like `lostActionIds`. */
+  followUps?: HeldFollowUp[];
+}
+
+/** #853 — one no-button "nothing ran" notice for a held (Plane A) card. */
+export interface HeldFollowUp {
+  /** `grant_failed` — the operator tapped Allow but the store refused the
+   *  grant: an Allow that produced nothing must not read as a yes. */
+  kind: 'expired' | 'denied' | 'failed' | 'grant_failed';
+  actionId?: string;
+  tool: string;
+  at: number;
 }
 
 export interface RetryStoreOptions {
@@ -437,7 +450,15 @@ function readStore(home?: string): RetryControlFile {
               : [],
           }
         : null;
-    return { version: 1, rows: parsed.rows.filter(isUsableRow), budget };
+    const followUps = Array.isArray(parsed.followUps)
+      ? parsed.followUps.filter(isUsableFollowUp).slice(-MAX_HELD_FOLLOW_UPS)
+      : [];
+    return {
+      version: 1,
+      rows: parsed.rows.filter(isUsableRow),
+      budget,
+      ...(followUps.length > 0 ? { followUps } : {}),
+    };
   } catch {
     // A corrupt store must never revive a stale card: it reads as EMPTY, so
     // there is no claim record, `grantRetry` fails its claimNonce check first,
@@ -445,6 +466,18 @@ function readStore(home?: string): RetryControlFile {
     // exists here.
     return { version: 1, rows: [], budget: null };
   }
+}
+
+const HELD_FOLLOW_UP_KINDS = new Set(['expired', 'denied', 'failed', 'grant_failed']);
+const MAX_HELD_FOLLOW_UPS = 20;
+
+function isUsableFollowUp(v: unknown): v is HeldFollowUp {
+  if (!v || typeof v !== 'object') return false;
+  const f = v as Partial<HeldFollowUp>;
+  return HELD_FOLLOW_UP_KINDS.has(String(f.kind))
+    && typeof f.tool === 'string'
+    && typeof f.at === 'number'
+    && (f.actionId === undefined || /^act-[0-9a-f]{16}$/.test(String(f.actionId)));
 }
 
 function isUsableRow(row: unknown): row is RetryRow {
@@ -783,7 +816,14 @@ export type LaunchClaimFailure =
 
 export type LaunchClaimOutcome =
   | { ok: true; id: string; nonce: string; epoch: number; expiresAt: number; row: RetryRow }
-  | { ok: false; reason: LaunchClaimFailure; lostActionIds?: string[] };
+  | {
+    ok: false;
+    reason: LaunchClaimFailure;
+    lostActionIds?: string[];
+    /** #853 — on `already-claimed`, the actionId the LIVE card was raised
+     *  for: the denial this one is deduped onto. Never a nonce. */
+    liveCardActionId?: string;
+  };
 
 export interface LaunchClaimOptions extends RetryStoreOptions {
   /** Digest window start, read by the caller in the SAME handler (R3 rule 7).
@@ -797,6 +837,7 @@ export interface LaunchClaimOptions extends RetryStoreOptions {
 interface ClaimAttempt {
   failed?: LaunchClaimFailure;
   lostActionIds?: string[];
+  liveCardActionId?: string;
   granted?: { row: RetryRow; epoch: number; expiresAt: number };
 }
 
@@ -836,7 +877,15 @@ export function claimCardLaunch(ref: RetryRowRef, opts: LaunchClaimOptions): Lau
     // post-spend card blackout fought the flapping-retry case this exists
     // for). Epoch pinning is unaffected: a NEW claim gets the CURRENT epoch.
     if (claimIsLive(row.claim, now) && !(row.claim?.grantedAt && !grantIsLive(row.grant, now))) {
-      return { value: { failed: 'already-claimed' }, commit: true };
+      return {
+        value: {
+          failed: 'already-claimed',
+          // Only a card still awaiting its answer is one to dedupe onto; an
+          // answered (granted) claim is not a pending card.
+          ...(row.claim?.actionId && !row.claim.grantedAt ? { liveCardActionId: row.claim.actionId } : {}),
+        },
+        commit: true,
+      };
     }
 
     if (
@@ -889,6 +938,7 @@ export function claimCardLaunch(ref: RetryRowRef, opts: LaunchClaimOptions): Lau
       ok: false,
       reason: attempt.failed,
       ...(attempt.lostActionIds ? { lostActionIds: attempt.lostActionIds } : {}),
+      ...(attempt.liveCardActionId ? { liveCardActionId: attempt.liveCardActionId } : {}),
     };
   }
   const granted = attempt.granted!;
@@ -914,6 +964,38 @@ export function releaseCardLaunch(ref: RetryRowRef, opts: RetryStoreOptions = {}
     if (row.grant && row.grant.epoch === row.claim.epoch) return { value: false, commit: false };
     delete row.claim;
     if (file.budget && file.budget.cards > 0) file.budget.cards -= 1;
+    return { value: true, commit: true };
+  });
+  return { ok: result.ok && result.value === true };
+}
+
+/**
+ * #853 — the card WAS requested but ended without a grant (transport failed,
+ * unreadable or unknown answer, a refused grant, expiry, Deny). Its waiter is
+ * gone, so nothing can answer it any more: retire the claim NOW instead of at
+ * `expiresAt`. Otherwise, for up to the card lifetime, every remint would be
+ * reported as riding a card nobody can answer (`cardDedupedTo` + `HELD`), and
+ * the terminal path the follow-up names (`approve --denial`) would be refused
+ * as `card-live`.
+ *
+ * Only the waiter's OWN claim (nonce-matched), only while unanswered. The
+ * budget debit is NOT refunded (unlike `releaseCardLaunch`): a card may have
+ * been shown. Never touches a grant, a suppression or the epoch.
+ */
+export function closeCardClaim(
+  ref: RetryRowRef,
+  auth: { nonce: string },
+  opts: RetryStoreOptions = {},
+): { ok: boolean } {
+  const now = opts.now ?? Date.now();
+  const presented = typeof auth?.nonce === 'string' && auth.nonce ? hmacNonce(auth.nonce, opts.home) : null;
+  if (!presented) return { ok: false };
+  const result = withLock<boolean>(opts.home, (file) => {
+    const row = findRow(file.rows, ref);
+    const claim = row?.claim;
+    if (!claim || claim.grantedAt || !claimIsLive(claim, now)) return { value: false, commit: false };
+    if (!constantTimeEquals(claim.nonceHmac, presented)) return { value: false, commit: false };
+    claim.expiresAt = now;
     return { value: true, commit: true };
   });
   return { ok: result.ok && result.value === true };
@@ -1213,6 +1295,133 @@ export function restoreLostActionIds(ids: string[], opts: RetryStoreOptions = {}
   });
 }
 
+// ── 6b. #853 held follow-ups and approved-not-run ─────────────────────────
+
+/**
+ * Queue one "nothing ran" follow-up the waiter could not deliver itself (an
+ * openclaw-only box has no verified no-button send path). The next DNP notify
+ * drains it, the same coupling as `drainLostActionIds`: drained only on the
+ * path that sends, put back if the send fails. Bounded and deduped by
+ * (kind, actionId) so a flapping job cannot grow it.
+ */
+export function queueHeldFollowUp(item: HeldFollowUp, opts: RetryStoreOptions = {}): boolean {
+  if (!isUsableFollowUp(item)) return false;
+  const result = withLock<boolean>(opts.home, (file) => {
+    const list = file.followUps ?? [];
+    if (list.some((f) => f.kind === item.kind && f.actionId === item.actionId && item.actionId)) {
+      return { value: true, commit: false };
+    }
+    list.push({ kind: item.kind, tool: String(item.tool).slice(0, 64), at: item.at, ...(item.actionId ? { actionId: item.actionId } : {}) });
+    file.followUps = list.slice(-MAX_HELD_FOLLOW_UPS);
+    return { value: true, commit: true };
+  });
+  return result.ok && result.value;
+}
+
+/** Take the queued follow-ups for delivery, clearing them in the same write. */
+export function drainHeldFollowUps(opts: RetryStoreOptions = {}): HeldFollowUp[] {
+  const result = withLock<HeldFollowUp[]>(opts.home, (file) => {
+    const list = file.followUps ?? [];
+    if (list.length === 0) return { value: [], commit: false };
+    delete file.followUps;
+    return { value: [...list], commit: true };
+  });
+  return result.ok ? result.value : [];
+}
+
+/** Put drained follow-ups back after a send that did not happen. */
+export function restoreHeldFollowUps(items: HeldFollowUp[], opts: RetryStoreOptions = {}): void {
+  const clean = items.filter(isUsableFollowUp);
+  if (clean.length === 0) return;
+  withLock<void>(opts.home, (file) => {
+    const merged = [...(file.followUps ?? [])];
+    for (const item of clean) {
+      // Same dedupe rule as `queueHeldFollowUp`: only an actionId-keyed pair.
+      if (!merged.some((f) => f.kind === item.kind && item.actionId && f.actionId === item.actionId)) merged.push(item);
+    }
+    file.followUps = merged.slice(-MAX_HELD_FOLLOW_UPS);
+    return { value: undefined, commit: true };
+  });
+}
+
+/** Read-only peek, for `doctor`. */
+export function listHeldFollowUps(opts: RetryStoreOptions = {}): HeldFollowUp[] {
+  return [...(readStore(opts.home).followUps ?? [])];
+}
+
+/** #853 — an operator Approve that has not been spent yet. */
+export interface ApprovedNotRun {
+  actionId?: string;
+  tool: string;
+  shortHash: string;
+  scope: string;
+  via: 'card' | 'tty';
+  approvedAt: number;
+  expiresAt: number;
+}
+
+/**
+ * Every LIVE, UNSPENT grant: the operator said yes and the action has not
+ * run. This is the list a launcher of one-shot `--print` workers needs (the
+ * worker exited on the deny and will not retry by itself), and the list
+ * `doctor` and the digest show as "approved, not run". Read-only: listing a
+ * grant never spends, extends or re-scopes it — the next run of the SAME call
+ * in the SAME cwd is still the only thing that can.
+ */
+export function listApprovedNotRun(opts: RetryStoreOptions = {}): ApprovedNotRun[] {
+  const now = opts.now ?? Date.now();
+  return readStore(opts.home).rows
+    .filter((r) => grantIsLive(r.grant, now))
+    .sort((a, b) => b.grant!.approvedAt - a.grant!.approvedAt)
+    .map((r) => {
+      // The card's own id first: it is the id the operator tapped and the one
+      // the worker's `HELD <actionId>` line carries (a remint rides that card).
+      // A TTY grant has no card, so the newest alias stands in.
+      const actionId = r.claim?.actionId ?? r.actionIds[r.actionIds.length - 1];
+      return {
+        ...(actionId ? { actionId } : {}),
+        tool: r.tool,
+        shortHash: shortHashOf(r.hash),
+        scope: scopeTail(r.grant!.origin.cwd),
+        via: r.grant!.via,
+        approvedAt: r.grant!.approvedAt,
+        expiresAt: r.grant!.approvedAt + r.grant!.ttlMs,
+      };
+    });
+}
+
+/** Operator copy for `listApprovedNotRun`. Empty input → empty string. */
+export function formatApprovedNotRunNotice(items: ApprovedNotRun[], now: number = Date.now()): string {
+  if (items.length === 0) return '';
+  const lines = items.slice(0, MAX_LOST_ACTION_IDS).map((i) => {
+    const left = Math.max(0, Math.round((i.expiresAt - now) / 60_000));
+    return `  ${i.actionId ?? i.shortHash} (${i.tool}, ${i.scope}) — approved, not run; ${left}m left`;
+  });
+  return [
+    `approved, not run (${items.length}): an Approve allows ONE retry; nothing has run until the same call runs again in that directory.`,
+    ...lines,
+    'A one-shot worker exits on a deny: re-run it (the same call, same cwd) to use the approval.',
+  ].join('\n');
+}
+
+/** The no-button "nothing ran" line for one held card. */
+export function heldFollowUpLine(item: Pick<HeldFollowUp, 'kind' | 'actionId' | 'tool'>): string {
+  const tool = String(item.tool || 'tool').slice(0, 32);
+  const id = item.actionId ?? 'unknown action';
+  if (item.kind === 'expired') return `ShieldCortex: card for ${tool} (${id}) expired unanswered. Nothing ran.`;
+  if (item.kind === 'denied') return `ShieldCortex: card for ${tool} (${id}) denied. Nothing ran.`;
+  if (item.kind === 'grant_failed') {
+    return `ShieldCortex: card for ${tool} (${id}): your Allow could NOT be recorded, so no retry is allowed. Nothing ran. From YOUR terminal: shieldcortex approve --denial ${id}`;
+  }
+  return `ShieldCortex: card for ${tool} (${id}) could not be delivered or answered. Nothing ran. From YOUR terminal: shieldcortex approve --denial ${id}`;
+}
+
+/** Operator copy for queued follow-ups (rides the next digest/notify). */
+export function formatHeldFollowUpNotice(items: HeldFollowUp[]): string {
+  if (items.length === 0) return '';
+  return items.slice(-MAX_LOST_ACTION_IDS).map((i) => heldFollowUpLine(i)).join('\n');
+}
+
 /** Card budget as it stands, for the operator copy. Read-only. */
 export function readCardBudget(opts: RetryStoreOptions = {}): RetryCardBudget | null {
   return readStore(opts.home).budget;
@@ -1291,11 +1500,12 @@ export function buildRetryCardFields(input: RetryCardCopyInput): RetryCardFields
   if (isUsableHeldCard(input.card)) return buildHeldCardFields(input, input.card);
   const tool = String(input.tool || 'tool').slice(0, 32);
   const topSignal = String(input.signals?.[0] ?? 'action-guard').slice(0, 32);
-  const rawTitle = `Approve once? ${tool} · ${topSignal}`;
+  const rawTitle = `Allow one retry? ${tool} · ${topSignal}`;
   const title = rawTitle.length <= CARD_TITLE_MAX ? rawTitle : `${rawTitle.slice(0, CARD_TITLE_MAX - 1)}…`;
 
-  const minutes = Math.max(1, Math.round(input.ttlMs / 60_000));
-  const trust = `held headless — Approve = ONE retry (${minutes}m, ${scopeTail(input.cwd)})`;
+  // `|| 1`, as heldCardOutcomeLine: Math.max(1, NaN) is NaN (#853 N2).
+  const minutes = Math.max(1, Math.round(Number(input.ttlMs) / 60_000) || 1);
+  const trust = `held headless — Approve allows ONE retry (${minutes}m, ${scopeTail(input.cwd)}); the tap runs nothing`;
   const cronCaveat =
     typeof input.cronIntervalMs === 'number'
     && Number.isFinite(input.cronIntervalMs)
@@ -1336,15 +1546,18 @@ function isUsableHeldCard(card: HeldCardSummary | undefined): card is HeldCardSu
 
 /**
  * #853 — the outcome line every held card carries, whole. It answers the only
- * questions the owner must not have to guess: what Approve buys (ONE run,
- * only if the agent retries the same call, in this scope), and what Deny or
- * silence means (nothing runs). The Claude Code hook cannot pause a call, so
- * "if retried" is the honest wording — the card never says the call is
- * waiting, and never says it ran.
+ * questions the owner must not have to guess: what Approve buys (it allows ONE
+ * retry of the same call, in this scope — the tap itself runs nothing), and
+ * what Deny or silence means (nothing runs). The Claude Code hook cannot
+ * pause a call, so "if retried" is the honest wording: the card never says
+ * the call is waiting, never says it ran, and never says a tap runs it. The
+ * buttons are the gateway's own (`allow-once` / `deny`); this line is what
+ * tells the owner what the first one means on this plane.
  */
 export function heldCardOutcomeLine(ttlMs: number, cwd?: string): string {
-  const minutes = Math.max(1, Math.round(ttlMs / 60_000));
-  return `Approve: runs ONCE if retried within ${minutes}m (${scopeTail(cwd)}) · Deny or no reply: nothing runs`;
+  // `|| 1`: Math.max(1, NaN) is NaN, and this line is the trust copy.
+  const minutes = Math.max(1, Math.round(Number(ttlMs) / 60_000) || 1);
+  return `Allow: SAME call runs once if retried in ${minutes}m (${scopeTail(cwd)}) · Deny or no reply: nothing runs`;
 }
 
 const HELD_CARD_BREAKS = new RegExp(`[${CARD_LINE_BREAK_CLASS}]`, 'gu');
@@ -1373,7 +1586,7 @@ function buildHeldCardFields(input: RetryCardCopyInput, card: HeldCardSummary): 
   const tool = flatCardLine(input.tool || 'tool').slice(0, 32);
   // The card's own expiry rides in the title so the description's budget goes
   // to the action and the outcome.
-  const rawTitle = `ShieldCortex held ${tool} — approve once? Card expires in ${Math.max(1, Math.round(RETRY_CARD_LIFETIME_MS / 60_000))}m`;
+  const rawTitle = `ShieldCortex held ${tool} — allow one retry? Card expires in ${Math.max(1, Math.round(RETRY_CARD_LIFETIME_MS / 60_000))}m`;
   const title = rawTitle.length <= CARD_TITLE_MAX ? rawTitle : `${rawTitle.slice(0, CARD_TITLE_MAX - 1)}…`;
   // Same rule as the #310 layout: a schedule slower than the grant must be
   // SAID, with the command that outlasts it.
@@ -1416,15 +1629,30 @@ function buildHeldCardFields(input: RetryCardCopyInput, card: HeldCardSummary): 
     const head = Math.ceil((max - 1) / 2);
     return `${text.slice(0, head)}…${text.slice(text.length - (max - 1 - head))}`;
   };
+  // WHO's last ` · ` segment is the session tag (`session sc-…`, `cron #…`):
+  // the one part that tells two jobs apart. A plain middle cut can land on
+  // it once a long host name (CI runners) fills the head, so the tail is kept
+  // whole and the head is cut at its END: "Claude Code on <host…>" keeps the
+  // agent and the start of the host.
+  const whoCut = (text: string, max: number) => {
+    if (text.length <= max) return text;
+    const at = text.lastIndexOf(' · ');
+    if (at <= 0) return middle(text, max);
+    const tail = text.slice(at);
+    const headRoom = max - tail.length;
+    if (headRoom < 8) return middle(text, max);
+    return `${clip(text.slice(0, at), headRoom)}${tail}`;
+  };
   const whatLine = middle(fullWhat, what);
-  const body = [`What: ${whatLine}`, `Why: ${clip(fullWhy, why)}`, `Who: ${middle(fullWho, who)}`].join('\n');
+  const body = [`What: ${whatLine}`, `Why: ${clip(fullWhy, why)}`, `Who: ${whoCut(fullWho, who)}`].join('\n');
   // Last resort, never reached at today's sizes: the BODY is cut, never the
   // outcome line.
   const description = `${clip(body, Math.max(1, CARD_DESCRIPTION_MAX - outcome.length - 1))}\n${outcome}`;
   return {
     title,
     description: description.slice(0, CARD_DESCRIPTION_MAX),
-    surfaceWithheld: true,
+    // Same meaning as the #310 layout: the target was dropped (secret egress).
+    surfaceWithheld: withheld,
     surfaceTruncated: !withheld && whatLine !== fullWhat,
   };
 }
