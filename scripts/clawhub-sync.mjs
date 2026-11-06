@@ -60,22 +60,64 @@ function clawhub(args, { capture = false } = {}) {
   return execFileSync(CLAWHUB_BIN, args, { stdio: capture ? 'pipe' : 'inherit', encoding: 'utf8' });
 }
 
+// A ClawHub write throttle ("Too many writes in a short period of time ...
+// (reset in Ns)") is transient: 5.17.2 hit it on two consecutive reruns (#985).
+// One retry after the reported window, capped so a long window cannot stall
+// the step, replaces a manual rerun.
+const WRITE_THROTTLE_MAX_WAIT_MS = 120_000;
+
+/** True when `clawhub publish` output says exactly `target` already exists on ClawHub. */
+function reportsVersionExists(output, target) {
+  const re = /\bVersion\s+([0-9A-Za-z.+-]+?)\.?\s+already exists\b/gi;
+  return [...output.matchAll(re)].some((m) => m[1] === target);
+}
+
+/** The throttle's reset window in seconds, or null when the output is not a write throttle. */
+function writeThrottleResetSeconds(output) {
+  const m = output.match(/Too many writes[^\n]*?reset in\s+(\d+)\s*s\b/i);
+  return m ? Number(m[1]) : null;
+}
+
 /**
- * Run `clawhub publish`, echo its output, and return that output so the caller
- * can read the submission result. Inherited stdio used to discard it — the line
- * saying the upload was pending security scans never reached the verdict.
+ * Run `clawhub publish`, echo its output, and return it with a verdict so the
+ * caller can read the submission result. Inherited stdio used to discard it —
+ * the line saying the upload was pending security scans never reached the
+ * verdict.
+ *
+ * Returns `{ output, alreadyExists }`. `alreadyExists` is true when the CLI
+ * exited non-zero because ClawHub already holds `target` (#985): the public
+ * index does not list a version held for scan/review, so the script reads
+ * 'absent', republishes, and the server answers "Version X already exists".
+ * That is the server saying the upload landed — it is a pending state, never
+ * "the publish did not land". Any other non-zero exit (rate limit, upload
+ * ticket failure, network) still exits 1, after at most one throttle retry.
  */
-function clawhubPublish(args) {
-  const res = spawnSync(CLAWHUB_BIN, args, { stdio: ['inherit', 'pipe', 'pipe'], encoding: 'utf8' });
-  if (res.stdout) process.stdout.write(res.stdout);
-  if (res.stderr) process.stderr.write(res.stderr);
-  if (res.error || res.status !== 0) {
+function clawhubPublish(args, target) {
+  for (let attempt = 0; ; attempt++) {
+    const res = spawnSync(CLAWHUB_BIN, args, { stdio: ['inherit', 'pipe', 'pipe'], encoding: 'utf8' });
+    if (res.stdout) process.stdout.write(res.stdout);
+    if (res.stderr) process.stderr.write(res.stderr);
+    const output = `${res.stdout ?? ''}\n${res.stderr ?? ''}`;
+    if (!res.error && res.status === 0) return { output, alreadyExists: false };
     // Code/status only: the error object carries argv, which is not needed here.
     const why = res.error ? res.error.code ?? 'spawn error' : `exit ${res.status ?? res.signal}`;
+    if (!res.error && reportsVersionExists(output, target)) {
+      console.log(
+        `[clawhub-sync] clawhub publish ${why}: ClawHub already holds ${target} (uploaded earlier, held for scan/review, ` +
+        `not yet listed publicly). Treating as submitted — not republishing.`,
+      );
+      return { output, alreadyExists: true };
+    }
+    const resetSeconds = res.error ? null : writeThrottleResetSeconds(output);
+    if (resetSeconds !== null && attempt === 0) {
+      const waitMs = Math.min(resetSeconds * 1000 + 5_000, WRITE_THROTTLE_MAX_WAIT_MS);
+      console.warn(`[clawhub-sync] ⚠️ ClawHub write throttle (reset in ${resetSeconds}s); retrying once in ${Math.round(waitMs / 1000)}s.`);
+      sleep(waitMs);
+      continue;
+    }
     console.error(`[clawhub-sync] ❌ clawhub publish failed (${why}).`);
     process.exit(1);
   }
-  return `${res.stdout ?? ''}\n${res.stderr ?? ''}`;
 }
 
 function clawhubCliVersion() {
@@ -140,15 +182,15 @@ if (!CHECK_ONLY) {
     console.log(`[clawhub-sync] ${version} is already uploaded and awaiting promotion — not republishing.`);
   } else {
     console.log(`[clawhub-sync] Publishing skill to ClawHub @ ${version}…`);
-    const output = clawhubPublish([
+    const { output, alreadyExists } = clawhubPublish([
       'publish', skillDir,
       '--slug', 'shieldcortex',
       '--name', 'ShieldCortex',
       '--version', version,
       '--changelog', `Sync from npm publish v${version}`,
-    ]);
-    submitted = reportsPendingSubmission(output, version);
-    if (submitted) {
+    ], version);
+    submitted = alreadyExists || reportsPendingSubmission(output, version);
+    if (submitted && !alreadyExists) {
       console.log(`[clawhub-sync] CLI reports ${version} submitted, pending security scans — not public until ClawHub serves it.`);
     }
   }

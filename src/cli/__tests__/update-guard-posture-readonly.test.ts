@@ -408,7 +408,12 @@ describe('a config with no signature yet is unknown read-only, never off', () =>
   // B3-R3: empty/whitespace early-return used to skip the cache-disagreement
   // check, so a file emptied in place (mtime restored) read as off while the
   // getter still served cached strict-ON.
-  (asRoot ? it.skip : it)('B3-R3: emptying config.json in place after a cached strict verdict is unknown, not off', async () => {
+  // #878 item 2 keys the cache on the file's identity (size and ctime
+  // included), so the getter now re-reads the blanked file — and must not read
+  // it as "no config yet": this process already enforced strict from it. The
+  // getter holds that posture; the read-only reader, which cannot know what
+  // the getter holds, says unknown, never off.
+  (asRoot ? it.skip : it)('B3-R3: emptying config.json in place after a cached strict verdict holds strict and is unknown, not off', async () => {
     try {
       writeConfig({ actionGuard: { enabled: false } });
       const { config } = await fresh();
@@ -419,6 +424,9 @@ describe('a config with no signature yet is unknown read-only, never off', () =>
       const st = fs.statSync(cfg);
       fs.writeFileSync(cfg, '  \n');
       fs.utimesSync(cfg, st.atime, st.mtime);
+      // The floor this process established is preserved, not relaxed to off.
+      expect(config.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: false });
+      expect(config.getDefenceMode()).toBe('strict');
       expect(config.readActionGuardCoreConfigReadOnly()).toBeNull();
       const update = await import('../update.js');
       const guard = await update.readGuardSwitch();
@@ -432,6 +440,8 @@ describe('a config with no signature yet is unknown read-only, never off', () =>
       });
       expect(summary.headline).toBe('check');
       expect(summary.rows.find((r) => r.label === 'Guard')).toMatchObject({ mark: 'check' });
+      // Still the blank bytes: no incidental write turned them into a signed default-off file.
+      expect(fs.readFileSync(cfg, 'utf-8')).toBe('  \n');
     } finally {
       fs.chmodSync(configDir, 0o700);
     }

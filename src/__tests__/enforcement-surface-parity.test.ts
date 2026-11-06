@@ -503,10 +503,14 @@ describe('#509 R4-1 — the guard self-protection floor is ONE list, duplicated 
     // The plugin denies always-block before ANY of its release exits.
     const early = pluginSrc.indexOf('if (isAlwaysBlockVerdict(v.signals)) {');
     expect(early).toBeGreaterThan(-1);
-    expect(early).toBeLessThan(pluginSrc.indexOf('if (autoApprove.length > 0 && !unscannedBlock && !selfProtected)'));
+    expect(early).toBeLessThan(pluginSrc.indexOf('if (autoApprove.length > 0 && !unscannedBlock && !selfProtected && !taintMintedBlock)'));
     expect(early).toBeLessThan(pluginSrc.indexOf('if (gate.shadow && !unscannedBlock && !selfProtected)'));
-    expect(pluginSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected\)/);
-    expect(pluginSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected/);
+    // #999: the plugin's two operator releases also refuse a taint-minted
+    // block — it left `unscannedBlock` (it is a scanned verdict) but must not
+    // become releasable by the allowlist or a broker pre-clear under enforce.
+    // The hook has no taint escalation, so it has no counterpart clause.
+    expect(pluginSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected && !taintMintedBlock\)/);
+    expect(pluginSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected && !taintMintedBlock\)/);
     expect(pluginSrc).toMatch(/const deny = failAction === 'deny' \|\| brokerDenies \|\| selfProtected;/);
     expect(pluginSrc).toMatch(/const failAction: FailureAction = selfProtected \? 'deny' : config\.failurePolicy\[severity\];/);
     expect(pluginSrc).toMatch(/config\.failurePolicy\.high === 'allow' && !selfProtectSignal \? 'allow' : 'deny'/);

@@ -51,11 +51,32 @@ describe('doctor: approval route (#853)', () => {
   }
 
   it('enforce with no card route is a FAIL: "approvals have no route"', async () => {
-    writeGuard({ enabled: true, enforce: true, notify: { enabled: true, webhookUrl: 'https://example.invalid/h' } });
+    writeGuard({ enabled: true, enforce: true, notify: { enabled: true } });
     const r = await check();
     expect(r.status).toBe('fail');
     expect(r.message).toMatch(/approvals have no route/);
     expect(r.message).toMatch(/ADVISORY/);
+  });
+
+  it('#853 Option A: a usable webhook IS a card route — denied with the card, not advisory', async () => {
+    writeGuard({ enabled: true, enforce: true, notify: { enabled: true, webhookUrl: 'https://example.invalid/h' } });
+    const r = await check();
+    expect(r.status).toBe('pass');
+    expect(r.message).toMatch(/webhook card route configured/);
+    expect(r.message).toMatch(/denied with the approval card/);
+    expect(r.message).not.toMatch(/ADVISORY/);
+  });
+
+  it('#853 Option A: a webhookUrl that cannot deliver (rejected by normalisation) is still no route', async () => {
+    writeGuard({ enabled: true, enforce: true, notify: { enabled: true, webhookUrl: 'ftp://example.invalid/h' } });
+    const r = await check();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/approvals have no route/);
+  });
+
+  it('#853 Option A: a webhook with notify disabled is no route', async () => {
+    writeGuard({ enabled: true, enforce: true, notify: { enabled: false, webhookUrl: 'https://example.invalid/h' } });
+    expect((await check()).status).toBe('fail');
   });
 
   it('notify off entirely is also no route', async () => {

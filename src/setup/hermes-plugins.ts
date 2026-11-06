@@ -401,7 +401,9 @@ export interface HermesScanOptions {
   /**
    * Override interpreter resolution. `null` is "this box has no Hermes to
    * ask", which is the seam the undetermined-path tests use: a box with a
-   * working Hermes would otherwise never exercise it.
+   * working Hermes would otherwise never exercise it. A path is a bare Python,
+   * or a Hermes launcher (its text carries `--print-runtime-command`), which is
+   * asked the same way the search asks one (#971).
    */
   interpreter?: string | null;
 }
@@ -575,9 +577,63 @@ export function hermesPluginRoots(hermesHome: string): string[] {
 // ── Primary path: ask Hermes ──────────────────────────────────────────────
 
 /**
- * The interpreter that can import `hermes_cli`: the agent's own virtualenv
- * first, then whatever the `hermes` launcher on PATH is shebanged to. Returns
- * null when neither is there, which is the signal to fall back.
+ * Where a current Hermes install keeps its own launcher (#971): a `#!/bin/sh`
+ * wrapper that `exec`s a bundled CPython with `-I` and a `sys.path` closure.
+ * The bundled Python on its own cannot import Hermes' dependencies; the
+ * launcher is the only thing that knows how to set them up.
+ */
+export function hermesHomeLauncher(hermesHome: string): string {
+  return path.join(hermesHome, 'hermes-agent', '.hermes', 'bin', 'hermes');
+}
+
+/**
+ * The flag a launcher answers with its own runtime argv, as one JSON array.
+ * A launcher whose text does not carry it is never run with it: an older
+ * `hermes` that does not know the flag could start a session instead.
+ */
+const PRINT_RUNTIME_FLAG = '--print-runtime-command';
+
+/** How much of a launcher is read to classify it. The live one is ~8 KiB. */
+const LAUNCHER_BYTE_CAP = 256 * 1024;
+
+/**
+ * Something Hermes can be asked through (#971). A `launcher` is spawned with
+ * `--print-runtime-command` and its interpreter is then run through the same
+ * closure; a `python` is a bare interpreter that already imports `hermes_cli`
+ * (a legacy venv, or a console script's shebang).
+ */
+export interface HermesAskCandidate {
+  kind: 'launcher' | 'python';
+  path: string;
+}
+
+/**
+ * The full interpreter search, in the order it is asked (#971):
+ *
+ *   1. `$HERMES_HOME/hermes-agent/.hermes/bin/hermes`, when it is a file;
+ *   2. `hermes` on PATH (a launcher that knows `--print-runtime-command`, or
+ *      a console script shebanged to a Python);
+ *   3. the legacy venv's Python — only asked when no launcher was found or
+ *      every launcher failed, and never when it is older than the launcher it
+ *      was left behind by.
+ */
+export interface HermesAskPlan {
+  launchers: HermesAskCandidate[];
+  venvs: HermesAskCandidate[];
+  /** Venv interpreters older than the launcher: named, never asked. */
+  stale: Array<{ path: string; launcher: string }>;
+  /** Launchers that exist and give nothing to spawn: named, never asked. */
+  unusable: Array<{ path: string; why: string }>;
+  /** The first candidate that could not be statted or was not a file. */
+  uncertain: string | null;
+}
+
+/**
+ * The interpreter that can answer for Hermes: the first candidate of
+ * `hermesAskPlan`. A launcher path is returned as-is — it is never spawned
+ * with `-c`, which on `hermes` means "resume a session" — and
+ * `probeHermesDiscovery` accepts one through `opts.interpreter`. Null when
+ * there is nothing to ask, which is the signal to fall back.
  */
 export function resolveHermesInterpreter(hermesHome: string): string | null {
   const search = searchHermesInterpreter(hermesHome);
@@ -600,26 +656,91 @@ export type HermesInterpreterSearch =
   | { kind: 'undetermined'; path: string };
 
 export function searchHermesInterpreter(hermesHome: string): HermesInterpreterSearch {
+  const plan = hermesAskPlan(hermesHome);
+  const first = plan.launchers[0] ?? plan.venvs[0];
+  if (first !== undefined) return { kind: 'found', interpreter: first.path };
+  if (plan.uncertain !== null) return { kind: 'undetermined', path: plan.uncertain };
+  // A stale venv is something the user has; it is not absence either.
+  if (plan.stale.length > 0) return { kind: 'undetermined', path: plan.stale[0].path };
+  return { kind: 'absent' };
+}
+
+export function hermesAskPlan(hermesHome: string): HermesAskPlan {
+  const plan: HermesAskPlan = { launchers: [], venvs: [], stale: [], unusable: [], uncertain: null };
+  const noteUncertain = (p: string | null): void => {
+    if (p !== null && plan.uncertain === null) plan.uncertain = p;
+  };
+  const seen = new Set<string>();
+  const add = (candidate: HermesAskCandidate): void => {
+    const key = realpathOr(candidate.path);
+    if (seen.has(key)) return;
+    seen.add(key);
+    plan.launchers.push(candidate);
+  };
+  const consider = (launcher: string): void => {
+    const verdict = classifyLauncher(launcher);
+    if ('why' in verdict) {
+      plan.unusable.push({ path: launcher, why: verdict.why });
+      noteUncertain(launcher);
+    } else {
+      add(verdict);
+    }
+  };
+
+  const home = hermesHomeLauncher(hermesHome);
+  const homeState = fileState(home);
+  if (homeState === 'file') consider(home);
+  else if (homeState === 'other') noteUncertain(home);
+
+  const onPath = hermesOnPath();
+  noteUncertain(onPath.uncertain);
+  if (onPath.launcher !== null) consider(onPath.launcher);
+
+  // The launcher a leftover venv is measured against: the home one when it is
+  // there, else the first real launcher PATH led to.
+  const reference = homeState === 'file'
+    ? home
+    : plan.launchers.find((c) => c.kind === 'launcher')?.path ?? null;
+  const referenceMtime = reference === null ? null : mtimeOf(reference, fs.statSync);
+
   const venv = path.join(hermesHome, 'hermes-agent', '.venv');
-  const candidates = [
+  for (const candidate of [
     path.join(venv, 'bin', 'python3'),
     path.join(venv, 'bin', 'python'),
     path.join(venv, 'Scripts', 'python.exe'),
-  ];
-  let uncertain: string | null = null;
-  for (const candidate of candidates) {
+  ]) {
     const state = fileState(candidate);
-    if (state === 'file') return { kind: 'found', interpreter: candidate };
-    if (state !== 'absent' && uncertain === null) uncertain = candidate;
+    if (state === 'other') noteUncertain(candidate);
+    if (state !== 'file') continue;
+    // lstat: the venv's own entry, not the system Python a venv symlink points
+    // at — the question is when the venv was made, not when CPython was.
+    const own = mtimeOf(candidate, fs.lstatSync);
+    if (reference !== null && referenceMtime !== null && own !== null && own < referenceMtime) {
+      plan.stale.push({ path: candidate, launcher: reference });
+      continue;
+    }
+    const key = realpathOr(candidate);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    plan.venvs.push({ kind: 'python', path: candidate });
   }
-  const onPath = hermesOnPath();
-  if (uncertain === null) uncertain = onPath.uncertain;
-  if (onPath.launcher !== null) {
-    const interpreter = shebangInterpreter(onPath.launcher);
-    if (interpreter !== null) return { kind: 'found', interpreter };
-    if (uncertain === null) uncertain = onPath.launcher;
+  return plan;
+}
+
+function realpathOr(target: string): string {
+  try {
+    return fs.realpathSync(target);
+  } catch {
+    return path.resolve(target);
   }
-  return uncertain === null ? { kind: 'absent' } : { kind: 'undetermined', path: uncertain };
+}
+
+function mtimeOf(target: string, stat: (p: string) => fs.Stats): number | null {
+  try {
+    return stat(target).mtimeMs;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -689,6 +810,47 @@ function hermesOnPath(): { launcher: string | null; uncertain: string | null } {
     if (state === 'other' && uncertain === null) uncertain = candidate;
   }
   return { launcher: null, uncertain };
+}
+
+/** The first `LAUNCHER_BYTE_CAP` bytes of a file, or null when it cannot be read. */
+function readHead(file: string, cap: number): string | null {
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(cap);
+      const read = fs.readSync(fd, buf, 0, buf.length, 0);
+      return buf.subarray(0, read).toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a `hermes` executable on disk gives us to ask (#971):
+ *
+ *   - a launcher that knows `--print-runtime-command` (its text carries the
+ *     flag) — asked for its runtime argv;
+ *   - a console script shebanged to an absolute Python — that Python;
+ *   - anything else — unusable, with a reason, and never run.
+ *
+ * A `#!/bin/sh exec <launcher> "$@"` wrapper (what `~/.local/bin/hermes`
+ * usually is) is deliberately NOT followed. The launcher it names belongs to
+ * whichever install put it on PATH, not necessarily to the home being
+ * scanned, and Hermes' bootstrap prepares a full dependency set for any data
+ * root it has not seen — a scan of another home must never cause that. The
+ * home's own launcher is asked first, which is what makes the wrapper moot on
+ * a current install.
+ */
+function classifyLauncher(launcher: string): HermesAskCandidate | { why: string } {
+  const head = readHead(launcher, LAUNCHER_BYTE_CAP);
+  if (head === null) return { why: 'could not be read' };
+  if (head.includes(PRINT_RUNTIME_FLAG)) return { kind: 'launcher', path: launcher };
+  const python = shebangInterpreter(launcher);
+  if (python !== null) return { kind: 'python', path: python };
+  return { why: 'names no interpreter this can spawn' };
 }
 
 /**
@@ -1243,60 +1405,229 @@ export interface HermesProbeResult {
  * `env` is passed to the child UNEXPANDED (see `childEnvironment`): Hermes
  * expands `HERMES_HOME` itself, and the whole point is that its expansion is
  * the one that counts.
+ *
+ * Candidates are asked in `hermesAskPlan` order (#971). One that cannot be
+ * asked at all — it will not spawn, exits non-zero, prints nothing parseable,
+ * or cannot import Hermes (`ModuleNotFoundError` / `ImportError`) — hands over
+ * to the next; any other failure is Hermes' own answer and stops the search.
+ * The error then names every candidate tried, in order, and every one that
+ * was skipped (a stale venv, a launcher with nothing to spawn).
  */
 export function probeHermesDiscovery(
   env: HermesEnvironment,
   opts: HermesScanOptions = {},
 ): HermesProbeResult | { error: string; noInterpreter?: true } {
   // The interpreter is LOOKED FOR under the best-effort home. That is a search
-  // for something to ask, not an answer: a wrong guess here costs a venv
-  // lookup and falls through to the `hermes` launcher on PATH.
+  // for something to ask, not an answer: a wrong guess here costs a lookup and
+  // falls through to the next candidate.
   const searchHome = resolveHermesHome(env);
   // `noInterpreter` only for a search that met nothing but absence (#651 r2);
   // an unreadable candidate, an unusable launcher or a dangling link is not
-  // "none found". The error text stays NO_HERMES_INTERPRETER in every no-answer
-  // case, as on main, so `update`'s plain "couldn't find Hermes' Python" row is
-  // unchanged; the doctor's absence downgrade reads only the structured flag.
-  let interpreter: string;
+  // "none found". The error text STARTS with NO_HERMES_INTERPRETER in every
+  // case where nothing could be spawned, so `update`'s plain "couldn't find
+  // Hermes' Python" row is unchanged; the doctor's absence downgrade reads
+  // only the structured flag.
+  let primary: HermesAskCandidate[];
+  let fallback: HermesAskCandidate[] = [];
+  const skipped: string[] = [];
   if (opts.interpreter !== undefined) {
     if (opts.interpreter === null) return { error: NO_HERMES_INTERPRETER, noInterpreter: true };
-    interpreter = opts.interpreter;
+    // The seam takes a Python OR a launcher. A launcher is recognised the same
+    // way the search recognises one, so it is never spawned with `-c`.
+    const head = readHead(opts.interpreter, LAUNCHER_BYTE_CAP);
+    const kind = head !== null && head.includes(PRINT_RUNTIME_FLAG) ? 'launcher' : 'python';
+    primary = [{ kind, path: opts.interpreter }];
   } else {
-    const search = searchHermesInterpreter(searchHome);
-    if (search.kind === 'absent') return { error: NO_HERMES_INTERPRETER, noInterpreter: true };
-    if (search.kind === 'undetermined') return { error: NO_HERMES_INTERPRETER };
-    interpreter = search.interpreter;
+    const plan = hermesAskPlan(searchHome);
+    primary = plan.launchers;
+    fallback = plan.venvs;
+    for (const s of plan.stale) skipped.push(`${s.path} (stale venv: older than the launcher ${s.launcher})`);
+    for (const u of plan.unusable) skipped.push(`${u.path} (${u.why})`);
+    if (primary.length === 0 && fallback.length === 0) {
+      if (plan.uncertain === null && skipped.length === 0) {
+        return { error: NO_HERMES_INTERPRETER, noInterpreter: true };
+      }
+      const looked = [...skipped];
+      if (plan.uncertain !== null && !looked.some((l) => l.startsWith(`${plan.uncertain} (`))) {
+        looked.unshift(`${plan.uncertain} (could not be read, or is not a file)`);
+      }
+      return { error: `${NO_HERMES_INTERPRETER} — looked at ${looked.join('; ')}` };
+    }
   }
 
-  const payload = JSON.stringify({
-    name: HERMES_PLUGIN_NAME,
-    importRoots: hermesImportRoots(searchHome, interpreter),
-  });
+  const tried: string[] = [];
+  let last = '';
+  // Venvs are asked only when every launcher failed or there was none.
+  for (const candidate of [...primary, ...fallback]) {
+    const outcome = askHermes(candidate, env, searchHome);
+    if (!('error' in outcome)) return outcome;
+    tried.push(`${candidate.path} (${outcome.error})`);
+    last = outcome.error;
+    if (!outcome.next) break;
+  }
+  // One bare interpreter and nothing skipped (the test seam, a legacy host):
+  // its own error, as before #971. Otherwise every path, in the order asked.
+  if (tried.length === 1 && skipped.length === 0 && opts.interpreter !== undefined) return { error: last };
+  const skippedText = skipped.length > 0 ? `; skipped ${skipped.join('; ')}` : '';
+  return { error: `Hermes could not be asked — tried ${tried.join('; ')}${skippedText}` };
+}
 
-  // spawnSync, no shell: the only untrusted strings here are paths, and they
-  // travel as one argv element that nothing re-parses.
-  const run = spawnSync(interpreter, ['-c', PROBE_SCRIPT, payload], {
+/** One ask; `next` says whether the following candidate should be tried. */
+type AskOutcome = HermesProbeResult | { error: string; next: boolean };
+
+/** Errors that mean "this interpreter cannot see Hermes", not "Hermes said no". */
+const CANNOT_IMPORT = /\b(ModuleNotFoundError|ImportError)\b/;
+
+function askHermes(candidate: HermesAskCandidate, env: HermesEnvironment, searchHome: string): AskOutcome {
+  if (candidate.kind === 'python') {
+    const payload = JSON.stringify({
+      name: HERMES_PLUGIN_NAME,
+      importRoots: hermesImportRoots(searchHome, candidate.path),
+    });
+    return readProbeRun(spawnProbe(candidate.path, ['-c', PROBE_SCRIPT, payload], env));
+  }
+  const runtime = launcherRuntime(candidate.path, env);
+  if ('error' in runtime) return { error: runtime.error, next: true };
+  const payload = JSON.stringify({ name: HERMES_PLUGIN_NAME, importRoots: [runtime.root] });
+  const args = [...(runtime.isolated ? ['-I'] : []), '-c', launcherClosure(runtime.root) + PROBE_SCRIPT, payload];
+  return readProbeRun(spawnProbe(runtime.python, args, env));
+}
+
+// spawnSync, no shell: the only untrusted strings here are paths, and they
+// travel as one argv element that nothing re-parses.
+function spawnProbe(command: string, args: string[], env: HermesEnvironment) {
+  return spawnSync(command, args, {
     encoding: 'utf8',
     timeout: PROBE_TIMEOUT_MS,
     maxBuffer: 4 * 1024 * 1024,
     windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
     env: childEnvironment(env),
   });
+}
 
-  if (run.error) return { error: `Hermes probe failed to run — ${run.error.message}` };
+/**
+ * The interpreter a launcher runs, from its own `--print-runtime-command`
+ * (#971): `argv[0]`, whether it passes `-I`, and the `hermes-agent` checkout
+ * its `sys.path` closure inserts — read from the printed `-c` source, else
+ * from the launcher's own `…/hermes-agent/.hermes/bin/hermes` location. Never
+ * guessed from `~/.hermes`.
+ */
+function launcherRuntime(
+  launcher: string,
+  env: HermesEnvironment,
+): { python: string; isolated: boolean; root: string } | { error: string } {
+  const run = spawnProbe(launcher, [PRINT_RUNTIME_FLAG], env);
+  if (run.error) return { error: `${PRINT_RUNTIME_FLAG} failed to run — ${run.error.message}` };
   if (run.signal !== null && run.signal !== undefined) {
-    return { error: `Hermes probe was killed (${run.signal}) — possibly the ${PROBE_TIMEOUT_MS}ms timeout` };
+    return { error: `${PRINT_RUNTIME_FLAG} was killed (${run.signal})` };
   }
   if (run.status !== 0) {
     const detail = (run.stderr || '').trim().split(/\r?\n/).slice(-1)[0] || `exit ${run.status}`;
-    return { error: `Hermes probe exited non-zero — ${detail}` };
+    return { error: `${PRINT_RUNTIME_FLAG} exited non-zero — ${detail}` };
+  }
+  const line = (run.stdout || '').trim().split(/\r?\n/).filter((l) => l.trim() !== '').slice(-1)[0] ?? '';
+  let argv: unknown;
+  try {
+    argv = JSON.parse(line);
+  } catch {
+    return { error: `${PRINT_RUNTIME_FLAG} printed no JSON argv` };
+  }
+  if (!Array.isArray(argv) || argv.length === 0 || !argv.every((a) => typeof a === 'string')) {
+    return { error: `${PRINT_RUNTIME_FLAG} printed no JSON argv` };
+  }
+  const words = argv as string[];
+  const python = words[0];
+  if (!path.isAbsolute(python) || fileState(python) !== 'file') {
+    return { error: `${PRINT_RUNTIME_FLAG} named an interpreter that is not there (${python})` };
+  }
+  const dashC = words.indexOf('-c', 1);
+  const flags = dashC === -1 ? words.slice(1) : words.slice(1, dashC);
+  const source = dashC === -1 ? null : words[dashC + 1] ?? null;
+  const root = (source === null ? null : rootFromBootstrap(source)) ?? rootFromLauncher(launcher);
+  if (root === null || !isDirectory(root)) {
+    return { error: `${PRINT_RUNTIME_FLAG} did not say which hermes-agent checkout it runs` };
+  }
+  return { python, isolated: flags.includes('-I'), root };
+}
+
+/** The checkout a printed bootstrap puts first on `sys.path`, or null. */
+function rootFromBootstrap(source: string): string | null {
+  const match = /sys\.path\.insert\(\s*0\s*,\s*(['"])((?:\\.|(?!\1).)*)\1\s*\)/.exec(source);
+  if (match === null) return null;
+  const literal = match[2];
+  // Plain `\\` / `\'` escapes only; anything fancier is not trusted to decode.
+  if (/\\[^\\'"]/.test(literal)) return null;
+  const decoded = literal.replace(/\\(.)/g, '$1');
+  return path.isAbsolute(decoded) ? decoded : null;
+}
+
+/** `…/hermes-agent/.hermes/bin/hermes` → `…/hermes-agent`, or null. */
+function rootFromLauncher(launcher: string): string | null {
+  const bin = path.dirname(launcher);
+  const dotHermes = path.dirname(bin);
+  if (!/^hermes(\.exe|\.cmd)?$/i.test(path.basename(launcher))) return null;
+  if (path.basename(bin) !== 'bin' || path.basename(dotHermes) !== '.hermes') return null;
+  return path.dirname(dotHermes);
+}
+
+/**
+ * The launcher's own closure, run ahead of `PROBE_SCRIPT` (#971): the same
+ * environment scrub, the checkout first on `sys.path`, and
+ * `import hermes_bootstrap`, which is what makes Hermes' dependencies
+ * importable at all. Anything bootstrap prints goes to stderr so the JSON on
+ * stdout stays the probe's; a bootstrap that raises is reported as the probe's
+ * own `ok: false`, so an `ImportError` there hands over to the next candidate.
+ *
+ * The launcher's default-home pin (`sys._hermes_pin_default_home`) is left
+ * OUT on purpose: it sets `HERMES_HOME` to the INSTALL's root, which would
+ * make the probe answer for that tree rather than for the `HOME` /
+ * `HERMES_HOME` it was handed — the one thing a scan must not change.
+ *
+ * `-I` drops `PYTHONDONTWRITEBYTECODE` and `PYTHONWARNINGS`, so both are set
+ * here instead: nothing may leave a `__pycache__` in the tree being inspected.
+ */
+function launcherClosure(root: string): string {
+  return [
+    'import contextlib as _sc_cl, json as _sc_json, os as _sc_os, sys as _sc_sys, warnings as _sc_w',
+    '_sc_sys.dont_write_bytecode = True',
+    '_sc_w.simplefilter("ignore")',
+    '_sc_os.environ.pop("PYTHONHOME", None)',
+    '_sc_os.environ.pop("PYTHONPATH", None)',
+    '_sc_os.environ.pop("VIRTUAL_ENV", None)',
+    // JSON string literals are valid Python string literals.
+    `_sc_sys.path.insert(0, ${JSON.stringify(root)})`,
+    'try:',
+    '    with _sc_cl.redirect_stdout(_sc_sys.stderr):',
+    '        import hermes_bootstrap',
+    'except BaseException as _sc_exc:',
+    '    _sc_sys.stdout.write(_sc_json.dumps({"ok": False, "error": "%s: %s (importing hermes_bootstrap)" % (type(_sc_exc).__name__, _sc_exc)}))',
+    '    _sc_sys.stdout.flush()',
+    '    _sc_os._exit(0)',
+    '',
+  ].join('\n');
+}
+
+/** Turn one probe child's result into the probe's answer, or a reason. */
+function readProbeRun(run: ReturnType<typeof spawnProbe>): AskOutcome {
+  if (run.error) return { error: `Hermes probe failed to run — ${run.error.message}`, next: true };
+  if (run.signal !== null && run.signal !== undefined) {
+    return {
+      error: `Hermes probe was killed (${run.signal}) — possibly the ${PROBE_TIMEOUT_MS}ms timeout`,
+      next: true,
+    };
+  }
+  if (run.status !== 0) {
+    const detail = (run.stderr || '').trim().split(/\r?\n/).slice(-1)[0] || `exit ${run.status}`;
+    return { error: `Hermes probe exited non-zero — ${detail}`, next: true };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse((run.stdout || '').trim());
   } catch {
-    return { error: 'Hermes probe produced no parseable result' };
+    return { error: 'Hermes probe produced no parseable result', next: true };
   }
+  const stop = (error: string): AskOutcome => ({ error, next: false });
   // Shape first, dereference second (#569 r7). `JSON.parse('null')` is a
   // perfectly successful parse, and reading `.ok` off it throws a TypeError out
   // of a function whose whole contract is to RETURN "no answer" — the caller
@@ -1304,51 +1635,53 @@ export function probeHermesDiscovery(
   // filtered, either: a response with one malformed element is a response from
   // something that is not the probe, and taking the rest of it on trust is how
   // a copy goes missing from the collision set.
-  if (!isRecord(parsed)) return { error: 'Hermes probe produced no result object' };
+  if (!isRecord(parsed)) return stop('Hermes probe produced no result object');
   const record = parsed;
   if (record.ok !== true || !Array.isArray(record.roots)) {
     const why = typeof record.error === 'string' ? record.error : 'unknown reason';
-    return { error: `Hermes could not be asked — ${why}` };
+    // An interpreter that cannot import Hermes has not been asked anything;
+    // the next candidate may well be able to (#971).
+    return { error: `Hermes could not be asked — ${why}`, next: CANNOT_IMPORT.test(why) };
   }
   if (typeof record.activeHome !== 'string' || typeof record.root !== 'string') {
-    return { error: 'Hermes probe named no home or no containing root' };
+    return stop('Hermes probe named no home or no containing root');
   }
   // An older probe that does not carry the field at all is not "nothing went
   // wrong" — it is a probe whose answer cannot be trusted on this question, and
   // the whole point of the field is that silence is not a clean bill of health.
   if (!Array.isArray(record.undetermined)) {
-    return { error: 'Hermes probe did not say which paths it could not read' };
+    return stop('Hermes probe did not say which paths it could not read');
   }
   const undetermined: HermesUndetermined[] = [];
   for (const entry of record.undetermined) {
     if (!isRecord(entry) || typeof entry.path !== 'string' || typeof entry.error !== 'string') {
-      return { error: 'Hermes probe returned a malformed undetermined entry' };
+      return stop('Hermes probe returned a malformed undetermined entry');
     }
     undetermined.push({ path: entry.path, error: entry.error });
   }
   const out: ProbeRoot[] = [];
   for (const entry of record.roots) {
     if (!isRecord(entry) || typeof entry.root !== 'string') {
-      return { error: 'Hermes probe returned a malformed root entry' };
+      return stop('Hermes probe returned a malformed root entry');
     }
     const copies = stringArray(entry.copies);
     const discovered = stringArray(entry.discovered);
     if (copies === null || discovered === null) {
-      return { error: 'Hermes probe returned a malformed root entry' };
+      return stop('Hermes probe returned a malformed root entry');
     }
     const loaded = optionalString(entry.loaded);
     const effective = optionalString(entry.effective);
     if (loaded === undefined || effective === undefined) {
-      return { error: 'Hermes probe returned a malformed root entry' };
+      return stop('Hermes probe returned a malformed root entry');
     }
     const effectiveSource = pluginSource(entry.effectiveSource);
     if (effectiveSource === undefined || (effective === null) !== (effectiveSource === null)) {
-      return { error: 'Hermes probe returned a malformed root entry' };
+      return stop('Hermes probe returned a malformed root entry');
     }
     out.push({ root: entry.root, copies, discovered, loaded, effective, effectiveSource });
   }
   const project = projectFrom(record.project);
-  if (project === null) return { error: 'Hermes probe returned a malformed project entry' };
+  if (project === null) return stop('Hermes probe returned a malformed project entry');
   return { activeHome: record.activeHome, root: record.root, roots: out, project, undetermined };
 }
 
@@ -1539,6 +1872,95 @@ export function hintDirsInRoot(root: string): string[] {
     if (manifest !== null && manifestMentionsUs(manifest)) hints.push(dir);
   }
   return hints;
+}
+
+/**
+ * The ONE copy a refresh may touch when Hermes cannot be asked (#971), or why
+ * there is no such copy.
+ *
+ * Answers only for the strictest layout there is: the conventional
+ * `<home>/plugins/shieldcortex`, with its manifest, and NOTHING else under
+ * this home that might be a plugin copy — no `shieldcortex*` sibling, and no
+ * other directory that carries a Hermes plugin manifest, in `plugins/` or any
+ * profile's `plugins/`, one category level deep included. Absence of the
+ * `shieldcortex` bytes in a manifest is not proof it is not ours (escaped
+ * names, a name past the read cap). Every listing and every manifest read
+ * must succeed: an unreadable one is not an empty one. A home that is itself
+ * a profile is declined outright, because its sibling roots are exactly what
+ * only Hermes can name; so is a host that may have project plugins switched
+ * on.
+ *
+ * This decides only whether the single conventional install may be brought
+ * forward; it never produces a winner, a shadow or a move.
+ */
+export function soleConventionalHermesCopy(hermesHome: string): { dir: string } | { declined: string } {
+  if (process.env.HERMES_ENABLE_PROJECT_PLUGINS !== undefined) {
+    return { declined: 'HERMES_ENABLE_PROJECT_PLUGINS is set, so a project copy may outrank the install' };
+  }
+  if (path.basename(path.dirname(hermesHome)) === 'profiles') {
+    return { declined: `${hermesHome} is a profile, and only Hermes can name its sibling plugin roots` };
+  }
+  const target = path.join(hermesHome, 'plugins', HERMES_PLUGIN_NAME);
+  const roots = [path.join(hermesHome, 'plugins')];
+  const profiles = strictList(path.join(hermesHome, 'profiles'));
+  if ('error' in profiles) return { declined: profiles.error };
+  for (const name of profiles.names) roots.push(path.join(hermesHome, 'profiles', name, 'plugins'));
+
+  const copies: string[] = [];
+  const visit = (dir: string, depth: number): string | null => {
+    const listed = strictList(dir);
+    if ('error' in listed) return listed.error;
+    for (const name of listed.names) {
+      if (name.startsWith('__') && name.endsWith('__')) continue;
+      if (FOREIGN_HARNESS_MANIFEST_DIRS.has(name)) continue;
+      const child = path.join(dir, name);
+      const kind = directoryState(child);
+      if (typeof kind === 'object') return `${child} could not be read (${kind.error})`;
+      if (kind !== 'dir') continue;
+      if (name.startsWith(HERMES_PLUGIN_NAME)) {
+        copies.push(child);
+        continue;
+      }
+      const manifest = hintManifestFile(child);
+      if (manifest === null) {
+        if (depth === 0) {
+          const why = visit(child, 1);
+          if (why !== null) return why;
+        }
+        continue;
+      }
+      // Any other manifest-bearing directory might be ours. A substring miss
+      // is not proof it is not (`name: "shieldcorte\u0078"`, or the name past
+      // the read cap). Count it and let the sole-copy check decline.
+      if (readHead(manifest, HINT_BYTE_CAP) === null) return `${manifest} could not be read`;
+      copies.push(child);
+    }
+    return null;
+  };
+  for (const root of roots) {
+    const why = visit(root, 0);
+    if (why !== null) return { declined: why };
+  }
+  if (copies.length !== 1 || path.resolve(copies[0]) !== path.resolve(target)) {
+    return {
+      declined: copies.length === 0
+        ? `no copy at ${target}`
+        : `${copies.length} possible cop${copies.length === 1 ? 'y' : 'ies'} (${copies.join(', ')}), not just ${target}`,
+    };
+  }
+  if (!isFile(path.join(target, 'plugin.yaml'))) return { declined: `${target} has no plugin.yaml` };
+  return { dir: target };
+}
+
+/** Sorted child names; absent is empty, anything else that fails is an error. */
+function strictList(dir: string): { names: string[] } | { error: string } {
+  try {
+    return { names: fs.readdirSync(dir).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)) };
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { names: [] };
+    return { error: `${dir} could not be listed (${describeFsError(err)})` };
+  }
 }
 
 // ── Public entry point ───────────────────────────────────────────────────

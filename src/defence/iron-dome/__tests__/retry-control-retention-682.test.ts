@@ -40,6 +40,7 @@ import {
   retryControlPath,
   retryStoreCapacity,
 } from '../retry-control.js';
+import { fencedStateFile } from './fenced-state-fixture.js';
 
 const HASH = hashToolCall('Bash', { command: 'sudo systemctl restart backup-daily' });
 const ACTION_ID = 'act-00000000000068aa';
@@ -97,7 +98,7 @@ describe('#682 — 48h review window for pending denial identities', () => {
   }
 
   function rawStore(): Record<string, unknown> {
-    return JSON.parse(readFileSync(retryControlPath(home), 'utf8')) as Record<string, unknown>;
+    return JSON.parse(readFileSync(fencedStateFile(retryControlPath(home)), 'utf8')) as Record<string, unknown>;
   }
 
   const id = () => fingerprintId(HASH, canonicaliseCwd(cwd));
@@ -337,7 +338,7 @@ describe('#682 — 48h review window for pending denial identities', () => {
     expect(c.ok).toBe(true);
     pruneRetryControl({ home, now: t0 + WINDOW });
 
-    const raw = readFileSync(retryControlPath(home), 'utf8');
+    const raw = readFileSync(fencedStateFile(retryControlPath(home)), 'utf8');
     const store = JSON.parse(raw) as { rows: unknown[]; retired: Array<Record<string, unknown>> };
     expect(store.rows).toEqual([]);
     expect(store.retired).toHaveLength(1);
@@ -464,7 +465,7 @@ describe('#682 — 48h review window for pending denial identities', () => {
     expect(last.suppression).toBeUndefined();
     last.denyEpoch += 1;
     last.suppression = { at: at + 1, until: at + 1 + (template.until - template.at), via: 'card' };
-    writeFileSync(retryControlPath(home), JSON.stringify(raw));
+    writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify(raw));
 
     const expected = {
       rows: MAX_RETRY_ROWS + 1, cap: MAX_RETRY_ROWS, protectedRows: MAX_RETRY_ROWS + 1, overCap: true, retiredForCapacity: 0,
@@ -537,7 +538,7 @@ describe('#682 — 48h review window for pending denial identities', () => {
     // slice cannot be what hides an extra receipt.
     const victim = MAX_RETIRED_IDENTITIES;
     const victimId = fingerprintId(jobHash(victim), canonicaliseCwd(cwd));
-    const raw = readFileSync(retryControlPath(home), 'utf8');
+    const raw = readFileSync(fencedStateFile(retryControlPath(home)), 'utf8');
     const after = JSON.parse(raw) as { rows: RawRow[]; retired: RawReceipt[] };
     expect(after.retired).toHaveLength(MAX_RETIRED_IDENTITIES);
     expect(new Set(after.retired.map((e) => e.id)).size).toBe(MAX_RETIRED_IDENTITIES);
@@ -598,7 +599,7 @@ describe('#682 — 48h review window for pending denial identities', () => {
   it('a store from before #682 (no `retired`) reads, and gains the 48h window for rows still on disk', () => {
     const cwdCanon = canonicaliseCwd(cwd)!;
     mkdirSync(join(home, '.shieldcortex', 'approvals'), { recursive: true });
-    writeFileSync(retryControlPath(home), JSON.stringify({
+    writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify({
       version: 1,
       budget: null,
       rows: [{
@@ -616,7 +617,7 @@ describe('#682 — 48h review window for pending denial identities', () => {
 
   it('an identity the old 60m rule already erased is not revived', () => {
     mkdirSync(join(home, '.shieldcortex', 'approvals'), { recursive: true });
-    writeFileSync(retryControlPath(home), JSON.stringify({ version: 1, budget: null, rows: [] }));
+    writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify({ version: 1, budget: null, rows: [] }));
     const at = t0 + 2 * HOUR;
     expect(lookupRetryRow({ actionId: ACTION_ID }, { home, now: at })).toBeUndefined();
     expect(findRetiredIdentity({ actionId: ACTION_ID }, { home, now: at })).toBeUndefined();
@@ -631,7 +632,7 @@ describe('#682 — 48h review window for pending denial identities', () => {
   ])('a `retired` field that is %s reads as no receipts and leaves rows alone', (_label, retired) => {
     denial();
     const store = rawStore();
-    writeFileSync(retryControlPath(home), JSON.stringify({ ...store, retired }));
+    writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify({ ...store, retired }));
     expect(lookupRetryRow({ actionId: ACTION_ID }, { home, now: t0 })?.id).toBe(id());
     expect(retryStoreCapacity({ home, now: t0 }).retiredOnRecord).toBe(0);
     expect(pruneRetryControl({ home, now: t0 + 1 }).ok).toBe(true);
@@ -655,7 +656,7 @@ describe('#682 — 48h review window for pending denial identities', () => {
       [],
       good,
     ];
-    writeFileSync(retryControlPath(home), JSON.stringify({ ...rawStore(), retired: hostile }));
+    writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify({ ...rawStore(), retired: hostile }));
 
     for (const junk of ['b', 'c', 'd']) {
       expect(findRetiredIdentity({ id: junk.repeat(32) }, { home })).toBeUndefined();
@@ -675,7 +676,7 @@ describe('#682 — 48h review window for pending denial identities', () => {
 
   it('a hostile entry that survives parsing is sanitised (escape-laden tool and aliases)', () => {
     mkdirSync(join(home, '.shieldcortex', 'approvals'), { recursive: true });
-    writeFileSync(retryControlPath(home), JSON.stringify({
+    writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify({
       version: 1, budget: null, rows: [],
       retired: [{
         id: 'e'.repeat(32), hash: HASH, grant: { approvedAt: t0 }, tool: '\u001b[31mBash\u0007',
@@ -691,7 +692,7 @@ describe('#682 — 48h review window for pending denial identities', () => {
     denial();
     const store = rawStore() as { rows: Array<{ actionIds: unknown[] }> };
     store.rows[0].actionIds = [42, null, ACTION_ID];
-    writeFileSync(retryControlPath(home), JSON.stringify(store));
+    writeFileSync(fencedStateFile(retryControlPath(home)), JSON.stringify(store));
     expect(lookupRetryRow({ actionId: ACTION_ID }, { home, now: t0 })?.id).toBe(id());
   });
 

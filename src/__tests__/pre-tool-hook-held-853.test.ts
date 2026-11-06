@@ -16,7 +16,10 @@
  *   - no hold without a usable harness timeout — honest denial, no card;
  *   - NO card route under enforce → advisory (allow + log), never a
  *     `denied_no_prompt_surface`; always-block still denies (ruling §1/§3);
- *   - an interactive session still gets `ask`, no card.
+ *   - an interactive session still gets `ask`, no card;
+ *   - Option A: a usable webhook (Telegram bridge) carrying the #815 card is a
+ *     card route — headless approvable calls are DENIED with the card, never
+ *     advisory; a webhook that can never deliver is not a route.
  */
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from '@jest/globals';
 import { execSync, spawn, spawnSync } from 'node:child_process';
@@ -24,6 +27,8 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(repoRoot, 'scripts', 'pre-tool-hook.mjs');
@@ -97,17 +102,56 @@ describe('#853 Plane A — the hook holds the original call under one card', () 
     }
   });
 
-  function writeConfig(opts: { openclaw?: boolean } = {}): void {
+  function writeConfig(opts: { openclaw?: boolean; webhookUrl?: string } = {}): void {
     writeFileSync(
       join(home, '.shieldcortex', 'config.json'),
       JSON.stringify({
         actionGuard: {
           enabled: true,
           enforce: true,
-          notify: { enabled: true, openclaw: opts.openclaw ?? true },
+          notify: {
+            enabled: true,
+            openclaw: opts.openclaw ?? true,
+            ...(opts.webhookUrl !== undefined ? { webhookUrl: opts.webhookUrl } : {}),
+          },
         },
       }),
     );
+  }
+
+  /** Like runHook, but async — so an in-process webhook receiver can answer
+   *  the hook's POST while it runs (spawnSync would block the event loop). */
+  async function runHookAsync(input: Record<string, unknown> = DANGEROUS, mode: string = 'bypassPermissions'): Promise<HookResult> {
+    const child = spawn(claudeBin, [], { env: hookEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (c) => { out += String(c); });
+    child.stderr.on('data', (c) => { err += String(c); });
+    const done = new Promise<void>((r) => child.on('close', () => r()));
+    child.stdin.end(payload(input, mode));
+    await done;
+    return parse(out, err);
+  }
+
+  /** A local stand-in for the operator's webhook → Telegram bridge. */
+  async function startWebhook(): Promise<{ url: string; bodies: Row[]; close: () => Promise<void> }> {
+    const bodies: Row[] = [];
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += String(c); });
+      req.on('end', () => {
+        try { bodies.push(JSON.parse(body) as Row); } catch { bodies.push({ raw: body }); }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const { port } = server.address() as AddressInfo;
+    return {
+      url: `http://127.0.0.1:${port}/hook`,
+      bodies,
+      close: () => new Promise<void>((r) => server.close(() => r())),
+    };
   }
 
   /** The harness timeout the hook reads back. `null` = entry with no timeout. */
@@ -309,6 +353,99 @@ describe('#853 Plane A — the hook holds the original call under one card', () 
     expect(rows.filter((x) => x.outcome === 'warned').every((x) => (x.hold as Row | undefined)?.state === 'no-card-route')).toBe(true);
     expect(denialRows().map((x) => x.outcome)).not.toContain('denied_no_prompt_surface');
   }, 60_000);
+
+  // ── #853 Option A: a webhook (Telegram bridge) carrying the #815 card IS a
+  //    card route. Headless dangerous calls are never silently allowed there.
+
+  it('Option A: webhook-only route — headless approvable call is DENIED with the #815 card, never advisory', async () => {
+    const hook = await startWebhook();
+    try {
+      writeConfig({ openclaw: false, webhookUrl: hook.url });
+      for (const mode of ['bypassPermissions', 'dontAsk']) {
+        const r = await runHookAsync(DANGEROUS, mode);
+        expect(r.decision).toBe('deny');
+        expect(r.stderr).not.toMatch(/NO card route/);
+        expect(r.stderr).not.toMatch(/advisory: allowed/);
+      }
+      // No OpenClaw card was raised (not opted in), nothing approved/held.
+      expect(cardParams()).toHaveLength(0);
+      const outs = outcomes();
+      expect(outs).not.toContain('warned');
+      expect(outs).not.toContain('approved');
+      expect(outs).not.toContain('held');
+      expect(outs).toContain('denied_no_prompt_surface');
+      expect(auditRows().some((x) => (x.hold as Row | undefined)?.state === 'no-card-route')).toBe(false);
+      // The webhook received the denial carrying the fixed-template #815 card,
+      // which never names the target.
+      const carded = hook.bodies.filter((b) => b.card && typeof b.card === 'object');
+      expect(carded.length).toBeGreaterThanOrEqual(1);
+      expect((carded[0].card as Row).kind).toBe('denial');
+      expect((carded[0].card as Row).version).toBe(1);
+      expect(JSON.stringify(carded[0].card)).not.toMatch(/modprobe|softdog/);
+    } finally {
+      await hook.close();
+    }
+  }, 60_000);
+
+  it('Option A: webhook route whose receiver is unreachable still fails CLOSED (deny), never advisory', () => {
+    // A usable URL that nobody answers: the route exists, delivery fails.
+    writeConfig({ openclaw: false, webhookUrl: 'http://127.0.0.1:9/unreachable' });
+    const r = runHook(DANGEROUS, 'bypassPermissions');
+    expect(r.decision).toBe('deny');
+    expect(r.stderr).not.toMatch(/NO card route/);
+    expect(outcomes()).not.toContain('warned');
+    expect(outcomes()).toContain('denied_no_prompt_surface');
+  }, 40_000);
+
+  it('Option A: webhook route with a missing dist (transport cannot load) fails CLOSED, never advisory', () => {
+    writeConfig({ openclaw: false, webhookUrl: 'https://example.invalid/hook' });
+    const env = { ...hookEnv(), SHIELDCORTEX_DIST_ROOT: join(home, 'no-dist-here') };
+    const run = spawnSync(claudeBin, [], { input: payload(DANGEROUS), env, timeout: 30_000, encoding: 'utf8' });
+    const r = parse(run.stdout ?? '', run.stderr ?? '');
+    expect(r.decision).toBe('deny');
+    expect(r.stderr).not.toMatch(/NO card route/);
+  }, 40_000);
+
+  it('Option A: truly unrouted (notify on, no openclaw, no webhook) stays ADVISORY — allow + audit (#853 §3)', () => {
+    writeConfig({ openclaw: false });
+    const r = runHook(DANGEROUS, 'bypassPermissions');
+    expect(r.decision).toBeUndefined();
+    expect(r.stderr).toMatch(/NO card route/);
+    expect(cardParams()).toHaveLength(0);
+    const warned = auditRows().filter((x) => x.outcome === 'warned');
+    expect(warned.length).toBeGreaterThanOrEqual(1);
+    expect(warned.every((x) => (x.hold as Row | undefined)?.state === 'no-card-route')).toBe(true);
+    expect(outcomes()).not.toContain('denied_no_prompt_surface');
+  }, 40_000);
+
+  it('Option A: a webhookUrl that can never deliver (rejected by normalisation) is NOT a route — advisory', () => {
+    // Mere configuration is not a route: ftp:// and credentialed URLs are
+    // refused by normaliseWebhookUrl, so no card could ever reach anyone.
+    for (const bad of ['ftp://example.invalid/hook', 'https://user:pw@example.invalid/hook']) {
+      writeConfig({ openclaw: false, webhookUrl: bad });
+      const r = runHook(DANGEROUS, 'bypassPermissions');
+      expect(r.decision).toBeUndefined();
+      expect(r.stderr).toMatch(/NO card route/);
+    }
+    expect(outcomes()).not.toContain('denied_no_prompt_surface');
+  }, 60_000);
+
+  it('Option A: notify disabled with a webhook configured is truly unrouted — advisory', () => {
+    writeFileSync(
+      join(home, '.shieldcortex', 'config.json'),
+      JSON.stringify({ actionGuard: { enabled: true, enforce: true, notify: { enabled: false, webhookUrl: 'https://example.invalid/hook' } } }),
+    );
+    const r = runHook(DANGEROUS, 'bypassPermissions');
+    expect(r.decision).toBeUndefined();
+    expect(r.stderr).toMatch(/NO card route/);
+  }, 40_000);
+
+  it('Option A: always-block still DENIES on a webhook-only route (never held, never advisory)', () => {
+    writeConfig({ openclaw: false, webhookUrl: 'http://127.0.0.1:9/unreachable' });
+    const r = runHook({ command: 'shieldcortex config --action-guard-disable' });
+    expect(r.decision).toBe('deny');
+    expect(outcomes()).not.toContain('warned');
+  }, 40_000);
 
   it('ruling §1: always-block (guard self-protection) still DENIES with no card route', () => {
     writeConfig({ openclaw: false });

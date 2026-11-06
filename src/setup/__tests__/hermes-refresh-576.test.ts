@@ -328,9 +328,10 @@ describeWithHermes('refreshHermesPluginCopies — what it writes (#576)', () => 
 describe('refreshHermesPluginCopies — when Hermes cannot be asked (#569 r4)', () => {
   const NO_HERMES = { interpreter: null } as const;
 
-  it('warns and writes nothing when a copy is installed but discovery is unavailable', () => {
+  it('warns and writes nothing when discovery is unavailable and there is more than one copy', () => {
     installCopy();
     makeStale();
+    makeShadow();
 
     const result = refreshHermesPluginCopies(home, { now: FROZEN, scan: NO_HERMES });
 
@@ -338,6 +339,19 @@ describe('refreshHermesPluginCopies — when Hermes cannot be asked (#569 r4)', 
     expect(result.summary).toMatch(/could not determine which copy Hermes loads/);
     expect(hermesPluginCopyStale(installed).stale).toBe(true);
     expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+  });
+
+  it('#971: refreshes the conventional copy when it is the only one under the home', () => {
+    installCopy();
+    makeStale();
+
+    const result = refreshHermesPluginCopies(home, { now: FROZEN, scan: NO_HERMES });
+
+    expect(result.status).toBe('refreshed');
+    expect(result.refreshed.map((r) => r.dir)).toEqual([installed]);
+    expect(hermesPluginCopyStale(installed).stale).toBe(false);
+    expect(result.refreshed[0].backup!.startsWith(path.join(hermes, 'backups') + path.sep)).toBe(true);
+    expect(fs.readdirSync(plugins)).toEqual(['shieldcortex']);
   });
 
   it('is a quiet skip, not a warning, when there is no copy to refresh either', () => {

@@ -279,6 +279,10 @@ function inlineStrictPosture(config) {
     actionGuard: { ...(config.actionGuard ?? {}), ...INLINE_STRICT_POSTURE.actionGuard },
     defenceMode: INLINE_STRICT_POSTURE.defenceMode,
   };
+  // #509 enforce-when-ready runs in shadow until proven — not strict. Dropped
+  // here exactly as `applyStrictFailClosedPosture` drops it in dist (#878: a
+  // kept `readinessGate: true` let the "strict" posture run in shadow).
+  delete out.actionGuard.readinessGate;
   // #522 (GPT-6 round-6, item 1), the second spelling. The deprecated
   // `interceptor.actionGuard` alias gap-fills per key in
   // flattenActionGuardConfig (#209). Every pinned key is now present on the
@@ -290,6 +294,7 @@ function inlineStrictPosture(config) {
   if (isBlock(out.interceptor) && isBlock(out.interceptor.actionGuard)) {
     const alias = { ...out.interceptor.actionGuard };
     for (const key of Object.keys(INLINE_STRICT_POSTURE.actionGuard)) delete alias[key];
+    delete alias.readinessGate;
     out.interceptor = { ...out.interceptor, actionGuard: alias };
   }
   return out;
@@ -338,17 +343,70 @@ async function applyHookPolicyLock(config) {
   }
 }
 
+/**
+ * Does a symlinked config.json have to be held strict? (#878 r5)
+ *
+ * A regular file returns false without loading anything (unchanged path; the
+ * hook does not verify a regular file's signature, #509). For a link the
+ * answer is the shared verifier's (scripts/lib/config-authenticity.mjs — the
+ * HMAC recomputed with the local `.integrity-key` exactly as src's
+ * checkConfigIntegrity does; a `_sig` string or a `.config-sig` file that does
+ * not verify is not a signature). It is imported lazily, and only for a link,
+ * so a missing or broken module cannot crash the hook — and cannot fail OPEN
+ * either: a link whose authenticity cannot be checked is held strict.
+ */
+let configAuthenticityModule;
+async function configLinkedStrict(configPath, parsed, raw) {
+  try {
+    if (!lstatSync(configPath).isSymbolicLink()) return false;
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  if (configAuthenticityModule === undefined) {
+    try {
+      configAuthenticityModule = await import('./lib/config-authenticity.mjs');
+    } catch {
+      configAuthenticityModule = null;
+    }
+  }
+  if (!configAuthenticityModule) {
+    process.stderr.write(
+      '[shieldcortex] config.json is a symbolic link and the signature verifier could not be loaded — ' +
+      'holding the strict fail-closed posture. Run `shieldcortex repair` to restore the install.\n',
+    );
+    return true;
+  }
+  try {
+    return configAuthenticityModule.configIsLinkedUnauthenticated(configPath, parsed, raw);
+  } catch {
+    return true;
+  }
+}
+
 async function loadActionGuardConfig() {
   let parsed = null;
+  let linkedStrict = false;
   try {
     const configPath = join(hookConfigDir(), 'config.json');
-    if (existsSync(configPath)) parsed = JSON.parse(readFileSync(configPath, 'utf-8'));
+    if (existsSync(configPath)) {
+      const raw = readFileSync(configPath, 'utf-8');
+      parsed = JSON.parse(raw);
+      // #878: a symlinked config.json is in force only when a signature
+      // AUTHENTICATES its bytes, as src holds it: the read layer never adopts
+      // or self-heals through a link (configLinkedStrict above). A dangling
+      // link fails existsSync and reads `{}`, as src reads it.
+      linkedStrict = await configLinkedStrict(configPath, parsed, raw);
+    }
   } catch {
     // Unreadable/corrupt config → the guard's own defaults, exactly as before.
     // Enforce-by-default means a corrupt config must not silently disable it.
     parsed = null;
   }
-  const config = await applyHookPolicyLock(parsed ?? {});
+  // #878: a linked config.json no signature authenticates is held strict, as
+  // src holds it — its own enabled/enforce/readinessGate are never read.
+  const base = linkedStrict ? inlineStrictPosture(parsed) : (parsed ?? {});
+  const config = await applyHookPolicyLock(base);
   return flattenActionGuardConfig(config);
 }
 
@@ -621,6 +679,17 @@ async function loadRetryControl(rawRetry, digestWindowMs) {
     return { config, mod };
   } catch {
     return null;
+  }
+}
+
+/** #815 B — the exact call digest, or undefined. Optional on purpose: a dist
+ *  without it (or a digest that throws) only makes a denial untappable and a
+ *  tap grant unspendable; it never changes a decision. */
+function exactRetryDigest(mod, toolName, toolInput) {
+  try {
+    return typeof mod?.exactCallDigest === 'function' ? mod.exactCallDigest(toolName, toolInput) : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -914,6 +983,11 @@ async function loadNotify(rawNotifyConfig) {
       buildApprovalCard: typeof cardMod?.buildApprovalCard === 'function'
         ? cardMod.buildApprovalCard
         : null,
+      /** #815 A — the webhook's card: a fixed template that never names the
+       *  target. A dist without it sends no webhook card. */
+      buildTemplateApprovalCard: typeof cardMod?.buildTemplateApprovalCard === 'function'
+        ? cardMod.buildTemplateApprovalCard
+        : null,
       /** Where a denial goes when the primary channel cannot carry one. Null
        *  means an openclaw-only install: the denial reaches no channel, which
        *  is the honest outcome until a non-interactive gateway send path
@@ -999,15 +1073,20 @@ function safeDiagnosticApprovalReason(reason) {
 
 /**
  * #648 — the card's what/why/who, built on this box from the live tool input.
- * Only for a LIVE hold going to the interactive card channel: the webhook and
- * every denial path keep the values-free surface (#284/#369/#517), and they
- * never receive this object. Every target in it has been through the
- * credential redactor (approval-card.ts `safeTarget`). Never throws.
+ * The interactive card channel gets the #648 card, whose targets go through
+ * the credential redactor as they are built (approval-card.ts `safeTarget`).
+ * #815 A: the webhook gets the fixed-template card instead
+ * (`buildTemplateApprovalCard`): a WHAT chosen by the kind of action, which
+ * never names the target. The values-free `command` / `surface` fields and
+ * `denials.jsonl` never receive either. Never throws.
  */
 function approvalCardFor(notify, channel, { toolName, toolInput, verdict, sessionKey, cwd }) {
-  if (channel?.name !== 'openclaw-approval' || typeof notify?.buildApprovalCard !== 'function') return undefined;
+  const build = channel?.name === 'openclaw-approval' ? notify?.buildApprovalCard
+    : channel?.name === 'webhook' ? notify?.buildTemplateApprovalCard
+      : undefined;
+  if (typeof build !== 'function') return undefined;
   try {
-    return notify.buildApprovalCard({
+    return build({
       tool: String(toolName ?? ''),
       input: toolInput,
       signals: Array.isArray(verdict?.signals) ? verdict.signals.map(String) : [],
@@ -1990,6 +2069,9 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
             // From the HARNESS payload, never from tool input (design B3).
             cwd: retryCtx.cwd,
             sessionKey,
+            // #815 B: the exact call digest a one-tap grant binds to. Absent
+            // (older dist, or it threw) leaves the denial untappable.
+            exactDigest: exactRetryDigest(retry.mod, toolName, toolInput),
           },
           { home: homedir() },
         );
@@ -2086,7 +2168,13 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
     typeof notify.buildActionGuardOutcomeNotification === 'function'
   ) {
     try {
-      let notification = notify.buildActionGuardOutcomeNotification(pendingRow);
+      // #815 A: a headless denial carries the fixed-template card to the
+      // webhook (it never names the target). Handed to the builder ONLY — `pendingRow` is the denials.jsonl row and
+      // stays values-free.
+      const card = outcome === 'denied_no_prompt_surface'
+        ? approvalCardFor(notify, notify.denialChannel, { toolName, toolInput, verdict, sessionKey, cwd: retryCtx?.cwd })
+        : undefined;
+      let notification = notify.buildActionGuardOutcomeNotification(card ? { ...pendingRow, card } : pendingRow);
       // Enrich first-of-window DNP with digest text when builder supports it.
       if (
         digestDecision?.action === 'notify' &&
@@ -3157,6 +3245,46 @@ const HELD_REACH_ANSWER = Object.freeze({
  *          and appends `note`.
  *   { handled: true, ... } — a decision has been emitted here.
  */
+/**
+ * #853 Option A — does this host have an approval CARD route?
+ *
+ * Two routes count, and either one means a headless approvable call is NEVER
+ * the no-card-route advisory (allow + log):
+ *   - the native OpenClaw card (`notify.openclaw === true`) — held under the
+ *     card, or failed CLOSED to the honest denial when it cannot be assembled;
+ *   - a webhook (the operator's Telegram/chat bridge) able to carry the #815
+ *     fixed-template card that `denied_no_prompt_surface` sends it. Not
+ *     holdable (no live answer path), so these calls are DENIED with the card.
+ *
+ * "Usable", not "mentioned": a webhook counts only if its URL survives the
+ * transport's own `normaliseWebhookUrl` (a rejected URL can deliver nothing —
+ * that host is truly unrouted). If the normaliser itself cannot be loaded we
+ * cannot tell, so a configured `webhookUrl` fails CLOSED to the denial, never
+ * open to advisory. Never throws.
+ */
+async function approvalCardRouteConfigured(rawNotify, notify) {
+  try {
+    if (!rawNotify || typeof rawNotify !== 'object' || rawNotify.enabled !== true) return false;
+    if (rawNotify.openclaw === true) return true;
+    if (notify && typeof notify === 'object' && notify.denialChannel) return true;
+    // No webhook channel was built. Either the URL was rejected (no route) or
+    // the transport could not be assembled (unknown → closed). Ask the SAME
+    // normaliser the transport uses; doctor applies it too, so both agree.
+    if (rawNotify.webhookUrl === undefined || rawNotify.webhookUrl === null) return false;
+    let normalise = null;
+    try {
+      const mod = await import(pathToFileURL(resolve(hookDistRoot(), 'defence', 'iron-dome', 'notify-config.js')).href);
+      normalise = typeof mod?.normaliseWebhookUrl === 'function' ? mod.normaliseWebhookUrl : null;
+    } catch {
+      normalise = null;
+    }
+    if (!normalise) return true; // cannot tell → fail CLOSED (deny), never advisory
+    return normalise(rawNotify.webhookUrl) !== undefined;
+  } catch {
+    return true; // fail CLOSED
+  }
+}
+
 async function tryHoldForOwner(holdCtx, ctx) {
   const { toolName, toolInput, verdict, action, notify, auditExtra, noPromptSurface } = ctx;
   if (!holdCtx || action !== 'require_approval') return null;
@@ -3405,7 +3533,7 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
     recordNotifyAudit(toolName, verdict, toolInput, { ...baseExtra, actionId: advisoryId }, notified);
     console.error(
       `[shieldcortex] ⚠️ Action Guard: ${safeToolName(toolName)} needs approval, but ${noPromptSurface} and approvals have NO card route on this host — `
-      + `advisory: allowed and logged (${advisoryId}) [${safeSignalList(verdict.signals).join(', ')}]. Configure an OpenClaw card route to hold these instead.`,
+      + `advisory: allowed and logged (${advisoryId}) [${safeSignalList(verdict.signals).join(', ')}]. Configure an OpenClaw card route (held) or a notify webhook (denied with the approval card) to stop these instead.`,
     );
     return { handled: true, decision: 'advisory', state: 'no-card-route', actionId: advisoryId };
   }
@@ -3935,6 +4063,12 @@ process.stdin.on('end', async () => {
           {
             hash: retryPlane.mod.hashToolCall(toolName, toolInput),
             origin: { cwd: retryOriginCwd, tool: toolName },
+            // #815 B: a one-tap grant is spent only by this exact call, and
+            // only while the guard's verdict on it is still one a tap may
+            // answer. A verdict the guard reached no scanned conclusion about
+            // passes no list, which leaves a tap grant unspent.
+            exactDigest: exactRetryDigest(retryPlane.mod, toolName, toolInput),
+            currentSignals: unscannedBlock ? undefined : safeSignalList(verdict.signals),
           },
           { home: homedir() },
         );
@@ -4085,6 +4219,10 @@ process.stdin.on('end', async () => {
     // Placed at the END of the chain on purpose: the one-shot approval (#118)
     // and the broker (#143) both get their say first, so an operator who
     // already approved, or a call the judge hardened, is unaffected by this.
+    // #853 Option A: resolved before the call so the route is the USABLE
+    // one (see approvalCardRouteConfigured). Memoised — emitApprovalRequired
+    // gets the same transport object.
+    const notifyForRoute = await getNotify();
     const held = await emitApprovalRequired(
       toolName,
       // #874: an advisory host reaches here only through the self-protection
@@ -4099,7 +4237,7 @@ process.stdin.on('end', async () => {
       'require_approval',
       message,
       brokered?.audit,
-      await getNotify(),
+      notifyForRoute,
       baseExtra,
       retryCtx,
       // #853: only the real dangerous tier may hold. `approvable` is the
@@ -4108,7 +4246,7 @@ process.stdin.on('end', async () => {
       // the no-card-route advisory path.
       {
         approvable: !alwaysBlock && !unscannedBlock && !notHoldableSignal,
-        cardRouteConfigured: cfg.notify?.enabled === true && cfg.notify?.openclaw === true,
+        cardRouteConfigured: await approvalCardRouteConfigured(cfg.notify, notifyForRoute),
         hashToolCall: approvals && typeof approvals.hashToolCall === 'function' ? approvals.hashToolCall : null,
         cwd: retryOriginCwd ?? (typeof hookData.cwd === 'string' ? resolve(hookData.cwd) : undefined),
         rawCwd: hookData.cwd,

@@ -234,15 +234,16 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     expect(enforced.stderr).toMatch(/now ENFORCING/);
     const promoted = rows().filter((r) => r.type === 'readiness_transition');
     expect(promoted.map((r) => r.to)).toEqual(['enforcing']);
-    // #853 ruling (issuecomment-6313152247 §3): enforcing + headless with NO
-    // card route configured is ADVISORY — allowed, logged, never a silent
-    // deny — even on a promoted install.
-    const noRoute = runHook(DANGEROUS, 'bypassPermissions');
-    expect(noRoute.decision).toBeUndefined();
-    expect(noRoute.stderr).toMatch(/NO card route/);
-    const advisoryRow = rows().filter((r) => r.type === 'intercept' && r.outcome === 'warned').at(-1);
-    expect((advisoryRow?.hold as Record<string, unknown> | undefined)?.state).toBe('no-card-route');
-    expect(rows().some((r) => r.outcome === 'denied_no_prompt_surface')).toBe(false);
+    // #853 Option A: promotion requires a webhook (NO_NOTICE_CHANNEL_MESSAGE),
+    // and a usable webhook carries the #815 approval card — it IS a card
+    // route. So a promoted install is never no-route advisory: the headless
+    // call is DENIED with the card, never silently allowed. (The truly
+    // unrouted advisory case is pinned in pre-tool-hook-held-853.test.ts.)
+    const webhookRouted = runHook(DANGEROUS, 'bypassPermissions');
+    expect(webhookRouted.decision).toBe('deny');
+    expect(webhookRouted.stderr).not.toMatch(/NO card route/);
+    expect(rows().some((r) => r.type === 'intercept' && r.outcome === 'warned')).toBe(false);
+    expect(rows().some((r) => r.outcome === 'denied_no_prompt_surface')).toBe(true);
     // With a card route configured, the promoted guard really does stop the
     // same headless call: this build has no held-action module, so the hold
     // fails CLOSED to the denial.

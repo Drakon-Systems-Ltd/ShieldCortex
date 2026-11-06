@@ -117,6 +117,8 @@ describe('#156 — no internal vocabulary reaches the headline', () => {
     { applied: true, canaryConsented: false, selfCheck: { ok: false, rosterState: 'loaded' as const, canaryProof: false, versionProof: true } },
     { applied: true, canaryConsented: true, selfCheck: { ok: false, rosterState: 'loaded' as const, versionProof: false } },
     { applied: true, canaryConsented: true, readinessUnproven: true },
+    // #977 review: a passing self-check read a gateway that predates this run's changes.
+    { applied: true, canaryConsented: true, restartPending: true, restartCommand: 'systemctl --user restart openclaw-gateway', selfCheck: { ok: true, rosterState: 'loaded' as const, canaryProof: true, versionProof: true } },
     { applied: false, canaryConsented: false },
   ];
 
@@ -156,5 +158,35 @@ describe('#156 — no internal vocabulary reaches the headline', () => {
       if (v.outcome !== 'protected') continue;
       expect(c.selfCheck?.ok).toBe(true);
     }
+  });
+});
+
+describe('#977 review — an owed restart is never advised while readiness is unproven', () => {
+  const cmd = 'systemctl --user restart openclaw-gateway';
+  for (const selfCheck of [
+    undefined,
+    { ok: true, rosterState: 'loaded' as const, canaryProof: true, versionProof: true },
+    { ok: false, rosterState: 'unproven' as const, canaryProof: false, versionProof: true },
+  ]) {
+    it(`restartPending + readinessUnproven → doctor (selfCheck ${selfCheck ? (selfCheck.ok ? 'ok' : 'unproven') : 'absent'})`, () => {
+      const v = summariseRepair({
+        applied: true,
+        canaryConsented: true,
+        ...(selfCheck ? { selfCheck } : {}),
+        readinessUnproven: true,
+        restartPending: true,
+        restartCommand: cmd,
+      });
+      expect(v.outcome).not.toBe('protected');
+      expect(v.nextCommand).toBe('shieldcortex doctor');
+      const all = renderRepairHeadline(v).join('\n');
+      expect(all).not.toContain(cmd);
+      expect(all).not.toMatch(/Restart the gateway|restart it once more/);
+    });
+  }
+
+  it('restartPending with readiness proven still names the restart command', () => {
+    const v = summariseRepair({ applied: true, canaryConsented: true, restartPending: true, restartCommand: cmd });
+    expect(v.nextCommand).toBe(cmd);
   });
 });

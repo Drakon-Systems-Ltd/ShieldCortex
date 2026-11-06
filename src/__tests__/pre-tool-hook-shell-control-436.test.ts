@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { grantRetry } from '../defence/iron-dome/retry-control.js';
+import { fencedStateFile } from '../defence/iron-dome/__tests__/fenced-state-fixture.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(repoRoot, 'scripts', 'pre-tool-hook.mjs');
@@ -144,7 +145,8 @@ describe('#436 — shell control through the real Claude Code hook', () => {
   }
 
   function store(): RetryStore | null {
-    const p = join(home, '.shieldcortex', 'approvals', 'retry-control.json');
+    // The state is the newest generation; the store path holds a pointer.
+    const p = fencedStateFile(join(home, '.shieldcortex', 'approvals', 'retry-control.json'));
     return existsSync(p) ? (JSON.parse(readFileSync(p, 'utf8')) as RetryStore) : null;
   }
 

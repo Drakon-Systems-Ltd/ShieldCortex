@@ -758,6 +758,13 @@ function handleResign(resign: Exclude<ResignArgs, { kind: 'not-resign' }>): void
   const preview = previewConfigResign();
   console.log(`config.json integrity: ${preview.verdict}`);
   console.log(`  File: ${preview.path}`);
+  if (preview.linked) {
+    // #878: the confirm would be refused before any write; say so here rather
+    // than print a confirm command for a write that cannot happen.
+    console.log('  Will be REFUSED: config.json is a symbolic link, and a re-sign would replace the link with a');
+    console.log('  regular file. Nothing is written. Replace the link with the file it points to, then re-run this.');
+    return;
+  }
   if (preview.verdict !== 'tampered') {
     if (preview.verdict === 'malformed' || preview.verdict === 'unreadable') {
       console.log('  It cannot be parsed, so it cannot be reviewed or re-signed. Fix it or restore a backup.');

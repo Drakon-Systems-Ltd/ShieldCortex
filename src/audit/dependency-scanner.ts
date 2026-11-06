@@ -26,9 +26,9 @@ import { execSync } from 'child_process';
 import { homedir } from 'os';
 import type { AuditFinding, ScannerResult } from './types.js';
 
-const LEARN_MORE_MALICIOUS  = 'https://shieldcortex.ai/docs/threats/supply-chain';
-const LEARN_MORE_TYPOSQUAT  = 'https://shieldcortex.ai/docs/threats/typosquatting';
-const LEARN_MORE_POSTINSTALL = 'https://shieldcortex.ai/docs/threats/malicious-scripts';
+const LEARN_MORE_MALICIOUS  = 'https://shieldcortex.ai/docs#dependency-scanner';
+const LEARN_MORE_TYPOSQUAT  = 'https://shieldcortex.ai/docs#dependency-scanner';
+const LEARN_MORE_POSTINSTALL = 'https://shieldcortex.ai/docs#dependency-scanner';
 
 // ── 1. Known Malicious Packages ─────────────────────────────────────────────
 
