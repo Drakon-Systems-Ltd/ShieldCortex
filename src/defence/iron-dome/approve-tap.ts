@@ -8,7 +8,13 @@
  * answer from a phone, for Hermes and Claude Code hosts. (OpenClaw hosts keep
  * their native approval channel, #220; nothing here touches OpenClaw.)
  *
- * ## The flow
+ * ## The flow (as intended end to end; steps 1-2 are not wired in 5.18.0)
+ *
+ * In this release the webhook card is still version 1 and carries no nonce:
+ * nothing calls `mintApproveTapNonce` from the guard yet, so no tap can be
+ * completed end to end. Steps 3-4 (the endpoint and `verifyApproveTap`) are
+ * what ships here; steps 1-2 describe the card side that lands with #815 A
+ * card version 2.
  *
  *   1. When a card is produced for a denial, the guard calls
  *      `mintApproveTapNonce({ actionId })`. It mints a single-use 128-bit

@@ -2720,8 +2720,12 @@ export interface ActionDescription {
   /** Which entries of `OUTSIDE_UNDERSTOOD_SUBSET` the command met. */
   doubts: readonly ShellDoubt[];
   /** #815 A: the key of the fixed webhook WHAT (`CARD_ACTION_TEMPLATES`)
-   *  that stands for this action. A key, never text from the input. */
-  actionClass: CardActionClass;
+   *  that stands for this action. A key, never text from the input.
+   *  Optional on the public type (`shieldcortex/defence`, #653): a consumer
+   *  built against 5.17.4 may still construct `{ text, confident, doubts }`.
+   *  Every producer in this module sets it; a reader treats a missing one
+   *  as `'tool'`, the generic template. */
+  actionClass?: CardActionClass;
 }
 
 /** The confidence gate's switch. Mutation checks only; nothing sets it off. */
@@ -3217,7 +3221,8 @@ export function fixedTemplateReason(text: unknown): string {
 export function buildTemplateApprovalCard(input: ApprovalCardInput): ApprovalCardSummary {
   let actionClass: CardActionClass = 'tool';
   try {
-    actionClass = describeAction(input).actionClass;
+    // A description with no class (the pre-5.18 public shape) is the generic template.
+    actionClass = describeAction(input).actionClass ?? 'tool';
   } catch {
     /* the generic template */
   }
