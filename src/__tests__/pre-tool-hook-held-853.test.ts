@@ -31,6 +31,17 @@ const REAL_DIST = join(repoRoot, 'dist');
 
 const DANGEROUS = { command: 'sudo modprobe softdog' };
 
+/**
+ * A hold needs the harness's own command line, read from /proc (Linux only):
+ * without it the hook cannot prove the harness timeout and, by design, never
+ * holds (#853 review CRITICAL). Tests that need a hold to happen — or that pin
+ * a reason only reachable once the harness IS proven — run on Linux only; off
+ * Linux the fail-safe itself is pinned instead (see `itOffLinux`).
+ */
+const HOLD_PLATFORM = process.platform === 'linux';
+const itHold = HOLD_PLATFORM ? it : it.skip;
+const itOffLinux = HOLD_PLATFORM ? it.skip : it;
+
 interface HookResult { decision?: string; reason?: string; stderr: string }
 type Row = Record<string, unknown>;
 
@@ -165,7 +176,7 @@ describe('#853 Plane A — the hook holds the original call under one card', () 
   };
   const outcomes = () => auditRows().map((r) => r.outcome);
 
-  it('Approve answers ALLOW to the same call — no denial, no grant left behind', () => {
+  itHold('Approve answers ALLOW to the same call — no denial, no grant left behind', () => {
     writeFileSync(decisionFile, JSON.stringify({ decision: 'allow-once' }));
     const r = runHook();
     expect(r.decision).toBe('allow');
@@ -190,7 +201,7 @@ describe('#853 Plane A — the hook holds the original call under one card', () 
     expect(JSON.parse(readFileSync(join(home, '.shieldcortex', 'holds', holds[0]), 'utf8'))).toMatchObject({ state: 'approved' });
   }, 40_000);
 
-  it('Deny answers DENY, and the same call right after gets no second card', () => {
+  itHold('Deny answers DENY, and the same call right after gets no second card', () => {
     const r = runHook();
     expect(r.decision).toBe('deny');
     expect(r.reason).toMatch(/HELD, then DENIED by the owner/);
@@ -212,7 +223,7 @@ describe('#853 Plane A — the hook holds the original call under one card', () 
     expect(outcomes()).not.toContain('denied_no_prompt_surface');
   }, 60_000);
 
-  it('a card that expires unanswered is a DENY that says so', () => {
+  itHold('a card that expires unanswered is a DENY that says so', () => {
     writeFileSync(decisionFile, JSON.stringify({ decision: null }));
     const r = runHook();
     expect(r.decision).toBe('deny');
@@ -223,7 +234,7 @@ describe('#853 Plane A — the hook holds the original call under one card', () 
     expect(outcomes()).not.toContain('denied_no_prompt_surface');
   }, 40_000);
 
-  it('a card that cannot be raised is a DENY that says nobody could approve it', () => {
+  itHold('a card that cannot be raised is a DENY that says nobody could approve it', () => {
     writeFileSync(failFlag, '1');
     const r = runHook();
     expect(r.decision).toBe('deny');
@@ -240,7 +251,7 @@ describe('#853 Plane A — the hook holds the original call under one card', () 
     expect(outcomes()).not.toContain('approved');
   }, 40_000);
 
-  it('a concurrent identical call gets NO second card while the first is held', async () => {
+  itHold('a concurrent identical call gets NO second card while the first is held', async () => {
     writeFileSync(slowFlag, '1');
     writeFileSync(decisionFile, JSON.stringify({ decision: 'allow-once' }));
     const first = spawn(claudeBin, [], { env: hookEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
@@ -264,7 +275,7 @@ describe('#853 Plane A — the hook holds the original call under one card', () 
     expect(parse(out1, err1).decision).toBe('allow');
   }, 40_000);
 
-  it('a harness timeout too short to hold safely keeps the old DENY, with no card', () => {
+  itHold('a harness timeout too short to hold safely keeps the old DENY, with no card', () => {
     writeHarnessTimeout(10);
     const r = runHook();
     expect(r.decision).toBe('deny');
@@ -365,6 +376,16 @@ describe('#853 Plane A — the hook holds the original call under one card', () 
 
   // ── #853 review (CRITICAL): hold only on a PROVEN harness budget ────────
 
+  itOffLinux('off Linux even a Claude Code parent with a hold-sized timeout is unproven: denied, no card, nothing approved', () => {
+    writeFileSync(decisionFile, JSON.stringify({ decision: 'allow-once' }));
+    const r = runHook();
+    expect(r.decision).toBe('deny');
+    expect(r.reason).toMatch(/could not prove how long Claude Code lets it run/);
+    expect(r.reason).toMatch(/Nothing ran/);
+    expect(cardParams()).toHaveLength(0);
+    expect(outcomes()).not.toContain('approved');
+  }, 40_000);
+
   it('no identifiable Claude Code parent (macOS, no /proc, unknown launcher): never held', () => {
     writeFileSync(decisionFile, JSON.stringify({ decision: 'allow-once' }));
     const r = runHook(DANGEROUS, 'bypassPermissions', 'none');
@@ -374,7 +395,7 @@ describe('#853 Plane A — the hook holds the original call under one card', () 
     expect(outcomes()).not.toContain('approved');
   }, 40_000);
 
-  it('a --settings override with a SHORTER timeout on the harness command line prevents the hold', () => {
+  itHold('a --settings override with a SHORTER timeout on the harness command line prevents the hold', () => {
     writeFileSync(decisionFile, JSON.stringify({ decision: 'allow-once' }));
     const override = join(home, 'override.json');
     writeFileSync(override, JSON.stringify({ hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: 'shieldcortex hook pre-tool', timeout: 10 }] }] } }));

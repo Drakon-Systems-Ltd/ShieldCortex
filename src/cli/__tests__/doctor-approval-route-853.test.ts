@@ -67,8 +67,14 @@ describe('doctor: approval route (#853)', () => {
     writeGuard({ enabled: true, enforce: true, notify: { enabled: true, openclaw: true } });
     writePreToolTimeout(135);
     const r = await check();
-    expect(r.status).toBe('pass');
-    expect(r.message).toMatch(/held up to 120s/);
+    if (process.platform === 'linux') {
+      expect(r.status).toBe('pass');
+      expect(r.message).toMatch(/held up to 120s/);
+    } else {
+      // Holds need the harness argv from /proc: off Linux nothing is held.
+      expect(r.status).toBe('warn');
+      expect(r.message).toMatch(/denied, not held/);
+    }
   });
 
   it('a card route with the old 10 s timeout warns that holds are impossible', async () => {
