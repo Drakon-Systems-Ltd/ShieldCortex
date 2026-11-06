@@ -301,10 +301,7 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
   });
 
   it('webhook denial body and denials.jsonl rows are byte-identical to main, plus the #815 card', () => {
-    // #853: a denial needs a card route configured (none → advisory). This
-    // build has no held-action module, so the hold fails closed to the
-    // denial whose webhook body and rows are pinned below.
-    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0, openclaw: true });
+    writeConfig({ webhookUrl: 'http://fake-webhook.invalid/hook', digestWindowMs: 0 });
     expect(runHook(SSH_READ, { permissionMode: 'bypassPermissions' }).decision).toBe('deny');
     const bodies = lines(webhookEvidence).map(normaliseWebhookBody).map(splitCard);
     expect(bodies.map((b) => b.rest)).toEqual([GOLDEN_WEBHOOK_DNP]);
