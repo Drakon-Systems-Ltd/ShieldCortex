@@ -33,6 +33,9 @@ export function cloudSync(threat: Record<string, unknown>, cfg: CloudSyncConfig)
     model: typeof threat.model === 'string' ? threat.model : undefined,
     reason: typeof threat.reason === 'string' ? threat.reason : undefined,
     ts: typeof threat.ts === 'string' ? threat.ts : undefined,
+    // Explicit. Do not spread `threat`: it can carry a matched span. The
+    // canonical builder drops any id that is not category:pattern.
+    injectionPatterns: Array.isArray(threat.injectionPatterns) ? threat.injectionPatterns : undefined,
   });
   if (!entry) return;
   const url = `${cfg.cloudBaseUrl || 'https://api.shieldcortex.ai'}/v1/audit/ingest`;
