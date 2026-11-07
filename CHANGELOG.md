@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **OpenClaw: an injection hit on llm_input now names the pattern (#1010).** The conversation-firewall audit row used to say only how many detections there were, so a false positive could not be traced to a rule. An in-process injection hit now also records `injectionPatterns`: up to 16 closed-set `category:pattern` ids. The matched text is still not stored. The MCP fallback still has no local detections to name. If cloud sync is on, those ids are the only extra field sent, and anything that is not a pattern id is dropped. Nothing about what the guard allows or blocks changes. Action Guard stays off by default.
+
 ## [5.18.1] - 2026-11-06
 
 Patch on 5.18.0. On OpenClaw, watch-only and enforce-when-ready shadow no longer deny a dangerous call just because a prompt injection was detected earlier in the session (#999, PR #1008). The guard had read the call in full, so watch-only now lets it proceed with a warning and shadow records it and lets it proceed, which stops these denials in cron and other headless runs. Enforcing installs are unchanged, and in every mode catastrophic calls and calls that touch the guard's own state or config are still held or denied. Calls the guard could not read in full still go to a human, or with no approver to the failure policy, which denies unless `interceptor.failurePolicy.high` is explicitly set to `allow`. The Claude Code hook is unchanged. No configuration or schema change; Action Guard stays off by default. Node floor unchanged.
