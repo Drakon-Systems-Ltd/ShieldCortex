@@ -11,6 +11,7 @@ import {
   needsAbsolutePathRepair,
   repairHookCommand,
 } from './hook-command-resolution.js';
+import { requiredPreToolTimeoutSeconds } from '../defence/iron-dome/held-action.js';
 
 // Resolved per call, not at import: an import-time constant freezes whichever
 // home os.homedir() saw when the module FIRST loaded, so any later redirection
@@ -49,8 +50,14 @@ const CORTEX_HOOKS: Record<string, HookEntry> = {
     // Enforce-by-default — the runtime opt-down lives in ~/.shieldcortex/
     // config.json (`actionGuard.enforce:false` → advisory, `enabled:false` →
     // off) so posture changes never require re-editing settings.json.
+    //
+    // #853: the timeout is sized for a HELD call — an approval card the
+    // owner answers while the hook keeps the original call pending. The hook
+    // reads this value back and holds only within it (minus a margin), so a
+    // timeout below this just makes the hold shorter or impossible, never
+    // lets the harness kill a hold (which would run the call, #884 C2).
     matcher: '*',
-    hooks: [{ type: 'command', command: 'shieldcortex hook pre-tool', timeout: 10 }],
+    hooks: [{ type: 'command', command: 'shieldcortex hook pre-tool', timeout: requiredPreToolTimeoutSeconds() }],
   },
 };
 

@@ -61,8 +61,11 @@ describe('source: the self-protection floor is not advisory and not shadowed', (
 
   it('Claude Code hook: advisory and shadow branches both exclude selfProtected', () => {
     const src = read('scripts', 'pre-tool-hook.mjs');
-    assert.match(src, /if \(shadow && !unscannedBlock && !selfProtected\)/);
-    assert.match(src, /if \(!cfg\.enforce && !unscannedBlock && !selfProtected\)/);
+    // #853: the floor is folded into `alwaysBlock` with the ruling §1
+    // always-block signals; pin that it still includes selfProtected.
+    assert.match(src, /const alwaysBlock = selfProtected \|\| rulingAlwaysBlockSignal;/);
+    assert.match(src, /if \(shadow && !unscannedBlock && !alwaysBlock\)/);
+    assert.match(src, /if \(!cfg\.enforce && !unscannedBlock && !alwaysBlock\)/);
     // Outage fallback: the floor is never advisory either.
     assert.match(src, /if \(!cfg\.enforce && !selfProtectSignal\)/);
   });

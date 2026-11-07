@@ -302,7 +302,8 @@ describe('#509 r7 req 3 — shadow behaviour on OpenClaw, and the floors in ever
       }).toEqual({
         catastrophic: 'blocked',
         exfil: 'blocked',
-        floorAttended: 'card',
+        // #853 ruling §1: always-block — never on a card, attended or not.
+        floorAttended: 'blocked',
         floorUnattended: 'blocked',
         schemaInvalid: 'card',
         lease: 'blocked',

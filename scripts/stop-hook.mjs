@@ -182,6 +182,12 @@ const GUARD_DEGRADED_OUTCOMES = new Set([
   'failure_denied',
   'warned',
   'failure_allowed',
+  // #853: held calls that did not run, and a hold whose outcome is unknown.
+  'held_denied',
+  'held_expired',
+  'held_card_failed',
+  'held_duplicate',
+  'hold_cancelled',
 ]);
 
 function cleanLogToken(value, max = 120) {

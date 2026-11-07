@@ -158,6 +158,8 @@ const RUN: Record<string, (doctor: Doctor) => Promise<unknown>> = {
   checkActionGuard: (d) => d.checkActionGuard(),
   checkRuntimePosture: (d) => d.checkRuntimePosture(),
   checkActionGuardReadiness: (d) => d.checkActionGuardReadiness(),
+  // #853: reads the enforced actionGuard view (integrity + policy lock).
+  checkApprovalRoute: (d) => d.checkApprovalRoute(),
   checkThreatGraph: (d) => d.checkThreatGraph(),
   // Run as on a box with no database (it returns at the prerequisite). Its
   // config read behind an open database is pinned by the call-site test

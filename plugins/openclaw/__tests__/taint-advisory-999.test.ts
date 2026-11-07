@@ -311,8 +311,11 @@ describe('#999 — floors that stay non-advisory in a tainted session', () => {
       const { i, audits } = build(posture);
       const r = await call(i, FLOOR_WRITE);
       expect(r.outcome).toBe('denied');
+      // #853 ruling §1: the self-protection floor is ALWAYS-BLOCK — denied up
+      // front as `auto_denied` (parity with the Claude Code hook), before any
+      // unattended/failure-policy exit. The taint escalation is still recorded.
       expect(audits.map((e) => ({ outcome: e.outcome, escalated: e.escalated }))).toEqual([
-        { outcome: 'failure_denied', escalated: TAINT_ESCALATION },
+        { outcome: 'auto_denied', escalated: TAINT_ESCALATION },
       ]);
     });
   }
