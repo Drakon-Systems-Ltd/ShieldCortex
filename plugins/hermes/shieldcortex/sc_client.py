@@ -139,7 +139,7 @@ _FALLBACK_SURFACE_KEYS = (
     "command", "cmd", "script", "code", "input", "shell", "run",
     # #509 r6 S2: typed-shell payload keys, kept in sync with the other two.
     "data", "text", "literal",
-    "path", "file_path", "filePath", "file", "target", "destination", "dir", "directory",
+    "path", "file_path", "filePath", "file", "target", "destination", "dir", "directory", "notebook_path",
     "url", "uri", "endpoint", "href", "host", "to",
 )
 
@@ -343,6 +343,7 @@ SELF_PROTECTION_SIGNALS = (
     "touch-decisions-ledger",
     "touch-guard-config",
     "disable-action-guard",
+    "touch-claude-transcript",
 )
 
 # The outage-scan shapes for those signals: the guard's own approval store
@@ -390,6 +391,9 @@ _FALLBACK_SELF_PROTECTION = [
     (re.compile(r"/etc/shieldcortex(?:\.conf\b|[\\/]|(?![\w.-]))", re.I), True),
     (re.compile(r"(?:^|[\s'\"=:(\\/])\.claude[\\/]+settings(?:\.local)?\.json\b", re.I), True),
     (re.compile(r"(?:^|[\s'\"=:(\\/])\.openclaw[\\/]+openclaw\.json\b", re.I), True),
+    # #923 r3: Claude Code session / subagent transcripts (not the memory/ dirs);
+    # the guard's CLAUDE_TRANSCRIPT_PATH_RE. Reads are inspection (lock_path).
+    (re.compile(r"\.claude[\\/]+projects[\\/]+(?:[^\s;&|<>'\"`]*?[\\/])?(?:subagents(?=$|[\\/\s;&|<>'\"`)])|[^\s;&|<>'\"`\\/]*\.jsonl\b)", re.I), True),
 ]
 
 # The hook's fallbackLockPathAccessIsReadOnly, ported: pure shell inspection

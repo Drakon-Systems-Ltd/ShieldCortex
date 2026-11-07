@@ -26,6 +26,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { performance } from 'node:perf_hooks';
 import { spawnSync } from 'node:child_process';
+import { claudeWordExpands, lexicalPathNormalise, shellWords } from '../../scripts/lib/shell-words.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const hookSrc = fs.readFileSync(path.join(repoRoot, 'scripts', 'pre-tool-hook.mjs'), 'utf-8');
@@ -44,6 +45,14 @@ const BUDGET_MS = 40;
 const SC = '~/.' + 'shieldcortex';
 const RM = 'r' + 'm';
 
+/** r8: since r7 the outage section calls the shared tokenizer the hook imports
+ *  (`import { lexicalPathNormalise as fallbackLexicalPathNormalise, shellWords as
+ *  fallbackShellWords } from './lib/shell-words.mjs'`). The evaluated slice has no
+ *  imports, so the REAL exports are handed in under the hook's own alias names.
+ *  r10: plus `claudeWordExpands as fallbackClaudeWordExpands`, the shared
+ *  expansion refusal. */
+const HOOK_SECTION_IMPORTS = ['fallbackShellWords', 'fallbackLexicalPathNormalise', 'fallbackClaudeWordExpands'] as const;
+
 type Match = (args: Record<string, unknown>, toolName?: string) => string | null;
 
 /** The hook is a script, not a module: its outage-fallback section is pure
@@ -54,7 +63,7 @@ function hookEntry(): { match: Match; cap: number } {
   const end = hookSrc.indexOf('// ==================== AUDIT (local JSONL)');
   expect(start).toBeGreaterThan(0);
   expect(end).toBeGreaterThan(start);
-  const api = new Function(`${hookSrc.slice(start, end)}\nreturn { match: fallbackSelfProtectionMatch, cap: FALLBACK_SCAN_CAP };`)();
+  const api = new Function(...HOOK_SECTION_IMPORTS, `${hookSrc.slice(start, end)}\nreturn { match: fallbackSelfProtectionMatch, cap: FALLBACK_SCAN_CAP };`)(shellWords, lexicalPathNormalise, claudeWordExpands);
   return api as { match: Match; cap: number };
 }
 
@@ -180,7 +189,11 @@ describe('#509 r8 — the capped entry point stays inside its budget on patholog
         const { ms, result } = best(() => match({ command: text }, 'Bash'));
         return { surface, shape, ms, signal: result };
       });
-      expect(report.map((r) => ({ ...r, under: r.ms < BUDGET_MS }))).toEqual(report.map((r) => ({ ...r, signal: null, under: true })));
+      // #923 r12: a scan that runs out of budget refuses unconditionally, so
+      // a pathological shape may come back as the transcript floor (a
+      // documented false freeze), never as any other match.
+      const ok = (s: unknown) => (s === 'touch-claude-transcript' ? null : s);
+      expect(report.map((r) => ({ ...r, signal: ok(r.signal), under: r.ms < BUDGET_MS }))).toEqual(report.map((r) => ({ ...r, signal: null, under: true })));
     }
   });
 });
