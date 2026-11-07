@@ -4287,7 +4287,9 @@ export function closedReadPipelineMask(execCommand: string, command: string, raw
  * an interpreter or shell on the far end of a pipe, a writing option, or a
  * word naming a credential path is never blanked and is judged exactly as
  * before. The read-only stages are:
- *   - the closed-set reads (`stagesAreClosedSetReads`, not a writing `jq`);
+ *   - the closed-set reads (`stagesAreClosedSetReads`, not a writing `jq`,
+ *     and not a `jq`/`grep` whose program or pattern comes from a FILE:
+ *     `READONLY_PROGRAM_FILE_OPTION_RE`, see `readOnlyStageLoadsProgramFile`);
  *   - `sed` printing lines: only the print-style scripts of
  *     `READONLY_SED_SCRIPT_RE`, no in-place, script-file or extra options;
  *   - `find` using only the predicates in `READONLY_FIND_PREDICATES` (so none
@@ -4385,13 +4387,49 @@ function readOnlyAwkStage(argv: string[]): boolean {
     && noOptionWordsAfter(argv, i + 1);
 }
 
+/**
+ * #629 review (CASE, #994): the closed-set grammar only refuses `--opt=value`
+ * and a writing `jq`, so a `jq` or `grep` whose PROGRAM or PATTERN is loaded
+ * from a file — the same class `readOnlySedStage`/`readOnlyAwkStage` refuse
+ * with `-f` — was still blanked, and the file operand (`<delete-verb>.jq`)
+ * was hidden from every later rule. Per verb, the option spellings that load
+ * a program, pattern list or module path:
+ *   - `jq`: `-f`/`--from-file` (jq 1.7 honours `f` anywhere in a short
+ *     cluster, so `-rf x.jq` is `-r -f x.jq`), and `-L`/`--library-path`,
+ *     which jq takes only as a word prefix (`-L dir` or `-Ldir`);
+ *   - `grep`/`egrep`/`fgrep`: `-f`/`--file`, as its own word, glued
+ *     (`-fpats`) or inside a cluster (`-rf pats`).
+ * The short form is refused wherever the letter sits in the cluster, and the
+ * long form with or without `=`, so a spelling the regex does not model fails
+ * closed. Checked BEFORE the grammar, so no later rule in the mask sees a
+ * stage of this shape as a read. The #874 relief (`closedReadPipelineMask`)
+ * is unchanged: its per-verb flag classes already refuse these.
+ */
+const READONLY_PROGRAM_FILE_OPTION_RE: Record<string, RegExp> = {
+  jq: /^(?:-[^-]*f|-L|--from-file(?:=|$)|--library-path(?:=|$))/,
+  grep: /^(?:-[^-]*f|--file(?:=|$))/,
+  egrep: /^(?:-[^-]*f|--file(?:=|$))/,
+  fgrep: /^(?:-[^-]*f|--file(?:=|$))/,
+};
+function readOnlyStageLoadsProgramFile(argv: string[]): boolean {
+  const re = READONLY_PROGRAM_FILE_OPTION_RE[argv[0] ?? ''];
+  if (!re) return false;
+  for (const w of argv.slice(1)) {
+    if (w === '--') return false; // everything after is an operand
+    if (re.test(w)) return true;
+  }
+  return false;
+}
+
 function readOnlyInspectionStageIsRead(argv: string[]): boolean {
   switch (argv[0]) {
     case 'sed': return readOnlySedStage(argv);
     case 'find': return readOnlyFindStage(argv);
     case 'awk': return readOnlyAwkStage(argv);
     case 'gh': return readOnlyGhStage(argv);
-    default: return stagesAreClosedSetReads([argv]) && !closedReadStageMayWrite(argv);
+    default:
+      return !readOnlyStageLoadsProgramFile(argv)
+        && stagesAreClosedSetReads([argv]) && !closedReadStageMayWrite(argv);
   }
 }
 

@@ -43,6 +43,14 @@ const STILL_FLAGGED: Array<[string, string]> = [
   ['read of a credential file', `cat ~/.ssh/id_rsa`],
   ['gh api write', `gh api -X DELETE repos/x/y`],
   ['xargs writer', `grep -l x . | xargs ${WIPE}`],
+  // #994 review: a program or pattern loaded FROM A FILE is the class the
+  // sed/awk stages already refuse; the file operand must stay visible.
+  ['jq program from a file named after a delete verb', `jq -f ${RM}.jq data.json`],
+  ['jq --from-file of the same', `jq --from-file ${RM}.jq data.json`],
+  ['jq -f inside a short cluster', `jq -rf ${RM}.jq data.json`],
+  ['grep pattern file named after a delete verb', `grep -f ${RM}.pat f`],
+  ['grep --file of the same', `grep --file ${RM}.pat f`],
+  ['find -exec on a normal tree', `find src -name "*.sh" -exec ${WIPE} {} +`],
 ];
 
 describe('#629 read-only inspection false positives', () => {
@@ -82,6 +90,53 @@ describe('#629 real writes and unsafe forms stay gated', () => {
 
   it('plain sed/awk reads, with or without a -- operand marker, are still read-only', () => {
     for (const cmd of [`sed -n 1p f`, `sed -n 1p -- f`, `awk '{print $1}' f`, `awk -F: '{print $1}' -- f`]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).not.toBeNull();
+    }
+  });
+
+  // #994 review (CASE): the closed-set path refused only `--opt=value`, so a
+  // jq/grep whose PROGRAM or PATTERN is loaded from a file was blanked and the
+  // file operand hidden from every later rule. Every spelling: own word, long
+  // form with and without `=`, glued, and anywhere inside a short cluster.
+  it('the mask never blanks a jq/grep stage whose program or pattern comes from a file', () => {
+    for (const cmd of [
+      `jq -f p.jq d.json`, `jq --from-file p.jq d.json`, `jq --from-file=p.jq d.json`,
+      `jq -rf p.jq d.json`, `jq -nf p.jq`, `jq -cfr p.jq d.json`,
+      `jq -L lib -n 1`, `jq -Llib -n 1`, `jq --library-path lib -n 1`, `jq --library-path=lib -n 1`,
+      `jq . d.json -f p.jq`,
+      `grep -f pats f`, `grep --file pats f`, `grep --file=pats f`, `grep -fpats f`,
+      `grep -rf pats .`, `grep -nf pats f`, `grep -if pats f`, `grep x f -f pats`,
+      `egrep -f pats f`, `fgrep -f pats f`, `egrep --file pats f`, `fgrep -rf pats .`,
+      `cat f | jq -f p.jq`, `cat f | grep -f pats`,
+    ]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+    }
+  });
+
+  it('jq/grep reads whose program or pattern is on the command line are still read-only', () => {
+    for (const cmd of [
+      `jq . d.json`, `jq -r .a d.json`, `jq -c '.a | length' d.json`,
+      `grep -n x f`, `grep -e x f`, `grep -F x f`, `grep -L x f`, `grep -rn x src`,
+      // after `--` a dash word is an operand (the pattern), not an option
+      `grep -n -- -f f`,
+    ]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).not.toBeNull();
+    }
+  });
+
+  it('the mask ignores find -delete and -exec on a normal (non-root) tree', () => {
+    for (const cmd of [
+      `find src -name "x.log" -delete`, `find src -type f -name "x.log" -delete`,
+      // braces quoted: an unquoted `{` is vetoed command-wide before the find
+      // grammar runs, so these reach READONLY_FIND_PREDICATES and fail there
+      `find src -type f -exec cat "{}" +`, `find src -name "x" -exec y "{}" ";"`,
+      `find src -name "x.log" -execdir y "{}" +`, `find src -name "x.log" -ok y "{}" +`,
+      `find src -type f -exec cat {} +`,
+    ]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+    }
+    // ...while the same predicates in read-only form on the same tree are blanked.
+    for (const cmd of [`find src -name "x.log"`, `find src -type f -name "x.log" -print`]) {
       expect(readOnlyInspectionMask(cmd, cmd, cmd)).not.toBeNull();
     }
   });
