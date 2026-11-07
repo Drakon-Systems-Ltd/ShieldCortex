@@ -7,6 +7,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **OpenClaw: an injection hit on llm_input now names the pattern (#1010).** The conversation-firewall audit row used to say only how many detections there were, so a false positive could not be traced to a rule. An in-process injection hit now also records `injectionPatterns`: up to 16 closed-set `category:pattern` ids. The matched text is still not stored. The MCP fallback still has no local detections to name. If cloud sync is on, those ids are the only extra field sent, and anything that is not a pattern id is dropped. Nothing about what the guard allows or blocks changes. Action Guard stays off by default.
 ### Documentation
 - **5.18.1 notes: state which unread calls keep the strict path.** The 5.18.1 entry said every call the guard "could not read in full" still skips the watch-only and shadow exits. That holds only for the #436 class: schema-rejected input and an exhausted command-evidence budget. A taint-escalated dangerous call that carries `opaque-script-invocation` or `opaque-command-substitution` now warns (watch-only) or is shadowed, as it already did in an untainted session. The entry now says so. No code change.
 
