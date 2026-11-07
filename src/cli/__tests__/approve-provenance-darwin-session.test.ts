@@ -103,18 +103,69 @@ describe('darwinSessionLeaderFromPs', () => {
       expect(darwinSessionLeaderFromPs('garbage\n300 Ss\n')).toBe(0);
       expect(darwinSessionLeaderFromPs('300 Ss\ngarbage\n')).toBe(0);
     });
-    it.each(['0 Ss\n', '-1 Ss\n', '12a Ss\n', '0300 Ss\n', '1.5 Ss\n', '1e3 Ss\n'])(
-      'invalid pid in %j rejects',
-      (rows) => {
-        expect(darwinSessionLeaderFromPs(rows)).toBe(0);
+    // Each invalid row sits beside a valid, distinct leader (pid 100, which
+    // alone elects) so the assertion proves whole-table refusal, not merely
+    // that a table with no leader yields 0.
+    it.each(['0 Ss\n', '-1 Ss\n', '12a Ss\n', '0300 Ss\n', '1.5 Ss\n', '1e3 Ss\n', '+300 Ss\n', '300 Ss\n'])(
+      'invalid pid in %j rejects the table whether the leader comes before or after it',
+      (row) => {
+        expect(darwinSessionLeaderFromPs('100 Ss\n')).toBe(100);
+        expect(darwinSessionLeaderFromPs(`100 Ss\n${row}`)).toBe(0);
+        expect(darwinSessionLeaderFromPs(`${row}100 Ss\n`)).toBe(0);
       },
     );
-    it.each(['300 ss\n', '300 s\n', '300 +s\n', '300 Q+\n', '300 S?\n', '300 Ss+s\n', '300 Sss\n', '300 S+s+\n', '300 sS\n'])(
-      'invalid STAT in %j rejects',
-      (rows) => {
-        expect(darwinSessionLeaderFromPs(rows)).toBe(0);
+    it.each(['300 ss\n', '300 s\n', '300 +s\n', '300 Q+\n', '300 S?\n', '300 Ss+s\n', '300 Sss\n', '300 S+s+\n', '300 sS\n', '300 ?s?\n', '300 HH\n'])(
+      'invalid STAT in %j rejects the table whether the leader comes before or after it',
+      (row) => {
+        expect(darwinSessionLeaderFromPs(`100 Ss\n${row}`)).toBe(0);
+        expect(darwinSessionLeaderFromPs(`${row}100 Ss\n`)).toBe(0);
       },
     );
+    // Apple's printer (adv_cmds ps/print.c `state()`) emits the flags in one
+    // fixed order — `<` or `N`, then `X`, `E`, `V`, `L`, `s`, `+` — and never
+    // emits the man page's `>`, `A`, `S`, `W`. A STAT outside that grammar is
+    // not something `ps` printed, so the table is not the evidence we asked for.
+    it.each(['300 Ss<\n', '300 S+s\n', '300 SsN\n', '300 R+<\n', '300 SLX\n', '300 S<N\n', '300 SN<\n'])(
+      'flags out of the printer\'s order in %j reject the table',
+      (row) => {
+        expect(darwinSessionLeaderFromPs(`100 Ss\n${row}`)).toBe(0);
+        expect(darwinSessionLeaderFromPs(`${row}100 Ss\n`)).toBe(0);
+      },
+    );
+    it.each(['300 SW\n', '300 S>\n', '300 SA\n', '300 IsW\n', '300 SS\n', '300 SWs\n'])(
+      'a flag the printer never emits in %j rejects the table',
+      (row) => {
+        expect(darwinSessionLeaderFromPs(`100 Ss\n${row}`)).toBe(0);
+        expect(darwinSessionLeaderFromPs(`${row}100 Ss\n`)).toBe(0);
+      },
+    );
+    // `ps -t <tty> -o pid=,stat=` without -M prints one row per process, so a
+    // pid that appears twice is a table that is not what we asked for. It is
+    // rejected before election — not deduplicated, not first-or-last-wins —
+    // because two rows for one pid are two stories about which process that
+    // is, and electing from either is electing from contradicted evidence.
+    describe('a duplicate pid rejects the whole lookup before election', () => {
+      it('conflicting rows for one pid, leader first', () => {
+        expect(darwinSessionLeaderFromPs('300 Ss\n300 S+\n')).toBe(0);
+      });
+      it('conflicting rows for one pid, leader last', () => {
+        expect(darwinSessionLeaderFromPs('300 S+\n300 Ss\n')).toBe(0);
+      });
+      it('the conflicting row arriving after other valid rows', () => {
+        expect(darwinSessionLeaderFromPs('300 Ss\n301 S+\n300 R+\n')).toBe(0);
+      });
+      it('duplicate non-leader rows beside a single leader', () => {
+        expect(darwinSessionLeaderFromPs('300 Ss\n301 S+\n301 S+\n')).toBe(0);
+        expect(darwinSessionLeaderFromPs('301 S+\n301 R+\n300 Ss\n')).toBe(0);
+      });
+      it('identical duplicate leader rows', () => {
+        expect(darwinSessionLeaderFromPs('300 Ss\n300 Ss\n')).toBe(0);
+        expect(darwinSessionLeaderFromPs('300 Ss\n301 S+\n300 Ss\n')).toBe(0);
+      });
+      it('distinct pids with the same STAT are not duplicates', () => {
+        expect(darwinSessionLeaderFromPs('300 Ss\n301 S+\n302 S+\n')).toBe(300);
+      });
+    });
     it('a malformed row rejects even when the parseable rows would refuse anyway', () => {
       expect(darwinSessionLeaderFromPs('100 Ss\n200 Ss\n300\n')).toBe(0);
     });
@@ -129,22 +180,51 @@ describe('darwinSessionLeaderFromPs', () => {
       expect(darwinSessionLeaderFromPs('300 Ss\r\n301 S+\r\n')).toBe(300);
       expect(darwinSessionLeaderFromPs('300 Ss')).toBe(300);
     });
-    it.each(['Ss', 'Ss+', 'Is', 'Is+', 'Ss<', 'SsN', 'Ts', 'Us', 'Rs+', 'Ss+<', 'IsW', 'Zs'])(
+    it.each(['Ss', 'Ss+', 'Is', 'Is+', 'S<s', 'SNs', 'Ts', 'Us', 'Rs+', 'S<s+', 'ILs', 'Zs', 'SXEVLs+', 'S<XEVLs+', 'TNs', 'U<s+'])(
       'leader STAT %j is recognised',
       (stat) => {
         expect(darwinSessionLeaderFromPs(`300 ${stat}\n301 S+\n`)).toBe(300);
       },
     );
-    it.each(['S', 'S+', 'R+', 'I', 'T', 'U', 'Z', 'SN', 'S<', 'S>', 'SA', 'SE', 'SL', 'SV', 'SW', 'SX', 'R+<'])(
+    it.each(['S', 'S+', 'R+', 'I', 'T', 'U', 'Z', 'SN', 'S<', 'SE', 'SL', 'SV', 'SX', 'R<+', 'SXEVL+', 'Z<', 'SNXEVL+'])(
       'non-leader STAT %j is valid and not a leader',
       (stat) => {
         expect(darwinSessionLeaderFromPs(`300 ${stat}\n`)).toBe(0);
         expect(darwinSessionLeaderFromPs(`300 ${stat}\n301 Ss\n`)).toBe(301);
       },
     );
-    it('the uppercase S flag (FIFO page replacement) is not the lowercase leader mark', () => {
+    // Apple's `ps` can print two run states the man page omits: `H` (halted,
+    // mach_state_table index 6) and `?` (index 7: the task could not be read,
+    // which is the initial state and the one left when task_read_for_pid
+    // fails). The `s` flag comes from kinfo_proc, not the task, so a leader
+    // whose task is unreadable prints `?s` — and a table that merely contains
+    // such a row was being refused outright (TARS, PR #1000 review).
+    describe('Apple run states H and ? are valid', () => {
+      it.each(['Hs', 'Hs+', '?s', '?s+', 'H<s', '?Ns+', 'HLs'])('leader STAT %j is recognised', (stat) => {
+        expect(darwinSessionLeaderFromPs(`300 ${stat}\n301 S+\n`)).toBe(300);
+        expect(darwinSessionLeaderFromPs(`301 S+\n300 ${stat}\n`)).toBe(300);
+      });
+      it.each(['H', 'H+', '?', '?+', 'H<', '?N+'])('non-leader STAT %j beside one Ss leader', (stat) => {
+        expect(darwinSessionLeaderFromPs(`300 Ss\n301 ${stat}\n`)).toBe(300);
+        expect(darwinSessionLeaderFromPs(`301 ${stat}\n300 Ss\n`)).toBe(300);
+        expect(darwinSessionLeaderFromPs(`301 ${stat}\n`)).toBe(0);
+      });
+      it('the reviewer\'s reproductions elect the leader', () => {
+        expect(darwinSessionLeaderFromPs('300 Ss\n301 H\n')).toBe(300);
+        expect(darwinSessionLeaderFromPs('300 Hs\n301 S+\n')).toBe(300);
+        expect(darwinSessionLeaderFromPs('300 Ss\n301 ?\n')).toBe(300);
+      });
+      it('H and ? are run states, not flags: they are only valid first', () => {
+        expect(darwinSessionLeaderFromPs('100 Ss\n300 SH\n')).toBe(0);
+        expect(darwinSessionLeaderFromPs('100 Ss\n300 S?\n')).toBe(0);
+        expect(darwinSessionLeaderFromPs('100 Ss\n300 ?H\n')).toBe(0);
+      });
+    });
+    it('the uppercase S (the man page\'s FIFO page replacement) is neither the leader mark nor a flag ps prints', () => {
       expect(darwinSessionLeaderFromPs('300 SS\n')).toBe(0);
-      expect(darwinSessionLeaderFromPs('300 SS\n301 Ss\n')).toBe(301);
+      // Not read as a non-leader beside a leader: the printer never emits
+      // `S`, so the row is not ps output and the table rejects whole.
+      expect(darwinSessionLeaderFromPs('300 SS\n301 Ss\n')).toBe(0);
     });
     it('a large but real pid is accepted', () => {
       expect(darwinSessionLeaderFromPs('99998 Ss\n')).toBe(99998);
@@ -209,6 +289,42 @@ describe('macOS — discovery failures refuse', () => {
     const { v } = verdict(SSH, 450, { ttyOutput: '401 nonsense\n450 S+\n' });
     expect(v.ok).toBe(false);
     expect(v.reason).toBe('no-session-leader');
+  });
+  it('a tty table with flags outside the printer\'s grammar refuses', () => {
+    expect(verdict(SSH, 450, { ttyOutput: '401 Ss\n450 SW+\n' }).v.reason).toBe('no-session-leader');
+    expect(verdict(SSH, 450, { ttyOutput: '401 S+s\n450 S+\n' }).v.reason).toBe('no-session-leader');
+  });
+  describe('a tty table with a duplicate pid refuses instead of electing from it', () => {
+    it.each([
+      '401 Ss\n401 S+\n450 S+\n', // conflicting rows for the leader pid, leader first
+      '401 S+\n401 Ss\n450 S+\n', // conflicting rows for the leader pid, leader last
+      '401 Ss\n450 S+\n450 R+\n', // conflicting rows for a non-leader pid
+      '401 Ss\n450 S+\n450 S+\n', // identical duplicate non-leader rows
+      '401 Ss\n401 Ss\n450 S+\n', // identical duplicate leader rows
+    ])('%j', (ttyOutput) => {
+      const { v } = verdict(SSH, 450, { ttyOutput });
+      expect(v.ok).toBe(false);
+      expect(v.reason).toBe('no-session-leader');
+    });
+    it('the same table without the duplicate passes (the refusal is the duplicate, not the shape)', () => {
+      expect(verdict(SSH, 450, { ttyOutput: '401 Ss\n450 S+\n' }).v).toMatchObject({ ok: true, reason: null });
+    });
+  });
+  describe('Apple run states H and ? on our tty do not break discovery', () => {
+    it('a halted non-leader beside the login shell (the reviewer\'s reader-level reproduction)', () => {
+      expect(verdict(SSH, 450, { ttyOutput: '401 Ss\n450 H+\n' }).v).toMatchObject({ ok: true, reason: null });
+    });
+    it('a leader whose task could not be read prints ?s and is still the leader', () => {
+      expect(verdict(SSH, 450, { ttyOutput: '401 ?s\n450 S+\n' }).v).toMatchObject({ ok: true, reason: null });
+      expect(verdict(SSH, 450, { ttyOutput: '401 ?s+\n450 S+\n' }).v).toMatchObject({ ok: true, reason: null });
+    });
+    it('a halted leader', () => {
+      expect(verdict(SSH, 450, { ttyOutput: '401 Hs\n450 S+\n' }).v).toMatchObject({ ok: true, reason: null });
+      expect(verdict(SSH, 450, { ttyOutput: '401 Hs+\n450 ?+\n' }).v).toMatchObject({ ok: true, reason: null });
+    });
+    it('an unreadable-task row that is not the leader', () => {
+      expect(verdict(SSH, 450, { ttyOutput: '401 Ss\n450 ?\n' }).v).toMatchObject({ ok: true, reason: null });
+    });
   });
   it('our own process unreadable refuses', () => {
     const { v } = verdict(SSH, 9999);

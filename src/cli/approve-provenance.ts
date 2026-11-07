@@ -239,9 +239,15 @@ function readProcLinux(pid: number): ProcInfo | null {
  * header, an extra column — and a leader picked from the rows that did parse
  * is a leader picked from partial evidence. Such a table yields 0. Only
  * formatting is ignored: blank lines, padding, a trailing CR.
+ *
+ * The same holds for a pid that appears twice. Without `-M` ps prints one
+ * row per process, so two rows for one pid are two accounts of what that
+ * process is; the table is rejected before election rather than deduplicated
+ * or resolved first- or last-wins, whichever row carries the `s`.
  */
 export function darwinSessionLeaderFromPs(lines: string): number {
   const leaders: number[] = [];
+  const seen = new Set<number>();
   for (const line of lines.split('\n')) {
     if (line.trim() === '') continue;
     const m = /^\s*(\S+)\s+(\S+)\s*$/.exec(line);
@@ -249,6 +255,8 @@ export function darwinSessionLeaderFromPs(lines: string): number {
     const pid = parseDarwinPid(m[1]);
     const stat = parseDarwinStat(m[2]);
     if (pid === null || stat === null) return 0;
+    if (seen.has(pid)) return 0;
+    seen.add(pid);
     if (stat.leader) leaders.push(pid);
   }
   return leaders.length === 1 ? leaders[0] : 0;
@@ -262,25 +270,35 @@ function parseDarwinPid(field: string): number | null {
 }
 
 /**
- * BSD `stat` per macOS ps(1): one run-state letter (I R S T U Z) followed by
- * zero or more flag letters, each printed at most once: `+` foreground, `<`
- * raised priority, `>` over soft memory limit, `A` random page replacement,
- * `E` exiting, `L` pages locked, `N` reduced priority, `S` FIFO page
- * replacement, `s` session leader, `V` vfork-suspended, `W` swapped out, `X`
- * traced. Only the lowercase `s` marks a leader; anything outside this
- * grammar is not a STAT field, however many `s` characters it contains.
+ * BSD `stat` as Apple's ps prints it, taken from the formatter rather than
+ * the man page (apple-oss-distributions/adv_cmds, ps/print.c `state()` and
+ * ps/tasks.c `mach_state_table[] = " RUSITH?"`; identical in adv_cmds-153
+ * and main). One run-state character, then flags in the printer's fixed
+ * order, each at most once:
+ *
+ *   run state  `T` stopped, `Z` zombie, else the task's state: `R` running,
+ *              `U` uninterruptible, `S` sleeping, `I` idle, `H` halted, `?`
+ *              task unreadable (the initial value, left when
+ *              task_read_for_pid fails)
+ *   `<` | `N`  nice below / above zero
+ *   `X`        traced
+ *   `E`        exiting (suppressed for zombies)
+ *   `V`        vfork-suspended
+ *   `L`        pages locked
+ *   `s`        session leader
+ *   `+`        foreground process group on its controlling terminal
+ *
+ * `H` and `?` are run states the man page omits; the `s` flag comes from
+ * kinfo_proc, not the task, so a leader whose task cannot be read prints
+ * `?s`. The man page's `>`, `A`, `S` and `W` are never printed. Only the
+ * lowercase `s` marks a leader; anything outside this grammar is not a STAT
+ * field `ps` produced, however many `s` characters it contains.
  */
-const BSD_RUN_STATE = /^[IRSTUZ]/;
-const BSD_STAT_FLAGS = new Set(['+', '<', '>', 'A', 'E', 'L', 'N', 'S', 's', 'V', 'W', 'X']);
+const BSD_STAT = /^[HIRSTUZ?][<N]?X?E?V?L?(s)?\+?$/;
 
 function parseDarwinStat(field: string): { leader: boolean } | null {
-  if (!BSD_RUN_STATE.test(field)) return null;
-  const seen = new Set<string>();
-  for (const flag of field.slice(1)) {
-    if (!BSD_STAT_FLAGS.has(flag) || seen.has(flag)) return null;
-    seen.add(flag);
-  }
-  return { leader: seen.has('s') };
+  const m = BSD_STAT.exec(field);
+  return m === null ? null : { leader: m[1] !== undefined };
 }
 
 /** Runs `ps` with these args and returns stdout; throws on any failure. */
