@@ -232,14 +232,55 @@ function readProcLinux(pid: number): ProcInfo | null {
  * `s` process on our tty. None, more than one, or a query that fails all
  * yield sid 0, which the verdict refuses: discovery failing must never read
  * as a clean session.
+ *
+ * The evidence is read whole or not at all (#698). `ps -t <tty> -o pid=,stat=`
+ * prints one `<pid> <stat>` row per process and no header, so any other
+ * nonblank row means the table is not what we asked for — truncated, a
+ * header, an extra column — and a leader picked from the rows that did parse
+ * is a leader picked from partial evidence. Such a table yields 0. Only
+ * formatting is ignored: blank lines, padding, a trailing CR.
  */
 export function darwinSessionLeaderFromPs(lines: string): number {
   const leaders: number[] = [];
   for (const line of lines.split('\n')) {
-    const m = /^\s*(\d+)\s+(\S+)\s*$/.exec(line);
-    if (m && m[2].includes('s')) leaders.push(Number(m[1]));
+    if (line.trim() === '') continue;
+    const m = /^\s*(\S+)\s+(\S+)\s*$/.exec(line);
+    if (!m) return 0;
+    const pid = parseDarwinPid(m[1]);
+    const stat = parseDarwinStat(m[2]);
+    if (pid === null || stat === null) return 0;
+    if (stat.leader) leaders.push(pid);
   }
   return leaders.length === 1 ? leaders[0] : 0;
+}
+
+/** A pid as ps prints it: decimal digits, no sign, no leading zero, never 0. */
+function parseDarwinPid(field: string): number | null {
+  if (!/^[1-9]\d*$/.test(field)) return null;
+  const pid = Number(field);
+  return Number.isSafeInteger(pid) ? pid : null;
+}
+
+/**
+ * BSD `stat` per macOS ps(1): one run-state letter (I R S T U Z) followed by
+ * zero or more flag letters, each printed at most once: `+` foreground, `<`
+ * raised priority, `>` over soft memory limit, `A` random page replacement,
+ * `E` exiting, `L` pages locked, `N` reduced priority, `S` FIFO page
+ * replacement, `s` session leader, `V` vfork-suspended, `W` swapped out, `X`
+ * traced. Only the lowercase `s` marks a leader; anything outside this
+ * grammar is not a STAT field, however many `s` characters it contains.
+ */
+const BSD_RUN_STATE = /^[IRSTUZ]/;
+const BSD_STAT_FLAGS = new Set(['+', '<', '>', 'A', 'E', 'L', 'N', 'S', 's', 'V', 'W', 'X']);
+
+function parseDarwinStat(field: string): { leader: boolean } | null {
+  if (!BSD_RUN_STATE.test(field)) return null;
+  const seen = new Set<string>();
+  for (const flag of field.slice(1)) {
+    if (!BSD_STAT_FLAGS.has(flag) || seen.has(flag)) return null;
+    seen.add(flag);
+  }
+  return { leader: seen.has('s') };
 }
 
 /** Runs `ps` with these args and returns stdout; throws on any failure. */
