@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.18.2] - 2026-11-07
+
+Patch on 5.18.1. On macOS, `shieldcortex approve` now refuses when it cannot read the terminal's process table whole, instead of picking a session leader from the rows it could read (#698, PR #1000). The 5.18.1 notes now say which unread calls keep the strict path. No change on Linux or other platforms, to same-UID authentication or to Action Guard defaults; macOS approval provenance now rejects malformed terminal-process evidence. No configuration or schema change; Action Guard stays off by default. Node floor unchanged.
+
+### Security
+- **macOS: `approve` no longer picks a session leader from a process table it could only partly read (#698).** To check that `shieldcortex approve` was started by a person, not an agent, the provenance check finds the session leader on the controlling terminal from `ps -t <tty> -o pid=,stat=`. The parser used to skip any row it could not read and treat any second field containing an `s` as the leader mark. So a cut-off table (`300 Ss` followed by a bare `400`), a row with an extra column, or a field such as `nonsense` could still produce a leader. The table is now read whole or not at all. Every nonblank row must be exactly `<pid> <stat>`. The pid must be a positive decimal with no sign or leading zero. The stat must match the format Apple's `ps` prints: one run state (`H I R S T U Z ?`) and then the optional flags in `ps`'s own order, each at most once. A pid may appear only once. Only a lowercase `s` flag marks a leader. Anything else, including no leader or more than one, gives sid 0, and `approve` refuses with `no-session-leader` as before. Blank lines, padding and a trailing CR are still allowed. Tests cover the malformed tables above, invalid pid and stat rows, valid leader and non-leader controls, and the macOS process reader on a raw tty table. Linux is unchanged, and so are same-UID authentication and the rest of the approval path. The runtime pty probe (#685) is separate.
+
 ### Documentation
 - **5.18.1 notes: state which unread calls keep the strict path.** The 5.18.1 entry said every call the guard "could not read in full" still skips the watch-only and shadow exits. That holds only for the #436 class: schema-rejected input and an exhausted command-evidence budget. A taint-escalated dangerous call that carries `opaque-script-invocation` or `opaque-command-substitution` now warns (watch-only) or is shadowed, as it already did in an untainted session. The entry now says so. No code change.
 
