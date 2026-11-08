@@ -31,9 +31,6 @@ if (typeof rootVersion !== 'string' || rootVersion.length === 0) {
   process.exit(1);
 }
 
-// Deliberately NOT a target: skills/shieldcortex/bundled/openclaw-plugin/openclaw.plugin.json
-// is the frozen 4.31.2 snapshot shipped beside that release's index.js (#881).
-// Stamping the release version on it would claim code it does not contain.
 const targets = [
   { label: 'plugins/openclaw/package.json', path: pluginPkgPath },
   { label: 'plugins/openclaw/openclaw.plugin.json', path: pluginManifestPath },

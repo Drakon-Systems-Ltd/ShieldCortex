@@ -374,7 +374,22 @@ jobs:
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
           RELEASE_VERSION: ${{ steps.tag.outputs.version }}
-        run: node scripts/clawhub-sync.mjs --wait 30
+        run: |
+          # Exit 2 = uploaded or submitted but held (security scan / moderation
+          # queue): surface it as a warning naming the version, not a red step.
+          # Any other non-zero exit (1 never landed, 3 unreadable) stays a failure.
+          set +e
+          node scripts/clawhub-sync.mjs --wait 30
+          code=$?
+          set -e
+          if [ "$code" -eq 2 ]; then
+            v="${RELEASE_VERSION#v}"
+            echo "::warning title=ClawHub: held in review::shieldcortex $v was submitted but ClawHub is still serving an older version (pending security scans / review). Inspect the findings with: clawhub scan download shieldcortex --version $v"
+            echo "### ⏳ ClawHub: shieldcortex $v held in review" >> "$GITHUB_STEP_SUMMARY"
+            echo "Run \`clawhub scan download shieldcortex --version $v\` to read the scan findings. Do not republish." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          exit "$code"
 
       - name: Skip ClawHub sync (missing token)
         if: env.HAS_CLAWHUB_TOKEN != 'true'

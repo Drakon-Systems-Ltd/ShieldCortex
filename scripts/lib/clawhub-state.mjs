@@ -108,7 +108,7 @@ export function describeState({ state, latest, target, waitedMs = 0, submitted =
         `⏳ The clawhub CLI reported ${target} submitted and pending security scans, but ClawHub ` +
         `is still serving '${latest || 'none'}'${waited} and does not list ${target} yet. ` +
         `That is not proof the upload failed, and not proof it will go public. ` +
-        `Check https://clawhub.ai/skills/shieldcortex; do not republish ${target} while its scan may still be running.`
+        `Check https://clawhub.ai/skills/shieldcortex, and read the scan findings with \`clawhub scan download shieldcortex --version ${target}\`; do not republish ${target} while its scan may still be running.`
       );
     case 'unknown':
       return (

@@ -43,11 +43,31 @@ export interface HostGatePlanes {
   signedEnforce: boolean;
   /** Signed config enabled, even in warn-mode. OpenClaw liveGating uses this today. */
   signedEnabled: boolean;
+  /**
+   * #878: the signed posture is unknown — it depends on a signature adoption
+   * that has not happened (an unsigned config.json, or one behind a symlink,
+   * which is never adopted). `signedEnabled`/`signedEnforce` are then false
+   * but mean "not proven", and the headline says `unknown`, never `off`. The
+   * runtime holds an unadoptable file at the strict posture.
+   */
+  signedUnknown?: boolean;
   claudeWired: boolean;
   openclaw: OpenClawGatePosture;
+  /**
+   * #922: the `Action guard posture` row's verdict (hook, plugin and Hermes
+   * self-report). When set, `mixed` is exactly a FAIL of that row. Unset, the
+   * headline falls back to the hook/plugin rule below.
+   */
+  postureMismatch?: boolean;
+  /**
+   * #922: the posture the hook and plugin agree on (Hermes excluded), when the
+   * verdict is supplied. `on` then needs it to enforce, so a box where both
+   * planes resolve advisory is not headed "Guard on".
+   */
+  postureNodeReference?: 'off' | 'advisory' | 'enforce-when-ready' | 'enforce' | null;
 }
 
-export type GuardHeadline = 'off' | 'on' | 'mixed' | 'advisory';
+export type GuardHeadline = 'off' | 'on' | 'mixed' | 'advisory' | 'unknown';
 
 export interface HostTableDeps {
   openclawBinaryPresent?: (home: string) => boolean;
@@ -167,8 +187,9 @@ export function claudeToolGateWired(homeArg?: string): boolean {
 }
 
 /**
- * Headline for the HOSTS table. `mixed` is one bound plane enforcing and
- * another bound plane observe-only/off — not "Guard off". `advisory` (#874)
+ * Headline for the HOSTS table. `mixed` is the #922 `Action guard posture`
+ * row failing (planes disagree) when that verdict is supplied, else one bound
+ * plane enforcing and another observe-only/off — not "Guard off". `advisory` (#874)
  * is no plane enforcing while the Claude Code hook is wired and the signed
  * guard is enabled in Watch only: that hook still scans, warns, and denies the
  * catastrophic tier and the self-protection floor, so "off" was untrue.
@@ -177,8 +198,17 @@ export function guardHeadlineFromPlanes(planes: HostGatePlanes): GuardHeadline {
   const claudeEnforcing = planes.claudeWired && planes.signedEnforce;
   const ocEnforcing = planes.signedEnabled && planes.openclaw === 'enforcing';
   const ocObserve = planes.openclaw === 'observe-only' || planes.openclaw === 'off';
-  if (claudeEnforcing && ocObserve) return 'mixed';
-  if (claudeEnforcing || ocEnforcing) return 'on';
+  if (planes.postureMismatch === true) return 'mixed';
+  // #878: an unknown signed posture is not off, whatever the planes below say.
+  if (planes.signedUnknown === true) return 'unknown';
+  const agreed = planes.postureMismatch === false ? planes.postureNodeReference ?? null : null;
+  if (agreed !== null) {
+    // #922: the resolved hook/plugin posture decides `on`.
+    if (agreed === 'enforce' || agreed === 'enforce-when-ready') return 'on';
+  } else {
+    if (planes.postureMismatch === undefined && claudeEnforcing && ocObserve) return 'mixed';
+    if (claudeEnforcing || ocEnforcing) return 'on';
+  }
   if (claudePlaneAdvisory(planes)) return 'advisory';
   return 'off';
 }
@@ -410,16 +440,19 @@ export function wiredHosts(table: HostTable): HostRow[] {
 
 /** The legend under the HOSTS table when a row shows a gate word (#651). */
 export const HOST_TABLE_GATE_LEGEND: readonly string[] = [
-  '  Header Guard on/off/mixed/advisory: configured Claude Code hook and OpenClaw plugin only (not Hermes,',
-  '  not a live check). mixed = Claude Code enforcing, OpenClaw observe-only/off; on = otherwise one',
-  '  enforcing (OpenClaw counts only with signed actionGuard.enabled); advisory = neither enforcing,',
-  '  Claude Code hook in Watch only; off = neither enforcing and the Claude Code hook not in Watch only',
+  '  Header Guard on/off/mixed/advisory: configured posture, not a live check. mixed = the Action guard',
+  '  posture row fails: the Claude Code hook and OpenClaw plugin disagree, or a Hermes self-report is',
+  '  looser than them. Otherwise: on = the hook and plugin agree on enforce (when unresolved: one',
+  '  enforcing; OpenClaw counts only with signed actionGuard.enabled); advisory = not on,',
+  '  Claude Code hook in Watch only; off = not on and the Claude Code hook not in Watch only',
   '  (OpenClaw observe-only does not make the header advisory).',
   '  Word after a host: its own configured gate. OpenClaw observe-only = entry not disabled but not',
   '  armed to block (enforce false, or actionGuard/interceptor disabled); off = entry disabled.',
   '  Claude Code advisory = hook wired, signed guard on in Watch only (ordinary dangerous calls run',
   '  with a logged warning; catastrophic calls and changes to the guard itself are still denied);',
   '  Claude Code off = hook wired, signed guard not on.',
+  '  unknown (header or Claude Code) = the signed posture depends on a signature not yet adopted',
+  '  (an unsigned or symlinked config.json; see the config integrity row) — not off.',
 ];
 
 export function formatHostTable(table: HostTable, version?: string, planes?: HostGatePlanes): string[] {
@@ -427,7 +460,8 @@ export function formatHostTable(table: HostTable, version?: string, planes?: Hos
   const headline = planes ? guardHeadlineFromPlanes(planes) : 'off';
   const guardLabel = headline === 'on' ? 'Guard on'
     : headline === 'mixed' ? 'Guard mixed'
-      : headline === 'advisory' ? 'Guard advisory' : 'Guard off';
+      : headline === 'advisory' ? 'Guard advisory'
+        : headline === 'unknown' ? 'Guard unknown' : 'Guard off';
   lines.push(version ? `ShieldCortex  ${version}    ${guardLabel}` : `ShieldCortex    ${guardLabel}`);
   lines.push('');
   const width = Math.max(...table.rows.map((r) => r.label.length), 10);
@@ -443,7 +477,7 @@ export function formatHostTable(table: HostTable, version?: string, planes?: Hos
   // row actually shows a gate word. Display only — changes no posture. #651 r2:
   // the words below describe `guardHeadlineFromPlanes` and
   // `openclawGatePosture` as they are — observe-only is a collapsed label that
-  // includes a disabled guard or interceptor, and Hermes feeds no plane.
+  // includes a disabled guard or interceptor. #922: Hermes feeds only `mixed`.
   if (table.rows.some((r) => rowGatePosture(r, planes) !== undefined)) {
     lines.push('');
     lines.push(...HOST_TABLE_GATE_LEGEND);
@@ -461,6 +495,7 @@ function rowGatePosture(r: HostRow, planes?: HostGatePlanes): string | undefined
   if (!planes || !r.present || r.kind !== 'bound') return undefined;
   if (r.id === 'claude') {
     if (!planes.claudeWired) return undefined;
+    if (planes.signedUnknown === true) return 'unknown';
     return planes.signedEnforce ? 'enforcing' : claudePlaneAdvisory(planes) ? 'advisory' : 'off';
   }
   if (r.id === 'openclaw') {

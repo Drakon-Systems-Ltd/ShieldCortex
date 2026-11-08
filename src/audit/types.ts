@@ -26,6 +26,12 @@ export interface AuditFinding {
   matchedText?: string;
   /** URL to learn more about this finding category */
   learnMoreUrl?: string;
+  /** Structured location for tool-description findings (never parse `title`). */
+  toolName?: string;
+  /** Structured field name, e.g. "description" or "inputSchema.<prop>.description". */
+  field?: string;
+  /** Detector indicators, e.g. "instruction:...", "skill:...", "encoding:...". */
+  indicators?: string[];
 }
 
 // ── Scanner Result ──

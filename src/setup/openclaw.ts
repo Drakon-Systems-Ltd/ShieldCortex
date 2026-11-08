@@ -12,6 +12,7 @@ import os from 'os';
 import { execSync, spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { gatewayRestartAdvice, gatewayBootLogAdvice } from './gateway-restart-command.js';
+import { nextCausalSeq } from './causal-seq.js';
 import {
   resolveRealtimePluginInstallPath,
   resolveRealtimeProjectDir,
@@ -36,6 +37,7 @@ import { acquireUpdateLock, stageAndPublish, type UpdateLock } from './host-swap
 import { helpGate } from '../cli/help-gate.js';
 import { COMMAND_HELP_SPECS } from '../cli/wants-help.js';
 import { resolveConversationAccessConsent } from './conversation-access-consent.js';
+import { withOwnConfigWrite } from '../audit/agent-config-watch-own-write.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -783,7 +785,8 @@ function cleanupLegacyPlugin(): void {
     if (config.plugins && Object.keys(config.plugins).length === 0) delete config.plugins;
 
     if (changed) {
-      fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+      // #916: ShieldCortex's own write of a watched config records its own baseline.
+      withOwnConfigWrite(configPath, () => { const out = JSON.stringify(config, null, 2) + '\n'; fs.writeFileSync(configPath, out, 'utf-8'); return out; });
       console.log('Cleaned up legacy plugin entries from openclaw.json');
     }
   } catch {
@@ -1094,7 +1097,7 @@ export function trustLocalPlugin(
 
     config.plugins = newPlugins;
 
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+    withOwnConfigWrite(configPath, () => { const out = JSON.stringify(config, null, 2) + '\n'; fs.writeFileSync(configPath, out, 'utf-8'); return out; });
     return true;
   } catch {
     return false;
@@ -1785,7 +1788,7 @@ function uninstallPlugin(): boolean {
         if (config.plugins?.entries?.[pluginId]) {
           delete config.plugins.entries[pluginId];
         }
-        fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+        withOwnConfigWrite(configPath, () => { const out = JSON.stringify(config, null, 2) + '\n'; fs.writeFileSync(configPath, out, 'utf-8'); return out; });
       }
     }
     fs.rmSync(destDir, { recursive: true });
@@ -1981,6 +1984,10 @@ async function writeOpenClawInstall(
   home: string,
   locked: ReadonlySet<string>,
 ): Promise<void> {
+  // #977 review: a restart reused from before this moment did not load
+  // anything written below. A causal ticket, not epoch ms — a restart in the
+  // same millisecond as this line would otherwise tie with it.
+  const writesStartedSeq = nextCausalSeq();
   const hooksDirs = findAllHooksDirs(locked);
   // Every write below this line that touches `~/.openclaw` — the config
   // cleanup, the snapshot, the plugin, the registration, the restart — is
@@ -2214,8 +2221,21 @@ async function writeOpenClawInstall(
     const { restartOpenClawGateway } = await import('./deep-clean.js');
     const result = await restartOpenClawGateway();
     console.log('');
-    if (result.restarted) {
+    if (result.restarted && result.reused) {
+      // #977: one restart per process — a second exec would land mid-stop.
+      // But a restart from before these writes did not load them: say so.
+      if (result.requestedSeq === undefined || result.requestedSeq < writesStartedSeq) {
+        console.warn('OpenClaw gateway was already restarted earlier in this run, before this install —');
+        console.warn('not restarting it twice in one run. Restart it once more so the new plugin/hook take effect:');
+        console.warn(`  ${gatewayRestartAdvice()}`);
+      } else {
+        console.log('OpenClaw gateway was already restarted earlier in this run; not restarting it again.');
+      }
+    } else if (result.restarted) {
       console.log(`OpenClaw gateway restarted via ${result.method}.`);
+    } else if (result.timedOut) {
+      console.warn(`OpenClaw gateway restart via ${result.method} timed out; the gateway may still be restarting.`);
+      console.warn('Check it with `shieldcortex doctor` before restarting it again.');
     } else if (result.attempted) {
       console.warn(`OpenClaw gateway restart via ${result.method} failed: ${result.detail ?? 'unknown'}`);
       console.warn('Restart it manually so the new plugin/hook take effect:');
@@ -2801,8 +2821,12 @@ export async function repairOpenClawPlugin(): Promise<void> {
       if (installs && Object.prototype.hasOwnProperty.call(installs, pluginId)) {
         delete installs[pluginId];
         const tmp = `${configPath}.tmp`;
-        fs.writeFileSync(tmp, JSON.stringify(current, null, 2), 'utf-8');
-        fs.renameSync(tmp, configPath);
+        withOwnConfigWrite(configPath, () => {
+          const out = JSON.stringify(current, null, 2);
+          fs.writeFileSync(tmp, out, 'utf-8');
+          fs.renameSync(tmp, configPath);
+          return out;
+        });
         console.log(`  ✓ cleared hooks.internal.installs.${pluginId} (legacy 4.18.3 hook-pack pin)`);
       } else {
         console.log(`  (no hooks.internal.installs.${pluginId} entry to clear)`);
@@ -2860,8 +2884,12 @@ export async function repairOpenClawPlugin(): Promise<void> {
 
       // Atomic write.
       const tmp = `${configPath}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(current, null, 2), 'utf-8');
-      fs.renameSync(tmp, configPath);
+      withOwnConfigWrite(configPath, () => {
+        const out = JSON.stringify(current, null, 2);
+        fs.writeFileSync(tmp, out, 'utf-8');
+        fs.renameSync(tmp, configPath);
+        return out;
+      });
       console.log('Restored customer plugin config:');
       if (configSnapshot.entry) console.log(`  ✓ plugins.entries.${pluginId} restored`);
       if (configSnapshot.allowed) console.log(`  ✓ plugins.allow membership restored`);

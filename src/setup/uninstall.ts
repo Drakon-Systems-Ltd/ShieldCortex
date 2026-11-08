@@ -18,6 +18,7 @@ import { uninstallHermes } from './hermes.js';
 import { uninstallCopilot } from './copilot.js';
 import { looksLikeShieldcortex } from './json-config.js';
 import { formatKeptSummary } from './uninstall-manifest.js';
+import { withOwnConfigWrite } from '../audit/agent-config-watch-own-write.js';
 import { helpGate } from '../cli/help-gate.js';
 
 /**
@@ -129,7 +130,7 @@ export function removeHooks(): void {
   }
 
   if (removed > 0) {
-    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+    withOwnConfigWrite(SETTINGS_PATH, () => { const out = JSON.stringify(settings, null, 2) + '\n'; fs.writeFileSync(SETTINGS_PATH, out, 'utf-8'); return out; });
     console.log(`Hooks: removed ${removed} hook(s) from ~/.claude/settings.json`);
   } else {
     console.log('Hooks: no ShieldCortex hooks found in settings.json.');
@@ -203,7 +204,7 @@ export function removeMcpEntry(): void {
   }
 
   delete config.mcpServers.memory;
-  fs.writeFileSync(mcpPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  withOwnConfigWrite(mcpPath, () => { const out = JSON.stringify(config, null, 2) + '\n'; fs.writeFileSync(mcpPath, out, 'utf-8'); return out; });
   console.log('MCP: removed shieldcortex entry from ~/.claude.json.');
 }
 
@@ -343,6 +344,9 @@ export async function uninstallAll(options?: {
       if (gateway) {
         if (gateway.restarted) {
           console.log(`\nOpenClaw gateway restarted via ${gateway.method}.`);
+        } else if (gateway.timedOut) {
+          console.warn(`\nOpenClaw gateway restart via ${gateway.method} timed out; the gateway may still be restarting.`);
+          console.warn('Check it with `shieldcortex doctor` before restarting it again.');
         } else if (gateway.attempted) {
           console.warn(`\nOpenClaw gateway restart via ${gateway.method} failed: ${gateway.detail ?? 'unknown'}`);
           console.warn('Restart it manually for the cleanup to take effect.');

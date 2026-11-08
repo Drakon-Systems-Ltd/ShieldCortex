@@ -14,6 +14,10 @@ export function isTaintingScanSummary(summary: string | undefined | null): boole
   const lower = s.toLowerCase();
   if (lower === 'unknown' || lower === 'none' || lower === 'clean') return false;
   if (lower.includes('scan unavailable') || lower.includes('unscanned')) return false;
+  // Credential exposure is a data finding, not instruction steering. Match
+  // ONLY the scanner's complete credential-only grammar: any extra layer
+  // (including an appended L2 detection) retains the existing taint policy.
+  if (/^THREAT in "[^"\r\n]*" response: credentials: \d+ finding\(s\)(?: \(\d+(?:\.\d+)?ms\))?$/i.test(s)) return false;
   if (/\b(critical|high|medium|low)\b/i.test(s)) return true;
   if (/\bthreat\b/i.test(s)) return true;
   if (/\bdetections?\b/i.test(s) && /\d+/.test(s)) return true;

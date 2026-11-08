@@ -126,9 +126,12 @@ import {
 // loaded with a runtime `import()` inside runDoctorAiSection() below, so a
 // plain `shieldcortex doctor` never touches either module.
 import {
-  getActionGuardCoreConfig,
+  ConfigIntegrityRefusal,
+  configPostureOutlook,
+  describeAdoptionBlock,
   getConfigDir,
   hasTrustedMemorySidecarPosture,
+  inspectActionGuardCoreConfig,
   inspectConfigIntegrity,
   readRawConfig,
   migrateInterceptorActionGuardAlias,
@@ -140,6 +143,7 @@ import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/opencl
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
 import type { DoctorExplainerOutcome } from '../defence/iron-dome/doctor-explainer.js';
 import { normaliseWebhookUrl } from '../defence/iron-dome/notify-config.js';
+import { approveTapDoctorRow } from '../defence/iron-dome/approve-tap.js';
 import { DEFAULT_IRON_DOME_CONFIG, type IronDomeConfig } from '../defence/iron-dome/config.js';
 import { sharedSensitivitySqlPredicate } from '../defence/sensitivity/isolation.js';
 import {
@@ -164,6 +168,14 @@ import {
   type OpenClawGatePosture,
 } from '../setup/host-table.js';
 import { collectPostureRecords, type CollectOptions } from '../posture/collect.js';
+import { openClawEffectiveHome } from '../setup/openclaw-effective-home.js';
+import {
+  GUARD_POSTURE_LABEL,
+  guardPostureRow,
+  readGuardPosture,
+  type PostureReport,
+  type ReadPostureOptions,
+} from '../guard/posture-switch.js';
 import {
   postureLevel,
   renderPostureLine,
@@ -212,6 +224,8 @@ export interface CheckResult {
   fixNoteWithCommands?: true;
   /** See DoctorReportItem.verboseNote — printed only with --verbose. */
   verboseNote?: string;
+  /** See DoctorReportItem.postureUnknown (#878) — the report prints this row's own fix. */
+  postureUnknown?: true;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
@@ -1270,7 +1284,8 @@ export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promis
         opened = true;
       }
     }
-    const report = verifyLedger(db, { heartbeatIntervalMs: resolveLedgerConfig().heartbeatIntervalMs });
+    // #878: read-only — doctor never adopts, mints or self-heals the config.
+    const report = verifyLedger(db, { heartbeatIntervalMs: resolveLedgerConfig({ readOnly: true }).heartbeatIntervalMs });
     const message = summariseLedgerReport(report);
     if (report.status === 'inconsistent') {
       if (allProblemsAreLegacyProjectBackfill(report)) {
@@ -1565,8 +1580,9 @@ export async function checkThreatGraph(
 
   // Config gate first: a deliberately disabled projector accrues lag by
   // design and must not WARN forever. `opts.enabled` is a test seam only.
-  const { isThreatGraphEnabled } = await import('../cloud/config.js');
-  const enabled = opts.enabled ?? isThreatGraphEnabled();
+  // Read-only (#878): doctor never adopts or self-heals the config it reports on.
+  const { isThreatGraphEnabled, readRawConfig: readConfig } = await import('../cloud/config.js');
+  const enabled = opts.enabled ?? isThreatGraphEnabled(readConfig({ readOnly: true }));
   if (!enabled) {
     return { label, status: 'info', message: 'disabled by config (threatGraph.enabled=false)' };
   }
@@ -1810,7 +1826,7 @@ async function checkSchema(): Promise<CheckResult> {
  */
 export function runMemoryStatsCheck(
   dbPath: string,
-  config: Pick<MemoryConfig, 'maxShortTermMemories' | 'maxLongTermMemories'> = resolveMemoryConfig(),
+  config: Pick<MemoryConfig, 'maxShortTermMemories' | 'maxLongTermMemories'> = resolveMemoryConfig(undefined, { readOnly: true }),
 ): CheckResult {
   const prerequisite = databasePrerequisite('Memories', dbPath);
   if (prerequisite) return prerequisite;
@@ -2273,10 +2289,11 @@ export async function checkAutoMemoryHooks(): Promise<CheckResult[]> {
   let samplingTurns = 5;
   try {
     const cfg = await import('../cloud/config.js');
-    const enable = cfg.getAutoMemoryEnableConfig();
+    // Read-only (#878): doctor never adopts or self-heals the config it reports on.
+    const raw = cfg.readRawConfig({ readOnly: true });
+    const enable = cfg.getAutoMemoryEnableConfig(raw);
     gateStop = enable.enableStop;
     gateSessionEnd = enable.enableSessionEnd;
-    const raw = cfg.readRawConfig();
     const am = raw.autoMemory && typeof raw.autoMemory === 'object'
       ? raw.autoMemory as Record<string, unknown>
       : {};
@@ -3451,9 +3468,10 @@ export const HERMES_PLUGIN_COPIES_LABEL = 'Hermes plugin copies';
 const HERMES_UNDETERMINED_FIX =
   'Install Hermes, or point the doctor at its python. Until Hermes\' own discovery can be ' +
   'reached this row cannot say which copy the gateway loads, and ' +
-  '`--fix-hermes-plugin-copies` moves nothing. The interpreter is looked for at ' +
-  '`$HERMES_HOME/hermes-agent/.venv/bin/python3`, then at the shebang of the `hermes` ' +
-  'launcher on PATH.';
+  '`--fix-hermes-plugin-copies` moves nothing. Hermes is asked through its launcher at ' +
+  '`$HERMES_HOME/hermes-agent/.hermes/bin/hermes`, then through the `hermes` launcher on ' +
+  'PATH, and only then through the legacy `$HERMES_HOME/hermes-agent/.venv` Python — which is ' +
+  'skipped when it is older than the launcher.';
 
 /** The remedy for "part of the tree could not be read", said once (#569 r6). */
 const HERMES_UNREADABLE_FIX =
@@ -4828,22 +4846,35 @@ function openclawGatePosture(live: ReturnType<typeof readOpenClawPluginGuardLive
 
 /** #536: any live enforcing plane, not only the OpenClaw plugin flags. */
 export function readHostGatePlanes(hostHome?: string): HostGatePlanes {
-  let signedEnabled = false;
-  let signedEnforce = false;
-  try {
-    const core = getActionGuardCoreConfig();
-    signedEnabled = core.enabled;
-    signedEnforce = core.enabled && core.enforce;
-  } catch {
-    signedEnabled = false;
-    signedEnforce = false;
-  }
+  // #878: the side-effect-free reader. getActionGuardCoreConfig() adopts an
+  // unsigned file and self-heals a stale signature, so doctor asking the
+  // question used to change the file it was reporting on. A posture that
+  // depends on an adoption not yet made is `signedUnknown`, never "off".
+  const core = inspectActionGuardCoreConfig();
+  const signedUnknown = core === 'unknown';
+  const signedEnabled = !signedUnknown && core.enabled;
+  const signedEnforce = !signedUnknown && core.enabled && core.enforce;
   return {
     signedEnabled,
     signedEnforce,
+    ...(signedUnknown ? { signedUnknown: true } : {}),
     claudeWired: claudeToolGateWired(hostHome),
     openclaw: openclawGatePosture(readOpenClawPluginGuardLive()),
   };
+}
+
+/**
+ * #922: the planes plus the posture row's verdict, so the header says
+ * `Guard mixed` exactly when the `Action guard posture` row FAILs.
+ */
+export function readHostGatePlanesWithPosture(hostHome?: string): HostGatePlanes {
+  const planes = readHostGatePlanes(hostHome);
+  try {
+    const report = readGuardPosture({ home: hostHome });
+    return { ...planes, postureMismatch: report.verdict === 'mismatch', postureNodeReference: report.nodeReference };
+  } catch {
+    return planes;
+  }
 }
 
 // ── Check: runtime posture (#613) ──────────────────────
@@ -4892,6 +4923,35 @@ export async function checkRuntimePosture(opts: CollectOptions = {}): Promise<Ch
         ' self-reports are host-local evidence, not attestation — full records: `shieldcortex policy-evidence`',
   });
   return rows;
+}
+
+// ── Check: Action Guard posture across planes (#922) ──
+/**
+ * One row for the EFFECTIVE posture of every present gate plane: the Claude
+ * Code hook, the OpenClaw plugin (entry merged over the signed config, then the
+ * lock) and Hermes (its #613 self-report only — Hermes does not read
+ * config.json). Hook and plugin disagreeing, or Hermes looser than them, is a
+ * FAIL. Hermes tighter than them is shown, not failed. Off / advisory stay
+ * `warn` with the old "do not enable from this warning" text. Read-only.
+ */
+export function checkGuardPosture(
+  opts: { read?: ReadPostureOptions; pluginOffFix?: string; report?: PostureReport } = {},
+): CheckResult {
+  let report: PostureReport;
+  try {
+    report = opts.report ?? readGuardPosture(opts.read);
+  } catch (err) {
+    return {
+      label: GUARD_POSTURE_LABEL,
+      status: 'warn',
+      message: `the Action Guard posture could not be read (${(err as Error).message})`,
+    };
+  }
+  const row = guardPostureRow(report);
+  if (row.status === 'warn' && opts.pluginOffFix && row.fix?.startsWith('Action Guard is advisory')) {
+    return { ...row, fix: opts.pluginOffFix };
+  }
+  return row;
 }
 
 export async function checkActionGuard(): Promise<CheckResult[]> {
@@ -4947,6 +5007,16 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     return results;
   }
 
+  // #922: one posture row for every gate plane, replacing the signed-only
+  // disabled / warn-mode rows. Same resolver as `shieldcortex guard posture`.
+  // Ahead of the config parse below: that parse throws on a malformed
+  // config.json, and the posture reader handles one itself.
+  const pluginLive = readOpenClawPluginGuardLive();
+  const pluginOff = pluginPlaneDisarmed(pluginLive);
+  const pluginOffFix =
+    'Do not add a webhook and do not enable Action Guard from this line. Signed config, plugin entry, and running interceptor are three planes. Headless denials staying local is expected while Guard is off.';
+  results.push(checkGuardPosture({ pluginOffFix: pluginOff ? pluginOffFix : undefined }));
+
   // 2. Config resolution (#209). Both surfaces now resolve ONE effective
   //    config: top-level `actionGuard` governs, `interceptor.actionGuard` is
   //    a deprecated per-key gap-fill alias, top-level wins on conflict. This
@@ -4969,7 +5039,14 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     // #647: and on a tampered file the enforced posture is the strict one —
     // the same view every runtime reader gets — so this row agrees with the
     // integrity row instead of grading bytes nothing enforces.
-    const trusted = inspectConfigIntegrity().verdict === 'tampered' ? applyStrictFailClosedPosture(onDisk) : onDisk;
+    // #878: the outlook comes from the one integrity report. An unsigned file
+    // that cannot be adopted has an UNKNOWN signed posture: its own values
+    // (enabled:false, enforce:false) are not graded as if in force, and the
+    // rows below say unknown rather than "disabled" or "warn-mode".
+    const integrity = inspectConfigIntegrity();
+    const outlook = configPostureOutlook(integrity);
+    const signedUnknown = outlook === 'unknown';
+    const trusted = outlook === 'strict' ? applyStrictFailClosedPosture(onDisk) : onDisk;
     const raw = applyPolicyLock(trusted, readPolicyLock({ audit: false, warn: false }));
     const isBlock = isConfigBlock;
     const top = isBlock(raw?.actionGuard) ? (raw.actionGuard as Record<string, unknown>) : null;
@@ -4979,33 +5056,8 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       : null;
     const merged = { ...(alias ?? {}), ...(top ?? {}) };
     const effective = { enabled: merged.enabled === true, enforce: merged.enforce !== false };
-    // Which key set this value — top-level when it has the key, else the alias.
-    const provenance = (k: string) =>
-      top && k in top ? `actionGuard.${k}` : `interceptor.actionGuard.${k}`;
-    const pluginLive = readOpenClawPluginGuardLive();
-    const pluginOff = pluginPlaneDisarmed(pluginLive);
     const planes = readHostGatePlanes();
     const claudeGating = claudePlaneEnforcing(planes);
-    const pluginOffFix =
-      'Do not add a webhook and do not enable Action Guard from this line. Signed config, plugin entry, and running interceptor are three planes. Headless denials staying local is expected while Guard is off.';
-
-    if (!effective.enabled) {
-      results.push({
-        label: `${label} config`,
-        status: 'warn',
-        message: `Action Guard is disabled in config (\`${provenance('enabled')}: false\`) — tool calls are not gated on either surface`,
-        fix: 'Action Guard is off. That is the default. Do not enable Action Guard from this warning. Do not add a webhook.',
-      });
-    } else if (!effective.enforce) {
-      results.push({
-        label: `${label} config`,
-        status: 'warn',
-        message: `Action Guard runs in warn-mode (\`${provenance('enforce')}: false\`) on both surfaces — dangerous ops log but are not gated (catastrophic still blocks)`,
-        fix: pluginOff
-          ? pluginOffFix
-          : 'Action Guard is advisory. Do not run --action-guard-enforce from this warning. Enable only after the review loop says yes.',
-      });
-    }
 
     // #242 Defect B: enforce-on + no notify channel is how unattended denials
     // vanished for eight days while lastRunStatus stayed ok.
@@ -5053,7 +5105,8 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       // Denial-capable sink for unattended/DNP path = enabled notify + a
       // webhook URL the transport will actually deliver to.
       const denialSink = notifyOn && webhook !== undefined;
-      const signedArmed = effective.enabled && effective.enforce;
+      // #878: an unknown signed posture is not proven armed (nor off).
+      const signedArmed = !signedUnknown && effective.enabled && effective.enforce;
       // "Armed" = signed enabled + enforce AND any live plane is gating.
       // OpenClaw plugin-off is not a live gate (#501 / Jarvis 5.0.6).
       // Claude Code PreToolUse wired + signed Enforce IS a live gate (#536).
@@ -5085,7 +5138,10 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
         // hosts stay WARN: under-configured, not enforcing. Plugin-off stays
         // WARN (Jarvis 5.0.6: leftover signed Enforce is not a live gate).
         const status: CheckResult['status'] = armed ? 'fail' : 'warn';
-        const prefix = claudeGating && pluginOff
+        const prefix = signedUnknown
+          ? `Action Guard's signed posture is unknown (${describeAdoptionBlock(integrity.adoption ?? 'unknown')}; ` +
+            'see the config integrity row), and whatever it resolves to, it would run with'
+          : claudeGating && pluginOff
           ? 'Action Guard is enforcing on the Claude Code hook (OpenClaw plugin is observe-only/off) with'
           : pluginOff && signedArmed
           ? 'Action Guard signed config says Enforce, but the OpenClaw plugin is off, and, when re-enabled, would run with'
@@ -5102,10 +5158,16 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
           'for live require_approval holds) and does not replace the webhook for DNP. ' +
           'The CLI writes a signed config — hand-editing config.json invalidates its integrity signature and ' +
           "forces strict mode. OpenClaw lastRunStatus is not ShieldCortex's to write.";
+        // #815 A: the same fact in plain English, on the armed row only — the
+        // row that says this host is not safe as configured. Once per row; the
+        // row itself is one per doctor run.
+        const plainArmed = armed
+          ? ' In plain terms: when Action Guard blocks something while nobody is at a prompt, nobody is told.'
+          : '';
         results.push({
           label: `${label} notify`,
           status,
-          message: webhookRejected
+          message: (webhookRejected
             ? // The value is never echoed: it may be junk pasted from anywhere.
               `${prefix} no denial-capable notify sink (actionGuard.notify.webhookUrl is set but is not an ` +
               `http(s) URL the notify transport will deliver to` +
@@ -5122,8 +5184,17 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
                   `actionGuard.notify.webhookUrl is set but notify.enabled is not true, so the transport is off`
                 : `actionGuard.notify.webhookUrl unset${notifyOn ? '' : ', notify.enabled is not true'}`) +
               `) — unattended denials stay in the audit log and session-guard index only. ` +
-              `The #242 cron incidents were this shape.`,
-          fix: armed ? webhookFix : pluginOffFix,
+              `The #242 cron incidents were this shape.`) + plainArmed,
+          fix: armed
+            ? webhookFix
+            : signedUnknown
+              ? 'The signed Action Guard posture is unknown until config.json can be adopted: resolve the config ' +
+                'integrity row first. Do not enable Action Guard from this line.'
+              : pluginOffFix,
+          // #878: armed is false whenever signedUnknown, so this row's fix is
+          // the unknown one above; the report must print it, not a
+          // "Guard is off" step matched from the notify wording.
+          ...(signedUnknown ? { postureUnknown: true as const } : {}),
         });
       }
 
@@ -5134,6 +5205,13 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       // harden or hold, but the human path is still the notify path.
       // Broker reporting stays gated on armed, exactly as before this change —
       // un-gating the DENIAL SINK check is the scope; the broker block is not.
+      // #815 B: one-tap approve. Silent unless `approveTap.enabled` is true;
+      // then one WARN line when it cannot arm (same-UID secret and the rest,
+      // in plain English), one INFO line when it can. Never FAIL, never
+      // writes config.
+      const tapRow = approveTapDoctorRow(merged.approveTap);
+      if (tapRow) results.push({ label: `${label} one-tap approve`, ...tapRow });
+
       const brokerBlock = armed && isBlock(merged.broker) ? merged.broker : null;
       if (brokerBlock) {
         results.push(
@@ -5217,9 +5295,10 @@ export function policyLockRows(): CheckResult[] {
   // Guard off, the OpenClaw plugin was off, and this row still FAILed because
   // config.json said enabled:true. FAIL only when a live plane is actually
   // gating — otherwise operators panic-uninstall a healthy box.
-  const signedOn = (() => {
-    try { return getActionGuardCoreConfig().enabled; } catch { return false; }
-  })();
+  // #878: read-only, like every doctor read of the core config.
+  const core = inspectActionGuardCoreConfig();
+  const signedUnknown = core === 'unknown';
+  const signedOn = !signedUnknown && core.enabled;
   const pluginLive = readOpenClawPluginGuardLive();
   const pluginOff = pluginPlaneDisarmed(pluginLive);
   const planes = readHostGatePlanes();
@@ -5267,10 +5346,16 @@ export function policyLockRows(): CheckResult[] {
             ? (claudePlaneEnforcing(planes) && pluginOff
               ? ' — Action Guard is live on the Claude Code hook (OpenClaw plugin is not), but a one-line edit to config.json switches it off and nothing would notice'
               : ' — Action Guard is live, but a one-line edit to config.json switches it off and nothing would notice')
-            : ' — Guard is off on this host. A lock is optional. This is not unprotected.'}`,
+            : signedUnknown
+              ? ' — the signed Action Guard posture is unknown (see the config integrity row), so doctor does not call it off.'
+              : ' — Guard is off on this host. A lock is optional. This is not unprotected.'}`,
         fix: liveGating
           ? `${PROTECT_HINT} to pin the security-critical keys to a root-owned file this user cannot write.`
-          : 'Do not run protect from this warning. A root lock is optional while Guard is off. Do not uninstall.',
+          : signedUnknown
+            // #878: unknown is not off — do not say "while Guard is off".
+            ? 'Do not run protect from this warning. A root lock is optional; resolve the config integrity row first. Do not uninstall.'
+            : 'Do not run protect from this warning. A root lock is optional while Guard is off. Do not uninstall.',
+        ...(!liveGating && signedUnknown ? { postureUnknown: true as const } : {}),
       });
       break;
     case 'unsupported':
@@ -5330,6 +5415,8 @@ export function policyLockRows(): CheckResult[] {
       });
       break;
     case 'unsigned':
+      // #878: inspectConfigIntegrity says `unsigned` only when nothing
+      // obstructs the adoption, so the sentence below is true when printed.
       rows.push({
         label: integrityLabel,
         status: 'pass',
@@ -5338,13 +5425,44 @@ export function policyLockRows(): CheckResult[] {
           `trusted and the next write signs it. ${HMAC_NOTE}`,
       });
       break;
+    case 'unverified': {
+      // #878: an unsigned file the ordinary read will not adopt. Not a pass,
+      // and no promise of adoption: its posture is unknown (or, where the
+      // adoption fails outright, the strict posture the runtime then holds).
+      const block = integrity.adoption ?? 'unknown';
+      rows.push({
+        label: integrityLabel,
+        status: 'warn',
+        message:
+          `verdict: unverified — ${describeAdoptionBlock(block)}. The file's own Action Guard values are not ` +
+          (block === 'fails'
+            ? 'in force: the strict fail-closed posture is (guard on + enforcing, no auto-approve, broker off, defence mode strict). '
+            : 'reported as in force: the signed posture is unknown, and the runtime holds the strict fail-closed posture. ') +
+          `Nothing is adopted or signed while this lasts. ${HMAC_NOTE}`,
+        fix: block === 'linked'
+          ? 'Replace the config.json symlink with the file it points to; the next read then adopts it and the next ' +
+            'write signs it. Then re-run doctor.'
+          : block === 'fails'
+            ? `Move the directory at ${path.join(path.dirname(integrity.path), '.integrity-key')} aside; the next read then ` +
+              'mints a key and adopts the file. Then re-run doctor.'
+            : 'Check that this user can write the config directory and that .integrity-key and .config-sig, if present, ' +
+              'are regular files. Then re-run doctor.',
+        // #878: 'fails' is the strict outlook (known); every other block is unknown.
+        ...(block !== 'fails' ? { postureUnknown: true as const } : {}),
+      });
+      break;
+    }
     case 'self-heal':
       rows.push({
         label: integrityLabel,
         status: 'pass',
         message:
           'verdict: self-heal — the embedded signature is stale but the legacy whole-file signature authenticates ' +
-          `these exact bytes; it is re-signed on the next read. ${HMAC_NOTE}`,
+          (integrity.linked
+            // #878: the read layer never rewrites through a link.
+            ? 'these exact bytes, so its values are trusted; it is NOT re-signed while config.json is a symbolic link ' +
+              `(nothing is written through one). ${HMAC_NOTE}`
+            : `these exact bytes; it is re-signed on the next read. ${HMAC_NOTE}`),
       });
       break;
     case 'valid':
@@ -5374,7 +5492,8 @@ export function fixActionGuardConfig(): { changed: boolean; backupPath?: string;
   // #647: on a tampered file the migration write is refused, so refuse here,
   // BEFORE the backup copy — a "fix" that leaves a backup and changes nothing
   // is litter, and one that re-signed the file would launder the verdict.
-  if (inspectConfigIntegrity().verdict === 'tampered') {
+  const integrity = inspectConfigIntegrity();
+  if (integrity.verdict === 'tampered') {
     return {
       changed: false,
       message:
@@ -5382,6 +5501,28 @@ export function fixActionGuardConfig(): { changed: boolean; backupPath?: string;
         're-sign it. Nothing was changed. Review it with `shieldcortex config --resign` first',
     };
   }
+  // #878: a symlinked config.json is never written (the write would replace
+  // the link), so refuse here, BEFORE the backup copy, for the same reason.
+  if (fs.lstatSync(configPath).isSymbolicLink()) {
+    return {
+      changed: false,
+      message:
+        'not migrating: config.json is a symbolic link, and the migration write would replace the link with a ' +
+        'regular file. Nothing was changed. Replace the link with the file it points to and retry',
+    };
+  }
+  // #878: an unsigned file whose adoption is obstructed — the migration's own
+  // read would fail to adopt it, AFTER the backup copy. Refuse first.
+  if (integrity.verdict === 'unverified') {
+    return {
+      changed: false,
+      message:
+        `not migrating: ${describeAdoptionBlock(integrity.adoption ?? 'unknown')}, and the migration write needs it ` +
+        'adopted first. Nothing was changed. See the config integrity row',
+    };
+  }
+  // The explicit `--fix-action-guard` write path: the ordinary (adopting) read
+  // is intended here, after every refusal above.
   const raw = readRawConfig();
   const isBlock = (v: unknown): v is Record<string, unknown> =>
     !!v && typeof v === 'object' && !Array.isArray(v);
@@ -5397,7 +5538,23 @@ export function fixActionGuardConfig(): { changed: boolean; backupPath?: string;
   // migrated file is re-signed with a fresh `_sig`. The previous bare
   // fs.writeFileSync here carried the stale signature through, so running the
   // fix ITSELF tripped the integrity check and forced strict mode.
-  migrateInterceptorActionGuardAlias();
+  try {
+    migrateInterceptorActionGuardAlias();
+  } catch (err) {
+    // #878: the file was inspected above, but it can still fail its integrity
+    // check by the time the migration reads it again. Say that, not the
+    // generic refusal: the migration wrote nothing to config.json, and the
+    // backup holds the bytes as they were before.
+    if (err instanceof ConfigIntegrityRefusal) {
+      throw new Error(
+        `not migrating: ${configPath} changed during the migration — it passed the integrity check when doctor ` +
+        'inspected it, and failed it (verdict: tampered) when the migration read it again. config.json was not ' +
+        `written. The copy taken before the change is at ${backupPath}. Review the file with ` +
+        '`shieldcortex config --resign`',
+      );
+    }
+    throw err;
+  }
   return {
     changed: true,
     backupPath,
@@ -5441,17 +5598,26 @@ export async function checkActionGuardReadiness(
     return readinessRowsForSurface(summary, '');
   }
   if (!deps.summaries) {
-    // Cheap pre-check: no gate configured → no audit read at all.
-    try {
-      const core = getActionGuardCoreConfig();
-      if (!core.enabled || !core.enforce || !core.readinessGate) return [];
-    } catch {
-      return [];
+    // Cheap pre-check: no gate configured → no audit read at all. Read-only
+    // (#878), like every other doctor read of the core config.
+    const core = inspectActionGuardCoreConfig();
+    if (core === 'unknown') {
+      return [{
+        label,
+        status: 'info',
+        message:
+          'not evaluated: the signed Action Guard posture is unknown (config.json has no signature it can adopt; ' +
+          'see the config integrity row)',
+        postureUnknown: true,
+      }];
     }
+    if (!core.enabled || !core.enforce || !core.readinessGate) return [];
   }
   let summaries: import('./guard.js').ReadinessSummary[];
   try {
-    summaries = deps.summaries ? deps.summaries() : (await import('./guard.js')).buildReadinessSummaries();
+    summaries = deps.summaries
+      ? deps.summaries()
+      : (await import('./guard.js')).buildReadinessSummaries({ readOnly: true });
   } catch (err) {
     return [{ label, status: 'warn', message: `could not compute readiness (${(err as Error).message})` }];
   }
@@ -5715,6 +5881,37 @@ export async function checkCronDenials(deps: CronDenialCheckDeps = {}): Promise<
  * A below-floor build is a `fail`, not a warning: on that box the guard's
  * dangerous tier is decorative, and the operator has no other signal that it is.
  */
+/**
+ * #916: agent configuration watch status. Never a failure: it shows whether the
+ * watch is on, when it last detected an unexpected change, and warns when a
+ * detected change is still undelivered or a watched file cannot be read/parsed.
+ */
+export async function checkAgentConfigWatch(home?: string): Promise<CheckResult> {
+  const label = 'Agent config watch';
+  const { agentConfigWatchEnabled, agentConfigWatchHome, loadAgentConfigStateChecked } = await import('../audit/agent-config-watch.js');
+  home ??= agentConfigWatchHome();
+  let config: unknown = {};
+  try { config = JSON.parse(fs.readFileSync(path.join(home, '.shieldcortex', 'config.json'), 'utf-8')); } catch { /* defaults */ }
+  if (!agentConfigWatchEnabled(config)) return { label, status: 'info', message: 'off (sessionStart.agentConfigWatch is false)' };
+  const { state, integrity } = loadAgentConfigStateChecked(home);
+  // #928: a baseline that fails its signature check is never trusted; the next
+  // session start alerts and re-baselines. Same-user tampering is detectable
+  // here, not preventable (the key is readable by the same user).
+  if (integrity === 'untrusted') return { label, status: 'warn', message: 'on; the stored baseline failed its integrity check (modified outside ShieldCortex); the next session start alerts and re-baselines — review your agent config files' };
+  if (!state.initialised) return { label, status: 'info', message: 'on; no baseline yet (recorded silently at the next session start)' };
+  // Detection and delivery are tracked separately: a change whose notification
+  // or audit row failed is still "detected", and shown as pending.
+  const detectedAt = state.lastDetectedAt ?? state.lastChangeAt;
+  const parts = [`on; watching ${Object.keys(state.files).length} config file(s)`];
+  parts.push(detectedAt ? `last unexpected change detected ${detectedAt}` : 'no unexpected change detected');
+  if (state.lastChangeAt && state.lastChangeAt !== detectedAt) parts.push(`last reported ${state.lastChangeAt}`);
+  const pending = typeof state.pendingChanges === 'number' ? state.pendingChanges : 0;
+  if (pending > 0) parts.push(`${pending} detected change(s) not yet reported; retried at the next session start`);
+  const unhealthy = Object.keys(state.fileErrors ?? {}).length;
+  if (unhealthy > 0) parts.push(`${unhealthy} watched file(s) could not be read or parsed (see the audit log)`);
+  return { label, status: pending > 0 || unhealthy > 0 ? 'warn' : 'pass', message: parts.join('; ') };
+}
+
 export async function checkClaudeCodeVersion(
   deps: DetectClaudeCodeDeps = {},
 ): Promise<CheckResult> {
@@ -7418,49 +7615,6 @@ export function probeOpenClawHooksDirClaim(
     }
   }
   return identical ? { kind: 'identical' } : { kind: 'none' };
-}
-
-/**
- * OpenClaw-effective home for expanding `~` in OpenClaw paths — mirror of
- * resolveRawHomeDir (openclaw/src/infra/home-dir.ts): OPENCLAW_HOME (itself
- * `~`-expandable against HOME/USERPROFILE) > HOME > USERPROFILE >
- * os.homedir().
- *
- * #393 SOL r4 B2: a non-`~`, non-absolute OPENCLAW_HOME is returned verbatim
- * by resolveRawHomeDir and then path.resolve()d against the OPENCLAW PROCESS
- * cwd (home-dir.ts resolveEffectiveHomeDir) — doctor resolving it against its
- * OWN cwd probed a decoy tree while OpenClaw ran from another. The same
- * cwd-fallback fires when nothing resolves at all (resolveRequiredHomeDir).
- * Both shapes are unresolvable for doctor: OpenClaw stays bound with buses
- * unknown, never probed against a guessed root.
- */
-function openClawEffectiveHome(): { home: string } | { unresolvable: string } {
-  const norm = (v: string | undefined): string | undefined => {
-    const t = v?.trim();
-    return t ? t : undefined;
-  };
-  const safeHomedir = (): string | undefined => {
-    try {
-      return norm(os.homedir());
-    } catch {
-      return undefined;
-    }
-  };
-  const explicit = norm(process.env.OPENCLAW_HOME);
-  if (explicit) {
-    if (/^~($|[\\/])/.test(explicit)) {
-      const fallback = norm(process.env.HOME) ?? norm(process.env.USERPROFILE) ?? safeHomedir();
-      if (fallback) return { home: path.resolve(explicit.replace(/^~(?=$|[\\/])/, fallback)) };
-      return { unresolvable: `OPENCLAW_HOME="${explicit}" has no HOME/USERPROFILE/homedir to expand ~ against — OpenClaw falls back to its own process cwd, which doctor cannot know` };
-    }
-    if (!path.isAbsolute(explicit)) {
-      return { unresolvable: `OPENCLAW_HOME="${explicit}" is relative (\`~user\` included) — OpenClaw resolves it against its own process cwd, which doctor cannot know` };
-    }
-    return { home: path.resolve(explicit) };
-  }
-  const home = norm(process.env.HOME) ?? norm(process.env.USERPROFILE) ?? safeHomedir();
-  if (home) return { home: path.resolve(home) };
-  return { unresolvable: 'no OPENCLAW_HOME/HOME/USERPROFILE and os.homedir() unavailable — OpenClaw falls back to its own process cwd, which doctor cannot know' };
 }
 
 /**
@@ -9746,6 +9900,7 @@ export async function runDoctor(
     checkChainedLedger,
     async () => checkStaleShieldCortexCopies(), // #674: an old copy can rewrite chained audit rows
     checkClaudeCodeVersion,
+    checkAgentConfigWatch,
     checkModelCache,
   ];
 
@@ -9917,7 +10072,7 @@ export async function runDoctor(
     color: shouldColorDoctor(),
     style,
     width: Number(process.env.COLUMNS || process.stdout?.columns || 80) || 80,
-    hostTableLines: formatHostTable(hostTable, String(pkg.version ?? ''), readHostGatePlanes()),
+    hostTableLines: formatHostTable(hostTable, String(pkg.version ?? ''), readHostGatePlanesWithPosture()),
     nextCommand,
   });
   for (const line of reportLines) console.log(line);

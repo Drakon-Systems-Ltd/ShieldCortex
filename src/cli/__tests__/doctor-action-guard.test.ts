@@ -4,6 +4,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { checkActionGuard, doctorExitCode, fixActionGuardConfig, policyLockRows } from '../doctor.js';
 import { normaliseWebhookUrl } from '../../defence/iron-dome/notify-config.js';
+import { reportBody, writeReport } from '../../posture/__tests__/self-report-fixture.js';
 import { handleCloudConfig } from '../../cloud/cli.js';
 import {
   getConfigDir,
@@ -409,6 +410,71 @@ describe('doctor — enforcing with no denial-capable sink is a FAIL (#517)', ()
 });
 
 /**
+ * #815 A — "doctor warns when Action Guard is armed and no notify channel is
+ * configured". That row already exists (#242) and, since #517 (c), is a FAIL
+ * on an armed host — the #815 brief asked for warn-only, but downgrading it
+ * would reopen the 837-of-837 silent-denial shape, so severity is unchanged.
+ * What #815 adds is one plain-English sentence on the armed row. Pinned here:
+ * the row is said once, in plain English, with one config step; it is silent
+ * when a channel is configured; it never writes config; and the plain line
+ * does not appear on a host whose guard is off.
+ */
+describe('doctor — no notify channel, in plain English (#815 A)', () => {
+  const PLAIN = 'In plain terms: when Action Guard blocks something while nobody is at a prompt, nobody is told.';
+  const notifyRows = (results: Awaited<ReturnType<typeof checkActionGuard>>) => results.filter((r) => /notify/i.test(r.label));
+
+  it('armed + no channel: exactly one notify row, plain English, one config step', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true } });
+    const rows = notifyRows(await checkActionGuard());
+    expect(rows).toHaveLength(1);
+    expect(rows[0].message).toContain(PLAIN);
+    expect(rows[0].message.split(PLAIN)).toHaveLength(2);
+    const commands = (rows[0].fix ?? '').match(/`shieldcortex [^`]+`/g) ?? [];
+    expect(commands).toEqual(['`shieldcortex config --action-guard-notify-webhook <https-url>`']);
+  });
+
+  it.each([
+    ['notify.enabled alone', { enabled: true }],
+    ['notify.openclaw only', { enabled: true, openclaw: true }],
+    ['a rejected webhook URL', { enabled: true, webhookUrl: 'ftp://hooks.example.invalid/sc' }],
+  ])('armed + %s: the plain line is on that row too', async (_label, notify) => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true, notify } });
+    const rows = notifyRows(await checkActionGuard());
+    expect(rows).toHaveLength(1);
+    expect(rows[0].message).toContain(PLAIN);
+  });
+
+  it('armed + a configured webhook channel: silent', async () => {
+    writeConfig({
+      actionGuard: { enabled: true, enforce: true, notify: { enabled: true, webhookUrl: 'https://hooks.example.invalid/sc' } },
+    });
+    expect(notifyRows(await checkActionGuard())).toEqual([]);
+  });
+
+  it.each([
+    ['guard off', { enabled: false }],
+    ['warn-mode', { enabled: true, enforce: false }],
+  ])('%s: never a FAIL, and no plain armed line', async (_label, actionGuard) => {
+    writeConfig({ actionGuard });
+    const rows = notifyRows(await checkActionGuard());
+    for (const r of rows) {
+      expect(r.status).not.toBe('fail');
+      expect(r.message).not.toContain(PLAIN);
+    }
+  });
+
+  it('does not repeat across runs and never writes config', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true } });
+    const before = fs.readFileSync(configPath());
+    const first = notifyRows(await checkActionGuard());
+    const second = notifyRows(await checkActionGuard());
+    expect(second).toEqual(first);
+    expect(second).toHaveLength(1);
+    expect(Buffer.compare(before, fs.readFileSync(configPath()))).toBe(0);
+  });
+});
+
+/**
  * #517 (c) residual, found in the #558 review: doctor's "denial-capable sink"
  * test was `webhook.length > 0` while the runtime (`normaliseWebhookUrl` in
  * notify-config.ts) rejects non-http(s) and malformed URLs. So a signed
@@ -623,7 +689,7 @@ describe('doctor — NOTIFY fail tracks the live OpenClaw plane, not leftover si
     expect(notify!.status).toBe('warn');
     expect(notify!.fix ?? '').not.toMatch(/--action-guard-notify-webhook/);
     expect(notify!.fix ?? '').toMatch(/do not add a webhook/i);
-    const config = results.find((r) => r.label === 'Action guard config');
+    const config = results.find((r) => r.label === 'Action guard posture');
     expect(config?.fix ?? '').not.toMatch(/--action-guard-enable/);
     expect(config?.fix ?? '').toMatch(/do not enable Action Guard/i);
   });
@@ -631,10 +697,46 @@ describe('doctor — NOTIFY fail tracks the live OpenClaw plane, not leftover si
   it('WARNs without --action-guard-enable when Guard is off and plugin plane is unproven', async () => {
     writeConfig({ actionGuard: { enabled: false } });
     const results = await checkActionGuard();
-    const config = results.find((r) => r.label === 'Action guard config');
+    const config = results.find((r) => r.label === 'Action guard posture');
     expect(config?.status).toBe('warn');
     expect(config?.fix ?? '').not.toMatch(/--action-guard-enable/);
     expect(config?.fix ?? '').toMatch(/Do not enable Action Guard/i);
+  });
+
+  // PR939: the macOS-only failure of the test above. The per-worker config
+  // sandbox outlives a test file, so a Hermes self-report another suite wrote
+  // can sit in <configDir>/posture. Where the pid's start cannot be checked
+  // (macOS always; here a report with no start token) it reads as
+  // `unobserved`, and its claimed advisory was taken as the Hermes plane.
+  it('an unverifiable Hermes self-report does not turn a signed-off row into advisory', async () => {
+    writeConfig({ actionGuard: { enabled: false } });
+    const now = new Date().toISOString();
+    const body = reportBody({
+      configured_posture: 'advisory',
+      heartbeat_at: now,
+      instance: { key: `p${process.pid}-sx`, pid: process.pid, process_start: null, started_at: now, liveness: 'process' },
+    });
+    const posture = path.join(getConfigDir(), 'posture');
+    writeReport(getConfigDir(), body);
+    try {
+      const results = await checkActionGuard();
+      const config = results.find((r) => r.label === 'Action guard posture');
+      expect(config?.status).toBe('warn');
+      expect(config?.message ?? '').not.toMatch(/^advisory/);
+      expect(config?.fix ?? '').toMatch(/Do not enable Action Guard/i);
+    } finally {
+      fs.rmSync(posture, { recursive: true, force: true });
+    }
+  });
+
+  it('a malformed config.json still gets the posture row (PR939 N1)', async () => {
+    fs.mkdirSync(path.dirname(configPath()), { recursive: true });
+    fs.writeFileSync(configPath(), '{not-json');
+    clearCloudConfigCache();
+    const results = await checkActionGuard();
+    const config = results.find((r) => r.label === 'Action guard posture');
+    expect(config).toBeDefined();
+    expect(config!.fix ?? '').not.toMatch(/--action-guard-(enable|enforce)/);
   });
 
   it('still FAILs when openclaw.json is unreadable garbage — cannot prove the plugin is off', async () => {
@@ -887,5 +989,36 @@ describe('doctor — fixActionGuardConfig re-signs the migrated config (#275)', 
     expect(isConfigTampered()).toBe(false);
 
     if (fix.backupPath) fs.rmSync(fix.backupPath, { force: true });
+  });
+});
+
+describe('doctor — one-tap approve (#815 B)', () => {
+  const tapRow = <T extends { label: string }>(results: T[]) => results.filter((r) => r.label === 'Action guard one-tap approve');
+
+  it('is silent when approveTap is not enabled', async () => {
+    writeConfig({ actionGuard: { enabled: true } });
+    expect(tapRow(await checkActionGuard())).toHaveLength(0);
+    writeConfig({ actionGuard: { enabled: true, approveTap: { enabled: 'true' } } });
+    expect(tapRow(await checkActionGuard())).toHaveLength(0);
+  });
+
+  it('warns once, never fails, and writes nothing on a same-UID host', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-tap-doctor-'));
+    try {
+      const secretPath = path.join(dir, 'approve.key');
+      // Owned by the user running doctor — the same-UID shape.
+      fs.writeFileSync(secretPath, `${'c3'.repeat(32)}\n`, { mode: 0o600 });
+      writeConfig({ actionGuard: { enabled: true, approveTap: { enabled: true, secretPath, approverTelegramUid: '42' } } });
+      const before = fs.readFileSync(configPath(), 'utf-8');
+      const rows = tapRow(await checkActionGuard());
+      expect(rows).toHaveLength(1);
+      expect(rows[0].status).toBe('warn');
+      expect(rows[0].message).toMatch(/same user the agent runs as/);
+      expect(rows[0].message).toMatch(/#501 OS lock/);
+      expect(rows[0].message).not.toContain('c3c3c3c3');
+      expect(fs.readFileSync(configPath(), 'utf-8')).toBe(before);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

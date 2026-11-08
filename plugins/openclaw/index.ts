@@ -43,6 +43,7 @@ import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG, flatte
 import type { ApprovalPromptDetail, ApprovalDecisionAudit, ApprovalDecisionOutcome, InterceptorConfig, BrokerRuntime, ReadinessRuntime, ResolvedReadinessLike } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
 import { cloudSync } from './cloud-sync.js';
+import { injectionPatternIds } from './audit-entry.js';
 import { createGatewayNotifyChannel } from './gateway-notify-channel.js';
 import type { GatewayNotifyContext, NotifyChannelLike } from './gateway-notify-channel.js';
 import { testedPath, writePostureSelfReport, type PostureReportInput } from './posture-report.js';
@@ -593,6 +594,8 @@ export interface ConversationScanResult {
   provenance?: PluginProvenanceLabel;
   /** L2 pattern names, when the provenance floor fired. Names only. */
   nonAuthoritativePatterns?: string[];
+  /** Closed-set injection rule ids (`category:pattern`). Names only, never the span. */
+  injectionPatterns?: string[];
 }
 
 export interface ConversationDecision {
@@ -2384,6 +2387,12 @@ export async function scanRealtimeContent(
       } else {
         summary = 'THREAT (non-injection layer)';
       }
+      // Names only. The summary above still says "N detections" and drops the
+      // ids; this is the field the audit row keeps. Absent when injection was
+      // clean, or when no detection had a safe category and pattern name.
+      const injectionPatterns = !scan.injection.clean
+        ? injectionPatternIds(scan.injection.detections)
+        : undefined;
       // L2 runs only on this branch. The MCP fallback below has no local
       // module to ask, and an L2 verdict invented from a remote text response
       // would be a second copy of the policy.
@@ -2396,9 +2405,16 @@ export async function scanRealtimeContent(
           available: true,
           provenance,
           nonAuthoritativePatterns: patterns,
+          ...(injectionPatterns ? { injectionPatterns } : {}),
         };
       }
-      return { clean: scan.clean, summary, available: true, provenance };
+      return {
+        clean: scan.clean,
+        summary,
+        available: true,
+        provenance,
+        ...(injectionPatterns ? { injectionPatterns } : {}),
+      };
     } catch (err) {
       // A scanner that THROWS is not a clean verdict either. Same treatment as
       // an absent one: unavailable, reported, never silently allowed to read as
@@ -3005,6 +3021,9 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
     // Counted with the undeclared ones, because they are the same operator
     // fact: this host sends a shape the provenance layer does not cover.
     _provenanceUndeclared += unreadableToolBlocks;
+    // `labelLlmInput` emits the prompt first, when there is one.
+    const promptIndex = typeof event?.prompt === 'string' && event.prompt ? 0 : -1;
+    const automationSession = isTrustedAutomationSession(sessionId);
     const labelled = inputs.filter(
       // #r2/B5: the internal-message exemption is for content the HOST
       // generated — boot checks, heartbeats, its own system notices — and the
@@ -3013,7 +3032,18 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
       // to tool output let untrusted bytes buy their way out of BOTH scanners
       // by claiming to be a system message. Tool-origin and unclassifiable
       // content is now always scanned; only the host-attributed turn may skip.
-      input => input.text && (input.label !== 'user' || !isInternalContent(input.text, sessionId)),
+      //
+      // #914: the bare prompt is `unknown` — a host-assembled string with no
+      // per-span origin — so it no longer gets the text-only exemption either:
+      // a DM opening with `Read HEARTBEAT.md` or `System:` must not buy its way
+      // past the scanner. What still attests a host-generated prompt is the
+      // session key the host minted for its own isolated cron / heartbeat run
+      // (#353), a structured field, not prompt text. Only there may the
+      // internal-content check skip the prompt.
+      (input, i) => input.text && !(
+        (input.label === 'user' || (i === promptIndex && automationSession))
+        && isInternalContent(input.text, sessionId)
+      ),
     );
     for (const labelledInput of labelled) {
       const text = labelledInput.text;
@@ -3088,6 +3118,9 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
         const entry = {
           type: "threat", hook: "llm_input", sessionId: event.sessionId,
           model: event.model, reason: result.summary,
+          // Closed-set rule ids. Omitted when the hit was not an injection, or
+          // the scanner did not name one. Never the matched span (#1010, #226).
+          ...(result.injectionPatterns ? { injectionPatterns: result.injectionPatterns } : {}),
           chars: text.length,
           contentSha256: createHash('sha256').update(text).digest('hex').slice(0, 16),
           // The declared origin this text was judged under. A closed-set
