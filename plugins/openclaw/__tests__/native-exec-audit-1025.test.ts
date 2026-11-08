@@ -252,8 +252,8 @@ describe('#1025 OpenClaw interceptor — audit-only nativeExec', () => {
 
     it('taint that rewrites an allow to require_approval still records, with the probe\'s budget', async () => {
       const r = spyRun(true);
-      void outcome(r.i.handleToolCall({ toolName: 'Bash', arguments: { command: 'npm install left-pad > ./out.txt' }, sessionId: SESSION, cwd: work }));
-      await new Promise(res => setTimeout(res, 50));
+      await outcome(r.i.handleToolCall({ toolName: 'Bash', arguments: { command: 'npm install left-pad > ./out.txt' }, sessionId: SESSION, cwd: work }));
+      expect(r.captured.some(e => e.escalated?.to === 'require_approval')).toBe(true);
       const records = r.calls.filter(c => c.op === 'record');
       expect(records).toHaveLength(1);
       expect(r.calls.find(c => c.op === 'probe')!.budget).toBe(records[0].budget);
