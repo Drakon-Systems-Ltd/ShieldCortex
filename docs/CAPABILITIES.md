@@ -8,16 +8,20 @@ Version numbers are the release that first shipped the behaviour as described. `
 
 ### Tool gate (Action Guard)
 
-On Claude Code (PreToolUse hook), OpenClaw (`before_tool_call`) and Hermes (`pre_tool_call`), each tool call is evaluated before it runs. Claude Code and OpenClaw gate once the shared Action Guard setting is on; the Hermes plugin enforces from its own switch (see [Hermes](#hermes)). A trusted call runs. A suspicious call is held and a plain-English approval card says what it does, why it was held and who asked, without the raw command (5.6+). A catastrophic command is a hard stop. Database, cluster and cloud teardown commands ask for approval (5.6+).
+On Claude Code (PreToolUse hook), OpenClaw (`before_tool_call`) and Hermes (`pre_tool_call`), each tool call is evaluated before it runs. Claude Code and OpenClaw gate once the shared Action Guard setting is on; the Hermes plugin enforces from its own switch (see [Hermes](#hermes)). What happens to a verdict depends on the host and the posture:
+
+- **Claude Code and OpenClaw, enforcing.** A trusted call runs. A suspicious (dangerous-tier) call is held and a plain-English approval card says what it does, why it was held and who asked, without the raw command (5.6+); on Claude Code the hold is the host's own permission prompt, on OpenClaw the host's approval flow. A catastrophic command is a hard stop. Database, cluster and cloud teardown commands ask for approval (5.6+).
+- **Claude Code and OpenClaw, watch-only (`enforce: false`) or enforce-when-ready shadow.** The ordinary dangerous tier runs: watch-only warns, shadow records `would_hold` or `would_block` and proceeds (5.18.1, #999). Catastrophic calls and calls that touch the guard's own state or config are still held or blocked in every posture.
+- **Hermes.** No approval prompt exists, so a call Action Guard would hold is blocked while the plugin enforces; advisory mode warns on the dangerous tier and still blocks catastrophic and self-protection verdicts. There is no card on Hermes.
 
 Action Guard stays off until you turn it on. The shared setting is the gate for Claude Code and OpenClaw; `sudo shieldcortex protect` turns it on and pins that posture in a root-owned policy lock ([Policy lock](UPDATING.md#policy-lock)). Hermes does not read the shared setting; see [Hermes](#hermes).
 
-- Source: `src/guard/`, `src/defence/iron-dome/`, `plugins/openclaw/index.ts`, `plugins/hermes/shieldcortex/`
-- CHANGELOG: 5.6.0 (approval cards, teardown approvals), 5.15.0 (#922 guard posture)
+- Source: `src/guard/`, `src/defence/iron-dome/`, `scripts/pre-tool-hook.mjs` (verdict-to-decision mapping in the header: catastrophic always `deny`, dangerous `ask` or, with `enforce: false`, a warning and no decision), `plugins/openclaw/index.ts`, `plugins/openclaw/interceptor.ts` (watch-only and shadow exits), `plugins/hermes/shieldcortex/policy.py`
+- CHANGELOG: 5.6.0 (approval cards, teardown approvals), 5.15.0 (#922 guard posture), 5.18.1 (#999 watch-only and shadow on a tainted session)
 
 ### Approval cards and webhooks
 
-Webhook notifications for a headless denial or a held approval end with a `card` block (5.18+, version 1): the same what, why and who, the exact `shieldcortex approve` command, and Approve/Deny choices that carry only the action id. The card never carries the raw command or a credential.
+The card is a Claude Code hook feature and needs a configured notify webhook (`actionGuard.notify` with `enabled: true` and a `webhookUrl`). When that hook sends a headless denial (`action_guard_denial` with outcome `denied_no_prompt_surface`) or a held approval request (`approval_requested`) to the webhook, the body ends with a `card` block (5.18+, version 1): a plain-English what, why and who, the exact `shieldcortex approve` command, and Approve/Deny choices that carry only the action id. The card never carries the raw command, the full hash or a credential. Other denials, advisory warnings and the OpenClaw plugin's webhook messages carry no card; OpenClaw approvals go through the host's own approval flow. With no webhook configured, `doctor` says in plain terms that nobody is told when Action Guard blocks something while nobody is at a prompt.
 
 The guard half of one-tap approve from Telegram also ships in 5.18, as a loopback-only `shieldcortex guard approve-tap` endpoint that is off by default. The chat half is not in this release, so a tap cannot be completed end to end yet; approvals still go through `shieldcortex approve`.
 
@@ -27,7 +31,7 @@ The guard half of one-tap approve from Telegram also ships in 5.18, as a loopbac
 
 ### Conversation firewall (OpenClaw)
 
-The OpenClaw plugin scans the conversation that reaches the model on the `llm_input` hook and records what it finds. `llm_input` is an observation hook: it has no blocking contract, so a detection there is audited and sent to the operator but cannot stop the turn. Blocking is a separate posture: `observe` (the default) scans, audits and notifies and never blocks; `enforce` additionally blocks the run through the `before_agent_run` gate, which exists only on OpenClaw builds that declare it. `doctor` and the plugin's own status say which of the three states the host is in. The `llm_output` hook does not scan the reply; it mines it for memory candidates and saves them through the normal defence pipeline.
+The OpenClaw plugin scans the conversation that reaches the model on the `llm_input` hook and records what it finds. `llm_input` is an observation hook: it has no blocking contract, so a detection there is audited and sent to the operator but cannot stop the turn. Blocking is a separate posture: `observe` (the default) scans, audits and notifies and never blocks; `enforce` additionally blocks the run through the `before_agent_run` gate, which exists only on OpenClaw builds that declare it. `doctor` and the plugin's own status say which of the three states the host is in. The `llm_output` hook does not scan the reply: its handler (`captureLlmOutput` in `plugins/openclaw/index.ts`) extracts memory candidates from the assistant text, screens each candidate before the write and saves the survivors through `remember`; the plugin's own status line describes it as `llm_output (memory)`. The header comment at the top of that file still says `llm_input/llm_output scanning`; that comment is stale and the handler is what ships.
 
 From 5.18.2, an in-process injection hit on `llm_input` records `injectionPatterns`, up to 16 closed-set `category:pattern` ids, so a false positive can be traced to a rule. The matched text is still not stored.
 
@@ -43,7 +47,7 @@ The `scan_tool_response` MCP tool, and the `withResponseScan` wrapper around Shi
 
 Limits: it is a scanner the agent or the integration calls, not an interceptor. It runs on the output of ShieldCortex's own MCP tools (through `withResponseScan`) and on any tool result the agent passes to `scan_tool_response`; it does not see the output of other tools unless something hands it over. Advisory by default, which logs threats and leaves the response untouched. In enforce mode the scanner also computes a sanitised copy (injection withheld, secrets redacted, exfiltration links stripped) that the caller swaps in. It never blocks tool execution, only the threatening output.
 
-- Source: `src/defence/tool-response-scanner.ts`, `src/server.ts`
+- Source: `src/defence/tool-response-scanner.ts` (`mode: 'advisory' | 'enforce'`; the enforce branch computes `sanitisedContent`), `src/server.ts` (ten `withResponseScan(` wraps: `recall`, `get_context`, `get_memory`, `export_memories`, `get_related`, `detect_contradictions`, `graph_query`, `threat_graph`, `graph_entities`, `graph_explain`; the `scan_tool_response` tool calls the scanner directly)
 - CHANGELOG: 4.37.0 (`scan_tool_response` surfaces the sanitised payload), later parity work; 5.3.0 (#506 injection floor: authority spoofing inside tool results, verbatim extraction asks, ten languages, ROT13)
 
 ### Claude SDK browser and computer toolsets
@@ -88,13 +92,13 @@ In prompt-time recall (the `UserPromptSubmit` hook), turns detected as a cron jo
 
 ### MCP tool-description scan
 
-`shieldcortex mcp scan [server]` starts the local (stdio) MCP servers found in your user-level configs (Claude Code, Claude Desktop, OpenClaw, VS Code, Cursor, Windsurf, Codex), reads their tool lists and checks each description for poisoning and for rug-pull drift against the previous reading. `--json` and `--ci` are for pipelines.
+`shieldcortex mcp scan [server]` starts the local (stdio) MCP servers found in your configs, reads their tool lists and checks each description for poisoning and for rug-pull drift against the previous reading. The manual scan reads user-level configs (Claude Code, Claude Desktop, OpenClaw, VS Code, Cursor, Windsurf, Codex) and the project-local ones under the current directory (`.claude/mcp.json`, `.claude.json`, `.vscode/mcp.json`, `.cursor/mcp.json`); a server name defined in both keeps a separate baseline per config file (5.14.0). `--json` and `--ci` are for pipelines.
 
 From 5.14.0 (#915), the Claude Code session-start hook also launches this check detached in the background, at most once per 6 hours per server unless that server's launch command, arguments or environment changed. When a description changed or looks suspicious it sends one plain notification to the `actionGuard.notify` webhook as an `mcp_tool_change` event and records the finding in the `mcp_tool_findings` table.
 
-Limits: user-level configs only, never a project-local one. It fails open. Turn it off with `"sessionStart": { "mcpToolCheck": false }` in `~/.shieldcortex/config.json` (a hand edit makes the file fail its signature check; see `shieldcortex config --resign`).
+Limits of the automatic check: user-level configs only, never a project-local one (a repository-controlled config must not start its commands without approval). Alerts go only to the `actionGuard.notify` webhook; it does not need Action Guard on. With no webhook configured, or when delivery fails, the finding is kept as a pending row and retried at the next session start, and nothing is shown in the session. It fails open. Turn it off with `"sessionStart": { "mcpToolCheck": false }` in `~/.shieldcortex/config.json` (a hand edit makes the file fail its signature check; see `shieldcortex config --resign`).
 
-- Source: `src/cli/mcp.ts`
+- Source: `src/cli/mcp.ts`, `src/audit/mcp-config-scanner.ts` (`discoverMcpServers`, `includeProject` defaults to true for the manual scan), `src/audit/mcp-tools-autocheck-runner.ts` (passes `includeProject: false`)
 - CHANGELOG: 4.32.0 (`mcp scan`), [What's new in 5.14](UPDATING.md#whats-new-in-514) (#915)
 
 ### Skill and instruction file scan
@@ -124,7 +128,7 @@ Limits: it detects and reports; it does not block, and it is not live between st
 
 ### Signed config and policy lock
 
-`~/.shieldcortex/config.json` is signed. A hand edit fails its integrity check; `doctor` reports the failure and holds an unsigned or tampered file at the strict posture rather than reading looser settings from it. `shieldcortex config --resign` on its own prints the verdict, the sha256 of the current bytes and the settings that would leave the strict posture, and writes nothing; only `--resign --confirm <sha256>` re-signs, and only the exact bytes previewed. A symlinked `config.json` is refused (5.17.2, #878). `sudo shieldcortex protect`, run once by a human as root, pins the security-critical settings in a root-owned policy lock. The lock holds only because the agent's own user cannot write that file: an agent running as its own non-root user cannot rewrite the pinned posture, and an agent running as root is not protected by it.
+`~/.shieldcortex/config.json` is signed. A hand edit fails its integrity check. `doctor` reports that failure and writes nothing; it says `Guard unknown` rather than `off` when the posture depends on a signature not yet adopted. The CLI, the Claude Code hook and the OpenClaw runtime treat an unsigned or tampered file as the strict posture (Guard on and enforcing, no auto-approve, broker off, no readiness gate) rather than reading looser settings from it, and `doctor` shows that same reading. On a process's first read, a missing or blank file still reads as Guard off; a posture already read is kept if the file later turns blank, corrupt or unreadable, and config writes are refused meanwhile. `shieldcortex config --resign` on its own prints the verdict, the sha256 of the current bytes and the settings that would leave the strict posture, and writes nothing; only `--resign --confirm <sha256>` re-signs, and only the exact bytes previewed. Writes to a symlinked `config.json` (live or dangling) are refused, and it is never self-healed or replaced; a symlinked target with a valid signature is read as written, and an unsigned one is held at the strict posture by the CLI, `doctor`, the Claude Code hook and the OpenClaw runtime alike (5.17.2, #878). `sudo shieldcortex protect`, run once by a human as root, pins the security-critical settings in a root-owned policy lock. The lock holds only because the agent's own user cannot write that file: an agent running as its own non-root user cannot rewrite the pinned posture, and an agent running as root is not protected by it.
 
 - Source: `src/cli/dispatch-help.ts` (`--resign` grammar), `src/guard/posture-switch.ts`, `src/cli/protect.ts`, `src/cli/doctor.ts`
 - CHANGELOG: [What's new in 5.11](UPDATING.md#whats-new-in-511) (#647), 5.17.2 (#878), [Policy lock](UPDATING.md#policy-lock)
@@ -140,9 +144,9 @@ Limits: it detects and reports; it does not block, and it is not live between st
 
 ### Audit
 
-`shieldcortex audit` runs five scanners in one pass: persistent agent memory files (poisoned instructions, credential leaks), MCP configs, environment files, rules files and project dependencies. Output is terminal, `--json`, markdown or `--sarif` (SARIF 2.1.0 for GitHub Code Scanning); `--ci` is for pipelines. Dependency quarantine, clean and auto-protect are free local features. Findings link to `shieldcortex.ai/docs#audit`.
+`shieldcortex audit` runs five scanners in one pass: persistent agent memory files (poisoned instructions, credential leaks), MCP configs, environment files, rules files and project dependencies. Output is terminal, `--json`, markdown or `--sarif` (SARIF 2.1.0 for GitHub Code Scanning); `--ci` is for pipelines. Dependency quarantine, clean and auto-protect are free local features. Findings link to live `shieldcortex.ai/docs` anchors: `#audit` for the environment, MCP config, MCP tool and rules-file scanners and the report footer, `#attack-vectors` for the memory scanner, and `#dependency-scanner` for the dependency scanner (5.17.2, PR #975).
 
-- Source: `src/cli/audit.ts`
+- Source: `src/cli/audit.ts`, `src/audit/env-scanner.ts`, `src/audit/mcp-config-scanner.ts`, `src/audit/mcp-tools-scanner.ts`, `src/audit/report-formatter.ts` (`#audit`), `src/audit/memory-scanner.ts` (`#attack-vectors`), `src/audit/dependency-scanner.ts` (`#dependency-scanner`)
 - CHANGELOG: 2.9.0 (introduced), 5.17.2 (PR #975 learn-more links)
 - Docs: [Audit waivers](security/audit-waivers.md)
 
@@ -182,7 +186,7 @@ Its counts are labelled when they are partial: pair counts stop at 20 of each ki
 
 ### Hermes
 
-Hermes gates tool calls once you run `hermes plugins enable shieldcortex` and the local API (`shieldcortex api`) is up. The enabled plugin enforces by default, whatever the shared Action Guard setting says: it blocks unless `SHIELDCORTEX_ENFORCE` opts it out (`0`, `false`, `no`, `off` or `advisory`). Hermes has no approval prompt, so a call Action Guard would hold for approval is blocked while enforcing. Advisory mode still blocks Action Guard's hard-block verdicts and recognised calls that would change the guard's own state or config (a plain read of its config is not one of them). While the API is unreachable, its bounded fallback scan blocks the self-protection and catastrophic shapes it recognises in every mode, and recognised dangerous shapes while enforcing (the default). In advisory mode, only the recognised self-protection and catastrophic shapes are blocked by the fallback.
+Hermes gates tool calls once you run `hermes plugins enable shieldcortex` and the local API (`shieldcortex api`) is up. The enabled plugin enforces by default, whatever the shared Action Guard setting says: it blocks unless `SHIELDCORTEX_ENFORCE` opts it out (`0`, `false`, `no`, `off` or `advisory`). Hermes has no approval prompt, so a call Action Guard would hold for approval is blocked while enforcing. Advisory mode still blocks Action Guard's hard-block verdicts and recognised calls that would change the guard's own state or config (a plain, read-only look at its config with ordinary arguments is not one of them; a read dressed in anything the guard cannot prove is only a read still is). While the API is unreachable, its bounded fallback scan blocks the self-protection and catastrophic shapes it recognises in every mode, and recognised dangerous shapes while enforcing (the default). In advisory mode, only the recognised self-protection and catastrophic shapes are blocked by the fallback.
 
 - Docs: [Hermes plugin](../plugins/hermes/shieldcortex/README.md)
 
@@ -206,7 +210,7 @@ The gate is `src/license/gate.ts`. Every feature it lists is `free` except four,
 |---|---|---|
 | Full cloud sync | `cloud_sync` | Two-way sync of memories, knowledge graph and quarantine content to ShieldCortex Cloud |
 | Team management | `team_management` | Members, invites and shared security policies |
-| Shared patterns | `shared_patterns` | Share custom injection patterns and policies across a team |
+| Shared patterns | `shared_patterns` | Share your custom patterns across a team. Writing custom patterns and Iron Dome policies is free (`custom_iron_dome_policies: 'free'`); only the sharing is gated |
 | Team memory scopes | `memory_scopes` | Private versus team memory scopes for multi-agent deployments |
 
 Everything else, including custom injection patterns, custom Iron Dome policies, custom firewall rules, audit export, deep skill scanning, the dependency scanner, typed memories, Dream Mode, LLM reranking, the local AI explainer, memory-file scan, review-copilot and deep X-Ray, is free and checks no key. Audit-metadata sync to the Free cloud tier (`cloud_audit_sync`) is also free.
