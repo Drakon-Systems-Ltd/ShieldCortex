@@ -14,9 +14,12 @@
  * (the "native" files are a 64-byte ELF magic stub).
  */
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { spawnSync } from 'node:child_process';
+import { createHmac } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   evaluateToolCall,
@@ -564,11 +567,13 @@ describe('#1025 fs store', () => {
     expect(probe()('./helper')).toBeNull();
   });
 
-  it('prune sweeps expired sessions and stray entries', () => {
+  it('prune sweeps expired sessions and leaves every name it did not create', () => {
     record('helper', 'agent-written');
     fs.mkdirSync(path.join(stateDir, 'junk'));
+    fs.writeFileSync(path.join(stateDir, 'junk', 'keep.txt'), 'keep');
     pruneNativeProvenance({ stateDir, now: Date.now() + 2 * 24 * 60 * 60 * 1000 });
-    expect(fs.readdirSync(stateDir)).toEqual([]);
+    expect(fs.readdirSync(stateDir)).toEqual(['junk']);
+    expect(fs.readFileSync(path.join(stateDir, 'junk', 'keep.txt'), 'utf8')).toBe('keep');
   });
 
   it('end to end through the evaluator: Write → bytes land → exec is observed; decision unchanged', () => {
@@ -589,4 +594,254 @@ describe('#1025 fs store', () => {
     const v = evaluateToolCall('Bash', { command: './app' }, undefined, { nativeArtifactProvenance: probe() });
     expect(v.nativeExec).toEqual({ uses: [{ action: 'exec', provenance: 'compiled-output' }] });
   });
+});
+
+// -- Fold r1: the store is agent-reachable, so it must never block, follow a
+// planted link, or delete what it did not create. ---------------------------
+
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
+const DIST_STORE = path.join(REPO, 'dist', 'defence', 'iron-dome', 'native-exec-provenance.js');
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** The record file name prefix the store uses for `canonical` in `key`. */
+const hashFor = (key: string, canonical: string) => createHmac('sha256', key).update(canonical).digest('hex');
+const VALID_RECORD = JSON.stringify({ kind: 'agent-written', preId: 'absent', at: 1 });
+
+/** Every entry under `dir` — lstat, so a link is listed and never followed —
+ *  with file bodies and directory mtimes, so "nothing was touched" is exact. */
+function snapshot(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (d: string, rel: string) => {
+    for (const n of fs.readdirSync(d).sort()) {
+      const p = path.join(d, n);
+      const r = rel ? `${rel}/${n}` : n;
+      const st = fs.lstatSync(p);
+      if (st.isSymbolicLink()) out.push(`${r} -> ${fs.readlinkSync(p)}`);
+      else if (st.isDirectory()) { out.push(`${r}/ @${st.mtimeMs}`); walk(p, r); }
+      else if (st.isFile()) out.push(`${r} = ${fs.readFileSync(p, 'utf8')}`);
+      else out.push(`${r} (special)`);
+    }
+  };
+  walk(dir, '');
+  return out;
+}
+
+function makeStale(p: string): void {
+  const old = new Date(Date.now() - 3 * DAY_MS);
+  fs.utimesSync(p, old, old);
+}
+
+describe('#1025 fold r1 — planted links and non-regular entries in the store', () => {
+  let root: string;
+  let stateDir: string;
+  let work: string;
+  let victim: string;
+  const KEY = 'sc-0123456789abcdef';
+  const OTHER = 'sc-fedcba9876543210';
+  const DECOY = 'sc-00000000000000aa';
+
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-1025-fold-')));
+    stateDir = path.join(root, 'state');
+    work = path.join(root, 'work');
+    victim = path.join(root, 'victim');
+    fs.mkdirSync(work, { recursive: true });
+    fs.mkdirSync(path.join(victim, 'precious-dir'), { recursive: true });
+    fs.writeFileSync(path.join(victim, 'precious-dir', 'keep.txt'), 'keep');
+    // A stale, session-looking directory: the one name the sweep may remove
+    // from the REAL store, so it must survive when the store is a link.
+    fs.mkdirSync(path.join(victim, DECOY));
+    fs.writeFileSync(path.join(victim, DECOY, 'keep.txt'), 'keep');
+    makeStale(path.join(victim, DECOY));
+    makeStale(path.join(victim, 'precious-dir'));
+    fs.writeFileSync(path.join(work, 'helper'), ELF_STUB, { mode: 0o755 });
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const record = (key = KEY, extra: { maxSessions?: number } = {}) => recordNativeArtifactCaptures({
+    sessionKey: key, captures: [{ token: 'helper', kind: 'agent-written' }], cwd: work, stateDir, home: root, ...extra,
+  });
+  const probe = (key = KEY) => createNativeArtifactProbe({ sessionKey: key, cwd: work, stateDir, home: root });
+  const helperHash = () => hashFor(KEY, path.join(work, 'helper'));
+
+  it('store root symlinked to another tree: record, sweep and probe do nothing through it', () => {
+    fs.symlinkSync(victim, stateDir);
+    const before = snapshot(victim);
+    expect(record()).toBe(0);
+    pruneNativeProvenance({ stateDir });
+    pruneNativeProvenance({ stateDir, now: Date.now() + 2 * DAY_MS });
+    expect(snapshot(victim)).toEqual(before);
+    expect(fs.lstatSync(stateDir).isSymbolicLink()).toBe(true);
+
+    // A valid record reachable only through the link is not evidence.
+    fs.mkdirSync(path.join(victim, KEY));
+    fs.writeFileSync(path.join(victim, KEY, `${helperHash()}.1.ab`), VALID_RECORD);
+    expect(probe()('./helper')).toBeNull();
+  });
+
+  it('store root symlinked, named with a trailing separator: record, sweep and probe still refuse it', () => {
+    // lstat('link/') resolves the link, so the root must be checked as a
+    // normalised lexical path, not as the caller spelled it.
+    fs.symlinkSync(victim, stateDir);
+    fs.mkdirSync(path.join(victim, KEY));
+    fs.writeFileSync(path.join(victim, KEY, `${helperHash()}.1.ab`), VALID_RECORD);
+    const before = snapshot(victim);
+    for (const sd of [`${stateDir}${path.sep}`, `${stateDir}${path.sep}${path.sep}`, `${stateDir}${path.sep}.${path.sep}`]) {
+      expect(recordNativeArtifactCaptures({
+        sessionKey: OTHER, captures: [{ token: 'helper', kind: 'agent-written' }], cwd: work, stateDir: sd, home: root,
+      })).toBe(0);
+      expect(recordNativeArtifactCaptures({
+        sessionKey: KEY, captures: [{ token: 'helper', kind: 'agent-written' }], cwd: work, stateDir: sd, home: root,
+      })).toBe(0);
+      expect(pruneNativeProvenance({ stateDir: sd })).toBeNull();
+      expect(pruneNativeProvenance({ stateDir: sd, now: Date.now() + 2 * DAY_MS })).toBeNull();
+      expect(createNativeArtifactProbe({ sessionKey: KEY, cwd: work, stateDir: sd, home: root })('./helper')).toBeNull();
+    }
+    expect(snapshot(victim)).toEqual(before);
+    expect(fs.lstatSync(stateDir).isSymbolicLink()).toBe(true);
+  });
+
+  it('a REAL store root named with a trailing separator still records and is probed', () => {
+    const sd = `${stateDir}${path.sep}`;
+    fs.rmSync(path.join(work, 'helper'));
+    expect(recordNativeArtifactCaptures({
+      sessionKey: KEY, captures: [{ token: 'helper', kind: 'agent-written' }], cwd: work, stateDir: sd, home: root,
+    })).toBe(1);
+    fs.writeFileSync(path.join(work, 'helper'), ELF_STUB, { mode: 0o755 });
+    expect(createNativeArtifactProbe({ sessionKey: KEY, cwd: work, stateDir: sd, home: root })('./helper')).toBe('agent-written');
+    expect(pruneNativeProvenance({ stateDir: sd })).toBe(1);
+  });
+
+  it('a session directory symlinked elsewhere: nothing written or read through it; the sweep leaves link and target', () => {
+    fs.mkdirSync(stateDir);
+    const target = path.join(victim, 'session-target');
+    fs.mkdirSync(target);
+    fs.writeFileSync(path.join(target, `${helperHash()}.1.ab`), VALID_RECORD);
+    makeStale(target);
+    fs.symlinkSync(target, path.join(stateDir, KEY));
+    const before = snapshot(victim);
+    expect(record()).toBe(0);
+    expect(probe()('./helper')).toBeNull();
+    pruneNativeProvenance({ stateDir, now: Date.now() + 2 * DAY_MS });
+    expect(snapshot(victim)).toEqual(before);
+    expect(fs.lstatSync(path.join(stateDir, KEY)).isSymbolicLink()).toBe(true);
+  });
+
+  it('the sweep removes only stale REAL session directories; other names, links, files and fresh sessions stay', () => {
+    fs.mkdirSync(stateDir);
+    const mk = (name: string, stale: boolean) => {
+      fs.mkdirSync(path.join(stateDir, name));
+      fs.writeFileSync(path.join(stateDir, name, 'x'), 'x');
+      if (stale) makeStale(path.join(stateDir, name));
+    };
+    mk('sc-aaaaaaaaaaaaaaaa', true); // stale session: swept
+    mk('sc-bbbbbbbbbbbbbbbb', false); // fresh session: kept
+    mk('junk', true); // not a session name: kept, however old
+    mk('sc-short', true);
+    fs.writeFileSync(path.join(stateDir, 'sc-cccccccccccccccc'), 'a file, not a session');
+    fs.symlinkSync(path.join(victim, DECOY), path.join(stateDir, 'sc-dddddddddddddddd'));
+    const victimBefore = snapshot(victim);
+    const live = pruneNativeProvenance({ stateDir });
+    expect(fs.readdirSync(stateDir).sort()).toEqual(['junk', 'sc-bbbbbbbbbbbbbbbb', 'sc-cccccccccccccccc', 'sc-dddddddddddddddd', 'sc-short']);
+    expect(live).toBe(1);
+    expect(snapshot(victim)).toEqual(victimBefore);
+  });
+
+  it('at the session cap a NEW session goes unrecorded; no existing session is evicted for room', () => {
+    expect(record(KEY, { maxSessions: 1 })).toBe(1);
+    expect(record(OTHER, { maxSessions: 1 })).toBe(0);
+    expect(fs.readdirSync(stateDir)).toEqual([KEY]);
+    // The existing session keeps recording.
+    expect(record(KEY, { maxSessions: 1 })).toBe(1);
+  });
+
+  it('record-named entries that are links, directories or oversized are not evidence', () => {
+    const dir = path.join(stateDir, KEY);
+    fs.mkdirSync(dir, { recursive: true });
+    const H = helperHash();
+    const outside = path.join(root, 'outside-record.json');
+    fs.writeFileSync(outside, VALID_RECORD);
+    fs.symlinkSync(outside, path.join(dir, `${H}.1.aa`));
+    fs.mkdirSync(path.join(dir, `${H}.2.bb`));
+    fs.writeFileSync(path.join(dir, `${H}.3.cc`), VALID_RECORD + ' '.repeat(64 * 1024));
+    expect(probe()('./helper')).toBeNull();
+    // Sanity: a regular, small record beside them is still read.
+    fs.writeFileSync(path.join(dir, `${H}.4.dd`), VALID_RECORD);
+    expect(probe()('./helper')).toBe('agent-written');
+  });
+});
+
+/** Run the BUILT probe in a child with a hard timeout, so a regression to a
+ *  blocking open fails this test instead of hanging Jest. */
+function probeInChild(opts: { sessionKey: string; cwd: string; stateDir: string; home: string }, token: string) {
+  const script = 'import(process.argv[1]).then((m) => {'
+    + ' const p = m.createNativeArtifactProbe(JSON.parse(process.argv[2]));'
+    + ' process.stdout.write(JSON.stringify({ r: p(process.argv[3]) })); });';
+  const started = Date.now();
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script, pathToFileURL(DIST_STORE).href, JSON.stringify(opts), token], {
+    encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL',
+  });
+  return { ...r, ms: Date.now() - started };
+}
+
+/** Whether a `mkfifo` executable can be started at all. Run with no operands
+ *  (prints usage, creates nothing) and a timeout; only "not found" counts as
+ *  unavailable, so a broken mkfifo still runs, and fails, the tests below. */
+const HAS_MKFIFO = process.platform !== 'win32'
+  && (spawnSync('mkfifo', [], { stdio: 'ignore', timeout: 5000 }).error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT';
+
+(HAS_MKFIFO ? describe : describe.skip)('#1025 fold r1 — a FIFO in the store never parks the probe (POSIX: mkfifo)', () => {
+  let root: string;
+  let stateDir: string;
+  let work: string;
+  const KEY = 'sc-0123456789abcdef';
+
+  beforeEach(() => {
+    expect(fs.existsSync(DIST_STORE)).toBe(true); // `node scripts/run-jest.mjs` builds dist first
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-1025-fifo-')));
+    stateDir = path.join(root, 'state');
+    work = path.join(root, 'work');
+    fs.mkdirSync(work, { recursive: true });
+    fs.writeFileSync(path.join(work, 'helper'), ELF_STUB, { mode: 0o755 });
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const opts = () => ({ sessionKey: KEY, cwd: work, stateDir, home: root });
+  const mkfifo = (p: string) => {
+    const r = spawnSync('mkfifo', [p], { encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL' });
+    expect({ error: r.error?.message, status: r.status, stderr: r.stderr }).toEqual({ error: undefined, status: 0, stderr: '' });
+  };
+  const expectPrompt = (r: ReturnType<typeof probeInChild>, expected: unknown) => {
+    expect({ error: r.error?.message, signal: r.signal, status: r.status, stderr: r.stderr }).toEqual({ error: undefined, signal: null, status: 0, stderr: '' });
+    expect(JSON.parse(r.stdout)).toEqual({ r: expected });
+  };
+
+  it('a FIFO named like a record (same path hash) is skipped; the real record beside it is still read', () => {
+    const dir = path.join(stateDir, KEY);
+    fs.mkdirSync(dir, { recursive: true });
+    const H = hashFor(KEY, path.join(work, 'helper'));
+    fs.writeFileSync(path.join(dir, `${H}.1.aa`), VALID_RECORD);
+    mkfifo(path.join(dir, `${H}.9.ffffff`));
+    expectPrompt(probeInChild(opts(), './helper'), 'agent-written');
+  }, 30_000);
+
+  it('a FIFO as the probed artifact, as the session directory, or as the store root is "not observed", promptly', () => {
+    const dir = path.join(stateDir, KEY);
+    fs.mkdirSync(dir, { recursive: true });
+    mkfifo(path.join(work, 'pipe'));
+    fs.writeFileSync(path.join(dir, `${hashFor(KEY, path.join(work, 'pipe'))}.1.aa`), VALID_RECORD);
+    expectPrompt(probeInChild(opts(), './pipe'), null);
+
+    fs.rmSync(dir, { recursive: true });
+    mkfifo(dir);
+    expectPrompt(probeInChild(opts(), './helper'), null);
+
+    fs.rmSync(stateDir, { recursive: true });
+    mkfifo(stateDir);
+    expectPrompt(probeInChild(opts(), './helper'), null);
+  }, 30_000);
 });

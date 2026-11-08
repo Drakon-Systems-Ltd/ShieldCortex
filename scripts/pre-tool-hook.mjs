@@ -3488,16 +3488,17 @@ process.stdin.on('end', async () => {
       // 4th arg, not the 3rd — the 3rd is the IronDome config. Passing the
       // options object into the config slot type-checks in .mjs and silently
       // does nothing, which is the same shape of defect as the gap this fixes.
-      const guardOptions = {
-        ...(resolveScriptSource ? { resolveScriptSource } : {}),
-        ...(resolveScriptSource && isReviewedScript ? { isReviewedScript } : {}),
-        ...nativeOptions,
-      };
+      // #1025: the native-exec probe rides in the same options object, after
+      // the resolver fields; with no resolver it is the whole object.
       verdict = guard.evaluateToolCall(
         toolName,
         toolInput,
         undefined,
-        Object.keys(guardOptions).length > 0 ? guardOptions : undefined,
+        resolveScriptSource
+          ? (isReviewedScript
+            ? { resolveScriptSource, isReviewedScript, ...nativeOptions }
+            : { resolveScriptSource, ...nativeOptions })
+          : (nativeOptions.nativeArtifactProvenance ? nativeOptions : undefined),
       );
     } catch (err) {
       await handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode, await getNotify(), baseExtra); // always exits
@@ -3558,7 +3559,11 @@ process.stdin.on('end', async () => {
         // #1025: a benign allow is normally unaudited, but running or loading
         // an agent-produced native image is the one thing about it worth
         // keeping — one row, redacted args, the same opt-out as every other
-        // allow row. The decision above is unchanged.
+        // allow row. The decision above is unchanged. Deliberately an else-if
+        // with the #509 tally below: this row is itself a counted
+        // `intercept` row (guard-readiness isCountedCall), so it already puts
+        // this call in the readiness denominator once; writing the tally row
+        // too would count one call twice.
         writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'allowed'), redactedAuditArgs(toolName, toolInput), 'allow', 'allowed', baseExtra);
       } else if (whenReady) {
         // #509: the intervention proxy's denominator is EVERY gated call, so under this

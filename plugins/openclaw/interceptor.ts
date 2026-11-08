@@ -2441,6 +2441,10 @@ export function createInterceptor(
           // channel for a value the guard just refused to read.
           // #1025: the native-exec observation is the other such thing — same
           // single row, same name-only preview, same `auditAllows` opt-out.
+          // Like the drift row, it sets `wrote`, so the #509 tally row below
+          // is not also written: this row already counts the call once in
+          // the readiness denominator (isCountedCall), and both would count
+          // it twice.
           emitAudit({
             ...guardAuditBase(context.toolName, v, `${context.toolName} :: ${drift ? 'contract-drift' : 'native-exec'}`),
             ...(drift ?? {}),

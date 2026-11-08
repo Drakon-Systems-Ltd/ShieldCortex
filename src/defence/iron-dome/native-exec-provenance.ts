@@ -79,10 +79,14 @@ export const NATIVE_PROVENANCE_RECORD_CAP = 4096;
 export const MAX_CAPTURES_PER_CALL = 16;
 /** TTL measured from a session directory's last activity. */
 export const NATIVE_PROVENANCE_TTL_MS = 24 * 60 * 60 * 1000;
-/** Distinct sessions kept before the oldest are swept. */
+/** Live (unexpired) sessions kept. At the cap a NEW session is not recorded;
+ *  no live session is ever evicted to make room. */
 export const MAX_NATIVE_PROVENANCE_SESSIONS = 512;
 /** Bytes read for the native-header test — enough for every magic checked. */
 export const NATIVE_HEADER_BYTES = 64;
+/** A record body is ~130 bytes of JSON; anything larger is not one of ours
+ *  and is not read past this many bytes. */
+export const MAX_RECORD_BYTES = 512;
 
 /** Both planes key sessions as `sc-` + 16 hex (session-guard.ts sessionKeyFor,
  *  scripts/pre-tool-hook.mjs). Anything else is refused, so a key can never be
@@ -172,7 +176,10 @@ export function canonicalTarget(
 
 // -- Native header (reused) ---------------------------------------------------
 
-/** True when the first bytes are an ELF, Mach-O (incl. fat) or PE/DOS magic. */
+/** True when the first bytes are an ELF, Mach-O (incl. fat) or PE/DOS magic.
+ *  Known false positives, accepted because the answer only labels a log row:
+ *  any file starting `MZ` (0x4d5a) reads as PE, and `0xcafebabe` is both the
+ *  Mach-O fat magic and the Java class-file magic. */
 export function isNativeImageHeader(bytes: Uint8Array | null | undefined): boolean {
   if (!bytes || bytes.length < 4) return false;
   if (bytes[0] === 0x7f && bytes[1] === 0x45 && bytes[2] === 0x4c && bytes[3] === 0x46) return true; // ELF
@@ -214,10 +221,15 @@ export function statContentId(absPath: string): ContentId | 'absent' | null {
 const OPEN_HEADER_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0);
 
 /** The first bytes of a regular file, or `null` (unreadable, or not a regular
- *  file — a FIFO, socket or device is never read). Never throws. */
+ *  file — a FIFO, socket or device is never read). A final symlink IS
+ *  followed, as exec follows it. A static stat refuses a non-regular target
+ *  before any open (so a device is not even opened); the open is still
+ *  non-blocking and re-checked with fstat, because the path can be swapped
+ *  between the two. Never throws. */
 export function readArtifactHeader(absPath: string): Uint8Array | null {
   let fd: number | null = null;
   try {
+    if (!fs.statSync(absPath).isFile()) return null;
     fd = fs.openSync(absPath, OPEN_HEADER_FLAGS);
     if (!fs.fstatSync(fd).isFile()) return null;
     const buf = Buffer.alloc(NATIVE_HEADER_BYTES);
@@ -299,6 +311,91 @@ function pathHashFor(sessionKey: string, canonical: string): string {
 
 const FINAL_RE = /^([0-9a-f]{64})\.\d+\.[0-9a-f]+$/;
 
+// The store lives in a directory the monitored agent can write (it runs as the
+// same user), so every entry in it is untrusted: a FIFO named like a record
+// would park a blocking open (and a hook that never answers is an allow), and
+// a symlinked root or session directory would aim the writes and the sweep at
+// another tree.
+//
+// What is defended — entries already in place when the hook looks (static):
+// the root (normalised lexically, see `storeRoot`) and the session directory
+// are lstat'd and must be REAL directories before anything lists, creates,
+// writes or sweeps under them; the sweep removes only entries that lstat as
+// real directories named like a session key and older than the TTL; a record
+// is read only if it is a small regular file. Independently of any race, a
+// record open is O_NONBLOCK (it does not wait for a FIFO writer), its fd is
+// re-checked with fstat, and its read is bounded by a fixed buffer; a record
+// is created with O_EXCL, so publication never opens an existing entry.
+//
+// What is NOT defended — a concurrent swap (TOCTOU): Node has no
+// openat()/dirfd API, so each check and the operation after it are separate
+// path lookups. An agent racing the hook can replace a checked root or
+// session directory with a link or another directory in between, so a record
+// may be written, listed or read through it, and the directory the sweep
+// renames and deletes need not be the one it lstat'd (rmSync of the renamed
+// path unlinks a link rather than following it, but a swapped-in real
+// directory is deleted). None of this is race-proof containment, and other
+// filesystem calls (mkdir, readdir, rename, rm) are ordinary synchronous I/O
+// with no timeout. The parents of the root (`~/.shieldcortex` or
+// SHIELDCORTEX_CONFIG_DIR) are trusted as for every other state file there.
+// The probe's output, raced or not, only labels a log row and never changes a
+// decision.
+
+/** The store root as a lexical absolute path with no trailing separator, or
+ *  `null` for an empty path. `lstat('link/')` resolves the link (a trailing
+ *  separator makes the final component a directory lookup), so a caller's
+ *  `stateDir` of `link/` would pass the real-directory check below while
+ *  pointing elsewhere. `path.resolve` is purely lexical — deliberately NOT
+ *  realpath, which would erase the evidence of a link — and every later
+ *  check and operation uses this one string. */
+function storeRoot(stateDir: string | undefined): string | null {
+  const raw = stateDir ?? resolveNativeProvenanceDir();
+  return typeof raw === 'string' && raw !== '' ? path.resolve(raw) : null;
+}
+
+/** True only for a real directory: not a symlink, not a special file. */
+function isRealDirectory(p: string): boolean {
+  try {
+    return fs.lstatSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** `O_NOFOLLOW` where the platform has it, plus the static lstat below where
+ *  it does not (Windows), so a record-named link is never followed. */
+const OPEN_RECORD_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0) | (fs.constants.O_NOFOLLOW ?? 0);
+
+/** A record file's text, or `null`: not a regular file (link, FIFO, socket,
+ *  device, directory), larger than `MAX_RECORD_BYTES`, or unreadable. The
+ *  open does not wait for a FIFO writer (O_NONBLOCK) and the fd is fstat'd
+ *  before any read; a fixed buffer bounds the read even if the file grows
+ *  after the size checks. Never throws. */
+function readRecordFile(p: string): string | null {
+  let fd: number | null = null;
+  try {
+    const st = fs.lstatSync(p);
+    if (!st.isFile() || st.size > MAX_RECORD_BYTES) return null;
+    fd = fs.openSync(p, OPEN_RECORD_FLAGS);
+    const fst = fs.fstatSync(fd);
+    if (!fst.isFile() || fst.size > MAX_RECORD_BYTES) return null;
+    const buf = Buffer.alloc(MAX_RECORD_BYTES + 1);
+    let n = 0;
+    while (n < buf.length) {
+      const got = fs.readSync(fd, buf, n, buf.length - n, n);
+      if (got <= 0) break;
+      n += got;
+    }
+    return n > MAX_RECORD_BYTES ? null : buf.toString('utf8', 0, n);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* best effort */ }
+    }
+  }
+}
+
 function parseRecordBody(raw: string): NativeArtifactRecord | null {
   try {
     const o = JSON.parse(raw) as Record<string, unknown> | null;
@@ -324,12 +421,19 @@ function parseRecordBody(raw: string): NativeArtifactRecord | null {
 
 function publishRecord(dir: string, finalName: string, body: string): boolean {
   const tmp = path.join(dir, `${finalName}.tmp`);
+  // `wx` is O_CREAT|O_EXCL: it never follows or opens an entry already at
+  // that name (a planted link or FIFO fails EEXIST), and only a file this
+  // call created is ever unlinked.
+  let created = false;
   try {
     fs.writeFileSync(tmp, body, { flag: 'wx', mode: 0o600 });
+    created = true;
     fs.renameSync(tmp, path.join(dir, finalName));
     return true;
   } catch {
-    try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+    if (created) {
+      try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+    }
     return false;
   }
 }
@@ -349,30 +453,53 @@ export function recordNativeArtifactCaptures(opts: {
   stateDir?: string;
   home?: string;
   now?: number;
+  maxSessions?: number;
 }): number {
   try {
     if (!SESSION_KEY_RE.test(String(opts.sessionKey ?? ''))) return 0;
     if (!Array.isArray(opts.captures) || opts.captures.length === 0) return 0;
-    const root = opts.stateDir ?? resolveNativeProvenanceDir();
+    const root = storeRoot(opts.stateDir);
+    if (root === null) return 0;
     const home = opts.home ?? os.homedir();
     const dir = path.join(root, opts.sessionKey);
     const at = opts.now ?? Date.now();
 
-    let existing: string[] | null = null;
-    try {
-      existing = fs.readdirSync(dir);
-    } catch {
-      existing = null;
-    }
-    if (existing === null) {
-      // First record of this session: the one moment a sweep is paid for, so
-      // the hot path never lists the whole store.
-      pruneNativeProvenance({ stateDir: root, now: at });
+    // The root: a real directory, or absent (then created). Anything else —
+    // a symlink, a file, a FIFO — and nothing is recorded.
+    if (!isRealDirectory(root)) {
       try {
-        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        fs.lstatSync(root);
+        return 0; // exists, and is not a real directory
+      } catch { /* absent: create it */ }
+      try {
+        fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+      } catch { /* re-checked below */ }
+      if (!isRealDirectory(root)) return 0;
+    }
+
+    let existing: string[];
+    let sessionPresent = true;
+    try {
+      fs.lstatSync(dir);
+    } catch {
+      sessionPresent = false;
+    }
+    if (sessionPresent) {
+      if (!isRealDirectory(dir)) return 0; // a planted link or special file
+      try {
+        existing = fs.readdirSync(dir);
       } catch {
         return 0;
       }
+    } else {
+      // First record of this session: the one moment a sweep is paid for, so
+      // the hot path never lists the whole store.
+      const live = pruneNativeProvenance({ stateDir: root, now: at });
+      if (live === null || live >= (opts.maxSessions ?? MAX_NATIVE_PROVENANCE_SESSIONS)) return 0;
+      try {
+        fs.mkdirSync(dir, { mode: 0o700 });
+      } catch { /* EEXIST from a concurrent call: re-checked below */ }
+      if (!isRealDirectory(dir)) return 0;
       existing = [];
     }
     let room = NATIVE_PROVENANCE_RECORD_CAP - existing.length;
@@ -410,8 +537,9 @@ export function createNativeArtifactProbe(opts: {
   stateDir?: string;
   home?: string;
 }): (token: string) => NativeArtifactProvenance | null {
-  const valid = SESSION_KEY_RE.test(String(opts.sessionKey ?? ''));
-  const dir = path.join(opts.stateDir ?? resolveNativeProvenanceDir(), valid ? opts.sessionKey : '_');
+  const root = storeRoot(opts.stateDir);
+  const valid = root !== null && SESSION_KEY_RE.test(String(opts.sessionKey ?? ''));
+  const dir = path.join(root ?? '_', valid ? opts.sessionKey : '_');
   const home = opts.home ?? os.homedir();
   let byHash: Map<string, string[]> | null = null;
   const listing = (): Map<string, string[]> => {
@@ -420,7 +548,8 @@ export function createNativeArtifactProbe(opts: {
     byHash = map;
     let names: string[] = [];
     try {
-      names = fs.readdirSync(dir);
+      // Nothing is listed or read through a planted link or special file.
+      names = root !== null && isRealDirectory(root) && isRealDirectory(dir) ? fs.readdirSync(dir) : [];
     } catch {
       names = [];
     }
@@ -444,10 +573,11 @@ export function createNativeArtifactProbe(opts: {
       if (!names) return null;
       const records: NativeArtifactRecord[] = [];
       for (const n of names) {
-        try {
-          const r = parseRecordBody(fs.readFileSync(path.join(dir, n), 'utf8'));
-          if (r) records.push(r);
-        } catch { /* unreadable record: not evidence */ }
+        // Not a small regular file (a planted FIFO, link, directory, an
+        // oversized file) or unreadable: not evidence.
+        const raw = readRecordFile(path.join(dir, n));
+        const r = raw === null ? null : parseRecordBody(raw);
+        if (r) records.push(r);
       }
       return classifyNativeProvenance(records, statContentId(canon), readArtifactHeader(canon));
     } catch {
@@ -457,43 +587,62 @@ export function createNativeArtifactProbe(opts: {
 }
 
 /**
- * Sweep expired or over-count session directories. Best effort, never throws.
- * A directory is renamed away before deletion so a reader sees all of a
- * session's records or none.
+ * Sweep expired session directories. Best effort, never throws. Returns how
+ * many live (unexpired) session directories remain, or `null` when the root is
+ * not a real directory or cannot be listed (then nothing is touched).
+ *
+ * Selection: only entries that lstat as real directories (not a link) named
+ * like a session key whose last activity is older than the TTL are chosen for
+ * removal. Every other name, link, file or special file present at the lstat
+ * is left as it is, and a live session is never evicted for room — the
+ * session cap is enforced by not recording a new session instead. A doomed
+ * directory is renamed away before deletion so a reader sees all of a
+ * session's records or none. The lstat and the rename are separate lookups:
+ * an entry swapped in between is what gets renamed and deleted (a link is
+ * unlinked, not followed; a real directory is removed) — see the store note
+ * above on what a concurrent swap can still reach.
  */
 export function pruneNativeProvenance(opts: {
   stateDir?: string;
   now?: number;
   ttlMs?: number;
-  maxSessions?: number;
-} = {}): void {
-  const root = opts.stateDir ?? resolveNativeProvenanceDir();
-  const now = opts.now ?? Date.now();
-  const ttlMs = opts.ttlMs ?? NATIVE_PROVENANCE_TTL_MS;
-  const maxSessions = opts.maxSessions ?? MAX_NATIVE_PROVENANCE_SESSIONS;
-  let dirs: fs.Dirent[];
+} = {}): number | null {
   try {
-    dirs = fs.readdirSync(root, { withFileTypes: true });
+    const root = storeRoot(opts.stateDir);
+    const now = opts.now ?? Date.now();
+    const ttlMs = opts.ttlMs ?? NATIVE_PROVENANCE_TTL_MS;
+    if (root === null || !isRealDirectory(root)) return null;
+    let names: string[];
+    try {
+      names = fs.readdirSync(root);
+    } catch {
+      return null;
+    }
+    let live = 0;
+    for (const name of names) {
+      if (!SESSION_KEY_RE.test(name)) continue;
+      const src = path.join(root, name);
+      let st: fs.Stats;
+      try {
+        st = fs.lstatSync(src);
+      } catch {
+        continue;
+      }
+      if (!st.isDirectory()) continue;
+      if (now - st.mtimeMs <= ttlMs) {
+        live++;
+        continue;
+      }
+      const grave = `${src}.expired.${now}.${randomBytes(6).toString('hex')}`;
+      try {
+        fs.renameSync(src, grave);
+      } catch {
+        continue;
+      }
+      try { fs.rmSync(grave, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    return live;
   } catch {
-    return;
-  }
-  const sessions: Array<{ name: string; mtimeMs: number }> = [];
-  for (const d of dirs) {
-    if (!d.isDirectory()) continue;
-    try {
-      sessions.push({ name: d.name, mtimeMs: fs.statSync(path.join(root, d.name)).mtimeMs });
-    } catch { /* skip */ }
-  }
-  const doomed = new Set<string>();
-  for (const s of sessions) if (now - s.mtimeMs > ttlMs || !SESSION_KEY_RE.test(s.name)) doomed.add(s.name);
-  const live = sessions.filter((s) => !doomed.has(s.name)).sort((a, b) => a.mtimeMs - b.mtimeMs);
-  for (let i = 0; i < live.length - maxSessions; i++) doomed.add(live[i].name);
-  for (const name of doomed) {
-    const src = path.join(root, name);
-    const grave = `${src}.expired.${now}.${randomBytes(6).toString('hex')}`;
-    try {
-      fs.renameSync(src, grave);
-      fs.rmSync(grave, { recursive: true, force: true });
-    } catch { /* best effort */ }
+    return null;
   }
 }

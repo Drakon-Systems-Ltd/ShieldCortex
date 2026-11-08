@@ -10,7 +10,7 @@
  * config or posture is touched. The "native" file is an ELF magic stub;
  * nothing is executed.
  */
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -22,17 +22,30 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const HOOK_PATH = path.resolve(REPO_ROOT, 'scripts', 'pre-tool-hook.mjs');
 const ELF_STUB = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, ...new Array(56).fill(0)]);
 
-type HookResult = { stdout: string; stderr: string; code: number };
+/** Whether a `mkfifo` executable can be started at all. Run with no operands
+ *  (prints usage, creates nothing) and a timeout; only "not found" counts as
+ *  unavailable, so a broken mkfifo still runs, and fails, the FIFO test. */
+const HAS_MKFIFO = process.platform !== 'win32'
+  && (spawnSync('mkfifo', [], { stdio: 'ignore', timeout: 5000 }).error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT';
 
-function runHook(payload: unknown, env: NodeJS.ProcessEnv): Promise<HookResult> {
+type HookResult = { stdout: string; stderr: string; code: number; timedOut?: true };
+
+/** `timeoutMs`: SIGKILL the hook after that long and report `timedOut`, so a
+ *  hook that parks fails the test instead of hanging Jest. */
+function runHook(payload: unknown, env: NodeJS.ProcessEnv, timeoutMs = 0): Promise<HookResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [HOOK_PATH], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env } });
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    const timer = timeoutMs > 0 ? setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs) : null;
     child.stdout.on('data', (c) => { stdout += c.toString(); });
     child.stderr.on('data', (c) => { stderr += c.toString(); });
     child.on('error', reject);
-    child.on('close', (code) => resolve({ stdout, stderr, code: code ?? 0 }));
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      resolve({ stdout, stderr, code: code ?? 0, ...(timedOut ? { timedOut: true as const } : {}) });
+    });
     child.stdin.write(JSON.stringify(payload));
     child.stdin.end();
   });
@@ -75,9 +88,9 @@ describe('#1025 native-exec observation through the real Claude Code hook', () =
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  const call = (box: Box, tool_name: string, tool_input: Record<string, unknown>) => runHook({
+  const call = (box: Box, tool_name: string, tool_input: Record<string, unknown>, timeoutMs = 0) => runHook({
     session_id: SESSION, cwd: box.work, hook_event_name: 'PreToolUse', permission_mode: 'default', tool_name, tool_input,
-  }, box.env);
+  }, box.env, timeoutMs);
 
   /** In `recorded` the Write goes through the hook (and is recorded); in
    *  `control` the same bytes appear with no hook call. */
@@ -136,6 +149,28 @@ describe('#1025 native-exec observation through the real Claude Code hook', () =
     await call(recorded, 'Bash', { command: './tool' });
     expect(auditRows(recorded).some((r) => r.nativeExec)).toBe(false);
   });
+
+  (HAS_MKFIFO ? it : it.skip)('a FIFO planted beside a real record cannot park the hook: a catastrophic call is still denied (POSIX: mkfifo)', async () => {
+    await plant('helper');
+    // Learn the session directory and the record name prefix exactly as the
+    // agent could (`ls`), and plant a FIFO with the same path hash.
+    const store = path.join(recorded.configDir, 'native-provenance');
+    const [sessionDir] = fs.readdirSync(store);
+    const [rec] = fs.readdirSync(path.join(store, sessionDir));
+    const fifo = path.join(store, sessionDir, `${rec.split('.')[0]}.9.ffffff`);
+    const made = spawnSync('mkfifo', [fifo], { encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL' });
+    expect({ error: made.error?.message, status: made.status, stderr: made.stderr }).toEqual({ error: undefined, status: 0, stderr: '' });
+
+    // Assembled: this file is scanned by the guard it drives.
+    const command = `${['rm', '-rf', '~'].join(' ')} ; ./helper`;
+    const a = await call(recorded, 'Bash', { command }, 8000);
+    const b = await call(control, 'Bash', { command }, 8000);
+    expect(a.timedOut).toBeUndefined();
+    expect(b.timedOut).toBeUndefined();
+    expect(JSON.parse(a.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(a.stdout).toBe(b.stdout);
+    expect(a.code).toBe(b.code);
+  }, 30_000);
 
   it('no session id: nothing recorded, nothing observed (current behaviour)', async () => {
     const payload = (tool_name: string, tool_input: Record<string, unknown>) => ({ cwd: recorded.work, hook_event_name: 'PreToolUse', permission_mode: 'default', tool_name, tool_input });
