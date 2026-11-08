@@ -275,4 +275,26 @@ describe('#907 native-exec floor through the real Claude Code hook', () => {
     expect(nativeAudited()).toBe(false);
     expect(decisionOf(await bash('f() { ./helper; }; f')).permissionDecision).toBe('deny');
   });
+
+  // -- review round 3 regressions, through the real hook ----------------------
+
+  it('r3 B4 / grok B1: a function shadowing cd keeps ./helper in the cwd (never the builtin destination)', async () => {
+    await agentHelper();
+    fs.mkdirSync(path.join(work, 'sub'));
+    for (const cmd of [
+      'cd() { :; }; cd sub && ./helper',
+      'cd() { true; }; cd /tmp && ./helper',
+      'cd() ( true ); cd /tmp && ./helper',
+      'function cd { true; }; cd /tmp && ./helper',
+      'pushd() { true; }; pushd /tmp && ./helper',
+      'cd() { true; }; time cd /tmp && ./helper',
+    ]) {
+      const r = await bash(cmd);
+      expect([cmd, decisionOf(r).permissionDecision]).toEqual([cmd, 'deny']);
+      expect(r.stderr).toMatch(/exec-agent-written-native-bytes/);
+    }
+    // positive control: an UNSHADOWED cd still re-anchors away from the cwd
+    expect(decisionOf(await bash('cd sub && ./helper')).permissionDecision).toBeUndefined();
+    expect(decisionOf(await bash('./helper')).permissionDecision).toBe('deny');
+  });
 });

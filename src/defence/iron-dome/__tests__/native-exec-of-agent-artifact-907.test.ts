@@ -1056,6 +1056,63 @@ describe('#907 r2 N5 / B1 — directory uncertainty never drops or re-anchors a 
   });
 });
 
+describe('#907 r3 B4 / grok B1 — a function shadowing cd/pushd never keeps the builtin directory', () => {
+  // Only ${WORK}/helper exists and is agent-produced. A function named cd /
+  // pushd may run instead of the builtin (it is defined in the call), so the
+  // builtin destination (/tmp, sub) is NOT where the shell goes. ./helper
+  // runs in the call cwd (the function case), so the cwd candidate must
+  // survive and the floor must fire there.
+  it.each([
+    'cd() { :; }; cd sub && ./helper',              // R3-B4 exact (astra)
+    'cd() { true; }; cd /tmp && ./helper',          // grok B1
+    'cd() ( true ); cd /tmp && ./helper',           // subshell function
+    'function cd { true; }; cd /tmp && ./helper',   // `function` keyword
+    'function cd() { true; }; cd /tmp && ./helper',
+    'pushd() { true; }; pushd /tmp && ./helper',    // pushd shadow
+    'cd() { true; }; time cd /tmp && ./helper',     // time prefix
+    'false && cd() { true; }; cd /tmp && ./helper', // def may not run: cwd still a named candidate
+    'cd() { true; }; cd /tmp || ./helper',          // || arm: cd "succeeds" but may be the fn
+  ])('%j — the shadowed cd does not re-anchor ./helper away from the cwd: floor', (cmd) => {
+    expect(isFloor(agentNative(`${WORK}/helper`).check(cmd), SIG_A)).toBe(true);
+  });
+
+  it('row C under the same shadow: an external program still loads the cwd preload', () => {
+    // /bin/ls is rooted (external); LD_PRELOAD=./lib.so resolves where it runs.
+    // The shadowed `cd /tmp` cannot prove the move, so the cwd lib.so is kept.
+    const w = agentNative(`${WORK}/lib.so`);
+    expect(isFloor(w.check('cd() { true; }; cd /tmp && LD_PRELOAD=./lib.so /bin/ls'), SIG_C)).toBe(true);
+  });
+
+  it('the inverse face is NOT a doorless false deny: only the builtin destination holds the image', () => {
+    // Only /tmp/helper is agent-produced; the shell runs the function and
+    // stays in cwd, so /tmp/helper does not run. It must not floor — the
+    // unprovable move is the door, never a catastrophic deny of a path the
+    // shell does not enter.
+    const w = agentNative('/tmp/helper');
+    const v = w.check('cd() { true; }; cd /tmp && ./helper');
+    expect(v.decision).not.toBe('block');
+    expect(v.signals).not.toContain(SIG_A);
+    expect(v.signals).toContain(SIG_J); // the cwd exec is unresolved → the door
+  });
+
+  it('capture records the real cwd output, not the shadowed builtin destination', () => {
+    const cap = (command: string) => nativeArtifactCaptures('Bash', { command }).map((c) => c.token).sort();
+    // R3-B4 capture: the compiler runs in the cwd (the fn did not cd); the
+    // builtin `sub` destination is a lie. The cwd output is kept and the
+    // unprovable directory is an unresolved record ('').
+    expect(cap('cd() { :; }; cd sub && cc a.c -o app')).toEqual(['', 'app']);
+    // positive control: a real (unshadowed) cd still narrows
+    expect(cap('cd out && cc a.c -o app')).toEqual(['out/app']);
+  });
+
+  it('positive control: an unshadowed cd still re-anchors (only sub/helper exists)', () => {
+    const w = agentNative(`${WORK}/sub/helper`);
+    expect(isFloor(w.check('cd sub && ./helper'), SIG_A)).toBe(true);
+    // a function NOT named cd does not disturb a real cd before it
+    expect(isFloor(w.check('g() { :; }; g; cd sub && ./helper'), SIG_A)).toBe(true);
+  });
+});
+
 describe('#907 r2 N4 / B2 — a heredoc body ends at the EARLIEST line a shell could end it', () => {
   it.each([
     // N4: backslash-newline in an unquoted delimiter is a line continuation → `EOF`

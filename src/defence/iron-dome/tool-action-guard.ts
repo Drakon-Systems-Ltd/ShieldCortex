@@ -7136,10 +7136,14 @@ const SUPPORTED_COMPILER = /^(?:cc|gcc|g\+\+|c\+\+|clang|clang\+\+|nvcc|ghc|rust
 //   subshell or behind a child-only wrapper (`timeout`, `sudo`, `env`, `nohup`
 //   …) cannot move this shell. A computed `cd`, `cd -`, `cd ~user`, `pushd`
 //   without a literal target, `popd` without an in-call `pushd`, `source`, a
-//   computed command word, a relative `cd` inside a loop, and an invoked
-//   function that changes directory all add `unknown`. A relative exec word is
-//   classified under EVERY named directory, and `unknown` makes it an
-//   unresolved target that takes the door — the same as lexer truncation.
+//   computed command word, a relative `cd` inside a loop, and ANY command word
+//   that names a function defined in this call (it may run the function or —
+//   if the definition did not run — the `cd`/`pushd` builtin of the same name,
+//   so its directory cannot be proved) all add `unknown`; a shadowed builtin's
+//   destination is never asserted and the cwd candidate is never dropped
+//   (review r3 B4 / grok B1). A relative exec word is classified under EVERY
+//   named directory, and `unknown` makes it an unresolved target that takes
+//   the door — the same as lexer truncation.
 //
 //   HEREDOC BODIES. A body ends at the EARLIEST line a shell could end it: the
 //   exact delimiter line, or — inside `$(…)` — a line that starts with the
@@ -7426,14 +7430,24 @@ function lexShellList(
     if (call !== null) {
       s.fn = true;
       const f = funcs.get(call)!;
+      // A command word that names a function defined in this call is
+      // UNRESOLVED: it may run the function body, or — when the defining
+      // statement did not run (`false && f(){…}; f`) — the builtin or
+      // external of the same name. Its directory effect cannot be proved, so
+      // never keep the `cd`/`pushd`/`popd` builtin destination a shadowing
+      // function makes a lie. Keep the caller's dirs (never drop the cwd
+      // exec), add the body's reachable dirs, and mark `unknown` so every
+      // later relative exec/load/compile in this scope takes the door — the
+      // same as truncation (review r3 B4 / grok B1). `&&`/`||` must not
+      // narrow onto a directory the shell may never have entered.
+      let bodyDirs: DirSet = pipeIn;
       if (st.budget <= 0) st.truncated = true;
       else {
         st.budget--;
         const r = lexShellList(f.body, 0, 'eof', depth + 1, pipeIn, st, f.subshell ? new Map(funcs) : funcs);
-        if (!f.subshell && (r.dirs.unknown || r.dirs.dirs.some(d => !pipeIn.dirs.includes(d)))) {
-          effect = { kind: 'set', dirs: dirUnion(pipeIn, dirUnion(r.dirs, UNKNOWN_DIRS)) };
-        }
+        if (!f.subshell) bodyDirs = dirUnion(pipeIn, r.dirs);
       }
+      effect = { kind: 'set', dirs: dirUnion(bodyDirs, UNKNOWN_DIRS) };
     }
     noteExportedFunctions(s.words, exportedFuncs);
     const nested = lexNestedPrograms(s, depth, st, funcs, exportedFuncs);
