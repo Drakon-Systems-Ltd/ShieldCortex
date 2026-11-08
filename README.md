@@ -59,6 +59,15 @@ shieldcortex doctor
 
 Bare `setup` asks before wiring each host (`setup <host>` wires that host without asking). Setup can change Claude Code and OpenClaw config files, and may restart the OpenClaw gateway: [what setup writes](#setup-details). Details: [Updating](docs/UPDATING.md#updating), [Storage maintenance](docs/UPDATING.md#storage-maintenance), [What postinstall does](docs/openclaw-integration.md#install-time-refresh-postinstall), [Offline embedding cache](docs/offline-embeddings.md).
 
+<a id="setup-details"></a>
+<details><summary>What setup writes, and installs without lifecycle scripts</summary>
+
+`setup` is the onboarding command: it prints one host table and asks before wiring each host. `shieldcortex setup claude` skips the table and runs the Claude Code install without asking. That install can write `~/.claude/CLAUDE.md`, `~/.claude.json` and `~/.claude.json.bak-shieldcortex` if it replaces the file, `~/.claude/settings.json` and `~/.claude/settings.json.bak-shieldcortex` if it replaces the file, and `~/.claude/hooks/cortex-memory/` unless any detected hook root already has a cortex-memory directory. If that hook installer runs against a writable OpenClaw root, it can also copy the OpenClaw hook, install or register the realtime plugin, snapshot and rewrite `openclaw.json`, and may restart the gateway. Two older names still work. `quickstart` takes the same targets as `setup`'s guided path, without hook flags or `uninstall`. `install` is not the wizard: it runs that same Claude Code install as `setup claude`, and is kept for existing scripts and the `--without-*` hook opt-outs. Within 5.x, update with [`shieldcortex update`](docs/UPDATING.md#updating).
+
+If npm skipped the package's lifecycle scripts (for example `--ignore-scripts`, or `ignore-scripts=true` in an npm config), ShieldCortex's postinstall did not run. On a global install that step wires no host. It prints the next step, checks that the database engine loads, writes a default `~/.shieldcortex/config.json` when none exists, refreshes an OpenClaw integration that is already present, and on macOS restarts a dashboard service still running an older build. Skipping it does not skip onboarding: run `shieldcortex setup`, then `shieldcortex doctor`. Without that config file, prompt-time recall stays off until you turn it on. [What postinstall does](docs/openclaw-integration.md#install-time-refresh-postinstall).
+
+</details>
+
 ## Where it can block
 
 Action Guard stays off until you turn it on. That shared setting is the tool gate for Claude Code and OpenClaw. A bare `sudo shieldcortex protect` turns it on and pins that posture. [Policy lock](docs/UPDATING.md#policy-lock). The Hermes plugin does not read the shared setting; it has its own (below).
@@ -92,7 +101,7 @@ Webhook notifications for a headless denial or a held approval end with a `card`
 
 ## Also included
 
-- **Local dashboard.** `shieldcortex dashboard` is a local view: Home, Needs you, Memory, Protection, Settings. It is not an approval inbox: held actions are still answered in Telegram or OpenClaw. [What it needs](docs/UPDATING.md#dashboard-recall-and-cloud), [details](#setup-details).
+- **Local dashboard.** `shieldcortex dashboard` is a local view: Home, Needs you, Memory, Protection, Settings. It is not an approval inbox: held actions are still answered in Telegram or OpenClaw. [What it needs](docs/UPDATING.md#dashboard-recall-and-cloud), [details](#dashboard-details).
 - **Security audit.** `shieldcortex audit` scans an AI agent's environment and prints a graded report; `--sarif` writes SARIF 2.1.0.
 - **Skill and instruction-file scanner.** `shieldcortex scan-skill <file>` scans one file; `scan-skills` discovers all instruction files.
 - **Doctor.** `shieldcortex doctor` prints the host table, `memory + tool gate` or memory only, not a gate, per host, and will not print "protected" for a host that cannot deny. [Doctor and the host table](docs/UPDATING.md#doctor-and-the-host-table).
@@ -120,10 +129,8 @@ Free cloud: 500 scans/month, 7-day retention, 1 member. Enterprise (fleets, SSO,
 - [Contributing](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CONTRIBUTING.md)
 - Licence: MIT. Every local feature is free.
 
-<a id="setup-details"></a>
-<details><summary>Setup, dashboard and recall details</summary>
-
-`setup` is the onboarding command: it prints one host table and asks before wiring each host. `shieldcortex setup claude` skips the table and runs the Claude Code install without asking. That install can write `~/.claude/CLAUDE.md`, `~/.claude.json` and `~/.claude.json.bak-shieldcortex` if it replaces the file, `~/.claude/settings.json` and `~/.claude/settings.json.bak-shieldcortex` if it replaces the file, and `~/.claude/hooks/cortex-memory/` unless any detected hook root already has a cortex-memory directory. If that hook installer runs against a writable OpenClaw root, it can also copy the OpenClaw hook, install or register the realtime plugin, snapshot and rewrite `openclaw.json`, and may restart the gateway. Two older names still work. `quickstart` takes the same targets as `setup`'s guided path, without hook flags or `uninstall`. `install` is not the wizard: it runs that same Claude Code install as `setup claude`, and is kept for existing scripts and the `--without-*` hook opt-outs. Within 5.x, update with [`shieldcortex update`](docs/UPDATING.md#updating).
+<a id="dashboard-details"></a>
+<details><summary>Dashboard and recall details</summary>
 
 - **Inspect.** `shieldcortex dashboard` is a local view: Home, Needs you, Memory, Protection, Settings. The Skill & package scanner (formerly X-Ray) is a Protection tab. Memory has Search & browse, Map, Recall, Needs a check, Timeline, Replay, and Files. Needs you lists held-back items, memory pairs that disagree or look duplicated, and new scanner findings. It is not an approval inbox: held actions are still answered in Telegram or OpenClaw. Its counts are labelled when they are partial: pair counts stop at 20 of each kind and the disagreement check compares only the 200 most important memories, a list that failed to refresh shows its last known count, and scanner findings cover the whole computer even when a project is selected. Prompt-time recall into Claude Code is not automatic. [What it needs](docs/UPDATING.md#dashboard-recall-and-cloud). In prompt-time recall (the `UserPromptSubmit` hook), turns detected as a cron job, subagent or liveness probe, or pinned to one of those lanes, get narrower recall than the owner's chat, and rows labelled PERSONAL (private-life notes the classifier recognised or a backfill raised) are withheld from them. This is not universal isolation: a private note the classifier missed and labelled `PUBLIC` can still reach those lanes, and SessionStart context, MCP tool reads and dashboard previews are not lane-scoped. [Recall lanes](docs/UPDATING.md#recall-lanes).
 
