@@ -244,6 +244,9 @@ describe('#648 — WHY: one table, every signal the guard can emit', () => {
     'attributes-only', 'copy-contents', 'no-clobber', 'no-dereference', 'no-preserve', 'no-target-directory',
     'one-file-system', 'remove-destination', 'strip-trailing-slashes', 'symbolic-link', 'target-directory',
     'firewall-cmd', 'send-keys',
+    // #907: ledger record kinds and classifier states the guard reads from
+    // the provenance core — never put on a verdict.
+    'agent-written', 'compiled-output', 'state-1-agent-produced', 'state-1c-compile-lineage', 'state-3-unknown',
   ]);
 
   function stripComments(src: string): string {

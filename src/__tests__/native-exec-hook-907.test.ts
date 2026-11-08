@@ -172,4 +172,48 @@ describe('#907 native-exec floor through the real Claude Code hook', () => {
     expect(d.permissionDecision).toBe('ask');
     expect(doorAudited()).toBe(true);
   });
+
+  // -- review round 1 regressions, through the real hook ----------------------
+
+  it('r1 B6: a structurally broken store (ENOTDIR) is incomplete history — an unwritten install-root image is the door, not relieved', async () => {
+    const binDir = path.join(work, 'node_modules', '.bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    const installed = path.join(binDir, 'other');
+    fs.writeFileSync(installed, ELF_STUB, { mode: 0o755 });
+    expect(decisionOf(await bash(installed)).permissionDecision).toBeUndefined(); // healthy store: Rule H relief
+    fs.writeFileSync(path.join(configDir, 'artifacts'), 'not a directory');
+    expect(decisionOf(await bash(installed)).permissionDecision).toBe('ask');
+  });
+
+  it('r1 B1: an agent-written native image named python3 is denied, with or without an inline program', async () => {
+    const fake = path.join(work, 'python3');
+    await write(fake);
+    fs.writeFileSync(fake, ELF_STUB, { mode: 0o755 });
+    for (const cmd of ['./python3', "./python3 -c 'print(1)'"]) {
+      const r = await bash(cmd);
+      expect(decisionOf(r).permissionDecision).toBe('deny');
+      expect(r.stderr).toMatch(/exec-agent-written-native-bytes/);
+    }
+  });
+
+  it("r1 B2: a relative path without './' is resolved like one with it", async () => {
+    fs.mkdirSync(path.join(work, 'bin'), { recursive: true });
+    const helper = path.join(work, 'bin', 'helper');
+    await write(helper);
+    fs.writeFileSync(helper, ELF_STUB, { mode: 0o755 });
+    for (const cmd of ['bin/helper', './bin/helper', 'cd bin && ./helper']) {
+      expect(decisionOf(await bash(cmd)).permissionDecision).toBe('deny');
+    }
+  });
+
+  it('r1 B3: reading or printing an agent-written native file name is not running it', async () => {
+    const helper = path.join(work, 'helper');
+    await write(helper);
+    fs.writeFileSync(helper, ELF_STUB, { mode: 0o755 });
+    for (const cmd of ["cat <<'EOF'\n./helper\nLD_PRELOAD=./helper ls\nEOF", 'echo "first line\n./helper\nlast"', 'ls # ./helper']) {
+      expect(decisionOf(await bash(cmd)).permissionDecision).toBeUndefined();
+    }
+    expect(auditRows().some((row) => JSON.stringify(row).includes('native-exec-of-agent-artifact'))).toBe(false);
+    expect(decisionOf(await bash('true && ./helper')).permissionDecision).toBe('deny'); // a real exec still is
+  });
 });

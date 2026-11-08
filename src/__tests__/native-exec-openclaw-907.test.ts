@@ -112,6 +112,40 @@ describe('#907 native-exec floor through the OpenClaw interceptor', () => {
     expect(h.saw('exec-agent-written-native-bytes')).toBe(false);
   });
 
+  it('r1 B1/B2: a native image named python3, and a path spelt without ./, are both blocked', async () => {
+    const h = harness();
+    fs.mkdirSync(path.join(work, 'bin'), { recursive: true });
+    for (const rel of ['python3', 'bin/helper']) {
+      const p = path.join(work, rel);
+      await h.call('Write', { file_path: p, content: 'stub' });
+      fs.writeFileSync(p, ELF_STUB, { mode: 0o755 });
+    }
+    await expect(h.call('Bash', { command: "./python3 -c 'print(1)'" })).rejects.toThrow(/ShieldCortex/);
+    await expect(h.call('Bash', { command: 'bin/helper' })).rejects.toThrow(/ShieldCortex/);
+  });
+
+  it('r1 B3: printing an agent-written native file name through a quoted heredoc is not running it', async () => {
+    const h = harness();
+    const helper = path.join(work, 'helper');
+    await h.call('Write', { file_path: helper, content: 'stub' });
+    fs.writeFileSync(helper, ELF_STUB, { mode: 0o755 });
+    await expect(h.call('Bash', { command: "cat <<'EOF'\n./helper\nEOF" })).resolves.toBeUndefined();
+    expect(h.saw('native-exec-of-agent-artifact')).toBe(false);
+  });
+
+  it('r1 nit: a ledger whose view cannot be built is incomplete history (the door), not classifier-off', async () => {
+    const broken = { ...pinnedDefence, buildArtifactView: () => { throw new Error('store exploded'); } };
+    const entries: InterceptAuditEntry[] = [];
+    const i = createInterceptor(
+      { ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never,
+      okPipeline as never,
+      { evaluateToolCall: defence.evaluateToolCall as never, artifactLedger: artifactLedgerAdapter(broken), onAuditEntry: (e) => entries.push(e) },
+    );
+    fs.writeFileSync(path.join(work, 'helper'), ELF_STUB, { mode: 0o755 });
+    await i.handleToolCall({ toolName: 'Bash', arguments: { command: './helper' }, sessionId: 'oc-907-session', cwd: work } as never).catch(() => undefined);
+    expect(JSON.stringify(entries)).toContain('unclassified-executable');
+  });
+
   it('no session id → the write is not held; a native exec is the door', async () => {
     const h = harness(null);
     const helper = path.join(work, 'helper');

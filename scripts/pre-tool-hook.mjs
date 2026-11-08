@@ -597,21 +597,24 @@ function artifactSessionKey(baseExtra) {
  * the per-call ledger view (already bound to this call's session), the stat
  * and header readers, and the payload `cwd` passed RAW — no `process.cwd()`
  * fallback, so record and query cannot hash a guessed base differently.
- * Never throws: a store that cannot build a view leaves the classifier off.
+ * Never throws. A LOADED store whose view cannot be built is a wired adapter
+ * with unreadable history, not an unwired one: it passes `artifactView: null`
+ * (incomplete history — every resolved native image is the door, row J),
+ * never `{}`, which would switch the classifier off.
  */
 function artifactGuardOptions(store, baseExtra, rawCwd) {
   if (!store) return {};
+  const readers = {
+    statPath: store.statContentId,
+    readFileHeader: store.readArtifactHeader,
+    ...(typeof rawCwd === 'string' ? { cwd: rawCwd } : {}),
+  };
   try {
     const key = artifactSessionKey(baseExtra);
     const artifactView = key ? store.buildArtifactView({ sessionKey: key }) : store.unkeyedArtifactView();
-    return {
-      artifactView,
-      statPath: store.statContentId,
-      readFileHeader: store.readArtifactHeader,
-      ...(typeof rawCwd === 'string' ? { cwd: rawCwd } : {}),
-    };
+    return { artifactView, ...readers };
   } catch {
-    return {};
+    return { artifactView: null, ...readers };
   }
 }
 

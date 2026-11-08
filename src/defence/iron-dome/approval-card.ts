@@ -157,6 +157,13 @@ export const SIGNAL_PHRASES: Readonly<Record<string, string>> = Object.freeze({
   'write-content-catastrophic': 'writes a file containing a destructive command',
   'write-content-dangerous': 'writes a file containing a risky command',
   'write-content-scanned': 'writes a script file',
+  // #907: native code the agent produced itself, and the unknown-program door.
+  'native-exec-of-agent-artifact': 'runs native machine code the agent wrote itself',
+  'exec-agent-written-native-bytes': 'runs a program file the agent wrote directly, not one a compiler built',
+  'load-agent-written-native-object': 'loads a native library the agent wrote directly into a program',
+  'map-exec-agent-written-memory': 'turns data into runnable machine code in memory',
+  'exec-of-agent-compiled-artifact': 'runs a program the agent compiled in this session',
+  'unclassified-executable': "runs a program file ShieldCortex can't trace to a known source",
   // Git.
   // A force flag or `+refspec` on a push: it MAY overwrite history; the
   // branch need not be shared, and `--force-with-lease` may refuse.
@@ -272,6 +279,14 @@ export const SIGNAL_CLASSES: Readonly<Record<string, SignalClass>> = Object.free
   'write-content-catastrophic': 'target',
   'write-content-dangerous': 'target',
   'write-content-scanned': 'target',
+  // #907: the program run is the `script` class (`Run a program from …`); the
+  // umbrella, a preload and a memory mapping ask nothing more of the WHAT.
+  'native-exec-of-agent-artifact': 'none',
+  'exec-agent-written-native-bytes': 'script',
+  'load-agent-written-native-object': 'none',
+  'map-exec-agent-written-memory': 'none',
+  'exec-of-agent-compiled-artifact': 'script',
+  'unclassified-executable': 'script',
   'git-force-push': 'git',
   'force-push': 'git',
   'force-push-invocation': 'git',

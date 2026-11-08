@@ -24,6 +24,7 @@ import path from 'node:path';
 
 import {
   canonicalTarget,
+  incompleteArtifactView,
   parseRecordName,
   RECORD_CAP,
   type AgentArtifactRecord,
@@ -100,12 +101,18 @@ export function statContentId(absPath: string): ContentId | 'absent' | null {
 /** Bytes read for the native-header test — enough for every magic it checks. */
 export const ARTIFACT_HEADER_BYTES = 64;
 
-/** The first bytes of a resolved target, or `null` when it cannot be read.
- *  Never throws. */
+/** `O_NONBLOCK` where the platform has it: opening a FIFO for reading must
+ *  never park the guard waiting for a writer (zeroth law). */
+const OPEN_HEADER_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0);
+
+/** The first bytes of a resolved target, or `null` when it cannot be read or
+ *  is not a regular file (a FIFO, socket or device is never read: it could
+ *  block, and it is not an executable image). Never throws. */
 export function readArtifactHeader(absPath: string): Uint8Array | null {
   let fd: number | null = null;
   try {
-    fd = fs.openSync(absPath, 'r');
+    fd = fs.openSync(absPath, OPEN_HEADER_FLAGS);
+    if (!fs.fstatSync(fd).isFile()) return null;
     const buf = Buffer.alloc(ARTIFACT_HEADER_BYTES);
     const n = fs.readSync(fd, buf, 0, ARTIFACT_HEADER_BYTES, 0);
     return new Uint8Array(buf.subarray(0, n));
@@ -224,13 +231,20 @@ function parseRecordBody(raw: string): AgentArtifactRecord | null {
   }
 }
 
-function listNames(recDir: string): { names: string[]; listable: boolean } {
+/**
+ * List a session's record directory. ONLY a genuinely absent directory
+ * (`ENOENT`: a session that has recorded nothing) is a complete, empty
+ * listing (3.1 item 1). Every other error is a listing failure — incomplete
+ * history — including `ENOTDIR`: a store path component that is a regular
+ * file is a structural store failure, not an inspected empty directory, and
+ * must never earn install-root relief (Rule H). Used for BOTH the first
+ * listing and the observation-boundary re-list, so the two cannot disagree.
+ */
+function listRecordNames(recDir: string): string[] | null {
   try {
-    return { names: fs.readdirSync(recDir), listable: true };
+    return fs.readdirSync(recDir);
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return { names: [], listable: true };
-    return { names: [], listable: false };
+    return (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT' ? [] : null;
   }
 }
 
@@ -245,7 +259,9 @@ export function buildArtifactView(opts: {
   const home = opts.home ?? os.homedir();
   const recDir = sessionRecDir(stateDir, opts.sessionKey);
 
-  const { names, listable } = listNames(recDir);
+  const listed = listRecordNames(recDir);
+  const listable = listed !== null;
+  const names = listed ?? [];
   const entries: LedgerEntry[] = [];
   for (const name of names) {
     const parsed = parseRecordName(name);
@@ -269,15 +285,7 @@ export function buildArtifactView(opts: {
   return {
     listable,
     entries,
-    relist: () => {
-      try {
-        return fs.readdirSync(recDir);
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT' || code === 'ENOTDIR') return [];
-        return null;
-      }
-    },
+    relist: () => listRecordNames(recDir),
     canonical: (token, cwd) => canonicalTarget(token, cwd, home, realpathThrowing),
     pathHash: (canonical) => pathHashFor(opts.sessionKey, canonical),
     cap: opts.cap ?? RECORD_CAP,
@@ -292,15 +300,7 @@ export function buildArtifactView(opts: {
  * recorded (3.1 "Keyed by host-owned session identity").
  */
 export function unkeyedArtifactView(home: string = os.homedir()): AgentArtifactView {
-  return {
-    listable: false,
-    entries: [],
-    relist: () => null,
-    canonical: (token, cwd) => canonicalTarget(token, cwd, home, realpathThrowing),
-    pathHash: () => '',
-    cap: RECORD_CAP,
-    keyed: false,
-  };
+  return incompleteArtifactView(realpathThrowing, home);
 }
 
 // -- TTL / bound (best effort) ------------------------------------------------

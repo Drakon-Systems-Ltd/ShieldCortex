@@ -2853,10 +2853,19 @@ export function artifactLedgerAdapter(defenceMod: any): InterceptorRuntimeOption
     }
   };
   return {
+    // Never throws. A view that cannot be built is a wired ledger with
+    // unreadable history: `artifactView: null` (incomplete — every resolved
+    // native image is the door, row J), never "classifier off".
     evaluatorOptions: (sessionId, cwd) => {
       const key = keyOf(sessionId);
+      let artifactView: unknown = null;
+      try {
+        artifactView = key ? m.buildArtifactView({ sessionKey: key }) : m.unkeyedArtifactView();
+      } catch {
+        artifactView = null;
+      }
       return {
-        artifactView: key ? m.buildArtifactView({ sessionKey: key }) : m.unkeyedArtifactView(),
+        artifactView,
         statPath: m.statContentId,
         readFileHeader: m.readArtifactHeader,
         ...(typeof cwd === 'string' ? { cwd } : {}),

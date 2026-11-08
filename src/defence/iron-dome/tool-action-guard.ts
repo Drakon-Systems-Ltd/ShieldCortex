@@ -43,6 +43,8 @@ import { bodyIsAllDataRead } from './heredoc-data-read.js';
 import {
   classifyArtifactState,
   completeHistoryForPath,
+  incompleteArtifactView,
+  isArtifactView,
   recordsForPath,
   type AgentArtifactView,
   type ArtifactState,
@@ -5241,6 +5243,7 @@ const WRAPPER_FLAG_TAKES_VALUE: Record<string, RegExp> = {
   nice: /^-n$/,
   ionice: /^-(?:c|n|p)$/,
   stdbuf: /^-(?:i|o|e)$/,
+  exec: /^-a$/,
 };
 
 /**
@@ -5521,10 +5524,13 @@ export interface ToolGuardOptions {
   isReviewedScript?: (scriptPath: string, source: string) => boolean;
   /**
    * #907 — the per-call agent-artifact ledger view, already bound to this
-   * call's session by the caller (hook / interceptor). `null`/absent means the
-   * native-exec floor and door do not evaluate (adapter non-coverage or an
-   * unkeyed view the caller supplies). The pure evaluator never derives a
-   * session key and never receives one — only this bound view.
+   * call's session by the caller (hook / interceptor). The pure evaluator
+   * never derives a session key and never receives one — only this bound view.
+   *   - `undefined` (absent): the adapter does not wire the ledger — the
+   *     native classifier does not run (adapter non-coverage, design §5).
+   *   - `null`: a WIRED adapter with no session key. History is never
+   *     complete, so every resolved native image is state 3 (row J, the door)
+   *     — exactly as an unkeyed `keyed: false` view. Never "classifier off".
    */
   artifactView?: AgentArtifactView | null;
   /** #907 — stat of a resolved absolute target: a `ContentId`, `'absent'` only
@@ -7088,11 +7094,629 @@ const SIG_UNCLASSIFIED = 'unclassified-executable'; // row J (door)
  *  matching. */
 const SUPPORTED_COMPILER = /^(?:cc|gcc|g\+\+|c\+\+|clang|clang\+\+|nvcc|ghc|rustc)$/;
 
+// -- #907 executed-statement lexer: use versus mention -----------------------
+//
+// The floor is doorless, so what it reads as "this call runs X" must be what a
+// shell would actually run. The fail-safe `splitCommandStatements` /
+// `tokeniseStatement` pair is the wrong reader for that: it splits at every
+// newline and operator regardless of quoting (deliberately — rules that must
+// not be evaded by quoting want exactly that), so a line inside a quoted
+// heredoc, a multiline `git commit -m "…"` or an `echo "…"`, or a comment
+// becomes a statement in command position. Provenance proves who WROTE a
+// file; it does not prove that this call RUNS it (review r1 B3).
+//
+// So native-target discovery and compile capture read the statements a shell
+// EXECUTES, from one hand-rolled, linear lexer (no regex family, no
+// backtracking):
+//   - single quotes, `$'…'`, a quoted heredoc body read by anything but a
+//     shell, and comments are DATA;
+//   - double quotes and an unquoted heredoc body are data whose `$(…)` /
+//     backtick / `${…}` expansions are EXECUTED (the outer shell runs them);
+//   - `$(…)`, backticks, `(…)`, `<(…)` / `>(…)`, a heredoc body a shell reads
+//     (`bash <<EOF`, `cat <<EOF | sh`), `bash -c '…'` and `eval …` are
+//     statement lists, lexed recursively;
+//   - redirections and their targets are removed, so `2>/dev/null ./x` still
+//     has `./x` in command position;
+//   - a literal `cd <dir>` (alone, or before `;` / `&&` / a newline) moves the
+//     directory later relative words resolve under; a computed `cd`, `cd -`,
+//     `pushd`/`popd` or `cd … ||` makes it unknown. Subshells, pipelines and
+//     background jobs do not leak it.
+// When the lexer and a real shell could disagree about where a heredoc body
+// ends, it ends the body EARLIER (exact delimiter line only), so the
+// disagreement can only read more text as commands, never less.
+
+/** One word of an executed statement. `literal` is false when the shell
+ *  computes the word — a parameter / command / arithmetic expansion or an
+ *  unquoted glob — so its value is not known here and it is never resolved. */
+interface ShellWord { text: string; literal: boolean }
+
+/** One simple command a shell would EXECUTE. `dir` is the lexical directory
+ *  prefix its relative words resolve under: `''` = the call's cwd, a prefix a
+ *  literal `cd` set, `null` when a `cd` made it unknowable. */
+interface ExecutedStatement { words: ShellWord[]; dir: string | null }
+
+interface ShellLexState {
+  out: ExecutedStatement[];
+  /** Nesting passed {@link MAX_SHELL_NESTING}: the rest was not read. */
+  truncated: boolean;
+}
+
+interface PendingHeredoc {
+  delim: string;
+  quoted: boolean;
+  stripTabs: boolean;
+  /** index in `pipeline` of the statement the operator belongs to. */
+  owner: number;
+  pipeline: ExecutedStatement[];
+  dir: string | null;
+}
+
+const SHELL_PROGRAM = /^(?:bash|sh|zsh|ksh|dash|ash)$/;
+/** Nesting bound for substitutions / subshells / `-c` / heredoc bodies. Past
+ *  it the lexer stops and reports `truncated`; the classifier then holds. */
+const MAX_SHELL_NESTING = 32;
+const SHELL_ASSIGNMENT = /^[A-Za-z_]\w*\+?=/;
+/** Reserved words that may open a statement before its command word, beyond
+ *  `SHELL_KEYWORD` (which the shared command-word walk uses unchanged). */
+const LEADING_RESERVED_WORD = /^(?:if|while|until)$/;
+/** A shell `-c` option cluster: the next word is the program. */
+const SHELL_INLINE_C = /^-[A-Za-z]*c[A-Za-z]*$/;
+/** Shell options that consume the next word (`bash -o pipefail`, `-O extglob`). */
+const SHELL_VALUE_OPTION = /^(?:[-+]o|[-+]O|--rcfile|--init-file)$/;
+/** Paths a shell reads as its own stdin when sourced. */
+const STDIN_PATH = /^\/(?:dev\/stdin|dev\/fd\/0|proc\/self\/fd\/0)$/;
+
+const isShellBlank = (c: string | undefined): boolean => c === ' ' || c === '\t';
+/** Characters that end an unquoted word. */
+const isWordBreak = (c: string | undefined): boolean =>
+  c === undefined || c === ' ' || c === '\t' || c === '\n' || c === '\r'
+  || c === ';' || c === '&' || c === '|' || c === '<' || c === '>' || c === '(' || c === ')';
+
+/** The statements a shell would execute for `text`, with use-vs-mention kept. */
+function executedStatements(text: string): { statements: ExecutedStatement[]; truncated: boolean } {
+  const st: ShellLexState = { out: [], truncated: false };
+  lexShellList(text, 0, false, 0, '', st);
+  return { statements: st.out, truncated: st.truncated };
+}
+
+/**
+ * Lex a statement list from `start` until EOF, or until the `)` that closes it
+ * when `inParen`. Returns the index just past that `)` (or `src.length`).
+ */
+function lexShellList(
+  src: string,
+  start: number,
+  inParen: boolean,
+  depth: number,
+  dirIn: string | null,
+  st: ShellLexState,
+): number {
+  if (depth > MAX_SHELL_NESTING) { st.truncated = true; return src.length; }
+  let i = start;
+  let dir = dirIn;
+  let words: ShellWord[] = [];
+  let wordEnd = -1;
+  let pipeline: ExecutedStatement[] = [];
+  let pending: PendingHeredoc[] = [];
+  const deferred: Array<{ body: string; h: PendingHeredoc }> = [];
+  let lastSep = ';';
+
+  const endStatement = (sep: string): void => {
+    if (words.length === 0) return;
+    const s: ExecutedStatement = { words, dir };
+    words = [];
+    st.out.push(s);
+    pipeline.push(s);
+    const before = lastSep;
+    lastSep = sep;
+    dir = shellDirAfter(s, dir, before, sep);
+    lexNestedPrograms(s, depth, st);
+  };
+  const classifyBody = (body: string, h: PendingHeredoc): void => {
+    if (heredocReadAsShell(h.pipeline, h.owner)) lexShellList(body, 0, false, depth + 1, h.dir, st);
+    else if (!h.quoted) scanShellExpansions(body, 0, null, depth + 1, h.dir, st);
+  };
+  const endPipeline = (): void => {
+    for (let k = 0; k < deferred.length; k++) {
+      if (deferred[k]!.h.pipeline !== pipeline) continue;
+      classifyBody(deferred[k]!.body, deferred[k]!.h);
+      deferred.splice(k--, 1);
+    }
+    pipeline = [];
+  };
+  /** Read the bodies of every heredoc opened on the line that just ended. */
+  const readHeredocBodies = (): void => {
+    for (const h of pending) {
+      let body = '';
+      while (i < src.length) {
+        const nl = src.indexOf('\n', i);
+        const lineEnd = nl < 0 ? src.length : nl;
+        let line = src.slice(i, lineEnd);
+        i = nl < 0 ? src.length : nl + 1;
+        if (h.stripTabs) line = line.replace(/^\t+/, '');
+        if (line === h.delim || line === `${h.delim}\r`) break;
+        body += `${line}\n`;
+      }
+      if (h.pipeline === pipeline) deferred.push({ body, h });
+      else classifyBody(body, h); // its pipeline already ended: consumers known
+    }
+    pending = [];
+  };
+
+  while (i < src.length) {
+    const c = src[i]!;
+    if (isShellBlank(c)) { i++; continue; }
+    if (c === '\\' && src[i + 1] === '\n') { i += 2; continue; }
+    if (c === '\n' || c === '\r') {
+      const had = words.length > 0;
+      endStatement('\n');
+      i++;
+      if (c === '\n' && pending.length > 0) readHeredocBodies();
+      if (had || lastSep !== '|') endPipeline();
+      continue;
+    }
+    if (c === '#') { // at a word start: a comment, to the end of the line
+      const nl = src.indexOf('\n', i);
+      i = nl < 0 ? src.length : nl;
+      continue;
+    }
+    if (c === ';') {
+      endStatement(';'); endPipeline();
+      i++;
+      while (src[i] === ';' || src[i] === '&') i++; // `;;` `;&` `;;&`
+      continue;
+    }
+    if (c === '&') {
+      if (src[i + 1] === '&') { endStatement('&&'); endPipeline(); i += 2; continue; }
+      if (src[i + 1] === '>') { // `&>` / `&>>`: a redirection
+        i = skipShellRedirection(src, i + (src[i + 2] === '>' ? 3 : 2), depth, dir, st);
+        continue;
+      }
+      endStatement('&'); endPipeline(); i++;
+      continue;
+    }
+    if (c === '|') {
+      if (src[i + 1] === '|') { endStatement('||'); endPipeline(); i += 2; continue; }
+      endStatement('|');
+      i += src[i + 1] === '&' ? 2 : 1;
+      continue;
+    }
+    if (c === '(') { // a subshell (or a function's `()`): its own list and cwd
+      endStatement(';');
+      i = lexShellList(src, i + 1, true, depth + 1, dir, st);
+      continue;
+    }
+    if (c === ')') {
+      i++;
+      if (inParen) break;
+      endStatement(';'); endPipeline();
+      continue;
+    }
+    if (c === '<' || c === '>') {
+      // An fd number glued to the operator (`2>`) is part of the redirection.
+      if (wordEnd === i && words.length > 0 && /^\d+$/.test(words[words.length - 1]!.text)) words.pop();
+      if (src[i + 1] === '(') { // process substitution: an executed list, used as a word
+        const end = lexShellList(src, i + 2, true, depth + 1, dir, st);
+        words.push({ text: src.slice(i, end), literal: false });
+        i = end; wordEnd = i;
+        continue;
+      }
+      if (c === '<' && src[i + 1] === '<' && src[i + 2] !== '<') {
+        let j = i + 2;
+        const stripTabs = src[j] === '-';
+        if (stripTabs) j++;
+        while (isShellBlank(src[j])) j++;
+        const d = readHeredocDelimiter(src, j);
+        if (d.text) {
+          pending.push({ delim: d.text, quoted: d.quoted, stripTabs, owner: pipeline.length, pipeline, dir });
+        }
+        i = d.end;
+        continue;
+      }
+      let j = i + 1;
+      if (c === '<' && src[j] === '<') j += 2; // `<<<` here-string: its word is data
+      else if (src[j] === '>' || src[j] === '&' || src[j] === '|' || (c === '<' && src[j] === '>')) j++;
+      i = skipShellRedirection(src, j, depth, dir, st);
+      continue;
+    }
+    const w = readShellWord(src, i, depth, dir, st);
+    words.push(w.word);
+    i = w.end; wordEnd = i;
+  }
+  endStatement(';');
+  if (pending.length > 0) readHeredocBodies();
+  endPipeline();
+  return i;
+}
+
+/** Skip a redirection's target word (still lexing any substitution in it). */
+function skipShellRedirection(src: string, from: number, depth: number, dir: string | null, st: ShellLexState): number {
+  let j = from;
+  while (isShellBlank(src[j])) j++;
+  if (j < src.length && !isWordBreak(src[j])) j = readShellWord(src, j, depth, dir, st).end;
+  return j;
+}
+
+/** A heredoc delimiter word: quote removal only, never expanded. Any quoting
+ *  makes the body literal (no expansion). */
+function readHeredocDelimiter(src: string, i: number): { text: string; quoted: boolean; end: number } {
+  let text = '';
+  let quoted = false;
+  while (i < src.length && !isWordBreak(src[i])) {
+    const c = src[i]!;
+    if (c === '\\' && i + 1 < src.length) { text += src[i + 1]; quoted = true; i += 2; continue; }
+    if (c === "'" || c === '"') {
+      const close = src.indexOf(c, i + 1);
+      const stop = close < 0 ? src.length : close;
+      text += src.slice(i + 1, stop);
+      quoted = true;
+      i = close < 0 ? src.length : close + 1;
+      continue;
+    }
+    text += c;
+    i++;
+  }
+  return { text, quoted, end: i };
+}
+
+/** Read one unquoted-context word starting at `i`. Expansions inside it are
+ *  lexed as executed lists; quotes are removed from its text. */
+function readShellWord(
+  src: string,
+  i: number,
+  depth: number,
+  dir: string | null,
+  st: ShellLexState,
+): { word: ShellWord; end: number } {
+  let text = '';
+  let literal = true;
+  while (i < src.length) {
+    const c = src[i]!;
+    // `name=( … )`: an array assignment. Its elements are DATA words (only
+    // their expansions run), not a subshell whose words are commands.
+    if (c === '(' && SHELL_ARRAY_ASSIGNMENT.test(text)) {
+      const end = scanArrayLiteral(src, i + 1, depth, dir, st);
+      text += src.slice(i, end);
+      literal = false;
+      i = end;
+      continue;
+    }
+    if (isWordBreak(c)) break;
+    if (c === '\\') {
+      if (src[i + 1] === '\n') { i += 2; continue; }
+      if (i + 1 < src.length) text += src[i + 1];
+      i += 2;
+      continue;
+    }
+    if (c === "'") {
+      const close = src.indexOf("'", i + 1);
+      text += src.slice(i + 1, close < 0 ? src.length : close);
+      i = close < 0 ? src.length : close + 1;
+      continue;
+    }
+    if (c === '"') {
+      const d = scanShellExpansions(src, i + 1, '"', depth + 1, dir, st);
+      text += d.text;
+      if (d.expanded) literal = false;
+      i = d.end;
+      continue;
+    }
+    if (c === '$' || c === '`') {
+      const e = lexShellExpansion(src, i, depth, dir, st);
+      if (e) { text += src.slice(i, e.end); if (e.computed) literal = false; i = e.end; continue; }
+    }
+    if (c === '*' || c === '?' || c === '[') literal = false; // an unquoted glob
+    text += c;
+    i++;
+  }
+  // The two parameters the shell derives from facts the guard also has: the
+  // home directory and the working directory (`$HOME/x` is `~/x`, `$PWD/x` is
+  // `./x`). Only when that leading parameter is the word's ONLY expansion.
+  if (!literal) {
+    const m = /^(?:\$HOME|\$\{HOME\}|\$PWD|\$\{PWD\})(?=\/|$)/.exec(text);
+    if (m && !/[$`*?[]/.test(text.slice(m[0].length))) {
+      text = (m[0].includes('HOME') ? '~' : '.') + text.slice(m[0].length);
+      literal = true;
+    }
+  }
+  return { word: { text, literal }, end: i };
+}
+
+/**
+ * At a `$` or backtick: lex the expansion it opens. Returns its end and
+ * whether it computes a value (every form here does, except a bare `$` that
+ * opens nothing — then `null`). `$'…'` is ANSI-C quoted DATA.
+ */
+function lexShellExpansion(
+  src: string,
+  i: number,
+  depth: number,
+  dir: string | null,
+  st: ShellLexState,
+): { end: number; computed: boolean } | null {
+  const c = src[i];
+  if (c === '`') return { end: lexBacktickList(src, i + 1, depth, dir, st), computed: true };
+  const n = src[i + 1];
+  if (n === '(') {
+    if (src[i + 2] === '(') return { end: scanArithmetic(src, i + 3, depth, dir, st), computed: true };
+    return { end: lexShellList(src, i + 2, true, depth + 1, dir, st), computed: true };
+  }
+  if (n === '{') return { end: scanShellExpansions(src, i + 2, '}', depth + 1, dir, st).end, computed: true };
+  if (n === "'") {
+    let j = i + 2;
+    while (j < src.length && src[j] !== "'") j += src[j] === '\\' ? 2 : 1;
+    return { end: Math.min(j + 1, src.length), computed: false };
+  }
+  if (n === '"') return { end: scanShellExpansions(src, i + 2, '"', depth + 1, dir, st).end, computed: true };
+  if (n !== undefined && /[A-Za-z0-9_@*#?$!-]/.test(n)) {
+    let j = i + 2;
+    if (/[A-Za-z_]/.test(n)) while (j < src.length && /\w/.test(src[j]!)) j++;
+    return { end: j, computed: true };
+  }
+  return null;
+}
+
+/**
+ * Scan quoted/expanding text: the inside of `"…"` (terminator `"`), of
+ * `${…}` (terminator `}`), or an unquoted heredoc body (no terminator). Only
+ * its `$(…)`, backtick, `${…}` and `$((…))` expansions execute; they are lexed.
+ * Returns the end (past the terminator) and the de-escaped text.
+ */
+function scanShellExpansions(
+  src: string,
+  i: number,
+  terminator: '"' | '}' | null,
+  depth: number,
+  dir: string | null,
+  st: ShellLexState,
+): { end: number; text: string; expanded: boolean } {
+  let text = '';
+  let expanded = false;
+  if (depth > MAX_SHELL_NESTING) { st.truncated = true; return { end: src.length, text, expanded: true }; }
+  while (i < src.length) {
+    const c = src[i]!;
+    if (terminator !== null && c === terminator) return { end: i + 1, text, expanded };
+    if (c === '\\') {
+      if (i + 1 < src.length && src[i + 1] !== '\n') text += src[i + 1];
+      i += 2;
+      continue;
+    }
+    if (terminator === '}' && c === "'") {
+      const close = src.indexOf("'", i + 1);
+      i = close < 0 ? src.length : close + 1;
+      continue;
+    }
+    if (terminator === '}' && c === '"') {
+      i = scanShellExpansions(src, i + 1, '"', depth + 1, dir, st).end;
+      expanded = true;
+      continue;
+    }
+    if (c === '$' || c === '`') {
+      const e = lexShellExpansion(src, i, depth, dir, st);
+      if (e) { text += src.slice(i, e.end); if (e.computed) expanded = true; i = e.end; continue; }
+    }
+    text += c;
+    i++;
+  }
+  return { end: src.length, text, expanded };
+}
+
+const SHELL_ARRAY_ASSIGNMENT = /^[A-Za-z_]\w*\+?=$/;
+
+/** The body of `name=( … )` up to its `)`: quoted / expanding words whose
+ *  expansions are lexed; nothing in it is a command. */
+function scanArrayLiteral(src: string, i: number, depth: number, dir: string | null, st: ShellLexState): number {
+  while (i < src.length) {
+    const c = src[i]!;
+    if (c === ')') return i + 1;
+    if (c === '\\') { i += 2; continue; }
+    if (c === "'") {
+      const close = src.indexOf("'", i + 1);
+      i = close < 0 ? src.length : close + 1;
+      continue;
+    }
+    if (c === '"') { i = scanShellExpansions(src, i + 1, '"', depth + 1, dir, st).end; continue; }
+    if (c === '$' || c === '`') {
+      const e = lexShellExpansion(src, i, depth, dir, st);
+      if (e) { i = e.end; continue; }
+    }
+    if (c === '#' && (i === 0 || /\s/.test(src[i - 1]!))) { // a comment inside the list
+      const nl = src.indexOf('\n', i);
+      i = nl < 0 ? src.length : nl;
+      continue;
+    }
+    i++;
+  }
+  return src.length;
+}
+
+/** `$((…))`: arithmetic. Only nested `$(…)` / backticks in it execute. */
+function scanArithmetic(src: string, i: number, depth: number, dir: string | null, st: ShellLexState): number {
+  let parens = 0;
+  while (i < src.length) {
+    const c = src[i]!;
+    if (c === '$' || c === '`') {
+      const e = lexShellExpansion(src, i, depth + 1, dir, st);
+      if (e) { i = e.end; continue; }
+    }
+    if (c === '(') parens++;
+    else if (c === ')') {
+      if (parens === 0) return src[i + 1] === ')' ? i + 2 : i + 1;
+      parens--;
+    }
+    i++;
+  }
+  return src.length;
+}
+
+/** A backtick substitution: de-escape `` \` `` / `\\` / `\$` and lex the body. */
+function lexBacktickList(src: string, i: number, depth: number, dir: string | null, st: ShellLexState): number {
+  let body = '';
+  while (i < src.length && src[i] !== '`') {
+    if (src[i] === '\\' && i + 1 < src.length) {
+      const n = src[i + 1]!;
+      body += n === '`' || n === '\\' || n === '$' ? n : `\\${n}`;
+      i += 2;
+      continue;
+    }
+    body += src[i];
+    i++;
+  }
+  lexShellList(body, 0, false, depth + 1, dir, st);
+  return Math.min(i + 1, src.length);
+}
+
+/** Non-executing modes of a transparent wrapper: the word after is not run
+ *  (`command -v ./x` reports how a name resolves; `sudo -l`/`-e` list/edit). */
+const WRAPPER_NO_EXEC: Record<string, RegExp> = {
+  command: /^-[A-Za-z]*[vV][A-Za-z]*$/,
+  sudo: /^(?:-[A-Za-z]*[elvK][A-Za-z]*|--(?:edit|list|validate|remove-timestamp))$/,
+};
+
+/**
+ * Walk a statement's leading assignments, reserved words and transparent
+ * wrappers to its command word — the same walk `commandWordIndex` makes — and
+ * report every ADDRESSED executable on the way: each wrapper word AND the
+ * command word (review r1 B1). A wrapper or interpreter NAME never exempts the
+ * file it addresses: `./python3` is a file the agent may have written, and
+ * `/usr/bin/env` is inspected like any other image. What a wrapper or
+ * interpreter is handed DOWNSTREAM (a script argument) is not addressed here —
+ * script discovery handles that, separately. Returns the command word's index,
+ * or `words.length` when there is none (or the wrapper runs nothing).
+ */
+function shellProgramWalk(
+  words: readonly ShellWord[],
+  onAddressed?: (w: ShellWord) => void,
+  onAssignment?: (w: ShellWord) => void,
+): number {
+  let i = 0;
+  while (i < words.length) {
+    const w = words[i]!;
+    if (SHELL_ASSIGNMENT.test(w.text)) { onAssignment?.(w); i++; continue; }
+    if (SHELL_KEYWORD.test(w.text) || LEADING_RESERVED_WORD.test(w.text)) { i++; continue; }
+    onAddressed?.(w);
+    const base = commandBaseName(w.text);
+    if (!EXEC_WRAPPER.test(base)) return i;
+    const takesValue = WRAPPER_FLAG_TAKES_VALUE[base];
+    const noExec = WRAPPER_NO_EXEC[base];
+    i++;
+    while (i < words.length) {
+      const a = words[i]!.text;
+      if (SHELL_ASSIGNMENT.test(a)) { onAssignment?.(words[i]!); i++; continue; }
+      if (/^\d+(?:\.\d+)?[smhd]?$/.test(a)) { i++; continue; }
+      if (a.startsWith('-')) {
+        if (noExec?.test(a)) return words.length;
+        i++;
+        if (takesValue?.test(a)) i++;
+        continue;
+      }
+      break;
+    }
+  }
+  return i;
+}
+
+/** Does this shell statement read its program from stdin (`bash`, `sh -s`,
+ *  `bash -`), rather than from `-c` or a script operand? */
+function shellReadsStdin(words: readonly ShellWord[], idx: number): boolean {
+  for (let j = idx + 1; j < words.length; j++) {
+    const a = words[j]!.text;
+    if (a === '-') return true;
+    if (a === '--') return j + 1 >= words.length;
+    if (SHELL_INLINE_C.test(a)) return false;
+    if (SHELL_VALUE_OPTION.test(a)) { j++; continue; }
+    if (a.startsWith('-') || a.startsWith('+')) continue;
+    return false; // a script operand: stdin is that script's input, not code
+  }
+  return true;
+}
+
+/** Is a heredoc owned by `pipeline[owner]` read as SHELL code — by its owner
+ *  (`bash <<EOF`) or by a shell later in the same pipeline (`cat <<EOF | sh`)?
+ *  A non-shell interpreter that reads it first consumes it as its own
+ *  language; script discovery and row D handle that body. */
+function heredocReadAsShell(pipeline: readonly ExecutedStatement[], owner: number): boolean {
+  for (let k = owner; k < pipeline.length; k++) {
+    const words = pipeline[k]!.words;
+    const idx = shellProgramWalk(words);
+    if (idx >= words.length) continue;
+    const base = commandBaseName(words[idx]!.text);
+    if (SHELL_PROGRAM.test(base)) {
+      if (shellReadsStdin(words, idx)) return true;
+      continue;
+    }
+    if ((base === 'source' || base === '.') && STDIN_PATH.test(words[idx + 1]?.text ?? '')) return true;
+    if (SCRIPT_INTERPRETER.test(base)) return false;
+  }
+  return false;
+}
+
+/** `bash -c '<program>'` and `eval <words>` run a further statement list in
+ *  this statement's directory. Lex it. */
+function lexNestedPrograms(s: ExecutedStatement, depth: number, st: ShellLexState): void {
+  const idx = shellProgramWalk(s.words);
+  if (idx >= s.words.length) return;
+  const base = commandBaseName(s.words[idx]!.text);
+  if (base === 'eval') {
+    lexShellList(s.words.slice(idx + 1).map(w => w.text).join(' '), 0, false, depth + 1, s.dir, st);
+    return;
+  }
+  if (!SHELL_PROGRAM.test(base)) return;
+  for (let j = idx + 1; j < s.words.length; j++) {
+    const a = s.words[j]!.text;
+    if (SHELL_INLINE_C.test(a)) {
+      const prog = s.words[j + 1];
+      if (prog) lexShellList(prog.text, 0, false, depth + 1, s.dir, st);
+      return;
+    }
+    if (SHELL_VALUE_OPTION.test(a)) { j++; continue; }
+    if (!a.startsWith('-') && !a.startsWith('+')) return;
+  }
+}
+
+/** The directory later statements of this list resolve under, after `s`. */
+function shellDirAfter(s: ExecutedStatement, dir: string | null, sepBefore: string, sepAfter: string): string | null {
+  const idx = shellProgramWalk(s.words);
+  if (idx >= s.words.length) return dir;
+  const word = s.words[idx]!.text;
+  if (word === 'pushd' || word === 'popd') return null;
+  if (word !== 'cd') return dir;
+  // A pipeline member or a background job is a subshell: no effect here.
+  if (sepBefore === '|' || sepAfter === '|' || sepAfter === '&') return dir;
+  if (sepAfter === '||') return null; // later statements may run in either
+  let dest: ShellWord | undefined;
+  for (let j = idx + 1; j < s.words.length; j++) {
+    const a = s.words[j]!;
+    if (a.text === '--') { dest = s.words[j + 1]; break; }
+    if (/^-[LPe@]+$/.test(a.text)) continue;
+    dest = a;
+    break;
+  }
+  if (!dest) return '~';
+  if (!dest.literal || dest.text === '-' || !dest.text) return null;
+  if (dest.text.startsWith('/') || dest.text === '~' || dest.text.startsWith('~/')) return dest.text;
+  if (dir === null) return null;
+  return dir ? `${dir}/${dest.text}` : dest.text;
+}
+
+/** A relative word re-anchored under a statement's `cd` prefix; `null` when
+ *  that prefix is unknowable. */
+function underShellDir(token: string, dir: string | null): string | null {
+  if (token.startsWith('/') || token === '~' || token.startsWith('~/')) return token;
+  if (dir === null) return null;
+  return dir ? `${dir}/${token}` : token;
+}
+
 /**
  * The write/compile targets to RECORD for a tool call (section 3.4). PURE --
  * the CALLER (hook / interceptor) publishes them through the fs store,
  * preserving this module's purity, exactly as the injected
- * `resolveScriptSource` split does.
+ * `resolveScriptSource` split does. Compile capture reads the EXECUTED
+ * statements only: a compiler named in a commit message, an echo or a quoted
+ * heredoc mints no record (a mention-minted compile record could make a later
+ * floor case ambiguous). An empty `token` is an output whose directory a `cd`
+ * made unknowable: `canonicalTarget` refuses it, so the store publishes an
+ * `unresolved.*` record (history incomplete, never a guessed path).
  */
 export function nativeArtifactCaptures(
   toolName: string,
@@ -7107,20 +7731,17 @@ export function nativeArtifactCaptures(
   // A recognised compiler with a literal, resolvable `-o` output -> compiled-output.
   const command = deobfuscateIfs(extractCommand(args));
   if (command) {
-    for (const stmt of splitCommandStatements(command)) {
-      const tokens = tokeniseStatement(stmt);
-      const i = commandWordIndex(tokens);
-      if (i >= tokens.length) continue;
-      if (!SUPPORTED_COMPILER.test(commandBaseName(tokens[i]))) continue;
-      for (let j = i + 1; j < tokens.length; j++) {
-        const t = tokens[j];
-        if (t === '-o') {
-          const v = tokens[j + 1];
-          if (v && !v.startsWith('-')) out.push({ token: v, kind: 'compiled-output' });
-          j++;
-        } else if (t.startsWith('-o') && t.length > 2) {
-          out.push({ token: t.slice(2), kind: 'compiled-output' });
-        }
+    for (const s of executedStatements(command).statements) {
+      const i = shellProgramWalk(s.words);
+      if (i >= s.words.length) continue;
+      if (!SUPPORTED_COMPILER.test(commandBaseName(s.words[i]!.text))) continue;
+      for (let j = i + 1; j < s.words.length; j++) {
+        const t = s.words[j]!;
+        let operand: ShellWord | undefined;
+        if (t.text === '-o') { operand = s.words[j + 1]; j++; }
+        else if (t.text.startsWith('-o') && t.text.length > 2) operand = { text: t.text.slice(2), literal: t.literal };
+        if (!operand || !operand.literal || !operand.text || operand.text.startsWith('-')) continue;
+        out.push({ token: underShellDir(operand.text, s.dir) ?? '', kind: 'compiled-output' });
       }
     }
   }
@@ -7131,37 +7752,54 @@ const LOADER_ENV_RE = /^(?:LD_PRELOAD|DYLD_INSERT_LIBRARIES)=(.+)$/;
 
 type NativeTarget = { token: string; via: 'exec' | 'load' };
 
-/** Exec/load targets resolved from the command: a program-position path token
- *  (row A) or an `LD_PRELOAD`/`DYLD_INSERT_LIBRARIES` preload path (row C).
- *  Bare names are NOT resolved through PATH in PR 1 (section 5, section 10
- *  residual). */
-function nativeExecTargets(command: string): NativeTarget[] {
+/** A program/loader word the native classifier resolves: a literal path
+ *  containing `/` (`./x`, `bin/x`, `node_modules/.bin/x`, `/usr/bin/x`,
+ *  `~/x` — design §5 "a token containing `/` or starting `~/`"). A bare name is
+ *  a PATH lookup and is not resolved in PR 1 (§10 residual). */
+function isNativePathWord(w: ShellWord): boolean {
+  return w.literal && w.text.includes('/') && !w.text.startsWith('-') && !/^\/dev\//.test(w.text);
+}
+
+/** Exec/load targets of the EXECUTED statements: every addressed executable
+ *  with a path (row A — wrappers and interpreters included, review r1 B1), and
+ *  every `LD_PRELOAD`/`DYLD_INSERT_LIBRARIES` path in a leading or wrapper
+ *  assignment or an `export` (row C). Every spelling of a path goes through
+ *  the same `canonicalTarget` (review r1 B2). */
+function nativeExecTargets(command: string): { targets: NativeTarget[]; truncated: boolean } {
+  const { statements, truncated } = executedStatements(command);
   const out: NativeTarget[] = [];
-  for (const stmt of splitCommandStatements(command)) {
-    const tokens = tokeniseStatement(stmt);
-    const i = commandWordIndex(tokens);
-    // Loader env-preload forms in the LEADING assignments (before the cmd word).
-    for (let k = 0; k < i && k < tokens.length; k++) {
-      const m = tokens[k].match(LOADER_ENV_RE);
-      if (!m) continue;
-      for (const lib of m[1].split(/[:\s]+/)) {
-        if (lib && looksLikePathToken(lib)) out.push({ token: lib, via: 'load' });
-      }
+  const seen = new Set<string>();
+  const add = (text: string, via: NativeTarget['via'], dir: string | null): void => {
+    const token = underShellDir(text, dir);
+    if (token === null || seen.has(`${via}\0${token}`)) return;
+    seen.add(`${via}\0${token}`);
+    out.push({ token, via });
+  };
+  const addLoader = (w: ShellWord, dir: string | null): void => {
+    const m = LOADER_ENV_RE.exec(w.text);
+    if (!m || !w.literal) return;
+    for (const lib of m[1]!.split(/[:\s]+/)) {
+      if (lib && isNativePathWord({ text: lib, literal: true })) add(lib, 'load', dir);
     }
-    if (i >= tokens.length) continue;
-    const cmd = tokens[i];
-    const base = commandBaseName(cmd);
-    // An interpreter running a script is not a native exec of a native image --
-    // the script's header is not native (step 0). Skip the program word.
-    if (SCRIPT_INTERPRETER.test(base) || EXEC_WRAPPER.test(base)) continue;
-    if (looksLikePathToken(cmd)) out.push({ token: cmd, via: 'exec' });
+  };
+  for (const s of statements) {
+    const idx = shellProgramWalk(
+      s.words,
+      (w) => { if (isNativePathWord(w)) add(w.text, 'exec', s.dir); },
+      (w) => addLoader(w, s.dir),
+    );
+    // `export LD_PRELOAD=…` preloads into every later command of this shell.
+    if (idx < s.words.length && /^(?:export|declare|typeset)$/.test(s.words[idx]!.text)) {
+      for (const w of s.words.slice(idx + 1)) addLoader(w, s.dir);
+    }
   }
-  return out;
+  return { targets: out, truncated };
 }
 
 /** Shapes that map written/just-generated bytes as executable memory (row D).
  *  Bounded gaps keep this linear -- no ReDoS. Text-decidable from the inspected
- *  body only (section 6); no ledger. */
+ *  body only (section 6); no ledger. Matched against {@link rowDProgramText},
+ *  never against the raw region. */
 const MAP_EXEC_MEMORY_RE: RegExp[] = [
   /\bmmap\b[\s\S]{0,200}?\bPROT_EXEC\b/i,
   /\bPROT_EXEC\b[\s\S]{0,200}?\bmmap\b/i,
@@ -7171,6 +7809,36 @@ const MAP_EXEC_MEMORY_RE: RegExp[] = [
   /\bcffi\b[\s\S]{0,240}?\bcallback\b/i,
 ];
 
+/** Primitives that turn a STRING into code without shelling out, beyond
+ *  `SHELL_OUT_SINK`'s eval/exec family: in a region holding one, a literal may
+ *  itself be the mapping, so row D keeps every byte. */
+const ROW_D_DYNAMIC_CODE = /\beval\b|\bexec\b|\bvm\b|\bFunction\s*\(|\bcompile\s*\(|\bexecfile\b|\brunpy\b|\bimportlib\b|\bimport\s*\(|\b(?:setTimeout|setInterval)\s*\(\s*['"`]/;
+
+/**
+ * #907 row D (review r1 B4) — the bytes of an interpreter region that can
+ * PERFORM an operation. Row D needs an executable-memory OPERATION, not its
+ * vocabulary: `print('mmap PROT_EXEC')` maps nothing. So comment and
+ * string-literal contents (`scriptDataRanges`, the lexer the span classifier
+ * already uses) are blanked, length-preserving. Fail-closed exception: a
+ * region that can hand a string to a shell or an evaluator (`hasSink`, or a
+ * dynamic-code primitive above) keeps every byte, because there a literal can
+ * be the very program that maps memory.
+ */
+function rowDProgramText(text: string, region: ScanRegion): string {
+  const slice = text.slice(region.start, region.end);
+  if (region.lang === 'sh' || region.hasSink || ROW_D_DYNAMIC_CODE.test(slice)) return slice;
+  const parts: string[] = [];
+  let cursor = region.start;
+  for (const { range: [lo, hi] } of scriptDataRanges(text, region)) {
+    if (lo < cursor) continue;
+    parts.push(text.slice(cursor, lo), blankedRun(text, lo, hi));
+    cursor = hi;
+  }
+  if (cursor === region.start) return slice;
+  parts.push(text.slice(cursor, region.end));
+  return parts.join('');
+}
+
 function mapExecAgentWrittenMemory(bodies: readonly string[]): boolean {
   for (const b of bodies) {
     if (!b) continue;
@@ -7179,25 +7847,42 @@ function mapExecAgentWrittenMemory(bodies: readonly string[]): boolean {
   return false;
 }
 
+/** Row J (the door): a native executable of unknown provenance. */
+function nativeDoorVerdict(): ToolGuardVerdict {
+  return verdict('require_approval', 'dangerous', 'exec', 'execute_command',
+    buildReason('a native executable of unknown provenance requires approval', [SIG_UNCLASSIFIED]),
+    [SIG_UNCLASSIFIED]);
+}
+
 /**
  * The ledger-dependent native-exec classifier for rows A / C / B / J. Returns a
  * verdict or `null`. Runs ONCE per evaluated call (from `evaluateToolCall`),
  * never in the recursive surface/evidence passes, so the observation-boundary
- * re-list is taken exactly once. Missing inputs (no view / stat / header) mean
- * the classifier does not run -- adapter non-coverage, not an allow claim
- * (section 5).
+ * re-list is taken exactly once.
+ *
+ * Missing-input precedence (section 5, review r1 B5): ONLY an `undefined`
+ * view, or a missing `statPath` / `readFileHeader`, means the adapter is not
+ * wired — the classifier does not run (adapter non-coverage, not an allow
+ * claim). A `null` view (a wired adapter with no session key) or a value that
+ * is not a usable view is INCOMPLETE history: targets are still resolved and
+ * classified, and every native image is state 3 (row J), exactly as an
+ * unkeyed `keyed: false` view is.
  */
 function classifyLedgerNativeExec(
   args: Record<string, unknown>,
   options?: ToolGuardOptions,
 ): ToolGuardVerdict | null {
-  const view = options?.artifactView;
+  const supplied = options?.artifactView;
   const statPath = options?.statPath;
   const readFileHeader = options?.readFileHeader;
-  if (!view || typeof statPath !== 'function' || typeof readFileHeader !== 'function') return null;
+  if (supplied === undefined || typeof statPath !== 'function' || typeof readFileHeader !== 'function') return null;
+  const view: AgentArtifactView = isArtifactView(supplied) ? supplied : incompleteArtifactView();
   const command = deobfuscateIfs(extractCommand(args));
   if (!command) return null;
-  const targets = nativeExecTargets(command);
+  const { targets, truncated } = nativeExecTargets(command);
+  // The lexer stopped at its nesting bound: part of the command was not read,
+  // so an exec in it cannot be ruled out. Hold, never allow unread.
+  if (truncated) return nativeDoorVerdict();
   if (targets.length === 0) return null;
 
   // Resolve + stat + header for EVERY target before the single re-list.
@@ -7253,11 +7938,7 @@ function classifyLedgerNativeExec(
     return verdict('block', 'catastrophic', 'exec', 'execute_command',
       buildReason(reason, [NATIVE_EXEC_UMBRELLA, sig]), [NATIVE_EXEC_UMBRELLA, sig]);
   }
-  if (door) {
-    return verdict('require_approval', 'dangerous', 'exec', 'execute_command',
-      buildReason('a native executable of unknown provenance requires approval', [SIG_UNCLASSIFIED]),
-      [SIG_UNCLASSIFIED]);
-  }
+  if (door) return nativeDoorVerdict();
   if (audit) {
     return verdict('allow', 'sensitive', 'exec', 'execute_command',
       'agent ran a native image its own compile produced (audited)', [SIG_COMPILED]);
@@ -7705,10 +8386,12 @@ function evaluateToolCallCore(
   // #907 row D — mapping written/just-generated bytes as executable memory
   // (mmap PROT_EXEC, mprotect +X, ctypes/cffi call into a buffer). Text-
   // decidable from the body the plane inspects (§6): the folded script bodies
-  // and inline/heredoc program regions, never arbitrary shell mentions. Needs
+  // and inline/heredoc program regions, never arbitrary shell mentions, and
+  // within them the OPERATIONS only — string and comment text is blanked
+  // unless the region can turn a string into code (`rowDProgramText`). Needs
   // no ledger; a floor DENY at the catastrophic, doorless tier.
   if (scriptRegions.length > 0
-      && mapExecAgentWrittenMemory(scriptRegions.map(r => scanSurface.slice(r.start, r.end)))) {
+      && mapExecAgentWrittenMemory(scriptRegions.map(r => rowDProgramText(scanSurface, r)))) {
     return withReview(verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
       buildReason('blocked mapping of agent-written bytes as executable memory', [NATIVE_EXEC_UMBRELLA, SIG_MAP_EXEC_MEM]),
       [NATIVE_EXEC_UMBRELLA, SIG_MAP_EXEC_MEM, ...opaqueSignals]));

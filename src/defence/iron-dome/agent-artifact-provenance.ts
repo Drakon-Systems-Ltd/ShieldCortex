@@ -64,8 +64,9 @@ export interface LedgerEntry {
  * (`canonicalTarget`) plus the per-session path hash; the query side calls
  * them so capture and query compute the same `pathHash` (3.4). An unkeyed
  * session (no session key) is represented by a view with `keyed: false` and
- * `listable: false`: history is then never complete, so every native image is
- * state 3 (3.1 "Keyed by host-owned session identity").
+ * `listable: false` ({@link incompleteArtifactView}): history is then never
+ * complete, so every native image is state 3 (3.1 "Keyed by host-owned session
+ * identity"). An explicit `null` view means the same thing.
  */
 export interface AgentArtifactView {
   /** false when the record directory could not be listed (any error other than
@@ -91,6 +92,48 @@ export interface AgentArtifactView {
 /** Proposed per-session record cap (3.1 item 3). At the cap, further calls
  *  proceed unrecorded, so a full directory is incomplete by definition. */
 export const RECORD_CAP = 4096;
+
+/** A realpath that never resolves anything: lexical normalisation only. */
+const lexicalRealpath: Realpath = (p: string) => p;
+
+/**
+ * The ONE view for "a wired adapter, but no history to read": no session key
+ * (§3.1 "Keyed by host-owned session identity"), an explicit `null`
+ * `artifactView` (§5 missing-input precedence), or a wired adapter whose view
+ * could not be built. History is never complete, so every resolved native
+ * image is state 3 (row J) — install root or not — and nothing is relieved.
+ * Target resolution still runs: the exec target is canonicalised (with
+ * `realpath` and `home` when the caller has them, lexically otherwise — the
+ * path is only stat'd and header-read, never matched against a record).
+ */
+export function incompleteArtifactView(
+  realpath: Realpath = lexicalRealpath,
+  home?: string,
+): AgentArtifactView {
+  return {
+    listable: false,
+    entries: [],
+    relist: () => null,
+    canonical: (token, cwd) => canonicalTarget(token, cwd, home, realpath),
+    pathHash: () => '',
+    cap: RECORD_CAP,
+    keyed: false,
+  };
+}
+
+/** True when `v` has the shape the classifier reads. A wired value that does
+ *  not (an older or broken adapter) is treated as incomplete history, never as
+ *  "classifier off" — only `undefined` means the adapter is not wired (§5). */
+export function isArtifactView(v: unknown): v is AgentArtifactView {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return Array.isArray(o.entries)
+    && typeof o.relist === 'function'
+    && typeof o.canonical === 'function'
+    && typeof o.pathHash === 'function'
+    && typeof o.listable === 'boolean'
+    && typeof o.keyed === 'boolean';
+}
 
 /** The three authorship states plus the 1c compile-lineage subtype (3.1). */
 export type ArtifactState =

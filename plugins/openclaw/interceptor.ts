@@ -1809,14 +1809,17 @@ export function createInterceptor(
 } {
   const denyCache = new DenyCache();
   const rateLimiter = new RateLimiter(options?.maxPromptsPerMinute ?? 5);
-  /** #907: never throws — a ledger that cannot build a view leaves the
-   *  native classifier off for this call (adapter non-coverage). */
+  /** #907: never throws. The adapter itself falls back to an incomplete
+   *  (`null`) view when it cannot build one, so the door still holds. Only an
+   *  adapter that throws outright — it supplied no readers, so nothing can be
+   *  classified — leaves the classifier off; `artifactView: null` keeps the
+   *  call marked as wired-but-unreadable rather than unwired. */
   const artifactEvaluatorOptions = (context: ToolCallContext): Partial<ToolGuardEvaluatorOptions> => {
     if (!options?.artifactLedger) return {};
     try {
       return options.artifactLedger.evaluatorOptions(context.sessionId, toolCallCwd(context));
     } catch {
-      return {};
+      return { artifactView: null };
     }
   };
   /** #907: true when a capture could not be recorded (hold). A throw is a hold. */

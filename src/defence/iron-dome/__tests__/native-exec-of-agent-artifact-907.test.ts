@@ -12,6 +12,7 @@
  * `exec-of-agent-compiled-artifact`, never a hold or a deny.
  */
 import { describe, expect, it, afterEach } from '@jest/globals';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -34,6 +35,7 @@ import {
   readArtifactHeader,
   recordArtifactCapture,
   statContentId,
+  unkeyedArtifactView,
 } from '../agent-artifact-store.js';
 
 const UMBRELLA = 'native-exec-of-agent-artifact';
@@ -563,5 +565,356 @@ describe('#907 fs store (real files under a test-owned dir)', () => {
     expect(statContentId(path.join(work, 'nope'))).toBe('absent');
     fs.symlinkSync(path.join(work, 'nope'), path.join(work, 'dangling'));
     expect(statContentId(path.join(work, 'dangling'))).toBeNull();
+  });
+});
+
+// == Review round 1 (Astra) regressions =======================================
+
+/** Decision + sorted signals: what "the same verdict" means below. */
+const shape = (v: { decision: string; severity: string; signals: string[] }) =>
+  ({ decision: v.decision, severity: v.severity, signals: [...v.signals].sort() });
+const NATIVE_SIGNALS = new Set([UMBRELLA, SIG_A, SIG_B, SIG_C, SIG_D, SIG_J]);
+/** Decision + severity + the #907 signals only. The pre-existing script-file
+ *  discovery (#4) folds only `./`-anchored command words, so `./bin/x` can
+ *  carry its `opaque-script-invocation` audit row where `bin/x` does not;
+ *  that is not this classifier's verdict. */
+const nativeShape = (v: { decision: string; severity: string; signals: string[] }) =>
+  ({ decision: v.decision, severity: v.severity, signals: v.signals.filter(s => NATIVE_SIGNALS.has(s)).sort() });
+
+describe('#907 r1 B1 — a wrapper / interpreter NAME never exempts the file it addresses', () => {
+  it.each([
+    './python3',
+    "./python3 -c 'print(1)'",
+    './node ./x.js',
+    './bash ./run.sh',
+    './env ls',
+    './timeout 5 ls',
+    './sudo true',
+    'sudo ./python3',
+    'timeout 5 ./python3 -V',
+    'env FOO=1 ./python3',
+  ])('agent-written native image addressed as `%s` → DENY', (cmd) => {
+    const w = new World();
+    for (const name of ['python3', 'node', 'bash', 'env', 'timeout', 'sudo']) {
+      w.record(`${WORK}/${name}`, 'agent-written');
+      w.put(`${WORK}/${name}`, ELF);
+    }
+    expect(isFloor(w.check(cmd), SIG_A)).toBe(true);
+  });
+
+  it('the renamed image is classified exactly like the same bytes under a neutral name', () => {
+    const w = new World();
+    for (const name of ['helper', 'python3']) {
+      w.record(`${WORK}/${name}`, 'agent-written');
+      w.put(`${WORK}/${name}`, ELF);
+    }
+    expect(shape(w.check('./python3'))).toEqual(shape(w.check('./helper')));
+  });
+
+  it('unkeyed view: an interpreter / wrapper at an install root is the door, exactly like /usr/bin/ls', () => {
+    const w = new World();
+    w.keyed = false;
+    for (const p of ['/usr/bin/ls', '/usr/bin/python3', '/usr/bin/env', '/usr/bin/bash']) w.put(p, ELF);
+    const control = w.check('/usr/bin/ls');
+    expect(isDoor(control)).toBe(true);
+    for (const cmd of ['/usr/bin/python3', '/usr/bin/python3 ./x.py', '/usr/bin/env node x.js', '/usr/bin/bash -c true']) {
+      expect(isDoor(w.check(cmd))).toBe(true);
+    }
+  });
+
+  it('keyed, complete history: an installed interpreter / wrapper keeps current behaviour (state 2)', () => {
+    const w = new World();
+    for (const p of ['/usr/bin/python3', '/usr/bin/env', '/usr/bin/timeout']) w.put(p, ELF);
+    for (const cmd of ['/usr/bin/python3 ./x.py', '/usr/bin/env node x.js', '/usr/bin/timeout 5 /usr/bin/python3 -V']) {
+      expect(touchesNative(w.check(cmd))).toBe(false);
+    }
+  });
+
+  it('downstream arguments stay separate: a native file handed to an interpreter as its script is not addressed', () => {
+    const w = new World();
+    w.record(`${WORK}/helper`, 'agent-written');
+    w.put(`${WORK}/helper`, ELF);
+    for (const cmd of ['python3 ./helper', 'bash ./helper', 'sh -e ./helper', 'node ./helper']) {
+      const v = w.check(cmd);
+      expect(v.signals).not.toContain(UMBRELLA);
+      expect(v.signals).not.toContain(SIG_J);
+    }
+  });
+});
+
+describe('#907 r1 B2 — every path spelling of one target gets the same verdict', () => {
+  const PAIRS: Array<[string, string, string]> = [
+    ['bin/helper', './bin/helper', `${WORK}/bin/helper`],
+    ['node_modules/.bin/tool', './node_modules/.bin/tool', INSTALL_TOOL],
+    ['LD_PRELOAD=lib/libx.so true', 'LD_PRELOAD=./lib/libx.so true', `${WORK}/lib/libx.so`],
+    ['cd bin && ./helper', './bin/helper', `${WORK}/bin/helper`],
+    ['$PWD/bin/helper', './bin/helper', `${WORK}/bin/helper`],
+    [`${WORK}/bin/helper`, './bin/helper', `${WORK}/bin/helper`],
+  ];
+  const HISTORIES: Array<[string, (w: World, p: string) => void]> = [
+    ['agent-written producer', (w, p) => { w.record(p, 'agent-written'); w.put(p, ELF); }],
+    ['compiled-output producer', (w, p) => { w.record(p, 'compiled-output'); w.put(p, ELF); }],
+    ['no record (unknown history)', (w, p) => { w.put(p, ELF); }],
+  ];
+  for (const [bare, dotted, target] of PAIRS) {
+    for (const [label, setup] of HISTORIES) {
+      it(`\`${bare}\` ≡ \`${dotted}\` — ${label}`, () => {
+        const w = new World();
+        setup(w, target);
+        const a = w.check(bare);
+        const b = w.check(dotted);
+        expect(nativeShape(a)).toEqual(nativeShape(b));
+        // and the classifier really ran on it (not two equal no-ops)
+        if (label.startsWith('agent')) expect(a.signals).toContain(UMBRELLA);
+        if (label.startsWith('compiled')) expect(a.signals).toContain(SIG_B);
+      });
+    }
+  }
+
+  it('a compile output captured under `cd` is the path a later spelt exec resolves to (row B, not J)', () => {
+    expect(nativeArtifactCaptures('Bash', { command: 'cd out && cc ../a.c -o app' }))
+      .toEqual([{ token: 'out/app', kind: 'compiled-output' }]);
+    const w = new World();
+    w.record(`${WORK}/out/app`, 'compiled-output');
+    w.put(`${WORK}/out/app`, ELF);
+    for (const cmd of ['./out/app', 'out/app', 'cd out && ./app']) {
+      const v = w.check(cmd);
+      expect(v.decision).toBe('allow');
+      expect(v.signals).toContain(SIG_B);
+    }
+  });
+
+  it('a compile whose output directory a computed `cd` hides is recorded as unresolvable, never at a guessed path', () => {
+    expect(nativeArtifactCaptures('Bash', { command: 'cd "$OUT" && cc a.c -o app' }))
+      .toEqual([{ token: '', kind: 'compiled-output' }]);
+  });
+});
+
+describe('#907 r1 B3 — mentioning a native file is not running it (use vs mention)', () => {
+  const READS = [
+    "cat <<'EOF'\n./helper\nLD_PRELOAD=./helper ls\nEOF",
+    'cat <<EOF\n./helper\nbin/helper --flag\nEOF',
+    "tee notes.md <<'EOF' >/dev/null\n./helper\nEOF",
+    'echo "first line\n./helper\nlast"',
+    'git commit -m "fix helper\n\n./helper now built by make"',
+    "printf '%s\\n' ./helper",
+    'ls # ./helper',
+    '# ./helper\nls',
+    "grep -n './helper' notes.md",
+    'command -v ./helper',
+    'files=(./helper bin/helper); echo "${files[@]}"',
+    'python3 - <<\'PY\'\nprint("./helper")\nPY',
+  ];
+  for (const [label, setup] of [
+    ['agent-produced target', (w: World) => { w.record(`${WORK}/helper`, 'agent-written'); w.put(`${WORK}/helper`, ELF); w.record(`${WORK}/bin/helper`, 'agent-written'); w.put(`${WORK}/bin/helper`, ELF); }],
+    ['unknown target', (w: World) => { w.put(`${WORK}/helper`, ELF); w.put(`${WORK}/bin/helper`, ELF); }],
+  ] as const) {
+    it.each(READS)(`${label}: read/print/mention %j mints no exec effect`, (cmd) => {
+      const w = new World();
+      setup(w);
+      const v = w.check(cmd);
+      expect(v.signals).not.toContain(UMBRELLA);
+      expect(v.signals).not.toContain(SIG_J);
+      expect(v.decision).not.toBe('block');
+    });
+  }
+
+  it.each([
+    'make && ./helper',
+    'true; ./helper',
+    'true\n./helper',
+    '(./helper)',
+    '{ ./helper; }',
+    'echo $(./helper)',
+    'echo "$(./helper)"',
+    'echo `./helper`',
+    'diff <(./helper) expected.txt',
+    "bash -c './helper'",
+    "sh -c 'cd bin && ./helper'",
+    'eval ./helper',
+    "bash <<'EOF'\n./helper\nEOF",
+    "cat <<'EOF' | sh\n./helper\nEOF",
+    'cat <<EOF\n$(./helper)\nEOF',
+    '2>/dev/null ./helper',
+    './helper > out.txt 2>&1',
+    'nohup ./helper >/dev/null 2>&1 &',
+    'if ./helper; then echo ok; fi',
+    'while ./helper; do break; done',
+    'X=1 ./helper',
+    'export LD_PRELOAD=./helper; ls',
+    "echo 'not this' # but\n./helper",
+  ])('real execution in a compound command still hits the floor: %j', (cmd) => {
+    const w = new World();
+    w.record(`${WORK}/helper`, 'agent-written');
+    w.put(`${WORK}/helper`, ELF);
+    w.record(`${WORK}/bin/helper`, 'agent-written');
+    w.put(`${WORK}/bin/helper`, ELF);
+    const v = w.check(cmd);
+    expect(v.decision).toBe('block');
+    expect(v.signals).toContain(UMBRELLA);
+  });
+
+  it.each([
+    'git commit -m "build\ncc helper.c -o helper"',
+    "cat <<'EOF'\ncc helper.c -o helper\nEOF",
+    "echo 'cc helper.c -o helper'",
+    '# cc helper.c -o helper',
+  ])('a compiler only MENTIONED in %j mints no compile capture', (cmd) => {
+    expect(nativeArtifactCaptures('Bash', { command: cmd })).toEqual([]);
+  });
+
+  it.each([
+    ['make && cc helper.c -o helper', 'helper'],
+    ["bash -c 'cc helper.c -o out/helper'", 'out/helper'],
+    ['x=$(cc helper.c -o helper)', 'helper'],
+  ])('a compiler actually run in %j is still captured', (cmd, out) => {
+    expect(nativeArtifactCaptures('Bash', { command: cmd })).toEqual([{ token: out, kind: 'compiled-output' }]);
+  });
+});
+
+describe('#907 r1 B4 — row D needs an executable-memory OPERATION, not its vocabulary', () => {
+  it.each([
+    `node -e "console.log('mmap PROT_EXEC')"`,
+    `python3 -c "print('mmap PROT_EXEC')"`,
+    `python3 -c "print('ctypes.CFUNCTYPE docs')"`,
+    `python3 -c "x = 1  # mmap PROT_EXEC via ctypes.CFUNCTYPE"`,
+    "python3 - <<'PY'\nprint(\"\"\"mmap with PROT_EXEC and mprotect PROT_EXEC\"\"\")\nPY",
+    "node - <<'JS'\n// mmap PROT_EXEC notes\nconsole.log('VirtualAlloc PAGE_EXECUTE_READWRITE')\nJS",
+  ])('printing / commenting the terms is allowed: %j', (cmd) => {
+    const v = evaluateToolCall('Bash', { command: cmd });
+    expect(v.signals).not.toContain(SIG_D);
+    expect(v.decision).not.toBe('block');
+  });
+
+  it('a folded script that only prints the terms is allowed; one that maps memory is denied', () => {
+    const docs = 'HELP = """Uses mmap with PROT_EXEC; see ctypes.CFUNCTYPE."""\nprint(HELP)\n';
+    const jit = 'import mmap\nm = mmap.mmap(-1, 4096, prot=mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC)\n';
+    const run = (src: string) => evaluateToolCall('Bash', { command: 'python3 ./tool.py' }, undefined, {
+      resolveScriptSource: (p: string) => (p.endsWith('tool.py') ? src : null),
+    });
+    expect(run(docs).signals).not.toContain(SIG_D);
+    expect(isFloor(run(jit), SIG_D)).toBe(true);
+  });
+
+  it.each([
+    "python3 -c 'import mmap; m = mmap.mmap(-1, 4096, prot=mmap.PROT_READ | mmap.PROT_EXEC)'",
+    "python3 -c 'import ctypes; f = ctypes.CFUNCTYPE(None)(ctypes.addressof(buf))'",
+    `python3 -c "exec('import mmap; mmap.mmap(-1, 1, prot=mmap.PROT_EXEC)')"`,
+    `node -e "eval('mmap(PROT_EXEC)')"`,
+    "python3 - <<'PY'\nimport mmap\nbuf = mmap.mmap(-1, 4096, prot=mmap.PROT_EXEC)\nPY",
+  ])('a real or string-evaluated mapping is still denied: %j', (cmd) => {
+    expect(isFloor(evaluateToolCall('Bash', { command: cmd }), SIG_D)).toBe(true);
+  });
+});
+
+describe('#907 r1 B5 — null artifactView is incomplete history, never classifier-off', () => {
+  const run = (command: string, artifactView: AgentArtifactView | null | undefined, w: World) =>
+    evaluateToolCall('Bash', { command }, undefined, {
+      artifactView,
+      statPath: (p) => w.files.get(p)?.id ?? 'absent',
+      readFileHeader: (p) => w.files.get(p)?.header ?? null,
+      cwd: WORK,
+    });
+
+  it.each(['/usr/bin/ls', './helper', '/usr/bin/python3 ./x.py'])(
+    'null ≡ keyed:false for `%s` (install-root and project-local)', (cmd) => {
+      const w = new World();
+      w.put('/usr/bin/ls', ELF);
+      w.put('/usr/bin/python3', ELF);
+      w.record(`${WORK}/helper`, 'agent-written');
+      w.put(`${WORK}/helper`, ELF);
+      const viaNull = run(cmd, null, w);
+      const viaUnkeyed = run(cmd, { ...w.view(), keyed: false, listable: false }, w);
+      expect(isDoor(viaNull)).toBe(true);
+      expect(shape(viaNull)).toEqual(shape(viaUnkeyed));
+    });
+
+  it('the fs store\'s unkeyed view classifies the same as null', () => {
+    const w = new World();
+    w.put('/usr/bin/ls', ELF);
+    expect(shape(run('/usr/bin/ls', unkeyedArtifactView(HOME), w))).toEqual(shape(run('/usr/bin/ls', null, w)));
+  });
+
+  it('a wired value that is not a usable view is incomplete history too', () => {
+    const w = new World();
+    w.put('/usr/bin/ls', ELF);
+    expect(isDoor(run('/usr/bin/ls', {} as unknown as AgentArtifactView, w))).toBe(true);
+  });
+
+  it('only undefined means "not wired": the classifier does not run', () => {
+    const w = new World();
+    w.put('/usr/bin/ls', ELF);
+    expect(touchesNative(run('/usr/bin/ls', undefined, w))).toBe(false);
+  });
+});
+
+describe('#907 r1 B6 — a structural store error is incomplete history, on both listings', () => {
+  let dir: string;
+  afterEach(() => {
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const KEY = 'sc-0123456789abcdef';
+  const mk = () => {
+    dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-907-b6-')));
+    const work = path.join(dir, 'work');
+    const binDir = path.join(work, 'node_modules', '.bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    const tool = path.join(binDir, 'tool'); // an install-root arm, never written this session
+    fs.writeFileSync(tool, Buffer.from(ELF), { mode: 0o755 });
+    return { work, tool };
+  };
+  const exec = (cmd: string, view: AgentArtifactView, work: string) =>
+    evaluateToolCall('Bash', { command: cmd }, undefined, {
+      artifactView: view, statPath: statContentId, readFileHeader: readArtifactHeader, cwd: work,
+    });
+
+  it('control: a genuinely absent session directory is complete and empty → install-root image keeps current behaviour', () => {
+    const { work, tool } = mk();
+    const view = buildArtifactView({ stateDir: path.join(dir, 'state'), sessionKey: KEY });
+    expect(view.listable).toBe(true);
+    expect(view.relist()).toEqual([]);
+    expect(touchesNative(exec(tool, view, work))).toBe(false);
+  });
+
+  it('first listing ENOTDIR (the store path is a regular file) → listable:false, relist null → the door', () => {
+    const { work, tool } = mk();
+    const stateDir = path.join(dir, 'state-file');
+    fs.writeFileSync(stateDir, 'not a directory');
+    const view = buildArtifactView({ stateDir, sessionKey: KEY });
+    expect(view.listable).toBe(false);
+    expect(view.relist()).toBeNull();
+    expect(isDoor(exec(tool, view, work))).toBe(true);
+  });
+
+  it('re-list ENOTDIR (the store breaks between listing and re-list) → the door for that check', () => {
+    const { work, tool } = mk();
+    const stateDir = path.join(dir, 'state');
+    fs.mkdirSync(stateDir);
+    const view = buildArtifactView({ stateDir, sessionKey: KEY });
+    expect(view.listable).toBe(true); // ENOENT: absent, complete
+    fs.writeFileSync(path.join(stateDir, 'artifacts'), 'now a file'); // structural break
+    expect(isDoor(exec(tool, view, work))).toBe(true);
+  });
+
+  it('an unwritable store holds the write AND every later native exec in that session is the door', () => {
+    const { work, tool } = mk();
+    const stateDir = path.join(dir, 'state-file');
+    fs.writeFileSync(stateDir, 'not a directory');
+    const helper = path.join(work, 'helper');
+    expect(recordArtifactCapture({ stateDir, sessionKey: KEY, token: helper, cwd: work, kind: 'agent-written' }).held).toBe(true);
+    fs.writeFileSync(helper, Buffer.from(ELF), { mode: 0o755 }); // a held call released anyway
+    const view = () => buildArtifactView({ stateDir, sessionKey: KEY });
+    expect(isDoor(exec('./helper', view(), work))).toBe(true);
+    expect(isDoor(exec(tool, view(), work))).toBe(true); // no install-root relief either
+  });
+
+  const fifoIt = process.platform === 'win32' ? it.skip : it;
+  fifoIt('readArtifactHeader never blocks on a FIFO and never reads a non-regular file', () => {
+    mk();
+    const fifo = path.join(dir, 'pipe');
+    const made = spawnSync('mkfifo', [fifo]);
+    if (made.status !== 0) return; // no mkfifo on this host: nothing to pin
+    expect(readArtifactHeader(fifo)).toBeNull();
+    expect(readArtifactHeader(dir)).toBeNull();
   });
 });
