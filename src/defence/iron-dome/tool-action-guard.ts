@@ -8611,11 +8611,23 @@ function interpolationSpans(text: string, lo: number, hi: number, region: ScanRe
     if (c === '\\' && lang !== 'python') { i++; continue; }
     if (opener === '{' && c === '{' && text[i + 1] === '{') { i++; continue; } // `{{` is a literal brace
     if (!text.startsWith(opener, i)) continue;
+    // The expression's end, found quote-aware: a `}` inside a quoted string
+    // of the expression (`f"{len('}') + …}"`) does not close it (review r3
+    // B2). An expression that never closes keeps the rest of the literal as
+    // code — reading MORE as code, never less.
     let depth = 0;
     let j = i + opener.length - 1;
     for (; j < hi; j++) {
-      if (text[j] === '{') depth++;
-      else if (text[j] === '}' && --depth === 0) break;
+      const q = text[j]!;
+      if (q === '"' || q === "'" || q === '`') {
+        let k = j + 1;
+        while (k < hi && text[k] !== q) { if (text[k] === '\\') k++; k++; }
+        if (k >= hi) { j = hi; break; }
+        j = k;
+        continue;
+      }
+      if (q === '{') depth++;
+      else if (q === '}' && --depth === 0) break;
     }
     spans.push([i, Math.min(j + 1, hi)]);
     i = j;

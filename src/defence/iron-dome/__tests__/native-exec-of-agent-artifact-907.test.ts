@@ -1396,3 +1396,20 @@ describe('#907 r3 B3 — loader-env uncertainty keeps the load; a function call 
     expect(w.check('f() { echo hi; }; LD_PRELOAD=./lib.so f').decision).not.toBe('block');
   });
 });
+
+describe('#907 r3 B2 — a quoted `}` inside an interpolation expression does not end it', () => {
+  const fold = (cmd: string, body: string) => evaluateToolCall('Bash', { command: cmd }, undefined, {
+    resolveScriptSource: () => body,
+  });
+
+  it('positive control: the plain f-string mapping floors', () => {
+    expect(isFloor(fold('python3 ./fstr.py', 'import mmap\nprint(f"{mmap.mmap(-1,4096,prot=mmap.PROT_EXEC)}")\n'), SIG_D)).toBe(true);
+  });
+
+  it.each([
+    ['python3 ./fstr.py', `import mmap\nprint(f"{len('}') + bool(mmap.mmap(-1,4096,prot=mmap.PROT_EXEC))}")\n`], // r3 exact
+    ['node ./t.mjs', 'console.log(`${"}" + mmap(PROT_EXEC)}`)\n'],                                             // r3 JS sibling
+  ])('folded %j still performs the mapping: floor', (cmd, body) => {
+    expect(isFloor(fold(cmd, body), SIG_D)).toBe(true);
+  });
+});
