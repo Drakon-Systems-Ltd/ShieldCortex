@@ -3341,12 +3341,7 @@ process.stdin.on('end', async () => {
     // #907: the agent-artifact ledger. The view is bound to THIS call's
     // session key here; the evaluator never derives or sees a key.
     const artifactStore = await loadArtifactStore();
-    const guardOptions = {
-      ...(resolveScriptSource
-        ? (isReviewedScript ? { resolveScriptSource, isReviewedScript } : { resolveScriptSource })
-        : {}),
-      ...artifactGuardOptions(artifactStore, baseExtra, hookData.cwd),
-    };
+    const artifactOptions = artifactGuardOptions(artifactStore, baseExtra, hookData.cwd);
     let verdict;
     try {
       // 4th arg, not the 3rd — the 3rd is the IronDome config. Passing the
@@ -3356,7 +3351,9 @@ process.stdin.on('end', async () => {
         toolName,
         toolInput,
         undefined,
-        Object.keys(guardOptions).length > 0 ? guardOptions : undefined,
+        resolveScriptSource
+          ? { ...(isReviewedScript ? { resolveScriptSource, isReviewedScript } : { resolveScriptSource }), ...artifactOptions }
+          : (Object.keys(artifactOptions).length > 0 ? artifactOptions : undefined),
       );
     } catch (err) {
       await handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode, await getNotify(), baseExtra); // always exits

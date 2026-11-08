@@ -180,8 +180,12 @@ export interface ToolGuardEvaluatorOptions {
    *  call's session), stat/header readers and the raw call cwd. Opaque here —
    *  built by {@link InterceptorOptions.artifactLedger}; an evaluator that
    *  predates the seam simply ignores them. */
-  artifactView?: unknown;
-  statPath?: (absPath: string) => unknown;
+  // Structurally opaque across the package boundary (the real type lives in
+  // agent-artifact-provenance.ts); `any` keeps this seam assignable to the
+  // evaluator's own options type in both directions.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  artifactView?: any;
+  statPath?: (absPath: string) => { dev: number; ino: number; size: number; mtimeMs: number } | 'absent' | null;
   readFileHeader?: (absPath: string) => Uint8Array | null;
   cwd?: string;
 }
