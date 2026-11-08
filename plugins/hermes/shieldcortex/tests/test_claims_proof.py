@@ -84,14 +84,18 @@ class TestClaim18OutageRecognition(unittest.TestCase):
 
     `register()` is the real entrypoint; `pre_tool_call` is the real hook. The
     one stub is `evaluate_tool_call`, replaced with a function that returns the
-    `available=False` verdict a dead local API produces — the recognisers
-    (`fallback_catastrophic_match`, `fallback_self_protection_match`,
-    `fallback_dangerous_match`, `fallback_write_target_match`) and the policy
-    are untouched. Removing a recogniser, or disconnecting it from the decision,
-    fails these tests; the flag-handling row above could not see either.
+    `available=False` verdict a dead local API produces — the recognisers and
+    the policy are untouched. One representative `terminal` command per tier
+    drives the three command recognisers (`fallback_catastrophic_match`,
+    `fallback_self_protection_match`, `fallback_dangerous_match`); removing one
+    of those, or disconnecting it from the decision, fails the matching test
+    here, which the flag-handling row above could not see. Each recognition
+    test also asserts the stub was the path taken for that very call.
 
-    One representative command per tier. The full shape matrices (wrappers,
-    quoting, posture spellings, lock paths) are proven in
+    Not driven here: the #505 tool-write target branch
+    (`fallback_write_target_match`, a Write/Edit whose path is a startup file);
+    its own cases live in `test_self_protection_floor.py`. The full shape
+    matrices (wrappers, quoting, posture spellings, lock paths) are proven in
     `test_self_protection_floor.py`, `test_fallback_regex_bounds.py` and
     `test_client_policy.py`, not re-proven here.
     """
@@ -152,21 +156,30 @@ class TestClaim18OutageRecognition(unittest.TestCase):
         # (label, SHIELDCORTEX_ENFORCE, enforcing?) — the shipped default and the explicit opt-out.
         return (("enforcing (default)", None, True), ("advisory", "0", False))
 
+    def _decide(self, hook, command, label):
+        """Run one real `pre_tool_call` and prove the outage path was taken for
+        THIS call: the stubbed client recorded exactly this tool and args, so the
+        decision came from the fallback recognisers, not from a live verdict."""
+        before = len(self.calls)
+        d = hook("terminal", {"command": command})
+        self.assertEqual(self.calls[before:], [("terminal", {"command": command})], label)
+        return d
+
     def test_recognised_catastrophic_command_is_blocked_in_both_postures(self):
         for label, env, _ in self._postures():
-            d = self._hook(env)("terminal", {"command": self.CATASTROPHIC})
+            d = self._decide(self._hook(env), self.CATASTROPHIC, label)
             self.assertTrue(_blocked(d), label)
             self.assertIn("catastrophic pattern", d["message"], label)
 
     def test_recognised_self_protection_command_is_blocked_in_both_postures(self):
         for label, env, _ in self._postures():
-            d = self._hook(env)("terminal", {"command": self.SELF_PROTECTION})
+            d = self._decide(self._hook(env), self.SELF_PROTECTION, label)
             self.assertTrue(_blocked(d), label)
             self.assertIn("guard's own state or config", d["message"], label)
 
     def test_recognised_dangerous_command_is_blocked_only_while_enforcing(self):
         for label, env, enforcing in self._postures():
-            d = self._hook(env)("terminal", {"command": self.DANGEROUS})
+            d = self._decide(self._hook(env), self.DANGEROUS, label)
             if enforcing:
                 self.assertTrue(_blocked(d), label)
                 self.assertIn("dangerous pattern", d["message"], label)
@@ -178,13 +191,15 @@ class TestClaim18OutageRecognition(unittest.TestCase):
         for label, env, _ in self._postures():
             hook = self._hook(env)
             for cmd in self.BENIGN:
-                self.assertIsNone(hook("terminal", {"command": cmd}), f"{label}: {cmd}")
+                self.assertIsNone(self._decide(hook, cmd, f"{label}: {cmd}"), f"{label}: {cmd}")
 
-    def test_the_outage_path_was_the_path_taken(self):
-        # Guard against a stub that never fired: every decision above came
-        # from the API client answering `available=False`, not from a verdict.
-        self._hook(None)("terminal", {"command": self.CATASTROPHIC})
-        self.assertEqual(self.calls, [("terminal", {"command": self.CATASTROPHIC})])
+    def test_a_stub_that_never_fires_is_caught(self):
+        # The per-call check in _decide is itself load-bearing: a hook that
+        # bypassed the client would leave `calls` empty and fail there.
+        hook = self._hook(None)
+        self.assertEqual(self.calls, [])
+        self._decide(hook, self.CATASTROPHIC, "first call")
+        self.assertEqual(len(self.calls), 1)
 
 
 if __name__ == "__main__":
