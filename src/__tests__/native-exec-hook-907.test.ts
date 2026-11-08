@@ -216,4 +216,63 @@ describe('#907 native-exec floor through the real Claude Code hook', () => {
     expect(auditRows().some((row) => JSON.stringify(row).includes('native-exec-of-agent-artifact'))).toBe(false);
     expect(decisionOf(await bash('true && ./helper')).permissionDecision).toBe('deny'); // a real exec still is
   });
+
+  // -- review round 2 regressions, through the real hook ----------------------
+
+  const agentHelper = async (): Promise<string> => {
+    const helper = path.join(work, 'helper');
+    await write(helper);
+    fs.writeFileSync(helper, ELF_STUB, { mode: 0o755 });
+    return helper;
+  };
+  const nativeAudited = () => auditRows().some((row) => JSON.stringify(row).includes('native-exec-of-agent-artifact'));
+
+  it('r2 N5 / B1: a cd that may not run, or runs in a child, never drops ./helper in the call cwd', async () => {
+    await agentHelper();
+    fs.mkdirSync(path.join(work, 'sub'));
+    for (const cmd of [
+      'false && cd sub; ./helper',
+      'if false; then cd sub; fi; ./helper',
+      'cd . || true; ./helper',
+      'cd /no/such/dir || ./helper',
+      'pushd . && ./helper',
+      'timeout 1 cd /tmp && ./helper',
+    ]) {
+      const r = await bash(cmd);
+      expect([cmd, decisionOf(r).permissionDecision]).toEqual([cmd, 'deny']);
+      expect(r.stderr).toMatch(/exec-agent-written-native-bytes/);
+    }
+    // a directory that cannot be named: the door, never a silent allow
+    expect(decisionOf(await bash('cd - && ./helper')).permissionDecision).toBe('ask');
+    expect(doorAudited()).toBe(true);
+    // positive controls: plain exec still denies; a successful cd still re-anchors
+    expect(decisionOf(await bash('./helper')).permissionDecision).toBe('deny');
+    expect(decisionOf(await bash('cd sub && ./helper')).permissionDecision).toBeUndefined(); // sub/helper absent
+  });
+
+  it('r2 N4 / B2: a heredoc ends at the earliest line a shell could end it — the trailing ./helper runs', async () => {
+    await agentHelper();
+    for (const cmd of [
+      'cat <<EO\\\nF\nhi\nEOF\n./helper',            // backslash-newline continues the delimiter: EOF
+      'END=EOF\ncat << $END\nharmless\nEOF\n./helper',   // an expanded delimiter cannot be proved
+    ]) {
+      const r = await bash(cmd);
+      expect([cmd, decisionOf(r).permissionDecision]).toEqual([cmd, 'deny']);
+      expect(r.stderr).toMatch(/exec-agent-written-native-bytes/);
+    }
+  });
+
+  it('r2 N4 control: inside single quotes the backslash-newline is data — ./helper stays heredoc text', async () => {
+    await agentHelper();
+    const d = decisionOf(await bash("cat <<'EO\\\nF'\nhi\nEOF\n./helper"));
+    expect(d.permissionDecision).not.toBe('deny');
+    expect(nativeAudited()).toBe(false);
+  });
+
+  it('r2 N3: a function only DEFINED runs nothing; calling it still denies', async () => {
+    await agentHelper();
+    expect(decisionOf(await bash('f() { ./helper; }; echo defined')).permissionDecision).toBeUndefined();
+    expect(nativeAudited()).toBe(false);
+    expect(decisionOf(await bash('f() { ./helper; }; f')).permissionDecision).toBe('deny');
+  });
 });
