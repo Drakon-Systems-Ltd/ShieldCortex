@@ -141,6 +141,53 @@ describe('sanitisePromptForRecall — OpenClaw 2026.10.x turn boilerplate (#992)
     expect(sanitisePromptForRecall(header)).toBe(header);
   });
 
+  // ── Review of 1b6cd82b (CASE-Drakon 5754304206, TARSDrakon 6604727129) ──
+  // B1: a trailing paragraph that starts with a guidance sentence but carries
+  // owner text after it lost the whole paragraph. Only the known sentence(s)
+  // are boilerplate; the remainder is the owner's and stays.
+  it('B1: keeps owner text that follows a guidance opener in the trailing paragraph (participate)', () => {
+    const input = 'The logs contain this line.\n\nYou can participate in the conversation throughout your work. Why is this injected, and fix the boiler pressure valve?';
+    expect(sanitisePromptForRecall(input)).toBe('The logs contain this line.\n\nWhy is this injected, and fix the boiler pressure valve?');
+  });
+  it('B1: keeps owner text that follows the `send` target line in the trailing paragraph', () => {
+    const input = `Read this.\n\n${TARGET_DEFAULT} Does that mean my reply goes to Telegram?`;
+    expect(sanitisePromptForRecall(input)).toBe('Read this.\n\nDoes that mean my reply goes to Telegram?');
+  });
+  it('B1: keeps owner text that follows the UI Presentation block in the trailing paragraph', () => {
+    const input = `Read this.\n\n${UI_PRESENTATION}\nWhy is this section in every prompt?`;
+    expect(sanitisePromptForRecall(input)).toBe('Read this.\n\nWhy is this section in every prompt?');
+  });
+  it('B1: a whole owner turn whose message ends with a guidance quote plus a question keeps the question', () => {
+    const owner = `Look: ${COMMENTARY_FINAL} What does it want from me?`;
+    // Quoted mid-paragraph (not at the paragraph start): the paragraph is owner text and is kept whole.
+    expect(sanitisePromptForRecall(ownerTurn(owner))).toBe(owner);
+  });
+
+  // B2: closed internal-context / runtime-context pairs were stripped wherever
+  // they appeared, so an owner message that IS a complete pair became "" and
+  // the hook exited gated:prompt-too-short. A pair is stripped only when it is
+  // anchored to the 2026.10.x envelope; a whole-message or mid-text quote is
+  // kept, and a step that would leave nothing falls back to its input.
+  it('B2: an owner message that is itself a closed internal-context pair is kept', () => {
+    const input = `${BEGIN}\nplease explain this marker\n${END}`;
+    expect(sanitisePromptForRecall(input)).toBe(input);
+  });
+  it('B2: an owner message that is itself a closed runtime-context pair is kept', () => {
+    const input = 'OpenClaw runtime context:\nhello owner\nEnd OpenClaw runtime context.';
+    expect(sanitisePromptForRecall(input)).toBe(input);
+  });
+  it('B2: a closed pair quoted mid-text in an owner turn is kept', () => {
+    const owner = `I keep seeing this:\n\n${BEGIN}\nsome framework words\n${END}\n\nwhat is it for?`;
+    expect(sanitisePromptForRecall(ownerTurn(owner))).toBe(owner);
+    const rt = `I keep seeing this:\n\n${RUNTIME_CONTEXT}\n\nwhat is it for?`;
+    expect(sanitisePromptForRecall(ownerTurn(rt))).toBe(rt);
+  });
+  it('B2: the leading internal-context block is stripped only when it opens the prompt', () => {
+    // Anchored: opens the prompt (after the envelope timestamp) — stripped.
+    expect(sanitisePromptForRecall(`[Tue 2026-11-03 11:53 UTC] ${BEGIN}\n\n[Subagent Context] depth 1/5.\n\n${END}\n\nrenew passport`)).toBe('renew passport');
+    expect(sanitisePromptForRecall(`${BEGIN}\n\n[Subagent Context] depth 1/5.\n\n${END}\n\nrenew passport`)).toBe('renew passport');
+  });
+
   it('still strips the #717 envelope and then the 2026.10.x trailer', () => {
     const MARK = '⟦openclaw:ctx⟧';
     const wrapped = [

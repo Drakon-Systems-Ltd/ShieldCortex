@@ -262,81 +262,152 @@ const RUNTIME_CONTEXT_BEGIN_MARKER = '<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>';
 const RUNTIME_CONTEXT_END_MARKER = '<<<END_OPENCLAW_INTERNAL_CONTEXT>>>';
 const RUNTIME_CONTEXT_HEADER = 'OpenClaw runtime context:';
 const RUNTIME_CONTEXT_FOOTER = 'End OpenClaw runtime context.';
-// Opening sentence of each guidance paragraph OpenClaw appends after the
-// user's message. A paragraph is dropped only when it STARTS with one of
-// these and sits in the trailing run of boilerplate; the same sentence quoted
-// inside the owner's own paragraph, or followed by more owner text, is kept.
-const TRAILING_GUIDANCE_OPENERS = [
-  'Visible source replies are not automatically delivered for this run.',
-  'No source-conversation reply can be sent from this turn.',
+// Sentences of the guidance paragraphs OpenClaw appends after the user's
+// message (2026.10.9 buildHarnessVisibleReplyGuidance / buildUiPresentationPrompt,
+// plus the message_tool_only variants). A trailing paragraph is consumed
+// sentence by sentence from its start: when every sentence is known the
+// paragraph is boilerplate and goes; when owner text follows the known
+// sentence(s) in the same paragraph (#993 review B1) only the known sentences
+// go and the remainder stays. A guidance sentence quoted mid-paragraph, or in
+// a paragraph that is not trailing, is owner text and is never touched.
+const TRAILING_GUIDANCE_SENTENCES = [
   'You can participate in the conversation throughout your work.',
-  'For the current source conversation, reply normally in your final assistant message;',
-  '`send`: `target` + `message`;',
+  'Use `message` when you have something worth saying; you don’t need to wait until you’re finished, and sending a message doesn’t end your task.',
+  'OpenClaw delivers your final response automatically.',
+  'Visible source replies are not automatically delivered for this run.',
+  'Use `message(action=send)` for source output.',
+  'For progress, set `final=false`.',
+  'Set `final=true`, or omit it, for a completed reply to the current source.',
+  'An added reaction to the current source message with `final=true` can also complete the reply.',
+  'Do not repeat delivered content.',
+  'No source-conversation reply can be sent from this turn.',
+  'Final assistant text remains private and returns to the invoking workflow; it is not automatically delivered to the source conversation.',
+  'For the current source conversation, reply normally in your final assistant message; OpenClaw will deliver it through the active source conversation.',
+  '`send`: `target` + `message`; target required this turn.',
   '`send`: `message`; current source is default target.',
+  'Set `target` only elsewhere.',
   'Commentary is optional progress and may be hidden.',
-  '## UI Presentation\n',
-];
+  'Answer user questions or status requests received during ongoing work with `message(action=send, final=false)`, then continue the task.',
+  "Before finishing, deliver every still-pending answer through this turn's visible-reply route.",
+  'Do not repeat answers already delivered.',
+  'Include answers to every still-pending user question, including questions received during ongoing work, in your final response.',
+  '## UI Presentation',
+  '`dashboard`: layout/plugin widgets, not HTML authoring; never for opening a browser side panel.',
+  'For a saved widget, use action="focus_tab" with its tabId.',
+  'Custom authoring is unavailable this turn, not unsupported by dashboards.',
+  'Inspect widgets in their chat/dashboard frame; do not open hosting URLs as browser pages.',
+  'Verify the delivered interaction or say unverified.',
+].sort((a, b) => b.length - a.length); // longest first: a sentence may prefix another
 
-/** Remove closed internal-context blocks: BEGIN and END each on their own line. */
-function stripInternalContextBlocks(lines) {
-  const out = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].trim() === RUNTIME_CONTEXT_BEGIN_MARKER || lines[i].trimEnd().endsWith(` ${RUNTIME_CONTEXT_BEGIN_MARKER}`)) {
-      let end = i + 1;
-      while (end < lines.length && lines[end].trim() !== RUNTIME_CONTEXT_END_MARKER) end += 1;
-      if (end < lines.length) {
-        // Keep any text the line carried before the marker (the timestamp).
-        const before = lines[i].trimEnd().slice(0, -RUNTIME_CONTEXT_BEGIN_MARKER.length);
-        if (before.trim() !== '') out.push(before.trimEnd());
-        i = end;
-        continue;
-      }
+/**
+ * Split a trailing paragraph into its known guidance prefix and the owner
+ * remainder. Returns the remainder ('' when the whole paragraph is known), or
+ * null when the paragraph does not start with a known sentence.
+ */
+function consumeGuidanceSentences(paragraph) {
+  let rest = paragraph;
+  let consumed = false;
+  for (;;) {
+    const hit = TRAILING_GUIDANCE_SENTENCES.find((sentence) => rest.startsWith(sentence)
+      && (rest.length === sentence.length || /\s/.test(rest[sentence.length])));
+    if (hit === undefined) break;
+    consumed = true;
+    rest = rest.slice(hit.length).replace(/^\s+/, '');
+    if (rest === '') break;
+  }
+  return consumed ? rest : null;
+}
+
+function isInternalContextBegin(line) {
+  const t = line.trim();
+  return t === RUNTIME_CONTEXT_BEGIN_MARKER || t.endsWith(` ${RUNTIME_CONTEXT_BEGIN_MARKER}`);
+}
+
+/**
+ * Strip the trailing run of 2026.10.x boilerplate, working backwards from the
+ * end of the prompt one unit at a time (#993 review B2: a framework block is
+ * removed only where the framework puts it). A unit is removed only while it
+ * sits at the tail, i.e. is anchored to the end of the prompt through the
+ * units already removed:
+ *   - a closed "OpenClaw runtime context:" … "End OpenClaw runtime context."
+ *     block whose footer is the last line;
+ *   - a closed internal-context block whose END marker is the last line;
+ *   - a guidance paragraph made of known sentences (see
+ *     consumeGuidanceSentences); owner text after the known sentences in that
+ *     paragraph ends the run and is kept.
+ * Anything else ends the run: the owner's own text, including a quoted closed
+ * pair with owner words after it, stays.
+ */
+function stripTrailingTurnBoilerplate(lines) {
+  const out = lines.slice();
+  const trimTail = () => { while (out.length > 0 && out[out.length - 1].trim() === '') out.pop(); };
+  for (;;) {
+    trimTail();
+    if (out.length === 0) break;
+    const last = out[out.length - 1].trim();
+    if (last === RUNTIME_CONTEXT_FOOTER) {
+      let start = out.length - 2;
+      while (start >= 0 && out[start].trim() !== RUNTIME_CONTEXT_HEADER) start -= 1;
+      if (start < 0) break; // footer without a header: owner text
+      out.length = start;
+      continue;
     }
-    out.push(lines[i]);
+    if (last === RUNTIME_CONTEXT_END_MARKER) {
+      let start = out.length - 2;
+      while (start >= 0 && !isInternalContextBegin(out[start])) start -= 1;
+      if (start < 0) break; // END without a BEGIN: owner text
+      // Keep any text the BEGIN line carried before the marker (the timestamp).
+      const before = out[start].trimEnd().slice(0, -RUNTIME_CONTEXT_BEGIN_MARKER.length).trimEnd();
+      out.length = start;
+      if (before !== '') out.push(before);
+      continue;
+    }
+    // Last paragraph: back to the previous blank line.
+    let pStart = out.length - 1;
+    while (pStart > 0 && out[pStart - 1].trim() !== '') pStart -= 1;
+    const remainder = consumeGuidanceSentences(out.slice(pStart).join('\n').trim());
+    if (remainder === null) break; // owner paragraph
+    out.length = pStart;
+    if (remainder !== '') { out.push(remainder); break; } // owner text after the opener (B1)
   }
   return out;
 }
 
-/** Remove a runtime-context block whose header and footer are each a whole line. */
-function stripRuntimeContextBlocks(lines) {
-  const out = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].trim() === RUNTIME_CONTEXT_HEADER) {
-      let end = i + 1;
-      while (end < lines.length && lines[end].trim() !== RUNTIME_CONTEXT_FOOTER) end += 1;
-      if (end < lines.length) {
-        i = end;
-        continue;
-      }
-    }
-    out.push(lines[i]);
+/**
+ * Strip internal-context blocks that open the prompt: the first non-blank
+ * line is the BEGIN marker (optionally after the envelope timestamp, which is
+ * kept for the final timestamp cut) and a closing END marker follows. An
+ * unclosed marker, or a block that follows owner text, is left alone.
+ */
+function stripLeadingInternalContextBlocks(lines) {
+  let out = lines.slice();
+  for (;;) {
+    let i = 0;
+    while (i < out.length && out[i].trim() === '') i += 1;
+    if (i >= out.length || !isInternalContextBegin(out[i])) break;
+    let end = i + 1;
+    while (end < out.length && out[end].trim() !== RUNTIME_CONTEXT_END_MARKER) end += 1;
+    if (end >= out.length) break; // unclosed: owner text
+    const before = out[i].trimEnd().slice(0, -RUNTIME_CONTEXT_BEGIN_MARKER.length).trimEnd();
+    out = (before !== '' ? [before] : []).concat(out.slice(end + 1));
   }
   return out;
 }
 
 /**
  * Strip OpenClaw 2026.10.x turn boilerplate around the owner's text (#992).
- * Never returns null; returns the input unchanged when nothing matched.
+ * Never returns null; returns the input unchanged when nothing matched, and
+ * also when stripping would leave nothing (an owner message that is itself a
+ * complete framework pair must not gate as too short, #993 review B2).
  */
 function stripOpenClawTurnBoilerplate(text) {
   if (text.length === 0) return text;
   let lines = text.replace(/\r\n/g, '\n').split('\n');
-  if (text.includes(RUNTIME_CONTEXT_BEGIN_MARKER)) lines = stripInternalContextBlocks(lines);
-  if (text.includes(RUNTIME_CONTEXT_HEADER)) lines = stripRuntimeContextBlocks(lines);
-
-  // Trailing guidance paragraphs, from the end backwards.
-  const paragraphs = lines.join('\n').split(/\n[ \t]*\n/);
-  while (paragraphs.length > 0) {
-    const last = paragraphs[paragraphs.length - 1].trim();
-    if (last === '') { paragraphs.pop(); continue; }
-    if (paragraphs.length > 1 && TRAILING_GUIDANCE_OPENERS.some((o) => (last + '\n').startsWith(o))) {
-      paragraphs.pop();
-      continue;
-    }
-    break;
-  }
-  const out = paragraphs.join('\n\n').trim().replace(LEADING_TIMESTAMP_PREFIX, '');
-  return out.trim() === text.trim() ? text : out;
+  lines = stripTrailingTurnBoilerplate(lines);
+  if (text.includes(RUNTIME_CONTEXT_BEGIN_MARKER)) lines = stripLeadingInternalContextBlocks(lines);
+  const out = lines.join('\n').trim().replace(LEADING_TIMESTAMP_PREFIX, '').trim();
+  if (out === '') return text;
+  return out === text.trim() ? text : out;
 }
 
 /**
