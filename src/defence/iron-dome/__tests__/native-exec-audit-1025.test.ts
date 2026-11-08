@@ -13,7 +13,7 @@
  * strings only; no payload is executed, and no fixture is a runnable image
  * (the "native" files are a 64-byte ELF magic stub).
  */
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { spawnSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';
 import fs from 'node:fs';
@@ -32,6 +32,11 @@ import {
   classifyNativeProvenance,
   createNativeArtifactProbe,
   isNativeImageHeader,
+  MAX_PROBE_DIR_ENTRIES,
+  MAX_RECORDS_PER_PATH,
+  MAX_STORE_ROOT_ENTRIES,
+  NATIVE_PROBE_BUDGET_MS,
+  NATIVE_PROVENANCE_RECORD_CAP,
   pruneNativeProvenance,
   recordNativeArtifactCaptures,
   rulePProducer,
@@ -844,4 +849,394 @@ const HAS_MKFIFO = process.platform !== 'win32'
     mkfifo(stateDir);
     expectPrompt(probeInChild(opts(), './helper'), null);
   }, 30_000);
+});
+
+// -- Fold r2: planted VOLUME in the store must not stall the probe. Before
+// the fold the probe read every record-named file for a hash, once per
+// candidate spelling, so 50k empty files took a catastrophic deny past the
+// hook timeout (a hook that never answers is an allow). ----------------------
+
+/** Spy on every `opendirSync`: how many entries each listing read and
+ *  whether its handle was closed. `failAfter`: make `readSync` throw EIO once
+ *  that many entries have been read. */
+function watchDirs(failAfter?: number) {
+  const real = fs.opendirSync.bind(fs);
+  const dirs: Array<{ path: string; entries: number; closed: boolean }> = [];
+  jest.spyOn(fs, 'opendirSync').mockImplementation(((p: fs.PathLike, o?: fs.OpenDirOptions) => {
+    const d = real(p, o);
+    const rec = { path: String(p), entries: 0, closed: false };
+    dirs.push(rec);
+    const read = d.readSync.bind(d);
+    const close = d.closeSync.bind(d);
+    d.readSync = (() => {
+      if (failAfter !== undefined && rec.entries >= failAfter) {
+        throw Object.assign(new Error('EIO: injected'), { code: 'EIO' });
+      }
+      const e = read();
+      if (e) rec.entries++;
+      return e;
+    }) as typeof d.readSync;
+    d.closeSync = (() => { rec.closed = true; close(); }) as typeof d.closeSync;
+    return d;
+  }) as typeof fs.opendirSync);
+  return dirs;
+}
+
+/** Create `n` EMPTY files named `<prefix><i><suffix>` in `dir`. */
+function plantEmpty(dir: string, n: number, name: (i: number) => string): void {
+  for (let i = 0; i < n; i++) fs.closeSync(fs.openSync(path.join(dir, name(i)), 'w'));
+}
+
+/** Sixteen distinct tokens that all canonicalise to `<cwd>/helper`. */
+const SPELLINGS = Array.from({ length: 16 }, (_, i) => `${'./'.repeat(i + 1)}helper`);
+
+describe('#1025 fold r2 — store volume is bounded work, never a stall', () => {
+  let root: string;
+  let stateDir: string;
+  let work: string;
+  let dir: string;
+  const KEY = 'sc-0123456789abcdef';
+  const OTHER = 'sc-fedcba9876543210';
+
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-1025-volume-')));
+    stateDir = path.join(root, 'state');
+    work = path.join(root, 'work');
+    dir = path.join(stateDir, KEY);
+    fs.mkdirSync(work, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(work, 'helper'), ELF_STUB, { mode: 0o755 });
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const probe = (clock?: () => number) => createNativeArtifactProbe({ sessionKey: KEY, cwd: work, stateDir, home: root, clock });
+  const H = () => hashFor(KEY, path.join(work, 'helper'));
+  const record = (i: number, kind = 'agent-written') => JSON.stringify({ kind, preId: 'absent', at: i });
+  const writeRecords = (hash: string, n: number, body: (i: number) => string = record) => {
+    for (let i = 0; i < n; i++) fs.writeFileSync(path.join(dir, `${hash}.${i + 1}.ab`), body(i));
+  };
+
+  it('20k empty record-named files + 16 spellings: catastrophic decision unchanged, listing capped, no record read', () => {
+    writeRecords(H(), 1); // a genuine record the stuffing buries
+    plantEmpty(dir, 20_000, (i) => `${H()}.${i}.ff`);
+    // Assembled so the literal is not a command line in this file.
+    const command = [['rm', '-rf', '~'].join(' '), ...SPELLINGS].join(' ; ');
+    const base = evaluateToolCall('Bash', { command });
+    expect(base.decision).toBe('block');
+
+    const dirs = watchDirs();
+    const opens = jest.spyOn(fs, 'openSync');
+    const p = probe();
+    let calls = 0;
+    const counted = (t: string) => { calls++; return p(t); };
+    const started = Date.now();
+    const wired = evaluateToolCall('Bash', { command }, undefined, { nativeArtifactProvenance: counted });
+    const ms = Date.now() - started;
+
+    const { nativeExec, ...rest } = wired;
+    expect(rest).toEqual(base);
+    expect(nativeExec).toBeUndefined(); // an over-full directory is no evidence
+    expect(calls).toBeGreaterThanOrEqual(SPELLINGS.length); // every spelling reached the probe
+    expect(dirs).toHaveLength(1); // listed once for the whole call
+    expect(dirs[0].entries).toBe(MAX_PROBE_DIR_ENTRIES + 1); // stopped at the overflow sentinel
+    expect(dirs[0].closed).toBe(true);
+    expect(opens).not.toHaveBeenCalled(); // not one planted file opened
+    expect(ms).toBeLessThan(5_000); // generous: the unbounded probe took ~7 s here
+  });
+
+  it('listing boundary: exactly MAX_PROBE_DIR_ENTRIES entries is read; one more junk name makes the whole directory no evidence', () => {
+    writeRecords(H(), 1);
+    plantEmpty(dir, MAX_PROBE_DIR_ENTRIES - 1, (i) => `junk-${i}`);
+    expect(probe()('./helper')).toBe('agent-written');
+    fs.writeFileSync(path.join(dir, 'one-more-junk'), '');
+    const dirs = watchDirs();
+    expect(probe()('./helper')).toBeNull();
+    expect(dirs[0]).toEqual({ path: dir, entries: MAX_PROBE_DIR_ENTRIES + 1, closed: true });
+  });
+
+  it('per-path cap boundary: MAX_RECORDS_PER_PATH records classify; one more makes the WHOLE hash not observed', () => {
+    writeRecords(H(), MAX_RECORDS_PER_PATH);
+    const opens = jest.spyOn(fs, 'openSync');
+    expect(probe()('./helper')).toBe('agent-written');
+    expect(opens).toHaveBeenCalledTimes(MAX_RECORDS_PER_PATH + 1); // records + the artifact header
+
+    // One more ENTRY under the hash, even an empty one: not a partial read.
+    fs.writeFileSync(path.join(dir, `${H()}.999999.ab`), '');
+    opens.mockClear();
+    expect(probe()('./helper')).toBeNull();
+    expect(opens).not.toHaveBeenCalled();
+  });
+
+  it('per-hash memo: 16 spellings cost one read set, for a positive and for a null classification', () => {
+    writeRecords(H(), 10);
+    const opens = jest.spyOn(fs, 'openSync');
+    const p = probe();
+    for (const t of SPELLINGS) expect(p(t)).toBe('agent-written');
+    expect(opens).toHaveBeenCalledTimes(10 + 1);
+
+    // Records that do not parse: the null is remembered too.
+    for (const n of fs.readdirSync(dir)) fs.writeFileSync(path.join(dir, n), '{not json');
+    opens.mockClear();
+    const q = probe();
+    for (const t of SPELLINGS) expect(q(t)).toBeNull();
+    expect(opens).toHaveBeenCalledTimes(10);
+  });
+
+  it('16 spellings x MAX_RECORDS_PER_PATH empty files: one read set in total', () => {
+    plantEmpty(dir, MAX_RECORDS_PER_PATH, (i) => `${H()}.${i}.ab`);
+    const lstats = jest.spyOn(fs, 'lstatSync');
+    const p = probe();
+    for (const t of SPELLINGS) expect(p(t)).toBeNull();
+    const recordLstats = lstats.mock.calls.filter(([a]) => String(a).startsWith(`${dir}${path.sep}`));
+    expect(recordLstats).toHaveLength(MAX_RECORDS_PER_PATH);
+  });
+
+  describe('one budget per probe, shared by every candidate', () => {
+    const second = () => {
+      fs.writeFileSync(path.join(work, 'other'), ELF_STUB, { mode: 0o755 });
+      fs.writeFileSync(path.join(work, 'third'), ELF_STUB, { mode: 0o755 });
+      writeRecords(hashFor(KEY, path.join(work, 'other')), 1);
+      writeRecords(hashFor(KEY, path.join(work, 'third')), 1);
+    };
+
+    it('starts at first use (not creation) and spans distinct candidates; past it, a valid path is null', () => {
+      writeRecords(H(), 1);
+      second();
+      let t = 0;
+      const p = probe(() => t);
+      t = 10_000; // long after creation: the budget has not started yet
+      expect(p('./helper')).toBe('agent-written');
+      t = 10_000 + NATIVE_PROBE_BUDGET_MS - 1;
+      expect(p('./other')).toBe('agent-written');
+      t = 10_000 + NATIVE_PROBE_BUDGET_MS + 1;
+      expect(p('./third')).toBeNull();
+      // A fresh probe (the next call) has its own budget.
+      expect(probe(() => t)('./third')).toBe('agent-written');
+    });
+
+    it('is enforced during the listing: the handle is still closed and no record is opened', () => {
+      writeRecords(H(), 1);
+      let n = 0;
+      const clock = () => (n++ < 2 ? 0 : 1_000_000); // spent right after the probe starts
+      const dirs = watchDirs();
+      const opens = jest.spyOn(fs, 'openSync');
+      expect(probe(clock)('./helper')).toBeNull();
+      expect(dirs).toEqual([{ path: dir, entries: 0, closed: true }]);
+      expect(opens).not.toHaveBeenCalled();
+    });
+
+    it('is enforced during path resolution', () => {
+      writeRecords(H(), 1);
+      let t = 0;
+      const realpath = fs.realpathSync;
+      const rp = jest.spyOn(fs, 'realpathSync').mockImplementation(((p: fs.PathLike) => {
+        t = 1_000_000; // the first lookup spends the budget
+        return realpath(p);
+      }) as typeof fs.realpathSync);
+      // `a/b/c` does not exist, so resolution walks up one lookup at a time.
+      expect(probe(() => t)('./a/b/c/helper')).toBeNull();
+      expect(rp).toHaveBeenCalledTimes(1);
+    });
+
+    it('is enforced between record reads', () => {
+      writeRecords(H(), 10);
+      let t = 0;
+      const open = fs.openSync;
+      const opens = jest.spyOn(fs, 'openSync').mockImplementation(((...a: Parameters<typeof fs.openSync>) => {
+        t = 1_000_000; // the first record read spends the budget
+        return open(...a);
+      }) as typeof fs.openSync);
+      expect(probe(() => t)('./helper')).toBeNull();
+      expect(opens).toHaveBeenCalledTimes(1);
+    });
+
+    it('is rechecked after a SUCCESSFUL resolution: a spent budget beats a memo hit', () => {
+      writeRecords(H(), 1);
+      let t = 0;
+      const p = probe(() => t);
+      expect(p('./helper')).toBe('agent-written'); // classified and memoised in budget
+      const realpath = fs.realpathSync;
+      const rp = jest.spyOn(fs, 'realpathSync').mockImplementation(((q: fs.PathLike) => {
+        const real = realpath(q);
+        t = 1_000_000; // this lookup succeeds, but spends the budget
+        return real;
+      }) as typeof fs.realpathSync);
+      const opens = jest.spyOn(fs, 'openSync');
+      expect(p('././helper')).toBeNull(); // same hash, memoised 'agent-written'
+      expect(rp).toHaveBeenCalledTimes(1);
+      expect(opens).not.toHaveBeenCalled();
+    });
+
+    it('is rechecked after the artifact header read: the final syscall spending the budget is null', () => {
+      writeRecords(H(), 1);
+      // Control: the same store, in budget, classifies.
+      expect(probe(() => 0)('./helper')).toBe('agent-written');
+
+      let t = 0;
+      let n = 0;
+      const open = fs.openSync;
+      const opens = jest.spyOn(fs, 'openSync').mockImplementation(((...a: Parameters<typeof fs.openSync>) => {
+        if (++n === 2) t = 1_000_000; // open 1 is the record, open 2 the artifact header
+        return open(...a);
+      }) as typeof fs.openSync);
+      const p = probe(() => t);
+      expect(p('./helper')).toBeNull();
+      expect(opens).toHaveBeenCalledTimes(2);
+      expect(String(opens.mock.calls[1][0])).toBe(path.join(work, 'helper'));
+      // And it stays null: no later spelling reclassifies or reads again.
+      expect(p('././helper')).toBeNull();
+      expect(opens).toHaveBeenCalledTimes(2);
+    });
+
+    it('a clock that throws or returns NaN is a spent budget, never a throw', () => {
+      writeRecords(H(), 1);
+      expect(probe(() => { throw new Error('clock'); })('./helper')).toBeNull();
+      expect(probe(() => Number.NaN)('./helper')).toBeNull();
+    });
+  });
+
+  it('directory errors: an unreadable listing is null and its handle is closed; an unopenable one is null', () => {
+    writeRecords(H(), 1);
+    plantEmpty(dir, 10, (i) => `junk-${i}`);
+    const dirs = watchDirs(3);
+    expect(probe()('./helper')).toBeNull();
+    expect(dirs).toEqual([{ path: dir, entries: 3, closed: true }]);
+    jest.restoreAllMocks();
+
+    jest.spyOn(fs, 'opendirSync').mockImplementation((() => {
+      throw Object.assign(new Error('EACCES: injected'), { code: 'EACCES' });
+    }) as typeof fs.opendirSync);
+    expect(probe()('./helper')).toBeNull();
+    expect(recordNativeArtifactCaptures({ sessionKey: KEY, captures: [{ token: 'helper', kind: 'agent-written' }], cwd: work, stateDir, home: root })).toBe(0);
+    expect(pruneNativeProvenance({ stateDir })).toBeNull();
+  });
+
+  it('record side: a stuffed session directory is listed to the record cap plus one overflow sentinel and nothing is published', () => {
+    const cap = () => recordNativeArtifactCaptures({
+      sessionKey: KEY, captures: [{ token: 'new', kind: 'agent-written' }], cwd: work, stateDir, home: root,
+    });
+    plantEmpty(dir, NATIVE_PROVENANCE_RECORD_CAP - 1, (i) => `junk-${i}`);
+    expect(cap()).toBe(1); // one slot left
+    expect(cap()).toBe(0); // exactly at the cap
+
+    plantEmpty(dir, 20_000, (i) => `more-${i}`);
+    const dirs = watchDirs();
+    const started = Date.now();
+    expect(cap()).toBe(0);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(dirs).toEqual([{ path: dir, entries: NATIVE_PROVENANCE_RECORD_CAP + 1, closed: true }]);
+  });
+
+  it('record side: a stuffed store root is listed to its cap plus one overflow sentinel; nothing is swept and no NEW session is created, while an existing session keeps recording', () => {
+    const stale = path.join(stateDir, 'sc-aaaaaaaaaaaaaaaa');
+    fs.mkdirSync(stale);
+    makeStale(stale);
+    plantEmpty(stateDir, MAX_STORE_ROOT_ENTRIES, (i) => `junk-${i}`);
+    const dirs = watchDirs();
+    expect(recordNativeArtifactCaptures({
+      sessionKey: OTHER, captures: [{ token: 'helper', kind: 'agent-written' }], cwd: work, stateDir, home: root,
+    })).toBe(0);
+    expect(dirs).toEqual([{ path: stateDir, entries: MAX_STORE_ROOT_ENTRIES + 1, closed: true }]);
+    expect(fs.existsSync(stale)).toBe(true); // over-full root: nothing removed
+    expect(fs.existsSync(path.join(stateDir, OTHER))).toBe(false);
+
+    // The session that already has its directory never lists the root, so it
+    // keeps recording (bounded by its own record cap).
+    dirs.length = 0;
+    expect(recordNativeArtifactCaptures({
+      sessionKey: KEY, captures: [{ token: 'helper', kind: 'agent-written' }], cwd: work, stateDir, home: root,
+    })).toBe(1);
+    expect(dirs).toEqual([{ path: dir, entries: 0, closed: true }]);
+    expect(fs.existsSync(stale)).toBe(true);
+  });
+});
+
+describe('#1025 fold r2 — the store is refused when another uid owns it', () => {
+  let root: string;
+  let stateDir: string;
+  let work: string;
+  const KEY = 'sc-0123456789abcdef';
+  const NEW = 'sc-fedcba9876543210';
+  const HAS_GETUID = typeof process.getuid === 'function';
+
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-1025-uid-')));
+    stateDir = path.join(root, 'state');
+    work = path.join(root, 'work');
+    fs.mkdirSync(work, { recursive: true });
+    fs.mkdirSync(path.join(stateDir, KEY), { recursive: true });
+    fs.writeFileSync(path.join(stateDir, KEY, `${hashFor(KEY, path.join(work, 'helper'))}.1.ab`), VALID_RECORD);
+    fs.writeFileSync(path.join(work, 'helper'), ELF_STUB, { mode: 0o755 });
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  /** lstat reports `foreign` paths as owned by a different uid. */
+  const foreignOwner = (...foreign: string[]) => {
+    const real = fs.lstatSync;
+    jest.spyOn(fs, 'lstatSync').mockImplementation(((p: fs.PathLike, o?: fs.StatSyncOptions) => {
+      const st = real(p, o as never) as fs.Stats;
+      if (!foreign.includes(String(p))) return st;
+      const fake = Object.create(Object.getPrototypeOf(st)) as fs.Stats;
+      return Object.assign(fake, st, { uid: st.uid + 1 });
+    }) as typeof fs.lstatSync);
+  };
+  const probe = () => createNativeArtifactProbe({ sessionKey: KEY, cwd: work, stateDir, home: root });
+  const record = (key: string) => recordNativeArtifactCaptures({
+    sessionKey: key, captures: [{ token: 'helper2', kind: 'agent-written' }], cwd: work, stateDir, home: root,
+  });
+
+  it('control: owned by this uid, the store is read and written', () => {
+    expect(probe()('./helper')).toBe('agent-written');
+    expect(record(KEY)).toBe(1);
+  });
+
+  (HAS_GETUID ? it : it.skip)('another uid owns the ROOT: nothing read, recorded or swept', () => {
+    const stale = path.join(stateDir, 'sc-aaaaaaaaaaaaaaaa');
+    fs.mkdirSync(stale);
+    makeStale(stale);
+    foreignOwner(stateDir);
+    expect(probe()('./helper')).toBeNull();
+    expect(record(KEY)).toBe(0);
+    expect(record(NEW)).toBe(0);
+    expect(pruneNativeProvenance({ stateDir })).toBeNull();
+    expect(fs.existsSync(stale)).toBe(true);
+  });
+
+  (HAS_GETUID ? it : it.skip)('another uid owns the SESSION directory: its records are not evidence and nothing is written into it', () => {
+    const before = fs.readdirSync(path.join(stateDir, KEY));
+    foreignOwner(path.join(stateDir, KEY));
+    expect(probe()('./helper')).toBeNull();
+    expect(record(KEY)).toBe(0);
+    expect(fs.readdirSync(path.join(stateDir, KEY))).toEqual(before);
+  });
+
+  (HAS_GETUID ? it : it.skip)('the sweep removes only stale session directories this uid owns', () => {
+    const mine = path.join(stateDir, 'sc-aaaaaaaaaaaaaaaa');
+    const theirs = path.join(stateDir, 'sc-bbbbbbbbbbbbbbbb');
+    for (const d of [mine, theirs]) { fs.mkdirSync(d); makeStale(d); }
+    foreignOwner(theirs);
+    expect(pruneNativeProvenance({ stateDir })).toBe(1); // KEY is live; theirs is not counted
+    expect(fs.existsSync(mine)).toBe(false);
+    expect(fs.existsSync(theirs)).toBe(true);
+  });
+
+  it('no process.getuid (Windows): ownership is not checked', () => {
+    foreignOwner(stateDir, path.join(stateDir, KEY));
+    const getuid = Object.getOwnPropertyDescriptor(process, 'getuid');
+    Object.defineProperty(process, 'getuid', { value: undefined, configurable: true, writable: true });
+    try {
+      expect(probe()('./helper')).toBe('agent-written');
+      expect(record(KEY)).toBe(1);
+    } finally {
+      if (getuid) Object.defineProperty(process, 'getuid', getuid);
+      else delete (process as { getuid?: unknown }).getuid;
+    }
+    expect(typeof process.getuid).toBe(HAS_GETUID ? 'function' : 'undefined');
+  });
 });

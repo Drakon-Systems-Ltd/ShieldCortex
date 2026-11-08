@@ -31,6 +31,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 
 // -- Types --------------------------------------------------------------------
 
@@ -87,6 +88,29 @@ export const NATIVE_HEADER_BYTES = 64;
 /** A record body is ~130 bytes of JSON; anything larger is not one of ours
  *  and is not read past this many bytes. */
 export const MAX_RECORD_BYTES = 512;
+/** Entries the probe lists from a session directory, of ANY name (records,
+ *  in-flight `.tmp` names, junk). The hook never publishes past
+ *  `NATIVE_PROVENANCE_RECORD_CAP`; the slack covers in-flight temp names. A
+ *  directory with more entries was stuffed by something else and is no
+ *  evidence at all, so a planted volume costs a bounded listing, not a
+ *  read per planted file. */
+export const MAX_PROBE_DIR_ENTRIES = NATIVE_PROVENANCE_RECORD_CAP + 256;
+/** Record entries read for one path hash. A hash with more is "not observed"
+ *  as a whole — never classified on a partial read. The cost: a path written
+ *  or compiled more than this many times in one session is not logged. */
+export const MAX_RECORDS_PER_PATH = 128;
+/** Entries the sweep lists from the store root. At most
+ *  `MAX_NATIVE_PROVENANCE_SESSIONS` live sessions are ever created and
+ *  expired ones are swept when a session starts, so a root with more entries
+ *  was stuffed by something else: nothing in it is swept and no NEW session
+ *  is created (a new session's first record needs a sweep that succeeds).
+ *  A session that already has its directory keeps recording, bounded by
+ *  `NATIVE_PROVENANCE_RECORD_CAP`, since that path never lists the root. */
+export const MAX_STORE_ROOT_ENTRIES = 4 * MAX_NATIVE_PROVENANCE_SESSIONS;
+/** Wall-clock budget, in ms, for one probe — every candidate of one
+ *  evaluated call shares it, from the probe's first use. Past it every
+ *  remaining lookup is "not observed". */
+export const NATIVE_PROBE_BUDGET_MS = 250;
 
 /** Both planes key sessions as `sc-` + 16 hex (session-guard.ts sessionKeyFor,
  *  scripts/pre-tool-hook.mjs). Anything else is refused, so a key can never be
@@ -340,6 +364,23 @@ const FINAL_RE = /^([0-9a-f]{64})\.\d+\.[0-9a-f]+$/;
 // SHIELDCORTEX_CONFIG_DIR) are trusted as for every other state file there.
 // The probe's output, raced or not, only labels a log row and never changes a
 // decision.
+//
+// Volume: the agent can also fill the store with ordinary files. Every
+// listing is an `opendir` iterated against a hard entry cap (an over-full
+// session directory is no evidence and nothing more is recorded into it; an
+// over-full root is not swept and no new session is created in it, while a
+// session already there keeps recording up to its own cap), the probe reads
+// at most `MAX_RECORDS_PER_PATH` entries per path hash and classifies each
+// hash once per call (each spelling is still resolved), and the whole probe
+// of one call shares one `NATIVE_PROBE_BUDGET_MS` budget. The budget is checked between filesystem
+// operations: a single synchronous call that itself blocks (a hung network
+// filesystem, say) cannot be interrupted, so it bounds the work, not the
+// latency of any one syscall.
+//
+// Ownership: where the platform has `process.getuid` (not Windows), the root
+// and the session directory must be owned by this uid, and the sweep only
+// removes session directories this uid owns — a store under a shared
+// SHIELDCORTEX_CONFIG_DIR cannot feed another uid's records into a label.
 
 /** The store root as a lexical absolute path with no trailing separator, or
  *  `null` for an empty path. `lstat('link/')` resolves the link (a trailing
@@ -353,12 +394,47 @@ function storeRoot(stateDir: string | undefined): string | null {
   return typeof raw === 'string' && raw !== '' ? path.resolve(raw) : null;
 }
 
-/** True only for a real directory: not a symlink, not a special file. */
+/** True when `st` is owned by this process's uid, or the platform has no
+ *  `process.getuid` (Windows), where ownership is not checked. */
+function ownedByThisUid(st: fs.Stats): boolean {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  return uid === undefined || st.uid === uid;
+}
+
+/** True only for a real directory owned by this uid: not a symlink, not a
+ *  special file, not another user's directory. */
 function isRealDirectory(p: string): boolean {
   try {
-    return fs.lstatSync(p).isDirectory();
+    const st = fs.lstatSync(p);
+    return st.isDirectory() && ownedByThisUid(st);
   } catch {
     return false;
+  }
+}
+
+/** The entry names of `dir`, read with `opendir` and never more than `max` of
+ *  them, or `null`: more than `max` entries (the overflow sentinel — every
+ *  name counts, record-shaped or not), `expired()` became true, or the
+ *  directory could not be opened or read. The handle is always closed. The
+ *  whole directory is never materialised. Never throws. */
+function listDirBounded(dir: string, max: number, expired?: () => boolean): string[] | null {
+  let d: fs.Dir | null = null;
+  try {
+    d = fs.opendirSync(dir);
+    const names: string[] = [];
+    for (;;) {
+      if (expired && (names.length & 63) === 0 && expired()) return null;
+      const e = d.readSync();
+      if (e === null) return names;
+      if (names.length >= max) return null;
+      names.push(e.name);
+    }
+  } catch {
+    return null;
+  } finally {
+    if (d !== null) {
+      try { d.closeSync(); } catch { /* best effort */ }
+    }
   }
 }
 
@@ -477,7 +553,7 @@ export function recordNativeArtifactCaptures(opts: {
       if (!isRealDirectory(root)) return 0;
     }
 
-    let existing: string[];
+    let existing: string[] | null;
     let sessionPresent = true;
     try {
       fs.lstatSync(dir);
@@ -485,12 +561,13 @@ export function recordNativeArtifactCaptures(opts: {
       sessionPresent = false;
     }
     if (sessionPresent) {
-      if (!isRealDirectory(dir)) return 0; // a planted link or special file
-      try {
-        existing = fs.readdirSync(dir);
-      } catch {
-        return 0;
-      }
+      if (!isRealDirectory(dir)) return 0; // a planted link, special file or another uid's
+      // Bounded: past the record cap there is no room anyway, so the listing
+      // reads at most the cap's worth of entries plus one overflow sentinel
+      // (any entry past the cap → nothing recorded) instead of reading a
+      // stuffed directory whole.
+      existing = listDirBounded(dir, NATIVE_PROVENANCE_RECORD_CAP);
+      if (existing === null) return 0;
     } else {
       // First record of this session: the one moment a sweep is paid for, so
       // the hot path never lists the whole store.
@@ -528,58 +605,114 @@ export function recordNativeArtifactCaptures(opts: {
  * The per-call probe the evaluator receives as
  * `ToolGuardOptions.nativeArtifactProvenance`: given a path token the command
  * runs, loads or names, the provenance to put on the audit row, or `null`.
- * The session's record directory is listed at most once per call, lazily, and
- * only a path with a record is stat'd and header-read. Never throws.
+ * The session's record directory is listed at most once per call, lazily,
+ * and only a path with a record is stat'd and header-read.
+ *
+ * Bounded whatever the store holds: the listing stops at
+ * `MAX_PROBE_DIR_ENTRIES` (over-full → no evidence for any path), a path
+ * hash with more than `MAX_RECORDS_PER_PATH` entries is not observed, each
+ * hash is classified at most once per probe (each spelling is still
+ * resolved, but `./x`, `././x`, … cost one read set; a `null` is remembered
+ * too), and every lookup of this probe
+ * shares one `NATIVE_PROBE_BUDGET_MS` budget that starts at its first use and
+ * is checked during the listing, the indexing, path resolution, between
+ * record reads, after resolution (before a remembered answer is returned) and
+ * after the final header read. Past the budget the answer is `null`, even for
+ * a hash already classified. Never throws.
+ *
+ * `clock` is a monotonic millisecond clock, `performance.now` by default.
  */
 export function createNativeArtifactProbe(opts: {
   sessionKey: string;
   cwd: string | undefined;
   stateDir?: string;
   home?: string;
+  clock?: () => number;
 }): (token: string) => NativeArtifactProvenance | null {
   const root = storeRoot(opts.stateDir);
   const valid = root !== null && SESSION_KEY_RE.test(String(opts.sessionKey ?? ''));
   const dir = path.join(root ?? '_', valid ? opts.sessionKey : '_');
   const home = opts.home ?? os.homedir();
-  let byHash: Map<string, string[]> | null = null;
-  const listing = (): Map<string, string[]> => {
-    if (byHash) return byHash;
-    const map = new Map<string, string[]>();
-    byHash = map;
-    let names: string[] = [];
+  const clock = typeof opts.clock === 'function' ? opts.clock : () => performance.now();
+  let deadline: number | null = null;
+  /** True once the shared budget is spent (or the clock misbehaves). */
+  const expired = (): boolean => {
     try {
-      // Nothing is listed or read through a planted link or special file.
-      names = root !== null && isRealDirectory(root) && isRealDirectory(dir) ? fs.readdirSync(dir) : [];
+      return deadline === null || !(clock() <= deadline);
     } catch {
-      names = [];
+      return true;
     }
-    for (const n of names) {
-      const m = n.match(FINAL_RE);
+  };
+  /** realpath that refuses once the budget is spent; `canonicalTarget` then
+   *  answers `null` (a non-ENOENT failure). */
+  const realpathInBudget: Realpath = (p: string) => {
+    if (expired()) throw Object.assign(new Error('native provenance probe budget spent'), { code: 'ETIMEDOUT' });
+    return fs.realpathSync(p);
+  };
+  // Path hash → its record names, or `null` for a hash over the per-path cap.
+  let byHash: Map<string, string[] | null> | null = null;
+  const memo = new Map<string, NativeArtifactProvenance | null>();
+  const listing = (): Map<string, string[] | null> => {
+    if (byHash) return byHash;
+    const empty = new Map<string, string[] | null>();
+    byHash = empty;
+    // Nothing is listed or read through a planted link, special file or
+    // another uid's directory; an over-full, unreadable or out-of-time
+    // listing is no evidence.
+    const names = root !== null && isRealDirectory(root) && isRealDirectory(dir)
+      ? listDirBounded(dir, MAX_PROBE_DIR_ENTRIES, expired)
+      : null;
+    if (names === null) return empty;
+    const map = new Map<string, string[] | null>();
+    for (let i = 0; i < names.length; i++) {
+      if ((i & 255) === 0 && expired()) return empty;
+      const m = FINAL_RE.exec(names[i]);
       if (!m) continue;
       const list = map.get(m[1]);
-      if (list) list.push(n);
-      else map.set(m[1], [n]);
+      if (list === null) continue; // already over the per-path cap
+      if (list === undefined) map.set(m[1], [names[i]]);
+      else if (list.length >= MAX_RECORDS_PER_PATH) map.set(m[1], null);
+      else list.push(names[i]);
     }
+    byHash = map;
     return map;
+  };
+  const classify = (names: string[] | null | undefined, canon: string): NativeArtifactProvenance | null => {
+    if (!names) return null; // no record, or over the per-path cap
+    const records: NativeArtifactRecord[] = [];
+    for (const n of names) {
+      if (expired()) return null;
+      // Not a small regular file (a planted FIFO, link, directory, an
+      // oversized file) or unreadable: not evidence.
+      const raw = readRecordFile(path.join(dir, n));
+      const r = raw === null ? null : parseRecordBody(raw);
+      if (r) records.push(r);
+    }
+    if (records.length === 0 || expired()) return null;
+    const current = statContentId(canon);
+    if (expired()) return null;
+    const header = readArtifactHeader(canon);
+    // The header read is the last syscall: if it spent the budget, the
+    // answer is still "not observed".
+    if (expired()) return null;
+    return classifyNativeProvenance(records, current, header);
   };
   return (token: string) => {
     try {
       if (!valid) return null;
+      if (deadline === null) deadline = clock() + NATIVE_PROBE_BUDGET_MS;
+      if (expired()) return null;
       const map = listing();
       if (map.size === 0) return null;
-      const canon = canonicalTarget(token, opts.cwd, home, realpathThrowing);
-      if (canon === null) return null;
-      const names = map.get(pathHashFor(opts.sessionKey, canon));
-      if (!names) return null;
-      const records: NativeArtifactRecord[] = [];
-      for (const n of names) {
-        // Not a small regular file (a planted FIFO, link, directory, an
-        // oversized file) or unreadable: not evidence.
-        const raw = readRecordFile(path.join(dir, n));
-        const r = raw === null ? null : parseRecordBody(raw);
-        if (r) records.push(r);
-      }
-      return classifyNativeProvenance(records, statContentId(canon), readArtifactHeader(canon));
+      const canon = canonicalTarget(token, opts.cwd, home, realpathInBudget);
+      // Rechecked after a resolution that SUCCEEDED too: its last lookup may
+      // have spent the budget, and then even a remembered answer is null.
+      if (canon === null || expired()) return null;
+      const hash = pathHashFor(opts.sessionKey, canon);
+      if (memo.has(hash)) return memo.get(hash) ?? null;
+      const result = classify(map.get(hash), canon);
+      memo.set(hash, result);
+      return result;
     } catch {
       return null;
     }
@@ -591,9 +724,11 @@ export function createNativeArtifactProbe(opts: {
  * many live (unexpired) session directories remain, or `null` when the root is
  * not a real directory or cannot be listed (then nothing is touched).
  *
- * Selection: only entries that lstat as real directories (not a link) named
- * like a session key whose last activity is older than the TTL are chosen for
- * removal. Every other name, link, file or special file present at the lstat
+ * Selection: only entries that lstat as real directories (not a link) owned
+ * by this uid (where the platform has `getuid`), named like a session key,
+ * whose last activity is older than the TTL are chosen for removal. A root
+ * with more than `MAX_STORE_ROOT_ENTRIES` entries is listed no further and
+ * nothing in it is touched (`null`). Every other name, link, file or special file present at the lstat
  * is left as it is, and a live session is never evicted for room — the
  * session cap is enforced by not recording a new session instead. A doomed
  * directory is renamed away before deletion so a reader sees all of a
@@ -612,12 +747,10 @@ export function pruneNativeProvenance(opts: {
     const now = opts.now ?? Date.now();
     const ttlMs = opts.ttlMs ?? NATIVE_PROVENANCE_TTL_MS;
     if (root === null || !isRealDirectory(root)) return null;
-    let names: string[];
-    try {
-      names = fs.readdirSync(root);
-    } catch {
-      return null;
-    }
+    // Listed whole (bounded) before anything is removed: an over-full or
+    // unreadable root is left exactly as it is.
+    const names = listDirBounded(root, MAX_STORE_ROOT_ENTRIES);
+    if (names === null) return null;
     let live = 0;
     for (const name of names) {
       if (!SESSION_KEY_RE.test(name)) continue;
@@ -628,7 +761,7 @@ export function pruneNativeProvenance(opts: {
       } catch {
         continue;
       }
-      if (!st.isDirectory()) continue;
+      if (!st.isDirectory() || !ownedByThisUid(st)) continue;
       if (now - st.mtimeMs <= ttlMs) {
         live++;
         continue;

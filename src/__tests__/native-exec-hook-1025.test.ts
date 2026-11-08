@@ -172,6 +172,33 @@ describe('#1025 native-exec observation through the real Claude Code hook', () =
     expect(a.code).toBe(b.code);
   }, 30_000);
 
+  it('20k empty record-named files planted beside a real record cannot stall the hook: 16 spellings of a catastrophic call are still denied', async () => {
+    await plant('helper');
+    // Learn the record name prefix exactly as the agent could (`ls`), then
+    // stuff the session directory with empty files under the same path hash.
+    const store = path.join(recorded.configDir, 'native-provenance');
+    const [sessionDir] = fs.readdirSync(store);
+    const dir = path.join(store, sessionDir);
+    const [rec] = fs.readdirSync(dir);
+    const hash = rec.split('.')[0];
+    for (let i = 0; i < 20_000; i++) fs.closeSync(fs.openSync(path.join(dir, `${hash}.${i}.ab`), 'w'));
+
+    // Sixteen distinct spellings of one path. Assembled: this file is scanned
+    // by the guard it drives.
+    const spellings = Array.from({ length: 16 }, (_, i) => `${'./'.repeat(i + 1)}helper`);
+    const command = [['rm', '-rf', '~'].join(' '), ...spellings].join(' ; ');
+    const started = Date.now();
+    const a = await call(recorded, 'Bash', { command }, 8000);
+    const ms = Date.now() - started;
+    const b = await call(control, 'Bash', { command }, 8000);
+    expect(a.timedOut).toBeUndefined();
+    expect(b.timedOut).toBeUndefined();
+    expect(JSON.parse(a.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(a.stdout).toBe(b.stdout);
+    expect(a.code).toBe(b.code);
+    expect(ms).toBeLessThan(5000); // generous; the unbounded probe took ~7 s for this plant
+  }, 60_000);
+
   it('no session id: nothing recorded, nothing observed (current behaviour)', async () => {
     const payload = (tool_name: string, tool_input: Record<string, unknown>) => ({ cwd: recorded.work, hook_event_name: 'PreToolUse', permission_mode: 'default', tool_name, tool_input });
     await runHook(payload('Write', { file_path: path.join(recorded.work, 'helper'), content: 'x' }), recorded.env);
