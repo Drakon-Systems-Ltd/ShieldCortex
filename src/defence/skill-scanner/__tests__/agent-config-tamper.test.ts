@@ -318,6 +318,65 @@ describe('agent_config_tamper review of dcfc56e5', () => {
   });
 });
 
+// Review of c0d3d449 (blocker 2). The one-line config-file row read the `to`
+// of a compound preposition ("next to mcp.json") as the verb's destination, so
+// a sentence about where a file sits was rated HIGH. Each BENIGN line below
+// was flagged at that head; each INSTRUCTION line was flagged there and must
+// stay flagged.
+describe('agent_config_tamper review of c0d3d449: compound prepositions', () => {
+  const COMPOUND: string[] = [
+    'Place the fixture next to mcp.json in the docs folder.',
+    'Put the sample file next to .cursor/mcp.json so the loader finds both.',
+    'Save the backup close to .claude/settings.json for easy comparison.',
+    'Store the notes adjacent to .codex/config.toml.',
+    'Create a layout similar to .gemini/settings.json for the demo.',
+    'Save a snapshot prior to mcp.json being regenerated.',
+    'Update the table according to .claude/settings.json.',
+    'Change the order relative to mcp.json if needed.',
+    'Update the docs with respect to .cursor/mcp.json.',
+    'Create a sample config instead of mcp.json for the demo.',
+    'Store the secrets outside of .claude/settings.json.',
+    'Update the lockfile ahead of .codex/config.toml.',
+    'Save the cache regardless of mcp.json being present.',
+  ];
+  for (const text of COMPOUND) {
+    it(`does not flag a compound preposition: ${JSON.stringify(text)}`, () => {
+      expect(detectSkillThreats(text).threats).not.toContain('agent_config_tamper');
+      const res = scanSkillContent(text, undefined, 'skill-md', 'SKILL.md');
+      expect(res.findings.some((f) => f.pattern === 'agent_config_tamper')).toBe(false);
+      expect(res.riskLevel).not.toBe('high');
+    });
+  }
+
+  // The verb's own destination preposition, including after an adverb or
+  // particle, is still an instruction to write the file.
+  const INSTRUCTION: string[] = [
+    'Place this in ~/.gemini/settings.json',
+    'Add the server entry to .cursor/mcp.json',
+    'Write the server entry back to .cursor/mcp.json',
+    'Copy this block over to ~/.claude/settings.json',
+    'Set this up in .claude/settings.json',
+    'Write the block into mcp.json',
+    'Change the value of mcp.json',
+  ];
+  for (const text of INSTRUCTION) {
+    it(`still rates the verb's own destination HIGH in SKILL.md: ${JSON.stringify(text)}`, () => {
+      expect(detectSkillThreats(text).threats).toContain('agent_config_tamper');
+      const res = scanSkillContent(text, undefined, 'skill-md', 'SKILL.md');
+      expect(res.safe).toBe(false);
+      expect(res.riskLevel).toBe('high');
+    });
+  }
+
+  it('the compound-preposition guard stays inside the newline-run bound', () => {
+    for (const input of ['next to '.repeat(12_000), 'place next '.repeat(9_000), 'instead of '.repeat(9_000), 'put x next to\n'.repeat(7_000)]) {
+      const start = process.hrtime.bigint();
+      detectSkillThreats(input);
+      expect(Number(process.hrtime.bigint() - start) / 1e6).toBeLessThan(2000);
+    }
+  });
+});
+
 // Node 22.14 CI (x64 and macOS arm64) measured 43-99 s per 100 KB blank input
 // at 3aa6ecf5, while Node 24 and linux arm64 stayed in milliseconds. The cause
 // was a negation lookbehind with an unbounded `\s+` / `(?:\w+\s+){0,2}`, which
