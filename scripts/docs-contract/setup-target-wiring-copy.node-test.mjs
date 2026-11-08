@@ -106,9 +106,11 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 const helpInstallParagraph = () => between(
   between(read('src', 'cli', 'setup-dispatch.ts'), 'export const SETUP_HELP = `', '`;'),
   'install is the Claude Code install', 'quickstart [target]');
+// The setup paragraph lives in docs/INSTALL.md (the README links to it from
+// its Install section); the contract follows the copy, not the file.
 const readmeSetupParagraph = () => {
-  const para = read('README.md').split('\n').find((l) => l.startsWith('`setup` is the onboarding command:'));
-  assert.ok(para, 'README setup paragraph not found');
+  const para = read('docs', 'INSTALL.md').split('\n').find((l) => l.startsWith('`setup` is the onboarding command:'));
+  assert.ok(para, 'docs/INSTALL.md setup paragraph not found');
   return para;
 };
 
@@ -132,12 +134,12 @@ function assertHelpSettingsBackup(para) {
     'help does not say the Claude Code hooks file keeps a .bak-shieldcortex sibling');
 }
 
-/** The README setup paragraph names every inventory path in backticks. */
+/** The docs/INSTALL.md setup paragraph names every inventory path in backticks. */
 function assertReadmeNamesInstallPaths(para) {
   for (const p of CLAUDE_INSTALL_PATHS) assert.ok(para.includes('`' + p + '`'), `README missing ${p}`);
 }
 
-/** The README names the settings backup sibling by path, scoped to a replace. */
+/** docs/INSTALL.md names the settings backup sibling by path, scoped to a replace. */
 function assertReadmeSettingsBackup(para) {
   assert.ok(para.includes('`' + CLAUDE_SETTINGS_FILE + '` and `' + CLAUDE_SETTINGS_BACKUP + '` if it replaces the file'),
     `README missing ${CLAUDE_SETTINGS_BACKUP} next to ${CLAUDE_SETTINGS_FILE}`);
@@ -290,7 +292,7 @@ describe('src/index.ts top-level --help setup entry', () => {
 });
 
 describe('docs: the targeted form is described as wiring without asking', () => {
-  it('README.md install section names the files setup claude can write', () => {
+  it('docs/INSTALL.md (linked from the README install section) names the files setup claude can write', () => {
     const para = readmeSetupParagraph();
     assert.match(para, /runs the Claude Code install without asking/);
     assertReadmeNamesInstallPaths(para);

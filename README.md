@@ -39,12 +39,43 @@ That string was caught and quarantined. Nothing was stored as a memory, and the 
 ![ShieldCortex catching an injection scan](assets/demo.gif)
 -->
 
-## What you get
+## What it does
 
-- **Memory firewall.** ShieldCortex does not replace OpenClaw, Hermes, or Claude memory. Writes that go through it are scanned before they stick. Recognised injection and leaked credentials are quarantined or blocked.
-- **Tool gate.** On Claude Code, OpenClaw, and Hermes, once Action Guard is on, a trusted task runs, a suspicious call gets a plain-English card, and a catastrophic command is a hard stop. When nobody is at a prompt, the denial or held request sent to your Action Guard webhook now carries a readable card (5.18+): what, why, who and the exact `shieldcortex approve` command, never the raw command or a credential. [What's new in 5.18](docs/UPDATING.md#whats-new-in-518).
-- **Agent config watch.** At each fresh Claude Code startup, ShieldCortex checks the hooks, MCP servers and similar settings in Claude Code, OpenClaw, Cursor, Codex and Gemini CLI (5.17+) configs, and agent instruction files planted in drop folders such as `~/Downloads`, and sends one notification to your Action Guard webhook when one changed outside ShieldCortex. It detects and reports; it does not block, and it is not live. [What's new in 5.17](docs/UPDATING.md#whats-new-in-517), [limits](docs/security/agent-config-watch.md).
-- **Inspect.** `shieldcortex dashboard` is a local view: Home, Needs you, Memory, Protection, Settings. The Skill & package scanner (formerly X-Ray) is a Protection tab. Memory has Search & browse, Map, Recall, Needs a check, Timeline, Replay, and Files. Needs you lists held-back items, memory pairs that disagree or look duplicated, and new scanner findings. It is not an approval inbox: held actions are still answered in Telegram or OpenClaw. Its counts are labelled when they are partial: pair counts stop at 20 of each kind and the disagreement check compares only the 200 most important memories, a list that failed to refresh shows its last known count, and scanner findings cover the whole computer even when a project is selected. Prompt-time recall into Claude Code is not automatic. [What it needs](docs/UPDATING.md#dashboard-recall-and-cloud). In prompt-time recall (the `UserPromptSubmit` hook), turns detected as a cron job, subagent or liveness probe, or pinned to one of those lanes, get narrower recall than the owner's chat, and rows labelled PERSONAL (private-life notes the classifier recognised or a backfill raised) are withheld from them. This is not universal isolation: a private note the classifier missed and labelled `PUBLIC` can still reach those lanes, and SessionStart context, MCP tool reads and dashboard previews are not lane-scoped. [Recall lanes](docs/UPDATING.md#recall-lanes).
+Every line below is backed by shipped code. Each link goes to the detail and the limits. [Full capability notes](docs/CAPABILITIES.md).
+
+**Stop hijacked agents**
+
+- **Tool gate.** On Claude Code, OpenClaw and Hermes, once Action Guard is on, a trusted call runs, a suspicious call gets a plain-English approval card, and a catastrophic command is a hard stop. [Where it can block](#where-it-can-block)
+- **Headless approvals.** When nobody is at a prompt, the denial or held request goes to your webhook as a readable card: what, why, who and the exact `shieldcortex approve` command, never the raw command or a credential (5.18+). [Detail](docs/CAPABILITIES.md#approval-cards-and-webhooks)
+- **Conversation firewall for OpenClaw.** With conversation access granted, the plugin scans what reaches the model and what comes back, and an injection hit records which pattern matched (5.18.2). [Detail and limits](docs/CAPABILITIES.md#conversation-firewall-openclaw)
+- **Tool-output scan.** The `scan_tool_response` MCP tool checks tool results for injection, leaked credentials and markdown-image exfiltration. Advisory by default; enforce mode hands the agent a sanitised copy. [Detail](docs/CAPABILITIES.md#tool-output-scan)
+- **Claude SDK browser and computer toolsets.** `shieldcortex/toolsets` records what each click, keystroke and page read would trigger; `mode: 'enforce'` refuses the riskiest calls and holds risky ones for approval (5.8+). [Quickstart](docs/quickstarts/claude-sdk-toolsets.md)
+- **Iron Dome.** The behaviour-protection layer behind the gate, with its own `status`, `scan`, `audit` and emergency stop. [Detail](docs/CAPABILITIES.md#iron-dome)
+
+**Protect memory**
+
+- **Memory firewall.** Writes that go through ShieldCortex are scanned before they stick; recognised injection and leaked credentials are quarantined or blocked. It does not replace OpenClaw, Hermes or Claude memory. [How scan results work](docs/SCAN.md)
+- **Memory for agents.** `remember`, `recall`, `get_context`, a knowledge graph (`graph_query`, `graph_entities`), contradiction detection and `consolidate` with Dream Mode, served over MCP and the Claude Code and OpenClaw hooks. [Detail](docs/CAPABILITIES.md#memory-recall-and-the-knowledge-graph)
+- **Memory-file scan.** `shieldcortex audit` reads persistent agent memory files for poisoned instructions and credential leaks. [Detail](docs/CAPABILITIES.md#audit)
+- **Recall lanes.** Cron, subagent and liveness turns get narrower prompt-time recall than the owner's chat, with bounded coverage. [Limits](#known-limits)
+
+**Catch supply-chain and config tampering**
+
+- **MCP tool-description poisoning.** `shieldcortex mcp scan` checks MCP server tool descriptions for poisoning and rug-pull drift. At each Claude Code session start it also runs in the background against your user-level MCP configs and sends one `mcp_tool_change` webhook notification when a description changed or looks suspicious (5.14+). [Detail](docs/CAPABILITIES.md#mcp-tool-description-scan)
+- **Skill and instruction files.** `scan-skill <path>` and `scan-skills` read SKILL.md, hook and rules files for hidden instructions; `--accept` records a reviewed file. [Detail](docs/CAPABILITIES.md#skill-and-instruction-file-scan)
+- **Packages.** `xray` scans an npm package, file or directory for risky code, `xray-preinstall` can block an install, and both `xray` and `audit` emit SARIF for GitHub Code Scanning. [Detail](docs/CAPABILITIES.md#package-scan-x-ray)
+- **Agent config watch.** At each fresh Claude Code startup, the hooks, MCP servers and similar settings in Claude Code, OpenClaw, Cursor, Codex and Gemini CLI configs, and instruction files planted in drop folders such as `~/Downloads`, are checked against a signed baseline; one webhook notification when something changed outside ShieldCortex. It detects and reports; it does not block. [Limits](docs/security/agent-config-watch.md)
+- **Signed config and policy lock.** `~/.shieldcortex/config.json` is signed: a hand edit fails its check, `doctor` says so, and `config --resign` previews before re-adopting it. `sudo shieldcortex protect` pins the security posture in a root-owned lock the agent user cannot write. [Policy lock](docs/UPDATING.md#policy-lock)
+- **Script allowlist.** `allowlist add` pins a human-reviewed script by path and content hash so the guard stops folding its source; any edit re-gates it. [Detail](docs/CAPABILITIES.md#script-allowlist)
+
+**See and audit**
+
+- **Security audit.** `shieldcortex audit` runs the memory-file, MCP config, environment-file, rules-file and dependency scanners in one pass, as terminal, JSON or SARIF output. [Detail](docs/CAPABILITIES.md#audit)
+- **Doctor.** `shieldcortex doctor` checks the install, the Guard posture on each plane (Claude Code hook, OpenClaw plugin, Hermes self-report), stale Hermes plugin copies and the agent config watch; `guard posture` prints the posture reading and changes nothing. [Doctor and the host table](docs/UPDATING.md#doctor-and-the-host-table)
+- **Chained audit ledger.** `ledger verify` walks the chained audit rows and exits 1 if they are inconsistent; `policy-evidence` reports each runtime's own posture self-report. [Detail](docs/CAPABILITIES.md#ledger-and-policy-evidence)
+- **Cortex mistake learning.** `cortex capture` records a mistake, `cortex preflight` checks a task against the record before you repeat it, and a rule can graduate once the record supports it. [Detail](docs/CAPABILITIES.md#cortex)
+- **Dashboard.** `shieldcortex dashboard` is a local view: Home, Needs you, Memory, Protection, Settings. It is not an approval inbox. [What it needs](docs/UPDATING.md#dashboard-recall-and-cloud)
+- **Claims with proof.** Each public defensive claim maps to a test that fires the real attack and asserts the block. [Claims proof matrix](docs/CLAIMS-PROOF.md)
 
 ## Install
 
@@ -56,17 +87,11 @@ shieldcortex setup
 shieldcortex doctor
 ```
 
-For manual storage and memory hygiene, run `shieldcortex maintain`. It consolidates STM above its cap (applied by default: this is the first phase of `shieldcortex consolidate`, not Dream Mode; it promotes, deletes decayed STM, evicts older unpinned memories from an over-limit tier, and deletes or downvotes near-identical long-term copies, so run `--dry-run` first), backfills missing vectors when the embedding model is cached, vacuums a database with enough free pages, then runs doctor's Memories, Semantic coverage and Disk checks and sends any remaining FAIL to the configured Action Guard webhook (the same FAIL set at most once a day). A database lock held by another live ShieldCortex process, whether seen before opening or at lock acquisition, skips consolidation, embedding and vacuum. It exits 1 while a FAIL remains. Use `--dry-run` to preview without changing database contents or config; SQLite may create shared-memory sidecar files. Use `--json` for a structured report. Audit-log retention is not part of `maintain` yet (#579), and nothing schedules it yet.
-
-`setup` is the onboarding command: it prints one host table and asks before wiring each host. `shieldcortex setup claude` skips the table and runs the Claude Code install without asking. That install can write `~/.claude/CLAUDE.md`, `~/.claude.json` and `~/.claude.json.bak-shieldcortex` if it replaces the file, `~/.claude/settings.json` and `~/.claude/settings.json.bak-shieldcortex` if it replaces the file, and `~/.claude/hooks/cortex-memory/` unless any detected hook root already has a cortex-memory directory. If that hook installer runs against a writable OpenClaw root, it can also copy the OpenClaw hook, install or register the realtime plugin, snapshot and rewrite `openclaw.json`, and may restart the gateway. Two older names still work. `quickstart` takes the same targets as `setup`'s guided path, without hook flags or `uninstall`. `install` is not the wizard: it runs that same Claude Code install as `setup claude`, and is kept for existing scripts and the `--without-*` hook opt-outs. Within 5.x, update with [`shieldcortex update`](docs/UPDATING.md#updating).
-
-If npm skipped the package's lifecycle scripts (for example `--ignore-scripts`, or `ignore-scripts=true` in an npm config), ShieldCortex's postinstall did not run. On a global install that step wires no host. It prints the next step, checks that the database engine loads, writes a default `~/.shieldcortex/config.json` when none exists, refreshes an OpenClaw integration that is already present, and on macOS restarts a dashboard service still running an older build. Skipping it does not skip onboarding: run `shieldcortex setup`, then `shieldcortex doctor`. Without that config file, prompt-time recall stays off until you turn it on. [What postinstall does](docs/openclaw-integration.md#install-time-refresh-postinstall).
-
-Semantic search downloads a small embedding model on first use. For air-gapped hosts or a mirror, see [Offline embedding cache](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/offline-embeddings.md). It covers the embedding model only, not every network feature.
+`setup` prints one host table and asks before wiring each host. What it writes, what postinstall does, storage maintenance and the offline embedding cache: [Install details](docs/INSTALL.md). Within 5.x, update with [`shieldcortex update`](docs/UPDATING.md#updating).
 
 ## Where it can block
 
-Action Guard stays off until you turn it on. That shared setting is the tool gate for Claude Code and OpenClaw. A bare `sudo shieldcortex protect` turns it on and pins that posture. [Policy lock](docs/UPDATING.md#policy-lock). The Hermes plugin does not read the shared setting; it has its own (below).
+Action Guard stays off until you turn it on. That shared setting is the tool gate for Claude Code and OpenClaw. A bare `sudo shieldcortex protect` turns it on and pins that posture. [Policy lock](docs/UPDATING.md#policy-lock). The Hermes plugin does not read the shared setting; it has its own. [Hermes](docs/CAPABILITIES.md#hermes)
 
 | Host | Memory scan | Tool gate |
 |---|---|---|
@@ -77,42 +102,33 @@ Action Guard stays off until you turn it on. That shared setting is the tool gat
 | LangChain, Python SDK | if you call `scan` or `save` | not a gate |
 | Claude SDK browser / computer toolsets (TypeScript) | no | observe by default; `mode: 'enforce'` refuses or holds for approval (`shieldcortex/toolsets`, 5.8+) |
 
-`shieldcortex doctor` prints the same split: `memory + tool gate` for a host that can deny, and memory only, not a gate, for one that cannot. Its `Action guard posture` row shows the configured posture of each gate plane: the Claude Code hook, the OpenClaw plugin (its `openclaw.json` entry merged over the shared setting, then the policy lock) and Hermes (from the Hermes process's own self-report only, since Hermes does not read the shared setting). It fails when the hook and the plugin disagree, or when Hermes reports a looser posture than they hold; Hermes reporting a tighter one is shown, not failed. `shieldcortex guard posture` prints the same reading and changes nothing. These are configured postures, not a check of running processes. It will not print "protected" for a host that cannot deny.
+`shieldcortex doctor` prints the same split: `memory + tool gate` for a host that can deny, and memory only, not a gate, for one that cannot. It will not print "protected" for a host that cannot deny. Codex, Cursor, VS Code and other MCP hosts get a memory server the model may call; that server is a scanner, not a deny. [Hosts in detail](docs/CAPABILITIES.md#hosts-and-fallbacks)
 
-Hermes gates tool calls once you run `hermes plugins enable shieldcortex` and the local API (`shieldcortex api`) is up. The enabled plugin enforces by default, whatever the shared Action Guard setting says: it blocks unless `SHIELDCORTEX_ENFORCE` opts it out (`0`, `false`, `no`, `off` or `advisory`). Hermes has no approval prompt, so a call Action Guard would hold for approval is blocked while enforcing. Advisory mode still blocks Action Guard's hard-block verdicts and recognised calls that would change the guard's own state or config (a plain read of its config with `ls`, `cat`, `head`, `tail`, `wc`, `stat`, `du`, `grep` or `jq` and plain arguments is not one of them; a read with an environment prefix, an option the guard cannot prove harmless, a redirection, nested execution or an interpreter still is). While the API is unreachable, its bounded fallback scan blocks the self-protection and catastrophic shapes it recognises in every mode, and recognised dangerous shapes while enforcing (the default). In advisory mode, only the recognised self-protection and catastrophic shapes are blocked by the fallback. [Hermes plugin](plugins/hermes/shieldcortex/README.md). Codex, Cursor, VS Code, and other MCP hosts get a memory server the model may call. That server is a scanner, not a deny.
+## Known limits
 
-If the Claude Code PreToolUse hook fails to load, a bounded fallback still blocks recognised catastrophic commands, even with the guard off. While the hook is broken those patterns also stop routine recursive force-deletes. Calls that do not match stay fail-open. [Full note](docs/UPDATING.md#claude-code-hook-fallback).
+- **Recall lanes.** In prompt-time recall (the `UserPromptSubmit` hook), turns detected as a cron job, subagent or liveness probe, or pinned to one of those lanes, get narrower recall than the owner's chat, and rows labelled PERSONAL (private-life notes the classifier recognised or a backfill raised) are withheld from them. This is not universal isolation: a private note the classifier missed and labelled `PUBLIC` can still reach those lanes, and SessionStart context, MCP tool reads and dashboard previews are not lane-scoped. [Recall lanes](docs/UPDATING.md#recall-lanes).
+- **Hermes has no approval prompt.** A call Action Guard would hold for approval is blocked while the Hermes plugin enforces. [Hermes](docs/CAPABILITIES.md#hermes)
+- **Hook fallback.** If the Claude Code hook fails to load, a bounded fallback still blocks recognised catastrophic commands; calls that do not match stay fail-open. [Full note](docs/UPDATING.md#claude-code-hook-fallback)
+- **Enforce-when-ready stays in shadow.** It needs reviewed evidence for the running version, and no such evidence ships yet. [What's new in 5.4](docs/UPDATING.md#whats-new-in-54)
+- **One-tap approve is half-shipped.** The 5.18 webhook card carries no nonce yet, so a Telegram tap cannot complete end to end. [Detail](docs/CAPABILITIES.md#approval-cards-and-webhooks)
+- **Dashboard counts are labelled when partial.** [Detail](docs/CAPABILITIES.md#dashboard)
 
-The optional enforce-when-ready posture runs the dangerous tier in shadow until this install's own audit shows the guard is operable and reviewed evidence for the running version exists. No such evidence ships yet, so today it stays in shadow and says so. [What's new in 5.4](docs/UPDATING.md#whats-new-in-54).
+## Free, licensed and Cloud
 
-`shieldcortex policy-evidence` (5.5+) reports what each runtime's own self-report says it is enforcing, as local self-reports rather than attestation. [What's new in 5.5](docs/UPDATING.md#whats-new-in-55).
-
-Approval cards (5.6+) say what a held action does, why it was held and who asked, in plain English, without the raw command. Database, cluster and cloud teardown commands now ask for approval (5.6+). [What's new in 5.6](docs/UPDATING.md#whats-new-in-56).
-
-Webhook notifications for a headless denial or a held approval end with a `card` block (5.18+, version 1): the same what, why and who, the exact approve command, and Approve/Deny choices that carry only the action id. The guard half of one-tap approve from Telegram also ships in 5.18, as a loopback-only `shieldcortex guard approve-tap` endpoint that is off by default; the card carries no nonce yet, so a tap cannot be completed end to end in this release. [What's new in 5.18](docs/UPDATING.md#whats-new-in-518).
-
-`shieldcortex/toolsets` (5.8+) sits in front of a Claude SDK browser-use or computer-use driver and by default records what each click, keystroke, navigation and page read would trigger without changing what runs; `mode: 'enforce'` refuses the riskiest calls outright, holds risky ones (such as irreversible clicks after a page read) for your approval, and lets the rest run. [Quickstart](docs/quickstarts/claude-sdk-toolsets.md).
-
-## Free and Cloud
-
-Two different apps.
-
-- **Local** (`shieldcortex dashboard`) runs on your machine. The Skill & package scanner (formerly X-Ray) lives here, under Protection.
-- **Cloud** is the fleet view: Shield, Capture, Recall, Library, Graph, Replay, Review, Quarantine, Dome, Devices, Keys. Default chrome is glass (Shield). Cloud does not ship X-Ray.
-
-Free cloud: 500 scans/month, 7-day retention, 1 member. Enterprise (fleets, SSO, full replica): sales@drakonsystems.com.
-
-[How to connect a box](docs/UPDATING.md#connect-a-box).
+- **Licence: MIT. Every local feature is free and needs no key.** That includes the memory firewall, Action Guard, all scanners, `audit`, Cortex, Iron Dome, deep X-Ray scans, review-copilot and the local dashboard.
+- **Enterprise licence key.** Four cloud and team features need one: full two-way cloud sync of memories, graph and quarantine content; team management; shared patterns and policies; team memory scopes. Activate with `shieldcortex license activate <key>`. [What is gated](docs/CAPABILITIES.md#what-needs-a-licence)
+- **Cloud is a second app**, the fleet view: Shield, Capture, Recall, Library, Graph, Replay, Review, Quarantine, Dome, Devices, Keys. Cloud does not ship X-Ray. Free cloud: 500 scans/month, 7-day retention, 1 member, audit metadata only. Enterprise (fleets, SSO, full replica): sales@drakonsystems.com. [How to connect a box](docs/UPDATING.md#connect-a-box)
 
 ## Links
 
 - [Docs](https://shieldcortex.ai/docs)
 - [Dashboard guide](https://shieldcortex.ai/guide)
-- [Changelog](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md)
+- [Capability notes and limits](docs/CAPABILITIES.md)
+- [Install details](docs/INSTALL.md)
 - [Updating](docs/UPDATING.md)
+- [Changelog](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md)
 - [Security](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/SECURITY.md) (security@drakonsystems.com)
 - [Contributing](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CONTRIBUTING.md)
-- Licence: MIT. Every local feature is free.
 
 <p align="center">
   <a href="https://shieldcortex.ai">Website</a> ·

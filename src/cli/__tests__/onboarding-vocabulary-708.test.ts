@@ -154,25 +154,31 @@ describe('#708 — help text describes install and quickstart accurately', () =>
   });
 });
 
-describe('#708 — README agrees with the code', () => {
+describe('#708 — README and docs/INSTALL.md agree with the code', () => {
   const readme = read('README.md');
   const install = readme.slice(readme.indexOf('## Install'), readme.indexOf('## Where it can block'));
+  // The install detail (older command names, postinstall note) moved from the
+  // README's Install section to docs/INSTALL.md, which that section links to.
+  const details = read('docs', 'INSTALL.md');
 
   it('the install steps onboard with setup', () => {
     expect(install).toMatch(/```bash\nnpm install -g shieldcortex\nshieldcortex setup\nshieldcortex doctor\n```/);
+    expect(install).toMatch(/docs\/INSTALL\.md/);
   });
 
   it('install and quickstart are described as the older names they are', () => {
     expect(install).not.toMatch(/also `quickstart`/);
-    expect(install).toMatch(/`install` is not the wizard/);
-    expect(install).toMatch(/same Claude Code install as `setup claude`/);
-    expect(install).toMatch(/`quickstart` takes the same targets as `setup`'s guided path, without hook flags or `uninstall`/);
+    expect(details).not.toMatch(/also `quickstart`/);
+    expect(details).toMatch(/`install` is not the wizard/);
+    expect(details).toMatch(/same Claude Code install as `setup claude`/);
+    expect(details).toMatch(/`quickstart` takes the same targets as `setup`'s guided path, without hook flags or `uninstall`/);
   });
 
   it('the suppressed-lifecycle-scripts note points back at setup and does not prescribe a bypass', () => {
-    expect(install).toMatch(/--ignore-scripts/);
-    expect(install).toMatch(/wires no host/);
-    expect(install).toMatch(/run `shieldcortex setup`, then `shieldcortex doctor`/);
+    expect(details).toMatch(/--ignore-scripts/);
+    expect(details).toMatch(/wires no host/);
+    expect(details).toMatch(/run `shieldcortex setup`, then `shieldcortex doctor`/);
+    expect(details).not.toMatch(/--foreground-scripts|ignore-scripts=false|npm rebuild/);
     expect(install).not.toMatch(/--foreground-scripts|ignore-scripts=false|npm rebuild/);
   });
 

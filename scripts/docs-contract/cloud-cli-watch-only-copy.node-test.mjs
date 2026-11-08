@@ -156,11 +156,15 @@ describe('Hermes outage fallback documentation', () => {
     assert.match(toolFallback, /if fallback_dangerous and enforce:/);
   });
 
-  for (const file of ['README.md', 'CHANGELOG.md']) {
+  // The Hermes gate paragraph lives in docs/CAPABILITIES.md (the README's
+  // "Where it can block" section links to it); the contract follows the copy.
+  const HERMES_COPY = [
+    { label: 'docs/CAPABILITIES.md', parts: ['docs', 'CAPABILITIES.md'], starts: 'Hermes gates tool calls' },
+    { label: 'CHANGELOG.md', parts: ['CHANGELOG.md'], starts: '- **README "Where it can block":' },
+  ];
+  for (const { label: file, parts, starts } of HERMES_COPY) {
     it(`${file} distinguishes default-enforcing and advisory outage tiers`, () => {
-      const paragraph = read(file).split('\n').find((line) => file === 'README.md'
-        ? line.startsWith('Hermes gates tool calls')
-        : line.startsWith('- **README "Where it can block":'));
+      const paragraph = read(...parts).split('\n').find((line) => line.startsWith(starts));
       assert.ok(paragraph, `no Hermes gate paragraph in ${file}`);
       assert.match(paragraph, /enforces by default/);
       assert.match(paragraph, /While the API is unreachable, its bounded fallback scan blocks the self-protection and catastrophic shapes it recognises in every mode, and recognised dangerous shapes while enforcing \(the default\)\./);
@@ -169,7 +173,7 @@ describe('Hermes outage fallback documentation', () => {
     });
   }
 
-  it('plugin README names the same outage fallback tiers as the main README', () => {
+  it('plugin README names the same outage fallback tiers as docs/CAPABILITIES.md', () => {
     const plugin = read('plugins', 'hermes', 'shieldcortex', 'README.md').replace(/\s+/g, ' ');
     assert.match(plugin, /While the API is unreachable, its bounded fallback scan blocks the self-protection and catastrophic shapes it recognises in every mode, and recognised dangerous shapes while enforcing \(the default\)\./);
     assert.match(plugin, /In advisory mode, only the recognised self-protection and catastrophic shapes are blocked by the fallback\./);
