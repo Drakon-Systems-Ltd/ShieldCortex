@@ -32,6 +32,7 @@ import {
   recordDenialFingerprint,
   retryControlDir,
 } from '../retry-control.js';
+import { fencedStateFile } from './fenced-state-fixture.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const DIST_STORE = join(repoRoot, 'dist', 'defence', 'iron-dome', 'retry-control.js');
@@ -109,7 +110,7 @@ describe('#310 — concurrency on the one lock plane', () => {
 
   function storeFile(): RaceStore {
     return JSON.parse(
-      readFileSync(join(home, '.shieldcortex', 'approvals', 'retry-control.json'), 'utf8'),
+      readFileSync(fencedStateFile(join(home, '.shieldcortex', 'approvals', 'retry-control.json')), 'utf8'),
     ) as RaceStore;
   }
 

@@ -42,6 +42,7 @@ import {
   releaseCardLaunch,
   retryControlPath,
 } from '../retry-control.js';
+import { fencedStateFile } from './fenced-state-fixture.js';
 
 const HASH = hashToolCall('Bash', { command: 'sudo modprobe softdog' });
 const OTHER_HASH = hashToolCall('Bash', { command: 'systemctl restart nginx' });
@@ -130,7 +131,7 @@ describe('#310 retry control — the one lock plane', () => {
     );
     expect(granted.ok).toBe(true);
 
-    const raw = JSON.parse(readFileSync(retryControlPath(home), 'utf8')) as {
+    const raw = JSON.parse(readFileSync(fencedStateFile(retryControlPath(home)), 'utf8')) as {
       rows: Array<{ grant?: { approvedAt?: number; grantKind?: string } }>;
     };
     for (const row of raw.rows) {
@@ -149,7 +150,7 @@ describe('#310 retry control — the one lock plane', () => {
     const nonce = c.ok ? c.nonce : '';
     expect(nonce).toMatch(/^[0-9a-f]{64}$/);
 
-    const onDisk = readFileSync(retryControlPath(home), 'utf8');
+    const onDisk = readFileSync(fencedStateFile(retryControlPath(home)), 'utf8');
     expect(onDisk).not.toContain(nonce);
     expect(onDisk).toMatch(/"nonceHmac":\s*"[0-9a-f]{64}"/);
   });
@@ -170,7 +171,7 @@ describe('#310 retry control — the one lock plane', () => {
     denial();
     const c = claim();
     const nonce = c.ok ? c.nonce : '';
-    writeFileSync(retryControlPath(home), '{ this is not json', { mode: 0o600 });
+    writeFileSync(fencedStateFile(retryControlPath(home)), '{ this is not json', { mode: 0o600 });
 
     const out = grantRetry({ hash: HASH, cwd }, { nonce }, { home, now: t0 + 1_000 });
     expect(out.ok).toBe(false);

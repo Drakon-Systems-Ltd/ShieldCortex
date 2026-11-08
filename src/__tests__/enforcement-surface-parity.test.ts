@@ -488,8 +488,12 @@ describe('#509 R4-1 — the guard self-protection floor is ONE list, duplicated 
   it('r5 finding 3: every auto-approval and failure-allow exit consults the floor, in both planes', () => {
     expect(hookSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected\)/);
     expect(hookSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected/);
-    expect(pluginSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected\)/);
-    expect(pluginSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected/);
+    // #999: the plugin's two operator releases also refuse a taint-minted
+    // block — it left `unscannedBlock` (it is a scanned verdict) but must not
+    // become releasable by the allowlist or a broker pre-clear under enforce.
+    // The hook has no taint escalation, so it has no counterpart clause.
+    expect(pluginSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected && !taintMintedBlock\)/);
+    expect(pluginSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected && !taintMintedBlock\)/);
     expect(pluginSrc).toMatch(/const deny = failAction === 'deny' \|\| brokerDenies \|\| selfProtected;/);
     expect(pluginSrc).toMatch(/const failAction: FailureAction = selfProtected \? 'deny' : config\.failurePolicy\[severity\];/);
     expect(pluginSrc).toMatch(/config\.failurePolicy\.high === 'allow' && !selfProtectSignal \? 'allow' : 'deny'/);

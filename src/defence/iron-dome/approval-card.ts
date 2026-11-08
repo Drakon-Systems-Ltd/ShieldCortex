@@ -20,18 +20,22 @@
  *              (`SIGNAL_PHRASES`); an unknown id falls back to the id itself.
  *   3. WHO   — the agent, the box and the session.
  *
- * Scope, and the constraint that does NOT move: this is the ask/card path
- * only. Notify webhooks and `denials.jsonl` stay values-free (#284/#369/#517 —
- * `safeActionGuardSurface` in operator-notify.ts). Nothing in this module is
- * read by those writers; the card summary rides on `OperatorNotification.card`,
- * which the webhook payload builder does not copy, and the hook attaches it
- * only for the card channel.
+ * Scope, and the constraint that does NOT move: `denials.jsonl` and the
+ * values-free alert fields (`command`, `surface`, `text` — #284/#369/#517,
+ * `safeActionGuardSurface` in operator-notify.ts) never carry this summary.
+ * It rides on `OperatorNotification.card` / `ActionGuardOutcomeNotification
+ * .card` to two readers only: the OpenClaw card channel and, since #815 A,
+ * the webhook channel's versioned `card` block (webhook-notify-channel.ts),
+ * which carries these three lines and never the raw command. Every target is
+ * gated by `safeTarget` as a line is built; the webhook also puts each whole
+ * line through `withholdSecretCardLine` before it is clipped or sent, so a
+ * field that skipped the target gate cannot leave the box (#815 A review B1).
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import { homedir, hostname as osHostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { redactCredentials } from '../credential-leak/index.js';
+import { redactCredentials, scanForCredentials } from '../credential-leak/index.js';
 import { classifyFamily, evaluateToolCall, extractCommand, extractPath, extractUrl, normaliseToolName } from './tool-action-guard.js';
 
 /** What the card shows in place of a target that looks like a credential. */
@@ -370,6 +374,12 @@ const KEBAB_WORDS = /^[a-z]+(?:-[a-z]+)+$/;
  * one `indexOf` walk for URL userinfo, and a split for long opaque runs.
  */
 export function looksSecretish(text: string): boolean {
+  return namesSecret(text) || hasOpaqueRun(text);
+}
+
+/** The named shapes of `looksSecretish`: `KEY=value`, `--token <value>`, URL
+ *  userinfo. Everything but the long-opaque-run heuristic. */
+function namesSecret(text: string): boolean {
   const WORD = /[\w.-]+/g;
   for (let m = WORD.exec(text); m !== null; m = WORD.exec(text)) {
     const word = m[0];
@@ -389,11 +399,201 @@ export function looksSecretish(text: string): boolean {
     URL_USERINFO.lastIndex = at + 3;
     if (URL_USERINFO.test(text)) return true;
   }
-  // A long opaque run in any one segment of a path, host or argument.
+  return false;
+}
+
+/** A long opaque run in any one segment of a path, host or argument. */
+function hasOpaqueRun(text: string): boolean {
   for (const part of text.split(/[\/\\\s:@?&=#,;]+/)) {
     if (OPAQUE_RUN.test(part) && !KEBAB_WORDS.test(part)) return true;
   }
   return false;
+}
+
+/**
+ * #815 A review B2: the vendor redactor, in every case. A card may show a
+ * case-folded form of what was typed (a host is printed in lower case), and
+ * folding defeats the case-sensitive vendor shapes: an AWS access-key id in
+ * lower case matches nothing, yet upper-casing the card text gives it back
+ * exactly. So the redactor reads the text as written AND upper- and
+ * lower-cased; any reading that trips it makes the text credential-shaped.
+ * (`looksSecretish` is case-blind already, apart from its lower-case kebab
+ * exemption, which must not be widened, so it reads the text as written.)
+ * Throws what the redactor throws; every caller withholds on a throw.
+ */
+function vendorShapeInAnyCase(text: string): boolean {
+  for (const view of new Set([text, text.toUpperCase(), text.toLowerCase()])) {
+    if (redactCredentials(view) !== view) return true;
+  }
+  return false;
+}
+
+/**
+ * #815 A fold 4: the redactor's NAMED shapes only — vendor keys, JWTs,
+ * private keys, connection strings, env-style assignments, split or whole —
+ * in every case, as `vendorShapeInAnyCase` reads them, but without its
+ * `high_entropy` net. The net is shape-blind (any 20+ character run of key
+ * characters above 4.5 bits a character), so on text whose spaces were taken
+ * out it reads prose: `Claude Code on <a macOS runner's generated name>`
+ * became one high-entropy token, and the whole WHO line was withheld. Every
+ * pattern match the redactor makes is reported as a finding of the pattern's
+ * own type, so a finding other than `high_entropy` is exactly a named shape.
+ * Throws what the redactor throws; every caller withholds on a throw.
+ */
+function namedShapeInAnyCase(text: string): boolean {
+  for (const view of new Set([text, text.toUpperCase(), text.toLowerCase()])) {
+    if (scanForCredentials(view).findings.some((f) => f.type !== 'high_entropy')) return true;
+  }
+  return false;
+}
+
+/** Whitespace other than the ASCII space (NBSP, U+3000, the U+2000 spaces,
+ *  tabs …): a reader sees a word break and `flattenCardText` prints a plain
+ *  space, but the shell does not split a word on it. */
+const UNUSUAL_SPACE_ALL = /[^\S ]/gu;
+/** Every space of any kind, plus the two zero-width ones `\s` leaves out. */
+const ANY_SPACE_ALL = /[\s\u180e\u200b]/gu;
+const nfkc = (text: string): string => text.normalize('NFKC');
+
+/** #815 A review r5 (B4): rounds of `%XX` decoding read, so `%2541` is read
+ *  as `%41` and then as `A`. Each round is one more reading; three is the cap. */
+const PERCENT_DECODE_ROUNDS = 3;
+const PERCENT_RUN = /(?:%[0-9A-Fa-f]{2})+/g;
+const UTF8 = new TextDecoder('utf-8');
+
+/**
+ * #815 A review r5 (B4): the `%XX`-decoded readings of `text`, one per round
+ * until a round changes nothing (at most `PERCENT_DECODE_ROUNDS`). A reader,
+ * a browser or `decodeURIComponent` turns `%41KIA…` back into the key; the
+ * recognisers did not. Tolerant by design: a `%` not followed by two hex
+ * digits stays as written, and bytes that are not UTF-8 read as U+FFFD, so a
+ * stray `%` (`100%-done`) is never on its own a reason to withhold a line.
+ */
+function percentDecodedReadings(text: string): string[] {
+  const out: string[] = [];
+  let current = text;
+  for (let round = 0; round < PERCENT_DECODE_ROUNDS && current.includes('%'); round += 1) {
+    const next = current.replace(PERCENT_RUN, (run) => UTF8.decode(Uint8Array.from(run.slice(1).split('%'), (hex) => parseInt(hex, 16))));
+    if (next === current) break;
+    out.push(next);
+    current = next;
+  }
+  return out;
+}
+
+/**
+ * #815 A review r4 — the class, not another spelling. Three rounds found a
+ * tool-input-derived string that reached the card in a form no recogniser had
+ * read: a remote name, a lower-cased host, a key split by NBSP or U+3000 or
+ * typed full-width / math-bold. A recogniser sees one string; a reader, a
+ * parser or a later transform (fold, flatten, clip) sees another. So a
+ * credential is looked for in EVERY reading those would produce, before any
+ * of them runs:
+ *
+ *   - as written, and NFKC-normalised (full-width and math-alphanumeric
+ *     letters and digits read as ASCII, compatibility spaces as U+0020);
+ *   - each with hidden, zero-width, soft-hyphen, bidi and line-break
+ *     characters removed;
+ *   - each of those with every non-ASCII space removed as well, and that
+ *     NFKC-normalised again (NBSP becomes a plain space under NFKC, so the
+ *     strip runs on the written text first);
+ *   - and every one of those with ALL whitespace removed (`tight`);
+ *   - review r5 (B4): every view above `%XX`-decoded, round by round
+ *     (`percentDecodedReadings`), and each decoded text read again in all
+ *     of the readings above. This is the ONE decoder: `safeHost` reads a
+ *     percent-encoded host through it too, so the host and target paths
+ *     cannot drift apart.
+ *
+ * The redactor's named shapes read every view in every case (review B2),
+ * the tight ones included. The named generic shapes (`namesSecret`) read
+ * every view but the tight ones. The two shape-blind heuristics — the
+ * redactor's entropy net and the long-opaque-run rule — read the spaced views
+ * only, and only when `heuristics` is on: prose with its spaces taken out IS
+ * a long opaque, high-entropy run, so a tight view judged on them would
+ * withhold every such sentence (fold 4: the WHO line of a macOS runner, whose
+ * generated name joined `Claude Code on` into one high-entropy token).
+ * Throws what the redactor throws; every caller withholds on a throw.
+ *
+ * Call sites: `safeTarget` (every target of every sentence: paths, hosts as
+ * written, branches, remotes, ids), `commandCarriesSplitCredential` (the
+ * whole command and its words joined, review r5), `safeHostname` (the WHO line's box name: named
+ * shapes here, the entropy net per part), and `withholdSecretCardLine` (the
+ * egress gate on every card line the webhook, and `boundedCard`, send off
+ * the box).
+ */
+export function credentialInAnyReading(text: string, opts: { heuristics?: boolean } = {}): boolean {
+  const heuristics = opts.heuristics ?? true;
+  const spaced = new Set<string>();
+  const read = (base: string) => {
+    const joined = base.replace(CARD_HIDDEN_ALL, '').replace(CARD_LINE_BREAKS_ALL, '');
+    const unspaced = joined.replace(UNUSUAL_SPACE_ALL, '');
+    for (const view of [base, joined, unspaced, nfkc(unspaced)]) spaced.add(view);
+  };
+  for (const base of [text, nfkc(text)]) read(base);
+  // Review r5 (B4): decoded after the hidden characters and the NFKC
+  // mapping are taken out, so `%4<U+200B>1` and a full-width `%` decode too.
+  for (const view of [...spaced]) {
+    for (const decoded of percentDecodedReadings(view)) for (const base of [decoded, nfkc(decoded)]) read(base);
+  }
+  for (const view of spaced) {
+    if (heuristics ? vendorShapeInAnyCase(view) : namedShapeInAnyCase(view)) return true;
+    if (namesSecret(view)) return true;
+    if (heuristics && hasOpaqueRun(view)) return true;
+  }
+  for (const view of spaced) {
+    const tight = view.replace(ANY_SPACE_ALL, '');
+    if (!spaced.has(tight) && namedShapeInAnyCase(tight)) return true;
+  }
+  return false;
+}
+
+/**
+ * #815 A review r5 (B5): set by `describeShell`, for as long as it describes
+ * a command `commandCarriesSplitCredential` flags; `safeTarget` then withholds
+ * every target. Synchronous, and restored on the way out.
+ */
+let commandTargetsWithheld = false;
+
+/**
+ * #815 A review r5 (B5): a target read from this machine (a git config URL),
+ * not from the command, is checked as before even while the command's own
+ * targets are withheld.
+ */
+function notFromCommand<T>(read: () => T): T {
+  const outer = commandTargetsWithheld;
+  commandTargetsWithheld = false;
+  try {
+    return read();
+  } finally {
+    commandTargetsWithheld = outer;
+  }
+}
+
+/**
+ * #815 A review r5 (B5) — the whole command, before any operand is chosen.
+ * A card shows ONE operand of a command (the branch, the path), and that
+ * operand alone may be half of a key the shell split in two (`… origin
+ * <first 20> <rest>`): every recogniser passes it, and the card shows half
+ * the key. So the redactor's named shapes (`credentialInAnyReading`,
+ * heuristics off) read the WHOLE command as typed, and its words joined by a
+ * space (the tight reading joins them with nothing).
+ *
+ * A word that is credential-shaped on its own is withheld by `safeTarget`
+ * wherever it is shown, so it explains a hit by itself: those words are
+ * taken out, and the rest read again. Only a credential that still needs
+ * more than one word flags the command, and then every target the command
+ * supplies is withheld (`commandTargetsWithheld`) — not a partial. An
+ * ordinary word beside a whole key (`git push --force <key> main`) is still
+ * named. Throws what the redactor throws; the caller withholds on a throw.
+ */
+function commandCarriesSplitCredential(command: string, segments: readonly Segment[]): boolean {
+  const named = (text: string) => credentialInAnyReading(text, { heuristics: false });
+  const words = segments.flatMap((s) => [...s.words, ...s.reads, ...s.writes]);
+  if (!named(command) && !named(words.join(' '))) return false;
+  const whole = new Set(words.filter(named));
+  let residue = command;
+  for (const w of whole) residue = residue.split(w).join(' ');
+  return named(words.filter((w) => !whole.has(w)).join(' ')) || named(residue);
 }
 
 function middleClip(text: string, max: number): string {
@@ -408,25 +608,33 @@ function middleClip(text: string, max: number): string {
  * the length cap and the character check first, so no pattern ever runs on an
  * oversized or hostile candidate (#648 r2 S2, S9); then the credential redactor
  * (it owns the vendor shapes — AWS key ids, GitHub/Slack/Stripe tokens,
- * private-key blocks), then the generic shapes it does not own. Anything that
- * trips any of them is withheld whole; a target is never partially masked,
- * because a half-shown secret is still a disclosure.
+ * private-key blocks — read in every case, #815 A review B2), then the
+ * generic shapes it does not own. Anything that trips any of them is withheld
+ * whole; a target is never partially masked, because a half-shown secret is
+ * still a disclosure. The checks read the target as given: a caller that
+ * shows a transformed form (case-folded, cut down) checks the original first.
+ *
+ * Review r5 (B5): while a command whose words together carry a credential is
+ * described (`commandTargetsWithheld`, set by `describeShell`), every target
+ * is withheld, before any of the checks below: one operand of a split key
+ * passes all of them, and is still half the key.
  */
 export function safeTarget(raw: unknown, maxLen = 60): string {
+  if (commandTargetsWithheld) return WITHHELD_SECRET;
   if (typeof raw !== 'string') return WITHHELD_SECRET;
   if (raw.length > MAX_TARGET_CHARS * 2) return WITHHELD_TOO_LONG;
   const text = raw.trim();
   if (!text) return WITHHELD_SECRET;
   if (text.length > MAX_TARGET_CHARS) return WITHHELD_TOO_LONG;
   if (UNUSUAL_CHARS.test(text)) return WITHHELD_UNUSUAL;
-  let redacted: string;
   try {
-    redacted = redactCredentials(text);
+    // #815 A review r4: in every reading — NFKC, spaces of any kind and
+    // hidden characters removed — so a sentence is never built around a
+    // full-width or NBSP-split credential.
+    if (credentialInAnyReading(text)) return WITHHELD_SECRET;
   } catch {
     return WITHHELD_SECRET;
   }
-  if (redacted !== text) return WITHHELD_SECRET;
-  if (looksSecretish(text)) return WITHHELD_SECRET;
   let shown = text;
   if (HOME && HOME.length > 1 && (shown === HOME || shown.startsWith(`${HOME}/`))) shown = `~${shown.slice(HOME.length)}`;
   return middleClip(shown, maxLen);
@@ -447,49 +655,101 @@ function quoted(raw: unknown, maxLen = 60): string {
   return `"${shown}"`;
 }
 
-/** A host name from a URL, `user@host` or `user@host:path`, or null. */
-function hostOf(text: string): string | null {
+/**
+ * A host name from a URL, `user@host` or `user@host:path`, or null: `host` as
+ * the card shows it (lower case; for a URL, the parser's own reading), and
+ * `written`, the same span exactly as it was typed (#815 A review B2). For a
+ * URL that is the authority after `scheme://`, up to the first `/ ? # \`,
+ * after the last `@`, without a port — where the parser reads the host.
+ */
+function hostParts(text: string): { host: string; written: string } | null {
   const t = String(text ?? '').trim();
   if (!t || t.length > MAX_TARGET_CHARS) return null;
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t)) {
+    let host: string;
     try {
-      const h = new URL(t).hostname.toLowerCase();
-      return h || null;
+      host = new URL(t).hostname.toLowerCase();
     } catch {
       return null;
     }
+    if (!host) return null;
+    const authority = t.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#\\]*)/i)?.[1] ?? '';
+    const written = authority.slice(authority.lastIndexOf('@') + 1).replace(/:\d*$/, '');
+    return { host, written };
   }
-  const scp = /^(?:[^@\s/]+@)?([A-Za-z0-9.-]+\.[A-Za-z]{2,}|localhost|\d{1,3}(?:\.\d{1,3}){3}):/.exec(t);
-  if (scp) return scp[1].toLowerCase();
-  const at = /^[^@\s/]+@([A-Za-z0-9.-]+)$/.exec(t);
-  if (at) return at[1].toLowerCase();
+  const scp = t.match(/^(?:[^@\s/]+@)?([A-Za-z0-9.-]+\.[A-Za-z]{2,}|localhost|\d{1,3}(?:\.\d{1,3}){3}):/);
+  if (scp) return { host: scp[1].toLowerCase(), written: scp[1] };
+  const at = t.match(/^[^@\s/]+@([A-Za-z0-9.-]+)$/);
+  if (at) return { host: at[1].toLowerCase(), written: at[1] };
   return null;
 }
 
-/** The host only — never userinfo, path or query — after the target gate. A
- *  URL carrying credentials in its userinfo (`https://user:pass@…`,
- *  `https://<token>@…`) is withheld whole, host included. The path and query
- *  are never shown, so only the host itself goes through the redactor. */
+/** The host a destination names, as the card shows it, or null. */
+function hostOf(text: string): string | null {
+  return hostParts(text)?.host ?? null;
+}
+
+/**
+ * The host only — never userinfo, path or query — after the target gate. A
+ * URL carrying credentials in its userinfo (`https://user:pass@…`,
+ * `https://<token>@…`) is withheld whole, host included. The path and query
+ * are never shown, so only the host itself goes through the redactor.
+ *
+ * #815 A review B2: the shown host is a TRANSFORM of what was typed (lower
+ * case; for a URL, the parser's reading), and a transform can defeat a
+ * recogniser — a lower-cased AWS key id matched nothing and reached the card,
+ * where upper-casing gave it back. So the host is checked as WRITTEN first,
+ * in every reading of the parser's rewrites (percent-decoding, full-width or
+ * ignored characters). Only then is the shown form checked (in every case)
+ * and printed.
+ */
 function safeHost(text: string): string | null {
-  const h = hostOf(text);
-  if (!h || !/^[a-z0-9.-]{1,253}$/.test(h)) return null;
+  const parts = hostParts(text);
+  if (!parts || !/^[a-z0-9.-]{1,253}$/.test(parts.host)) return null;
   if (/^[a-z][a-z0-9+.-]*:\/\/[^/\s@]+@/i.test(text) || /^[^@\s/]*:[^@\s/]*@/.test(text)) return WITHHELD_SECRET;
-  return safeTarget(h);
+  // #815 A review r4 (N4): a rewrite beyond case is not withheld blindly.
+  // `safeTarget` reads the written host in every reading the parser's
+  // mapping produces — NFKC, ignored characters removed and (review r5, B4)
+  // percent-decoded, by the one decoder every target uses. The shown host is
+  // then checked itself, in every case, below.
+  const asWritten = safeTarget(parts.written, MAX_TARGET_CHARS);
+  if (isWithheld(asWritten)) return asWritten;
+  return safeTarget(parts.host);
 }
 
 const SENSITIVE_PATH_RE =
   /(?:^|[\/~])\.ssh(?:\/|$)|authorized_keys|\bid_(?:rsa|dsa|ecdsa|ed25519)\b|\/etc\/(?:passwd|shadow|gshadow|sudoers)\b|\.aws\/|(?:^|\/)\.env(?:\.[\w.-]+)?$|\.gnupg|\.netrc|\.npmrc|\.pgpass|\.git-credentials|\.docker\/config\.json|\.kube\/config|\.shieldcortex(?:\/|$)/i;
 
+/** Where a sensitive file lives, in fixed words. ONE list: the #648 sentence
+ *  (`locationOf`) and the #815 A webhook template (`CARD_ACTION_TEMPLATES`)
+ *  both read it. */
+const CARD_PLACES = Object.freeze({
+  ssh: 'in your SSH folder',
+  aws: 'in your AWS folder',
+  gpg: 'in your GPG keyring',
+  shieldcortex: "in ShieldCortex's own folder",
+  accounts: 'holding system accounts or passwords',
+  secrets: 'of secret settings',
+  logins: 'holding saved logins',
+});
+type CardPlace = keyof typeof CARD_PLACES;
+
+/** Which of `CARD_PLACES` a path is in, or null. */
+function placeOf(path: string): CardPlace | null {
+  if (/(?:^|[\/~])\.ssh(?:\/|$)|authorized_keys|\bid_(?:rsa|dsa|ecdsa|ed25519)\b/i.test(path)) return 'ssh';
+  if (/\.aws\//i.test(path)) return 'aws';
+  if (/\.gnupg/i.test(path)) return 'gpg';
+  if (/\.shieldcortex(?:\/|$)/i.test(path)) return 'shieldcortex';
+  if (/\/etc\/(?:passwd|shadow|gshadow|sudoers)\b/i.test(path)) return 'accounts';
+  if (/(?:^|\/)\.env(?:\.[\w.-]+)?$/i.test(path)) return 'secrets';
+  if (/\.netrc|\.npmrc|\.pgpass|\.git-credentials|\.docker\/config\.json|\.kube\/config/i.test(path)) return 'logins';
+  return null;
+}
+
 /** Where a sensitive path lives, for the WHAT line ("… in your SSH folder"). */
 function locationOf(path: string): string {
-  if (/(?:^|[\/~])\.ssh(?:\/|$)|authorized_keys|\bid_(?:rsa|dsa|ecdsa|ed25519)\b/i.test(path)) return ' in your SSH folder';
-  if (/\.aws\//i.test(path)) return ' in your AWS folder';
-  if (/\.gnupg/i.test(path)) return ' in your GPG keyring';
-  if (/\.shieldcortex(?:\/|$)/i.test(path)) return " in ShieldCortex's own folder";
-  if (/\/etc\/(?:passwd|shadow|gshadow|sudoers)\b/i.test(path)) return ' holding system accounts or passwords';
-  if (/(?:^|\/)\.env(?:\.[\w.-]+)?$/i.test(path)) return ' of secret settings';
-  if (/\.netrc|\.npmrc|\.pgpass|\.git-credentials|\.docker\/config\.json|\.kube\/config/i.test(path)) return ' holding saved logins';
-  return '';
+  const place = placeOf(path);
+  return place ? ` ${CARD_PLACES[place]}` : '';
 }
 
 // ── Shell parsing: just enough to find the verb and its target ──────────────
@@ -1677,16 +1937,21 @@ function gitRemoteHost(ctx: ShellContext, op: string, remoteArg: string | undefi
   const urls = remote.filter((e) => e.key === 'url').map((e) => e.value);
   const pushUrls = remote.filter((e) => e.key === 'pushurl').map((e) => e.value);
   const targets = op === 'push' ? (pushUrls.length > 0 ? pushUrls : urls) : urls.slice(0, 1);
-  const hosts = new Set(targets.map((u) => safeHost(u)));
+  const hosts = new Set(targets.map((u) => notFromCommand(() => safeHost(u))));
   if (hosts.size !== 1) return null;
   return [...hosts][0];
 }
 
-/** How the card names a remote it will not put a host on. */
+/** How the card names a remote it will not put a host on. The name is
+ *  command input like any other target, so it goes through the target gate
+ *  (#815 A review B1): a credential-shaped name is withheld whole. */
 function remoteLabel(op: string, remoteArg: string | undefined, entries: boolean): string {
   if (op === 'clone' || !entries) return 'a remote server';
   const name = remoteArg ?? 'origin';
-  return /^[A-Za-z0-9._-]{1,32}$/.test(name) ? `the "${name}" remote` : 'a remote server';
+  if (!/^[A-Za-z0-9._-]{1,32}$/.test(name)) return 'a remote server';
+  const shown = safeTarget(name, 32);
+  if (shown === name) return `the "${name}" remote`;
+  return isWithheld(shown) ? shown : 'a remote server';
 }
 
 function describeGit(args: string[], ctx: ShellContext): Described {
@@ -1702,16 +1967,16 @@ function describeGit(args: string[], ctx: ShellContext): Described {
     const branch = sub === 'push' ? pos.slice(1).map((b) => b.replace(/^[+:]/, '')).find(Boolean) : undefined;
     const branchText = branch ? ` (branch ${quoted(branch, 40)})` : '';
     // The WHY line carries "may overwrite history"; the WHAT stays short.
-    if (force) return { category: 'git', sentence: `Force-push to ${where}${branchText} (git push --force)` };
-    if (del) return { category: 'git', sentence: `Delete a branch on ${where}${branchText} (git push --delete)` };
-    return { category: 'network', sentence: `Send data to ${where} (git ${sub})` };
+    if (force) return { category: 'git', kind: 'force-push', sentence: `Force-push to ${where}${branchText} (git push --force)` };
+    if (del) return { category: 'git', kind: 'delete-remote-branch', sentence: `Delete a branch on ${where}${branchText} (git push --delete)` };
+    return { category: 'network', kind: 'git-remote', sentence: `Send data to ${where} (git ${sub})` };
   }
   if (sub === 'branch' && rest.some((a) => /^(?:-D|-d|--delete)$/.test(a))) {
     const name = operands('git', rest)[0];
-    return { category: 'git', sentence: name ? `Delete a git branch: ${quoted(name, 40)}` : 'Delete a git branch' };
+    return { category: 'git', kind: 'delete-branch', sentence: name ? `Delete a git branch: ${quoted(name, 40)}` : 'Delete a git branch' };
   }
-  if (sub === 'reset' && rest.includes('--hard')) return { category: 'git', sentence: 'Throw away uncommitted changes (git reset --hard)' };
-  if (sub === 'clean') return { category: 'git', sentence: 'Delete untracked files in the repository (git clean)' };
+  if (sub === 'reset' && rest.includes('--hard')) return { category: 'git', kind: 'discard-changes', sentence: 'Throw away uncommitted changes (git reset --hard)' };
+  if (sub === 'clean') return { category: 'git', kind: 'clean-repo', sentence: 'Delete untracked files in the repository (git clean)' };
   return { category: 'git', sentence: sub && GIT_SUBCOMMANDS.has(sub) ? `Change the git repository (git ${sub})` : 'Change the git repository' };
 }
 
@@ -1769,6 +2034,9 @@ type Category =
 interface Described {
   category: Category;
   sentence: string;
+  /** #815 A: which fixed webhook template stands for it, where the category
+   *  alone is too coarse (a force-push, not just "git"). */
+  kind?: CardActionKind;
 }
 
 interface ShellContext {
@@ -1932,19 +2200,20 @@ function describeNetworkTool(prog: string, args: string[], ctx: ShellContext, wr
       || args.some((a) => /^(?:-X|--request=|--method=)(?:POST|PUT|PATCH|DELETE)$/i.test(a));
     const egress = ctx.signals.some((s) => /egress|exfil/.test(s));
     const verb = sends || egress ? 'Send data to' : 'Download from';
+    const kind: CardActionKind = sends || egress ? 'send' : 'download';
     // R3: where the download lands is part of WHAT it does.
     const outputs = [...(writerOutputs(prog, args)?.outputs ?? []), ...writes.filter((w) => !isBitBucket(w))];
     if (outputs.length > 0) {
       const dest = mostSensitive(outputs);
-      return { category: 'network', sentence: `${verb} ${host ?? 'a web address it could not show safely'} and write to ${quoted(dest)}${andMore(outputs.length - 1)}` };
+      return { category: 'network', kind, sentence: `${verb} ${host ?? 'a web address it could not show safely'} and write to ${quoted(dest)}${andMore(outputs.length - 1)}` };
     }
-    return { category: 'network', sentence: host ? `${verb} ${host} (${prog})` : `${verb} a web address it could not show safely (${prog})` };
+    return { category: 'network', kind, sentence: host ? `${verb} ${host} (${prog})` : `${verb} a web address it could not show safely (${prog})` };
   }
   if (prog === 'ssh' || prog === 'mosh') {
     // ssh options that consume the next word (`-p 22`, `-i <key>`) are not the destination.
     const dest = operands(prog, args)[0];
     const host = dest ? safeHost(dest.includes('@') ? dest : `x@${dest}`) : null;
-    return { category: 'network', sentence: host ? `Log in to ${host} over SSH` : 'Log in to another machine over SSH' };
+    return { category: 'network', kind: 'remote-login', sentence: host ? `Log in to ${host} over SSH` : 'Log in to another machine over SSH' };
   }
   if (COPY_REMOTE.has(prog)) {
     const pos = operands(prog, args);
@@ -1952,16 +2221,16 @@ function describeNetworkTool(prog: string, args: string[], ctx: ShellContext, wr
     if (remoteIdx === -1 && prog === 'rsync') return null;
     const host = remoteIdx !== -1 ? safeHost(pos[remoteIdx]) : null;
     const where = host ?? 'another machine';
-    return { category: 'network', sentence: remoteIdx === pos.length - 1 ? `Copy files to ${where} (${prog})` : `Copy files from ${where} (${prog})` };
+    return { category: 'network', kind: 'remote-copy', sentence: remoteIdx === pos.length - 1 ? `Copy files to ${where} (${prog})` : `Copy files from ${where} (${prog})` };
   }
   if (RAW_SOCKETS.has(prog)) {
     const host = operands(prog, args)
       .filter((a) => (/[A-Za-z]/.test(a) ? /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(a) : /^\d{1,3}(?:\.\d{1,3}){3}$/.test(a)))
       .map((a) => safeHost(`x@${a}`)).find((h) => h && !isWithheld(h));
-    return { category: 'network', sentence: host ? `Open a raw network connection to ${host} (${prog})` : `Open a raw network connection (${prog})` };
+    return { category: 'network', kind: 'raw-socket', sentence: host ? `Open a raw network connection to ${host} (${prog})` : `Open a raw network connection (${prog})` };
   }
   if ((prog === 'npm' || prog === 'pnpm' || prog === 'yarn') && args[0] === 'publish') {
-    return { category: 'network', sentence: `Publish a package to the ${prog} registry` };
+    return { category: 'network', kind: 'publish', sentence: `Publish a package to the ${prog} registry` };
   }
   return null;
 }
@@ -2107,7 +2376,7 @@ function describeProgram(step: Step, ctx: ShellContext): Described | null {
   if (READERS.has(prog)) {
     // `cat SRC > /dev/tcp/host/port` sends SRC to host (#648 r6 B2).
     const socket = socketSend(seg, step.u);
-    if (socket) return { category: 'network', sentence: sendPhrase(socket.files, socket.host) };
+    if (socket) return { category: 'network', kind: 'send', sentence: sendPhrase(socket.files, socket.host) };
     // `cat SRC > DST` copies SRC: the card names the source, not just the
     // harmless-looking destination (#648 r2 S3). `sort -o`, `uniq IN OUT`
     // and `xxd IN OUT` write as well (#648 r3 R3).
@@ -2133,8 +2402,8 @@ function describeProgram(step: Step, ctx: ShellContext): Described | null {
     const patternByFlag = args.some((a) => /^(?:-[ef]|--regexp|--file)(?:=.*)?$/.test(a));
     const files = patternByFlag ? pos : pos.slice(1);
     return files.length === 0
-      ? { category: 'read', sentence: `Search inside files (${prog})` }
-      : { category: 'read', sentence: pathPhrase('Search inside', files) };
+      ? { category: 'read', kind: 'search', sentence: `Search inside files (${prog})` }
+      : { category: 'read', kind: 'search', sentence: pathPhrase('Search inside', files) };
   }
   if (DELETERS.has(prog)) {
     const recursive = prog === 'rmdir' || args.some((a) => /^-[A-Za-z]*[rR][A-Za-z]*$/.test(a) || a === '--recursive');
@@ -2150,7 +2419,7 @@ function describeProgram(step: Step, ctx: ShellContext): Described | null {
       || args.some((a, i) => (a === '-exec' || a === '-execdir') && /^(?:rm|shred|unlink)$/.test(basename(args[i + 1] ?? '')));
     const root = args[0] && !args[0].startsWith('-') && !args[0].startsWith('(') && args[0] !== '!' ? quoted(args[0]) : null;
     if (deletes) return { category: 'delete', sentence: `Delete the files it finds under: ${root ?? 'the current folder'}` };
-    return { category: 'read', sentence: root ? `Search for files under: ${root}` : 'Search for files' };
+    return { category: 'read', kind: 'search', sentence: root ? `Search for files under: ${root}` : 'Search for files' };
   }
   if (prog === 'mv' || prog === 'cp' || prog === 'install' || prog === 'ln') {
     const p = parseArgs(prog, args);
@@ -2213,7 +2482,7 @@ function describeProgram(step: Step, ctx: ShellContext): Described | null {
   const install = describeInstall(prog, args);
   if (install) return install;
   if (RUNNERS.has(prog)) {
-    return { category: 'install', sentence: pos[0] ? `Download and run a package: ${quoted(pos[0], 40)} (${prog})` : `Download and run a package (${prog})` };
+    return { category: 'install', kind: 'run-package', sentence: pos[0] ? `Download and run a package: ${quoted(pos[0], 40)} (${prog})` : `Download and run a package (${prog})` };
   }
   const stop = describeStop(prog, args, ctx);
   if (stop) return stop;
@@ -2362,7 +2631,7 @@ function describeSendFlow(pipelineSteps: Step[]): Flow | null {
   const raw = RAW_SOCKETS.has(step.u.prog);
   const dest = sender.dest ?? (raw ? 'another machine' : NO_WEB_HOST);
   const sentence = files.length > 0 ? sendPhrase(files, dest) : `Send data to ${dest} (${step.u.prog})`;
-  return { category: 'network', sentence: withSudo(sentence, step), step, members: pipelineSteps };
+  return { category: 'network', kind: 'send', sentence: withSudo(sentence, step), step, members: pipelineSteps };
 }
 
 /** Does this WHAT show `cls`? Read from the sentence and its kind. */
@@ -2454,6 +2723,13 @@ export interface ActionDescription {
   confident: boolean;
   /** Which entries of `OUTSIDE_UNDERSTOOD_SUBSET` the command met. */
   doubts: readonly ShellDoubt[];
+  /** #815 A: the key of the fixed webhook WHAT (`CARD_ACTION_TEMPLATES`)
+   *  that stands for this action. A key, never text from the input.
+   *  Optional on the public type (`shieldcortex/defence`, #653): a consumer
+   *  built against 5.17.4 may still construct `{ text, confident, doubts }`.
+   *  Every producer in this module sets it; a reader treats a missing one
+   *  as `'tool'`, the generic template. */
+  actionClass?: CardActionClass;
 }
 
 /** The confidence gate's switch. Mutation checks only; nothing sets it off. */
@@ -2508,13 +2784,27 @@ function coversSignals(
  * pinned to that pipeline, and the step is chosen inside it. When nothing can
  * be pinned, the card says so instead of guessing. Last, every write to a
  * sensitive path must appear in the sentence, or it goes generic (R3).
+ *
+ * #815 A review r5 (B5): before any step is described, the whole command is
+ * read for a credential its words carry only together
+ * (`commandCarriesSplitCredential`); if one is found, every target the
+ * sentence would name is withheld.
  */
 export function describeShell(command: string, ctxIn: ShellContext): ActionDescription {
+  const outer = commandTargetsWithheld;
+  try {
+    return describeParsedShell(command, ctxIn);
+  } finally {
+    commandTargetsWithheld = outer;
+  }
+}
+
+function describeParsedShell(command: string, ctxIn: ShellContext): ActionDescription {
   const ctx: ShellContext = { ...ctxIn };
   const { segments, pipelines, truncated, doubts } = parseShell(command);
   const tooLong = truncated ? ` ${COMMAND_TOO_LONG}` : '';
-  const generic = (): ActionDescription => ({ text: `${GENERIC_SHELL}${tooLong}`, confident: false, doubts: [...doubts] });
-  if (segments.length === 0) return { text: `${UNSUMMARISABLE_SHELL}${tooLong}`, confident: false, doubts: [...doubts] };
+  const generic = (): ActionDescription => ({ text: `${GENERIC_SHELL}${tooLong}`, confident: false, doubts: [...doubts], actionClass: 'shell' });
+  if (segments.length === 0) return { text: `${UNSUMMARISABLE_SHELL}${tooLong}`, confident: false, doubts: [...doubts], actionClass: 'shell' };
   if (segments.length > MAX_STEPS) doubts.add('too-many-steps');
   const steps: Step[] = [];
   let dirChanged = false;
@@ -2532,6 +2822,12 @@ export function describeShell(command: string, ctxIn: ShellContext): ActionDescr
   const outside = truncated || [...doubts].some((d) => OUTSIDE_UNDERSTOOD_SUBSET[d].effect === 'generic');
   if (GATE.enabled && outside) return generic();
   ctx.dropGitHost = doubts.has('git-repo-option');
+  // Review r5 (B5): the whole command, before any operand is chosen or cut.
+  try {
+    if (commandCarriesSplitCredential(command, segments)) commandTargetsWithheld = true;
+  } catch {
+    commandTargetsWithheld = true;
+  }
   const verdicts = new Map<string, readonly string[]>();
   const raises = (text: string, signal: string) => {
     if (!verdicts.has(text)) verdicts.set(text, guardOn(text).signals);
@@ -2573,9 +2869,9 @@ export function describeShell(command: string, ctxIn: ShellContext): ActionDescr
         if (chosen) break;
       }
     }
-    if (!chosen) return { text: `${UNATTRIBUTED_SHELL}${tooLong}`, confident: false, doubts: [...doubts] };
+    if (!chosen) return { text: `${UNATTRIBUTED_SHELL}${tooLong}`, confident: false, doubts: [...doubts], actionClass: 'shell' };
   }
-  if (!chosen) return { text: `${UNSUMMARISABLE_SHELL}${tooLong}`, confident: false, doubts: [...doubts] };
+  if (!chosen) return { text: `${UNSUMMARISABLE_SHELL}${tooLong}`, confident: false, doubts: [...doubts], actionClass: 'shell' };
   // A download that is run is one action with the step that runs it.
   members ??= chosen.step.feed ? [chosen.step.feed, chosen.step] : [chosen.step];
   // R1 (#648 r5): every signal on the verdict is shown by the WHAT, and is
@@ -2593,12 +2889,13 @@ export function describeShell(command: string, ctxIn: ShellContext): ActionDescr
   // the WHAT goes generic rather than leave it out.
   const sensitiveWrites = steps.flatMap((s) => [...s.seg.writes, ...(writerOutputs(s.u.prog, s.u.args)?.outputs ?? [])]).filter(isSensitiveWrite);
   // A socket write is named by its host (`… to example.com`), never as a path.
-  const named = (w: string) => text.includes(quoted(w)) || text.includes(quoted(w, 40)) || (isSocketPath(w) && socketHost(w) !== null && text.includes(` to ${socketHost(w)}`));
+  // With every target withheld (review r5), no write can be shown named.
+  const named = (w: string) => !commandTargetsWithheld && (text.includes(quoted(w)) || text.includes(quoted(w, 40)) || (isSocketPath(w) && socketHost(w) !== null && text.includes(` to ${socketHost(w)}`)));
   if (GATE.enabled && sensitiveWrites.some((w) => !named(w))) {
     doubts.add('hidden-write');
     return generic();
   }
-  return { text, confident: true, doubts: [...doubts] };
+  return { text, confident: true, doubts: [...doubts], actionClass: shellActionClass(chosen, members) };
 }
 
 // ── Non-shell tools ──────────────────────────────────────────────────────────
@@ -2649,45 +2946,46 @@ export function describeAction(a: ApprovalCardActionInput): ActionDescription {
   const signals = Array.isArray(a.signals) ? a.signals.map(String) : [];
   const ctx: ShellContext = { signals, cwd: a.cwd, agentPid: a.agentPid, procRoot: a.procRoot, gitSystemConfig: a.gitSystemConfig };
   const raw = String(a.tool ?? '');
-  const sure = (text: string): ActionDescription => ({ text, confident: true, doubts: [] });
+  const sure = (text: string, actionClass: CardActionClass): ActionDescription => ({ text, confident: true, doubts: [], actionClass });
   try {
     const n = normaliseToolName(raw);
-    if (/^(?:killshell|killbash|taskstop)$/.test(n)) return sure('Stop a background command it started');
+    if (/^(?:killshell|killbash|taskstop)$/.test(n)) return sure('Stop a background command it started', 'stop-background');
     if (raw.trim().toLowerCase() === 'process') {
       const verb = typeof args.action === 'string' ? args.action.trim().toLowerCase().replace(/_/g, '-') : '';
-      return sure(own(NATIVE_PROCESS_ACTIONS, verb) ?? 'Control a running command');
+      return sure(own(NATIVE_PROCESS_ACTIONS, verb) ?? 'Control a running command', 'process');
     }
-    if (n === 'websearch' || n === 'web_search') return sure('Search the web');
-    if (n === 'task' || n === 'sessions_spawn' || n === 'agent') return sure('Start a helper agent');
-    if (n === 'apply_patch') return sure('Apply a patch to files');
+    if (n === 'websearch' || n === 'web_search') return sure('Search the web', 'web-search');
+    if (n === 'task' || n === 'sessions_spawn' || n === 'agent') return sure('Start a helper agent', 'agent');
+    if (n === 'apply_patch') return sure('Apply a patch to files', 'patch');
     const family = classifyFamily(raw);
     if (family === 'exec') {
       const command = extractCommand(args);
-      return command ? describeShell(command, ctx) : { text: UNSUMMARISABLE_SHELL, confident: false, doubts: [] };
+      return command ? describeShell(command, ctx) : { text: UNSUMMARISABLE_SHELL, confident: false, doubts: [], actionClass: 'shell' };
     }
     const path = extractPath(args);
+    const at = path ? [path] : [];
     if (family === 'read') {
-      if (/^(?:glob|grep|search|find|ls|list|list_files)$/.test(n)) return sure(path ? `Search files in: ${quoted(path)}` : 'Search files in the current folder');
-      return sure(path ? pathPhrase('Read', [path]) : `Read a file (${safeToolLabel(raw)})`);
+      if (/^(?:glob|grep|search|find|ls|list|list_files)$/.test(n)) return sure(path ? `Search files in: ${quoted(path)}` : 'Search files in the current folder', placedClass('search', at));
+      return sure(path ? pathPhrase('Read', [path]) : `Read a file (${safeToolLabel(raw)})`, placedClass('read', at));
     }
     if (family === 'write') {
-      if (!path) return sure(`Change files (${safeToolLabel(raw)})`);
-      return sure(pathPhrase(/^(?:write|create|write_file)$/.test(n) ? 'Write' : 'Change', [path]));
+      if (!path) return sure(`Change files (${safeToolLabel(raw)})`, 'write');
+      return sure(pathPhrase(/^(?:write|create|write_file)$/.test(n) ? 'Write' : 'Change', [path]), placedClass('write', at));
     }
-    if (family === 'delete') return sure(path ? pathPhrase('Delete', [path]) : `Delete something (${safeToolLabel(raw)})`);
+    if (family === 'delete') return sure(path ? pathPhrase('Delete', [path]) : `Delete something (${safeToolLabel(raw)})`, placedClass('delete', at));
     if (family === 'network') {
       const url = extractUrl(args, raw);
       const first = url.split(/[\s,]+/)[0] ?? '';
       const host = first ? (safeHost(first) ?? safeHost(`https://${first.replace(/^[^@]*@/, '')}`)) : null;
-      if (/fetch|curl|wget|http|request|download/.test(n)) return sure(host ? `Fetch a web page from ${host}` : 'Fetch a web page');
-      return sure(host ? `Send data to ${host} (${safeToolLabel(raw)})` : `Send data off this machine (${safeToolLabel(raw)})`);
+      if (/fetch|curl|wget|http|request|download/.test(n)) return sure(host ? `Fetch a web page from ${host}` : 'Fetch a web page', 'web-fetch');
+      return sure(host ? `Send data to ${host} (${safeToolLabel(raw)})` : `Send data off this machine (${safeToolLabel(raw)})`, 'send');
     }
-    if (family === 'git') return sure(`Change the git repository (${safeToolLabel(raw)})`);
-    if (family === 'memory') return sure("Change the agent's memory");
+    if (family === 'git') return sure(`Change the git repository (${safeToolLabel(raw)})`, 'git');
+    if (family === 'memory') return sure("Change the agent's memory", 'memory');
   } catch {
     /* fall through to the honest line */
   }
-  return { text: `Use ${safeToolLabel(raw)} (details withheld: could not summarise safely)`, confident: false, doubts: [] };
+  return { text: `Use ${safeToolLabel(raw)} (details withheld: could not summarise safely)`, confident: false, doubts: [], actionClass: 'tool' };
 }
 
 // ── Line 3: who is asking ────────────────────────────────────────────────────
@@ -2706,15 +3004,55 @@ export interface ApprovalCardWhoInput {
   sessionId?: string;
 }
 
+/**
+ * #815 A fold 4: the full redactor — its entropy net included — on each part
+ * of a hostname, in every reading of the name (as written, NFKC, unusual
+ * spaces removed). A host is `.`-separated labels of `-`-separated parts; a
+ * generated name (`Mac-mini-runner-<40 hex>`, `sat12-bq108-<uuid>-<serial>`)
+ * joins low-entropy parts into one token the net flags as a whole, while a
+ * key-shaped part is flagged on its own. The whole name is read for named
+ * shapes separately (`credentialInAnyReading`, heuristics off).
+ * Throws what the redactor throws; the caller withholds on a throw.
+ */
+function hostPartTripsRedactor(name: string): boolean {
+  const unspaced = name.replace(UNUSUAL_SPACE_ALL, '');
+  for (const reading of new Set([name, nfkc(name), unspaced, nfkc(unspaced)])) {
+    for (const part of reading.split(/[.\-\s]+/u)) {
+      if (part && vendorShapeInAnyCase(part)) return true;
+    }
+  }
+  return false;
+}
+
 function safeHostname(h: string | undefined): string {
   let name = h;
   if (name === undefined) {
     try { name = osHostname(); } catch { name = ''; }
   }
+  const full = String(name ?? '').trim();
+  // #815 A review B2 (N2): the name is checked whole, as written, BEFORE it
+  // is cut to its first label and middle-clipped. The clip cut a key-shaped
+  // name down to a head and a tail no recogniser knows and still showed both.
+  // A name that trips the credential check is not printed at all; the WHO
+  // line still names the agent and the session ("this machine").
+  // Review r4 / fold 4: named credential shapes in every reading of the
+  // whole name, and the redactor's entropy net one part at a time — not the
+  // long-opaque-run rule, and not the net over the joined name. CI and cloud
+  // boxes carry long generated names (`Mac-mini-runner-<40 hex>`,
+  // `sat12-bq108-<uuid>-<serial>`) that are not secrets, were shown
+  // middle-clipped before B2, and tripped those over the whole name at random.
+  let credential: boolean;
+  try {
+    credential = full.length > MAX_TARGET_CHARS || UNUSUAL_CHARS.test(full)
+      || credentialInAnyReading(full, { heuristics: false }) || hostPartTripsRedactor(full);
+  } catch {
+    credential = true;
+  }
+  if (credential) return 'this machine';
   // The box's own label, not its FQDN: CI and cloud hosts carry long
   // generated names (`<id>.local`, `<id>.internal`), and a host that ate the
   // whole line would push the session off the card.
-  const short = String(name ?? '').trim().split('.')[0];
+  const short = full.split('.')[0];
   return /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/.test(short) ? middleClip(short, 20) : 'this machine';
 }
 
@@ -2729,7 +3067,9 @@ export function describeWho(w: ApprovalCardWhoInput): string {
   }
   const parts = session.split(':');
   const fromKey = parts[0] === 'agent' ? parts[1] : undefined;
-  const id = [w.agentId, fromKey].find((v) => typeof v === 'string' && /^[A-Za-z0-9_.-]{1,32}$/.test(v));
+  // The id is shown only whole and only once the target gate passes it
+  // (#815 A review B1): the shape check alone let a key-shaped id through.
+  const id = [w.agentId, fromKey].find((v) => typeof v === 'string' && /^[A-Za-z0-9_.-]{1,32}$/.test(v) && safeTarget(v, 32) === v);
   const agent = id ? `OpenClaw agent "${id}"` : 'OpenClaw agent';
   if (!session) return `${agent} on ${host}`;
   const kind = parts[0] === 'agent' ? parts[2] : undefined;
@@ -2771,6 +3111,150 @@ export function buildApprovalCard(input: ApprovalCardInput): ApprovalCardSummary
   };
 }
 
+// ── #815 A: the webhook card is a fixed template ────────────────────────────
+
+/**
+ * The webhook card never shows a target (#815 A, descoped after review r5).
+ * Its WHAT is one of these fixed sentences, picked by the KIND of action the
+ * builder parsed and, for a file, by which of `CARD_PLACES` it is in. No
+ * branch, path, host, URL, argument, operand, program or file name from the
+ * command or the tool input can reach it: every value is a literal, and the
+ * only way out is a lookup in `CARD_ACTION_TEMPLATES`.
+ */
+const CARD_ACTIONS = Object.freeze({
+  // Files. Each of these can also say where (`read:ssh`, "Read a file in your SSH folder").
+  read: 'Read a file',
+  search: 'Search files',
+  write: 'Create or change a file',
+  delete: 'Delete files',
+  move: 'Move or copy a file',
+  perms: 'Change who can access a file',
+  send: 'Send data off this machine',
+  // Git.
+  'force-push': 'Force-push to a remote',
+  'delete-remote-branch': 'Delete a branch on a remote',
+  'delete-branch': 'Delete a git branch',
+  'discard-changes': 'Throw away uncommitted git changes',
+  'clean-repo': 'Delete untracked files in a git repository',
+  'git-remote': 'Exchange data with a git remote',
+  git: 'Change a git repository',
+  // The network.
+  download: 'Download from the internet',
+  'remote-login': 'Log in to another machine over SSH',
+  'remote-copy': 'Copy files to or from another machine',
+  'raw-socket': 'Open a raw network connection',
+  publish: 'Publish a package to a registry',
+  network: 'Connect to another machine',
+  'fetch-run': 'Download code from the internet and run it',
+  // Software, programs and the machine.
+  install: 'Install software',
+  'run-package': 'Download and run a package',
+  stop: 'Stop a running program or service',
+  scheduler: 'Change scheduled jobs',
+  firewall: 'Change firewall or network rules',
+  disk: 'Change or erase a disk',
+  script: 'Run a program or script',
+  system: 'Restart or shut down this machine',
+  shell: 'Run a shell command',
+  // Tools other than the shell.
+  'stop-background': 'Stop a background command it started',
+  process: 'Control a running command',
+  'web-search': 'Search the web',
+  'web-fetch': 'Fetch a web page',
+  agent: 'Start a helper agent',
+  patch: 'Apply a patch to files',
+  memory: "Change the agent's memory",
+  tool: 'Use a tool',
+});
+export type CardActionKind = keyof typeof CARD_ACTIONS;
+const PLACED_KINDS = ['read', 'search', 'write', 'delete', 'move', 'perms', 'send'] as const;
+type PlacedKind = (typeof PLACED_KINDS)[number];
+/** An action class: a kind, or a file kind and its place (`read:ssh`). */
+export type CardActionClass = CardActionKind | `${PlacedKind}:${CardPlace}`;
+
+/** A shell step's kind when nothing finer was recorded (`Described.kind`). */
+const CATEGORY_KINDS: Readonly<Record<Category, CardActionKind>> = {
+  read: 'read', write: 'write', delete: 'delete', move: 'move', perms: 'perms', stop: 'stop', network: 'network',
+  'fetch-run': 'fetch-run', install: 'install', git: 'git', scheduler: 'scheduler', firewall: 'firewall', disk: 'disk',
+  script: 'script', system: 'system', other: 'shell',
+};
+
+function placedSentence(kind: PlacedKind, place: CardPlace): string {
+  const where = CARD_PLACES[place];
+  return kind === 'send' ? `Send a file ${where.replace(/^in /, 'from ')} off this machine` : `${CARD_ACTIONS[kind]} ${where}`;
+}
+
+/** Every WHAT the webhook card can carry: the closed set, by action class. */
+export const CARD_ACTION_TEMPLATES = Object.freeze({
+  ...CARD_ACTIONS,
+  ...Object.fromEntries(PLACED_KINDS.flatMap((kind) => (Object.keys(CARD_PLACES) as CardPlace[])
+    .map((place) => [`${kind}:${place}`, placedSentence(kind, place)]))),
+}) as Readonly<Record<CardActionClass, string>>;
+const CARD_ACTION_TEXTS: ReadonlySet<string> = new Set(Object.values(CARD_ACTION_TEMPLATES));
+
+/** A kind, with the place of the first path that is in one of `CARD_PLACES`
+ *  when it is a file kind. Only the key leaves; no path does. */
+function placedClass(kind: CardActionKind, paths: readonly string[]): CardActionClass {
+  if (!(PLACED_KINDS as readonly string[]).includes(kind)) return kind;
+  for (const path of paths) {
+    const place = placeOf(path);
+    if (place) return `${kind as PlacedKind}:${place}`;
+  }
+  return kind;
+}
+
+/** The class of the step(s) a confident shell WHAT stands for. The place is
+ *  read from every word and redirect of those steps (not URLs). */
+function shellActionClass(chosen: Described, members: readonly Step[]): CardActionClass {
+  const words = members.flatMap((s) => [...s.u.args, ...s.seg.reads, ...s.seg.writes]);
+  return placedClass(chosen.kind ?? CATEGORY_KINDS[chosen.category], words.filter((w) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(w)));
+}
+
+/** The webhook WHAT for an action class: a pure lookup in the closed set.
+ *  A class outside it reads as the generic "Use a tool". */
+export function cardActionTemplate(actionClass: unknown): string {
+  return own(CARD_ACTION_TEMPLATES, String(actionClass)) ?? CARD_ACTIONS.tool;
+}
+
+/** The webhook's own check at egress: a WHAT that is not one of the fixed
+ *  templates, whoever built it, is sent as the generic one. */
+export function fixedTemplateAction(text: unknown): string {
+  return typeof text === 'string' && CARD_ACTION_TEXTS.has(text) ? text : CARD_ACTIONS.tool;
+}
+
+const OTHER_RULE = SIGNAL_PHRASES['redacted-signal'];
+const CARD_REASON_TEXTS: ReadonlySet<string> = new Set([...Object.values(SIGNAL_PHRASES), 'matched a safety rule']);
+
+/** The webhook WHY: each reason one of the guard's fixed phrases
+ *  (`SIGNAL_PHRASES`) in its order, once. Anything else — an id the table
+ *  does not know, which `describeSignal` shows as the id — reads as "matched
+ *  another safety rule". */
+export function fixedTemplateReason(text: unknown): string {
+  const parts = (typeof text === 'string' ? text : '').split(REASON_SEPARATOR);
+  return [...new Set(parts.map((p) => (CARD_REASON_TEXTS.has(p) ? p : OTHER_RULE)))].join(REASON_SEPARATOR);
+}
+
+/**
+ * #815 A: the card the WEBHOOK carries. The WHAT is the fixed template for
+ * the action's class, the WHY the guard's own phrases, the WHO the agent, box
+ * and session (`describeWho`, never the tool input). It never names a target;
+ * the interactive card (`buildApprovalCard`, #648) still does.
+ */
+export function buildTemplateApprovalCard(input: ApprovalCardInput): ApprovalCardSummary {
+  let actionClass: CardActionClass = 'tool';
+  try {
+    // A description with no class (the pre-5.18 public shape) is the generic template.
+    actionClass = describeAction(input).actionClass ?? 'tool';
+  } catch {
+    /* the generic template */
+  }
+  return {
+    action: cardActionTemplate(actionClass),
+    reason: fixedTemplateReason(describeSignals(input.signals)),
+    who: describeWho(input),
+  };
+}
+
 /** One card line: every line break becomes a space and every invisible
  *  format character is shown as `<U+XXXX>` (#648 r2 S9) — the fields may have
  *  crossed a process boundary since they were built. */
@@ -2806,6 +3290,56 @@ export function clipCardLine(text: unknown, max: number): string {
 
 function clipLine(text: string, max: number): string {
   return clipCardLine(text, max);
+}
+
+/** A whole card line longer than this is withheld rather than scanned. No
+ *  line the builders make comes near it. A received card meets this gate
+ *  first, as received, and only then is held to 300 characters a line
+ *  (`boundedCard` in operator-notify.ts, #815 A review B2). */
+const MAX_CARD_LINE_SCAN = 1024;
+
+/**
+ * #815 A (review B1): the credential gate for a WHOLE card line, for a
+ * channel that sends card text off the box (the webhook's `card` block).
+ *
+ * `safeTarget` guards each target as a sentence is built, but a field can
+ * still reach a channel without it: the remote-name fallback in
+ * `remoteLabel` once did, and a field that crossed a process boundary was
+ * built somewhere this module cannot see. So the line is put through the
+ * credential redactor and the generic shapes again, BEFORE it is clipped — a
+ * clip can cut a secret down to a fragment no recogniser knows and still
+ * show half of it. Every reading `credentialInAnyReading` lists is checked
+ * (review r4): as received and as it will be shown (flattened), NFKC, with
+ * hidden characters, line breaks and spaces of every kind removed, so a key
+ * split by a zero-width, control, NBSP or U+3000 character, or typed
+ * full-width, is still seen whole. The vendor redactor reads each in every
+ * case (review B2), so a case-folded key is still a key; with every space
+ * removed it is held to named shapes (fold 4: the entropy net reads a
+ * spaceless sentence as a token). `boundedCard` runs this on each line as it
+ * is received, before it folds whitespace or cuts the line at 300 (review
+ * B2): any of those can
+ * turn a key into fragments no recogniser knows.
+ *
+ * A line that trips either reading is replaced whole by `WITHHELD_SECRET`
+ * (one too long to scan, by `WITHHELD_TOO_LONG`); nothing is ever partially
+ * masked. Any other line is returned unchanged, for the caller to flatten and
+ * clip (`clipCardLine`).
+ */
+export function withholdSecretCardLine(text: unknown): string {
+  if (typeof text !== 'string') return WITHHELD_SECRET;
+  if (text.length > MAX_CARD_LINE_SCAN) return WITHHELD_TOO_LONG;
+  // Review r4: every reading (`credentialInAnyReading`) of the line as
+  // received and as it will be shown (flattened) — NFKC, upper and lower case,
+  // hidden characters and spaces of every kind removed — so a key typed
+  // full-width or split by NBSP / U+3000 is seen whole before any fold or clip.
+  for (const view of new Set([text, flattenCardText(text)])) {
+    try {
+      if (credentialInAnyReading(view)) return WITHHELD_SECRET;
+    } catch {
+      return WITHHELD_SECRET;
+    }
+  }
+  return text;
 }
 
 function expiryText(ms: number): string {
