@@ -501,6 +501,116 @@ async function loadScriptResolver(base) {
 }
 
 /**
+ * #907 — the agent-artifact ledger store (create-once per-session records of
+ * write-family and supported-compile calls; design
+ * docs/design/907-native-exec-of-agent-artifact.md §3). Lazy, exactly like the
+ * resolver above: a static import that failed would crash the hook, and a
+ * crashed hook is an allow. A missing module returns null; the caller then
+ * runs no native classifier (adapter non-coverage) but HOLDS a recognised
+ * write/compile in a keyed session rather than letting it through unrecorded.
+ */
+async function loadArtifactStore() {
+  const distRoot = hookDistRoot();
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'agent-artifact-store.js')).href
+    );
+    return typeof mod.recordArtifactCapture === 'function'
+      && typeof mod.buildArtifactView === 'function'
+      && typeof mod.unkeyedArtifactView === 'function'
+      && typeof mod.statContentId === 'function'
+      && typeof mod.readArtifactHeader === 'function'
+      ? mod
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** #907 — the session key the ledger is keyed by, or null. An absent key and a
+ *  non-empty unresolved id are treated the same: no ledger (§3.1). */
+function artifactSessionKey(baseExtra) {
+  if (baseExtra.namedIdentityUnresolved) return null;
+  return typeof baseExtra.sessionKey === 'string' && baseExtra.sessionKey ? baseExtra.sessionKey : null;
+}
+
+/**
+ * #907 — the evaluator options that bind the native classifier to this call:
+ * the per-call ledger view (already bound to this call's session), the stat
+ * and header readers, and the payload `cwd` passed RAW — no `process.cwd()`
+ * fallback, so record and query cannot hash a guessed base differently.
+ * Never throws: a store that cannot build a view leaves the classifier off.
+ */
+function artifactGuardOptions(store, baseExtra, rawCwd) {
+  if (!store) return {};
+  try {
+    const key = artifactSessionKey(baseExtra);
+    const artifactView = key ? store.buildArtifactView({ sessionKey: key }) : store.unkeyedArtifactView();
+    return {
+      artifactView,
+      statPath: store.statContentId,
+      readFileHeader: store.readArtifactHeader,
+      ...(typeof rawCwd === 'string' ? { cwd: rawCwd } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * #907 — publish one create-once record per write/compile capture of this
+ * call. Returns true when the call must be HELD (row J): a capture exists in a
+ * keyed session but could not be recorded. Unkeyed sessions record nothing and
+ * hold nothing (§3.1). Never throws — any failure is a hold, never a silent
+ * unrecorded release.
+ */
+function recordArtifactCaptures(store, guard, toolName, toolInput, baseExtra, rawCwd) {
+  const key = artifactSessionKey(baseExtra);
+  if (!key) return false;
+  let captures;
+  try {
+    captures = typeof guard.nativeArtifactCaptures === 'function'
+      ? guard.nativeArtifactCaptures(toolName, toolInput)
+      : [];
+  } catch {
+    return true;
+  }
+  if (!Array.isArray(captures) || captures.length === 0) return false;
+  if (!store) return true;
+  let held = false;
+  for (const c of captures) {
+    try {
+      const r = store.recordArtifactCapture({
+        sessionKey: key,
+        token: c.token,
+        kind: c.kind,
+        cwd: typeof rawCwd === 'string' ? rawCwd : undefined,
+      });
+      if (!r || r.held) held = true;
+    } catch {
+      held = true;
+    }
+  }
+  return held;
+}
+
+/** #907 — the verdict for a call held because its ledger record could not be
+ *  published: the ordinary (widenable) `require_approval` door, row J. A
+ *  stronger verdict is kept and only gains the signal. */
+function heldForUnrecordedCapture(verdict) {
+  const signals = Array.isArray(verdict.signals) ? verdict.signals : [];
+  const withSig = signals.includes('unclassified-executable') ? signals : [...signals, 'unclassified-executable'];
+  if (verdict.decision !== 'allow') return { ...verdict, signals: withSig };
+  return {
+    ...verdict,
+    decision: 'require_approval',
+    severity: 'dangerous',
+    reason: 'ShieldCortex could not record this write in its agent-artifact ledger, so it is held rather than let through unrecorded',
+    signals: withSig,
+  };
+}
+
+/**
  * Load the reviewed-script allowlist check (#189). Optional exactly like the
  * resolver above, and meaningless without it: an exemption only exists where
  * a fold would have happened. Missing module, empty config, malformed
@@ -3228,6 +3338,15 @@ process.stdin.on('end', async () => {
     const isReviewedScript = resolveScriptSource
       ? await loadReviewedScriptCheck(cfg.reviewedScripts, scriptBase)
       : undefined;
+    // #907: the agent-artifact ledger. The view is bound to THIS call's
+    // session key here; the evaluator never derives or sees a key.
+    const artifactStore = await loadArtifactStore();
+    const guardOptions = {
+      ...(resolveScriptSource
+        ? (isReviewedScript ? { resolveScriptSource, isReviewedScript } : { resolveScriptSource })
+        : {}),
+      ...artifactGuardOptions(artifactStore, baseExtra, hookData.cwd),
+    };
     let verdict;
     try {
       // 4th arg, not the 3rd — the 3rd is the IronDome config. Passing the
@@ -3237,13 +3356,17 @@ process.stdin.on('end', async () => {
         toolName,
         toolInput,
         undefined,
-        resolveScriptSource
-          ? (isReviewedScript ? { resolveScriptSource, isReviewedScript } : { resolveScriptSource })
-          : undefined,
+        Object.keys(guardOptions).length > 0 ? guardOptions : undefined,
       );
     } catch (err) {
       await handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode, await getNotify(), baseExtra); // always exits
       return;
+    }
+    // #907 capture: AFTER this call's own exec check (a same-call write is not
+    // yet in the view the check read, §3.4 item 6) and BEFORE the call is
+    // released. A record that cannot be published holds the call (row J).
+    if (recordArtifactCaptures(artifactStore, guard, toolName, toolInput, baseExtra, hookData.cwd)) {
+      verdict = heldForUnrecordedCapture(verdict);
     }
 
     // ── #509 enforce-when-ready ───────────────────────────────────────────
