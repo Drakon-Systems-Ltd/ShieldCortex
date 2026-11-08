@@ -1413,3 +1413,29 @@ describe('#907 r3 B2 — a quoted `}` inside an interpolation expression does no
     expect(isFloor(fold(cmd, body), SIG_D)).toBe(true);
   });
 });
+
+describe('#907 r3 B1 — inert interpolation, String.raw and argv text never floor', () => {
+  const fold = (cmd: string, body: string) => evaluateToolCall('Bash', { command: cmd }, undefined, {
+    resolveScriptSource: () => body,
+  });
+
+  it.each([
+    ['node scripts/build.mjs', 'console.log(`${"mmap PROT_EXEC"}`)\n'],                                         // r3 exact
+    ['node scripts/build.mjs', 'const text = String.raw`mmap PROT_EXEC`; console.log(text)\n'],                // r3 exact
+    ['node scripts/build.mjs', 'const cp = require("node:child_process"); cp.spawnSync("printf", ["mmap PROT_EXEC"])\n'], // r3 exact
+    ['python3 ./fstr.py', `print(f"{'mmap PROT_EXEC'}")\n`],                                                   // r3 exact (py regression)
+  ])('folded %j only names the words: never the catastrophic floor', (cmd, body) => {
+    const v = fold(cmd, body);
+    expect(v.signals).not.toContain(SIG_D);
+    expect(v.decision).not.toBe('block');
+  });
+
+  it.each([
+    ['python3 ./fstr.py', 'import mmap\nprint(f"{mmap.mmap(-1,4096,prot=mmap.PROT_EXEC)}")\n'],                // interpolation is code
+    ['python3 ./fstr.py', `print(f"{exec('import mmap; mmap.mmap(-1, 1, prot=mmap.PROT_EXEC)')}")\n`],          // nested literal fed to exec
+    ['node ./t.mjs', 'const cp = require("node:child_process"); cp.spawnSync("python3", ["-c", "import mmap; mmap.mmap(-1, 1, prot=mmap.PROT_EXEC)"])\n'], // interpreter argv is code
+    ['node ./t.mjs', 'console.log(String.raw`${mmap(PROT_EXEC)}`)\n'],                                          // String.raw interpolation still runs
+  ])('positive control %j performs the mapping: floor', (cmd, body) => {
+    expect(isFloor(fold(cmd, body), SIG_D)).toBe(true);
+  });
+});

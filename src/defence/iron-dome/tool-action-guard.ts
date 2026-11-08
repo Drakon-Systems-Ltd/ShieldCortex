@@ -8570,6 +8570,8 @@ const ROW_D_CODE_CALL = /(?<![\w$.])(?:eval|exec|execfile|compile|Function|syste
  *  their literal arguments are kept, and nothing is escalated. An ordinary
  *  `import("node:path")` therefore keeps `node:path` and nothing else. */
 const ROW_D_LITERAL_CALL = /(?<![\w$.])(?:import|__import__|getattr|setTimeout|setInterval)\s*\(|\b(?:importlib\.import_module|runpy\.run_\w+)\s*\(/g;
+/** A program that reads an argv string as code (`python3 -c …`, `sh -c …`). */
+const ROW_D_INTERPRETER_PROGRAM = /^(?:python[\d.]*|pypy[\d.]*|node(?:js)?|deno|bun|tsx|ts-node|sh|bash|zsh|dash|ksh|fish|perl[\d.]*|ruby|php[\d.]*|lua[\d.]*|env|sudo|xargs|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh|osascript)$/i;
 /** Ruby / Perl / PHP evaluate strings without parentheses (`eval $code`). */
 const ROW_D_BARE_EVAL = /(?<![\w$.])(?:\w+_)?eval\b|\bcreate_function\b|\bassert\s*\(/;
 /** A Python string prefix in front of its quote (`f"…"`, `rb'…'`). */
@@ -8582,7 +8584,9 @@ const PY_STRING_PREFIX = /[rRbBuUfFtT]/;
  * code: a JS tagged template (zx's `$\`…\`` runs a shell) or a Perl/PHP
  * double-quoted string with an expression interpolation.
  */
-function interpolationSpans(text: string, lo: number, hi: number, region: ScanRegion): Array<[number, number]> | 'code' {
+function interpolationSpans(
+  text: string, lo: number, hi: number, region: ScanRegion, nested: Array<[number, number]> = [],
+): Array<[number, number]> | 'code' {
   const lang = region.lang;
   const triple = lo - region.start >= 3 && (text.startsWith('"""', lo - 3) || text.startsWith("'''", lo - 3));
   const quoteAt = lo - (triple ? 3 : 1);
@@ -8596,7 +8600,10 @@ function interpolationSpans(text: string, lo: number, hi: number, region: ScanRe
   } else if (lang === 'node' && quote === '`') {
     let p = quoteAt - 1;
     while (p >= region.start && /\s/.test(text[p]!)) p--;
-    if (p >= region.start && /[\w$)\]]/.test(text[p]!)) return 'code'; // a tagged template
+    // A tagged template is code (zx's `$\`…\`` runs a shell) — except
+    // `String.raw`, which only returns its text (review r3 B1).
+    const rawTag = /\bString\.raw$/.test(text.slice(Math.max(region.start, p - 10), p + 1));
+    if (p >= region.start && /[\w$)\]]/.test(text[p]!) && !rawTag) return 'code';
     opener = '${';
   } else if (lang === 'ruby' && quote === '"') {
     opener = '#{';
@@ -8623,6 +8630,10 @@ function interpolationSpans(text: string, lo: number, hi: number, region: ScanRe
         let k = j + 1;
         while (k < hi && text[k] !== q) { if (text[k] === '\\') k++; k++; }
         if (k >= hi) { j = hi; break; }
+        // A plain string INSIDE the expression is data unless a code call
+        // takes it (`f"{'mmap PROT_EXEC'}"` prints text, review r3 B1); a
+        // nested template may interpolate again, so it stays code.
+        if (q !== '`') nested.push([j + 1, k]);
         j = k;
         continue;
       }
@@ -8680,10 +8691,15 @@ function rowDProgramText(text: string, region: ScanRegion): string {
   const inert: Array<{ lo: number; hi: number; literal: boolean }> = [];
   for (const { range: [lo, hi], comment } of scriptDataRanges(text, region)) {
     if (comment) { inert.push({ lo, hi, literal: false }); continue; }
-    const spans = interpolationSpans(text, lo, hi, region);
+    const nested: Array<[number, number]> = [];
+    const spans = interpolationSpans(text, lo, hi, region, nested);
     if (spans === 'code') continue;
     let at = lo;
-    for (const [a, b] of spans) { if (a > at) inert.push({ lo: at, hi: a, literal: true }); at = b; }
+    for (const [a, b] of spans) {
+      if (a > at) inert.push({ lo: at, hi: a, literal: true });
+      for (const [x, y] of nested) if (x >= a && y <= b && y > x) inert.push({ lo: x, hi: y, literal: true });
+      at = b;
+    }
     if (hi > at) inert.push({ lo: at, hi, literal: true });
   }
   const blankExcept = (keep: (r: { lo: number; hi: number; literal: boolean }, k: number) => boolean): string => {
@@ -8717,9 +8733,21 @@ function rowDProgramText(text: string, region: ScanRegion): string {
   for (const m of code.matchAll(ROW_D_CODE_CALL)) {
     const open = m.index! + m[0].length - 1;
     const close = matchingParen(code, open, code.length);
-    keepArgs(open, close);
     // The program operand: every argument of `Function(…)`, else the first.
     const operandEnd = /Function\s*\($/.test(m[0]) ? close : firstArgumentEnd(code, open, close);
+    // An argv-taking call (`spawnSync("printf", ["…"])`) whose program is a
+    // literal NON-interpreter passes its other strings as argv DATA, not code
+    // (review r3 B1). An interpreter / shell program, or a computed one, keeps
+    // every literal argument.
+    if (/(?:spawn|spawnSync|execFile|execFileSync)\s*\($/.test(m[0])) {
+      const prog = /^\s*(["'`])([^"'`\\$]*)\1\s*$/.exec(text.slice(region.start + open + 1, region.start + operandEnd));
+      const base = prog ? prog[2]!.split('/').pop()! : null;
+      if (base !== null && base !== '' && !ROW_D_INTERPRETER_PROGRAM.test(base)) {
+        keepArgs(open, operandEnd);
+        continue;
+      }
+    }
+    keepArgs(open, close);
     const operand = code.slice(open + 1, operandEnd).replace(/(?<![\w$])[rRbBuU]{1,2}(?=["'])/g, '');
     if (/[A-Za-z_$]/.test(operand)) return blankExcept(r => r.literal);
   }
