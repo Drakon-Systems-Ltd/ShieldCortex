@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <b>Holds a hijacked AI agent's recognised dangerous tool calls for a human, hard-stops the catastrophic ones, and keeps recognised poisoned instructions out of the memory it writes through ShieldCortex.</b>
+  <b>On Claude Code and OpenClaw with Action Guard enforcing, holds a hijacked AI agent's recognised dangerous tool calls for a human and hard-stops the catastrophic ones; keeps recognised poisoned instructions out of the memory it writes through ShieldCortex.</b>
 </p>
 
 <p align="center">
@@ -13,9 +13,9 @@
 
 **Trusted task: let it work. Suspicious call: hold it for a human. Catastrophe: a hard stop.**
 
-- **Stops recognised dangerous and catastrophic tool calls from a hijacked agent.** Once Action Guard is enforcing, a trusted call runs, a call the guard recognises as dangerous is held for your approval, and a catastrophic command is a hard stop. [Tool gate](docs/CAPABILITIES.md#tool-gate-action-guard)
+- **Gates recognised dangerous and catastrophic tool calls from a hijacked agent.** On Claude Code and OpenClaw, once Action Guard is enforcing, a trusted call runs, a call the guard recognises as dangerous is held for your approval, and a catastrophic command is a hard stop. [Tool gate](docs/CAPABILITIES.md#tool-gate-action-guard)
 - **Keeps recognised poisoned instructions out of memory.** Writes that go through ShieldCortex are scanned first; recognised injection and leaked credentials are quarantined before they stick. [How scan results work](docs/SCAN.md)
-- **Catches tampering you would not see.** MCP tool descriptions, skill files and packages are scanned for poisoning and drift, and your agents' own config files are checked against a signed baseline at each fresh Claude Code startup, with one webhook notification when something changed. [Limits](docs/CAPABILITIES.md#agent-config-watch)
+- **Reports tampering you would not see.** MCP tool descriptions are scanned for poisoning and drift, skill files for hidden instructions and packages for risky code, and your agents' own config files are checked against a signed baseline at each fresh Claude Code startup, with one webhook notification when something changed. [Limits](docs/CAPABILITIES.md#agent-config-watch)
 
 Action Guard is off by default on Claude Code and OpenClaw; Hermes enforces once its plugin is enabled, and blocks rather than holds. Claude Code, OpenClaw and Hermes get the tool gate and the memory scan. Codex, Cursor, VS Code and other MCP hosts get the memory scan only: a memory server the model may call, not a gate. The Claude SDK browser and computer toolsets get a gate with no memory scan. [Where it can block](#where-it-can-block)
 

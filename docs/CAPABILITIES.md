@@ -27,7 +27,7 @@ The card is a Claude Code hook feature and needs a configured notify webhook (`a
 
 The guard half of one-tap approve from Telegram also ships in 5.18, as a loopback-only `shieldcortex guard approve-tap` endpoint that is off by default. The chat half is not in this release, so a tap cannot be completed end to end yet; approvals still go through `shieldcortex approve`.
 
-- Commands: `shieldcortex approve [hash]`, `shieldcortex deny [hash]`, `shieldcortex guard approve-tap`, `shieldcortex guard test-approval`
+- Commands: `shieldcortex approve <hash>` (held call), `shieldcortex approve --denial <actionId>` (headless denial), `shieldcortex deny [hash]`, `shieldcortex guard approve-tap`, `shieldcortex guard test-approval`
 - Source: `src/cli/approve.ts`, `src/cli/deny.ts`, `src/cli/approve-tap.ts`, `src/cli/guard.ts`
 - CHANGELOG: [What's new in 5.18](UPDATING.md#whats-new-in-518), 5.6.0
 
@@ -37,7 +37,7 @@ The OpenClaw plugin scans the conversation that reaches the model on the `llm_in
 
 From 5.18.2, an in-process injection hit on `llm_input` records `injectionPatterns`, closed-set `category:pattern` ids, so a false positive can be traced to a rule. The matched text is still not stored.
 
-Limits: the hooks are only live when the host grants conversation access (`plugins.entries.shieldcortex-realtime.hooks.allowConversationAccess=true` in `openclaw.json`); without it, `doctor` and the plugin's own status report the scanning as inactive. A detection on `llm_input` cannot stop the turn; `enforce` blocks only through `before_agent_run`. If the gate hits an internal error or its scan deadline, the turn proceeds unscanned; the failure is logged and, for a timeout, audited and alerted, and it is never recorded as clean. `observe` stays the default. The MCP fallback path has no local pattern names.
+Limits: the hooks are only live when the host grants conversation access (`plugins.entries.shieldcortex-realtime.hooks.allowConversationAccess=true` in `openclaw.json`); without it, `doctor` and the plugin's own status report the scanning as inactive. A detection on `llm_input` cannot stop the turn; `enforce` blocks only through `before_agent_run`. A scan that did not complete is never recorded as clean. `observe` stays the default. The MCP fallback path has no local pattern names.
 
 - Source: `plugins/openclaw/index.ts`, `plugins/openclaw/conversation-access.ts`
 - CHANGELOG: 5.18.2 (#1010); the firewall itself: 4.47.39
@@ -134,12 +134,12 @@ Limits: it detects and reports; it does not block, and it is not live between st
 
 - **Tampering is detected and reported.** A hand edit fails the check. `doctor` reports it and writes nothing; its posture row says `Guard unknown` rather than `off` while the signed posture depends on a signature not yet adopted, and it names no posture command in that state.
 - **ShieldCortex never re-signs a tampered file on its own.** Explicit setters refuse and automatic writers skip. `shieldcortex config --resign` prints the verdict, the sha256 of the current bytes and the settings that would leave the strict posture, and writes nothing; only `--resign --confirm <sha256>` re-signs, and only the exact bytes previewed (5.11, #647).
-- **A file the runtime cannot authenticate is held strict, not guessed.** In the OpenClaw runtime, a `config.json` that is a link, or whose metadata cannot be read, is accepted only with a valid signature, and a valid signature is honoured even when it turns Guard off; unsigned or mis-signed, it is held at the strict posture (Guard on and enforcing, no auto-approve, broker off, no readiness gate) (5.17.2, #878, PR #984). The CLI applies the strict view to a file whose signature check says it was tampered with. `doctor` does not enforce anything: for an unsigned file behind a link it reports the posture as unknown. The Claude Code hook checks only symlinked config; if it cannot read a file's metadata it uses the bytes it parsed, not the strict posture.
+- **A file the runtime cannot authenticate is held strict, not guessed.** In the OpenClaw runtime, a `config.json` that is a link, or whose metadata cannot be read, is accepted only with a valid signature, and a valid signature is honoured even when it turns Guard off; unsigned or mis-signed, it is held at the strict posture (Guard on and enforcing, no auto-approve, broker off, no readiness gate) (5.17.2, #878, PR #984). The CLI applies the same strict view on a normal read to a file whose signature check says it was tampered with, and to an unsigned or mis-signed file behind a link. `doctor` is a read-only caller: it enforces nothing, and for an unsigned file behind a link it reports the posture as unknown. The Claude Code hook checks only symlinked config; if it cannot read a file's metadata it uses the bytes it parsed, not the strict posture.
 - **An established posture survives a file that breaks underneath it.** Once a process has read a posture, a file that turns blank, corrupt or unreadable keeps that posture and config writes are refused. A deliberate signed change, including turning Guard off, takes effect.
 
-The Claude Code hook and the OpenClaw runtime do not verify a plain regular `config.json`; the CLI applies a strict view to a tampered file before the policy lock is applied; and a signature alone is not a same-user boundary. Enforcement is the policy lock's job: `sudo shieldcortex protect`, run once by a human as root, pins the security-critical settings in a root-owned lock.
+The Claude Code hook and the OpenClaw runtime do not verify a plain regular `config.json`; the CLI applies a strict view to a tampered file, or to an unverified file behind a link, before the policy lock is applied; and a signature alone is not a same-user boundary. Enforcement is the policy lock's job: `sudo shieldcortex protect`, run once by a human as root, pins the security-critical settings in a root-owned lock.
 
-- Source: `src/cli/dispatch-help.ts` (`--resign` grammar), `src/guard/posture-switch.ts` (`runtimeBase`, `gradedPosture`, `UNKNOWN_FIX`), `src/cli/protect.ts`, `src/cli/doctor.ts`, `src/setup/host-table.ts` (`Guard unknown`)
+- Source: `src/cli/dispatch-help.ts` (`--resign` grammar), `src/cloud/config.ts` (`readRawConfigState`: strict view on `tampered`, and on `unverified` for a non-read-only caller), `src/guard/posture-switch.ts` (`runtimeBase`, `gradedPosture`, `UNKNOWN_FIX`), `src/cli/protect.ts`, `src/cli/doctor.ts`, `src/setup/host-table.ts` (`Guard unknown`)
 - CHANGELOG: [What's new in 5.11](UPDATING.md#whats-new-in-511) (#647), 5.17.2 (#878), [Policy lock](UPDATING.md#policy-lock)
 
 ### Script allowlist
