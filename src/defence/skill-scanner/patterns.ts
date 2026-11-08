@@ -110,6 +110,17 @@ const AGENT_CONFIG_FILE =
   String.raw`(?:\.claude\/settings[\w.-]*\.json|\.claude\/hooks|\.codex\/config\.toml|\.cursor\/mcp\.json|\.gemini\/settings\.json|\.windsurf\/mcp[\w.-]*\.json|(?<![\w-])mcp\.json\b)`;
 const CONFIG_WRITE_VERB =
   String.raw`\b${NOT_NEGATED}${NOT_NOUN_USE}(?:write|add|append|put|insert|create|edit|modify|update|change|set|merge|patch|overwrite|replace|configure|save|store|paste|copy|drop|place)\b`;
+// The destination preposition must be the verb's own ("add X to <path>",
+// "change the value of <path>"). In a compound preposition the `to` / `of`
+// belongs to the word before it ("next to mcp.json", "instead of mcp.json"):
+// that says where something sits or what it is compared with, not that the
+// config file is written. Closed word lists, bounded horizontal whitespace.
+// Adverbs and particles that keep the verb's own destination ("back to",
+// "over to", "up in", "out of") are deliberately not listed.
+const NOT_COMPOUND_TO =
+  String.raw`(?<!\b(?:next|close|closer|near|nearer|adjacent|similar|identical|prior|subsequent|due|owing|thanks|according|pursuant|relative|compared|opposed|contrary|respect|regard|regards)[ \t]{1,4})`;
+const NOT_COMPOUND_OF =
+  String.raw`(?<!\b(?:instead|outside|ahead|regardless|irrespective|because|independent|independently)[ \t]{1,4})`;
 
 /** The rows of one SKILL pattern group, for per-regex tests. */
 export function skillPatternGroupRows(name: string): readonly RegExp[] {
@@ -270,7 +281,7 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
         `${CONFIG_WRITE_VERB}[ \\t]{1,4}` +
           `(?:(?:the|this|your|a|an|following|new|updated|these|those|another)[ \\t]{1,4}){0,3}` +
           `(?:(?!(?:to|into|in|inside|within|of|on|for|about|mention|regarding|and|or|that|which)\\b)[\\w-]{1,20}[ \\t]{1,4}){0,3}?` +
-          `(?:(?:to|into|in|inside|within|of)[ \\t]{1,4}(?:(?:the|your|this)[ \\t]{1,4})?)?` +
+          `(?:(?:${NOT_COMPOUND_TO}to|into|in|inside|within|${NOT_COMPOUND_OF}of)[ \\t]{1,4}(?:(?:the|your|this)[ \\t]{1,4})?)?` +
           `[\`"'*_]{0,2}[\\w~$./\\\\-]{0,60}?${AGENT_CONFIG_FILE}(?![ \\t]{1,4}(?:schema|link|docs?|documentation|section|page|reference|example|spec|guide)\\b)`,
         'i',
       ),
