@@ -176,6 +176,14 @@ export interface ToolGuardEvaluatorOptions {
   /** #189: answers whether a human pinned this exact path + content as
    *  reviewed. An evaluator that predates the seam simply ignores it. */
   isReviewedScript?: (scriptPath: string, source: string) => boolean;
+  /** #907: the per-call agent-artifact ledger view (already bound to this
+   *  call's session), stat/header readers and the raw call cwd. Opaque here —
+   *  built by {@link InterceptorOptions.artifactLedger}; an evaluator that
+   *  predates the seam simply ignores them. */
+  artifactView?: unknown;
+  statPath?: (absPath: string) => unknown;
+  readFileHeader?: (absPath: string) => Uint8Array | null;
+  cwd?: string;
 }
 export type ToolGuardEvaluator = (
   toolName: string,
@@ -1629,6 +1637,22 @@ interface InterceptorOptions {
    *  limit, so a looping or compromised agent must not be able to spend it
    *  without bound. Exhausting it yields no judge, which yields a hold. */
   maxJudgeCallsPerMinute?: number;
+  /** #907 — the agent-artifact ledger, injected from `shieldcortex/defence`
+   *  (agent-artifact-store.ts). `evaluatorOptions` binds the per-call view to
+   *  this call's session; `record` publishes this call's write/compile
+   *  captures and returns `held: true` when one could not be published — the
+   *  call is then held on the ordinary door rather than let through
+   *  unrecorded. Absent on an older dist: no native classifier (adapter
+   *  non-coverage), nothing recorded. */
+  artifactLedger?: {
+    evaluatorOptions: (sessionId: string | undefined, cwd: string | undefined) => Partial<ToolGuardEvaluatorOptions>;
+    record: (
+      toolName: string,
+      args: Record<string, unknown>,
+      sessionId: string | undefined,
+      cwd: string | undefined,
+    ) => { held: boolean };
+  };
   /** #260 — session-guard index. Injected from `shieldcortex/defence`. */
   sessionGuard?: {
     keyFor: (sessionId: string | undefined) => string | null;
@@ -1668,6 +1692,22 @@ const SESSION_TOOL_MEMORY = 12;
  *  being placed anywhere near a prompt. */
 const TOOL_NAME_SAFE = /[^A-Za-z0-9_.:-]/g;
 
+/** #907: a call held because its agent-artifact record could not be
+ *  published — the ordinary (widenable) door, row J. A stronger verdict is
+ *  kept and only gains the signal. */
+function heldForUnrecordedCapture(v: ToolGuardVerdictLike): ToolGuardVerdictLike {
+  const signals = Array.isArray(v.signals) ? v.signals : [];
+  const withSig = signals.includes('unclassified-executable') ? signals : [...signals, 'unclassified-executable'];
+  if (v.decision !== 'allow') return { ...v, signals: withSig };
+  return {
+    ...v,
+    decision: 'require_approval',
+    severity: 'dangerous',
+    reason: 'ShieldCortex could not record this write in its agent-artifact ledger, so it is held rather than let through unrecorded',
+    signals: withSig,
+  };
+}
+
 export function createInterceptor(
   config: InterceptorConfig,
   pipeline: PipelineRunner,
@@ -1678,6 +1718,25 @@ export function createInterceptor(
 } {
   const denyCache = new DenyCache();
   const rateLimiter = new RateLimiter(options?.maxPromptsPerMinute ?? 5);
+  /** #907: never throws — a ledger that cannot build a view leaves the
+   *  native classifier off for this call (adapter non-coverage). */
+  const artifactEvaluatorOptions = (context: ToolCallContext): Partial<ToolGuardEvaluatorOptions> => {
+    if (!options?.artifactLedger) return {};
+    try {
+      return options.artifactLedger.evaluatorOptions(context.sessionId, toolCallCwd(context));
+    } catch {
+      return {};
+    }
+  };
+  /** #907: true when a capture could not be recorded (hold). A throw is a hold. */
+  const recordArtifactCaptures = (context: ToolCallContext): boolean => {
+    if (!options?.artifactLedger) return false;
+    try {
+      return options.artifactLedger.record(context.toolName, context.arguments || {}, context.sessionId, toolCallCwd(context)).held === true;
+    } catch {
+      return true;
+    }
+  };
   const log = config.logger ?? { info: console.log, warn: console.warn };
   const onAuditEntry = options?.onAuditEntry;
   const bindAudit = options?.bindAudit;
@@ -2173,11 +2232,16 @@ export function createInterceptor(
         ...(actionGuardCfg.reviewedScripts && actionGuardCfg.reviewedScripts.length > 0
           ? { isReviewedScript: createReviewedScriptCheck(actionGuardCfg.reviewedScripts, toolCallCwd(context)) }
           : {}),
+        // #907: the native-exec floor/door inputs, bound to this call's session.
+        ...artifactEvaluatorOptions(context),
       });
     } catch (err) {
       handleGuardUnavailable(context, `action-guard error: ${err instanceof Error ? err.message : err}`, call);
       return;
     }
+    // #907 capture: after this call's own exec check, before it is released.
+    // A record that cannot be published holds the call (row J, the door).
+    if (recordArtifactCaptures(context)) v = heldForUnrecordedCapture(v);
 
     // #233: a prompt injection detected on the CONVERSATION path earlier in this
     // session tightens the guard by one notch for a bounded window — sensitive

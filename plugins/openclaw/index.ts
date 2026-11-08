@@ -2808,6 +2808,63 @@ export function isInternalContent(text: string, sessionId?: string | null): bool
 }
 
 type InterceptorRuntimeOptions = NonNullable<Parameters<typeof createInterceptor>[2]>;
+/**
+ * #907 — the agent-artifact ledger adapter for the interceptor, built from
+ * the injected defence module (agent-artifact-store.ts). The session key is
+ * `sessionKeyFor(context.sessionId)`, the same host-owned keying the hook and
+ * the session-guard index use; an absent or unresolved id has no key, so the
+ * view is unkeyed (every native exec is the door) and nothing is recorded or
+ * held. Undefined on an older dist without the exports.
+ */
+export function artifactLedgerAdapter(defenceMod: any): InterceptorRuntimeOptions['artifactLedger'] {
+  const m = defenceMod;
+  if (!m
+    || typeof m.sessionKeyFor !== 'function'
+    || typeof m.nativeArtifactCaptures !== 'function'
+    || typeof m.recordArtifactCapture !== 'function'
+    || typeof m.buildArtifactView !== 'function'
+    || typeof m.unkeyedArtifactView !== 'function'
+    || typeof m.statContentId !== 'function'
+    || typeof m.readArtifactHeader !== 'function') {
+    return undefined;
+  }
+  const keyOf = (sessionId: string | undefined): string | null => {
+    try {
+      const k = m.sessionKeyFor(sessionId);
+      return typeof k === 'string' && k ? k : null;
+    } catch {
+      return null;
+    }
+  };
+  return {
+    evaluatorOptions: (sessionId, cwd) => {
+      const key = keyOf(sessionId);
+      return {
+        artifactView: key ? m.buildArtifactView({ sessionKey: key }) : m.unkeyedArtifactView(),
+        statPath: m.statContentId,
+        readFileHeader: m.readArtifactHeader,
+        ...(typeof cwd === 'string' ? { cwd } : {}),
+      };
+    },
+    record: (toolName, args, sessionId, cwd) => {
+      const key = keyOf(sessionId);
+      if (!key) return { held: false };
+      const captures = m.nativeArtifactCaptures(toolName, args);
+      if (!Array.isArray(captures) || captures.length === 0) return { held: false };
+      let held = false;
+      for (const c of captures) {
+        try {
+          const r = m.recordArtifactCapture({ sessionKey: key, token: c.token, kind: c.kind, cwd });
+          if (!r || r.held) held = true;
+        } catch {
+          held = true;
+        }
+      }
+      return { held };
+    },
+  };
+}
+
 type ActionLeaseGate = NonNullable<ReturnType<NonNullable<InterceptorRuntimeOptions['checkActionLease']>>>;
 
 /**
@@ -4836,6 +4893,9 @@ export default {
           // #854: both adapters act as the SAME identity the Claude Code hook
           // leases as — see actionLeaseAdapters.
           ...actionLeaseAdapters(defenceMod),
+          // #907: the agent-artifact ledger (native-exec floor + door). Same
+          // host-owned keying as the session-guard index and the hook.
+          artifactLedger: artifactLedgerAdapter(defenceMod),
           // #260: the session-guard index. Same formula as the Claude Code
           // hook. Absent on an older dist — then emitAudit still stamps origin
           // but does not write an index nobody would summarise.
