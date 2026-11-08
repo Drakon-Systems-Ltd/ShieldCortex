@@ -32,6 +32,8 @@ Requests are read-only metadata GETs plus one OSV POST. Nothing is downloaded or
 | OSV advisory, new version, install hook, source-only | Plain-English reasons are added to the approval card (`OSV: GHSA-… affects this version`, `published 11 h ago`, `runs a postinstall script on install`) and to the audit row (`packageVetting`). The decision is unchanged: age or hooks alone never block. |
 | Lookup failed | Reason `unchecked: <why>` on the card and audit row. Never reported as clean. The install proceeds as the guard would have decided. |
 
+The Action Guard webhook card (#815) carries only fixed phrases, so there each finding appears by kind: `installs a package listed as malicious`, `installs a package version with a published security advisory`, `installs a package version published only days ago`, `installs a package that runs scripts during install` / `… runs its setup code during install`, `could not finish the package check`. The package name, version and OSV id never leave the box on that card; they are on the interactive card and the audit row.
+
 ## Failure posture and cache
 
 - Hard 3 s budget for the whole command. Past it, the affected packages are `unchecked`.

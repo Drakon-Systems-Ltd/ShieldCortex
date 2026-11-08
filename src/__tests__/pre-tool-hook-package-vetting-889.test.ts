@@ -161,4 +161,46 @@ describe('pre-tool hook — #889 package vetting', () => {
     expect(decisionOf(r)?.permissionDecision ?? 'allow').not.toBe('deny');
     expect(auditRows().some((x) => Array.isArray(x.packageVetting))).toBe(false);
   });
+
+  // #889 review item 6, the hook's INLINE copy of the strict posture. A
+  // symlinked config.json that no signature authenticates is held strict by
+  // `inlineStrictPosture` inside the hook (#878), not by dist's
+  // `applyStrictFailClosedPosture` (covered in package-vetting-policy-889), so
+  // the opt-out has to be dropped by that copy too — in both spellings.
+  const linkConfig = (body: Record<string, unknown>) => {
+    const dir = path.join(tempHome, '.shieldcortex');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'target.json'), JSON.stringify(body));
+    fs.symlinkSync('target.json', path.join(dir, 'config.json'));
+  };
+
+  it('inline strict posture (unsigned linked config): packageVetting.enabled:false is dropped and a MAL- package is blocked', async () => {
+    linkConfig({ actionGuard: { enabled: false, enforce: false, packageVetting: { enabled: false, minAgeDays: 3 } } });
+    const r = await runHook(install('@ifasn/ms-doc-mcp@1.0.3'));
+    const d = decisionOf(r);
+    expect(d?.permissionDecision).toBe('deny');
+    expect(d?.permissionDecisionReason).toContain('MAL-2026-18603');
+    const row = auditRows().find((x) => x.outcome === 'auto_denied');
+    expect(row?.packageVetting?.[0]).toMatchObject({ name: '@ifasn/ms-doc-mcp', version: '1.0.3', kinds: ['malicious'] });
+  });
+
+  it('inline strict posture: the deprecated interceptor.actionGuard alias cannot carry the opt-out either', async () => {
+    linkConfig({ actionGuard: { enabled: true, enforce: false }, interceptor: { actionGuard: { packageVetting: { enabled: false } } } });
+    const r = await runHook(install('@ifasn/ms-doc-mcp@1.0.3'));
+    const d = decisionOf(r);
+    expect(d?.permissionDecision).toBe('deny');
+    expect(d?.permissionDecisionReason).toContain('MAL-2026-18603');
+  });
+
+  it('inline strict posture keeps minAgeDays: only the opt-out is dropped', async () => {
+    // fresh-lib was published 11 h ago. With minAgeDays:0 kept from the linked
+    // config there is no age finding; the check itself still runs (a row exists).
+    linkConfig({ actionGuard: { enabled: true, enforce: false, packageVetting: { enabled: false, minAgeDays: 0 } } });
+    const r = await runHook(install('fresh-lib'));
+    expect(decisionOf(r)?.permissionDecision ?? 'allow').not.toBe('deny');
+    const row = auditRows().find((x) => Array.isArray(x.packageVetting));
+    expect(row).toBeDefined();
+    expect(row!.packageVetting[0]).toMatchObject({ name: 'fresh-lib', version: '3.5.0', status: 'checked' });
+    expect(row!.packageVetting[0].kinds).not.toContain('new-version');
+  });
 });

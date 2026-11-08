@@ -421,6 +421,13 @@ export function __setRuntimeForTest(runtime: OpenClawRuntime | null): void {
   _runtimeOverride = runtime;
   if (runtime) runtimePromise = null;
 }
+/** Tests only: the EFFECTIVE config the gate is built from — shield config
+ *  merged with the plugin entry, then the policy lock (or, with a lock on disk
+ *  and no usable reader, the inline fail-closed posture). #889 R4 pins what
+ *  that inline copy does to `packageVetting`. */
+export function __loadConfigForTest(): Promise<SCConfig> {
+  return loadConfig();
+}
 export function __resetConfigStateForTest(): void {
   _mergedConfig = null;
   _configOverride = null;
