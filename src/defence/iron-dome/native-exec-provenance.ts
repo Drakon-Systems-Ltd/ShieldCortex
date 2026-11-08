@@ -357,7 +357,10 @@ export function isNativeImageHeader(bytes: Uint8Array | null | undefined): boole
  * `'absent'` only when the final component does not exist, `null` for every
  * other failure. Never throws.
  */
-export function statContentId(absPath: string, expired?: () => boolean): ContentId | 'absent' | null {
+export function statContentId(
+  absPath: string,
+  expired: () => boolean = budgetOf(undefined).expired,
+): ContentId | 'absent' | null {
   try {
     if (expired?.()) return null;
     const st = fs.statSync(absPath);
@@ -386,7 +389,10 @@ const OPEN_HEADER_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0)
  *  before any open (so a device is not even opened); the open is still
  *  non-blocking and re-checked with fstat, because the path can be swapped
  *  between the two. Never throws. */
-export function readArtifactHeader(absPath: string, expired?: () => boolean): Uint8Array | null {
+export function readArtifactHeader(
+  absPath: string,
+  expired: () => boolean = budgetOf(undefined).expired,
+): Uint8Array | null {
   let fd: number | null = null;
   try {
     if (expired?.()) return null;
@@ -706,7 +712,8 @@ function publishRecord(dir: string, finalName: string, body: string, expired: ()
  * record, path resolution and the first-record sweep share one deadline
  * (a fresh default when absent). It is checked before every filesystem
  * operation; once spent nothing more is resolved, listed, swept or
- * published and the count so far is returned. Captures are resolved once
+ * published and the answer is 0 (records already published stay; each is
+ * complete and harmless). Captures are resolved once
  * per normalised spelling and recorded once per (canonical path, kind): the
  * same path named with both kinds keeps one record of each, so Rule P
  * answers `ambiguous` rather than whichever came last.

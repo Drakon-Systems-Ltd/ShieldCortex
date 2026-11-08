@@ -32,6 +32,7 @@ import {
   classifyNativeProvenance,
   createNativeArtifactProbe,
   isNativeImageHeader,
+  readArtifactHeader,
   MAX_PROBE_DIR_ENTRIES,
   MAX_RECORDS_PER_PATH,
   MAX_STORE_ROOT_ENTRIES,
@@ -1257,7 +1258,7 @@ describe('#1025 fold r3 — one shared deadline; record and sweep are bounded', 
   const DAY = 24 * 60 * 60 * 1000;
 
   beforeEach(() => {
-    root = fs.realpathSync(fs.mkdtempSync(path.join('/tmp', 'sc-1025-r3-')));
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-1025-r3-')));
     stateDir = path.join(root, 'state');
     work = path.join(root, 'work');
     fs.mkdirSync(work, { recursive: true });
@@ -1393,15 +1394,64 @@ describe('#1025 fold r3 — one shared deadline; record and sweep are bounded', 
     }
   });
 
-  it('decision parity: disabled / enabled / expired budget, catastrophic and benign', () => {
-    for (const command of [`${['rm', '-rf', '~'].join(' ')} ; ./helper`, 'ls -la']) {
+  it('decision parity with a REAL recorded ELF: disabled / enabled (nativeExec present) / expired (absent)', () => {
+    expect(recordNativeArtifactCaptures({
+      sessionKey: KEY, cwd: work, stateDir, home: root,
+      captures: [{ token: './helper', kind: 'agent-written' }],
+    })).toBe(1);
+    fs.writeFileSync(path.join(work, 'helper'), ELF_STUB, { mode: 0o755 });
+    const cases: Array<[string, string]> = [
+      [`${['rm', '-rf', '~'].join(' ')} ; ./helper`, 'block'],
+      ['LD_PRELOAD=./helper /bin/true', 'allow'],
+    ];
+    for (const [command, decision] of cases) {
       const base = evaluateToolCall('Bash', { command });
-      for (const budget of [createNativeProvenanceBudget(), createNativeProvenanceBudget({ clock: () => Number.NaN })]) {
-        const { nativeExec: _n, ...rest } = evaluateToolCall('Bash', { command }, undefined, {
-          nativeArtifactProvenance: createNativeArtifactProbe({ sessionKey: KEY, cwd: work, stateDir, home: root, budget }),
-        });
-        expect(rest).toEqual(base);
-      }
+      expect(base.decision).toBe(decision);
+      expect(base.nativeExec).toBeUndefined();
+      const wire = (budget: ReturnType<typeof createNativeProvenanceBudget>) => evaluateToolCall('Bash', { command }, undefined, {
+        nativeArtifactProvenance: createNativeArtifactProbe({ sessionKey: KEY, cwd: work, stateDir, home: root, budget }),
+      });
+      const enabled = wire(createNativeProvenanceBudget());
+      const expiredRun = wire(createNativeProvenanceBudget({ clock: () => Number.NaN }));
+      expect(enabled.nativeExec).toBeDefined();
+      expect(enabled.nativeExec?.uses).toEqual(expect.arrayContaining([expect.objectContaining({ provenance: 'agent-written' })]));
+      expect(expiredRun.nativeExec).toBeUndefined();
+      const { nativeExec: _a, ...e } = enabled;
+      const { nativeExec: _b, ...x } = expiredRun;
+      expect(e).toEqual(base);
+      expect(x).toEqual(base);
     }
+  });
+
+  it('expiry checkpoints driven by mocked fs ops: write→rename and open→fstat', () => {
+    // Publication: the write spends the budget → no rename, record is 0.
+    let t = 0;
+    const budget = createNativeProvenanceBudget({ clock: () => t });
+    const realWrite = fs.writeFileSync;
+    jest.spyOn(fs, 'writeFileSync').mockImplementation(((...a: Parameters<typeof fs.writeFileSync>) => {
+      realWrite(...a);
+      t = 1e9;
+    }) as typeof fs.writeFileSync);
+    const renames = jest.spyOn(fs, 'renameSync');
+    expect(recordNativeArtifactCaptures({
+      sessionKey: KEY, cwd: work, stateDir, home: root, budget,
+      captures: [{ token: './y', kind: 'agent-written' }],
+    })).toBe(0);
+    expect(renames).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
+
+    // Header read: the open spends the budget → no fstat, null.
+    fs.writeFileSync(path.join(work, 'h'), ELF_STUB);
+    let u = 0;
+    const b2 = createNativeProvenanceBudget({ clock: () => u });
+    const realOpen = fs.openSync;
+    jest.spyOn(fs, 'openSync').mockImplementation(((...a: Parameters<typeof fs.openSync>) => {
+      const fd = realOpen(...a);
+      u = 1e9;
+      return fd;
+    }) as typeof fs.openSync);
+    const fstats = jest.spyOn(fs, 'fstatSync');
+    expect(readArtifactHeader(path.join(work, 'h'), () => b2.expired())).toBeNull();
+    expect(fstats).not.toHaveBeenCalled();
   });
 });

@@ -199,6 +199,42 @@ describe('#1025 native-exec observation through the real Claude Code hook', () =
     expect(ms).toBeLessThan(5000); // generous; the unbounded probe took ~7 s for this plant
   }, 60_000);
 
+  it('fold r3: a ~600-level deep tree under a catastrophic redirect is denied quickly and records nothing', async () => {
+    fs.mkdirSync(path.join(recorded.work, ...new Array(600).fill('a')), { recursive: true });
+    const store = path.join(recorded.configDir, 'native-provenance');
+    const before = fs.existsSync(store) ? fs.readdirSync(store).sort() : null;
+    const command = `${['rm', '-rf', '~'].join(' ')} ; echo hi > ${'a/'.repeat(600)}${'b/'.repeat(600)}x`;
+    const started = Date.now();
+    const a = await call(recorded, 'Bash', { command }, 8000);
+    const ms = Date.now() - started;
+    const b = await call(control, 'Bash', { command }, 8000);
+    expect(a.timedOut).toBeUndefined();
+    expect(JSON.parse(a.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(a.stdout).toBe(b.stdout);
+    expect(a.code).toBe(b.code);
+    expect(ms).toBeLessThan(5000); // base (unbounded record) took ~9.5 s
+    expect(fs.existsSync(store) ? fs.readdirSync(store).sort() : null).toEqual(before); // a block records nothing
+  }, 60_000);
+
+  it('fold r3: a first-record allow beside a planted 20k-file expired session dir records, quickly, and leaves that dir whole', async () => {
+    const store = path.join(recorded.configDir, 'native-provenance');
+    const big = path.join(store, 'sc-ffffffffffffffff');
+    fs.mkdirSync(big, { recursive: true, mode: 0o700 });
+    fs.chmodSync(store, 0o700);
+    for (let i = 0; i < 20_000; i++) fs.closeSync(fs.openSync(path.join(big, `f${i}`), 'w'));
+    const old = (Date.now() - 3 * 24 * 60 * 60 * 1000) / 1000;
+    fs.utimesSync(big, old, old);
+    const started = Date.now();
+    const a = await call(recorded, 'Write', { file_path: path.join(recorded.work, 'tool'), content: 'stub' }, 8000);
+    const ms = Date.now() - started;
+    expect(a.timedOut).toBeUndefined();
+    expect(ms).toBeLessThan(5000);
+    expect(fs.readdirSync(big)).toHaveLength(20_000); // over-full doomed dir: skipped, not deleted
+    const sessions = fs.readdirSync(store).filter((n) => n !== 'sc-ffffffffffffffff' && /^sc-[a-f0-9]{16}$/.test(n));
+    expect(sessions).toHaveLength(1);
+    expect(fs.readdirSync(path.join(store, sessions[0]))).toHaveLength(1); // the record was published
+  }, 60_000);
+
   it('no session id: nothing recorded, nothing observed (current behaviour)', async () => {
     const payload = (tool_name: string, tool_input: Record<string, unknown>) => ({ cwd: recorded.work, hook_event_name: 'PreToolUse', permission_mode: 'default', tool_name, tool_input });
     await runHook(payload('Write', { file_path: path.join(recorded.work, 'helper'), content: 'x' }), recorded.env);

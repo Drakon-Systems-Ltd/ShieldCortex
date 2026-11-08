@@ -3527,7 +3527,8 @@ process.stdin.on('end', async () => {
     // #1025: record this call's write/compile targets AFTER its own
     // evaluation (a same-call write is not evidence for this call's probe),
     // and carry the observation on every row this call writes. Neither step
-    // reads or changes `verdict`.
+    // changes `verdict`; the record step reads only `verdict.decision`, to
+    // skip a `block` (the call never runs).
     recordNativeProvenance(nativeStore, guard, toolName, toolInput, baseExtra, hookData.cwd, verdict, nativeBudget);
     const nativeExec = safeNativeExec(verdict?.nativeExec);
     if (nativeExec) baseExtra.nativeExec = nativeExec;
