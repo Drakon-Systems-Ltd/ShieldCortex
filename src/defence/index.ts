@@ -146,8 +146,19 @@ export type {
 } from './iron-dome/policy-lock.js';
 
 // Tool Action Guard — gates what the agent DOES at runtime (shell/file/network/git).
-export { evaluateToolCall, classifyFamily, isCriticalPath, normaliseToolName, detectScriptInvocation } from './iron-dome/tool-action-guard.js';
-export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily, ToolGuardOptions } from './iron-dome/tool-action-guard.js';
+export { evaluateToolCall, classifyFamily, isCriticalPath, normaliseToolName, detectScriptInvocation, nativeArtifactCaptures, nativeExecObservation } from './iron-dome/tool-action-guard.js';
+export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily, ToolGuardOptions, NativeExecObservation, NativeExecUse } from './iron-dome/tool-action-guard.js';
+// #1025 — audit-only native-exec provenance store. Exported so the OpenClaw
+// interceptor (which receives the defence module injected) can bind the
+// per-call probe and record write/compile targets, the same route
+// `evaluateToolCall` travels. Observation only: nothing here gates a call.
+export {
+  createNativeArtifactProbe, recordNativeArtifactCaptures, pruneNativeProvenance,
+  resolveNativeProvenanceDir, classifyNativeProvenance, isNativeImageHeader,
+} from './iron-dome/native-exec-provenance.js';
+export type {
+  NativeArtifactKind, NativeArtifactProvenance, NativeArtifactCapture, NativeArtifactRecord,
+} from './iron-dome/native-exec-provenance.js';
 // #648: the plain-English what/why/who an approval card shows. The OpenClaw
 // interceptor takes `buildApprovalCard` through its runtime seam.
 export { buildApprovalCard, describeAction, describeShell, describeSignal, describeSignals, describeWho, fitReasons, formatApprovalCardLines, GENERIC_SHELL, OUTSIDE_UNDERSTOOD_SUBSET, safeTarget, SIGNAL_CLASSES, SIGNAL_PHRASES, signalClass } from './iron-dome/approval-card.js';
