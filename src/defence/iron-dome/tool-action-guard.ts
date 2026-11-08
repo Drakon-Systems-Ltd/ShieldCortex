@@ -7208,8 +7208,23 @@ function underShellDirs(token: string, dirs: DirSet): { tokens: string[]; unreso
 }
 
 /** One simple command a shell would EXECUTE, and the directories it could run
- *  in. `fn` marks the invocation of a function defined in this call. */
-interface ExecutedStatement { words: ShellWord[]; dirs: DirSet; fn?: boolean }
+ *  in. `fn` marks the invocation of a function defined in this call, and
+ *  `bodyFrom`/`bodyTo` bound that function's lexed body in `st.out` (so a
+ *  leading loader assignment on the call reaches the body's external starts,
+ *  review r3 B3). `cond` is set when it is NOT proven that the statement runs,
+ *  and runs in the top-level shell: after `&&`/`||`, in a pipeline or in the
+ *  background, inside an `if`/loop/`case`/group, or lexed in a nested list
+ *  (subshell, substitution, function body, child shell). Its env REMOVALS
+ *  (`unset`, `export -n`, a replacing assignment) can therefore not be
+ *  certified; its additions are still kept (review r3 B3: keep the load). */
+interface ExecutedStatement {
+  words: ShellWord[];
+  dirs: DirSet;
+  fn?: boolean;
+  bodyFrom?: number;
+  bodyTo?: number;
+  cond?: boolean;
+}
 
 /** A function defined in this call: its body text, lexed where it is invoked. */
 interface ShellFunction { body: string; subshell: boolean }
@@ -7378,6 +7393,8 @@ function lexShellList(
   let casePattern = false;
   let casePatternSeen = false;
   let afterOp = false;               // the last token was `|` / `&&` / `||`
+  let ctlDepth = 0;                  // open `if … fi` / `{ … }` in this list
+  let andOrFrom = st.out.length;     // st.out index where this and-or list began
 
   const finishPipeline = (): void => {
     if (pipeElements === 0) return;
@@ -7389,6 +7406,9 @@ function lexShellList(
     else if (pipeLast.kind === 'set') { tp = fp = shared ? dirUnion(pipeLast.dirs, x) : pipeLast.dirs; }
     else { tp = fp = x; }
     if (pipeNegated) [tp, fp] = [fp, tp];
+    // bash runs every member of a multi-element pipeline in a subshell: none
+    // of their env removals is certain to reach this shell (review r3 B3).
+    if (shared) for (const p of pipeline) p.cond = true;
     if (tSet === null || fSet === null) { tSet = tp; fSet = fp; }
     else if (op === '&&') { fSet = dirUnion(fSet, fp); tSet = tp; }
     else { tSet = dirUnion(tSet, tp); fSet = fp; }
@@ -7408,6 +7428,9 @@ function lexShellList(
   /** `;` / newline / `&` / end: the and-or list is over. */
   const endAndOr = (background: boolean): void => {
     finishPipeline();
+    // `… &` runs the whole list in a subshell (review r3 B3).
+    if (background) for (let k = andOrFrom; k < st.out.length; k++) st.out[k]!.cond = true;
+    andOrFrom = st.out.length;
     if (tSet !== null && fSet !== null) cur = background ? andOrStart : dirUnion(tSet, fSet);
     tSet = fSet = null;
     op = null;
@@ -7434,7 +7457,12 @@ function lexShellList(
       const w = s.words[k]!;
       if (w.bare && LOOP_OPENER.test(w.text)) loops.push(st.out.length);
       else if (isBareWord(w, 'done')) loops.pop();
+      else if (isBareWord(w, 'if') || isBareWord(w, '{')) ctlDepth++;
+      else if ((isBareWord(w, 'fi') || isBareWord(w, '}')) && ctlDepth > 0) ctlDepth--;
     }
+    // Not proven to run, once, in the top-level shell (review r3 B3).
+    if (depth > 0 || op !== null || pipeElements > 0 || loops.length > 0 || caseDepth > 0
+        || ctlDepth > 0 || braceDepth > 0) s.cond = true;
     if (s.words.some(w => /^CDPATH\+?=/.test(w.text))) cdpathSet = true;
     st.out.push(s);
     pipeline.push(s);
@@ -7458,7 +7486,9 @@ function lexShellList(
       if (st.budget <= 0) st.truncated = true;
       else {
         st.budget--;
+        s.bodyFrom = st.out.length;
         const r = lexShellList(f.body, 0, 'eof', depth + 1, pipeIn, st, f.subshell ? new Map(funcs) : funcs);
+        s.bodyTo = st.out.length;
         if (!f.subshell) bodyDirs = dirUnion(pipeIn, r.dirs);
       }
       effect = { kind: 'set', dirs: dirUnion(bodyDirs, UNKNOWN_DIRS) };
@@ -8418,8 +8448,20 @@ function nativeExecTargets(command: string): { targets: NativeTarget[]; truncate
   const shellVars = new Map<string, string[]>(); // assigned, not exported
   const exported = new Map<string, string[]>();  // in every later program's env
   let allExport = false;
-  for (const s of statements) {
+  // A statement whose run is not proven (`cond`) can ADD loader state but never
+  // REMOVE it: a conditional / subshell / backgrounded `unset`, `export -n` or
+  // re-assignment may not happen in this shell, so the earlier value is kept
+  // (review r3 B3 — keep the load; never certify "no load").
+  const setVar = (map: Map<string, string[]>, name: string, libs: string[], cond: boolean | undefined): void => {
+    map.set(name, cond ? [...(map.get(name) ?? []), ...libs] : libs);
+  };
+  // A leading loader assignment on a FUNCTION call is in the environment of
+  // the external programs that function's body starts (review r3 B3).
+  const fnEnv: Array<{ from: number; to: number; libs: string[] }> = [];
+  for (let si = 0; si < statements.length; si++) {
+    const s = statements[si]!;
     const own: string[] = [];
+    for (const e of fnEnv) if (si >= e.from && si < e.to) own.push(...e.libs);
     let external = false;
     const idx = shellProgramWalk(
       s.words,
@@ -8432,19 +8474,25 @@ function nativeExecTargets(command: string): { targets: NativeTarget[]; truncate
     );
     const cmd = idx < s.words.length ? s.words[idx]! : undefined;
     if (cmd === undefined) {
-      // Assignment only: a shell variable, exported only under `set -a`.
+      // Assignment only: a shell variable, exported under `set -a` — or when
+      // the variable is ALREADY exported, which a re-assignment keeps
+      // (`export LD_PRELOAD; LD_PRELOAD=./x.so; prog`, review r3 B3).
       for (const w of s.words) {
         const m = LOADER_ENV_RE.exec(w.text);
         if (!m || !w.literal) continue;
         const libs = loaderLibs(m[3]!);
-        const prev = m[2] ? (allExport ? exported.get(m[1]!) : shellVars.get(m[1]!)) ?? [] : [];
-        if (allExport) exported.set(m[1]!, [...prev, ...libs]);
-        else shellVars.set(m[1]!, [...prev, ...libs]);
+        const intoExported = allExport || exported.has(m[1]!);
+        const map = intoExported ? exported : shellVars;
+        const prev = m[2] ? map.get(m[1]!) ?? [] : [];
+        setVar(map, m[1]!, [...prev, ...libs], s.cond);
       }
       continue;
     }
     const name = cmd.text;
-    const runsExternal = external || s.fn === true || !cmd.literal || name.includes('/') || !SHELL_BUILTIN_NO_EXEC.has(name);
+    // A function call starts no image itself; its body's external programs are
+    // their own statements (review r3 B3: no load for `f(){ :; }; LD_PRELOAD=… f`).
+    const runsExternal = external
+      || (s.fn !== true && (!cmd.literal || name.includes('/') || !SHELL_BUILTIN_NO_EXEC.has(name)));
     if (!external && cmd.literal && /^(?:export|declare|typeset|local|readonly)$/.test(name)) {
       const flags = s.words.slice(idx + 1).filter(w => /^[-+][A-Za-z]+$/.test(w.text)).map(w => w.text);
       const exporting = name === 'export'
@@ -8461,22 +8509,33 @@ function nativeExecTargets(command: string): { targets: NativeTarget[]; truncate
           if (varName === null) continue;
           const libs = m && w.literal ? loaderLibs(m[3]!) : null;
           if (unexporting) {
-            exported.delete(varName);
-            if (libs) shellVars.set(varName, libs);
+            if (!s.cond) exported.delete(varName);
+            if (libs) setVar(s.cond ? exported : shellVars, varName, libs, s.cond);
           } else if (exporting) {
-            exported.set(varName, libs ?? shellVars.get(varName) ?? []);
+            setVar(exported, varName, libs ?? shellVars.get(varName) ?? [], s.cond);
           } else if (libs) {
-            shellVars.set(varName, libs);
+            setVar(exported.has(varName) ? exported : shellVars, varName, libs, s.cond);
           }
         }
       }
     } else if (!external && cmd.literal && name === 'unset') {
-      for (const w of s.words.slice(idx + 1)) { exported.delete(w.text); shellVars.delete(w.text); }
+      if (!s.cond) for (const w of s.words.slice(idx + 1)) { exported.delete(w.text); shellVars.delete(w.text); }
     } else if (!external && cmd.literal && name === 'set') {
       for (let k = idx + 1; k < s.words.length; k++) {
         const a = s.words[k]!.text;
         if (/^-[A-Za-z]*a/.test(a) || (a === '-o' && s.words[k + 1]?.text === 'allexport')) allExport = true;
         if (/^\+[A-Za-z]*a/.test(a) || (a === '+o' && s.words[k + 1]?.text === 'allexport')) allExport = false;
+      }
+    }
+    if (s.fn === true && !external) {
+      const reaching = [...own, ...[...exported.values()].flat()];
+      if (reaching.length > 0) {
+        if (own.length > 0 && s.bodyFrom !== undefined && s.bodyTo !== undefined) {
+          fnEnv.push({ from: s.bodyFrom, to: s.bodyTo, libs: own.slice() });
+        }
+        // The word may still name the external of the same name (the
+        // definition is not proven to have run): uncertain -> the door.
+        unresolved = true;
       }
     }
     if (!runsExternal) continue;

@@ -1343,3 +1343,56 @@ describe('#907 r2 N1 / N2 — row D: no keyword reactivates unrelated text; exec
     expect(isFloor(fold(cmd, body), SIG_D)).toBe(true);
   });
 });
+
+describe('#907 r3 B3 — loader-env uncertainty keeps the load; a function call starts no image', () => {
+  // Reviewer fixture (r3 astra R3-B3): agent-produced ${WORK}/lib.so and an
+  // INSTALLED native /usr/bin/true with no producing record.
+  const world = () => {
+    const w = agentNative(`${WORK}/lib.so`);
+    w.put('/usr/bin/true', ELF);
+    return w;
+  };
+
+  it('positive controls: a direct export / leading preload floors', () => {
+    const w = world();
+    expect(isFloor(w.check('export LD_PRELOAD=./lib.so; /usr/bin/true'), SIG_C)).toBe(true);
+    expect(isFloor(w.check('LD_PRELOAD=./lib.so /usr/bin/true'), SIG_C)).toBe(true);
+    // an unconditional top-level unset / export -n still removes the load
+    expect(w.check('export LD_PRELOAD=./lib.so; unset LD_PRELOAD; /usr/bin/true').signals).not.toContain(UMBRELLA);
+    expect(w.check('export LD_PRELOAD=./lib.so; export -n LD_PRELOAD; /usr/bin/true').signals).not.toContain(UMBRELLA);
+  });
+
+  it.each([
+    'export LD_PRELOAD=./lib.so; false && unset LD_PRELOAD; /usr/bin/true',  // r3 exact: conditional unset
+    'export LD_PRELOAD=./lib.so; (unset LD_PRELOAD); /usr/bin/true',         // r3 exact: subshell unset
+    'export LD_PRELOAD; LD_PRELOAD=./lib.so; /usr/bin/true',                 // r3 exact: re-assign keeps export
+    'export LD_PRELOAD=./lib.so; false && export -n LD_PRELOAD; /usr/bin/true',
+    'export LD_PRELOAD=./lib.so; unset LD_PRELOAD | cat; /usr/bin/true',
+    'export LD_PRELOAD=./lib.so; unset LD_PRELOAD & /usr/bin/true',
+    'export LD_PRELOAD=./lib.so; if false; then unset LD_PRELOAD; fi; /usr/bin/true',
+    'export LD_PRELOAD=./lib.so; false && { true; unset LD_PRELOAD; }; /usr/bin/true',
+    'export LD_PRELOAD=./lib.so; echo $(unset LD_PRELOAD); /usr/bin/true',
+    'export LD_PRELOAD=./lib.so; false && LD_PRELOAD=; /usr/bin/true',
+    'export LD_PRELOAD=./lib.so; ls',
+  ])('%j keeps the agent-written load: floor', (cmd) => {
+    expect(isFloor(world().check(cmd), SIG_C)).toBe(true);
+  });
+
+  it.each([
+    'f() { :; }; LD_PRELOAD=./lib.so f',                 // r3 exact
+    'export LD_PRELOAD=./lib.so; f() { :; }; f',         // r3 exact
+  ])('%j: a no-op function loads nothing — never the doorless floor (door: the word may be the external)', (cmd) => {
+    const v = world().check(cmd);
+    expect(v.signals).not.toContain(UMBRELLA);
+    expect(v.decision).not.toBe('block');
+    expect(isDoor(v)).toBe(true);
+  });
+
+  it('a leading preload on a function call reaches the external programs its body starts', () => {
+    const w = world();
+    expect(isFloor(w.check('f() { /usr/bin/true; }; LD_PRELOAD=./lib.so f'), SIG_C)).toBe(true);
+    expect(isFloor(w.check('f() { ls; }; LD_PRELOAD=./lib.so f'), SIG_C)).toBe(true);
+    // control: the body runs only a builtin
+    expect(w.check('f() { echo hi; }; LD_PRELOAD=./lib.so f').decision).not.toBe('block');
+  });
+});
