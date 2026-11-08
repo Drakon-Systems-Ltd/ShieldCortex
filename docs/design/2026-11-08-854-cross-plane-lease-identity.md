@@ -2,6 +2,8 @@
 
 **Status:** design proposal for independent review. Nothing here is implemented, enabled or approved. It authorises no runtime change, no Guard configuration change and no release. #854 stays open; #554 is closed as its duplicate and its acceptance constraints and five rejected-design findings are binding inputs here (§3).
 
+**Round 2 (8 Nov 2026, after the independent panel's FIX verdict on the first draft).** Option A (§4) is **withdrawn as an implementation candidate**: the first draft claimed it met the #554 acceptance constraints and recommended implementing it; that claim and that recommendation are withdrawn (§4.3, §6). The §4.1 selection rule now requires host-owned evidence about the *current run's* backend and resume mode, which no published OpenClaw release supplies, so the rule is unreachable today. §5 distinguishes the *requested* harness id from the *effective* one and excludes fork turns. §4.5 separates positive regression fixtures from safety-invariant fixtures and adds backend-switch, retained-binding, fork, same-row-invalidation and forged-row cases. No runtime change and no upstream filing follow from this round.
+
 **Base:** ShieldCortex `main` at `4d7b3c0bf15144c332786e11b1affd5d3e4c6fc1` (8 Nov 2026). OpenClaw evidence is a static read of the **published npm tarballs** `openclaw@2026.10.4`, `2026.10.6`, `2026.11.1` and `2026.11.2` (the `latest` dist-tag on 8 Nov 2026), unpacked into disposable directories. Paths below are `package/dist/...` inside each tarball; chunk hashes in file names are per release. No live gateway, no live Guard state and no host process was inspected; nothing was executed.
 
 **Lineage.** #856 (merged `68a446df`, 5.10.6) and #868 (5.10.7) made both planes derive one identity from one session id. The 17 Oct option (1′) design on #554 (a per-call `tool_use_id` binding consumed across planes) received two independent CHANGES REQUESTED verdicts with five findings; it is **not revived**. The withdrawn #552 pid-ancestry re-entry stays withdrawn. This document answers the question #854 left open: does OpenClaw now hand either plane a host-owned, non-replayable identity for the Claude CLI child, and if not, what is the smallest upstream contract that would.
@@ -10,7 +12,7 @@
 
 ## 0. One-paragraph summary
 
-OpenClaw 2026.11.1/11.2 passes the plugin `before_tool_call` hook **exactly the same context fields as 2026.10.4/10.6**: OpenClaw's `sessionId`, `sessionKey`, `runId`, `toolCallId`; no Claude CLI session id, no child pid, no spawn token. But the static read also shows two facts the earlier rounds did not record. **(a)** For the `claude-cli` backend (`sessionMode: "always"`) OpenClaw **mints the Claude session id itself** before spawn (`crypto.randomUUID()` in `resolveSessionIdToSend`) and passes it as `--session-id`, or passes the stored id as `--resume`; so the gateway holds the exact string the Claude Code PreToolUse hook later hashes, in the same runtime module that builds the plugin context, for every turn including a fresh cron turn. It just does not put it on the context, in the child environment, or in the session store until the run commits. **(b)** After a turn commits, that id is persisted host-side as `SessionEntry.cliSessionIds["claude-cli"]`, and plugins can read it in-process through `api.runtime.agent.session.getSessionEntryAsync({ sessionKey, agentId })` (sync `getSessionEntry` in 10.4; async added by 11.1). The general case (first turn of a fresh session, which is every isolated cron turn and the 25 Oct incident) therefore **remains upstream-blocked**, and the minimal upstream contract is one optional field (§5). A **partial, host-owned, non-replayable** bridge for resumed turns (the long-lived main-session hits in the issue body) is implementable today without any OpenClaw change and without a per-call binding record (§4); it is proposed for review, not for implementation in this PR.
+OpenClaw 2026.11.1/11.2 passes the plugin `before_tool_call` hook **exactly the same context fields as 2026.10.4/10.6**: OpenClaw's `sessionId`, `sessionKey`, `runId`, `toolCallId`; no Claude CLI session id, no child pid, no spawn token. But the static read also shows two facts the earlier rounds did not record. **(a)** For the `claude-cli` backend (`sessionMode: "always"`) OpenClaw **mints the Claude session id itself** before spawn (`crypto.randomUUID()` in `resolveSessionIdToSend`) and passes it as `--session-id`, or passes the stored id as `--resume`; so the gateway holds the exact string the Claude Code PreToolUse hook later hashes, in the same runtime module that builds the plugin context, for every turn including a fresh cron turn. It just does not put it on the context, in the child environment, or in the session store until the run commits. **(b)** After a turn commits, that id is persisted host-side as `SessionEntry.cliSessionIds["claude-cli"]`, and plugins can read it in-process through `api.runtime.agent.session.getSessionEntryAsync({ sessionKey, agentId })` (sync `getSessionEntry` in 10.4; async added by 11.1). The general case (first turn of a fresh session, which is every isolated cron turn and the 25 Oct incident) therefore **remains upstream-blocked**, and the minimal upstream contract is one optional field (§5). A partial bridge for resumed turns (the long-lived main-session hits in the issue body) can be *constructed* today from the committed binding without any OpenClaw change and without a per-call binding record (§4, Option A). Review found that it does **not** meet the #554 acceptance constraints: the binding it reads lives in a same-uid-writable store, the Claude id it matches is caller-selectable (`claude --session-id <id>`), and the selection rule cannot tell from `PluginHookToolContext` whether the current run is a `claude-cli` run that actually resumed that binding without forking. Option A is therefore kept as analysis and **withdrawn as an implementation candidate** until a trusted, process-bound identity for the current run is demonstrated (§4.3, §6). The §5 contract is the path, with its own fork-turn limitation stated there.
 
 ---
 
@@ -76,7 +78,7 @@ So the string the Claude Code hook will report as `session_id` exists as `resolv
 | Does 2026.11.1/11.2 hand the plugin a host-owned Claude-child identity? | **No.** Context unchanged since 10.4. |
 | Does it hand the Claude child the OpenClaw session identity? | **No.** Child env unchanged. |
 | Does any host-owned, non-replayable identity reach **both** planes for a **fresh** turn? | **No.** Upstream-blocked (§5). |
-| Does one reach both planes for a **resumed** turn? | **Yes, indirectly:** the committed `cliSessionIds["claude-cli"]` is host-written, keyed by the host's own `sessionKey`, readable in-process by the plugin, and equal to the `--resume` id Claude reports to the hook when the binding is reused (§4). |
+| Does one reach both planes for a **resumed** turn? | **A candidate exists, but it is not a trusted identity.** The committed `cliSessionIds["claude-cli"]` is written by the host's commit path, keyed by the host's own `sessionKey`, readable in-process by the plugin, and equal to the `--resume` id Claude reports to the hook *when* the current run is a `claude-cli` run that reused that binding without `--fork-session`. But the store is same-uid writable, the plugin cannot verify the current run's backend or resume mode from `PluginHookToolContext`, and the hook plane's id is caller-selectable. So **no** in the sense #554 requires (host-owned, bound to this child, non-replayable); see §4.3. |
 
 ---
 
@@ -98,57 +100,82 @@ Both §4 and §5 are **identity selection**, the thing #856 already shipped for 
 
 ---
 
-## 4. Option A (no OpenClaw change): committed-binding identity on the plugin plane for resumed `claude-cli` turns
+## 4. Option A (no OpenClaw change): committed-binding identity on the plugin plane for resumed `claude-cli` turns — analysed, **withdrawn as an implementation candidate**
+
+**Disposition.** Option A is retained in this document as analysis only. It is not recommended for implementation and its first-draft compliance claim is withdrawn (§4.3). It stays here because (i) its step 1 is the exact code path the §5 field would feed, (ii) its failure modes define the §4.5 fixtures, and (iii) the conditions under which it could be revisited are stated precisely (§4.1 steps 2a/2b, fixture (o)).
 
 ### 4.1 Rule
 
 In `actionLeaseAdapters` (`plugins/openclaw/index.ts` L2848), when the call is **scoped** (`scopeForToolCall(toolName, args) != null`) and the plugin can resolve the run's harness identity, the plugin leases as `leaseIdentityFor(harnessSessionId)` instead of `leaseIdentityFor(ctx.sessionId)`. Resolution order, first hit wins:
 
 1. `ctx.harnessSessionId` when a future OpenClaw exposes it (§5). Not present today; listed so the shape is forward-compatible and the §5 field lands in one place.
-2. `entry.cliSessionIds["claude-cli"]` from `api.runtime.agent.session.getSessionEntryAsync({ sessionKey: ctx.sessionKey, agentId: ctx.agentId, readConsistency: "latest" })` (fall back to the sync `getSessionEntry` where the async form is absent), **only if** `entry.sessionId === ctx.sessionId` (the store row is the live incarnation this run was built from) **and** the value is a nonblank string.
-3. Otherwise `ctx.sessionId`, exactly as today.
+2. `entry.cliSessionIds["claude-cli"]` from `api.runtime.agent.session.getSessionEntryAsync({ sessionKey: ctx.sessionKey, agentId: ctx.agentId, readConsistency: "latest" })` (fall back to the sync `getSessionEntry` where the async form is absent), **only when all three of the following hold**, with (2a) and (2b) taken from host-owned evidence about the *current run* and never inferred from the store row:
+   - **(2a) Current-run backend evidence.** The host asserts that *this run's* resolved backend is `claude-cli` (`context.backendResolved.id` inside `execute.runtime`, or the §5 `harnessBackendId`). `entry.sessionId === ctx.sessionId` proves only that the row belongs to this OpenClaw session; it says nothing about which backend this run spawned. A session that ran `claude-cli` on an earlier turn and another backend on this one still carries the old Claude id in its row.
+   - **(2b) Current-run binding evidence.** The host asserts that this run was spawned with `--resume <id>` where `<id>` equals the stored value, **and not** with `--fork-session` (§4.2, §5). The plugin cannot observe `useResume`, the resolved args, `claudeCliInvalidatedReason` or `forkNextResume`; a stored value may be *retained* from an earlier turn that this run did not resume, or resumed under a fork that gives Claude a new id.
+   - **(2c)** the row is the live incarnation (`entry.sessionId === ctx.sessionId`) and the value is a nonblank string.
+
+   If (2a) or (2b) is unavailable, step 2 **must not fire**. On every published OpenClaw release inspected here (2026.10.4 → 2026.11.2) neither is available to a plugin, so step 2 is unreachable today and Option A reduces to step 1, i.e. to the §5 contract.
+3. Otherwise `ctx.sessionId`, exactly as today (strict identity).
+
+The first draft of this rule gated step 2 on (2c) alone. That would let a run whose backend has switched, or whose binding was invalidated, forked or otherwise not resumed, lease as a *historical* Claude identity and re-enter a hold held under that id with no corresponding Claude hook evaluation on this run. That defect, together with §4.3, is why Option A is withdrawn rather than recommended.
 
 Unscoped calls never read the store and never derive. Release uses the identity captured at acquire (the #856 `acquiredAs` WeakMap), unchanged.
 
 ### 4.2 What it covers and what it does not
 
 - **Covers:** turn N≥2 of a session whose previous turn committed a Claude binding and whose current turn reuses it (`prepare.runtime` L1765-1812 → `mode: "reuse"`/`"reuse-with-drift"` → `--resume <id>`). Claude Code's hook then reports that same id. This is the long-lived main-session class in the #854 body (install, security-config, gateway-restart, npm-publish hits in a resumed chat session).
-- **Does not cover:** the first turn of a fresh session (no committed binding yet; OpenClaw passes a freshly minted `--session-id` the plugin cannot see). Every isolated cron turn is in this class, including the 25 Oct `openclaw backup create --verify` incident. Also not covered: a turn where OpenClaw invalidates or forks the binding (`claudeCliInvalidatedReason`, `forkNextResume` → `--fork-session`): Claude runs under a new id, the store still holds the old one.
+- **Does not cover:** the first turn of a fresh session (no committed binding yet; OpenClaw passes a freshly minted `--session-id` the plugin cannot see). Every isolated cron turn is in this class, including the 25 Oct `openclaw backup create --verify` incident. Also not covered: a turn where OpenClaw invalidates or forks the binding (`claudeCliInvalidatedReason`, `forkNextResume` → `--fork-session`): Claude runs under a new id, the store still holds the old one. Also not covered: a **backend switch** (the session ran `claude-cli` earlier and runs another backend now): the row still holds the Claude id, no Claude hook runs on this turn, and without (2a) the plugin would adopt an identity no hook plane on this run can corroborate.
 - **Behaviour in the uncovered cases:** the plugin derives a *stale* identity (this session's previous Claude id, or OpenClaw's id); the hook derives the live one; they differ; the second plane is refused — **today's behaviour, no downgrade.**
 
-### 4.3 Against the acceptance constraints
+### 4.3 Against the acceptance constraints — where Option A fails (compliance claim withdrawn)
 
-- **Host-maintained, specific to this child's session:** the value is written only by OpenClaw's own commit path (§2.4) under the host's `sessionKey`, from the id OpenClaw passed to, and read back from, this session's Claude process. It is not chosen by the agent, not a shared pid, not an env string, not a nonce.
-- **Not presentable:** a sibling session B cannot pass A's id to the plugin; the plugin never takes an identity from tool-call parameters. B's plugin plane reads B's own store row. B's hook plane reports B's own Claude `session_id`.
-- **Sibling B HELD:** B's identities differ from A's on both planes; both refuse while A holds. Unchanged.
-- **Forged / expired / missing:** a missing or blank `cliSessionIds["claude-cli"]`, a store row whose `sessionId` is not this run's `ctx.sessionId`, a read failure or a throw all fall to step 3 (strict identity, today's behaviour). There is nothing to expire because nothing is minted per call.
-- **Freeze first; no early release; off elsewhere:** the freeze check and the held-branch order in `checkSessionLease` are untouched; nothing releases before the operation; the hook, `evaluateAction` and host adapters are untouched. Only the OpenClaw plugin's identity selection changes.
+- **Host-maintained binding of *this* child: NOT MET.** The value is written by OpenClaw's commit path (§2.4), but it rests in `~/.openclaw/agents/<agent>/sessions/...`, a same-uid-writable store that the agent process can rewrite, and the id it names is a Claude `--session-id` that any same-uid process can choose when it launches `claude`. The constraint asks for a host-maintained binding of the process instance; a rewritable row plus a caller-selectable child id is neither. The hook plane's pre-existing trust in stdin `session_id` does not license extending the same trust to the plugin plane: that widens the exposure from one plane to both, which is exactly the outcome §4.4 item 1 describes. The first draft's statement that this constraint was met is withdrawn.
+- **Not presentable: PARTIALLY MET.** A sibling cannot pass A's id as a tool-call parameter, and the plugin never reads an identity from tool-call arguments. But a same-uid process can write A's id into its own store row and launch Claude under it (§4.4 item 1). "Not a parameter" is not "not presentable".
+- **Bound to the current run: NOT MET today.** Steps 2a/2b (§4.1) are the conditions under which the stored id would be known to describe *this* run; no published release lets a plugin establish them.
+- **Sibling B HELD (honest siblings):** B's identities differ from A's on both planes; both refuse while A holds. Unchanged. This holds only for a sibling that does not rewrite its row.
+- **Forged / expired / missing:** a missing or blank `cliSessionIds["claude-cli"]`, a store row whose `sessionId` is not this run's `ctx.sessionId`, a read failure or a throw all fall to step 3 (strict identity, today's behaviour). There is nothing to expire because nothing is minted per call. A **forged** row with a *matching* `sessionId` and a victim's Claude id is **not** caught (fixture (o), §4.5), which is the disqualifying case.
+- **Freeze first; no early release; off elsewhere:** the freeze check and the held-branch order in `checkSessionLease` are untouched; nothing releases before the operation; the hook, `evaluateAction` and host adapters are untouched. Only the OpenClaw plugin's identity selection would change.
+
+**Result.** Option A does not satisfy the #554 acceptance constraints as they are written, and the first draft's claim that it did is withdrawn. It may be revisited only when (2a)/(2b) are available from host-owned evidence that the agent process cannot write, and fixture (o) is HELD.
 
 ### 4.4 Residual risks to weigh in review (stated, not minimised)
 
-1. **Trust in the host session store.** The store is same-uid writable (`~/.openclaw/agents/<agent>/sessions/...`). An agent process that rewrites its **own** row's `cliSessionIds["claude-cli"]` to a victim's Claude id, *and* gets Claude to run under that id, could make both of its planes carry the victim's identity. The second half is **pre-existing**: the hook plane has always trusted Claude Code's stdin `session_id`, and `claude --session-id <victim>` gives it to any same-uid process today. Option A does not create that capability; it extends the same trust to the plugin plane. The sessions store is **not** in the `security-config` write-shape set and this design does not propose adding it (reviewers may disagree; it is a separate scope question).
+1. **Trust in the host session store — disqualifying, not residual (see §4.3).** The store is same-uid writable (`~/.openclaw/agents/<agent>/sessions/...`). An agent process that rewrites its **own** row's `cliSessionIds["claude-cli"]` to a victim's Claude id, *and* gets Claude to run under that id, makes both of its planes carry the victim's identity, so the lease check cannot distinguish it from the victim. The second half is pre-existing (the hook plane has always trusted Claude Code's stdin `session_id`, and `claude --session-id <victim>` gives it to any same-uid process today), but that does **not** justify extending the trust to a second enforcement plane; the first draft argued that it did, and that position is withdrawn. Whether the sessions store should join the `security-config` write-shape set is a separate scope question and remains open.
 2. **Stale-id collision.** In an uncovered turn the plugin leases as this session's *previous* Claude id. That could equal another live session's identity only if another OpenClaw session is concurrently running Claude under that same id, which OpenClaw's fork-on-resume design avoids (`forkCliSessionBindings`, `--fork-session`). Assessed LOW; a fixture pins the refusal direction anyway (§4.5 e).
 3. **Store read in the enforcement path.** One worker-backed read per **scoped** call (scoped calls are rare: install, security-config, npm-publish, gateway-restart). Cache per `(sessionKey, runId)` for the run. A read that is slow, fails or throws falls to step 3; it must never fail open to `''`/`anon-pid`.
 4. **API lifetime.** Sync `getSessionEntry` is deprecated for removal in the first January 2027 stable release; the design uses the async form where present and sync only on dists that lack it.
 5. **Derived keys in refusal text.** Unchanged from #856's residual list.
+6. **Backend switch and retained binding.** Without (2a)/(2b) the row's Claude id outlives the run that produced it: a later turn on another backend, a turn after invalidation, or a forked turn would all match (2c) and inherit the historical id. Pinned by fixtures (k), (l), (m), (n).
 
-### 4.5 Synthetic regression plan (fixture-only; no live host; each test must fail with the rule removed)
+### 4.5 Synthetic regression plan for any future identity-selection implementation (fixture-only; no live host)
 
-Pure plugin/adapter tests with a fixture lease dir and a stubbed `api.runtime.agent.session`:
+Kept for the §5-fed path (step 1) and for any revival of step 2 once (2a)/(2b) exist. Pure plugin/adapter tests with a fixture lease dir and a stubbed `api.runtime.agent.session` plus a stubbed current-run evidence source (`harnessBackendId`, requested id, fork flag). The first draft required *every* fixture to fail when the rule is removed; that requirement is withdrawn because it is impossible for cases whose purpose is to preserve today's behaviour. Fixtures are split into two classes with different mutation contracts, and each names its exact expected failure.
 
-- (a) **Resumed turn, hook first:** hook holds `security-config` as `sc-HMAC(C1)`; plugin ctx `{ sessionId: O1, sessionKey: K1, agentId: A }`, store row `{ sessionId: O1, cliSessionIds: { "claude-cli": C1 } }`; plugin scoped `exec` → **allowed as same holder**, `acquired: false`, nothing released. Mutation: revert step 2 → HELD (the test fails).
-- (b) **Resumed turn, plugin first:** plugin acquires as `sc-HMAC(C1)`; hook plane evaluates with `self = sc-HMAC(C1)` → same holder. Mutation as (a).
-- (c) **Fresh turn:** store row has no `cliSessionIds` → plugin leases as `leaseIdentityFor(O1)`; hook as `sc-HMAC(C2)` → second plane HELD. Pins "no downgrade"; mutation: make step 2 return a guessed id → test fails because the refusal disappears.
-- (d) **Sibling B:** store rows `{O1→C1}` and `{O2→C2}`; A holds; B's plugin and B's hook both HELD.
-- (e) **Stale store row:** `entry.sessionId !== ctx.sessionId` → step 3; HELD against a hook holder under the live id. Mutation: drop the `entry.sessionId` guard → test fails.
-- (f) **Read failure / throw / timeout:** stub rejects → step 3 (never `''`, never `anon-pid`), scoped call still gated; no fail-open.
-- (g) **Unscoped call:** store stub asserts it was **never called**.
-- (h) **Release parity:** acquire as `sc-HMAC(C1)` via the store path, salt lookup then fails → release still frees exactly that hold (extends the #856 r2 case).
-- (i) **Freeze wins:** freeze set + matching committed id → FROZEN, not allowed.
-- (j) **Old dist without `getSessionEntryAsync`:** sync `getSessionEntry` used; absent both → step 3.
+**Class P — positive regression.** Each must PASS with the rule and FAIL with the rule removed (steps 1/2 reverted to step 3). Removing the rule must fail *all* of Class P and *none* of Class I.
+
+- (a) **Resumed turn, hook first:** hook holds `security-config` as `sc-HMAC(C1)`; plugin ctx `{ sessionId: O1, sessionKey: K1, agentId: A }`, current-run evidence `{ backend: "claude-cli", resumed: C1, fork: false }`, store row `{ sessionId: O1, cliSessionIds: { "claude-cli": C1 } }`; plugin scoped `exec` → allowed as same holder, `acquired: false`, nothing released. Expected failure without rule: HELD.
+- (b) **Resumed turn, plugin first:** plugin acquires as `sc-HMAC(C1)`; hook plane evaluates with `self = sc-HMAC(C1)` → same holder. Expected failure without rule: hook HELD against a plugin holder under `leaseIdentityFor(O1)`.
+- (h) **Release parity:** acquire as `sc-HMAC(C1)` via the derived path, salt lookup then fails → release still frees exactly that hold (extends the #856 r2 case). Expected failure without rule: the hold is acquired under `O1`, so the assertion on the released identity fails.
+- (j) **Old dist without `getSessionEntryAsync`:** sync `getSessionEntry` used with the same evidence as (a) → allowed. Expected failure without rule: HELD. Absent both APIs → step 3 (this half belongs to Class I and is asserted there as (j′)).
+- (p) **§5 field present:** ctx carries `harnessSessionId: C1, harnessBackendId: "claude-cli"`, store stub asserts it was never called, result as (a). Expected failure without rule: HELD.
+
+**Class I — safety invariants.** Each must PASS both with and without the rule (they pin behaviour the rule must not change) and must FAIL against the one named unsafe mutation. Each mutation run must fail exactly its fixture and nothing else.
+
+- (c) **Fresh turn:** store row has no `cliSessionIds`, evidence `{ backend: "claude-cli", resumed: null }` → plugin leases as `leaseIdentityFor(O1)`; hook as `sc-HMAC(C2)` → second plane HELD. Mutation M-c: step 2 returns a minted or guessed id → the refusal disappears → FAIL.
+- (d) **Sibling B:** rows `{O1→C1}`, `{O2→C2}`; A holds; B's plugin and B's hook both HELD. Mutation M-d: derive the identity from a tool-call argument or caller-supplied field → B allowed → FAIL.
+- (e) **Stale store row:** `entry.sessionId !== ctx.sessionId` → step 3; HELD against a hook holder under the live id. Mutation M-e: drop the (2c) guard → allowed → FAIL.
+- (f) **Read failure / throw / timeout:** stub rejects → step 3 (never `''`, never `anon-pid`), scoped call still gated. Mutation M-f: on throw fall to `''`/`anon-pid` → fail-open observed → FAIL.
+- (g) **Unscoped call:** store stub and evidence stub assert they were never called. Mutation M-g: remove the scoped gate → stub called → FAIL.
+- (i) **Freeze wins:** freeze set + matching derived id → FROZEN, not allowed. Mutation M-i: identity match evaluated before the freeze check → allowed → FAIL.
+- (j′) **No store API at all:** both forms absent → step 3 → HELD against a hook holder. Mutation M-j′: treat a missing API as "trust the row cached from an earlier run" → FAIL.
+- (k) **Backend switch (new):** row `{O1→C1}` from an earlier `claude-cli` turn; current-run evidence `{ backend: "codex" }` or absent; a hook holder exists as `sc-HMAC(C1)` (left by the earlier Claude process); plugin must lease as `leaseIdentityFor(O1)` → HELD. Mutation M-k: step 2 fires on (2c) alone → plugin re-enters as C1 with no Claude hook on this run → FAIL.
+- (l) **Retained binding, not resumed this run (new):** row `{O1→C1}`; evidence `{ backend: "claude-cli", requested: C3 via --session-id, resumed: null }` (binding invalidated: `claudeCliInvalidatedReason` set) or evidence absent; plugin leases `O1`; hook reports C3 → HELD. Mutation M-l: step 2 fires without (2b) → plugin leases C1 → FAIL.
+- (m) **Fork turn (new):** row `{O1→C1}`; evidence `{ backend: "claude-cli", requested: C1, fork: true }`; Claude reports C4. Plugin must not adopt C1 → strict → HELD; with the §5 field, `harnessSessionId` must be **absent** on this turn (§5). Mutation M-m: forward the requested id as effective → plugin leases C1 and can re-enter a hold under the parent's live Claude id → FAIL.
+- (n) **Same-row invalidation (new):** row `{O1→C1}` with the binding marked invalidated → step 3 → HELD. Mutation M-n: ignore the invalidation flag → FAIL.
+- (o) **Forged store row (new; the acceptance gate for any revival of step 2):** the fixture "agent" writes row `{ sessionId: O1, cliSessionIds: { "claude-cli": C_victim } }`, a hook holder exists as `sc-HMAC(C_victim)`, and the fixture's evidence source is the *store row itself* (the only source a plugin has today). With step 2 reachable the plugin re-enters as the victim: this fixture **documents the impersonation** and must be reported as a known FAIL for Option A as drafted. Step 2 may only be revived when (o) is HELD, i.e. when (2a)/(2b) come from host-owned evidence the agent process cannot write.
 - Existing `src/__tests__/session-lease-cross-plane-854.test.ts` (#854 r2 block) must stay green unchanged.
 
-PR evidence required before any merge: the failing-then-passing run for (a)-(j), the two mutation runs quoted with counts, `npm run guard:precision -- --planes` unchanged, and the README feature grid untouched (no user-visible capability is added; the fix removes a false refusal).
+PR evidence required before any merge of an implementation: the failing-then-passing run for Class P; the rule-removed run quoted with counts (all P fail, all I pass); one run per named mutation M-c … M-n quoted with counts (exactly the named fixture fails); the status of (o) stated explicitly; `npm run guard:precision -- --planes` unchanged; and the README feature grid untouched (no user-visible capability is added; the fix removes a false refusal).
 
 ---
 
@@ -159,16 +186,23 @@ Precisely one optional field on the existing tool-hook context, populated from a
 ```ts
 // PluginHookToolContext (config-contracts d.ts, L15036 in 2026.11.1)
 /**
- * Session id of the CLI harness child executing this run, as passed on its
- * command line (`--session-id` or `--resume`). Present only on CLI-backend
- * runs. Host-minted; never taken from the tool call or the child.
+ * Effective session id of the CLI harness child executing this run: the id
+ * passed on its command line (`--session-id <id>`, or `--resume <id>` without
+ * the backend's fork argument). Present only on CLI-backend runs and ABSENT
+ * when the run was spawned with `--fork-session`, because the child then runs
+ * under a new id the host learns only after spawn. Host-minted; never taken
+ * from the tool call or the child.
  */
 harnessSessionId?: string;
 /** CLI backend id that owns `harnessSessionId`, e.g. "claude-cli". */
 harnessBackendId?: string;
 ```
 
-Population point: `execute.runtime` builds the plugin context at L1535-1557 from `run`; `executePreparedCliRun` (L3199) computes `resolvedSessionId` for the same run before spawn. Threading `resolvedSessionId` and `context.backendResolved.id` into the permission handler's ctx is a plumbing change inside one file plus the type. With it, ShieldCortex's step 1 in §4.1 fires on **every** turn, fresh or resumed, and `leaseIdentityFor` closes #854 for the Claude CLI runtime with no store read and none of the §4.4 residuals 1-4.
+Population point: `execute.runtime` builds the plugin context at L1535-1557 from `run`; `executePreparedCliRun` (L3199) computes `resolvedSessionId` for the same run before spawn. Threading `resolvedSessionId` and `context.backendResolved.id` into the permission handler's ctx is a plumbing change inside one file plus the type.
+
+**Requested vs effective id.** `resolvedSessionId` is the id OpenClaw *requests*. With `--session-id <id>`, or `--resume <id>` without the fork argument, Claude runs under that id and the PreToolUse hook reports it: requested == effective. With `--resume <id> --fork-session` (`forkNextResume`, §2.3) Claude resumes the transcript but runs under a **new** id that OpenClaw learns only from the stream after spawn (`pickCliSessionId`, §2.4): requested ≠ effective, and the plugin would lease as the parent's id. The contract is therefore: populate `harnessSessionId` **only** when the host can assert requested == effective (non-fork spawns); leave it **absent** on fork turns, where ShieldCortex falls to strict identity (today's behaviour, pinned by fixture (m)). Fork turns stay excluded until an effective-id propagation exists upstream (the host reading Claude's init `session_id` from the stream before the first `can_use_tool` and updating the context, or the B3 relay).
+
+With that, step 1 in §4.1 fires on every **non-fork** turn, fresh or resumed, with no store read and none of §4.4 items 1-4 and 6. What B does not change: the hook plane's own trust in stdin `session_id` (a same-uid process can still launch `claude --session-id <victim>`), so B gives the plugin plane a host-owned identity but is not yet a process-bound binding of the child; only B3 removes that remaining element. That residual is stated, not minimised, and is why B is described as the *minimal* contract rather than the complete one.
 
 Alternatives, in order of preference if the field is refused:
 
@@ -182,9 +216,9 @@ The upstream request itself is **held** per the standing owner decision on #854 
 
 ## 6. Recommendation
 
-1. Review Option A as a bounded, forward-compatible identity-selection change on the plugin plane; if approved, implement it with the §4.5 fixtures and mutation evidence in a separate PR with FULL (Sol + Grok + Daybreak) review as runtime/security work. It fixes the resumed-session class now and is the exact code path the §5 field will feed.
-2. Record the §5 contract as the one factual blocker for the fresh-turn class on #854; file it upstream only when the owner lifts the hold.
-3. Keep #673/#875 (lease refusals must not raise approval cards) as the mitigation for the fresh-turn class in the meantime.
+1. **Option A is withdrawn as an implementation candidate; do not implement it.** Its first-draft compliance claim is withdrawn (§4.3): the identity it selects is read from an agent-writable store and matched to a caller-selectable Claude id, and the selection rule cannot verify the current run's backend or resume mode (§4.1 2a/2b). It is retained as analysis because step 1 is the code path the §5 field would feed and its failure modes define the §4.5 fixtures. It may be revisited only when (2a)/(2b) are available from host-owned evidence the agent process cannot write and fixture (o) is HELD; any such revival is runtime/security work needing FULL (Sol + Grok + Daybreak) review and the §4.5 evidence.
+2. Record the §5 contract, with the requested/effective distinction and the fork exclusion, as the one factual blocker for the Claude CLI runtime on #854; file it upstream only when the owner lifts the hold. Note on #854 that B3 (process-instance relay) is the only option that also removes the hook plane's trust in stdin `session_id`.
+3. Keep #673/#875 (lease refusals must not raise approval cards) as the mitigation for **all** Claude CLI turns in the meantime, not only fresh ones, since no identity-selection change is recommended from this round.
 
 ## 7. What was not done
 
