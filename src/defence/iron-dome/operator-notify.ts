@@ -482,6 +482,11 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   'readiness-demoted', 'readiness-promoted', 'readiness-started',
   // #874: parity with the hook — the other two self-protection floor signals.
   'touch-guard-config', 'disable-action-guard',
+  // #907: the native-exec-of-agent-artifact floor, its compile-lineage audit
+  // signal, and the unknown-executable door — parity with the hook.
+  'native-exec-of-agent-artifact', 'exec-agent-written-native-bytes',
+  'load-agent-written-native-object', 'map-exec-agent-written-memory',
+  'exec-of-agent-compiled-artifact', 'unclassified-executable',
 ]);
 const SAFE_ACTION_GUARD_OUTCOMES = new Set([
   'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',

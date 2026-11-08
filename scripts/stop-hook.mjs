@@ -316,6 +316,11 @@ const SAFE_SUMMARY_SIGNALS = new Set([
   'filesystem-destructive', 'destructive-filesystem', 'dangerous-shell',
   'command-exec', 'network-egress', 'credential-access', 'data-exfiltration',
   'untrusted-script', 'reviewed-script', 'shell-injection', 'persistence-risk',
+  // #907: the native-exec-of-agent-artifact floor and its door, so a STOP
+  // summary can name them rather than redact them.
+  'native-exec-of-agent-artifact', 'exec-agent-written-native-bytes',
+  'load-agent-written-native-object', 'map-exec-agent-written-memory',
+  'exec-of-agent-compiled-artifact', 'unclassified-executable',
 ]);
 
 function cleanSignal(value) {

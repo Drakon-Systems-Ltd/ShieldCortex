@@ -40,6 +40,17 @@ import {
 import type { ContractDriftObservation } from './tool-input-schema.js';
 import { forEachWindow } from '../scan-windows.js';
 import { bodyIsAllDataRead } from './heredoc-data-read.js';
+import {
+  classifyArtifactState,
+  completeHistoryForPath,
+  headerHasNul,
+  isNativeImageHeader,
+  recordsForPath,
+  type AgentArtifactView,
+  type ArtifactState,
+  type ContentId,
+  type RecordKind,
+} from './agent-artifact-provenance.js';
 
 export type ToolGuardDecision = 'allow' | 'require_approval' | 'block';
 export type ToolGuardSeverity = 'benign' | 'sensitive' | 'dangerous' | 'catastrophic';
@@ -5018,6 +5029,22 @@ export interface ToolGuardOptions {
    * the file body only, never the invocation.
    */
   isReviewedScript?: (scriptPath: string, source: string) => boolean;
+  /**
+   * #907 — the per-call agent-artifact ledger view, already bound to this
+   * call's session by the caller (hook / interceptor). `null`/absent means the
+   * native-exec floor and door do not evaluate (adapter non-coverage or an
+   * unkeyed view the caller supplies). The pure evaluator never derives a
+   * session key and never receives one — only this bound view.
+   */
+  artifactView?: AgentArtifactView | null;
+  /** #907 — stat of a resolved absolute target: a `ContentId`, `'absent'` only
+   *  on not-found (`ENOENT`/`ENOTDIR`), `null` for every other failure. */
+  statPath?: (absPath: string) => ContentId | 'absent' | null;
+  /** #907 — the first bytes of a resolved absolute target, or `null`. */
+  readFileHeader?: (absPath: string) => Uint8Array | null;
+  /** #907 — the call's raw working directory, unvalidated; `canonicalTarget`
+   *  validates it. Also used by the ledger capture side at the caller. */
+  cwd?: string;
 }
 
 interface ScriptFold {
@@ -6550,6 +6577,221 @@ function commandEvidencePass(
   return best;
 }
 
+// -- #907 native-exec-of-agent-artifact: capture, floor, door, row D ----------
+//
+// The umbrella signal plus the four shape signals (section 2). The pure
+// provenance core decides authorship from an injected ledger view +
+// stat/header; this module parses the command to find the exec/load target and
+// the write/compile capture targets, reusing the same tokeniser the
+// script-fold uses -- no new regex family.
+
+const NATIVE_EXEC_UMBRELLA = 'native-exec-of-agent-artifact';
+const SIG_EXEC_WRITTEN = 'exec-agent-written-native-bytes'; // shape 1 (row A)
+const SIG_LOAD_WRITTEN = 'load-agent-written-native-object'; // shape 3 loader (row C)
+const SIG_MAP_EXEC_MEM = 'map-exec-agent-written-memory'; // shape 4 / shape 3 mem (row D)
+const SIG_COMPILED = 'exec-of-agent-compiled-artifact'; // shape 2 (row B)
+const SIG_UNCLASSIFIED = 'unclassified-executable'; // row J (door)
+
+/** Recognised compilers whose literal `-o <out>` output gets compile lineage
+ *  (section 3.4). Two-token drivers (`go build`, `zig cc`) are deliberately
+ *  absent: `commandBaseName` yields one segment and PR 1 adds no subcommand
+ *  matching. */
+const SUPPORTED_COMPILER = /^(?:cc|gcc|g\+\+|c\+\+|clang|clang\+\+|nvcc|ghc|rustc)$/;
+
+/**
+ * The write/compile targets to RECORD for a tool call (section 3.4). PURE --
+ * the CALLER (hook / interceptor) publishes them through the fs store,
+ * preserving this module's purity, exactly as the injected
+ * `resolveScriptSource` split does.
+ */
+export function nativeArtifactCaptures(
+  toolName: string,
+  args: Record<string, unknown>,
+): Array<{ token: string; kind: RecordKind }> {
+  const out: Array<{ token: string; kind: RecordKind }> = [];
+  // Write-family tool with a path argument -> agent-written (any ext/location).
+  if (classifyFamily(toolName) === 'write') {
+    const p = extractPath(args);
+    if (p) out.push({ token: p, kind: 'agent-written' });
+  }
+  // A recognised compiler with a literal, resolvable `-o` output -> compiled-output.
+  const command = deobfuscateIfs(extractCommand(args));
+  if (command) {
+    for (const stmt of splitCommandStatements(command)) {
+      const tokens = tokeniseStatement(stmt);
+      const i = commandWordIndex(tokens);
+      if (i >= tokens.length) continue;
+      if (!SUPPORTED_COMPILER.test(commandBaseName(tokens[i]))) continue;
+      for (let j = i + 1; j < tokens.length; j++) {
+        const t = tokens[j];
+        if (t === '-o') {
+          const v = tokens[j + 1];
+          if (v && !v.startsWith('-')) out.push({ token: v, kind: 'compiled-output' });
+          j++;
+        } else if (t.startsWith('-o') && t.length > 2) {
+          out.push({ token: t.slice(2), kind: 'compiled-output' });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+const LOADER_ENV_RE = /^(?:LD_PRELOAD|DYLD_INSERT_LIBRARIES)=(.+)$/;
+
+type NativeTarget = { token: string; via: 'exec' | 'load' };
+
+/** Exec/load targets resolved from the command: a program-position path token
+ *  (row A) or an `LD_PRELOAD`/`DYLD_INSERT_LIBRARIES` preload path (row C).
+ *  Bare names are NOT resolved through PATH in PR 1 (section 5, section 10
+ *  residual). */
+function nativeExecTargets(command: string): NativeTarget[] {
+  const out: NativeTarget[] = [];
+  for (const stmt of splitCommandStatements(command)) {
+    const tokens = tokeniseStatement(stmt);
+    const i = commandWordIndex(tokens);
+    // Loader env-preload forms in the LEADING assignments (before the cmd word).
+    for (let k = 0; k < i && k < tokens.length; k++) {
+      const m = tokens[k].match(LOADER_ENV_RE);
+      if (!m) continue;
+      for (const lib of m[1].split(/[:\s]+/)) {
+        if (lib && looksLikePathToken(lib)) out.push({ token: lib, via: 'load' });
+      }
+    }
+    if (i >= tokens.length) continue;
+    const cmd = tokens[i];
+    const base = commandBaseName(cmd);
+    // An interpreter running a script is not a native exec of a native image --
+    // the script's header is not native (step 0). Skip the program word.
+    if (SCRIPT_INTERPRETER.test(base) || EXEC_WRAPPER.test(base)) continue;
+    if (looksLikePathToken(cmd)) out.push({ token: cmd, via: 'exec' });
+  }
+  return out;
+}
+
+/** Shapes that map written/just-generated bytes as executable memory (row D).
+ *  Bounded gaps keep this linear -- no ReDoS. Text-decidable from the inspected
+ *  body only (section 6); no ledger. */
+const MAP_EXEC_MEMORY_RE: RegExp[] = [
+  /\bmmap\b[\s\S]{0,200}?\bPROT_EXEC\b/i,
+  /\bPROT_EXEC\b[\s\S]{0,200}?\bmmap\b/i,
+  /\bmprotect\b[\s\S]{0,200}?\bPROT_EXEC\b/i,
+  /\bVirtualAllocE?x?\b[\s\S]{0,200}?\bPAGE_EXECUTE(?:_READWRITE|_READ|_WRITECOPY)?\b/i,
+  /\bctypes\b[\s\S]{0,240}?\bCFUNCTYPE\b/i,
+  /\bcffi\b[\s\S]{0,240}?\bcallback\b/i,
+];
+
+function mapExecAgentWrittenMemory(bodies: readonly string[]): boolean {
+  for (const b of bodies) {
+    if (!b) continue;
+    for (const re of MAP_EXEC_MEMORY_RE) if (re.test(b)) return true;
+  }
+  return false;
+}
+
+/**
+ * The ledger-dependent native-exec classifier for rows A / C / B / J. Returns a
+ * verdict or `null`. Runs ONCE per evaluated call (from `evaluateToolCall`),
+ * never in the recursive surface/evidence passes, so the observation-boundary
+ * re-list is taken exactly once. Missing inputs (no view / stat / header) mean
+ * the classifier does not run -- adapter non-coverage, not an allow claim
+ * (section 5).
+ */
+function classifyLedgerNativeExec(
+  args: Record<string, unknown>,
+  options?: ToolGuardOptions,
+): ToolGuardVerdict | null {
+  const view = options?.artifactView;
+  const statPath = options?.statPath;
+  const readFileHeader = options?.readFileHeader;
+  if (!view || typeof statPath !== 'function' || typeof readFileHeader !== 'function') return null;
+  const command = deobfuscateIfs(extractCommand(args));
+  if (!command) return null;
+  const targets = nativeExecTargets(command);
+  if (targets.length === 0) return null;
+
+  // Resolve + stat + header for EVERY target before the single re-list.
+  const resolved: Array<{
+    via: 'exec' | 'load';
+    id: ContentId | 'absent' | null;
+    header: Uint8Array | null;
+    hash: string;
+    installRoot: boolean;
+  }> = [];
+  for (const t of targets) {
+    const canon = view.canonical(t.token, options?.cwd);
+    if (canon === null) continue; // unresolvable -> current behaviour (section 10)
+    resolved.push({
+      via: t.via,
+      id: statPath(canon),
+      header: readFileHeader(canon),
+      hash: view.pathHash(canon),
+      installRoot: isInstalledBinaryPath(canon),
+    });
+  }
+  if (resolved.length === 0) return null;
+  // Observation boundary (section 3.1 item 5): ONE re-list, after all stat/header.
+  const relistNames = typeof view.relist === 'function' ? view.relist() : null;
+
+  let floor: 'exec' | 'load' | null = null;
+  let door = false;
+  let audit = false;
+  for (const r of resolved) {
+    const complete = completeHistoryForPath(view, r.hash, relistNames);
+    const records = recordsForPath(view, r.hash);
+    const state: ArtifactState = classifyArtifactState({
+      currentId: r.id,
+      header: r.header,
+      records,
+      complete,
+      installRoot: r.installRoot,
+    });
+    if (state === 'state-1-agent-produced') {
+      if (floor === null || r.via === 'exec') floor = r.via;
+    } else if (state === 'state-3-unknown') {
+      door = true;
+    } else if (state === 'state-1c-compile-lineage') {
+      audit = true;
+    }
+  }
+
+  if (floor !== null) {
+    const sig = floor === 'load' ? SIG_LOAD_WRITTEN : SIG_EXEC_WRITTEN;
+    const reason = floor === 'load'
+      ? 'blocked load of an agent-written native object (no observed compile produced it)'
+      : 'blocked execution of agent-written native bytes (no observed compile produced it)';
+    return verdict('block', 'catastrophic', 'exec', 'execute_command',
+      buildReason(reason, [NATIVE_EXEC_UMBRELLA, sig]), [NATIVE_EXEC_UMBRELLA, sig]);
+  }
+  if (door) {
+    return verdict('require_approval', 'dangerous', 'exec', 'execute_command',
+      buildReason('a native executable of unknown provenance requires approval', [SIG_UNCLASSIFIED]),
+      [SIG_UNCLASSIFIED]);
+  }
+  if (audit) {
+    return verdict('allow', 'sensitive', 'exec', 'execute_command',
+      'agent ran a native image its own compile produced (audited)', [SIG_COMPILED]);
+  }
+  return null;
+}
+
+/** Merge the ledger native-exec verdict into the main verdict (section 4
+ *  precedence, monotone). Row B (AUDIT) rides an allow as a recorded signal; it
+ *  never overrides a gated verdict. Floor/door take the stronger, carrying the
+ *  native signal when they tie or lose so the row stays auditable. */
+function mergeLedgerNative(v: ToolGuardVerdict, native: ToolGuardVerdict): ToolGuardVerdict {
+  if (native.decision === 'allow') {
+    if (v.decision !== 'allow') return v; // already gated -- B is subsumed
+    const signals = [...new Set([...v.signals, ...native.signals])];
+    const severity = SEVERITY_RANK[v.severity] >= SEVERITY_RANK[native.severity]
+      ? v.severity
+      : native.severity;
+    return { ...v, severity, signals, reason: v.severity === 'benign' ? native.reason : v.reason };
+  }
+  if (outranks(native, v)) return native;
+  return { ...v, signals: [...new Set([...v.signals, ...native.signals])] };
+}
+
 export function evaluateToolCall(
   toolName: string,
   args: Record<string, unknown> = {},
@@ -6574,6 +6816,12 @@ export function evaluateToolCall(
   // (a schema rejection, a `sudo` the walk did reach) would otherwise carry the
   // call through `autoApprove` or advisory mode as if the guard had read it.
   if (evidence?.signals.includes('command-evidence-unscannable')) v = withUnscannableSignals(v);
+  // #907 — the ledger native-exec floor/door/audit (rows A/C/B/J). Evaluated
+  // ONCE here, outside the recursive surface/evidence passes, so the
+  // observation-boundary re-list is taken exactly once per evaluated call.
+  // Row D (text, no ledger) rides the core instead. The merge is monotone.
+  const ledgerNative = classifyLedgerNativeExec(args, options);
+  if (ledgerNative) v = mergeLedgerNative(v, ledgerNative);
   // Contract drift rides ALONGSIDE the verdict and cannot change it. The
   // recursive rescan passes (`skipSchema`) never re-observe: the outer call
   // already did, and a doubled row would double-count in every summary.
@@ -6940,6 +7188,18 @@ function evaluateToolCallCore(
     ...(fold.opaque ? ['opaque-script-invocation'] : []),
     ...(subst.opaque ? ['opaque-command-substitution'] : []),
   ];
+
+  // #907 row D — mapping written/just-generated bytes as executable memory
+  // (mmap PROT_EXEC, mprotect +X, ctypes/cffi call into a buffer). Text-
+  // decidable from the body the plane inspects (§6): the folded script bodies
+  // and inline/heredoc program regions, never arbitrary shell mentions. Needs
+  // no ledger; a floor DENY at the catastrophic, doorless tier.
+  if (scriptRegions.length > 0
+      && mapExecAgentWrittenMemory(scriptRegions.map(r => scanSurface.slice(r.start, r.end)))) {
+    return withReview(verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
+      buildReason('blocked mapping of agent-written bytes as executable memory', [NATIVE_EXEC_UMBRELLA, SIG_MAP_EXEC_MEM]),
+      [NATIVE_EXEC_UMBRELLA, SIG_MAP_EXEC_MEM, ...opaqueSignals]));
+  }
 
   // 1) Catastrophic — hard block, cannot fail open, ignores config.
   // Span-classified (#84): a catastrophic token inside a URL or a quoted DATA

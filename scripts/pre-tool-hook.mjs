@@ -1085,6 +1085,12 @@ const SAFE_SIGNALS = new Set([
   // #874: the other two self-protection floor signals. Guard reason codes,
   // not operator data; redacted, a floor denial could not name its signal.
   'touch-guard-config', 'disable-action-guard',
+  // #907: the native-exec-of-agent-artifact floor (umbrella + shapes), its
+  // compile-lineage audit signal, and the unknown-executable door. Guard
+  // reason codes, not operator data.
+  'native-exec-of-agent-artifact', 'exec-agent-written-native-bytes',
+  'load-agent-written-native-object', 'map-exec-agent-written-memory',
+  'exec-of-agent-compiled-artifact', 'unclassified-executable',
 ]);
 /**
  * #436 — the only tiers that deny with no operator affordance. Everything the
