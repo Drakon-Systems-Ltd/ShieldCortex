@@ -7,11 +7,18 @@ blocked while enforcing." and "The enabled plugin enforces by default …
 Advisory mode still blocks Action Guard's hard-block verdicts and recognised
 calls that would change the guard's own state or config."
 
-Each test fires the real policy module with a real verdict shape and asserts
-the Hermes hook decision. `npm test` never loads this plane; CI runs these with
+`TestClaim18HermesPlane` fires the real policy module with a real verdict
+shape and asserts the Hermes hook decision. `TestClaim18OutageRecognition`
+registers the real plugin (`register()` → `pre_tool_call`) with ONLY the API
+client stubbed unreachable, so a command string is recognised by the real
+fallback recognisers and carried through the real wiring to the decision.
+`npm test` never loads this plane; CI runs these with
 `python3 -m unittest discover -s plugins/hermes/shieldcortex/tests`.
 """
+import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -56,10 +63,13 @@ class TestClaim18HermesPlane(unittest.TestCase):
     def test_allow_verdict_is_allowed(self):
         self.assertIsNone(action_guard_decision(ActionGuardVerdict("allow", [], ""), enforce=True))
 
-    def test_api_unreachable_fallback_is_bounded(self):
+    def test_api_unreachable_flag_handling_is_bounded(self):
         # "While the API is unreachable, its bounded fallback scan blocks the
         # self-protection and catastrophic shapes it recognises in every mode,
         # and recognised dangerous shapes while enforcing."
+        # This row proves the POLICY's handling of the three recogniser flags
+        # only. Recognition of real command strings, and the wiring that turns
+        # a match into these flags, is proven by TestClaim18OutageRecognition.
         down = ActionGuardVerdict("allow", [], "unreachable", available=False)
         self.assertTrue(_blocked(action_guard_decision(down, enforce=False, fallback_blocked=True)))
         self.assertTrue(_blocked(action_guard_decision(down, enforce=False, fallback_self_protected=True)))
@@ -67,6 +77,114 @@ class TestClaim18HermesPlane(unittest.TestCase):
         self.assertIsNone(action_guard_decision(down, enforce=False, fallback_dangerous=True))
         # Nothing recognised: fail open, so a down scanner does not wedge normal work.
         self.assertIsNone(action_guard_decision(down, enforce=True))
+
+
+class TestClaim18OutageRecognition(unittest.TestCase):
+    """Claim 18, API-down half, through the real plugin wiring.
+
+    `register()` is the real entrypoint; `pre_tool_call` is the real hook. The
+    one stub is `evaluate_tool_call`, replaced with a function that returns the
+    `available=False` verdict a dead local API produces — the recognisers
+    (`fallback_catastrophic_match`, `fallback_self_protection_match`,
+    `fallback_dangerous_match`, `fallback_write_target_match`) and the policy
+    are untouched. Removing a recogniser, or disconnecting it from the decision,
+    fails these tests; the flag-handling row above could not see either.
+
+    One representative command per tier. The full shape matrices (wrappers,
+    quoting, posture spellings, lock paths) are proven in
+    `test_self_protection_floor.py`, `test_fallback_regex_bounds.py` and
+    `test_client_policy.py`, not re-proven here.
+    """
+
+    CATASTROPHIC = "rm -rf /"
+    SELF_PROTECTION = "shieldcortex config --action-guard-disable"
+    DANGEROUS = "sudo systemctl stop nginx"
+    BENIGN = ("ls -la", "git status")
+
+    def setUp(self):
+        pkg_parent = str(Path(__file__).resolve().parents[2])
+        if pkg_parent not in sys.path:
+            sys.path.insert(0, pkg_parent)
+        import shieldcortex as plugin  # the real package, as Hermes loads it
+
+        self.plugin = plugin
+        self.home = tempfile.mkdtemp(prefix="sc-hermes-claim18-")
+        self.saved = {k: os.environ.get(k) for k in ("HOME", "SHIELDCORTEX_CONFIG_DIR", "SHIELDCORTEX_ENFORCE")}
+        # The posture reporter writes under the config dir; keep it off the
+        # operator's real ~/.shieldcortex.
+        os.environ["HOME"] = self.home
+        os.environ["SHIELDCORTEX_CONFIG_DIR"] = os.path.join(self.home, ".shieldcortex")
+        self.calls = []
+        down = ActionGuardVerdict("allow", [], "scanner unavailable", available=False)
+
+        def unreachable(tool_name, args, *_a, **_k):
+            self.calls.append((tool_name, args))
+            return down
+
+        self.orig_evaluate = plugin.evaluate_tool_call
+        plugin.evaluate_tool_call = unreachable
+
+    def tearDown(self):
+        self.plugin.evaluate_tool_call = self.orig_evaluate
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def _hook(self, enforce_env):
+        """Register the real plugin under a posture and return its pre_tool_call."""
+        if enforce_env is None:
+            os.environ.pop("SHIELDCORTEX_ENFORCE", None)  # shipped default: enforce
+        else:
+            os.environ["SHIELDCORTEX_ENFORCE"] = enforce_env
+        hooks = {}
+
+        class Ctx:
+            def register_hook(self, name, fn):
+                hooks[name] = fn
+
+        self.plugin.register(Ctx())
+        return hooks["pre_tool_call"]
+
+    def _postures(self):
+        # (label, SHIELDCORTEX_ENFORCE, enforcing?) — the shipped default and the explicit opt-out.
+        return (("enforcing (default)", None, True), ("advisory", "0", False))
+
+    def test_recognised_catastrophic_command_is_blocked_in_both_postures(self):
+        for label, env, _ in self._postures():
+            d = self._hook(env)("terminal", {"command": self.CATASTROPHIC})
+            self.assertTrue(_blocked(d), label)
+            self.assertIn("catastrophic pattern", d["message"], label)
+
+    def test_recognised_self_protection_command_is_blocked_in_both_postures(self):
+        for label, env, _ in self._postures():
+            d = self._hook(env)("terminal", {"command": self.SELF_PROTECTION})
+            self.assertTrue(_blocked(d), label)
+            self.assertIn("guard's own state or config", d["message"], label)
+
+    def test_recognised_dangerous_command_is_blocked_only_while_enforcing(self):
+        for label, env, enforcing in self._postures():
+            d = self._hook(env)("terminal", {"command": self.DANGEROUS})
+            if enforcing:
+                self.assertTrue(_blocked(d), label)
+                self.assertIn("dangerous pattern", d["message"], label)
+            else:
+                self.assertIsNone(d, label)
+
+    def test_unrecognised_command_fails_open_in_both_postures(self):
+        # Bounded: a down scanner never wedges ordinary work.
+        for label, env, _ in self._postures():
+            hook = self._hook(env)
+            for cmd in self.BENIGN:
+                self.assertIsNone(hook("terminal", {"command": cmd}), f"{label}: {cmd}")
+
+    def test_the_outage_path_was_the_path_taken(self):
+        # Guard against a stub that never fired: every decision above came
+        # from the API client answering `available=False`, not from a verdict.
+        self._hook(None)("terminal", {"command": self.CATASTROPHIC})
+        self.assertEqual(self.calls, [("terminal", {"command": self.CATASTROPHIC})])
 
 
 if __name__ == "__main__":

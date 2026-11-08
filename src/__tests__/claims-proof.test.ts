@@ -512,7 +512,7 @@ describe('B. Recall / ACL (what it releases)', () => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('C. Iron Dome (what it does)', () => {
-  it('claim 10: runtime Action Guard hard-blocks catastrophic tool calls out of the box', () => {
+  it('claim 10 (core verdict): a catastrophic command classifies as block, un-relaxable by autoApprove', () => {
     const catastrophic = ['rm -rf /', ':(){ :|:& };:', 'dd if=/dev/zero of=/dev/sda bs=1M'];
     for (const command of catastrophic) {
       const v = evaluateToolCall('Bash', { command });
@@ -560,7 +560,7 @@ describe('C. Iron Dome (what it does)', () => {
     // Site copy: "A call it recognises as switching itself off or changing its
     // own configuration is held too."
     const v = evaluateToolCall('Bash', { command: 'shieldcortex config --action-guard-disable' });
-    expect(v.decision).not.toBe('allow');
+    expect(v.decision).toBe('require_approval');
     expect(v.signals).toContain('disable-action-guard');
   });
 });
@@ -615,8 +615,10 @@ describe('C2. Shipped posture (Claude Code hook)', () => {
   const DANGEROUS = 'sudo systemctl stop nginx';
   const CATASTROPHIC = ['rm', '-rf', '/'].join(' ');
 
-  it('claim 10a (shipped default, guard off): the hook emits NO decision for any tier — the core verdict alone gates nothing', () => {
-    writeGuardConfig(home, { enabled: false });
+  /** The shipped-default assertion: the real hook, a tier-firing command, and
+   *  NO decision on stdout. Shared by the three "guard off" cases below so the
+   *  default is proven the same way whether the setting is absent or written. */
+  function expectHookSilentForEveryTier(): void {
     // The classification is unchanged …
     expect(evaluateToolCall('Bash', { command: DANGEROUS }).decision).toBe('require_approval');
     expect(evaluateToolCall('Bash', { command: CATASTROPHIC }).decision).toBe('block');
@@ -628,6 +630,30 @@ describe('C2. Shipped posture (Claude Code hook)', () => {
       expect(r.stdout).toBe('');
       expect(r.decision).toBeUndefined();
     }
+  }
+
+  it('claim 10a (shipped default, no config at all): a fresh HOME with no config.json — the hook emits NO decision for any tier', () => {
+    // Nothing is written: this is the state after `npm install` and before
+    // anyone runs `shieldcortex config`. The hook resolves `enabled` from its
+    // own default for an absent file, so a flip of that default to `true`
+    // fails here — the explicit-off case below could not see it.
+    expect(existsSync(join(home, '.shieldcortex', 'config.json'))).toBe(false);
+    expectHookSilentForEveryTier();
+  });
+
+  it('claim 10a (shipped default, `enabled` omitted): an actionGuard block that never mentions `enabled` is off', () => {
+    // A half-configured file — the operator set `enforce` but never turned the
+    // guard on. `enabled` must be exactly `true` to gate; an omitted key is off.
+    writeGuardConfig(home, { enforce: true });
+    expectHookSilentForEveryTier();
+  });
+
+  it('claim 10a (explicit off): `actionGuard.enabled:false` written out — the hook emits NO decision for any tier', () => {
+    // The state `shieldcortex config --action-guard-disable` writes. Kept
+    // separate from the default cases: this proves the off-state behaviour,
+    // the two above prove the default IS off.
+    writeGuardConfig(home, { enabled: false });
+    expectHookSilentForEveryTier();
   });
 
   it('claim 10a (turned on): a dangerous call is held for approval, a catastrophic one is a hard stop, a benign one is untouched', () => {
