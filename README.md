@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <b>Holds a hijacked AI agent's recognised dangerous tool calls for a human, hard-stops the catastrophic ones, and keeps poisoned instructions out of the memory it writes through ShieldCortex.</b>
+  <b>Holds a hijacked AI agent's recognised dangerous tool calls for a human, hard-stops the catastrophic ones, and keeps recognised poisoned instructions out of the memory it writes through ShieldCortex.</b>
 </p>
 
 <p align="center">
@@ -14,10 +14,10 @@
 **Trusted task: let it work. Suspicious call: hold it for a human. Catastrophe: a hard stop.**
 
 - **Stops recognised dangerous and catastrophic tool calls from a hijacked agent.** Once Action Guard is enforcing, a trusted call runs, a call the guard recognises as dangerous is held for your approval, and a catastrophic command is a hard stop. [Tool gate](docs/CAPABILITIES.md#tool-gate-action-guard)
-- **Keeps poisoned instructions out of memory.** Writes that go through ShieldCortex are scanned first; recognised injection and leaked credentials are quarantined before they stick. [How scan results work](docs/SCAN.md)
+- **Keeps recognised poisoned instructions out of memory.** Writes that go through ShieldCortex are scanned first; recognised injection and leaked credentials are quarantined before they stick. [How scan results work](docs/SCAN.md)
 - **Catches tampering you would not see.** MCP tool descriptions, skill files and packages are scanned for poisoning and drift, and your agents' own config files are checked against a signed baseline at each fresh Claude Code startup, with one webhook notification when something changed. [Limits](docs/CAPABILITIES.md#agent-config-watch)
 
-Action Guard is off by default on Claude Code and OpenClaw; Hermes enforces once its plugin is enabled, and blocks rather than holds. Claude Code, OpenClaw and Hermes get the tool gate and the memory scan. Codex, Cursor, Copilot and other MCP hosts get the memory scan only: a memory server the model may call, not a gate. The Claude SDK browser and computer toolsets get a gate with no memory scan. [Where it can block](#where-it-can-block)
+Action Guard is off by default on Claude Code and OpenClaw; Hermes enforces once its plugin is enabled, and blocks rather than holds. Claude Code, OpenClaw and Hermes get the tool gate and the memory scan. Codex, Cursor, VS Code and other MCP hosts get the memory scan only: a memory server the model may call, not a gate. The Claude SDK browser and computer toolsets get a gate with no memory scan. [Where it can block](#where-it-can-block)
 
 ## What a catch looks like
 
@@ -66,7 +66,7 @@ Action Guard stays off until you turn it on. `sudo shieldcortex protect` turns i
 | Claude Code | yes | bound (PreToolUse) |
 | OpenClaw | yes | bound (`before_tool_call`) |
 | Hermes | via the local API | bound (`pre_tool_call`) |
-| Codex, Cursor, Copilot, MCP | if the agent calls the tools | not a gate |
+| Codex, Cursor, VS Code, MCP | if the agent calls the tools | not a gate |
 | LangChain, Python SDK | if you call `scan` or `save` | not a gate |
 | Claude SDK browser / computer toolsets (TypeScript) | no | observe by default; `mode: 'enforce'` refuses or holds for approval (`shieldcortex/toolsets`, 5.8+) |
 
@@ -78,8 +78,8 @@ Each line links to the detail, the limits and the source file or changelog entry
 
 **Stop hijacked agents**
 
-- **Tool gate.** On Claude Code and OpenClaw with Action Guard enforcing, a trusted call runs, a recognised dangerous call is held for your approval, and a catastrophic command is a hard stop. Watch-only and enforce-when-ready let the ordinary dangerous tier proceed and record it; catastrophic calls and calls that touch the guard's own state stay strict in every posture. Hermes blocks instead of holding. [Postures and limits](docs/CAPABILITIES.md#tool-gate-action-guard), [Hermes](docs/CAPABILITIES.md#hermes)
-- **Headless approvals (Claude Code).** With a notify webhook configured, a held or headless-denied call reaches you as a plain-English card with the `shieldcortex approve` command that releases it; the raw command and any credential stay out of the message (5.18+). OpenClaw uses its own approval flow; Hermes has no prompt. [Detail](docs/CAPABILITIES.md#approval-cards-and-webhooks)
+- **Tool gate.** On Claude Code and OpenClaw with Action Guard enforcing, a trusted call runs, a recognised dangerous call is held for your approval, and a catastrophic command is a hard stop. An unattended OpenClaw call, with no approver, falls to the failure policy, which denies high and critical by default. Watch-only and enforce-when-ready let the ordinary dangerous tier proceed and record it; catastrophic calls and calls that touch the guard's own state stay strict in every posture. Hermes blocks instead of holding. [Postures and limits](docs/CAPABILITIES.md#tool-gate-action-guard), [Hermes](docs/CAPABILITIES.md#hermes)
+- **Headless approvals (Claude Code).** With a notify webhook configured, a held or headless-denied call reaches you as a plain-English card with the exact `shieldcortex approve` command: for a held call it releases that one call once; for a headless denial it authorises one retry, since the denied call is already gone. The raw command and any credential stay out of the message (5.18+). OpenClaw uses its own approval flow; Hermes has no prompt. [Detail](docs/CAPABILITIES.md#approval-cards-and-webhooks)
 - **Conversation firewall for OpenClaw.** With conversation access granted, the plugin scans what reaches the model and names the pattern an injection hit matched (5.18.2). It observes by default; its `enforce` posture can block a turn on OpenClaw builds that support the gate. [Detail and limits](docs/CAPABILITIES.md#conversation-firewall-openclaw)
 - **Tool-output scan.** `scan_tool_response` checks a tool result you pass it for injection, leaked credentials and markdown-image exfiltration, and ShieldCortex's own MCP tools run it on their output. It is a scanner the agent calls, not an interceptor of other tools. [Detail](docs/CAPABILITIES.md#tool-output-scan)
 - **Claude SDK browser and computer toolsets.** `shieldcortex/toolsets` records what each click, keystroke and page read would trigger; `mode: 'enforce'` refuses the riskiest calls and holds risky ones for approval (5.8+). [Quickstart](docs/quickstarts/claude-sdk-toolsets.md)
@@ -108,13 +108,13 @@ Each line links to the detail, the limits and the source file or changelog entry
 - **Chained audit ledger.** Audit rows form a tamper-evident chain you can verify with `ledger verify`, which exits 1 if the chain is inconsistent; `policy-evidence` reports each runtime's own posture self-report. [What the chain does and does not show](docs/CAPABILITIES.md#ledger-and-policy-evidence)
 - **Cortex mistake learning.** `cortex capture` records a mistake, `cortex preflight` checks a task against the record before you repeat it, and a rule can graduate once the record supports it. [Detail](docs/CAPABILITIES.md#cortex)
 - **Dashboard.** `shieldcortex dashboard` is a local view: Home, Needs you, Memory, Protection, Settings. It is not an approval inbox. [What it needs](docs/UPDATING.md#dashboard-recall-and-cloud)
-- **Claims with proof.** The core memory, recall, gate, environment-firewall and ledger claims each map to a test that fires the real attack and asserts the block, redaction or quarantine. The matrix was written against 4.47 and does not yet cover the detect-only features above. [Claims proof matrix](docs/CLAIMS-PROOF.md)
+- **Claims with proof.** A claims-proof suite maps the defensive claims of the 4.47 README to tests that fire the real attack and assert the block, redaction or quarantine. It was written against 4.47 and does not cover the detect-only features above. [Claims proof matrix](docs/CLAIMS-PROOF.md)
 
 ## Known limits
 
 - **Recall lanes.** In prompt-time recall (the `UserPromptSubmit` hook), turns detected as a cron job, subagent or liveness probe, or pinned to one of those lanes, get narrower recall than the owner's chat, and rows labelled PERSONAL (private-life notes the classifier recognised or a backfill raised) are withheld from them. This is not universal isolation: the stored label is what keeps a note out, so a private note labelled `PUBLIC` can still reach those lanes, and SessionStart context, MCP tool reads and dashboard previews are not lane-scoped. [Recall lanes](docs/UPDATING.md#recall-lanes).
 - **Hermes has no approval prompt.** A call Action Guard would hold for approval is blocked while the Hermes plugin enforces. [Hermes](docs/CAPABILITIES.md#hermes)
-- **Hook fallback.** If the Claude Code hook fails to load, a bounded fallback still blocks recognised catastrophic commands; nothing else is gated until the hook is repaired. [Full note](docs/UPDATING.md#claude-code-hook-fallback)
+- **Hook fallback.** If the Claude Code hook fails to load, a bounded fallback still blocks recognised catastrophic commands, even with the guard off. Its blunt patterns also stop routine recursive force-deletes while the hook is broken; calls that do not match stay fail-open. [Full note](docs/UPDATING.md#claude-code-hook-fallback)
 - **Enforce-when-ready stays in shadow.** It needs reviewed evidence for the running version, and no such evidence ships yet. [What's new in 5.4](docs/UPDATING.md#whats-new-in-54)
 - **One-tap approve is half-shipped.** The 5.18 card and the loopback-only `guard approve-tap` endpoint (off by default) do not yet complete a Telegram tap end to end; approvals still go through `shieldcortex approve`. [Detail](docs/CAPABILITIES.md#approval-cards-and-webhooks)
 - **Dashboard counts are partial where labelled.** Memory-pair counts stop at 20 of each kind, the disagreement check compares only the 200 most important memories, and scanner findings cover the whole computer even when a project is selected. [Detail](docs/CAPABILITIES.md#dashboard)
@@ -123,7 +123,9 @@ Each line links to the detail, the limits and the source file or changelog entry
 
 - **Licence: MIT. Every local feature is free and needs no key.** That includes the memory firewall, Action Guard, all scanners, `audit`, Cortex, Iron Dome, deep X-Ray scans, review-copilot and the local dashboard.
 - **Enterprise licence key.** Four cloud and team features need one: full two-way cloud sync of memories, graph and quarantine content; team management; sharing custom patterns across a team; team memory scopes. Writing custom patterns, Iron Dome policies and firewall rules is free and local; only the sharing is gated. Activate with `shieldcortex license activate <key>`. [What is gated](docs/CAPABILITIES.md#what-needs-a-licence)
-- **Cloud is a second app**, the fleet view: Shield, Capture, Recall, Library, Graph, Replay, Review, Quarantine, Dome, Devices, Keys. Cloud does not ship X-Ray. Free cloud: 500 scans/month, 7-day retention, 1 member, audit metadata only. Enterprise: sales@drakonsystems.com. [How to connect a box](docs/UPDATING.md#connect-a-box)
+- **Cloud is a second app**, the fleet view: Shield, Capture, Recall, Library, Graph, Replay, Review, Quarantine, Dome, Devices, Keys. Cloud does not ship X-Ray. [How to connect a box](docs/UPDATING.md#connect-a-box)
+
+Free cloud: 500 scans/month, 7-day retention, 1 member. Enterprise (fleets, SSO, full replica): sales@drakonsystems.com.
 
 ## Links
 
