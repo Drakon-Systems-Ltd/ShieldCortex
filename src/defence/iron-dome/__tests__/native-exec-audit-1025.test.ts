@@ -35,6 +35,9 @@ import {
   MAX_PROBE_DIR_ENTRIES,
   MAX_RECORDS_PER_PATH,
   MAX_STORE_ROOT_ENTRIES,
+  MAX_MISSING_PARENT_COMPONENTS,
+  MAX_SWEEP_DELETIONS,
+  createNativeProvenanceBudget,
   NATIVE_PROBE_BUDGET_MS,
   NATIVE_PROVENANCE_RECORD_CAP,
   pruneNativeProvenance,
@@ -1020,7 +1023,9 @@ describe('#1025 fold r2 — store volume is bounded work, never a stall', () => 
     it('is enforced during the listing: the handle is still closed and no record is opened', () => {
       writeRecords(H(), 1);
       let n = 0;
-      const clock = () => (n++ < 2 ? 0 : 1_000_000); // spent right after the probe starts
+      // Spent at the check before the first directory read (r3: the budget is
+      // also checked before the root/session lstats and before the open).
+      const clock = () => (n++ < 4 ? 0 : 1_000_000);
       const dirs = watchDirs();
       const opens = jest.spyOn(fs, 'openSync');
       expect(probe(clock)('./helper')).toBeNull();
@@ -1065,7 +1070,10 @@ describe('#1025 fold r2 — store volume is bounded work, never a stall', () => 
         return real;
       }) as typeof fs.realpathSync);
       const opens = jest.spyOn(fs, 'openSync');
-      expect(p('././helper')).toBeNull(); // same hash, memoised 'agent-written'
+      // A lexically DIFFERENT spelling (r3 memoises same-spelling resolution)
+      // that resolves to the same canonical path, so the hash memo is hit.
+      fs.symlinkSync(work, path.join(work, 'link'));
+      expect(p('./link/helper')).toBeNull(); // same hash, memoised 'agent-written'
       expect(rp).toHaveBeenCalledTimes(1);
       expect(opens).not.toHaveBeenCalled();
     });
@@ -1238,5 +1246,162 @@ describe('#1025 fold r2 — the store is refused when another uid owns it', () =
       else delete (process as { getuid?: unknown }).getuid;
     }
     expect(typeof process.getuid).toBe(HAS_GETUID ? 'function' : 'undefined');
+  });
+});
+
+describe('#1025 fold r3 — one shared deadline; record and sweep are bounded', () => {
+  let root: string;
+  let stateDir: string;
+  let work: string;
+  const KEY = 'sc-0123456789abcdef';
+  const DAY = 24 * 60 * 60 * 1000;
+
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join('/tmp', 'sc-1025-r3-')));
+    stateDir = path.join(root, 'state');
+    work = path.join(root, 'work');
+    fs.mkdirSync(work, { recursive: true });
+    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('~600-level deep tree under a catastrophic redirect: decision unchanged, quick; direct record of the deep missing target is bounded', () => {
+    const deep = path.join(work, ...new Array(600).fill('a'));
+    fs.mkdirSync(deep, { recursive: true });
+    const target = `${'a/'.repeat(600)}${'b/'.repeat(600)}x`;
+    const command = `${['rm', '-rf', '~'].join(' ')} ; echo hi > ${target}`;
+    const base = evaluateToolCall('Bash', { command });
+    expect(base.decision).toBe('block');
+    const budget = createNativeProvenanceBudget();
+    const started = Date.now();
+    const wired = evaluateToolCall('Bash', { command }, undefined, {
+      nativeArtifactProvenance: createNativeArtifactProbe({ sessionKey: KEY, cwd: work, stateDir, home: root, budget }),
+    });
+    const { nativeExec, ...rest } = wired;
+    expect(rest).toEqual(base);
+    expect(nativeExec).toBeUndefined();
+    // Direct recording of the same target (not merely the block skip): the
+    // 600 missing components exceed MAX_MISSING_PARENT_COMPONENTS → null.
+    const rp = jest.spyOn(fs, 'realpathSync');
+    const n = recordNativeArtifactCaptures({
+      sessionKey: KEY, cwd: work, stateDir, home: root,
+      captures: Array.from({ length: 16 }, (_, i) => ({ token: `${'./'.repeat(i + 1)}${target}`, kind: 'agent-written' as const })),
+    });
+    expect(n).toBe(0);
+    // One resolution (memoised across the 16 spellings), at most cap+1 calls.
+    expect(rp.mock.calls.length).toBeLessThanOrEqual(MAX_MISSING_PARENT_COMPONENTS + 1);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('a missing tail of up to MAX_MISSING_PARENT_COMPONENTS is still recorded', () => {
+    expect(recordNativeArtifactCaptures({
+      sessionKey: KEY, cwd: work, stateDir, home: root,
+      captures: [{ token: 'p/q/x', kind: 'compiled-output' }],
+    })).toBe(1);
+    expect(recordNativeArtifactCaptures({
+      sessionKey: KEY, cwd: work, stateDir, home: root,
+      captures: [{ token: 'p/q/r/x', kind: 'compiled-output' }],
+    })).toBe(0);
+  });
+
+  it('dedupe: 16 spellings of one kind → one record; the same path with both kinds keeps both (ambiguous stays honest)', () => {
+    expect(recordNativeArtifactCaptures({
+      sessionKey: KEY, cwd: work, stateDir, home: root,
+      captures: SPELLINGS.map((t) => ({ token: t, kind: 'agent-written' as const })),
+    })).toBe(1);
+    expect(recordNativeArtifactCaptures({
+      sessionKey: KEY, cwd: work, stateDir, home: root,
+      captures: [{ token: './y', kind: 'agent-written' }, { token: '././y', kind: 'compiled-output' }],
+    })).toBe(2);
+  });
+
+  it('planted expired session dir with 20k files: skipped (left whole), call quick; small expired dirs pruned within the shared cap', () => {
+    const big = path.join(stateDir, 'sc-ffffffffffffffff');
+    fs.mkdirSync(big, { mode: 0o700 });
+    plantEmpty(big, 20_000, (i) => `f${i}`);
+    const small = ['sc-1111111111111111', 'sc-2222222222222222', 'sc-3333333333333333'].map((k) => path.join(stateDir, k));
+    for (const d of small) { fs.mkdirSync(d, { mode: 0o700 }); plantEmpty(d, 100, (i) => `r${i}`); }
+    const old = (Date.now() - 3 * DAY) / 1000;
+    for (const d of [big, ...small]) fs.utimesSync(d, old, old);
+    const unlinks = jest.spyOn(fs, 'unlinkSync');
+    const rmdirs = jest.spyOn(fs, 'rmdirSync');
+    const rms = jest.spyOn(fs, 'rmSync');
+    const started = Date.now();
+    expect(pruneNativeProvenance({ stateDir })).toBe(0);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(rms).not.toHaveBeenCalled(); // never recursive
+    expect(unlinks.mock.calls.length + rmdirs.mock.calls.length).toBeLessThanOrEqual(MAX_SWEEP_DELETIONS);
+    expect(fs.readdirSync(big)).toHaveLength(20_000); // over-full: left in place, not renamed
+    const left = fs.readdirSync(stateDir).filter((n) => n !== 'sc-ffffffffffffffff');
+    expect(left).toHaveLength(1); // two 101-deletion dirs fit in 256; the third waits
+    // Next sweep takes the rest; the big one still stands.
+    expect(pruneNativeProvenance({ stateDir })).toBe(0);
+    expect(fs.readdirSync(stateDir)).toEqual(['sc-ffffffffffffffff']);
+  });
+
+  it('an expired dir with a nested directory is skipped entirely', () => {
+    const d = path.join(stateDir, 'sc-4444444444444444');
+    fs.mkdirSync(path.join(d, 'nested'), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(d, 'r1'), '');
+    const old = (Date.now() - 3 * DAY) / 1000;
+    fs.utimesSync(d, old, old);
+    const unlinks = jest.spyOn(fs, 'unlinkSync');
+    expect(pruneNativeProvenance({ stateDir })).toBe(0);
+    expect(unlinks).not.toHaveBeenCalled();
+    expect(fs.readdirSync(d).sort()).toEqual(['nested', 'r1']);
+  });
+
+  it('shared budget: probe spends it → record publishes nothing and touches no fs; latched against a clock that recovers', () => {
+    let t = 0;
+    const budget = createNativeProvenanceBudget({ clock: () => t });
+    const p = createNativeArtifactProbe({ sessionKey: KEY, cwd: work, stateDir, home: root, budget });
+    expect(p('./helper')).toBeNull(); // starts the deadline
+    t = NATIVE_PROBE_BUDGET_MS + 1;
+    expect(budget.expired()).toBe(true);
+    t = 0; // a clock that goes back never revives it
+    const spies = ['lstatSync', 'mkdirSync', 'opendirSync', 'writeFileSync', 'renameSync', 'statSync', 'realpathSync']
+      .map((m) => jest.spyOn(fs, m as 'lstatSync'));
+    expect(recordNativeArtifactCaptures({
+      sessionKey: KEY, cwd: work, stateDir, home: root, budget,
+      captures: [{ token: './y', kind: 'agent-written' }],
+    })).toBe(0);
+    for (const s of spies) expect(s).not.toHaveBeenCalled();
+    expect(pruneNativeProvenance({ stateDir, budget })).toBeNull();
+  });
+
+  it('record → sweep share one deadline: expiry during the first-record sweep records nothing', () => {
+    let n = 0;
+    const budget = createNativeProvenanceBudget({ clock: () => (n++ < 6 ? 0 : 1e9) });
+    expect(recordNativeArtifactCaptures({
+      sessionKey: KEY, cwd: work, stateDir, home: root, budget,
+      captures: [{ token: './y', kind: 'agent-written' }],
+    })).toBe(0);
+    expect(fs.existsSync(path.join(stateDir, KEY))).toBe(false);
+  });
+
+  it('a NaN or throwing clock is an expired budget, never a throw', () => {
+    for (const clock of [() => Number.NaN, () => { throw new Error('clock'); }]) {
+      const budget = createNativeProvenanceBudget({ clock: clock as () => number });
+      expect(recordNativeArtifactCaptures({
+        sessionKey: KEY, cwd: work, stateDir, home: root, budget,
+        captures: [{ token: './y', kind: 'agent-written' }],
+      })).toBe(0);
+      expect(pruneNativeProvenance({ stateDir, budget })).toBeNull();
+    }
+  });
+
+  it('decision parity: disabled / enabled / expired budget, catastrophic and benign', () => {
+    for (const command of [`${['rm', '-rf', '~'].join(' ')} ; ./helper`, 'ls -la']) {
+      const base = evaluateToolCall('Bash', { command });
+      for (const budget of [createNativeProvenanceBudget(), createNativeProvenanceBudget({ clock: () => Number.NaN })]) {
+        const { nativeExec: _n, ...rest } = evaluateToolCall('Bash', { command }, undefined, {
+          nativeArtifactProvenance: createNativeArtifactProbe({ sessionKey: KEY, cwd: work, stateDir, home: root, budget }),
+        });
+        expect(rest).toEqual(base);
+      }
+    }
   });
 });

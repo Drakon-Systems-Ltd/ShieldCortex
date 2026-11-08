@@ -2838,8 +2838,9 @@ export function nativeProvenanceAdapter(defenceMod: unknown): InterceptorRuntime
   const m = defenceMod as {
     sessionKeyFor?: (value: string | undefined) => string | null;
     nativeArtifactCaptures?: (toolName: string, args: Record<string, unknown>) => unknown;
-    createNativeArtifactProbe?: (opts: { sessionKey: string; cwd: string | undefined }) => unknown;
-    recordNativeArtifactCaptures?: (opts: { sessionKey: string; captures: unknown; cwd: string | undefined }) => unknown;
+    createNativeArtifactProbe?: (opts: { sessionKey: string; cwd: string | undefined; budget?: unknown }) => unknown;
+    recordNativeArtifactCaptures?: (opts: { sessionKey: string; captures: unknown; cwd: string | undefined; budget?: unknown }) => unknown;
+    createNativeProvenanceBudget?: () => unknown;
   } | null | undefined;
   if (!m
     || typeof m.sessionKeyFor !== 'function'
@@ -2857,20 +2858,24 @@ export function nativeProvenanceAdapter(defenceMod: unknown): InterceptorRuntime
     }
   };
   return {
-    probe: (sessionId, cwd) => {
+    // One per evaluated call (the interceptor calls this inside handleToolCall),
+    // so concurrent calls never share or reset each other's deadline. An older
+    // dist without the factory: undefined, and the store makes its own.
+    budget: () => (typeof m.createNativeProvenanceBudget === 'function' ? m.createNativeProvenanceBudget() : undefined),
+    probe: (sessionId, cwd, budget) => {
       const key = keyOf(sessionId);
       if (!key) return undefined;
-      const probe = m.createNativeArtifactProbe!({ sessionKey: key, cwd });
+      const probe = m.createNativeArtifactProbe!({ sessionKey: key, cwd, budget });
       return typeof probe === 'function'
         ? (probe as NonNullable<ReturnType<NonNullable<InterceptorRuntimeOptions['nativeProvenance']>['probe']>>)
         : undefined;
     },
-    record: (toolName, args, sessionId, cwd) => {
+    record: (toolName, args, sessionId, cwd, budget) => {
       const key = keyOf(sessionId);
       if (!key) return;
       const captures = m.nativeArtifactCaptures!(toolName, args);
       if (!Array.isArray(captures) || captures.length === 0) return;
-      m.recordNativeArtifactCaptures!({ sessionKey: key, captures, cwd });
+      m.recordNativeArtifactCaptures!({ sessionKey: key, captures, cwd, budget });
     },
   };
 }

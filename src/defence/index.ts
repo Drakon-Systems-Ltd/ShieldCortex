@@ -155,9 +155,11 @@ export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily
 export {
   createNativeArtifactProbe, recordNativeArtifactCaptures, pruneNativeProvenance,
   resolveNativeProvenanceDir, classifyNativeProvenance, isNativeImageHeader,
+  createNativeProvenanceBudget,
 } from './iron-dome/native-exec-provenance.js';
 export type {
   NativeArtifactKind, NativeArtifactProvenance, NativeArtifactCapture, NativeArtifactRecord,
+  NativeProvenanceBudget,
 } from './iron-dome/native-exec-provenance.js';
 // #648: the plain-English what/why/who an approval card shows. The OpenClaw
 // interceptor takes `buildApprovalCard` through its runtime seam.

@@ -111,6 +111,130 @@ export const MAX_STORE_ROOT_ENTRIES = 4 * MAX_NATIVE_PROVENANCE_SESSIONS;
  *  evaluated call shares it, from the probe's first use. Past it every
  *  remaining lookup is "not observed". */
 export const NATIVE_PROBE_BUDGET_MS = 250;
+/** Deletions (unlinks plus rmdirs) one sweep makes, across every directory
+ *  it removes. A doomed directory with more entries than what remains of
+ *  this cap, or with a subdirectory (nothing in the store nests, so it was
+ *  planted), is skipped and left in place. */
+export const MAX_SWEEP_DELETIONS = 256;
+/** Missing directory components a target's parent may have and still be
+ *  keyed. A redirect never creates directories and a compiler at most writes
+ *  into one a same-call `mkdir -p` made, so a longer missing tail is not a
+ *  real write target; past it the token is unresolvable (`null`). */
+export const MAX_MISSING_PARENT_COMPONENTS = 2;
+
+/**
+ * ONE monotonic deadline shared by every filesystem operation of the store
+ * for one evaluated call: the probe, the record step, path resolution and
+ * the sweep. It starts at its first check and is never refreshed. Expiry is
+ * latched: once a check says expired (the time is past, or the clock threw
+ * or returned a non-finite value) every later check says so too, whatever
+ * the clock does next. Expired always means "not observed / not recorded" —
+ * `null` or `0` — never a throw and never a different decision.
+ */
+export interface NativeProvenanceBudget {
+  expired(): boolean;
+}
+
+/** Budgets this module made → that call's canonicalisation memo, keyed by
+ *  the lexically normalised absolute spelling (`./x`, `././x` and `/work/x`
+ *  resolve once per call). */
+const CANON_MEMO = new WeakMap<NativeProvenanceBudget, Map<string, string | null>>();
+/** A caller-supplied budget-like object → the latching wrapper used for it. */
+const FOREIGN_BUDGETS = new WeakMap<object, NativeProvenanceBudget>();
+
+export function createNativeProvenanceBudget(opts: {
+  clock?: () => number;
+  budgetMs?: number;
+} = {}): NativeProvenanceBudget {
+  const clock = typeof opts.clock === 'function' ? opts.clock : () => performance.now();
+  const ms = typeof opts.budgetMs === 'number' && Number.isFinite(opts.budgetMs) && opts.budgetMs >= 0
+    ? opts.budgetMs
+    : NATIVE_PROBE_BUDGET_MS;
+  let deadline: number | null = null;
+  let spent = false;
+  const budget: NativeProvenanceBudget = {
+    expired(): boolean {
+      if (spent) return true;
+      try {
+        const t = clock();
+        if (typeof t !== 'number' || !Number.isFinite(t)) {
+          spent = true;
+        } else {
+          if (deadline === null) deadline = t + ms;
+          if (!(t <= deadline)) spent = true;
+        }
+      } catch {
+        spent = true;
+      }
+      return spent;
+    },
+  };
+  CANON_MEMO.set(budget, new Map());
+  return budget;
+}
+
+/** The caller's budget (the SAME object, so phases share one deadline and
+ *  one memo), or a fresh default when none was passed. A foreign object is
+ *  wrapped once so its expiry latches and a throw counts as expired. */
+function budgetOf(b: unknown, clock?: () => number): NativeProvenanceBudget {
+  if (b && typeof b === 'object') {
+    if (CANON_MEMO.has(b as NativeProvenanceBudget)) return b as NativeProvenanceBudget;
+    const known = FOREIGN_BUDGETS.get(b);
+    if (known) return known;
+    const fn = (b as { expired?: unknown }).expired;
+    if (typeof fn === 'function') {
+      let spent = false;
+      const wrapped: NativeProvenanceBudget = {
+        expired(): boolean {
+          if (spent) return true;
+          try {
+            if (fn.call(b) !== false) spent = true;
+          } catch {
+            spent = true;
+          }
+          return spent;
+        },
+      };
+      CANON_MEMO.set(wrapped, new Map());
+      FOREIGN_BUDGETS.set(b, wrapped);
+      return wrapped;
+    }
+  }
+  return createNativeProvenanceBudget({ clock });
+}
+
+/** realpath that refuses once `budget` is spent (a non-ENOENT failure, so
+ *  `canonicalTarget` answers `null`). The native resolver is preferred (one
+ *  syscall-level walk instead of an lstat per component); a stubbed
+ *  `fs.realpathSync` without `.native` is honoured as is. */
+function budgetedRealpath(budget: NativeProvenanceBudget): Realpath {
+  return (p: string) => {
+    if (budget.expired()) throw Object.assign(new Error('native provenance budget spent'), { code: 'ETIMEDOUT' });
+    const rp = fs.realpathSync as typeof fs.realpathSync & { native?: (q: string) => string };
+    const out = typeof rp.native === 'function' ? rp.native(p) : rp(p);
+    return String(out);
+  };
+}
+
+/** `canonicalTarget` under `budget`, memoised per call by normalised
+ *  spelling; `null` once the budget is spent, even for a remembered answer. */
+function canonicalInBudget(
+  token: string,
+  cwd: string | undefined,
+  home: string | undefined,
+  budget: NativeProvenanceBudget,
+): string | null {
+  if (budget.expired()) return null;
+  const memo = CANON_MEMO.get(budget);
+  const key = lexicalAbsolute(token, cwd, home);
+  if (key === null) return null;
+  if (memo?.has(key)) return budget.expired() ? null : memo.get(key) ?? null;
+  const canon = canonicalTarget(token, cwd, home, budgetedRealpath(budget));
+  // A resolution that SUCCEEDED may have spent the budget on its last lookup.
+  if (budget.expired()) return null;
+  memo?.set(key, canon);
+  return canon;
+}
 
 /** Both planes key sessions as `sc-` + 16 hex (session-guard.ts sessionKeyFor,
  *  scripts/pre-tool-hook.mjs). Anything else is refused, so a key can never be
@@ -127,10 +251,12 @@ export function resolveNativeProvenanceDir(env: NodeJS.ProcessEnv = process.env)
 
 // -- canonicalTarget (reused from the frozen #907 core) -----------------------
 
+/** At most `MAX_MISSING_PARENT_COMPONENTS` + 1 realpath calls: a parent with
+ *  a longer missing tail is not a real write target and is `null`. */
 function longestExistingRealpath(start: string, realpath: Realpath): string | null {
   const stripped: string[] = [];
   let cur = start;
-  for (let i = 0; i < 4096; i++) {
+  for (let i = 0; i <= MAX_MISSING_PARENT_COMPONENTS; i++) {
     try {
       const real = realpath(cur);
       return stripped.length ? [real, ...stripped].join(path.sep) : real;
@@ -157,15 +283,11 @@ function longestExistingRealpath(start: string, realpath: Realpath): string | nu
  * deliberately no `process.cwd()` fallback: a guessed base would key capture
  * and query differently.
  */
-export function canonicalTarget(
-  token: string,
-  cwd: string | undefined,
-  home: string | undefined,
-  realpath: Realpath,
-): string | null {
+/** The lexically normalised absolute spelling `canonicalTarget` starts from
+ *  (no filesystem access), or `null` when the token cannot be placed. */
+function lexicalAbsolute(token: string, cwd: string | undefined, home: string | undefined): string | null {
   if (typeof token !== 'string') return null;
   if (!token || token.includes('\0') || token.length > 4096) return null;
-
   let abs: string;
   if (token === '~' || token.startsWith('~/')) {
     if (typeof home !== 'string' || !home || !path.isAbsolute(home)) return null;
@@ -178,9 +300,19 @@ export function canonicalTarget(
     }
     abs = `${cwd}/${token}`;
   }
-
   abs = path.normalize(abs);
   if (abs.length > 1 && abs.endsWith(path.sep)) abs = abs.slice(0, -1);
+  return abs;
+}
+
+export function canonicalTarget(
+  token: string,
+  cwd: string | undefined,
+  home: string | undefined,
+  realpath: Realpath,
+): string | null {
+  const abs = lexicalAbsolute(token, cwd, home);
+  if (abs === null) return null;
 
   const base = path.basename(abs);
   const parent = path.dirname(abs);
@@ -225,15 +357,19 @@ export function isNativeImageHeader(bytes: Uint8Array | null | undefined): boole
  * `'absent'` only when the final component does not exist, `null` for every
  * other failure. Never throws.
  */
-export function statContentId(absPath: string): ContentId | 'absent' | null {
+export function statContentId(absPath: string, expired?: () => boolean): ContentId | 'absent' | null {
   try {
+    if (expired?.()) return null;
     const st = fs.statSync(absPath);
+    if (expired?.()) return null;
     return { dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs };
   } catch {
     try {
+      if (expired?.()) return null;
       fs.lstatSync(absPath);
       return null;
     } catch (err) {
+      if (expired?.()) return null;
       const code = (err as NodeJS.ErrnoException).code;
       return code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : null;
     }
@@ -250,18 +386,25 @@ const OPEN_HEADER_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0)
  *  before any open (so a device is not even opened); the open is still
  *  non-blocking and re-checked with fstat, because the path can be swapped
  *  between the two. Never throws. */
-export function readArtifactHeader(absPath: string): Uint8Array | null {
+export function readArtifactHeader(absPath: string, expired?: () => boolean): Uint8Array | null {
   let fd: number | null = null;
   try {
+    if (expired?.()) return null;
     if (!fs.statSync(absPath).isFile()) return null;
+    if (expired?.()) return null;
     fd = fs.openSync(absPath, OPEN_HEADER_FLAGS);
+    if (expired?.()) return null;
     if (!fs.fstatSync(fd).isFile()) return null;
+    if (expired?.()) return null;
     const buf = Buffer.alloc(NATIVE_HEADER_BYTES);
     const n = fs.readSync(fd, buf, 0, NATIVE_HEADER_BYTES, 0);
+    if (expired?.()) return null;
     return new Uint8Array(buf.subarray(0, n));
   } catch {
     return null;
   } finally {
+    // Bounded cleanup exemption: the descriptor is closed even past the
+    // deadline (one close, no path lookup).
     if (fd !== null) {
       try { fs.closeSync(fd); } catch { /* best effort */ }
     }
@@ -327,8 +470,6 @@ export function classifyNativeProvenance(
 
 // -- Store --------------------------------------------------------------------
 
-const realpathThrowing: Realpath = (p: string) => fs.realpathSync(p);
-
 function pathHashFor(sessionKey: string, canonical: string): string {
   return createHmac('sha256', sessionKey).update(canonical).digest('hex');
 }
@@ -356,11 +497,11 @@ const FINAL_RE = /^([0-9a-f]{64})\.\d+\.[0-9a-f]+$/;
 // path lookups. An agent racing the hook can replace a checked root or
 // session directory with a link or another directory in between, so a record
 // may be written, listed or read through it, and the directory the sweep
-// renames and deletes need not be the one it lstat'd (rmSync of the renamed
-// path unlinks a link rather than following it, but a swapped-in real
-// directory is deleted). None of this is race-proof containment, and other
-// filesystem calls (mkdir, readdir, rename, rm) are ordinary synchronous I/O
-// with no timeout. The parents of the root (`~/.shieldcortex` or
+// renames need not be the one it lstat'd (only the names the sweep listed
+// are then unlinked inside it, at most `MAX_SWEEP_DELETIONS` per sweep, and
+// it is removed with a non-recursive rmdir; nothing is ever deleted
+// recursively). None of this is race-proof containment. The parents of the
+// root (`~/.shieldcortex` or
 // SHIELDCORTEX_CONFIG_DIR) are trusted as for every other state file there.
 // The probe's output, raced or not, only labels a log row and never changes a
 // decision.
@@ -371,11 +512,18 @@ const FINAL_RE = /^([0-9a-f]{64})\.\d+\.[0-9a-f]+$/;
 // over-full root is not swept and no new session is created in it, while a
 // session already there keeps recording up to its own cap), the probe reads
 // at most `MAX_RECORDS_PER_PATH` entries per path hash and classifies each
-// hash once per call (each spelling is still resolved), and the whole probe
-// of one call shares one `NATIVE_PROBE_BUDGET_MS` budget. The budget is checked between filesystem
-// operations: a single synchronous call that itself blocks (a hung network
-// filesystem, say) cannot be interrupted, so it bounds the work, not the
-// latency of any one syscall.
+// hash once per call, and the record step resolves a target with at most
+// `MAX_MISSING_PARENT_COMPONENTS` + 1 realpath calls, once per normalised
+// spelling, and records once per (canonical path, kind). The sweep makes at
+// most `MAX_SWEEP_DELETIONS` deletions. Probe, record, path resolution and
+// sweep of one call all share ONE `NativeProvenanceBudget`
+// (`NATIVE_PROBE_BUDGET_MS`), checked before every filesystem operation;
+// past it the answer is "not observed / not recorded". Closing an already
+// opened file or directory handle is the one operation done after expiry
+// (one close, no path lookup). The check runs between operations: a single
+// synchronous call that itself blocks (a hung network filesystem, say)
+// cannot be interrupted, so the budget bounds the work, not the latency of
+// any one syscall.
 //
 // Ownership: where the platform has `process.getuid` (not Windows), the root
 // and the session directory must be owned by this uid, and the sweep only
@@ -418,20 +566,38 @@ function isRealDirectory(p: string): boolean {
  *  directory could not be opened or read. The handle is always closed. The
  *  whole directory is never materialised. Never throws. */
 function listDirBounded(dir: string, max: number, expired?: () => boolean): string[] | null {
+  const got = readDirBounded(dir, max, expired, false);
+  return got === null || got.more ? null : got.names;
+}
+
+/** At most `max` entry names of `dir` plus whether more remain, or `null`
+ *  (unopenable, unreadable, `expired()` became true — checked before the
+ *  open and before EVERY read — or, with `refuseDirs`, a subdirectory was
+ *  seen). Never throws. */
+function readDirBounded(
+  dir: string,
+  max: number,
+  expired: (() => boolean) | undefined,
+  refuseDirs: boolean,
+): { names: string[]; more: boolean } | null {
   let d: fs.Dir | null = null;
   try {
+    if (expired?.()) return null;
     d = fs.opendirSync(dir);
     const names: string[] = [];
     for (;;) {
-      if (expired && (names.length & 63) === 0 && expired()) return null;
+      if (expired?.()) return null;
       const e = d.readSync();
-      if (e === null) return names;
-      if (names.length >= max) return null;
+      if (e === null) return { names, more: false };
+      if (refuseDirs && e.isDirectory()) return null;
+      if (names.length >= max) return { names, more: true };
       names.push(e.name);
     }
   } catch {
     return null;
   } finally {
+    // Bounded cleanup exemption: the handle is closed even past the deadline
+    // (one close, no path lookup), so expiry never leaks a descriptor.
     if (d !== null) {
       try { d.closeSync(); } catch { /* best effort */ }
     }
@@ -447,25 +613,32 @@ const OPEN_RECORD_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0)
  *  open does not wait for a FIFO writer (O_NONBLOCK) and the fd is fstat'd
  *  before any read; a fixed buffer bounds the read even if the file grows
  *  after the size checks. Never throws. */
-function readRecordFile(p: string): string | null {
+function readRecordFile(p: string, expired: () => boolean): string | null {
   let fd: number | null = null;
   try {
+    if (expired()) return null;
     const st = fs.lstatSync(p);
     if (!st.isFile() || st.size > MAX_RECORD_BYTES) return null;
+    if (expired()) return null;
     fd = fs.openSync(p, OPEN_RECORD_FLAGS);
+    if (expired()) return null;
     const fst = fs.fstatSync(fd);
     if (!fst.isFile() || fst.size > MAX_RECORD_BYTES) return null;
     const buf = Buffer.alloc(MAX_RECORD_BYTES + 1);
     let n = 0;
     while (n < buf.length) {
+      if (expired()) return null;
       const got = fs.readSync(fd, buf, n, buf.length - n, n);
       if (got <= 0) break;
       n += got;
     }
+    if (expired()) return null;
     return n > MAX_RECORD_BYTES ? null : buf.toString('utf8', 0, n);
   } catch {
     return null;
   } finally {
+    // Bounded cleanup exemption: the descriptor is closed even past the
+    // deadline (one close, no path lookup).
     if (fd !== null) {
       try { fs.closeSync(fd); } catch { /* best effort */ }
     }
@@ -495,19 +668,26 @@ function parseRecordBody(raw: string): NativeArtifactRecord | null {
   }
 }
 
-function publishRecord(dir: string, finalName: string, body: string): boolean {
+/** Publish one record: create a temp file, then rename it into place. The
+ *  deadline is checked before the create, before the rename and after it;
+ *  once spent nothing more is done — a temp file already created is LEFT
+ *  (no unlink after expiry; its `.tmp` name never matches a record, so it is
+ *  never evidence) and the answer is `false`. Never throws. */
+function publishRecord(dir: string, finalName: string, body: string, expired: () => boolean): boolean {
   const tmp = path.join(dir, `${finalName}.tmp`);
   // `wx` is O_CREAT|O_EXCL: it never follows or opens an entry already at
   // that name (a planted link or FIFO fails EEXIST), and only a file this
   // call created is ever unlinked.
   let created = false;
   try {
+    if (expired()) return false;
     fs.writeFileSync(tmp, body, { flag: 'wx', mode: 0o600 });
     created = true;
+    if (expired()) return false;
     fs.renameSync(tmp, path.join(dir, finalName));
-    return true;
+    return !expired();
   } catch {
-    if (created) {
+    if (created && !expired()) {
       try { fs.unlinkSync(tmp); } catch { /* best effort */ }
     }
     return false;
@@ -521,6 +701,15 @@ function publishRecord(dir: string, finalName: string, body: string): boolean {
  * path is not observed. Called by the hook / interceptor AFTER the call's own
  * evaluation, so a same-call write is not visible to that call's own probe.
  * Returns how many records were published (for tests).
+ *
+ * Bounded by `budget` — the SAME object the call's probe used, so probe,
+ * record, path resolution and the first-record sweep share one deadline
+ * (a fresh default when absent). It is checked before every filesystem
+ * operation; once spent nothing more is resolved, listed, swept or
+ * published and the count so far is returned. Captures are resolved once
+ * per normalised spelling and recorded once per (canonical path, kind): the
+ * same path named with both kinds keeps one record of each, so Rule P
+ * answers `ambiguous` rather than whichever came last.
  */
 export function recordNativeArtifactCaptures(opts: {
   sessionKey: string;
@@ -530,72 +719,96 @@ export function recordNativeArtifactCaptures(opts: {
   home?: string;
   now?: number;
   maxSessions?: number;
+  budget?: NativeProvenanceBudget;
+  clock?: () => number;
 }): number {
   try {
     if (!SESSION_KEY_RE.test(String(opts.sessionKey ?? ''))) return 0;
     if (!Array.isArray(opts.captures) || opts.captures.length === 0) return 0;
     const root = storeRoot(opts.stateDir);
     if (root === null) return 0;
+    const budget = budgetOf(opts.budget, opts.clock);
+    const expired = (): boolean => budget.expired();
     const home = opts.home ?? os.homedir();
     const dir = path.join(root, opts.sessionKey);
     const at = opts.now ?? Date.now();
 
     // The root: a real directory, or absent (then created). Anything else —
     // a symlink, a file, a FIFO — and nothing is recorded.
+    if (expired()) return 0;
     if (!isRealDirectory(root)) {
+      if (expired()) return 0;
       try {
         fs.lstatSync(root);
         return 0; // exists, and is not a real directory
       } catch { /* absent: create it */ }
+      if (expired()) return 0;
+      // Bounded: `recursive` walks only the trusted parents of the root.
       try {
         fs.mkdirSync(root, { recursive: true, mode: 0o700 });
       } catch { /* re-checked below */ }
-      if (!isRealDirectory(root)) return 0;
+      if (expired() || !isRealDirectory(root)) return 0;
     }
 
     let existing: string[] | null;
     let sessionPresent = true;
+    if (expired()) return 0;
     try {
       fs.lstatSync(dir);
     } catch {
       sessionPresent = false;
     }
+    if (expired()) return 0;
     if (sessionPresent) {
       if (!isRealDirectory(dir)) return 0; // a planted link, special file or another uid's
       // Bounded: past the record cap there is no room anyway, so the listing
       // reads at most the cap's worth of entries plus one overflow sentinel
       // (any entry past the cap → nothing recorded) instead of reading a
       // stuffed directory whole.
-      existing = listDirBounded(dir, NATIVE_PROVENANCE_RECORD_CAP);
+      existing = listDirBounded(dir, NATIVE_PROVENANCE_RECORD_CAP, expired);
       if (existing === null) return 0;
     } else {
       // First record of this session: the one moment a sweep is paid for, so
-      // the hot path never lists the whole store.
-      const live = pruneNativeProvenance({ stateDir: root, now: at });
+      // the hot path never lists the whole store. Same budget.
+      const live = pruneNativeProvenance({ stateDir: root, now: at, budget });
       if (live === null || live >= (opts.maxSessions ?? MAX_NATIVE_PROVENANCE_SESSIONS)) return 0;
+      if (expired()) return 0;
       try {
         fs.mkdirSync(dir, { mode: 0o700 });
       } catch { /* EEXIST from a concurrent call: re-checked below */ }
-      if (!isRealDirectory(dir)) return 0;
+      if (expired() || !isRealDirectory(dir)) return 0;
       existing = [];
     }
     let room = NATIVE_PROVENANCE_RECORD_CAP - existing.length;
     let published = 0;
+    const seen = new Set<string>();
+    const ids = new Map<string, ContentId | 'absent' | null>();
     for (const c of opts.captures.slice(0, MAX_CAPTURES_PER_CALL)) {
-      if (room <= 0) break;
+      if (room <= 0 || expired()) break;
       if (!c || typeof c.token !== 'string') continue;
       if (c.kind !== 'agent-written' && c.kind !== 'compiled-output') continue;
-      const canon = canonicalTarget(c.token, opts.cwd, home, realpathThrowing);
+      const canon = canonicalInBudget(c.token, opts.cwd, home, budget);
       if (canon === null) continue;
-      const id = statContentId(canon);
+      const dedupe = `${c.kind}\0${canon}`;
+      if (seen.has(dedupe)) continue;
+      seen.add(dedupe);
+      let id = ids.get(canon);
+      if (id === undefined) {
+        if (expired()) return 0;
+        id = statContentId(canon, expired);
+        ids.set(canon, id);
+      }
+      if (expired()) return 0;
       const record: NativeArtifactRecord = { kind: c.kind, preId: id === null ? 'unknown' : id, at };
       const name = `${pathHashFor(opts.sessionKey, canon)}.${at}.${randomBytes(6).toString('hex')}`;
-      if (publishRecord(dir, name, JSON.stringify(record))) {
+      if (publishRecord(dir, name, JSON.stringify(record), expired)) {
         published++;
         room--;
       }
     }
-    return published;
+    // Spent at any point: "not recorded" (0). Records already published stay
+    // — harmless, each is a complete record — but the call reports none.
+    return expired() ? 0 : published;
   } catch {
     return 0;
   }
@@ -628,27 +841,17 @@ export function createNativeArtifactProbe(opts: {
   stateDir?: string;
   home?: string;
   clock?: () => number;
+  /** The call's shared budget (also passed to the record step). A fresh
+   *  default from `clock` when absent. */
+  budget?: NativeProvenanceBudget;
 }): (token: string) => NativeArtifactProvenance | null {
   const root = storeRoot(opts.stateDir);
   const valid = root !== null && SESSION_KEY_RE.test(String(opts.sessionKey ?? ''));
   const dir = path.join(root ?? '_', valid ? opts.sessionKey : '_');
   const home = opts.home ?? os.homedir();
-  const clock = typeof opts.clock === 'function' ? opts.clock : () => performance.now();
-  let deadline: number | null = null;
+  const budget = budgetOf(opts.budget, opts.clock);
   /** True once the shared budget is spent (or the clock misbehaves). */
-  const expired = (): boolean => {
-    try {
-      return deadline === null || !(clock() <= deadline);
-    } catch {
-      return true;
-    }
-  };
-  /** realpath that refuses once the budget is spent; `canonicalTarget` then
-   *  answers `null` (a non-ENOENT failure). */
-  const realpathInBudget: Realpath = (p: string) => {
-    if (expired()) throw Object.assign(new Error('native provenance probe budget spent'), { code: 'ETIMEDOUT' });
-    return fs.realpathSync(p);
-  };
+  const expired = (): boolean => budget.expired();
   // Path hash → its record names, or `null` for a hash over the per-path cap.
   let byHash: Map<string, string[] | null> | null = null;
   const memo = new Map<string, NativeArtifactProvenance | null>();
@@ -659,7 +862,7 @@ export function createNativeArtifactProbe(opts: {
     // Nothing is listed or read through a planted link, special file or
     // another uid's directory; an over-full, unreadable or out-of-time
     // listing is no evidence.
-    const names = root !== null && isRealDirectory(root) && isRealDirectory(dir)
+    const names = root !== null && !expired() && isRealDirectory(root) && !expired() && isRealDirectory(dir)
       ? listDirBounded(dir, MAX_PROBE_DIR_ENTRIES, expired)
       : null;
     if (names === null) return empty;
@@ -684,14 +887,14 @@ export function createNativeArtifactProbe(opts: {
       if (expired()) return null;
       // Not a small regular file (a planted FIFO, link, directory, an
       // oversized file) or unreadable: not evidence.
-      const raw = readRecordFile(path.join(dir, n));
+      const raw = readRecordFile(path.join(dir, n), expired);
       const r = raw === null ? null : parseRecordBody(raw);
       if (r) records.push(r);
     }
     if (records.length === 0 || expired()) return null;
-    const current = statContentId(canon);
+    const current = statContentId(canon, expired);
     if (expired()) return null;
-    const header = readArtifactHeader(canon);
+    const header = readArtifactHeader(canon, expired);
     // The header read is the last syscall: if it spent the budget, the
     // answer is still "not observed".
     if (expired()) return null;
@@ -700,11 +903,10 @@ export function createNativeArtifactProbe(opts: {
   return (token: string) => {
     try {
       if (!valid) return null;
-      if (deadline === null) deadline = clock() + NATIVE_PROBE_BUDGET_MS;
       if (expired()) return null;
       const map = listing();
       if (map.size === 0) return null;
-      const canon = canonicalTarget(token, opts.cwd, home, realpathInBudget);
+      const canon = canonicalInBudget(token, opts.cwd, home, budget);
       // Rechecked after a resolution that SUCCEEDED too: its last lookup may
       // have spent the budget, and then even a remembered answer is null.
       if (canon === null || expired()) return null;
@@ -732,28 +934,46 @@ export function createNativeArtifactProbe(opts: {
  * is left as it is, and a live session is never evicted for room — the
  * session cap is enforced by not recording a new session instead. A doomed
  * directory is renamed away before deletion so a reader sees all of a
- * session's records or none. The lstat and the rename are separate lookups:
- * an entry swapped in between is what gets renamed and deleted (a link is
- * unlinked, not followed; a real directory is removed) — see the store note
- * above on what a concurrent swap can still reach.
+ * session's records or none.
+ *
+ * Volume: one sweep makes at most `MAX_SWEEP_DELETIONS` deletions (unlinks
+ * plus rmdirs, across all directories). A doomed directory is listed up
+ * front against what remains of that cap; one with too many entries, or with
+ * a subdirectory, is skipped and left in place. Only the listed names are
+ * unlinked and the directory is removed with a non-recursive rmdir, so
+ * entries raced in after the listing are never deleted. The whole sweep runs
+ * under the caller's budget, checked before every filesystem operation;
+ * once spent it stops and answers `null`. The lstat, the listing and the
+ * rename are separate lookups: a directory swapped in between is what gets
+ * renamed, but only the listed names are unlinked inside it — see the store
+ * note above on what a concurrent swap can still reach.
  */
 export function pruneNativeProvenance(opts: {
   stateDir?: string;
   now?: number;
   ttlMs?: number;
+  budget?: NativeProvenanceBudget;
+  clock?: () => number;
 } = {}): number | null {
   try {
     const root = storeRoot(opts.stateDir);
     const now = opts.now ?? Date.now();
     const ttlMs = opts.ttlMs ?? NATIVE_PROVENANCE_TTL_MS;
-    if (root === null || !isRealDirectory(root)) return null;
-    // Listed whole (bounded) before anything is removed: an over-full or
-    // unreadable root is left exactly as it is.
-    const names = listDirBounded(root, MAX_STORE_ROOT_ENTRIES);
+    const budget = budgetOf(opts.budget, opts.clock);
+    const expired = (): boolean => budget.expired();
+    if (root === null || expired() || !isRealDirectory(root)) return null;
+    // Listed whole (bounded) before anything is removed: an over-full,
+    // unreadable or out-of-time root is left exactly as it is.
+    const names = listDirBounded(root, MAX_STORE_ROOT_ENTRIES, expired);
     if (names === null) return null;
     let live = 0;
+    // Shared across every directory this sweep empties.
+    let deletions = MAX_SWEEP_DELETIONS;
     for (const name of names) {
-      if (!SESSION_KEY_RE.test(name)) continue;
+      // Out of time: stop; the session count so far is not the whole count.
+      if (expired()) return null;
+      const isSession = SESSION_KEY_RE.test(name);
+      if (!isSession && !GRAVE_RE.test(name)) continue;
       const src = path.join(root, name);
       let st: fs.Stats;
       try {
@@ -762,20 +982,49 @@ export function pruneNativeProvenance(opts: {
         continue;
       }
       if (!st.isDirectory() || !ownedByThisUid(st)) continue;
-      if (now - st.mtimeMs <= ttlMs) {
+      if (isSession && now - st.mtimeMs <= ttlMs) {
         live++;
         continue;
       }
-      const grave = `${src}.expired.${now}.${randomBytes(6).toString('hex')}`;
-      try {
-        fs.renameSync(src, grave);
-      } catch {
-        continue;
+      // Deletion cap, shared across this sweep: every unlink AND every rmdir
+      // counts. Listed up front with a hard cap of what is left minus one
+      // (the directory itself); an over-full doomed directory, or one that
+      // holds a subdirectory (nothing in the store nests, so it was planted),
+      // is SKIPPED — left exactly where it is, not renamed, not touched.
+      if (deletions < 2) continue;
+      if (expired()) return null;
+      const doomed = readDirBounded(src, deletions - 1, expired, true);
+      if (expired()) return null;
+      if (doomed === null || doomed.more) continue;
+      let grave = src;
+      if (isSession) {
+        // Renamed away first, so a reader sees all of a session's records or
+        // none. A grave whose rmdir fails (a race added entries) is retried by
+        // later sweeps under the same rules (GRAVE_RE).
+        grave = `${src}.expired.${now}.${randomBytes(6).toString('hex')}`;
+        if (expired()) return null;
+        try {
+          fs.renameSync(src, grave);
+        } catch {
+          continue;
+        }
       }
-      try { fs.rmSync(grave, { recursive: true, force: true }); } catch { /* best effort */ }
+      // Only the names listed above: an entry raced in after the listing is
+      // never unlinked and only makes the non-recursive rmdir fail.
+      for (const entry of doomed.names) {
+        if (expired()) return null;
+        deletions--;
+        try { fs.unlinkSync(path.join(grave, entry)); } catch { /* best effort */ }
+      }
+      if (expired()) return null;
+      deletions--;
+      try { fs.rmdirSync(grave); } catch { /* not empty (raced) or gone: a later sweep */ }
     }
-    return live;
+    return expired() ? null : live;
   } catch {
     return null;
   }
 }
+
+/** Grave names: a doomed session directory renamed by a sweep. */
+const GRAVE_RE = /^sc-[a-f0-9]{16}\.expired\.\d+\.[0-9a-f]{12}$/;

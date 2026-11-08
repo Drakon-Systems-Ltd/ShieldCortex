@@ -592,13 +592,14 @@ function nativeProvenanceKey(baseExtra) {
 /** #1025 — the evaluator option that binds the provenance probe to this
  *  call's session and RAW payload cwd (no process.cwd() fallback, so record
  *  and query resolve a relative path from the same base). Never throws. */
-function nativeProvenanceOptions(store, baseExtra, rawCwd) {
+function nativeProvenanceOptions(store, baseExtra, rawCwd, budget) {
   const key = nativeProvenanceKey(baseExtra);
   if (!store || !key) return {};
   try {
     const probe = store.createNativeArtifactProbe({
       sessionKey: key,
       cwd: typeof rawCwd === 'string' ? rawCwd : undefined,
+      budget,
     });
     return typeof probe === 'function' ? { nativeArtifactProvenance: probe } : {};
   } catch {
@@ -606,11 +607,28 @@ function nativeProvenanceOptions(store, baseExtra, rawCwd) {
   }
 }
 
+/** #1025 — this call's ONE store budget, shared by its probe, its record step
+ *  and the sweep that step may run. Made per call (never module-level), so
+ *  no other call can share or reset it. `undefined` on an older dist: the
+ *  store then makes its own default. Never throws. */
+function nativeProvenanceBudget(store) {
+  try {
+    return typeof store?.createNativeProvenanceBudget === 'function'
+      ? store.createNativeProvenanceBudget()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** #1025 — record this call's write/compile targets. After the call's own
- *  evaluation; best effort; never throws and never touches the verdict. */
-function recordNativeProvenance(store, guard, toolName, toolInput, baseExtra, rawCwd) {
+ *  evaluation; best effort; never throws and never touches the verdict. A
+ *  `block` verdict records nothing: the call never runs, so its writes never
+ *  happen, and no store work stands between the deny and its delivery. */
+function recordNativeProvenance(store, guard, toolName, toolInput, baseExtra, rawCwd, verdict, budget) {
   const key = nativeProvenanceKey(baseExtra);
   if (!store || !key || typeof guard?.nativeArtifactCaptures !== 'function') return;
+  if (!verdict || verdict.decision === 'block') return;
   try {
     const captures = guard.nativeArtifactCaptures(toolName, toolInput);
     if (!Array.isArray(captures) || captures.length === 0) return;
@@ -618,6 +636,7 @@ function recordNativeProvenance(store, guard, toolName, toolInput, baseExtra, ra
       sessionKey: key,
       captures,
       cwd: typeof rawCwd === 'string' ? rawCwd : undefined,
+      budget,
     });
   } catch {
     /* observation only: an unrecorded write is a missed log line later */
@@ -3482,7 +3501,8 @@ process.stdin.on('end', async () => {
       : undefined;
     // #1025: audit-only native-exec provenance, bound to THIS call's session.
     const nativeStore = await loadNativeProvenance();
-    const nativeOptions = nativeProvenanceOptions(nativeStore, baseExtra, hookData.cwd);
+    const nativeBudget = nativeProvenanceBudget(nativeStore);
+    const nativeOptions = nativeProvenanceOptions(nativeStore, baseExtra, hookData.cwd, nativeBudget);
     let verdict;
     try {
       // 4th arg, not the 3rd — the 3rd is the IronDome config. Passing the
@@ -3508,7 +3528,7 @@ process.stdin.on('end', async () => {
     // evaluation (a same-call write is not evidence for this call's probe),
     // and carry the observation on every row this call writes. Neither step
     // reads or changes `verdict`.
-    recordNativeProvenance(nativeStore, guard, toolName, toolInput, baseExtra, hookData.cwd);
+    recordNativeProvenance(nativeStore, guard, toolName, toolInput, baseExtra, hookData.cwd, verdict, nativeBudget);
     const nativeExec = safeNativeExec(verdict?.nativeExec);
     if (nativeExec) baseExtra.nativeExec = nativeExec;
 

@@ -1746,8 +1746,10 @@ interface InterceptorOptions {
    *  verdict, and a throw from either is swallowed. Absent on an older dist:
    *  no observation, identical decisions. */
   nativeProvenance?: {
-    probe: (sessionId: string | undefined, cwd: string | undefined) => ToolGuardEvaluatorOptions['nativeArtifactProvenance'] | undefined;
-    record: (toolName: string, args: Record<string, unknown>, sessionId: string | undefined, cwd: string | undefined) => void;
+    /** A fresh store budget for ONE call, shared by its probe and record. */
+    budget?: () => unknown;
+    probe: (sessionId: string | undefined, cwd: string | undefined, budget?: unknown) => ToolGuardEvaluatorOptions['nativeArtifactProvenance'] | undefined;
+    record: (toolName: string, args: Record<string, unknown>, sessionId: string | undefined, cwd: string | undefined, budget?: unknown) => void;
   };
   /** #260 — session-guard index. Injected from `shieldcortex/defence`. */
   sessionGuard?: {
@@ -1819,20 +1821,31 @@ export function createInterceptor(
   const denyCache = new DenyCache();
   const rateLimiter = new RateLimiter(options?.maxPromptsPerMinute ?? 5);
   /** #1025: the probe option for this call, or nothing. Never throws. */
-  const nativeProvenanceOptions = (context: ToolCallContext): Pick<ToolGuardEvaluatorOptions, 'nativeArtifactProvenance'> => {
+  const nativeProvenanceOptions = (context: ToolCallContext, budget: unknown): Pick<ToolGuardEvaluatorOptions, 'nativeArtifactProvenance'> => {
     if (!options?.nativeProvenance) return {};
     try {
-      const probe = options.nativeProvenance.probe(context.sessionId, toolCallCwd(context));
+      const probe = options.nativeProvenance.probe(context.sessionId, toolCallCwd(context), budget);
       return typeof probe === 'function' ? { nativeArtifactProvenance: probe } : {};
     } catch {
       return {};
     }
   };
-  /** #1025: record write/compile targets. Never throws, returns nothing. */
-  const recordNativeProvenance = (context: ToolCallContext): void => {
-    if (!options?.nativeProvenance) return;
+  /** #1025: this call's ONE store budget (probe + record + sweep). Local to
+   *  the call, so a concurrent call never shares or resets it. Never throws. */
+  const nativeProvenanceBudget = (): unknown => {
     try {
-      options.nativeProvenance.record(context.toolName, context.arguments || {}, context.sessionId, toolCallCwd(context));
+      return options?.nativeProvenance?.budget?.();
+    } catch {
+      return undefined;
+    }
+  };
+  /** #1025: record write/compile targets. Never throws, returns nothing. A
+   *  `block` records nothing — the call never runs, so its writes never
+   *  happen, and no store work stands between the deny and its delivery. */
+  const recordNativeProvenance = (context: ToolCallContext, decision: unknown, budget: unknown): void => {
+    if (!options?.nativeProvenance || decision === 'block') return;
+    try {
+      options.nativeProvenance.record(context.toolName, context.arguments || {}, context.sessionId, toolCallCwd(context), budget);
     } catch { /* observation only */ }
   };
   const log = config.logger ?? { info: console.log, warn: console.warn };
@@ -2321,6 +2334,7 @@ export function createInterceptor(
     }
 
     let v: ToolGuardVerdictLike;
+    const nativeBudget = nativeProvenanceBudget();
     try {
       // 4th arg (issue #4): lets the pure guard core scan the CONTENTS of a
       // script the command invokes (`bash deploy.sh`) through this fs-backed
@@ -2333,16 +2347,12 @@ export function createInterceptor(
           ? { isReviewedScript: createReviewedScriptCheck(actionGuardCfg.reviewedScripts, toolCallCwd(context)) }
           : {}),
         // #1025: audit-only native-exec provenance, bound to this session.
-        ...nativeProvenanceOptions(context),
+        ...nativeProvenanceOptions(context, nativeBudget),
       });
     } catch (err) {
       handleGuardUnavailable(context, `action-guard error: ${err instanceof Error ? err.message : err}`, call);
       return;
     }
-    // #1025: record this call's write/compile targets after its own
-    // evaluation. Observation only — never reads or changes `v`.
-    recordNativeProvenance(context);
-
     // #233: a prompt injection detected on the CONVERSATION path earlier in this
     // session tightens the guard by one notch for a bounded window — sensitive
     // work starts asking, dangerous work stops. Benign work is untouched: an
@@ -2389,6 +2399,11 @@ export function createInterceptor(
         v = { ...v, decision: esc.decision, reason: `${v.reason} — ESCALATED by tainted session: ${taint.reason}` };
       }
     }
+    // #1025: record this call's write/compile targets after its own
+    // evaluation AND the taint rewrite, so a call taint turned into a `block`
+    // records nothing (it never runs). Observation only — never reads or
+    // changes `v` beyond its final decision.
+    recordNativeProvenance(context, v.decision, nativeBudget);
 
     // ── Native contract drift observation ────────────────────────────────
     // A reviewed host contract grew fields ShieldCortex does not read. The
