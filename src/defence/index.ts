@@ -155,6 +155,7 @@ export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily
 export {
   recordArtifactCapture, buildArtifactView, unkeyedArtifactView, pruneArtifactStore,
   resolveArtifactStateDir, ARTIFACT_TTL_MS, MAX_ARTIFACT_SESSIONS,
+  statContentId, readArtifactHeader, ARTIFACT_HEADER_BYTES,
 } from './iron-dome/agent-artifact-store.js';
 export type { CaptureResult } from './iron-dome/agent-artifact-store.js';
 export {

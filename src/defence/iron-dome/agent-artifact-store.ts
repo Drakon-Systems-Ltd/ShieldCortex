@@ -75,15 +75,58 @@ export interface CaptureResult {
   held: boolean;
 }
 
-function statPreId(absPath: string): PreId {
+/**
+ * The ONE stat both sides use (section 5 `statPath` contract): the target's
+ * `ContentId` (following a final symlink, as exec does), `'absent'` ONLY when
+ * `lstat` of the final component fails with not-found, `null` for every other
+ * failure. An I/O error is never reported as absent; a dangling symlink is
+ * `null`, not absent. Never throws.
+ */
+export function statContentId(absPath: string): ContentId | 'absent' | null {
   try {
     const st = fs.statSync(absPath);
     return { dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs };
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return 'absent';
-    return 'unknown';
+  } catch {
+    try {
+      fs.lstatSync(absPath);
+      return null; // the entry exists but cannot be followed/stat'd
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      return code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : null;
+    }
   }
+}
+
+/** Bytes read for the native-header test — enough for every magic it checks. */
+export const ARTIFACT_HEADER_BYTES = 64;
+
+/** The first bytes of a resolved target, or `null` when it cannot be read.
+ *  Never throws. */
+export function readArtifactHeader(absPath: string): Uint8Array | null {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(absPath, 'r');
+    const buf = Buffer.alloc(ARTIFACT_HEADER_BYTES);
+    const n = fs.readSync(fd, buf, 0, ARTIFACT_HEADER_BYTES, 0);
+    return new Uint8Array(buf.subarray(0, n));
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+}
+
+/** Capture-side stat: a `null` stat is recorded as `'unknown'` (history
+ *  incomplete for that path, 3.1 item 4); the record is still published. */
+function statPreId(absPath: string): PreId {
+  const id = statContentId(absPath);
+  return id === null ? 'unknown' : id;
 }
 
 function randSuffix(): string {
