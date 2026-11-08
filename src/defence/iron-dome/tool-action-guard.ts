@@ -7145,11 +7145,16 @@ const SUPPORTED_COMPILER = /^(?:cc|gcc|g\+\+|c\+\+|clang|clang\+\+|nvcc|ghc|rust
 //   named directory, and `unknown` makes it an unresolved target that takes
 //   the door — the same as lexer truncation.
 //
-//   HEREDOC BODIES. A body ends at the EARLIEST line a shell could end it: the
-//   exact delimiter line, or — inside `$(…)` — a line that starts with the
-//   delimiter and closes the substitution (`EOF)`, bash and dash both end
-//   there). A backslash-newline inside the delimiter word is a line
-//   continuation, not part of the delimiter. A delimiter the lexer cannot prove
+//   HEREDOC BODIES. A body ends at the EARLIEST line a shell could end it,
+//   proven on LOGICAL lines. The close is the exact delimiter line, or —
+//   inside `$(…)` — a line that starts with the delimiter and closes the
+//   substitution (`EOF)`, bash and dash both end there). A backslash-newline
+//   inside the opening delimiter word is a line continuation, not part of the
+//   delimiter. In an UNQUOTED body a trailing unescaped backslash-newline also
+//   continues the next physical line before the delimiter is matched, so a
+//   continued close `EO\<nl>F` forms the delimiter `EOF` and the trailing text
+//   is lexed as commands, never swallowed (review r3 B5); a quoted body keeps
+//   its literal physical-line delimiter. A delimiter the lexer cannot prove
 //   matches the shell's (any `$` or backtick in it) has no body here: every
 //   line up to the literal delimiter is lexed as commands, one line at a time,
 //   so prose with an unbalanced quote cannot swallow later lines.
@@ -7287,6 +7292,15 @@ const isBareWord = (w: ShellWord | undefined, text: string): boolean => w !== un
 /** Every word so far is a reserved OPENER: the next word is in reserved position. */
 const inReservedPosition = (words: readonly ShellWord[]): boolean =>
   words.every(w => w.bare && RESERVED_OPENER.test(w.text));
+
+/** Does `s` end in an ODD run of backslashes — an unescaped trailing `\` that
+ *  continues onto the next physical line? Counted, never a backtracking regex
+ *  (no ReDoS on a backslash-dense line). */
+function endsWithOddBackslash(s: string): boolean {
+  let n = 0;
+  for (let p = s.length - 1; p >= 0 && s[p] === '\\'; p--) n++;
+  return n % 2 === 1;
+}
 
 /** The statements a shell would execute for `text`, with use-vs-mention kept. */
 function executedStatements(text: string): { statements: ExecutedStatement[]; truncated: boolean } {
@@ -7483,22 +7497,45 @@ function lexShellList(
         }
         continue;
       }
+      // Prove the close on a LOGICAL line. In an UNQUOTED heredoc a physical
+      // line ending in an unescaped (odd-count) backslash continues onto the
+      // next, and the shell removes the `\`-newline before matching, so a
+      // continued close `EO\<nl>F` forms the delimiter `EOF` and the trailing
+      // command runs (review r3 B5). A quoted heredoc keeps its literal
+      // physical-line delimiter (no continuation, no expansion).
       let body = '';
       while (i < src.length) {
         const lineStart = i;
         const nl = src.indexOf('\n', i);
         const lineEnd = nl < 0 ? src.length : nl;
         const raw = src.slice(i, lineEnd);
-        i = nl < 0 ? src.length : nl + 1;
-        const line = h.stripTabs ? raw.replace(/^\t+/, '') : raw;
-        if (line === h.delim || line === `${h.delim}\r`) break;
+        const afterNl = nl < 0 ? src.length : nl + 1;
+        const first = h.stripTabs ? raw.replace(/^\t+/, '') : raw;
+        // Form the logical delimiter candidate and the index just past it.
+        let line = first;
+        let close = afterNl;
+        if (!h.quoted) {
+          while (endsWithOddBackslash(line) && close < src.length) {
+            line = line.slice(0, -1); // drop the continuation backslash
+            const nl2 = src.indexOf('\n', close);
+            const segEnd = nl2 < 0 ? src.length : nl2;
+            const seg = src.slice(close, segEnd);
+            line += h.stripTabs ? seg.replace(/^\t+/, '') : seg;
+            close = nl2 < 0 ? src.length : nl2 + 1;
+          }
+        }
+        if (line === h.delim || line === `${h.delim}\r`) { i = close; break; }
         // `$(cat <<EOF … EOF)`: bash and dash close the body AND the
-        // substitution on that line. Resume at the `)`.
-        if (inParen && line.startsWith(h.delim) && line[h.delim.length] === ')') {
-          i = lineStart + (raw.length - line.length) + h.delim.length;
+        // substitution on that line. Resume at the `)` (physical-line form).
+        if (inParen && first.startsWith(h.delim) && first[h.delim.length] === ')') {
+          i = lineStart + (raw.length - first.length) + h.delim.length;
           break;
         }
+        // Not the delimiter: this physical line is body; re-examine any
+        // continuation lines as fresh logical lines (reading MORE as commands
+        // is the permitted direction, never less).
         body += `${raw}\n`;
+        i = afterNl;
       }
       if (h.pipeline === pipeline) deferred.push({ body, h });
       else classifyBody(body, h); // its pipeline already ended: consumers known

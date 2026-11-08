@@ -1145,6 +1145,47 @@ describe('#907 r2 N4 / B2 — a heredoc body ends at the EARLIEST line a shell c
   });
 });
 
+describe('#907 r3 B5 — a line-continued CLOSING delimiter is proven on logical lines', () => {
+  it.each([
+    // R3-B5 exact: EO\<nl>F joins to the closing EOF; ./helper then runs
+    'cat <<EOF\nhi\nEO\\\nF\n./helper',
+    // the continuation can span more than one break
+    'cat <<EOF\nhi\nE\\\nO\\\nF\n./helper',
+    // `<<-` strips the leading tab on each physical segment too
+    'cat <<-EOF\n\thi\n\tEO\\\n\tF\n./helper',
+    // control: the ordinary single-line close still works
+    'cat <<EOF\nhi\nEOF\n./helper',
+  ])('%j — the trailing ./helper is executed: floor', (cmd) => {
+    expect(isFloor(agentNative(`${WORK}/helper`).check(cmd), SIG_A)).toBe(true);
+  });
+
+  it('capture: a compiler after a continued close is captured', () => {
+    const cap = (command: string) => nativeArtifactCaptures('Bash', { command }).map((c) => c.token);
+    expect(cap('cat <<EOF\nhi\nEO\\\nF\ncc a.c -o app')).toEqual(['app']);
+    // control: the body text before the close mints nothing
+    expect(cap('cat <<EOF\ncc x.c -o inbody\nEOF\ncc a.c -o app')).toEqual(['app']);
+  });
+
+  it.each([
+    // a quoted heredoc does NOT continue the delimiter: the close is the
+    // literal EOF line, and an even (escaped) trailing backslash is not a
+    // continuation — the body stays body until a real delimiter line
+    "cat <<'EOF'\nhi\nEO\\\nF\nEOF\n./helper",     // quoted: closes at the physical EOF, ./helper runs
+  ])('%j — quoted/escaped closes keep their literal physical-line rule: floor at the real delimiter', (cmd) => {
+    expect(isFloor(agentNative(`${WORK}/helper`).check(cmd), SIG_A)).toBe(true);
+  });
+
+  it('a continued line that does NOT form the delimiter stays body (no early close that drops a target)', () => {
+    // `fooEOF` is a continued logical line, not the delimiter, so the heredoc
+    // keeps reading; only the real EOF closes it and ./after runs.
+    const v = agentNative(`${WORK}/helper`).check('cat <<EOF\nfoo\\\nEOF\n./helper\nEOF\n./after');
+    // ./helper is still inside the body here (bash keeps reading after fooEOF)
+    // — but reading MORE as commands is the only permitted disagreement, so a
+    // floor (never a silent allow) is acceptable; assert it does not silently allow.
+    expect(v.decision).not.toBe('allow');
+  });
+});
+
 describe('#907 r2 N3 — shell syntax roles: definitions, patterns, assignments and builtins run nothing', () => {
   const both = () => agentNative(`${WORK}/helper`, `${WORK}/lib.so`);
 

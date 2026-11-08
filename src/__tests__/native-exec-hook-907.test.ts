@@ -297,4 +297,18 @@ describe('#907 native-exec floor through the real Claude Code hook', () => {
     expect(decisionOf(await bash('cd sub && ./helper')).permissionDecision).toBeUndefined();
     expect(decisionOf(await bash('./helper')).permissionDecision).toBe('deny');
   });
+
+  it('r3 B5: a line-continued closing heredoc delimiter does not swallow the trailing ./helper', async () => {
+    await agentHelper();
+    for (const cmd of [
+      'cat <<EOF\nhi\nEO\\\nF\n./helper',            // EO\<nl>F joins to the closing EOF
+      'cat <<EOF\nhi\nE\\\nO\\\nF\n./helper',        // continuation over two breaks
+    ]) {
+      const r = await bash(cmd);
+      expect([cmd, decisionOf(r).permissionDecision]).toEqual([cmd, 'deny']);
+      expect(r.stderr).toMatch(/exec-agent-written-native-bytes/);
+    }
+    // control: the ordinary close still runs the trailing command
+    expect(decisionOf(await bash('cat <<EOF\nhi\nEOF\n./helper')).permissionDecision).toBe('deny');
+  });
 });
