@@ -646,7 +646,9 @@ describe('#907 r1 B2 — every path spelling of one target gets the same verdict
   const PAIRS: Array<[string, string, string]> = [
     ['bin/helper', './bin/helper', `${WORK}/bin/helper`],
     ['node_modules/.bin/tool', './node_modules/.bin/tool', INSTALL_TOOL],
-    ['LD_PRELOAD=lib/libx.so true', 'LD_PRELOAD=./lib/libx.so true', `${WORK}/lib/libx.so`],
+    // r2 N3: the preload must reach an EXTERNAL program — `true` is a shell
+    // builtin and loads nothing (pinned as a no-load control in r2 N3 below).
+    ['LD_PRELOAD=lib/libx.so /bin/true', 'LD_PRELOAD=./lib/libx.so /bin/true', `${WORK}/lib/libx.so`],
     ['cd bin && ./helper', './bin/helper', `${WORK}/bin/helper`],
     ['$PWD/bin/helper', './bin/helper', `${WORK}/bin/helper`],
     [`${WORK}/bin/helper`, './bin/helper', `${WORK}/bin/helper`],
@@ -916,5 +918,330 @@ describe('#907 r1 B6 — a structural store error is incomplete history, on both
     if (made.status !== 0) return; // no mkfifo on this host: nothing to pin
     expect(readArtifactHeader(fifo)).toBeNull();
     expect(readArtifactHeader(dir)).toBeNull();
+  });
+});
+
+// -- review round 2 regressions -----------------------------------------------
+//
+// One family: the shell lexer / row-D text reader decides "executed vs
+// mentioned" and "which directory". Every reproduction from both r2 reports is
+// pinned with its positive control. Shell semantics of the directory and
+// heredoc cases were checked against bash 5.2 and dash with harmless
+// `echo` / `cat` probes (no native payload).
+
+/** A world with an agent-written native image at each of `paths`. */
+function agentNative(...paths: string[]): World {
+  const w = new World();
+  for (const p of paths) { w.record(p, 'agent-written'); w.put(p, ELF); }
+  return w;
+}
+
+describe('#907 r2 N5 / B1 — directory uncertainty never drops or re-anchors a relative exec', () => {
+  // Only ${WORK}/helper exists and is agent-produced. In every command the
+  // shell runs ./helper in the call cwd (or may): the floor must fire.
+  it.each([
+    'false && cd sub; ./helper',                  // N5: the cd does not run
+    'if false; then cd sub; fi; ./helper',        // N5
+    'true && cd sub; ./helper',                   // the cd may fail
+    'cd sub; ./helper',                           // the cd may fail
+    'cd . || true; ./helper',                     // B1: cd . does not move
+    'cd /no/such/dir || ./helper',                // B1: || runs where cd FAILED
+    'pushd . && ./helper',                        // B1
+    'popd; ./helper',                             // B1: no in-call pushd
+    'timeout 1 cd /tmp && ./helper',              // B1: a child-only wrapper
+    'sudo cd /tmp && ./helper',                   // B1 (sudo spelling)
+    'env cd /tmp && ./helper',
+    'nohup cd /tmp; ./helper',
+    '(cd sub); ./helper',                         // a subshell does not leak
+    'cd sub | cat; ./helper',                     // a pipeline member
+    'cd sub & ./helper',                          // a background job
+    'x=$(cd sub); ./helper',                      // a substitution
+    'cd sub || exit 1; ./helper',                 // over-approximated: both
+    'f() { cd sub; }; f; ./helper',               // an invoked function's cd
+    'for d in a b; do cd sub; done; ./helper',
+    'cd "$X" || true; ./helper',                  // unknown, but cwd still named
+  ])('%j still hits the floor on ./helper in the call cwd', (cmd) => {
+    const w = agentNative(`${WORK}/helper`);
+    expect(isFloor(w.check(cmd), SIG_A)).toBe(true);
+  });
+
+  // `door`: no NAMED directory the shell could be in holds the image, so the
+  // unnamed one takes the door. `floor`: the call cwd is still one of the
+  // directories (`source` may not cd at all; a loop's first pass runs before
+  // its cd), the image there is agent-produced, and a floor on a resolved
+  // candidate outranks the door (DENY > HOLD, classifyLedgerNativeExec).
+  it.each([
+    ['cd - && ./helper', 'door'],
+    ['cd "$(pwd)" && ./helper', 'door'],
+    ['cd "$DIR" && ./helper', 'door'],
+    ['cd ~bob && ./helper', 'door'],
+    ['cd $(git rev-parse --show-toplevel) && ./helper', 'door'],
+    ['source ./env.sh && ./helper', 'floor'],
+    ['. ./env.sh && ./helper', 'floor'],
+    ['pushd && ./helper', 'door'],
+    ['while true; do ./helper; cd sub; done', 'floor'],
+    ['CDPATH=/opt cd sub && ./helper', 'door'],
+  ])('%j runs ./helper in a directory that cannot be named → %s, never a silent allow', (cmd, want) => {
+    const v = agentNative(`${WORK}/helper`).check(cmd);
+    expect(v.decision).not.toBe('allow');
+    if (want === 'floor') expect(isFloor(v, SIG_A)).toBe(true);
+    else expect(v.signals).toContain(SIG_J);
+  });
+
+  it.each([
+    'cd - && ./helper',
+    'cd "$(pwd)" && ./helper',
+    'cd "$DIR" && ./helper',
+    'cd ~bob && ./helper',
+    'cd $(git rev-parse --show-toplevel) && ./helper',
+    'source ./env.sh && ./helper',
+    '. ./env.sh && ./helper',
+    'pushd && ./helper',
+    'while true; do ./helper; cd sub; done',
+    'CDPATH=/opt cd sub && ./helper',
+    'x() { cd "$1"; }; x foo; ./helper',
+  ])('%j: every NAMED candidate is absent, the unnamed directory is not ruled out → the door (the token is never dropped)', (cmd) => {
+    const v = new World().check(cmd);
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain(SIG_J);
+  });
+
+  it('positive controls: a successful cd re-anchors (only sub/helper exists)', () => {
+    const w = agentNative(`${WORK}/sub/helper`);
+    for (const cmd of [
+      'cd sub && ./helper',
+      'cd sub && make && ./helper',
+      'command cd sub && ./helper',
+      'builtin cd sub && ./helper',
+      'time cd sub && ./helper',
+      'test -d sub && cd sub; ./helper',
+      'if true; then cd sub; fi; ./helper',
+      'pushd sub && ./helper',
+      'eval cd sub; ./helper',
+      'cd sub\n./helper',
+    ]) {
+      expect([cmd, isFloor(w.check(cmd), SIG_A)]).toEqual([cmd, true]);
+    }
+    // and the plain control on the real target
+    expect(isFloor(w.check('./sub/helper'), SIG_A)).toBe(true);
+  });
+
+  it('a pushd/popd pair returns to the named directory', () => {
+    const w = agentNative(`${WORK}/helper`);
+    const v = w.check('pushd sub && make && popd; ./helper');
+    expect(isFloor(v, SIG_A)).toBe(true);
+  });
+
+  it('control: an unrelated exec under a named directory set keeps current behaviour', () => {
+    const w = new World(); // nothing exists: every candidate is absent → outside the classifier
+    for (const cmd of ['false && cd sub; ./helper', 'cd sub; ./helper', 'cd . || true; ./helper']) {
+      expect(touchesNative(w.check(cmd))).toBe(false);
+    }
+  });
+
+  it('capture uses the same rule: every directory the compiler could run in, unnamed → unresolved', () => {
+    // A set of candidate directories: compare as sets ('' = unresolved).
+    const cap = (command: string) => nativeArtifactCaptures('Bash', { command }).map((c) => c.token).sort();
+    expect(cap('false && cd out; cc a.c -o app')).toEqual(['app', 'out/app']);
+    expect(cap('if false; then cd out; fi; cc a.c -o app')).toEqual(['app', 'out/app']);
+    expect(cap('cd out && cc a.c -o app')).toEqual(['out/app']);
+    expect(cap('cd out; cc a.c -o app')).toEqual(['app', 'out/app']);
+    expect(cap('timeout 1 cd out && cc a.c -o app')).toEqual(['app']);
+    expect(cap('cd . || true; cc a.c -o app')).toEqual(['app']);
+    expect(cap('cd "$OUT" || true; cc a.c -o app')).toEqual(['', 'app']);
+    expect(cap('cd - && cc a.c -o app')).toEqual(['']);
+    expect(cap('source ./env.sh && cc a.c -o app')).toEqual(['', 'app']);
+    // positive control: a plain compile still captures
+    expect(cap('cc a.c -o app')).toEqual(['app']);
+  });
+});
+
+describe('#907 r2 N4 / B2 — a heredoc body ends at the EARLIEST line a shell could end it', () => {
+  it.each([
+    // N4: backslash-newline in an unquoted delimiter is a line continuation → `EOF`
+    'cat <<EO\\\nF\nhi\nEOF\n./helper',
+    // the same continuation inside double quotes
+    'cat <<"EO\\\nF"\nhi\nEOF\n./helper',
+    // B2: a delimiter holding an expansion cannot be proved → lines are commands
+    'END=EOF\ncat << $END\nharmless\nEOF\n./helper',
+    'cat <<"$END"\nharmless\nEOF\n./helper',
+    "cat << ${END}\ndon't stop\n./helper\n${END}",
+    // `$(cat <<EOF … EOF)`: bash and dash close body and substitution on that line
+    'x=$(cat <<EOF\nhi\nEOF)\n./helper',
+    // controls: the ordinary forms
+    'cat <<EOF\nhi\nEOF\n./helper',
+    "cat <<'EOF'\nhi\nEOF\n./helper",
+    'cat <<-EOF\n\thi\n\tEOF\n./helper',
+  ])('%j — the trailing ./helper is executed: floor', (cmd) => {
+    expect(isFloor(agentNative(`${WORK}/helper`).check(cmd), SIG_A)).toBe(true);
+  });
+
+  it.each([
+    // single quotes keep backslash-newline: that delimiter never matches, the rest is body
+    "cat <<'EO\\\nF'\nhi\nEOF\n./helper",
+    "cat <<'EOF'\n./helper\nEOF",
+    'x=$(cat <<EOF\nfoo)\n./helper\nEOF\n)',
+  ])('%j — ./helper is inert heredoc text: no native signal', (cmd) => {
+    const v = agentNative(`${WORK}/helper`).check(cmd);
+    expect(v.signals).not.toContain(UMBRELLA);
+    expect(v.decision).not.toBe('block');
+  });
+});
+
+describe('#907 r2 N3 — shell syntax roles: definitions, patterns, assignments and builtins run nothing', () => {
+  const both = () => agentNative(`${WORK}/helper`, `${WORK}/lib.so`);
+
+  it.each([
+    'f() { ./helper; }\ncase x in\n./helper) echo hi;;\nesac', // N3 exact
+    'f() { ./helper; }',
+    'f() { ./helper; }; echo defined',
+    'function g { ./helper; }',
+    'function g() { ./helper; }; echo ok',
+    'function g\n{ ./helper; }',
+    'f() ( ./helper )',
+    'f()\n{\n  ./helper\n}',
+    'case x in ./helper) echo hi;; esac',
+    'case "$1" in (./helper|bin/helper) echo hi;; *) echo no;; esac',
+    'LD_PRELOAD=./lib.so echo hi',                // N3: builtin
+    'LD_PRELOAD=./lib.so true',
+    'LD_PRELOAD=./lib.so',                        // assignment only
+    'LD_PRELOAD=./lib.so; ./other',               // not exported
+    'export -n LD_PRELOAD=./lib.so',              // N3: -n removes the export
+    'export -n LD_PRELOAD=./lib.so; ls',
+    'declare LD_PRELOAD=./lib.so; ls',
+    'export LD_PRELOAD=./lib.so; export -n LD_PRELOAD; ls',
+    'export LD_PRELOAD=./lib.so; unset LD_PRELOAD; ls',
+    'export LD_PRELOAD=./lib.so; echo done',
+    'f() { ./helper; }; bash -c f',               // a child shell does not inherit f
+    'f() { ./helper; }; sudo f',                  // sudo runs an external f
+  ])('%j mints no exec/load effect', (cmd) => {
+    const v = both().check(cmd);
+    expect(v.signals).not.toContain(UMBRELLA);
+    expect(v.decision).not.toBe('block');
+  });
+
+  it.each([
+    ['f() { ./helper; }; f', SIG_A],
+    ['f() { ./helper; }\nf', SIG_A],
+    ['function g { ./helper; }; g', SIG_A],
+    ['f() ( ./helper ); f', SIG_A],
+    ['f() { ./helper; }; time f', SIG_A],
+    ['f() { ./helper; }; echo $(f)', SIG_A],
+    ['f() { ./helper; }; eval f', SIG_A],
+    ['f() { ./helper; }; export -f f; bash -c f', SIG_A],
+    ['f() { g; }; g() { ./helper; }; f', SIG_A],
+    // every cd may fail, so ./helper may still run in the call cwd — the same
+    // rule as `cd sub; ./helper` above (r2 N5 / B1): the floor
+    ['f() { cd sub; ./helper; }; cd sub2; f', SIG_A],
+    // with `&&` both cds must succeed: ./helper runs only in sub2/sub (absent)
+    ['f() { cd sub && ./helper; }; cd sub2 && f', null],
+    ['case x in x) ./helper;; esac', SIG_A],
+    ['case x in\n  x)\n    ./helper\n    ;;\nesac', SIG_A],
+    ['case $(./helper) in x) echo;; esac', SIG_A],
+    ['LD_PRELOAD=./lib.so ls', SIG_C],
+    ['LD_PRELOAD=./lib.so /bin/echo hi', SIG_C],
+    ['LD_PRELOAD=./lib.so env echo hi', SIG_C],
+    ['export LD_PRELOAD=./lib.so; ls', SIG_C],
+    ['LD_PRELOAD=./lib.so; export LD_PRELOAD; ls', SIG_C],
+    ['declare -x LD_PRELOAD=./lib.so; ls', SIG_C],
+    ['set -a; LD_PRELOAD=./lib.so; ls', SIG_C],
+    ['export LD_PRELOAD=./lib.so; cd sub && ls', null],
+    ['./helper', SIG_A],
+  ])('positive control %j keeps its coverage', (cmd, sig) => {
+    const w = both();
+    if (sig === null) {
+      // `cd sub2 && f` → f's ./helper runs only in sub2/sub, which does not exist → nothing native
+      // `cd sub && ls` → the preload resolves under sub, which holds no library
+      expect(w.check(cmd).signals).not.toContain(UMBRELLA);
+      return;
+    }
+    expect(isFloor(w.check(cmd), sig)).toBe(true);
+  });
+
+  it('a function body is lexed in the CALL-SITE directory: sub2/sub/helper under `cd sub2 && f`', () => {
+    const w = agentNative(`${WORK}/sub2/sub/helper`);
+    expect(isFloor(w.check('f() { cd sub && ./helper; }; cd sub2 && f'), SIG_A)).toBe(true);
+    // defined but never called: nothing runs
+    expect(w.check('f() { cd sub && ./helper; }; cd sub2').signals).not.toContain(UMBRELLA);
+  });
+
+  it('an export resolves where the program runs: sub/lib.so under `cd sub`', () => {
+    const w = agentNative(`${WORK}/sub/lib.so`);
+    expect(isFloor(w.check('export LD_PRELOAD=./lib.so; cd sub && ls'), SIG_C)).toBe(true);
+  });
+
+  it.each([
+    'f() { cc x.c -o helper; }; echo defined', // N3 exact
+    'f() { cc x.c -o helper; }',
+    'case x in cc) echo;; esac',
+    'case x in "cc x.c -o helper") echo;; esac',
+  ])('a compiler only DEFINED or MATCHED in %j mints no compile capture', (cmd) => {
+    expect(nativeArtifactCaptures('Bash', { command: cmd })).toEqual([]);
+  });
+
+  it.each([
+    ['f() { cc x.c -o helper; }; f', 'helper'],
+    ['case x in x) cc x.c -o helper;; esac', 'helper'],
+    ['cc x.c -o helper', 'helper'],
+  ])('a compiler actually run in %j is still captured', (cmd, out) => {
+    expect(nativeArtifactCaptures('Bash', { command: cmd })).toEqual([{ token: out, kind: 'compiled-output' }]);
+  });
+
+  it('runaway function expansion is bounded and holds (never allows unread)', () => {
+    const defs = Array.from({ length: 12 }, (_, k) => `f${k}() { f${k + 1}; f${k + 1}; }`).join('; ');
+    const v = agentNative(`${WORK}/helper`).check(`${defs}; f12() { ./x; }; f0`);
+    expect(v.signals).toContain(SIG_J);
+  });
+});
+
+describe('#907 r2 N1 / N2 — row D: no keyword reactivates unrelated text; executed interpolations stay code', () => {
+  const fold = (cmd: string, body: string) => evaluateToolCall('Bash', { command: cmd }, undefined, {
+    resolveScriptSource: () => body,
+  });
+
+  it.each([
+    `python3 -c 'print("mmap PROT_EXEC")'`,
+    `python3 -c 'print("mmap PROT_EXEC eval")'`,           // N1
+    `python3 -c 'print("mmap PROT_EXEC importlib")'`,      // N1
+    `node -e 'console.log("mmap PROT_EXEC vm")'`,          // N1
+    "node -e 'console.log(`mmap PROT_EXEC`)'",             // an untagged template is text
+    `python3 -c 'print(f"mmap PROT_EXEC {x}")'`,           // interpolation without the operation
+    `python3 -c 'import re; re.compile(x); print("mmap PROT_EXEC")'`,
+    `bash -c 'echo mmap PROT_EXEC'`,
+  ])('inline %j prints the words: allowed', (cmd) => {
+    const v = evaluateToolCall('Bash', { command: cmd });
+    expect(v.signals).not.toContain(SIG_D);
+    expect(v.decision).not.toBe('block');
+  });
+
+  it.each([
+    ['bash ./x.sh', '#!/bin/sh\necho mmap PROT_EXEC\n'],                                   // N1
+    ['node scripts/build.mjs', 'import("node:path"); console.log("mmap PROT_EXEC");\n'],   // N1
+    ['python3 ./doc.py', 'import importlib\nimportlib.import_module("json")\nprint("mmap PROT_EXEC")\n'],
+  ])('folded %j only prints the words: allowed', (cmd, body) => {
+    const v = fold(cmd, body);
+    expect(v.signals).not.toContain(SIG_D);
+    expect(v.decision).not.toBe('block');
+  });
+
+  it.each([
+    `python3 -c 'import mmap; print(f"{mmap.mmap(-1,4096,prot=mmap.PROT_EXEC)}")'`,      // N2 exact
+    `python3 -c 'import mmap; mmap.mmap(-1,4096,prot=mmap.PROT_EXEC)'`,                 // direct control
+    "node -e 'console.log(`${mmap(PROT_EXEC)}`)'",                                       // template interpolation
+    `python3 -c "exec('import mmap; mmap.mmap(-1, 1, prot=mmap.PROT_EXEC)')"`,          // r1 control
+    `python3 -c 's = "import mmap; mmap.mmap(-1, 1, prot=mmap.PROT_EXEC)"; exec(s)'`,   // string via a variable
+    `python3 -c 'import mmap; mmap.mmap(-1, 4096, prot=getattr(mmap, "PROT_EXEC"))'`,  // a code-bearing literal
+    `node -e "eval('mmap(PROT_EXEC)')"`,                                                  // r1 control
+  ])('inline %j performs the mapping: floor', (cmd) => {
+    expect(isFloor(evaluateToolCall('Bash', { command: cmd }), SIG_D)).toBe(true);
+  });
+
+  it.each([
+    ['python3 ./fstr.py', 'import mmap\nprint(f"{mmap.mmap(-1,4096,prot=mmap.PROT_EXEC)}")\n'],                  // N2 exact
+    ['python3 ./jit.py', 'import mmap\nm = mmap.mmap(-1, 4096, prot=mmap.PROT_READ | mmap.PROT_EXEC)\n'],
+    ['bash ./x.sh', "#!/bin/sh\npython3 -c 'import mmap; mmap.mmap(-1, 4096, prot=mmap.PROT_EXEC)'\n"],         // shell runs a program
+    ['bash ./x.sh', "#!/bin/sh\npython3 - <<'PY'\nimport mmap\nmmap.mmap(-1, 4096, prot=mmap.PROT_EXEC)\nPY\n"],
+  ])('folded %j performs the mapping: floor', (cmd, body) => {
+    expect(isFloor(fold(cmd, body), SIG_D)).toBe(true);
   });
 });

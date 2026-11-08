@@ -7113,52 +7113,159 @@ const SUPPORTED_COMPILER = /^(?:cc|gcc|g\+\+|c\+\+|clang|clang\+\+|nvcc|ghc|rust
 //   - double quotes and an unquoted heredoc body are data whose `$(…)` /
 //     backtick / `${…}` expansions are EXECUTED (the outer shell runs them);
 //   - `$(…)`, backticks, `(…)`, `<(…)` / `>(…)`, a heredoc body a shell reads
-//     (`bash <<EOF`, `cat <<EOF | sh`), `bash -c '…'` and `eval …` are
-//     statement lists, lexed recursively;
+//     (`bash <<EOF`, `cat <<EOF | sh`), `bash -c '…'`, `eval …` and a `trap`
+//     action are statement lists, lexed recursively;
+//   - shell SYNTAX ROLES are kept (review r2 N3): a `case` pattern is a
+//     pattern, never a command; a function DEFINITION body runs nothing until
+//     the function is invoked by name in the same call, and is then lexed at
+//     the call site, in the caller's directories;
 //   - redirections and their targets are removed, so `2>/dev/null ./x` still
-//     has `./x` in command position;
-//   - a literal `cd <dir>` (alone, or before `;` / `&&` / a newline) moves the
-//     directory later relative words resolve under; a computed `cd`, `cd -`,
-//     `pushd`/`popd` or `cd … ||` makes it unknown. Subshells, pipelines and
-//     background jobs do not leak it.
-// When the lexer and a real shell could disagree about where a heredoc body
-// ends, it ends the body EARLIER (exact delimiter line only), so the
-// disagreement can only read more text as commands, never less.
+//     has `./x` in command position.
+//
+// Two rules decide every case where the lexer and a real shell could disagree,
+// and both point the same way — a disagreement may read MORE text as
+// commands, never less, and may never re-anchor a relative word to a path the
+// shell does not run (review r2 N4/N5, B1/B2):
+//
+//   DIRECTORIES. A statement does not have one directory; it has the SET of
+//   directories it could run in (`DirSet`), plus an `unknown` flag when the set
+//   cannot be named. A `cd` may fail, so after the and-or list that holds it a
+//   later statement may run in either directory; `cd x && y` is the only form
+//   that narrows (`y` runs only if `cd` succeeded) and `cd x || y` runs `y`
+//   where `cd` FAILED. A `cd` in a pipeline member, a background job, a
+//   subshell or behind a child-only wrapper (`timeout`, `sudo`, `env`, `nohup`
+//   …) cannot move this shell. A computed `cd`, `cd -`, `cd ~user`, `pushd`
+//   without a literal target, `popd` without an in-call `pushd`, `source`, a
+//   computed command word, a relative `cd` inside a loop, and an invoked
+//   function that changes directory all add `unknown`. A relative exec word is
+//   classified under EVERY named directory, and `unknown` makes it an
+//   unresolved target that takes the door — the same as lexer truncation.
+//
+//   HEREDOC BODIES. A body ends at the EARLIEST line a shell could end it: the
+//   exact delimiter line, or — inside `$(…)` — a line that starts with the
+//   delimiter and closes the substitution (`EOF)`, bash and dash both end
+//   there). A backslash-newline inside the delimiter word is a line
+//   continuation, not part of the delimiter. A delimiter the lexer cannot prove
+//   matches the shell's (any `$` or backtick in it) has no body here: every
+//   line up to the literal delimiter is lexed as commands, one line at a time,
+//   so prose with an unbalanced quote cannot swallow later lines.
 
 /** One word of an executed statement. `literal` is false when the shell
  *  computes the word — a parameter / command / arithmetic expansion or an
- *  unquoted glob — so its value is not known here and it is never resolved. */
-interface ShellWord { text: string; literal: boolean }
+ *  unquoted glob — so its value is not known here and it is never resolved.
+ *  `bare` is true when the word was written with no quoting, escape or
+ *  expansion at all: only a bare word can be a reserved word (`{`, `}`,
+ *  `case`, `in`, `esac`, `function`, `while`, `done`, …). */
+interface ShellWord { text: string; literal: boolean; bare: boolean }
 
-/** One simple command a shell would EXECUTE. `dir` is the lexical directory
- *  prefix its relative words resolve under: `''` = the call's cwd, a prefix a
- *  literal `cd` set, `null` when a `cd` made it unknowable. */
-interface ExecutedStatement { words: ShellWord[]; dir: string | null }
+/** The directories a statement could run in. `''` is the call's cwd; any
+ *  other entry is a lexical prefix a literal `cd` produced (relative, absolute
+ *  or `~`-rooted). `unknown` adds a directory that cannot be named. */
+interface DirSet { readonly dirs: readonly string[]; readonly unknown: boolean }
+
+/** Past this many named candidates the set is cut and marked `unknown`. */
+const MAX_DIR_CANDIDATES = 16;
+const CWD_DIRS: DirSet = { dirs: [''], unknown: false };
+const UNKNOWN_DIRS: DirSet = { dirs: [], unknown: true };
+
+function dirUnion(a: DirSet, b: DirSet): DirSet {
+  if (a === b) return a;
+  const dirs = [...a.dirs];
+  for (const d of b.dirs) if (!dirs.includes(d)) dirs.push(d);
+  const unknown = a.unknown || b.unknown || dirs.length > MAX_DIR_CANDIDATES;
+  return { dirs: dirs.length > MAX_DIR_CANDIDATES ? dirs.slice(0, MAX_DIR_CANDIDATES) : dirs, unknown };
+}
+
+const isRootedWord = (t: string): boolean => t.startsWith('/') || t === '~' || t.startsWith('~/');
+
+function joinShellDir(prefix: string, rel: string): string {
+  if (isRootedWord(rel)) return rel;
+  return prefix ? `${prefix}/${rel}` : rel;
+}
+
+/** `from` after a successful change to `dest` (`null` = cannot be named). */
+function dirsAfterChange(from: DirSet, dest: string | null): DirSet {
+  if (dest === null) return UNKNOWN_DIRS;
+  if (/^\.\/*$/.test(dest)) return from; // `cd .` stays put
+  if (isRootedWord(dest)) return { dirs: [dest], unknown: false };
+  return { dirs: from.dirs.map(d => joinShellDir(d, dest)), unknown: from.unknown };
+}
+
+/** Every token a word could resolve to under `dirs`, and whether one of the
+ *  directories cannot be named (then the word is an UNRESOLVED target). */
+function underShellDirs(token: string, dirs: DirSet): { tokens: string[]; unresolved: boolean } {
+  if (isRootedWord(token)) return { tokens: [token], unresolved: false };
+  return { tokens: dirs.dirs.map(d => joinShellDir(d, token)), unresolved: dirs.unknown };
+}
+
+/** One simple command a shell would EXECUTE, and the directories it could run
+ *  in. `fn` marks the invocation of a function defined in this call. */
+interface ExecutedStatement { words: ShellWord[]; dirs: DirSet; fn?: boolean }
+
+/** A function defined in this call: its body text, lexed where it is invoked. */
+interface ShellFunction { body: string; subshell: boolean }
+type ShellFunctions = Map<string, ShellFunction>;
 
 interface ShellLexState {
   out: ExecutedStatement[];
-  /** Nesting passed {@link MAX_SHELL_NESTING}: the rest was not read. */
+  /** Nesting passed {@link MAX_SHELL_NESTING}, or the function-expansion
+   *  budget ran out: the rest was not read. */
   truncated: boolean;
+  /** Function bodies still allowed to be lexed at a call site. */
+  budget: number;
 }
 
 interface PendingHeredoc {
   delim: string;
   quoted: boolean;
   stripTabs: boolean;
+  /** The delimiter holds an expansion: the shell's delimiter is not provable. */
+  uncertain: boolean;
   /** index in `pipeline` of the statement the operator belongs to. */
   owner: number;
   pipeline: ExecutedStatement[];
-  dir: string | null;
+  dirs: DirSet;
+}
+
+/** How a statement's own effect moves the directory set of THIS shell.
+ *  `change`: on success the shell is in `succ`, on failure where it was.
+ *  `set`: either way the shell may end in any of `dirs`. */
+type DirEffect = { kind: 'none' } | { kind: 'change'; succ: DirSet } | { kind: 'set'; dirs: DirSet };
+const NO_DIR_EFFECT: DirEffect = { kind: 'none' };
+
+/** Where a statement list stops: end of text, the `)` of a subshell or
+ *  substitution, or the `}` that closes a function body. */
+type ListClose = 'eof' | 'paren' | 'brace';
+
+interface ListResult {
+  /** Index just past the closing `)` / `}` (or `src.length`). */
+  end: number;
+  /** Index of the closing `}` (brace lists only). */
+  closeAt: number;
+  /** The closing token was found. */
+  closed: boolean;
+  /** Every directory this shell may be in when the list ends. */
+  dirs: DirSet;
 }
 
 const SHELL_PROGRAM = /^(?:bash|sh|zsh|ksh|dash|ash)$/;
-/** Nesting bound for substitutions / subshells / `-c` / heredoc bodies. Past
- *  it the lexer stops and reports `truncated`; the classifier then holds. */
+/** Nesting bound for substitutions / subshells / `-c` / heredoc bodies /
+ *  function calls. Past it the lexer stops and reports `truncated`; the
+ *  classifier then holds. */
 const MAX_SHELL_NESTING = 32;
+/** Total function bodies lexed at call sites in one call. */
+const MAX_FUNCTION_EXPANSIONS = 64;
 const SHELL_ASSIGNMENT = /^[A-Za-z_]\w*\+?=/;
 /** Reserved words that may open a statement before its command word, beyond
  *  `SHELL_KEYWORD` (which the shared command-word walk uses unchanged). */
 const LEADING_RESERVED_WORD = /^(?:if|while|until)$/;
+/** Reserved words after which another reserved word is still in reserved
+ *  position (a `{` there opens a group). */
+const RESERVED_OPENER = /^(?:\{|then|do|else|elif|if|while|until|!|time)$/;
+/** Leading words that start a loop whose body may run more than once. */
+const LOOP_OPENER = /^(?:while|until|for|select)$/;
+/** A function name as bash accepts it in `name()` / `function name`. */
+const SHELL_FUNCTION_NAME = /^[A-Za-z_][\w.:+@-]*$/;
 /** A shell `-c` option cluster: the next word is the program. */
 const SHELL_INLINE_C = /^-[A-Za-z]*c[A-Za-z]*$/;
 /** Shell options that consume the next word (`bash -o pipefail`, `-O extglob`). */
@@ -7172,87 +7279,270 @@ const isWordBreak = (c: string | undefined): boolean =>
   c === undefined || c === ' ' || c === '\t' || c === '\n' || c === '\r'
   || c === ';' || c === '&' || c === '|' || c === '<' || c === '>' || c === '(' || c === ')';
 
+const isBareWord = (w: ShellWord | undefined, text: string): boolean => w !== undefined && w.bare && w.text === text;
+/** Every word so far is a reserved OPENER: the next word is in reserved position. */
+const inReservedPosition = (words: readonly ShellWord[]): boolean =>
+  words.every(w => w.bare && RESERVED_OPENER.test(w.text));
+
 /** The statements a shell would execute for `text`, with use-vs-mention kept. */
 function executedStatements(text: string): { statements: ExecutedStatement[]; truncated: boolean } {
-  const st: ShellLexState = { out: [], truncated: false };
-  lexShellList(text, 0, false, 0, '', st);
+  const st: ShellLexState = { out: [], truncated: false, budget: MAX_FUNCTION_EXPANSIONS };
+  lexShellList(text, 0, 'eof', 0, CWD_DIRS, st, new Map());
   return { statements: st.out, truncated: st.truncated };
 }
 
+/** `[openers…, NAME]` or `[openers…, function, NAME]`: a function header's name. */
+function functionHeaderName(words: readonly ShellWord[]): string | null {
+  const n = words.length;
+  if (n === 0) return null;
+  const name = words[n - 1]!;
+  if (!name.bare || !SHELL_FUNCTION_NAME.test(name.text) || /^[!{}]$/.test(name.text)) return null;
+  const head = words[n - 2];
+  const before = isBareWord(head, 'function') ? words.slice(0, n - 2) : words.slice(0, n - 1);
+  if (!isBareWord(head, 'function') && RESERVED_OPENER.test(name.text)) return null;
+  return inReservedPosition(before) ? name.text : null;
+}
+
+/** `[openers…, case, WORD]`: the next bare `in` opens the pattern list. */
+function awaitingCaseIn(words: readonly ShellWord[]): boolean {
+  const n = words.length;
+  return n >= 2 && isBareWord(words[n - 2], 'case') && inReservedPosition(words.slice(0, n - 2));
+}
+
 /**
- * Lex a statement list from `start` until EOF, or until the `)` that closes it
- * when `inParen`. Returns the index just past that `)` (or `src.length`).
+ * Lex a statement list from `start` until EOF, or until the `)` / `}` that
+ * closes it. Statements a shell would execute are appended to `st.out` with
+ * the directory set each could run in; the returned `dirs` are every
+ * directory this shell may be in afterwards.
  */
 function lexShellList(
   src: string,
   start: number,
-  inParen: boolean,
+  close: ListClose,
   depth: number,
-  dirIn: string | null,
+  dirsIn: DirSet,
   st: ShellLexState,
-): number {
-  if (depth > MAX_SHELL_NESTING) { st.truncated = true; return src.length; }
+  funcs: ShellFunctions,
+): ListResult {
+  if (depth > MAX_SHELL_NESTING) {
+    st.truncated = true;
+    return { end: src.length, closeAt: src.length, closed: false, dirs: dirUnion(dirsIn, UNKNOWN_DIRS) };
+  }
+  const inParen = close === 'paren';
   let i = start;
-  let dir = dirIn;
   let words: ShellWord[] = [];
   let wordEnd = -1;
-  let pipeline: ExecutedStatement[] = [];
   let pending: PendingHeredoc[] = [];
   const deferred: Array<{ body: string; h: PendingHeredoc }> = [];
-  let lastSep = ';';
 
-  const endStatement = (sep: string): void => {
+  // -- directory flow (see the header): an and-or list is evaluated as the
+  // pair (T, F) of directory sets in which its prefix's status is true /
+  // false; `&&` runs the next pipeline in T, `||` in F, and the list ends in
+  // T ∪ F. A pipeline's own effect is its LAST element's (zsh/ksh run that
+  // one in this shell; earlier members are subshells everywhere).
+  let cur: DirSet = dirsIn;          // where the next and-or list starts
+  let andOrStart: DirSet = dirsIn;
+  let tSet: DirSet | null = null;
+  let fSet: DirSet | null = null;
+  let op: '&&' | '||' | null = null;
+  let pipeIn: DirSet = dirsIn;       // where the current pipeline runs
+  let pipeline: ExecutedStatement[] = [];
+  let pipeElements = 0;
+  let pipeLast: DirEffect = NO_DIR_EFFECT;
+  let pipeNegated = false;
+  const loops: number[] = [];        // st.out index where each open loop began
+  const dirStack: DirSet[] = [];     // in-call `pushd` history
+  let cdpathSet = false;             // this call assigns CDPATH
+  const exportedFuncs = new Set<string>();
+  let braceDepth = 0;
+  // case: depth of open `case … esac`, and whether we are reading patterns.
+  let caseDepth = 0;
+  let casePattern = false;
+  let casePatternSeen = false;
+  let afterOp = false;               // the last token was `|` / `&&` / `||`
+
+  const finishPipeline = (): void => {
+    if (pipeElements === 0) return;
+    const x = pipeIn;
+    let tp: DirSet;
+    let fp: DirSet;
+    const shared = pipeElements > 1; // the effect may run in a subshell
+    if (pipeLast.kind === 'change') { tp = shared ? dirUnion(pipeLast.succ, x) : pipeLast.succ; fp = x; }
+    else if (pipeLast.kind === 'set') { tp = fp = shared ? dirUnion(pipeLast.dirs, x) : pipeLast.dirs; }
+    else { tp = fp = x; }
+    if (pipeNegated) [tp, fp] = [fp, tp];
+    if (tSet === null || fSet === null) { tSet = tp; fSet = fp; }
+    else if (op === '&&') { fSet = dirUnion(fSet, fp); tSet = tp; }
+    else { tSet = dirUnion(tSet, tp); fSet = fp; }
+    endPipelineHeredocs();
+    pipeline = [];
+    pipeElements = 0;
+    pipeLast = NO_DIR_EFFECT;
+    pipeNegated = false;
+  };
+  /** `&&` / `||`: the next pipeline runs where the prefix was true / false. */
+  const chain = (o: '&&' | '||'): void => {
+    finishPipeline();
+    if (tSet === null || fSet === null) { tSet = pipeIn; fSet = pipeIn; }
+    op = o;
+    pipeIn = o === '&&' ? tSet : fSet;
+  };
+  /** `;` / newline / `&` / end: the and-or list is over. */
+  const endAndOr = (background: boolean): void => {
+    finishPipeline();
+    if (tSet !== null && fSet !== null) cur = background ? andOrStart : dirUnion(tSet, fSet);
+    tSet = fSet = null;
+    op = null;
+    andOrStart = cur;
+    pipeIn = cur;
+  };
+
+  /** A directory change inside a loop may repeat, and statements earlier in
+   *  the body run after it on the next pass: none of them can be named. */
+  const markLoopUnknown = (): void => {
+    if (loops.length === 0) return;
+    for (let k = loops[0]!; k < st.out.length; k++) st.out[k]!.dirs = dirUnion(st.out[k]!.dirs, UNKNOWN_DIRS);
+  };
+
+  const endStatement = (): void => {
     if (words.length === 0) return;
-    const s: ExecutedStatement = { words, dir };
+    const s: ExecutedStatement = { words, dirs: pipeIn };
     words = [];
+    if (pipeElements === 0) {
+      for (const w of s.words) { if (isBareWord(w, '!')) pipeNegated = !pipeNegated; else break; }
+    }
+    // Loops: leading reserved words open / close them.
+    for (let k = 0; k < s.words.length && inReservedPosition(s.words.slice(0, k)); k++) {
+      const w = s.words[k]!;
+      if (w.bare && LOOP_OPENER.test(w.text)) loops.push(st.out.length);
+      else if (isBareWord(w, 'done')) loops.pop();
+    }
+    if (s.words.some(w => /^CDPATH\+?=/.test(w.text))) cdpathSet = true;
     st.out.push(s);
     pipeline.push(s);
-    const before = lastSep;
-    lastSep = sep;
-    dir = shellDirAfter(s, dir, before, sep);
-    lexNestedPrograms(s, depth, st);
+    pipeElements++;
+    let effect = statementDirEffect(s, pipeIn, dirStack, cdpathSet, loops.length > 0);
+    const call = invokedFunction(s.words, funcs);
+    if (call !== null) {
+      s.fn = true;
+      const f = funcs.get(call)!;
+      if (st.budget <= 0) st.truncated = true;
+      else {
+        st.budget--;
+        const r = lexShellList(f.body, 0, 'eof', depth + 1, pipeIn, st, f.subshell ? new Map(funcs) : funcs);
+        if (!f.subshell && (r.dirs.unknown || r.dirs.dirs.some(d => !pipeIn.dirs.includes(d)))) {
+          effect = { kind: 'set', dirs: dirUnion(pipeIn, dirUnion(r.dirs, UNKNOWN_DIRS)) };
+        }
+      }
+    }
+    noteExportedFunctions(s.words, exportedFuncs);
+    const nested = lexNestedPrograms(s, depth, st, funcs, exportedFuncs);
+    if (nested !== null) effect = { kind: 'set', dirs: nested };
+    if (effect.kind !== 'none') markLoopUnknown();
+    pipeLast = effect;
   };
   const classifyBody = (body: string, h: PendingHeredoc): void => {
-    if (heredocReadAsShell(h.pipeline, h.owner)) lexShellList(body, 0, false, depth + 1, h.dir, st);
-    else if (!h.quoted) scanShellExpansions(body, 0, null, depth + 1, h.dir, st);
+    if (heredocReadAsShell(h.pipeline, h.owner)) {
+      lexShellList(body, 0, 'eof', depth + 1, h.dirs, st, exportedOnly(funcs, exportedFuncs));
+    } else if (!h.quoted) scanShellExpansions(body, 0, null, depth + 1, h.dirs, st, funcs);
   };
-  const endPipeline = (): void => {
+  function endPipelineHeredocs(): void {
     for (let k = 0; k < deferred.length; k++) {
       if (deferred[k]!.h.pipeline !== pipeline) continue;
       classifyBody(deferred[k]!.body, deferred[k]!.h);
       deferred.splice(k--, 1);
     }
-    pipeline = [];
-  };
+  }
   /** Read the bodies of every heredoc opened on the line that just ended. */
   const readHeredocBodies = (): void => {
     for (const h of pending) {
+      if (h.uncertain) {
+        // The shell's delimiter cannot be named: read every line up to the
+        // literal one as COMMANDS, each line its own list (review r2 B2).
+        while (i < src.length) {
+          const nl = src.indexOf('\n', i);
+          let line = src.slice(i, nl < 0 ? src.length : nl);
+          i = nl < 0 ? src.length : nl + 1;
+          if (h.stripTabs) line = line.replace(/^\t+/, '');
+          if (line === h.delim) break;
+          lexShellList(line, 0, 'eof', depth + 1, h.dirs, st, funcs);
+        }
+        continue;
+      }
       let body = '';
       while (i < src.length) {
+        const lineStart = i;
         const nl = src.indexOf('\n', i);
         const lineEnd = nl < 0 ? src.length : nl;
-        let line = src.slice(i, lineEnd);
+        const raw = src.slice(i, lineEnd);
         i = nl < 0 ? src.length : nl + 1;
-        if (h.stripTabs) line = line.replace(/^\t+/, '');
+        const line = h.stripTabs ? raw.replace(/^\t+/, '') : raw;
         if (line === h.delim || line === `${h.delim}\r`) break;
-        body += `${line}\n`;
+        // `$(cat <<EOF … EOF)`: bash and dash close the body AND the
+        // substitution on that line. Resume at the `)`.
+        if (inParen && line.startsWith(h.delim) && line[h.delim.length] === ')') {
+          i = lineStart + (raw.length - line.length) + h.delim.length;
+          break;
+        }
+        body += `${raw}\n`;
       }
       if (h.pipeline === pipeline) deferred.push({ body, h });
       else classifyBody(body, h); // its pipeline already ended: consumers known
     }
     pending = [];
   };
+  const result = (closed: boolean, closeAt: number): ListResult => {
+    endStatement();
+    if (pending.length > 0) readHeredocBodies();
+    endAndOr(false);
+    return { end: i, closeAt, closed, dirs: cur };
+  };
 
   while (i < src.length) {
     const c = src[i]!;
     if (isShellBlank(c)) { i++; continue; }
     if (c === '\\' && src[i + 1] === '\n') { i += 2; continue; }
+
+    // -- `case WORD in`: patterns until `)` are patterns, never commands.
+    if (casePattern) {
+      if (c === '\n' || c === '\r') {
+        i++;
+        if (c === '\n' && pending.length > 0) readHeredocBodies();
+        // A pattern list cannot span lines; if one did, read on as commands.
+        if (casePatternSeen) { casePattern = false; casePatternSeen = false; }
+        continue;
+      }
+      if (c === '#' && !casePatternSeen) { const nl = src.indexOf('\n', i); i = nl < 0 ? src.length : nl; continue; }
+      if (c === '|' || (c === '(' && !casePatternSeen)) { i++; continue; }
+      if (c === ')') { i++; casePattern = false; casePatternSeen = false; continue; }
+      if (c === ';' || c === '&' || c === '<' || c === '>' || c === '(') { casePattern = false; casePatternSeen = false; continue; }
+      const w = readShellWord(src, i, depth, pipeIn, st, funcs);
+      i = w.end;
+      if (!casePatternSeen && isBareWord(w.word, 'esac')) {
+        caseDepth--;
+        casePattern = false;
+        words.push(w.word); // `esac` closes the compound: it is a pipeline element
+        wordEnd = i;
+        continue;
+      }
+      casePatternSeen = true;
+      continue;
+    }
+
     if (c === '\n' || c === '\r') {
-      const had = words.length > 0;
-      endStatement('\n');
+      // `function NAME` / `case WORD` may continue on the next line.
+      if (c === '\n' && (awaitingCaseIn(words)
+          || (words.length >= 2 && isBareWord(words[words.length - 2], 'function') && functionHeaderName(words) !== null))) {
+        i++;
+        if (pending.length > 0) readHeredocBodies();
+        continue;
+      }
+      // A newline right after `|` / `&&` / `||` continues the pipeline / list.
+      const continues = words.length === 0 && afterOp;
+      endStatement();
       i++;
       if (c === '\n' && pending.length > 0) readHeredocBodies();
-      if (had || lastSep !== '|') endPipeline();
+      if (!continues) endAndOr(false);
       continue;
     }
     if (c === '#') { // at a word start: a comment, to the end of the line
@@ -7261,43 +7551,70 @@ function lexShellList(
       continue;
     }
     if (c === ';') {
-      endStatement(';'); endPipeline();
+      endStatement();
+      const caseEnd = src[i + 1] === ';' || src[i + 1] === '&';
+      endAndOr(false);
       i++;
       while (src[i] === ';' || src[i] === '&') i++; // `;;` `;&` `;;&`
+      if (caseEnd && caseDepth > 0) { casePattern = true; casePatternSeen = false; }
+      afterOp = false;
       continue;
     }
     if (c === '&') {
-      if (src[i + 1] === '&') { endStatement('&&'); endPipeline(); i += 2; continue; }
+      if (src[i + 1] === '&') { endStatement(); chain('&&'); i += 2; afterOp = true; continue; }
       if (src[i + 1] === '>') { // `&>` / `&>>`: a redirection
-        i = skipShellRedirection(src, i + (src[i + 2] === '>' ? 3 : 2), depth, dir, st);
+        i = skipShellRedirection(src, i + (src[i + 2] === '>' ? 3 : 2), depth, pipeIn, st, funcs);
         continue;
       }
-      endStatement('&'); endPipeline(); i++;
+      endStatement(); endAndOr(true); i++;
+      afterOp = false;
       continue;
     }
     if (c === '|') {
-      if (src[i + 1] === '|') { endStatement('||'); endPipeline(); i += 2; continue; }
-      endStatement('|');
+      if (src[i + 1] === '|') { endStatement(); chain('||'); i += 2; afterOp = true; continue; }
+      endStatement();
       i += src[i + 1] === '&' ? 2 : 1;
+      afterOp = true;
       continue;
     }
-    if (c === '(') { // a subshell (or a function's `()`): its own list and cwd
-      endStatement(';');
-      i = lexShellList(src, i + 1, true, depth + 1, dir, st);
+    if (c === '(') {
+      // `NAME()` / `function NAME()`: a function DEFINITION (review r2 N3).
+      const fname = functionHeaderName(words);
+      if (fname !== null) {
+        let j = i + 1;
+        while (isShellBlank(src[j])) j++;
+        if (src[j] === ')') {
+          const def = readFunctionDefinition(src, j + 1, depth, st, funcs);
+          if (def !== null) {
+            words = [];
+            funcs.set(fname, def.fn);
+            pipeElements++; pipeLast = NO_DIR_EFFECT; // defining succeeds; it runs nothing
+            i = def.end; wordEnd = i;
+            afterOp = false;
+            continue;
+          }
+        }
+      }
+      // A subshell: its own list, its own directory; nothing leaks out.
+      endStatement();
+      i = lexShellList(src, i + 1, 'paren', depth + 1, pipeIn, st, new Map(funcs)).end;
+      pipeElements++; pipeLast = NO_DIR_EFFECT;
+      afterOp = false;
       continue;
     }
     if (c === ')') {
       i++;
-      if (inParen) break;
-      endStatement(';'); endPipeline();
+      if (inParen) return result(true, i - 1);
+      endStatement(); endAndOr(false);
+      afterOp = false;
       continue;
     }
     if (c === '<' || c === '>') {
       // An fd number glued to the operator (`2>`) is part of the redirection.
       if (wordEnd === i && words.length > 0 && /^\d+$/.test(words[words.length - 1]!.text)) words.pop();
       if (src[i + 1] === '(') { // process substitution: an executed list, used as a word
-        const end = lexShellList(src, i + 2, true, depth + 1, dir, st);
-        words.push({ text: src.slice(i, end), literal: false });
+        const end = lexShellList(src, i + 2, 'paren', depth + 1, pipeIn, st, new Map(funcs)).end;
+        words.push({ text: src.slice(i, end), literal: false, bare: false });
         i = end; wordEnd = i;
         continue;
       }
@@ -7307,8 +7624,11 @@ function lexShellList(
         if (stripTabs) j++;
         while (isShellBlank(src[j])) j++;
         const d = readHeredocDelimiter(src, j);
-        if (d.text) {
-          pending.push({ delim: d.text, quoted: d.quoted, stripTabs, owner: pipeline.length, pipeline, dir });
+        if (d.text || d.quoted) {
+          pending.push({
+            delim: d.text, quoted: d.quoted, stripTabs, uncertain: d.uncertain,
+            owner: pipeline.length, pipeline, dirs: pipeIn,
+          });
         }
         i = d.end;
         continue;
@@ -7316,47 +7636,178 @@ function lexShellList(
       let j = i + 1;
       if (c === '<' && src[j] === '<') j += 2; // `<<<` here-string: its word is data
       else if (src[j] === '>' || src[j] === '&' || src[j] === '|' || (c === '<' && src[j] === '>')) j++;
-      i = skipShellRedirection(src, j, depth, dir, st);
+      i = skipShellRedirection(src, j, depth, pipeIn, st, funcs);
       continue;
     }
-    const w = readShellWord(src, i, depth, dir, st);
+    const w = readShellWord(src, i, depth, pipeIn, st, funcs);
+    afterOp = false;
+    // `}`: closes a function body (any unquoted `}` word — closing EARLY only
+    // reads more text as commands); `{` in reserved position opens a group.
+    if (close === 'brace' && isBareWord(w.word, '}')) {
+      if (braceDepth === 0) { const at = i; i = w.end; return result(true, at); }
+      braceDepth--;
+    } else if (close === 'brace' && isBareWord(w.word, '{') && inReservedPosition(words)) {
+      braceDepth++;
+    }
+    // `function NAME {`: a function definition with a brace body.
+    if (isBareWord(w.word, '{') && words.length >= 2 && isBareWord(words[words.length - 2], 'function')
+        && functionHeaderName(words) !== null) {
+      const def = readFunctionDefinition(src, i, depth, st, funcs);
+      if (def !== null) {
+        funcs.set(words[words.length - 1]!.text, def.fn);
+        words = [];
+        pipeElements++; pipeLast = NO_DIR_EFFECT;
+        i = def.end; wordEnd = i;
+        continue;
+      }
+    }
+    // `case WORD in`: the header runs nothing; patterns follow.
+    if (isBareWord(w.word, 'in') && awaitingCaseIn(words)) {
+      words = [];
+      caseDepth++;
+      casePattern = true;
+      casePatternSeen = false;
+      i = w.end; wordEnd = i;
+      continue;
+    }
+    if (caseDepth > 0 && isBareWord(w.word, 'esac') && inReservedPosition(words)) caseDepth--;
     words.push(w.word);
     i = w.end; wordEnd = i;
   }
-  endStatement(';');
-  if (pending.length > 0) readHeredocBodies();
-  endPipeline();
-  return i;
+  return result(false, src.length);
+}
+
+/**
+ * A function body after `NAME()` (from just past the `)`) or at the `{` of
+ * `function NAME {`: a `{ … }` group or a `( … )` subshell. The body is lexed
+ * into a THROWAWAY buffer only to find where it ends — defining a function
+ * runs nothing (review r2 N3). `null` when the body is not one of those two
+ * forms or never closes: the caller then reads the text as ordinary commands,
+ * which can only read MORE as commands.
+ */
+function readFunctionDefinition(
+  src: string,
+  from: number,
+  depth: number,
+  st: ShellLexState,
+  funcs: ShellFunctions,
+): { fn: ShellFunction; end: number } | null {
+  let j = from;
+  while (j < src.length) {
+    if (isShellBlank(src[j]) || src[j] === '\n' || src[j] === '\r') { j++; continue; }
+    if (src[j] === '\\' && src[j + 1] === '\n') { j += 2; continue; }
+    break;
+  }
+  const brace = src[j] === '{' && isWordBreak(src[j + 1]);
+  if (!brace && src[j] !== '(') return null;
+  const saved = st.out;
+  st.out = [];
+  try {
+    const r = lexShellList(src, j + 1, brace ? 'brace' : 'paren', depth + 1, CWD_DIRS, st, new Map(funcs));
+    if (!r.closed) return null;
+    return { fn: { body: src.slice(j + 1, r.closeAt), subshell: !brace }, end: r.end };
+  } finally {
+    st.out = saved;
+  }
+}
+
+/** The name of a function DEFINED IN THIS CALL that `words` invokes, or
+ *  null. Only a direct call reaches a shell function: `sudo f`, `env f`,
+ *  `timeout 1 f`, `nohup f` and the `exec` builtin run an external `f`, and
+ *  `command f` skips functions; `time f` runs it. */
+function invokedFunction(words: readonly ShellWord[], funcs: ShellFunctions): string | null {
+  if (funcs.size === 0) return null;
+  let i = 0;
+  while (i < words.length) {
+    const w = words[i]!;
+    if (SHELL_ASSIGNMENT.test(w.text)) { i++; continue; }
+    if (w.bare && (SHELL_KEYWORD.test(w.text) || LEADING_RESERVED_WORD.test(w.text))) { i++; continue; }
+    if (isBareWord(w, 'time')) { i++; while (i < words.length && words[i]!.text.startsWith('-')) i++; continue; }
+    break;
+  }
+  const w = words[i];
+  return w !== undefined && w.literal && funcs.has(w.text) ? w.text : null;
+}
+
+/** `export -f NAME` / `declare -fx NAME`: the function reaches child shells. */
+function noteExportedFunctions(words: readonly ShellWord[], exported: Set<string>): void {
+  const head = words[0]?.text;
+  if (head !== 'export' && head !== 'declare' && head !== 'typeset') return;
+  const flags = words.slice(1).filter(w => w.text.startsWith('-')).map(w => w.text).join('');
+  if (!flags.includes('f') || (head !== 'export' && !flags.includes('x'))) return;
+  for (const w of words.slice(1)) if (!w.text.startsWith('-')) exported.add(w.text);
+}
+
+/** The functions a CHILD shell (`bash -c`, `bash <<EOF`) inherits. */
+function exportedOnly(funcs: ShellFunctions, exported: ReadonlySet<string>): ShellFunctions {
+  const out: ShellFunctions = new Map();
+  for (const [k, v] of funcs) if (exported.has(k)) out.set(k, v);
+  return out;
 }
 
 /** Skip a redirection's target word (still lexing any substitution in it). */
-function skipShellRedirection(src: string, from: number, depth: number, dir: string | null, st: ShellLexState): number {
+function skipShellRedirection(
+  src: string, from: number, depth: number, dirs: DirSet, st: ShellLexState, funcs: ShellFunctions,
+): number {
   let j = from;
   while (isShellBlank(src[j])) j++;
-  if (j < src.length && !isWordBreak(src[j])) j = readShellWord(src, j, depth, dir, st).end;
+  if (j < src.length && !isWordBreak(src[j])) j = readShellWord(src, j, depth, dirs, st, funcs).end;
   return j;
 }
 
-/** A heredoc delimiter word: quote removal only, never expanded. Any quoting
- *  makes the body literal (no expansion). */
-function readHeredocDelimiter(src: string, i: number): { text: string; quoted: boolean; end: number } {
+/**
+ * A heredoc delimiter word: quote removal only, never expanded. Any quoting
+ * makes the body literal (no expansion). A backslash-newline outside single
+ * quotes is a LINE CONTINUATION — the shell removes both bytes, so
+ * `EO\<newline>F` is the unquoted delimiter `EOF` (review r2 N4). A `$` or
+ * backtick outside single quotes makes the delimiter `uncertain`: a shell
+ * that expanded it would end the body somewhere this lexer cannot name
+ * (review r2 B2), so the caller reads the body as commands.
+ */
+function readHeredocDelimiter(src: string, i: number): { text: string; quoted: boolean; uncertain: boolean; end: number } {
   let text = '';
   let quoted = false;
+  let uncertain = false;
   while (i < src.length && !isWordBreak(src[i])) {
     const c = src[i]!;
-    if (c === '\\' && i + 1 < src.length) { text += src[i + 1]; quoted = true; i += 2; continue; }
-    if (c === "'" || c === '"') {
-      const close = src.indexOf(c, i + 1);
+    if (c === '\\') {
+      if (src[i + 1] === '\n') { i += 2; continue; }
+      if (i + 1 < src.length) { text += src[i + 1]; quoted = true; }
+      i += 2;
+      continue;
+    }
+    if (c === "'") {
+      const close = src.indexOf("'", i + 1);
       const stop = close < 0 ? src.length : close;
       text += src.slice(i + 1, stop);
       quoted = true;
       i = close < 0 ? src.length : close + 1;
       continue;
     }
+    if (c === '"') {
+      quoted = true;
+      i++;
+      while (i < src.length && src[i] !== '"') {
+        const d = src[i]!;
+        if (d === '\\' && i + 1 < src.length) {
+          const n = src[i + 1]!;
+          if (n === '\n') { i += 2; continue; }
+          text += n === '$' || n === '`' || n === '"' || n === '\\' ? n : `\\${n}`;
+          i += 2;
+          continue;
+        }
+        if (d === '$' || d === '`') uncertain = true;
+        text += d;
+        i++;
+      }
+      i = Math.min(i + 1, src.length);
+      continue;
+    }
+    if (c === '$' || c === '`') uncertain = true;
     text += c;
     i++;
   }
-  return { text, quoted, end: i };
+  return { text, quoted, uncertain, end: i };
 }
 
 /** Read one unquoted-context word starting at `i`. Expansions inside it are
@@ -7365,45 +7816,51 @@ function readShellWord(
   src: string,
   i: number,
   depth: number,
-  dir: string | null,
+  dirs: DirSet,
   st: ShellLexState,
+  funcs: ShellFunctions,
 ): { word: ShellWord; end: number } {
   let text = '';
   let literal = true;
+  let bare = true;
   while (i < src.length) {
     const c = src[i]!;
     // `name=( … )`: an array assignment. Its elements are DATA words (only
     // their expansions run), not a subshell whose words are commands.
     if (c === '(' && SHELL_ARRAY_ASSIGNMENT.test(text)) {
-      const end = scanArrayLiteral(src, i + 1, depth, dir, st);
+      const end = scanArrayLiteral(src, i + 1, depth, dirs, st, funcs);
       text += src.slice(i, end);
       literal = false;
+      bare = false;
       i = end;
       continue;
     }
     if (isWordBreak(c)) break;
     if (c === '\\') {
       if (src[i + 1] === '\n') { i += 2; continue; }
+      bare = false;
       if (i + 1 < src.length) text += src[i + 1];
       i += 2;
       continue;
     }
     if (c === "'") {
+      bare = false;
       const close = src.indexOf("'", i + 1);
       text += src.slice(i + 1, close < 0 ? src.length : close);
       i = close < 0 ? src.length : close + 1;
       continue;
     }
     if (c === '"') {
-      const d = scanShellExpansions(src, i + 1, '"', depth + 1, dir, st);
+      bare = false;
+      const d = scanShellExpansions(src, i + 1, '"', depth + 1, dirs, st, funcs);
       text += d.text;
       if (d.expanded) literal = false;
       i = d.end;
       continue;
     }
     if (c === '$' || c === '`') {
-      const e = lexShellExpansion(src, i, depth, dir, st);
-      if (e) { text += src.slice(i, e.end); if (e.computed) literal = false; i = e.end; continue; }
+      const e = lexShellExpansion(src, i, depth, dirs, st, funcs);
+      if (e) { bare = false; text += src.slice(i, e.end); if (e.computed) literal = false; i = e.end; continue; }
     }
     if (c === '*' || c === '?' || c === '[') literal = false; // an unquoted glob
     text += c;
@@ -7419,7 +7876,7 @@ function readShellWord(
       literal = true;
     }
   }
-  return { word: { text, literal }, end: i };
+  return { word: { text, literal, bare }, end: i };
 }
 
 /**
@@ -7431,23 +7888,24 @@ function lexShellExpansion(
   src: string,
   i: number,
   depth: number,
-  dir: string | null,
+  dirs: DirSet,
   st: ShellLexState,
+  funcs: ShellFunctions,
 ): { end: number; computed: boolean } | null {
   const c = src[i];
-  if (c === '`') return { end: lexBacktickList(src, i + 1, depth, dir, st), computed: true };
+  if (c === '`') return { end: lexBacktickList(src, i + 1, depth, dirs, st, funcs), computed: true };
   const n = src[i + 1];
   if (n === '(') {
-    if (src[i + 2] === '(') return { end: scanArithmetic(src, i + 3, depth, dir, st), computed: true };
-    return { end: lexShellList(src, i + 2, true, depth + 1, dir, st), computed: true };
+    if (src[i + 2] === '(') return { end: scanArithmetic(src, i + 3, depth, dirs, st, funcs), computed: true };
+    return { end: lexShellList(src, i + 2, 'paren', depth + 1, dirs, st, new Map(funcs)).end, computed: true };
   }
-  if (n === '{') return { end: scanShellExpansions(src, i + 2, '}', depth + 1, dir, st).end, computed: true };
+  if (n === '{') return { end: scanShellExpansions(src, i + 2, '}', depth + 1, dirs, st, funcs).end, computed: true };
   if (n === "'") {
     let j = i + 2;
     while (j < src.length && src[j] !== "'") j += src[j] === '\\' ? 2 : 1;
     return { end: Math.min(j + 1, src.length), computed: false };
   }
-  if (n === '"') return { end: scanShellExpansions(src, i + 2, '"', depth + 1, dir, st).end, computed: true };
+  if (n === '"') return { end: scanShellExpansions(src, i + 2, '"', depth + 1, dirs, st, funcs).end, computed: true };
   if (n !== undefined && /[A-Za-z0-9_@*#?$!-]/.test(n)) {
     let j = i + 2;
     if (/[A-Za-z_]/.test(n)) while (j < src.length && /\w/.test(src[j]!)) j++;
@@ -7467,8 +7925,9 @@ function scanShellExpansions(
   i: number,
   terminator: '"' | '}' | null,
   depth: number,
-  dir: string | null,
+  dirs: DirSet,
   st: ShellLexState,
+  funcs: ShellFunctions,
 ): { end: number; text: string; expanded: boolean } {
   let text = '';
   let expanded = false;
@@ -7487,12 +7946,12 @@ function scanShellExpansions(
       continue;
     }
     if (terminator === '}' && c === '"') {
-      i = scanShellExpansions(src, i + 1, '"', depth + 1, dir, st).end;
+      i = scanShellExpansions(src, i + 1, '"', depth + 1, dirs, st, funcs).end;
       expanded = true;
       continue;
     }
     if (c === '$' || c === '`') {
-      const e = lexShellExpansion(src, i, depth, dir, st);
+      const e = lexShellExpansion(src, i, depth, dirs, st, funcs);
       if (e) { text += src.slice(i, e.end); if (e.computed) expanded = true; i = e.end; continue; }
     }
     text += c;
@@ -7505,7 +7964,9 @@ const SHELL_ARRAY_ASSIGNMENT = /^[A-Za-z_]\w*\+?=$/;
 
 /** The body of `name=( … )` up to its `)`: quoted / expanding words whose
  *  expansions are lexed; nothing in it is a command. */
-function scanArrayLiteral(src: string, i: number, depth: number, dir: string | null, st: ShellLexState): number {
+function scanArrayLiteral(
+  src: string, i: number, depth: number, dirs: DirSet, st: ShellLexState, funcs: ShellFunctions,
+): number {
   while (i < src.length) {
     const c = src[i]!;
     if (c === ')') return i + 1;
@@ -7515,9 +7976,9 @@ function scanArrayLiteral(src: string, i: number, depth: number, dir: string | n
       i = close < 0 ? src.length : close + 1;
       continue;
     }
-    if (c === '"') { i = scanShellExpansions(src, i + 1, '"', depth + 1, dir, st).end; continue; }
+    if (c === '"') { i = scanShellExpansions(src, i + 1, '"', depth + 1, dirs, st, funcs).end; continue; }
     if (c === '$' || c === '`') {
-      const e = lexShellExpansion(src, i, depth, dir, st);
+      const e = lexShellExpansion(src, i, depth, dirs, st, funcs);
       if (e) { i = e.end; continue; }
     }
     if (c === '#' && (i === 0 || /\s/.test(src[i - 1]!))) { // a comment inside the list
@@ -7531,12 +7992,14 @@ function scanArrayLiteral(src: string, i: number, depth: number, dir: string | n
 }
 
 /** `$((…))`: arithmetic. Only nested `$(…)` / backticks in it execute. */
-function scanArithmetic(src: string, i: number, depth: number, dir: string | null, st: ShellLexState): number {
+function scanArithmetic(
+  src: string, i: number, depth: number, dirs: DirSet, st: ShellLexState, funcs: ShellFunctions,
+): number {
   let parens = 0;
   while (i < src.length) {
     const c = src[i]!;
     if (c === '$' || c === '`') {
-      const e = lexShellExpansion(src, i, depth + 1, dir, st);
+      const e = lexShellExpansion(src, i, depth + 1, dirs, st, funcs);
       if (e) { i = e.end; continue; }
     }
     if (c === '(') parens++;
@@ -7550,7 +8013,9 @@ function scanArithmetic(src: string, i: number, depth: number, dir: string | nul
 }
 
 /** A backtick substitution: de-escape `` \` `` / `\\` / `\$` and lex the body. */
-function lexBacktickList(src: string, i: number, depth: number, dir: string | null, st: ShellLexState): number {
+function lexBacktickList(
+  src: string, i: number, depth: number, dirs: DirSet, st: ShellLexState, funcs: ShellFunctions,
+): number {
   let body = '';
   while (i < src.length && src[i] !== '`') {
     if (src[i] === '\\' && i + 1 < src.length) {
@@ -7562,7 +8027,7 @@ function lexBacktickList(src: string, i: number, depth: number, dir: string | nu
     body += src[i];
     i++;
   }
-  lexShellList(body, 0, false, depth + 1, dir, st);
+  lexShellList(body, 0, 'eof', depth + 1, dirs, st, new Map(funcs));
   return Math.min(i + 1, src.length);
 }
 
@@ -7572,6 +8037,10 @@ const WRAPPER_NO_EXEC: Record<string, RegExp> = {
   command: /^-[A-Za-z]*[vV][A-Za-z]*$/,
   sudo: /^(?:-[A-Za-z]*[elvK][A-Za-z]*|--(?:edit|list|validate|remove-timestamp))$/,
 };
+
+/** Wrappers that keep their command IN THIS SHELL (a builtin or keyword):
+ *  every other `EXEC_WRAPPER` starts a child process. */
+const IN_SHELL_WRAPPER = /^(?:command|time|builtin)$/;
 
 /**
  * Walk a statement's leading assignments, reserved words and transparent
@@ -7583,11 +8052,13 @@ const WRAPPER_NO_EXEC: Record<string, RegExp> = {
  * interpreter is handed DOWNSTREAM (a script argument) is not addressed here —
  * script discovery handles that, separately. Returns the command word's index,
  * or `words.length` when there is none (or the wrapper runs nothing).
+ * `onWrapper` reports each wrapper word passed on the way.
  */
 function shellProgramWalk(
   words: readonly ShellWord[],
   onAddressed?: (w: ShellWord) => void,
   onAssignment?: (w: ShellWord) => void,
+  onWrapper?: (w: ShellWord) => void,
 ): number {
   let i = 0;
   while (i < words.length) {
@@ -7597,6 +8068,7 @@ function shellProgramWalk(
     onAddressed?.(w);
     const base = commandBaseName(w.text);
     if (!EXEC_WRAPPER.test(base)) return i;
+    onWrapper?.(w);
     const takesValue = WRAPPER_FLAG_TAKES_VALUE[base];
     const noExec = WRAPPER_NO_EXEC[base];
     i++;
@@ -7651,60 +8123,140 @@ function heredocReadAsShell(pipeline: readonly ExecutedStatement[], owner: numbe
   return false;
 }
 
-/** `bash -c '<program>'` and `eval <words>` run a further statement list in
- *  this statement's directory. Lex it. */
-function lexNestedPrograms(s: ExecutedStatement, depth: number, st: ShellLexState): void {
+/**
+ * `eval <words>`, `trap '<action>' SIG…` and `bash -c '<program>'` run a
+ * further statement list. Lex it. Returns the directories THIS shell may be
+ * in after an `eval` (it runs here); `null` otherwise — a `trap` action runs
+ * later, wherever the shell then is (so its directories are not named), and
+ * `bash -c` is a child that inherits only exported functions.
+ */
+function lexNestedPrograms(
+  s: ExecutedStatement,
+  depth: number,
+  st: ShellLexState,
+  funcs: ShellFunctions,
+  exported: ReadonlySet<string>,
+): DirSet | null {
   const idx = shellProgramWalk(s.words);
-  if (idx >= s.words.length) return;
+  if (idx >= s.words.length) return null;
   const base = commandBaseName(s.words[idx]!.text);
   if (base === 'eval') {
-    lexShellList(s.words.slice(idx + 1).map(w => w.text).join(' '), 0, false, depth + 1, s.dir, st);
-    return;
+    return lexShellList(s.words.slice(idx + 1).map(w => w.text).join(' '), 0, 'eof', depth + 1, s.dirs, st, funcs).dirs;
   }
-  if (!SHELL_PROGRAM.test(base)) return;
+  if (base === 'trap') {
+    let j = idx + 1;
+    if (s.words[j]?.text === '--') j++;
+    const action = s.words[j];
+    if (action && !action.text.startsWith('-') && j + 1 < s.words.length) {
+      lexShellList(action.text, 0, 'eof', depth + 1, dirUnion(s.dirs, UNKNOWN_DIRS), st, funcs);
+    }
+    return null;
+  }
+  if (!SHELL_PROGRAM.test(base)) return null;
   for (let j = idx + 1; j < s.words.length; j++) {
     const a = s.words[j]!.text;
     if (SHELL_INLINE_C.test(a)) {
       const prog = s.words[j + 1];
-      if (prog) lexShellList(prog.text, 0, false, depth + 1, s.dir, st);
-      return;
+      if (prog) lexShellList(prog.text, 0, 'eof', depth + 1, s.dirs, st, exportedOnly(funcs, exported));
+      return null;
     }
     if (SHELL_VALUE_OPTION.test(a)) { j++; continue; }
-    if (!a.startsWith('-') && !a.startsWith('+')) return;
+    if (!a.startsWith('-') && !a.startsWith('+')) return null;
   }
+  return null;
 }
 
-/** The directory later statements of this list resolve under, after `s`. */
-function shellDirAfter(s: ExecutedStatement, dir: string | null, sepBefore: string, sepAfter: string): string | null {
-  const idx = shellProgramWalk(s.words);
-  if (idx >= s.words.length) return dir;
-  const word = s.words[idx]!.text;
-  if (word === 'pushd' || word === 'popd') return null;
-  if (word !== 'cd') return dir;
-  // A pipeline member or a background job is a subshell: no effect here.
-  if (sepBefore === '|' || sepAfter === '|' || sepAfter === '&') return dir;
-  if (sepAfter === '||') return null; // later statements may run in either
-  let dest: ShellWord | undefined;
-  for (let j = idx + 1; j < s.words.length; j++) {
-    const a = s.words[j]!;
-    if (a.text === '--') { dest = s.words[j + 1]; break; }
-    if (/^-[LPe@]+$/.test(a.text)) continue;
-    dest = a;
+/** The literal destination of `cd [-L|-P|-e|-@]… [--] DEST`: `'~'` when there
+ *  is none, `null` when the shell computes it or it cannot be named here
+ *  (`cd -` is OLDPWD, `cd ~user` another user's home). */
+function cdDestination(args: readonly ShellWord[]): string | null {
+  let k = 0;
+  while (k < args.length) {
+    const a = args[k]!.text;
+    if (a === '--') { k++; break; }
+    if (/^-[LPe@]+$/.test(a)) { k++; continue; }
     break;
   }
+  const dest = args[k];
   if (!dest) return '~';
-  if (!dest.literal || dest.text === '-' || !dest.text) return null;
-  if (dest.text.startsWith('/') || dest.text === '~' || dest.text.startsWith('~/')) return dest.text;
-  if (dir === null) return null;
-  return dir ? `${dir}/${dest.text}` : dest.text;
+  if (!dest.literal || !dest.text || dest.text === '-') return null;
+  if (dest.text.startsWith('~') && dest.text !== '~' && !dest.text.startsWith('~/')) return null;
+  return dest.text;
 }
 
-/** A relative word re-anchored under a statement's `cd` prefix; `null` when
- *  that prefix is unknowable. */
-function underShellDir(token: string, dir: string | null): string | null {
-  if (token.startsWith('/') || token === '~' || token.startsWith('~/')) return token;
-  if (dir === null) return null;
-  return dir ? `${dir}/${token}` : token;
+function changeTo(dest: string | null, x: DirSet, cdpath: boolean, inLoop: boolean): DirEffect {
+  let succ = dirsAfterChange(x, dest);
+  // CDPATH may send a relative `cd sub` elsewhere; a loop may repeat it.
+  if (dest !== null && !isRootedWord(dest) && ((cdpath && !/^\.\.?(?:\/|$)/.test(dest)) || inLoop)) {
+    succ = dirUnion(succ, UNKNOWN_DIRS);
+  }
+  return { kind: 'change', succ };
+}
+
+/**
+ * How statement `s`, run in directories `x`, moves THIS shell's directory.
+ * Only `cd` / `pushd` / `popd` reached directly or through an in-shell
+ * wrapper (`command`, `builtin`, `time`) move it; through a child-only
+ * wrapper (`timeout 1 cd /tmp`, `sudo cd`, `env cd`, `nohup cd`) or by path
+ * the `cd` runs in a child and cannot (review r2 B1). `source` / `.` and a
+ * computed command word may do anything: `unknown` joins the set.
+ */
+function statementDirEffect(
+  s: ExecutedStatement,
+  x: DirSet,
+  stack: DirSet[],
+  cdpath: boolean,
+  inLoop: boolean,
+): DirEffect {
+  const words = s.words;
+  let i = 0;
+  while (i < words.length) {
+    const w = words[i]!;
+    if (SHELL_ASSIGNMENT.test(w.text)) { i++; continue; }
+    if (w.bare && (SHELL_KEYWORD.test(w.text) || LEADING_RESERVED_WORD.test(w.text))) { i++; continue; }
+    if (w.literal && IN_SHELL_WRAPPER.test(w.text)) {
+      const isCommand = w.text === 'command';
+      i++;
+      while (i < words.length && words[i]!.text.startsWith('-')) {
+        if (isCommand && /[vV]/.test(words[i]!.text)) return NO_DIR_EFFECT; // reports, runs nothing
+        i++;
+      }
+      continue;
+    }
+    break;
+  }
+  const w = words[i];
+  if (w === undefined) return NO_DIR_EFFECT;
+  if (!w.literal) return w.text.includes('/') ? NO_DIR_EFFECT : { kind: 'set', dirs: dirUnion(x, UNKNOWN_DIRS) };
+  if (w.text.includes('/') || EXEC_WRAPPER.test(w.text)) return NO_DIR_EFFECT; // a child process
+  const args = words.slice(i + 1);
+  switch (w.text) {
+    case 'cd':
+      return changeTo(cdDestination(args), x, cdpath, inLoop);
+    case 'pushd': {
+      let k = 0;
+      while (k < args.length && args[k]!.text.startsWith('-') && !/^-\d+$/.test(args[k]!.text)) {
+        if (args[k]!.text === '-n') { stack.push(UNKNOWN_DIRS); return NO_DIR_EFFECT; }
+        if (args[k]!.text === '--') { k++; break; }
+        k++;
+      }
+      const dest = args[k];
+      stack.push(x);
+      if (!dest || /^[+-]\d+$/.test(dest.text)) return { kind: 'change', succ: UNKNOWN_DIRS };
+      return changeTo(cdDestination([dest]), x, cdpath, inLoop);
+    }
+    case 'popd': {
+      if (args.some(a => a.text === '-n')) return NO_DIR_EFFECT;
+      const top = stack.pop();
+      if (top === undefined || args.some(a => /^[+-]\d+$/.test(a.text))) return { kind: 'change', succ: UNKNOWN_DIRS };
+      return { kind: 'change', succ: inLoop ? dirUnion(top, UNKNOWN_DIRS) : top };
+    }
+    case 'source':
+    case '.':
+      return { kind: 'set', dirs: dirUnion(x, UNKNOWN_DIRS) };
+    default:
+      return NO_DIR_EFFECT;
+  }
 }
 
 /**
@@ -7712,10 +8264,12 @@ function underShellDir(token: string, dir: string | null): string | null {
  * the CALLER (hook / interceptor) publishes them through the fs store,
  * preserving this module's purity, exactly as the injected
  * `resolveScriptSource` split does. Compile capture reads the EXECUTED
- * statements only: a compiler named in a commit message, an echo or a quoted
- * heredoc mints no record (a mention-minted compile record could make a later
- * floor case ambiguous). An empty `token` is an output whose directory a `cd`
- * made unknowable: `canonicalTarget` refuses it, so the store publishes an
+ * statements only: a compiler named in a commit message, an echo, a quoted
+ * heredoc or an uninvoked function body mints no record (a mention-minted
+ * compile record could make a later floor case ambiguous). The output is
+ * recorded under EVERY directory the compiler could have run in — the same
+ * rule the query side applies — and an empty `token` is a directory that
+ * cannot be named: `canonicalTarget` refuses it, so the store publishes an
  * `unresolved.*` record (history incomplete, never a guessed path).
  */
 export function nativeArtifactCaptures(
@@ -7731,6 +8285,12 @@ export function nativeArtifactCaptures(
   // A recognised compiler with a literal, resolvable `-o` output -> compiled-output.
   const command = deobfuscateIfs(extractCommand(args));
   if (command) {
+    const seen = new Set<string>();
+    const push = (token: string): void => {
+      if (seen.has(token)) return;
+      seen.add(token);
+      out.push({ token, kind: 'compiled-output' });
+    };
     for (const s of executedStatements(command).statements) {
       const i = shellProgramWalk(s.words);
       if (i >= s.words.length) continue;
@@ -7739,16 +8299,30 @@ export function nativeArtifactCaptures(
         const t = s.words[j]!;
         let operand: ShellWord | undefined;
         if (t.text === '-o') { operand = s.words[j + 1]; j++; }
-        else if (t.text.startsWith('-o') && t.text.length > 2) operand = { text: t.text.slice(2), literal: t.literal };
+        else if (t.text.startsWith('-o') && t.text.length > 2) operand = { text: t.text.slice(2), literal: t.literal, bare: false };
         if (!operand || !operand.literal || !operand.text || operand.text.startsWith('-')) continue;
-        out.push({ token: underShellDir(operand.text, s.dir) ?? '', kind: 'compiled-output' });
+        const r = underShellDirs(operand.text, s.dirs);
+        for (const token of r.tokens) push(token);
+        if (r.unresolved) push('');
       }
     }
   }
   return out;
 }
 
-const LOADER_ENV_RE = /^(?:LD_PRELOAD|DYLD_INSERT_LIBRARIES)=(.+)$/;
+const LOADER_ENV_RE = /^(LD_PRELOAD|DYLD_INSERT_LIBRARIES)(\+?)=([\s\S]*)$/;
+
+/** Command words a shell runs IN ITSELF: a preload variable in front of one
+ *  loads nothing (`LD_PRELOAD=./x.so echo hi`, review r2 N3). Reached by path
+ *  (`/bin/echo`) or through a child-only wrapper they are external programs. */
+const SHELL_BUILTIN_NO_EXEC = new Set([
+  'echo', 'printf', 'cd', 'pushd', 'popd', 'dirs', 'true', 'false', ':', 'test', '[', '[[',
+  'export', 'declare', 'typeset', 'local', 'readonly', 'set', 'unset', 'shift', 'read',
+  'alias', 'unalias', 'hash', 'type', 'umask', 'ulimit', 'wait', 'jobs', 'fg', 'bg', 'let',
+  'return', 'exit', 'break', 'continue', 'getopts', 'trap', 'shopt', 'history', 'times',
+  'enable', 'help', 'logout', 'mapfile', 'readarray', 'caller', 'compgen', 'complete',
+  'compopt', 'disown', 'suspend', 'kill', 'builtin', 'eval',
+]);
 
 type NativeTarget = { token: string; via: 'exec' | 'load' };
 
@@ -7756,44 +8330,109 @@ type NativeTarget = { token: string; via: 'exec' | 'load' };
  *  containing `/` (`./x`, `bin/x`, `node_modules/.bin/x`, `/usr/bin/x`,
  *  `~/x` — design §5 "a token containing `/` or starting `~/`"). A bare name is
  *  a PATH lookup and is not resolved in PR 1 (§10 residual). */
-function isNativePathWord(w: ShellWord): boolean {
+function isNativePathWord(w: { text: string; literal: boolean }): boolean {
   return w.literal && w.text.includes('/') && !w.text.startsWith('-') && !/^\/dev\//.test(w.text);
 }
 
-/** Exec/load targets of the EXECUTED statements: every addressed executable
- *  with a path (row A — wrappers and interpreters included, review r1 B1), and
- *  every `LD_PRELOAD`/`DYLD_INSERT_LIBRARIES` path in a leading or wrapper
- *  assignment or an `export` (row C). Every spelling of a path goes through
- *  the same `canonicalTarget` (review r1 B2). */
-function nativeExecTargets(command: string): { targets: NativeTarget[]; truncated: boolean } {
+const loaderLibs = (value: string): string[] =>
+  value.split(/[:\s]+/).filter(lib => lib && isNativePathWord({ text: lib, literal: true }));
+
+/**
+ * Exec/load targets of the EXECUTED statements: every addressed executable
+ * with a path (row A — wrappers and interpreters included, review r1 B1), and
+ * every preload library an EXTERNAL program of this call starts with (row C).
+ * A preload reaches a program three ways: a leading or wrapper assignment on
+ * that program's own statement; an `export` / `declare -x` / `typeset -x` /
+ * `local -x` (or `set -a`) earlier in the call; or `export NAME` of an earlier
+ * assignment. An assignment alone, `export -n`, `declare +x` and a builtin
+ * command load nothing (review r2 N3). A relative library resolves where the
+ * PROGRAM runs, so it is resolved under that statement's directories. Every
+ * spelling of a path goes through the same `canonicalTarget` (review r1 B2).
+ * `unresolved` is set when a relative target's directory cannot be named.
+ */
+function nativeExecTargets(command: string): { targets: NativeTarget[]; truncated: boolean; unresolved: boolean } {
   const { statements, truncated } = executedStatements(command);
   const out: NativeTarget[] = [];
   const seen = new Set<string>();
-  const add = (text: string, via: NativeTarget['via'], dir: string | null): void => {
-    const token = underShellDir(text, dir);
-    if (token === null || seen.has(`${via}\0${token}`)) return;
-    seen.add(`${via}\0${token}`);
-    out.push({ token, via });
-  };
-  const addLoader = (w: ShellWord, dir: string | null): void => {
-    const m = LOADER_ENV_RE.exec(w.text);
-    if (!m || !w.literal) return;
-    for (const lib of m[1]!.split(/[:\s]+/)) {
-      if (lib && isNativePathWord({ text: lib, literal: true })) add(lib, 'load', dir);
+  let unresolved = false;
+  const add = (text: string, via: NativeTarget['via'], dirs: DirSet): void => {
+    const r = underShellDirs(text, dirs);
+    if (r.unresolved) unresolved = true;
+    for (const token of r.tokens) {
+      if (seen.has(`${via}\0${token}`)) continue;
+      seen.add(`${via}\0${token}`);
+      out.push({ token, via });
     }
   };
+  const shellVars = new Map<string, string[]>(); // assigned, not exported
+  const exported = new Map<string, string[]>();  // in every later program's env
+  let allExport = false;
   for (const s of statements) {
+    const own: string[] = [];
+    let external = false;
     const idx = shellProgramWalk(
       s.words,
-      (w) => { if (isNativePathWord(w)) add(w.text, 'exec', s.dir); },
-      (w) => addLoader(w, s.dir),
+      (w) => { if (isNativePathWord(w)) add(w.text, 'exec', s.dirs); },
+      (w) => {
+        const m = LOADER_ENV_RE.exec(w.text);
+        if (m && w.literal) own.push(...loaderLibs(m[3]!));
+      },
+      (w) => { if (!IN_SHELL_WRAPPER.test(w.text)) external = true; },
     );
-    // `export LD_PRELOAD=…` preloads into every later command of this shell.
-    if (idx < s.words.length && /^(?:export|declare|typeset)$/.test(s.words[idx]!.text)) {
-      for (const w of s.words.slice(idx + 1)) addLoader(w, s.dir);
+    const cmd = idx < s.words.length ? s.words[idx]! : undefined;
+    if (cmd === undefined) {
+      // Assignment only: a shell variable, exported only under `set -a`.
+      for (const w of s.words) {
+        const m = LOADER_ENV_RE.exec(w.text);
+        if (!m || !w.literal) continue;
+        const libs = loaderLibs(m[3]!);
+        const prev = m[2] ? (allExport ? exported.get(m[1]!) : shellVars.get(m[1]!)) ?? [] : [];
+        if (allExport) exported.set(m[1]!, [...prev, ...libs]);
+        else shellVars.set(m[1]!, [...prev, ...libs]);
+      }
+      continue;
     }
+    const name = cmd.text;
+    const runsExternal = external || s.fn === true || !cmd.literal || name.includes('/') || !SHELL_BUILTIN_NO_EXEC.has(name);
+    if (!external && cmd.literal && /^(?:export|declare|typeset|local|readonly)$/.test(name)) {
+      const flags = s.words.slice(idx + 1).filter(w => /^[-+][A-Za-z]+$/.test(w.text)).map(w => w.text);
+      const exporting = name === 'export'
+        ? !flags.some(f => f.startsWith('-') && f.includes('n'))
+        : flags.some(f => f.startsWith('-') && f.includes('x')) || allExport;
+      const unexporting = (name === 'export' && flags.some(f => f.startsWith('-') && f.includes('n')))
+        || flags.some(f => f.startsWith('+') && f.includes('x'));
+      const functionsOnly = flags.some(f => f.startsWith('-') && f.includes('f'));
+      if (!functionsOnly) {
+        for (const w of s.words.slice(idx + 1)) {
+          if (/^[-+][A-Za-z]+$/.test(w.text)) continue;
+          const m = LOADER_ENV_RE.exec(w.text);
+          const varName = m ? m[1]! : /^(?:LD_PRELOAD|DYLD_INSERT_LIBRARIES)$/.test(w.text) ? w.text : null;
+          if (varName === null) continue;
+          const libs = m && w.literal ? loaderLibs(m[3]!) : null;
+          if (unexporting) {
+            exported.delete(varName);
+            if (libs) shellVars.set(varName, libs);
+          } else if (exporting) {
+            exported.set(varName, libs ?? shellVars.get(varName) ?? []);
+          } else if (libs) {
+            shellVars.set(varName, libs);
+          }
+        }
+      }
+    } else if (!external && cmd.literal && name === 'unset') {
+      for (const w of s.words.slice(idx + 1)) { exported.delete(w.text); shellVars.delete(w.text); }
+    } else if (!external && cmd.literal && name === 'set') {
+      for (let k = idx + 1; k < s.words.length; k++) {
+        const a = s.words[k]!.text;
+        if (/^-[A-Za-z]*a/.test(a) || (a === '-o' && s.words[k + 1]?.text === 'allexport')) allExport = true;
+        if (/^\+[A-Za-z]*a/.test(a) || (a === '+o' && s.words[k + 1]?.text === 'allexport')) allExport = false;
+      }
+    }
+    if (!runsExternal) continue;
+    for (const lib of own) add(lib, 'load', s.dirs);
+    for (const libs of exported.values()) for (const lib of libs) add(lib, 'load', s.dirs);
   }
-  return { targets: out, truncated };
+  return { targets: out, truncated, unresolved };
 }
 
 /** Shapes that map written/just-generated bytes as executable memory (row D).
@@ -7809,34 +8448,177 @@ const MAP_EXEC_MEMORY_RE: RegExp[] = [
   /\bcffi\b[\s\S]{0,240}?\bcallback\b/i,
 ];
 
-/** Primitives that turn a STRING into code without shelling out, beyond
- *  `SHELL_OUT_SINK`'s eval/exec family: in a region holding one, a literal may
- *  itself be the mapping, so row D keeps every byte. */
-const ROW_D_DYNAMIC_CODE = /\beval\b|\bexec\b|\bvm\b|\bFunction\s*\(|\bcompile\s*\(|\bexecfile\b|\brunpy\b|\bimportlib\b|\bimport\s*\(|\b(?:setTimeout|setInterval)\s*\(\s*['"`]/;
+/** Calls that turn a STRING ARGUMENT into code or a shell command. Their
+ *  literal arguments are code, never data; a NON-literal first argument means
+ *  a string from anywhere in the region may be the program (the whole region's
+ *  literals are kept — data flow is not traced). Matched against the CODE view
+ *  only, so the same word inside a string or comment is nothing (review r2 N1). */
+const ROW_D_CODE_CALL = /(?<![\w$.])(?:eval|exec|execfile|compile|Function|system|popen|Popen|check_call|check_output|getoutput|getstatusoutput|execSync|execFileSync|spawnSync|execFile|spawn|shell_exec|passthru|proc_open|runInThisContext|runInNewContext|runInContext|compileFunction)\s*\(|\b(?:os\.(?:system|popen|exec\w*|spawn\w*|posix_spawnp?)|subprocess\.\w+|pty\.\w+|commands\.\w+|vm\.\w+|builtins\.(?:eval|exec|compile)|\w+\.(?:execSync|execFileSync|spawnSync|execFile|spawn))\s*\(|\bnew\s+(?:Function|vm\.Script|Script)\s*\(/g;
+/** Calls whose LITERAL argument may be code (`import('data:…')`, a
+ *  `setTimeout('…')` string, `getattr(mmap, 'PROT_EXEC')`) but whose
+ *  non-literal argument is ordinarily a module, a function or a name: only
+ *  their literal arguments are kept, and nothing is escalated. An ordinary
+ *  `import("node:path")` therefore keeps `node:path` and nothing else. */
+const ROW_D_LITERAL_CALL = /(?<![\w$.])(?:import|__import__|getattr|setTimeout|setInterval)\s*\(|\b(?:importlib\.import_module|runpy\.run_\w+)\s*\(/g;
+/** Ruby / Perl / PHP evaluate strings without parentheses (`eval $code`). */
+const ROW_D_BARE_EVAL = /(?<![\w$.])(?:\w+_)?eval\b|\bcreate_function\b|\bassert\s*\(/;
+/** A Python string prefix in front of its quote (`f"…"`, `rb'…'`). */
+const PY_STRING_PREFIX = /[rRbBuUfFtT]/;
 
 /**
- * #907 row D (review r1 B4) — the bytes of an interpreter region that can
- * PERFORM an operation. Row D needs an executable-memory OPERATION, not its
- * vocabulary: `print('mmap PROT_EXEC')` maps nothing. So comment and
- * string-literal contents (`scriptDataRanges`, the lexer the span classifier
- * already uses) are blanked, length-preserving. Fail-closed exception: a
- * region that can hand a string to a shell or an evaluator (`hasSink`, or a
- * dynamic-code primitive above) keeps every byte, because there a literal can
- * be the very program that maps memory.
+ * Inside one string literal's CONTENT `[lo, hi)`: the spans the language
+ * EXECUTES — a Python f-/t-string's `{…}`, a JS template literal's `${…}`, a
+ * Ruby double-quoted `#{…}` (review r2 N2). `'code'` when the whole literal is
+ * code: a JS tagged template (zx's `$\`…\`` runs a shell) or a Perl/PHP
+ * double-quoted string with an expression interpolation.
+ */
+function interpolationSpans(text: string, lo: number, hi: number, region: ScanRegion): Array<[number, number]> | 'code' {
+  const lang = region.lang;
+  const triple = lo - region.start >= 3 && (text.startsWith('"""', lo - 3) || text.startsWith("'''", lo - 3));
+  const quoteAt = lo - (triple ? 3 : 1);
+  const quote = text[quoteAt];
+  let opener: string | null = null;
+  if (lang === 'python') {
+    let p = quoteAt - 1;
+    while (p >= region.start && quoteAt - p <= 2 && PY_STRING_PREFIX.test(text[p]!)) p--;
+    const prefix = text.slice(p + 1, quoteAt);
+    if (/[fFtT]/.test(prefix) && (p < region.start || !/[\w$]/.test(text[p]!))) opener = '{';
+  } else if (lang === 'node' && quote === '`') {
+    let p = quoteAt - 1;
+    while (p >= region.start && /\s/.test(text[p]!)) p--;
+    if (p >= region.start && /[\w$)\]]/.test(text[p]!)) return 'code'; // a tagged template
+    opener = '${';
+  } else if (lang === 'ruby' && quote === '"') {
+    opener = '#{';
+  } else if ((lang === 'perl' || lang === 'php') && quote === '"') {
+    const body = text.slice(lo, hi);
+    return body.includes('@{[') || body.includes('${\\') || body.includes('{$') ? 'code' : [];
+  }
+  if (opener === null) return [];
+  const spans: Array<[number, number]> = [];
+  for (let i = lo; i < hi; i++) {
+    const c = text[i];
+    if (c === '\\' && lang !== 'python') { i++; continue; }
+    if (opener === '{' && c === '{' && text[i + 1] === '{') { i++; continue; } // `{{` is a literal brace
+    if (!text.startsWith(opener, i)) continue;
+    let depth = 0;
+    let j = i + opener.length - 1;
+    for (; j < hi; j++) {
+      if (text[j] === '{') depth++;
+      else if (text[j] === '}' && --depth === 0) break;
+    }
+    spans.push([i, Math.min(j + 1, hi)]);
+    i = j;
+  }
+  return spans;
+}
+
+/** `(` at `open` in the code view: the index of its matching `)` (or `end`). */
+function matchingParen(code: string, open: number, end: number): number {
+  let depth = 0;
+  for (let i = open; i < end; i++) {
+    const c = code[i];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if ((c === ')' || c === ']' || c === '}') && --depth === 0) return i;
+  }
+  return end;
+}
+
+/** The end of the first top-level argument of the list opened at `open`. */
+function firstArgumentEnd(code: string, open: number, close: number): number {
+  let depth = 0;
+  for (let i = open + 1; i < close; i++) {
+    const c = code[i];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (c === ',' && depth === 0) return i;
+  }
+  return close;
+}
+
+/**
+ * #907 row D (review r1 B4, r2 N1/N2) — the bytes of an interpreter region
+ * that can PERFORM an operation. Row D needs an executable-memory OPERATION,
+ * not its vocabulary: `print('mmap PROT_EXEC')` maps nothing. So comment and
+ * INERT string-literal text (`scriptDataRanges`, the lexer the span
+ * classifier already uses) is blanked, length-preserving, while every span
+ * the language executes stays code:
+ *   - interpolations (`f"{…}"`, `` `${…}` ``, `"#{…}"`) and tagged templates;
+ *   - the literal arguments of a call that turns a string into code or a
+ *     shell command (`exec('…')`, `eval('…')`, `subprocess.run('…')`,
+ *     `import('data:…')`, `getattr(m, '…')`);
+ *   - EVERY literal, when such a string-to-code call takes a non-literal
+ *     first argument (`exec(src)`): data flow is not traced, so a literal
+ *     anywhere may be that program. Comments stay blank — nothing reads them.
+ * Which calls exist is decided on the code view only: `eval` inside a printed
+ * string, or an ordinary `import("node:path")`, reactivates nothing.
  */
 function rowDProgramText(text: string, region: ScanRegion): string {
-  const slice = text.slice(region.start, region.end);
-  if (region.lang === 'sh' || region.hasSink || ROW_D_DYNAMIC_CODE.test(slice)) return slice;
-  const parts: string[] = [];
-  let cursor = region.start;
-  for (const { range: [lo, hi] } of scriptDataRanges(text, region)) {
-    if (lo < cursor) continue;
-    parts.push(text.slice(cursor, lo), blankedRun(text, lo, hi));
-    cursor = hi;
+  if (region.lang === 'sh') return '';
+  const inert: Array<{ lo: number; hi: number; literal: boolean }> = [];
+  for (const { range: [lo, hi], comment } of scriptDataRanges(text, region)) {
+    if (comment) { inert.push({ lo, hi, literal: false }); continue; }
+    const spans = interpolationSpans(text, lo, hi, region);
+    if (spans === 'code') continue;
+    let at = lo;
+    for (const [a, b] of spans) { if (a > at) inert.push({ lo: at, hi: a, literal: true }); at = b; }
+    if (hi > at) inert.push({ lo: at, hi, literal: true });
   }
-  if (cursor === region.start) return slice;
-  parts.push(text.slice(cursor, region.end));
-  return parts.join('');
+  const blankExcept = (keep: (r: { lo: number; hi: number; literal: boolean }, k: number) => boolean): string => {
+    const parts: string[] = [];
+    let cursor = region.start;
+    for (let k = 0; k < inert.length; k++) {
+      const r = inert[k]!;
+      if (r.lo < cursor || keep(r, k)) continue;
+      parts.push(text.slice(cursor, r.lo), blankedRun(text, r.lo, r.hi));
+      cursor = r.hi;
+    }
+    parts.push(text.slice(cursor, region.end));
+    return parts.join('');
+  };
+  const code = blankExcept(() => false);
+  if (region.lang !== 'python' && region.lang !== 'node' && ROW_D_BARE_EVAL.test(code)) {
+    return blankExcept(r => r.literal);
+  }
+  const kept = new Set<number>();
+  // Literal ranges inside the argument list `(open, close]` of the code view.
+  // `inert` is in source order: binary-search the first, walk to the last.
+  const keepArgs = (open: number, close: number): void => {
+    const from = region.start + open;
+    let lo = 0;
+    let hi = inert.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (inert[mid]!.lo <= from) lo = mid + 1; else hi = mid; }
+    for (let k = lo; k < inert.length && inert[k]!.hi - region.start <= close; k++) {
+      if (inert[k]!.literal) kept.add(k);
+    }
+  };
+  for (const m of code.matchAll(ROW_D_CODE_CALL)) {
+    const open = m.index! + m[0].length - 1;
+    const close = matchingParen(code, open, code.length);
+    keepArgs(open, close);
+    // The program operand: every argument of `Function(…)`, else the first.
+    const operandEnd = /Function\s*\($/.test(m[0]) ? close : firstArgumentEnd(code, open, close);
+    const operand = code.slice(open + 1, operandEnd).replace(/(?<![\w$])[rRbBuU]{1,2}(?=["'])/g, '');
+    if (/[A-Za-z_$]/.test(operand)) return blankExcept(r => r.literal);
+  }
+  for (const m of code.matchAll(ROW_D_LITERAL_CALL)) {
+    const open = m.index! + m[0].length - 1;
+    keepArgs(open, matchingParen(code, open, code.length));
+  }
+  return kept.size === 0 ? code : blankExcept((_r, k) => kept.has(k));
+}
+
+/** The row-D bodies of one inspected region. A SHELL region (a folded `.sh`
+ *  file) has no executable-memory primitive of its own: its bodies are the
+ *  interpreter programs it RUNS — inline `-c` / `-e` programs and
+ *  interpreter heredocs — exactly what the inline plane inspects on the
+ *  command line. Printing the words (`echo mmap PROT_EXEC`) is not one. */
+function rowDProgramBodies(text: string, region: ScanRegion, depth = 0): string[] {
+  if (region.lang !== 'sh') return [rowDProgramText(text, region)];
+  if (depth >= 4) return [];
+  const slice = text.slice(region.start, region.end);
+  return [...interpreterHeredocRegions(slice), ...inlineProgramRegions(slice)]
+    .flatMap(r => rowDProgramBodies(slice, r, depth + 1));
 }
 
 function mapExecAgentWrittenMemory(bodies: readonly string[]): boolean {
@@ -7879,11 +8661,14 @@ function classifyLedgerNativeExec(
   const view: AgentArtifactView = isArtifactView(supplied) ? supplied : incompleteArtifactView();
   const command = deobfuscateIfs(extractCommand(args));
   if (!command) return null;
-  const { targets, truncated } = nativeExecTargets(command);
-  // The lexer stopped at its nesting bound: part of the command was not read,
-  // so an exec in it cannot be ruled out. Hold, never allow unread.
-  if (truncated) return nativeDoorVerdict();
-  if (targets.length === 0) return null;
+  const { targets, truncated, unresolved } = nativeExecTargets(command);
+  // The lexer stopped at its nesting bound, or a relative exec/load word runs
+  // in a directory the lexer cannot name (review r2 B1): an exec of an
+  // agent-produced image cannot be ruled out. That is the door — never a
+  // silent allow, never a fabricated deny. A floor on a target that WAS
+  // resolved still wins (DENY > HOLD).
+  const uncertain = truncated || unresolved;
+  if (targets.length === 0) return uncertain ? nativeDoorVerdict() : null;
 
   // Resolve + stat + header for EVERY target before the single re-list.
   const resolved: Array<{
@@ -7904,12 +8689,12 @@ function classifyLedgerNativeExec(
       installRoot: isInstalledBinaryPath(canon),
     });
   }
-  if (resolved.length === 0) return null;
+  if (resolved.length === 0) return uncertain ? nativeDoorVerdict() : null;
   // Observation boundary (section 3.1 item 5): ONE re-list, after all stat/header.
   const relistNames = typeof view.relist === 'function' ? view.relist() : null;
 
   let floor: 'exec' | 'load' | null = null;
-  let door = false;
+  let door = uncertain;
   let audit = false;
   for (const r of resolved) {
     const complete = completeHistoryForPath(view, r.hash, relistNames);
@@ -8388,10 +9173,10 @@ function evaluateToolCallCore(
   // decidable from the body the plane inspects (§6): the folded script bodies
   // and inline/heredoc program regions, never arbitrary shell mentions, and
   // within them the OPERATIONS only — string and comment text is blanked
-  // unless the region can turn a string into code (`rowDProgramText`). Needs
+  // unless the language executes it (`rowDProgramText`). Needs
   // no ledger; a floor DENY at the catastrophic, doorless tier.
   if (scriptRegions.length > 0
-      && mapExecAgentWrittenMemory(scriptRegions.map(r => rowDProgramText(scanSurface, r)))) {
+      && mapExecAgentWrittenMemory(scriptRegions.flatMap(r => rowDProgramBodies(scanSurface, r)))) {
     return withReview(verdict('block', 'catastrophic', family, ACTION_BY_FAMILY[family],
       buildReason('blocked mapping of agent-written bytes as executable memory', [NATIVE_EXEC_UMBRELLA, SIG_MAP_EXEC_MEM]),
       [NATIVE_EXEC_UMBRELLA, SIG_MAP_EXEC_MEM, ...opaqueSignals]));
