@@ -13,13 +13,13 @@
 
 **Trusted task: let it work. Hijack: a plain-English card. Catastrophe: a hard stop.**
 
-ShieldCortex scans what an AI agent writes to memory and, once turned on, gates the tools it calls. It does not replace OpenClaw, Hermes, or Claude memory.
+ShieldCortex scans memory writes that go through it and, once turned on, gates the tools an agent calls on Claude Code, OpenClaw and Hermes. Codex, Cursor, VS Code and other MCP hosts get a memory scanner the model may call, not a gate. It does not replace OpenClaw, Hermes, or Claude memory.
 
 ## What it does
 
-- **Tool gate.** On Claude Code, OpenClaw and Hermes, once Action Guard is on (it stays off until you turn it on; the Hermes plugin has its own setting), a trusted task runs, a suspicious call gets a plain-English card and is held for your approval, and a catastrophic command is a hard stop. When nobody is at a prompt, the denial or held request sent to your Action Guard webhook carries that card (5.18+). [Policy lock](docs/UPDATING.md#policy-lock), [What's new in 5.18](docs/UPDATING.md#whats-new-in-518).
+- **Tool gate.** On Claude Code and OpenClaw, once Action Guard is on (it stays off until you turn it on), a trusted task runs, a suspicious call gets a plain-English card and is held for your approval, and a catastrophic command is a hard stop. When nobody is at a prompt, the denial or held request sent to your Action Guard webhook carries that card (5.18+). Hermes gates tool calls once you enable its plugin, which has its own setting; Hermes has no approval prompt, so a call Action Guard would hold is blocked while enforcing. [Hermes plugin](plugins/hermes/shieldcortex/README.md), [Policy lock](docs/UPDATING.md#policy-lock), [What's new in 5.18](docs/UPDATING.md#whats-new-in-518).
 - **Memory firewall.** Writes that go through ShieldCortex are scanned before they stick: recognised injection and leaked credentials are quarantined or blocked. [How scan results work](docs/SCAN.md).
-- **Reports changes.** At each fresh Claude Code startup, the agent config watch checks the hooks and MCP servers in Claude Code, OpenClaw, Cursor, Codex and Gemini CLI configs, and the MCP tool-description check compares your MCP servers' tool descriptions with the last check; both notify your Action Guard webhook. They detect and report; the config watch does not block, and it is not live. [Limits](docs/security/agent-config-watch.md), [What's new in 5.17](docs/UPDATING.md#whats-new-in-517), [What's new in 5.14](docs/UPDATING.md#whats-new-in-514).
+- **Reports changes.** At each fresh Claude Code startup, the agent config watch checks the hooks and MCP servers in Claude Code, OpenClaw, Cursor, Codex and Gemini CLI configs. At each Claude Code session start, the MCP tool-description check compares the tool descriptions of the local MCP servers in your user-level configs with the last check, at most once per 6 hours per server unless its launch config changed. Both send one message to your Action Guard webhook when one is set. They detect and report; they do not block, and the config watch is not live. [Limits](docs/security/agent-config-watch.md), [What's new in 5.17](docs/UPDATING.md#whats-new-in-517), [What's new in 5.14](docs/UPDATING.md#whats-new-in-514).
 
 ## What a catch looks like
 
@@ -57,7 +57,7 @@ shieldcortex setup
 shieldcortex doctor
 ```
 
-Details: [Updating](docs/UPDATING.md#updating), [Storage maintenance](docs/UPDATING.md#storage-maintenance), [What postinstall does](docs/openclaw-integration.md#install-time-refresh-postinstall), [Offline embedding cache](docs/offline-embeddings.md).
+`setup` asks before wiring each host and can change Claude Code and OpenClaw config files, and may restart the OpenClaw gateway: [what setup writes](#setup-details). Details: [Updating](docs/UPDATING.md#updating), [Storage maintenance](docs/UPDATING.md#storage-maintenance), [What postinstall does](docs/openclaw-integration.md#install-time-refresh-postinstall), [Offline embedding cache](docs/offline-embeddings.md).
 
 ## Where it can block
 
@@ -92,7 +92,7 @@ Webhook notifications for a headless denial or a held approval end with a `card`
 
 ## Also included
 
-- **Local dashboard.** `shieldcortex dashboard` is a local view: Home, Needs you, Memory, Protection, Settings. [What it needs](docs/UPDATING.md#dashboard-recall-and-cloud).
+- **Local dashboard.** `shieldcortex dashboard` is a local view: Home, Needs you, Memory, Protection, Settings. It is not an approval inbox: held actions are still answered in Telegram or OpenClaw. [What it needs](docs/UPDATING.md#dashboard-recall-and-cloud), [details](#setup-details).
 - **Security audit.** `shieldcortex audit` scans an AI agent's environment and prints a graded report; `--sarif` writes SARIF 2.1.0.
 - **Skill and instruction-file scanner.** `shieldcortex scan-skill <file>` scans one file; `scan-skills` discovers all instruction files.
 - **Doctor.** `shieldcortex doctor` prints the host table, `memory + tool gate` or memory only, not a gate, per host, and will not print "protected" for a host that cannot deny. [Doctor and the host table](docs/UPDATING.md#doctor-and-the-host-table).
@@ -120,6 +120,7 @@ Free cloud: 500 scans/month, 7-day retention, 1 member. Enterprise (fleets, SSO,
 - [Contributing](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CONTRIBUTING.md)
 - Licence: MIT. Every local feature is free.
 
+<a id="setup-details"></a>
 <details><summary>Setup, dashboard and recall details</summary>
 
 `setup` is the onboarding command: it prints one host table and asks before wiring each host. `shieldcortex setup claude` skips the table and runs the Claude Code install without asking. That install can write `~/.claude/CLAUDE.md`, `~/.claude.json` and `~/.claude.json.bak-shieldcortex` if it replaces the file, `~/.claude/settings.json` and `~/.claude/settings.json.bak-shieldcortex` if it replaces the file, and `~/.claude/hooks/cortex-memory/` unless any detected hook root already has a cortex-memory directory. If that hook installer runs against a writable OpenClaw root, it can also copy the OpenClaw hook, install or register the realtime plugin, snapshot and rewrite `openclaw.json`, and may restart the gateway. Two older names still work. `quickstart` takes the same targets as `setup`'s guided path, without hook flags or `uninstall`. `install` is not the wizard: it runs that same Claude Code install as `setup claude`, and is kept for existing scripts and the `--without-*` hook opt-outs. Within 5.x, update with [`shieldcortex update`](docs/UPDATING.md#updating).
