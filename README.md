@@ -103,7 +103,7 @@ Each line links to the detail, the limits and the source file or changelog entry
 
 **See and audit**
 
-- **Security audit.** `shieldcortex audit` runs the memory-file, MCP config, environment-file, rules-file and dependency scanners in one pass, as terminal, JSON or SARIF output. [Detail](docs/CAPABILITIES.md#audit)
+- **Security audit.** `shieldcortex audit` runs the memory-file, MCP config, environment-file and rules-file scanners in one pass (add `--deps` for a fifth, dependency scan), as terminal, JSON or SARIF output. [Detail](docs/CAPABILITIES.md#audit)
 - **Doctor.** `shieldcortex doctor` checks the install and the configured Guard posture on each plane (Claude Code hook, OpenClaw plugin, Hermes self-report); it fails when the hook and plugin disagree or Hermes reports a looser posture. `guard posture` prints the same reading and changes nothing. [Doctor and the host table](docs/UPDATING.md#doctor-and-the-host-table)
 - **Chained audit ledger.** Audit rows form a tamper-evident chain you can verify with `ledger verify`, which exits 1 if the chain is inconsistent; `policy-evidence` reports each runtime's own posture self-report. [What the chain does and does not show](docs/CAPABILITIES.md#ledger-and-policy-evidence)
 - **Cortex mistake learning.** `cortex capture` records a mistake, `cortex preflight` checks a task against the record before you repeat it, and a rule can graduate once the record supports it. [Detail](docs/CAPABILITIES.md#cortex)
