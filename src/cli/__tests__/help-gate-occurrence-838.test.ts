@@ -72,6 +72,7 @@ const FIRST: Probe[] = [
     ['recalc', ['--backup-dir', '--db']],
   ].map(([verb, flags]) => ({ command: 'memories' as const, prefix: [verb as string], flags: flags as string[], read: firstFlag })),
   { command: 'guard', prefix: ['readiness'], flags: ['--surface'], read: inlineReader('src/cli/guard.ts', 'surfaceAt') },
+  ...[['--home', 'homeAt'], ['--agent-uid', 'agentUidAt'], ['--bridge-uid', 'bridgeUidAt']].map(([flag, idx]) => ({ command: 'guard' as const, prefix: ['approve-tap'], flags: [flag], read: inlineReader('src/cli/approve-tap.ts', idx) })),
   { command: 'protect', prefix: [], flags: ['--config'], read: (a) => parseProtectArgs(a).sourceConfig },
   { command: 'protect', prefix: [], flags: ['--agent-uid'], read: (a) => parseProtectArgs(a).agentUid },
   { command: 'remember', prefix: ['title'], flags: ['--content', '--category', '--importance', '--tags', '--project'], read: rememberFlag },

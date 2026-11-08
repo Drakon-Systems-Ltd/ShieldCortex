@@ -2287,6 +2287,12 @@ export function createInterceptor(
       taint = null;
     }
     let escalation: InterceptAuditEntry['escalated'] | undefined;
+    // #999: provenance of a `block` — set only where taint rewrote the
+    // decision TO block. Such a block is a scanned verdict, so it is not the
+    // #436 unscanned class (see `unscannedBlock` below). Escalation never
+    // touches a verdict that was already `block`, so a block the guard minted
+    // itself never sets this.
+    let taintMintedBlock = false;
     if (taint) {
       const esc = escalateForTaint({
         decision: v.decision as GuardDecision,
@@ -2302,6 +2308,7 @@ export function createInterceptor(
         // would vanish from the durable record — invisible in exactly the
         // forensic view that needs it.
         escalation = { by: 'session-taint', from: v.decision, to: esc.decision, reason: taint.reason };
+        taintMintedBlock = esc.decision === 'block';
         v = { ...v, decision: esc.decision, reason: `${v.reason} — ESCALATED by tainted session: ${taint.reason}` };
       }
     }
@@ -2400,7 +2407,16 @@ export function createInterceptor(
     // and `autoApprove: ['unknown-keys']` becoming a blanket bypass of the #412
     // closed schema. The residual `decision === 'block' && !terminalBlock` arm
     // is kept for any sub-catastrophic block a future rule mints.
-    const unscannedBlock = isSchemaInvalid(v) || (v.decision === 'block' && !terminalBlock);
+    //
+    // #999: a block that session-taint minted from a scanned dangerous verdict
+    // is NOT in that class — the guard read the whole call. Counting it as
+    // unscanned skipped the watch-only and shadow exits and denied headless
+    // runs on hosts that never chose enforcement. It is excluded from the
+    // residual arm only; a schema-invalid bag stays unscanned whether or not
+    // taint escalated it. Under enforce it still stops: the allowlist and
+    // broker pre-clear below keep refusing it (`!taintMintedBlock`), exactly
+    // as they did while it counted as unscanned.
+    const unscannedBlock = isSchemaInvalid(v) || (v.decision === 'block' && !terminalBlock && !taintMintedBlock);
     if (terminalBlock) {
       // #227: release any lease this call minted early — a blocked action must
       // not leave a hold on that scope (self-heals at TTL if release fails).
@@ -2425,9 +2441,14 @@ export function createInterceptor(
     // A verdict touching the guard's own state or config skips autoApprove and
     // broker pre-clear, and every failure-policy exit below (unattended,
     // approver error) DENIES it whatever `failurePolicy` says.
+    //
+    // #999: nor does it release a taint-minted block. The escalation exists
+    // to put a human back in front of dangerous work the allowlist would
+    // otherwise wave through; under watch-only the advisory exit below lets
+    // the call proceed and records it as a warn with `escalated`.
     const selfProtected = isSelfProtectionVerdict(v.signals);
     const autoApprove = actionGuardCfg.autoApprove ?? [];
-    if (autoApprove.length > 0 && !unscannedBlock && !selfProtected) {
+    if (autoApprove.length > 0 && !unscannedBlock && !selfProtected && !taintMintedBlock) {
       const hay = [v.family, v.action, ...v.signals].map(s => String(s).toLowerCase());
       const matched = autoApprove.some(a => {
         const n = a.toLowerCase();
@@ -2448,7 +2469,8 @@ export function createInterceptor(
     // limits: the catastrophic tier threw above; an unscanned schema
     // rejection or sub-catastrophic block (#436) is never shadowed; and
     // neither is the guard self-protection floor (R4-1). The session-lease
-    // floor refused before the guard ran.
+    // floor refused before the guard ran. A taint-minted block (#999) is a
+    // scanned verdict and IS shadowed, with `escalated` on the row.
     if (gate.shadow && !unscannedBlock && !selfProtected) {
       const wouldOutcome = typeof context.requireApproval === 'function' ? 'would_hold' : 'would_block';
       emitAudit({ ...base, action: 'require_approval', outcome: wouldOutcome, shadow: true, posture: 'enforce-when-ready' }, call);
@@ -2463,6 +2485,7 @@ export function createInterceptor(
     // down to warn-and-allow (advisory) for operators who want the old behaviour.
     // #436: an unscanned schema rejection must not become an advisory allow.
     // #509 R4-1: nor may the guard self-protection floor.
+    // #999: a taint-minted block is scanned, so watch-only warns on it here.
     if (!actionGuardCfg.enforce && !unscannedBlock && !selfProtected) {
       log.warn(`[shieldcortex] ⚠️ Action Guard: ${context.toolName} — ${v.reason}`);
       emitAudit({ ...base, action: 'warn', outcome: 'warned' }, call);
@@ -2487,7 +2510,10 @@ export function createInterceptor(
       throw new Error(`ShieldCortex: tool call blocked — ${brokered.reason}`);
     }
 
-    if (brokered?.outcome === 'pre_clear' && !unscannedBlock && !selfProtected) {
+    // #999: a taint-minted block is never pre-cleared, as before it stopped
+    // counting as unscanned. (The shipped broker core already refuses any
+    // `block`; this keeps the enforce posture from depending on that.)
+    if (brokered?.outcome === 'pre_clear' && !unscannedBlock && !selfProtected && !taintMintedBlock) {
       // Reversible, on-host, in-context, judge-confident: proceed without
       // waiting. Loud on purpose — a release nobody approved must never be a
       // silent one, because the audit row is the only thing that will ever tell

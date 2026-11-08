@@ -657,6 +657,17 @@ async function loadRetryControl(rawRetry, digestWindowMs) {
   }
 }
 
+/** #815 B — the exact call digest, or undefined. Optional on purpose: a dist
+ *  without it (or a digest that throws) only makes a denial untappable and a
+ *  tap grant unspendable; it never changes a decision. */
+function exactRetryDigest(mod, toolName, toolInput) {
+  try {
+    return typeof mod?.exactCallDigest === 'function' ? mod.exactCallDigest(toolName, toolInput) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** #224 — optional: stamp binding fields. Missing dist degrades to unbound. */
 async function loadBinding() {
   const distRoot = hookDistRoot();
@@ -947,6 +958,11 @@ async function loadNotify(rawNotifyConfig) {
       buildApprovalCard: typeof cardMod?.buildApprovalCard === 'function'
         ? cardMod.buildApprovalCard
         : null,
+      /** #815 A — the webhook's card: a fixed template that never names the
+       *  target. A dist without it sends no webhook card. */
+      buildTemplateApprovalCard: typeof cardMod?.buildTemplateApprovalCard === 'function'
+        ? cardMod.buildTemplateApprovalCard
+        : null,
       /** Where a denial goes when the primary channel cannot carry one. Null
        *  means an openclaw-only install: the denial reaches no channel, which
        *  is the honest outcome until a non-interactive gateway send path
@@ -1032,15 +1048,20 @@ function safeDiagnosticApprovalReason(reason) {
 
 /**
  * #648 — the card's what/why/who, built on this box from the live tool input.
- * Only for a LIVE hold going to the interactive card channel: the webhook and
- * every denial path keep the values-free surface (#284/#369/#517), and they
- * never receive this object. Every target in it has been through the
- * credential redactor (approval-card.ts `safeTarget`). Never throws.
+ * The interactive card channel gets the #648 card, whose targets go through
+ * the credential redactor as they are built (approval-card.ts `safeTarget`).
+ * #815 A: the webhook gets the fixed-template card instead
+ * (`buildTemplateApprovalCard`): a WHAT chosen by the kind of action, which
+ * never names the target. The values-free `command` / `surface` fields and
+ * `denials.jsonl` never receive either. Never throws.
  */
 function approvalCardFor(notify, channel, { toolName, toolInput, verdict, sessionKey, cwd }) {
-  if (channel?.name !== 'openclaw-approval' || typeof notify?.buildApprovalCard !== 'function') return undefined;
+  const build = channel?.name === 'openclaw-approval' ? notify?.buildApprovalCard
+    : channel?.name === 'webhook' ? notify?.buildTemplateApprovalCard
+      : undefined;
+  if (typeof build !== 'function') return undefined;
   try {
-    return notify.buildApprovalCard({
+    return build({
       tool: String(toolName ?? ''),
       input: toolInput,
       signals: Array.isArray(verdict?.signals) ? verdict.signals.map(String) : [],
@@ -1994,6 +2015,9 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
             // From the HARNESS payload, never from tool input (design B3).
             cwd: retryCtx.cwd,
             sessionKey,
+            // #815 B: the exact call digest a one-tap grant binds to. Absent
+            // (older dist, or it threw) leaves the denial untappable.
+            exactDigest: exactRetryDigest(retry.mod, toolName, toolInput),
           },
           { home: homedir() },
         );
@@ -2090,7 +2114,13 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
     typeof notify.buildActionGuardOutcomeNotification === 'function'
   ) {
     try {
-      let notification = notify.buildActionGuardOutcomeNotification(pendingRow);
+      // #815 A: a headless denial carries the fixed-template card to the
+      // webhook (it never names the target). Handed to the builder ONLY — `pendingRow` is the denials.jsonl row and
+      // stays values-free.
+      const card = outcome === 'denied_no_prompt_surface'
+        ? approvalCardFor(notify, notify.denialChannel, { toolName, toolInput, verdict, sessionKey, cwd: retryCtx?.cwd })
+        : undefined;
+      let notification = notify.buildActionGuardOutcomeNotification(card ? { ...pendingRow, card } : pendingRow);
       // Enrich first-of-window DNP with digest text when builder supports it.
       if (
         digestDecision?.action === 'notify' &&
@@ -3614,6 +3644,12 @@ process.stdin.on('end', async () => {
           {
             hash: retryPlane.mod.hashToolCall(toolName, toolInput),
             origin: { cwd: retryOriginCwd, tool: toolName },
+            // #815 B: a one-tap grant is spent only by this exact call, and
+            // only while the guard's verdict on it is still one a tap may
+            // answer. A verdict the guard reached no scanned conclusion about
+            // passes no list, which leaves a tap grant unspent.
+            exactDigest: exactRetryDigest(retryPlane.mod, toolName, toolInput),
+            currentSignals: unscannedBlock ? undefined : safeSignalList(verdict.signals),
           },
           { home: homedir() },
         );

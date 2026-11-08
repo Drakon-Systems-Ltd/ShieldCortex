@@ -28,7 +28,54 @@ export type InterceptInput = {
 export type RealtimeInput = {
   kind: 'realtime';
   hook?: string; sessionId?: string; model?: string; reason?: string; ts?: string;
+  /** Closed-set `category:pattern` ids. Never matched text. */
+  injectionPatterns?: string[];
 };
+
+/** One side of a pattern id. Identifier characters only, so a matched span cannot pass. */
+const PATTERN_TOKEN = /^[a-z0-9_]{1,64}$/i;
+const PATTERN_ID = /^[a-z0-9_]{1,64}:[a-z0-9_]{1,64}$/i;
+export const INJECTION_PATTERN_CAP = 16;
+
+/**
+ * Names only, from scanner detections. `pattern` is the closed-set rule name
+ * (`InjectionDetection` has no `name` field). `match` and `description` are
+ * never read. Unsafe or missing tokens are dropped, not logged.
+ */
+export function injectionPatternIds(detections: unknown): string[] | undefined {
+  if (!Array.isArray(detections)) return undefined;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of detections) {
+    if (!raw || typeof raw !== 'object') continue;
+    const category = (raw as { category?: unknown }).category;
+    const pattern = (raw as { pattern?: unknown }).pattern;
+    if (typeof category !== 'string' || typeof pattern !== 'string') continue;
+    if (!PATTERN_TOKEN.test(category) || !PATTERN_TOKEN.test(pattern)) continue;
+    const id = `${category}:${pattern}`.toLowerCase();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= INJECTION_PATTERN_CAP) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/** Re-check ids at the cloud boundary. Drops anything that is not `category:pattern`. */
+export function closedSetPatternIds(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const id = item.toLowerCase();
+    if (!PATTERN_ID.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= INJECTION_PATTERN_CAP) break;
+  }
+  return out;
+}
 
 function clamp01(n: unknown): number {
   const v = typeof n === 'number' && Number.isFinite(n) ? n : 0;
@@ -66,6 +113,7 @@ export function toAuditEntry(input: InterceptInput | RealtimeInput): CanonicalAu
     };
   }
   const reason = input.reason || 'OpenClaw realtime threat';
+  const patterns = closedSetPatternIds(input.injectionPatterns);
   return {
     source_type: input.hook || 'openclaw-realtime',
     source_identifier: input.model || input.sessionId || 'openclaw',
@@ -73,7 +121,10 @@ export function toAuditEntry(input: InterceptInput | RealtimeInput): CanonicalAu
     sensitivity_level: 'INTERNAL',
     firewall_result: 'QUARANTINE',
     anomaly_score: 0,
-    threat_indicators: [reason],
+    // Names replace the summary here when we have them. `reason` still carries
+    // the summary. A free-text indicator never gets in: closedSetPatternIds
+    // drops it.
+    threat_indicators: patterns.length > 0 ? patterns : [reason],
     fragmentation_score: null,
     reason,
     pipeline_duration_ms: 0,

@@ -44,7 +44,7 @@
  *     not a rung of it.
  */
 
-import type { ApprovalCardSummary } from './approval-card.js';
+import { withholdSecretCardLine, type ApprovalCardSummary } from './approval-card.js';
 
 /**
  * What actually happened to the held call, from the operator's point of view.
@@ -145,9 +145,13 @@ export interface OperatorNotification {
   /** #310 action id when this notification is a headless denial. */
   actionId?: string;
   /** #648 — the plain-English summary an approval CARD shows (what, why, who).
-   *  Only on 'approval_requested', and only read by the card channel
-   *  (openclaw-approval-channel.ts). The webhook payload builder copies fields
-   *  by name and never this one, so notify and denials stay values-free. */
+   *  Only on 'approval_requested'. Read by the card channel
+   *  (openclaw-approval-channel.ts), where every target in it has been
+   *  through the credential redactor on the box, and, since #815 A, laid out
+   *  by the webhook channel as its versioned `card` block: there the hook
+   *  hands a fixed-template card that never names the target, and the
+   *  webhook sends only fixed template lines whatever it is handed. The
+   *  values-free `command` surface and `denials.jsonl` are unchanged. */
   card?: ApprovalCardSummary;
 }
 
@@ -224,6 +228,14 @@ export interface ActionGuardOutcomeNotification {
   sessionId?: string;
   origin?: string;
   detectedAt: string;
+  /** #815 A — the plain-English what/why/who for the operator's chat. Only
+   *  on `action_guard_denial`: the fixed-template card built on the box by
+   *  approval-card.ts (`buildTemplateApprovalCard`), which never names the
+   *  target, bounded again here (`boundedCard`). The webhook payload carries
+   *  it as a versioned `card` block of fixed template lines; `denials.jsonl`
+   *  never does — the hook hands it to this builder only, never to the
+   *  forensic row. */
+  card?: ApprovalCardSummary;
 }
 
 /** Every shape a channel can be handed. */
@@ -442,11 +454,19 @@ function optionalText(v: unknown): string | undefined {
 }
 
 /** #648: the card summary crosses from the hook process as plain data — keep
- *  it to three bounded single-line strings or drop it entirely. */
+ *  it to three bounded single-line strings or drop it entirely.
+ *  #815 A review B2: each line meets the credential gate AS RECEIVED, before
+ *  whitespace is folded or the line is cut at 300 — folding split a key
+ *  across a line break into two halves no recogniser knows, and the cut left
+ *  the head of a key at the end of the line. A line that trips the gate is
+ *  withheld whole (`withholdSecretCardLine`); every channel then sees the
+ *  same withheld line. */
 function boundedCard(card: unknown): ApprovalCardSummary | undefined {
   if (!card || typeof card !== 'object') return undefined;
   const c = card as Record<string, unknown>;
-  const line = (v: unknown) => (typeof v === 'string' && v.trim() ? truncate(v.replace(/\s+/g, ' ').trim(), 300) : undefined);
+  const line = (v: unknown) => (typeof v === 'string' && v.trim()
+    ? truncate(withholdSecretCardLine(v).replace(/\s+/g, ' ').trim(), 300)
+    : undefined);
   const action = line(c.action);
   const reason = line(c.reason);
   const who = line(c.who);
@@ -529,6 +549,8 @@ export interface ActionGuardOutcomeInput {
   origin?: string;
   /** ISO timestamp; supplied by the caller so a test can pin it. */
   detectedAt: string;
+  /** #815 A — see `ActionGuardOutcomeNotification.card`. Ignored on a warning. */
+  card?: ApprovalCardSummary;
 }
 
 const SAFE_ACTION_GUARD_TOOLS = new Set([
@@ -711,6 +733,12 @@ export function buildActionGuardOutcomeNotification(
   const origin = String(input.origin ?? '').trim();
   if (origin === 'claude-code-hook' || origin === 'openclaw-interceptor') {
     n.origin = origin;
+  }
+  // #815 A: a denial may carry the readable card; an advisory warning never
+  // does (nothing was stopped, so there is nothing to approve or explain).
+  if (event === 'action_guard_denial') {
+    const card = boundedCard((input as { card?: unknown }).card);
+    if (card) n.card = card;
   }
   return n;
 }

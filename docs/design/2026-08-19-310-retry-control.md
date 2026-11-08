@@ -67,10 +67,21 @@ Order per DNP event: **suppression check → digest/budget accounting → card/m
   live in one `flock`-guarded store file (`retry-control.json` beside approvals; the existing
   approvals RMW+rename is last-writer-wins and stays live-hold-only). Launch-claim is atomic
   with the budget debit; failed spawn releases the slot.
+  **Superseded by #815 B (`src/defence/iron-dome/fenced-store.ts`):** the lock is an `mkdir`
+  lock directory (`retry-control.lock`), and the store is fenced. Its state is the newest
+  generation file in `retry-control.json.gen/`, each one claimed exactly once with `link(2)`;
+  `retry-control.json` is only a pointer to that generation and holds no rows, so releases up
+  to 5.17.4 read it as an empty store and are never shown a grant the store holds (what they
+  write there later is never read). Deleting `retry-control.json` revokes nothing: an unspent
+  grant ends only when it is spent, when it expires, or when a still-open retry card for it is
+  answered Deny (`recordDenySuppression`, a fenced write). To reset the store, stop the agent and every running `shieldcortex` process (hooks,
+  `approve`, the tap endpoint), then remove `retry-control.json` and `retry-control.json.gen/`
+  together. The #815 B tap nonce store (`approve-tap-nonces.json`, `approve-tap-nonces.json.gen/`)
+  works the same way.
 
 ### B5 (SOL) — denial-fingerprint store is first-class
 
-`retry-control.json` holds `actionId → { hash, denyEpoch, lastDeniedAt, originScope: {cwd?,
+The retry store (since #815 B, the newest file in `retry-control.json.gen/`) holds `actionId → { hash, denyEpoch, lastDeniedAt, originScope: {cwd?,
 sessionKey?}, tool, signals, redactedSurface, deniedAt, suppression?, claim?, grant? }`.
 - TTL/prune: fingerprints prune with the pending-retention clock (60m rolling from last DNP);
   suppressions prune at window end; spent/expired grants prune at spend-TTL + 24h (audit tail).
