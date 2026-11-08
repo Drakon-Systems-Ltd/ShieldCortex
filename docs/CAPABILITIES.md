@@ -8,7 +8,7 @@ Version numbers are the release that first shipped the behaviour as described. `
 
 ### Tool gate (Action Guard)
 
-On Claude Code (PreToolUse hook), OpenClaw (`before_tool_call`) and Hermes (`pre_tool_call`), each tool call is evaluated before it runs. A trusted call runs. A suspicious call is held and a plain-English approval card says what it does, why it was held and who asked, without the raw command (5.6+). A catastrophic command is a hard stop. Database, cluster and cloud teardown commands ask for approval (5.6+).
+On Claude Code (PreToolUse hook), OpenClaw (`before_tool_call`) and Hermes (`pre_tool_call`), each tool call is evaluated before it runs. Claude Code and OpenClaw gate once the shared Action Guard setting is on; the Hermes plugin enforces from its own switch (see [Hermes](#hermes)). A trusted call runs. A suspicious call is held and a plain-English approval card says what it does, why it was held and who asked, without the raw command (5.6+). A catastrophic command is a hard stop. Database, cluster and cloud teardown commands ask for approval (5.6+).
 
 Action Guard stays off until you turn it on. The shared setting is the gate for Claude Code and OpenClaw; `sudo shieldcortex protect` turns it on and pins that posture in a root-owned policy lock ([Policy lock](UPDATING.md#policy-lock)). Hermes does not read the shared setting; see [Hermes](#hermes).
 
@@ -19,7 +19,7 @@ Action Guard stays off until you turn it on. The shared setting is the gate for 
 
 Webhook notifications for a headless denial or a held approval end with a `card` block (5.18+, version 1): the same what, why and who, the exact `shieldcortex approve` command, and Approve/Deny choices that carry only the action id. The card never carries the raw command or a credential.
 
-The guard half of one-tap approve from Telegram also ships in 5.18, as a loopback-only `shieldcortex guard approve-tap` endpoint that is off by default. The card carries no nonce yet, so a tap cannot be completed end to end in this release.
+The guard half of one-tap approve from Telegram also ships in 5.18, as a loopback-only `shieldcortex guard approve-tap` endpoint that is off by default. The chat half is not in this release, so a tap cannot be completed end to end yet; approvals still go through `shieldcortex approve`.
 
 - Commands: `shieldcortex approve [hash]`, `shieldcortex deny [hash]`, `shieldcortex guard approve-tap`, `shieldcortex guard test-approval`
 - Source: `src/cli/approve.ts`, `src/cli/deny.ts`, `src/cli/approve-tap.ts`, `src/cli/guard.ts`
@@ -27,7 +27,9 @@ The guard half of one-tap approve from Telegram also ships in 5.18, as a loopbac
 
 ### Conversation firewall (OpenClaw)
 
-The OpenClaw plugin registers `llm_input` and `llm_output` hooks and scans the conversation that reaches the model and the reply that comes back. From 5.18.2, an in-process injection hit on `llm_input` records `injectionPatterns`, up to 16 closed-set `category:pattern` ids, so a false positive can be traced to a rule. The matched text is still not stored.
+The OpenClaw plugin scans the conversation that reaches the model on the `llm_input` hook and records what it finds. `llm_input` is an observation hook: it has no blocking contract, so a detection there is audited and sent to the operator but cannot stop the turn. Blocking is a separate posture: `observe` (the default) scans, audits and notifies and never blocks; `enforce` additionally blocks the run through the `before_agent_run` gate, which exists only on OpenClaw builds that declare it. `doctor` and the plugin's own status say which of the three states the host is in. The `llm_output` hook does not scan the reply; it mines it for memory candidates and saves them through the normal defence pipeline.
+
+From 5.18.2, an in-process injection hit on `llm_input` records `injectionPatterns`, up to 16 closed-set `category:pattern` ids, so a false positive can be traced to a rule. The matched text is still not stored.
 
 Limits: the hooks are only live when the host grants conversation access (`plugins.entries.shieldcortex-realtime.hooks.allowConversationAccess=true` in `openclaw.json`); without it, `doctor` and the plugin's own status report the scanning as inactive. The MCP fallback path has no local pattern names.
 
@@ -37,9 +39,9 @@ Limits: the hooks are only live when the host grants conversation access (`plugi
 
 ### Tool-output scan
 
-The `scan_tool_response` MCP tool, and the `withResponseScan` wrapper around ShieldCortex's own MCP tools, scan tool output on the read path with the write path's detectors: the Iron Dome injection patterns, the instruction detector (homoglyph folding, windowed scan), the encoding detector (base64, hex and URL blobs decoded and rescanned), a markdown-image exfiltration check and credential-leak scanning.
+The `scan_tool_response` MCP tool, and the `withResponseScan` wrapper around ShieldCortex's own MCP tools, scan tool output on the read path for injection, encoded or obfuscated instructions, markdown-image exfiltration and leaked credentials, using the same detectors as the memory write path.
 
-Limits: advisory by default, which logs threats and leaves the response untouched. In enforce mode the scanner also computes a sanitised copy (injection withheld, secrets redacted, exfiltration links stripped) that the caller swaps in. It never blocks tool execution, only the threatening output. It does not run the write path's trust, anomaly, privilege, fragmentation or sensitivity layers.
+Limits: it is a scanner the agent or the integration calls, not an interceptor. It runs on the output of ShieldCortex's own MCP tools (through `withResponseScan`) and on any tool result the agent passes to `scan_tool_response`; it does not see the output of other tools unless something hands it over. Advisory by default, which logs threats and leaves the response untouched. In enforce mode the scanner also computes a sanitised copy (injection withheld, secrets redacted, exfiltration links stripped) that the caller swaps in. It never blocks tool execution, only the threatening output.
 
 - Source: `src/defence/tool-response-scanner.ts`, `src/server.ts`
 - CHANGELOG: 4.37.0 (`scan_tool_response` surfaces the sanitised payload), later parity work; 5.3.0 (#506 injection floor: authority spoofing inside tool results, verbatim extraction asks, ten languages, ROT13)
@@ -73,7 +75,7 @@ The MCP server (`shieldcortex` with no arguments, or `--mode mcp`) serves `remem
 
 `shieldcortex consolidate` runs memory maintenance and then Dream Mode consolidation (merge duplicates, archive stale, detect contradictions). Typed memories, Dream Mode and LLM reranking are free local features.
 
-Prompt-time recall into Claude Code (the `UserPromptSubmit` hook) is not automatic; see [Dashboard, recall and Cloud](UPDATING.md#dashboard-recall-and-cloud) and [Recall lanes](UPDATING.md#recall-lanes) for what is injected and when.
+Prompt-time recall into Claude Code (the `UserPromptSubmit` hook) is not automatic: it needs the hook that `setup` wires and a config switch; see [Dashboard, recall and Cloud](UPDATING.md#dashboard-recall-and-cloud) and [Recall lanes](UPDATING.md#recall-lanes) for what is injected and when.
 
 - Source: `src/server.ts`, `src/memory/`, `src/graph/`, `src/memory/consolidate.ts`
 - CHANGELOG: 1.13.0 (`graph_query`), 4.47.0 (every local feature free)
@@ -122,14 +124,14 @@ Limits: it detects and reports; it does not block, and it is not live between st
 
 ### Signed config and policy lock
 
-`~/.shieldcortex/config.json` is signed. A hand edit fails its integrity check; `doctor` reports the failure and holds an unsigned or tampered file at the strict posture rather than reading looser settings from it. `shieldcortex config --resign` prints the verdict, the sha256 of the current bytes and the settings that would leave the strict posture, and writes nothing; `--resign --confirm <sha256>` re-signs exactly the previewed bytes. A symlinked `config.json` is refused (5.17.2, #878). `sudo shieldcortex protect` pins the security-critical settings in a root-owned policy lock the agent user cannot write, so the Guard cannot be switched off from the agent's own account.
+`~/.shieldcortex/config.json` is signed. A hand edit fails its integrity check; `doctor` reports the failure and holds an unsigned or tampered file at the strict posture rather than reading looser settings from it. `shieldcortex config --resign` on its own prints the verdict, the sha256 of the current bytes and the settings that would leave the strict posture, and writes nothing; only `--resign --confirm <sha256>` re-signs, and only the exact bytes previewed. A symlinked `config.json` is refused (5.17.2, #878). `sudo shieldcortex protect`, run once by a human as root, pins the security-critical settings in a root-owned policy lock. The lock holds only because the agent's own user cannot write that file: an agent running as its own non-root user cannot rewrite the pinned posture, and an agent running as root is not protected by it.
 
 - Source: `src/cli/dispatch-help.ts` (`--resign` grammar), `src/guard/posture-switch.ts`, `src/cli/protect.ts`, `src/cli/doctor.ts`
 - CHANGELOG: [What's new in 5.11](UPDATING.md#whats-new-in-511) (#647), 5.17.2 (#878), [Policy lock](UPDATING.md#policy-lock)
 
 ### Script allowlist
 
-`shieldcortex allowlist add|remove|verify|scan` pins a human-reviewed script by path and content hash, so the guard stops folding its source into every evaluation; any edit to the file re-gates it. `allowlist scan` discovers cron-referenced scripts and batch-reviews new or changed ones in the terminal.
+`shieldcortex allowlist add|remove|verify|scan` pins a human-reviewed script by path and content hash. Normally, when a call runs a script, the guard reads the script's contents into the scan of that call; a pinned script is skipped as already reviewed. Any edit to the file changes the hash and re-gates it. `allowlist scan` discovers cron-referenced scripts and batch-reviews new or changed ones in the terminal.
 
 - Source: `src/cli/allowlist.ts`, `src/cli/allowlist-scan.ts`
 - CHANGELOG: 4.13.0 (introduced), 5.10.1 (#786 JSON escaping)
@@ -180,7 +182,7 @@ Its counts are labelled when they are partial: pair counts stop at 20 of each ki
 
 ### Hermes
 
-Hermes gates tool calls once you run `hermes plugins enable shieldcortex` and the local API (`shieldcortex api`) is up. The enabled plugin enforces by default, whatever the shared Action Guard setting says: it blocks unless `SHIELDCORTEX_ENFORCE` opts it out (`0`, `false`, `no`, `off` or `advisory`). Hermes has no approval prompt, so a call Action Guard would hold for approval is blocked while enforcing. Advisory mode still blocks Action Guard's hard-block verdicts and recognised calls that would change the guard's own state or config (a plain read of its config with `ls`, `cat`, `head`, `tail`, `wc`, `stat`, `du`, `grep` or `jq` and plain arguments is not one of them; a read with an environment prefix, an option the guard cannot prove harmless, a redirection, nested execution or an interpreter still is). While the API is unreachable, its bounded fallback scan blocks the self-protection and catastrophic shapes it recognises in every mode, and recognised dangerous shapes while enforcing (the default). In advisory mode, only the recognised self-protection and catastrophic shapes are blocked by the fallback.
+Hermes gates tool calls once you run `hermes plugins enable shieldcortex` and the local API (`shieldcortex api`) is up. The enabled plugin enforces by default, whatever the shared Action Guard setting says: it blocks unless `SHIELDCORTEX_ENFORCE` opts it out (`0`, `false`, `no`, `off` or `advisory`). Hermes has no approval prompt, so a call Action Guard would hold for approval is blocked while enforcing. Advisory mode still blocks Action Guard's hard-block verdicts and recognised calls that would change the guard's own state or config (a plain read of its config is not one of them). While the API is unreachable, its bounded fallback scan blocks the self-protection and catastrophic shapes it recognises in every mode, and recognised dangerous shapes while enforcing (the default). In advisory mode, only the recognised self-protection and catastrophic shapes are blocked by the fallback.
 
 - Docs: [Hermes plugin](../plugins/hermes/shieldcortex/README.md)
 
