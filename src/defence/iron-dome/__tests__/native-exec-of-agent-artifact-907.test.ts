@@ -429,6 +429,14 @@ describe('#907 benign controls', () => {
     expect(v.signals).not.toContain(SIG_J);
   });
 
+  it('an agent-written file with NUL bytes but no native magic → outside the floor (header magic only)', () => {
+    const w = new World();
+    w.record(`${WORK}/blob`, 'agent-written');
+    w.put(`${WORK}/blob`, new Uint8Array([0x00, 0x01, 0x02, 0x00, 0x41, 0x42]));
+    const v = w.check('./blob');
+    expect(v.signals).not.toContain(UMBRELLA);
+  });
+
   it('a pre-existing project-local native binary with no record → row J (the priced cost, §4.2)', () => {
     const w = new World();
     w.put(`${WORK}/target/debug/app`, ELF);

@@ -43,8 +43,6 @@ import { bodyIsAllDataRead } from './heredoc-data-read.js';
 import {
   classifyArtifactState,
   completeHistoryForPath,
-  headerHasNul,
-  isNativeImageHeader,
   recordsForPath,
   type AgentArtifactView,
   type ArtifactState,

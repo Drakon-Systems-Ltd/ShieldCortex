@@ -211,8 +211,8 @@ export function isNativeImageHeader(bytes: Uint8Array | null | undefined): boole
   }
 }
 
-/** A NUL byte in the inspected header — the Q5 "binary without a known magic"
- *  signal, honoured only when Rule P already names an agent-written producer. */
+/** A NUL byte in the inspected header. Not a classifier input (the design
+ *  decides "native image" by magic only); kept for callers that report it. */
 export function headerHasNul(bytes: Uint8Array | null | undefined): boolean {
   if (!bytes) return false;
   for (let i = 0; i < bytes.length; i++) if (bytes[i] === 0) return true;
@@ -373,14 +373,10 @@ export function classifyArtifactState(input: ClassifyInput): ArtifactState {
       ? rulePProducer(records, currentId)
       : null;
 
-  const magic = isNativeImageHeader(header);
-  const native =
-    magic ||
-    (producer !== null &&
-      producer !== 'no-producer' &&
-      producer !== 'ambiguous' &&
-      producer.kind === 'agent-written' &&
-      headerHasNul(header));
+  // A native image is decided by its header magic alone (§3.1 table). The
+  // floor is never a text/byte heuristic: it needs a Rule P producer AND a
+  // native header (§4).
+  const native = isNativeImageHeader(header);
 
   if (!native) {
     // Header is not a native image, or could not be read.
