@@ -1105,6 +1105,11 @@ function approvalCardFor(notify, channel, { toolName, toolInput, verdict, sessio
       ...(Array.isArray(verdict?.packageVettingReasons) && verdict.packageVettingReasons.length > 0
         ? { extraReasons: verdict.packageVettingReasons.map(String) }
         : {}),
+      // #889 R2: the finding kinds, so the webhook's fixed-template card can say
+      // what kind of thing the check found without the free-form text above.
+      ...(Array.isArray(verdict?.packageVettingKinds) && verdict.packageVettingKinds.length > 0
+        ? { vettingKinds: verdict.packageVettingKinds.map(String) }
+        : {}),
       plane: 'claude-code',
       sessionId: notificationContext(sessionKey).sessionId,
       cwd: typeof cwd === 'string' ? cwd : undefined,
@@ -3477,6 +3482,9 @@ process.stdin.on('end', async () => {
           if (outcome) {
             verdict = vm.applyVettingToVerdict(verdict, outcome);
             if (outcome.reasons.length > 0) verdict.packageVettingReasons = outcome.reasons;
+            // The finding KINDS (closed set) for the webhook's fixed-template card (#889 R2).
+            const kinds = [...new Set(outcome.audit.flatMap((a) => (Array.isArray(a.kinds) ? a.kinds : [])))];
+            if (kinds.length > 0) verdict.packageVettingKinds = kinds;
             if (outcome.audit.length > 0) baseExtra.packageVetting = outcome.audit;
           }
         }
