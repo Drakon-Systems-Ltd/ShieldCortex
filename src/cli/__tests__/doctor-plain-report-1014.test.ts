@@ -342,3 +342,36 @@ describe('#1014 — wrapSoft keeps long tokens whole', () => {
     expect(wrapSoft('', 40, 2)).toEqual(['  ']);
   });
 });
+
+describe('#1014 — a fresh install and a remedy the message already states', () => {
+  const freshDb: DoctorReportItem = {
+    label: 'Database',
+    status: 'info',
+    message: 'not initialised yet — created automatically on first use',
+    fix: 'Run `shieldcortex scan "init"` to create the database now',
+  };
+
+  it('a fresh box says the database is not initialised yet without --verbose', () => {
+    // #129 made "no database yet" an info row so a fresh install is not a
+    // failure; it is still the one info row a new user needs to see.
+    const t = render([...EXPECTED_ONLY, freshDb]).join('\n');
+    expect(t).toMatch(/^Memory database: not initialised yet — created automatically on first use$/m);
+    expect(t.indexOf('Memory database:')).toBeLessThan(t.indexOf('EXPECTED ON THIS HOST'));
+    expect(render(HEALTHY).join('\n')).not.toMatch(/not initialised yet/);
+  });
+
+  it('a failure whose message already ends with its remedy prints the remedy once', () => {
+    const remedy =
+      'Install Node 22.14+ LTS or Node 24+ (Node 23 is not supported), then reinstall ShieldCortex';
+    const row: DoctorReportItem = {
+      label: 'Node runtime',
+      status: 'fail',
+      message: `Node v20.19.0 is an unsupported runtime — the database engine will not load. ${remedy}.`,
+      fix: remedy,
+    };
+    const t = render([row]).join('\n');
+    expect(t).toMatch(/^ 1\. This Node.js version is not supported  \[node-runtime\]$/m);
+    // Lines wrap, so count on the flattened text.
+    expect(t.replace(/\s+/g, ' ').split('Install Node 22.14+ LTS').length - 1).toBe(1);
+  });
+});

@@ -335,7 +335,10 @@ function renderFixItem(g: ThemeGroup, n: number, width: number, s: DoctorReportS
         ? honestyGuidance(g)
         : (g.fixNote ? cleanWhy(g.fixNote) : '');
     if (guidance && !guidance.startsWith(SHRUG)) {
-      out.push(...wrapSoft(scrubIssueRefs(guidance), width, 4, 4).map(dim));
+      // Some checks (Node runtime) end their message with the remedy so the
+      // full report shows it; here the why line already said it, so say it once.
+      const text = scrubIssueRefs(guidance);
+      if (!(why ?? '').includes(text.replace(/\.$/, ''))) out.push(...wrapSoft(text, width, 4, 4).map(dim));
     }
   }
   return out;
@@ -459,6 +462,11 @@ export function formatDoctorSummary(results: DoctorReportItem[], o: DoctorSummar
     : `${fixGroups.length} thing${fixGroups.length === 1 ? '' : 's'} to fix`;
   const guard = o.gatePlanes ? `Guard: ${guardWord(guardHeadlineFromPlanes(o.gatePlanes))}` : '';
   lines.push([verdict, toFix, guard].filter(Boolean).join(g.sep));
+  // A fresh install has no database yet. #129 made that an info row so a new
+  // user's first doctor run is not a failure; it is still the one info row
+  // they need to see without --verbose, in the row's own plain words.
+  const freshDb = infos.find((r) => r.label === 'Database' && /not initialised/i.test(r.message));
+  if (freshDb) lines.push(...wrapSoft(`Memory database: ${cleanWhy(freshDb.message)}`, width, 0, 2).map(dim));
   lines.push('');
 
   if (fixGroups.length > 0) {

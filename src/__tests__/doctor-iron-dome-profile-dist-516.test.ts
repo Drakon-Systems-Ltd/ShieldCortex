@@ -24,8 +24,12 @@ let home: string;
 beforeAll(() => {
   requireFreshBuiltArtefacts({
     repoRoot,
-    sources: [join(repoRoot, 'src', 'cli', 'doctor.ts'), join(repoRoot, 'src', 'defence', 'iron-dome', 'index.ts')],
-    artefacts: [DIST_ENTRY, join(repoRoot, 'dist', 'cli', 'doctor.js')],
+    sources: [
+      join(repoRoot, 'src', 'cli', 'doctor.ts'),
+      join(repoRoot, 'src', 'cli', 'doctor-plain.ts'),
+      join(repoRoot, 'src', 'defence', 'iron-dome', 'index.ts'),
+    ],
+    artefacts: [DIST_ENTRY, join(repoRoot, 'dist', 'cli', 'doctor.js'), join(repoRoot, 'dist', 'cli', 'doctor-plain.js')],
   });
   home = mkdtempSync(join(tmpdir(), 'sc-516-dist-home-'));
   const configDir = join(home, '.shieldcortex');
@@ -57,13 +61,24 @@ function doctor(args: string[]): string {
 }
 
 describe('doctor never echoes a malformed Iron Dome config (#516)', () => {
+  // The row is `info`, so the default one-screen report counts it rather than
+  // listing it (#1014). These three layouts print it, and print it fixed.
   it.each([
-    ['human', []],
     ['verbose', ['--verbose']],
+    ['explain', ['--explain', 'iron-dome-profile']],
     ['json', ['--json']],
   ])('%s output', (_name, args) => {
     const output = doctor(args as string[]);
     expect(output).toContain(ROW);
+    expect(output).not.toContain(MARKER);
+    expect(output).not.toContain('is not valid JSON');
+  }, 150_000);
+
+  it('default output', () => {
+    const output = doctor([]);
+    // The report rendered (so the check ran and was counted) and leaked nothing.
+    expect(output).toContain('ShieldCortex Doctor');
+    expect(output).toMatch(/informational rows? hidden/);
     expect(output).not.toContain(MARKER);
     expect(output).not.toContain('is not valid JSON');
   }, 150_000);

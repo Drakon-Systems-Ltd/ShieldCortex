@@ -6,6 +6,7 @@ import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from '@jest/globals';
 
+import { doctorRowId } from '../doctor-plain.js';
 import {
   NATIVE_ENGINE_AFFECTED_NODE_MAJOR,
   NATIVE_ENGINE_LABEL,
@@ -616,8 +617,9 @@ describe('doctor — a stale installed engine fails early on the real CLI (#471)
     expect(code).not.toBe(134);
     expect(code).toBe(1);
 
-    // The operator can act on it.
-    expect(report).toContain(NATIVE_ENGINE_LABEL);
+    // The operator can act on it. The default report names the check by its
+    // stable id (#1014); the label itself is in --verbose and --json.
+    expect(report).toContain(`[${doctorRowId(NATIVE_ENGINE_LABEL)}]`);
     expect(report).toContain('better-sqlite3 12.4.1');
     expect(report).toContain('incompatible with Node 24.21.0');
     expect(report).toContain('npm install -g shieldcortex@latest');
