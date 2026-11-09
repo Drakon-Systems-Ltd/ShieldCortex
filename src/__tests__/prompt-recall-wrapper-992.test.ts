@@ -185,7 +185,99 @@ describe('sanitisePromptForRecall — OpenClaw 2026.10.x turn boilerplate (#992)
   it('B2: the leading internal-context block is stripped only when it opens the prompt', () => {
     // Anchored: opens the prompt (after the envelope timestamp) — stripped.
     expect(sanitisePromptForRecall(`[Tue 2026-11-03 11:53 UTC] ${BEGIN}\n\n[Subagent Context] depth 1/5.\n\n${END}\n\nrenew passport`)).toBe('renew passport');
-    expect(sanitisePromptForRecall(`${BEGIN}\n\n[Subagent Context] depth 1/5.\n\n${END}\n\nrenew passport`)).toBe('renew passport');
+    // Round 3 (R2, reports/fable-greenlights/drakon-993-20261109T1920Z.md): with no
+    // framework evidence (no envelope timestamp, no consumed wrapper) a leading
+    // pair is indistinguishable from an owner quote, so it is kept.
+    const bare = `${BEGIN}\n\n[Subagent Context] depth 1/5.\n\n${END}\n\nrenew passport`;
+    expect(sanitisePromptForRecall(bare)).toBe(bare);
+  });
+
+  // ── Round 3 (R1-R5): final targeted repair at d2c424fa ──────────────────
+  const PAIRS: Array<[string, string]> = [
+    ['internal-context', `${BEGIN}\nsome framework words\n${END}`],
+    ['runtime-context', RUNTIME_CONTEXT],
+  ];
+
+  it('R1: owner text before a BEGIN marker makes the line owner text (unwrapped and in an owner turn)', () => {
+    const owner = `Please inspect ${BEGIN}\nsome words\n${END}\nand then tell me what it means`;
+    expect(sanitisePromptForRecall(owner)).toBe(owner);
+    expect(sanitisePromptForRecall(ownerTurn(owner))).toBe(owner);
+    // A closed block at the tail whose BEGIN line carries owner words is owner text too.
+    const tail = `Look at this: ${BEGIN}\nsome words\n${END}`;
+    expect(sanitisePromptForRecall(ownerTurn(tail))).toBe(tail);
+  });
+
+  for (const [name, pair] of PAIRS) {
+    it(`R2: an unwrapped prompt with a trailing closed ${name} pair is unchanged`, () => {
+      const input = `Explain this block:\n\n${pair}`;
+      expect(sanitisePromptForRecall(input)).toBe(input);
+    });
+    it(`R2: a closed ${name} pair at the tail is still removed in an owner turn`, () => {
+      expect(sanitisePromptForRecall(`[Tue 2026-11-03 11:48 UTC] Explain this\n\n${pair}`)).toBe('Explain this');
+    });
+    // R4: pins. These hold on d2c424fa too (the empty-result fallback); no
+    // exact-owner-message assertion, see the CHANGELOG limitation.
+    it(`R4: a whole-message ${name} pair keeps the owner's words, non-empty, in an owner turn`, () => {
+      const owner = name === 'runtime-context'
+        ? 'OpenClaw runtime context:\nowner words here\nEnd OpenClaw runtime context.'
+        : `${BEGIN}\nowner words here\n${END}`;
+      for (const turn of [ownerTurn(owner), internalContextTurn(owner)]) {
+        const out = sanitisePromptForRecall(turn);
+        expect(out.length).toBeGreaterThan(0);
+        expect(out).toContain('owner words here');
+        // Longer than the hook's too-short gate (MIN_PROMPT_LENGTH is far below this).
+        expect(out.length).toBeGreaterThanOrEqual(owner.length);
+      }
+    });
+  }
+
+  it('R3: N consecutive leading blocks inside a framed prompt reduce to the owner text', () => {
+    const block = `${BEGIN}\n\nframework words\n\n${END}`;
+    const blocks = (n: number) => Array.from({ length: n }, () => block).join('\n\n');
+    expect(sanitisePromptForRecall(`[Tue 2026-11-03 11:48 UTC] ${blocks(3)}\n\nrenew passport`)).toBe('renew passport');
+    const MARK = '⟦openclaw:ctx⟧';
+    const env = (n: number) => [
+      `Conversation info: ${MARK}`, '```json', JSON.stringify({ chat_id: 'telegram:100000001' }), '```', '',
+      `${blocks(n)}\n\nrenew passport`,
+    ].join('\n');
+    expect(sanitisePromptForRecall(env(3))).toBe('renew passport');
+  });
+
+  /** Best-of-3 time for fn, in ms. */
+  const best = (fn: () => void): number => {
+    let min = Infinity;
+    for (let k = 0; k < 3; k += 1) {
+      const t0 = process.hrtime.bigint();
+      fn();
+      min = Math.min(min, Number(process.hrtime.bigint() - t0) / 1e6);
+    }
+    return min;
+  };
+  // Quadrupling the input costs about 4x when linear and about 16x when
+  // quadratic; a cap of 10x with a 5 ms floor does not depend on runner speed.
+  const expectLinear = (make: (n: number) => string, expected: string) => {
+    const small = make(5000);
+    const large = make(20000);
+    expect(sanitisePromptForRecall(small)).toBe(expected);
+    expect(sanitisePromptForRecall(large)).toBe(expected);
+    const t1 = Math.max(best(() => { sanitisePromptForRecall(small); }), 5);
+    const t2 = best(() => { sanitisePromptForRecall(large); });
+    expect(t2 / t1).toBeLessThan(10);
+  };
+
+  it('R3/R5: many consecutive leading blocks are processed in linear time', () => {
+    const block = `${BEGIN}\n\nw\n\n${END}`;
+    expectLinear(
+      (n) => `[Tue 2026-11-03 11:48 UTC] ${Array.from({ length: n }, () => block).join('\n\n')}\n\nrenew passport`,
+      'renew passport',
+    );
+  });
+
+  it('R5: a trailing paragraph of many repeated guidance sentences is processed in linear time', () => {
+    expectLinear(
+      (n) => `fix the boiler\n\n${Array.from({ length: n }, () => 'Do not repeat delivered content.').join(' ')}`,
+      'fix the boiler',
+    );
   });
 
   it('still strips the #717 envelope and then the 2026.10.x trailer', () => {

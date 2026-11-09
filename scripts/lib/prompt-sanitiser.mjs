@@ -318,9 +318,16 @@ function consumeGuidanceSentences(paragraph) {
   return consumed ? rest : null;
 }
 
+/**
+ * A BEGIN line is the exact marker, or the validated envelope timestamp
+ * followed by the exact marker (#993 review round 3, R1). Any other text before
+ * the marker makes the line owner text.
+ */
 function isInternalContextBegin(line) {
   const t = line.trim();
-  return t === RUNTIME_CONTEXT_BEGIN_MARKER || t.endsWith(` ${RUNTIME_CONTEXT_BEGIN_MARKER}`);
+  if (t === RUNTIME_CONTEXT_BEGIN_MARKER) return true;
+  const m = LEADING_TIMESTAMP_PREFIX.exec(t);
+  return m !== null && t.slice(m[0].length) === RUNTIME_CONTEXT_BEGIN_MARKER;
 }
 
 /**
@@ -337,8 +344,12 @@ function isInternalContextBegin(line) {
  *     paragraph ends the run and is kept.
  * Anything else ends the run: the owner's own text, including a quoted closed
  * pair with owner words after it, stays.
+ *
+ * Closed pairs are removed only when `framed` is true (#993 round 3, R2): the
+ * prompt carries framework evidence independent of the pair itself. Guidance
+ * paragraphs need no evidence.
  */
-function stripTrailingTurnBoilerplate(lines) {
+function stripTrailingTurnBoilerplate(lines, framed) {
   const out = lines.slice();
   const trimTail = () => { while (out.length > 0 && out[out.length - 1].trim() === '') out.pop(); };
   for (;;) {
@@ -346,6 +357,7 @@ function stripTrailingTurnBoilerplate(lines) {
     if (out.length === 0) break;
     const last = out[out.length - 1].trim();
     if (last === RUNTIME_CONTEXT_FOOTER) {
+      if (!framed) break;
       let start = out.length - 2;
       while (start >= 0 && out[start].trim() !== RUNTIME_CONTEXT_HEADER) start -= 1;
       if (start < 0) break; // footer without a header: owner text
@@ -353,9 +365,14 @@ function stripTrailingTurnBoilerplate(lines) {
       continue;
     }
     if (last === RUNTIME_CONTEXT_END_MARKER) {
+      if (!framed) break;
       let start = out.length - 2;
-      while (start >= 0 && !isInternalContextBegin(out[start])) start -= 1;
-      if (start < 0) break; // END without a BEGIN: owner text
+      // The nearest BEGIN-looking line must be a valid BEGIN: another END, or a
+      // marker with owner text before it, means this is not a framework block.
+      while (start >= 0 && !isInternalContextBegin(out[start])
+        && out[start].trim() !== RUNTIME_CONTEXT_END_MARKER
+        && !out[start].includes(RUNTIME_CONTEXT_BEGIN_MARKER)) start -= 1;
+      if (start < 0 || !isInternalContextBegin(out[start])) break; // owner text
       // Keep any text the BEGIN line carried before the marker (the timestamp).
       const before = out[start].trimEnd().slice(0, -RUNTIME_CONTEXT_BEGIN_MARKER.length).trimEnd();
       out.length = start;
@@ -375,23 +392,30 @@ function stripTrailingTurnBoilerplate(lines) {
 
 /**
  * Strip internal-context blocks that open the prompt: the first non-blank
- * line is the BEGIN marker (optionally after the envelope timestamp, which is
- * kept for the final timestamp cut) and a closing END marker follows. An
- * unclosed marker, or a block that follows owner text, is left alone.
+ * line is a BEGIN line (see isInternalContextBegin) and a closing END marker
+ * follows. Only meaningful for a framed prompt (the caller checks). A forward
+ * cursor walks the original array once, so N consecutive blocks cost O(N)
+ * (#993 round 3, R3). The envelope timestamp the first BEGIN line carries is
+ * kept once, for the final timestamp cut. An unclosed marker, or a block that
+ * follows owner text, is left alone.
  */
 function stripLeadingInternalContextBlocks(lines) {
-  let out = lines.slice();
+  let pos = 0;
+  let kept = '';
   for (;;) {
-    let i = 0;
-    while (i < out.length && out[i].trim() === '') i += 1;
-    if (i >= out.length || !isInternalContextBegin(out[i])) break;
+    let i = pos;
+    while (i < lines.length && lines[i].trim() === '') i += 1;
+    if (i >= lines.length || !isInternalContextBegin(lines[i])) break;
     let end = i + 1;
-    while (end < out.length && out[end].trim() !== RUNTIME_CONTEXT_END_MARKER) end += 1;
-    if (end >= out.length) break; // unclosed: owner text
-    const before = out[i].trimEnd().slice(0, -RUNTIME_CONTEXT_BEGIN_MARKER.length).trimEnd();
-    out = (before !== '' ? [before] : []).concat(out.slice(end + 1));
+    while (end < lines.length && lines[end].trim() !== RUNTIME_CONTEXT_END_MARKER) end += 1;
+    if (end >= lines.length) break; // unclosed: owner text
+    if (pos === 0 && kept === '') {
+      kept = lines[i].trimEnd().slice(0, -RUNTIME_CONTEXT_BEGIN_MARKER.length).trimEnd();
+    }
+    pos = end + 1;
   }
-  return out;
+  if (pos === 0) return lines;
+  return (kept !== '' ? [kept] : []).concat(lines.slice(pos));
 }
 
 /**
@@ -400,11 +424,15 @@ function stripLeadingInternalContextBlocks(lines) {
  * also when stripping would leave nothing (an owner message that is itself a
  * complete framework pair must not gate as too short, #993 review B2).
  */
-function stripOpenClawTurnBoilerplate(text) {
+function stripOpenClawTurnBoilerplate(text, framework = false) {
   if (text.length === 0) return text;
+  // R2 (#993 round 3): closed pairs go only with framework evidence that does
+  // not come from the pair itself: a wrapper this call already consumed, or
+  // the validated envelope timestamp opening the text. Otherwise keep.
+  const framed = framework || LEADING_TIMESTAMP_PREFIX.test(text);
   let lines = text.replace(/\r\n/g, '\n').split('\n');
-  lines = stripTrailingTurnBoilerplate(lines);
-  if (text.includes(RUNTIME_CONTEXT_BEGIN_MARKER)) lines = stripLeadingInternalContextBlocks(lines);
+  lines = stripTrailingTurnBoilerplate(lines, framed);
+  if (framed && text.includes(RUNTIME_CONTEXT_BEGIN_MARKER)) lines = stripLeadingInternalContextBlocks(lines);
   const out = lines.join('\n').trim().replace(LEADING_TIMESTAMP_PREFIX, '').trim();
   if (out === '') return text;
   return out === text.trim() ? text : out;
@@ -441,15 +469,15 @@ function sanitise(prompt, stripTurnBoilerplate) {
   // line-anchored, so "[Tue … UTC] Automated liveness check …" otherwise read
   // as an interactive turn and fed the doctor's repetition sample (#992).
   // Removing it can only let a marker match, i.e. only narrow the lane.
-  const finish = (text) => (stripTurnBoilerplate
-    ? stripOpenClawTurnBoilerplate(text.trim())
+  const finish = (text, framework = false) => (stripTurnBoilerplate
+    ? stripOpenClawTurnBoilerplate(text.trim(), framework)
     : text.trim().replace(LEADING_TIMESTAMP_PREFIX, '')).trim();
 
   // 0) OpenClaw 2026.9.x marker-keyed envelope (#717). When it matches, the
   //    remainder is the current user message and the legacy patterns below
   //    have nothing left to do.
   const fromEnvelope = stripOpenClawEnvelope(prompt);
-  if (fromEnvelope !== null) return finish(fromEnvelope);
+  if (fromEnvelope !== null) return finish(fromEnvelope, true);
 
   let working = prompt;
 
@@ -470,5 +498,5 @@ function sanitise(prompt, stripTurnBoilerplate) {
   }
 
   // 3) OpenClaw 2026.10.x turn boilerplate (#992).
-  return finish(working);
+  return finish(working, working !== prompt);
 }
