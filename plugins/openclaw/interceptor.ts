@@ -1913,6 +1913,21 @@ export function createInterceptor(
     });
   }
 
+  /** #1031 (B1): a metadata-only row for `call` — same session key and
+   *  readiness pin as {@link emitAudit}, but NO call arguments reach the #224
+   *  binding. `attachEnforcementBinding` builds `actionKey` from a command's
+   *  tokens and keeps every dash-prefixed one verbatim (`--token=<value>`),
+   *  so a row whose preview is deliberately the tool name alone would still
+   *  carry an argument value in `actionKey`. Bound with no args, the key is
+   *  the normalised tool name and nothing else. */
+  function emitArgFreeAudit(entry: InterceptAuditEntry, call: CallAuditContext): void {
+    emitAuditWith(entry, {
+      sessionKey: options?.sessionGuard?.keyFor(call.sessionId) ?? undefined,
+      args: {},
+      readinessPin: call.readinessPin,
+    });
+  }
+
   /**
    * #372 — hang a one-shot decision writer on a minted approval card.
    *
@@ -2460,7 +2475,10 @@ export function createInterceptor(
           // is not also written: this row already counts the call once in
           // the readiness denominator (isCountedCall), and both would count
           // it twice.
-          emitAudit({
+          // #1031 (B1): "name only" covers the whole row, not just the
+          // preview — the binding gets no args either, so no argument value
+          // reaches `actionKey`. Session key and readiness pin are kept.
+          emitArgFreeAudit({
             ...guardAuditBase(context.toolName, v, `${context.toolName} :: ${drift ? 'contract-drift' : 'native-exec'}`),
             ...(drift ?? {}),
             action: 'allow',

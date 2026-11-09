@@ -23,6 +23,7 @@ import { nativeProvenanceAdapter } from '../index.js';
 import { createSessionTaintStore } from '../session-taint.js';
 import { evaluateToolCall, nativeArtifactCaptures } from '../../../src/defence/iron-dome/tool-action-guard.js';
 import { createNativeArtifactProbe, createNativeProvenanceBudget, MAX_RESOLVE_COMPONENTS, MAX_RESOLVE_SYMLINKS, recordNativeArtifactCaptures } from '../../../src/defence/iron-dome/native-exec-provenance.js';
+import { attachEnforcementBinding, hasRequiredBinding } from '../../../src/defence/iron-dome/enforcement-binding.js';
 
 const ELF_STUB = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, ...new Array(56).fill(0)]);
 const SESSION = 'agent-session';
@@ -334,5 +335,182 @@ describe('#1025 OpenClaw interceptor — audit-only nativeExec', () => {
   it('the adapter is undefined on an older dist without the exports', () => {
     expect(nativeProvenanceAdapter({ sessionKeyFor: () => KEY })).toBeUndefined();
     expect(nativeProvenanceAdapter(null)).toBeUndefined();
+  });
+});
+
+/**
+ * #1031 (B1) — the benign native-exec row is name-only on EVERY field, not
+ * just its preview. Wired with the REAL #224 binding (`attachEnforcementBinding`,
+ * the same call shape as the plugin's own `bindAudit` in index.ts), whose
+ * `actionKey` keeps a dash-prefixed command token verbatim. Before the fix the
+ * row's `actionKey` carried `--token=<value>`; the assertions read the whole
+ * serialized row as written to the local audit file, the cloud sink and the
+ * session-guard index.
+ */
+describe('#1031 B1 — the benign native-exec row carries no argument value in any field', () => {
+  // Synthetic; never a real credential. Distinctive so a substring hit is unambiguous.
+  const CANARY = 'scCanary1031B1qZ7xV2mK9pL4tR8w';
+  const COMMAND = `LD_PRELOAD=./libx.so /bin/true --token=${CANARY}`;
+  const PIN = { adapter: 'fixture-adapter', policy: 'fixture-policy' };
+  let auditDir: string;
+  let prevAudit: string | undefined;
+
+  beforeEach(() => {
+    prevAudit = process.env.SHIELDCORTEX_AUDIT_DIR;
+    auditDir = path.join(root, 'audit');
+    process.env.SHIELDCORTEX_AUDIT_DIR = auditDir;
+  });
+  afterEach(() => {
+    if (prevAudit === undefined) delete process.env.SHIELDCORTEX_AUDIT_DIR;
+    else process.env.SHIELDCORTEX_AUDIT_DIR = prevAudit;
+  });
+
+  /** Every row the interceptor appended to the local audit file, raw lines. */
+  function durableLines(): string[] {
+    if (!fs.existsSync(auditDir)) return [];
+    return fs.readdirSync(auditDir)
+      .filter((n) => /^realtime-.*\.jsonl$/.test(n))
+      .flatMap((n) => fs.readFileSync(path.join(auditDir, n), 'utf-8').split('\n').filter(Boolean));
+  }
+
+  function bound(actionGuard: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) {
+    const sink: InterceptAuditEntry[] = [];
+    const indexed: InterceptAuditEntry[] = [];
+    const i = createInterceptor(
+      {
+        ...DEFAULT_CONFIG,
+        actionGuard: { enabled: true, enforce: true, autoApprove: [], ...actionGuard },
+        logger: { info: () => {}, warn: () => {} },
+      } as never,
+      okPipeline as never,
+      {
+        evaluateToolCall: evaluateToolCall as never,
+        onAuditEntry: (e) => sink.push(e),
+        nativeProvenance: nativeProvenanceAdapter(fakeDefence()),
+        sessionGuard: { keyFor: (id: string | undefined) => (id === SESSION ? KEY : null), index: (e: InterceptAuditEntry) => { indexed.push(e); } },
+        bindAudit: (entry, args) => attachEnforcementBinding(entry, {
+          plane: 'action_guard',
+          hookName: 'before_tool_call',
+          pluginId: 'shieldcortex-realtime',
+          tool: entry.tool,
+          args: args ?? {},
+          home: root,
+        }),
+        ...extra,
+      } as never,
+    );
+    return { i, sink, indexed };
+  }
+
+  it('control: the canary is a value the binding keeps verbatim, and the call is a benign allow', () => {
+    // Without this, a "canary absent" assertion could pass without the leak path being reachable.
+    const key = attachEnforcementBinding({ tool: 'Bash' }, {
+      plane: 'action_guard', hookName: 'before_tool_call', pluginId: 'shieldcortex-realtime',
+      tool: 'Bash', args: { command: COMMAND }, home: root,
+    }).actionKey;
+    expect(key).toContain(CANARY);
+    const v = evaluateToolCall('Bash', { command: COMMAND });
+    expect(v.decision).toBe('allow');
+    expect(v.severity).toBe('benign');
+    expect(v.signals).toEqual([]);
+  });
+
+  it('benign allow + nativeExec: one bound row; the canary is in no field of the durable, cloud or index row', async () => {
+    const b = bound();
+    await plant(b.i, 'libx.so');
+    const before = durableLines().length;
+    b.sink.length = 0;
+    b.indexed.length = 0;
+    expect(await outcome(b.i.handleToolCall({ toolName: 'Bash', arguments: { command: COMMAND }, sessionId: SESSION, cwd: work }))).toBe('resolved');
+
+    const lines = durableLines().slice(before);
+    expect(lines).toHaveLength(1); // one row: no second readiness tally, no recognised-allow row
+    for (const text of [lines[0], JSON.stringify(b.sink), JSON.stringify(b.indexed)]) {
+      expect(text).not.toContain(CANARY);
+      expect(text).not.toContain('--token');
+    }
+    const row = JSON.parse(lines[0]) as InterceptAuditEntry & Record<string, unknown>;
+    expect(row.preview).toBe('Bash :: native-exec');
+    expect(row.nativeExec).toEqual({ uses: [{ action: 'load', provenance: 'agent-written' }] });
+    // Still a fully bound row, keyed to its session.
+    expect(hasRequiredBinding(row)).toBe(true);
+    expect(row.actionKey).toBe('bash');
+    expect(row.sessionKey).toBe(KEY);
+    expect(b.sink).toHaveLength(1);
+    expect(b.indexed).toHaveLength(1);
+  });
+
+  it('enforce-when-ready: the same single row keeps its readiness pin and session key, and still carries no argument value', async () => {
+    const b = bound({ readinessGate: true }, {
+      readiness: { pin: () => PIN, resolve: async () => ({ mode: 'enforce', transition: null }), channelConfigured: () => false },
+    });
+    await plant(b.i, 'libx.so');
+    const before = durableLines().length;
+    expect(await outcome(b.i.handleToolCall({ toolName: 'Bash', arguments: { command: COMMAND }, sessionId: SESSION, cwd: work }))).toBe('resolved');
+    const lines = durableLines().slice(before);
+    expect(lines).toHaveLength(1); // the observation row counts the call; no separate tally row
+    expect(lines[0]).not.toContain(CANARY);
+    const row = JSON.parse(lines[0]) as InterceptAuditEntry & Record<string, unknown>;
+    expect(row.readinessTally).toBeUndefined();
+    expect(row.readinessPin).toEqual(PIN);
+    expect(row.sessionKey).toBe(KEY);
+    expect(row.preview).toBe('Bash :: native-exec');
+    expect(hasRequiredBinding(row)).toBe(true);
+  });
+
+  it('the contract-drift row that shares this branch is bound without args too', async () => {
+    const b = bound();
+    const args = { command: `/bin/true --token=${CANARY}`, title: 'drifted field' };
+    // Precondition: a benign allow whose only reason for a row is the drift.
+    const v = evaluateToolCall('exec', args);
+    expect(v.decision).toBe('allow');
+    expect(v.severity).toBe('benign');
+    expect(v.contractDrift?.droppedKeys).toEqual(['title']);
+    const before = durableLines().length;
+    expect(await outcome(b.i.handleToolCall({ toolName: 'exec', arguments: args, sessionId: SESSION, cwd: work }))).toBe('resolved');
+    const lines = durableLines().slice(before);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain(CANARY);
+    const row = JSON.parse(lines[0]) as InterceptAuditEntry & Record<string, unknown>;
+    expect(row.preview).toBe('exec :: contract-drift');
+    expect(row.actionKey).toBe('exec');
+    expect(row.sessionKey).toBe(KEY);
+  });
+});
+
+/**
+ * #1031 (B2) — through the plugin's own adapter: the probe it hands the
+ * evaluator still carries its call budget's `expired()`, so a spent budget
+ * adds no `sameCall` label. Outcome and decision rows are the unwired ones.
+ */
+describe('#1031 B2 — a spent per-call budget adds no sameCall label on OpenClaw', () => {
+  function withBudget(budget: () => unknown) {
+    const captured: InterceptAuditEntry[] = [];
+    const i = createInterceptor(
+      { ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never,
+      okPipeline as never,
+      {
+        evaluateToolCall: evaluateToolCall as never,
+        onAuditEntry: (e) => captured.push(e),
+        nativeProvenance: nativeProvenanceAdapter({ ...fakeDefence(), createNativeProvenanceBudget: budget }),
+      },
+    );
+    return { i, captured };
+  }
+
+  it('live budget → exec/compiled-output/sameCall; spent budget → no nativeExec; same outcome and rows as unwired', async () => {
+    const cmd = { toolName: 'Bash', arguments: { command: 'cc main.c -o app && ./app' }, sessionId: SESSION, cwd: work };
+    const live = withBudget(() => createNativeProvenanceBudget({ clock: () => 0 }));
+    const spent = withBudget(() => createNativeProvenanceBudget({ clock: () => Number.NaN }));
+    const plain = run({ wired: false, tainted: false });
+    const want = await outcome(plain.i.handleToolCall(cmd));
+    expect(await outcome(live.i.handleToolCall(cmd))).toBe(want);
+    expect(await outcome(spent.i.handleToolCall(cmd))).toBe(want);
+    expect(live.captured.map(r => r.nativeExec).filter(Boolean)).toEqual([
+      { uses: [{ action: 'exec', provenance: 'compiled-output', sameCall: true }] },
+    ]);
+    expect(spent.captured.some(r => r.nativeExec)).toBe(false);
+    expect(decisionView(live.captured)).toEqual(decisionView(plain.captured));
+    expect(decisionView(spent.captured)).toEqual(decisionView(plain.captured));
   });
 });

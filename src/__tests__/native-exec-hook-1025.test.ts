@@ -327,4 +327,31 @@ describe('#1025 native-exec observation through the real Claude Code hook', () =
     expect(auditRows(recorded).some((r) => r.nativeExec)).toBe(false);
     expect(fs.existsSync(path.join(recorded.configDir, 'native-provenance'))).toBe(false);
   });
+
+  it('#1031 B1 pin: the benign native-exec row keeps argument values out of EVERY field, actionKey included', async () => {
+    // The OpenClaw row leaked a dash-prefixed argument through the #224
+    // binding's actionKey. On this plane the row is bound from the redacted
+    // surface, never the raw input; this pins that on the real hook and dist.
+    // Synthetic; never a real credential.
+    const CANARY = 'scCanary1031HookQ7vX2mK9pL4tR8';
+    await plant('libx.so');
+    const dir = path.join(recorded.configDir, 'audit');
+    const lines = () => (fs.existsSync(dir) ? fs.readdirSync(dir) : [])
+      .filter((n) => /^realtime-.*\.jsonl$/.test(n))
+      .flatMap((n) => fs.readFileSync(path.join(dir, n), 'utf-8').split('\n').filter(Boolean));
+    const before = lines().length;
+    const a = await call(recorded, 'Bash', { command: `LD_PRELOAD=./libx.so /bin/true --token=${CANARY}` });
+    expect(a.code).toBe(0);
+    const added = lines().slice(before);
+    expect(added).toHaveLength(1); // one row: the observation row, no tally row
+    expect(added[0]).not.toContain(CANARY);
+    expect(added[0]).not.toContain('--token');
+    const row = JSON.parse(added[0]) as Record<string, unknown>;
+    // The path under test was reached: an observed, bound benign-allow row.
+    expect(row.nativeExec).toEqual({ uses: [{ action: 'load', provenance: 'agent-written' }] });
+    expect(row.action).toBe('allow');
+    expect(typeof row.actionKey).toBe('string');
+    expect(row.actionKey).toBe('bash');
+    expect(typeof row.sessionKey).toBe('string');
+  });
 });
