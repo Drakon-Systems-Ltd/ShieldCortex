@@ -244,6 +244,8 @@ describe('#648 — WHY: one table, every signal the guard can emit', () => {
     'attributes-only', 'copy-contents', 'no-clobber', 'no-dereference', 'no-preserve', 'no-target-directory',
     'one-file-system', 'remove-destination', 'strip-trailing-slashes', 'symbolic-link', 'target-directory',
     'firewall-cmd', 'send-keys',
+    // #1025: `nativeExec` provenance enums on an audit-only field, never a signal.
+    'agent-written', 'compiled-output',
   ]);
 
   function stripComments(src: string): string {

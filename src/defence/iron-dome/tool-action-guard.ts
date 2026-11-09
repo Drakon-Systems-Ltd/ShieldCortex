@@ -38,6 +38,7 @@ import {
   RECIPIENT_LIST_KEYS, RECIPIENT_LIST_MAX,
 } from './tool-input-schema.js';
 import type { ContractDriftObservation } from './tool-input-schema.js';
+import type { NativeArtifactCapture, NativeArtifactProvenance } from './native-exec-provenance.js';
 import { forEachWindow } from '../scan-windows.js';
 import { bodyIsAllDataRead } from './heredoc-data-read.js';
 
@@ -110,6 +111,39 @@ export interface ToolGuardVerdict {
    * happens.
    */
   contractDrift?: ContractDriftObservation;
+  /**
+   * #1025 — AUDIT-ONLY native-exec provenance observation. This call runs,
+   * loads or names a native image (ELF / Mach-O / PE header) that the agent
+   * wrote or compiled earlier in this session, or compiles and runs it in
+   * this same call. Attached after the decision is final and NEVER read by any
+   * decision, severity, taint, approval or posture code: it cannot deny, hold
+   * or escalate. Content-free — enums only, no path text.
+   *
+   * Absent means "nothing observed", never "nothing ran": it is populated only
+   * when the caller wired `nativeArtifactProvenance` (a keyed session with the
+   * provenance store), and detection is best-effort (see
+   * `nativeExecObservation`).
+   */
+  nativeExec?: NativeExecObservation;
+}
+
+/** #1025 — one observed use of an agent-produced native image. */
+export interface NativeExecUse {
+  /** `exec`: in command position; `load`: a loader variable
+   *  (`LD_PRELOAD` / `LD_AUDIT` / `DYLD_INSERT_LIBRARIES`) or a shared-object
+   *  path in a call that names a loader API; `reference`: named somewhere the
+   *  tokeniser cannot prove runs it (e.g. `eval "$(echo ./x)"`) — it may or
+   *  may not execute. */
+  action: 'exec' | 'load' | 'reference';
+  provenance: NativeArtifactProvenance;
+  /** Produced by a compiler earlier in THIS call; its bytes did not exist
+   *  when the call was evaluated, so the header was not inspected. */
+  sameCall?: true;
+}
+
+/** #1025 — the audit-only `nativeExec` verdict field. */
+export interface NativeExecObservation {
+  uses: NativeExecUse[];
 }
 
 // ── Tool-name recognition ───────────────────────────────────────────────────
@@ -5510,6 +5544,22 @@ export interface ToolGuardOptions {
    * the file body only, never the invocation.
    */
   isReviewedScript?: (scriptPath: string, source: string) => boolean;
+  /**
+   * #1025 — the audit-only native-exec provenance probe, bound by the caller
+   * to this call's session and cwd (native-exec-provenance.ts
+   * `createNativeArtifactProbe`). Given a path token the command runs, loads
+   * or names, it answers whether the agent wrote or compiled that native
+   * image earlier in the session. Its answer only ever fills
+   * `verdict.nativeExec`; it is consulted after the decision is final and
+   * cannot change it. Same purity contract as `resolveScriptSource`: never
+   * throws, never blocks; a throw is treated as "not observed".
+   *
+   * #1031: the real probe also carries `expired()`, its call's shared store
+   * budget. Once that says spent, no `sameCall` label is added either (that
+   * label reads no store, so the probe's own checks cannot stop it). A probe
+   * without `expired` keeps the earlier behaviour; one that throws is spent.
+   */
+  nativeArtifactProvenance?: ((token: string) => NativeArtifactProvenance | null) & { expired?: () => boolean };
 }
 
 interface ScriptFold {
@@ -7070,7 +7120,14 @@ export function evaluateToolCall(
   // recursive rescan passes (`skipSchema`) never re-observe: the outer call
   // already did, and a doubled row would double-count in every summary.
   const drift = contractDriftFor(toolName, args);
-  return drift ? { ...v, contractDrift: drift } : v;
+  if (drift) v = { ...v, contractDrift: drift };
+  // #1025: the native-exec observation is attached LAST, to the final
+  // verdict, and nothing reads it back — decision, severity and signals are
+  // exactly what they were without it. A catastrophic block is terminal and
+  // doorless (above), so no store work runs on its path at all.
+  if (v.decision === 'block' && v.severity === 'catastrophic') return v;
+  const nativeExec = nativeExecObservation(toolName, args, options);
+  return nativeExec ? { ...v, nativeExec } : v;
 }
 
 /**
@@ -7967,4 +8024,349 @@ function verdict(
   return matches && matches.length > 0
     ? { decision, severity, family, action, reason, signals, matches }
     : { decision, severity, family, action, reason, signals };
+}
+
+// ── #1025 native-exec provenance observation (AUDIT-ONLY) ──────────────────
+//
+// Owner decision on #907 (27 Oct 2026, D4): running or loading a native image
+// the agent wrote or compiled is LOGGED, never denied or held. This section
+// only ever produces `verdict.nativeExec`, after the decision is final, and
+// nothing reads that field back. It reuses this module's existing shell
+// readers — `splitCommandStatements`, `tokeniseStatement`, `commandWordIndex`,
+// `isInlineProgramFlag`, `maskSinkFreeInlinePrograms` — and adds no lexer. The
+// frozen #907 PR 1 (93810414) showed that a deny/hold reading of shell has to
+// be exact and cannot be; an audit reading does not: a missed spelling is a
+// missed log line, never a bypass, so every residual below is a gap in the
+// log and nothing else.
+//
+// Best-effort residuals (documented, not closed):
+//   - a path built at runtime (`"$(echo .)/x"`, `$DIR/x`, globbing) is not
+//     resolved; a literal path inside `eval "$(…)"` is still reported as a
+//     `reference`;
+//   - a bare name found on PATH (`helper`, no `/`) is not resolved;
+//   - a relative path is resolved against the call's cwd AND against every
+//     literal `cd` / `pushd` directory named in the call (over-reporting is
+//     the safe side for a log); a computed directory (`cd "$X"`, `cd -`,
+//     `CDPATH`) is not followed;
+//   - loads through an API whose path is not a literal in the call (`dlopen`
+//     of a computed name, Python `import` of an extension module by module
+//     name) are not seen; executable-memory mapping (#907 row D) is out of
+//     scope;
+//   - a write the capture reader does not recognise (`cp`, `mv`, `install`,
+//     archive extraction, a write inside a script file) is not recorded, so a
+//     later exec of it is not observed;
+//   - a command over OVERSIZED_COMMAND_LENGTH is neither captured nor
+//     observed;
+//   - same-call write-then-run is observed only for a recognised compiler's
+//     output, because a fresh redirect target is usually a script;
+//   - statement splitting is the module's fail-safe one (it splits inside
+//     quotes), so a multi-line quoted string can mint a spurious capture or
+//     label a mention `exec`. A spurious capture is inert unless that exact
+//     path later becomes a native image its record did not pre-date (Rule
+//     P); a mislabel is a wrong word on a log line. Neither moves a verdict.
+
+/** Compilers whose output (`-o X`, or `a.out` by default) is recorded as
+ *  `compiled-output`. `go build -o X` is handled separately. */
+const NATIVE_COMPILER = /^(?:cc|gcc|g\+\+|c\+\+|clang|clang\+\+|tcc|nvcc|ghc|rustc|gfortran|ld|ld\.lld|ld\.gold)$/;
+/** Compiler flags that stop before a linked image (no `a.out`). */
+const NO_LINK_FLAG = /^-(?:c|S|E|M|MM|fsyntax-only)$/;
+/** Variables that make the dynamic loader map a library into a process. */
+const LOADER_ENV = /^(?:LD_PRELOAD|LD_AUDIT|DYLD_INSERT_LIBRARIES)=(.*)$/;
+/** Shared-object spellings. */
+const SHARED_OBJECT_PATH = /\.(?:so(?:\.\d+)*|dylib|bundle|node|dll|pyd)$/i;
+/** A loader API named anywhere in the call. Only decides `load` versus
+ *  `reference` for a shared-object path; it can never add an observation. */
+const LOADER_API = /\b(?:dlopen|CDLL|cdll|WinDLL|LoadLibrary\w*|ctypes|cffi|ffi|Fiddle|DynaLoader|System\.load(?:Library)?|process\.dlopen|require|LD_PRELOAD|LD_AUDIT|DYLD_INSERT_LIBRARIES)\b/;
+/** An explicit path literal anywhere in the text (the `reference` sweep). */
+const PATH_LITERAL_RE = /(?:^|[\s'"`=:(,[{<>|;&])((?:\.{1,2}\/|~\/|\/)[^\s'"`;|&<>(){}[\],:$*?]+)/g;
+const MAX_NATIVE_CANDIDATES = 16;
+const MAX_NATIVE_USES = 8;
+
+/** A program / library word worth probing: a literal path containing `/`. */
+function isNativePathWord(tok: string | undefined): tok is string {
+  return typeof tok === 'string' && tok.length > 0 && tok.length <= 4096
+    && tok.includes('/') && !tok.startsWith('-') && !tok.startsWith('/dev/') && !tok.startsWith('//')
+    && !/[$`*?]/.test(tok) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(tok);
+}
+
+const MAX_CD_DIRS = 4;
+
+/** Literal directories a `cd` / `pushd` in this text may move to. Whether the
+ *  change runs, or applies to a given statement, is not modelled: a relative
+ *  target is probed under each of these AND under the call's cwd. */
+function literalCdDirs(surface: string): string[] {
+  const dirs: string[] = [];
+  for (const stmt of splitCommandStatements(surface)) {
+    if (dirs.length >= MAX_CD_DIRS) break;
+    const tokens = tokeniseStatement(stmt);
+    let i = commandWordIndex(tokens);
+    if (i < tokens.length && commandBaseName(tokens[i]) === 'eval') i++;
+    const base = i < tokens.length ? commandBaseName(tokens[i]) : '';
+    if (base !== 'cd' && base !== 'pushd') continue;
+    const d = tokens.slice(i + 1).find(a => !a.startsWith('-'));
+    if (!d || /[$`*?]/.test(d) || d.startsWith('~') && !d.startsWith('~/') || d.length > 4096) continue;
+    const clean = d.replace(/\/+$/, '');
+    if (clean && clean !== '.' && !dirs.includes(clean)) dirs.push(clean);
+  }
+  return dirs;
+}
+
+/** `tok` re-anchored under each literal `cd` directory (relative tokens only). */
+function underCdDirs(tok: string, dirs: readonly string[]): string[] {
+  if (tok.startsWith('/') || tok.startsWith('~')) return [];
+  const rel = tok.replace(/^(?:\.\/)+/, '');
+  return dirs.map(d => `${d}/${rel}`);
+}
+
+/** `./out/x` and `out/x` name the same file from one cwd. Pure, lexical. */
+function sameCallKey(tok: string): string {
+  let t = tok.replace(/\/{2,}/g, '/');
+  while (t.startsWith('./')) t = t.slice(2);
+  return t;
+}
+
+/**
+ * The write / compile targets a call names, for the caller to record in the
+ * provenance store (native-exec-provenance.ts). PURE. Recognised:
+ *   - a write-family tool's path (`Write`, `Edit`, …) → `agent-written`;
+ *   - shell redirection targets (`> f`, `>> f`, `2> f`, `&> f`), `tee f`,
+ *     `dd of=f`, `curl -o f` / `--output f`, `wget -O f` → `agent-written`;
+ *   - a recognised compiler's `-o f` (or `a.out` when linking with no `-o`),
+ *     and `go build -o f` → `compiled-output`.
+ * Over-capture is harmless: a record only matters if that exact path is later
+ * a native image whose bytes changed after the record was made (Rule P).
+ */
+export function nativeArtifactCaptures(
+  toolName: string,
+  args: Record<string, unknown> = {},
+): NativeArtifactCapture[] {
+  const out: NativeArtifactCapture[] = [];
+  const seen = new Set<string>();
+  const push = (token: string | undefined, kind: NativeArtifactCapture['kind']): void => {
+    if (typeof token !== 'string') return;
+    const t = token.trim();
+    if (!t || t.startsWith('-') || t.startsWith('&') || t.startsWith('/dev/') || t.length > 4096) return;
+    if (/[$`*?]/.test(t)) return;
+    const key = `${kind}\0${t}`;
+    if (seen.has(key) || out.length >= MAX_NATIVE_CANDIDATES) return;
+    seen.add(key);
+    out.push({ token: t, kind });
+  };
+  try {
+    if (classifyFamily(toolName) === 'write') push(extractPath(args), 'agent-written');
+    const raw = deobfuscateIfs(extractCommand(args));
+    const command = raw.length > OVERSIZED_COMMAND_LENGTH ? '' : raw;
+    // The same surface script discovery reads: comments and inert quoted
+    // heredoc bodies are not statements, so a compiler only MENTIONED there
+    // mints no record.
+    if (command) {
+      const surface = scriptDiscoverySurface(command);
+      const before = out.length;
+      capturesInShell(surface, push, 0);
+      const dirs = literalCdDirs(surface);
+      for (const c of out.slice(before)) for (const t of underCdDirs(c.token, dirs)) push(t, c.kind);
+    }
+  } catch {
+    // Observation only: a reader fault records nothing.
+  }
+  return out;
+}
+
+function capturesInShell(
+  text: string,
+  push: (token: string | undefined, kind: NativeArtifactCapture['kind']) => void,
+  depth: number,
+): void {
+  if (depth > MAX_INLINE_RECURSION) return;
+  for (const stmt of splitCommandStatements(text)) {
+    if (!stmt.trim()) continue;
+    const tokens = tokeniseStatement(stmt);
+    // Redirections can sit anywhere in a statement.
+    for (let j = 0; j < tokens.length; j++) {
+      const t = tokens[j];
+      const m = t.match(/^(?:\d*|&)>>?\|?(.*)$/);
+      if (!m) continue;
+      push(m[1] ? m[1] : tokens[j + 1], 'agent-written');
+    }
+    const i = commandWordIndex(tokens);
+    if (i >= tokens.length) continue;
+    const base = commandBaseName(tokens[i]);
+    const rest = tokens.slice(i + 1);
+    if (/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(base)) {
+      const c = rest.findIndex(a => a.startsWith('-') && isInlineProgramFlag(base, a));
+      if (c >= 0 && rest[c + 1] !== undefined) capturesInShell(rest[c + 1], push, depth + 1);
+      continue;
+    }
+    if (base === 'eval') { capturesInShell(rest.join(' '), push, depth + 1); continue; }
+    if (base === 'tee') {
+      for (const a of rest) if (!a.startsWith('-') && !/^[<>]/.test(a)) push(a, 'agent-written');
+      continue;
+    }
+    if (base === 'dd') {
+      for (const a of rest) if (a.startsWith('of=')) push(a.slice(3), 'agent-written');
+      continue;
+    }
+    if (base === 'curl' || base === 'wget') {
+      const short = base === 'curl' ? '-o' : '-O';
+      const long = base === 'curl' ? '--output' : '--output-document';
+      for (let j = 0; j < rest.length; j++) {
+        const a = rest[j];
+        if (a === short || a === long) push(rest[++j], 'agent-written');
+        else if (a.startsWith(`${long}=`)) push(a.slice(long.length + 1), 'agent-written');
+        else if (a.startsWith(short) && a.length > 2 && !a.startsWith('--')) push(a.slice(2), 'agent-written');
+      }
+      continue;
+    }
+    const goBuild = base === 'go' && rest[0] === 'build';
+    if (NATIVE_COMPILER.test(base) || goBuild) {
+      let named = false;
+      let linked = !goBuild;
+      for (let j = goBuild ? 1 : 0; j < rest.length; j++) {
+        const a = rest[j];
+        if (a === '-o') { push(rest[++j], 'compiled-output'); named = true; }
+        else if (a.startsWith('-o') && a.length > 2 && !goBuild) { push(a.slice(2), 'compiled-output'); named = true; }
+        else if (NO_LINK_FLAG.test(a)) linked = false;
+      }
+      if (!named && linked && base !== 'ghc' && base !== 'rustc') push('a.out', 'compiled-output');
+    }
+  }
+}
+
+type NativeCandidate = { token: string; action: NativeExecUse['action'] };
+
+/**
+ * Path tokens the command runs (`exec`), maps through the loader (`load`) or
+ * merely names (`reference`). PURE. Statement roles come from the module's
+ * existing readers on the same surface script discovery uses
+ * (`scriptDiscoverySurface`: comments and inert quoted heredoc bodies
+ * removed; `maskSinkFreeInlinePrograms`: a path literal inside a sink-free
+ * `python3 -c` program is never a command word). A final literal sweep over
+ * the RAW command picks up every other explicit path as a `reference` ("read
+ * more, never less" — the label, not the observation, is what is uncertain).
+ */
+function nativeExecCandidates(command: string): NativeCandidate[] {
+  const found = new Map<string, NativeExecUse['action']>();
+  const rank = { reference: 0, load: 1, exec: 2 } as const;
+  const add = (token: string, action: NativeExecUse['action']): void => {
+    const prev = found.get(token);
+    if (prev !== undefined) {
+      if (rank[action] > rank[prev]) found.set(token, action);
+      return;
+    }
+    if (found.size >= MAX_NATIVE_CANDIDATES) return;
+    found.set(token, action);
+  };
+  const loaderLibs = (value: string): void => {
+    for (const lib of value.split(/[:\s]+/)) if (isNativePathWord(lib)) add(lib, 'load');
+  };
+  const walk = (text: string, depth: number): void => {
+    if (depth > MAX_INLINE_RECURSION) return;
+    for (const stmt of splitCommandStatements(maskSinkFreeInlinePrograms(text))) {
+      if (!stmt.trim()) continue;
+      const tokens = tokeniseStatement(stmt);
+      const i = commandWordIndex(tokens);
+      // `command -v X` / `command -V X` only looks X up.
+      const lookupOnly = tokens.slice(0, i).some((t, k) => commandBaseName(t) === 'command' && /^-[A-Za-z]*[vV]/.test(tokens[k + 1] ?? ''));
+      for (let k = 0; k < Math.min(i, tokens.length); k++) {
+        const t = tokens[k];
+        const m = t.match(LOADER_ENV);
+        if (m) loaderLibs(m[1]);
+        // A path spelled like a wrapper (`./env`, `./sudo`) was skipped as
+        // one by `commandWordIndex`, but it is the program the shell runs.
+        else if (isNativePathWord(t) && EXEC_WRAPPER.test(commandBaseName(t))) add(t, 'exec');
+      }
+      if (i >= tokens.length) continue;
+      const cmd = tokens[i];
+      const base = commandBaseName(cmd);
+      const rest = tokens.slice(i + 1);
+      if (base === 'export' || base === 'declare' || base === 'typeset') {
+        for (const a of rest) { const m = a.match(LOADER_ENV); if (m) loaderLibs(m[1]); }
+        continue;
+      }
+      if (base === 'eval') { walk(rest.join(' '), depth + 1); continue; }
+      if (/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(base)) {
+        const c = rest.findIndex(a => a.startsWith('-') && isInlineProgramFlag(base, a));
+        if (c >= 0 && rest[c + 1] !== undefined) walk(rest[c + 1], depth + 1);
+      }
+      if (isNativePathWord(cmd) && !lookupOnly) add(cmd, SHARED_OBJECT_PATH.test(cmd) ? 'load' : 'exec');
+    }
+  };
+  const surface = scriptDiscoverySurface(command);
+  walk(surface, 0);
+  const loaderNamed = LOADER_API.test(command);
+  for (const m of command.matchAll(PATH_LITERAL_RE)) {
+    const tok = m[1];
+    if (!isNativePathWord(tok)) continue;
+    add(tok, loaderNamed && SHARED_OBJECT_PATH.test(tok) ? 'load' : 'reference');
+  }
+  const dirs = literalCdDirs(surface);
+  if (dirs.length > 0) {
+    for (const [tok, action] of [...found]) for (const t of underCdDirs(tok, dirs)) add(t, action);
+  }
+  return [...found].map(([token, action]) => ({ token, action }));
+}
+
+/**
+ * #1025 — build the audit-only `nativeExec` field for one call, or
+ * `undefined`. Runs only when the caller wired `nativeArtifactProvenance`
+ * (a keyed session with the provenance store); with no probe there is no
+ * established provenance and the verdict is returned exactly as before.
+ * Never throws: any fault is "not observed".
+ */
+export function nativeExecObservation(
+  toolName: string,
+  args: Record<string, unknown>,
+  options?: ToolGuardOptions,
+): NativeExecObservation | undefined {
+  const probe = options?.nativeArtifactProvenance;
+  if (typeof probe !== 'function') return undefined;
+  try {
+    const command = deobfuscateIfs(extractCommand(args));
+    // An oversized command is already opaque to the guard; observing it would
+    // only add hot-path work for a best-effort log line.
+    if (!command || command.length > OVERSIZED_COMMAND_LENGTH) return undefined;
+    const compiledHere = new Set(
+      nativeArtifactCaptures(toolName, args)
+        .filter(c => c.kind === 'compiled-output')
+        .map(c => sameCallKey(c.token)),
+    );
+    // #1031: a `null` from the probe is "no record" OR "the shared budget is
+    // spent" — it cannot say which. `sameCall` is derived without the store,
+    // so it asks the budget itself: past the deadline nothing more is
+    // labelled, this label included. Checked per candidate, after that
+    // candidate's lookup, so a budget the lookup just spent counts.
+    const budgetSpent = (): boolean => {
+      const e = (probe as { expired?: unknown }).expired;
+      if (typeof e !== 'function') return false;
+      try {
+        return e.call(probe) !== false;
+      } catch {
+        return true;
+      }
+    };
+    const uses: NativeExecUse[] = [];
+    const seen = new Set<string>();
+    const note = (u: NativeExecUse): void => {
+      const key = `${u.action}/${u.provenance}/${u.sameCall ? 1 : 0}`;
+      if (seen.has(key) || uses.length >= MAX_NATIVE_USES) return;
+      seen.add(key);
+      uses.push(u);
+    };
+    for (const c of nativeExecCandidates(command)) {
+      let provenance: NativeArtifactProvenance | null = null;
+      try {
+        provenance = probe(c.token);
+      } catch {
+        provenance = null;
+      }
+      if (provenance === 'agent-written' || provenance === 'compiled-output' || provenance === 'ambiguous') {
+        note({ action: c.action, provenance });
+      } else if (c.action !== 'reference' && compiledHere.has(sameCallKey(c.token)) && !budgetSpent()) {
+        note({ action: c.action, provenance: 'compiled-output', sameCall: true });
+      }
+    }
+    return uses.length > 0 ? { uses } : undefined;
+  } catch {
+    return undefined;
+  }
 }

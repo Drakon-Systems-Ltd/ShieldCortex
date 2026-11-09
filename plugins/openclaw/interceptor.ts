@@ -166,6 +166,18 @@ export interface ToolGuardVerdictLike {
   reviewedScripts?: string[];
   /** Files a `$(cat …)` substitution spliced into the scanned command (#517). */
   expandedSubstitutions?: string[];
+  /** #1025 — audit-only native-exec provenance observation. Never a verdict
+   *  input: attached by the evaluator after the decision is final. */
+  nativeExec?: NativeExecLike;
+}
+/** #1025 — structurally typed like ToolGuardVerdictLike; the real type is
+ *  `NativeExecObservation` in tool-action-guard.ts. */
+export interface NativeExecLike {
+  uses: Array<{
+    action: 'exec' | 'load' | 'reference';
+    provenance: 'agent-written' | 'compiled-output' | 'ambiguous';
+    sameCall?: true;
+  }>;
 }
 /** Optional 4th-parameter seam on the real evaluator (issue #4): the guard core
  *  stays pure/synchronous and asks the CALLER to resolve an invoked script's
@@ -176,6 +188,9 @@ export interface ToolGuardEvaluatorOptions {
   /** #189: answers whether a human pinned this exact path + content as
    *  reviewed. An evaluator that predates the seam simply ignores it. */
   isReviewedScript?: (scriptPath: string, source: string) => boolean;
+  /** #1025: the audit-only native-exec provenance probe, bound to this call's
+   *  session and cwd. An evaluator that predates the seam ignores it. */
+  nativeArtifactProvenance?: (token: string) => 'agent-written' | 'compiled-output' | 'ambiguous' | null;
 }
 export type ToolGuardEvaluator = (
   toolName: string,
@@ -429,6 +444,13 @@ export interface InterceptAuditEntry {
    * gates, denies, or mints a card.
    */
   contractDrift?: ContractDriftLike;
+  /**
+   * #1025 — audit-only: this call ran, loaded or named a native image the
+   * agent wrote or compiled earlier in the session (or compiled and ran it in
+   * this call). Enums only, no path text. Rides on the call's own outcome and
+   * never gates, denies, holds, escalates or mints a card.
+   */
+  nativeExec?: NativeExecLike;
   /** #260 — plane origin so the session-guard summariser can find this row. */
   origin?: 'openclaw-interceptor';
   sessionKey?: string;
@@ -1716,6 +1738,19 @@ interface InterceptorOptions {
    *  limit, so a looping or compromised agent must not be able to spend it
    *  without bound. Exhausting it yields no judge, which yields a hold. */
   maxJudgeCallsPerMinute?: number;
+  /** #1025 — the audit-only native-exec provenance store, injected from
+   *  `shieldcortex/defence` (native-exec-provenance.ts). `probe` binds the
+   *  per-call lookup to this call's session and cwd (undefined: unkeyed, no
+   *  observation); `record` stores this call's write/compile targets after
+   *  its evaluation. Both are observation only — neither can change a
+   *  verdict, and a throw from either is swallowed. Absent on an older dist:
+   *  no observation, identical decisions. */
+  nativeProvenance?: {
+    /** A fresh store budget for ONE call, shared by its probe and record. */
+    budget?: () => unknown;
+    probe: (sessionId: string | undefined, cwd: string | undefined, budget?: unknown) => ToolGuardEvaluatorOptions['nativeArtifactProvenance'] | undefined;
+    record: (toolName: string, args: Record<string, unknown>, sessionId: string | undefined, cwd: string | undefined, budget?: unknown) => void;
+  };
   /** #260 — session-guard index. Injected from `shieldcortex/defence`. */
   sessionGuard?: {
     keyFor: (sessionId: string | undefined) => string | null;
@@ -1755,6 +1790,62 @@ const SESSION_TOOL_MEMORY = 12;
  *  being placed anywhere near a prompt. */
 const TOOL_NAME_SAFE = /[^A-Za-z0-9_.:-]/g;
 
+const NATIVE_EXEC_ACTIONS = new Set(['exec', 'load', 'reference']);
+const NATIVE_EXEC_PROVENANCE = new Set(['agent-written', 'compiled-output', 'ambiguous']);
+
+/** #1025: `{ nativeExec }` rebuilt from allowlisted enums (bounded), or `{}`.
+ *  The evaluator is injected across a package boundary, so its output is
+ *  not assumed to be well-formed. */
+function nativeExecField(v: ToolGuardVerdictLike): { nativeExec?: NativeExecLike } {
+  const uses = Array.isArray(v.nativeExec?.uses) ? v.nativeExec.uses : [];
+  const out: NativeExecLike['uses'] = [];
+  for (const u of uses.slice(0, 8)) {
+    const action = String(u?.action ?? '');
+    const provenance = String(u?.provenance ?? '');
+    if (!NATIVE_EXEC_ACTIONS.has(action) || !NATIVE_EXEC_PROVENANCE.has(provenance)) continue;
+    const use = { action, provenance } as NativeExecLike['uses'][number];
+    if (u?.sameCall === true) use.sameCall = true;
+    out.push(use);
+  }
+  return out.length > 0 ? { nativeExec: { uses: out } } : {};
+}
+
+/** A rule name as the guard core mints them (`openclaw-process-inspect`). */
+const RULE_NAME_SHAPE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/** Mirrors the core's CONTRACT_DRIFT_MAX_KEYS / _MAX_KEY_LEN (tool-input-schema.ts). */
+const DRIFT_MAX_KEYS = 12;
+const DRIFT_MAX_KEY_LEN = 64;
+const DRIFT_KEY_CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+/** Generous: only a malformed evaluator gets near it. */
+const DRIFT_META_MAX = 200;
+
+/** #1032: `threats` for a metadata-only row — rule names, bounded; anything
+ *  else an injected evaluator put in `signals` is dropped, not redacted. */
+function ruleNamesOnly(signals: unknown): string[] {
+  if (!Array.isArray(signals)) return [];
+  return [...new Set(signals.filter((s): s is string => typeof s === 'string' && RULE_NAME_SHAPE.test(s)))].slice(0, 25);
+}
+
+/** #1032: `contractDrift` rebuilt from its known fields. Same data the core
+ *  minted (contract id, dropped key NAMES, host revision) — any other field
+ *  an evaluator attached stays off the row. */
+function contractDriftField(d: ContractDriftLike): ContractDriftLike {
+  const keys = Array.isArray(d?.droppedKeys) ? d.droppedKeys : [];
+  const rev = d?.revision && typeof d.revision === 'object' ? d.revision : undefined;
+  return {
+    contract: String(d?.contract ?? '').slice(0, DRIFT_META_MAX),
+    droppedKeys: keys.slice(0, DRIFT_MAX_KEYS).map((k) => String(k).replace(DRIFT_KEY_CONTROL, ' ').slice(0, DRIFT_MAX_KEY_LEN)),
+    ...(d?.truncated === true || keys.length > DRIFT_MAX_KEYS ? { truncated: true } : {}),
+    ...(rev ? {
+      revision: {
+        measuredAt: String(rev.measuredAt ?? '').slice(0, DRIFT_META_MAX),
+        hostVersion: typeof rev.hostVersion === 'string' ? rev.hostVersion.slice(0, DRIFT_META_MAX) : null,
+        selection: String(rev.selection ?? '').slice(0, DRIFT_META_MAX),
+      },
+    } : {}),
+  };
+}
+
 export function createInterceptor(
   config: InterceptorConfig,
   pipeline: PipelineRunner,
@@ -1765,6 +1856,34 @@ export function createInterceptor(
 } {
   const denyCache = new DenyCache();
   const rateLimiter = new RateLimiter(options?.maxPromptsPerMinute ?? 5);
+  /** #1025: the probe option for this call, or nothing. Never throws. */
+  const nativeProvenanceOptions = (context: ToolCallContext, budget: unknown): Pick<ToolGuardEvaluatorOptions, 'nativeArtifactProvenance'> => {
+    if (!options?.nativeProvenance) return {};
+    try {
+      const probe = options.nativeProvenance.probe(context.sessionId, toolCallCwd(context), budget);
+      return typeof probe === 'function' ? { nativeArtifactProvenance: probe } : {};
+    } catch {
+      return {};
+    }
+  };
+  /** #1025: this call's ONE store budget (probe + record + sweep). Local to
+   *  the call, so a concurrent call never shares or resets it. Never throws. */
+  const nativeProvenanceBudget = (): unknown => {
+    try {
+      return options?.nativeProvenance?.budget?.();
+    } catch {
+      return undefined;
+    }
+  };
+  /** #1025: record write/compile targets. Never throws, returns nothing. A
+   *  `block` records nothing — the call never runs, so its writes never
+   *  happen, and no store work stands between the deny and its delivery. */
+  const recordNativeProvenance = (context: ToolCallContext, decision: unknown, budget: unknown): void => {
+    if (!options?.nativeProvenance || decision === 'block') return;
+    try {
+      options.nativeProvenance.record(context.toolName, context.arguments || {}, context.sessionId, toolCallCwd(context), budget);
+    } catch { /* observation only */ }
+  };
   const log = config.logger ?? { info: console.log, warn: console.warn };
   const onAuditEntry = options?.onAuditEntry;
   const bindAudit = options?.bindAudit;
@@ -1826,6 +1945,21 @@ export function createInterceptor(
     emitAuditWith(entry, {
       sessionKey: options?.sessionGuard?.keyFor(call.sessionId) ?? undefined,
       args: call.args,
+      readinessPin: call.readinessPin,
+    });
+  }
+
+  /** #1031 (B1): a metadata-only row for `call` — same session key and
+   *  readiness pin as {@link emitAudit}, but NO call arguments reach the #224
+   *  binding. `attachEnforcementBinding` builds `actionKey` from a command's
+   *  tokens and keeps every dash-prefixed one verbatim (`--token=<value>`),
+   *  so a row whose preview is deliberately the tool name alone would still
+   *  carry an argument value in `actionKey`. Bound with no args, the key is
+   *  the normalised tool name and nothing else. */
+  function emitArgFreeAudit(entry: InterceptAuditEntry, call: CallAuditContext): void {
+    emitAuditWith(entry, {
+      sessionKey: options?.sessionGuard?.keyFor(call.sessionId) ?? undefined,
+      args: {},
       readinessPin: call.readinessPin,
     });
   }
@@ -1900,6 +2034,28 @@ export function createInterceptor(
       ...(v.reviewedScripts && v.reviewedScripts.length > 0 ? { reviewedScripts: v.reviewedScripts } : {}),
       // #517: files a `$(cat …)` substitution spliced into the scanned command.
       ...(v.expandedSubstitutions && v.expandedSubstitutions.length > 0 ? { expandedSubstitutions: v.expandedSubstitutions } : {}),
+      // #1025: audit-only native-exec observation, rebuilt from enums.
+      ...nativeExecField(v),
+    };
+  }
+
+  /** #1032 (B1 r2): the benign observation / contract-drift row, built from
+   *  an explicit allow-list — NOT from {@link guardAuditBase}, which copies
+   *  the verdict's evidence fields: `matches` spans, `reviewedScripts` and
+   *  `expandedSubstitutions` are literal text from the command (a `$(cat
+   *  ./<path>)` operand, a `sh ./<dir>/../x.sh` path). This row is name-only
+   *  by contract, so every field here is fixed, an enum, a bounded rule name,
+   *  or a dropped key NAME; the values are what the base would have written
+   *  for an allow. Paired with {@link emitArgFreeAudit} for the binding. */
+  function benignObservationEntry(toolName: string, v: ToolGuardVerdictLike, drift: ContractDriftLike | undefined): InterceptAuditEntry {
+    return {
+      type: 'intercept', tool: toolName, severity: 'low',
+      firewallResult: 'ACTION_GUARD', threats: ruleNamesOnly(v.signals),
+      anomalyScore: 0.1, trustScore: 0, sensitivityLevel: 'INTERNAL', fragmentationScore: null, pipelineDurationMs: 0,
+      preview: `${toolName} :: ${drift ? 'contract-drift' : 'native-exec'}`.slice(0, 200), ts: new Date().toISOString(),
+      ...(drift ? { contractDrift: contractDriftField(drift) } : {}),
+      ...nativeExecField(v),
+      action: 'allow', outcome: 'allowed',
     };
   }
 
@@ -2249,6 +2405,7 @@ export function createInterceptor(
     }
 
     let v: ToolGuardVerdictLike;
+    const nativeBudget = nativeProvenanceBudget();
     try {
       // 4th arg (issue #4): lets the pure guard core scan the CONTENTS of a
       // script the command invokes (`bash deploy.sh`) through this fs-backed
@@ -2260,12 +2417,13 @@ export function createInterceptor(
         ...(actionGuardCfg.reviewedScripts && actionGuardCfg.reviewedScripts.length > 0
           ? { isReviewedScript: createReviewedScriptCheck(actionGuardCfg.reviewedScripts, toolCallCwd(context)) }
           : {}),
+        // #1025: audit-only native-exec provenance, bound to this session.
+        ...nativeProvenanceOptions(context, nativeBudget),
       });
     } catch (err) {
       handleGuardUnavailable(context, `action-guard error: ${err instanceof Error ? err.message : err}`, call);
       return;
     }
-
     // #233: a prompt injection detected on the CONVERSATION path earlier in this
     // session tightens the guard by one notch for a bounded window — sensitive
     // work starts asking, dangerous work stops. Benign work is untouched: an
@@ -2312,6 +2470,11 @@ export function createInterceptor(
         v = { ...v, decision: esc.decision, reason: `${v.reason} — ESCALATED by tainted session: ${taint.reason}` };
       }
     }
+    // #1025: record this call's write/compile targets after its own
+    // evaluation AND the taint rewrite, so a call taint turned into a `block`
+    // records nothing (it never runs). Observation only — never reads or
+    // changes `v` beyond its final decision.
+    recordNativeProvenance(context, v.decision, nativeBudget);
 
     // ── Native contract drift observation ────────────────────────────────
     // A reviewed host contract grew fields ShieldCortex does not read. The
@@ -2354,7 +2517,7 @@ export function createInterceptor(
           const allowPreview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
           emitAudit({ ...guardAuditBase(context.toolName, v, allowPreview), ...(drift ?? {}), action: 'allow', outcome: 'allowed' }, call);
           wrote = true;
-        } else if (drift) {
+        } else if (drift || nativeExecField(v).nativeExec) {
           wrote = true;
           // A benign allow is normally unaudited — but drift is the one thing
           // about it worth keeping, so it rides on ONE row of its own rather
@@ -2362,12 +2525,18 @@ export function createInterceptor(
           // tool name and nothing else: a drifted field may hold a prompt or a
           // token, and unlike `summariseToolArgs` this row must never be a
           // channel for a value the guard just refused to read.
-          emitAudit({
-            ...guardAuditBase(context.toolName, v, `${context.toolName} :: contract-drift`),
-            ...drift,
-            action: 'allow',
-            outcome: 'allowed',
-          }, call);
+          // #1025: the native-exec observation is the other such thing — same
+          // single row, same name-only preview, same `auditAllows` opt-out.
+          // Like the drift row, it sets `wrote`, so the #509 tally row below
+          // is not also written: this row already counts the call once in
+          // the readiness denominator (isCountedCall), and both would count
+          // it twice.
+          // #1031 (B1): "name only" covers the whole row, not just the
+          // preview — the binding gets no args either, so no argument value
+          // reaches `actionKey`. Session key and readiness pin are kept.
+          // #1032: and the row itself is an allow-list projection, so the
+          // verdict's path evidence (#189 / #517) never rides along.
+          emitArgFreeAudit(benignObservationEntry(context.toolName, v, drift?.contractDrift), call);
         }
       }
       if (!wrote && gate.whenReady) {

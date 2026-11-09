@@ -559,6 +559,108 @@ async function loadScriptResolver(base) {
 }
 
 /**
+ * #1025 — the audit-only native-exec provenance store. Lazy, exactly like the
+ * resolver above: a static import that failed would crash the hook, and a
+ * crashed hook is an allow. A missing module returns null and the hook runs
+ * with no observation — the decision is the same either way, because nothing
+ * this module returns is ever a decision input.
+ */
+async function loadNativeProvenance() {
+  const distRoot = hookDistRoot();
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'native-exec-provenance.js')).href
+    );
+    return typeof mod.createNativeArtifactProbe === 'function'
+      && typeof mod.recordNativeArtifactCaptures === 'function'
+      ? mod
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** #1025 — the session key provenance is recorded under, or null. Unkeyed
+ *  and unresolved sessions record and observe nothing (current behaviour). */
+function nativeProvenanceKey(baseExtra) {
+  if (baseExtra.namedIdentityUnresolved) return null;
+  return typeof baseExtra.sessionKey === 'string' && /^sc-[a-f0-9]{16}$/.test(baseExtra.sessionKey)
+    ? baseExtra.sessionKey
+    : null;
+}
+
+/** #1025 — the evaluator option that binds the provenance probe to this
+ *  call's session and RAW payload cwd (no process.cwd() fallback, so record
+ *  and query resolve a relative path from the same base). Never throws. */
+function nativeProvenanceOptions(store, baseExtra, rawCwd, budget) {
+  const key = nativeProvenanceKey(baseExtra);
+  if (!store || !key) return {};
+  try {
+    const probe = store.createNativeArtifactProbe({
+      sessionKey: key,
+      cwd: typeof rawCwd === 'string' ? rawCwd : undefined,
+      budget,
+    });
+    return typeof probe === 'function' ? { nativeArtifactProvenance: probe } : {};
+  } catch {
+    return {};
+  }
+}
+
+/** #1025 — this call's ONE store budget, shared by its probe, its record step
+ *  and the sweep that step may run. Made per call (never module-level), so
+ *  no other call can share or reset it. `undefined` on an older dist: the
+ *  store then makes its own default. Never throws. */
+function nativeProvenanceBudget(store) {
+  try {
+    return typeof store?.createNativeProvenanceBudget === 'function'
+      ? store.createNativeProvenanceBudget()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** #1025 — record this call's write/compile targets. After the call's own
+ *  evaluation; best effort; never throws and never touches the verdict. A
+ *  `block` verdict records nothing: the call never runs, so its writes never
+ *  happen, and no store work stands between the deny and its delivery. */
+function recordNativeProvenance(store, guard, toolName, toolInput, baseExtra, rawCwd, verdict, budget) {
+  const key = nativeProvenanceKey(baseExtra);
+  if (!store || !key || typeof guard?.nativeArtifactCaptures !== 'function') return;
+  if (!verdict || verdict.decision === 'block') return;
+  try {
+    const captures = guard.nativeArtifactCaptures(toolName, toolInput);
+    if (!Array.isArray(captures) || captures.length === 0) return;
+    store.recordNativeArtifactCaptures({
+      sessionKey: key,
+      captures,
+      cwd: typeof rawCwd === 'string' ? rawCwd : undefined,
+      budget,
+    });
+  } catch {
+    /* observation only: an unrecorded write is a missed log line later */
+  }
+}
+
+const SAFE_NATIVE_EXEC_ACTIONS = new Set(['exec', 'load', 'reference']);
+const SAFE_NATIVE_EXEC_PROVENANCE = new Set(['agent-written', 'compiled-output', 'ambiguous']);
+
+/** #1025 — rebuild `verdict.nativeExec` from allowlisted enums only, bounded,
+ *  the same treatment every other verdict field written to the row gets. */
+function safeNativeExec(value) {
+  const uses = Array.isArray(value?.uses) ? value.uses : [];
+  const out = [];
+  for (const u of uses.slice(0, 8)) {
+    const action = String(u?.action ?? '');
+    const provenance = String(u?.provenance ?? '');
+    if (!SAFE_NATIVE_EXEC_ACTIONS.has(action) || !SAFE_NATIVE_EXEC_PROVENANCE.has(provenance)) continue;
+    out.push(u?.sameCall === true ? { action, provenance, sameCall: true } : { action, provenance });
+  }
+  return out.length > 0 ? { uses: out } : undefined;
+}
+
+/**
  * Load the reviewed-script allowlist check (#189). Optional exactly like the
  * resolver above, and meaningless without it: an exemption only exists where
  * a fold would have happened. Missing module, empty config, malformed
@@ -3397,23 +3499,39 @@ process.stdin.on('end', async () => {
     const isReviewedScript = resolveScriptSource
       ? await loadReviewedScriptCheck(cfg.reviewedScripts, scriptBase)
       : undefined;
+    // #1025: audit-only native-exec provenance, bound to THIS call's session.
+    const nativeStore = await loadNativeProvenance();
+    const nativeBudget = nativeProvenanceBudget(nativeStore);
+    const nativeOptions = nativeProvenanceOptions(nativeStore, baseExtra, hookData.cwd, nativeBudget);
     let verdict;
     try {
       // 4th arg, not the 3rd — the 3rd is the IronDome config. Passing the
       // options object into the config slot type-checks in .mjs and silently
       // does nothing, which is the same shape of defect as the gap this fixes.
+      // #1025: the native-exec probe rides in the same options object, after
+      // the resolver fields; with no resolver it is the whole object.
       verdict = guard.evaluateToolCall(
         toolName,
         toolInput,
         undefined,
         resolveScriptSource
-          ? (isReviewedScript ? { resolveScriptSource, isReviewedScript } : { resolveScriptSource })
-          : undefined,
+          ? (isReviewedScript
+            ? { resolveScriptSource, isReviewedScript, ...nativeOptions }
+            : { resolveScriptSource, ...nativeOptions })
+          : (nativeOptions.nativeArtifactProvenance ? nativeOptions : undefined),
       );
     } catch (err) {
       await handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode, await getNotify(), baseExtra); // always exits
       return;
     }
+    // #1025: record this call's write/compile targets AFTER its own
+    // evaluation (a same-call write is not evidence for this call's probe),
+    // and carry the observation on every row this call writes. Neither step
+    // changes `verdict`; the record step reads only `verdict.decision`, to
+    // skip a `block` (the call never runs).
+    recordNativeProvenance(nativeStore, guard, toolName, toolInput, baseExtra, hookData.cwd, verdict, nativeBudget);
+    const nativeExec = safeNativeExec(verdict?.nativeExec);
+    if (nativeExec) baseExtra.nativeExec = nativeExec;
 
     // ── #509 enforce-when-ready ───────────────────────────────────────────
     // Only an ENFORCING guard can be gated, and never on a host with a policy
@@ -3458,11 +3576,21 @@ process.stdin.on('end', async () => {
       // unaudited — volume discipline, mirrored with the plugin interceptor.
       if (verdict.severity !== 'benign' && cfg.auditAllows !== false) {
         writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'allowed'), redactedAuditArgs(toolName, toolInput), 'allow', 'allowed', baseExtra);
+      } else if (baseExtra.nativeExec && cfg.auditAllows !== false) {
+        // #1025: a benign allow is normally unaudited, but running or loading
+        // an agent-produced native image is the one thing about it worth
+        // keeping — one row, redacted args, the same opt-out as every other
+        // allow row. The decision above is unchanged. Deliberately an else-if
+        // with the #509 tally below: this row is itself a counted
+        // `intercept` row (guard-readiness isCountedCall), so it already puts
+        // this call in the readiness denominator once; writing the tally row
+        // too would count one call twice.
+        writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'allowed'), redactedAuditArgs(toolName, toolInput), 'allow', 'allowed', baseExtra);
       } else if (whenReady) {
         // #509: the intervention proxy's denominator is EVERY gated call, so under this
         // posture a benign allow leaves a minimal row too — no command text,
         // no args; the one extra row per call is the measurement's price.
-        writeAuditEntry(safeToolName(toolName), { decision: 'allow', severity: 'benign', signals: [] }, { tally: 'redacted' }, 'allow', 'allowed', { ...baseExtra, readinessTally: true });
+        writeAuditEntry(safeToolName(toolName), { decision: 'allow', severity: 'benign', signals: [] }, { tally: 'redacted' }, 'allow', 'allowed', { ...baseExtra, nativeExec: undefined, readinessTally: true });
       }
       process.exit(0);
     }
