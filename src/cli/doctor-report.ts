@@ -78,6 +78,13 @@ export interface DoctorReportItem {
    * message text — that text names notify / denial-capable sinks too.
    */
   postureUnknown?: true;
+  /**
+   * #1014 r4: set by the Action Guard posture row when a plane present on
+   * this host could not be compared (openclaw.json unreadable or malformed,
+   * Hermes with no self-report). The fix may still be the by-design off /
+   * advisory sentence; this flag keeps the row under TO FIX regardless.
+   */
+  planeUnread?: true;
 }
 
 export interface FormatDoctorReportOpts {
@@ -185,6 +192,7 @@ export function collapseKey(item: DoctorReportItem): string {
   // #878: an unknown-posture row never merges with a known-posture one — the
   // merged group would carry one marker for two different next steps.
   if (item.postureUnknown) return `${item.status}:posture-unknown:${item.label}`;
+  if (item.planeUnread) return `${item.status}:plane-unread:${item.label}`;
   const theme = themeForLabel(item.label);
   // Same posture decision, two check sites.
   if (theme === 'SCAN' || /conversation scanning/i.test(item.label) || /conversation scanning/i.test(item.message)) {
@@ -268,10 +276,13 @@ export function extractFixCommands(fix: string | undefined): string[] {
   const stop = new Set([
     'to', 'and', 'or', 'then', 'so', 'for', 'while', 'the', 'a', 'an', 'on', 'in',
     'with', 'from', 'after', 'before', 'because', 'if', 'when', 'this', 'that',
-    'auto-repair', 'migrate', 'please',
+    'auto-repair', 'migrate', 'please', 'instead',
   ]);
   let bm: RegExpExecArray | null;
   while ((bm = bareRe.exec(fix)) !== null) {
+    // The same clause rule as the backtick scan: a snippet the sentence
+    // says not to run is not re-found here without its backticks (#1014 r4).
+    if (isForbiddenInContext(fix, bm.index)) continue;
     const parts = bm[1].trim().split(/\s+/);
     const kept: string[] = [parts[0]];
     for (let i = 1; i < parts.length; i++) {
@@ -308,6 +319,19 @@ function unique(xs: string[]): string[] {
 /** Honesty-warn `$` must not prescribe these. Fail rows may still print them. */
 export function isHonestyForbiddenCommand(cmd: string): boolean {
   return /action-guard-enable|action-guard-enforce|action-guard-notify-webhook|allow-conversation-access|import-native|shieldcortex repair\b/i.test(cmd);
+}
+
+/**
+ * True when a fix's PROSE prescribes a command a warning must not print:
+ * a forbidden command in a clause that does not reject it. "Do not run
+ * --action-guard-enforce from this warning" names the command to say no,
+ * and that sentence is printable; "Run `shieldcortex config
+ * --action-guard-enforce`" is not (#1014 r4).
+ */
+export function prescribesForbiddenCommand(fix: string): boolean {
+  return fix
+    .split(/(?<=[.;:!?])\s+|\n/)
+    .some((clause) => !/\b(?:do not|don't|never|rather than|instead of)\b/i.test(clause) && isHonestyForbiddenCommand(clause));
 }
 
 /** Collapse whitespace and strip backticks — never ellipsizes. */
@@ -389,8 +413,16 @@ export interface ThemeGroup {
   verboseNotes: string[];
   /** See DoctorReportItem.postureUnknown. */
   postureUnknown?: true;
+  /** See DoctorReportItem.planeUnread. */
+  planeUnread?: true;
   count: number;
   labels: string[];
+  /**
+   * Every row in the group, in order: its label and its own message. `why`
+   * above is one message chosen for the group; the default report lists
+   * each member when there is more than one (#1014 r4).
+   */
+  members: Array<{ label: string; why: string }>;
 }
 
 /** The next step for an unknown-posture warn whose own fix cannot be printed. */
@@ -421,7 +453,7 @@ export function honestyGuidance(g: {
   // command a warning must not prescribe; they used to run first, so a
   // dual-plane row reporting missing telemetry printed "Native memory is
   // still the brain" instead of its own "restore the telemetry" fix.
-  if (g.fixNote && !isHonestyForbiddenCommand(g.fixNote)) {
+  if (g.fixNote && !prescribesForbiddenCommand(g.fixNote)) {
     return cleanWhy(g.fixNote);
   }
   if (/import-native|dual.plane|dual_legacy|native agent sot|native memory bus/.test(blob)) {
@@ -448,8 +480,10 @@ export function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeG
       ...(it.fixNoteWithCommands ? { fixNoteWithCommands: true as const } : {}),
       verboseNotes: it.verboseNote ? [it.verboseNote] : [],
       ...(it.postureUnknown ? { postureUnknown: true as const } : {}),
+      ...(it.planeUnread ? { planeUnread: true as const } : {}),
       count: 1,
       labels: [it.label],
+      members: [{ label: it.label, why: it.message.replace(/\s+/g, ' ').trim() }],
     }));
   }
 
@@ -469,8 +503,10 @@ export function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeG
         ...(it.fixNoteWithCommands ? { fixNoteWithCommands: true as const } : {}),
         verboseNotes: it.verboseNote ? [it.verboseNote] : [],
         ...(it.postureUnknown ? { postureUnknown: true as const } : {}),
+        ...(it.planeUnread ? { planeUnread: true as const } : {}),
         count: 1,
         labels: [it.label],
+        members: [{ label: it.label, why: it.message.replace(/\s+/g, ' ').trim() }],
       };
       // Prefer SCAN theme when collapsing conversation-related load warnings
       if (key.endsWith(':SCAN')) g.theme = 'SCAN';
@@ -479,6 +515,7 @@ export function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeG
     } else {
       existing.count += 1;
       if (!existing.labels.includes(it.label)) existing.labels.push(it.label);
+      existing.members.push({ label: it.label, why: it.message.replace(/\s+/g, ' ').trim() });
       // Prefer a non-empty fix
       const cmds = extractFixCommands(it.fix);
       for (const c of cmds) if (!existing.fixCommands.includes(c)) existing.fixCommands.push(c);

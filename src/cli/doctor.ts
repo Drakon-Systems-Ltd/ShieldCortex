@@ -227,6 +227,8 @@ export interface CheckResult {
   verboseNote?: string;
   /** See DoctorReportItem.postureUnknown (#878) — the report prints this row's own fix. */
   postureUnknown?: true;
+  /** See DoctorReportItem.planeUnread (#1014 r4) — a gate plane could not be read; never "expected". */
+  planeUnread?: true;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single

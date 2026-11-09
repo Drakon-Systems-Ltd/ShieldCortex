@@ -28,6 +28,7 @@ import {
   groupItems,
   honestyGuidance,
   isHonestyForbiddenCommand,
+  prescribesForbiddenCommand,
   type DoctorReportItem,
   type DoctorReportStyle,
   type DoctorStatus,
@@ -138,7 +139,7 @@ export type WarnTier = 'fix' | 'expected';
  *    (the Guard-off notify row's own opening sentence)
  */
 const BY_DESIGN_FIX =
-  /^Action Guard is (?:off|advisory)\.|\bis a valid choice\b|\bThat is the default\b|\boptional while Guard is off\b|\bexpected while Guard is off\b|\bExpected on dual_legacy\b|^Do not add a webhook and do not enable Action Guard from this (?:line|warning)\./i;
+  /^Action Guard is (?:off|advisory)\.|\bis a valid choice\b|\bThat is the default\b|(?<!\bnot )\boptional while Guard is off\b|(?<!\bnot )\bexpected while Guard is off\b|\bExpected on dual_legacy\b|^Do not add a webhook and do not enable Action Guard from this (?:line|warning)\./i;
 
 /**
  * Messages that OPEN with the Guard's configured posture, in the check's own
@@ -163,6 +164,9 @@ export function warnTier(g: ThemeGroup): WarnTier {
   if (g.status !== 'warn') return 'fix';
   // #878: an unknown signed posture is a problem to resolve, never "expected".
   if (g.postureUnknown) return 'fix';
+  // #1014 r4: a plane that could not be read is a diagnosis, even when the
+  // signed posture is off or advisory by choice and the fix says so.
+  if (g.planeUnread) return 'fix';
   // An enforcing guard with nobody to tell is actionable even though its
   // command is withheld from warnings (#815 A).
   if (/^Action Guard is enforcing/i.test(g.why)) return 'fix';
@@ -257,6 +261,12 @@ export function plainEnglish(g: ThemeGroup): PlainItem {
       };
     }
   }
+  // A read error is the same sentence whatever check hit it; the rewrites
+  // below describe a check's usual failure, which this is not (#1014 r4).
+  if (/^(?:permission denied reading|cannot read) /i.test(msg)) return { what: `${label}: ${scrubInternal(msg)}` };
+  if (g.planeUnread) {
+    return { what: "Action Guard's posture could not be read on every agent", why: scrubInternal(msg) };
+  }
   if (g.status === 'fail') {
     if (is(/^Node runtime$/i)) return { what: 'This Node.js version is not supported', why: scrubInternal(msg) };
     if (is(/^Database engine$/i)) {
@@ -319,23 +329,51 @@ function unique(xs: string[]): string[] {
   return out;
 }
 
+/**
+ * The title of a TO FIX item that holds several checks sharing one fix: the
+ * checks are listed under it, each with its own message, so the title says
+ * only how many and, when every message is a read error, what kind.
+ */
+function sharedFixTitle(g: ThemeGroup): string {
+  const n = g.members.length;
+  if (g.members.every((m) => /^(?:permission denied reading|cannot read) /i.test(m.why))) {
+    return `${n} checks cannot read ShieldCortex files`;
+  }
+  return `${n} checks need the same fix`;
+}
+
+/** Append `[id]` to the last line of a wrapped block, or on its own line when it does not fit. */
+function withIdTag(lines: string[], plain: string, id: string, width: number, s: DoctorReportStyle): void {
+  const dim = (l: string) => `${s.dim}${l}${s.reset}`;
+  const idTag = `[${id}]`;
+  if (plain.length + 2 + idTag.length <= width) {
+    lines[lines.length - 1] = `${lines[lines.length - 1]}  ${dim(idTag)}`;
+  } else {
+    lines.push(dim(`    ${idTag}`));
+  }
+}
+
 function renderFixItem(g: ThemeGroup, n: number, width: number, s: DoctorReportStyle): string[] {
   const dim = (l: string) => `${s.dim}${l}${s.reset}`;
   const out: string[] = [];
-  const { what, why } = plainEnglish(g);
-  const id = doctorRowId(g.labels[0] ?? g.what);
+  const shared = g.members.length > 1;
+  const { what, why } = shared ? { what: sharedFixTitle(g), why: undefined } : plainEnglish(g);
   const num = `${String(n).padStart(2)}.`;
   const title = wrapSoft(what, width, 4, 4);
   title[0] = `${statusColour(g.status, s)}${num}${s.reset} ${s.bold}${title[0].slice(4)}${s.reset}`;
-  const plainLast = wrapSoft(what, width, 4, 4).at(-1) ?? '';
-  const idTag = `[${id}]`;
-  if (plainLast.length + 2 + idTag.length <= width) {
-    title[title.length - 1] = `${title[title.length - 1]}  ${dim(idTag)}`;
-  } else {
-    title.push(dim(`    ${idTag}`));
-  }
+  if (!shared) withIdTag(title, wrapSoft(what, width, 4, 4).at(-1) ?? '', doctorRowId(g.labels[0] ?? g.what), width, s);
   out.push(...title);
-  if (why && why !== what) out.push(...wrapSoft(why, width, 4, 4).map(dim));
+  if (shared) {
+    // Every check the fix covers, with its own message and id (#1014 r4):
+    // the fix is one, the failures are several, and each must be visible.
+    for (const m of g.members) {
+      const block = wrapSoft(`${m.label}: ${scrubInternal(m.why)}`, width, 4, 6);
+      withIdTag(block, block.at(-1) ?? '', doctorRowId(m.label), width, s);
+      out.push(...block);
+    }
+  } else if (why && why !== what) {
+    out.push(...wrapSoft(why, width, 4, 4).map(dim));
+  }
 
   const cmds = g.status === 'warn' ? g.fixCommands.filter((c) => !isHonestyForbiddenCommand(c)) : g.fixCommands;
   if (cmds.length > 0) {
@@ -362,7 +400,7 @@ function renderFixItem(g: ThemeGroup, n: number, width: number, s: DoctorReportS
       ? ownFix
       : g.postureUnknown
         ? honestyGuidance(g)
-        : ownFix && (!isHonestyForbiddenCommand(ownFix) || /^Action Guard is enforcing/i.test(g.why))
+        : ownFix && (!prescribesForbiddenCommand(ownFix) || /^Action Guard is enforcing/i.test(g.why))
           ? ownFix
           : honestyGuidance(g);
     if (guidance && !guidance.startsWith(SHRUG)) {
@@ -488,9 +526,12 @@ export function formatDoctorSummary(results: DoctorReportItem[], o: DoctorSummar
   const verdict = fails.length > 0
     ? `${s.red}${g.bad} ${fails.length} failed check${fails.length === 1 ? '' : 's'}${s.reset}`
     : `${s.green}${g.ok} Healthy${s.reset}`;
-  const toFix = fixGroups.length === 0
+  // Checks, not items: several checks under one shared fix are each a thing
+  // to fix, and the count must not read lower than the failed-check count.
+  const toFixCount = fixGroups.reduce((acc, grp) => acc + grp.members.length, 0);
+  const toFix = toFixCount === 0
     ? 'nothing to fix'
-    : `${fixGroups.length} thing${fixGroups.length === 1 ? '' : 's'} to fix`;
+    : `${toFixCount} thing${toFixCount === 1 ? '' : 's'} to fix`;
   const guard = o.gatePlanes ? `Guard: ${guardWord(guardHeadlineFromPlanes(o.gatePlanes))}` : '';
   lines.push([verdict, toFix, guard].filter(Boolean).join(g.sep));
   // A fresh install has no database yet. #129 made that an info row so a new

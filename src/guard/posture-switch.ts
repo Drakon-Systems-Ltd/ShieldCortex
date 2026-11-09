@@ -512,6 +512,14 @@ export interface GuardPostureRow {
   fix?: string;
   /** #878: see DoctorReportItem.postureUnknown — the report prints this row's own fix. */
   postureUnknown?: true;
+  /**
+   * #1014 r4: a plane present on this host could not be compared — its
+   * config could not be read or parsed, or (Hermes) no process reported.
+   * The row's fix may still be the by-design off / advisory sentence, so a
+   * report must read this flag, not the fix, before filing the row as
+   * expected: the read error is a diagnosis whatever the signed posture is.
+   */
+  planeUnread?: true;
 }
 
 const OFF_FIX = 'Action Guard is off. That is the default. Do not enable Action Guard from this warning. Do not add a webhook.';
@@ -609,10 +617,11 @@ export function guardPostureRow(report: PostureReport): GuardPostureRow {
     message += `; ${signed}`;
   }
   if (status === 'pass') return { label, status, message };
+  const unread = unknown.length > 0 ? { planeUnread: true as const } : {};
   if (report.integrityAdoption) {
-    return { label, status, message, fix: UNKNOWN_FIX, ...(signedUnknown ? { postureUnknown: true as const } : {}) };
+    return { label, status, message, fix: UNKNOWN_FIX, ...(signedUnknown ? { postureUnknown: true as const } : {}), ...unread };
   }
-  return { label, status, message, fix: graded === 'off' ? OFF_FIX : ADVISORY_FIX };
+  return { label, status, message, fix: graded === 'off' ? OFF_FIX : ADVISORY_FIX, ...unread };
 }
 
 /** Lines for `shieldcortex guard posture`. */
