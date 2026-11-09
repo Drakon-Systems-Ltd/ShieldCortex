@@ -57,7 +57,7 @@ const OPENCLAW_CTX_MARKER = '\u27E6openclaw:ctx\u27E7';
 // Trailing channel-context suffix: from this line to the end is metadata.
 const OPENCLAW_TRAILING_CONTEXT_HEADER = `Context: ${OPENCLAW_CTX_MARKER}`;
 // Leading "[Fri 2026-10-10 12:48 UTC] " envelope timestamp.
-const LEADING_TIMESTAMP_PREFIX = /^\[[A-Za-z]{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}[^\]]*\] */;
+const LEADING_TIMESTAMP_PREFIX = /^\[[A-Za-z]{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}[^\]\n\r\u2028\u2029]*\] */;
 // Per-turn delivery hints OpenClaw prepends ("Delivery: ... `message` tool ...").
 const DELIVERY_HINT_LINE = /^Delivery: .*`message` tool/;
 // Session goal line OpenClaw adds between the context blocks and the message.
