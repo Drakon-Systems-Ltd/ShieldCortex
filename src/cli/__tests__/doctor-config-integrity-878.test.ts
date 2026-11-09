@@ -582,10 +582,15 @@ describe('#878 r2: the human report prints an unknown-posture row own fix, never
     const rows = await doctor.checkActionGuard();
     expect(rows.filter((r) => r.postureUnknown)).toEqual([]);
     expect(rows.find((r) => r.label === 'Action guard notify')?.status).toBe('warn');
-    for (const out of Object.values(await reports(rows))) {
-      expect(out).toContain(HONESTY_OFF);
-      expect(out).not.toContain(NOTIFY_UNKNOWN_FIX);
-    }
+    const out = await reports(rows);
+    // --verbose keeps the honesty guidance verbatim; the default report (#1014)
+    // files the same rows under EXPECTED as plain phrases. Neither says unknown.
+    expect(out.verbose).toContain(HONESTY_OFF);
+    expect(out.default).toContain('EXPECTED ON THIS HOST');
+    expect(out.default).toContain('Action Guard off');
+    expect(out.default).toContain('Guard notifications not set');
+    expect(out.default).not.toContain('TO FIX');
+    for (const o of Object.values(out)) expect(o).not.toContain(NOTIFY_UNKNOWN_FIX);
   });
 });
 

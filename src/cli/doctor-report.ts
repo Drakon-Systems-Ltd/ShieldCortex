@@ -8,6 +8,8 @@
  */
 
 import { sanitiseDisplayLines } from './term-ui.js';
+import { formatDoctorSummary } from './doctor-plain.js';
+import type { HostGatePlanes, HostTable } from '../setup/host-table.js';
 
 export type DoctorStatus = 'pass' | 'warn' | 'fail' | 'info';
 
@@ -98,6 +100,14 @@ export interface FormatDoctorReportOpts {
   hostTableLines?: string[];
   /** Single next command. Empty when the box is OK. */
   nextCommand?: string | null;
+  /**
+   * #1014: the host table itself, for the default report's AGENTS ON THIS HOST
+   * section (one line per agent, with session counts). `hostTableLines` stays
+   * the `--verbose` HOSTS block.
+   */
+  hostTable?: HostTable;
+  /** #1014: live Action Guard planes for the default header's Guard word. */
+  gatePlanes?: HostGatePlanes;
 }
 
 export interface DoctorReportStyle {
@@ -334,7 +344,7 @@ export function wrapLine(text: string, width: number, indent = 0, hang = 0): str
   return lines.length ? lines : [' '.repeat(indent)];
 }
 
-interface ThemeGroup {
+export interface ThemeGroup {
   status: DoctorStatus;
   theme: string;
   what: string;
@@ -390,7 +400,7 @@ export function honestyGuidance(g: {
   return 'No action needed. This is attention, not unprotected.';
 }
 
-function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] {
+export function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] {
   if (!collapse) {
     return items.map((it) => ({
       status: it.status,
@@ -543,9 +553,25 @@ export function formatDoctorReport(
 ): string[] {
   const width = clampWidth(opts.width ?? detectWidth());
   const verbose = opts.verbose === true;
-  const style = opts.color ? (opts.style ?? defaultColorStyle()) : (opts.style ?? NO_STYLE);
+  // #1014 AC5: colour only when the caller says so (a TTY with NO_COLOR
+  // unset). A palette passed with `color: false` is not applied.
+  const style = opts.color ? (opts.style ?? defaultColorStyle()) : NO_STYLE;
   const version = opts.version?.trim() || '';
   const target = opts.target?.trim() || '';
+
+  // #1014: the default report is the plain-English one-screen layout.
+  // `--verbose` keeps the full report below, unchanged.
+  if (!verbose) {
+    return formatDoctorSummary(results, {
+      width,
+      version,
+      target,
+      style,
+      symbols: opts.color === true,
+      hostTable: opts.hostTable,
+      gatePlanes: opts.gatePlanes,
+    });
+  }
 
   const fails = results.filter((r) => r.status === 'fail');
   const warns = results.filter((r) => r.status === 'warn');

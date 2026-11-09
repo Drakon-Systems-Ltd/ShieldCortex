@@ -1,0 +1,466 @@
+[
+  {
+    "label": "Node runtime",
+    "status": "pass",
+    "message": "Node v22.23.4 (^22.14.0 || >=24.0.0 required)"
+  },
+  {
+    "label": "Database engine",
+    "status": "pass",
+    "message": "better-sqlite3 13.0.3 on Node 22.23.4 \u2014 the Node 24+ engine floor (13.x or newer) does not apply to this runtime"
+  },
+  {
+    "label": "Database",
+    "status": "pass",
+    "message": "healthy (7.6 MB, WAL 680.0 KB)"
+  },
+  {
+    "label": "Schema",
+    "status": "pass",
+    "message": "up to date"
+  },
+  {
+    "label": "Write path",
+    "status": "fail",
+    "message": "INSERT failed \u2014 SQLITE_READONLY: attempt to write a readonly database (memories.db is owned by root)",
+    "fix": "Run `sudo chown -R $USER ~/.shieldcortex` to give this user back its state directory, then re-run `shieldcortex doctor`."
+  },
+  {
+    "label": "Memories",
+    "status": "pass",
+    "message": "305 total (92 STM, 213 LTM)"
+  },
+  {
+    "label": "Semantic coverage",
+    "status": "warn",
+    "message": "213/292 memories embedded \u2014 79 (27%) have no vector and are INVISIBLE to semantic recall (search.ts filters WHERE embedding IS NOT NULL; they are not ranked low, they are not candidates)",
+    "fix": "Backfill the missing vectors with `shieldcortex memories embed-backfill --execute`. If the count keeps growing after a backfill, the write path is dropping them again \u2014 that is #458 and it needs the hook writer, not another backfill."
+  },
+  {
+    "label": "Hooks",
+    "status": "fail",
+    "message": "2/4 installed \u2014 missing: cortex-memory/session-start.mjs, cortex-memory/pre-tool.mjs",
+    "fix": "Run `shieldcortex setup claude` to configure hooks"
+  },
+  {
+    "label": "Hook timeouts",
+    "status": "pass",
+    "message": "all canonical"
+  },
+  {
+    "label": "Recall lane",
+    "status": "info",
+    "message": "detected from OpenClaw prompt markers. Jobs launched by another scheduler (systemd, crontab, CI) carry no marker and recall as interactive \u2014 set SHIELDCORTEX_RECALL_LANE=cron (or automation) in that job's environment."
+  },
+  {
+    "label": "Recall repetition",
+    "status": "pass",
+    "message": "last 4 interactive recall runs did not all return the same non-empty top-k set"
+  },
+  {
+    "label": "Auto-memory: Stop hook",
+    "status": "pass",
+    "message": "enabled (samples turn % 5 == 0)"
+  },
+  {
+    "label": "Auto-memory: SessionEnd hook",
+    "status": "warn",
+    "message": "runtime gate is on but hook is not wired in settings.json \u2014 hook will never fire",
+    "fix": "Run `shieldcortex setup --with-session-end` to wire the hook"
+  },
+  {
+    "label": "Auto-memory sampling",
+    "status": "pass",
+    "message": "every 5 turn(s), salience-bypass on"
+  },
+  {
+    "label": "Memory plane (empty-brain)",
+    "status": "pass",
+    "message": "305 admitted memories (7d activity=571)"
+  },
+  {
+    "label": "Memory plane (dual-plane drift)",
+    "status": "pass",
+    "message": "honest sidecar (mcp_sidecar_no_inject): signed posture, SC inject explicitly off; native memory is expected (native_sot_touched_7d=true native_sot_bytes=725870 native_bus_active=true native_scan_notes=2)"
+  },
+  {
+    "label": "Memory plane (host contract)",
+    "status": "pass",
+    "message": "honest sidecar (mcp_sidecar_no_inject): SC inject explicitly off, native host memory keeps the automatic bus \u2014 no canonicity claimed"
+  },
+  {
+    "label": "Memory capture: dist build",
+    "status": "pass",
+    "message": "defence pipeline modules present (pipeline.js, database/init.js, disposition.js)"
+  },
+  {
+    "label": "Memory capture: recent drops",
+    "status": "pass",
+    "message": "no defence_pipeline_unavailable drops in the last 24h"
+  },
+  {
+    "label": "Brain worker",
+    "status": "pass",
+    "message": "last tick 1m ago (profile=mcp, pid=2059749)"
+  },
+  {
+    "label": "Project keys",
+    "status": "pass",
+    "message": "120 distinct, no legacy/canonical collisions"
+  },
+  {
+    "label": "API server",
+    "status": "pass",
+    "message": "running (port 3001)"
+  },
+  {
+    "label": "Dashboard",
+    "status": "pass",
+    "message": "running (http://localhost:3030)"
+  },
+  {
+    "label": "Dashboard freshness",
+    "status": "info",
+    "message": "no managed dashboard service running"
+  },
+  {
+    "label": "Disk",
+    "status": "pass",
+    "message": "42.2 MB / 100 MB limit + 344.0 KB backups"
+  },
+  {
+    "label": "State permissions",
+    "status": "pass",
+    "message": "owner-only (0700 dirs, 0600 files)"
+  },
+  {
+    "label": "Lock",
+    "status": "pass",
+    "message": "clean (1 active lock)"
+  },
+  {
+    "label": "OpenClaw config",
+    "status": "info",
+    "message": "not checked \u2014 openclaw binary not found"
+  },
+  {
+    "label": "OpenClaw residue",
+    "status": "pass",
+    "message": "clean (hook installed, plugin absent but non-orphaned)"
+  },
+  {
+    "label": "OpenClaw hook",
+    "status": "pass",
+    "message": "cortex-memory hook up to date"
+  },
+  {
+    "label": "OpenClaw plugin version",
+    "status": "info",
+    "message": "realtime plugin not registered with OpenClaw"
+  },
+  {
+    "label": "OpenClaw skill version",
+    "status": "info",
+    "message": "skill not installed (optional) \u2014 `shieldcortex openclaw skill install` adds it"
+  },
+  {
+    "label": "OpenClaw plugin loaded",
+    "status": "info",
+    "message": "skipped (realtime plugin not installed)"
+  },
+  {
+    "label": "Conversation scanning",
+    "status": "warn",
+    "message": "conversation scanning INACTIVE \u2014 OpenClaw drops llm_input/llm_output at registration because plugins.entries.shieldcortex-realtime.hooks.allowConversationAccess is not true; no conversation content is being scanned on this host; conversation enforcement support UNKNOWN \u2014 could not read the installed OpenClaw version",
+    "fix": "Conversation scanning is off because plugins.entries[\"shieldcortex-realtime\"].hooks.allowConversationAccess is not true. That is a valid choice. Do not grant conversation access or restart the gateway from this warning."
+  },
+  {
+    "label": "OpenClaw plugin running version",
+    "status": "info",
+    "message": "skipped (realtime plugin not installed)"
+  },
+  {
+    "label": "OpenClaw plugin startup intent",
+    "status": "info",
+    "message": "skipped (no installed plugin manifest)"
+  },
+  {
+    "label": "OpenClaw plugin pkg",
+    "status": "info",
+    "message": "skipped (OpenClaw plugin dir not present)"
+  },
+  {
+    "label": "OpenClaw dup installs",
+    "status": "pass",
+    "message": "clean (no duplicate shieldcortex-realtime installs in extensions/ or hooks/)"
+  },
+  {
+    "label": "Hermes plugin copies",
+    "status": "pass",
+    "message": "clean (one canonical `shieldcortex` copy per plugin root (3 plugin roots under ~/.hermes): ~/.hermes/plugins/shieldcortex (active home)). Project plugins are off here; a gateway started with `HERMES_ENABLE_PROJECT_PLUGINS` would also load from `<cwd>/.hermes/plugins` in its own working directory, which this check cannot see."
+  },
+  {
+    "label": "Hermes plugin",
+    "status": "pass",
+    "message": "Hermes plugin copy up to date"
+  },
+  {
+    "label": "OpenClaw plugin pins",
+    "status": "info",
+    "message": "skipped (realtime plugin not installed)"
+  },
+  {
+    "label": "OpenClaw approval buttons",
+    "status": "info",
+    "message": "Telegram approval prompts fall back to \"/approve\" text (inlineButtons: unset \u2192 allowlist)",
+    "fix": "Make approvals tappable: set channels.telegram.capabilities.inlineButtons to 'all' (or 'dm'/'group' for a tighter surface) via `openclaw config patch`, then restart the gateway."
+  },
+  {
+    "label": "Defence canary",
+    "status": "pass",
+    "message": "caught (7ms, pattern: defence_canary)"
+  },
+  {
+    "label": "Action guard",
+    "status": "pass",
+    "message": "verdict probes 3/3 (catastrophic\u2192block, dangerous\u2192approval, benign\u2192allow) in 38ms \u2014 in-process check of guard logic + this box's config; wiring proof needs the consent-gated live canary (SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 shieldcortex openclaw status)"
+  },
+  {
+    "label": "Action guard posture",
+    "status": "pass",
+    "message": "enforce on both compared planes (Claude Code hook, OpenClaw plugin); Hermes enforce (self-report) agrees"
+  },
+  {
+    "label": "Action guard notify",
+    "status": "warn",
+    "message": "Action Guard is enforcing with no denial-capable notify sink (actionGuard.notify.webhookUrl unset) \u2014 nobody is told when the guard blocks something while nobody is at a prompt. The #242 cron incidents were this shape.",
+    "fix": "Run `shieldcortex config --action-guard-notify-webhook <https-url>` so headless denials reach a human."
+  },
+  {
+    "label": "Action guard policy lock",
+    "status": "fail",
+    "message": "policy unlocked: a same-user process can disable the guard \u2014 Action Guard is live, but a one-line edit to config.json switches it off and nothing would notice",
+    "fix": "Run `sudo shieldcortex protect` to pin the security-critical keys to a root-owned file this user cannot write."
+  },
+  {
+    "label": "Action guard config integrity",
+    "status": "pass",
+    "message": "verdict: valid \u2014 config.json matches its integrity signature (a corruption / accidental-edit check \u2014 the key is co-located and same-uid, so it is not tamper protection; the policy lock row above is)."
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000001)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000001 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000002)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000002 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000003)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000003 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000004)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000004 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000005)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000005 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000006)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000006 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000007)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000007 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000008)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000008 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000009)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000009 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000010)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000010 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000011)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000011 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000012)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000012 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000013)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000013 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000014)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000014 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000015)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000015 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Claude Code (tool-gate, c000000000000000000000016)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance c000000000000000000000016 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture intentionally off by configuration \u00b7 scanner unknown \u00b7 denials unknown \u00b7 per-call hook, last call within max_age (38 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1001-s5001)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1001-s5001 (current) \u00b7 installed yes \u00b7 loaded yes (self-reported by the runtime process) \u00b7 posture advisory \u2014 warns, but this instance reported 23 denied calls \u00b7 scanner available \u00b7 blocked action at 2026-11-09T06:05:18.158Z on pre_tool_call:terminal (that path, that moment) (1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1002-s5002)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1002-s5002 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1003-s5003)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1003-s5003 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1004-s5004)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1004-s5004 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1005-s5005)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1005-s5005 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1006-s5006)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1006-s5006 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1007-s5007)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1007-s5007 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1008-s5008)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1008-s5008 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1009-s5009)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1009-s5009 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1010-s5010)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1010-s5010 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1011-s5011)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1011-s5011 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1012-s5012)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1012-s5012 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1013-s5013)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1013-s5013 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1014-s5014)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1014-s5014 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1015-s5015)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1015-s5015 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Hermes (tool-gate, p1016-s5016)",
+    "status": "info",
+    "message": "tool gate \u00b7 instance p1016-s5016 (ended) \u00b7 installed yes \u00b7 loaded unobserved \u2014 no current self-report from a runtime process \u00b7 posture unknown \u00b7 the reporting process has exited, or its pid now belongs to a different process (reporting process has ended; 1022 further instance report(s) for this profile were not read (cap 16))"
+  },
+  {
+    "label": "Runtime posture: Codex (memory)",
+    "status": "info",
+    "message": "memory only \u2014 not a tool gate; ShieldCortex memory installed yes (memory-only host: ShieldCortex serves memory here and cannot gate tool calls)"
+  },
+  {
+    "label": "Runtime posture (host)",
+    "status": "info",
+    "message": "weakest of 18 record(s) judged (33 found): off (Claude Code, tool-gate) \u2014 records found only, not a claim that no other runtime process exists; self-reports are host-local evidence, not attestation \u2014 full records: `shieldcortex policy-evidence`"
+  },
+  {
+    "label": "Iron Dome profile",
+    "status": "info",
+    "message": "Iron Dome not configured \u2014 profile not checked"
+  },
+  {
+    "label": "Cron denials",
+    "status": "pass",
+    "message": "no guard denials landed inside scheduled runs in the last 7 days"
+  },
+  {
+    "label": "Threat graph",
+    "status": "pass",
+    "message": "caught up (cursor 3537 of 3537, realtime at realtime-2026-11-09.jsonl:6, last ran 2026-11-09T18:11:58.879Z)"
+  },
+  {
+    "label": "Attestation coverage",
+    "status": "pass",
+    "message": "99% of the last 28 days' 520 audit rows carry attestation (490 attested / 26 explicitly unattested / 4 unplumbed)"
+  },
+  {
+    "label": "Chained ledger",
+    "status": "pass",
+    "message": "consistent \u2014 1554 chained row(s), head epoch 0 seq 1553; 2629 unchained history row(s), 4 missing interval(s); local only, not independently committed"
+  },
+  {
+    "label": "Stale ShieldCortex copies",
+    "status": "warn",
+    "message": "1 copy at 5.2.1 or older could share this database: ~/.nvm/versions/node/v22.14.0/lib/node_modules/shieldcortex (5.2.0)",
+    "fix": "Update it with `npm install -g shieldcortex@latest` from that Node, or remove it with `npm uninstall -g shieldcortex` from that Node."
+  },
+  {
+    "label": "Claude Code version",
+    "status": "pass",
+    "message": "2.1.319 (npm channel) \u2014 at or above the 2.1.215 enforcement floor"
+  },
+  {
+    "label": "Agent config watch",
+    "status": "pass",
+    "message": "on; watching 372 config file(s); no unexpected change detected"
+  },
+  {
+    "label": "Embeddings",
+    "status": "pass",
+    "message": "model cached; size + sidecar attestation ok (90387606 bytes) \u2014 not a live content hash this run; files only, inference not exercised"
+  }
+]

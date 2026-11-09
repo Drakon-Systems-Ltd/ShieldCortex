@@ -59,6 +59,34 @@ shieldcortex doctor
 
 Bare `setup` asks before wiring each host (`setup <host>` wires that host without asking). Setup can change Claude Code and OpenClaw config files, and may restart the OpenClaw gateway: [what setup writes](#setup-details). Details: [Updating](docs/UPDATING.md#updating), [Storage maintenance](docs/UPDATING.md#storage-maintenance), [What postinstall does](docs/openclaw-integration.md#install-time-refresh-postinstall), [Offline embedding cache](docs/offline-embeddings.md).
 
+`shieldcortex doctor` fits on one screen. Things to fix come first, each with a copy-paste command. Warnings that are expected on your host, such as a feature you left off, sit on one line and ask for nothing. Each agent gets one line. `shieldcortex doctor --verbose` prints every check in full, and `shieldcortex doctor --explain <ID>` prints one check, with the `[id]` shown after each item.
+
+```text
+ShieldCortex Doctor · v5.19.0 · tars
+✅ Healthy · 2 things to fix · Guard: off (your choice)
+
+TO FIX
+ 1. 79 memories can't be found by meaning search (27%)  [semantic-coverage]
+    they are saved, but a search by meaning will not return them
+    $ shieldcortex memories embed-backfill --execute
+ 2. Session-end memory capture is switched on but not connected  [auto-memory-sessionend-hook]
+    nothing is saved when a session ends until the hook is wired
+    $ shieldcortex setup --with-session-end
+
+EXPECTED ON THIS HOST (no action)
+ · Conversation scanning off · Action Guard off · Guard notifications not set · Policy lock not set
+
+AGENTS ON THIS HOST
+ Claude Code       ✔ connected · memory + tool gate · gate off   (16+ sessions)
+ OpenClaw          — not installed
+ Hermes            ✔ connected · memory + tool gate · advisory   (1 live, 15+ ended)
+ Codex             ✔ connected · memory only
+ Cursor / VS Code  — not installed
+
+39 checks passed · 46 informational rows hidden
+details: shieldcortex doctor --verbose · explain one: shieldcortex doctor --explain <ID>
+```
+
 <a id="setup-details"></a>
 <details><summary>What setup writes, and installs without lifecycle scripts</summary>
 
@@ -106,7 +134,7 @@ Webhook notifications for a headless denial or a held approval end with a `card`
 - **Local dashboard.** `shieldcortex dashboard` is a local view: Home, Needs you, Memory, Protection, Settings. It is not an approval inbox: held actions are still answered in Telegram or OpenClaw. [What it needs](docs/UPDATING.md#dashboard-recall-and-cloud), [details](#dashboard-details).
 - **Security audit.** `shieldcortex audit` scans an AI agent's environment and prints a graded report; `--sarif` writes SARIF 2.1.0.
 - **Skill and instruction-file scanner.** `shieldcortex scan-skill <file>` scans one file; `scan-skills` discovers all instruction files.
-- **Doctor.** `shieldcortex doctor` prints the host table, `memory + tool gate` or memory only, not a gate, per host, and will not print "protected" for a host that cannot deny. [Doctor and the host table](docs/UPDATING.md#doctor-and-the-host-table).
+- **Doctor.** `shieldcortex doctor` is a one-screen summary: what to fix with the command for each, what is expected on this host, and one line per agent, `memory + tool gate` or memory only, not a gate. It will not print "protected" for a host that cannot deny. `--verbose` prints every check; `--explain <ID>` prints one. [Doctor and the host table](docs/UPDATING.md#doctor-and-the-host-table).
 - **Claude SDK toolsets.** `shieldcortex/toolsets` (5.8+) sits in front of a Claude SDK browser-use or computer-use driver and by default records what each call would trigger without changing what runs; `mode: 'enforce'` refuses the riskiest calls and holds risky ones for your approval. [Quickstart](docs/quickstarts/claude-sdk-toolsets.md).
 - **Approval cards** (5.6+) say what a held action does, why it was held and who asked, in plain English, without the raw command. [What's new in 5.6](docs/UPDATING.md#whats-new-in-56).
 

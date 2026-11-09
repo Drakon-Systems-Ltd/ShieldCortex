@@ -78,7 +78,9 @@ Diagnose the installation. Exits 1 when any check fails.
 Options:
   --strict                 Also exit 1 when any check warns
   --json                   Print the checked rows as JSON instead of the report
-  --verbose, --debug       Show every passing check
+  --verbose, --debug       Show every check in full (the complete report)
+  --explain [<ID>]         Print one check in full; 'expected' prints every
+                           no-action warning; no ID lists the check IDs
   --fix-project-keys       Repair unambiguous project-key collisions (backs up first)
   --fix-action-guard       Migrate the deprecated interceptor.actionGuard alias
   --fix-hermes-plugin-copies

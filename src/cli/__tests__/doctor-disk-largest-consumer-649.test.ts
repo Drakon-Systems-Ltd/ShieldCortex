@@ -345,7 +345,8 @@ describe('#649 the fallback survives the human report', () => {
       expect(text).toMatch(/Then audit evidence 30\.0 KB, everything else 5\.0 KB\./);
       expect(text).toMatch(/free pages could not be read, so nothing about what fills it was measured and no command is named for it/);
       expect(text).toMatch(/shieldcortex logs prune \(without --execute\)/);
-      expect(text).toMatch(/Audit evidence \(26%\) has no automatic retention yet \(#579\), and nothing here deletes it/);
+      // The default report (#1014) drops issue numbers from fix prose; --verbose keeps them.
+      expect(text).toMatch(/Audit evidence \(26%\) has no automatic retention yet(?: \(#579\))?, and nothing here deletes it/);
       expect(text).toMatch(/not a measurement of free space on the filesystem — inspect before removing anything/);
       expect(out).toMatch(/^\s*\$ shieldcortex logs prune$/m);
       expect(text).not.toMatch(/logs prune --execute|shieldcortex vacuum/);

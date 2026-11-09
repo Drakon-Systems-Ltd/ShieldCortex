@@ -491,7 +491,8 @@ export function formatHostTable(table: HostTable, version?: string, planes?: Hos
   return lines;
 }
 
-function rowGatePosture(r: HostRow, planes?: HostGatePlanes): string | undefined {
+/** The gate word after a bound host row, or undefined when none applies. Read-only. */
+export function rowGatePosture(r: HostRow, planes?: HostGatePlanes): string | undefined {
   if (!planes || !r.present || r.kind !== 'bound') return undefined;
   if (r.id === 'claude') {
     if (!planes.claudeWired) return undefined;

@@ -1,0 +1,94 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`#1014 default report — snapshots healthy host 1`] = `
+"ShieldCortex Doctor | v5.19.0 | tars
+[OK] Healthy | 2 things to fix | Guard: off (your choice)
+
+TO FIX
+ 1. 79 memories can't be found by meaning search (27%)  [semantic-coverage]
+    they are saved, but a search by meaning will not return them
+    $ shieldcortex memories embed-backfill --execute
+ 2. Session-end memory capture is switched on but not connected  [auto-memory-sessionend-hook]
+    nothing is saved when a session ends until the hook is wired
+    $ shieldcortex setup --with-session-end
+
+EXPECTED ON THIS HOST (no action)
+ - Conversation scanning off | Action Guard off | Guard notifications not set | Policy lock not set
+
+AGENTS ON THIS HOST
+ Claude Code       [ok] connected | memory + tool gate | gate off   (16+ sessions)
+ OpenClaw          [--] not installed
+ Hermes            [ok] connected | memory + tool gate | advisory   (1 live, 15+ ended)
+ Codex             [ok] connected | memory only
+ Cursor / VS Code  [--] not installed
+
+39 checks passed | 46 informational rows hidden
+details: shieldcortex doctor --verbose | explain one: shieldcortex doctor --explain <ID>"
+`;
+
+exports[`#1014 default report — snapshots host with failures 1`] = `
+"ShieldCortex Doctor | v5.19.0 | tars
+[FAIL] 3 failed checks | 7 things to fix | Guard: off (your choice)
+
+TO FIX
+ 1. The memory database refused a test write  [write-path]
+    INSERT failed — SQLITE_READONLY: attempt to write a readonly database (memories.db is owned by
+    root)
+    $ sudo chown -R $USER ~/.shieldcortex
+    $ shieldcortex doctor
+ 2. Some Claude Code hooks are missing or broken  [hooks]
+    2/4 installed — missing: cortex-memory/session-start.mjs, cortex-memory/pre-tool.mjs
+    $ shieldcortex setup claude
+ 3. Action Guard is on, but any process running as you could switch it off
+    [action-guard-policy-lock]
+    policy unlocked: a same-user process can disable the guard — Action Guard is live, but a
+    one-line edit to config.json switches it off and nothing would notice
+    $ sudo shieldcortex protect
+ 4. 79 memories can't be found by meaning search (27%)  [semantic-coverage]
+    they are saved, but a search by meaning will not return them
+    $ shieldcortex memories embed-backfill --execute
+ 5. Session-end memory capture is switched on but not connected  [auto-memory-sessionend-hook]
+    nothing is saved when a session ends until the hook is wired
+    $ shieldcortex setup --with-session-end
+ 6. Nobody is told when Action Guard blocks something unattended  [action-guard-notify]
+    Action Guard is enforcing with no denial-capable notify sink — nobody is told when the guard
+    blocks something while nobody is at a prompt.
+    Run shieldcortex config --action-guard-notify-webhook <https-url> so headless denials reach a
+    human.
+ 7. An older ShieldCortex copy could share your database  [stale-shieldcortex-copies]
+    1 copy at 5.2.1 or older could share this database:
+    ~/.nvm/versions/node/v22.14.0/lib/node_modules/shieldcortex (5.2.0)
+    $ npm install -g shieldcortex@latest
+    $ npm uninstall -g shieldcortex
+
+EXPECTED ON THIS HOST (no action)
+ - Conversation scanning off
+
+AGENTS ON THIS HOST
+ Claude Code       [ok] connected | memory + tool gate | gate off   (16+ sessions)
+ OpenClaw          [--] not installed
+ Hermes            [ok] connected | memory + tool gate | advisory   (1 live, 15+ ended)
+ Codex             [ok] connected | memory only
+ Cursor / VS Code  [--] not installed
+
+37 checks passed | 46 informational rows hidden
+details: shieldcortex doctor --verbose | explain one: shieldcortex doctor --explain <ID>"
+`;
+
+exports[`#1014 default report — snapshots host with only expected warnings 1`] = `
+"ShieldCortex Doctor | v5.19.0 | tars
+[OK] Healthy | nothing to fix | Guard: off (your choice)
+
+EXPECTED ON THIS HOST (no action)
+ - Conversation scanning off | Action Guard off | Guard notifications not set | Policy lock not set
+
+AGENTS ON THIS HOST
+ Claude Code       [ok] connected | memory + tool gate | gate off   (16+ sessions)
+ OpenClaw          [--] not installed
+ Hermes            [ok] connected | memory + tool gate | advisory   (1 live, 15+ ended)
+ Codex             [ok] connected | memory only
+ Cursor / VS Code  [--] not installed
+
+41 checks passed | 46 informational rows hidden
+details: shieldcortex doctor --verbose | explain one: shieldcortex doctor --explain <ID>"
+`;

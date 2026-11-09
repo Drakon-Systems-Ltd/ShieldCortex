@@ -153,6 +153,7 @@ import {
   shouldColorDoctor,
   type DoctorReportStyle,
 } from './doctor-report.js';
+import { formatDoctorExplain } from './doctor-plain.js';
 import {
   formatHostTable,
   isInteractiveTerminal,
@@ -10063,19 +10064,36 @@ export async function runDoctor(
   }
 
   const style: DoctorReportStyle = { bold, reset, green, yellow, red, cyan, dim };
-  const reportLines = formatDoctorReport(displayRows, {
-    verbose,
-    version: String(pkg.version ?? ''),
-    target: (() => {
-      try { return os.hostname(); } catch { return ''; }
-    })(),
-    color: shouldColorDoctor(),
-    style,
-    width: Number(process.env.COLUMNS || process.stdout?.columns || 80) || 80,
-    hostTableLines: formatHostTable(hostTable, String(pkg.version ?? ''), readHostGatePlanesWithPosture()),
-    nextCommand,
-  });
-  for (const line of reportLines) console.log(line);
+  const color = shouldColorDoctor();
+  const reportWidth = Number(process.env.COLUMNS || process.stdout?.columns || 80) || 80;
+  // #1014: `--explain [<ID>]` prints one check in full (or the id index)
+  // instead of the report. Same rows, same exit code; nothing else changes.
+  if (args.includes('--explain')) {
+    const next = args[args.indexOf('--explain') + 1];
+    const explainId = next !== undefined && !next.startsWith('-') ? next : null;
+    const explainLines = formatDoctorExplain(displayRows, explainId, {
+      width: reportWidth,
+      style: color ? style : { bold: '', reset: '', green: '', yellow: '', red: '', cyan: '', dim: '' },
+    });
+    for (const line of explainLines) console.log(line);
+  } else {
+    const gatePlanes = readHostGatePlanesWithPosture();
+    const reportLines = formatDoctorReport(displayRows, {
+      verbose,
+      version: String(pkg.version ?? ''),
+      target: (() => {
+        try { return os.hostname(); } catch { return ''; }
+      })(),
+      color,
+      style,
+      width: reportWidth,
+      hostTableLines: formatHostTable(hostTable, String(pkg.version ?? ''), gatePlanes),
+      hostTable,
+      gatePlanes,
+      nextCommand,
+    });
+    for (const line of reportLines) console.log(line);
+  }
 
   if (args.includes('--repair')) {
     if (!isInteractiveTerminal()) {

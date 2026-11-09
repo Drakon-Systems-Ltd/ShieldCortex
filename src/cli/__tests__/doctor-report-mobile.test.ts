@@ -123,8 +123,8 @@ describe('wrapLine / oneLineWhy', () => {
   });
 });
 
-describe('formatDoctorReport — Edith case', () => {
-  it('default: collapses SCAN x2, hides passes, ranks attention first', () => {
+describe('formatDoctorReport — Edith case (default is the #1014 plain-English report)', () => {
+  it('default: actionable warns under TO FIX with their commands, by-design warns under EXPECTED, passes counted', () => {
     const lines = formatDoctorReport(EDITH, {
       version: '4.54.2',
       target: 'edith',
@@ -133,40 +133,33 @@ describe('formatDoctorReport — Edith case', () => {
       verbose: false,
     });
     const text = lines.join('\n');
+    // 48 columns wraps sentences; match them with the wrapping collapsed.
+    const flat = text.replace(/\s+/g, ' ');
 
-    expect(text).toMatch(/ShieldCortex Doctor\s+v4\.54\.2/);
-    expect(text).toMatch(/target\s+edith/);
-    // raw tally keeps 5 warn even if themes collapse
-    expect(text).toMatch(/5 warn/);
-    expect(text).toMatch(/0 fail/);
-    expect(text).toMatch(/4 pass/);
+    expect(text).toMatch(/ShieldCortex Doctor \| v4\.54\.2 \| edith/);
+    expect(text).toMatch(/Healthy \| 2 things to fix/);
 
-    expect(text).toMatch(/NEEDS ATTENTION/);
-    // collapsed conversation theme
-    expect(text).toMatch(/SCAN/);
-    expect(text).toMatch(/x2/);
-    expect(text).toMatch(/Conversation scanning|conversation scanning/i);
-    expect(text).toMatch(/GUARD/);
-    expect(text).toMatch(/ATTEST/);
-    expect(text).toMatch(/KEY/);
-
-    // commands on own lines
+    // Actionable: a plain line and a copy-paste command each.
+    expect(text).toMatch(/^TO FIX$/m);
+    expect(flat).toMatch(/1\. 1 project name points at the same memories as another/);
     expect(text).toMatch(/\$ shieldcortex doctor --fix-project-keys/);
     expect(text).toMatch(/\$ openclaw gateway restart/);
-    expect(text).toMatch(/allowConversationAccess/);
     expect(text).not.toMatch(/\$ shieldcortex config --action-guard-enable/);
     expect(text).not.toMatch(/\$ shieldcortex config --action-guard-enforce/);
     expect(text).not.toMatch(/\$ shieldcortex openclaw install --allow-conversation-access/);
-    expect(text).not.toMatch(/\$ restart OpenClaw/);
-    expect(text).not.toMatch(/\$ restart MCP/);
-    expect(text).toMatch(/\$ /);
+    expect(text).not.toMatch(/\$ restart/);
 
-    // passes collapsed
-    expect(text).toMatch(/4 pass hidden/);
+    // By design: the two conversation warnings are one phrase; warn-mode is a posture, not a task.
+    expect(text).toMatch(/EXPECTED ON THIS HOST/);
+    expect(flat).toMatch(/Conversation scanning off \| Action Guard in watch only/);
+    expect(text).not.toMatch(/allowConversationAccess/);
+    expect(text).not.toMatch(/NEEDS ATTENTION|\bSCAN\b|\bATTEST\b|x2/);
+
+    // Passes and info are counted, not listed.
+    expect(text).toMatch(/4 checks passed/);
+    expect(text).toMatch(/1 informational row hidden/);
     expect(text).toMatch(/doctor --verbose/);
     expect(text).not.toMatch(/\[ok\].*Database/);
-
-    // no old bottom wall header
     expect(text).not.toMatch(/Suggested fixes:/);
 
     // every line fits 48
@@ -178,6 +171,7 @@ describe('formatDoctorReport — Edith case', () => {
   it('verbose: lists passes and does not hide them', () => {
     const lines = formatDoctorReport(EDITH, {
       version: '4.54.2',
+      target: 'edith',
       width: 80,
       color: false,
       verbose: true,
@@ -186,25 +180,25 @@ describe('formatDoctorReport — Edith case', () => {
     expect(text).toMatch(/HEALTHY/);
     expect(text).toMatch(/\[ok\].*Database|DB\s+Database/);
     expect(text).not.toMatch(/pass hidden/);
+    // The full report keeps its themes, counts and detail.
+    expect(text).toMatch(/NEEDS ATTENTION/);
+    expect(text).toMatch(/5 warn/);
+    expect(text).toMatch(/allowConversationAccess/);
   });
 
-  it('all-pass host prints All clear', () => {
-    const lines = formatDoctorReport(
-      [
-        { label: 'Database', status: 'pass', message: 'healthy' },
-        { label: 'Hooks', status: 'pass', message: 'ok' },
-      ],
-      { width: 40, color: false },
-    );
-    expect(lines.join('\n')).toMatch(/All clear/);
+  it('all-pass host: default says nothing to fix, verbose prints All clear', () => {
+    const rows: DoctorReportItem[] = [{ label: 'Database', status: 'pass', message: 'ok' }];
+    expect(formatDoctorReport(rows, { width: 80, color: false }).join('\n')).toMatch(/Healthy \| nothing to fix/);
+    expect(formatDoctorReport(rows, { width: 80, color: false, verbose: true }).join('\n')).toMatch(/All clear/);
   });
 
-  it('prints HOSTS and NEXT when provided, and honesty note only on warn-without-fail', () => {
+  it('verbose prints HOSTS and NEXT when provided, and the honesty note only on warn-without-fail', () => {
     const warnOnly = formatDoctorReport(
       [{ label: 'NOTIFY', status: 'warn', message: 'plugin off' }],
       {
         width: 80,
         color: false,
+        verbose: true,
         hostTableLines: ['  Hermes  present  not wired  memory + tool gate'],
         nextCommand: 'shieldcortex setup',
       },
@@ -217,61 +211,87 @@ describe('formatDoctorReport — Edith case', () => {
 
     const fail = formatDoctorReport(
       [{ label: 'Database', status: 'fail', message: 'corrupt', fix: 'shieldcortex repair' }],
-      { width: 80, color: false, nextCommand: 'shieldcortex repair' },
+      { width: 80, color: false, verbose: true, nextCommand: 'shieldcortex repair' },
     ).join('\n');
     expect(fail).not.toMatch(/Honesty warnings are not unprotected/);
     expect(fail).toMatch(/\$ shieldcortex repair/);
   });
 
-  it('honesty warns do not print $ import-native or $ repair', () => {
+  it('default: AGENTS comes from the host table; HOSTS lines, NEXT and the honesty note are --verbose only', () => {
     const text = formatDoctorReport(
-      [
-        {
-          label: 'Memory plane (dual-plane drift)',
-          status: 'warn',
-          message: 'dual_legacy dual-plane drift',
-          fix: 'Run `shieldcortex memories import-native`',
+      [{ label: 'NOTIFY', status: 'warn', message: 'plugin off' }],
+      {
+        width: 80,
+        color: false,
+        hostTableLines: ['  Hermes  present  not wired  memory + tool gate'],
+        hostTable: {
+          home: '/h',
+          rows: [{ id: 'hermes', label: 'Hermes', kind: 'bound', present: true, wired: false, wireCommand: 'shieldcortex hermes install', unwireCommand: 'shieldcortex hermes uninstall' }],
         },
-        {
-          label: 'OpenClaw plugin loaded',
-          status: 'warn',
-          message: 'cannot read OpenClaw plugin roster',
-          fix: 'Run `shieldcortex repair`',
-        },
-      ],
-      { width: 80, color: false },
+        nextCommand: 'shieldcortex setup',
+      },
     ).join('\n');
-    expect(text).not.toMatch(/\$ shieldcortex memories import-native/);
-    expect(text).not.toMatch(/\$ shieldcortex repair/);
-    expect(text).not.toMatch(/no single copy-paste command/);
-    expect(text).toMatch(/Honesty warnings are not unprotected/);
-    expect(text).toMatch(/Native memory is still the brain/);
-    expect(text).toMatch(/Do not run repair from this warning/);
+    expect(text).toMatch(/AGENTS ON THIS HOST/);
+    expect(text).toMatch(/Hermes\s+\[!!\] not connected \| run: shieldcortex hermes install/);
+    expect(text).not.toMatch(/^HOSTS$/m);
+    expect(text).not.toMatch(/^NEXT$/m);
+    expect(text).not.toMatch(/Honesty warnings are not unprotected/);
   });
 
-  it('warn-only NEXT does not print $ repair or $ import-native', () => {
+  it('honesty warns: default files them under EXPECTED with no $ import-native or $ repair; verbose keeps the guidance', () => {
+    const rows: DoctorReportItem[] = [
+      {
+        label: 'Memory plane (dual-plane drift)',
+        status: 'warn',
+        message: 'dual_legacy dual-plane drift',
+        fix: 'Run `shieldcortex memories import-native`',
+      },
+      {
+        label: 'OpenClaw plugin loaded',
+        status: 'warn',
+        message: 'cannot read OpenClaw plugin roster',
+        fix: 'Run `shieldcortex repair`',
+      },
+    ];
+    const dflt = formatDoctorReport(rows, { width: 80, color: false }).join('\n');
+    expect(dflt).not.toMatch(/\$ shieldcortex memories import-native/);
+    expect(dflt).not.toMatch(/\$ shieldcortex repair/);
+    expect(dflt).not.toMatch(/TO FIX/);
+    expect(dflt).toMatch(/Native agent memory stays primary/);
+    expect(dflt).toMatch(/OpenClaw plugin roster not readable/);
+
+    const verbose = formatDoctorReport(rows, { width: 80, color: false, verbose: true }).join('\n');
+    expect(verbose).not.toMatch(/\$ shieldcortex memories import-native/);
+    expect(verbose).not.toMatch(/\$ shieldcortex repair/);
+    expect(verbose).not.toMatch(/no single copy-paste command/);
+    expect(verbose).toMatch(/Honesty warnings are not unprotected/);
+    expect(verbose).toMatch(/Native memory is still the brain/);
+    expect(verbose).toMatch(/Do not run repair from this warning/);
+  });
+
+  it('verbose warn-only NEXT does not print $ repair or $ import-native', () => {
     const repair = formatDoctorReport(
       [{ label: 'OpenClaw plugin loaded', status: 'warn', message: 'roster unread' }],
-      { width: 80, color: false, nextCommand: 'shieldcortex repair' },
+      { width: 80, color: false, verbose: true, nextCommand: 'shieldcortex repair' },
     ).join('\n');
     expect(repair).not.toMatch(/\$ shieldcortex repair/);
     expect(repair).not.toMatch(/^NEXT$/m);
 
     const native = formatDoctorReport(
       [{ label: 'Memory plane', status: 'warn', message: 'dual_legacy' }],
-      { width: 80, color: false, nextCommand: 'shieldcortex memories import-native' },
+      { width: 80, color: false, verbose: true, nextCommand: 'shieldcortex memories import-native' },
     ).join('\n');
     expect(native).not.toMatch(/\$ shieldcortex memories import-native/);
     expect(native).not.toMatch(/^NEXT$/m);
 
     const setup = formatDoctorReport(
       [{ label: 'NOTIFY', status: 'warn', message: 'plugin off' }],
-      { width: 80, color: false, nextCommand: 'shieldcortex setup' },
+      { width: 80, color: false, verbose: true, nextCommand: 'shieldcortex setup' },
     ).join('\n');
     expect(setup).toMatch(/\$ shieldcortex setup/);
   });
 
-  it('Jarvis-class honesty warns print a next step, not a shrug', () => {
+  it('Jarvis-class warns: a real command or the row own guidance under TO FIX, posture notes under EXPECTED', () => {
     const text = formatDoctorReport(
       [
         {
@@ -298,12 +318,13 @@ describe('formatDoctorReport — Edith case', () => {
     expect(text).not.toMatch(/no single copy-paste command/);
     expect(text).toMatch(/\$ shieldcortex consolidate/);
     expect(text).toMatch(/safe to rotate or clear/);
-    expect(text).toMatch(/Do not add a webhook/);
+    expect(text).toMatch(/Guard notifications not set/);
+    expect(text).not.toMatch(/Do not add a webhook/);
     expect(text).not.toMatch(/\$ shieldcortex memories/);
     expect(text).not.toMatch(/\$ shieldcortex repair/);
   });
 
-  it('warn-only NOTIFY does not print $ webhook', () => {
+  it('warn-only NOTIFY never prints $ webhook', () => {
     const text = formatDoctorReport(
       [{
         label: 'Action Guard notify',
@@ -314,10 +335,10 @@ describe('formatDoctorReport — Edith case', () => {
       { width: 80, color: false },
     ).join('\n');
     expect(text).not.toMatch(/\$ shieldcortex config --action-guard-notify-webhook/);
-    expect(text).toMatch(/Do not add a webhook/);
+    expect(text).toMatch(/Guard notifications not set/);
   });
 
-  it('failures section precedes warnings', () => {
+  it('failures lead TO FIX, numbered, each with its command', () => {
     const lines = formatDoctorReport(
       [
         { label: 'Hooks', status: 'warn', message: 'missing', fix: '`shieldcortex install`' },
@@ -326,9 +347,12 @@ describe('formatDoctorReport — Edith case', () => {
       { width: 60, color: false },
     );
     const text = lines.join('\n');
-    expect(text.indexOf('FAILURES')).toBeGreaterThanOrEqual(0);
-    expect(text.indexOf('FAILURES')).toBeLessThan(text.indexOf('NEEDS ATTENTION'));
-    expect(text).toMatch(/\$ shieldcortex repair/);
+    expect(text).toMatch(/1 failed check \| 2 things to fix/);
+    expect(text).toMatch(/^ 1\. The memory database cannot be opened/m);
+    expect(text).toMatch(/^    \$ shieldcortex repair$/m);
+    expect(text).toMatch(/^ 2\. Hooks/m);
+    expect(text).toMatch(/^    \$ shieldcortex install$/m);
+    expect(text.indexOf(' 1. ')).toBeLessThan(text.indexOf(' 2. '));
   });
 });
 
