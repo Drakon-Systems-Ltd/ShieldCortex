@@ -9,8 +9,12 @@
  * Three tiers (#1014 AC1): FAIL rows and warnings with something to do go under
  * TO FIX, each with one plain line on what is wrong, one on why it matters when
  * that is not obvious, and a copy-paste command (or the row's own guidance when
- * no safe command exists). Warnings whose own guidance says not to act move to
- * a one-line EXPECTED section and are never mixed with actionable items.
+ * no safe command exists). A warning moves to the one-line EXPECTED section
+ * only when its own fix text positively says the feature is off by design
+ * (`warnTier`); a warning with no fix, an unreadable posture, a failed opt-in,
+ * missing telemetry or an unsupported host is a diagnosis and stays under
+ * TO FIX with its label, reason and whatever remedy the check gave. The two
+ * sections are never mixed.
  *
  * Symbols and colour appear only when the caller passes `symbols`/a styled
  * palette, which doctor.ts does on a TTY with NO_COLOR unset; otherwise the
@@ -20,6 +24,7 @@
 import {
   cleanWhy,
   extractFixCommands,
+  fixNeedsProse,
   groupItems,
   honestyGuidance,
   isHonestyForbiddenCommand,
@@ -115,13 +120,43 @@ export function doctorRowId(label: string): string {
 export type WarnTier = 'fix' | 'expected';
 
 /**
- * Guidance wording that means "nothing to do here": the honesty / by-design
- * warnings doctor prints so a configured-off feature is never mistaken for a
- * missing one. Matched on the guidance the full report would print, so the
- * two layouts agree on which warnings are actionable.
+ * The by-design statements doctor's own checks put in a warning's fix when
+ * the feature is intentionally inactive. Matched on the ROW'S OWN fix text
+ * only, never on its label or message: a label that says "Action guard" is
+ * not evidence that the Guard is off by choice, and the absence of a fix is
+ * not evidence that nothing needs doing (#1014 r3).
+ *
+ *  - "Action Guard is off. That is the default." / "Action Guard is advisory."
+ *    (posture-switch.ts OFF_FIX / ADVISORY_FIX)
+ *  - "That is a valid choice." (openclaw-conversation-access.ts; the pre-#226
+ *    wording was "leaving it ungranted is a valid choice")
+ *  - "A root lock is optional while Guard is off." (doctor.ts policy lock)
+ *  - "Headless denials staying local is expected while Guard is off."
+ *    (doctor.ts notify when the plugin plane is off)
+ *  - "Expected on dual_legacy." (plane-drift.ts DUAL_LEGACY_FIX)
+ *  - "Do not add a webhook and do not enable Action Guard from this line."
+ *    (the Guard-off notify row's own opening sentence)
  */
-const EXPECTED_GUIDANCE =
-  /^(?:Native memory is still the brain|Cannot read OpenClaw's plugin roster|Guard is off or the plugin is off)|\b(?:do not|don't) (?:run|enable|add|grant|uninstall|restart|install)\b|that is (?:a valid choice|the default)|not unprotected|optional while guard is off|^nothing to do\b/i;
+const BY_DESIGN_FIX =
+  /^Action Guard is (?:off|advisory)\.|\bis a valid choice\b|\bThat is the default\b|\boptional while Guard is off\b|\bexpected while Guard is off\b|\bExpected on dual_legacy\b|^Do not add a webhook and do not enable Action Guard from this (?:line|warning)\./i;
+
+/**
+ * Messages that OPEN with the Guard's configured posture, in the check's own
+ * words: the notify row while the Guard is disabled ("Action Guard is
+ * disabled and, when re-enabled, would run with no denial-capable notify
+ * sink") and the pre-#922 config row ("Action Guard runs in warn-mode"). Their
+ * fix may be the enable / webhook command a warning must not print, so the
+ * message is what says this is a chosen posture and not a sink or a read that
+ * failed. A message that starts any other way ("the Action Guard posture could
+ * not be read", "One-tap approve is OFF") says nothing about the Guard's
+ * posture and never matches.
+ */
+const BY_DESIGN_WHY = /^Action Guard (?:is (?:off|advisory|disabled)\b|runs in warn-mode\b)/i;
+
+/** True when the warning's own words say the feature is inactive by design. */
+export function isByDesignWarning(g: Pick<ThemeGroup, 'fixNote' | 'why'>): boolean {
+  return (g.fixNote !== '' && BY_DESIGN_FIX.test(cleanWhy(g.fixNote))) || BY_DESIGN_WHY.test(g.why);
+}
 
 /** Which tier a warning group belongs to. FAIL rows are always TO FIX. */
 export function warnTier(g: ThemeGroup): WarnTier {
@@ -132,38 +167,26 @@ export function warnTier(g: ThemeGroup): WarnTier {
   // command is withheld from warnings (#815 A).
   if (/^Action Guard is enforcing/i.test(g.why)) return 'fix';
   if (g.fixCommands.some((c) => !isHonestyForbiddenCommand(c))) return 'fix';
-  const guidance = honestyGuidance(g);
-  if (guidance === '') return 'expected'; // conversation scanning off
-  if (guidance.startsWith(SHRUG)) {
-    // No safe command and no guidance of its own. For a Guard row that is a
-    // configured posture (its only remedy would turn the guard on, which a
-    // warning never prescribes); for any other row it is something the
-    // operator has to look at, so it stays under TO FIX with its message.
-    return g.theme === 'GUARD' || g.theme === 'NOTIFY' || /action guard/i.test(g.labels.join(' '))
-      ? 'expected'
-      : 'fix';
-  }
-  return EXPECTED_GUIDANCE.test(guidance) ? 'expected' : 'fix';
+  return isByDesignWarning(g) ? 'expected' : 'fix';
 }
 
-/** One short phrase for the EXPECTED line. */
+/**
+ * One short phrase for the EXPECTED line. Only called for groups `warnTier`
+ * filed as expected, so the fix text has already named the feature; the
+ * label picks the phrase and the fix text picks the posture word.
+ */
 export function expectedPhrase(g: ThemeGroup): string {
   const label = g.labels.join(' ').toLowerCase();
-  const blob = `${g.what} ${g.why} ${g.fixNote}`.toLowerCase();
-  if (g.theme === 'SCAN' || /conversation scanning/.test(blob)) return 'Conversation scanning off';
+  const fix = cleanWhy(g.fixNote).toLowerCase();
+  if (g.theme === 'SCAN' || /conversation scanning/.test(`${label} ${fix}`)) return 'Conversation scanning off';
+  if (/expected on dual_legacy/.test(fix)) return 'Native agent memory stays primary';
   if (/policy lock/.test(label)) return 'Policy lock not set';
   if (/notify/.test(label)) return 'Guard notifications not set';
-  if (/action guard/.test(label)) {
-    // Label first: the posture row's own fix mentions webhooks too.
-    if (/^off\b/.test(g.why.toLowerCase()) || /action guard is off|guard is off/.test(blob)) return 'Action Guard off';
-    if (/advisory|warn-mode|watch only/.test(blob)) return 'Action Guard in watch only';
-    return 'Action Guard off';
+  const why = g.why.toLowerCase();
+  if (/^action guard is advisory\./.test(fix) || /^action guard (?:is advisory|runs in warn-mode)\b/.test(why)) {
+    return 'Action Guard in watch only';
   }
-  if (/webhook/.test(blob)) return 'Guard notifications not set';
-  if (/import-native|dual.plane|dual_legacy|native agent sot|native memory bus/.test(blob)) {
-    return 'Native agent memory stays primary';
-  }
-  if (/index unreadable|plugin roster|cannot read openclaw/.test(blob)) return 'OpenClaw plugin roster not readable';
+  if (/^action guard is off\./.test(fix) || /^action guard is (?:off|disabled)\b/.test(why)) return 'Action Guard off';
   return g.what;
 }
 
@@ -316,7 +339,9 @@ function renderFixItem(g: ThemeGroup, n: number, width: number, s: DoctorReportS
 
   const cmds = g.status === 'warn' ? g.fixCommands.filter((c) => !isHonestyForbiddenCommand(c)) : g.fixCommands;
   if (cmds.length > 0) {
-    if (g.fixNoteWithCommands && g.fixNote) {
+    // The prose prints with the commands when the row asks for it or when it
+    // carries a "do not" the `$` lines alone would drop (#1014 r3).
+    if (g.fixNote && fixNeedsProse(g)) {
       out.push(...wrapSoft(scrubIssueRefs(g.fixNote), width, 4, 4).map(dim));
     }
     for (const cmd of cmds) {
@@ -325,15 +350,21 @@ function renderFixItem(g: ThemeGroup, n: number, width: number, s: DoctorReportS
       out.push(...wrapSoft(text, width, 4, 6).map((l) => (runnable ? `${s.bold}${l}${s.reset}` : dim(l))));
     }
   } else {
-    // An enforcing guard with nobody to tell: the row's own fix is the
-    // guidance (as prose; a warning never prints a guard-changing `$` line).
-    // The full report's text match would read this row as "Guard is off".
-    const enforcingNotify = g.status === 'warn' && /^Action Guard is enforcing/i.test(g.why) && g.fixNote;
-    const guidance = enforcingNotify
-      ? cleanWhy(g.fixNote)
-      : g.status === 'warn'
+    // No safe `$` line. The row's own fix is the guidance, as prose (a
+    // warning never prints a guard-changing `$`). `honestyGuidance` is kept
+    // for the two cases where the row's text cannot be printed as is: an
+    // unknown signed posture (#878, structured) and a fix whose only content
+    // is a command a warning must not prescribe. It is never consulted for a
+    // row that has a printable fix of its own, so a label match can no
+    // longer replace a check's diagnosis with a canned by-design sentence.
+    const ownFix = g.fixNote ? cleanWhy(g.fixNote) : '';
+    const guidance = g.status !== 'warn'
+      ? ownFix
+      : g.postureUnknown
         ? honestyGuidance(g)
-        : (g.fixNote ? cleanWhy(g.fixNote) : '');
+        : ownFix && (!isHonestyForbiddenCommand(ownFix) || /^Action Guard is enforcing/i.test(g.why))
+          ? ownFix
+          : honestyGuidance(g);
     if (guidance && !guidance.startsWith(SHRUG)) {
       // Some checks (Node runtime) end their message with the remedy so the
       // full report shows it; here the why line already said it, so say it once.

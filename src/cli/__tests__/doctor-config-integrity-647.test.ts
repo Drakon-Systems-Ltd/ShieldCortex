@@ -147,7 +147,7 @@ afterEach(() => {
 });
 
 describe('#647 doctor names the integrity verdict', () => {
-  it('tampered: FAIL, says so, and the fix never prescribes the laundering re-run', () => {
+  it('tampered: FAIL, says so, and the fix never prescribes the laundering re-run', async () => {
     tamperedFixture();
     const row = integrityRow();
     expect(row.status).toBe('fail');
@@ -156,6 +156,23 @@ describe('#647 doctor names the integrity verdict', () => {
     expect(row.fix).toMatch(/config --resign/);
     expect(row.fix).toMatch(/Do not re-run/);
     expect(row.fix).not.toMatch(/\(they re-sign\)|Re-write the affected settings/);
+
+    // #1014 r3: the `config --*` wildcard is the thing NOT to run, so it is
+    // never a `$` line; both real steps are; and the default report prints the
+    // "Do not re-run" sentence with them instead of dropping it.
+    const { extractFixCommands, formatDoctorReport } = await import('../doctor-report.js');
+    expect(row.fixNoteWithCommands).toBe(true);
+    expect(extractFixCommands(row.fix)).toEqual([
+      'shieldcortex config --resign',
+      'shieldcortex config --resign --confirm <sha256>',
+    ]);
+    for (const verbose of [false, true]) {
+      const text = formatDoctorReport([row], { width: 120, color: false, verbose }).join('\n');
+      expect(text).toMatch(/Do not re-run shieldcortex config --\* flags to clear this/);
+      expect(text).not.toMatch(/\$ shieldcortex config --\*/);
+      expect(text).toMatch(/^\s+\$ shieldcortex config --resign$/m);
+      expect(text).toMatch(/^\s+\$ shieldcortex config --resign --confirm <sha256>$/m);
+    }
   });
 
   it('a refused setter does not launder it: doctor still says tampered afterwards', () => {

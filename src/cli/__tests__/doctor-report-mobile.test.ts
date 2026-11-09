@@ -238,27 +238,32 @@ describe('formatDoctorReport — Edith case (default is the #1014 plain-English 
     expect(text).not.toMatch(/Honesty warnings are not unprotected/);
   });
 
-  it('honesty warns: default files them under EXPECTED with no $ import-native or $ repair; verbose keeps the guidance', () => {
+  it('honesty warns: a by-design row goes under EXPECTED, a check that could not run stays under TO FIX; no $ import-native or $ repair anywhere', () => {
+    // The producers' own wording (plane-drift.ts DUAL_LEGACY_FIX; doctor.ts
+    // index-unreadable). #1014 r3: the second row is a read error, not a
+    // chosen posture, so the default report keeps its label and reason.
     const rows: DoctorReportItem[] = [
       {
         label: 'Memory plane (dual-plane drift)',
         status: 'warn',
-        message: 'dual_legacy dual-plane drift',
-        fix: 'Run `shieldcortex memories import-native`',
+        message: 'dual_legacy dual-plane drift (time-boxed defect): native agent SoT written inside the window — ~/.claude/MEMORY.md',
+        fix: 'Native memory is still the brain. Expected on dual_legacy. Do not run memories import-native from this warning. dual_legacy is a migration escape, not a tidy-up.',
       },
       {
         label: 'OpenClaw plugin loaded',
         status: 'warn',
-        message: 'cannot read OpenClaw plugin roster',
-        fix: 'Run `shieldcortex repair`',
+        message: "couldn't read OpenClaw's plugin list, so couldn't check the realtime plugin is running. This is a check that couldn't run, not a fault",
+        fix: "Couldn't read OpenClaw's plugin list file. If the plugin is already loaded you are protected. Do not run repair from this warning.",
       },
     ];
     const dflt = formatDoctorReport(rows, { width: 80, color: false }).join('\n');
     expect(dflt).not.toMatch(/\$ shieldcortex memories import-native/);
     expect(dflt).not.toMatch(/\$ shieldcortex repair/);
-    expect(dflt).not.toMatch(/TO FIX/);
     expect(dflt).toMatch(/Native agent memory stays primary/);
-    expect(dflt).toMatch(/OpenClaw plugin roster not readable/);
+    expect(dflt).toMatch(/^ 1\. OpenClaw plugin loaded  \[openclaw-plugin-loaded\]$/m);
+    expect(dflt).toMatch(/couldn't read OpenClaw's plugin list/);
+    expect(dflt).toMatch(/Do not run repair from this warning/);
+    expect(dflt).not.toMatch(/Memory plane \(dual-plane drift\)/);
 
     const verbose = formatDoctorReport(rows, { width: 80, color: false, verbose: true }).join('\n');
     expect(verbose).not.toMatch(/\$ shieldcortex memories import-native/);

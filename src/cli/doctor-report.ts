@@ -207,6 +207,36 @@ function normaliseFixKey(fix: string): string {
     .slice(0, 160);
 }
 
+/**
+ * A backticked snippet that is not a remedy: truncated (`sudo shieldcortex …`
+ * naming a cause), a wildcard over a family of flags (`config --*`), or any
+ * bare glob. Printing one after `$` tells the operator to run the thing the
+ * sentence was warning about (#1014 r3).
+ */
+function isPlaceholderSnippet(c: string): boolean {
+  return /…|\.\.\.|(?:^|\s)--?\*(?:\s|$)|(?:^|\s)\*(?:\s|$)/.test(c);
+}
+
+/**
+ * True when the clause the snippet sits in tells the operator NOT to run it:
+ * "Do not re-run `shieldcortex config --*` …". Looks back to the start of the
+ * sentence or clause so a "do not" in an earlier sentence never hides a real
+ * command that follows it.
+ */
+function isForbiddenInContext(fix: string, start: number): boolean {
+  const clauseStart = Math.max(
+    fix.lastIndexOf('. ', start), fix.lastIndexOf('; ', start), fix.lastIndexOf(': ', start),
+    fix.lastIndexOf('! ', start), fix.lastIndexOf('? ', start), fix.lastIndexOf('\n', start),
+  );
+  const clause = fix.slice(clauseStart + 1, start);
+  return /\b(?:do not|don't|never|rather than|instead of)\b/i.test(clause);
+}
+
+/** A fix whose prose carries a "do not" the commands alone would drop. */
+export function fixNeedsProse(g: { fixNote: string; fixNoteWithCommands?: true }): boolean {
+  return g.fixNoteWithCommands === true || /\b(?:do not|don't|never)\b/i.test(g.fixNote);
+}
+
 /** Pull copy-pasteable commands out of a free-form fix string. */
 export function extractFixCommands(fix: string | undefined): string[] {
   if (!fix) return [];
@@ -216,6 +246,7 @@ export function extractFixCommands(fix: string | undefined): string[] {
   while ((m = re.exec(fix)) !== null) {
     const c = m[1].trim();
     if (!c) continue;
+    if (isPlaceholderSnippet(c) || isForbiddenInContext(fix, m.index)) continue;
     // Prefer real shell-ish snippets
     if (
       /^(?:[\w.-]+\s+)?(?:shieldcortex|openclaw|claude|npm|node|systemctl|launchctl|chown|chmod)\b/i.test(c) ||
@@ -385,6 +416,14 @@ export function honestyGuidance(g: {
   if (g.theme === 'SCAN' || /conversation scanning/.test(blob)) {
     return '';
   }
+  // #1014 r3: the row's own fix is the guidance whenever it can be printed.
+  // The text matches below are a fallback for a row whose only remedy is a
+  // command a warning must not prescribe; they used to run first, so a
+  // dual-plane row reporting missing telemetry printed "Native memory is
+  // still the brain" instead of its own "restore the telemetry" fix.
+  if (g.fixNote && !isHonestyForbiddenCommand(g.fixNote)) {
+    return cleanWhy(g.fixNote);
+  }
   if (/import-native|dual.plane|dual_legacy|native agent sot|native memory bus/.test(blob)) {
     return 'Native memory is still the brain. Expected on dual_legacy. Do not run memories import-native from this warning.';
   }
@@ -393,9 +432,6 @@ export function honestyGuidance(g: {
   }
   if (/webhook|notify\.openclaw|denial-capable|notify\.enabled|action-guard-notify/.test(blob)) {
     return 'Guard is off or the plugin is off. Headless denials staying local is expected. Do not add a webhook and do not enable Action Guard from this warning.';
-  }
-  if (g.fixNote && !isHonestyForbiddenCommand(g.fixNote)) {
-    return cleanWhy(g.fixNote);
   }
   return 'No action needed. This is attention, not unprotected.';
 }
@@ -501,7 +537,7 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
     ? g.fixCommands.filter((c) => !isHonestyForbiddenCommand(c))
     : g.fixCommands;
   if (cmds.length > 0) {
-    if (g.fixNoteWithCommands && g.fixNote) {
+    if (g.fixNote && fixNeedsProse(g)) {
       lines.push(...wrapLine(cleanWhy(g.fixNote), width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
     }
     for (const cmd of cmds) {

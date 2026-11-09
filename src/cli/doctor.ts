@@ -5391,10 +5391,14 @@ export function policyLockRows(): CheckResult[] {
           'hand edit). The strict fail-closed posture is in force (guard on + enforcing, no auto-approve, no ' +
           'reviewed-script pins, broker off, defence mode strict), and config writes are refused so the file, its ' +
           `pins and this verdict are preserved. ${HMAC_NOTE}`,
+        // #1014 r3: both steps are full commands so the report prints both as
+        // `$` lines, and the prose prints with them so the "do not" survives.
         fix:
           'Do not re-run `shieldcortex config --*` flags to clear this — they refuse on a tampered file. Review the ' +
-          'file, then `shieldcortex config --resign` (a preview; writes nothing) and `--resign --confirm <sha256>`; ' +
-          'or restore a backup whose signature still verifies. Then re-run doctor.',
+          'file, then `shieldcortex config --resign` (a preview; writes nothing) and ' +
+          '`shieldcortex config --resign --confirm <sha256>`; or restore a backup whose signature still verifies. ' +
+          'Then re-run doctor.',
+        fixNoteWithCommands: true,
       });
       break;
     case 'malformed':
