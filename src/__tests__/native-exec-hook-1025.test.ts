@@ -78,10 +78,13 @@ const SESSION = 'sc-1025-hook-session';
  *  D-1 (a node that still has an `a` child, so every `a/..` is walkable).
  *  Depth and segment are scaled so each path and link target fits PATH_MAX
  *  (Linux 4096, macOS 1024); on Linux this is the D=2000 / 817-segment shape.
+ *  `prefixLen` (default `work.length`): size the tree from this length, so
+ *  homes whose work prefixes differ get the same depth (and token) by
+ *  construction — pass the longest prefix of every home planted.
  *  Torn down iteratively (no recursive rm through 2000 levels). */
-function plantLinkChain(work: string): { token: string; depth: number; teardown: () => void } {
+function plantLinkChain(work: string, prefixLen = work.length): { token: string; depth: number; teardown: () => void } {
   const pathMax = process.platform === 'darwin' ? 1024 : 4096;
-  const depth = Math.min(2000, Math.floor((pathMax - work.length - 16) / 2));
+  const depth = Math.min(2000, Math.floor((pathMax - Math.max(prefixLen, work.length) - 16) / 2));
   const seg = Math.min(817, Math.floor((pathMax - 8) / 5));
   const node = path.join(work, ...new Array(depth - 1).fill('a'));
   fs.mkdirSync(path.join(node, 'a'), { recursive: true });
@@ -243,30 +246,55 @@ describe('#1025 native-exec observation through the real Claude Code hook', () =
     expect(fs.existsSync(store) ? fs.readdirSync(store).sort() : null).toEqual(before); // a block records nothing
   }, 60_000);
 
-  it('r4: deep tree + 39-link a/../ chain naming .../L0/x — catastrophic deny and require_approval stay fast, same decision', async () => {
+  it('r4: deep tree + 39-link a/../ chain naming .../L0/x — catastrophic deny and require_approval stay fast; keyed and unkeyed runs decide alike', async () => {
     await plant('seed'); // a non-empty session store, so the probe lists and resolves
-    const chains = [recorded, control].map((box) => plantLinkChain(box.work));
+    // One depth for both homes by construction: size from the longest prefix.
+    const prefixLen = Math.max(recorded.work.length, control.work.length);
+    const chains = [recorded, control].map((box) => plantLinkChain(box.work, prefixLen));
+    // Control is UNKEYED (no session_id): nativeProvenanceKey is null, so the
+    // native-exec record/probe path is not wired at all for it.
+    const unkeyed = (command: string, timeoutMs: number) => runHook({
+      cwd: control.work, hook_event_name: 'PreToolUse', permission_mode: 'default', tool_name: 'Bash', tool_input: { command },
+    }, control.env, timeoutMs);
+    const view = (rows: Array<Record<string, unknown>>) => rows.map((r) => ({ action: r.action, outcome: r.outcome, severity: r.severity, threats: r.threats }));
+    const sorted = <T,>(rows: T[]) => [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
     try {
       if (process.platform === 'linux') expect(chains[0].depth).toBe(2000);
+      expect(chains[1].depth).toBe(chains[0].depth);
       const token = chains[0].token;
       expect(chains[1].token).toBe(token);
-      const cases: Array<[string, string]> = [
-        [`${['rm', '-rf', '~'].join(' ')} ; ./${token}`, 'deny'],
-        [`${['rm', '-rf', '~'].join(' ')} ; echo hi > ${token}`, 'deny'],
-        [`git push --force origin main > ${token}`, 'ask'],
+      const cases: Array<[string, string, string, string, string]> = [
+        [`${['rm', '-rf', '~'].join(' ')} ; ./${token}`, 'deny', 'auto_deny', 'auto_denied', 'critical'],
+        [`${['rm', '-rf', '~'].join(' ')} ; echo hi > ${token}`, 'deny', 'auto_deny', 'auto_denied', 'critical'],
+        [`git push --force origin main > ${token}`, 'ask', 'require_approval', 'asked', 'high'],
       ];
-      for (const [command, want] of cases) {
+      for (const [command, want, wantAction, wantOutcome, wantSeverity] of cases) {
+        const beforeA = auditRows(recorded).length;
+        const beforeB = auditRows(control).length;
         const started = Date.now();
         const a = await call(recorded, 'Bash', { command }, 9000);
         const ms = Date.now() - started;
-        const b = await call(control, 'Bash', { command }, 9000);
+        const b = await unkeyed(command, 9000);
         expect(a.timedOut).toBeUndefined();
         expect(b.timedOut).toBeUndefined();
         expect(JSON.parse(a.stdout).hookSpecificOutput.permissionDecision).toBe(want);
         expect(a.stdout).toBe(b.stdout);
         expect(a.code).toBe(b.code);
         expect(ms).toBeLessThan(3000); // unbounded realpath(3) took ~11 s for this plant
+
+        // Material parity: this call's audit rows, keyed vs unkeyed.
+        const rowsA = view(auditRows(recorded).slice(beforeA));
+        const rowsB = view(auditRows(control).slice(beforeB));
+        expect(rowsA.length).toBeGreaterThan(0);
+        expect(sorted(rowsA)).toEqual(sorted(rowsB)); // same rows; append order is not the contract
+        // The decision row (a `notify` row accompanies it; order is not pinned).
+        expect(rowsA.map((r) => ({ action: r.action, outcome: r.outcome }))).toContainEqual({ action: wantAction, outcome: wantOutcome });
+        for (const r of rowsA) {
+          expect(r.severity).toBe(wantSeverity);
+          expect(Array.isArray(r.threats) && r.threats.length > 0).toBe(true);
+        }
       }
+      expect(fs.existsSync(path.join(control.configDir, 'native-provenance'))).toBe(false);
     } finally {
       for (const c of chains) c.teardown();
     }
