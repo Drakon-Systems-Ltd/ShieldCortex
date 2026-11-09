@@ -78,7 +78,9 @@ export type Realpath = (p: string) => string;
 export const NATIVE_PROVENANCE_RECORD_CAP = 4096;
 /** Captures recorded from one call. */
 export const MAX_CAPTURES_PER_CALL = 16;
-/** TTL measured from a session directory's last activity. */
+/** TTL measured from a session directory's mtime: it moves when a record is
+ *  published there, never on a probe, so a session that only runs what it
+ *  recorded ages out (#1031 N2). */
 export const NATIVE_PROVENANCE_TTL_MS = 24 * 60 * 60 * 1000;
 /** Live (unexpired) sessions kept. At the cap a NEW session is not recorded;
  *  no live session is ever evicted to make room. */
@@ -132,6 +134,17 @@ export const MAX_MISSING_PARENT_COMPONENTS = 2;
  * `null` or `0` — never a throw and never a different decision.
  */
 export interface NativeProvenanceBudget {
+  expired(): boolean;
+}
+
+/**
+ * What {@link createNativeArtifactProbe} returns: the per-call lookup, plus
+ * `expired()` — whether that call's shared budget is spent (latched, never
+ * throws). #1031: the evaluator checks it before a `sameCall` label, which
+ * reads no store and so is not stopped by the lookup's own budget checks.
+ */
+export interface NativeArtifactProbe {
+  (token: string): NativeArtifactProvenance | null;
   expired(): boolean;
 }
 
@@ -884,6 +897,11 @@ export function recordNativeArtifactCaptures(opts: {
  * after the final header read. Past the budget the answer is `null`, even for
  * a hash already classified. Never throws.
  *
+ * The probe also exposes `expired()`: the same shared budget, latched. The
+ * evaluator asks it before a label it derives WITHOUT the store (`sameCall`),
+ * because a `null` from the probe cannot tell "no record" from "out of time"
+ * (#1031) — past the deadline nothing more is labelled, that included.
+ *
  * `clock` is a monotonic millisecond clock, `performance.now` by default.
  */
 export function createNativeArtifactProbe(opts: {
@@ -895,7 +913,7 @@ export function createNativeArtifactProbe(opts: {
   /** The call's shared budget (also passed to the record step). A fresh
    *  default from `clock` when absent. */
   budget?: NativeProvenanceBudget;
-}): (token: string) => NativeArtifactProvenance | null {
+}): NativeArtifactProbe {
   const root = storeRoot(opts.stateDir);
   const valid = root !== null && SESSION_KEY_RE.test(String(opts.sessionKey ?? ''));
   const dir = path.join(root ?? '_', valid ? opts.sessionKey : '_');
@@ -951,7 +969,7 @@ export function createNativeArtifactProbe(opts: {
     if (expired()) return null;
     return classifyNativeProvenance(records, current, header);
   };
-  return (token: string) => {
+  const lookup = (token: string): NativeArtifactProvenance | null => {
     try {
       if (!valid) return null;
       if (expired()) return null;
@@ -970,6 +988,17 @@ export function createNativeArtifactProbe(opts: {
       return null;
     }
   };
+  // #1031: the budget's own latch, read-only. A budget that throws counts as
+  // spent, as everywhere else in this module.
+  return Object.assign(lookup, {
+    expired: (): boolean => {
+      try {
+        return expired();
+      } catch {
+        return true;
+      }
+    },
+  });
 }
 
 /**
@@ -979,7 +1008,7 @@ export function createNativeArtifactProbe(opts: {
  *
  * Selection: only entries that lstat as real directories (not a link) owned
  * by this uid (where the platform has `getuid`), named like a session key,
- * whose last activity is older than the TTL are chosen for removal. A root
+ * whose mtime (its last record) is older than the TTL are chosen for removal. A root
  * with more than `MAX_STORE_ROOT_ENTRIES` entries is listed no further and
  * nothing in it is touched (`null`). Every other name, link, file or special file present at the lstat
  * is left as it is, and a live session is never evicted for room — the

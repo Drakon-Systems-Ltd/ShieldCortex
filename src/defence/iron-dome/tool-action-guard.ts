@@ -5553,8 +5553,13 @@ export interface ToolGuardOptions {
    * `verdict.nativeExec`; it is consulted after the decision is final and
    * cannot change it. Same purity contract as `resolveScriptSource`: never
    * throws, never blocks; a throw is treated as "not observed".
+   *
+   * #1031: the real probe also carries `expired()`, its call's shared store
+   * budget. Once that says spent, no `sameCall` label is added either (that
+   * label reads no store, so the probe's own checks cannot stop it). A probe
+   * without `expired` keeps the earlier behaviour; one that throws is spent.
    */
-  nativeArtifactProvenance?: (token: string) => NativeArtifactProvenance | null;
+  nativeArtifactProvenance?: ((token: string) => NativeArtifactProvenance | null) & { expired?: () => boolean };
 }
 
 interface ScriptFold {
@@ -8325,6 +8330,20 @@ export function nativeExecObservation(
         .filter(c => c.kind === 'compiled-output')
         .map(c => sameCallKey(c.token)),
     );
+    // #1031: a `null` from the probe is "no record" OR "the shared budget is
+    // spent" — it cannot say which. `sameCall` is derived without the store,
+    // so it asks the budget itself: past the deadline nothing more is
+    // labelled, this label included. Checked per candidate, after that
+    // candidate's lookup, so a budget the lookup just spent counts.
+    const budgetSpent = (): boolean => {
+      const e = (probe as { expired?: unknown }).expired;
+      if (typeof e !== 'function') return false;
+      try {
+        return e.call(probe) !== false;
+      } catch {
+        return true;
+      }
+    };
     const uses: NativeExecUse[] = [];
     const seen = new Set<string>();
     const note = (u: NativeExecUse): void => {
@@ -8342,7 +8361,7 @@ export function nativeExecObservation(
       }
       if (provenance === 'agent-written' || provenance === 'compiled-output' || provenance === 'ambiguous') {
         note({ action: c.action, provenance });
-      } else if (c.action !== 'reference' && compiledHere.has(sameCallKey(c.token))) {
+      } else if (c.action !== 'reference' && compiledHere.has(sameCallKey(c.token)) && !budgetSpent()) {
         note({ action: c.action, provenance: 'compiled-output', sameCall: true });
       }
     }
