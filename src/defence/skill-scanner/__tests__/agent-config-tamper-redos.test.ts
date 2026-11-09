@@ -158,6 +158,7 @@ for await (const chunk of process.stdin) raw += chunk;
 const req = JSON.parse(raw);
 const { detectSkillThreats, skillPatternGroupRows } = await import(req.patternsModule);
 const { scanSkillContent } = await import(req.scanModule);
+const { writeSync } = await import('node:fs');
 
 function timed(fn) {
   const t = process.hrtime.bigint();
@@ -173,6 +174,9 @@ for (const input of req.inputs) {
   let rowMaxMs = -1;
   let rowMaxIndex = -1;
   for (let i = 0; i < timedRows.length; i++) {
+    if (plantedRows.length > 0 && i === realRows.length) {
+      writeSync(2, 'REDOS_PLANTED_ROW ' + JSON.stringify({ label: input.label, realRowsCompleted: i }) + String.fromCharCode(10));
+    }
     const { elapsed } = timed(() => timedRows[i].test(input.text));
     if (elapsed > rowMaxMs) { rowMaxMs = elapsed; rowMaxIndex = i; }
   }
@@ -253,6 +257,11 @@ function describeRun(run: ChildRun): string {
   return `timedOut=${run.timedOut} status=${run.status} signal=${run.signal} wall=${run.wallMs.toFixed(0)} ms stderr=${run.stderr}`;
 }
 
+function reachedPlantedRow(run: ChildRun, label: string, realRowsCompleted: number): boolean {
+  const marker = `REDOS_PLANTED_ROW ${JSON.stringify({ label, realRowsCompleted })}`;
+  return run.stderr.split('\n').includes(marker);
+}
+
 function fmt(n: number | null | undefined): string {
   return n === null || n === undefined ? 'skipped' : `${n.toFixed(1)} ms`;
 }
@@ -260,7 +269,7 @@ function fmt(n: number | null | undefined): string {
 function table(title: string, rowsOut: Array<Partial<Measured> & { label: string }>): string {
   return [
     `[redos-gate] ${title}`,
-    ...rowsOut.map((r) => `[redos-gate]   ${r.label} | every row max=${fmt(r.rowMaxMs)} | detectSkillThreats=${fmt(r.detectMs)} | full scan=${fmt(r.fullMs)}`),
+    ...rowsOut.map((r) => `[redos-gate]   ${r.label} | every row max=${fmt(r.rowMaxMs)} | detectSkillThreats=${fmt(r.detectMs)} | full scan=${fmt(r.fullMs)} | fullSig=${r.fullSig ?? 'skipped'}`),
   ].join('\n');
 }
 
@@ -349,10 +358,13 @@ describe('agent_config_tamper ReDoS gate', () => {
       expect(calibration.report.results).toHaveLength(1);
       expect(calibration.report.rows).toEqual(rows.map((re) => `${re.source}/${re.flags}`));
       expect(calibration.report.results[0].rowMaxMs).toBeLessThan(BUDGET_MS);
+      const calibrationReached = reachedPlantedRow(calibration, 'control calibration', rows.length);
+      expect(calibrationReached).toBe(true);
 
       // The control: 100 KB. The child is killed CONTROL_CAP_MS after the
-      // measured start-up cost; a kill counts as a miss. A child that exits
-      // any other way without a report is a broken control and fails here.
+      // measured start-up cost; only a kill after the planted-row marker
+      // counts as a miss. A child that exits any other way without a report
+      // is a broken control and fails here.
       const capMs = Math.ceil(calibration.wallMs) + CONTROL_CAP_MS;
       const control = runChild(
         [{ label: 'control', text: controlInput[1], fullScan: false }],
@@ -360,14 +372,16 @@ describe('agent_config_tamper ReDoS gate', () => {
         capMs,
       );
       const measured = control.report ? control.report.results[0] : undefined;
+      const controlReached = reachedPlantedRow(control, 'control', rows.length);
       console.log([
         `[redos-gate] negative control, planted row /${CONTROL_ROW.source}/ on "${CONTROL_INPUT_LABEL}"`,
-        `[redos-gate]   calibration (1 KB): every row max=${fmt(calibration.report.results[0].rowMaxMs)} | child wall ${calibration.wallMs.toFixed(0)} ms`,
-        `[redos-gate]   control (100 KB): ${control.timedOut ? `killed at the ${capMs} ms cap (miss)` : `every row max=${fmt(measured?.rowMaxMs)} planted=${measured?.rowMaxPlanted}`} | child wall ${control.wallMs.toFixed(0)} ms`,
+        `[redos-gate]   calibration (1 KB): every row max=${fmt(calibration.report.results[0].rowMaxMs)} | child wall ${calibration.wallMs.toFixed(0)} ms | planted-row marker=${calibrationReached} real rows=${rows.length}`,
+        `[redos-gate]   control (100 KB): ${control.timedOut ? `killed at the ${capMs} ms cap` : `every row max=${fmt(measured?.rowMaxMs)} planted=${measured?.rowMaxPlanted}`} | child wall ${control.wallMs.toFixed(0)} ms | planted-row marker=${controlReached} real rows=${rows.length}`,
       ].join('\n'));
 
       if (!control.timedOut && !measured) throw new Error(`control child neither reported nor hit the cap (${describeRun(control)})`);
-      const missed = control.timedOut
+      if (!controlReached) throw new Error(`control killed before the planted row or marker missing (${describeRun(control)})`);
+      const missed = (control.timedOut && controlReached)
         || (measured !== undefined && measured.rowMaxPlanted && measured.rowMaxMs >= BUDGET_MS);
       expect(missed).toBe(true);
     }, GATE_CHILD_TIMEOUT_MS + 60_000);
@@ -416,10 +430,15 @@ describe('agent_config_tamper ReDoS gate', () => {
       });
     }
 
-    // The child times dist/, this worker runs the TypeScript sources. Same
-    // scan outcome on every input shows the fresh process did the same work
-    // (and did not, for example, return early through the scan's catch-all).
+    // The child times dist/, this worker runs the TypeScript sources.
+    // Successful full-scan signatures in both processes rule out matching
+    // catch-all failures; parity then checks their observed scan outcomes.
     it('the fresh process reached the same scan outcome as this worker on every input', () => {
+      for (const [label] of ADVERSARIAL) {
+        if (FULL_SCAN_SLOW_ON_MAIN.has(label)) continue;
+        expect(fresh(label).fullSig).toMatch(/\|scanned$/);
+        expect(inWorker.get(label)?.fullSig).toMatch(/\|scanned$/);
+      }
       const fromChild = freshReport().results.map((r) => ({ label: r.label, detect: r.detectSig, full: r.fullSig }));
       const fromWorker = ADVERSARIAL.map(([label]) => ({
         label,
