@@ -68,18 +68,23 @@ if (barrierDir) {
   }
 }
 const start = Date.now();
-// Overlap by construction: announce that the append loop has begun, and do not
-// leave it until every peer has announced too (at least \`count\` appends
-// regardless). Release skew between processes on a slow runner can exceed a
-// whole fixed-size run, so a fixed count alone cannot guarantee overlap.
+// Overlap by construction: announce once the FIRST append has committed, and do
+// not leave the loop until every peer has announced too (at least count
+// appends regardless). Release skew between processes on a slow runner can
+// exceed a whole fixed-size run, so a fixed count alone cannot guarantee
+// overlap.
 const peers = peersArg ? peersArg.split(',') : [];
-if (barrierDir) writeReady(joinPath(barrierDir, 'started-' + tag), '');
-const peersStarted = () => peers.every((p) => goExists(joinPath(barrierDir, 'started-' + p)));
-const loopDeadline = Date.now() + 60_000;
+const peerFile = (p) => joinPath(barrierDir, 'started-' + p);
+const missingPeers = () => peers.filter((p) => !goExists(peerFile(p)));
+let waitDeadline = 0;
 let ok = 0;
 for (let i = 0; ; i++) {
-  if (i >= count && (!barrierDir || peersStarted())) break;
-  if (Date.now() > loopDeadline) { process.stderr.write('peers never started'); process.exit(4); }
+  if (i >= count && (!barrierDir || missingPeers().length === 0)) break;
+  if (i >= count) {
+    // Only the wait for peers is bounded; a slow but progressing append run is not.
+    if (!waitDeadline) waitDeadline = Date.now() + 60_000;
+    if (Date.now() > waitDeadline) { process.stderr.write('peers never started: ' + missingPeers().join(',')); process.exit(4); }
+  }
   if (mode === 'crash' && i === count - 1) {
     __setLedgerFaultForTests(() => { process.kill(process.pid, 'SIGKILL'); });
   }
@@ -91,6 +96,7 @@ for (let i = 0; ; i++) {
     reason: tag + ' ' + i, fragmentation_score: null,
   });
   if (id > 0) ok++;
+  if (i === 0 && barrierDir) writeReady(peerFile(tag), '');
 }
 const end = Date.now();
 closeDatabase();
@@ -198,7 +204,7 @@ describe('multi-process ledger gates', () => {
     }
     const timings = results.map((r) => JSON.parse(r.out) as { ok: number; start: number; end: number });
     // Each writer appends at least EACH rows (more if it waited for peers).
-    expect(timings.every((t) => t.ok >= EACH)).toBe(true);
+    expect(timings.map((t) => t.ok >= EACH)).toEqual(tags.map(() => true));
     const total = timings.reduce((n, t) => n + t.ok, 0);
 
     const db = new Database(dbPath, { readonly: true });
