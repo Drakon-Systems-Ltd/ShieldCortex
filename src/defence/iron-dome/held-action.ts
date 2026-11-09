@@ -47,7 +47,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync,
-  renameSync, rmSync, writeFileSync,
+  realpathSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -126,33 +126,121 @@ export function isClaudeCodeArgv(argv: string[] | null | undefined): boolean {
   });
 }
 
-/** hooks.json files under the given plugin roots, bounded in depth and count. */
-export function findPluginHookFiles(roots: string[], maxDepth = 6, maxFiles = 200): string[] {
-  const out: string[] = [];
-  const walk = (dir: string, depth: number) => {
-    if (depth > maxDepth || out.length >= maxFiles) return;
-    let entries: import('node:fs').Dirent[];
-    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      if (out.length >= maxFiles) return;
-      const full = join(dir, e.name);
-      if (e.isDirectory() && !e.isSymbolicLink()) walk(full, depth + 1);
-      else if (e.isFile() && e.name === 'hooks.json') out.push(full);
-    }
-  };
-  for (const r of roots) walk(r, 0);
-  return out;
+/** Result of walking plugin roots for hooks.json files. `complete` is true
+ *  only when every directory under every root was listed, every child link
+ *  was resolved, and no traversal bound cut the walk short. Anything less
+ *  means a registered hook (and its shorter timeout) may have been missed. */
+export interface PluginHookDiscovery {
+  files: string[];
+  complete: boolean;
+  /** Why the walk is incomplete (diagnostic only, no paths). */
+  incomplete?: 'root-unreadable' | 'dir-unreadable' | 'link-unresolved' | 'depth-cap' | 'file-cap' | 'dir-cap';
 }
 
-function pluginDirsFromArgv(argv: string[] | null | undefined): string[] {
-  const out: string[] = [];
-  if (!Array.isArray(argv)) return out;
+/**
+ * hooks.json files under the given plugin roots, bounded in depth, file count
+ * and directory count. #853 review: a partial walk must never pass as a
+ * proven budget, so this reports `complete: false` on any unreadable
+ * directory, any child symlink it cannot resolve, and any bound it hits.
+ * Child symlinks are followed (a skipped link is not a proven absence of a
+ * hook, so it may not be silently dropped); a link back
+ * into an already-walked directory is a cycle and is skipped, which loses
+ * nothing. A root that does not exist is fine only when `optional`.
+ */
+export function discoverPluginHookFiles(
+  roots: Array<{ path: string; optional: boolean }>,
+  opts: { maxDepth?: number; maxFiles?: number; maxDirs?: number } = {},
+): PluginHookDiscovery {
+  // Bounds keep the walk cheap; hitting any of them is `complete: false`.
+  // Depth 16 covers real marketplace/cache trees (skill content nests past
+  // 6); cycles are stopped by the realpath visited-set, not by depth.
+  const maxDepth = opts.maxDepth ?? 16;
+  const maxFiles = opts.maxFiles ?? 200;
+  const maxDirs = opts.maxDirs ?? 2000;
+  const files: string[] = [];
+  const seenFiles = new Set<string>();
+  const visited = new Set<string>();
+  let incomplete: PluginHookDiscovery['incomplete'];
+  const fail = (why: NonNullable<PluginHookDiscovery['incomplete']>) => { incomplete ??= why; };
+
+  const addFile = (full: string) => {
+    let real: string;
+    try { real = realpathSync(full); } catch { fail('link-unresolved'); return; }
+    if (seenFiles.has(real)) return;
+    if (files.length >= maxFiles) { fail('file-cap'); return; }
+    seenFiles.add(real);
+    files.push(full);
+  };
+
+  const walk = (dir: string, depth: number): void => {
+    if (incomplete) return;
+    let real: string;
+    try { real = realpathSync(dir); } catch { fail('dir-unreadable'); return; }
+    if (visited.has(real)) return; // cycle or a second route to a walked dir
+    if (visited.size >= maxDirs) { fail('dir-cap'); return; }
+    visited.add(real);
+    let entries: import('node:fs').Dirent[];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { fail('dir-unreadable'); return; }
+    for (const e of entries) {
+      if (incomplete) return;
+      const full = join(dir, e.name);
+      let isDir = e.isDirectory();
+      let isFile = e.isFile();
+      if (e.isSymbolicLink()) {
+        try {
+          const st = statSync(full);
+          isDir = st.isDirectory();
+          isFile = st.isFile();
+        } catch {
+          fail('link-unresolved');
+          return;
+        }
+      }
+      if (isDir) {
+        if (depth + 1 > maxDepth) { fail('depth-cap'); return; }
+        walk(full, depth + 1);
+      } else if (isFile && e.name === 'hooks.json') {
+        addFile(full);
+      }
+    }
+  };
+
+  for (const r of roots) {
+    if (incomplete) break;
+    let st: import('node:fs').Stats;
+    try {
+      st = statSync(r.path); // a root that is itself a link is followed
+    } catch (err) {
+      if (r.optional && (err as NodeJS.ErrnoException)?.code === 'ENOENT') continue;
+      fail('root-unreadable');
+      break;
+    }
+    if (!st.isDirectory()) { fail('root-unreadable'); break; }
+    walk(r.path, 0);
+  }
+  return incomplete ? { files, complete: false, incomplete } : { files, complete: true };
+}
+
+/** hooks.json files under the given plugin roots (best effort, no
+ *  completeness signal). Kept for callers that only want a listing; the
+ *  timeout reading uses `discoverPluginHookFiles`. */
+export function findPluginHookFiles(roots: string[], maxDepth = 16, maxFiles = 200): string[] {
+  return discoverPluginHookFiles(roots.map((path) => ({ path, optional: true })), { maxDepth, maxFiles }).files;
+}
+
+/** `--plugin-dir` values on a Claude Code argv. `valid: false` when a flag
+ *  has no value. Values are returned as given (possibly relative). */
+export function pluginDirsFromArgv(argv: string[] | null | undefined): { dirs: string[]; valid: boolean } {
+  const dirs: string[] = [];
+  let valid = true;
+  if (!Array.isArray(argv)) return { dirs, valid };
   for (let i = 0; i < argv.length; i++) {
     const a = String(argv[i]);
-    if (a === '--plugin-dir' && typeof argv[i + 1] === 'string') { out.push(argv[i + 1]); i++; }
-    else if (a.startsWith('--plugin-dir=')) out.push(a.slice('--plugin-dir='.length));
+    if (a === '--plugin-dir') {
+      if (typeof argv[i + 1] === 'string') { dirs.push(argv[i + 1]); i++; } else valid = false;
+    } else if (a.startsWith('--plugin-dir=')) dirs.push(a.slice('--plugin-dir='.length));
   }
-  return out;
+  return { dirs, valid };
 }
 
 /** Where Claude Code reads managed (policy) settings, per platform. */
@@ -264,10 +352,28 @@ export function readPreToolHookTimeout(src: PreToolTimeoutSources = {}): PreTool
       optional: false,
     });
   }
-  const pluginFiles = src.pluginHookFiles ?? findPluginHookFiles([
-    join(home, '.claude', 'plugins'),
-    ...(src.assumeNoArgvFlags ? [] : pluginDirsFromArgv(src.parentArgv)),
-  ]);
+  let pluginFiles = src.pluginHookFiles;
+  if (!pluginFiles) {
+    // #853 review: a `--plugin-dir` is resolved by Claude Code against ITS
+    // cwd at launch, which this hook cannot prove (CLAUDE_PROJECT_DIR and
+    // our own cwd need not match it). A relative, empty or valueless
+    // `--plugin-dir` therefore makes the budget unproven — never resolved
+    // against the hook's cwd and never skipped.
+    const argvDirs = src.assumeNoArgvFlags ? { dirs: [], valid: true } : pluginDirsFromArgv(src.parentArgv);
+    if (!argvDirs.valid || argvDirs.dirs.some((d) => d.trim() === '' || !isAbsolute(d))) {
+      return { seconds: null, sources: [], reason: 'settings-unreadable' };
+    }
+    // #853 review: a walk cut short (unreadable dir, unresolvable child
+    // link, depth/file/dir cap) may have missed a shorter timeout; that is
+    // not a proven budget. `~/.claude/plugins` may be absent; a named
+    // `--plugin-dir` that cannot be walked is unproven.
+    const discovery = discoverPluginHookFiles([
+      { path: join(home, '.claude', 'plugins'), optional: true },
+      ...argvDirs.dirs.map((path) => ({ path, optional: false })),
+    ]);
+    if (!discovery.complete) return { seconds: null, sources: [], reason: 'settings-unreadable' };
+    pluginFiles = discovery.files;
+  }
   for (const p of pluginFiles) candidates.push({ label: 'plugin', load: fromFile(p), optional: false });
 
   const found: Array<number | null> = [];

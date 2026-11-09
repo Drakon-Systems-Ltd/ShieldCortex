@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -23,6 +23,7 @@ import {
   awaitHeldDecision,
   buildHeldCardParams,
   claimHold,
+  discoverPluginHookFiles,
   heldRefusalReason,
   holdKey,
   holdWindowMs,
@@ -240,6 +241,142 @@ describe('reading the harness timeout', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  // ── #853 panel FIX (9347c034): plugin discovery must be complete and
+  // anchored, or the budget is unproven and nothing is held. ─────────────
+
+  describe('plugin discovery fails closed', () => {
+    let root: string;
+    let home: string;
+    const writeHooks = (dir: string, timeout: number) => {
+      mkdirSync(join(dir, 'hooks'), { recursive: true });
+      writeFileSync(join(dir, 'hooks', 'hooks.json'), JSON.stringify(preTool(timeout)));
+    };
+    beforeEach(() => {
+      root = mkdtempSync(join(tmpdir(), 'sc-hold-disc-'));
+      home = join(root, 'home');
+      mkdirSync(join(home, '.claude', 'plugins'), { recursive: true });
+      writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify(preTool(135)));
+    });
+    afterEach(() => {
+      try { chmodSync(join(home, '.claude', 'plugins', 'locked'), 0o755); } catch { /* not created */ }
+      rmSync(root, { recursive: true, force: true });
+    });
+    const read = (argv: string[] = ['claude']) => readPreToolHookTimeout({ home, managedPaths: [], parentArgv: argv });
+    const unproven = (r: ReturnType<typeof read>) => {
+      expect(r).toMatchObject({ seconds: null, reason: 'settings-unreadable' });
+      expect(holdWindowMs({ holdSeconds: 120, hookTimeoutSeconds: r.seconds, elapsedMs: 0 })).toBe(0);
+    };
+
+    it.each([
+      ['a relative', ['claude', '--plugin-dir', 'plugins/sc']],
+      ['a relative (= form)', ['claude', '--plugin-dir=./sc']],
+      ['a tilde (not expanded by a shell)', ['claude', '--plugin-dir', '~/sc']],
+      ['an empty', ['claude', '--plugin-dir=']],
+      ['a valueless (last arg)', ['claude', '--plugin-dir']],
+    ])('%s --plugin-dir is unproven, never resolved against the hook cwd', (_l, argv) => {
+      // Even when the hook's own cwd happens to contain a matching dir.
+      const prev = process.cwd();
+      writeHooks(join(root, 'plugins', 'sc'), 20);
+      process.chdir(root);
+      try { unproven(read(argv)); } finally { process.chdir(prev); }
+    });
+
+    it('a named --plugin-dir that does not exist is unproven', () => {
+      unproven(read(['claude', '--plugin-dir', join(root, 'missing')]));
+    });
+
+    it('an absent ~/.claude/plugins is fine (nothing to miss)', () => {
+      rmSync(join(home, '.claude', 'plugins'), { recursive: true });
+      expect(read().seconds).toBe(135);
+    });
+
+    it('a child symlink to a plugin dir is followed, so its shorter timeout counts', () => {
+      writeHooks(join(root, 'real-plugin'), 25);
+      symlinkSync(join(root, 'real-plugin'), join(home, '.claude', 'plugins', 'linked'));
+      const r = read();
+      expect(r.seconds).toBe(25);
+      expect(r.sources).toContain('plugin');
+    });
+
+    it('a symlinked hooks.json file is read', () => {
+      writeHooks(join(root, 'elsewhere'), 30);
+      mkdirSync(join(home, '.claude', 'plugins', 'p', 'hooks'), { recursive: true });
+      symlinkSync(join(root, 'elsewhere', 'hooks', 'hooks.json'), join(home, '.claude', 'plugins', 'p', 'hooks', 'hooks.json'));
+      expect(read().seconds).toBe(30);
+    });
+
+    it('a dangling child symlink is unproven', () => {
+      symlinkSync(join(root, 'gone'), join(home, '.claude', 'plugins', 'dangling'));
+      unproven(read());
+    });
+
+    it('a symlink cycle terminates and does not lose the real entry', () => {
+      writeHooks(join(home, '.claude', 'plugins', 'a'), 45);
+      symlinkSync(join(home, '.claude', 'plugins'), join(home, '.claude', 'plugins', 'a', 'loop'));
+      expect(read().seconds).toBe(45);
+    });
+
+    const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+    (asRoot ? it.skip : it)('an unreadable child directory is unproven', () => {
+      writeHooks(join(home, '.claude', 'plugins', 'ok'), 90);
+      const locked = join(home, '.claude', 'plugins', 'locked');
+      writeHooks(locked, 20);
+      chmodSync(locked, 0o000);
+      unproven(read());
+    });
+
+    it('a --plugin-dir that is a file, not a directory, is unproven', () => {
+      writeFileSync(join(root, 'not-a-dir'), 'x');
+      unproven(read(['claude', '--plugin-dir', join(root, 'not-a-dir')]));
+    });
+
+    it('the depth cap makes the walk incomplete, not proven', () => {
+      let deep = join(home, '.claude', 'plugins');
+      for (let i = 0; i < 18; i++) deep = join(deep, `d${i}`);
+      writeHooks(deep, 20);
+      unproven(read());
+      const d = discoverPluginHookFiles([{ path: join(home, '.claude', 'plugins'), optional: true }]);
+      expect(d).toMatchObject({ complete: false, incomplete: 'depth-cap' });
+    });
+
+    it('a real-world nesting depth (8 levels) stays within the default bound', () => {
+      writeHooks(join(home, '.claude', 'plugins', 'marketplaces', 'm', 'plugins', 'p', 'skills', 's', 'refs', 'x'), 70);
+      expect(read().seconds).toBe(70);
+    });
+
+    it('the file cap makes the walk incomplete, not proven', () => {
+      for (let i = 0; i < 4; i++) writeHooks(join(home, '.claude', 'plugins', `p${i}`), 90);
+      const d = discoverPluginHookFiles([{ path: join(home, '.claude', 'plugins'), optional: true }], { maxFiles: 3 });
+      expect(d).toMatchObject({ complete: false, incomplete: 'file-cap' });
+      expect(d.files.length).toBe(3);
+    });
+
+    it('the directory cap makes the walk incomplete, not proven', () => {
+      for (let i = 0; i < 5; i++) mkdirSync(join(home, '.claude', 'plugins', `e${i}`));
+      const d = discoverPluginHookFiles([{ path: join(home, '.claude', 'plugins'), optional: true }], { maxDirs: 3 });
+      expect(d).toMatchObject({ complete: false, incomplete: 'dir-cap' });
+    });
+
+    it('a complete walk within the bounds stays proven', () => {
+      writeHooks(join(home, '.claude', 'plugins', 'cache', 'm', 'sc', '1.0.0'), 60);
+      const extra = join(root, 'extra');
+      writeHooks(extra, 50);
+      const d = discoverPluginHookFiles([
+        { path: join(home, '.claude', 'plugins'), optional: true },
+        { path: extra, optional: false },
+      ]);
+      expect(d.complete).toBe(true);
+      expect(d.files).toHaveLength(2);
+      expect(read(['claude', '--plugin-dir', extra]).seconds).toBe(50);
+    });
+
+    it('a root --plugin-dir that is itself a symlink is followed', () => {
+      writeHooks(join(root, 'target'), 35);
+      symlinkSync(join(root, 'target'), join(root, 'link'));
+      expect(read(['claude', '--plugin-dir', join(root, 'link')]).seconds).toBe(35);
+    });
   });
 
   it('doctor mode (assumeNoArgvFlags) reads the files without a harness', () => {
