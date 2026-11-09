@@ -167,6 +167,10 @@ export function warnTier(g: ThemeGroup): WarnTier {
   // #1014 r4: a plane that could not be read is a diagnosis, even when the
   // signed posture is off or advisory by choice and the fix says so.
   if (g.planeUnread) return 'fix';
+  // #1014 r5: a compound warning is classified by every fact it states. A
+  // by-design sentence in its fix ("That is a valid choice") covers the
+  // choice, not the observation the same row says it could not make.
+  if (g.observationIncomplete) return 'fix';
   // An enforcing guard with nobody to tell is actionable even though its
   // command is withheld from warnings (#815 A).
   if (/^Action Guard is enforcing/i.test(g.why)) return 'fix';
@@ -266,6 +270,11 @@ export function plainEnglish(g: ThemeGroup): PlainItem {
   if (/^(?:permission denied reading|cannot read) /i.test(msg)) return { what: `${label}: ${scrubInternal(msg)}` };
   if (g.planeUnread) {
     return { what: "Action Guard's posture could not be read on every agent", why: scrubInternal(msg) };
+  }
+  // The label says "loaded"; the marked row says that is exactly what could
+  // not be confirmed, so the title must not repeat the label as a fact.
+  if (g.observationIncomplete && is(/^OpenClaw plugin loaded$/i)) {
+    return { what: 'Could not confirm the running OpenClaw gateway loaded the ShieldCortex plugin', why: scrubInternal(msg) };
   }
   if (g.status === 'fail') {
     if (is(/^Node runtime$/i)) return { what: 'This Node.js version is not supported', why: scrubInternal(msg) };

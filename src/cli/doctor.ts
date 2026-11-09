@@ -24,6 +24,7 @@ import {
   gatherReconcileInput,
   reconcilePluginState,
   REALTIME_PLUGIN_ID,
+  type GatherOptions,
   type ReconcileInput,
   type ReconcileVerdict,
 } from '../integrations/openclaw-plugin-index.js';
@@ -229,6 +230,8 @@ export interface CheckResult {
   postureUnknown?: true;
   /** See DoctorReportItem.planeUnread (#1014 r4) — a gate plane could not be read; never "expected". */
   planeUnread?: true;
+  /** See DoctorReportItem.observationIncomplete (#1014 r5) — a stated observation was not made; never "expected". */
+  observationIncomplete?: true;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
@@ -8767,13 +8770,16 @@ export async function checkOpenClawConversationScanning(
 export async function checkOpenClawPluginLoadState(
   home: string = os.homedir(),
   expectedVersion: string = pkg.version,
+  // The live-roster read is guarded to null under Jest; a test that needs a
+  // roster-proven load passes one here, as gatherReconcileInput's own tests do.
+  gather: Pick<GatherOptions, 'readLiveRoster'> = {},
 ): Promise<CheckResult> {
   const label = 'OpenClaw plugin loaded';
   if (!fs.existsSync(path.join(home, '.openclaw'))) {
     return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
   }
 
-  const input = gatherReconcileInput(home, { expectedVersion });
+  const input = gatherReconcileInput(home, { ...gather, expectedVersion });
   const verdict = reconcilePluginState(input);
   const result = verdict.state === 'duplicate-install'
     ? withDuplicateInstallEvidence(renderPluginLoadVerdict(verdict), home, input)
@@ -8792,15 +8798,20 @@ export async function checkOpenClawPluginLoadState(
   if (result.status === 'pass') {
     const access = readConversationAccess(home, REALTIME_PLUGIN_ID);
     if (access.readable && !access.granted) {
-      const toolCallStatus =
-        verdict.loadedInLiveRoster === true
-          ? 'tool-call gating is live'
-          : 'tool-call gating is NOT separately proven while live-roster evidence is unavailable';
+      const rosterProven = verdict.loadedInLiveRoster === true;
+      const toolCallStatus = rosterProven
+        ? 'tool-call gating is live'
+        : 'tool-call gating is NOT separately proven while live-roster evidence is unavailable';
       return {
         ...result,
         status: 'warn',
         message: `${result.message}. NOTE: conversation-hook access is NOT granted, so the gateway refuses this plugin's llm_input/llm_output hooks — ${toolCallStatus}; conversation scanning is NOT live`,
         fix: conversationAccessFix(REALTIME_PLUGIN_ID),
+        // #1014 r5: the fix says the withheld access is a valid choice, and it
+        // is; the unproven load is not a choice. Marked from the same test
+        // that writes "NOT separately proven", so the default report keeps
+        // the gap visible instead of filing the row as expected.
+        ...(rosterProven ? {} : { observationIncomplete: true as const }),
       };
     }
   }

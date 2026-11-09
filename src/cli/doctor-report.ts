@@ -85,6 +85,16 @@ export interface DoctorReportItem {
    * advisory sentence; this flag keeps the row under TO FIX regardless.
    */
   planeUnread?: true;
+  /**
+   * #1014 r5: the warning states an observation its check could not make,
+   * next to a by-design choice. The OpenClaw plugin-load row sets it when
+   * conversation access is withheld (fix: "That is a valid choice") AND the
+   * running gateway's boot roster could not be read, so load and tool-call
+   * gating are NOT separately proven. The choice is no reason to hide the
+   * gap: a marked row is never filed as expected and never merges into the
+   * conversation-scanning group.
+   */
+  observationIncomplete?: true;
 }
 
 export interface FormatDoctorReportOpts {
@@ -193,6 +203,7 @@ export function collapseKey(item: DoctorReportItem): string {
   // merged group would carry one marker for two different next steps.
   if (item.postureUnknown) return `${item.status}:posture-unknown:${item.label}`;
   if (item.planeUnread) return `${item.status}:plane-unread:${item.label}`;
+  if (item.observationIncomplete) return `${item.status}:observation-incomplete:${item.label}`;
   const theme = themeForLabel(item.label);
   // Same posture decision, two check sites.
   if (theme === 'SCAN' || /conversation scanning/i.test(item.label) || /conversation scanning/i.test(item.message)) {
@@ -415,6 +426,8 @@ export interface ThemeGroup {
   postureUnknown?: true;
   /** See DoctorReportItem.planeUnread. */
   planeUnread?: true;
+  /** See DoctorReportItem.observationIncomplete. */
+  observationIncomplete?: true;
   count: number;
   labels: string[];
   /**
@@ -481,6 +494,7 @@ export function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeG
       verboseNotes: it.verboseNote ? [it.verboseNote] : [],
       ...(it.postureUnknown ? { postureUnknown: true as const } : {}),
       ...(it.planeUnread ? { planeUnread: true as const } : {}),
+      ...(it.observationIncomplete ? { observationIncomplete: true as const } : {}),
       count: 1,
       labels: [it.label],
       members: [{ label: it.label, why: it.message.replace(/\s+/g, ' ').trim() }],
@@ -504,6 +518,7 @@ export function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeG
         verboseNotes: it.verboseNote ? [it.verboseNote] : [],
         ...(it.postureUnknown ? { postureUnknown: true as const } : {}),
         ...(it.planeUnread ? { planeUnread: true as const } : {}),
+        ...(it.observationIncomplete ? { observationIncomplete: true as const } : {}),
         count: 1,
         labels: [it.label],
         members: [{ label: it.label, why: it.message.replace(/\s+/g, ' ').trim() }],
