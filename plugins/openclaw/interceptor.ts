@@ -1810,6 +1810,42 @@ function nativeExecField(v: ToolGuardVerdictLike): { nativeExec?: NativeExecLike
   return out.length > 0 ? { nativeExec: { uses: out } } : {};
 }
 
+/** A rule name as the guard core mints them (`openclaw-process-inspect`). */
+const RULE_NAME_SHAPE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/** Mirrors the core's CONTRACT_DRIFT_MAX_KEYS / _MAX_KEY_LEN (tool-input-schema.ts). */
+const DRIFT_MAX_KEYS = 12;
+const DRIFT_MAX_KEY_LEN = 64;
+const DRIFT_KEY_CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+/** Generous: only a malformed evaluator gets near it. */
+const DRIFT_META_MAX = 200;
+
+/** #1032: `threats` for a metadata-only row — rule names, bounded; anything
+ *  else an injected evaluator put in `signals` is dropped, not redacted. */
+function ruleNamesOnly(signals: unknown): string[] {
+  if (!Array.isArray(signals)) return [];
+  return [...new Set(signals.filter((s): s is string => typeof s === 'string' && RULE_NAME_SHAPE.test(s)))].slice(0, 25);
+}
+
+/** #1032: `contractDrift` rebuilt from its known fields. Same data the core
+ *  minted (contract id, dropped key NAMES, host revision) — any other field
+ *  an evaluator attached stays off the row. */
+function contractDriftField(d: ContractDriftLike): ContractDriftLike {
+  const keys = Array.isArray(d?.droppedKeys) ? d.droppedKeys : [];
+  const rev = d?.revision && typeof d.revision === 'object' ? d.revision : undefined;
+  return {
+    contract: String(d?.contract ?? '').slice(0, DRIFT_META_MAX),
+    droppedKeys: keys.slice(0, DRIFT_MAX_KEYS).map((k) => String(k).replace(DRIFT_KEY_CONTROL, ' ').slice(0, DRIFT_MAX_KEY_LEN)),
+    ...(d?.truncated === true || keys.length > DRIFT_MAX_KEYS ? { truncated: true } : {}),
+    ...(rev ? {
+      revision: {
+        measuredAt: String(rev.measuredAt ?? '').slice(0, DRIFT_META_MAX),
+        hostVersion: typeof rev.hostVersion === 'string' ? rev.hostVersion.slice(0, DRIFT_META_MAX) : null,
+        selection: String(rev.selection ?? '').slice(0, DRIFT_META_MAX),
+      },
+    } : {}),
+  };
+}
+
 export function createInterceptor(
   config: InterceptorConfig,
   pipeline: PipelineRunner,
@@ -1913,6 +1949,21 @@ export function createInterceptor(
     });
   }
 
+  /** #1031 (B1): a metadata-only row for `call` — same session key and
+   *  readiness pin as {@link emitAudit}, but NO call arguments reach the #224
+   *  binding. `attachEnforcementBinding` builds `actionKey` from a command's
+   *  tokens and keeps every dash-prefixed one verbatim (`--token=<value>`),
+   *  so a row whose preview is deliberately the tool name alone would still
+   *  carry an argument value in `actionKey`. Bound with no args, the key is
+   *  the normalised tool name and nothing else. */
+  function emitArgFreeAudit(entry: InterceptAuditEntry, call: CallAuditContext): void {
+    emitAuditWith(entry, {
+      sessionKey: options?.sessionGuard?.keyFor(call.sessionId) ?? undefined,
+      args: {},
+      readinessPin: call.readinessPin,
+    });
+  }
+
   /**
    * #372 — hang a one-shot decision writer on a minted approval card.
    *
@@ -1985,6 +2036,26 @@ export function createInterceptor(
       ...(v.expandedSubstitutions && v.expandedSubstitutions.length > 0 ? { expandedSubstitutions: v.expandedSubstitutions } : {}),
       // #1025: audit-only native-exec observation, rebuilt from enums.
       ...nativeExecField(v),
+    };
+  }
+
+  /** #1032 (B1 r2): the benign observation / contract-drift row, built from
+   *  an explicit allow-list — NOT from {@link guardAuditBase}, which copies
+   *  the verdict's evidence fields: `matches` spans, `reviewedScripts` and
+   *  `expandedSubstitutions` are literal text from the command (a `$(cat
+   *  ./<path>)` operand, a `sh ./<dir>/../x.sh` path). This row is name-only
+   *  by contract, so every field here is fixed, an enum, a bounded rule name,
+   *  or a dropped key NAME; the values are what the base would have written
+   *  for an allow. Paired with {@link emitArgFreeAudit} for the binding. */
+  function benignObservationEntry(toolName: string, v: ToolGuardVerdictLike, drift: ContractDriftLike | undefined): InterceptAuditEntry {
+    return {
+      type: 'intercept', tool: toolName, severity: 'low',
+      firewallResult: 'ACTION_GUARD', threats: ruleNamesOnly(v.signals),
+      anomalyScore: 0.1, trustScore: 0, sensitivityLevel: 'INTERNAL', fragmentationScore: null, pipelineDurationMs: 0,
+      preview: `${toolName} :: ${drift ? 'contract-drift' : 'native-exec'}`.slice(0, 200), ts: new Date().toISOString(),
+      ...(drift ? { contractDrift: contractDriftField(drift) } : {}),
+      ...nativeExecField(v),
+      action: 'allow', outcome: 'allowed',
     };
   }
 
@@ -2460,12 +2531,12 @@ export function createInterceptor(
           // is not also written: this row already counts the call once in
           // the readiness denominator (isCountedCall), and both would count
           // it twice.
-          emitAudit({
-            ...guardAuditBase(context.toolName, v, `${context.toolName} :: ${drift ? 'contract-drift' : 'native-exec'}`),
-            ...(drift ?? {}),
-            action: 'allow',
-            outcome: 'allowed',
-          }, call);
+          // #1031 (B1): "name only" covers the whole row, not just the
+          // preview — the binding gets no args either, so no argument value
+          // reaches `actionKey`. Session key and readiness pin are kept.
+          // #1032: and the row itself is an allow-list projection, so the
+          // verdict's path evidence (#189 / #517) never rides along.
+          emitArgFreeAudit(benignObservationEntry(context.toolName, v, drift?.contractDrift), call);
         }
       }
       if (!wrote && gate.whenReady) {

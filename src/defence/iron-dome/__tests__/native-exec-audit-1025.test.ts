@@ -1556,3 +1556,103 @@ describe('#1025 fold r3 — one shared deadline; record and sweep are bounded', 
     expect(fstats).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * #1031 (B2) — `sameCall` is derived from the compile command, not the store,
+ * so a `null` from the probe used to become a `sameCall` label even after the
+ * call's shared 250 ms budget was spent. The release promise is "after which
+ * nothing more is labelled". The evaluator now asks the probe's own budget
+ * (`probe.expired()`) before that label. Real budget, real probe, real
+ * evaluator; the verdict is the unwired one in every case.
+ */
+describe('#1031 B2 — sameCall stops at the shared provenance deadline', () => {
+  const KEY = 'sc-0123456789abcdef';
+  const COMMAND = 'cc main.c -o app && ./app';
+  const SAME_CALL = { uses: [{ action: 'exec', provenance: 'compiled-output', sameCall: true }] };
+  let root: string;
+  let stateDir: string;
+  let work: string;
+
+  beforeEach(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-1031-b2-')));
+    stateDir = path.join(root, 'state');
+    work = path.join(root, 'work');
+    fs.mkdirSync(work, { recursive: true });
+    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  /** A clock that reads the given ticks in order, then stays on the last. */
+  const ticking = (...ticks: number[]) => {
+    let n = 0;
+    return () => ticks[Math.min(n++, ticks.length - 1)];
+  };
+  const probeWith = (budget: ReturnType<typeof createNativeProvenanceBudget>) =>
+    createNativeArtifactProbe({ sessionKey: KEY, cwd: work, stateDir, home: root, budget });
+  const FS_OPS = ['lstatSync', 'statSync', 'opendirSync', 'openSync', 'readSync', 'readdirSync', 'readlinkSync', 'realpathSync', 'mkdirSync', 'writeFileSync', 'renameSync'] as const;
+
+  it('control: a live budget labels the same-call compile-and-run (the path under test is reached)', () => {
+    const base = evaluateToolCall('Bash', { command: COMMAND });
+    const probe = probeWith(createNativeProvenanceBudget({ clock: () => 0 }));
+    const wired = evaluateToolCall('Bash', { command: COMMAND }, undefined, { nativeArtifactProvenance: probe });
+    expect(probe.expired()).toBe(false);
+    expect(wired.nativeExec).toEqual(SAME_CALL);
+    const { nativeExec: _n, ...rest } = wired;
+    expect(rest).toEqual(base);
+  });
+
+  it('a budget already spent (clock 0 → 251 → 0, latched): no sameCall, verdict identical to unwired, no filesystem call', () => {
+    const budget = createNativeProvenanceBudget({ clock: ticking(0, NATIVE_PROBE_BUDGET_MS + 1, 0) });
+    expect(budget.expired()).toBe(false); // 0: starts the deadline
+    expect(budget.expired()).toBe(true); // 251: past it
+    expect(budget.expired()).toBe(true); // 0 again: latched
+    const probe = probeWith(budget);
+    expect(probe.expired()).toBe(true);
+    const base = evaluateToolCall('Bash', { command: COMMAND });
+    const spies = FS_OPS.map((m) => jest.spyOn(fs, m as 'lstatSync'));
+    const wired = evaluateToolCall('Bash', { command: COMMAND }, undefined, { nativeArtifactProvenance: probe });
+    expect(wired.nativeExec).toBeUndefined();
+    expect(wired).toEqual(base);
+    for (const s of spies) expect(s).not.toHaveBeenCalled();
+  });
+
+  it('a budget spent DURING the call (first check at 0, the next at 251): no sameCall', () => {
+    const probe = probeWith(createNativeProvenanceBudget({ clock: ticking(0, NATIVE_PROBE_BUDGET_MS + 1) }));
+    const base = evaluateToolCall('Bash', { command: COMMAND });
+    const wired = evaluateToolCall('Bash', { command: COMMAND }, undefined, { nativeArtifactProvenance: probe });
+    expect(probe.expired()).toBe(true);
+    expect(wired.nativeExec).toBeUndefined();
+    expect(wired).toEqual(base);
+  });
+
+  it('a NaN clock, or a probe whose expired() throws, is a spent budget: no sameCall, never a throw', () => {
+    const base = evaluateToolCall('Bash', { command: COMMAND });
+    const nan = probeWith(createNativeProvenanceBudget({ clock: () => Number.NaN }));
+    const throwing = Object.assign((_t: string): NativeArtifactProvenance | null => null, {
+      expired: (): boolean => { throw new Error('budget fault'); },
+    });
+    for (const probe of [nan, throwing]) {
+      const wired = evaluateToolCall('Bash', { command: COMMAND }, undefined, { nativeArtifactProvenance: probe });
+      expect(wired.nativeExec).toBeUndefined();
+      expect(wired).toEqual(base);
+    }
+  });
+
+  it('a spent budget suppresses the sameCall label only: the decision of a held compile-and-run is unchanged', () => {
+    // A require_approval verdict alongside a sameCall candidate: audit-only, so
+    // the spent budget may remove the label and nothing else.
+    const command = 'git push --force origin main ; cc main.c -o app && ./app';
+    const base = evaluateToolCall('Bash', { command });
+    expect(base.decision).toBe('require_approval');
+    const live = evaluateToolCall('Bash', { command }, undefined, { nativeArtifactProvenance: probeWith(createNativeProvenanceBudget({ clock: () => 0 })) });
+    const spent = evaluateToolCall('Bash', { command }, undefined, { nativeArtifactProvenance: probeWith(createNativeProvenanceBudget({ clock: () => Number.NaN })) });
+    expect(live.nativeExec).toEqual(SAME_CALL);
+    expect(spent.nativeExec).toBeUndefined();
+    const { nativeExec: _l, ...l } = live;
+    expect(l).toEqual(base);
+    expect(spent).toEqual(base);
+  });
+});
