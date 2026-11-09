@@ -17,6 +17,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 
+import { evaluateToolCall } from '../defence/iron-dome/tool-action-guard.js';
+import { createScriptSourceResolver } from '../defence/iron-dome/script-source-resolver.js';
+import { createReviewedScriptCheck, hashScriptSource } from '../defence/iron-dome/reviewed-scripts.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const HOOK_PATH = path.resolve(REPO_ROOT, 'scripts', 'pre-tool-hook.mjs');
@@ -353,5 +357,72 @@ describe('#1025 native-exec observation through the real Claude Code hook', () =
     expect(typeof row.actionKey).toBe('string');
     expect(row.actionKey).toBe('bash');
     expect(typeof row.sessionKey).toBe('string');
+  });
+
+  /**
+   * #1032 fold 1 pin — the OpenClaw benign row ALSO copied the verdict's
+   * `expandedSubstitutions` (#517) / `reviewedScripts` (#189), literal path
+   * tokens from the command. On this plane the benign native-exec row is
+   * written from `safeAllowAuditVerdict` (severity, decision, rule names,
+   * fixed reason) and redacted args, so neither field reaches it. Each case
+   * proves in-process that the core's verdict carries the canary, then reads
+   * the real hook's whole durable row; the decision matches the control home.
+   */
+  describe('#1032 pin: verdict path evidence never reaches the benign native-exec row', () => {
+    // Synthetic path text; never a real credential.
+    const PATH_CANARY = 'scCanary1032P4subst';
+    const lines = (box: Box) => {
+      const dir = path.join(box.configDir, 'audit');
+      return (fs.existsSync(dir) ? fs.readdirSync(dir) : [])
+        .filter((n) => /^realtime-.*\.jsonl$/.test(n))
+        .flatMap((n) => fs.readFileSync(path.join(dir, n), 'utf-8').split('\n').filter(Boolean));
+    };
+
+    async function observe(command: string): Promise<Record<string, unknown>> {
+      await plant('libx.so');
+      const before = lines(recorded).length;
+      const a = await call(recorded, 'Bash', { command });
+      const b = await call(control, 'Bash', { command });
+      expect(a.code).toBe(0);
+      expect(a.stdout).toBe(b.stdout); // same decision as the unrecorded home
+      const added = lines(recorded).slice(before);
+      expect(added).toHaveLength(1); // the observation row; no tally row
+      expect(added[0]).not.toContain(PATH_CANARY);
+      const row = JSON.parse(added[0]) as Record<string, unknown>;
+      expect(row.nativeExec).toEqual({ uses: [{ action: 'load', provenance: 'agent-written' }] });
+      expect(row.action).toBe('allow');
+      expect(row.expandedSubstitutions).toBeUndefined();
+      expect(row.reviewedScripts).toBeUndefined();
+      expect(row.actionKey).toBe('bash');
+      return row;
+    }
+
+    it('a `$(cat <path>)` substitution path', async () => {
+      for (const box of [recorded, control]) fs.writeFileSync(path.join(box.work, PATH_CANARY), 'harmless text\n');
+      const command = `LD_PRELOAD=./libx.so /bin/true $(cat ./${PATH_CANARY})`;
+      const v = evaluateToolCall('Bash', { command }, undefined, { resolveScriptSource: createScriptSourceResolver(recorded.work) });
+      expect(v).toMatchObject({ decision: 'allow', severity: 'benign' });
+      expect(v.expandedSubstitutions).toEqual([`./${PATH_CANARY}`]);
+      await observe(command);
+    });
+
+    it('a reviewed-script path (operator hash pin in config)', async () => {
+      const source = 'echo reviewed\n';
+      for (const box of [recorded, control]) {
+        fs.writeFileSync(path.join(box.work, 'reviewed.sh'), source);
+        fs.mkdirSync(path.join(box.work, `${PATH_CANARY}dir`));
+        fs.writeFileSync(path.join(box.configDir, 'config.json'), JSON.stringify({
+          actionGuard: { enabled: true, reviewedScripts: [{ path: path.join(box.work, 'reviewed.sh'), sha256: hashScriptSource(source) }] },
+        }));
+      }
+      const command = `LD_PRELOAD=./libx.so sh ./${PATH_CANARY}dir/../reviewed.sh`;
+      const v = evaluateToolCall('Bash', { command }, undefined, {
+        resolveScriptSource: createScriptSourceResolver(recorded.work),
+        isReviewedScript: createReviewedScriptCheck([{ path: path.join(recorded.work, 'reviewed.sh'), sha256: hashScriptSource(source) }], recorded.work),
+      });
+      expect(v).toMatchObject({ decision: 'allow', severity: 'benign' });
+      expect(v.reviewedScripts).toEqual([`./${PATH_CANARY}dir/../reviewed.sh`]);
+      await observe(command);
+    });
   });
 });

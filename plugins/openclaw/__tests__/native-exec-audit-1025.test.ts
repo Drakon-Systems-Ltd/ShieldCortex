@@ -18,7 +18,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { createInterceptor, DEFAULT_CONFIG, type InterceptAuditEntry } from '../interceptor.js';
+import { createInterceptor, createReviewedScriptCheck, createScriptSourceResolver, DEFAULT_CONFIG, type InterceptAuditEntry } from '../interceptor.js';
+import { hashScriptSource } from '../../../src/defence/iron-dome/reviewed-scripts.js';
 import { nativeProvenanceAdapter } from '../index.js';
 import { createSessionTaintStore } from '../session-taint.js';
 import { evaluateToolCall, nativeArtifactCaptures } from '../../../src/defence/iron-dome/tool-action-guard.js';
@@ -475,6 +476,142 @@ describe('#1031 B1 — the benign native-exec row carries no argument value in a
     expect(row.preview).toBe('exec :: contract-drift');
     expect(row.actionKey).toBe('exec');
     expect(row.sessionKey).toBe(KEY);
+  });
+
+  /**
+   * #1032 fold 1 (Astra B1 r2) — the binding was one channel; the row ITSELF
+   * was the other. It was built from the shared audit base, which copies the
+   * verdict's `expandedSubstitutions` (#517) and `reviewedScripts` (#189):
+   * literal path tokens from the command. Real evaluator, real fs resolver,
+   * real reviewed-script check, real binding; each case first proves the
+   * verdict carries the canary, then that no byte of it reaches any row.
+   */
+  describe('#1032 — the benign row is metadata only, not a projection of the verdict', () => {
+    // Synthetic path text; never a real credential.
+    const PATH_CANARY = 'scCanary1032P4subst';
+
+    function expectCanaryNowhere(b: ReturnType<typeof bound>, lines: string[]): InterceptAuditEntry & Record<string, unknown> {
+      expect(lines).toHaveLength(1); // still ONE row: no tally row, no recognised-allow row
+      expect(b.sink).toHaveLength(1);
+      expect(b.indexed).toHaveLength(1);
+      for (const text of [lines[0], JSON.stringify(b.sink), JSON.stringify(b.indexed)]) {
+        expect(text).not.toContain(PATH_CANARY);
+      }
+      const row = JSON.parse(lines[0]) as InterceptAuditEntry & Record<string, unknown>;
+      expect(row.expandedSubstitutions).toBeUndefined();
+      expect(row.reviewedScripts).toBeUndefined();
+      expect(row.matches).toBeUndefined();
+      expect(row.action).toBe('allow');
+      expect(row.outcome).toBe('allowed');
+      expect(row.sessionKey).toBe(KEY);
+      expect(hasRequiredBinding(row)).toBe(true);
+      return row;
+    }
+
+    async function runCall(b: ReturnType<typeof bound>, toolName: string, args: Record<string, unknown>): Promise<string[]> {
+      const before = durableLines().length;
+      b.sink.length = 0;
+      b.indexed.length = 0;
+      expect(await outcome(b.i.handleToolCall({ toolName, arguments: args, sessionId: SESSION, cwd: work }))).toBe('resolved');
+      return durableLines().slice(before);
+    }
+
+    it('native-exec row: a `$(cat <path>)` substitution path is in no field of the durable, cloud or index row', async () => {
+      fs.writeFileSync(path.join(work, PATH_CANARY), 'harmless text\n');
+      const command = `LD_PRELOAD=./libx.so /bin/true $(cat ./${PATH_CANARY})`;
+      // Precondition: the verdict the interceptor gets carries the path.
+      const v = evaluateToolCall('Bash', { command }, undefined, { resolveScriptSource: createScriptSourceResolver(work) });
+      expect(v).toMatchObject({ decision: 'allow', severity: 'benign' });
+      expect(v.expandedSubstitutions).toEqual([`./${PATH_CANARY}`]);
+
+      const b = bound();
+      await plant(b.i, 'libx.so');
+      const row = expectCanaryNowhere(b, await runCall(b, 'Bash', { command }));
+      expect(row.preview).toBe('Bash :: native-exec');
+      expect(row.nativeExec).toEqual({ uses: [{ action: 'load', provenance: 'agent-written' }] });
+      expect(row.actionKey).toBe('bash');
+    });
+
+    it('contract-drift row (no native image): the substitution path is gone, the dropped key NAMES stay', async () => {
+      fs.writeFileSync(path.join(work, PATH_CANARY), 'harmless text\n');
+      const args = { command: `/bin/true $(cat ./${PATH_CANARY})`, title: 'drifted field' };
+      const v = evaluateToolCall('exec', args, undefined, { resolveScriptSource: createScriptSourceResolver(work) });
+      expect(v).toMatchObject({ decision: 'allow', severity: 'benign' });
+      expect(v.expandedSubstitutions).toEqual([`./${PATH_CANARY}`]);
+      expect(v.contractDrift?.droppedKeys).toEqual(['title']);
+
+      const b = bound();
+      const row = expectCanaryNowhere(b, await runCall(b, 'exec', args));
+      expect(row.preview).toBe('exec :: contract-drift');
+      expect(row.actionKey).toBe('exec');
+      expect(row.nativeExec).toBeUndefined();
+      // What the drift row exists to say survives: the same observation, key names only.
+      expect(row.contractDrift).toEqual(v.contractDrift);
+      expect(JSON.stringify(row)).not.toContain('drifted field');
+    });
+
+    it('native-exec row: a reviewed-script path (operator hash pin) is in no field of any row', async () => {
+      const source = 'echo reviewed\n';
+      fs.writeFileSync(path.join(work, 'reviewed.sh'), source);
+      fs.mkdirSync(path.join(work, `${PATH_CANARY}dir`));
+      const reviewedScripts = [{ path: path.join(work, 'reviewed.sh'), sha256: hashScriptSource(source) }];
+      const command = `LD_PRELOAD=./libx.so sh ./${PATH_CANARY}dir/../reviewed.sh`;
+      const v = evaluateToolCall('Bash', { command }, undefined, {
+        resolveScriptSource: createScriptSourceResolver(work),
+        isReviewedScript: createReviewedScriptCheck(reviewedScripts, work),
+      });
+      expect(v).toMatchObject({ decision: 'allow', severity: 'benign' });
+      expect(v.reviewedScripts).toEqual([`./${PATH_CANARY}dir/../reviewed.sh`]);
+
+      const b = bound({ reviewedScripts });
+      await plant(b.i, 'libx.so');
+      const row = expectCanaryNowhere(b, await runCall(b, 'Bash', { command }));
+      expect(row.preview).toBe('Bash :: native-exec');
+      expect(row.nativeExec).toEqual({ uses: [{ action: 'load', provenance: 'agent-written' }] });
+      expect(row.actionKey).toBe('bash');
+    });
+
+    it('enforce-when-ready: same single row, readiness pin kept, substitution path absent', async () => {
+      fs.writeFileSync(path.join(work, PATH_CANARY), 'harmless text\n');
+      const command = `LD_PRELOAD=./libx.so /bin/true $(cat ./${PATH_CANARY})`;
+      const b = bound({ readinessGate: true }, {
+        readiness: { pin: () => PIN, resolve: async () => ({ mode: 'enforce', transition: null }), channelConfigured: () => false },
+      });
+      await plant(b.i, 'libx.so');
+      const row = expectCanaryNowhere(b, await runCall(b, 'Bash', { command }));
+      expect(row.readinessTally).toBeUndefined();
+      expect(row.readinessPin).toEqual(PIN);
+      expect(row.preview).toBe('Bash :: native-exec');
+    });
+
+    it('allow-list, not deny-list: an injected evaluator\'s extra verdict fields never reach the row', async () => {
+      // The evaluator crosses a package boundary. Every value-bearing field it
+      // could add — known (#192 matches, #189, #517) or not — stays off the
+      // benign row; nativeExec and contractDrift are rebuilt from their shapes.
+      const CANARY = 'scCanary1032AllowListQ7vX2mK9';
+      const b = bound({}, {
+        evaluateToolCall: () => ({
+          decision: 'allow', severity: 'benign', family: 'exec', action: 'run', reason: CANARY,
+          signals: ['openclaw-process-inspect', `--token=${CANARY}`],
+          matches: [{ signal: 'x', span: CANARY }],
+          reviewedScripts: [CANARY],
+          expandedSubstitutions: [CANARY],
+          [CANARY]: CANARY,
+          contractDrift: { contract: 'openclaw.exec', droppedKeys: ['title'], value: CANARY },
+          nativeExec: { uses: [{ action: 'load', provenance: 'agent-written', path: CANARY }] },
+        }),
+      });
+      const before = durableLines().length;
+      expect(await outcome(b.i.handleToolCall({ toolName: 'exec', arguments: { command: '/bin/true' }, sessionId: SESSION, cwd: work }))).toBe('resolved');
+      const lines = durableLines().slice(before);
+      expect(lines).toHaveLength(1);
+      for (const text of [lines[0], JSON.stringify(b.sink), JSON.stringify(b.indexed)]) expect(text).not.toContain(CANARY);
+      const row = JSON.parse(lines[0]) as InterceptAuditEntry & Record<string, unknown>;
+      expect(row.threats).toEqual(['openclaw-process-inspect']);
+      expect(row.contractDrift).toEqual({ contract: 'openclaw.exec', droppedKeys: ['title'] });
+      expect(row.nativeExec).toEqual({ uses: [{ action: 'load', provenance: 'agent-written' }] });
+      expect(row.preview).toBe('exec :: contract-drift');
+    });
   });
 });
 
