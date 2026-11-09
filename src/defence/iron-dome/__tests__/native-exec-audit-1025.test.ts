@@ -37,6 +37,8 @@ import {
   MAX_RECORDS_PER_PATH,
   MAX_STORE_ROOT_ENTRIES,
   MAX_MISSING_PARENT_COMPONENTS,
+  MAX_RESOLVE_COMPONENTS,
+  MAX_RESOLVE_SYMLINKS,
   MAX_SWEEP_DELETIONS,
   createNativeProvenanceBudget,
   NATIVE_PROBE_BUDGET_MS,
@@ -109,9 +111,12 @@ describe('#1025 the field is observation only', () => {
   it('a decision the guard already makes is left exactly as it is (catastrophic stays catastrophic, allow stays allow)', () => {
     const cat = both('./helper && rm -rf /', agent(H));
     expect(cat.wired.decision).toBe('block');
-    expect(cat.nativeExec?.uses.length ?? 0).toBeGreaterThan(0);
+    // r4: a catastrophic block is terminal, so the probe is not even asked.
+    expect(cat.nativeExec).toBeUndefined();
+    expect(cat.wired).toEqual(cat.base);
     const allow = both('./helper --version', agent(H));
     expect(allow.wired.decision).toBe(allow.base.decision);
+    expect(allow.nativeExec?.uses.length ?? 0).toBeGreaterThan(0);
   });
 });
 
@@ -923,13 +928,22 @@ describe('#1025 fold r2 — store volume is bounded work, never a stall', () => 
     for (let i = 0; i < n; i++) fs.writeFileSync(path.join(dir, `${hash}.${i + 1}.ab`), body(i));
   };
 
-  it('20k empty record-named files + 16 spellings: catastrophic decision unchanged, listing capped, no record read', () => {
+  it('20k empty record-named files + 16 spellings: dangerous-tier decision unchanged, listing capped, no record read', () => {
     writeRecords(H(), 1); // a genuine record the stuffing buries
     plantEmpty(dir, 20_000, (i) => `${H()}.${i}.ff`);
-    // Assembled so the literal is not a command line in this file.
-    const command = [['rm', '-rf', '~'].join(' '), ...SPELLINGS].join(' ; ');
+    // r4: a non-terminal verdict, so the probe really runs (a catastrophic
+    // block skips it — pinned in the next assertion block).
+    const command = ['git push --force origin main', ...SPELLINGS].join(' ; ');
     const base = evaluateToolCall('Bash', { command });
-    expect(base.decision).toBe('block');
+    expect(base.decision).toBe('require_approval');
+    const catastrophic = [['rm', '-rf', '~'].join(' '), ...SPELLINGS].join(' ; ');
+    let catCalls = 0;
+    const cat = evaluateToolCall('Bash', { command: catastrophic }, undefined, {
+      nativeArtifactProvenance: () => { catCalls++; return null; },
+    });
+    expect(cat).toEqual(evaluateToolCall('Bash', { command: catastrophic }));
+    expect(cat.decision).toBe('block');
+    expect(catCalls).toBe(0);
 
     const dirs = watchDirs();
     const opens = jest.spyOn(fs, 'openSync');
@@ -1037,14 +1051,19 @@ describe('#1025 fold r2 — store volume is bounded work, never a stall', () => 
     it('is enforced during path resolution', () => {
       writeRecords(H(), 1);
       let t = 0;
-      const realpath = fs.realpathSync;
-      const rp = jest.spyOn(fs, 'realpathSync').mockImplementation(((p: fs.PathLike) => {
-        t = 1_000_000; // the first lookup spends the budget
-        return realpath(p);
-      }) as typeof fs.realpathSync);
+      const lstat = fs.lstatSync;
+      const native = jest.spyOn(fs.realpathSync, 'native');
+      // Store lstats (root, session dir, records) are under stateDir; the
+      // resolver's per-component lstats are prefixes of `work`.
+      const resolving = (q: unknown) => !String(q).startsWith(stateDir);
+      const ls = jest.spyOn(fs, 'lstatSync').mockImplementation(((q: fs.PathLike, o?: fs.StatSyncOptions) => {
+        if (resolving(q)) t = 1_000_000; // the first component lookup spends the budget
+        return lstat(q, o as fs.StatSyncOptions);
+      }) as typeof fs.lstatSync);
       // `a/b/c` does not exist, so resolution walks up one lookup at a time.
       expect(probe(() => t)('./a/b/c/helper')).toBeNull();
-      expect(rp).toHaveBeenCalledTimes(1);
+      expect(ls.mock.calls.filter(([q]) => resolving(q))).toHaveLength(1);
+      expect(native).not.toHaveBeenCalled();
     });
 
     it('is enforced between record reads', () => {
@@ -1064,18 +1083,22 @@ describe('#1025 fold r2 — store volume is bounded work, never a stall', () => 
       let t = 0;
       const p = probe(() => t);
       expect(p('./helper')).toBe('agent-written'); // classified and memoised in budget
-      const realpath = fs.realpathSync;
-      const rp = jest.spyOn(fs, 'realpathSync').mockImplementation(((q: fs.PathLike) => {
-        const real = realpath(q);
-        t = 1_000_000; // this lookup succeeds, but spends the budget
-        return real;
-      }) as typeof fs.realpathSync);
-      const opens = jest.spyOn(fs, 'openSync');
       // A lexically DIFFERENT spelling (r3 memoises same-spelling resolution)
       // that resolves to the same canonical path, so the hash memo is hit.
       fs.symlinkSync(work, path.join(work, 'link'));
+      const lstat = fs.lstatSync;
+      const readlink = jest.spyOn(fs, 'readlinkSync');
+      // The link's absolute target is walked again; the LAST lookup of the
+      // resolution (`work` itself, after the readlink) succeeds but spends it.
+      const ls = jest.spyOn(fs, 'lstatSync').mockImplementation(((q: fs.PathLike, o?: fs.StatSyncOptions) => {
+        const real = lstat(q, o as fs.StatSyncOptions);
+        if (readlink.mock.calls.length > 0 && String(q) === work) t = 1_000_000;
+        return real;
+      }) as typeof fs.lstatSync);
+      const opens = jest.spyOn(fs, 'openSync');
       expect(p('./link/helper')).toBeNull(); // same hash, memoised 'agent-written'
-      expect(rp).toHaveBeenCalledTimes(1);
+      expect(readlink).toHaveBeenCalledTimes(1);
+      expect(ls.mock.calls.filter(([q]) => String(q) === work).length).toBe(2);
       expect(opens).not.toHaveBeenCalled();
     });
 
@@ -1270,9 +1293,12 @@ describe('#1025 fold r3 — one shared deadline; record and sweep are bounded', 
   });
 
   it('~600-level deep tree under a catastrophic redirect: decision unchanged, quick; direct record of the deep missing target is bounded', () => {
-    const deep = path.join(work, ...new Array(600).fill('a'));
+    // r4: scaled so the tree fits PATH_MAX (macOS 1024) under the tmpdir.
+    const DEEP = Math.min(600, Math.floor(((process.platform === 'darwin' ? 1024 : 4096) - work.length - 16) / 2));
+    expect(DEEP).toBeGreaterThan(300);
+    const deep = path.join(work, ...new Array(DEEP).fill('a'));
     fs.mkdirSync(deep, { recursive: true });
-    const target = `${'a/'.repeat(600)}${'b/'.repeat(600)}x`;
+    const target = `${'a/'.repeat(DEEP)}${'b/'.repeat(600)}x`;
     const command = `${['rm', '-rf', '~'].join(' ')} ; echo hi > ${target}`;
     const base = evaluateToolCall('Bash', { command });
     expect(base.decision).toBe('block');
@@ -1286,15 +1312,84 @@ describe('#1025 fold r3 — one shared deadline; record and sweep are bounded', 
     expect(nativeExec).toBeUndefined();
     // Direct recording of the same target (not merely the block skip): the
     // 600 missing components exceed MAX_MISSING_PARENT_COMPONENTS → null.
-    const rp = jest.spyOn(fs, 'realpathSync');
+    const native = jest.spyOn(fs.realpathSync, 'native');
+    const lstats = jest.spyOn(fs, 'lstatSync');
     const n = recordNativeArtifactCaptures({
       sessionKey: KEY, cwd: work, stateDir, home: root,
       captures: Array.from({ length: 16 }, (_, i) => ({ token: `${'./'.repeat(i + 1)}${target}`, kind: 'agent-written' as const })),
     });
     expect(n).toBe(0);
-    // One resolution (memoised across the 16 spellings), at most cap+1 calls.
-    expect(rp.mock.calls.length).toBeLessThanOrEqual(MAX_MISSING_PARENT_COMPONENTS + 1);
+    // One resolution (memoised across the 16 spellings), at most cap+1
+    // walks, each at most one lstat per component of the deep spelling; the
+    // native resolver is never called.
+    expect(native).not.toHaveBeenCalled();
+    const walked = lstats.mock.calls.filter(([q]) => String(q).startsWith(work)).length;
+    expect(walked).toBeGreaterThan(0);
+    expect(walked).toBeLessThanOrEqual((MAX_MISSING_PARENT_COMPONENTS + 1) * (DEEP + 2));
     expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  describe('r4: path resolution is a budget-checked walker, never realpath(3)', () => {
+    const FOREVER = () => createNativeProvenanceBudget({ budgetMs: 1e12 });
+    const rec = (token: string, budget = FOREVER()) => recordNativeArtifactCaptures({
+      sessionKey: KEY, cwd: work, stateDir, home: root, budget, captures: [{ token, kind: 'agent-written' }],
+    });
+    const chain = (n: number) => {
+      for (let i = 0; i < n; i++) fs.symlinkSync(i < n - 1 ? `L${i + 1}` : '.', path.join(work, `L${i}`));
+    };
+
+    it(`follows up to MAX_RESOLVE_SYMLINKS (${MAX_RESOLVE_SYMLINKS}) links and records`, () => {
+      chain(MAX_RESOLVE_SYMLINKS);
+      const native = jest.spyOn(fs.realpathSync, 'native');
+      const readlink = jest.spyOn(fs, 'readlinkSync');
+      expect(rec('L0/x')).toBe(1);
+      expect(readlink).toHaveBeenCalledTimes(MAX_RESOLVE_SYMLINKS);
+      expect(native).not.toHaveBeenCalled();
+    });
+
+    it('one link past the expansion cap is not recorded, even with an unlimited budget; never throws', () => {
+      chain(MAX_RESOLVE_SYMLINKS + 1);
+      const readlink = jest.spyOn(fs, 'readlinkSync');
+      expect(rec('L0/x')).toBe(0);
+      expect(readlink).toHaveBeenCalledTimes(MAX_RESOLVE_SYMLINKS);
+    });
+
+    it('dot-dot components inside link targets count against MAX_RESOLVE_COMPONENTS (not normalised away)', () => {
+      fs.mkdirSync(path.join(work, 'a'));
+      const seg = Math.floor(((process.platform === 'darwin' ? 1024 : 4096) - 8) / 5);
+      const links = Math.min(MAX_RESOLVE_SYMLINKS, Math.ceil(MAX_RESOLVE_COMPONENTS / (2 * seg)) + 1);
+      for (let i = 0; i < links; i++) {
+        fs.symlinkSync(`${'a/../'.repeat(seg)}${i < links - 1 ? `L${i + 1}` : '.'}`, path.join(work, `L${i}`));
+      }
+      const lstats = jest.spyOn(fs, 'lstatSync');
+      const readlink = jest.spyOn(fs, 'readlinkSync');
+      const started = Date.now();
+      const n = rec('L0/x');
+      const walked = lstats.mock.calls.filter(([q]) => String(q).startsWith(work)).length;
+      if (2 * seg * links > MAX_RESOLVE_COMPONENTS) {
+        // The component cap fires before the chain ends: not recorded.
+        expect(n).toBe(0);
+        expect(readlink.mock.calls.length).toBeLessThan(links);
+      }
+      expect(walked).toBeLessThanOrEqual(MAX_RESOLVE_COMPONENTS);
+      expect(readlink.mock.calls.length).toBeLessThanOrEqual(MAX_RESOLVE_SYMLINKS);
+      expect(Date.now() - started).toBeLessThan(2_000);
+    });
+
+    it('the deadline is checked before every lstat and readlink: expiry at the link stops before its readlink', () => {
+      chain(2);
+      let t = 0;
+      const budget = createNativeProvenanceBudget({ clock: () => t });
+      const lstat = fs.lstatSync;
+      jest.spyOn(fs, 'lstatSync').mockImplementation(((q: fs.PathLike, o?: fs.StatSyncOptions) => {
+        const st = lstat(q, o as fs.StatSyncOptions);
+        if (String(q) === path.join(work, 'L0')) t = 1e12;
+        return st;
+      }) as typeof fs.lstatSync);
+      const readlink = jest.spyOn(fs, 'readlinkSync');
+      expect(rec('L0/x', budget)).toBe(0);
+      expect(readlink).not.toHaveBeenCalled();
+    });
   });
 
   it('a missing tail of up to MAX_MISSING_PARENT_COMPONENTS is still recorded', () => {
@@ -1363,7 +1458,7 @@ describe('#1025 fold r3 — one shared deadline; record and sweep are bounded', 
     t = NATIVE_PROBE_BUDGET_MS + 1;
     expect(budget.expired()).toBe(true);
     t = 0; // a clock that goes back never revives it
-    const spies = ['lstatSync', 'mkdirSync', 'opendirSync', 'writeFileSync', 'renameSync', 'statSync', 'realpathSync']
+    const spies = ['lstatSync', 'mkdirSync', 'opendirSync', 'writeFileSync', 'renameSync', 'statSync', 'realpathSync', 'readlinkSync']
       .map((m) => jest.spyOn(fs, m as 'lstatSync'));
     expect(recordNativeArtifactCaptures({
       sessionKey: KEY, cwd: work, stateDir, home: root, budget,
@@ -1400,11 +1495,13 @@ describe('#1025 fold r3 — one shared deadline; record and sweep are bounded', 
       captures: [{ token: './helper', kind: 'agent-written' }],
     })).toBe(1);
     fs.writeFileSync(path.join(work, 'helper'), ELF_STUB, { mode: 0o755 });
-    const cases: Array<[string, string]> = [
-      [`${['rm', '-rf', '~'].join(' ')} ; ./helper`, 'block'],
-      ['LD_PRELOAD=./helper /bin/true', 'allow'],
+    // r4: a catastrophic block is terminal and is never observed.
+    const cases: Array<[string, string, boolean]> = [
+      [`${['rm', '-rf', '~'].join(' ')} ; ./helper`, 'block', false],
+      ['git push --force origin main ; ./helper', 'require_approval', true],
+      ['LD_PRELOAD=./helper /bin/true', 'allow', true],
     ];
-    for (const [command, decision] of cases) {
+    for (const [command, decision, observed] of cases) {
       const base = evaluateToolCall('Bash', { command });
       expect(base.decision).toBe(decision);
       expect(base.nativeExec).toBeUndefined();
@@ -1413,8 +1510,12 @@ describe('#1025 fold r3 — one shared deadline; record and sweep are bounded', 
       });
       const enabled = wire(createNativeProvenanceBudget());
       const expiredRun = wire(createNativeProvenanceBudget({ clock: () => Number.NaN }));
-      expect(enabled.nativeExec).toBeDefined();
-      expect(enabled.nativeExec?.uses).toEqual(expect.arrayContaining([expect.objectContaining({ provenance: 'agent-written' })]));
+      if (observed) {
+        expect(enabled.nativeExec).toBeDefined();
+        expect(enabled.nativeExec?.uses).toEqual(expect.arrayContaining([expect.objectContaining({ provenance: 'agent-written' })]));
+      } else {
+        expect(enabled.nativeExec).toBeUndefined();
+      }
       expect(expiredRun.nativeExec).toBeUndefined();
       const { nativeExec: _a, ...e } = enabled;
       const { nativeExec: _b, ...x } = expiredRun;

@@ -7118,7 +7118,9 @@ export function evaluateToolCall(
   if (drift) v = { ...v, contractDrift: drift };
   // #1025: the native-exec observation is attached LAST, to the final
   // verdict, and nothing reads it back — decision, severity and signals are
-  // exactly what they were without it.
+  // exactly what they were without it. A catastrophic block is terminal and
+  // doorless (above), so no store work runs on its path at all.
+  if (v.decision === 'block' && v.severity === 'catastrophic') return v;
   const nativeExec = nativeExecObservation(toolName, args, options);
   return nativeExec ? { ...v, nativeExec } : v;
 }

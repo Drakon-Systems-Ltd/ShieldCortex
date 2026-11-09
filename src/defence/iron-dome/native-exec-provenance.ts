@@ -203,16 +203,57 @@ function budgetOf(b: unknown, clock?: () => number): NativeProvenanceBudget {
   return createNativeProvenanceBudget({ clock });
 }
 
-/** realpath that refuses once `budget` is spent (a non-ENOENT failure, so
- *  `canonicalTarget` answers `null`). The native resolver is preferred (one
- *  syscall-level walk instead of an lstat per component); a stubbed
- *  `fs.realpathSync` without `.native` is honoured as is. */
+/** Symlink expansions one store path resolution may follow. */
+export const MAX_RESOLVE_SYMLINKS = 8;
+/** Path components (including `.`/`..` read from link targets) one store path
+ *  resolution may process. */
+export const MAX_RESOLVE_COMPONENTS = 4096;
+
+function resolveRefusal(code: string): Error {
+  return Object.assign(new Error('native provenance path resolution refused'), { code });
+}
+
+/** A realpath built from one `lstat` per component and one `readlink` per
+ *  symlink, with `budget` checked before EVERY one, at most
+ *  `MAX_RESOLVE_SYMLINKS` expansions and `MAX_RESOLVE_COMPONENTS` processed
+ *  components. `fs.realpathSync(.native)` is deliberately not used: realpath(3)
+ *  does its whole walk — every prefix, every expansion — inside one
+ *  uninterruptible call, and an agent-planted link chain makes that one call
+ *  take seconds. Here no step is larger than one kernel lookup of a path
+ *  shorter than PATH_MAX. Past any cap it throws a non-ENOENT code, so
+ *  `canonicalTarget` answers `null` (not observed / not recorded). `..` in a
+ *  link target is applied to the already-resolved prefix, as the kernel does. */
 function budgetedRealpath(budget: NativeProvenanceBudget): Realpath {
   return (p: string) => {
-    if (budget.expired()) throw Object.assign(new Error('native provenance budget spent'), { code: 'ETIMEDOUT' });
-    const rp = fs.realpathSync as typeof fs.realpathSync & { native?: (q: string) => string };
-    const out = typeof rp.native === 'function' ? rp.native(p) : rp(p);
-    return String(out);
+    if (budget.expired()) throw resolveRefusal('ETIMEDOUT');
+    if (typeof p !== 'string' || !path.isAbsolute(p)) throw resolveRefusal('EINVAL');
+    const pending: string[] = p.split(path.sep).reverse();
+    let resolved: string = path.sep;
+    let processed = 0;
+    let expansions = 0;
+    while (pending.length > 0) {
+      const part = pending.pop() as string;
+      if (++processed > MAX_RESOLVE_COMPONENTS) throw resolveRefusal('ELOOP');
+      if (part === '' || part === '.') continue;
+      if (part === '..') {
+        resolved = path.dirname(resolved);
+        continue;
+      }
+      const next = resolved === path.sep ? `${path.sep}${part}` : `${resolved}${path.sep}${part}`;
+      if (budget.expired()) throw resolveRefusal('ETIMEDOUT');
+      const st = fs.lstatSync(next);
+      if (!st.isSymbolicLink()) {
+        resolved = next;
+        continue;
+      }
+      if (++expansions > MAX_RESOLVE_SYMLINKS) throw resolveRefusal('ELOOP');
+      if (budget.expired()) throw resolveRefusal('ETIMEDOUT');
+      const target = String(fs.readlinkSync(next));
+      if (path.isAbsolute(target)) resolved = path.sep;
+      const parts = target.split(path.sep);
+      for (let i = parts.length - 1; i >= 0; i--) pending.push(parts[i]);
+    }
+    return resolved;
   };
 }
 
@@ -519,8 +560,11 @@ const FINAL_RE = /^([0-9a-f]{64})\.\d+\.[0-9a-f]+$/;
 // session already there keeps recording up to its own cap), the probe reads
 // at most `MAX_RECORDS_PER_PATH` entries per path hash and classifies each
 // hash once per call, and the record step resolves a target with at most
-// `MAX_MISSING_PARENT_COMPONENTS` + 1 realpath calls, once per normalised
-// spelling, and records once per (canonical path, kind). The sweep makes at
+// `MAX_MISSING_PARENT_COMPONENTS` + 1 resolutions, once per normalised
+// spelling, and records once per (canonical path, kind). Each resolution is
+// itself budget-bounded: an lstat per component, at most
+// `MAX_RESOLVE_SYMLINKS` expansions and `MAX_RESOLVE_COMPONENTS` components,
+// the budget checked before every lstat and readlink (never realpath(3)). The sweep makes at
 // most `MAX_SWEEP_DELETIONS` deletions. Probe, record, path resolution and
 // sweep of one call all share ONE `NativeProvenanceBudget`
 // (`NATIVE_PROBE_BUDGET_MS`), checked before every filesystem operation;

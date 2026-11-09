@@ -74,6 +74,30 @@ function auditRows(box: Box): Array<Record<string, unknown>> {
 
 const SESSION = 'sc-1025-hook-session';
 
+/** #1025 r4: a deep `a` tree with a 39-link `a/../` chain planted at depth
+ *  D-1 (a node that still has an `a` child, so every `a/..` is walkable).
+ *  Depth and segment are scaled so each path and link target fits PATH_MAX
+ *  (Linux 4096, macOS 1024); on Linux this is the D=2000 / 817-segment shape.
+ *  Torn down iteratively (no recursive rm through 2000 levels). */
+function plantLinkChain(work: string): { token: string; depth: number; teardown: () => void } {
+  const pathMax = process.platform === 'darwin' ? 1024 : 4096;
+  const depth = Math.min(2000, Math.floor((pathMax - work.length - 16) / 2));
+  const seg = Math.min(817, Math.floor((pathMax - 8) / 5));
+  const node = path.join(work, ...new Array(depth - 1).fill('a'));
+  fs.mkdirSync(path.join(node, 'a'), { recursive: true });
+  for (let i = 0; i < 39; i++) {
+    fs.symlinkSync(`${'a/../'.repeat(seg)}${i < 38 ? `L${i + 1}` : '.'}`, path.join(node, `L${i}`));
+  }
+  return {
+    token: `${'a/'.repeat(depth - 1)}L0/x`,
+    depth,
+    teardown: () => {
+      for (let i = 0; i < 39; i++) fs.rmSync(path.join(node, `L${i}`), { force: true });
+      for (let d = depth; d >= 1; d--) { try { fs.rmdirSync(path.join(work, ...new Array(d).fill('a'))); } catch { /* already gone */ } };
+    },
+  };
+}
+
 describe('#1025 native-exec observation through the real Claude Code hook', () => {
   let root: string;
   let recorded: Box;
@@ -200,10 +224,13 @@ describe('#1025 native-exec observation through the real Claude Code hook', () =
   }, 60_000);
 
   it('fold r3: a ~600-level deep tree under a catastrophic redirect is denied quickly and records nothing', async () => {
-    fs.mkdirSync(path.join(recorded.work, ...new Array(600).fill('a')), { recursive: true });
+    // r4: scaled so the tree fits PATH_MAX (macOS 1024) under the tmpdir.
+    const DEEP = Math.min(600, Math.floor(((process.platform === 'darwin' ? 1024 : 4096) - recorded.work.length - 16) / 2));
+    expect(DEEP).toBeGreaterThan(300);
+    fs.mkdirSync(path.join(recorded.work, ...new Array(DEEP).fill('a')), { recursive: true });
     const store = path.join(recorded.configDir, 'native-provenance');
     const before = fs.existsSync(store) ? fs.readdirSync(store).sort() : null;
-    const command = `${['rm', '-rf', '~'].join(' ')} ; echo hi > ${'a/'.repeat(600)}${'b/'.repeat(600)}x`;
+    const command = `${['rm', '-rf', '~'].join(' ')} ; echo hi > ${'a/'.repeat(DEEP)}${'b/'.repeat(600)}x`;
     const started = Date.now();
     const a = await call(recorded, 'Bash', { command }, 8000);
     const ms = Date.now() - started;
@@ -215,6 +242,35 @@ describe('#1025 native-exec observation through the real Claude Code hook', () =
     expect(ms).toBeLessThan(5000); // base (unbounded record) took ~9.5 s
     expect(fs.existsSync(store) ? fs.readdirSync(store).sort() : null).toEqual(before); // a block records nothing
   }, 60_000);
+
+  it('r4: deep tree + 39-link a/../ chain naming .../L0/x — catastrophic deny and require_approval stay fast, same decision', async () => {
+    await plant('seed'); // a non-empty session store, so the probe lists and resolves
+    const chains = [recorded, control].map((box) => plantLinkChain(box.work));
+    try {
+      if (process.platform === 'linux') expect(chains[0].depth).toBe(2000);
+      const token = chains[0].token;
+      expect(chains[1].token).toBe(token);
+      const cases: Array<[string, string]> = [
+        [`${['rm', '-rf', '~'].join(' ')} ; ./${token}`, 'deny'],
+        [`${['rm', '-rf', '~'].join(' ')} ; echo hi > ${token}`, 'deny'],
+        [`git push --force origin main > ${token}`, 'ask'],
+      ];
+      for (const [command, want] of cases) {
+        const started = Date.now();
+        const a = await call(recorded, 'Bash', { command }, 9000);
+        const ms = Date.now() - started;
+        const b = await call(control, 'Bash', { command }, 9000);
+        expect(a.timedOut).toBeUndefined();
+        expect(b.timedOut).toBeUndefined();
+        expect(JSON.parse(a.stdout).hookSpecificOutput.permissionDecision).toBe(want);
+        expect(a.stdout).toBe(b.stdout);
+        expect(a.code).toBe(b.code);
+        expect(ms).toBeLessThan(3000); // unbounded realpath(3) took ~11 s for this plant
+      }
+    } finally {
+      for (const c of chains) c.teardown();
+    }
+  }, 120_000);
 
   it('fold r3: a first-record allow beside a planted 20k-file expired session dir records, quickly, and leaves that dir whole', async () => {
     const store = path.join(recorded.configDir, 'native-provenance');
