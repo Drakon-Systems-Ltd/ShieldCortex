@@ -14,7 +14,9 @@
  * (`warnTier`); a warning with no fix, an unreadable posture, a failed opt-in,
  * missing telemetry or an unsupported host is a diagnosis and stays under
  * TO FIX with its label, reason and whatever remedy the check gave. The two
- * sections are never mixed.
+ * sections are never mixed: a warning that states a by-design choice AND a
+ * known limit of this host (`unsupportedCapability`) puts the choice under
+ * EXPECTED and the limit under TO FIX, each in the check's own words.
  *
  * Symbols and colour appear only when the caller passes `symbols`/a styled
  * palette, which doctor.ts does on a TTY with NO_COLOR unset; otherwise the
@@ -33,6 +35,7 @@ import {
   type DoctorReportStyle,
   type DoctorStatus,
   type ThemeGroup,
+  type UnsupportedCapability,
 } from './doctor-report.js';
 import {
   guardHeadlineFromPlanes,
@@ -422,6 +425,32 @@ function renderFixItem(g: ThemeGroup, n: number, width: number, s: DoctorReportS
   return out;
 }
 
+/**
+ * A KNOWN limit of this host stated by a warning whose own tier is expected
+ * (#1014 r6): the access choice is by design, the limit is not, so the limit
+ * is a TO FIX item of its own. Title, the check's own sentence for the limit,
+ * then its conditional remedy as prose. Never a `$` line: the remedy holds
+ * only "if you want" the capability, and a command would drop that condition.
+ */
+function renderCapabilityLimit(
+  lim: UnsupportedCapability & { label: string },
+  n: number,
+  width: number,
+  s: DoctorReportStyle,
+): string[] {
+  const dim = (l: string) => `${s.dim}${l}${s.reset}`;
+  const what = `${cleanWhy(lim.capability)} is unavailable on this host`;
+  const num = `${String(n).padStart(2)}.`;
+  const title = wrapSoft(what, width, 4, 4);
+  title[0] = `${statusColour('warn', s)}${num}${s.reset} ${s.bold}${title[0].slice(4)}${s.reset}`;
+  withIdTag(title, wrapSoft(what, width, 4, 4).at(-1) ?? '', doctorRowId(lim.label), width, s);
+  return [
+    ...title,
+    ...wrapSoft(cleanWhy(lim.fact), width, 4, 4).map(dim),
+    ...wrapSoft(scrubIssueRefs(lim.fix), width, 4, 4).map(dim),
+  ];
+}
+
 interface SessionCount {
   live: number;
   ended: number;
@@ -525,6 +554,10 @@ export function formatDoctorSummary(results: DoctorReportItem[], o: DoctorSummar
   const warnGroups = groupItems(warns, true);
   const fixGroups = [...groupItems(fails, true), ...warnGroups.filter((w) => warnTier(w) === 'fix')];
   const expectedGroups = warnGroups.filter((w) => warnTier(w) === 'expected');
+  // A known host limit inside an expected group is not part of the choice
+  // (#1014 r6). A TO FIX group already prints its whole message, limit
+  // included, so only the expected groups give theirs up as items.
+  const limits = expectedGroups.flatMap((grp) => grp.unsupportedCapabilities ?? []);
 
   const lines: string[] = [];
   const head = ['ShieldCortex Doctor', o.version?.trim() ? `v${o.version.trim()}` : '', o.target?.trim() ?? '']
@@ -537,7 +570,7 @@ export function formatDoctorSummary(results: DoctorReportItem[], o: DoctorSummar
     : `${s.green}${g.ok} Healthy${s.reset}`;
   // Checks, not items: several checks under one shared fix are each a thing
   // to fix, and the count must not read lower than the failed-check count.
-  const toFixCount = fixGroups.reduce((acc, grp) => acc + grp.members.length, 0);
+  const toFixCount = fixGroups.reduce((acc, grp) => acc + grp.members.length, 0) + limits.length;
   const toFix = toFixCount === 0
     ? 'nothing to fix'
     : `${toFixCount} thing${toFixCount === 1 ? '' : 's'} to fix`;
@@ -550,9 +583,10 @@ export function formatDoctorSummary(results: DoctorReportItem[], o: DoctorSummar
   if (freshDb) lines.push(...wrapSoft(`Memory database: ${cleanWhy(freshDb.message)}`, width, 0, 2).map(dim));
   lines.push('');
 
-  if (fixGroups.length > 0) {
+  if (fixGroups.length > 0 || limits.length > 0) {
     lines.push(`${s.bold}TO FIX${s.reset}`);
     fixGroups.forEach((grp, i) => lines.push(...renderFixItem(grp, i + 1, width, s)));
+    limits.forEach((lim, i) => lines.push(...renderCapabilityLimit(lim, fixGroups.length + i + 1, width, s)));
     lines.push('');
   }
 

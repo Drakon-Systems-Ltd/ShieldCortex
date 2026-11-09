@@ -7,7 +7,7 @@
  * truncated mid-sentence via ellipsis — it wraps in full at any width.
  */
 
-import { sanitiseDisplayLines } from './term-ui.js';
+import { sanitiseDisplayField, sanitiseDisplayLines } from './term-ui.js';
 import { formatDoctorSummary } from './doctor-plain.js';
 import type { HostGatePlanes, HostTable } from '../setup/host-table.js';
 
@@ -31,6 +31,16 @@ export function sanitiseDoctorRowsForDisplay<T extends DoctorReportItem>(rows: r
     message: sanitiseDisplayLines(r.message),
     ...(r.fix !== undefined ? { fix: sanitiseDisplayLines(r.displayFix ?? r.fix) } : {}),
     ...(r.verboseNote !== undefined ? { verboseNote: sanitiseDisplayLines(r.verboseNote) } : {}),
+    // The limit names the host's own version string, read off disk (#1014 r6).
+    ...(r.unsupportedCapability !== undefined
+      ? {
+        unsupportedCapability: {
+          capability: sanitiseDisplayField(r.unsupportedCapability.capability),
+          fact: sanitiseDisplayField(r.unsupportedCapability.fact),
+          fix: sanitiseDisplayField(r.unsupportedCapability.fix),
+        },
+      }
+      : {}),
   }));
 }
 
@@ -95,6 +105,28 @@ export interface DoctorReportItem {
    * conversation-scanning group.
    */
   observationIncomplete?: true;
+  /**
+   * #1014 r6: a capability this host is KNOWN not to support, stated in the
+   * row's message. The conversation-scanning row sets it when the installed
+   * OpenClaw predates the first conversation hook that can block: whatever
+   * the access setting, detections there can never be more than advisory.
+   * That is an observed incompatibility, not an observation the check could
+   * not make, so it is not `observationIncomplete`. The row's fix can still
+   * call withheld access "a valid choice", and the default report files that
+   * choice under EXPECTED; this limit then prints as its own TO FIX item, so
+   * the choice never hides it.
+   */
+  unsupportedCapability?: UnsupportedCapability;
+}
+
+/** See DoctorReportItem.unsupportedCapability. Every field is the producer's own words. */
+export interface UnsupportedCapability {
+  /** The capability, as a noun phrase that titles the item: "Conversation enforcement". */
+  capability: string;
+  /** The limit as the check states it: the same clause its message carries. */
+  fact: string;
+  /** What changes the limit, as conditional prose. Printed as prose only, never as a `$` command. */
+  fix: string;
 }
 
 export interface FormatDoctorReportOpts {
@@ -428,6 +460,11 @@ export interface ThemeGroup {
   planeUnread?: true;
   /** See DoctorReportItem.observationIncomplete. */
   observationIncomplete?: true;
+  /**
+   * Every member's DoctorReportItem.unsupportedCapability, once each, in
+   * member order, with the label of the row that stated it (its `--explain` id).
+   */
+  unsupportedCapabilities?: Array<UnsupportedCapability & { label: string }>;
   count: number;
   labels: string[];
   /**
@@ -495,6 +532,7 @@ export function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeG
       ...(it.postureUnknown ? { postureUnknown: true as const } : {}),
       ...(it.planeUnread ? { planeUnread: true as const } : {}),
       ...(it.observationIncomplete ? { observationIncomplete: true as const } : {}),
+      ...(it.unsupportedCapability ? { unsupportedCapabilities: [{ ...it.unsupportedCapability, label: it.label }] } : {}),
       count: 1,
       labels: [it.label],
       members: [{ label: it.label, why: it.message.replace(/\s+/g, ' ').trim() }],
@@ -519,6 +557,7 @@ export function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeG
         ...(it.postureUnknown ? { postureUnknown: true as const } : {}),
         ...(it.planeUnread ? { planeUnread: true as const } : {}),
         ...(it.observationIncomplete ? { observationIncomplete: true as const } : {}),
+        ...(it.unsupportedCapability ? { unsupportedCapabilities: [{ ...it.unsupportedCapability, label: it.label }] } : {}),
         count: 1,
         labels: [it.label],
         members: [{ label: it.label, why: it.message.replace(/\s+/g, ' ').trim() }],
@@ -536,6 +575,12 @@ export function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeG
       for (const c of cmds) if (!existing.fixCommands.includes(c)) existing.fixCommands.push(c);
       if (!existing.fixNote && it.fix) existing.fixNote = it.fix;
       if (it.verboseNote && !existing.verboseNotes.includes(it.verboseNote)) existing.verboseNotes.push(it.verboseNote);
+      // A limit stated by a later member must survive the merge: the load row
+      // and the scanning row are one access decision, not one capability (#1014 r6).
+      const lim = it.unsupportedCapability;
+      if (lim && !(existing.unsupportedCapabilities ?? []).some((x) => x.fact === lim.fact)) {
+        existing.unsupportedCapabilities = [...(existing.unsupportedCapabilities ?? []), { ...lim, label: it.label }];
+      }
       // Prefer the dedicated conversation-scanning label over plugin-loaded note
       if (/conversation scanning/i.test(it.label) && !/conversation scanning/i.test(existing.what)) {
         existing.what = shortWhat(it);

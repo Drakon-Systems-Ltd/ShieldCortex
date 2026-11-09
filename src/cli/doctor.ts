@@ -153,6 +153,7 @@ import {
   sanitiseDoctorRowsForDisplay,
   shouldColorDoctor,
   type DoctorReportStyle,
+  type UnsupportedCapability,
 } from './doctor-report.js';
 import { formatDoctorExplain } from './doctor-plain.js';
 import {
@@ -232,6 +233,8 @@ export interface CheckResult {
   planeUnread?: true;
   /** See DoctorReportItem.observationIncomplete (#1014 r5) — a stated observation was not made; never "expected". */
   observationIncomplete?: true;
+  /** See DoctorReportItem.unsupportedCapability (#1014 r6) — a KNOWN host limit; never hidden behind an expected choice. */
+  unsupportedCapability?: UnsupportedCapability;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
@@ -8741,6 +8744,20 @@ export async function checkOpenClawConversationScanning(
   // front is cheaper than discovering it after enabling enforcement.
   const capability = evaluateEnforcementSupport(readOpenClawHostVersion(home));
   const message = `${describeConversationAccess(state, REALTIME_PLUGIN_ID)}; ${describeEnforcementSupport(capability)}`;
+  // #1014 r6: a KNOWN unsupported capability is carried as a fact of its own,
+  // whatever the grant. The withheld-access fix below calls the choice valid,
+  // and it is; the version limit is not a choice, and the default report must
+  // not file it under the access choice's EXPECTED line. UNKNOWN support is
+  // not a known limit and is not marked.
+  const limit = capability.support === 'unsupported'
+    ? {
+      unsupportedCapability: {
+        capability: 'Conversation enforcement',
+        fact: describeEnforcementSupport(capability),
+        fix: `No setting changes this: conversation enforcement needs OpenClaw ${capability.minVersion} or later. Upgrade OpenClaw only if you want conversation enforcement; this does not ask you to change conversation access.`,
+      },
+    }
+    : {};
 
   if (!state.readable) {
     return {
@@ -8748,10 +8765,11 @@ export async function checkOpenClawConversationScanning(
       status: 'warn',
       message,
       fix: 'Check that ~/.openclaw/openclaw.json exists and is valid JSON, then re-run `shieldcortex doctor`.',
+      ...limit,
     };
   }
   if (!state.granted) {
-    return { label, status: 'warn', message, fix: conversationAccessFix(REALTIME_PLUGIN_ID) };
+    return { label, status: 'warn', message, fix: conversationAccessFix(REALTIME_PLUGIN_ID), ...limit };
   }
   if (capability.support === 'unsupported') {
     // Granted but incapable: scanning happens, enforcement never can. That is a
@@ -8762,6 +8780,7 @@ export async function checkOpenClawConversationScanning(
       status: 'warn',
       message,
       fix: `Upgrade OpenClaw to ${capability.minVersion} or later if you want conversation enforcement to become possible. Scanning and auditing work as-is.`,
+      ...limit,
     };
   }
   return { label, status: 'info', message };
