@@ -84,6 +84,43 @@ describe('sanitisePromptForRecall', () => {
     expect(out).toContain('real ask');
   });
 
+  // The s-class matches every JS line terminator. These two gaps sit outside the
+  // qualifier, so a terminator there is a different hole from the class above.
+  const HEADER_LINE_TERMINATORS = ['\n', '\r', '\u2028', '\u2029', '\r\n'] as const;
+
+  it.each(HEADER_LINE_TERMINATORS)(
+    'does not let whitespace before ( cross %p (#1045)',
+    (term) => {
+      const prompt = `conversation info${term}(owner text):\nreal ask`;
+      const out = sanitisePromptForRecall(prompt);
+      expect(out).toContain('(owner text):');
+      expect(out).toContain('real ask');
+      expect(out).not.toBe('real ask');
+    },
+  );
+
+  it.each(HEADER_LINE_TERMINATORS)(
+    'does not let whitespace between ) and : cross %p (#1045)',
+    (term) => {
+      const prompt = `conversation info (owner text)${term}:\nreal ask`;
+      const out = sanitisePromptForRecall(prompt);
+      expect(out).toContain('(owner text)');
+      expect(out).toContain('real ask');
+      expect(out).not.toBe('real ask');
+    },
+  );
+
+  it('still strips a one-line header with spaces and tabs around the qualifier (#1045)', () => {
+    const wrapped = [
+      'Conversation info \t(untrusted metadata)\t :',
+      '```json',
+      '{ "chat_id": "telegram:1" }',
+      '```',
+      'Reboot it',
+    ].join('\n');
+    expect(sanitisePromptForRecall(wrapped)).toBe('Reboot it');
+  });
+
   it('does not strip a fenced code block from a regular user prompt', () => {
     // The user is asking about a code block. The fence is intentional content,
     // not framework metadata, so the sanitiser must not eat it.

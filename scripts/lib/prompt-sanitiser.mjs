@@ -39,7 +39,11 @@ const HEADER_PATTERNS = [
   // a fenced ``` (any language tag) JSON block, then the real user content.
   // The qualifier stays on that one line (#1045). [^)]* would cross newlines
   // and swallow a later lane marker or owner text up to a distant ")".
-  /^conversation info\s*\([^)\n\r\u2028\u2029]*\)\s*:\s*\n+/i,
+  // Whitespace before "(" and between ")" and ":" is horizontal only — the
+  // s-class minus every JS line terminator (\n, \r, U+2028, U+2029). The
+  // s-class there would let "conversation info" plus a line break plus
+  // "(owner text):" consume that next line the same way.
+  /^conversation info[^\S\n\r\u2028\u2029]*\([^)\n\r\u2028\u2029]*\)[^\S\n\r\u2028\u2029]*:\s*\n+/i,
   /^conversation info\s*:\s*\n+/i,
 ];
 
