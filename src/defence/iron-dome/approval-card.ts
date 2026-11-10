@@ -114,6 +114,19 @@ export const SIGNAL_PHRASES: Readonly<Record<string, string>> = Object.freeze({
   'install-package-global': 'installs software for the whole machine',
   'local-package-install': 'installs packages into this project',
   'registry-code-exec': 'downloads a package and runs it straight away',
+  'package-vetting': 'the package check found something to look at',
+  'known-malicious-package': 'installs a package listed as malicious',
+  // #889 phase 1: the KINDS of the package check's findings, as the webhook
+  // card shows them (`describeVettingKinds`). These ids are card vocabulary,
+  // not verdict signals: an `unchecked` lookup adds no signal on purpose (a
+  // network blip must not change the verdict), yet the phone should still be
+  // told the check did not finish. The package name, version and OSV id stay
+  // on the interactive card; none of them has a phrase here.
+  'package-advisory': 'installs a package version with a published security advisory',
+  'package-new-version': 'installs a package version published only days ago',
+  'package-install-hook': 'installs a package that runs scripts during install',
+  'package-source-only': 'installs a package that runs its setup code during install',
+  'package-check-unavailable': 'could not finish the package check',
   // Deleting and overwriting.
   'recursive-force-delete': 'deletes files permanently',
   'delete-root-or-home': 'deletes a whole home folder or disk',
@@ -233,6 +246,13 @@ export const SIGNAL_CLASSES: Readonly<Record<string, SignalClass>> = Object.free
   'install-package-global': 'install',
   'local-package-install': 'install',
   'registry-code-exec': 'install',
+  'package-vetting': 'none',
+  'known-malicious-package': 'install',
+  'package-advisory': 'install',
+  'package-new-version': 'install',
+  'package-install-hook': 'install',
+  'package-source-only': 'install',
+  'package-check-unavailable': 'none',
   'recursive-force-delete': 'delete',
   'delete-root-or-home': 'delete',
   'delete-critical-path': 'delete',
@@ -2926,6 +2946,22 @@ export interface ApprovalCardActionInput {
   procRoot?: string;
   /** Tests only: the system-level git config files (default: the real ones). */
   gitSystemConfig?: readonly string[];
+  /**
+   * #889: plain-English findings from the pre-install package check (OSV hit,
+   * version age, install scripts, "unchecked: …"). Built by `package-vetting`
+   * from a fixed vocabulary plus a registry-safe package name; still bounded
+   * and flattened here, because this line is read by a person deciding.
+   */
+  extraReasons?: readonly string[];
+  /**
+   * #889: the KINDS of those findings (`FindingKind` in `package-vetting`:
+   * `malicious`, `advisory`, `new-version`, `install-hook`, `sdist-only`,
+   * `unchecked`). The webhook card renders them through the closed
+   * `VETTING_CARD_SIGNALS` → `SIGNAL_PHRASES` mapping, so a phone learns what
+   * kind of thing the check found without the name, version or OSV id that
+   * `extraReasons` carry. The interactive card ignores this field.
+   */
+  vettingKinds?: readonly string[];
 }
 
 /** Line 1: what it wants to do, in plain English, naming the target — and
@@ -3081,10 +3117,21 @@ export interface ApprovalCardSummary {
 
 export interface ApprovalCardInput extends ApprovalCardActionInput, ApprovalCardWhoInput {}
 
+/** Most vetting reasons shown, and the longest one (#889). */
+const MAX_EXTRA_REASONS = 4;
+const MAX_EXTRA_REASON_LEN = 110;
+
 export function buildApprovalCard(input: ApprovalCardInput): ApprovalCardSummary {
+  const base = describeSignals(input.signals);
+  const extra = (Array.isArray(input.extraReasons) ? input.extraReasons : [])
+    .map((r) => flattenCardText(r).replace(/;/g, ','))
+    .filter(Boolean)
+    .slice(0, MAX_EXTRA_REASONS)
+    .map((r) => (r.length > MAX_EXTRA_REASON_LEN ? `${r.slice(0, MAX_EXTRA_REASON_LEN - 1).trimEnd()}…` : r));
   return {
     action: describeAction(input).text,
-    reason: describeSignals(input.signals),
+    // The package findings lead: they are the new information on an install card.
+    reason: extra.length ? [...extra, base].join(REASON_SEPARATOR) : base,
     who: describeWho(input),
   };
 }
@@ -3213,10 +3260,48 @@ export function fixedTemplateReason(text: unknown): string {
 }
 
 /**
+ * #889: the package check's finding kinds → the `SIGNAL_PHRASES` id the
+ * webhook card shows for each. A closed table: a kind outside it renders
+ * nothing, so no text that arrived as a "kind" can reach the card. `malicious`
+ * shares the verdict's own `known-malicious-package` phrase, so a MAL- hit
+ * reads once however it arrived (signal, kind or both).
+ */
+export const VETTING_CARD_SIGNALS: Readonly<Record<string, string>> = Object.freeze({
+  malicious: 'known-malicious-package',
+  advisory: 'package-advisory',
+  'install-hook': 'package-install-hook',
+  'sdist-only': 'package-source-only',
+  'new-version': 'package-new-version',
+  unchecked: 'package-check-unavailable',
+});
+
+/** The order the findings rank in `package-vetting` (malicious first, the
+ *  lookup note last), so the card reads the way the audit row does. */
+const VETTING_KIND_ORDER: readonly string[] = Object.freeze(['malicious', 'advisory', 'install-hook', 'sdist-only', 'new-version', 'unchecked']);
+
+/** The fixed phrases for a verdict's vetting finding kinds, in finding order,
+ *  once each. Anything that is not an array of known kinds renders nothing. */
+export function describeVettingKinds(kinds: unknown): string[] {
+  if (!Array.isArray(kinds)) return [];
+  const present = new Set(kinds.filter((k): k is string => typeof k === 'string'));
+  const out: string[] = [];
+  for (const kind of VETTING_KIND_ORDER) {
+    if (!present.has(kind)) continue;
+    const phrase = SIGNAL_PHRASES[VETTING_CARD_SIGNALS[kind]];
+    if (phrase && !out.includes(phrase)) out.push(phrase);
+  }
+  return out;
+}
+
+/**
  * #815 A: the card the WEBHOOK carries. The WHAT is the fixed template for
  * the action's class, the WHY the guard's own phrases, the WHO the agent, box
  * and session (`describeWho`, never the tool input). It never names a target;
  * the interactive card (`buildApprovalCard`, #648) still does.
+ *
+ * #889: the WHY also carries the package check's finding kinds as fixed
+ * phrases (`describeVettingKinds`), after the verdict's signals. `extraReasons`
+ * — the free-form findings — never reach this card.
  */
 export function buildTemplateApprovalCard(input: ApprovalCardInput): ApprovalCardSummary {
   let actionClass: CardActionClass = 'tool';
@@ -3226,9 +3311,10 @@ export function buildTemplateApprovalCard(input: ApprovalCardInput): ApprovalCar
   } catch {
     /* the generic template */
   }
+  const reasons = [describeSignals(input.signals), ...describeVettingKinds(input.vettingKinds)];
   return {
     action: cardActionTemplate(actionClass),
-    reason: fixedTemplateReason(describeSignals(input.signals)),
+    reason: fixedTemplateReason(reasons.join(REASON_SEPARATOR)),
     who: describeWho(input),
   };
 }

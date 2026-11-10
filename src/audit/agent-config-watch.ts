@@ -941,6 +941,8 @@ export interface AgentConfigNotification {
   changeCount: number;
   /** `high` when any change is a high-severity kind (those are listed first). */
   severity?: ChangeSeverity;
+  /** #889: report-only package check of newly added MCP servers that launch a package. */
+  packageChecks?: Array<{ name: string; malicious: boolean; reasons: string[] }>;
 }
 
 export interface AgentConfigWatchDeps {
@@ -954,6 +956,42 @@ export interface AgentConfigWatchDeps {
   snapshot?: (file: string, spec: WatchedFileSpec) => FileSnapshot | Promise<FileSnapshot>;
   /** Drop directories checked for planted instruction files (default `defaultDropzoneDirs(home)`). */
   dropzoneDirs?: string[];
+  /**
+   * #889: vet newly added MCP servers whose command launches a package
+   * (`npx`/`uvx` …). Report-only: the answer rides on the notification and can
+   * never change what is baselined, delivered or blocked. Must bound its own
+   * time; a throw or a hang costs the check, never the notification.
+   */
+  vetServers?: (servers: Array<{ name: string; entry: unknown }>) => Promise<Array<{ name: string; malicious: boolean; reasons: string[] }>>;
+}
+
+/** Hard ceiling on the report-only package check inside the watch's own budget. */
+const VET_SERVERS_CEILING_MS = 2500;
+
+/**
+ * The raw entries of MCP servers a change list ADDED (or changed), read from the
+ * file again — snapshots hold hashes, never contents. Bounded to five. Never
+ * throws: an unreadable file just yields nothing to check.
+ */
+export function addedServerEntries(file: string, spec: WatchedFileSpec, changes: readonly ConfigChange[]): Array<{ name: string; entry: unknown }> {
+  const wanted = changes.filter((c) => c.section === 'mcpServers' && (c.kind === 'added' || c.kind === 'changed'));
+  if (wanted.length === 0 || spec.format === 'raw' || spec.format === 'dir') return [];
+  try {
+    const raw = readRegularFileBounded(file);
+    const parsed: unknown = spec.format === 'toml' ? parseToml(raw) : JSON.parse(spec.format === 'jsonc' ? stripJsonc(raw) : raw);
+    const out: Array<{ name: string; entry: unknown }> = [];
+    for (const c of wanted) {
+      const sec = spec.sections.find((s) => s.keyPath === c.keyPath);
+      if (!sec) continue;
+      const servers = sec.extract ? sec.extract(parsed) : getPath(parsed, sec.keyPath);
+      const entry = servers && typeof servers === 'object' ? own(servers as Record<string, unknown>, c.name) : undefined;
+      if (entry !== undefined) out.push({ name: c.name, entry });
+      if (out.length >= 5) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 export interface AgentConfigWatchResult {
@@ -1095,11 +1133,25 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
         if (changes.length === 0) { next.files[c.key] = c.after; continue; }
         next.lastDetectedAt = new Date(now()).toISOString();
         const severity: ChangeSeverity = changes.some((x) => changeSeverity(x) === 'high') ? 'high' : 'normal';
+        let packageChecks: AgentConfigNotification['packageChecks'];
+        if (deps.vetServers) {
+          try {
+            const servers = addedServerEntries(c.file, c.spec, changes);
+            if (servers.length > 0) {
+              let t: NodeJS.Timeout | undefined;
+              const ceiling = new Promise<undefined>((res) => { t = setTimeout(() => res(undefined), VET_SERVERS_CEILING_MS); t.unref?.(); });
+              const checks = await Promise.race([deps.vetServers(servers), ceiling]);
+              if (t) clearTimeout(t);
+              if (checks && checks.length > 0) packageChecks = checks;
+            }
+          } catch { /* report-only: a failed check never costs the notification */ }
+        }
         const note: AgentConfigNotification = {
           file: shown,
           changes: changes.slice(0, 3).map((x) => ({ label: changeLabel(x), name: x.name })),
           changeCount: changes.length,
           ...(severity === 'high' ? { severity } : {}),
+          ...(packageChecks ? { packageChecks } : {}),
         };
         try {
           await deps.notify(note);

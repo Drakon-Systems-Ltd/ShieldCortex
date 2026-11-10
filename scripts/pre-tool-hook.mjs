@@ -283,6 +283,13 @@ function inlineStrictPosture(config) {
   // here exactly as `applyStrictFailClosedPosture` drops it in dist (#878: a
   // kept `readinessGate: true` let the "strict" posture run in shadow).
   delete out.actionGuard.readinessGate;
+  // #889: the strict posture keeps the known-malicious package floor on, exactly as
+  // `applyStrictFailClosedPosture` does in dist.
+  if (out.actionGuard.packageVetting && typeof out.actionGuard.packageVetting === 'object' && !Array.isArray(out.actionGuard.packageVetting)) {
+    const pv = { ...out.actionGuard.packageVetting };
+    delete pv.enabled;
+    out.actionGuard.packageVetting = pv;
+  }
   // #522 (GPT-6 round-6, item 1), the second spelling. The deprecated
   // `interceptor.actionGuard` alias gap-fills per key in
   // flattenActionGuardConfig (#209). Every pinned key is now present on the
@@ -295,6 +302,11 @@ function inlineStrictPosture(config) {
     const alias = { ...out.interceptor.actionGuard };
     for (const key of Object.keys(INLINE_STRICT_POSTURE.actionGuard)) delete alias[key];
     delete alias.readinessGate;
+    if (alias.packageVetting && typeof alias.packageVetting === 'object' && !Array.isArray(alias.packageVetting)) {
+      const pv = { ...alias.packageVetting };
+      delete pv.enabled;
+      alias.packageVetting = pv;
+    }
     out.interceptor = { ...out.interceptor, actionGuard: alias };
   }
   return out;
@@ -463,6 +475,9 @@ function flattenActionGuardConfig(config) {
       // malformed means no exemption ever fires, which is where the guard
       // started — the allowlist can only fail closed.
       reviewedScripts: Array.isArray(raw.reviewedScripts) ? raw.reviewedScripts : null,
+      // #889 pre-install package vetting — RAW again; validated only by
+      // normalisePackageVettingConfig in dist. Absent = defaults (on, 7 days).
+      packageVetting: raw.packageVetting && typeof raw.packageVetting === 'object' && !Array.isArray(raw.packageVetting) ? raw.packageVetting : null,
       // #310 / #378 operator retry control — RAW again, validated only by
       // normaliseRetryControlConfig in dist. Fingerprint + `approve --denial`
       // are always-on when the dist module is complete. `retryCards` must be
@@ -523,6 +538,22 @@ async function loadGuard() {
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'tool-action-guard.js')).href
     );
     return typeof mod.evaluateToolCall === 'function' ? mod : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #889: the pre-install package vetting module. Null when dist predates it,
+ * in which case installs are judged exactly as before — vetting is additive.
+ */
+async function loadPackageVetting() {
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(hookDistRoot(), 'defence', 'iron-dome', 'package-vetting.js')).href
+    );
+    return typeof mod.vetToolCall === 'function' && typeof mod.applyVettingToVerdict === 'function'
+      && typeof mod.normalisePackageVettingConfig === 'function' ? mod : null;
   } catch {
     return null;
   }
@@ -1138,14 +1169,20 @@ function safeApprovalVerdict(verdict) {
   };
 }
 
-function safeDiagnosticApprovalReason(reason) {
+function safeDiagnosticApprovalReason(reason, packageReasons) {
   const raw = String(reason ?? '');
   const hashHint = raw.match(/shieldcortex approve [0-9a-f]{12}/)?.[0];
   const degraded = /degraded|unavailable|could not scan|guard runtime/i.test(raw);
   const lead = degraded
     ? 'Action Guard is degraded/unavailable and requires approval; inspect local audit for details.'
     : 'Action Guard requires approval; inspect local audit for details.';
-  return `${lead}${hashHint ? ` To allow this exact command once, run in YOUR terminal: ${hashHint}` : ''}`;
+  // #889: the package check's findings are built from a fixed vocabulary plus
+  // a registry-safe package name, so — unlike the guard's own reason — they are
+  // safe to show on the prompt a person is answering.
+  const pkg = Array.isArray(packageReasons) && packageReasons.length > 0
+    ? ` Package check: ${packageReasons.slice(0, 4).map((r) => String(r).replace(/[^\x20-\x7e]/g, '?').slice(0, 110)).join('; ')}.`
+    : '';
+  return `${lead}${pkg}${hashHint ? ` To allow this exact command once, run in YOUR terminal: ${hashHint}` : ''}`;
 }
 
 /**
@@ -1167,6 +1204,14 @@ function approvalCardFor(notify, channel, { toolName, toolInput, verdict, sessio
       tool: String(toolName ?? ''),
       input: toolInput,
       signals: Array.isArray(verdict?.signals) ? verdict.signals.map(String) : [],
+      ...(Array.isArray(verdict?.packageVettingReasons) && verdict.packageVettingReasons.length > 0
+        ? { extraReasons: verdict.packageVettingReasons.map(String) }
+        : {}),
+      // #889 R2: the finding kinds, so the webhook's fixed-template card can say
+      // what kind of thing the check found without the free-form text above.
+      ...(Array.isArray(verdict?.packageVettingKinds) && verdict.packageVettingKinds.length > 0
+        ? { vettingKinds: verdict.packageVettingKinds.map(String) }
+        : {}),
       plane: 'claude-code',
       sessionId: notificationContext(sessionKey).sessionId,
       cwd: typeof cwd === 'string' ? cwd : undefined,
@@ -1266,6 +1311,8 @@ const SAFE_SIGNALS = new Set([
   // #874: the other two self-protection floor signals. Guard reason codes,
   // not operator data; redacted, a floor denial could not name its signal.
   'touch-guard-config', 'disable-action-guard',
+  // #889: the pre-install package check's own reason codes (no operator data).
+  'package-vetting', 'known-malicious-package',
 ]);
 /**
  * #436 — the only tiers that deny with no operator affordance. Everything the
@@ -1884,7 +1931,16 @@ function terminalDecisionReason(verdict, outcome, event) {
     : '';
   const severity = safeSeverity(verdict?.severity, event);
   const severityPrefix = severity === 'critical' ? 'Catastrophic-tier. ' : '';
-  return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${nextStep}${suffix}`;
+  // #889: a known-malicious package says so, by name and advisory id — the
+  // agent needs to know WHICH install to drop. Same vocabulary-only reasons as
+  // the approval prompt. Each reason arrives already bounded to 240 characters
+  // by the vetting module, which clips the package name and the id list so the
+  // fixed explanation (and "pin a version", the way through) is whole: the cap
+  // here must not be shorter, or it cuts the instruction off.
+  const malicious = Array.isArray(verdict?.packageVettingReasons) && verdict.signals?.includes?.('known-malicious-package')
+    ? ` Package check: ${verdict.packageVettingReasons.slice(0, 4).map((r) => String(r).replace(/[^\x20-\x7e]/g, '?').slice(0, 240)).join('; ')}.`
+    : '';
+  return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${malicious}${nextStep}${suffix}`;
 }
 
 function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey, actionId, notify }) {
@@ -3240,7 +3296,7 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
       'asked',
       { ...baseExtra, intentArgs: toolInput, ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}), ...broker },
     );
-    emitDecision('ask', safeDiagnosticApprovalReason(reason));
+    emitDecision('ask', safeDiagnosticApprovalReason(reason, auditVerdict?.packageVettingReasons));
     return;
   }
   const actionId = writeTerminalOutcomeAudit(toolName, { ...auditVerdict, reason }, toolInput, action, 'denied_no_prompt_surface', 'action_guard_denial', {
@@ -3524,8 +3580,33 @@ process.stdin.on('end', async () => {
       await handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode, await getNotify(), baseExtra); // always exits
       return;
     }
+    // #889: pre-install package vetting. Only for a call the guard has not
+    // already refused catastrophically; network work happens only when the
+    // command names a package to install, bounded to 3 s inside `vetToolCall`.
+    // It only adds information — except a known-malicious package, which
+    // becomes a catastrophic block (door-less, like every catastrophic
+    // signal). Any failure leaves the guard's own verdict untouched.
+    if (!(verdict.decision === 'block' && TERMINAL_BLOCK_SEVERITIES.has(verdict.severity))) {
+      try {
+        const vm = await loadPackageVetting();
+        if (vm) {
+          const outcome = await vm.vetToolCall(toolName, toolInput, vm.normalisePackageVettingConfig(cfg.packageVetting));
+          if (outcome) {
+            verdict = vm.applyVettingToVerdict(verdict, outcome);
+            if (outcome.reasons.length > 0) verdict.packageVettingReasons = outcome.reasons;
+            // The finding KINDS (closed set) for the webhook's fixed-template card (#889 R2).
+            const kinds = [...new Set(outcome.audit.flatMap((a) => (Array.isArray(a.kinds) ? a.kinds : [])))];
+            if (kinds.length > 0) verdict.packageVettingKinds = kinds;
+            if (outcome.audit.length > 0) baseExtra.packageVetting = outcome.audit;
+          }
+        }
+      } catch { /* vetting is additive: a failure never changes the guard's answer */ }
+    }
+
     // #1025: record this call's write/compile targets AFTER its own
-    // evaluation (a same-call write is not evidence for this call's probe),
+    // evaluation AND after vetting (#889: a call vetting turns into a block
+    // records nothing, same as the plugin; a same-call write is not evidence
+    // for this call's probe),
     // and carry the observation on every row this call writes. Neither step
     // changes `verdict`; the record step reads only `verdict.decision`, to
     // skip a `block` (the call never runs).

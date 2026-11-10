@@ -421,6 +421,13 @@ export function __setRuntimeForTest(runtime: OpenClawRuntime | null): void {
   _runtimeOverride = runtime;
   if (runtime) runtimePromise = null;
 }
+/** Tests only: the EFFECTIVE config the gate is built from — shield config
+ *  merged with the plugin entry, then the policy lock (or, with a lock on disk
+ *  and no usable reader, the inline fail-closed posture). #889 R4 pins what
+ *  that inline copy does to `packageVetting`. */
+export function __loadConfigForTest(): Promise<SCConfig> {
+  return loadConfig();
+}
 export function __resetConfigStateForTest(): void {
   _mergedConfig = null;
   _configOverride = null;
@@ -516,6 +523,9 @@ interface InterceptorUserConfig {
     /** Reviewed-script allowlist (#189). Passed through RAW; validated
      *  entry-by-entry inside createReviewedScriptCheck. */
     reviewedScripts?: unknown[];
+    /** Pre-install package vetting (#889). Passed through RAW;
+     *  `normalisePackageVettingConfig` in the main package is the boundary. */
+    packageVetting?: Record<string, unknown>;
     /** Operator-notify transport (#143), reused by the #225 conversation sink.
      *  Passed through RAW for the same reason as `broker`: `normaliseNotifyConfig`
      *  in the main package is the single boundary that knows which values arm a
@@ -1435,6 +1445,15 @@ const ACTION_GUARD_JSON_SCHEMA = {
         timeoutMs: { type: "number", minimum: 500, maximum: 60000 },
       },
     },
+    // #889. normalisePackageVettingConfig in the main package has the last word.
+    packageVetting: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean" },
+        minAgeDays: { type: "number", minimum: 0, maximum: 365 },
+      },
+    },
     // #189. Each entry pins one script by absolute path + content hash;
     // createReviewedScriptCheck has the last word on every field.
     reviewedScripts: {
@@ -1734,6 +1753,10 @@ function normaliseActionGuardBlock(
   // boundary that shape-validates each entry.
   if (Array.isArray(rawGuard.reviewedScripts)) {
     guard.reviewedScripts = [...rawGuard.reviewedScripts];
+  }
+  // #889: passthrough; normalisePackageVettingConfig is the boundary.
+  if (rawGuard.packageVetting && typeof rawGuard.packageVetting === "object" && !Array.isArray(rawGuard.packageVetting)) {
+    guard.packageVetting = { ...(rawGuard.packageVetting as Record<string, unknown>) };
   }
   // #143/#225: the notify transport. Same passthrough discipline again —
   // normaliseNotifyConfig is the boundary. Shallow-copied rather than aliased
@@ -2143,6 +2166,13 @@ async function applyPolicyLockToPluginConfig(config: SCConfig): Promise<SCConfig
         'loaded to read it — enforcing the strict fail-closed posture (Action Guard on + enforcing, ' +
         'no auto-approve, broker off). Run `shieldcortex repair` to restore the install.',
       );
+    }
+    // #889: the strict posture keeps the known-malicious package floor on.
+    const pv = (config.interceptor?.actionGuard as Record<string, unknown> | undefined)?.packageVetting;
+    if (pv && typeof pv === 'object' && !Array.isArray(pv)) {
+      const { enabled: _optOut, ...keep } = pv as Record<string, unknown>;
+      void _optOut;
+      return withGuardPosture(config, { ...INLINE_STRICT_GUARD_POSTURE, packageVetting: keep });
     }
     return withGuardPosture(config, INLINE_STRICT_GUARD_POSTURE);
   };
@@ -4903,6 +4933,14 @@ export default {
             ? ((defenceMod as any).evaluateToolCall as Parameters<typeof createInterceptor>[2] extends { evaluateToolCall?: infer E } ? E : never)
             : undefined,
           broker: resolveBrokerRuntime(defenceMod, interceptorConfig.actionGuard?.broker, api),
+          // #889: pre-install package vetting from the same runtime seam. Absent
+          // on an older dist: installs are then judged exactly as before.
+          packageVetting: typeof (defenceMod as any)?.vetToolCall === 'function' && typeof (defenceMod as any)?.applyVettingToVerdict === 'function'
+            ? {
+                vet: (toolName, args, cfg) => (defenceMod as any).vetToolCall(toolName, args, (defenceMod as any).normalisePackageVettingConfig?.(cfg) ?? {}),
+                apply: (v, outcome) => (defenceMod as any).applyVettingToVerdict(v, outcome),
+              }
+            : undefined,
           // #648: the plain-English card summary (what / why / who), from the
           // same runtime seam. Absent on an older dist: the card keeps its
           // previous layout.
