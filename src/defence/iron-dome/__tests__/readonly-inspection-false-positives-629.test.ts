@@ -50,6 +50,9 @@ const STILL_FLAGGED: Array<[string, string]> = [
   ['jq -f inside a short cluster', `jq -rf ${RM}.jq data.json`],
   ['grep pattern file named after a delete verb', `grep -f ${RM}.pat f`],
   ['grep --file of the same', `grep --file ${RM}.pat f`],
+  // A bare -- consumed as a grep pattern is not the option terminator.
+  ...['-e', '--regexp'].flatMap(patternFlag => ['-f', '--file'].map(fileFlag =>
+    [`grep ${patternFlag} -- then ${fileFlag}`, `grep ${patternFlag} -- ${fileFlag} ${String.fromCharCode(114, 109)}.pat f`] as [string, string])),
   ['find -exec on a normal tree', `find src -name "*.sh" -exec ${WIPE} {} +`],
 ];
 
@@ -107,6 +110,8 @@ describe('#629 real writes and unsafe forms stay gated', () => {
       `grep -f pats f`, `grep --file pats f`, `grep --file=pats f`, `grep -fpats f`,
       `grep -rf pats .`, `grep -nf pats f`, `grep -if pats f`, `grep x f -f pats`,
       `egrep -f pats f`, `fgrep -f pats f`, `egrep --file pats f`, `fgrep -rf pats .`,
+      ...['grep', 'egrep', 'fgrep'].flatMap(verb => ['-e', '--regexp'].flatMap(patternFlag =>
+        ['-f', '--file'].map(fileFlag => `${verb} ${patternFlag} -- ${fileFlag} pats f`))),
       `cat f | jq -f p.jq`, `cat f | grep -f pats`,
     ]) {
       expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
@@ -118,7 +123,7 @@ describe('#629 real writes and unsafe forms stay gated', () => {
       `jq . d.json`, `jq -r .a d.json`, `jq -c '.a | length' d.json`,
       `grep -n x f`, `grep -e x f`, `grep -F x f`, `grep -L x f`, `grep -rn x src`,
       // after `--` a dash word is an operand (the pattern), not an option
-      `grep -n -- -f f`,
+      `grep -n -- -f f`, `grep -e x -- -f f`,
     ]) {
       expect(readOnlyInspectionMask(cmd, cmd, cmd)).not.toBeNull();
     }

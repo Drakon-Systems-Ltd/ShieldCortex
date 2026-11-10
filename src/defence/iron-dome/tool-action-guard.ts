@@ -4445,12 +4445,22 @@ const READONLY_PROGRAM_FILE_OPTION_RE: Record<string, RegExp> = {
   egrep: /^(?:-[^-]*f|--file(?:=|$))/,
   fgrep: /^(?:-[^-]*f|--file(?:=|$))/,
 };
+// GNU grep permutes options. A bare '--' is only a terminator when it is
+// not the argument of a value-taking option (notably -e/--regexp). Skip that
+// argument before looking for a later pattern-file option; unknown spellings
+// still fail closed elsewhere in the stage grammar.
+const READONLY_GREP_VALUE_OPTION_RE = /^(?:--(?:regexp|after-context|before-context|context|max-count|devices|directories|include|exclude|exclude-dir|label|binary-files|color|colour)|-[a-zA-Z]*[eABCmDd])$/;
 function readOnlyStageLoadsProgramFile(argv: string[]): boolean {
-  const re = READONLY_PROGRAM_FILE_OPTION_RE[argv[0] ?? ''];
+  const verb = argv[0] ?? '';
+  const re = READONLY_PROGRAM_FILE_OPTION_RE[verb];
   if (!re) return false;
-  for (const w of argv.slice(1)) {
-    if (w === '--') return false; // everything after is an operand
+  for (let i = 1; i < argv.length; i++) {
+    const w = argv[i]!;
+    if (w === '--') return false; // an actual terminator: following words are operands
     if (re.test(w)) return true;
+    if (/^(?:grep|egrep|fgrep)$/.test(verb) && READONLY_GREP_VALUE_OPTION_RE.test(w)) {
+      if (++i >= argv.length) return true; // missing value: do not mask
+    }
   }
   return false;
 }
