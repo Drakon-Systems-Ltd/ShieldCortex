@@ -853,22 +853,44 @@ export function describeAge(hours: number): string {
   return `${Math.floor(hours / 24)} days ago`;
 }
 
+/** Longest reason that reaches a verdict, an audit row or the hook's denial text whole. */
+const MAX_REASON_CHARS = 240;
+/** Longest package name shown inside a malicious reason; a longer one is clipped. */
+const MAX_REASON_NAME_CHARS = 64;
+
+function clip(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, Math.max(0, max - 3))}...`;
+}
+
+/**
+ * A malicious reason whose fixed wording always fits {@link MAX_REASON_CHARS}.
+ * The package name and the id list are the only variable parts, so they are
+ * bounded separately (the name by the caller, the ids to the room that is
+ * left) and the explanation after them, including the way through, is never
+ * what a later length cap cuts off.
+ */
+function maliciousReason(before: string, subject: string, between: string, ids: string, after: string): string {
+  const room = MAX_REASON_CHARS - before.length - subject.length - between.length - after.length;
+  return `${before}${subject}${between}${clip(ids, Math.max(0, room))}${after}`;
+}
+
 function listIds(ids: string[], max = 3): string {
   return ids.length <= max ? ids.join(', ') : `${ids.slice(0, max).join(', ')} +${ids.length - max} more`;
 }
 
 function buildFindings(v: Omit<PackageVet, 'findings'>, minAgeDays: number, nowMs: number): VettingFinding[] {
   const out: VettingFinding[] = [];
-  const label = `${safeName(v.ref)}${v.version && isSafeVersion(v.version) ? `@${v.version}` : ''}`;
+  const name = clip(safeName(v.ref), MAX_REASON_NAME_CHARS);
+  const label = `${name}${v.version && isSafeVersion(v.version) ? `@${v.version}` : ''}`;
   if (v.status === 'unchecked') {
     out.push({ kind: 'unchecked', severity: 'advisory', reason: `unchecked: ${v.uncheckedReason ?? 'lookup failed'}` });
   }
   if (v.malicious.length && v.unconfirmedVersion) {
     // A name-only hit: OSV lists a malicious release under this name, but the version this install
     // would fetch could not be checked. Say exactly that, and the way through.
-    out.push({ kind: 'malicious', severity: 'catastrophic', reason: `OSV lists a malicious release of ${safeName(v.ref)} (${listIds(v.malicious)}); the version this install would fetch could not be checked, so it is blocked until you pin a version` });
+    out.push({ kind: 'malicious', severity: 'catastrophic', reason: maliciousReason('OSV lists a malicious release of ', name, ' (', listIds(v.malicious), '); the version this install would fetch could not be checked, so it is blocked until you pin a version') });
   } else if (v.malicious.length) {
-    out.push({ kind: 'malicious', severity: 'catastrophic', reason: `OSV lists ${label} as known malicious (${listIds(v.malicious)})` });
+    out.push({ kind: 'malicious', severity: 'catastrophic', reason: maliciousReason('OSV lists ', label, ' as known malicious (', listIds(v.malicious), ')') });
   }
   const advisories = v.osvIds.filter((id) => !id.startsWith('MAL-'));
   if (advisories.length) {
@@ -1022,7 +1044,13 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
       if (r) {
         // A version-specific OSV answer is final for this ref, pinned or not: no name-only ids are merged.
         const malIds = r.exact ? [] : batchFor(ref);
-        vet = withMalicious(r.vet, malIds, minAgeDays, nowMs, false, !pinned && malIds.length > 0);
+        // No version-specific answer AND this ref's batch chunk failed or did not line up: the
+        // malicious-package check did not happen for it. Say so next to the lookup's own reason
+        // (as the refs past the cap do); the cached-MAL check below stays in force.
+        const base = !r.exact && !ref.customIndex && batchAnswer(ref) === null
+          ? uncheckedVet(ref, `${r.vet.uncheckedReason ?? 'lookup failed'}, and the malicious-package check was unavailable`, minAgeDays, nowMs)
+          : r.vet;
+        vet = withMalicious(base, malIds, minAgeDays, nowMs, false, !pinned && malIds.length > 0);
         if (malIds.length && pinned && !r.exact) {
           rememberMalicious(cache, dirty, ref, { version: pinned, hooks: [], sdistOnly: false }, malIds, nowMs);
         }
@@ -1091,7 +1119,7 @@ export async function vetToolCall(
     if (!res) return null;
     // Defence in depth: every reason is built from a fixed vocabulary plus validated names/versions,
     // but nothing that reaches an audit row or a verdict may carry a control character.
-    const clean = (r: string) => r.replace(/[^\x20-\x7e]/g, '?').slice(0, 240);
+    const clean = (r: string) => r.replace(/[^\x20-\x7e]/g, '?').slice(0, MAX_REASON_CHARS);
     return {
       malicious: res.malicious,
       reasons: res.reasons.map(clean),

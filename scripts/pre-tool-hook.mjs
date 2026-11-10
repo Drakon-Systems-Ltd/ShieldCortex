@@ -1933,9 +1933,12 @@ function terminalDecisionReason(verdict, outcome, event) {
   const severityPrefix = severity === 'critical' ? 'Catastrophic-tier. ' : '';
   // #889: a known-malicious package says so, by name and advisory id — the
   // agent needs to know WHICH install to drop. Same vocabulary-only reasons as
-  // the approval prompt.
+  // the approval prompt. Each reason arrives already bounded to 240 characters
+  // by the vetting module, which clips the package name and the id list so the
+  // fixed explanation (and "pin a version", the way through) is whole: the cap
+  // here must not be shorter, or it cuts the instruction off.
   const malicious = Array.isArray(verdict?.packageVettingReasons) && verdict.signals?.includes?.('known-malicious-package')
-    ? ` Package check: ${verdict.packageVettingReasons.slice(0, 4).map((r) => String(r).replace(/[^\x20-\x7e]/g, '?').slice(0, 110)).join('; ')}.`
+    ? ` Package check: ${verdict.packageVettingReasons.slice(0, 4).map((r) => String(r).replace(/[^\x20-\x7e]/g, '?').slice(0, 240)).join('; ')}.`
     : '';
   return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${malicious}${nextStep}${suffix}`;
 }
