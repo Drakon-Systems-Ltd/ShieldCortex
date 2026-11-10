@@ -5308,7 +5308,10 @@ function looksExternal(url: string, text: string): boolean {
 //      fold, a script run without `-I` (its own directory would shadow
 //      `requests`) — is not proof. Nor is a body the issuer could decode into
 //      recipients the guard never read: a curl body must be ONE body flag,
-//      declared JSON, parsing as a JSON object, and no body or Python literal
+//      declared JSON, parsing as a JSON object; a Python body must be `json=`
+//      with a dict literal written at the call (`data=` refuses in every
+//      form), under a `headers=` dict that names no content type other than
+//      JSON; and no body or Python literal
 //      may carry a `MIME-Version` header or a base64-like run over 40
 //      characters (a whole bound credential excepted). A line continuation or
 //      a line break inside a quoted word refuses: the lexer pins argv only for
@@ -5462,6 +5465,9 @@ function everyCredentialNames(value: string, issuer: IssuerId): boolean {
 
 // ── Destination proof ────────────────────────────────────────────────────────
 
+// What may follow the authority of an issuer URL: plain path and query text.
+const ISSUER_URL_TAIL = /^[A-Za-z0-9/._~?&=-]*$/;
+
 /**
  * The canonical host of the `https://` URL starting at `at`, and where the URL
  * token ends — or null. The authority must be a plain DNS name (letters,
@@ -5470,6 +5476,12 @@ function everyCredentialNames(value: string, issuer: IssuerId): boolean {
  * expansions and concatenation all fail lexically. The WHATWG URL parser must
  * then agree on the same hostname with no credentials. Case, a trailing dot and
  * a port are canonicalised, not refused.
+ *
+ * Everything after the authority must be plain path and query text
+ * (`ISSUER_URL_TAIL`). `$` and `%` are not in that set, so an endpoint that
+ * wraps further requests inside a JSON envelope — Graph `$batch`, however it
+ * is spelled — is never a proven destination: its inner requests carry their
+ * own content type and body, which a JSON-only outer body does not prove.
  */
 function cleanHttpsUrlAt(text: string, at: number): { host: string; end: number } | null {
   if (text.slice(at, at + 8).toLowerCase() !== 'https://') return null;
@@ -5481,6 +5493,7 @@ function cleanHttpsUrlAt(text: string, at: number): { host: string; end: number 
   const host = m[1]!.toLowerCase();
   let end = auth.lastIndex;
   while (end < text.length && !/[\s"'`<>]/.test(text[end]!)) end++;
+  if (!ISSUER_URL_TAIL.test(text.slice(auth.lastIndex, end))) return null;
   let parsed: URL;
   try { parsed = new URL(text.slice(at, end)); } catch { return null; }
   if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '') return null;
@@ -5832,7 +5845,13 @@ function tokenisePythonSubset(src: string): PyTok[] | null {
   return out;
 }
 
-const REQUESTS_POST_KWARGS: ReadonlySet<string> = new Set(['headers', 'data', 'json', 'params', 'timeout']);
+// `data` is NOT admitted, in any form. A string `data=` is a raw body under
+// whatever content type the caller names (Graph `sendMail` decodes a
+// `text/plain` base64 MIME message, however it is wrapped, into recipients the
+// guard never read); a dict `data=` is sent form-encoded; and `data=` beside
+// `json=` sends `data` and drops `json`. The only body this door proves is
+// `json=` with a dict literal — the curl door's contract (`curlBodyProven`).
+const REQUESTS_POST_KWARGS: ReadonlySet<string> = new Set(['headers', 'json', 'params', 'timeout']);
 // `requests` follows redirects by default (a 307/308 re-sends the body to
 // wherever the issuer points), so every admitted POST must say
 // `allow_redirects=False` — spelled exactly that way, never computed.
@@ -5846,7 +5865,7 @@ const MAX_PY_EXPR_DEPTH = 32;
  * name bound to one), and judging each literal judges the value transmitted.
  * Returns the index after the expression, or -1.
  */
-function parsePyExpr(t: readonly PyTok[], i: number, bound: ReadonlySet<string>, depth: number): number {
+function parsePyExpr(t: readonly PyTok[], i: number, bound: ReadonlyMap<string, string>, depth: number): number {
   if (depth > MAX_PY_EXPR_DEPTH) return -1;
   const isOp = (k: number, v: string): boolean => t[k]?.k === 'op' && t[k]!.v === v;
   const term = (j: number): number => {
@@ -5874,13 +5893,55 @@ function parsePyExpr(t: readonly PyTok[], i: number, bound: ReadonlySet<string>,
 }
 
 /**
+ * The `headers=` dict literal whose `{` is at `open` and whose expression ends
+ * at `end` (already parsed by `parsePyExpr`) declares no content type other
+ * than JSON. Every top-level key must be ONE string, written as a literal or
+ * through a bound name, so the header name is on the surface. A key that names
+ * Content-Type at all must be spelled exactly that (any letter case, no
+ * padding) and carry ONE string value in the form `JSON_CONTENT_TYPE` admits on
+ * the curl door; so a second, differently-cased Content-Type key with another
+ * value refuses too. No header name or value may hold a line break (a second
+ * header line). An absent Content-Type is fine: `requests` labels a `json=`
+ * body itself.
+ */
+function pyHeadersJsonOnly(t: readonly PyTok[], open: number, end: number, bound: ReadonlyMap<string, string>): boolean {
+  const text = (from: number, to: number): string | null => {
+    const tok = t[from];
+    if (!tok || to !== from + 1) return null;                  // a nested dict / list is not one string
+    if (tok.k === 'str') return tok.v;
+    return tok.k === 'name' ? bound.get(tok.v) ?? null : null; // True / False / None / a number: not a string
+  };
+  const isOp = (k: number, v: string): boolean => t[k]?.k === 'op' && t[k]!.v === v;
+  let k = open + 1;
+  while (k < end - 1) {
+    const keyEnd = parsePyExpr(t, k, bound, 1);
+    if (keyEnd < 0 || !isOp(keyEnd, ':')) return false;
+    const valueEnd = parsePyExpr(t, keyEnd + 1, bound, 1);
+    if (valueEnd < 0) return false;
+    const key = text(k, keyEnd);
+    const value = text(keyEnd + 1, valueEnd);
+    if (key === null || /[\r\n]/.test(key)) return false;
+    if (value !== null && /[\r\n]/.test(value)) return false;
+    if (/content-type/i.test(key)) {
+      if (!/^content-type$/i.test(key)) return false;
+      if (value === null || !JSON_CONTENT_TYPE.test(`content-type:${value}`)) return false;
+    }
+    k = isOp(valueEnd, ',') ? valueEnd + 1 : valueEnd;
+  }
+  return k === end - 1;
+}
+
+/**
  * `requests.post("<issuer URL>"[, kw=expr]*, allow_redirects=False)` filling
  * the WHOLE statement `s`. The destination is the literal first argument and
  * nothing else; redirects are explicitly refused; every other keyword is from
- * a closed data-only set (no `proxies`, `hooks`, `auth`, `verify`,
- * `**kwargs`), each at most once.
+ * a closed data-only set (no `data`, `proxies`, `hooks`, `auth`, `verify`,
+ * `**kwargs`), each at most once. The door is JSON-only: a body is `json=`
+ * with a dict literal written at the call (never a string, a list, `None` or a
+ * bound name), and `headers=` is a dict literal that `pyHeadersJsonOnly`
+ * proves. A POST with no body has nothing more to prove.
  */
-function pyRequestsPostProven(s: readonly PyTok[], bound: ReadonlySet<string>, issuer: IssuerId): boolean {
+function pyRequestsPostProven(s: readonly PyTok[], bound: ReadonlyMap<string, string>, issuer: IssuerId): boolean {
   const head = ['requests', '.', 'post', '('];
   if (s.length < 6 || !head.every((v, n) => s[n]!.k !== 'str' && s[n]!.v === v)) return false;
   const last = s[s.length - 1]!;
@@ -5903,8 +5964,13 @@ function pyRequestsPostProven(s: readonly PyTok[], bound: ReadonlySet<string>, i
       continue;
     }
     if (!REQUESTS_POST_KWARGS.has(kw.v)) return false;
-    j = parsePyExpr(s, j + 2, bound, 0);
+    const valueAt = j + 2;
+    j = parsePyExpr(s, valueAt, bound, 0);
     if (j < 0) return false;
+    if (kw.v === 'json' || kw.v === 'headers') {
+      if (!(s[valueAt]!.k === 'op' && s[valueAt]!.v === '{')) return false;   // a dict literal at the call
+      if (kw.v === 'headers' && !pyHeadersJsonOnly(s, valueAt, j, bound)) return false;
+    }
   }
   return j === s.length - 1 && seen.has(REQUESTS_NO_REDIRECT_KW);
 }
@@ -5926,7 +5992,7 @@ function foldedClientProven(fold: ScriptFold, issuer: IssuerId): boolean {
     if (!toks) return false;
     if (toks.some(t => t.k === 'str' && (hasForeignDestinationSyntax(t.v, issuer) || !everyCredentialNames(t.v, issuer)
       || carriesOpaquePayload(t.v, issuer)))) return false;
-    const bound = new Set<string>();
+    const bound = new Map<string, string>();                   // NAME → the literal it currently holds
     let stmt: PyTok[] = [];
     for (const tok of toks) {
       if (tok.k !== 'nl') { stmt.push(tok); continue; }
@@ -5936,7 +6002,7 @@ function foldedClientProven(fold: ScriptFold, issuer: IssuerId): boolean {
       if (s.length === 2 && s[0]!.k === 'name' && s[0]!.v === 'import' && s[1]!.k === 'name' && s[1]!.v === 'requests') continue;
       if (s.length === 3 && s[0]!.k === 'name' && s[1]!.k === 'op' && s[1]!.v === '=' && s[2]!.k === 'str'
         && !['requests', 'import', 'True', 'False', 'None'].includes(s[0]!.v)) {
-        bound.add(s[0]!.v);
+        bound.set(s[0]!.v, s[2]!.v);
         continue;
       }
       if (pyRequestsPostProven(s, bound, issuer)) { posts++; continue; }

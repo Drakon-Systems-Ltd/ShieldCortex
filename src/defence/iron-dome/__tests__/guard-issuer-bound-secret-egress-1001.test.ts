@@ -780,4 +780,29 @@ describe('#1001 final round F3 — a Graph batch envelope is not a JSON-only bod
       command: `curl -X POST 'https://graph.microsoft.com/v1.0/$batch' ${BEARER} --json '{"requests":[]}'`,
     }));
   });
+
+  // Pinned with the fix (not shown failing first): an issuer URL is plain path
+  // and query text only, on both doors.
+  it.each([
+    ['the batch endpoint spelled with a percent-encoded dollar', 'https://graph.microsoft.com/v1.0/%24batch'],
+    ['a dollar sign in the query', 'https://graph.microsoft.com/v1.0/me/sendMail?$select=id'],
+    ['a percent-encoded path segment', 'https://graph.microsoft.com/v1.0/me/send%4dail'],
+  ])('Python door: %s → block', (_name, url) => {
+    expectWall(runFinal(finalClient(PY_BEARER, 'json={"a": "b"}', url)));
+  });
+
+  it('curl door: the batch endpoint spelled with a percent-encoded dollar → block', () => {
+    expectWall(evaluateToolCall('Bash', {
+      command: `curl -X POST https://graph.microsoft.com/v1.0/%24batch ${BEARER} --json '{"requests":[]}'`,
+    }));
+  });
+
+  it('controls: ordinary Graph and GitHub paths, and a plain query string, still demote', () => {
+    expectDoor(runFinal(finalClient(PY_BEARER, 'json={"a": "b"}')));
+    expectDoor(runFinal(finalClient(PY_BEARER, 'json={"a": "b"}', 'https://graph.microsoft.com/v1.0/users/00000000-0000-0000-0000-000000000000/sendMail')));
+    expectDoor(runFinal(['import requests',
+      `requests.post("https://api.github.com/repos/o/r/issues?per_page=5", headers={"Authorization": "token ${GH_TOKEN}"}, json={"title": "x"}, allow_redirects=False)`].join('\n')));
+    expectDoor(evaluateToolCall('Bash', { command: `curl -X POST ${GRAPH_SEND} ${BEARER} --json '{"a":"b"}'` }));
+    expectDoor(evaluateToolCall('Bash', { command: `curl https://api.github.com/repos/o/r/issues ${GH_AUTH}` }));
+  });
 });
