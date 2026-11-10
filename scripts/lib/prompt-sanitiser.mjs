@@ -37,7 +37,9 @@
 const HEADER_PATTERNS = [
   // OpenClaw Telegram channel wrapper. Header line ends with a colon, then
   // a fenced ``` (any language tag) JSON block, then the real user content.
-  /^conversation info\s*\([^)]*\)\s*:\s*\n+/i,
+  // The qualifier stays on that one line (#1045). [^)]* would cross newlines
+  // and swallow a later lane marker or owner text up to a distant ")".
+  /^conversation info\s*\([^)\n\r\u2028\u2029]*\)\s*:\s*\n+/i,
   /^conversation info\s*:\s*\n+/i,
 ];
 

@@ -70,6 +70,20 @@ describe('sanitisePromptForRecall', () => {
     expect(sanitisePromptForRecall(wrapped)).toBe('Reboot it');
   });
 
+  it('does not let a conversation-info header swallow later lines (#1045)', () => {
+    const prompt = [
+      'conversation info (',
+      'owner line that must stay',
+      '[Subagent Context]',
+      '):',
+      'real ask',
+    ].join('\n');
+    const out = sanitisePromptForRecall(prompt);
+    expect(out).toContain('owner line that must stay');
+    expect(out).toContain('[Subagent Context]');
+    expect(out).toContain('real ask');
+  });
+
   it('does not strip a fenced code block from a regular user prompt', () => {
     // The user is asking about a code block. The fence is intentional content,
     // not framework metadata, so the sanitiser must not eat it.
