@@ -26,10 +26,17 @@ const npm = {
   'clean-lib': { latest: '4.2.1', versions: { '4.2.1': { time: hoursAgo(24 * 400) } } },
 };
 const osv = { 'npm@@ifasn/ms-doc-mcp@1.0.3': ['MAL-2026-18603'] };
+// Name-only answers of the batch endpoint (served only when SC889_BATCH=1; otherwise the batch is down, as before).
+const LONG = 'ghost-' + 'a'.repeat(114);
+const nameMal = { 'ghost-lib': ['MAL-2025-4'], [LONG]: ['MAL-2025-10001', 'MAL-2025-10002', 'MAL-2025-10003', 'MAL-2025-10004', 'MAL-2025-10005'] };
 const pypi = { 'fresh-py': { latest: '1.0.0', files: [{ packagetype: 'bdist_wheel', upload_time_iso_8601: hoursAgo(5) }] } };
 const res = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
 globalThis.fetch = async (url, init) => {
   if (process.env.SC889_OFFLINE === '1') throw Object.assign(new Error('offline'), { code: 'ENOTFOUND' });
+  if (url === 'https://api.osv.dev/v1/querybatch' && process.env.SC889_BATCH === '1') {
+    const { queries } = JSON.parse(init.body);
+    return res({ results: queries.map((q) => { const ids = q.version ? [] : (nameMal[q.package.name] || []); return ids.length ? { vulns: ids.map((id) => ({ id })) } : {}; }) });
+  }
   if (url === 'https://api.osv.dev/v1/query') {
     const q = JSON.parse(init.body);
     const ids = osv[q.package.ecosystem + '@' + q.package.name + '@' + q.version] || [];
@@ -222,5 +229,39 @@ describe('pre-tool hook — #889 package vetting', () => {
     const r = await runHook(`echo hi > ${target} && ${install('clean-lib')}`);
     expect(decisionOf(r)?.permissionDecision ?? 'allow').not.toBe('deny');
     expect(fs.existsSync(store) ? fs.readdirSync(store).flatMap((d) => fs.readdirSync(path.join(store, d))) : []).not.toEqual([]);
+  });
+
+  // Final panel at 14adad1c (Sol): the denial the agent actually reads must carry the
+  // whole unconfirmed-version explanation, pin instruction included.
+  const PIN_TAIL = '; the version this install would fetch could not be checked, so it is blocked until you pin a version';
+
+  it('C3: the emitted denial keeps the whole unconfirmed-version explanation and the pin instruction', async () => {
+    writeConfig({ enabled: true, enforce: false });
+    const r = await runHook(install('ghost-lib'), { SC889_BATCH: '1' });
+    const d = decisionOf(r);
+    expect(d?.permissionDecision).toBe('deny');
+    expect(d?.permissionDecisionReason).toContain(`OSV lists a malicious release of ghost-lib (MAL-2025-4)${PIN_TAIL}`);
+    expect(d?.permissionDecisionReason).not.toContain('as known malicious');
+  });
+
+  it('C3: a 120-character name with five ids still ends on the pin instruction in the emitted denial', async () => {
+    writeConfig({ enabled: true, enforce: false });
+    const long = `ghost-${'a'.repeat(114)}`;
+    const r = await runHook(install(long), { SC889_BATCH: '1' });
+    const d = decisionOf(r);
+    expect(d?.permissionDecision).toBe('deny');
+    expect(d?.permissionDecisionReason).toContain('OSV lists a malicious release of ghost-aaaa');
+    expect(d?.permissionDecisionReason).toContain('(MAL-2025-10001');
+    expect(d?.permissionDecisionReason).toContain(PIN_TAIL);
+    expect(d?.permissionDecisionReason).not.toContain(long);
+  });
+
+  it('A: registry failure plus a failed batch on a head ref is recorded as check unavailable, and does not block', async () => {
+    writeConfig({ enabled: true, enforce: false });
+    const r = await runHook(install('not-in-any-registry'));
+    expect(decisionOf(r)?.permissionDecision ?? 'allow').not.toBe('deny');
+    const row = auditRows().find((x) => Array.isArray(x.packageVetting));
+    expect(row!.packageVetting[0].status).toBe('unchecked');
+    expect(row!.packageVetting[0].reasons).toEqual(['unchecked: package not found in the public registry, and the malicious-package check was unavailable']);
   });
 });

@@ -329,7 +329,8 @@ describe('vetPackages — failure posture', () => {
     const f: FetchLike = async (url, init) => (url.includes('osv.dev') ? { ok: false, status: 503, json: async () => ({}) } : inner(url, init));
     const res = await vetPackages([npmRef('clean-lib', '4.2.1')], { fetchImpl: f, nowMs: NOW, stateDir });
     expect(res.packages[0].status).toBe('unchecked');
-    expect(res.reasons[0]).toBe('unchecked: OSV answered HTTP 503');
+    // Every OSV endpoint is down here, the batch included: the reason says both (panel correction, rubric A).
+    expect(res.reasons[0]).toBe('unchecked: OSV answered HTTP 503, and the malicious-package check was unavailable');
   });
 
   it('an unknown package is unchecked with a reason', async () => {
@@ -345,7 +346,7 @@ describe('vetPackages — failure posture', () => {
     const res = await vetPackages([npmRef('a-pkg'), pyRef('b-pkg')], { fetchImpl: hang, nowMs: NOW, stateDir, budgetMs: 80 });
     expect(Date.now() - t0).toBeLessThan(1500);
     expect(res.packages.every((p) => p.status === 'unchecked')).toBe(true);
-    expect(res.reasons).toEqual(['unchecked: timed out']);
+    expect(res.reasons).toEqual(['unchecked: timed out, and the malicious-package check was unavailable']);
   });
 
   it('a custom index is unchecked, with no lookups made', async () => {
@@ -847,5 +848,107 @@ describe('rubric C — name-only MAL- hits', () => {
     expect(out!.malicious).toBe(true);
     expect(out!.reasons.join(' ')).toMatch(UNCONFIRMED);
     expect(out!.reasons.join(' ')).not.toMatch(CTRL);
+  });
+});
+
+// Final panel at 14adad1c (Sol), two rubric defects as implemented.
+describe('panel correction — rubric A: a head ref whose registry lookup and batch chunk both failed', () => {
+  const UNAVAILABLE = ', and the malicious-package check was unavailable';
+  const batchDown = (w: World, registry: 'fixture' | 'offline' = 'fixture'): FetchLike => {
+    const inner = fetchFor(w);
+    return async (url, init) => {
+      if (url.endsWith('/querybatch')) return { ok: false, status: 500, json: async () => ({}) };
+      if (registry === 'offline' && !url.includes('osv.dev')) throw Object.assign(new Error('getaddrinfo'), { code: 'ENOTFOUND' });
+      return inner(url, init);
+    };
+  };
+  const batchMisaligned = (w: World): FetchLike => {
+    const inner = fetchFor(w);
+    return async (url, init) => (url.endsWith('/querybatch')
+      ? { ok: true, status: 200, json: async () => ({ results: [{}, {}, {}] }) }
+      : inner(url, init));
+  };
+
+  it('registry 404 + failed chunk: the head ref says the malicious-package check was unavailable', async () => {
+    const res = await vetPackages([npmRef('does-not-exist')], { fetchImpl: batchDown(fixtureWorld()), nowMs: NOW, stateDir });
+    expect(res.malicious).toBe(false);
+    expect(res.packages[0].status).toBe('unchecked');
+    expect(res.packages[0].uncheckedReason).toBe(`package not found in the public registry${UNAVAILABLE}`);
+    expect(res.reasons).toEqual([`unchecked: package not found in the public registry${UNAVAILABLE}`]);
+  });
+
+  it('registry network failure + failed chunk, pinned and unpinned head refs alike', async () => {
+    const res = await vetPackages([npmRef('clean-lib'), npmRef('hooky-lib', '1.0.0')], { fetchImpl: batchDown(fixtureWorld(), 'offline'), nowMs: NOW, stateDir });
+    expect(res.malicious).toBe(false);
+    for (const p of res.packages) {
+      expect(p.status).toBe('unchecked');
+      expect(p.uncheckedReason).toBe(`network error (ENOTFOUND)${UNAVAILABLE}`);
+    }
+  });
+
+  it('registry 404 + a chunk whose results do not line up: unavailable, never clean', async () => {
+    const res = await vetPackages([npmRef('does-not-exist')], { fetchImpl: batchMisaligned(fixtureWorld()), nowMs: NOW, stateDir });
+    expect(res.malicious).toBe(false);
+    expect(res.packages[0].uncheckedReason).toBe(`package not found in the public registry${UNAVAILABLE}`);
+  });
+
+  it('the cached MAL- hit stays in force for a head ref when registry and batch both fail', async () => {
+    const w = fixtureWorld();
+    await vetPackages([npmRef(MAL_NAME, '1.0.3')], opts(w)); // records the MAL- hit
+    for (const f of [batchDown(fixtureWorld(), 'offline'), offline]) {
+      const res = await vetPackages([npmRef(MAL_NAME, '1.0.3')], { fetchImpl: f, nowMs: NOW + 3_600_000, stateDir });
+      expect(res.malicious).toBe(true);
+      expect(res.packages[0].cached).toBe(true);
+      expect(res.packages[0].malicious).toEqual([MAL_ID]);
+    }
+  });
+
+  it('control: the registry failed but the batch answered, so nothing is called unavailable', async () => {
+    const res = await vetPackages([npmRef('does-not-exist')], opts(fixtureWorld()));
+    expect(res.reasons).toEqual(['unchecked: package not found in the public registry']);
+  });
+
+  it('control: a version-specific answer is unaffected by a failed chunk', async () => {
+    const res = await vetPackages([npmRef('clean-lib', '4.2.1')], { fetchImpl: batchDown(fixtureWorld()), nowMs: NOW, stateDir });
+    expect(res.packages[0].status).toBe('checked');
+    expect(res.reasons.join(' ')).not.toMatch(/unavailable/);
+  });
+});
+
+describe('panel correction — rubric C3: the unconfirmed-version explanation is never cut', () => {
+  const TAIL = '; the version this install would fetch could not be checked, so it is blocked until you pin a version';
+  const LONG = `ghost-${'a'.repeat(114)}`; // 120 characters, the longest name a reason will show
+  const IDS = ['MAL-2025-10001', 'MAL-2025-10002', 'MAL-2025-10003', 'MAL-2025-10004', 'MAL-2025-10005'];
+
+  it('a long name with several ids keeps the whole explanation and the pin instruction through vetToolCall', async () => {
+    const w = fixtureWorld();
+    w.osv[`npm@${LONG}@1.0.0`] = IDS; // not in the registry fixture: the version cannot be resolved
+    const out = await vetToolCall('Bash', { command: j('npm', 'install', LONG) }, opts(w));
+    expect(out!.malicious).toBe(true);
+    const reason = out!.reasons[0];
+    expect(reason.startsWith('OSV lists a malicious release of ghost-aaaa')).toBe(true);
+    expect(reason.endsWith(TAIL)).toBe(true);
+    expect(reason).toContain('(MAL-2025-10001');
+    expect(reason.length).toBeLessThanOrEqual(240);
+    expect(reason).not.toContain(LONG); // the name is what gives way, not the explanation
+    expect(out!.audit[0].reasons.find((r) => r.startsWith('OSV lists'))!.endsWith(TAIL)).toBe(true);
+    expect(reason).not.toMatch(CTRL);
+  });
+
+  it('an ordinary name is worded exactly as before', async () => {
+    const w = fixtureWorld();
+    w.osv['npm@ghost-lib@1.0.0'] = ['MAL-2025-4'];
+    const res = await vetPackages([npmRef('ghost-lib')], opts(w));
+    expect(res.reasons[0]).toBe(`OSV lists a malicious release of ghost-lib (MAL-2025-4)${TAIL}`);
+  });
+
+  it('a long name on a confirmed hit still names the version and says known malicious', async () => {
+    const w = fixtureWorld();
+    w.npm[LONG] = { versions: { '1.0.0': { time: hoursAgo(24 * 400) } } };
+    w.osv[`npm@${LONG}@1.0.0`] = IDS;
+    const out = await vetToolCall('Bash', { command: j('npm', 'install', `${LONG}@1.0.0`) }, opts(w));
+    const reason = out!.reasons[0];
+    expect(reason).toMatch(/^OSV lists ghost-a+\.\.\.@1\.0\.0 as known malicious \(MAL-2025-10001, MAL-2025-10002, MAL-2025-10003 \+2 more\)$/);
+    expect(reason.length).toBeLessThanOrEqual(240);
   });
 });
