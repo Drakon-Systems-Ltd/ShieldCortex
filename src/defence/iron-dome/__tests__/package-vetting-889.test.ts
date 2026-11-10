@@ -667,3 +667,185 @@ describe('review item 7 — MAL ids carried only as aliases', () => {
     expect(res.malicious).toBe(true);
   });
 });
+
+// ── Fable 1920Z closed rubric A–C (second panel round) ─────────────────────
+
+const batchCalls = (w: World) => w.calls.filter((c) => c === 'POST https://api.osv.dev/v1/querybatch');
+const customRef = (name: string, spec: string | null = null): PackageRef => ({ ...npmRef(name, spec), customIndex: true });
+
+describe('rubric A — the OSV batch covers every package, in chunks', () => {
+  const pad = (n: number, prefix = 'pad') => Array.from({ length: n }, (_, i) => npmRef(`${prefix}-${i}`, '1.0.0'));
+
+  it('a MAL- package at position 501 blocks', async () => {
+    const w = fixtureWorld();
+    const res = await vetPackages([...pad(500), npmRef(MAL_NAME, '1.0.3')], opts(w));
+    expect(res.malicious).toBe(true);
+    expect(res.reasons.join(' ')).toContain(MAL_ID);
+    expect(batchCalls(w)).toHaveLength(2);
+  });
+
+  it('every chunk carries at most 500 queries and none is dropped', async () => {
+    const w = fixtureWorld();
+    const sizes: number[] = [];
+    const inner = fetchFor(w);
+    const f: FetchLike = (url, init) => {
+      if (url.endsWith('/querybatch')) sizes.push((JSON.parse(init!.body!) as { queries: unknown[] }).queries.length);
+      return inner(url, init);
+    };
+    await vetPackages(pad(1203), { fetchImpl: f, nowMs: NOW, stateDir });
+    expect(sizes.sort((a, b) => a - b)).toEqual([203, 500, 500]);
+  });
+
+  it('second chunk fails: the first chunk MAL- still blocks and the second chunk refs say unavailable', async () => {
+    const w = fixtureWorld();
+    const inner = fetchFor(w);
+    const f: FetchLike = async (url, init) => {
+      if (url.endsWith('/querybatch') && (JSON.parse(init!.body!) as { queries: Array<{ package: { name: string } }> }).queries.some((q) => q.package.name === 'late-0')) {
+        return { ok: false, status: 500, json: async () => ({}) };
+      }
+      return inner(url, init);
+    };
+    const refs = [...pad(20), npmRef(MAL_NAME, '1.0.3'), ...pad(479, 'mid'), ...pad(5, 'late')];
+    const res = await vetPackages(refs, { fetchImpl: f, nowMs: NOW, stateDir });
+    expect(res.malicious).toBe(true);
+    expect(res.packages.find((p) => p.ref.name === MAL_NAME)!.malicious).toEqual([MAL_ID]);
+    const late = res.packages.find((p) => p.ref.name === 'late-0')!;
+    expect(late.status).toBe('unchecked');
+    expect(late.malicious).toEqual([]);
+    expect(late.uncheckedReason).toMatch(/malicious-package check was unavailable/);
+    const early = res.packages.find((p) => p.ref.name === 'mid-30')!;
+    expect(early.uncheckedReason).not.toMatch(/malicious-package check was unavailable/);
+  });
+
+  it('a chunk whose results length differs from its queries is unavailable, never clean', async () => {
+    const w = fixtureWorld();
+    const inner = fetchFor(w);
+    const f: FetchLike = async (url, init) => (url.endsWith('/querybatch')
+      ? { ok: true, status: 200, json: async () => ({ results: [{}] }) }
+      : inner(url, init));
+    const res = await vetPackages([...pad(8), npmRef(MAL_NAME, '1.0.3')], { fetchImpl: f, nowMs: NOW, stateDir });
+    expect(res.malicious).toBe(false);
+    expect(res.reasons.join(' ')).toMatch(/malicious-package check was unavailable/);
+  });
+
+  it('a cached MAL- hit stays in force when the batch is unavailable', async () => {
+    const w = fixtureWorld();
+    await vetPackages([npmRef(MAL_NAME, '1.0.3')], opts(w)); // records the MAL- hit
+    const f: FetchLike = async () => { throw Object.assign(new Error('x'), { code: 'ENOTFOUND' }); };
+    const res = await vetPackages([...pad(8), npmRef(MAL_NAME, '1.0.3')], { fetchImpl: f, nowMs: NOW, stateDir });
+    expect(res.malicious).toBe(true);
+  });
+});
+
+describe('rubric B — custom-index and public refs are different installs', () => {
+  it('custom first, public second: the public ref is vetted and a MAL- hit blocks', async () => {
+    const w = fixtureWorld();
+    const res = await vetPackages([customRef(MAL_NAME, '1.0.3'), npmRef(MAL_NAME, '1.0.3')], opts(w));
+    expect(res.packages).toHaveLength(2);
+    expect(res.malicious).toBe(true);
+    expect(res.packages.find((p) => !p.ref.customIndex)!.malicious).toEqual([MAL_ID]);
+  });
+
+  it('public first, custom second: same result', async () => {
+    const w = fixtureWorld();
+    const res = await vetPackages([npmRef(MAL_NAME, '1.0.3'), customRef(MAL_NAME, '1.0.3')], opts(w));
+    expect(res.packages).toHaveLength(2);
+    expect(res.malicious).toBe(true);
+  });
+
+  it('identical refs still collapse to one', async () => {
+    const w = fixtureWorld();
+    const res = await vetPackages([npmRef('clean-lib', '4.2.1'), npmRef('clean-lib', '4.2.1')], opts(w));
+    expect(res.packages).toHaveLength(1);
+  });
+});
+
+describe('rubric C — name-only MAL- hits', () => {
+  const decoys = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7', 'h8'].map((d) => npmRef(d, '1.0.0'));
+  const multi = (name: string) => ({ [name]: { versions: { '1.0.0': { time: hoursAgo(24 * 400) }, '2.0.0': { time: hoursAgo(24 * 300) } } } });
+  const UNCONFIRMED = /OSV lists a malicious release of [^;]+; the version this install would fetch could not be checked, so it is blocked until you pin a version/;
+
+  it('rule 1: a version-specific answer (record withdrawn) is final for a pinned ref even though the batch still lists the id', async () => {
+    const w = fixtureWorld();
+    const inner = fetchFor(w);
+    const f: FetchLike = async (url, init) => (url === 'https://api.osv.dev/v1/query'
+      ? { ok: true, status: 200, json: async () => ({ vulns: [{ id: MAL_ID, withdrawn: '2026-11-06T00:00:00Z' }] }) }
+      : inner(url, init));
+    const res = await vetPackages([npmRef(MAL_NAME, '1.0.3')], { fetchImpl: f, nowMs: NOW, stateDir });
+    expect(batchCalls(w)).toHaveLength(1);
+    expect(res.malicious).toBe(false);
+  });
+
+  it('rule 2: a ninth unpinned package with a MAL- on another version resolves clean and is not blocked', async () => {
+    const w = fixtureWorld();
+    w.npm['multi-lib'] = multi('multi-lib')['multi-lib'];
+    w.osv['npm@multi-lib@1.0.0'] = ['MAL-2025-1'];
+    const res = await vetPackages([...decoys, npmRef('multi-lib')], opts(w));
+    expect(res.malicious).toBe(false);
+    expect(res.reasons.join(' ')).not.toMatch(/malicious/);
+  });
+
+  it('rule 2: a ninth unpinned package whose resolved version is malicious is blocked as known malicious', async () => {
+    const w = fixtureWorld();
+    w.npm['multi-lib'] = multi('multi-lib')['multi-lib'];
+    w.osv['npm@multi-lib@2.0.0'] = ['MAL-2025-2'];
+    const res = await vetPackages([...decoys, npmRef('multi-lib')], opts(w));
+    expect(res.malicious).toBe(true);
+    expect(res.reasons.join(' ')).toContain('multi-lib@2.0.0 as known malicious');
+  });
+
+  it('rule 2: at most 8 extra lookups; the ninth extra is unconfirmed (rule 3), not clean', async () => {
+    const w = fixtureWorld();
+    const names = Array.from({ length: 9 }, (_, i) => `multi-${i}`);
+    for (const n of names) {
+      w.npm[n] = multi(n)[n];
+      w.osv[`npm@${n}@1.0.0`] = ['MAL-2025-3'];
+    }
+    const res = await vetPackages([...decoys, ...names.map((n) => npmRef(n))], opts(w));
+    const blocked = res.packages.filter((p) => p.malicious.length);
+    expect(blocked.map((p) => p.ref.name)).toEqual(['multi-8']);
+    expect(res.reasons.join(' ')).toMatch(UNCONFIRMED);
+    expect(res.reasons.join(' ')).not.toContain('as known malicious');
+  });
+
+  it('rule 3: no version resolved (registry 404) keeps the install blocked, with the accurate wording', async () => {
+    const w = fixtureWorld();
+    w.osv['npm@ghost-lib@1.0.0'] = ['MAL-2025-4']; // not in the registry fixture: the version cannot be resolved
+    const res = await vetPackages([...decoys, npmRef('ghost-lib')], opts(w));
+    expect(res.malicious).toBe(true);
+    const pkg = res.packages.find((p) => p.ref.name === 'ghost-lib')!;
+    expect(pkg.findings.find((f) => f.kind === 'malicious')!.reason).toMatch(UNCONFIRMED);
+    expect(pkg.findings.find((f) => f.kind === 'malicious')!.reason).not.toContain('as known malicious');
+  });
+
+  it('rule 3: the version query did not answer keeps the install blocked, with the accurate wording (first eight too)', async () => {
+    const w = fixtureWorld();
+    w.npm['multi-lib'] = multi('multi-lib')['multi-lib'];
+    w.osv['npm@multi-lib@1.0.0'] = ['MAL-2025-5'];
+    const inner = fetchFor(w);
+    const f: FetchLike = async (url, init) => (url === 'https://api.osv.dev/v1/query'
+      ? { ok: false, status: 503, json: async () => ({}) }
+      : inner(url, init));
+    const res = await vetPackages([npmRef('multi-lib')], { fetchImpl: f, nowMs: NOW, stateDir });
+    expect(res.malicious).toBe(true);
+    expect(res.reasons.join(' ')).toMatch(UNCONFIRMED);
+    expect(res.reasons.join(' ')).not.toContain('as known malicious');
+  });
+
+  it('rule 3: pinning the clean version of the same package passes', async () => {
+    const w = fixtureWorld();
+    w.npm['multi-lib'] = multi('multi-lib')['multi-lib'];
+    w.osv['npm@multi-lib@1.0.0'] = ['MAL-2025-6'];
+    const res = await vetPackages([...decoys, npmRef('multi-lib', '2.0.0')], opts(w));
+    expect(res.malicious).toBe(false);
+  });
+
+  it('rule 3 wording reaches the verdict reason and stays printable ASCII', async () => {
+    const w = fixtureWorld();
+    w.osv['npm@ghost-lib@1.0.0'] = ['MAL-2025-4'];
+    const out = await vetToolCall('Bash', { command: j('npm', 'i', 'a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7', 'h8', 'ghost-lib') }, opts(w));
+    expect(out!.malicious).toBe(true);
+    expect(out!.reasons.join(' ')).toMatch(UNCONFIRMED);
+    expect(out!.reasons.join(' ')).not.toMatch(CTRL);
+  });
+});

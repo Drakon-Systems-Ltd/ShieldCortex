@@ -3577,15 +3577,6 @@ process.stdin.on('end', async () => {
       await handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode, await getNotify(), baseExtra); // always exits
       return;
     }
-    // #1025: record this call's write/compile targets AFTER its own
-    // evaluation (a same-call write is not evidence for this call's probe),
-    // and carry the observation on every row this call writes. Neither step
-    // changes `verdict`; the record step reads only `verdict.decision`, to
-    // skip a `block` (the call never runs).
-    recordNativeProvenance(nativeStore, guard, toolName, toolInput, baseExtra, hookData.cwd, verdict, nativeBudget);
-    const nativeExec = safeNativeExec(verdict?.nativeExec);
-    if (nativeExec) baseExtra.nativeExec = nativeExec;
-
     // #889: pre-install package vetting. Only for a call the guard has not
     // already refused catastrophically; network work happens only when the
     // command names a package to install, bounded to 3 s inside `vetToolCall`.
@@ -3608,6 +3599,17 @@ process.stdin.on('end', async () => {
         }
       } catch { /* vetting is additive: a failure never changes the guard's answer */ }
     }
+
+    // #1025: record this call's write/compile targets AFTER its own
+    // evaluation AND after vetting (#889: a call vetting turns into a block
+    // records nothing, same as the plugin; a same-call write is not evidence
+    // for this call's probe),
+    // and carry the observation on every row this call writes. Neither step
+    // changes `verdict`; the record step reads only `verdict.decision`, to
+    // skip a `block` (the call never runs).
+    recordNativeProvenance(nativeStore, guard, toolName, toolInput, baseExtra, hookData.cwd, verdict, nativeBudget);
+    const nativeExec = safeNativeExec(verdict?.nativeExec);
+    if (nativeExec) baseExtra.nativeExec = nativeExec;
 
     // ── #509 enforce-when-ready ───────────────────────────────────────────
     // Only an ENFORCING guard can be gated, and never on a host with a policy

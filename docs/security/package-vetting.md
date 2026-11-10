@@ -20,7 +20,9 @@ The requested spec is resolved to the version that would actually install (npm r
 2. **Version age.** A version published fewer than `minAgeDays` ago (default 7) is a finding.
 3. **Install hooks.** An npm version with `preinstall`, `install`, `postinstall` or `prepare` is a finding. A PyPI release that ships only a source distribution (no wheel) is a finding.
 
-**The malicious-package check covers every package in the command.** Registry lookups (version, age, hooks) are capped at 8 packages per command, but one OSV `querybatch` covers all of them on its own 3 s deadline, by name+version when the spec pins a version and by name alone otherwise. A `MAL-` package therefore blocks whatever its position in the command and whatever the registry does. Past the cap, the other facts are `unchecked`.
+**The malicious-package check covers every package in the command.** Registry lookups (version, age, hooks) are capped at 8 packages per command, but OSV `querybatch` requests (chunks of at most 500 packages, a few in flight at a time) cover all of them on their own 3 s deadline, by name+version when the spec pins a version and by name alone otherwise. A chunk that fails, or whose answer does not match its queries, is never read as clean: its packages are reported as `the malicious-package check was unavailable` and a cached `MAL-` hit still blocks. A `MAL-` package therefore blocks whatever its position in the command and whatever the registry does. Past the cap, the other facts are `unchecked`, except that a package past the cap with a name-only `MAL-` hit gets the same registry and version lookup as the first eight (at most 8 such extra lookups per command, on the same deadlines).
+
+A custom-index install and a public install of the same package are separate installs: `npm --registry=X install a@1.0.0; npm install a@1.0.0` vets the public one.
 
 Requests are read-only metadata GETs plus one OSV POST. Nothing is downloaded or run.
 
@@ -52,10 +54,12 @@ The Action Guard webhook card (#815) carries only fixed phrases, so there each f
 
 - **Best effort over recognised shapes.** The block applies to the installer forms in the table above. Wrapped or unusual shapes (`sudo -u bob npm i x`, `(npm i x)`, `{ npm i x; }`, `bun x x`, `uv run --with x`) are not recognised and are not vetted.
 - **Index configuration in files.** Only flags and environment variables on the command are seen. A registry or index set in `.npmrc`, `pip.conf` or `uv.toml` is not, so such an install is checked against the public registries.
-- **Name-only fallback.** When a version cannot be resolved (unpinned or ranged spec and the registry did not answer), any `MAL-` record for the package name blocks, even one that affects only other versions.
+- **Name-only hits and the unconfirmed-version case.** An unpinned or ranged spec is first asked of OSV by name; a `MAL-` record that affects only other versions of the package (as some widely installed packages have) does not block a clean version, because the version this install would fetch is resolved and asked about, and that version-specific answer is final. Where that version cannot be confirmed (the registry did not resolve it, the version query did not answer, or the command is past the extra-lookup limit) the install stays blocked, with a reason that says OSV lists a malicious release under that name, that the version this install would fetch could not be checked, and that pinning a version is the way through. Pinning a clean version passes.
 - **Alias lookups past the cap** are limited to a few records per command.
 - **Registry resolution** reads the full npm packument inside the 3 s budget; a very large package may come back `unchecked` for age and hooks (the `MAL-` check is unaffected). Range resolution uses the highest satisfying version, while npm prefers the `latest` tag when it satisfies the range, so the vetted version can differ from the installed one.
-- `actionGuard.packageVetting.enabled: false` is dropped under a verified or unverifiable policy lock and under the strict fail-closed posture.
+- `actionGuard.packageVetting.enabled: false` is dropped under a verified or unverifiable policy lock and under the strict fail-closed posture, in both the top-level `actionGuard` block and the deprecated `interceptor.actionGuard` alias.
+- **Alias lookups** are budgeted for the whole command, not per chunk. A `MAL-` record reachable only as an alias of a non-`MAL-` id may be missed past that budget (tracked in #1028).
+- **Withdrawn records** on a name-only or batch answer are not distinguishable from live ones (tracked in #1028); a version-specific answer ignores withdrawn records.
 
 ## Not in phase 1
 

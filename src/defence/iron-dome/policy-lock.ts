@@ -620,6 +620,13 @@ export function applyPolicyLock(raw: Record<string, unknown>, state: PolicyLockS
     guardTouched = true;
   }
   if (guardTouched) out.actionGuard = guard;
+  // #889: the deprecated `interceptor.actionGuard` alias is merged under the top-level
+  // block by the hook (and read by the plugin), so an alias-only opt-out would survive
+  // a verified lock. Scrub it there too.
+  if (isBlock(out.interceptor) && isBlock(out.interceptor.actionGuard)) {
+    const alias = { ...(out.interceptor.actionGuard as Record<string, unknown>) };
+    if (dropPackageVettingOptOut(alias)) out.interceptor = { ...out.interceptor, actionGuard: alias };
+  }
 
   if (p.defenceMode !== undefined) {
     const configured = isLockedDefenceMode(out.defenceMode) ? out.defenceMode : DEFAULT_DEFENCE_MODE;

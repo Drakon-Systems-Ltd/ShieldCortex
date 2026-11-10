@@ -82,6 +82,11 @@ export interface PackageVet {
   sdistOnly: boolean;
   /** True when the answer came from the on-disk cache rather than the network. */
   cached?: boolean;
+  /**
+   * `malicious` came from a name-only OSV answer (a malicious release exists under this
+   * name) and the version this install would fetch could not be checked.
+   */
+  unconfirmedVersion?: boolean;
   findings: VettingFinding[];
 }
 
@@ -120,6 +125,10 @@ export const DEFAULT_MIN_AGE_DAYS = 7;
 export const DEFAULT_BUDGET_MS = 3000;
 export const DEFAULT_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_PACKAGES_PER_COMMAND = 8;
+/** Extra registry + version lookups for refs past the cap that carry a name-only `MAL-` hit. */
+const MAX_EXTRA_LOOKUPS = 8;
+/** Chunks of the OSV batch in flight at once. */
+const BATCH_CONCURRENCY = 3;
 
 // ── Command parsing ─────────────────────────────────────────────────────────
 
@@ -737,46 +746,72 @@ const MAX_BATCH = 500;
 const MAX_ALIAS_LOOKUPS = 6;
 
 /**
- * One OSV `querybatch` for every package in the command, independent of the
- * registry and of the per-command cap. A package with a known version is asked
- * by name+version; otherwise by name alone (any `MAL-` entry for the package
- * counts — a malicious-package report is almost always package-wide).
- * Returns ids per query index, or null when the batch itself failed.
+ * OSV `querybatch` for every package in the command, independent of the
+ * registry and of the per-command cap, sent in chunks of at most
+ * {@link MAX_BATCH} (a few in flight at a time, all on the caller's deadline).
+ * A package with a known version is asked by name+version; otherwise by name
+ * alone, so any `MAL-` entry for the name comes back — which includes entries
+ * that only affect OTHER versions (a name-only hit is a reason to look, not a
+ * verdict; `vetPackages` resolves it).
+ *
+ * Returns ids per query index; `null` for a query whose chunk failed or whose
+ * answer did not line up with the chunk (never an empty clean answer).
  *
  * The batch answer carries ids only, never aliases, so the (few) non-MAL ids it
  * returns are fetched individually to see whether one is an alias of a `MAL-`
- * record.
+ * record; that budget is shared by all chunks.
  */
 async function queryOsvBatch(
   queries: ReadonlyArray<{ ref: PackageRef; version: string | null }>,
   fetchImpl: FetchLike,
   signal: AbortSignal,
+): Promise<Array<string[] | null>> {
+  const out: Array<string[] | null> = queries.map(() => null);
+  if (!queries.length) return out;
+  const budget = { aliasLookups: 0 };
+  const chunks: number[] = [];
+  for (let start = 0; start < queries.length; start += MAX_BATCH) chunks.push(start);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < chunks.length) {
+      const start = chunks[next++];
+      const slice = queries.slice(start, start + MAX_BATCH);
+      const answer = await queryOsvChunk(slice, fetchImpl, signal, budget);
+      if (answer) answer.forEach((ids, i) => { out[start + i] = ids; });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(BATCH_CONCURRENCY, chunks.length) }, worker));
+  return out;
+}
+
+async function queryOsvChunk(
+  slice: ReadonlyArray<{ ref: PackageRef; version: string | null }>,
+  fetchImpl: FetchLike,
+  signal: AbortSignal,
+  budget: { aliasLookups: number },
 ): Promise<string[][] | null> {
-  if (!queries.length) return [];
   try {
-    const sliced = queries.slice(0, MAX_BATCH);
     const res = await fetchImpl('https://api.osv.dev/v1/querybatch', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'user-agent': 'shieldcortex-package-vetting' },
       body: JSON.stringify({
-        queries: sliced.map((q) => ({ package: { name: q.ref.name, ecosystem: q.ref.ecosystem }, ...(q.version ? { version: q.version } : {}) })),
+        queries: slice.map((q) => ({ package: { name: q.ref.name, ecosystem: q.ref.ecosystem }, ...(q.version ? { version: q.version } : {}) })),
       }),
       signal,
     });
     if (!res.ok) return null;
     const results = obj(await res.json()).results;
-    if (!Array.isArray(results)) return null;
-    const out: string[][] = queries.map(() => []);
-    let aliasLookups = 0;
-    for (let i = 0; i < sliced.length; i++) {
+    if (!Array.isArray(results) || results.length !== slice.length) return null;
+    const out: string[][] = slice.map(() => []);
+    for (let i = 0; i < slice.length; i++) {
       const vulns = Array.isArray(obj(results[i]).vulns) ? obj(results[i]).vulns as unknown[] : [];
       const ids: string[] = [];
       for (const v of vulns) {
         const id = obj(v).id;
         if (typeof id !== 'string' || !OSV_ID.test(id)) continue;
         ids.push(id);
-        if (!id.startsWith('MAL-') && aliasLookups < MAX_ALIAS_LOOKUPS) {
-          aliasLookups++;
+        if (!id.startsWith('MAL-') && budget.aliasLookups < MAX_ALIAS_LOOKUPS) {
+          budget.aliasLookups++;
           try {
             const r = await fetchImpl(`https://api.osv.dev/v1/vulns/${encodeURIComponent(id)}`, { headers: { accept: 'application/json', 'user-agent': 'shieldcortex-package-vetting' }, signal });
             if (r.ok) {
@@ -828,7 +863,11 @@ function buildFindings(v: Omit<PackageVet, 'findings'>, minAgeDays: number, nowM
   if (v.status === 'unchecked') {
     out.push({ kind: 'unchecked', severity: 'advisory', reason: `unchecked: ${v.uncheckedReason ?? 'lookup failed'}` });
   }
-  if (v.malicious.length) {
+  if (v.malicious.length && v.unconfirmedVersion) {
+    // A name-only hit: OSV lists a malicious release under this name, but the version this install
+    // would fetch could not be checked. Say exactly that, and the way through.
+    out.push({ kind: 'malicious', severity: 'catastrophic', reason: `OSV lists a malicious release of ${safeName(v.ref)} (${listIds(v.malicious)}); the version this install would fetch could not be checked, so it is blocked until you pin a version` });
+  } else if (v.malicious.length) {
     out.push({ kind: 'malicious', severity: 'catastrophic', reason: `OSV lists ${label} as known malicious (${listIds(v.malicious)})` });
   }
   const advisories = v.osvIds.filter((id) => !id.startsWith('MAL-'));
@@ -907,12 +946,17 @@ function rememberMalicious(cache: CacheFile, dirty: { v: boolean }, ref: Package
 }
 
 /** Vet with the malicious-package gate applied: extra `MAL-` ids found by the batch query or the cache. */
-function withMalicious(v: PackageVet, extra: string[], minAgeDays: number, nowMs: number, cached = false): PackageVet {
+function withMalicious(v: PackageVet, extra: string[], minAgeDays: number, nowMs: number, cached = false, unconfirmed = false): PackageVet {
   const mal = extra.filter((id) => id.startsWith('MAL-') && !v.osvIds.includes(id));
   if (!mal.length) return v;
-  const base = { ...v, osvIds: [...v.osvIds, ...mal], malicious: [...v.malicious, ...mal], ...(cached ? { cached: true } : {}) } as Omit<PackageVet, 'findings'> & { findings?: VettingFinding[] };
+  const base = { ...v, osvIds: [...v.osvIds, ...mal], malicious: [...v.malicious, ...mal], ...(cached ? { cached: true } : {}), ...(unconfirmed ? { unconfirmedVersion: true } : {}) } as Omit<PackageVet, 'findings'> & { findings?: VettingFinding[] };
   delete base.findings;
   return { ...base, findings: buildFindings(base, minAgeDays, nowMs) };
+}
+
+/** Dedup / lookup key. A custom-index ref and a public ref for the same package are different installs. */
+function refKey(r: PackageRef): string {
+  return `${r.ecosystem}@${r.name}@${r.spec ?? ''}@${r.customIndex ? 'custom' : 'public'}`;
 }
 
 /**
@@ -922,6 +966,13 @@ function withMalicious(v: PackageVet, extra: string[], minAgeDays: number, nowMs
  * batch (every package) run on separate deadlines of `budgetMs` each, so
  * neither padding the command nor slow registry answers can starve the
  * malicious-package check.
+ *
+ * A name-only `MAL-` hit does not by itself condemn an unpinned package (the
+ * report may cover other versions only): the version this install would fetch
+ * is resolved and asked about, for the first eight packages and for up to
+ * {@link MAX_EXTRA_LOOKUPS} more that carry such a hit. A version-specific
+ * answer is final. Where the version cannot be confirmed the install stays
+ * blocked, with a reason that says so.
  */
 export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions = {}): Promise<VettingResult> {
   const nowMs = opts.nowMs ?? Date.now();
@@ -931,7 +982,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
   const unique: PackageRef[] = [];
   const seen = new Set<string>();
   for (const r of refs) {
-    const k = `${r.ecosystem}@${r.name}@${r.spec ?? ''}`;
+    const k = refKey(r);
     if (!seen.has(k)) { seen.add(k); unique.push(r); }
   }
   const fetchImpl: FetchLike = opts.fetchImpl ?? ((url, init) => (globalThis as unknown as { fetch: FetchLike }).fetch(url, init));
@@ -952,26 +1003,35 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
     const headP = Promise.all(head.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, dirty })
       .catch((): OneResult => ({ vet: uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs), exact: false }))));
     const [batch, results] = await Promise.all([batchP, headP]);
-    const batchFor = (ref: PackageRef): string[] => {
+    const batchAnswer = (ref: PackageRef): string[] | null => {
       const i = batchRefs.indexOf(ref);
-      return batch && i >= 0 ? batch[i].filter((id) => id.startsWith('MAL-')) : [];
+      return i >= 0 ? batch[i] : [];
     };
+    const batchFor = (ref: PackageRef): string[] => (batchAnswer(ref) ?? []).filter((id) => id.startsWith('MAL-'));
+    // Refs past the cap with a name-only MAL- hit get the same registry + version lookup as the first eight.
+    const extraRefs = unique.slice(head.length)
+      .filter((r) => !r.customIndex && !pinnedVersion(r) && batchFor(r).length > 0)
+      .slice(0, MAX_EXTRA_LOOKUPS);
+    const extraResults = await Promise.all(extraRefs.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, dirty })
+      .catch((): OneResult => ({ vet: uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs), exact: false }))));
+    const extraByRef = new Map(extraRefs.map((ref, i) => [ref, extraResults[i]] as const));
     unique.forEach((ref, idx) => {
       const pinned = pinnedVersion(ref);
+      const r = idx < head.length ? results[idx] : extraByRef.get(ref);
       let vet: PackageVet;
-      if (idx < head.length) {
-        const r = results[idx];
-        // A name-only batch answer is a fallback: when the version-specific query answered, it is authoritative.
-        const malIds = r.exact && !pinned ? [] : batchFor(ref);
-        vet = withMalicious(r.vet, malIds, minAgeDays, nowMs);
+      if (r) {
+        // A version-specific OSV answer is final for this ref, pinned or not: no name-only ids are merged.
+        const malIds = r.exact ? [] : batchFor(ref);
+        vet = withMalicious(r.vet, malIds, minAgeDays, nowMs, false, !pinned && malIds.length > 0);
         if (malIds.length && pinned && !r.exact) {
           rememberMalicious(cache, dirty, ref, { version: pinned, hooks: [], sdistOnly: false }, malIds, nowMs);
         }
       } else {
-        const reason = batch || ref.customIndex
+        const reason = batchAnswer(ref) !== null || ref.customIndex
           ? `more than ${MAX_PACKAGES_PER_COMMAND} packages in one command`
           : `more than ${MAX_PACKAGES_PER_COMMAND} packages in one command, and the malicious-package check was unavailable`;
-        vet = withMalicious(uncheckedVet(ref, reason, minAgeDays, nowMs), batchFor(ref), minAgeDays, nowMs);
+        const hits = batchFor(ref);
+        vet = withMalicious(uncheckedVet(ref, reason, minAgeDays, nowMs), hits, minAgeDays, nowMs, false, !pinned && hits.length > 0);
         if (pinned && vet.malicious.length) rememberMalicious(cache, dirty, ref, { version: pinned, hooks: [], sdistOnly: false }, vet.malicious, nowMs);
       }
       // Offline: a fresh cached MAL- record for this package still blocks.
@@ -1107,7 +1167,7 @@ export async function vetMcpServers(
   const perServer = servers.map((s) => ({ name: s.name, refs: parseMcpServerEntry(s.entry) })).filter((s) => s.refs.length > 0);
   if (!perServer.length) return [];
   const res = await vetPackages(perServer.flatMap((s) => s.refs), opts);
-  const key = (r: PackageRef) => `${r.ecosystem}@${r.name}@${r.spec ?? ''}`;
+  const key = refKey;
   const byRef = new Map(res.packages.map((p) => [key(p.ref), p]));
   const out: Array<{ name: string; malicious: boolean; reasons: string[] }> = [];
   for (const s of perServer) {

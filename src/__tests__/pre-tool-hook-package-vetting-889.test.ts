@@ -203,4 +203,24 @@ describe('pre-tool hook — #889 package vetting', () => {
     expect(row!.packageVetting[0]).toMatchObject({ name: 'fresh-lib', version: '3.5.0', status: 'checked' });
     expect(row!.packageVetting[0].kinds).not.toContain('new-version');
   });
+
+  // Fable 1920Z I2: vetting runs BEFORE native provenance is recorded, so a call
+  // vetting turns into a block records nothing (#1025: "a block records nothing").
+  it('I2: a write target plus a known-malicious install is blocked and records no native provenance', async () => {
+    writeConfig({ enabled: true, enforce: false });
+    const store = path.join(tempHome, '.shieldcortex', 'native-provenance');
+    const target = path.join(tempHome, 'out.bin');
+    const r = await runHook(`echo hi > ${target} && ${install('@ifasn/ms-doc-mcp@1.0.3')}`);
+    expect(decisionOf(r)?.permissionDecision).toBe('deny');
+    expect(fs.existsSync(store) ? fs.readdirSync(store).flatMap((d) => fs.readdirSync(path.join(store, d))) : []).toEqual([]);
+  });
+
+  it('I2 control: the same write with a clean install records its target', async () => {
+    writeConfig({ enabled: true, enforce: false });
+    const store = path.join(tempHome, '.shieldcortex', 'native-provenance');
+    const target = path.join(tempHome, 'out.bin');
+    const r = await runHook(`echo hi > ${target} && ${install('clean-lib')}`);
+    expect(decisionOf(r)?.permissionDecision ?? 'allow').not.toBe('deny');
+    expect(fs.existsSync(store) ? fs.readdirSync(store).flatMap((d) => fs.readdirSync(path.join(store, d))) : []).not.toEqual([]);
+  });
 });

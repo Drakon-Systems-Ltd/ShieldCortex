@@ -36,3 +36,49 @@ describe('packageVetting opt-out vs lock / strict posture (#889 review item 6)',
     expect((applyPolicyLock(input, state) as ReturnType<typeof raw>).actionGuard.packageVetting).toEqual({ enabled: false, minAgeDays: 3 });
   });
 });
+
+// ── Fable 1920Z rubric D: the deprecated alias under a verified lock ───────
+
+describe('verified lock scrubs the interceptor.actionGuard alias (rubric D)', () => {
+  const locked = { status: 'locked', path: '/x', policy: { v: 1, actionGuard: { enabled: true } } } as unknown as PolicyLockState;
+  const aliasOnly = () => ({
+    actionGuard: { enabled: true },
+    interceptor: { actionGuard: { packageVetting: { enabled: false, minAgeDays: 2 } } },
+  });
+
+  it('drops enabled:false from the alias, keeps minAgeDays', () => {
+    const out = applyPolicyLock(aliasOnly(), locked) as ReturnType<typeof aliasOnly>;
+    expect(out.interceptor.actionGuard.packageVetting).toEqual({ minAgeDays: 2 });
+  });
+
+  it('both spellings are scrubbed together', () => {
+    const out = applyPolicyLock(raw(), locked) as ReturnType<typeof raw>;
+    expect(out.actionGuard.packageVetting).toEqual({ minAgeDays: 3 });
+    expect(out.interceptor.actionGuard.packageVetting).toEqual({ minAgeDays: 2 });
+  });
+
+  it('hook surface: the hook merges {...alias, ...top}; after the lock no opt-out survives the merge', () => {
+    const out = applyPolicyLock(aliasOnly(), locked) as ReturnType<typeof aliasOnly>;
+    const merged = { ...out.interceptor.actionGuard, ...out.actionGuard } as { packageVetting?: { enabled?: boolean } };
+    expect(merged.packageVetting?.enabled).not.toBe(false);
+    expect(merged.packageVetting && 'enabled' in merged.packageVetting).toBe(false);
+  });
+
+  it('plugin surface: the plugin view carries its own actionGuard (the alias spelling) as the top-level block', () => {
+    const view = { actionGuard: { packageVetting: { enabled: false } } };
+    const out = applyPolicyLock(view, locked) as { actionGuard: { packageVetting: Record<string, unknown> } };
+    expect('enabled' in out.actionGuard.packageVetting).toBe(false);
+  });
+
+  it('an unlocked host keeps the alias opt-out (control)', () => {
+    const state: PolicyLockState = { status: 'absent', path: '/x' };
+    const out = applyPolicyLock(aliasOnly(), state) as ReturnType<typeof aliasOnly>;
+    expect(out.interceptor.actionGuard.packageVetting).toEqual({ enabled: false, minAgeDays: 2 });
+  });
+
+  it('does not mutate its input', () => {
+    const input = aliasOnly();
+    applyPolicyLock(input, locked);
+    expect(input.interceptor.actionGuard.packageVetting).toEqual({ enabled: false, minAgeDays: 2 });
+  });
+});
