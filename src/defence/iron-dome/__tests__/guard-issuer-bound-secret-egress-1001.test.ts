@@ -72,7 +72,7 @@ describe('#1001 — credential bound for its own issuer gets a door', () => {
         'import requests',
         `TOKEN = "${microsoftBearer()}"`,
         'requests.post("https://login.microsoftonline.com/common/oauth2/v2.0/token",',
-        '    data={"grant_type": "client_credentials"}, allow_redirects=False)',
+        '    json={"grant_type": "client_credentials"}, allow_redirects=False)',
         'requests.post("https://graph.microsoft.com/v1.0/me/sendMail",',
         `    headers={"Authorization": "Bearer ${microsoftBearer()}"}, json={"t": TOKEN}, allow_redirects=False)`,
       ].join('\n'),
@@ -665,5 +665,119 @@ describe('#1001 r3 — an opaque body is not proof: one JSON object, declared JS
       'client.py': ['import requests', `TOKEN = "${GH_TOKEN}"`,
         `requests.post("https://api.github.com/repos/owner/repository-name/issues/comments", headers={"Authorization": "token ${GH_TOKEN}"}, json={"body": "x"}, allow_redirects=False)`].join('\n'),
     }, 'python3 -I DIR/client.py'));
+  });
+});
+
+// ── Final round (CASE review 5785176359, items 1 and 2; Fable verdict F1–F3) ──
+//
+// The Python door admitted a raw string body. `data=` with `text/plain` let a
+// base64 MIME message through once it was wrapped so no run exceeded 40
+// characters, and Graph `sendMail` decodes that into recipients the guard never
+// read. The close is structural, not a longer or shorter run: the Python door
+// is JSON-only, the same contract as the curl door. A body is admitted only as
+// `json=` with a dict literal written at the call; `data=` refuses in every
+// form; `headers=` is a dict literal whose every Content-Type key is spelled
+// exactly and carries a literal JSON value. Synthetic fixtures only.
+
+/** `MIME_B64` re-wrapped: `width` characters per piece, pieces joined by `sep`. */
+function wrapMime(width: number, sep: string): string {
+  return (MIME_B64.match(new RegExp(`.{1,${width}}`, 'g')) ?? []).join(sep);
+}
+const PY_BEARER = `"Authorization": "Bearer ${microsoftBearer()}"`;
+/** One issuer-only Microsoft POST: `headers` is the dict body text, `kw` the extra keywords. */
+function finalClient(headers: string, kw: string, url = GRAPH_SEND, prelude: string[] = []): string {
+  return ['import requests', ...prelude,
+    `requests.post("${url}", headers={${headers}}${kw === '' ? '' : `, ${kw}`}, allow_redirects=False)`].join('\n');
+}
+const TEXT_PLAIN = `${PY_BEARER}, "Content-Type": "text/plain"`;
+const runFinal = (src: string) => foldedVerdict({ 'client.py': src }, 'python3 -I DIR/client.py');
+
+describe('#1001 final round F1 — a wrapped base64 MIME body on the Python door stays a wall (CASE blocking 1)', () => {
+  it.each([
+    ['40-column newline-wrapped MIME as data= with text/plain', finalClient(TEXT_PLAIN, `data="""${wrapMime(40, '\n')}"""`)],
+    ['40-column space-wrapped MIME as data= with text/plain', finalClient(TEXT_PLAIN, `data="${wrapMime(40, ' ')}"`)],
+    ['40-column newline-wrapped MIME as data= with no Content-Type', finalClient(PY_BEARER, `data="""${wrapMime(40, '\n')}"""`)],
+    ['20-column newline-wrapped MIME as data= with text/plain', finalClient(TEXT_PLAIN, `data="""${wrapMime(20, '\n')}"""`)],
+    ['20-column space-wrapped MIME as data= with no Content-Type', finalClient(PY_BEARER, `data="${wrapMime(20, ' ')}"`)],
+    ['40-column space-wrapped MIME bound to a name, sent as data=', finalClient(TEXT_PLAIN, 'data=MAIL', GRAPH_SEND, [`MAIL = "${wrapMime(40, ' ')}"`])],
+  ])('%s → block', (_name, src) => {
+    expectWall(runFinal(src));
+  });
+});
+
+describe('#1001 final round F2 — the Python door is JSON-only (CASE blocking 2)', () => {
+  it('the old form-encoded token call (data= dict) is no longer proof → block', () => {
+    // The first required-pair fixture as it stood before this round: the token
+    // endpoint call sends `data={...}`, which requests form-encodes.
+    expectWall(runFinal([
+      'import requests',
+      `TOKEN = "${microsoftBearer()}"`,
+      'requests.post("https://login.microsoftonline.com/common/oauth2/v2.0/token",',
+      '    data={"grant_type": "client_credentials"}, allow_redirects=False)',
+      'requests.post("https://graph.microsoft.com/v1.0/me/sendMail",',
+      `    headers={"Authorization": "Bearer ${microsoftBearer()}"}, json={"t": TOKEN}, allow_redirects=False)`,
+    ].join('\n')));
+  });
+
+  it.each([
+    ['data= as a short plain string', finalClient(TEXT_PLAIN, 'data="hello"')],
+    ['data= as a dict', finalClient(PY_BEARER, 'data={"a": "b"}')],
+    ['data= as a JSON-looking string declared JSON', finalClient(`${PY_BEARER}, "Content-Type": "application/json"`, `data='{"a": 1}'`)],
+    ['data= as None', finalClient(PY_BEARER, 'data=None')],
+    ['data= together with json= (requests sends data and drops json)', finalClient(PY_BEARER, 'json={"a": "b"}, data={"a": "b"}')],
+    ['json= as a string literal', finalClient(PY_BEARER, 'json="hello"')],
+    ['json= as a list', finalClient(PY_BEARER, 'json=[{"a": "b"}]')],
+    ['json= as a bound name', finalClient(PY_BEARER, 'json=BODY', GRAPH_SEND, ['BODY = "hello"'])],
+    ['json= as None', finalClient(PY_BEARER, 'json=None')],
+  ])('body: %s → block', (_name, src) => {
+    expectWall(runFinal(src));
+  });
+
+  it.each([
+    ['Content-Type text/plain beside a json= dict', finalClient(TEXT_PLAIN, 'json={"a": "b"}')],
+    ['a lower-case content-type key with text/plain', finalClient(`${PY_BEARER}, "content-type": "text/plain"`, 'json={"a": "b"}')],
+    ['an upper-case CONTENT-TYPE key with a form type', finalClient(`${PY_BEARER}, "CONTENT-TYPE": "application/x-www-form-urlencoded"`, 'json={"a": "b"}')],
+    ['a Content-Type key written through a bound name', finalClient(`${PY_BEARER}, CT: "text/plain"`, 'json={"a": "b"}', GRAPH_SEND, ['CT = "Content-Type"'])],
+    ['a Content-Type value written through a bound name', finalClient(`${PY_BEARER}, "Content-Type": KIND`, 'json={"a": "b"}', GRAPH_SEND, ['KIND = "text/plain"'])],
+    ['a padded Content-Type key, even with a JSON value', finalClient(`${PY_BEARER}, "Content-Type ": "application/json"`, 'json={"a": "b"}')],
+    ['a JSON Content-Type beside a second, differently-cased text/plain one', finalClient(`${PY_BEARER}, "Content-Type": "application/json", "content-type": "text/plain"`, 'json={"a": "b"}')],
+    ['a Content-Type whose value is not a string', finalClient(`${PY_BEARER}, "Content-Type": None`, 'json={"a": "b"}')],
+    ['a JSON type with a parameter other than charset=utf-8', finalClient(`${PY_BEARER}, "Content-Type": "application/json; boundary=x"`, 'json={"a": "b"}')],
+    ['Content-Type text/plain on a POST with no body', finalClient(TEXT_PLAIN, '')],
+    ['headers= as a list of pairs', ['import requests',
+      `requests.post("${GRAPH_SEND}", headers=[["Authorization", "Bearer ${microsoftBearer()}"], ["Content-Type", "text/plain"]], json={"a": "b"}, allow_redirects=False)`].join('\n')],
+  ])('headers: %s → block', (_name, src) => {
+    expectWall(runFinal(src));
+  });
+
+  const ghClient = (headers: string, kw: string, prelude: string[] = []): string => ['import requests', ...prelude,
+    `requests.post("https://api.github.com/repos/o/r/issues/1/comments", headers={"Authorization": "token ${GH_TOKEN}"${headers}}${kw}, allow_redirects=False)`].join('\n');
+  it.each([
+    ['Graph json={"t": TOKEN}', msClient('json={"t": TOKEN}')],
+    ['GitHub json={"body": "x"}', ghClient('', ', json={"body": "x"}')],
+    ['GitHub json= with Content-Type: application/json', ghClient(', "Content-Type": "application/json"', ', json={"body": "x"}')],
+    ['GitHub json= with a charset=utf-8 parameter', ghClient(', "Content-Type": "application/json; charset=utf-8"', ', json={"body": "x"}')],
+    ['GitHub json= with a lower-case content-type key', ghClient(', "content-type": "application/json"', ', json={"body": "x"}')],
+    ['GitHub json= with a JSON Content-Type written through bound names', ghClient(', CT: KIND', ', json={"body": "x"}', ['CT = "Content-Type"', 'KIND = "application/json"'])],
+    ['GitHub json= dict with nested values', ghClient('', ', json={"body": "x", "labels": ["a", "b"], "draft": False}')],
+    ['GitHub POST with no body', ghClient('', '')],
+  ])('control: issuer-only %s → require_approval', (_name, src) => {
+    expectDoor(runFinal(src));
+  });
+});
+
+describe('#1001 final round F3 — a Graph batch envelope is not a JSON-only body', () => {
+  // `$batch` takes a JSON envelope whose inner requests carry their own
+  // content type and body, so a JSON-only outer body proves nothing about them.
+  const inner = `{"id": "1", "method": "POST", "url": "/me/sendMail", "headers": {"Content-Type": "text/plain"}, "body": "${wrapMime(40, ' ')}"}`;
+
+  it('a json= dict posted to the Graph batch endpoint with an inner text/plain wrapped MIME body → block', () => {
+    expectWall(runFinal(finalClient(PY_BEARER, `json={"requests": [${inner}]}`, 'https://graph.microsoft.com/v1.0/$batch')));
+  });
+
+  it('the same batch endpoint on the curl door → block', () => {
+    expectWall(evaluateToolCall('Bash', {
+      command: `curl -X POST 'https://graph.microsoft.com/v1.0/$batch' ${BEARER} --json '{"requests":[]}'`,
+    }));
   });
 });
