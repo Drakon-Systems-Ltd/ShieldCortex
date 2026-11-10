@@ -146,6 +146,10 @@ export type {
 } from './iron-dome/policy-lock.js';
 
 // Tool Action Guard — gates what the agent DOES at runtime (shell/file/network/git).
+// #889: pre-install package vetting (OSV + registry), consumed by the hook and the OpenClaw plugin.
+export { vetToolCall, vetMcpServers, vetPackages, parseInstallCommands, applyVettingToVerdict, normalisePackageVettingConfig } from './iron-dome/package-vetting.js';
+export type { ToolVettingOutcome, PackageVettingConfig } from './iron-dome/package-vetting.js';
+
 export { evaluateToolCall, classifyFamily, isCriticalPath, normaliseToolName, detectScriptInvocation, nativeArtifactCaptures, nativeExecObservation } from './iron-dome/tool-action-guard.js';
 export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily, ToolGuardOptions, NativeExecObservation, NativeExecUse } from './iron-dome/tool-action-guard.js';
 // #1025 — audit-only native-exec provenance store. Exported so the OpenClaw

@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { deriveProjectKey } from './lib/project-key.mjs';
-import { sanitisePromptForRecall } from './lib/prompt-sanitiser.mjs';
+import { sanitisePromptForLaneDetection, sanitisePromptForRecall } from './lib/prompt-sanitiser.mjs';
 import { recordSessionEvent } from './lib/session-capture.mjs';
 import { captureForSessionEvent } from './lib/capture-prompt.mjs';
 import { formatRecallContext } from './lib/recall-frame.mjs';
@@ -495,7 +495,10 @@ process.stdin.on('end', async () => {
 
     // #718: lane scoping. Automated lanes share the owner's project key, so
     // project scope alone let personal memories reach a watchdog probe.
-    const laneInfo = detectLane({ text: prompt, env: process.env });
+    // #992: lane markers can sit inside the OpenClaw internal-context blocks
+    // the recall sanitiser strips, so the lane is read from the text without
+    // that step.
+    const laneInfo = detectLane({ text: sanitisePromptForLaneDetection(rawPrompt), env: process.env });
     const lanePolicy = resolveLanePolicy(laneInfo.lane, config);
     if (!lanePolicy.recall) {
       logRecallRun({

@@ -47,6 +47,10 @@ export interface ActionGuardConfig {
    *  readiness decision itself is guard-readiness.ts, injected as
    *  {@link ReadinessRuntime} — never re-implemented here. */
   readinessGate?: boolean;
+  /** RAW pre-install package-vetting config (#889): `{ enabled?, minAgeDays? }`.
+   *  Passed through untouched; `normalisePackageVettingConfig` in the main
+   *  package is the only place that interprets it. */
+  packageVetting?: Record<string, unknown>;
   /** RAW operator-notify config (#143), passed through untouched to the
    *  readiness runtime; `normaliseNotifyConfig` is the boundary. */
   notify?: Record<string, unknown>;
@@ -166,6 +170,11 @@ export interface ToolGuardVerdictLike {
   reviewedScripts?: string[];
   /** Files a `$(cat …)` substitution spliced into the scanned command (#517). */
   expandedSubstitutions?: string[];
+  /** Pre-install package check (#889): per package, what was resolved and which
+   *  kinds of finding it produced. Names and kinds only, never the command.
+   *  Absent = the call installed nothing by name (or the check is off). */
+  packageVetting?: PackageVettingAudit[];
+
   /** #1025 — audit-only native-exec provenance observation. Never a verdict
    *  input: attached by the evaluator after the decision is final. */
   nativeExec?: NativeExecLike;
@@ -183,6 +192,29 @@ export interface NativeExecLike {
  *  stays pure/synchronous and asks the CALLER to resolve an invoked script's
  *  source, so `bash deploy.sh` is scanned by the same rules as the inline
  *  command. Structurally typed, like ToolGuardVerdictLike above. */
+/** #889: structural shape of `shieldcortex/defence`'s vetting outcome (this
+ *  plugin takes no compile-time dependency on the main package). */
+export interface PackageVettingAudit {
+  ecosystem: string;
+  name: string;
+  version?: string;
+  status: 'checked' | 'unchecked';
+  kinds: string[];
+  reasons: string[];
+}
+export interface PackageVettingOutcomeLike {
+  malicious: boolean;
+  reasons: string[];
+  audit: PackageVettingAudit[];
+}
+/** #889: the vetting seam, injected like `evaluateToolCall`. `vet` never
+ *  throws and bounds its own wall clock; `apply` folds the outcome into a
+ *  verdict (a known-malicious hit becomes a catastrophic block). */
+export interface PackageVettingRuntime {
+  vet: (toolName: string, args: Record<string, unknown>, cfg: Record<string, unknown> | undefined) => Promise<PackageVettingOutcomeLike | null>;
+  apply: (v: ToolGuardVerdictLike, outcome: PackageVettingOutcomeLike | null) => ToolGuardVerdictLike;
+}
+
 export interface ToolGuardEvaluatorOptions {
   resolveScriptSource?: (scriptPath: string) => string | null;
   /** #189: answers whether a human pinned this exact path + content as
@@ -1701,6 +1733,8 @@ interface InterceptorOptions {
   onAuditEntry?: (entry: InterceptAuditEntry) => void;
   /** Tool Action Guard evaluator, injected from `shieldcortex/defence` at runtime. */
   evaluateToolCall?: ToolGuardEvaluator;
+  /** #889: pre-install package vetting. Absent on an older dist = no vetting. */
+  packageVetting?: PackageVettingRuntime;
   /** #233: look up a conversation-level taint for this session. Returning null
    *  (or throwing) means no escalation — a broken scanner must never become a
    *  new source of denials. */
@@ -1768,6 +1802,8 @@ interface InterceptorOptions {
     tool: string;
     input: unknown;
     signals: readonly string[];
+    /** #889: package-check findings, plain English. */
+    extraReasons?: readonly string[];
     plane: 'openclaw';
     agentId?: string;
     sessionId?: string;
@@ -1889,13 +1925,14 @@ export function createInterceptor(
   const bindAudit = options?.bindAudit;
   /** #648: the card's what/why/who, or undefined (older dist, or a summariser
    *  that threw) — then the prompt keeps its previous layout. Never throws. */
-  const approvalCardFor = (context: ToolCallContext, v: ToolGuardVerdictLike): ApprovalCardText | undefined => {
+  const approvalCardFor = (context: ToolCallContext, v: ToolGuardVerdictLike, extraReasons?: readonly string[]): ApprovalCardText | undefined => {
     if (typeof options?.buildApprovalCard !== 'function') return undefined;
     try {
       const card = options.buildApprovalCard({
         tool: context.toolName,
         input: context.arguments,
         signals: Array.isArray(v.signals) ? v.signals : [],
+        ...(extraReasons && extraReasons.length > 0 ? { extraReasons } : {}),
         plane: 'openclaw',
         agentId: context.agentId,
         sessionId: context.sessionId,
@@ -2424,6 +2461,28 @@ export function createInterceptor(
       handleGuardUnavailable(context, `action-guard error: ${err instanceof Error ? err.message : err}`, call);
       return;
     }
+
+    // #889: pre-install package vetting. Runs only for a call the guard has not
+    // already refused, only does network work when the command names a package
+    // to install, and is bounded inside `vet` (3 s total). It can only ADD
+    // information to the verdict — or turn a known-malicious package into a
+    // catastrophic block — and a failure of any kind leaves the verdict as the
+    // guard made it: unavailable vetting must never become a new way to deny
+    // or to allow.
+    let vetting: PackageVettingOutcomeLike | null = null;
+    const vettingRuntime = options?.packageVetting;
+    if (vettingRuntime && !(v.decision === 'block' && v.severity === 'catastrophic')) {
+      try {
+        vetting = await vettingRuntime.vet(context.toolName, context.arguments || {}, actionGuardCfg.packageVetting);
+        if (vetting) v = vettingRuntime.apply(v, vetting);
+      } catch {
+        vetting = null;
+      }
+    }
+    const vettingAudit = vetting && vetting.audit.length > 0 ? { packageVetting: vetting.audit } : {};
+    const vettingReasons = vetting && !vetting.malicious ? vetting.reasons : undefined;
+
+
     // #233: a prompt injection detected on the CONVERSATION path earlier in this
     // session tightens the guard by one notch for a bounded window — sensitive
     // work starts asking, dangerous work stops. Benign work is untouched: an
@@ -2515,7 +2574,7 @@ export function createInterceptor(
       if (actionGuardCfg.auditAllows !== false) {
         if (v.severity !== 'benign') {
           const allowPreview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
-          emitAudit({ ...guardAuditBase(context.toolName, v, allowPreview), ...(drift ?? {}), action: 'allow', outcome: 'allowed' }, call);
+          emitAudit({ ...guardAuditBase(context.toolName, v, allowPreview), ...vettingAudit, ...(drift ?? {}), action: 'allow', outcome: 'allowed' }, call);
           wrote = true;
         } else if (drift || nativeExecField(v).nativeExec) {
           wrote = true;
@@ -2558,7 +2617,7 @@ export function createInterceptor(
     }
 
     const preview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
-    const base = { ...guardAuditBase(context.toolName, v, preview), ...(escalation ? { escalated: escalation } : {}), ...(drift ?? {}) };
+    const base = { ...guardAuditBase(context.toolName, v, preview), ...vettingAudit, ...(escalation ? { escalated: escalation } : {}), ...(drift ?? {}) };
     const severity: Severity = v.severity === 'catastrophic' ? 'critical' : 'high';
 
     // Catastrophic / exfil — hard block, always enforced when the guard is enabled.
@@ -2733,7 +2792,7 @@ export function createInterceptor(
     try {
       approved = await withApprovalDeadline(
         (() => {
-          const card = approvalCardFor(context, v);
+          const card = approvalCardFor(context, v, vettingReasons);
           const plain = plainApprovalCard(card);
           return context.requireApproval!(
             formatActionGuardPrompt(context.toolName, v, context.arguments, card),
