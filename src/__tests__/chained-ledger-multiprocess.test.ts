@@ -95,8 +95,14 @@ for (let i = 0; ; i++) {
     anomaly_score: 0, threat_indicators: '[]', blocked_patterns: '[]',
     reason: tag + ' ' + i, fragmentation_score: null,
   });
-  if (id > 0) ok++;
-  if (i === 0 && barrierDir) writeReady(peerFile(tag), '');
+  if (id <= 0 && mode !== 'crash') {
+    process.stderr.write('append failed for ' + tag + ' at attempt ' + i + ': id=' + id);
+    process.exit(5);
+  }
+  if (id > 0) {
+    ok++;
+    if (ok === 1 && barrierDir) writeReady(peerFile(tag), '');
+  }
 }
 const end = Date.now();
 closeDatabase();

@@ -50,6 +50,19 @@ const STILL_FLAGGED: Array<[string, string]> = [
   ['jq -f inside a short cluster', `jq -rf ${RM}.jq data.json`],
   ['grep pattern file named after a delete verb', `grep -f ${RM}.pat f`],
   ['grep --file of the same', `grep --file ${RM}.pat f`],
+  // Final release review: long value-taking, abbreviated, and unknown flags
+  // must not let a later file operand or guarded filename disappear.
+  ...['grep', 'egrep', 'fgrep'].flatMap(verb => [
+    [`${verb} group separator then short file`, `${verb} --group-separator -- -f pat-${String.fromCharCode(107, 105, 108, 108)}.txt f`],
+    [`${verb} group separator then long file`, `${verb} --group-separator -- --file pat-${String.fromCharCode(107, 105, 108, 108)}.txt f`],
+    [`${verb} exclude-from`, `${verb} --exclude-from pat-${String.fromCharCode(107, 105, 108, 108)}.txt x f`],
+    [`${verb} abbreviated regexp then file`, `${verb} --rege -- -f pat-${String.fromCharCode(107, 105, 108, 108)}.txt f`],
+    [`${verb} unknown long flag`, `${verb} --unrecognized pat-${String.fromCharCode(107, 105, 108, 108)}.txt f`],
+  ] as Array<[string, string]>),
+  ['jq arg then file program', `jq --arg a -- -f pat-${String.fromCharCode(107, 105, 108, 108)}.jq d.json`],
+  ['jq slurpfile operand', `jq --slurpfile a pat-${String.fromCharCode(107, 105, 108, 108)}.json . d.json`],
+  ...['--argjson', '--rawfile', '--indent', '--ar'].map(option =>
+    [`jq long option ${option}`, `jq ${option} pat-${String.fromCharCode(107, 105, 108, 108)}.json . d.json`] as [string, string]),
   // GNU grep's colour WHEN is optional: the next flag remains a flag.
   ...['grep', 'egrep', 'fgrep'].flatMap(verb => ['--color', '--colour'].flatMap(colour =>
     ['-f', '--file'].map(file =>
@@ -126,6 +139,16 @@ describe('#629 real writes and unsafe forms stay gated', () => {
       ...['--max-count', '-C', '--include', '--binary-files', '--label'].flatMap(flag =>
         ['-f', '--file'].map(file => `grep ${flag} ${file} pats f`)),
       `grep --color=always -f pats f`,
+      ...['grep', 'egrep', 'fgrep'].flatMap(verb => [
+        `${verb} --group-separator -- -f pats f`,
+        `${verb} --group-separator -- --file pats f`,
+        `${verb} --exclude-from exclusions x f`,
+        `${verb} --rege -- -f pats f`,
+        `${verb} --unrecognized x f`,
+      ]),
+      `jq --arg a -- -f program.jq data.json`,
+      `jq --slurpfile a vars.json . data.json`,
+      ...['--argjson', '--rawfile', '--indent', '--ar'].map(option => `jq ${option} x . d.json`),
       `cat f | jq -f p.jq`, `cat f | grep -f pats`,
     ]) {
       expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();

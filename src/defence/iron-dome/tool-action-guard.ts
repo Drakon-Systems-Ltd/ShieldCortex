@@ -4445,23 +4445,44 @@ const READONLY_PROGRAM_FILE_OPTION_RE: Record<string, RegExp> = {
   egrep: /^(?:-[^-]*f|--file(?:=|$))/,
   fgrep: /^(?:-[^-]*f|--file(?:=|$))/,
 };
-// GNU grep permutes options. A bare '--' is only a terminator when it is
-// not the argument of a value-taking option (notably -e/--regexp). Skip that
-// argument before looking for a later pattern-file option. The optional
-// --color/--colour WHEN is only accepted with '=', never as the next word.
-// Unknown spellings still fail closed elsewhere in the stage grammar.
-const READONLY_GREP_VALUE_OPTION_RE = /^(?:--(?:regexp|after-context|before-context|context|max-count|devices|directories|include|exclude|exclude-dir|label|binary-files)|-[a-zA-Z]*[eABCmDd])$/;
+// #629's mask accepts only exact, no-argument long options. GNU grep allows
+// unambiguous abbreviations; a value-taking or unknown long spelling must keep
+// the whole statement visible, even when its value looks like '--'. Neither
+// the stage grammar nor the jq write check provides a fallback for such words.
+const READONLY_GREP_NOARG_LONG_OPTIONS = new Set([
+  '--basic-regexp', '--extended-regexp', '--fixed-strings', '--perl-regexp',
+  '--ignore-case', '--word-regexp', '--line-regexp',
+  '--invert-match', '--line-number', '--byte-offset', '--with-filename',
+  '--no-filename', '--only-matching', '--quiet',
+  '--silent', '--no-messages', '--files-with-matches', '--files-without-match',
+  '--count', '--text', '--recursive', '--dereference-recursive',
+  '--null', '--null-data', '--initial-tab', '--color', '--colour',
+]);
+const READONLY_JQ_NOARG_LONG_OPTIONS = new Set([
+  '--null-input', '--raw-input', '--slurp', '--compact-output', '--raw-output',
+  '--raw-output0', '--join-output', '--ascii-output', '--sort-keys',
+  '--monochrome-output', '--color-output', '--tab', '--unbuffered',
+  '--exit-status', '--seq', '--stream', '--stream-errors',
+]);
+// Preserve the existing short-option value handling, including a literal '--'
+// consumed by -e. A following file flag is still inspected, not masked.
+const READONLY_GREP_SHORT_VALUE_OPTION_RE = /^-[a-zA-Z]*[eABCmDd]$/;
 function readOnlyStageLoadsProgramFile(argv: string[]): boolean {
   const verb = argv[0] ?? '';
   const re = READONLY_PROGRAM_FILE_OPTION_RE[verb];
   if (!re) return false;
+  const grep = /^(?:grep|egrep|fgrep)$/.test(verb);
+  const noArgLong = grep ? READONLY_GREP_NOARG_LONG_OPTIONS : READONLY_JQ_NOARG_LONG_OPTIONS;
   for (let i = 1; i < argv.length; i++) {
     const w = argv[i]!;
-    if (w === '--') return false; // an actual terminator: following words are operands
+    if (w === '--') return false; // actual terminator: following words are operands
+    if (w.startsWith('--') && !noArgLong.has(w)) return true;
     if (re.test(w)) return true;
-    if (/^(?:grep|egrep|fgrep)$/.test(verb) && READONLY_GREP_VALUE_OPTION_RE.test(w)) {
-      if (i + 1 >= argv.length || re.test(argv[i + 1]!)) return true;
-      i++; // the value (including a literal -- for -e) is not an option
+    if (grep && READONLY_GREP_SHORT_VALUE_OPTION_RE.test(w)) {
+      const value = argv[i + 1];
+      if (value === undefined || re.test(value)
+        || (value.startsWith('--') && value !== '--' && !noArgLong.has(value))) return true;
+      i++; // the short flag's value (including a literal --) is not an option
     }
   }
   return false;
