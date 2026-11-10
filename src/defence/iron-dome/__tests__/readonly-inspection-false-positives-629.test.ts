@@ -50,6 +50,15 @@ const STILL_FLAGGED: Array<[string, string]> = [
   ['jq -f inside a short cluster', `jq -rf ${RM}.jq data.json`],
   ['grep pattern file named after a delete verb', `grep -f ${RM}.pat f`],
   ['grep --file of the same', `grep --file ${RM}.pat f`],
+  // GNU grep's colour WHEN is optional: the next flag remains a flag.
+  ...['grep', 'egrep', 'fgrep'].flatMap(verb => ['--color', '--colour'].flatMap(colour =>
+    ['-f', '--file'].map(file =>
+      [`${verb} ${colour} then ${file}`, `${verb} ${colour} ${file} ${String.fromCharCode(114, 109)}.pat f`] as [string, string]))),
+  ['grep attached colour then file', `grep --color=always -f ${String.fromCharCode(114, 109)}.pat f`],
+  // A missing required value followed by a pattern-file flag must not hide it.
+  ...['--max-count', '-C', '--include', '--binary-files', '--label'].flatMap(valueFlag =>
+    ['-f', '--file'].map(file =>
+      [`grep ${valueFlag} then ${file}`, `grep ${valueFlag} ${file} ${String.fromCharCode(114, 109)}.pat f`] as [string, string])),
   // A bare -- consumed as a grep pattern is not the option terminator.
   ...['-e', '--regexp'].flatMap(patternFlag => ['-f', '--file'].map(fileFlag =>
     [`grep ${patternFlag} -- then ${fileFlag}`, `grep ${patternFlag} -- ${fileFlag} ${String.fromCharCode(114, 109)}.pat f`] as [string, string])),
@@ -112,6 +121,11 @@ describe('#629 real writes and unsafe forms stay gated', () => {
       `egrep -f pats f`, `fgrep -f pats f`, `egrep --file pats f`, `fgrep -rf pats .`,
       ...['grep', 'egrep', 'fgrep'].flatMap(verb => ['-e', '--regexp'].flatMap(patternFlag =>
         ['-f', '--file'].map(fileFlag => `${verb} ${patternFlag} -- ${fileFlag} pats f`))),
+      ...['grep', 'egrep', 'fgrep'].flatMap(verb => ['--color', '--colour'].flatMap(colour =>
+        ['-f', '--file'].map(file => `${verb} ${colour} ${file} pats f`))),
+      ...['--max-count', '-C', '--include', '--binary-files', '--label'].flatMap(flag =>
+        ['-f', '--file'].map(file => `grep ${flag} ${file} pats f`)),
+      `grep --color=always -f pats f`,
       `cat f | jq -f p.jq`, `cat f | grep -f pats`,
     ]) {
       expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
@@ -122,6 +136,7 @@ describe('#629 real writes and unsafe forms stay gated', () => {
     for (const cmd of [
       `jq . d.json`, `jq -r .a d.json`, `jq -c '.a | length' d.json`,
       `grep -n x f`, `grep -e x f`, `grep -F x f`, `grep -L x f`, `grep -rn x src`,
+      `grep --color -n x f`, `grep --colour -n x f`,
       // after `--` a dash word is an operand (the pattern), not an option
       `grep -n -- -f f`, `grep -e x -- -f f`,
     ]) {
