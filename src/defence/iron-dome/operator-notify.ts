@@ -44,7 +44,7 @@
  *     not a rung of it.
  */
 
-import type { ApprovalCardSummary } from './approval-card.js';
+import { withholdSecretCardLine, type ApprovalCardSummary } from './approval-card.js';
 
 /**
  * What actually happened to the held call, from the operator's point of view.
@@ -145,9 +145,13 @@ export interface OperatorNotification {
   /** #310 action id when this notification is a headless denial. */
   actionId?: string;
   /** #648 — the plain-English summary an approval CARD shows (what, why, who).
-   *  Only on 'approval_requested', and only read by the card channel
-   *  (openclaw-approval-channel.ts). The webhook payload builder copies fields
-   *  by name and never this one, so notify and denials stay values-free. */
+   *  Only on 'approval_requested'. Read by the card channel
+   *  (openclaw-approval-channel.ts), where every target in it has been
+   *  through the credential redactor on the box, and, since #815 A, laid out
+   *  by the webhook channel as its versioned `card` block: there the hook
+   *  hands a fixed-template card that never names the target, and the
+   *  webhook sends only fixed template lines whatever it is handed. The
+   *  values-free `command` surface and `denials.jsonl` are unchanged. */
   card?: ApprovalCardSummary;
 }
 
@@ -224,6 +228,14 @@ export interface ActionGuardOutcomeNotification {
   sessionId?: string;
   origin?: string;
   detectedAt: string;
+  /** #815 A — the plain-English what/why/who for the operator's chat. Only
+   *  on `action_guard_denial`: the fixed-template card built on the box by
+   *  approval-card.ts (`buildTemplateApprovalCard`), which never names the
+   *  target, bounded again here (`boundedCard`). The webhook payload carries
+   *  it as a versioned `card` block of fixed template lines; `denials.jsonl`
+   *  never does — the hook hands it to this builder only, never to the
+   *  forensic row. */
+  card?: ApprovalCardSummary;
 }
 
 /** Every shape a channel can be handed. */
@@ -301,9 +313,11 @@ export interface AgentConfigChangeNotification {
   changeCount: number;
   /** `high`: a traffic/credential redirect, sandbox or trust weakening, or a planted instruction file. */
   severity?: 'high';
+  /** #889: report-only package check of a newly added MCP server that launches a package. */
+  packageChecks?: Array<{ name: string; malicious: boolean; reasons: string[] }>;
 }
 
-export function buildAgentConfigChangeNotification(input: { file: string; changes: Array<{ label: string; name: string }>; changeCount: number; severity?: string }): AgentConfigChangeNotification {
+export function buildAgentConfigChangeNotification(input: { file: string; changes: Array<{ label: string; name: string }>; changeCount: number; severity?: string; packageChecks?: Array<{ name: string; malicious: boolean; reasons: string[] }> }): AgentConfigChangeNotification {
   const safe = (raw: unknown, max: number): string => (String(raw ?? '').replace(/[^A-Za-z0-9_.:\/@ ~-]/g, '?').trim() || 'unknown').slice(0, max);
   return {
     event: 'agent_config_change',
@@ -311,16 +325,24 @@ export function buildAgentConfigChangeNotification(input: { file: string; change
     changes: input.changes.slice(0, 3).map((c) => ({ label: safe(c.label, 40), name: safe(c.name, 64) })),
     changeCount: Math.max(input.changeCount, input.changes.length),
     ...(input.severity === 'high' ? { severity: 'high' as const } : {}),
+    ...(input.packageChecks && input.packageChecks.length > 0
+      ? { packageChecks: input.packageChecks.slice(0, 3).map((p) => ({ name: safe(p.name, 64), malicious: p.malicious === true, reasons: p.reasons.slice(0, 3).map((r) => safe(r, 110)) })) }
+      : {}),
   };
 }
 
 export function formatAgentConfigChangeNotification(n: AgentConfigChangeNotification): string {
   const shown = n.changes.map((c) => `${c.label} (${c.name})`).join(', ');
   const extra = n.changeCount - n.changes.length;
-  if (n.severity === 'high') {
-    return `ShieldCortex HIGH SEVERITY: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}. This can redirect your agent's traffic or credentials, weaken its sandbox, or plant instructions it will obey. If you did not make this change, review the file before starting an agent.`;
+  const pkg = (n.packageChecks ?? []).map((p) => `${p.malicious ? 'KNOWN MALICIOUS PACKAGE' : 'Package check'} for MCP server ${p.name}: ${p.reasons.join('; ')}.`).join(' ');
+  const tail = pkg ? ` ${pkg}` : '';
+  if (n.packageChecks?.some((p) => p.malicious)) {
+    return `ShieldCortex HIGH SEVERITY: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}.${tail} Remove that MCP server before starting an agent.`;
   }
-  return `ShieldCortex: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}. If you did not make this change, review the file.`;
+  if (n.severity === 'high') {
+    return `ShieldCortex HIGH SEVERITY: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}. This can redirect your agent's traffic or credentials, weaken its sandbox, or plant instructions it will obey. If you did not make this change, review the file before starting an agent.${tail}`;
+  }
+  return `ShieldCortex: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}. If you did not make this change, review the file.${tail}`;
 }
 
 export type AnyOperatorNotification = OperatorNotification | ConversationThreatNotification | ActionGuardOutcomeNotification | MaintenanceFailNotification | McpToolChangeNotification | AgentConfigChangeNotification;
@@ -442,11 +464,19 @@ function optionalText(v: unknown): string | undefined {
 }
 
 /** #648: the card summary crosses from the hook process as plain data — keep
- *  it to three bounded single-line strings or drop it entirely. */
+ *  it to three bounded single-line strings or drop it entirely.
+ *  #815 A review B2: each line meets the credential gate AS RECEIVED, before
+ *  whitespace is folded or the line is cut at 300 — folding split a key
+ *  across a line break into two halves no recogniser knows, and the cut left
+ *  the head of a key at the end of the line. A line that trips the gate is
+ *  withheld whole (`withholdSecretCardLine`); every channel then sees the
+ *  same withheld line. */
 function boundedCard(card: unknown): ApprovalCardSummary | undefined {
   if (!card || typeof card !== 'object') return undefined;
   const c = card as Record<string, unknown>;
-  const line = (v: unknown) => (typeof v === 'string' && v.trim() ? truncate(v.replace(/\s+/g, ' ').trim(), 300) : undefined);
+  const line = (v: unknown) => (typeof v === 'string' && v.trim()
+    ? truncate(withholdSecretCardLine(v).replace(/\s+/g, ' ').trim(), 300)
+    : undefined);
   const action = line(c.action);
   const reason = line(c.reason);
   const who = line(c.who);
@@ -529,6 +559,8 @@ export interface ActionGuardOutcomeInput {
   origin?: string;
   /** ISO timestamp; supplied by the caller so a test can pin it. */
   detectedAt: string;
+  /** #815 A — see `ActionGuardOutcomeNotification.card`. Ignored on a warning. */
+  card?: ApprovalCardSummary;
 }
 
 const SAFE_ACTION_GUARD_TOOLS = new Set([
@@ -568,6 +600,8 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   'readiness-demoted', 'readiness-promoted', 'readiness-started',
   // #874: parity with the hook — the other two self-protection floor signals.
   'touch-guard-config', 'disable-action-guard',
+  // #889: the pre-install package check's own reason codes (no operator data).
+  'package-vetting', 'known-malicious-package',
 ]);
 const SAFE_ACTION_GUARD_OUTCOMES = new Set([
   'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',
@@ -711,6 +745,12 @@ export function buildActionGuardOutcomeNotification(
   const origin = String(input.origin ?? '').trim();
   if (origin === 'claude-code-hook' || origin === 'openclaw-interceptor') {
     n.origin = origin;
+  }
+  // #815 A: a denial may carry the readable card; an advisory warning never
+  // does (nothing was stopped, so there is nothing to approve or explain).
+  if (event === 'action_guard_denial') {
+    const card = boundedCard((input as { card?: unknown }).card);
+    if (card) n.card = card;
   }
   return n;
 }

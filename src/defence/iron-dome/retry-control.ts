@@ -23,8 +23,10 @@
  * ## One lock plane
  *
  * Fingerprints, deny suppression, launch claims, the card budget, grants and
- * grant consumption all live in ONE file guarded by ONE lock
- * (`~/.shieldcortex/approvals/retry-control.json` + `.lock`). The #118
+ * grant consumption all live in ONE store guarded by ONE lock: the newest
+ * generation under `~/.shieldcortex/approvals/retry-control.json.gen/`, with
+ * `retry-control.json` only a pointer to it and `.lock` the lock
+ * (fenced-store.ts). Deleting `retry-control.json` revokes nothing. The #118
  * approvals store keeps its own last-writer-wins RMW and stays LIVE-HOLD
  * ONLY — this module never touches it, and the live-hold path never touches
  * this one. That split is why #118/#143 behaviour is byte-identical with
@@ -55,27 +57,29 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  rmSync,
-  rmdirSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 
 import { mkdirSecure } from '../../setup/state-permissions.js';
+import { EXACT_CALL_DIGEST_VERSION } from './action-approvals.js';
 import { DEFAULT_DNP_DIGEST_WINDOW_MS } from './dnp-digest.js';
+import {
+  CORRUPT_STORE,
+  acquireStoreLock,
+  commitFencedJson,
+  readFencedJson,
+  releaseStoreLock,
+  type StoreLock,
+} from './fenced-store.js';
+import { tapTerminalOnlyReason } from './tap-eligibility.js';
 
 /** The hash every fingerprint, card and grant is bound to is the SAME #118
  *  canonical tool-call hash — re-exported so callers (the hook, the CLI) have
  *  exactly one implementation to reach for. */
 export { hashToolCall } from './action-approvals.js';
+/** #815 B: the exact, versioned call digest a one-tap grant is bound to. */
+export { EXACT_CALL_DIGEST_VERSION, exactCallDigest } from './action-approvals.js';
 
 // ── Clocks (design B6, "budgets and clocks, named and aligned") ────────────
 
@@ -156,7 +160,18 @@ export interface RetryGrant {
   approvedAt: number;
   ttlMs: number;
   epoch: number;
-  via: 'card' | 'tty';
+  /** `tap` (#815 B): a one-tap approve from the operator's chat, verified by
+   *  `approve-tap.ts` (HMAC with the separate approve secret, single-use
+   *  nonce, approver uid). Spent exactly like the other two. */
+  via: 'card' | 'tty' | 'tap';
+  /** Who answered, for a `tap` grant only: `telegram:<uid>`. Audit only —
+   *  never part of the spend predicate. */
+  approver?: string;
+  /** `tap` grants only (#815 B): the exact call digest the operator approved
+   *  and its version. A tap grant is spent only by a call whose exact digest
+   *  equals it; one without a current-version digest is never spent. */
+  exactDigest?: string;
+  exactDigestVersion?: number;
   /** The spend predicate: `{cwd, tool}` AND-matched (R3 rule 3). */
   origin: { cwd?: string; tool: string; anyOrigin?: boolean };
   consumedAt?: number;
@@ -184,6 +199,11 @@ export interface RetryRow {
   signals: string[];
   redactedSurface: string;
   actionIds: string[];
+  /** #815 B: the exact call digest of the most recent denial of this
+   *  identity, and its version. Only the one-tap path reads it; a row
+   *  without a current-version digest can never be tapped. */
+  exactDigest?: string;
+  exactDigestVersion?: number;
   suppression?: RetrySuppression;
   claim?: RetryClaim;
   grant?: RetryGrant;
@@ -386,6 +406,13 @@ function constantTimeEquals(a: string, b: string): boolean {
   return timingSafeEqual(left, right);
 }
 
+/** The exact digest on a row or grant, or null unless it is 64 hex of the
+ *  CURRENT version (#815 B). Never falls back to the tolerant hash. */
+export function currentExactDigest(rec: { exactDigest?: unknown; exactDigestVersion?: unknown } | undefined): string | null {
+  if (!rec || rec.exactDigestVersion !== EXACT_CALL_DIGEST_VERSION) return null;
+  return typeof rec.exactDigest === 'string' && /^[0-9a-f]{64}$/.test(rec.exactDigest) ? rec.exactDigest : null;
+}
+
 // ── The lock plane ────────────────────────────────────────────────────────
 
 const LOCK_ATTEMPTS = 60;
@@ -410,55 +437,36 @@ function sleepSync(ms: number): void {
   }
 }
 
-function acquireLock(home?: string): string | null {
-  const p = retryLockPath(home);
-  try {
-    mkdirSecure(retryControlDir(home));
-  } catch {
-    return null;
-  }
-  for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
-    try {
-      // Not `recursive` — that would succeed on an existing directory and
-      // hand two processes the same "exclusive" lock.
-      mkdirSync(p, { mode: 0o700 });
-      try {
-        writeFileSync(join(p, 'owner'), JSON.stringify({ pid: process.pid, at: Date.now() }), {
-          mode: 0o600,
-        });
-      } catch {
-        /* the directory IS the lock; the owner note is a breadcrumb */
-      }
-      return p;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') return null;
-      try {
-        const st = statSync(p);
-        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
-          try { rmSync(join(p, 'owner'), { force: true }); } catch { /* ignore */ }
-          try { rmdirSync(p); } catch { /* someone else got there first */ }
-          continue;
-        }
-      } catch {
-        continue; // vanished between EEXIST and stat — retry immediately
-      }
-      sleepSync(LOCK_SLEEP_MS);
-    }
-  }
-  return null;
-}
-
-function releaseLock(p: string | null): void {
-  if (!p) return;
-  try { rmSync(join(p, 'owner'), { force: true }); } catch { /* ignore */ }
-  try { rmdirSync(p); } catch { /* ignore */ }
+/** The shared lock (fenced-store.ts), with this plane's own bounds. The
+ *  lock only serialises contenders; the fenced commit is what refuses a
+ *  holder that lost the lock to a stale takeover. */
+function acquireLock(home?: string): StoreLock | null {
+  return acquireStoreLock(retryLockPath(home), {
+    attempts: LOCK_ATTEMPTS, sleepMs: LOCK_SLEEP_MS, staleMs: LOCK_STALE_MS,
+  });
 }
 
 function readStore(home?: string): RetryControlFile {
+  return readStoreSnapshot(home).file;
+}
+
+/** The store and the generation a commit built on it must succeed. */
+function readStoreSnapshot(home?: string): {
+  file: RetryControlFile; base: number; onDisk: string | null; preFence: string | null | undefined;
+} {
+  const snap = readFencedJson(retryControlPath(home));
+  let onDisk: string | null = null;
+  if (snap.fenced && snap.value && typeof snap.value === 'object') {
+    const { fence: _fence, ...rest } = snap.value as Record<string, unknown>;
+    onDisk = JSON.stringify(rest);
+  }
+  return { file: parseStore(snap.value), base: snap.base, onDisk, preFence: snap.preFence };
+}
+
+function parseStore(raw: unknown): RetryControlFile {
   try {
-    const p = retryControlPath(home);
-    if (!existsSync(p)) return { version: 1, rows: [], budget: null };
-    const parsed = JSON.parse(readFileSync(p, 'utf8')) as Partial<RetryControlFile>;
+    if (raw === undefined || raw === CORRUPT_STORE) return { version: 1, rows: [], budget: null };
+    const parsed = raw as Partial<RetryControlFile>;
     if (!parsed || !Array.isArray(parsed.rows)) return { version: 1, rows: [], budget: null };
     const rawBudget = parsed.budget as RetryCardBudget | null | undefined;
     const budget: RetryCardBudget | null =
@@ -544,28 +552,26 @@ function parseRetired(raw: unknown): RetiredIdentity[] {
   return out.slice(-MAX_RETIRED_IDENTITIES);
 }
 
-function writeStore(file: RetryControlFile, home?: string): boolean {
-  try {
-    mkdirSecure(retryControlDir(home));
-    const target = retryControlPath(home);
-    const tmp = `${target}.${process.pid}.tmp`;
-    // No receipts, no key: a store that never retired anything keeps the
-    // pre-#682 shape on disk.
-    const out: RetryControlFile =
-      file.retired && file.retired.length > 0
-        ? file
-        : { version: file.version, rows: file.rows, budget: file.budget };
-    writeFileSync(tmp, `${JSON.stringify(out, null, 2)}\n`, { mode: 0o600 });
-    renameSync(tmp, target);
-    return true;
-  } catch {
-    return false;
-  }
+function storeOnDisk(file: RetryControlFile): Record<string, unknown> {
+  // No receipts, no key: a store that never retired anything keeps the
+  // pre-#682 shape on disk.
+  return file.retired && file.retired.length > 0
+    ? { version: file.version, rows: file.rows, budget: file.budget, retired: file.retired }
+    : { version: file.version, rows: file.rows, budget: file.budget };
+}
+
+/** A fenced commit (fenced-store.ts): refused when any other writer has
+ *  committed since `base` was read, so a stale holder cannot write back.
+ *  The copy at `retryControlPath` is then a pointer with no rows, which a
+ *  release before the fence reads as an empty store: it never sees a grant
+ *  this store will also honour. */
+function writeStore(file: RetryControlFile, base: number, preFence: string | null | undefined, home?: string): boolean {
+  return commitFencedJson(retryControlPath(home), base, storeOnDisk(file), preFence);
 }
 
 type LockedResult<T> = { ok: true; value: T } | { ok: false; reason: 'locked' | 'unwritable' };
 
-/** Read-modify-write under the one lock. */
+/** Read-modify-write under the one lock, committed through the fence. */
 function withLock<T>(
   home: string | undefined,
   mutate: (file: RetryControlFile) => { value: T; commit: boolean },
@@ -573,14 +579,19 @@ function withLock<T>(
   const lock = acquireLock(home);
   if (!lock) return { ok: false, reason: 'locked' };
   try {
-    const file = readStore(home);
+    const { file, base, onDisk, preFence } = readStoreSnapshot(home);
     const { value, commit } = mutate(file);
-    if (commit && !writeStore(file, home)) return { ok: false, reason: 'unwritable' };
+    // A commit that would write back exactly the fenced state already on
+    // disk is skipped (it would only advance the generation). Anything else —
+    // a real change, the pre-fence store's first commit (its one migration,
+    // fenced-store.ts), an edited or corrupt generation — is written.
+    const changed = onDisk === null || JSON.stringify(storeOnDisk(file)) !== onDisk;
+    if (commit && changed && !writeStore(file, base, preFence, home)) return { ok: false, reason: 'unwritable' };
     return { ok: true, value };
   } catch {
     return { ok: false, reason: 'unwritable' };
   } finally {
-    releaseLock(lock);
+    releaseStoreLock(lock);
   }
 }
 
@@ -865,6 +876,10 @@ export interface DenialFingerprintEntry {
   /** From the harness payload (same trust as sessionKey), NEVER from tool input. */
   cwd?: string;
   sessionKey?: string;
+  /** #815 B: `exactCallDigest(tool, input)` of THIS denied call. Recorded
+   *  with the current digest version; absent or malformed leaves the row
+   *  untappable. */
+  exactDigest?: string;
 }
 
 export interface DenialFingerprintResult {
@@ -896,6 +911,9 @@ export function recordDenialFingerprint(
   if (!/^[0-9a-f]{64}$/.test(hash)) return { ok: false, reason: 'unwritable' };
   const cwd = canonicaliseCwd(entry.cwd);
   const id = fingerprintId(hash, cwd);
+  const exact = typeof entry.exactDigest === 'string' && /^[0-9a-f]{64}$/.test(entry.exactDigest)
+    ? entry.exactDigest
+    : null;
 
   const result = withLock(opts.home, (file) => {
     // Prune WITHOUT claiming the unspent-expiry notice: "reported once" has to
@@ -936,6 +954,16 @@ export function recordDenialFingerprint(
       if (entry.redactedSurface) row.redactedSurface = String(entry.redactedSurface).slice(0, 300);
       // sessionKey is diagnostic; keep the most recent one that reached us.
       if (entry.sessionKey) row.originScope.sessionKey = String(entry.sessionKey).slice(0, 64);
+    }
+    // #815 B: the exact digest always describes the LATEST denial of this
+    // identity (several exact calls can share one tolerant hash). A denial
+    // without one clears it, so a tap can never bind an older call's digest.
+    if (exact) {
+      row.exactDigest = exact;
+      row.exactDigestVersion = EXACT_CALL_DIGEST_VERSION;
+    } else {
+      delete row.exactDigest;
+      delete row.exactDigestVersion;
     }
     const actionId = typeof entry.actionId === 'string' ? entry.actionId.trim() : '';
     if (actionId && !row.actionIds.includes(actionId)) {
@@ -1170,12 +1198,24 @@ export interface GrantRetryAuth {
   anyOrigin?: boolean;
   /** TTY only: grant despite a live deny suppression. Cards can never set it. */
   overrideDeny?: boolean;
+  /**
+   * #815 B — the one-tap path. Set ONLY by `verifyApproveTap` in
+   * approve-tap.ts, after it has verified the HMAC (made with the separate
+   * approve secret), the approver uid, and consumed the single-use nonce.
+   * Exclusive like a card: it can never carry the TTY flag or either
+   * widener, it is bound to the exact call digest and deny epoch the nonce
+   * was minted for, it is refused when the current row is terminal-only,
+   * and it never answers "already granted" as a success.
+   */
+  tap?: { approver: string; exactDigest: string; epoch: number };
 }
 
 export type GrantRetryFailure =
   | 'not-found' | 'suppressed' | 'unscopeable' | 'claim-missing' | 'claim-expired'
   | 'claim-spent' | 'epoch-stale' | 'bad-nonce' | 'not-authenticated' | 'locked'
-  | 'unwritable' | 'no-key' | 'card-live';
+  | 'unwritable' | 'no-key' | 'card-live'
+  // #815 B, tap path only:
+  | 'hash-mismatch' | 'grant-live' | 'terminal-only';
 
 export type GrantRetryOutcome =
   | { ok: true; alreadyGranted?: boolean; grant: RetryGrant; row: RetryRow; id: string }
@@ -1195,12 +1235,16 @@ interface GrantAttempt {
  * window between those two writes is a row that looks grantable and was never
  * granted.
  *
- * Authentication is not optional and has exactly two forms:
+ * Authentication is not optional and has exactly three forms:
  *   - card: the `claimNonce` minted at launch, HMAC-matched against a claim
  *     that is still live AND still on the current epoch. A corrupt/reset store
  *     has no claim record, so a stale card fails here before anything else.
  *   - TTY: `isInteractive` — the same gate `shieldcortex approve` has always
  *     used. A same-user process that merely imports this module has neither.
+ *   - tap (#815 B): `auth.tap`, passed only by approve-tap.ts after it has
+ *     verified the HMAC, the approver and the single-use nonce. Scoped exactly
+ *     like a card (no widener, no deny override), bound to the hash and epoch
+ *     the nonce was minted for.
  *
  * Deny beats an in-flight approve: a tap that lands after the operator already
  * denied is refused (`suppressed`) and audited, never honoured. Only the TTY
@@ -1215,7 +1259,21 @@ export function grantRetry(
   const ttlMs =
     boundedNumber(opts.ttlMs, MIN_RETRY_GRANT_TTL_MS, MAX_RETRY_GRANT_TTL_MS)
     ?? DEFAULT_RETRY_GRANT_TTL_MS;
-  const viaCard = typeof auth.nonce === 'string' && auth.nonce.length > 0;
+  const tapAuth = auth.tap && typeof auth.tap === 'object' ? auth.tap : undefined;
+  const viaTap = tapAuth !== undefined;
+  // A tap and a card nonce together is a confused caller: refuse rather than
+  // pick one (#815 B).
+  if (viaTap && typeof auth.nonce === 'string' && auth.nonce.length > 0) {
+    return { ok: false, reason: 'not-authenticated' };
+  }
+  if (viaTap && !(
+    typeof tapAuth.approver === 'string' && /^telegram:[1-9][0-9]{0,19}$/.test(tapAuth.approver)
+    && typeof tapAuth.exactDigest === 'string' && /^[0-9a-f]{64}$/.test(tapAuth.exactDigest)
+    && Number.isSafeInteger(tapAuth.epoch) && tapAuth.epoch >= 0
+  )) {
+    return { ok: false, reason: 'not-authenticated' };
+  }
+  const viaCard = !viaTap && typeof auth.nonce === 'string' && auth.nonce.length > 0;
   // Card authentication is EXCLUSIVE: a caller presenting a nonce is the
   // waiter, and the waiter never carries TTY privileges. Hard-drop the
   // interactive flag and both wideners the moment a nonce is present, so a
@@ -1223,11 +1281,11 @@ export function grantRetry(
   // smuggle --any-origin / --override-deny onto a card grant (SOL R-impl
   // blocker 2; spec B4 — the trust boundary is THIS function, not its
   // callers).
-  const viaTty = !viaCard && auth.isInteractive === true;
-  if (viaCard) {
+  const viaTty = !viaCard && !viaTap && auth.isInteractive === true;
+  if (viaCard || viaTap) {
     auth = { ...auth, isInteractive: false, anyOrigin: false, overrideDeny: false };
   }
-  if (!viaCard && !viaTty) return { ok: false, reason: 'not-authenticated' };
+  if (!viaCard && !viaTty && !viaTap) return { ok: false, reason: 'not-authenticated' };
 
   let presentedHmac: string | null = null;
   if (viaCard) {
@@ -1249,9 +1307,25 @@ export function grantRetry(
       if (!constantTimeEquals(row.claim.nonceHmac, presentedHmac as string)) {
         return { value: { failed: 'bad-nonce' }, commit: true };
       }
-    } else if (claimIsLive(row.claim, now) && !row.claim?.grantedAt) {
-      // One live door: a TTY grant must not sit beside an unanswered card.
-      return { value: { failed: 'card-live' }, commit: true };
+    } else {
+      if (viaTap) {
+        // #815 B: the nonce was minted for THIS exact call on THIS epoch. A
+        // row whose latest denial is a different exact call (or carries no
+        // current-version digest), or an operator Deny since the nonce was
+        // minted (which advances the epoch), refuses the tap.
+        if (currentExactDigest(row) !== tapAuth!.exactDigest) return { value: { failed: 'hash-mismatch' }, commit: true };
+        if (row.denyEpoch !== tapAuth!.epoch) return { value: { failed: 'epoch-stale' }, commit: true };
+        // Terminal-only is decided HERE, on the row as it is inside this
+        // locked transaction — a remint can add a catastrophic or
+        // self-protection signal after the tap path's preview without
+        // touching the hash or the epoch.
+        if (tapTerminalOnlyReason(row.signals) !== null) return { value: { failed: 'terminal-only' }, commit: true };
+      }
+      if (claimIsLive(row.claim, now) && !row.claim?.grantedAt) {
+        // One live door: a TTY grant (or a tap) must not sit beside an
+        // unanswered card.
+        return { value: { failed: 'card-live' }, commit: true };
+      }
     }
 
     const suppressed = suppressionIsLive(row, now);
@@ -1267,6 +1341,12 @@ export function grantRetry(
       // Cards NEVER get here (claimCardLaunch already refused an unscopeable
       // identity); this is the TTY path without --any-origin.
       return { value: { failed: 'unscopeable' }, commit: true };
+    }
+
+    if (viaTap && grantIsLive(row.grant, now)) {
+      // #815 B: a tap never answers "already granted" as a success — the
+      // retry is already authorised and unspent, so this tap adds nothing.
+      return { value: { failed: 'grant-live' }, commit: true };
     }
 
     if (grantIsLive(row.grant, now)) {
@@ -1297,7 +1377,10 @@ export function grantRetry(
       approvedAt: now,
       ttlMs,
       epoch: row.denyEpoch,
-      via: viaCard ? 'card' : 'tty',
+      via: viaCard ? 'card' : viaTap ? 'tap' : 'tty',
+      ...(viaTap
+        ? { approver: tapAuth!.approver, exactDigest: tapAuth!.exactDigest, exactDigestVersion: EXACT_CALL_DIGEST_VERSION }
+        : {}),
       origin: {
         ...(anyOrigin ? { anyOrigin: true } : {}),
         ...(row.originScope.cwd && !anyOrigin ? { cwd: row.originScope.cwd } : {}),
@@ -1307,7 +1390,7 @@ export function grantRetry(
     row.grant = grant;
     // The claim is KEPT and marked: it is what lets a double tap authenticate
     // and be answered idempotently, and what makes a third tap `claim-spent`.
-    if (row.claim) row.claim.grantedAt = now;
+    if (row.claim && !viaTap) row.claim.grantedAt = now;
     return { value: { row: { ...row }, grant: { ...grant } }, commit: true };
   });
 
@@ -1355,7 +1438,20 @@ export type ConsumedRetryGrant = RetryGrant & { hash: string; id: string; action
  * tool calls cannot both spend the same grant: exactly one sees it unspent.
  */
 export function consumeRetryGrant(
-  args: { hash: string; origin: ConsumeRetryOrigin },
+  args: {
+    hash: string;
+    origin: ConsumeRetryOrigin;
+    /** #815 B: `exactCallDigest(tool, input)` of THIS call. A `tap` grant is
+     *  spent only when it equals the grant's own; without it, never. */
+    exactDigest?: string;
+    /** #815 B: the signals of the guard's CURRENT verdict on this call. A
+     *  `tap` grant is re-checked against it when spent, with the predicate
+     *  the grant itself passed (`tapTerminalOnlyReason`); without it, or when
+     *  it is terminal-only, the grant is left unspent and nothing is
+     *  returned. Terminal and card grants keep their own authority and do
+     *  not read it. */
+    currentSignals?: readonly unknown[];
+  },
   opts: RetryStoreOptions = {},
 ): ConsumedRetryGrant | null {
   const now = opts.now ?? Date.now();
@@ -1364,6 +1460,10 @@ export function consumeRetryGrant(
   const tool = String(args.origin?.tool ?? '').trim();
   if (!tool) return null;
   const cwd = canonicaliseCwd(args.origin?.cwd);
+  const exact = typeof args.exactDigest === 'string' && /^[0-9a-f]{64}$/.test(args.exactDigest)
+    ? args.exactDigest
+    : null;
+  const tapVerdictEligible = tapTerminalOnlyReason(args.currentSignals) === null;
 
   const result = withLock<ConsumedRetryGrant | null>(opts.home, (file) => {
     // Snapshotted so a no-op consume — the overwhelming majority, since every
@@ -1376,6 +1476,12 @@ export function consumeRetryGrant(
       if (r.hash !== hash) return false;
       if (!grantIsLive(r.grant, now)) return false;
       if (suppressionIsLive(r, now)) return false; // deny beats a live grant
+      // #815 B: a tap grant is bound byte-for-byte; the tolerant hash alone
+      // never spends it. And the verdict on THIS call must still be one a tap
+      // may answer — refused here, before anything is spent or returned.
+      if (r.grant!.via === 'tap' && (!tapVerdictEligible || exact === null || currentExactDigest(r.grant) !== exact)) {
+        return false;
+      }
       const origin = r.grant!.origin;
       if (origin.tool !== tool) return false;
       if (origin.anyOrigin === true) return true; // TTY-only, confirmed

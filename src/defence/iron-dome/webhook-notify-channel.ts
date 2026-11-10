@@ -19,8 +19,21 @@
  *      module doc. A compromised or careless endpoint that echoes back
  *      `{"approved":true}` gets nothing from this channel for it; the human's
  *      answer only ever counts when it lands on the #118 approval store.
+ *
+ * #815 A: a held call or a headless denial can also carry a versioned `card`
+ * block — a fixed-template what/why/who, the exact approve command, and
+ * (denials only) the Approve/Deny choices bound to the action id. The card
+ * never shows the call's target (see `cardLines`). Version 1 has no tap path;
+ * see `WEBHOOK_CARD_VERSION`.
  */
 import { createHmac } from 'node:crypto';
+import {
+  clipCardLine,
+  fixedTemplateAction,
+  fixedTemplateReason,
+  withholdSecretCardLine,
+  type ApprovalCardSummary,
+} from './approval-card.js';
 import type {
   ActionGuardOutcomeNotification,
   AnyOperatorNotification,
@@ -84,6 +97,157 @@ function buildConversationPayload(n: ConversationThreatNotification): Record<str
   };
 }
 
+// ── #815 A: the readable card, for a bridge that relays to a chat ──────────
+
+/**
+ * Version of the `card` block. A receiver (sc-notify-bridge) must check it
+ * before drawing anything from the block.
+ *
+ *   1 — this shape. `actions` name the choices and the action they belong to
+ *       (`{ action, label, actionId }`) and NOTHING else: no hash, no args, no
+ *       token. There is no tap path in version 1 — a button drawn from it can
+ *       do nothing, so a version-1 receiver shows `approveCommand` instead of
+ *       a button that pretends to approve.
+ *   2 — reserved for #815 B (one-tap approve): each `actions[]` entry gains a
+ *       single-use, expiring `nonce`. Nothing in version 1 is a credential.
+ */
+export const WEBHOOK_CARD_VERSION = 1 as const;
+
+export interface WebhookCardAction {
+  action: 'approve' | 'deny';
+  label: string;
+  /** The #310 action id (`act-` + 16 hex). The only identity a button carries. */
+  actionId: string;
+}
+
+export interface WebhookCard {
+  version: typeof WEBHOOK_CARD_VERSION;
+  /** 'approval' — the call is HELD and a human answer decides it.
+   *  'denial'   — the call is already refused; approving authorises a RETRY. */
+  kind: 'approval' | 'denial';
+  headline: string;
+  /** Plain-English WHAT: one of the fixed `CARD_ACTION_TEMPLATES`. It never
+   *  names the target (no branch, path, host, URL or argument). */
+  what: string;
+  why: string;
+  who: string;
+  /** The exact command that allows it, when there is one. */
+  approveCommand?: string;
+  /** Live holds only — on a denial there is nothing left to refuse. */
+  denyCommand?: string;
+  /** Present only when an action id exists to bind a choice to. */
+  actions?: WebhookCardAction[];
+  /** The card as plain text, for a receiver that renders text only. */
+  text: string;
+}
+
+/** Per-line bounds. A chat message is not a document, and a line that crossed
+ *  a process boundary is re-flattened (line breaks and hidden characters) by
+ *  `clipCardLine` before it is sent anywhere. */
+const CARD_WHAT_MAX = 160;
+const CARD_WHY_MAX = 240;
+const CARD_WHO_MAX = 96;
+const ACTION_ID_SHAPE = /^act-[a-f0-9]{16}$/;
+/** The ids a live-hold card's commands carry, re-checked here as the action
+ *  id is: `buildNotification` makes them this shape, a hand-built
+ *  notification need not. */
+const SHORT_HASH_SHAPE = /^[0-9a-f]{12}$/i;
+const ATTEMPT_ID_SHAPE = /^[0-9a-f]{8,64}$/i;
+
+/**
+ * The card's three lines. `text` is built from these lines only; everything
+ * else on the card is fixed wording or a shape-checked id.
+ *
+ * #815 A (descoped after review r5): the card never shows the call's target.
+ * WHAT is one of the fixed `CARD_ACTION_TEMPLATES` and WHY is made of the
+ * guard's fixed phrases; anything else handed in is replaced here, at the
+ * last point before the card leaves the box, whoever built it (the hook
+ * builds this card with `buildTemplateApprovalCard`). WHO is the agent, the
+ * box's own hostname (through its credential check) and the session id.
+ * Review B1, kept as defence in depth: each line also goes through the
+ * credential redactor (`withholdSecretCardLine`) whole, before it is clipped,
+ * and a line that trips it is withheld whole.
+ */
+function cardLines(card: ApprovalCardSummary): { what: string; why: string; who: string } {
+  const line = (text: string, max: number) => clipCardLine(withholdSecretCardLine(text), max);
+  return {
+    what: line(fixedTemplateAction(card.action), CARD_WHAT_MAX),
+    why: line(fixedTemplateReason(card.reason), CARD_WHY_MAX),
+    who: line(card.who, CARD_WHO_MAX),
+  };
+}
+
+function cardText(headline: string, lines: { what: string; why: string; who: string }, tail: string[]): string {
+  return [headline, '', `What: ${lines.what}`, `Why:  ${lines.why}`, `Who:  ${lines.who}`, '', ...tail].join('\n');
+}
+
+/** The card for a HELD call (approval_requested over the webhook). There is no
+ *  action id on a live hold, so it carries the commands and no `actions`. A
+ *  hash or attempt id that is not the shape `buildNotification` makes gets no
+ *  card: a card whose commands cannot be stated exactly is not sent. */
+function buildApprovalCardBlock(n: OperatorNotification, card: ApprovalCardSummary): WebhookCard | undefined {
+  if (typeof n.shortHash !== 'string' || !SHORT_HASH_SHAPE.test(n.shortHash)) return undefined;
+  // Truthiness as the commands below (and the top-level ones) read it.
+  if (n.attemptId && (typeof n.attemptId !== 'string' || !ATTEMPT_ID_SHAPE.test(n.attemptId))) return undefined;
+  const lines = cardLines(card);
+  const attemptArg = n.attemptId ? ` --attempt ${n.attemptId}` : '';
+  const approveCommand = `shieldcortex approve ${n.shortHash}${attemptArg}`;
+  const denyCommand = `shieldcortex deny ${n.shortHash}${attemptArg}`;
+  const headline = '🛡️ ShieldCortex needs your approval';
+  return {
+    version: WEBHOOK_CARD_VERSION,
+    kind: 'approval',
+    headline,
+    ...lines,
+    approveCommand,
+    denyCommand,
+    text: cardText(headline, lines, [
+      'To allow it once, run in a terminal on that machine:',
+      `  ${approveCommand}`,
+      'To refuse it:',
+      `  ${denyCommand}`,
+    ]),
+  };
+}
+
+/** The card for a refused call. Only a headless denial
+ *  (`denied_no_prompt_surface`) has a retry to authorise; any other denial is
+ *  explained but offers no command and no choice. */
+function buildDenialCardBlock(n: ActionGuardOutcomeNotification, card: ApprovalCardSummary): WebhookCard {
+  const lines = cardLines(card);
+  const actionId = typeof n.actionId === 'string' && ACTION_ID_SHAPE.test(n.actionId) ? n.actionId : undefined;
+  const retryable = n.outcome === 'denied_no_prompt_surface' && actionId !== undefined;
+  const headline = n.outcome === 'denied_no_prompt_surface'
+    ? '🛡️ ShieldCortex blocked an action: nobody was at a prompt to approve it'
+    : '🛡️ ShieldCortex blocked an action';
+  if (!retryable) {
+    return {
+      version: WEBHOOK_CARD_VERSION,
+      kind: 'denial',
+      headline,
+      ...lines,
+      text: cardText(headline, lines, ['The call was refused. Nothing is waiting for approval.']),
+    };
+  }
+  const approveCommand = `shieldcortex approve --denial ${actionId}`;
+  return {
+    version: WEBHOOK_CARD_VERSION,
+    kind: 'denial',
+    headline,
+    ...lines,
+    approveCommand,
+    actions: [
+      { action: 'approve', label: 'Approve retry', actionId },
+      { action: 'deny', label: 'Deny', actionId },
+    ],
+    text: cardText(headline, lines, [
+      'The job was refused and did not do the work.',
+      'To allow ONE retry, run in a terminal on that machine:',
+      `  ${approveCommand}`,
+    ]),
+  };
+}
+
 function buildPayload(n: AnyOperatorNotification): Record<string, unknown> {
   if (n.event === 'maintenance_fail') return { event: n.event, checks: n.checks, text: formatOperatorNotification(n), ts: new Date().toISOString() };
   if (n.event === 'mcp_tool_change') return { event: n.event, kind: n.kind, server: n.server, tools: n.tools, toolCount: n.toolCount, ...(n.reason ? { reason: n.reason } : {}), text: formatOperatorNotification(n), ts: new Date().toISOString() };
@@ -109,6 +273,8 @@ function buildActionGuardPayload(n: ActionGuardOutcomeNotification): Record<stri
     detectedAt: n.detectedAt,
     text: formatOperatorNotification(n),
     ts: new Date().toISOString(),
+    // Last, so every pre-#815 key keeps its place for an existing receiver.
+    ...(n.event === 'action_guard_denial' && n.card ? { card: buildDenialCardBlock(n, n.card) } : {}),
   };
 }
 
@@ -147,6 +313,13 @@ function buildApprovalPayload(n: OperatorNotification): Record<string, unknown> 
   if (denied && n.deniedReason) payload.deniedReason = n.deniedReason;
   if (n.sessionId) payload.sessionId = n.sessionId;
   if (n.cwd) payload.cwd = n.cwd;
+  // #815 A: the readable card for a live hold. `buildNotification` attaches a
+  // card only to 'approval_requested'; the check is repeated so a hand-built
+  // denial can never be given a live-hold card with a deny command on it.
+  if (!denied && n.card) {
+    const card = buildApprovalCardBlock(n, n.card);
+    if (card) payload.card = card;
+  }
   return payload;
 }
 

@@ -283,6 +283,13 @@ function inlineStrictPosture(config) {
   // here exactly as `applyStrictFailClosedPosture` drops it in dist (#878: a
   // kept `readinessGate: true` let the "strict" posture run in shadow).
   delete out.actionGuard.readinessGate;
+  // #889: the strict posture keeps the known-malicious package floor on, exactly as
+  // `applyStrictFailClosedPosture` does in dist.
+  if (out.actionGuard.packageVetting && typeof out.actionGuard.packageVetting === 'object' && !Array.isArray(out.actionGuard.packageVetting)) {
+    const pv = { ...out.actionGuard.packageVetting };
+    delete pv.enabled;
+    out.actionGuard.packageVetting = pv;
+  }
   // #522 (GPT-6 round-6, item 1), the second spelling. The deprecated
   // `interceptor.actionGuard` alias gap-fills per key in
   // flattenActionGuardConfig (#209). Every pinned key is now present on the
@@ -295,6 +302,11 @@ function inlineStrictPosture(config) {
     const alias = { ...out.interceptor.actionGuard };
     for (const key of Object.keys(INLINE_STRICT_POSTURE.actionGuard)) delete alias[key];
     delete alias.readinessGate;
+    if (alias.packageVetting && typeof alias.packageVetting === 'object' && !Array.isArray(alias.packageVetting)) {
+      const pv = { ...alias.packageVetting };
+      delete pv.enabled;
+      alias.packageVetting = pv;
+    }
     out.interceptor = { ...out.interceptor, actionGuard: alias };
   }
   return out;
@@ -463,6 +475,9 @@ function flattenActionGuardConfig(config) {
       // malformed means no exemption ever fires, which is where the guard
       // started — the allowlist can only fail closed.
       reviewedScripts: Array.isArray(raw.reviewedScripts) ? raw.reviewedScripts : null,
+      // #889 pre-install package vetting — RAW again; validated only by
+      // normalisePackageVettingConfig in dist. Absent = defaults (on, 7 days).
+      packageVetting: raw.packageVetting && typeof raw.packageVetting === 'object' && !Array.isArray(raw.packageVetting) ? raw.packageVetting : null,
       // #310 / #378 operator retry control — RAW again, validated only by
       // normaliseRetryControlConfig in dist. Fingerprint + `approve --denial`
       // are always-on when the dist module is complete. `retryCards` must be
@@ -529,6 +544,22 @@ async function loadGuard() {
 }
 
 /**
+ * #889: the pre-install package vetting module. Null when dist predates it,
+ * in which case installs are judged exactly as before — vetting is additive.
+ */
+async function loadPackageVetting() {
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(hookDistRoot(), 'defence', 'iron-dome', 'package-vetting.js')).href
+    );
+    return typeof mod.vetToolCall === 'function' && typeof mod.applyVettingToVerdict === 'function'
+      && typeof mod.normalisePackageVettingConfig === 'function' ? mod : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The invoked-script source resolver (#160).
  *
  * Without this, `evaluateToolCall` cannot fold a script's CONTENTS into the
@@ -556,6 +587,108 @@ async function loadScriptResolver(base) {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * #1025 — the audit-only native-exec provenance store. Lazy, exactly like the
+ * resolver above: a static import that failed would crash the hook, and a
+ * crashed hook is an allow. A missing module returns null and the hook runs
+ * with no observation — the decision is the same either way, because nothing
+ * this module returns is ever a decision input.
+ */
+async function loadNativeProvenance() {
+  const distRoot = hookDistRoot();
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'native-exec-provenance.js')).href
+    );
+    return typeof mod.createNativeArtifactProbe === 'function'
+      && typeof mod.recordNativeArtifactCaptures === 'function'
+      ? mod
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** #1025 — the session key provenance is recorded under, or null. Unkeyed
+ *  and unresolved sessions record and observe nothing (current behaviour). */
+function nativeProvenanceKey(baseExtra) {
+  if (baseExtra.namedIdentityUnresolved) return null;
+  return typeof baseExtra.sessionKey === 'string' && /^sc-[a-f0-9]{16}$/.test(baseExtra.sessionKey)
+    ? baseExtra.sessionKey
+    : null;
+}
+
+/** #1025 — the evaluator option that binds the provenance probe to this
+ *  call's session and RAW payload cwd (no process.cwd() fallback, so record
+ *  and query resolve a relative path from the same base). Never throws. */
+function nativeProvenanceOptions(store, baseExtra, rawCwd, budget) {
+  const key = nativeProvenanceKey(baseExtra);
+  if (!store || !key) return {};
+  try {
+    const probe = store.createNativeArtifactProbe({
+      sessionKey: key,
+      cwd: typeof rawCwd === 'string' ? rawCwd : undefined,
+      budget,
+    });
+    return typeof probe === 'function' ? { nativeArtifactProvenance: probe } : {};
+  } catch {
+    return {};
+  }
+}
+
+/** #1025 — this call's ONE store budget, shared by its probe, its record step
+ *  and the sweep that step may run. Made per call (never module-level), so
+ *  no other call can share or reset it. `undefined` on an older dist: the
+ *  store then makes its own default. Never throws. */
+function nativeProvenanceBudget(store) {
+  try {
+    return typeof store?.createNativeProvenanceBudget === 'function'
+      ? store.createNativeProvenanceBudget()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** #1025 — record this call's write/compile targets. After the call's own
+ *  evaluation; best effort; never throws and never touches the verdict. A
+ *  `block` verdict records nothing: the call never runs, so its writes never
+ *  happen, and no store work stands between the deny and its delivery. */
+function recordNativeProvenance(store, guard, toolName, toolInput, baseExtra, rawCwd, verdict, budget) {
+  const key = nativeProvenanceKey(baseExtra);
+  if (!store || !key || typeof guard?.nativeArtifactCaptures !== 'function') return;
+  if (!verdict || verdict.decision === 'block') return;
+  try {
+    const captures = guard.nativeArtifactCaptures(toolName, toolInput);
+    if (!Array.isArray(captures) || captures.length === 0) return;
+    store.recordNativeArtifactCaptures({
+      sessionKey: key,
+      captures,
+      cwd: typeof rawCwd === 'string' ? rawCwd : undefined,
+      budget,
+    });
+  } catch {
+    /* observation only: an unrecorded write is a missed log line later */
+  }
+}
+
+const SAFE_NATIVE_EXEC_ACTIONS = new Set(['exec', 'load', 'reference']);
+const SAFE_NATIVE_EXEC_PROVENANCE = new Set(['agent-written', 'compiled-output', 'ambiguous']);
+
+/** #1025 — rebuild `verdict.nativeExec` from allowlisted enums only, bounded,
+ *  the same treatment every other verdict field written to the row gets. */
+function safeNativeExec(value) {
+  const uses = Array.isArray(value?.uses) ? value.uses : [];
+  const out = [];
+  for (const u of uses.slice(0, 8)) {
+    const action = String(u?.action ?? '');
+    const provenance = String(u?.provenance ?? '');
+    if (!SAFE_NATIVE_EXEC_ACTIONS.has(action) || !SAFE_NATIVE_EXEC_PROVENANCE.has(provenance)) continue;
+    out.push(u?.sameCall === true ? { action, provenance, sameCall: true } : { action, provenance });
+  }
+  return out.length > 0 ? { uses: out } : undefined;
 }
 
 /**
@@ -654,6 +787,17 @@ async function loadRetryControl(rawRetry, digestWindowMs) {
     return { config, mod };
   } catch {
     return null;
+  }
+}
+
+/** #815 B — the exact call digest, or undefined. Optional on purpose: a dist
+ *  without it (or a digest that throws) only makes a denial untappable and a
+ *  tap grant unspendable; it never changes a decision. */
+function exactRetryDigest(mod, toolName, toolInput) {
+  try {
+    return typeof mod?.exactCallDigest === 'function' ? mod.exactCallDigest(toolName, toolInput) : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -947,6 +1091,11 @@ async function loadNotify(rawNotifyConfig) {
       buildApprovalCard: typeof cardMod?.buildApprovalCard === 'function'
         ? cardMod.buildApprovalCard
         : null,
+      /** #815 A — the webhook's card: a fixed template that never names the
+       *  target. A dist without it sends no webhook card. */
+      buildTemplateApprovalCard: typeof cardMod?.buildTemplateApprovalCard === 'function'
+        ? cardMod.buildTemplateApprovalCard
+        : null,
       /** Where a denial goes when the primary channel cannot carry one. Null
        *  means an openclaw-only install: the denial reaches no channel, which
        *  is the honest outcome until a non-interactive gateway send path
@@ -1020,30 +1169,49 @@ function safeApprovalVerdict(verdict) {
   };
 }
 
-function safeDiagnosticApprovalReason(reason) {
+function safeDiagnosticApprovalReason(reason, packageReasons) {
   const raw = String(reason ?? '');
   const hashHint = raw.match(/shieldcortex approve [0-9a-f]{12}/)?.[0];
   const degraded = /degraded|unavailable|could not scan|guard runtime/i.test(raw);
   const lead = degraded
     ? 'Action Guard is degraded/unavailable and requires approval; inspect local audit for details.'
     : 'Action Guard requires approval; inspect local audit for details.';
-  return `${lead}${hashHint ? ` To allow this exact command once, run in YOUR terminal: ${hashHint}` : ''}`;
+  // #889: the package check's findings are built from a fixed vocabulary plus
+  // a registry-safe package name, so — unlike the guard's own reason — they are
+  // safe to show on the prompt a person is answering.
+  const pkg = Array.isArray(packageReasons) && packageReasons.length > 0
+    ? ` Package check: ${packageReasons.slice(0, 4).map((r) => String(r).replace(/[^\x20-\x7e]/g, '?').slice(0, 110)).join('; ')}.`
+    : '';
+  return `${lead}${pkg}${hashHint ? ` To allow this exact command once, run in YOUR terminal: ${hashHint}` : ''}`;
 }
 
 /**
  * #648 — the card's what/why/who, built on this box from the live tool input.
- * Only for a LIVE hold going to the interactive card channel: the webhook and
- * every denial path keep the values-free surface (#284/#369/#517), and they
- * never receive this object. Every target in it has been through the
- * credential redactor (approval-card.ts `safeTarget`). Never throws.
+ * The interactive card channel gets the #648 card, whose targets go through
+ * the credential redactor as they are built (approval-card.ts `safeTarget`).
+ * #815 A: the webhook gets the fixed-template card instead
+ * (`buildTemplateApprovalCard`): a WHAT chosen by the kind of action, which
+ * never names the target. The values-free `command` / `surface` fields and
+ * `denials.jsonl` never receive either. Never throws.
  */
 function approvalCardFor(notify, channel, { toolName, toolInput, verdict, sessionKey, cwd }) {
-  if (channel?.name !== 'openclaw-approval' || typeof notify?.buildApprovalCard !== 'function') return undefined;
+  const build = channel?.name === 'openclaw-approval' ? notify?.buildApprovalCard
+    : channel?.name === 'webhook' ? notify?.buildTemplateApprovalCard
+      : undefined;
+  if (typeof build !== 'function') return undefined;
   try {
-    return notify.buildApprovalCard({
+    return build({
       tool: String(toolName ?? ''),
       input: toolInput,
       signals: Array.isArray(verdict?.signals) ? verdict.signals.map(String) : [],
+      ...(Array.isArray(verdict?.packageVettingReasons) && verdict.packageVettingReasons.length > 0
+        ? { extraReasons: verdict.packageVettingReasons.map(String) }
+        : {}),
+      // #889 R2: the finding kinds, so the webhook's fixed-template card can say
+      // what kind of thing the check found without the free-form text above.
+      ...(Array.isArray(verdict?.packageVettingKinds) && verdict.packageVettingKinds.length > 0
+        ? { vettingKinds: verdict.packageVettingKinds.map(String) }
+        : {}),
       plane: 'claude-code',
       sessionId: notificationContext(sessionKey).sessionId,
       cwd: typeof cwd === 'string' ? cwd : undefined,
@@ -1143,6 +1311,8 @@ const SAFE_SIGNALS = new Set([
   // #874: the other two self-protection floor signals. Guard reason codes,
   // not operator data; redacted, a floor denial could not name its signal.
   'touch-guard-config', 'disable-action-guard',
+  // #889: the pre-install package check's own reason codes (no operator data).
+  'package-vetting', 'known-malicious-package',
 ]);
 /**
  * #436 — the only tiers that deny with no operator affordance. Everything the
@@ -1761,7 +1931,16 @@ function terminalDecisionReason(verdict, outcome, event) {
     : '';
   const severity = safeSeverity(verdict?.severity, event);
   const severityPrefix = severity === 'critical' ? 'Catastrophic-tier. ' : '';
-  return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${nextStep}${suffix}`;
+  // #889: a known-malicious package says so, by name and advisory id — the
+  // agent needs to know WHICH install to drop. Same vocabulary-only reasons as
+  // the approval prompt. Each reason arrives already bounded to 240 characters
+  // by the vetting module, which clips the package name and the id list so the
+  // fixed explanation (and "pin a version", the way through) is whole: the cap
+  // here must not be shorter, or it cuts the instruction off.
+  const malicious = Array.isArray(verdict?.packageVettingReasons) && verdict.signals?.includes?.('known-malicious-package')
+    ? ` Package check: ${verdict.packageVettingReasons.slice(0, 4).map((r) => String(r).replace(/[^\x20-\x7e]/g, '?').slice(0, 240)).join('; ')}.`
+    : '';
+  return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${malicious}${nextStep}${suffix}`;
 }
 
 function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey, actionId, notify }) {
@@ -1994,6 +2173,9 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
             // From the HARNESS payload, never from tool input (design B3).
             cwd: retryCtx.cwd,
             sessionKey,
+            // #815 B: the exact call digest a one-tap grant binds to. Absent
+            // (older dist, or it threw) leaves the denial untappable.
+            exactDigest: exactRetryDigest(retry.mod, toolName, toolInput),
           },
           { home: homedir() },
         );
@@ -2090,7 +2272,13 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
     typeof notify.buildActionGuardOutcomeNotification === 'function'
   ) {
     try {
-      let notification = notify.buildActionGuardOutcomeNotification(pendingRow);
+      // #815 A: a headless denial carries the fixed-template card to the
+      // webhook (it never names the target). Handed to the builder ONLY — `pendingRow` is the denials.jsonl row and
+      // stays values-free.
+      const card = outcome === 'denied_no_prompt_surface'
+        ? approvalCardFor(notify, notify.denialChannel, { toolName, toolInput, verdict, sessionKey, cwd: retryCtx?.cwd })
+        : undefined;
+      let notification = notify.buildActionGuardOutcomeNotification(card ? { ...pendingRow, card } : pendingRow);
       // Enrich first-of-window DNP with digest text when builder supports it.
       if (
         digestDecision?.action === 'notify' &&
@@ -3108,7 +3296,7 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
       'asked',
       { ...baseExtra, intentArgs: toolInput, ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}), ...broker },
     );
-    emitDecision('ask', safeDiagnosticApprovalReason(reason));
+    emitDecision('ask', safeDiagnosticApprovalReason(reason, auditVerdict?.packageVettingReasons));
     return;
   }
   const actionId = writeTerminalOutcomeAudit(toolName, { ...auditVerdict, reason }, toolInput, action, 'denied_no_prompt_surface', 'action_guard_denial', {
@@ -3367,23 +3555,64 @@ process.stdin.on('end', async () => {
     const isReviewedScript = resolveScriptSource
       ? await loadReviewedScriptCheck(cfg.reviewedScripts, scriptBase)
       : undefined;
+    // #1025: audit-only native-exec provenance, bound to THIS call's session.
+    const nativeStore = await loadNativeProvenance();
+    const nativeBudget = nativeProvenanceBudget(nativeStore);
+    const nativeOptions = nativeProvenanceOptions(nativeStore, baseExtra, hookData.cwd, nativeBudget);
     let verdict;
     try {
       // 4th arg, not the 3rd — the 3rd is the IronDome config. Passing the
       // options object into the config slot type-checks in .mjs and silently
       // does nothing, which is the same shape of defect as the gap this fixes.
+      // #1025: the native-exec probe rides in the same options object, after
+      // the resolver fields; with no resolver it is the whole object.
       verdict = guard.evaluateToolCall(
         toolName,
         toolInput,
         undefined,
         resolveScriptSource
-          ? (isReviewedScript ? { resolveScriptSource, isReviewedScript } : { resolveScriptSource })
-          : undefined,
+          ? (isReviewedScript
+            ? { resolveScriptSource, isReviewedScript, ...nativeOptions }
+            : { resolveScriptSource, ...nativeOptions })
+          : (nativeOptions.nativeArtifactProvenance ? nativeOptions : undefined),
       );
     } catch (err) {
       await handleDegradedGuard(toolName, toolInput, cfg, `evaluation error: ${err?.message ?? err}`, permissionMode, await getNotify(), baseExtra); // always exits
       return;
     }
+    // #889: pre-install package vetting. Only for a call the guard has not
+    // already refused catastrophically; network work happens only when the
+    // command names a package to install, bounded to 3 s inside `vetToolCall`.
+    // It only adds information — except a known-malicious package, which
+    // becomes a catastrophic block (door-less, like every catastrophic
+    // signal). Any failure leaves the guard's own verdict untouched.
+    if (!(verdict.decision === 'block' && TERMINAL_BLOCK_SEVERITIES.has(verdict.severity))) {
+      try {
+        const vm = await loadPackageVetting();
+        if (vm) {
+          const outcome = await vm.vetToolCall(toolName, toolInput, vm.normalisePackageVettingConfig(cfg.packageVetting));
+          if (outcome) {
+            verdict = vm.applyVettingToVerdict(verdict, outcome);
+            if (outcome.reasons.length > 0) verdict.packageVettingReasons = outcome.reasons;
+            // The finding KINDS (closed set) for the webhook's fixed-template card (#889 R2).
+            const kinds = [...new Set(outcome.audit.flatMap((a) => (Array.isArray(a.kinds) ? a.kinds : [])))];
+            if (kinds.length > 0) verdict.packageVettingKinds = kinds;
+            if (outcome.audit.length > 0) baseExtra.packageVetting = outcome.audit;
+          }
+        }
+      } catch { /* vetting is additive: a failure never changes the guard's answer */ }
+    }
+
+    // #1025: record this call's write/compile targets AFTER its own
+    // evaluation AND after vetting (#889: a call vetting turns into a block
+    // records nothing, same as the plugin; a same-call write is not evidence
+    // for this call's probe),
+    // and carry the observation on every row this call writes. Neither step
+    // changes `verdict`; the record step reads only `verdict.decision`, to
+    // skip a `block` (the call never runs).
+    recordNativeProvenance(nativeStore, guard, toolName, toolInput, baseExtra, hookData.cwd, verdict, nativeBudget);
+    const nativeExec = safeNativeExec(verdict?.nativeExec);
+    if (nativeExec) baseExtra.nativeExec = nativeExec;
 
     // ── #509 enforce-when-ready ───────────────────────────────────────────
     // Only an ENFORCING guard can be gated, and never on a host with a policy
@@ -3428,11 +3657,21 @@ process.stdin.on('end', async () => {
       // unaudited — volume discipline, mirrored with the plugin interceptor.
       if (verdict.severity !== 'benign' && cfg.auditAllows !== false) {
         writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'allowed'), redactedAuditArgs(toolName, toolInput), 'allow', 'allowed', baseExtra);
+      } else if (baseExtra.nativeExec && cfg.auditAllows !== false) {
+        // #1025: a benign allow is normally unaudited, but running or loading
+        // an agent-produced native image is the one thing about it worth
+        // keeping — one row, redacted args, the same opt-out as every other
+        // allow row. The decision above is unchanged. Deliberately an else-if
+        // with the #509 tally below: this row is itself a counted
+        // `intercept` row (guard-readiness isCountedCall), so it already puts
+        // this call in the readiness denominator once; writing the tally row
+        // too would count one call twice.
+        writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'allowed'), redactedAuditArgs(toolName, toolInput), 'allow', 'allowed', baseExtra);
       } else if (whenReady) {
         // #509: the intervention proxy's denominator is EVERY gated call, so under this
         // posture a benign allow leaves a minimal row too — no command text,
         // no args; the one extra row per call is the measurement's price.
-        writeAuditEntry(safeToolName(toolName), { decision: 'allow', severity: 'benign', signals: [] }, { tally: 'redacted' }, 'allow', 'allowed', { ...baseExtra, readinessTally: true });
+        writeAuditEntry(safeToolName(toolName), { decision: 'allow', severity: 'benign', signals: [] }, { tally: 'redacted' }, 'allow', 'allowed', { ...baseExtra, nativeExec: undefined, readinessTally: true });
       }
       process.exit(0);
     }
@@ -3614,6 +3853,12 @@ process.stdin.on('end', async () => {
           {
             hash: retryPlane.mod.hashToolCall(toolName, toolInput),
             origin: { cwd: retryOriginCwd, tool: toolName },
+            // #815 B: a one-tap grant is spent only by this exact call, and
+            // only while the guard's verdict on it is still one a tap may
+            // answer. A verdict the guard reached no scanned conclusion about
+            // passes no list, which leaves a tap grant unspent.
+            exactDigest: exactRetryDigest(retryPlane.mod, toolName, toolInput),
+            currentSignals: unscannedBlock ? undefined : safeSignalList(verdict.signals),
           },
           { home: homedir() },
         );

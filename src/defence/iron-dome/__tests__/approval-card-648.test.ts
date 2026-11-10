@@ -244,6 +244,8 @@ describe('#648 — WHY: one table, every signal the guard can emit', () => {
     'attributes-only', 'copy-contents', 'no-clobber', 'no-dereference', 'no-preserve', 'no-target-directory',
     'one-file-system', 'remove-destination', 'strip-trailing-slashes', 'symbolic-link', 'target-directory',
     'firewall-cmd', 'send-keys',
+    // #1025: `nativeExec` provenance enums on an audit-only field, never a signal.
+    'agent-written', 'compiled-output',
   ]);
 
   function stripComments(src: string): string {
@@ -323,17 +325,58 @@ describe('#648 — WHO: agent, box, session', () => {
     expect(describeWho({ plane: 'openclaw', host: 'h', sessionId: 'agent:ops:cron:nightly' })).toMatch(/^OpenClaw agent "ops" on h · scheduled job #/);
   });
 
+  it('#815 A review B1: a credential-shaped agent id is not printed, from the config or the session key', () => {
+    // Built at runtime so no secret-shaped literal is committed.
+    const AWS_ID = ['AK', 'IA'].join('') + 'Q3XZ7LMN2PRT6VWY';
+    expect(describeWho({ plane: 'openclaw', agentId: AWS_ID, host: 'h' })).toBe('OpenClaw agent on h');
+    const who = describeWho({ plane: 'openclaw', host: 'h', sessionId: `agent:${AWS_ID}:cron:nightly` });
+    expect(who).toMatch(/^OpenClaw agent on h · scheduled job #[0-9a-f]{8}$/);
+    // A plain id is still named.
+    expect(describeWho({ plane: 'openclaw', agentId: 'ops-2', host: 'h' })).toBe('OpenClaw agent "ops-2" on h');
+  });
+
   it('a hostile hostname is not printed', () => {
     expect(describeWho({ plane: 'claude-code', host: 'evil\nhost' })).toBe('Claude Code on this machine');
   });
 
   it("a long generated hostname (CI, cloud) is shortened, and the session still fits the card's WHO line", () => {
-    const host = `sat12-bq${'7'.repeat(20)}-${'a1b2c3d4'.repeat(4)}.local`;
+    // #815 A review B2 (N2): this used to be `sat12-bq${'7'.repeat(20)}-${'a1b2c3d4'.repeat(4)}`,
+    // whose 32-hex tail the credential redactor itself flags; the clip showed
+    // 12 characters of it. That case is now withheld (below); a long name
+    // with no credential shape is still shortened.
+    const host = `sat12-bq${'7'.repeat(14)}-runner.local`;
     const who = describeWho({ plane: 'claude-code', host, sessionId: 'sc-0123456789abcdef' });
-    expect(who).toMatch(/^Claude Code on sat12-b…[a-d0-9]{12} · session sc-0123456789abcdef$/);
+    expect(who).toMatch(/^Claude Code on sat12-b…7+-runner · session sc-0123456789abcdef$/);
     expect(describeWho({ plane: 'claude-code', host: 'veronica-box.tail1234.ts.net' })).toBe('Claude Code on veronica-box');
     const [, , whoLine] = formatApprovalCardLines({ action: 'x', reason: 'y', who }, { expiresInMs: 600_000 });
     expect(whoLine).toContain('session sc-0123456789abcdef');
+  });
+
+  describe('#815 A review B2 (N2): the hostname is checked whole, as written, before it is cut to a label and clipped', () => {
+    // Built at runtime so no secret-shaped literal is committed.
+    const KEY = ['AK', 'IA'].join('') + 'W7NQ4KPJ2XZT6RHM';
+    const GH = ['gh', 'p_'].join('') + 'Z'.repeat(4) + 'q7Lm2Xr9Tb4Vc8Nd1Fh6Jk3Wp5Ys0Ua';
+    it.each([
+      ['an AWS key id', KEY],
+      ['the same key in lower case', KEY.toLowerCase()],
+      ['a GitHub token the clip would cut to a fragment', GH],
+      ['a key in the first label of an FQDN', `${KEY}.corp.example`],
+      ['a key in a later label (never shown, still checked)', `build.${KEY}.internal`],
+      ['a 32-hex run the redactor flags', `sat12-bq${'7'.repeat(20)}-${'a1b2c3d4'.repeat(4)}.local`],
+    ])('%s: the WHO line says "this machine" and carries no fragment', (_label, host) => {
+      for (const plane of ['claude-code', 'openclaw'] as const) {
+        const who = describeWho({ plane, host, sessionId: 'sc-0123456789abcdef' });
+        expect(who).toMatch(/^(?:Claude Code|OpenClaw agent) on this machine(?: · session (?:sc-0123456789abcdef|#[0-9a-f]{8}))?$/);
+        for (const needle of [host.slice(0, 6), host.split('.')[0].slice(-6)]) expect(who.toUpperCase()).not.toContain(needle.toUpperCase());
+      }
+    });
+
+    it('ordinary hostnames are unchanged', () => {
+      for (const [host, shown] of [
+        ['jarvis', 'jarvis'], ['MacBook-Pro', 'MacBook-Pro'], ['ip-10-0-0-1.ec2.internal', 'ip-10-0-0-1'],
+        ['clawdbot1', 'clawdbot1'], ['asia-east1-runner.local', 'asia-east1-runner'],
+      ]) expect(describeWho({ plane: 'claude-code', host })).toBe(`Claude Code on ${shown}`);
+    });
   });
 });
 

@@ -119,3 +119,7 @@ a subfolder of Downloads) are not checked.
 - Detection is at session start, not live: an edit that is reverted before the
   next session start is not seen. A change made before the very first baseline
   is invisible by design.
+
+## Package check of added MCP servers (#889)
+
+When a change adds an MCP server whose `command` is `npx` or `uvx`, the watch also looks the package up (OSV, registry age, install scripts) and appends the result to the notification. It is report-only: it cannot change what is baselined or delivered, has its own 2.5 s ceiling, and a failed lookup is shown as `unchecked`. See `package-vetting.md`.

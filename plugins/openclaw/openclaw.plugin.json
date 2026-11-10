@@ -1,6 +1,6 @@
 {
   "id": "shieldcortex-realtime",
-  "version": "5.17.4",
+  "version": "5.19.0",
   "name": "ShieldCortex Real-time Scanner",
   "description": "Real-time defence scanning on LLM input, memory extraction on LLM output, and active tool call interception with approval gating.",
   "kind": null,
@@ -398,6 +398,23 @@
                   }
                 }
               },
+              "packageVetting": {
+                "type": "object",
+                "description": "Pre-install package vetting (#889). Checks npm/PyPI installs against OSV, version age and install scripts. A known-malicious package is always blocked; other findings only add reasons to the approval card and audit row. Validated by normalisePackageVettingConfig.",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "minAgeDays": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 365,
+                    "default": 7
+                  }
+                }
+              },
               "reviewedScripts": {
                 "type": "array",
                 "description": "Reviewed-script allowlist (#189). Each entry pins ONE script by absolute path and content hash; createReviewedScriptCheck has the last word on every field.",
@@ -518,6 +535,23 @@
                 "type": "number",
                 "minimum": 500,
                 "maximum": 60000
+              }
+            }
+          },
+          "packageVetting": {
+            "type": "object",
+            "description": "Pre-install package vetting (#889). Checks npm/PyPI installs against OSV, version age and install scripts. A known-malicious package is always blocked; other findings only add reasons to the approval card and audit row. Validated by normalisePackageVettingConfig.",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "default": true
+              },
+              "minAgeDays": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 365,
+                "default": 7
               }
             }
           },

@@ -26,7 +26,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { grantRetry } from '../defence/iron-dome/retry-control.js';
+import { exactCallDigest, grantRetry } from '../defence/iron-dome/retry-control.js';
+import { fencedStateFile } from '../defence/iron-dome/__tests__/fenced-state-fixture.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(repoRoot, 'scripts', 'pre-tool-hook.mjs');
@@ -49,7 +50,8 @@ interface RetryStore {
     originScope: { cwd?: string; sessionKey?: string };
     suppression?: { until: number };
     claim?: { nonceHmac: string; epoch: number };
-    grant?: { approvedAt: number; ttlMs: number; consumedAt?: number; origin: { cwd?: string; tool: string } };
+    grant?: { approvedAt: number; ttlMs: number; consumedAt?: number; via?: string; origin: { cwd?: string; tool: string } };
+    exactDigest?: string;
   }>;
   budget: { windowStartMs: number; cards: number; lostActionIds: string[] } | null;
 }
@@ -193,7 +195,9 @@ describe('#310 — retry control through the real Claude Code hook', () => {
   }
 
   function store(): RetryStore | null {
-    return existsSync(storePath()) ? (JSON.parse(readFileSync(storePath(), 'utf8')) as RetryStore) : null;
+    // The state is the newest generation; the store path holds a pointer.
+    const state = fencedStateFile(storePath());
+    return existsSync(state) ? (JSON.parse(readFileSync(state, 'utf8')) as RetryStore) : null;
   }
 
   function evidence(): Array<Record<string, unknown>> {
@@ -277,6 +281,70 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     expect(runHook(IRREVERSIBLE).decision).toBe('deny');
   });
 
+  it('#815 B a tap grant is spent by the hook only for the exact call it was granted for', () => {
+    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl() } });
+    expect(runHook(IRREVERSIBLE).decision).toBe('deny');
+    const row = store()!.rows[0];
+    // The hook records the exact digest of the denied call.
+    expect(row.exactDigest).toBe(exactCallDigest('Bash', IRREVERSIBLE));
+    const granted = grantRetry(
+      { id: row.id },
+      { tap: { approver: 'telegram:42', exactDigest: row.exactDigest!, epoch: row.denyEpoch } },
+      { home },
+    );
+    expect(granted).toMatchObject({ ok: true });
+
+    // A different spelling of the command does not spend it…
+    expect(runHook({ command: 'sudo  modprobe softdog' }).decision).toBe('deny');
+    expect(store()!.rows.find((r) => r.id === row.id)?.grant?.consumedAt).toBeUndefined();
+    // …the exact call does, once.
+    const retried = runHook(IRREVERSIBLE);
+    expect(retried.decision).toBeUndefined();
+    expect(retried.stderr).toContain('consumed operator RETRY grant');
+    expect(runHook(IRREVERSIBLE).decision).toBe('deny');
+  });
+
+  it('#815 B a tap grant is re-checked against the current verdict when spent', () => {
+    // The real guard, with an overlay the test controls: while the overlay
+    // file exists, the verdict on the same call also carries its signals.
+    // It stands in for any reason the current verdict differs from the one
+    // the grant was made on; the call itself is byte-identical throughout.
+    const overlay = join(home, 'verdict-overlay.json');
+    const realGuard = pathToFileURL(join(REAL_DIST, 'tool-action-guard.js')).href;
+    writeFileSync(join(distRoot, 'defence', 'iron-dome', 'tool-action-guard.js'), [
+      `export * from ${JSON.stringify(realGuard)};`,
+      `import * as real from ${JSON.stringify(realGuard)};`,
+      "import { existsSync, readFileSync } from 'node:fs';",
+      'export function evaluateToolCall(...args) {',
+      '  const v = real.evaluateToolCall(...args);',
+      `  if (!existsSync(${JSON.stringify(overlay)})) return v;`,
+      `  return { ...v, signals: [...v.signals, ...JSON.parse(readFileSync(${JSON.stringify(overlay)}, 'utf8'))] };`,
+      '}',
+    ].join('\n'));
+    writeConfig({ notify: { enabled: true, webhookUrl: webhookUrl() } });
+    expect(runHook(IRREVERSIBLE).decision).toBe('deny');
+    const row = store()!.rows[0];
+    expect(grantRetry(
+      { id: row.id },
+      { tap: { approver: 'telegram:42', exactDigest: row.exactDigest!, epoch: row.denyEpoch } },
+      { home },
+    )).toMatchObject({ ok: true });
+
+    // The current verdict is now self-protection: denied, the grant unspent.
+    writeFileSync(overlay, JSON.stringify(['touch-approval-store']));
+    const refused = runHook(IRREVERSIBLE);
+    expect(refused.decision).toBe('deny');
+    expect(refused.stderr).not.toContain('consumed operator RETRY grant');
+    expect(store()!.rows.find((r) => r.id === row.id)?.grant?.consumedAt).toBeUndefined();
+
+    // Control — the verdict the grant was made on: allowed once.
+    rmSync(overlay);
+    const retried = runHook(IRREVERSIBLE);
+    expect(retried.decision).toBeUndefined();
+    expect(retried.stderr).toContain('consumed operator RETRY grant');
+    expect(runHook(IRREVERSIBLE).decision).toBe('deny');
+  });
+
   // ── Fingerprint, and only a fingerprint ────────────────────────────────
 
   it('a denial mints a FINGERPRINT and nothing spendable', () => {
@@ -292,7 +360,7 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     expect(rows[0].grant).toBeUndefined();
     expect(rows[0].claim).toBeUndefined();
     // The command itself is never in the control record.
-    expect(readFileSync(storePath(), 'utf8')).not.toContain('modprobe');
+    expect(readFileSync(fencedStateFile(storePath()), 'utf8')).not.toContain('modprobe');
   });
 
   it('remints under one identity — same row, same epoch, alias index grows', () => {
@@ -480,16 +548,19 @@ describe('#310 — retry control through the real Claude Code hook', () => {
     runHook(IRREVERSIBLE);
     expect(waitFor(() => (store()?.rows[0]?.claim ?? null) !== null)).toBe(true);
 
-    const onDisk = readFileSync(storePath(), 'utf8');
+    const onDisk = readFileSync(fencedStateFile(storePath()), 'utf8');
     const row = store()!.rows[0];
     const hmac = row.claim!.nonceHmac;
     expect(hmac).toMatch(/^[0-9a-f]{64}$/);
     // The ONLY 64-hex values on disk are the call hash (which is not spendable
-    // — #118 has always printed it) and the nonce HMAC. No raw nonce, and no
-    // second secret hiding beside it.
+    // — #118 has always printed it), the exact call digest (#815 B; a digest
+    // of the same call, equally unspendable) and the nonce HMAC. No raw
+    // nonce, and no second secret hiding beside it.
     const hexes = new Set((onDisk.match(/[0-9a-f]{64}/g) ?? []));
     hexes.delete(hmac);
     hexes.delete(row.hash);
+    expect(row.exactDigest).toMatch(/^[0-9a-f]{64}$/);
+    hexes.delete(row.exactDigest!);
     expect([...hexes]).toHaveLength(0);
     // And no spendable token in the alert or the forensics rows.
     expect(JSON.stringify(evidence())).not.toContain(hmac);
