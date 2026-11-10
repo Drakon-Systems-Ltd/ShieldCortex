@@ -57,7 +57,7 @@ const OPENCLAW_CTX_MARKER = '\u27E6openclaw:ctx\u27E7';
 // Trailing channel-context suffix: from this line to the end is metadata.
 const OPENCLAW_TRAILING_CONTEXT_HEADER = `Context: ${OPENCLAW_CTX_MARKER}`;
 // Leading "[Fri 2026-10-10 12:48 UTC] " envelope timestamp.
-const LEADING_TIMESTAMP_PREFIX = /^\[[A-Za-z]{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}[^\]]*\] */;
+const LEADING_TIMESTAMP_PREFIX = /^\[[A-Za-z]{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}[^\]\n\r\u2028\u2029]*\] */;
 // Per-turn delivery hints OpenClaw prepends ("Delivery: ... `message` tool ...").
 const DELIVERY_HINT_LINE = /^Delivery: .*`message` tool/;
 // Session goal line OpenClaw adds between the context blocks and the message.
@@ -244,6 +244,200 @@ function stripOpenClawEnvelope(prompt) {
   return out === prompt ? null : out;
 }
 
+// ── OpenClaw 2026.10.x turn boilerplate (#992) ───────────────────────────
+// A CLI-backend turn carries more than the #717 envelope. Taken from the
+// 2026.10.9 emitters (RUNTIME_CONTEXT_* constants, labelRuntimeContextText,
+// buildHarnessVisibleReplyGuidance, buildUiPresentationPrompt):
+//   - closed `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>` … `<<<END_…>>>` blocks;
+//   - a trailing "OpenClaw runtime context:" … "End OpenClaw runtime context."
+//     block (OpenClaw escapes the footer inside the body, so the first footer
+//     line after the header ends it);
+//   - trailing visible-reply guidance paragraphs;
+//   - the leading "[Tue 2026-11-03 11:48 UTC] " envelope timestamp, which
+//     #717 only removed after a ⟦openclaw:ctx⟧ envelope.
+// The recall query is the first six distinct terms of the result, so the
+// timestamp alone filled four slots on every turn and the guidance filled the
+// rest of a short message: unrelated prompts recalled the same notes.
+const RUNTIME_CONTEXT_BEGIN_MARKER = '<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>';
+const RUNTIME_CONTEXT_END_MARKER = '<<<END_OPENCLAW_INTERNAL_CONTEXT>>>';
+const RUNTIME_CONTEXT_HEADER = 'OpenClaw runtime context:';
+const RUNTIME_CONTEXT_FOOTER = 'End OpenClaw runtime context.';
+// Sentences of the guidance paragraphs OpenClaw appends after the user's
+// message (2026.10.9 buildHarnessVisibleReplyGuidance / buildUiPresentationPrompt,
+// plus the message_tool_only variants). A trailing paragraph is consumed
+// sentence by sentence from its start: when every sentence is known the
+// paragraph is boilerplate and goes; when owner text follows the known
+// sentence(s) in the same paragraph (#993 review B1) only the known sentences
+// go and the remainder stays. A guidance sentence quoted mid-paragraph, or in
+// a paragraph that is not trailing, is owner text and is never touched.
+const TRAILING_GUIDANCE_SENTENCES = [
+  'You can participate in the conversation throughout your work.',
+  'Use `message` when you have something worth saying; you don’t need to wait until you’re finished, and sending a message doesn’t end your task.',
+  'OpenClaw delivers your final response automatically.',
+  'Visible source replies are not automatically delivered for this run.',
+  'Use `message(action=send)` for source output.',
+  'For progress, set `final=false`.',
+  'Set `final=true`, or omit it, for a completed reply to the current source.',
+  'An added reaction to the current source message with `final=true` can also complete the reply.',
+  'Do not repeat delivered content.',
+  'No source-conversation reply can be sent from this turn.',
+  'Final assistant text remains private and returns to the invoking workflow; it is not automatically delivered to the source conversation.',
+  'For the current source conversation, reply normally in your final assistant message; OpenClaw will deliver it through the active source conversation.',
+  '`send`: `target` + `message`; target required this turn.',
+  '`send`: `message`; current source is default target.',
+  'Set `target` only elsewhere.',
+  'Commentary is optional progress and may be hidden.',
+  'Answer user questions or status requests received during ongoing work with `message(action=send, final=false)`, then continue the task.',
+  "Before finishing, deliver every still-pending answer through this turn's visible-reply route.",
+  'Do not repeat answers already delivered.',
+  'Include answers to every still-pending user question, including questions received during ongoing work, in your final response.',
+  '## UI Presentation',
+  '`dashboard`: layout/plugin widgets, not HTML authoring; never for opening a browser side panel.',
+  'For a saved widget, use action="focus_tab" with its tabId.',
+  'Custom authoring is unavailable this turn, not unsupported by dashboards.',
+  'Inspect widgets in their chat/dashboard frame; do not open hosting URLs as browser pages.',
+  'Verify the delivered interaction or say unverified.',
+].sort((a, b) => b.length - a.length); // longest first: a sentence may prefix another
+
+/**
+ * Split a trailing paragraph into its known guidance prefix and the owner
+ * remainder. Returns the remainder ('' when the whole paragraph is known), or
+ * null when the paragraph does not start with a known sentence.
+ */
+function consumeGuidanceSentences(paragraph) {
+  let rest = paragraph;
+  let consumed = false;
+  for (;;) {
+    const hit = TRAILING_GUIDANCE_SENTENCES.find((sentence) => rest.startsWith(sentence)
+      && (rest.length === sentence.length || /\s/.test(rest[sentence.length])));
+    if (hit === undefined) break;
+    consumed = true;
+    rest = rest.slice(hit.length).replace(/^\s+/, '');
+    if (rest === '') break;
+  }
+  return consumed ? rest : null;
+}
+
+/**
+ * A BEGIN line is the exact marker, or the validated envelope timestamp
+ * followed by the exact marker (#993 review round 3, R1). Any other text before
+ * the marker makes the line owner text.
+ */
+function isInternalContextBegin(line) {
+  const t = line.trim();
+  if (t === RUNTIME_CONTEXT_BEGIN_MARKER) return true;
+  const m = LEADING_TIMESTAMP_PREFIX.exec(t);
+  return m !== null && t.slice(m[0].length) === RUNTIME_CONTEXT_BEGIN_MARKER;
+}
+
+/**
+ * Strip the trailing run of 2026.10.x boilerplate, working backwards from the
+ * end of the prompt one unit at a time (#993 review B2: a framework block is
+ * removed only where the framework puts it). A unit is removed only while it
+ * sits at the tail, i.e. is anchored to the end of the prompt through the
+ * units already removed:
+ *   - a closed "OpenClaw runtime context:" … "End OpenClaw runtime context."
+ *     block whose footer is the last line;
+ *   - a closed internal-context block whose END marker is the last line;
+ *   - a guidance paragraph made of known sentences (see
+ *     consumeGuidanceSentences); owner text after the known sentences in that
+ *     paragraph ends the run and is kept.
+ * Anything else ends the run: the owner's own text, including a quoted closed
+ * pair with owner words after it, stays.
+ *
+ * Closed pairs are removed only when `framed` is true (#993 round 3, R2): the
+ * prompt carries framework evidence independent of the pair itself. Guidance
+ * paragraphs need no evidence.
+ */
+function stripTrailingTurnBoilerplate(lines, framed) {
+  const out = lines.slice();
+  const trimTail = () => { while (out.length > 0 && out[out.length - 1].trim() === '') out.pop(); };
+  for (;;) {
+    trimTail();
+    if (out.length === 0) break;
+    const last = out[out.length - 1].trim();
+    if (last === RUNTIME_CONTEXT_FOOTER) {
+      if (!framed) break;
+      let start = out.length - 2;
+      while (start >= 0 && out[start].trim() !== RUNTIME_CONTEXT_HEADER) start -= 1;
+      if (start < 0) break; // footer without a header: owner text
+      out.length = start;
+      continue;
+    }
+    if (last === RUNTIME_CONTEXT_END_MARKER) {
+      if (!framed) break;
+      let start = out.length - 2;
+      // The nearest BEGIN-looking line must be a valid BEGIN: another END, or a
+      // marker with owner text before it, means this is not a framework block.
+      while (start >= 0 && !isInternalContextBegin(out[start])
+        && out[start].trim() !== RUNTIME_CONTEXT_END_MARKER
+        && !out[start].includes(RUNTIME_CONTEXT_BEGIN_MARKER)) start -= 1;
+      if (start < 0 || !isInternalContextBegin(out[start])) break; // owner text
+      // Keep any text the BEGIN line carried before the marker (the timestamp).
+      const before = out[start].trimEnd().slice(0, -RUNTIME_CONTEXT_BEGIN_MARKER.length).trimEnd();
+      out.length = start;
+      if (before !== '') out.push(before);
+      continue;
+    }
+    // Last paragraph: back to the previous blank line.
+    let pStart = out.length - 1;
+    while (pStart > 0 && out[pStart - 1].trim() !== '') pStart -= 1;
+    const remainder = consumeGuidanceSentences(out.slice(pStart).join('\n').trim());
+    if (remainder === null) break; // owner paragraph
+    out.length = pStart;
+    if (remainder !== '') { out.push(remainder); break; } // owner text after the opener (B1)
+  }
+  return out;
+}
+
+/**
+ * Strip internal-context blocks that open the prompt: the first non-blank
+ * line is a BEGIN line (see isInternalContextBegin) and a closing END marker
+ * follows. Only meaningful for a framed prompt (the caller checks). A forward
+ * cursor walks the original array once, so N consecutive blocks cost O(N)
+ * (#993 round 3, R3). The envelope timestamp the first BEGIN line carries is
+ * kept once, for the final timestamp cut. An unclosed marker, or a block that
+ * follows owner text, is left alone.
+ */
+function stripLeadingInternalContextBlocks(lines) {
+  let pos = 0;
+  let kept = '';
+  for (;;) {
+    let i = pos;
+    while (i < lines.length && lines[i].trim() === '') i += 1;
+    if (i >= lines.length || !isInternalContextBegin(lines[i])) break;
+    let end = i + 1;
+    while (end < lines.length && lines[end].trim() !== RUNTIME_CONTEXT_END_MARKER) end += 1;
+    if (end >= lines.length) break; // unclosed: owner text
+    if (pos === 0 && kept === '') {
+      kept = lines[i].trimEnd().slice(0, -RUNTIME_CONTEXT_BEGIN_MARKER.length).trimEnd();
+    }
+    pos = end + 1;
+  }
+  if (pos === 0) return lines;
+  return (kept !== '' ? [kept] : []).concat(lines.slice(pos));
+}
+
+/**
+ * Strip OpenClaw 2026.10.x turn boilerplate around the owner's text (#992).
+ * Never returns null; returns the input unchanged when nothing matched, and
+ * also when stripping would leave nothing (an owner message that is itself a
+ * complete framework pair must not gate as too short, #993 review B2).
+ */
+function stripOpenClawTurnBoilerplate(text, framework = false) {
+  if (text.length === 0) return text;
+  // R2 (#993 round 3): closed pairs go only with framework evidence that does
+  // not come from the pair itself: a wrapper this call already consumed, or
+  // the validated envelope timestamp opening the text. Otherwise keep.
+  const framed = framework || LEADING_TIMESTAMP_PREFIX.test(text);
+  let lines = text.replace(/\r\n/g, '\n').split('\n');
+  lines = stripTrailingTurnBoilerplate(lines, framed);
+  if (framed && text.includes(RUNTIME_CONTEXT_BEGIN_MARKER)) lines = stripLeadingInternalContextBlocks(lines);
+  const out = lines.join('\n').trim().replace(LEADING_TIMESTAMP_PREFIX, '').trim();
+  if (out === '') return text;
+  return out === text.trim() ? text : out;
+}
+
 /**
  * Strip framework metadata wrappers from a prompt.
  *
@@ -252,13 +446,38 @@ function stripOpenClawEnvelope(prompt) {
  *   was metadata. Never null/undefined.
  */
 export function sanitisePromptForRecall(prompt) {
+  return sanitise(prompt, true);
+}
+
+/**
+ * The prompt lane detection reads (#718): the same as sanitisePromptForRecall
+ * but WITHOUT the #992 turn-boilerplate step (only its leading-timestamp cut). OpenClaw puts lane markers such
+ * as "[Subagent Context]" inside the internal-context blocks that step
+ * removes, so detecting the lane on the recall text would turn a subagent
+ * turn into an interactive one and widen what it may recall.
+ *
+ * @param {string} prompt
+ * @returns {string}
+ */
+export function sanitisePromptForLaneDetection(prompt) {
+  return sanitise(prompt, false);
+}
+
+function sanitise(prompt, stripTurnBoilerplate) {
   if (typeof prompt !== 'string' || prompt.length === 0) return '';
+  // Lane text still loses the leading envelope timestamp: the lane markers are
+  // line-anchored, so "[Tue … UTC] Automated liveness check …" otherwise read
+  // as an interactive turn and fed the doctor's repetition sample (#992).
+  // Removing it can only let a marker match, i.e. only narrow the lane.
+  const finish = (text, framework = false) => (stripTurnBoilerplate
+    ? stripOpenClawTurnBoilerplate(text.trim(), framework)
+    : text.trim().replace(LEADING_TIMESTAMP_PREFIX, '')).trim();
 
   // 0) OpenClaw 2026.9.x marker-keyed envelope (#717). When it matches, the
   //    remainder is the current user message and the legacy patterns below
   //    have nothing left to do.
   const fromEnvelope = stripOpenClawEnvelope(prompt);
-  if (fromEnvelope !== null) return fromEnvelope.trim();
+  if (fromEnvelope !== null) return finish(fromEnvelope, true);
 
   let working = prompt;
 
@@ -278,5 +497,6 @@ export function sanitisePromptForRecall(prompt) {
     working = working.replace(LEADING_FENCE, '');
   }
 
-  return working.trim();
+  // 3) OpenClaw 2026.10.x turn boilerplate (#992).
+  return finish(working, working !== prompt);
 }
