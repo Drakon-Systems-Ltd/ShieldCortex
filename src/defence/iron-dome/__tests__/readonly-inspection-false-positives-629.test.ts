@@ -167,12 +167,16 @@ const GREP_VALUE_OR_UNKNOWN_OPTIONS = [
   '--after-context 2', '--before-context 2', '--context 1', '--regexp', '--binary-files text',
   '--devices skip', '--directories skip', '--exclude-from x', '--group-separator x',
   // abbreviations and unknown long options are not in the closed set either
-  '--max 1', '--exc x', '--frobnicate', '--binary',
+  '--max 1', '--exc x', '--frobnicate', '--reg', '--ignore', '--line-num', '--bin',
+  // #1053 review: a value glued to -e/-f, or a pattern-file cluster
+  '-ePAT', '-fpats', '-rf pats',
 ];
 const GREP_STILL_MASKED = [
   '-n', '--', '-n --', '-rn', '-inw', '-c', '-l', '-L', '-F', '-E', '-o', '-v', '-x', '-H', '-h',
   '--color', '--colour', '--color -n', '--line-number', '--ignore-case --fixed-strings',
   '--recursive', '--count', '--files-with-matches', '--only-matching', '--invert-match',
+  // #1053 review (N1): exact GNU no-argument options (`--binary` is `-U`)
+  '--binary', '--no-group-separator', '--unix-byte-offsets', '--fixed-regexp',
 ];
 
 describe('#1051 grep options the #629 mask cannot model decline the mask', () => {
@@ -282,5 +286,168 @@ describe('#1015 jq module forms decline the #629 mask', () => {
     const plain = bash(`jq . ${RM}`);
     expect(plain.decision).toBe('allow');
     expect(plain.signals ?? []).toEqual([]);
+  });
+});
+
+// #1053 review (B1): jq's `--arg NAME VALUE`, `--indent N` (and the other
+// value-taking options) take the next word as a value, so a `--` there is a
+// VALUE, not the end of options: `-f p.jq` after it still loads the program
+// (jq 1.7 runs the file and its `include`). Every such stage stays visible.
+describe('#1053 jq -- consumed as an option value does not end option parsing', () => {
+  const CONSUMED_DASH_DASH = [
+    `jq --arg name -- -f p.jq d.json`, `jq --arg name -- --from-file p.jq d.json`,
+    `jq --arg name -- -rf p.jq d.json`, `jq --arg name -- -nf p.jq`, `jq --indent -- -f p.jq d.json`,
+    `jq --argjson name -- -f p.jq d.json`, `jq --slurpfile name -- -f p.jq d.json`,
+    `jq --rawfile name -- -f p.jq d.json`, `jq --arg -- -- -f p.jq d.json`,
+    `jq -r --arg name -- -L lib . d.json`, `jq --arg name -- --library-path lib . d.json`,
+    // `--run-tests` reads programs from its file, so it is not in the closed table
+    `jq --run-tests p.test`, `jq --arg name -- --run-tests p.test`,
+  ];
+
+  it('mask: the jq stage stays visible, alone, piped and beside another statement', () => {
+    for (const stage of CONSUMED_DASH_DASH) {
+      expect(readOnlyInspectionMask(stage, stage, stage)).toBeNull();
+      const piped = `cat d.json | ${stage}`;
+      expect(readOnlyInspectionMask(piped, piped, piped)).toBeNull();
+      for (const cmd of [`jq . d.json; ${stage}`, `${stage}; jq . d.json`, `jq . d.json && ${stage}`]) {
+        const m = readOnlyInspectionMask(cmd, cmd, cmd);
+        expect(m === null ? cmd : m).toContain(stage);
+      }
+    }
+  });
+
+  it('decision: a delete-verb operand of such a stage is rated', () => {
+    for (const cmd of [
+      `jq --arg name -- -f p.jq ${RM}`, `jq --arg name -- --from-file p.jq ${RM}.json`,
+      `jq --arg name -- -rf ${RM}.jq d.json`, `jq --arg name -- -nf ${RM}.jq`,
+      `jq --indent -- -f ${RM}.jq d.json`, `cat d.json | jq --arg name -- -f ${RM}.jq`,
+      `jq . d.json; jq --arg name -- -f ${RM}.jq d.json`, `jq --arg name -- -f ${RM}.jq d.json; jq . d.json`,
+      `jq --run-tests ${RM}.test`,
+    ]) {
+      const v = bash(cmd);
+      expect(v.decision).not.toBe('allow');
+      expect((v.signals ?? []).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('a real -- terminator, and a consumed -- with no program file, keep the relief', () => {
+    for (const cmd of [
+      `jq -- .a d.json`, `jq -r -- .a d.json`, `jq --arg n v -- .a d.json`, `jq --arg name -- . d.json`,
+      `jq --indent 2 . d.json`, `jq --tab --seq -S . d.json`, `jq -n --args '$ARGS' a b`,
+      `jq --slurpfile s a.json --rawfile r b.txt -n '$s'`, `jq -rc --sort-keys .a d.json`,
+      `cat d.json | jq --arg name -- .a`,
+    ]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBe(' '.repeat(cmd.length));
+    }
+    for (const cmd of [`jq --arg name -- . ${RM}`, `jq -- .a ${RM}`, `jq --indent 2 .a ${RM}`]) {
+      const v = bash(cmd);
+      expect(v.decision).toBe('allow');
+      expect(v.signals ?? []).toEqual([]);
+    }
+  });
+
+  it('a jq option outside the closed table declines', () => {
+    for (const cmd of [
+      `jq --debug-dump-disasm . d.json`, `jq --from . d.json`, `jq --in-place . d.json`,
+      `jq -1 d.json`, `jq - . d.json`, `jq . d.json --arg n`, `jq --indent`, `jq -rL lib . d.json`,
+    ]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+    }
+  });
+});
+
+// #1053 review (B2): only the FILTER can load a module, and only as code.
+// A field selector, a string, an --arg value or a file name holding one of
+// the words is data, and must keep the relief it had before #1015.
+describe('#1053 jq module words that are data keep the relief', () => {
+  const DATA_READS = [
+    `jq '.import' ${RM}.json`, `jq '.include' ${RM}.json`, `jq '.modulemeta' ${RM}.json`,
+    `jq --arg label import '.name' ${RM}.json`, `jq . import/${RM}.json`,
+    `jq '.a.import' ${RM}.json`, `jq '.a1.include' ${RM}.json`, `jq '."import"' ${RM}.json`,
+    `jq '.["modulemeta"]' ${RM}.json`, `jq 'select(.kind == "import")' ${RM}.json`,
+    `jq '"\\(.include)"' ${RM}.json`, `jq --argjson v '"include"' .a ${RM}.json`,
+    `jq --rawfile import x.txt .a ${RM}.json`, `jq -n --args '$ARGS' import include`,
+    `jq '...import' ${RM}.json`, `jq '1.5.import' ${RM}.json`,
+  ];
+
+  it('mask: blanked whole, alone, piped and beside another read', () => {
+    for (const cmd of DATA_READS) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBe(' '.repeat(cmd.length));
+    }
+    for (const cmd of [`cat ${RM}.json | jq '.import'`, `jq . d.json; jq '.include' ${RM}.json`,
+      `jq '.modulemeta' ${RM}.json && jq --arg label import '.name' ${RM}.json`]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)!.trim()).toMatch(/^[;&]*$/);
+    }
+  });
+
+  it('decision: the reviewer commands are allowed with no signal', () => {
+    for (const cmd of [...DATA_READS, `cat ${RM}.json | jq '.import'`,
+      `jq . d.json; jq '.include' ${RM}.json`]) {
+      const v = bash(cmd);
+      expect(v.decision).toBe('allow');
+      expect(v.severity).toBe('benign');
+      expect(v.signals ?? []).toEqual([]);
+    }
+  });
+
+  it('a real directive or modulemeta call in the filter stays visible and rated', () => {
+    const CODE = [
+      `jq 'include "x"; .' ${RM}`, `jq 'import "x" as e; .' ${RM}`, `jq 'import "x" as $e; $e' ${RM}`,
+      `jq 'module {}; include "x"; .' ${RM}`, `jq 'include"x";.' ${RM}`, `jq 'inc''lude "x"; .' ${RM}`,
+      `jq '"m" | modulemeta' ${RM}`, `jq '.a | modulemeta' ${RM}`, `jq '"\\(modulemeta)"' ${RM}`,
+      `jq '"\\("\\(modulemeta)")"' ${RM}`, `jq -- 'include "x"; .' ${RM}`,
+      `jq --arg n v 'include "x"; .' ${RM}`, `jq -n --args 'import "x" as e; .' ${RM}`,
+      // fail closed where the word is not provably a field name or string text
+      `jq '{import: 1}' ${RM}`, `jq '. as $import | .' ${RM}`, `jq '1.import' ${RM}`,
+      `jq '..import' ${RM}`, `jq '. import' ${RM}`,
+      `jq '"x' ${RM}`, `jq '(.a' ${RM}`, `jq '"\\(.a"' ${RM}`,
+    ];
+    for (const cmd of CODE) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+      const v = bash(cmd);
+      expect(v.decision).not.toBe('allow');
+      expect((v.signals ?? []).length).toBeGreaterThan(0);
+    }
+    // Comments are not modelled, so a word after `#` counts. Mask level only:
+    // the file-delete rule stops reading at a quoted `#` whatever the mask does
+    // (`cat '.a # x' <verb>` is allowed with no mask either).
+    expect(readOnlyInspectionMask(`jq '.a # import' ${RM}`, `jq '.a # import' ${RM}`, `jq '.a # import' ${RM}`)).toBeNull();
+    for (const stage of [`jq 'include "x"; .' ${RM}`, `jq '"m" | modulemeta' ${RM}`]) {
+      for (const cmd of [`cat d.json | ${stage}`, `jq '.import' d.json; ${stage}`]) {
+        const m = readOnlyInspectionMask(cmd, cmd, cmd);
+        expect(m === null ? cmd : m).toContain(stage);
+        expect(bash(cmd).decision).not.toBe('allow');
+      }
+    }
+  });
+
+  it('held: -L/--library-path and plain -f still decline and are rated', () => {
+    for (const cmd of [`jq -L lib . ${RM}`, `jq -Llib . ${RM}`, `jq --library-path lib . ${RM}`,
+      `jq -f p.jq ${RM}`, `jq --from-file p.jq ${RM}`, `jq -rf p.jq ${RM}`]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+      expect(bash(cmd).decision).not.toBe('allow');
+    }
+  });
+});
+
+// #1053 review (N1) and held grep cases at the decision level.
+describe('#1053 grep closed set at the decision level', () => {
+  it('exact GNU no-argument long options keep the relief', () => {
+    for (const opt of ['--binary', '--no-group-separator', '--unix-byte-offsets', '--fixed-regexp']) {
+      const v = bash(`grep ${opt} ${RM} f`);
+      expect(v.decision).toBe('allow');
+      expect(v.signals ?? []).toEqual([]);
+    }
+  });
+
+  it('value-taking options, glued values and abbreviations are rated', () => {
+    for (const cmd of [`grep -A2 ${RM} f`, `grep -m1 ${RM} f`, `grep -ePAT ${RM}`, `grep -fpats ${RM}`,
+      `grep -nA2 ${RM} f`, `grep -rne ${RM} f`, `grep --max 1 ${RM} f`, `grep --exc x ${RM} f`,
+      `grep --reg ${RM} f`, `grep --ignore ${RM} f`, `grep --line-num ${RM} f`, `grep --bin ${RM} f`,
+      `cat f | grep -A2 ${RM}`, `grep -n x f; grep -m1 ${RM} f`]) {
+      const v = bash(cmd);
+      expect(v.decision).not.toBe('allow');
+      expect((v.signals ?? []).length).toBeGreaterThan(0);
+    }
   });
 });
