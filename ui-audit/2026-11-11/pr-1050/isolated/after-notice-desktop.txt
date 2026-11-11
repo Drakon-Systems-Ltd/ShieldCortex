@@ -1,0 +1,3 @@
+  [off]  Action Guard is off by default since 4.54.15.
+     Guard is opt-in. It stays off until you choose otherwise.
+     Status:  shieldcortex guard readiness

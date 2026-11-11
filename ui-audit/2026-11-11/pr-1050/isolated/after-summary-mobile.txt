@@ -1,0 +1,9 @@
+ShieldCortex updated   5.7.0 -> 5.9.0
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [ok]  OpenClaw       plugin 5.9.0
+                       installed,
+                       gateway restarted
+  [ok]  Skill          updated
+  [off] Guard          off (the default)

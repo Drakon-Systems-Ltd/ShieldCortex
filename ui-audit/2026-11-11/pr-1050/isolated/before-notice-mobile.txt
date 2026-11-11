@@ -1,0 +1,3 @@
+  [off]  Action Guard is off by default since 4.54.15.
+     Turn on: shieldcortex config --action-guard-enable
+     Status:  shieldcortex guard readiness
