@@ -675,11 +675,16 @@ describe('C2. Shipped posture (Claude Code hook)', () => {
     expect(benign.decision).toBeUndefined();
   });
 
-  it('claim 10b (self-protection floor, hook): with the guard on, switching it off through a tool call is held', () => {
+  it('claim 10b (self-protection floor, hook): with the guard on, switching it off through a tool call is denied, never offered for approval', () => {
+    // #853 ruling: the self-protection floor is always-block. A prompt, one-shot
+    // approval, retry grant or card could approve what may not be approved, so
+    // the hook refuses outright (`deny`), never `ask`.
     writeGuardConfig(home, { enabled: true, enforce: true });
     const r = runRealHook(home, 'shieldcortex config --action-guard-disable');
     expect(r.status).toBe(0);
-    expect(r.decision).toBe('ask');
+    expect(r.decision).toBe('deny');
+    expect(r.stdout).toMatch(/always-block/i);
+    expect(r.stdout).toContain('disable-action-guard');
   });
 
   it('claim 10c (hook load-failure fallback): a broken hook still blocks a recognised catastrophic command, even with the guard off; a benign call passes', () => {
