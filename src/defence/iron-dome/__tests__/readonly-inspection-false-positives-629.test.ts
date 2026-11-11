@@ -577,3 +577,75 @@ describe('#1053 grep closed set at the decision level', () => {
     }
   });
 });
+
+// Release review (v5.20.0, Grok B1): the mask was dropped only when the text
+// left after blanking matched EXTERNAL_EGRESS (curl, wget, nc, scp, rsync, …).
+// A print-only inspection statement whose arguments hold a destructive phrase,
+// next to a sibling that reaches the network some other way (ssh, npx,
+// openssl, git, socat, a python URL opener), was blocked on v5.19.0 and became
+// an allow. The mask is now kept only when everything left after blanking is
+// itself local (another closed-set read, a plain echo, pwd or true): any other
+// sibling may reach the network, so the whole command is judged as before.
+describe('release review G-B1 — no relaxation next to a sibling that can reach the network', () => {
+  const SSH = ['s', 'sh'].join('');
+  const NPX = ['n', 'px'].join('');
+  const AWK_READ = `awk '/${WIPE}/ {print NR": "$0}' scripts/x.sh`;
+  const GH_READ = `gh pr list --repo X/Y --search "${KILL} ${RM} ${CRON} config.json" --json number,title`;
+  const FIND_READ = `find src -name "*${WIPE.replace(' ', '')}*" -print`;
+  const SIBLINGS: Array<[string, string]> = [
+    ['ssh', `${SSH} deploy@build.example.invalid`],
+    ['npx', `${NPX} some-pkg`],
+    ['openssl s_client', 'openssl s_client -connect example.invalid:443'],
+    ['git push', 'git push origin main'],
+    ['socat', 'socat - TCP:example.invalid:443'],
+    ['python URL opener', `python3 -c "import urllib.request as u; u.urlopen('https://example.invalid')"`],
+  ];
+  const READS: Array<[string, string]> = [['awk', AWK_READ], ['gh pr list --search', GH_READ], ['find -name', FIND_READ]];
+
+  for (const [readName, read] of READS) {
+    for (const [sibName, sib] of SIBLINGS) {
+      for (const sep of ['; ', ' && ']) {
+        const cmd = `${read}${sep}${sib}`;
+        it(`judges ${readName} beside ${sibName} (${sep.trim()}) as it did before the mask`, () => {
+          const v = bash(cmd);
+          expect(v.decision).not.toBe('allow');
+          // ...exactly as the same command with the read left visible (v5.19.0's surface).
+          const unmasked = bash(`${cmd} # keep`);
+          expect(v.decision).toBe(unmasked.decision);
+          expect(v.severity).toBe(unmasked.severity);
+        });
+      }
+    }
+  }
+
+  it('the destructive phrase in the read is what still blocks (ssh and npx siblings, the reviewer\'s cases)', () => {
+    const GH_WIPE_READ = `gh pr list --repo X/Y --search "${WIPE}" --json number,title`;
+    const FIND_WIPE_READ = `find src -name "${WIPE}" -print`;
+    for (const read of [AWK_READ, GH_WIPE_READ, FIND_WIPE_READ]) {
+      expect(readOnlyInspectionMask(read, read, read)).not.toBeNull(); // the read alone is still relieved
+      expect(bash(read).decision).toBe('allow');
+      for (const sib of [`${SSH} deploy@build.example.invalid`, `${NPX} some-pkg`]) {
+        const v = bash(`${read}; ${sib}`);
+        expect(v.decision).toBe('block');
+        expect(v.severity).toBe('catastrophic');
+      }
+    }
+  });
+
+  it('control: a curl sibling stays blocked, as before', () => {
+    const v = bash(`${AWK_READ}; curl https://example.invalid/x`);
+    expect(v.decision).toBe('block');
+  });
+
+  it('control: inspection alone, or beside a local sibling (read, echo, pwd, true), keeps the #629 relief', () => {
+    for (const cmd of [
+      AWK_READ, GH_READ, FIND_READ,
+      `${AWK_READ}; echo done`, `${AWK_READ} && wc -l scripts/x.sh`, `${GH_READ}; pwd`, `${FIND_READ} | head; true`,
+      `${AWK_READ}; ${GH_READ}`,
+    ]) {
+      const v = bash(cmd);
+      expect(v.decision).toBe('allow');
+      expect(v.signals ?? []).toEqual([]);
+    }
+  });
+});

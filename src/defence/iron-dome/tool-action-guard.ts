@@ -7950,9 +7950,16 @@ function evaluateToolCallCore(
   const scannedCommand = commandScanText(command);
   // #629: read-only inspection statements (search/print/list) are blanked so
   // their arguments are not rated as commands. Exec family only, and never
-  // when the remaining text can still reach the network.
+  // when the remaining text can still reach the network. EXTERNAL_EGRESS only
+  // names a few verbs (v5.20.0 release review: an `ssh` or `npx` sibling of a
+  // print-only read was allowed where v5.19.0 blocked), so the remainder must
+  // also pass the #874 allow-set: every statement left is itself a closed-set
+  // read, a plain `echo`, `pwd` or `true` (`closedReadSiblingMayReachNetwork`,
+  // which fails closed on anything else). Otherwise the whole command is
+  // judged exactly as before the mask existed.
   const inspectionMasked = family === 'exec' ? readOnlyInspectionMask(scannedCommand, command, rawCommand) : null;
   const execCommand = inspectionMasked !== null && !EXTERNAL_EGRESS.test(inspectionMasked)
+    && !closedReadSiblingMayReachNetwork(inspectionMasked, false)
     ? inspectionMasked
     : scannedCommand;
   const execSurface = [execCommand, path, url].filter(Boolean).join('   ');
