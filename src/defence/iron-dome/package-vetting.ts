@@ -790,21 +790,51 @@ async function queryOsv(ref: PackageRef, version: string, fetchImpl: FetchLike, 
     throw new Unchecked(signal.aborted ? 'timed out' : `OSV unreachable (${errClass(err)})`);
   }
   if (!res.ok) throw new Unchecked(`OSV answered HTTP ${res.status}`);
-  let body: Record<string, unknown>;
-  try { body = obj(await res.json()); } catch { throw new Unchecked('OSV answer was not valid JSON'); }
-  const vulns = Array.isArray(body.vulns) ? body.vulns : [];
-  const ids: string[] = [];
-  for (const v of vulns) {
-    const o = obj(v);
-    if (o.withdrawn) continue;
-    if (typeof o.id === 'string' && OSV_ID.test(o.id)) ids.push(o.id);
-    // A record filed under another id (GHSA-…, PYSEC-…) can carry the MAL- id as an alias.
-    if (Array.isArray(o.aliases)) for (const a of o.aliases) if (typeof a === 'string' && a.startsWith('MAL-') && OSV_ID.test(a)) ids.push(a);
-  }
-  return [...new Set(ids)];
+  let body: unknown;
+  try { body = await res.json(); } catch { throw new Unchecked('OSV answer was not valid JSON'); }
+  const answer = readOsvResult(body, { aliases: true, skipWithdrawn: true });
+  // A malformed answer is never a clean one (it would be final for this version and evict a
+  // cached MAL- hit). It still counts when a well-formed entry in it names a MAL- id.
+  if (!answer.complete && !answer.ids.some(isMalId)) throw new Unchecked('OSV answer was not in the expected shape');
+  return answer.ids;
 }
 
 const OSV_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,60}$/;
+const isMalId = (id: string) => id.startsWith('MAL-');
+/** Top-level keys of an error body (Google API / gRPC-gateway shapes); OSV's answers carry none of them. */
+const OSV_ERROR_KEYS = ['error', 'code', 'message', 'details', 'status'];
+
+/**
+ * One OSV result object, validated: `{}` or `{ vulns: [ { id, … }, … ] }`, as
+ * `/v1/query` returns it and as each element of a `/v1/querybatch` `results`
+ * array is. `complete` is false — the answer may not be read as clean — when
+ * it is not a plain object, carries an error shape, has a `vulns` that is not
+ * an array, holds an entry that is not an object with a well-formed string id
+ * (or has non-array `aliases`), or says there are more pages to fetch. Ids of
+ * the well-formed entries are returned either way, so a malformed answer can
+ * still prove a package malicious, but never prove it clean.
+ */
+function readOsvResult(result: unknown, opts: { aliases: boolean; skipWithdrawn: boolean }): { ids: string[]; complete: boolean } {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return { ids: [], complete: false };
+  const r = result as Record<string, unknown>;
+  let complete = !OSV_ERROR_KEYS.some((k) => Object.prototype.hasOwnProperty.call(r, k));
+  if (r.next_page_token !== undefined && r.next_page_token !== '') complete = false;
+  if (r.vulns === undefined) return { ids: [], complete };
+  if (!Array.isArray(r.vulns)) return { ids: [], complete: false };
+  const ids: string[] = [];
+  for (const v of r.vulns) {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) { complete = false; continue; }
+    const o = v as Record<string, unknown>;
+    if (typeof o.id !== 'string' || !OSV_ID.test(o.id)) { complete = false; continue; }
+    if (o.aliases !== undefined && !Array.isArray(o.aliases)) complete = false;
+    if (opts.skipWithdrawn && o.withdrawn) continue;
+    ids.push(o.id);
+    // A record filed under another id (GHSA-…, PYSEC-…) can carry the MAL- id as an alias.
+    if (opts.aliases && Array.isArray(o.aliases)) for (const a of o.aliases) if (typeof a === 'string' && isMalId(a) && OSV_ID.test(a)) ids.push(a);
+  }
+  return { ids: [...new Set(ids)], complete };
+}
+
 const MAX_BATCH = 500;
 const MAX_ALIAS_LOOKUPS = 6;
 
@@ -817,8 +847,9 @@ const MAX_ALIAS_LOOKUPS = 6;
  * that only affect OTHER versions (a name-only hit is a reason to look, not a
  * verdict; `vetPackages` resolves it).
  *
- * Returns ids per query index; `null` for a query whose chunk failed or whose
- * answer did not line up with the chunk (never an empty clean answer).
+ * Returns ids per query index; `null` for a query whose chunk failed, whose
+ * answer did not line up with the chunk, or whose own result was malformed
+ * and named no `MAL-` id (never an empty clean answer).
  *
  * The batch answer carries ids only, never aliases, so the (few) non-MAL ids it
  * returns are fetched individually to see whether one is an alias of a `MAL-`
@@ -852,7 +883,7 @@ async function queryOsvChunk(
   fetchImpl: FetchLike,
   signal: AbortSignal,
   budget: { aliasLookups: number },
-): Promise<string[][] | null> {
+): Promise<Array<string[] | null> | null> {
   try {
     const res = await fetchImpl('https://api.osv.dev/v1/querybatch', {
       method: 'POST',
@@ -863,15 +894,16 @@ async function queryOsvChunk(
       signal,
     });
     if (!res.ok) return null;
-    const results = obj(await res.json()).results;
+    const body: unknown = await res.json();
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+    if (OSV_ERROR_KEYS.some((k) => Object.prototype.hasOwnProperty.call(body, k))) return null;
+    const results = (body as Record<string, unknown>).results;
     if (!Array.isArray(results) || results.length !== slice.length) return null;
-    const out: string[][] = slice.map(() => []);
+    const out: Array<string[] | null> = slice.map(() => null);
     for (let i = 0; i < slice.length; i++) {
-      const vulns = Array.isArray(obj(results[i]).vulns) ? obj(results[i]).vulns as unknown[] : [];
+      const answer = readOsvResult(results[i], { aliases: false, skipWithdrawn: false });
       const ids: string[] = [];
-      for (const v of vulns) {
-        const id = obj(v).id;
-        if (typeof id !== 'string' || !OSV_ID.test(id)) continue;
+      for (const id of answer.ids) {
         ids.push(id);
         if (!id.startsWith('MAL-') && budget.aliasLookups < MAX_ALIAS_LOOKUPS) {
           budget.aliasLookups++;
@@ -884,7 +916,8 @@ async function queryOsvChunk(
           } catch { /* alias enrichment is best-effort */ }
         }
       }
-      out[i] = [...new Set(ids)];
+      // A malformed result is unavailable for this query (never clean) unless it still names a MAL- id.
+      out[i] = answer.complete || ids.some(isMalId) ? [...new Set(ids)] : null;
     }
     return out;
   } catch {
