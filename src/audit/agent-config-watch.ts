@@ -959,14 +959,35 @@ export interface AgentConfigWatchDeps {
   /**
    * #889: vet newly added MCP servers whose command launches a package
    * (`npx`/`uvx` …). Report-only: the answer rides on the notification and can
-   * never change what is baselined, delivered or blocked. Must bound its own
-   * time; a throw or a hang costs the check, never the notification.
+   * never change what is baselined, delivered or blocked. `budgetMs` is the
+   * time it may use; it should bound itself to that. It runs once per changed
+   * file, all files at once, inside one window that ends by the half-way point
+   * of the watch's budget; a throw, a hang or an overrun costs the check
+   * (reported as `unchecked` on the notification), never the notification.
    */
-  vetServers?: (servers: Array<{ name: string; entry: unknown }>) => Promise<Array<{ name: string; malicious: boolean; reasons: string[] }>>;
+  vetServers?: (servers: Array<{ name: string; entry: unknown }>, opts?: { budgetMs: number }) => Promise<Array<{ name: string; malicious: boolean; reasons: string[] }>>;
 }
 
 /** Hard ceiling on the report-only package check inside the watch's own budget. */
 const VET_SERVERS_CEILING_MS = 2500;
+/**
+ * The package check must END by this fraction of the watch's total budget, so
+ * the rest is always left for delivering, recording and saving every change:
+ * enrichment can never be what runs the watch out of time.
+ */
+const VET_SERVERS_BUDGET_SHARE = 0.5;
+/** Head start the check's own budget leaves before the window closes on it. */
+const VET_SERVERS_GRACE_MS = 250;
+/** Changed files whose added servers are checked in one run (each check runs concurrently). */
+const VET_SERVERS_MAX_FILES = 5;
+
+/** Fixed explanations for a package check that did not produce an answer. */
+export const PACKAGE_CHECK_UNFINISHED = {
+  timedOut: 'unchecked: the package check did not finish within the watch\'s time budget',
+  failed: 'unchecked: the package check failed',
+  noTime: 'unchecked: skipped, the watch had no time left for the package check',
+  tooMany: `unchecked: skipped, the watch checks packages for at most ${VET_SERVERS_MAX_FILES} changed files per run`,
+} as const;
 
 /**
  * The raw entries of MCP servers a change list ADDED (or changed), read from the
@@ -1031,6 +1052,8 @@ export function sameSnapshot(a: FileSnapshot | undefined, b: FileSnapshot | unde
 }
 
 export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<AgentConfigWatchResult> {
+  // Wall clock for the budget (deps.now may be a fixed test clock; it only stamps state).
+  const startedAt = Date.now();
   const now = deps.now ?? Date.now;
   const result: AgentConfigWatchResult = { baselined: false, notified: 0, errors: 0 };
   /** True when the row was recorded; a `false` return or a throw both count as not recorded. */
@@ -1120,38 +1143,40 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
 
     if (firstRun) result.baselined = true;
     let pending = 0;
-    for (const c of changedFiles) {
-      if (expired) return;
-      // One file's failure (a diff that throws...) must not stop the others
-      // or lose what was already delivered: it keeps its baseline and re-alerts.
+    // Diff every changed file first (synchronous), so the report-only package
+    // check below can run once for all of them instead of once per file in turn.
+    const diffed = changedFiles.map((c) => {
       try {
         // High-severity kinds first, so they are always among the three shown.
         const changes = diffSnapshots(c.spec, c.before, c.after)
           .filter((x) => !(c.spec.ignoreRemovals && x.kind === 'removed'))
           .sort((x, y) => Number(changeSeverity(y) === 'high') - Number(changeSeverity(x) === 'high'));
+        return { c, changes };
+      } catch (err) {
+        return { c, err };
+      }
+    });
+    const packageChecks = await checkAddedServers(diffed);
+    if (expired) return;
+    for (const [i, d] of diffed.entries()) {
+      if (expired) return;
+      const c = d.c;
+      // One file's failure (a diff that throws...) must not stop the others
+      // or lose what was already delivered: it keeps its baseline and re-alerts.
+      try {
+        if (d.err !== undefined || !d.changes) throw d.err;
+        const changes = d.changes;
         const shown = displayPath(c.file, deps.home);
         if (changes.length === 0) { next.files[c.key] = c.after; continue; }
         next.lastDetectedAt = new Date(now()).toISOString();
         const severity: ChangeSeverity = changes.some((x) => changeSeverity(x) === 'high') ? 'high' : 'normal';
-        let packageChecks: AgentConfigNotification['packageChecks'];
-        if (deps.vetServers) {
-          try {
-            const servers = addedServerEntries(c.file, c.spec, changes);
-            if (servers.length > 0) {
-              let t: NodeJS.Timeout | undefined;
-              const ceiling = new Promise<undefined>((res) => { t = setTimeout(() => res(undefined), VET_SERVERS_CEILING_MS); t.unref?.(); });
-              const checks = await Promise.race([deps.vetServers(servers), ceiling]);
-              if (t) clearTimeout(t);
-              if (checks && checks.length > 0) packageChecks = checks;
-            }
-          } catch { /* report-only: a failed check never costs the notification */ }
-        }
+        const checks = packageChecks[i];
         const note: AgentConfigNotification = {
           file: shown,
           changes: changes.slice(0, 3).map((x) => ({ label: changeLabel(x), name: x.name })),
           changeCount: changes.length,
           ...(severity === 'high' ? { severity } : {}),
-          ...(packageChecks ? { packageChecks } : {}),
+          ...(checks && checks.length > 0 ? { packageChecks: checks } : {}),
         };
         try {
           await deps.notify(note);
@@ -1216,6 +1241,64 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
     }
     if (expired) return;
     saveAgentConfigState(deps.home, next);
+  };
+
+  /**
+   * #889, report-only: the package check of MCP servers each changed file
+   * added, for all files at once, inside one window that closes by
+   * {@link VET_SERVERS_BUDGET_SHARE} of the watch budget (and never later than
+   * {@link VET_SERVERS_CEILING_MS}). Whatever the check does — answers, throws,
+   * hangs or overruns — this returns by the window's end, and a file whose
+   * check gave no answer gets an `unchecked` explanation instead. Never throws.
+   */
+  const checkAddedServers = async (
+    diffed: ReadonlyArray<{ c: { file: string; spec: WatchedFileSpec }; changes?: ConfigChange[] }>,
+  ): Promise<Array<AgentConfigNotification['packageChecks']>> => {
+    const out: Array<AgentConfigNotification['packageChecks']> = diffed.map(() => undefined);
+    const vet = deps.vetServers;
+    if (!vet) return out;
+    const wanted: Array<{ i: number; servers: Array<{ name: string; entry: unknown }> }> = [];
+    for (const [i, d] of diffed.entries()) {
+      if (!d.changes || d.changes.length === 0) continue;
+      const servers = addedServerEntries(d.c.file, d.c.spec, d.changes);
+      if (servers.length > 0) wanted.push({ i, servers });
+    }
+    if (wanted.length === 0) return out;
+    // Only a server with a command can launch a package: those are the ones an unfinished check leaves unchecked.
+    const unfinished = (servers: Array<{ name: string; entry: unknown }>, why: string) => {
+      const named = servers.filter((s) => !!s.entry && typeof s.entry === 'object' && typeof (s.entry as Record<string, unknown>).command === 'string');
+      return named.length > 0 ? named.map((s) => ({ name: s.name, malicious: false, reasons: [why] })) : undefined;
+    };
+    const run = wanted.slice(0, VET_SERVERS_MAX_FILES);
+    for (const w of wanted.slice(VET_SERVERS_MAX_FILES)) out[w.i] = unfinished(w.servers, PACKAGE_CHECK_UNFINISHED.tooMany);
+    const windowMs = Math.min(VET_SERVERS_CEILING_MS, startedAt + budget * VET_SERVERS_BUDGET_SHARE - Date.now());
+    if (expired || windowMs <= 0) {
+      for (const w of run) out[w.i] = unfinished(w.servers, PACKAGE_CHECK_UNFINISHED.noTime);
+      return out;
+    }
+    const settled: Array<{ ok: true; checks: Awaited<ReturnType<NonNullable<AgentConfigWatchDeps['vetServers']>>> } | { ok: false } | undefined> = run.map(() => undefined);
+    const budgetMs = Math.max(0, Math.floor(windowMs - VET_SERVERS_GRACE_MS));
+    const all = Promise.all(run.map(async (w, k) => {
+      try {
+        settled[k] = { ok: true, checks: await vet(w.servers, { budgetMs }) };
+      } catch {
+        settled[k] = { ok: false };
+      }
+    }));
+    let t: NodeJS.Timeout | undefined;
+    const windowEnd = new Promise<void>((res) => { t = setTimeout(res, windowMs); t.unref?.(); });
+    try {
+      await Promise.race([all, windowEnd]);
+    } finally {
+      if (t) clearTimeout(t);
+    }
+    for (const [k, w] of run.entries()) {
+      const r = settled[k];
+      if (r === undefined) out[w.i] = unfinished(w.servers, PACKAGE_CHECK_UNFINISHED.timedOut);
+      else if (!r.ok) out[w.i] = unfinished(w.servers, PACKAGE_CHECK_UNFINISHED.failed);
+      else if (Array.isArray(r.checks) && r.checks.length > 0) out[w.i] = r.checks;
+    }
+    return out;
   };
 
   let timer: NodeJS.Timeout | undefined;
