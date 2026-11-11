@@ -741,33 +741,53 @@ const isMalId = (id: string) => id.startsWith('MAL-');
 /** Top-level keys of an error body (Google API / gRPC-gateway shapes); OSV's answers carry none of them. */
 const OSV_ERROR_KEYS = ['error', 'code', 'message', 'details', 'status'];
 
+/** Keys an OSV result object carries (`/v1/query` answer, `/v1/querybatch` element). Anything else is not that answer. */
+const OSV_RESULT_KEYS = new Set(['vulns', 'next_page_token']);
+/** OSV `timestamp`: an RFC 3339 date-time string. */
+const OSV_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i;
+const isOsvTimestamp = (v: unknown): v is string => typeof v === 'string' && OSV_TIMESTAMP.test(v) && Number.isFinite(Date.parse(v));
+
+/**
+ * One OSV vulnerability entry, validated on every field this check reads: `id`
+ * a well-formed id string, `withdrawn` (when present) a date-time string,
+ * `aliases` (when present) a list of strings. Null when any is malformed: a
+ * malformed field can neither withdraw a record nor be read past.
+ */
+function readOsvEntry(v: unknown): { id: string; withdrawn: boolean; aliases: string[] } | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  if (typeof o.id !== 'string' || !OSV_ID.test(o.id)) return null;
+  if (o.withdrawn !== undefined && !isOsvTimestamp(o.withdrawn)) return null;
+  if (o.aliases !== undefined && (!Array.isArray(o.aliases) || !o.aliases.every((a) => typeof a === 'string'))) return null;
+  return { id: o.id, withdrawn: o.withdrawn !== undefined, aliases: (o.aliases as string[] | undefined) ?? [] };
+}
+
 /**
  * One OSV result object, validated: `{}` or `{ vulns: [ { id, … }, … ] }`, as
  * `/v1/query` returns it and as each element of a `/v1/querybatch` `results`
  * array is. `complete` is false — the answer may not be read as clean — when
- * it is not a plain object, carries an error shape, has a `vulns` that is not
- * an array, holds an entry that is not an object with a well-formed string id
- * (or has non-array `aliases`), or says there are more pages to fetch. Ids of
- * the well-formed entries are returned either way, so a malformed answer can
- * still prove a package malicious, but never prove it clean.
+ * it is not a plain object, carries a key OSV's answer does not have (an error
+ * shape, `results`, anything else), has a `vulns` that is not an array, holds
+ * an entry that fails {@link readOsvEntry}, or says there are more pages to
+ * fetch. Ids of the well-formed entries are returned either way, so a
+ * malformed answer can still prove a package malicious, but never prove it
+ * clean; a malformed entry contributes nothing (not even a withdrawal).
  */
 function readOsvResult(result: unknown, opts: { aliases: boolean; skipWithdrawn: boolean }): { ids: string[]; complete: boolean } {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return { ids: [], complete: false };
   const r = result as Record<string, unknown>;
-  let complete = !OSV_ERROR_KEYS.some((k) => Object.prototype.hasOwnProperty.call(r, k));
+  let complete = Object.keys(r).every((k) => OSV_RESULT_KEYS.has(k));
   if (r.next_page_token !== undefined && r.next_page_token !== '') complete = false;
   if (r.vulns === undefined) return { ids: [], complete };
   if (!Array.isArray(r.vulns)) return { ids: [], complete: false };
   const ids: string[] = [];
   for (const v of r.vulns) {
-    if (!v || typeof v !== 'object' || Array.isArray(v)) { complete = false; continue; }
-    const o = v as Record<string, unknown>;
-    if (typeof o.id !== 'string' || !OSV_ID.test(o.id)) { complete = false; continue; }
-    if (o.aliases !== undefined && !Array.isArray(o.aliases)) complete = false;
-    if (opts.skipWithdrawn && o.withdrawn) continue;
-    ids.push(o.id);
+    const e = readOsvEntry(v);
+    if (!e) { complete = false; continue; }
+    if (opts.skipWithdrawn && e.withdrawn) continue;
+    ids.push(e.id);
     // A record filed under another id (GHSA-…, PYSEC-…) can carry the MAL- id as an alias.
-    if (opts.aliases && Array.isArray(o.aliases)) for (const a of o.aliases) if (typeof a === 'string' && isMalId(a) && OSV_ID.test(a)) ids.push(a);
+    if (opts.aliases) for (const a of e.aliases) if (isMalId(a) && OSV_ID.test(a)) ids.push(a);
   }
   return { ids: [...new Set(ids)], complete };
 }
@@ -836,9 +856,13 @@ async function queryOsvChunk(
     if (OSV_ERROR_KEYS.some((k) => Object.prototype.hasOwnProperty.call(body, k))) return null;
     const results = (body as Record<string, unknown>).results;
     if (!Array.isArray(results) || results.length !== slice.length) return null;
+    // Anything beside `results` (a page token, an unknown key) means the envelope is not the
+    // answer this check reads: no result in it is clean, though a well-formed MAL- entry still counts.
+    const envelopeComplete = Object.keys(body).every((k) => k === 'results');
     const out: Array<string[] | null> = slice.map(() => null);
     for (let i = 0; i < slice.length; i++) {
-      const answer = readOsvResult(results[i], { aliases: false, skipWithdrawn: false });
+      const read = readOsvResult(results[i], { aliases: false, skipWithdrawn: false });
+      const answer = { ids: read.ids, complete: read.complete && envelopeComplete };
       const ids: string[] = [];
       for (const id of answer.ids) {
         ids.push(id);

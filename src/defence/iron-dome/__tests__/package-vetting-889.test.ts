@@ -1002,6 +1002,16 @@ describe('release review B2 — malformed OSV answers are never clean', () => {
     ['a string', 'oops'],
     ['a number', 42],
     ['more pages to fetch', { vulns: [], next_page_token: 'abc' }],
+    // Round 2 (Astra B2): every consumed field is validated, and only OSV's own keys make an answer.
+    ['a MAL- entry whose withdrawn is an object', { vulns: [{ id: MAL, withdrawn: {} }] }],
+    ['a MAL- entry whose withdrawn is a number', { vulns: [{ id: MAL, withdrawn: 1 }] }],
+    ['a MAL- entry whose withdrawn is not a date-time', { vulns: [{ id: MAL, withdrawn: 'yes' }] }],
+    ['a MAL- entry whose withdrawn is true', { vulns: [{ id: MAL, withdrawn: true }] }],
+    ['an entry with a null alias', { vulns: [{ id: 'GHSA-aaaa-bbbb-cccc', aliases: [null] }] }],
+    ['an entry with a numeric alias', { vulns: [{ id: 'GHSA-aaaa-bbbb-cccc', aliases: [7] }] }],
+    ['a batch-shaped { results: [] }', { results: [] }],
+    ['{ unexpected: true }', { unexpected: true }],
+    ['an empty vulns beside an unknown key', { vulns: [], extra: 1 }],
   ];
 
   it.each(MALFORMED)('exact query answering %s: unchecked, the cached MAL- hit is kept and still blocks', async (_label, body) => {
@@ -1039,6 +1049,11 @@ describe('release review B2 — malformed OSV answers are never clean', () => {
     ['JSON null', () => ({ body: null })],
     ['{}', () => ({ body: {} })],
     ['an error body beside results', (n) => ({ body: { error: 'x', results: each(n, {}) } })],
+    ['results: [{ vulns: [MAL- entry, withdrawn: {}] }]', (n) => ({ body: { results: each(n, { vulns: [{ id: MAL, withdrawn: {} }] }) } })],
+    ['results: [{ vulns: [entry, aliases: [null]] }]', (n) => ({ body: { results: each(n, { vulns: [{ id: 'GHSA-aaaa-bbbb-cccc', aliases: [null] }] }) } })],
+    ['results: [{ unexpected: true }]', (n) => ({ body: { results: each(n, { unexpected: true }) } })],
+    ['a page token beside results', (n) => ({ body: { results: each(n, {}), next_page_token: 'abc' } })],
+    ['an unknown key beside results', (n) => ({ body: { results: each(n, {}), extra: 1 } })],
   ];
 
   it.each(BATCH_MALFORMED)('both endpoints malformed (batch %s): the cached MAL- hit is kept and still blocks', async (_label, batch) => {
@@ -1087,6 +1102,34 @@ describe('release review B2 — malformed OSV answers are never clean', () => {
     const res = await vet(mkFetch({ body: { vulns: [{ id: MAL }, null] } }, batchClean));
     expect(res.malicious).toBe(true);
     expect(res.reasons[0]).toContain('as known malicious');
+  });
+
+  it('round 2: the reviewer\'s fixtures, crossed with every batch answer, never evict the cached MAL- or outweigh a valid MAL- batch', async () => {
+    const exact: unknown[] = [{ vulns: [{ id: MAL, withdrawn: {} }] }, { vulns: [{ id: 'GHSA-aaaa-bbbb-cccc', aliases: [null] }] }, { results: [] }, { unexpected: true }];
+    const batches: Array<[string, (n: number) => Shape]> = [
+      ['clean', batchClean], ['same malformed body', () => ({ body: { results: [] } })], ['valid MAL-', batchMal], ['HTTP 500', () => ({ status: 500, body: {} })],
+    ];
+    for (const body of exact) {
+      for (const [label, batch] of batches) {
+        seed();
+        const res = await vet(mkFetch({ body: structuredClone(body) }, batch));
+        expect({ body, label, malicious: res.malicious, cache: cacheKeys() }).toEqual({ body, label, malicious: true, cache: [KEY] });
+        expect(res.packages[0].status === 'checked' && !res.packages[0].cached && label !== 'valid MAL-').toBe(false);
+      }
+    }
+  });
+
+  it('round 2 controls: a well-formed withdrawal is honoured, and a well-formed MAL- beside a malformed entry still blocks', async () => {
+    seed();
+    const withdrawn = await vet(mkFetch({ body: { vulns: [{ id: MAL, withdrawn: '2026-11-01T00:00:00Z' }] } }, batchClean));
+    expect(withdrawn.malicious).toBe(false);
+    expect(withdrawn.packages[0].status).toBe('checked');
+    expect(cacheKeys()).toEqual([]);
+    const fractional = await vet(mkFetch({ body: { vulns: [{ id: 'GHSA-aaaa-bbbb-cccc', withdrawn: '2026-11-01T00:00:00.123456Z', aliases: ['CVE-2026-0001'] }] } }, batchClean));
+    expect(fractional.packages[0]).toMatchObject({ status: 'checked', malicious: [] });
+    const mixed = await vet(mkFetch({ body: { vulns: [{ id: MAL }, { id: 'GHSA-aaaa-bbbb-cccc', aliases: [null] }] } }, batchClean));
+    expect(mixed.malicious).toBe(true);
+    expect(mixed.reasons[0]).toContain('as known malicious');
   });
 
   it('controls: legitimate {} and { vulns: [] } are clean and evict a stale cached hit (as before)', async () => {
