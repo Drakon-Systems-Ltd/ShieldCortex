@@ -1,7 +1,8 @@
 /**
  * #889 phase 1 — the #916 agent-config watch vets a NEWLY ADDED MCP server
- * that launches a package (npx/uvx). Report-only: the finding rides on the
- * notification and never changes what is baselined or delivered. Synthetic:
+ * that launches a package (npx/uvx). Report-only: the finding follows the
+ * change notice out as a follow-up and never changes what is baselined or
+ * delivered. Synthetic:
  * temp HOME, inert placeholder commands, vetting stubbed (no network).
  */
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
@@ -48,7 +49,7 @@ afterEach(() => {
 });
 
 describe('agent config watch — package vetting of added MCP servers (#889)', () => {
-  it('passes only the ADDED server entry to the vetting callback and puts the result on the notification', async () => {
+  it('passes only the ADDED server entry to the vetting callback and sends the result as a follow-up to the change notice', async () => {
     await run(); // baseline
     write({ mcpServers: { existing: { command: 'node', args: ['server.js'] }, docs: { command: 'npx', args: ['-y', 'some-mcp@1.0.0'] } } });
     let seen: Array<{ name: string; entry: unknown }> = [];
@@ -59,20 +60,32 @@ describe('agent config watch — package vetting of added MCP servers (#889)', (
       },
     });
     expect(seen).toEqual([{ name: 'docs', entry: { command: 'npx', args: ['-y', 'some-mcp@1.0.0'] } }]);
-    expect(notes).toHaveLength(1);
-    expect(notes[0].packageChecks).toEqual([{ name: 'docs', malicious: true, reasons: ['OSV lists some-mcp@1.0.0 as known malicious (MAL-2026-18603)'] }]);
-    const text = formatOperatorNotification(buildAgentConfigChangeNotification(notes[0]));
+    expect(notes).toHaveLength(2);
+    // The change notice is exactly what it is without the check...
+    expect(notes[0]).toEqual({ file: expect.any(String), changes: [{ label: 'MCP server added', name: 'docs' }], changeCount: 1 });
+    // ...and the answer follows it, naming the notice it follows.
+    expect(notes[1]).toMatchObject({ file: notes[0].file, changes: notes[0].changes, packageCheckFollowUp: true, severity: 'high' });
+    expect(notes[1].packageChecks).toEqual([{ name: 'docs', malicious: true, reasons: ['OSV lists some-mcp@1.0.0 as known malicious (MAL-2026-18603)'] }]);
+    const text = formatOperatorNotification(buildAgentConfigChangeNotification(notes[1]));
+    expect(text).toMatch(/^ShieldCortex HIGH SEVERITY: package check, follow-up to the .*\.mcp\.json change notice \(MCP server added \(docs\)\)\./);
     expect(text).toContain('KNOWN MALICIOUS PACKAGE for MCP server docs');
     expect(text).toContain('MAL-2026-18603');
+    expect(text).toContain('Remove that MCP server before starting an agent.');
+    expect(text).not.toContain('changed outside ShieldCortex');
+    const webhookShape = buildAgentConfigChangeNotification(notes[1]);
+    expect(webhookShape.packageCheckFollowUp).toBe(true);
+    expect(buildAgentConfigChangeNotification(notes[0]).packageCheckFollowUp).toBeUndefined();
   });
 
   it('is report-only: a throwing check still delivers the ordinary notification, says the check failed, and advances the baseline', async () => {
     await run();
     write({ mcpServers: { existing: { command: 'node', args: ['server.js'] }, docs: { command: 'npx', args: ['some-mcp'] } } });
     await run({ vetServers: async () => { throw new Error('boom'); } });
-    expect(notes).toHaveLength(1);
-    expect(notes[0].packageChecks).toEqual([{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.failed] }]);
+    expect(notes).toHaveLength(2);
+    expect(notes[0].packageChecks).toBeUndefined();
     expect(notes[0].changes[0]).toMatchObject({ label: 'MCP server added', name: 'docs' });
+    expect(notes[1]).toMatchObject({ packageCheckFollowUp: true, packageChecks: [{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.failed] }] });
+    expect(notes[1].severity).toBeUndefined();
     expect((await run()).notified).toBe(0); // acknowledged
   });
 
@@ -83,7 +96,8 @@ describe('agent config watch — package vetting of added MCP servers (#889)', (
     const res = await run({ totalBudgetMs: 800, vetServers: () => new Promise(() => undefined) });
     expect(Date.now() - t0).toBeLessThan(800);
     expect(res).toMatchObject({ notified: 1, errors: 0 });
-    expect(notes[0].packageChecks).toEqual([{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.timedOut] }]);
+    expect(notes[0].packageChecks).toBeUndefined();
+    expect(notes[1]).toMatchObject({ packageCheckFollowUp: true, packageChecks: [{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.timedOut] }] });
     expect((await run()).notified).toBe(1 - 1); // acknowledged
   });
 
@@ -118,10 +132,12 @@ describe('agent config watch — package vetting of added MCP servers (#889)', (
 // budget, with no deadline check after that await. Three changed files with a
 // slow check: two delivered, the run timed out, a third notification fired
 // AFTER the run returned, and no baseline advanced, so every change re-alerted
-// next session. The check now runs once for all files, concurrently, inside a
-// window that closes by half the watch budget; delivery and baselining keep the
-// other half.
-describe('release review B3 — the package check is subordinate to the watch deadline', () => {
+// next session. Round 1 ran the check once for all files inside a window that
+// closed by half the budget, but delivery still waited for that window: with
+// 1100 ms deliveries (3 x 1100 > the 2500 ms left) round 2 reproduced the same
+// loss. The check now starts beside delivery and nothing before the save waits
+// for it; its answer goes out afterwards as a follow-up, only while time lasts.
+describe('release review B3 — the package check is off the delivery and baseline path', () => {
   let projects: string[];
   const ADDED = { mcpServers: { existing: { command: 'node', args: ['server.js'] }, docs: { command: 'npx', args: ['-y', 'some-mcp@1.0.0'] } } };
   const BASE = { mcpServers: { existing: { command: 'node', args: ['server.js'] } } };
@@ -140,6 +156,8 @@ describe('release review B3 — the package check is subordinate to the watch de
     notes = []; rows = [];
   };
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const changeNotes = () => notes.filter((n) => !n.packageCheckFollowUp);
+  const followUps = () => notes.filter((n) => n.packageCheckFollowUp);
   afterEach(() => { for (const p of projects ?? []) fs.rmSync(p, { recursive: true, force: true }); projects = []; });
 
   it('three changed files and a check that never answers: all three delivered and baselined in time, nothing after return', async () => {
@@ -151,7 +169,10 @@ describe('release review B3 — the package check is subordinate to the watch de
     expect(res).toEqual({ baselined: false, notified: 3, errors: 0 });
     expect(rows.filter((r) => r.kind === 'error')).toEqual([]); // no timeout row
     expect(rows.filter((r) => r.outcome === 'change')).toHaveLength(3);
-    for (const n of notes) expect(n.packageChecks).toEqual([{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.timedOut] }]);
+    expect(changeNotes()).toHaveLength(3);
+    for (const n of changeNotes()) expect(n.packageChecks).toBeUndefined();
+    expect(followUps()).toHaveLength(3);
+    for (const n of followUps()) expect(n.packageChecks).toEqual([{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.timedOut] }]);
     // Nothing is delivered or recorded after the run has returned.
     const counts = [notes.length, rows.length];
     await sleep(400);
@@ -177,7 +198,8 @@ describe('release review B3 — the package check is subordinate to the watch de
     expect(calls).toBe(3);
     expect(Date.now() - t0).toBeLessThan(1500); // concurrent, not 3 x 300 ms serially plus slack
     expect(res).toEqual({ baselined: false, notified: 3, errors: 0 });
-    for (const n of notes) expect(n.packageChecks).toEqual([{ name: 'docs', malicious: false, reasons: ['unchecked: timed out'] }]);
+    expect(followUps()).toHaveLength(3);
+    for (const n of followUps()) expect(n.packageChecks).toEqual([{ name: 'docs', malicious: false, reasons: ['unchecked: timed out'] }]);
     expect((await runMany()).notified).toBe(0);
   });
 
@@ -198,7 +220,8 @@ describe('release review B3 — the package check is subordinate to the watch de
     const res = await runMany({ totalBudgetMs: 1200, snapshot: slowTake, vetServers: async () => { called = true; return []; } });
     expect(called).toBe(false);
     expect(res).toMatchObject({ notified: 1, errors: 0 });
-    expect(notes[0].packageChecks).toEqual([{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.noTime] }]);
+    expect(changeNotes()[0].packageChecks).toBeUndefined();
+    expect(followUps().map((n) => n.packageChecks)).toEqual([[{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.noTime] }]]);
   });
 
   it('checks at most five changed files per run and says so for the rest', async () => {
@@ -207,14 +230,16 @@ describe('release review B3 — the package check is subordinate to the watch de
     const res = await runMany({ vetServers: async (servers) => { calls++; return servers.map((s) => ({ name: s.name, malicious: false, reasons: ['ok'] })); } });
     expect(calls).toBe(5);
     expect(res.notified).toBe(6);
-    expect(notes.filter((n) => n.packageChecks?.[0]?.reasons[0] === PACKAGE_CHECK_UNFINISHED.tooMany)).toHaveLength(1);
+    expect(changeNotes()).toHaveLength(6);
+    expect(followUps()).toHaveLength(6);
+    expect(followUps().filter((n) => n.packageChecks?.[0]?.reasons[0] === PACKAGE_CHECK_UNFINISHED.tooMany)).toHaveLength(1);
   });
 
   it('an unfinished check lists only servers that have a command (a remote url server launches no package)', async () => {
     await setup(1);
     fs.writeFileSync(path.join(projects[0], '.mcp.json'), JSON.stringify({ mcpServers: { ...ADDED.mcpServers, remote: { url: 'https://mcp.example/x' } } }));
     await runMany({ vetServers: async () => { throw new Error('boom'); } });
-    expect(notes[0].packageChecks).toEqual([{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.failed] }]);
+    expect(followUps()[0].packageChecks).toEqual([{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.failed] }]);
   });
 
   it('control: without a check the three files deliver and baseline as before, and the state file is written', async () => {
@@ -223,5 +248,128 @@ describe('release review B3 — the package check is subordinate to the watch de
     expect(res).toEqual({ baselined: false, notified: 3, errors: 0 });
     expect(notes.every((n) => n.packageChecks === undefined)).toBe(true);
     expect(fs.existsSync(agentConfigStatePath(home))).toBe(true);
+  });
+
+  // Round 2's reproduction, at the DEFAULT 5 s budget: three changed files,
+  // each change notice taking 1100 ms to deliver (under the transport's 10 s
+  // default) and each package check answering after 1900 ms (under the
+  // runner's 2 s cap). Before: {baselined:false, notified:2, errors:1}, no
+  // baseline advanced, the third notice landed after return, and a repeat run
+  // re-alerted all three.
+  const slowNotify = (ms: number) => async (n: AgentConfigNotification) => {
+    events.push({ at: Date.now(), what: n.packageCheckFollowUp ? 'follow-up start' : 'notice start' });
+    await sleep(ms);
+    notes.push(n);
+  };
+  let events: Array<{ at: number; what: string }> = [];
+  beforeEach(() => { events = []; });
+
+  it('three files, 1100 ms deliveries, 1900 ms checks, default budget: all delivered, every baseline advanced, a repeat run notifies 0', async () => {
+    await setup(3);
+    const baseline = fs.readFileSync(agentConfigStatePath(home), 'utf-8');
+    const malicious = [{ name: 'docs', malicious: true, reasons: ['OSV lists some-mcp@1.0.0 as known malicious (MAL-2026-18603)'] }];
+    const t0 = Date.now();
+    const res = await runMany({ notify: slowNotify(1100), vetServers: async () => { await sleep(1900); return malicious; } });
+    const returnedAfter = Date.now() - t0;
+    expect(res).toEqual({ baselined: false, notified: 3, errors: 0 });
+    expect(returnedAfter).toBeLessThan(5000);
+    // Exactly as without the check: three plain change notices, three change rows, no timeout row.
+    expect(changeNotes()).toHaveLength(3);
+    for (const n of changeNotes()) expect(n.packageChecks).toBeUndefined();
+    expect(rows.filter((r) => r.outcome === 'change')).toHaveLength(3);
+    expect(rows.filter((r) => r.kind === 'error')).toEqual([]);
+    expect(fs.readFileSync(agentConfigStatePath(home), 'utf-8')).not.toBe(baseline); // saved (the repeat run below proves every file advanced)
+    // Every follow-up started after the last change notice had been delivered.
+    const firstFollowUp = events.findIndex((e) => e.what === 'follow-up start');
+    expect(events.slice(0, 3).map((e) => e.what)).toEqual(['notice start', 'notice start', 'notice start']);
+    expect(firstFollowUp).toBe(3);
+    expect(events[firstFollowUp].at - events[2].at).toBeGreaterThanOrEqual(1050);
+    // The answer goes out while time lasts (one fits: 3300 + 1100 < 5000), and
+    // the rest are recorded as not delivered instead of overrunning the deadline.
+    expect(followUps()).toHaveLength(1);
+    expect(followUps()[0]).toMatchObject({ packageCheckFollowUp: true, severity: 'high', packageChecks: malicious });
+    expect(rows.filter((r) => r.kind === 'notify-error').map((r) => r.detail)).toEqual([
+      'package check follow-up not delivered (no time left)',
+      'package check follow-up not delivered (no time left)',
+    ]);
+    // Nothing is delivered or recorded after the run has returned.
+    const counts = [notes.length, rows.length, events.length];
+    await sleep(1300);
+    expect([notes.length, rows.length, events.length]).toEqual(counts);
+    // Every baseline advanced: a repeat run, with the same slow check, notifies nothing.
+    notes = []; rows = [];
+    let vetted = 0;
+    expect(await runMany({ notify: slowNotify(1100), vetServers: async () => { vetted++; await sleep(1900); return malicious; } })).toEqual({ baselined: false, notified: 0, errors: 0 });
+    expect(notes).toEqual([]);
+    expect(vetted).toBe(0);
+  }, 20_000);
+
+  it('control: the same three 1100 ms deliveries with no check at all give the same result and baselines', async () => {
+    await setup(3);
+    const res = await runMany({ notify: slowNotify(1100) });
+    expect(res).toEqual({ baselined: false, notified: 3, errors: 0 });
+    expect(changeNotes()).toHaveLength(3);
+    expect(rows.filter((r) => r.outcome === 'change')).toHaveLength(3);
+    notes = [];
+    expect((await runMany({ notify: slowNotify(1100) })).notified).toBe(0);
+  }, 20_000);
+
+  it('three 1100 ms deliveries and a check that never answers: the same, with the answer unchecked', async () => {
+    await setup(3);
+    const res = await runMany({ notify: slowNotify(1100), vetServers: () => new Promise(() => undefined) });
+    expect(res).toEqual({ baselined: false, notified: 3, errors: 0 });
+    expect(rows.filter((r) => r.kind === 'error')).toEqual([]);
+    expect(followUps().map((n) => n.packageChecks)).toEqual([[{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.timedOut] }]]);
+    notes = [];
+    expect((await runMany({ notify: slowNotify(1100) })).notified).toBe(0);
+  }, 20_000);
+
+  it('a follow-up still in flight at the deadline is cut off: the run returns on time and its result and baseline are untouched', async () => {
+    await setup(1);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const t0 = Date.now();
+    const res = await runMany({
+      totalBudgetMs: 1500,
+      notify: async (n) => { if (n.packageCheckFollowUp) { await held; return; } notes.push(n); },
+      vetServers: async () => [{ name: 'docs', malicious: false, reasons: ['published 2 days ago'] }],
+    });
+    expect(Date.now() - t0).toBeLessThan(1500 + 400);
+    expect(res).toEqual({ baselined: false, notified: 1, errors: 0 });
+    expect(changeNotes()).toHaveLength(1);
+    expect(rows.filter((r) => r.outcome === 'change')).toHaveLength(1);
+    expect(rows.filter((r) => r.kind === 'error')).toEqual([]);
+    expect(rows.filter((r) => r.kind === 'notify-error').map((r) => r.detail)).toEqual(['package check follow-up did not finish (timed out after 1500ms)']);
+    const rowsAtReturn = rows.length;
+    release(); // the cut-off send settling late records nothing more
+    await sleep(20);
+    expect(rows.length).toBe(rowsAtReturn);
+    notes = []; rows = [];
+    expect((await runMany()).notified).toBe(0);
+  }, 20_000);
+
+  it('a follow-up that fails to send is recorded, and the change notice it follows still counts and baselines', async () => {
+    await setup(1);
+    const res = await runMany({
+      notify: async (n) => { if (n.packageCheckFollowUp) throw Object.assign(new Error('x'), { code: 'ECONNRESET' }); notes.push(n); },
+      vetServers: async () => [{ name: 'docs', malicious: false, reasons: ['published 2 days ago'] }],
+    });
+    expect(res).toEqual({ baselined: false, notified: 1, errors: 0 });
+    expect(rows.filter((r) => r.kind === 'notify-error')).toEqual([expect.objectContaining({ keyPath: 'mcpServers', detail: 'package check follow-up not delivered (ECONNRESET)', outcome: 'error' })]);
+    expect((await runMany()).notified).toBe(0);
+  });
+
+  it('an undelivered change notice gets no follow-up (it re-alerts, and is re-checked, next run)', async () => {
+    await setup(1);
+    let calls = 0;
+    const res = await runMany({
+      notify: async () => { throw new Error('down'); },
+      vetServers: async () => { calls++; return [{ name: 'docs', malicious: false, reasons: ['published 2 days ago'] }]; },
+    });
+    expect(res).toMatchObject({ notified: 0, errors: 1 });
+    expect(calls).toBe(1);
+    expect(rows.filter((r) => r.kind === 'notify-error').map((r) => r.detail)).toEqual([expect.stringMatching(/^notification not delivered/)]);
+    notes = [];
+    expect((await runMany()).notified).toBe(1);
   });
 });
