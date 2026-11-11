@@ -55,7 +55,7 @@ or set `SHIELDCORTEX_SKIP_UPDATE_CHECK=1` for the dashboard/API process. The das
 
 ## Next release (unreleased)
 
-- **The self-protection floor is always-block (#853, PR #959).** A call the guard recognises as changing its own state, config, lease ledger or policy lock, or as switching it off (`config --action-guard-disable`, `guard posture off|advisory`), is now refused outright by the Claude Code hook and the OpenClaw plugin in every posture and mode. It is no longer held for approval: no prompt, one-shot `approve`, `approve --denial` retry grant or card releases it; only the owner changing the policy does. Hermes, which has no approval prompt, already blocked these calls. Ordinary dangerous calls are still held for approval as before.
+- **The self-protection floor is always-block (#853, PR #959).** A call the guard recognises as changing its own state, config, lease ledger or policy lock, or as switching it off (`config --action-guard-disable`, `guard posture off|advisory`), is now refused outright by the Claude Code hook and the OpenClaw plugin whenever the guard is on, in every posture and mode (enforce, advisory/watch-only and shadow). With the guard off, neither surface refuses them. It is no longer held for approval: no prompt, one-shot `approve`, `approve --denial` retry grant or card releases it; only the owner changing the policy does. Hermes, which has no approval prompt, already blocked these calls. Ordinary dangerous calls are still held for approval as before.
 
 <a id="whats-new-in-519"></a>
 

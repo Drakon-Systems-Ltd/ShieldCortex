@@ -2685,7 +2685,8 @@ export function createInterceptor(
     // otherwise wave through; under watch-only the advisory exit below lets
     // the call proceed and records it as a warn with `escalated`.
     const selfProtected = isSelfProtectionVerdict(v.signals);
-    // #853 ruling §1: ALWAYS-BLOCK — deny now, in every posture and mode. No
+    // #853 ruling §1: ALWAYS-BLOCK — with the guard enabled (a disabled guard
+    // returned early above), deny now in every posture and mode. No
     // allowlist, shadow, advisory, broker, card or approver releases it;
     // "only a policy edit by the owner changes this". Parity with the hook.
     if (isAlwaysBlockVerdict(v.signals)) {
