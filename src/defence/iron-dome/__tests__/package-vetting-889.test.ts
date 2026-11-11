@@ -952,3 +952,160 @@ describe('panel correction — rubric C3: the unconfirmed-version explanation is
     expect(reason.length).toBeLessThanOrEqual(240);
   });
 });
+
+// Release review (v5.20.0, Astra B2): an HTTP-200 OSV answer that is not in the
+// documented shape (JSON null, an array, an error body, a non-array `vulns`, a
+// malformed entry, …) was read as `{ vulns: [] }`: a clean version-specific
+// answer that was final for the version, evicted the cached MAL- hit and
+// overrode a valid malicious batch answer. It is now unavailable/unchecked.
+// Legitimate `{}` / `{ vulns: [] }` stay clean.
+describe('release review B2 — malformed OSV answers are never clean', () => {
+  const NAME = 'synth-cachedpkg';
+  const VER = '1.2.3';
+  const MAL = 'MAL-2026-90002';
+  const KEY = `npm@${NAME}@${VER}`;
+  const cacheFile = () => path.join(stateDir, 'package-vetting-cache.json');
+  const seed = () => fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: { [KEY]: { at: NOW - 3_600_000, ecosystem: 'npm', name: NAME, version: VER, osvIds: [MAL], hooks: [], sdistOnly: false } } }));
+  const cacheKeys = () => Object.keys(JSON.parse(fs.readFileSync(cacheFile(), 'utf-8')).entries);
+  type Shape = { body?: unknown; status?: number; badJson?: boolean; throws?: boolean };
+  const reply = (r: Shape) => {
+    if (r.throws) throw Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+    const status = r.status ?? 200;
+    return { ok: status < 400, status, json: async () => { if (r.badJson) throw new SyntaxError('Unexpected token'); return structuredClone(r.body); } };
+  };
+  const mkFetch = (query: Shape, batch: (n: number) => Shape): FetchLike => {
+    const w = world({ npm: { [NAME]: { versions: { [VER]: { time: hoursAgo(24 * 400) } } } } });
+    const inner = fetchFor(w);
+    return async (url, init) => {
+      if (url === 'https://api.osv.dev/v1/query') return reply(query);
+      if (url === 'https://api.osv.dev/v1/querybatch') return reply(batch(JSON.parse(init!.body!).queries.length));
+      return inner(url, init);
+    };
+  };
+  const vet = (f: FetchLike) => vetPackages([npmRef(NAME, VER)], { fetchImpl: f, nowMs: NOW, stateDir });
+  const each = (n: number, r: unknown) => Array.from({ length: n }, () => r);
+  const batchClean = (n: number): Shape => ({ body: { results: each(n, {}) } });
+  const batchMal = (n: number): Shape => ({ body: { results: each(n, { vulns: [{ id: MAL, modified: '2026-11-05T00:00:00Z' }] }) } });
+
+  const MALFORMED: Array<[string, unknown]> = [
+    ['JSON null', null],
+    ['an array', []],
+    ['an error body', { error: 'internal', code: 13 }],
+    ['a gRPC-style error', { code: 13, message: 'internal', details: [] }],
+    ['vulns: null', { vulns: null }],
+    ['vulns as a string', { vulns: MAL }],
+    ['vulns as an object', { vulns: {} }],
+    ['a null entry', { vulns: [null] }],
+    ['an entry with a numeric id', { vulns: [{ id: 123 }] }],
+    ['an entry with no id', { vulns: [{ modified: '2026-11-05T00:00:00Z' }] }],
+    ['an entry with non-array aliases', { vulns: [{ id: 'GHSA-aaaa-bbbb-cccc', aliases: MAL }] }],
+    ['a string', 'oops'],
+    ['a number', 42],
+    ['more pages to fetch', { vulns: [], next_page_token: 'abc' }],
+  ];
+
+  it.each(MALFORMED)('exact query answering %s: unchecked, the cached MAL- hit is kept and still blocks', async (_label, body) => {
+    seed();
+    const res = await vet(mkFetch({ body }, batchClean));
+    expect(res.malicious).toBe(true);
+    expect(res.packages[0].cached).toBe(true);
+    expect(cacheKeys()).toEqual([KEY]);
+  });
+
+  it.each(MALFORMED)('exact query answering %s with no cache: unchecked (fail open), never checked-clean', async (_label, body) => {
+    const res = await vet(mkFetch({ body }, batchClean));
+    expect(res.malicious).toBe(false);
+    expect(res.packages[0].status).toBe('unchecked');
+    expect(res.reasons).toEqual(['unchecked: OSV answer was not in the expected shape']);
+  });
+
+  it.each(MALFORMED.filter(([, b]) => b !== null && typeof b === 'object' && !Array.isArray(b)))(
+    'exact query answering %s cannot override a valid version-specific MAL- batch answer', async (_label, body) => {
+      const res = await vet(mkFetch({ body }, batchMal));
+      expect(res.malicious).toBe(true);
+      expect(res.reasons[0]).toBe(`OSV lists ${NAME} as known malicious (${MAL})`);
+      expect(cacheKeys()).toEqual([KEY]); // and the hit is remembered for the offline block
+    });
+
+  const BATCH_MALFORMED: Array<[string, (n: number) => Shape]> = [
+    ['results: [null]', (n) => ({ body: { results: each(n, null) } })],
+    ['results: [[]]', (n) => ({ body: { results: each(n, []) } })],
+    ['results: ["x"]', (n) => ({ body: { results: each(n, 'x') } })],
+    ['results: [{ vulns: null }]', (n) => ({ body: { results: each(n, { vulns: null }) } })],
+    ['results: [{ vulns: "x" }]', (n) => ({ body: { results: each(n, { vulns: 'x' }) } })],
+    ['results: [{ error }]', (n) => ({ body: { results: each(n, { error: 'x' }) } })],
+    ['results: [{ vulns: [{ id: 1 }] }]', (n) => ({ body: { results: each(n, { vulns: [{ id: 1 }] }) } })],
+    ['results: null', () => ({ body: { results: null } })],
+    ['JSON null', () => ({ body: null })],
+    ['{}', () => ({ body: {} })],
+    ['an error body beside results', (n) => ({ body: { error: 'x', results: each(n, {}) } })],
+  ];
+
+  it.each(BATCH_MALFORMED)('both endpoints malformed (batch %s): the cached MAL- hit is kept and still blocks', async (_label, batch) => {
+    seed();
+    const res = await vet(mkFetch({ body: { vulns: null } }, batch));
+    expect(res.malicious).toBe(true);
+    expect(res.packages[0].cached).toBe(true);
+    expect(cacheKeys()).toEqual([KEY]);
+  });
+
+  it.each(BATCH_MALFORMED)('batch %s with the exact query down: reported as the malicious-package check unavailable', async (_label, batch) => {
+    const res = await vet(mkFetch({ throws: true }, batch));
+    expect(res.malicious).toBe(false);
+    expect(res.reasons[0]).toMatch(/and the malicious-package check was unavailable$/);
+  });
+
+  it('a ninth (batch-only) package whose batch result is malformed is unavailable, never clean', async () => {
+    const decoys = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7', 'h8'].map((d) => npmRef(d, '1.0.0'));
+    const w = fixtureWorld();
+    const inner = fetchFor(w);
+    const f: FetchLike = async (url, init) => {
+      if (url !== 'https://api.osv.dev/v1/querybatch') return inner(url, init);
+      const n = JSON.parse(init!.body!).queries.length;
+      return { ok: true, status: 200, json: async () => ({ results: [...each(n - 1, {}), { vulns: null }] }) };
+    };
+    const res = await vetPackages([...decoys, npmRef('ninth-lib', '1.0.0')], { fetchImpl: f, nowMs: NOW, stateDir });
+    const ninth = res.packages.find((p) => p.ref.name === 'ninth-lib')!;
+    expect(ninth.findings[0].reason).toMatch(/and the malicious-package check was unavailable$/);
+  });
+
+  it('a malformed result beside a valid MAL- result in the same chunk does not hide that MAL- (per-query, not per-chunk)', async () => {
+    const decoys = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7', 'h8'].map((d) => npmRef(d, '1.0.0'));
+    const w = fixtureWorld();
+    const inner = fetchFor(w);
+    const f: FetchLike = async (url, init) => {
+      if (url !== 'https://api.osv.dev/v1/querybatch') return inner(url, init);
+      const n = JSON.parse(init!.body!).queries.length;
+      return { ok: true, status: 200, json: async () => ({ results: [{ vulns: null }, ...each(n - 2, {}), { vulns: [{ id: MAL }] }] }) };
+    };
+    const res = await vetPackages([...decoys, npmRef('ninth-lib', '1.0.0')], { fetchImpl: f, nowMs: NOW, stateDir });
+    expect(res.malicious).toBe(true);
+    expect(res.packages.find((p) => p.ref.name === 'ninth-lib')!.malicious).toEqual([MAL]);
+  });
+
+  it('a malformed exact answer that still names a MAL- id in a well-formed entry is malicious', async () => {
+    const res = await vet(mkFetch({ body: { vulns: [{ id: MAL }, null] } }, batchClean));
+    expect(res.malicious).toBe(true);
+    expect(res.reasons[0]).toContain('as known malicious');
+  });
+
+  it('controls: legitimate {} and { vulns: [] } are clean and evict a stale cached hit (as before)', async () => {
+    for (const body of [{}, { vulns: [] }]) {
+      seed();
+      const res = await vet(mkFetch({ body }, batchClean));
+      expect(res.malicious).toBe(false);
+      expect(res.packages[0].status).toBe('checked');
+      expect(cacheKeys()).toEqual([]);
+    }
+  });
+
+  it('controls: invalid JSON, a network error and HTTP 500 keep the cached hit (as before)', async () => {
+    for (const query of [{ badJson: true }, { throws: true }, { status: 500, body: {} }] as Shape[]) {
+      seed();
+      const res = await vet(mkFetch(query, batchClean));
+      expect(res.malicious).toBe(true);
+      expect(res.packages[0].cached).toBe(true);
+      expect(cacheKeys()).toEqual([KEY]);
+    }
+  });
+});
