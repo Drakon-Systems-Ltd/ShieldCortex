@@ -1277,3 +1277,41 @@ describe('release review B2 — malformed OSV answers are never clean', () => {
     }
   });
 });
+
+// Release review (v5.20.0) nits. Astra N1: a NAMED remote spec
+// (`name@git+https://…`, `name@https://…`) was looked up by name although the
+// docs say URL/git installs are skipped. Astra N2: an MCP server entry's `env`
+// (a custom registry/index, or a version-selection variable) was ignored.
+describe('release review nits — named remote specs and MCP entry env', () => {
+  it('a named URL, git, github or file spec names nothing to look up', () => {
+    for (const spec of [
+      'synth-gitpkg@git+https://example.invalid/r.git', '@synthscope/synth-gitpkg@git+https://example.invalid/r.git',
+      'synth-urlpkg@https://example.invalid/pkg/download', '@synthscope/synth-urlpkg@https://example.invalid/x',
+      'synth-gitpkg@github:synthuser/synthrepo', '@synthscope/synth-gitpkg@github:synthuser/synthrepo',
+      'synth-gitpkg@synthuser/synthrepo', 'synth-filepkg@file:../local',
+    ]) {
+      expect(parseInstallCommands(j('npm', 'install', spec))).toEqual([]);
+    }
+    // controls: registry specs keep working, including a tilde range and an npm alias
+    expect(parseInstallCommands(j('npm', 'install', 'some-pkg@~1.2.3', '@scope/pkg@next', 'x@npm:real-pkg@1.0.0')).map(tuple))
+      .toEqual([['npm', 'some-pkg', '~1.2.3'], ['npm', '@scope/pkg', 'next'], ['npm', 'real-pkg', '1.0.0']]);
+  });
+
+  it('an MCP entry env that sets a custom registry/index makes the package unchecked, with no lookups', async () => {
+    expect(parseMcpServerEntry({ command: 'npx', args: ['-y', 'some-mcp'], env: { npm_config_registry: 'https://npm.internal.example' } })[0].customIndex).toBe(true);
+    expect(parseMcpServerEntry({ command: 'uvx', args: ['some-tool'], env: { UV_INDEX_URL: 'https://pypi.internal.example/simple' } })[0].customIndex).toBe(true);
+    const w = fixtureWorld();
+    const out = await vetMcpServers([{ name: 'internal', entry: { command: 'npx', args: ['-y', 'clean-lib'], env: { NPM_CONFIG_REGISTRY: 'https://npm.internal.example' } } }], opts(w));
+    expect(out).toEqual([{ name: 'internal', malicious: false, reasons: [expect.stringMatching(/^unchecked: installs from a custom package index/)] }]);
+    expect(w.calls).toEqual([]);
+  });
+
+  it('an MCP entry env that sets a version-selection variable is carried; unrelated env (secrets included) is ignored', () => {
+    expect(parseMcpServerEntry({ command: 'npx', args: ['-y', 'some-mcp'], env: { npm_config_tag: 'beta' } })[0].versionOption).toBe('npm_config_tag');
+    const [plain] = parseMcpServerEntry({ command: 'npx', args: ['-y', 'some-mcp'], env: { API_TOKEN: "x' ; npm i other-pkg '", HOME: '/tmp' } });
+    expect(plain).toMatchObject({ name: 'some-mcp' });
+    expect(plain.customIndex).toBeUndefined();
+    expect(plain.versionOption).toBeUndefined();
+    expect(parseMcpServerEntry({ command: 'npx', args: ['-y', 'some-mcp'], env: { API_TOKEN: "x' ; npm i other-pkg '" } })).toHaveLength(1);
+  });
+});
