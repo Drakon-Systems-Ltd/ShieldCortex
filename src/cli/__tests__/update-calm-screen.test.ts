@@ -12,7 +12,6 @@ import {
   crossesGuardDefaultOff,
   BANNED_DEFAULT_PHRASES,
   BANNED_DEFAULT_PATTERNS,
-  GUARD_ON_COMMAND,
   GUARD_STATUS_COMMAND,
   type UpdateSummaryInput,
 } from '../update-summary.js';
@@ -295,7 +294,9 @@ describe('a gateway that started without the plugin is always red (#773 follow-u
           const summary = buildUpdateSummary(input);
           const guard = summary.rows.filter((r) => r.label === 'Guard');
           expect(guard).toHaveLength(1);
-          expect(guard[0]).toMatchObject({ mark: 'off', text: 'off (the default)', command: GUARD_ON_COMMAND });
+          expect(guard[0]).toMatchObject({ mark: 'off', text: 'off (the default)' });
+          expect(guard[0].command).toBeUndefined();
+          expect(screen(input, { ascii: true }).join('\n')).not.toMatch(/--action-guard-enable/);
           expect(summary.headline).toBe('failed');
         });
       }
@@ -384,7 +385,8 @@ describe('Guard default-off migration notice', () => {
   it('prints when the update crosses 4.54.15', () => {
     const lines = guardDefaultOffNoticeLines('4.54.14', true).join('\n');
     expect(lines).toContain('Action Guard is off by default since 4.54.15.');
-    expect(lines).toContain(GUARD_ON_COMMAND);
+    expect(lines).toContain('Guard is opt-in. It stays off until you choose otherwise.');
+    expect(lines).not.toMatch(/--action-guard-enable|Turn on:/);
     expect(lines).toContain(GUARD_STATUS_COMMAND);
     expect(guardDefaultOffNoticeLines('4.10.3', true).length).toBeGreaterThan(0);
   });
@@ -399,9 +401,10 @@ describe('Guard default-off migration notice', () => {
     expect(crossesGuardDefaultOff('not-a-version', () => -1)).toBe(false);
   });
 
-  it('points at commands that exist', () => {
-    expect(GUARD_ON_COMMAND).toBe('shieldcortex config --action-guard-enable');
+  it('points at the status command and never the enable command', () => {
     expect(GUARD_STATUS_COMMAND).toBe('shieldcortex guard readiness');
+    const lines = guardDefaultOffNoticeLines('4.54.14', true).join('\n');
+    expect(lines).not.toMatch(/--action-guard-enable/);
   });
 });
 
