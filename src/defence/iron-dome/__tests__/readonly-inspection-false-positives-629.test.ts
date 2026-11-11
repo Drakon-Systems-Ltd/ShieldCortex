@@ -116,7 +116,7 @@ describe('#629 real writes and unsafe forms stay gated', () => {
   it('jq/grep reads whose program or pattern is on the command line are still read-only', () => {
     for (const cmd of [
       `jq . d.json`, `jq -r .a d.json`, `jq -c '.a | length' d.json`,
-      `grep -n x f`, `grep -e x f`, `grep -F x f`, `grep -L x f`, `grep -rn x src`,
+      `grep -n x f`, `grep -F x f`, `grep -L x f`, `grep -rn x src`,
       // after `--` a dash word is an operand (the pattern), not an option
       `grep -n -- -f f`,
     ]) {
@@ -148,5 +148,139 @@ describe('#629 real writes and unsafe forms stay gated', () => {
     expect(m!.length).toBe(cmd.length);
     expect(m).toContain(WIPE);
     expect(bash(cmd).decision).not.toBe('allow');
+  });
+});
+
+// #1051: a grep option that takes a value (or one the mask cannot name) means
+// the guard cannot tell which word is the pattern and which a file, so the
+// stage is never blanked. Only closed sets of no-argument short clusters and
+// exact long options, plus the `--` terminator, keep the relief.
+const GREPS = ['grep', 'egrep', 'fgrep'];
+// An unquoted delete verb as the pattern: the file-delete rule rates it
+// whenever its statement is not blanked (a quoted phrase is already data).
+const GUARDED_PATTERN = RM;
+// Each entry is the option word(s) placed before the pattern.
+const GREP_VALUE_OR_UNKNOWN_OPTIONS = [
+  '-A 2', '-A2', '-B 3', '-B3', '-C 1', '-C1', '-m 1', '-m1', '-e', '-d skip', '-D skip',
+  '-nA2', '-iC1', '-nm1', '-rne', '-5', '-NUM',
+  '--exclude-dir x', '--exclude x', '--include x', '--label x', '--max-count 1',
+  '--after-context 2', '--before-context 2', '--context 1', '--regexp', '--binary-files text',
+  '--devices skip', '--directories skip', '--exclude-from x', '--group-separator x',
+  // abbreviations and unknown long options are not in the closed set either
+  '--max 1', '--exc x', '--frobnicate', '--binary',
+];
+const GREP_STILL_MASKED = [
+  '-n', '--', '-n --', '-rn', '-inw', '-c', '-l', '-L', '-F', '-E', '-o', '-v', '-x', '-H', '-h',
+  '--color', '--colour', '--color -n', '--line-number', '--ignore-case --fixed-strings',
+  '--recursive', '--count', '--files-with-matches', '--only-matching', '--invert-match',
+];
+
+describe('#1051 grep options the #629 mask cannot model decline the mask', () => {
+  it('never blanks a grep/egrep/fgrep stage with a value-taking or unknown option', () => {
+    for (const verb of GREPS) {
+      for (const opt of GREP_VALUE_OR_UNKNOWN_OPTIONS) {
+        for (const cmd of [`${verb} ${opt} P f`, `cat f | ${verb} ${opt} P`, `${verb} -n x f; ${verb} ${opt} P f`]) {
+          const m = readOnlyInspectionMask(cmd, cmd, cmd);
+          // the stage with the option must stay visible, whatever else is blanked
+          expect(m === null ? cmd : m).toContain(`${verb} ${opt} P`);
+        }
+      }
+    }
+  });
+
+  it('an option after the pattern still declines (GNU grep permutes options)', () => {
+    for (const verb of GREPS) {
+      for (const cmd of [`${verb} P f -A 2`, `${verb} P f -m1`, `${verb} -n P f --exclude-dir x`]) {
+        expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+      }
+    }
+  });
+
+  it('no-argument clusters, exact no-argument long options and -- keep the relief', () => {
+    for (const verb of GREPS) {
+      for (const opt of GREP_STILL_MASKED) {
+        const cmd = `${verb} ${opt} P f`;
+        expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBe(' '.repeat(cmd.length));
+      }
+      // after `--` every word is an operand, dash-led or not
+      for (const cmd of [`${verb} -n -- -A f`, `${verb} -- -m1 f`, `${verb} -- --exclude-dir f`]) {
+        expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBe(' '.repeat(cmd.length));
+      }
+    }
+  });
+
+  it('reviewer probes: a guarded pattern behind a value-taking option is rated', () => {
+    const probes = [
+      `grep -A 2 ${GUARDED_PATTERN} f`, `grep -A2 ${GUARDED_PATTERN} f`,
+      `grep -B 3 ${GUARDED_PATTERN} f`, `grep -C1 ${GUARDED_PATTERN} f`,
+      `grep -m 1 ${GUARDED_PATTERN} f`, `grep --exclude-dir x ${GUARDED_PATTERN} f`,
+      `grep -e ${GUARDED_PATTERN} f`, `egrep -A 2 ${GUARDED_PATTERN} f`,
+      `fgrep -m1 ${GUARDED_PATTERN} f`,
+    ];
+    for (const cmd of probes) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+      const v = bash(cmd);
+      expect(v.decision).not.toBe('allow');
+      expect((v.signals ?? []).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('the same pattern behind -n or -- is still relieved', () => {
+    for (const verb of GREPS) {
+      for (const cmd of [`${verb} -n ${GUARDED_PATTERN} f`, `${verb} -- ${GUARDED_PATTERN} f`,
+        `${verb} --color -n ${GUARDED_PATTERN} f`]) {
+        const v = bash(cmd);
+        expect(v.decision).toBe('allow');
+        expect(v.signals ?? []).toEqual([]);
+      }
+    }
+  });
+});
+
+// #1015: a jq filter that loads a module reads a file from jq's search path
+// the guard never sees, so the #629 mask declines it, matching the #874
+// relief's CLOSED_READ_JQ_MODULE_RE. Ordinary data reads stay relieved.
+describe('#1015 jq module forms decline the #629 mask', () => {
+  const MODULE_FORMS = [
+    `jq 'include "x"; .' d.json`, `jq 'import "x" as e; .' d.json`, `jq 'import "x" as $e; $e' d.json`,
+    `jq -n 'modulemeta'`, `jq -n '"x" | modulemeta'`, `jq -r 'include "x"; .a' d.json`,
+    `jq -c 'include"x";.' d.json`, `cat d.json | jq 'include "x"; .'`,
+    `jq --arg n v 'include "x"; .' d.json`, `jq -n --args 'import "x" as e; .' a`,
+    `jq . d.json; jq 'include "x"; .' d.json`,
+  ];
+
+  it('never blanks a jq stage whose filter can load a module', () => {
+    for (const cmd of MODULE_FORMS) {
+      const m = readOnlyInspectionMask(cmd, cmd, cmd);
+      const stmt = cmd.includes('; jq') ? cmd.slice(cmd.indexOf('; jq') + 2) : cmd;
+      expect(m === null ? cmd : m).toContain(stmt);
+    }
+  });
+
+  it('-L/--library-path still declines', () => {
+    for (const cmd of [`jq -L lib . d.json`, `jq -Llib . d.json`, `jq --library-path lib . d.json`]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+    }
+  });
+
+  it('ordinary jq data reads stay masked', () => {
+    for (const cmd of [`jq . d.json`, `jq -r '.imports[]' d.json`, `jq '.included' d.json`,
+      `jq -c '.a | length' d.json`, `cat d.json | jq -r .name`]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBe(' '.repeat(cmd.length));
+    }
+  });
+
+  it('decision level: a module-loading stage keeps its operands rated, a plain read is relieved', () => {
+    // an operand spelled as a delete verb is rated whenever the stage is visible
+    for (const cmd of [`jq 'include "x"; .' ${RM}`, `jq 'import "x" as e; .' ${RM}`,
+      `jq '. | modulemeta' ${RM}`]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+      const v = bash(cmd);
+      expect(v.decision).not.toBe('allow');
+      expect((v.signals ?? []).length).toBeGreaterThan(0);
+    }
+    const plain = bash(`jq . ${RM}`);
+    expect(plain.decision).toBe('allow');
+    expect(plain.signals ?? []).toEqual([]);
   });
 });

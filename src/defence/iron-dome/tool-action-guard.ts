@@ -4455,16 +4455,74 @@ function readOnlyStageLoadsProgramFile(argv: string[]): boolean {
   return false;
 }
 
+/**
+ * #1051 — the only grep/egrep/fgrep options the #629 mask accepts. A
+ * value-taking option (`-A 2`, `-A2`, `-m1`, `-e P`, `--exclude-dir x`,
+ * `--max-count 1`, …) moves which word is the pattern and which are files,
+ * so the guard cannot model the stage and must not blank it. Rather than
+ * model option-value consumption, every option word must come from a CLOSED
+ * set of options that take no argument:
+ *   - a short cluster of `CLOSED_READ_GREP_FLAGS_RE` letters (the same class
+ *     the #874 relief uses; no letter in it takes a value, so no letter can
+ *     consume the rest of the cluster or the next word);
+ *   - an exact long option from `READONLY_GREP_NOARG_LONG_OPTIONS`. No
+ *     abbreviation (getopt_long would expand `--max` to `--max-count`) and
+ *     no `=` (already refused by `stagesAreClosedSetReads`). `--color` and
+ *     `--colour` are listed: their WHEN is optional and only ever attached
+ *     with `=`, so the next word is never consumed. `--binary` is left out
+ *     as a prefix of the value-taking `--binary-files`;
+ *   - the `--` terminator, after which every word is an operand.
+ * A lone `-` is the stdin operand. Anything else (an unknown option, a
+ * `-NUM` context, `-d`/`-D`) declines. GNU grep permutes options, so a dash
+ * word after the pattern or a file is judged the same way.
+ */
+const READONLY_GREP_NOARG_LONG_OPTIONS = new Set([
+  '--extended-regexp', '--fixed-strings', '--basic-regexp', '--perl-regexp',
+  '--ignore-case', '--no-ignore-case', '--word-regexp', '--line-regexp', '--null-data',
+  '--no-messages', '--invert-match', '--byte-offset', '--line-number', '--line-buffered',
+  '--with-filename', '--no-filename', '--only-matching', '--quiet', '--silent', '--text',
+  '--files-without-match', '--files-with-matches', '--count', '--initial-tab', '--null',
+  '--recursive', '--dereference-recursive', '--color', '--colour', '--version', '--help',
+]);
+function readOnlyGrepOptionsAreClosed(argv: string[]): boolean {
+  for (const w of argv.slice(1)) {
+    if (w === '--') return true;
+    if (!w.startsWith('-') || w === '-') continue;
+    const known = w.startsWith('--') ? READONLY_GREP_NOARG_LONG_OPTIONS.has(w) : CLOSED_READ_GREP_FLAGS_RE.test(w);
+    if (!known) return false;
+  }
+  return true;
+}
+
+/**
+ * #1015 — a `jq` stage that can load a module (`include`, `import`,
+ * `modulemeta`) reads a file from jq's search path that no word of the
+ * command names, so the #629 mask declines it, as the #874 relief already
+ * does with `CLOSED_READ_JQ_MODULE_RE`. Every word after the verb is checked,
+ * not just the filter, so `--arg`/`--args` value words cannot shift which
+ * word is the filter; a file name holding one of the words loses the relief
+ * too (fails closed). `-L`/`--library-path` are refused by
+ * `readOnlyStageLoadsProgramFile`.
+ */
+function readOnlyJqStageMayLoadModule(argv: string[]): boolean {
+  return argv.slice(1).some(w => CLOSED_READ_JQ_MODULE_RE.test(w));
+}
+
 function readOnlyInspectionStageIsRead(argv: string[]): boolean {
   switch (argv[0]) {
     case 'sed': return readOnlySedStage(argv);
     case 'find': return readOnlyFindStage(argv);
     case 'awk': return readOnlyAwkStage(argv);
     case 'gh': return readOnlyGhStage(argv);
-    default:
-      return !readOnlyStageLoadsProgramFile(argv)
-        && stagesAreClosedSetReads([argv]) && !closedReadStageMayWrite(argv);
+    case 'grep': case 'egrep': case 'fgrep':
+      if (!readOnlyGrepOptionsAreClosed(argv)) return false;
+      break;
+    case 'jq':
+      if (readOnlyJqStageMayLoadModule(argv)) return false;
+      break;
   }
+  return !readOnlyStageLoadsProgramFile(argv)
+    && stagesAreClosedSetReads([argv]) && !closedReadStageMayWrite(argv);
 }
 
 /**
