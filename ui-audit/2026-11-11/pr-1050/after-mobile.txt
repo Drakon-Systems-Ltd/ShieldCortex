@@ -1,0 +1,15 @@
+ShieldCortex updated   5.7.0 -> 5.9.0
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [ok]  OpenClaw       plugin 5.9.0
+                       installed,
+                       gateway restarted
+  [ok]  Skill          updated
+  [off] Guard          off (the default)
+
+Upgrade crossing 4.54.15 (one-time notice):
+
+  [off]  Action Guard is off by default since 4.54.15.
+     Guard is opt-in. It stays off until you choose otherwise.
+     Status:  shieldcortex guard readiness
