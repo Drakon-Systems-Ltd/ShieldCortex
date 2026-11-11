@@ -87,6 +87,7 @@ const THREAT_DESCRIPTIONS: Record<string, string> = {
   persistence: 'Attempts to modify agent configuration files',
   supply_chain: 'Instructions to install packages or modify dependencies',
   agent_manipulation: 'Instructions to disable safety checks or permissions',
+  agent_config_tamper: 'Instructions to redirect API endpoints, rewrite agent config, or weaken sandbox/approval settings',
   stealth_instruction: 'Hidden instructions using formatting tricks',
 
   // Code patterns
@@ -359,6 +360,7 @@ function findSnippetForThreat(content: string, threat: string): string | null {
     persistence: ['.claude', '.cursorrules', 'crontab', 'hook', 'bashrc'],
     supply_chain: ['npm install', 'pip install', 'package.json', 'dependency'],
     agent_manipulation: ['ignore', 'bypass', 'disable', 'override', 'skip'],
+    agent_config_tamper: ['_BASE_URL', '_API_BASE', '_PROXY', 'settings.json', 'config.toml', 'mcp.json', 'mcpServers', 'approval', 'sandbox'],
     stealth_instruction: ['<!--', '---'],
     dangerous_require: ['child_process', 'require', 'import'],
     dangerous_calls: ['eval', 'exec', 'spawn', 'Function'],
