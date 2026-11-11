@@ -1037,9 +1037,20 @@ const OSV_ERROR_KEYS = ['error', 'code', 'message', 'details', 'status'];
 
 /** Keys an OSV result object carries (`/v1/query` answer, `/v1/querybatch` element). Anything else is not that answer. */
 const OSV_RESULT_KEYS = new Set(['vulns', 'next_page_token']);
-/** OSV `timestamp`: an RFC 3339 date-time string. */
-const OSV_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i;
-const isOsvTimestamp = (v: unknown): v is string => typeof v === 'string' && OSV_TIMESTAMP.test(v) && Number.isFinite(Date.parse(v));
+/**
+ * OSV `timestamp`: an RFC 3339 date-time (§5.6), each field in its §5.7 range: hour 00–23,
+ * minute and second 00–59 (a leap second is refused, as Date.parse refuses it), offset hour
+ * 00–23 and minute 00–59. The day is checked against its month below. Date.parse alone is
+ * not a validator: it rolls 30 February over to 2 March and reads hour 24 as the next midnight.
+ */
+const OSV_TIMESTAMP = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/i;
+const isLeapYear = (y: number) => y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+const daysInMonth = (y: number, m: number) => (m === 2 ? (isLeapYear(y) ? 29 : 28) : m === 4 || m === 6 || m === 9 || m === 11 ? 30 : 31);
+function isOsvTimestamp(v: unknown): v is string {
+  if (typeof v !== 'string') return false;
+  const m = v.match(OSV_TIMESTAMP);
+  return !!m && Number(m[3]) <= daysInMonth(Number(m[1]), Number(m[2])) && Number.isFinite(Date.parse(v));
+}
 
 /**
  * One OSV vulnerability entry, validated on every field this check reads: `id`

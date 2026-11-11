@@ -1384,6 +1384,7 @@ describe('release review B2 — malformed OSV answers are never clean', () => {
     ['{}', () => ({ body: {} })],
     ['an error body beside results', (n) => ({ body: { error: 'x', results: each(n, {}) } })],
     ['results: [{ vulns: [MAL- entry, withdrawn: {}] }]', (n) => ({ body: { results: each(n, { vulns: [{ id: MAL, withdrawn: {} }] }) } })],
+    ['results: [{ vulns: [MAL- entry, withdrawn: 30 February] }]', (n) => ({ body: { results: each(n, { vulns: [{ id: MAL, withdrawn: '2026-02-30T00:00:00Z' }] }) } })],
     ['results: [{ vulns: [entry, aliases: [null]] }]', (n) => ({ body: { results: each(n, { vulns: [{ id: 'GHSA-aaaa-bbbb-cccc', aliases: [null] }] }) } })],
     ['results: [{ unexpected: true }]', (n) => ({ body: { results: each(n, { unexpected: true }) } })],
     ['a page token beside results', (n) => ({ body: { results: each(n, {}), next_page_token: 'abc' } })],
@@ -1483,6 +1484,85 @@ describe('release review B2 — malformed OSV answers are never clean', () => {
       expect(res.malicious).toBe(true);
       expect(res.packages[0].cached).toBe(true);
       expect(cacheKeys()).toEqual([KEY]);
+    }
+  });
+
+  // Round 3 (Astra, Grok B2): a `withdrawn` string in the date-time shape that is not a
+  // calendar date-time was a withdrawal, because Date.parse rolls 30 February over to
+  // 2 March and reads hour 24 as the next midnight. The MAL- entry was skipped, the exact
+  // answer was checked-clean and final: the cached hit was deleted and a valid MAL- batch
+  // answer discarded. RFC 3339 (§5.6, §5.7) is now checked field by field.
+  const IMPOSSIBLE_WITHDRAWN = [
+    '2026-02-30T00:00:00Z',
+    '2026-04-31T00:00:00Z',
+    '2026-11-01T24:00:00Z',
+    '2026-02-29T00:00:00Z', // 2026 is a common year
+    '2026-02-31T12:00:00+01:00',
+    '2026-06-31T00:00:00.5Z',
+    '1900-02-29T00:00:00Z', // a century that is not a multiple of 400 is a common year
+  ];
+  const withdrawnAt = (at: string) => ({ vulns: [{ id: MAL, withdrawn: at }] });
+
+  it.each(IMPOSSIBLE_WITHDRAWN)('round 3: an exact answer withdrawing the MAL- at %s keeps the cached hit, which still blocks', async (at) => {
+    seed();
+    const res = await vet(mkFetch({ body: withdrawnAt(at) }, batchClean));
+    expect(res.malicious).toBe(true);
+    expect(res.packages[0].cached).toBe(true);
+    expect(cacheKeys()).toEqual([KEY]);
+  });
+
+  it.each(IMPOSSIBLE_WITHDRAWN)('round 3: an exact answer withdrawing the MAL- at %s cannot override a valid MAL- batch answer', async (at) => {
+    seed();
+    const res = await vet(mkFetch({ body: withdrawnAt(at) }, batchMal));
+    expect(res.malicious).toBe(true);
+    expect(res.reasons[0]).toBe(`OSV lists ${NAME} as known malicious (${MAL})`);
+    expect(cacheKeys()).toEqual([KEY]);
+  });
+
+  it.each(IMPOSSIBLE_WITHDRAWN)('round 3: an exact answer withdrawing the MAL- at %s with no cache is unchecked, never checked-clean', async (at) => {
+    const res = await vet(mkFetch({ body: withdrawnAt(at) }, batchClean));
+    expect(res.malicious).toBe(false);
+    expect(res.packages[0].status).toBe('unchecked');
+    expect(res.reasons).toEqual(['unchecked: OSV answer was not in the expected shape']);
+  });
+
+  it('round 3: the reviewers\' timestamps, pinned and unpinned, crossed with every batch answer, never evict the cached MAL- or read as checked-clean', async () => {
+    const batches: Array<[string, (n: number) => Shape]> = [
+      ['clean', batchClean], ['valid MAL-', batchMal], ['HTTP 500', () => ({ status: 500, body: {} })],
+      ['the same withdrawal', (n) => ({ body: { results: each(n, withdrawnAt(IMPOSSIBLE_WITHDRAWN[0])) } })],
+    ];
+    for (const spec of [VER, null]) {
+      for (const at of IMPOSSIBLE_WITHDRAWN) {
+        for (const [label, batch] of batches) {
+          seed();
+          const res = await vetPackages([npmRef(NAME, spec)], { fetchImpl: mkFetch({ body: withdrawnAt(at) }, batch), nowMs: NOW, stateDir });
+          const p = res.packages[0];
+          expect({ spec, at, label, malicious: res.malicious, cache: cacheKeys() }).toEqual({ spec, at, label, malicious: true, cache: [KEY] });
+          expect({ spec, at, label, checkedClean: p.status === 'checked' && p.malicious.length === 0 }).toEqual({ spec, at, label, checkedClean: false });
+        }
+      }
+    }
+  });
+
+  it('round 3: hours, minutes, seconds (no leap second), offsets, months and days out of range are refused too', async () => {
+    for (const at of [
+      '2026-01-01T00:60:00Z', '2026-01-01T00:00:60Z', '2016-12-31T23:59:60Z', '2026-01-01T00:00:00+24:00',
+      '2026-01-01T00:00:00+01:60', '2026-00-10T00:00:00Z', '2026-01-00T00:00:00Z', '2026-13-01T00:00:00Z', '2026-01-32T00:00:00Z',
+    ]) {
+      seed();
+      const res = await vet(mkFetch({ body: withdrawnAt(at) }, batchClean));
+      expect({ at, malicious: res.malicious, cache: cacheKeys() }).toEqual({ at, malicious: true, cache: [KEY] });
+    }
+  });
+
+  it('round 3 controls: a calendar-valid withdrawal (leap days, offsets, fractions, lowercase t/z) is honoured and evicts the cached hit', async () => {
+    for (const at of [
+      '2024-02-29T00:00:00Z', '2000-02-29T23:59:59Z', '2026-04-30T00:00:00Z', '2026-12-31T23:59:59.999999Z',
+      '2026-11-01T00:00:00+01:00', '2026-11-01T23:59:59.999-05:30', '2026-11-01T00:00:00-00:00', '2026-11-01T00:00:00+23:59', '2026-11-01t00:00:00z',
+    ]) {
+      seed();
+      const res = await vet(mkFetch({ body: withdrawnAt(at) }, batchClean));
+      expect({ at, malicious: res.malicious, status: res.packages[0].status, cache: cacheKeys() }).toEqual({ at, malicious: false, status: 'checked', cache: [] });
     }
   });
 });
