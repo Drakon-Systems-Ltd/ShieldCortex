@@ -4323,7 +4323,11 @@ export function closedReadPipelineMask(execCommand: string, command: string, raw
  * before. The read-only stages are:
  *   - the closed-set reads (`stagesAreClosedSetReads`, not a writing `jq`,
  *     and not a `jq`/`grep` whose program or pattern comes from a FILE:
- *     `READONLY_PROGRAM_FILE_OPTION_RE`, see `readOnlyStageLoadsProgramFile`);
+ *     `READONLY_PROGRAM_FILE_OPTION_RE`, judged on option words only),
+ *     where a `grep` uses only no-argument options
+ *     (`readOnlyGrepOptionsAreClosed`) and a `jq` only the options of
+ *     `READONLY_JQ_LONG_OPTIONS`/`READONLY_JQ_SHORT_CLUSTER_RE`, with a
+ *     filter that loads no module (`readOnlyJqStageIsRead`);
  *   - `sed` printing lines: only the print-style scripts of
  *     `READONLY_SED_SCRIPT_RE`, no in-place, script-file or extra options;
  *   - `find` using only the predicates in `READONLY_FIND_PREDICATES` (so none
@@ -4438,6 +4442,16 @@ function readOnlyAwkStage(argv: string[]): boolean {
  * closed. Checked BEFORE the grammar, so no later rule in the mask sees a
  * stage of this shape as a read. The #874 relief (`closedReadPipelineMask`)
  * is unchanged: its per-verb flag classes already refuse these.
+ *
+ * #1053 review (B1, round-2 B3): the regex judges OPTION words only. Neither
+ * verb reads options after a real `--`, so a word there is an operand
+ * (`jq -- . d.json -f` reads a data file named `-f`). For grep the first
+ * `--` is always that terminator, because `readOnlyGrepOptionsAreClosed`
+ * admits no option that takes a value, so `readOnlyGrepLoadsPatternFile`
+ * stops at it. For jq a `--` can also be an option's VALUE (`--arg name --`,
+ * `--indent --`), after which option parsing goes on and `-f p.jq` still
+ * loads the program, so `readOnlyJqWordRoles` classifies every word and
+ * `readOnlyJqStageIsRead` applies the regex to the option words alone.
  */
 const READONLY_PROGRAM_FILE_OPTION_RE: Record<string, RegExp> = {
   jq: /^(?:-[^-]*f|-L|--from-file(?:=|$)|--library-path(?:=|$))/,
@@ -4445,14 +4459,268 @@ const READONLY_PROGRAM_FILE_OPTION_RE: Record<string, RegExp> = {
   egrep: /^(?:-[^-]*f|--file(?:=|$))/,
   fgrep: /^(?:-[^-]*f|--file(?:=|$))/,
 };
-function readOnlyStageLoadsProgramFile(argv: string[]): boolean {
-  const re = READONLY_PROGRAM_FILE_OPTION_RE[argv[0] ?? ''];
-  if (!re) return false;
+function readOnlyGrepLoadsPatternFile(argv: string[]): boolean {
+  const re = READONLY_PROGRAM_FILE_OPTION_RE[argv[0] ?? '']!;
   for (const w of argv.slice(1)) {
     if (w === '--') return false; // everything after is an operand
     if (re.test(w)) return true;
   }
   return false;
+}
+
+/**
+ * #1051 — the only grep/egrep/fgrep options the #629 mask accepts. A
+ * value-taking option (`-A 2`, `-A2`, `-m1`, `-e P`, `--exclude-dir x`,
+ * `--max-count 1`, …) moves which word is the pattern and which are files,
+ * so the guard cannot model the stage and must not blank it. Rather than
+ * model option-value consumption, every option word must come from a CLOSED
+ * set of options that take no argument:
+ *   - a short cluster of `CLOSED_READ_GREP_FLAGS_RE` letters (the same class
+ *     the #874 relief uses; no letter in it takes a value, so no letter can
+ *     consume the rest of the cluster or the next word);
+ *   - an exact long option from `READONLY_GREP_NOARG_LONG_OPTIONS`. No
+ *     abbreviation (getopt_long would expand `--max` to `--max-count`, and
+ *     `--bin` is ambiguous) and no `=` (already refused by
+ *     `stagesAreClosedSetReads`). `--color` and `--colour` are listed: their
+ *     WHEN is optional and only ever attached with `=`, so the next word is
+ *     never consumed. `--binary` is GNU grep's own exact no-argument
+ *     spelling of `-U` (not a prefix match for `--binary-files`, which
+ *     getopt_long only tries when no option matches exactly), and
+ *     `--fixed-regexp`, `--unix-byte-offsets` (`-u`) and
+ *     `--no-group-separator` are exact no-argument options too;
+ *   - the `--` terminator, after which every word is an operand.
+ * A lone `-` is the stdin operand. Anything else (an unknown option, a
+ * `-NUM` context, `-d`/`-D`) declines. GNU grep permutes options, so a dash
+ * word after the pattern or a file is judged the same way.
+ */
+const READONLY_GREP_NOARG_LONG_OPTIONS = new Set([
+  '--extended-regexp', '--fixed-strings', '--basic-regexp', '--perl-regexp',
+  '--ignore-case', '--no-ignore-case', '--word-regexp', '--line-regexp', '--null-data',
+  '--no-messages', '--invert-match', '--byte-offset', '--line-number', '--line-buffered',
+  '--with-filename', '--no-filename', '--only-matching', '--quiet', '--silent', '--text',
+  '--files-without-match', '--files-with-matches', '--count', '--initial-tab', '--null',
+  '--recursive', '--dereference-recursive', '--color', '--colour', '--version', '--help',
+  '--binary', '--fixed-regexp', '--unix-byte-offsets', '--no-group-separator',
+]);
+function readOnlyGrepOptionsAreClosed(argv: string[]): boolean {
+  for (const w of argv.slice(1)) {
+    if (w === '--') return true;
+    if (!w.startsWith('-') || w === '-') continue;
+    const known = w.startsWith('--') ? READONLY_GREP_NOARG_LONG_OPTIONS.has(w) : CLOSED_READ_GREP_FLAGS_RE.test(w);
+    if (!known) return false;
+  }
+  return true;
+}
+
+/**
+ * #1053 review (B1) — the only jq options the #629 mask accepts, by exact
+ * name, with the number of following words each one takes as its value(s),
+ * as jq 1.7 parses them (jq matches long options exactly; it does not expand
+ * abbreviations). The value words are names, strings, JSON texts or a data
+ * file (`--slurpfile`/`--rawfile`/`--argfile` read JSON or text, never a
+ * program). `--argfile` is gone from jq 1.7 (an unknown option, so jq exits
+ * before running anything) and took two words where it existed.
+ *
+ * Not listed, so declined: every program-file or module-path spelling
+ * (`-f`, `--from-file`, `-L`, `--library-path`), `--run-tests` (its test
+ * file holds programs, which may `include` a module), `--in-place`, the
+ * `--debug-*` options and anything unknown.
+ */
+const READONLY_JQ_LONG_OPTIONS: Record<string, number> = {
+  '--arg': 2, '--argjson': 2, '--slurpfile': 2, '--rawfile': 2, '--argfile': 2,
+  '--indent': 1,
+  '--null-input': 0, '--raw-input': 0, '--slurp': 0, '--compact-output': 0, '--raw-output': 0,
+  '--raw-output0': 0, '--join-output': 0, '--ascii-output': 0, '--sort-keys': 0,
+  '--color-output': 0, '--monochrome-output': 0, '--tab': 0, '--unbuffered': 0, '--stream': 0,
+  '--stream-errors': 0, '--seq': 0, '--args': 0, '--jsonargs': 0, '--exit-status': 0,
+  '--version': 0, '--build-configuration': 0, '--help': 0,
+};
+/** A cluster of jq short options that take no value (no `f`, `L` or `i`). */
+const READONLY_JQ_SHORT_CLUSTER_RE = /^-[acCehjMnrRsSV]+$/;
+/**
+ * #1053 round-2 (B4) — whether a dash word (not `-` or `--`) is one jq reads
+ * as an OPERAND. jq's `isoptish` takes a word as an option only when `-` is
+ * followed by `-` or a letter, so `-1`, `-.a` and `-(.a)` are a filter or a
+ * file name, not options. A non-ASCII second character is left to the option
+ * table (it declines): jq asks the C library's `isalpha`, whose answer for
+ * such a byte depends on the locale.
+ */
+function readOnlyJqDashWordIsOperand(w: string): boolean {
+  const second = w.charCodeAt(1);
+  return second < 0x80 && w[1] !== '-' && !/[A-Za-z]/.test(w[1]!);
+}
+type ReadOnlyJqWordRole = 'option' | 'value' | 'terminator' | 'filter' | 'operand';
+/**
+ * #1053 review (B1) and round 2 (B3, B4) — the role of every word of a jq
+ * stage (index 0, the verb, is an 'operand'), or null when the stage cannot
+ * be modelled. ONE left-to-right walk following jq 1.7's own argv loop; the
+ * program-file check and the module lexer both read its answer, so they
+ * cannot disagree with it about where options end or which word is the
+ * filter.
+ *   - Until a real `--`, a dash word is an OPTION unless
+ *     `readOnlyJqDashWordIsOperand` makes it an operand. A long option must
+ *     be in `READONLY_JQ_LONG_OPTIONS`, and the words it takes are VALUES:
+ *     a `--` there (`--arg name --`, `--indent --`) is data and option
+ *     parsing goes on. A short option must be a cluster of
+ *     `READONLY_JQ_SHORT_CLUSTER_RE`, so `-f`, `-rf`, `-nf`, `-L` and
+ *     `-Ldir` decline. jq reads options after the filter too.
+ *   - A `--` met as an option word is the TERMINATOR: every later word is
+ *     an operand however it is spelled (`jq -- . d.json -f`).
+ *   - The first operand is the FILTER, even a dash word (`jq -1 d.json`,
+ *     `jq -.a d.json`) or a word after the terminator; the rest are
+ *     OPERANDS (input files, or `$ARGS` strings after `--args`).
+ * A lone `-` before the filter declines (jq 1.7 takes it as the filter,
+ * other builds as an option), as does an option missing its value words
+ * (jq exits with usage) and any option not listed.
+ */
+function readOnlyJqWordRoles(argv: string[]): ReadOnlyJqWordRole[] | null {
+  const roles: ReadOnlyJqWordRole[] = ['operand'];
+  let filterSeen = false;
+  let optionsDone = false;
+  for (let i = 1; i < argv.length; i++) {
+    const w = argv[i]!;
+    if (!optionsDone && w.startsWith('-') && w !== '-' && !readOnlyJqDashWordIsOperand(w)) {
+      if (w === '--') { roles.push('terminator'); optionsDone = true; continue; }
+      roles.push('option');
+      if (w.startsWith('--')) {
+        const arity = READONLY_JQ_LONG_OPTIONS[w];
+        if (arity === undefined || i + arity >= argv.length) return null;
+        for (let k = 0; k < arity; k++) roles.push('value');
+        i += arity;
+      } else if (!READONLY_JQ_SHORT_CLUSTER_RE.test(w)) {
+        return null;
+      }
+      continue;
+    }
+    if (filterSeen) { roles.push('operand'); continue; }
+    if (w === '-') return null;
+    roles.push('filter');
+    filterSeen = true;
+  }
+  return roles;
+}
+
+/** jq 1.7's number and identifier tokens, matched in place (sticky). */
+const READONLY_JQ_NUMBER_RE = /(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?/y;
+const READONLY_JQ_IDENT_RE = /[A-Za-z_][A-Za-z0-9_]*/y;
+/** Length of the token `re` matches at `at` in `s`, or 0. */
+function readOnlyJqTokenLength(re: RegExp, s: string, at: number): number {
+  re.lastIndex = at;
+  return re.test(s) ? re.lastIndex - at : 0;
+}
+/**
+ * Whether the word ending at `at` is closed as an object KEY: the next token
+ * is `:` (not `::`, which would make the word part of a module-qualified
+ * name), `,` or `}`. Only spaces and tabs may sit between (the caller has
+ * refused any other line break).
+ */
+function readOnlyJqWordEndsKey(filter: string, at: number): boolean {
+  let j = at;
+  while (filter[j] === ' ' || filter[j] === '\t') j++;
+  const c = filter[j];
+  return c === ',' || c === '}' || (c === ':' && filter[j + 1] !== ':');
+}
+
+/**
+ * #1015 / #1053 review (B2, round-2 B2) — whether a jq FILTER can load a
+ * module: an `include`/`import` directive reads a file from jq's search path
+ * that no word of the command names, and `modulemeta` reads one by name.
+ * Only the filter word is judged (`readOnlyJqWordRoles` finds it), so an
+ * `--arg` value, a file name or a directory holding one of the words is
+ * data, as it is to jq.
+ *
+ * The filter is lexed far enough to tell code from data, following jq 1.7's
+ * lexer. A string literal's text is data, except a `\(…)` interpolation
+ * inside it, which is code (strings and brackets nest; an unbalanced or
+ * unterminated filter counts, failing closed). In code, a module word is
+ * inert only where jq's grammar makes it a NAME, which is never a directive
+ * or a call:
+ *   - a FIELD, `.import`, where the `.` starts the token rather than ending
+ *     `..` or a number (`1.import` is the number `1.` then the keyword);
+ *   - a VARIABLE, `$include`, bound (`. as $include`, `reduce … as $import`,
+ *     `def f($import)`) or referenced: `$` and the name are one token, so
+ *     `$ include` (a space after `$`) still counts;
+ *   - an object KEY: the word comes right after the `{` or a pair-separating
+ *     `,` of an object (or object pattern, `. as {import: $x}`) and the next
+ *     token is `:`, `,` or `}` (`{import: 1}`, `{import}`, `{a: 1, include}`).
+ * A `,` inside an object separates pairs only while no value of that object
+ * has held a bare word: jq 1.7 allows only a restricted expression there,
+ * with no `if`, `try`, `reduce` or `def` whose own commas could reach the
+ * object, but a keyword or call in a value makes every later `,` of the
+ * object untrusted, so a word after it counts. Every other code occurrence
+ * counts: a directive, a call, `. import`, `..import`, a module-qualified
+ * name. Comments are not modelled, so a word after `#` counts too, and a
+ * filter holding a line break (where jq ends a comment and resumes code)
+ * counts whole; the mask also refuses a quoted newline before parsing.
+ */
+function readOnlyJqFilterMayLoadModule(filter: string): boolean {
+  if (/[\n\r]/.test(filter)) return true;
+  // 's' = in a string literal; otherwise the closer that pops this code frame:
+  // `)`, `]`, or `}` for an object whose commas still separate pairs (`}!`
+  // once a value of it held a bare word); 'interp' is a `\(` frame whose `)`
+  // returns to its string.
+  const stack: string[] = [];
+  let keyPosition = false;
+  let i = 0;
+  while (i < filter.length) {
+    const c = filter[i]!;
+    const top = stack[stack.length - 1];
+    if (top === 's') {
+      if (c === '"') stack.pop();
+      else if (c === '\\' && filter[i + 1] === '(') { stack.push('interp'); i++; }
+      else if (c === '\\') i++; // `\"`, `\\`, `\u…`: the escaped character is string text
+      i++;
+      continue;
+    }
+    if (c === ' ' || c === '\t') { i++; continue; }
+    const atKey = keyPosition;
+    keyPosition = false;
+    const num = readOnlyJqTokenLength(READONLY_JQ_NUMBER_RE, filter, i);
+    if (num) { i += num; continue; }
+    if (filter.startsWith('..', i)) { i += 2; continue; }
+    if (c === '.' || c === '$') {
+      i += 1 + readOnlyJqTokenLength(READONLY_JQ_IDENT_RE, filter, i + 1); // a field or variable name
+      continue;
+    }
+    const ident = readOnlyJqTokenLength(READONLY_JQ_IDENT_RE, filter, i);
+    if (ident) {
+      if (!(atKey && readOnlyJqWordEndsKey(filter, i + ident))) {
+        if (CLOSED_READ_JQ_MODULE_RE.test(filter.slice(i, i + ident))) return true;
+        if (top === '}') stack[stack.length - 1] = '}!';
+      }
+      i += ident;
+      continue;
+    }
+    if (c === '"') stack.push('s');
+    else if (c === '(') stack.push(')');
+    else if (c === '[') stack.push(']');
+    else if (c === '{') { stack.push('}'); keyPosition = true; }
+    else if (c === ',' && top === '}') keyPosition = true;
+    else if (c === ')' || c === ']' || c === '}') {
+      const open = stack.pop();
+      if (!(open === c || (c === ')' && open === 'interp') || (c === '}' && open === '}!'))) return true;
+    }
+    i++;
+  }
+  return stack.length > 0;
+}
+
+/**
+ * #1015 / #1053 review — a jq stage the #629 mask may treat as a read: every
+ * word has a role (`readOnlyJqWordRoles`), no OPTION word loads a program
+ * file or module path (`READONLY_PROGRAM_FILE_OPTION_RE`; the option table
+ * already declines those, so this is the belt), and the FILTER loads no
+ * module. Values and operands are data to jq and are not judged here.
+ * `closedReadStageMayWrite` still judges every word afterwards: an in-place
+ * build or wrapper does not follow jq's option rules.
+ */
+function readOnlyJqStageIsRead(argv: string[]): boolean {
+  const roles = readOnlyJqWordRoles(argv);
+  if (roles === null) return false;
+  const loader = READONLY_PROGRAM_FILE_OPTION_RE.jq!;
+  if (argv.some((w, i) => roles[i] === 'option' && loader.test(w))) return false;
+  const at = roles.indexOf('filter');
+  return !readOnlyJqFilterMayLoadModule(at < 0 ? '' : argv[at]!);
 }
 
 function readOnlyInspectionStageIsRead(argv: string[]): boolean {
@@ -4461,10 +4729,14 @@ function readOnlyInspectionStageIsRead(argv: string[]): boolean {
     case 'find': return readOnlyFindStage(argv);
     case 'awk': return readOnlyAwkStage(argv);
     case 'gh': return readOnlyGhStage(argv);
-    default:
-      return !readOnlyStageLoadsProgramFile(argv)
-        && stagesAreClosedSetReads([argv]) && !closedReadStageMayWrite(argv);
+    case 'grep': case 'egrep': case 'fgrep':
+      if (!readOnlyGrepOptionsAreClosed(argv) || readOnlyGrepLoadsPatternFile(argv)) return false;
+      break;
+    case 'jq':
+      if (!readOnlyJqStageIsRead(argv)) return false;
+      break;
   }
+  return stagesAreClosedSetReads([argv]) && !closedReadStageMayWrite(argv);
 }
 
 /**
@@ -7678,9 +7950,16 @@ function evaluateToolCallCore(
   const scannedCommand = commandScanText(command);
   // #629: read-only inspection statements (search/print/list) are blanked so
   // their arguments are not rated as commands. Exec family only, and never
-  // when the remaining text can still reach the network.
+  // when the remaining text can still reach the network. EXTERNAL_EGRESS only
+  // names a few verbs (v5.20.0 release review: an `ssh` or `npx` sibling of a
+  // print-only read was allowed where v5.19.0 blocked), so the remainder must
+  // also pass the #874 allow-set: every statement left is itself a closed-set
+  // read, a plain `echo`, `pwd` or `true` (`closedReadSiblingMayReachNetwork`,
+  // which fails closed on anything else). Otherwise the whole command is
+  // judged exactly as before the mask existed.
   const inspectionMasked = family === 'exec' ? readOnlyInspectionMask(scannedCommand, command, rawCommand) : null;
   const execCommand = inspectionMasked !== null && !EXTERNAL_EGRESS.test(inspectionMasked)
+    && !closedReadSiblingMayReachNetwork(inspectionMasked, false)
     ? inspectionMasked
     : scannedCommand;
   const execSurface = [execCommand, path, url].filter(Boolean).join('   ');
