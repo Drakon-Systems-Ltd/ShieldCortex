@@ -23,8 +23,9 @@ import { createSessionTaintStore } from '../session-taint.js';
  * interceptor:
  *   - watch-only and shadow: a taint-minted block warns / is recorded as the
  *     stop it would have been, with `escalated` on the row, and proceeds;
- *   - enforce: unchanged — no allowlist, broker pre-clear or failure policy
- *     releases it;
+ *   - enforce: unchanged — no allowlist or broker pre-clear releases it, and
+ *     the DEFAULT failure policy (high: deny) denies it unattended (an explicit
+ *     `failurePolicy.high: 'allow'` is the documented exception);
  *   - #436 (schema-invalid), a block the guard minted before escalation,
  *     the catastrophic tier and the self-protection floor: unchanged in
  *     every posture.

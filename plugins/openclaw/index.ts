@@ -43,6 +43,7 @@ import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG, flatte
 import type { ApprovalPromptDetail, ApprovalDecisionAudit, ApprovalDecisionOutcome, InterceptorConfig, BrokerRuntime, ReadinessRuntime, ResolvedReadinessLike } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
 import { cloudSync } from './cloud-sync.js';
+import { injectionPatternIds } from './audit-entry.js';
 import { createGatewayNotifyChannel } from './gateway-notify-channel.js';
 import type { GatewayNotifyContext, NotifyChannelLike } from './gateway-notify-channel.js';
 import { testedPath, writePostureSelfReport, type PostureReportInput } from './posture-report.js';
@@ -420,6 +421,13 @@ export function __setRuntimeForTest(runtime: OpenClawRuntime | null): void {
   _runtimeOverride = runtime;
   if (runtime) runtimePromise = null;
 }
+/** Tests only: the EFFECTIVE config the gate is built from — shield config
+ *  merged with the plugin entry, then the policy lock (or, with a lock on disk
+ *  and no usable reader, the inline fail-closed posture). #889 R4 pins what
+ *  that inline copy does to `packageVetting`. */
+export function __loadConfigForTest(): Promise<SCConfig> {
+  return loadConfig();
+}
 export function __resetConfigStateForTest(): void {
   _mergedConfig = null;
   _configOverride = null;
@@ -515,6 +523,9 @@ interface InterceptorUserConfig {
     /** Reviewed-script allowlist (#189). Passed through RAW; validated
      *  entry-by-entry inside createReviewedScriptCheck. */
     reviewedScripts?: unknown[];
+    /** Pre-install package vetting (#889). Passed through RAW;
+     *  `normalisePackageVettingConfig` in the main package is the boundary. */
+    packageVetting?: Record<string, unknown>;
     /** Operator-notify transport (#143), reused by the #225 conversation sink.
      *  Passed through RAW for the same reason as `broker`: `normaliseNotifyConfig`
      *  in the main package is the single boundary that knows which values arm a
@@ -593,6 +604,8 @@ export interface ConversationScanResult {
   provenance?: PluginProvenanceLabel;
   /** L2 pattern names, when the provenance floor fired. Names only. */
   nonAuthoritativePatterns?: string[];
+  /** Closed-set injection rule ids (`category:pattern`). Names only, never the span. */
+  injectionPatterns?: string[];
 }
 
 export interface ConversationDecision {
@@ -1432,6 +1445,15 @@ const ACTION_GUARD_JSON_SCHEMA = {
         timeoutMs: { type: "number", minimum: 500, maximum: 60000 },
       },
     },
+    // #889. normalisePackageVettingConfig in the main package has the last word.
+    packageVetting: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean" },
+        minAgeDays: { type: "number", minimum: 0, maximum: 365 },
+      },
+    },
     // #189. Each entry pins one script by absolute path + content hash;
     // createReviewedScriptCheck has the last word on every field.
     reviewedScripts: {
@@ -1731,6 +1753,10 @@ function normaliseActionGuardBlock(
   // boundary that shape-validates each entry.
   if (Array.isArray(rawGuard.reviewedScripts)) {
     guard.reviewedScripts = [...rawGuard.reviewedScripts];
+  }
+  // #889: passthrough; normalisePackageVettingConfig is the boundary.
+  if (rawGuard.packageVetting && typeof rawGuard.packageVetting === "object" && !Array.isArray(rawGuard.packageVetting)) {
+    guard.packageVetting = { ...(rawGuard.packageVetting as Record<string, unknown>) };
   }
   // #143/#225: the notify transport. Same passthrough discipline again —
   // normaliseNotifyConfig is the boundary. Shallow-copied rather than aliased
@@ -2141,6 +2167,13 @@ async function applyPolicyLockToPluginConfig(config: SCConfig): Promise<SCConfig
         'no auto-approve, broker off). Run `shieldcortex repair` to restore the install.',
       );
     }
+    // #889: the strict posture keeps the known-malicious package floor on.
+    const pv = (config.interceptor?.actionGuard as Record<string, unknown> | undefined)?.packageVetting;
+    if (pv && typeof pv === 'object' && !Array.isArray(pv)) {
+      const { enabled: _optOut, ...keep } = pv as Record<string, unknown>;
+      void _optOut;
+      return withGuardPosture(config, { ...INLINE_STRICT_GUARD_POSTURE, packageVetting: keep });
+    }
     return withGuardPosture(config, INLINE_STRICT_GUARD_POSTURE);
   };
 
@@ -2384,6 +2417,12 @@ export async function scanRealtimeContent(
       } else {
         summary = 'THREAT (non-injection layer)';
       }
+      // Names only. The summary above still says "N detections" and drops the
+      // ids; this is the field the audit row keeps. Absent when injection was
+      // clean, or when no detection had a safe category and pattern name.
+      const injectionPatterns = !scan.injection.clean
+        ? injectionPatternIds(scan.injection.detections)
+        : undefined;
       // L2 runs only on this branch. The MCP fallback below has no local
       // module to ask, and an L2 verdict invented from a remote text response
       // would be a second copy of the policy.
@@ -2396,9 +2435,16 @@ export async function scanRealtimeContent(
           available: true,
           provenance,
           nonAuthoritativePatterns: patterns,
+          ...(injectionPatterns ? { injectionPatterns } : {}),
         };
       }
-      return { clean: scan.clean, summary, available: true, provenance };
+      return {
+        clean: scan.clean,
+        summary,
+        available: true,
+        provenance,
+        ...(injectionPatterns ? { injectionPatterns } : {}),
+      };
     } catch (err) {
       // A scanner that THROWS is not a clean verdict either. Same treatment as
       // an absent one: unavailable, reported, never silently allowed to read as
@@ -2811,6 +2857,60 @@ type InterceptorRuntimeOptions = NonNullable<Parameters<typeof createInterceptor
 type ActionLeaseGate = NonNullable<ReturnType<NonNullable<InterceptorRuntimeOptions['checkActionLease']>>>;
 
 /**
+ * #1025 — the audit-only native-exec provenance adapter, built from the
+ * injected defence module (native-exec-provenance.ts). Keyed by
+ * `sessionKeyFor(sessionId)`, the same host-owned key the hook and the
+ * session-guard index use; an absent or unresolvable id has no key, so the
+ * call is neither recorded nor observed (current behaviour). Undefined on an
+ * older dist without the exports. Nothing here can change a decision.
+ */
+export function nativeProvenanceAdapter(defenceMod: unknown): InterceptorRuntimeOptions['nativeProvenance'] {
+  const m = defenceMod as {
+    sessionKeyFor?: (value: string | undefined) => string | null;
+    nativeArtifactCaptures?: (toolName: string, args: Record<string, unknown>) => unknown;
+    createNativeArtifactProbe?: (opts: { sessionKey: string; cwd: string | undefined; budget?: unknown }) => unknown;
+    recordNativeArtifactCaptures?: (opts: { sessionKey: string; captures: unknown; cwd: string | undefined; budget?: unknown }) => unknown;
+    createNativeProvenanceBudget?: () => unknown;
+  } | null | undefined;
+  if (!m
+    || typeof m.sessionKeyFor !== 'function'
+    || typeof m.nativeArtifactCaptures !== 'function'
+    || typeof m.createNativeArtifactProbe !== 'function'
+    || typeof m.recordNativeArtifactCaptures !== 'function') {
+    return undefined;
+  }
+  const keyOf = (sessionId: string | undefined): string | null => {
+    try {
+      const k = m.sessionKeyFor!(sessionId);
+      return typeof k === 'string' && k ? k : null;
+    } catch {
+      return null;
+    }
+  };
+  return {
+    // One per evaluated call (the interceptor calls this inside handleToolCall),
+    // so concurrent calls never share or reset each other's deadline. An older
+    // dist without the factory: undefined, and the store makes its own.
+    budget: () => (typeof m.createNativeProvenanceBudget === 'function' ? m.createNativeProvenanceBudget() : undefined),
+    probe: (sessionId, cwd, budget) => {
+      const key = keyOf(sessionId);
+      if (!key) return undefined;
+      const probe = m.createNativeArtifactProbe!({ sessionKey: key, cwd, budget });
+      return typeof probe === 'function'
+        ? (probe as NonNullable<ReturnType<NonNullable<InterceptorRuntimeOptions['nativeProvenance']>['probe']>>)
+        : undefined;
+    },
+    record: (toolName, args, sessionId, cwd, budget) => {
+      const key = keyOf(sessionId);
+      if (!key) return;
+      const captures = m.nativeArtifactCaptures!(toolName, args);
+      if (!Array.isArray(captures) || captures.length === 0) return;
+      m.recordNativeArtifactCaptures!({ sessionKey: key, captures, cwd, budget });
+    },
+  };
+}
+
+/**
  * #854: the interceptor's lease adapters. The holder is the SAME identity the
  * Claude Code hook leases as — `leaseIdentityFor` (or, on an older dist,
  * `sessionKeyFor`, the same formula) — never the raw sessionId, which can
@@ -3045,6 +3145,9 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
         const entry = {
           type: "threat", hook: "llm_input", sessionId: event.sessionId,
           model: event.model, reason: result.summary,
+          // Closed-set rule ids. Omitted when the hit was not an injection, or
+          // the scanner did not name one. Never the matched span (#1010, #226).
+          ...(result.injectionPatterns ? { injectionPatterns: result.injectionPatterns } : {}),
           chars: text.length,
           contentSha256: createHash('sha256').update(text).digest('hex').slice(0, 16),
           // The declared origin this text was judged under. A closed-set
@@ -4830,6 +4933,14 @@ export default {
             ? ((defenceMod as any).evaluateToolCall as Parameters<typeof createInterceptor>[2] extends { evaluateToolCall?: infer E } ? E : never)
             : undefined,
           broker: resolveBrokerRuntime(defenceMod, interceptorConfig.actionGuard?.broker, api),
+          // #889: pre-install package vetting from the same runtime seam. Absent
+          // on an older dist: installs are then judged exactly as before.
+          packageVetting: typeof (defenceMod as any)?.vetToolCall === 'function' && typeof (defenceMod as any)?.applyVettingToVerdict === 'function'
+            ? {
+                vet: (toolName, args, cfg) => (defenceMod as any).vetToolCall(toolName, args, (defenceMod as any).normalisePackageVettingConfig?.(cfg) ?? {}),
+                apply: (v, outcome) => (defenceMod as any).applyVettingToVerdict(v, outcome),
+              }
+            : undefined,
           // #648: the plain-English card summary (what / why / who), from the
           // same runtime seam. Absent on an older dist: the card keeps its
           // previous layout.
@@ -4850,6 +4961,9 @@ export default {
           // #854: both adapters act as the SAME identity the Claude Code hook
           // leases as — see actionLeaseAdapters.
           ...actionLeaseAdapters(defenceMod),
+          // #1025: audit-only native-exec provenance. Same host-owned keying
+          // as the session-guard index and the hook.
+          nativeProvenance: nativeProvenanceAdapter(defenceMod),
           // #260: the session-guard index. Same formula as the Claude Code
           // hook. Absent on an older dist — then emitAudit still stamps origin
           // but does not write an index nobody would summarise.

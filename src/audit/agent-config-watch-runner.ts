@@ -92,6 +92,12 @@ export async function main(overrides: { channels?: NotifyChannel[]; projectRoot?
     projectRoots: resolveProjectRoots(config, root),
     notify: (n: AgentConfigNotification) => send(buildAgentConfigChangeNotification(n)),
     ledger: makeAgentConfigLedger(logAudit),
+    // #889: report-only package check of newly added MCP servers (npx/uvx).
+    vetServers: async (servers) => {
+      const { vetMcpServers, normalisePackageVettingConfig } = await import('../defence/iron-dome/package-vetting.js');
+      const guardCfg = (config as { actionGuard?: { packageVetting?: unknown } }).actionGuard;
+      return vetMcpServers(servers, { ...normalisePackageVettingConfig(guardCfg?.packageVetting), budgetMs: 2000 });
+    },
     ...(overrides.dropzoneDirs ? { dropzoneDirs: overrides.dropzoneDirs } : {}),
   });
 }

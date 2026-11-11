@@ -48,7 +48,7 @@ import { logAudit } from ${JSON.stringify(loggerTs)};
 import { __setLedgerFaultForTests } from ${JSON.stringify(ledgerTs)};
 import { existsSync as goExists, writeFileSync as writeReady } from 'fs';
 import { join as joinPath } from 'path';
-const [dbPath, countArg, tag, mode, barrierDir] = process.argv.slice(2);
+const [dbPath, countArg, tag, mode, barrierDir, peersArg] = process.argv.slice(2);
 initDatabase(dbPath);
 const count = Number(countArg);
 // Start barrier: announce readiness only once the loader has done its work and
@@ -68,8 +68,23 @@ if (barrierDir) {
   }
 }
 const start = Date.now();
+// Overlap by construction: announce once the FIRST append has committed, and do
+// not leave the loop until every peer has announced too (at least count
+// appends regardless). Release skew between processes on a slow runner can
+// exceed a whole fixed-size run, so a fixed count alone cannot guarantee
+// overlap.
+const peers = peersArg ? peersArg.split(',') : [];
+const peerFile = (p) => joinPath(barrierDir, 'started-' + p);
+const missingPeers = () => peers.filter((p) => !goExists(peerFile(p)));
+let waitDeadline = 0;
 let ok = 0;
-for (let i = 0; i < count; i++) {
+for (let i = 0; ; i++) {
+  if (i >= count && (!barrierDir || missingPeers().length === 0)) break;
+  if (i >= count) {
+    // Only the wait for peers is bounded; a slow but progressing append run is not.
+    if (!waitDeadline) waitDeadline = Date.now() + 60_000;
+    if (Date.now() > waitDeadline) { process.stderr.write('peers never started: ' + missingPeers().join(',')); process.exit(4); }
+  }
   if (mode === 'crash' && i === count - 1) {
     __setLedgerFaultForTests(() => { process.kill(process.pid, 'SIGKILL'); });
   }
@@ -81,6 +96,7 @@ for (let i = 0; i < count; i++) {
     reason: tag + ' ' + i, fragmentation_score: null,
   });
   if (id > 0) ok++;
+  if (i === 0 && barrierDir) writeReady(peerFile(tag), '');
 }
 const end = Date.now();
 closeDatabase();
@@ -101,9 +117,9 @@ function childEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function runWriter(dbPath: string, count: number, tag: string, mode = '', barrierDir = ''): Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string; err: string }> {
+function runWriter(dbPath: string, count: number, tag: string, mode = '', barrierDir = '', peers = ''): Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string; err: string }> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, nodeArgs(childScript, [dbPath, String(count), tag, mode, barrierDir]), { env: childEnv(), cwd: repoRoot });
+    const child = spawn(process.execPath, nodeArgs(childScript, [dbPath, String(count), tag, mode, barrierDir, peers]), { env: childEnv(), cwd: repoRoot });
     liveChildren.add(child);
     let out = '';
     let err = '';
@@ -163,7 +179,7 @@ describe('multi-process ledger gates', () => {
     const tags = Array.from({ length: WRITERS }, (_, i) => `w${i}`);
     const barrierDir = path.join(work, 'barrier');
     mkdirSync(barrierDir);
-    const pending = Promise.all(tags.map((t) => runWriter(dbPath, EACH, t, '', barrierDir)));
+    const pending = Promise.all(tags.map((t) => runWriter(dbPath, EACH, t, '', barrierDir, tags.join(','))));
     // Release the writers only once every one of them is loaded and has the
     // DB open, so they contend for appends rather than for start-up.
     const readyFile = (t: string) => path.join(barrierDir, `ready-${t}`);
@@ -187,22 +203,25 @@ describe('multi-process ledger gates', () => {
       expect({ code: r.code, err: r.code === 0 ? '' : r.err }).toEqual({ code: 0, err: '' });
     }
     const timings = results.map((r) => JSON.parse(r.out) as { ok: number; start: number; end: number });
-    expect(timings.map((t) => t.ok)).toEqual(tags.map(() => EACH));
+    // Each writer appends at least EACH rows (more if it waited for peers).
+    expect(timings.map((t) => t.ok >= EACH)).toEqual(tags.map(() => true));
+    const total = timings.reduce((n, t) => n + t.ok, 0);
 
     const db = new Database(dbPath, { readonly: true });
     try {
       // Product contract first, so a fixture that failed to overlap can never
       // hide a broken chain: seq unique and dense, chain verifies end to end.
       const seqs = (db.prepare('SELECT seq FROM defence_audit WHERE seq IS NOT NULL ORDER BY seq').all() as { seq: number }[]).map((r) => r.seq);
-      expect(seqs).toHaveLength(WRITERS * EACH);
+      expect(seqs).toHaveLength(total);
       expect(new Set(seqs).size).toBe(seqs.length);
       const r = verifyLedger(db);
       expect(r.status).toBe('consistent');
       expect(r.gaps).toEqual([]);
-      expect(r.head?.seq).toBe(WRITERS * EACH);
+      expect(r.head?.seq).toBe(total);
     } finally { db.close(); }
 
-    // Fixture contract: the writers' append loops overlapped in time — every
+    // Fixture contract (guaranteed by the children's started-file wait, and
+    // asserted so a regression in that wait cannot pass silently): every
     // writer began before any writer finished, so the processes were appending
     // concurrently. This proves overlapping loop lifetimes, not that commits
     // interleaved; interleaving is lock hand-off order, which is what a count

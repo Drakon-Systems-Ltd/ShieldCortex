@@ -508,6 +508,19 @@ function guardBlockOf(raw: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
+ * #889: `actionGuard.packageVetting.enabled: false` switches off the known-malicious
+ * package floor. On a locked or fail-closed host that opt-out must not survive, so the
+ * `enabled` key is dropped (the other vetting keys only tune advisories). Mutates `guard`.
+ */
+function dropPackageVettingOptOut(guard: Record<string, unknown>): boolean {
+  if (!isBlock(guard.packageVetting) || !('enabled' in guard.packageVetting)) return false;
+  const pv = { ...guard.packageVetting };
+  delete pv.enabled;
+  guard.packageVetting = pv;
+  return true;
+}
+
+/**
  * Force the exact strict fail-closed posture onto a raw config object.
  *
  * Used for BOTH an unverifiable lock and a `tampered` HMAC verdict. Before
@@ -526,6 +539,7 @@ export function applyStrictFailClosedPosture(raw: Record<string, unknown>): Reco
   guard.reviewedScripts = [];
   // #509: enforce-when-ready runs in shadow until proven — not strict.
   delete guard.readinessGate;
+  dropPackageVettingOptOut(guard);
   out.actionGuard = guard;
   out.defenceMode = STRICT_FAILCLOSED_POSTURE.defenceMode;
   // The deprecated `interceptor.actionGuard` alias gap-fills per key on both
@@ -542,6 +556,7 @@ export function applyStrictFailClosedPosture(raw: Record<string, unknown>): Reco
     delete alias.broker;
     delete alias.reviewedScripts;
     delete alias.readinessGate;
+    dropPackageVettingOptOut(alias);
     interceptor.actionGuard = alias;
     out.interceptor = interceptor;
   }
@@ -581,6 +596,8 @@ export function applyPolicyLock(raw: Record<string, unknown>, state: PolicyLockS
   // #509: a locked host ignores the enforce-when-ready gate (the hook's rule
   // too), so the effective config must not report one.
   if ('readinessGate' in guard) { delete guard.readinessGate; guardTouched = true; }
+  // #889: a locked host cannot opt out of the known-malicious package floor.
+  if (dropPackageVettingOptOut(guard)) guardTouched = true;
   if (p.actionGuard?.broker?.enabled === false) {
     guard.broker = { ...(isBlock(guard.broker) ? guard.broker : {}), enabled: false };
     guardTouched = true;
@@ -603,6 +620,13 @@ export function applyPolicyLock(raw: Record<string, unknown>, state: PolicyLockS
     guardTouched = true;
   }
   if (guardTouched) out.actionGuard = guard;
+  // #889: the deprecated `interceptor.actionGuard` alias is merged under the top-level
+  // block by the hook (and read by the plugin), so an alias-only opt-out would survive
+  // a verified lock. Scrub it there too.
+  if (isBlock(out.interceptor) && isBlock(out.interceptor.actionGuard)) {
+    const alias = { ...(out.interceptor.actionGuard as Record<string, unknown>) };
+    if (dropPackageVettingOptOut(alias)) out.interceptor = { ...out.interceptor, actionGuard: alias };
+  }
 
   if (p.defenceMode !== undefined) {
     const configured = isLockedDefenceMode(out.defenceMode) ? out.defenceMode : DEFAULT_DEFENCE_MODE;

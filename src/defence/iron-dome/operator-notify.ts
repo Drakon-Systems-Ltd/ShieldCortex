@@ -313,9 +313,11 @@ export interface AgentConfigChangeNotification {
   changeCount: number;
   /** `high`: a traffic/credential redirect, sandbox or trust weakening, or a planted instruction file. */
   severity?: 'high';
+  /** #889: report-only package check of a newly added MCP server that launches a package. */
+  packageChecks?: Array<{ name: string; malicious: boolean; reasons: string[] }>;
 }
 
-export function buildAgentConfigChangeNotification(input: { file: string; changes: Array<{ label: string; name: string }>; changeCount: number; severity?: string }): AgentConfigChangeNotification {
+export function buildAgentConfigChangeNotification(input: { file: string; changes: Array<{ label: string; name: string }>; changeCount: number; severity?: string; packageChecks?: Array<{ name: string; malicious: boolean; reasons: string[] }> }): AgentConfigChangeNotification {
   const safe = (raw: unknown, max: number): string => (String(raw ?? '').replace(/[^A-Za-z0-9_.:\/@ ~-]/g, '?').trim() || 'unknown').slice(0, max);
   return {
     event: 'agent_config_change',
@@ -323,16 +325,24 @@ export function buildAgentConfigChangeNotification(input: { file: string; change
     changes: input.changes.slice(0, 3).map((c) => ({ label: safe(c.label, 40), name: safe(c.name, 64) })),
     changeCount: Math.max(input.changeCount, input.changes.length),
     ...(input.severity === 'high' ? { severity: 'high' as const } : {}),
+    ...(input.packageChecks && input.packageChecks.length > 0
+      ? { packageChecks: input.packageChecks.slice(0, 3).map((p) => ({ name: safe(p.name, 64), malicious: p.malicious === true, reasons: p.reasons.slice(0, 3).map((r) => safe(r, 110)) })) }
+      : {}),
   };
 }
 
 export function formatAgentConfigChangeNotification(n: AgentConfigChangeNotification): string {
   const shown = n.changes.map((c) => `${c.label} (${c.name})`).join(', ');
   const extra = n.changeCount - n.changes.length;
-  if (n.severity === 'high') {
-    return `ShieldCortex HIGH SEVERITY: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}. This can redirect your agent's traffic or credentials, weaken its sandbox, or plant instructions it will obey. If you did not make this change, review the file before starting an agent.`;
+  const pkg = (n.packageChecks ?? []).map((p) => `${p.malicious ? 'KNOWN MALICIOUS PACKAGE' : 'Package check'} for MCP server ${p.name}: ${p.reasons.join('; ')}.`).join(' ');
+  const tail = pkg ? ` ${pkg}` : '';
+  if (n.packageChecks?.some((p) => p.malicious)) {
+    return `ShieldCortex HIGH SEVERITY: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}.${tail} Remove that MCP server before starting an agent.`;
   }
-  return `ShieldCortex: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}. If you did not make this change, review the file.`;
+  if (n.severity === 'high') {
+    return `ShieldCortex HIGH SEVERITY: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}. This can redirect your agent's traffic or credentials, weaken its sandbox, or plant instructions it will obey. If you did not make this change, review the file before starting an agent.${tail}`;
+  }
+  return `ShieldCortex: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}. If you did not make this change, review the file.${tail}`;
 }
 
 export type AnyOperatorNotification = OperatorNotification | ConversationThreatNotification | ActionGuardOutcomeNotification | MaintenanceFailNotification | McpToolChangeNotification | AgentConfigChangeNotification;
@@ -590,6 +600,8 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   'readiness-demoted', 'readiness-promoted', 'readiness-started',
   // #874: parity with the hook — the other two self-protection floor signals.
   'touch-guard-config', 'disable-action-guard',
+  // #889: the pre-install package check's own reason codes (no operator data).
+  'package-vetting', 'known-malicious-package',
 ]);
 const SAFE_ACTION_GUARD_OUTCOMES = new Set([
   'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',
