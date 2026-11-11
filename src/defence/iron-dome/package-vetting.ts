@@ -54,6 +54,13 @@ export interface PackageRef {
   installer: string;
   /** A non-default index/registry flag was present: public metadata would not describe it. */
   customIndex?: boolean;
+  /**
+   * An option or environment variable on the command that changes WHICH version
+   * the installer picks (`--tag`, `--before`, `--pre`, …), from a fixed
+   * vocabulary. This check does not model those rules, so unless the spec pins
+   * an exact version the version this install would fetch is unconfirmed.
+   */
+  versionOption?: string;
 }
 
 export type FindingKind = 'malicious' | 'advisory' | 'new-version' | 'install-hook' | 'sdist-only' | 'unchecked';
@@ -203,6 +210,7 @@ const PIP_VERBS = new Set(['install']);
 const VALUE_FLAGS_NPM = new Set([
   '--prefix', '--registry', '--workspace', '-w', '--cache', '--userconfig', '--tag', '-C', '--dir', '--filter', '-F',
   '--cwd', '--save-prefix', '--loglevel', '--omit', '--include', '--scope', '--otp', '--before', '--store-dir',
+  '--resolution-mode',
 ]);
 const VALUE_FLAGS_PIP = new Set([
   '-r', '--requirement', '-c', '--constraint', '-e', '--editable', '-i', '--index-url', '--extra-index-url', '-f',
@@ -211,9 +219,23 @@ const VALUE_FLAGS_PIP = new Set([
   '--cert', '--client-cert', '--cache-dir', '--log', '--retries', '--timeout', '--trusted-host', '--exists-action',
   '--config-settings', '-C', '--default-index', '--index', '--index-strategy', '--resolution', '--with',
   '--project', '--directory', '--package', '--constraints', '--overrides',
+  // uv: `-p` is `--python`; selection options that take a value.
+  '-p', '--prerelease', '--exclude-newer',
 ]);
 const INDEX_FLAGS_NPM = new Set(['--registry']);
 const INDEX_FLAGS_PIP = new Set(['-i', '--index-url', '--extra-index-url', '--default-index', '--index', '-f', '--find-links']);
+/**
+ * Options that change which version the installer selects for a range, a tag or
+ * an unpinned name (npm `--tag` sets the default dist-tag, `--before` picks the
+ * newest version published before a date, pnpm `--resolution-mode` can pick the
+ * lowest; pip/uv `--pre`/`--prerelease` admit pre-releases, `--exclude-newer`
+ * is uv's `--before`, `--resolution` can pick the lowest, `--only-binary` /
+ * `--prefer-binary` can pick an older release that has a wheel). The registry
+ * lookup below follows none of these, so a ref carrying one is never treated as
+ * resolved: see {@link PackageRef.versionOption}.
+ */
+const VERSION_FLAGS_NPM = new Set(['--tag', '--before', '--include-staged', '--resolution-mode']);
+const VERSION_FLAGS_PIP = new Set(['--pre', '--prerelease', '--exclude-newer', '--resolution', '--only-binary', '--prefer-binary']);
 
 interface Positionals {
   positionals: string[];
@@ -222,9 +244,23 @@ interface Positionals {
   customIndex: boolean;
   /** `-r file` style inputs the vetting cannot resolve. */
   fileInputs: boolean;
+  /** The first version-selection option seen (see {@link PackageRef.versionOption}). */
+  versionOption?: string;
 }
 
-function collectArgs(args: readonly string[], valueFlags: ReadonlySet<string>, indexFlags: ReadonlySet<string>, pkgFlags: ReadonlySet<string>): Positionals {
+interface CollectOptions {
+  /** Options that change which version is selected (see {@link PackageRef.versionOption}). */
+  versionFlags?: ReadonlySet<string>;
+  /**
+   * Runner form (`npx`, `bunx`, `pnpm dlx`, `yarn dlx`, `uvx`, `uv tool run`,
+   * `pipx run`): the installer reads its own options only up to the first
+   * positional, which names what to run; every later word, dashed or not, is an
+   * argument of the program being run (npm's `npx-cli.js` inserts `--` there).
+   */
+  stopAtFirstPositional?: boolean;
+}
+
+function collectArgs(args: readonly string[], valueFlags: ReadonlySet<string>, indexFlags: ReadonlySet<string>, pkgFlags: ReadonlySet<string>, opts: CollectOptions = {}): Positionals {
   const out: Positionals = { positionals: [], packageFlags: [], customIndex: false, fileInputs: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -234,6 +270,7 @@ function collectArgs(args: readonly string[], valueFlags: ReadonlySet<string>, i
       const flag = eq > 0 ? a.slice(0, eq) : a;
       const inlineValue = eq > 0 ? a.slice(eq + 1) : undefined;
       if (indexFlags.has(flag)) out.customIndex = true;
+      if (opts.versionFlags?.has(flag)) out.versionOption ??= flag;
       if (flag === '-r' || flag === '--requirement' || flag === '-e' || flag === '--editable') out.fileInputs = true;
       if (pkgFlags.has(flag)) {
         const v = inlineValue ?? args[i + 1];
@@ -246,7 +283,23 @@ function collectArgs(args: readonly string[], valueFlags: ReadonlySet<string>, i
       continue;
     }
     out.positionals.push(a);
+    if (opts.stopAtFirstPositional) break;
   }
+  return out;
+}
+
+/** Pre-verb options (`npm --tag beta install x`, `uv --prerelease allow pip install x`): value-skipping scan up to the verb. */
+interface PreVerb { at: number; preIndex: boolean; versionOption?: string }
+function scanPreVerb(args: readonly string[], valueFlags: ReadonlySet<string>, indexFlags: ReadonlySet<string>, versionFlags: ReadonlySet<string>): PreVerb {
+  let i = 0;
+  const out: PreVerb = { at: -1, preIndex: false };
+  while (i < args.length && args[i].startsWith('-')) {
+    const flag = args[i].split('=')[0];
+    if (indexFlags.has(flag)) out.preIndex = true;
+    if (versionFlags.has(flag)) out.versionOption ??= flag;
+    i += valueFlags.has(args[i]) && !args[i].includes('=') ? 2 : 1;
+  }
+  out.at = i < args.length ? i : -1;
   return out;
 }
 
@@ -308,6 +361,8 @@ const MAX_DEPTH = 3;
 
 /** Environment variables that redirect an installer to a different registry/index. */
 const INDEX_ENV = /^(?:npm_config_(?:[^=]*:)?registry|PIP_(?:EXTRA_)?INDEX_URL|PIP_FIND_LINKS|UV_(?:DEFAULT_|EXTRA_)?INDEX(?:_URL)?|UV_FIND_LINKS)=/i;
+/** Environment variables that change which version is selected (the {@link VERSION_FLAGS_NPM} / {@link VERSION_FLAGS_PIP} settings). */
+const VERSION_ENV = /^(npm_config_(?:tag|before|include_staged|resolution_mode)|PIP_(?:PRE|ONLY_BINARY|PREFER_BINARY)|UV_(?:PRERELEASE|EXCLUDE_NEWER|RESOLUTION))=/i;
 
 /**
  * Package installs named by a shell command: npm/pnpm/bun add or install, yarn add,
@@ -324,13 +379,20 @@ export function parseInstallCommands(command: string, depth = 0): PackageRef[] {
   for (const stmt of splitStatements(command)) {
     let w = words(stmt);
     let envIndex = false;
+    let envVersion: string | undefined;
+    const noteEnv = (word: string) => {
+      if (INDEX_ENV.test(word)) envIndex = true;
+      // The variable name, lower-cased, from the fixed alternatives above: safe to show.
+      const m = VERSION_ENV.exec(word);
+      if (m) envVersion ??= m[1].toLowerCase();
+    };
     // Leading VAR=value assignments and transparent wrappers.
     for (;;) {
-      if (w.length && /^[A-Za-z_][A-Za-z0-9_@:.-]*=/.test(w[0])) { if (INDEX_ENV.test(w[0])) envIndex = true; w = w.slice(1); continue; }
+      if (w.length && /^[A-Za-z_][A-Za-z0-9_@:.-]*=/.test(w[0])) { noteEnv(w[0]); w = w.slice(1); continue; }
       if (w.length && WRAPPERS.has(path.basename(w[0]))) {
         w = w.slice(1);
         while (w.length && (w[0].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_@:.-]*=/.test(w[0]) || /^\d+[smhd]?$/.test(w[0]))) {
-          if (INDEX_ENV.test(w[0])) envIndex = true;
+          noteEnv(w[0]);
           w = w.slice(1);
         }
         continue;
@@ -360,136 +422,137 @@ export function parseInstallCommands(command: string, depth = 0): PackageRef[] {
     } else if (bin === 'pipx') {
       stmtRefs.push(...parsePipx(rest));
     }
-    // An index/registry env var set for this statement applies to every package it names.
+    // An index/registry or version-selection env var set for this statement applies to every package it names.
     if (envIndex) for (const r of stmtRefs) r.customIndex = true;
+    if (envVersion) for (const r of stmtRefs) r.versionOption ??= envVersion;
     refs.push(...stmtRefs);
   }
   return refs;
 }
 
-function npmRefs(installer: string, tokens: readonly string[], customIndex: boolean): PackageRef[] {
+/** What the options around a package name say about where and how it is resolved. */
+interface RefContext { customIndex: boolean; versionOption?: string }
+
+function npmRefs(installer: string, tokens: readonly string[], ctx: RefContext): PackageRef[] {
   const out: PackageRef[] = [];
   for (const t of tokens) {
     const p = parseNpmSpecifier(t);
-    if (p) out.push({ ecosystem: 'npm', name: p.name, spec: p.spec, installer, ...(customIndex ? { customIndex } : {}) });
+    if (p) out.push({ ecosystem: 'npm', name: p.name, spec: p.spec, installer, ...refFlags(ctx) });
   }
   return out;
 }
 
-function pyRefs(installer: string, tokens: readonly string[], customIndex: boolean, uvStyle = false): PackageRef[] {
+function pyRefs(installer: string, tokens: readonly string[], ctx: RefContext, uvStyle = false): PackageRef[] {
   const out: PackageRef[] = [];
   for (const t of tokens) {
     const p = uvStyle ? parseUvxSpecifier(t) : parsePythonRequirement(t);
-    if (p) out.push({ ecosystem: 'PyPI', name: p.name, spec: p.spec, installer, ...(customIndex ? { customIndex } : {}) });
+    if (p) out.push({ ecosystem: 'PyPI', name: p.name, spec: p.spec, installer, ...refFlags(ctx) });
   }
   return out;
+}
+
+function refFlags(ctx: RefContext): Pick<PackageRef, 'customIndex' | 'versionOption'> {
+  return { ...(ctx.customIndex ? { customIndex: true } : {}), ...(ctx.versionOption ? { versionOption: ctx.versionOption } : {}) };
+}
+
+/** Merge what was seen before the verb(s) with what the argument list itself carries. */
+function ctxOf(a: Positionals, ...pre: Array<{ preIndex: boolean; versionOption?: string }>): RefContext {
+  return {
+    customIndex: a.customIndex || pre.some((p) => p.preIndex),
+    versionOption: pre.map((p) => p.versionOption).find(Boolean) ?? a.versionOption,
+  };
 }
 
 function parseNpmFamily(bin: string, rest: string[]): PackageRef[] {
   // Find the subcommand: first non-flag word (yarn/pnpm `global add` tolerated).
-  let i = 0;
-  let preIndex = false;
-  while (i < rest.length && rest[i].startsWith('-')) {
-    if (INDEX_FLAGS_NPM.has(rest[i].split('=')[0])) preIndex = true;
-    i += VALUE_FLAGS_NPM.has(rest[i]) && !rest[i].includes('=') ? 2 : 1;
-  }
+  const pre = scanPreVerb(rest, VALUE_FLAGS_NPM, INDEX_FLAGS_NPM, VERSION_FLAGS_NPM);
+  if (pre.at < 0) return [];
+  let i = pre.at;
   let verb = rest[i];
-  if (verb === undefined) return [];
   if (bin === 'yarn' && verb === 'global') { i++; verb = rest[i]; }
+  if (verb === undefined) return [];
   const after = rest.slice(i + 1);
-  if (verb === 'dlx') {
-    return parseNpx(`${bin} dlx`, after, preIndex);
-  }
-  if (bin === 'npm' && (verb === 'exec' || verb === 'x')) return parseNpx('npm exec', after, preIndex);
+  // `npx`-style runners stop reading their own options at the command; `npm exec` reads them anywhere before `--`.
+  if (verb === 'dlx') return parseNpx(`${bin} dlx`, after, pre, true);
+  if (bin === 'npm' && (verb === 'exec' || verb === 'x')) return parseNpx('npm exec', after, pre, false);
   if (!NPM_ADD_VERBS.has(verb)) return [];
   // `yarn install` / `pnpm install` / `npm ci` take no packages; `yarn add` does.
   if (bin === 'yarn' && verb !== 'add') return [];
-  const a = collectArgs(after, VALUE_FLAGS_NPM, INDEX_FLAGS_NPM, new Set());
-  return npmRefs(`${bin} ${verb}`, a.positionals, a.customIndex || preIndex);
+  const a = collectArgs(after, VALUE_FLAGS_NPM, INDEX_FLAGS_NPM, new Set(), { versionFlags: VERSION_FLAGS_NPM });
+  return npmRefs(`${bin} ${verb}`, a.positionals, ctxOf(a, pre));
 }
 
-function parseNpx(installer: string, rest: string[], preIndex = false): PackageRef[] {
-  const a = collectArgs(rest, VALUE_FLAGS_NPM, INDEX_FLAGS_NPM, new Set(['-p', '--package']));
-  const custom = a.customIndex || preIndex;
+function parseNpx(installer: string, rest: string[], pre: { preIndex: boolean; versionOption?: string } = { preIndex: false }, runner = true): PackageRef[] {
+  const a = collectArgs(rest, VALUE_FLAGS_NPM, INDEX_FLAGS_NPM, new Set(['-p', '--package']), { versionFlags: VERSION_FLAGS_NPM, stopAtFirstPositional: runner });
+  const ctx = ctxOf(a, pre);
   // With -p/--package the positionals are the command to run, not packages.
-  if (a.packageFlags.length) return npmRefs(installer, a.packageFlags, custom);
+  if (a.packageFlags.length) return npmRefs(installer, a.packageFlags, ctx);
   // Everything after the first positional belongs to the executed command.
-  return a.positionals.length ? npmRefs(installer, [a.positionals[0]], custom) : [];
+  return a.positionals.length ? npmRefs(installer, [a.positionals[0]], ctx) : [];
 }
 
 function parsePip(bin: string, rest: string[]): PackageRef[] {
-  let i = 0;
-  let preIndex = false;
-  while (i < rest.length && rest[i].startsWith('-')) {
-    if (INDEX_FLAGS_PIP.has(rest[i].split('=')[0])) preIndex = true;
-    i += VALUE_FLAGS_PIP.has(rest[i]) && !rest[i].includes('=') ? 2 : 1;
-  }
-  if (!PIP_VERBS.has(rest[i] ?? '')) return [];
-  const a = collectArgs(rest.slice(i + 1), VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set());
-  return pyRefs(`${bin} install`, a.positionals, a.customIndex || preIndex);
+  const pre = scanPreVerb(rest, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, VERSION_FLAGS_PIP);
+  if (pre.at < 0 || !PIP_VERBS.has(rest[pre.at])) return [];
+  const a = collectArgs(rest.slice(pre.at + 1), VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set(), { versionFlags: VERSION_FLAGS_PIP });
+  return pyRefs(`${bin} install`, a.positionals, ctxOf(a, pre));
 }
 
-/** Index of the first non-flag word, skipping the values of value-taking flags; also reports an index flag seen before it. */
-function firstWord(args: readonly string[], valueFlags: ReadonlySet<string>, indexFlags: ReadonlySet<string>): { at: number; preIndex: boolean } {
-  let i = 0;
-  let preIndex = false;
-  while (i < args.length && args[i].startsWith('-')) {
-    if (indexFlags.has(args[i].split('=')[0])) preIndex = true;
-    i += valueFlags.has(args[i]) && !args[i].includes('=') ? 2 : 1;
-  }
-  return { at: i < args.length ? i : -1, preIndex };
+/** Index of the first non-flag word, skipping the values of value-taking flags; also reports index / version options seen before it. */
+function firstWord(args: readonly string[]): PreVerb {
+  return scanPreVerb(args, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, VERSION_FLAGS_PIP);
 }
 
 function parseUv(rest: string[]): PackageRef[] {
-  const first = firstWord(rest, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP);
+  const first = firstWord(rest);
   if (first.at < 0) return [];
   const verb = rest[first.at];
   const after = rest.slice(first.at + 1);
+  const pyCollect = (args: readonly string[]) => collectArgs(args, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set(), { versionFlags: VERSION_FLAGS_PIP });
   if (verb === 'add') {
-    const a = collectArgs(after, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set());
-    return pyRefs('uv add', a.positionals, a.customIndex || first.preIndex);
+    const a = pyCollect(after);
+    return pyRefs('uv add', a.positionals, ctxOf(a, first));
   }
   if (verb === 'pip') {
-    const sec = firstWord(after, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP);
+    const sec = firstWord(after);
     if (sec.at >= 0 && after[sec.at] === 'install') {
-      const a = collectArgs(after.slice(sec.at + 1), VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set());
-      return pyRefs('uv pip install', a.positionals, a.customIndex || first.preIndex || sec.preIndex);
+      const a = pyCollect(after.slice(sec.at + 1));
+      return pyRefs('uv pip install', a.positionals, ctxOf(a, first, sec));
     }
     return [];
   }
   if (verb === 'tool') {
-    const sec = firstWord(after, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP);
-    const pre = first.preIndex || sec.preIndex;
-    if (sec.at >= 0 && after[sec.at] === 'run') return parseUvx('uv tool run', after.slice(sec.at + 1), pre);
+    const sec = firstWord(after);
+    if (sec.at >= 0 && after[sec.at] === 'run') return parseUvx('uv tool run', after.slice(sec.at + 1), [first, sec]);
     if (sec.at >= 0 && after[sec.at] === 'install') {
-      const a = collectArgs(after.slice(sec.at + 1), VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set());
-      return pyRefs('uv tool install', a.positionals, a.customIndex || pre, true);
+      const a = pyCollect(after.slice(sec.at + 1));
+      return pyRefs('uv tool install', a.positionals, ctxOf(a, first, sec), true);
     }
   }
   return [];
 }
 
-function parseUvx(installer: string, rest: string[], preIndex = false): PackageRef[] {
-  const a = collectArgs(rest, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set(['--from']));
-  const custom = a.customIndex || preIndex;
-  if (a.packageFlags.length) return pyRefs(installer, a.packageFlags, custom, true);
-  return a.positionals.length ? pyRefs(installer, [a.positionals[0]], custom, true) : [];
+function parseUvx(installer: string, rest: string[], pre: Array<{ preIndex: boolean; versionOption?: string }> = []): PackageRef[] {
+  const a = collectArgs(rest, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set(['--from']), { versionFlags: VERSION_FLAGS_PIP, stopAtFirstPositional: true });
+  const ctx = ctxOf(a, ...pre);
+  if (a.packageFlags.length) return pyRefs(installer, a.packageFlags, ctx, true);
+  return a.positionals.length ? pyRefs(installer, [a.positionals[0]], ctx, true) : [];
 }
 
 function parsePipx(rest: string[]): PackageRef[] {
-  const f = firstWord(rest, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP);
+  const f = firstWord(rest);
   if (f.at < 0) return [];
   const verb = rest[f.at];
   const after = rest.slice(f.at + 1);
   if (verb === 'install') {
-    const a = collectArgs(after, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set());
-    return pyRefs('pipx install', a.positionals.slice(0, 1), a.customIndex || f.preIndex);
+    const a = collectArgs(after, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set(), { versionFlags: VERSION_FLAGS_PIP });
+    return pyRefs('pipx install', a.positionals.slice(0, 1), ctxOf(a, f));
   }
   if (verb === 'run') {
-    const a = collectArgs(after, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set(['--spec']));
-    const custom = a.customIndex || f.preIndex;
-    if (a.packageFlags.length) return pyRefs('pipx run', a.packageFlags, custom);
-    return a.positionals.length ? pyRefs('pipx run', [a.positionals[0]], custom) : [];
+    const a = collectArgs(after, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set(['--spec']), { versionFlags: VERSION_FLAGS_PIP, stopAtFirstPositional: true });
+    const ctx = ctxOf(a, f);
+    if (a.packageFlags.length) return pyRefs('pipx run', a.packageFlags, ctx);
+    return a.positionals.length ? pyRefs('pipx run', [a.positionals[0]], ctx) : [];
   }
   return [];
 }
@@ -935,6 +998,12 @@ async function vetOne(ref: PackageRef, ctx: {
   if (ref.customIndex) {
     return { vet: uncheckedVet(ref, 'installs from a custom package index, which public records do not describe', minAgeDays, nowMs), exact: false };
   }
+  if (ref.versionOption && !pinnedVersion(ref)) {
+    // The installer picks the version by a rule this check does not follow, so resolving the
+    // spec here would vet a different version and its clean answer would wrongly be final.
+    // No version-specific answer: a name-only MAL- hit stays in force (unconfirmed-version block).
+    return { vet: uncheckedVet(ref, `the install chooses its version with ${ref.versionOption}, which this check does not follow, so the version it would fetch could not be confirmed`, minAgeDays, nowMs), exact: false };
+  }
   let facts: Facts;
   try {
     facts = ref.ecosystem === 'npm' ? await resolveNpm(ref, fetchImpl, regSignal) : await resolvePyPI(ref, fetchImpl, regSignal);
@@ -978,7 +1047,7 @@ function withMalicious(v: PackageVet, extra: string[], minAgeDays: number, nowMs
 
 /** Dedup / lookup key. A custom-index ref and a public ref for the same package are different installs. */
 function refKey(r: PackageRef): string {
-  return `${r.ecosystem}@${r.name}@${r.spec ?? ''}@${r.customIndex ? 'custom' : 'public'}`;
+  return `${r.ecosystem}@${r.name}@${r.spec ?? ''}@${r.customIndex ? 'custom' : 'public'}@${r.versionOption ?? ''}`;
 }
 
 /**

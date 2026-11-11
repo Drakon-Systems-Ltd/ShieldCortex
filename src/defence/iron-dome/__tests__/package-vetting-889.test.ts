@@ -952,3 +952,171 @@ describe('panel correction — rubric C3: the unconfirmed-version explanation is
     expect(reason.length).toBeLessThanOrEqual(240);
   });
 });
+
+// Release review (v5.20.0, Astra B1): `--tag` / `--before` were consumed as value
+// flags and then ignored, so the registry lookup resolved `latest`, got a clean
+// exact answer for it and discarded the name-only MAL- hit for the version npm
+// actually selects. Fixture: npm-pick-manifest 10 picks 2.0.0-beta.1 for
+// `--tag beta` and 0.9.0 for `--before 2020-06-01`; both are malicious, latest
+// (1.0.0) is clean.
+describe('release review B1 — version-selection options are never resolved as if absent', () => {
+  const TAGPKG = 'synth-tagpkg';
+  const TAG_MAL = 'MAL-2026-90003';
+  const UNCONFIRMED = /OSV lists a malicious release of synth-tagpkg \(MAL-2026-90003\); the version this install would fetch could not be checked, so it is blocked until you pin a version/;
+  const tagWorld = (): World => {
+    const w = fixtureWorld();
+    w.npm[TAGPKG] = {
+      tags: { latest: '1.0.0', beta: '2.0.0-beta.1' },
+      versions: {
+        '0.9.0': { time: '2019-01-01T00:00:00Z' },
+        '1.0.0': { time: '2021-01-01T00:00:00Z' },
+        '2.0.0-beta.1': { time: hoursAgo(24 * 30) },
+      },
+    };
+    w.osv[`npm@${TAGPKG}@0.9.0`] = [TAG_MAL];
+    w.osv[`npm@${TAGPKG}@2.0.0-beta.1`] = [TAG_MAL];
+    return w;
+  };
+  const vet = (w: World, command: string) => vetToolCall('Bash', { command }, opts(w));
+
+  it('parses the option onto the ref, wherever it is spelled (after, before the verb, inline, env)', () => {
+    const cases: Array<[string, string]> = [
+      [j('npm', 'install', TAGPKG, '--tag', 'beta'), '--tag'],
+      [j('npm', 'install', '--tag', 'beta', TAGPKG), '--tag'],
+      [j('npm', 'install', '--tag=beta', TAGPKG), '--tag'],
+      [j('npm', '--tag', 'beta', 'install', TAGPKG), '--tag'],
+      [j('npm', 'install', TAGPKG, '--before', '2020-06-01'), '--before'],
+      [j('npm', 'install', '--before=2020-06-01', TAGPKG), '--before'],
+      [j('npx', '--tag', 'beta', TAGPKG), '--tag'],
+      [j('pnpm', 'add', '--resolution-mode', 'lowest-direct', `${TAGPKG}@^1.0.0`), '--resolution-mode'],
+      [j('npm_config_tag=beta', 'npm', 'i', TAGPKG), 'npm_config_tag'],
+      [j('pip', 'install', '--pre', 'some-pkg'), '--pre'],
+      [j('uv', 'pip', 'install', '--prerelease', 'allow', 'some-pkg'), '--prerelease'],
+      [j('uvx', '--exclude-newer', '2020-01-01', 'some-tool'), '--exclude-newer'],
+      [j('PIP_PRE=1', 'pip', 'install', 'some-pkg'), 'pip_pre'],
+    ];
+    for (const [command, option] of cases) {
+      const refs = parseInstallCommands(command);
+      expect(refs).toHaveLength(1);
+      expect(refs[0].versionOption).toBe(option);
+    }
+    // The option's value is never read as a package.
+    expect(parseInstallCommands(j('npm', 'install', TAGPKG, '--tag', 'beta')).map((r) => r.name)).toEqual([TAGPKG]);
+    expect(parseInstallCommands(j('uv', 'pip', 'install', '--prerelease', 'allow', 'some-pkg')).map((r) => r.name)).toEqual(['some-pkg']);
+    // Control: no option, no mark.
+    expect(parseInstallCommands(j('npm', 'install', TAGPKG))[0].versionOption).toBeUndefined();
+  });
+
+  it('npm install <pkg> --tag beta: the selected (malicious) beta is not hidden behind a clean latest', async () => {
+    const w = tagWorld();
+    const out = await vet(w, j('npm', 'install', TAGPKG, '--tag', 'beta'));
+    expect(out!.malicious).toBe(true);
+    expect(out!.reasons.join(' ')).toMatch(UNCONFIRMED);
+    expect(out!.audit[0].version).toBeUndefined(); // never reported as having checked latest
+    // latest (1.0.0) was never asked about as if it were the install's version
+    expect(w.calls.filter((c) => c === 'POST https://api.osv.dev/v1/query')).toEqual([]);
+  });
+
+  it('npm install <pkg> --before <date>: the selected (malicious) older version is not hidden behind a clean latest', async () => {
+    for (const command of [j('npm', 'install', TAGPKG, '--before', '2020-06-01'), j('npm', 'install', '--before=2020-06-01', TAGPKG)]) {
+      const out = await vet(tagWorld(), command);
+      expect(out!.malicious).toBe(true);
+      expect(out!.reasons.join(' ')).toMatch(UNCONFIRMED);
+    }
+  });
+
+  it('the env-var and pre-verb spellings block the same way', async () => {
+    for (const command of [j('npm_config_tag=beta', 'npm', 'i', TAGPKG), j('npm', '--tag', 'beta', 'install', TAGPKG), j('npx', '--tag', 'beta', TAGPKG)]) {
+      const out = await vet(tagWorld(), command);
+      expect(out!.malicious).toBe(true);
+    }
+  });
+
+  it('without a MAL- record for the name, the option makes the check unchecked (fail open), never clean', async () => {
+    const w = tagWorld();
+    delete w.osv[`npm@${TAGPKG}@0.9.0`];
+    delete w.osv[`npm@${TAGPKG}@2.0.0-beta.1`];
+    const out = await vet(w, j('npm', 'install', TAGPKG, '--tag', 'beta'));
+    expect(out!.malicious).toBe(false);
+    expect(out!.audit[0].status).toBe('unchecked');
+    expect(out!.reasons).toEqual(['unchecked: the install chooses its version with --tag, which this check does not follow, so the version it would fetch could not be confirmed']);
+  });
+
+  it('control: an explicit dist-tag spec (pkg@beta, no option) resolves the tag and is blocked as known malicious', async () => {
+    const out = await vet(tagWorld(), j('npm', 'install', `${TAGPKG}@beta`));
+    expect(out!.malicious).toBe(true);
+    expect(out!.reasons.join(' ')).toContain(`${TAGPKG}@2.0.0-beta.1 as known malicious`);
+  });
+
+  it('control: an exact pin is exact whatever the option, so the clean pinned version passes', async () => {
+    const out = await vet(tagWorld(), j('npm', 'install', `${TAGPKG}@1.0.0`, '--tag', 'beta'));
+    expect(out!.malicious).toBe(false);
+    expect(out!.audit[0]).toMatchObject({ status: 'checked', version: '1.0.0' });
+  });
+
+  it('control: the same command without the option still vets latest (clean) and is not blocked', async () => {
+    const out = await vet(tagWorld(), j('npm', 'install', TAGPKG));
+    expect(out!.malicious).toBe(false);
+    expect(out!.audit[0]).toMatchObject({ status: 'checked', version: '1.0.0' });
+  });
+
+  it('a cached MAL- hit still blocks offline for a ref carrying the option', async () => {
+    const w = tagWorld();
+    await vet(w, j('npm', 'install', `${TAGPKG}@2.0.0-beta.1`)); // caches the MAL- hit
+    const out = await vetToolCall('Bash', { command: j('npm', 'install', TAGPKG, '--tag', 'beta') }, { fetchImpl: offline, nowMs: NOW + 3_600_000, stateDir });
+    expect(out!.malicious).toBe(true);
+  });
+
+  it('pip --pre: the pre-release pip would pick is not hidden behind the clean final release', async () => {
+    const w = fixtureWorld();
+    w.pypi['pre-lib'] = { latest: '1.0.0', releases: { '1.0.0': [{ packagetype: 'bdist_wheel', upload_time_iso_8601: hoursAgo(24 * 300) }], '2.0.0rc1': [{ packagetype: 'bdist_wheel', upload_time_iso_8601: hoursAgo(24 * 3) }] } };
+    w.osv['PyPI@pre-lib@2.0.0rc1'] = ['MAL-2026-90004'];
+    const out = await vet(w, j('pip', 'install', '--pre', 'pre-lib'));
+    expect(out!.malicious).toBe(true);
+    const control = await vet(w, j('pip', 'install', 'pre-lib'));
+    expect(control!.malicious).toBe(false);
+  });
+
+  it('a public ref and the same ref with an option are separate installs (not deduplicated)', async () => {
+    const out = await vet(tagWorld(), j('npm', 'install', TAGPKG, ';', 'npm', 'install', TAGPKG, '--tag', 'beta'));
+    expect(out!.audit).toHaveLength(2);
+    expect(out!.malicious).toBe(true);
+  });
+});
+
+// Same review, same class: runner forms (`npx`, `bunx`, `pnpm dlx`, `yarn dlx`,
+// `uvx`, `uv tool run`, `pipx run`) read their own options only up to the
+// command (npm's npx-cli.js inserts `--` before the first positional). Reading
+// later words as installer options vetted the wrong package or skipped the
+// malicious-package check entirely.
+describe('release review B1 — runner forms stop reading installer options at the command', () => {
+  it('words after the command are the command\'s arguments, not -p / --registry / --tag', () => {
+    expect(parseInstallCommands(j('npx', 'evil-pkg', '-p', 'clean-pkg')).map(tuple)).toEqual([['npm', 'evil-pkg', null]]);
+    expect(parseInstallCommands(j('npx', 'evil-pkg', '--package=clean-pkg')).map(tuple)).toEqual([['npm', 'evil-pkg', null]]);
+    const [reg] = parseInstallCommands(j('npx', 'evil-pkg', '--registry=https://private.example'));
+    expect(reg.customIndex).toBeUndefined();
+    const [tag] = parseInstallCommands(j('npx', 'evil-pkg', '--tag', 'next'));
+    expect(tag.versionOption).toBeUndefined();
+    expect(parseInstallCommands(j('bunx', 'evil-pkg', '-p', 'clean-pkg')).map(tuple)).toEqual([['npm', 'evil-pkg', null]]);
+    expect(parseInstallCommands(j('pnpm', 'dlx', 'evil-pkg', '-p', 'clean-pkg')).map(tuple)).toEqual([['npm', 'evil-pkg', null]]);
+    expect(parseInstallCommands(j('uvx', 'evil-tool', '--from', 'clean-pkg')).map(tuple)).toEqual([['PyPI', 'evil-tool', null]]);
+    expect(parseInstallCommands(j('pipx', 'run', 'evil-tool', '--spec', 'clean-pkg')).map(tuple)).toEqual([['PyPI', 'evil-tool', null]]);
+  });
+
+  it('uv\'s -p (python) takes a value, so the package after it is the one vetted', () => {
+    expect(parseInstallCommands(j('uvx', '-p', '3.11', 'evil-tool')).map(tuple)).toEqual([['PyPI', 'evil-tool', null]]);
+  });
+
+  it('controls: options BEFORE the command still apply, and npm exec reads them anywhere before --', () => {
+    expect(parseInstallCommands(j('npx', '-p', 'clean-pkg', 'run-it')).map(tuple)).toEqual([['npm', 'clean-pkg', null]]);
+    const [reg] = parseInstallCommands(j('npx', '--registry=https://private.example', 'some-pkg'));
+    expect(reg.customIndex).toBe(true);
+    expect(parseInstallCommands(j('npm', 'exec', 'run-it', '-p', 'clean-pkg')).map(tuple)).toEqual([['npm', 'clean-pkg', null]]);
+    expect(parseInstallCommands(j('uvx', '--from', 'some-pkg==2.0', 'cmd')).map(tuple)).toEqual([['PyPI', 'some-pkg', '==2.0']]);
+  });
+
+  it('end to end: npx <malicious> --registry=<x> is still checked and blocked', async () => {
+    const out = await vetToolCall('Bash', { command: j('npx', `${MAL_NAME}@1.0.3`, '--registry=https://private.example') }, opts(fixtureWorld()));
+    expect(out!.malicious).toBe(true);
+  });
+});
