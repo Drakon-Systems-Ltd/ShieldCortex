@@ -108,6 +108,8 @@ describe('#629 real writes and unsafe forms stay gated', () => {
       `grep -rf pats .`, `grep -nf pats f`, `grep -if pats f`, `grep x f -f pats`,
       `egrep -f pats f`, `fgrep -f pats f`, `egrep --file pats f`, `fgrep -rf pats .`,
       `cat f | jq -f p.jq`, `cat f | grep -f pats`,
+      // #1053 round 0: a value glued onto -e/-f
+      `grep -erm f`, `grep -frm.pat f`,
     ]) {
       expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
     }
@@ -170,6 +172,8 @@ const GREP_VALUE_OR_UNKNOWN_OPTIONS = [
   '--max 1', '--exc x', '--frobnicate', '--reg', '--ignore', '--line-num', '--bin',
   // #1053 review: a value glued to -e/-f, or a pattern-file cluster
   '-ePAT', '-fpats', '-rf pats',
+  // #1053 round 1: unambiguous abbreviations GNU grep would expand
+  '--fixed', '--no-group', '--unix',
 ];
 const GREP_STILL_MASKED = [
   '-n', '--', '-n --', '-rn', '-inw', '-c', '-l', '-L', '-F', '-E', '-o', '-v', '-x', '-H', '-h',
@@ -177,6 +181,8 @@ const GREP_STILL_MASKED = [
   '--recursive', '--count', '--files-with-matches', '--only-matching', '--invert-match',
   // #1053 review (N1): exact GNU no-argument options (`--binary` is `-U`)
   '--binary', '--no-group-separator', '--unix-byte-offsets', '--fixed-regexp',
+  // #1053 round 0 safe rows
+  '--text', '-i',
 ];
 
 describe('#1051 grep options the #629 mask cannot model decline the mask', () => {
@@ -349,16 +355,113 @@ describe('#1053 jq -- consumed as an option value does not end option parsing', 
   it('a jq option outside the closed table declines', () => {
     for (const cmd of [
       `jq --debug-dump-disasm . d.json`, `jq --from . d.json`, `jq --in-place . d.json`,
-      `jq -1 d.json`, `jq - . d.json`, `jq . d.json --arg n`, `jq --indent`, `jq -rL lib . d.json`,
+      `jq - . d.json`, `jq . d.json --arg n`, `jq --indent`, `jq -rL lib . d.json`,
+      // reviewer rows: unknown, glued, abbreviated or `=` spellings
+      `jq -nL lib . d.json`, `jq -Lrm . d.json`, `jq -r0 . d.json`, `jq -e1 d.json`, `jq -x . d.json`,
+      `jq -b . d.json`, `jq --ar a b . d.json`, `jq --raw . d.json`, `jq --indent=2 . d.json`,
+      `jq --foo . d.json`, `jq --debug-trace . d.json`,
+      // a non-ASCII letter after the dash is an option to jq in some locales
+      `jq -${String.fromCharCode(0xe9)}a d.json`,
     ]) {
       expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+    }
+  });
+
+  it('round 1 rows: no-value options keep the relief; an include beside any cluster does not', () => {
+    for (const cmd of [`jq -e .a d.json`, `jq --exit-status .a d.json`, `jq --seq . d.json`,
+      `jq --stream . d.json`, `jq --stream-errors . d.json`, `jq --tab .a d.json`, `jq --indent 3 . d.json`,
+      `jq --indent -1 .a d.json`, `jq --argfile a d.json . d.json`]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBe(' '.repeat(cmd.length));
+    }
+    for (const cmd of [`jq -eC 'include "x"; .' ${RM}`, `jq -rc 'include "x"; .' ${RM}`,
+      `jq -re 'include "x"; .' ${RM}`, `jq -n 'include "x"; .'`,
+      // `--args`/`--jsonargs` do not end option parsing: a later -f is an option
+      `jq -n --args '$ARGS' -f p.jq`, `jq -n --jsonargs '$ARGS' -f p.jq`]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+    }
+  });
+});
+
+// #1053 round 2 (B3): a `--` that jq reads AS AN OPTION ends option parsing,
+// so every later word is an operand. A data file spelled `-f`, `-L` or
+// `--from-file` there is read as JSON, never as a program (real jq 1.7 prints
+// both files). Only words in option position are judged for a program file,
+// so a word an option takes as its VALUE is data too.
+describe('#1053 round 2: after a real jq -- terminator, loader-shaped words are data', () => {
+  const AFTER_TERMINATOR = [
+    `jq -- . ${RM}.json -f`, `jq --arg n -- -- . ${RM}.json -f`, `jq -- . ${RM}.json -rf`,
+    `jq -- . ${RM}.json -L`, `jq -- . ${RM}.json --from-file`, `jq -- . ${RM}.json --library-path`,
+    `jq -r -- . ${RM}.json -f`, `jq -- . ${RM} -f`, `jq -- -f ${RM}.json`, `jq -- -f p.jq d.json`,
+    `jq -n -- -f`, `jq -n '$ARGS' --args a -- -f`, `jq -n --args '$ARGS' -- -f p.jq`,
+    `jq --arg n -- -- . ${RM}.json -f p.jq`, `cat ${RM}.json | jq -- . -f`,
+  ];
+  const OPTION_VALUES = [
+    `jq --arg value -f . ${RM}.json`, `jq --arg value -L . ${RM}.json`, `jq --arg value --from-file . ${RM}.json`,
+    `jq --arg -f v . ${RM}.json`, `jq --arg v -Lx . ${RM}.json`, `jq --slurpfile x -f . ${RM}.json`,
+    `jq --indent -f . ${RM}.json`, `jq --arg value -f . ${RM}`, `jq --arg value -L . ${RM}`,
+    // the option takes `--run-tests` as its value, so `t.txt` is the filter
+    `jq --indent --run-tests t.txt`, `jq --arg name --run-tests t.txt`,
+  ];
+
+  it('mask and decision: relieved, alone and beside another read', () => {
+    for (const cmd of [...AFTER_TERMINATOR, ...OPTION_VALUES]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBe(' '.repeat(cmd.length));
+      const v = bash(cmd);
+      expect(v.decision).toBe('allow');
+      expect(v.severity).toBe('benign');
+      expect(v.signals ?? []).toEqual([]);
+    }
+    for (const cmd of [`jq . d.json; jq -- . ${RM}.json -f`, `jq -- . ${RM}.json -rf && jq . d.json`]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)!.trim()).toMatch(/^[;&]*$/);
+      expect(bash(cmd).decision).toBe('allow');
+    }
+  });
+
+  it('a consumed -- is still not the terminator: a loader before the real one is rated', () => {
+    for (const cmd of [
+      `jq --arg n -- -f p.jq -- . ${RM}.json`, `jq --arg n -- -rf ${RM}.jq -- d.json`,
+      `jq --indent -- --from-file p.jq -- ${RM}.json`, `jq --arg n -- -L lib -- . ${RM}`,
+      `jq . ${RM}.json -f p.jq -- x`, `jq -n --args '$ARGS' -f ${RM}.jq`, `jq -n --jsonargs '$ARGS' -f ${RM}.jq`,
+    ]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+      const v = bash(cmd);
+      expect(v.decision).not.toBe('allow');
+      expect((v.signals ?? []).length).toBeGreaterThan(0);
+    }
+  });
+});
+
+// #1053 round 2 (B4): jq takes a word as an option only when the dash is
+// followed by `-` or a letter, so `-1` and `-.a` are the FILTER (real jq 1.7
+// prints -1). The filter is still lexed for module code, and an actual
+// unknown option, a -f/-L option or a loader after the filter still declines.
+describe('#1053 round 2: a negative jq filter is the filter, not an option', () => {
+  it('decision: relieved with no signal', () => {
+    for (const cmd of [`jq -1 ${RM}.json`, `jq -.a ${RM}.json`, `jq -1 ${RM}`, `jq -r -.a ${RM}.json`,
+      `jq '-(.a)' ${RM}.json`, `jq -.a ${RM}.json -c`, `cat ${RM}.json | jq -.a`]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBe(' '.repeat(cmd.length));
+      const v = bash(cmd);
+      expect(v.decision).toBe('allow');
+      expect(v.severity).toBe('benign');
+      expect(v.signals ?? []).toEqual([]);
+    }
+  });
+
+  it('the dash filter is still lexed, and real options around it are still judged', () => {
+    for (const cmd of [`jq '-(modulemeta)' ${RM}`, `jq '-.a | modulemeta' ${RM}`, `jq '-1, (include)' ${RM}`,
+      `jq -1 -x ${RM}`, `jq -1 ${RM} -f p.jq`, `jq -1 -L lib ${RM}`, `jq -rf p.jq -1 ${RM}`]) {
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
+      const v = bash(cmd);
+      expect(v.decision).not.toBe('allow');
+      expect((v.signals ?? []).length).toBeGreaterThan(0);
     }
   });
 });
 
 // #1053 review (B2): only the FILTER can load a module, and only as code.
 // A field selector, a string, an --arg value or a file name holding one of
-// the words is data, and must keep the relief it had before #1015.
+// the words is data, and must keep the relief it had before #1015. Round 2:
+// so is an object key (`{import: 1}`, `{import}`) or a variable (`$include`).
 describe('#1053 jq module words that are data keep the relief', () => {
   const DATA_READS = [
     `jq '.import' ${RM}.json`, `jq '.include' ${RM}.json`, `jq '.modulemeta' ${RM}.json`,
@@ -368,6 +471,15 @@ describe('#1053 jq module words that are data keep the relief', () => {
     `jq '"\\(.include)"' ${RM}.json`, `jq --argjson v '"include"' .a ${RM}.json`,
     `jq --rawfile import x.txt .a ${RM}.json`, `jq -n --args '$ARGS' import include`,
     `jq '...import' ${RM}.json`, `jq '1.5.import' ${RM}.json`,
+    // round 2 (B2): an object key or a variable is a name, never a directive or call
+    `jq '{import: 1}' ${RM}.json`, `jq '{import}' ${RM}.json`, `jq '. as $include | 1' ${RM}.json`,
+    `jq '. as $import | .' ${RM}.json`, `jq '{a: .b, include: 2}' ${RM}.json`,
+    `jq '{"a": 1, modulemeta}' ${RM}.json`, `jq '. as {import: $x} | $x' ${RM}.json`,
+    `jq --arg import v '{$import}' ${RM}.json`, `jq 'reduce .[] as $import (0; . + 1)' ${RM}.json`,
+    `jq '{ include : 1 }' ${RM}.json`, `jq '{a: {modulemeta: 1}}' ${RM}.json`,
+    // round 0 controls and round 1 string rows
+    `jq '.name' ${RM}.json`, `jq '.imports' ${RM}.json`, `jq '"\\( "include" )"' ${RM}.json`,
+    `jq '"\\\\(include)"' ${RM}.json`,
   ];
 
   it('mask: blanked whole, alone, piped and beside another read', () => {
@@ -397,9 +509,16 @@ describe('#1053 jq module words that are data keep the relief', () => {
       `jq '"m" | modulemeta' ${RM}`, `jq '.a | modulemeta' ${RM}`, `jq '"\\(modulemeta)"' ${RM}`,
       `jq '"\\("\\(modulemeta)")"' ${RM}`, `jq -- 'include "x"; .' ${RM}`,
       `jq --arg n v 'include "x"; .' ${RM}`, `jq -n --args 'import "x" as e; .' ${RM}`,
-      // fail closed where the word is not provably a field name or string text
-      `jq '{import: 1}' ${RM}`, `jq '. as $import | .' ${RM}`, `jq '1.import' ${RM}`,
-      `jq '..import' ${RM}`, `jq '. import' ${RM}`,
+      // fail closed where the word is not provably a field, a `$variable`, an
+      // object key closed by `:`, `,` or `}`, or string text
+      `jq '1.import' ${RM}`, `jq '..import' ${RM}`, `jq '. import' ${RM}`,
+      `jq '{a: modulemeta}' ${RM}`, `jq '{(import): 1}' ${RM}`, `jq '{import "x"}' ${RM}`,
+      `jq '. as $ include | 1' ${RM}`, `jq '[1, include]' ${RM}`, `jq '1, modulemeta' ${RM}`,
+      `jq '{a: [1, import]}' ${RM}`, `jq '{import::x: 1}' ${RM}`, `jq '"\\(1, modulemeta)"' ${RM}`,
+      `jq '{a: 1} | modulemeta' ${RM}`, `jq 'include "x"; {import: 1}' ${RM}`, `jq 'def import: .; .' ${RM}`,
+      // a keyword in an object value could open a construct with its own
+      // commas, so no later comma of that object is trusted as a key position
+      `jq '{a: if . then 1, modulemeta else 2 end}' ${RM}`, `jq '{a: try 1, include}' ${RM}`,
       `jq '"x' ${RM}`, `jq '(.a' ${RM}`, `jq '"\\(.a"' ${RM}`,
     ];
     for (const cmd of CODE) {
@@ -418,6 +537,13 @@ describe('#1053 jq module words that are data keep the relief', () => {
         expect(m === null ? cmd : m).toContain(stage);
         expect(bash(cmd).decision).not.toBe('allow');
       }
+    }
+  });
+
+  it('round 1 nit: a filter holding a line break is never blanked', () => {
+    for (const f of [`# "\ninclude "m"; . # "`, `. # "\n| "m" | modulemeta # "`, `. # x\n| .a`, `.a\n| .import`]) {
+      const cmd = `jq '${f}' ${RM}.json`;
+      expect(readOnlyInspectionMask(cmd, cmd, cmd)).toBeNull();
     }
   });
 
