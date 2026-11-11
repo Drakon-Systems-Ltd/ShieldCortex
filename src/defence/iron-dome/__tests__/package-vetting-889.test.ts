@@ -11,6 +11,7 @@ import {
   applyVettingToVerdict,
   normalisePackageVettingConfig,
   pySatisfies,
+  UNRECOGNISED_OPTION,
   type FetchLike,
   type PackageRef,
 } from '../package-vetting.js';
@@ -475,9 +476,14 @@ describe('vetToolCall + applyVettingToVerdict', () => {
   });
 
   it('audit summary carries package names and finding kinds, not the command', async () => {
-    const out = await vetToolCall('Bash', { command: j('npm', 'install', 'hooky-lib', '--token=abc123') }, opts(fixtureWorld()));
+    const out = await vetToolCall('Bash', { command: j('npm', 'install', 'hooky-lib', '--otp=abc123') }, opts(fixtureWorld()));
     expect(out!.audit).toEqual([{ ecosystem: 'npm', name: 'hooky-lib', version: '1.0.0', status: 'checked', kinds: ['install-hook'], reasons: ['runs a postinstall script on install'] }]);
     expect(JSON.stringify(out)).not.toContain('abc123');
+    // An option npm does not define (`--token`) leaves the version unconfirmed; its text is never echoed.
+    const unknown = await vetToolCall('Bash', { command: j('npm', 'install', 'hooky-lib', '--token=abc123') }, opts(fixtureWorld()));
+    expect(unknown!.audit[0].status).toBe('unchecked');
+    expect(JSON.stringify(unknown)).not.toContain('abc123');
+    expect(JSON.stringify(unknown)).not.toContain('token');
   });
 
   it('vets an MCP server entry report-only', async () => {
@@ -1111,13 +1117,173 @@ describe('release review B1 — runner forms stop reading installer options at t
     expect(parseInstallCommands(j('npx', '-p', 'clean-pkg', 'run-it')).map(tuple)).toEqual([['npm', 'clean-pkg', null]]);
     const [reg] = parseInstallCommands(j('npx', '--registry=https://private.example', 'some-pkg'));
     expect(reg.customIndex).toBe(true);
-    expect(parseInstallCommands(j('npm', 'exec', 'run-it', '-p', 'clean-pkg')).map(tuple)).toEqual([['npm', 'clean-pkg', null]]);
+    expect(parseInstallCommands(j('npm', 'exec', 'run-it', '--package=clean-pkg')).map(tuple)).toEqual([['npm', 'clean-pkg', null]]);
+    // For npm itself (not npx) `-p` is `--parseable`: npm exec then installs the command it runs.
+    expect(parseInstallCommands(j('npm', 'exec', 'run-it', '-p', 'clean-pkg')).map(tuple)).toEqual([['npm', 'run-it', null]]);
     expect(parseInstallCommands(j('uvx', '--from', 'some-pkg==2.0', 'cmd')).map(tuple)).toEqual([['PyPI', 'some-pkg', '==2.0']]);
   });
 
   it('end to end: npx <malicious> --registry=<x> is still checked and blocked', async () => {
     const out = await vetToolCall('Bash', { command: j('npx', `${MAL_NAME}@1.0.3`, '--registry=https://private.example') }, opts(fixtureWorld()));
     expect(out!.malicious).toBe(true);
+  });
+});
+
+// Release review round 2 (v5.20.0, Astra B1): flags were matched by exact
+// string, but npm reads its command line with nopt over its own option table:
+// `--enjoy-by` is an alias of `--before`, `-e` abbreviates that alias, and any
+// unique prefix (`--bef`, `--befor`) names the option. Those spellings were
+// neither marked as selecting the version nor consumed as value flags, so the
+// clean `latest` answer discarded the name-only MAL- hit for the version npm
+// selects, and `npm --enjoy-by D install pkg` produced no ref at all. npm is now
+// read the way npm 10 reads it (checked against npm's own parser during the
+// fix), and an option the check does not recognise, for any installer, leaves
+// the version unconfirmed. Fixture as above: npm 10.9 picks 0.9.0 (malicious)
+// for `--before 2020-06-01`, 2.0.0-beta.1 (malicious) for `--tag beta`, latest
+// (1.0.0) is clean.
+describe('release review round 2 B1 — installer option aliases, abbreviations and unknown options', () => {
+  const PKG = 'synth-tagpkg';
+  const MAL = 'MAL-2026-90003';
+  const UNCONFIRMED = /OSV lists a malicious release of synth-tagpkg \(MAL-2026-90003\); the version this install would fetch could not be checked, so it is blocked until you pin a version/;
+  const tagWorld = (): World => {
+    const w = fixtureWorld();
+    w.npm[PKG] = {
+      tags: { latest: '1.0.0', beta: '2.0.0-beta.1' },
+      versions: { '0.9.0': { time: '2019-01-01T00:00:00Z' }, '1.0.0': { time: '2021-01-01T00:00:00Z' }, '2.0.0-beta.1': { time: hoursAgo(24 * 30) } },
+    };
+    w.osv[`npm@${PKG}@0.9.0`] = [MAL];
+    w.osv[`npm@${PKG}@2.0.0-beta.1`] = [MAL];
+    return w;
+  };
+  const vet = (w: World, command: string) => vetToolCall('Bash', { command }, opts(w));
+  const exactQueries = (w: World) => w.calls.filter((c) => c === 'POST https://api.osv.dev/v1/query');
+
+  it('the reviewer\'s npm spellings select --before (after the package, inline, before the verb)', () => {
+    const cases = [
+      j('npm', 'install', PKG, '--enjoy-by=2020-06-01'),
+      j('npm', 'install', PKG, '--enjoy-by', '2020-06-01'),
+      j('npm', 'install', PKG, '--bef=2020-06-01'),
+      j('npm', 'install', PKG, '--bef', '2020-06-01'),
+      j('npm', 'install', PKG, '--befor=2020-06-01'),
+      j('npm', 'install', PKG, '--enjoy=2020-06-01'),
+      j('npm', 'install', PKG, '-e', '2020-06-01'),
+      j('npm', '--enjoy-by', '2020-06-01', 'install', PKG),
+      j('npm', '--bef', '2020-06-01', 'i', PKG),
+      j('npm', '--enjoy-by=2020-06-01', 'add', PKG),
+      j('npx', '--enjoy-by', '2020-06-01', PKG),
+      j('npx', '--bef=2020-06-01', '-y', PKG),
+      j('npm', 'exec', '--bef', '2020-06-01', '--', PKG),
+    ];
+    for (const command of cases) {
+      const refs = parseInstallCommands(command);
+      expect({ command, refs: refs.map((r) => [r.name, r.versionOption]) }).toEqual({ command, refs: [[PKG, '--before']] });
+    }
+  });
+
+  it('controls: literal --tag / --before still mark; an exact pin and a plain install do not', () => {
+    expect(parseInstallCommands(j('npm', 'install', PKG, '--tag', 'beta'))[0].versionOption).toBe('--tag');
+    expect(parseInstallCommands(j('npm', 'install', PKG, '--before=2020-06-01'))[0].versionOption).toBe('--before');
+    expect(parseInstallCommands(j('npm', 'install', PKG))[0].versionOption).toBeUndefined();
+    // Recognised everyday options are not "unrecognised".
+    expect(parseInstallCommands(j('npm', 'install', '-D', '--save-exact', '--legacy-peer-deps', '--no-audit', '--no-fund', '-g', PKG))[0].versionOption).toBeUndefined();
+    expect(parseInstallCommands(j('npm', 'i', '--prefer-offline', '--loglevel', 'error', '--omit=dev', PKG)).map((r) => [r.name, r.versionOption])).toEqual([[PKG, undefined]]);
+    expect(parseInstallCommands(j('npx', '-y', PKG, '--bef', '2020-06-01'))[0].versionOption).toBeUndefined(); // the command's own argument
+  });
+
+  it('end to end: --enjoy-by= / --bef= / pre-verb --enjoy-by block as unconfirmed and never ask OSV about latest', async () => {
+    for (const command of [
+      j('npm', 'install', PKG, '--enjoy-by=2020-06-01'),
+      j('npm', 'install', PKG, '--bef=2020-06-01'),
+      j('npm', '--enjoy-by', '2020-06-01', 'install', PKG),
+    ]) {
+      const w = tagWorld();
+      const out = await vet(w, command);
+      expect(out!.malicious).toBe(true);
+      expect(out!.reasons.join(' ')).toMatch(UNCONFIRMED);
+      expect(out!.audit[0].version).toBeUndefined();
+      expect(exactQueries(w)).toEqual([]);
+    }
+  });
+
+  it('end to end controls: --tag / --before block the same way; no option vets latest (clean)', async () => {
+    for (const command of [j('npm', 'install', PKG, '--tag', 'beta'), j('npm', 'install', PKG, '--before', '2020-06-01')]) {
+      const out = await vet(tagWorld(), command);
+      expect(out!.malicious).toBe(true);
+      expect(out!.reasons.join(' ')).toMatch(UNCONFIRMED);
+    }
+    const plain = await vet(tagWorld(), j('npm', 'install', PKG));
+    expect(plain!.malicious).toBe(false);
+    expect(plain!.audit[0]).toMatchObject({ status: 'checked', version: '1.0.0' });
+  });
+
+  it('an option npm does not define leaves the version unconfirmed (never exact-clean), wherever it is', async () => {
+    for (const command of [
+      j('npm', 'install', PKG, '--min-release-age=3'),
+      j('npm', 'install', '--min-release-age', '3', PKG),
+      j('npm', '--min-release-age', '3', 'install', PKG), // a newer npm might read 3 as its value
+      j('npm', 'install', PKG, '--ta=beta'), // ambiguous prefix: npm 10 does not read it as --tag, but it is not clean either
+    ]) {
+      const refs = parseInstallCommands(command);
+      expect(refs.find((r) => r.name === PKG)?.versionOption).toBe(UNRECOGNISED_OPTION);
+      const w = tagWorld();
+      const out = await vet(w, command);
+      expect(out!.malicious).toBe(true);
+      expect(out!.reasons.join(' ')).toMatch(UNCONFIRMED);
+    }
+    // Without a MAL- record for the name it is unchecked (fail open), with a fixed reason.
+    const w = tagWorld();
+    delete w.osv[`npm@${PKG}@0.9.0`];
+    delete w.osv[`npm@${PKG}@2.0.0-beta.1`];
+    const out = await vet(w, j('npm', 'install', PKG, '--min-release-age=3'));
+    expect(out!.malicious).toBe(false);
+    expect(out!.audit[0].status).toBe('unchecked');
+    expect(out!.reasons).toEqual([`unchecked: the install has ${UNRECOGNISED_OPTION}, which may choose the version it fetches, so that version could not be confirmed`]);
+    // An exact pin is exact whatever the options.
+    const pinned = await vet(tagWorld(), j('npm', 'install', `${PKG}@1.0.0`, '--min-release-age=3'));
+    expect(pinned!.audit[0]).toMatchObject({ status: 'checked', version: '1.0.0' });
+  });
+
+  it('npm commands resolve by npm\'s own aliases and prefixes', () => {
+    for (const verb of ['install', 'i', 'add', 'isnta', 'isntal', 'insta', 'it', 'install-test', 'installTest']) {
+      expect({ verb, refs: parseInstallCommands(j('npm', verb, PKG)).map((r) => r.name) }).toEqual({ verb, refs: [PKG] });
+    }
+    expect(parseInstallCommands(j('npm', 'exe', PKG)).map((r) => r.name)).toEqual([PKG]);
+    // Not installs: ci takes no packages, uninstall removes, ambiguous prefixes are not commands.
+    for (const verb of ['ci', 'uninstall', 'un', 'in-x', 'ex']) expect(parseInstallCommands(j('npm', verb, PKG))).toEqual([]);
+  });
+
+  it('pnpm / yarn / bun read npm aliases and prefixes conservatively; their own options are recognised', () => {
+    expect(parseInstallCommands(j('pnpm', 'add', PKG, '--bef', '2020-06-01')).find((r) => r.name === PKG)?.versionOption).toBe('--before');
+    expect(parseInstallCommands(j('pnpm', '--enjoy-by', '2020-06-01', 'add', PKG)).map((r) => [r.name, r.versionOption])).toEqual([[PKG, '--before']]);
+    expect(parseInstallCommands(j('bun', 'add', '--minimum-release-age', '3', PKG)).find((r) => r.name === PKG)?.versionOption).toBe(UNRECOGNISED_OPTION);
+    for (const command of [j('pnpm', 'add', '-D', '--save-exact', PKG), j('yarn', 'add', '--dev', '--exact', PKG), j('bun', 'add', '-d', PKG), j('pnpm', 'add', '-w', PKG), j('pnpm', 'add', '--workspace', PKG), j('pnpm', 'add', '--reporter', 'silent', PKG)]) {
+      expect({ command, refs: parseInstallCommands(command).map((r) => [r.name, r.versionOption]) }).toEqual({ command, refs: [[PKG, undefined]] });
+    }
+  });
+
+  it('Python installers: unrecognised options (pip prefixes, uv --exclude-newer-package) are never resolved as if absent', () => {
+    expect(parseInstallCommands(j('pip', 'install', '--prefer', 'some-pkg'))[0].versionOption).toBe(UNRECOGNISED_OPTION); // pip: unique prefix of --prefer-binary
+    expect(parseInstallCommands(j('pip', 'install', '--only-b', ':all:', 'some-pkg')).find((r) => r.name === 'some-pkg')?.versionOption).toBe(UNRECOGNISED_OPTION);
+    expect(parseInstallCommands(j('uv', 'pip', 'install', '--exclude-newer-package', 'some-pkg=2020-01-01', 'some-pkg')).map((r) => [r.name, r.versionOption])).toEqual([['some-pkg', '--exclude-newer-package']]);
+    expect(parseInstallCommands(j('pip', 'install', '--python-version', '3.8', 'some-pkg')).map((r) => [r.name, r.versionOption])).toEqual([['some-pkg', '--python-version']]);
+    expect(parseInstallCommands(j('pipx', 'install', '--pip-args=--pre', 'some-tool')).map((r) => [r.name, r.versionOption])).toEqual([['some-tool', '--pip-args']]);
+    // Controls: everyday options are recognised; short clusters too.
+    for (const command of [j('pip', 'install', '-U', '--user', '--no-deps', 'some-pkg'), j('pip', 'install', '-qU', 'some-pkg'), j('uv', 'pip', 'install', '--system', 'some-pkg'), j('uv', 'add', '--dev', 'some-pkg'), j('pipx', 'install', '-f', 'some-tool')]) {
+      expect({ command, refs: parseInstallCommands(command).map((r) => r.versionOption) }).toEqual({ command, refs: [undefined] });
+    }
+    // pipx -f is --force, not pip's --find-links: the package after it is vetted, on the public index.
+    expect(parseInstallCommands(j('pipx', 'install', '-f', 'some-tool'))[0].customIndex).toBeUndefined();
+  });
+
+  it('variables exported earlier in the command apply to later installs (review nits N1, N2)', () => {
+    expect(parseInstallCommands(j('export', 'NPM_CONFIG_TAG=beta;', 'npm', 'i', PKG))[0].versionOption).toBe('npm_config_tag');
+    expect(parseInstallCommands(j('export', 'PIP_PRE=1', '&&', 'pip', 'install', 'some-pkg'))[0].versionOption).toBe('pip_pre');
+    expect(parseInstallCommands(j('export', 'UV_PRERELEASE=allow;', 'uvx', 'some-tool'))[0].versionOption).toBe('uv_prerelease');
+    expect(parseInstallCommands(j('export', 'npm_config_registry=https://private.example;', 'npm', 'i', PKG))[0].customIndex).toBe(true);
+    expect(parseInstallCommands(j('npm_config_include-staged=true', 'npm', 'i', PKG))[0].versionOption).toBe('npm_config_include-staged');
+    // Controls: an unrelated export, and an export after the install, change nothing.
+    expect(parseInstallCommands(j('export', 'FOO=1;', 'npm', 'i', PKG))[0].versionOption).toBeUndefined();
+    expect(parseInstallCommands(j('npm', 'i', PKG, ';', 'export', 'NPM_CONFIG_TAG=beta'))[0].versionOption).toBeUndefined();
   });
 });
 
