@@ -327,6 +327,9 @@ export function parseNpmSpecifier(token: string): { name: string; spec: string |
   let name = token;
   let spec: string | null = null;
   if (at > 0) { name = token.slice(0, at); spec = token.slice(at + 1) || null; }
+  // `name@<url | git+… | github:… | user/repo | file:…>` installs from that source, not the
+  // registry: a version, range or dist-tag never holds `/` or `:`.
+  if (spec !== null && /[/:]/.test(spec)) return null;
   if (!NPM_NAME.test(name) || name.length > 214) return null;
   return { name: name.toLowerCase(), spec };
 }
@@ -567,8 +570,16 @@ export function parseMcpServerEntry(entry: unknown): PackageRef[] {
   const e = entry as Record<string, unknown>;
   if (typeof e.command !== 'string') return [];
   const args = Array.isArray(e.args) ? e.args.filter((a): a is string => typeof a === 'string') : [];
+  // The entry's `env` is the launched process's environment: a registry/index or a
+  // version-selection variable there applies exactly as a `VAR=value` prefix would.
+  // Only the names the parser acts on are carried (values never leave this function).
+  const env = e.env && typeof e.env === 'object' && !Array.isArray(e.env)
+    ? Object.entries(e.env as Record<string, unknown>)
+      .filter(([k, v]) => typeof v === 'string' && /^[A-Za-z_][A-Za-z0-9_@:.-]*$/.test(k) && (INDEX_ENV.test(`${k}=`) || VERSION_ENV.test(`${k}=`)))
+      .map(([k, v]) => `${k}=${v as string}`)
+    : [];
   const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-  return parseInstallCommands([e.command, ...args].map(quote).join(' '));
+  return parseInstallCommands([...env, e.command, ...args].map(quote).join(' '));
 }
 
 // ── Cache ───────────────────────────────────────────────────────────────────
