@@ -1280,7 +1280,9 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
    * by {@link VET_SERVERS_BUDGET_SHARE} of the watch budget (and never later
    * than {@link VET_SERVERS_CEILING_MS}). Whatever the check does — answers,
    * throws, hangs or overruns — `collect()` resolves by the window's end, and
-   * a file whose check gave no answer gets an `unchecked` explanation instead.
+   * a file whose check gave no answer BY THEN gets an `unchecked` explanation
+   * instead: the window closes when it ends, however late `collect()` is called,
+   * and an answer that settles after it is dropped.
    * Never throws; `undefined` when there is nothing to check.
    */
   const startPackageCheck = (
@@ -1311,25 +1313,33 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
     const windowEndsAt = Date.now() + windowMs;
     const settled: Array<{ ok: true; checks: Awaited<ReturnType<NonNullable<AgentConfigWatchDeps['vetServers']>>> } | { ok: false } | undefined> = run.map(() => undefined);
     const budgetMs = Math.max(0, Math.floor(windowMs - VET_SERVERS_GRACE_MS));
+    // The cutoff is armed HERE, when the checks start, not when `collect()` is called: delivery
+    // and saving can outlast the window, and an answer that settles after it closed is not an
+    // answer (it would arrive past the time the watch gave the check). `closed` freezes `settled`;
+    // the clock is read as well, in case the timer itself runs late behind synchronous work.
+    let closed = false;
+    const isClosed = () => closed || Date.now() >= windowEndsAt;
+    let closeTimer: NodeJS.Timeout | undefined;
+    const windowEnd = new Promise<void>((res) => {
+      closeTimer = setTimeout(() => { closed = true; res(); }, windowMs);
+      closeTimer.unref?.();
+    });
     // Each call is wrapped: a synchronous throw or a rejection only marks that file's check failed.
+    // What is bounded here is the WAIT. The check's own work is bounded by `budgetMs`, which it is
+    // handed and should keep to; a check still running past the window is not cancelled, its
+    // late answer is dropped.
     const all = Promise.all(run.map(async (w, k) => {
       try {
-        settled[k] = { ok: true, checks: await vet(w.servers, { budgetMs }) };
+        const checks = await vet(w.servers, { budgetMs });
+        if (!isClosed()) settled[k] = { ok: true, checks };
       } catch {
-        settled[k] = { ok: false };
+        if (!isClosed()) settled[k] = { ok: false };
       }
-    }));
+    })).then(() => { if (closeTimer) clearTimeout(closeTimer); });
     const collect = async (): Promise<Array<AgentConfigNotification['packageChecks']>> => {
-      const left = windowEndsAt - Date.now();
-      if (left > 0) {
-        let t: NodeJS.Timeout | undefined;
-        const windowEnd = new Promise<void>((res) => { t = setTimeout(res, left); t.unref?.(); });
-        try {
-          await Promise.race([all, windowEnd]);
-        } finally {
-          if (t) clearTimeout(t);
-        }
-      }
+      if (!isClosed()) await Promise.race([all, windowEnd]);
+      closed = true;
+      if (closeTimer) clearTimeout(closeTimer);
       for (const [k, w] of run.entries()) {
         const r = settled[k];
         if (r === undefined) out[w.i] = unfinished(w.servers, PACKAGE_CHECK_UNFINISHED.timedOut);
