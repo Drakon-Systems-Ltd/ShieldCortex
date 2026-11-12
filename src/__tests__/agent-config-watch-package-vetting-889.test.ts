@@ -373,3 +373,63 @@ describe('release review B3 — the package check is off the delivery and baseli
     expect((await runMany()).notified).toBe(1);
   });
 });
+
+// #1054 (P2 source-head panel, Sol 4): `collect()` armed its window timer only
+// when it was called, after delivery and saving. With a delivery that outlasts
+// the package-check window, an answer that settled AFTER the window had closed
+// (but before `collect()` ran) was still taken from the settled slot and sent
+// as the check's answer. The window now closes when it ends, whenever
+// `collect()` is called: a late answer is dropped and reported as not finished.
+describe('#1054 — an answer that settles after the package-check window closed is not used', () => {
+  let project2: string;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const LATE = [{ name: 'docs', malicious: true, reasons: ['OSV lists some-mcp@1.0.0 as known malicious (MAL-2026-18603)'] }];
+  const start = async () => {
+    project2 = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-889w-late-'));
+    const file = path.join(project2, '.mcp.json');
+    fs.writeFileSync(file, JSON.stringify({ mcpServers: { existing: { command: 'node', args: ['server.js'] } } }));
+    const go = (over: Partial<Parameters<typeof runAgentConfigWatch>[0]> = {}) => runAgentConfigWatch({
+      home, projectRoots: [project2], dropzoneDirs: [],
+      // Only the change notice is slow; the follow-up is delivered at once.
+      notify: async (n) => { if (!n.packageCheckFollowUp) await sleep(3000); notes.push(n); },
+      ledger: (r) => { rows.push(r); return true; },
+      totalBudgetMs: 8000, // window: the 2500 ms ceiling
+      ...over,
+    });
+    await runAgentConfigWatch({ home, projectRoots: [project2], dropzoneDirs: [], notify: async () => undefined, ledger: () => true });
+    fs.writeFileSync(file, JSON.stringify({ mcpServers: { existing: { command: 'node', args: ['server.js'] }, docs: { command: 'npx', args: ['-y', 'some-mcp@1.0.0'] } } }));
+    notes = []; rows = [];
+    return go;
+  };
+  afterEach(() => { if (project2) fs.rmSync(project2, { recursive: true, force: true }); });
+
+  it('delivery outlasts the window and the check answers after the cutoff but before collection: reported as not finished', async () => {
+    const go = await start();
+    let answeredAt = 0;
+    const t0 = Date.now();
+    const res = await go({ vetServers: async () => { await sleep(2750); answeredAt = Date.now() - t0; return LATE; } });
+    expect(res).toMatchObject({ notified: 1, errors: 0 });
+    // The fixture did what it says: the answer came after the 2500 ms window and before the 3000 ms delivery ended.
+    expect(answeredAt).toBeGreaterThanOrEqual(2700);
+    expect(answeredAt).toBeLessThan(3000);
+    const follow = notes.filter((n) => n.packageCheckFollowUp);
+    expect(follow).toHaveLength(1);
+    expect(follow[0].packageChecks).toEqual([{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.timedOut] }]);
+    expect(follow[0].severity).toBeUndefined();
+  }, 20_000);
+
+  it('control: an answer inside the window is used even when collection comes after the window', async () => {
+    const go = await start();
+    await go({ vetServers: async () => { await sleep(1000); return LATE; } });
+    const follow = notes.filter((n) => n.packageCheckFollowUp);
+    expect(follow).toHaveLength(1);
+    expect(follow[0]).toMatchObject({ severity: 'high', packageChecks: LATE });
+  }, 20_000);
+
+  it('a check that throws after the cutoff is reported as not finished, not as failed', async () => {
+    const go = await start();
+    await go({ vetServers: async () => { await sleep(2750); throw new Error('late'); } });
+    const follow = notes.filter((n) => n.packageCheckFollowUp);
+    expect(follow[0].packageChecks).toEqual([{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.timedOut] }]);
+  }, 20_000);
+});
