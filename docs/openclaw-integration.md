@@ -464,10 +464,15 @@ with an entry `enforce: false`) or when Hermes reports a looser posture than
 them; Hermes reporting a tighter one (for example enforcing on a box where the
 signed guard is off) is shown, not failed. When they agree, off and advisory are
 ⚠️ and enforce is ✅, as the old `Action guard config` row was; this row
-replaces it. A ❌ names `shieldcortex config --action-guard-disable` or
-`--action-guard-advisory` only when that rewrites the signed posture onto the
-plugin entry (best effort, then a gateway restart) and turns nothing on;
-otherwise it names no posture command.
+replaces it. A ❌ names no posture command. Matching a stricter plane down
+to a signed off or advisory setting would turn protection down, and matching
+the signed setting up would turn a plane up; the row states both and names
+neither (#1037). `shieldcortex doctor --ai` holds to the same rule: while this
+row fails, or when the AI note cites it, the note never shows the model's own
+words. The hypothesis line is a fixed sentence, and the suggested command is one
+of `shieldcortex guard posture`, `shieldcortex guard posture --json`,
+`shieldcortex doctor` or `shieldcortex doctor --verbose`; anything else is
+replaced with `shieldcortex doctor --verbose`.
 `shieldcortex guard posture` prints the same reading (exit 0 when the planes
 agree, 4 when they disagree, `--json` for machine output) and writes nothing.
 Both read files and self-reports: OpenClaw reads its entry at gateway start, so

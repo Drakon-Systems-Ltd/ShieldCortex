@@ -540,6 +540,12 @@ function report(answer: ReachAnswer, log: (l: string) => void): { code: number; 
 export const GUARD_POSTURE_MISMATCH_EXIT = 4;
 
 function runGuardPosture(args: string[], opts: { home?: string }): number {
+  // #1037: doctor's posture row names `shieldcortex guard posture --help`.
+  // Honoured only on its own; it reads nothing and writes nothing.
+  if (args.length === 1 && (args[0] === '--help' || args[0] === '-h')) {
+    console.log(GUARD_HELP);
+    return 0;
+  }
   const unexpected = args.filter((a) => a !== '--json');
   if (unexpected.length > 0) {
     console.error(

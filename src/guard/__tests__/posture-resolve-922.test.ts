@@ -352,20 +352,35 @@ describe('#922 guardPostureRow — status and honest fixes', () => {
     for (const row of [off, adv]) expect(row.fix ?? '').not.toMatch(ENABLING);
   });
 
-  it('a mismatch whose fix turns nothing on names the signed setter: signed off, plugin enforce', () => {
+  const LOOSENING = /`[^`]*(--action-guard-(disable|advisory)|guard posture (off|advisory))[^`]*`/;
+
+  it('#1037: signed off + plugin enforce FAILs and names no loosening command', () => {
     const row = guardPostureRow(resolvePlanePostures(inputs({ openclaw: { state: 'ok', raw: entry({ actionGuard: { enabled: true } }) } })));
     expect(row.status).toBe('fail');
-    expect(row.fix).toMatch(/Run `shieldcortex config --action-guard-disable`/);
-    expect(row.fix).toMatch(/restart the OpenClaw gateway/);
+    expect(row.fix).toMatch(/would turn Action Guard off on that plane/);
+    expect(row.fix).toMatch(/would turn a plane up/);
+    expect(row.fix).toMatch(/names no command/);
+    expect(row.fix).toMatch(/`shieldcortex guard posture --help`/);
+    expect(row.fix ?? '').not.toMatch(LOOSENING);
     expect(row.fix ?? '').not.toMatch(ENABLING);
+    expect(row.fix ?? '').not.toMatch(/--action-guard-disable/);
+    // The fix is a report whose backticked command is an inspection step: the
+    // human report must print its prose too (#1037 B1).
+    expect(row.fixNoteWithCommands).toBe(true);
   });
 
-  it('signed advisory, plugin enforce → the advisory setter', () => {
+  it('#1037: signed advisory + plugin enforce FAILs and names no advisory setter', () => {
     const row = guardPostureRow(resolvePlanePostures(inputs({
       signedRaw: { actionGuard: { enabled: true, enforce: false } },
       openclaw: { state: 'ok', raw: entry({ actionGuard: { enforce: true } }) },
     })));
-    expect(row.fix).toMatch(/Run `shieldcortex config --action-guard-advisory`/);
+    expect(row.status).toBe('fail');
+    expect(row.fix).toMatch(/drop that plane to advisory/);
+    expect(row.fix).toMatch(/catastrophic ops and changes to the guard itself are still held or blocked/);
+    expect(row.fix).toMatch(/would turn a plane up/);
+    expect(row.fix).toMatch(/names no command/);
+    expect(row.fix ?? '').not.toMatch(LOOSENING);
+    expect(row.fix ?? '').not.toMatch(/--action-guard-advisory/);
   });
 
   it('a mismatch whose fix would turn a plane up names no posture command (#634, Q2 pending)', () => {
@@ -377,6 +392,7 @@ describe('#922 guardPostureRow — status and honest fixes', () => {
     for (const shape of shapes) {
       const row = guardPostureRow(resolvePlanePostures(shape));
       expect(row.status).toBe('fail');
+      expect(row.fixNoteWithCommands).toBe(true);
       expect(row.fix ?? '').not.toMatch(ENABLING);
       expect(row.fix ?? '').not.toMatch(/--action-guard-(disable|advisory)/);
     }
@@ -395,6 +411,7 @@ describe('#922 guardPostureRow — status and honest fixes', () => {
       })));
       if (row.status !== 'pass') {
         expect(row.fix ?? '').not.toMatch(ENABLING);
+        expect(row.fix ?? '').not.toMatch(LOOSENING);
         checked += 1;
       }
     }

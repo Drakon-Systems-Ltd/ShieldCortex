@@ -512,6 +512,13 @@ export interface GuardPostureRow {
   fix?: string;
   /** #878: see DoctorReportItem.postureUnknown — the report prints this row's own fix. */
   postureUnknown?: true;
+  /**
+   * #1037: see DoctorReportItem.fixNoteWithCommands. A mismatch fix states
+   * the consequence of each direction and names no posture command; its one
+   * backticked command is an inspection step, so the report prints the prose
+   * as well as that command.
+   */
+  fixNoteWithCommands?: true;
 }
 
 const OFF_FIX = 'Action Guard is off. That is the default. Do not enable Action Guard from this warning. Do not add a webhook.';
@@ -521,10 +528,10 @@ const HERMES_SOURCE_NOTE =
   'Hermes takes its posture from SHIELDCORTEX_ENFORCE in the Hermes gateway environment, not from config.json; no ShieldCortex command changes it today.';
 
 /**
- * The fix for a hook/plugin mismatch. A `$` command only when it can turn
- * nothing on: the signed posture is off or advisory AND no plane is looser
- * than it. The command is the existing signed setter, which mirrors the same
- * value onto the OpenClaw plugin entry.
+ * The fix for a hook/plugin mismatch. Never a single command that turns
+ * protection down (#1037): restoring a signed off/advisory value onto a
+ * stricter plane would loosen that plane, and raising the signed setting
+ * to the stricter plane would turn a plane up. State both. Name neither.
  */
 function mismatchFix(report: PostureReport): string {
   const s = report.signed;
@@ -535,13 +542,17 @@ function mismatchFix(report: PostureReport): string {
   const compared = report.planes.filter((p) => p.posture !== null);
   const noneLooser = compared.every((p) => (p.values ?? [p.posture as PlanePosture]).every((v) => POSTURE_RANK[v] >= POSTURE_RANK[s]));
   const hermesNote = report.hermesLooser ? ` ${HERMES_SOURCE_NOTE}` : '';
+  const help = '`shieldcortex guard posture --help` lists where each plane reads its posture.';
   if (report.nodeMismatch && noneLooser && (s === 'off' || s === 'advisory')) {
-    const cmd = s === 'off' ? 'shieldcortex config --action-guard-disable' : 'shieldcortex config --action-guard-advisory';
-    return `Run \`${cmd}\` to put the signed posture (${s}) back on the OpenClaw plugin entry, then restart the OpenClaw gateway. ` +
-      `It turns nothing on.${hermesNote}`;
+    const down = s === 'off'
+      ? 'Matching the stricter plane down to the signed setting would turn Action Guard off on that plane.'
+      : 'Matching the stricter plane down to the signed setting would drop that plane to advisory ' +
+        '(ordinary dangerous ops log but are not gated; catastrophic ops and changes to the guard itself are still held or blocked).';
+    return `${down} Matching the signed setting up to the stricter plane would turn a plane up. ` +
+      `This row names no command. ${help}${hermesNote}`;
   }
   return `The signed posture is ${s}. Putting every plane on it would turn a plane up, so this row names no command: ` +
-    'decide which posture you want. `shieldcortex guard posture --help` lists where each plane reads its posture.' +
+    `decide which posture you want. ${help}` +
     hermesNote;
 }
 
@@ -576,6 +587,7 @@ export function guardPostureRow(report: PostureReport): GuardPostureRow {
       status: 'fail',
       message: `planes disagree — ${words}. One posture must hold on every plane.`,
       fix: mismatchFix(report),
+      fixNoteWithCommands: true,
     };
   }
   const graded = report.verdict === 'none' ? report.graded : report.reference ?? report.graded;

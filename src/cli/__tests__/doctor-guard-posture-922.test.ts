@@ -11,14 +11,22 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { LIVE, NOW, hermesPluginArtefacts, reportBody, snapshot, writeReport } from '../../posture/__tests__/self-report-fixture.js';
+import {
+  AI_POSTURE_READ_ONLY_COMMANDS,
+  AI_POSTURE_SAFE_COMMAND,
+  AI_POSTURE_SAFE_HYPOTHESIS,
+} from '../../defence/iron-dome/doctor-explainer.js';
+import type { CheckResult } from '../doctor.js';
 
 type Doctor = typeof import('../doctor.js');
 type Config = typeof import('../../cloud/config.js');
 type HostTable = typeof import('../../setup/host-table.js');
+type Report = typeof import('../doctor-report.js');
 
 let doctor: Doctor;
 let config: Config;
 let hostTable: HostTable;
+let report: Report;
 let PROTECTED_ROOT_ENV: string;
 
 beforeAll(async () => {
@@ -26,6 +34,7 @@ beforeAll(async () => {
   config = await import('../../cloud/config.js');
   doctor = await import('../doctor.js');
   hostTable = await import('../../setup/host-table.js');
+  report = await import('../doctor-report.js');
 });
 
 let tmp: string;
@@ -139,13 +148,16 @@ describe('#922 doctor — one Action guard posture row', () => {
     expect(doctor.doctorExitCode([row])).not.toBe(0);
   });
 
-  it('signed off + plugin entry enabled:true FAILs with the signed setter, which turns nothing on', () => {
+  it('#1037: signed off + plugin entry enabled:true FAILs and does not suggest turning Guard off', () => {
     claudeHookWired();
     signed({ enabled: false });
     openclawEntry({ enabled: true, config: { actionGuard: { enabled: true } } });
     const row = doctor.checkGuardPosture();
     expect(row.status).toBe('fail');
-    expect(row.fix).toMatch(/`shieldcortex config --action-guard-disable`/);
+    expect(row.fix).toMatch(/would turn Action Guard off on that plane/);
+    expect(row.fix).toMatch(/names no command/);
+    expect(row.fix ?? '').not.toMatch(/--action-guard-disable/);
+    expect(row.fix ?? '').not.toMatch(/`[^`]*(--action-guard-(disable|advisory)|guard posture (off|advisory))[^`]*`/);
   });
 
   it('Hermes self-report looser than the hook FAILs; tighter on a default box warns (Q4 pending)', () => {
@@ -201,5 +213,312 @@ describe('#922 doctor — header says Guard mixed iff the posture row FAILs', ()
     signed({ enabled: true, enforce: false });
     openclawEntry({ enabled: true, config: {} });
     expect(header()).toContain('Guard advisory');
+  });
+});
+
+/**
+ * #1037: the row must name both consequences where the operator reads it, and
+ * nothing doctor prints — the human report or the --ai section — may prescribe
+ * a command that changes a plane's posture. Asserting on `row.fix` alone does
+ * not prove this: the report renders a fix with a backticked command as the
+ * command only unless the row keeps its prose.
+ */
+describe('#1037 doctor — the posture mismatch as the operator sees it', () => {
+  const POSTURE_SETTER = /--action-guard-[a-z]|guard posture (off|advisory|enforce)|SHIELDCORTEX_ENFORCE\s*=/;
+
+  const mismatches: Array<[string, () => void, RegExp]> = [
+    ['signed off, plugin entry enabling', () => {
+      claudeHookWired();
+      signed({ enabled: false });
+      openclawEntry({ enabled: true, config: { actionGuard: { enabled: true } } });
+    }, /would turn Action Guard off on that plane/],
+    ['signed advisory, plugin entry enforcing', () => {
+      claudeHookWired();
+      signed({ enabled: true, enforce: false });
+      openclawEntry({ enabled: true, config: { actionGuard: { enforce: true } } });
+    }, /would drop that plane to advisory/],
+  ];
+
+  function rendered(verbose: boolean): string {
+    const display = report.sanitiseDoctorRowsForDisplay([doctor.checkGuardPosture()]);
+    return report.formatDoctorReport(display, {
+      verbose,
+      width: 80,
+      nextCommand: report.nextCommandForFailures(display),
+    }).join('\n');
+  }
+
+  describe.each([false, true])('formatDoctorReport (verbose=%s)', (verbose) => {
+    it.each(mismatches)('%s: both consequences survive rendering and no posture command is prescribed', (_name, arrange, down) => {
+      arrange();
+      expect(doctor.checkGuardPosture().status).toBe('fail');
+      const text = rendered(verbose);
+      const flat = text.replace(/\s+/g, ' ');
+      expect(flat).toMatch(down);
+      expect(flat).toMatch(/Matching the signed setting up to the stricter plane would turn a plane up/);
+      expect(flat).toMatch(/This row names no command/);
+      const commands = text.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('$ '));
+      // The row's inspection step, then NEXT. Both read-only.
+      expect(commands).toEqual(['$ shieldcortex guard posture --help', '$ shieldcortex doctor --verbose']);
+      expect(text).not.toMatch(POSTURE_SETTER);
+    });
+  });
+
+  const reply = (suggestedCommand: string, hypothesis = 'The OpenClaw plugin entry overrides the signed setting.') =>
+    JSON.stringify({ hypothesis, citedLabels: ['Action guard posture'], suggestedCommand, confidence: 'high' });
+
+  it.each(mismatches)('%s: --ai never prints a posture-changing suggestion', async (_name, arrange) => {
+    arrange();
+    const row = doctor.checkGuardPosture();
+    expect(row.status).toBe('fail');
+    for (const unsafe of [
+      'shieldcortex config --action-guard-disable',
+      'shieldcortex config --action-guard-advisory',
+      'shieldcortex config --action-guard-enforce',
+      'npx shieldcortex config --ACTION-GUARD-DISABLE',
+      'openclaw config set plugins.entries.shieldcortex-realtime.config.actionGuard.enabled false',
+      'openclaw plugins disable shieldcortex-realtime',
+      'SHIELDCORTEX_ENFORCE=0 hermes gateway restart',
+    ]) {
+      const invoke = jest.fn(async () => reply(unsafe));
+      const { lines, outcome } = await doctor.runDoctorAiSection([row], { invoke });
+      expect(invoke).toHaveBeenCalledTimes(1);
+      const text = lines.join('\n');
+      expect(text).not.toContain(unsafe);
+      expect(text).not.toMatch(POSTURE_SETTER);
+      expect(outcome.result?.suggestedCommand).toBe('shieldcortex doctor --verbose');
+      expect(text).toContain('suggested next command:');
+      expect(text).toContain('shieldcortex doctor --verbose');
+    }
+  });
+
+  it.each([
+    'shieldcortex guard posture',
+    'shieldcortex guard posture --json',
+    'shieldcortex doctor',
+    'shieldcortex doctor --verbose',
+  ])('--ai still prints read-only inspection guidance: %s', async (safe) => {
+    mismatches[0][1]();
+    const row = doctor.checkGuardPosture();
+    const invoke = jest.fn(async () => reply(safe));
+    const { lines, outcome } = await doctor.runDoctorAiSection([row], { invoke });
+    expect(outcome.result?.suggestedCommand).toBe(safe);
+    expect(lines.join('\n')).toContain('suggested next command:');
+    expect(lines.join('\n')).toContain(safe);
+  });
+
+  /*
+   * #1037 r2 (Astra B2): for a posture finding the printed next step comes
+   * from a closed set of read-only inspection commands. Each command below
+   * reached the operator verbatim through the old denylist. Several of them
+   * match no denylist spelling at all, so only the closed set stops them.
+   */
+  it.each([
+    'hermes plugins disable shieldcortex',
+    'openclaw plugins "disable" shieldcortex-realtime',
+    'openclaw config set plugins.enabled false',
+    'openclaw --profile work plugins disable shieldcortex-realtime',
+    "openclaw plugins 'disable' shieldcortex-realtime",
+    'openclaw plugins dis\\able shieldcortex-realtime',
+    'shieldcortex guard posture; shieldcortex config --action-guard-disable',
+    'shieldcortex guard posture && hermes plugins disable shieldcortex',
+    'shieldcortex doctor --verbose | sh',
+    'shieldcortex guard posture $(hermes plugins disable shieldcortex)',
+    'env SHIELDCORTEX_ENFORCE=0 hermes gateway restart',
+    'sed -i s/true/false/ ~/.openclaw/openclaw.json',
+    'shieldcortex repair',
+  ])('--ai replaces any command outside the read-only set: %s', async (unsafe) => {
+    for (const [, arrange] of mismatches) {
+      arrange();
+      const row = doctor.checkGuardPosture();
+      expect(row.status).toBe('fail');
+      const invoke = jest.fn(async () => reply(unsafe));
+      const { lines, outcome } = await doctor.runDoctorAiSection([row], { invoke });
+      expect(invoke).toHaveBeenCalledTimes(1);
+      const text = lines.join('\n');
+      expect(text).not.toContain(unsafe);
+      expect(text).not.toMatch(/plugins? +["']?dis|config set|SHIELDCORTEX_ENFORCE=|--action-guard-/);
+      expect(outcome.result?.suggestedCommand).toBe(AI_POSTURE_SAFE_COMMAND);
+      expect(text).toContain('suggested next command:');
+      expect(text).toContain(AI_POSTURE_SAFE_COMMAND);
+      // The model's hypothesis is never shown on a posture-governed result,
+      // however descriptive it is.
+      expect(outcome.result?.hypothesis).toBe(AI_POSTURE_SAFE_HYPOTHESIS);
+    }
+  });
+
+  it('--ai normalises whitespace before matching the read-only set', async () => {
+    mismatches[0][1]();
+    const row = doctor.checkGuardPosture();
+    const invoke = jest.fn(async () => reply('  shieldcortex   guard\tposture  '));
+    const { lines, outcome } = await doctor.runDoctorAiSection([row], { invoke });
+    expect(outcome.result?.suggestedCommand).toBe('shieldcortex guard posture');
+    expect(lines.join('\n')).toContain('suggested next command:');
+  });
+
+  /*
+   * #1037 r2 (Astra B2), the hypothesis channel: with a safe command, a
+   * hypothesis that prescribes a posture change in prose is replaced with a
+   * fixed sentence. The citations and confidence stay; the prescription does not.
+   * Since the adjudicated fix every hypothesis is replaced on a posture-governed
+   * result, not only a prescriptive one (see the never-prints test below).
+   */
+  const ZWSP = String.fromCharCode(0x200b);
+  const CYRILLIC_I = String.fromCharCode(0x456);
+  it.each([
+    'Run hermes plugins disable shieldcortex to align the planes.',
+    'Run `shieldcortex config --action-guard-disable` to make the planes agree.',
+    'The fix is openclaw plugins "disable" shieldcortex-realtime.',
+    'Disable the Hermes plugin so the planes agree.',
+    'Disabling the ShieldCortex plugin in Hermes would make the planes agree.',
+    'Removing shieldcortex-realtime from the OpenClaw plugins list would align them.',
+    'Turn the OpenClaw plugin entry off to match the signed setting.',
+    'Switch the Claude Code hook to advisory so it matches the plugin.',
+    'Setting SHIELDCORTEX_ENFORCE=0 in the Hermes gateway environment would align it.',
+    'Set enforce false on the plugin entry.',
+    'Uninstall the OpenClaw plugin.',
+    'Stop the OpenClaw plugin from gating.',
+    'Use openclaw config set plugins.enabled false and restart.',
+    `Dis${ZWSP}able the Hermes plugin so the planes agree.`,
+    `D${CYRILLIC_I}sable the Hermes plugin so the planes agree.`,
+  ])('--ai replaces a hypothesis that prescribes a posture change: %s', async (hypothesis) => {
+    mismatches[0][1]();
+    const row = doctor.checkGuardPosture();
+    const invoke = jest.fn(async () => reply('shieldcortex guard posture', hypothesis));
+    const { lines, outcome } = await doctor.runDoctorAiSection([row], { invoke });
+    expect(invoke).toHaveBeenCalledTimes(1);
+    const text = lines.join('\n');
+    expect(outcome.result?.hypothesis).toBe(AI_POSTURE_SAFE_HYPOTHESIS);
+    expect(outcome.result?.suggestedCommand).toBe('shieldcortex guard posture');
+    expect(outcome.result?.citedLabels).toEqual(['Action guard posture']);
+    expect(outcome.result?.confidence).toBe('high');
+    expect(text).not.toContain(hypothesis);
+    expect(text).toContain(AI_POSTURE_SAFE_HYPOTHESIS);
+    expect(text).not.toMatch(POSTURE_SETTER);
+    expect(text).not.toMatch(/disable|uninstall|remov|turn .*off|SHIELDCORTEX_ENFORCE/i);
+  });
+
+  it('the fixed posture hypothesis itself prescribes nothing', () => {
+    expect(AI_POSTURE_SAFE_HYPOTHESIS).not.toMatch(/`|--|\brun\b|disable|uninstall|remov|turn|off\b|advisory|SHIELDCORTEX_ENFORCE/i);
+  });
+
+  /*
+   * #1037 adjudication: a denylist cannot tell a prescription from a
+   * description ("align the plugin with the signed setting" turns it off when
+   * the signed setting is off), so while the posture row fails the model's
+   * hypothesis is never printed, whatever it says. The line under the
+   * `Hypothesis (` header is the fixed sentence and the command is from the
+   * closed read-only set. Each prescriptive sentence below printed verbatim
+   * before this fix; the last three are descriptive and were kept verbatim.
+   */
+  const COMBINING_LOW_LINE = String.fromCharCode(0x332);
+  const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  function printedHypothesisLine(lines: string[]): string | undefined {
+    const printed = strip(lines.join('\n')).split('\n');
+    const header = printed.findIndex((l) => l.trim().startsWith('Hypothesis ('));
+    return header === -1 ? undefined : printed[header + 1]?.trim();
+  }
+  it.each([
+    'For the OpenClaw plugin, use advisory instead of enforcement.',
+    'Ensure the Hermes ShieldCortex plugin is disabled so the planes agree.',
+    'The Hermes plugin should be disabled to align the planes.',
+    'The OpenClaw plugin should be disabled so the planes agree.',
+    'The hook should be turned off.',
+    'The hook should be switched to advisory.',
+    'The OpenClaw plugin should be off.',
+    'The hook ought to be advisory.',
+    'Advisory on the Claude Code hook would make the planes agree.',
+    'SHIELDCORTEX_ENFORCE should be 0 so Hermes matches the signed setting.',
+    'Opt Hermes out of enforcement so the planes agree.',
+    'Shut the OpenClaw plugin down so the planes agree.',
+    'Align the OpenClaw plugin with the signed setting so the planes agree.',
+    `Dis${COMBINING_LOW_LINE}able the Hermes plugin so the planes agree.`,
+    'The OpenClaw plugin entry overrides the signed setting.',
+    'The OpenClaw plugin entry is stricter than the signed config, so the two planes disagree.',
+    'Hermes reads its posture from the gateway environment, not from config.json, so it can differ from the hook.',
+  ])("--ai never prints the model's hypothesis for a failing posture row: %s", async (hypothesis) => {
+    for (const [, arrange] of mismatches) {
+      arrange();
+      const row = doctor.checkGuardPosture();
+      expect(row.status).toBe('fail');
+      const invoke = jest.fn(async () => reply('shieldcortex guard posture', hypothesis));
+      const { lines, outcome } = await doctor.runDoctorAiSection([row], { invoke });
+      expect(invoke).toHaveBeenCalledTimes(1);
+      expect(outcome.result?.hypothesis).toBe(AI_POSTURE_SAFE_HYPOTHESIS);
+      expect(printedHypothesisLine(lines)).toBe(AI_POSTURE_SAFE_HYPOTHESIS);
+      expect(strip(lines.join('\n'))).not.toContain(hypothesis);
+      expect(AI_POSTURE_READ_ONLY_COMMANDS).toContain(outcome.result?.suggestedCommand);
+      expect(outcome.result?.citedLabels).toEqual(['Action guard posture']);
+      expect(outcome.result?.confidence).toBe('high');
+    }
+  });
+
+  /*
+   * Which results the read-only set governs: the posture row is failing
+   * (whatever the model cites), or the model cites the posture row (whatever
+   * its status). A default-off box shows the posture row as a warn beside
+   * every unrelated failure, so a warn the model does not cite leaves
+   * unrelated advice alone — the denylist still applies there.
+   */
+  const dbFail: CheckResult = { label: 'Database', status: 'fail', message: 'schema is behind by 2 migrations' };
+  const citing = (labels: string[], suggestedCommand: string, hypothesis = 'The database schema is behind.') =>
+    JSON.stringify({ hypothesis, citedLabels: labels, suggestedCommand, confidence: 'medium' });
+
+  it('a failing posture row governs the result even when the model cites only another finding', async () => {
+    for (const [, arrange] of mismatches) {
+      arrange();
+      const row = doctor.checkGuardPosture();
+      expect(row.status).toBe('fail');
+      const invoke = jest.fn(async () => citing(['Database'], 'hermes plugins "disable" shieldcortex', 'Run hermes plugins disable shieldcortex first.'));
+      const { lines, outcome } = await doctor.runDoctorAiSection([row, dbFail], { invoke });
+      expect(outcome.result?.citedLabels).toEqual(['Database']);
+      expect(outcome.result?.suggestedCommand).toBe(AI_POSTURE_SAFE_COMMAND);
+      expect(AI_POSTURE_READ_ONLY_COMMANDS).toContain(outcome.result?.suggestedCommand);
+      expect(outcome.result?.hypothesis).toBe(AI_POSTURE_SAFE_HYPOTHESIS);
+      expect(printedHypothesisLine(lines)).toBe(AI_POSTURE_SAFE_HYPOTHESIS);
+      expect(lines.join('\n')).not.toMatch(/hermes plugins/);
+    }
+  });
+
+  it('a warn posture row the model cites governs the result too', async () => {
+    claudeHookWired();
+    const row = doctor.checkGuardPosture();
+    expect(row.status).toBe('warn');
+    const invoke = jest.fn(async () => citing(['Action guard posture', 'Database'], 'hermes plugins disable shieldcortex'));
+    const { outcome } = await doctor.runDoctorAiSection([row, dbFail], { invoke });
+    expect(outcome.result?.suggestedCommand).toBe(AI_POSTURE_SAFE_COMMAND);
+  });
+
+  it('a default-off warn posture row the model does not cite leaves unrelated advice alone', async () => {
+    claudeHookWired();
+    const row = doctor.checkGuardPosture();
+    expect(row.status).toBe('warn');
+    const invoke = jest.fn(async () => citing(['Database'], 'shieldcortex repair'));
+    const { outcome } = await doctor.runDoctorAiSection([row, dbFail], { invoke });
+    expect(outcome.result?.suggestedCommand).toBe('shieldcortex repair');
+    expect(outcome.result?.hypothesis).toBe('The database schema is behind.');
+  });
+
+  it.each([
+    'hermes plugins disable shieldcortex',
+    'openclaw plugins "disable" shieldcortex-realtime',
+    'openclaw config set plugins.enabled false',
+    'openclaw --profile work plugins disable shieldcortex-realtime',
+  ])('outside the read-only set the denylist still replaces a plane-changing command: %s', async (unsafe) => {
+    claudeHookWired();
+    const row = doctor.checkGuardPosture();
+    const invoke = jest.fn(async () => citing(['Database'], unsafe));
+    const { lines, outcome } = await doctor.runDoctorAiSection([row, dbFail], { invoke });
+    expect(outcome.result?.suggestedCommand).toBe(AI_POSTURE_SAFE_COMMAND);
+    expect(lines.join('\n')).not.toContain(unsafe);
+  });
+
+  it('outside the read-only set a hypothesis naming a plane-changing command is not shown', async () => {
+    claudeHookWired();
+    const row = doctor.checkGuardPosture();
+    const invoke = jest.fn(async () => citing(['Database'], 'shieldcortex repair', 'Run hermes plugins "disable" shieldcortex first.'));
+    const { lines, outcome } = await doctor.runDoctorAiSection([row, dbFail], { invoke });
+    expect(outcome.result).toBeNull();
+    expect(lines.join('\n')).not.toMatch(/hermes plugins/);
   });
 });
