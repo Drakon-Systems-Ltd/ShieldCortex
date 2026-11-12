@@ -313,7 +313,7 @@ export interface AgentConfigChangeNotification {
   changeCount: number;
   /** `high`: a traffic/credential redirect, sandbox or trust weakening, or a planted instruction file. */
   severity?: 'high';
-  /** #889: report-only package check of a newly added MCP server that launches a package. */
+  /** #889: report-only package check of an added or changed MCP server that launches a package. */
   packageChecks?: Array<{ name: string; malicious: boolean; reasons: string[] }>;
   /** #889: the package-check follow-up to a change notice already sent for this file, not a second change. */
   packageCheckFollowUp?: true;

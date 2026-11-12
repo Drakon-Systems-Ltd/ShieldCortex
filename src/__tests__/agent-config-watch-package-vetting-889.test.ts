@@ -465,3 +465,26 @@ describe('#1054 — the webhook payload of a package-check follow-up carries the
     expect(empty).not.toHaveProperty('packageChecks');
   });
 });
+
+// #1054 (P2 source-head panel, Daybreak 5 / Grok 4): the text said the watch
+// checks MCP servers it reports as "added"; the code has always checked the
+// ones it reports as added OR changed. The text now says so; this pins the code.
+describe('#1054 — the watch checks an MCP server entry it reports as changed, not only added', () => {
+  it('an existing entry edited to launch a package is handed to the check, and its finding follows the change notice', async () => {
+    await run(); // baseline: `existing` runs `node server.js`
+    write({ mcpServers: { existing: { command: 'npx', args: ['-y', 'some-mcp@1.0.0'] } } });
+    let seen: Array<{ name: string; entry: unknown }> = [];
+    await run({ vetServers: async (servers) => { seen = servers; return [{ name: 'existing', malicious: false, reasons: ['published 2 days ago'] }]; } });
+    expect(seen).toEqual([{ name: 'existing', entry: { command: 'npx', args: ['-y', 'some-mcp@1.0.0'] } }]);
+    expect(notes[0].changes).toEqual([{ label: 'MCP server changed', name: 'existing' }]);
+    expect(notes[1]).toMatchObject({ packageCheckFollowUp: true, packageChecks: [{ name: 'existing', malicious: false, reasons: ['published 2 days ago'] }] });
+  });
+
+  it('addedServerEntries returns entries for both kinds and none for a removal', () => {
+    write({ mcpServers: { a: { command: 'uvx', args: ['tool'] }, b: { command: 'npx', args: ['pkg'] } } });
+    const spec = specForPath(mcpFile(), home, [project])!;
+    const change = (kind: 'added' | 'changed' | 'removed', name: string) => ({ keyPath: 'mcpServers', section: 'mcpServers' as const, kind, name });
+    expect(addedServerEntries(mcpFile(), spec, [change('added', 'a'), change('changed', 'b')]).map((e) => e.name)).toEqual(['a', 'b']);
+    expect(addedServerEntries(mcpFile(), spec, [change('removed', 'a')])).toEqual([]);
+  });
+});

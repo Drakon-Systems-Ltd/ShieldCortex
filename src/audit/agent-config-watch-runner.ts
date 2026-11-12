@@ -94,7 +94,7 @@ export async function main(overrides: { channels?: NotifyChannel[]; projectRoot?
     projectRoots: resolveProjectRoots(config, root),
     notify: (n: AgentConfigNotification) => send(buildAgentConfigChangeNotification(n)),
     ledger: makeAgentConfigLedger(logAudit),
-    // #889: report-only package check of newly added MCP servers (npx/uvx), bounded by the
+    // #889: report-only package check of added or changed MCP servers (npx/uvx), bounded by the
     // window the watch hands it (never more than 2 s), so its own lookups end as "unchecked: timed out".
     vetServers: async (servers, hint) => {
       const { vetMcpServers, normalisePackageVettingConfig } = await import('../defence/iron-dome/package-vetting.js');

@@ -941,7 +941,7 @@ export interface AgentConfigNotification {
   changeCount: number;
   /** `high` when any change is a high-severity kind (those are listed first). */
   severity?: ChangeSeverity;
-  /** #889: report-only package check of newly added MCP servers that launch a package. */
+  /** #889: report-only package check of added or changed MCP servers that launch a package. */
   packageChecks?: Array<{ name: string; malicious: boolean; reasons: string[] }>;
   /**
    * #889: this is the package-check follow-up to a change notice already
@@ -963,7 +963,7 @@ export interface AgentConfigWatchDeps {
   /** Drop directories checked for planted instruction files (default `defaultDropzoneDirs(home)`). */
   dropzoneDirs?: string[];
   /**
-   * #889: vet newly added MCP servers whose command launches a package
+   * #889: vet added or changed MCP servers whose command launches a package
    * (`npx`/`uvx` …). Report-only and off the critical path: it starts beside
    * delivery, and nothing in delivering, recording or baselining the change
    * waits for it, so it can never change what is baselined, delivered or
@@ -987,7 +987,7 @@ const VET_SERVERS_CEILING_MS = 2500;
 const VET_SERVERS_BUDGET_SHARE = 0.5;
 /** Head start the check's own budget leaves before the window closes on it. */
 const VET_SERVERS_GRACE_MS = 250;
-/** Changed files whose added servers are checked in one run (each check runs concurrently). */
+/** Changed files whose added or changed servers are checked in one run (each check runs concurrently). */
 const VET_SERVERS_MAX_FILES = 5;
 
 /** Fixed explanations for a package check that did not produce an answer. */
@@ -1275,7 +1275,7 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
 
   /**
    * #889, report-only: STARTS the package check of MCP servers each changed
-   * file added, for all files at once, and returns at once (synchronously):
+   * file added or changed, for all files at once, and returns at once (synchronously):
    * delivery never waits for it. The check runs inside one window that closes
    * by {@link VET_SERVERS_BUDGET_SHARE} of the watch budget (and never later
    * than {@link VET_SERVERS_CEILING_MS}). Whatever the check does — answers,
