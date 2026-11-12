@@ -467,10 +467,12 @@ signed guard is off) is shown, not failed. When they agree, off and advisory are
 replaces it. A ❌ names no posture command. Matching a stricter plane down
 to a signed off or advisory setting would turn protection down, and matching
 the signed setting up would turn a plane up; the row states both and names
-neither (#1037). `shieldcortex doctor --ai` holds to the same rule: a suggested
-command that would change a posture (`shieldcortex config --action-guard-*`, the
-OpenClaw plugin entry, `SHIELDCORTEX_ENFORCE=`) is replaced with
-`shieldcortex doctor --verbose`.
+neither (#1037). `shieldcortex doctor --ai` holds to the same rule: while this
+row fails, or when the AI note cites it, the suggested command is one of
+`shieldcortex guard posture`, `shieldcortex guard posture --json`,
+`shieldcortex doctor` or `shieldcortex doctor --verbose`, and anything else is
+replaced with `shieldcortex doctor --verbose`. A hypothesis that reads as a step
+to take is replaced with a fixed sentence.
 `shieldcortex guard posture` prints the same reading (exit 0 when the planes
 agree, 4 when they disagree, `--json` for machine output) and writes nothing.
 Both read files and self-reports: OpenClaw reads its entry at gateway start, so

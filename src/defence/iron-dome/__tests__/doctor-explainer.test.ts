@@ -26,6 +26,9 @@ import {
   capFindings,
   DOCTOR_EXPLAINER_SYSTEM_PROMPT,
   AI_POSTURE_SAFE_COMMAND,
+  AI_POSTURE_SAFE_HYPOTHESIS,
+  AI_POSTURE_READ_ONLY_COMMANDS,
+  POSTURE_FINDING_LABEL,
   MAX_FINDINGS,
   type DoctorFinding,
   type ModelInvoker,
@@ -252,6 +255,129 @@ describe('#1037: a suggestion never changes Action Guard posture', () => {
 
   it('the system prompt tells the model the same rule', () => {
     expect(DOCTOR_EXPLAINER_SYSTEM_PROMPT).toMatch(/never a command that changes Action Guard's posture/);
+  });
+});
+
+describe('#1037 r2: a posture finding gets a read-only next step from a closed set', () => {
+  const postureFail: DoctorFinding = {
+    label: POSTURE_FINDING_LABEL,
+    status: 'fail',
+    message: 'planes disagree — Claude Code hook off, OpenClaw plugin enforce. One posture must hold on every plane.',
+  };
+  const postureWarn: DoctorFinding = { ...postureFail, status: 'warn', message: 'off on the one compared plane (Claude Code hook)' };
+  const known = [POSTURE_FINDING_LABEL, failFinding.label];
+  const reply = (suggestedCommand: string, hypothesis = 'The plugin entry overrides the signed setting.', cited = [POSTURE_FINDING_LABEL]) =>
+    JSON.stringify({ hypothesis, citedLabels: cited, suggestedCommand, confidence: 'medium' });
+
+  it('the label is the one doctor gives its posture row', async () => {
+    const { GUARD_POSTURE_LABEL } = await import('../../../guard/posture-switch.js');
+    expect(POSTURE_FINDING_LABEL).toBe(GUARD_POSTURE_LABEL);
+  });
+
+  it('the read-only set is small, closed and free of quotes and shell syntax', () => {
+    expect([...AI_POSTURE_READ_ONLY_COMMANDS].sort()).toEqual([
+      'shieldcortex doctor',
+      'shieldcortex doctor --verbose',
+      'shieldcortex guard posture',
+      'shieldcortex guard posture --json',
+    ]);
+    expect(AI_POSTURE_READ_ONLY_COMMANDS).toContain(AI_POSTURE_SAFE_COMMAND);
+    for (const c of AI_POSTURE_READ_ONLY_COMMANDS) expect(c).toMatch(/^[a-z -]+$/);
+  });
+
+  it.each([
+    'hermes plugins disable shieldcortex',
+    'openclaw plugins "disable" shieldcortex-realtime',
+    'openclaw config set plugins.enabled false',
+    'openclaw --profile work plugins disable shieldcortex-realtime',
+    'shieldcortex config --action-guard-disable',
+    'shieldcortex guard posture; hermes plugins disable shieldcortex',
+    'shieldcortex guard posture --json > /dev/null && openclaw plugins disable shieldcortex-realtime',
+    'shieldcortex repair',
+    'SHIELDCORTEX GUARD POSTURE',
+  ])('a cited posture finding: replaces %s', (unsafe) => {
+    const r = parseDoctorExplainerResponse(reply(unsafe), known);
+    expect(r?.suggestedCommand).toBe(AI_POSTURE_SAFE_COMMAND);
+    expect(r?.hypothesis).toBe('The plugin entry overrides the signed setting.');
+  });
+
+  it.each([...AI_POSTURE_READ_ONLY_COMMANDS])('a cited posture finding: keeps %s', (safe) => {
+    expect(parseDoctorExplainerResponse(reply(safe), known)?.suggestedCommand).toBe(safe);
+    expect(parseDoctorExplainerResponse(reply(` ${safe.replace(/ /g, '   ')} `), known)?.suggestedCommand).toBe(safe);
+  });
+
+  it.each([
+    'Run hermes plugins disable shieldcortex to align the planes.',
+    'Run `shieldcortex guard posture` and then pick a side.',
+    'Disable the Hermes plugin so the planes agree.',
+    'Turn the plugin entry off.',
+    'Set enforce: false on the plugin entry.',
+    'Setting SHIELDCORTEX_ENFORCE=0 would align Hermes.',
+    'Downgrade the hook to advisory.',
+  ])('a cited posture finding: replaces the hypothesis %s', (hypothesis) => {
+    const r = parseDoctorExplainerResponse(reply('shieldcortex guard posture', hypothesis), known);
+    expect(r).toEqual({
+      hypothesis: AI_POSTURE_SAFE_HYPOTHESIS,
+      citedLabels: [POSTURE_FINDING_LABEL],
+      suggestedCommand: 'shieldcortex guard posture',
+      confidence: 'medium',
+    });
+  });
+
+  it('postureFailing governs a result that cites only another finding', () => {
+    const raw = reply('hermes plugins "disable" shieldcortex', 'Run hermes plugins disable shieldcortex.', [failFinding.label]);
+    const r = parseDoctorExplainerResponse(raw, known, { postureFailing: true });
+    expect(r?.suggestedCommand).toBe(AI_POSTURE_SAFE_COMMAND);
+    expect(r?.hypothesis).toBe(AI_POSTURE_SAFE_HYPOTHESIS);
+    expect(r?.citedLabels).toEqual([failFinding.label]);
+  });
+
+  it('without a cited or failing posture finding, unrelated advice is untouched', () => {
+    const r = parseDoctorExplainerResponse(reply('shieldcortex repair', 'Restart never happened.', [failFinding.label]), known);
+    expect(r?.suggestedCommand).toBe('shieldcortex repair');
+    expect(r?.hypothesis).toBe('Restart never happened.');
+  });
+
+  it('runDoctorAiExplainer sets postureFailing from a failing posture row', async () => {
+    const invoke = jest.fn<ModelInvoker>().mockResolvedValue(
+      reply('shieldcortex repair', 'Run shieldcortex repair.', [failFinding.label]),
+    );
+    const out = await runDoctorAiExplainer([postureFail, failFinding], invoke);
+    expect(out.result?.suggestedCommand).toBe(AI_POSTURE_SAFE_COMMAND);
+    expect(out.result?.hypothesis).toBe(AI_POSTURE_SAFE_HYPOTHESIS);
+  });
+
+  it('runDoctorAiExplainer leaves a default-off warn posture row out of it unless cited', async () => {
+    const invoke = jest.fn<ModelInvoker>().mockResolvedValue(
+      reply('shieldcortex repair', 'The plugin regressed.', [failFinding.label]),
+    );
+    const out = await runDoctorAiExplainer([postureWarn, failFinding], invoke);
+    expect(out.result?.suggestedCommand).toBe('shieldcortex repair');
+    expect(out.result?.hypothesis).toBe('The plugin regressed.');
+  });
+});
+
+describe('#1037 r2: the denylist second layer reads through quoting', () => {
+  const known = [failFinding.label];
+  const reply = (suggestedCommand: string, hypothesis = 'The plugin regressed.') =>
+    JSON.stringify({ hypothesis, citedLabels: [failFinding.label], suggestedCommand, confidence: 'high' });
+
+  it.each([
+    'hermes plugins disable shieldcortex',
+    'hermes plugin uninstall shieldcortex',
+    'openclaw plugins "disable" shieldcortex-realtime',
+    "openclaw plugins 'disable' shieldcortex-realtime",
+    'openclaw plugins dis\\able shieldcortex-realtime',
+    'openclaw config set plugins.enabled false',
+    'openclaw --profile work plugins disable shieldcortex-realtime',
+    'openclaw --profile work config set plugins.entries.shieldcortex-realtime.enabled false',
+    'env SHIELDCORTEX_ENFORCE=0 hermes gateway restart',
+  ])('replaces %s', (unsafe) => {
+    expect(parseDoctorExplainerResponse(reply(unsafe), known)?.suggestedCommand).toBe(AI_POSTURE_SAFE_COMMAND);
+  });
+
+  it('drops a hypothesis that quotes a plane-changing verb', () => {
+    expect(parseDoctorExplainerResponse(reply('shieldcortex repair', 'Run hermes plugins "disable" shieldcortex.'), known)).toBeNull();
   });
 });
 

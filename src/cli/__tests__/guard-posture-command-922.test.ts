@@ -150,6 +150,26 @@ describe('#922 shieldcortex guard posture (read-only)', () => {
     },
   );
 
+  it.each([['--help'], ['-h']])(
+    '#1037: `guard posture %s` prints the guard help (exit 0) and writes nothing — doctor names this step',
+    async (arg) => {
+      claudeHookWired();
+      signed({ enabled: false });
+      openclawEntry({ enabled: true, config: { actionGuard: { enabled: true } } });
+      const before = snapshot(tmp);
+      expect(await run(arg)).toBe(0);
+      expect(out.join('\n')).toMatch(/Where each plane reads its posture \(guard posture changes none of them\)/);
+      expect(err).toEqual([]);
+      expect(snapshot(tmp)).toEqual(before);
+    },
+  );
+
+  it('`guard posture off --help` is still a usage error: help is honoured only on its own', async () => {
+    claudeHookWired();
+    expect(await run('off', '--help')).toBe(1);
+    expect(err.join('\n')).toMatch(/only reads; it takes no posture argument in this release \(got: off --help\)/);
+  });
+
   it('reading the posture leaves the whole tree byte-identical', async () => {
     claudeHookWired();
     signed({ enabled: false });
