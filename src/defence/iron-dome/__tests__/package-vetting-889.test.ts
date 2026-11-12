@@ -1275,11 +1275,12 @@ describe('release review round 2 B1 — installer option aliases, abbreviations 
     expect(parseInstallCommands(j('pipx', 'install', '-f', 'some-tool'))[0].customIndex).toBeUndefined();
   });
 
-  it('variables exported earlier in the command apply to later installs (review nits N1, N2)', () => {
+  it('version-selection variables exported earlier in the command apply to later installs; index variables do not (review nits N1, N2; #1054)', () => {
     expect(parseInstallCommands(j('export', 'NPM_CONFIG_TAG=beta;', 'npm', 'i', PKG))[0].versionOption).toBe('npm_config_tag');
     expect(parseInstallCommands(j('export', 'PIP_PRE=1', '&&', 'pip', 'install', 'some-pkg'))[0].versionOption).toBe('pip_pre');
     expect(parseInstallCommands(j('export', 'UV_PRERELEASE=allow;', 'uvx', 'some-tool'))[0].versionOption).toBe('uv_prerelease');
-    expect(parseInstallCommands(j('export', 'npm_config_registry=https://private.example;', 'npm', 'i', PKG))[0].customIndex).toBe(true);
+    // An exported index variable is not carried: the later install stays on the public path, where it is checked.
+    expect(parseInstallCommands(j('export', 'npm_config_registry=https://private.example;', 'npm', 'i', PKG))[0].customIndex).toBeUndefined();
     expect(parseInstallCommands(j('npm_config_include-staged=true', 'npm', 'i', PKG))[0].versionOption).toBe('npm_config_include-staged');
     // Controls: an unrelated export, and an export after the install, change nothing.
     expect(parseInstallCommands(j('export', 'FOO=1;', 'npm', 'i', PKG))[0].versionOption).toBeUndefined();
@@ -1605,74 +1606,133 @@ describe('release review nits — named remote specs and MCP entry env', () => {
   });
 });
 
-// #1054 (P2 source-head panel, Sol 2): a registry variable exported earlier in
-// the command was carried for the rest of it and never cleared, and a bare
-// `VAR=value` statement was carried as if it were exported. A custom index
-// means "no public lookup", so `export npm_config_registry=…; unset
-// npm_config_registry; npm install <pkg>` reported a public install as
-// `unchecked` without asking OSV at all. Carried index state now has to be
-// certain: exported by this command and not unset since.
-describe('#1054 — carried registry state is dropped when it is stale or uncertain', () => {
+// #1054 (P2 source-head panel, Sol 2; PR panel rounds 1 to 3; Fable ruling 12 Nov): an index
+// variable exported earlier in the command used to be carried to later statements, and every
+// repair of that carry needed another piece of shell behaviour. A custom index means "no public
+// lookup", so the carry is gone: an index variable counts only as a prefix on the install's own
+// statement, on the statement that launches a nested shell, or in an MCP entry's `env`. An install
+// after `export`, `unset`, `declare` or a bare assignment is on the public path, where it is checked.
+describe('#1054 — an index variable is never carried from one statement to the next', () => {
   const PKG = 'some-pkg';
   const REG = 'npm_config_registry=https://private.example';
+  const PIP = 'PIP_INDEX_URL=https://private.example/simple';
+  const UV = 'UV_INDEX_URL=https://private.example/simple';
   const custom = (command: string) => parseInstallCommands(command).map((r) => r.customIndex === true);
 
-  it('unset, export -n and declare +x take an exported registry variable away', () => {
+  it('an install after an exported index variable is not custom-index, for each installer family', () => {
+    expect(custom(j('export', `${REG};`, 'npm', 'install', PKG))).toEqual([false]);
+    expect(custom(j('export', REG, '&&', 'npx', PKG))).toEqual([false]);
+    expect(custom(j('export', `${PIP};`, 'pip', 'install', PKG))).toEqual([false]);
+    expect(custom(j('export', `${PIP};`, 'python3', '-m', 'pip', 'install', PKG))).toEqual([false]);
+    expect(custom(j('export', `${PIP};`, 'pipx', 'install', PKG))).toEqual([false]);
+    expect(custom(j('export', `${UV};`, 'uv', 'add', PKG))).toEqual([false]);
+    expect(custom(j('export', `${UV};`, 'uvx', PKG))).toEqual([false]);
+    expect(custom(j('declare', '-x', `${REG};`, 'npm', 'install', PKG))).toEqual([false]);
+    expect(custom(j('typeset', '-x', `${PIP};`, 'pip', 'install', PKG))).toEqual([false]);
+    // Assigned first and exported by name afterwards: the same.
+    expect(custom(j(`${REG};`, 'export', 'npm_config_registry;', 'npm', 'install', PKG))).toEqual([false]);
+    expect(custom(j('export', `${REG};`, 'npm_config_registry=https://other.example;', 'npm', 'install', PKG))).toEqual([false]);
+    // Beside a version-selection variable in the same export: the version is carried, the index is not.
+    expect(custom(j('export', REG, 'NPM_CONFIG_TAG=beta;', 'npm', 'i', PKG))).toEqual([false]);
+  });
+
+  it('the same when the exported value is a variable expansion', () => {
+    expect(custom(j('export', 'npm_config_registry=$PRIVATE_REGISTRY;', 'npm', 'install', PKG))).toEqual([false]);
+    expect(custom(j('export', 'PIP_INDEX_URL="${PRIVATE_INDEX}";', 'pip', 'install', PKG))).toEqual([false]);
+    expect(custom(j('export', 'UV_INDEX_URL=$PRIVATE_INDEX', '&&', 'uv', 'add', PKG))).toEqual([false]);
+  });
+
+  it('an outer export does not reach a nested shell install', () => {
+    expect(custom(`export ${REG}; sh -c 'npm install ${PKG}'`)).toEqual([false]);
+    expect(custom(`export ${PIP}; bash -c 'pip install ${PKG}'`)).toEqual([false]);
+    expect(custom(`export ${UV} && sh -c 'uv add ${PKG}'`)).toEqual([false]);
+    expect(custom(`export ${PIP}; sh -c 'python -m pip install ${PKG}'`)).toEqual([false]);
+  });
+
+  it('end to end: a known-malicious package installed after an exported index variable is looked up and blocked', async () => {
+    for (const command of [
+      j('export', `${REG};`, 'npm', 'install', `${MAL_NAME}@1.0.3`),
+      j('export', 'npm_config_registry=$PRIVATE_REGISTRY;', 'npm', 'install', `${MAL_NAME}@1.0.3`),
+      `export ${REG}; sh -c 'npm install ${MAL_NAME}@1.0.3'`,
+    ]) {
+      const w = fixtureWorld();
+      const out = await vetToolCall('Bash', { command }, opts(w));
+      expect({ command, looked: w.calls.length > 0 }).toEqual({ command, looked: true });
+      expect(out!.malicious).toBe(true);
+    }
+  });
+
+  it('pins: statements that remove, empty or re-assign an exported index variable end on the public path', () => {
     expect(custom(j('export', `${REG};`, 'unset', 'npm_config_registry;', 'npm', 'install', PKG))).toEqual([false]);
     expect(custom(j('export', `${REG};`, 'unset', '-v', 'npm_config_registry;', 'npm', 'install', PKG))).toEqual([false]);
-    expect(custom(j('export', `${REG}`, '&&', 'unset', 'npm_config_registry', '&&', 'npm', 'install', PKG))).toEqual([false]);
     expect(custom(j('export', `${REG};`, 'export', '-n', 'npm_config_registry;', 'npm', 'install', PKG))).toEqual([false]);
     expect(custom(j('export', `${REG};`, 'declare', '+x', 'npm_config_registry;', 'npm', 'install', PKG))).toEqual([false]);
-    expect(custom(j('export', 'PIP_INDEX_URL=https://private.example/simple;', 'unset', 'PIP_INDEX_URL;', 'pip', 'install', PKG))).toEqual([false]);
-    expect(custom(j('export', 'UV_INDEX_URL=https://private.example/simple;', 'unset', 'UV_INDEX_URL;', 'uv', 'add', PKG))).toEqual([false]);
-  });
-
-  it('a bare assignment is a shell variable, not an export', () => {
+    expect(custom(j('export', `${PIP};`, 'unset', 'PIP_INDEX_URL;', 'pip', 'install', PKG))).toEqual([false]);
+    expect(custom(j('export', `${UV};`, 'unset', 'UV_INDEX_URL;', 'uv', 'add', PKG))).toEqual([false]);
+    // An empty assignment in a pipeline member or a background job (panel round 3).
+    expect(custom(j('export', `${REG};`, 'npm_config_registry=', '|', 'cat;', 'npm', 'install', PKG))).toEqual([false]);
+    expect(custom(j('export', `${REG};`, 'export', 'npm_config_registry=', '&', 'npm', 'install', PKG))).toEqual([false]);
+    // An empty export followed by a bare assignment of the same variable (panel round 3).
+    expect(custom(j('export', 'npm_config_registry=;', `${REG};`, 'npm', 'install', PKG))).toEqual([false]);
+    expect(custom(j('export', `${REG};`, 'export', 'npm_config_registry=;', `${REG};`, 'npm', 'install', PKG))).toEqual([false]);
+    // A bare assignment, an export after `||`, in a pipeline or in the background.
     expect(custom(j(`${REG};`, 'npm', 'install', PKG))).toEqual([false]);
-    expect(custom(j('PIP_INDEX_URL=https://private.example/simple', '&&', 'pip', 'install', PKG))).toEqual([false]);
-    // ...until it is exported by name, or was already exported by this command.
-    expect(custom(j(`${REG};`, 'export', 'npm_config_registry;', 'npm', 'install', PKG))).toEqual([true]);
-    expect(custom(j(`export ${REG};`, 'npm_config_registry=https://other.example;', 'npm', 'install', PKG))).toEqual([true]);
-    // A bare name exported without ever being assigned here says nothing.
-    expect(custom(j('export', 'npm_config_registry;', 'npm', 'install', PKG))).toEqual([false]);
-  });
-
-  it('an export that is not known to reach the install does not move it off the public path', () => {
+    expect(custom(j(PIP, '&&', 'pip', 'install', PKG))).toEqual([false]);
     expect(custom(j('true', '||', 'export', `${REG};`, 'npm', 'install', PKG))).toEqual([false]);
     expect(custom(j('export', REG, '|', 'cat;', 'npm', 'install', PKG))).toEqual([false]);
     expect(custom(j('export', REG, '&', 'npm', 'install', PKG))).toEqual([false]);
+    expect(custom(j('export', 'npm_config_registry;', 'npm', 'install', PKG))).toEqual([false]);
   });
 
-  it('only the named variable is removed; another exported index variable still applies', () => {
-    expect(custom(j('export', 'PIP_INDEX_URL=https://a.example/simple', 'PIP_EXTRA_INDEX_URL=https://b.example/simple;', 'unset', 'PIP_INDEX_URL;', 'pip', 'install', PKG))).toEqual([true]);
-    expect(custom(j('export', `${REG};`, 'unset', 'SOMETHING_ELSE;', 'npm', 'install', PKG))).toEqual([true]);
-    // An unset after the install changes nothing for it; a statement's own prefix still applies to that statement only.
-    expect(custom(j('export', `${REG};`, 'npm', 'install', PKG, ';', 'unset', 'npm_config_registry'))).toEqual([true]);
+  it('pins: a prefix with a value is custom for its own statement and family only; an empty prefix is not', () => {
+    expect(custom(j(REG, 'npm', 'install', PKG))).toEqual([true]);
+    expect(custom(j(PIP, 'pip', 'install', PKG))).toEqual([true]);
+    expect(custom(j(UV, 'uv', 'add', PKG))).toEqual([true]);
+    expect(custom(j('env', REG, 'npm', 'install', PKG))).toEqual([true]);
     expect(custom(j(REG, 'npm', 'install', PKG, ';', 'npm', 'install', 'other-pkg'))).toEqual([true, false]);
+    expect(custom(j(REG, 'pip', 'install', PKG))).toEqual([false]);
+    expect(custom(j(PIP, 'npm', 'install', PKG))).toEqual([false]);
+    expect(custom(j('npm_config_registry=', 'npm', 'install', PKG))).toEqual([false]);
+    expect(custom(j('PIP_INDEX_URL=', 'pip', 'install', PKG))).toEqual([false]);
+    // An earlier export changes none of this.
+    expect(custom(j('export', `${REG};`, REG, 'npm', 'install', PKG))).toEqual([true]);
+    expect(custom(j('export', `${REG};`, 'npm_config_registry=', 'npm', 'install', PKG))).toEqual([false]);
   });
 
-  it('a nested shell inherits the names, so its own unset applies', () => {
-    expect(custom(`export ${REG}; sh -c 'npm install ${PKG}'`)).toEqual([true]);
-    expect(custom(`export ${REG}; sh -c 'unset npm_config_registry; npm install ${PKG}'`)).toEqual([false]);
-    expect(custom(`${REG} sh -c 'unset npm_config_registry; npm install ${PKG}'`)).toEqual([false]);
+  it('a nested shell is handed its launching statement\'s prefix, as a constant for every statement inside', () => {
+    expect(custom(`${REG} sh -c 'npm install ${PKG}'`)).toEqual([true]);
+    expect(custom(`${PIP} bash -c 'pip install ${PKG}; pip install other-pkg'`)).toEqual([true, true]);
+    expect(custom(`${PIP} sh -c 'npm install ${PKG}; pip install other-pkg'`)).toEqual([false, true]);
+    // Only a prefix on the install statement itself changes it, for that statement.
+    expect(custom(`${REG} sh -c 'npm_config_registry= npm install ${PKG}; npm install other-pkg'`)).toEqual([false, true]);
+    // The statement after the nested shell is on the public path again.
+    expect(custom(`${REG} sh -c 'npm install ${PKG}'; npm install other-pkg`)).toEqual([true, false]);
   });
 
-  it('a version-selection variable stays carried through unset and bare assignment (that side only costs a confirmation)', () => {
+  it('documented limit: a nested shell that removes or empties a variable it was handed is not followed', () => {
+    // As on main before #1054: the install stays custom-index and is reported unchecked.
+    expect(custom(`${REG} sh -c 'unset npm_config_registry; npm install ${PKG}'`)).toEqual([true]);
+    expect(custom(`${REG} sh -c 'export npm_config_registry=; npm install ${PKG}'`)).toEqual([true]);
+  });
+
+  it('pins: an MCP entry env counts with a value, not when empty, and only for its own family', () => {
+    expect(parseMcpServerEntry({ command: 'npx', args: ['-y', 'some-mcp'], env: { npm_config_registry: 'https://npm.internal.example' } })[0].customIndex).toBe(true);
+    expect(parseMcpServerEntry({ command: 'npx', args: ['-y', 'some-mcp'], env: { npm_config_registry: '' } })[0].customIndex).toBeUndefined();
+    expect(parseMcpServerEntry({ command: 'npx', args: ['-y', 'some-mcp'], env: { PIP_INDEX_URL: 'https://pypi.internal.example/simple' } })[0].customIndex).toBeUndefined();
+    expect(parseMcpServerEntry({ command: 'uvx', args: ['some-tool'], env: { npm_config_registry: 'https://npm.internal.example' } })[0].customIndex).toBeUndefined();
+  });
+
+  it('pins: a version-selection variable is still carried by export and by bare assignment (that side only costs a confirmation)', () => {
+    expect(parseInstallCommands(j('export', 'NPM_CONFIG_TAG=beta;', 'npm', 'i', PKG))[0].versionOption).toBe('npm_config_tag');
     expect(parseInstallCommands(j('export', 'NPM_CONFIG_TAG=beta;', 'unset', 'NPM_CONFIG_TAG;', 'npm', 'i', PKG))[0].versionOption).toBe('npm_config_tag');
     expect(parseInstallCommands(j('NPM_CONFIG_TAG=beta;', 'npm', 'i', PKG))[0].versionOption).toBe('npm_config_tag');
     expect(parseInstallCommands(j('true', '||', 'export', 'PIP_PRE=1;', 'pip', 'install', PKG))[0].versionOption).toBe('pip_pre');
-  });
-
-  it('end to end: the install after the unset is looked up, and a known-malicious package is blocked', async () => {
-    const w = fixtureWorld();
-    const out = await vetToolCall('Bash', { command: j('export', `${REG};`, 'unset', 'npm_config_registry;', 'npm', 'install', `${MAL_NAME}@1.0.3`) }, opts(w));
-    expect(w.calls.length).toBeGreaterThan(0);
-    expect(out!.malicious).toBe(true);
-    // Control: while the variable is exported the install is not looked up at all.
-    const w2 = fixtureWorld();
-    const kept = await vetToolCall('Bash', { command: j('export', `${REG};`, 'npm', 'install', `${MAL_NAME}@1.0.3`) }, opts(w2));
-    expect(w2.calls).toEqual([]);
-    expect(kept?.malicious ?? false).toBe(false);
+    expect(parseInstallCommands(j('declare', '-x', 'UV_PRERELEASE=allow;', 'uv', 'add', PKG))[0].versionOption).toBe('uv_prerelease');
+    expect(parseInstallCommands(`export NPM_CONFIG_TAG=beta; sh -c 'npm i ${PKG}'`)[0].versionOption).toBe('npm_config_tag');
+    // Controls, unchanged: `export -n` and `declare +x` carry nothing.
+    expect(parseInstallCommands(j('export', '-n', 'NPM_CONFIG_TAG=beta;', 'npm', 'i', PKG))[0].versionOption).toBeUndefined();
+    expect(parseInstallCommands(j('declare', '+x', 'NPM_CONFIG_TAG=beta;', 'npm', 'i', PKG))[0].versionOption).toBeUndefined();
+    expect(parseInstallCommands(j('export', REG, 'NPM_CONFIG_TAG=beta;', 'npm', 'i', PKG))[0].versionOption).toBe('npm_config_tag');
   });
 });
 
@@ -1778,9 +1838,10 @@ describe('#1054 — a value-taking version-selection option before the verb neve
   });
 });
 
-// #1054, panel round 1 on the P2 PR (Sol 1): carried and prefixed index variables were applied to
-// every install in reach, whatever installer they redirect. A pip variable exported earlier took a
-// later npm install off the public path. Each variable now applies to its own installer family only.
+// #1054, panel round 1 on the P2 PR (Sol 1): an index variable was applied to every install in
+// reach, whatever installer it redirects, so a pip variable took an npm install off the public
+// path. Each variable now applies to its own installer family only. (Index variables are no longer
+// carried between statements at all, so these cases are written as prefixes.)
 describe('#1054 — an index variable applies only to its own installer family', () => {
   const PKG = 'some-pkg';
   const flags = (...parts: string[]) => parseInstallCommands(j(...parts)).map((r) => [r.installer, r.customIndex === true]);
@@ -1788,34 +1849,34 @@ describe('#1054 — an index variable applies only to its own installer family',
   const UV = 'UV_INDEX_URL=https://private.example/simple';
   const NPM = 'npm_config_registry=https://private.example';
 
-  it('an exported variable of one family leaves the other families on the public path', () => {
-    expect(flags('export', `${PIP};`, 'npm', 'install', PKG)).toEqual([['npm install', false]]);
-    expect(flags('export', `${PIP};`, 'npx', PKG)).toEqual([['npx', false]]);
-    expect(flags('export', `${NPM};`, 'pip', 'install', PKG)).toEqual([['pip install', false]]);
-    expect(flags('export', `${NPM};`, 'uvx', PKG)).toEqual([['uvx', false]]);
-    expect(flags('export', `${PIP};`, 'uv', 'add', PKG)).toEqual([['uv add', false]]);
-    expect(flags('export', `${UV};`, 'pip', 'install', PKG)).toEqual([['pip install', false]]);
-  });
-
-  it('the same holds for a prefix on the statement and inside a nested shell', () => {
+  it('a prefix of one family leaves the other families on the public path', () => {
     expect(flags(PIP, 'npm', 'install', PKG)).toEqual([['npm install', false]]);
+    expect(flags(PIP, 'npx', PKG)).toEqual([['npx', false]]);
     expect(flags(NPM, 'pip', 'install', PKG)).toEqual([['pip install', false]]);
-    expect(parseInstallCommands(`export ${PIP}; sh -c 'npm install ${PKG}'`).map((r) => r.customIndex === true)).toEqual([false]);
+    expect(flags(NPM, 'uvx', PKG)).toEqual([['uvx', false]]);
+    expect(flags(PIP, 'uv', 'add', PKG)).toEqual([['uv add', false]]);
+    expect(flags(UV, 'pip', 'install', PKG)).toEqual([['pip install', false]]);
   });
 
-  it('controls: each variable still applies to its own family, and a mixed command is split per install', () => {
-    expect(flags('export', `${PIP};`, 'pip', 'install', PKG)).toEqual([['pip install', true]]);
-    expect(flags('export', `${PIP};`, 'pipx', 'install', PKG)).toEqual([['pipx install', true]]);
-    expect(flags('export', `${UV};`, 'uv', 'add', PKG)).toEqual([['uv add', true]]);
-    expect(flags('export', `${UV};`, 'uvx', PKG)).toEqual([['uvx', true]]);
-    expect(flags('export', `${NPM};`, 'pnpm', 'add', PKG)).toEqual([['pnpm add', true]]);
-    expect(flags('export', `${NPM};`, 'bunx', PKG)).toEqual([['bunx', true]]);
-    expect(flags('export', `${PIP};`, 'pip', 'install', PKG, ';', 'npm', 'install', 'other-pkg')).toEqual([['pip install', true], ['npm install', false]]);
+  it('the same holds inside a nested shell', () => {
+    expect(parseInstallCommands(`${PIP} sh -c 'npm install ${PKG}'`).map((r) => r.customIndex === true)).toEqual([false]);
+    expect(parseInstallCommands(`${NPM} sh -c 'pip install ${PKG}'`).map((r) => r.customIndex === true)).toEqual([false]);
   });
 
-  it('end to end: the npm install after a pip export is looked up, and a known-malicious package is blocked', async () => {
+  it('controls: each variable still applies to its own family, and a mixed nested command is split per install', () => {
+    expect(flags(PIP, 'pip', 'install', PKG)).toEqual([['pip install', true]]);
+    expect(flags(PIP, 'pipx', 'install', PKG)).toEqual([['pipx install', true]]);
+    expect(flags(UV, 'uv', 'add', PKG)).toEqual([['uv add', true]]);
+    expect(flags(UV, 'uvx', PKG)).toEqual([['uvx', true]]);
+    expect(flags(NPM, 'pnpm', 'add', PKG)).toEqual([['pnpm add', true]]);
+    expect(flags(NPM, 'bunx', PKG)).toEqual([['bunx', true]]);
+    expect(parseInstallCommands(`${PIP} sh -c 'pip install ${PKG}; npm install other-pkg'`).map((r) => [r.installer, r.customIndex === true]))
+      .toEqual([['pip install', true], ['npm install', false]]);
+  });
+
+  it('end to end: an npm install under a pip prefix is looked up, and a known-malicious package is blocked', async () => {
     const w = fixtureWorld();
-    const out = await vetToolCall('Bash', { command: j('export', `${PIP};`, 'npm', 'install', `${MAL_NAME}@1.0.3`) }, opts(w));
+    const out = await vetToolCall('Bash', { command: j(PIP, 'npm', 'install', `${MAL_NAME}@1.0.3`) }, opts(w));
     expect(w.calls.length).toBeGreaterThan(0);
     expect(out!.malicious).toBe(true);
   });
@@ -1840,38 +1901,40 @@ describe('#1054 — every runner candidate read before a later package option is
   });
 });
 
-// #1054, panel round 2 on the P2 PR (Sol 1): an index variable set to nothing was carried as a
-// custom index, so the install after it got no public lookup, although the installer then uses
-// its default index. (Daybreak 1 in the same round said `python -m pip` falls outside the pip
-// family: it does not, its installer label is `pip install`; pinned below.)
+// #1054, panel round 2 on the P2 PR (Sol 1): an index variable set to nothing was read as a
+// custom index, so the install got no public lookup, although the installer then uses its default
+// index. (Daybreak 1 in the same round said `python -m pip` falls outside the pip family: it does
+// not, its installer label is `pip install`; pinned below.)
 describe('#1054 — an index variable set to nothing is not a custom index; python -m pip is in the pip family', () => {
   const PKG = 'some-pkg';
   const custom = (...parts: string[]) => parseInstallCommands(j(...parts)).map((r) => r.customIndex === true);
   const PIP = 'PIP_INDEX_URL=https://private.example/simple';
 
-  it('empty export, empty overwrite, empty prefix and empty value in a nested shell', () => {
+  it('empty prefix, empty export, empty overwrite and empty prefix in a nested shell', () => {
+    expect(custom('PIP_INDEX_URL=', 'pip', 'install', PKG)).toEqual([false]);
+    expect(custom('PIP_INDEX_URL=""', 'pip', 'install', PKG)).toEqual([false]);
+    expect(custom('npm_config_registry=', 'npm', 'install', PKG)).toEqual([false]);
     expect(custom('export', 'PIP_INDEX_URL=;', 'pip', 'install', PKG)).toEqual([false]);
     expect(custom('export', 'PIP_INDEX_URL="";', 'pip', 'install', PKG)).toEqual([false]);
     expect(custom('export', 'npm_config_registry=;', 'npm', 'install', PKG)).toEqual([false]);
     expect(custom('export', `${PIP};`, 'export', 'PIP_INDEX_URL=;', 'pip', 'install', PKG)).toEqual([false]);
     expect(custom('export', `${PIP};`, 'PIP_INDEX_URL=;', 'pip', 'install', PKG)).toEqual([false]);
     expect(custom('export', `${PIP};`, 'PIP_INDEX_URL=', 'pip', 'install', PKG)).toEqual([false]);
-    expect(custom('PIP_INDEX_URL=', 'pip', 'install', PKG)).toEqual([false]);
-    expect(parseInstallCommands(`export ${PIP}; sh -c 'PIP_INDEX_URL= pip install ${PKG}'`).map((r) => r.customIndex === true)).toEqual([false]);
+    expect(parseInstallCommands(`${PIP} sh -c 'PIP_INDEX_URL= pip install ${PKG}'`).map((r) => r.customIndex === true)).toEqual([false]);
     expect(parseMcpServerEntry({ command: 'uvx', args: ['some-tool'], env: { UV_INDEX_URL: '' } })[0].customIndex).toBeUndefined();
   });
 
-  it('controls: a value still counts, and so does a value set again after an empty one', () => {
-    expect(custom('export', `${PIP};`, 'pip', 'install', PKG)).toEqual([true]);
-    expect(custom('export', 'PIP_INDEX_URL=;', 'export', `${PIP};`, 'pip', 'install', PKG)).toEqual([true]);
-    expect(custom('export', `${PIP}`, 'PIP_EXTRA_INDEX_URL=;', 'pip', 'install', PKG)).toEqual([true]);
+  it('controls: a prefix value still counts, and so does a value set again after an empty one on the same statement', () => {
+    expect(custom(PIP, 'pip', 'install', PKG)).toEqual([true]);
+    expect(custom('PIP_INDEX_URL=', PIP, 'pip', 'install', PKG)).toEqual([true]);
+    expect(custom(PIP, 'PIP_EXTRA_INDEX_URL=', 'pip', 'install', PKG)).toEqual([true]);
   });
 
-  it('python -m pip takes PIP_* as a prefix, an export and in a nested shell (pinned)', () => {
+  it('python -m pip takes PIP_* as a prefix and in a nested shell, and never an npm variable (pinned)', () => {
     expect(parseInstallCommands(j(PIP, 'python', '-m', 'pip', 'install', PKG)).map((r) => [r.installer, r.customIndex])).toEqual([['pip install', true]]);
-    expect(custom('export', `${PIP};`, 'python3', '-m', 'pip', 'install', PKG)).toEqual([true]);
-    expect(parseInstallCommands(`export ${PIP}; sh -c 'python -m pip install ${PKG}'`).map((r) => r.customIndex === true)).toEqual([true]);
-    expect(custom('export', 'npm_config_registry=https://private.example;', 'python', '-m', 'pip', 'install', PKG)).toEqual([false]);
+    expect(custom(PIP, 'python3', '-m', 'pip', 'install', PKG)).toEqual([true]);
+    expect(parseInstallCommands(`${PIP} sh -c 'python -m pip install ${PKG}'`).map((r) => r.customIndex === true)).toEqual([true]);
+    expect(custom('npm_config_registry=https://private.example', 'python', '-m', 'pip', 'install', PKG)).toEqual([false]);
   });
 
   it('end to end: the install after an empty export is looked up, and a known-malicious package is blocked', async () => {

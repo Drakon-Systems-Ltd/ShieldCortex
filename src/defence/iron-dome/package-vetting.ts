@@ -576,9 +576,11 @@ const INDEX_ENV = /^(?:npm_config_(?:[^=]*:)?registry|PIP_(?:EXTRA_)?INDEX_URL|P
 const VERSION_ENV = /^(npm_config_(?:tag|before|include[_-]staged|resolution[_-]mode|userconfig|globalconfig)|PIP_(?:PRE|ONLY_BINARY|PREFER_BINARY|PYTHON_VERSION|PLATFORM|ABI|IMPLEMENTATION)|UV_(?:PRERELEASE|EXCLUDE_NEWER|RESOLUTION))=/i;
 
 /**
- * Index / version-selection variables in force for a statement: exported earlier in the command
- * (`export NPM_CONFIG_TAG=beta; npm i x`), or handed down to a nested `sh -c`.
- * `index` holds the NAMES of the index variables still exported, so `unset` can take one away.
+ * What a nested `sh -c` is handed by the statement that launches it. `index` holds the NAMES of
+ * the index variables on that statement's own prefix (and its launchers'): a constant for every
+ * statement of the nested command, never changed by an `export` or `unset` there or outside.
+ * `version` is the version-selection variable in force, which IS carried from statement to
+ * statement (`export NPM_CONFIG_TAG=beta; npm i x`).
  */
 interface CarriedEnv { index: ReadonlySet<string>; version?: string }
 
@@ -611,62 +613,33 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_@:.-]*=/;
 export function parseInstallCommands(command: string, depth = 0, inherited: CarriedEnv = { index: new Set() }): PackageRef[] {
   if (typeof command !== 'string' || !command || depth > MAX_DEPTH) return [];
   const refs: PackageRef[] = [];
-  // A custom index means "no public lookup", so carried index state has to be certain: only a
-  // variable this command exported, and has not unset since, counts. Anything stale or uncertain
-  // (unset, un-exported, assigned without `export`, exported in a subshell or on the far side of
-  // `||`) leaves the install on the public path, where it is checked. A version-selection variable
-  // errs the other way: once seen it stays carried, which can only make the version unconfirmed.
-  const exported = new Set(inherited.index);
-  /** Index variables assigned without `export` (shell variables: no child process sees them). */
-  const local = new Set<string>();
+  // A custom index means "no public lookup", so no index variable is carried from one statement
+  // to the next: `export`, `unset`, `declare` and bare assignments say nothing about the index of
+  // a later install, which stays on the public path, where it is checked. Each statement starts
+  // from the set its launching shell statement handed down (`inherited.index`, the same for every
+  // statement at this level) and adds only its own prefix and wrapper assignments. A
+  // version-selection variable errs the other way: once seen it stays carried, which can only
+  // make the version unconfirmed.
   let carriedVersion = inherited.version;
   const carryVersion = (word: string) => {
     const m = VERSION_ENV.exec(word);
     if (m) carriedVersion ??= m[1].toLowerCase();
   };
-  for (const { text: stmt, before, after } of splitStatements(command)) {
+  for (const { text: stmt } of splitStatements(command)) {
     let w = words(stmt);
-    // A pipeline member or a background job runs in a subshell, and `a || b` runs `b` only when
-    // `a` fails: what such a statement exports is not known to reach the statements after it.
-    const reaches = before !== '|' && before !== '||' && after !== '|' && after !== '&';
-    // `unset VAR` (any flags) removes the variable; taken as done wherever it appears, which can only add a public check.
-    if (w[0] === 'unset') {
-      for (const x of w.slice(1)) { exported.delete(x); local.delete(x); }
-      continue;
-    }
-    // `declare +x VAR` / `typeset +x VAR` take the export away, like `export -n VAR`.
-    if ((w[0] === 'declare' || w[0] === 'typeset') && w.slice(1).some((x) => /^\+[a-z]*x[a-z]*$/.test(x))) {
-      for (const x of w.slice(1)) exported.delete(x.split('=')[0]);
-      continue;
-    }
-    // `export VAR=value` (or `declare -x` / `typeset -x`) sets the variable for every later
-    // statement; `export VAR` exports one assigned earlier; `export -n VAR` takes the export away.
+    // `export VAR=value` (or `declare -x` / `typeset -x`): only a version-selection variable is
+    // carried to later statements (`export -n` carries nothing).
     if (w[0] === 'export' || ((w[0] === 'declare' || w[0] === 'typeset') && w.includes('-x'))) {
       const unexport = w[0] === 'export' && w.slice(1).some((x) => /^-[a-z]*n[a-z]*$/.test(x));
-      for (const x of w.slice(1)) {
-        if (x.startsWith('-') || x.startsWith('+')) continue;
-        const name = x.split('=')[0];
-        if (unexport) { exported.delete(name); continue; }
-        carryVersion(x);
-        // An empty value points nowhere: the installer falls back to its default (public) index.
-        if (emptyIndexAssignment(x)) { exported.delete(name); local.delete(name); continue; }
-        if (!reaches) continue;
-        if (x.includes('=') ? INDEX_ENV.test(x) : local.has(name)) { exported.add(name); local.delete(name); }
-      }
+      if (!unexport) for (const x of w.slice(1)) if (!x.startsWith('-') && !x.startsWith('+')) carryVersion(x);
       continue;
     }
-    // A bare `VAR=value` statement sets a shell variable. Child processes see it only when VAR
-    // is already exported, which this command shows only by its own earlier `export`.
+    // A bare `VAR=value` statement: likewise, only a version-selection variable is carried.
     if (w.length && w.every((x) => ASSIGNMENT.test(x))) {
-      for (const x of w) {
-        carryVersion(x);
-        const name = x.split('=')[0];
-        if (emptyIndexAssignment(x)) { exported.delete(name); local.delete(name); continue; }
-        if (INDEX_ENV.test(x) && reaches && !exported.has(name)) local.add(name);
-      }
+      for (const x of w) carryVersion(x);
       continue;
     }
-    const stmtIndex = new Set(exported);
+    const stmtIndex = new Set(inherited.index);
     let envVersion: string | undefined = carriedVersion;
     const noteEnv = (word: string) => {
       if (emptyIndexAssignment(word)) stmtIndex.delete(word.split('=')[0]);
@@ -692,7 +665,7 @@ export function parseInstallCommands(command: string, depth = 0, inherited: Carr
     const bin = path.basename(w[0]);
     const rest = w.slice(1);
     const stmtRefs: PackageRef[] = [];
-    /** A nested shell was handed this statement's index variables and has applied them itself (it may `unset` one). */
+    /** A nested shell was handed this statement's index variables and has applied them itself, per install family (an empty prefix on an install inside takes one away for that install). */
     let nested = false;
 
     if (SHELLS.has(bin)) {
