@@ -11,7 +11,6 @@ It is test data only. It lives under `src/defence/iron-dome/__tests__/fixtures/a
 | File | Holds |
 |---|---|
 | `types.ts` | the fixture format: id, issue, phase, class, status, call, stub files, effects, targets, v3 decision, expectation |
-| `tokens.ts` | shared composed tokens, so no catastrophic shape is spelled out in a fixture |
 | `phase1.ts` | Phase 1 fixtures (#519) |
 | `index.ts` | the epic lines frozen on 12 Nov 2026, and the corpus assembled from the phase files |
 | `../adr002-frozen-corpus-1065.test.ts` | the suite |
@@ -32,7 +31,7 @@ The effect, target and v3 decision fields are recorded for the reviewer and for 
 ## Rules for adding fixtures
 
 - Only the call and stub file contents the issue supports. Where the reporter's source was not supplied, the body is a synthetic stand-in and the fixture says so.
-- Catastrophic shapes are named by signal or composed from `tokens.ts`. Credentials are synthetic; hosts are reserved example names or documentation address ranges.
+- Catastrophic shapes are named by signal, following the convention already in `guard-precision-corpus.ts`. Credentials are synthetic; hosts are reserved example names or documentation address ranges.
 - Every relief fixture has a paired control that must not move.
 - The corpus is run in CI or an isolated evaluator only, never on a live guarded host, and fixture text is never reshaped to get it past a live guard (#629, 5 Oct rule).
 - Removing a `known-gap` marker and ticking the epic line happen in the same change.
@@ -54,11 +53,13 @@ The Phase 2 to 4 fixture files were drafted and could not be written on the buil
 
 The builder stopped there. The file was not retried in another form, split to isolate the rows, composed at runtime to avoid the match, or written through another tool or host. Doing any of those is the evasion the 5 Oct rule forbids.
 
-What that leaves for whoever continues Phase 0, on a host whose controls permit the write (the isolated evaluator, or a contributor's unguarded checkout):
+The remaining fixtures are not authored. Authoring is stopped. Where and whether it resumes is the operator's decision under the epic's existing rule. This document grants nothing on it.
 
-1. Author `phase2.ts`, `phase2-heredoc-738.ts`, `phase3.ts` and `phase4.ts` against `types.ts`, and add them to `index.ts`.
-2. Run the suite with `ADR002_CORPUS_REPORT=1` to get the verdict `main` returns for every fixture, and set each status from that output, not from the issue text. In particular the #874 rows must be re-run and the ones that already pass recorded as `settled`.
-3. Remove `.failing` from the coverage test.
+What Phase 0 still lacks, for the record:
+
+1. The Phase 2 to 4 fixtures, written against `types.ts` and added to `index.ts`. None is in the tree, and none is to be added as a placeholder or stub.
+2. A run of the suite with `ADR002_CORPUS_REPORT=1` to get the verdict `main` returns for every fixture, with each status set from that output, not from the issue text. In particular the #874 rows have not been re-run, and the ones that already pass are not yet recorded as `settled`.
+3. The `.failing` marker on the coverage test stays until the last epic line is covered.
 
 ## Reading notes for the missing lines
 

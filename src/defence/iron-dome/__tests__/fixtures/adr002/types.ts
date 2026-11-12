@@ -13,8 +13,8 @@
  *
  * Conventions (same as `guard-precision-corpus.ts` and
  * `scripts/lib/guard-policy-sets.mjs`):
- *   - Catastrophic shapes are named by signal or composed from the shared
- *     tokens in `tokens.ts`; they are never spelled out.
+ *   - Catastrophic shapes are named by signal, following the convention
+ *     already in `guard-precision-corpus.ts`; they are never spelled out.
  *   - Credentials are synthetic and hosts are reserved example names or
  *     documentation address ranges.
  *   - Fixtures are classifier inputs. Nothing in this corpus is executed, and
