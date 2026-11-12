@@ -364,6 +364,9 @@ describe('#922 guardPostureRow — status and honest fixes', () => {
     expect(row.fix ?? '').not.toMatch(LOOSENING);
     expect(row.fix ?? '').not.toMatch(ENABLING);
     expect(row.fix ?? '').not.toMatch(/--action-guard-disable/);
+    // The fix is a report whose backticked command is an inspection step: the
+    // human report must print its prose too (#1037 B1).
+    expect(row.fixNoteWithCommands).toBe(true);
   });
 
   it('#1037: signed advisory + plugin enforce FAILs and names no advisory setter', () => {
@@ -373,6 +376,8 @@ describe('#922 guardPostureRow — status and honest fixes', () => {
     })));
     expect(row.status).toBe('fail');
     expect(row.fix).toMatch(/drop that plane to advisory/);
+    expect(row.fix).toMatch(/catastrophic ops and changes to the guard itself are still held or blocked/);
+    expect(row.fix).toMatch(/would turn a plane up/);
     expect(row.fix).toMatch(/names no command/);
     expect(row.fix ?? '').not.toMatch(LOOSENING);
     expect(row.fix ?? '').not.toMatch(/--action-guard-advisory/);
@@ -387,6 +392,7 @@ describe('#922 guardPostureRow — status and honest fixes', () => {
     for (const shape of shapes) {
       const row = guardPostureRow(resolvePlanePostures(shape));
       expect(row.status).toBe('fail');
+      expect(row.fixNoteWithCommands).toBe(true);
       expect(row.fix ?? '').not.toMatch(ENABLING);
       expect(row.fix ?? '').not.toMatch(/--action-guard-(disable|advisory)/);
     }

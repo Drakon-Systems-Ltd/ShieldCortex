@@ -69,7 +69,9 @@ export interface DoctorExplainerResult {
    *  grounding check that stops a confabulated citation from surviving. */
   citedLabels: string[];
   /** ONE copy-pasteable command for the operator to run. Never executed by
-   *  this module or by doctor.ts — see doctor.ts's runDoctorAiSection(). */
+   *  this module or by doctor.ts — see doctor.ts's runDoctorAiSection().
+   *  Never one that changes an Action Guard posture (#1037): the parser puts
+   *  AI_POSTURE_SAFE_COMMAND in its place. */
   suggestedCommand: string;
   confidence: 'low' | 'medium' | 'high';
 }
@@ -116,7 +118,7 @@ You must cite, by exact label, which finding(s) support your hypothesis — only
 Reply with ONLY a JSON object, no prose:
 {"hypothesis":"one or two plain sentences","citedLabels":["exact label from what you were shown"],"suggestedCommand":"a single copy-pasteable shell command","confidence":"low|medium|high"}
 
-The hypothesis must read like something you would say to a person, not to another program — no internal type names, no jargon the operator has not already seen echoed back from their own checks. suggestedCommand must be a single, non-destructive command a ShieldCortex operator could actually run (e.g. one of doctor's own fix hints, \`shieldcortex repair\`, or a read-only inspection command) — never a script, never something that claims to already have fixed it.`;
+The hypothesis must read like something you would say to a person, not to another program — no internal type names, no jargon the operator has not already seen echoed back from their own checks. suggestedCommand must be a single, non-destructive command a ShieldCortex operator could actually run (e.g. one of doctor's own fix hints, \`shieldcortex repair\`, or a read-only inspection command) — never a script, never something that claims to already have fixed it, and never a command that changes Action Guard's posture on any plane (no \`shieldcortex config --action-guard-*\`, no OpenClaw plugin entry change, no SHIELDCORTEX_ENFORCE): which posture to run is the operator's decision, so for a posture finding suggest \`shieldcortex guard posture\`.`;
 
 /**
  * Defang anything that could pass for our own delimiters — the same idea as
@@ -197,6 +199,23 @@ const MAX_HYPOTHESIS_CHARS = 500;
 const MAX_COMMAND_CHARS = 300;
 
 /**
+ * #1037: a command that changes an Action Guard posture on some plane, in
+ * either direction: the signed-config setter family
+ * (`shieldcortex config --action-guard-*`), the OpenClaw plugin or its
+ * `plugins.entries.shieldcortex-*` entry, or an assignment of Hermes's
+ * SHIELDCORTEX_ENFORCE. Doctor never prescribes one — its posture row names
+ * the consequence of each direction and leaves the choice to the operator —
+ * so neither may its explainer. Matched by family, not by spelling. Reading a
+ * posture (`guard posture`, `printenv SHIELDCORTEX_ENFORCE`,
+ * `openclaw config get …`) does not match.
+ */
+const POSTURE_CHANGING_COMMAND =
+  /--action-guard-[a-z]|\bSHIELDCORTEX_ENFORCE\s*=|\bopenclaw\s+config\s+(?:set|unset)\b[^\n]*\bshieldcortex|\bopenclaw\s+plugins?\s+(?:disable|uninstall|remove)\b/i;
+
+/** The read-only next step shown in place of a posture-changing suggestion (#1037). */
+export const AI_POSTURE_SAFE_COMMAND = 'shieldcortex doctor --verbose';
+
+/**
  * Strict. Every field must be present and exactly the right shape; anything
  * else returns null, which the caller reads as "no AI analysis available".
  *
@@ -222,6 +241,9 @@ export function parseDoctorExplainerResponse(
 
   const hypothesis = o.hypothesis;
   if (typeof hypothesis !== 'string' || !hypothesis.trim()) return null;
+  // #1037: a hypothesis that tells the operator to change a posture is the
+  // same suggestion in prose — discard it rather than print it.
+  if (POSTURE_CHANGING_COMMAND.test(hypothesis)) return null;
 
   const confidence = o.confidence;
   if (confidence !== 'low' && confidence !== 'medium' && confidence !== 'high') return null;
@@ -233,6 +255,9 @@ export function parseDoctorExplainerResponse(
   // design calls for ONE copy-pasteable command; reject rather than guess
   // which line the operator was meant to run.
   if (!trimmedCommand || trimmedCommand.includes('\n') || trimmedCommand.length > MAX_COMMAND_CHARS) return null;
+  // #1037: the deterministic boundary for "never suggest a posture change".
+  // The prompt asks for this too, but a model's obedience is not the guarantee.
+  const safeCommand = POSTURE_CHANGING_COMMAND.test(trimmedCommand) ? AI_POSTURE_SAFE_COMMAND : trimmedCommand;
 
   const citedRaw = o.citedLabels;
   if (!Array.isArray(citedRaw)) return null;
@@ -245,7 +270,7 @@ export function parseDoctorExplainerResponse(
   return {
     hypothesis: hypothesis.trim().slice(0, MAX_HYPOTHESIS_CHARS),
     citedLabels,
-    suggestedCommand: trimmedCommand,
+    suggestedCommand: safeCommand,
     confidence,
   };
 }

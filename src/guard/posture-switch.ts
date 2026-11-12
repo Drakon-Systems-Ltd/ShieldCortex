@@ -512,6 +512,13 @@ export interface GuardPostureRow {
   fix?: string;
   /** #878: see DoctorReportItem.postureUnknown — the report prints this row's own fix. */
   postureUnknown?: true;
+  /**
+   * #1037: see DoctorReportItem.fixNoteWithCommands. A mismatch fix states
+   * the consequence of each direction and names no posture command; its one
+   * backticked command is an inspection step, so the report prints the prose
+   * as well as that command.
+   */
+  fixNoteWithCommands?: true;
 }
 
 const OFF_FIX = 'Action Guard is off. That is the default. Do not enable Action Guard from this warning. Do not add a webhook.';
@@ -539,7 +546,8 @@ function mismatchFix(report: PostureReport): string {
   if (report.nodeMismatch && noneLooser && (s === 'off' || s === 'advisory')) {
     const down = s === 'off'
       ? 'Matching the stricter plane down to the signed setting would turn Action Guard off on that plane.'
-      : 'Matching the stricter plane down to the signed setting would drop that plane to advisory (dangerous ops log, but are not gated).';
+      : 'Matching the stricter plane down to the signed setting would drop that plane to advisory ' +
+        '(ordinary dangerous ops log but are not gated; catastrophic ops and changes to the guard itself are still held or blocked).';
     return `${down} Matching the signed setting up to the stricter plane would turn a plane up. ` +
       `This row names no command. ${help}${hermesNote}`;
   }
@@ -579,6 +587,7 @@ export function guardPostureRow(report: PostureReport): GuardPostureRow {
       status: 'fail',
       message: `planes disagree — ${words}. One posture must hold on every plane.`,
       fix: mismatchFix(report),
+      fixNoteWithCommands: true,
     };
   }
   const graded = report.verdict === 'none' ? report.graded : report.reference ?? report.graded;

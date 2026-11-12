@@ -25,6 +25,7 @@ import {
   runDoctorAiExplainer,
   capFindings,
   DOCTOR_EXPLAINER_SYSTEM_PROMPT,
+  AI_POSTURE_SAFE_COMMAND,
   MAX_FINDINGS,
   type DoctorFinding,
   type ModelInvoker,
@@ -190,6 +191,67 @@ describe('parsing is strict — a confused or hostile model must not become a co
     expect(r).not.toHaveProperty('overridePassed');
     expect(r).not.toHaveProperty('verdict');
     expect(Object.keys(r as object).sort()).toEqual(['citedLabels', 'confidence', 'hypothesis', 'suggestedCommand'].sort());
+  });
+});
+
+describe('#1037: a suggestion never changes Action Guard posture', () => {
+  const known = [failFinding.label];
+  const reply = (suggestedCommand: string, hypothesis = 'The plugin entry overrides the signed setting.') =>
+    JSON.stringify({ hypothesis, citedLabels: [failFinding.label], suggestedCommand, confidence: 'high' });
+
+  it.each([
+    'shieldcortex config --action-guard-disable',
+    'shieldcortex config --action-guard-advisory',
+    'shieldcortex config --action-guard-enable',
+    'shieldcortex config --action-guard-enforce-when-ready',
+    'shieldcortex config --action-guard-notify-disable',
+    'npx shieldcortex config --Action-Guard-Disable',
+    'openclaw config set plugins.entries.shieldcortex-realtime.config.actionGuard.enforce false',
+    'openclaw config unset plugins.entries.shieldcortex-realtime.config.actionGuard',
+    'openclaw plugins disable shieldcortex-realtime',
+    'openclaw plugin uninstall shieldcortex-realtime',
+    'SHIELDCORTEX_ENFORCE=0 hermes gateway restart',
+    'export SHIELDCORTEX_ENFORCE = false',
+  ])('replaces a posture-changing command with read-only guidance: %s', (unsafe) => {
+    const r = parseDoctorExplainerResponse(reply(unsafe), known);
+    expect(r?.suggestedCommand).toBe(AI_POSTURE_SAFE_COMMAND);
+    expect(r?.hypothesis).toBe('The plugin entry overrides the signed setting.');
+    expect(Object.keys(r as object).sort()).toEqual(['citedLabels', 'confidence', 'hypothesis', 'suggestedCommand'].sort());
+  });
+
+  it('discards a hypothesis that prescribes a posture setter in prose', () => {
+    expect(parseDoctorExplainerResponse(
+      reply('shieldcortex guard posture', 'Run `shieldcortex config --action-guard-disable` so the planes agree.'),
+      known,
+    )).toBeNull();
+  });
+
+  it.each([
+    'shieldcortex guard posture',
+    'shieldcortex guard posture --json',
+    'shieldcortex doctor --verbose',
+    'shieldcortex config --policy-status',
+    'printenv SHIELDCORTEX_ENFORCE',
+    'openclaw config get plugins.entries.shieldcortex-realtime',
+    'shieldcortex repair',
+  ])('passes read-only and unrelated guidance through unchanged: %s', (safe) => {
+    expect(parseDoctorExplainerResponse(reply(safe), known)?.suggestedCommand).toBe(safe);
+  });
+
+  it('a hypothesis may still name where a plane reads its posture', () => {
+    const hypothesis = 'Hermes reads SHIELDCORTEX_ENFORCE and the plugin reads its openclaw.json entry, so they disagree.';
+    expect(parseDoctorExplainerResponse(reply('shieldcortex guard posture', hypothesis), known)?.hypothesis).toBe(hypothesis);
+  });
+
+  it('runDoctorAiExplainer applies the same rule to a mock model reply', async () => {
+    const invoke = jest.fn<ModelInvoker>().mockResolvedValue(reply('shieldcortex config --action-guard-advisory'));
+    const out = await runDoctorAiExplainer([failFinding], invoke);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(out.result?.suggestedCommand).toBe(AI_POSTURE_SAFE_COMMAND);
+  });
+
+  it('the system prompt tells the model the same rule', () => {
+    expect(DOCTOR_EXPLAINER_SYSTEM_PROMPT).toMatch(/never a command that changes Action Guard's posture/);
   });
 });
 
