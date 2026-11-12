@@ -20,6 +20,7 @@ import {
   type AgentConfigLedgerRow,
 } from '../audit/agent-config-watch.js';
 import { buildAgentConfigChangeNotification, formatOperatorNotification } from '../defence/iron-dome/operator-notify.js';
+import { createWebhookNotifyChannel } from '../defence/iron-dome/webhook-notify-channel.js';
 import { vetMcpServers, type FetchLike } from '../defence/iron-dome/package-vetting.js';
 
 let home: string;
@@ -432,4 +433,35 @@ describe('#1054 — an answer that settles after the package-check window closed
     const follow = notes.filter((n) => n.packageCheckFollowUp);
     expect(follow[0].packageChecks).toEqual([{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.timedOut] }]);
   }, 20_000);
+});
+
+// #1054 (CASE N4 on the source PR): the follow-up's webhook payload carried
+// `packageCheckFollowUp` and `text` only, so a receiver that reads fields had
+// to parse the sentence to learn which server was flagged. The follow-up
+// payload now carries the same sanitised `packageChecks` the notification
+// holds. The change notice's payload is unchanged.
+describe('#1054 — the webhook payload of a package-check follow-up carries the findings', () => {
+  const post = async (n: Parameters<typeof buildAgentConfigChangeNotification>[0]) => {
+    let body: Record<string, unknown> = {};
+    const fetchImpl = (async (_url: string, init: RequestInit) => { body = JSON.parse(String(init.body)); return { ok: true, status: 200, text: async () => '' } as unknown as Response; }) as unknown as typeof fetch;
+    const channel = createWebhookNotifyChannel({ url: 'https://ops.example.com/hook', fetchImpl });
+    expect(await channel.send(buildAgentConfigChangeNotification(n), { timeoutMs: 5_000 })).toEqual({ delivered: true });
+    return body;
+  };
+  const CHANGE = { file: '~/.mcp.json', changes: [{ label: 'MCP server added', name: 'docs' }], changeCount: 1 };
+
+  it('follow-up: packageChecks is present, bounded and sanitised, beside text', async () => {
+    const body = await post({ ...CHANGE, severity: 'high', packageCheckFollowUp: true, packageChecks: [{ name: 'docs\u001b[31m', malicious: true, reasons: ['OSV lists some-mcp@1.0.0 as known malicious (MAL-2026-18603)', 'b', 'c', 'd'] }] });
+    expect(body).toMatchObject({ event: 'agent_config_change', packageCheckFollowUp: true, severity: 'high' });
+    expect(body.packageChecks).toEqual([{ name: 'docs??31m', malicious: true, reasons: ['OSV lists some-mcp@1.0.0 as known malicious ?MAL-2026-18603?', 'b', 'c'] }]);
+    expect(String(body.text)).toContain('KNOWN MALICIOUS PACKAGE for MCP server docs');
+  });
+
+  it('the change notice itself never carries packageChecks, and a follow-up without findings has no empty array', async () => {
+    expect(await post(CHANGE)).not.toHaveProperty('packageChecks');
+    expect(await post({ ...CHANGE, packageChecks: [{ name: 'docs', malicious: true, reasons: ['x'] }] })).not.toHaveProperty('packageChecks');
+    const empty = await post({ ...CHANGE, packageCheckFollowUp: true });
+    expect(empty).toMatchObject({ packageCheckFollowUp: true });
+    expect(empty).not.toHaveProperty('packageChecks');
+  });
 });
