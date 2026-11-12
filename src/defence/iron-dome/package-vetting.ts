@@ -348,7 +348,16 @@ const PY_KNOWN = new Set([
  * What an option word is to the check: selects the version (the canonical flag), unrecognised, or
  * neither; and whether it takes the next word as its value when it is read through npm's table.
  */
-interface OptionClass { version?: string; unknown?: boolean; takesValue?: boolean }
+interface OptionClass {
+  version?: string;
+  unknown?: boolean;
+  takesValue?: boolean;
+  /**
+   * The option takes the next word as its value for npm, and this tool (pnpm / yarn / bun) may
+   * read it either way: the word after it is its value or a word in its own right.
+   */
+  maybeValue?: boolean;
+}
 type Classify = (word: string) => OptionClass;
 
 /** A `-abc` cluster of single-letter options is known when each letter is (up to a value-taking one). */
@@ -360,10 +369,15 @@ function shortCluster(word: string, known: ReadonlySet<string>, valueFlags: Read
   return {};
 }
 
+/** Whether npm's own option table gives `flag` the next word as its value. */
+const npmTakesValue = (flag: string) => parseNpmArgv([flag, 'x']).options.at(-1)?.value === 'x';
+
 /** pnpm / yarn / bun: their own options, else read the way npm would (aliases, prefixes), else unrecognised. */
 function classifyNpmFamily(word: string): OptionClass {
   const flag = word.split('=')[0];
-  if (VERSION_FLAGS_NPM.has(flag)) return { version: flag };
+  // A version-selection option that is not in this family's own value table (`--globalconfig`)
+  // takes a value for npm; whether pnpm / yarn / bun read the next word as that value is not known.
+  if (VERSION_FLAGS_NPM.has(flag)) return { version: flag, ...(!VALUE_FLAGS_NPM.has(flag) && npmTakesValue(flag) ? { maybeValue: true } : {}) };
   if (NPM_FAMILY_EXTRA.has(flag) || VALUE_FLAGS_NPM.has(flag)) return {};
   const opts = parseNpmArgv([flag, 'x']).options;
   const takesValue = opts.at(-1)?.value === 'x';
@@ -386,6 +400,8 @@ interface Positionals {
   positionals: string[];
   /** Values given to -p/--package style flags. */
   packageFlags: string[];
+  /** Runner form: how many of `packageFlags` came before the (first) command word. */
+  packageFlagsBeforeCommand?: number;
   customIndex: boolean;
   /** `-r file` style inputs the vetting cannot resolve. */
   fileInputs: boolean;
@@ -401,20 +417,50 @@ interface CollectOptions {
    * `pipx run`): the installer reads its own options only up to the first
    * positional, which names what to run; every later word, dashed or not, is an
    * argument of the program being run (npm's `npx-cli.js` inserts `--` there).
+   *
+   * Which word is that first positional is not certain when it directly follows an option this
+   * check does not recognise (or one it cannot tell takes a value) written without `=`: the
+   * installer may read the word as that option's value, and then the NEXT positional is the
+   * command. Both readings are returned, so every package the command could name is vetted
+   * (at most {@link RUNNER_CANDIDATES_MAX}).
    */
   stopAtFirstPositional?: boolean;
 }
 
+/**
+ * The packages a runner form fetches. With a package option before the command, those values
+ * (the command is then a program inside them). Otherwise the command word itself; and when that
+ * word was ambiguous, also what the other reading fetches: the package options after it, else
+ * the next command word.
+ */
+function runnerPackages(a: Positionals): string[] {
+  if ((a.packageFlagsBeforeCommand ?? a.packageFlags.length) > 0) return a.packageFlags;
+  return a.packageFlags.length ? [...a.positionals.slice(0, 1), ...a.packageFlags] : a.positionals;
+}
+
+/** Positionals a runner form may yield when the command word is ambiguous (see {@link CollectOptions.stopAtFirstPositional}). */
+const RUNNER_CANDIDATES_MAX = 4;
+
 function collectArgs(args: readonly string[], valueFlags: ReadonlySet<string>, indexFlags: ReadonlySet<string>, pkgFlags: ReadonlySet<string>, opts: CollectOptions = {}): Positionals {
   const out: Positionals = { positionals: [], packageFlags: [], customIndex: false, fileInputs: false };
+  /** The previous word was an option that may or may not have taken this word as its value. */
+  let mayBeValue = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === '--') { out.positionals.push(...args.slice(i + 1)); break; }
+    if (a === '--') {
+      // Runner form: only the word after `--` is the command; the rest are its arguments.
+      out.positionals.push(...(opts.stopAtFirstPositional ? args.slice(i + 1, i + 2) : args.slice(i + 1)));
+      break;
+    }
+    const followsAmbiguous = mayBeValue;
+    mayBeValue = false;
     if (a.startsWith('-') && a !== '-') {
       const eq = a.indexOf('=');
       const flag = eq > 0 ? a.slice(0, eq) : a;
       const inlineValue = eq > 0 ? a.slice(eq + 1) : undefined;
-      if (indexFlags.has(flag)) out.customIndex = true;
+      // Runner form, past an ambiguous command word: in the reading where that word IS the command
+      // this option belongs to the program it runs, so it may not move that package off the public path.
+      if (indexFlags.has(flag) && !(opts.stopAtFirstPositional && out.positionals.length > 0)) out.customIndex = true;
       const cls = opts.classify?.(a);
       if (cls?.version) out.versionOption ??= cls.version;
       else if (cls?.unknown) out.versionOption ??= UNRECOGNISED_OPTION;
@@ -427,18 +473,21 @@ function collectArgs(args: readonly string[], valueFlags: ReadonlySet<string>, i
       }
       // Short flag with attached value: -wfoo / -rreq.txt (only for the value-taking shorts).
       if (inlineValue === undefined && (valueFlags.has(flag) || cls?.takesValue)) i++;
+      else if (inlineValue === undefined && (cls?.unknown || cls?.maybeValue)) mayBeValue = true;
       continue;
     }
+    if (opts.stopAtFirstPositional) out.packageFlagsBeforeCommand ??= out.packageFlags.length;
     out.positionals.push(a);
-    if (opts.stopAtFirstPositional) break;
+    if (opts.stopAtFirstPositional && (!followsAmbiguous || out.positionals.length >= RUNNER_CANDIDATES_MAX)) break;
   }
   return out;
 }
 
 /**
  * Pre-verb options (`pnpm --tag beta add x`, `uv --prerelease allow pip install x`): value-skipping scan up to the verb.
- * An unrecognised option may take a value the check does not know about: the word after it is
- * skipped as that value when it is not itself one of `verbs`.
+ * An unrecognised option may take a value the check does not know about (and so may a
+ * version-selection option npm gives a value that this tool is not known to: `maybeValue`):
+ * the word after it is skipped as that value when it is not itself one of `verbs`.
  */
 interface PreVerb { at: number; preIndex: boolean; versionOption?: string }
 function scanPreVerb(args: readonly string[], valueFlags: ReadonlySet<string>, indexFlags: ReadonlySet<string>, classify: Classify, verbs: ReadonlySet<string>): PreVerb {
@@ -451,7 +500,7 @@ function scanPreVerb(args: readonly string[], valueFlags: ReadonlySet<string>, i
     if (cls.version) out.versionOption ??= cls.version;
     else if (cls.unknown) out.versionOption ??= UNRECOGNISED_OPTION;
     const takesNext = !args[i].includes('=') && (valueFlags.has(args[i]) || cls.takesValue === true
-      || (cls.unknown === true && i + 1 < args.length && !args[i + 1].startsWith('-') && !verbs.has(args[i + 1])));
+      || ((cls.unknown === true || cls.maybeValue === true) && i + 1 < args.length && !args[i + 1].startsWith('-') && !verbs.has(args[i + 1])));
     i += takesNext ? 2 : 1;
   }
   out.at = i < args.length ? i : -1;
@@ -558,6 +607,19 @@ export function parseInstallCommands(command: string, depth = 0, inherited: Carr
   };
   for (const { text: stmt, before, after } of splitStatements(command)) {
     let w = words(stmt);
+    // A pipeline member or a background job runs in a subshell, and `a || b` runs `b` only when
+    // `a` fails: what such a statement exports is not known to reach the statements after it.
+    const reaches = before !== '|' && before !== '||' && after !== '|' && after !== '&';
+    // `unset VAR` (any flags) removes the variable; taken as done wherever it appears, which can only add a public check.
+    if (w[0] === 'unset') {
+      for (const x of w.slice(1)) { exported.delete(x); local.delete(x); }
+      continue;
+    }
+    // `declare +x VAR` / `typeset +x VAR` take the export away, like `export -n VAR`.
+    if ((w[0] === 'declare' || w[0] === 'typeset') && w.slice(1).some((x) => /^\+[a-z]*x[a-z]*$/.test(x))) {
+      for (const x of w.slice(1)) exported.delete(x.split('=')[0]);
+      continue;
+    }
     // `export VAR=value` (or `declare -x` / `typeset -x`) sets the variable for every later
     // statement; `export VAR` exports one assigned earlier; `export -n VAR` takes the export away.
     if (w[0] === 'export' || ((w[0] === 'declare' || w[0] === 'typeset') && w.includes('-x'))) {
@@ -607,8 +669,11 @@ export function parseInstallCommands(command: string, depth = 0, inherited: Carr
     const bin = path.basename(w[0]);
     const rest = w.slice(1);
     const stmtRefs: PackageRef[] = [];
+    /** A nested shell was handed this statement's index variables and has applied them itself (it may `unset` one). */
+    let nested = false;
 
     if (SHELLS.has(bin)) {
+      nested = true;
       const ci = rest.findIndex((x) => /^-[a-z]*c$/.test(x));
       if (ci >= 0 && rest[ci + 1]) stmtRefs.push(...parseInstallCommands(rest[ci + 1], depth + 1, { index: stmtIndex, version: envVersion }));
     } else if (NPM_FAMILY.has(bin)) {
@@ -621,19 +686,6 @@ export function parseInstallCommands(command: string, depth = 0, inherited: Carr
       stmtRefs.push(...parsePip(bin, rest));
     } else if (/^python[\d.]*$/.test(bin) && rest[0] === '-m' && /^pip\d*$/.test(rest[1] ?? '')) {
       stmtRefs.push(...parsePip('pip', rest.slice(2)));
-    // A pipeline member or a background job runs in a subshell, and `a || b` runs `b` only when
-    // `a` fails: what such a statement exports is not known to reach the statements after it.
-    const reaches = before !== '|' && before !== '||' && after !== '|' && after !== '&';
-    // `unset VAR` (any flags) removes the variable; taken as done wherever it appears, which can only add a public check.
-    if (w[0] === 'unset') {
-      for (const x of w.slice(1)) { exported.delete(x); local.delete(x); }
-      continue;
-    }
-    // `declare +x VAR` / `typeset +x VAR` take the export away, like `export -n VAR`.
-    if ((w[0] === 'declare' || w[0] === 'typeset') && w.slice(1).some((x) => /^\+[a-z]*x[a-z]*$/.test(x))) {
-      for (const x of w.slice(1)) exported.delete(x.split('=')[0]);
-      continue;
-    }
     } else if (bin === 'uv') {
       stmtRefs.push(...parseUv(rest));
     } else if (bin === 'uvx') {
@@ -669,11 +721,8 @@ function pyRefs(installer: string, tokens: readonly string[], ctx: RefContext, u
   }
   return out;
 }
-    /** A nested shell was handed this statement's index variables and has applied them itself (it may `unset` one). */
-    let nested = false;
 
 function refFlags(ctx: RefContext): Pick<PackageRef, 'customIndex' | 'versionOption'> {
-      nested = true;
   return { ...(ctx.customIndex ? { customIndex: true } : {}), ...(ctx.versionOption ? { versionOption: ctx.versionOption } : {}) };
 }
 
@@ -700,6 +749,21 @@ function npmContext(p: NpmArgv): RefContext & { packages: string[] } {
   return { customIndex, versionOption: selected ?? (unknown ? UNRECOGNISED_OPTION : undefined), packages };
 }
 
+/**
+ * The word(s) `npm exec` / `npx` may run as the command, from `remain[from]`. npm 10 reads an
+ * option it does not define as a switch, so the word after it is the command; an npm that
+ * defines the option might read that word as its value, and then the next word is the command.
+ * Every such reading is returned (at most {@link RUNNER_CANDIDATES_MAX}), so each is vetted.
+ */
+function commandCandidates(p: NpmArgv, from: number): string[] {
+  const out: string[] = [];
+  for (let i = from; i < p.remain.length && out.length < RUNNER_CANDIDATES_MAX; i++) {
+    out.push(p.remain[i]);
+    if (!p.afterUnknown.has(i)) break;
+  }
+  return out;
+}
+
 const NPM_RUNS = (cmd: string | undefined) => cmd === 'install' || cmd === 'install-test' || cmd === 'exec';
 
 /**
@@ -720,7 +784,7 @@ function parseNpm(rest: readonly string[]): PackageRef[] {
   const ctx = npmContext(p);
   const args = p.remain.slice(at + 1);
   // `npm exec` installs its --package values, else the command it is given.
-  if (cmd === 'exec') return npmRefs('npm exec', ctx.packages.length ? ctx.packages : args.slice(0, 1), ctx);
+  if (cmd === 'exec') return npmRefs('npm exec', ctx.packages.length ? ctx.packages : commandCandidates(p, at + 1), ctx);
   return npmRefs(`npm ${p.remain[at]}`, args, ctx);
 }
 
@@ -728,7 +792,7 @@ function parseNpm(rest: readonly string[]): PackageRef[] {
 function parseNpxCli(rest: readonly string[]): PackageRef[] {
   const p = parseNpmArgv(['exec', ...npxArgv(rest)]);
   const ctx = npmContext(p);
-  return npmRefs('npx', ctx.packages.length ? ctx.packages : p.remain.slice(1, 2), ctx);
+  return npmRefs('npx', ctx.packages.length ? ctx.packages : commandCandidates(p, 1), ctx);
 }
 
 const NPM_FAMILY_VERBS = new Set([...NPM_ADD_VERBS, 'dlx', 'global']);
@@ -756,10 +820,9 @@ function parseNpmFamily(bin: string, rest: string[]): PackageRef[] {
 function parseNpx(installer: string, rest: string[], pre: { preIndex: boolean; versionOption?: string } = { preIndex: false }): PackageRef[] {
   const a = collectArgs(rest, VALUE_FLAGS_NPM, INDEX_FLAGS_NPM, new Set(['-p', '--package']), { classify: classifyNpmFamily, stopAtFirstPositional: true });
   const ctx = ctxOf(a, pre);
-  // With -p/--package the positionals are the command to run, not packages.
-  if (a.packageFlags.length) return npmRefs(installer, a.packageFlags, ctx);
-  // Everything after the first positional belongs to the executed command.
-  return a.positionals.length ? npmRefs(installer, [a.positionals[0]], ctx) : [];
+  // With -p/--package the positionals are the command to run, not packages; everything after
+  // the command belongs to the executed command.
+  return npmRefs(installer, runnerPackages(a), ctx);
 }
 
 function parsePip(bin: string, rest: string[]): PackageRef[] {
@@ -809,8 +872,7 @@ function parseUv(rest: string[]): PackageRef[] {
 function parseUvx(installer: string, rest: string[], pre: Array<{ preIndex: boolean; versionOption?: string }> = []): PackageRef[] {
   const a = collectArgs(rest, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set(['--from']), { classify: classifyPython, stopAtFirstPositional: true });
   const ctx = ctxOf(a, ...pre);
-  if (a.packageFlags.length) return pyRefs(installer, a.packageFlags, ctx, true);
-  return a.positionals.length ? pyRefs(installer, [a.positionals[0]], ctx, true) : [];
+  return pyRefs(installer, runnerPackages(a), ctx, true);
 }
 
 const PIPX_VERBS = new Set(['install', 'run']);
@@ -828,8 +890,7 @@ function parsePipx(rest: string[]): PackageRef[] {
   if (verb === 'run') {
     const a = collectArgs(after, VALUE_FLAGS_PIPX, INDEX_FLAGS_PIPX, new Set(['--spec']), { classify: classifyPython, stopAtFirstPositional: true });
     const ctx = ctxOf(a, f);
-    if (a.packageFlags.length) return pyRefs('pipx run', a.packageFlags, ctx);
-    return a.positionals.length ? pyRefs('pipx run', [a.positionals[0]], ctx) : [];
+    return pyRefs('pipx run', runnerPackages(a), ctx);
   }
   return [];
 }

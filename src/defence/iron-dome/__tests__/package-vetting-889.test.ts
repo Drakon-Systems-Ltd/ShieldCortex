@@ -1675,3 +1675,105 @@ describe('#1054 — carried registry state is dropped when it is stale or uncert
     expect(kept?.malicious ?? false).toBe(false);
   });
 });
+
+// #1054 (P2 source-head panel, Daybreak 3): a runner form names the package by
+// its first positional, but with an option the check does not recognise written
+// as `--option WORD pkg` the installer may read WORD as the option's value, and
+// then `pkg` is what runs. Only WORD was vetted. Both readings are vetted now.
+describe('#1054 — a runner command word after an unrecognised option is vetted under both readings', () => {
+  const names = (command: string) => parseInstallCommands(command).map((r) => r.name);
+
+  it('every runner form yields both candidates, each with the version unconfirmed', () => {
+    for (const [command, eco] of [
+      [j('npx', '--future-option', 'VALUE', 'evil-pkg'), 'npm'],
+      [j('npm', 'exec', '--future-option', 'VALUE', 'evil-pkg'), 'npm'],
+      [j('bunx', '--future-option', 'VALUE', 'evil-pkg'), 'npm'],
+      [j('pnpm', 'dlx', '--future-option', 'VALUE', 'evil-pkg'), 'npm'],
+      [j('yarn', 'dlx', '--future-option', 'VALUE', 'evil-pkg'), 'npm'],
+      [j('uvx', '--future-option', 'VALUE', 'evil-pkg'), 'PyPI'],
+      [j('uv', 'tool', 'run', '--future-option', 'VALUE', 'evil-pkg'), 'PyPI'],
+      [j('pipx', 'run', '--future-option', 'VALUE', 'evil-pkg'), 'PyPI'],
+    ] as const) {
+      const refs = parseInstallCommands(command);
+      expect({ command, refs: refs.map((r) => [r.ecosystem, r.name, r.versionOption]) }).toEqual({
+        command, refs: [[eco, 'value', UNRECOGNISED_OPTION], [eco, 'evil-pkg', UNRECOGNISED_OPTION]],
+      });
+    }
+  });
+
+  it('a chain of unrecognised options is followed, up to four candidates', () => {
+    expect(names(j('bunx', '--u1', 'v1', '--u2', 'v2', 'evil-pkg', 'arg'))).toEqual(['v1', 'v2', 'evil-pkg']);
+    expect(names(j('npx', '--u1', 'v1', '--u2', 'v2', 'evil-pkg', 'arg'))).toEqual(['v1', 'v2', 'evil-pkg']);
+    expect(names(j('bunx', '--u1', 'v1', '--u2', 'v2', '--u3', 'v3', '--u4', 'v4', 'fifth'))).toEqual(['v1', 'v2', 'v3', 'v4']);
+  });
+
+  it('an option after the ambiguous word cannot take the first candidate off the public path or drop it', () => {
+    const reg = parseInstallCommands(j('bunx', '--future-option', 'evil-pkg', '--registry=https://private.example', 'other'));
+    expect(reg.map((r) => [r.name, r.customIndex])).toEqual([['evil-pkg', undefined], ['other', undefined]]);
+    // `-p` after the word: in one reading it belongs to the program, in the other it names the package.
+    expect(names(j('bunx', '--future-option', 'evil-pkg', '-p', 'clean-pkg', 'cmd'))).toEqual(['evil-pkg', 'clean-pkg']);
+    expect(names(j('uvx', '--future-option', 'evil-pkg', '--from', 'clean-pkg', 'cmd'))).toEqual(['evil-pkg', 'clean-pkg']);
+  });
+
+  it('controls: no ambiguity without an unrecognised option, with =value, or with -p before the command', () => {
+    expect(names(j('npx', 'evil-pkg', 'arg'))).toEqual(['evil-pkg']);
+    expect(names(j('bunx', 'evil-pkg', 'arg'))).toEqual(['evil-pkg']);
+    expect(names(j('bunx', '--future-option=VALUE', 'evil-pkg', 'arg'))).toEqual(['evil-pkg']);
+    expect(names(j('uvx', '-p', '3.11', 'evil-tool', 'arg'))).toEqual(['evil-tool']);
+    expect(names(j('bunx', '-p', 'clean-pkg', '--future-option', 'cmd', 'arg'))).toEqual(['clean-pkg']);
+    expect(names(j('npx', '-p', 'clean-pkg', '--future-option', 'cmd', 'arg'))).toEqual(['clean-pkg']);
+    expect(names(j('bunx', '--', 'evil-pkg', 'arg'))).toEqual(['evil-pkg']);
+  });
+
+  it('end to end: the package behind the unrecognised option is checked and blocked', async () => {
+    for (const runner of [['npx'], ['bunx'], ['pnpm', 'dlx']]) {
+      const out = await vetToolCall('Bash', { command: j(...runner, '--future-option', 'VALUE', `${MAL_NAME}@1.0.3`) }, opts(fixtureWorld()));
+      expect({ runner, malicious: out!.malicious }).toEqual({ runner, malicious: true });
+    }
+  });
+});
+
+// #1054 (P2 source-head panel, Grok 2): a version-selection option that takes a
+// value, written before the verb with a separate argument. For pip and uv the
+// value was already consumed (the flags are in the value table): pinned here.
+// For pnpm / yarn / bun, `--globalconfig` was classed as version-selecting but
+// not as value-taking, so its value was read as the verb and nothing was vetted.
+describe('#1054 — a value-taking version-selection option before the verb never hides the install', () => {
+  it('pnpm / yarn / bun --globalconfig <file> <verb> <pkg>: the package is found, version unconfirmed', () => {
+    for (const command of [
+      j('pnpm', '--globalconfig', '/tmp/rc', 'add', 'evil-pkg'),
+      j('yarn', '--globalconfig', '/tmp/rc', 'add', 'evil-pkg'),
+      j('bun', '--globalconfig', '/tmp/rc', 'add', 'evil-pkg'),
+      j('pnpm', '--globalconfig', '/tmp/rc', 'dlx', 'evil-pkg'),
+      j('pnpm', '--globalconfig=/tmp/rc', 'add', 'evil-pkg'),
+    ]) {
+      expect({ command, refs: parseInstallCommands(command).map((r) => [r.name, r.versionOption]) }).toEqual({ command, refs: [['evil-pkg', '--globalconfig']] });
+    }
+    // Read as a switch instead (the verb follows it directly): still found.
+    expect(parseInstallCommands(j('pnpm', '--globalconfig', 'add', 'evil-pkg')).map((r) => [r.name, r.versionOption])).toEqual([['evil-pkg', '--globalconfig']]);
+    // After `dlx` the word after it is ambiguous: both are vetted.
+    expect(parseInstallCommands(j('pnpm', 'dlx', '--globalconfig', 'rc-file', 'evil-pkg')).map((r) => r.name)).toEqual(['rc-file', 'evil-pkg']);
+  });
+
+  it('pip / uv: each value-taking version option before the verb, space form (already consumed; pinned)', () => {
+    for (const [flag, value] of [
+      ['--python-version', '3.8'], ['--only-binary', ':all:'], ['--platform', 'manylinux2014_x86_64'], ['--abi', 'cp38'],
+      ['--implementation', 'cp'], ['--prerelease', 'allow'], ['--exclude-newer', '2020-01-01'], ['--resolution', 'lowest'],
+      ['--fork-strategy', 'fewest'], ['--python-platform', 'linux'], ['--exclude-newer-package', 'a=2020-01-01'],
+    ]) {
+      for (const command of [
+        j('pip', flag, value, 'install', 'evil-pkg'),
+        j('uv', 'pip', flag, value, 'install', 'evil-pkg'),
+        j('uv', flag, value, 'pip', 'install', 'evil-pkg'),
+        j('uv', flag, value, 'add', 'evil-pkg'),
+      ]) {
+        expect({ command, refs: parseInstallCommands(command).map((r) => [r.name, r.versionOption]) }).toEqual({ command, refs: [['evil-pkg', flag]] });
+      }
+    }
+  });
+
+  it('end to end: pnpm --globalconfig <file> add <malicious> is checked and blocked', async () => {
+    const out = await vetToolCall('Bash', { command: j('pnpm', '--globalconfig', '/tmp/rc', 'add', `${MAL_NAME}@1.0.3`) }, opts(fixtureWorld()));
+    expect(out!.malicious).toBe(true);
+  });
+});
