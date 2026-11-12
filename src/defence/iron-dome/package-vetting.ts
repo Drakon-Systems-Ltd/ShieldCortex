@@ -310,7 +310,7 @@ const MAX_DEPTH = 3;
 const INDEX_ENV = /^(?:npm_config_(?:[^=]*:)?registry|PIP_(?:EXTRA_)?INDEX_URL|PIP_FIND_LINKS|UV_(?:DEFAULT_|EXTRA_)?INDEX(?:_URL)?|UV_FIND_LINKS)=/i;
 
 /**
- * Package installs named by a shell command: npm/pnpm/yarn/bun add or install,
+ * Package installs named by a shell command: npm/pnpm/bun add or install, yarn add,
  * npx/bunx/pnpm dlx/yarn dlx/npm exec, pip/pip3 install (also `python -m pip`),
  * uv add / uv pip install / uvx / uv tool run|install, pipx install|run.
  *
