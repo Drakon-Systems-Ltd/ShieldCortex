@@ -594,6 +594,9 @@ function indexVariableApplies(name: string, ref: PackageRef): boolean {
   return false;
 }
 
+/** `VAR=` for an index variable: set to nothing, which no installer reads as a custom index. */
+const emptyIndexAssignment = (word: string) => word.endsWith('=') && word.indexOf('=') === word.length - 1 && INDEX_ENV.test(word);
+
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_@:.-]*=/;
 
 /**
@@ -645,6 +648,8 @@ export function parseInstallCommands(command: string, depth = 0, inherited: Carr
         const name = x.split('=')[0];
         if (unexport) { exported.delete(name); continue; }
         carryVersion(x);
+        // An empty value points nowhere: the installer falls back to its default (public) index.
+        if (emptyIndexAssignment(x)) { exported.delete(name); local.delete(name); continue; }
         if (!reaches) continue;
         if (x.includes('=') ? INDEX_ENV.test(x) : local.has(name)) { exported.add(name); local.delete(name); }
       }
@@ -656,6 +661,7 @@ export function parseInstallCommands(command: string, depth = 0, inherited: Carr
       for (const x of w) {
         carryVersion(x);
         const name = x.split('=')[0];
+        if (emptyIndexAssignment(x)) { exported.delete(name); local.delete(name); continue; }
         if (INDEX_ENV.test(x) && reaches && !exported.has(name)) local.add(name);
       }
       continue;
@@ -663,7 +669,8 @@ export function parseInstallCommands(command: string, depth = 0, inherited: Carr
     const stmtIndex = new Set(exported);
     let envVersion: string | undefined = carriedVersion;
     const noteEnv = (word: string) => {
-      if (INDEX_ENV.test(word)) stmtIndex.add(word.split('=')[0]);
+      if (emptyIndexAssignment(word)) stmtIndex.delete(word.split('=')[0]);
+      else if (INDEX_ENV.test(word)) stmtIndex.add(word.split('=')[0]);
       // The variable name, lower-cased, from the fixed alternatives above: safe to show.
       const m = VERSION_ENV.exec(word);
       if (m) envVersion ??= m[1].toLowerCase();

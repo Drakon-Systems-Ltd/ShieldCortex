@@ -1839,3 +1839,45 @@ describe('#1054 — every runner candidate read before a later package option is
     expect(names('bunx', '--package', 'clean-pkg', '--u1', 'v1', 'cmd')).toEqual(['clean-pkg']);
   });
 });
+
+// #1054, panel round 2 on the P2 PR (Sol 1): an index variable set to nothing was carried as a
+// custom index, so the install after it got no public lookup, although the installer then uses
+// its default index. (Daybreak 1 in the same round said `python -m pip` falls outside the pip
+// family: it does not, its installer label is `pip install`; pinned below.)
+describe('#1054 — an index variable set to nothing is not a custom index; python -m pip is in the pip family', () => {
+  const PKG = 'some-pkg';
+  const custom = (...parts: string[]) => parseInstallCommands(j(...parts)).map((r) => r.customIndex === true);
+  const PIP = 'PIP_INDEX_URL=https://private.example/simple';
+
+  it('empty export, empty overwrite, empty prefix and empty value in a nested shell', () => {
+    expect(custom('export', 'PIP_INDEX_URL=;', 'pip', 'install', PKG)).toEqual([false]);
+    expect(custom('export', 'PIP_INDEX_URL="";', 'pip', 'install', PKG)).toEqual([false]);
+    expect(custom('export', 'npm_config_registry=;', 'npm', 'install', PKG)).toEqual([false]);
+    expect(custom('export', `${PIP};`, 'export', 'PIP_INDEX_URL=;', 'pip', 'install', PKG)).toEqual([false]);
+    expect(custom('export', `${PIP};`, 'PIP_INDEX_URL=;', 'pip', 'install', PKG)).toEqual([false]);
+    expect(custom('export', `${PIP};`, 'PIP_INDEX_URL=', 'pip', 'install', PKG)).toEqual([false]);
+    expect(custom('PIP_INDEX_URL=', 'pip', 'install', PKG)).toEqual([false]);
+    expect(parseInstallCommands(`export ${PIP}; sh -c 'PIP_INDEX_URL= pip install ${PKG}'`).map((r) => r.customIndex === true)).toEqual([false]);
+    expect(parseMcpServerEntry({ command: 'uvx', args: ['some-tool'], env: { UV_INDEX_URL: '' } })[0].customIndex).toBeUndefined();
+  });
+
+  it('controls: a value still counts, and so does a value set again after an empty one', () => {
+    expect(custom('export', `${PIP};`, 'pip', 'install', PKG)).toEqual([true]);
+    expect(custom('export', 'PIP_INDEX_URL=;', 'export', `${PIP};`, 'pip', 'install', PKG)).toEqual([true]);
+    expect(custom('export', `${PIP}`, 'PIP_EXTRA_INDEX_URL=;', 'pip', 'install', PKG)).toEqual([true]);
+  });
+
+  it('python -m pip takes PIP_* as a prefix, an export and in a nested shell (pinned)', () => {
+    expect(parseInstallCommands(j(PIP, 'python', '-m', 'pip', 'install', PKG)).map((r) => [r.installer, r.customIndex])).toEqual([['pip install', true]]);
+    expect(custom('export', `${PIP};`, 'python3', '-m', 'pip', 'install', PKG)).toEqual([true]);
+    expect(parseInstallCommands(`export ${PIP}; sh -c 'python -m pip install ${PKG}'`).map((r) => r.customIndex === true)).toEqual([true]);
+    expect(custom('export', 'npm_config_registry=https://private.example;', 'python', '-m', 'pip', 'install', PKG)).toEqual([false]);
+  });
+
+  it('end to end: the install after an empty export is looked up, and a known-malicious package is blocked', async () => {
+    const w = fixtureWorld();
+    const out = await vetToolCall('Bash', { command: j('export', 'npm_config_registry=;', 'npm', 'install', `${MAL_NAME}@1.0.3`) }, opts(w));
+    expect(w.calls.length).toBeGreaterThan(0);
+    expect(out!.malicious).toBe(true);
+  });
+});
