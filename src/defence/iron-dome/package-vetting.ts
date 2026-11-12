@@ -140,9 +140,19 @@ const BATCH_CONCURRENCY = 3;
 
 // ── Command parsing ─────────────────────────────────────────────────────────
 
-/** Split on statement separators outside quotes. */
-function splitStatements(cmd: string): string[] {
-  const out: string[] = [];
+/** A statement with the separators on either side of it (`''` at either end of the command). */
+interface Statement { text: string; before: string; after: string }
+
+/** Split on statement separators outside quotes, keeping the separator on each side (`;`, a newline, `|`, `||`, `&`, `&&`). */
+function splitStatements(cmd: string): Statement[] {
+  const out: Statement[] = [];
+  let before = '';
+  const push = (text: string, after: string) => {
+    const t = text.trim();
+    // An empty statement (`a;; b`, `a &\n b`) is dropped; the separator nearest the next statement is the one it sees.
+    if (t) out.push({ text: t, before, after });
+    before = after;
+  };
   let cur = '';
   let q: '"' | "'" | null = null;
   for (let i = 0; i < cmd.length; i++) {
@@ -161,15 +171,16 @@ function splitStatements(cmd: string): string[] {
       continue;
     }
     if (c === ';' || c === '\n' || c === '|' || c === '&') {
-      out.push(cur);
+      let sep = c;
+      while (cmd[i + 1] === c && (c === '|' || c === '&')) { i++; sep = c + c; }
+      push(cur, sep);
       cur = '';
-      while (cmd[i + 1] === c && (c === '|' || c === '&')) i++;
       continue;
     }
     cur += c;
   }
-  out.push(cur);
-  return out.map((s) => s.trim()).filter(Boolean);
+  push(cur, '');
+  return out;
 }
 
 /** Shell-ish word split: quotes removed, backslash escapes honoured. */
@@ -511,8 +522,14 @@ const INDEX_ENV = /^(?:npm_config_(?:[^=]*:)?registry|PIP_(?:EXTRA_)?INDEX_URL|P
 /** Environment variables that change which version is selected (the {@link VERSION_FLAGS_NPM} / {@link VERSION_FLAGS_PIP} settings). */
 const VERSION_ENV = /^(npm_config_(?:tag|before|include[_-]staged|resolution[_-]mode|userconfig|globalconfig)|PIP_(?:PRE|ONLY_BINARY|PREFER_BINARY|PYTHON_VERSION|PLATFORM|ABI|IMPLEMENTATION)|UV_(?:PRERELEASE|EXCLUDE_NEWER|RESOLUTION))=/i;
 
-/** Index / version-selection variables exported earlier in the command (`export NPM_CONFIG_TAG=beta; npm i x`). */
-interface CarriedEnv { index: boolean; version?: string }
+/**
+ * Index / version-selection variables in force for a statement: exported earlier in the command
+ * (`export NPM_CONFIG_TAG=beta; npm i x`), or handed down to a nested `sh -c`.
+ * `index` holds the NAMES of the index variables still exported, so `unset` can take one away.
+ */
+interface CarriedEnv { index: ReadonlySet<string>; version?: string }
+
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_@:.-]*=/;
 
 /**
  * Package installs named by a shell command: npm/pnpm/bun add or install, yarn add,
@@ -523,41 +540,62 @@ interface CarriedEnv { index: boolean; version?: string }
  * URLs, git specs and tarballs are skipped (nothing to look up by name), and a
  * bare `npm install` (no packages) yields nothing.
  */
-export function parseInstallCommands(command: string, depth = 0, inherited: CarriedEnv = { index: false }): PackageRef[] {
+export function parseInstallCommands(command: string, depth = 0, inherited: CarriedEnv = { index: new Set() }): PackageRef[] {
   if (typeof command !== 'string' || !command || depth > MAX_DEPTH) return [];
   const refs: PackageRef[] = [];
-  const carried: CarriedEnv = { ...inherited };
-  const carry = (word: string) => {
-    if (INDEX_ENV.test(word)) carried.index = true;
+  // A custom index means "no public lookup", so carried index state has to be certain: only a
+  // variable this command exported, and has not unset since, counts. Anything stale or uncertain
+  // (unset, un-exported, assigned without `export`, exported in a subshell or on the far side of
+  // `||`) leaves the install on the public path, where it is checked. A version-selection variable
+  // errs the other way: once seen it stays carried, which can only make the version unconfirmed.
+  const exported = new Set(inherited.index);
+  /** Index variables assigned without `export` (shell variables: no child process sees them). */
+  const local = new Set<string>();
+  let carriedVersion = inherited.version;
+  const carryVersion = (word: string) => {
     const m = VERSION_ENV.exec(word);
-    if (m) carried.version ??= m[1].toLowerCase();
+    if (m) carriedVersion ??= m[1].toLowerCase();
   };
-  for (const stmt of splitStatements(command)) {
+  for (const { text: stmt, before, after } of splitStatements(command)) {
     let w = words(stmt);
     // `export VAR=value` (or `declare -x` / `typeset -x`) sets the variable for every later
-    // statement; so may a bare `VAR=value` statement when VAR is already exported.
+    // statement; `export VAR` exports one assigned earlier; `export -n VAR` takes the export away.
     if (w[0] === 'export' || ((w[0] === 'declare' || w[0] === 'typeset') && w.includes('-x'))) {
-      for (const x of w.slice(1)) carry(x);
+      const unexport = w[0] === 'export' && w.slice(1).some((x) => /^-[a-z]*n[a-z]*$/.test(x));
+      for (const x of w.slice(1)) {
+        if (x.startsWith('-') || x.startsWith('+')) continue;
+        const name = x.split('=')[0];
+        if (unexport) { exported.delete(name); continue; }
+        carryVersion(x);
+        if (!reaches) continue;
+        if (x.includes('=') ? INDEX_ENV.test(x) : local.has(name)) { exported.add(name); local.delete(name); }
+      }
       continue;
     }
-    if (w.length && w.every((x) => /^[A-Za-z_][A-Za-z0-9_@:.-]*=/.test(x))) {
-      for (const x of w) carry(x);
+    // A bare `VAR=value` statement sets a shell variable. Child processes see it only when VAR
+    // is already exported, which this command shows only by its own earlier `export`.
+    if (w.length && w.every((x) => ASSIGNMENT.test(x))) {
+      for (const x of w) {
+        carryVersion(x);
+        const name = x.split('=')[0];
+        if (INDEX_ENV.test(x) && reaches && !exported.has(name)) local.add(name);
+      }
       continue;
     }
-    let envIndex = carried.index;
-    let envVersion: string | undefined = carried.version;
+    const stmtIndex = new Set(exported);
+    let envVersion: string | undefined = carriedVersion;
     const noteEnv = (word: string) => {
-      if (INDEX_ENV.test(word)) envIndex = true;
+      if (INDEX_ENV.test(word)) stmtIndex.add(word.split('=')[0]);
       // The variable name, lower-cased, from the fixed alternatives above: safe to show.
       const m = VERSION_ENV.exec(word);
       if (m) envVersion ??= m[1].toLowerCase();
     };
     // Leading VAR=value assignments and transparent wrappers.
     for (;;) {
-      if (w.length && /^[A-Za-z_][A-Za-z0-9_@:.-]*=/.test(w[0])) { noteEnv(w[0]); w = w.slice(1); continue; }
+      if (w.length && ASSIGNMENT.test(w[0])) { noteEnv(w[0]); w = w.slice(1); continue; }
       if (w.length && WRAPPERS.has(path.basename(w[0]))) {
         w = w.slice(1);
-        while (w.length && (w[0].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_@:.-]*=/.test(w[0]) || /^\d+[smhd]?$/.test(w[0]))) {
+        while (w.length && (w[0].startsWith('-') || ASSIGNMENT.test(w[0]) || /^\d+[smhd]?$/.test(w[0]))) {
           noteEnv(w[0]);
           w = w.slice(1);
         }
@@ -572,7 +610,7 @@ export function parseInstallCommands(command: string, depth = 0, inherited: Carr
 
     if (SHELLS.has(bin)) {
       const ci = rest.findIndex((x) => /^-[a-z]*c$/.test(x));
-      if (ci >= 0 && rest[ci + 1]) stmtRefs.push(...parseInstallCommands(rest[ci + 1], depth + 1, { index: envIndex, version: envVersion }));
+      if (ci >= 0 && rest[ci + 1]) stmtRefs.push(...parseInstallCommands(rest[ci + 1], depth + 1, { index: stmtIndex, version: envVersion }));
     } else if (NPM_FAMILY.has(bin)) {
       stmtRefs.push(...parseNpmFamily(bin, rest));
     } else if (bin === 'npx') {
@@ -583,6 +621,19 @@ export function parseInstallCommands(command: string, depth = 0, inherited: Carr
       stmtRefs.push(...parsePip(bin, rest));
     } else if (/^python[\d.]*$/.test(bin) && rest[0] === '-m' && /^pip\d*$/.test(rest[1] ?? '')) {
       stmtRefs.push(...parsePip('pip', rest.slice(2)));
+    // A pipeline member or a background job runs in a subshell, and `a || b` runs `b` only when
+    // `a` fails: what such a statement exports is not known to reach the statements after it.
+    const reaches = before !== '|' && before !== '||' && after !== '|' && after !== '&';
+    // `unset VAR` (any flags) removes the variable; taken as done wherever it appears, which can only add a public check.
+    if (w[0] === 'unset') {
+      for (const x of w.slice(1)) { exported.delete(x); local.delete(x); }
+      continue;
+    }
+    // `declare +x VAR` / `typeset +x VAR` take the export away, like `export -n VAR`.
+    if ((w[0] === 'declare' || w[0] === 'typeset') && w.slice(1).some((x) => /^\+[a-z]*x[a-z]*$/.test(x))) {
+      for (const x of w.slice(1)) exported.delete(x.split('=')[0]);
+      continue;
+    }
     } else if (bin === 'uv') {
       stmtRefs.push(...parseUv(rest));
     } else if (bin === 'uvx') {
@@ -591,7 +642,7 @@ export function parseInstallCommands(command: string, depth = 0, inherited: Carr
       stmtRefs.push(...parsePipx(rest));
     }
     // An index/registry or version-selection env var set for this statement applies to every package it names.
-    if (envIndex) for (const r of stmtRefs) r.customIndex = true;
+    if (stmtIndex.size > 0 && !nested) for (const r of stmtRefs) r.customIndex = true;
     if (envVersion) for (const r of stmtRefs) r.versionOption ??= envVersion;
     refs.push(...stmtRefs);
   }
@@ -618,8 +669,11 @@ function pyRefs(installer: string, tokens: readonly string[], ctx: RefContext, u
   }
   return out;
 }
+    /** A nested shell was handed this statement's index variables and has applied them itself (it may `unset` one). */
+    let nested = false;
 
 function refFlags(ctx: RefContext): Pick<PackageRef, 'customIndex' | 'versionOption'> {
+      nested = true;
   return { ...(ctx.customIndex ? { customIndex: true } : {}), ...(ctx.versionOption ? { versionOption: ctx.versionOption } : {}) };
 }
 
