@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Doctor no longer suggests turning Action Guard off to clear a posture mismatch (#1037).** When the signed setting is off or advisory and a live plane is stricter, the Action guard posture row states both directions and names no command. It no longer offers a single command that would turn that plane off or drop it to advisory. Off remains the default. Nothing about what the guard allows or blocks changes.
+
 ## [5.20.0] - 2026-11-12
 
 Minor on 5.19.0. Adds pre-install package vetting to Action Guard and agent-config watch, and fixes read-only command classification, prompt recall, update guidance, and agent-config tamper scanning. Action Guard remains off by default.

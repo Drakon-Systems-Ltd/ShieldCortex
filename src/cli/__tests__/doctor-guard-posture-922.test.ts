@@ -139,13 +139,16 @@ describe('#922 doctor — one Action guard posture row', () => {
     expect(doctor.doctorExitCode([row])).not.toBe(0);
   });
 
-  it('signed off + plugin entry enabled:true FAILs with the signed setter, which turns nothing on', () => {
+  it('#1037: signed off + plugin entry enabled:true FAILs and does not suggest turning Guard off', () => {
     claudeHookWired();
     signed({ enabled: false });
     openclawEntry({ enabled: true, config: { actionGuard: { enabled: true } } });
     const row = doctor.checkGuardPosture();
     expect(row.status).toBe('fail');
-    expect(row.fix).toMatch(/`shieldcortex config --action-guard-disable`/);
+    expect(row.fix).toMatch(/would turn Action Guard off on that plane/);
+    expect(row.fix).toMatch(/names no command/);
+    expect(row.fix ?? '').not.toMatch(/--action-guard-disable/);
+    expect(row.fix ?? '').not.toMatch(/`[^`]*(--action-guard-(disable|advisory)|guard posture (off|advisory))[^`]*`/);
   });
 
   it('Hermes self-report looser than the hook FAILs; tighter on a default box warns (Q4 pending)', () => {
