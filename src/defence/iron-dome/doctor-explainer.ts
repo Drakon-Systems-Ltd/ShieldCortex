@@ -63,7 +63,9 @@ export interface DoctorFinding {
 /** The explainer's whole output. Deliberately small, and deliberately free of
  *  anything that looks like a verdict — see the file header. */
 export interface DoctorExplainerResult {
-  /** Plain-English guess at the single cause connecting the cited findings. */
+  /** Plain-English guess at the single cause connecting the cited findings.
+   *  When a posture finding governs the result (#1037) this is always
+   *  AI_POSTURE_SAFE_HYPOTHESIS: the model's own words are never shown. */
   hypothesis: string;
   /** Finding labels, filtered to ones actually shown to the model — the
    *  grounding check that stops a confabulated citation from surviving. */
@@ -227,9 +229,9 @@ export const AI_POSTURE_READ_ONLY_COMMANDS: readonly string[] = Object.freeze([
 export const AI_POSTURE_SAFE_COMMAND = 'shieldcortex doctor --verbose';
 
 /**
- * #1037: shown in place of a hypothesis that tells the operator to change a
- * posture when a posture finding governs the result. Fixed text, so it cannot
- * carry a prescription; the cited labels and confidence are kept.
+ * #1037: always shown in place of the model's hypothesis when a posture
+ * finding governs the result, whatever the model wrote. Fixed text, so it
+ * cannot carry a prescription; the cited labels and confidence are kept.
  */
 export const AI_POSTURE_SAFE_HYPOTHESIS =
   'The Action guard posture check is part of this failure. Which posture each plane runs is your decision, ' +
@@ -276,36 +278,6 @@ const POSTURE_CHANGING_COMMAND = new RegExp(
 
 function prescribesPostureChange(text: string): boolean {
   return POSTURE_CHANGING_COMMAND.test(foldForMatch(text));
-}
-
-/**
- * #1037: a hypothesis on a posture finding that reads as a step to take
- * rather than an explanation — any inline code, shell syntax, flag or
- * `NAME=value`; the word "run"; a verb that switches a plane off, down or out
- * (disable, uninstall, remove, turn/set/switch … off or advisory, stop …);
- * `enforce`/`enabled` set false; any letter outside the Latin script (a
- * look-alike spelling). Deliberately broad: a match costs only the model's
- * wording, which is replaced with AI_POSTURE_SAFE_HYPOTHESIS, while the
- * doctor row above it still explains the mismatch in full.
- */
-const POSTURE_HYPOTHESIS_STEP: readonly RegExp[] = [
-  /[`$|]|&&/,
-  /(?:^|\s)-{1,2}[a-z]/i,
-  /[A-Za-z_]\w*\s*=/,
-  /(?!\p{Script=Latin})\p{L}/u,
-  /\brun\b/i,
-  /\b(?:disabl|uninstall|remov|delet|unload|deactivat|downgrad|loosen|relax|lower|unregister|detach)(?:e|es|ing|s)?\b/i,
-  // "Setting" is left out here: "the signed setting is off" explains.
-  /\b(?:turn(?:s|ing)?|switch(?:es|ing)?|sets?|put(?:s|ting)?|drop(?:s|ping)?|flip(?:s|ping)?|tak(?:e|es|ing)|bring(?:s|ing)?|mov(?:e|es|ing)|chang(?:e|es|ing)|mak(?:e|es|ing)|mark(?:s|ing)?)\b.{0,60}?\b(?:off|down|advisory|false|0|warn-mode|out)\b/i,
-  /\bsetting\b.{0,60}?\bto\s+(?:off|advisory|false|0|warn-mode)\b/i,
-  /\bstop(?:s|ping)?\b/i,
-  /\b(?:enforce|enabled?|actionGuard)\b\s*[:=]?\s*(?:false|0|off|no)\b/i,
-  /\b(?:guard|posture|plugins?|config)\s+(?:off|advisory|disable|uninstall|remove|set|unset)\b/i,
-];
-
-function hypothesisPrescribesStep(text: string): boolean {
-  const folded = foldForMatch(text);
-  return POSTURE_HYPOTHESIS_STEP.some((re) => re.test(folded)) || prescribesPostureChange(text);
 }
 
 /** Exact match against the closed read-only set, after collapsing whitespace. */
@@ -378,11 +350,11 @@ export function parseDoctorExplainerResponse(
   const shownHypothesis = trimmedHypothesis.slice(0, MAX_HYPOTHESIS_CHARS);
   const postureGoverned = opts.postureFailing === true || citedLabels.includes(POSTURE_FINDING_LABEL);
   if (postureGoverned) {
-    // Structural: the next step is picked from a closed read-only set, and a
-    // hypothesis that reads as a step is replaced with fixed text.
-    const prescribes = hypothesisPrescribesStep(trimmedHypothesis) || hypothesisPrescribesStep(shownHypothesis);
+    // Structural: no free model text reaches the operator here. The
+    // hypothesis is fixed text and the next step is picked from a closed
+    // read-only set; the cited labels and confidence are kept.
     return {
-      hypothesis: prescribes ? AI_POSTURE_SAFE_HYPOTHESIS : shownHypothesis,
+      hypothesis: AI_POSTURE_SAFE_HYPOTHESIS,
       citedLabels,
       suggestedCommand: readOnlyPostureCommand(trimmedCommand),
       confidence,

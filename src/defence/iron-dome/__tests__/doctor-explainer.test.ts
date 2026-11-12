@@ -298,7 +298,8 @@ describe('#1037 r2: a posture finding gets a read-only next step from a closed s
   ])('a cited posture finding: replaces %s', (unsafe) => {
     const r = parseDoctorExplainerResponse(reply(unsafe), known);
     expect(r?.suggestedCommand).toBe(AI_POSTURE_SAFE_COMMAND);
-    expect(r?.hypothesis).toBe('The plugin entry overrides the signed setting.');
+    // The model's own hypothesis is never shown on a posture-governed result.
+    expect(r?.hypothesis).toBe(AI_POSTURE_SAFE_HYPOTHESIS);
   });
 
   it.each([...AI_POSTURE_READ_ONLY_COMMANDS])('a cited posture finding: keeps %s', (safe) => {
@@ -306,22 +307,56 @@ describe('#1037 r2: a posture finding gets a read-only next step from a closed s
     expect(parseDoctorExplainerResponse(reply(` ${safe.replace(/ /g, '   ')} `), known)?.suggestedCommand).toBe(safe);
   });
 
-  it.each([
-    'Run hermes plugins disable shieldcortex to align the planes.',
-    'Run `shieldcortex guard posture` and then pick a side.',
-    'Disable the Hermes plugin so the planes agree.',
-    'Turn the plugin entry off.',
-    'Set enforce: false on the plugin entry.',
-    'Setting SHIELDCORTEX_ENFORCE=0 would align Hermes.',
-    'Downgrade the hook to advisory.',
-  ])('a cited posture finding: replaces the hypothesis %s', (hypothesis) => {
-    const r = parseDoctorExplainerResponse(reply('shieldcortex guard posture', hypothesis), known);
-    expect(r).toEqual({
-      hypothesis: AI_POSTURE_SAFE_HYPOTHESIS,
-      citedLabels: [POSTURE_FINDING_LABEL],
-      suggestedCommand: 'shieldcortex guard posture',
-      confidence: 'medium',
-    });
+  /*
+   * #1037 adjudication: when a posture finding governs the result, the
+   * model's hypothesis is never shown, whatever it says — prescriptive,
+   * descriptive, or spelled to slip past a pattern. Governed either by citing
+   * the posture row or by `postureFailing`; the command is always from the
+   * closed read-only set.
+   */
+  it('a governed result always shows the fixed hypothesis and a closed-set command', () => {
+    const COMBINING_LOW_LINE = String.fromCharCode(0x332);
+    const hypotheses = [
+      'Run hermes plugins disable shieldcortex to align the planes.',
+      'Run `shieldcortex guard posture` and then pick a side.',
+      'Disable the Hermes plugin so the planes agree.',
+      'Turn the plugin entry off.',
+      'Set enforce: false on the plugin entry.',
+      'Setting SHIELDCORTEX_ENFORCE=0 would align Hermes.',
+      'Downgrade the hook to advisory.',
+      'For the OpenClaw plugin, use advisory instead of enforcement.',
+      'Ensure the Hermes ShieldCortex plugin is disabled so the planes agree.',
+      'The Hermes plugin should be disabled to align the planes.',
+      'The OpenClaw plugin should be disabled so the planes agree.',
+      'The hook should be turned off.',
+      'The hook should be switched to advisory.',
+      'The OpenClaw plugin should be off.',
+      'The hook ought to be advisory.',
+      'Advisory on the Claude Code hook would make the planes agree.',
+      'SHIELDCORTEX_ENFORCE should be 0 so Hermes matches the signed setting.',
+      'Opt Hermes out of enforcement so the planes agree.',
+      'Shut the OpenClaw plugin down so the planes agree.',
+      'Align the OpenClaw plugin with the signed setting so the planes agree.',
+      `Dis${COMBINING_LOW_LINE}able the Hermes plugin so the planes agree.`,
+      'The OpenClaw plugin entry overrides the signed setting.',
+      'The OpenClaw plugin entry is stricter than the signed config, so the two planes disagree.',
+      'Hermes reads its posture from the gateway environment, not from config.json, so it can differ from the hook.',
+    ];
+    const governedBy: Array<[string, string[], { postureFailing?: boolean }]> = [
+      ['cited', [POSTURE_FINDING_LABEL], {}],
+      ['postureFailing', [failFinding.label], { postureFailing: true }],
+    ];
+    for (const hypothesis of hypotheses) {
+      for (const [, cited, opts] of governedBy) {
+        for (const command of ['shieldcortex guard posture', 'hermes plugins disable shieldcortex']) {
+          const r = parseDoctorExplainerResponse(reply(command, hypothesis, cited), known, opts);
+          expect(r?.hypothesis).toBe(AI_POSTURE_SAFE_HYPOTHESIS);
+          expect(AI_POSTURE_READ_ONLY_COMMANDS).toContain(r?.suggestedCommand);
+          expect(r?.citedLabels).toEqual(cited);
+          expect(r?.confidence).toBe('medium');
+        }
+      }
+    }
   });
 
   it('postureFailing governs a result that cites only another finding', () => {
