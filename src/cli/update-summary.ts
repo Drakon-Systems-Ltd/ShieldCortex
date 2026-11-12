@@ -36,7 +36,7 @@ export interface UpdateSummaryRow {
   why?: string;
   /** Exactly one command. */
   command?: string;
-  /** Word shown before the command: Fix, Check, Turn on. */
+  /** Word shown before the command: Fix, Check. */
   commandLabel?: string;
   /** Short plain note after the command, e.g. where to run it. */
   commandNote?: string;
@@ -119,7 +119,6 @@ export const BANNED_DEFAULT_PATTERNS: readonly RegExp[] = [/\b[0-9a-f]{12,}\b/, 
 /** First version where Action Guard is off unless explicitly enabled. */
 export const GUARD_DEFAULT_OFF_SINCE = '4.54.15';
 
-export const GUARD_ON_COMMAND = 'shieldcortex config --action-guard-enable';
 export const GUARD_STATUS_COMMAND = 'shieldcortex guard readiness';
 
 function plural(n: number, one: string, many: string): string {
@@ -365,12 +364,12 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
       commandLabel: 'Check',
     });
   } else if (!input.guardOn) {
+    // Status only. Enabling Guard is gated on the real-agent exam; the
+    // update panel must not hand the owner a copy-paste enable command (#1039).
     rows.push({
       label: 'Guard',
       mark: 'off',
       text: 'off (the default)',
-      command: GUARD_ON_COMMAND,
-      commandLabel: 'Turn on',
     });
   } else if (pluginAbsent) {
     // Guard is on, but the gateway it relies on has no plugin. Red, like the
@@ -530,7 +529,7 @@ export function renderGuardDefaultOffNotice(opts: { style?: TermStyle; ascii?: b
   const mark = opts.ascii ? '[off]' : '\u25cb';
   return [
     '  ' + style.dim + mark + style.reset + '  ' + style.bold + 'Action Guard is off by default since ' + GUARD_DEFAULT_OFF_SINCE + '.' + style.reset,
-    '     Turn on: ' + style.cyan + GUARD_ON_COMMAND + style.reset,
+    '     Guard is opt-in. It stays off until you choose otherwise.',
     '     Status:  ' + style.cyan + GUARD_STATUS_COMMAND + style.reset,
   ];
 }

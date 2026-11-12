@@ -8,7 +8,6 @@ exports[`NO_COLOR / non-TTY rendering plain ASCII markers, no colour codes, no b
   [ok]  OpenClaw       plugin 5.9.0 installed, gateway restarted
   [ok]  Skill          updated
   [off] Guard          off (the default)
-                       Turn on: shieldcortex config --action-guard-enable
 
 ShieldCortex updated   5.7.0 -> 5.9.0
 
@@ -39,7 +38,6 @@ ShieldCortex updated to 5.9.0 - 1 thing to check
                        Fix: shieldcortex update
                        Run it in a terminal where the hermes command works.
   [off] Guard          off (the default)
-                       Turn on: shieldcortex config --action-guard-enable
 
 Update failed - ShieldCortex is still on 5.7.0
 
@@ -50,7 +48,6 @@ Update failed - ShieldCortex is still on 5.7.0
   [ok]  OpenClaw       plugin 5.9.0 installed, gateway restarted
   [ok]  Skill          updated
   [off] Guard          off (the default)
-                       Turn on: shieldcortex config --action-guard-enable
 
 ShieldCortex updated to 5.9.0 - 1 thing to check
 
@@ -62,7 +59,6 @@ ShieldCortex updated to 5.9.0 - 1 thing to check
                          @drakon-systems/shieldcortex-realtime@latest
   [ok]  Skill          updated
   [off] Guard          off (the default)
-                       Turn on: shieldcortex config --action-guard-enable
 
 ShieldCortex updated to 5.9.0 - 2 things to check
 
@@ -101,7 +97,6 @@ Update failed - 1 problem to fix
                        Fix: shieldcortex repair
   [ok]  Skill          updated
   [off] Guard          off (the default)
-                       Turn on: shieldcortex config --action-guard-enable
 
 ShieldCortex updated to 5.9.0 - 1 thing to check
 
@@ -112,7 +107,6 @@ ShieldCortex updated to 5.9.0 - 1 thing to check
                        Fix: systemctl --user restart openclaw-gateway
   [ok]  Skill          updated
   [off] Guard          off (the default)
-                       Turn on: shieldcortex config --action-guard-enable
 
 ShieldCortex updated to 5.9.0 - 1 thing to check
 
@@ -124,7 +118,6 @@ ShieldCortex updated to 5.9.0 - 1 thing to check
                        Check: shieldcortex doctor
   [ok]  Skill          updated
   [off] Guard          off (the default)
-                       Turn on: shieldcortex config --action-guard-enable
 
 ShieldCortex updated to 5.9.0 - 1 thing to check
 
@@ -137,7 +130,6 @@ ShieldCortex updated to 5.9.0 - 1 thing to check
                        Check: shieldcortex doctor
   [ok]  Skill          updated
   [off] Guard          off (the default)
-                       Turn on: shieldcortex config --action-guard-enable
 
 ShieldCortex updated to 5.9.0 - 1 thing to check
 
@@ -148,8 +140,7 @@ ShieldCortex updated to 5.9.0 - 1 thing to check
                        gateway restart.
                        Fix: systemctl --user restart openclaw-gateway
   [ok]  Skill          updated
-  [off] Guard          off (the default)
-                       Turn on: shieldcortex config --action-guard-enable"
+  [off] Guard          off (the default)"
 `;
 
 exports[`update summary: five scenarios a: all OK, Guard off (snapshot) 1`] = `
@@ -159,8 +150,7 @@ exports[`update summary: five scenarios a: all OK, Guard off (snapshot) 1`] = `
   ✓ Engine         ready
   ✓ OpenClaw       plugin 5.9.0 installed, gateway restarted
   ✓ Skill          updated
-  ○ Guard          off (the default)
-                   Turn on: shieldcortex config --action-guard-enable"
+  ○ Guard          off (the default)"
 `;
 
 exports[`update summary: five scenarios b: all OK, Guard on and proven (snapshot) 1`] = `
@@ -196,8 +186,7 @@ exports[`update summary: five scenarios d: Hermes present, no interpreter (snaps
                    Hermes keeps running the previous plugin.
                    Fix: shieldcortex update
                    Run it in a terminal where the hermes command works.
-  ○ Guard          off (the default)
-                   Turn on: shieldcortex config --action-guard-enable"
+  ○ Guard          off (the default)"
 `;
 
 exports[`update summary: five scenarios e: package install failed (snapshot) 1`] = `
@@ -209,8 +198,7 @@ exports[`update summary: five scenarios e: package install failed (snapshot) 1`]
   ✓ Engine         ready
   ✓ OpenClaw       plugin 5.9.0 installed, gateway restarted
   ✓ Skill          updated
-  ○ Guard          off (the default)
-                   Turn on: shieldcortex config --action-guard-enable"
+  ○ Guard          off (the default)"
 `;
 
 exports[`update summary: five scenarios f: plugin behind, Guard off (snapshot) 1`] = `
@@ -223,8 +211,7 @@ exports[`update summary: five scenarios f: plugin behind, Guard off (snapshot) 1
                    Fix: openclaw plugins install --force
                      @drakon-systems/shieldcortex-realtime@latest
   ✓ Skill          updated
-  ○ Guard          off (the default)
-                   Turn on: shieldcortex config --action-guard-enable"
+  ○ Guard          off (the default)"
 `;
 
 exports[`update summary: five scenarios f: plugin behind, Guard on (snapshot) 1`] = `
@@ -253,8 +240,7 @@ exports[`update summary: five scenarios g: gateway without plugin, plugin step w
                    Memory protection is not running in OpenClaw.
                    Fix: shieldcortex repair
   ✓ Skill          updated
-  ○ Guard          off (the default)
-                   Turn on: shieldcortex config --action-guard-enable"
+  ○ Guard          off (the default)"
 `;
 
 exports[`update summary: five scenarios g: gateway without plugin, plugin step warned, Guard on (snapshot) 1`] = `
@@ -281,8 +267,7 @@ exports[`update summary: five scenarios h: gateway restart failed (snapshot) 1`]
                    OpenClaw may still be running the previous plugin.
                    Fix: systemctl --user restart openclaw-gateway
   ✓ Skill          updated
-  ○ Guard          off (the default)
-                   Turn on: shieldcortex config --action-guard-enable"
+  ○ Guard          off (the default)"
 `;
 
 exports[`update summary: five scenarios h: gateway restart not confirmed back up (snapshot) 1`] = `
@@ -296,8 +281,7 @@ exports[`update summary: five scenarios h: gateway restart not confirmed back up
                    confirmed.
                    Check: shieldcortex doctor
   ✓ Skill          updated
-  ○ Guard          off (the default)
-                   Turn on: shieldcortex config --action-guard-enable"
+  ○ Guard          off (the default)"
 `;
 
 exports[`update summary: five scenarios h: gateway restart still needed (snapshot) 1`] = `
@@ -310,8 +294,7 @@ exports[`update summary: five scenarios h: gateway restart still needed (snapsho
                    restart.
                    Fix: systemctl --user restart openclaw-gateway
   ✓ Skill          updated
-  ○ Guard          off (the default)
-                   Turn on: shieldcortex config --action-guard-enable"
+  ○ Guard          off (the default)"
 `;
 
 exports[`update summary: five scenarios h: gateway restart timed out (snapshot) 1`] = `
@@ -324,6 +307,5 @@ exports[`update summary: five scenarios h: gateway restart timed out (snapshot) 
                    yet.
                    Check: shieldcortex doctor
   ✓ Skill          updated
-  ○ Guard          off (the default)
-                   Turn on: shieldcortex config --action-guard-enable"
+  ○ Guard          off (the default)"
 `;
