@@ -1777,3 +1777,65 @@ describe('#1054 — a value-taking version-selection option before the verb neve
     expect(out!.malicious).toBe(true);
   });
 });
+
+// #1054, panel round 1 on the P2 PR (Sol 1): carried and prefixed index variables were applied to
+// every install in reach, whatever installer they redirect. A pip variable exported earlier took a
+// later npm install off the public path. Each variable now applies to its own installer family only.
+describe('#1054 — an index variable applies only to its own installer family', () => {
+  const PKG = 'some-pkg';
+  const flags = (...parts: string[]) => parseInstallCommands(j(...parts)).map((r) => [r.installer, r.customIndex === true]);
+  const PIP = 'PIP_INDEX_URL=https://private.example/simple';
+  const UV = 'UV_INDEX_URL=https://private.example/simple';
+  const NPM = 'npm_config_registry=https://private.example';
+
+  it('an exported variable of one family leaves the other families on the public path', () => {
+    expect(flags('export', `${PIP};`, 'npm', 'install', PKG)).toEqual([['npm install', false]]);
+    expect(flags('export', `${PIP};`, 'npx', PKG)).toEqual([['npx', false]]);
+    expect(flags('export', `${NPM};`, 'pip', 'install', PKG)).toEqual([['pip install', false]]);
+    expect(flags('export', `${NPM};`, 'uvx', PKG)).toEqual([['uvx', false]]);
+    expect(flags('export', `${PIP};`, 'uv', 'add', PKG)).toEqual([['uv add', false]]);
+    expect(flags('export', `${UV};`, 'pip', 'install', PKG)).toEqual([['pip install', false]]);
+  });
+
+  it('the same holds for a prefix on the statement and inside a nested shell', () => {
+    expect(flags(PIP, 'npm', 'install', PKG)).toEqual([['npm install', false]]);
+    expect(flags(NPM, 'pip', 'install', PKG)).toEqual([['pip install', false]]);
+    expect(parseInstallCommands(`export ${PIP}; sh -c 'npm install ${PKG}'`).map((r) => r.customIndex === true)).toEqual([false]);
+  });
+
+  it('controls: each variable still applies to its own family, and a mixed command is split per install', () => {
+    expect(flags('export', `${PIP};`, 'pip', 'install', PKG)).toEqual([['pip install', true]]);
+    expect(flags('export', `${PIP};`, 'pipx', 'install', PKG)).toEqual([['pipx install', true]]);
+    expect(flags('export', `${UV};`, 'uv', 'add', PKG)).toEqual([['uv add', true]]);
+    expect(flags('export', `${UV};`, 'uvx', PKG)).toEqual([['uvx', true]]);
+    expect(flags('export', `${NPM};`, 'pnpm', 'add', PKG)).toEqual([['pnpm add', true]]);
+    expect(flags('export', `${NPM};`, 'bunx', PKG)).toEqual([['bunx', true]]);
+    expect(flags('export', `${PIP};`, 'pip', 'install', PKG, ';', 'npm', 'install', 'other-pkg')).toEqual([['pip install', true], ['npm install', false]]);
+  });
+
+  it('end to end: the npm install after a pip export is looked up, and a known-malicious package is blocked', async () => {
+    const w = fixtureWorld();
+    const out = await vetToolCall('Bash', { command: j('export', `${PIP};`, 'npm', 'install', `${MAL_NAME}@1.0.3`) }, opts(w));
+    expect(w.calls.length).toBeGreaterThan(0);
+    expect(out!.malicious).toBe(true);
+  });
+});
+
+// #1054, panel round 1 on the P2 PR (Sol 2): with a chain of unrecognised options, a package
+// option after the second candidate made the result "first candidate + package values", dropping
+// the candidates in between although each may be the command.
+describe('#1054 — every runner candidate read before a later package option is kept', () => {
+  const names = (...parts: string[]) => parseInstallCommands(j(...parts)).map((r) => r.name);
+
+  it('the middle candidate is vetted too', () => {
+    expect(names('bunx', '--u1', 'v1', '--u2', 'evil-pkg', '--package', 'clean-pkg', 'cmd')).toEqual(['v1', 'evil-pkg', 'clean-pkg']);
+    expect(names('pnpm', 'dlx', '--u1', 'v1', '--u2', 'evil-pkg', '--package', 'clean-pkg', 'cmd')).toEqual(['v1', 'evil-pkg', 'clean-pkg']);
+    expect(names('uvx', '--u1', 'v1', '--u2', 'evil-pkg', '--from', 'clean-pkg', 'cmd')).toEqual(['v1', 'evil-pkg', 'clean-pkg']);
+    expect(names('pipx', 'run', '--u1', 'v1', '--u2', 'evil-pkg', '--spec', 'clean-pkg', 'cmd')).toEqual(['v1', 'evil-pkg', 'clean-pkg']);
+  });
+
+  it('controls: words after the package option are commands only; one candidate stays one', () => {
+    expect(names('bunx', '--u1', 'evil-pkg', '--package', 'clean-pkg', 'cmd', 'arg')).toEqual(['evil-pkg', 'clean-pkg']);
+    expect(names('bunx', '--package', 'clean-pkg', '--u1', 'v1', 'cmd')).toEqual(['clean-pkg']);
+  });
+});

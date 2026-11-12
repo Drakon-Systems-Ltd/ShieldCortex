@@ -402,6 +402,8 @@ interface Positionals {
   packageFlags: string[];
   /** Runner form: how many of `packageFlags` came before the (first) command word. */
   packageFlagsBeforeCommand?: number;
+  /** Runner form: how many command-word candidates had been read when the first later package option appeared. */
+  candidatesBeforePackageFlag?: number;
   customIndex: boolean;
   /** `-r file` style inputs the vetting cannot resolve. */
   fileInputs: boolean;
@@ -435,7 +437,8 @@ interface CollectOptions {
  */
 function runnerPackages(a: Positionals): string[] {
   if ((a.packageFlagsBeforeCommand ?? a.packageFlags.length) > 0) return a.packageFlags;
-  return a.packageFlags.length ? [...a.positionals.slice(0, 1), ...a.packageFlags] : a.positionals;
+  // Every candidate read before a later package option may be the command (so a package); the words after that option are commands only.
+  return a.packageFlags.length ? [...a.positionals.slice(0, a.candidatesBeforePackageFlag ?? 1), ...a.packageFlags] : a.positionals;
 }
 
 /** Positionals a runner form may yield when the command word is ambiguous (see {@link CollectOptions.stopAtFirstPositional}). */
@@ -466,6 +469,7 @@ function collectArgs(args: readonly string[], valueFlags: ReadonlySet<string>, i
       else if (cls?.unknown) out.versionOption ??= UNRECOGNISED_OPTION;
       if (flag === '-r' || flag === '--requirement' || flag === '-e' || flag === '--editable') out.fileInputs = true;
       if (pkgFlags.has(flag)) {
+        if (out.positionals.length > 0) out.candidatesBeforePackageFlag ??= out.positionals.length;
         const v = inlineValue ?? args[i + 1];
         if (v !== undefined) out.packageFlags.push(v);
         if (inlineValue === undefined) i++;
@@ -577,6 +581,18 @@ const VERSION_ENV = /^(npm_config_(?:tag|before|include[_-]staged|resolution[_-]
  * `index` holds the NAMES of the index variables still exported, so `unset` can take one away.
  */
 interface CarriedEnv { index: ReadonlySet<string>; version?: string }
+
+/**
+ * An index variable redirects only its own installer family: `npm_config_*` the npm family,
+ * `PIP_*` pip and pipx, `UV_*` uv and uvx. One family's variable never takes another family's
+ * install off the public path.
+ */
+function indexVariableApplies(name: string, ref: PackageRef): boolean {
+  if (/^npm_config_/i.test(name)) return ref.ecosystem === 'npm';
+  if (/^PIP_/i.test(name)) return ref.ecosystem === 'PyPI' && /^pip/.test(ref.installer);
+  if (/^UV_/i.test(name)) return ref.ecosystem === 'PyPI' && /^uv/.test(ref.installer);
+  return false;
+}
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_@:.-]*=/;
 
@@ -694,7 +710,7 @@ export function parseInstallCommands(command: string, depth = 0, inherited: Carr
       stmtRefs.push(...parsePipx(rest));
     }
     // An index/registry or version-selection env var set for this statement applies to every package it names.
-    if (stmtIndex.size > 0 && !nested) for (const r of stmtRefs) r.customIndex = true;
+    if (!nested) for (const r of stmtRefs) if ([...stmtIndex].some((name) => indexVariableApplies(name, r))) r.customIndex = true;
     if (envVersion) for (const r of stmtRefs) r.versionOption ??= envVersion;
     refs.push(...stmtRefs);
   }
