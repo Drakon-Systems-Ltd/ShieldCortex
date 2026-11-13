@@ -528,10 +528,28 @@ const HERMES_SOURCE_NOTE =
   'Hermes takes its posture from SHIELDCORTEX_ENFORCE in the Hermes gateway environment, not from config.json; no ShieldCortex command changes it today.';
 
 /**
- * The fix for a hook/plugin mismatch. Never a single command that turns
- * protection down (#1037): restoring a signed off/advisory value onto a
- * stricter plane would loosen that plane, and raising the signed setting
- * to the stricter plane would turn a plane up. State both. Name neither.
+ * What matching a stricter plane down to each signed setting does to that
+ * plane. `enforce` has no entry: no plane is stricter than it.
+ */
+const DOWN_TO_SIGNED: Record<Exclude<PlanePosture, 'enforce'>, string> = {
+  off: 'Matching the stricter plane down to the signed setting would turn Action Guard off on that plane.',
+  advisory: 'Matching the stricter plane down to the signed setting would drop that plane to advisory ' +
+    '(ordinary dangerous ops log but are not gated; catastrophic ops and changes to the guard itself are still held or blocked).',
+  'enforce-when-ready': 'Matching the stricter plane down to the signed setting would drop that plane to enforce-when-ready, ' +
+    'which stays in shadow until this install meets the readiness conditions ' +
+    '(ordinary dangerous ops log but are not gated; catastrophic ops and changes to the guard itself are still held or blocked).',
+};
+
+/**
+ * The fix for a posture mismatch. Never a single command that turns
+ * protection down (#1037): restoring the signed value onto a stricter plane
+ * would loosen that plane, and raising the signed setting to the stricter
+ * plane would turn a plane up. State both. Name neither.
+ *
+ * #1063: each direction is derived on its own, from every compared value
+ * (Hermes profiles included). One plane can sit above the signed setting
+ * while another sits below it; the row then states the down consequence for
+ * the stricter plane and the up consequence for the looser one.
  */
 function mismatchFix(report: PostureReport): string {
   const s = report.signed;
@@ -539,21 +557,21 @@ function mismatchFix(report: PostureReport): string {
     return `The signed config cannot be trusted (integrity: ${report.integrity}), so there is no signed posture to restore. ` +
       'Resolve the config integrity row first; this row names no posture command.';
   }
-  const compared = report.planes.filter((p) => p.posture !== null);
-  const noneLooser = compared.every((p) => (p.values ?? [p.posture as PlanePosture]).every((v) => POSTURE_RANK[v] >= POSTURE_RANK[s]));
+  const values = report.planes
+    .filter((p) => p.posture !== null)
+    .flatMap((p) => p.values ?? [p.posture as PlanePosture]);
+  const stricter = values.some((v) => POSTURE_RANK[v] > POSTURE_RANK[s]);
+  const looser = values.some((v) => POSTURE_RANK[v] < POSTURE_RANK[s]);
   const hermesNote = report.hermesLooser ? ` ${HERMES_SOURCE_NOTE}` : '';
   const help = '`shieldcortex guard posture --help` lists where each plane reads its posture.';
-  if (report.nodeMismatch && noneLooser && (s === 'off' || s === 'advisory')) {
-    const down = s === 'off'
-      ? 'Matching the stricter plane down to the signed setting would turn Action Guard off on that plane.'
-      : 'Matching the stricter plane down to the signed setting would drop that plane to advisory ' +
-        '(ordinary dangerous ops log but are not gated; catastrophic ops and changes to the guard itself are still held or blocked).';
-    return `${down} Matching the signed setting up to the stricter plane would turn a plane up. ` +
-      `This row names no command. ${help}${hermesNote}`;
+  if (!stricter || s === 'enforce') {
+    return `The signed posture is ${s}. Putting every plane on it would turn a plane up, so this row names no command: ` +
+      `decide which posture you want. ${help}` +
+      hermesNote;
   }
-  return `The signed posture is ${s}. Putting every plane on it would turn a plane up, so this row names no command: ` +
-    `decide which posture you want. ${help}` +
-    hermesNote;
+  const up = looser ? ' Putting a looser plane on the signed setting would turn that plane up.' : '';
+  return `${DOWN_TO_SIGNED[s]}${up} Matching the signed setting up to the stricter plane would turn a plane up. ` +
+    `This row names no command. ${help}${hermesNote}`;
 }
 
 /**

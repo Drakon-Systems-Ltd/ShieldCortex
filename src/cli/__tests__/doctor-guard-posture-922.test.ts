@@ -522,3 +522,45 @@ describe('#1037 doctor — the posture mismatch as the operator sees it', () => 
     expect(lines.join('\n')).not.toMatch(/hermes plugins/);
   });
 });
+
+/**
+ * #1063: signed advisory with one plane above it (the OpenClaw plugin entry
+ * enforcing) and one below it (Hermes reporting intentionally off), read from
+ * fixture files through the real readers. The human report must state both
+ * consequences — matching the stricter plane down, and putting the looser plane
+ * on the signed setting — and still prescribe no posture-changing command.
+ */
+describe('#1063 doctor — mixed stricter and looser planes, as the operator sees it', () => {
+  const POSTURE_SETTER = /--action-guard-[a-z]|guard posture (off|advisory|enforce)|SHIELDCORTEX_ENFORCE\s*=/;
+
+  function arrangeMixed(): CheckResult {
+    claudeHookWired();
+    hermesPluginArtefacts(home);
+    signed({ enabled: true, enforce: false });
+    openclawEntry({ enabled: true, config: { actionGuard: { enforce: true } } });
+    writeReport(configDir, reportBody({ configured_posture: 'intentionally-off' }));
+    return doctor.checkGuardPosture({ read: { home, collect: { nowMs: NOW, deps: LIVE } } });
+  }
+
+  it.each([false, true])('verbose=%s: both directions survive rendering and no posture command is prescribed', (verbose) => {
+    const row = arrangeMixed();
+    expect(row.status).toBe('fail');
+    expect(row.message).toMatch(/Claude Code hook advisory/);
+    expect(row.message).toMatch(/OpenClaw plugin enforce/);
+    expect(row.message).toMatch(/Hermes off \(self-report\)/);
+    const display = report.sanitiseDoctorRowsForDisplay([row]);
+    const text = report.formatDoctorReport(display, {
+      verbose,
+      width: 80,
+      nextCommand: report.nextCommandForFailures(display),
+    }).join('\n');
+    const flat = text.replace(/\s+/g, ' ');
+    expect(flat).toMatch(/Matching the stricter plane down to the signed setting would drop that plane to advisory/);
+    expect(flat).toMatch(/Putting a looser plane on the signed setting would turn that plane up/);
+    expect(flat).toMatch(/Matching the signed setting up to the stricter plane would turn a plane up/);
+    expect(flat).toMatch(/This row names no command/);
+    const commands = text.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('$ '));
+    expect(commands).toEqual(['$ shieldcortex guard posture --help', '$ shieldcortex doctor --verbose']);
+    expect(text).not.toMatch(POSTURE_SETTER);
+  });
+});

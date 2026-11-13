@@ -420,6 +420,136 @@ describe('#922 guardPostureRow — status and honest fixes', () => {
 });
 
 /**
+ * #1063: the two directions are derived on their own. One plane can sit above
+ * the signed setting while another sits below it; the row then states what
+ * matching the stricter plane down would do AND what putting the looser plane
+ * on the signed setting would do, and still names no posture command.
+ */
+describe('#1063 guardPostureRow — up and down consequences are derived independently', () => {
+  const LOOSENING = /`[^`]*(--action-guard-(disable|advisory)|guard posture (off|advisory))[^`]*`/;
+  const ADVISORY = { actionGuard: { enabled: true, enforce: false } };
+  const WHEN_READY = { actionGuard: { enabled: true, readinessGate: true } };
+  const HELP = '`shieldcortex guard posture --help` lists where each plane reads its posture.';
+  const HERMES_NOTE =
+    'Hermes takes its posture from SHIELDCORTEX_ENFORCE in the Hermes gateway environment, not from config.json; no ShieldCortex command changes it today.';
+  const UP_STRICTER = 'Matching the signed setting up to the stricter plane would turn a plane up.';
+  const UP_LOOSER = 'Putting a looser plane on the signed setting would turn that plane up.';
+  const DOWN_ADVISORY =
+    'Matching the stricter plane down to the signed setting would drop that plane to advisory ' +
+    '(ordinary dangerous ops log but are not gated; catastrophic ops and changes to the guard itself are still held or blocked).';
+
+  const valuesOf = (r: ReturnType<typeof resolvePlanePostures>) =>
+    r.planes.flatMap((p) => p.values ?? (p.posture === null ? [] : [p.posture]));
+
+  function expectNoPostureCommand(fix: string): void {
+    expect(fix).not.toMatch(ENABLING);
+    expect(fix).not.toMatch(LOOSENING);
+    expect(fix).not.toMatch(/--action-guard-/);
+  }
+
+  it.each<[string, PostureInputs]>([
+    ['hook advisory, plugin enforce, Hermes off', inputs({
+      signedRaw: ADVISORY,
+      openclaw: { state: 'ok', raw: entry({ actionGuard: { enforce: true } }) },
+      postureRecords: [hermes('intentionally-off')],
+    })],
+    ['hook advisory, plugin off, Hermes enforce', inputs({
+      signedRaw: ADVISORY,
+      openclaw: { state: 'ok', raw: entry({ actionGuard: { enabled: false } }) },
+      postureRecords: [hermes('enforce')],
+    })],
+    ['hook and plugin advisory, one Hermes profile enforce and one off', inputs({
+      signedRaw: ADVISORY,
+      openclaw: { state: 'ok', raw: entry({}) },
+      postureRecords: [hermes('enforce'), hermes('intentionally-off', { profile: 'work' })],
+    })],
+  ])('signed advisory, %s: states the down AND the up consequence, names no command', (_name, shape) => {
+    const r = resolvePlanePostures(shape);
+    expect(r.signed).toBe('advisory');
+    // The shape really is mixed: one plane above the signed setting, one below.
+    expect(valuesOf(r)).toEqual(expect.arrayContaining(['enforce', 'off']));
+    const row = guardPostureRow(r);
+    expect(row.status).toBe('fail');
+    expect(row.fixNoteWithCommands).toBe(true);
+    const fix = row.fix ?? '';
+    expect(fix).toContain(DOWN_ADVISORY);
+    expect(fix).toContain(UP_LOOSER);
+    expect(fix).toContain(UP_STRICTER);
+    expect(fix).toContain('This row names no command');
+    expect(fix).toContain(HELP);
+    expectNoPostureCommand(fix);
+  });
+
+  it('signed enforce-when-ready with an enforce plane and an advisory plane states both directions', () => {
+    const r = resolvePlanePostures(inputs({
+      signedRaw: WHEN_READY,
+      openclaw: { state: 'ok', raw: entry({ actionGuard: { enforce: false } }) },
+      postureRecords: [hermes('enforce')],
+    }));
+    expect(r.signed).toBe('enforce-when-ready');
+    expect(valuesOf(r)).toEqual(expect.arrayContaining(['enforce', 'advisory']));
+    const row = guardPostureRow(r);
+    expect(row.status).toBe('fail');
+    const fix = row.fix ?? '';
+    expect(fix).toMatch(/Matching the stricter plane down to the signed setting would drop that plane to enforce-when-ready/);
+    expect(fix).toContain(UP_LOOSER);
+    expect(fix).toContain(UP_STRICTER);
+    expect(fix).toContain('This row names no command');
+    expectNoPostureCommand(fix);
+  });
+
+  it('a stricter plane alone gets the down consequence even when only Hermes disagrees, and no looser-plane claim', () => {
+    // Signed off, hook off, Hermes profiles off and enforce: no plane is below
+    // the signed setting, so "putting every plane on it would turn a plane up"
+    // would be false; matching the enforce profile down would turn Guard off.
+    const r = resolvePlanePostures(inputs({ postureRecords: [hermes('enforce'), hermes('intentionally-off', { profile: 'work' })] }));
+    expect(r.signed).toBe('off');
+    expect(r.nodeMismatch).toBe(false);
+    const row = guardPostureRow(r);
+    expect(row.status).toBe('fail');
+    const fix = row.fix ?? '';
+    expect(fix).toContain('Matching the stricter plane down to the signed setting would turn Action Guard off on that plane.');
+    expect(fix).toContain(UP_STRICTER);
+    expect(fix).not.toContain(UP_LOOSER);
+    expect(fix).not.toMatch(/Putting every plane on it would turn a plane up/);
+    expect(fix).toContain(HERMES_NOTE);
+    expectNoPostureCommand(fix);
+  });
+
+  // The pure stricter-only and looser-only shapes keep their exact #1037 text.
+  it.each<[string, PostureInputs, string]>([
+    ['stricter only: signed off, plugin enabled', inputs({
+      openclaw: { state: 'ok', raw: entry({ actionGuard: { enabled: true } }) },
+    }), 'Matching the stricter plane down to the signed setting would turn Action Guard off on that plane. ' +
+      `${UP_STRICTER} This row names no command. ${HELP}`],
+    ['stricter only: signed advisory, plugin enforce', inputs({
+      signedRaw: ADVISORY,
+      openclaw: { state: 'ok', raw: entry({ actionGuard: { enforce: true } }) },
+    }), `${DOWN_ADVISORY} ${UP_STRICTER} This row names no command. ${HELP}`],
+    ['looser only: signed enforce, plugin advisory', inputs({
+      signedRaw: { actionGuard: { enabled: true } },
+      openclaw: { state: 'ok', raw: entry({ actionGuard: { enforce: false } }) },
+    }), 'The signed posture is enforce. Putting every plane on it would turn a plane up, so this row names no command: ' +
+      `decide which posture you want. ${HELP}`],
+    ['looser only: signed advisory, plugin off', inputs({
+      signedRaw: ADVISORY,
+      openclaw: { state: 'ok', raw: entry({ actionGuard: { enabled: false } }) },
+    }), 'The signed posture is advisory. Putting every plane on it would turn a plane up, so this row names no command: ' +
+      `decide which posture you want. ${HELP}`],
+    ['looser only: signed enforce, Hermes advisory', inputs({
+      signedRaw: { actionGuard: { enabled: true } },
+      postureRecords: [hermes('advisory')],
+    }), 'The signed posture is enforce. Putting every plane on it would turn a plane up, so this row names no command: ' +
+      `decide which posture you want. ${HELP} ${HERMES_NOTE}`],
+  ])('%s: the fix text is unchanged', (_name, shape, expected) => {
+    const row = guardPostureRow(resolvePlanePostures(shape));
+    expect(row.status).toBe('fail');
+    expect(row.fix).toBe(expected);
+    expectNoPostureCommand(row.fix ?? '');
+  });
+});
+
+/**
  * #878 r4 N1: an unsigned config.json behind a symbolic link (`unverified`,
  * adoption blocked by the link) is what the hook and the OpenClaw runtime hold
  * strict, before the lock and the #209 fold. The planes report that posture,
