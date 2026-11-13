@@ -1944,3 +1944,242 @@ describe('#1054 — an index variable set to nothing is not a custom index; pyth
     expect(out!.malicious).toBe(true);
   });
 });
+
+// #1054, source review of the P2 PR (three findings, one class): an option's value decided
+// whether a package was looked up at all.
+//   1. uv `--with` / `-w` / `--with-executables-from` and pipx `--preinstall` name a package the
+//      installer fetches as well as the one it is asked for; the value was skipped as "a value".
+//   2. A pnpm / yarn / bun option that takes a value but was listed as a switch had its value read
+//      as the runner's command word, which ended the scan before a later `--package` / `-p`.
+//   3. npm's registry option marked the install custom whatever its value, so naming npm's own
+//      public registry (in any spelling npm accepts) took the install off the public lookup.
+// A PyPI package OSV lists as malicious, for the end-to-end cases.
+const MAL_PY = 'mal-py';
+const pyMalWorld = (): World => {
+  const w = fixtureWorld();
+  w.pypi[MAL_PY] = { latest: '1.0.0', releases: { '1.0.0': [{ packagetype: 'bdist_wheel', upload_time_iso_8601: hoursAgo(24 * 90) }] } };
+  w.osv[`PyPI@${MAL_PY}@1.0.0`] = [MAL_ID];
+  return w;
+};
+
+describe('#1054 — a package named by an option value is vetted as well as the package asked for (uv --with, pipx --preinstall)', () => {
+  const names = (...parts: string[]) => parseInstallCommands(j(...parts)).map((r) => r.name);
+
+  it.each(['--with', '-w', '--with-executables-from'])('uv tool install %s <pkg>: both the tool and the extra package', (flag) => {
+    expect(names('uv', 'tool', 'install', 'some-tool', flag, 'evil-pkg')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names('uv', 'tool', 'install', flag, 'evil-pkg', 'some-tool')).toEqual(['some-tool', 'evil-pkg']);
+    expect(parseInstallCommands(j('uv', 'tool', 'install', flag, 'evil-pkg', 'some-tool')).map((r) => r.installer)).toEqual(['uv tool install', 'uv tool install']);
+  });
+
+  it.each(['uvx', 'uv tool run'])('%s: --with, -w and --with-executables-from before the command', (runner) => {
+    expect(names(runner, '--with', 'evil-pkg', 'some-tool', 'arg')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names(runner, '-w', 'evil-pkg', 'some-tool', 'arg')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names(runner, '--with-executables-from', 'evil-pkg', 'some-tool')).toEqual(['some-tool', 'evil-pkg']);
+    // In addition to `--from`, never instead of it.
+    expect(names(runner, '--from', 'some-pkg', '--with', 'evil-pkg', 'cmd')).toEqual(['some-pkg', 'evil-pkg']);
+    expect(names(runner, '--with', 'evil-pkg', '--from', 'some-pkg', 'cmd')).toEqual(['some-pkg', 'evil-pkg']);
+  });
+
+  it('the = form, the attached short form, a short cluster, and repeated options', () => {
+    expect(names('uvx', '--with=evil-pkg', 'some-tool')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names('uvx', '-w=evil-pkg', 'some-tool')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names('uvx', '-wevil-pkg', 'some-tool')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names('uvx', '-qw', 'evil-pkg', 'some-tool')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names('uvx', '-qwevil-pkg', 'some-tool')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names('uv', 'tool', 'install', '--with-executables-from=evil-pkg', 'some-tool')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names('uvx', '--with', 'a-pkg', '-w', 'evil-pkg', 'some-tool')).toEqual(['some-tool', 'a-pkg', 'evil-pkg']);
+  });
+
+  it('a comma-separated value names one package each; a comma inside one requirement does not split it', () => {
+    expect(names('uvx', '--with', 'a-pkg,evil-pkg', 'some-tool')).toEqual(['some-tool', 'a-pkg', 'evil-pkg']);
+    expect(names('uv', 'tool', 'install', 'some-tool', '--with=a-pkg,evil-pkg')).toEqual(['some-tool', 'a-pkg', 'evil-pkg']);
+    expect(parseInstallCommands(j('uvx', '--with', '"a-pkg>=1,<2,evil-pkg==1.0"', 'some-tool')).map(tuple))
+      .toEqual([['PyPI', 'some-tool', null], ['PyPI', 'a-pkg', '>=1,<2'], ['PyPI', 'evil-pkg', '==1.0']]);
+  });
+
+  it('the extra package carries the same index and version context as the tool', () => {
+    const refs = parseInstallCommands(j('uvx', '--index-url', 'https://private.example/simple', '--with', 'evil-pkg', 'some-tool'));
+    expect(refs.map((r) => [r.name, r.customIndex])).toEqual([['some-tool', true], ['evil-pkg', true]]);
+    expect(parseInstallCommands(j('uvx', '--prerelease', 'allow', '--with', 'evil-pkg', 'some-tool')).map((r) => [r.name, r.versionOption]))
+      .toEqual([['some-tool', '--prerelease'], ['evil-pkg', '--prerelease']]);
+  });
+
+  it('an MCP server entry launched through uvx --with is read the same way', () => {
+    expect(parseMcpServerEntry({ command: 'uvx', args: ['--with', 'evil-pkg', 'some-tool'] }).map((r) => r.name)).toEqual(['some-tool', 'evil-pkg']);
+  });
+
+  it('pipx install --preinstall <pkg>: both the package and the preinstalled one, in every spelling pipx accepts', () => {
+    expect(names('pipx', 'install', '--preinstall', 'evil-pkg', 'some-tool')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names('pipx', 'install', 'some-tool', '--preinstall', 'evil-pkg')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names('pipx', 'install', '--preinstall=evil-pkg', 'some-tool')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names('pipx', 'install', '--preinst', 'evil-pkg', 'some-tool')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names('pipx', 'install', '--pr', 'evil-pkg', 'some-tool')).toEqual(['some-tool', 'evil-pkg']);
+    expect(names('pipx', 'install', '--preinstall', 'a-pkg', '--preinstall', 'evil-pkg', 'some-tool')).toEqual(['some-tool', 'a-pkg', 'evil-pkg']);
+  });
+
+  it('controls (unchanged): a path, URL or file value yields no ref, and words after a runner command are the program\'s', () => {
+    expect(names('uvx', '--with', './local-dir', 'some-tool')).toEqual(['some-tool']);
+    expect(names('uvx', '--with', 'https://example.com/x.whl', 'some-tool')).toEqual(['some-tool']);
+    expect(names('uvx', '--with-editable', './local-dir', 'some-tool')).toEqual(['some-tool']);
+    expect(names('uvx', '--with-requirements', 'requirements.txt', 'some-tool')).toEqual(['some-tool']);
+    expect(names('uv', 'tool', 'install', '--with-editable', './local-dir', 'some-tool')).toEqual(['some-tool']);
+    expect(names('uvx', 'some-tool', '--with', 'not-an-install')).toEqual(['some-tool']);
+    expect(names('uv', 'tool', 'run', 'some-tool', '-w', 'not-an-install')).toEqual(['some-tool']);
+    // `--from` and `--spec` still select the runner package; the command word is vetted when no package option precedes it.
+    expect(names('uvx', '--from', 'some-pkg==2.0', 'cmd')).toEqual(['some-pkg']);
+    expect(names('pipx', 'run', '--spec', 'some-pkg', 'cmd')).toEqual(['some-pkg']);
+    expect(names('uvx', 'some-tool')).toEqual(['some-tool']);
+    expect(names('pipx', 'run', 'some-tool')).toEqual(['some-tool']);
+    expect(names('pipx', 'install', 'some-tool')).toEqual(['some-tool']);
+    expect(names('uvx', '-p', '3.11', 'some-tool', 'arg')).toEqual(['some-tool']);
+  });
+
+  it('end to end: a known-malicious package named by the option is looked up and blocked', async () => {
+    for (const command of [
+      j('uv', 'tool', 'install', 'wheel-lib', '--with', `${MAL_PY}==1.0.0`),
+      j('uv', 'tool', 'install', 'wheel-lib', '-w', `${MAL_PY}==1.0.0`),
+      j('uv', 'tool', 'install', 'wheel-lib', '--with-executables-from', `${MAL_PY}==1.0.0`),
+      j('uvx', '--with', `${MAL_PY}==1.0.0`, 'wheel-lib'),
+      j('uvx', '-w', `wheel-lib,${MAL_PY}==1.0.0`, 'wheel-lib'),
+      j('uv', 'tool', 'run', '--with', `${MAL_PY}==1.0.0`, 'wheel-lib'),
+      j('pipx', 'install', '--preinstall', `${MAL_PY}==1.0.0`, 'wheel-lib'),
+    ]) {
+      const out = await vetToolCall('Bash', { command }, opts(pyMalWorld()));
+      expect({ command, malicious: out!.malicious }).toEqual({ command, malicious: true });
+    }
+  });
+
+  it('end to end control: the same commands without the malicious package are not blocked', async () => {
+    const out = await vetToolCall('Bash', { command: j('uvx', '--with', 'wheel-lib', 'wheel-lib') }, opts(pyMalWorld()));
+    expect(out!.malicious).toBe(false);
+  });
+});
+
+describe('#1054 — a known option\'s value never ends a runner scan before a later package option', () => {
+  const names = (...parts: string[]) => parseInstallCommands(j(...parts)).map((r) => r.name);
+  const VALUE_OPTIONS = [
+    '--allow-build', '--global-dir', '--workspace-concurrency', '--save-catalog-name', '--mode', '--backend', '--config',
+    '--linker', '--concurrent-scripts', '--cache-dir', '-c',
+  ];
+
+  it.each(VALUE_OPTIONS)('pnpm dlx / bunx / yarn dlx %s <value> --package <pkg> <cmd>: the package is in the refs', (flag) => {
+    expect(names('pnpm', 'dlx', flag, 'some-value', '--package', 'evil-pkg', 'cmd')).toEqual(['some-value', 'evil-pkg']);
+    expect(names('bunx', flag, 'some-value', '-p', 'evil-pkg', 'cmd')).toEqual(['some-value', 'evil-pkg']);
+    expect(names('yarn', 'dlx', flag, 'some-value', '-p', 'evil-pkg', 'cmd')).toEqual(['some-value', 'evil-pkg']);
+  });
+
+  it.each(VALUE_OPTIONS)('%s <value> <cmd> with no package option: the command word is vetted in both readings', (flag) => {
+    expect(names('pnpm', 'dlx', flag, 'some-value', 'evil-pkg', 'arg')).toEqual(['some-value', 'evil-pkg']);
+    expect(names('bunx', flag, 'some-value', 'evil-pkg', 'arg')).toEqual(['some-value', 'evil-pkg']);
+  });
+
+  it('a value-taking option before the verb does not hide the install', () => {
+    expect(names('pnpm', '--allow-build', 'some-value', 'add', 'evil-pkg')).toEqual(['evil-pkg']);
+    expect(names('pnpm', '--allow-build', 'some-value', 'dlx', 'evil-pkg')).toEqual(['evil-pkg']);
+  });
+
+  it('uv: --python-preference takes its value, and a short cluster ending in a value-taking letter is read both ways', () => {
+    expect(names('uvx', '--python-preference', 'system', '--from', 'evil-pkg', 'cmd')).toEqual(['evil-pkg']);
+    expect(names('uvx', '--python-preference', 'system', 'evil-pkg')).toEqual(['evil-pkg']);
+    expect(names('uvx', '-qp', '3.11', '--from', 'evil-pkg', 'cmd')).toContain('evil-pkg');
+    expect(names('uvx', '-qp', '3.11', 'evil-pkg', 'arg')).toContain('evil-pkg');
+  });
+
+  it('controls (unchanged): the = form is not ambiguous, switches stay switches, add forms vet every positional', () => {
+    expect(names('pnpm', 'dlx', '--allow-build=some-value', '--package', 'evil-pkg', 'cmd')).toEqual(['evil-pkg']);
+    expect(names('pnpm', 'dlx', '--allow-build=some-value', 'evil-pkg', 'arg')).toEqual(['evil-pkg']);
+    expect(names('pnpm', 'dlx', '--silent', 'evil-pkg', 'arg')).toEqual(['evil-pkg']);
+    expect(names('bunx', '--bun', 'evil-pkg', 'arg')).toEqual(['evil-pkg']);
+    expect(names('pnpm', 'dlx', '--package', 'clean-pkg', '--allow-build', 'some-value', 'cmd')).toEqual(['clean-pkg']);
+    expect(names('pnpm', 'add', '--allow-build', 'some-value', 'evil-pkg')).toEqual(['some-value', 'evil-pkg']);
+    expect(names('pnpm', 'dlx', 'some-pkg')).toEqual(['some-pkg']);
+    expect(names('bunx', 'some-pkg')).toEqual(['some-pkg']);
+  });
+
+  it('end to end: the malicious package after the option value is looked up and blocked', async () => {
+    for (const command of [
+      j('pnpm', 'dlx', '--allow-build', 'clean-lib', '--package', `${MAL_NAME}@1.0.3`, 'run-it'),
+      j('bunx', '--backend', 'clean-lib', '-p', `${MAL_NAME}@1.0.3`, 'run-it'),
+      j('yarn', 'dlx', '--mode', 'clean-lib', '-p', `${MAL_NAME}@1.0.3`, 'run-it'),
+      j('pnpm', 'dlx', '--allow-build', 'clean-lib', `${MAL_NAME}@1.0.3`),
+    ]) {
+      const out = await vetToolCall('Bash', { command }, opts(fixtureWorld()));
+      expect({ command, malicious: out!.malicious }).toEqual({ command, malicious: true });
+    }
+  });
+});
+
+describe('#1054 — npm\'s default public registry named explicitly is not a custom index', () => {
+  const custom = (...parts: string[]) => parseInstallCommands(j(...parts)).map((r) => [r.name, r.customIndex === true]);
+  const SPELLINGS = ['--registry', '--reg', '--regi', '--registr'];
+  const DEFAULTS = ['https://registry.npmjs.org', 'https://registry.npmjs.org/', 'https://REGISTRY.npmjs.ORG', 'HTTPS://registry.npmjs.org/'];
+  const PRIVATE = 'https://npm.internal.example';
+
+  it.each(SPELLINGS)('%s with the default public URL (either slash form): looked up publicly', (flag) => {
+    for (const url of DEFAULTS) {
+      expect({ url, refs: custom('npm', 'install', flag, url, 'some-pkg') }).toEqual({ url, refs: [['some-pkg', false]] });
+      expect({ url, refs: custom('npm', 'install', `${flag}=${url}`, 'some-pkg') }).toEqual({ url, refs: [['some-pkg', false]] });
+      expect({ url, refs: custom('npm', flag, url, 'install', 'some-pkg') }).toEqual({ url, refs: [['some-pkg', false]] });
+      expect({ url, refs: custom('npm', 'install', 'some-pkg', flag, url) }).toEqual({ url, refs: [['some-pkg', false]] });
+    }
+  });
+
+  it.each(SPELLINGS)('%s with no value or an empty value: looked up publicly', (flag) => {
+    expect(custom('npm', 'install', 'some-pkg', flag)).toEqual([['some-pkg', false]]);
+    expect(custom('npm', 'install', `${flag}=`, 'some-pkg')).toEqual([['some-pkg', false]]);
+  });
+
+  it('npx and npm exec read the option the same way', () => {
+    expect(custom('npx', '--reg', 'https://registry.npmjs.org', 'some-pkg')).toEqual([['some-pkg', false]]);
+    expect(custom('npx', '--registry=https://registry.npmjs.org/', 'some-pkg')).toEqual([['some-pkg', false]]);
+    expect(custom('npm', 'exec', '--regi=https://registry.npmjs.org', '--', 'some-pkg')).toEqual([['some-pkg', false]]);
+  });
+
+  it('the last registry option decides', () => {
+    expect(custom('npm', 'install', '--registry', PRIVATE, '--reg', 'https://registry.npmjs.org', 'some-pkg')).toEqual([['some-pkg', false]]);
+    expect(custom('npm', 'install', '--reg', 'https://registry.npmjs.org', '--registry', PRIVATE, 'some-pkg')).toEqual([['some-pkg', true]]);
+  });
+
+  it.each(SPELLINGS)('pinned: %s with a private registry URL is custom', (flag) => {
+    expect(custom('npm', 'install', flag, PRIVATE, 'some-pkg')).toEqual([['some-pkg', true]]);
+    expect(custom('npm', 'install', `${flag}=${PRIVATE}`, 'some-pkg')).toEqual([['some-pkg', true]]);
+    expect(custom('npm', flag, PRIVATE, 'install', 'some-pkg')).toEqual([['some-pkg', true]]);
+    expect(custom('npx', flag, PRIVATE, 'some-pkg')).toEqual([['some-pkg', true]]);
+  });
+
+  it('pinned: nothing but the https default counts as default', () => {
+    for (const url of [
+      'http://registry.npmjs.org', 'https://registry.npmjs.org.internal.example', 'https://registry.yarnpkg.com',
+      'https://registry.npmjs.org:8443', 'https://registry.npmjs.org/mirror', 'https://registry.npmjs.org//', 'registry.npmjs.org',
+      'https://user@registry.npmjs.org', 'https://registry.npmmirror.com',
+    ]) {
+      expect({ url, refs: custom('npm', 'install', '--registry', url, 'some-pkg') }).toEqual({ url, refs: [['some-pkg', true]] });
+      expect({ url, refs: custom('npm', 'install', `--reg=${url}`, 'some-pkg') }).toEqual({ url, refs: [['some-pkg', true]] });
+    }
+  });
+
+  it('pinned (not changed in this round): pnpm, yarn and bun read any --registry value as custom', () => {
+    expect(custom('pnpm', 'add', '--registry', 'https://registry.npmjs.org', 'some-pkg')).toEqual([['some-pkg', true]]);
+    expect(custom('bun', 'add', '--registry=https://registry.npmjs.org', 'some-pkg')).toEqual([['some-pkg', true]]);
+  });
+
+  it('end to end: a known-malicious package installed with the public registry named is looked up and blocked', async () => {
+    for (const command of [
+      j('npm', 'install', '--reg', 'https://registry.npmjs.org', `${MAL_NAME}@1.0.3`),
+      j('npm', 'install', '--regi=https://registry.npmjs.org/', `${MAL_NAME}@1.0.3`),
+      j('npm', 'install', '--registry', 'https://registry.npmjs.org/', `${MAL_NAME}@1.0.3`),
+      j('npm', 'install', `${MAL_NAME}@1.0.3`, '--registry'),
+      j('npx', '--reg', 'https://registry.npmjs.org', `${MAL_NAME}@1.0.3`),
+    ]) {
+      const w = fixtureWorld();
+      const out = await vetToolCall('Bash', { command }, opts(w));
+      expect({ command, looked: w.calls.length > 0, malicious: out!.malicious }).toEqual({ command, looked: true, malicious: true });
+    }
+  });
+
+  it('end to end control: a private registry is still reported unchecked, not looked up as public', async () => {
+    const out = await vetToolCall('Bash', { command: j('npm', 'install', '--reg', PRIVATE, `${MAL_NAME}@1.0.3`) }, opts(fixtureWorld()));
+    expect(out!.malicious).toBe(false);
+    expect(out!.audit.map((a) => a.status)).toEqual(['unchecked']);
+  });
+});

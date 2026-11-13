@@ -251,9 +251,23 @@ const VALUE_FLAGS_PIP = new Set([
     + '--root-user-action --script --source --source-dir --source-directory --tag --torch-backend --upgrade-group '
     + '--upgrade-package --use-deprecated --use-feature --with-editable --with-executables-from --with-requirements '
     + '-P -b -m -w').split(' '),
+  // uv's global `--python-preference <only-managed|managed|system|only-system>`.
+  '--python-preference',
 ]);
 /** pipx's own value-taking options (its `-f` is `--force` and its `-e` is `--editable`, both switches). */
 const VALUE_FLAGS_PIPX = new Set(['--suffix', '--python', '--index-url', '-i', '--pip-args', '--spec', '--preinstall', '--backend']);
+/**
+ * Options whose value names a package the installer fetches IN ADDITION to the one it is asked
+ * for: uv's `--with` / `-w` and `--with-executables-from` on `uvx`, `uv tool run` and
+ * `uv tool install` (a comma-separated list names several). Each value is vetted like a
+ * positional. `--with-editable` and `--with-requirements` name a path and a file, not a registry
+ * package: no ref.
+ */
+const UV_EXTRA_PACKAGE_FLAGS = new Set(['--with', '-w', '--with-executables-from']);
+/** pipx's `--preinstall <pkg>` (installed before the package itself), in every unique prefix pipx's parser accepts (`--pr` … `--preinstall`). */
+const PIPX_EXTRA_PACKAGE_FLAGS = new Set(Array.from({ length: '--preinstall'.length - 3 }, (_, n) => '--preinstall'.slice(0, n + 4)));
+/** uv reads `--with a,b` as two packages; a comma inside one requirement (`a>=1,<2`) is followed by a version operator. */
+const splitPackageList = (value: string): string[] => value.split(/,(?![<>=!~])/).map((s) => s.trim()).filter(Boolean);
 const INDEX_FLAGS_NPM = new Set(['--registry']);
 const INDEX_FLAGS_PIP = new Set(['-i', '--index-url', '--extra-index-url', '--default-index', '--index', '-f', '--find-links']);
 /**
@@ -306,6 +320,19 @@ const NPM_FAMILY_EXTRA = new Set([
     + '--concurrent-scripts --cache-dir --no-cache --analyze --only-missing --bun --yarn --quiet --verbose').split(' '),
   ...'-r -F -w -W -C -D -P -O -E -T -i -g -s -c -d -p -f -a -b -y -q -v -h'.split(' '),
 ]);
+/**
+ * Options of {@link NPM_FAMILY_EXTRA} that take a value in pnpm, yarn or bun and are not in
+ * {@link VALUE_FLAGS_NPM}. Whether the tool at hand reads the NEXT word as that value (rather than
+ * only the `=` form) is not established here, and `-c` is a switch for pnpm (`--shell-mode`) and
+ * `--config` for bun: so the word after one is read both ways (`maybeValue`). In a runner form
+ * that keeps the scan going, and a later `--package` / `-p` is still read.
+ */
+const NPM_FAMILY_MAYBE_VALUE = new Set([
+  '--allow-build', '--global-dir', '--workspace-concurrency', '--save-catalog-name', '--mode', '--backend', '--config',
+  '--linker', '--concurrent-scripts', '--cache-dir', '-c',
+]);
+/** Single-letter options of the pnpm / yarn / bun forms whose next word is, or may be, their value. */
+const NPM_FAMILY_VALUE_SHORTS = new Set([...VALUE_FLAGS_NPM, ...NPM_FAMILY_MAYBE_VALUE].filter((f) => /^-[^-]$/.test(f)));
 
 /**
  * pip 24 `install`, uv 0.11 (`pip install`, `add`, `tool run|install`, `uvx`,
@@ -360,13 +387,38 @@ interface OptionClass {
 }
 type Classify = (word: string) => OptionClass;
 
-/** A `-abc` cluster of single-letter options is known when each letter is (up to a value-taking one). */
+/**
+ * A `-abc` cluster of single-letter options is known when each letter is (up to a value-taking one).
+ * When the value-taking letter is the LAST one (`-qp 3.12`) its value may be the next word: read
+ * both ways, since the letter tables are shared between tools that disagree (pipx `-f` is a switch).
+ */
 function shortCluster(word: string, known: ReadonlySet<string>, valueFlags: ReadonlySet<string>): OptionClass {
-  for (const c of word.slice(1)) {
-    if (!known.has(`-${c}`)) return { unknown: true };
-    if (valueFlags.has(`-${c}`)) return {};
+  for (let n = 1; n < word.length; n++) {
+    const f = `-${word[n]}`;
+    if (!known.has(f)) return { unknown: true };
+    if (valueFlags.has(f)) return n === word.length - 1 ? { maybeValue: true } : {};
   }
   return {};
+}
+
+/**
+ * A package-naming option ({@link UV_EXTRA_PACKAGE_FLAGS}, {@link PIPX_EXTRA_PACKAGE_FLAGS}) in the
+ * word `word`: the value it carries (`--with=a`, `-wa`, `-qwa`), or that it takes the next word
+ * (`--with a`, `-w a`, `-qw a`). Null when the word is not one.
+ */
+function namedPackage(word: string, flag: string, inlineValue: string | undefined, pkgFlags: ReadonlySet<string>, valueFlags: ReadonlySet<string>): { value?: string; next?: true } | null {
+  if (pkgFlags.has(flag)) return inlineValue !== undefined ? { value: inlineValue } : { next: true };
+  if (!/^-[^-]/.test(word)) return null;
+  for (let n = 1; n < word.length; n++) {
+    const f = `-${word[n]}`;
+    if (pkgFlags.has(f)) {
+      const rest = word.slice(n + 1).replace(/^=/, '');
+      return rest ? { value: rest } : { next: true };
+    }
+    // An earlier value-taking letter owns the rest of the word.
+    if (valueFlags.has(f) || !/[A-Za-z]/.test(word[n])) return null;
+  }
+  return null;
 }
 
 /** Whether npm's own option table gives `flag` the next word as its value. */
@@ -378,13 +430,15 @@ function classifyNpmFamily(word: string): OptionClass {
   // A version-selection option that is not in this family's own value table (`--globalconfig`)
   // takes a value for npm; whether pnpm / yarn / bun read the next word as that value is not known.
   if (VERSION_FLAGS_NPM.has(flag)) return { version: flag, ...(!VALUE_FLAGS_NPM.has(flag) && npmTakesValue(flag) ? { maybeValue: true } : {}) };
+  // A value-taking option of this family that is not in its value table: the next word is read both ways.
+  if (NPM_FAMILY_MAYBE_VALUE.has(flag)) return { maybeValue: true };
   if (NPM_FAMILY_EXTRA.has(flag) || VALUE_FLAGS_NPM.has(flag)) return {};
   const opts = parseNpmArgv([flag, 'x']).options;
   const takesValue = opts.at(-1)?.value === 'x';
   const version = opts.find((o) => NPM_VERSION_KEYS.has(o.key));
   if (version) return { version: `--${version.key}`, takesValue };
   if (opts.length && opts.every((o) => o.known)) return { takesValue };
-  if (/^-[^-]/.test(flag)) return shortCluster(flag, NPM_FAMILY_EXTRA, new Set());
+  if (/^-[^-]/.test(flag)) return shortCluster(flag, NPM_FAMILY_EXTRA, NPM_FAMILY_VALUE_SHORTS);
   return { unknown: true };
 }
 
@@ -404,6 +458,8 @@ interface Positionals {
   packageFlagsBeforeCommand?: number;
   /** Runner form: how many command-word candidates had been read when the first later package option appeared. */
   candidatesBeforePackageFlag?: number;
+  /** Values of {@link CollectOptions.extraPackageFlags}: packages fetched in addition to the positionals / runner package. */
+  extraPackages: string[];
   customIndex: boolean;
   /** `-r file` style inputs the vetting cannot resolve. */
   fileInputs: boolean;
@@ -427,6 +483,12 @@ interface CollectOptions {
    * (at most {@link RUNNER_CANDIDATES_MAX}).
    */
   stopAtFirstPositional?: boolean;
+  /**
+   * Options whose value names a package fetched in addition to the positionals (uv `--with`,
+   * pipx `--preinstall`). In a runner form they are the installer's own only before the command
+   * word, which is where the scan ends.
+   */
+  extraPackageFlags?: ReadonlySet<string>;
 }
 
 /**
@@ -445,7 +507,7 @@ function runnerPackages(a: Positionals): string[] {
 const RUNNER_CANDIDATES_MAX = 4;
 
 function collectArgs(args: readonly string[], valueFlags: ReadonlySet<string>, indexFlags: ReadonlySet<string>, pkgFlags: ReadonlySet<string>, opts: CollectOptions = {}): Positionals {
-  const out: Positionals = { positionals: [], packageFlags: [], customIndex: false, fileInputs: false };
+  const out: Positionals = { positionals: [], packageFlags: [], extraPackages: [], customIndex: false, fileInputs: false };
   /** The previous word was an option that may or may not have taken this word as its value. */
   let mayBeValue = false;
   for (let i = 0; i < args.length; i++) {
@@ -473,6 +535,14 @@ function collectArgs(args: readonly string[], valueFlags: ReadonlySet<string>, i
         const v = inlineValue ?? args[i + 1];
         if (v !== undefined) out.packageFlags.push(v);
         if (inlineValue === undefined) i++;
+        continue;
+      }
+      // A package named by an option, fetched as well as the positionals: its value is a ref, never skipped.
+      const named = opts.extraPackageFlags ? namedPackage(a, flag, inlineValue, opts.extraPackageFlags, valueFlags) : null;
+      if (named) {
+        const v = named.next ? args[i + 1] : named.value;
+        if (v !== undefined) out.extraPackages.push(v);
+        if (named.next) i++;
         continue;
       }
       // Short flag with attached value: -wfoo / -rreq.txt (only for the value-taking shorts).
@@ -730,7 +800,19 @@ function ctxOf(a: Positionals, ...pre: Array<{ preIndex: boolean; versionOption?
   };
 }
 
-/** Index / version options on npm's own command line, and its `--package` values. */
+/**
+ * npm's default public registry named explicitly: `https://registry.npmjs.org`, with or without
+ * the trailing slash, host in any case. Nothing else is the default: not `http://`, not a mirror,
+ * not another host.
+ */
+const NPM_DEFAULT_REGISTRY = /^https:\/\/registry\.npmjs\.org\/?$/i;
+
+/**
+ * Index / version options on npm's own command line, and its `--package` values. The registry
+ * option (in any spelling {@link parseNpmArgv} resolves to `registry`: `--reg`, a unique prefix)
+ * makes the install a custom-index one only when the value the LAST one took is not npm's default
+ * public registry; with the default, no value or an empty value the public lookup runs.
+ */
 function npmContext(p: NpmArgv): RefContext & { packages: string[] } {
   let customIndex = false;
   let selected: string | undefined;
@@ -738,7 +820,7 @@ function npmContext(p: NpmArgv): RefContext & { packages: string[] } {
   const packages: string[] = [];
   for (const o of p.options) {
     if (!o.known) { unknown = true; continue; }
-    if (o.key === 'registry' && !o.negated) customIndex = true;
+    if (o.key === 'registry' && !o.negated) customIndex = !!o.value && !NPM_DEFAULT_REGISTRY.test(o.value);
     if (NPM_VERSION_KEYS.has(o.key)) selected ??= `--${o.key}`;
     if (o.key === 'package' && o.value) packages.push(o.value);
   }
@@ -858,17 +940,19 @@ function parseUv(rest: string[]): PackageRef[] {
     const sec = firstWord(after, UV_SUB_VERBS);
     if (sec.at >= 0 && after[sec.at] === 'run') return parseUvx('uv tool run', after.slice(sec.at + 1), [first, sec]);
     if (sec.at >= 0 && after[sec.at] === 'install') {
-      const a = pyCollect(after.slice(sec.at + 1));
-      return pyRefs('uv tool install', a.positionals, ctxOf(a, first, sec), true);
+      // The tool package(s), and every package `--with` / `-w` / `--with-executables-from` adds to its environment.
+      const a = collectArgs(after.slice(sec.at + 1), VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set(), { classify: classifyPython, extraPackageFlags: UV_EXTRA_PACKAGE_FLAGS });
+      return pyRefs('uv tool install', [...a.positionals, ...a.extraPackages.flatMap(splitPackageList)], ctxOf(a, first, sec), true);
     }
   }
   return [];
 }
 
 function parseUvx(installer: string, rest: string[], pre: Array<{ preIndex: boolean; versionOption?: string }> = []): PackageRef[] {
-  const a = collectArgs(rest, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set(['--from']), { classify: classifyPython, stopAtFirstPositional: true });
+  const a = collectArgs(rest, VALUE_FLAGS_PIP, INDEX_FLAGS_PIP, new Set(['--from']), { classify: classifyPython, stopAtFirstPositional: true, extraPackageFlags: UV_EXTRA_PACKAGE_FLAGS });
   const ctx = ctxOf(a, ...pre);
-  return pyRefs(installer, runnerPackages(a), ctx, true);
+  // The runner package (the command or `--from`), and in addition every package `--with` / `-w` / `--with-executables-from` names before the command.
+  return pyRefs(installer, [...runnerPackages(a), ...a.extraPackages.flatMap(splitPackageList)], ctx, true);
 }
 
 const PIPX_VERBS = new Set(['install', 'run']);
@@ -880,13 +964,14 @@ function parsePipx(rest: string[]): PackageRef[] {
   const verb = rest[f.at];
   const after = rest.slice(f.at + 1);
   if (verb === 'install') {
-    const a = collectArgs(after, VALUE_FLAGS_PIPX, INDEX_FLAGS_PIPX, new Set(), { classify: classifyPython });
-    return pyRefs('pipx install', a.positionals.slice(0, 1), ctxOf(a, f));
+    // The package, and every package `--preinstall` has pipx install before it.
+    const a = collectArgs(after, VALUE_FLAGS_PIPX, INDEX_FLAGS_PIPX, new Set(), { classify: classifyPython, extraPackageFlags: PIPX_EXTRA_PACKAGE_FLAGS });
+    return pyRefs('pipx install', [...a.positionals.slice(0, 1), ...a.extraPackages], ctxOf(a, f));
   }
   if (verb === 'run') {
-    const a = collectArgs(after, VALUE_FLAGS_PIPX, INDEX_FLAGS_PIPX, new Set(['--spec']), { classify: classifyPython, stopAtFirstPositional: true });
+    const a = collectArgs(after, VALUE_FLAGS_PIPX, INDEX_FLAGS_PIPX, new Set(['--spec']), { classify: classifyPython, stopAtFirstPositional: true, extraPackageFlags: PIPX_EXTRA_PACKAGE_FLAGS });
     const ctx = ctxOf(a, f);
-    return pyRefs('pipx run', runnerPackages(a), ctx);
+    return pyRefs('pipx run', [...runnerPackages(a), ...a.extraPackages], ctx);
   }
   return [];
 }
