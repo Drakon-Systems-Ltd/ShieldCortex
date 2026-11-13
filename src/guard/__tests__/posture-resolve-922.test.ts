@@ -9,6 +9,7 @@
  */
 import { describe, expect, it } from '@jest/globals';
 import {
+  POSTURE_RANK,
   guardPostureRow,
   resolvePlanePostures,
   type PostureInputs,
@@ -434,6 +435,9 @@ describe('#1063 guardPostureRow — up and down consequences are derived indepen
     'Hermes takes its posture from SHIELDCORTEX_ENFORCE in the Hermes gateway environment, not from config.json; no ShieldCortex command changes it today.';
   const UP_STRICTER = 'Matching the signed setting up to the stricter plane would turn a plane up.';
   const UP_LOOSER = 'Putting a looser plane on the signed setting would turn that plane up.';
+  const HERMES_NO_GATE =
+    'Hermes cannot be matched down to the signed setting: it has no enforce-when-ready posture. ' +
+    'It enforces, or an explicit SHIELDCORTEX_ENFORCE opt-out makes it advisory.';
   const DOWN_ADVISORY =
     'Matching the stricter plane down to the signed setting would drop that plane to advisory ' +
     '(ordinary dangerous ops log but are not gated; catastrophic ops and changes to the guard itself are still held or blocked).';
@@ -480,21 +484,63 @@ describe('#1063 guardPostureRow — up and down consequences are derived indepen
     expectNoPostureCommand(fix);
   });
 
-  it('signed enforce-when-ready with an enforce plane and an advisory plane states both directions', () => {
+  it('signed enforce-when-ready: no hook or OpenClaw shape sits above it, so only Hermes can be the stricter plane', () => {
+    // The hook holds the signed value; the plugin entry can turn its plane
+    // off or advisory, but its readiness gate comes from the signed file only.
+    const ABOVE_WHEN_READY = POSTURE_RANK['enforce-when-ready'];
+    const choices = [undefined, true, false];
+    for (const signedRaw of [WHEN_READY, { interceptor: WHEN_READY }]) {
+      for (const where of ['top', 'alias'] as const) {
+        for (const enabled of choices) {
+          for (const enforce of choices) {
+            for (const readinessGate of choices) {
+              const guard = Object.fromEntries(
+                Object.entries({ enabled, enforce, readinessGate }).filter(([, v]) => v !== undefined),
+              );
+              const config = where === 'top' ? { actionGuard: guard } : { interceptor: { actionGuard: guard } };
+              const r = resolvePlanePostures(inputs({ signedRaw, openclaw: { state: 'ok', raw: entry(config) } }));
+              expect(r.signed).toBe('enforce-when-ready');
+              const p = posturesOf(r);
+              expect(p.claude).toBe('enforce-when-ready');
+              expect(POSTURE_RANK[p.openclaw as keyof typeof POSTURE_RANK]).toBeLessThanOrEqual(ABOVE_WHEN_READY);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('signed enforce-when-ready with Hermes enforcing and the plugin advisory: says Hermes has no such posture, never readiness shadow', () => {
     const r = resolvePlanePostures(inputs({
       signedRaw: WHEN_READY,
       openclaw: { state: 'ok', raw: entry({ actionGuard: { enforce: false } }) },
       postureRecords: [hermes('enforce')],
     }));
     expect(r.signed).toBe('enforce-when-ready');
-    expect(valuesOf(r)).toEqual(expect.arrayContaining(['enforce', 'advisory']));
+    expect(posturesOf(r)).toEqual({ claude: 'enforce-when-ready', openclaw: 'advisory', hermes: 'enforce' });
+    const row = guardPostureRow(r);
+    expect(row.status).toBe('fail');
+    expect(row.fixNoteWithCommands).toBe(true);
+    const fix = row.fix ?? '';
+    // The looser OpenClaw direction and the signed-setting-up direction stay.
+    expect(fix).toBe(`${HERMES_NO_GATE} ${UP_LOOSER} ${UP_STRICTER} This row names no command. ${HELP} ${HERMES_NOTE}`);
+    expect(fix).not.toMatch(/drop that plane to enforce-when-ready|readiness|shadow|log but are not gated/);
+    expectNoPostureCommand(fix);
+  });
+
+  it('signed enforce-when-ready with Hermes split enforce/advisory: Hermes is not "a looser plane" that can be put on the signed setting', () => {
+    const r = resolvePlanePostures(inputs({
+      signedRaw: WHEN_READY,
+      postureRecords: [hermes('enforce'), hermes('advisory', { profile: 'work' })],
+    }));
+    expect(r.signed).toBe('enforce-when-ready');
+    expect(valuesOf(r)).toEqual(['enforce-when-ready', 'advisory', 'enforce']);
     const row = guardPostureRow(r);
     expect(row.status).toBe('fail');
     const fix = row.fix ?? '';
-    expect(fix).toMatch(/Matching the stricter plane down to the signed setting would drop that plane to enforce-when-ready/);
-    expect(fix).toContain(UP_LOOSER);
-    expect(fix).toContain(UP_STRICTER);
-    expect(fix).toContain('This row names no command');
+    expect(fix).toBe(`${HERMES_NO_GATE} ${UP_STRICTER} This row names no command. ${HELP} ${HERMES_NOTE}`);
+    expect(fix).not.toContain(UP_LOOSER);
+    expect(fix).not.toMatch(/readiness|shadow/);
     expectNoPostureCommand(fix);
   });
 

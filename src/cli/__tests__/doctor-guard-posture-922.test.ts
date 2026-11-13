@@ -564,3 +564,54 @@ describe('#1063 doctor — mixed stricter and looser planes, as the operator see
     expect(text).not.toMatch(POSTURE_SETTER);
   });
 });
+
+/**
+ * #1063 r1: signed enforce-when-ready. The hook holds the signed value and the
+ * plugin's readiness gate comes from the signed file, so the only plane that
+ * can sit above it is Hermes, which has no enforce-when-ready posture. The
+ * rendered row must say that, keep the looser-plugin and signed-setting-up
+ * directions, and never promise Hermes a readiness-gated shadow.
+ */
+describe('#1063 doctor — signed enforce-when-ready with Hermes the stricter plane', () => {
+  const POSTURE_SETTER = /--action-guard-[a-z]|guard posture (off|advisory|enforce)|SHIELDCORTEX_ENFORCE\s*=/;
+  const HERMES_NO_GATE =
+    'Hermes cannot be matched down to the signed setting: it has no enforce-when-ready posture. ' +
+    'It enforces, or an explicit SHIELDCORTEX_ENFORCE opt-out makes it advisory.';
+  const REST =
+    'Putting a looser plane on the signed setting would turn that plane up. ' +
+    'Matching the signed setting up to the stricter plane would turn a plane up. ' +
+    'This row names no command.';
+  const HERMES_NOTE =
+    'Hermes takes its posture from SHIELDCORTEX_ENFORCE in the Hermes gateway environment, not from config.json; ' +
+    'no ShieldCortex command changes it today.';
+
+  function arrangeWhenReady(): CheckResult {
+    claudeHookWired();
+    hermesPluginArtefacts(home);
+    signed({ enabled: true, readinessGate: true });
+    openclawEntry({ enabled: true, config: { actionGuard: { enforce: false } } });
+    writeReport(configDir, reportBody({ configured_posture: 'enforce' }));
+    return doctor.checkGuardPosture({ read: { home, collect: { nowMs: NOW, deps: LIVE } } });
+  }
+
+  it.each([false, true])('verbose=%s: the Hermes limitation is rendered in full and no posture command is prescribed', (verbose) => {
+    const row = arrangeWhenReady();
+    expect(row.status).toBe('fail');
+    expect(row.message).toMatch(/Claude Code hook enforce-when-ready/);
+    expect(row.message).toMatch(/OpenClaw plugin advisory/);
+    expect(row.message).toMatch(/Hermes enforce \(self-report\)/);
+    const display = report.sanitiseDoctorRowsForDisplay([row]);
+    const text = report.formatDoctorReport(display, {
+      verbose,
+      width: 80,
+      nextCommand: report.nextCommandForFailures(display),
+    }).join('\n');
+    const flat = text.replace(/\s+/g, ' ');
+    expect(flat).toContain(`${HERMES_NO_GATE} ${REST}`);
+    expect(flat).toContain(HERMES_NOTE);
+    expect(flat).not.toMatch(/drop that plane to enforce-when-ready|readiness conditions|stays in shadow/);
+    const commands = text.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('$ '));
+    expect(commands).toEqual(['$ shieldcortex guard posture --help', '$ shieldcortex doctor --verbose']);
+    expect(text).not.toMatch(POSTURE_SETTER);
+  });
+});
