@@ -615,3 +615,52 @@ describe('#1063 doctor — signed enforce-when-ready with Hermes the stricter pl
     expect(text).not.toMatch(POSTURE_SETTER);
   });
 });
+
+/**
+ * #1063 r2: the Claude Code hook is not wired and there is no OpenClaw entry,
+ * so Hermes is the only compared plane. Hermes does not read config.json:
+ * raising the signed setting changes no compared plane, and the rendered row
+ * must not say a plane would turn up. Read from fixture files through the real
+ * readers, with two live Hermes profiles that disagree.
+ */
+describe('#1063 doctor — Hermes the only compared plane, hook unwired', () => {
+  const POSTURE_SETTER = /--action-guard-[a-z]|guard posture (off|advisory|enforce)|SHIELDCORTEX_ENFORCE\s*=/;
+  const HERMES_NOTE =
+    'Hermes takes its posture from SHIELDCORTEX_ENFORCE in the Hermes gateway environment, not from config.json; ' +
+    'no ShieldCortex command changes it today.';
+
+  it.each<[string, Record<string, unknown>, string, RegExp, string]>([
+    ['signed enforce-when-ready, Hermes enforce and advisory', { enabled: true, readinessGate: true }, 'advisory',
+      /Hermes advisory and enforce \(self-report\)/,
+      'Hermes cannot be matched down to the signed setting: it has no enforce-when-ready posture. ' +
+      'It enforces, or an explicit SHIELDCORTEX_ENFORCE opt-out makes it advisory. This row names no command.'],
+    ['signed off, Hermes enforce and intentionally-off', { enabled: false }, 'intentionally-off',
+      /Hermes off and enforce \(self-report\)/,
+      'Matching the stricter plane down to the signed setting would turn Action Guard off on that plane. ' +
+      'This row names no command.'],
+  ])('%s: no "turn a plane up" claim survives rendering, and no posture command is prescribed', (_name, guard, work, hermesWords, lead) => {
+    hermesPluginArtefacts(home);
+    signed(guard);
+    writeReport(configDir, reportBody({ configured_posture: 'enforce' }));
+    writeReport(configDir, reportBody({ profile: 'work', configured_posture: work }));
+    const row = doctor.checkGuardPosture({ read: { home, collect: { nowMs: NOW, deps: LIVE } } });
+    expect(row.status).toBe('fail');
+    expect(row.message).not.toMatch(/Claude Code hook|OpenClaw plugin/);
+    expect(row.message).toMatch(hermesWords);
+    for (const verbose of [false, true]) {
+      const display = report.sanitiseDoctorRowsForDisplay([row]);
+      const text = report.formatDoctorReport(display, {
+        verbose,
+        width: 80,
+        nextCommand: report.nextCommandForFailures(display),
+      }).join('\n');
+      const flat = text.replace(/\s+/g, ' ');
+      expect(flat).toContain(lead);
+      expect(flat).toContain(HERMES_NOTE);
+      expect(flat).not.toMatch(/turn a plane up|turn that plane up/);
+      const commands = text.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('$ '));
+      expect(commands).toEqual(['$ shieldcortex guard posture --help', '$ shieldcortex doctor --verbose']);
+      expect(text).not.toMatch(POSTURE_SETTER);
+    }
+  });
+});

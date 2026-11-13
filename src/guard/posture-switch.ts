@@ -138,6 +138,12 @@ export interface PostureReport {
   nodeMismatch: boolean;
   /** The posture the hook and plugin agree on, or null (none known, or they disagree). Hermes excluded. */
   nodeReference: PlanePosture | null;
+  /**
+   * #1063 r2: raising the signed setting to a stricter plane's posture would
+   * turn some compared plane up ({@link signedRaiseTurnsPlaneUp}). False when
+   * the signed posture is unknown or no plane sits above it.
+   */
+  signedRaiseTurnsPlaneUp: boolean;
 }
 
 function isBlock(v: unknown): v is Record<string, unknown> {
@@ -380,6 +386,48 @@ function gradedKeyOf(inputs: PostureInputs, graded: PlanePosture): string | null
   return k in top || !(k in alias) ? `actionGuard.${k}` : `interceptor.actionGuard.${k}`;
 }
 
+/**
+ * The top-level `actionGuard` keys that make config.json read as `posture`.
+ * Every key a posture reads is set as a boolean, so the #209 alias cannot gap-fill
+ * one and the plugin's boolean filter keeps them all.
+ */
+const POSTURE_KEYS: Record<PlanePosture, Record<string, boolean>> = {
+  off: { enabled: false },
+  advisory: { enabled: true, enforce: false, readinessGate: false },
+  'enforce-when-ready': { enabled: true, enforce: true, readinessGate: true },
+  enforce: { enabled: true, enforce: true, readinessGate: false },
+};
+
+/**
+ * #1063 r2: whether raising the signed setting to a stricter plane's posture
+ * would turn some compared plane up. Each compared Claude Code hook and
+ * OpenClaw plane is re-read, through its own reader, over a config.json carrying
+ * that posture. The hook follows the file. The plugin follows it unless its own
+ * entry holds it (an entry key, a disabled entry, `interceptor.enabled:false`).
+ * Hermes does not read config.json, so it never counts: with the hook unwired
+ * and no OpenClaw entry following the file, raising the signed setting changes
+ * no compared plane.
+ */
+function signedRaiseTurnsPlaneUp(inputs: PostureInputs, signed: PlanePosture | null, planes: PlaneResult[]): boolean {
+  if (signed === null) return false;
+  const followers = planes.filter((p) => p.plane !== 'hermes' && p.posture !== null);
+  const targets = new Set(
+    planes
+      .flatMap((p) => p.values ?? (p.posture === null ? [] : [p.posture]))
+      .filter((v) => POSTURE_RANK[v] > POSTURE_RANK[signed]),
+  );
+  for (const target of targets) {
+    const raw = inputs.signedRaw ?? {};
+    const guard = isBlock(raw.actionGuard) ? raw.actionGuard : {};
+    const raised: PostureInputs = { ...inputs, signedRaw: { ...raw, actionGuard: { ...guard, ...POSTURE_KEYS[target] } } };
+    for (const p of followers) {
+      const next = (p.plane === 'claude' ? resolveHook(raised) : resolveOpenClaw(raised))?.posture ?? null;
+      if (next !== null && POSTURE_RANK[next] > POSTURE_RANK[p.posture as PlanePosture]) return true;
+    }
+  }
+  return false;
+}
+
 /** Pure. Same inputs, same report. */
 export function resolvePlanePostures(inputs: PostureInputs): PostureReport {
   const planes = [resolveHook(inputs), resolveOpenClaw(inputs), resolveHermes(inputs)].filter(
@@ -407,8 +455,9 @@ export function resolvePlanePostures(inputs: PostureInputs): PostureReport {
   const compared = node.length + (hermes ? 1 : 0);
   const graded = gradedPosture(inputs);
   const verdict: PostureVerdict = nodeMismatch || hermesLooser ? 'mismatch' : compared === 0 ? 'none' : 'agree';
+  const signed = signedPosture(inputs);
   return {
-    signed: signedPosture(inputs),
+    signed,
     integrity: inputs.integrity,
     ...(inputs.integrityAdoption ? { integrityAdoption: inputs.integrityAdoption } : {}),
     graded,
@@ -420,6 +469,7 @@ export function resolvePlanePostures(inputs: PostureInputs): PostureReport {
     hermesLooser,
     nodeMismatch,
     nodeReference: nodeValues.length === 1 ? nodeValues[0] : null,
+    signedRaiseTurnsPlaneUp: signedRaiseTurnsPlaneUp(inputs, signed, planes),
   };
 }
 
@@ -576,6 +626,12 @@ const HERMES_NO_READINESS =
  * signed setting ({@link planeCanHold}). Hermes above a signed
  * enforce-when-ready gets {@link HERMES_NO_READINESS}, never the readiness
  * shadow, and is not counted as a looser plane that could be put on it.
+ *
+ * #1063 r2: the signed-setting-up consequence is stated only when raising the
+ * signed setting would turn a compared plane up
+ * ({@link PostureReport.signedRaiseTurnsPlaneUp}). Hermes does not read
+ * config.json, so a Hermes-only stricter plane over an unwired hook gets no
+ * such sentence.
  */
 function mismatchFix(report: PostureReport): string {
   const s = report.signed;
@@ -602,9 +658,11 @@ function mismatchFix(report: PostureReport): string {
   const up = below.some((p) => planeCanHold(p.plane, s))
     ? ' Putting a looser plane on the signed setting would turn that plane up.'
     : '';
+  const raise = report.signedRaiseTurnsPlaneUp
+    ? ' Matching the signed setting up to the stricter plane would turn a plane up.'
+    : '';
   const hermesNote = report.hermesLooser || hermesCannotHold ? ` ${HERMES_SOURCE_NOTE}` : '';
-  return `${down}${up} Matching the signed setting up to the stricter plane would turn a plane up. ` +
-    `This row names no command. ${help}${hermesNote}`;
+  return `${down}${up}${raise} This row names no command. ${help}${hermesNote}`;
 }
 
 /**

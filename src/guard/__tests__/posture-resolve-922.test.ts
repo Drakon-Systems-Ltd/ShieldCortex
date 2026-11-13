@@ -562,6 +562,75 @@ describe('#1063 guardPostureRow — up and down consequences are derived indepen
     expectNoPostureCommand(fix);
   });
 
+  /**
+   * #1063 r2: "Matching the signed setting up to the stricter plane would turn
+   * a plane up" holds only when a compared plane that reads config.json would
+   * actually rise. Hermes does not read it. With the hook unwired and no
+   * OpenClaw entry, raising the signed setting changes no compared plane, so
+   * the row must not say a plane would turn up.
+   */
+  const DOWN_OFF = 'Matching the stricter plane down to the signed setting would turn Action Guard off on that plane.';
+
+  it.each<[string, Record<string, unknown>, PostureRecord[], string]>([
+    ['signed enforce-when-ready, Hermes enforce and advisory', WHEN_READY,
+      [hermes('enforce'), hermes('advisory', { profile: 'work' })], HERMES_NO_GATE],
+    ['signed off, Hermes enforce and intentionally-off', {},
+      [hermes('enforce'), hermes('intentionally-off', { profile: 'work' })], DOWN_OFF],
+  ])('hook unwired, no OpenClaw, %s: raising the signed setting turns no plane up, so the row does not say it would', (_name, signedRaw, postureRecords, down) => {
+    const r = resolvePlanePostures(inputs({ signedRaw, claudeWired: false, postureRecords }));
+    expect(r.planes.map((p) => p.plane)).toEqual(['hermes']);
+    expect(r.verdict).toBe('mismatch');
+    const row = guardPostureRow(r);
+    expect(row.status).toBe('fail');
+    expect(row.fixNoteWithCommands).toBe(true);
+    const fix = row.fix ?? '';
+    expect(fix).toBe(`${down} This row names no command. ${HELP} ${HERMES_NOTE}`);
+    expect(fix).not.toContain(UP_STRICTER);
+    expect(fix).not.toMatch(/turn a plane up|turn that plane up/);
+    expectNoPostureCommand(fix);
+
+    // Control: the same shape with the hook wired. The hook reads config.json
+    // and sits below Hermes enforce, so raising the signed setting turns it up.
+    const wired = guardPostureRow(resolvePlanePostures(inputs({ signedRaw, claudeWired: true, postureRecords })));
+    expect(wired.status).toBe('fail');
+    expect(wired.fix ?? '').toContain(UP_STRICTER);
+    expectNoPostureCommand(wired.fix ?? '');
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['entry actionGuard.enabled:false', entry({ actionGuard: { enabled: false } })],
+    ['entry interceptor.enabled:false', entry({ interceptor: { enabled: false } })],
+    ['plugin entry disabled', entry({}, false)],
+  ])('hook unwired, OpenClaw off by its own %s: the signed setting cannot raise it, so no plane would turn up', (_name, raw) => {
+    const r = resolvePlanePostures(inputs({
+      claudeWired: false,
+      openclaw: { state: 'ok', raw },
+      postureRecords: [hermes('enforce'), hermes('intentionally-off', { profile: 'work' })],
+    }));
+    expect(r.signed).toBe('off');
+    expect(posturesOf(r)).toEqual({ openclaw: 'off', hermes: 'off' });
+    const fix = guardPostureRow(r).fix ?? '';
+    expect(fix).toBe(`${DOWN_OFF} This row names no command. ${HELP} ${HERMES_NOTE}`);
+    expect(fix).not.toMatch(/turn a plane up/);
+    expectNoPostureCommand(fix);
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['an entry that sets nothing', {}],
+    ['an entry that pins enforce:false (signed enforce lifts it to advisory)', { actionGuard: { enforce: false } }],
+  ])('hook unwired, OpenClaw following the signed file with %s: raising the signed setting turns it up, so the row says so', (_name, config) => {
+    const r = resolvePlanePostures(inputs({
+      claudeWired: false,
+      openclaw: { state: 'ok', raw: entry(config) },
+      postureRecords: [hermes('enforce'), hermes('intentionally-off', { profile: 'work' })],
+    }));
+    expect(r.signed).toBe('off');
+    expect(posturesOf(r)).toEqual({ openclaw: 'off', hermes: 'off' });
+    const fix = guardPostureRow(r).fix ?? '';
+    expect(fix).toBe(`${DOWN_OFF} ${UP_STRICTER} This row names no command. ${HELP} ${HERMES_NOTE}`);
+    expectNoPostureCommand(fix);
+  });
+
   // The pure stricter-only and looser-only shapes keep their exact #1037 text.
   it.each<[string, PostureInputs, string]>([
     ['stricter only: signed off, plugin enabled', inputs({
