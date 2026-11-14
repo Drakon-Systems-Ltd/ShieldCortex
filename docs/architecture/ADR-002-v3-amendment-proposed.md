@@ -105,7 +105,7 @@ Session taint is wired as a flag on audit rows. It gates nothing. Promoting a na
 
 v2's DENY set, plus the three items the contract adds: git force push or history rewrite, payments or money movement, disabling the guard itself. **Changing the published list is an owner decision.** Until it is recorded, the list in force is the one `main` enforces today.
 
-Open scoping questions that the owner answer must settle, because the corpus already holds cases on both sides:
+Open scoping questions that the owner answer must settle, because the folded issues hold cases on both sides (none of them is a fixture in the corpus yet):
 
 - whether a lease-protected force push to a non-default branch is on the list or logged (#512 calls it routine);
 - what counts as "disabling the guard" beyond the switch itself: a write to the guard's config or hook registration is the proposed boundary; a read of those files is not (#927, #874).
@@ -120,7 +120,7 @@ v2 §6 is replaced by the phases of epic #1065:
 
 | Phase | What | Verdict change |
 |---|---|---|
-| 0 | Freeze the corpus: every folded issue becomes named fixtures with expected effects, targets and decision; cases that fail today are marked known-gap. This document. | none |
+| 0 | Freeze the corpus: every folded issue becomes named fixtures with expected effects, targets and decision; cases that fail today are marked known-gap. This document. **Not complete:** at this change 1 of the 20 epic lines (#519) has a fixture and the other nineteen are not authored; see [ADR-002-frozen-corpus.md](./ADR-002-frozen-corpus.md). | none |
 | 1 | One single-pass lexer and argv tree: statements, words marked executable or data, redirects, heredocs tagged by language, substitutions, normalisation of executable words. Shadow mode. Linear time, proven by a growth ratio. | none |
 | 2 | An effect and target mapper on that model replaces the dangerous-tier substring rules. Quoted prose and written file content are data. Reading a config file is not writing it. Hook and OpenClaw interceptor share one classifier. | false positives in the frozen corpus stop; zero movement in the miss corpus and the block list |
 | 3 | The always-block list runs on normalised executable words. Write-content rows made linear. Residuals documented in `docs/`. | misses in the frozen corpus stop; the false-positive corpus does not move |
@@ -137,14 +137,14 @@ Rules for every phase: tests and fixtures run in CI or an isolated evaluator, ne
 - **The block list becomes the security boundary that matters most**, so Phase 3 (normalisation, inline-program output routed into a shell, sends to a bare host) carries more weight than it did under v2, and needs a non-author security reviewer in addition to the usual panel.
 - **Taint evidence arrives before a taint gate**, which lets the eventual gate be sized from data instead of from the argument in 1.2.
 - **`tool-action-guard.ts` must get smaller.** The epic's closing condition includes it.
-- The frozen corpus is what makes any of this reviewable: each phase reports a moved list against it, and a move that is not in the corpus is a defect in the change.
+- The frozen corpus is what is meant to make any of this reviewable: each phase reports a moved list against it, and a move that is not in the corpus is a defect in the change. It cannot do that yet. At this change it holds 1 of the 20 epic lines, and no phase can report a moved list against lines that have no fixture.
 
 ---
 
 ## 5. What v3 does not decide
 
 - Hold-and-resume itself (#853), card delivery (#815), owner-present detection (#923) and session-lease identity (#854). They belong to #875 and keep their owners.
-- Any new detector. Where the corpus records a shape the guard has no signal for and the contract's list does not name (for example the reverse-shell case in #1005), v3 records it as a block-list scoping question for the owner, not as work to start.
+- Any new detector. Where a folded issue records a shape the guard has no signal for and the contract's list does not name (for example the reverse-shell case in #1005), v3 records it as a block-list scoping question for the owner, not as work to start.
 - Skill-scanner speed (#1002, #1040) and the release blocker (#1060).
 
 ---
@@ -156,7 +156,7 @@ Unchanged in kind from v2 §5; changed in what it is for.
 - **5A** (logged-signal replay) is re-run after Phase 2 and reported as descriptive.
 - **5B** (effect-witness fixtures, three arms) is executed in Phase 4 against the bars v2 pre-registered: at least 90% of witnessed attacks blocked, at most 2% unintended blocking of legitimate work, at least 98% completion along the approval path, zero successes in the enumerated regression families. Denominators are frozen before the run.
 - **5C** (per-adapter coverage) is reported for the taint **flag**: present on rows in the positive-injection control, absent in the clean control.
-- The **frozen corpus** (`src/defence/iron-dome/__tests__/fixtures/adr002/`, index in [ADR-002-frozen-corpus.md](./ADR-002-frozen-corpus.md)) is the per-phase regression bar.
+- The **frozen corpus** (`src/defence/iron-dome/__tests__/fixtures/adr002/`, index in [ADR-002-frozen-corpus.md](./ADR-002-frozen-corpus.md)) is the intended per-phase regression bar. At this change it covers 1 of the 20 epic lines (#519, a cost fixture measured by an opt-in report and not asserted in the default suite), so it is not yet a bar for Phases 2 to 4.
 
 ---
 

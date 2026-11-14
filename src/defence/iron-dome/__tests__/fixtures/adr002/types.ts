@@ -72,7 +72,10 @@ export type ExpectedVerdict = 'allow' | 'not-block' | 'gate' | 'block' | 'any';
  *   settled           the expectation holds on main today and must keep holding
  *   known-gap         the expectation is agreed and FAILS on main today; run as
  *                     `it.failing`, so CI goes red the moment it starts passing
- *                     until the marker is removed and the epic line is ticked
+ *                     until the marker is removed and the epic line is ticked.
+ *                     A `cost` known-gap is the exception: elapsed time cannot
+ *                     decide red or green, so it is not run as `it.failing`
+ *                     and is recorded, not machine-held (see `cost` below)
  *   pending-decision  the correct verdict is not settled (owner or design
  *                     decision outstanding); `expect` pins TODAY's verdict so
  *                     any movement is deliberate and shows in the moved list
@@ -85,7 +88,8 @@ export type FixtureClass =
   | 'false-positive' // routine work the guard misreads
   | 'miss'           // a dangerous shape the guard does not stop
   | 'control'        // the paired case that must not move when its sibling is fixed
-  | 'cost'           // scan cost grows faster than linearly
+  | 'cost'           // scan cost grows faster than linearly; never timed in
+                     // the default suite, measured only by the opt-in report
   | 'note';
 
 export interface FixtureExpectation {
@@ -99,7 +103,9 @@ export interface FixtureExpectation {
   /**
    * `cost` fixtures: the largest allowed time ratio between input size n and
    * 2n. Linear is about 2; quadratic is about 4. Measured as a best-of ratio,
-   * never as wall clock against a budget (#519, #1040).
+   * never as wall clock against a budget (#519, #1040). It is printed beside
+   * the measured ratios by the ADR002_CORPUS_REPORT=1 report and is not
+   * asserted by any test: a clock reading does not decide red or green.
    */
   maxGrowthPerDoubling?: number;
 }

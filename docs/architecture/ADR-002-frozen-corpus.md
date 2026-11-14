@@ -1,6 +1,6 @@
 # ADR-002 frozen corpus (epic #1065, Phase 0)
 
-**State at this change: incomplete.** The fixture format, the test harness and the Phase 1 line (#519) are in the tree. The fixtures for the other nineteen epic lines are **not**. Read "What is missing, and why" before relying on this corpus for anything.
+**State at this change: incomplete.** The fixture format, the test harness and the Phase 1 line (#519) are in the tree. The fixtures for the other nineteen epic lines are **not**: 1 of 20 lines has a fixture. That one fixture is a cost fixture whose growth measurement is an opt-in report, so the default suite asserts no classifier verdict for any epic line yet. Read "What is missing, and why" before relying on this corpus for anything.
 
 ## What it is
 
@@ -20,11 +20,13 @@ It is test data only. It lives under `src/defence/iron-dome/__tests__/fixtures/a
 | Status | Meaning | How the suite runs it |
 |---|---|---|
 | `settled` | the expectation holds on `main` and must keep holding | plain test |
-| `known-gap` | the expectation is agreed and **fails** on `main` today | `it.failing`: CI goes red the moment it starts passing, until the marker is removed and the epic line ticked in the same change |
+| `known-gap` | the expectation is agreed and **fails** on `main` today | verdict fixtures: `it.failing`, so CI goes red the moment it starts passing, until the marker is removed and the epic line ticked in the same change. Cost fixtures: recorded only, not held by CI (see below) |
 | `pending-decision` | the correct verdict is not settled (an owner or design decision is outstanding) | pinned to today's verdict, so any move is deliberate |
 | `note` | a recorded constraint or classification with no call to evaluate | never executed |
 
 A fixture asserts a verdict (`allow`, `not-block`, `gate`, `block`, or none), signals that must or must not be present, script paths the resolver must be asked for, or, for a cost fixture, a growth ratio per doubling of input size. Cost is always a ratio, never a wall-clock budget (#519, #1040).
+
+A cost fixture is never timed in the default suite. Elapsed time moves with the scheduler, garbage collection and JIT warm-up, so a clock reading must not decide red or green. The default suite checks only the deterministic part: the same size builds the same call, and the input grows by a constant amount per unit of size. The growth measurement runs only with `ADR002_CORPUS_REPORT=1`, after one discarded pass over every size, and prints times, ratios, the fixture's bound and `withinBound`. It asserts nothing. The consequence is stated plainly: a `known-gap` cost fixture is **not** machine-held. The change that closes it removes the marker on the strength of that report and of its own deterministic test (for #519, a step count the Phase 1 lexer can expose; today's tokeniser cannot be counted without a production change, which this corpus does not make).
 
 The effect, target and v3 decision fields are recorded for the reviewer and for Phases 2 to 4. The Phase 0 suite does not assert them: v3 is a proposal, and no default has changed.
 
@@ -40,12 +42,12 @@ The effect, target and v3 decision fields are recorded for the reviewer and for 
 
 | Epic line | Phase | Fixtures in the tree |
 |---|---|---|
-| #519 tokeniser cost | 1 | 1 (`519/tokeniser-growth-repeated-word`, cost, known-gap) |
+| #519 tokeniser cost | 1 | 1 (`519/tokeniser-growth-repeated-word`, cost, known-gap; measured by the opt-in report, not asserted) |
 | #629, #927, #512, #551 (also #549), #738, #958, #634, #874 | 2 | none yet |
 | #504, #703, #662, #995, #755, #929, #1049, #588, #1005, #885 note | 3 | none yet |
 | #556 | 4 | none yet |
 
-The suite prints this as one line (`[#1065] frozen corpus: ...`) and holds "every unchecked epic line maps to at least one fixture id" as a known-gap, so it cannot be forgotten: the test turns red when the last line is covered.
+That is 1 of 20 epic lines. The suite prints this as one line (`[#1065] frozen corpus: ...`) and holds "every unchecked epic line maps to at least one fixture id" as a known-gap, so it cannot be forgotten: the test turns red when the last line is covered.
 
 ## What is missing, and why
 

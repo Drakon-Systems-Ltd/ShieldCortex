@@ -23,6 +23,8 @@ export const PHASE1_FIXTURES: FrozenFixture[] = [
     expect: { verdict: 'any', maxGrowthPerDoubling: 3 },
     why: '#519 measured 81 / 285 / 1080 ms at 2000 / 4000 / 8000 tokens on d8625b86 (about x4 per doubling). '
       + 'Still quadratic on main 7da096fb: 17 / 59 / 229 ms on the fleet test runner, ratios 3.49 and 3.91; 3.89 to 3.94 for 4000 to 8000 over three more runs (12 Nov 2026). '
-      + 'The Phase 1 lexer is single-pass; its acceptance is this growth ratio, not a wall-clock budget.',
+      + 'The Phase 1 lexer is single-pass; its acceptance is this growth ratio, not a wall-clock budget. '
+      + 'The ratio is measured by the opt-in report (ADR002_CORPUS_REPORT=1) and is not asserted in the default suite, '
+      + 'so this known-gap is recorded here, not held by CI.',
   },
 ];

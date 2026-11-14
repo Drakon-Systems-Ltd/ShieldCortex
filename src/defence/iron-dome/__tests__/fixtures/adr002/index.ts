@@ -10,6 +10,9 @@
  * `docs/architecture/ADR-002-frozen-corpus.md` for why and for what each
  * missing line needs. The test holds that gap as a known-gap, so CI goes red
  * when the last line is covered and the marker has not been removed.
+ * 1 of 20 epic lines has a fixture. That one is a cost fixture, whose growth
+ * measurement is an opt-in report, so the default suite asserts no classifier
+ * verdict for any epic line yet.
  */
 import type { FrozenFixture } from './types.js';
 import { PHASE1_FIXTURES } from './phase1.js';
