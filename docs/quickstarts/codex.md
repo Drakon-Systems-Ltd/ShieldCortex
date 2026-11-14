@@ -35,6 +35,10 @@ You should see a ShieldCortex MCP entry named `shieldcortex-memory`.
 - prompt and tool-output scanning before bad memory lands
 - optional cloud sync, replay, and team review
 
+## What you do not get
+
+ShieldCortex is not a tool gate on Codex. Codex-native shell and `apply_patch` calls do not reach ShieldCortex, and Action Guard does not deny or hold them. See [the Codex boundary](../security/codex-boundary.md).
+
 ## Remove
 
 ```bash
