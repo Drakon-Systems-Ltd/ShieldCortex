@@ -50,14 +50,14 @@ describe('#509 r5 finding 3 — the OpenClaw interceptor never auto-approves or 
   });
 
   for (const enforce of [true, false]) {
-    it(`autoApprove ["exec", "touch-approval-store"] (${enforce ? 'enforcing' : 'advisory'}): the approver IS asked, and a "no" denies`, async () => {
+    it(`autoApprove ["exec", "touch-approval-store"] (${enforce ? 'enforcing' : 'advisory'}): never released — #853 always-block denies before the approver, even a "yes" one`, async () => {
       const i = interceptor({ enforce, autoApprove: ['exec', 'touch-approval-store'] });
       for (const args of FLOOR_WRITES) {
         let asked = 0;
         await expect(
-          i.handleToolCall({ toolName: 'Bash', arguments: args, requireApproval: async () => { asked += 1; return false; } }),
-        ).rejects.toThrow(/denied by user/);
-        expect({ args, asked }).toEqual({ args, asked: 1 });
+          i.handleToolCall({ toolName: 'Bash', arguments: args, requireApproval: async () => { asked += 1; return true; } }),
+        ).rejects.toThrow(/always-block/);
+        expect({ args, asked }).toEqual({ args, asked: 0 });
       }
       // The allowlist still works for an ordinary dangerous op.
       const j = interceptor({ enforce, autoApprove: ['privilege-escalation'] });
@@ -97,9 +97,10 @@ describe('#509 r5 finding 3 — the OpenClaw interceptor never auto-approves or 
     const i = interceptor({ enforce: true, autoApprove: ['exec', 'openclaw-process-mutate'] });
     const args = { action: 'write', sessionId: 'shell-1', data: "printf '{}' > ~/.shieldcortex/approvals/guard-readiness.json\n" };
     let asked = 0;
+    // #853 ruling §1: always-block — denied before any approver, even a "yes".
     await expect(
-      i.handleToolCall({ toolName: 'process', arguments: args, requireApproval: async () => { asked += 1; return false; } }),
-    ).rejects.toThrow(/denied by user/);
-    expect(asked).toBe(1);
+      i.handleToolCall({ toolName: 'process', arguments: args, requireApproval: async () => { asked += 1; return true; } }),
+    ).rejects.toThrow(/always-block/);
+    expect(asked).toBe(0);
   });
 });

@@ -753,6 +753,11 @@ const STOP_OUTCOMES = new Set([
   'denied_no_prompt_surface',
   'warned',
   'auto_denied',
+  // #853: a call held under an owner card that did not run.
+  'held_denied',
+  'held_expired',
+  'held_card_failed',
+  'held_duplicate',
 ]);
 
 /** #509 r7: the OpenClaw interceptor's own words for a stop. A card hold
