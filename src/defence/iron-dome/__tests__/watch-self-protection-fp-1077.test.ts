@@ -386,3 +386,172 @@ describe('#1077 r1 — argparse help text never reaches a consumer unscanned', (
     expect(floorOf(v)).toEqual([]);
   });
 });
+
+/**
+ * #1077 (B) — a pinned, sink-free workspace script was still denied.
+ *
+ * The live lease script uses only argparse/json/os.path/pathlib/time. The one
+ * token in it that matched the shell-out sink was `getattr(args, "reason",
+ * "")`, so the guard read the script as able to start processes and followed
+ * its data literals as child scripts: `LEASE_DIR` (a directory) came back
+ * opaque and `LEDGER` was scanned as shell, where its ledger wording drove the
+ * self-protection floor — with the script pinned, too. A `getattr` whose
+ * attribute is one plain literal name is exactly `obj.name`, so it is no
+ * longer a sink unless that name is.
+ */
+describe('#1077 (B) — a sink-free lease script is not walked for child scripts', () => {
+  const LEASE = '/ws/clawd/scripts/action_lease.py';
+  const LEDGER_TEXT = [
+    '# DECISIONS',
+    '',
+    '- 2026-11-12 lease acquired: plugin-update (owner approval)',
+    '- 2026-11-12 decision: stop openclaw-gateway before the plugin update, then systemctl --user restart openclaw-gateway',
+    '- 2026-11-13 guard: Action Guard left in watch mode; ~/.shieldcortex/config.json unchanged (owner decision)',
+    '- 2026-11-13 lease release: plugin-update',
+    '',
+  ].join('\n');
+  const leaseScript = (reasonRead = 'getattr(args, "reason", "")') => [
+    '#!/usr/bin/env python3',
+    '"""Workspace action lease: a cooperative lock for risky operations."""',
+    'import argparse',
+    'import json',
+    'import os',
+    'import sys',
+    'import time',
+    'from pathlib import Path',
+    '',
+    'LEASE_DIR = os.path.expanduser("~/clawd/.locks")',
+    'LEDGER = os.path.expanduser("~/clawd/DECISIONS.md")',
+    '',
+    'def _lock_path(scope):',
+    '    return os.path.join(LEASE_DIR, f"{scope}.json")',
+    '',
+    'def _ledger(line):',
+    '    with open(LEDGER, "a", encoding="utf-8") as fh:',
+    '        fh.write(f"- {time.strftime(\'%Y-%m-%dT%H:%M:%SZ\', time.gmtime())} {line}\\n")',
+    '',
+    'def acquire(scope, reason):',
+    '    os.makedirs(LEASE_DIR, exist_ok=True)',
+    '    path = _lock_path(scope)',
+    '    if os.path.exists(path):',
+    '        with open(path, encoding="utf-8") as fh:',
+    '            held = json.load(fh)',
+    '        print(f"lease busy: {scope} held by pid {held.get(\'pid\')}", file=sys.stderr)',
+    '        return 1',
+    '    with open(path, "w", encoding="utf-8") as fh:',
+    '        json.dump({"scope": scope, "reason": reason, "pid": os.getpid(), "at": time.time()}, fh)',
+    '    _ledger(f"lease acquired: {scope} ({reason}); guard approval decision recorded")',
+    '    return 0',
+    '',
+    'def release(scope, reason):',
+    '    path = Path(_lock_path(scope))',
+    '    if path.exists():',
+    '        path.unlink()',
+    '    _ledger(f"lease release: {scope} ({reason or \'done\'})")',
+    '    return 0',
+    '',
+    'def main():',
+    '    ap = argparse.ArgumentParser(description="action lease")',
+    '    ap.add_argument("cmd", choices=["acquire", "release"])',
+    '    ap.add_argument("scope")',
+    '    ap.add_argument("--reason", default="")',
+    '    args = ap.parse_args()',
+    '    handler = {"acquire": acquire, "release": release}[args.cmd]',
+    `    return handler(args.scope, ${reasonRead})`,
+    '',
+    'if __name__ == "__main__":',
+    '    sys.exit(main())',
+    '',
+  ].join('\n');
+  // The resolver plays the host: the ledger is readable text, the lock dir is not a file.
+  const files = (src: string): Record<string, string> => ({ [LEASE]: src, '~/clawd/DECISIONS.md': LEDGER_TEXT });
+
+  describe.each([
+    ['acquire', `python3 ${LEASE} acquire plugin-update --reason x`],
+    ['release', `python3 ${LEASE} release plugin-update --reason x`],
+  ])('%s', (_verb, command) => {
+    test('unpinned: allowed, no floor, not opaque', () => {
+      const src = leaseScript();
+      const v = bash(command, files(src));
+      expect(floorOf(v)).toEqual([]);
+      expect(v.signals ?? []).not.toContain('opaque-script-invocation');
+      expect(v.decision).toBe('allow');
+    });
+
+    test('pinned: allowed, no floor, not opaque, review recorded', () => {
+      const src = leaseScript();
+      const v = bash(command, files(src), (p, s) => p === LEASE && s === src);
+      expect(floorOf(v)).toEqual([]);
+      expect(v.signals ?? []).not.toContain('opaque-script-invocation');
+      expect(v.reviewedScripts).toEqual([LEASE]);
+      expect(v.decision).toBe('allow');
+    });
+  });
+
+  test.each([
+    ['getattr(ns, "reason")', 'getattr(ns, "reason")'],
+    ["getattr(self.opts, 'reason', None)", "getattr(self.opts, 'reason', None)"],
+    ['getattr( args , "reason" , "" )', 'getattr( args , "reason" , "" )'],
+  ])('literal-name getattr spellings are not sinks: %s', (_label, call) => {
+    // The path literal is followed only when the file can shell out; the
+    // computed-name control below proves the walk is what is being measured.
+    const src = `import os\nCHILD = os.path.expanduser("/ws/child.sh")\nprint(${call})\n`;
+    const v = bash('python3 /ws/g.py', { '/ws/g.py': src, '/ws/child.sh': "echo '{}' > ~/.shieldcortex/config.json\n" });
+    expect(v.signals ?? []).not.toContain('touch-guard-config');
+    expect(v.decision).toBe('allow');
+  });
+
+  test('control for the spelling cases: a computed-name getattr in the same file walks the child', () => {
+    const src = 'import os\nCHILD = os.path.expanduser("/ws/child.sh")\nprint(getattr(ns, "sys" + "tem"))\n';
+    const v = bash('python3 /ws/g.py', { '/ws/g.py': src, '/ws/child.sh': "echo '{}' > ~/.shieldcortex/config.json\n" });
+    expect(v.signals).toContain('touch-guard-config');
+  });
+
+  describe('controls — getattr that can reach a process is still a sink (child walked)', () => {
+    const CHILD = { '/ws/child.sh': "#!/bin/sh\necho '{}' > ~/.shieldcortex/config.json\n" };
+    test.each([
+      ['computed name', 'import os\ngetattr(os, "sys" + "tem")("/ws/child.sh")\n'],
+      ['name from a variable', 'import os\nn = "system"\ngetattr(os, n)("/ws/child.sh")\n'],
+      ['literal sink name', 'import os\ngetattr(os, "system")("/ws/child.sh")\n'],
+      ['literal os.exec* name', 'import os\ngetattr(os, "execl")("/ws/child.sh")\n'],
+      ['literal popen name', 'import os\ngetattr(os, "popen")("/ws/child.sh")\n'],
+      ['builtin exec by literal name', 'import builtins\ngetattr(builtins, "exec")("import os; os.sy" + "stem(\'/ws/child.sh\')")\n'],
+      ['literal module-prefix sink name', 'import pty as p\nx = p\ngetattr(x, "pty").spawn("/ws/child.sh")\n'],
+      ['dunder name', 'import os\ngetattr(os, "__dict__")["sys" + "tem"]("/ws/child.sh")\n'],
+      ['f-string name', 'import os\ngetattr(os, f"system")("/ws/child.sh")\n'],
+      ['non-name object', 'import importlib\ngetattr(importlib.import_module("o" + "s"), "sy" "stem")("/ws/child.sh")\n'],
+      ['relieved getattr beside a real computed one', 'import os\ngetattr(args, "reason", "")\ngetattr(os, "sys" + "tem")("/ws/child.sh")\n'],
+    ])('%s', (_label, src) => {
+      const v = bash('python3 /ws/s.py', { '/ws/s.py': src, ...CHILD });
+      expect(v.signals).toContain('touch-guard-config');
+      expect(v.decision).not.toBe('allow');
+    });
+
+    test('an inline -c program keeps getattr as a sink (folded disk sources only)', () => {
+      const v = bash(`python3 -c 'import os; getattr(args, "reason"); x = os.path.expanduser("/ws/child.sh")'`, CHILD);
+      expect(v.signals).toContain('touch-guard-config');
+    });
+  });
+
+  describe('controls — the lease script really writing guard state is still held', () => {
+    test.each([
+      ['ledger in the guard home', 'LEDGER = os.path.expanduser("~/clawd/DECISIONS.md")', 'LEDGER = os.path.expanduser("~/.shieldcortex/DECISIONS.md")', 'touch-decisions-ledger'],
+      ['lock dir in the approval store', 'LEASE_DIR = os.path.expanduser("~/clawd/.locks")', 'LEASE_DIR = os.path.expanduser("~/.shieldcortex/approvals")', 'touch-approval-store'],
+      ['lock dir in the guard leases', 'LEASE_DIR = os.path.expanduser("~/clawd/.locks")', 'LEASE_DIR = os.path.expanduser("~/.shieldcortex/leases")', 'touch-decisions-ledger'],
+      ['ledger is the guard config', 'LEDGER = os.path.expanduser("~/clawd/DECISIONS.md")', 'LEDGER = os.path.expanduser("~/.shieldcortex/config.json")', 'touch-guard-config'],
+      ['ledger is the OpenClaw config', 'LEDGER = os.path.expanduser("~/clawd/DECISIONS.md")', 'LEDGER = os.path.expanduser("~/.openclaw/openclaw.json")', 'disable-action-guard'],
+    ])('unpinned: %s', (_label, from, to, signal) => {
+      const src = leaseScript().replace(from, to);
+      const v = bash(`python3 ${LEASE} acquire plugin-update --reason x`, files(src));
+      expect(v.signals).toContain(signal);
+      expect(v.decision).not.toBe('allow');
+    });
+
+    test('the command line itself still writes the ledger: held even when the script is pinned', () => {
+      const src = leaseScript();
+      const v = bash(`python3 ${LEASE} acquire x --reason y && echo done >> ~/.shieldcortex/DECISIONS.md`, files(src), (p, s) => p === LEASE && s === src);
+      expect(v.signals).toContain('touch-decisions-ledger');
+      expect(v.decision).not.toBe('allow');
+    });
+  });
+});

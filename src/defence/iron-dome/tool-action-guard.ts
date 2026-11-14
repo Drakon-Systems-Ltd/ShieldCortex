@@ -3175,6 +3175,42 @@ const SHELL_OUT_SINK =
  */
 const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php', 'node']);
 /**
+ * #1077 (B) — `getattr(args, "reason", "")` is the argparse idiom for an
+ * optional flag, and it was the only thing in a stdlib-only lease script
+ * (argparse/json/os.path/pathlib/time) that matched SHELL_OUT_SINK. The match
+ * marked the script as able to shell out, so its data-path literals
+ * (`LEASE_DIR`, `LEDGER`) were followed as child scripts — a directory came
+ * back opaque and a ledger with no extension was scanned as shell, and its
+ * wording drove the self-protection floor even with the script pinned.
+ *
+ * `getattr` stays a sink for what it is there for: reaching a function
+ * WITHOUT naming it (`getattr(os, 'sys' + 'tem')`). A call whose object is a
+ * plain dotted name and whose attribute is ONE plain string literal names the
+ * attribute outright: it is exactly `obj.name`, which this regex already
+ * judges by its name. So the `getattr` keyword of such a call is blanked for
+ * the sink test only, and only when the literal name is not itself a sink
+ * spelling (`system`, `popen`, `execv`, `check_output`, `eval`, `pty`, …:
+ * tested as `os.<name>(`, a bare `<name>(` and a module prefix `<name>.x`).
+ * Everything else in the text — the object, the default, every other call —
+ * is still tested.
+ *
+ * Narrow on purpose: Python only (no other language has `getattr`), folded
+ * disk sources only (inline `-c` programs and heredocs keep today's
+ * fail-closed rule), no underscore-led names (dunders are the reflection
+ * escape hatches), no computed or prefixed (f/r/b) literals, no non-name
+ * objects. The docstring readback list keeps `getattr` unconditionally, so
+ * this never relaxes docstring blanking.
+ */
+const LITERAL_NAME_GETATTR =
+  /\bgetattr(\s*\(\s*[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*\s*,\s*(["'])([A-Za-z]\w*)\2\s*[,)])/g;
+function blankLiteralNameGetattr(text: string): string {
+  if (!text.includes('getattr')) return text;
+  return text.replace(LITERAL_NAME_GETATTR, (whole, rest: string, _q: string, name: string) => {
+    if ([`os.${name}(`, ` ${name}(`, ` ${name}.x`].some(form => SHELL_OUT_SINK.test(form))) return whole;
+    return `${' '.repeat('getattr'.length)}${rest}`;
+  });
+}
+/**
  * @param folded true ONLY for a script folded from DISK (the #444 shape:
  *   `python3 scripts/patch_x.py`). Disk bytes are never expanded by the
  *   invoking shell, so a backtick in Python prose there is inert text.
@@ -3185,7 +3221,8 @@ const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php', 'node'])
  *   be proven from a partial parse. Fail closed there.
  */
 function hasShellOutSink(text: string, lang: ScriptLang, folded = false): boolean {
-  if (SHELL_OUT_SINK.test(text)) return true;
+  const sinkText = folded && lang === 'python' ? blankLiteralNameGetattr(text) : text;
+  if (SHELL_OUT_SINK.test(sinkText)) return true;
   if (!text.includes('`')) return false;
   return !folded || BACKTICK_EXEC_LANGS.has(lang);
 }
