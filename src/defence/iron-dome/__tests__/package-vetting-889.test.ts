@@ -1071,6 +1071,37 @@ describe('release review B2 — malformed OSV answers are never clean', () => {
     expect(res.reasons[0]).toMatch(/and the malicious-package check was unavailable$/);
   });
 
+  // #1054 Part A review (Sol 2): an error key marks the envelope incomplete; it does not erase a
+  // well-formed MAL- entry that sits at the right index.
+  it.each(['error', 'code', 'message', 'details', 'status'])('an aligned batch reply carrying "%s" still counts its well-formed MAL- entry (exact query down, nothing cached)', async (key) => {
+    const res = await vet(mkFetch({ throws: true }, (n) => ({ body: { [key]: 'upstream problem', results: each(n, { vulns: [{ id: MAL }] }) } })));
+    expect(res.malicious).toBe(true);
+    expect(res.packages[0].malicious).toEqual([MAL]);
+  });
+
+  it('an error-keyed batch reply is per-query: the MAL- entry blocks its own package, a clean-looking neighbour is unavailable, never clean', async () => {
+    const decoys = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7', 'h8'].map((d) => npmRef(d, '1.0.0'));
+    const w = fixtureWorld();
+    const inner = fetchFor(w);
+    const f: FetchLike = async (url, init) => {
+      if (url !== 'https://api.osv.dev/v1/querybatch') return inner(url, init);
+      const n = JSON.parse(init!.body!).queries.length;
+      return { ok: true, status: 200, json: async () => ({ error: 'upstream problem', results: [...each(n - 2, {}), { vulns: [{ id: MAL }] }, {}] }) };
+    };
+    const res = await vetPackages([...decoys, npmRef('ninth-lib', '1.0.0'), npmRef('tenth-lib', '1.0.0')], { fetchImpl: f, nowMs: NOW, stateDir });
+    expect(res.malicious).toBe(true);
+    expect(res.packages.find((p) => p.ref.name === 'ninth-lib')!.malicious).toEqual([MAL]);
+    const tenth = res.packages.find((p) => p.ref.name === 'tenth-lib')!;
+    expect(tenth.malicious).toEqual([]);
+    expect(tenth.findings[0].reason).toMatch(/and the malicious-package check was unavailable$/);
+  });
+
+  it('an error-keyed batch reply whose results do not line up with the queries proves nothing: unavailable', async () => {
+    const res = await vet(mkFetch({ throws: true }, (n) => ({ body: { error: 'x', results: each(n + 1, { vulns: [{ id: MAL }] }) } })));
+    expect(res.malicious).toBe(false);
+    expect(res.reasons[0]).toMatch(/and the malicious-package check was unavailable$/);
+  });
+
   it('a ninth (batch-only) package whose batch result is malformed is unavailable, never clean', async () => {
     const decoys = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7', 'h8'].map((d) => npmRef(d, '1.0.0'));
     const w = fixtureWorld();

@@ -738,9 +738,6 @@ async function queryOsv(ref: PackageRef, version: string, fetchImpl: FetchLike, 
 
 const OSV_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,60}$/;
 const isMalId = (id: string) => id.startsWith('MAL-');
-/** Top-level keys of an error body (Google API / gRPC-gateway shapes); OSV's answers carry none of them. */
-const OSV_ERROR_KEYS = ['error', 'code', 'message', 'details', 'status'];
-
 /** Keys an OSV result object carries (`/v1/query` answer, `/v1/querybatch` element). Anything else is not that answer. */
 const OSV_RESULT_KEYS = new Set(['vulns', 'next_page_token']);
 /**
@@ -864,11 +861,11 @@ async function queryOsvChunk(
     if (!res.ok) return null;
     const body: unknown = await res.json();
     if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
-    if (OSV_ERROR_KEYS.some((k) => Object.prototype.hasOwnProperty.call(body, k))) return null;
     const results = (body as Record<string, unknown>).results;
     if (!Array.isArray(results) || results.length !== slice.length) return null;
-    // Anything beside `results` (a page token, an unknown key) means the envelope is not the
-    // answer this check reads: no result in it is clean, though a well-formed MAL- entry still counts.
+    // Anything beside `results` (an error key, a page token, an unknown key) means the envelope
+    // is not the answer this check reads: no result in it is clean, though a well-formed MAL-
+    // entry at its own query's index still counts.
     const envelopeComplete = Object.keys(body).every((k) => k === 'results');
     const out: Array<string[] | null> = slice.map(() => null);
     for (let i = 0; i < slice.length; i++) {
