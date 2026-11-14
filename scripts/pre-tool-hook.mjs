@@ -1925,6 +1925,10 @@ function terminalDecisionReason(verdict, outcome, event) {
       // Never steer toward enforce:false / broad autoApprove (#386).
       ' Headless session: do NOT retry freehand network/gh/curl. '
       + 'If a reviewed/pinned work-lane script exists for this job, run that path instead. '
+      // #1077 ask 3: a session with no prompt surface cannot wait for a card,
+      // and owners did not know the pin exists. Name it, and say who runs it:
+      // `allowlist add` is TTY-gated, so it is the owner's step, not the agent's.
+      + 'If this call runs a script the owner has reviewed, ask the owner to pin it from their own terminal: shieldcortex allowlist add <path> (path + content hash; any edit re-gates it), then retry. '
       + 'Otherwise wait for operator: shieldcortex approve --denial <actionId> (one-shot), or an Approve-once card if raised. '
       + 'Do not set actionGuard.enforce:false.'
     )
