@@ -244,10 +244,13 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
   const pluginAbsent = p.status === 'failed';
   const pluginStepFailed = input.plugin.status === 'warn' || input.plugin.status === 'failed';
   // The command the plugin step itself named for finishing its work — a re-run
-  // or a recovery (#952). When the step failed, this is THE fix for the plugin,
-  // and every row that points at the plugin gives it (#1071): an OpenClaw row
+  // or a recovery (#952). When the step failed, the OpenClaw "couldn't be
+  // updated" row gives it, and so does the Guard row when it reports the plugin
+  // out of date or OpenClaw's checking unconfirmed (#1071): an OpenClaw row
   // saying one command and a Guard row another, for the same stale plugin, is
   // how an operator ended up told to re-run the very update that had failed.
+  // A gateway running with no ShieldCortex plugin at all (`pluginAbsent`) is a
+  // different finding: both of its rows keep the plugin check's own command.
   const stepCommand = pluginStepFailed ? (input.plugin.rerun ?? input.plugin.recovery?.command) : undefined;
   const stepCommandNote = stepCommand && !input.plugin.rerun ? input.plugin.recovery?.note : undefined;
   if (pluginInstalled) {

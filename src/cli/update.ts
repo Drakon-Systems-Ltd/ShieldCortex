@@ -165,11 +165,12 @@ function describeInstallEnd(err: unknown, timeoutMs: number): string {
  *  - `secret-ref`: "<path> is configured as a secret reference but is
  *    unavailable in this command path." The install never ran: OpenClaw could
  *    not resolve the reference for `update`'s child. #1071: that is not the end
- *    of the step — the same force install is retried once through the resolved
- *    `openclaw` binary, and if that is refused too, the force install itself
- *    (run where `openclaw` resolves the reference) is the fix. The operator
- *    report had it succeed at once from the shell `update` ran in, while the
- *    old advice, `shieldcortex update`, only repeated the refused install.
+ *    of the step — the same force install is retried once, through the same
+ *    `openclaw` with the same environment, and if that is refused too, the
+ *    force install itself (run where `openclaw` resolves the reference) is the
+ *    fix. The operator report had it succeed at once from the shell `update`
+ *    ran in, while the old advice, `shieldcortex update`, only repeated the
+ *    refused install.
  *    Nothing here reads, loads or passes a secret.
  *  - `drain`: "plugin <id> admitted work did not settle within 60s; the
  *    previous plugin generation stays active." The files were saved and the
@@ -787,11 +788,7 @@ export async function readRealtimePluginEndState(
   return { version: null, reason: `${listReason}; installed package version unreadable` };
 }
 
-/**
- * `run`/`rm` are injectable so the failure paths can be tested without a real
- * spawn or a root-owned dir; `resolveBin` so the #1071 retry never shells out
- * to `which` in a test.
- */
+/** `run`/`rm` are injectable so the failure paths can be tested without a real spawn or a root-owned dir. */
 export async function stepOpenClawPlugin(
   home: string,
   deps: {
@@ -799,7 +796,6 @@ export async function stepOpenClawPlugin(
     rm?: typeof fs.rmSync;
     readPluginVersion?: typeof readInstalledRealtimePluginVersion;
     readCliVersion?: typeof readPackageVersion;
-    resolveBin?: (home: string) => string | null;
   } = {},
 ): Promise<StepResult> {
   const run = deps.run ?? runQuiet;
@@ -840,9 +836,7 @@ export async function stepOpenClawPlugin(
     }));
   }
   try {
-    return await stepOpenClawPluginLocked(home, {
-      run, rm, readVersion, readCliVersion: deps.readCliVersion, resolveBin: deps.resolveBin, extDir, legacy,
-    });
+    return await stepOpenClawPluginLocked(home, { run, rm, readVersion, readCliVersion: deps.readCliVersion, extDir, legacy });
   } finally {
     acquired.lock.release();
   }
@@ -856,7 +850,6 @@ async function stepOpenClawPluginLocked(
     rm: typeof fs.rmSync;
     readVersion: typeof readInstalledRealtimePluginVersion;
     readCliVersion?: typeof readPackageVersion;
-    resolveBin?: (home: string) => string | null;
     extDir: string;
     legacy: boolean;
   },
@@ -883,6 +876,11 @@ async function stepOpenClawPluginLocked(
     // the operator set one, passes through untouched, so OpenClaw resolves its
     // own home exactly as it does for the same command typed in this shell.
     const installOpts = { timeout: timeoutMs, env: { ...process.env, HOME: home } };
+    // The one install command, for the first attempt and the #1071 retry alike:
+    // the bare name, no shell, this exact env object. The child's own PATH
+    // lookup (from `installOpts.env`) picks the executable, so the retry runs
+    // the very `openclaw` that refused — never a copy found some other way.
+    const install = () => run('openclaw', PLUGIN_INSTALL_ARGS, installOpts);
 
     /** The install child exited 0: report what it ACTUALLY left on disk. */
     const installed = (): StepResult => {
@@ -1009,7 +1007,7 @@ async function stepOpenClawPluginLocked(
       // spec (observed 2026-06-09: the index pinned @4.30.2 → "up to date" while
       // npm had 4.31.0). A forced @latest install reliably advances the plugin
       // AND rewrites the tracked spec to @latest so future updates work.
-      await run('openclaw', PLUGIN_INSTALL_ARGS, installOpts);
+      await install();
       return installed();
     } catch (err) {
       if (classifyOpenClawInstallEnding(installSaid(err)) !== 'secret-ref') return await failed(err);
@@ -1019,14 +1017,19 @@ async function stepOpenClawPluginLocked(
       // route OpenClaw resolves its own references on (OpenClaw 2026.11.3's CLI
       // gateway call resolves them before it selects credentials), and the
       // operator's copy succeeded at once from the shell `update` ran in. Try
-      // it once more through the OpenClaw binary resolved the way the skill
-      // step finds it (#179: a bare name is a bet about PATH), and report what
-      // landed. Nothing here reads, loads or passes a secret.
-      const bin = await resolvePluginInstallBinary(home, ctx.resolveBin);
-      const firstRefusal = `first install refused: ${secretRefKey(installSaid(err))} is a gateway secret reference OpenClaw could not resolve for it; retried through \`${scrubHomePath(bin, home)} plugins install --force\``;
+      // it exactly once more, and report what landed. Nothing here reads,
+      // loads or passes a secret.
+      //
+      // The retry never widens what runs: same executable, same args, same env,
+      // no shell, one retry only. It does NOT re-resolve the binary (#1071 r2):
+      // `resolveOpenClawBinary` treats a failing `which` as "not on PATH" and
+      // falls back to well-known install locations, so a host whose PATH has a
+      // working `openclaw` but no usable `which` would have retried through a
+      // different copy than the one that refused.
+      const firstRefusal = `first install refused: ${secretRefKey(installSaid(err))} is a gateway secret reference OpenClaw could not resolve for it; retried the same \`openclaw plugins install --force\` once`;
       let r: StepResult;
       try {
-        await run(bin, PLUGIN_INSTALL_ARGS, installOpts);
+        await install();
         r = installed();
       } catch (retryErr) {
         r = await failed(retryErr);
@@ -1046,23 +1049,6 @@ function installSaid(err: unknown): string {
 /** Which config value OpenClaw's secret-ref refusal named, in display words. */
 function secretRefKey(said: string): string {
   return /\bgateway\.auth\.token\b/.test(said) ? 'gateway.auth.token' : 'a gateway config value';
-}
-
-/**
- * The `openclaw` the #1071 retry runs: the binary resolved the way the skill
- * step resolves it (PATH, then the well-known install locations), or the bare
- * name when nothing resolves — the retry is still worth one attempt then.
- */
-async function resolvePluginInstallBinary(
-  home: string,
-  resolveBin?: (home: string) => string | null,
-): Promise<string> {
-  try {
-    const resolve = resolveBin ?? (await import('../setup/openclaw.js')).resolveOpenClawBinary;
-    return resolve(home) ?? 'openclaw';
-  } catch {
-    return 'openclaw';
-  }
 }
 
 /** Every seam is injectable so the #604 end-state branches are testable without a real `openclaw`. */
