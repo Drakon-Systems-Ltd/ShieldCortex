@@ -1348,3 +1348,200 @@ describe('#1054 — checks that run at the same time keep each other\'s cached M
     expect(res2.malicious).toBe(true);
   });
 });
+
+// #1054 Part A, the review that closed PR #1080. With a cached hit already on
+// disk and two checks of the SAME package version running together, a check
+// that got a clean answer recorded "evict this key" and, when it wrote, deleted
+// whatever record was on disk by then: including the record the other check
+// had just written from a malicious answer. With the network away that version
+// was then no longer blocked. An eviction now carries the record its check saw
+// and removes only that record, and never one written after its check started.
+//
+// The ordering rules, one row each (all inside one process):
+//   1. different versions, both malicious            -> both records kept, either finish order
+//   2. same version, both malicious                  -> one record kept
+//   3. same version, one clean + one malicious,
+//      record already on disk                        -> the malicious record is kept, either finish order
+//   4. same version, both clean, record on disk      -> record evicted
+//   5. a later clean check that does not overlap     -> still evicts
+//   6. an expired record                             -> dropped at write, never revived
+//   7. one check, two refs for one version, answers
+//      differ                                        -> the malicious record is kept, either order
+describe('#1054 — cache ordering rules for checks of the same package version', () => {
+  const P = { name: 'synth-order-pkg', ver: '1.0.0', id: 'MAL-2026-91001' };
+  const V2 = { name: P.name, ver: '2.0.0', id: 'MAL-2026-91002' };
+  const KEY = `npm@${P.name}@${P.ver}`;
+  const KEY2 = `npm@${V2.name}@${V2.ver}`;
+  const cacheFile = () => path.join(stateDir, 'package-vetting-cache.json');
+  const entries = (): Record<string, { at: number; osvIds: string[] }> => JSON.parse(fs.readFileSync(cacheFile(), 'utf-8')).entries;
+  const record = (at: number, ids: string[] = [P.id]) => ({ at, ecosystem: 'npm', name: P.name, version: P.ver, osvIds: ids, hooks: [], sdistOnly: false });
+  const seed = (at: number, ids: string[] = [P.id]) => fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: { [KEY]: record(at, ids) } }));
+  const npmFix = { [P.name]: { versions: { [P.ver]: { time: hoursAgo(24 * 40) }, [V2.ver]: { time: hoursAgo(24 * 35) } } } };
+  const malWorld = (): World => world({ npm: npmFix, osv: { [KEY]: [P.id], [KEY2]: [V2.id] } });
+  const cleanWorld = (): World => world({ npm: npmFix });
+  /** The fixture fetch with every version-specific OSV answer held back, so the caller picks which check finishes last. */
+  const held = (w: World, ms: number): FetchLike => {
+    const base = fetchFor(w);
+    return async (url, init) => {
+      if (url === 'https://api.osv.dev/v1/query') await new Promise((r) => setTimeout(r, ms));
+      return base(url, init);
+    };
+  };
+  const vet = (w: World, ms: number, ver = P.ver, nowMs = NOW) => vetPackages([npmRef(P.name, ver)], { fetchImpl: held(w, ms), nowMs, stateDir });
+  const offlineVet = async (ver = P.ver, nowMs = NOW + 60_000) => {
+    const off = await vetPackages([npmRef(P.name, ver)], { fetchImpl: offline, nowMs, stateDir });
+    return { malicious: off.malicious, status: off.packages[0].status, cached: off.packages[0].cached === true };
+  };
+  const BLOCKED = { malicious: true, status: 'checked', cached: true };
+  const NOT_BLOCKED = { malicious: false, status: 'unchecked', cached: false };
+  const FINISH: Array<[string, number, number]> = [['the first check finishes last', 60, 5], ['the second check finishes last', 5, 60]];
+
+  it.each(FINISH)('row 1: two versions of one package, both malicious, %s: both records are kept and both block offline', async (_l, msA, msB) => {
+    const [a, b] = await Promise.all([vet(malWorld(), msA, P.ver), vet(malWorld(), msB, V2.ver)]);
+    expect([a.malicious, b.malicious]).toEqual([true, true]);
+    expect(Object.keys(entries()).sort()).toEqual([KEY, KEY2]);
+    expect(await offlineVet(P.ver)).toEqual(BLOCKED);
+    expect(await offlineVet(V2.ver)).toEqual(BLOCKED);
+  });
+
+  it.each(FINISH)('row 2: same version, both malicious, %s: one record, and it blocks offline', async (_l, msA, msB) => {
+    const [a, b] = await Promise.all([vet(malWorld(), msA), vet(malWorld(), msB)]);
+    expect([a.malicious, b.malicious]).toEqual([true, true]);
+    expect(Object.keys(entries())).toEqual([KEY]);
+    expect(entries()[KEY]).toMatchObject({ at: NOW, osvIds: [P.id] });
+    expect(await offlineVet()).toEqual(BLOCKED);
+  });
+
+  // The record on disk when both checks start. "identical" is the hard case: the malicious check
+  // rewrites a record with the same time and ids as the one the clean check saw.
+  const SEEDS: Array<[string, () => void]> = [
+    ['an hour-old record', () => seed(NOW - 3_600_000)],
+    ['a record identical to the one the malicious check writes', () => seed(NOW)],
+    ['a record with a different id', () => seed(NOW - 3_600_000, ['MAL-2026-91009'])],
+  ];
+  const ROW3 = SEEDS.flatMap(([s, doSeed]) => [
+    [s, 'the clean check finishes last', doSeed, 60, 5] as const,
+    [s, 'the malicious check finishes last', doSeed, 5, 60] as const,
+  ]);
+
+  it.each(ROW3)('row 3: %s on disk, one clean and one malicious check of that version, %s: the malicious record is kept', async (_s, _l, doSeed, msClean, msMal) => {
+    doSeed();
+    const [c, m] = await Promise.all([vet(cleanWorld(), msClean), vet(malWorld(), msMal)]);
+    expect([c.malicious, m.malicious]).toEqual([false, true]);
+    expect(Object.keys(entries())).toEqual([KEY]);
+    expect(entries()[KEY]).toMatchObject({ at: NOW, osvIds: [P.id] });
+    expect(await offlineVet()).toEqual(BLOCKED);
+  });
+
+  it.each(ROW3)('row 3, started the other way round: %s on disk, %s: the malicious record is kept', async (_s, _l, doSeed, msClean, msMal) => {
+    doSeed();
+    const [m, c] = await Promise.all([vet(malWorld(), msMal), vet(cleanWorld(), msClean)]);
+    expect([c.malicious, m.malicious]).toEqual([false, true]);
+    expect(Object.keys(entries())).toEqual([KEY]);
+    expect(await offlineVet()).toEqual(BLOCKED);
+  });
+
+  it.each(FINISH)('row 3 control: nothing on disk, one clean and one malicious check, %s: the malicious record is written and kept', async (_l, msClean, msMal) => {
+    const [c, m] = await Promise.all([vet(cleanWorld(), msClean), vet(malWorld(), msMal)]);
+    expect([c.malicious, m.malicious]).toEqual([false, true]);
+    expect(Object.keys(entries())).toEqual([KEY]);
+    expect(await offlineVet()).toEqual(BLOCKED);
+  });
+
+  it.each(FINISH)('row 4: same version, both clean, record on disk, %s: the record is evicted', async (_l, msA, msB) => {
+    seed(NOW - 3_600_000);
+    const [a, b] = await Promise.all([vet(cleanWorld(), msA), vet(cleanWorld(), msB)]);
+    expect([a.malicious, b.malicious]).toEqual([false, false]);
+    expect(entries()).toEqual({});
+    expect(await offlineVet()).toEqual(NOT_BLOCKED);
+  });
+
+  it('row 5: a clean check that starts after the malicious check has written still evicts its record', async () => {
+    expect((await vet(malWorld(), 0)).malicious).toBe(true);
+    expect(Object.keys(entries())).toEqual([KEY]);
+    expect((await vet(cleanWorld(), 0)).malicious).toBe(false);
+    expect(entries()).toEqual({});
+    expect(await offlineVet()).toEqual(NOT_BLOCKED);
+  });
+
+  it.each(FINISH)('row 5: after a clean and a malicious check overlapped (%s), a later clean check on its own evicts the kept record', async (_l, msClean, msMal) => {
+    seed(NOW);
+    await Promise.all([vet(cleanWorld(), msClean), vet(malWorld(), msMal)]);
+    expect(Object.keys(entries())).toEqual([KEY]);
+    expect((await vet(cleanWorld(), 0)).malicious).toBe(false);
+    expect(entries()).toEqual({});
+    expect(await offlineVet()).toEqual(NOT_BLOCKED);
+  });
+
+  it('row 6: an expired record is dropped by any write, is not what an overlapping eviction or rewrite leaves behind, and never blocks', async () => {
+    const EXPIRED = NOW - 7 * 3_600_000;
+    // Offline, an expired record does not block, and (nothing to write) it is left alone.
+    seed(EXPIRED);
+    expect(await offlineVet(P.ver, NOW)).toEqual(NOT_BLOCKED);
+    // A write for another version drops it.
+    await vet(malWorld(), 0, V2.ver);
+    expect(Object.keys(entries())).toEqual([KEY2]);
+    // A clean check that saw it, overlapping a malicious one: only the fresh record is left, either finish order.
+    for (const [msClean, msMal] of [[60, 5], [5, 60]]) {
+      seed(EXPIRED);
+      await Promise.all([vet(cleanWorld(), msClean), vet(malWorld(), msMal)]);
+      expect(entries()).toEqual({ [KEY]: expect.objectContaining({ at: NOW }) });
+    }
+    // Two clean checks that saw it: gone, not rewritten.
+    seed(EXPIRED);
+    await Promise.all([vet(cleanWorld(), 5), vet(cleanWorld(), 60)]);
+    expect(entries()).toEqual({});
+    expect(await offlineVet()).toEqual(NOT_BLOCKED);
+  });
+
+  // One check, two refs that resolve to the same version (a pin and a bare name), and OSV answers the
+  // two version queries differently. The malicious answer is the one kept, whichever arrives last.
+  it.each([['the clean answer arrives last', [P.id], []], ['the malicious answer arrives last', [], [P.id]]] as Array<[string, string[], string[]]>)(
+    'row 7: one check, two refs for one version, %s: the malicious record is kept', async (_l, firstIds, secondIds) => {
+      seed(NOW - 3_600_000);
+      const base = fetchFor(world({ npm: { [P.name]: { versions: { [P.ver]: { time: hoursAgo(24 * 40) } } } } }));
+      let n = 0;
+      const f: FetchLike = async (url, init) => {
+        if (url !== 'https://api.osv.dev/v1/query') return base(url, init);
+        const mine = n++;
+        if (mine === 1) await new Promise((r) => setTimeout(r, 30));
+        const ids = mine === 0 ? firstIds : secondIds;
+        return { ok: true, status: 200, json: async () => (ids.length ? { vulns: ids.map((id) => ({ id, modified: '2026-11-05T00:00:00Z' })) } : {}) };
+      };
+      const res = await vetPackages([npmRef(P.name, P.ver), npmRef(P.name)], { fetchImpl: f, nowMs: NOW, stateDir });
+      expect(res.malicious).toBe(true);
+      expect(n).toBe(2);
+      expect(entries()).toEqual({ [KEY]: expect.objectContaining({ at: NOW, osvIds: [P.id] }) });
+      expect(await offlineVet()).toEqual(BLOCKED);
+    });
+
+  // The compare is on the record itself (its time and ids), so it also holds for a writer this
+  // process knows nothing about. Stood in for here by writing the file while the clean check waits.
+  it('a record that replaced the one a clean check saw (another writer, a different time) is kept, and so is one not in the expected shape', async () => {
+    seed(NOW - 3_600_000);
+    const slowClean = vet(cleanWorld(), 40);
+    await new Promise((r) => setTimeout(r, 10));
+    seed(NOW - 1_000);
+    expect((await slowClean).malicious).toBe(false);
+    expect(entries()).toEqual({ [KEY]: expect.objectContaining({ at: NOW - 1_000 }) });
+    expect(await offlineVet()).toEqual(BLOCKED);
+
+    seed(NOW - 3_600_000);
+    const slowClean2 = vet(cleanWorld(), 40);
+    await new Promise((r) => setTimeout(r, 10));
+    fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: { [KEY]: { ...record(NOW - 3_600_000), osvIds: P.id } } }));
+    expect((await slowClean2).malicious).toBe(false);
+    expect(Object.keys(entries())).toEqual([KEY]);
+  });
+
+  it('control: the cache file and its directory stay owner-only after an eviction and after a rewrite', async () => {
+    seed(NOW - 3_600_000);
+    fs.chmodSync(cacheFile(), 0o644);
+    await vet(cleanWorld(), 0);
+    expect(entries()).toEqual({});
+    expect(fs.statSync(cacheFile()).mode & 0o777).toBe(0o600);
+    await vet(malWorld(), 0);
+    expect(fs.statSync(cacheFile()).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(stateDir).mode & 0o077).toBe(0);
+  });
+});
