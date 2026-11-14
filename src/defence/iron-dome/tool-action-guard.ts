@@ -3183,32 +3183,32 @@ const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php', 'node'])
  * back opaque and a ledger with no extension was scanned as shell, and its
  * wording drove the self-protection floor even with the script pinned.
  *
- * `getattr` stays a sink for what it is there for: reaching a function
- * WITHOUT naming it (`getattr(os, 'sys' + 'tem')`). A call whose object is a
- * plain dotted name and whose attribute is ONE plain string literal names the
- * attribute outright: it is exactly `obj.name`, which this regex already
- * judges by its name. So the `getattr` keyword of such a call is blanked for
- * the sink test only, and only when the literal name is not itself a sink
- * spelling (`system`, `popen`, `execv`, `check_output`, `eval`, `pty`, …:
- * tested as `os.<name>(`, a bare `<name>(` and a module prefix `<name>.x`).
+ * `getattr` stays a sink: it reaches a function by a name the sink regex
+ * never sees as a call. FAIL CLOSED — the keyword is blanked (for the sink
+ * test only) solely when the attribute is ONE plain string literal on a
+ * closed list of inert argparse flag names. A name is never relieved because
+ * it is "not a sink spelling": any attribute can be a renamed or aliased
+ * executor (`K.run = os.system; getattr(K, 'run')`, `getattr(m, 'call')` on a
+ * hidden `subprocess`, `getattr(asyncio, 'create_subprocess_shell')`,
+ * `getattr(os, 'sys').modules[…]`), so a denylist of sink names loses to the
+ * next spelling. The list holds only what the #1077 lease script reads; widen
+ * it by adding a flag name with a repro, never by inferring inertness.
  * Everything else in the text — the object, the default, every other call —
  * is still tested.
  *
  * Narrow on purpose: Python only (no other language has `getattr`), folded
  * disk sources only (inline `-c` programs and heredocs keep today's
- * fail-closed rule), no underscore-led names (dunders are the reflection
- * escape hatches), no computed or prefixed (f/r/b) literals, no non-name
+ * fail-closed rule), no computed or prefixed (f/r/b) literals, no non-name
  * objects. The docstring readback list keeps `getattr` unconditionally, so
  * this never relaxes docstring blanking.
  */
+const INERT_GETATTR_NAMES: ReadonlySet<string> = new Set(['reason']);
 const LITERAL_NAME_GETATTR =
   /\bgetattr(\s*\(\s*[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*\s*,\s*(["'])([A-Za-z]\w*)\2\s*[,)])/g;
 function blankLiteralNameGetattr(text: string): string {
   if (!text.includes('getattr')) return text;
-  return text.replace(LITERAL_NAME_GETATTR, (whole, rest: string, _q: string, name: string) => {
-    if ([`os.${name}(`, ` ${name}(`, ` ${name}.x`].some(form => SHELL_OUT_SINK.test(form))) return whole;
-    return `${' '.repeat('getattr'.length)}${rest}`;
-  });
+  return text.replace(LITERAL_NAME_GETATTR, (whole, rest: string, _q: string, name: string) =>
+    INERT_GETATTR_NAMES.has(name) ? `${' '.repeat('getattr'.length)}${rest}` : whole);
 }
 /**
  * @param folded true ONLY for a script folded from DISK (the #444 shape:

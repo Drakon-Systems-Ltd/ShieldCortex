@@ -509,8 +509,9 @@ describe('#1077 r2 — a stdin redirect after an fd duplication is not unwrapped
  * its data literals as child scripts: `LEASE_DIR` (a directory) came back
  * opaque and `LEDGER` was scanned as shell, where its ledger wording drove the
  * self-protection floor — with the script pinned, too. A `getattr` whose
- * attribute is one plain literal name is exactly `obj.name`, so it is no
- * longer a sink unless that name is.
+ * attribute is one plain literal on a closed list of inert flag names
+ * (`reason`) is no longer a sink; every other `getattr` still is (r3: fail
+ * closed — any name can be a renamed executor).
  */
 describe('#1077 (B) — a sink-free lease script is not walked for child scripts', () => {
   const LEASE = '/ws/clawd/scripts/action_lease.py';
@@ -666,6 +667,76 @@ describe('#1077 (B) — a sink-free lease script is not walked for child scripts
       expect(v.signals).toContain('touch-decisions-ledger');
       expect(v.decision).not.toBe('allow');
     });
+  });
+});
+
+/**
+ * #1077 r3 — getattr fails closed: only an inert flag name is relieved.
+ *
+ * Round 2 relieved a literal getattr name unless the name itself was a sink
+ * spelling. Any attribute can be a renamed executor, so a renamed or aliased
+ * sink reached by getattr dropped the keyword, the file read as sink-free and
+ * the guard-writing child was never walked. Each reviewer repro below was
+ * held on r1, allowed on r2, and is held again. Relief is now a closed list
+ * (`reason`), never "not a known sink".
+ */
+describe('#1077 r3 — getattr of any name but an inert flag stays a sink', () => {
+  const SYS = ['sys', 'tem'].join('');
+  const SUBP = ['sub', 'process'].join('');
+  const CHILD = '/ws/child.sh';
+  const CHILDREN: Array<[string, string, string]> = [
+    ['guard config', "#!/bin/sh\necho '{}' > ~/.shieldcortex/config.json\n", 'touch-guard-config'],
+    ['approval store', "#!/bin/sh\necho '{}' > ~/.shieldcortex/approvals/approvals.json\n", 'touch-approval-store'],
+    ['OpenClaw config', "#!/bin/sh\necho '{}' > ~/.openclaw/openclaw.json\n", 'disable-action-guard'],
+  ];
+  const held = (src: string, childSrc: string, signal: string) => {
+    const v = bash('python3 /ws/g.py', { '/ws/g.py': src, [CHILD]: childSrc });
+    expect(v.signals).toContain(signal);
+    expect(v.decision).not.toBe('allow');
+  };
+
+  // astra r2 BLOCKER 1: a renamed sink read back by a literal getattr name.
+  const ASTRA: Array<[string, string[]]> = [
+    ['a: renamed sink on a SimpleNamespace', [`from os import ${SYS} as go`, 'import types', 'x=types.SimpleNamespace(run=go)', `getattr(x, 'run')('${CHILD}')`]],
+    ['b: renamed sink stashed on os', [`from os import ${SYS} as go`, 'import os', 'os.runner=go', `getattr(os, 'runner')('${CHILD}')`]],
+    ['c: getattr(os, "sys").modules', ['import os', `fn=getattr(os, 'sys').modules['posix'].${SYS}`, `fn('${CHILD}')`]],
+    ['d: imported sink on a SimpleNamespace', [`from os import ${SYS}`, 'import types', `x=types.SimpleNamespace(run=${SYS})`, `getattr(x, 'run')('${CHILD}')`]],
+  ];
+  describe.each(CHILDREN)('astra r2 a-d, child writes the %s', (_kind, childSrc, signal) => {
+    test.each(ASTRA.flatMap(([label, stmts]): Array<[string, string]> => [
+      [`${label} (newline)`, `${stmts.join('\n')}\n`],
+      [`${label} (semicolon)`, `${stmts.join('; ')}\n`],
+    ]))('%s', (_label, src) => held(src, childSrc, signal));
+  });
+
+  // astra r2 helper extra f and grok r2 BLOCKER: names the denylist probes missed.
+  // (astra extra e passes the child inside a list literal; that was allow on r1
+  // too — a list-literal child is not followed — so it is not a regression here.)
+  test.each([
+    ['astra f: renamed sink on a class', `from os import ${SYS} as go\nclass K: pass\nK.run = go\ngetattr(K, 'run')('${CHILD}')\n`],
+    ['grok: getattr(commands, "getstatus")', `import commands\ngetattr(commands, "getstatus")("${CHILD}")\n`],
+    ['grok: getattr(pty, "openpty")', `import pty\ngetattr(pty, "openpty")("${CHILD}")\n`],
+    ['grok: getattr(asyncio, "create_subprocess_shell")', `import asyncio\ngetattr(asyncio, "create_subprocess_shell")("${CHILD}")\n`],
+    ['grok: getattr(asyncio, "create_subprocess_exec")', `import asyncio\ngetattr(asyncio, "create_subprocess_exec")("${CHILD}")\n`],
+    ['grok: hidden module, getattr(m, "run")', `import importlib\nm = importlib.import_module("sub" + "process")\ngetattr(m, "run")("${CHILD}")\n`],
+    ['grok: hidden module, getattr(m, "call")', `import importlib\nm = importlib.import_module("sub" + "process")\ngetattr(m, "call")("${CHILD}")\n`],
+    ['grok: create_subprocess_shell of expanduser(child)', `import asyncio, os\ngetattr(asyncio, "create_subprocess_shell")(os.path.expanduser("${CHILD}"))\n`],
+    ['grok: hidden run of expanduser(child)', `import importlib, os\nm = importlib.import_module("sub" + "process")\ngetattr(m, "run")(os.path.expanduser("${CHILD}"))\n`],
+    ['grok: hidden call of expanduser(child)', `import importlib, os\nm = importlib.import_module("sub" + "process")\ngetattr(m, "call")(os.path.expanduser("${CHILD}"))\n`],
+    ['grok: getattr(os, "startfile")', `import os\ngetattr(os, "startfile")("${CHILD}")\n`],
+    ['grok: getattr(subprocess, "run") stays held', `import ${SUBP}\ngetattr(${SUBP}, "run")("${CHILD}")\n`],
+  ])('%s', (_label, src) => held(src, CHILDREN[0][1], 'touch-guard-config'));
+
+  test('fail closed: a plausible-but-unlisted flag name is still a sink (child walked)', () => {
+    const src = `import os\nCHILD = os.path.expanduser("${CHILD}")\nprint(getattr(args, "verbose", False))\n`;
+    held(src, CHILDREN[0][1], 'touch-guard-config');
+  });
+
+  test('control: the listed flag name is relieved (same file, `reason`)', () => {
+    const src = `import os\nCHILD = os.path.expanduser("${CHILD}")\nprint(getattr(args, "reason", ""))\n`;
+    const v = bash('python3 /ws/g.py', { '/ws/g.py': src, [CHILD]: CHILDREN[0][1] });
+    expect(floorOf(v)).toEqual([]);
+    expect(v.decision).toBe('allow');
   });
 });
 
