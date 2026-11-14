@@ -138,6 +138,12 @@ export interface PostureReport {
   nodeMismatch: boolean;
   /** The posture the hook and plugin agree on, or null (none known, or they disagree). Hermes excluded. */
   nodeReference: PlanePosture | null;
+  /**
+   * #1063 r2: raising the signed setting to a stricter plane's posture would
+   * turn some compared plane up ({@link signedRaiseTurnsPlaneUp}). False when
+   * the signed posture is unknown or no plane sits above it.
+   */
+  signedRaiseTurnsPlaneUp: boolean;
 }
 
 function isBlock(v: unknown): v is Record<string, unknown> {
@@ -380,6 +386,48 @@ function gradedKeyOf(inputs: PostureInputs, graded: PlanePosture): string | null
   return k in top || !(k in alias) ? `actionGuard.${k}` : `interceptor.actionGuard.${k}`;
 }
 
+/**
+ * The top-level `actionGuard` keys that make config.json read as `posture`.
+ * Every key a posture reads is set as a boolean, so the #209 alias cannot gap-fill
+ * one and the plugin's boolean filter keeps them all.
+ */
+const POSTURE_KEYS: Record<PlanePosture, Record<string, boolean>> = {
+  off: { enabled: false },
+  advisory: { enabled: true, enforce: false, readinessGate: false },
+  'enforce-when-ready': { enabled: true, enforce: true, readinessGate: true },
+  enforce: { enabled: true, enforce: true, readinessGate: false },
+};
+
+/**
+ * #1063 r2: whether raising the signed setting to a stricter plane's posture
+ * would turn some compared plane up. Each compared Claude Code hook and
+ * OpenClaw plane is re-read, through its own reader, over a config.json carrying
+ * that posture. The hook follows the file. The plugin follows it unless its own
+ * entry holds it (an entry key, a disabled entry, `interceptor.enabled:false`).
+ * Hermes does not read config.json, so it never counts: with the hook unwired
+ * and no OpenClaw entry following the file, raising the signed setting changes
+ * no compared plane.
+ */
+function signedRaiseTurnsPlaneUp(inputs: PostureInputs, signed: PlanePosture | null, planes: PlaneResult[]): boolean {
+  if (signed === null) return false;
+  const followers = planes.filter((p) => p.plane !== 'hermes' && p.posture !== null);
+  const targets = new Set(
+    planes
+      .flatMap((p) => p.values ?? (p.posture === null ? [] : [p.posture]))
+      .filter((v) => POSTURE_RANK[v] > POSTURE_RANK[signed]),
+  );
+  for (const target of targets) {
+    const raw = inputs.signedRaw ?? {};
+    const guard = isBlock(raw.actionGuard) ? raw.actionGuard : {};
+    const raised: PostureInputs = { ...inputs, signedRaw: { ...raw, actionGuard: { ...guard, ...POSTURE_KEYS[target] } } };
+    for (const p of followers) {
+      const next = (p.plane === 'claude' ? resolveHook(raised) : resolveOpenClaw(raised))?.posture ?? null;
+      if (next !== null && POSTURE_RANK[next] > POSTURE_RANK[p.posture as PlanePosture]) return true;
+    }
+  }
+  return false;
+}
+
 /** Pure. Same inputs, same report. */
 export function resolvePlanePostures(inputs: PostureInputs): PostureReport {
   const planes = [resolveHook(inputs), resolveOpenClaw(inputs), resolveHermes(inputs)].filter(
@@ -407,8 +455,9 @@ export function resolvePlanePostures(inputs: PostureInputs): PostureReport {
   const compared = node.length + (hermes ? 1 : 0);
   const graded = gradedPosture(inputs);
   const verdict: PostureVerdict = nodeMismatch || hermesLooser ? 'mismatch' : compared === 0 ? 'none' : 'agree';
+  const signed = signedPosture(inputs);
   return {
-    signed: signedPosture(inputs),
+    signed,
     integrity: inputs.integrity,
     ...(inputs.integrityAdoption ? { integrityAdoption: inputs.integrityAdoption } : {}),
     graded,
@@ -420,6 +469,7 @@ export function resolvePlanePostures(inputs: PostureInputs): PostureReport {
     hermesLooser,
     nodeMismatch,
     nodeReference: nodeValues.length === 1 ? nodeValues[0] : null,
+    signedRaiseTurnsPlaneUp: signedRaiseTurnsPlaneUp(inputs, signed, planes),
   };
 }
 
@@ -528,10 +578,60 @@ const HERMES_SOURCE_NOTE =
   'Hermes takes its posture from SHIELDCORTEX_ENFORCE in the Hermes gateway environment, not from config.json; no ShieldCortex command changes it today.';
 
 /**
- * The fix for a hook/plugin mismatch. Never a single command that turns
- * protection down (#1037): restoring a signed off/advisory value onto a
- * stricter plane would loosen that plane, and raising the signed setting
- * to the stricter plane would turn a plane up. State both. Name neither.
+ * Whether a plane can hold a posture at all. Hermes implements no readiness gate
+ * (guard-readiness.ts: the gate runs only in the Claude Code hook and the
+ * OpenClaw interceptor; the Hermes plugin's SHIELDCORTEX_ENFORCE resolves to
+ * enforce or advisory), so it has no enforce-when-ready.
+ */
+function planeCanHold(plane: PlaneId, posture: PlanePosture): boolean {
+  return !(plane === 'hermes' && posture === 'enforce-when-ready');
+}
+
+/**
+ * What matching a stricter plane down to each signed setting does to that
+ * plane. `enforce` has no entry: no plane is stricter than it.
+ *
+ * `enforce-when-ready` describes a plane that runs the readiness gate. Over a
+ * signed enforce-when-ready no such plane is stricter as resolved above: the
+ * hook holds the signed value, and the plugin's readiness gate comes from the
+ * signed file only, so its entry can only turn that plane down. The plane above
+ * it is Hermes, which cannot hold it ({@link HERMES_NO_READINESS}).
+ */
+const DOWN_TO_SIGNED: Record<Exclude<PlanePosture, 'enforce'>, string> = {
+  off: 'Matching the stricter plane down to the signed setting would turn Action Guard off on that plane.',
+  advisory: 'Matching the stricter plane down to the signed setting would drop that plane to advisory ' +
+    '(ordinary dangerous ops log but are not gated; catastrophic ops and changes to the guard itself are still held or blocked).',
+  'enforce-when-ready': 'Matching the stricter plane down to the signed setting would drop that plane to enforce-when-ready, ' +
+    'which stays in shadow until this install meets the readiness conditions ' +
+    '(ordinary dangerous ops log but are not gated; catastrophic ops and changes to the guard itself are still held or blocked).',
+};
+
+/** #1063 r1: the down consequence for Hermes above a signed enforce-when-ready, which it cannot hold. */
+const HERMES_NO_READINESS =
+  'Hermes cannot be matched down to the signed setting: it has no enforce-when-ready posture. ' +
+  'It enforces, or an explicit SHIELDCORTEX_ENFORCE opt-out makes it advisory.';
+
+/**
+ * The fix for a posture mismatch. Never a single command that turns
+ * protection down (#1037): restoring the signed value onto a stricter plane
+ * would loosen that plane, and raising the signed setting to the stricter
+ * plane would turn a plane up. State both. Name neither.
+ *
+ * #1063: each direction is derived on its own, from every compared value
+ * (Hermes profiles included). One plane can sit above the signed setting
+ * while another sits below it; the row then states the down consequence for
+ * the stricter plane and the up consequence for the looser one.
+ *
+ * #1063 r1: each consequence is stated only for a plane that can hold the
+ * signed setting ({@link planeCanHold}). Hermes above a signed
+ * enforce-when-ready gets {@link HERMES_NO_READINESS}, never the readiness
+ * shadow, and is not counted as a looser plane that could be put on it.
+ *
+ * #1063 r2: the signed-setting-up consequence is stated only when raising the
+ * signed setting would turn a compared plane up
+ * ({@link PostureReport.signedRaiseTurnsPlaneUp}). Hermes does not read
+ * config.json, so a Hermes-only stricter plane over an unwired hook gets no
+ * such sentence.
  */
 function mismatchFix(report: PostureReport): string {
   const s = report.signed;
@@ -540,20 +640,29 @@ function mismatchFix(report: PostureReport): string {
       'Resolve the config integrity row first; this row names no posture command.';
   }
   const compared = report.planes.filter((p) => p.posture !== null);
-  const noneLooser = compared.every((p) => (p.values ?? [p.posture as PlanePosture]).every((v) => POSTURE_RANK[v] >= POSTURE_RANK[s]));
-  const hermesNote = report.hermesLooser ? ` ${HERMES_SOURCE_NOTE}` : '';
+  const valuesOf = (p: PlaneResult): PlanePosture[] => p.values ?? [p.posture as PlanePosture];
+  const above = compared.filter((p) => valuesOf(p).some((v) => POSTURE_RANK[v] > POSTURE_RANK[s]));
+  const below = compared.filter((p) => valuesOf(p).some((v) => POSTURE_RANK[v] < POSTURE_RANK[s]));
   const help = '`shieldcortex guard posture --help` lists where each plane reads its posture.';
-  if (report.nodeMismatch && noneLooser && (s === 'off' || s === 'advisory')) {
-    const down = s === 'off'
-      ? 'Matching the stricter plane down to the signed setting would turn Action Guard off on that plane.'
-      : 'Matching the stricter plane down to the signed setting would drop that plane to advisory ' +
-        '(ordinary dangerous ops log but are not gated; catastrophic ops and changes to the guard itself are still held or blocked).';
-    return `${down} Matching the signed setting up to the stricter plane would turn a plane up. ` +
-      `This row names no command. ${help}${hermesNote}`;
+  if (above.length === 0 || s === 'enforce') {
+    const hermesNote = report.hermesLooser ? ` ${HERMES_SOURCE_NOTE}` : '';
+    return `The signed posture is ${s}. Putting every plane on it would turn a plane up, so this row names no command: ` +
+      `decide which posture you want. ${help}` +
+      hermesNote;
   }
-  return `The signed posture is ${s}. Putting every plane on it would turn a plane up, so this row names no command: ` +
-    `decide which posture you want. ${help}` +
-    hermesNote;
+  const hermesCannotHold = above.some((p) => !planeCanHold(p.plane, s));
+  const down = [
+    ...(above.some((p) => planeCanHold(p.plane, s)) ? [DOWN_TO_SIGNED[s]] : []),
+    ...(hermesCannotHold ? [HERMES_NO_READINESS] : []),
+  ].join(' ');
+  const up = below.some((p) => planeCanHold(p.plane, s))
+    ? ' Putting a looser plane on the signed setting would turn that plane up.'
+    : '';
+  const raise = report.signedRaiseTurnsPlaneUp
+    ? ' Matching the signed setting up to the stricter plane would turn a plane up.'
+    : '';
+  const hermesNote = report.hermesLooser || hermesCannotHold ? ` ${HERMES_SOURCE_NOTE}` : '';
+  return `${down}${up}${raise} This row names no command. ${help}${hermesNote}`;
 }
 
 /**
