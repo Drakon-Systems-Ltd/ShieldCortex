@@ -181,14 +181,49 @@ function setOwn(out: Record<string, unknown>, key: string, value: unknown): void
   Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
 }
 
+/**
+ * #1077 ask 2 — OpenClaw exec carries a free-text label (`title`, and the
+ * Claude-style `description`/`label`) that the model re-words on every
+ * attempt. Hashed, it minted a new approval id per ATTEMPT, so an operator's
+ * `shieldcortex approve --denial <id>` could never land on the identical
+ * headless retry — #201's Bash problem, on the OpenClaw contract.
+ *
+ * Two byte-exact names, nothing else:
+ *   - `exec`: the native OpenClaw exec contract (`OPENCLAW_EXEC_ALIASES` in
+ *     tool-input-schema.ts), as the plugin plane names it.
+ *   - `mcp__openclaw__exec`: the same tool as Claude Code's hook sees it when
+ *     Claude runs as OpenClaw's CLI backend with native Bash off (OpenClaw's
+ *     MCP loopback bridge; #854 design note §2.5). That hook is the only plane
+ *     that hashes calls for `approve`/`approve --denial`, so without it this
+ *     relief would never apply to the case #1077 reported.
+ * No `mcp__<other>__exec`, no `mcp__evil__Bash`, no case folding, no Codex
+ * glued alias: every other name keeps its full input bound. This is a relief
+ * on the APPROVAL HASH only; tool-input-schema.ts still refuses the native
+ * contract to every MCP-fronted name.
+ *
+ * Only label keys are dropped. `command`, `workdir`/`cwd`, `env`, `elevated`,
+ * `host`, `timeoutSeconds`, `background`, `pty` — everything that changes what
+ * runs, where, or how it is supervised — stays bound, and the hook binds the
+ * session cwd separately on every grant. The EXACT digest (`exactCallDigest`,
+ * tap grants) is deliberately left unchanged: it stays byte-bound, the safe
+ * direction for a two-projection drift.
+ */
+const OPENCLAW_EXEC_APPROVAL_TOOLS: ReadonlySet<string> = new Set(['exec', 'mcp__openclaw__exec']);
+const OPENCLAW_EXEC_LABEL_KEYS = new Set(['title', 'description', 'label']);
+
 function projectForHash(tool: string, input: unknown): unknown {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const record = input as Record<string, unknown>;
   // Unknown and namespaced tools fail closed: their full input stays bound.
-  if (!hasReviewedAdvisoryFields(tool, record)) return input;
+  const dropped = hasReviewedAdvisoryFields(tool, record)
+    ? EXEC_ADVISORY_KEYS
+    : OPENCLAW_EXEC_APPROVAL_TOOLS.has(tool) && typeof record.command === 'string' && record.command.length > 0
+      ? OPENCLAW_EXEC_LABEL_KEYS
+      : null;
+  if (!dropped) return input;
   const out = emptyRecord();
   for (const key of Object.keys(record)) {
-    if (!EXEC_ADVISORY_KEYS.has(key)) setOwn(out, key, record[key]);
+    if (!dropped.has(key)) setOwn(out, key, record[key]);
   }
   return out;
 }
