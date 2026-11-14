@@ -1808,19 +1808,52 @@ function rootScanFrom(
 // ── Without Hermes: hints, and nothing that decides ───────────────────────
 
 /**
- * The manifest file Hermes would read from `dir`, or null.
+ * Which manifest Hermes would read from a directory: that file, none, or "could
+ * not find out" (#974).
+ */
+type ManifestLookup = { file: string } | 'absent' | { error: string };
+
+/**
+ * The manifest file Hermes would read from `dir`, with absence kept apart from
+ * a lookup that failed (#974).
  *
  * Selection, not parsing: `plugin.yaml` then `plugin.yml` on EXISTENCE (which
  * is what Hermes uses — a `plugin.yaml` DIRECTORY is selected and then fails),
- * then a portable `plugin.json` when neither YAML spelling is there. The hint
- * list only wants somewhere to look for a literal substring.
+ * then a portable `plugin.json` when neither YAML spelling is there.
+ *
+ * `fs.existsSync` cannot make this choice: it answers `false` for every
+ * failure, so a directory that stats but cannot be searched (`chmod 600`, an
+ * ACL, a failing mount) reads as one with no manifest. Same rule as
+ * `directoryState`: ENOENT and ENOTDIR are genuine absence of that spelling —
+ * a dangling link included, which is not a manifest to Hermes either — and
+ * anything else is undetermined. The first undetermined spelling ends the
+ * lookup: a later spelling that does exist would not be the one Hermes reads
+ * if the earlier one is there after all.
  */
-function hintManifestFile(dir: string): string | null {
+function manifestLookup(dir: string): ManifestLookup {
   for (const base of ['plugin.yaml', 'plugin.yml', 'plugin.json']) {
     const candidate = path.join(dir, base);
-    if (fs.existsSync(candidate)) return candidate;
+    try {
+      fs.statSync(candidate);
+      return { file: candidate };
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+      return { error: `${candidate} could not be looked up (${describeFsError(err)})` };
+    }
   }
-  return null;
+  return 'absent';
+}
+
+/**
+ * `manifestLookup` for the HINT list only, where "could not find out" and "not
+ * there" may share an answer: a hint is somewhere to look for a literal
+ * substring, it decides nothing, and a manifest that cannot be looked up
+ * cannot be searched for one either.
+ */
+function hintManifestFile(dir: string): string | null {
+  const found = manifestLookup(dir);
+  return typeof found === 'object' && 'file' in found ? found.file : null;
 }
 
 /** Whether a manifest's first `HINT_BYTE_CAP` bytes mention our key at all. */
@@ -1884,8 +1917,10 @@ export function hintDirsInRoot(root: string): string[] {
  * other directory that carries a Hermes plugin manifest, in `plugins/` or any
  * profile's `plugins/`, one category level deep included. Absence of the
  * `shieldcortex` bytes in a manifest is not proof it is not ours (escaped
- * names, a name past the read cap). Every listing and every manifest read
- * must succeed: an unreadable one is not an empty one. A home that is itself
+ * names, a name past the read cap). Every listing, every manifest lookup and
+ * every manifest read must succeed, at the root and one category level down
+ * alike: an unreadable one is not an empty one, and a manifest that could not
+ * be looked up is not a missing one (#974). A home that is itself
  * a profile is declined outright, because its sibling roots are exactly what
  * only Hermes can name; so is a host that may have project plugins switched
  * on.
@@ -1921,18 +1956,23 @@ export function soleConventionalHermesCopy(hermesHome: string): { dir: string } 
         copies.push(child);
         continue;
       }
-      const manifest = hintManifestFile(child);
-      if (manifest === null) {
+      // Tri-state, at BOTH depths (#974). A directory whose manifest lookup
+      // failed is not a category to descend into and not a manifest-less
+      // directory to skip: it may be a copy, and that is the one thing this
+      // function exists to rule out.
+      const manifest = manifestLookup(child);
+      if (manifest === 'absent') {
         if (depth === 0) {
           const why = visit(child, 1);
           if (why !== null) return why;
         }
         continue;
       }
+      if ('error' in manifest) return manifest.error;
       // Any other manifest-bearing directory might be ours. A substring miss
       // is not proof it is not (`name: "shieldcorte\u0078"`, or the name past
       // the read cap). Count it and let the sole-copy check decline.
-      if (readHead(manifest, HINT_BYTE_CAP) === null) return `${manifest} could not be read`;
+      if (readHead(manifest.file, HINT_BYTE_CAP) === null) return `${manifest.file} could not be read`;
       copies.push(child);
     }
     return null;
