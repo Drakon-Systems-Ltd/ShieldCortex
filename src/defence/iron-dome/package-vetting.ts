@@ -541,26 +541,57 @@ function readCache(opts: VetOptions): CacheFile {
 }
 
 /**
- * What one `vetPackages` call changed in the cache: a record to set, or `null`
- * for a record a fresh clean answer evicted. A call writes these, not its
- * start-of-call copy of the file: other checks run at the same time (the
- * agent-config watch checks every changed file together) and each has records
- * of its own to keep.
+ * What one `vetPackages` call changed in the cache: a record to set, or an
+ * eviction (a fresh clean answer for a version that had a record). A call
+ * writes these, not its start-of-call copy of the file: other checks run at
+ * the same time (the agent-config watch checks every changed file together)
+ * and each has records of its own to keep.
+ *
+ * An eviction carries the record its check saw (`at` and ids). It removes that
+ * record and no other: see `writeCache`.
  */
-type CacheChanges = Map<string, CacheEntry | null>;
+type CacheChange = { set: CacheEntry } | { evict: Pick<CacheEntry, 'at' | 'osvIds'> };
+type CacheChanges = Map<string, CacheChange>;
+
+/**
+ * Per cache file, the order in which this process wrote each record. A check
+ * notes the counter when it reads the file; a record numbered above that was
+ * written after the check started. This settles the one case the record
+ * compare cannot: a rewrite with the same time and ids as the record it
+ * replaced. Entries leave with their record.
+ */
+let cacheWriteSeq = 0;
+const cacheSetSeq = new Map<string, Map<string, number>>();
+
+/** True when `onDisk` is the record an eviction saw: same time, same ids. A record in any other shape never is. */
+function isRecordSeen(onDisk: unknown, seen: Pick<CacheEntry, 'at' | 'osvIds'>): boolean {
+  const e = onDisk as Partial<CacheEntry> | null | undefined;
+  return !!e && e.at === seen.at && Array.isArray(e.osvIds) && e.osvIds.length === seen.osvIds.length
+    && e.osvIds.every((id, i) => id === seen.osvIds[i]);
+}
 
 /**
  * Re-read the cache file, apply this call's changes on top, drop expired
  * records, write. All of it is synchronous, with no `await` between the read
  * and the rename, so two checks in one process cannot interleave here and the
  * second writer always starts from what the first one wrote.
+ *
+ * An eviction deletes only when the record now on disk is still the one its
+ * check saw, and was not written by this process after that check started
+ * (`startSeq`). So a clean answer cannot remove a record that another check,
+ * running at the same time, wrote from a malicious answer for the same
+ * version, whichever of the two finishes last. A clean check that starts
+ * after that write sees the new record and evicts it as before.
  */
-function writeCache(opts: VetOptions, changes: CacheChanges, nowMs: number, ttlMs: number): void {
+function writeCache(opts: VetOptions, changes: CacheChanges, nowMs: number, ttlMs: number, startSeq: number): void {
   try {
+    const file = cachePath(opts);
+    const seqs = cacheSetSeq.get(file) ?? new Map<string, number>();
     const merged = readCache(opts).entries;
-    for (const [k, e] of changes) {
-      if (e) merged[k] = e;
-      else delete merged[k];
+    const written: string[] = [];
+    for (const [k, c] of changes) {
+      if ('set' in c) { merged[k] = c.set; written.push(k); }
+      else if (isRecordSeen(merged[k], c.evict) && (seqs.get(k) ?? 0) <= startSeq) delete merged[k];
     }
     const entries: Record<string, CacheEntry> = {};
     for (const [k, e] of Object.entries(merged)) if (nowMs - e.at < ttlMs) entries[k] = e;
@@ -569,7 +600,12 @@ function writeCache(opts: VetOptions, changes: CacheChanges, nowMs: number, ttlM
     const tmp = path.join(dir, `.package-vetting-cache.${process.pid}.${Date.now()}.tmp`);
     fs.writeFileSync(tmp, JSON.stringify({ v: 1, entries }), { mode: 0o600 });
     fs.chmodSync(tmp, 0o600);
-    fs.renameSync(tmp, cachePath(opts));
+    fs.renameSync(tmp, file);
+    // Only now is the file what this call wrote: number its records, forget the ones that left.
+    for (const k of written) seqs.set(k, ++cacheWriteSeq);
+    for (const k of [...seqs.keys()]) if (!(k in entries)) seqs.delete(k);
+    if (seqs.size > 0) cacheSetSeq.set(file, seqs);
+    else cacheSetSeq.delete(file);
   } catch { /* the cache is an optimisation; never fail a vet over it */ }
 }
 
@@ -1043,16 +1079,22 @@ async function vetOne(ref: PackageRef, ctx: {
 /**
  * Only `MAL-` hits are cached (for the offline block). A fresh clean answer evicts a stale hit for the same version.
  * Both are applied to this call's copy and recorded in `changes`, which is what gets written.
+ * The eviction records the hit this call saw, so the write removes that record and no newer one.
+ * Within one call a malicious answer for a version stands: a clean answer for the same version,
+ * before or after it, does not withdraw it.
  */
 function rememberMalicious(cache: CacheFile, changes: CacheChanges, ref: PackageRef, facts: Pick<Facts, 'version' | 'publishedAt' | 'hooks' | 'sdistOnly'>, osvIds: string[], nowMs: number): void {
   const key = cacheKey(ref.ecosystem, ref.name, facts.version);
   if (osvIds.some((id) => id.startsWith('MAL-'))) {
     const entry: CacheEntry = { at: nowMs, ecosystem: ref.ecosystem, name: ref.name, version: facts.version, publishedAt: facts.publishedAt, osvIds, hooks: facts.hooks, sdistOnly: facts.sdistOnly };
     cache.entries[key] = entry;
-    changes.set(key, entry);
+    changes.set(key, { set: entry });
   } else if (key in cache.entries) {
+    const prior = changes.get(key);
+    if (prior && 'set' in prior) return;
+    const seen = cache.entries[key];
     delete cache.entries[key];
-    changes.set(key, null);
+    changes.set(key, { evict: { at: seen.at, osvIds: Array.isArray(seen.osvIds) ? [...seen.osvIds] : [] } });
   }
 }
 
@@ -1103,7 +1145,9 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
   const osvTimer = setTimeout(() => osvCtl.abort(), budgetMs);
   regTimer.unref?.();
   osvTimer.unref?.();
+  // Read the file and note the write counter together, before the first `await`.
   const cache = readCache(opts);
+  const cacheSeqAtStart = cacheWriteSeq;
   const changes: CacheChanges = new Map();
   const packages: PackageVet[] = [];
   try {
@@ -1168,7 +1212,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
     clearTimeout(regTimer);
     clearTimeout(osvTimer);
   }
-  if (changes.size > 0) writeCache(opts, changes, nowMs, ttlMs);
+  if (changes.size > 0) writeCache(opts, changes, nowMs, ttlMs, cacheSeqAtStart);
   const all = packages.flatMap((p) => p.findings);
   const rank = (f: VettingFinding) => (f.kind === 'malicious' ? 0 : f.kind === 'advisory' ? 1 : f.kind === 'install-hook' || f.kind === 'sdist-only' ? 2 : f.kind === 'new-version' ? 3 : 4);
   const reasons = [...new Set(all.sort((a, b) => rank(a) - rank(b)).map((f) => f.reason))];
