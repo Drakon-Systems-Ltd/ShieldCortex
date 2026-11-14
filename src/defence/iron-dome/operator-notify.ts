@@ -315,9 +315,11 @@ export interface AgentConfigChangeNotification {
   severity?: 'high';
   /** #889: report-only package check of a newly added MCP server that launches a package. */
   packageChecks?: Array<{ name: string; malicious: boolean; reasons: string[] }>;
+  /** #889: the package-check follow-up to a change notice already sent for this file, not a second change. */
+  packageCheckFollowUp?: true;
 }
 
-export function buildAgentConfigChangeNotification(input: { file: string; changes: Array<{ label: string; name: string }>; changeCount: number; severity?: string; packageChecks?: Array<{ name: string; malicious: boolean; reasons: string[] }> }): AgentConfigChangeNotification {
+export function buildAgentConfigChangeNotification(input: { file: string; changes: Array<{ label: string; name: string }>; changeCount: number; severity?: string; packageChecks?: Array<{ name: string; malicious: boolean; reasons: string[] }>; packageCheckFollowUp?: boolean }): AgentConfigChangeNotification {
   const safe = (raw: unknown, max: number): string => (String(raw ?? '').replace(/[^A-Za-z0-9_.:\/@ ~-]/g, '?').trim() || 'unknown').slice(0, max);
   return {
     event: 'agent_config_change',
@@ -328,6 +330,7 @@ export function buildAgentConfigChangeNotification(input: { file: string; change
     ...(input.packageChecks && input.packageChecks.length > 0
       ? { packageChecks: input.packageChecks.slice(0, 3).map((p) => ({ name: safe(p.name, 64), malicious: p.malicious === true, reasons: p.reasons.slice(0, 3).map((r) => safe(r, 110)) })) }
       : {}),
+    ...(input.packageCheckFollowUp === true ? { packageCheckFollowUp: true as const } : {}),
   };
 }
 
@@ -336,6 +339,11 @@ export function formatAgentConfigChangeNotification(n: AgentConfigChangeNotifica
   const extra = n.changeCount - n.changes.length;
   const pkg = (n.packageChecks ?? []).map((p) => `${p.malicious ? 'KNOWN MALICIOUS PACKAGE' : 'Package check'} for MCP server ${p.name}: ${p.reasons.join('; ')}.`).join(' ');
   const tail = pkg ? ` ${pkg}` : '';
+  if (n.packageCheckFollowUp) {
+    // Sent after the change notice it follows (#889): name that notice, never re-announce the change.
+    const malicious = n.packageChecks?.some((p) => p.malicious) === true;
+    return `ShieldCortex${malicious ? ' HIGH SEVERITY' : ''}: package check, follow-up to the ${n.file} change notice (${shown}${extra > 0 ? ` and ${extra} more` : ''}).${tail}${malicious ? ' Remove that MCP server before starting an agent.' : ''}`;
+  }
   if (n.packageChecks?.some((p) => p.malicious)) {
     return `ShieldCortex HIGH SEVERITY: ${n.file} changed outside ShieldCortex: ${shown}${extra > 0 ? ` and ${extra} more` : ''}.${tail} Remove that MCP server before starting an agent.`;
   }

@@ -943,6 +943,12 @@ export interface AgentConfigNotification {
   severity?: ChangeSeverity;
   /** #889: report-only package check of newly added MCP servers that launch a package. */
   packageChecks?: Array<{ name: string; malicious: boolean; reasons: string[] }>;
+  /**
+   * #889: this is the package-check follow-up to a change notice already
+   * delivered for the same file (same `file`/`changes`), not a second change.
+   * Ordinary change notices never carry `packageChecks`.
+   */
+  packageCheckFollowUp?: true;
 }
 
 export interface AgentConfigWatchDeps {
@@ -958,15 +964,36 @@ export interface AgentConfigWatchDeps {
   dropzoneDirs?: string[];
   /**
    * #889: vet newly added MCP servers whose command launches a package
-   * (`npx`/`uvx` …). Report-only: the answer rides on the notification and can
-   * never change what is baselined, delivered or blocked. Must bound its own
-   * time; a throw or a hang costs the check, never the notification.
+   * (`npx`/`uvx` …). Report-only and off the critical path: it starts beside
+   * delivery, and nothing in delivering, recording or baselining the change
+   * waits for it, so it can never change what is baselined, delivered or
+   * blocked. Its answer goes out afterwards as a follow-up notification
+   * (`packageCheckFollowUp`), only while the watch's budget lasts. `budgetMs`
+   * is the time it may use; it should bound itself to that. It runs once per
+   * changed file, all files at once, inside one window that ends by the
+   * half-way point of the watch's budget; a throw, a hang or an overrun costs
+   * the check (reported as `unchecked` in the follow-up), never the change notice.
    */
-  vetServers?: (servers: Array<{ name: string; entry: unknown }>) => Promise<Array<{ name: string; malicious: boolean; reasons: string[] }>>;
+  vetServers?: (servers: Array<{ name: string; entry: unknown }>, opts?: { budgetMs: number }) => Promise<Array<{ name: string; malicious: boolean; reasons: string[] }>>;
 }
 
 /** Hard ceiling on the report-only package check inside the watch's own budget. */
 const VET_SERVERS_CEILING_MS = 2500;
+/**
+ * The package check must END by this fraction of the watch's total budget, so
+ * the rest is left for its follow-up notifications. (Delivering, recording and
+ * saving the changes never wait for it at all: it runs beside them.)
+ */
+const VET_SERVERS_BUDGET_SHARE = 0.5;
+/** Head start the check's own budget leaves before the window closes on it. */
+const VET_SERVERS_GRACE_MS = 250;
+
+/** Fixed explanations for a package check that did not produce an answer. */
+export const PACKAGE_CHECK_UNFINISHED = {
+  timedOut: 'unchecked: the package check did not finish within the watch\'s time budget',
+  failed: 'unchecked: the package check failed',
+  noTime: 'unchecked: skipped, the watch had no time left for the package check',
+} as const;
 
 /**
  * The raw entries of MCP servers a change list ADDED (or changed), read from the
@@ -994,6 +1021,11 @@ export function addedServerEntries(file: string, spec: WatchedFileSpec, changes:
   }
 }
 
+/**
+ * Counts cover the change notices only. The report-only package-check
+ * follow-ups (#889) never change them: one that is not delivered is recorded
+ * as a `notify-error` ledger row instead.
+ */
 export interface AgentConfigWatchResult {
   baselined: boolean;
   notified: number;
@@ -1006,6 +1038,11 @@ export interface AgentConfigWatchResult {
 export const BASELINE_UNTRUSTED_LABEL = 'watch baseline untrusted';
 
 const DEFAULT_TOTAL_BUDGET_MS = 5_000;
+
+/** A package check started beside delivery (#889). `collect` never throws and resolves by the check's window end. */
+interface PackageCheckRun {
+  collect: () => Promise<Array<AgentConfigNotification['packageChecks']>>;
+}
 
 class DeadlineError extends Error {
   constructor(ms: number) {
@@ -1031,6 +1068,8 @@ export function sameSnapshot(a: FileSnapshot | undefined, b: FileSnapshot | unde
 }
 
 export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<AgentConfigWatchResult> {
+  // Wall clock for the budget (deps.now may be a fixed test clock; it only stamps state).
+  const startedAt = Date.now();
   const now = deps.now ?? Date.now;
   const result: AgentConfigWatchResult = { baselined: false, notified: 0, errors: 0 };
   /** True when the row was recorded; a `false` return or a throw both count as not recorded. */
@@ -1044,6 +1083,14 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
   // Commit guard: once the deadline fires (or the run fails), the abandoned body
   // must not notify, log or save anything after this function has returned.
   let expired = false;
+  /** Set only by the deadline itself (`expired` is also set by a failed run). */
+  let deadlinePassed = false;
+  // #889, report-only: the package check started beside delivery, and the
+  // change notices it may follow up. Nothing before the save awaits it.
+  let packageCheck: PackageCheckRun | undefined;
+  const delivered: Array<{ i: number; note: AgentConfigNotification }> = [];
+  /** Longest a change notice took to deliver this run: a follow-up needs at least that much time left to start. */
+  let slowestDeliveryMs = 0;
 
   const body = async (): Promise<void> => {
     const loaded = loadAgentConfigStateChecked(deps.home);
@@ -1120,41 +1167,45 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
 
     if (firstRun) result.baselined = true;
     let pending = 0;
-    for (const c of changedFiles) {
-      if (expired) return;
-      // One file's failure (a diff that throws...) must not stop the others
-      // or lose what was already delivered: it keeps its baseline and re-alerts.
+    // Diff every changed file first (synchronous), so the report-only package
+    // check can start once for all of them before delivery begins.
+    const diffed = changedFiles.map((c) => {
       try {
         // High-severity kinds first, so they are always among the three shown.
         const changes = diffSnapshots(c.spec, c.before, c.after)
           .filter((x) => !(c.spec.ignoreRemovals && x.kind === 'removed'))
           .sort((x, y) => Number(changeSeverity(y) === 'high') - Number(changeSeverity(x) === 'high'));
+        return { c, changes };
+      } catch (err) {
+        return { c, err };
+      }
+    });
+    // Started, never awaited here: its answer can only follow the change notices
+    // out (sendPackageFollowUps, after this body), so whatever it does, every
+    // change below is delivered, recorded and baselined exactly as without it.
+    try { packageCheck = startPackageCheck(diffed); } catch { packageCheck = undefined; }
+    for (const [i, d] of diffed.entries()) {
+      if (expired) return;
+      const c = d.c;
+      // One file's failure (a diff that throws...) must not stop the others
+      // or lose what was already delivered: it keeps its baseline and re-alerts.
+      try {
+        if (d.err !== undefined || !d.changes) throw d.err;
+        const changes = d.changes;
         const shown = displayPath(c.file, deps.home);
         if (changes.length === 0) { next.files[c.key] = c.after; continue; }
         next.lastDetectedAt = new Date(now()).toISOString();
         const severity: ChangeSeverity = changes.some((x) => changeSeverity(x) === 'high') ? 'high' : 'normal';
-        let packageChecks: AgentConfigNotification['packageChecks'];
-        if (deps.vetServers) {
-          try {
-            const servers = addedServerEntries(c.file, c.spec, changes);
-            if (servers.length > 0) {
-              let t: NodeJS.Timeout | undefined;
-              const ceiling = new Promise<undefined>((res) => { t = setTimeout(() => res(undefined), VET_SERVERS_CEILING_MS); t.unref?.(); });
-              const checks = await Promise.race([deps.vetServers(servers), ceiling]);
-              if (t) clearTimeout(t);
-              if (checks && checks.length > 0) packageChecks = checks;
-            }
-          } catch { /* report-only: a failed check never costs the notification */ }
-        }
         const note: AgentConfigNotification = {
           file: shown,
           changes: changes.slice(0, 3).map((x) => ({ label: changeLabel(x), name: x.name })),
           changeCount: changes.length,
           ...(severity === 'high' ? { severity } : {}),
-          ...(packageChecks ? { packageChecks } : {}),
         };
+        const sentAt = Date.now();
         try {
           await deps.notify(note);
+          slowestDeliveryMs = Math.max(slowestDeliveryMs, Date.now() - sentAt);
         } catch (err) {
           if (expired) return;
           // Not delivered: keep the old baseline so the change is re-sent next session.
@@ -1165,6 +1216,7 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
         }
         if (expired) return;
         result.notified++;
+        delivered.push({ i, note });
         let recorded = true;
         for (const x of changes) {
           if (!safeLedger({ file: shown, keyPath: x.keyPath, kind: changeLabel(x), detail: `entry=${safeEntryName(x.name)}`, outcome: 'change', severity: changeSeverity(x) })) recorded = false;
@@ -1218,26 +1270,179 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
     saveAgentConfigState(deps.home, next);
   };
 
+  /**
+   * #889, report-only: STARTS the package check of MCP servers each changed
+   * file added, for all files at once, and returns at once (synchronously):
+   * delivery never waits for it. The check runs inside one window that closes
+   * by {@link VET_SERVERS_BUDGET_SHARE} of the watch budget (and never later
+   * than {@link VET_SERVERS_CEILING_MS}). Whatever the check does — answers,
+   * throws, hangs or overruns — `collect()` resolves by the window's end, and
+   * a file whose check gave no answer BY THEN gets an `unchecked` explanation
+   * instead: the window closes when it ends, however late `collect()` is called,
+   * and an answer that settles after it is dropped.
+   * Never throws; `undefined` when there is nothing to check.
+   */
+  const startPackageCheck = (
+    diffed: ReadonlyArray<{ c: { file: string; spec: WatchedFileSpec }; changes?: ConfigChange[] }>,
+  ): PackageCheckRun | undefined => {
+    const vet = deps.vetServers;
+    if (!vet) return undefined;
+    const out: Array<AgentConfigNotification['packageChecks']> = diffed.map(() => undefined);
+    const wanted: Array<{ i: number; servers: Array<{ name: string; entry: unknown }> }> = [];
+    for (const [i, d] of diffed.entries()) {
+      if (!d.changes || d.changes.length === 0) continue;
+      const servers = addedServerEntries(d.c.file, d.c.spec, d.changes);
+      if (servers.length > 0) wanted.push({ i, servers });
+    }
+    if (wanted.length === 0) return undefined;
+    // Only a server with a command can launch a package: those are the ones an unfinished check leaves unchecked.
+    const unfinished = (servers: Array<{ name: string; entry: unknown }>, why: string) => {
+      const named = servers.filter((s) => !!s.entry && typeof s.entry === 'object' && typeof (s.entry as Record<string, unknown>).command === 'string');
+      return named.length > 0 ? named.map((s) => ({ name: s.name, malicious: false, reasons: [why] })) : undefined;
+    };
+    // Every changed file that added a server is looked up, as before this check moved off the
+    // delivery path: no file is skipped for count, only for the window below.
+    const run = wanted;
+    const windowMs = Math.min(VET_SERVERS_CEILING_MS, startedAt + budget * VET_SERVERS_BUDGET_SHARE - Date.now());
+    if (expired || windowMs <= 0) {
+      for (const w of run) out[w.i] = unfinished(w.servers, PACKAGE_CHECK_UNFINISHED.noTime);
+      return { collect: async () => out };
+    }
+    const windowEndsAt = Date.now() + windowMs;
+    const settled: Array<{ ok: true; checks: Awaited<ReturnType<NonNullable<AgentConfigWatchDeps['vetServers']>>> } | { ok: false } | undefined> = run.map(() => undefined);
+    const budgetMs = Math.max(0, Math.floor(windowMs - VET_SERVERS_GRACE_MS));
+    // The cutoff is armed HERE, when the checks start, not when `collect()` is called: delivery
+    // and saving can outlast the window, and an answer that settles after it closed is not an
+    // answer (it would arrive past the time the watch gave the check). `closed` freezes `settled`;
+    // the clock is read as well, in case the timer itself runs late behind synchronous work.
+    let closed = false;
+    const isClosed = () => closed || Date.now() >= windowEndsAt;
+    let closeTimer: NodeJS.Timeout | undefined;
+    const windowEnd = new Promise<void>((res) => {
+      closeTimer = setTimeout(() => { closed = true; res(); }, windowMs);
+      closeTimer.unref?.();
+    });
+    // Each call is wrapped: a synchronous throw or a rejection only marks that file's check failed.
+    // What is bounded here is the WAIT. The check's own work is bounded by `budgetMs`, which it is
+    // handed and should keep to; a check still running past the window is not cancelled, its
+    // late answer is dropped.
+    const all = Promise.all(run.map(async (w, k) => {
+      try {
+        const checks = await vet(w.servers, { budgetMs });
+        if (!isClosed()) settled[k] = { ok: true, checks };
+      } catch {
+        if (!isClosed()) settled[k] = { ok: false };
+      }
+    })).then(() => { if (closeTimer) clearTimeout(closeTimer); });
+    const collect = async (): Promise<Array<AgentConfigNotification['packageChecks']>> => {
+      if (!isClosed()) await Promise.race([all, windowEnd]);
+      closed = true;
+      if (closeTimer) clearTimeout(closeTimer);
+      for (const [k, w] of run.entries()) {
+        const r = settled[k];
+        if (r === undefined) out[w.i] = unfinished(w.servers, PACKAGE_CHECK_UNFINISHED.timedOut);
+        else if (!r.ok) out[w.i] = unfinished(w.servers, PACKAGE_CHECK_UNFINISHED.failed);
+        else if (Array.isArray(r.checks) && r.checks.length > 0) out[w.i] = r.checks;
+      }
+      return out;
+    };
+    return { collect };
+  };
+
+  /**
+   * #889: after the change notices (and the save) are done, send each
+   * delivered change notice's package-check answer as a follow-up. Runs inside
+   * the same deadline, never before the change notices: a follow-up starts
+   * only while the time left is at least the slowest change notice's delivery
+   * time, never after the deadline, and one not delivered is recorded as a
+   * `notify-error` row for its own file, exactly once: when its send fails,
+   * when there is no time left to start it, or at the deadline (the one in
+   * flight and every one still queued behind it; see `closeFollowUps`). It
+   * cannot touch the result counts, the change rows or the saved baseline.
+   */
+  let followUps: Array<{ note: AgentConfigNotification; found: NonNullable<AgentConfigNotification['packageChecks']>; settled: boolean }> | undefined;
+  /** Records a follow-up as not delivered, unless it already has its one outcome. */
+  const followUpNotDelivered = (f: NonNullable<typeof followUps>[number], why: string): void => {
+    if (f.settled) return;
+    f.settled = true;
+    safeLedger({ file: f.note.file, keyPath: 'mcpServers', kind: 'notify-error', detail: `package check follow-up not delivered (${why})`, outcome: 'error' });
+  };
+  const sendPackageFollowUps = async (check: PackageCheckRun): Promise<void> => {
+    const checks = await check.collect();
+    if (deadlinePassed) return;
+    // The whole queue is fixed before the first send, so the deadline knows what is outstanding.
+    const queue: NonNullable<typeof followUps> = [];
+    for (const d of delivered) {
+      const found = checks[d.i];
+      if (found && found.length > 0) queue.push({ note: d.note, found, settled: false });
+    }
+    followUps = queue;
+    for (const f of queue) {
+      if (deadlinePassed) return; // closeFollowUps has recorded this one and the rest
+      if (startedAt + budget - Date.now() < Math.max(1, slowestDeliveryMs)) { followUpNotDelivered(f, 'no time left'); continue; }
+      const note: AgentConfigNotification = {
+        ...f.note,
+        packageChecks: f.found,
+        packageCheckFollowUp: true,
+        ...(f.found.some((p) => p.malicious) ? { severity: 'high' as const } : {}),
+      };
+      try {
+        await deps.notify(note);
+        f.settled = true;
+      } catch (err) {
+        followUpNotDelivered(f, errorCategory(err)); // no second row if the deadline already recorded it
+      }
+    }
+  };
+  /**
+   * The deadline cut the follow-ups short: every one without an outcome yet
+   * (the send in flight and those queued behind it) is recorded as not
+   * delivered under its own file. A send that settles later changes nothing.
+   * If the deadline came before the queue existed, one general row says so.
+   */
+  const closeFollowUps = (): void => {
+    const why = `timed out after ${budget}ms`;
+    if (!followUps) {
+      safeLedger({ file: '(agent config watch)', keyPath: '', kind: 'notify-error', detail: `package check follow-up did not finish (${why})`, outcome: 'error' });
+      return;
+    }
+    for (const f of followUps) followUpNotDelivered(f, why);
+  };
+
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_, rej) => {
-    timer = setTimeout(() => { expired = true; rej(new DeadlineError(budget)); }, budget);
+    timer = setTimeout(() => { expired = true; deadlinePassed = true; rej(new DeadlineError(budget)); }, budget);
     timer.unref?.();
   });
   const running = body();
   running.catch(() => undefined); // a late rejection after the deadline is not unhandled
   try {
-    await Promise.race([running, deadline]);
-  } catch (err) {
-    // Fail open: one ledger row, no notification, baseline untouched.
-    expired = true;
-    result.errors++;
-    safeLedger({
-      file: '(agent config watch)',
-      keyPath: '',
-      kind: 'error',
-      detail: err instanceof DeadlineError ? `timed out after ${budget}ms` : `check failed (${errorCategory(err)})`,
-      outcome: 'error',
-    });
+    try {
+      await Promise.race([running, deadline]);
+    } catch (err) {
+      // Fail open: one ledger row, no notification, baseline untouched.
+      expired = true;
+      result.errors++;
+      safeLedger({
+        file: '(agent config watch)',
+        keyPath: '',
+        kind: 'error',
+        detail: err instanceof DeadlineError ? `timed out after ${budget}ms` : `check failed (${errorCategory(err)})`,
+        outcome: 'error',
+      });
+    }
+    // The change notices are done (delivered, recorded and saved, or not, as
+    // without the check): only now may the package check's answer follow them.
+    if (!deadlinePassed && packageCheck && delivered.length > 0) {
+      const following = sendPackageFollowUps(packageCheck);
+      following.catch(() => undefined);
+      try {
+        await Promise.race([following, deadline]);
+      } catch {
+        // The deadline cut the follow-ups short: one row per outstanding file; nothing else changes.
+        closeFollowUps();
+      }
+    }
   } finally {
     if (timer) clearTimeout(timer);
   }

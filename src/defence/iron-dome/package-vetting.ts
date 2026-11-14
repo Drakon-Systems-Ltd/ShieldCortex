@@ -540,10 +540,30 @@ function readCache(opts: VetOptions): CacheFile {
   return { v: 1, entries: {} };
 }
 
-function writeCache(opts: VetOptions, file: CacheFile, nowMs: number, ttlMs: number): void {
+/**
+ * What one `vetPackages` call changed in the cache: a record to set, or `null`
+ * for a record a fresh clean answer evicted. A call writes these, not its
+ * start-of-call copy of the file: other checks run at the same time (the
+ * agent-config watch checks every changed file together) and each has records
+ * of its own to keep.
+ */
+type CacheChanges = Map<string, CacheEntry | null>;
+
+/**
+ * Re-read the cache file, apply this call's changes on top, drop expired
+ * records, write. All of it is synchronous, with no `await` between the read
+ * and the rename, so two checks in one process cannot interleave here and the
+ * second writer always starts from what the first one wrote.
+ */
+function writeCache(opts: VetOptions, changes: CacheChanges, nowMs: number, ttlMs: number): void {
   try {
+    const merged = readCache(opts).entries;
+    for (const [k, e] of changes) {
+      if (e) merged[k] = e;
+      else delete merged[k];
+    }
     const entries: Record<string, CacheEntry> = {};
-    for (const [k, e] of Object.entries(file.entries)) if (nowMs - e.at < ttlMs) entries[k] = e;
+    for (const [k, e] of Object.entries(merged)) if (nowMs - e.at < ttlMs) entries[k] = e;
     const dir = stateDir(opts);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const tmp = path.join(dir, `.package-vetting-cache.${process.pid}.${Date.now()}.tmp`);
@@ -727,21 +747,79 @@ async function queryOsv(ref: PackageRef, version: string, fetchImpl: FetchLike, 
     throw new Unchecked(signal.aborted ? 'timed out' : `OSV unreachable (${errClass(err)})`);
   }
   if (!res.ok) throw new Unchecked(`OSV answered HTTP ${res.status}`);
-  let body: Record<string, unknown>;
-  try { body = obj(await res.json()); } catch { throw new Unchecked('OSV answer was not valid JSON'); }
-  const vulns = Array.isArray(body.vulns) ? body.vulns : [];
-  const ids: string[] = [];
-  for (const v of vulns) {
-    const o = obj(v);
-    if (o.withdrawn) continue;
-    if (typeof o.id === 'string' && OSV_ID.test(o.id)) ids.push(o.id);
-    // A record filed under another id (GHSA-…, PYSEC-…) can carry the MAL- id as an alias.
-    if (Array.isArray(o.aliases)) for (const a of o.aliases) if (typeof a === 'string' && a.startsWith('MAL-') && OSV_ID.test(a)) ids.push(a);
-  }
-  return [...new Set(ids)];
+  let body: unknown;
+  try { body = await res.json(); } catch { throw new Unchecked('OSV answer was not valid JSON'); }
+  const answer = readOsvResult(body, { aliases: true, skipWithdrawn: true });
+  // A malformed answer is never a clean one (it would be final for this version and evict a
+  // cached MAL- hit). It still counts when a well-formed entry in it names a MAL- id.
+  if (!answer.complete && !answer.ids.some(isMalId)) throw new Unchecked('OSV answer was not in the expected shape');
+  return answer.ids;
 }
 
 const OSV_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,60}$/;
+const isMalId = (id: string) => id.startsWith('MAL-');
+/** Keys an OSV result object carries (`/v1/query` answer, `/v1/querybatch` element). Anything else is not that answer. */
+const OSV_RESULT_KEYS = new Set(['vulns', 'next_page_token']);
+/**
+ * OSV `timestamp`: an RFC 3339 date-time (§5.6), each field in its §5.7 range: hour 00–23,
+ * minute and second 00–59 (a leap second is refused, as Date.parse refuses it), offset hour
+ * 00–23 and minute 00–59. The day is checked against its month below. Date.parse alone is
+ * not a validator: it rolls 30 February over to 2 March and reads hour 24 as the next midnight.
+ */
+const OSV_TIMESTAMP = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/i;
+const isLeapYear = (y: number) => y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+const daysInMonth = (y: number, m: number) => (m === 2 ? (isLeapYear(y) ? 29 : 28) : m === 4 || m === 6 || m === 9 || m === 11 ? 30 : 31);
+function isOsvTimestamp(v: unknown): v is string {
+  if (typeof v !== 'string') return false;
+  const m = v.match(OSV_TIMESTAMP);
+  return !!m && Number(m[3]) <= daysInMonth(Number(m[1]), Number(m[2])) && Number.isFinite(Date.parse(v));
+}
+
+/**
+ * One OSV vulnerability entry, validated on every field this check reads: `id`
+ * a well-formed id string, `withdrawn` (when present) a date-time string,
+ * `aliases` (when present) a list of strings. Null when any is malformed: a
+ * malformed field can neither withdraw a record nor be read past.
+ */
+function readOsvEntry(v: unknown): { id: string; withdrawn: boolean; aliases: string[] } | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  if (typeof o.id !== 'string' || !OSV_ID.test(o.id)) return null;
+  if (o.withdrawn !== undefined && !isOsvTimestamp(o.withdrawn)) return null;
+  if (o.aliases !== undefined && (!Array.isArray(o.aliases) || !o.aliases.every((a) => typeof a === 'string'))) return null;
+  return { id: o.id, withdrawn: o.withdrawn !== undefined, aliases: (o.aliases as string[] | undefined) ?? [] };
+}
+
+/**
+ * One OSV result object, validated: `{}` or `{ vulns: [ { id, … }, … ] }`, as
+ * `/v1/query` returns it and as each element of a `/v1/querybatch` `results`
+ * array is. `complete` is false — the answer may not be read as clean — when
+ * it is not a plain object, carries a key OSV's answer does not have (an error
+ * shape, `results`, anything else), has a `vulns` that is not an array, holds
+ * an entry that fails {@link readOsvEntry}, or says there are more pages to
+ * fetch. Ids of the well-formed entries are returned either way, so a
+ * malformed answer can still prove a package malicious, but never prove it
+ * clean; a malformed entry contributes nothing (not even a withdrawal).
+ */
+function readOsvResult(result: unknown, opts: { aliases: boolean; skipWithdrawn: boolean }): { ids: string[]; complete: boolean } {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return { ids: [], complete: false };
+  const r = result as Record<string, unknown>;
+  let complete = Object.keys(r).every((k) => OSV_RESULT_KEYS.has(k));
+  if (r.next_page_token !== undefined && r.next_page_token !== '') complete = false;
+  if (r.vulns === undefined) return { ids: [], complete };
+  if (!Array.isArray(r.vulns)) return { ids: [], complete: false };
+  const ids: string[] = [];
+  for (const v of r.vulns) {
+    const e = readOsvEntry(v);
+    if (!e) { complete = false; continue; }
+    if (opts.skipWithdrawn && e.withdrawn) continue;
+    ids.push(e.id);
+    // A record filed under another id (GHSA-…, PYSEC-…) can carry the MAL- id as an alias.
+    if (opts.aliases) for (const a of e.aliases) if (isMalId(a) && OSV_ID.test(a)) ids.push(a);
+  }
+  return { ids: [...new Set(ids)], complete };
+}
+
 const MAX_BATCH = 500;
 const MAX_ALIAS_LOOKUPS = 6;
 
@@ -754,8 +832,9 @@ const MAX_ALIAS_LOOKUPS = 6;
  * that only affect OTHER versions (a name-only hit is a reason to look, not a
  * verdict; `vetPackages` resolves it).
  *
- * Returns ids per query index; `null` for a query whose chunk failed or whose
- * answer did not line up with the chunk (never an empty clean answer).
+ * Returns ids per query index; `null` for a query whose chunk failed, whose
+ * answer did not line up with the chunk, or whose own result was malformed
+ * and named no `MAL-` id (never an empty clean answer).
  *
  * The batch answer carries ids only, never aliases, so the (few) non-MAL ids it
  * returns are fetched individually to see whether one is an alias of a `MAL-`
@@ -789,7 +868,7 @@ async function queryOsvChunk(
   fetchImpl: FetchLike,
   signal: AbortSignal,
   budget: { aliasLookups: number },
-): Promise<string[][] | null> {
+): Promise<Array<string[] | null> | null> {
   try {
     const res = await fetchImpl('https://api.osv.dev/v1/querybatch', {
       method: 'POST',
@@ -800,15 +879,20 @@ async function queryOsvChunk(
       signal,
     });
     if (!res.ok) return null;
-    const results = obj(await res.json()).results;
+    const body: unknown = await res.json();
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+    const results = (body as Record<string, unknown>).results;
     if (!Array.isArray(results) || results.length !== slice.length) return null;
-    const out: string[][] = slice.map(() => []);
+    // Anything beside `results` (an error key, a page token, an unknown key) means the envelope
+    // is not the answer this check reads: no result in it is clean, though a well-formed MAL-
+    // entry at its own query's index still counts.
+    const envelopeComplete = Object.keys(body).every((k) => k === 'results');
+    const out: Array<string[] | null> = slice.map(() => null);
     for (let i = 0; i < slice.length; i++) {
-      const vulns = Array.isArray(obj(results[i]).vulns) ? obj(results[i]).vulns as unknown[] : [];
+      const read = readOsvResult(results[i], { aliases: false, skipWithdrawn: false });
+      const answer = { ids: read.ids, complete: read.complete && envelopeComplete };
       const ids: string[] = [];
-      for (const v of vulns) {
-        const id = obj(v).id;
-        if (typeof id !== 'string' || !OSV_ID.test(id)) continue;
+      for (const id of answer.ids) {
         ids.push(id);
         if (!id.startsWith('MAL-') && budget.aliasLookups < MAX_ALIAS_LOOKUPS) {
           budget.aliasLookups++;
@@ -821,7 +905,8 @@ async function queryOsvChunk(
           } catch { /* alias enrichment is best-effort */ }
         }
       }
-      out[i] = [...new Set(ids)];
+      // A malformed result is unavailable for this query (never clean) unless it still names a MAL- id.
+      out[i] = answer.complete || ids.some(isMalId) ? [...new Set(ids)] : null;
     }
     return out;
   } catch {
@@ -929,7 +1014,7 @@ interface OneResult {
 
 async function vetOne(ref: PackageRef, ctx: {
   fetchImpl: FetchLike; regSignal: AbortSignal; osvSignal: AbortSignal; minAgeDays: number; nowMs: number;
-  cache: CacheFile; dirty: { v: boolean };
+  cache: CacheFile; changes: CacheChanges;
 }): Promise<OneResult> {
   const { fetchImpl, regSignal, osvSignal, minAgeDays, nowMs, cache } = ctx;
   if (ref.customIndex) {
@@ -944,7 +1029,7 @@ async function vetOne(ref: PackageRef, ctx: {
   try {
     // A clean answer is never served from the cache: always ask OSV for this version.
     const osvIds = await queryOsv(ref, facts.version, fetchImpl, osvSignal);
-    rememberMalicious(cache, ctx.dirty, ref, facts, osvIds, nowMs);
+    rememberMalicious(cache, ctx.changes, ref, facts, osvIds, nowMs);
     const base = {
       ref, status: 'checked' as const, version: facts.version, publishedAt: facts.publishedAt, osvIds,
       malicious: osvIds.filter((id) => id.startsWith('MAL-')), hooks: facts.hooks, sdistOnly: facts.sdistOnly,
@@ -955,15 +1040,19 @@ async function vetOne(ref: PackageRef, ctx: {
   }
 }
 
-/** Only `MAL-` hits are cached (for the offline block). A fresh clean answer evicts a stale hit for the same version. */
-function rememberMalicious(cache: CacheFile, dirty: { v: boolean }, ref: PackageRef, facts: Pick<Facts, 'version' | 'publishedAt' | 'hooks' | 'sdistOnly'>, osvIds: string[], nowMs: number): void {
+/**
+ * Only `MAL-` hits are cached (for the offline block). A fresh clean answer evicts a stale hit for the same version.
+ * Both are applied to this call's copy and recorded in `changes`, which is what gets written.
+ */
+function rememberMalicious(cache: CacheFile, changes: CacheChanges, ref: PackageRef, facts: Pick<Facts, 'version' | 'publishedAt' | 'hooks' | 'sdistOnly'>, osvIds: string[], nowMs: number): void {
   const key = cacheKey(ref.ecosystem, ref.name, facts.version);
   if (osvIds.some((id) => id.startsWith('MAL-'))) {
-    cache.entries[key] = { at: nowMs, ecosystem: ref.ecosystem, name: ref.name, version: facts.version, publishedAt: facts.publishedAt, osvIds, hooks: facts.hooks, sdistOnly: facts.sdistOnly };
-    dirty.v = true;
+    const entry: CacheEntry = { at: nowMs, ecosystem: ref.ecosystem, name: ref.name, version: facts.version, publishedAt: facts.publishedAt, osvIds, hooks: facts.hooks, sdistOnly: facts.sdistOnly };
+    cache.entries[key] = entry;
+    changes.set(key, entry);
   } else if (key in cache.entries) {
     delete cache.entries[key];
-    dirty.v = true;
+    changes.set(key, null);
   }
 }
 
@@ -1015,14 +1104,14 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
   regTimer.unref?.();
   osvTimer.unref?.();
   const cache = readCache(opts);
-  const dirty = { v: false };
+  const changes: CacheChanges = new Map();
   const packages: PackageVet[] = [];
   try {
     const head = unique.slice(0, MAX_PACKAGES_PER_COMMAND);
     // The malicious-package batch covers EVERY package (custom-index installs excepted: public records do not describe them).
     const batchRefs = unique.filter((r) => !r.customIndex);
     const batchP = queryOsvBatch(batchRefs.map((ref) => ({ ref, version: pinnedVersion(ref) })), fetchImpl, osvCtl.signal);
-    const headP = Promise.all(head.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, dirty })
+    const headP = Promise.all(head.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes })
       .catch((): OneResult => ({ vet: uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs), exact: false }))));
     const [batch, results] = await Promise.all([batchP, headP]);
     const batchAnswer = (ref: PackageRef): string[] | null => {
@@ -1034,7 +1123,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
     const extraRefs = unique.slice(head.length)
       .filter((r) => !r.customIndex && !pinnedVersion(r) && batchFor(r).length > 0)
       .slice(0, MAX_EXTRA_LOOKUPS);
-    const extraResults = await Promise.all(extraRefs.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, dirty })
+    const extraResults = await Promise.all(extraRefs.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes })
       .catch((): OneResult => ({ vet: uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs), exact: false }))));
     const extraByRef = new Map(extraRefs.map((ref, i) => [ref, extraResults[i]] as const));
     unique.forEach((ref, idx) => {
@@ -1052,7 +1141,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
           : r.vet;
         vet = withMalicious(base, malIds, minAgeDays, nowMs, false, !pinned && malIds.length > 0);
         if (malIds.length && pinned && !r.exact) {
-          rememberMalicious(cache, dirty, ref, { version: pinned, hooks: [], sdistOnly: false }, malIds, nowMs);
+          rememberMalicious(cache, changes, ref, { version: pinned, hooks: [], sdistOnly: false }, malIds, nowMs);
         }
       } else {
         const reason = batchAnswer(ref) !== null || ref.customIndex
@@ -1060,7 +1149,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
           : `more than ${MAX_PACKAGES_PER_COMMAND} packages in one command, and the malicious-package check was unavailable`;
         const hits = batchFor(ref);
         vet = withMalicious(uncheckedVet(ref, reason, minAgeDays, nowMs), hits, minAgeDays, nowMs, false, !pinned && hits.length > 0);
-        if (pinned && vet.malicious.length) rememberMalicious(cache, dirty, ref, { version: pinned, hooks: [], sdistOnly: false }, vet.malicious, nowMs);
+        if (pinned && vet.malicious.length) rememberMalicious(cache, changes, ref, { version: pinned, hooks: [], sdistOnly: false }, vet.malicious, nowMs);
       }
       // Offline: a fresh cached MAL- record for this package still blocks.
       if (vet.status === 'unchecked' && !vet.malicious.length && !ref.customIndex) {
@@ -1079,7 +1168,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
     clearTimeout(regTimer);
     clearTimeout(osvTimer);
   }
-  if (dirty.v) writeCache(opts, cache, nowMs, ttlMs);
+  if (changes.size > 0) writeCache(opts, changes, nowMs, ttlMs);
   const all = packages.flatMap((p) => p.findings);
   const rank = (f: VettingFinding) => (f.kind === 'malicious' ? 0 : f.kind === 'advisory' ? 1 : f.kind === 'install-hook' || f.kind === 'sdist-only' ? 2 : f.kind === 'new-version' ? 3 : 4);
   const reasons = [...new Set(all.sort((a, b) => rank(a) - rank(b)).map((f) => f.reason))];
