@@ -345,3 +345,44 @@ describe('#1077 r1 — a directory invocation is still opaque', () => {
     expect(bash('sh /ws/r.sh', { '/ws/r.sh': '#!/bin/sh\n/\n' }).signals).toContain('opaque-script-invocation');
   });
 });
+
+/**
+ * Review r1 follow-up (found while folding the blockers): argparse prints
+ * `description=__doc__` on `-h`, so a docstring blanked under the argparse
+ * exemption reached a shell through the command's own stdout. The exemption
+ * holds only for a root invocation whose stdout nothing on the command line
+ * consumes.
+ */
+describe('#1077 r1 — argparse help text never reaches a consumer unscanned', () => {
+  const X = '/ws/x.py';
+  const src = '"""echo {} > ~/.shieldcortex/config.json"""\nimport argparse\nap = argparse.ArgumentParser(description=__doc__)\nap.parse_args()\n';
+  test.each([
+    `python3 ${X} -h | sh`,
+    `python3 ${X} --help | bash`,
+    `python3 ${X} -h > /tmp/h && sh /tmp/h`,
+    `python3 ${X} -h 1>/tmp/h`,
+    `python3 ${X} -h &> /tmp/h`,
+    `sh -c "$(python3 ${X} -h)"`,
+    `bash <(python3 ${X} -h)`,
+    `eval \`python3 ${X} -h\``,
+    `python3 ${X} -h 2>&1 | tee /tmp/h`,
+  ])('held: %s', (command) => {
+    const v = bash(command, { [X]: src });
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('touch-guard-config');
+  });
+
+  test('a nested script never gets the exemption (its parent may pipe it)', () => {
+    const files = { [X]: src, '/ws/run.sh': `#!/bin/sh\npython3 ${X} -h | sh\n` };
+    expect(bash('sh /ws/run.sh', files).signals).toContain('touch-guard-config');
+  });
+
+  test.each([
+    `python3 ${X} -h`,
+    `python3 ${X} acquire x 2>/dev/null`,
+    `cd /ws && python3 ${X} acquire x 2>err.log`,
+  ])('control — stdout to the terminal only: relieved: %s', (command) => {
+    const v = bash(command, { [X]: src });
+    expect(floorOf(v)).toEqual([]);
+  });
+});

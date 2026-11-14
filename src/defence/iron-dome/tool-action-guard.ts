@@ -3551,7 +3551,20 @@ function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null
   return depth === 0 ? found : null;
 }
 
-function blankPythonDocstrings(src: string, lang: ScriptLang): string {
+/**
+ * #1077 r1: argparse prints `description=__doc__` on `-h`, so the docstring is
+ * on STDOUT, and `python3 x.py -h | sh` runs it. The argparse exemption above
+ * therefore holds only for a ROOT invocation whose command cannot consume its
+ * stdout: no pipe, no stdout redirect (a `2>`/`/dev/null` discard is fine), no
+ * command or process substitution, no backtick. A nested script never gets it
+ * — its parent's handling of its stdout is not on this command line.
+ */
+export function commandStdoutMayBeConsumed(cmd: string): boolean {
+  const c = stripDevNullDiscards(String(cmd || ''));
+  return /[|`]|\$\(|[<>]\(|(?<!\d)>|(?<!\d)1>/.test(c);
+}
+
+function blankPythonDocstrings(src: string, lang: ScriptLang, argparseHelpUnconsumed = false): string {
   if (lang !== 'python' || !src || !(src.includes('"""') || src.includes("'''"))) return src;
   const docs = pythonStandaloneDocstrings(src);
   if (!docs || docs.length === 0) return src;
@@ -3559,7 +3572,7 @@ function blankPythonDocstrings(src: string, lang: ScriptLang): string {
   let cursor = 0;
   for (const [lo, hi] of docs) { code += src.slice(cursor, lo) + blankedRun(src, lo, hi); cursor = hi; }
   code += src.slice(cursor);
-  const exempt = pyArgparseIsStdlib(code) ? code.replace(PY_DOC_ARGPARSE_RE, '$1None') : code;
+  const exempt = argparseHelpUnconsumed && pyArgparseIsStdlib(code) ? code.replace(PY_DOC_ARGPARSE_RE, '$1None') : code;
   const gated = exempt.replace(PY_DOC_ALLOWED_DUNDER_RE, ' ');
   if (PY_DOC_READBACK_RE.test(gated) || !pyImportsAreDocSafe(gated)) return src;
   // Egress evidence is not the floor: a docstring naming a network
@@ -7148,6 +7161,7 @@ function foldScriptSources(
 ): ScriptFold {
   const roots = detectScriptInvocations(execCommand);
   if (roots.length === 0) return { content: '', opaque: false, regions: [], reviewed: [], unreadSensitive: [] };
+  const helpTextMayBeConsumed = commandStdoutMayBeConsumed(execCommand);
   if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [], reviewed: [], unreadSensitive: [] };
 
   const visited = new Set<string>();
@@ -7264,7 +7278,7 @@ function foldScriptSources(
       ? expandFileSubstitutions(plainSrc, resolveScriptSource, subst, 1)
       : plainSrc;
     const reviewedScan = next.lang !== 'sh'
-      ? blankPythonDocstrings(blankInterpreterComments(plainSrc, next.lang), next.lang)
+      ? blankPythonDocstrings(blankInterpreterComments(plainSrc, next.lang), next.lang, next.depth === 1 && !helpTextMayBeConsumed)
       : expandedSrc === plainSrc
         ? commandScanText(plainSrc)
         : `${commandScanText(plainSrc)}\n${commandScanText(expandedSrc)}`;
