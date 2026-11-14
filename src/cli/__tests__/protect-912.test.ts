@@ -75,13 +75,15 @@ describe('#912 verified snapshot and race check', () => {
     };
   }
 
-  it('reads only a verified old lock as trusted and refuses failed verification', () => {
+  it('trusts only a verified old policy and snapshots unverified bytes without adopting its pins', () => {
     const f = fixture();
     const verified = snapshotExistingLock(lockPath, f.seam);
     expect(verified.ok).toBe(true);
     if (verified.ok) expect(verified.snapshot).toMatchObject({ status: 'locked', policy: old });
     f.setStat({ ...file, uid: 1001 });
-    expect(snapshotExistingLock(lockPath, f.seam)).toMatchObject({ ok: false });
+    expect(snapshotExistingLock(lockPath, f.seam)).toMatchObject({
+      ok: true, snapshot: { status: 'unverifiable', reason: 'owned-by-agent', bytes: JSON.stringify(old) },
+    });
   });
 
   it('detects concurrent byte, identity, and absence changes before replace', () => {

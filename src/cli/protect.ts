@@ -234,7 +234,11 @@ export function replacementCandidate(raw: Record<string, unknown>, opts: Protect
   return policy;
 }
 
-type LockSnapshot = { status: 'absent' } | { status: 'locked'; policy: LockedPolicy; bytes: string; stat: ReturnType<ProtectedFsSeam['lstat']> };
+type CapturedLock = { bytes: string; stat: NonNullable<ReturnType<ProtectedFsSeam['lstat']>> };
+type LockSnapshot =
+  | { status: 'absent' }
+  | ({ status: 'locked'; policy: LockedPolicy } & CapturedLock)
+  | ({ status: 'unverifiable'; reason: string } & CapturedLock);
 
 /** A v1 reader deliberately ignores these fields; replacement must not erase them. */
 function unknownLockFields(bytes: string): string[] {
@@ -270,7 +274,7 @@ function sameStat(a: ReturnType<ProtectedFsSeam['lstat']>, b: ReturnType<Protect
     b.ctimeMs !== undefined && b.mtimeMs !== undefined && JSON.stringify(a) === JSON.stringify(b);
 }
 
-/** Verify with the runtime reader, then retain the exact bytes and file metadata for the pre-rename check. */
+/** Classify with the runtime reader, then retain descriptor-bound bytes for the pre-rename check. */
 export function snapshotExistingLock(lockPath: string, seam: ProtectedFsSeam):
   { ok: true; snapshot: LockSnapshot } | { ok: false; detail: string } {
   const captured: { current: { bytes: string; stat: ReturnType<ProtectedFsSeam['lstat']> } | null } = { current: null };
@@ -296,29 +300,45 @@ export function snapshotExistingLock(lockPath: string, seam: ProtectedFsSeam):
   const state = readPolicyLock({ seam: capturingSeam, audit: false, warn: false });
   if (state.path !== lockPath) return { ok: false, detail: 'the runtime resolved a different policy lock path.' };
   if (identityFailed) return { ok: false, detail: 'existing lock identity could not be established during read.' };
-  if (state.status === 'unverifiable') return { ok: false, detail: `existing lock is unverifiable: ${state.detail}` };
-  if (state.status !== 'locked') return { ok: true, snapshot: { status: 'absent' } };
+  if (state.status === 'absent') return { ok: true, snapshot: { status: 'absent' } };
+  if (state.status !== 'locked' && state.status !== 'unverifiable') {
+    return { ok: false, detail: 'existing lock state could not be established.' };
+  }
+  // Ownership failures are reported before the reader opens the file. We still
+  // need an O_NOFOLLOW descriptor read: privileged replacement may never treat
+  // an unobserved destination as absent or silently overwrite it.
+  if (state.status === 'unverifiable' && currentRead() === null) capturingSeam.readFile(lockPath);
+  if (identityFailed) return { ok: false, detail: 'existing lock identity could not be established during read.' };
   const first = currentRead();
   captured.current = null;
   const again = readPolicyLock({ seam: capturingSeam, audit: false, warn: false });
+  if (again.status === 'unverifiable' && currentRead() === null) capturingSeam.readFile(lockPath);
   const finalStat = seam.lstat(lockPath);
   const second = currentRead();
-  if (identityFailed || first === null || second === null || again.status !== 'locked' || again.path !== lockPath ||
+  if (identityFailed || first === null || second === null || again.status !== state.status || again.path !== lockPath ||
+      (state.status === 'unverifiable' && (again.status !== 'unverifiable' || again.reason !== state.reason)) ||
       second.bytes !== first.bytes || !sameStat(finalStat, first.stat) || !sameStat(second.stat, first.stat)) {
     return { ok: false, detail: 'existing lock changed or could not be read during verification.' };
+  }
+  if (finalStat === null) return { ok: false, detail: 'existing lock vanished during verification.' };
+  if (state.status === 'unverifiable') {
+    return { ok: true, snapshot: { status: 'unverifiable', reason: state.reason, bytes: first.bytes, stat: finalStat } };
   }
   const unknown = unknownLockFields(first.bytes);
   if (unknown.length > 0) {
     return { ok: false, detail: `existing verified v1 lock has unrecognized fields (${unknown.join(', ')}); replacement would erase them.` };
   }
-  return { ok: true, snapshot: { status: 'locked', policy: again.policy, bytes: first.bytes, stat: finalStat } };
+  return { ok: true, snapshot: { status: 'locked', policy: state.policy, bytes: first.bytes, stat: finalStat } };
 }
 
 export function lockSnapshotUnchanged(lockPath: string, seam: ProtectedFsSeam, previous: LockSnapshot): boolean {
   const current = snapshotExistingLock(lockPath, seam);
-  return current.ok && current.snapshot.status === previous.status &&
-    (current.snapshot.status === 'absent' || (previous.status === 'locked' &&
-      current.snapshot.bytes === previous.bytes && JSON.stringify(current.snapshot.stat) === JSON.stringify(previous.stat)));
+  if (!current.ok || current.snapshot.status !== previous.status) return false;
+  if (current.snapshot.status === 'absent') return true;
+  if (previous.status === 'absent') return false;
+  return (current.snapshot.status !== 'unverifiable' ||
+      (previous.status === 'unverifiable' && current.snapshot.reason === previous.reason)) &&
+    current.snapshot.bytes === previous.bytes && sameStat(current.snapshot.stat, previous.stat);
 }
 
 export interface ProtectResult {

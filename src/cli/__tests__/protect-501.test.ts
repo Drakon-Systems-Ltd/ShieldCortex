@@ -300,13 +300,13 @@ describe('#501 runProtect refuses to write a lock it could rewrite', () => {
     }
   });
 
-  it('#912 refuses an existing unverified lock without treating its pins as trusted', () => {
+  it('#912 refuses an unsafe destination without treating its unverified pins as trusted', () => {
     fs.writeFileSync(path.join(protectedRoot, POLICY_LOCK_FILENAME), JSON.stringify({
       actionGuard: { reviewedScripts: [{ path: '/tmp/untrusted.sh', sha256: 'a'.repeat(64) }] },
     }));
     const result = runProtect(['--dry-run']);
     expect(result.code).toBe(1);
-    expect(result.lines.join('\n')).toMatch(/existing lock is unverifiable/);
+    expect(result.lines.join('\n')).toMatch(/REFUSED destination/);
     expect(result.lines.join('\n')).not.toMatch(/untrusted\.sh/);
   });
 });
