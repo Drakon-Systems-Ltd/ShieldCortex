@@ -3933,6 +3933,40 @@ export function stripDevNullDiscards(cmd: string): string {
   return String(cmd || '').replace(DEV_NULL_DISCARD_RE, ' ');
 }
 
+/**
+ * #1077 case 2: `ssh host 'cat ~/.openclaw/openclaw.json'` reads a file on
+ * another host, yet the carve-outs below judged `ssh` as an unknown verb and
+ * held it on the self-protection floor. The guard cannot prove `host` is not
+ * this machine, so this does NOT trust the host: it replaces the ssh wrapper
+ * with the remote command and lets the SAME read-only test that already
+ * relieves a LOCAL `cat` of that path judge it. A remote read is relieved
+ * exactly when the local read would be; a remote write (`'echo {} > …'`,
+ * `'sed -i …'`, `'cat …; rm …'`) still fails the test and keeps the gate.
+ *
+ * Unwrapped only when `ssh` is the first word of a statement or pipeline stage
+ * (never after `sudo`/`env`/a `VAR=` prefix), every option is from a closed set
+ * that neither runs a local command nor writes a local file (`-o ProxyCommand`,
+ * `-o LocalCommand`, `-F <config>`, `-E <log>` are refused), and the remote
+ * command is a single-quoted string, or a double-quoted one with no `$`,
+ * backtick or backslash (local expansion), or plain words to the end of the
+ * stage. The local side of the pipeline is left in place and judged as
+ * written. Anything else is left as `ssh …`, an unknown verb: gate kept.
+ */
+const SSH_SAFE_OPT = String.raw`(?:-[46CqTtnv]+|-p[ \t]*\d+|-l[ \t]*[\w.-]+|-o[ \t]*(?:ConnectTimeout|BatchMode|StrictHostKeyChecking|ServerAliveInterval|ServerAliveCountMax|ConnectionAttempts|LogLevel)=[\w.-]+)`;
+const SSH_REMOTE_READ_RE = new RegExp(
+  String.raw`(^|[;&|\n][ \t]*)ssh((?:[ \t]+${SSH_SAFE_OPT})*)[ \t]+(?!-)[\w.@-]+[ \t]+(?:'([^']*)'|"([^"$` + '`' + String.raw`\\]*)"|([^'"\s;&|][^;&|\n'"]*?))(?=[ \t]*(?:$|[;&|\n]|\d?>))`,
+  'g',
+);
+export function unwrapSshRemoteCommands(cmd: string): string {
+  return String(cmd || '').replace(SSH_REMOTE_READ_RE, (_m, lead: string, _opts: string, sq?: string, dq?: string, bare?: string) =>
+    `${lead}${sq ?? dq ?? bare ?? ''}`);
+}
+
+/** #1077: the text the read-only carve-outs judge — discards dropped, ssh wrappers opened. */
+function readOnlyCarveOutSurface(text: string): string {
+  return stripDevNullDiscards(unwrapSshRemoteCommands(stripDevNullDiscards(String(text || ''))));
+}
+
 /** Nested execution keeps the gate. */
 // The function-definition arm starts only at a word start (#874 review): any
 // match starting mid-word has one starting at that word's start, so this is
@@ -4021,7 +4055,7 @@ export function policyLockAccessIsReadOnly(text: string): boolean {
  * The caller still refuses the carve-out when a #500 command shape is present.
  */
 export function guardConfigAccessIsReadOnly(text: string): boolean {
-  const cmd = stripDevNullDiscards(String(text || ''));
+  const cmd = readOnlyCarveOutSurface(text);
   if (!GUARD_CONFIG_PATH_RE.test(cmd)) return false;
   if (STORE_MUTATION_RE.test(cmd)) return false;
   if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
@@ -4983,7 +5017,7 @@ interface ReadOnlyShellOptions {
 }
 
 function shellAccessIsReadOnly(text: string, opts: ReadOnlyShellOptions): boolean {
-  const cmd = stripDevNullDiscards(String(text || ''));
+  const cmd = readOnlyCarveOutSurface(text);
   if (!opts.pathRe.test(cmd)) return false;
   if (STORE_MUTATION_RE.test(cmd)) return false;
   if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
