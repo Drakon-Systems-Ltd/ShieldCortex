@@ -1380,8 +1380,11 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
     for (const f of queue) {
       if (deadlinePassed) return; // closeFollowUps has recorded this one and the rest
       if (startedAt + budget - Date.now() < Math.max(1, slowestDeliveryMs)) { followUpNotDelivered(f, 'no time left'); continue; }
+      // The follow-up is about the package check, so its severity is the check's own: `high` only
+      // for a known-malicious package, never inherited from the change notice it follows.
+      const { severity: _changeSeverity, ...followed } = f.note;
       const note: AgentConfigNotification = {
-        ...f.note,
+        ...followed,
         packageChecks: f.found,
         packageCheckFollowUp: true,
         ...(f.found.some((p) => p.malicious) ? { severity: 'high' as const } : {}),

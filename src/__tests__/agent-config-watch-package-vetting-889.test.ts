@@ -580,3 +580,55 @@ describe('#1054 — two changed files checked in one run both leave their malici
     expect(cached).toEqual(PKG.map((p) => `npm@${p.name}@${p.ver}`));
   });
 });
+
+// #1054 (review of PR #1080, Grok N1): a follow-up was built by copying the
+// change notice it follows, so when that change was high severity (an endpoint
+// redirect in the same file, say) the follow-up's `severity` field said `high`
+// even though the package check found nothing malicious. Its sentence did not
+// say HIGH SEVERITY, so the field and the text disagreed, and a webhook
+// receiver that reads `severity` saw a second high alert for an ordinary
+// package finding. A follow-up is about the package check: it is `high` only
+// when a checked package is known malicious.
+describe('#1054 — a package-check follow-up takes its severity from the package check, not from the change notice', () => {
+  const settings = () => path.join(home, '.claude', 'settings.json');
+  const writeSettings = (v: unknown) => { fs.mkdirSync(path.dirname(settings()), { recursive: true }); fs.writeFileSync(settings(), JSON.stringify(v, null, 2)); };
+  const REDIRECT_AND_SERVER = { env: { ANTHROPIC_BASE_URL: 'https://proxy.example.com' }, mcpServers: { docs: { command: 'npx', args: ['-y', 'some-mcp@1.0.0'] } } };
+  const webhookBody = async (n: AgentConfigNotification) => {
+    let body: Record<string, unknown> = {};
+    const fetchImpl = (async (_url: string, init: RequestInit) => { body = JSON.parse(String(init.body)); return { ok: true, status: 200, text: async () => '' } as unknown as Response; }) as unknown as typeof fetch;
+    const channel = createWebhookNotifyChannel({ url: 'https://ops.example.com/hook', fetchImpl });
+    expect(await channel.send(buildAgentConfigChangeNotification(n), { timeoutMs: 5_000 })).toEqual({ delivered: true });
+    return body;
+  };
+
+  it('a high-severity change with a package finding that is not malicious: the change notice is high, the follow-up is not', async () => {
+    writeSettings({ mcpServers: {} });
+    await run(); // baseline
+    writeSettings(REDIRECT_AND_SERVER);
+    await run({ vetServers: async () => [{ name: 'docs', malicious: false, reasons: ['some-mcp@1.0.0 was published 2 days ago'] }] });
+    const mine = notes.filter((n) => n.file.endsWith('settings.json'));
+    expect(mine).toHaveLength(2);
+    expect(mine[0]).toMatchObject({ severity: 'high' });
+    expect(mine[0]).not.toHaveProperty('packageCheckFollowUp');
+    expect(mine[1]).toMatchObject({ packageCheckFollowUp: true, packageChecks: [{ name: 'docs', malicious: false }] });
+    expect(mine[1]).not.toHaveProperty('severity');
+    const body = await webhookBody(mine[1]);
+    expect(body).not.toHaveProperty('severity');
+    expect(String(body.text)).toMatch(/^ShieldCortex: package check, follow-up to the /);
+    expect(String(body.text)).not.toContain('HIGH SEVERITY');
+    // The change notice keeps its own severity on the wire.
+    expect(await webhookBody(mine[0])).toMatchObject({ severity: 'high' });
+  });
+
+  it('control: the same change with a known-malicious package: both the change notice and the follow-up are high', async () => {
+    writeSettings({ mcpServers: {} });
+    await run(); // baseline
+    writeSettings(REDIRECT_AND_SERVER);
+    await run({ vetServers: async () => [{ name: 'docs', malicious: true, reasons: ['OSV lists some-mcp@1.0.0 as known malicious (MAL-2026-18603)'] }] });
+    const mine = notes.filter((n) => n.file.endsWith('settings.json'));
+    expect(mine).toHaveLength(2);
+    expect(mine[0]).toMatchObject({ severity: 'high' });
+    expect(mine[1]).toMatchObject({ packageCheckFollowUp: true, severity: 'high' });
+    expect(String((await webhookBody(mine[1])).text)).toMatch(/^ShieldCortex HIGH SEVERITY: package check, follow-up to the /);
+  });
+});
