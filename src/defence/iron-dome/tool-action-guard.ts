@@ -3394,6 +3394,43 @@ const BLANKING_PAD = ' '.repeat(512);
  * file is prose. The lexer pass is nearly all of it — the rewrite is a
  * pad-and-join, because a regex per comment cost 14ms of that on its own.
  */
+/**
+ * #1077 case 1: blank the DOCSTRINGS of a Python source folded from disk, the
+ * same length-preserving way #532 blanks its comments. A docstring is a
+ * triple-quoted literal standing alone as a statement — it starts a line, the
+ * previous code character is not one that would make it an operand (`(`, `,`,
+ * `=`, an operator …), and nothing but whitespace follows its closing quotes.
+ * Python evaluates it and discards it unless the program reads it back, so a
+ * usage block naming `~/.shieldcortex/config.json` or `python3 scripts/x.py`
+ * is prose, not access and not an invocation.
+ *
+ * Fail closed: when the source can read its own doc text back — any
+ * `__doc__` other than an argparse `description=`/`epilog=`/`usage=` keyword,
+ * or `getdoc`/`getsource`/`getcomments`/`pydoc`/`linecache`/`__file__`/
+ * `__loader__` — nothing is blanked, so `os.system(__doc__)` stays scanned.
+ * Disk bytes only; inline `-c` programs are never passed here.
+ */
+const PY_DOC_READBACK_RE = /\b(?:getdoc|getsource|getcomments|pydoc|linecache|__file__|__loader__)\b/;
+const PY_DOC_ARGPARSE_RE = /\b(?:description|epilog|usage)[ \t]*=[ \t]*__doc__\b/g;
+const PY_DOCSTRING_RE = /^[ \t]*[rRuU]?("""|''')[\s\S]*?\1[ \t]*$/gm;
+function blankPythonDocstrings(src: string, lang: ScriptLang): string {
+  if (lang !== 'python' || !src || !(src.includes('"""') || src.includes("'''"))) return src;
+  if (PY_DOC_READBACK_RE.test(src)) return src;
+  if (src.replace(PY_DOC_ARGPARSE_RE, '').includes('__doc__')) return src;
+  let out = '';
+  let cursor = 0;
+  for (const m of src.matchAll(PY_DOCSTRING_RE)) {
+    const lo = m.index ?? 0;
+    const hi = lo + m[0].length;
+    if (lo < cursor) continue;
+    const prev = src.slice(0, lo).replace(/\s+$/, '').slice(-1);
+    if (prev && /[([{,=+\-*/%\\|&<>!~^@.]/.test(prev)) continue;   // an operand, not a statement
+    out += src.slice(cursor, lo) + blankedRun(src, lo, hi);
+    cursor = hi;
+  }
+  return cursor === 0 ? src : out + src.slice(cursor);
+}
+
 function blankInterpreterComments(src: string, lang: ScriptLang): string {
   if (lang === 'sh' || !src) return src;
   const rules = SCRIPT_LANG_RULES[lang];
@@ -6780,6 +6817,10 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
     if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
+    // #1077: a token ending in `/` names a directory, which no interpreter or
+    // kernel runs as a program — in a folded Python source it is the
+    // `Path.home() / "x"` operator, not an unreadable script.
+    if (clean.endsWith('/')) return;
     const resolved = lang ?? langFromPath(clean);
     // De-duplicate on path AND language. Keying on path alone discarded a
     // SECOND invocation of the same file by a different interpreter, so
@@ -7075,7 +7116,7 @@ function foldScriptSources(
       ? expandFileSubstitutions(plainSrc, resolveScriptSource, subst, 1)
       : plainSrc;
     const reviewedScan = next.lang !== 'sh'
-      ? blankInterpreterComments(plainSrc, next.lang)
+      ? blankPythonDocstrings(blankInterpreterComments(plainSrc, next.lang), next.lang)
       : expandedSrc === plainSrc
         ? commandScanText(plainSrc)
         : `${commandScanText(plainSrc)}\n${commandScanText(expandedSrc)}`;
