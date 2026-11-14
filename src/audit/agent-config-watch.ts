@@ -987,15 +987,12 @@ const VET_SERVERS_CEILING_MS = 2500;
 const VET_SERVERS_BUDGET_SHARE = 0.5;
 /** Head start the check's own budget leaves before the window closes on it. */
 const VET_SERVERS_GRACE_MS = 250;
-/** Changed files whose added servers are checked in one run (each check runs concurrently). */
-const VET_SERVERS_MAX_FILES = 5;
 
 /** Fixed explanations for a package check that did not produce an answer. */
 export const PACKAGE_CHECK_UNFINISHED = {
   timedOut: 'unchecked: the package check did not finish within the watch\'s time budget',
   failed: 'unchecked: the package check failed',
   noTime: 'unchecked: skipped, the watch had no time left for the package check',
-  tooMany: `unchecked: skipped, the watch checks packages for at most ${VET_SERVERS_MAX_FILES} changed files per run`,
 } as const;
 
 /**
@@ -1303,8 +1300,9 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
       const named = servers.filter((s) => !!s.entry && typeof s.entry === 'object' && typeof (s.entry as Record<string, unknown>).command === 'string');
       return named.length > 0 ? named.map((s) => ({ name: s.name, malicious: false, reasons: [why] })) : undefined;
     };
-    const run = wanted.slice(0, VET_SERVERS_MAX_FILES);
-    for (const w of wanted.slice(VET_SERVERS_MAX_FILES)) out[w.i] = unfinished(w.servers, PACKAGE_CHECK_UNFINISHED.tooMany);
+    // Every changed file that added a server is looked up, as before this check moved off the
+    // delivery path: no file is skipped for count, only for the window below.
+    const run = wanted;
     const windowMs = Math.min(VET_SERVERS_CEILING_MS, startedAt + budget * VET_SERVERS_BUDGET_SHARE - Date.now());
     if (expired || windowMs <= 0) {
       for (const w of run) out[w.i] = unfinished(w.servers, PACKAGE_CHECK_UNFINISHED.noTime);
@@ -1357,30 +1355,58 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
    * the same deadline, never before the change notices: a follow-up starts
    * only while the time left is at least the slowest change notice's delivery
    * time, never after the deadline, and one not delivered is recorded as a
-   * `notify-error` row. It cannot touch the result counts, the change rows or
-   * the saved baseline.
+   * `notify-error` row for its own file, exactly once: when its send fails,
+   * when there is no time left to start it, or at the deadline (the one in
+   * flight and every one still queued behind it; see `closeFollowUps`). It
+   * cannot touch the result counts, the change rows or the saved baseline.
    */
+  let followUps: Array<{ note: AgentConfigNotification; found: NonNullable<AgentConfigNotification['packageChecks']>; settled: boolean }> | undefined;
+  /** Records a follow-up as not delivered, unless it already has its one outcome. */
+  const followUpNotDelivered = (f: NonNullable<typeof followUps>[number], why: string): void => {
+    if (f.settled) return;
+    f.settled = true;
+    safeLedger({ file: f.note.file, keyPath: 'mcpServers', kind: 'notify-error', detail: `package check follow-up not delivered (${why})`, outcome: 'error' });
+  };
   const sendPackageFollowUps = async (check: PackageCheckRun): Promise<void> => {
     const checks = await check.collect();
+    if (deadlinePassed) return;
+    // The whole queue is fixed before the first send, so the deadline knows what is outstanding.
+    const queue: NonNullable<typeof followUps> = [];
     for (const d of delivered) {
       const found = checks[d.i];
-      if (!found || found.length === 0) continue;
-      if (deadlinePassed) return;
-      const notDelivered = (why: string) => safeLedger({ file: d.note.file, keyPath: 'mcpServers', kind: 'notify-error', detail: `package check follow-up not delivered (${why})`, outcome: 'error' });
-      if (startedAt + budget - Date.now() < Math.max(1, slowestDeliveryMs)) { notDelivered('no time left'); continue; }
+      if (found && found.length > 0) queue.push({ note: d.note, found, settled: false });
+    }
+    followUps = queue;
+    for (const f of queue) {
+      if (deadlinePassed) return; // closeFollowUps has recorded this one and the rest
+      if (startedAt + budget - Date.now() < Math.max(1, slowestDeliveryMs)) { followUpNotDelivered(f, 'no time left'); continue; }
       const note: AgentConfigNotification = {
-        ...d.note,
-        packageChecks: found,
+        ...f.note,
+        packageChecks: f.found,
         packageCheckFollowUp: true,
-        ...(found.some((p) => p.malicious) ? { severity: 'high' as const } : {}),
+        ...(f.found.some((p) => p.malicious) ? { severity: 'high' as const } : {}),
       };
       try {
         await deps.notify(note);
+        f.settled = true;
       } catch (err) {
-        if (deadlinePassed) return;
-        notDelivered(errorCategory(err));
+        followUpNotDelivered(f, errorCategory(err)); // no second row if the deadline already recorded it
       }
     }
+  };
+  /**
+   * The deadline cut the follow-ups short: every one without an outcome yet
+   * (the send in flight and those queued behind it) is recorded as not
+   * delivered under its own file. A send that settles later changes nothing.
+   * If the deadline came before the queue existed, one general row says so.
+   */
+  const closeFollowUps = (): void => {
+    const why = `timed out after ${budget}ms`;
+    if (!followUps) {
+      safeLedger({ file: '(agent config watch)', keyPath: '', kind: 'notify-error', detail: `package check follow-up did not finish (${why})`, outcome: 'error' });
+      return;
+    }
+    for (const f of followUps) followUpNotDelivered(f, why);
   };
 
   let timer: NodeJS.Timeout | undefined;
@@ -1413,8 +1439,8 @@ export async function runAgentConfigWatch(deps: AgentConfigWatchDeps): Promise<A
       try {
         await Promise.race([following, deadline]);
       } catch {
-        // The deadline cut a follow-up short: say so once; nothing else changes.
-        safeLedger({ file: '(agent config watch)', keyPath: '', kind: 'notify-error', detail: `package check follow-up did not finish (timed out after ${budget}ms)`, outcome: 'error' });
+        // The deadline cut the follow-ups short: one row per outstanding file; nothing else changes.
+        closeFollowUps();
       }
     }
   } finally {

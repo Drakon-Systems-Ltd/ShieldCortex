@@ -225,15 +225,17 @@ describe('release review B3 — the package check is off the delivery and baseli
     expect(followUps().map((n) => n.packageChecks)).toEqual([[{ name: 'docs', malicious: false, reasons: [PACKAGE_CHECK_UNFINISHED.noTime] }]]);
   });
 
-  it('checks at most five changed files per run and says so for the rest', async () => {
+  it('six changed files: every one is looked up, as on main (none is skipped for count)', async () => {
     await setup(6);
     let calls = 0;
     const res = await runMany({ vetServers: async (servers) => { calls++; return servers.map((s) => ({ name: s.name, malicious: false, reasons: ['ok'] })); } });
-    expect(calls).toBe(5);
+    expect(calls).toBe(6);
     expect(res.notified).toBe(6);
     expect(changeNotes()).toHaveLength(6);
     expect(followUps()).toHaveLength(6);
-    expect(followUps().filter((n) => n.packageChecks?.[0]?.reasons[0] === PACKAGE_CHECK_UNFINISHED.tooMany)).toHaveLength(1);
+    // Every follow-up carries the check's own answer: none is a skip.
+    expect(followUps().map((n) => n.packageChecks)).toEqual(Array.from({ length: 6 }, () => [{ name: 'docs', malicious: false, reasons: ['ok'] }]));
+    expect(Object.keys(PACKAGE_CHECK_UNFINISHED).sort()).toEqual(['failed', 'noTime', 'timedOut']);
   });
 
   it('an unfinished check lists only servers that have a command (a remote url server launches no package)', async () => {
@@ -340,13 +342,58 @@ describe('release review B3 — the package check is off the delivery and baseli
     expect(changeNotes()).toHaveLength(1);
     expect(rows.filter((r) => r.outcome === 'change')).toHaveLength(1);
     expect(rows.filter((r) => r.kind === 'error')).toEqual([]);
-    expect(rows.filter((r) => r.kind === 'notify-error').map((r) => r.detail)).toEqual(['package check follow-up did not finish (timed out after 1500ms)']);
+    expect(rows.filter((r) => r.kind === 'notify-error')).toEqual([expect.objectContaining({ file: changeNotes()[0].file, keyPath: 'mcpServers', detail: 'package check follow-up not delivered (timed out after 1500ms)', outcome: 'error' })]);
     const rowsAtReturn = rows.length;
     release(); // the cut-off send settling late records nothing more
     await sleep(20);
     expect(rows.length).toBe(rowsAtReturn);
     notes = []; rows = [];
     expect((await runMany()).notified).toBe(0);
+  }, 20_000);
+
+  it('three follow-ups queued and the first hangs to the deadline: each file gets its own not-delivered row, once', async () => {
+    await setup(3);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let followUpSends = 0;
+    const res = await runMany({
+      totalBudgetMs: 1500,
+      notify: async (n) => { if (n.packageCheckFollowUp) { followUpSends++; await held; return; } notes.push(n); },
+      vetServers: async () => [{ name: 'docs', malicious: true, reasons: ['OSV lists some-mcp@1.0.0 as known malicious (MAL-2026-18603)'] }],
+    });
+    expect(res).toEqual({ baselined: false, notified: 3, errors: 0 });
+    expect(followUpSends).toBe(1); // the second and third were still queued behind the first
+    const files = changeNotes().map((n) => n.file);
+    expect(new Set(files).size).toBe(3);
+    const undelivered = rows.filter((r) => r.kind === 'notify-error');
+    expect(undelivered.map((r) => r.detail)).toEqual(Array.from({ length: 3 }, () => 'package check follow-up not delivered (timed out after 1500ms)'));
+    expect(undelivered.map((r) => r.file)).toEqual(files);
+    for (const r of undelivered) expect(r).toMatchObject({ keyPath: 'mcpServers', outcome: 'error' });
+    expect(rows.filter((r) => r.kind === 'error')).toEqual([]);
+    const rowsAtReturn = rows.length;
+    release(); // the held send settling late neither sends the queued ones nor records them again
+    await sleep(30);
+    expect(rows.length).toBe(rowsAtReturn);
+    expect(followUpSends).toBe(1);
+    notes = []; rows = [];
+    expect((await runMany()).notified).toBe(0); // all three were baselined: the rows above are their only record
+  }, 20_000);
+
+  it('the held follow-up failing after the deadline adds no second row for its file', async () => {
+    await setup(2);
+    let fail!: (e: Error) => void;
+    const held = new Promise<void>((_, rej) => { fail = rej; });
+    held.catch(() => undefined);
+    await runMany({
+      totalBudgetMs: 1500,
+      notify: async (n) => { if (n.packageCheckFollowUp) { await held; return; } notes.push(n); },
+      vetServers: async () => [{ name: 'docs', malicious: false, reasons: ['published 2 days ago'] }],
+    });
+    const files = changeNotes().map((n) => n.file);
+    expect(rows.filter((r) => r.kind === 'notify-error').map((r) => r.file)).toEqual(files);
+    fail(Object.assign(new Error('x'), { code: 'ECONNRESET' }));
+    await sleep(30);
+    expect(rows.filter((r) => r.kind === 'notify-error').map((r) => [r.file, r.detail])).toEqual(files.map((f) => [f, 'package check follow-up not delivered (timed out after 1500ms)']));
   }, 20_000);
 
   it('a follow-up that fails to send is recorded, and the change notice it follows still counts and baselines', async () => {
