@@ -6948,7 +6948,7 @@ export function detectScriptInvocation(execSurface: string, depth = 0): string[]
  * scanned: a shell script's lines are shell statements, a Python or JS file's
  * lines are not — see `SCRIPT_LANG_RULES` and `buildSpanCtx`.
  */
-export function detectScriptInvocations(execSurface: string, depth = 0): DetectedScript[] {
+export function detectScriptInvocations(execSurface: string, depth = 0, foldedInterpreterSource = false): DetectedScript[] {
   const found: DetectedScript[] = [];
   if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
 
@@ -6963,10 +6963,12 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
     if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
-    // #1077: a token ending in `/` names a directory, which no interpreter or
-    // kernel runs as a program — in a folded Python source it is the
-    // `Path.home() / "x"` operator, not an unreadable script.
-    if (clean.endsWith('/')) return;
+    // #1077: in a folded INTERPRETER source (Python/JS/…, never shell) a lone
+    // `/` is the `Path.home() / "x"` division operator, not an unreadable
+    // script. Only that exact token, only there (review r1: every other
+    // trailing-slash path stays detected — `python3 app/` runs
+    // `app/__main__.py`, and `./deploy/` must keep reporting opaque).
+    if (foldedInterpreterSource && clean === '/') return;
     const resolved = lang ?? langFromPath(clean);
     // De-duplicate on path AND language. Keying on path alone discarded a
     // SECOND invocation of the same file by a different interpreter, so
@@ -7011,7 +7013,7 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
             // The inline program itself is already in the exec surface (and
             // already scanned); only follow a file invocation NESTED in it.
             if (/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(base)) {
-              for (const nested of detectScriptInvocations(tokens[j + 1] ?? '', depth + 1)) add(nested.path, nested.lang);
+              for (const nested of detectScriptInvocations(tokens[j + 1] ?? '', depth + 1, foldedInterpreterSource)) add(nested.path, nested.lang);
             }
             break;
           }
@@ -7274,7 +7276,7 @@ function foldScriptSources(
       // of entries that can reach here is bounded by the root-owned lock's
       // ceiling rather than by the same-UID config alone.
       const nestedOfReviewed = next.lang === 'sh' || hasShellOutSink(reviewedScan, next.lang, true)
-        ? detectScriptInvocations(reviewedScan)
+        ? detectScriptInvocations(reviewedScan, 0, next.lang !== 'sh')
         : [];
       if (nestedOfReviewed.length > 0) {
         if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
@@ -7313,7 +7315,7 @@ function foldScriptSources(
     // on an unmasked sink-bearing program, so the three planes agree. Comments
     // are already blanked from `scan`, so a path mentioned in a docstring is
     // not followed.
-    const nested = next.lang === 'sh' || hasSink ? detectScriptInvocations(scan) : [];
+    const nested = next.lang === 'sh' || hasSink ? detectScriptInvocations(scan, 0, next.lang !== 'sh') : [];
     if (nested.length > 0) {
       if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;         // depth exceeded — say so
       else for (const n of nested) {

@@ -318,3 +318,30 @@ describe('#1077 r1 — nothing that can feed ssh stdin is unwrapped', () => {
     expect(floorOf(v).length).toBeGreaterThan(0);
   });
 });
+
+/**
+ * Review r1 (PR #1079), Astra blocker 2 — a trailing-slash path is a
+ * directory, and `python3 app/` runs `app/__main__.py`. The first cut skipped
+ * every such token; base reported it opaque. Only the bare `/` division
+ * operator inside a folded interpreter source is skipped now.
+ */
+describe('#1077 r1 — a directory invocation is still opaque', () => {
+  test.each([
+    'python3 app/',
+    'python3 /ws/app/',
+    './deploy/',
+    'cd /ws && python3 ./app/ --run',
+  ])('opaque: %s', (command) => {
+    expect(bash(command, {}).signals).toContain('opaque-script-invocation');
+  });
+
+  test('inside a reviewed shell parent', () => {
+    const src = '#!/bin/sh\npython3 /ws/app/\n';
+    const v = bash('sh /ws/run.sh', { '/ws/run.sh': src }, (p, s) => p === '/ws/run.sh' && s === src);
+    expect(v.signals).toContain('opaque-script-invocation');
+  });
+
+  test('a lone `/` in a shell script is not skipped', () => {
+    expect(bash('sh /ws/r.sh', { '/ws/r.sh': '#!/bin/sh\n/\n' }).signals).toContain('opaque-script-invocation');
+  });
+});
