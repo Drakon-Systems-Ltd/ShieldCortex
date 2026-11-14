@@ -21,7 +21,7 @@
  * #500 (self-protection of hook wiring, expected hashes, install-root pin) is
  * expected to build on the same two functions.
  */
-import { lstatSync, readFileSync, readlinkSync, statSync } from 'fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, statSync } from 'fs';
 import { dirname, isAbsolute, resolve as resolvePath } from 'path';
 
 // ── Audit vocabulary ──────────────────────────────────
@@ -108,6 +108,11 @@ export function describeProtectedAudit(event: ProtectedAuditEvent): { action: st
 export interface ProtectedStat {
   uid: number;
   gid: number;
+  /** File identity for privileged replacement race checks. */
+  dev?: number;
+  ino?: number;
+  ctimeMs?: number;
+  mtimeMs?: number;
   /** Raw mode bits, as `fs.Stats.mode`. */
   mode: number;
   isFile: boolean;
@@ -134,6 +139,8 @@ export interface ProtectedFsSeam {
   readlink(path: string): string | null;
   /** File contents as utf-8, or null when unreadable. */
   readFile(path: string): string | null;
+  /** Descriptor-bound read for privileged replacement checks. Null if identity cannot be established. */
+  readFileWithIdentity?(path: string): { contents: string; before: ProtectedStat; after: ProtectedStat } | null;
   /** Effective uid, or null where the platform has no such concept. */
   geteuid(): number | null;
   platform: NodeJS.Platform;
@@ -143,11 +150,16 @@ export interface ProtectedFsSeam {
 
 function toProtectedStat(s: {
   uid: number; gid: number; mode: number;
+  dev?: number; ino?: number; ctimeMs?: number; mtimeMs?: number;
   isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean;
 }): ProtectedStat {
   return {
     uid: s.uid,
     gid: s.gid,
+    dev: s.dev,
+    ino: s.ino,
+    ctimeMs: s.ctimeMs,
+    mtimeMs: s.mtimeMs,
     mode: s.mode,
     isFile: s.isFile(),
     isDirectory: s.isDirectory(),
@@ -169,6 +181,20 @@ export function defaultProtectedFsSeam(): ProtectedFsSeam {
     },
     readFile(path) {
       try { return readFileSync(path, 'utf-8'); } catch { return null; }
+    },
+    readFileWithIdentity(path) {
+      let fd: number;
+      try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); } catch { return null; }
+      try {
+        const before = toProtectedStat(fstatSync(fd));
+        const contents = readFileSync(fd, 'utf-8');
+        const after = toProtectedStat(fstatSync(fd));
+        return { contents, before, after };
+      } catch {
+        return null;
+      } finally {
+        closeSync(fd);
+      }
     },
     geteuid() {
       return typeof process.geteuid === 'function' ? process.geteuid() : null;

@@ -23,7 +23,9 @@ import {
   PROTECT_HINT,
   PROTECTED_POLICY_KEYS_V1,
   describePolicyLock,
+  policyLockCoverage,
   readPolicyLock,
+  wouldLoosen,
   type LockedPolicy,
 } from '../defence/iron-dome/policy-lock.js';
 import { normaliseReviewedScripts } from '../defence/iron-dome/reviewed-scripts.js';
@@ -194,6 +196,149 @@ function coversKey(policy: LockedPolicy, key: (typeof PROTECTED_POLICY_KEYS_V1)[
     case 'memory.hostContract.posture': return policy.memory?.hostContract?.posture !== undefined;
     case 'memory.inject.mode': return policy.memory?.inject?.mode !== undefined;
   }
+}
+
+/** A replacement must retain every old floor and every reviewed file pin. */
+export function replacementRefusals(old: LockedPolicy, candidate: LockedPolicy): string[] {
+  const before = policyLockCoverage({ status: 'locked', path: '', policy: old });
+  const after = policyLockCoverage({ status: 'locked', path: '', policy: candidate });
+  const refusals: string[] = [];
+  for (const [key, value] of before) {
+    if (!after.has(key)) {
+      refusals.push(`${key}: covered by existing lock, omitted from candidate`);
+    } else if (key === 'actionGuard.reviewedScripts') {
+      const oldPins = value as NonNullable<LockedPolicy['actionGuard']>['reviewedScripts'] ?? [];
+      const newPins = after.get(key) as typeof oldPins;
+      const identity = (pin: NonNullable<typeof oldPins>[number]) => JSON.stringify([pin.path, pin.sha256.toLowerCase()]);
+      const oldKeys = new Set(oldPins.map(identity));
+      const newKeys = new Set(newPins!.map(identity));
+      if ([...oldKeys].some((pin) => !newKeys.has(pin))) refusals.push(`${key}: existing trusted pin would be lost`);
+      if ([...newKeys].some((pin) => !oldKeys.has(pin))) refusals.push(`${key}: candidate adds a new pin`);
+    } else if (wouldLoosen(key, after.get(key), value)) {
+      refusals.push(`${key}: ${JSON.stringify(value)} -> ${JSON.stringify(after.get(key))} loosens the existing lock`);
+    }
+  }
+  if (!before.has('actionGuard.reviewedScripts') &&
+      Array.isArray(after.get('actionGuard.reviewedScripts')) &&
+      (after.get('actionGuard.reviewedScripts') as unknown[]).length > 0) {
+    refusals.push('actionGuard.reviewedScripts: candidate adds a new pin');
+  }
+  return refusals;
+}
+
+export function replacementCandidate(raw: Record<string, unknown>, opts: ProtectOptions, existing?: LockedPolicy): LockedPolicy {
+  const policy = buildLockedPolicy(raw, opts);
+  if (existing && !opts.fromConfig && existing.actionGuard?.reviewedScripts) {
+    policy.actionGuard!.reviewedScripts = existing.actionGuard.reviewedScripts.map((pin) => ({ ...pin }));
+  }
+  return policy;
+}
+
+type CapturedLock = { bytes: string; stat: NonNullable<ReturnType<ProtectedFsSeam['lstat']>> };
+type LockSnapshot =
+  | { status: 'absent' }
+  | ({ status: 'locked'; policy: LockedPolicy } & CapturedLock)
+  | ({ status: 'unverifiable'; reason: string } & CapturedLock);
+
+/** A v1 reader deliberately ignores these fields; replacement must not erase them. */
+function unknownLockFields(bytes: string): string[] {
+  const raw: unknown = JSON.parse(bytes);
+  if (!isBlock(raw)) return ['(top level)'];
+  const unknown: string[] = [];
+  const check = (value: unknown, prefix: string, allowed: readonly string[]) => {
+    if (!isBlock(value)) return;
+    for (const key of Object.keys(value)) {
+      if (!allowed.includes(key)) unknown.push(`${prefix}${key}`);
+    }
+  };
+  check(raw, '', ['version', 'actionGuard', 'defenceMode', 'memory']);
+  check(raw.actionGuard, 'actionGuard.', ['enabled', 'enforce', 'autoApprove', 'broker', 'reviewedScripts']);
+  if (isBlock(raw.actionGuard)) {
+    check(raw.actionGuard.broker, 'actionGuard.broker.', ['enabled']);
+    if (Array.isArray(raw.actionGuard.reviewedScripts)) {
+      raw.actionGuard.reviewedScripts.forEach((entry, index) =>
+        check(entry, `actionGuard.reviewedScripts[${index}].`, ['path', 'sha256', 'note', 'addedAt']));
+    }
+  }
+  check(raw.memory, 'memory.', ['hostContract', 'inject']);
+  if (isBlock(raw.memory)) {
+    check(raw.memory.hostContract, 'memory.hostContract.', ['posture']);
+    check(raw.memory.inject, 'memory.inject.', ['mode']);
+  }
+  return unknown;
+}
+
+function sameStat(a: ReturnType<ProtectedFsSeam['lstat']>, b: ReturnType<ProtectedFsSeam['lstat']>): boolean {
+  return a !== null && b !== null && a.dev !== undefined && a.ino !== undefined &&
+    a.ctimeMs !== undefined && a.mtimeMs !== undefined && b.dev !== undefined && b.ino !== undefined &&
+    b.ctimeMs !== undefined && b.mtimeMs !== undefined && JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** Classify with the runtime reader, then retain descriptor-bound bytes for the pre-rename check. */
+export function snapshotExistingLock(lockPath: string, seam: ProtectedFsSeam):
+  { ok: true; snapshot: LockSnapshot } | { ok: false; detail: string } {
+  const captured: { current: { bytes: string; stat: ReturnType<ProtectedFsSeam['lstat']> } | null } = { current: null };
+  // The seam callback mutates this between reads; keep TS from narrowing it to the initial null.
+  const currentRead = (): typeof captured.current => captured.current;
+  let identityFailed = false;
+  const capturingSeam: ProtectedFsSeam = {
+    ...seam,
+    readFile(path) {
+      if (path !== lockPath) return seam.readFile(path);
+      const beforePath = seam.lstat(path);
+      const read = seam.readFileWithIdentity?.(path) ?? null;
+      const afterPath = seam.lstat(path);
+      if (!read || !sameStat(beforePath, read.before) || !sameStat(read.before, read.after) ||
+          !sameStat(read.after, afterPath)) {
+        identityFailed = true;
+        return null;
+      }
+      captured.current = { bytes: read.contents, stat: afterPath };
+      return read.contents;
+    },
+  };
+  const state = readPolicyLock({ seam: capturingSeam, audit: false, warn: false });
+  if (state.path !== lockPath) return { ok: false, detail: 'the runtime resolved a different policy lock path.' };
+  if (identityFailed) return { ok: false, detail: 'existing lock identity could not be established during read.' };
+  if (state.status === 'absent') return { ok: true, snapshot: { status: 'absent' } };
+  if (state.status !== 'locked' && state.status !== 'unverifiable') {
+    return { ok: false, detail: 'existing lock state could not be established.' };
+  }
+  // Ownership failures are reported before the reader opens the file. We still
+  // need an O_NOFOLLOW descriptor read: privileged replacement may never treat
+  // an unobserved destination as absent or silently overwrite it.
+  if (state.status === 'unverifiable' && currentRead() === null) capturingSeam.readFile(lockPath);
+  if (identityFailed) return { ok: false, detail: 'existing lock identity could not be established during read.' };
+  const first = currentRead();
+  captured.current = null;
+  const again = readPolicyLock({ seam: capturingSeam, audit: false, warn: false });
+  if (again.status === 'unverifiable' && currentRead() === null) capturingSeam.readFile(lockPath);
+  const finalStat = seam.lstat(lockPath);
+  const second = currentRead();
+  if (identityFailed || first === null || second === null || again.status !== state.status || again.path !== lockPath ||
+      (state.status === 'unverifiable' && (again.status !== 'unverifiable' || again.reason !== state.reason)) ||
+      second.bytes !== first.bytes || !sameStat(finalStat, first.stat) || !sameStat(second.stat, first.stat)) {
+    return { ok: false, detail: 'existing lock changed or could not be read during verification.' };
+  }
+  if (finalStat === null) return { ok: false, detail: 'existing lock vanished during verification.' };
+  if (state.status === 'unverifiable') {
+    return { ok: true, snapshot: { status: 'unverifiable', reason: state.reason, bytes: first.bytes, stat: finalStat } };
+  }
+  const unknown = unknownLockFields(first.bytes);
+  if (unknown.length > 0) {
+    return { ok: false, detail: `existing verified v1 lock has unrecognized fields (${unknown.join(', ')}); replacement would erase them.` };
+  }
+  return { ok: true, snapshot: { status: 'locked', policy: state.policy, bytes: first.bytes, stat: finalStat } };
+}
+
+export function lockSnapshotUnchanged(lockPath: string, seam: ProtectedFsSeam, previous: LockSnapshot): boolean {
+  const current = snapshotExistingLock(lockPath, seam);
+  if (!current.ok || current.snapshot.status !== previous.status) return false;
+  if (current.snapshot.status === 'absent') return true;
+  if (previous.status === 'absent') return false;
+  return (current.snapshot.status !== 'unverifiable' ||
+      (previous.status === 'unverifiable' && current.snapshot.reason === previous.reason)) &&
+    current.snapshot.bytes === previous.bytes && sameStat(current.snapshot.stat, previous.stat);
 }
 
 export interface ProtectResult {
@@ -435,17 +580,66 @@ export function runProtect(args: string[] = []): ProtectResult {
       return { code: 1, lines };
     }
     raw = source.raw;
-    lines.push(`Pinning the values in ${sourcePath} verbatim (--from-config).`);
+    lines.push(`Candidate values from ${sourcePath} (--from-config).`);
   } else {
-    lines.push('Pinning the safe posture; config.json is not read (add --from-config to pin its values instead).');
+    lines.push('Candidate safe posture; config.json is not read (add --from-config to use its values instead).');
     if (opts.sourceConfig) lines.push('Note: --config is only read together with --from-config.');
   }
 
-  const policy = buildLockedPolicy(raw, opts);
+  // A real write needs privilege before lock or destination checks can return
+  // a competing refusal. Dry runs still compare the source and preflight the
+  // destination without requiring privilege.
+  if (!opts.dryRun) {
+    const euid = typeof process.geteuid === 'function' ? process.geteuid() : null;
+    if (euid !== 0) {
+      lines.push('Refusing to write the policy lock: this process is not privileged.');
+      lines.push(
+        "The lock only means anything because the agent's uid cannot write it. Writing it as uid " +
+        `${euid ?? 'unknown'} would produce a file that looks like a lock and protects nothing.`,
+      );
+      lines.push(`${PROTECT_HINT}. Add --dry-run to see exactly what it would write first.`);
+      return { code: 1, lines };
+    }
+  }
+
+  const existing = snapshotExistingLock(lockPath, seam);
+  if (!existing.ok) {
+    lines.push(`Refusing to replace the policy lock: ${existing.detail}`);
+    lines.push('Nothing was written.');
+    return { code: 1, lines };
+  }
+  // Only verified old pins enter the default candidate; no file is rehashed.
+  const policy = replacementCandidate(raw, opts, existing.snapshot.status === 'locked' ? existing.snapshot.policy : undefined);
+  const refusals = existing.snapshot.status === 'locked'
+    ? replacementRefusals(existing.snapshot.policy, policy)
+    : [];
   const body = `${JSON.stringify(policy, null, 2)}\n`;
   const pinned = PROTECTED_POLICY_KEYS_V1.filter((k) => coversKey(policy, k)).join(', ');
 
   lines.push(`Judging the destination as agent uid ${agent.uid} (${agent.via}).`);
+
+  if (existing.snapshot.status === 'locked') {
+    lines.push(`Existing verified lock: ${lockPath}`);
+    const before = policyLockCoverage({ status: 'locked', path: lockPath, policy: existing.snapshot.policy });
+    const after = policyLockCoverage({ status: 'locked', path: lockPath, policy });
+    for (const key of PROTECTED_POLICY_KEYS_V1) {
+      if (before.has(key) || after.has(key)) {
+        lines.push(`  ${key}: ${before.has(key) ? JSON.stringify(before.get(key)) : '(uncovered)'} -> ${after.has(key) ? JSON.stringify(after.get(key)) : '(omitted)'}`);
+      }
+    }
+  }
+  const preflight = preflightLockDestination(lockPath, seam);
+  if (refusals.length || !preflight.ok) {
+    if (opts.dryRun) {
+      lines.push(`Candidate policy for ${lockPath} (REFUSED):`);
+      lines.push(body.trimEnd());
+      lines.push(`Pinned keys: ${pinned}`);
+    }
+    for (const refusal of refusals) lines.push(`REFUSED ${refusal}`);
+    if (!preflight.ok) lines.push(`REFUSED destination ${dirname(lockPath)} would not verify for the agent: ${preflight.detail}`);
+    lines.push('Nothing was written.');
+    return { code: 1, lines };
+  }
 
   if (opts.dryRun) {
     lines.push(`Would write ${lockPath}, owned by uid 0, mode 0644, in a uid-0 0755 directory:`);
@@ -453,36 +647,12 @@ export function runProtect(args: string[] = []): ProtectResult {
     lines.push('');
     lines.push(`Pinned keys: ${pinned}`);
     lines.push('config.json may only TIGHTEN these; it can never loosen them.');
-    const preflight = preflightLockDestination(lockPath, seam);
-    lines.push(preflight.ok
-      ? `Destination ${dirname(lockPath)} verifies for the agent: ${preflight.detail}`
-      : `WARNING: the real write would be REFUSED — ${dirname(lockPath)} would not verify for the agent: ${preflight.detail}`);
+    lines.push(`Destination ${dirname(lockPath)} verifies for the agent: ${preflight.detail}`);
     return { code: 0, lines };
-  }
-
-  const euid = typeof process.geteuid === 'function' ? process.geteuid() : null;
-  if (euid !== 0) {
-    lines.push('Refusing to write the policy lock: this process is not privileged.');
-    lines.push(
-      "The lock only means anything because the agent's uid cannot write it. Writing it as uid " +
-      `${euid ?? 'unknown'} would produce a file that looks like a lock and protects nothing.`,
-    );
-    lines.push(`${PROTECT_HINT}. Add --dry-run to see exactly what it would write first.`);
-    return { code: 1, lines };
   }
 
   // #522 (GPT-6 round-6, item 2): the destination is judged BEFORE the first
   // mutation. Everything below this line creates, chmods, writes or renames.
-  const preflight = preflightLockDestination(lockPath, seam);
-  if (!preflight.ok) {
-    lines.push(`Refusing to write the policy lock: ${dirname(lockPath)} would not verify for the agent — ${preflight.detail}`);
-    lines.push(
-      'Nothing was written. A lock in a directory chain the agent uid could replace would protect nothing; ' +
-      'make that chain root-owned, not group- or other-writable, with no agent-owned symlinks, and re-run.',
-    );
-    return { code: 1, lines };
-  }
-
   try {
     if (!existsSync(protectedRoot)) mkdirSync(protectedRoot, { recursive: true, mode: 0o755 });
     chmodSync(protectedRoot, 0o755);
@@ -497,6 +667,12 @@ export function runProtect(args: string[] = []): ProtectResult {
   try {
     writeFileSync(tmp, body, { mode: 0o644 });
     chmodSync(tmp, 0o644);
+    if (!lockSnapshotUnchanged(lockPath, seam, existing.snapshot) || !preflightLockDestination(lockPath, seam).ok) {
+      rmSync(tmp, { force: true });
+      lines.push(`Refusing to replace ${lockPath}: the current lock or destination changed before replace.`);
+      lines.push('Nothing was written to the policy lock.');
+      return { code: 1, lines };
+    }
     renameSync(tmp, lockPath);
   } catch (err) {
     try { if (existsSync(tmp)) rmSync(tmp, { force: true }); } catch { /* best-effort */ }

@@ -220,11 +220,11 @@ describe('#501 runProtect refuses to write a lock it could rewrite', () => {
       defenceMode: 'balanced',
     }));
     const result = runProtect(['--dry-run']);
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1); // this fixture's agent-owned destination fails preflight
     const text = result.lines.join('\n');
-    expect(text).toMatch(/Would write/);
+    expect(text).toMatch(/Candidate policy.*REFUSED/);
     expect(text).toMatch(/"enabled": true/);
-    expect(text).toMatch(/only TIGHTEN/);
+    expect(text).toMatch(/REFUSED destination/);
     // #522 (GPT-6 round-6, item 3): the default run does not read the file, so
     // its autoApprove entry is not in the printed policy — and the operator is
     // told which switch WOULD pin it.
@@ -287,8 +287,10 @@ describe('#501 runProtect refuses to write a lock it could rewrite', () => {
     const prevSudoUid = process.env.SUDO_UID;
     delete process.env.SUDO_UID;
     try {
-      const text = runProtect(['--dry-run']).lines.join('\n');
-      expect(text).toMatch(/would be REFUSED/);
+      const result = runProtect(['--dry-run']);
+      const text = result.lines.join('\n');
+      expect(result.code).toBe(1);
+      expect(text).toMatch(/REFUSED destination/);
       expect(text).toMatch(/would not verify for the agent/);
       if (self !== null && self !== 0) {
         expect(text).toMatch(new RegExp(`Judging the destination as agent uid ${self} \\(this process's own uid`));
@@ -296,6 +298,16 @@ describe('#501 runProtect refuses to write a lock it could rewrite', () => {
     } finally {
       if (prevSudoUid !== undefined) process.env.SUDO_UID = prevSudoUid;
     }
+  });
+
+  it('#912 refuses an unsafe destination without treating its unverified pins as trusted', () => {
+    fs.writeFileSync(path.join(protectedRoot, POLICY_LOCK_FILENAME), JSON.stringify({
+      actionGuard: { reviewedScripts: [{ path: '/tmp/untrusted.sh', sha256: 'a'.repeat(64) }] },
+    }));
+    const result = runProtect(['--dry-run']);
+    expect(result.code).toBe(1);
+    expect(result.lines.join('\n')).toMatch(/REFUSED destination/);
+    expect(result.lines.join('\n')).not.toMatch(/untrusted\.sh/);
   });
 });
 
@@ -331,7 +343,7 @@ describe('#501 protect writes to the root the RUNTIME reads (review SHOULD-FIX-6
     // be pinned". Before the fix the two halves disagreed — the unprivileged
     // dry run printed the resolved root and the privileged write used
     // /etc/shieldcortex.
-    const wouldWrite = (lines: string[]) => lines.find((l) => l.startsWith('Would write')) ?? '';
+    const wouldWrite = (lines: string[]) => lines.find((l) => l.startsWith('Candidate policy for')) ?? '';
     const unprivileged = wouldWrite(runProtect(['--dry-run']).lines);
     const privileged = wouldWrite(asPrivileged(() => runProtect(['--dry-run']).lines));
     expect(privileged).toBe(unprivileged);
@@ -351,7 +363,7 @@ describe('#501 protect writes to the root the RUNTIME reads (review SHOULD-FIX-6
     const text = result.lines.join('\n');
     expect(text).toContain(path.dirname(lockPath));
     expect(text).not.toMatch(/\/etc\/shieldcortex/);
-    expect(text).toMatch(/Refusing to write the policy lock/);
+    expect(text).toMatch(/REFUSED destination/);
     expect(text).toMatch(/would not verify for the agent/);
     expect(text).toMatch(/Nothing was written/);
     expect(text).not.toMatch(/WROTE/);
@@ -400,7 +412,7 @@ describe('#522 protect judges the destination BEFORE touching the disk (GPT-6 ro
     process.env[PROTECTED_ROOT_ENV] = nested;
     const result = asPrivileged(() => runProtect([]));
     expect(result.code).toBe(1);
-    expect(result.lines.join('\n')).toMatch(/Refusing to write the policy lock/);
+    expect(result.lines.join('\n')).toMatch(/REFUSED destination/);
     expect(fs.existsSync(nested)).toBe(false);
     expect(fs.existsSync(path.join(protectedRoot, 'nested'))).toBe(false);
   });
@@ -757,7 +769,7 @@ describe('#522 r7 (Tars) — the agent uid is resolved, never guessed; --from-co
     it('SUDO_UID positive control: the invoking uid is the agent, and is named as such', () => {
       const text = withIdentity(true, String(SELF), () => runProtect(['--dry-run'])).lines.join('\n');
       expect(text).toMatch(new RegExp(`Judging the destination as agent uid ${SELF} \\(from SUDO_UID\\)`));
-      expect(text).toMatch(/would be REFUSED/);
+      expect(text).toMatch(/REFUSED destination/);
     });
 
     it('an unprivileged --dry-run with no SUDO_UID is judged as its own uid — the macOS CI case', () => {
@@ -766,7 +778,7 @@ describe('#522 r7 (Tars) — the agent uid is resolved, never guessed; --from-co
       // the SELF-owned root "verified". Judged as SELF it is refused everywhere.
       const text = withIdentity(false, undefined, () => runProtect(['--dry-run'])).lines.join('\n');
       expect(text).toMatch(new RegExp(`Judging the destination as agent uid ${SELF} \\(this process's own uid`));
-      expect(text).toMatch(/would be REFUSED/);
+      expect(text).toMatch(/REFUSED destination/);
       expect(text).toMatch(/would not verify for the agent/);
     });
 
@@ -829,8 +841,8 @@ describe('#522 r7 (Tars) — the agent uid is resolved, never guessed; --from-co
       fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ actionGuard: { enabled: false } }));
       const result = withIdentity(true, String(SELF), () => runProtect(['--dry-run', '--from-config']));
       const text = result.lines.join('\n');
-      expect(result.code).toBe(0);
-      expect(text).toMatch(/Pinning the values in .*config\.json verbatim \(--from-config\)/);
+      expect(result.code).toBe(1); // the candidate is shown, but the fixture root is agent-owned
+      expect(text).toMatch(/Candidate values from .*config\.json \(--from-config\)/);
       expect(text).toMatch(/"enabled": false/);
     });
 
