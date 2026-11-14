@@ -508,12 +508,18 @@ describe('#1077 r2 — a stdin redirect after an fd duplication is not unwrapped
  * "")`, so the guard read the script as able to start processes and followed
  * its data literals as child scripts: `LEASE_DIR` (a directory) came back
  * opaque and `LEDGER` was scanned as shell, where its ledger wording drove the
- * self-protection floor — with the script pinned, too. A `getattr` whose
- * attribute is one plain literal on a closed list of inert flag names
- * (`reason`) is no longer a sink; every other `getattr` still is (r3: fail
- * closed — any name can be a renamed executor).
+ * self-protection floor — with the script pinned, too.
+ *
+ * r4 (adjudication): NOT relieved. `getattr` stays a shell-out sink for every
+ * name, exactly as on main. Rounds r2 and r3 each relieved a literal flag name
+ * and each was bypassed: the guard cannot tell from the NAME that the VALUE is
+ * not callable (`K.reason = go`, `default=go`, `type=lambda s: go`,
+ * `set_defaults(reason=go)`, a non-literal default). The lease script with
+ * `getattr(args, "reason", "")` is a RESIDUAL — still held, pinned or not —
+ * and the route is to read the declared flag as `args.reason`, which is
+ * sink-free and allowed. A pin-gated fallback is a follow-up, not a name rule.
  */
-describe('#1077 (B) — a sink-free lease script is not walked for child scripts', () => {
+describe('#1077 (B) — the lease script: `args.reason` allows, `getattr(args, "reason", "")` is held', () => {
   const LEASE = '/ws/clawd/scripts/action_lease.py';
   const LEDGER_TEXT = [
     '# DECISIONS',
@@ -524,7 +530,8 @@ describe('#1077 (B) — a sink-free lease script is not walked for child scripts
     '- 2026-11-13 lease release: plugin-update',
     '',
   ].join('\n');
-  const leaseScript = (reasonRead = 'getattr(args, "reason", "")') => [
+  const GETATTR_READ = 'getattr(args, "reason", "")';
+  const leaseScript = (reasonRead = 'args.reason') => [
     '#!/usr/bin/env python3',
     '"""Workspace action lease: a cooperative lock for risky operations."""',
     'import argparse',
@@ -584,15 +591,27 @@ describe('#1077 (B) — a sink-free lease script is not walked for child scripts
     ['acquire', `python3 ${LEASE} acquire plugin-update --reason x`],
     ['release', `python3 ${LEASE} release plugin-update --reason x`],
   ])('%s', (_verb, command) => {
-    test('unpinned: allowed, no floor, not opaque', () => {
-      const src = leaseScript();
-      const v = bash(command, files(src));
+    test('RESIDUAL (adjudication), unpinned: the `getattr(args, "reason", "")` form is held', () => {
+      const v = bash(command, files(leaseScript(GETATTR_READ)));
+      expect(floorOf(v)).not.toEqual([]);
+      expect(v.decision).not.toBe('allow');
+    });
+
+    test('RESIDUAL (adjudication), pinned: the `getattr(args, "reason", "")` form is still held', () => {
+      const src = leaseScript(GETATTR_READ);
+      const v = bash(command, files(src), (p, s) => p === LEASE && s === src);
+      expect(floorOf(v)).not.toEqual([]);
+      expect(v.decision).not.toBe('allow');
+    });
+
+    test('route, unpinned: the `args.reason` form is allowed, no floor, not opaque', () => {
+      const v = bash(command, files(leaseScript()));
       expect(floorOf(v)).toEqual([]);
       expect(v.signals ?? []).not.toContain('opaque-script-invocation');
       expect(v.decision).toBe('allow');
     });
 
-    test('pinned: allowed, no floor, not opaque, review recorded', () => {
+    test('route, pinned: the `args.reason` form is allowed, no floor, not opaque, review recorded', () => {
       const src = leaseScript();
       const v = bash(command, files(src), (p, s) => p === LEASE && s === src);
       expect(floorOf(v)).toEqual([]);
@@ -606,13 +625,13 @@ describe('#1077 (B) — a sink-free lease script is not walked for child scripts
     ['getattr(ns, "reason")', 'getattr(ns, "reason")'],
     ["getattr(self.opts, 'reason', None)", "getattr(self.opts, 'reason', None)"],
     ['getattr( args , "reason" , "" )', 'getattr( args , "reason" , "" )'],
-  ])('literal-name getattr spellings are not sinks: %s', (_label, call) => {
-    // The path literal is followed only when the file can shell out; the
-    // computed-name control below proves the walk is what is being measured.
+  ])('r4: literal-name `reason` getattr spellings are sinks (child walked): %s', (_label, call) => {
+    // The path literal is followed only when the file can shell out, so a
+    // held verdict here proves the getattr armed the sink and the child was walked.
     const src = `import os\nCHILD = os.path.expanduser("/ws/child.sh")\nprint(${call})\n`;
     const v = bash('python3 /ws/g.py', { '/ws/g.py': src, '/ws/child.sh': "echo '{}' > ~/.shieldcortex/config.json\n" });
-    expect(v.signals ?? []).not.toContain('touch-guard-config');
-    expect(v.decision).toBe('allow');
+    expect(v.signals).toContain('touch-guard-config');
+    expect(v.decision).not.toBe('allow');
   });
 
   test('control for the spelling cases: a computed-name getattr in the same file walks the child', () => {
@@ -634,14 +653,14 @@ describe('#1077 (B) — a sink-free lease script is not walked for child scripts
       ['dunder name', 'import os\ngetattr(os, "__dict__")["sys" + "tem"]("/ws/child.sh")\n'],
       ['f-string name', 'import os\ngetattr(os, f"system")("/ws/child.sh")\n'],
       ['non-name object', 'import importlib\ngetattr(importlib.import_module("o" + "s"), "sy" "stem")("/ws/child.sh")\n'],
-      ['relieved getattr beside a real computed one', 'import os\ngetattr(args, "reason", "")\ngetattr(os, "sys" + "tem")("/ws/child.sh")\n'],
+      ['flag getattr beside a real computed one', 'import os\ngetattr(args, "reason", "")\ngetattr(os, "sys" + "tem")("/ws/child.sh")\n'],
     ])('%s', (_label, src) => {
       const v = bash('python3 /ws/s.py', { '/ws/s.py': src, ...CHILD });
       expect(v.signals).toContain('touch-guard-config');
       expect(v.decision).not.toBe('allow');
     });
 
-    test('an inline -c program keeps getattr as a sink (folded disk sources only)', () => {
+    test('an inline -c program keeps getattr as a sink', () => {
       const v = bash(`python3 -c 'import os; getattr(args, "reason"); x = os.path.expanduser("/ws/child.sh")'`, CHILD);
       expect(v.signals).toContain('touch-guard-config');
     });
@@ -671,7 +690,8 @@ describe('#1077 (B) — a sink-free lease script is not walked for child scripts
 });
 
 /**
- * #1077 r3 — getattr fails closed: only an inert flag name is relieved.
+ * #1077 r3 — getattr fails closed. (r4: no name is relieved at all — see the
+ * adjudication block below; these repros stay held.)
  *
  * Round 2 relieved a literal getattr name unless the name itself was a sink
  * spelling. Any attribute can be a renamed executor, so a renamed or aliased
@@ -680,7 +700,7 @@ describe('#1077 (B) — a sink-free lease script is not walked for child scripts
  * held on r1, allowed on r2, and is held again. Relief is now a closed list
  * (`reason`), never "not a known sink".
  */
-describe('#1077 r3 — getattr of any name but an inert flag stays a sink', () => {
+describe('#1077 r3 — getattr of any name stays a sink', () => {
   const SYS = ['sys', 'tem'].join('');
   const SUBP = ['sub', 'process'].join('');
   const CHILD = '/ws/child.sh';
@@ -732,11 +752,56 @@ describe('#1077 r3 — getattr of any name but an inert flag stays a sink', () =
     held(src, CHILDREN[0][1], 'touch-guard-config');
   });
 
-  test('control: the listed flag name is relieved (same file, `reason`)', () => {
+  test('r4: the formerly listed flag name `reason` is a sink too (same file, child walked)', () => {
     const src = `import os\nCHILD = os.path.expanduser("${CHILD}")\nprint(getattr(args, "reason", ""))\n`;
-    const v = bash('python3 /ws/g.py', { '/ws/g.py': src, [CHILD]: CHILDREN[0][1] });
-    expect(floorOf(v)).toEqual([]);
-    expect(v.decision).toBe('allow');
+    held(src, CHILDREN[0][1], 'touch-guard-config');
+  });
+});
+
+/**
+ * #1077 r4 (adjudication) — the allowlisted-getattr relief is deleted.
+ *
+ * r3 relieved `getattr(<name>, "reason", …)` for the sink test. A lexical
+ * attribute NAME says nothing about the runtime VALUE: the r3 blockers stored
+ * a renamed executor under `reason` (class attribute, SimpleNamespace) or
+ * passed one as the default, and the adjudication found the same family
+ * through argparse `default=`/`type=`/`set_defaults()`, `or`, assignment,
+ * nesting and `map()`. Each was held on main, allowed on r3, and executes the
+ * child (runtime-proven). With the relief gone they are held again; every
+ * shape is pinned against all three guard stores.
+ */
+describe('#1077 r4 — getattr is a sink again: the r3 blockers and their siblings are held', () => {
+  const SYS = ['sys', 'tem'].join('');
+  const CHILD = '/ws/child.sh';
+  const CHILDREN: Array<[string, string, string]> = [
+    ['guard config', "#!/bin/sh\necho '{}' > ~/.shieldcortex/config.json\n", 'touch-guard-config'],
+    ['approval store', "#!/bin/sh\necho '{}' > ~/.shieldcortex/approvals/approvals.json\n", 'touch-approval-store'],
+    ['OpenClaw config', "#!/bin/sh\necho '{}' > ~/.openclaw/openclaw.json\n", 'disable-action-guard'],
+  ];
+  const NAMED_CHILD = `import os; C = os.path.expanduser("${CHILD}")`;
+  const SHAPES: Array<[string, string[]]> = [
+    // astra r3 BLOCKER 1: the allowlisted name holds an arbitrary callable.
+    ['astra B1: class attribute K.reason = go', [`from os import ${SYS} as go`, 'class K:', '    pass', 'K.reason = go', `getattr(K, "reason")("${CHILD}")`]],
+    ['astra B1: SimpleNamespace(reason=go)', [`from os import ${SYS} as go`, 'import types', 'x = types.SimpleNamespace(reason=go)', `getattr(x, "reason")("${CHILD}")`]],
+    // grok r3 BLOCKER: a non-literal third argument was blanked with the keyword.
+    ['grok B: getattr(args, "reason", S)(child), `;` form', ['import argparse', `from os import ${SYS} as S; args = argparse.Namespace(); getattr(args, "reason", S)("${CHILD}")`]],
+    ['grok B: getattr(args, "reason", S)(child), separate statements', ['import argparse', `from os import ${SYS} as S`, 'args = argparse.Namespace()', `getattr(args, "reason", S)("${CHILD}")`]],
+    // adjudication siblings: same family, closed by the same deletion.
+    ['nested default', ['import argparse', `from os import ${SYS} as go; args = argparse.Namespace(); args.reason = go; getattr(args, "reason", getattr(args, "reason"))("${CHILD}")`]],
+    ['renamed default with args defined', ['import argparse', 'args = argparse.Namespace()', `from os import ${SYS} as go`, `print(getattr(args, "reason", go("${CHILD}")))`]],
+    ['or-composition', ['import argparse', `from os import ${SYS} as S; args = argparse.Namespace(); (getattr(args, "reason", "") or S)("${CHILD}")`]],
+    ['assign then call', [`from os import ${SYS} as go`, 'class K:', '    pass', 'K.reason = go', 'f = getattr(K, "reason", "")', `f("${CHILD}")`]],
+    ['argparse default=go', ['import argparse', `from os import ${SYS} as go`, 'ap = argparse.ArgumentParser()', 'ap.add_argument("--reason", default=go)', 'args = ap.parse_args([])', 'r = getattr(args, "reason", "")', `r("${CHILD}")`]],
+    ['argparse type=lambda s: go (the lease call verbatim)', ['import argparse', `from os import ${SYS} as go`, 'ap = argparse.ArgumentParser()', 'ap.add_argument("--reason", default="", type=lambda s: go)', 'args = ap.parse_args(["--reason", "x"])', NAMED_CHILD, 'reason = getattr(args, "reason", "")', 'reason(C)']],
+    ['set_defaults(reason=go) + map', ['import argparse', `from os import ${SYS} as go`, 'ap = argparse.ArgumentParser()', 'ap.set_defaults(reason=go)', 'args = ap.parse_args([])', NAMED_CHILD, 'list(map(getattr(args, "reason", ""), [C]))']],
+    ['map(getattr(K, "reason", ""), [C])', [`from os import ${SYS} as go`, 'class K:', '    pass', 'K.reason = go', NAMED_CHILD, 'list(map(getattr(K, "reason", ""), [C]))']],
+  ];
+  describe.each(CHILDREN)('child writes the %s', (_kind, childSrc, signal) => {
+    test.each(SHAPES)('%s', (_label, lines) => {
+      const v = bash('python3 /ws/g.py', { '/ws/g.py': `${lines.join('\n')}\n`, [CHILD]: childSrc });
+      expect(v.signals).toContain(signal);
+      expect(v.decision).not.toBe('allow');
+    });
   });
 });
 
