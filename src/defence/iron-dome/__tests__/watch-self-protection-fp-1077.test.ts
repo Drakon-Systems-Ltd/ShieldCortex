@@ -217,3 +217,71 @@ describe('#1077 case 1 — a workspace script that mentions guard concepts', () 
     });
   });
 });
+
+/**
+ * Review r1 (PR #1079) — every shape below was ALLOWED by the first cut and is
+ * held on the base. Each folds a disk script whose real code reaches
+ * `~/.shieldcortex/config.json` only through text the docstring blanker
+ * could hide. Each must stay non-allow with the floor signal.
+ */
+describe('#1077 r1 — docstring blanking fails closed', () => {
+  const WRITE = 'echo {} > ~/.shieldcortex/config.json';
+  const held = (src: string) => {
+    const v = bash('python3 /ws/r1.py', { '/ws/r1.py': src });
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('touch-guard-config');
+  };
+
+  describe('tokenised: a closing delimiter is never read as an opening one', () => {
+    test.each([
+      ['code between two literals (Astra repro)',
+        'import os\npad = """\n"""\nopen(os.path.expanduser("~/.shieldcortex/config.json"), "w").write("{}")\n"""\n"""\n'],
+      ['statements chained after a closing delimiter',
+        `import os\nnote = '''\n'''; ${SHELL_OUT}("${WRITE}"); '''\n'''\n`],
+      ['backslash-continued implicit concatenation',
+        `import os\ncmd = """x""" \\\n"""\n${WRITE}\n"""\n${SHELL_OUT}(cmd)\n`],
+      ['parenthesised implicit concatenation',
+        `import os\ncmd = (\n"""\n${WRITE}\n"""\n)\n${SHELL_OUT}(cmd)\n`],
+      ['adjacent literals on one line',
+        `import os\ncmd = ""\n"""a""" """\n${WRITE}\n"""\n${SHELL_OUT}(cmd)\n`],
+      ['real open() right after one genuine docstring',
+        '"""Helper."""\nimport os\nopen(os.path.expanduser("~/.shieldcortex/config.json"), "w").write("{}")\n'],
+      ['f-string field reusing its quote (PEP 701) desyncs nothing',
+        `import os\nx = f"{"a"}"\n"""\n${WRITE}\n"""\n${SHELL_OUT}(x)\n`],
+    ])('%s', (_label, src) => held(src));
+  });
+
+  describe('no in-memory readback channel (Grok repros and their siblings)', () => {
+    const doc = `"""${WRITE}"""\n`;
+    test.each([
+      ['globals() with a split dunder', `${doc}import os\n${SHELL_OUT}(globals()['__' + 'doc__'])\n`],
+      ['split __file__ read back from disk', `${doc}import os, pathlib\nsrc = pathlib.Path(globals()['__' + 'file__']).read_text()\n${SHELL_OUT}(src.split('"' * 3)[1])\n`],
+      ['getattr(inspect, "get" + "doc")', `${doc}import inspect, os, sys\n${SHELL_OUT}(getattr(inspect, 'get' + 'doc')(sys.modules[__name__]))\n`],
+      ['function docstring via getattr', `import os\ndef f():\n    """${WRITE}"""\n${SHELL_OUT}(getattr(f, '__' + 'doc__'))\n`],
+      ['inspect.getsourcelines', `${doc}import inspect, os, sys\nlines, _ = inspect.getsourcelines(sys.modules[__name__])\n${SHELL_OUT}(lines[0].strip('"'))\n`],
+      ['vars() with an underscore-built name', `${doc}import os\n${SHELL_OUT}(vars()['_' * 2 + 'doc' + '_' * 2])\n`],
+      ['str.format attribute lookup', `import os\ndef f():\n    """${WRITE}"""\n${SHELL_OUT}(('{0.' + '_' * 2 + 'doc' + '_' * 2 + '}').format(f))\n`],
+      ['frame code-object constants', `${doc}import os, sys\n${SHELL_OUT}(sys._getframe().f_code.co_consts[0])\n`],
+      ['functools.wraps onto a namespace', `import os, functools\ndef f():\n    """${WRITE}"""\n@functools.wraps(f)\ndef g(): pass\n${SHELL_OUT}(repr(g))\n`],
+      ['third-party docstring reader', `${doc}import click, os\n${SHELL_OUT}(click.get_current_context().get_help())\n`],
+      ['own path from argv', `${doc}import os, sys\n${SHELL_OUT}(open(sys.argv[0]).read().split('"' * 3)[1])\n`],
+      ['own path as a literal', `${doc}import os\n${SHELL_OUT}(open("/ws/r1.py").read().split('"' * 3)[1])\n`],
+      ['stdin (cat self | python3 self)', `${doc}import os, sys\n${SHELL_OUT}(sys.stdin.read().split('"' * 3)[1])\n`],
+      // Astra nit: `description=__doc__` relieves the stdlib parser only.
+      ['description= on a non-argparse callable', `${doc}import os\nclass R:\n    def __init__(self, description=None):\n        ${SHELL_OUT}(description)\nR(description=__doc__)\n`],
+      ['a script-defined ArgumentParser', `${doc}import os\nclass ArgumentParser:\n    def __init__(self, description=None):\n        ${SHELL_OUT}(description)\nArgumentParser(description=__doc__)\n`],
+      ['argparse.ArgumentParser patched', `${doc}import argparse, os\nclass P:\n    def __init__(self, description=None):\n        ${SHELL_OUT}(description)\nargparse.ArgumentParser = P\nargparse.ArgumentParser(description=__doc__)\n`],
+      ['argparse description read back', `${doc}import argparse, os\nap = argparse.ArgumentParser(description=__doc__)\n${SHELL_OUT}(ap.description)\n`],
+      ['argparse help formatted back', `${doc}import argparse, os\nap = argparse.ArgumentParser(description=__doc__)\n${SHELL_OUT}(ap.format_help())\n`],
+      ['argparse formatter hook', `${doc}import argparse, os\nclass F(argparse.RawTextHelpFormatter):\n    def _fill_text(self, text, width, indent):\n        ${SHELL_OUT}(text)\n        return text\nap = argparse.ArgumentParser(description=__doc__, formatter_class=F)\nap.parse_args(["-h"])\n`],
+      ['stdout captured around --help', `${doc}import argparse, contextlib, io, os\nap = argparse.ArgumentParser(description=__doc__)\nbuf = io.StringIO()\nwith contextlib.redirect_stdout(buf):\n    try:\n        ap.parse_args(["-h"])\n    except SystemExit:\n        pass\n${SHELL_OUT}(buf.getvalue())\n`],
+    ])('%s', (_label, src) => held(src));
+  });
+
+  test('control — the #1077 shape (stdlib argparse, no readback) is still relieved', () => {
+    const src = `"""Lease helper.\n\nNever touches ~/.shieldcortex/config.json.\n"""\nimport argparse, subprocess, sys\n\ndef main():\n    ap = argparse.ArgumentParser(description=__doc__)\n    ap.add_argument("scope", help="lease scope")\n    args = ap.parse_args()\n    subprocess.run(["git", "status"])\n    return 0\n\nif __name__ == "__main__":\n    sys.exit(main())\n`;
+    const v = bash('python3 /ws/r1.py x', { '/ws/r1.py': src });
+    expect(floorOf(v)).toEqual([]);
+    expect(v.decision).toBe('allow');
+  });
+});

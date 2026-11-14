@@ -3396,43 +3396,180 @@ const BLANKING_PAD = ' '.repeat(512);
  */
 /**
  * #1077 case 1: blank the DOCSTRINGS of a Python source folded from disk, the
- * same length-preserving way #532 blanks its comments. A docstring is a
- * triple-quoted literal standing alone as a statement — it starts a line, the
- * previous code character is not one that would make it an operand (`(`, `,`,
- * `=`, an operator …), and nothing but whitespace follows its closing quotes.
- * Python evaluates it and discards it unless the program reads it back, so a
- * usage block naming `~/.shieldcortex/config.json` or `python3 scripts/x.py`
- * is prose, not access and not an invocation.
+ * same length-preserving way #532 blanks its comments, so a usage block naming
+ * `~/.shieldcortex/config.json` or `python3 scripts/x.py` is prose, not access
+ * and not an invocation. Two gates, both fail closed: on any doubt nothing is
+ * blanked and the source keeps its whole pre-#1077 scan surface.
  *
- * Fail closed: when the source can read its own doc text back — any
- * `__doc__` other than an argparse `description=`/`epilog=`/`usage=` keyword,
- * or `getdoc`/`getsource`/`getcomments`/`pydoc`/`linecache`/`__file__`/
- * `__loader__` — nothing is blanked, so `os.system(__doc__)` stays scanned.
+ * 1. TOKENISED, not pattern-matched (review r1: a line-anchored regex took a
+ *    CLOSING delimiter for an opening one and blanked the real `open()` that
+ *    sat between two literals). `pythonStandaloneDocstrings` walks the source
+ *    the way Python's tokenizer does — string prefixes, single and triple
+ *    quotes, escapes, bracket depth, backslash continuations — and accepts a
+ *    triple-quoted literal only when it is a whole logical line on its own:
+ *    bracket depth 0, nothing but indentation before its opening quotes on a
+ *    line that starts a new logical line, nothing but spaces after its closing
+ *    quotes up to the newline. Such a literal cannot be an operand, an argument
+ *    or one half of an implicit concatenation. Anything the walk cannot read
+ *    with certainty aborts the whole pass: an unterminated literal, an unknown
+ *    prefix, a stray backslash, an unbalanced bracket, or an f-/t-string whose
+ *    replacement field holds a quote, backslash or `#` (PEP 701 lets a field
+ *    reuse the outer quote, where a simple walk and Python disagree).
+ *
+ * 2. NO IN-MEMORY READBACK in the code that remains. Python keeps a docstring
+ *    (`__doc__`, the code object's constants) and a sink can reach it without
+ *    ever spelling it (review r1: `globals()['__'+'doc__']`,
+ *    `getattr(inspect, 'get'+'doc')`). So this is not a denylist of readback
+ *    spellings: blanking is refused when the code — everything but the
+ *    docstrings, string literals included — holds ANY `__` other than
+ *    `__name__`/`__main__`/`__init__`/`__future__` and the one argparse
+ *    `ArgumentParser(description=__doc__)` keyword; ANY dynamic name or
+ *    attribute lookup (`getattr`, `globals`, `locals`, `vars`, `dir`, `eval`,
+ *    `exec`, builtin `compile`, `format`, `attrgetter` …); frame or code-object
+ *    access; a way to read the parser's help text back or capture stdout to
+ *    do so; a self-path (`argv`, `/proc/`, a `.py` literal) or stdin; or an
+ *    import outside a small stdlib set that exposes no docstring (`inspect`,
+ *    `pydoc`, `doctest`, `functools`, `types`, `io`, every third-party package
+ *    — `click`, `docopt`, `fire` read docstrings themselves — are all out).
+ *
+ * RESIDUAL, the class #532 already carries for comments: a script that opens
+ * its OWN file through a path this gate cannot see (a split literal of its own
+ * name, a glob) reads a docstring back from disk exactly as it could read a
+ * comment there. #1077 adds no reach #532 does not already have.
+ *
  * A docstring holding a URL (`://`) is never blanked: egress evidence keeps
- * its pre-#1077 surface. Disk bytes only; inline `-c` programs are never passed here.
+ * its pre-#1077 surface. Disk bytes only; inline `-c` programs are never
+ * passed here.
  */
-const PY_DOC_READBACK_RE = /\b(?:getdoc|getsource|getcomments|pydoc|linecache|__file__|__loader__)\b/;
-const PY_DOC_ARGPARSE_RE = /\b(?:description|epilog|usage)[ \t]*=[ \t]*__doc__\b/g;
-const PY_DOCSTRING_RE = /^[ \t]*[rRuU]?("""|''')[\s\S]*?\1[ \t]*$/gm;
+const PY_DOC_SAFE_IMPORTS = new Set([
+  '__future__', 'argparse', 'base64', 'collections', 'configparser', 'copy', 'csv', 'dataclasses',
+  'datetime', 'enum', 'errno', 'fnmatch', 'getpass', 'glob', 'gzip', 'hashlib', 'http', 'itertools',
+  'json', 'logging', 'math', 'os', 'pathlib', 'platform', 'queue', 'random', 're', 'shlex', 'shutil',
+  'signal', 'socket', 'sqlite3', 'stat', 'struct', 'subprocess', 'sys', 'tarfile', 'tempfile',
+  'textwrap', 'threading', 'time', 'typing', 'urllib', 'uuid', 'zipfile', 'zlib',
+]);
+const PY_DOC_ALLOWED_DUNDER_RE = /\b__(?:name|main|init|future)__\b/g;
+// Only the stdlib parser, spelled `argparse.ArgumentParser(`, and only while
+// `argparse` is never rebound or patched (`pyArgparseIsStdlib`): a class of the
+// script's own named `ArgumentParser` would receive the doc text as an argument.
+const PY_DOC_ARGPARSE_RE = /(\bargparse[ \t]*\.[ \t]*ArgumentParser[ \t]*\([^()]*?\bdescription[ \t]*=[ \t]*)__doc__\b/g;
+function pyArgparseIsStdlib(code: string): boolean {
+  if (/\bargparse[ \t]*\.[ \t]*\w+[ \t]*=[^=]/.test(code)) return false;          // patched attribute
+  for (const m of code.matchAll(/\bargparse\b/g)) {
+    const at = m.index ?? 0;
+    if (/^[ \t]*\./.test(code.slice(at + 8, at + 12))) continue;                  // argparse.<attr>
+    if (/\b(?:import|from)[ \t]+$/.test(code.slice(Math.max(0, at - 12), at))) continue;
+    return false;                                                             // any other binding or use
+  }
+  return true;
+}
+const PY_DOC_READBACK_RE = new RegExp([
+  '__',
+  String.raw`\b(?:getattr|setattr|delattr|attrgetter|methodcaller|globals|locals|vars|eval|exec|execfile|format|format_map|breakpoint)\b`,
+  String.raw`(?<![.\w])(?:compile|dir|help|input)[ \t]*\(`,
+  String.raw`\b(?:inspect|pydoc|doctest|unittest|linecache|tokenize|traceback|ast|dis|gc|ctypes|pickle|marshal|importlib|modules|_getframe|_current_frames|currentframe|exc_info|excepthook|settrace|setprofile|addaudithook|monitoring|wraps|update_wrapper)\b`,
+  String.raw`\b(?:f|co|tb|gi|cr|ag)_[a-z]`,
+  String.raw`\b(?:epilog|usage|formatter_class|\w*Formatter|add_text|_add_item|_join_parts|_fill_text|_format_text|_split_lines|_get_formatter|_print_message|format_help|format_usage|print_help|print_usage)\b`,
+  String.raw`\.[ \t]*(?:description|epilog|usage)\b`,
+  String.raw`\b(?:redirect_stdout|redirect_stderr|dup|dup2|fdopen|openpty|stdin|orig_argv|argv)\b|\.[ \t]*(?:stdout|stderr|write)[ \t]*=[^=]|\b(?:close|read)[ \t]*\([ \t]*[0-2][ \t]*[,)]`,
+  String.raw`\/proc\/|\.pyw?\b`,
+].join('|'));
+
+/** Every top-level module the code imports is in `PY_DOC_SAFE_IMPORTS`. */
+function pyImportsAreDocSafe(code: string): boolean {
+  const FROM_RE = /\bfrom[ \t]+([\w.]+)[ \t]+import\b(?:[ \t]*\([^)]*\)|[^\n;]*)/g;
+  for (const m of code.matchAll(FROM_RE)) if (!PY_DOC_SAFE_IMPORTS.has(m[1].split('.')[0])) return false;
+  for (const m of code.replace(FROM_RE, ' ').matchAll(/\bimport\b([^\n;]*)/g)) {
+    for (const part of m[1].split(',')) {
+      const name = part.trim().split(/\s+/)[0] ?? '';
+      if (!PY_DOC_SAFE_IMPORTS.has(name.split('.')[0])) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * `[start, end)` of each triple-quoted literal that is a whole logical line by
+ * itself (see `blankPythonDocstrings`); `null` when the walk is not certain it
+ * reads the source as Python would.
+ */
+function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null {
+  const found: Array<[number, number]> = [];
+  const n = src.length;
+  let depth = 0;
+  let lineStart = true;           // only indentation since a logical-line break at depth 0
+  let i = 0;
+  while (i < n) {
+    const c = src[i];
+    if (c === '\n') { if (depth === 0) lineStart = true; i++; continue; }
+    if (c === ' ' || c === '\t' || c === '\r' || c === '\f') { i++; continue; }
+    if (c === '#') { while (i < n && src[i] !== '\n') i++; continue; }
+    if (c === '\\') {
+      const skip = src[i + 1] === '\n' ? 2 : src[i + 1] === '\r' && src[i + 2] === '\n' ? 3 : 0;
+      if (!skip) return null;
+      i += skip; lineStart = false; continue;
+    }
+    if (c === '(' || c === '[' || c === '{') { depth++; lineStart = false; i++; continue; }
+    if (c === ')' || c === ']' || c === '}') { if (--depth < 0) return null; lineStart = false; i++; continue; }
+    let j = i;
+    while (j < n && /\w/.test(src[j])) j++;
+    const q = src[j];
+    if (q !== '"' && q !== "'") { lineStart = false; i = j > i ? j : i + 1; continue; }
+    const prefix = src.slice(i, j).toLowerCase();
+    if (prefix && !/^[rubft]{1,2}$/.test(prefix)) return null;
+    const triple = src.startsWith(q + q + q, j);
+    const delim = triple ? q + q + q : q;
+    const fmt = /[ft]/.test(prefix);
+    let k = j + delim.length;
+    let field = 0;
+    let close = -1;
+    while (k < n) {
+      const ch = src[k];
+      if (fmt && field > 0) {
+        if (ch === '"' || ch === "'" || ch === '\\' || ch === '#') return null;
+        if (ch === '{') field++;
+        else if (ch === '}') field--;
+        k++;
+        continue;
+      }
+      if (ch === '\\') { k += 2; continue; }
+      if (!triple && ch === '\n') return null;
+      if (fmt && ch === '{') { if (src[k + 1] === '{') { k += 2; continue; } field = 1; k++; continue; }
+      if (src.startsWith(delim, k)) { close = k; break; }
+      k++;
+    }
+    if (close < 0) return null;
+    const end = close + delim.length;
+    if (triple && lineStart && depth === 0 && (prefix === '' || prefix === 'r' || prefix === 'u')) {
+      let e = end;
+      while (e < n && (src[e] === ' ' || src[e] === '\t' || src[e] === '\r')) e++;
+      if (e >= n || src[e] === '\n') found.push([i, end]);
+    }
+    lineStart = false;
+    i = end;
+  }
+  return depth === 0 ? found : null;
+}
+
 function blankPythonDocstrings(src: string, lang: ScriptLang): string {
   if (lang !== 'python' || !src || !(src.includes('"""') || src.includes("'''"))) return src;
-  if (PY_DOC_READBACK_RE.test(src)) return src;
-  if (src.replace(PY_DOC_ARGPARSE_RE, '').includes('__doc__')) return src;
-  let out = '';
+  const docs = pythonStandaloneDocstrings(src);
+  if (!docs || docs.length === 0) return src;
+  let code = '';
   let cursor = 0;
-  for (const m of src.matchAll(PY_DOCSTRING_RE)) {
-    const lo = m.index ?? 0;
-    const hi = lo + m[0].length;
-    if (lo < cursor) continue;
-    const prev = src.slice(0, lo).replace(/\s+$/, '').slice(-1);
-    if (prev && /[([{,=+\-*/%\\|&<>!~^@.]/.test(prev)) continue;   // an operand, not a statement
-    // Egress evidence is not the floor: a docstring naming a network
-    // destination keeps contributing it exactly as before #1077 (the #920
-    // secret-egress fixtures rely on it). Only guard-path prose is relieved.
-    if (m[0].includes('://')) continue;
-    out += src.slice(cursor, lo) + blankedRun(src, lo, hi);
-    cursor = hi;
-  }
+  for (const [lo, hi] of docs) { code += src.slice(cursor, lo) + blankedRun(src, lo, hi); cursor = hi; }
+  code += src.slice(cursor);
+  const exempt = pyArgparseIsStdlib(code) ? code.replace(PY_DOC_ARGPARSE_RE, '$1None') : code;
+  const gated = exempt.replace(PY_DOC_ALLOWED_DUNDER_RE, ' ');
+  if (PY_DOC_READBACK_RE.test(gated) || !pyImportsAreDocSafe(gated)) return src;
+  // Egress evidence is not the floor: a docstring naming a network
+  // destination keeps contributing it exactly as before #1077 (the #920
+  // secret-egress fixtures rely on it). Only guard-path prose is relieved.
+  const blank = docs.filter(([lo, hi]) => !src.slice(lo, hi).includes('://'));
+  if (blank.length === docs.length) return code;
+  let out = '';
+  cursor = 0;
+  for (const [lo, hi] of blank) { out += src.slice(cursor, lo) + blankedRun(src, lo, hi); cursor = hi; }
   return cursor === 0 ? src : out + src.slice(cursor);
 }
 
