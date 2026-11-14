@@ -45,6 +45,7 @@ import {
   type DefenceMode,
 } from './config.js';
 import { parseResignArgs, type ResignArgs } from './resign-args.js';
+import { formatUnknownConfigOptions } from './config-args.js';
 import type { RankerEngine } from '../memory/types.js';
 
 const VALID_RANKER_ENGINES: RankerEngine[] = ['rrf', 'legacy'];
@@ -89,6 +90,15 @@ export function handleCloudConfig(args: string[]): void | Promise<void> {
 }
 
 function handleCloudConfigFlags(args: string[]): void {
+  // #1038: a typo must not print the help wall and exit 0. Refuse before any
+  // read or write, including --cloud-status, so a bad flag cannot half-apply
+  // or print a key prefix.
+  const unknown = formatUnknownConfigOptions(args);
+  if (unknown) {
+    for (const line of unknown) console.error(line);
+    process.exit(2);
+  }
+
   if (args.includes('--cloud-status')) {
     const config = getCloudConfig();
     const mode = getDefenceMode();
