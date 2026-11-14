@@ -3408,7 +3408,8 @@ const BLANKING_PAD = ' '.repeat(512);
  * `__doc__` other than an argparse `description=`/`epilog=`/`usage=` keyword,
  * or `getdoc`/`getsource`/`getcomments`/`pydoc`/`linecache`/`__file__`/
  * `__loader__` — nothing is blanked, so `os.system(__doc__)` stays scanned.
- * Disk bytes only; inline `-c` programs are never passed here.
+ * A docstring holding a URL (`://`) is never blanked: egress evidence keeps
+ * its pre-#1077 surface. Disk bytes only; inline `-c` programs are never passed here.
  */
 const PY_DOC_READBACK_RE = /\b(?:getdoc|getsource|getcomments|pydoc|linecache|__file__|__loader__)\b/;
 const PY_DOC_ARGPARSE_RE = /\b(?:description|epilog|usage)[ \t]*=[ \t]*__doc__\b/g;
@@ -3425,6 +3426,10 @@ function blankPythonDocstrings(src: string, lang: ScriptLang): string {
     if (lo < cursor) continue;
     const prev = src.slice(0, lo).replace(/\s+$/, '').slice(-1);
     if (prev && /[([{,=+\-*/%\\|&<>!~^@.]/.test(prev)) continue;   // an operand, not a statement
+    // Egress evidence is not the floor: a docstring naming a network
+    // destination keeps contributing it exactly as before #1077 (the #920
+    // secret-egress fixtures rely on it). Only guard-path prose is relieved.
+    if (m[0].includes('://')) continue;
     out += src.slice(cursor, lo) + blankedRun(src, lo, hi);
     cursor = hi;
   }

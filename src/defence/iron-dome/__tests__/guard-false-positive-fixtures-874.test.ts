@@ -115,7 +115,8 @@ describe('#874 (b) read-only inspection of the ShieldCortex config dir', () => {
     '/tmp/probe/cat ~/.shieldcortex/config.json',
     './cat ~/.shieldcortex/config.json',
     'cat ~/.shieldcortex/config.json &',
-    'cat ~/.shieldcortex/config.json 2>/dev/null',
+    // `cat … 2>/dev/null` moved: a /dev/null discard writes no file, so it is
+    // relieved as a read since #1077 (watch-self-protection-fp-1077.test.ts).
     'cat ~/.shieldcortex/config.json\\',
     'grep --color=always enabled ~/.shieldcortex/config.json',
     'cat ~/.shieldcortex/config.json; (cat ~/.shieldcortex/config.json)',
