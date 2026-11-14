@@ -540,10 +540,30 @@ function readCache(opts: VetOptions): CacheFile {
   return { v: 1, entries: {} };
 }
 
-function writeCache(opts: VetOptions, file: CacheFile, nowMs: number, ttlMs: number): void {
+/**
+ * What one `vetPackages` call changed in the cache: a record to set, or `null`
+ * for a record a fresh clean answer evicted. A call writes these, not its
+ * start-of-call copy of the file: other checks run at the same time (the
+ * agent-config watch checks every changed file together) and each has records
+ * of its own to keep.
+ */
+type CacheChanges = Map<string, CacheEntry | null>;
+
+/**
+ * Re-read the cache file, apply this call's changes on top, drop expired
+ * records, write. All of it is synchronous, with no `await` between the read
+ * and the rename, so two checks in one process cannot interleave here and the
+ * second writer always starts from what the first one wrote.
+ */
+function writeCache(opts: VetOptions, changes: CacheChanges, nowMs: number, ttlMs: number): void {
   try {
+    const merged = readCache(opts).entries;
+    for (const [k, e] of changes) {
+      if (e) merged[k] = e;
+      else delete merged[k];
+    }
     const entries: Record<string, CacheEntry> = {};
-    for (const [k, e] of Object.entries(file.entries)) if (nowMs - e.at < ttlMs) entries[k] = e;
+    for (const [k, e] of Object.entries(merged)) if (nowMs - e.at < ttlMs) entries[k] = e;
     const dir = stateDir(opts);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const tmp = path.join(dir, `.package-vetting-cache.${process.pid}.${Date.now()}.tmp`);
@@ -994,7 +1014,7 @@ interface OneResult {
 
 async function vetOne(ref: PackageRef, ctx: {
   fetchImpl: FetchLike; regSignal: AbortSignal; osvSignal: AbortSignal; minAgeDays: number; nowMs: number;
-  cache: CacheFile; dirty: { v: boolean };
+  cache: CacheFile; changes: CacheChanges;
 }): Promise<OneResult> {
   const { fetchImpl, regSignal, osvSignal, minAgeDays, nowMs, cache } = ctx;
   if (ref.customIndex) {
@@ -1009,7 +1029,7 @@ async function vetOne(ref: PackageRef, ctx: {
   try {
     // A clean answer is never served from the cache: always ask OSV for this version.
     const osvIds = await queryOsv(ref, facts.version, fetchImpl, osvSignal);
-    rememberMalicious(cache, ctx.dirty, ref, facts, osvIds, nowMs);
+    rememberMalicious(cache, ctx.changes, ref, facts, osvIds, nowMs);
     const base = {
       ref, status: 'checked' as const, version: facts.version, publishedAt: facts.publishedAt, osvIds,
       malicious: osvIds.filter((id) => id.startsWith('MAL-')), hooks: facts.hooks, sdistOnly: facts.sdistOnly,
@@ -1020,15 +1040,19 @@ async function vetOne(ref: PackageRef, ctx: {
   }
 }
 
-/** Only `MAL-` hits are cached (for the offline block). A fresh clean answer evicts a stale hit for the same version. */
-function rememberMalicious(cache: CacheFile, dirty: { v: boolean }, ref: PackageRef, facts: Pick<Facts, 'version' | 'publishedAt' | 'hooks' | 'sdistOnly'>, osvIds: string[], nowMs: number): void {
+/**
+ * Only `MAL-` hits are cached (for the offline block). A fresh clean answer evicts a stale hit for the same version.
+ * Both are applied to this call's copy and recorded in `changes`, which is what gets written.
+ */
+function rememberMalicious(cache: CacheFile, changes: CacheChanges, ref: PackageRef, facts: Pick<Facts, 'version' | 'publishedAt' | 'hooks' | 'sdistOnly'>, osvIds: string[], nowMs: number): void {
   const key = cacheKey(ref.ecosystem, ref.name, facts.version);
   if (osvIds.some((id) => id.startsWith('MAL-'))) {
-    cache.entries[key] = { at: nowMs, ecosystem: ref.ecosystem, name: ref.name, version: facts.version, publishedAt: facts.publishedAt, osvIds, hooks: facts.hooks, sdistOnly: facts.sdistOnly };
-    dirty.v = true;
+    const entry: CacheEntry = { at: nowMs, ecosystem: ref.ecosystem, name: ref.name, version: facts.version, publishedAt: facts.publishedAt, osvIds, hooks: facts.hooks, sdistOnly: facts.sdistOnly };
+    cache.entries[key] = entry;
+    changes.set(key, entry);
   } else if (key in cache.entries) {
     delete cache.entries[key];
-    dirty.v = true;
+    changes.set(key, null);
   }
 }
 
@@ -1080,14 +1104,14 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
   regTimer.unref?.();
   osvTimer.unref?.();
   const cache = readCache(opts);
-  const dirty = { v: false };
+  const changes: CacheChanges = new Map();
   const packages: PackageVet[] = [];
   try {
     const head = unique.slice(0, MAX_PACKAGES_PER_COMMAND);
     // The malicious-package batch covers EVERY package (custom-index installs excepted: public records do not describe them).
     const batchRefs = unique.filter((r) => !r.customIndex);
     const batchP = queryOsvBatch(batchRefs.map((ref) => ({ ref, version: pinnedVersion(ref) })), fetchImpl, osvCtl.signal);
-    const headP = Promise.all(head.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, dirty })
+    const headP = Promise.all(head.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes })
       .catch((): OneResult => ({ vet: uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs), exact: false }))));
     const [batch, results] = await Promise.all([batchP, headP]);
     const batchAnswer = (ref: PackageRef): string[] | null => {
@@ -1099,7 +1123,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
     const extraRefs = unique.slice(head.length)
       .filter((r) => !r.customIndex && !pinnedVersion(r) && batchFor(r).length > 0)
       .slice(0, MAX_EXTRA_LOOKUPS);
-    const extraResults = await Promise.all(extraRefs.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, dirty })
+    const extraResults = await Promise.all(extraRefs.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes })
       .catch((): OneResult => ({ vet: uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs), exact: false }))));
     const extraByRef = new Map(extraRefs.map((ref, i) => [ref, extraResults[i]] as const));
     unique.forEach((ref, idx) => {
@@ -1117,7 +1141,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
           : r.vet;
         vet = withMalicious(base, malIds, minAgeDays, nowMs, false, !pinned && malIds.length > 0);
         if (malIds.length && pinned && !r.exact) {
-          rememberMalicious(cache, dirty, ref, { version: pinned, hooks: [], sdistOnly: false }, malIds, nowMs);
+          rememberMalicious(cache, changes, ref, { version: pinned, hooks: [], sdistOnly: false }, malIds, nowMs);
         }
       } else {
         const reason = batchAnswer(ref) !== null || ref.customIndex
@@ -1125,7 +1149,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
           : `more than ${MAX_PACKAGES_PER_COMMAND} packages in one command, and the malicious-package check was unavailable`;
         const hits = batchFor(ref);
         vet = withMalicious(uncheckedVet(ref, reason, minAgeDays, nowMs), hits, minAgeDays, nowMs, false, !pinned && hits.length > 0);
-        if (pinned && vet.malicious.length) rememberMalicious(cache, dirty, ref, { version: pinned, hooks: [], sdistOnly: false }, vet.malicious, nowMs);
+        if (pinned && vet.malicious.length) rememberMalicious(cache, changes, ref, { version: pinned, hooks: [], sdistOnly: false }, vet.malicious, nowMs);
       }
       // Offline: a fresh cached MAL- record for this package still blocks.
       if (vet.status === 'unchecked' && !vet.malicious.length && !ref.customIndex) {
@@ -1144,7 +1168,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
     clearTimeout(regTimer);
     clearTimeout(osvTimer);
   }
-  if (dirty.v) writeCache(opts, cache, nowMs, ttlMs);
+  if (changes.size > 0) writeCache(opts, changes, nowMs, ttlMs);
   const all = packages.flatMap((p) => p.findings);
   const rank = (f: VettingFinding) => (f.kind === 'malicious' ? 0 : f.kind === 'advisory' ? 1 : f.kind === 'install-hook' || f.kind === 'sdist-only' ? 2 : f.kind === 'new-version' ? 3 : 4);
   const reasons = [...new Set(all.sort((a, b) => rank(a) - rank(b)).map((f) => f.reason))];
