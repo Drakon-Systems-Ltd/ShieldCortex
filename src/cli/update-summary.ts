@@ -243,6 +243,13 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
   // (PR #773 follow-up: a plugin-step warning used to hide it as yellow).
   const pluginAbsent = p.status === 'failed';
   const pluginStepFailed = input.plugin.status === 'warn' || input.plugin.status === 'failed';
+  // The command the plugin step itself named for finishing its work — a re-run
+  // or a recovery (#952). When the step failed, this is THE fix for the plugin,
+  // and every row that points at the plugin gives it (#1071): an OpenClaw row
+  // saying one command and a Guard row another, for the same stale plugin, is
+  // how an operator ended up told to re-run the very update that had failed.
+  const stepCommand = pluginStepFailed ? (input.plugin.rerun ?? input.plugin.recovery?.command) : undefined;
+  const stepCommandNote = stepCommand && !input.plugin.rerun ? input.plugin.recovery?.note : undefined;
   if (pluginInstalled) {
     const reloaded = gatewayRestartClause(p.gatewayRestart);
     const restartIssue = restartAttention(p.gatewayRestart, p.restartCommand, p.changesUnloaded === true);
@@ -263,9 +270,9 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
         mark: 'check',
         text: 'plugin couldn\'t be updated',
         why: 'OpenClaw keeps running the previous plugin.',
-        command: input.plugin.rerun ?? input.plugin.recovery?.command ?? 'shieldcortex update',
+        command: stepCommand ?? 'shieldcortex update',
         commandLabel: 'Fix',
-        commandNote: input.plugin.rerun ? undefined : input.plugin.recovery?.note,
+        commandNote: stepCommandNote,
       });
     } else if (pluginBehind) {
       const expected = sanitiseDisplayField(p.expectedVersion || input.toVersion);
@@ -383,14 +390,16 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
       commandLabel: 'Fix',
     });
   } else if (pluginBehind) {
-    // The OpenClaw row names the cause; this row says what it means for Guard.
+    // The OpenClaw row names the cause; this row says what it means for Guard,
+    // with the same command (#1071).
     rows.push({
       label: 'Guard',
       mark: 'check',
       text: 'on, but OpenClaw\'s plugin is out of date',
       why: 'Guard needs the plugin from this update.',
-      command: pluginFixCommand,
+      command: stepCommand ?? pluginFixCommand,
       commandLabel: 'Fix',
+      commandNote: stepCommandNote,
     });
   } else if (p.status === 'unproven' || p.status === 'warn' || p.status === 'blocked') {
     rows.push({
@@ -398,8 +407,12 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
       mark: 'check',
       text: 'on, but couldn\'t confirm OpenClaw is checking tool calls',
       why: 'Risky tool calls might not be stopped.',
-      command: p.nextCommand ?? 'shieldcortex doctor',
-      commandLabel: 'Check',
+      // #1071: a plugin step that failed is the cause to fix first, and the
+      // OpenClaw row already names its command — this row must not send the
+      // operator somewhere else.
+      ...(stepCommand
+        ? { command: stepCommand, commandLabel: 'Fix', commandNote: stepCommandNote }
+        : { command: p.nextCommand ?? 'shieldcortex doctor', commandLabel: 'Check' }),
     });
   } else {
     rows.push({ label: 'Guard', mark: 'ok', text: p.status === 'ok' ? 'on and checking tool calls' : 'on' });
