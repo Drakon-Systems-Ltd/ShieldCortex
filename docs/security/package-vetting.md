@@ -8,7 +8,7 @@ When an agent runs a package install, the Action Guard already raises an approva
 |---|---|
 | npm family | `npm install\|i\|add`, `pnpm add\|install`, `yarn add`, `bun add`, `npx`, `bunx`, `pnpm dlx`, `yarn dlx`, `npm exec` |
 | Python | `pip`/`pip3 install`, `python -m pip install`, `uv add`, `uv pip install`, `uvx`, `uv tool run\|install`, `pipx install\|run` |
-| MCP config | a newly added MCP server whose `command` is `npx` or `uvx` (the #916 agent-config watch; report-only) |
+| MCP config | an added or changed MCP server whose `command` is `npx` or `uvx` (the #916 agent-config watch; report-only) |
 
 The package name and the requested version (pinned, range, dist-tag or unpinned) are extracted. Paths, URLs, git specs, tarballs and `-r requirements.txt` yield nothing to look up and are skipped. npm aliases (`foo@npm:<pkg>@1.0.0`) are vetted by their target. A custom index or registry reports `unchecked`, because public records would not describe it: this covers `--registry` / `--index-url` / `-i` flags before or after the verb and the `npm_config_registry`, `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL` and `UV_*INDEX*` environment variables set on the command.
 
@@ -58,7 +58,7 @@ The Action Guard webhook card (#815) carries only fixed phrases, so there each f
 - **Name-only hits and the unconfirmed-version case.** An unpinned or ranged spec is first asked of OSV by name; a `MAL-` record that affects only other versions of the package (as some widely installed packages have) does not block a clean version, because the version this install would fetch is resolved and asked about, and that version-specific answer is final. Where that version cannot be confirmed (the registry did not resolve it, the version query did not answer, or the command is past the extra-lookup limit) the install stays blocked, with a reason that says OSV lists a malicious release under that name, that the version this install would fetch could not be checked, and that pinning a version is the way through. Pinning a clean version passes.
 - **Alias lookups past the cap** are limited to a few records per command.
 - **Registry resolution** reads the full npm packument inside the 3 s budget; a very large package may come back `unchecked` for age and hooks (the `MAL-` check is unaffected). Range resolution uses the highest satisfying version, while npm prefers the `latest` tag when it satisfies the range, so the vetted version can differ from the installed one.
-- `actionGuard.packageVetting.enabled: false` is dropped under a verified or unverifiable policy lock and under the strict fail-closed posture, in both the top-level `actionGuard` block and the deprecated `interceptor.actionGuard` alias.
+- `actionGuard.packageVetting.enabled: false` is dropped under a verified or unverifiable policy lock and under the strict fail-closed posture, in both the top-level `actionGuard` block and the deprecated `interceptor.actionGuard` alias. That applies to the tool-call check in the hook and the plugin. The agent-config watch reads `enabled: false` from `config.json` as written, lock or not, so the opt-out always stops its report-only lookups (they cannot block anything either way).
 - **Alias lookups** are budgeted for the whole command, not per chunk. A `MAL-` record reachable only as an alias of a non-`MAL-` id may be missed past that budget (tracked in #1028).
 - **Withdrawn records** on a name-only or batch answer are not distinguishable from live ones (tracked in #1028); a version-specific answer ignores withdrawn records.
 
