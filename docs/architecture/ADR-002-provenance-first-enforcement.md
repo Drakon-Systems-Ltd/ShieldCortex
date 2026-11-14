@@ -17,6 +17,8 @@
 
 > **Operator decision recorded (2026-09-29):** the trade-offs in Section 8 were accepted as recommended. This records the design decision only and switches no enforcement on; go-live stays gated on Section 2.5: 5A reviewed globally; 5B executed and independently reviewed against the pre-registered Section 5B bars, globally; 5C complete per shipped adapter, with an uncovered adapter not narrowed (it keeps its current dangerous-tier behaviour).
 
+> **Proposed amendment (2026-11-12), not accepted:** [ADR-002 v3](./ADR-002-v3-amendment-proposed.md) proposes aligning this ADR with the design contract the operator accepted on 2026-10-20 (#875) and building the command model first (epic #1065). Until the operator decides, the text below is the accepted record and nothing in the proposal is in force.
+
 Numbering note: this is the first file under `docs/architecture/`. Earlier decision records live under `docs/design/` (for example `ADR-2026-08-19-retry-control.md`) and keep their names; "ADR-001" is the label #556 gives the intent-first doctrine, not a file.
 
 ---
