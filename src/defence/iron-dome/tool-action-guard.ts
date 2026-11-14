@@ -4122,9 +4122,12 @@ export function stripDevNullDiscards(cmd: string): string {
  * after a `|`, `;`, `&&` or a newline a preceding stage can feed ssh's stdin,
  * and `cat ~/.shieldcortex/config.json | ssh h cat` ships the file off-host
  * whatever the remote command is), never after `sudo`/`env`/a `VAR=` prefix,
- * with no `<` anywhere in its arguments (a stdin redirect, here-doc,
- * here-string or process substitution feeds it too), every option is from a closed set
- * that neither runs a local command nor writes a local file (`-o ProxyCommand`,
+ * with no `<` ANYWHERE in the command (a stdin redirect, here-doc,
+ * here-string or process substitution feeds it too; review r2: the stage
+ * pattern stopped at the `&` of `2>&1`, so `ssh h cat 2>&1 < FILE` unwrapped
+ * to a local `cat … < FILE` and the redirect that fed ssh read as harmless),
+ * every option is from a closed set that neither runs a local command nor
+ * writes a local file (`-o ProxyCommand`,
  * `-o LocalCommand`, `-F <config>`, `-E <log>` are refused), and the remote
  * command is a single-quoted string, or a double-quoted one with no `$`,
  * backtick or backslash (local expansion), or plain words to the end of the
@@ -4137,7 +4140,9 @@ const SSH_REMOTE_READ_RE = new RegExp(
   '',
 );
 export function unwrapSshRemoteCommands(cmd: string): string {
-  return String(cmd || '').replace(SSH_REMOTE_READ_RE, (_m, lead: string, _opts: string, sq?: string, dq?: string, bare?: string) =>
+  const text = String(cmd || '');
+  if (text.includes('<')) return text;
+  return text.replace(SSH_REMOTE_READ_RE, (_m, lead: string, _opts: string, sq?: string, dq?: string, bare?: string) =>
     `${lead}${sq ?? dq ?? bare ?? ''}`);
 }
 
