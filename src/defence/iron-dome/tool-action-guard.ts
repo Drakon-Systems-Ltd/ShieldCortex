@@ -3917,6 +3917,22 @@ const STORE_MUTATION_RE = new RegExp(
   'i',
 );
 
+/**
+ * #1077: a redirect whose target is exactly `/dev/null` (`2>/dev/null`,
+ * `>/dev/null`, `&>/dev/null`, `2>> /dev/null`) discards output; it writes no
+ * file. The read-only carve-outs below treated it as a write, so the routine
+ * `ls ~/.shieldcortex/approvals/ 2>/dev/null` was held as a store mutation.
+ * Each discard is replaced by a space (never glued to a neighbour) BEFORE the
+ * mutation test, so any other redirect in the same command still fails the
+ * carve-out. The target must END at `/dev/null`: `>/dev/null/../x` is a path
+ * through it and is left in place. Quoted `"/dev/null"` is not stripped
+ * (fail closed: it stays a redirect, the carve-out stays off).
+ */
+const DEV_NULL_DISCARD_RE = /(?:\d|&)?>{1,2}\|?[ \t]*\/dev\/null(?=$|[\s;&|)])/g;
+export function stripDevNullDiscards(cmd: string): string {
+  return String(cmd || '').replace(DEV_NULL_DISCARD_RE, ' ');
+}
+
 /** Nested execution keeps the gate. */
 // The function-definition arm starts only at a word start (#874 review): any
 // match starting mid-word has one starting at that word's start, so this is
@@ -4005,7 +4021,7 @@ export function policyLockAccessIsReadOnly(text: string): boolean {
  * The caller still refuses the carve-out when a #500 command shape is present.
  */
 export function guardConfigAccessIsReadOnly(text: string): boolean {
-  const cmd = String(text || '');
+  const cmd = stripDevNullDiscards(String(text || ''));
   if (!GUARD_CONFIG_PATH_RE.test(cmd)) return false;
   if (STORE_MUTATION_RE.test(cmd)) return false;
   if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
@@ -4967,7 +4983,7 @@ interface ReadOnlyShellOptions {
 }
 
 function shellAccessIsReadOnly(text: string, opts: ReadOnlyShellOptions): boolean {
-  const cmd = String(text || '');
+  const cmd = stripDevNullDiscards(String(text || ''));
   if (!opts.pathRe.test(cmd)) return false;
   if (STORE_MUTATION_RE.test(cmd)) return false;
   if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
