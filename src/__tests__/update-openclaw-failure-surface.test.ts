@@ -1,11 +1,12 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { classifyOpenClawInstallEnding, collectUnresolved, footer, stepOpenClawPlugin, updateVerdict } from '../cli/update.js';
-import { buildUpdateSummary } from '../cli/update-summary.js';
+import { buildUpdateSummary, renderUpdateSummary, type UpdateSummaryInput } from '../cli/update-summary.js';
+import { NO_STYLE } from '../cli/term-ui.js';
 import type { CapturedError } from '../integrations/child-output.js';
 
 /**
@@ -119,8 +120,10 @@ describe('#221 — no swallow is left behind in the OpenClaw steps', () => {
  * `#604` "the target version landed, so it is ok" branch must never see them.
  *
  *  1. Secret-ref: OpenClaw refuses because `gateway.auth.token` is a secret
- *     reference this command path cannot resolve. The step used to answer with
- *     the very `openclaw plugins install --force …` that fails the same way.
+ *     reference it could not resolve for the install child. #1071 replaced
+ *     #952's answer (`shieldcortex update`, which only repeats the refused
+ *     install) with one retry and, failing that, the force install itself run
+ *     where `openclaw` resolves the reference — see the #1071 block below.
  *  2. Drain: OpenClaw saves the files and then refuses the swap ("admitted work
  *     did not settle"; "the previous plugin generation stays active"). The
  *     on-disk version already equals the CLI, so `#604` reported **ok** while
@@ -167,26 +170,31 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
   it.each([
     ['the full OpenClaw line', SECRET_REF_STDERR],
     ['the bare refusal wording', 'config value is configured as a secret reference but is unavailable'],
-  ])('secret-ref (%s): warns, unfinished, and never names the force install as the answer', async (_label, stderr) => {
+  ])('secret-ref refused twice (%s): warns, unfinished, and names the force install — never `shieldcortex update`', async (_label, stderr) => {
     const f = scripted({ stderr }, CLI);
     const r = await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => '5.15.1', readCliVersion: () => CLI });
 
     expect(r.status).toBe('warn');
     expect(r.unfinished).toBe(true);
     expect(r.rerun).toBeUndefined();
+    // #1071: the command that finishes the step is the force install, run where
+    // `openclaw` resolves the reference — not the update that was just refused.
+    expect(r.recovery?.command).toBe(FORCE_INSTALL);
+    expect(r.recovery?.note).toMatch(/where openclaw resolves the gateway secret reference/);
     const shown = [r.summary ?? '', ...(r.detail ?? [])].join('\n');
-    expect(shown).not.toContain('plugins install --force');
     expect(shown).toMatch(/secret reference/);
-    expect(shown).toMatch(/shieldcortex update/);
-    // The prerequisite is the one OpenClaw's own resolver has: the reference must
-    // resolve in the environment the command runs in. "A login shell" is one way
-    // to get that environment, not the requirement — a login shell without the
-    // variable fails the same way.
-    expect(shown).toMatch(/environment resolves that reference/);
+    expect(shown).toMatch(/refused twice/);
+    expect(shown).toContain(`run \`${FORCE_INSTALL}\` from the shell where \`openclaw\` resolves that reference`);
+    // `shieldcortex update` appears only as what NOT to do, never as the fix.
+    expect(shown).not.toMatch(/run `shieldcortex update`/);
     expect(shown).not.toMatch(/login shell/);
-    // No credential code: nothing but the one install was spawned — no secrets
-    // helper, no end-state read that pretends the install may have landed.
-    expect(f.calls.map((c) => c.args.join(' '))).toEqual([FORCE_INSTALL.replace(/^openclaw /, '')]);
+    // No credential code: the install and its one retry of the same command
+    // were all that was spawned — no secrets helper, no --token/--password, no
+    // end-state read that pretends the refused install may have landed.
+    expect(f.calls).toEqual([
+      { cmd: 'openclaw', args: FORCE_INSTALL.split(' ').slice(1) },
+      { cmd: 'openclaw', args: FORCE_INSTALL.split(' ').slice(1) },
+    ]);
   });
 
   it('secret-ref: OpenClaw\'s own `Fix:` lines reach the operator alongside the step\'s advice', async () => {
@@ -275,24 +283,28 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
       return calls.join('').replace(/\x1b\[[0-9;]*m/g, '');
     }
 
+    // `never`: the command this ending must not be answered with. A drain is not
+    // finished by the force install (#952); a secret-ref is not finished by the
+    // update that just ran that same install and was refused (#1071).
     const ENDINGS = [
       {
         name: 'secret-ref',
         stderr: SECRET_REF_STDERR,
-        command: 'shieldcortex update',
-        note: /environment resolves the gateway secret reference/,
+        command: FORCE_INSTALL,
+        note: /where openclaw resolves the gateway secret reference/,
+        never: 'shieldcortex update',
       },
-      { name: 'drain', stderr: DRAIN_STDERR, command: RELOAD_WAIT, note: null },
+      { name: 'drain', stderr: DRAIN_STDERR, command: RELOAD_WAIT, note: null, never: 'plugins install --force' },
     ] as const;
 
-    describe.each(ENDINGS)('$name', ({ stderr, command, note }) => {
+    describe.each(ENDINGS)('$name', ({ stderr, command, note, never }) => {
       async function plugin() {
         // The plugin on disk already matches the CLI — the case that used to read as finished.
         const f = scripted({ stderr }, CLI);
         return stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => CLI, readCliVersion: () => CLI });
       }
 
-      it('is collected as unresolved with its own recovery, never the force install', async () => {
+      it('is collected as unresolved with its own recovery, never the command that cannot finish it', async () => {
         const r = await plugin();
         const unresolved = collectUnresolved([
           { label: 'OpenClaw plugin', result: r },
@@ -300,7 +312,7 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
         ]);
         expect(unresolved).toHaveLength(1);
         expect(unresolved[0]).toMatchObject({ label: 'OpenClaw plugin', rerun: command, verb: 'run' });
-        expect(unresolved[0].rerun).not.toContain('plugins install --force');
+        expect(unresolved[0].rerun).not.toContain(never);
         // The verdict is untouched: still non-zero, still a step-level warning.
         expect(r.status).toBe('warn');
         expect(updateVerdict({ failed: false, attention: true, unfinished: r.unfinished === true }).exitCode).toBe(1);
@@ -320,7 +332,7 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
         expect(out).toContain('1 step unresolved');
         expect(out).toContain(`OpenClaw plugin: run ${command}`);
         expect(out).not.toContain('re-run');
-        expect(out).not.toContain('plugins install --force');
+        expect(out).not.toContain(never);
         if (note) expect(out).toMatch(note);
       });
 
@@ -372,5 +384,356 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
     expect(shown).toContain('plugin manifest not found');
     expect(r.summary).not.toContain('plugins install --force');
     expect(r.rerun).toBe(FORCE_INSTALL);
+  });
+});
+
+/**
+ * #1071 — `update` skipped the OpenClaw plugin on a host whose
+ * `gateway.auth.token` is a secret reference, then told the operator to fix it
+ * with `shieldcortex update`: the very run that had just been refused. The
+ * Guard row on the same screen gave a different command, the one that worked
+ * (`openclaw plugins install --force …@latest`, verified from the same shell).
+ *
+ * Now a secret-ref refusal is retried once — the same `openclaw`, args and
+ * environment, never a re-resolved binary (r2) — and if that is refused too,
+ * the OpenClaw row and the Guard row name that one working command.
+ */
+describe('#1071 — a gateway secret reference does not end the plugin step', () => {
+  const CLI = '5.20.0';
+  const BEFORE = '5.19.0';
+  const FORCE_INSTALL = 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest';
+  const INSTALL_ARGS = FORCE_INSTALL.split(' ').slice(1);
+  const RELOAD_WAIT = 'openclaw plugins reload shieldcortex-realtime --wait';
+  /** OpenClaw 2026.11.3's exact refusal (`GatewaySecretRefUnavailableError`, dist/credentials-*.mjs). */
+  const SECRET_REF_STDERR = [
+    'gateway.auth.token is configured as a secret reference but is unavailable in this command path.',
+    'Fix: set OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD, pass explicit --token/--password,',
+    'or run a gateway command path that resolves secret references before credential selection.',
+  ].join('\n');
+  const DRAIN_STDERR =
+    'plugin shieldcortex-realtime admitted work did not settle within 60s; the previous plugin generation stays active.';
+  const CREDENTIAL_ENV = ['OPENCLAW_GATEWAY_TOKEN', 'OPENCLAW_GATEWAY_PASSWORD', 'OPENCLAW_HOME'] as const;
+
+  let saved: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    // The reporter's host: the token is a secret reference in OpenClaw's own
+    // config, and no gateway credential is in this process's environment.
+    writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({
+      gateway: { mode: 'local', auth: { mode: 'token', token: { source: 'exec', provider: 'vault', id: 'gateway/token' } } },
+    }));
+    saved = {};
+    for (const k of CREDENTIAL_ENV) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+
+  afterEach(() => {
+    for (const k of CREDENTIAL_ENV) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  type Call = { cmd: string; args: string[]; env: NodeJS.ProcessEnv };
+
+  /**
+   * A fake `openclaw`. It reads the gateway config under the HOME it was handed
+   * and, when `gateway.auth.token` is a secret reference, refuses exactly as
+   * OpenClaw does unless `resolves(n)` says the n-th install (1-based) resolves
+   * it. Anything it installs lands at the CLI's version. `retryEnding` scripts a
+   * different failure for the second install.
+   */
+  function fakeOpenClaw(resolves: (install: number) => boolean, retryEnding?: string) {
+    const calls: Call[] = [];
+    let onDisk = BEFORE;
+    const run = (cmd: string, args: string[], opts: { env?: NodeJS.ProcessEnv } = {}) => {
+      const env = opts.env ?? process.env;
+      calls.push({ cmd, args, env });
+      if (args[0] === 'plugins' && args[1] === 'list') {
+        return Promise.resolve({ stdout: JSON.stringify({ plugins: [{ id: 'shieldcortex-realtime', version: onDisk }] }), stderr: '' });
+      }
+      const installs = calls.filter((c) => c.args[1] === 'install').length;
+      if (installs > 1 && retryEnding) return rejectWith({ stderr: retryEnding })();
+      const cfg = JSON.parse(readFileSync(join(String(env.HOME), '.openclaw', 'openclaw.json'), 'utf-8'));
+      const tokenIsRef = typeof cfg?.gateway?.auth?.token === 'object';
+      const hasExplicit = Boolean(env.OPENCLAW_GATEWAY_TOKEN || env.OPENCLAW_GATEWAY_PASSWORD)
+        || args.includes('--token') || args.includes('--password');
+      if (tokenIsRef && !hasExplicit && !resolves(installs)) return rejectWith({ stderr: SECRET_REF_STDERR })();
+      onDisk = CLI;
+      return Promise.resolve({ stdout: 'Installed shieldcortex-realtime', stderr: '' });
+    };
+    return { run: run as never, calls, readPluginVersion: () => onDisk };
+  }
+
+  function step(f: ReturnType<typeof fakeOpenClaw>) {
+    return stepOpenClawPlugin(home, {
+      run: f.run,
+      readPluginVersion: f.readPluginVersion,
+      readCliVersion: () => CLI,
+    });
+  }
+
+  function captureFooter(unresolved: ReturnType<typeof collectUnresolved>): string {
+    const calls: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stdout as any).write = (chunk: any) => { calls.push(String(chunk)); return true; };
+    try {
+      footer(1000, true, { version: CLI }, unresolved);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdout as any).write = original;
+    }
+    // eslint-disable-next-line no-control-regex
+    return calls.join('').replace(/\x1b\[[0-9;]*m/g, '');
+  }
+
+  it('refused once, the one retry of the same install lands — the step is ok', async () => {
+    const f = fakeOpenClaw((n) => n === 2);
+    const r = await step(f);
+
+    expect(r.status).toBe('ok');
+    expect(r.summary).toBe(`${BEFORE} → ${CLI}`);
+    expect(r.unfinished).toBeUndefined();
+    expect(r.rerun).toBeUndefined();
+    expect(r.recovery).toBeUndefined();
+    expect(r.detail?.[0]).toBe(
+      'first install refused: gateway.auth.token is a gateway secret reference OpenClaw could not resolve for it; retried the same `openclaw plugins install --force` once',
+    );
+    expect(collectUnresolved([{ label: 'OpenClaw plugin', result: r }])).toEqual([]);
+
+    // Exactly the install and one retry of the same command — no secrets helper,
+    // no explicit credential, no token in either child's environment. The retry
+    // never widens execution: same executable, args and environment as the
+    // first attempt (#1071 r2).
+    expect(f.calls.map(({ cmd, args }) => ({ cmd, args }))).toEqual([
+      { cmd: 'openclaw', args: INSTALL_ARGS },
+      { cmd: 'openclaw', args: INSTALL_ARGS },
+    ]);
+    expect(f.calls[1].env).toEqual(f.calls[0].env);
+    for (const c of f.calls) {
+      expect(c.env.HOME).toBe(home);
+      expect(c.env.OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
+      expect(c.env.OPENCLAW_GATEWAY_PASSWORD).toBeUndefined();
+      expect(c.args).not.toContain('--token');
+      expect(c.args).not.toContain('--password');
+    }
+  });
+
+  it('an OPENCLAW_HOME the operator set reaches the retry untouched, as it does the first install', async () => {
+    process.env.OPENCLAW_HOME = '/srv/openclaw-profile';
+    const f = fakeOpenClaw((n) => n === 2);
+    await step(f);
+
+    expect(f.calls).toHaveLength(2);
+    for (const c of f.calls) expect(c.env.OPENCLAW_HOME).toBe('/srv/openclaw-profile');
+  });
+
+  it('an ordinary failure is not retried', async () => {
+    const f = fakeOpenClaw(() => true);
+    const r = await stepOpenClawPlugin(home, {
+      run: ((cmd: string, args: string[]) => {
+        f.calls.push({ cmd, args, env: {} });
+        return rejectWith({ stderr: 'OpenClaw config is invalid: ~/.openclaw/openclaw.json' })();
+      }) as never,
+      readPluginVersion: () => BEFORE,
+      readCliVersion: () => CLI,
+    });
+
+    expect(r.status).toBe('warn');
+    expect(f.calls.filter((c) => c.args[1] === 'install')).toHaveLength(1);
+  });
+
+  it('the retry goes through the same ending checks: a drain on the retry gets the drain recovery', async () => {
+    const f = fakeOpenClaw(() => false, DRAIN_STDERR);
+    const r = await step(f);
+
+    expect(r.status).toBe('warn');
+    expect(r.unfinished).toBe(true);
+    expect(r.recovery?.command).toBe(RELOAD_WAIT);
+    // The first refusal is not lost behind the retry's own ending.
+    expect(r.detail?.[0]).toMatch(/^first install refused: gateway\.auth\.token is a gateway secret reference/);
+  });
+
+  describe('refused by the retry too', () => {
+    async function refusedTwice() {
+      const f = fakeOpenClaw(() => false);
+      return { r: await step(f), f };
+    }
+
+    it('the step names the force install as its one fix, never `shieldcortex update`', async () => {
+      const { r, f } = await refusedTwice();
+
+      expect(f.calls.filter((c) => c.args[1] === 'install')).toHaveLength(2);
+      expect(r.status).toBe('warn');
+      expect(r.unfinished).toBe(true);
+      expect(r.recovery?.command).toBe(FORCE_INSTALL);
+      expect(r.recovery?.command).not.toContain('shieldcortex update');
+      expect(r.summary).toMatch(/refused twice: gateway\.auth\.token is a gateway secret reference/);
+
+      const out = captureFooter(collectUnresolved([{ label: 'OpenClaw plugin', result: r }]));
+      expect(out).toContain(`OpenClaw plugin: run ${FORCE_INSTALL}`);
+      expect(out).not.toContain('shieldcortex update');
+    });
+
+    /**
+     * The closing screen of the operator report: Guard on, and the end-of-run
+     * plugin check saw the plugin behind the CLI and suggested the force install.
+     * Plus two shapes where the check suggested something else entirely.
+     */
+    const PROTECTION: Array<[string, UpdateSummaryInput['protection']]> = [
+      ['plugin behind, check suggests the force install (the report)', {
+        status: 'unproven', loaded: 'unknown', versionOk: false, pluginVersion: BEFORE, expectedVersion: CLI,
+        gatewayReloaded: false, nextCommand: FORCE_INSTALL,
+      }],
+      ['plugin behind, check suggests `shieldcortex repair`', {
+        status: 'unproven', loaded: 'unknown', versionOk: false, pluginVersion: BEFORE, expectedVersion: CLI,
+        gatewayReloaded: false, nextCommand: 'shieldcortex repair',
+      }],
+      ['enforcement not confirmed, check suggests doctor', {
+        status: 'unproven', loaded: 'unknown', pluginVersion: BEFORE, gatewayReloaded: false,
+        nextCommand: 'shieldcortex doctor --ai',
+      }],
+    ];
+
+    it.each(PROTECTION)('every OpenClaw and Guard row gives the same single working command (%s)', async (_label, protection) => {
+      const { r } = await refusedTwice();
+      const input: UpdateSummaryInput = {
+        fromVersion: BEFORE,
+        toVersion: CLI,
+        packageState: 'updated',
+        engine: { ok: true },
+        plugin: { status: r.status, rerun: r.rerun, recovery: r.recovery },
+        skill: { status: 'ok' },
+        guardOn: true,
+        protection,
+      };
+      const summary = buildUpdateSummary(input);
+      const openclaw = summary.rows.find((x) => x.label === 'OpenClaw');
+      const guard = summary.rows.find((x) => x.label === 'Guard');
+
+      expect(openclaw).toMatchObject({ mark: 'check', command: FORCE_INSTALL, commandLabel: 'Fix' });
+      expect(guard).toMatchObject({ mark: 'check', command: FORCE_INSTALL, commandLabel: 'Fix' });
+      expect(guard?.commandNote).toBe(openclaw?.commandNote);
+      expect(summary.rows.map((x) => x.command)).not.toContain('shieldcortex update');
+      // The renderer wraps a long command onto a continuation line; read it flat.
+      const screen = renderUpdateSummary(summary, input, { width: 100, style: NO_STYLE, ascii: true })
+        .join('\n').replace(/\s+/g, ' ');
+      expect(screen).not.toContain('shieldcortex update');
+      expect(screen.split(FORCE_INSTALL)).toHaveLength(3);
+    });
+  });
+
+  /**
+   * #1071 r2 — the retry must run the `openclaw` that refused, never another
+   * copy. Driven through the real spawn and the real resolution path (no `run`,
+   * no binary seam): an executable `openclaw` on PATH, no `which` anywhere on
+   * PATH, and a DIFFERENT executable at a well-known fallback location
+   * (`$HOME/.npm-global/bin/openclaw`). A retry that re-resolves the binary —
+   * `which` fails, so it falls back — runs that other copy. It must not.
+   */
+  describe('the retry runs the same `openclaw` that refused — real spawn, no `which` on PATH', () => {
+    let binDir: string;
+    let savedPath: string | undefined;
+    let log: string;
+    let installedMark: string;
+
+    function writeScript(file: string, body: string[]) {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, ['#!/bin/sh', ...body, ''].join('\n'), { mode: 0o755 });
+      chmodSync(file, 0o755);
+    }
+
+    /** `refusals`: how many times the PATH copy refuses before it installs. */
+    function setUp(refusals: number) {
+      binDir = mkdtempSync(join(tmpdir(), 'sc-1071-path-'));
+      log = join(binDir, 'calls.log');
+      installedMark = join(binDir, 'installed');
+      const count = join(binDir, 'refusals');
+      // Shell builtins only: PATH holds this directory and nothing else.
+      const refuse = [
+        `echo ${JSON.stringify(SECRET_REF_STDERR.split('\n')[0])} >&2`,
+        'exit 1',
+      ];
+      const install = [`: > '${installedMark}'`, 'echo "Installed shieldcortex-realtime"', 'exit 0'];
+      writeScript(join(binDir, 'openclaw'), [
+        `echo "path $*" >> '${log}'`,
+        ...(refusals >= 1 ? [`if [ ! -e '${count}.1' ]; then : > '${count}.1'; ${refuse.join('; ')}; fi`] : []),
+        ...(refusals >= 2 ? [`if [ ! -e '${count}.2' ]; then : > '${count}.2'; ${refuse.join('; ')}; fi`] : []),
+        ...install,
+      ]);
+      // A working, different copy where `resolveOpenClawBinary` falls back to.
+      writeScript(join(home, '.npm-global', 'bin', 'openclaw'), [
+        `echo "fallback $*" >> '${log}'`,
+        ...install,
+      ]);
+      savedPath = process.env.PATH;
+      process.env.PATH = binDir;
+    }
+
+    afterEach(() => {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      savedPath = undefined;
+      if (binDir) rmSync(binDir, { recursive: true, force: true });
+    });
+
+    function realStep() {
+      return stepOpenClawPlugin(home, {
+        readPluginVersion: () => (existsSync(installedMark) ? CLI : BEFORE),
+        readCliVersion: () => CLI,
+      });
+    }
+
+    function calls(): string[] {
+      return existsSync(log) ? readFileSync(log, 'utf-8').trim().split('\n') : [];
+    }
+
+    it('no `which` on PATH really fails here — the precondition the old re-resolution fell back on', () => {
+      setUp(1);
+      expect(spawnSync('which', ['openclaw'], { env: process.env }).error).toBeDefined();
+    });
+
+    it('refused once, the retry through the PATH copy installs; the fallback copy never runs', async () => {
+      setUp(1);
+      const r = await realStep();
+
+      expect(calls()).toEqual([`path ${INSTALL_ARGS.join(' ')}`, `path ${INSTALL_ARGS.join(' ')}`]);
+      expect(r.status).toBe('ok');
+      expect(r.summary).toBe(`${BEFORE} → ${CLI}`);
+      expect(r.detail?.[0]).toMatch(/^first install refused: gateway\.auth\.token is a gateway secret reference/);
+      expect(r.detail?.join('\n')).not.toContain('.npm-global');
+    });
+
+    it('refused twice by the PATH copy: one retry only, the fallback copy never runs, the fix is the force install', async () => {
+      setUp(2);
+      const r = await realStep();
+
+      expect(calls()).toEqual([`path ${INSTALL_ARGS.join(' ')}`, `path ${INSTALL_ARGS.join(' ')}`]);
+      expect(r.status).toBe('warn');
+      expect(r.unfinished).toBe(true);
+      expect(r.recovery?.command).toBe(FORCE_INSTALL);
+      expect(existsSync(installedMark)).toBe(false);
+    });
+  });
+
+  it.each([
+    ['plugin behind', { versionOk: false, nextCommand: FORCE_INSTALL }],
+    ['enforcement not confirmed', { nextCommand: 'shieldcortex doctor --ai' }],
+  ] as const)('a drain recovery is the Guard row\'s command too, not the force install (%s)', (_label, over) => {
+    const summary = buildUpdateSummary({
+      fromVersion: BEFORE,
+      toVersion: CLI,
+      packageState: 'updated',
+      engine: { ok: true },
+      plugin: { status: 'warn', recovery: { command: RELOAD_WAIT } },
+      skill: { status: 'ok' },
+      guardOn: true,
+      protection: { status: 'unproven', loaded: 'unknown', pluginVersion: BEFORE, gatewayReloaded: false, ...over },
+    });
+    expect(summary.rows.find((x) => x.label === 'OpenClaw')?.command).toBe(RELOAD_WAIT);
+    expect(summary.rows.find((x) => x.label === 'Guard')?.command).toBe(RELOAD_WAIT);
   });
 });
