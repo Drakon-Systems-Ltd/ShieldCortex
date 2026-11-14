@@ -3422,15 +3422,26 @@ const BLANKING_PAD = ' '.repeat(512);
  *    `getattr(inspect, 'get'+'doc')`). So this is not a denylist of readback
  *    spellings: blanking is refused when the code — everything but the
  *    docstrings, string literals included — holds ANY `__` other than
- *    `__name__`/`__main__`/`__init__`/`__future__` and the one argparse
- *    `ArgumentParser(description=__doc__)` keyword; ANY dynamic name or
+ *    `__name__`/`__main__`/`__init__`/`__future__`; ANY dynamic name or
  *    attribute lookup (`getattr`, `globals`, `locals`, `vars`, `dir`, `eval`,
  *    `exec`, builtin `compile`, `format`, `attrgetter` …); frame or code-object
- *    access; a way to read the parser's help text back or capture stdout to
- *    do so; a self-path (`argv`, `/proc/`, a `.py` literal) or stdin; or an
- *    import outside a small stdlib set that exposes no docstring (`inspect`,
- *    `pydoc`, `doctest`, `functools`, `types`, `io`, every third-party package
- *    — `click`, `docopt`, `fire` read docstrings themselves — are all out).
+ *    access; a way to read a parser's help text back or capture stdout; a
+ *    self-path (`argv`, `/proc/`, a `.py` literal) or stdin; or an import
+ *    outside a small stdlib set that exposes no docstring (`inspect`, `pydoc`,
+ *    `doctest`, `functools`, `types`, `io`, every third-party package —
+ *    `click`, `docopt`, `fire` read docstrings themselves — are all out).
+ *
+ *    NO EXEMPTION, argparse included (review r2). `description=__doc__` is a
+ *    `__` like any other, so a script that hands its docstring to argparse
+ *    keeps that docstring on the scan surface. r1 exempted that one keyword,
+ *    which made the gate a denylist of the ways argparse hands the text back
+ *    (`_get_kwargs()`, `repr(ap)`), of the ways `argparse.ArgumentParser` can
+ *    be rebound (an annotated or tuple-target assignment, a backslash before
+ *    `=`, `ArgumentParser.__init__ = …`) and of the ways fd 1 can be moved
+ *    before `-h` prints it (`os.close(1 + 0)`, `os.closerange(1, 2)`); every
+ *    round found the next spelling. The owner's route for such a script is
+ *    the pin (`shieldcortex allowlist add`). The help-text and stdout terms
+ *    above are kept as defence in depth; none is load-bearing.
  *
  * RESIDUAL, the class #532 already carries for comments: a script that opens
  * its OWN file through a path this gate cannot see (a split literal of its own
@@ -3449,20 +3460,6 @@ const PY_DOC_SAFE_IMPORTS = new Set([
   'textwrap', 'threading', 'time', 'typing', 'urllib', 'uuid', 'zipfile', 'zlib',
 ]);
 const PY_DOC_ALLOWED_DUNDER_RE = /\b__(?:name|main|init|future)__\b/g;
-// Only the stdlib parser, spelled `argparse.ArgumentParser(`, and only while
-// `argparse` is never rebound or patched (`pyArgparseIsStdlib`): a class of the
-// script's own named `ArgumentParser` would receive the doc text as an argument.
-const PY_DOC_ARGPARSE_RE = /(\bargparse[ \t]*\.[ \t]*ArgumentParser[ \t]*\([^()]*?\bdescription[ \t]*=[ \t]*)__doc__\b/g;
-function pyArgparseIsStdlib(code: string): boolean {
-  if (/\bargparse[ \t]*\.[ \t]*\w+[ \t]*=[^=]/.test(code)) return false;          // patched attribute
-  for (const m of code.matchAll(/\bargparse\b/g)) {
-    const at = m.index ?? 0;
-    if (/^[ \t]*\./.test(code.slice(at + 8, at + 12))) continue;                  // argparse.<attr>
-    if (/\b(?:import|from)[ \t]+$/.test(code.slice(Math.max(0, at - 12), at))) continue;
-    return false;                                                             // any other binding or use
-  }
-  return true;
-}
 const PY_DOC_READBACK_RE = new RegExp([
   '__',
   String.raw`\b(?:getattr|setattr|delattr|attrgetter|methodcaller|globals|locals|vars|eval|exec|execfile|format|format_map|breakpoint)\b`,
@@ -3551,20 +3548,7 @@ function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null
   return depth === 0 ? found : null;
 }
 
-/**
- * #1077 r1: argparse prints `description=__doc__` on `-h`, so the docstring is
- * on STDOUT, and `python3 x.py -h | sh` runs it. The argparse exemption above
- * therefore holds only for a ROOT invocation whose command cannot consume its
- * stdout: no pipe, no stdout redirect (a `2>`/`/dev/null` discard is fine), no
- * command or process substitution, no backtick. A nested script never gets it
- * — its parent's handling of its stdout is not on this command line.
- */
-export function commandStdoutMayBeConsumed(cmd: string): boolean {
-  const c = stripDevNullDiscards(String(cmd || ''));
-  return /[|`]|\$\(|[<>]\(|(?<!\d)>|(?<!\d)1>/.test(c);
-}
-
-function blankPythonDocstrings(src: string, lang: ScriptLang, argparseHelpUnconsumed = false): string {
+function blankPythonDocstrings(src: string, lang: ScriptLang): string {
   if (lang !== 'python' || !src || !(src.includes('"""') || src.includes("'''"))) return src;
   const docs = pythonStandaloneDocstrings(src);
   if (!docs || docs.length === 0) return src;
@@ -3572,8 +3556,7 @@ function blankPythonDocstrings(src: string, lang: ScriptLang, argparseHelpUncons
   let cursor = 0;
   for (const [lo, hi] of docs) { code += src.slice(cursor, lo) + blankedRun(src, lo, hi); cursor = hi; }
   code += src.slice(cursor);
-  const exempt = argparseHelpUnconsumed && pyArgparseIsStdlib(code) ? code.replace(PY_DOC_ARGPARSE_RE, '$1None') : code;
-  const gated = exempt.replace(PY_DOC_ALLOWED_DUNDER_RE, ' ');
+  const gated = code.replace(PY_DOC_ALLOWED_DUNDER_RE, ' ');
   if (PY_DOC_READBACK_RE.test(gated) || !pyImportsAreDocSafe(gated)) return src;
   // Egress evidence is not the floor: a docstring naming a network
   // destination keeps contributing it exactly as before #1077 (the #920
@@ -7161,7 +7144,6 @@ function foldScriptSources(
 ): ScriptFold {
   const roots = detectScriptInvocations(execCommand);
   if (roots.length === 0) return { content: '', opaque: false, regions: [], reviewed: [], unreadSensitive: [] };
-  const helpTextMayBeConsumed = commandStdoutMayBeConsumed(execCommand);
   if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [], reviewed: [], unreadSensitive: [] };
 
   const visited = new Set<string>();
@@ -7278,7 +7260,7 @@ function foldScriptSources(
       ? expandFileSubstitutions(plainSrc, resolveScriptSource, subst, 1)
       : plainSrc;
     const reviewedScan = next.lang !== 'sh'
-      ? blankPythonDocstrings(blankInterpreterComments(plainSrc, next.lang), next.lang, next.depth === 1 && !helpTextMayBeConsumed)
+      ? blankPythonDocstrings(blankInterpreterComments(plainSrc, next.lang), next.lang)
       : expandedSrc === plainSrc
         ? commandScanText(plainSrc)
         : `${commandScanText(plainSrc)}\n${commandScanText(expandedSrc)}`;
