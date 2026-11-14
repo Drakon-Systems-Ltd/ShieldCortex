@@ -163,7 +163,7 @@ describe('soleConventionalHermesCopy: a manifest lookup that fails is not an abs
     }
   });
 
-  it('root depth: an unsearchable directory is named for its manifest, not walked as a category', () => {
+  it('root depth: an unsearchable directory declines, naming the manifest it could not look up', () => {
     installStaleCopy();
     const hidden = plantCopy(path.join(plugins, 'old-guard'));
     unsearchable(hidden);
