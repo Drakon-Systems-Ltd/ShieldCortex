@@ -4895,6 +4895,50 @@ export function readHostGatePlanesWithPosture(hostHome?: string): HostGatePlanes
  */
 export const RUNTIME_POSTURE_LABEL = 'Runtime posture';
 
+// ── Codex tool boundary (#810) ─────────────────────────
+/**
+ * #810 — the owner decided (2026-10-27) that Action Guard deny-holds are NOT
+ * enforced on the Codex harness: Codex stays observe-only. This row states
+ * that boundary instead of letting the memory-only Codex row, or the OpenClaw
+ * plugin row, be read as cover for Codex-native tool calls. It separates:
+ *
+ * - bare Codex (CLI / `~/.codex`): ShieldCortex installs no Codex hook, so
+ *   native shell and apply_patch calls never reach ShieldCortex;
+ * - Codex run by OpenClaw: OpenClaw-owned tools, including code-mode nested
+ *   calls, reach the ShieldCortex OpenClaw plugin's `before_tool_call`. One
+ *   historical live probe observed this with the plugin in observe mode only;
+ *   a deny on that path was never exercised. That is a record of what was
+ *   observed, not the mode every install runs in — the plugin's own posture
+ *   row reports its configured mode;
+ *   Codex-native shell/apply_patch through OpenClaw's native hook relay was
+ *   not exercised and is unverified;
+ * - audit: benign allows normally write no row, so an empty audit for a
+ *   benign call is expected and is not evidence of a missed check.
+ *
+ * Always `info`: like the #613 rows it must not change doctor's exit code,
+ * and the observe-only state is deliberate. Never says "protected",
+ * "enforced" or "proves". Shown only when a Codex or OpenClaw record exists.
+ */
+export const CODEX_BOUNDARY_LABEL = 'Codex tool boundary';
+
+export function codexToolBoundaryRow(runtimes: readonly string[]): CheckResult | null {
+  const hasCodex = runtimes.includes('codex');
+  const hasOpenClaw = runtimes.includes('openclaw');
+  if (!hasCodex && !hasOpenClaw) return null;
+  return {
+    label: CODEX_BOUNDARY_LABEL,
+    status: 'info',
+    message: [
+      'Codex is observe-only for Action Guard: ShieldCortex does not deny or hold Codex-native tool calls (#810).',
+      'Bare Codex (CLI, ~/.codex): native tools unguarded — ShieldCortex installs no Codex hook, so native shell and apply_patch calls run with only Codex\'s own sandbox and approvals.',
+      'Codex run by OpenClaw: OpenClaw-owned tools, including code-mode nested calls, reach the ShieldCortex OpenClaw plugin\'s before_tool_call check. A past live probe observed this with the plugin in observe mode only; a deny or hold on this path is untested. That probe does not set this host\'s mode — see the OpenClaw plugin posture row.',
+      'Codex-native shell/apply_patch via OpenClaw\'s native hook relay: unverified — not exercised.',
+      'Benign allows normally write no audit row, so no row for a benign call is expected and does not mean the check was skipped.',
+      'Intended boundary, no action needed — details: docs/security/codex-boundary.md',
+    ].join(' '),
+  };
+}
+
 export async function checkRuntimePosture(opts: CollectOptions = {}): Promise<CheckResult[]> {
   const records = collectPostureRecords({
     ...opts,
@@ -4910,6 +4954,8 @@ export async function checkRuntimePosture(opts: CollectOptions = {}): Promise<Ch
       message: `${renderPostureLine(r)}${notes}`,
     };
   });
+  const boundary = codexToolBoundaryRow(records.map((r) => r.runtime));
+  if (boundary) rows.push(boundary);
   const summary = summarisePosture(records);
   const weakest = records.find((r) => r.source === summary.weakest);
   rows.push({
