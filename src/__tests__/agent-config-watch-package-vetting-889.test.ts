@@ -512,3 +512,71 @@ describe('#1054 — the webhook payload of a package-check follow-up carries the
     expect(empty).not.toHaveProperty('packageChecks');
   });
 });
+
+// #1054 Part A, review of PR #1080: every changed file is now checked at the
+// same time. Each check read the malicious-package cache when it started and
+// wrote its own copy back when it finished, so the last to finish replaced
+// the other's record and that package no longer blocked with the network
+// away. On main the files were checked in turn, so both records were kept.
+// Registry and OSV answers below are fixtures; nothing is fetched or installed.
+describe('#1054 — two changed files checked in one run both leave their malicious-package record for the offline block', () => {
+  const PKG = [
+    { name: 'synth-mal-alpha', ver: '1.0.0', id: 'MAL-2026-90001' },
+    { name: 'synth-mal-beta', ver: '2.0.0', id: 'MAL-2026-90002' },
+  ];
+  const BASE = { mcpServers: { existing: { command: 'node', args: ['server.js'] } } };
+  const serverFor = (p: { name: string; ver: string }) => ({ command: 'npx', args: ['-y', `${p.name}@${p.ver}`] });
+  let projects: string[];
+  afterEach(() => { for (const p of projects ?? []) fs.rmSync(p, { recursive: true, force: true }); projects = []; });
+
+  /** Fixture registry + OSV; the version-specific OSV answer for `slowName` is held back so that check finishes last. */
+  const fixtureFetch = (slowName: string): FetchLike => async (url, init) => {
+    const json = (body: unknown, status = 200) => ({ ok: status < 400, status, json: async () => body });
+    const idsFor = (name: string, version?: string) => PKG.filter((p) => p.name === name && (!version || p.ver === version)).map((p) => ({ id: p.id, modified: '2026-11-05T00:00:00Z' }));
+    if (url === 'https://api.osv.dev/v1/query') {
+      const q = JSON.parse(init!.body!);
+      if (q.package.name === slowName) await new Promise((r) => setTimeout(r, 80));
+      const vulns = idsFor(q.package.name, q.version);
+      return json(vulns.length ? { vulns } : {});
+    }
+    if (url === 'https://api.osv.dev/v1/querybatch') {
+      const { queries } = JSON.parse(init!.body!) as { queries: Array<{ package: { name: string }; version?: string }> };
+      return json({ results: queries.map((q) => { const vulns = idsFor(q.package.name, q.version); return vulns.length ? { vulns } : {}; }) });
+    }
+    const vuln = /^https:\/\/api\.osv\.dev\/v1\/vulns\/(.+)$/.exec(url);
+    if (vuln) return json({ id: decodeURIComponent(vuln[1]), aliases: [] });
+    const npm = /^https:\/\/registry\.npmjs\.org\/(.+)$/.exec(url);
+    const p = npm ? PKG.find((x) => x.name === decodeURIComponent(npm[1])) : undefined;
+    if (!p) return json({}, 404);
+    return json({ 'dist-tags': { latest: p.ver }, versions: { [p.ver]: { name: p.name, version: p.ver } }, time: { [p.ver]: '2026-01-01T00:00:00Z' } });
+  };
+  const offline: FetchLike = async () => { throw Object.assign(new Error('getaddrinfo'), { code: 'ENOTFOUND' }); };
+
+  it.each([['the first file\'s check finishes last', 0], ['the second file\'s check finishes last', 1]])('%s', async (_label, slow) => {
+    const stateDir = path.join(home, 'state');
+    projects = PKG.map(() => fs.mkdtempSync(path.join(os.tmpdir(), 'sc-1054w-cache-')));
+    const runBoth = (over: Partial<Parameters<typeof runAgentConfigWatch>[0]> = {}) => runAgentConfigWatch({
+      home, projectRoots: projects, dropzoneDirs: [],
+      notify: async (n) => { notes.push(n); },
+      ledger: (r) => { rows.push(r); return true; },
+      ...over,
+    });
+    for (const p of projects) fs.writeFileSync(path.join(p, '.mcp.json'), JSON.stringify(BASE));
+    await runBoth(); // baseline
+    projects.forEach((p, i) => fs.writeFileSync(path.join(p, '.mcp.json'), JSON.stringify({ mcpServers: { ...BASE.mcpServers, [`srv${i}`]: serverFor(PKG[i]) } })));
+    notes = []; rows = [];
+    const fetchImpl = fixtureFetch(PKG[slow as number].name);
+    const res = await runBoth({ vetServers: (servers, o) => vetMcpServers(servers, { fetchImpl, stateDir, budgetMs: o?.budgetMs }) });
+    expect(res).toMatchObject({ notified: 2, errors: 0 });
+    // Both checks answered inside the window and both found their package malicious.
+    const followUps = notes.filter((n) => n.packageCheckFollowUp);
+    expect(followUps.map((n) => n.packageChecks?.[0]?.malicious)).toEqual([true, true]);
+    // The network goes away: each package is still blocked from the cache.
+    for (const [i, p] of PKG.entries()) {
+      const off = await vetMcpServers([{ name: `srv${i}`, entry: serverFor(p) }], { fetchImpl: offline, stateDir });
+      expect({ pkg: p.name, checks: off }).toEqual({ pkg: p.name, checks: [{ name: `srv${i}`, malicious: true, reasons: [expect.stringContaining(p.id)] }] });
+    }
+    const cached = Object.keys(JSON.parse(fs.readFileSync(path.join(stateDir, 'package-vetting-cache.json'), 'utf-8')).entries).sort();
+    expect(cached).toEqual(PKG.map((p) => `npm@${p.name}@${p.ver}`));
+  });
+});

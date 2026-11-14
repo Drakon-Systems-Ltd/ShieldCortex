@@ -1263,3 +1263,88 @@ describe('release review B2 — malformed OSV answers are never clean', () => {
     }
   });
 });
+
+// #1054 Part A, review of PR #1080: the agent-config watch now checks every
+// changed file at the same time. Each check read the whole cache file when it
+// started and wrote its own copy back when it finished, so the last check to
+// finish replaced the file and the other check's MAL- record was gone: with
+// the network away that package was no longer blocked. A write now re-reads
+// the file and applies only what its own check recorded or evicted.
+describe('#1054 — checks that run at the same time keep each other\'s cached MAL- records', () => {
+  const A = { name: 'synth-mal-alpha', ver: '1.0.0', id: 'MAL-2026-90001' };
+  const B = { name: 'synth-mal-beta', ver: '2.0.0', id: 'MAL-2026-90002' };
+  const keyOf = (p: { name: string; ver: string }) => `npm@${p.name}@${p.ver}`;
+  const cacheFile = () => path.join(stateDir, 'package-vetting-cache.json');
+  const cacheKeys = () => Object.keys(JSON.parse(fs.readFileSync(cacheFile(), 'utf-8')).entries).sort();
+  const twoMal = (): World => world({
+    npm: {
+      [A.name]: { versions: { [A.ver]: { time: hoursAgo(24 * 40) } } },
+      [B.name]: { versions: { [B.ver]: { time: hoursAgo(24 * 40) } } },
+    },
+    osv: { [keyOf(A)]: [A.id], [keyOf(B)]: [B.id] },
+  });
+  /** The fixture fetch, with the version-specific OSV answer for one package held back. */
+  const slowFor = (w: World, slowName: string, ms: number): FetchLike => {
+    const base = fetchFor(w);
+    return async (url, init) => {
+      if (url === 'https://api.osv.dev/v1/query' && JSON.parse(init!.body!).package.name === slowName) await new Promise((r) => setTimeout(r, ms));
+      return base(url, init);
+    };
+  };
+  const ORDERS: Array<[string, string]> = [['the first check finishes last', A.name], ['the second check finishes last', B.name]];
+
+  it.each(ORDERS)('two checks, two different malicious packages, %s: both are on disk and both block offline', async (_label, slowName) => {
+    const f = slowFor(twoMal(), slowName, 60);
+    const [ra, rb] = await Promise.all([
+      vetPackages([npmRef(A.name, A.ver)], { fetchImpl: f, nowMs: NOW, stateDir }),
+      vetPackages([npmRef(B.name, B.ver)], { fetchImpl: f, nowMs: NOW, stateDir }),
+    ]);
+    expect([ra.malicious, rb.malicious]).toEqual([true, true]);
+    expect(cacheKeys()).toEqual([keyOf(A), keyOf(B)]);
+    for (const p of [A, B]) {
+      const off = await vetPackages([npmRef(p.name, p.ver)], { fetchImpl: offline, nowMs: NOW + 3_600_000, stateDir });
+      expect({ name: p.name, malicious: off.malicious, cached: off.packages[0].cached, ids: off.packages[0].malicious }).toEqual({ name: p.name, malicious: true, cached: true, ids: [p.id] });
+    }
+    expect(fs.statSync(cacheFile()).mode & 0o777).toBe(0o600);
+  });
+
+  it.each(ORDERS)('a clean answer in one check still evicts the stale hit for that version and leaves the other check\'s new record, %s', async (_label, slowName) => {
+    // A is cached as malicious from an hour ago; its report has since been withdrawn. B is newly malicious.
+    fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: { [keyOf(A)]: { at: NOW - 3_600_000, ecosystem: 'npm', name: A.name, version: A.ver, osvIds: [A.id], hooks: [], sdistOnly: false } } }));
+    const w = twoMal();
+    delete w.osv[keyOf(A)];
+    const f = slowFor(w, slowName, 60);
+    const [ra, rb] = await Promise.all([
+      vetPackages([npmRef(A.name, A.ver)], { fetchImpl: f, nowMs: NOW, stateDir }),
+      vetPackages([npmRef(B.name, B.ver)], { fetchImpl: f, nowMs: NOW, stateDir }),
+    ]);
+    expect([ra.malicious, rb.malicious]).toEqual([false, true]);
+    expect(cacheKeys()).toEqual([keyOf(B)]);
+    const offA = await vetPackages([npmRef(A.name, A.ver)], { fetchImpl: offline, nowMs: NOW + 3_600_000, stateDir });
+    expect({ malicious: offA.malicious, status: offA.packages[0].status }).toEqual({ malicious: false, status: 'unchecked' });
+    const offB = await vetPackages([npmRef(B.name, B.ver)], { fetchImpl: offline, nowMs: NOW + 3_600_000, stateDir });
+    expect({ malicious: offB.malicious, cached: offB.packages[0].cached }).toEqual({ malicious: true, cached: true });
+  });
+
+  it('a write still drops records that expired on disk, and keeps unexpired ones another check wrote', async () => {
+    const old = { at: NOW - 7 * 3_600_000, ecosystem: 'npm', name: 'synth-expired', version: '1.0.0', osvIds: ['MAL-2026-90003'], hooks: [], sdistOnly: false };
+    const live = { at: NOW - 3_600_000, ecosystem: 'npm', name: 'synth-live', version: '1.0.0', osvIds: ['MAL-2026-90004'], hooks: [], sdistOnly: false };
+    fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: { 'npm@synth-expired@1.0.0': old, 'npm@synth-live@1.0.0': live } }));
+    await vetPackages([npmRef(A.name, A.ver)], opts(twoMal()));
+    expect(cacheKeys()).toEqual(['npm@synth-live@1.0.0', keyOf(A)]);
+  });
+
+  it('control: a cache file over the size limit is not read, a new record replaces it, owner-only, and a cache that cannot be written never fails a vet', async () => {
+    fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: {}, pad: 'x'.repeat(4_000_001) }));
+    const res = await vetPackages([npmRef(A.name, A.ver)], opts(twoMal()));
+    expect(res.malicious).toBe(true);
+    expect(cacheKeys()).toEqual([keyOf(A)]);
+    expect(fs.statSync(cacheFile()).size).toBeLessThan(4_000_000);
+    expect(fs.statSync(cacheFile()).mode & 0o777).toBe(0o600);
+    // The state directory is a regular file here, so nothing can be read or written under it.
+    const blocked = path.join(stateDir, 'not-a-directory');
+    fs.writeFileSync(blocked, '');
+    const res2 = await vetPackages([npmRef(B.name, B.ver)], { ...opts(twoMal()), stateDir: blocked });
+    expect(res2.malicious).toBe(true);
+  });
+});
