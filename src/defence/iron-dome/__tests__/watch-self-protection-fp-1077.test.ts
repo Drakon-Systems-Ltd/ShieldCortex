@@ -555,3 +555,47 @@ describe('#1077 (B) — a sink-free lease script is not walked for child scripts
     });
   });
 });
+
+/**
+ * #1077 (A) — remaining issue cases after #1079 and (B).
+ *
+ * Case 1 (`python3 <path>/action_lease.py acquire <scope> --reason x`) is
+ * covered by the (B) block above. Case 2's live shape ran an INTERPRETER on
+ * the remote side (`ssh host 'python3 - <<EOF … EOF'`). That stays held, by
+ * decision: the ssh unwrap judges a remote command exactly as the local one,
+ * and locally a Python read of the OpenClaw config is held too (only the
+ * closed set of shell readers is relieved). Relieving it remotely would make
+ * the remote side looser than the local one, and the guard cannot prove the
+ * host is not this one (`ssh localhost`). The shell-reader form is the route.
+ */
+describe('#1077 (A) — an interpreter over ssh stays held (decision, see NOTES)', () => {
+  const PY = [
+    'import json, os',
+    'with open(os.path.expanduser("~/.openclaw/openclaw.json")) as fh:',
+    '    cfg = json.load(fh)',
+    'tg = cfg.get("channels", {}).get("telegram", {})',
+    'tg["botToken"] = "<redacted>"',
+    'print(json.dumps(tg, indent=2))',
+  ].join('\n');
+  test.each([
+    `ssh vps2 'python3 - <<EOF\n${PY}\nEOF'`,
+    `ssh vps2 "python3 - <<'EOF'\n${PY}\nEOF"`,
+    `ssh vps2 python3 - <<'EOF'\n${PY}\nEOF`,
+    `ssh vps2 'python3 -' <<'EOF'\n${PY}\nEOF`,
+    // the local twin is held as well: parity, not a remote-only rule
+    `python3 - <<'EOF'\nimport json\nprint(json.load(open("/home/u/.openclaw/openclaw.json")))\nEOF`,
+  ])('held: %s', (command) => {
+    const v = bash(command);
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals).toContain('disable-action-guard');
+  });
+
+  test.each([
+    "ssh vps2 'jq .channels.telegram ~/.openclaw/openclaw.json'",
+    `ssh vps2 "jq '.channels.telegram' ~/.openclaw/openclaw.json"`,
+  ])('the shell-reader route runs: %s', (command) => {
+    const v = bash(command);
+    expect(floorOf(v)).toEqual([]);
+    expect(v.decision).toBe('allow');
+  });
+});
