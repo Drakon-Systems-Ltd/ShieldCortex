@@ -132,8 +132,8 @@ const MAX_PACKAGES_PER_COMMAND = 8;
 const MAX_EXTRA_LOOKUPS = 8;
 /** Chunks of the OSV batch in flight at once. */
 const BATCH_CONCURRENCY = 3;
-/** At most one full npm metadata request for exact-pin publication time per command. */
-const MAX_EXACT_PIN_AGE_FALLBACKS = 1;
+/** At most one full npm metadata request across all npm refs per command. */
+const MAX_NPM_FULL_METADATA_REQUESTS = 1;
 
 // ── Command parsing ─────────────────────────────────────────────────────────
 
@@ -813,45 +813,56 @@ function errClass(err: unknown): string {
 
 const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {});
 
-async function resolveNpm(ref: PackageRef, fetchImpl: FetchLike, signal: AbortSignal, ageFallback: { remaining: number }, checkAge: boolean): Promise<Facts> {
+const NPM_TIME_LIMIT = 'publication time lookup limit reached (one full npm metadata request per command)';
+
+async function fullNpmMetadata(base: string, fetchImpl: FetchLike, signal: AbortSignal, allowance: { remaining: number }): Promise<Record<string, unknown>> {
+  if (allowance.remaining <= 0) throw new Unchecked(NPM_TIME_LIMIT);
+  // Consume before awaiting: concurrent package lookups share this allowance.
+  allowance.remaining--;
+  return obj(await getJson(fetchImpl, base, signal));
+}
+
+async function fillNpmAge(facts: Facts, doc: Record<string, unknown> | undefined, base: string, fetchImpl: FetchLike, signal: AbortSignal, allowance: { remaining: number }, checkAge: boolean): Promise<void> {
+  if (!checkAge) return;
+  if (facts.publishedAt && Number.isFinite(Date.parse(facts.publishedAt))) return;
+  facts.publishedAt = undefined;
+  try {
+    const metadata = doc ?? await fullNpmMetadata(base, fetchImpl, signal, allowance);
+    const published = obj(metadata.time)[facts.version];
+    if (typeof published === 'string' && Number.isFinite(Date.parse(published))) facts.publishedAt = published;
+    else facts.ageUncheckedReason = 'publication time absent from registry metadata';
+  } catch (err) {
+    facts.ageUncheckedReason = err instanceof Unchecked ? (err.message === NPM_TIME_LIMIT ? NPM_TIME_LIMIT : `publication time lookup failed: ${err.message}`) : 'publication time lookup failed';
+  }
+}
+
+async function resolveNpm(ref: PackageRef, fetchImpl: FetchLike, signal: AbortSignal, allowance: { remaining: number }, checkAge: boolean): Promise<Facts> {
   const enc = ref.name.startsWith('@') ? `@${encodeURIComponent(ref.name.slice(1))}` : encodeURIComponent(ref.name);
   const base = `https://registry.npmjs.org/${enc}`;
   const spec = ref.spec ?? 'latest';
-  // Exact pins need one small manifest. Its time is usually absent. Permit one
-  // full metadata request per command for age, keeping hooks and OSV independent
-  // of an age lookup failure.
+  // Exact pins need one small manifest. Age uses the shared full-metadata allowance.
   if (semver.valid(spec)) {
     const version = semver.valid(spec)!;
     const manifest = obj(await getJson(fetchImpl, `${base}/${encodeURIComponent(version)}`, signal));
     if (manifest.version !== version) throw new Unchecked('registry returned a different version');
     const facts = npmFacts(version, manifest, manifest.time);
-    if (checkAge && (!facts.publishedAt || !Number.isFinite(Date.parse(facts.publishedAt)))) {
-      facts.publishedAt = undefined;
-      if (ageFallback.remaining > 0) {
-        ageFallback.remaining--;
-        try {
-          const doc = obj(await getJson(fetchImpl, base, signal));
-          const published = obj(doc.time)[version];
-          if (typeof published === 'string' && Number.isFinite(Date.parse(published))) facts.publishedAt = published;
-          else facts.ageUncheckedReason = 'publication time absent from registry metadata';
-        } catch (err) {
-          facts.ageUncheckedReason = err instanceof Unchecked ? `publication time lookup failed: ${err.message}` : 'publication time lookup failed';
-        }
-      } else facts.ageUncheckedReason = 'publication time lookup limit reached (one full npm metadata request per command)';
-    }
+    await fillNpmAge(facts, undefined, base, fetchImpl, signal, allowance, checkAge);
     return facts;
   }
-  // install-v1 omits much of the full packument while retaining dist-tags and
-  // version manifests. Fall back only when it cannot identify the manifest.
+  // install-v1 retains dist-tags and version manifests, but normally has no time map.
   let doc = obj(await getJson(fetchImpl, base, signal, 'application/vnd.npm.install-v1+json'));
   let version = npmVersion(doc, spec);
+  let fullDoc: Record<string, unknown> | undefined;
   if (!version || !obj(doc.versions)[version]) {
-    doc = obj(await getJson(fetchImpl, base, signal));
+    doc = await fullNpmMetadata(base, fetchImpl, signal, allowance);
+    fullDoc = doc;
     version = npmVersion(doc, spec);
   }
   if (!version || !obj(doc.versions)[version]) throw new Unchecked('could not resolve the requested version to a published version');
   if (!isSafeVersion(version)) throw new Unchecked('registry returned an unrecognisable version');
-  return npmFacts(version, obj(obj(doc.versions)[version]), obj(doc.time)[version]);
+  const facts = npmFacts(version, obj(obj(doc.versions)[version]), obj(doc.time)[version]);
+  await fillNpmAge(facts, fullDoc, base, fetchImpl, signal, allowance, checkAge);
+  return facts;
 }
 
 function npmVersion(doc: Record<string, unknown>, spec: string): string | undefined {
@@ -1187,7 +1198,7 @@ interface OneResult {
 
 async function vetOne(ref: PackageRef, ctx: {
   fetchImpl: FetchLike; regSignal: AbortSignal; osvSignal: AbortSignal; minAgeDays: number; nowMs: number;
-  cache: CacheFile; changes: CacheChanges; ageFallback: { remaining: number };
+  cache: CacheFile; changes: CacheChanges; npmFullMetadata: { remaining: number };
 }): Promise<OneResult> {
   const { fetchImpl, regSignal, osvSignal, minAgeDays, nowMs, cache } = ctx;
   if (ref.customIndex) {
@@ -1195,7 +1206,7 @@ async function vetOne(ref: PackageRef, ctx: {
   }
   let facts: Facts;
   try {
-    facts = ref.ecosystem === 'npm' ? await resolveNpm(ref, fetchImpl, regSignal, ctx.ageFallback, minAgeDays > 0) : await resolvePyPI(ref, fetchImpl, regSignal);
+    facts = ref.ecosystem === 'npm' ? await resolveNpm(ref, fetchImpl, regSignal, ctx.npmFullMetadata, minAgeDays > 0) : await resolvePyPI(ref, fetchImpl, regSignal);
   } catch (err) {
     return { vet: uncheckedVet(ref, err instanceof Unchecked ? err.message : 'lookup failed', minAgeDays, nowMs), exact: false };
   }
@@ -1287,14 +1298,14 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
   const cache = readCache(opts);
   const cacheSeqAtStart = cacheWriteSeq;
   const changes: CacheChanges = new Map();
-  const ageFallback = { remaining: MAX_EXACT_PIN_AGE_FALLBACKS };
+  const npmFullMetadata = { remaining: MAX_NPM_FULL_METADATA_REQUESTS };
   const packages: PackageVet[] = [];
   try {
     const head = unique.slice(0, MAX_PACKAGES_PER_COMMAND);
     // The malicious-package batch covers EVERY package (custom-index installs excepted: public records do not describe them).
     const batchRefs = unique.filter((r) => !r.customIndex);
     const batchP = queryOsvBatch(batchRefs.map((ref) => ({ ref, version: pinnedVersion(ref) })), fetchImpl, osvCtl.signal);
-    const headP = Promise.all(head.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes, ageFallback })
+    const headP = Promise.all(head.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes, npmFullMetadata })
       .catch((): OneResult => ({ vet: uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs), exact: false }))));
     const [batch, results] = await Promise.all([batchP, headP]);
     const batchAnswer = (ref: PackageRef): string[] | null => {
@@ -1306,7 +1317,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
     const extraRefs = unique.slice(head.length)
       .filter((r) => !r.customIndex && !pinnedVersion(r) && batchFor(r).length > 0)
       .slice(0, MAX_EXTRA_LOOKUPS);
-    const extraResults = await Promise.all(extraRefs.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes, ageFallback })
+    const extraResults = await Promise.all(extraRefs.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes, npmFullMetadata })
       .catch((): OneResult => ({ vet: uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs), exact: false }))));
     const extraByRef = new Map(extraRefs.map((ref, i) => [ref, extraResults[i]] as const));
     unique.forEach((ref, idx) => {

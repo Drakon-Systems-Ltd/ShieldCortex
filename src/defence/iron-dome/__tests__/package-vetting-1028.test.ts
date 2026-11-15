@@ -55,10 +55,12 @@ describe('#1028 npm metadata resolution', () => {
       return osv(url, init);
     };
     const dir = stateDir();
-    const latest = await vetPackages([ref('range-pkg', '^1.0.0')], { fetchImpl, nowMs, stateDir: dir });
-    const max = await vetPackages([ref('range-pkg', '>=1.5.0 <2')], { fetchImpl, nowMs, stateDir: dir });
+    const latest = await vetPackages([ref('range-pkg', '^1.0.0')], { fetchImpl, nowMs, stateDir: dir, minAgeDays: 0 });
+    const max = await vetPackages([ref('range-pkg', '>=1.5.0 <2')], { fetchImpl, nowMs, stateDir: dir, minAgeDays: 0 });
     expect(latest.packages[0]).toMatchObject({ version: '1.2.0', hooks: ['install'] });
     expect(max.packages[0].version).toBe('1.9.0');
+    expect(latest.packages[0].findings.some((finding) => finding.kind === 'unchecked')).toBe(false);
+    expect(max.packages[0].findings.some((finding) => finding.kind === 'unchecked')).toBe(false);
     expect(calls).toEqual(['application/vnd.npm.install-v1+json', 'application/vnd.npm.install-v1+json']);
   });
 
@@ -113,6 +115,53 @@ describe('#1028 npm metadata resolution', () => {
     expect(full).toHaveLength(1);
     expect(out.packages.filter((p) => p.findings.some((f) => f.kind === 'new-version'))).toHaveLength(1);
     expect(out.packages.filter((p) => p.findings.some((f) => f.kind === 'unchecked' && f.reason.includes('publication time lookup limit')))).toHaveLength(1);
+  });
+
+  it('checks range age after abbreviated resolution and shares the one full lookup with exact pins', async () => {
+    const full: string[] = [];
+    const osvVersions: string[] = [];
+    let releaseExact: (() => void) | undefined;
+    const fetchImpl: FetchLike = async (url, init) => {
+      if (url.startsWith(registry)) {
+        if (url.endsWith('/1.0.0')) {
+          await new Promise<void>((resolve) => { releaseExact = resolve; });
+          return response({ version: '1.0.0', scripts: { postinstall: 'run' } });
+        }
+        if (init?.headers?.accept === 'application/vnd.npm.install-v1+json') {
+          return response({ name: 'range-one', 'dist-tags': { latest: '1.0.0' }, versions: { '1.0.0': { hasInstallScript: true } }, modified: '2026-11-05T01:00:00Z' });
+        }
+        full.push(url);
+        releaseExact?.();
+        return response({ time: { '1.0.0': '2026-11-05T01:00:00Z' } });
+      }
+      if (url.endsWith('/query')) {
+        const body = JSON.parse(init?.body as string) as { version: string };
+        osvVersions.push(body.version);
+        return response({ vulns: [{ id: 'MAL-2026-1028' }] });
+      }
+      return osv(url, init);
+    };
+    const out = await vetPackages([ref('range-one', '^1.0.0'), ref('exact-two', '1.0.0')], { fetchImpl, nowMs, stateDir: stateDir() });
+    expect(full).toHaveLength(1);
+    expect(osvVersions).toEqual(['1.0.0', '1.0.0']);
+    expect(out.malicious).toBe(true);
+    expect(out.packages[0]).toMatchObject({ status: 'checked', version: '1.0.0', publishedAt: '2026-11-05T01:00:00Z', hooks: ['install'] });
+    expect(out.packages[0].findings).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'new-version', reason: 'published 11 h ago' })]));
+    expect(out.packages[1]).toMatchObject({ status: 'checked', version: '1.0.0', hooks: ['postinstall'] });
+    expect(out.packages[1].findings).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'unchecked', reason: expect.stringContaining('publication time lookup limit') }), expect.objectContaining({ kind: 'malicious' })]));
+  });
+
+  it('keeps resolved version, hooks and MAL block when range age lookup fails', async () => {
+    const fetchImpl: FetchLike = async (url, init) => {
+      if (url.startsWith(registry)) return init?.headers?.accept === 'application/vnd.npm.install-v1+json'
+        ? response({ 'dist-tags': { latest: '1.0.0' }, versions: { '1.0.0': { hasInstallScript: true } } })
+        : response({}, 503);
+      return url.endsWith('/query') ? response({ vulns: [{ id: 'MAL-2026-1028' }] }) : osv(url, init);
+    };
+    const out = await vetPackages([ref('range-fail', '^1.0.0')], { fetchImpl, nowMs, stateDir: stateDir() });
+    expect(out.malicious).toBe(true);
+    expect(out.packages[0]).toMatchObject({ status: 'checked', version: '1.0.0', hooks: ['install'] });
+    expect(out.packages[0].findings).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'unchecked', reason: 'unchecked: publication time lookup failed: registry answered HTTP 503' }), expect.objectContaining({ kind: 'malicious' })]));
   });
 });
 
