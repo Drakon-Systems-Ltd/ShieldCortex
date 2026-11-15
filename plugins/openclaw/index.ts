@@ -4050,14 +4050,23 @@ export async function handleBeforeAgentRun(
       : [];
     const history = Array.isArray(event?.messages) ? event.messages : [];
     for (const message of history.slice(-HISTORY_SCAN_LIMIT)) {
-      const role = message && typeof message === 'object' && 'role' in message
-        ? String(message.role).toLowerCase() : '';
-      const userRole = role === 'user' || role === 'human';
-      for (const input of labelHistoryMessage(message).inputs) {
-        // The current owner's older user-role turns can be detected without
-        // destroying this new turn. Tool-result blocks inside a user-role
-        // message do not inherit that relief (Anthropic encodes them there).
-        inputs.push({ ...input, ownerHistory: userRole && input.label !== 'tool_result' });
+      // #934: a malformed message (non-string role, throwing getter/toString)
+      // must not abort input collection — that left the prompt and every later
+      // message unscanned. Skip only the offending message.
+      try {
+        const rawRole = message && typeof message === 'object' && 'role' in message
+          ? (message as { role?: unknown }).role : undefined;
+        const role = typeof rawRole === 'string' ? rawRole.toLowerCase() : '';
+        const userRole = role === 'user' || role === 'human';
+        const labelled = labelHistoryMessage(message).inputs;
+        for (const input of labelled) {
+          // The current owner's older user-role turns can be detected without
+          // destroying this new turn. Tool-result blocks inside a user-role
+          // message do not inherit that relief (Anthropic encodes them there).
+          inputs.push({ ...input, ownerHistory: userRole && input.label !== 'tool_result' });
+        }
+      } catch {
+        continue;
       }
     }
     const automationSession = isTrustedAutomationSession(sessionId);

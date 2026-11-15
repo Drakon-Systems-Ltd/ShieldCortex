@@ -98,6 +98,28 @@ describe('#934 enforcing conversation gate with the real defence scanner', () =>
     expect(scanner).toHaveBeenCalled();
   });
 
+  it('still blocks a hostile non-owner prompt when a history role cannot be stringified', async () => {
+    // JSON-shaped hostile input: an own `toString: null` makes String(role)
+    // throw, which must not reach the fail-open catch before the prompt is scanned.
+    const role = JSON.parse('{"toString":null}');
+    const decision = await handleBeforeAgentRun(
+      { prompt: ATTACK, messages: [{ role, content: CLEAN }], senderIsOwner: false },
+      { sessionId: 'agent:main:direct:guest' },
+    );
+    expect(decision).toMatchObject({ outcome: 'block', category: 'prompt_injection' });
+    expect(scanner).toHaveBeenCalledWith(expect.any(String), ATTACK, expect.anything());
+  });
+
+  it('skips an unreadable history message but still scans later tool results', async () => {
+    const unreadable = { get role(): string { throw new Error('malformed role'); }, content: CLEAN };
+    const decision = await handleBeforeAgentRun(
+      { prompt: CLEAN, messages: [unreadable, { role: 'tool', content: ATTACK }], senderIsOwner: true },
+      { sessionId: 'owner-with-malformed-history-934' },
+    );
+    expect(decision).toMatchObject({ outcome: 'block', category: 'prompt_injection' });
+    expect(scanner).toHaveBeenCalledWith(expect.any(String), ATTACK, expect.anything());
+  });
+
   it('keeps history scanning bounded to the last five messages', async () => {
     const messages = [
       { role: 'user', content: ATTACK },
