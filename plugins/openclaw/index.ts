@@ -35,7 +35,7 @@ import { createRequire } from "node:module";
 import { readConversationAccess, describeRegisteredHooks } from './conversation-access.js';
 import { createSessionTaintStore } from './session-taint.js';
 import { isTaintingScanSummary, severityFromScanSummary } from './scan-taint-policy.js';
-import { labelHistoryMessageForGate, labelLlmInput, snapshotGateHistory, HISTORY_SCAN_LIMIT } from './provenance.js';
+import { labelHistoryMessageForGate, labelLlmInput, readGateHostField, snapshotGateHistory, HISTORY_SCAN_LIMIT } from './provenance.js';
 import type { PluginProvenanceLabel } from './provenance.js';
 import { classifyConversationOrigin } from './conversation-trust.js';
 import type { ConversationTrustDecision } from './conversation-trust.js';
@@ -4046,8 +4046,13 @@ export async function handleBeforeAgentRun(
     // the last five history messages (not five blocks), retaining every readable
     // block in each selected message. The observation hook remains unchanged.
     const scanStarted = Date.now();
-    // Read once: a getter must not answer the type check and the scan differently.
-    const rawPrompt: unknown = event?.prompt;
+    // Read once, like history: a prompt that is not a plain data property
+    // (getter, Proxy, throwing read) may answer the host differently after
+    // the gate scanned it, so it is scanned but can never clean-pass.
+    let rawPrompt: unknown;
+    let promptOpaque = false;
+    try { ({ value: rawPrompt, opaque: promptOpaque } = readGateHostField(event, 'prompt')); }
+    catch { promptOpaque = true; }
     const prompt = typeof rawPrompt === 'string' ? rawPrompt : '';
     const inputs: Array<{ text: string; label: PluginProvenanceLabel; ownerHistory?: boolean }> = prompt
       ? [{ text: prompt, label: 'unknown' }] : [];
@@ -4136,6 +4141,12 @@ export async function handleBeforeAgentRun(
     if (!scan && historyIncomplete) {
       text = '[selected history unreadable or uninspected]';
       scan = { clean: false, available: true, summary: 'selected conversation history was not fully inspected' };
+      fromHistory = true;
+    }
+    if (!scan && promptOpaque) {
+      // Not owner-attested: the host may read a different prompt than was scanned.
+      text = '[prompt not a plain data property]';
+      scan = { clean: false, available: true, summary: 'prompt could not be read stably and was not fully inspected' };
       fromHistory = true;
     }
     if (!scan && unavailable) {

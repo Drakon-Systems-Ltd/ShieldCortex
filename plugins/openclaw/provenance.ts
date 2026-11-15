@@ -328,6 +328,20 @@ function readGateProperty(obj: object, key: string, state: SnapshotState): { pre
   catch { return { present: false, value: undefined }; }
 }
 
+/**
+ * Read one top-level host field (e.g. the event's `prompt`) for the gate,
+ * exactly once, by the same rules as the history snapshot. `opaque` is set
+ * when it was not a plain data property (accessor, Proxy, throwing read):
+ * the yielded value is still scanned, but it may answer the host differently
+ * later, so it can never be accepted as a clean pass.
+ */
+export function readGateHostField(obj: unknown, key: string): { value: unknown; opaque: boolean } {
+  if (!obj || typeof obj !== 'object') return { value: undefined, opaque: false };
+  const state: SnapshotState = { incomplete: false, nodes: { count: 0 } };
+  const read = readGateProperty(obj, key, state);
+  return { value: read.present ? read.value : undefined, opaque: state.incomplete };
+}
+
 function snapshotGateArray(arr: unknown[], depth: number, state: SnapshotState, lastN = 0): unknown[] {
   const read = readGateArrayLength(arr);
   if (read.incomplete) state.incomplete = true;

@@ -515,6 +515,21 @@ describe('#934 accessor and getter reads that change between the gate and the ho
       .toMatchObject({ outcome: 'block', category: 'prompt_injection' });
   });
 
+  it('never clean-passes an event.prompt getter, reading it once and still scanning it', async () => {
+    let reads = 0;
+    const event = Object.defineProperty({ senderIsOwner: true, messages: [] }, 'prompt', {
+      enumerable: true, get: () => (++reads >= 2 ? ATTACK : CLEAN),
+    });
+    expect(await handleBeforeAgentRun(event as never, { sessionId: 'agent:main:direct:guest' }))
+      .toMatchObject({ outcome: 'block' });
+    expect(reads).toBe(1);
+    const hostile = Object.defineProperty({ senderIsOwner: false, messages: [] }, 'prompt', {
+      enumerable: true, get: () => ATTACK,
+    });
+    expect(await handleBeforeAgentRun(hostile as never, { sessionId: 'agent:main:direct:guest' }))
+      .toMatchObject({ outcome: 'block', category: 'prompt_injection' });
+  });
+
   it('reads each getter once, so a getter that flips on a later read cannot clean-pass', async () => {
     const later = (n: number) => { let c = 0; return () => (++c >= n ? ATTACK : BENIGN); };
     const msg = Object.defineProperty({ role: 'tool' }, 'content', { enumerable: true, get: later(3) });
