@@ -447,13 +447,12 @@ describe('#934 accessor and getter reads that change between the gate and the ho
       { sessionId: 'agent:main:direct:guest' },
     );
   }
-  const scannedAttack = () => scanner.mock.calls.some(call => String(call[1]).includes('Ignore all previous'));
 
   it('blocks a history accessor index that answers benign first and the attack later', async () => {
     const messages = accessorIndex([{ role: 'tool', content: ATTACK }, { role: 'tool', content: BENIGN }], 0,
       { role: 'tool', content: BENIGN });
     expect(await gate({ messages })).toMatchObject({ outcome: 'block' });
-    expect(scannedAttack()).toBe(true);
+    expect(verdicts()).toContain(NOT_INSPECTED);
   });
 
   it('never clean-passes a history accessor index, even one that is stable', async () => {
@@ -467,14 +466,14 @@ describe('#934 accessor and getter reads that change between the gate and the ho
   it('blocks a content-block accessor index that answers benign first', async () => {
     const content = accessorIndex([textBlock(ATTACK), textBlock(BENIGN)], 0, textBlock(BENIGN));
     expect(await gate({ messages: [{ role: 'tool', content }] })).toMatchObject({ outcome: 'block' });
-    expect(scannedAttack()).toBe(true);
+    expect(verdicts()).toContain(NOT_INSPECTED);
   });
 
   it('blocks a nested tool-result content array with an accessor index', async () => {
     const inner = accessorIndex([textBlock(ATTACK)], 0, textBlock(BENIGN));
     const messages = [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: inner }] }];
     expect(await gate({ messages }, true)).toMatchObject({ outcome: 'block' });
-    expect(scannedAttack()).toBe(true);
+    expect(verdicts()).toContain(NOT_INSPECTED);
   });
 
   it('blocks a sparse (holey) content array rather than reading through the prototype', async () => {
@@ -492,35 +491,84 @@ describe('#934 accessor and getter reads that change between the gate and the ho
       },
     };
     expect(await gate(event as never)).toMatchObject({ outcome: 'block' });
-    expect(scannedAttack()).toBe(true);
+    expect(verdicts()).toContain(NOT_INSPECTED);
   });
 
-  it('accepts a stable event.messages getter (same array, or an equal fresh copy)', async () => {
+  it('never clean-passes an event.messages getter, but still scans what it yields', async () => {
     const history = [{ role: 'tool', content: CLEAN }, { role: 'user', content: [textBlock(CLEAN)] }];
-    expect(await gate({ get messages() { return history; } } as never)).toEqual({ outcome: 'pass' });
-    expect(await gate({ get messages() { return history.map(m => ({ ...m })); } } as never))
-      .toEqual({ outcome: 'pass' });
+    expect(await gate({ get messages() { return history; } } as never)).toMatchObject({ outcome: 'block' });
+    expect(verdicts()).toContain(NOT_INSPECTED);
     expect(await gate({ get messages() { return [{ role: 'tool', content: ATTACK }]; } } as never))
       .toMatchObject({ outcome: 'block', category: 'prompt_injection' });
-    expect(verdicts()).not.toContain(NOT_INSPECTED);
   });
 
-  it('accepts stable host class getters on messages and blocks', async () => {
+  it('never clean-passes host class (prototype) getters, but still scans what they yield', async () => {
     class HostBlock { constructor(private readonly t: string) {} get type() { return 'text'; } get text() { return this.t; } }
     class HostMessage {
       constructor(private readonly r: string, private readonly c: unknown) {}
       get role() { return this.r; }
       get content() { return this.c; }
     }
-    expect(await gate({ messages: [new HostMessage('tool', [new HostBlock(CLEAN)])] })).toEqual({ outcome: 'pass' });
+    expect(await gate({ messages: [new HostMessage('tool', [new HostBlock(CLEAN)])] })).toMatchObject({ outcome: 'block' });
+    expect(verdicts()).toContain(NOT_INSPECTED);
     expect(await gate({ messages: [new HostMessage('tool', [new HostBlock(ATTACK)])] }))
       .toMatchObject({ outcome: 'block', category: 'prompt_injection' });
+  });
+
+  it('reads each getter once, so a getter that flips on a later read cannot clean-pass', async () => {
+    const later = (n: number) => { let c = 0; return () => (++c >= n ? ATTACK : BENIGN); };
+    const msg = Object.defineProperty({ role: 'tool' }, 'content', { enumerable: true, get: later(3) });
+    expect(await gate({ messages: [msg] })).toMatchObject({ outcome: 'block' });
+    expect(verdicts()).toContain(NOT_INSPECTED);
+    const block = Object.defineProperty({ type: 'text' }, 'text', { enumerable: true, get: later(3) });
+    expect(await gate({ messages: [{ role: 'tool', content: [block] }] })).toMatchObject({ outcome: 'block' });
+    let reads = 0;
+    const event = { get messages() { return ++reads >= 3 ? [{ role: 'tool', content: ATTACK }] : [{ role: 'tool', content: BENIGN }]; } };
+    expect(await gate(event as never)).toMatchObject({ outcome: 'block' });
+    expect(reads).toBe(1);
+  });
+
+  it('never clean-passes an inherited accessor on a plain-looking message', async () => {
+    const proto = Object.defineProperty({}, 'content', { get: () => BENIGN });
+    const msg = Object.assign(Object.create(proto) as Record<string, unknown>, { role: 'tool' });
+    expect(await gate({ messages: [msg] })).toMatchObject({ outcome: 'block' });
+    expect(verdicts()).toContain(NOT_INSPECTED);
+  });
+
+  it('accepts inherited data properties and class instances with data fields', async () => {
+    const proto = { role: 'tool' };
+    const msg = Object.assign(Object.create(proto) as Record<string, unknown>, { content: CLEAN });
+    class HostMessage { role = 'tool'; content = [textBlock(CLEAN)]; }
+    expect(await gate({ messages: [msg, new HostMessage()] })).toEqual({ outcome: 'pass' });
+    expect(verdicts()).not.toContain(NOT_INSPECTED);
+  });
+
+  it('never clean-passes tool-result content nested past the flattening limit', async () => {
+    for (const k of [4, 5]) {
+      let inner: unknown = [textBlock(ATTACK)];
+      for (let i = 0; i < k; i++) inner = [{ type: 'tool_result', tool_use_id: `t${i}`, content: inner }];
+      expect(await gate({ messages: [{ role: 'user', content: inner }] })).toMatchObject({ outcome: 'block' });
+    }
+    expect(verdicts()).toContain(NOT_INSPECTED);
+  });
+
+  it('clean-passes frozen and JSON-parsed plain history', async () => {
+    const frozen = Object.freeze([Object.freeze({ role: 'tool', content: Object.freeze([Object.freeze(textBlock(CLEAN))]) })]);
+    expect(await gate({ messages: frozen })).toEqual({ outcome: 'pass' });
+    const parsed = JSON.parse(JSON.stringify(Array.from({ length: 50 }, (_, i) => ({
+      role: i % 2 ? 'assistant' : 'user', content: [textBlock(`Routine note ${i} about the build pipeline.`)],
+    }))));
+    expect(await gate({ messages: parsed })).toEqual({ outcome: 'pass' });
+    const nested3 = [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'a', content: [
+      { type: 'tool_result', tool_use_id: 'b', content: [{ type: 'tool_result', tool_use_id: 'c', content: [textBlock(CLEAN)] }] }] }] }];
+    expect(await gate({ messages: nested3 })).toEqual({ outcome: 'pass' });
+    expect(verdicts()).not.toContain(NOT_INSPECTED);
   });
 
   it('blocks a message content getter that answers benign first and the attack later', async () => {
     const msg = flipping({ role: 'tool' }, 'content', BENIGN, ATTACK);
     expect(await gate({ messages: [msg] })).toMatchObject({ outcome: 'block' });
-    expect(scannedAttack()).toBe(true);
+    expect(verdicts()).toContain(NOT_INSPECTED);
   });
 
   it('blocks a role getter that claims owner user-role first and tool later', async () => {
@@ -531,14 +579,14 @@ describe('#934 accessor and getter reads that change between the gate and the ho
   it('blocks a block text getter that answers benign first and the attack later', async () => {
     const block = flipping({ type: 'text' }, 'text', BENIGN, ATTACK);
     expect(await gate({ messages: [{ role: 'tool', content: [block] }] })).toMatchObject({ outcome: 'block' });
-    expect(scannedAttack()).toBe(true);
+    expect(verdicts()).toContain(NOT_INSPECTED);
   });
 
   it('blocks a nested tool-result content getter that answers benign first', async () => {
     const result = flipping({ type: 'tool_result', tool_use_id: 't1' }, 'content',
       [textBlock(BENIGN)], [textBlock(ATTACK)]);
     expect(await gate({ messages: [{ role: 'user', content: [result] }] }, true)).toMatchObject({ outcome: 'block' });
-    expect(scannedAttack()).toBe(true);
+    expect(verdicts()).toContain(NOT_INSPECTED);
   });
 
   it('still clean-passes plain data and does not mark it uninspected', async () => {

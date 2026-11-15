@@ -4046,17 +4046,19 @@ export async function handleBeforeAgentRun(
     // the last five history messages (not five blocks), retaining every readable
     // block in each selected message. The observation hook remains unchanged.
     const scanStarted = Date.now();
-    const prompt = typeof event?.prompt === 'string' ? event.prompt : '';
+    // Read once: a getter must not answer the type check and the scan differently.
+    const rawPrompt: unknown = event?.prompt;
+    const prompt = typeof rawPrompt === 'string' ? rawPrompt : '';
     const inputs: Array<{ text: string; label: PluginProvenanceLabel; ownerHistory?: boolean }> = prompt
       ? [{ text: prompt, label: 'unknown' }] : [];
-    // Selected history is first copied to plain data (snapshotGateHistory):
-    // no host getter, Proxy trap, species or slice runs during labelling, and
-    // any read that was opaque or answered differently on a second read
-    // (accessor array index, unstable property getter, unstable `messages`)
-    // marks the history incomplete, so it can never clean-pass. Whatever such
-    // reads yielded is still scanned, including a differing second answer.
+    // Selected history is first copied to plain data (snapshotGateHistory),
+    // reading each host property at most once; no host getter, Proxy trap,
+    // species or slice runs during labelling. Any read on that path that was
+    // not a plain data property (own or inherited accessor, accessor index,
+    // Proxy, hole, depth overflow) marks the history incomplete, so it can
+    // never clean-pass; whatever the read yielded is still scanned.
     let historyIncomplete = false;
-    let snapshot: ReturnType<typeof snapshotGateHistory> = { messages: [], incomplete: true, alternateTexts: [] };
+    let snapshot: ReturnType<typeof snapshotGateHistory> = { messages: [], incomplete: true };
     try { snapshot = snapshotGateHistory(event, HISTORY_SCAN_LIMIT); }
     catch { historyIncomplete = true; }
     historyIncomplete ||= snapshot.incomplete;
@@ -4069,7 +4071,6 @@ export async function handleBeforeAgentRun(
         inputs.push({ ...input, ownerHistory: labelled.userRole && input.label !== 'tool_result' });
       }
     }
-    for (const text of snapshot.alternateTexts) inputs.push({ text, label: 'unknown' });
     const automationSession = isTrustedAutomationSession(sessionId);
     const turnTrust = classifyConversationOrigin({
       senderIsOwner: event?.senderIsOwner,
