@@ -5,17 +5,18 @@
  * the corpus was frozen (12 Nov 2026). Every one of them must end up with at
  * least one named fixture. `FROZEN_CORPUS` is what has been authored so far.
  *
- * STATE AT THIS COMMIT: only the Phase 1 line (#519) has fixtures. The
- * Phase 2 to 4 fixture files are not in the tree yet; see
+ * STATE AT THIS COMMIT: the Phase 1 line (#519) and one Phase 3 line (#1005,
+ * the SCN-009 reverse-shell shapes and their controls) have fixtures. The
+ * other Phase 2 to 4 fixtures are not in the tree yet; see
  * `docs/architecture/ADR-002-frozen-corpus.md` for why and for what each
  * missing line needs. The test holds that gap as a known-gap, so CI goes red
  * when the last line is covered and the marker has not been removed.
- * 1 of 20 epic lines has a fixture. That one is a cost fixture, whose growth
- * measurement is an opt-in report, so the default suite asserts no classifier
- * verdict for any epic line yet.
+ * 2 of 20 epic lines have a fixture. #519's is a cost fixture, whose growth
+ * measurement is an opt-in report; #1005's are verdict fixtures.
  */
 import type { FrozenFixture } from './types.js';
 import { PHASE1_FIXTURES } from './phase1.js';
+import { PHASE3_FIXTURES } from './phase3.js';
 
 export interface EpicLine {
   issue: number;
@@ -49,6 +50,7 @@ export const EPIC_LINES: EpicLine[] = [
 
 export const FROZEN_CORPUS: FrozenFixture[] = [
   ...PHASE1_FIXTURES,
+  ...PHASE3_FIXTURES,
 ];
 
 export type { FrozenFixture } from './types.js';
