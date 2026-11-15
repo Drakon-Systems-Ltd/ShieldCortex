@@ -36,6 +36,7 @@
  */
 
 import fs from 'fs';
+import { randomUUID } from 'crypto';
 import os from 'os';
 import path from 'path';
 import semver from 'semver';
@@ -73,6 +74,8 @@ export interface PackageVet {
   /** The version a plain install would resolve to. */
   version?: string;
   publishedAt?: string;
+  /** Why publication age could not be checked while other checks succeeded. */
+  ageUncheckedReason?: string;
   osvIds: string[];
   /** The subset of `osvIds` that are `MAL-` (known malicious) entries. */
   malicious: string[];
@@ -129,6 +132,8 @@ const MAX_PACKAGES_PER_COMMAND = 8;
 const MAX_EXTRA_LOOKUPS = 8;
 /** Chunks of the OSV batch in flight at once. */
 const BATCH_CONCURRENCY = 3;
+/** At most one full npm metadata request for exact-pin publication time per command. */
+const MAX_EXACT_PIN_AGE_FALLBACKS = 1;
 
 // ── Command parsing ─────────────────────────────────────────────────────────
 
@@ -549,10 +554,14 @@ function isCacheEntry(value: unknown): value is CacheEntry {
 }
 
 function readCache(opts: VetOptions): CacheFile {
+  let fd: number | undefined;
   try {
-    const st = fs.lstatSync(cachePath(opts));
+    // Open the file itself without following a symlink. Stat and read the same
+    // descriptor, so a path swap between those operations cannot select another file.
+    fd = fs.openSync(cachePath(opts), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const st = fs.fstatSync(fd);
     if (!st.isFile() || st.size > 4_000_000) return { v: 1, entries: {} };
-    const parsed = JSON.parse(fs.readFileSync(cachePath(opts), 'utf-8'));
+    const parsed = JSON.parse(fs.readFileSync(fd, 'utf-8'));
     if (parsed?.v === 1 && parsed.entries && typeof parsed.entries === 'object' && !Array.isArray(parsed.entries)) {
       const entries: Record<string, CacheEntry> = Object.create(null);
       let discardedInvalidRows = false;
@@ -563,6 +572,7 @@ function readCache(opts: VetOptions): CacheFile {
       return { v: 1, entries, discardedInvalidRows };
     }
   } catch { /* absent or corrupt: start empty */ }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
   return { v: 1, entries: {} };
 }
 
@@ -588,6 +598,32 @@ type CacheChanges = Map<string, CacheChange>;
  */
 let cacheWriteSeq = 0;
 const cacheSetSeq = new Map<string, Map<string, number>>();
+const STALE_CACHE_LOCK_MS = 30_000;
+
+function sameInode(a: fs.Stats, b: fs.Stats): boolean { return a.dev === b.dev && a.ino === b.ino; }
+
+/** Reclaim only an old lock whose recorded owner is dead. */
+function reclaimStaleCacheLock(lockPath: string): boolean {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(lockPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const held = fs.fstatSync(fd);
+    if (!held.isFile() || Date.now() - held.mtimeMs < STALE_CACHE_LOCK_MS) return false;
+    const raw = fs.readFileSync(fd, 'utf8');
+    let pid: unknown;
+    try { pid = JSON.parse(raw).pid; } catch { return false; }
+    // An ownerless/invalid lock cannot be distinguished from a paused live
+    // writer between O_EXCL and its owner write. Leave it in place.
+    if (!Number.isSafeInteger(pid) || (pid as number) <= 0) return false;
+    try { process.kill(pid as number, 0); return false; }
+    catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ESRCH') return false; }
+    // Do not unlink a path that was replaced while inspecting the owner.
+    if (!sameInode(held, fs.lstatSync(lockPath))) return false;
+    fs.unlinkSync(lockPath);
+    return true;
+  } catch { return false; }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
+}
 
 /** True when `onDisk` is the record an eviction saw: same time, same ids. A record in any other shape never is. */
 function isRecordSeen(onDisk: unknown, seen: Pick<CacheEntry, 'at' | 'osvIds'>): boolean {
@@ -610,12 +646,32 @@ function isRecordSeen(onDisk: unknown, seen: Pick<CacheEntry, 'at' | 'osvIds'>):
  * after that write sees the new record and evicts it as before.
  */
 function writeCache(opts: VetOptions, changes: CacheChanges, nowMs: number, ttlMs: number, startSeq: number, startIdentity: string | null): void {
+  let lock: number | undefined;
+  let lockInode: fs.Stats | undefined;
+  let lockPath: string | undefined;
+  let tmp: string | undefined;
   try {
     const file = cachePath(opts);
     const dir = stateDir(opts);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const identity = cacheIdentity(opts);
     if (identity === null) return;
+    // Coordinate separate processes as well as concurrent calls in this process.
+    // A bounded lock failure leaves the current verdict intact; the cache is optional.
+    lockPath = `${file}.lock`;
+    const deadline = Date.now() + 250;
+    for (;;) {
+      try {
+        lock = fs.openSync(lockPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
+        lockInode = fs.fstatSync(lock);
+        fs.writeSync(lock, JSON.stringify({ pid: process.pid }));
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST' || Date.now() >= deadline) return;
+        if (reclaimStaleCacheLock(lockPath)) continue;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      }
+    }
     const seqs = cacheSetSeq.get(identity) ?? new Map<string, number>();
     const merged = readCache(opts).entries;
     const written: string[] = [];
@@ -626,16 +682,25 @@ function writeCache(opts: VetOptions, changes: CacheChanges, nowMs: number, ttlM
     }
     const entries: Record<string, CacheEntry> = {};
     for (const [k, e] of Object.entries(merged)) if (nowMs - e.at < ttlMs) entries[k] = e;
-    const tmp = path.join(dir, `.package-vetting-cache.${process.pid}.${Date.now()}.tmp`);
-    fs.writeFileSync(tmp, JSON.stringify({ v: 1, entries }), { mode: 0o600 });
+    tmp = path.join(dir, `.package-vetting-cache.${randomUUID()}.tmp`);
+    fs.writeFileSync(tmp, JSON.stringify({ v: 1, entries }), { mode: 0o600, flag: 'wx' });
     fs.chmodSync(tmp, 0o600);
     fs.renameSync(tmp, file);
+    tmp = undefined;
     // Only now is the file what this call wrote: number its records, forget the ones that left.
     for (const k of written) seqs.set(k, ++cacheWriteSeq);
     for (const k of [...seqs.keys()]) if (!(k in entries)) seqs.delete(k);
     if (seqs.size > 0) cacheSetSeq.set(identity, seqs);
     else cacheSetSeq.delete(identity);
   } catch { /* the cache is an optimisation; never fail a vet over it */ }
+  finally {
+    if (tmp) { try { fs.unlinkSync(tmp); } catch { /* already gone */ } }
+    if (lock !== undefined) {
+      fs.closeSync(lock);
+      try { if (lockInode && lockPath && sameInode(lockInode, fs.lstatSync(lockPath))) fs.unlinkSync(lockPath); }
+      catch { /* already gone or replaced */ }
+    }
+  }
 }
 
 /** A cached, unexpired `MAL-` hit that applies to this request, or null. */
@@ -717,16 +782,17 @@ class Unchecked extends Error {}
 interface Facts {
   version: string;
   publishedAt?: string;
+  ageUncheckedReason?: string;
   hooks: string[];
   sdistOnly: boolean;
 }
 
 const NPM_HOOKS = ['preinstall', 'install', 'postinstall', 'prepare'];
 
-async function getJson(fetchImpl: FetchLike, url: string, signal: AbortSignal): Promise<unknown> {
+async function getJson(fetchImpl: FetchLike, url: string, signal: AbortSignal, accept = 'application/json'): Promise<unknown> {
   let res;
   try {
-    res = await fetchImpl(url, { headers: { accept: 'application/json', 'user-agent': 'shieldcortex-package-vetting' }, signal });
+    res = await fetchImpl(url, { headers: { accept, 'user-agent': 'shieldcortex-package-vetting' }, signal });
   } catch (err) {
     throw new Unchecked(signal.aborted ? 'timed out' : `network error (${errClass(err)})`);
   }
@@ -747,24 +813,63 @@ function errClass(err: unknown): string {
 
 const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {});
 
-async function resolveNpm(ref: PackageRef, fetchImpl: FetchLike, signal: AbortSignal): Promise<Facts> {
+async function resolveNpm(ref: PackageRef, fetchImpl: FetchLike, signal: AbortSignal, ageFallback: { remaining: number }, checkAge: boolean): Promise<Facts> {
   const enc = ref.name.startsWith('@') ? `@${encodeURIComponent(ref.name.slice(1))}` : encodeURIComponent(ref.name);
-  const doc = obj(await getJson(fetchImpl, `https://registry.npmjs.org/${enc}`, signal));
+  const base = `https://registry.npmjs.org/${enc}`;
+  const spec = ref.spec ?? 'latest';
+  // Exact pins need one small manifest. Its time is usually absent. Permit one
+  // full metadata request per command for age, keeping hooks and OSV independent
+  // of an age lookup failure.
+  if (semver.valid(spec)) {
+    const version = semver.valid(spec)!;
+    const manifest = obj(await getJson(fetchImpl, `${base}/${encodeURIComponent(version)}`, signal));
+    if (manifest.version !== version) throw new Unchecked('registry returned a different version');
+    const facts = npmFacts(version, manifest, manifest.time);
+    if (checkAge && (!facts.publishedAt || !Number.isFinite(Date.parse(facts.publishedAt)))) {
+      facts.publishedAt = undefined;
+      if (ageFallback.remaining > 0) {
+        ageFallback.remaining--;
+        try {
+          const doc = obj(await getJson(fetchImpl, base, signal));
+          const published = obj(doc.time)[version];
+          if (typeof published === 'string' && Number.isFinite(Date.parse(published))) facts.publishedAt = published;
+          else facts.ageUncheckedReason = 'publication time absent from registry metadata';
+        } catch (err) {
+          facts.ageUncheckedReason = err instanceof Unchecked ? `publication time lookup failed: ${err.message}` : 'publication time lookup failed';
+        }
+      } else facts.ageUncheckedReason = 'publication time lookup limit reached (one full npm metadata request per command)';
+    }
+    return facts;
+  }
+  // install-v1 omits much of the full packument while retaining dist-tags and
+  // version manifests. Fall back only when it cannot identify the manifest.
+  let doc = obj(await getJson(fetchImpl, base, signal, 'application/vnd.npm.install-v1+json'));
+  let version = npmVersion(doc, spec);
+  if (!version || !obj(doc.versions)[version]) {
+    doc = obj(await getJson(fetchImpl, base, signal));
+    version = npmVersion(doc, spec);
+  }
+  if (!version || !obj(doc.versions)[version]) throw new Unchecked('could not resolve the requested version to a published version');
+  if (!isSafeVersion(version)) throw new Unchecked('registry returned an unrecognisable version');
+  return npmFacts(version, obj(obj(doc.versions)[version]), obj(doc.time)[version]);
+}
+
+function npmVersion(doc: Record<string, unknown>, spec: string): string | undefined {
   const versions = obj(doc.versions);
   const tags = obj(doc['dist-tags']);
-  const spec = ref.spec ?? 'latest';
-  let version: string | undefined;
-  if (typeof tags[spec] === 'string') version = tags[spec] as string;
-  else if (semver.valid(spec)) version = semver.valid(spec)!;
-  else if (semver.validRange(spec)) version = semver.maxSatisfying(Object.keys(versions), spec) ?? undefined;
-  if (!version || !versions[version]) throw new Unchecked('could not resolve the requested version to a published version');
-  if (!isSafeVersion(version)) throw new Unchecked('registry returned an unrecognisable version');
-  const manifest = obj(versions[version]);
+  if (typeof tags[spec] === 'string') return tags[spec] as string;
+  const range = semver.validRange(spec);
+  if (!range) return undefined;
+  const latest = tags.latest;
+  if (typeof latest === 'string' && semver.valid(latest) && semver.satisfies(latest, range)) return latest;
+  return semver.maxSatisfying(Object.keys(versions), range) ?? undefined;
+}
+
+function npmFacts(version: string, manifest: Record<string, unknown>, published?: unknown): Facts {
   const scripts = obj(manifest.scripts);
   const hooks = NPM_HOOKS.filter((h) => typeof scripts[h] === 'string' && (scripts[h] as string).trim() !== '');
   // A manifest can also flag install scripts without listing them (registry-computed).
   if (!hooks.length && manifest.hasInstallScript === true) hooks.push('install');
-  const published = obj(doc.time)[version];
   return { version, publishedAt: typeof published === 'string' ? published : undefined, hooks, sdistOnly: false };
 }
 
@@ -1037,6 +1142,7 @@ function buildFindings(v: Omit<PackageVet, 'findings'>, minAgeDays: number, nowM
   if (v.status === 'unchecked') {
     out.push({ kind: 'unchecked', severity: 'advisory', reason: `unchecked: ${v.uncheckedReason ?? 'lookup failed'}` });
   }
+  if (v.ageUncheckedReason) out.push({ kind: 'unchecked', severity: 'advisory', reason: `unchecked: ${v.ageUncheckedReason}` });
   if (v.malicious.length && v.unconfirmedVersion) {
     // A name-only hit: OSV lists a malicious release under this name, but the version this install
     // would fetch could not be checked. Say exactly that, and the way through.
@@ -1081,7 +1187,7 @@ interface OneResult {
 
 async function vetOne(ref: PackageRef, ctx: {
   fetchImpl: FetchLike; regSignal: AbortSignal; osvSignal: AbortSignal; minAgeDays: number; nowMs: number;
-  cache: CacheFile; changes: CacheChanges;
+  cache: CacheFile; changes: CacheChanges; ageFallback: { remaining: number };
 }): Promise<OneResult> {
   const { fetchImpl, regSignal, osvSignal, minAgeDays, nowMs, cache } = ctx;
   if (ref.customIndex) {
@@ -1089,7 +1195,7 @@ async function vetOne(ref: PackageRef, ctx: {
   }
   let facts: Facts;
   try {
-    facts = ref.ecosystem === 'npm' ? await resolveNpm(ref, fetchImpl, regSignal) : await resolvePyPI(ref, fetchImpl, regSignal);
+    facts = ref.ecosystem === 'npm' ? await resolveNpm(ref, fetchImpl, regSignal, ctx.ageFallback, minAgeDays > 0) : await resolvePyPI(ref, fetchImpl, regSignal);
   } catch (err) {
     return { vet: uncheckedVet(ref, err instanceof Unchecked ? err.message : 'lookup failed', minAgeDays, nowMs), exact: false };
   }
@@ -1098,7 +1204,7 @@ async function vetOne(ref: PackageRef, ctx: {
     const osvIds = await queryOsv(ref, facts.version, fetchImpl, osvSignal);
     rememberMalicious(cache, ctx.changes, ref, facts, osvIds, nowMs);
     const base = {
-      ref, status: 'checked' as const, version: facts.version, publishedAt: facts.publishedAt, osvIds,
+      ref, status: 'checked' as const, version: facts.version, publishedAt: facts.publishedAt, ageUncheckedReason: facts.ageUncheckedReason, osvIds,
       malicious: osvIds.filter((id) => id.startsWith('MAL-')), hooks: facts.hooks, sdistOnly: facts.sdistOnly,
     };
     return { vet: { ...base, findings: buildFindings(base, minAgeDays, nowMs) }, version: facts.version, exact: true };
@@ -1181,13 +1287,14 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
   const cache = readCache(opts);
   const cacheSeqAtStart = cacheWriteSeq;
   const changes: CacheChanges = new Map();
+  const ageFallback = { remaining: MAX_EXACT_PIN_AGE_FALLBACKS };
   const packages: PackageVet[] = [];
   try {
     const head = unique.slice(0, MAX_PACKAGES_PER_COMMAND);
     // The malicious-package batch covers EVERY package (custom-index installs excepted: public records do not describe them).
     const batchRefs = unique.filter((r) => !r.customIndex);
     const batchP = queryOsvBatch(batchRefs.map((ref) => ({ ref, version: pinnedVersion(ref) })), fetchImpl, osvCtl.signal);
-    const headP = Promise.all(head.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes })
+    const headP = Promise.all(head.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes, ageFallback })
       .catch((): OneResult => ({ vet: uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs), exact: false }))));
     const [batch, results] = await Promise.all([batchP, headP]);
     const batchAnswer = (ref: PackageRef): string[] | null => {
@@ -1199,7 +1306,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
     const extraRefs = unique.slice(head.length)
       .filter((r) => !r.customIndex && !pinnedVersion(r) && batchFor(r).length > 0)
       .slice(0, MAX_EXTRA_LOOKUPS);
-    const extraResults = await Promise.all(extraRefs.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes })
+    const extraResults = await Promise.all(extraRefs.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes, ageFallback })
       .catch((): OneResult => ({ vet: uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs), exact: false }))));
     const extraByRef = new Map(extraRefs.map((ref, i) => [ref, extraResults[i]] as const));
     unique.forEach((ref, idx) => {
