@@ -60,8 +60,10 @@ function assertVerdict(f: FrozenFixture): void {
     case 'block': expect(shown).toMatchObject({ decision: 'block' }); break;
     case 'gate': expect(shown).not.toMatchObject({ decision: 'allow' }); break;
     case 'not-block': expect(shown).not.toMatchObject({ decision: 'block' }); break;
+    case 'approval': expect(shown).toMatchObject({ decision: 'require_approval' }); break;
     case 'any': break;
   }
+  if (e.severity !== undefined) expect({ id: f.id, severity: o.severity }).toEqual({ id: f.id, severity: e.severity });
   for (const s of e.forbidSignals ?? []) expect(o.signals).not.toContain(s);
   for (const s of e.requireSignals ?? []) expect(o.signals).toContain(s);
   for (const p of e.asksFor ?? []) expect(o.asked).toContain(p);
