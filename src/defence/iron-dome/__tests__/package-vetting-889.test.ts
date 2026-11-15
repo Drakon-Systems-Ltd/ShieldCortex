@@ -1448,6 +1448,69 @@ describe('#1054 — cache ordering rules for checks of the same package version'
     expect(await offlineVet()).toEqual(BLOCKED);
   });
 
+  // B2: identity is the cache directory, not the spelling supplied by the caller.
+  const vetAt = (dir: string, w: World, ver = P.ver) => vetPackages([npmRef(P.name, ver)], { fetchImpl: fetchFor(w), nowMs: NOW, stateDir: dir });
+  const heldCleanAt = (dir: string) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const base = fetchFor(cleanWorld());
+    const fetchImpl: FetchLike = async (url, init) => {
+      if (url === 'https://api.osv.dev/v1/query') await gate;
+      return base(url, init);
+    };
+    return { result: vetPackages([npmRef(P.name, P.ver)], { fetchImpl, nowMs: NOW, stateDir: dir }), release };
+  };
+  it.each(['relative', 'symlink'] as const)('B2: %s alias preserves identical newer records in both directions', async (kind) => {
+    const alias = kind === 'relative' ? path.relative(process.cwd(), stateDir) : stateDir + '-link';
+    if (kind === 'symlink') fs.symlinkSync(stateDir, alias, 'dir');
+    for (const [cleanDir, malDir] of [[stateDir, alias], [alias, stateDir]]) {
+      seed(NOW);
+      const pending = heldCleanAt(cleanDir);
+      try { expect((await vetAt(malDir, malWorld())).malicious).toBe(true); }
+      finally { pending.release(); }
+      expect((await pending.result).malicious).toBe(false);
+      expect(entries()[KEY]).toMatchObject({ at: NOW, osvIds: [P.id] });
+      expect(await offlineVet()).toEqual(BLOCKED);
+    }
+  });
+  it('B2: the same relative spelling in another cwd does not prune the first file write numbers', async () => {
+    const originalCwd = process.cwd();
+    const rootA = fs.mkdtempSync(path.join(home, 'cwd-a-'));
+    const rootB = fs.mkdtempSync(path.join(home, 'cwd-b-'));
+    const aDir = path.join(rootA, 'state');
+    fs.mkdirSync(aDir);
+    fs.writeFileSync(path.join(aDir, 'package-vetting-cache.json'), JSON.stringify({ v: 1, entries: { [KEY]: record(NOW) } }));
+    let pending: ReturnType<typeof heldCleanAt> | undefined;
+    try {
+      process.chdir(rootA);
+      pending = heldCleanAt('state');
+      await vetAt('state', malWorld());
+      process.chdir(rootB);
+      await vetAt('state', malWorld(), V2.ver);
+      process.chdir(rootA);
+      pending.release();
+      await pending.result;
+      expect(JSON.parse(fs.readFileSync(path.join(aDir, 'package-vetting-cache.json'), 'utf-8')).entries[KEY]).toMatchObject({ at: NOW, osvIds: [P.id] });
+      const off = await vetPackages([npmRef(P.name, P.ver)], { fetchImpl: offline, nowMs: NOW + 60_000, stateDir: aDir });
+      expect({ malicious: off.malicious, status: off.packages[0].status, cached: off.packages[0].cached === true }).toEqual(BLOCKED);
+    } finally { process.chdir(originalCwd); pending?.release(); if (pending) await pending.result; }
+  });
+  it('B2: a symlink repointed during a clean check cannot evict the other directory record', async () => {
+    seed(NOW);
+    const other = fs.mkdtempSync(path.join(home, 'other-state-'));
+    fs.writeFileSync(path.join(other, 'package-vetting-cache.json'), JSON.stringify({ v: 1, entries: { [KEY]: record(NOW) } }));
+    const alias = stateDir + '-moving-link';
+    fs.symlinkSync(stateDir, alias, 'dir');
+    const pending = heldCleanAt(alias);
+    fs.unlinkSync(alias);
+    fs.symlinkSync(other, alias, 'dir');
+    pending.release();
+    await pending.result;
+    expect(JSON.parse(fs.readFileSync(path.join(other, 'package-vetting-cache.json'), 'utf-8')).entries[KEY]).toMatchObject({ at: NOW, osvIds: [P.id] });
+    const off = await vetPackages([npmRef(P.name, P.ver)], { fetchImpl: offline, nowMs: NOW + 60_000, stateDir: other });
+    expect({ malicious: off.malicious, status: off.packages[0].status, cached: off.packages[0].cached === true }).toEqual(BLOCKED);
+  });
+
   it.each(FINISH)('row 4: same version, both clean, record on disk, %s: the record is evicted', async (_l, msA, msB) => {
     seed(NOW - 3_600_000);
     const [a, b] = await Promise.all([vet(cleanWorld(), msA), vet(cleanWorld(), msB)]);
@@ -1601,5 +1664,24 @@ describe('#1084 — malformed cache rows cannot discard a malicious verdict', ()
     const out = await vetToolCall('Bash', { command: j('npm', 'install', `${OLD}@1.0.0`, `${MAL_NAME}@1.0.3`) }, { fetchImpl: offline, nowMs: NOW, stateDir });
     expect(out?.malicious).toBe(true);
     expect(applyVettingToVerdict({ decision: 'allow' as const, severity: 'sensitive', reason: 'package check', signals: [] }, out)).toMatchObject({ decision: 'block', severity: 'catastrophic' });
+  });
+});
+
+
+describe('#1084 D1 — writer-compatible non-semver malicious cache records', () => {
+  it('keeps a registry dist-tag record offline for bare and pinned requests and the tool verdict', async () => {
+    const name = 'synth-nonsemver-pkg';
+    const version = '2024.01';
+    const fixture = world({ npm: { [name]: { tags: { latest: version }, versions: { [version]: { time: hoursAgo(24 * 40) } } } }, osv: { [`npm@${name}@${version}`]: [MAL_ID] } });
+    const online = await vetPackages([npmRef(name)], { fetchImpl: fetchFor(fixture), nowMs: NOW, stateDir });
+    expect(online.malicious).toBe(true);
+    for (const spec of [undefined, '1.0.0']) {
+      const off = await vetPackages([npmRef(name, spec)], { fetchImpl: offline, nowMs: NOW + 60_000, stateDir });
+      expect(off.malicious).toBe(true);
+      expect(off.packages[0].cached).toBe(true);
+    }
+    const offTool = await vetToolCall('Bash', { command: ['npm', 'install', name].join(' ') }, { fetchImpl: offline, nowMs: NOW + 60_000, stateDir });
+    expect(offTool?.malicious).toBe(true);
+    expect(applyVettingToVerdict({ decision: 'allow' as const, severity: 'sensitive', reason: 'package check', signals: [] }, offTool!).decision).toBe('block');
   });
 });
