@@ -64,9 +64,11 @@ export type AdrDecision = 'BLOCK' | 'LOG' | 'UNRESOLVED';
  *   not-block  decision !== 'block'
  *   gate       decision !== 'allow'
  *   block      decision === 'block'
+ *   approval   decision === 'require_approval' (an intended door: `gate`
+ *              cannot tell it apart from a block)
  *   any        the decision is not asserted (signals only)
  */
-export type ExpectedVerdict = 'allow' | 'not-block' | 'gate' | 'block' | 'any';
+export type ExpectedVerdict = 'allow' | 'not-block' | 'gate' | 'block' | 'approval' | 'any';
 
 /**
  *   settled           the expectation holds on main today and must keep holding
@@ -94,6 +96,8 @@ export type FixtureClass =
 
 export interface FixtureExpectation {
   verdict: ExpectedVerdict;
+  /** Exact severity the verdict must carry, when the tier itself is the expectation. */
+  severity?: string;
   /** Signals that must not appear on the verdict. */
   forbidSignals?: string[];
   /** Signals that must appear on the verdict. */
