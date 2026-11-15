@@ -35,6 +35,8 @@
  * a label this file cannot justify is a label it must not produce.
  */
 
+import { types } from 'node:util';
+
 export const PLUGIN_PROVENANCE_LABELS = ['user', 'tool_result', 'unknown'] as const;
 
 export type PluginProvenanceLabel = (typeof PLUGIN_PROVENANCE_LABELS)[number];
@@ -109,7 +111,7 @@ const MAX_NESTING = 3;
  * is preserved through every child representation: once a block is
  * tool-origin, everything inside it is too.
  */
-function flattenToolResult(block: unknown, depth: number, out: string[]): number {
+function flattenToolResult(block: unknown, depth: number, out: string[], opaque: OpaqueState): number {
   const direct = blockText(block);
   if (direct) {
     out.push(direct);
@@ -119,13 +121,42 @@ function flattenToolResult(block: unknown, depth: number, out: string[]): number
   if (!b || depth >= MAX_NESTING) return 1;
   const inner = b.content ?? b.result ?? b.output;
   if (Array.isArray(inner)) {
+    // A Proxy array may report any length or element. Scan what it yields,
+    // and record that the yield cannot be trusted to be the whole result.
+    if (isHostProxy(inner)) opaque.proxied = true;
     if (inner.length === 0) return 1;
     let unreadable = 0;
-    for (const child of inner) unreadable += flattenToolResult(child, depth + 1, out);
+    for (const child of inner) unreadable += flattenToolResult(child, depth + 1, out, opaque);
     return unreadable;
   }
-  if (inner && typeof inner === 'object') return flattenToolResult(inner, depth + 1, out);
+  if (inner && typeof inner === 'object') return flattenToolResult(inner, depth + 1, out, opaque);
   return 1;
+}
+
+/** Set when a container read during labelling was a Proxy. */
+interface OpaqueState { proxied: boolean }
+
+/**
+ * True for a live or revoked Proxy. A Proxy array's `length` and index traps
+ * may return values that differ from the target, so a scan of what they yield
+ * is not proof the container was clean. Detection failure counts as a Proxy.
+ */
+export function isHostProxy(value: unknown): boolean {
+  try { return types.isProxy(value); } catch { return true; }
+}
+
+/**
+ * Read an array length once for an index loop. `incomplete` is set when the
+ * read throws, yields a value that is not a safe non-negative integer, or the
+ * array is a Proxy (whose reported length is not authoritative).
+ */
+export function readGateArrayLength(arr: unknown[]): { length: number; incomplete: boolean } {
+  let raw: unknown;
+  try { raw = arr.length; } catch { return { length: 0, incomplete: true }; }
+  if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0) {
+    return { length: 0, incomplete: true };
+  }
+  return { length: raw, incomplete: isHostProxy(arr) };
 }
 
 /**
@@ -137,6 +168,10 @@ function flattenToolResult(block: unknown, depth: number, out: string[]): number
  * the BLOCK decides, not the role.
  */
 export function labelHistoryMessage(msg: unknown): LabelledInputs {
+  return labelHistoryMessageTracked(msg, { proxied: false });
+}
+
+function labelHistoryMessageTracked(msg: unknown, opaque: OpaqueState): LabelledInputs {
   const m = asRecord(msg);
   if (!m) return { inputs: [], unreadableToolBlocks: 0 };
   const role = typeof m.role === 'string' ? m.role.toLowerCase() : '';
@@ -167,7 +202,7 @@ export function labelHistoryMessage(msg: unknown): LabelledInputs {
     for (const block of m.content) {
       if (isToolResultBlock(block)) {
         const texts: string[] = [];
-        unreadableToolBlocks += flattenToolResult(block, 0, texts);
+        unreadableToolBlocks += flattenToolResult(block, 0, texts, opaque);
         for (const text of texts) inputs.push({ text, label: 'tool_result' });
         continue;
       }
@@ -197,9 +232,13 @@ export function labelHistoryMessage(msg: unknown): LabelledInputs {
   return { inputs: [], unreadableToolBlocks: 0 };
 }
 
-/** Gate-only extraction: keep readable siblings when a host getter is hostile. */
+/** Gate-only extraction: keep readable siblings when a host getter is hostile.
+ * `incomplete` is also set for any Proxy content array, including a nested
+ * tool-result array: its traps may hide blocks while returning values, so the
+ * yielded blocks are scanned but never accepted as the whole message. */
 export function labelHistoryMessageForGate(msg: unknown): { inputs: LabelledInput[]; incomplete: boolean; userRole: boolean } {
   const inputs: LabelledInput[] = [];
+  const opaque: OpaqueState = { proxied: false };
   let incomplete = false;
   let role: unknown;
   let content: unknown;
@@ -212,18 +251,25 @@ export function labelHistoryMessageForGate(msg: unknown): { inputs: LabelledInpu
   try { content = (msg as Record<string, unknown>).content; }
   catch { return { inputs, incomplete: true, userRole }; }
 
-  if (!Array.isArray(content)) {
-    try { inputs.push(...labelHistoryMessage({ role, content }).inputs); }
+  let contentIsArray: boolean;
+  try { contentIsArray = Array.isArray(content); }
+  catch { return { inputs, incomplete: true, userRole }; }
+  if (!contentIsArray) {
+    try { inputs.push(...labelHistoryMessageTracked({ role, content }, opaque).inputs); }
     catch { incomplete = true; }
-    return { inputs, incomplete, userRole };
+    return { inputs, incomplete: incomplete || opaque.proxied, userRole };
   }
   // Read by index: Array.prototype.slice, iteration, and species may all run
-  // user-controlled code before the first readable block is returned.
-  for (let i = 0; i < content.length; i++) {
-    try { inputs.push(...labelHistoryMessage({ role, content: [content[i]] }).inputs); }
+  // user-controlled code before the first readable block is returned. The
+  // length is read once, so a trap cannot vary it between iterations.
+  const blocks = content as unknown[];
+  const read = readGateArrayLength(blocks);
+  incomplete ||= read.incomplete;
+  for (let i = 0; i < read.length; i++) {
+    try { inputs.push(...labelHistoryMessageTracked({ role, content: [blocks[i]] }, opaque).inputs); }
     catch { incomplete = true; }
   }
-  return { inputs, incomplete, userRole };
+  return { inputs, incomplete: incomplete || opaque.proxied, userRole };
 }
 
 /**
