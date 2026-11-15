@@ -1517,7 +1517,7 @@ describe('#1054 — cache ordering rules for checks of the same package version'
 
   // The compare is on the record itself (its time and ids), so it also holds for a writer this
   // process knows nothing about. Stood in for here by writing the file while the clean check waits.
-  it('a record that replaced the one a clean check saw (another writer, a different time) is kept, and so is one not in the expected shape', async () => {
+  it('a valid replacement written by another writer is kept; a malformed replacement is discarded', async () => {
     seed(NOW - 3_600_000);
     const slowClean = vet(cleanWorld(), 40);
     await new Promise((r) => setTimeout(r, 10));
@@ -1531,7 +1531,7 @@ describe('#1054 — cache ordering rules for checks of the same package version'
     await new Promise((r) => setTimeout(r, 10));
     fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: { [KEY]: { ...record(NOW - 3_600_000), osvIds: P.id } } }));
     expect((await slowClean2).malicious).toBe(false);
-    expect(Object.keys(entries())).toEqual([KEY]);
+    expect(entries()).toEqual({});
   });
 
   it('control: the cache file and its directory stay owner-only after an eviction and after a rewrite', async () => {

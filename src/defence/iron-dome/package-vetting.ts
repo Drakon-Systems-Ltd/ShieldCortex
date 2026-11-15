@@ -520,7 +520,7 @@ interface CacheEntry {
   hooks: string[];
   sdistOnly: boolean;
 }
-interface CacheFile { v: 1; entries: Record<string, CacheEntry> }
+interface CacheFile { v: 1; entries: Record<string, CacheEntry>; discardedInvalidRows?: boolean }
 
 function stateDir(opts: VetOptions): string {
   return opts.stateDir ?? path.join(os.homedir(), '.shieldcortex', 'state');
@@ -530,12 +530,35 @@ function cachePath(opts: VetOptions): string {
 }
 const cacheKey = (eco: Ecosystem, name: string, version: string) => `${eco}@${name}@${version}`;
 
+/** Cache JSON is untrusted: one damaged row must not abort vetting of its siblings. */
+function isCacheEntry(value: unknown): value is CacheEntry {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const e = value as Partial<CacheEntry>;
+  return typeof e.at === 'number' && Number.isFinite(e.at) && e.at >= 0
+    && (e.ecosystem === 'npm' || e.ecosystem === 'PyPI')
+    && typeof e.name === 'string' && e.name.length > 0
+    && typeof e.version === 'string' && isSafeVersion(e.version)
+    && (e.ecosystem !== 'npm' || semver.valid(e.version) !== null)
+    && (e.publishedAt === undefined || typeof e.publishedAt === 'string')
+    && Array.isArray(e.osvIds) && e.osvIds.every((id) => typeof id === 'string')
+    && Array.isArray(e.hooks) && e.hooks.every((hook) => typeof hook === 'string')
+    && typeof e.sdistOnly === 'boolean';
+}
+
 function readCache(opts: VetOptions): CacheFile {
   try {
     const st = fs.lstatSync(cachePath(opts));
     if (!st.isFile() || st.size > 4_000_000) return { v: 1, entries: {} };
-    const parsed = JSON.parse(fs.readFileSync(cachePath(opts), 'utf-8')) as CacheFile;
-    if (parsed?.v === 1 && parsed.entries && typeof parsed.entries === 'object') return parsed;
+    const parsed = JSON.parse(fs.readFileSync(cachePath(opts), 'utf-8'));
+    if (parsed?.v === 1 && parsed.entries && typeof parsed.entries === 'object' && !Array.isArray(parsed.entries)) {
+      const entries: Record<string, CacheEntry> = Object.create(null);
+      let discardedInvalidRows = false;
+      for (const [key, entry] of Object.entries(parsed.entries)) {
+        if (isCacheEntry(entry) && key === cacheKey(entry.ecosystem, entry.name, entry.version)) entries[key] = entry;
+        else discardedInvalidRows = true;
+      }
+      return { v: 1, entries, discardedInvalidRows };
+    }
   } catch { /* absent or corrupt: start empty */ }
   return { v: 1, entries: {} };
 }
@@ -612,6 +635,7 @@ function writeCache(opts: VetOptions, changes: CacheChanges, nowMs: number, ttlM
 /** A cached, unexpired `MAL-` hit that applies to this request, or null. */
 function cachedMaliciousFor(ref: PackageRef, cache: CacheFile, nowMs: number, ttlMs: number): CacheEntry | null {
   for (const e of Object.values(cache.entries)) {
+    if (!isCacheEntry(e)) continue;
     if (e.ecosystem !== ref.ecosystem || e.name !== ref.name || nowMs - e.at >= ttlMs) continue;
     if (!e.osvIds.some((id) => id.startsWith('MAL-'))) continue;
     if (specCouldResolveTo(ref, e.version)) return e;
@@ -1212,7 +1236,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
     clearTimeout(regTimer);
     clearTimeout(osvTimer);
   }
-  if (changes.size > 0) writeCache(opts, changes, nowMs, ttlMs, cacheSeqAtStart);
+  if (changes.size > 0 || cache.discardedInvalidRows) writeCache(opts, changes, nowMs, ttlMs, cacheSeqAtStart);
   const all = packages.flatMap((p) => p.findings);
   const rank = (f: VettingFinding) => (f.kind === 'malicious' ? 0 : f.kind === 'advisory' ? 1 : f.kind === 'install-hook' || f.kind === 'sdist-only' ? 2 : f.kind === 'new-version' ? 3 : 4);
   const reasons = [...new Set(all.sort((a, b) => rank(a) - rank(b)).map((f) => f.reason))];
