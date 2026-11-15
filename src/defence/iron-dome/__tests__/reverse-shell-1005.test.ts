@@ -250,15 +250,17 @@ function liveRow(file: string): string {
 const SURFACES = ['src/defence/iron-dome/tool-action-guard.ts', 'plugins/openclaw/interceptor.ts', 'scripts/pre-tool-hook.mjs'];
 
 describe('#1005 — one row on every surface, linear on every input', () => {
-  const live = new RegExp(liveRow(SURFACES[0]));
+  // Read per test, so a missing row fails each case instead of the whole suite.
+  const live = (): RegExp => new RegExp(liveRow(SURFACES[0]));
 
   it('the guard, the interceptor, the hook and the Hermes port carry the same row', () => {
-    for (const f of SURFACES) expect({ f, row: liveRow(f) }).toEqual({ f, row: live.source });
+    const row = live().source;
+    for (const f of SURFACES) expect({ f, row: liveRow(f) }).toEqual({ f, row });
     const py = fs.readFileSync(path.join(REPO, 'plugins/hermes/shieldcortex/sc_client.py'), 'utf-8');
     const m = /^_FALLBACK_REVERSE_SHELL_ROW = re\.compile\(r'''(.*)'''\)$/m.exec(py);
     expect(m).not.toBeNull();
     // Python spells `/` bare; everything else is byte-identical.
-    expect(m![1]).toBe(live.source.replace(/\\\//g, '/'));
+    expect(m![1]).toBe(row.replace(/\\\//g, '/'));
   });
 
   // Every unit repeated with no target: a quadratic row costs ~16x for 4x the
@@ -287,13 +289,14 @@ describe('#1005 — one row on every surface, linear on every input', () => {
     ['line continuations', 'nc', ' \\\n'],
   ];
   it.each(UNITS)('%s costs ~4x for 4x the input, not ~16x', (_name, head, unit) => {
+    const re = live();
     const timeOf = (reps: number): number => {
       const s = head + unit.repeat(reps);
-      live.test(s);   // warm
+      re.test(s);   // warm
       const runs: number[] = [];
       for (let k = 0; k < 3; k++) {
         const t = process.hrtime.bigint();
-        expect(live.test(s)).toBe(false);
+        expect(re.test(s)).toBe(false);
         runs.push(Number(process.hrtime.bigint() - t) / 1e6);
       }
       return runs.sort((x, y) => x - y)[1];
