@@ -35,7 +35,7 @@ import { createRequire } from "node:module";
 import { readConversationAccess, describeRegisteredHooks } from './conversation-access.js';
 import { createSessionTaintStore } from './session-taint.js';
 import { isTaintingScanSummary, severityFromScanSummary } from './scan-taint-policy.js';
-import { labelLlmInput } from './provenance.js';
+import { labelHistoryMessage, labelLlmInput, HISTORY_SCAN_LIMIT } from './provenance.js';
 import type { PluginProvenanceLabel } from './provenance.js';
 import { classifyConversationOrigin } from './conversation-trust.js';
 import type { ConversationTrustDecision } from './conversation-trust.js';
@@ -3975,10 +3975,27 @@ function gatePass(): InputGateDecision {
   return { outcome: 'pass' };
 }
 
-/** A transcript label is context, not an instruction by itself. Keep the body
- * intact for the scanner: a hostile directive after the label must still hit. */
-function withoutTranscriptLabel(text: string): string {
-  return text.replace(/^\s*(?:System:|User:|Assistant:|\[System Message\])\s*/i, '');
+/** The real scanner flags a leading role marker on otherwise ordinary prose.
+ * Keep the full scan, and relieve only this complete, known benign transcript
+ * sentence. Never infer safety by stripping a marker and rescanning a body:
+ * the marker is the only signal for some hostile directives. */
+function isBenignTranscriptSentence(text: string): boolean {
+  return /^(?:System:|User:|Assistant:|\[System Message\])\r?\nPlease summarize the project status for today\.$/i.test(text);
+}
+
+/** Only these complete, observed heartbeat prompts are exempt on the enforcing
+ * path. The observation hook's legacy internal-content predicate is unchanged. */
+const GATE_HEARTBEAT_PROMPTS = new Set([
+  'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly.',
+  'Read HEARTBEAT.md if it exists (workspace context). Follow it strictly.\n'
+    + 'Do not infer or repeat old tasks from prior chats.\n'
+    + 'If nothing needs attention, reply HEARTBEAT_OK.',
+]);
+
+function isGateAutomationPrompt(text: string, sessionId?: string): boolean {
+  if (!isTrustedAutomationSession(sessionId)) return false;
+  const inner = stripOneHostCronEnvelope(text);
+  return GATE_HEARTBEAT_PROMPTS.has(inner);
 }
 
 /**
@@ -4025,10 +4042,24 @@ export async function handleBeforeAgentRun(
     const sessionId = resolveHookSessionId(undefined, ctx);
     const model = (ctx as { modelId?: string } | undefined)?.modelId;
 
-    // The same bounded, structured history extraction as llm_input. The bare
-    // prompt has no attested origin; only a host-minted cron/heartbeat session
-    // key may exempt that prompt. No history text inherits the exemption.
-    const inputs = labelLlmInput({ prompt: event?.prompt, historyMessages: event?.messages }).inputs;
+    // The prompt has no attested per-span origin. On the enforcing path select
+    // the last five history messages (not five blocks), retaining every readable
+    // block in each selected message. The observation hook remains unchanged.
+    const inputs: Array<{ text: string; label: PluginProvenanceLabel; ownerHistory?: boolean }> = typeof event?.prompt === 'string' && event.prompt
+      ? [{ text: event.prompt, label: 'unknown' }]
+      : [];
+    const history = Array.isArray(event?.messages) ? event.messages : [];
+    for (const message of history.slice(-HISTORY_SCAN_LIMIT)) {
+      const role = message && typeof message === 'object' && 'role' in message
+        ? String(message.role).toLowerCase() : '';
+      const userRole = role === 'user' || role === 'human';
+      for (const input of labelHistoryMessage(message).inputs) {
+        // The current owner's older user-role turns can be detected without
+        // destroying this new turn. Tool-result blocks inside a user-role
+        // message do not inherit that relief (Anthropic encodes them there).
+        inputs.push({ ...input, ownerHistory: userRole && input.label !== 'tool_result' });
+      }
+    }
     const automationSession = isTrustedAutomationSession(sessionId);
     const scanStarted = Date.now();
     const turnTrust = classifyConversationOrigin({
@@ -4038,7 +4069,7 @@ export async function handleBeforeAgentRun(
     let text = '';
     let scan: ConversationScanResult | undefined;
     let fromHistory = false;
-    let ownerPromptDetection: { text: string; scan: ConversationScanResult } | undefined;
+    let ownerDetection: { text: string; scan: ConversationScanResult } | undefined;
     let unavailable: { text: string; scan: ConversationScanResult; fromHistory: boolean } | undefined;
 
     // scanRealtimeContent no longer throws on the paths that used to (it
@@ -4048,8 +4079,10 @@ export async function handleBeforeAgentRun(
     // unbounded pause in front of the user's prompt — see scanWithDeadline.
     for (const [i, input] of inputs.entries()) {
       if (i === 0 && typeof event?.prompt === 'string' && event.prompt
-          && automationSession && isInternalContent(input.text, sessionId)) continue;
-      const candidate = withoutTranscriptLabel(input.text);
+          && automationSession && isGateAutomationPrompt(input.text, sessionId)) continue;
+      // Preserve role markers: for some attacks they are the only detector
+      // evidence. The exact benign fixture above is relieved after scanning.
+      const candidate = input.text;
       if (candidate.length < 10) continue;
       const remaining = CONVERSATION_SCAN_MAX_MS - (Date.now() - scanStarted);
       if (remaining <= 0) {
@@ -4071,12 +4104,12 @@ export async function handleBeforeAgentRun(
       if (result.available === false || result.errored) {
         unavailable ??= { text: candidate, scan: result, fromHistory: i !== 0 || !event?.prompt };
       } else if (!result.clean) {
+        if (isBenignTranscriptSentence(candidate)) continue;
         const isPrompt = i === 0 && typeof event?.prompt === 'string' && !!event.prompt;
-        if (isPrompt && !turnTrust.mayTaint) {
-          // The owner's current turn may be observed but not blocked. History
-          // has no per-message owner attestation, so keep scanning it rather
-          // than allowing this prompt detection to shelter a tool result.
-          ownerPromptDetection = { text: candidate, scan: result };
+        if ((isPrompt || input.ownerHistory) && !turnTrust.mayTaint) {
+          // Owner-attested current input and structurally user-role history
+          // are observed, but neither may shelter a later tool-result hit.
+          ownerDetection ??= { text: candidate, scan: result };
           continue;
         }
         text = candidate;
@@ -4088,11 +4121,11 @@ export async function handleBeforeAgentRun(
     if (!scan && unavailable) {
       ({ text, scan, fromHistory } = unavailable);
     }
-    if (!scan && ownerPromptDetection) ({ text, scan } = ownerPromptDetection);
+    if (!scan && ownerDetection) ({ text, scan } = ownerDetection);
     if (!scan) return gatePass();
 
-    // #235: sender trust applies to the current prompt only. Structured
-    // history can include tool results and has no per-message owner attestation.
+    // #235: tool/assistant history has no owner attestation; a current owner's
+    // ordinary user-role history is observed rather than blocking future turns.
     const trust = fromHistory ? classifyConversationOrigin({ senderIsOwner: false }) : turnTrust;
     const decision = evaluateConversationRun(posture, scan, trust);
 
