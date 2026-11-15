@@ -197,6 +197,35 @@ export function labelHistoryMessage(msg: unknown): LabelledInputs {
   return { inputs: [], unreadableToolBlocks: 0 };
 }
 
+/** Gate-only extraction: keep readable siblings when a host getter is hostile. */
+export function labelHistoryMessageForGate(msg: unknown): { inputs: LabelledInput[]; incomplete: boolean; userRole: boolean } {
+  const inputs: LabelledInput[] = [];
+  let incomplete = false;
+  let role: unknown;
+  let content: unknown;
+  try {
+    const m = asRecord(msg);
+    if (!m) return { inputs, incomplete: true, userRole: false };
+    role = m.role;
+  } catch { incomplete = true; }
+  const userRole = typeof role === 'string' && USER_ROLES.has(role.toLowerCase());
+  try { content = (msg as Record<string, unknown>).content; }
+  catch { return { inputs, incomplete: true, userRole }; }
+
+  if (!Array.isArray(content)) {
+    try { inputs.push(...labelHistoryMessage({ role, content }).inputs); }
+    catch { incomplete = true; }
+    return { inputs, incomplete, userRole };
+  }
+  // Read by index: Array.prototype.slice, iteration, and species may all run
+  // user-controlled code before the first readable block is returned.
+  for (let i = 0; i < content.length; i++) {
+    try { inputs.push(...labelHistoryMessage({ role, content: [content[i]] }).inputs); }
+    catch { incomplete = true; }
+  }
+  return { inputs, incomplete, userRole };
+}
+
 /**
  * Every text this hook will scan for one `llm_input` event, each with the
  * origin it was declared under.

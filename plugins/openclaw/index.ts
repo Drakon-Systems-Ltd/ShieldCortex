@@ -35,7 +35,7 @@ import { createRequire } from "node:module";
 import { readConversationAccess, describeRegisteredHooks } from './conversation-access.js';
 import { createSessionTaintStore } from './session-taint.js';
 import { isTaintingScanSummary, severityFromScanSummary } from './scan-taint-policy.js';
-import { labelHistoryMessage, labelLlmInput, HISTORY_SCAN_LIMIT } from './provenance.js';
+import { labelHistoryMessageForGate, labelLlmInput, HISTORY_SCAN_LIMIT } from './provenance.js';
 import type { PluginProvenanceLabel } from './provenance.js';
 import { classifyConversationOrigin } from './conversation-trust.js';
 import type { ConversationTrustDecision } from './conversation-trust.js';
@@ -4045,32 +4045,35 @@ export async function handleBeforeAgentRun(
     // The prompt has no attested per-span origin. On the enforcing path select
     // the last five history messages (not five blocks), retaining every readable
     // block in each selected message. The observation hook remains unchanged.
-    const inputs: Array<{ text: string; label: PluginProvenanceLabel; ownerHistory?: boolean }> = typeof event?.prompt === 'string' && event.prompt
-      ? [{ text: event.prompt, label: 'unknown' }]
-      : [];
-    const history = Array.isArray(event?.messages) ? event.messages : [];
-    for (const message of history.slice(-HISTORY_SCAN_LIMIT)) {
-      // #934: a malformed message (non-string role, throwing getter/toString)
-      // must not abort input collection — that left the prompt and every later
-      // message unscanned. Skip only the offending message.
-      try {
-        const rawRole = message && typeof message === 'object' && 'role' in message
-          ? (message as { role?: unknown }).role : undefined;
-        const role = typeof rawRole === 'string' ? rawRole.toLowerCase() : '';
-        const userRole = role === 'user' || role === 'human';
-        const labelled = labelHistoryMessage(message).inputs;
-        for (const input of labelled) {
-          // The current owner's older user-role turns can be detected without
-          // destroying this new turn. Tool-result blocks inside a user-role
-          // message do not inherit that relief (Anthropic encodes them there).
-          inputs.push({ ...input, ownerHistory: userRole && input.label !== 'tool_result' });
-        }
-      } catch {
-        continue;
+    const scanStarted = Date.now();
+    const prompt = typeof event?.prompt === 'string' ? event.prompt : '';
+    const inputs: Array<{ text: string; label: PluginProvenanceLabel; ownerHistory?: boolean }> = prompt
+      ? [{ text: prompt, label: 'unknown' }] : [];
+    let historyIncomplete = false;
+    let history: unknown[] = [];
+    try {
+      const messages = event?.messages;
+      if (Array.isArray(messages)) history = messages;
+    } catch { historyIncomplete = true; }
+    // Native array length is fixed for this pass. Index getters are isolated,
+    // and no species/slice method on the host array is called.
+    let historyLength = 0;
+    try { historyLength = history.length; }
+    catch { historyIncomplete = true; }
+    const first = Math.max(0, historyLength - HISTORY_SCAN_LIMIT);
+    for (let i = first; i < historyLength; i++) {
+      let message: unknown;
+      try { message = history[i]; }
+      catch { historyIncomplete = true; continue; }
+      let labelled: ReturnType<typeof labelHistoryMessageForGate>;
+      try { labelled = labelHistoryMessageForGate(message); }
+      catch { historyIncomplete = true; continue; }
+      historyIncomplete ||= labelled.incomplete;
+      for (const input of labelled.inputs) {
+        inputs.push({ ...input, ownerHistory: labelled.userRole && input.label !== 'tool_result' });
       }
     }
     const automationSession = isTrustedAutomationSession(sessionId);
-    const scanStarted = Date.now();
     const turnTrust = classifyConversationOrigin({
       senderIsOwner: event?.senderIsOwner,
       trustOwnerInput: cfg.conversationTrust?.trustOwnerInput,
@@ -4086,8 +4089,11 @@ export async function handleBeforeAgentRun(
     // function's contract is that nothing here can stop a turn by accident.
     // #226: BOUNDED. The gateway awaits this hook, so an unbounded scan is an
     // unbounded pause in front of the user's prompt — see scanWithDeadline.
-    for (const [i, input] of inputs.entries()) {
-      if (i === 0 && typeof event?.prompt === 'string' && event.prompt
+    // The newest selected history text gets first chance under the deadline.
+    // This prevents a long benign prefix from hiding a hostile final block.
+    const orderedInputs = prompt ? [inputs[0], ...inputs.slice(1).reverse()] : inputs.slice().reverse();
+    for (const [i, input] of orderedInputs.entries()) {
+      if (i === 0 && prompt
           && automationSession && isGateAutomationPrompt(input.text, sessionId)) continue;
       // Preserve role markers: for some attacks they are the only detector
       // evidence. The exact benign fixture above is relieved after scanning.
@@ -4095,9 +4101,10 @@ export async function handleBeforeAgentRun(
       if (candidate.length < 10) continue;
       const remaining = CONVERSATION_SCAN_MAX_MS - (Date.now() - scanStarted);
       if (remaining <= 0) {
+        historyIncomplete ||= orderedInputs.slice(i).some((pending) => pending !== inputs[0] || !prompt);
         unavailable ??= {
           text: candidate,
-          fromHistory: i !== 0 || !event?.prompt,
+          fromHistory: i !== 0 || !prompt,
           scan: { clean: false, available: false, errored: true,
             error: `conversation scan exceeded its ${CONVERSATION_SCAN_MAX_MS}ms deadline`, summary: 'scan unavailable' },
         };
@@ -4111,10 +4118,11 @@ export async function handleBeforeAgentRun(
         result = { clean: false, available: false, errored: true, error: detail, summary: 'scan unavailable' };
       }
       if (result.available === false || result.errored) {
-        unavailable ??= { text: candidate, scan: result, fromHistory: i !== 0 || !event?.prompt };
+        unavailable ??= { text: candidate, scan: result, fromHistory: i !== 0 || !prompt };
+        if (result.error?.includes('deadline') && (i < orderedInputs.length - 1 || i !== 0 || !prompt)) historyIncomplete = true;
       } else if (!result.clean) {
         if (isBenignTranscriptSentence(candidate)) continue;
-        const isPrompt = i === 0 && typeof event?.prompt === 'string' && !!event.prompt;
+        const isPrompt = i === 0 && !!prompt;
         if ((isPrompt || input.ownerHistory) && !turnTrust.mayTaint) {
           // Owner-attested current input and structurally user-role history
           // are observed, but neither may shelter a later tool-result hit.
@@ -4126,6 +4134,11 @@ export async function handleBeforeAgentRun(
         fromHistory = !isPrompt;
         break;
       }
+    }
+    if (!scan && historyIncomplete) {
+      text = '[selected history unreadable or uninspected]';
+      scan = { clean: false, available: true, summary: 'selected conversation history was not fully inspected' };
+      fromHistory = true;
     }
     if (!scan && unavailable) {
       ({ text, scan, fromHistory } = unavailable);
