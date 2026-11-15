@@ -2908,10 +2908,14 @@ const FALLBACK_INERT_MATCH_CAP = 64;
 
 /** `[open, close + 1)` of every quoted data argument, or [] when none can be trusted. */
 function fallbackDataQuoteRanges(text) {
-  if (FALLBACK_NESTED_EXEC_RE.test(text) || FALLBACK_QUOTE_UNMODELLED_RE.test(text)) return [];
+  if (FALLBACK_QUOTE_UNMODELLED_RE.test(text)) return [];
   const ranges = [];
   // Quote contents blanked, so the pipe check below never reads quoted text.
   let unquoted = '';
+  // #1005 review B3 (astra): only single-quote contents blanked, for the nested-exec
+  // check — a backtick or `$(` inside '…' is literal (`--body 'use `nc -e` never'`),
+  // inside "…" or bare it runs. An unclosed '…' is read raw.
+  let live = '';
   let q = null;
   let open = -1;
   let stmtStart = 0;
@@ -2919,9 +2923,10 @@ function fallbackDataQuoteRanges(text) {
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     // Bash escaping: `\` escapes the next char outside quotes and inside "…".
-    if (c === '\\' && q !== "'") { unquoted += q ? '  ' : text.slice(i, i + 2); i++; continue; }
+    if (c === '\\' && q !== "'") { unquoted += q ? '  ' : text.slice(i, i + 2); live += text.slice(i, i + 2); i++; continue; }
     if (q) {
       unquoted += ' ';
+      live += q === "'" ? ' ' : c;
       if (c !== q) continue;
       const prefix = text.slice(stmtStart, open);
       if (open - stmtStart <= FALLBACK_QUOTE_PREFIX_CAP) {
@@ -2937,6 +2942,7 @@ function fallbackDataQuoteRanges(text) {
       continue;
     }
     unquoted += c;
+    live += c;
     if (c === '"' || c === "'") { q = c; open = i; continue; }
     if (c === ';' || c === '\n' || c === '|' || c === '&' || c === '(') stmtStart = i + 1;
     else if (c === '#' && i >= commentCheckedTo && (i === 0 || FALLBACK_WORD_BREAK.includes(text[i - 1]))) {
@@ -2949,7 +2955,8 @@ function fallbackDataQuoteRanges(text) {
       if (line.includes('"') || line.includes("'")) return [];
     }
   }
-  return FALLBACK_UNSAFE_PIPE_RE.test(unquoted) ? [] : ranges;
+  if (q === "'") live += text.slice(open);
+  return FALLBACK_NESTED_EXEC_RE.test(live) || FALLBACK_UNSAFE_PIPE_RE.test(unquoted) ? [] : ranges;
 }
 
 /** True when `re` matches somewhere outside a quoted data argument (and `accept`, if given, takes its end). */

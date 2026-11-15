@@ -211,19 +211,24 @@ _FALLBACK_INERT_MATCH_CAP = 64  # inert matches looked past before the row fails
 
 def _fallback_data_quote_ranges(text: str) -> list:
     """`(open, close + 1)` of every quoted data argument, or [] when none can be trusted."""
-    if _FALLBACK_NESTED_EXEC.search(text) or _FALLBACK_QUOTE_UNMODELLED.search(text):
+    if _FALLBACK_QUOTE_UNMODELLED.search(text):
         return []
     ranges, unquoted = [], []  # quote contents blanked, so the pipe check never reads quoted text
+    # #1005 review B3 (astra): only single-quote contents blanked, for the nested-exec check --
+    # a backtick or `$(` inside '...' is literal, inside "..." or bare it runs. An unclosed '...' is read raw.
+    live = []
     q, open_at, stmt_start, i, n = None, -1, 0, 0, len(text)
     comment_checked_to = 0  # end of the last line already found free of quotes after a `#`
     while i < n:
         c = text[i]
         if c == "\\" and q != "'":  # bash escaping: outside quotes and inside "..."
             unquoted.append("  " if q else text[i:i + 2])
+            live.append(text[i:i + 2])
             i += 2
             continue
         if q:
             unquoted.append(" ")
+            live.append(" " if q == "'" else c)
             if c == q:
                 prefix = text[stmt_start:open_at]
                 if open_at - stmt_start <= _FALLBACK_QUOTE_PREFIX_CAP:
@@ -238,6 +243,7 @@ def _fallback_data_quote_ranges(text: str) -> list:
             i += 1
             continue
         unquoted.append(c)
+        live.append(c)
         if c in "\"'":
             q, open_at = c, i
         elif c in ";\n|&(":
@@ -251,7 +257,9 @@ def _fallback_data_quote_ranges(text: str) -> list:
             if text.find('"', i, comment_checked_to) >= 0 or text.find("'", i, comment_checked_to) >= 0:
                 return []
         i += 1
-    return [] if _FALLBACK_UNSAFE_PIPE.search("".join(unquoted)) else ranges
+    if q == "'":
+        live.append(text[open_at:])
+    return [] if _FALLBACK_NESTED_EXEC.search("".join(live)) or _FALLBACK_UNSAFE_PIPE.search("".join(unquoted)) else ranges
 
 
 def _fallback_executed_match(rx, text: str, accept=None) -> bool:
