@@ -124,7 +124,7 @@ describe('#1028 npm metadata resolution', () => {
     const fetchImpl: FetchLike = async (url, init) => {
       if (url.startsWith(registry)) {
         if (url.endsWith('/1.0.0')) {
-          await new Promise<void>((resolve) => { releaseExact = resolve; });
+          await Promise.race([new Promise<void>((resolve) => { releaseExact = resolve; }), new Promise<void>((resolve) => setTimeout(resolve, 100))]);
           return response({ version: '1.0.0', scripts: { postinstall: 'run' } });
         }
         if (init?.headers?.accept === 'application/vnd.npm.install-v1+json') {
