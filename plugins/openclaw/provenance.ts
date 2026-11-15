@@ -272,6 +272,161 @@ export function labelHistoryMessageForGate(msg: unknown): { inputs: LabelledInpu
   return { inputs, incomplete: incomplete || opaque.proxied, userRole };
 }
 
+/** Fields the labeller reads from a message or block, at any nesting. */
+const SNAPSHOT_KEYS = ['role', 'content', 'type', 'text', 'tool_use_id', 'toolUseId', 'result', 'output'] as const;
+/** Deeper than the labeller ever reads (message → blocks → MAX_NESTING tool-result levels). */
+const SNAPSHOT_MAX_DEPTH = 4 + 2 * MAX_NESTING + 2;
+/** Objects/arrays visited per event before the snapshot gives up (fail closed). */
+const SNAPSHOT_NODE_BUDGET = 250_000;
+
+interface SnapshotState { incomplete: boolean; nodes: { count: number }; alternateTexts: string[] }
+
+/**
+ * Read one property for the gate. Own data properties are taken without
+ * running code. Anything else (own or inherited accessor, Proxy) is read
+ * TWICE: a getter that answers differently on consecutive reads is not
+ * telling the gate what the host will later see. Both values are returned so
+ * the caller can scan both and record the read as unstable.
+ */
+function readGateProperty(obj: object, key: string, state: SnapshotState): { present: boolean; values: unknown[] } {
+  const proxied = isHostProxy(obj);
+  if (!proxied) {
+    let desc: PropertyDescriptor | undefined;
+    try { desc = Object.getOwnPropertyDescriptor(obj, key); }
+    catch { state.incomplete = true; return { present: false, values: [] }; }
+    if (desc && 'value' in desc) return { present: true, values: [desc.value] };
+    if (!desc) {
+      let has: boolean;
+      try { has = key in obj; } catch { state.incomplete = true; return { present: false, values: [] }; }
+      if (!has) return { present: false, values: [] };
+    }
+  }
+  let first: unknown;
+  let second: unknown;
+  try { first = Reflect.get(obj, key); }
+  catch { state.incomplete = true; return { present: false, values: [] }; }
+  try { second = Reflect.get(obj, key); }
+  catch { state.incomplete = true; return { present: true, values: [first] }; }
+  return { present: true, values: Object.is(first, second) ? [first] : [first, second] };
+}
+
+function snapshotsEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) {
+    const bb = b as unknown[];
+    return a.length === bb.length && a.every((v, i) => snapshotsEqual(v, bb[i]));
+  }
+  const ar = a as Record<string, unknown>;
+  const br = b as Record<string, unknown>;
+  const ak = Object.keys(ar);
+  return ak.length === Object.keys(br).length && ak.every(k => Object.hasOwn(br, k) && snapshotsEqual(ar[k], br[k]));
+}
+
+/**
+ * Snapshot the values one accessor read produced. Values that are equal as
+ * plain data are one stable value (a getter returning a fresh but identical
+ * copy is stable). Values that differ are all kept and the read is unstable.
+ */
+function snapshotReads(values: unknown[], depth: number, state: SnapshotState): unknown[] {
+  const snaps = values.map(v => snapshotGateValue(v, depth, state));
+  if (snaps.length > 1 && snapshotsEqual(snaps[0], snaps[1])) return [snaps[0]];
+  if (snaps.length > 1) state.incomplete = true;
+  return snaps;
+}
+
+function snapshotGateArray(arr: unknown[], depth: number, state: SnapshotState, lastN = 0): unknown[] {
+  const read = readGateArrayLength(arr);
+  if (read.incomplete) state.incomplete = true;
+  const proxied = isHostProxy(arr);
+  const out: unknown[] = [];
+  const start = lastN > 0 ? Math.max(0, read.length - lastN) : 0;
+  for (let i = start; i < read.length; i++) {
+    if (state.nodes.count > SNAPSHOT_NODE_BUDGET) { state.incomplete = true; break; }
+    const key = String(i);
+    if (!proxied) {
+      let desc: PropertyDescriptor | undefined;
+      try { desc = Object.getOwnPropertyDescriptor(arr, key); }
+      catch { state.incomplete = true; continue; }
+      // A hole would be read through the prototype chain; ordinary host
+      // history and content arrays are dense.
+      if (!desc) { state.incomplete = true; continue; }
+      if ('value' in desc) { out.push(snapshotGateValue(desc.value, depth, state)); continue; }
+      // An accessor INDEX is never ordinary host data: plain, JSON-parsed and
+      // cloned arrays all hold data elements. Scan whatever it yields, but it
+      // can never be accepted as what the host will read next.
+      state.incomplete = true;
+    }
+    const read2 = readGateProperty(arr, key, state);
+    out.push(...snapshotReads(read2.values, depth, state));
+  }
+  return out;
+}
+
+function snapshotGateValue(value: unknown, depth: number, state: SnapshotState): unknown {
+  if (value === null || typeof value !== 'object') return typeof value === 'function' ? undefined : value;
+  if (depth > SNAPSHOT_MAX_DEPTH) return undefined;
+  if (++state.nodes.count > SNAPSHOT_NODE_BUDGET) { state.incomplete = true; return undefined; }
+  if (isHostProxy(value)) state.incomplete = true;
+  let isArray: boolean;
+  try { isArray = Array.isArray(value); } catch { state.incomplete = true; return undefined; }
+  if (isArray) return snapshotGateArray(value as unknown[], depth + 1, state);
+  const out: Record<string, unknown> = {};
+  for (const key of SNAPSHOT_KEYS) {
+    const read = readGateProperty(value, key, state);
+    if (!read.present) continue;
+    const snaps = snapshotReads(read.values, depth + 1, state);
+    // Only one value can occupy the field. A differing value from a second
+    // read is already recorded as unstable; its texts are kept for scanning
+    // so a later-read attack still reaches the detector and the audit row.
+    out[key] = snaps[0];
+    for (const alt of snaps.slice(1)) collectSnapshotTexts(alt, state.alternateTexts);
+  }
+  return out;
+}
+
+function collectSnapshotTexts(snap: unknown, out: string[]): void {
+  if (typeof snap === 'string') { if (snap) out.push(snap); return; }
+  if (Array.isArray(snap)) { for (const v of snap) collectSnapshotTexts(v, out); return; }
+  if (snap && typeof snap === 'object') {
+    for (const v of Object.values(snap as Record<string, unknown>)) collectSnapshotTexts(v, out);
+  }
+}
+
+/**
+ * Plain-data copy of the selected (last `limit`) history messages for the
+ * enforcing gate, read so that no host code runs again during labelling.
+ *
+ * `incomplete` is set when any read was opaque or unstable: a throwing read,
+ * a Proxy, an array hole, an accessor array index, or a property getter that
+ * returned different data on two consecutive reads (including the event's
+ * own `messages`). Stable getters — identical value, or an equal fresh copy,
+ * on both reads — are accepted. `alternateTexts` carries the texts of any
+ * differing second read so they are scanned too, never silently discarded.
+ */
+export function snapshotGateHistory(event: unknown, limit: number): { messages: unknown[]; incomplete: boolean; alternateTexts: string[] } {
+  const state: SnapshotState = { incomplete: false, nodes: { count: 0 }, alternateTexts: [] };
+  const messages: unknown[] = [];
+  if (!event || typeof event !== 'object') return { messages, incomplete: false, alternateTexts: [] };
+  const read = readGateProperty(event, 'messages', state);
+  const windows: unknown[][] = [];
+  for (const value of read.values) {
+    let isArray: boolean;
+    try { isArray = Array.isArray(value); } catch { state.incomplete = true; continue; }
+    windows.push(isArray ? snapshotGateArray(value as unknown[], 1, state, limit) : []);
+  }
+  // A getter returning an equal fresh array on both reads is stable; one
+  // that answers differently is not, and both answers are scanned.
+  if (windows.length > 1 && !snapshotsEqual(windows[0], windows[1])) {
+    state.incomplete = true;
+    for (const w of windows) messages.push(...w);
+  } else if (windows.length > 0) {
+    messages.push(...windows[0]);
+  }
+  return { messages, incomplete: state.incomplete, alternateTexts: state.alternateTexts };
+}
+
 /**
  * Every text this hook will scan for one `llm_input` event, each with the
  * origin it was declared under.

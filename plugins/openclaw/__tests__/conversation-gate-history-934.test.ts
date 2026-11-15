@@ -414,3 +414,139 @@ describe('#934 enforcing conversation gate with the real defence scanner', () =>
     )).toMatchObject({ outcome: 'block' });
   });
 });
+
+describe('#934 accessor and getter reads that change between the gate and the host', () => {
+  const NOT_INSPECTED = 'selected conversation history was not fully inspected';
+  const BENIGN = 'Ordinary status update number zero for the team today.';
+  const textBlock = (text: string) => ({ type: 'text', text });
+  /** A plain array whose index `idx` is an accessor: benign on the first read, `items[idx]` after. */
+  function accessorIndex<T>(items: T[], idx: number, first: T): T[] {
+    const arr = items.slice();
+    let reads = 0;
+    Object.defineProperty(arr, String(idx), {
+      enumerable: true, configurable: true, get: () => (++reads === 1 ? first : items[idx]),
+    });
+    return arr;
+  }
+  /** An object whose `key` is a getter: `first` on the first read, `later` after. */
+  function flipping<T extends object>(base: T, key: string, first: unknown, later: unknown): T {
+    let reads = 0;
+    return Object.defineProperty({ ...base }, key, {
+      enumerable: true, configurable: true, get: () => (++reads === 1 ? first : later),
+    }) as T;
+  }
+  function verdicts(): string[] {
+    return fs.readdirSync(auditDir).flatMap(name => fs.readFileSync(path.join(auditDir, name), 'utf8')
+      .split('\n').filter(Boolean).map(line => (JSON.parse(line) as { verdict?: string }).verdict ?? ''));
+  }
+  async function gate(event: Record<string, unknown>, senderIsOwner = false) {
+    // Object.assign onto the event keeps any `messages` getter live; a spread
+    // would invoke it once and hand the gate a plain data copy.
+    return handleBeforeAgentRun(
+      Object.assign(event, { prompt: CLEAN, senderIsOwner }) as never,
+      { sessionId: 'agent:main:direct:guest' },
+    );
+  }
+  const scannedAttack = () => scanner.mock.calls.some(call => String(call[1]).includes('Ignore all previous'));
+
+  it('blocks a history accessor index that answers benign first and the attack later', async () => {
+    const messages = accessorIndex([{ role: 'tool', content: ATTACK }, { role: 'tool', content: BENIGN }], 0,
+      { role: 'tool', content: BENIGN });
+    expect(await gate({ messages })).toMatchObject({ outcome: 'block' });
+    expect(scannedAttack()).toBe(true);
+  });
+
+  it('never clean-passes a history accessor index, even one that is stable', async () => {
+    const msg = { role: 'tool', content: CLEAN };
+    const messages = [msg];
+    Object.defineProperty(messages, '0', { enumerable: true, get: () => msg });
+    expect(await gate({ messages })).toMatchObject({ outcome: 'block' });
+    expect(verdicts()).toContain(NOT_INSPECTED);
+  });
+
+  it('blocks a content-block accessor index that answers benign first', async () => {
+    const content = accessorIndex([textBlock(ATTACK), textBlock(BENIGN)], 0, textBlock(BENIGN));
+    expect(await gate({ messages: [{ role: 'tool', content }] })).toMatchObject({ outcome: 'block' });
+    expect(scannedAttack()).toBe(true);
+  });
+
+  it('blocks a nested tool-result content array with an accessor index', async () => {
+    const inner = accessorIndex([textBlock(ATTACK)], 0, textBlock(BENIGN));
+    const messages = [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: inner }] }];
+    expect(await gate({ messages }, true)).toMatchObject({ outcome: 'block' });
+    expect(scannedAttack()).toBe(true);
+  });
+
+  it('blocks a sparse (holey) content array rather than reading through the prototype', async () => {
+    const content: unknown[] = [textBlock(CLEAN)];
+    content[2] = textBlock(CLEAN);
+    expect(await gate({ messages: [{ role: 'tool', content }] })).toMatchObject({ outcome: 'block' });
+    expect(verdicts()).toContain(NOT_INSPECTED);
+  });
+
+  it('blocks an event.messages getter that returns benign history first and the attack later', async () => {
+    let reads = 0;
+    const event = {
+      get messages() {
+        return ++reads === 1 ? [{ role: 'tool', content: BENIGN }] : [{ role: 'tool', content: ATTACK }];
+      },
+    };
+    expect(await gate(event as never)).toMatchObject({ outcome: 'block' });
+    expect(scannedAttack()).toBe(true);
+  });
+
+  it('accepts a stable event.messages getter (same array, or an equal fresh copy)', async () => {
+    const history = [{ role: 'tool', content: CLEAN }, { role: 'user', content: [textBlock(CLEAN)] }];
+    expect(await gate({ get messages() { return history; } } as never)).toEqual({ outcome: 'pass' });
+    expect(await gate({ get messages() { return history.map(m => ({ ...m })); } } as never))
+      .toEqual({ outcome: 'pass' });
+    expect(await gate({ get messages() { return [{ role: 'tool', content: ATTACK }]; } } as never))
+      .toMatchObject({ outcome: 'block', category: 'prompt_injection' });
+    expect(verdicts()).not.toContain(NOT_INSPECTED);
+  });
+
+  it('accepts stable host class getters on messages and blocks', async () => {
+    class HostBlock { constructor(private readonly t: string) {} get type() { return 'text'; } get text() { return this.t; } }
+    class HostMessage {
+      constructor(private readonly r: string, private readonly c: unknown) {}
+      get role() { return this.r; }
+      get content() { return this.c; }
+    }
+    expect(await gate({ messages: [new HostMessage('tool', [new HostBlock(CLEAN)])] })).toEqual({ outcome: 'pass' });
+    expect(await gate({ messages: [new HostMessage('tool', [new HostBlock(ATTACK)])] }))
+      .toMatchObject({ outcome: 'block', category: 'prompt_injection' });
+  });
+
+  it('blocks a message content getter that answers benign first and the attack later', async () => {
+    const msg = flipping({ role: 'tool' }, 'content', BENIGN, ATTACK);
+    expect(await gate({ messages: [msg] })).toMatchObject({ outcome: 'block' });
+    expect(scannedAttack()).toBe(true);
+  });
+
+  it('blocks a role getter that claims owner user-role first and tool later', async () => {
+    const msg = flipping({ content: ATTACK }, 'role', 'user', 'tool');
+    expect(await gate({ messages: [msg] }, true)).toMatchObject({ outcome: 'block' });
+  });
+
+  it('blocks a block text getter that answers benign first and the attack later', async () => {
+    const block = flipping({ type: 'text' }, 'text', BENIGN, ATTACK);
+    expect(await gate({ messages: [{ role: 'tool', content: [block] }] })).toMatchObject({ outcome: 'block' });
+    expect(scannedAttack()).toBe(true);
+  });
+
+  it('blocks a nested tool-result content getter that answers benign first', async () => {
+    const result = flipping({ type: 'tool_result', tool_use_id: 't1' }, 'content',
+      [textBlock(BENIGN)], [textBlock(ATTACK)]);
+    expect(await gate({ messages: [{ role: 'user', content: [result] }] }, true)).toMatchObject({ outcome: 'block' });
+    expect(scannedAttack()).toBe(true);
+  });
+
+  it('still clean-passes plain data and does not mark it uninspected', async () => {
+    const messages = [
+      { role: 'tool', content: [{ type: 'tool_result', tool_use_id: 't1', content: [textBlock(CLEAN)] }] },
+      { role: 'user', content: CLEAN },
+    ];
+    expect(await gate({ messages })).toEqual({ outcome: 'pass' });
+    expect(verdicts()).not.toContain(NOT_INSPECTED);
+  });
+});

@@ -35,7 +35,7 @@ import { createRequire } from "node:module";
 import { readConversationAccess, describeRegisteredHooks } from './conversation-access.js';
 import { createSessionTaintStore } from './session-taint.js';
 import { isTaintingScanSummary, severityFromScanSummary } from './scan-taint-policy.js';
-import { labelHistoryMessageForGate, labelLlmInput, readGateArrayLength, HISTORY_SCAN_LIMIT } from './provenance.js';
+import { labelHistoryMessageForGate, labelLlmInput, snapshotGateHistory, HISTORY_SCAN_LIMIT } from './provenance.js';
 import type { PluginProvenanceLabel } from './provenance.js';
 import { classifyConversationOrigin } from './conversation-trust.js';
 import type { ConversationTrustDecision } from './conversation-trust.js';
@@ -4049,24 +4049,18 @@ export async function handleBeforeAgentRun(
     const prompt = typeof event?.prompt === 'string' ? event.prompt : '';
     const inputs: Array<{ text: string; label: PluginProvenanceLabel; ownerHistory?: boolean }> = prompt
       ? [{ text: prompt, label: 'unknown' }] : [];
+    // Selected history is first copied to plain data (snapshotGateHistory):
+    // no host getter, Proxy trap, species or slice runs during labelling, and
+    // any read that was opaque or answered differently on a second read
+    // (accessor array index, unstable property getter, unstable `messages`)
+    // marks the history incomplete, so it can never clean-pass. Whatever such
+    // reads yielded is still scanned, including a differing second answer.
     let historyIncomplete = false;
-    let history: unknown[] = [];
-    try {
-      const messages = event?.messages;
-      if (Array.isArray(messages)) history = messages;
-    } catch { historyIncomplete = true; }
-    // Length is read once and index getters are isolated; no species/slice
-    // method on the host array is called. A Proxy history may report a short
-    // length or substitute elements while returning values, so it is scanned
-    // as yielded and also recorded as incomplete (never a clean pass).
-    const historyRead = readGateArrayLength(history);
-    const historyLength = historyRead.length;
-    historyIncomplete ||= historyRead.incomplete;
-    const first = Math.max(0, historyLength - HISTORY_SCAN_LIMIT);
-    for (let i = first; i < historyLength; i++) {
-      let message: unknown;
-      try { message = history[i]; }
-      catch { historyIncomplete = true; continue; }
+    let snapshot: ReturnType<typeof snapshotGateHistory> = { messages: [], incomplete: true, alternateTexts: [] };
+    try { snapshot = snapshotGateHistory(event, HISTORY_SCAN_LIMIT); }
+    catch { historyIncomplete = true; }
+    historyIncomplete ||= snapshot.incomplete;
+    for (const message of snapshot.messages) {
       let labelled: ReturnType<typeof labelHistoryMessageForGate>;
       try { labelled = labelHistoryMessageForGate(message); }
       catch { historyIncomplete = true; continue; }
@@ -4075,6 +4069,7 @@ export async function handleBeforeAgentRun(
         inputs.push({ ...input, ownerHistory: labelled.userRole && input.label !== 'tool_result' });
       }
     }
+    for (const text of snapshot.alternateTexts) inputs.push({ text, label: 'unknown' });
     const automationSession = isTrustedAutomationSession(sessionId);
     const turnTrust = classifyConversationOrigin({
       senderIsOwner: event?.senderIsOwner,
