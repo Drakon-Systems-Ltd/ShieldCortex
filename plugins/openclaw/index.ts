@@ -3975,6 +3975,12 @@ function gatePass(): InputGateDecision {
   return { outcome: 'pass' };
 }
 
+/** A transcript label is context, not an instruction by itself. Keep the body
+ * intact for the scanner: a hostile directive after the label must still hit. */
+function withoutTranscriptLabel(text: string): string {
+  return text.replace(/^\s*(?:System:|User:|Assistant:|\[System Message\])\s*/i, '');
+}
+
 /**
  * The conversation firewall's enforcement point (#225).
  *
@@ -4013,36 +4019,81 @@ export async function handleBeforeAgentRun(
     posture = conversationPosture(cfg.interceptor?.conversation);
     if (posture === 'off') return gatePass();
 
-    const text = String(event?.prompt ?? '');
     // sessionId/model come off the hook CONTEXT (PluginHookAgentContext); the
     // event carries neither. Both are optional there too, so both may be absent.
-    // Resolve BEFORE the internal-content skip so #353 can see the host key.
+    // Resolve BEFORE the automation skip so #353 can see the host key.
     const sessionId = resolveHookSessionId(undefined, ctx);
-    if (!text || text.length < 10 || isInternalContent(text, sessionId)) return gatePass();
     const model = (ctx as { modelId?: string } | undefined)?.modelId;
+
+    // The same bounded, structured history extraction as llm_input. The bare
+    // prompt has no attested origin; only a host-minted cron/heartbeat session
+    // key may exempt that prompt. No history text inherits the exemption.
+    const inputs = labelLlmInput({ prompt: event?.prompt, historyMessages: event?.messages }).inputs;
+    const automationSession = isTrustedAutomationSession(sessionId);
+    const scanStarted = Date.now();
+    const turnTrust = classifyConversationOrigin({
+      senderIsOwner: event?.senderIsOwner,
+      trustOwnerInput: cfg.conversationTrust?.trustOwnerInput,
+    });
+    let text = '';
+    let scan: ConversationScanResult | undefined;
+    let fromHistory = false;
+    let ownerPromptDetection: { text: string; scan: ConversationScanResult } | undefined;
+    let unavailable: { text: string; scan: ConversationScanResult; fromHistory: boolean } | undefined;
 
     // scanRealtimeContent no longer throws on the paths that used to (it
     // reports `available:false` instead), but a defensive catch stays: this
     // function's contract is that nothing here can stop a turn by accident.
     // #226: BOUNDED. The gateway awaits this hook, so an unbounded scan is an
     // unbounded pause in front of the user's prompt — see scanWithDeadline.
-    let scan: ConversationScanResult;
-    try {
-      scan = await scanWithDeadline(text);
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      scan = { clean: false, available: false, errored: true, error: detail, summary: 'scan unavailable' };
+    for (const [i, input] of inputs.entries()) {
+      if (i === 0 && typeof event?.prompt === 'string' && event.prompt
+          && automationSession && isInternalContent(input.text, sessionId)) continue;
+      const candidate = withoutTranscriptLabel(input.text);
+      if (candidate.length < 10) continue;
+      const remaining = CONVERSATION_SCAN_MAX_MS - (Date.now() - scanStarted);
+      if (remaining <= 0) {
+        unavailable ??= {
+          text: candidate,
+          fromHistory: i !== 0 || !event?.prompt,
+          scan: { clean: false, available: false, errored: true,
+            error: `conversation scan exceeded its ${CONVERSATION_SCAN_MAX_MS}ms deadline`, summary: 'scan unavailable' },
+        };
+        break;
+      }
+      let result: ConversationScanResult;
+      try {
+        result = await scanWithDeadline(candidate, remaining);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        result = { clean: false, available: false, errored: true, error: detail, summary: 'scan unavailable' };
+      }
+      if (result.available === false || result.errored) {
+        unavailable ??= { text: candidate, scan: result, fromHistory: i !== 0 || !event?.prompt };
+      } else if (!result.clean) {
+        const isPrompt = i === 0 && typeof event?.prompt === 'string' && !!event.prompt;
+        if (isPrompt && !turnTrust.mayTaint) {
+          // The owner's current turn may be observed but not blocked. History
+          // has no per-message owner attestation, so keep scanning it rather
+          // than allowing this prompt detection to shelter a tool result.
+          ownerPromptDetection = { text: candidate, scan: result };
+          continue;
+        }
+        text = candidate;
+        scan = result;
+        fromHistory = !isPrompt;
+        break;
+      }
     }
+    if (!scan && unavailable) {
+      ({ text, scan, fromHistory } = unavailable);
+    }
+    if (!scan && ownerPromptDetection) ({ text, scan } = ownerPromptDetection);
+    if (!scan) return gatePass();
 
-    // #235: WHO sent this turn, resolved before the verdict is applied.
-    // `senderIsOwner` was declared on the event and read by nothing, so the
-    // enforce path could block the operator's own paste and destroy it. The
-    // config is already loaded, so this is a pure call — no second read.
-    const trust = classifyConversationOrigin({
-      senderIsOwner: event?.senderIsOwner,
-      trustOwnerInput: cfg.conversationTrust?.trustOwnerInput,
-    });
-
+    // #235: sender trust applies to the current prompt only. Structured
+    // history can include tool results and has no per-message owner attestation.
+    const trust = fromHistory ? classifyConversationOrigin({ senderIsOwner: false }) : turnTrust;
     const decision = evaluateConversationRun(posture, scan, trust);
 
     // #226: REDACT ONCE, then use the redacted string everywhere the reason
@@ -4066,8 +4117,8 @@ export async function handleBeforeAgentRun(
     // first report of a broken scanner in another. `sessionId` may be absent —
     // noteScanUnavailable buckets that case separately rather than letting one
     // nameless session stand in for all of them.
-    const unavailable = decision.outcome === 'unavailable';
-    const alertGate = unavailable ? noteScanUnavailable(sessionId) : null;
+    const scanUnavailable = decision.outcome === 'unavailable';
+    const alertGate = scanUnavailable ? noteScanUnavailable(sessionId) : null;
     const suppressAlert = alertGate !== null && !alertGate.alert;
 
     // ── EVIDENCE FIRST, SIDE EFFECT SECOND ────────────────────────────────
