@@ -528,6 +528,10 @@ function stateDir(opts: VetOptions): string {
 function cachePath(opts: VetOptions): string {
   return path.join(stateDir(opts), 'package-vetting-cache.json');
 }
+function cacheIdentity(opts: VetOptions): string | null {
+  try { return path.join(fs.realpathSync.native(path.resolve(stateDir(opts))), 'package-vetting-cache.json'); }
+  catch { return null; }
+}
 const cacheKey = (eco: Ecosystem, name: string, version: string) => `${eco}@${name}@${version}`;
 
 /** Cache JSON is untrusted: one damaged row must not abort vetting of its siblings. */
@@ -538,7 +542,6 @@ function isCacheEntry(value: unknown): value is CacheEntry {
     && (e.ecosystem === 'npm' || e.ecosystem === 'PyPI')
     && typeof e.name === 'string' && e.name.length > 0
     && typeof e.version === 'string' && isSafeVersion(e.version)
-    && (e.ecosystem !== 'npm' || semver.valid(e.version) !== null)
     && (e.publishedAt === undefined || typeof e.publishedAt === 'string')
     && Array.isArray(e.osvIds) && e.osvIds.every((id) => typeof id === 'string')
     && Array.isArray(e.hooks) && e.hooks.every((hook) => typeof hook === 'string')
@@ -606,20 +609,23 @@ function isRecordSeen(onDisk: unknown, seen: Pick<CacheEntry, 'at' | 'osvIds'>):
  * version, whichever of the two finishes last. A clean check that starts
  * after that write sees the new record and evicts it as before.
  */
-function writeCache(opts: VetOptions, changes: CacheChanges, nowMs: number, ttlMs: number, startSeq: number): void {
+function writeCache(opts: VetOptions, changes: CacheChanges, nowMs: number, ttlMs: number, startSeq: number, startIdentity: string | null): void {
   try {
     const file = cachePath(opts);
-    const seqs = cacheSetSeq.get(file) ?? new Map<string, number>();
+    const dir = stateDir(opts);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const identity = cacheIdentity(opts);
+    if (identity === null) return;
+    const seqs = cacheSetSeq.get(identity) ?? new Map<string, number>();
     const merged = readCache(opts).entries;
     const written: string[] = [];
     for (const [k, c] of changes) {
       if ('set' in c) { merged[k] = c.set; written.push(k); }
-      else if (isRecordSeen(merged[k], c.evict) && (seqs.get(k) ?? 0) <= startSeq) delete merged[k];
+      // An unresolved start read no record; a changed directory must not evict its replacement.
+      else if (startIdentity !== null && startIdentity === identity && isRecordSeen(merged[k], c.evict) && (seqs.get(k) ?? 0) <= startSeq) delete merged[k];
     }
     const entries: Record<string, CacheEntry> = {};
     for (const [k, e] of Object.entries(merged)) if (nowMs - e.at < ttlMs) entries[k] = e;
-    const dir = stateDir(opts);
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const tmp = path.join(dir, `.package-vetting-cache.${process.pid}.${Date.now()}.tmp`);
     fs.writeFileSync(tmp, JSON.stringify({ v: 1, entries }), { mode: 0o600 });
     fs.chmodSync(tmp, 0o600);
@@ -627,8 +633,8 @@ function writeCache(opts: VetOptions, changes: CacheChanges, nowMs: number, ttlM
     // Only now is the file what this call wrote: number its records, forget the ones that left.
     for (const k of written) seqs.set(k, ++cacheWriteSeq);
     for (const k of [...seqs.keys()]) if (!(k in entries)) seqs.delete(k);
-    if (seqs.size > 0) cacheSetSeq.set(file, seqs);
-    else cacheSetSeq.delete(file);
+    if (seqs.size > 0) cacheSetSeq.set(identity, seqs);
+    else cacheSetSeq.delete(identity);
   } catch { /* the cache is an optimisation; never fail a vet over it */ }
 }
 
@@ -648,6 +654,7 @@ function specCouldResolveTo(ref: PackageRef, version: string): boolean {
   const spec = ref.spec;
   if (!spec) return true;
   if (ref.ecosystem === 'npm') {
+    if (!semver.valid(version)) return true; // The writer can cache a dist-tag target that semver cannot compare.
     if (semver.valid(spec)) return semver.eq(spec, version);
     if (semver.validRange(spec)) return semver.satisfies(version, spec, { includePrerelease: true });
     return true; // dist-tag: cannot tell which version it points at
@@ -1170,6 +1177,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
   regTimer.unref?.();
   osvTimer.unref?.();
   // Read the file and note the write counter together, before the first `await`.
+  const cacheIdentityAtStart = cacheIdentity(opts);
   const cache = readCache(opts);
   const cacheSeqAtStart = cacheWriteSeq;
   const changes: CacheChanges = new Map();
@@ -1236,7 +1244,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
     clearTimeout(regTimer);
     clearTimeout(osvTimer);
   }
-  if (changes.size > 0 || cache.discardedInvalidRows) writeCache(opts, changes, nowMs, ttlMs, cacheSeqAtStart);
+  if (changes.size > 0 || cache.discardedInvalidRows) writeCache(opts, changes, nowMs, ttlMs, cacheSeqAtStart, cacheIdentityAtStart);
   const all = packages.flatMap((p) => p.findings);
   const rank = (f: VettingFinding) => (f.kind === 'malicious' ? 0 : f.kind === 'advisory' ? 1 : f.kind === 'install-hook' || f.kind === 'sdist-only' ? 2 : f.kind === 'new-version' ? 3 : 4);
   const reasons = [...new Set(all.sort((a, b) => rank(a) - rank(b)).map((f) => f.reason))];
