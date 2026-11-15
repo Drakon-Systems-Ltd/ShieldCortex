@@ -60,6 +60,8 @@ export function projectRootFromArgv(argv: readonly string[]): string | undefined
  * setup. A hung child can never linger past this.
  */
 export const CHILD_DEADLINE_MS = 20_000;
+/** Upper bound on the report-only MCP package check's own lookups (#889); the watch may hand it less. */
+export const VET_SERVERS_BUDGET_MS = 2_000;
 export function armChildDeadline(ms: number = CHILD_DEADLINE_MS, exit: () => void = () => process.exit(0)): NodeJS.Timeout {
   const t = setTimeout(exit, ms);
   t.unref?.();
@@ -92,11 +94,12 @@ export async function main(overrides: { channels?: NotifyChannel[]; projectRoot?
     projectRoots: resolveProjectRoots(config, root),
     notify: (n: AgentConfigNotification) => send(buildAgentConfigChangeNotification(n)),
     ledger: makeAgentConfigLedger(logAudit),
-    // #889: report-only package check of newly added MCP servers (npx/uvx).
-    vetServers: async (servers) => {
+    // #889: report-only package check of newly added MCP servers (npx/uvx), bounded by the
+    // window the watch hands it (never more than 2 s), so its own lookups end as "unchecked: timed out".
+    vetServers: async (servers, hint) => {
       const { vetMcpServers, normalisePackageVettingConfig } = await import('../defence/iron-dome/package-vetting.js');
       const guardCfg = (config as { actionGuard?: { packageVetting?: unknown } }).actionGuard;
-      return vetMcpServers(servers, { ...normalisePackageVettingConfig(guardCfg?.packageVetting), budgetMs: 2000 });
+      return vetMcpServers(servers, { ...normalisePackageVettingConfig(guardCfg?.packageVetting), budgetMs: Math.min(VET_SERVERS_BUDGET_MS, hint?.budgetMs ?? VET_SERVERS_BUDGET_MS) });
     },
     ...(overrides.dropzoneDirs ? { dropzoneDirs: overrides.dropzoneDirs } : {}),
   });

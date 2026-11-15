@@ -952,3 +952,736 @@ describe('panel correction — rubric C3: the unconfirmed-version explanation is
     expect(reason.length).toBeLessThanOrEqual(240);
   });
 });
+
+// Release review (v5.20.0, Astra B2): an HTTP-200 OSV answer that is not in the
+// documented shape (JSON null, an array, an error body, a non-array `vulns`, a
+// malformed entry, …) was read as `{ vulns: [] }`: a clean version-specific
+// answer that was final for the version, evicted the cached MAL- hit and
+// overrode a valid malicious batch answer. It is now unavailable/unchecked.
+// Legitimate `{}` / `{ vulns: [] }` stay clean.
+describe('release review B2 — malformed OSV answers are never clean', () => {
+  const NAME = 'synth-cachedpkg';
+  const VER = '1.2.3';
+  const MAL = 'MAL-2026-90002';
+  const KEY = `npm@${NAME}@${VER}`;
+  const cacheFile = () => path.join(stateDir, 'package-vetting-cache.json');
+  const seed = () => fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: { [KEY]: { at: NOW - 3_600_000, ecosystem: 'npm', name: NAME, version: VER, osvIds: [MAL], hooks: [], sdistOnly: false } } }));
+  const cacheKeys = () => Object.keys(JSON.parse(fs.readFileSync(cacheFile(), 'utf-8')).entries);
+  type Shape = { body?: unknown; status?: number; badJson?: boolean; throws?: boolean };
+  const reply = (r: Shape) => {
+    if (r.throws) throw Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+    const status = r.status ?? 200;
+    return { ok: status < 400, status, json: async () => { if (r.badJson) throw new SyntaxError('Unexpected token'); return structuredClone(r.body); } };
+  };
+  const mkFetch = (query: Shape, batch: (n: number) => Shape): FetchLike => {
+    const w = world({ npm: { [NAME]: { versions: { [VER]: { time: hoursAgo(24 * 400) } } } } });
+    const inner = fetchFor(w);
+    return async (url, init) => {
+      if (url === 'https://api.osv.dev/v1/query') return reply(query);
+      if (url === 'https://api.osv.dev/v1/querybatch') return reply(batch(JSON.parse(init!.body!).queries.length));
+      return inner(url, init);
+    };
+  };
+  const vet = (f: FetchLike) => vetPackages([npmRef(NAME, VER)], { fetchImpl: f, nowMs: NOW, stateDir });
+  const each = (n: number, r: unknown) => Array.from({ length: n }, () => r);
+  const batchClean = (n: number): Shape => ({ body: { results: each(n, {}) } });
+  const batchMal = (n: number): Shape => ({ body: { results: each(n, { vulns: [{ id: MAL, modified: '2026-11-05T00:00:00Z' }] }) } });
+
+  const MALFORMED: Array<[string, unknown]> = [
+    ['JSON null', null],
+    ['an array', []],
+    ['an error body', { error: 'internal', code: 13 }],
+    ['a gRPC-style error', { code: 13, message: 'internal', details: [] }],
+    ['vulns: null', { vulns: null }],
+    ['vulns as a string', { vulns: MAL }],
+    ['vulns as an object', { vulns: {} }],
+    ['a null entry', { vulns: [null] }],
+    ['an entry with a numeric id', { vulns: [{ id: 123 }] }],
+    ['an entry with no id', { vulns: [{ modified: '2026-11-05T00:00:00Z' }] }],
+    ['an entry with non-array aliases', { vulns: [{ id: 'GHSA-aaaa-bbbb-cccc', aliases: MAL }] }],
+    ['a string', 'oops'],
+    ['a number', 42],
+    ['more pages to fetch', { vulns: [], next_page_token: 'abc' }],
+    // Round 2 (Astra B2): every consumed field is validated, and only OSV's own keys make an answer.
+    ['a MAL- entry whose withdrawn is an object', { vulns: [{ id: MAL, withdrawn: {} }] }],
+    ['a MAL- entry whose withdrawn is a number', { vulns: [{ id: MAL, withdrawn: 1 }] }],
+    ['a MAL- entry whose withdrawn is not a date-time', { vulns: [{ id: MAL, withdrawn: 'yes' }] }],
+    ['a MAL- entry whose withdrawn is true', { vulns: [{ id: MAL, withdrawn: true }] }],
+    ['an entry with a null alias', { vulns: [{ id: 'GHSA-aaaa-bbbb-cccc', aliases: [null] }] }],
+    ['an entry with a numeric alias', { vulns: [{ id: 'GHSA-aaaa-bbbb-cccc', aliases: [7] }] }],
+    ['a batch-shaped { results: [] }', { results: [] }],
+    ['{ unexpected: true }', { unexpected: true }],
+    ['an empty vulns beside an unknown key', { vulns: [], extra: 1 }],
+  ];
+
+  it.each(MALFORMED)('exact query answering %s: unchecked, the cached MAL- hit is kept and still blocks', async (_label, body) => {
+    seed();
+    const res = await vet(mkFetch({ body }, batchClean));
+    expect(res.malicious).toBe(true);
+    expect(res.packages[0].cached).toBe(true);
+    expect(cacheKeys()).toEqual([KEY]);
+  });
+
+  it.each(MALFORMED)('exact query answering %s with no cache: unchecked (fail open), never checked-clean', async (_label, body) => {
+    const res = await vet(mkFetch({ body }, batchClean));
+    expect(res.malicious).toBe(false);
+    expect(res.packages[0].status).toBe('unchecked');
+    expect(res.reasons).toEqual(['unchecked: OSV answer was not in the expected shape']);
+  });
+
+  it.each(MALFORMED.filter(([, b]) => b !== null && typeof b === 'object' && !Array.isArray(b)))(
+    'exact query answering %s cannot override a valid version-specific MAL- batch answer', async (_label, body) => {
+      const res = await vet(mkFetch({ body }, batchMal));
+      expect(res.malicious).toBe(true);
+      expect(res.reasons[0]).toBe(`OSV lists ${NAME} as known malicious (${MAL})`);
+      expect(cacheKeys()).toEqual([KEY]); // and the hit is remembered for the offline block
+    });
+
+  const BATCH_MALFORMED: Array<[string, (n: number) => Shape]> = [
+    ['results: [null]', (n) => ({ body: { results: each(n, null) } })],
+    ['results: [[]]', (n) => ({ body: { results: each(n, []) } })],
+    ['results: ["x"]', (n) => ({ body: { results: each(n, 'x') } })],
+    ['results: [{ vulns: null }]', (n) => ({ body: { results: each(n, { vulns: null }) } })],
+    ['results: [{ vulns: "x" }]', (n) => ({ body: { results: each(n, { vulns: 'x' }) } })],
+    ['results: [{ error }]', (n) => ({ body: { results: each(n, { error: 'x' }) } })],
+    ['results: [{ vulns: [{ id: 1 }] }]', (n) => ({ body: { results: each(n, { vulns: [{ id: 1 }] }) } })],
+    ['results: null', () => ({ body: { results: null } })],
+    ['JSON null', () => ({ body: null })],
+    ['{}', () => ({ body: {} })],
+    ['an error body beside results', (n) => ({ body: { error: 'x', results: each(n, {}) } })],
+    ['results: [{ vulns: [MAL- entry, withdrawn: {}] }]', (n) => ({ body: { results: each(n, { vulns: [{ id: MAL, withdrawn: {} }] }) } })],
+    ['results: [{ vulns: [MAL- entry, withdrawn: 30 February] }]', (n) => ({ body: { results: each(n, { vulns: [{ id: MAL, withdrawn: '2026-02-30T00:00:00Z' }] }) } })],
+    ['results: [{ vulns: [entry, aliases: [null]] }]', (n) => ({ body: { results: each(n, { vulns: [{ id: 'GHSA-aaaa-bbbb-cccc', aliases: [null] }] }) } })],
+    ['results: [{ unexpected: true }]', (n) => ({ body: { results: each(n, { unexpected: true }) } })],
+    ['a page token beside results', (n) => ({ body: { results: each(n, {}), next_page_token: 'abc' } })],
+    ['an unknown key beside results', (n) => ({ body: { results: each(n, {}), extra: 1 } })],
+  ];
+
+  it.each(BATCH_MALFORMED)('both endpoints malformed (batch %s): the cached MAL- hit is kept and still blocks', async (_label, batch) => {
+    seed();
+    const res = await vet(mkFetch({ body: { vulns: null } }, batch));
+    expect(res.malicious).toBe(true);
+    expect(res.packages[0].cached).toBe(true);
+    expect(cacheKeys()).toEqual([KEY]);
+  });
+
+  it.each(BATCH_MALFORMED)('batch %s with the exact query down: reported as the malicious-package check unavailable', async (_label, batch) => {
+    const res = await vet(mkFetch({ throws: true }, batch));
+    expect(res.malicious).toBe(false);
+    expect(res.reasons[0]).toMatch(/and the malicious-package check was unavailable$/);
+  });
+
+  // #1054 Part A review (Sol 2): an error key marks the envelope incomplete; it does not erase a
+  // well-formed MAL- entry that sits at the right index.
+  it.each(['error', 'code', 'message', 'details', 'status'])('an aligned batch reply carrying "%s" still counts its well-formed MAL- entry (exact query down, nothing cached)', async (key) => {
+    const res = await vet(mkFetch({ throws: true }, (n) => ({ body: { [key]: 'upstream problem', results: each(n, { vulns: [{ id: MAL }] }) } })));
+    expect(res.malicious).toBe(true);
+    expect(res.packages[0].malicious).toEqual([MAL]);
+  });
+
+  it('an error-keyed batch reply is per-query: the MAL- entry blocks its own package, a clean-looking neighbour is unavailable, never clean', async () => {
+    const decoys = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7', 'h8'].map((d) => npmRef(d, '1.0.0'));
+    const w = fixtureWorld();
+    const inner = fetchFor(w);
+    const f: FetchLike = async (url, init) => {
+      if (url !== 'https://api.osv.dev/v1/querybatch') return inner(url, init);
+      const n = JSON.parse(init!.body!).queries.length;
+      return { ok: true, status: 200, json: async () => ({ error: 'upstream problem', results: [...each(n - 2, {}), { vulns: [{ id: MAL }] }, {}] }) };
+    };
+    const res = await vetPackages([...decoys, npmRef('ninth-lib', '1.0.0'), npmRef('tenth-lib', '1.0.0')], { fetchImpl: f, nowMs: NOW, stateDir });
+    expect(res.malicious).toBe(true);
+    expect(res.packages.find((p) => p.ref.name === 'ninth-lib')!.malicious).toEqual([MAL]);
+    const tenth = res.packages.find((p) => p.ref.name === 'tenth-lib')!;
+    expect(tenth.malicious).toEqual([]);
+    expect(tenth.findings[0].reason).toMatch(/and the malicious-package check was unavailable$/);
+  });
+
+  it('an error-keyed batch reply whose results do not line up with the queries proves nothing: unavailable', async () => {
+    const res = await vet(mkFetch({ throws: true }, (n) => ({ body: { error: 'x', results: each(n + 1, { vulns: [{ id: MAL }] }) } })));
+    expect(res.malicious).toBe(false);
+    expect(res.reasons[0]).toMatch(/and the malicious-package check was unavailable$/);
+  });
+
+  it('a ninth (batch-only) package whose batch result is malformed is unavailable, never clean', async () => {
+    const decoys = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7', 'h8'].map((d) => npmRef(d, '1.0.0'));
+    const w = fixtureWorld();
+    const inner = fetchFor(w);
+    const f: FetchLike = async (url, init) => {
+      if (url !== 'https://api.osv.dev/v1/querybatch') return inner(url, init);
+      const n = JSON.parse(init!.body!).queries.length;
+      return { ok: true, status: 200, json: async () => ({ results: [...each(n - 1, {}), { vulns: null }] }) };
+    };
+    const res = await vetPackages([...decoys, npmRef('ninth-lib', '1.0.0')], { fetchImpl: f, nowMs: NOW, stateDir });
+    const ninth = res.packages.find((p) => p.ref.name === 'ninth-lib')!;
+    expect(ninth.findings[0].reason).toMatch(/and the malicious-package check was unavailable$/);
+  });
+
+  it('a malformed result beside a valid MAL- result in the same chunk does not hide that MAL- (per-query, not per-chunk)', async () => {
+    const decoys = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7', 'h8'].map((d) => npmRef(d, '1.0.0'));
+    const w = fixtureWorld();
+    const inner = fetchFor(w);
+    const f: FetchLike = async (url, init) => {
+      if (url !== 'https://api.osv.dev/v1/querybatch') return inner(url, init);
+      const n = JSON.parse(init!.body!).queries.length;
+      return { ok: true, status: 200, json: async () => ({ results: [{ vulns: null }, ...each(n - 2, {}), { vulns: [{ id: MAL }] }] }) };
+    };
+    const res = await vetPackages([...decoys, npmRef('ninth-lib', '1.0.0')], { fetchImpl: f, nowMs: NOW, stateDir });
+    expect(res.malicious).toBe(true);
+    expect(res.packages.find((p) => p.ref.name === 'ninth-lib')!.malicious).toEqual([MAL]);
+  });
+
+  it('a malformed exact answer that still names a MAL- id in a well-formed entry is malicious', async () => {
+    const res = await vet(mkFetch({ body: { vulns: [{ id: MAL }, null] } }, batchClean));
+    expect(res.malicious).toBe(true);
+    expect(res.reasons[0]).toContain('as known malicious');
+  });
+
+  it('round 2: the reviewer\'s fixtures, crossed with every batch answer, never evict the cached MAL- or outweigh a valid MAL- batch', async () => {
+    const exact: unknown[] = [{ vulns: [{ id: MAL, withdrawn: {} }] }, { vulns: [{ id: 'GHSA-aaaa-bbbb-cccc', aliases: [null] }] }, { results: [] }, { unexpected: true }];
+    const batches: Array<[string, (n: number) => Shape]> = [
+      ['clean', batchClean], ['same malformed body', () => ({ body: { results: [] } })], ['valid MAL-', batchMal], ['HTTP 500', () => ({ status: 500, body: {} })],
+    ];
+    for (const body of exact) {
+      for (const [label, batch] of batches) {
+        seed();
+        const res = await vet(mkFetch({ body: structuredClone(body) }, batch));
+        expect({ body, label, malicious: res.malicious, cache: cacheKeys() }).toEqual({ body, label, malicious: true, cache: [KEY] });
+        expect(res.packages[0].status === 'checked' && !res.packages[0].cached && label !== 'valid MAL-').toBe(false);
+      }
+    }
+  });
+
+  it('round 2 controls: a well-formed withdrawal is honoured, and a well-formed MAL- beside a malformed entry still blocks', async () => {
+    seed();
+    const withdrawn = await vet(mkFetch({ body: { vulns: [{ id: MAL, withdrawn: '2026-11-01T00:00:00Z' }] } }, batchClean));
+    expect(withdrawn.malicious).toBe(false);
+    expect(withdrawn.packages[0].status).toBe('checked');
+    expect(cacheKeys()).toEqual([]);
+    const fractional = await vet(mkFetch({ body: { vulns: [{ id: 'GHSA-aaaa-bbbb-cccc', withdrawn: '2026-11-01T00:00:00.123456Z', aliases: ['CVE-2026-0001'] }] } }, batchClean));
+    expect(fractional.packages[0]).toMatchObject({ status: 'checked', malicious: [] });
+    const mixed = await vet(mkFetch({ body: { vulns: [{ id: MAL }, { id: 'GHSA-aaaa-bbbb-cccc', aliases: [null] }] } }, batchClean));
+    expect(mixed.malicious).toBe(true);
+    expect(mixed.reasons[0]).toContain('as known malicious');
+  });
+
+  it('controls: legitimate {} and { vulns: [] } are clean and evict a stale cached hit (as before)', async () => {
+    for (const body of [{}, { vulns: [] }]) {
+      seed();
+      const res = await vet(mkFetch({ body }, batchClean));
+      expect(res.malicious).toBe(false);
+      expect(res.packages[0].status).toBe('checked');
+      expect(cacheKeys()).toEqual([]);
+    }
+  });
+
+  it('controls: invalid JSON, a network error and HTTP 500 keep the cached hit (as before)', async () => {
+    for (const query of [{ badJson: true }, { throws: true }, { status: 500, body: {} }] as Shape[]) {
+      seed();
+      const res = await vet(mkFetch(query, batchClean));
+      expect(res.malicious).toBe(true);
+      expect(res.packages[0].cached).toBe(true);
+      expect(cacheKeys()).toEqual([KEY]);
+    }
+  });
+
+  // Round 3 (Astra, Grok B2): a `withdrawn` string in the date-time shape that is not a
+  // calendar date-time was a withdrawal, because Date.parse rolls 30 February over to
+  // 2 March and reads hour 24 as the next midnight. The MAL- entry was skipped, the exact
+  // answer was checked-clean and final: the cached hit was deleted and a valid MAL- batch
+  // answer discarded. RFC 3339 (§5.6, §5.7) is now checked field by field.
+  const IMPOSSIBLE_WITHDRAWN = [
+    '2026-02-30T00:00:00Z',
+    '2026-04-31T00:00:00Z',
+    '2026-11-01T24:00:00Z',
+    '2026-02-29T00:00:00Z', // 2026 is a common year
+    '2026-02-31T12:00:00+01:00',
+    '2026-06-31T00:00:00.5Z',
+    '1900-02-29T00:00:00Z', // a century that is not a multiple of 400 is a common year
+  ];
+  const withdrawnAt = (at: string) => ({ vulns: [{ id: MAL, withdrawn: at }] });
+
+  it.each(IMPOSSIBLE_WITHDRAWN)('round 3: an exact answer withdrawing the MAL- at %s keeps the cached hit, which still blocks', async (at) => {
+    seed();
+    const res = await vet(mkFetch({ body: withdrawnAt(at) }, batchClean));
+    expect(res.malicious).toBe(true);
+    expect(res.packages[0].cached).toBe(true);
+    expect(cacheKeys()).toEqual([KEY]);
+  });
+
+  it.each(IMPOSSIBLE_WITHDRAWN)('round 3: an exact answer withdrawing the MAL- at %s cannot override a valid MAL- batch answer', async (at) => {
+    seed();
+    const res = await vet(mkFetch({ body: withdrawnAt(at) }, batchMal));
+    expect(res.malicious).toBe(true);
+    expect(res.reasons[0]).toBe(`OSV lists ${NAME} as known malicious (${MAL})`);
+    expect(cacheKeys()).toEqual([KEY]);
+  });
+
+  it.each(IMPOSSIBLE_WITHDRAWN)('round 3: an exact answer withdrawing the MAL- at %s with no cache is unchecked, never checked-clean', async (at) => {
+    const res = await vet(mkFetch({ body: withdrawnAt(at) }, batchClean));
+    expect(res.malicious).toBe(false);
+    expect(res.packages[0].status).toBe('unchecked');
+    expect(res.reasons).toEqual(['unchecked: OSV answer was not in the expected shape']);
+  });
+
+  it('round 3: the reviewers\' timestamps, pinned and unpinned, crossed with every batch answer, never evict the cached MAL- or read as checked-clean', async () => {
+    const batches: Array<[string, (n: number) => Shape]> = [
+      ['clean', batchClean], ['valid MAL-', batchMal], ['HTTP 500', () => ({ status: 500, body: {} })],
+      ['the same withdrawal', (n) => ({ body: { results: each(n, withdrawnAt(IMPOSSIBLE_WITHDRAWN[0])) } })],
+    ];
+    for (const spec of [VER, null]) {
+      for (const at of IMPOSSIBLE_WITHDRAWN) {
+        for (const [label, batch] of batches) {
+          seed();
+          const res = await vetPackages([npmRef(NAME, spec)], { fetchImpl: mkFetch({ body: withdrawnAt(at) }, batch), nowMs: NOW, stateDir });
+          const p = res.packages[0];
+          expect({ spec, at, label, malicious: res.malicious, cache: cacheKeys() }).toEqual({ spec, at, label, malicious: true, cache: [KEY] });
+          expect({ spec, at, label, checkedClean: p.status === 'checked' && p.malicious.length === 0 }).toEqual({ spec, at, label, checkedClean: false });
+        }
+      }
+    }
+  });
+
+  it('round 3: hours, minutes, seconds (no leap second), offsets, months and days out of range are refused too', async () => {
+    for (const at of [
+      '2026-01-01T00:60:00Z', '2026-01-01T00:00:60Z', '2016-12-31T23:59:60Z', '2026-01-01T00:00:00+24:00',
+      '2026-01-01T00:00:00+01:60', '2026-00-10T00:00:00Z', '2026-01-00T00:00:00Z', '2026-13-01T00:00:00Z', '2026-01-32T00:00:00Z',
+    ]) {
+      seed();
+      const res = await vet(mkFetch({ body: withdrawnAt(at) }, batchClean));
+      expect({ at, malicious: res.malicious, cache: cacheKeys() }).toEqual({ at, malicious: true, cache: [KEY] });
+    }
+  });
+
+  it('round 3 controls: a calendar-valid withdrawal (leap days, offsets, fractions, lowercase t/z) is honoured and evicts the cached hit', async () => {
+    for (const at of [
+      '2024-02-29T00:00:00Z', '2000-02-29T23:59:59Z', '2026-04-30T00:00:00Z', '2026-12-31T23:59:59.999999Z',
+      '2026-11-01T00:00:00+01:00', '2026-11-01T23:59:59.999-05:30', '2026-11-01T00:00:00-00:00', '2026-11-01T00:00:00+23:59', '2026-11-01t00:00:00z',
+    ]) {
+      seed();
+      const res = await vet(mkFetch({ body: withdrawnAt(at) }, batchClean));
+      expect({ at, malicious: res.malicious, status: res.packages[0].status, cache: cacheKeys() }).toEqual({ at, malicious: false, status: 'checked', cache: [] });
+    }
+  });
+});
+
+// #1054 Part A, review of PR #1080: the agent-config watch now checks every
+// changed file at the same time. Each check read the whole cache file when it
+// started and wrote its own copy back when it finished, so the last check to
+// finish replaced the file and the other check's MAL- record was gone: with
+// the network away that package was no longer blocked. A write now re-reads
+// the file and applies only what its own check recorded or evicted.
+describe('#1054 — checks that run at the same time keep each other\'s cached MAL- records', () => {
+  const A = { name: 'synth-mal-alpha', ver: '1.0.0', id: 'MAL-2026-90001' };
+  const B = { name: 'synth-mal-beta', ver: '2.0.0', id: 'MAL-2026-90002' };
+  const keyOf = (p: { name: string; ver: string }) => `npm@${p.name}@${p.ver}`;
+  const cacheFile = () => path.join(stateDir, 'package-vetting-cache.json');
+  const cacheKeys = () => Object.keys(JSON.parse(fs.readFileSync(cacheFile(), 'utf-8')).entries).sort();
+  const twoMal = (): World => world({
+    npm: {
+      [A.name]: { versions: { [A.ver]: { time: hoursAgo(24 * 40) } } },
+      [B.name]: { versions: { [B.ver]: { time: hoursAgo(24 * 40) } } },
+    },
+    osv: { [keyOf(A)]: [A.id], [keyOf(B)]: [B.id] },
+  });
+  /** The fixture fetch, with the version-specific OSV answer for one package held back. */
+  const slowFor = (w: World, slowName: string, ms: number): FetchLike => {
+    const base = fetchFor(w);
+    return async (url, init) => {
+      if (url === 'https://api.osv.dev/v1/query' && JSON.parse(init!.body!).package.name === slowName) await new Promise((r) => setTimeout(r, ms));
+      return base(url, init);
+    };
+  };
+  const ORDERS: Array<[string, string]> = [['the first check finishes last', A.name], ['the second check finishes last', B.name]];
+
+  it.each(ORDERS)('two checks, two different malicious packages, %s: both are on disk and both block offline', async (_label, slowName) => {
+    const f = slowFor(twoMal(), slowName, 60);
+    const [ra, rb] = await Promise.all([
+      vetPackages([npmRef(A.name, A.ver)], { fetchImpl: f, nowMs: NOW, stateDir }),
+      vetPackages([npmRef(B.name, B.ver)], { fetchImpl: f, nowMs: NOW, stateDir }),
+    ]);
+    expect([ra.malicious, rb.malicious]).toEqual([true, true]);
+    expect(cacheKeys()).toEqual([keyOf(A), keyOf(B)]);
+    for (const p of [A, B]) {
+      const off = await vetPackages([npmRef(p.name, p.ver)], { fetchImpl: offline, nowMs: NOW + 3_600_000, stateDir });
+      expect({ name: p.name, malicious: off.malicious, cached: off.packages[0].cached, ids: off.packages[0].malicious }).toEqual({ name: p.name, malicious: true, cached: true, ids: [p.id] });
+    }
+    expect(fs.statSync(cacheFile()).mode & 0o777).toBe(0o600);
+  });
+
+  it.each(ORDERS)('a clean answer in one check still evicts the stale hit for that version and leaves the other check\'s new record, %s', async (_label, slowName) => {
+    // A is cached as malicious from an hour ago; its report has since been withdrawn. B is newly malicious.
+    fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: { [keyOf(A)]: { at: NOW - 3_600_000, ecosystem: 'npm', name: A.name, version: A.ver, osvIds: [A.id], hooks: [], sdistOnly: false } } }));
+    const w = twoMal();
+    delete w.osv[keyOf(A)];
+    const f = slowFor(w, slowName, 60);
+    const [ra, rb] = await Promise.all([
+      vetPackages([npmRef(A.name, A.ver)], { fetchImpl: f, nowMs: NOW, stateDir }),
+      vetPackages([npmRef(B.name, B.ver)], { fetchImpl: f, nowMs: NOW, stateDir }),
+    ]);
+    expect([ra.malicious, rb.malicious]).toEqual([false, true]);
+    expect(cacheKeys()).toEqual([keyOf(B)]);
+    const offA = await vetPackages([npmRef(A.name, A.ver)], { fetchImpl: offline, nowMs: NOW + 3_600_000, stateDir });
+    expect({ malicious: offA.malicious, status: offA.packages[0].status }).toEqual({ malicious: false, status: 'unchecked' });
+    const offB = await vetPackages([npmRef(B.name, B.ver)], { fetchImpl: offline, nowMs: NOW + 3_600_000, stateDir });
+    expect({ malicious: offB.malicious, cached: offB.packages[0].cached }).toEqual({ malicious: true, cached: true });
+  });
+
+  it('a write still drops records that expired on disk, and keeps unexpired ones another check wrote', async () => {
+    const old = { at: NOW - 7 * 3_600_000, ecosystem: 'npm', name: 'synth-expired', version: '1.0.0', osvIds: ['MAL-2026-90003'], hooks: [], sdistOnly: false };
+    const live = { at: NOW - 3_600_000, ecosystem: 'npm', name: 'synth-live', version: '1.0.0', osvIds: ['MAL-2026-90004'], hooks: [], sdistOnly: false };
+    fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: { 'npm@synth-expired@1.0.0': old, 'npm@synth-live@1.0.0': live } }));
+    await vetPackages([npmRef(A.name, A.ver)], opts(twoMal()));
+    expect(cacheKeys()).toEqual(['npm@synth-live@1.0.0', keyOf(A)]);
+  });
+
+  it('control: a cache file over the size limit is not read, a new record replaces it, owner-only, and a cache that cannot be written never fails a vet', async () => {
+    fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: {}, pad: 'x'.repeat(4_000_001) }));
+    const res = await vetPackages([npmRef(A.name, A.ver)], opts(twoMal()));
+    expect(res.malicious).toBe(true);
+    expect(cacheKeys()).toEqual([keyOf(A)]);
+    expect(fs.statSync(cacheFile()).size).toBeLessThan(4_000_000);
+    expect(fs.statSync(cacheFile()).mode & 0o777).toBe(0o600);
+    // The state directory is a regular file here, so nothing can be read or written under it.
+    const blocked = path.join(stateDir, 'not-a-directory');
+    fs.writeFileSync(blocked, '');
+    const res2 = await vetPackages([npmRef(B.name, B.ver)], { ...opts(twoMal()), stateDir: blocked });
+    expect(res2.malicious).toBe(true);
+  });
+});
+
+// #1054 Part A, the review that closed PR #1080. With a cached hit already on
+// disk and two checks of the SAME package version running together, a check
+// that got a clean answer recorded "evict this key" and, when it wrote, deleted
+// whatever record was on disk by then: including the record the other check
+// had just written from a malicious answer. With the network away that version
+// was then no longer blocked. An eviction now carries the record its check saw
+// and removes only that record, and never one written after its check started.
+//
+// The ordering rules, one row each (all inside one process):
+//   1. different versions, both malicious            -> both records kept, either finish order
+//   2. same version, both malicious                  -> one record kept
+//   3. same version, one clean + one malicious,
+//      record already on disk                        -> the malicious record is kept, either finish order
+//   4. same version, both clean, record on disk      -> record evicted
+//   5. a later clean check that does not overlap     -> still evicts
+//   6. an expired record                             -> dropped at write, never revived
+//   7. one check, two refs for one version, answers
+//      differ                                        -> the malicious record is kept, either order
+describe('#1054 — cache ordering rules for checks of the same package version', () => {
+  const P = { name: 'synth-order-pkg', ver: '1.0.0', id: 'MAL-2026-91001' };
+  const V2 = { name: P.name, ver: '2.0.0', id: 'MAL-2026-91002' };
+  const KEY = `npm@${P.name}@${P.ver}`;
+  const KEY2 = `npm@${V2.name}@${V2.ver}`;
+  const cacheFile = () => path.join(stateDir, 'package-vetting-cache.json');
+  const entries = (): Record<string, { at: number; osvIds: string[] }> => JSON.parse(fs.readFileSync(cacheFile(), 'utf-8')).entries;
+  const record = (at: number, ids: string[] = [P.id]) => ({ at, ecosystem: 'npm', name: P.name, version: P.ver, osvIds: ids, hooks: [], sdistOnly: false });
+  const seed = (at: number, ids: string[] = [P.id]) => fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: { [KEY]: record(at, ids) } }));
+  const npmFix = { [P.name]: { versions: { [P.ver]: { time: hoursAgo(24 * 40) }, [V2.ver]: { time: hoursAgo(24 * 35) } } } };
+  const malWorld = (): World => world({ npm: npmFix, osv: { [KEY]: [P.id], [KEY2]: [V2.id] } });
+  const cleanWorld = (): World => world({ npm: npmFix });
+  /** The fixture fetch with every version-specific OSV answer held back, so the caller picks which check finishes last. */
+  const held = (w: World, ms: number): FetchLike => {
+    const base = fetchFor(w);
+    return async (url, init) => {
+      if (url === 'https://api.osv.dev/v1/query') await new Promise((r) => setTimeout(r, ms));
+      return base(url, init);
+    };
+  };
+  const vet = (w: World, ms: number, ver = P.ver, nowMs = NOW) => vetPackages([npmRef(P.name, ver)], { fetchImpl: held(w, ms), nowMs, stateDir });
+  const offlineVet = async (ver = P.ver, nowMs = NOW + 60_000) => {
+    const off = await vetPackages([npmRef(P.name, ver)], { fetchImpl: offline, nowMs, stateDir });
+    return { malicious: off.malicious, status: off.packages[0].status, cached: off.packages[0].cached === true };
+  };
+  const BLOCKED = { malicious: true, status: 'checked', cached: true };
+  const NOT_BLOCKED = { malicious: false, status: 'unchecked', cached: false };
+  const FINISH: Array<[string, number, number]> = [['the first check finishes last', 60, 5], ['the second check finishes last', 5, 60]];
+
+  it.each(FINISH)('row 1: two versions of one package, both malicious, %s: both records are kept and both block offline', async (_l, msA, msB) => {
+    const [a, b] = await Promise.all([vet(malWorld(), msA, P.ver), vet(malWorld(), msB, V2.ver)]);
+    expect([a.malicious, b.malicious]).toEqual([true, true]);
+    expect(Object.keys(entries()).sort()).toEqual([KEY, KEY2]);
+    expect(await offlineVet(P.ver)).toEqual(BLOCKED);
+    expect(await offlineVet(V2.ver)).toEqual(BLOCKED);
+  });
+
+  it.each(FINISH)('row 2: same version, both malicious, %s: one record, and it blocks offline', async (_l, msA, msB) => {
+    const [a, b] = await Promise.all([vet(malWorld(), msA), vet(malWorld(), msB)]);
+    expect([a.malicious, b.malicious]).toEqual([true, true]);
+    expect(Object.keys(entries())).toEqual([KEY]);
+    expect(entries()[KEY]).toMatchObject({ at: NOW, osvIds: [P.id] });
+    expect(await offlineVet()).toEqual(BLOCKED);
+  });
+
+  // The record on disk when both checks start. "identical" is the hard case: the malicious check
+  // rewrites a record with the same time and ids as the one the clean check saw.
+  const SEEDS: Array<[string, () => void]> = [
+    ['an hour-old record', () => seed(NOW - 3_600_000)],
+    ['a record identical to the one the malicious check writes', () => seed(NOW)],
+    ['a record with a different id', () => seed(NOW - 3_600_000, ['MAL-2026-91009'])],
+  ];
+  const ROW3 = SEEDS.flatMap(([s, doSeed]) => [
+    [s, 'the clean check finishes last', doSeed, 60, 5] as const,
+    [s, 'the malicious check finishes last', doSeed, 5, 60] as const,
+  ]);
+
+  it.each(ROW3)('row 3: %s on disk, one clean and one malicious check of that version, %s: the malicious record is kept', async (_s, _l, doSeed, msClean, msMal) => {
+    doSeed();
+    const [c, m] = await Promise.all([vet(cleanWorld(), msClean), vet(malWorld(), msMal)]);
+    expect([c.malicious, m.malicious]).toEqual([false, true]);
+    expect(Object.keys(entries())).toEqual([KEY]);
+    expect(entries()[KEY]).toMatchObject({ at: NOW, osvIds: [P.id] });
+    expect(await offlineVet()).toEqual(BLOCKED);
+  });
+
+  it.each(ROW3)('row 3, started the other way round: %s on disk, %s: the malicious record is kept', async (_s, _l, doSeed, msClean, msMal) => {
+    doSeed();
+    const [m, c] = await Promise.all([vet(malWorld(), msMal), vet(cleanWorld(), msClean)]);
+    expect([c.malicious, m.malicious]).toEqual([false, true]);
+    expect(Object.keys(entries())).toEqual([KEY]);
+    expect(await offlineVet()).toEqual(BLOCKED);
+  });
+
+  it.each(FINISH)('row 3 control: nothing on disk, one clean and one malicious check, %s: the malicious record is written and kept', async (_l, msClean, msMal) => {
+    const [c, m] = await Promise.all([vet(cleanWorld(), msClean), vet(malWorld(), msMal)]);
+    expect([c.malicious, m.malicious]).toEqual([false, true]);
+    expect(Object.keys(entries())).toEqual([KEY]);
+    expect(await offlineVet()).toEqual(BLOCKED);
+  });
+
+  // B2: identity is the cache directory, not the spelling supplied by the caller.
+  const vetAt = (dir: string, w: World, ver = P.ver) => vetPackages([npmRef(P.name, ver)], { fetchImpl: fetchFor(w), nowMs: NOW, stateDir: dir });
+  const heldCleanAt = (dir: string) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const base = fetchFor(cleanWorld());
+    const fetchImpl: FetchLike = async (url, init) => {
+      if (url === 'https://api.osv.dev/v1/query') await gate;
+      return base(url, init);
+    };
+    return { result: vetPackages([npmRef(P.name, P.ver)], { fetchImpl, nowMs: NOW, stateDir: dir }), release };
+  };
+  it.each(['relative', 'symlink'] as const)('B2: %s alias preserves identical newer records in both directions', async (kind) => {
+    const alias = kind === 'relative' ? path.relative(process.cwd(), stateDir) : stateDir + '-link';
+    if (kind === 'symlink') fs.symlinkSync(stateDir, alias, 'dir');
+    for (const [cleanDir, malDir] of [[stateDir, alias], [alias, stateDir]]) {
+      seed(NOW);
+      const pending = heldCleanAt(cleanDir);
+      try { expect((await vetAt(malDir, malWorld())).malicious).toBe(true); }
+      finally { pending.release(); }
+      expect((await pending.result).malicious).toBe(false);
+      expect(entries()[KEY]).toMatchObject({ at: NOW, osvIds: [P.id] });
+      expect(await offlineVet()).toEqual(BLOCKED);
+    }
+  });
+  it('B2: the same relative spelling in another cwd does not prune the first file write numbers', async () => {
+    const originalCwd = process.cwd();
+    const rootA = fs.mkdtempSync(path.join(home, 'cwd-a-'));
+    const rootB = fs.mkdtempSync(path.join(home, 'cwd-b-'));
+    const aDir = path.join(rootA, 'state');
+    fs.mkdirSync(aDir);
+    fs.writeFileSync(path.join(aDir, 'package-vetting-cache.json'), JSON.stringify({ v: 1, entries: { [KEY]: record(NOW) } }));
+    let pending: ReturnType<typeof heldCleanAt> | undefined;
+    try {
+      process.chdir(rootA);
+      pending = heldCleanAt('state');
+      await vetAt('state', malWorld());
+      process.chdir(rootB);
+      await vetAt('state', malWorld(), V2.ver);
+      process.chdir(rootA);
+      pending.release();
+      await pending.result;
+      expect(JSON.parse(fs.readFileSync(path.join(aDir, 'package-vetting-cache.json'), 'utf-8')).entries[KEY]).toMatchObject({ at: NOW, osvIds: [P.id] });
+      const off = await vetPackages([npmRef(P.name, P.ver)], { fetchImpl: offline, nowMs: NOW + 60_000, stateDir: aDir });
+      expect({ malicious: off.malicious, status: off.packages[0].status, cached: off.packages[0].cached === true }).toEqual(BLOCKED);
+    } finally { process.chdir(originalCwd); pending?.release(); if (pending) await pending.result; }
+  });
+  it('B2: a symlink repointed during a clean check cannot evict the other directory record', async () => {
+    seed(NOW);
+    const other = fs.mkdtempSync(path.join(home, 'other-state-'));
+    fs.writeFileSync(path.join(other, 'package-vetting-cache.json'), JSON.stringify({ v: 1, entries: { [KEY]: record(NOW) } }));
+    const alias = stateDir + '-moving-link';
+    fs.symlinkSync(stateDir, alias, 'dir');
+    const pending = heldCleanAt(alias);
+    fs.unlinkSync(alias);
+    fs.symlinkSync(other, alias, 'dir');
+    pending.release();
+    await pending.result;
+    expect(JSON.parse(fs.readFileSync(path.join(other, 'package-vetting-cache.json'), 'utf-8')).entries[KEY]).toMatchObject({ at: NOW, osvIds: [P.id] });
+    const off = await vetPackages([npmRef(P.name, P.ver)], { fetchImpl: offline, nowMs: NOW + 60_000, stateDir: other });
+    expect({ malicious: off.malicious, status: off.packages[0].status, cached: off.packages[0].cached === true }).toEqual(BLOCKED);
+  });
+
+  it.each(FINISH)('row 4: same version, both clean, record on disk, %s: the record is evicted', async (_l, msA, msB) => {
+    seed(NOW - 3_600_000);
+    const [a, b] = await Promise.all([vet(cleanWorld(), msA), vet(cleanWorld(), msB)]);
+    expect([a.malicious, b.malicious]).toEqual([false, false]);
+    expect(entries()).toEqual({});
+    expect(await offlineVet()).toEqual(NOT_BLOCKED);
+  });
+
+  it('row 5: a clean check that starts after the malicious check has written still evicts its record', async () => {
+    expect((await vet(malWorld(), 0)).malicious).toBe(true);
+    expect(Object.keys(entries())).toEqual([KEY]);
+    expect((await vet(cleanWorld(), 0)).malicious).toBe(false);
+    expect(entries()).toEqual({});
+    expect(await offlineVet()).toEqual(NOT_BLOCKED);
+  });
+
+  it.each(FINISH)('row 5: after a clean and a malicious check overlapped (%s), a later clean check on its own evicts the kept record', async (_l, msClean, msMal) => {
+    seed(NOW);
+    await Promise.all([vet(cleanWorld(), msClean), vet(malWorld(), msMal)]);
+    expect(Object.keys(entries())).toEqual([KEY]);
+    expect((await vet(cleanWorld(), 0)).malicious).toBe(false);
+    expect(entries()).toEqual({});
+    expect(await offlineVet()).toEqual(NOT_BLOCKED);
+  });
+
+  it('row 6: an expired record is dropped by any write, is not what an overlapping eviction or rewrite leaves behind, and never blocks', async () => {
+    const EXPIRED = NOW - 7 * 3_600_000;
+    // Offline, an expired record does not block, and (nothing to write) it is left alone.
+    seed(EXPIRED);
+    expect(await offlineVet(P.ver, NOW)).toEqual(NOT_BLOCKED);
+    // A write for another version drops it.
+    await vet(malWorld(), 0, V2.ver);
+    expect(Object.keys(entries())).toEqual([KEY2]);
+    // A clean check that saw it, overlapping a malicious one: only the fresh record is left, either finish order.
+    for (const [msClean, msMal] of [[60, 5], [5, 60]]) {
+      seed(EXPIRED);
+      await Promise.all([vet(cleanWorld(), msClean), vet(malWorld(), msMal)]);
+      expect(entries()).toEqual({ [KEY]: expect.objectContaining({ at: NOW }) });
+    }
+    // Two clean checks that saw it: gone, not rewritten.
+    seed(EXPIRED);
+    await Promise.all([vet(cleanWorld(), 5), vet(cleanWorld(), 60)]);
+    expect(entries()).toEqual({});
+    expect(await offlineVet()).toEqual(NOT_BLOCKED);
+  });
+
+  // One check, two refs that resolve to the same version (a pin and a bare name), and OSV answers the
+  // two version queries differently. The malicious answer is the one kept, whichever arrives last.
+  it.each([['the clean answer arrives last', [P.id], []], ['the malicious answer arrives last', [], [P.id]]] as Array<[string, string[], string[]]>)(
+    'row 7: one check, two refs for one version, %s: the malicious record is kept', async (_l, firstIds, secondIds) => {
+      seed(NOW - 3_600_000);
+      const base = fetchFor(world({ npm: { [P.name]: { versions: { [P.ver]: { time: hoursAgo(24 * 40) } } } } }));
+      let n = 0;
+      const f: FetchLike = async (url, init) => {
+        if (url !== 'https://api.osv.dev/v1/query') return base(url, init);
+        const mine = n++;
+        if (mine === 1) await new Promise((r) => setTimeout(r, 30));
+        const ids = mine === 0 ? firstIds : secondIds;
+        return { ok: true, status: 200, json: async () => (ids.length ? { vulns: ids.map((id) => ({ id, modified: '2026-11-05T00:00:00Z' })) } : {}) };
+      };
+      const res = await vetPackages([npmRef(P.name, P.ver), npmRef(P.name)], { fetchImpl: f, nowMs: NOW, stateDir });
+      expect(res.malicious).toBe(true);
+      expect(n).toBe(2);
+      expect(entries()).toEqual({ [KEY]: expect.objectContaining({ at: NOW, osvIds: [P.id] }) });
+      expect(await offlineVet()).toEqual(BLOCKED);
+    });
+
+  // The compare is on the record itself (its time and ids), so it also holds for a writer this
+  // process knows nothing about. Stood in for here by writing the file while the clean check waits.
+  it('a valid replacement written by another writer is kept; a malformed replacement is discarded', async () => {
+    seed(NOW - 3_600_000);
+    const slowClean = vet(cleanWorld(), 40);
+    await new Promise((r) => setTimeout(r, 10));
+    seed(NOW - 1_000);
+    expect((await slowClean).malicious).toBe(false);
+    expect(entries()).toEqual({ [KEY]: expect.objectContaining({ at: NOW - 1_000 }) });
+    expect(await offlineVet()).toEqual(BLOCKED);
+
+    seed(NOW - 3_600_000);
+    const slowClean2 = vet(cleanWorld(), 40);
+    await new Promise((r) => setTimeout(r, 10));
+    fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: { [KEY]: { ...record(NOW - 3_600_000), osvIds: P.id } } }));
+    expect((await slowClean2).malicious).toBe(false);
+    expect(entries()).toEqual({});
+  });
+
+  it('control: the cache file and its directory stay owner-only after an eviction and after a rewrite', async () => {
+    seed(NOW - 3_600_000);
+    fs.chmodSync(cacheFile(), 0o644);
+    await vet(cleanWorld(), 0);
+    expect(entries()).toEqual({});
+    expect(fs.statSync(cacheFile()).mode & 0o777).toBe(0o600);
+    await vet(malWorld(), 0);
+    expect(fs.statSync(cacheFile()).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(stateDir).mode & 0o077).toBe(0);
+  });
+});
+
+
+describe('#1084 — malformed cache rows cannot discard a malicious verdict', () => {
+  const OLD = 'old-pkg';
+  const KEY = `npm@${OLD}@1.0.0`;
+  const cacheFile = () => path.join(stateDir, 'package-vetting-cache.json');
+  const valid = () => ({ at: NOW - 1_000, ecosystem: 'npm', name: OLD, version: '1.0.0', osvIds: [MAL_ID], hooks: [], sdistOnly: false });
+  const malformed: Array<[string, () => unknown]> = [
+    ['string ids', () => ({ ...valid(), osvIds: MAL_ID })],
+    ['non-string id', () => ({ ...valid(), osvIds: [7] })],
+    ['null row', () => null],
+    ['missing version', () => ({ ...valid(), version: undefined })],
+    ['non-string hook', () => ({ ...valid(), hooks: [7] })],
+  ];
+  const seed = (bad: unknown) => fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: { [KEY]: bad } }));
+  const w = () => {
+    const f = fixtureWorld();
+    f.npm[OLD] = { versions: { '1.0.0': { time: hoursAgo(24 * 40) } } };
+    return f;
+  };
+  const mixedFetch = (): FetchLike => {
+    const f = fetchFor(w());
+    return async (url, init) => {
+      if (url === 'https://api.osv.dev/v1/query' && JSON.parse(init!.body!).package.name === OLD) {
+        return { ok: false, status: 503, json: async () => ({}) };
+      }
+      return f(url, init);
+    };
+  };
+
+  it.each(malformed)('%s: a clean check removes the invalid row, without needing a malicious write', async (_label, bad) => {
+    seed(bad());
+    expect((await vetPackages([npmRef(OLD, '1.0.0')], opts(w()))).malicious).toBe(false);
+    expect(JSON.parse(fs.readFileSync(cacheFile(), 'utf-8')).entries).toEqual({});
+  });
+
+  it.each(malformed)('%s: an unchecked sibling cannot erase an online MAL hit at the final verdict', async (_label, bad) => {
+    seed(bad());
+    const out = await vetToolCall('Bash', { command: j('npm', 'install', `${MAL_NAME}@1.0.3`, `${OLD}@1.0.0`) }, { fetchImpl: mixedFetch(), nowMs: NOW, stateDir });
+    expect(out).not.toBeNull();
+    const verdict = applyVettingToVerdict({ decision: 'allow' as const, severity: 'sensitive', reason: 'package check', signals: [] }, out);
+    expect(verdict).toMatchObject({ decision: 'block', severity: 'catastrophic' });
+    expect(verdict.reason).toContain(MAL_ID);
+    const entries = JSON.parse(fs.readFileSync(cacheFile(), 'utf-8')).entries;
+    expect(entries[KEY]).toBeUndefined();
+    expect(entries[`npm@${MAL_NAME}@1.0.3`].osvIds).toContain(MAL_ID);
+  });
+
+  it('a malformed row does not discard an independent valid offline MAL record', async () => {
+    seed({ ...valid(), osvIds: MAL_ID });
+    const parsed = JSON.parse(fs.readFileSync(cacheFile(), 'utf-8'));
+    parsed.entries[`npm@${MAL_NAME}@1.0.3`] = { ...valid(), name: MAL_NAME, version: '1.0.3' };
+    fs.writeFileSync(cacheFile(), JSON.stringify(parsed));
+    const out = await vetToolCall('Bash', { command: j('npm', 'install', `${OLD}@1.0.0`, `${MAL_NAME}@1.0.3`) }, { fetchImpl: offline, nowMs: NOW, stateDir });
+    expect(out?.malicious).toBe(true);
+    expect(applyVettingToVerdict({ decision: 'allow' as const, severity: 'sensitive', reason: 'package check', signals: [] }, out)).toMatchObject({ decision: 'block', severity: 'catastrophic' });
+  });
+});
+
+
+describe('#1084 D1 — writer-compatible non-semver malicious cache records', () => {
+  it('keeps a registry dist-tag record offline for bare and pinned requests and the tool verdict', async () => {
+    const name = 'synth-nonsemver-pkg';
+    const version = '2024.01';
+    const fixture = world({ npm: { [name]: { tags: { latest: version }, versions: { [version]: { time: hoursAgo(24 * 40) } } } }, osv: { [`npm@${name}@${version}`]: [MAL_ID] } });
+    const online = await vetPackages([npmRef(name)], { fetchImpl: fetchFor(fixture), nowMs: NOW, stateDir });
+    expect(online.malicious).toBe(true);
+    for (const spec of [undefined, '1.0.0']) {
+      const off = await vetPackages([npmRef(name, spec)], { fetchImpl: offline, nowMs: NOW + 60_000, stateDir });
+      expect(off.malicious).toBe(true);
+      expect(off.packages[0].cached).toBe(true);
+    }
+    const offTool = await vetToolCall('Bash', { command: ['npm', 'install', name].join(' ') }, { fetchImpl: offline, nowMs: NOW + 60_000, stateDir });
+    expect(offTool?.malicious).toBe(true);
+    expect(applyVettingToVerdict({ decision: 'allow' as const, severity: 'sensitive', reason: 'package check', signals: [] }, offTool!).decision).toBe('block');
+  });
+});
