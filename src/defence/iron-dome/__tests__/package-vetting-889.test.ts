@@ -1545,3 +1545,61 @@ describe('#1054 — cache ordering rules for checks of the same package version'
     expect(fs.statSync(stateDir).mode & 0o077).toBe(0);
   });
 });
+
+
+describe('#1084 — malformed cache rows cannot discard a malicious verdict', () => {
+  const OLD = 'old-pkg';
+  const KEY = `npm@${OLD}@1.0.0`;
+  const cacheFile = () => path.join(stateDir, 'package-vetting-cache.json');
+  const valid = () => ({ at: NOW - 1_000, ecosystem: 'npm', name: OLD, version: '1.0.0', osvIds: [MAL_ID], hooks: [], sdistOnly: false });
+  const malformed: Array<[string, () => unknown]> = [
+    ['string ids', () => ({ ...valid(), osvIds: MAL_ID })],
+    ['non-string id', () => ({ ...valid(), osvIds: [7] })],
+    ['null row', () => null],
+    ['missing version', () => ({ ...valid(), version: undefined })],
+    ['non-string hook', () => ({ ...valid(), hooks: [7] })],
+  ];
+  const seed = (bad: unknown) => fs.writeFileSync(cacheFile(), JSON.stringify({ v: 1, entries: { [KEY]: bad } }));
+  const w = () => {
+    const f = fixtureWorld();
+    f.npm[OLD] = { versions: { '1.0.0': { time: hoursAgo(24 * 40) } } };
+    return f;
+  };
+  const mixedFetch = (): FetchLike => {
+    const f = fetchFor(w());
+    return async (url, init) => {
+      if (url === 'https://api.osv.dev/v1/query' && JSON.parse(init!.body!).package.name === OLD) {
+        return { ok: false, status: 503, json: async () => ({}) };
+      }
+      return f(url, init);
+    };
+  };
+
+  it.each(malformed)('%s: a clean check removes the invalid row, without needing a malicious write', async (_label, bad) => {
+    seed(bad());
+    expect((await vetPackages([npmRef(OLD, '1.0.0')], opts(w()))).malicious).toBe(false);
+    expect(JSON.parse(fs.readFileSync(cacheFile(), 'utf-8')).entries).toEqual({});
+  });
+
+  it.each(malformed)('%s: an unchecked sibling cannot erase an online MAL hit at the final verdict', async (_label, bad) => {
+    seed(bad());
+    const out = await vetToolCall('Bash', { command: j('npm', 'install', `${MAL_NAME}@1.0.3`, `${OLD}@1.0.0`) }, { fetchImpl: mixedFetch(), nowMs: NOW, stateDir });
+    expect(out).not.toBeNull();
+    const verdict = applyVettingToVerdict({ decision: 'allow' as const, severity: 'sensitive', reason: 'package check', signals: [] }, out);
+    expect(verdict).toMatchObject({ decision: 'block', severity: 'catastrophic' });
+    expect(verdict.reason).toContain(MAL_ID);
+    const entries = JSON.parse(fs.readFileSync(cacheFile(), 'utf-8')).entries;
+    expect(entries[KEY]).toBeUndefined();
+    expect(entries[`npm@${MAL_NAME}@1.0.3`].osvIds).toContain(MAL_ID);
+  });
+
+  it('a malformed row does not discard an independent valid offline MAL record', async () => {
+    seed({ ...valid(), osvIds: MAL_ID });
+    const parsed = JSON.parse(fs.readFileSync(cacheFile(), 'utf-8'));
+    parsed.entries[`npm@${MAL_NAME}@1.0.3`] = { ...valid(), name: MAL_NAME, version: '1.0.3' };
+    fs.writeFileSync(cacheFile(), JSON.stringify(parsed));
+    const out = await vetToolCall('Bash', { command: j('npm', 'install', `${OLD}@1.0.0`, `${MAL_NAME}@1.0.3`) }, { fetchImpl: offline, nowMs: NOW, stateDir });
+    expect(out?.malicious).toBe(true);
+    expect(applyVettingToVerdict({ decision: 'allow' as const, severity: 'sensitive', reason: 'package check', signals: [] }, out)).toMatchObject({ decision: 'block', severity: 'catastrophic' });
+  });
+});
