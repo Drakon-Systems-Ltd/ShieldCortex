@@ -4053,7 +4053,18 @@ export async function handleBeforeAgentRun(
     let promptOpaque = false;
     try { ({ value: rawPrompt, opaque: promptOpaque } = readGateHostField(event, 'prompt')); }
     catch { promptOpaque = true; }
-    const prompt = typeof rawPrompt === 'string' ? rawPrompt : '';
+    // A non-string prompt (String object, array, object with toString) is
+    // still evidence: the previous gate scanned String(event.prompt), and the
+    // host may coerce it the same way. Stringify it once for the scan, but a
+    // non-string can render differently on the host's own coercion (or not
+    // stringify at all), so it can never clean-pass.
+    let prompt = '';
+    if (typeof rawPrompt === 'string') {
+      prompt = rawPrompt;
+    } else if (rawPrompt !== undefined && rawPrompt !== null) {
+      promptOpaque = true;
+      try { prompt = String(rawPrompt); } catch { prompt = ''; }
+    }
     const inputs: Array<{ text: string; label: PluginProvenanceLabel; ownerHistory?: boolean }> = prompt
       ? [{ text: prompt, label: 'unknown' }] : [];
     // Selected history is first copied to plain data (snapshotGateHistory),
@@ -4077,8 +4088,16 @@ export async function handleBeforeAgentRun(
       }
     }
     const automationSession = isTrustedAutomationSession(sessionId);
+    // Owner attestation is read once, by the same rules as the prompt. A flag
+    // that is not a plain data property (getter, Proxy, throwing read) could
+    // answer `true` here and `false` to the host, so it never grants owner
+    // trust and the turn can never clean-pass.
+    let rawSenderIsOwner: unknown;
+    let ownerOpaque = false;
+    try { ({ value: rawSenderIsOwner, opaque: ownerOpaque } = readGateHostField(event, 'senderIsOwner')); }
+    catch { ownerOpaque = true; }
     const turnTrust = classifyConversationOrigin({
-      senderIsOwner: event?.senderIsOwner,
+      senderIsOwner: ownerOpaque ? false : rawSenderIsOwner as boolean | undefined,
       trustOwnerInput: cfg.conversationTrust?.trustOwnerInput,
     });
     let text = '';
@@ -4126,7 +4145,9 @@ export async function handleBeforeAgentRun(
       } else if (!result.clean) {
         if (isBenignTranscriptSentence(candidate)) continue;
         const isPrompt = i === 0 && !!prompt;
-        if ((isPrompt || input.ownerHistory) && !turnTrust.mayTaint) {
+        // An opaque prompt is not owner-attested input: the host may read
+        // something other than what was scanned, so it cannot be sheltered.
+        if (((isPrompt && !promptOpaque) || input.ownerHistory) && !turnTrust.mayTaint) {
           // Owner-attested current input and structurally user-role history
           // are observed, but neither may shelter a later tool-result hit.
           ownerDetection ??= { text: candidate, scan: result };
@@ -4134,7 +4155,7 @@ export async function handleBeforeAgentRun(
         }
         text = candidate;
         scan = result;
-        fromHistory = !isPrompt;
+        fromHistory = !isPrompt || promptOpaque;
         break;
       }
     }
@@ -4147,6 +4168,11 @@ export async function handleBeforeAgentRun(
       // Not owner-attested: the host may read a different prompt than was scanned.
       text = '[prompt not a plain data property]';
       scan = { clean: false, available: true, summary: 'prompt could not be read stably and was not fully inspected' };
+      fromHistory = true;
+    }
+    if (!scan && ownerOpaque) {
+      text = '[senderIsOwner not a plain data property]';
+      scan = { clean: false, available: true, summary: 'owner attestation could not be read stably' };
       fromHistory = true;
     }
     if (!scan && unavailable) {

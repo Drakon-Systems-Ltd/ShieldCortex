@@ -613,3 +613,84 @@ describe('#934 accessor and getter reads that change between the gate and the ho
     expect(verdicts()).not.toContain(NOT_INSPECTED);
   });
 });
+
+describe('#934 non-string prompts and owner-attestation reads (PR #1085 review)', () => {
+  const BENIGN = 'Ordinary status update number zero for the team today.';
+  const ctx = { sessionId: 'agent:main:direct:guest' };
+  const scanned = () => scanner.mock.calls.map(call => String(call[1]));
+
+  it.each([
+    ['B1 String object', () => new String(ATTACK)],
+    ['B2 object with toString', () => ({ toString: () => ATTACK })],
+    ['B3 single-element array', () => [ATTACK]],
+  ])('scans a %s prompt as evidence and blocks it', async (_name, make) => {
+    for (const senderIsOwner of [false, true]) {
+      scanner.mockClear();
+      expect(await handleBeforeAgentRun({ prompt: make(), senderIsOwner, messages: [] } as never, ctx))
+        .toMatchObject({ outcome: 'block', category: 'prompt_injection' });
+      expect(scanned()).toContain(ATTACK);
+    }
+  });
+
+  it('never clean-passes a non-string prompt whose stringification is benign', async () => {
+    for (const prompt of [new String(CLEAN), { toString: () => CLEAN }, [CLEAN], 42]) {
+      expect(await handleBeforeAgentRun({ prompt, senderIsOwner: true, messages: [] } as never, ctx))
+        .toMatchObject({ outcome: 'block' });
+    }
+    expect(scanned()).toContain(CLEAN);
+  });
+
+  it('blocks a non-string prompt whose stringification throws', async () => {
+    const prompt = { toString: () => { throw new Error('nope'); } };
+    expect(await handleBeforeAgentRun({ prompt, senderIsOwner: true, messages: [] } as never, ctx))
+      .toMatchObject({ outcome: 'block' });
+    expect(await handleBeforeAgentRun({ prompt: Object.create(null), senderIsOwner: false, messages: [] } as never, ctx))
+      .toMatchObject({ outcome: 'block' });
+  });
+
+  it('A: an accessor senderIsOwner answering true first and false later never grants owner trust', async () => {
+    let reads = 0;
+    const event = Object.defineProperty({ prompt: ATTACK, messages: [] }, 'senderIsOwner', {
+      enumerable: true, get: () => ++reads === 1,
+    });
+    expect(await handleBeforeAgentRun(event as never, ctx))
+      .toMatchObject({ outcome: 'block', category: 'prompt_injection' });
+    expect(reads).toBe(1);
+  });
+
+  it('A2: a Proxy event answering senderIsOwner true once never grants owner trust', async () => {
+    let n = 0;
+    const event = new Proxy({ prompt: ATTACK, messages: [] } as Record<string, unknown>, {
+      get(target, key) { return key === 'senderIsOwner' ? ++n === 1 : target[key as string]; },
+    });
+    expect(await handleBeforeAgentRun(event as never, ctx))
+      .toMatchObject({ outcome: 'block', category: 'prompt_injection' });
+    expect(n).toBe(1);
+  });
+
+  it('never clean-passes an accessor senderIsOwner, even a stable benign turn', async () => {
+    for (const value of [true, false]) {
+      const event = Object.defineProperty({ prompt: CLEAN, messages: [] }, 'senderIsOwner', {
+        enumerable: true, get: () => value,
+      });
+      expect(await handleBeforeAgentRun(event as never, ctx)).toMatchObject({ outcome: 'block' });
+    }
+  });
+
+  it('still clean-passes frozen benign and JSON-parsed 200-message benign events', async () => {
+    const frozen = Object.freeze({
+      prompt: CLEAN, senderIsOwner: false,
+      messages: Object.freeze([Object.freeze({ role: 'tool', content: BENIGN })]),
+    });
+    expect(await handleBeforeAgentRun(frozen as never, ctx)).toEqual({ outcome: 'pass' });
+    const parsed = JSON.parse(JSON.stringify({
+      prompt: CLEAN, senderIsOwner: false,
+      messages: Array.from({ length: 200 }, (_, i) => ({
+        role: i % 2 ? 'assistant' : 'user', content: [{ type: 'text', text: BENIGN }],
+      })),
+    }));
+    expect(await handleBeforeAgentRun(parsed, ctx)).toEqual({ outcome: 'pass' });
+    expect(await handleBeforeAgentRun({ prompt: CLEAN, senderIsOwner: true, messages: [] }, ctx))
+      .toEqual({ outcome: 'pass' });
+  });
+});
