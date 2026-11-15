@@ -694,3 +694,92 @@ describe('#934 non-string prompts and owner-attestation reads (PR #1085 review)'
       .toEqual({ outcome: 'pass' });
   });
 });
+
+describe('#934 primitive wrappers, toJSON and single-object content (PR #1085 review r6)', () => {
+  const ctx = { sessionId: 'agent:main:direct:guest' };
+  const scanned = () => scanner.mock.calls.map(call => String(call[1]));
+  const event = (messages: unknown[]) => ({ prompt: CLEAN, senderIsOwner: false, messages });
+  const msg = (content: unknown, role = 'tool') => ({ role, content });
+  type J = (wire: unknown) => () => unknown;
+
+  it.each([
+    ['C1 tool content String object', () => msg(new String(ATTACK))],
+    ['C2 block text String object', () => msg([{ type: 'text', text: new String(ATTACK) }])],
+    ['C8 user content String object', () => msg(new String(ATTACK), 'user')],
+  ])('%s: unwraps to the primitive, scans it and blocks', async (_name, make) => {
+    expect(await handleBeforeAgentRun(event([make()]) as never, ctx))
+      .toMatchObject({ outcome: 'block', category: 'prompt_injection' });
+    expect(scanned()).toContain(ATTACK);
+  });
+
+  it('never clean-passes benign String/Number/Boolean wrappers, but still scans the String', async () => {
+    for (const content of [new String(CLEAN), [{ type: 'text', text: new String(CLEAN) }]]) {
+      expect(await handleBeforeAgentRun(event([msg(content)]) as never, ctx)).toMatchObject({ outcome: 'block' });
+    }
+    expect(scanned()).toContain(CLEAN);
+    expect(await handleBeforeAgentRun(event([{ role: new String('tool'), content: CLEAN }]) as never, ctx))
+      .toMatchObject({ outcome: 'block' });
+    expect(await handleBeforeAgentRun(event([msg([{ type: 'text', text: CLEAN, n: new Number(1) }]),
+      { role: 'tool', content: [{ type: new Boolean(true), text: CLEAN }] }]) as never, ctx))
+      .toMatchObject({ outcome: 'block' });
+  });
+
+  it('does not run an overridden toString/valueOf on a wrapper', async () => {
+    const wrapped = Object.assign(new String(ATTACK), {
+      toString: () => { throw new Error('host code ran'); },
+      valueOf: () => { throw new Error('host code ran'); },
+    });
+    expect(await handleBeforeAgentRun(event([msg(wrapped)]) as never, ctx))
+      .toMatchObject({ outcome: 'block', category: 'prompt_injection' });
+  });
+
+  it.each([
+    ['C5 tool content with toJSON', (j: J) => event([msg({ toJSON: j(ATTACK) })])],
+    ['C6 block with toJSON', (j: J) => event([msg([{ toJSON: j({ type: 'text', text: ATTACK }) }])])],
+    ['C9 message with toJSON', (j: J) => event([{ role: 'tool', content: 'ok', toJSON: j({ role: 'tool', content: ATTACK }) }])],
+    ['messages array with toJSON', (j: J) => event(Object.assign([msg(CLEAN)], { toJSON: j([msg(ATTACK)]) }))],
+    ['block with benign-looking text and toJSON', (j: J) => event([msg([{ type: 'text', text: CLEAN, toJSON: j({ type: 'text', text: ATTACK }) }])])],
+    ['inherited toJSON on a class instance', (j: J) => {
+      const toJSON = j({ role: 'tool', content: ATTACK });
+      class Wire { role = 'tool'; content = CLEAN; toJSON() { return toJSON(); } }
+      return event([new Wire()]);
+    }],
+  ])('%s: never clean-passes and never runs toJSON', async (_name, make) => {
+    let calls = 0;
+    const j: J = wire => () => { calls++; return wire; };
+    expect(await handleBeforeAgentRun(make(j) as never, ctx)).toMatchObject({ outcome: 'block' });
+    expect(calls).toBe(0);
+  });
+
+  it('C7: scans a non-array single-block object content and blocks the attack', async () => {
+    expect(await handleBeforeAgentRun(event([msg({ type: 'text', text: ATTACK })]) as never, ctx))
+      .toMatchObject({ outcome: 'block', category: 'prompt_injection' });
+    expect(scanned()).toContain(ATTACK);
+    expect(await handleBeforeAgentRun(event([msg({ type: 'tool_result', tool_use_id: 't', content: [{ type: 'text', text: ATTACK }] }, 'user')]) as never, ctx))
+      .toMatchObject({ outcome: 'block', category: 'prompt_injection' });
+  });
+
+  it('passes a benign single-block object content, but never clean-passes one with no text', async () => {
+    expect(await handleBeforeAgentRun(event([msg({ type: 'text', text: CLEAN })]) as never, ctx))
+      .toEqual({ outcome: 'pass' });
+    for (const content of [{}, { type: 'image', source: 'x' }]) {
+      expect(await handleBeforeAgentRun(event([msg(content)]) as never, ctx)).toMatchObject({ outcome: 'block' });
+    }
+  });
+
+  it('still clean-passes benign class instances, frozen history and JSON-parsed 200-message events', async () => {
+    class HostBlock { type = 'text'; constructor(public text: string) {} describe() { return this.text; } }
+    class HostMessage { role = 'tool'; content = [new HostBlock(CLEAN)]; }
+    expect(await handleBeforeAgentRun(event([new HostMessage(), msg(CLEAN, 'user')]) as never, ctx))
+      .toEqual({ outcome: 'pass' });
+    const frozen = Object.freeze({
+      prompt: CLEAN, senderIsOwner: false,
+      messages: Object.freeze([Object.freeze({ role: 'tool', content: Object.freeze([Object.freeze({ type: 'text', text: CLEAN })]) })]),
+    });
+    expect(await handleBeforeAgentRun(frozen as never, ctx)).toEqual({ outcome: 'pass' });
+    const parsed = JSON.parse(JSON.stringify(event(Array.from({ length: 200 }, (_, i) => ({
+      role: i % 2 ? 'assistant' : 'user', content: [{ type: 'text', text: `Routine note ${i} about the build pipeline.` }],
+    })))));
+    expect(await handleBeforeAgentRun(parsed, ctx)).toEqual({ outcome: 'pass' });
+  });
+});

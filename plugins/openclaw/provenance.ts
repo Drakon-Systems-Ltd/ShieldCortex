@@ -266,8 +266,15 @@ export function labelHistoryMessageForGate(msg: unknown): { inputs: LabelledInpu
   try { contentIsArray = Array.isArray(content); }
   catch { return { inputs, incomplete: true, userRole }; }
   if (!contentIsArray) {
-    try { inputs.push(...labelHistoryMessageTracked({ role, content }, opaque).inputs); }
-    catch { incomplete = true; }
+    // A non-array object is labelled as a single content block: the host may
+    // still send it, so it is never silently dropped. One that yields no text
+    // was not inspected.
+    const single = content !== null && typeof content === 'object';
+    try {
+      const labelled = labelHistoryMessageTracked({ role, content: single ? [content] : content }, opaque).inputs;
+      if (single && labelled.length === 0) incomplete = true;
+      inputs.push(...labelled);
+    } catch { incomplete = true; }
     return { inputs, incomplete: incomplete || opaque.proxied || !!opaque.truncated, userRole };
   }
   // Read by index: Array.prototype.slice, iteration, and species may all run
@@ -368,12 +375,47 @@ function snapshotGateArray(arr: unknown[], depth: number, state: SnapshotState, 
   return out;
 }
 
+/**
+ * Intrinsic `valueOf`s captured at module load. Calling one on a value reads
+ * its internal [[StringData]]/[[NumberData]]/[[BooleanData]] slot and throws
+ * for anything without it (including a Proxy), without running host code.
+ */
+const PRIMITIVE_UNWRAPPERS: ReadonlyArray<(value: object) => unknown> = [
+  String.prototype.valueOf, Number.prototype.valueOf, Boolean.prototype.valueOf,
+].map(fn => (value: object) => Reflect.apply(fn, value, []));
+
+/**
+ * The primitive inside a String/Number/Boolean wrapper object, or `none`.
+ * The host serialises a wrapper through user-overridable conversions
+ * (`toJSON`, `toString`, `valueOf`), so whatever it sends cannot be proven
+ * equal to the slot value: the caller scans the slot and marks incomplete.
+ */
+function unwrapPrimitiveWrapper(value: object): { wrapped: boolean; primitive?: unknown } {
+  for (const unwrap of PRIMITIVE_UNWRAPPERS) {
+    try { return { wrapped: true, primitive: unwrap(value) }; }
+    catch { /* not this wrapper kind */ }
+  }
+  return { wrapped: false };
+}
+
+/**
+ * A `toJSON` anywhere on an object's chain replaces what the host serialises
+ * for it with code the gate never runs, so the copy cannot be the wire form.
+ */
+function markIfToJSON(value: object, state: SnapshotState): void {
+  const read = readGateProperty(value, 'toJSON', state);
+  if (read.present) state.incomplete = true;
+}
+
 function snapshotGateValue(value: unknown, depth: number, state: SnapshotState): unknown {
   if (value === null || typeof value !== 'object') return typeof value === 'function' ? undefined : value;
   // Structure deeper than the labeller can follow was not inspected.
   if (depth > SNAPSHOT_MAX_DEPTH) { state.incomplete = true; return undefined; }
   if (++state.nodes.count > SNAPSHOT_NODE_BUDGET) { state.incomplete = true; return undefined; }
   if (isHostProxy(value)) state.incomplete = true;
+  const wrapper = unwrapPrimitiveWrapper(value);
+  if (wrapper.wrapped) { state.incomplete = true; return wrapper.primitive; }
+  markIfToJSON(value, state);
   let isArray: boolean;
   try { isArray = Array.isArray(value); } catch { state.incomplete = true; return undefined; }
   if (isArray) return snapshotGateArray(value as unknown[], depth + 1, state);
@@ -407,7 +449,10 @@ export function snapshotGateHistory(event: unknown, limit: number): { messages: 
   if (read.present) {
     let isArray: boolean;
     try { isArray = Array.isArray(read.value); } catch { isArray = false; state.incomplete = true; }
-    if (isArray) messages = snapshotGateArray(read.value as unknown[], 1, state, limit);
+    if (isArray) {
+      markIfToJSON(read.value as object, state);
+      messages = snapshotGateArray(read.value as unknown[], 1, state, limit);
+    }
   }
   return { messages, incomplete: state.incomplete };
 }
