@@ -291,8 +291,9 @@ describe('#1005 — one row on every surface, linear on every input', () => {
     expect(m![1]).toBe(row.replace(/\\\//g, '/'));
   });
 
-  // Every unit repeated with no target: a quadratic row costs ~16x for 4x the
-  // input, a linear one ~4x. Relative, so a slow machine does not fail it.
+  // Every unit repeated with no target, 200,000 characters, in a bounded child.
+  // No wall-clock ratio (it failed under host load, #1088 review N2): a linear
+  // row needs milliseconds here, a quadratic one ~4e10 steps, far past the bound.
   const UNITS: Array<[string, string, string]> = [
     ['nc repeated', '', 'nc '],
     ['quoted nc repeated', '', "'nc "],
@@ -316,23 +317,12 @@ describe('#1005 — one row on every surface, linear on every input', () => {
     ['a long exec /dev/tcp gap', 'exec 5<>/dev/tcp/a/1;', ' x'],
     ['line continuations', 'nc', ' \\\n'],
   ];
-  it.each(UNITS)('%s costs ~4x for 4x the input, not ~16x', (_name, head, unit) => {
-    const re = live();
-    const timeOf = (reps: number): number => {
-      const s = head + unit.repeat(reps);
-      re.test(s);   // warm
-      const runs: number[] = [];
-      for (let k = 0; k < 3; k++) {
-        const t = process.hrtime.bigint();
-        expect(re.test(s)).toBe(false);
-        runs.push(Number(process.hrtime.bigint() - t) / 1e6);
-      }
-      return runs.sort((x, y) => x - y)[1];
-    };
-    const reps = Math.floor(25_000 / unit.length);
-    const small = timeOf(reps);
-    const large = timeOf(4 * reps);
-    expect(large).toBeLessThan(8 * small + 5);
+  it.each(UNITS)('%s returns at 200,000 characters in a bounded child', (_name, head, unit) => {
+    const script = 'const re = new RegExp(process.argv[1]); const [h, u] = JSON.parse(process.argv[2]);'
+      + ' const s = h + u.repeat(Math.floor(200000 / u.length)); re.test(s);'
+      + ' process.stdout.write(re.test(s) ? "matched" : "done");';
+    const r = spawnSync(process.execPath, ['-e', script, live().source, JSON.stringify([head, unit])], { timeout: 20_000, encoding: 'utf-8' });
+    expect({ signal: r.signal, out: r.stdout }).toEqual({ signal: null, out: 'done' });
   });
 
   // #1088 review round 0 (grok B1): `>&>` once matched two gap alternatives, 2^n
