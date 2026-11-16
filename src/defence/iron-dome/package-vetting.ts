@@ -90,6 +90,12 @@ export interface PackageVet {
    * name) and the version this install would fetch could not be checked.
    */
   unconfirmedVersion?: boolean;
+  /**
+   * npm: the selected manifest declares `engines.npm`, and npm-pick-manifest would pick a
+   * different version if the installing npm did not satisfy it. The installing npm's version
+   * is not known here, so a name-only `MAL-` hit is kept alongside this version's own answer.
+   */
+  npmEngineDependent?: boolean;
   findings: VettingFinding[];
 }
 
@@ -800,6 +806,8 @@ interface Facts {
   ageUncheckedReason?: string;
   hooks: string[];
   sdistOnly: boolean;
+  /** npm: the selection depends on the installing npm's `engines.npm` check (see {@link PackageVet.npmEngineDependent}). */
+  npmEngineDependent?: boolean;
 }
 
 // Registry tarballs run install lifecycle hooks; prepare runs for local/git
@@ -869,29 +877,53 @@ async function resolveNpm(ref: PackageRef, fetchImpl: FetchLike, signal: AbortSi
   }
   // install-v1 retains dist-tags and version manifests, but normally has no time map.
   let doc = obj(await getJson(fetchImpl, base, signal, 'application/vnd.npm.install-v1+json'));
-  let version = npmVersion(doc, spec, ref.spec !== null);
+  let pick = npmVersion(doc, spec, ref.spec !== null);
   let fullDoc: Record<string, unknown> | undefined;
-  if (!version || !obj(doc.versions)[version]) {
+  if (!pick.version || !obj(doc.versions)[pick.version]) {
     doc = await fullNpmMetadata(base, fetchImpl, signal, allowance, NPM_RESOLUTION_LIMIT);
     fullDoc = doc;
-    version = npmVersion(doc, spec, ref.spec !== null);
+    pick = npmVersion(doc, spec, ref.spec !== null);
   }
+  const version = pick.version;
   if (!version || !obj(doc.versions)[version]) throw new Unchecked('could not resolve the requested version to a published version');
   if (!isSafeVersion(version)) throw new Unchecked('registry returned an unrecognisable version');
   const facts = npmFacts(version, obj(obj(doc.versions)[version]), obj(doc.time)[version]);
+  if (pick.npmEngineDependent) facts.npmEngineDependent = true;
   await fillNpmAge(facts, fullDoc, base, fetchImpl, signal, allowance, checkAge);
   return facts;
 }
 
-function npmVersion(doc: Record<string, unknown>, spec: string, explicitTag: boolean): string | undefined {
-  const versions = obj(doc.versions);
+/**
+ * The version npm-pick-manifest would select. `engines.node` is judged against this
+ * process's Node, which may differ from the installer's. `engines.npm` cannot be judged
+ * (the installing npm's version is unknown), so the pick treats it as satisfied and
+ * reports `npmEngineDependent` when the installing npm rejecting the selected manifest
+ * would change the pick. An explicitly requested tag is exact, as in npm.
+ */
+function npmVersion(doc: Record<string, unknown>, spec: string, explicitTag: boolean): { version?: string; npmEngineDependent?: boolean } {
   const tags = obj(doc['dist-tags']);
   // An explicitly requested tag is exact, including a deprecated release.
-  if (explicitTag && typeof tags[spec] === 'string') return tags[spec] as string;
+  if (explicitTag && typeof tags[spec] === 'string') return { version: tags[spec] as string };
+  const version = npmPick(doc, spec, explicitTag);
+  if (!version) return {};
+  const npmRange = obj(obj(obj(doc.versions)[version]).engines).npm;
+  if (typeof npmRange !== 'string') return { version };
+  // What npm picks if the installing npm does not satisfy the selected manifest's engines.npm.
+  const alternative = npmPick(doc, spec, explicitTag, version);
+  return alternative !== undefined && alternative !== version ? { version, npmEngineDependent: true } : { version };
+}
+
+function npmPick(doc: Record<string, unknown>, spec: string, explicitTag: boolean, npmRejected?: string): string | undefined {
+  const versions = obj(doc.versions);
+  const tags = obj(doc['dist-tags']);
   const range = semver.validRange(spec);
   if (!range && spec !== 'latest') return undefined;
   const wanted = range ?? '*';
-  const engineOk = (manifest: Record<string, unknown>) => {
+  // npm-pick-manifest takes dist-tags.latest without a range test when the spec is
+  // bare (the implicit default tag) or the literal `*`, so a prerelease latest qualifies.
+  const anyLatest = spec === '*' || (spec === 'latest' && !explicitTag);
+  const engineOk = (version: string, manifest: Record<string, unknown>) => {
+    if (version === npmRejected) return false;
     const node = obj(manifest.engines).node;
     if (typeof node !== 'string') return true;
     try { return semver.satisfies(process.version, node, { includePrerelease: true, loose: true }); }
@@ -899,23 +931,25 @@ function npmVersion(doc: Record<string, unknown>, spec: string, explicitTag: boo
   };
   const preferred = (version: string) => {
     const manifest = obj(versions[version]);
-    return !!versions[version] && !manifest.deprecated && engineOk(manifest);
+    return !!versions[version] && !manifest.deprecated && engineOk(version, manifest);
   };
   const latest = tags.latest;
+  const latestInRange = typeof latest === 'string' && semver.valid(latest) !== null
+    && (anyLatest || semver.satisfies(latest, wanted, { loose: true }));
   // Keep the registry's opaque latest target when no semver candidate exists:
   // the cache must still protect non-semver registry records during an outage.
   if (spec === 'latest' && typeof latest === 'string' && !semver.valid(latest) && versions[latest]) return latest;
-  if (typeof latest === 'string' && semver.valid(latest) && semver.satisfies(latest, wanted) && !versions[latest]) return latest;
-  if (typeof latest === 'string' && semver.valid(latest) && semver.satisfies(latest, wanted) && preferred(latest)) return latest;
-  const candidates = Object.keys(versions).filter((v) => semver.satisfies(v, wanted));
+  if (latestInRange && !versions[latest as string]) return latest as string;
+  if (latestInRange && preferred(latest as string)) return latest as string;
+  const candidates = Object.keys(versions).filter((v) => semver.satisfies(v, wanted, { loose: true }));
   // Match npm-pick-manifest's fallback ordering: healthy, engine-compatible,
   // non-deprecated, then highest semver. A result is still returned when every
   // candidate is deprecated or incompatible, as npm itself does.
   candidates.sort((a, b) => {
     const ma = obj(versions[a]); const mb = obj(versions[b]);
-    const ea = Number(engineOk(ma)); const eb = Number(engineOk(mb));
+    const ea = Number(engineOk(a, ma)); const eb = Number(engineOk(b, mb));
     const da = Number(!ma.deprecated); const db = Number(!mb.deprecated);
-    return (db * eb - da * ea) || (eb - ea) || (db - da) || semver.rcompare(a, b);
+    return (db * eb - da * ea) || (eb - ea) || (db - da) || semver.rcompare(a, b, true);
   });
   return candidates[0];
 }
@@ -1198,7 +1232,10 @@ function buildFindings(v: Omit<PackageVet, 'findings'>, minAgeDays: number, nowM
     out.push({ kind: 'unchecked', severity: 'advisory', reason: `unchecked: ${v.uncheckedReason ?? 'lookup failed'}` });
   }
   if (v.ageUncheckedReason) out.push({ kind: 'unchecked', severity: 'advisory', reason: `unchecked: ${v.ageUncheckedReason}` });
-  if (v.malicious.length && v.unconfirmedVersion) {
+  if (v.malicious.length && v.unconfirmedVersion && v.npmEngineDependent) {
+    // The selected version was checked, but npm may fetch another one (engines.npm).
+    out.push({ kind: 'malicious', severity: 'catastrophic', reason: maliciousReason('OSV lists a malicious release of ', name, ' (', listIds(v.malicious), '); npm may fetch another version (engines.npm), which was not checked, so it is blocked until you pin a version') });
+  } else if (v.malicious.length && v.unconfirmedVersion) {
     // A name-only hit: OSV lists a malicious release under this name, but the version this install
     // would fetch could not be checked. Say exactly that, and the way through.
     out.push({ kind: 'malicious', severity: 'catastrophic', reason: maliciousReason('OSV lists a malicious release of ', name, ' (', listIds(v.malicious), '); the version this install would fetch could not be checked, so it is blocked until you pin a version') });
@@ -1238,6 +1275,8 @@ interface OneResult {
   version?: string;
   /** `osvIds` came from a version-specific OSV query (not a name-only one). */
   exact: boolean;
+  /** npm may select another version than the one `exact` describes (engines.npm). */
+  npmEngineDependent?: boolean;
 }
 
 async function vetOne(ref: PackageRef, ctx: {
@@ -1261,8 +1300,9 @@ async function vetOne(ref: PackageRef, ctx: {
     const base = {
       ref, status: 'checked' as const, version: facts.version, publishedAt: facts.publishedAt, ageUncheckedReason: facts.ageUncheckedReason, osvIds,
       malicious: osvIds.filter((id) => id.startsWith('MAL-')), hooks: facts.hooks, sdistOnly: facts.sdistOnly,
+      ...(facts.npmEngineDependent ? { npmEngineDependent: true } : {}),
     };
-    return { vet: { ...base, findings: buildFindings(base, minAgeDays, nowMs) }, version: facts.version, exact: true };
+    return { vet: { ...base, findings: buildFindings(base, minAgeDays, nowMs) }, version: facts.version, exact: true, ...(facts.npmEngineDependent ? { npmEngineDependent: true } : {}) };
   } catch (err) {
     return { vet: uncheckedVet(ref, err instanceof Unchecked ? err.message : 'lookup failed', minAgeDays, nowMs), version: facts.version, exact: false };
   }
@@ -1369,8 +1409,11 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
       const r = idx < head.length ? results[idx] : extraByRef.get(ref);
       let vet: PackageVet;
       if (r) {
-        // A version-specific OSV answer is final for this ref, pinned or not: no name-only ids are merged.
-        const malIds = r.exact ? [] : batchFor(ref);
+        // A version-specific OSV answer is final for this ref, pinned or not: no name-only ids are merged,
+        // unless npm's own pick depends on the installing npm (engines.npm). Then the checked version's
+        // facts stand and a name-only MAL- hit is kept too, without a second registry or OSV lookup.
+        // A checked version that is itself MAL- keeps its own, exact reason.
+        const malIds = r.exact && !(r.npmEngineDependent && !r.vet.malicious.length) ? [] : batchFor(ref);
         // No version-specific answer AND this ref's batch chunk failed or did not line up: the
         // malicious-package check did not happen for it. Say so next to the lookup's own reason
         // (as the refs past the cap do); the cached-MAL check below stays in force.
