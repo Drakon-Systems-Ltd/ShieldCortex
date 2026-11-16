@@ -4861,7 +4861,7 @@ export function guardProvenOffEverywhere(
   const signedRead =
     verdict === 'valid' ||
     verdict === 'absent' ||
-    (verdict === 'unverified' && configPostureOutlook(integrity) === 'file');
+    verdict === 'unsigned';
   if (!signedRead) return false;
   if (!pluginLive.readable || !pluginPlaneDisarmed(pluginLive)) return false;
   return !claudePlaneEnforcing(planes);
