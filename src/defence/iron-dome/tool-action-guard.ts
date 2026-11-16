@@ -3535,31 +3535,31 @@ const PY_DOC_MARK_RUN_RE = /[\p{M}\uFF9E\uFF9F]{31}/u;
  *
  * - a comment that is the only thing on its line, holding `coding:` or
  *   `coding=` and then a name (`PY_CODING_COOKIE_RE`, the PEP's own pattern);
- * - on line 1, or on line 2 when line 1 is blank or only a comment, after a
- *   leading BOM. The first declaration found is the one Python uses.
+ * - on physical line 1, or on line 2 when line 1 is blank or only a comment,
+ *   after a leading BOM. The first declaration found is the one Python uses.
  *
- * The tokenizer that runs a file splits lines at `\r\n`, `\r` and `\n`, while
- * `tokenize.detect_encoding` splits at `\n` only, so the head is read both
- * ways and either reading's foreign declaration refuses. A BOM with a
- * declaration other than utf-8 is a SyntaxError, so that file never runs.
+ * Physical lines are the ones Python runs the file by. compile() of the
+ * bytes, `python3 file.py` and `python3 - <file.py` all split at `\r\n`, `\r`
+ * and `\n` alike before looking for a declaration, so a cookie on line 3 is a
+ * comment however lines 1 and 2 end (`#!x\r\r# coding: latin-1` runs as
+ * UTF-8). `tokenize.detect_encoding` splits at `\n` only and would take that
+ * cookie for line 1's, but no way of running the file uses it: it decodes
+ * source for display (`inspect`, `linecache`, `tokenize.open`), and each of
+ * those names already refuses the blanking (`PY_DOC_READBACK_RE`). A BOM with
+ * a declaration other than utf-8 is a SyntaxError, so that file never runs.
  */
 function pyDeclaresForeignEncoding(src: string): boolean {
   const text = src.charCodeAt(0) === 0xfeff ? src.slice(1) : src;
-  for (const lines of [text.split(/\r\n|\r|\n/, 2), text.split('\n', 2)]) {
-    for (const line of lines) {
-      const m = line.match(PY_CODING_COOKIE_RE);
-      if (m) {
-        if (!pyCodecReadsUtf8(m[1])) return true;
-        break;
-      }
-      if (!/^[ \t\f]*(?:[#\r]|$)/.test(line)) break;   // code on line 1: line 2 is never read
-    }
+  for (const line of text.split(/\r\n|\r|\n/, 2)) {
+    const m = line.match(PY_CODING_COOKIE_RE);
+    if (m) return !pyCodecReadsUtf8(m[1]);
+    if (!/^[ \t\f]*(?:#|$)/.test(line)) break;   // code on line 1: line 2 is never read
   }
   return false;
 }
 
-/** PEP 263; `s`: `.` crosses U+2028/U+2029 (and the `\r` a `\n`-only line keeps), as Python's does. */
-const PY_CODING_COOKIE_RE = /^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)/s;
+/** PEP 263, inside one physical line; Python's `.` crosses U+2028/U+2029, which `[^\r\n]` does too. */
+const PY_CODING_COOKIE_RE = /^[ \t\f]*#[^\r\n]*?coding[:=][ \t]*([-\w.]+)/;
 
 /**
  * Codec names that make Python read the file as UTF-8 does: the tokenizer's

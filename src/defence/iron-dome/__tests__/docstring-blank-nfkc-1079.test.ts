@@ -158,8 +158,6 @@ describe('#1079 r1 — only a PEP 263 declaration names the codec, and UTF-8 ali
     ['utf-7 spelled UTF_7', `# coding=UTF_7\n${ATTACK}`],
     ['utf-7 after U+2028 in the comment', `# \u2028 coding: utf-7\n${ATTACK}`],
     ['utf-7 behind a BOM (a SyntaxError, so never run; kept scanned anyway)', `\uFEFF# coding: utf-7\n${ATTACK}`],
-    // Line 3 for the running tokenizer, line 1 for tokenize.detect_encoding. Both readings count.
-    ['utf-7 after two `\\r`', `#!/x\r\r# coding: utf-7\n${ATTACK}`],
     ['latin-1 on line 2 under a vim modeline spelling', `#!/usr/bin/env python3\n# vim: set fileencoding=latin-1 :\n${DOC}import os\n${SHELL_OUT}(glob${cp(0xfffd)}ls()['_' '_doc_' '_'])\n`],
   ])('a foreign declaration keeps the docstring: %s', (_label, src) => held(src));
 
@@ -169,6 +167,72 @@ describe('#1079 r1 — only a PEP 263 declaration names the codec, and UTF-8 ali
     allowed(`# coding: utf-8 ${'x'.repeat(200 * 1024)}\n${HELPER}`);
     held(`# ${'x'.repeat(200 * 1024)} coding: utf-7\n${ATTACK}`);
     expect(performance.now() - t0).toBeLessThan(5_000);
+  });
+});
+
+/**
+ * Review r2 (B2-r1): the declaration window is Python's physical lines.
+ * compile() of the bytes, `python3 file.py` and `python3 - <file.py` all split
+ * lines at `\r\n`, `\r` and `\n` alike before they look for a declaration, so
+ * a cookie on physical line 3 is a comment and the file runs as UTF-8: the
+ * text the gate already judges. `tokenize.detect_encoding` splits at `\n` only
+ * and takes `#!x\r\r# coding: X` for line 1's declaration; nothing that runs
+ * the file reads it that way. Each row was run on CPython 3.14.9 both ways
+ * (compile of the bytes, and the file): every "relieved" row runs as UTF-8 and
+ * origin/main allows it; every "held" row prints the docstring under the codec.
+ */
+describe('#1079 r2 — a declaration on physical line 3 is a comment, however lines 1 and 2 end', () => {
+  const HELPER = `"""Lease helper. Never touches ~/.shieldcortex/config.json."""\nimport subprocess\nsubprocess.run(["git", "status"])\n`;
+  const CODECS = ['utf-7', 'latin-1', 'cp1252', 'unicode_escape', 'raw_unicode_escape'];
+  const LINE3: Array<[string, (codec: string) => string]> = [
+    ['shebang, CR, CR; the cookie LF-ended', (c) => `#!/usr/bin/env python3\r\r# coding: ${c}\n`],
+    ['shebang, CR, CR; the cookie CR-ended', (c) => `#!/usr/bin/env python3\r\r# coding: ${c}\r`],
+    ['shebang, CR, CR; the cookie CRLF-ended', (c) => `#!/usr/bin/env python3\r\r# coding: ${c}\r\n`],
+    ['shebang, CR, CRLF; the cookie LF-ended', (c) => `#!/usr/bin/env python3\r\r\n# coding: ${c}\n`],
+    ['shebang, CR, CRLF; the cookie CR-ended', (c) => `#!/usr/bin/env python3\r\r\n# coding: ${c}\r`],
+    ['shebang, CR, CRLF; the cookie CRLF-ended', (c) => `#!/usr/bin/env python3\r\r\n# coding: ${c}\r\n`],
+    ['a CR inside the line-2 comment', (c) => `#!x\n# a\r# coding: ${c}\n`],
+    ['two CR-ended comment lines', (c) => `# a\r# b\r# coding: ${c}\n`],
+    ['two blank CR lines', (c) => `\r\r# coding: ${c}\n`],
+    ['shebang, LF, then a blank CR line', (c) => `#!x\n\r# coding: ${c}\n`],
+  ];
+
+  test("the reviewer's two files, byte for byte, are relieved", () => {
+    allowed(`#!/usr/bin/env python3\r\r# coding: latin-1\n${HELPER}`);
+    allowed(`#!x\n# a\r# coding: latin-1\n${HELPER}`);
+  });
+
+  describe.each(LINE3)('%s', (_label, head) => {
+    test.each(CODECS)('`# coding: %s` on line 3 is relieved, as its LF spelling is', (codec) => {
+      const src = `${head(codec)}${HELPER}`;
+      allowed(src);
+      allowed(src.replace(/\r\n?/g, '\n'));
+    });
+  });
+
+  test('a line-3 cookie opens no door: the UTF-8 text Python runs is the text the gate reads', () => {
+    held(`#!/x\r\r# coding: utf-7\n${DOC}import os\n${SHELL_OUT}(__doc__)\n`);
+    held(`#!x\n# a\r# coding: latin-1\n${DOC}import os\n${SHELL_OUT}(_${FF}doc${FF}_)\n`);
+  });
+
+  // A declaration on line 1 or 2 is still honoured under every line ending.
+  const UTF7_ATTACK = `${DOC}import os\n${SHELL_OUT}(+AF8AXw-doc+AF8AXw-)\n`;
+  const LATIN1_ATTACK = `${DOC}import os\n${SHELL_OUT}(glob${cp(0xfffd)}ls()['_' '_doc_' '_'])\n`;
+  const ENDS: Array<[string, string]> = [['LF', '\n'], ['CR', '\r'], ['CRLF', '\r\n']];
+  test.each(ENDS)('a declaration on line 1, %s-ended, keeps the docstring (utf-7, latin-1)', (_n, t) => {
+    held(`# coding: utf-7${t}${UTF7_ATTACK}`);
+    held(`# -*- coding: latin-1 -*-${t}${LATIN1_ATTACK}`);
+  });
+  test.each(ENDS.flatMap(([n1, t1]) => ENDS.map(([n2, t2]) => [n1, n2, t1, t2] as [string, string, string, string])))(
+    'a declaration on line 2 after a %s-ended shebang, itself %s-ended, keeps the docstring (utf-7, latin-1)',
+    (_n1, _n2, t1, t2) => {
+      held(`#!/usr/bin/env python3${t1}# coding: utf-7${t2}${UTF7_ATTACK}`);
+      held(`#!/usr/bin/env python3${t1}# -*- coding: latin-1 -*-${t2}${LATIN1_ATTACK}`);
+    },
+  );
+  test('a declaration on line 2 behind a CR inside a line-1 comment keeps the docstring', () => {
+    held(`# harmless\r# coding: utf-7\n${UTF7_ATTACK}`);
+    held(`# harmless\r# -*- coding: latin-1 -*-\n${LATIN1_ATTACK}`);
   });
 });
 
