@@ -290,6 +290,13 @@ describe('#1079 r3 — CR and CRLF end a line in the docstring walk, as LF does'
       ['a utf-7 declaration on line 1', `# coding: utf-7\n${DOC}import os\n${SHELL_OUT}(+AF8AXw-doc+AF8AXw-)\n`],
       ['click hands the docstring back as `main.help` (only the import tells)', `import os\nimport click\n${CLICK}`],
       ['the same, the first import a from-import', `from os import path\nimport click\nimport os\n${CLICK}`],
+      // Grok r3 B-CONT: Python deletes `\` and the break after it and reads one
+      // statement, so each of these is `import os as os, click`.
+      ['click in an aliased import on one line (the control for the next four)', `import os as os, click\n${CLICK}`],
+      ['click after a continuation: `import os \\`, then `as os, click`', `import os \\\nas os, click\n${CLICK}`],
+      ['click after a continuation: `import os \\`, then `, click`', `import os \\\n, click\n${CLICK}`],
+      ['click after two continuations: `import os \\`, `as os, \\`, `click`', `import os \\\nas os, \\\nclick\n${CLICK}`],
+      ['click after a comma and a continuation: `import os,\\`, then `click`', `import os,\\\nclick\n${CLICK}`],
       ['the literal is an operand across a continuation', `X = \\\n"""${WRITE}"""\nimport os\n${SHELL_OUT}(X)\n`],
     ])('held: %s', (_l, src) => held(spell(src, eol)));
   });
@@ -340,6 +347,120 @@ describe('#1079 r3 — CR and CRLF end a line in the docstring walk, as LF does'
     expect(rows.map((r) => [r.label, r.bytes > KIB - 64 && r.bytes <= KIB, r.held ? 'held' : r.decision])).toEqual(
       SHAPES.map(([label, , , , want]) => [label, true, want]),
     );
+  }, 60_000);
+});
+
+/**
+ * Grok r3 B-CONT and NIT 1: the gate reads Python's logical lines. A backslash
+ * before a physical break is an explicit line join (Python deletes both and a
+ * token never spans it), and a form feed between tokens is whitespace, so each
+ * separates tokens as a space does. Before this every held row below but the
+ * one-line controls was allowed, though its one-line spelling is held; and
+ * three relieved rows (a continuation right after the name, before `import` in
+ * a from-import, after a comma) were held, though their one-line spellings are
+ * relieved. On CPython 3.14.9 (sinks stubbed) each held row hands the
+ * docstring back, to stdout or to the sink, and each relieved row runs with
+ * `__doc__` the helper text.
+ */
+describe('#1079 r4 — a backslash continuation and a form feed separate tokens, as Python reads them', () => {
+  const EOLS: Array<[string, string]> = [['LF', '\n'], ['CR', '\r'], ['CRLF', '\r\n']];
+  const spell = (src: string, eol: string) => src.replace(/\n/g, eol);
+  const LINE = `"""Lease helper. Never touches ~/.shieldcortex/config.json."""\n`;
+  const RUN = `subprocess.run(["git", "status"])\n`;
+  const MAIN = `def main():\n    """${WRITE}"""\n`;
+  /** `help(main)` renders the docstring to `sys.stdout`; `W.write` hands it to the sink. */
+  const CAPTURE = (gap: string) => [
+    'import os, sys',
+    'class W:',
+    `    def write(self, s): ${SHELL_OUT}(s)`,
+    '    def flush(self): pass',
+    '    def isatty(self): return False',
+    `${MAIN}w = W()`,
+    `sys.stdout${gap}=${gap}w`,
+    `help${gap}(main)`,
+    '',
+  ].join('\n');
+
+  describe.each(EOLS)('%s-ended', (_n, eol) => {
+    test.each([
+      ['builtin help() on one line (the control for the next row)', `import os\n${MAIN}help(main)\n`],
+      ['builtin help() across a continuation', `import os\n${MAIN}help \\\n(main)\n`],
+      ['help() into a captured stdout on one line (the control for the next two rows)', CAPTURE(' ')],
+      ['help() into a captured stdout, each step across a continuation', CAPTURE(' \\\n')],
+      ['help() into a captured stdout, the tokens separated by form feeds', CAPTURE('\f')],
+      ['builtin help() after a form feed', `import os\n${MAIN}help\f(main)\n`],
+    ])('held: %s', (_l, src) => held(spell(src, eol)));
+
+    test.each([
+      ['an aliased import continued after a space (Grok r3: must stay allowed)', `${LINE}import subprocess \\\nas sp\nsp.run(["git", "status"])\n`],
+      ['an aliased import continued right after the name', `${LINE}import subprocess\\\nas sp\nsp.run(["git", "status"])\n`],
+      ['a from-import continued before `import` (Grok r3 NIT 1)', `${LINE}import subprocess\nfrom os.path \\\nimport join\n${RUN}`],
+      ['an import list continued after a comma', `${LINE}import subprocess, \\\n    json\n${RUN}`],
+      ['an argparse `help=` keyword on a continued line', `${LINE}import argparse, subprocess\nap = argparse.ArgumentParser()\nap.add_argument("--dry-run", \\\n    help="print only", action="store_true")\n${RUN}`],
+      ['a form-feed page break between two functions', `${LINE}import subprocess\ndef a():\n    return 1\n\f\ndef b():\n    ${RUN}b()\n`],
+      ['a form feed between tokens', `${LINE}import subprocess\nx =\f1\n${RUN}`],
+    ])('relieved: %s', (_l, src) => allowed(spell(src, eol)));
+  });
+
+  /**
+   * Each shape at 16 KiB and at 256 KiB, in a child bounded at 20 s; the
+   * fastest of three runs at each size. The join is one forward pass and every
+   * term after it moves forward only, so 16x the input costs about 16x (a
+   * quadratic step would cost about 256x). The bound is 64x, with a 4 ms floor
+   * on the small run so that timer noise there cannot fail it.
+   */
+  test('continuation-heavy CR and CRLF input: 16 KiB vs 256 KiB stays near-linear (bounded child)', () => {
+    const GUARD = new URL('../../../../dist/defence/iron-dome/tool-action-guard.js', import.meta.url).href;
+    const CR = (s: string) => spell(s, '\r');
+    const CRLF = (s: string) => spell(s, '\r\n');
+    const CLICK = `@click.command()\n${MAIN}${SHELL_OUT}(main.help)\n`;
+    // [label, head, unit repeated to fill the size, tail, expected]
+    const SHAPES: Array<[string, string, string, string, 'held' | 'allow']> = [
+      ['CR: a continued aliased import per line', CR(LINE), 'import os \\\ras os, \\\rsys\r', '', 'allow'],
+      ['CRLF: a continued from-import per line', CRLF(LINE), 'from os.path \\\r\nimport join\r\n', '', 'allow'],
+      ['CR: one logical import line of continuations', `${CR(LINE)}import os`, ' \\\r', ', sys\r', 'allow'],
+      ['CRLF: one logical import line of continuations', `${CRLF(LINE)}import os`, ' \\\r\n', ', sys\r\n', 'allow'],
+      ['CR: click after a logical line of continuations', `${CR(DOC)}import os`, ' \\\r', `, click\r${CR(CLICK)}`, 'held'],
+      ['CRLF: help( after a logical line of continuations', `${CRLF(`import os\n${MAIN}`)}help`, ' \\\r\n', '(main)\r\n', 'held'],
+      ['CR: a form feed between tokens on every line', CR(LINE), 'x =\f1\r', '', 'allow'],
+    ];
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      const { evaluateToolCall } = await import(${JSON.stringify(GUARD)});
+      const [sizes, shapes] = JSON.parse(process.argv[1]);
+      const enc = new TextEncoder();
+      const bytes = (s) => enc.encode(s).length;
+      const fill = (kib, head, unit, tail) => head + unit.repeat(Math.floor((kib - bytes(head) - bytes(tail)) / bytes(unit))) + tail;
+      const judge = (src) => evaluateToolCall('Bash', { command: 'python3 /ws/n.py' }, undefined, { resolveScriptSource: (p) => (p === '/ws/n.py' ? src : null) });
+      const out = [];
+      for (const [label, head, unit, tail] of shapes) {
+        const row = { label };
+        for (const [name, kib] of sizes) {
+          const src = fill(kib, head, unit, tail);
+          judge(src);
+          let best = Infinity;
+          let v;
+          for (let r = 0; r < 3; r++) {
+            const t0 = performance.now();
+            v = judge(src);
+            best = Math.min(best, performance.now() - t0);
+          }
+          row[name] = { bytes: bytes(src), ms: best, verdict: (v.signals ?? []).includes('touch-guard-config') ? 'held' : v.decision };
+        }
+        out.push(row);
+      }
+      process.stdout.write(JSON.stringify(out));
+    `, JSON.stringify([[['small', 16 * 1024], ['large', 256 * 1024]], SHAPES.map(([label, head, unit, tail]) => [label, head, unit, tail])])], {
+      encoding: 'utf8', timeout: 20_000, killSignal: 'SIGKILL', maxBuffer: 1 << 20,
+    });
+    expect(child.error).toBeUndefined();
+    expect(child.stderr).toBe('');
+    expect(child.status).toBe(0);
+    type Run = { bytes: number; ms: number; verdict: string };
+    const rows = JSON.parse(child.stdout) as Array<{ label: string; small: Run; large: Run }>;
+    expect(rows.map((r) => [r.label, r.small.verdict, r.large.verdict, r.large.bytes > 256 * 1024 - 64, r.large.bytes <= 256 * 1024])).toEqual(
+      SHAPES.map(([label, , , , want]) => [label, want, want, true, true]),
+    );
+    for (const r of rows) expect([r.label, r.large.ms / Math.max(r.small.ms, 4) < 64]).toEqual([r.label, true]);
   }, 60_000);
 });
 

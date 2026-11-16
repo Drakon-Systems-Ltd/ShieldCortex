@@ -3585,11 +3585,12 @@ const PY_UTF8_CODEC_ALIASES = new Set([
 ]);
 
 /**
- * Every top-level module the code imports is in `PY_DOC_SAFE_IMPORTS`. A
- * statement ends at `;` or a physical line break, `\r` included (review r3 of
- * #1093): ending it at `\n` only read a CR-only file's first import as
- * running to the end of the file, so `import os\rimport click` checked `os`
- * alone once a CR-ended docstring could be blanked.
+ * Every top-level module the code imports is in `PY_DOC_SAFE_IMPORTS`.
+ * `code` is logical lines (`pyLogicalLines`), so a statement ends at `;` or
+ * at a line break no backslash escapes, `\r` included (review r3 of #1093):
+ * ending it at `\n` only read a CR-only file's first import as running to the
+ * end of the file, so `import os\rimport click` checked `os` alone once a
+ * CR-ended docstring could be blanked.
  */
 function pyImportsAreDocSafe(code: string): boolean {
   const FROM_RE = /\bfrom[ \t]+([\w.]+)[ \t]+import\b(?:[ \t]*\([^)]*\)|[^\r\n;]*)/g;
@@ -3601,6 +3602,30 @@ function pyImportsAreDocSafe(code: string): boolean {
     }
   }
   return true;
+}
+
+/**
+ * The gate's text as Python's logical lines (review r4 of #1093). A backslash
+ * before a physical break (`\r\n`, `\r`, `\n`) is an explicit line join:
+ * Python deletes both and reads one statement, and no token spans the join,
+ * so it separates tokens as a space does. A form feed between tokens is
+ * whitespace to Python as well. Each becomes one space here, so that the
+ * import and from scans and the readback terms that allow only spaces and
+ * tabs between tokens (`help (`, `.stdout =`) read the statement Python runs:
+ * read by physical line, `import os \<break>as os, click` checked `os` alone
+ * and `help \<break>(main)` was no call, while the same-line spellings are
+ * held.
+ *
+ * It runs before NFKC (`pyDocGateViews`), so only U+005C joins. NFKC also
+ * turns a fullwidth or small reverse solidus into `\`, but Python rejects
+ * those outside a string and inside one they end no statement, so joining
+ * after the fold could merge two statements Python keeps apart. A space is a
+ * starter, so it never lengthens a run of combining marks. Inside a string a
+ * join, or an escaped backslash before a break, merges two lines of the same
+ * literal, never two statements. One forward pass: linear.
+ */
+function pyLogicalLines(code: string): string {
+  return code.replace(/\\(?:\r\n|\r|\n)|\f/g, ' ');
 }
 
 /**
@@ -3696,7 +3721,7 @@ function blankPythonDocstrings(src: string, lang: ScriptLang, asRead: string): s
   let cursor = 0;
   for (const [lo, hi] of docs) { code += src.slice(cursor, lo) + blankedRun(src, lo, hi); cursor = hi; }
   code += src.slice(cursor);
-  const views = pyDocGateViews(code);
+  const views = pyDocGateViews(pyLogicalLines(code));
   if (!views) return src;
   for (const view of views) {
     const gated = view.replace(PY_DOC_ALLOWED_DUNDER_RE, ' ');
