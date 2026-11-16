@@ -3472,6 +3472,46 @@ const PY_DOC_READBACK_RE = new RegExp([
   String.raw`\/proc\/|\.pyw?\b`,
 ].join('|'));
 
+/**
+ * #1079 follow-up: the readback gate judges the names PYTHON reads, not the
+ * bytes on disk. Python folds every identifier to NFKC (PEP 3131), so
+ * `_<U+FF3F>doc<U+FF3F>_` IS `__doc__` (six compatibility low lines fold to
+ * `_`), a fullwidth or mathematical-bold `globals` IS the builtin, and
+ * `from <fullwidth inspect> import getdoc` imports `inspect`. The patterns
+ * above are ASCII, so they run on folded text, never on the raw source:
+ *
+ * - NFKC is exactly Python's fold. It also makes a mixed spelling of an allowed
+ *   dunder (`__name<U+FF3F>_`) the ASCII one, so it is judged as `__name__` is.
+ * - NFKD is the same fold without composition. NFKC can compose a combining
+ *   mark onto the ASCII letter before it (`getattr` + U+0301 is `getattŕ`);
+ *   Python composes the same way, so that is another name, but the gate does
+ *   not lean on it. NFKD never removes or moves an ASCII character, so every
+ *   ASCII spelling the source holds is still there to match.
+ *
+ * Both views must pass. ASCII text is its own NFKC and NFKD.
+ */
+function pyDocGateViews(code: string): string[] {
+  return /^[\x00-\x7f]*$/.test(code) ? [code] : [code.normalize('NFKC'), code.normalize('NFKD')];
+}
+
+/**
+ * A PEP 263 coding declaration (line 1 or 2) makes Python decode the file with
+ * another codec while the resolver hands the guard UTF-8: under utf-7
+ * `+AF8AXw-` is `__`, under latin-1 byte 0xAA is `ª` (NFKC `a`) where the
+ * guard sees U+FFFD. No view of the UTF-8 text is then the program, so any
+ * declaration naming something other than UTF-8 or ASCII refuses the
+ * blanking. Matched anywhere in the first two lines, split at `\n` only:
+ * that covers every reading of a stray `\r`, and a false match only keeps
+ * the docstrings scanned.
+ */
+function pyDeclaresForeignEncoding(src: string): boolean {
+  const head = src.split('\n', 2).join('\n');
+  for (const m of head.matchAll(/coding[:=][ \t]*([-\w.]+)/g)) {
+    if (!/^(?:utf[-_]?8(?:[-_][-\w.]*)?|(?:us[-_])?ascii)$/i.test(m[1])) return true;
+  }
+  return false;
+}
+
 /** Every top-level module the code imports is in `PY_DOC_SAFE_IMPORTS`. */
 function pyImportsAreDocSafe(code: string): boolean {
   const FROM_RE = /\bfrom[ \t]+([\w.]+)[ \t]+import\b(?:[ \t]*\([^)]*\)|[^\n;]*)/g;
@@ -3548,16 +3588,26 @@ function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null
   return depth === 0 ? found : null;
 }
 
-function blankPythonDocstrings(src: string, lang: ScriptLang): string {
+/**
+ * @param src the source with its comments already blanked (#532).
+ * @param asRead the file exactly as the resolver returned it. A coding
+ *   declaration is a comment, so `src` no longer holds one, and the IFS
+ *   rewrite (`deobfuscateIfs`) can swallow a line break, and with it a
+ *   declaration on line 2. Python decodes these bytes.
+ */
+function blankPythonDocstrings(src: string, lang: ScriptLang, asRead: string): string {
   if (lang !== 'python' || !src || !(src.includes('"""') || src.includes("'''"))) return src;
+  if (pyDeclaresForeignEncoding(asRead)) return src;
   const docs = pythonStandaloneDocstrings(src);
   if (!docs || docs.length === 0) return src;
   let code = '';
   let cursor = 0;
   for (const [lo, hi] of docs) { code += src.slice(cursor, lo) + blankedRun(src, lo, hi); cursor = hi; }
   code += src.slice(cursor);
-  const gated = code.replace(PY_DOC_ALLOWED_DUNDER_RE, ' ');
-  if (PY_DOC_READBACK_RE.test(gated) || !pyImportsAreDocSafe(gated)) return src;
+  for (const view of pyDocGateViews(code)) {
+    const gated = view.replace(PY_DOC_ALLOWED_DUNDER_RE, ' ');
+    if (PY_DOC_READBACK_RE.test(gated) || !pyImportsAreDocSafe(gated)) return src;
+  }
   // Egress evidence is not the floor: a docstring naming a network
   // destination keeps contributing it exactly as before #1077 (the #920
   // secret-egress fixtures rely on it). Only guard-path prose is relieved.
@@ -6487,7 +6537,7 @@ function foldScriptSources(
       ? expandFileSubstitutions(plainSrc, resolveScriptSource, subst, 1)
       : plainSrc;
     const reviewedScan = next.lang !== 'sh'
-      ? blankPythonDocstrings(blankInterpreterComments(plainSrc, next.lang), next.lang)
+      ? blankPythonDocstrings(blankInterpreterComments(plainSrc, next.lang), next.lang, src)
       : expandedSrc === plainSrc
         ? commandScanText(plainSrc)
         : `${commandScanText(plainSrc)}\n${commandScanText(expandedSrc)}`;
