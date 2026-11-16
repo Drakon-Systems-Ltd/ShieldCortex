@@ -168,24 +168,28 @@ describe('multi-process ledger gates', () => {
     } finally { db2.close(); }
   }, 60_000);
 
-  it('waiting for a delayed peer does not append extra rows', async () => {
+  it('a completed append loop does not extend its timing window to a delayed peer', async () => {
     const dbPath = path.join(work, 'delayed-peer.db');
     const barrierDir = path.join(work, 'delayed-peer-barrier');
     mkdirSync(barrierDir);
     writeFileSync(path.join(barrierDir, 'go'), '');
     const pending = runWriter(dbPath, 1, 'early', '', barrierDir, 'early,delayed');
     let result!: Awaited<ReturnType<typeof runWriter>>;
+    let completed = false;
+    void pending.then(() => { completed = true; });
+    let releasedAt = 0;
     try {
       await waitFor(
         () => existsSync(path.join(barrierDir, 'started-early')),
         () => 'the early writer to commit its first append',
         60_000,
       );
-      // Keep one peer missing after the requested row has committed. The old
-      // loop keeps writing throughout this interval instead of waiting.
-      await new Promise((r) => setTimeout(r, 150));
+      // A singleton has no appends remaining. It must finish before this
+      // absent peer starts, rather than manufacture an overlap window.
+      await waitFor(() => completed, () => 'the completed singleton to exit without a peer', 5_000);
     } finally {
       // Release and join even on failure; never strand a child at its barrier.
+      releasedAt = Date.now();
       writeFileSync(path.join(barrierDir, 'started-delayed'), '');
       for (const child of liveChildren) {
         if (!existsSync(path.join(barrierDir, 'started-early'))) child.kill('SIGKILL');
@@ -194,9 +198,41 @@ describe('multi-process ledger gates', () => {
     }
     expect({ code: result.code, err: result.err }).toEqual({ code: 0, err: '' });
     expect(JSON.parse(result.out).ok).toBe(1);
+    expect(JSON.parse(result.out).end).toBeLessThan(releasedAt);
     const db = new Database(dbPath, { readonly: true });
     try {
       expect(db.prepare('SELECT COUNT(*) AS n FROM defence_audit').get()).toEqual({ n: 1 });
+      expect(verifyLedger(db).status).toBe('consistent');
+    } finally { db.close(); }
+  }, 90_000);
+
+  it('waits for a delayed peer while an append remains, without adding rows', async () => {
+    const dbPath = path.join(work, 'remaining-append.db');
+    const barrierDir = path.join(work, 'remaining-append-barrier');
+    mkdirSync(barrierDir);
+    writeFileSync(path.join(barrierDir, 'go'), '');
+    const pending = runWriter(dbPath, 2, 'early', '', barrierDir, 'early,delayed');
+    let result!: Awaited<ReturnType<typeof runWriter>>;
+    try {
+      await waitFor(() => existsSync(path.join(barrierDir, 'started-early')),
+        () => 'the first of two appends', 60_000);
+      await new Promise((r) => setTimeout(r, 150));
+      const waitingDb = new Database(dbPath, { readonly: true });
+      try {
+        expect(waitingDb.prepare('SELECT COUNT(*) AS n FROM defence_audit').get()).toEqual({ n: 1 });
+      } finally { waitingDb.close(); }
+    } finally {
+      writeFileSync(path.join(barrierDir, 'started-delayed'), '');
+      if (!existsSync(path.join(barrierDir, 'started-early'))) {
+        for (const child of liveChildren) child.kill('SIGKILL');
+      }
+      result = await pending;
+    }
+    expect({ code: result.code, err: result.err }).toEqual({ code: 0, err: '' });
+    expect(JSON.parse(result.out).ok).toBe(2);
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      expect(db.prepare('SELECT COUNT(*) AS n FROM defence_audit').get()).toEqual({ n: 2 });
       expect(verifyLedger(db).status).toBe('consistent');
     } finally { db.close(); }
   }, 90_000);
