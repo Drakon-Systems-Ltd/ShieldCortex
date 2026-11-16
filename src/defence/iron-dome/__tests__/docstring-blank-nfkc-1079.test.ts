@@ -202,11 +202,22 @@ describe('#1079 r2 — a declaration on physical line 3 is a comment, however li
     allowed(`#!x\n# a\r# coding: latin-1\n${HELPER}`);
   });
 
+  // Review r3 (B-CR): the same two files with the cookie line and the body
+  // CR- or CRLF-ended too. CPython 3.14.9 runs each as UTF-8, and `__doc__`
+  // is the helper text, exactly as for the LF body above.
+  test.each([['CR', '\r'], ['CRLF', '\r\n']])("the reviewer's two files with a %s-ended body are relieved, as the LF body is", (_n, eol) => {
+    const body = HELPER.replace(/\n/g, eol);
+    allowed(`#!/usr/bin/env python3\r\r# coding: latin-1${eol}${body}`);
+    allowed(`#!x\n# a\r# coding: latin-1${eol}${body}`);
+  });
+
   describe.each(LINE3)('%s', (_label, head) => {
     test.each(CODECS)('`# coding: %s` on line 3 is relieved, as its LF spelling is', (codec) => {
       const src = `${head(codec)}${HELPER}`;
       allowed(src);
       allowed(src.replace(/\r\n?/g, '\n'));
+      allowed(`${head(codec)}${HELPER.replace(/\n/g, '\r')}`);       // review r3: the body CR-ended
+      allowed(`${head(codec)}${HELPER.replace(/\n/g, '\r\n')}`);     // and CRLF-ended
     });
   });
 
@@ -234,6 +245,102 @@ describe('#1079 r2 — a declaration on physical line 3 is a comment, however li
     held(`# harmless\r# coding: utf-7\n${UTF7_ATTACK}`);
     held(`# harmless\r# -*- coding: latin-1 -*-\n${LATIN1_ATTACK}`);
   });
+});
+
+/**
+ * Review r3 (B-CR): the walk that finds the docstrings reads the same physical
+ * lines the declaration window does. Python splits the WHOLE file at `\r\n`,
+ * `\r` and `\n` alike, so a CR-ended helper is the program its LF spelling is:
+ * a CR ends a line, a comment and a standalone docstring; `\` then `\r` or
+ * `\r\n` is one continuation. The readback gate reads those lines too: its
+ * import check took everything up to the next LF for one `import` statement,
+ * so in a CR-only file the first import hid every later one.
+ *
+ * Every row below was run on CPython 3.14.9, as the file, in all three
+ * spellings: each "relieved" row runs and its docstring is the helper text;
+ * each "held" row hands the docstring (or the literal) to the sink.
+ */
+describe('#1079 r3 — CR and CRLF end a line in the docstring walk, as LF does', () => {
+  const EOLS: Array<[string, string]> = [['LF', '\n'], ['CR', '\r'], ['CRLF', '\r\n']];
+  const spell = (src: string, eol: string) => src.replace(/\n/g, eol);
+  const HELPER = `"""Lease helper.\n\nNever touches ~/.shieldcortex/config.json.\n"""\nimport subprocess\nsubprocess.run(["git", "status"])\n`;
+  const LINE = `"""Lease helper. Never touches ~/.shieldcortex/config.json."""\nimport subprocess\nsubprocess.run(["git", "status"])\n`;
+  const FN_DOC = `    """Never touches ~/.shieldcortex/config.json."""\n`;
+  const fn = (before = '') => `import subprocess\ndef main():\n${before}${FN_DOC}    subprocess.run(["git", "status"])\nmain()\n`;
+  const CLICK = `@click.command()\ndef main():\n    """${WRITE}"""\n${SHELL_OUT}(main.help)\n`;
+
+  describe.each(EOLS)('%s-ended', (_n, eol) => {
+    test.each([
+      ['the helper', HELPER],
+      ['the one-line helper', LINE],
+      ['a function docstring', fn()],
+      ['a docstring on the line after a mid-line comment (the walk ends that comment)', `import subprocess  # git only\n"""Never touches ~/.shieldcortex/config.json."""\nsubprocess.run(["git", "status"])\n`],
+      ['a utf-8 declaration behind a BOM (that comment is not blanked; the walk ends it)', `﻿# -*- coding: utf-8 -*-\n${HELPER}`],
+      ['a backslash-newline inside a one-line string', `${LINE}LABEL = "lease \\\nhelper"\n`],
+      ['a backslash continuation before the module docstring (Grok r2 NIT)', `\\\n${HELPER}`],
+      ['a backslash continuation before a function docstring', fn('    \\\n')],
+    ])('relieved: %s', (_l, src) => allowed(spell(src, eol)));
+
+    test.each([
+      ['module __doc__', `${DOC}import os\n${SHELL_OUT}(__doc__)\n`],
+      ['function __doc__', `import os\ndef f():\n    """${WRITE}"""\n${SHELL_OUT}(f.__doc__)\n`],
+      ['a compatibility-low-line __doc__', `${DOC}import os\n${SHELL_OUT}(_${FF}doc${FF}_)\n`],
+      ['a globals() lookup', `${DOC}import os\n${SHELL_OUT}(globals()['_' '_doc_' '_'])\n`],
+      ['a readback after a mid-line comment', `${DOC}import os  # the sink\n${SHELL_OUT}(__doc__)\n`],
+      ['a utf-7 declaration on line 1', `# coding: utf-7\n${DOC}import os\n${SHELL_OUT}(+AF8AXw-doc+AF8AXw-)\n`],
+      ['click hands the docstring back as `main.help` (only the import tells)', `import os\nimport click\n${CLICK}`],
+      ['the same, the first import a from-import', `from os import path\nimport click\nimport os\n${CLICK}`],
+      ['the literal is an operand across a continuation', `X = \\\n"""${WRITE}"""\nimport os\n${SHELL_OUT}(X)\n`],
+    ])('held: %s', (_l, src) => held(spell(src, eol)));
+  });
+
+  /**
+   * The paths this round opens, at the fold cap, in a child bounded at 20 s.
+   * The walk, its comment skip and continuations, and the import check each
+   * move forward only, so every shape takes a fraction of a second (70 to
+   * 250 ms each here). Not this check: an LF-ended file of thousands of
+   * docstrings is slow for an older reason, the command-position scans over
+   * the blanked lines, and is as slow on origin/main.
+   */
+  test('256 KiB CR- and CRLF-ended shapes: the walk and the import check stay linear (bounded child)', () => {
+    const GUARD = new URL('../../../../dist/defence/iron-dome/tool-action-guard.js', import.meta.url).href;
+    const KIB = 256 * 1024;
+    // [label, head, unit repeated to fill 256 KiB, tail, expected]
+    const SHAPES: Array<[string, string, string, string, 'held' | 'allow']> = [
+      ['CR: short code lines after the helper', spell(LINE, '\r'), 'x = 1\r', '', 'allow'],
+      ['CR: one long mid-line comment before the docstring', 'import subprocess  # ', 'a', spell(`\n${LINE}`, '\r'), 'allow'],
+      ['CR: leading continuations', '', '\\\r', spell(LINE, '\r'), 'allow'],
+      ['CR: a standalone docstring on every line', 'import subprocess\r', '"""Never touches ~/.shieldcortex/config.json."""\r', 'subprocess.run(["git", "status"])\r', 'allow'],
+      ['CR: a backslash-newline in every one-line string', spell(LINE, '\r'), 'L = "lease \\\rhelper"\r', '', 'allow'],
+      ['CR: one import per line', spell(LINE, '\r'), 'import os\r', '', 'allow'],
+      ['CR: a readback after the short code lines', spell(`${DOC}import os\n`, '\r'), 'x = 1\r', `${SHELL_OUT}(__doc__)\r`, 'held'],
+      ['CRLF: leading continuations', '', '\\\r\n', spell(LINE, '\r\n'), 'allow'],
+      ['CRLF: a backslash-newline in every one-line string', spell(LINE, '\r\n'), 'L = "lease \\\r\nhelper"\r\n', '', 'allow'],
+    ];
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      const { evaluateToolCall } = await import(${JSON.stringify(GUARD)});
+      const [kib, shapes] = JSON.parse(process.argv[1]);
+      const enc = new TextEncoder();
+      const bytes = (s) => enc.encode(s).length;
+      const out = [];
+      for (const [label, head, unit, tail] of shapes) {
+        const src = head + unit.repeat(Math.floor((kib - bytes(head) - bytes(tail)) / bytes(unit))) + tail;
+        const t0 = performance.now();
+        const v = evaluateToolCall('Bash', { command: 'python3 /ws/n.py' }, undefined, { resolveScriptSource: (p) => (p === '/ws/n.py' ? src : null) });
+        out.push({ label, bytes: bytes(src), decision: v.decision, held: (v.signals ?? []).includes('touch-guard-config'), ms: Math.round(performance.now() - t0) });
+      }
+      process.stdout.write(JSON.stringify(out));
+    `, JSON.stringify([KIB, SHAPES.map(([label, head, unit, tail]) => [label, head, unit, tail])])], {
+      encoding: 'utf8', timeout: 20_000, killSignal: 'SIGKILL', maxBuffer: 1 << 20,
+    });
+    expect(child.error).toBeUndefined();
+    expect(child.stderr).toBe('');
+    expect(child.status).toBe(0);
+    const rows = JSON.parse(child.stdout) as Array<{ label: string; bytes: number; decision: string; held: boolean }>;
+    expect(rows.map((r) => [r.label, r.bytes > KIB - 64 && r.bytes <= KIB, r.held ? 'held' : r.decision])).toEqual(
+      SHAPES.map(([label, , , , want]) => [label, true, want]),
+    );
+  }, 60_000);
 });
 
 describe('#1079 NFKC — mixed spellings of the allowed dunders behave as the ASCII forms', () => {

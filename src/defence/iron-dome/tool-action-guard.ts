@@ -3584,11 +3584,17 @@ const PY_UTF8_CODEC_ALIASES = new Set([
   'iso646_us', 'iso_646.irv_1991', 'iso_ir_6', 'us', 'us_ascii',
 ]);
 
-/** Every top-level module the code imports is in `PY_DOC_SAFE_IMPORTS`. */
+/**
+ * Every top-level module the code imports is in `PY_DOC_SAFE_IMPORTS`. A
+ * statement ends at `;` or a physical line break, `\r` included (review r3 of
+ * #1093): ending it at `\n` only read a CR-only file's first import as
+ * running to the end of the file, so `import os\rimport click` checked `os`
+ * alone once a CR-ended docstring could be blanked.
+ */
 function pyImportsAreDocSafe(code: string): boolean {
-  const FROM_RE = /\bfrom[ \t]+([\w.]+)[ \t]+import\b(?:[ \t]*\([^)]*\)|[^\n;]*)/g;
+  const FROM_RE = /\bfrom[ \t]+([\w.]+)[ \t]+import\b(?:[ \t]*\([^)]*\)|[^\r\n;]*)/g;
   for (const m of code.matchAll(FROM_RE)) if (!PY_DOC_SAFE_IMPORTS.has(m[1].split('.')[0])) return false;
-  for (const m of code.replace(FROM_RE, ' ').matchAll(/\bimport\b([^\n;]*)/g)) {
+  for (const m of code.replace(FROM_RE, ' ').matchAll(/\bimport\b([^\r\n;]*)/g)) {
     for (const part of m[1].split(',')) {
       const name = part.trim().split(/\s+/)[0] ?? '';
       if (!PY_DOC_SAFE_IMPORTS.has(name.split('.')[0])) return false;
@@ -3601,6 +3607,13 @@ function pyImportsAreDocSafe(code: string): boolean {
  * `[start, end)` of each triple-quoted literal that is a whole logical line by
  * itself (see `blankPythonDocstrings`); `null` when the walk is not certain it
  * reads the source as Python would.
+ *
+ * Lines are Python's physical lines, the ones `pyDeclaresForeignEncoding`
+ * reads (review r3 of #1093): Python reads the whole file with universal
+ * newlines, so `\r\n`, `\r` and `\n` each end a line, a comment and a
+ * standalone docstring, and `\` before any of them is one continuation. A
+ * walk that ended lines at `\n` only held a CR-ended helper its LF spelling
+ * relieves; Python runs both alike.
  */
 function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null {
   const found: Array<[number, number]> = [];
@@ -3610,13 +3623,13 @@ function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null
   let i = 0;
   while (i < n) {
     const c = src[i];
-    if (c === '\n') { if (depth === 0) lineStart = true; i++; continue; }
-    if (c === ' ' || c === '\t' || c === '\r' || c === '\f') { i++; continue; }
-    if (c === '#') { while (i < n && src[i] !== '\n') i++; continue; }
+    if (c === '\n' || c === '\r') { if (depth === 0) lineStart = true; i++; continue; }
+    if (c === ' ' || c === '\t' || c === '\f') { i++; continue; }
+    if (c === '#') { while (i < n && src[i] !== '\n' && src[i] !== '\r') i++; continue; }
     if (c === '\\') {
-      const skip = src[i + 1] === '\n' ? 2 : src[i + 1] === '\r' && src[i + 2] === '\n' ? 3 : 0;
+      const skip = pyLineBreakLength(src, i + 1);
       if (!skip) return null;
-      i += skip; lineStart = false; continue;
+      i += 1 + skip; continue;    // joins two physical lines: neither starts nor ends a logical one
     }
     if (c === '(' || c === '[' || c === '{') { depth++; lineStart = false; i++; continue; }
     if (c === ')' || c === ']' || c === '}') { if (--depth < 0) return null; lineStart = false; i++; continue; }
@@ -3641,8 +3654,8 @@ function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null
         k++;
         continue;
       }
-      if (ch === '\\') { k += 2; continue; }
-      if (!triple && ch === '\n') return null;
+      if (ch === '\\') { k += 1 + (pyLineBreakLength(src, k + 1) || 1); continue; }
+      if (!triple && (ch === '\n' || ch === '\r')) return null;
       if (fmt && ch === '{') { if (src[k + 1] === '{') { k += 2; continue; } field = 1; k++; continue; }
       if (src.startsWith(delim, k)) { close = k; break; }
       k++;
@@ -3651,13 +3664,20 @@ function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null
     const end = close + delim.length;
     if (triple && lineStart && depth === 0 && (prefix === '' || prefix === 'r' || prefix === 'u')) {
       let e = end;
-      while (e < n && (src[e] === ' ' || src[e] === '\t' || src[e] === '\r')) e++;
-      if (e >= n || src[e] === '\n') found.push([i, end]);
+      while (e < n && (src[e] === ' ' || src[e] === '\t')) e++;
+      if (e >= n || pyLineBreakLength(src, e)) found.push([i, end]);
     }
     lineStart = false;
     i = end;
   }
   return depth === 0 ? found : null;
+}
+
+/** Length of the Python line break at `at` (`\r\n` is 2; `\r`, `\n` are 1), else 0. */
+function pyLineBreakLength(src: string, at: number): number {
+  if (src[at] === '\n') return 1;
+  if (src[at] !== '\r') return 0;
+  return src[at + 1] === '\n' ? 2 : 1;
 }
 
 /**
