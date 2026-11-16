@@ -350,6 +350,57 @@ describe('#1079 r3 — CR and CRLF end a line in the docstring walk, as LF does'
   }, 60_000);
 });
 
+/** [label, head, unit repeated to fill the size, tail, expected] */
+type SizeShape = [string, string, string, string, 'held' | 'allow'];
+
+/**
+ * Each shape at 16 KiB and at 256 KiB, in a child bounded at 20 s; the
+ * fastest of three runs at each size. The join is one forward pass and every
+ * term after it moves forward only, so 16x the input costs about 16x (a
+ * quadratic step would cost about 256x). The bound is 64x, with a 4 ms floor
+ * on the small run so that timer noise there cannot fail it.
+ */
+function expectNearLinear(SHAPES: SizeShape[]): void {
+  const GUARD = new URL('../../../../dist/defence/iron-dome/tool-action-guard.js', import.meta.url).href;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    const { evaluateToolCall } = await import(${JSON.stringify(GUARD)});
+    const [sizes, shapes] = JSON.parse(process.argv[1]);
+    const enc = new TextEncoder();
+    const bytes = (s) => enc.encode(s).length;
+    const fill = (kib, head, unit, tail) => head + unit.repeat(Math.floor((kib - bytes(head) - bytes(tail)) / bytes(unit))) + tail;
+    const judge = (src) => evaluateToolCall('Bash', { command: 'python3 /ws/n.py' }, undefined, { resolveScriptSource: (p) => (p === '/ws/n.py' ? src : null) });
+    const out = [];
+    for (const [label, head, unit, tail] of shapes) {
+      const row = { label };
+      for (const [name, kib] of sizes) {
+        const src = fill(kib, head, unit, tail);
+        judge(src);
+        let best = Infinity;
+        let v;
+        for (let r = 0; r < 3; r++) {
+          const t0 = performance.now();
+          v = judge(src);
+          best = Math.min(best, performance.now() - t0);
+        }
+        row[name] = { bytes: bytes(src), ms: best, verdict: (v.signals ?? []).includes('touch-guard-config') ? 'held' : v.decision };
+      }
+      out.push(row);
+    }
+    process.stdout.write(JSON.stringify(out));
+  `, JSON.stringify([[['small', 16 * 1024], ['large', 256 * 1024]], SHAPES.map(([label, head, unit, tail]) => [label, head, unit, tail])])], {
+    encoding: 'utf8', timeout: 20_000, killSignal: 'SIGKILL', maxBuffer: 1 << 20,
+  });
+  expect(child.error).toBeUndefined();
+  expect(child.stderr).toBe('');
+  expect(child.status).toBe(0);
+  type Run = { bytes: number; ms: number; verdict: string };
+  const rows = JSON.parse(child.stdout) as Array<{ label: string; small: Run; large: Run }>;
+  expect(rows.map((r) => [r.label, r.small.verdict, r.large.verdict, r.large.bytes > 256 * 1024 - 64, r.large.bytes <= 256 * 1024])).toEqual(
+    SHAPES.map(([label, , , , want]) => [label, want, want, true, true]),
+  );
+  for (const r of rows) expect([r.label, r.large.ms / Math.max(r.small.ms, 4) < 64]).toEqual([r.label, true]);
+}
+
 /**
  * Grok r3 B-CONT and NIT 1: the gate reads Python's logical lines. A backslash
  * before a physical break is an explicit line join (Python deletes both and a
@@ -402,20 +453,11 @@ describe('#1079 r4 — a backslash continuation and a form feed separate tokens,
     ])('relieved: %s', (_l, src) => allowed(spell(src, eol)));
   });
 
-  /**
-   * Each shape at 16 KiB and at 256 KiB, in a child bounded at 20 s; the
-   * fastest of three runs at each size. The join is one forward pass and every
-   * term after it moves forward only, so 16x the input costs about 16x (a
-   * quadratic step would cost about 256x). The bound is 64x, with a 4 ms floor
-   * on the small run so that timer noise there cannot fail it.
-   */
   test('continuation-heavy CR and CRLF input: 16 KiB vs 256 KiB stays near-linear (bounded child)', () => {
-    const GUARD = new URL('../../../../dist/defence/iron-dome/tool-action-guard.js', import.meta.url).href;
     const CR = (s: string) => spell(s, '\r');
     const CRLF = (s: string) => spell(s, '\r\n');
     const CLICK = `@click.command()\n${MAIN}${SHELL_OUT}(main.help)\n`;
-    // [label, head, unit repeated to fill the size, tail, expected]
-    const SHAPES: Array<[string, string, string, string, 'held' | 'allow']> = [
+    expectNearLinear([
       ['CR: a continued aliased import per line', CR(LINE), 'import os \\\ras os, \\\rsys\r', '', 'allow'],
       ['CRLF: a continued from-import per line', CRLF(LINE), 'from os.path \\\r\nimport join\r\n', '', 'allow'],
       ['CR: one logical import line of continuations', `${CR(LINE)}import os`, ' \\\r', ', sys\r', 'allow'],
@@ -423,44 +465,86 @@ describe('#1079 r4 — a backslash continuation and a form feed separate tokens,
       ['CR: click after a logical line of continuations', `${CR(DOC)}import os`, ' \\\r', `, click\r${CR(CLICK)}`, 'held'],
       ['CRLF: help( after a logical line of continuations', `${CRLF(`import os\n${MAIN}`)}help`, ' \\\r\n', '(main)\r\n', 'held'],
       ['CR: a form feed between tokens on every line', CR(LINE), 'x =\f1\r', '', 'allow'],
-    ];
-    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
-      const { evaluateToolCall } = await import(${JSON.stringify(GUARD)});
-      const [sizes, shapes] = JSON.parse(process.argv[1]);
-      const enc = new TextEncoder();
-      const bytes = (s) => enc.encode(s).length;
-      const fill = (kib, head, unit, tail) => head + unit.repeat(Math.floor((kib - bytes(head) - bytes(tail)) / bytes(unit))) + tail;
-      const judge = (src) => evaluateToolCall('Bash', { command: 'python3 /ws/n.py' }, undefined, { resolveScriptSource: (p) => (p === '/ws/n.py' ? src : null) });
-      const out = [];
-      for (const [label, head, unit, tail] of shapes) {
-        const row = { label };
-        for (const [name, kib] of sizes) {
-          const src = fill(kib, head, unit, tail);
-          judge(src);
-          let best = Infinity;
-          let v;
-          for (let r = 0; r < 3; r++) {
-            const t0 = performance.now();
-            v = judge(src);
-            best = Math.min(best, performance.now() - t0);
-          }
-          row[name] = { bytes: bytes(src), ms: best, verdict: (v.signals ?? []).includes('touch-guard-config') ? 'held' : v.decision };
-        }
-        out.push(row);
-      }
-      process.stdout.write(JSON.stringify(out));
-    `, JSON.stringify([[['small', 16 * 1024], ['large', 256 * 1024]], SHAPES.map(([label, head, unit, tail]) => [label, head, unit, tail])])], {
-      encoding: 'utf8', timeout: 20_000, killSignal: 'SIGKILL', maxBuffer: 1 << 20,
-    });
-    expect(child.error).toBeUndefined();
-    expect(child.stderr).toBe('');
-    expect(child.status).toBe(0);
-    type Run = { bytes: number; ms: number; verdict: string };
-    const rows = JSON.parse(child.stdout) as Array<{ label: string; small: Run; large: Run }>;
-    expect(rows.map((r) => [r.label, r.small.verdict, r.large.verdict, r.large.bytes > 256 * 1024 - 64, r.large.bytes <= 256 * 1024])).toEqual(
-      SHAPES.map(([label, , , , want]) => [label, want, want, true, true]),
-    );
-    for (const r of rows) expect([r.label, r.large.ms / Math.max(r.small.ms, 4) < 64]).toEqual([r.label, true]);
+    ]);
+  }, 60_000);
+});
+
+/**
+ * Review r4 of #1096 (Astra and Grok B-COMMENT): a backslash joins two
+ * physical lines only where Python reads it as code. In a comment it is
+ * comment text, and the comment still ends at the break; in a string it is
+ * part of the literal. The r4 join rewrote every `\` and break, so
+ * `import os # \` then `import click` read as one import of `os` (allowed,
+ * though origin/main holds it and Python imports click), and a comment
+ * ending in `\` pulled the next statement into a safe import's capture or
+ * made `help (` out of `# help \` and `(42))` (held, though Python calls
+ * nothing). A form feed in a comment or a string is no token separator
+ * either: rewritten, `# from<FF>os<FF>import (` read as a from-import whose
+ * parenthesised list swallowed the next line's `import click`.
+ *
+ * `<J>` marks the break right after the backslash, so the mixed rows end it
+ * differently from the rest of the file. On CPython 3.14.9 (sinks stubbed)
+ * each held row hands the docstring to the sink, and each relieved row runs
+ * with nothing handed back.
+ */
+describe('#1079 r5 — a backslash or a form feed in a comment or a string joins nothing', () => {
+  const J = '<J>';
+  const ENDINGS: Array<[string, string, string]> = [
+    ['LF', '\n', '\n'], ['CR', '\r', '\r'], ['CRLF', '\r\n', '\r\n'],
+    ['LF, the join CRLF', '\n', '\r\n'], ['LF, the join CR', '\n', '\r'],
+    ['CRLF, the join LF', '\r\n', '\n'], ['CR, the join LF', '\r', '\n'],
+  ];
+  const spell = (src: string, eol: string, join = eol) => src.replace(/\n/g, eol).split(J).join(join);
+  const MAIN = `def main():\n    """${WRITE}"""\n`;
+  const CLICK = `@click.command()\n${MAIN}${SHELL_OUT}(main.help)\n`;
+  const LINE = `"""Lease helper. Never touches ~/.shieldcortex/config.json."""\n`;
+  const RUN = `subprocess.run(["git", "status"])\n`;
+  const HELPER = `def helper():\n    ${LINE}    return 0\nimport subprocess\n`;
+
+  describe.each(ENDINGS)('%s-ended', (_n, eol, join) => {
+    test.each([
+      ['`import os # \\`, then `import click`', `import os # \\${J}import click\n${CLICK}`],
+      ['the same, no space before the backslash', `import os #\\${J}import click\n${CLICK}`],
+      ['the same, a tab before the comment', `import os\t# \\${J}import click\n${CLICK}`],
+      ['the same, after an import list', `import os, sys # \\${J}import click\n${CLICK}`],
+      ['`from os import path # \\`, then `import click`', `from os import path # \\${J}import click\nimport os\n${CLICK}`],
+      ['`from os.path import join # \\`, then `import click`', `from os.path import join # \\${J}import click\nimport os\n${CLICK}`],
+      ['`from os import path # \\`, then `from click import command`', `from os import path # \\${J}from click import command\nimport os\n@command()\n${MAIN}${SHELL_OUT}(main.help)\n`],
+      ['a `#` in a string is no comment, so the continuation after it joins', `x = "foo#bar"; import os \\${J}, click\n${CLICK}`],
+      ['help() on the line after a comment ending in a backslash', `import os\n${MAIN}x = 1 # \\${J}help(main)\n`],
+    ])('held: %s', (_l, src) => held(spell(src, eol, join)));
+
+    test.each([
+      ['`( # help \\`, then `(42))`: no call (Astra)', `${HELPER}x = ( # help \\${J}(42))\n${RUN}`],
+      ['the same with `dir`', `${HELPER}x = ( # dir \\${J}(42))\n${RUN}`],
+      ['the same with `compile`', `${HELPER}x = ( # compile \\${J}(42))\n${RUN}`],
+      ['`# see help\\`, then a parenthesised string: no call (Grok)', `${LINE}import subprocess  # see help\\${J}("docs")\n${RUN}`],
+      ['a Windows path ending the comment after a safe import (Grok)', `${LINE}import subprocess  # C:\\${J}${RUN}`],
+      ['the same after a continued import (Grok)', `${LINE}import \\\n    subprocess  # C:\\${J}${RUN}`],
+    ])('relieved: %s', (_l, src) => allowed(spell(src, eol, join)));
+  });
+
+  describe.each(ENDINGS.slice(0, 3))('%s-ended, a form feed', (_n, eol) => {
+    test.each([
+      ['in a comment: `# from<FF>os<FF>import (` swallows no import', `import os  # from\fos\fimport (\nimport click\nprint()\n${CLICK}`],
+      ['in a string: the same words swallow no import', `import os\nx = "from\fos\fimport ("\nimport click\ny = ")"\n${CLICK}`],
+      ['in an f-string replacement field, which is code: `help<FF>(main)` is a call', `import os\n${MAIN}x = f"{help\f(main)}"\n`],
+    ])('held: %s', (_l, src) => held(spell(src, eol)));
+
+    test.each([
+      ['in a string: `help<FF>(` is no call (Grok r4 NIT 1)', `${LINE}import subprocess\nLABEL = "help\f(me)"\n${RUN}`],
+      ['in a comment: `help<FF>(` is no call', `${LINE}import subprocess  # see help\f(docs)\n${RUN}`],
+    ])('relieved: %s', (_l, src) => allowed(spell(src, eol)));
+  });
+
+  test('comment-backslash and comment-form-feed input: 16 KiB vs 256 KiB stays near-linear (bounded child)', () => {
+    expectNearLinear([
+      ['CRLF: a safe import, its comment ending in a backslash, per line', spell(LINE, '\r\n'), 'import os # C:\\\r\n', '', 'allow'],
+      ['LF: imports whose comments end in a backslash, then click', 'import os\n', 'import os # \\\n', `import click\n${CLICK}`, 'held'],
+      ['CR: `( # help \\`, then `(42))`, per line', spell(`${LINE}import subprocess\n`, '\r'), 'x = ( # help \\\r(42))\r', '', 'allow'],
+      ['LF: `help<FF>(` in a comment per line', `${LINE}import subprocess\n`, 'x = 1  # see help\f(docs)\n', '', 'allow'],
+      ['CRLF: a `#` in a string, then a continued import per line', spell(LINE, '\r\n'), 'x = "a#b"; import os \\\r\n, sys\r\n', '', 'allow'],
+    ]);
   }, 60_000);
 });
 
