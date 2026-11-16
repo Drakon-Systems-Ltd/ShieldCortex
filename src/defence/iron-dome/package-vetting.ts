@@ -558,7 +558,7 @@ function readCache(opts: VetOptions): CacheFile {
   try {
     // Open the file itself without following a symlink. Stat and read the same
     // descriptor, so a path swap between those operations cannot select another file.
-    fd = fs.openSync(cachePath(opts), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    fd = fs.openSync(cachePath(opts), fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
     const st = fs.fstatSync(fd);
     if (!st.isFile() || st.size > 4_000_000) return { v: 1, entries: {} };
     const parsed = JSON.parse(fs.readFileSync(fd, 'utf-8'));
@@ -603,10 +603,18 @@ const STALE_CACHE_LOCK_MS = 30_000;
 function sameInode(a: fs.Stats, b: fs.Stats): boolean { return a.dev === b.dev && a.ino === b.ino; }
 
 /** Reclaim only an old lock whose recorded owner is dead. */
-function reclaimStaleCacheLock(lockPath: string): boolean {
+export function reclaimStaleCacheLock(lockPath: string): boolean {
   let fd: number | undefined;
+  let guard: number | undefined;
+  let guardInode: fs.Stats | undefined;
+  const guardPath = `${lockPath}.recovery`;
   try {
-    fd = fs.openSync(lockPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    // Only one reclaimer may inspect and unlink this path at a time. Without
+    // this guard, two inspectors can both accept the old inode; one can unlink
+    // a new writer's lock after the other has removed the stale one.
+    guard = fs.openSync(guardPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
+    guardInode = fs.fstatSync(guard);
+    fd = fs.openSync(lockPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
     const held = fs.fstatSync(fd);
     if (!held.isFile() || Date.now() - held.mtimeMs < STALE_CACHE_LOCK_MS) return false;
     const raw = fs.readFileSync(fd, 'utf8');
@@ -622,7 +630,14 @@ function reclaimStaleCacheLock(lockPath: string): boolean {
     fs.unlinkSync(lockPath);
     return true;
   } catch { return false; }
-  finally { if (fd !== undefined) fs.closeSync(fd); }
+  finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    if (guard !== undefined) {
+      fs.closeSync(guard);
+      try { if (guardInode && sameInode(guardInode, fs.lstatSync(guardPath))) fs.unlinkSync(guardPath); }
+      catch { /* a replaced guard belongs to another reclaimer */ }
+    }
+  }
 }
 
 /** True when `onDisk` is the record an eviction saw: same time, same ids. A record in any other shape never is. */
@@ -787,7 +802,9 @@ interface Facts {
   sdistOnly: boolean;
 }
 
-const NPM_HOOKS = ['preinstall', 'install', 'postinstall', 'prepare'];
+// Registry tarballs run install lifecycle hooks; prepare runs for local/git
+// sources, not for a normal registry tarball install.
+const NPM_HOOKS = ['preinstall', 'install', 'postinstall'];
 
 async function getJson(fetchImpl: FetchLike, url: string, signal: AbortSignal, accept = 'application/json'): Promise<unknown> {
   let res;
@@ -814,9 +831,10 @@ function errClass(err: unknown): string {
 const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {});
 
 const NPM_TIME_LIMIT = 'publication time lookup limit reached (one full npm metadata request per command)';
+const NPM_RESOLUTION_LIMIT = 'version resolution metadata lookup limit reached (one full npm metadata request per command)';
 
-async function fullNpmMetadata(base: string, fetchImpl: FetchLike, signal: AbortSignal, allowance: { remaining: number }): Promise<Record<string, unknown>> {
-  if (allowance.remaining <= 0) throw new Unchecked(NPM_TIME_LIMIT);
+async function fullNpmMetadata(base: string, fetchImpl: FetchLike, signal: AbortSignal, allowance: { remaining: number }, limitReason = NPM_TIME_LIMIT): Promise<Record<string, unknown>> {
+  if (allowance.remaining <= 0) throw new Unchecked(limitReason);
   // Consume before awaiting: concurrent package lookups share this allowance.
   allowance.remaining--;
   return obj(await getJson(fetchImpl, base, signal));
@@ -845,18 +863,18 @@ async function resolveNpm(ref: PackageRef, fetchImpl: FetchLike, signal: AbortSi
     const version = semver.valid(spec)!;
     const manifest = obj(await getJson(fetchImpl, `${base}/${encodeURIComponent(version)}`, signal));
     if (manifest.version !== version) throw new Unchecked('registry returned a different version');
-    const facts = npmFacts(version, manifest, manifest.time);
+    const facts = npmFacts(version, manifest);
     await fillNpmAge(facts, undefined, base, fetchImpl, signal, allowance, checkAge);
     return facts;
   }
   // install-v1 retains dist-tags and version manifests, but normally has no time map.
   let doc = obj(await getJson(fetchImpl, base, signal, 'application/vnd.npm.install-v1+json'));
-  let version = npmVersion(doc, spec);
+  let version = npmVersion(doc, spec, ref.spec !== null);
   let fullDoc: Record<string, unknown> | undefined;
   if (!version || !obj(doc.versions)[version]) {
-    doc = await fullNpmMetadata(base, fetchImpl, signal, allowance);
+    doc = await fullNpmMetadata(base, fetchImpl, signal, allowance, NPM_RESOLUTION_LIMIT);
     fullDoc = doc;
-    version = npmVersion(doc, spec);
+    version = npmVersion(doc, spec, ref.spec !== null);
   }
   if (!version || !obj(doc.versions)[version]) throw new Unchecked('could not resolve the requested version to a published version');
   if (!isSafeVersion(version)) throw new Unchecked('registry returned an unrecognisable version');
@@ -865,15 +883,41 @@ async function resolveNpm(ref: PackageRef, fetchImpl: FetchLike, signal: AbortSi
   return facts;
 }
 
-function npmVersion(doc: Record<string, unknown>, spec: string): string | undefined {
+function npmVersion(doc: Record<string, unknown>, spec: string, explicitTag: boolean): string | undefined {
   const versions = obj(doc.versions);
   const tags = obj(doc['dist-tags']);
-  if (typeof tags[spec] === 'string') return tags[spec] as string;
+  // An explicitly requested tag is exact, including a deprecated release.
+  if (explicitTag && typeof tags[spec] === 'string') return tags[spec] as string;
   const range = semver.validRange(spec);
-  if (!range) return undefined;
+  if (!range && spec !== 'latest') return undefined;
+  const wanted = range ?? '*';
+  const engineOk = (manifest: Record<string, unknown>) => {
+    const node = obj(manifest.engines).node;
+    if (typeof node !== 'string') return true;
+    try { return semver.satisfies(process.version, node, { includePrerelease: true, loose: true }); }
+    catch { return false; }
+  };
+  const preferred = (version: string) => {
+    const manifest = obj(versions[version]);
+    return !!versions[version] && !manifest.deprecated && engineOk(manifest);
+  };
   const latest = tags.latest;
-  if (typeof latest === 'string' && semver.valid(latest) && semver.satisfies(latest, range)) return latest;
-  return semver.maxSatisfying(Object.keys(versions), range) ?? undefined;
+  // Keep the registry's opaque latest target when no semver candidate exists:
+  // the cache must still protect non-semver registry records during an outage.
+  if (spec === 'latest' && typeof latest === 'string' && !semver.valid(latest) && versions[latest]) return latest;
+  if (typeof latest === 'string' && semver.valid(latest) && semver.satisfies(latest, wanted) && !versions[latest]) return latest;
+  if (typeof latest === 'string' && semver.valid(latest) && semver.satisfies(latest, wanted) && preferred(latest)) return latest;
+  const candidates = Object.keys(versions).filter((v) => semver.satisfies(v, wanted));
+  // Match npm-pick-manifest's fallback ordering: healthy, engine-compatible,
+  // non-deprecated, then highest semver. A result is still returned when every
+  // candidate is deprecated or incompatible, as npm itself does.
+  candidates.sort((a, b) => {
+    const ma = obj(versions[a]); const mb = obj(versions[b]);
+    const ea = Number(engineOk(ma)); const eb = Number(engineOk(mb));
+    const da = Number(!ma.deprecated); const db = Number(!mb.deprecated);
+    return (db * eb - da * ea) || (eb - ea) || (db - da) || semver.rcompare(a, b);
+  });
+  return candidates[0];
 }
 
 function npmFacts(version: string, manifest: Record<string, unknown>, published?: unknown): Facts {

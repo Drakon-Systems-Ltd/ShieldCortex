@@ -76,7 +76,8 @@ describe('#1028 npm metadata resolution', () => {
       return osv(url, init);
     };
     const out = await vetPackages([ref('fallback-pkg', null)], { fetchImpl, nowMs, stateDir: stateDir() });
-    expect(out.packages[0]).toMatchObject({ version: '1.0.0', hooks: ['prepare'], publishedAt: '2026-11-01T00:00:00Z' });
+    // A registry tarball does not execute prepare by itself.
+    expect(out.packages[0]).toMatchObject({ version: '1.0.0', hooks: [], publishedAt: '2026-11-01T00:00:00Z' });
     expect(calls).toEqual(['application/vnd.npm.install-v1+json', 'application/json']);
   });
 

@@ -493,7 +493,7 @@ describe('vetToolCall + applyVettingToVerdict', () => {
       { name: 'docs', entry: { command: 'npx', args: ['-y', `${MAL_NAME}@1.0.3`] } },
       { name: 'local', entry: { command: 'node', args: ['x.js'] } },
       { name: 'ok', entry: { command: 'npx', args: ['clean-lib@4.2.1'] } },
-    ], opts(fixtureWorld()));
+    ], { ...opts(fixtureWorld()), minAgeDays: 0 });
     expect(hits).toHaveLength(1);
     expect(hits[0]).toMatchObject({ name: 'docs', malicious: true });
   });
