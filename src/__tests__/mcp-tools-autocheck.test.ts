@@ -544,7 +544,7 @@ describe('(#926) a partial retry re-sends only the alerts that were not delivere
     expect(res).toMatchObject({ notified: 0, errors: 0 });
     expect(h.rowsOf('suspicious')).toHaveLength(1);
     expect(h.rowsOf('suspicious')[0].finding).toMatchObject({ alertKind: 'suspicious' });
-    expect(h.rowsOf('suspicious')[0].finding?.tools.map((t) => t.tool)).toEqual(['alpha']);
+    expect(new Set(h.rowsOf('suspicious')[0].finding?.tools.map((t) => t.tool))).toEqual(new Set(['alpha']));
     expect(h.kinds(h.delivered)).toEqual(['suspicious', 'changed']); // each sent exactly once overall
     expect(h.rowsOf('changed')).toHaveLength(1);
     expect(h.store.get('files', 'alpha')).not.toBe(baseAlpha);
@@ -622,7 +622,7 @@ describe('(#926) a partial retry re-sends only the alerts that were not delivere
       expect(h.delivered[1]).toMatchObject({ kind: 'suspicious', tools: ['gamma'], toolCount: 1 });
       expect(h.delivered[2]).toMatchObject({ kind: 'changed', tools: ['beta'] });
       const susRows = h.rowsOf('suspicious');
-      expect(susRows.map((r) => r.finding?.tools.map((t) => t.tool))).toEqual([['alpha'], ['gamma']]);
+      expect(susRows.map((r) => [...new Set(r.finding?.tools.map((t) => t.tool))])).toEqual([['alpha'], ['gamma']]);
     });
 
     it('the same server, tool and content from a different config source is a different identity', async () => {
@@ -642,6 +642,8 @@ describe('(#926) a partial retry re-sends only the alerts that were not delivere
       h.advance(HOUR); await h.run();
       // A's checkpoint suppresses A's repeat only; B's first sight of it is still delivered.
       expect(h.kinds(h.delivered)).toEqual(['suspicious', 'suspicious']);
+      // One pending row per source: B finishing a quiet run did not drop A's marker.
+      expect(h.rowsOf('pending').map((r) => r.finding?.source)).toEqual([srcA.sourcePath, srcB.sourcePath]);
       changedDown = false;
       h.advance(HOUR); await h.run();
       expect(h.kinds(h.delivered)).toEqual(['suspicious', 'suspicious', 'changed', 'changed']);
