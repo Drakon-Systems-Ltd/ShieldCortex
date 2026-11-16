@@ -84,9 +84,17 @@ function fetchFor(w: World): FetchLike {
     if (vuln) return json({ id: decodeURIComponent(vuln[1]), aliases: w.aliases?.[decodeURIComponent(vuln[1])] ?? [] });
     const npm = /^https:\/\/registry\.npmjs\.org\/(.+)$/.exec(url);
     if (npm) {
-      const name = decodeURIComponent(npm[1]);
+      const slash = npm[1].lastIndexOf('/');
+      const version = slash >= 0 && !npm[1].startsWith('@') ? decodeURIComponent(npm[1].slice(slash + 1)) : null;
+      const scopedVersion = npm[1].startsWith('@') && slash > npm[1].indexOf('%2F') ? decodeURIComponent(npm[1].slice(slash + 1)) : null;
+      const selected = version ?? scopedVersion;
+      const name = decodeURIComponent(selected ? npm[1].slice(0, slash) : npm[1]);
       const f = w.npm[name];
       if (!f) return json({}, 404);
+      if (selected) {
+        const m = f.versions[selected];
+        return m ? json({ name, version: selected, scripts: m.scripts, hasInstallScript: m.hasInstallScript, time: m.time }) : json({}, 404);
+      }
       return json({
         'dist-tags': f.tags ?? { latest: Object.keys(f.versions).pop()! },
         versions: Object.fromEntries(Object.entries(f.versions).map(([v, m]) => [v, { name, version: v, scripts: m.scripts, hasInstallScript: m.hasInstallScript }])),
@@ -485,7 +493,7 @@ describe('vetToolCall + applyVettingToVerdict', () => {
       { name: 'docs', entry: { command: 'npx', args: ['-y', `${MAL_NAME}@1.0.3`] } },
       { name: 'local', entry: { command: 'node', args: ['x.js'] } },
       { name: 'ok', entry: { command: 'npx', args: ['clean-lib@4.2.1'] } },
-    ], opts(fixtureWorld()));
+    ], { ...opts(fixtureWorld()), minAgeDays: 0 });
     expect(hits).toHaveLength(1);
     expect(hits[0]).toMatchObject({ name: 'docs', malicious: true });
   });
