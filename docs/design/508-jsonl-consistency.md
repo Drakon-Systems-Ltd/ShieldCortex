@@ -61,13 +61,29 @@ v:1,day,segment,seq,prev,predecessor}))). Thus metadata and payload are covered;
 chain.seq never substitutes for payload.seq. Genesis uses 64 zeroes and null
 predecessor; a linked new segment uses predecessor.h as prev.
 
+Legal transition tuples are normative (D,S,Q,H denote the previous chained row):
+- Unanchored first row: (day=current day, segment=fresh, seq=0, prev=zero64,
+  predecessor=null), with an explicit unanchored reason.
+- Ordinary successor: (day=D, segment=S, seq=Q+1, prev=H,
+  predecessor=previous.predecessor). The segment-start predecessor repeats unchanged
+  for the entire segment; it is not replaced with the preceding ordinary row.
+- Linked segment start: (day=current day, segment=fresh, seq=0, prev=H,
+  predecessor={day:D,segment:S,seq:Q,h:H}). New day always starts a new segment;
+  same-day starts require a coverage break. Never reuse a segment identity.
+Verifier rejects observed gaps, reordering, wrong prev, changed predecessor within
+one segment, nonzero starts, reused identities and day changes within a segment,
+not merely incorrect individual row hashes. Missing history is incomplete, not
+itself inconsistency. Shared vectors must include every legal tuple and each of
+these rejected transitions, including deleted-middle-row and competing successors.
+
 One future checked-in language-neutral JSON vector manifest is normative: each
 case contains input JSON, normalized payload, exact canonical UTF-8 hex, full hash
 preimage hex, expected lowercase SHA256, or expected rejection reason. Both Python
 and Node consume the same manifest, including standalone/bundled artifacts. Cases:
 key permutation, nested arrays, optional fields, payload seq, -0, 1e-7/1e21,
 non-ASCII and supplementary keys, escaping, surrogate rejection, safe-integer
-limits, metadata changes and malformed values. Independently checked expected
+limits (Python 1.0 canonicalizes to 1; 0.5 stays 0.5; Python integers outside
+±(2^53−1) are rejected before conversion), metadata changes and malformed values. Independently checked expected
 bytes/hashes are required; generating expectations with the implementation under
 test is insufficient. Vectors are specified, NOT created or run in this docs PR.
 
@@ -77,21 +93,39 @@ Under the shared directory lock, sample UTC day once; event timestamp stays payl
 metadata. Append to that chosen day even if the clock crosses midnight afterwards.
 For same-day restart recover last complete valid chained row within bounded tail
 read (1 MiB maximum); continue its segment only when the remaining suffix is empty.
-Unchained suffix starts a new segment with an explicit coverage break. Lookup the
-nearest earlier retained eligible day within the verifier budgets below; do not
+Unchained suffix starts a new segment with an explicit coverage break. Its
+predecessor is the last valid chained row in this same file, when found within
+budget; do not skip it in favour of an earlier day. Only absent such a row may
+lookup use an earlier day. No recovered row means explicit unanchored genesis. Lookup the
+nearest earlier retained eligible day within the writer budgets below; do not
 assume yesterday exists. Record exact predecessor identity, not only a digest.
 Legacy-only/missing/inaccessible predecessor means unanchored genesis plus explicit
 reason, never proof of tampering. First-ever genesis is indistinguishable from lost
 history without an external anchor. Retained predecessor mismatch is inconsistent;
 missing predecessor is incomplete. Restart after budget exhaustion is unanchored.
 
+Writer recovery has separate hard budgets: 32 directory entries inspected,
+one nearest-earlier filename candidate, 1 MiB total tail bytes across current and
+candidate files, and 25 ms monotonic lookup time. Do not read an older candidate
+if that nearest file is legacy-only/inaccessible. Exhaustion yields unanchored
+genesis, with the reason recorded, not a verifier-sized scan under lock.
+
 Never truncate a torn tail or insert a newline to repair it. Decline chained append
 to that file and report sink unavailable; any existing fallback that appends there
 is unprotected and cannot regain verified status. No rewrite/reordering: consumers'
 file/line identities must remain stable. Whole-record tail truncation may leave a
 consistent observed prefix; torn partial records are separately reported incomplete.
+A torn tail disables chaining for the remainder of that UTC day's file. Existing
+fallback appends can join the partial line and corrupt the next record too; they
+do not heal the file. A new UTC day may start a new unanchored segment.
 
 ## 4. Mixed coverage and CLI outcomes
+
+Plain ledger verify without JSONL flags remains unchanged: 0 consistent or no
+chain yet, 1 inconsistent, 2 usage error or missing database. Combined mode retains
+the DB no-chain-yet result as 0 but explicitly reports no DB chain; it does not
+turn absent JSONL into success. Usage errors remain 2; machine output distinguishes
+usage-error from incomplete/unavailable with a reason and per-plane statuses.
 
 Proposed ledger verify --jsonl combines DB and JSONL; --jsonl-only isolates JSONL.
 Report counts and file/line ranges for chained, unchained, torn, restarted/unanchored,
@@ -117,6 +151,35 @@ permits stealing; PID absence in another namespace is not proof of death. Defaul
 v1 performs NO automatic stale-lock reaping: timeout gives explicit unchained
 fallback or sink failure, not a competing chained writer. Any future recovery
 requires a separately reviewed atomic ownership protocol, not check-then-unlink.
+The versioned v1 lock protocol is identical in Node and Python: UTF-8 JSON
+{v:1,token,host,boot,pid,start,namespace}, token random 128-bit lowercase hex,
+identity fields strings and pid a positive safe integer. Acquire with exclusive
+create/no-follow, write the complete record, and validate descriptor/path identity
+before audit access. Partial/malformed records are occupied locks, never permission
+to replace them. Release only the same verified identity/token; mismatch leaves
+it untouched and reports failure. Shared cross-language protocol vectors cover
+record parsing, competing acquisition, partial publication and mismatched release.
+
+Total cooperative lock hold is limited to 50 ms including the 25 ms lookup,
+canonicalization and append preparation. Check monotonic deadlines before each
+operation; on exhaustion release safely and fall back unchained. A blocked kernel
+I/O call cannot be promised a hard wall-clock bound: report that limitation; no
+waiter steals the lock. Verifier budgets never apply to writers.
+
+A killed owner can leave the exclusive-create file indefinitely, across days.
+Every subsequent writer then pays up to 250 ms acquisition latency and falls back
+unchained or reports sink failure until manual intervention. Proposed read-only
+status reports lock identity/owner fields, acquisition timeout counts and coverage
+loss; age is diagnostic only, not proof of staleness. Operator recovery requires
+quiescing all eight writer sites, establishing owner death in its actual host/boot/
+namespace, preserving incident evidence and rechecking identity immediately before
+any separately authorized lock removal. If death/quiescence cannot be established,
+leave it in place. Resume writers only after coordination; never delete audit data.
+This is a manual-only recovery contract, not a command or authorization to remove
+anything here. No automatic recovery is proposed. Kernel advisory locks were not
+selected because portable Node-core/Python parity needs a separately reviewed
+platform adapter; their process-death release remains a future design alternative.
+
 No assertion of “cannot fork”: verifier detects duplicate segment sequence,
 competing successors, and predecessor/hash disagreement among observed rows.
 Non-cooperating writers remain visible as unchained or malformed coverage.
@@ -157,3 +220,9 @@ not applicable to this design-only milestone; implementation proof remains UNKNO
 - [ ] Carried to rolling #1075 AFTER merge only: implementation evidence for these
   six design contracts, bundle parity and complete writer discovery. No carry write
   is claimed by this draft. Memory authenticity remains OPEN in #508, no new issue.
+
+Review disposition: Sol transition blocker and Opus B1(a/b) fixed in proposed
+design above. N1–N5 all fixed (CLI compatibility, Python numbers, shared lock
+protocol, same-day predecessor and torn-tail consequence). None dropped; only
+implementation evidence is carried to #1075 after merge. Fresh independent
+exact-head review is required; this document is not self-approval.
