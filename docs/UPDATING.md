@@ -280,7 +280,9 @@ shieldcortex config --policy-status
 shieldcortex memories reclassify
 ```
 
-Root, once. A bare `protect` reads nothing from `config.json`: it pins the safe posture — Action Guard **enabled and enforcing**, empty auto-approve and reviewed-script lists, broker off — so this is also the moment Guard turns on. `sudo shieldcortex protect --from-config` pins your current protected settings instead — the Action Guard block, plus defence mode and memory posture where `config.json` sets them — including a Guard that is off. Either way an agent cannot quietly loosen the pinned keys afterwards. There is no `unprotect` command. Recovery is a human at a root shell — [runbook](design/2026-09-16-501-policy-lock.md).
+Root, once. On a first run (no verified lock yet), a bare `protect` reads nothing from `config.json`: it pins the safe posture — Action Guard **enabled and enforcing**, empty auto-approve and reviewed-script lists, broker off — so this is also the moment Guard turns on. `sudo shieldcortex protect --from-config` pins your current protected settings instead — the Action Guard block, plus defence mode and memory posture where `config.json` sets them — including a Guard that is off. Either way an agent cannot quietly loosen the pinned keys afterwards.
+
+Running `protect` again over a verified lock is a replacement, and it can only keep or tighten what is pinned. A bare re-run carries the existing lock's verified reviewed-script pins (path and sha256) forward unchanged, without rehashing any file; its other keys are rebuilt from the safe posture. `--from-config` instead takes reviewed-script pins from `config.json`. Either way the replacement is refused, and nothing is written, if it would drop an existing pin, add a pin the old lock did not hold, or loosen any other pinned key (`--dry-run` shows each refusal). There is no `unprotect` command. Recovery is a human at a root shell — [runbook](design/2026-09-16-501-policy-lock.md).
 
 <a id="dashboard-recall-and-cloud"></a>
 
