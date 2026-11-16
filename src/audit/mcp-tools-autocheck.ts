@@ -31,6 +31,25 @@ import { buildMcpToolChangeNotification, type McpToolChangeNotification } from '
 export const DEFAULT_INTERVAL_HOURS = 6;
 export const DEFAULT_SERVER_TIMEOUT_MS = 5_000;
 export const DEFAULT_TOTAL_BUDGET_MS = 20_000;
+/**
+ * How long a delivery checkpoint is honoured (#926). Past this, an alert that is
+ * still stuck behind a failing sibling is sent again rather than staying silent.
+ */
+export const DELIVERY_CHECKPOINT_TTL_MS = 7 * 24 * 3_600_000;
+
+/**
+ * One delivered alert member (#926): a single tool version, from one config
+ * source, reported under one alert kind. The entry existing means the operator
+ * notification that carried it was accepted by the transport. `recorded` is a
+ * separate fact: whether the final findings row for it was durably written.
+ */
+export interface AutoCheckDeliveryCheckpoint {
+  server: string;
+  /** Config source the server came from; `null` when unknown (unscoped baseline). */
+  source: string | null;
+  deliveredAt: number;
+  recorded: boolean;
+}
 
 export interface AutoCheckState {
   servers: Record<string, { checkedAt: number; configHash: string }>;
@@ -40,6 +59,13 @@ export interface AutoCheckState {
    * cleared for a server once its alerts are delivered.
    */
   pending?: Record<string, { server: string }>;
+  /**
+   * Per-alert delivery checkpoints (#926), keyed by server + kind + a hash of
+   * [source, tool, content hash]. Lets a retry skip what was already delivered
+   * while a sibling alert is still failing. Dropped for a server (and source)
+   * once all of its alerts are delivered and recorded.
+   */
+  checkpoints?: Record<string, AutoCheckDeliveryCheckpoint>;
 }
 
 /** Structured finding carried by `pending` rows so the finding survives an undeliverable alert. */
