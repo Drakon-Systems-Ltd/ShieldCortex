@@ -3489,28 +3489,100 @@ const PY_DOC_READBACK_RE = new RegExp([
  *   ASCII spelling the source holds is still there to match.
  *
  * Both views must pass. ASCII text is its own NFKC and NFKD.
+ *
+ * `null` (refuse the blanking) when the code holds more than 30 code points in
+ * a row that can sit in one run of combining marks once decomposed
+ * (`PY_DOC_MARK_RUN_RE`). Normalization reorders each such run by combining
+ * class, and on an adversarial run (U+0315 x n, then U+0300 x n, inside an
+ * ordinary string literal) that costs time quadratic in the run: 32 s for one
+ * 256 KiB script. The test is a single linear pass made before any
+ * normalization. Past the bound nothing is normalized and the docstrings keep
+ * their scan surface, which is what any doubt costs here. 30 is the longest
+ * run UAX #15's Stream-Safe Text Format allows. Under it, a run in the
+ * decomposed text is at most 63 marks long (3 trailing the code point before
+ * the run, 2 from each of the 30 in it; a code point that decomposes to a
+ * starter never begins with a mark), so the reordering is linear in the
+ * length of the source.
  */
-function pyDocGateViews(code: string): string[] {
-  return /^[\x00-\x7f]*$/.test(code) ? [code] : [code.normalize('NFKC'), code.normalize('NFKD')];
+function pyDocGateViews(code: string): string[] | null {
+  if (/^[\x00-\x7f]*$/.test(code)) return [code];
+  if (PY_DOC_MARK_RUN_RE.test(code)) return null;
+  return [code.normalize('NFKC'), code.normalize('NFKD')];
 }
 
 /**
- * A PEP 263 coding declaration (line 1 or 2) makes Python decode the file with
- * another codec while the resolver hands the guard UTF-8: under utf-7
- * `+AF8AXw-` is `__`, under latin-1 byte 0xAA is `ª` (NFKC `a`) where the
- * guard sees U+FFFD. No view of the UTF-8 text is then the program, so any
- * declaration naming something other than UTF-8 or ASCII refuses the
- * blanking. Matched anywhere in the first two lines, split at `\n` only:
- * that covers every reading of a stray `\r`, and a false match only keeps
- * the docstrings scanned.
+ * 31 code points in a row each of which NFKD turns into combining marks only:
+ * every mark (`\p{M}`, which holds every code point of nonzero combining
+ * class) and the two halfwidth katakana sound marks, U+FF9E and U+FF9F, whose
+ * compatibility forms are the combining U+3099 and U+309A. No other code point
+ * decomposes to marks only (every one is swept against this runtime's own
+ * normalizer in docstring-blank-nfkc-1079.test.ts). Every other code point
+ * contains a starter once decomposed, and a starter ends the run. Matching
+ * costs at most 31 steps per code point, so it is linear.
+ */
+const PY_DOC_MARK_RUN_RE = /[\p{M}\uFF9E\uFF9F]{31}/u;
+
+/**
+ * A PEP 263 coding declaration makes Python decode the file with another codec
+ * while the resolver hands the guard UTF-8: under utf-7 `+AF8AXw-` is `__`,
+ * under latin-1 byte 0xAA is `ª` (NFKC `a`) where the guard sees U+FFFD. No
+ * view of the UTF-8 text is then the program, so a declaration naming a codec
+ * that does not read the file as UTF-8 refuses the blanking.
+ *
+ * A declaration is what CPython's tokenizer takes for one, not the word
+ * `coding` anywhere (a docstring's "encoding: json" is prose, and Python reads
+ * that file as UTF-8):
+ *
+ * - a comment that is the only thing on its line, holding `coding:` or
+ *   `coding=` and then a name (`PY_CODING_COOKIE_RE`, the PEP's own pattern);
+ * - on line 1, or on line 2 when line 1 is blank or only a comment, after a
+ *   leading BOM. The first declaration found is the one Python uses.
+ *
+ * The tokenizer that runs a file splits lines at `\r\n`, `\r` and `\n`, while
+ * `tokenize.detect_encoding` splits at `\n` only, so the head is read both
+ * ways and either reading's foreign declaration refuses. A BOM with a
+ * declaration other than utf-8 is a SyntaxError, so that file never runs.
  */
 function pyDeclaresForeignEncoding(src: string): boolean {
-  const head = src.split('\n', 2).join('\n');
-  for (const m of head.matchAll(/coding[:=][ \t]*([-\w.]+)/g)) {
-    if (!/^(?:utf[-_]?8(?:[-_][-\w.]*)?|(?:us[-_])?ascii)$/i.test(m[1])) return true;
+  const text = src.charCodeAt(0) === 0xfeff ? src.slice(1) : src;
+  for (const lines of [text.split(/\r\n|\r|\n/, 2), text.split('\n', 2)]) {
+    for (const line of lines) {
+      const m = line.match(PY_CODING_COOKIE_RE);
+      if (m) {
+        if (!pyCodecReadsUtf8(m[1])) return true;
+        break;
+      }
+      if (!/^[ \t\f]*(?:[#\r]|$)/.test(line)) break;   // code on line 1: line 2 is never read
+    }
   }
   return false;
 }
+
+/** PEP 263; `s`: `.` crosses U+2028/U+2029 (and the `\r` a `\n`-only line keeps), as Python's does. */
+const PY_CODING_COOKIE_RE = /^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)/s;
+
+/**
+ * Codec names that make Python read the file as UTF-8 does: the tokenizer's
+ * own spelling (the first 12 characters lowercased with `_` as `-`, equal to
+ * `utf-8` or starting `utf-8-`, so `UTF_8`, `utf-8-unix` and `utf-8-sig`),
+ * then `codecs.lookup`, whose aliases for `utf_8` and `ascii` are listed
+ * below (Python 3.9 to 3.14 agree). An ASCII file reads the same under both,
+ * and ASCII rejects any other byte. Latin-1, UTF-7, UTF-16 and every other
+ * codec are foreign.
+ */
+function pyCodecReadsUtf8(name: string): boolean {
+  const head = name.slice(0, 12).toLowerCase().replace(/_/g, '-');
+  if (head === 'utf-8' || head.startsWith('utf-8-')) return true;
+  // codecs.lookup: lowercase, each run of `-`/`_` one `_`, none at either end.
+  const norm = name.toLowerCase().replace(/[-_]+/g, '_').replace(/^_|_$/g, '');
+  return PY_UTF8_CODEC_MODULES.has(norm) || PY_UTF8_CODEC_ALIASES.has(norm) || PY_UTF8_CODEC_ALIASES.has(norm.replace(/\./g, '_'));
+}
+const PY_UTF8_CODEC_MODULES = new Set(['utf_8', 'ascii']);
+const PY_UTF8_CODEC_ALIASES = new Set([
+  'u8', 'utf', 'utf8', 'utf8_ucs2', 'utf8_ucs4', 'cp65001',
+  '646', 'ansi_x3.4_1968', 'ansi_x3.4_1986', 'ansi_x3_4_1968', 'cp367', 'csascii', 'ibm367',
+  'iso646_us', 'iso_646.irv_1991', 'iso_ir_6', 'us', 'us_ascii',
+]);
 
 /** Every top-level module the code imports is in `PY_DOC_SAFE_IMPORTS`. */
 function pyImportsAreDocSafe(code: string): boolean {
@@ -3604,7 +3676,9 @@ function blankPythonDocstrings(src: string, lang: ScriptLang, asRead: string): s
   let cursor = 0;
   for (const [lo, hi] of docs) { code += src.slice(cursor, lo) + blankedRun(src, lo, hi); cursor = hi; }
   code += src.slice(cursor);
-  for (const view of pyDocGateViews(code)) {
+  const views = pyDocGateViews(code);
+  if (!views) return src;
+  for (const view of views) {
     const gated = view.replace(PY_DOC_ALLOWED_DUNDER_RE, ' ');
     if (PY_DOC_READBACK_RE.test(gated) || !pyImportsAreDocSafe(gated)) return src;
   }
