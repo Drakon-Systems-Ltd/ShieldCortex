@@ -548,6 +548,88 @@ describe('#1079 r5 — a backslash or a form feed in a comment or a string joins
   }, 60_000);
 });
 
+/**
+ * Review r5 of #1096 (Astra B-FORMAT-LITERAL): in an f- or t-string
+ * replacement field, a `:` outside any bracket of the expression ends the
+ * expression, and the format spec after it is literal text that Python hands
+ * to `format()` as it stands. Only a nested `{…}` in the spec is code again.
+ * `:=` there is a spec starting `=` (PEP 572), not a walrus. The r5 walk read
+ * every form feed in the field as a token gap, so
+ * `f"{when:from<FF>os<FF>import (}"` became a from-import whose parenthesised
+ * list swallowed the next line's `import click` (allowed, though origin/main
+ * holds it), and `f"{when:help<FF>(}"` became a help call (held, though
+ * origin/main relieves it and Python calls nothing).
+ *
+ * On CPython 3.14.9 (real Click, sinks stubbed) each held row imports click
+ * and hands the docstring to the sink; each relieved row runs, calls no
+ * help() and hands nothing back; each expression row calls help(main).
+ */
+describe('#1079 r6 — a form feed in an f- or t-string format spec is literal text', () => {
+  const J = '<J>';
+  const ENDINGS: Array<[string, string, string]> = [
+    ['LF', '\n', '\n'], ['CR', '\r', '\r'], ['CRLF', '\r\n', '\r\n'],
+    ['LF, the join CRLF', '\n', '\r\n'], ['LF, the join CR', '\n', '\r'],
+    ['CRLF, the join LF', '\r\n', '\n'], ['CR, the join LF', '\r', '\n'],
+  ];
+  const spell = (src: string, eol: string, join = eol) => src.replace(/\n/g, eol).split(J).join(join);
+  const MAIN = `def main():\n    """${WRITE}"""\n`;
+  const CLICK = `@click.command()\n${MAIN}${SHELL_OUT}(main.help)\n`;
+  const LINE = `"""Lease helper. Never touches ~/.shieldcortex/config.json."""\n`;
+  const RUN = `subprocess.run(["git", "status"])\n`;
+  const WHEN = 'datetime.datetime(2026, 1, 1)';
+  const SWALLOW = 'from\fos\fimport (';
+  /** `<J>` is the break after the stamp, so the mixed rows end it differently from the rest of the file. */
+  const UNSAFE = (stamp: string) => `import os, datetime\nFMT = "%Y"\nstamp = ${stamp}${J}import click\n${CLICK}`;
+  const BENIGN = (stamp: string) => `${LINE}import datetime, subprocess\nFMT = "%Y"\nstamp = ${stamp}${J}${RUN}`;
+  const CALL = (stamp: string) => `import os, datetime\n${MAIN}x = ${stamp}${J}`;
+
+  describe.each(ENDINGS)('%s-ended', (_n, eol, join) => {
+    test.each([
+      ['an f-string spec `from<FF>os<FF>import (` swallows no import (Astra)', UNSAFE(`f"{${WHEN}:${SWALLOW}}"`)],
+      ['the same in a t-string', UNSAFE(`t"{${WHEN}:${SWALLOW}}"`)],
+      ['the same in a triple-quoted f-string, the spec across a line break', UNSAFE(`f"""{${WHEN}:${SWALLOW}\nmore literal text\n}"""`)],
+      ['the same in a raw f-string', UNSAFE(`rf"{${WHEN}:${SWALLOW}}"`)],
+      ['a spec that starts `:=`', UNSAFE(`f"{${WHEN}:=${SWALLOW}}"`)],
+      ['spec text after a nested field', UNSAFE(`f"{${WHEN}:{FMT}${SWALLOW}}"`)],
+      ['a spec after a slice colon in the expression', UNSAFE(`f"{[${WHEN}][0:1][0]:${SWALLOW}}"`)],
+      ['a spec after a dict colon in the expression', UNSAFE(`f"{ {0: ${WHEN}}[0]:${SWALLOW}}"`)],
+    ])('held: %s', (_l, src) => held(spell(src, eol, join)));
+
+    test.each([
+      ['an f-string date spec `help<FF>(` is no call (Astra)', BENIGN(`f"{${WHEN}:help\f(}"`)],
+      ['the same in a t-string', BENIGN(`t"{${WHEN}:help\f(}"`)],
+      ['a date spec `sys.stdout<FF>=x` captures no stdout (Astra)', BENIGN(`f"{${WHEN}:sys.stdout\f=x}"`)],
+      ['a triple-quoted f-string date spec across a line break', BENIGN(`f"""{${WHEN}:%Y\f%m\nhelp\f(\n}"""`)],
+      ['a date spec that starts `:=`', BENIGN(`f"{${WHEN}:=help\f(}"`)],
+      ['date spec text after a nested field', BENIGN(`f"{${WHEN}:{FMT}help\f(}"`)],
+      ['a date spec after a slice colon in the expression', BENIGN(`f"{[${WHEN}][0:1][0]:help\f(}"`)],
+      ['a date spec after a dict colon in the expression', BENIGN(`f"{ {0: ${WHEN}}[0]:help\f(}"`)],
+      ['a date spec with form-feed page breaks', BENIGN(`f"{${WHEN}:%Y\f%m\f%d}"`)],
+    ])('relieved: %s', (_l, src) => allowed(spell(src, eol, join)));
+
+    test.each([
+      ['a nested field in a spec is code: `{help<FF>(main)}`', CALL(`f"{${WHEN}:{help\f(main)}}"`)],
+      ['the same in a t-string', CALL(`t"{${WHEN}:{help\f(main)}}"`)],
+      ['a nested field after spec text', CALL(`f"{${WHEN}:%Y{help\f(main)}}"`)],
+      ['a field after a spec has ended', CALL(`f"{${WHEN}:%Y}{help\f(main)}"`)],
+      ['a slice colon begins no spec', CALL(`f"{[0, 1][0:1] and help\f(main)}"`)],
+      ['a dict colon begins no spec', CALL(`f"{ {1: 2}[1] and help\f(main)}"`)],
+      ['a lambda colon in parentheses begins no spec', CALL(`f"{(lambda: 0)() or help\f(main)}"`)],
+    ])('held, the expression is code: %s', (_l, src) => held(spell(src, eol, join)));
+  });
+
+  test('format-spec input: 16 KiB vs 256 KiB stays near-linear (bounded child)', () => {
+    expectNearLinear([
+      ['LF: a date spec with form feeds per line', `${LINE}import datetime\n`, `x = f"{${WHEN}:%Y\f%m\f%d}"\n`, '', 'allow'],
+      ['CRLF: nested fields in a date spec per line', spell(`${LINE}import datetime\nFMT = "%Y"\n`, '\r\n'), `x = f"{${WHEN}:{FMT}\f{FMT}}"\r\n`, '', 'allow'],
+      ['CR: a swallowing spec per line, then click', 'import os, datetime\r', `x = f"{${WHEN}:${SWALLOW}}"\r`, `import click\r${spell(CLICK, '\r')}`, 'held'],
+      ['LF: one spec of form feeds', `${LINE}import datetime\nx = f"{${WHEN}:`, '%Y\f', '}"\n', 'allow'],
+      ['LF: one spec of nested fields', `${LINE}import datetime\nFMT = "%Y"\nx = f"{${WHEN}:`, '{FMT}\f', '}"\n', 'allow'],
+      ['LF: one expression of brackets before the spec', `${LINE}import datetime\nx = f"{`, '(1) and ', `${WHEN}:help\f(}"\n`, 'allow'],
+    ]);
+  }, 60_000);
+});
+
 describe('#1079 NFKC — mixed spellings of the allowed dunders behave as the ASCII forms', () => {
   const helper = (guard: string, extra = '') => [
     '"""Lease helper.',

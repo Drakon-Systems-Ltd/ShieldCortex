@@ -3623,8 +3623,12 @@ function pyImportsAreDocSafe(code: string): boolean {
  * read as one import of `os`, and `# help \` then `(42))` as a call. A form
  * feed in a comment or a string separates no tokens either: rewritten,
  * `# from<FF>os<FF>import (` read as a from-import whose parenthesised list
- * swallowed the next line's `import click`. Every other byte is left as
- * Python reads it, so mid-line comments keep their scan surface (#532).
+ * swallowed the next line's `import click`. That includes an f- or t-string's
+ * format spec, the text after the `:` that ends a replacement field's
+ * expression (review r5 of #1096): Python hands `from<FF>os<FF>import (` in
+ * `f"{when:from<FF>os<FF>import (}"` to `format()` as it stands. Every other
+ * byte is left as Python reads it, so mid-line comments keep their scan
+ * surface (#532).
  *
  * It runs before NFKC (`pyDocGateViews`), so only U+005C joins. NFKC also
  * turns a fullwidth or small reverse solidus into `\`, but Python rejects
@@ -3643,6 +3647,9 @@ function pyLogicalLines(code: string, gaps: readonly number[]): string {
   return parts.join('');
 }
 
+/** An f-string field past its expression: in its format spec (`pythonStandaloneDocstrings`). */
+const FORMAT_SPEC = -1;
+
 /**
  * `[start, end)` of each triple-quoted literal that is a whole logical line by
  * itself (see `blankPythonDocstrings`); `null` when the walk is not certain it
@@ -3657,8 +3664,11 @@ function pyLogicalLines(code: string, gaps: readonly number[]): string {
  *
  * `gaps` receives, in order, the offset of each token gap the walk reads as
  * code (`pyLogicalLines`): a `\` that joins two physical lines, and a form
- * feed between tokens or in an f-string's replacement field. Never one in a
- * comment or a string literal.
+ * feed between tokens or in the expression of an f- or t-string's
+ * replacement field. Never one in a comment or a string literal, and never
+ * one in a format spec: a `:` outside any bracket of the expression (`:=`
+ * included, which Python reads as a spec starting `=`) begins literal text,
+ * where only a nested `{…}` is code again and `}` ends the field.
  */
 function pythonStandaloneDocstrings(src: string, gaps: number[]): Array<[number, number]> | null {
   const found: Array<[number, number]> = [];
@@ -3689,21 +3699,33 @@ function pythonStandaloneDocstrings(src: string, gaps: number[]): Array<[number,
     const delim = triple ? q + q + q : q;
     const fmt = /[ft]/.test(prefix);
     let k = j + delim.length;
-    let field = 0;
+    // The open replacement fields, innermost last: how many brackets are open
+    // in the field's expression, or FORMAT_SPEC once its spec has begun.
+    const fields: number[] = [];
     let close = -1;
     while (k < n) {
       const ch = src[k];
-      if (fmt && field > 0) {
+      if (fmt && fields.length > 0) {
         if (ch === '"' || ch === "'" || ch === '\\' || ch === '#') return null;
-        if (ch === '\f') gaps.push(k);   // a replacement field is code
-        else if (ch === '{') field++;
-        else if (ch === '}') field--;
+        const top = fields.length - 1;
+        const open = fields[top];
+        if (open === FORMAT_SPEC) {         // literal text: only a nested field is code
+          if (ch === '{') fields.push(0);
+          else if (ch === '}') fields.pop();
+        } else if (ch === '\f') gaps.push(k);   // the expression is code
+        else if (ch === ':' && open === 0) fields[top] = FORMAT_SPEC;   // `:=` too, as in Python
+        else if (ch === '(' || ch === '[' || ch === '{') fields[top] = open + 1;
+        else if (ch === ')' || ch === ']' || ch === '}') {
+          if (open > 0) fields[top] = open - 1;
+          else if (ch === '}') fields.pop();
+          else return null;
+        }
         k++;
         continue;
       }
       if (ch === '\\') { k += 1 + (pyLineBreakLength(src, k + 1) || 1); continue; }
       if (!triple && (ch === '\n' || ch === '\r')) return null;
-      if (fmt && ch === '{') { if (src[k + 1] === '{') { k += 2; continue; } field = 1; k++; continue; }
+      if (fmt && ch === '{') { if (src[k + 1] === '{') { k += 2; continue; } fields.push(0); k++; continue; }
       if (src.startsWith(delim, k)) { close = k; break; }
       k++;
     }
