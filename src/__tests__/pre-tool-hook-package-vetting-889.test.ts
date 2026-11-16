@@ -44,9 +44,15 @@ globalThis.fetch = async (url, init) => {
   }
   const m = /^https:\\/\\/registry\\.npmjs\\.org\\/(.+)$/.exec(url);
   if (m) {
-    const name = decodeURIComponent(m[1]);
+    const parts = m[1].split('/');
+    const name = decodeURIComponent(parts[0]);
     const p = npm[name];
     if (!p) return res({}, 404);
+    if (parts.length === 2) {
+      const version = decodeURIComponent(parts[1]);
+      return p.versions[version] ? res({ name, version }) : res({}, 404);
+    }
+    if (parts.length !== 1) return res({}, 404);
     return res({ 'dist-tags': { latest: p.latest }, versions: Object.fromEntries(Object.keys(p.versions).map((v) => [v, { name, version: v }])), time: Object.fromEntries(Object.entries(p.versions).map(([v, x]) => [v, x.time])) });
   }
   const py = /^https:\\/\\/pypi\\.org\\/pypi\\/([^/]+)\\/json$/.exec(url);

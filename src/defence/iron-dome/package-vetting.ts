@@ -36,6 +36,7 @@
  */
 
 import fs from 'fs';
+import { randomUUID } from 'crypto';
 import os from 'os';
 import path from 'path';
 import semver from 'semver';
@@ -73,6 +74,8 @@ export interface PackageVet {
   /** The version a plain install would resolve to. */
   version?: string;
   publishedAt?: string;
+  /** Why publication age could not be checked while other checks succeeded. */
+  ageUncheckedReason?: string;
   osvIds: string[];
   /** The subset of `osvIds` that are `MAL-` (known malicious) entries. */
   malicious: string[];
@@ -87,6 +90,12 @@ export interface PackageVet {
    * name) and the version this install would fetch could not be checked.
    */
   unconfirmedVersion?: boolean;
+  /**
+   * npm: the selected manifest declares `engines.npm`, and npm-pick-manifest would pick a
+   * different version if the installing npm did not satisfy it. The installing npm's version
+   * is not known here, so a name-only `MAL-` hit is kept alongside this version's own answer.
+   */
+  npmEngineDependent?: boolean;
   findings: VettingFinding[];
 }
 
@@ -129,6 +138,8 @@ const MAX_PACKAGES_PER_COMMAND = 8;
 const MAX_EXTRA_LOOKUPS = 8;
 /** Chunks of the OSV batch in flight at once. */
 const BATCH_CONCURRENCY = 3;
+/** At most one full npm metadata request across all npm refs per command. */
+const MAX_NPM_FULL_METADATA_REQUESTS = 1;
 
 // ── Command parsing ─────────────────────────────────────────────────────────
 
@@ -549,10 +560,14 @@ function isCacheEntry(value: unknown): value is CacheEntry {
 }
 
 function readCache(opts: VetOptions): CacheFile {
+  let fd: number | undefined;
   try {
-    const st = fs.lstatSync(cachePath(opts));
+    // Open the file itself without following a symlink. Stat and read the same
+    // descriptor, so a path swap between those operations cannot select another file.
+    fd = fs.openSync(cachePath(opts), fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
+    const st = fs.fstatSync(fd);
     if (!st.isFile() || st.size > 4_000_000) return { v: 1, entries: {} };
-    const parsed = JSON.parse(fs.readFileSync(cachePath(opts), 'utf-8'));
+    const parsed = JSON.parse(fs.readFileSync(fd, 'utf-8'));
     if (parsed?.v === 1 && parsed.entries && typeof parsed.entries === 'object' && !Array.isArray(parsed.entries)) {
       const entries: Record<string, CacheEntry> = Object.create(null);
       let discardedInvalidRows = false;
@@ -563,6 +578,7 @@ function readCache(opts: VetOptions): CacheFile {
       return { v: 1, entries, discardedInvalidRows };
     }
   } catch { /* absent or corrupt: start empty */ }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
   return { v: 1, entries: {} };
 }
 
@@ -588,6 +604,47 @@ type CacheChanges = Map<string, CacheChange>;
  */
 let cacheWriteSeq = 0;
 const cacheSetSeq = new Map<string, Map<string, number>>();
+const STALE_CACHE_LOCK_MS = 30_000;
+
+function sameInode(a: fs.Stats, b: fs.Stats): boolean { return a.dev === b.dev && a.ino === b.ino; }
+
+/** Reclaim only an old lock whose recorded owner is dead. */
+export function reclaimStaleCacheLock(lockPath: string): boolean {
+  let fd: number | undefined;
+  let guard: number | undefined;
+  let guardInode: fs.Stats | undefined;
+  const guardPath = `${lockPath}.recovery`;
+  try {
+    // Only one reclaimer may inspect and unlink this path at a time. Without
+    // this guard, two inspectors can both accept the old inode; one can unlink
+    // a new writer's lock after the other has removed the stale one.
+    guard = fs.openSync(guardPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
+    guardInode = fs.fstatSync(guard);
+    fd = fs.openSync(lockPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
+    const held = fs.fstatSync(fd);
+    if (!held.isFile() || Date.now() - held.mtimeMs < STALE_CACHE_LOCK_MS) return false;
+    const raw = fs.readFileSync(fd, 'utf8');
+    let pid: unknown;
+    try { pid = JSON.parse(raw).pid; } catch { return false; }
+    // An ownerless/invalid lock cannot be distinguished from a paused live
+    // writer between O_EXCL and its owner write. Leave it in place.
+    if (!Number.isSafeInteger(pid) || (pid as number) <= 0) return false;
+    try { process.kill(pid as number, 0); return false; }
+    catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ESRCH') return false; }
+    // Do not unlink a path that was replaced while inspecting the owner.
+    if (!sameInode(held, fs.lstatSync(lockPath))) return false;
+    fs.unlinkSync(lockPath);
+    return true;
+  } catch { return false; }
+  finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    if (guard !== undefined) {
+      fs.closeSync(guard);
+      try { if (guardInode && sameInode(guardInode, fs.lstatSync(guardPath))) fs.unlinkSync(guardPath); }
+      catch { /* a replaced guard belongs to another reclaimer */ }
+    }
+  }
+}
 
 /** True when `onDisk` is the record an eviction saw: same time, same ids. A record in any other shape never is. */
 function isRecordSeen(onDisk: unknown, seen: Pick<CacheEntry, 'at' | 'osvIds'>): boolean {
@@ -610,12 +667,32 @@ function isRecordSeen(onDisk: unknown, seen: Pick<CacheEntry, 'at' | 'osvIds'>):
  * after that write sees the new record and evicts it as before.
  */
 function writeCache(opts: VetOptions, changes: CacheChanges, nowMs: number, ttlMs: number, startSeq: number, startIdentity: string | null): void {
+  let lock: number | undefined;
+  let lockInode: fs.Stats | undefined;
+  let lockPath: string | undefined;
+  let tmp: string | undefined;
   try {
     const file = cachePath(opts);
     const dir = stateDir(opts);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const identity = cacheIdentity(opts);
     if (identity === null) return;
+    // Coordinate separate processes as well as concurrent calls in this process.
+    // A bounded lock failure leaves the current verdict intact; the cache is optional.
+    lockPath = `${file}.lock`;
+    const deadline = Date.now() + 250;
+    for (;;) {
+      try {
+        lock = fs.openSync(lockPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
+        lockInode = fs.fstatSync(lock);
+        fs.writeSync(lock, JSON.stringify({ pid: process.pid }));
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST' || Date.now() >= deadline) return;
+        if (reclaimStaleCacheLock(lockPath)) continue;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      }
+    }
     const seqs = cacheSetSeq.get(identity) ?? new Map<string, number>();
     const merged = readCache(opts).entries;
     const written: string[] = [];
@@ -626,16 +703,25 @@ function writeCache(opts: VetOptions, changes: CacheChanges, nowMs: number, ttlM
     }
     const entries: Record<string, CacheEntry> = {};
     for (const [k, e] of Object.entries(merged)) if (nowMs - e.at < ttlMs) entries[k] = e;
-    const tmp = path.join(dir, `.package-vetting-cache.${process.pid}.${Date.now()}.tmp`);
-    fs.writeFileSync(tmp, JSON.stringify({ v: 1, entries }), { mode: 0o600 });
+    tmp = path.join(dir, `.package-vetting-cache.${randomUUID()}.tmp`);
+    fs.writeFileSync(tmp, JSON.stringify({ v: 1, entries }), { mode: 0o600, flag: 'wx' });
     fs.chmodSync(tmp, 0o600);
     fs.renameSync(tmp, file);
+    tmp = undefined;
     // Only now is the file what this call wrote: number its records, forget the ones that left.
     for (const k of written) seqs.set(k, ++cacheWriteSeq);
     for (const k of [...seqs.keys()]) if (!(k in entries)) seqs.delete(k);
     if (seqs.size > 0) cacheSetSeq.set(identity, seqs);
     else cacheSetSeq.delete(identity);
   } catch { /* the cache is an optimisation; never fail a vet over it */ }
+  finally {
+    if (tmp) { try { fs.unlinkSync(tmp); } catch { /* already gone */ } }
+    if (lock !== undefined) {
+      fs.closeSync(lock);
+      try { if (lockInode && lockPath && sameInode(lockInode, fs.lstatSync(lockPath))) fs.unlinkSync(lockPath); }
+      catch { /* already gone or replaced */ }
+    }
+  }
 }
 
 /** A cached, unexpired `MAL-` hit that applies to this request, or null. */
@@ -717,16 +803,21 @@ class Unchecked extends Error {}
 interface Facts {
   version: string;
   publishedAt?: string;
+  ageUncheckedReason?: string;
   hooks: string[];
   sdistOnly: boolean;
+  /** npm: the selection depends on the installing npm's `engines.npm` check (see {@link PackageVet.npmEngineDependent}). */
+  npmEngineDependent?: boolean;
 }
 
-const NPM_HOOKS = ['preinstall', 'install', 'postinstall', 'prepare'];
+// Registry tarballs run install lifecycle hooks; prepare runs for local/git
+// sources, not for a normal registry tarball install.
+const NPM_HOOKS = ['preinstall', 'install', 'postinstall'];
 
-async function getJson(fetchImpl: FetchLike, url: string, signal: AbortSignal): Promise<unknown> {
+async function getJson(fetchImpl: FetchLike, url: string, signal: AbortSignal, accept = 'application/json'): Promise<unknown> {
   let res;
   try {
-    res = await fetchImpl(url, { headers: { accept: 'application/json', 'user-agent': 'shieldcortex-package-vetting' }, signal });
+    res = await fetchImpl(url, { headers: { accept, 'user-agent': 'shieldcortex-package-vetting' }, signal });
   } catch (err) {
     throw new Unchecked(signal.aborted ? 'timed out' : `network error (${errClass(err)})`);
   }
@@ -747,24 +838,127 @@ function errClass(err: unknown): string {
 
 const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {});
 
-async function resolveNpm(ref: PackageRef, fetchImpl: FetchLike, signal: AbortSignal): Promise<Facts> {
+const NPM_TIME_LIMIT = 'publication time lookup limit reached (one full npm metadata request per command)';
+const NPM_RESOLUTION_LIMIT = 'version resolution metadata lookup limit reached (one full npm metadata request per command)';
+
+async function fullNpmMetadata(base: string, fetchImpl: FetchLike, signal: AbortSignal, allowance: { remaining: number }, limitReason = NPM_TIME_LIMIT): Promise<Record<string, unknown>> {
+  if (allowance.remaining <= 0) throw new Unchecked(limitReason);
+  // Consume before awaiting: concurrent package lookups share this allowance.
+  allowance.remaining--;
+  return obj(await getJson(fetchImpl, base, signal));
+}
+
+async function fillNpmAge(facts: Facts, doc: Record<string, unknown> | undefined, base: string, fetchImpl: FetchLike, signal: AbortSignal, allowance: { remaining: number }, checkAge: boolean): Promise<void> {
+  if (!checkAge) return;
+  if (facts.publishedAt && Number.isFinite(Date.parse(facts.publishedAt))) return;
+  facts.publishedAt = undefined;
+  try {
+    const metadata = doc ?? await fullNpmMetadata(base, fetchImpl, signal, allowance);
+    const published = obj(metadata.time)[facts.version];
+    if (typeof published === 'string' && Number.isFinite(Date.parse(published))) facts.publishedAt = published;
+    else facts.ageUncheckedReason = 'publication time absent from registry metadata';
+  } catch (err) {
+    facts.ageUncheckedReason = err instanceof Unchecked ? (err.message === NPM_TIME_LIMIT ? NPM_TIME_LIMIT : `publication time lookup failed: ${err.message}`) : 'publication time lookup failed';
+  }
+}
+
+async function resolveNpm(ref: PackageRef, fetchImpl: FetchLike, signal: AbortSignal, allowance: { remaining: number }, checkAge: boolean): Promise<Facts> {
   const enc = ref.name.startsWith('@') ? `@${encodeURIComponent(ref.name.slice(1))}` : encodeURIComponent(ref.name);
-  const doc = obj(await getJson(fetchImpl, `https://registry.npmjs.org/${enc}`, signal));
+  const base = `https://registry.npmjs.org/${enc}`;
+  const spec = ref.spec ?? 'latest';
+  // Exact pins need one small manifest. Age uses the shared full-metadata allowance.
+  if (semver.valid(spec)) {
+    const version = semver.valid(spec)!;
+    const manifest = obj(await getJson(fetchImpl, `${base}/${encodeURIComponent(version)}`, signal));
+    if (manifest.version !== version) throw new Unchecked('registry returned a different version');
+    const facts = npmFacts(version, manifest);
+    await fillNpmAge(facts, undefined, base, fetchImpl, signal, allowance, checkAge);
+    return facts;
+  }
+  // install-v1 retains dist-tags and version manifests, but normally has no time map.
+  let doc = obj(await getJson(fetchImpl, base, signal, 'application/vnd.npm.install-v1+json'));
+  let pick = npmVersion(doc, spec, ref.spec !== null);
+  let fullDoc: Record<string, unknown> | undefined;
+  if (!pick.version || !obj(doc.versions)[pick.version]) {
+    doc = await fullNpmMetadata(base, fetchImpl, signal, allowance, NPM_RESOLUTION_LIMIT);
+    fullDoc = doc;
+    pick = npmVersion(doc, spec, ref.spec !== null);
+  }
+  const version = pick.version;
+  if (!version || !obj(doc.versions)[version]) throw new Unchecked('could not resolve the requested version to a published version');
+  if (!isSafeVersion(version)) throw new Unchecked('registry returned an unrecognisable version');
+  const facts = npmFacts(version, obj(obj(doc.versions)[version]), obj(doc.time)[version]);
+  if (pick.npmEngineDependent) facts.npmEngineDependent = true;
+  await fillNpmAge(facts, fullDoc, base, fetchImpl, signal, allowance, checkAge);
+  return facts;
+}
+
+/**
+ * The version npm-pick-manifest would select. `engines.node` is judged against this
+ * process's Node, which may differ from the installer's. `engines.npm` cannot be judged
+ * (the installing npm's version is unknown), so the pick treats it as satisfied and
+ * reports `npmEngineDependent` when the installing npm rejecting the selected manifest
+ * would change the pick. An explicitly requested tag is exact, as in npm.
+ */
+function npmVersion(doc: Record<string, unknown>, spec: string, explicitTag: boolean): { version?: string; npmEngineDependent?: boolean } {
+  const tags = obj(doc['dist-tags']);
+  // An explicitly requested tag is exact, including a deprecated release.
+  if (explicitTag && typeof tags[spec] === 'string') return { version: tags[spec] as string };
+  const version = npmPick(doc, spec, explicitTag);
+  if (!version) return {};
+  const npmRange = obj(obj(obj(doc.versions)[version]).engines).npm;
+  if (typeof npmRange !== 'string') return { version };
+  // What npm picks if the installing npm does not satisfy the selected manifest's engines.npm.
+  const alternative = npmPick(doc, spec, explicitTag, version);
+  return alternative !== undefined && alternative !== version ? { version, npmEngineDependent: true } : { version };
+}
+
+function npmPick(doc: Record<string, unknown>, spec: string, explicitTag: boolean, npmRejected?: string): string | undefined {
   const versions = obj(doc.versions);
   const tags = obj(doc['dist-tags']);
-  const spec = ref.spec ?? 'latest';
-  let version: string | undefined;
-  if (typeof tags[spec] === 'string') version = tags[spec] as string;
-  else if (semver.valid(spec)) version = semver.valid(spec)!;
-  else if (semver.validRange(spec)) version = semver.maxSatisfying(Object.keys(versions), spec) ?? undefined;
-  if (!version || !versions[version]) throw new Unchecked('could not resolve the requested version to a published version');
-  if (!isSafeVersion(version)) throw new Unchecked('registry returned an unrecognisable version');
-  const manifest = obj(versions[version]);
+  const range = semver.validRange(spec);
+  if (!range && spec !== 'latest') return undefined;
+  const wanted = range ?? '*';
+  // npm-pick-manifest takes dist-tags.latest without a range test when the spec is
+  // bare (the implicit default tag) or the literal `*`, so a prerelease latest qualifies.
+  const anyLatest = spec === '*' || (spec === 'latest' && !explicitTag);
+  const engineOk = (version: string, manifest: Record<string, unknown>) => {
+    if (version === npmRejected) return false;
+    const node = obj(manifest.engines).node;
+    if (typeof node !== 'string') return true;
+    try { return semver.satisfies(process.version, node, { includePrerelease: true, loose: true }); }
+    catch { return false; }
+  };
+  const preferred = (version: string) => {
+    const manifest = obj(versions[version]);
+    return !!versions[version] && !manifest.deprecated && engineOk(version, manifest);
+  };
+  const latest = tags.latest;
+  const latestInRange = typeof latest === 'string' && semver.valid(latest) !== null
+    && (anyLatest || semver.satisfies(latest, wanted, { loose: true }));
+  // Keep the registry's opaque latest target when no semver candidate exists:
+  // the cache must still protect non-semver registry records during an outage.
+  if (spec === 'latest' && typeof latest === 'string' && !semver.valid(latest) && versions[latest]) return latest;
+  if (latestInRange && !versions[latest as string]) return latest as string;
+  if (latestInRange && preferred(latest as string)) return latest as string;
+  const candidates = Object.keys(versions).filter((v) => semver.satisfies(v, wanted, { loose: true }));
+  // Match npm-pick-manifest's fallback ordering: healthy, engine-compatible,
+  // non-deprecated, then highest semver. A result is still returned when every
+  // candidate is deprecated or incompatible, as npm itself does.
+  candidates.sort((a, b) => {
+    const ma = obj(versions[a]); const mb = obj(versions[b]);
+    const ea = Number(engineOk(a, ma)); const eb = Number(engineOk(b, mb));
+    const da = Number(!ma.deprecated); const db = Number(!mb.deprecated);
+    return (db * eb - da * ea) || (eb - ea) || (db - da) || semver.rcompare(a, b, true);
+  });
+  return candidates[0];
+}
+
+function npmFacts(version: string, manifest: Record<string, unknown>, published?: unknown): Facts {
   const scripts = obj(manifest.scripts);
   const hooks = NPM_HOOKS.filter((h) => typeof scripts[h] === 'string' && (scripts[h] as string).trim() !== '');
   // A manifest can also flag install scripts without listing them (registry-computed).
   if (!hooks.length && manifest.hasInstallScript === true) hooks.push('install');
-  const published = obj(doc.time)[version];
   return { version, publishedAt: typeof published === 'string' ? published : undefined, hooks, sdistOnly: false };
 }
 
@@ -1037,7 +1231,11 @@ function buildFindings(v: Omit<PackageVet, 'findings'>, minAgeDays: number, nowM
   if (v.status === 'unchecked') {
     out.push({ kind: 'unchecked', severity: 'advisory', reason: `unchecked: ${v.uncheckedReason ?? 'lookup failed'}` });
   }
-  if (v.malicious.length && v.unconfirmedVersion) {
+  if (v.ageUncheckedReason) out.push({ kind: 'unchecked', severity: 'advisory', reason: `unchecked: ${v.ageUncheckedReason}` });
+  if (v.malicious.length && v.unconfirmedVersion && v.npmEngineDependent) {
+    // The selected version was checked, but npm may fetch another one (engines.npm).
+    out.push({ kind: 'malicious', severity: 'catastrophic', reason: maliciousReason('OSV lists a malicious release of ', name, ' (', listIds(v.malicious), '); npm may fetch another version (engines.npm), which was not checked, so it is blocked until you pin a version') });
+  } else if (v.malicious.length && v.unconfirmedVersion) {
     // A name-only hit: OSV lists a malicious release under this name, but the version this install
     // would fetch could not be checked. Say exactly that, and the way through.
     out.push({ kind: 'malicious', severity: 'catastrophic', reason: maliciousReason('OSV lists a malicious release of ', name, ' (', listIds(v.malicious), '); the version this install would fetch could not be checked, so it is blocked until you pin a version') });
@@ -1077,11 +1275,13 @@ interface OneResult {
   version?: string;
   /** `osvIds` came from a version-specific OSV query (not a name-only one). */
   exact: boolean;
+  /** npm may select another version than the one `exact` describes (engines.npm). */
+  npmEngineDependent?: boolean;
 }
 
 async function vetOne(ref: PackageRef, ctx: {
   fetchImpl: FetchLike; regSignal: AbortSignal; osvSignal: AbortSignal; minAgeDays: number; nowMs: number;
-  cache: CacheFile; changes: CacheChanges;
+  cache: CacheFile; changes: CacheChanges; npmFullMetadata: { remaining: number };
 }): Promise<OneResult> {
   const { fetchImpl, regSignal, osvSignal, minAgeDays, nowMs, cache } = ctx;
   if (ref.customIndex) {
@@ -1089,7 +1289,7 @@ async function vetOne(ref: PackageRef, ctx: {
   }
   let facts: Facts;
   try {
-    facts = ref.ecosystem === 'npm' ? await resolveNpm(ref, fetchImpl, regSignal) : await resolvePyPI(ref, fetchImpl, regSignal);
+    facts = ref.ecosystem === 'npm' ? await resolveNpm(ref, fetchImpl, regSignal, ctx.npmFullMetadata, minAgeDays > 0) : await resolvePyPI(ref, fetchImpl, regSignal);
   } catch (err) {
     return { vet: uncheckedVet(ref, err instanceof Unchecked ? err.message : 'lookup failed', minAgeDays, nowMs), exact: false };
   }
@@ -1098,10 +1298,11 @@ async function vetOne(ref: PackageRef, ctx: {
     const osvIds = await queryOsv(ref, facts.version, fetchImpl, osvSignal);
     rememberMalicious(cache, ctx.changes, ref, facts, osvIds, nowMs);
     const base = {
-      ref, status: 'checked' as const, version: facts.version, publishedAt: facts.publishedAt, osvIds,
+      ref, status: 'checked' as const, version: facts.version, publishedAt: facts.publishedAt, ageUncheckedReason: facts.ageUncheckedReason, osvIds,
       malicious: osvIds.filter((id) => id.startsWith('MAL-')), hooks: facts.hooks, sdistOnly: facts.sdistOnly,
+      ...(facts.npmEngineDependent ? { npmEngineDependent: true } : {}),
     };
-    return { vet: { ...base, findings: buildFindings(base, minAgeDays, nowMs) }, version: facts.version, exact: true };
+    return { vet: { ...base, findings: buildFindings(base, minAgeDays, nowMs) }, version: facts.version, exact: true, ...(facts.npmEngineDependent ? { npmEngineDependent: true } : {}) };
   } catch (err) {
     return { vet: uncheckedVet(ref, err instanceof Unchecked ? err.message : 'lookup failed', minAgeDays, nowMs), version: facts.version, exact: false };
   }
@@ -1181,13 +1382,14 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
   const cache = readCache(opts);
   const cacheSeqAtStart = cacheWriteSeq;
   const changes: CacheChanges = new Map();
+  const npmFullMetadata = { remaining: MAX_NPM_FULL_METADATA_REQUESTS };
   const packages: PackageVet[] = [];
   try {
     const head = unique.slice(0, MAX_PACKAGES_PER_COMMAND);
     // The malicious-package batch covers EVERY package (custom-index installs excepted: public records do not describe them).
     const batchRefs = unique.filter((r) => !r.customIndex);
     const batchP = queryOsvBatch(batchRefs.map((ref) => ({ ref, version: pinnedVersion(ref) })), fetchImpl, osvCtl.signal);
-    const headP = Promise.all(head.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes })
+    const headP = Promise.all(head.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes, npmFullMetadata })
       .catch((): OneResult => ({ vet: uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs), exact: false }))));
     const [batch, results] = await Promise.all([batchP, headP]);
     const batchAnswer = (ref: PackageRef): string[] | null => {
@@ -1199,7 +1401,7 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
     const extraRefs = unique.slice(head.length)
       .filter((r) => !r.customIndex && !pinnedVersion(r) && batchFor(r).length > 0)
       .slice(0, MAX_EXTRA_LOOKUPS);
-    const extraResults = await Promise.all(extraRefs.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes })
+    const extraResults = await Promise.all(extraRefs.map((ref) => vetOne(ref, { fetchImpl, regSignal: regCtl.signal, osvSignal: osvCtl.signal, minAgeDays, nowMs, cache, changes, npmFullMetadata })
       .catch((): OneResult => ({ vet: uncheckedVet(ref, 'lookup failed', minAgeDays, nowMs), exact: false }))));
     const extraByRef = new Map(extraRefs.map((ref, i) => [ref, extraResults[i]] as const));
     unique.forEach((ref, idx) => {
@@ -1207,8 +1409,11 @@ export async function vetPackages(refs: readonly PackageRef[], opts: VetOptions 
       const r = idx < head.length ? results[idx] : extraByRef.get(ref);
       let vet: PackageVet;
       if (r) {
-        // A version-specific OSV answer is final for this ref, pinned or not: no name-only ids are merged.
-        const malIds = r.exact ? [] : batchFor(ref);
+        // A version-specific OSV answer is final for this ref, pinned or not: no name-only ids are merged,
+        // unless npm's own pick depends on the installing npm (engines.npm). Then the checked version's
+        // facts stand and a name-only MAL- hit is kept too, without a second registry or OSV lookup.
+        // A checked version that is itself MAL- keeps its own, exact reason.
+        const malIds = r.exact && !(r.npmEngineDependent && !r.vet.malicious.length) ? [] : batchFor(ref);
         // No version-specific answer AND this ref's batch chunk failed or did not line up: the
         // malicious-package check did not happen for it. Say so next to the lookup's own reason
         // (as the refs past the cap do); the cached-MAL check below stays in force.
