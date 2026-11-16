@@ -3585,8 +3585,9 @@ const PY_UTF8_CODEC_ALIASES = new Set([
 ]);
 
 /**
- * Every top-level module the code imports is in `PY_DOC_SAFE_IMPORTS`. A
- * statement ends at `;` or a physical line break, `\r` included (review r3 of
+ * Every top-level module the code imports is in `PY_DOC_SAFE_IMPORTS`.
+ * `code` is logical lines (`pyLogicalLines`), so a statement ends at `;` or
+ * at a line break that no code backslash joins, `\r` included (review r3 of
  * #1093): ending it at `\n` only read a CR-only file's first import as
  * running to the end of the file, so `import os\rimport click` checked `os`
  * alone once a CR-ended docstring could be blanked.
@@ -3604,6 +3605,52 @@ function pyImportsAreDocSafe(code: string): boolean {
 }
 
 /**
+ * The gate's text as Python's logical lines (review r4 of #1093). `gaps` is
+ * what `pythonStandaloneDocstrings` read as a token gap in code, in order:
+ * each `\` that is an explicit line join, and each form feed. Python deletes
+ * a join's backslash and the break after it (`\r\n`, `\r`, `\n`) and reads
+ * one statement, and no token spans the join, so it separates tokens as a
+ * space does; a form feed between tokens is whitespace too. Each becomes one
+ * space here, so that the import and from scans and the readback terms that
+ * allow only spaces and tabs between tokens (`help (`, `.stdout =`) read the
+ * statement Python runs: read by physical line, `import os \<break>as os,
+ * click` checked `os` alone and `help \<break>(main)` was no call, while the
+ * same-line spellings are held.
+ *
+ * Only those offsets change (review r4 of #1096). A backslash in a comment
+ * is comment text, and the comment still ends at the break; in a string it
+ * is part of the literal. Joined anyway, `import os # \` then `import click`
+ * read as one import of `os`, and `# help \` then `(42))` as a call. A form
+ * feed in a comment or a string separates no tokens either: rewritten,
+ * `# from<FF>os<FF>import (` read as a from-import whose parenthesised list
+ * swallowed the next line's `import click`. That includes an f- or t-string's
+ * format spec, the text after the `:` that ends a replacement field's
+ * expression (review r5 of #1096): Python hands `from<FF>os<FF>import (` in
+ * `f"{when:from<FF>os<FF>import (}"` to `format()` as it stands. Every other
+ * byte is left as Python reads it, so mid-line comments keep their scan
+ * surface (#532).
+ *
+ * It runs before NFKC (`pyDocGateViews`), so only U+005C joins. NFKC also
+ * turns a fullwidth or small reverse solidus into `\`, but Python rejects
+ * those outside a string. A space is a starter, so it never lengthens a run
+ * of combining marks. One forward splice: linear.
+ */
+function pyLogicalLines(code: string, gaps: readonly number[]): string {
+  if (gaps.length === 0) return code;
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const at of gaps) {
+    parts.push(code.slice(cursor, at), ' ');
+    cursor = at + 1 + (code[at] === '\\' ? pyLineBreakLength(code, at + 1) : 0);
+  }
+  parts.push(code.slice(cursor));
+  return parts.join('');
+}
+
+/** An f-string field past its expression: in its format spec (`pythonStandaloneDocstrings`). */
+const FORMAT_SPEC = -1;
+
+/**
  * `[start, end)` of each triple-quoted literal that is a whole logical line by
  * itself (see `blankPythonDocstrings`); `null` when the walk is not certain it
  * reads the source as Python would.
@@ -3614,8 +3661,16 @@ function pyImportsAreDocSafe(code: string): boolean {
  * standalone docstring, and `\` before any of them is one continuation. A
  * walk that ended lines at `\n` only held a CR-ended helper its LF spelling
  * relieves; Python runs both alike.
+ *
+ * `gaps` receives, in order, the offset of each token gap the walk reads as
+ * code (`pyLogicalLines`): a `\` that joins two physical lines, and a form
+ * feed between tokens or in the expression of an f- or t-string's
+ * replacement field. Never one in a comment or a string literal, and never
+ * one in a format spec: a `:` outside any bracket of the expression (`:=`
+ * included, which Python reads as a spec starting `=`) begins literal text,
+ * where only a nested `{…}` is code again and `}` ends the field.
  */
-function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null {
+function pythonStandaloneDocstrings(src: string, gaps: number[]): Array<[number, number]> | null {
   const found: Array<[number, number]> = [];
   const n = src.length;
   let depth = 0;
@@ -3624,11 +3679,12 @@ function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null
   while (i < n) {
     const c = src[i];
     if (c === '\n' || c === '\r') { if (depth === 0) lineStart = true; i++; continue; }
-    if (c === ' ' || c === '\t' || c === '\f') { i++; continue; }
+    if (c === ' ' || c === '\t' || c === '\f') { if (c === '\f') gaps.push(i); i++; continue; }
     if (c === '#') { while (i < n && src[i] !== '\n' && src[i] !== '\r') i++; continue; }
     if (c === '\\') {
       const skip = pyLineBreakLength(src, i + 1);
       if (!skip) return null;
+      gaps.push(i);
       i += 1 + skip; continue;    // joins two physical lines: neither starts nor ends a logical one
     }
     if (c === '(' || c === '[' || c === '{') { depth++; lineStart = false; i++; continue; }
@@ -3643,20 +3699,33 @@ function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null
     const delim = triple ? q + q + q : q;
     const fmt = /[ft]/.test(prefix);
     let k = j + delim.length;
-    let field = 0;
+    // The open replacement fields, innermost last: how many brackets are open
+    // in the field's expression, or FORMAT_SPEC once its spec has begun.
+    const fields: number[] = [];
     let close = -1;
     while (k < n) {
       const ch = src[k];
-      if (fmt && field > 0) {
+      if (fmt && fields.length > 0) {
         if (ch === '"' || ch === "'" || ch === '\\' || ch === '#') return null;
-        if (ch === '{') field++;
-        else if (ch === '}') field--;
+        const top = fields.length - 1;
+        const open = fields[top];
+        if (open === FORMAT_SPEC) {         // literal text: only a nested field is code
+          if (ch === '{') fields.push(0);
+          else if (ch === '}') fields.pop();
+        } else if (ch === '\f') gaps.push(k);   // the expression is code
+        else if (ch === ':' && open === 0) fields[top] = FORMAT_SPEC;   // `:=` too, as in Python
+        else if (ch === '(' || ch === '[' || ch === '{') fields[top] = open + 1;
+        else if (ch === ')' || ch === ']' || ch === '}') {
+          if (open > 0) fields[top] = open - 1;
+          else if (ch === '}') fields.pop();
+          else return null;
+        }
         k++;
         continue;
       }
       if (ch === '\\') { k += 1 + (pyLineBreakLength(src, k + 1) || 1); continue; }
       if (!triple && (ch === '\n' || ch === '\r')) return null;
-      if (fmt && ch === '{') { if (src[k + 1] === '{') { k += 2; continue; } field = 1; k++; continue; }
+      if (fmt && ch === '{') { if (src[k + 1] === '{') { k += 2; continue; } fields.push(0); k++; continue; }
       if (src.startsWith(delim, k)) { close = k; break; }
       k++;
     }
@@ -3690,13 +3759,14 @@ function pyLineBreakLength(src: string, at: number): number {
 function blankPythonDocstrings(src: string, lang: ScriptLang, asRead: string): string {
   if (lang !== 'python' || !src || !(src.includes('"""') || src.includes("'''"))) return src;
   if (pyDeclaresForeignEncoding(asRead)) return src;
-  const docs = pythonStandaloneDocstrings(src);
+  const gaps: number[] = [];
+  const docs = pythonStandaloneDocstrings(src, gaps);
   if (!docs || docs.length === 0) return src;
   let code = '';
   let cursor = 0;
   for (const [lo, hi] of docs) { code += src.slice(cursor, lo) + blankedRun(src, lo, hi); cursor = hi; }
   code += src.slice(cursor);
-  const views = pyDocGateViews(code);
+  const views = pyDocGateViews(pyLogicalLines(code, gaps));   // `code` keeps `src`'s offsets
   if (!views) return src;
   for (const view of views) {
     const gated = view.replace(PY_DOC_ALLOWED_DUNDER_RE, ' ');
