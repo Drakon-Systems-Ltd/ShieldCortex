@@ -842,7 +842,7 @@ const SENSITIVE_PATH_RE = new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|$
 // startup file. Exec surface only: the write-content scan skips this row
 // (#505 Option A; the residual is #588).
 // #1005 (SCN-008b): the `env-credential-egress` proposer. See the DANGEROUS row.
-const ENV_CREDENTIAL_CLIENT_RE = /(?:^|[;&|(\n"'`])[^\S\n]*(?:(?:if|then|elif|else|do|while|until|!|\{)[^\S\n]+)*(?:\w+=[^\s'"`;&|()]*[^\S\n]+)*(?:(?:[\w.~-]*\/)*(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec|xargs)(?:[^\S\n]+(?:-[^\s'"`;&|()]+|\w+=[^\s'"`;&|()]*|\d+(?:\.\d+)?[smhd]?))*[^\S\n]+)*(?:[\w.~-]*\/)*(?:curl|wget|https?|xh|aria2c)(?=[\s'"`;&|)]|$)/i;
+const ENV_CREDENTIAL_CLIENT_RE = /(?:^|[;&|(\n"'`])[^\S\n]*(?:(?:if|then|elif|else|do|while|until|!|\{)[^\S\n]+)*(?:\w+=[^\s'"`;&|()]*[^\S\n]+)*(?:(?:[\w.~-]*\/)*(?:(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec|xargs)(?:[^\S\n]+(?:-[^\s'"`;&|()]+|\w+=[^\s'"`;&|()]*|\d+(?:\.\d+)?[smhd]?))*|ssh(?:[^\S\n]+-[46AaCfGgKkMNnqsTtVvXxYy]*(?:[BbcDEeFIiJLlmOoPpQRSWw](?:[^\s'"`;&|()]+|[^\S\n]+[^\s'"`;&|()]+))?)*[^\S\n]+[^\s'"`;&|()-][^\s'"`;&|()]*)[^\S\n]+)*(?:[\w.~-]*\/)*(?:curl|wget|https?|xh|aria2c)(?=[\s'"`;&|)]|$)/i;
 const MODIFY_SHELL_STARTUP_RE = new RegExp(String.raw`(?:(?:>>?|>\|)(?:[ \t]|\\\n)*|\btee\b(?:(?:[ \t]|\\\n)+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|"[^"\n]*"|[^\s'"|;&<>\\-][^\s'"|;&<>\\]*))*(?:[ \t]|\\\n)+|\bsed\b(?=[^|;&\n]*[ \t](?:-[a-zA-Z]*i|--in-place))[^|;&\n]*(?:[ \t]|\\\n)+)['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})|\b(?:cp|mv|install)\b[^|;&\n]*(?:[ \t]|\\\n)+['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})['"]?\s*(?=$|[|;&\n])`, 'i');
 
 const DANGEROUS: Pattern[] = [
@@ -1183,9 +1183,11 @@ const DANGEROUS: Pattern[] = [
   // expanded into the request itself (see there). Command position is the
   // statement start, a separator, `(`, an opening quote (`bash -c "…"`,
   // `ssh host '…'`), a shell keyword or `{`, then assignments, transparent
-  // wrappers and a path. No gap after the client word, and no token class
-  // here can cross an anchor character, so each character is read from at
-  // most one anchor and the row is linear.
+  // wrappers, `ssh [options] host` (an unquoted remote command: the shell
+  // expands the variable locally and ssh sends the value on) and a path. No
+  // gap after the client word, and no token class here can cross an anchor
+  // character, so each character is read from at most one anchor and the
+  // row is linear.
   { re: ENV_CREDENTIAL_CLIENT_RE, signal: 'env-credential-egress' },
 ];
 
