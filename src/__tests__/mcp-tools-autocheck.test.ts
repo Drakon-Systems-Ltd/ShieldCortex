@@ -506,6 +506,53 @@ describe('(#926) a partial retry re-sends only the alerts that were not delivere
     expect(h.rows).toHaveLength(4);
   });
 
+  it('keeps delivered checkpoints when a baseline write fails partway through partial-retry completion', async () => {
+    let suffix = '';
+    let transportDown = true;
+    let failBetaWrite = false;
+    const writes: string[] = [];
+    const backing = memStore();
+    const store: ToolHashStore = {
+      get: (s, t) => backing.get(s, t),
+      set: (s, t, hash, changed) => {
+        writes.push(t);
+        if (failBetaWrite && t === 'beta') throw new Error('SQLITE_BUSY');
+        backing.set(s, t, hash, changed);
+      },
+    };
+    const h = partial({
+      tools: () => ['alpha', 'beta', 'gamma'].map((name) => ({ name, description: `Lists ${name} files.${suffix}` })),
+      store,
+      failNotify: () => transportDown,
+    });
+    await h.run(); // silent initial baseline
+    const originalBeta = store.get('files', 'beta');
+    suffix = ' Includes nested folders.';
+    h.advance(HOUR);
+    expect(await h.run()).toMatchObject({ notified: 0, errors: 1 });
+    expect(h.rowsOf('pending')).toHaveLength(1);
+
+    transportDown = false;
+    failBetaWrite = true;
+    writes.length = 0;
+    h.advance(HOUR);
+    expect(await h.run()).toMatchObject({ notified: 1, errors: 1 });
+    expect(writes).toEqual(['alpha', 'beta']); // one hash committed before the failure
+    expect(store.get('files', 'beta')).toBe(originalBeta);
+    expect(Object.values(h.state().checkpoints ?? {})).toHaveLength(3);
+    expect(h.rowsOf('pending')).toHaveLength(1);
+    expect(h.rowsOf('changed')).toHaveLength(1);
+
+    failBetaWrite = false;
+    h.advance(HOUR);
+    expect(await h.run()).toMatchObject({ notified: 0, errors: 0 });
+    expect(h.delivered).toHaveLength(1);
+    expect(h.rowsOf('changed')).toHaveLength(1);
+    expect(store.get('files', 'beta')).not.toBe(originalBeta);
+    expect(h.state().checkpoints ?? {}).toEqual({});
+    expect(h.state().pending ?? {}).toEqual({});
+  });
+
   it('the changed alert keeps failing: suspicious is still sent once and the pending row is kept once', async () => {
     const m = mixed();
     const h = partial({ tools: m.tools, failNotify: (n) => n.kind === 'changed' });
