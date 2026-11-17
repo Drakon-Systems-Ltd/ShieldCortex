@@ -7,6 +7,7 @@ import os from 'os';
 import path from 'path';
 import { discoverMcpServers } from '../audit/mcp-config-scanner.js';
 import {
+  DELIVERY_CHECKPOINT_TTL_MS,
   runAutoToolCheck,
   type AutoCheckDeps,
   type AutoCheckLedgerRow,
@@ -385,6 +386,310 @@ describe('automatic MCP tool check (#915)', () => {
       up = true;
       await runAutoToolCheck(h.deps);
       expect(h.rows.filter((r) => r.kind === 'changed')).toHaveLength(1);
+    });
+  });
+});
+
+/**
+ * #926 — per-alert delivery checkpoints across a partial retry.
+ *
+ * State is round-tripped through JSON between runs, so only what a run SAVED
+ * survives into the next one (as with the real state file and a fresh process).
+ * Transport ATTEMPTS are counted separately from successful deliveries.
+ */
+describe('(#926) a partial retry re-sends only the alerts that were not delivered', () => {
+  const T0 = 1_700_000_000_000;
+  const HOUR = 3_600_000;
+
+  function partial(opts: {
+    tools: () => McpToolDescriptor[];
+    /** Return true to make this notification fail in transport. */
+    failNotify?: (n: McpToolChangeNotification) => boolean;
+    /** Return false to make this ledger write fail. */
+    ledgerOk?: (r: AutoCheckLedgerRow) => boolean;
+    saveOk?: () => boolean;
+    server?: AutoCheckDeps['servers'][number];
+    store?: ToolHashStore;
+  }) {
+    const attempts: McpToolChangeNotification[] = [];
+    const delivered: McpToolChangeNotification[] = [];
+    const rows: AutoCheckLedgerRow[] = [];
+    const store = opts.store ?? memStore();
+    let saved = JSON.stringify({ servers: {} });
+    let clock = T0;
+    const deps: AutoCheckDeps = {
+      servers: [opts.server ?? SERVER],
+      store,
+      fetchTools: async () => opts.tools(),
+      notify: (n) => {
+        attempts.push(n);
+        if (opts.failNotify?.(n)) throw new Error('webhook down');
+        delivered.push(n);
+      },
+      ledger: (r) => {
+        if (opts.ledgerOk && !opts.ledgerOk(r)) return false;
+        rows.push(r);
+        return true;
+      },
+      loadState: () => JSON.parse(saved) as AutoCheckState,
+      saveState: (s) => {
+        if (opts.saveOk && !opts.saveOk()) throw new Error('EROFS: state file not writable');
+        saved = JSON.stringify(s);
+      },
+      now: () => clock,
+      intervalHours: 0,
+    };
+    return {
+      deps, attempts, delivered, rows, store,
+      state: () => JSON.parse(saved) as AutoCheckState,
+      advance: (ms: number) => { clock += ms; },
+      run: () => runAutoToolCheck(deps),
+      kinds: (list: McpToolChangeNotification[]) => list.map((n) => n.kind),
+      rowsOf: (kind: AutoCheckLedgerRow['kind']) => rows.filter((r) => r.kind === kind),
+    };
+  }
+
+  /** Two ordinary tools at baseline; then `alpha` turns suspicious and `beta` merely changes. */
+  function mixed() {
+    let alpha = 'Reads a file.';
+    let beta = 'Lists a folder.';
+    const tools = (): McpToolDescriptor[] => [{ name: 'alpha', description: alpha }, { name: 'beta', description: beta }];
+    return {
+      tools,
+      drift: () => { alpha = POISON; beta = 'Lists a folder, recursively.'; },
+      setAlpha: (d: string) => { alpha = d; },
+    };
+  }
+
+  it('suspicious delivered, changed fails, retry: one suspicious delivery, one suspicious row, changed re-sent', async () => {
+    const m = mixed();
+    let changedDown = true;
+    const h = partial({ tools: m.tools, failNotify: (n) => n.kind === 'changed' && changedDown });
+    await h.run(); // baseline, silent
+    const baseAlpha = h.store.get('files', 'alpha');
+    const baseBeta = h.store.get('files', 'beta');
+    const baseCheckedAt = h.state().servers.files.checkedAt;
+
+    m.drift();
+    h.advance(HOUR);
+    const first = await h.run();
+    expect(first).toMatchObject({ notified: 1, errors: 1 });
+    expect(h.kinds(h.delivered)).toEqual(['suspicious']);
+    expect(h.rowsOf('suspicious')).toHaveLength(1);
+    expect(h.rowsOf('pending')).toHaveLength(1);
+    expect(h.rowsOf('pending')[0].finding).toMatchObject({ alertKind: 'changed' });
+    // Incomplete: neither the hashes nor the server cache advanced.
+    expect(h.store.get('files', 'alpha')).toBe(baseAlpha);
+    expect(h.store.get('files', 'beta')).toBe(baseBeta);
+    expect(h.state().servers.files.checkedAt).toBe(baseCheckedAt);
+
+    changedDown = false;
+    h.advance(HOUR);
+    const retry = await h.run(); // fresh invocation: state reloaded from what was saved
+    expect(retry).toMatchObject({ notified: 1, errors: 0 });
+    expect(h.kinds(h.attempts)).toEqual(['suspicious', 'changed', 'changed']); // transport attempts
+    expect(h.kinds(h.delivered)).toEqual(['suspicious', 'changed']);            // successful deliveries
+    expect(h.rowsOf('suspicious')).toHaveLength(1);
+    expect(h.rowsOf('changed')).toHaveLength(1);
+    expect(h.rowsOf('pending')).toHaveLength(1);
+    expect(h.rowsOf('error')).toHaveLength(1);
+    expect(h.store.get('files', 'alpha')).not.toBe(baseAlpha);
+    expect(h.store.get('files', 'beta')).not.toBe(baseBeta);
+    expect(h.state().servers.files.checkedAt).toBeGreaterThan(baseCheckedAt);
+    // Completion drops the bookkeeping: nothing is left to suppress a later recurrence.
+    expect(h.state().pending ?? {}).toEqual({});
+    expect(h.state().checkpoints ?? {}).toEqual({});
+
+    h.advance(HOUR);
+    await h.run(); // unchanged follow-up stays quiet
+    expect(h.attempts).toHaveLength(3);
+    expect(h.rows).toHaveLength(4);
+  });
+
+  it('the changed alert keeps failing: suspicious is still sent once and the pending row is kept once', async () => {
+    const m = mixed();
+    const h = partial({ tools: m.tools, failNotify: (n) => n.kind === 'changed' });
+    await h.run();
+    m.drift();
+    for (let i = 0; i < 3; i++) { h.advance(HOUR); await h.run(); }
+    expect(h.kinds(h.delivered)).toEqual(['suspicious']);
+    expect(h.rowsOf('suspicious')).toHaveLength(1);
+    expect(h.rowsOf('pending')).toHaveLength(1);
+    expect(h.rowsOf('error')).toHaveLength(3); // every failed run stays visible
+  });
+
+  it('a delivered marker never hides a missing durable finding: the row is recorded on retry without a re-send', async () => {
+    const m = mixed();
+    let dbUp = false;
+    const h = partial({ tools: m.tools, ledgerOk: (r) => r.kind !== 'suspicious' || dbUp });
+    await h.run();
+    const baseAlpha = h.store.get('files', 'alpha');
+    m.drift();
+
+    for (let i = 0; i < 2; i++) { // delivered, but the final suspicious row cannot be written
+      h.advance(HOUR);
+      const res = await h.run();
+      expect(res.errors).toBe(1);
+      expect(h.rowsOf('suspicious')).toHaveLength(0);
+      expect(h.store.get('files', 'alpha')).toBe(baseAlpha); // no hash advance while the record is owed
+    }
+    expect(h.kinds(h.attempts).filter((k) => k === 'suspicious')).toHaveLength(1);
+    const owed = Object.values(h.state().checkpoints ?? {}).filter((c) => !c.recorded);
+    expect(owed).toHaveLength(1);
+    expect(owed[0]).toMatchObject({ server: 'files' });
+
+    dbUp = true;
+    h.advance(HOUR);
+    const res = await h.run();
+    expect(res).toMatchObject({ notified: 0, errors: 0 });
+    expect(h.rowsOf('suspicious')).toHaveLength(1);
+    expect(h.rowsOf('suspicious')[0].finding).toMatchObject({ alertKind: 'suspicious' });
+    expect(new Set(h.rowsOf('suspicious')[0].finding?.tools.map((t) => t.tool))).toEqual(new Set(['alpha']));
+    expect(h.kinds(h.delivered)).toEqual(['suspicious', 'changed']); // each sent exactly once overall
+    expect(h.rowsOf('changed')).toHaveLength(1);
+    expect(h.store.get('files', 'alpha')).not.toBe(baseAlpha);
+    expect(h.state().checkpoints ?? {}).toEqual({});
+  });
+
+  it('first group fails: no delivery checkpoint for either group, pending rows stay deduped, recovery sends each once', async () => {
+    const m = mixed();
+    let down = true;
+    const h = partial({ tools: m.tools, failNotify: () => down });
+    await h.run();
+    m.drift();
+    for (let i = 0; i < 3; i++) { h.advance(HOUR); await h.run(); }
+    expect(h.delivered).toHaveLength(0);
+    expect(h.state().checkpoints ?? {}).toEqual({});
+    expect(h.rowsOf('pending').map((r) => r.finding?.alertKind).sort()).toEqual(['changed', 'suspicious']);
+    down = false;
+    h.advance(HOUR);
+    await h.run();
+    expect(h.kinds(h.delivered)).toEqual(['suspicious', 'changed']);
+    expect(h.rowsOf('suspicious')).toHaveLength(1);
+    expect(h.rowsOf('changed')).toHaveLength(1);
+    expect(h.rowsOf('pending')).toHaveLength(2);
+  });
+
+  describe('identity: server, source, tool, kind and content hash', () => {
+    it('reordering the tool list does not create a new identity', async () => {
+      const m = mixed();
+      let changedDown = true;
+      let reversed = false;
+      const h = partial({
+        tools: () => (reversed ? [...m.tools()].reverse() : m.tools()),
+        failNotify: (n) => n.kind === 'changed' && changedDown,
+      });
+      await h.run();
+      m.drift();
+      h.advance(HOUR); await h.run();
+      reversed = true; changedDown = false;
+      h.advance(HOUR); await h.run();
+      expect(h.kinds(h.delivered)).toEqual(['suspicious', 'changed']);
+      expect(h.rowsOf('suspicious')).toHaveLength(1);
+    });
+
+    it('a delivered tool whose content changes again stays eligible (same name, new hash)', async () => {
+      const m = mixed();
+      let changedDown = true;
+      const h = partial({ tools: m.tools, failNotify: (n) => n.kind === 'changed' && changedDown });
+      await h.run();
+      m.drift();
+      h.advance(HOUR); await h.run();
+      m.setAlpha(`${POISON} Now with a second paragraph.`);
+      changedDown = false;
+      h.advance(HOUR); await h.run();
+      expect(h.kinds(h.delivered)).toEqual(['suspicious', 'suspicious', 'changed']);
+      expect(h.rowsOf('suspicious')).toHaveLength(2); // two different tool versions, one row each
+      expect(h.state().checkpoints ?? {}).toEqual({});
+    });
+
+    it('a tool that joins an already-delivered group is alerted for its own tuple only', async () => {
+      const m = mixed();
+      let gamma = 'Writes a file.';
+      let changedDown = true;
+      const h = partial({
+        tools: () => [...m.tools(), { name: 'gamma', description: gamma }],
+        failNotify: (n) => n.kind === 'changed' && changedDown,
+      });
+      await h.run();
+      m.drift();
+      h.advance(HOUR); await h.run();
+      expect(h.delivered[0]).toMatchObject({ kind: 'suspicious', tools: ['alpha'] });
+      gamma = POISON;
+      changedDown = false;
+      h.advance(HOUR); await h.run();
+      expect(h.delivered).toHaveLength(3);
+      expect(h.delivered[1]).toMatchObject({ kind: 'suspicious', tools: ['gamma'], toolCount: 1 });
+      expect(h.delivered[2]).toMatchObject({ kind: 'changed', tools: ['beta'] });
+      const susRows = h.rowsOf('suspicious');
+      expect(susRows.map((r) => [...new Set(r.finding?.tools.map((t) => t.tool))])).toEqual([['alpha'], ['gamma']]);
+    });
+
+    it('the same server, tool and content from a different config source is a different identity', async () => {
+      const srcA = { ...SERVER, sourcePath: '/home/u/.claude.json' };
+      const srcB = { ...SERVER, sourcePath: '/home/u/.cursor/mcp.json' };
+      const a = mixed();
+      const b = mixed();
+      let changedDown = true;
+      const h = partial({ tools: a.tools, failNotify: (n) => n.kind === 'changed' && changedDown });
+      h.deps.servers = [srcA, srcB];
+      h.deps.fetchTools = async (server) => (server.sourcePath === srcA.sourcePath ? a.tools() : b.tools());
+      await h.run(); // both baselines
+      a.drift();
+      h.advance(HOUR); await h.run(); // source A: suspicious delivered, changed pending
+      expect(h.kinds(h.delivered)).toEqual(['suspicious']);
+      b.drift(); // source B now serves the very same content
+      h.advance(HOUR); await h.run();
+      // A's checkpoint suppresses A's repeat only; B's first sight of it is still delivered.
+      expect(h.kinds(h.delivered)).toEqual(['suspicious', 'suspicious']);
+      // One pending row per source: B finishing a quiet run did not drop A's marker.
+      expect(h.rowsOf('pending').map((r) => r.finding?.source)).toEqual([srcA.sourcePath, srcB.sourcePath]);
+      changedDown = false;
+      h.advance(HOUR); await h.run();
+      expect(h.kinds(h.delivered)).toEqual(['suspicious', 'suspicious', 'changed', 'changed']);
+      expect(h.rowsOf('suspicious').map((r) => r.finding?.source)).toEqual([srcA.sourcePath, srcB.sourcePath]);
+    });
+  });
+
+  describe('durable boundaries (documented limits, not exactly-once)', () => {
+    it('a checkpoint that could not be saved is not trusted: the retry re-sends rather than risk a missed alert', async () => {
+      const m = mixed();
+      let changedDown = true;
+      let writable = true;
+      const h = partial({ tools: m.tools, failNotify: (n) => n.kind === 'changed' && changedDown, saveOk: () => writable });
+      await h.run();
+      const baseAlpha = h.store.get('files', 'alpha');
+      m.drift();
+      writable = false;
+      h.advance(HOUR); await h.run(); // delivered, but the state file is read-only
+      expect(h.state().checkpoints ?? {}).toEqual({});
+      expect(h.store.get('files', 'alpha')).toBe(baseAlpha);
+      writable = true; changedDown = false;
+      h.advance(HOUR); await h.run();
+      expect(h.kinds(h.delivered)).toEqual(['suspicious', 'suspicious', 'changed']); // over-alert, never a miss
+      expect(h.store.get('files', 'alpha')).not.toBe(baseAlpha);
+    });
+
+    it('a delivery checkpoint expires, so an alert stuck behind a failing sibling is repeated after the bound', async () => {
+      const m = mixed();
+      const h = partial({ tools: m.tools, failNotify: (n) => n.kind === 'changed' });
+      await h.run();
+      m.drift();
+      h.advance(HOUR); await h.run();
+      h.advance(DELIVERY_CHECKPOINT_TTL_MS - HOUR); await h.run(); // still inside the bound
+      expect(h.kinds(h.delivered)).toEqual(['suspicious']);
+      h.advance(2 * HOUR); await h.run();                           // past it
+      expect(h.kinds(h.delivered)).toEqual(['suspicious', 'suspicious']);
+    });
+
+    it('a checkpoint dated in the future (clock moved back) is ignored', async () => {
+      const m = mixed();
+      const h = partial({ tools: m.tools, failNotify: (n) => n.kind === 'changed' });
+      await h.run();
+      m.drift();
+      h.advance(HOUR); await h.run();
+      h.advance(-2 * HOUR); await h.run();
+      expect(h.kinds(h.delivered)).toEqual(['suspicious', 'suspicious']);
     });
   });
 });

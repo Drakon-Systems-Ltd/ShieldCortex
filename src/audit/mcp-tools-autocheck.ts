@@ -31,15 +31,42 @@ import { buildMcpToolChangeNotification, type McpToolChangeNotification } from '
 export const DEFAULT_INTERVAL_HOURS = 6;
 export const DEFAULT_SERVER_TIMEOUT_MS = 5_000;
 export const DEFAULT_TOTAL_BUDGET_MS = 20_000;
+/**
+ * How long a delivery checkpoint is honoured (#926). Past this, an alert that is
+ * still stuck behind a failing sibling is sent again rather than staying silent.
+ */
+export const DELIVERY_CHECKPOINT_TTL_MS = 7 * 24 * 3_600_000;
+
+/**
+ * One delivered alert member (#926): a single tool version, from one config
+ * source, reported under one alert kind. The entry existing means the operator
+ * notification that carried it was accepted by the transport. `recorded` is a
+ * separate fact: whether the final findings row for it was durably written.
+ */
+export interface AutoCheckDeliveryCheckpoint {
+  server: string;
+  /** Config source the server came from; `null` when unknown (unscoped baseline). */
+  source: string | null;
+  deliveredAt: number;
+  recorded: boolean;
+}
 
 export interface AutoCheckState {
   servers: Record<string, { checkedAt: number; configHash: string }>;
   /**
    * Alerts that could not be delivered, keyed by server + kind + finding hash.
    * Exists only to dedupe the durable `pending` ledger row across failed runs;
-   * cleared for a server once its alerts are delivered.
+   * cleared for a server (and config source) once its alerts are delivered.
+   * Markers written before #926 carry no `source` and are cleared server-wide.
    */
-  pending?: Record<string, { server: string }>;
+  pending?: Record<string, { server: string; source?: string | null }>;
+  /**
+   * Per-alert delivery checkpoints (#926), keyed by server + kind + a hash of
+   * [source, tool, content hash]. Lets a retry skip what was already delivered
+   * while a sibling alert is still failing. Dropped for a server (and source)
+   * once all of its alerts are delivered and recorded.
+   */
+  checkpoints?: Record<string, AutoCheckDeliveryCheckpoint>;
 }
 
 /** Structured finding carried by `pending` rows so the finding survives an undeliverable alert. */
@@ -179,51 +206,126 @@ export async function runAutoToolCheck(deps: AutoCheckDeps): Promise<AutoCheckRe
         .reduce((m, v) => (SEV.indexOf(v) > SEV.indexOf(m) ? v : m), 'medium');
       const maxSev = (tools: string[]): string => tools.map(sevOf).reduce((m, v) => (SEV.indexOf(v) > SEV.indexOf(m) ? v : m), 'medium');
 
-      interface Alert { kind: 'suspicious' | 'changed'; notification: McpToolChangeNotification; detail: string; finding: AutoCheckFinding }
-      const alerts: Alert[] = [];
-      if (suspiciousByTool.size > 0) {
-        const toolNames = [...suspiciousByTool.keys()];
-        alerts.push({
-          kind: 'suspicious',
-          notification: buildMcpToolChangeNotification({
-            kind: 'suspicious', server: server.name, tools: toolNames,
-            reason: reasonFromIndicators([...suspiciousIndicators.values()].flat()),
-          }),
-          detail: [...suspiciousByTool.entries()].map(([t, d]) => `${t}: ${d.join(', ')}`).join('; '),
+      interface Alert { kind: 'suspicious' | 'changed'; tools: string[]; notification: McpToolChangeNotification; detail: string; finding: AutoCheckFinding }
+      const buildAlert = (kind: Alert['kind'], names: string[]): Alert => {
+        if (kind === 'suspicious') {
+          const members = new Set(names);
+          return {
+            kind, tools: names,
+            notification: buildMcpToolChangeNotification({
+              kind: 'suspicious', server: server.name, tools: names,
+              reason: reasonFromIndicators(names.flatMap((t) => suspiciousIndicators.get(t) ?? [])),
+            }),
+            detail: names.map((t) => `${t}: ${(suspiciousByTool.get(t) ?? []).join(', ')}`).join('; '),
+            finding: {
+              alertKind: 'suspicious', source: server.sourcePath, severity: maxSev(names),
+              tools: findings
+                .filter((f) => f.toolName !== undefined && f.field !== undefined && members.has(f.toolName))
+                .map((f) => ({ tool: f.toolName as string, field: f.field, indicators: f.indicators ?? ['flagged'] })),
+            },
+          };
+        }
+        return {
+          kind, tools: names,
+          notification: buildMcpToolChangeNotification({ kind: 'changed', server: server.name, tools: names }),
+          detail: `tools=${names.join(',')}; hash changed since last check`,
           finding: {
-            alertKind: 'suspicious', source: server.sourcePath, severity: maxSev(toolNames),
-            tools: findings
-              .filter((f) => f.toolName !== undefined && f.field !== undefined && suspiciousByTool.has(f.toolName))
-              .map((f) => ({ tool: f.toolName as string, field: f.field, indicators: f.indicators ?? ['flagged'] })),
+            alertKind: 'changed', source: server.sourcePath, severity: maxSev(names),
+            tools: names.map((t) => ({ tool: t, field: 'description', indicators: ['hash-changed'] })),
           },
-        });
+        };
+      };
+
+      // ── Per-alert delivery checkpoints (#926) ──
+      // One notification can carry several tools, and one server can produce two
+      // notifications (suspicious, then changed-only). If the first is delivered
+      // and the second fails, the retry rebuilds both from the old baseline. A
+      // checkpoint per alert MEMBER stops the delivered one being sent and
+      // recorded twice. Identity = server + kind + [source, tool, content hash]:
+      // the scanner's per-tool hash, never the display text or the list order, so
+      // a reordered list is the same alert and a tool that changes again is not.
+      //
+      // Three separate facts are kept, and none stands in for another:
+      //   pending   - `state.pending`: an undelivered finding has its `pending` row
+      //   delivered - a checkpoint exists: the transport accepted the notification
+      //   recorded  - checkpoint.recorded: the final findings row was written
+      // A delivered-but-unrecorded member is not re-sent, but its findings row is
+      // still owed: the retry writes it, and hashes stay uncommitted until it lands.
+      //
+      // Limits (this is bounded dedupe for the ordinary partial retry, NOT
+      // exactly-once delivery):
+      //  - Crash windows. The transport has no idempotency key and the checkpoint
+      //    is a JSON file, separate from the findings table. Dying after the
+      //    transport accepted an alert but before the state file is saved re-sends
+      //    it next run; dying after the findings INSERT but before the save writes
+      //    a second findings row (no second notification). Same if the state file
+      //    cannot be written at all. Every window errs towards a repeat, never
+      //    towards a finding with no alert or no record.
+      //  - Concurrency. Two checks that overlap (two sessions starting together)
+      //    each load the state before the other saves, so both may send, and the
+      //    last save wins. Nothing here locks the state file.
+      //  - Time. A checkpoint is honoured for DELIVERY_CHECKPOINT_TTL_MS; an alert
+      //    still stuck behind a failing sibling after that is repeated.
+      const source = server.sourcePath ?? null;
+      const hashOf = new Map(drift.map((d) => [d.tool, d.hash]));
+      const cpKey = (kind: Alert['kind'], tool: string): string =>
+        `${server.name}\u0000${kind}\u0000${createHash('sha256').update(JSON.stringify([source, tool, hashOf.get(tool) ?? null])).digest('hex')}`;
+      const checkedNow = now();
+      const live = (cp: AutoCheckDeliveryCheckpoint | undefined): cp is AutoCheckDeliveryCheckpoint =>
+        !!cp && typeof cp.deliveredAt === 'number' && cp.deliveredAt <= checkedNow && checkedNow - cp.deliveredAt < DELIVERY_CHECKPOINT_TTL_MS;
+      const mine = (cp: AutoCheckDeliveryCheckpoint | undefined): boolean => !!cp && cp.server === server.name && (cp.source ?? null) === source;
+      const groups: [Alert['kind'], string[]][] = [['suspicious', [...suspiciousByTool.keys()]], ['changed', changedOnly]];
+      if (state.checkpoints === null || typeof state.checkpoints !== 'object') delete state.checkpoints;
+      if (state.checkpoints) {
+        // Keep only checkpoints for tool versions still waiting on this baseline:
+        // an expired one, or one for content that has since moved on, is dropped
+        // so it cannot suppress a later recurrence.
+        const current = new Set(groups.flatMap(([kind, names]) => names.map((t) => cpKey(kind, t))));
+        for (const [k, v] of Object.entries(state.checkpoints)) {
+          if (mine(v) && (!current.has(k) || !live(v))) delete state.checkpoints[k];
+        }
       }
-      if (changedOnly.length > 0) {
-        alerts.push({
-          kind: 'changed',
-          notification: buildMcpToolChangeNotification({ kind: 'changed', server: server.name, tools: changedOnly }),
-          detail: `tools=${changedOnly.join(',')}; hash changed since last check`,
-          finding: {
-            alertKind: 'changed', source: server.sourcePath, severity: maxSev(changedOnly),
-            tools: changedOnly.map((t) => ({ tool: t, field: 'description', indicators: ['hash-changed'] })),
-          },
-        });
+      const phaseOf = (kind: Alert['kind'], tool: string): 'undelivered' | 'unrecorded' | 'recorded' => {
+        const cp = state.checkpoints?.[cpKey(kind, tool)];
+        if (!live(cp) || !mine(cp)) return 'undelivered';
+        return cp.recorded === true ? 'recorded' : 'unrecorded';
+      };
+      const toSend: Alert[] = [];
+      const toRecord: Alert[] = []; // delivered on an earlier run, findings row still owed
+      for (const [kind, names] of groups) {
+        const undelivered = names.filter((t) => phaseOf(kind, t) === 'undelivered');
+        const unrecorded = names.filter((t) => phaseOf(kind, t) === 'unrecorded');
+        if (undelivered.length > 0) toSend.push(buildAlert(kind, undelivered));
+        if (unrecorded.length > 0) toRecord.push(buildAlert(kind, unrecorded));
       }
+      // Saved straight away, not at the end of the run, to keep the crash window small.
+      const checkpoint = (al: Alert, recorded: boolean): void => {
+        const cps = (state.checkpoints = state.checkpoints ?? {});
+        for (const t of al.tools) {
+          const k = cpKey(al.kind, t);
+          cps[k] = { server: server.name, source, deliveredAt: live(cps[k]) ? cps[k].deliveredAt : checkedNow, recorded };
+        }
+        try { deps.saveState(state); } catch { /* fail open: an unsaved checkpoint means a repeat, not a miss */ }
+      };
+      let recordOwed = false;
+      const record = (al: Alert): void => {
+        if (safeLedger({ server: server.name, kind: al.kind, detail: al.detail, finding: al.finding })) checkpoint(al, true);
+        else recordOwed = true;
+      };
+
+      for (const al of toRecord) record(al);
 
       // Alerts are delivered in order. If one fails, the finding must not be lost
       // just because notification is unavailable: record every undelivered alert
       // as a deduped `pending` row (full finding), then fail the server so hashes
-      // stay uncommitted and the alert is re-sent next run.
-      // Known residual: if `suspicious` is delivered and `changed` then fails, the
-      // retry re-sends `suspicious` (over-alert, never a missed alert); follow-up
-      // tracked on issue #926.
-      for (let i = 0; i < alerts.length; i++) {
-        const al = alerts[i];
+      // stay uncommitted and the undelivered alerts are re-sent next run.
+      for (let i = 0; i < toSend.length; i++) {
+        const al = toSend[i];
         try {
           await Promise.resolve(deps.notify(al.notification));
         } catch (err) {
           state.pending = state.pending ?? {};
-          for (const un of alerts.slice(i)) {
+          for (const un of toSend.slice(i)) {
             const key = `${server.name}\u0000${un.kind}\u0000${createHash('sha256').update(JSON.stringify([server.sourcePath ?? null, un.detail])).digest('hex')}`;
             if (state.pending[key]) continue;
             // Dedupe marker only AFTER the full finding is durably written: if the
@@ -233,20 +335,29 @@ export async function runAutoToolCheck(deps: AutoCheckDeps): Promise<AutoCheckRe
               detail: `undelivered ${un.kind} alert (source=${server.sourcePath ?? 'unknown'}, severity=${un.finding.severity}): ${un.detail}`,
               finding: un.finding,
             });
-            if (written) state.pending[key] = { server: server.name };
+            if (written) state.pending[key] = { server: server.name, source };
           }
           throw err;
         }
         result.notified++;
-        // Ledger only after successful delivery: a retried alert must not duplicate the row.
-        // If the findings write fails, do not commit hashes/state: the server is retried
-        // (the alert may be re-sent: over-alert, never a finding with no durable record).
-        if (!safeLedger({ server: server.name, kind: al.kind, detail: al.detail, finding: al.finding })) {
-          throw new Error('findings ledger write failed after delivery');
+        // Delivered first, recorded second: the final row is written only after a
+        // successful delivery, and a failed write leaves the checkpoint at
+        // "delivered, not recorded" so the retry writes the row without re-sending.
+        checkpoint(al, false);
+        record(al);
+      }
+      // A findings row is still owed: do not commit hashes/state, retry the write next run.
+      if (recordOwed) throw new Error('findings ledger write failed after delivery');
+
+      if (state.pending) {
+        for (const [k, v] of Object.entries(state.pending)) {
+          if (v.server === server.name && (v.source === undefined || v.source === source)) delete state.pending[k];
         }
       }
-      if (state.pending) {
-        for (const [k, v] of Object.entries(state.pending)) if (v.server === server.name) delete state.pending[k];
+      // Complete: the baseline advances below, so these versions will read as
+      // unchanged. Dropping the checkpoints means a later recurrence alerts again.
+      if (state.checkpoints) {
+        for (const [k, v] of Object.entries(state.checkpoints)) if (mine(v)) delete state.checkpoints[k];
       }
       // Delivery succeeded (or nothing needed delivering): now persist drift + state.
       for (const p of pending.values()) baseline.set(p.server, p.tool, p.hash, p.changed);
@@ -259,6 +370,7 @@ export async function runAutoToolCheck(deps: AutoCheckDeps): Promise<AutoCheckRe
     }
   }
 
+  if (state.checkpoints && Object.keys(state.checkpoints).length === 0) delete state.checkpoints;
   try { deps.saveState(state); } catch { /* fail open */ }
   return result;
 }
