@@ -349,6 +349,11 @@ export async function runAutoToolCheck(deps: AutoCheckDeps): Promise<AutoCheckRe
       // A findings row is still owed: do not commit hashes/state, retry the write next run.
       if (recordOwed) throw new Error('findings ledger write failed after delivery');
 
+      // Keep delivery and pending bookkeeping until ALL baseline writes return.
+      // A store can throw after earlier members committed; retaining the remaining
+      // members' checkpoints keeps the next invocation from delivering them twice.
+      for (const p of pending.values()) baseline.set(p.server, p.tool, p.hash, p.changed);
+
       if (state.pending) {
         for (const [k, v] of Object.entries(state.pending)) {
           if (v.server === server.name && (v.source === undefined || v.source === source)) delete state.pending[k];
@@ -359,8 +364,7 @@ export async function runAutoToolCheck(deps: AutoCheckDeps): Promise<AutoCheckRe
       if (state.checkpoints) {
         for (const [k, v] of Object.entries(state.checkpoints)) if (mine(v)) delete state.checkpoints[k];
       }
-      // Delivery succeeded (or nothing needed delivering): now persist drift + state.
-      for (const p of pending.values()) baseline.set(p.server, p.tool, p.hash, p.changed);
+      // Delivery and baseline persistence succeeded: now advance the server cache.
       state.servers[server.name] = { checkedAt: now(), configHash: cfgHash };
     } catch (err) {
       result.errors++;
