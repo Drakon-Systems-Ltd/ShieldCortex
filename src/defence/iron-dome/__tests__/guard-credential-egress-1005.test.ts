@@ -149,6 +149,10 @@ const STAY_ALLOW: Row[] = [
   // a public key is not a credential
   ['id_ed25519.pub', 'Bash', bash('cat ./keys/id_ed25519.pub')],
   ['ssh-keygen on a .pub', 'Bash', bash('ssh-keygen -y -f ./keys/id_ed25519.pub')],
+  // A key basename counts outside a `.ssh/` segment only; directly under one
+  // it is judged as on origin/main (the #874 (d2) grep-pattern relief row).
+  ['grep pattern naming .ssh/id_ed25519', 'Bash', bash('grep -n .ssh/id_ed25519 notes.txt')],
+  ['#874 (d2) relief row', 'Bash', bash('grep -n .ssh/id_ed25519 ~/.claude/settings.json; shieldcortex guard --help')],
   // §1 control rows
   ['ls', 'Bash', bash('ls -la')],
   ['aws config', 'Bash', bash('cat ~/.aws/config')],

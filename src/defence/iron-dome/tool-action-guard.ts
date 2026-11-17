@@ -827,9 +827,12 @@ const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlog
 // segment, so reading or uploading one cards whatever the destination is. A
 // `.secret`/`.secrets` directory counts only as its own segment (after start,
 // a blank, a quote, `=`, `:`, `/`, `~` or curl's `@`), never `docs/my.secrets/`.
+// An `id_ed25519`/`id_ecdsa`/`id_dsa` basename counts OUTSIDE a `.ssh/`
+// directory only: a home-rooted `~/.ssh/…` is the SSH_DIR rule's, and a bare
+// relative `.ssh/…` stays judged as before (#874/#920 relative-path refusal).
 // `~/.kube/config` and `.npmrc` are left out on purpose: routine kubectl and
 // registry work names them on almost every call.
-const CREDENTIAL_STORE_PATH_SRC = String.raw`\.netrc\b|_netrc\b|\.git-credentials\b|\.config\/gh\/hosts\.ya?ml\b|\.docker\/config\.json\b|\.pgpass\b|\.pypirc\b|\.vault-token\b|application_default_credentials\.json\b|\.config\/gcloud\/(?:credentials|access_tokens)\.db\b|\.azure\/(?:accessTokens\.json|msal_token_cache\.(?:json|bin))\b|(?:^|[\s'"=:\/~@])\.secrets?\/|\bid_(?:ed25519|ecdsa|dsa)\b(?!\.pub)`;
+const CREDENTIAL_STORE_PATH_SRC = String.raw`\.netrc\b|_netrc\b|\.git-credentials\b|\.config\/gh\/hosts\.ya?ml\b|\.docker\/config\.json\b|\.pgpass\b|\.pypirc\b|\.vault-token\b|application_default_credentials\.json\b|\.config\/gcloud\/(?:credentials|access_tokens)\.db\b|\.azure\/(?:accessTokens\.json|msal_token_cache\.(?:json|bin))\b|(?:^|[\s'"=:\/~@])\.secrets?\/|(?<!\.ssh\/)\bid_(?:ed25519|ecdsa|dsa)\b(?!\.pub)`;
 const SENSITIVE_PATH_RE = new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|${SSH_DIR_PATH_SRC}|${AUTHORIZED_KEYS_PATH_SRC}|id_rsa|\.aws\/credentials|(?<![A-Za-z0-9_])\.env\b|${CREDENTIAL_STORE_PATH_SRC}`, 'i');
 // #505: a shell WRITE shape whose destination is a startup file. The write
 // prefix is a redirect (`>`, `>>`, noclobber `>|`), `tee` with any run of

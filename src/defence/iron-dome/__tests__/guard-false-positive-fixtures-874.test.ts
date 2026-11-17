@@ -244,6 +244,43 @@ describe('#874 differential: genuinely dangerous commands stay gated', () => {
  * Every negative row below was run on origin/main 7f3cb79d and on this branch; the
  * decision is the same on both (PR body).
  */
+// #1005 (SCN-008a): these held rows ALSO read a newly listed credential
+// store: `~/.netrc`, the Docker `config.json`, the gcloud ADC file, or an
+// `id_ed25519`/`id_ecdsa`/`id_dsa` basename outside a literal `.ssh/` segment.
+// The hold and the decision are unchanged; the path rule now names the store
+// beside it. Listed one by one so no other row can gain the signal unseen.
+const NAMES_1005_STORE = new Set<string>([
+  "cat ~/.claude/settings.json ~/.s's'h/id_ed25519; shieldcortex guard --help",
+  "cat ~/.claude/settings.json; cat ~/.s's'h/id_ed25519; openclaw models list",
+  "grep -f ~/.s's'h/id_ed25519 ~/.claude/settings.json; shieldcortex guard --help",
+  "cat ~/.claude/settings.json ~/.s?h/id_ed25519; shieldcortex guard --help",
+  "cat ~/.claude/settings.json ~/.s[s]h/id_ed25519; shieldcortex guard --help",
+  "cat ~/.claude/settings.json ~/.s*/id_ed25519; shieldcortex guard --help",
+  "cat ~/.claude/settings.json ~/./.s's'h/id_ed25519; shieldcortex guard --help",
+  "cat ~/.claude/settings.json ~//.s's'h/id_ed25519; shieldcortex guard --help",
+  "cat ~/.claude/settings.json; cat ~/./.s's'h/id_ed25519; openclaw models list",
+  "grep -f ~/./.s's'h/id_ed25519 ~/.claude/settings.json; shieldcortex guard --help",
+  "cat ~/.claude/settings.json '.ssh'/id_ed25519; shieldcortex guard --help",
+  "cat ~/.claude/settings.json id_ed25519; shieldcortex guard --help",
+  "cat ~/.claude/settings.json id_ecdsa; shieldcortex guard --help",
+  "cat ~/.claude/settings.json id_dsa; shieldcortex guard --help",
+  "grep id_ed25519 ~/.claude/settings.json; shieldcortex guard --help",
+  "cat ~/.claude/settings.json ~/.docker/config.json; shieldcortex guard --help",
+  "cat ~/.claude/settings.json ~/.config/gcloud/application_default_credentials.json; shieldcortex guard --help",
+  "cat ~/.claude/settings.json ~/.netrc; shieldcortex guard --help",
+  "cat ~/.claude/settings.json; cat ~/.docker/config.json; shieldcortex guard --help",
+  "cat ~/.claude/settings.json; cat ~/.config/gcloud/application_default_credentials.json; shieldcortex guard --help",
+  "cat ~/.claude/settings.json; cat ~/.netrc; shieldcortex guard --help",
+  "grep -n x ~/.openclaw/openclaw.json ~/.docker/config.json; openclaw models list",
+  "grep -n x ~/.openclaw/openclaw.json ~/.config/gcloud/application_default_credentials.json; openclaw models list",
+  "grep -n x ~/.openclaw/openclaw.json ~/.netrc; openclaw models list",
+  "jq . ~/.shieldcortex/config.json ~/.docker/config.json; pwd",
+  "jq . ~/.shieldcortex/config.json ~/.config/gcloud/application_default_credentials.json; pwd",
+  "jq . ~/.shieldcortex/config.json ~/.netrc; pwd",
+]);
+const held = (command: string, floor: string): string[] =>
+  NAMES_1005_STORE.has(command) ? ['touch-sensitive-path', floor] : [floor];
+
 describe('#874 (d) closed-set reads next to another statement', () => {
   let dir: string;
   const resolveIn = () => ({ resolveScriptSource: createScriptSourceResolver(dir) });
@@ -354,7 +391,7 @@ describe('#874 (d) closed-set reads next to another statement', () => {
   ])('a quoted or globbed key read keeps the hold as on origin/main: %s', (command) => {
     const v = run(command);
     expect(v.decision).toBe('require_approval');
-    expect(v.signals).toEqual(['disable-action-guard']);
+    expect(v.signals).toEqual(held(command, 'disable-action-guard'));
   });
 
   // #920 review r10: the same key or credential spelled with a `.`/`..`
@@ -398,7 +435,7 @@ describe('#874 (d) closed-set reads next to another statement', () => {
   ])('a non-canonically spelled key read keeps the hold as on origin/main: %s', (command) => {
     const v = run(command);
     expect(v.decision).toBe('require_approval');
-    expect(v.signals).toEqual(['disable-action-guard']);
+    expect(v.signals).toEqual(held(command, 'disable-action-guard'));
   });
 
   // #920 review r11/r12: a relative multi-segment word (`.ssh/id_ed25519`
@@ -450,7 +487,7 @@ describe('#874 (d) closed-set reads next to another statement', () => {
   ])('a cwd-relative key read keeps the hold as on origin/main: %s', (command) => {
     const v = run(command);
     expect(v.decision).toBe('require_approval');
-    expect(v.signals).toEqual(['disable-action-guard']);
+    expect(v.signals).toEqual(held(command, 'disable-action-guard'));
   });
 
   // #920 review r13: the home-anchored and absolute spellings of the same
@@ -519,7 +556,7 @@ describe('#874 (d) closed-set reads next to another statement', () => {
   ])('a non-canonical word refuses the relief even when harmless: %s', (command) => {
     const v = run(command);
     expect(v.decision).toBe('require_approval');
-    expect(v.signals).toEqual(['disable-action-guard']);
+    expect(v.signals).toEqual(held(command, 'disable-action-guard'));
   });
 
   it.each([
@@ -573,7 +610,7 @@ describe('#874 (d) closed-set reads next to another statement', () => {
   ])('a read of anything but the guard files keeps the hold as on origin/main: %s', (command) => {
     const v = run(command);
     expect(v.decision).toBe('require_approval');
-    expect(v.signals).toEqual([command.includes('.shieldcortex/') ? 'touch-guard-config' : 'disable-action-guard']);
+    expect(v.signals).toEqual(held(command, command.includes('.shieldcortex/') ? 'touch-guard-config' : 'disable-action-guard'));
   });
 
   it.each([
