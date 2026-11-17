@@ -115,7 +115,8 @@ _FALLBACK_DANGEROUS = [
     re.compile(r"\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log", re.I),
     _FALLBACK_DESTROY_ROW,
     # #505: `.ssh` behind any home root + `authorized_keys` as a path segment — mirrors the guard row.
-    re.compile(r"/etc/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|/home/[^\s/'\"]+|/root|/Users/[^\s/'\"]+)/\.ssh(?![\w.-])|(?:^|[\s'\"=:/])\.ssh/authorized_keys2?\b|/authorized_keys2?\b|id_rsa|\.aws/credentials|\.env\b", re.I),
+    # #1005: plus the named credential stores (the guard's CREDENTIAL_STORE_PATH_SRC).
+    re.compile(r"/etc/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|/home/[^\s/'\"]+|/root|/Users/[^\s/'\"]+)/\.ssh(?![\w.-])|(?:^|[\s'\"=:/])\.ssh/authorized_keys2?\b|/authorized_keys2?\b|id_rsa|\.aws/credentials|\.env\b|\.netrc\b|_netrc\b|\.git-credentials\b|\.config/gh/hosts\.ya?ml\b|\.docker/config\.json\b|\.pgpass\b|\.pypirc\b|\.vault-token\b|application_default_credentials\.json\b|\.config/gcloud/(?:credentials|access_tokens)\.db\b|\.azure/(?:accessTokens\.json|msal_token_cache\.(?:json|bin))\b|(?:^|[\s'\"=:/~@])\.secrets?/|\bid_(?:ed25519|ecdsa|dsa)\b(?!\.pub)", re.I),
     # #505: a shell write shape onto a login/interactive startup file — mirrors the guard row.
     re.compile(
         r"(?:(?:>>?|>\|)(?:[ \t]|\\\n)*|\btee\b(?:(?:[ \t]|\\\n)+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|\"[^\"\n]*\"|[^\s'\"|;&<>\\-][^\s'\"|;&<>\\]*))*(?:[ \t]|\\\n)+|\bsed\b(?=[^|;&\n]*[ \t](?:-[a-zA-Z]*i|--in-place))[^|;&\n]*(?:[ \t]|\\\n)+)['\"]?(?:[^\s'\"|;&<>]*/)?"
