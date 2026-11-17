@@ -7,6 +7,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.20.2] - 2026-11-17
+
 ### Fixed
 - **A partly delivered MCP tool alert is no longer repeated in full on the retry (#926).** The session-start tool-description check can send two messages for one server in a single run: one for tools that look suspicious and one for tools that only changed. If the first went out and the second failed, the next run sent the first again and wrote a second findings row for it. The check now keeps a delivery checkpoint per tool version (server, config source, tool, alert kind and content hash) in its state file, so the retry sends only what was not delivered. Delivered and recorded are tracked separately: if a message went out but its findings row could not be written, the retry writes the row without sending the message again, and the stored tool hashes still do not advance until the row exists. This covers the ordinary retry, not every case. A crash between the webhook accepting a message and the state file being saved, a state file that cannot be written, or two checks running at the same moment can still repeat a message. A checkpoint is dropped after 7 days, so an alert stuck behind a failing one is sent again after that. All of these err towards a repeat, never towards a missed alert. No database change.
 
