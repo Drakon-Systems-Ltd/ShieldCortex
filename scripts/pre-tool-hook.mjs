@@ -2668,6 +2668,14 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
   { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
+  // #1005 (SCN-008b): a network client at command position whose request, in
+  // the same statement, expands a credential-named variable. Blunter than the
+  // guard (outage only): the name is a substring test, and a credential in an
+  // auth option (`-H`, `-u`) gates here although the guard leaves it to R1.
+  // Linear: no token class crosses an anchor, and the gap stops before the
+  // next client word, so each character is read from at most one anchor.
+  // `dataQuotes`: an `echo "curl …"` / `git commit -m` mention is not a call.
+  { re: /(?:^|[;&|(\n"'`])[^\S\n]*(?:(?:if|then|elif|else|do|while|until|!|\{)[^\S\n]+)*(?:\w+=[^\s'"`;&|()]*[^\S\n]+)*(?:(?:[\w.~-]*\/)*(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec|xargs)(?:[^\S\n]+(?:-[^\s'"`;&|()]+|\w+=[^\s'"`;&|()]*|\d+(?:\.\d+)?[smhd]?))*[^\S\n]+)*(?:[\w.~-]*\/)*(?:curl|wget|https?|xh|aria2c)(?=[\s'"`;&|)]|$)(?:(?![\s'"`(](?:[\w.~-]*\/)*(?:curl|wget|https?|xh|aria2c)(?=[\s'"`;&|)]|$))[^;&|\n])*?\$(?:\{|\(printenv[^\S\n]+)?\w*?(?:(?<!page_)(?<!next_)(?<!cursor_)(?<!csrf_)(?<!xsrf_)token|secret|passw(?:or)?d|credential|api_?key|access_?key|private_?key)/i, signal: 'env-credential-egress', dataQuotes: true },
 ];
 
 /** Same command/path/url field set tool-action-guard.ts extracts — narrow, not the whole args object. */
