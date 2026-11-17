@@ -678,8 +678,10 @@ class DestroyRowDataQuoteTests(unittest.TestCase):
             self.assertFalse(fallback_dangerous_match(cmd), cmd)
             self.assertIsNone(action_guard_decision(down, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd)), cmd)
 
-    def test_only_the_destroy_row_reads_quotes(self):
-        # Every other row keeps its plain search: a quoted sudo still gates.
+    def test_rows_outside_the_mention_aware_set_still_gate_quoted_text(self):
+        # Only the teardown, credential-request and posture rows read quoted
+        # data as a mention; every other row keeps its plain search: a quoted
+        # sudo still gates.
         from sc_client import fallback_dangerous_match
         self.assertTrue(fallback_dangerous_match('echo "sudo reboot"'))
 
