@@ -1579,20 +1579,29 @@ const HTTPIE_CLIENT = /^(?:https?|xh)$/i;
 const HTTP_METHOD_WORD = /^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/i;
 // An HTTPie request item `Name:value` is a header; `name:=json` is data.
 const HTTPIE_HEADER_ITEM = /^[A-Za-z0-9!#%&'*+.^_|~-]+:(?!=)/;
-// Long options whose value authenticates the request, per client.
-const AUTH_LONG_OPTION: Record<string, RegExp> = {
-  curl: /^(?:header|user|oauth2-bearer|proxy-user|proxy-header)$/,
-  wget: /^(?:header|user|password|http-user|http-password|proxy-user|proxy-password|ftp-user|ftp-password)$/,
-  aria2c: /^(?:header|http-user|http-passwd|ftp-user|ftp-passwd)$/,
-  httpie: /^(?:auth|bearer)$/,
+// Options whose value is never sent as request data, per client: the value
+// authenticates the request (R1 above), or it names a LOCAL file the client
+// writes (`-o`, `--dump-header`, `--cookie-jar`, wget `-O`/`-P`, …). Input
+// and upload options (`-d`, `-F`, `-T`, `-b`, `-e`, `--url`) are sent.
+const UNSENT_LONG_OPTION: Record<string, RegExp> = {
+  curl: /^(?:header|user|oauth2-bearer|proxy-user|proxy-header|output|dump-header|cookie-jar|trace|trace-ascii|stderr|output-dir|etag-save|hsts|alt-svc|libcurl)$/,
+  wget: /^(?:header|user|password|http-user|http-password|proxy-user|proxy-password|ftp-user|ftp-password|output-document|output-file|append-output|directory-prefix|save-cookies)$/,
+  aria2c: /^(?:header|http-user|http-passwd|ftp-user|ftp-passwd|out|dir)$/,
+  httpie: /^(?:auth|bearer|output)$/,
 };
 // HTTPie long options that take a separate value, so the value is not read
 // as the URL (the first positional; header items only follow it).
-const HTTPIE_VALUE_OPTION = /^(?:--(?:timeout|session|session-read-only|output|auth-type|proxy|verify|cert|cert-key|print|pretty|style|max-redirects)|-[oAps])$/;
-// curl short options that take a value; the first one in a cluster takes the
-// rest of the word, or the next word when it ends the cluster.
-const CURL_VALUE_SHORT = 'AbcCdDEeFHKmoPQrTtuUwXxYyz';
-const CURL_AUTH_SHORT = 'HuU';
+const HTTPIE_VALUE_OPTION = /^(?:--(?:timeout|session|session-read-only|auth-type|proxy|verify|cert|cert-key|print|pretty|style|max-redirects)|-[Aps])$/;
+// Short options that take a value, per client; the first one in a cluster
+// takes the rest of the word, or the next word when it ends the cluster.
+// UNSENT_SHORT is the subset whose value is skipped, as above.
+const VALUE_SHORT: Record<string, string> = {
+  curl: 'AbcCdDEeFHKmoPQrTtuUwXxYyz',
+  wget: 'aABDeIilnoOPQRtTUwX',
+  aria2c: 'dhijklmMostTuUx',
+  httpie: 'aAops',
+};
+const UNSENT_SHORT: Record<string, string> = { curl: 'HuUoDc', wget: 'aoOP', aria2c: 'od', httpie: 'ao' };
 // ssh options that take a value, so the host (and the remote command after
 // it) is found past them.
 const SSH_VALUE_SHORT = 'BbcDEeFIiJLlmOoPpQRSWw';
@@ -1621,14 +1630,15 @@ function expandsCredentialVariable(text: string): boolean {
 function clientArgvSendsCredential(client: string, args: readonly string[]): boolean {
   const c = client.toLowerCase();
   const httpie = HTTPIE_CLIENT.test(c);
-  const authLong = AUTH_LONG_OPTION[httpie ? 'httpie' : c];
+  const family = httpie ? 'httpie' : c;
+  const unsentLong = UNSENT_LONG_OPTION[family];
   const sent: string[] = [];
   let sawUrl = false;
   for (let k = 0; k < args.length; k++) {
     const a = args[k];
     if (a.startsWith('--') && a.length > 2) {
       const eq = a.indexOf('=');
-      if (authLong.test((eq < 0 ? a : a.slice(0, eq)).slice(2).toLowerCase())) {
+      if (unsentLong.test((eq < 0 ? a : a.slice(0, eq)).slice(2).toLowerCase())) {
         if (eq < 0) k++;                                   // the value is the next word
         continue;
       }
@@ -1637,23 +1647,17 @@ function clientArgvSendsCredential(client: string, args: readonly string[]): boo
       continue;
     }
     if (a.startsWith('-') && a.length > 1) {
-      if (c === 'curl') {
-        let auth = false;
-        for (let p = 1; p < a.length; p++) {
-          if (!CURL_VALUE_SHORT.includes(a[p])) continue;
-          if (CURL_AUTH_SHORT.includes(a[p])) {
-            auth = true;
-            if (p === a.length - 1) k++;                     // `-H "…"`: skip the next word too
-          }
-          break;
+      let unsent = false;
+      for (let p = 1; p < a.length; p++) {
+        if (!VALUE_SHORT[family].includes(a[p])) continue;
+        if (UNSENT_SHORT[family].includes(a[p])) {
+          unsent = true;
+          if (p === a.length - 1) k++;                       // `-H "…"`, `-sSo f`: skip the next word too
         }
-        if (auth) continue;
-      } else if (httpie && a.startsWith('-a')) {
-        if (a === '-a') k++;
-        continue;
-      } else if (httpie && HTTPIE_VALUE_OPTION.test(a)) {
-        sent.push(args[++k] ?? '');
+        break;
       }
+      if (unsent) continue;
+      if (httpie && HTTPIE_VALUE_OPTION.test(a)) sent.push(args[++k] ?? '');
       sent.push(a);
       continue;
     }
