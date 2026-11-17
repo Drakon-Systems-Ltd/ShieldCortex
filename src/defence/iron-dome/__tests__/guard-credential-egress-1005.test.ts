@@ -3,6 +3,7 @@ import { performance } from 'node:perf_hooks';
 import { evaluateToolCall, readOnlyInspectionMask, CATASTROPHIC_SIGNALS } from '../tool-action-guard.js';
 import { TAP_ELIGIBLE_SIGNALS, tapTerminalOnlyReason } from '../tap-eligibility.js';
 import { SIGNAL_PHRASES, SIGNAL_CLASSES } from '../approval-card.js';
+import { projectActionGuardFields } from '../operator-notify.js';
 
 /**
  * #1005 (SCN-008a) — named credential stores in the sensitive-path set.
@@ -441,6 +442,10 @@ describe('#1005 SCN-008b — a credential-named variable in a request cards on a
     expect(CATASTROPHIC_SIGNALS).not.toContain(ENV);
   });
 
+  it('operator-notify keeps the signal name on a denial row instead of redacting it', () => {
+    expect(projectActionGuardFields({ tool: 'Bash', signals: [ENV], event: 'action_guard_denial' }).signals).toEqual([ENV]);
+  });
+
   it('is not one-tap eligible: the card cannot show the value, so the door is the terminal', () => {
     expect(TAP_ELIGIBLE_SIGNALS).not.toContain(ENV);
     expect(tapTerminalOnlyReason([ENV])).toBe('unknown-signal');
@@ -466,6 +471,11 @@ const ENV_CONTROLS: Array<[label: string, tool: string, args: Record<string, unk
   ['echo, bare words', 'Bash', bash('echo curl $GITHUB_TOKEN'), ALLOW_BENIGN],
   ['printf argument', 'Bash', bash('printf \'%s\\n\' "curl -s $SINK?k=$GITHUB_TOKEN"'), ALLOW_BENIGN],
   ['grep for the name', 'Bash', bash("grep -rn 'GITHUB_TOKEN' docs/"), ALLOW_BENIGN],
+  // A closing quote is an anchor, so the row proposes on ` curl` here; the
+  // disposer refuses it because `curl` is an argument, not the command.
+  ['client word as an echo argument after a quote', 'Bash', bash('echo "step:" curl "$SINK?k=$GITHUB_TOKEN"'), ALLOW_BENIGN],
+  ['client word as a printf argument after a quote', 'Bash', bash('printf \'%s \' "x" curl "$SINK?k=$X_SECRET"'), ALLOW_BENIGN],
+  ['client word as a commit pathspec after a quote', 'Bash', bash('git commit -m "fix" curl $GITHUB_TOKEN'), GIT_MUTATE],
   ['commit message', 'Bash', bash("git commit -m 'never put $GITHUB_TOKEN in a curl URL'"), GIT_MUTATE],
   ['commit message quoting a curl call', 'Bash', bash('git commit -m "curl https://x/?k=$GITHUB_TOKEN is wrong"'), GIT_MUTATE],
   ['gh --body', 'Bash', bash("gh pr comment 1 --body 'never curl https://x.example.com/?k=$GITHUB_TOKEN'"), ALLOW_BENIGN],
