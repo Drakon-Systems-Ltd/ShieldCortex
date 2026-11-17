@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -15,8 +16,9 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { parsePluginListEntry, stepOpenClawPlugin } from '../cli/update.js';
+import { parsePluginListEntry, stepOpenClawPlugin, updateVerdict } from '../cli/update.js';
 import { buildUpdateSummary, renderUpdateSummary, type UpdateSummaryInput } from '../cli/update-summary.js';
 import { NO_STYLE } from '../cli/term-ui.js';
 import {
@@ -35,11 +37,17 @@ import type { CapturedError } from '../integrations/child-output.js';
  *     reference unresolvable). The one retry now carries the local gateway's
  *     own boot credential from `~/.openclaw/gateway.systemd.env` — the file
  *     OpenClaw writes as the gateway unit's EnvironmentFile — in that child's
- *     env only, after fixed-path, owner, mode and local-gateway checks.
+ *     env only, after fixed-path, owner, mode and local-gateway checks
+ *     (r2: no symlinked `~/.openclaw`, the gateway mode as OpenClaw would
+ *     resolve it, no Node spawn diagnostics), and nothing that child says is
+ *     shown.
  *  2. When the install is still refused, OpenClaw's own plugin list is read
  *     before the closing screen: a previous version still listed and enabled
- *     is "plugin not updated (still on X)", not "the gateway started without
- *     the ShieldCortex plugin" / "OpenClaw isn't running the plugin".
+ *     is "plugin not updated (still on X)" — installed and listed, never
+ *     "running" — and a check that proved the plugin absent stays red.
+ *
+ * The directory-swap race and missing open flags are pinned in
+ * update-gateway-boot-env-1105-fs.test.ts, which replaces `fs` for the module.
  */
 
 const CLI = '5.20.1';
@@ -65,6 +73,11 @@ const ENV_KEYS = [
   'OPENCLAW_HOME',
   'OPENCLAW_PROFILE',
   'OPENCLAW_CONFIG_PATH',
+  'CLAWDBOT_STATE_DIR',
+  'CLAWDBOT_CONFIG_PATH',
+  'CLAWDBOT_GATEWAY_URL',
+  'NODE_DEBUG',
+  'NODE_DEBUG_NATIVE',
 ] as const;
 
 let home: string;
@@ -95,12 +108,17 @@ afterEach(() => {
 });
 
 function writeConfig(mode: 'local' | 'remote' | null) {
-  writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({
+  writeRawConfig({
     gateway: {
       ...(mode ? { mode } : {}),
       auth: { mode: 'token', token: { source: 'exec', provider: 'vault', id: 'gateway/token' } },
     },
-  }));
+  });
+}
+
+/** openclaw.json exactly as given (an object is serialized; a string is written verbatim). */
+function writeRawConfig(body: unknown) {
+  writeFileSync(join(home, '.openclaw', 'openclaw.json'), typeof body === 'string' ? body : JSON.stringify(body));
 }
 
 const bootEnvPath = () => join(home, '.openclaw', 'gateway.systemd.env');
@@ -160,9 +178,9 @@ describe('#1105 — parsing the gateway boot env (KEY=VALUE only, never run)', (
     });
   });
 
-  it('accepts a plain single-quoted value, comments, blank lines and CRLF endings', () => {
-    const body = ['; note', '', "OPENCLAW_GATEWAY_TOKEN='two words'\r", '# end\r'].join('\n');
-    expect(parseGatewayBootEnv(body)).toEqual({ OPENCLAW_GATEWAY_TOKEN: 'two words' });
+  it('accepts comments, blank lines and CRLF endings', () => {
+    const body = ['; note', '', `OPENCLAW_GATEWAY_TOKEN=${TOKEN}\r`, '# end\r'].join('\n');
+    expect(parseGatewayBootEnv(body)).toEqual({ OPENCLAW_GATEWAY_TOKEN: TOKEN });
   });
 
   it('takes nothing but the two credential keys — every other assignment is ignored', () => {
@@ -187,6 +205,10 @@ describe('#1105 — parsing the gateway boot env (KEY=VALUE only, never run)', (
     ['unbalanced double quotes', '"abc'],
     ['an unescaped inner double quote', '"ab"cd"'],
     ['unbalanced single quotes', "'abc"],
+    // #1105 r2 (nit): OpenClaw's serializer never writes single quotes, so a
+    // single-quoted value did not come from it.
+    ['a single-quoted value', "'two words'"],
+    ['a single-quoted value with no space', "'tok'"],
     ['inner whitespace in a bare value', 'two words'],
     ['a trailing comment', 'tok # comment'],
     ['a bare backslash', 'to\\k'],
@@ -259,6 +281,60 @@ describe('#1105 — reading the gateway boot env: fixed path, owner-checked, loc
     ['a directory at the path', () => { rmSync(bootEnvPath()); mkdirSync(bootEnvPath(), { mode: 0o700 }); }, /is not a regular file/],
     ['a file over 64 KiB', () => writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n#${'x'.repeat(64 * 1024)}\n`), /larger than 64 KiB/],
     ['a file with no plain credential line', () => writeBootEnv('OPENCLAW_GATEWAY_TOKEN=$FROM_ELSEWHERE\nOTHER=1\n'), /has no plain OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD line/],
+
+    // #1105 r2 B-dir: `~/.openclaw` itself must not be a link — even to a
+    // directory the user owns, mode 0700, holding a valid 0600 boot env.
+    ['~/.openclaw as a symlink to a private directory the user owns', () => {
+      const real = join(home, 'real-openclaw');
+      renameSync(join(home, '.openclaw'), real);
+      chmodSync(real, 0o700);
+      expect(statSync(join(real, 'gateway.systemd.env')).mode & 0o777).toBe(0o600);
+      symlinkSync(real, join(home, '.openclaw'));
+    }, /^~\/\.openclaw is a symbolic link$/],
+
+    // #1105 r2 B1: the mode OpenClaw acts on is resolved AFTER $include and
+    // ${VAR} substitution, and after the config's env block is applied. None
+    // of that is resolved here, so every such form fails closed.
+    ['$include at the top level', () => writeRawConfig({ $include: './gateway.json5' }), /uses \$include/],
+    ['$include nested under gateway', () => writeRawConfig({ gateway: { $include: './remote.json5' } }), /uses \$include/],
+    ['$include inside an array', () => writeRawConfig({ gateway: { mode: 'local' }, agents: [{ $include: './a.json5' }] }), /uses \$include/],
+    ['$include spelled with a JSON escape', () => writeRawConfig('{"gateway":{"\\u0024include":"./remote.json5"}}'), /uses \$include/],
+    ['${VAR} as gateway.mode', () => writeRawConfig({ gateway: { mode: '${OPENCLAW_MODE}' } }), /uses \$\{…\} substitution/],
+    ['${VAR:-remote} as gateway.mode', () => writeRawConfig({ gateway: { mode: '${MODE:-remote}' } }), /uses \$\{…\} substitution/],
+    ['${VAR} in any other string', () => writeRawConfig({ gateway: { mode: 'local' }, agents: { list: [{ name: 'a-${HOSTNAME}' }] } }), /uses \$\{…\} substitution/],
+    ['${VAR} in a key', () => writeRawConfig({ gateway: { mode: 'local' }, '${KEY}': 1 }), /uses \$\{…\} substitution/],
+    ['gateway.mode "Remote" (not exactly "local")', () => writeRawConfig({ gateway: { mode: 'Remote' } }), /gateway\.mode is not exactly "local"/],
+    ['gateway.mode " remote " (OpenClaw trims it)', () => writeRawConfig({ gateway: { mode: ' remote ' } }), /gateway\.mode is not exactly "local"/],
+    ['gateway.mode null', () => writeRawConfig({ gateway: { mode: null } }), /gateway\.mode is not exactly "local"/],
+    ['gateway that is not an object', () => writeRawConfig({ gateway: 'remote' }), /gateway in ~\/\.openclaw\/openclaw\.json is not an object/],
+    ['a config that is not a JSON object', () => writeRawConfig('[]'), /is not a JSON object/],
+    ['a JSON5 config (strict JSON is all this reader knows)', () => writeRawConfig('{ // remote below?\n "gateway": { "mode": "local" } }'), /could not be read to confirm a local gateway/],
+    ['an env block that sets OPENCLAW_GATEWAY_URL', () => writeRawConfig({ gateway: { mode: 'local' }, env: { OPENCLAW_GATEWAY_URL: 'wss://elsewhere.example' } }), /env block .* sets an OPENCLAW_\* or CLAWDBOT_\* variable/],
+    ['env.vars that sets OPENCLAW_GATEWAY_URL', () => writeRawConfig({ gateway: { mode: 'local' }, env: { vars: { OPENCLAW_GATEWAY_URL: 'wss://elsewhere.example' } } }), /env block .* sets an OPENCLAW_\* or CLAWDBOT_\* variable/],
+    ['env.vars that sets a lower-case clawdbot_ variable', () => writeRawConfig({ env: { vars: { clawdbot_state_dir: '/srv/other' } } }), /env block .* sets an OPENCLAW_\* or CLAWDBOT_\* variable/],
+    ['an env block that is not an object', () => writeRawConfig({ env: 'OPENCLAW_GATEWAY_URL=wss://x' }), /env block .* could not be checked/],
+    ['a symlinked openclaw.json (to a valid local config)', () => {
+      const elsewhere = join(home, 'local-config.json');
+      writeFileSync(elsewhere, JSON.stringify({ gateway: { mode: 'local' } }), { mode: 0o600 });
+      rmSync(join(home, '.openclaw', 'openclaw.json'));
+      symlinkSync(elsewhere, join(home, '.openclaw', 'openclaw.json'));
+    }, /openclaw\.json is a symbolic link/],
+
+    // Grok nit: the legacy spellings relocate OpenClaw too — any CLAWDBOT_*.
+    ['CLAWDBOT_STATE_DIR set', () => { process.env.CLAWDBOT_STATE_DIR = '/srv/other'; }, /CLAWDBOT_STATE_DIR is set/],
+    ['CLAWDBOT_CONFIG_PATH set', () => { process.env.CLAWDBOT_CONFIG_PATH = '/srv/other.json'; }, /CLAWDBOT_CONFIG_PATH is set/],
+    ['any other CLAWDBOT_* variable set', () => { process.env.CLAWDBOT_GATEWAY_URL = 'wss://elsewhere.example'; }, /CLAWDBOT_GATEWAY_URL is set/],
+
+    // #1105 r2 B4: Node's child_process debug log prints every spawn's env to
+    // this process's stderr. Any non-blank NODE_DEBUG refuses the borrow,
+    // whatever it names — and so does NODE_DEBUG_NATIVE.
+    ['NODE_DEBUG=child_process', () => { process.env.NODE_DEBUG = 'child_process'; }, /^NODE_DEBUG is set, and Node's diagnostics would print the retry child's environment/],
+    ['NODE_DEBUG=CHILD_PROCESS (Node matches sections case-insensitively)', () => { process.env.NODE_DEBUG = 'CHILD_PROCESS'; }, /^NODE_DEBUG is set/],
+    ['NODE_DEBUG=* (wildcard)', () => { process.env.NODE_DEBUG = '*'; }, /^NODE_DEBUG is set/],
+    ['NODE_DEBUG=child* (prefix wildcard)', () => { process.env.NODE_DEBUG = 'child*'; }, /^NODE_DEBUG is set/],
+    ['NODE_DEBUG=net,child_process (a list)', () => { process.env.NODE_DEBUG = 'net,child_process'; }, /^NODE_DEBUG is set/],
+    ['NODE_DEBUG=http (any section at all)', () => { process.env.NODE_DEBUG = 'http'; }, /^NODE_DEBUG is set/],
+    ['NODE_DEBUG_NATIVE set', () => { process.env.NODE_DEBUG_NATIVE = 'all'; }, /^NODE_DEBUG_NATIVE is set/],
   ];
 
   it.each(REFUSALS)('not used: %s', (_label, arrange, reason, over = {}) => {
@@ -271,6 +347,22 @@ describe('#1105 — reading the gateway boot env: fixed path, owner-checked, loc
     // A reason is shown to the operator: never the value, never the absolute home.
     expect(r.reason).not.toContain(TOKEN);
     expect(r.reason).not.toContain(home);
+  });
+
+  it('gateway.mode exactly "local", with a $schema key and an unrelated env var: used', () => {
+    writeRawConfig({
+      $schema: 'https://docs.openclaw.ai/schema/openclaw.json',
+      gateway: { mode: 'local', auth: { mode: 'token', token: { source: 'exec', provider: 'vault', id: 'gateway/token' } } },
+      env: { vars: { HTTP_PROXY: 'http://proxy.internal:3128' } },
+    });
+    writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+    expect(resolve()).toMatchObject({ used: true, keys: ['OPENCLAW_GATEWAY_TOKEN'] });
+  });
+
+  it('NODE_DEBUG refuses before anything is read: no ~/.openclaw at all still names NODE_DEBUG', () => {
+    rmSync(join(home, '.openclaw'), { recursive: true, force: true });
+    process.env.NODE_DEBUG = 'child_process';
+    expect(resolve()).toEqual({ used: false, reason: expect.stringMatching(/^NODE_DEBUG is set/) });
   });
 
   it('a FIFO at the path is refused without blocking the read', () => {
@@ -314,6 +406,8 @@ describe('#1105 — the update step: SecretRef token, no gateway credential in t
     list?: Record<string, unknown> | null;
     /** What a retry that HAS a credential ends with, instead of installing. */
     credentialedEnding?: Partial<CapturedError>;
+    /** OpenClaw's refusal to a child with no credential (default: the token path). */
+    refusal?: string;
   } = {}) {
     const calls: Call[] = [];
     let onDisk = BEFORE;
@@ -331,7 +425,7 @@ describe('#1105 — the update step: SecretRef token, no gateway credential in t
       const hasCredential = Boolean(env.OPENCLAW_GATEWAY_TOKEN || env.OPENCLAW_GATEWAY_PASSWORD);
       if (!hasCredential) {
         return Promise.reject(Object.assign(new Error('exit 1: openclaw plugins install'), {
-          exitCode: 1, command: FORCE_INSTALL, stdout: '', stderr: SECRET_REF_STDERR,
+          exitCode: 1, command: FORCE_INSTALL, stdout: '', stderr: opts.refusal ?? SECRET_REF_STDERR,
         }) as CapturedError);
       }
       if (opts.credentialedEnding) {
@@ -408,36 +502,134 @@ describe('#1105 — the update step: SecretRef token, no gateway credential in t
     expect(r.detail?.[0]).toContain('once with OPENCLAW_GATEWAY_PASSWORD from the local gateway\'s boot env');
   });
 
-  it('whatever the child says back is scrubbed of the credential before it reaches the screen', async () => {
-    writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
-    const f = fakeOpenClaw({
-      list: { enabled: true, status: 'loaded' },
-      credentialedEnding: { stderr: `gateway rejected token ${TOKEN}: unauthorized (token=${TOKEN})` },
-    });
+  it('a password-path refusal is named as gateway.auth.password, and the retry carries only the password', async () => {
+    writeBootEnv(`OPENCLAW_GATEWAY_PASSWORD=${PASSWORD}\n`);
+    const f = fakeOpenClaw({ refusal: SECRET_REF_STDERR.replace('gateway.auth.token', 'gateway.auth.password') });
     const { value: r, out } = await step(f);
 
-    expect(r.status).toBe('warn');
-    expect(r.unfinished).toBe(true);
-    const shown = [r.summary ?? '', ...(r.detail ?? [])].join('\n');
-    expect(shown).toContain('rejected token [redacted:$OPENCLAW_GATEWAY_TOKEN]');
-    expect(shown).not.toContain(TOKEN);
-    expect(out).not.toContain(TOKEN);
-    // Not even part of it. The shared reporter's own redaction rewrites
-    // `…-token` and `token=…` shapes; run before the exact-value scrub, it cut
-    // the value apart and left `plain-words-gateway-` on screen.
-    expect(shown).not.toContain('plain-words');
-    expect(out).not.toContain('plain-words');
+    expect(r.status).toBe('ok');
+    const [first, retry] = installs(f);
+    expect(first.env.OPENCLAW_GATEWAY_PASSWORD).toBeUndefined();
+    expect(retry.env.OPENCLAW_GATEWAY_PASSWORD).toBe(PASSWORD);
+    expect(retry.env.OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
+    expect(r.detail?.[0]).toMatch(/^first install refused: gateway\.auth\.password is a gateway secret reference/);
+    expect(out).not.toContain(PASSWORD);
   });
 
-  it('a credential shorter than the shared reporter\'s 8-character floor is scrubbed too', async () => {
-    writeBootEnv('OPENCLAW_GATEWAY_TOKEN=Qz7k\n');
-    const f = fakeOpenClaw({ credentialedEnding: { stderr: 'auth failed for Qz7k' } });
-    const { value: r, out } = await step(f);
+  it('a password-path refusal that is refused twice names gateway.auth.password, not "a gateway config value"', async () => {
+    const f = fakeOpenClaw({ refusal: SECRET_REF_STDERR.replace('gateway.auth.token', 'gateway.auth.password') });
+    const { value: r } = await step(f);
+    expect(r.summary).toMatch(/OpenClaw refused twice: gateway\.auth\.password is a gateway secret reference/);
+    expect(r.detail?.[0]).toMatch(/^first install refused: gateway\.auth\.password is/);
+  });
 
-    const shown = [r.summary ?? '', ...(r.detail ?? [])].join('\n');
-    expect(shown).toContain('auth failed for [redacted:$OPENCLAW_GATEWAY_TOKEN]');
-    expect(shown).not.toContain('Qz7k');
-    expect(out).not.toContain('Qz7k');
+  describe('#1105 r2 B3 — a credentialed retry is reported in fixed words, never in what the child said', () => {
+    /**
+     * A value OpenClaw's serializer would write double-quoted (inner quote,
+     * backslash, surrounding spaces), and every way a child could echo it that
+     * an exact-value scrub misses.
+     */
+    const RAW = '  q"uo\\te-s3cr3t-Vx7  ';
+    const LINE = 'OPENCLAW_GATEWAY_TOKEN="  q\\"uo\\\\te-s3cr3t-Vx7  "';
+    const ECHOES = {
+      json: JSON.stringify(RAW),
+      jsonTrimmed: JSON.stringify(RAW.trim()),
+      trimmed: RAW.trim(),
+      partial: 's3cr3t-Vx7',
+      percent: encodeURIComponent(RAW.trim()),
+      base64: Buffer.from(RAW.trim()).toString('base64'),
+      shellQuoted: `'${RAW.trim().replace(/'/g, "'\\''")}'`,
+    };
+    /** Fragments no output may contain, whichever echo they came from. */
+    const FRAGMENTS = ['s3cr3t', 'Vx7', 'uo\\te', 'uo\\\\te', 'q\\"uo', ECHOES.percent, ECHOES.base64, 'rejected token', 'child-said'];
+
+    function assertNothingFromTheChild(r: unknown, out: string) {
+      const shown = JSON.stringify(r);
+      for (const frag of FRAGMENTS) {
+        expect(out).not.toContain(frag);
+        expect(shown).not.toContain(frag);
+      }
+    }
+
+    it('the boot env line decodes to the raw value the child is given', () => {
+      expect(parseGatewayBootEnv(LINE)).toEqual({ OPENCLAW_GATEWAY_TOKEN: RAW });
+    });
+
+    it('quoted, JSON-escaped, trimmed, partial, encoded and split echoes never reach any output', async () => {
+      writeBootEnv(`${LINE}\n`);
+      const f = fakeOpenClaw({
+        list: { enabled: true, status: 'loaded' },
+        credentialedEnding: {
+          exitCode: 1,
+          // One half of the trimmed value on each stream, and every echo whole.
+          stdout: [`child-said token=${ECHOES.trimmed.slice(0, 7)}`, ...Object.values(ECHOES)].join('\n'),
+          stderr: [`Error: gateway rejected token ${ECHOES.json}`, ECHOES.trimmed.slice(7), `{"token":${ECHOES.jsonTrimmed}}`, `auth=${ECHOES.shellQuoted}`].join('\n'),
+          message: `exit 1: gateway rejected token ${ECHOES.trimmed}`,
+        },
+      });
+      const { value: r, out } = await step(f);
+
+      expect(installs(f)[1].env.OPENCLAW_GATEWAY_TOKEN).toBe(RAW);
+      expect(r.status).toBe('warn');
+      expect(r.unfinished).toBe(true);
+      expect(r.summary).toMatch(/^update failed — openclaw plugins install exited 1 \(its output is withheld: this retry carried the gateway credential\)/);
+      expect(r.rerun).toBe(FORCE_INSTALL);
+      assertNothingFromTheChild(r, out);
+    });
+
+    it('a child that timed out: the timeout, and nothing it said', async () => {
+      writeBootEnv(`${LINE}\n`);
+      const f = fakeOpenClaw({
+        credentialedEnding: { exitCode: null, timedOut: true, stdout: `child-said ${ECHOES.trimmed}`, stderr: ECHOES.json },
+      });
+      const { value: r, out } = await step(f);
+      expect(r.status).toBe('warn');
+      expect((r.detail ?? []).join('\n')).not.toContain('child-said');
+      assertNothingFromTheChild(r, out);
+    });
+
+    it('a credentialed child refused for the reference again: the refused-twice message, in fixed words', async () => {
+      writeBootEnv(`${LINE}\n`);
+      const f = fakeOpenClaw({
+        list: { enabled: true, status: 'loaded' },
+        credentialedEnding: { stderr: `${SECRET_REF_STDERR}\nchild-said token was ${ECHOES.json}` },
+      });
+      const { value: r, out } = await step(f);
+      expect(r.summary).toBe(
+        `not updated — still on v${BEFORE}; OpenClaw refused twice: gateway.auth.token is a gateway secret reference it could not resolve here`,
+      );
+      expect(r.recovery?.command).toBe(FORCE_INSTALL);
+      expect(r.detail).toContain('gateway.auth.token is configured as a secret reference but is unavailable in this command path.');
+      expect(r.detail).toContain('its output is withheld: this retry carried the gateway credential');
+      assertNothingFromTheChild(r, out);
+    });
+
+    it('a credentialed child refused for an unsettled reload: the drain recovery, in fixed words', async () => {
+      writeBootEnv(`${LINE}\n`);
+      const f = fakeOpenClaw({
+        credentialedEnding: {
+          stderr: `plugin shieldcortex-realtime admitted work did not settle within 60s; the previous plugin generation stays active. child-said ${ECHOES.trimmed}`,
+        },
+      });
+      const { value: r, out } = await step(f);
+      expect(r.summary).toMatch(/^files saved — the previous plugin generation stays active/);
+      expect(r.recovery?.command).toBe('openclaw plugins reload shieldcortex-realtime --wait');
+      assertNothingFromTheChild(r, out);
+    });
+
+    it('a credential shorter than the shared reporter\'s 8-character floor: not shown either', async () => {
+      writeBootEnv('OPENCLAW_GATEWAY_TOKEN=Qz7k\n');
+      const f = fakeOpenClaw({ credentialedEnding: { stderr: 'auth failed for Qz7k' } });
+      const { value: r, out } = await step(f);
+      expect(out).not.toContain('Qz7k');
+      expect(out).not.toContain('auth failed');
+      expect(JSON.stringify(r)).not.toContain('Qz7k');
+    });
+
+    it('the exact-value scrub (the second line of defence) replaces a short value too', () => {
+      const creds = { OPENCLAW_GATEWAY_TOKEN: 'Qz7k' };
+      expect(redactGatewayCredentials('auth failed for Qz7k', creds)).toBe('auth failed for [redacted:$OPENCLAW_GATEWAY_TOKEN]');
+    });
   });
 
   it('the operator\'s own credential is never replaced — the boot env is not read and the retry is identical', async () => {
@@ -518,21 +710,39 @@ describe('#1105 — the update step: SecretRef token, no gateway credential in t
       };
     }
 
-    it('the closing screen says "not updated (still on X)", never "not running"', async () => {
+    it('a check that proved the plugin absent stays red — the still-installed version is named inside it (#1105 r2 B5)', async () => {
       const { value: r } = await refusedTwice({ enabled: true, status: 'loaded' });
       const input = closing(r);
       const summary = buildUpdateSummary(input);
       const openclaw = summary.rows.find((x) => x.label === 'OpenClaw');
       const guard = summary.rows.find((x) => x.label === 'Guard');
 
-      expect(openclaw).toMatchObject({ mark: 'check', text: `plugin not updated (still on ${BEFORE})`, command: FORCE_INSTALL, commandLabel: 'Fix' });
-      expect(guard).toMatchObject({ mark: 'check', text: 'on, but couldn\'t confirm OpenClaw is checking tool calls', command: FORCE_INSTALL, commandLabel: 'Fix' });
-      expect(summary.headline).toBe('check');
+      // Inventory (OpenClaw's plugin list) cannot contradict a runtime check
+      // that proved the plugin absent: both rows stay red.
+      expect(openclaw).toMatchObject({
+        mark: 'fail',
+        text: `plugin not updated (${BEFORE} still installed), and the gateway started without the ShieldCortex plugin`,
+      });
+      expect(guard).toMatchObject({ mark: 'fail', text: 'on, but OpenClaw isn\'t running the plugin' });
+      expect(summary.headline).toBe('failed');
       const screen = renderUpdateSummary(summary, input, { width: 100, style: NO_STYLE, ascii: true }).join('\n');
-      expect(screen).not.toContain('started without');
-      expect(screen).not.toContain('isn\'t running');
-      expect(screen).not.toContain('not running');
-      expect(screen).toContain(`still on ${BEFORE}`);
+      expect(screen).toContain(`${BEFORE} still installed`);
+      expect(screen).not.toContain('keeps running');
+    });
+
+    it('a failed check with loaded "no" and a still-listed plugin: red, and the run still exits non-zero', async () => {
+      const { value: r } = await refusedTwice({ enabled: true, status: 'loaded' });
+      expect(r.unfinished).toBe(true);
+      const summary = buildUpdateSummary({
+        ...closing(r),
+        protection: { status: 'failed', loaded: 'no', pluginVersion: BEFORE, expectedVersion: CLI },
+      });
+      expect(summary.rows.filter((x) => x.mark === 'fail').map((x) => x.label)).toEqual(['OpenClaw', 'Guard']);
+      expect(summary.headline).toBe('failed');
+      // runUpdate sets `failed` for a failed check; the refused step alone is
+      // unfinished — either way the exit code stays 1.
+      expect(updateVerdict({ failed: true, attention: true, unfinished: r.unfinished === true }).exitCode).toBe(1);
+      expect(updateVerdict({ failed: false, attention: true, unfinished: r.unfinished === true }).exitCode).toBe(1);
     });
 
     it('a plugin OpenClaw lists as disabled keeps the red "not running" finding', async () => {
@@ -543,14 +753,23 @@ describe('#1105 — the update step: SecretRef token, no gateway credential in t
       expect(summary.headline).toBe('failed');
     });
 
-    it('with no failed check, the OpenClaw row still names the version it is on', async () => {
+    it('with loading unproven, the OpenClaw row says installed and listed — never "running" (#1105 r2 B5)', async () => {
       const { value: r } = await refusedTwice({ enabled: true, status: 'loaded' });
-      const summary = buildUpdateSummary({ ...closing(r), protection: { status: 'unproven', loaded: 'unknown', pluginVersion: BEFORE } });
+      const input: UpdateSummaryInput = { ...closing(r), protection: { status: 'unproven', loaded: 'unknown', pluginVersion: BEFORE } };
+      const summary = buildUpdateSummary(input);
       expect(summary.rows.find((x) => x.label === 'OpenClaw')).toMatchObject({
         mark: 'check',
         text: `plugin not updated (still on ${BEFORE})`,
-        why: 'OpenClaw keeps running the previous plugin.',
+        why: 'The previous version is still installed and listed enabled.',
       });
+      expect(summary.rows.find((x) => x.label === 'Guard')).toMatchObject({
+        mark: 'check',
+        text: 'on, but couldn\'t confirm OpenClaw is checking tool calls',
+        command: FORCE_INSTALL,
+      });
+      expect(summary.headline).toBe('check');
+      const screen = renderUpdateSummary(summary, input, { width: 100, style: NO_STYLE, ascii: true }).join('\n');
+      expect(screen).not.toMatch(/running the previous|keeps running|is running/);
     });
   });
 
@@ -635,4 +854,59 @@ describe('#1105 — the closing screen is given what the plugin step found', () 
     const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'cli', 'update.ts'), 'utf-8');
     expect(src).toMatch(/stillOn: pluginResult\.stillOn/);
   });
+});
+
+/**
+ * #1105 r2 B4, through a real Node process: Node fixes its debug sections from
+ * NODE_DEBUG at startup, so a process that removes the variable later still
+ * logs every spawn's env to stderr. The module is transpiled on its own (it
+ * imports only `fs`, `path` and `util`) and run in a child Node whose startup
+ * env has NODE_DEBUG, which the driver deletes before asking.
+ */
+describe('#1105 r2 B4 — a child_process debug log switched on at startup refuses the borrow', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'sc-1105-debuglog-'));
+    const srcFile = join(dirname(fileURLToPath(import.meta.url)), '..', 'integrations', 'openclaw-gateway-boot-env.ts');
+    const js = ts.transpileModule(readFileSync(srcFile, 'utf-8'), {
+      compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    writeFileSync(join(dir, 'boot-env.mjs'), js);
+    writeFileSync(join(dir, 'driver.mjs'), [
+      "import { resolveGatewayBootCredentials } from './boot-env.mjs';",
+      'const hadDebug = process.env.NODE_DEBUG !== undefined;',
+      'delete process.env.NODE_DEBUG;',
+      "const r = resolveGatewayBootCredentials({ home: process.argv[2], refusedPath: 'gateway.auth.token', env: process.env });",
+      "process.stdout.write('RESULT ' + JSON.stringify({ hadDebug, used: r.used, reason: r.used ? null : r.reason }) + '\\n');",
+      '',
+    ].join('\n'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  function runDriver(nodeDebug?: string) {
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: home };
+    if (nodeDebug !== undefined) env.NODE_DEBUG = nodeDebug;
+    const res = spawnSync(process.execPath, [join(dir, 'driver.mjs'), home], { env, encoding: 'utf-8', timeout: 30000 });
+    const line = (res.stdout ?? '').split('\n').find((l) => l.startsWith('RESULT '));
+    expect(line).toBeDefined();
+    return { result: JSON.parse(line!.slice('RESULT '.length)) as { hadDebug: boolean; used: boolean; reason: string | null }, stderr: res.stderr ?? '' };
+  }
+
+  it('control: the same process without NODE_DEBUG borrows the credential', () => {
+    writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+    const { result } = runDriver();
+    expect(result).toEqual({ hadDebug: false, used: true, reason: null });
+  });
+
+  it.each(['child_process', 'CHILD_PROCESS', '*', 'net,child_process'])(
+    'NODE_DEBUG=%s at startup, deleted from process.env before the call: refused',
+    (value) => {
+      writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+      const { result, stderr } = runDriver(value);
+      expect(result.hadDebug).toBe(true);
+      expect(result.used).toBe(false);
+      expect(result.reason).toMatch(/^NODE_DEBUG is set, and Node's diagnostics would print the retry child's environment/);
+      expect(stderr).not.toContain(TOKEN);
+    },
+  );
 });

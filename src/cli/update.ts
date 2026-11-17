@@ -1096,10 +1096,13 @@ async function stepOpenClawPluginLocked(
       // env OpenClaw wrote for its unit. When this environment has neither
       // OPENCLAW_GATEWAY_TOKEN nor OPENCLAW_GATEWAY_PASSWORD, and the refusal
       // named the local gateway's own auth, and that file passes every check in
-      // `resolveGatewayBootCredentials` (fixed path, owner, mode, local gateway,
-      // plain KEY=VALUE), the retry's env — and only the retry's — carries
-      // those two keys. Their values are never logged, printed or written, and
-      // are scrubbed from anything the child said back.
+      // `resolveGatewayBootCredentials` (fixed path, owner, mode, a local
+      // gateway OpenClaw would resolve the same way, no Node spawn
+      // diagnostics, plain KEY=VALUE), the retry's env — and only the
+      // retry's — carries those two keys. Their values are never logged,
+      // printed or written; nothing that child says is shown (its failure is
+      // reported in fixed words), and every string the step returns is
+      // scrubbed of the exact values as well.
       //
       // The retry never widens what runs: same executable, same args, same env
       // (plus at most those two keys), no shell, one retry only. It does NOT
@@ -1120,15 +1123,17 @@ async function stepOpenClawPluginLocked(
         r = installed();
       } catch (retryErr) {
         retryFailed = true;
-        // Scrub the credential out of what the child said BEFORE any reporter
-        // reads it: the shared reporter's own redaction rewrites credential-
-        // shaped text first, and a value it has already cut apart can no longer
-        // be found whole, leaving part of it in cleartext.
-        r = await failed(boot.used ? redactCapturedError(retryErr, boot.env) : retryErr);
+        // A child that carried the credential is reported in fixed words only
+        // (#1105 r2): what it said is used to classify its ending, never
+        // shown — no scrub can find a value it quoted, escaped, trimmed or
+        // cut apart.
+        r = await failed(boot.used ? credentialedRetryFailure(retryErr, boot.env) : retryErr);
       }
       // Why the boot env did not help, when it matters: the retry failed too.
       const bootNote = !boot.used && retryFailed ? [`gateway boot env not used: ${boot.reason}`] : [];
       const out: StepResult = { ...r, detail: [firstRefusal, ...bootNote, ...(r.detail ?? [])] };
+      // Second line of defence: nothing above carries the child's words, but
+      // every string that reaches the screen is scrubbed of the exact values.
       return boot.used ? redactStepResult(out, boot.env) : out;
     }
   });
@@ -1143,7 +1148,11 @@ function installSaid(err: unknown): string {
 
 /** Which config value OpenClaw's secret-ref refusal named, in display words. */
 function secretRefKey(said: string): string {
-  return /\bgateway\.auth\.token\b/.test(said) ? 'gateway.auth.token' : 'a gateway config value';
+  const named = secretRefPath(said);
+  if (named === 'gateway.auth.token' || named === 'gateway.auth.password') return named;
+  if (/\bgateway\.auth\.token\b/.test(said)) return 'gateway.auth.token';
+  if (/\bgateway\.auth\.password\b/.test(said)) return 'gateway.auth.password';
+  return 'a gateway config value';
 }
 
 /** The exact config path OpenClaw's secret-ref refusal named (`<path> is configured as …`), or null (#1105). */
@@ -1151,32 +1160,64 @@ function secretRefPath(said: string): string | null {
   return said.match(/\b(gateway\.[A-Za-z0-9_.]+)\s+is configured as a secret reference but is unavailable/)?.[1] ?? null;
 }
 
+/** What a credentialed retry's report says instead of its output (#1105 r2). */
+const CREDENTIALED_OUTPUT_WITHHELD = 'its output is withheld: this retry carried the gateway credential';
+
 /**
- * A copy of a child's captured failure with every gateway credential value
- * scrubbed from everything it carries as text (#1105). The classifier and the
- * reporter then only ever see the scrubbed copy.
+ * The credentialed retry's failure, as the reporter will see it: fixed words
+ * only, never what that child said (#1105 r2). Its stdout and stderr could
+ * carry the borrowed credential in a form no exact scrub finds — quoted,
+ * JSON-escaped, trimmed, cut across lines or streams — so they are used only
+ * to CLASSIFY the ending (scrubbed first all the same), and the report is
+ * built from that class and how the child ended: OpenClaw's secret-reference
+ * refusal (with the config key from a fixed set), its unsettled-reload
+ * refusal, an exit status, a timeout, or a child that could not start.
  */
-function redactCapturedError(err: unknown, creds: GatewayCredentials): unknown {
-  if (!err || typeof err !== 'object') return typeof err === 'string' ? redactGatewayCredentials(err, creds) : err;
-  const e = err as CapturedError;
-  const scrub = (v: unknown) => (typeof v === 'string' ? redactGatewayCredentials(v, creds) : v);
-  const copy = new Error(String(scrub(e.message ?? ''))) as CapturedError;
-  copy.stack = String(scrub(copy.stack ?? ''));
-  for (const k of ['exitCode', 'timedOut', 'spawnFailed', 'code'] as const) {
-    if (k in e) (copy as unknown as Record<string, unknown>)[k] = (e as unknown as Record<string, unknown>)[k];
+function credentialedRetryFailure(err: unknown, creds: GatewayCredentials): CapturedError {
+  const e = (err ?? {}) as CapturedError;
+  const said = redactGatewayCredentials(installSaid(err), creds);
+  const ending = classifyOpenClawInstallEnding(said);
+  const exitCode = typeof e.exitCode === 'number' ? e.exitCode : null;
+  const lines: string[] = [];
+  if (ending === 'secret-ref') {
+    lines.push(`${secretRefKey(said)} is configured as a secret reference but is unavailable in this command path.`);
+  } else if (ending === 'drain') {
+    lines.push('plugin shieldcortex-realtime admitted work did not settle; the previous plugin generation stays active.');
+  } else if (!e.spawnFailed && !e.timedOut && exitCode !== null) {
+    lines.push(`openclaw plugins install exited ${exitCode} (${CREDENTIALED_OUTPUT_WITHHELD})`);
   }
-  for (const k of ['stdout', 'stderr', 'command'] as const) {
-    if (k in e) (copy as unknown as Record<string, unknown>)[k] = scrub(e[k]);
+  if (!e.spawnFailed && (ending !== null || e.timedOut)) lines.push(CREDENTIALED_OUTPUT_WITHHELD);
+  const out = new Error(e.timedOut ? 'openclaw plugins install timed out' : 'openclaw plugins install failed') as CapturedError;
+  out.command = PLUGIN_RERUN;
+  out.stdout = '';
+  out.stderr = lines.join('\n');
+  out.exitCode = exitCode;
+  if (e.timedOut) out.timedOut = true;
+  if (e.spawnFailed) {
+    out.spawnFailed = true;
+    // Node's spawn errno, kept only in its own shape.
+    if (typeof e.code === 'string' && /^E[A-Z0-9]{1,15}$/.test(e.code)) out.code = e.code;
   }
-  return copy;
+  return out;
 }
 
-/** A step result with every gateway credential value scrubbed from what reaches the screen (#1105). */
+/**
+ * A step result with every gateway credential value scrubbed from every
+ * string the closing screen or footer can print (#1105) — a second line of
+ * defence behind `credentialedRetryFailure`.
+ */
 function redactStepResult(r: StepResult, creds: GatewayCredentials): StepResult {
+  const scrub = (v: string) => redactGatewayCredentials(v, creds);
   return {
     ...r,
-    ...(r.summary !== undefined ? { summary: redactGatewayCredentials(r.summary, creds) } : {}),
-    ...(r.detail ? { detail: r.detail.map((d) => redactGatewayCredentials(d, creds)) } : {}),
+    ...(r.summary !== undefined ? { summary: scrub(r.summary) } : {}),
+    ...(r.detail ? { detail: r.detail.map(scrub) } : {}),
+    ...(r.rerun !== undefined ? { rerun: scrub(r.rerun) } : {}),
+    ...(r.reason !== undefined ? { reason: scrub(r.reason) } : {}),
+    ...(r.stillOn !== undefined ? { stillOn: scrub(r.stillOn) } : {}),
+    ...(r.recovery
+      ? { recovery: { command: scrub(r.recovery.command), ...(r.recovery.note !== undefined ? { note: scrub(r.recovery.note) } : {}) } }
+      : {}),
   };
 }
 
