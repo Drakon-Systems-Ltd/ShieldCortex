@@ -51,7 +51,11 @@ export interface UpdateSummaryInput {
   engine: { ok: boolean; packagedPrebuild?: boolean; remediation?: string | null };
   /** OpenClaw plugin step. 'skip' = OpenClaw plugin not installed. */
   /** `recovery`: the fix when re-running the install is not one (#952). */
-  plugin: { status: SummaryStepStatus; rerun?: string; recovery?: { command: string; note?: string } };
+  /**
+   * `stillOn`: after OpenClaw refused the install, the version OpenClaw's own
+   * plugin list still names, enabled (#1105).
+   */
+  plugin: { status: SummaryStepStatus; rerun?: string; recovery?: { command: string; note?: string }; stillOn?: string };
   skill: { status: SummaryStepStatus; rerun?: string };
   hook?: { status: SummaryStepStatus };
   hermes?: { status: SummaryStepStatus; reason?: string };
@@ -238,11 +242,20 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
   // off it used to collapse into a green "installed" row (PR #773 review).
   const pluginBehind = pluginInstalled && p.versionOk === false;
   const pluginFixCommand = p.nextCommand ?? 'shieldcortex repair';
+  const pluginStepFailed = input.plugin.status === 'warn' || input.plugin.status === 'failed';
+  // #1105: OpenClaw refused this run's install and its own plugin list still
+  // names the previous version, enabled. The finding is "not updated, still on
+  // X" — the reported host was told OpenClaw ran without the plugin while the
+  // previous version was loaded and enabled the whole time.
+  const stillOn = pluginStepFailed && input.plugin.stillOn ? sanitiseDisplayField(input.plugin.stillOn) : '';
   // The plugin check proved the running gateway has no ShieldCortex plugin.
   // The one red OpenClaw case; it wins over every other OpenClaw row below
   // (PR #773 follow-up: a plugin-step warning used to hide it as yellow).
-  const pluginAbsent = p.status === 'failed';
-  const pluginStepFailed = input.plugin.status === 'warn' || input.plugin.status === 'failed';
+  // Not when OpenClaw lists the previous plugin still enabled after a refused
+  // install (#1105): the two sources disagree, so the rows say "couldn't
+  // confirm", never "not running" — yellow, and the run still exits non-zero.
+  const pluginCheckAbsent = p.status === 'failed';
+  const pluginAbsent = pluginCheckAbsent && !stillOn;
   // The command the plugin step itself named for finishing its work — a re-run
   // or a recovery (#952). When the step failed, the OpenClaw "couldn't be
   // updated" row gives it, and so does the Guard row when it reports the plugin
@@ -271,8 +284,10 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
       rows.push({
         label: 'OpenClaw',
         mark: 'check',
-        text: 'plugin couldn\'t be updated',
-        why: 'OpenClaw keeps running the previous plugin.',
+        text: stillOn ? 'plugin not updated (still on ' + stillOn + ')' : 'plugin couldn\'t be updated',
+        why: stillOn && pluginCheckAbsent
+          ? 'OpenClaw lists it enabled; loading it wasn\'t confirmed.'
+          : 'OpenClaw keeps running the previous plugin.',
         command: stepCommand ?? 'shieldcortex update',
         commandLabel: 'Fix',
         commandNote: stepCommandNote,
@@ -404,7 +419,10 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
       commandLabel: 'Fix',
       commandNote: stepCommandNote,
     });
-  } else if (p.status === 'unproven' || p.status === 'warn' || p.status === 'blocked') {
+  } else if (p.status === 'unproven' || p.status === 'warn' || p.status === 'blocked' || pluginCheckAbsent) {
+    // `pluginCheckAbsent` reaches here only with a still-listed plugin (#1105):
+    // the check and OpenClaw's own list disagree, so this is "couldn't
+    // confirm", with the plugin step's command.
     rows.push({
       label: 'Guard',
       mark: 'check',

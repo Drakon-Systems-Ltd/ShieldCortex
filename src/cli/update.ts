@@ -21,6 +21,13 @@ import { resolveRealtimePluginInstallPath, readInstalledRealtimePluginVersion } 
 import { describeRunFailure, sanitiseForReport } from '../integrations/child-output.js';
 import type { CapturedError } from '../integrations/child-output.js';
 import {
+  GATEWAY_BOOT_ENV_DISPLAY,
+  redactGatewayCredentials,
+  resolveGatewayBootCredentials,
+  type GatewayBootCredentials,
+  type GatewayCredentials,
+} from '../integrations/openclaw-gateway-boot-env.js';
+import {
   getWidth,
   supportsColor,
   supportsUnicode,
@@ -121,6 +128,13 @@ interface StepResult {
    * re-run of the step. `note` says where or how to run it.
    */
   recovery?: { command: string; note?: string };
+  /**
+   * #1105: the version OpenClaw's own `plugins list --json` still names,
+   * enabled, after OpenClaw refused this run's install. The closing screen
+   * then says the plugin was not updated and is still on this version — not
+   * that OpenClaw is running without it.
+   */
+  stillOn?: string;
   /** Machine-readable cause, for plain wording on the closing screen only. */
   reason?: string;
   /** Plugin-check facts for the closing screen (protection step only). */
@@ -166,12 +180,14 @@ function describeInstallEnd(err: unknown, timeoutMs: number): string {
  *    unavailable in this command path." The install never ran: OpenClaw could
  *    not resolve the reference for `update`'s child. #1071: that is not the end
  *    of the step — the same force install is retried once, through the same
- *    `openclaw` with the same environment, and if that is refused too, the
- *    force install itself (run where `openclaw` resolves the reference) is the
- *    fix. The operator report had it succeed at once from the shell `update`
- *    ran in, while the old advice, `shieldcortex update`, only repeated the
- *    refused install.
- *    Nothing here reads, loads or passes a secret.
+ *    `openclaw`, and if that is refused too, the force install itself (run
+ *    where `openclaw` resolves the reference) is the fix. The operator report
+ *    had it succeed at once from the shell `update` ran in, while the old
+ *    advice, `shieldcortex update`, only repeated the refused install.
+ *    #1105: when this environment has neither OPENCLAW_GATEWAY_TOKEN nor
+ *    OPENCLAW_GATEWAY_PASSWORD, the retry's env alone gets them from the local
+ *    gateway's own boot env (see `openclaw-gateway-boot-env.ts` for every
+ *    check); never logged, printed or written.
  *  - `drain`: "plugin <id> admitted work did not settle within 60s; the
  *    previous plugin generation stays active." The files were saved and the
  *    on-disk version already equals the CLI's, so the #604 end-state read used
@@ -745,6 +761,20 @@ export type EndState = { version: string } | { version: null; reason: string };
  * a valid semver version is not a version.
  */
 export function parsePluginListVersion(stdout: string, id = 'shieldcortex-realtime'): string | null {
+  return parsePluginListEntry(stdout, id)?.version ?? null;
+}
+
+/**
+ * The plugin's entry in `openclaw plugins list --json`: its version (valid
+ * semver or null) and whether OpenClaw lists it as enabled. OpenClaw's record
+ * carries `enabled` and `status` (`enabled ? "loaded" : "disabled"`, OpenClaw
+ * 2026.11.4 dist/status-snapshot-*.mjs); `enabled` is null when neither says.
+ * Null when the document or the entry is missing.
+ */
+export function parsePluginListEntry(
+  stdout: string,
+  id = 'shieldcortex-realtime',
+): { version: string | null; enabled: boolean | null } | null {
   // A log line can itself start with `[` ("[plugins] loading…"), so try each
   // line that could open the document until one parses.
   let json: unknown = undefined;
@@ -760,8 +790,34 @@ export function parsePluginListVersion(stdout: string, id = 'shieldcortex-realti
       ? (json as { plugins: unknown[] }).plugins
       : null;
   if (!list) return null;
-  const entry = list.find((p) => (p as { id?: unknown } | null)?.id === id) as { version?: unknown } | undefined;
-  return typeof entry?.version === 'string' && semver.valid(entry.version) ? entry.version : null;
+  const entry = list.find((p) => (p as { id?: unknown } | null)?.id === id) as
+    { version?: unknown; enabled?: unknown; status?: unknown } | undefined;
+  if (!entry) return null;
+  const version = typeof entry.version === 'string' && semver.valid(entry.version) ? entry.version : null;
+  const enabled = typeof entry.enabled === 'boolean' ? entry.enabled
+    : entry.status === 'loaded' ? true
+    : entry.status === 'disabled' || entry.status === 'error' ? false
+    : null;
+  // `enabled: true` with an error status is not a plugin OpenClaw is running.
+  return { version, enabled: enabled === true && entry.status === 'error' ? false : enabled };
+}
+
+/**
+ * #1105: after OpenClaw refused the install, what its own plugin list says is
+ * still there — the version it names, when it names one AND lists the plugin
+ * as enabled. Null otherwise, including when the list cannot be read: the
+ * closing screen then keeps whatever the plugin check found. Run with this
+ * process's env and the step's HOME only — never the gateway credential.
+ */
+async function readStillListedVersion(home: string, run: typeof runQuiet): Promise<string | null> {
+  try {
+    const { stdout } = await run('openclaw', ['plugins', 'list', '--json'],
+      { timeout: 60000, env: { ...process.env, HOME: home } });
+    const entry = parsePluginListEntry(stdout);
+    return entry?.enabled === true && entry.version ? entry.version : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -880,7 +936,11 @@ async function stepOpenClawPluginLocked(
     // the bare name, no shell, this exact env object. The child's own PATH
     // lookup (from `installOpts.env`) picks the executable, so the retry runs
     // the very `openclaw` that refused — never a copy found some other way.
-    const install = () => run('openclaw', PLUGIN_INSTALL_ARGS, installOpts);
+    // #1105: `credentials` (the local gateway's boot credential, retry only) go
+    // into a copy of that env for this one child — never into `process.env`,
+    // never onto the command line, never anywhere else.
+    const install = (credentials?: GatewayCredentials) => run('openclaw', PLUGIN_INSTALL_ARGS,
+      credentials ? { ...installOpts, env: { ...installOpts.env, ...credentials } } : installOpts);
 
     /** The install child exited 0: report what it ACTUALLY left on disk. */
     const installed = (): StepResult => {
@@ -937,17 +997,28 @@ async function stepOpenClawPluginLocked(
         // succeed straight away from the very shell `update` ran in. Never
         // `shieldcortex update`: that re-runs the install OpenClaw just refused.
         const key = secretRefKey(said);
+        // #1105: the install never ran, so whatever plugin was there is still
+        // there. Ask OpenClaw's own list before the closing screen says
+        // anything about it: "not updated, still on X" is the finding, not
+        // "OpenClaw isn't running the plugin".
+        const stillOn = await readStillListedVersion(home, run);
         return {
           status: 'warn' as const,
-          summary: `not applied — OpenClaw refused twice: ${key} is a gateway secret reference it could not resolve here`,
+          summary: stillOn
+            ? `not updated — still on v${stillOn}; OpenClaw refused twice: ${key} is a gateway secret reference it could not resolve here`
+            : `not applied — OpenClaw refused twice: ${key} is a gateway secret reference it could not resolve here`,
           detail: [
             ...report.detail,
+            ...(stillOn
+              ? [`OpenClaw's own plugin list still shows shieldcortex-realtime v${stillOn}, enabled — the refused install did not replace it`]
+              : []),
             `run \`${PLUGIN_RERUN}\` from the shell where \`openclaw\` resolves that reference (an env-sourced reference reads the variable its id names); re-running \`shieldcortex update\` repeats the install OpenClaw just refused`,
             ...purgeDetail,
           ],
           truncated: report.truncated,
           unfinished: true,
           recovery: { command: PLUGIN_RERUN, note: SECRET_REF_NOTE },
+          ...(stillOn ? { stillOn } : {}),
         };
       }
       if (ending === 'drain') {
@@ -1017,24 +1088,48 @@ async function stepOpenClawPluginLocked(
       // route OpenClaw resolves its own references on (OpenClaw 2026.11.3's CLI
       // gateway call resolves them before it selects credentials), and the
       // operator's copy succeeded at once from the shell `update` ran in. Try
-      // it exactly once more, and report what landed. Nothing here reads,
-      // loads or passes a secret.
+      // it exactly once more, and report what landed.
       //
-      // The retry never widens what runs: same executable, same args, same env,
-      // no shell, one retry only. It does NOT re-resolve the binary (#1071 r2):
-      // `resolveOpenClawBinary` treats a failing `which` as "not on PATH" and
-      // falls back to well-known install locations, so a host whose PATH has a
-      // working `openclaw` but no usable `which` would have retried through a
-      // different copy than the one that refused.
-      const firstRefusal = `first install refused: ${secretRefKey(installSaid(err))} is a gateway secret reference OpenClaw could not resolve for it; retried the same \`openclaw plugins install --force\` once`;
+      // #1105: a reference only the operator's interactive shell resolves (a
+      // shell function that sources an env file) is refused again by an
+      // identical retry. The gateway service itself has the value, in the boot
+      // env OpenClaw wrote for its unit. When this environment has neither
+      // OPENCLAW_GATEWAY_TOKEN nor OPENCLAW_GATEWAY_PASSWORD, and the refusal
+      // named the local gateway's own auth, and that file passes every check in
+      // `resolveGatewayBootCredentials` (fixed path, owner, mode, local gateway,
+      // plain KEY=VALUE), the retry's env — and only the retry's — carries
+      // those two keys. Their values are never logged, printed or written, and
+      // are scrubbed from anything the child said back.
+      //
+      // The retry never widens what runs: same executable, same args, same env
+      // (plus at most those two keys), no shell, one retry only. It does NOT
+      // re-resolve the binary (#1071 r2): `resolveOpenClawBinary` treats a
+      // failing `which` as "not on PATH" and falls back to well-known install
+      // locations, so a host whose PATH has a working `openclaw` but no usable
+      // `which` would have retried through a different copy than the one that
+      // refused.
+      const said = installSaid(err);
+      const boot: GatewayBootCredentials = resolveGatewayBootCredentials({ home, refusedPath: secretRefPath(said) });
+      const firstRefusal = boot.used
+        ? `first install refused: ${secretRefKey(said)} is a gateway secret reference OpenClaw could not resolve for it; retried \`openclaw plugins install --force\` once with ${boot.keys.join(' and ')} from the local gateway's boot env (${GATEWAY_BOOT_ENV_DISPLAY}), passed only to that child`
+        : `first install refused: ${secretRefKey(said)} is a gateway secret reference OpenClaw could not resolve for it; retried the same \`openclaw plugins install --force\` once`;
       let r: StepResult;
+      let retryFailed = false;
       try {
-        await install();
+        await install(boot.used ? boot.env : undefined);
         r = installed();
       } catch (retryErr) {
-        r = await failed(retryErr);
+        retryFailed = true;
+        // Scrub the credential out of what the child said BEFORE any reporter
+        // reads it: the shared reporter's own redaction rewrites credential-
+        // shaped text first, and a value it has already cut apart can no longer
+        // be found whole, leaving part of it in cleartext.
+        r = await failed(boot.used ? redactCapturedError(retryErr, boot.env) : retryErr);
       }
-      return { ...r, detail: [firstRefusal, ...(r.detail ?? [])] };
+      // Why the boot env did not help, when it matters: the retry failed too.
+      const bootNote = !boot.used && retryFailed ? [`gateway boot env not used: ${boot.reason}`] : [];
+      const out: StepResult = { ...r, detail: [firstRefusal, ...bootNote, ...(r.detail ?? [])] };
+      return boot.used ? redactStepResult(out, boot.env) : out;
     }
   });
 }
@@ -1049,6 +1144,40 @@ function installSaid(err: unknown): string {
 /** Which config value OpenClaw's secret-ref refusal named, in display words. */
 function secretRefKey(said: string): string {
   return /\bgateway\.auth\.token\b/.test(said) ? 'gateway.auth.token' : 'a gateway config value';
+}
+
+/** The exact config path OpenClaw's secret-ref refusal named (`<path> is configured as …`), or null (#1105). */
+function secretRefPath(said: string): string | null {
+  return said.match(/\b(gateway\.[A-Za-z0-9_.]+)\s+is configured as a secret reference but is unavailable/)?.[1] ?? null;
+}
+
+/**
+ * A copy of a child's captured failure with every gateway credential value
+ * scrubbed from everything it carries as text (#1105). The classifier and the
+ * reporter then only ever see the scrubbed copy.
+ */
+function redactCapturedError(err: unknown, creds: GatewayCredentials): unknown {
+  if (!err || typeof err !== 'object') return typeof err === 'string' ? redactGatewayCredentials(err, creds) : err;
+  const e = err as CapturedError;
+  const scrub = (v: unknown) => (typeof v === 'string' ? redactGatewayCredentials(v, creds) : v);
+  const copy = new Error(String(scrub(e.message ?? ''))) as CapturedError;
+  copy.stack = String(scrub(copy.stack ?? ''));
+  for (const k of ['exitCode', 'timedOut', 'spawnFailed', 'code'] as const) {
+    if (k in e) (copy as unknown as Record<string, unknown>)[k] = (e as unknown as Record<string, unknown>)[k];
+  }
+  for (const k of ['stdout', 'stderr', 'command'] as const) {
+    if (k in e) (copy as unknown as Record<string, unknown>)[k] = scrub(e[k]);
+  }
+  return copy;
+}
+
+/** A step result with every gateway credential value scrubbed from what reaches the screen (#1105). */
+function redactStepResult(r: StepResult, creds: GatewayCredentials): StepResult {
+  return {
+    ...r,
+    ...(r.summary !== undefined ? { summary: redactGatewayCredentials(r.summary, creds) } : {}),
+    ...(r.detail ? { detail: r.detail.map((d) => redactGatewayCredentials(d, creds)) } : {}),
+  };
 }
 
 /** Every seam is injectable so the #604 end-state branches are testable without a real `openclaw`. */
@@ -1923,7 +2052,12 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
       packagedPrebuild: engineResult.packagedPrebuild,
       remediation: engineResult.remediation,
     },
-    plugin: { status: pluginResult.status, rerun: pluginResult.rerun, recovery: pluginResult.recovery },
+    plugin: {
+      status: pluginResult.status,
+      rerun: pluginResult.rerun,
+      recovery: pluginResult.recovery,
+      ...(pluginResult.stillOn ? { stillOn: pluginResult.stillOn } : {}),
+    },
     skill: { status: skillResult.status, rerun: skillResult.rerun },
     hook: { status: hookResult.status },
     hermes: { status: hermesResult.status, reason: hermesResult.reason },
