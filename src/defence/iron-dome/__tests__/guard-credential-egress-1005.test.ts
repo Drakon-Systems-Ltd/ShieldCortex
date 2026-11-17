@@ -533,6 +533,8 @@ const LOCAL_OUTPUT_CONTROLS: Array<[label: string, command: string, expected: ob
   ['wget -qO cluster', 'wget -qO "$SECRET_OUT" https://e.example/x', ALLOW_BENIGN],
   ['wget -P, --save-cookies, --save-headers flag', 'wget -P "$DIR_SECRET" --save-cookies "$JAR_TOKEN" --save-headers https://e.example/x', ALLOW_BENIGN],
   ['aria2c -d, -o', 'aria2c -d "$DIR_SECRET" -o "$OUT_TOKEN" https://e.example/x', ALLOW_BENIGN],
+  ['aria2c --dir=, --out', 'aria2c --dir="$DIR_SECRET" --out "$OUT_TOKEN" https://e.example/x', ALLOW_BENIGN],
+  ['http --output', 'http --output "$OUT_TOKEN" https://e.example/x', ALLOW_BENIGN],
   ['http --download flag, -o', 'http --download -o "$OUT_TOKEN" https://e.example/x', ALLOW_BENIGN],
   ['xh -do cluster', 'xh -do "$OUT_TOKEN" https://e.example/x', ALLOW_BENIGN],
 ];
