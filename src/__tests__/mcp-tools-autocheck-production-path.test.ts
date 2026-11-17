@@ -67,6 +67,8 @@ const channels = process.env.SC_CHANNELS === '0' ? [] : [{
   name: 'stub-transport',
   send: async (msg) => {
     if (!fs.existsSync(process.env.SC_UP_FLAG)) return { delivered: false, reason: 'transport down' };
+    // #926: fail one alert kind only, so a single run can deliver one alert and lose the next.
+    if (process.env.SC_FAIL_KIND && msg && msg.kind === process.env.SC_FAIL_KIND) return { delivered: false, reason: 'transport rejected this alert' };
     fs.appendFileSync(process.env.SC_SENT_LOG, JSON.stringify(msg) + '\\n');
     return { delivered: true };
   },
@@ -86,12 +88,12 @@ function dbRead<T>(sql: string): T[] {
 const findings = (kind: string) => dbRead<{ kind: string; finding_json: string | null; detail: string; severity: string | null; source: string | null; audit_id: number | null; alert_kind: string | null }>(
   `SELECT * FROM mcp_tool_findings WHERE kind = '${kind}' ORDER BY id`);
 
-async function run(channels: 'stub' | 'none', failInsert = false): Promise<void> {
+async function run(channels: 'stub' | 'none', failInsert = false, failKind = ''): Promise<void> {
   await new Promise((r) => setTimeout(r, 25)); // tiny interval below: let it lapse
   if (up) fs.writeFileSync(path.join(home, 'up.flag'), ''); else fs.rmSync(path.join(home, 'up.flag'), { force: true });
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? '', HOME: home, SC_TEST_HOME: home, SC_UP_FLAG: path.join(home, 'up.flag'),
-    SC_SENT_LOG: path.join(home, 'sent.log'), SC_CHANNELS: channels === 'none' ? '0' : '1', SC_FAIL_FINDINGS_INSERT: failInsert ? '1' : '0',
+    SC_SENT_LOG: path.join(home, 'sent.log'), SC_CHANNELS: channels === 'none' ? '0' : '1', SC_FAIL_FINDINGS_INSERT: failInsert ? '1' : '0', SC_FAIL_KIND: failKind,
     SHIELDCORTEX_ALLOW_UNSAFE_RUNTIME: '1', // ambient only: silences the checkout guard, passes no DB path
   };
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', CHILD_JS], { env, encoding: 'utf-8', timeout: 60_000 });
@@ -259,5 +261,70 @@ describe('(#925 fix6) the pending dedupe marker is committed only after the find
     expect(dbRead(`SELECT * FROM mcp_tool_hashes`).length).toBeGreaterThan(0);
     await run('stub', false); // quiet
     expect(findings('suspicious')).toHaveLength(1);
+  });
+});
+
+describe('(#926) production path: a partial retry does not repeat the delivered alert', () => {
+  const stateFile = () => path.join(home, '.shieldcortex', 'state', 'mcp-tool-check.json');
+  const savedState = () => JSON.parse(fs.readFileSync(stateFile(), 'utf-8')) as { pending?: Record<string, unknown>; checkpoints?: Record<string, { recorded: boolean }> };
+  const sentKinds = () => (fs.existsSync(path.join(home, 'sent.log'))
+    ? fs.readFileSync(path.join(home, 'sent.log'), 'utf-8').split('\n').filter(Boolean).map((l) => (JSON.parse(l) as { kind: string }).kind)
+    : []);
+  const hashes = () => JSON.stringify(dbRead(`SELECT server_name, tool_name, content_hash FROM mcp_tool_hashes ORDER BY 1, 2`));
+  const auditRows = (indicators: string) => dbRead<{ id: number }>(
+    `SELECT id FROM defence_audit WHERE source_type = 'mcp-tools' AND threat_indicators = '${indicators}'`);
+
+  it('suspicious delivered, changed fails, retry in a fresh process: one suspicious delivery and row, changed re-sent', async () => {
+    setTools([{ name: 'alpha', description: 'Reads a file.' }, { name: 'beta', description: 'Lists a folder.' }]);
+    await run('stub'); // baseline: first sight, benign, silent
+    expect(sentCount()).toBe(0);
+    const baseline = hashes();
+
+    setTools([{ name: 'alpha', description: POISON }, { name: 'beta', description: 'Lists a folder, recursively.' }]);
+    await run('stub', false, 'changed'); // suspicious is delivered, changed is not
+    expect(sentKinds()).toEqual(['suspicious']);
+    expect(findings('suspicious')).toHaveLength(1);
+    expect(findings('changed')).toHaveLength(0);
+    expect(findings('pending').map((p) => p.alert_kind)).toEqual(['changed']);
+    expect(hashes()).toBe(baseline); // incomplete: no hash advance
+    const cps = Object.values(savedState().checkpoints ?? {});
+    expect(cps).toHaveLength(1); // delivered AND recorded, kept in the state file for the retry
+    expect(cps[0].recorded).toBe(true);
+
+    await run('stub'); // retry: a new process that knows only the saved state and the DB
+    expect(sentKinds()).toEqual(['suspicious', 'changed']);
+    expect(findings('suspicious')).toHaveLength(1); // one durable finding, not two
+    expect(findings('changed')).toHaveLength(1);
+    expect(findings('pending')).toHaveLength(1);
+    expect(auditRows('["mcp_tool_suspicious"]')).toHaveLength(1); // the scored audit row is not duplicated either
+    expect(auditRows('["mcp_tool_changed"]')).toHaveLength(1);
+    expect(hashes()).not.toBe(baseline);
+    expect(savedState().checkpoints ?? {}).toEqual({});
+    expect(savedState().pending ?? {}).toEqual({});
+
+    await run('stub'); // unchanged follow-up stays quiet
+    expect(sentCount()).toBe(2);
+    expect(findings('suspicious')).toHaveLength(1);
+    expect(findings('changed')).toHaveLength(1);
+  });
+
+  it('delivered but the findings INSERT failed: the retry writes the finding once and does not re-send', async () => {
+    setTools(wide());
+    await run('stub', true); // delivered; the durable finding could not be written
+    expect(sentCount()).toBe(1);
+    expect(findings('suspicious')).toHaveLength(0);
+    expect(dbRead(`SELECT * FROM mcp_tool_hashes`)).toHaveLength(0);
+    const owed = Object.values(savedState().checkpoints ?? {});
+    expect(owed.length).toBeGreaterThan(0);
+    expect(owed.every((c) => c.recorded === false)).toBe(true); // delivered is not recorded
+
+    await run('stub', false);
+    expect(sentCount()).toBe(1); // no second notification
+    const fin = findings('suspicious');
+    expect(fin).toHaveLength(1); // the delivered marker did not hide the missing finding
+    const f = JSON.parse(fin[0].finding_json as string);
+    expect(new Set(f.tools.map((t: { tool: string }) => t.tool))).toEqual(new Set([`read_${LONG}`, `write_${LONG}`]));
+    expect(dbRead(`SELECT * FROM mcp_tool_hashes`).length).toBeGreaterThan(0);
+    expect(savedState().checkpoints ?? {}).toEqual({});
   });
 });
