@@ -188,13 +188,19 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
     // `shieldcortex update` appears only as what NOT to do, never as the fix.
     expect(shown).not.toMatch(/run `shieldcortex update`/);
     expect(shown).not.toMatch(/login shell/);
-    // No credential code: the install and its one retry of the same command
-    // were all that was spawned — no secrets helper, no --token/--password, no
-    // end-state read that pretends the refused install may have landed.
+    // No credential code: the install, its one retry of the same command and —
+    // once both were refused — OpenClaw's own plugin list (#1105), read only to
+    // say what is still there, were all that was spawned. No secrets helper, no
+    // --token/--password, and the list does not turn the refusal into a
+    // finished install: the step stays unfinished with the force install as
+    // its fix (asserted above).
     expect(f.calls).toEqual([
       { cmd: 'openclaw', args: FORCE_INSTALL.split(' ').slice(1) },
       { cmd: 'openclaw', args: FORCE_INSTALL.split(' ').slice(1) },
+      { cmd: 'openclaw', args: ['plugins', 'list', '--json'] },
     ]);
+    // This list names no `enabled` state, so nothing is claimed about it.
+    expect(r.stillOn).toBeUndefined();
   });
 
   it('secret-ref: OpenClaw\'s own `Fix:` lines reach the operator alongside the step\'s advice', async () => {
@@ -658,8 +664,11 @@ describe('#1071 — a gateway secret reference does not end the plugin step', ()
         'exit 1',
       ];
       const install = [`: > '${installedMark}'`, 'echo "Installed shieldcortex-realtime"', 'exit 0'];
+      // #1105: `plugins list` is a read — it must not count as an install.
+      const list = `if [ "$1" = plugins ] && [ "$2" = list ]; then echo '{"plugins":[]}'; exit 0; fi`;
       writeScript(join(binDir, 'openclaw'), [
         `echo "path $*" >> '${log}'`,
+        list,
         ...(refusals >= 1 ? [`if [ ! -e '${count}.1' ]; then : > '${count}.1'; ${refuse.join('; ')}; fi`] : []),
         ...(refusals >= 2 ? [`if [ ! -e '${count}.2' ]; then : > '${count}.2'; ${refuse.join('; ')}; fi`] : []),
         ...install,
@@ -667,6 +676,7 @@ describe('#1071 — a gateway secret reference does not end the plugin step', ()
       // A working, different copy where `resolveOpenClawBinary` falls back to.
       writeScript(join(home, '.npm-global', 'bin', 'openclaw'), [
         `echo "fallback $*" >> '${log}'`,
+        list,
         ...install,
       ]);
       savedPath = process.env.PATH;
@@ -711,7 +721,13 @@ describe('#1071 — a gateway secret reference does not end the plugin step', ()
       setUp(2);
       const r = await realStep();
 
-      expect(calls()).toEqual([`path ${INSTALL_ARGS.join(' ')}`, `path ${INSTALL_ARGS.join(' ')}`]);
+      // #1105: after the second refusal, OpenClaw's plugin list is read — through
+      // the same PATH copy, never the fallback.
+      expect(calls()).toEqual([
+        `path ${INSTALL_ARGS.join(' ')}`,
+        `path ${INSTALL_ARGS.join(' ')}`,
+        'path plugins list --json',
+      ]);
       expect(r.status).toBe('warn');
       expect(r.unfinished).toBe(true);
       expect(r.recovery?.command).toBe(FORCE_INSTALL);
