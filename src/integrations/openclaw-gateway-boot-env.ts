@@ -47,7 +47,10 @@
  *    NODE_DEBUG or NODE_DEBUG_NATIVE, a `child_process` debug log already on,
  *    or a NODE_OPTIONS the child would inherit that asks for a diagnostic
  *    report, a trace, an inspector or a heap snapshot (each can write the
- *    child's environment out), and nothing is borrowed.
+ *    child's environment out), or that preloads a module (`--require`, `-r`,
+ *    `--import`, `--loader`), and nothing is borrowed. NODE_OPTIONS is
+ *    checked as Node splits it (double quotes and the backslash escapes
+ *    inside them are Node's to remove); one Node cannot split is a refusal.
  *  - Bound to the directory it checked: `~/.openclaw` must not be a symbolic
  *    link. It is opened O_DIRECTORY|O_NOFOLLOW and checked on that descriptor
  *    (a directory, owned by the user running update, not writable by group or
@@ -174,7 +177,9 @@ type SdState =
  * Entries are found the way systemd's own parser finds them
  * (`parse_env_file_internal`, src/basic/env-file.c): `\n` and `\r` both end
  * a line, a backslash-newline in a value is a continuation, a quoted value
- * runs on across lines, and nothing after a NUL is read. A line that only
+ * runs on across lines. A body with a NUL byte in it is not used at all:
+ * OpenClaw's serializer never writes one, and nothing here depends on what
+ * a given systemd makes of the bytes around it. A line that only
  * LOOKS like `OPENCLAW_GATEWAY_TOKEN=…` but is the tail of another entry is
  * therefore not a credential. A credential entry is taken only when it sits
  * on one line and decodes in the form OpenClaw's serializer writes; one that
@@ -188,10 +193,9 @@ type SdState =
  * wins, as in systemd — and when that last entry is one this parser will not
  * use, the key is dropped rather than an earlier value used.
  */
-export function parseGatewayBootEnv(content: string): GatewayCredentials {
+export function parseGatewayBootEnv(text: string): GatewayCredentials {
   const out: GatewayCredentials = {};
-  const nul = content.indexOf('\0');
-  const text = nul === -1 ? content : content.slice(0, nul);
+  if (text.includes('\0')) return out;
   let state: SdState = 'preKey';
   let keyStart = 0;
   let keyEnd = 0;
@@ -510,11 +514,16 @@ function readOwnedBootEnv(dir: StateDir, euid: number, flags: { file: number }):
     if (n > MAX_BOOT_ENV_BYTES) return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} is larger than 64 KiB` };
     // systemd refuses a value that is not valid UTF-8; a lenient decode would
     // hand the child a value the gateway never had.
+    let text: string;
     try {
-      return { text: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf.subarray(0, n)) };
+      text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf.subarray(0, n));
     } catch {
       return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} is not valid UTF-8` };
     }
+    // Rejected, not cut short: OpenClaw never writes a NUL, so a file with one
+    // is not the file it wrote.
+    if (text.includes('\0')) return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} contains a NUL byte` };
+    return { text };
   } catch (err) {
     return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} could not be read (${errCode(err)})` };
   } finally {
@@ -601,30 +610,97 @@ function runtimeDotEnvProblem(dir: StateDir, home: string, euid: number, flags: 
 }
 
 /**
- * NODE_OPTIONS a Node child inherits that can write its environment out: a
- * diagnostic report (`--report-*` includes every environment variable), a
- * trace (`--trace-env` prints the values it reads), an inspector or debug
- * port, a heap snapshot (every string in the heap), or an env file loaded at
- * startup. Node accepts `_` for `-` in option names, so both are matched.
+ * NODE_OPTIONS arguments a Node child inherits that can write its environment
+ * out: a diagnostic report (`--report-*` includes every environment
+ * variable), a trace (`--trace-env` prints the values it reads), an inspector
+ * or debug port, a heap snapshot (every string in the heap), or an env file
+ * loaded at startup. Matched anywhere in an argument, after lower-casing and
+ * `_` → `-` (Node accepts `_` for `-` in option names).
  */
 const NODE_OPTIONS_DIAGNOSTICS = /--(?:report|trace|inspect|debug|heapsnapshot|env-file)/;
 
 /**
- * Which Node diagnostic would print a spawned child's environment, or null.
- * Node's `child_process` debug log formats each spawn's options — env
- * included — to THIS process's stderr, and the sections it logs are fixed
- * from NODE_DEBUG when Node starts: removing the variable later does not turn
- * them off, so the live switch is asked as well. Any non-blank NODE_DEBUG
- * counts, whatever it names: the retry child inherits it too — and so would it
- * inherit a diagnostic NODE_OPTIONS.
+ * NODE_OPTIONS arguments that load code of someone else's choosing into the
+ * child before OpenClaw runs — code that then holds the child's environment:
+ * `--require` / `-r`, `--import`, `--loader` / `--experimental-loader`.
  */
-function spawnDiagnostics(env: NodeJS.ProcessEnv): string | null {
-  for (const k of ['NODE_DEBUG', 'NODE_DEBUG_NATIVE'] as const) {
-    if (env[k]?.trim()) return k;
+const NODE_OPTIONS_PRELOADS = /--(?:require|import|loader|experimental-loader)|^-r$/;
+
+/**
+ * NODE_OPTIONS split into the arguments Node takes from it, the way Node
+ * splits it (src/node_options.cc `ParseNodeOptionsEnvVar`): only a space
+ * outside double quotes separates; a double quote opens or closes quoting and
+ * is dropped; inside quotes a backslash is dropped and the character after it
+ * kept as is; outside quotes a backslash is an ordinary character. So
+ * `--re"port"-on-signal` is `--report-on-signal` to Node. Null when Node
+ * itself rejects the value — a quote left open, or a backslash ending it
+ * inside quotes — since then which options it carries is not established.
+ * Pure.
+ */
+export function nodeOptionsArgs(value: string): string[] | null {
+  const args: string[] = [];
+  let quoted = false;
+  let startsNew = true;
+  for (let i = 0; i < value.length; i++) {
+    let c = value[i];
+    if (c === '\\' && quoted) {
+      if (i + 1 === value.length) return null;
+      c = value[++i];
+    } else if (c === ' ' && !quoted) {
+      startsNew = true;
+      continue;
+    } else if (c === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (startsNew) {
+      args.push(c);
+      startsNew = false;
+    } else {
+      args[args.length - 1] += c;
+    }
   }
-  const nodeOptions = env.NODE_OPTIONS?.toLowerCase().replace(/_/g, '-');
-  if (nodeOptions && NODE_OPTIONS_DIAGNOSTICS.test(nodeOptions)) return 'NODE_OPTIONS';
-  return debuglog('child_process').enabled ? 'NODE_DEBUG' : null;
+  return quoted ? null : args;
+}
+
+/**
+ * Why the NODE_OPTIONS the retry child inherits could expose its environment,
+ * or null. Each argument is checked as Node reads it (`nodeOptionsArgs`), and
+ * the value as written is checked too, for a Node that splits it more simply.
+ * A value Node cannot split is a refusal. Never quotes the value.
+ */
+function nodeOptionsProblem(raw: string): string | null {
+  const args = nodeOptionsArgs(raw);
+  if (!args) {
+    return 'NODE_OPTIONS has an unclosed quote or ends in a backslash inside quotes, so which options the retry child would get could not be established';
+  }
+  const seen = [raw, ...args].map((a) => a.toLowerCase().replace(/_/g, '-'));
+  if (seen.some((a) => NODE_OPTIONS_DIAGNOSTICS.test(a))) {
+    return 'NODE_OPTIONS asks for a Node diagnostic, and Node\'s diagnostics would print the retry child\'s environment';
+  }
+  if (seen.some((a) => NODE_OPTIONS_PRELOADS.test(a))) {
+    return 'NODE_OPTIONS preloads a module (--require, -r, --import or --loader), and that code would run inside the retry child with its environment';
+  }
+  return null;
+}
+
+/**
+ * Why a Node diagnostic or preload could expose a spawned child's
+ * environment, or null. Node's `child_process` debug log formats each
+ * spawn's options — env included — to THIS process's stderr, and the
+ * sections it logs are fixed from NODE_DEBUG when Node starts: removing the
+ * variable later does not turn them off, so the live switch is asked as
+ * well. Any non-blank NODE_DEBUG counts, whatever it names: the retry child
+ * inherits it too — as it inherits NODE_OPTIONS.
+ */
+function childEnvExposure(env: NodeJS.ProcessEnv): string | null {
+  const printed = 'and Node\'s diagnostics would print the retry child\'s environment';
+  for (const k of ['NODE_DEBUG', 'NODE_DEBUG_NATIVE'] as const) {
+    if (env[k]?.trim()) return `${k} is set, ${printed}`;
+  }
+  const nodeOptions = env.NODE_OPTIONS ? nodeOptionsProblem(env.NODE_OPTIONS) : null;
+  if (nodeOptions) return nodeOptions;
+  return debuglog('child_process').enabled ? `NODE_DEBUG is set, ${printed}` : null;
 }
 
 /** The first location override set in `env`: an OPENCLAW_* one, or any legacy CLAWDBOT_* variable. */
@@ -657,11 +733,8 @@ export function resolveGatewayBootCredentials(params: {
   if (!params.refusedPath || !LOCAL_AUTH_PATHS.has(params.refusedPath)) {
     return { used: false, reason: 'the refusal did not name the local gateway\'s own gateway.auth.token or gateway.auth.password' };
   }
-  const diagnostics = spawnDiagnostics(env);
-  if (diagnostics) {
-    const what = diagnostics === 'NODE_OPTIONS' ? 'NODE_OPTIONS asks for a Node diagnostic' : `${diagnostics} is set`;
-    return { used: false, reason: `${what}, and Node's diagnostics would print the retry child's environment, so ${GATEWAY_BOOT_ENV_DISPLAY} was not read` };
-  }
+  const exposure = childEnvExposure(env);
+  if (exposure) return { used: false, reason: `${exposure}, so ${GATEWAY_BOOT_ENV_DISPLAY} was not read` };
   const override = locationOverride(env);
   if (override) {
     return { used: false, reason: `${override} is set, so ${GATEWAY_BOOT_ENV_DISPLAY} may not belong to the gateway this install talks to` };

@@ -23,6 +23,7 @@ import { buildUpdateSummary, renderUpdateSummary, type UpdateSummaryInput } from
 import { NO_STYLE } from '../cli/term-ui.js';
 import {
   GATEWAY_BOOT_ENV_DISPLAY,
+  nodeOptionsArgs,
   parseGatewayBootEnv,
   redactGatewayCredentials,
   resolveGatewayBootCredentials,
@@ -49,6 +50,12 @@ import type { CapturedError } from '../integrations/child-output.js';
  * r3 (CASE B1): the install child loads `~/.openclaw/.env` and
  * `~/.config/openclaw/gateway.env` into its own environment at startup, so a
  * gateway URL, port or location override in either refuses the borrow too.
+ *
+ * r4 (Astra R3-B2): NODE_OPTIONS is judged as Node splits it — double quotes,
+ * and the backslash escapes inside them, are Node's to remove — so
+ * `--re"port"-on-signal` is a report switch. A value Node cannot split, or
+ * one that preloads a module, refuses the borrow too. A boot env with a NUL
+ * byte is rejected, not cut short.
  *
  * The directory-swap race and missing open flags are pinned in
  * update-gateway-boot-env-1105-fs.test.ts, which replaces `fs` for the module.
@@ -277,9 +284,13 @@ describe('#1105 — parsing the gateway boot env (KEY=VALUE only, never run)', (
     expect(parseGatewayBootEnv(`# note \\\\\nOPENCLAW_GATEWAY_TOKEN=${TOKEN}`)).toEqual({ OPENCLAW_GATEWAY_TOKEN: TOKEN });
   });
 
-  it('a lone \\r ends a line and nothing after a NUL is read, as in systemd', () => {
+  it('a lone \\r ends a line', () => {
     expect(parseGatewayBootEnv(`FOO=1\rOPENCLAW_GATEWAY_TOKEN=${TOKEN}`)).toEqual({ OPENCLAW_GATEWAY_TOKEN: TOKEN });
-    expect(parseGatewayBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\0\nOPENCLAW_GATEWAY_TOKEN=after-nul`)).toEqual({ OPENCLAW_GATEWAY_TOKEN: TOKEN });
+  });
+
+  it('a body with a NUL byte anywhere is not used at all — never cut short at the NUL (#1105 r4)', () => {
+    expect(parseGatewayBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\0\nOPENCLAW_GATEWAY_TOKEN=after-nul`)).toEqual({});
+    expect(parseGatewayBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\nOTHER=1\0`)).toEqual({});
     expect(parseGatewayBootEnv(`FOO=1\0\nOPENCLAW_GATEWAY_TOKEN=${TOKEN}`)).toEqual({});
   });
 
@@ -289,6 +300,94 @@ describe('#1105 — parsing the gateway boot env (KEY=VALUE only, never run)', (
     expect(parseGatewayBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}${nbsp}`)).toEqual({});
     expect(parseGatewayBootEnv(`OPENCLAW_GATEWAY_TOKEN=${bom}${TOKEN}`)).toEqual({});
     expect(parseGatewayBootEnv(`OPENCLAW_GATEWAY_TOKEN= \t${TOKEN} \t`)).toEqual({ OPENCLAW_GATEWAY_TOKEN: TOKEN });
+  });
+});
+
+/**
+ * #1105 r4 (Astra R3-B2): the retry child inherits NODE_OPTIONS, and Node
+ * removes double quotes — and the backslash escapes inside them — before it
+ * reads an option (src/node_options.cc `ParseNodeOptionsEnvVar`). The refusal
+ * is applied to the arguments as Node splits them.
+ */
+describe('#1105 r4 — NODE_OPTIONS split the way Node splits it', () => {
+  it.each([
+    ['', []],
+    ['--max-old-space-size=4096   --use-openssl-ca', ['--max-old-space-size=4096', '--use-openssl-ca']],
+    ['--re"port"-on-signal', ['--report-on-signal']],
+    ['"--report\\-on-signal"', ['--report-on-signal']],
+    ['--report""-on-signal', ['--report-on-signal']],
+    ['--report-dir="a b"', ['--report-dir=a b']],
+    ['"--report-dir=a b"', ['--report-dir=a b']],
+    ['--report-dir="a\\"b"', ['--report-dir=a"b']],
+    // Outside quotes a backslash is an ordinary character.
+    ['--report-dir=a\\b', ['--report-dir=a\\b']],
+    ['"--report-dir=a\\\\b"', ['--report-dir=a\\b']],
+    // Only a space separates; a tab or newline is part of the argument.
+    ['--a=1\t--b', ['--a=1\t--b']],
+    ['--a=1\n--b', ['--a=1\n--b']],
+    // Single quotes are not Node's: kept as written.
+    ["'--report-on-signal'", ["'--report-on-signal'"]],
+    // An empty pair of quotes makes no argument of its own.
+    ['--a ""', ['--a']],
+    ['"-\\r" ./x.js', ['-r', './x.js']],
+  ])('%j → %j', (value, args) => {
+    expect(nodeOptionsArgs(value)).toEqual(args);
+  });
+
+  it.each([
+    ['"--report-on-signal'],
+    ['--max-old-space-size=4096 "--use-openssl-ca'],
+    ['"--report-on-signal\\'],
+  ])('%j: Node rejects it, and so is it rejected here (null)', (value) => {
+    expect(nodeOptionsArgs(value)).toBeNull();
+  });
+
+  /**
+   * The same inputs through a real Node: what it does with each is what
+   * `nodeOptionsArgs` says it reads. Report switches only install a handler;
+   * nothing is written.
+   */
+  function nodeWith(nodeOptions: string): { status: number | null; seen?: { signal: boolean; fatal: boolean; dir: string } } {
+    const r = spawnSync(process.execPath, ['-e',
+      'process.stdout.write(JSON.stringify({ signal: process.report.reportOnSignal, fatal: process.report.reportOnFatalError, dir: process.report.directory }))'],
+    { env: { PATH: process.env.PATH ?? '', NODE_OPTIONS: nodeOptions }, encoding: 'utf-8', timeout: 30_000 });
+    return { status: r.status, ...(r.status === 0 ? { seen: JSON.parse(r.stdout) } : {}) };
+  }
+
+  it.each([
+    ['--report-dir="a b"', 'a b'],
+    ['"--report-dir=a b"', 'a b'],
+    ['--report-dir="a\\"b"', 'a"b'],
+    ['--report-dir=a\\b', 'a\\b'],
+    ['"--report-dir=a\\\\b"', 'a\\b'],
+    ['--report-dir=a""b', 'ab'],
+    ['--report-dir="a\\ b"', 'a b'],
+  ])('real Node agrees: %j sets the report directory to %j', (value, dir) => {
+    expect(nodeOptionsArgs(value)).toEqual([`--report-dir=${dir}`]);
+    expect(nodeWith(value)).toEqual({ status: 0, seen: { signal: false, fatal: false, dir } });
+  });
+
+  it.each([
+    ['--re"port"-on-signal', 'signal'],
+    ['"--report\\-on-signal"', 'signal'],
+    ['--report""-on-signal', 'signal'],
+    ['--max-old-space-size=4096 --re"port_on"-signal', 'signal'],
+    ['"--report\\-on\\-fatalerror"', 'fatal'],
+  ] as const)('real Node turns a report on for %j — and the borrow is refused', (value, which) => {
+    expect(nodeWith(value).seen?.[which]).toBe(true);
+    process.env.NODE_OPTIONS = value;
+    writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+    expect(resolve()).toEqual({ used: false, reason: expect.stringMatching(/^NODE_OPTIONS asks for a Node diagnostic/) });
+  });
+
+  it.each([
+    ['"--report-on-signal'],
+    ['"--report-on-signal\\'],
+  ])('real Node refuses to start with %j — and the borrow is refused', (value) => {
+    expect(nodeWith(value).status).not.toBe(0);
+    process.env.NODE_OPTIONS = value;
+    writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+    expect(resolve()).toEqual({ used: false, reason: expect.stringMatching(/^NODE_OPTIONS has an unclosed quote/) });
   });
 });
 
@@ -413,6 +512,38 @@ describe('#1105 — reading the gateway boot env: fixed path, owner-checked, loc
     ['NODE_OPTIONS=--inspect=0', () => { process.env.NODE_OPTIONS = '--inspect=0'; }, /^NODE_OPTIONS asks for a Node diagnostic/],
     ['NODE_OPTIONS=--heapsnapshot-signal=SIGUSR2', () => { process.env.NODE_OPTIONS = '--heapsnapshot-signal=SIGUSR2'; }, /^NODE_OPTIONS asks for a Node diagnostic/],
 
+    // #1105 r4 (Astra R3-B2): judged as Node splits NODE_OPTIONS — quotes and
+    // the escapes inside them are removed before Node reads an option.
+    ...([
+      ['--re"port"-on-signal'],
+      ['"--report\\-on-fatalerror"'],
+      ['--report""-on-signal'],
+      ['--max-old-space-size=4096 --re"port_on"-signal'],
+      ['--max-old-space-size=4096 "--in"spect=0'],
+      ['--heap"snapshot-signal"=SIGUSR2'],
+      ['"--tr\\ace-env"'],
+      ['"--env\\-file"=/tmp/sc-1105.env'],
+    ] as const).map(([value]): Refusal => [`NODE_OPTIONS=${value} (quoted or escaped)`, () => { process.env.NODE_OPTIONS = value; },
+      /^NODE_OPTIONS asks for a Node diagnostic, and Node's diagnostics would print the retry child's environment, so ~\/\.openclaw\/gateway\.systemd\.env was not read$/]),
+    // Grok r3 nit 1: a preloaded module runs inside the retry child, env and all.
+    ...([
+      ['--require=/tmp/sc-1105-preload.js'],
+      ['--require /tmp/sc-1105-preload.js'],
+      ['-r /tmp/sc-1105-preload.js'],
+      ['--import=/tmp/sc-1105-preload.mjs'],
+      ['--loader /tmp/sc-1105-preload.mjs'],
+      ['--experimental-loader=/tmp/sc-1105-preload.mjs'],
+      ['--max-old-space-size=4096 --re"quire" /tmp/sc-1105-preload.js'],
+      ['"-\\r" /tmp/sc-1105-preload.js'],
+    ] as const).map(([value]): Refusal => [`NODE_OPTIONS=${value} (a preload)`, () => { process.env.NODE_OPTIONS = value; },
+      /^NODE_OPTIONS preloads a module \(--require, -r, --import or --loader\), and that code would run inside the retry child with its environment/]),
+    // A value Node itself cannot split: which options it carries is unknown.
+    ...([
+      ['--max-old-space-size=4096 "--use-openssl-ca'],
+      ['"--use-openssl-ca\\'],
+    ] as const).map(([value]): Refusal => [`NODE_OPTIONS=${value} (Node cannot split it)`, () => { process.env.NODE_OPTIONS = value; },
+      /^NODE_OPTIONS has an unclosed quote or ends in a backslash inside quotes, so which options the retry child would get could not be established/]),
+
     // #1105 r3 (CASE B1): OPENCLAW_GATEWAY_PORT beats the config's port.
     ['OPENCLAW_GATEWAY_PORT set', () => { process.env.OPENCLAW_GATEWAY_PORT = '9'; }, /^OPENCLAW_GATEWAY_PORT is set/],
 
@@ -461,6 +592,8 @@ describe('#1105 — reading the gateway boot env: fixed path, owner-checked, loc
     ['a ~/.openclaw/.env over 1 MiB', () => writeDotEnv(stateDotEnvPath(), `A=${'x'.repeat(1024 * 1024)}\n`), /^~\/\.openclaw\/\.env is larger than 1 MiB/],
     ['a boot env that is not valid UTF-8', () => writeBootEnv(Buffer.concat([Buffer.from(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\nOTHER=`), Buffer.from([0xff, 0x0a])])),
       /^~\/\.openclaw\/gateway\.systemd\.env is not valid UTF-8$/],
+    ['a boot env with a NUL byte (#1105 r4)', () => writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n\0OTHER=1\n`),
+      /^~\/\.openclaw\/gateway\.systemd\.env contains a NUL byte$/],
   ];
 
   it.each(REFUSALS)('not used: %s', (_label, arrange, reason, over = {}) => {
@@ -509,6 +642,33 @@ describe('#1105 — reading the gateway boot env: fixed path, owner-checked, loc
     process.env.NODE_OPTIONS = '--max-old-space-size=4096 --use-openssl-ca';
     writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
     expect(resolve()).toMatchObject({ used: true });
+  });
+
+  it.each([
+    ['--max-old-space-size=4096 --title="shield cortex"'],
+    ['"--max-old-space-size=4096"   --use-openssl-ca'],
+    ['--title="a \\"quoted\\" name" --stack-trace-limit=50'],
+    ['--title=C:\\shield'],
+    ['--experimental-import-meta-resolve --no-experimental-require-module'],
+  ])('control (#1105 r4): NODE_OPTIONS %s — quoted or not, nothing diagnostic or preloaded — still used', (value) => {
+    process.env.NODE_OPTIONS = value;
+    writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+    expect(resolve()).toMatchObject({ used: true });
+  });
+
+  it('a NODE_OPTIONS refusal names the variable, never its value (#1105 r4)', () => {
+    for (const value of [
+      '--title=sc1105-marker --re"port"-on-signal',
+      '--title=sc1105-marker --require /tmp/sc1105-marker.js',
+      '--title=sc1105-marker "--use-openssl-ca',
+    ]) {
+      process.env.NODE_OPTIONS = value;
+      const r = resolve();
+      expect(r.used).toBe(false);
+      if (r.used) continue;
+      expect(r.reason).toMatch(/^NODE_OPTIONS /);
+      expect(r.reason).not.toContain('sc1105-marker');
+    }
   });
 
   it('reading the dotenv files writes nothing and the refusal never quotes them', () => {
@@ -848,6 +1008,55 @@ describe('#1105 — the update step: SecretRef token, no gateway credential in t
     expect(JSON.stringify(r) + out).not.toContain(TOKEN);
   });
 
+  /**
+   * #1105 r4 (Astra R3-B2), through the `run` seam: the retry child inherits
+   * NODE_OPTIONS exactly as set, so a quoted or escaped diagnostic, a
+   * preload, or a value Node cannot split keeps the credential out of it.
+   */
+  describe('#1105 r4 — NODE_OPTIONS as Node splits it decides the retry child\'s env', () => {
+    it.each([
+      ['a quoted report switch', '--title=sc1105-marker --re"port"-on-signal', 'NODE_OPTIONS asks for a Node diagnostic'],
+      ['an escaped report switch', '--title=sc1105-marker "--report\\-on-fatalerror"', 'NODE_OPTIONS asks for a Node diagnostic'],
+      ['a quoted inspector', '--title=sc1105-marker "--in"spect=0', 'NODE_OPTIONS asks for a Node diagnostic'],
+      ['a preload', '--title=sc1105-marker --require /tmp/sc1105-marker.js', 'NODE_OPTIONS preloads a module'],
+      ['a value Node cannot split', '--title=sc1105-marker "--use-openssl-ca', 'NODE_OPTIONS has an unclosed quote'],
+    ])('%s: the retry child gets no credential, and the value is never shown', async (_label, value, why) => {
+      process.env.NODE_OPTIONS = value;
+      writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+      const f = fakeOpenClaw();
+      const { value: r, out } = await step(f);
+
+      const [first, retry] = installs(f);
+      // Both children inherit NODE_OPTIONS unchanged; neither has the credential.
+      expect(first.env.NODE_OPTIONS).toBe(value);
+      expect(retry.env.NODE_OPTIONS).toBe(value);
+      for (const c of f.calls) {
+        expect(c.env.OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
+        expect(c.args.join(' ')).not.toContain(TOKEN);
+      }
+      expect(r.status).not.toBe('ok');
+      expect((r.detail ?? []).join('\n')).toContain(`gateway boot env not used: ${why}`);
+      expect(out).not.toContain(TOKEN);
+      expect(out).not.toContain('sc1105-marker');
+      expect(JSON.stringify(r)).not.toContain('sc1105-marker');
+    });
+
+    it('control: a quoted NODE_OPTIONS with nothing diagnostic or preloaded — the retry child gets the credential', async () => {
+      const value = '--max-old-space-size=4096 --title="shield cortex"';
+      process.env.NODE_OPTIONS = value;
+      writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+      const f = fakeOpenClaw();
+      const { value: r, out } = await step(f);
+
+      expect(r.status).toBe('ok');
+      const [first, retry] = installs(f);
+      expect(first.env.OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
+      expect(retry.env.OPENCLAW_GATEWAY_TOKEN).toBe(TOKEN);
+      expect(retry.env.NODE_OPTIONS).toBe(value);
+      expect(out).not.toContain(TOKEN);
+    });
+  });
+
   describe('no boot env: refused twice — the accurate message', () => {
     async function refusedTwice(list: Record<string, unknown> | null) {
       const f = fakeOpenClaw({ list });
@@ -936,6 +1145,19 @@ describe('#1105 — the update step: SecretRef token, no gateway credential in t
       expect(summary.rows.find((x) => x.label === 'OpenClaw')).toMatchObject({ mark: 'fail' });
       expect(summary.rows.find((x) => x.label === 'Guard')).toMatchObject({ mark: 'fail', text: 'on, but OpenClaw isn\'t running the plugin' });
       expect(summary.headline).toBe('failed');
+    });
+
+    it('with no list to go on, the OpenClaw row says the update was not confirmed — never that nothing was installed (#1105 r4)', async () => {
+      const { value: r } = await refusedTwice(null);
+      expect(r.stillOn).toBeUndefined();
+      const input: UpdateSummaryInput = { ...closing(r), protection: { status: 'unproven', loaded: 'unknown', pluginVersion: BEFORE } };
+      const row = buildUpdateSummary(input).rows.find((x) => x.label === 'OpenClaw');
+      expect(row).toMatchObject({
+        mark: 'check',
+        text: 'plugin couldn\'t be updated',
+        why: 'The update was not confirmed complete; what OpenClaw has installed now is not known.',
+      });
+      expect(row?.why).not.toMatch(/not installed|left as it was|running/);
     });
 
     it('with loading unproven, the OpenClaw row says installed and listed — never "running" (#1105 r2 B5)', async () => {

@@ -287,10 +287,12 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
         mark: 'check',
         text: stillOn ? 'plugin not updated (still on ' + stillOn + ')' : 'plugin couldn\'t be updated',
         // Inventory only: installed and listed enabled, never "running".
-        // Without the list, nothing is known about what OpenClaw has loaded.
+        // Without the list, nothing is known about what OpenClaw has now: a
+        // step that timed out or failed late may have installed part or all
+        // of it, so this says only that the update was not confirmed.
         why: stillOn
           ? 'The previous version is still installed and listed enabled.'
-          : 'The new version was not installed; whatever OpenClaw had is left as it was.',
+          : 'The update was not confirmed complete; what OpenClaw has installed now is not known.',
         command: stepCommand ?? 'shieldcortex update',
         commandLabel: 'Fix',
         commandNote: stepCommandNote,
