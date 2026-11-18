@@ -37,6 +37,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify optional ML stack installed
+        run: |
+          node --input-type=module -e "
+          try { console.log(import.meta.resolve('@huggingface/transformers')); }
+          catch { console.error('::error::optional dependency @huggingface/transformers is not installed: npm dropped it because an install script in its subtree failed (see the npm ci step)'); process.exit(1); }
+          "
+
       - name: Build
         run: npm run build:ts
 
@@ -75,8 +82,27 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
 
+      # ONNXRUNTIME_NODE_INSTALL_CUDA=skip: on linux/x64 the postinstall of
+      # onnxruntime-node (pulled in by the OPTIONAL @huggingface/transformers)
+      # downloads CUDA 12 provider binaries from a GitHub release asset. Since
+      # 2026-11-17 that URL answers 404, the script throws, and npm drops the
+      # whole optional subtree while `npm ci` still exits 0 — so the embeddings
+      # suites failed with "Cannot find module '@huggingface/transformers'".
+      # CI never uses the CUDA execution provider; the CPU binaries ship inside
+      # the npm tarball.
       - name: Install dependencies
         run: npm ci
+        env:
+          ONNXRUNTIME_NODE_INSTALL_CUDA: skip
+
+      # A dropped optional dependency is silent at install time. Fail here, by
+      # name, instead of as unrelated-looking test failures later.
+      - name: Verify optional ML stack installed
+        run: |
+          node --input-type=module -e "
+          try { console.log(import.meta.resolve('@huggingface/transformers')); }
+          catch { console.error('::error::optional dependency @huggingface/transformers is not installed: npm dropped it because an install script in its subtree failed (see the npm ci step)'); process.exit(1); }
+          "
 
       # Fail-fast on plugin-version drift. The OpenClaw plugin sub-package
       # (plugins/openclaw/package.json) MUST be version-bumped in lockstep
