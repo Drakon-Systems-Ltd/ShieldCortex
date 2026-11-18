@@ -44,8 +44,13 @@ jobs:
           node-version: '22.14.0'
           cache: 'npm'
 
+      # ONNXRUNTIME_NODE_INSTALL_CUDA=skip: onnxruntime-node's linux/x64 postinstall
+      # fetches CUDA binaries from a GitHub release URL that now 404s; npm then
+      # silently drops the optional @huggingface/transformers subtree. See ci.yml.
       - name: Install dependencies
         run: npm ci
+        env:
+          ONNXRUNTIME_NODE_INSTALL_CUDA: skip
 
       - name: Build TypeScript (so harness can import compiled paths if needed)
         run: npm run build:ts
