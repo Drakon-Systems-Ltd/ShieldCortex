@@ -20,8 +20,17 @@
  *    environment variable, a config value, or the unit file. When anything
  *    could point OpenClaw at a different state dir, config or gateway
  *    (OPENCLAW_STATE_DIR, OPENCLAW_HOME, OPENCLAW_PROFILE, OPENCLAW_CONFIG_PATH,
- *    OPENCLAW_GATEWAY_URL, or any legacy CLAWDBOT_* variable) the file is not
- *    read at all.
+ *    OPENCLAW_GATEWAY_URL, OPENCLAW_GATEWAY_PORT, or any legacy CLAWDBOT_*
+ *    variable) the file is not read at all. Nor is it when either dotenv file
+ *    OpenClaw loads into its OWN process at startup names one of them:
+ *    `~/.openclaw/.env` and `~/.config/openclaw/gateway.env` are applied to
+ *    the child's environment first-wins with no OPENCLAW_* blocklist (OpenClaw
+ *    2026.11.4 dist/cli/run-main.js `shouldLoadCliDotEnv`,
+ *    dist/dotenv-global-*.mjs `resolveGlobalDotEnvFiles`), before the gateway
+ *    URL and port are chosen. Both are read the hardened way below (the first
+ *    through the checked directory); a missing one is fine, one that cannot
+ *    be read is a refusal. The custom state dir OpenClaw could use is never
+ *    resolved here: every variable that would move it is a refusal above.
  *  - Local gateway only, as OpenClaw would resolve it: OpenClaw sends an env
  *    token to a REMOTE gateway too (env-first precedence,
  *    dist/credentials-*.mjs), and the mode it acts on is the one AFTER `$include`
@@ -35,22 +44,27 @@
  *  - No diagnostics that could print a child's environment: Node's
  *    `child_process` debug log writes every spawn's env to this process's
  *    stderr, and it is switched on from NODE_DEBUG at startup. Any non-blank
- *    NODE_DEBUG or NODE_DEBUG_NATIVE, or a `child_process` debug log already
- *    on, and nothing is borrowed.
+ *    NODE_DEBUG or NODE_DEBUG_NATIVE, a `child_process` debug log already on,
+ *    or a NODE_OPTIONS the child would inherit that asks for a diagnostic
+ *    report, a trace, an inspector or a heap snapshot (each can write the
+ *    child's environment out), and nothing is borrowed.
  *  - Bound to the directory it checked: `~/.openclaw` must not be a symbolic
  *    link. It is opened O_DIRECTORY|O_NOFOLLOW and checked on that descriptor
  *    (a directory, owned by the user running update, not writable by group or
  *    others); both files are then opened THROUGH that descriptor
- *    (`/proc/self/fd/<n>/…`, where the kernel provides it) with O_NOFOLLOW,
- *    and the directory's identity is re-checked after each open. Each file is
+ *    (`/proc/self/fd/<n>/…`, where the kernel provides it; elsewhere by path,
+ *    with only the post-open identity check below) with O_NOFOLLOW, and the
+ *    directory's identity is re-checked after each open. Each file is
  *    checked on its own descriptor; the boot env must be a regular file, one
  *    link, owned by that user, not writable by group or others, at most
  *    64 KiB. Without O_NOFOLLOW, O_DIRECTORY and O_NONBLOCK nothing is read.
- *  - Parsed, never run: plain `KEY=VALUE` lines in systemd EnvironmentFile
- *    form. Only OPENCLAW_GATEWAY_TOKEN and OPENCLAW_GATEWAY_PASSWORD are
- *    taken. A value that would need shell or systemd expansion (`$…`, a
- *    backtick), or any quoting OpenClaw's serializer does not write, is not
- *    used.
+ *  - Parsed, never run: entries found the way systemd's EnvironmentFile
+ *    parser finds them (a backslash-newline continues a value, a quoted value
+ *    can span lines), but only a credential entry on ONE line, in the form
+ *    OpenClaw's serializer writes, is taken. Only OPENCLAW_GATEWAY_TOKEN and
+ *    OPENCLAW_GATEWAY_PASSWORD are taken. A value that would need shell or
+ *    systemd expansion (`$…`, a backtick), any quoting OpenClaw's serializer
+ *    does not write, or a file that is not valid UTF-8, is not used.
  *  - Nothing is written, cached, logged or printed. Callers get the values
  *    only to put them in one child's env; whatever that child says back is
  *    never shown (update.ts reports it in fixed words), and
@@ -79,6 +93,9 @@ const LOCAL_AUTH_PATHS = new Set(['gateway.auth.token', 'gateway.auth.password']
  */
 const LOCATION_OVERRIDES = [
   'OPENCLAW_GATEWAY_URL',
+  // Env-first over the config's gateway.port (resolveGatewayPort): the local
+  // URL's port can be anything, including a listener that is not the gateway.
+  'OPENCLAW_GATEWAY_PORT',
   'OPENCLAW_STATE_DIR',
   'OPENCLAW_HOME',
   'OPENCLAW_PROFILE',
@@ -89,6 +106,8 @@ const LOCATION_OVERRIDES = [
 const LEGACY_OVERRIDE_PREFIX = 'CLAWDBOT_';
 
 const MAX_BOOT_ENV_BYTES = 64 * 1024;
+/** OpenClaw's own cap for a dotenv file (`MAX_DOTENV_FILE_BYTES`); a larger one is not read here. */
+const MAX_DOTENV_BYTES = 1024 * 1024;
 /** openclaw.json is read only to find the gateway mode; a config past this is not read. */
 const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
 
@@ -111,7 +130,9 @@ function isCredentialKey(key: string): key is GatewayCredentialKey {
  * used.
  */
 function decodeValue(raw: string): string | null {
-  const v = raw.trim();
+  // systemd strips spaces and tabs around a value, nothing else: a JS trim()
+  // would also drop a no-break space or a BOM the gateway keeps.
+  const v = raw.replace(/^[ \t]+|[ \t]+$/g, '');
   if (!v) return null;
   let out = '';
   if (v.startsWith('"')) {
@@ -138,28 +159,117 @@ function decodeValue(raw: string): string | null {
   return out;
 }
 
+/** systemd's env-file character classes (src/basic/env-file.c: NEWLINE, WHITESPACE, COMMENTS). */
+const SD_NEWLINE = '\n\r';
+const SD_WHITESPACE = ' \t\n\r';
+const SD_COMMENTS = '#;';
+
+type SdState =
+  | 'preKey' | 'key' | 'preValue' | 'value' | 'valueEscape'
+  | 'singleQuote' | 'doubleQuote' | 'doubleQuoteEscape' | 'comment' | 'commentEscape';
+
 /**
  * The two gateway credential keys out of a systemd EnvironmentFile body. Pure.
  *
- * Every other key is ignored without being decoded. The last line for a key
- * wins, as in systemd — and when that last line is one this parser will not
- * decode, the key is dropped rather than an earlier value used.
+ * Entries are found the way systemd's own parser finds them
+ * (`parse_env_file_internal`, src/basic/env-file.c): `\n` and `\r` both end
+ * a line, a backslash-newline in a value is a continuation, a quoted value
+ * runs on across lines, and nothing after a NUL is read. A line that only
+ * LOOKS like `OPENCLAW_GATEWAY_TOKEN=…` but is the tail of another entry is
+ * therefore not a credential. A credential entry is taken only when it sits
+ * on one line and decodes in the form OpenClaw's serializer writes; one that
+ * runs past its line has a line break in its raw text, which `decodeValue`
+ * never accepts, so it is not used. A comment ending in a backslash means
+ * nothing is used at all: systemd before v254 continues such a comment onto
+ * the next line and v254 and later do not, so what the gateway got depends on
+ * a version this cannot know (OpenClaw's serializer writes no comments).
+ *
+ * Every other key is ignored without being decoded. The last entry for a key
+ * wins, as in systemd — and when that last entry is one this parser will not
+ * use, the key is dropped rather than an earlier value used.
  */
 export function parseGatewayBootEnv(content: string): GatewayCredentials {
   const out: GatewayCredentials = {};
-  for (const raw of content.split('\n')) {
-    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
-    const t = line.trimStart();
-    if (!t || t.startsWith('#') || t.startsWith(';')) continue;
-    const eq = t.indexOf('=');
-    if (eq <= 0) continue;
-    const key = t.slice(0, eq).trim();
-    if (!isCredentialKey(key)) continue;
-    const value = decodeValue(t.slice(eq + 1));
+  const nul = content.indexOf('\0');
+  const text = nul === -1 ? content : content.slice(0, nul);
+  let state: SdState = 'preKey';
+  let keyStart = 0;
+  let keyEnd = 0;
+  let valueStart = 0;
+  /** A comment ended in a backslash-newline: what follows depends on the systemd version. */
+  let versionDependent = false;
+
+  const finish = (end: number) => {
+    const key = text.slice(keyStart, keyEnd).replace(/[ \t]+$/, '');
+    if (!isCredentialKey(key)) return;
+    // An entry that ran on past its line keeps that line break in this raw
+    // slice; decodeValue refuses it (whitespace in a bare value, a control
+    // character in a quoted one).
+    const value = decodeValue(text.slice(valueStart, end));
     if (value === null) delete out[key];
     else out[key] = value;
+  };
+
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const newline = SD_NEWLINE.includes(c);
+    switch (state) {
+      case 'preKey':
+        if (SD_COMMENTS.includes(c)) state = 'comment';
+        else if (!SD_WHITESPACE.includes(c)) {
+          state = 'key';
+          keyStart = i;
+        }
+        break;
+      case 'key':
+        if (newline) state = 'preKey';
+        else if (c === '=') {
+          state = 'preValue';
+          keyEnd = i;
+          valueStart = i + 1;
+        }
+        break;
+      case 'preValue':
+      case 'value':
+        if (newline) {
+          finish(i);
+          state = 'preKey';
+        } else if (c === '\\') state = 'valueEscape';
+        else if (state === 'preValue' && c === "'") state = 'singleQuote';
+        else if (state === 'preValue' && c === '"') state = 'doubleQuote';
+        else if (state === 'preValue' && !SD_WHITESPACE.includes(c)) state = 'value';
+        break;
+      case 'valueEscape':
+        state = 'value';
+        break;
+      case 'singleQuote':
+        if (c === "'") state = 'preValue';
+        break;
+      case 'doubleQuote':
+        if (c === '"') state = 'preValue';
+        else if (c === '\\') state = 'doubleQuoteEscape';
+        break;
+      case 'doubleQuoteEscape':
+        state = 'doubleQuote';
+        break;
+      case 'comment':
+        if (c === '\\') state = 'commentEscape';
+        else if (newline) state = 'preKey';
+        break;
+      case 'commentEscape':
+        if (newline) {
+          versionDependent = true;
+          state = 'preKey';
+        } else state = 'comment';
+        break;
+    }
   }
-  return out;
+  // End of input inside an entry: systemd keeps what it has.
+  if (state === 'preValue' || state === 'value' || state === 'valueEscape' || state === 'singleQuote'
+    || state === 'doubleQuote' || state === 'doubleQuoteEscape') {
+    finish(text.length);
+  }
+  return versionDependent ? {} : out;
 }
 
 type Owned = { uid: number | bigint; mode: number | bigint };
@@ -249,10 +359,12 @@ const DIR_CHANGED = 'SC_STATE_DIR_CHANGED';
  * Open `name` inside the checked directory, never through a link. Where the
  * kernel provides `/proc/self/fd`, the path goes THROUGH the directory's own
  * descriptor, so the file is the one in the directory that was checked even
- * if `~/.openclaw` is swapped meanwhile. Either way, the directory's identity
- * is checked again after the open: a `~/.openclaw` that is no longer that
- * directory — or is now a link — is refused, because it is no longer the one
- * the gateway reads either.
+ * if `~/.openclaw` is swapped meanwhile. Elsewhere (macOS) the open goes by
+ * path, and the only guard is the identity check that follows it: that
+ * catches a swap still in place when the file has been opened, not one made
+ * and undone around the open. Either way, a `~/.openclaw` that is no longer
+ * the checked directory after the open — or is now a link — is refused,
+ * because it is no longer the one the gateway reads either.
  */
 function openInDir(dir: StateDir, name: string, flags: number): number {
   const viaFd = `/proc/self/fd/${dir.fd}`;
@@ -361,7 +473,9 @@ function confirmLocalGateway(dir: StateDir, flags: { file: number }): string | n
     try {
       cfg = JSON.parse(buf.subarray(0, n).toString('utf8'));
     } catch {
-      return unread;
+      // OpenClaw parses JSON5; this reads strict JSON only, so a config with
+      // comments, unquoted keys or trailing commas is not confirmed local.
+      return '~/.openclaw/openclaw.json is not strict JSON (JSON5 configs are not read here), so a local gateway could not be confirmed';
     }
     return localGatewayProblem(cfg);
   } catch {
@@ -394,7 +508,13 @@ function readOwnedBootEnv(dir: StateDir, euid: number, flags: { file: number }):
     if (st.nlink !== 1) return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} has more than one hard link` };
     const n = readBounded(fd, buf);
     if (n > MAX_BOOT_ENV_BYTES) return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} is larger than 64 KiB` };
-    return { text: buf.subarray(0, n).toString('utf8') };
+    // systemd refuses a value that is not valid UTF-8; a lenient decode would
+    // hand the child a value the gateway never had.
+    try {
+      return { text: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf.subarray(0, n)) };
+    } catch {
+      return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} is not valid UTF-8` };
+    }
   } catch (err) {
     return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} could not be read (${errCode(err)})` };
   } finally {
@@ -403,18 +523,107 @@ function readOwnedBootEnv(dir: StateDir, euid: number, flags: { file: number }):
   }
 }
 
+/** What every message calls the two dotenv files OpenClaw loads at startup. Never an absolute path. */
+export const STATE_DOTENV_DISPLAY = '~/.openclaw/.env';
+export const GATEWAY_DOTENV_DISPLAY = '~/.config/openclaw/gateway.env';
+
 /**
- * Which Node diagnostic would print a spawned child's environment from THIS
- * process, or null. Node's `child_process` debug log formats each spawn's
- * options — env included — to this process's stderr, and the sections it
- * logs are fixed from NODE_DEBUG when Node starts: removing the variable later
- * does not turn them off, so the live switch is asked as well. Any non-blank
- * NODE_DEBUG counts, whatever it names: the retry child inherits it too.
+ * The override a dotenv file's text names, or null. Not a parse: ANY
+ * mention of an override name as a whole word counts — an assignment in
+ * whatever syntax dotenv accepts (`export K=…`, `K: …`, after a `\r` or a
+ * U+2028 that ends a line for it), a commented-out line, or text inside some
+ * other value — case-insensitively. dotenv keys are ASCII and taken
+ * literally, so whatever OpenClaw would set is always among what this finds.
+ * A legacy name is reported generically: the matched text is the file's,
+ * not ours to print.
+ */
+function dotEnvOverride(text: string): string | null {
+  for (const name of LOCATION_OVERRIDES) {
+    if (new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`, 'i').test(text)) return name;
+  }
+  return /(?<![A-Za-z0-9_])CLAWDBOT_/i.test(text) ? 'a CLAWDBOT_* variable' : null;
+}
+
+/**
+ * Why a dotenv file OpenClaw loads into the install child's own environment
+ * rules the borrow out, or null when the file is absent or names no
+ * override. `open` throws as `fs.openSync` does. A file that is a link, not
+ * a regular file, not the user's own and private, over OpenClaw's own 1 MiB
+ * cap, or unreadable is a refusal: what it would set cannot be ruled out.
+ */
+function dotEnvProblem(display: string, open: () => number, euid: number): string | null {
+  const why = 'so it could not be ruled out that it points the install at another gateway';
+  let fd: number;
+  try {
+    fd = open();
+  } catch (err) {
+    const code = errCode(err);
+    // Absent — or a path through a non-directory, which OpenClaw cannot read either.
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    if (code === DIR_CHANGED) return '~/.openclaw changed while it was being read';
+    if (code === 'ELOOP') return `${display} is a symbolic link, ${why}`;
+    return `${display} could not be opened (${code}), ${why}`;
+  }
+  const buf = Buffer.alloc(MAX_DOTENV_BYTES + 1);
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return `${display} is not a regular file, ${why}`;
+    const problem = ownerProblem(st, euid);
+    if (problem) return `${display} ${problem}, ${why}`;
+    const n = readBounded(fd, buf);
+    if (n > MAX_DOTENV_BYTES) return `${display} is larger than 1 MiB, ${why}`;
+    const named = dotEnvOverride(buf.subarray(0, n).toString('utf8'));
+    if (named) {
+      return `${display} names ${named}, which OpenClaw loads into the install's own environment and which can point it at another gateway`;
+    }
+    return null;
+  } catch (err) {
+    return `${display} could not be read (${errCode(err)}), ${why}`;
+  } finally {
+    // Provider keys live in these files; nothing here keeps them.
+    buf.fill(0);
+    try { fs.closeSync(fd); } catch { /* already closed */ }
+  }
+}
+
+/**
+ * Why the dotenv files the install child loads at startup rule the borrow
+ * out, or null. `~/.openclaw/.env` is read through the checked directory;
+ * `~/.config/openclaw/gateway.env` by its fixed path under `home` (the HOME
+ * the child is given), never following a link at the file itself. A dotenv
+ * in the child's working directory needs no check: OpenClaw drops every
+ * OPENCLAW_* key from it (dist/dotenv-*.mjs `BLOCKED_WORKSPACE_DOTENV_PREFIXES`)
+ * and no longer reads CLAWDBOT_*.
+ */
+function runtimeDotEnvProblem(dir: StateDir, home: string, euid: number, flags: { file: number }): string | null {
+  return dotEnvProblem(STATE_DOTENV_DISPLAY, () => openInDir(dir, '.env', flags.file), euid)
+    ?? dotEnvProblem(GATEWAY_DOTENV_DISPLAY, () => fs.openSync(path.join(home, '.config', 'openclaw', 'gateway.env'), flags.file), euid);
+}
+
+/**
+ * NODE_OPTIONS a Node child inherits that can write its environment out: a
+ * diagnostic report (`--report-*` includes every environment variable), a
+ * trace (`--trace-env` prints the values it reads), an inspector or debug
+ * port, a heap snapshot (every string in the heap), or an env file loaded at
+ * startup. Node accepts `_` for `-` in option names, so both are matched.
+ */
+const NODE_OPTIONS_DIAGNOSTICS = /--(?:report|trace|inspect|debug|heapsnapshot|env-file)/;
+
+/**
+ * Which Node diagnostic would print a spawned child's environment, or null.
+ * Node's `child_process` debug log formats each spawn's options — env
+ * included — to THIS process's stderr, and the sections it logs are fixed
+ * from NODE_DEBUG when Node starts: removing the variable later does not turn
+ * them off, so the live switch is asked as well. Any non-blank NODE_DEBUG
+ * counts, whatever it names: the retry child inherits it too — and so would it
+ * inherit a diagnostic NODE_OPTIONS.
  */
 function spawnDiagnostics(env: NodeJS.ProcessEnv): string | null {
   for (const k of ['NODE_DEBUG', 'NODE_DEBUG_NATIVE'] as const) {
     if (env[k]?.trim()) return k;
   }
+  const nodeOptions = env.NODE_OPTIONS?.toLowerCase().replace(/_/g, '-');
+  if (nodeOptions && NODE_OPTIONS_DIAGNOSTICS.test(nodeOptions)) return 'NODE_OPTIONS';
   return debuglog('child_process').enabled ? 'NODE_DEBUG' : null;
 }
 
@@ -450,7 +659,8 @@ export function resolveGatewayBootCredentials(params: {
   }
   const diagnostics = spawnDiagnostics(env);
   if (diagnostics) {
-    return { used: false, reason: `${diagnostics} is set, and Node's diagnostics would print the retry child's environment, so ${GATEWAY_BOOT_ENV_DISPLAY} was not read` };
+    const what = diagnostics === 'NODE_OPTIONS' ? 'NODE_OPTIONS asks for a Node diagnostic' : `${diagnostics} is set`;
+    return { used: false, reason: `${what}, and Node's diagnostics would print the retry child's environment, so ${GATEWAY_BOOT_ENV_DISPLAY} was not read` };
   }
   const override = locationOverride(env);
   if (override) {
@@ -467,6 +677,8 @@ export function resolveGatewayBootCredentials(params: {
   try {
     const notLocal = confirmLocalGateway(opened.dir, flags);
     if (notLocal) return { used: false, reason: notLocal };
+    const dotEnv = runtimeDotEnvProblem(opened.dir, params.home, euid, flags);
+    if (dotEnv) return { used: false, reason: dotEnv };
     const read = readOwnedBootEnv(opened.dir, euid, flags);
     if ('reason' in read) return { used: false, reason: read.reason };
     const creds = parseGatewayBootEnv(read.text);

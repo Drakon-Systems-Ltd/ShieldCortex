@@ -1097,9 +1097,10 @@ async function stepOpenClawPluginLocked(
       // OPENCLAW_GATEWAY_TOKEN nor OPENCLAW_GATEWAY_PASSWORD, and the refusal
       // named the local gateway's own auth, and that file passes every check in
       // `resolveGatewayBootCredentials` (fixed path, owner, mode, a local
-      // gateway OpenClaw would resolve the same way, no Node spawn
-      // diagnostics, plain KEY=VALUE), the retry's env — and only the
-      // retry's — carries those two keys. Their values are never logged,
+      // gateway OpenClaw would resolve the same way — including no gateway
+      // URL, port or location override in the dotenv files OpenClaw loads
+      // into the child itself — no Node spawn diagnostics, plain KEY=VALUE),
+      // the retry's env — and only the retry's — carries those two keys. Their values are never logged,
       // printed or written; nothing that child says is shown (its failure is
       // reported in fixed words), and every string the step returns is
       // scrubbed of the exact values as well.

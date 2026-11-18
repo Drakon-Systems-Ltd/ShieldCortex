@@ -287,9 +287,10 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
         mark: 'check',
         text: stillOn ? 'plugin not updated (still on ' + stillOn + ')' : 'plugin couldn\'t be updated',
         // Inventory only: installed and listed enabled, never "running".
+        // Without the list, nothing is known about what OpenClaw has loaded.
         why: stillOn
           ? 'The previous version is still installed and listed enabled.'
-          : 'OpenClaw keeps running the previous plugin.',
+          : 'The new version was not installed; whatever OpenClaw had is left as it was.',
         command: stepCommand ?? 'shieldcortex update',
         commandLabel: 'Fix',
         commandNote: stepCommandNote,

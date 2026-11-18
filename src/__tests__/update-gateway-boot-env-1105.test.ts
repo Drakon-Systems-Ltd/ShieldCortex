@@ -46,6 +46,10 @@ import type { CapturedError } from '../integrations/child-output.js';
  *     is "plugin not updated (still on X)" — installed and listed, never
  *     "running" — and a check that proved the plugin absent stays red.
  *
+ * r3 (CASE B1): the install child loads `~/.openclaw/.env` and
+ * `~/.config/openclaw/gateway.env` into its own environment at startup, so a
+ * gateway URL, port or location override in either refuses the borrow too.
+ *
  * The directory-swap race and missing open flags are pinned in
  * update-gateway-boot-env-1105-fs.test.ts, which replaces `fs` for the module.
  */
@@ -76,8 +80,10 @@ const ENV_KEYS = [
   'CLAWDBOT_STATE_DIR',
   'CLAWDBOT_CONFIG_PATH',
   'CLAWDBOT_GATEWAY_URL',
+  'OPENCLAW_GATEWAY_PORT',
   'NODE_DEBUG',
   'NODE_DEBUG_NATIVE',
+  'NODE_OPTIONS',
 ] as const;
 
 let home: string;
@@ -122,9 +128,19 @@ function writeRawConfig(body: unknown) {
 }
 
 const bootEnvPath = () => join(home, '.openclaw', 'gateway.systemd.env');
+/** The two dotenv files OpenClaw 2026.11.4 loads into a CLI child's env at startup (dist/dotenv-global-*.mjs). */
+const stateDotEnvPath = () => join(home, '.openclaw', '.env');
+const gatewayDotEnvPath = () => join(home, '.config', 'openclaw', 'gateway.env');
+
+/** A dotenv file as an operator would leave it: theirs, mode 0600 (explicit, so the umask cannot decide). */
+function writeDotEnv(file: string, body: string | Buffer, mode = 0o600) {
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, body);
+  chmodSync(file, mode);
+}
 
 /** The boot env as OpenClaw writes it: serialized entries, mode 0600. */
-function writeBootEnv(body: string, mode = 0o600) {
+function writeBootEnv(body: string | Buffer, mode = 0o600) {
   writeFileSync(bootEnvPath(), body);
   chmodSync(bootEnvPath(), mode);
 }
@@ -223,6 +239,57 @@ describe('#1105 — parsing the gateway boot env (KEY=VALUE only, never run)', (
     expect(parseGatewayBootEnv('OPENCLAW_GATEWAY_TOKEN=first\nOPENCLAW_GATEWAY_TOKEN=second')).toEqual({ OPENCLAW_GATEWAY_TOKEN: 'second' });
     expect(parseGatewayBootEnv('OPENCLAW_GATEWAY_TOKEN=first\nOPENCLAW_GATEWAY_TOKEN=$LATER')).toEqual({});
   });
+
+  // #1105 r3 (CASE nit 1): systemd's EnvironmentFile parser
+  // (src/basic/env-file.c) joins a backslash-newline onto the value, and a
+  // quoted value runs on across lines — OpenClaw's serializer double-quotes a
+  // value with a newline in it. A line inside another entry is not a key.
+  it.each([
+    ['a backslash continuation of another value', 'FOO=bar\\\nOPENCLAW_GATEWAY_TOKEN=inside-foo'],
+    ['a continuation after a value with spaces before the backslash', 'FOO=bar \\\nOPENCLAW_GATEWAY_TOKEN=inside-foo'],
+    ['a continuation that is a \\r line end', 'FOO=bar\\\rOPENCLAW_GATEWAY_TOKEN=inside-foo'],
+    ['a double-quoted value spanning lines (as OpenClaw writes a value with a newline)', 'CERT="line one\nOPENCLAW_GATEWAY_TOKEN=inside-cert\nline three"'],
+    ['a single-quoted value spanning lines', "FOO='a\nOPENCLAW_GATEWAY_TOKEN=inside-foo\n'"],
+    ['a backslash-newline inside double quotes', 'FOO="a\\\nOPENCLAW_GATEWAY_TOKEN=inside-foo\nrest"'],
+    ['an unterminated quote running to the end of the file', 'FOO="a\nOPENCLAW_GATEWAY_TOKEN=inside-foo\n'],
+  ])('a credential line inside %s is not a credential', (_label, body) => {
+    expect(parseGatewayBootEnv(body)).toEqual({});
+  });
+
+  it('a credential entry that runs past its own line is dropped, not cut short or joined', () => {
+    // systemd would give "abcdef" and "abc\ndef"; neither is a form OpenClaw
+    // writes, and the raw text keeps the line break decodeValue refuses.
+    expect(parseGatewayBootEnv('OPENCLAW_GATEWAY_TOKEN=abc\\\ndef')).toEqual({});
+    expect(parseGatewayBootEnv('OPENCLAW_GATEWAY_TOKEN="abc\ndef"')).toEqual({});
+    expect(parseGatewayBootEnv('OPENCLAW_GATEWAY_TOKEN=first\nOPENCLAW_GATEWAY_TOKEN="abc\ndef"')).toEqual({});
+  });
+
+  it('a real credential line after a multi-line entry closes is read', () => {
+    expect(parseGatewayBootEnv(`CERT="line one\nline two"\nOPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`)).toEqual({ OPENCLAW_GATEWAY_TOKEN: TOKEN });
+    expect(parseGatewayBootEnv(`FOO=a\\\nb\nOPENCLAW_GATEWAY_TOKEN=${TOKEN}`)).toEqual({ OPENCLAW_GATEWAY_TOKEN: TOKEN });
+  });
+
+  it('a comment ending in a backslash makes the whole file version-dependent: nothing is used', () => {
+    // systemd < v254 continues the comment onto the next line; v254+ does not.
+    expect(parseGatewayBootEnv(`# note \\\nOPENCLAW_GATEWAY_TOKEN=${TOKEN}`)).toEqual({});
+    expect(parseGatewayBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n; note \\\nOTHER=1`)).toEqual({});
+    // An escaped backslash at the end of a comment is not a continuation.
+    expect(parseGatewayBootEnv(`# note \\\\\nOPENCLAW_GATEWAY_TOKEN=${TOKEN}`)).toEqual({ OPENCLAW_GATEWAY_TOKEN: TOKEN });
+  });
+
+  it('a lone \\r ends a line and nothing after a NUL is read, as in systemd', () => {
+    expect(parseGatewayBootEnv(`FOO=1\rOPENCLAW_GATEWAY_TOKEN=${TOKEN}`)).toEqual({ OPENCLAW_GATEWAY_TOKEN: TOKEN });
+    expect(parseGatewayBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\0\nOPENCLAW_GATEWAY_TOKEN=after-nul`)).toEqual({ OPENCLAW_GATEWAY_TOKEN: TOKEN });
+    expect(parseGatewayBootEnv(`FOO=1\0\nOPENCLAW_GATEWAY_TOKEN=${TOKEN}`)).toEqual({});
+  });
+
+  it('only spaces and tabs are trimmed: a no-break space or BOM around a value is not dropped silently', () => {
+    const nbsp = String.fromCharCode(0xa0);
+    const bom = String.fromCharCode(0xfeff);
+    expect(parseGatewayBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}${nbsp}`)).toEqual({});
+    expect(parseGatewayBootEnv(`OPENCLAW_GATEWAY_TOKEN=${bom}${TOKEN}`)).toEqual({});
+    expect(parseGatewayBootEnv(`OPENCLAW_GATEWAY_TOKEN= \t${TOKEN} \t`)).toEqual({ OPENCLAW_GATEWAY_TOKEN: TOKEN });
+  });
 });
 
 describe('#1105 — reading the gateway boot env: fixed path, owner-checked, local gateway only', () => {
@@ -265,7 +332,7 @@ describe('#1105 — reading the gateway boot env: fixed path, owner-checked, loc
     ['OPENCLAW_CONFIG_PATH set', () => { process.env.OPENCLAW_CONFIG_PATH = '/srv/other.json'; }, /OPENCLAW_CONFIG_PATH is set/],
     ['a remote gateway', () => writeConfig('remote'), /gateway\.mode is remote/],
     ['a config that cannot be read', () => rmSync(join(home, '.openclaw', 'openclaw.json')), /could not be read to confirm a local gateway/],
-    ['a config that is not JSON', () => writeFileSync(join(home, '.openclaw', 'openclaw.json'), '{ gateway: '), /could not be read to confirm a local gateway/],
+    ['a config that is not JSON', () => writeFileSync(join(home, '.openclaw', 'openclaw.json'), '{ gateway: '), /is not strict JSON \(JSON5 configs are not read here\)/],
     ['no boot env file', () => rmSync(bootEnvPath()), /there is no ~\/\.openclaw\/gateway\.systemd\.env/],
     ['a group-writable file', () => chmodSync(bootEnvPath(), 0o620), /writable by group or others/],
     ['a world-writable file', () => chmodSync(bootEnvPath(), 0o602), /writable by group or others/],
@@ -308,7 +375,7 @@ describe('#1105 — reading the gateway boot env: fixed path, owner-checked, loc
     ['gateway.mode null', () => writeRawConfig({ gateway: { mode: null } }), /gateway\.mode is not exactly "local"/],
     ['gateway that is not an object', () => writeRawConfig({ gateway: 'remote' }), /gateway in ~\/\.openclaw\/openclaw\.json is not an object/],
     ['a config that is not a JSON object', () => writeRawConfig('[]'), /is not a JSON object/],
-    ['a JSON5 config (strict JSON is all this reader knows)', () => writeRawConfig('{ // remote below?\n "gateway": { "mode": "local" } }'), /could not be read to confirm a local gateway/],
+    ['a JSON5 config (strict JSON is all this reader knows)', () => writeRawConfig('{ // remote below?\n "gateway": { "mode": "local" } }'), /is not strict JSON \(JSON5 configs are not read here\)/],
     ['an env block that sets OPENCLAW_GATEWAY_URL', () => writeRawConfig({ gateway: { mode: 'local' }, env: { OPENCLAW_GATEWAY_URL: 'wss://elsewhere.example' } }), /env block .* sets an OPENCLAW_\* or CLAWDBOT_\* variable/],
     ['env.vars that sets OPENCLAW_GATEWAY_URL', () => writeRawConfig({ gateway: { mode: 'local' }, env: { vars: { OPENCLAW_GATEWAY_URL: 'wss://elsewhere.example' } } }), /env block .* sets an OPENCLAW_\* or CLAWDBOT_\* variable/],
     ['env.vars that sets a lower-case clawdbot_ variable', () => writeRawConfig({ env: { vars: { clawdbot_state_dir: '/srv/other' } } }), /env block .* sets an OPENCLAW_\* or CLAWDBOT_\* variable/],
@@ -335,6 +402,65 @@ describe('#1105 — reading the gateway boot env: fixed path, owner-checked, loc
     ['NODE_DEBUG=net,child_process (a list)', () => { process.env.NODE_DEBUG = 'net,child_process'; }, /^NODE_DEBUG is set/],
     ['NODE_DEBUG=http (any section at all)', () => { process.env.NODE_DEBUG = 'http'; }, /^NODE_DEBUG is set/],
     ['NODE_DEBUG_NATIVE set', () => { process.env.NODE_DEBUG_NATIVE = 'all'; }, /^NODE_DEBUG_NATIVE is set/],
+
+    // #1105 r3 (CASE nit 3): the retry child inherits NODE_OPTIONS, and a
+    // diagnostic report, an env trace, an inspector or a heap snapshot can
+    // each write its environment out.
+    ['NODE_OPTIONS=--report-on-fatalerror', () => { process.env.NODE_OPTIONS = '--report-on-fatalerror'; }, /^NODE_OPTIONS asks for a Node diagnostic, and Node's diagnostics would print the retry child's environment/],
+    ['NODE_OPTIONS with --report_on_signal (underscore spelling)', () => { process.env.NODE_OPTIONS = '--max-old-space-size=4096 --report_on_signal'; }, /^NODE_OPTIONS asks for a Node diagnostic/],
+    ['NODE_OPTIONS=--trace-env', () => { process.env.NODE_OPTIONS = '--trace-env'; }, /^NODE_OPTIONS asks for a Node diagnostic/],
+    ['NODE_OPTIONS=--trace-warnings', () => { process.env.NODE_OPTIONS = '--trace-warnings'; }, /^NODE_OPTIONS asks for a Node diagnostic/],
+    ['NODE_OPTIONS=--inspect=0', () => { process.env.NODE_OPTIONS = '--inspect=0'; }, /^NODE_OPTIONS asks for a Node diagnostic/],
+    ['NODE_OPTIONS=--heapsnapshot-signal=SIGUSR2', () => { process.env.NODE_OPTIONS = '--heapsnapshot-signal=SIGUSR2'; }, /^NODE_OPTIONS asks for a Node diagnostic/],
+
+    // #1105 r3 (CASE B1): OPENCLAW_GATEWAY_PORT beats the config's port.
+    ['OPENCLAW_GATEWAY_PORT set', () => { process.env.OPENCLAW_GATEWAY_PORT = '9'; }, /^OPENCLAW_GATEWAY_PORT is set/],
+
+    // #1105 r3 (CASE B1): the dotenv files OpenClaw loads into the install
+    // child's own env at startup — first-wins, no OPENCLAW_* blocklist — are
+    // location overrides too. CASE's three live-reproduced rows first.
+    ['~/.openclaw/.env sets OPENCLAW_GATEWAY_URL (CASE row 1)', () => writeDotEnv(stateDotEnvPath(), 'OPENCLAW_GATEWAY_URL=wss://remote.example:443\n'),
+      /^~\/\.openclaw\/\.env names OPENCLAW_GATEWAY_URL, which OpenClaw loads into the install's own environment/],
+    ['~/.config/openclaw/gateway.env sets OPENCLAW_GATEWAY_URL (CASE row 2)', () => writeDotEnv(gatewayDotEnvPath(), 'OPENCLAW_GATEWAY_URL=wss://remote.example:443\n'),
+      /^~\/\.config\/openclaw\/gateway\.env names OPENCLAW_GATEWAY_URL/],
+    ['~/.openclaw/.env sets OPENCLAW_GATEWAY_PORT (CASE row 3)', () => writeDotEnv(stateDotEnvPath(), 'OPENCLAW_GATEWAY_PORT=9\n'),
+      /^~\/\.openclaw\/\.env names OPENCLAW_GATEWAY_PORT/],
+    ...([
+      ['OPENCLAW_STATE_DIR', 'OPENCLAW_STATE_DIR=/srv/other\n'],
+      ['OPENCLAW_HOME', 'OPENCLAW_HOME=/srv/other\n'],
+      ['OPENCLAW_PROFILE', 'OPENCLAW_PROFILE=work\n'],
+      ['OPENCLAW_CONFIG_PATH', 'OPENCLAW_CONFIG_PATH=/srv/other.json\n'],
+      ['OPENCLAW_GATEWAY_URL', 'export OPENCLAW_GATEWAY_URL=wss://remote.example\n'],
+      ['OPENCLAW_GATEWAY_URL', 'OPENCLAW_GATEWAY_URL: wss://remote.example\n'],
+      ['OPENCLAW_GATEWAY_URL', 'A=1\rOPENCLAW_GATEWAY_URL=wss://remote.example\n'],
+      ['OPENCLAW_GATEWAY_URL', '# OPENCLAW_GATEWAY_URL=wss://remote.example (any mention counts)\n'],
+      ['OPENCLAW_GATEWAY_PORT', 'openclaw_gateway_port=9\n'],
+      ['a CLAWDBOT_\\* variable', 'CLAWDBOT_STATE_DIR=/srv/other\n'],
+    ] as const).flatMap(([name, body]): Refusal[] => [
+      [`~/.openclaw/.env: ${JSON.stringify(body)}`, () => writeDotEnv(stateDotEnvPath(), `OPENROUTER_API_KEY=sk-or-x\n${body}`),
+        new RegExp(`^~/\\.openclaw/\\.env names ${name}`)],
+      [`~/.config/openclaw/gateway.env: ${JSON.stringify(body)}`, () => writeDotEnv(gatewayDotEnvPath(), body),
+        new RegExp(`^~/\\.config/openclaw/gateway\\.env names ${name}`)],
+    ]),
+    ['a symlinked ~/.openclaw/.env', () => {
+      const elsewhere = join(home, 'elsewhere.env');
+      writeFileSync(elsewhere, 'OPENROUTER_API_KEY=x\n', { mode: 0o600 });
+      symlinkSync(elsewhere, stateDotEnvPath());
+    }, /^~\/\.openclaw\/\.env is a symbolic link, so it could not be ruled out/],
+    ['a symlinked ~/.config/openclaw/gateway.env', () => {
+      const elsewhere = join(home, 'elsewhere.env');
+      writeFileSync(elsewhere, 'OPENROUTER_API_KEY=x\n', { mode: 0o600 });
+      mkdirSync(dirname(gatewayDotEnvPath()), { recursive: true });
+      symlinkSync(elsewhere, gatewayDotEnvPath());
+    }, /^~\/\.config\/openclaw\/gateway\.env is a symbolic link/],
+    ['a group-writable ~/.openclaw/.env', () => writeDotEnv(stateDotEnvPath(), 'OPENROUTER_API_KEY=x\n', 0o620),
+      /^~\/\.openclaw\/\.env is writable by group or others/],
+    ['a world-writable ~/.config/openclaw/gateway.env', () => writeDotEnv(gatewayDotEnvPath(), 'OPENROUTER_API_KEY=x\n', 0o602),
+      /^~\/\.config\/openclaw\/gateway\.env is writable by group or others/],
+    ['a directory at ~/.openclaw/.env', () => mkdirSync(stateDotEnvPath(), { mode: 0o700 }), /^~\/\.openclaw\/\.env is not a regular file/],
+    ['a ~/.openclaw/.env over 1 MiB', () => writeDotEnv(stateDotEnvPath(), `A=${'x'.repeat(1024 * 1024)}\n`), /^~\/\.openclaw\/\.env is larger than 1 MiB/],
+    ['a boot env that is not valid UTF-8', () => writeBootEnv(Buffer.concat([Buffer.from(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\nOTHER=`), Buffer.from([0xff, 0x0a])])),
+      /^~\/\.openclaw\/gateway\.systemd\.env is not valid UTF-8$/],
   ];
 
   it.each(REFUSALS)('not used: %s', (_label, arrange, reason, over = {}) => {
@@ -357,6 +483,45 @@ describe('#1105 — reading the gateway boot env: fixed path, owner-checked, loc
     });
     writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
     expect(resolve()).toMatchObject({ used: true, keys: ['OPENCLAW_GATEWAY_TOKEN'] });
+  });
+
+  it('control (#1105 r3): both dotenv files present with unrelated keys — still used', () => {
+    writeDotEnv(stateDotEnvPath(), [
+      'OPENROUTER_API_KEY=sk-or-unrelated',
+      'HTTP_PROXY=http://proxy.internal:3128',
+      // Names that merely CONTAIN an override name are other keys.
+      'MY_OPENCLAW_GATEWAY_URL=wss://not-read.example',
+      'OPENCLAW_GATEWAY_URL_NOTE=not-read',
+      '',
+    ].join('\n'));
+    writeDotEnv(gatewayDotEnvPath(), 'ANTHROPIC_API_KEY=sk-ant-unrelated\n');
+    writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+    expect(resolve()).toMatchObject({ used: true, keys: ['OPENCLAW_GATEWAY_TOKEN'] });
+  });
+
+  it('control (#1105 r3): a ~/.config that is a file (no gateway.env can exist) — still used', () => {
+    writeFileSync(join(home, '.config'), 'not a directory');
+    writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+    expect(resolve()).toMatchObject({ used: true });
+  });
+
+  it('control (#1105 r3): a NODE_OPTIONS with no diagnostic option — still used', () => {
+    process.env.NODE_OPTIONS = '--max-old-space-size=4096 --use-openssl-ca';
+    writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+    expect(resolve()).toMatchObject({ used: true });
+  });
+
+  it('reading the dotenv files writes nothing and the refusal never quotes them', () => {
+    const body = 'OPENROUTER_API_KEY=sk-or-secret-provider-key\nOPENCLAW_GATEWAY_URL=wss://remote.example:443\n';
+    writeDotEnv(stateDotEnvPath(), body);
+    writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+    const before = statSync(stateDotEnvPath());
+    const r = resolve();
+    expect(r.used).toBe(false);
+    if (r.used) return;
+    expect(r.reason).not.toMatch(/sk-or-secret|remote\.example/);
+    expect(statSync(stateDotEnvPath()).mtimeMs).toBe(before.mtimeMs);
+    expect(readFileSync(stateDotEnvPath(), 'utf-8')).toBe(body);
   });
 
   it('NODE_DEBUG refuses before anything is read: no ~/.openclaw at all still names NODE_DEBUG', () => {
@@ -661,6 +826,26 @@ describe('#1105 — the update step: SecretRef token, no gateway credential in t
     for (const c of f.calls) expect(c.env.OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
     expect(r.status).toBe('warn');
     expect(r.detail?.[1]).toMatch(/gateway boot env not used: gateway\.mode is remote/);
+  });
+
+  it.each([
+    ['~/.openclaw/.env', () => writeDotEnv(stateDotEnvPath(), 'OPENCLAW_GATEWAY_URL=wss://remote.example:443\n'), /~\/\.openclaw\/\.env names OPENCLAW_GATEWAY_URL/],
+    ['~/.config/openclaw/gateway.env', () => writeDotEnv(gatewayDotEnvPath(), 'OPENCLAW_GATEWAY_URL=wss://remote.example:443\n'), /~\/\.config\/openclaw\/gateway\.env names OPENCLAW_GATEWAY_URL/],
+    ['~/.openclaw/.env (port)', () => writeDotEnv(stateDotEnvPath(), 'OPENCLAW_GATEWAY_PORT=9\n'), /~\/\.openclaw\/\.env names OPENCLAW_GATEWAY_PORT/],
+  ] as const)('#1105 r3 B1: a gateway override in %s — no child ever gets the local credential', async (_label, arrange, reason) => {
+    writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+    arrange();
+    const f = fakeOpenClaw({ list: { enabled: true, status: 'loaded' } });
+    const { value: r, out } = await step(f);
+
+    expect(installs(f)).toHaveLength(2);
+    for (const c of f.calls) {
+      expect(c.env.OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
+      expect(c.env.OPENCLAW_GATEWAY_PASSWORD).toBeUndefined();
+    }
+    expect(r.status).toBe('warn');
+    expect(r.detail?.[1]).toMatch(new RegExp(`^gateway boot env not used: ${reason.source}`));
+    expect(JSON.stringify(r) + out).not.toContain(TOKEN);
   });
 
   describe('no boot env: refused twice — the accurate message', () => {
