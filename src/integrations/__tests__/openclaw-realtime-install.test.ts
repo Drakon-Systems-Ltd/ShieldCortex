@@ -177,9 +177,68 @@ describe('readSelectedRealtimeInstall — the copy OpenClaw selected, not the hi
     )).state).toBe('unknown');
   });
 
-  it('the copy the index names is missing ⇒ unknown, never the leftover', () => {
+  it('#1109 round 4: the copy the index names is NOT ON DISK ⇒ none (dangling), never the leftover and never a version', () => {
     writeRealtimeProject('leftover', '5.20.2');
-    expect(readSelectedRealtimeInstall(home, index({ [ID]: { source: 'npm', installPath: path.join(home, 'gone') } })).state).toBe('unknown');
+    const gone = path.join(home, 'gone');
+    const s = readSelectedRealtimeInstall(home, index({ [ID]: { source: 'npm', installPath: gone } }, [{ pluginId: ID, rootDir: gone }]));
+    expect(s).toEqual({ state: 'none', dangling: `the copy OpenClaw's install index roster and install index record name is not on disk (${gone})` });
+    expect(readSelectedRealtimePluginVersion(home, index({ [ID]: { source: 'npm', installPath: gone } })))
+      .toEqual({ version: null, reason: `the copy OpenClaw's install index record names is not on disk (${gone})` });
+  });
+
+  it('#1109 round 4: a named directory holding neither package.json nor openclaw.plugin.json is not on disk either', () => {
+    const empty = path.join(home, '.openclaw', 'npm', 'projects', 'reaped', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+    fs.mkdirSync(empty, { recursive: true });
+    expect(readSelectedRealtimeInstall(home, index({ [ID]: { source: 'npm', installPath: empty } })).state).toBe('none');
+  });
+
+  it('#1109 round 4: a dangling record falls through to what OpenClaw discovers (a newer extension copy is still seen)', () => {
+    const ext = path.join(home, '.openclaw', 'extensions', ID);
+    fs.mkdirSync(ext, { recursive: true });
+    fs.writeFileSync(path.join(ext, 'index.js'), '');
+    fs.writeFileSync(path.join(ext, 'openclaw.plugin.json'), JSON.stringify({ id: ID, version: '5.22.0' }));
+    expect(readSelectedRealtimeInstall(home, index({ [ID]: { source: 'npm', installPath: path.join(home, 'gone') } })))
+      .toMatchObject({ state: 'selected', dir: ext, version: '5.22.0', evidence: 'extensions directory' });
+  });
+
+  it.each([
+    ['unparseable package.json', (dir: string) => fs.writeFileSync(path.join(dir, 'package.json'), '{ nope')],
+    ['package.json with no exact version', (dir: string) => fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: PKG, version: 'latest' }))],
+  ])('#1109 round 4: a named copy that EXISTS but is unreadable (%s) is still unknown', (_label, write) => {
+    const dir = path.join(home, '.openclaw', 'npm', 'projects', 'broken', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+    fs.mkdirSync(dir, { recursive: true });
+    write(dir);
+    expect(readSelectedRealtimeInstall(home, index({ [ID]: { source: 'npm', installPath: dir } })).state).toBe('unknown');
+    writeJson('plugins/installs.json', { installRecords: { [ID]: { installPath: dir } } });
+    expect(readSelectedRealtimeInstall(home).state).toBe('unknown');
+  });
+
+  it('#1109 round 4: no index — installs.json naming a copy that is gone is none (dangling)', () => {
+    const gone = path.join(home, '.openclaw', 'npm', 'projects', 'gone', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+    writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'npm', installPath: gone } } });
+    expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'none', dangling: `the copy installs.json names is not on disk (${gone})` });
+  });
+
+  it('#1109 round 4 (npm provenance): a selected copy whose record says ClawHub is never a post-install version', () => {
+    const p = writeRealtimeProject('proj', '5.20.2');
+    const viaIndex = index({ [ID]: { source: 'clawhub', installPath: p } }, [{ pluginId: ID, rootDir: p }]);
+    expect(readSelectedRealtimeInstall(home, viaIndex)).toMatchObject({ state: 'selected', version: '5.20.2', source: 'clawhub' });
+    expect(readSelectedRealtimePluginVersion(home, viaIndex))
+      .toEqual({ version: null, reason: 'the copy OpenClaw selected (v5.20.2) was installed from clawhub, not npm' });
+    // A pre-2026.6.1 host (OpenClaw <= 2026.4.25 is one) records it in installs.json.
+    writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'clawhub', installPath: p } } });
+    expect(readSelectedRealtimePluginVersion(home).version).toBeNull();
+    // npm and a local path (a linked development install) are fine; a record that names no source says nothing.
+    for (const source of ['npm', 'path', undefined]) {
+      writeJson('plugins/installs.json', { installRecords: { [ID]: { ...(source ? { source } : {}), installPath: p } } });
+      expect(readSelectedRealtimePluginVersion(home)).toEqual({ version: '5.20.2' });
+    }
+  });
+
+  it('#1109 round 4 (npm provenance): the replacement decision still SEES a ClawHub copy (so it can be replaced)', () => {
+    const p = writeRealtimeProject('proj', '5.17.3');
+    const e = readRealtimeReplacementEvidence(home, index({ [ID]: { source: 'clawhub', installPath: p } }, [{ pluginId: ID, rootDir: p }]));
+    expect(e.selected).toMatchObject({ state: 'selected', version: '5.17.3', source: 'clawhub' });
   });
 
   it('an unreadable index is unknown', () => {

@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { reexecUpdatedCli, stepOpenClawPlugin } from '../update.js';
+import { coreUpdateOutcome, reexecUpdatedCli, stepOpenClawPlugin } from '../update.js';
 import { answersNpmView } from '../../__tests__/npm-view-fixture.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -49,6 +49,38 @@ describe('update executes the newly installed CLI', () => {
     expect(body).toContain('maybePrintActionGuardDefaultOffNotice(fromVersion, mainUpdated)');
     expect(src).toContain('SHIELDCORTEX_UPDATE_FROM_VERSION');
     expect(body).toMatch(/maybePrint411Notice\(fromVersion/);
+  });
+});
+
+describe('#1109 round 4 (Astra B5) — npm updated a different install than the one running update', () => {
+  const base = { mainUpdated: true, npmStatus: 'ok' as const, reexeced: false, currentVersion: '5.20.2', latestVersion: '5.21.0' };
+
+  it('A unchanged, B advanced: npm said it installed 5.21.0 but this install still reads 5.20.2 ⇒ elsewhere', async () => {
+    // The real hand-off answer for that host: this install's package.json still says 5.20.2.
+    const handoff = await reexecUpdatedCli('5.20.2', { readVersion: () => '5.20.2', env: {}, launch: async () => 0 });
+    expect(handoff).toBeNull();
+    expect(coreUpdateOutcome({ ...base, handoff })).toBe('elsewhere');
+  });
+
+  it('the ordinary outcomes are unchanged', () => {
+    // Same install advanced: the parent exits into the child, which is reexeced.
+    expect(coreUpdateOutcome({ ...base, reexeced: true, handoff: null })).toBe('updated');
+    expect(coreUpdateOutcome({ ...base, handoff: 'failed' })).toBe('updated');
+    // --force reinstall of the current version: nothing to hand off to, nothing elsewhere.
+    expect(coreUpdateOutcome({ ...base, latestVersion: '5.20.2', handoff: null })).toBe('updated');
+    expect(coreUpdateOutcome({ ...base, mainUpdated: false, handoff: undefined, latestVersion: '5.20.2' })).toBe('current');
+    expect(coreUpdateOutcome({ ...base, mainUpdated: false, npmStatus: 'failed' })).toBe('failed');
+    expect(coreUpdateOutcome({ ...base, mainUpdated: false, latestVersion: null })).toBe('unavailable');
+  });
+
+  it('runUpdate classifies with the hand-off answer and does not reconcile against the old copy', () => {
+    const src = fs.readFileSync(path.join(root, 'src/cli/update.ts'), 'utf8');
+    const body = src.slice(src.indexOf('export async function runUpdate'));
+    expect(body).toMatch(/handoff = await reexecUpdatedCli\(currentVersion\)/);
+    expect(body).toMatch(/coreUpdateOutcome\(\{[\s\S]*?handoff,?\s*\}\)/);
+    // The protection check (its reconcile installs at THIS process's version) is skipped for `elsewhere`.
+    expect(body.indexOf("coreUpdate === 'elsewhere'")).toBeGreaterThan(0);
+    expect(body.indexOf("coreUpdate === 'elsewhere'")).toBeLessThan(body.indexOf('await stepVerifyProtection'));
   });
 });
 

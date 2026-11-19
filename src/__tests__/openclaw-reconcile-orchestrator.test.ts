@@ -269,6 +269,52 @@ describe('reconcileOpenClawPluginState', () => {
     expect(calls.length).toBe(0);
     expect(res.ok).toBe(true);
   });
+
+  /** The copy OpenClaw's index (and installs.json) record names, deleted from disk. */
+  const recordedCopy = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-abc', PKG_SUBPATH);
+
+  it('#1109 round 4 (CASE blocking 1): a DANGLING record — the copy it names was deleted — gets the pinned install, not "could not tell"', async () => {
+    setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
+    fs.rmSync(recordedCopy(), { recursive: true, force: true });
+    const calls: string[][] = [];
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: (argv) => {
+        calls.push(argv);
+        if (argv[1] === 'install') {
+          // OpenClaw writes the copy and rewrites its index row in the same install.
+          fs.mkdirSync(recordedCopy(), { recursive: true });
+          fs.writeFileSync(path.join(recordedCopy(), 'package.json'), JSON.stringify({ version: '4.47.2' }));
+          const db = new Database(path.join(home, '.openclaw', 'state', 'openclaw.sqlite'));
+          db.prepare('UPDATE installed_plugin_index SET install_records_json = ?').run(
+            JSON.stringify({ [PLUGIN]: { source: 'npm', version: '4.47.2', installPath: recordedCopy() } }),
+          );
+          db.close();
+        }
+        return { status: 0, output: '' };
+      },
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    expect(calls.filter((a) => a[1] === 'install')[0]).toEqual(['plugins', 'install', '--force', 'npm:@drakon-systems/shieldcortex-realtime@4.47.2']);
+    expect(res.messages.join('\n')).not.toMatch(/could not tell which copy OpenClaw selected/);
+    const step = res.stepResults.find((r) => r.kind === 'openclaw-install-pinned' || r.kind === 'openclaw-install');
+    expect(step).toMatchObject({ ok: true });
+  });
+
+  it('#1109 round 4: a recorded copy that EXISTS but cannot be parsed still refuses the install', async () => {
+    setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
+    fs.writeFileSync(path.join(recordedCopy(), 'package.json'), '{ nope');
+    const calls: string[][] = [];
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: (argv) => { calls.push(argv); return { status: 0, output: '' }; },
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    expect(calls.filter((a) => a[1] === 'install')).toEqual([]);
+    expect(res.ok).toBe(false);
+  });
 });
 
 describe('reconcile executor — gateway-safety guard', () => {

@@ -11,6 +11,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 
 import {
@@ -777,6 +778,116 @@ describe('#1109 round 2 — the development installs (--link, local copy) are an
     await installOpenClawHook({ noHooks: true, restartGateway: false });
 
     expect(warnLines.join('\n')).toContain(`the plugin is on v5.17.3, CLI is v${selfVersion()}`);
+    expect(process.exitCode).toBe(1);
+  });
+});
+
+describe('#1109 round 4 — a dangling install record (the recorded copy was deleted) is healed, not frozen (CASE blocking 1)', () => {
+  const selfVersion = (): string => JSON.parse(
+    fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..', 'package.json'), 'utf-8'),
+  ).version;
+  const NPM = (): string[] => ['plugins', 'install', '--force', `npm:@drakon-systems/shieldcortex-realtime@${selfVersion()}`];
+  const projectDir = (name: string): string => path.join(tempHome, '.openclaw', 'npm', 'projects', name, 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+  const enabledConfig = () => writeConfig({ plugins: { allow: [PLUGIN], entries: { [PLUGIN]: { enabled: true } } } });
+  const installsJson = (installPath: string): void => {
+    fs.mkdirSync(path.join(tempHome, '.openclaw', 'plugins'), { recursive: true });
+    fs.writeFileSync(path.join(tempHome, '.openclaw', 'plugins', 'installs.json'),
+      JSON.stringify({ installRecords: { [PLUGIN]: { source: 'npm', installPath } } }));
+  };
+  /** OpenClaw's real SQLite install index (2026.6.1+), one row naming `dir` in its roster and its record. */
+  const sqliteIndex = (dir: string): void => {
+    fs.mkdirSync(path.join(tempHome, '.openclaw', 'state'), { recursive: true });
+    const db = new Database(path.join(tempHome, '.openclaw', 'state', 'openclaw.sqlite'));
+    db.exec('CREATE TABLE IF NOT EXISTS installed_plugin_index (index_key TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL, host_contract_version TEXT NOT NULL, compat_registry_version TEXT NOT NULL, migration_version INTEGER NOT NULL, policy_hash TEXT NOT NULL, generated_at_ms INTEGER NOT NULL, refresh_reason TEXT, install_records_json TEXT NOT NULL, plugins_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL, warning TEXT, updated_at_ms INTEGER NOT NULL);');
+    db.prepare("INSERT OR REPLACE INTO installed_plugin_index VALUES ('k',1,'v','x',1,'h',1,'r',@ir,@pj,'[]',NULL,1)").run({
+      ir: JSON.stringify({ [PLUGIN]: { source: 'npm', installPath: dir } }),
+      pj: JSON.stringify([{ pluginId: PLUGIN, enabled: true, rootDir: dir }]),
+    });
+    db.close();
+  };
+  const landPin = (dir: string): void => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', version: selfVersion() }));
+  };
+
+  it('installs.json names a copy that is gone (no index): the pinned npm: install runs, lands, no failure exit', async () => {
+    enabledConfig();
+    installsJson(projectDir('gone'));
+    __setNativePluginInstallForTest(null);
+    const calls: string[][] = [];
+    __setNativeSpawnForTest((_cmd, args) => {
+      calls.push([...args]);
+      if (args.some((a) => a.startsWith('npm:'))) { landPin(projectDir('fresh')); installsJson(projectDir('fresh')); }
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    await handleOpenClawCommand('install', ['--no-hooks', '--no-gateway-restart']);
+
+    expect(calls.filter((a) => a[1] === 'install')).toEqual([NPM()]);
+    expect(warnLines.join('\n')).not.toMatch(/could not tell which copy OpenClaw selected/);
+    expect(logLines.join('\n')).toContain(`Installed real-time plugin v${selfVersion()} via OpenClaw package install.`);
+    expect(process.exitCode).not.toBe(1);
+  });
+
+  it('the SQLite index roster AND record name a copy that is gone: the pinned npm: install runs and lands', async () => {
+    enabledConfig();
+    sqliteIndex(projectDir('gone'));
+    __setNativePluginInstallForTest(null);
+    const calls: string[][] = [];
+    __setNativeSpawnForTest((_cmd, args) => {
+      calls.push([...args]);
+      if (args.some((a) => a.startsWith('npm:'))) {
+        landPin(projectDir('fresh'));
+        // OpenClaw rewrites its index row in the same install.
+        const db = new Database(path.join(tempHome, '.openclaw', 'state', 'openclaw.sqlite'));
+        db.prepare('UPDATE installed_plugin_index SET install_records_json = ?, plugins_json = ?').run(
+          JSON.stringify({ [PLUGIN]: { source: 'npm', installPath: projectDir('fresh') } }),
+          JSON.stringify([{ pluginId: PLUGIN, enabled: true, rootDir: projectDir('fresh') }]),
+        );
+        db.close();
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    await handleOpenClawCommand('install', ['--no-hooks', '--no-gateway-restart']);
+
+    expect(calls.filter((a) => a[1] === 'install')).toEqual([NPM()]);
+    expect(logLines.join('\n')).toContain(`Installed real-time plugin v${selfVersion()} via OpenClaw package install.`);
+    expect(process.exitCode).not.toBe(1);
+  });
+
+  it('the install exits 0 but the record still dangles: that is NOT success (exit 1, with the command)', async () => {
+    enabledConfig();
+    installsJson(projectDir('gone'));
+    __setNativePluginInstallForTest(null);
+    __setNativeSpawnForTest(() => ({ status: 0, stdout: '', stderr: '' }));
+
+    await handleOpenClawCommand('install', ['--no-hooks', '--no-gateway-restart']);
+
+    expect(warnLines.join('\n')).toContain('is not on disk');
+    expect(warnLines.join('\n')).toContain(NPM().join(' '));
+    expect(process.exitCode).toBe(1);
+  });
+
+  it.each([
+    ['unreadable (EACCES)', (dir: string) => { landPin(dir); fs.chmodSync(path.join(dir, 'package.json'), 0o000); }],
+    ['unparseable', (dir: string) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'package.json'), '{ nope'); }],
+  ])('a recorded copy that EXISTS but is %s still refuses: no install, exit 1', async (_label, make) => {
+    enabledConfig();
+    const dir = projectDir('broken');
+    make(dir);
+    installsJson(dir);
+    __setNativePluginInstallForTest(null);
+    const calls: string[][] = [];
+    __setNativeSpawnForTest((_cmd, args) => { calls.push([...args]); return { status: 0, stdout: '', stderr: '' }; });
+    try {
+      await handleOpenClawCommand('install', ['--no-hooks', '--no-gateway-restart']);
+    } finally {
+      try { fs.chmodSync(path.join(dir, 'package.json'), 0o644); } catch { /* not there */ }
+    }
+
+    expect(calls.filter((a) => a[1] === 'install')).toEqual([]);
+    expect(warnLines.join('\n')).toMatch(/Real-time plugin not installed: could not tell which copy OpenClaw selected/);
     expect(process.exitCode).toBe(1);
   });
 });

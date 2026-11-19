@@ -372,12 +372,28 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
 
   it('#604 still holds: an ordinary timeout whose target version landed is reported installed', async () => {
     const f = scripted({ timedOut: true, exitCode: null, stderr: '' }, CLI);
-    const r = await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => '5.15.1', readCliVersion: () => CLI });
+    // Before the install: 5.15.1. After the (timed-out) install: the copy
+    // OpenClaw selected is the pin — the evidence, not the plugin list.
+    const r = await stepOpenClawPlugin(home, {
+      run: f.run,
+      readPluginVersion: () => (f.calls.some((c) => c.args[1] === 'install') ? CLI : '5.15.1'),
+      readCliVersion: () => CLI,
+    });
 
     expect(r.status).toBe('ok');
     expect(r.summary).toContain(`v${CLI} installed (slow`);
     expect(r.unfinished).toBeUndefined();
     expect(r.rerun).toBeUndefined();
+  });
+
+  it('#1109 round 4: a timeout whose plugin LIST names the pin, but whose selected copy did not land, is not installed', async () => {
+    const f = scripted({ timedOut: true, exitCode: null, stderr: '' }, CLI);
+    const r = await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => '5.15.1', readCliVersion: () => CLI });
+
+    expect(r.status).toBe('warn');
+    expect(r.summary).not.toContain('installed (slow');
+    expect((r.detail ?? []).join('\n')).toContain(`installed is v5.15.1, target v${CLI}`);
+    expect(r.unfinished).toBe(true);
   });
 
   it('#221 still holds: an ordinary invalid-config exit reports the config error and keeps the re-run', async () => {

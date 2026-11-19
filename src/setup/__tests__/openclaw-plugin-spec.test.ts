@@ -801,4 +801,89 @@ describe('`shieldcortex update` plugin step', () => {
     expect(f.installs()).toEqual([]);
     expect(r.summary).toBe('not updated — npm has no @drakon-systems/shieldcortex-realtime@5.20.2 yet; still on v5.20.1');
   });
+
+  // ── #1109 round 4 (adjudication): real files, default readers ──────────────
+  const projectDir = (name: string): string =>
+    join(home, '.openclaw', 'npm', 'projects', name, 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+  const recordAt = (installPath: string, source = 'npm'): void => writeFileSync(join(home, '.openclaw', 'plugins', 'installs.json'),
+    JSON.stringify({ installRecords: { 'shieldcortex-realtime': { source, installPath } } }));
+  const landAt = (dir: string, version: string): void => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: REALTIME_PLUGIN_PACKAGE, version }));
+  };
+  /** `scripted`, plus what an install that exits 0 leaves on disk. */
+  const landing = (f: ReturnType<typeof scripted>, onInstall: (args: string[]) => void) =>
+    ((cmd: string, args: string[], o: unknown) => {
+      const out = (f.run as unknown as (c: string, a: string[], o: unknown) => Promise<unknown>)(cmd, args, o);
+      return cmd === 'openclaw' && args[1] === 'install' ? out.then((v) => { onInstall(args); return v; }) : out;
+    }) as never;
+
+  it('#1109 round 4 (CASE blocking 1): a dangling installs.json record does not freeze update — the pinned npm: install runs and lands', async () => {
+    recordAt(projectDir('gone'));
+    const f = scripted([null]);
+    const r = await stepOpenClawPlugin(home, {
+      run: landing(f, () => { landAt(projectDir('fresh'), CLI); recordAt(projectDir('fresh')); }),
+      readCliVersion: () => CLI,
+    });
+    expect(f.installs()).toEqual([NPM_ARGS]);
+    expect(r.status).toBe('ok');
+    expect(exitCodeOf(r)).toBe(0);
+  });
+
+  it('#1109 round 4: a dangling record that the install leaves dangling is unfinished, never "in place"', async () => {
+    recordAt(projectDir('gone'));
+    const f = scripted(['exit 1 for some reason'], { listed: CLI });
+    const r = await stepOpenClawPlugin(home, { run: f.run, readCliVersion: () => CLI });
+    expect(f.installs()).toEqual([NPM_ARGS]);
+    expect(r.status).toBe('warn');
+    expect(r.summary).not.toMatch(/in place/);
+    expect((r.detail ?? []).join('\n')).toMatch(/end state unknown \(the copy installs\.json names is not on disk/);
+    expect(r.unfinished).toBe(true);
+    expect(exitCodeOf(r)).toBe(1);
+  });
+
+  it('#1109 round 4 (Astra B4): on a host that predates `npm:`, a bare retry ClawHub served at the pin is NOT success', async () => {
+    recordAt(projectDir('old'));
+    landAt(projectDir('old'), '5.20.1');
+    const f = scripted([PRE_NPM_PREFIX_STDERR, null]);
+    const r = await stepOpenClawPlugin(home, {
+      // OpenClaw <= 2026.4.25: the plain name is tried on ClawHub first; the copy lands, recorded as ClawHub's.
+      run: landing(f, (args) => { if (!args[3].startsWith('npm:')) { landAt(projectDir('hub'), CLI); recordAt(projectDir('hub'), 'clawhub'); } }),
+      readCliVersion: () => CLI,
+    });
+    expect(f.installs()).toEqual([NPM_ARGS, BARE_ARGS]);
+    expect(r.status).toBe('warn');
+    expect(r.summary).toContain(`installed from clawhub, not npm`);
+    expect((r.detail ?? []).join('\n')).toContain(`upgrade OpenClaw (2026.4.26 or later), then run \`${NPM_CMD}\``);
+    expect(r.unfinished).toBe(true);
+    expect(exitCodeOf(r)).toBe(1);
+  });
+
+  it('#1109 round 4 (Astra B4 control): the same bare retry recorded as npm is success', async () => {
+    recordAt(projectDir('old'));
+    landAt(projectDir('old'), '5.20.1');
+    const f = scripted([PRE_NPM_PREFIX_STDERR, null]);
+    const r = await stepOpenClawPlugin(home, {
+      run: landing(f, (args) => { if (!args[3].startsWith('npm:')) { landAt(projectDir('npm'), CLI); recordAt(projectDir('npm'), 'npm'); } }),
+      readCliVersion: () => CLI,
+    });
+    expect(f.installs()).toEqual([NPM_ARGS, BARE_ARGS]);
+    expect(r.status).toBe('ok');
+    expect(exitCodeOf(r)).toBe(0);
+  });
+
+  it('#1109 round 4 (Astra B5): npm updated a DIFFERENT install — nothing is checked, deleted or installed, and the step is unfinished', async () => {
+    const ext = join(home, '.openclaw', 'extensions', 'shieldcortex-realtime');
+    mkdirSync(ext, { recursive: true });
+    writeFileSync(join(ext, 'openclaw.plugin.json'), JSON.stringify({ id: 'shieldcortex-realtime', version: '5.17.3' }));
+    const f = scripted([null]);
+    const r = await stepOpenClawPlugin(home, { run: f.run, readCliVersion: () => CLI, coreUpdate: 'elsewhere' });
+    expect(f.calls).toEqual([]);
+    expect(existsSync(join(ext, 'openclaw.plugin.json'))).toBe(true);
+    expect(r.status).toBe('warn');
+    expect(r.summary).toContain(`npm updated a different ShieldCortex install than the one running this update (this one is still v${CLI})`);
+    expect(r.recovery?.command).toBe('shieldcortex update');
+    expect(r.unfinished).toBe(true);
+    expect(exitCodeOf(r)).toBe(1);
+  });
 });

@@ -833,8 +833,41 @@ export async function confirmRealtimePluginPublished(
   }
 }
 
-/** How the core npm step ended, for the plugin step's honesty about its pin (#1109 review 7). */
-export type CoreUpdateOutcome = 'updated' | 'current' | 'failed' | 'unavailable';
+/**
+ * How the core npm step ended, for the plugin step's honesty about its pin
+ * (#1109 review 7). `elsewhere` (#1109 round 4): npm reported installing a new
+ * version, but the install running this update still reads its old one — npm
+ * wrote a DIFFERENT ShieldCortex install (its own global prefix, while this
+ * process is a project-local, npx or other-prefix copy). This process's
+ * version is then not the core npm just installed, so it is no plugin pin.
+ */
+export type CoreUpdateOutcome = 'updated' | 'current' | 'failed' | 'unavailable' | 'elsewhere';
+
+/** Run in the parent only (see `CoreUpdateOutcome`); `handoff` is `reexecUpdatedCli`'s answer, when it ran. */
+export function coreUpdateOutcome(a: {
+  mainUpdated: boolean;
+  npmStatus: StepResult['status'];
+  reexeced: boolean;
+  latestVersion: string | null;
+  currentVersion: string;
+  handoff?: number | 'failed' | null;
+}): CoreUpdateOutcome {
+  // `reexecUpdatedCli` answers null in the parent only when this install's
+  // package.json still reads `currentVersion` after npm said it installed
+  // `latestVersion` — a version this process was not on.
+  if (a.mainUpdated && !a.reexeced && a.handoff === null && a.latestVersion !== null && a.latestVersion !== a.currentVersion) {
+    return 'elsewhere';
+  }
+  if (a.mainUpdated) return 'updated';
+  if (a.npmStatus === 'failed') return 'failed';
+  return !a.reexeced && !a.latestVersion ? 'unavailable' : 'current';
+}
+
+/** What the plugin step and the protection check say when npm updated another install (#1109 round 4). */
+const CORE_ELSEWHERE_RECOVERY = {
+  command: 'shieldcortex update',
+  note: 'with the shieldcortex npm just updated first on PATH (its prefix: `npm prefix -g`)',
+};
 /**
  * #952: the command that finishes a swap OpenClaw refused because the previous
  * generation's admitted work had not settled. It is the recovery OpenClaw's own
@@ -917,25 +950,32 @@ async function readStillListedVersion(home: string, run: typeof runQuiet): Promi
 /**
  * After an install child timed out or exited non-zero, read what is REALLY
  * installed (#604): the child can outlive its budget and land anyway (measured:
- * reported failed at 120.1 s, plugin 5.2.1 loaded at 126.6 s). OpenClaw's own
- * plugin list first, then the on-disk package; never a guess.
+ * reported failed at 120.1 s, plugin 5.2.1 loaded at 126.6 s). Never a guess.
+ *
+ * #1109 round 4: the SAME evidence as after an exit 0 — the copy OpenClaw
+ * selected (`readLanded`). `openclaw plugins list --json` is not that: it
+ * reports the index's recorded package version, and it keeps listing a
+ * disabled entry whose files are gone. So the list is read only to say what
+ * it claims when the selected copy cannot be told; it never makes a failed
+ * install a finished one.
  */
 export async function readRealtimePluginEndState(
   home: string,
-  deps: { run: typeof runQuiet; readVersion: typeof readInstalledRealtimePluginVersion },
+  deps: { run: typeof runQuiet; readLanded: (home: string) => { version: string } | { version: null; reason: string } },
 ): Promise<EndState> {
-  let listReason = 'openclaw plugins list --json listed no shieldcortex-realtime version';
+  const landed = deps.readLanded(home);
+  if (landed.version !== null && semver.valid(landed.version)) return { version: landed.version };
+  const why = landed.version === null ? landed.reason : 'installed package version unreadable';
+  let listed = '';
   try {
     const { stdout } = await deps.run('openclaw', ['plugins', 'list', '--json'],
       { timeout: 60000, env: { ...process.env, HOME: home } });
     const v = parsePluginListVersion(stdout);
-    if (v) return { version: v };
-  } catch (err) {
-    listReason = `openclaw plugins list --json failed (${describeRunFailure(err).reason})`;
+    if (v) listed = `; openclaw plugins list --json names v${v}, but that is OpenClaw's index, not the copy on disk`;
+  } catch {
+    // Diagnostic only: nothing to add.
   }
-  const onDisk = deps.readVersion(home);
-  if (onDisk && semver.valid(onDisk)) return { version: onDisk };
-  return { version: null, reason: `${listReason}; installed package version unreadable` };
+  return { version: null, reason: `${why}${listed}` };
 }
 
 /** `run`/`rm` are injectable so the failure paths can be tested without a real spawn or a root-owned dir. */
@@ -1066,6 +1106,22 @@ async function stepOpenClawPluginLocked(
     const coreNote = ctx.coreUpdate === 'failed' || ctx.coreUpdate === 'unavailable'
       ? [`the CLI itself was not updated (npm step ${ctx.coreUpdate === 'failed' ? 'failed' : 'could not reach the registry'}), so the plugin is matched to the CLI still installed${pinned ? ` (v${pinned})` : ''}`]
       : [];
+    // #1109 round 4: npm updated a different ShieldCortex install than this
+    // one. This process's version is the OLD copy's, not the core just
+    // installed — pinning the plugin to it would install a stale build. Touch
+    // nothing; the update run from the updated install does this step.
+    if (ctx.coreUpdate === 'elsewhere') {
+      return {
+        status: 'warn' as const,
+        summary: `not updated — npm updated a different ShieldCortex install than the one running this update (this one is still${pinned ? ` v${pinned}` : ' on its old version'}), so the plugin was left as it is`,
+        detail: [
+          `installing${pinned ? ` v${pinned}` : ''} here would pin the plugin to this older copy, not to the CLI npm just installed`,
+          `run \`${CORE_ELSEWHERE_RECOVERY.command}\` ${CORE_ELSEWHERE_RECOVERY.note}`,
+        ],
+        unfinished: true,
+        recovery: CORE_ELSEWHERE_RECOVERY,
+      };
+    }
     if (!pinned) {
       return {
         status: 'warn' as const,
@@ -1190,17 +1246,24 @@ async function stepOpenClawPluginLocked(
       // to — it is unfinished (`update` exits non-zero), and the footer carries
       // the command that finishes it. That holds with a purge failure too.
       const unresolved = landed.ok ? {} : { unfinished: true, rerun: rerunCommand() };
+      // #1109 round 4: on a host that predates `npm:` the bare retry is
+      // resolved on ClawHub first when ClawHub has that exact version. Say
+      // so, and what removes the ambiguity.
+      const legacyNote = !landed.ok && source === 'bare'
+        ? [`this OpenClaw predates the \`npm:\` source and resolves the plain package name on ClawHub before npm; upgrade OpenClaw (2026.4.26 or later), then run \`${realtimePluginInstallCommand(pinned)}\``]
+        : [];
       if (purgeFailure) {
         return {
           status: 'warn' as const,
           summary: `${transition} — legacy copy left behind`,
-          detail: [...coreNote, sanitiseForReport(`could not remove legacy extension at ${extDir}: ${purgeFailure}`, { home })],
+          detail: [...coreNote, ...legacyNote, sanitiseForReport(`could not remove legacy extension at ${extDir}: ${purgeFailure}`, { home })],
           ...unresolved,
         };
       }
+      const detail = [...coreNote, ...legacyNote];
       return landed.ok
-        ? { status: 'ok' as const, summary: transition, ...(coreNote.length ? { detail: coreNote } : {}) }
-        : { status: 'warn' as const, summary: transition, ...(coreNote.length ? { detail: coreNote } : {}), ...unresolved };
+        ? { status: 'ok' as const, summary: transition, ...(detail.length ? { detail } : {}) }
+        : { status: 'warn' as const, summary: transition, ...(detail.length ? { detail } : {}), ...unresolved };
     };
 
     /** The install child failed: say why, and name the one command that finishes the step. */
@@ -1270,7 +1333,7 @@ async function stepOpenClawPluginLocked(
       // #604: a timeout or a non-zero exit says how the CHILD ended, not what it
       // left behind. Read the end state before calling the step failed.
       if (!e?.spawnFailed && (e?.timedOut || typeof e?.exitCode === 'number')) {
-        const end = await readRealtimePluginEndState(home, { run, readVersion: (h) => ctx.readLanded(h).version });
+        const end = await readRealtimePluginEndState(home, { run, readLanded: ctx.readLanded });
         const expected = pinned;
         const how = describeInstallEnd(err, timeoutMs);
         // Exactly the pin, captured before the install — a newer copy is not
@@ -2153,8 +2216,9 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   }
 
   let reexecFailed = false;
+  let handoff: number | 'failed' | null | undefined;
   if (mainUpdated) {
-    const handoff = await reexecUpdatedCli(currentVersion);
+    handoff = await reexecUpdatedCli(currentVersion);
     if (typeof handoff === 'number') process.exit(handoff);
     reexecFailed = handoff === 'failed';
   }
@@ -2164,11 +2228,10 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   const engineResult = await stepVerifyEngine();
 
   // #1109 review 7: how the core step ended decides what the plugin pin means.
-  const coreUpdate: CoreUpdateOutcome = mainUpdated
-    ? 'updated'
-    : npmStatus === 'failed' ? 'failed'
-    : !reexeced && !latest.version ? 'unavailable'
-    : 'current';
+  // #1109 round 4: including npm having updated a different install.
+  const coreUpdate: CoreUpdateOutcome = coreUpdateOutcome({
+    mainUpdated, npmStatus, reexeced, latestVersion: latest.version, currentVersion, handoff,
+  });
   // #1109 review: at most one bare-spec install for this whole run — the
   // plugin step and the protection check's reconcile share it.
   const bareRetryBudget = new BareRetryBudget();
@@ -2192,6 +2255,10 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
 
   const protection: StepResult = reexecFailed
     ? { status: 'unproven', summary: 'protection unproven', detail: ['New CLI could not be started; re-run update before verifying protection.', 'next: shieldcortex update'] }
+    // #1109 round 4: the protection check's reconcile installs the plugin at
+    // THIS process's version — the old copy's, when npm updated another one.
+    : coreUpdate === 'elsewhere'
+      ? { status: 'unproven', summary: 'protection unproven', detail: ['npm updated a different ShieldCortex install than the one running this update; nothing was reconciled against this older copy.', `next: ${CORE_ELSEWHERE_RECOVERY.command} ${CORE_ELSEWHERE_RECOVERY.note}`] }
     : await stepVerifyProtection(home, {
       verbose: options.verbose,
       allowConversationAccess: options.allowConversationAccess,

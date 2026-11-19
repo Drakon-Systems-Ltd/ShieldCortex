@@ -89,8 +89,10 @@ function fakeOpenClaw(script: { install: () => Promise<{ stdout: string; stderr:
   return { run: run as never, calls };
 }
 
-function plugin(run: never, installedOnDisk: string | null) {
-  return stepOpenClawPlugin(home, { run: answersNpmView(run), readPluginVersion: () => installedOnDisk, readCliVersion: () => PKG });
+/** `installedOnDisk`: the selected copy's version, or a reader of it (it can change once the install ran). */
+function plugin(run: never, installedOnDisk: string | null | (() => string | null)) {
+  const read = typeof installedOnDisk === 'function' ? installedOnDisk : () => installedOnDisk;
+  return stepOpenClawPlugin(home, { run: answersNpmView(run), readPluginVersion: read, readCliVersion: () => PKG });
 }
 
 function skill(run: never) {
@@ -128,27 +130,52 @@ describe('#604 — timeout budget', () => {
 
 describe('#604 — plugin step reads the end state after a timeout or non-zero exit', () => {
   it('timeout but landed: reports installed (slow), not failed', async () => {
+    let landed = false;
     const f = fakeOpenClaw({
-      install: () => Promise.reject(timedOut(PLUGIN_RERUN)),
+      install: () => { landed = true; return Promise.reject(timedOut(PLUGIN_RERUN)); },
       list: async () => ({ stdout: pluginList(PKG), stderr: '' }),
     });
-    const r = await plugin(f.run, '5.2.0');
+    const r = await plugin(f.run, () => (landed ? PKG : '5.2.0'));
     expect(r.status).toBe('ok');
     expect(r.summary).toContain(`v${PKG} installed (slow`);
     expect(r.summary).not.toContain('failed');
     expect(r.rerun).toBeUndefined();
-    expect(f.calls.some((c) => c.args.join(' ') === 'plugins list --json')).toBe(true);
   });
 
   it('non-zero exit but landed: the target version is in place', async () => {
+    let landed = false;
+    const f = fakeOpenClaw({
+      install: () => { landed = true; return Promise.reject(childError({ exitCode: 1, command: PLUGIN_RERUN, stderr: 'warning: gateway reload failed' })); },
+      list: async () => ({ stdout: pluginList(PKG), stderr: '' }),
+    });
+    const r = await plugin(f.run, () => (landed ? PKG : '5.2.0'));
+    expect(r.status).toBe('ok');
+    expect(r.summary).toContain('target version is in place');
+    expect(r.rerun).toBeUndefined();
+  });
+
+  it('#1109 round 4: the plugin LIST naming the pin is not the end state — the selected copy did not land', async () => {
     const f = fakeOpenClaw({
       install: () => Promise.reject(childError({ exitCode: 1, command: PLUGIN_RERUN, stderr: 'warning: gateway reload failed' })),
       list: async () => ({ stdout: pluginList(PKG), stderr: '' }),
     });
     const r = await plugin(f.run, '5.2.0');
-    expect(r.status).toBe('ok');
-    expect(r.summary).toContain('target version is in place');
-    expect(r.rerun).toBeUndefined();
+    expect(r.status).toBe('warn');
+    expect(r.summary).not.toContain('in place');
+    expect(r.detail?.join('\n')).toContain(`installed is v5.2.0, target v${PKG} — re-run: ${PLUGIN_RERUN}`);
+    expect(r.unfinished).toBe(true);
+  });
+
+  it('#1109 round 4: an unreadable selected copy with the pin LISTED is unknown, never in place — and says what the list claimed', async () => {
+    const f = fakeOpenClaw({
+      install: () => Promise.reject(timedOut(PLUGIN_RERUN)),
+      list: async () => ({ stdout: pluginList(PKG), stderr: '' }),
+    });
+    const r = await plugin(f.run, null);
+    expect(r.status).toBe('warn');
+    const detail = r.detail?.join('\n') ?? '';
+    expect(detail).toMatch(/end state unknown \(installed version unreadable; openclaw plugins list --json names v5\.2\.1, but that is OpenClaw's index, not the copy on disk\)/);
+    expect(r.unfinished).toBe(true);
   });
 
   it('timeout and not landed: warns with the installed and target versions and the exact re-run', async () => {
