@@ -9,10 +9,8 @@ import {
   classifyLiveLoadEvidence,
   type PluginIndexRow,
 } from '../integrations/openclaw-plugin-index.js';
-import {
-  readInstalledRealtimePluginVersion,
-  resolveRealtimePluginInstallPath,
-} from '../integrations/openclaw-plugin-state.js';
+import { resolveRealtimePluginInstallPath } from '../integrations/openclaw-plugin-state.js';
+import { readSelectedRealtimePluginVersion } from '../integrations/openclaw-realtime-install.js';
 import { readLatestBootRoster, findRegistrationSince, findGatewayAttributedRegistrationSince, type BootRoster } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveRepairConsent } from './repair-consent.js';
@@ -95,7 +93,7 @@ export interface SelfCheckVerdict {
   /** Which of the three roster answers we actually have. */
   rosterState: RosterProofState;
   canaryProof: boolean;
-  /** onDiskVersion >= expectedVersion (inert/true when no expectedVersion given). */
+  /** onDiskVersion === expectedVersion (inert/true when no expectedVersion given). */
   versionProof: boolean;
   reasons: string[];
 }
@@ -129,8 +127,13 @@ export interface SelfCheckInput {
   gatewayPidRegistrationSeenAfterBoot?: boolean;
   /** The build the flow expects to be enforcing; enables the version proof. */
   expectedVersion?: string;
-  /** Ground-truth on-disk version, for the version proof. */
+  /**
+   * The version of the copy OpenClaw SELECTED, for the version proof (#1109
+   * round 3) — never the highest copy on disk.
+   */
   onDiskVersion?: string | null;
+  /** Why `onDiskVersion` is null (e.g. the records disagree), for the report. */
+  onDiskReason?: string;
 }
 
 /**
@@ -222,18 +225,24 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
     reasons.push('canary proof FAILED: canary denied but no audit entry appeared — cannot prove the interceptor fired');
   }
 
-  // Version proof: onDisk must be >= expected. Inert (true) when the caller
-  // supplied no expectedVersion (e.g. pure roster+canary unit tests).
+  // Version proof: onDisk must BE expected — the plugin ships in lockstep with
+  // the CLI and every install is pinned to that exact version, so a newer
+  // build is "not the pinned build" just as an older one is (#1109 review).
+  // Inert (true) when the caller supplied no expectedVersion (e.g. pure
+  // roster+canary unit tests).
   let versionProof = true;
   if (input.expectedVersion) {
     const onDisk = semver.valid(input.onDiskVersion ?? '') ?? semver.valid(semver.coerce(input.onDiskVersion ?? '') ?? '');
     const expected = semver.valid(input.expectedVersion) ?? semver.valid(semver.coerce(input.expectedVersion) ?? '');
     if (!onDisk) {
       versionProof = false;
-      reasons.push(`version proof FAILED: could not read the on-disk plugin version to compare against expected ${input.expectedVersion}`);
+      reasons.push(`version proof FAILED: could not read the selected plugin copy's version to compare against expected ${input.expectedVersion}${input.onDiskReason ? ` (${input.onDiskReason})` : ''}`);
     } else if (expected && semver.lt(onDisk, expected)) {
       versionProof = false;
       reasons.push(`version proof FAILED: on-disk build ${onDisk} is OLDER than expected ${expected} — a silent downgrade (the 4.25.4 class); refuse it`);
+    } else if (expected && !semver.eq(onDisk, expected)) {
+      versionProof = false;
+      reasons.push(`version proof FAILED: on-disk build ${onDisk} is not the pinned ${expected} (newer than this CLI expects)`);
     } else {
       reasons.push(`version proof: on-disk build ${onDisk} satisfies expected ${expected ?? input.expectedVersion}`);
     }
@@ -248,8 +257,12 @@ export interface RunSelfCheckOptions {
   expectedVersion?: string;
   /** Injectable index reader (defaults to the live SQLite read). */
   readIndex?: (home: string) => PluginIndexRow | null;
-  /** Injectable on-disk version reader (defaults to the live package.json read). */
-  readOnDiskVersion?: (home: string) => string | null;
+  /**
+   * Injectable reader of the SELECTED copy's version (defaults to
+   * `readSelectedRealtimePluginVersion`, #1109 round 3: a leftover copy at the
+   * right version next to an older selected one must not pass the proof).
+   */
+  readOnDiskVersion?: (home: string) => string | null | { version: string } | { version: null; reason: string };
   /**
    * Injectable live-roster reader (defaults to the gateway's newest
    * `http server listening` boot line, bounded by the running gateway's
@@ -301,7 +314,7 @@ export async function runPluginSelfCheck(
 ): Promise<SelfCheckRunResult> {
   const pluginId = options.pluginId ?? REALTIME_PLUGIN_ID;
   const readIndex = options.readIndex ?? ((h: string) => readPluginInstallIndex(h));
-  const readOnDisk = options.readOnDiskVersion ?? ((h: string) => readInstalledRealtimePluginVersion(h));
+  const readOnDisk = options.readOnDiskVersion ?? ((h: string) => readSelectedRealtimePluginVersion(h));
   // The default roster read touches the host's real gateway log dir
   // (/tmp/openclaw), which no `home` override can redirect — so it must never
   // fire under Jest, or a test would silently inherit THIS box's roster and
@@ -364,7 +377,11 @@ export async function runPluginSelfCheck(
   }
   liveRoster = classified.liveRoster;
 
-  const onDiskVersion = options.expectedVersion ? readOnDisk(home) : null;
+  const onDiskRead = options.expectedVersion ? readOnDisk(home) : null;
+  const onDiskVersion = onDiskRead !== null && typeof onDiskRead === 'object' ? onDiskRead.version : onDiskRead;
+  const onDiskReason = onDiskRead !== null && typeof onDiskRead === 'object' && onDiskRead.version === null
+    ? onDiskRead.reason
+    : undefined;
   const canary = await probe(home, pluginId);
   const verdict = evaluateSelfCheck({
     pluginId,
@@ -375,6 +392,7 @@ export async function runPluginSelfCheck(
     canary,
     expectedVersion: options.expectedVersion,
     onDiskVersion,
+    ...(onDiskReason ? { onDiskReason } : {}),
   });
   return { ...verdict, index, liveRoster, canary };
 }

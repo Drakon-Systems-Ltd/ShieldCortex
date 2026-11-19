@@ -30,6 +30,9 @@ import {
 } from '../integrations/openclaw-gateway-boot-env.js';
 import type { CapturedError } from '../integrations/child-output.js';
 
+/** #1109: the plugin step's `npm view` publication check is not what this suite is about. */
+const PUBLISHED = async () => ({ published: true as const });
+
 /**
  * #1105 — `shieldcortex update` on a host whose `gateway.auth.token` is a
  * secret reference only the operator's interactive shell resolves.
@@ -63,7 +66,7 @@ import type { CapturedError } from '../integrations/child-output.js';
 
 const CLI = '5.20.1';
 const BEFORE = '5.20.0';
-const FORCE_INSTALL = 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest';
+const FORCE_INSTALL = `openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@${CLI}`;
 const INSTALL_ARGS = FORCE_INSTALL.split(' ').slice(1);
 /** OpenClaw 2026.11.4's exact refusal (dist/credentials-*.mjs, `GatewaySecretRefUnavailableError`). */
 const SECRET_REF_STDERR = [
@@ -766,6 +769,7 @@ describe('#1105 — the update step: SecretRef token, no gateway credential in t
 
   function step(f: ReturnType<typeof fakeOpenClaw>) {
     return captureOutput(() => stepOpenClawPlugin(home, {
+      confirmPublished: PUBLISHED,
       run: f.run,
       readPluginVersion: f.readPluginVersion,
       readCliVersion: () => CLI,
@@ -967,6 +971,7 @@ describe('#1105 — the update step: SecretRef token, no gateway credential in t
       return Promise.reject(Object.assign(new Error('exit 1'), { exitCode: 1, stdout: '', stderr: SECRET_REF_STDERR }));
     };
     const { value: r } = await captureOutput(() => stepOpenClawPlugin(home, {
+      confirmPublished: PUBLISHED,
       run: run as never, readPluginVersion: () => BEFORE, readCliVersion: () => CLI,
     }));
 
@@ -1225,6 +1230,7 @@ describe('#1105 — the update step: SecretRef token, no gateway credential in t
       writeBootEnv(`OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
       const fake = setUp();
       const { value: r, out } = await captureOutput(() => stepOpenClawPlugin(home, {
+      confirmPublished: PUBLISHED,
         readPluginVersion: () => (fake.installed() ? CLI : BEFORE),
         readCliVersion: () => CLI,
       }));
@@ -1239,6 +1245,7 @@ describe('#1105 — the update step: SecretRef token, no gateway credential in t
     it('no boot env: refused twice, then the list — and the accurate message', async () => {
       const fake = setUp();
       const { value: r } = await captureOutput(() => stepOpenClawPlugin(home, {
+      confirmPublished: PUBLISHED,
         readPluginVersion: () => (fake.installed() ? CLI : BEFORE),
         readCliVersion: () => CLI,
       }));

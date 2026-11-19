@@ -114,6 +114,7 @@ import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
 import { isRepairLogName } from '../logs/retention.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
+import { realtimePluginInstallCommand } from '../setup/openclaw-plugin-spec.js';
 import {
   CLAUDE_CODE_ENFORCEMENT_FLOOR,
   detectClaudeCode,
@@ -201,6 +202,11 @@ export const VACUUM_FREE_SHARE = 0.2;
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
+
+/** The command that installs the realtime plugin this CLI expects, from npm, pinned. */
+function cliRealtimeInstallCommand(): string {
+  return realtimePluginInstallCommand(pkg.version);
+}
 
 // ANSI colour codes
 const bold = '\x1b[1m';
@@ -3082,7 +3088,7 @@ export async function checkOpenClawPluginPackage(
           `plugin. This is the stale state behind the gateway crash-loop incident.`,
         fix:
           `Remove ${barePkgDir.replace(os.homedir(), '~')} then reinstall the supported plugin: ` +
-          `\`openclaw plugins install @drakon-systems/shieldcortex-realtime\``,
+          `\`${cliRealtimeInstallCommand()}\``,
         needsOpenClawCli: {
           subcommand: 'plugins',
           fallbackFix:
@@ -8770,7 +8776,7 @@ export async function checkOpenClawPluginVersion(
       label,
       status: 'warn',
       message: `realtime plugin v${installed} installed, v${expectedVersion} available`,
-      fix: 'Run `openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest` (reliable past a pinned spec), then restart the gateway',
+      fix: `Run \`${realtimePluginInstallCommand(expectedVersion)}\`, then restart the gateway`,
       needsOpenClawCli: { subcommand: 'plugins' },
     };
   }
@@ -8980,7 +8986,7 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         status: 'fail',
         message:
           'openclaw.json ENABLES the realtime plugin but no package is installed on this host — the gateway boots with NO memory firewall and NO action guard while config reports it ON',
-        fix: 'Install the plugin: `openclaw plugins install @drakon-systems/shieldcortex-realtime@latest`, then restart the gateway (or run `shieldcortex repair`, which will do both).',
+        fix: `Install the plugin: \`${realtimePluginInstallCommand(verdict.expectedVersion)}\`, then restart the gateway (or run \`shieldcortex repair\`, which will do both).`,
         // Highest-severity unactionable site: BOTH offered routes spawn the
         // refused subcommand, and the message says the gateway boots with no
         // memory firewall and no action guard.
@@ -9528,7 +9534,7 @@ export async function checkPluginStartupIntent(home: string = os.homedir()): Pro
       `(activation.onStartup=${intent.onStartup}, hook capability=${intent.hookCapability}) — ` +
       `this is the aiquant silent-skip`,
     fix:
-      'Reinstall the current plugin so the on-disk manifest has `activation.onStartup: true` and `onCapabilities: ["hook"]`: `shieldcortex repair` or `openclaw plugins install @drakon-systems/shieldcortex-realtime`.',
+      'Reinstall the current plugin so the on-disk manifest has `activation.onStartup: true` and `onCapabilities: ["hook"]`: `shieldcortex repair` or `' + cliRealtimeInstallCommand() + '`.',
   };
 }
 

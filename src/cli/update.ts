@@ -18,7 +18,25 @@ import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import semver from 'semver';
 import { resolveRealtimePluginInstallPath, readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
+import {
+  readRealtimeReplacementEvidence,
+  readSelectedRealtimePluginVersion,
+  type LinkedRealtimeInstall,
+} from '../integrations/openclaw-realtime-install.js';
 import { describeRunFailure, sanitiseForReport } from '../integrations/child-output.js';
+import {
+  BareRetryBudget,
+  REALTIME_PLUGIN_PACKAGE,
+  assessRealtimeReplacement,
+  exactPluginPin,
+  isLegacyNpmProtocolRefusal,
+  landedVersionVerdict,
+  parseNpmViewVersion,
+  realtimePluginInstallArgs,
+  realtimePluginInstallCommand,
+  type ExistingRealtimeInstall,
+  type RealtimePluginSpecSource,
+} from '../setup/openclaw-plugin-spec.js';
 import type { CapturedError } from '../integrations/child-output.js';
 import {
   GATEWAY_BOOT_ENV_DISPLAY,
@@ -346,7 +364,7 @@ export async function step(
 
 // ── Captured subprocess ─────────────────────────────────────
 
-interface RunOpts {
+export interface RunOpts {
   timeout?: number;
   env?: NodeJS.ProcessEnv;
 }
@@ -394,7 +412,7 @@ function runQuiet(cmd: string, args: string[], opts: RunOpts = {}): Promise<{ st
       reject(e);
     });
 
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       if (timer) clearTimeout(timer);
       if (timedOut) {
         const err = new Error(`timeout: ${cmd} ${args.join(' ')}`) as CapturedError;
@@ -413,10 +431,24 @@ function runQuiet(cmd: string, args: string[], opts: RunOpts = {}): Promise<{ st
         err.command = `${cmd} ${args.join(' ')}`;
         return reject(err);
       }
+      // #1109 round 2: a child killed by a signal did not succeed. It used to
+      // resolve here exactly like exit 0 (`code` is null, not a number).
+      if (code !== 0) {
+        const err = new Error(`killed by ${signal ?? 'a signal'}: ${cmd} ${args.join(' ')}`) as CapturedError;
+        err.stdout = stdout;
+        err.stderr = stderr;
+        err.exitCode = null;
+        err.signal = signal ?? 'unknown';
+        err.command = `${cmd} ${args.join(' ')}`;
+        return reject(err);
+      }
       resolve({ stdout, stderr });
     });
   });
 }
+
+/** Test seam (#1109 round 2): the captured runner, to prove a signal-killed child rejects. */
+export const __runQuietForTest = runQuiet;
 
 // ── Header / footer ─────────────────────────────────────────
 
@@ -540,10 +572,25 @@ export async function fetchLatestVersion(deps: { run?: typeof runQuiet } = {}): 
   }
 }
 
-async function stepNpmPackage(
+/**
+ * The env the core `npm install -g` child runs with (#1109 round 2). The new
+ * package's postinstall would otherwise run `shieldcortex openclaw install` on
+ * an OpenClaw host — its own plugin install, with its own bare-spec retry —
+ * before this `update` run reaches its plugin step. `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1`
+ * is the long-standing postinstall switch for that (scripts/postinstall.mjs),
+ * so even an older or newer package's postinstall honours it. Scoped to this
+ * one child: `process.env` is copied, never changed. `update` refreshes the
+ * plugin, skill and hook itself, from the new CLI it re-execs into.
+ */
+export function coreInstallRunOpts(env: NodeJS.ProcessEnv = process.env): RunOpts {
+  return { timeout: 180000, env: { ...env, SHIELDCORTEX_SKIP_AUTO_OPENCLAW: '1' } };
+}
+
+export async function stepNpmPackage(
   currentVersion: string,
   latest: LatestVersionResult,
   force: boolean,
+  run: typeof runQuiet = runQuiet,
 ): Promise<{ updated: boolean; result: StepResult }> {
   const latestVersion = latest.version;
   if (!latestVersion) {
@@ -557,13 +604,13 @@ async function stepNpmPackage(
   }
   if (latestVersion === currentVersion && force) {
     const result = await step('npm package', async () => {
-      await runQuiet('npm', ['install', '-g', 'shieldcortex@latest', '--silent', '--no-audit', '--no-fund'], { timeout: 180000 });
+      await run('npm', ['install', '-g', 'shieldcortex@latest', '--silent', '--no-audit', '--no-fund'], coreInstallRunOpts());
       return `v${currentVersion} (reinstalled)`;
     });
     return { updated: true, result };
   }
   const result = await step('npm package', async () => {
-    await runQuiet('npm', ['install', '-g', 'shieldcortex@latest', '--silent', '--no-audit', '--no-fund'], { timeout: 180000 });
+    await run('npm', ['install', '-g', 'shieldcortex@latest', '--silent', '--no-audit', '--no-fund'], coreInstallRunOpts());
     return `v${currentVersion} → v${latestVersion}`;
   });
   return { updated: true, result };
@@ -739,8 +786,88 @@ export function isRealtimePluginRegistered(home: string): boolean {
   return readRealtimePluginRegistration(home).registered;
 }
 
-const PLUGIN_INSTALL_ARGS = ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@latest'];
-const PLUGIN_RERUN = `openclaw ${PLUGIN_INSTALL_ARGS.join(' ')}`;
+/**
+ * The plugin version this CLI expects, read from the package.json on disk NOW
+ * — after the npm step that is the newly installed core, also when the re-exec
+ * into it failed and this (older) process carries on. Never
+ * `IN_PROCESS_VERSION`, which is the version being replaced. The plugin ships
+ * in lockstep with core, so this is the exact version to install. Null when it
+ * cannot be read or is not an exact version: the step then installs NOTHING
+ * (#1109 review — no automated floating install).
+ */
+function expectedPluginVersion(read: () => string = readPackageVersion): string | null {
+  try {
+    return exactPluginPin(read());
+  } catch {
+    return null;
+  }
+}
+
+/** What `npm view <plugin>@<pin> version --json` established before any destructive step. */
+export type PluginPublishCheck = { published: true } | { published: false; reason: string };
+
+/**
+ * Is the realtime plugin published on npm at exactly `pin`? The release
+ * workflow publishes core before the plugin, so a freshly installable core can
+ * briefly name a plugin version that does not exist yet. `npm view` of a
+ * missing version prints nothing (or fails with E404); anything other than the
+ * pin itself is "cannot confirm".
+ */
+export async function confirmRealtimePluginPublished(
+  pin: string,
+  run: typeof runQuiet = runQuiet,
+): Promise<PluginPublishCheck> {
+  try {
+    // `run` resolves only on a normal exit 0 (non-zero, timeout and signal all
+    // reject). The answer must parse as JSON and be exactly the pin.
+    const { stdout } = await run('npm', ['view', `${REALTIME_PLUGIN_PACKAGE}@${pin}`, 'version', '--json'], { timeout: 15000 });
+    const listed = parseNpmViewVersion(stdout);
+    if (listed.state === 'unparseable') {
+      return { published: false, reason: `could not confirm ${REALTIME_PLUGIN_PACKAGE}@${pin} on npm (npm view printed something other than JSON)` };
+    }
+    return listed.state === 'versions' && listed.versions.length === 1 && listed.versions[0] === pin
+      ? { published: true }
+      : { published: false, reason: `npm has no ${REALTIME_PLUGIN_PACKAGE}@${pin} yet` };
+  } catch (err) {
+    return { published: false, reason: `could not confirm ${REALTIME_PLUGIN_PACKAGE}@${pin} on npm (${describeRunFailure(err).reason})` };
+  }
+}
+
+/**
+ * How the core npm step ended, for the plugin step's honesty about its pin
+ * (#1109 review 7). `elsewhere` (#1109 round 4): npm reported installing a new
+ * version, but the install running this update still reads its old one — npm
+ * wrote a DIFFERENT ShieldCortex install (its own global prefix, while this
+ * process is a project-local, npx or other-prefix copy). This process's
+ * version is then not the core npm just installed, so it is no plugin pin.
+ */
+export type CoreUpdateOutcome = 'updated' | 'current' | 'failed' | 'unavailable' | 'elsewhere';
+
+/** Run in the parent only (see `CoreUpdateOutcome`); `handoff` is `reexecUpdatedCli`'s answer, when it ran. */
+export function coreUpdateOutcome(a: {
+  mainUpdated: boolean;
+  npmStatus: StepResult['status'];
+  reexeced: boolean;
+  latestVersion: string | null;
+  currentVersion: string;
+  handoff?: number | 'failed' | null;
+}): CoreUpdateOutcome {
+  // `reexecUpdatedCli` answers null in the parent only when this install's
+  // package.json still reads `currentVersion` after npm said it installed
+  // `latestVersion` — a version this process was not on.
+  if (a.mainUpdated && !a.reexeced && a.handoff === null && a.latestVersion !== null && a.latestVersion !== a.currentVersion) {
+    return 'elsewhere';
+  }
+  if (a.mainUpdated) return 'updated';
+  if (a.npmStatus === 'failed') return 'failed';
+  return !a.reexeced && !a.latestVersion ? 'unavailable' : 'current';
+}
+
+/** What the plugin step and the protection check say when npm updated another install (#1109 round 4). */
+const CORE_ELSEWHERE_RECOVERY = {
+  command: 'shieldcortex update',
+  note: 'with the shieldcortex npm just updated first on PATH (its prefix: `npm prefix -g`)',
+};
 /**
  * #952: the command that finishes a swap OpenClaw refused because the previous
  * generation's admitted work had not settled. It is the recovery OpenClaw's own
@@ -823,25 +950,32 @@ async function readStillListedVersion(home: string, run: typeof runQuiet): Promi
 /**
  * After an install child timed out or exited non-zero, read what is REALLY
  * installed (#604): the child can outlive its budget and land anyway (measured:
- * reported failed at 120.1 s, plugin 5.2.1 loaded at 126.6 s). OpenClaw's own
- * plugin list first, then the on-disk package; never a guess.
+ * reported failed at 120.1 s, plugin 5.2.1 loaded at 126.6 s). Never a guess.
+ *
+ * #1109 round 4: the SAME evidence as after an exit 0 — the copy OpenClaw
+ * selected (`readLanded`). `openclaw plugins list --json` is not that: it
+ * reports the index's recorded package version, and it keeps listing a
+ * disabled entry whose files are gone. So the list is read only to say what
+ * it claims when the selected copy cannot be told; it never makes a failed
+ * install a finished one.
  */
 export async function readRealtimePluginEndState(
   home: string,
-  deps: { run: typeof runQuiet; readVersion: typeof readInstalledRealtimePluginVersion },
+  deps: { run: typeof runQuiet; readLanded: (home: string) => { version: string } | { version: null; reason: string } },
 ): Promise<EndState> {
-  let listReason = 'openclaw plugins list --json listed no shieldcortex-realtime version';
+  const landed = deps.readLanded(home);
+  if (landed.version !== null && semver.valid(landed.version)) return { version: landed.version };
+  const why = landed.version === null ? landed.reason : 'installed package version unreadable';
+  let listed = '';
   try {
     const { stdout } = await deps.run('openclaw', ['plugins', 'list', '--json'],
       { timeout: 60000, env: { ...process.env, HOME: home } });
     const v = parsePluginListVersion(stdout);
-    if (v) return { version: v };
-  } catch (err) {
-    listReason = `openclaw plugins list --json failed (${describeRunFailure(err).reason})`;
+    if (v) listed = `; openclaw plugins list --json names v${v}, but that is OpenClaw's index, not the copy on disk`;
+  } catch {
+    // Diagnostic only: nothing to add.
   }
-  const onDisk = deps.readVersion(home);
-  if (onDisk && semver.valid(onDisk)) return { version: onDisk };
-  return { version: null, reason: `${listReason}; installed package version unreadable` };
+  return { version: null, reason: `${why}${listed}` };
 }
 
 /** `run`/`rm` are injectable so the failure paths can be tested without a real spawn or a root-owned dir. */
@@ -852,6 +986,29 @@ export async function stepOpenClawPlugin(
     rm?: typeof fs.rmSync;
     readPluginVersion?: typeof readInstalledRealtimePluginVersion;
     readCliVersion?: typeof readPackageVersion;
+    /** Defaults to `npm view` through `run`. */
+    confirmPublished?: (pin: string) => Promise<PluginPublishCheck>;
+    /** Defaults to OpenClaw's own files under `home` (the linked install's package/manifest, path records). */
+    readLinkedInstall?: (home: string) => LinkedRealtimeInstall;
+    /**
+     * Before the install (#1109 round 3): the copy OpenClaw SELECTED, its link
+     * state, and every copy this step is about to delete. Defaults to
+     * OpenClaw's own records under `home`; a suite that injects
+     * `readPluginVersion` gets that reader as the selected copy (it is
+     * scripting "what is installed").
+     */
+    readExistingInstall?: (home: string, deleting: readonly string[]) => ExistingRealtimeInstall;
+    /**
+     * After the install: the version of the copy OpenClaw SELECTED (#1109
+     * round 2), or why it could not be told. Defaults to OpenClaw's install
+     * records; a suite that injects only `readPluginVersion` gets that reader
+     * here too (it is scripting "what landed").
+     */
+    readLandedVersion?: (home: string) => { version: string } | { version: null; reason: string };
+    /** How the core npm step ended; anything but 'updated'/'current' is said out loud. */
+    coreUpdate?: CoreUpdateOutcome;
+    /** The one bare-spec retry for the whole `update` run (shared with the protection check's reconcile). */
+    bareRetryBudget?: BareRetryBudget;
   } = {},
 ): Promise<StepResult> {
   const run = deps.run ?? runQuiet;
@@ -888,11 +1045,34 @@ export async function stepOpenClawPlugin(
       summary: 'skipped — ~/.openclaw could not be taken exclusively',
       detail: [scrubHomePath(acquired.busy, home)],
       unfinished: true,
-      rerun: PLUGIN_RERUN,
+      rerun: realtimePluginInstallCommand(expectedPluginVersion(deps.readCliVersion)),
     }));
   }
   try {
-    return await stepOpenClawPluginLocked(home, { run, rm, readVersion, readCliVersion: deps.readCliVersion, extDir, legacy });
+    return await stepOpenClawPluginLocked(home, {
+      run,
+      rm,
+      readVersion,
+      readCliVersion: deps.readCliVersion,
+      confirmPublished: deps.confirmPublished ?? ((pin) => confirmRealtimePluginPublished(pin, run)),
+      readExisting: deps.readExistingInstall ?? ((h, deleting) => {
+        const evidence = readRealtimeReplacementEvidence(h, { deleting });
+        const linked = deps.readLinkedInstall ? deps.readLinkedInstall(h) : evidence.linked;
+        if (!deps.readPluginVersion) return { ...evidence, linked };
+        const v = readVersion(h);
+        return { ...evidence, linked, selected: v ? { state: 'selected' as const, version: v } : { state: 'none' as const } };
+      }),
+      readLanded: deps.readLandedVersion ?? (deps.readPluginVersion
+        ? (h) => {
+          const v = readVersion(h);
+          return v ? { version: v } : { version: null, reason: 'installed version unreadable' };
+        }
+        : (h) => readSelectedRealtimePluginVersion(h)),
+      coreUpdate: deps.coreUpdate,
+      bareRetryBudget: deps.bareRetryBudget ?? new BareRetryBudget(),
+      extDir,
+      legacy,
+    });
   } finally {
     acquired.lock.release();
   }
@@ -906,12 +1086,83 @@ async function stepOpenClawPluginLocked(
     rm: typeof fs.rmSync;
     readVersion: typeof readInstalledRealtimePluginVersion;
     readCliVersion?: typeof readPackageVersion;
+    confirmPublished: (pin: string) => Promise<PluginPublishCheck>;
+    readExisting: (home: string, deleting: readonly string[]) => ExistingRealtimeInstall;
+    readLanded: (home: string) => { version: string } | { version: null; reason: string };
+    coreUpdate?: CoreUpdateOutcome;
+    bareRetryBudget: BareRetryBudget;
     extDir: string;
     legacy: boolean;
   },
 ): Promise<StepResult> {
   const { run, rm, readVersion, extDir, legacy } = ctx;
   return await step('OpenClaw plugin', async () => {
+    // #1109 review: the exact version this run installs, captured ONCE, before
+    // anything is deleted or installed. Every later comparison is against this
+    // value, never a fresh re-read.
+    const pinned = expectedPluginVersion(ctx.readCliVersion);
+    // The core npm step did not land a new CLI: the pin is the CLI still
+    // installed here, and the closing screen says so (#1109 review 7).
+    const coreNote = ctx.coreUpdate === 'failed' || ctx.coreUpdate === 'unavailable'
+      ? [`the CLI itself was not updated (npm step ${ctx.coreUpdate === 'failed' ? 'failed' : 'could not reach the registry'}), so the plugin is matched to the CLI still installed${pinned ? ` (v${pinned})` : ''}`]
+      : [];
+    // #1109 round 4: npm updated a different ShieldCortex install than this
+    // one. This process's version is the OLD copy's, not the core just
+    // installed — pinning the plugin to it would install a stale build. Touch
+    // nothing; the update run from the updated install does this step.
+    if (ctx.coreUpdate === 'elsewhere') {
+      return {
+        status: 'warn' as const,
+        summary: `not updated — npm updated a different ShieldCortex install than the one running this update (this one is still${pinned ? ` v${pinned}` : ' on its old version'}), so the plugin was left as it is`,
+        detail: [
+          `installing${pinned ? ` v${pinned}` : ''} here would pin the plugin to this older copy, not to the CLI npm just installed`,
+          `run \`${CORE_ELSEWHERE_RECOVERY.command}\` ${CORE_ELSEWHERE_RECOVERY.note}`,
+        ],
+        unfinished: true,
+        recovery: CORE_ELSEWHERE_RECOVERY,
+      };
+    }
+    if (!pinned) {
+      return {
+        status: 'warn' as const,
+        summary: 'not updated — could not read this CLI\'s exact version, so nothing was installed',
+        detail: [...coreNote, `run \`${realtimePluginInstallCommand(null)}\` once the CLI version is readable (\`shieldcortex --version\`)`],
+        unfinished: true,
+        rerun: realtimePluginInstallCommand(null),
+      };
+    }
+    // Never clobber a deliberate or newer install: `--force` would replace a
+    // linked checkout or downgrade a newer plugin, and `npm install -g`'s
+    // postinstall reaches this code without anyone asking for that. #1109
+    // round 3: decided on the copy OpenClaw SELECTED — a stale npm project
+    // must not hide a newer selected extension or index-only install — and on
+    // the legacy extension this step is about to delete.
+    const existing = ctx.readExisting(home, legacy ? [extDir] : []);
+    const before = existing.selected.state === 'selected' ? existing.selected.version : null;
+    const keep = assessRealtimeReplacement(existing, pinned);
+    if (!keep.replace) {
+      // Kept is only "done" when the SELECTED copy is exactly the pin and
+      // nothing about it is unknown; anything else is unfinished.
+      const atPin = keep.why !== 'unknown' && landedVersionVerdict(before, pinned).ok;
+      return {
+        status: atPin ? 'ok' as const : 'warn' as const,
+        summary: keep.summary,
+        detail: [...coreNote, `to replace it with v${pinned}: \`${realtimePluginInstallCommand(pinned)}\``],
+        ...(atPin ? {} : { unfinished: true, rerun: realtimePluginInstallCommand(pinned) }),
+      };
+    }
+    // The pin must exist on npm before anything is deleted (the legacy purge
+    // below) or forced in. Unconfirmed is not confirmed.
+    const publish = await ctx.confirmPublished(pinned);
+    if (!publish.published) {
+      return {
+        status: 'warn' as const,
+        summary: `not updated — ${publish.reason}${before ? `; still on v${before}` : ''}`,
+        detail: [...coreNote, `run \`${realtimePluginInstallCommand(pinned)}\` once v${pinned} is on npm`],
+        unfinished: true,
+        rerun: realtimePluginInstallCommand(pinned),
+      };
+    }
     // Drop any legacy file-copied extension so OpenClaw's registry copy is the
     // single source of truth (prevents the dup-install state doctor flags).
     let purgeFailure: string | null = null;
@@ -926,7 +1177,6 @@ async function stepOpenClawPluginLocked(
         purgeFailure = err instanceof Error ? err.message : String(err);
       }
     }
-    const before = readVersion(home);
     const timeoutMs = openClawStepTimeoutMs();
     // `HOME` is the home this step read the registry from. `OPENCLAW_HOME`, when
     // the operator set one, passes through untouched, so OpenClaw resolves its
@@ -939,36 +1189,81 @@ async function stepOpenClawPluginLocked(
     // #1105: `credentials` (the local gateway's boot credential, retry only) go
     // into a copy of that env for this one child — never into `process.env`,
     // never onto the command line, never anywhere else.
-    const install = (credentials?: GatewayCredentials) => run('openclaw', PLUGIN_INSTALL_ARGS,
-      credentials ? { ...installOpts, env: { ...installOpts.env, ...credentials } } : installOpts);
+    //
+    // The spec is `npm:@drakon-systems/shieldcortex-realtime@<pinned>`: an
+    // exact pin from npm, because OpenClaw 2026.11.5 resolves an unprefixed
+    // spec on ClawHub, which carries a stale copy. A host that predates the
+    // `npm:` prefix refuses it outright; that refusal (an anchored stderr line,
+    // nothing else wrong) earns ONE bare (still exact) run for this whole
+    // `update` — the secret-ref retry below cannot add a second — and every
+    // later printed command uses the bare form on that host.
+    const budget = ctx.bareRetryBudget;
+    let source: RealtimePluginSpecSource = 'npm';
+    const rerunCommand = (): string => realtimePluginInstallCommand(pinned, source);
+    const install = async (credentials?: GatewayCredentials) => {
+      const opts = credentials ? { ...installOpts, env: { ...installOpts.env, ...credentials } } : installOpts;
+      try {
+        return await run('openclaw', realtimePluginInstallArgs(pinned, source), opts);
+      } catch (err) {
+        const e = err as CapturedError;
+        // Allowlist (#1109 round 2): a normal non-zero exit whose every
+        // stderr line is a known form of the legacy refusal. A timeout, a
+        // signal, a spawn failure or any other line is surfaced, not retried.
+        if (source !== 'npm' || e?.spawnFailed || !isLegacyNpmProtocolRefusal({
+          stderr: e?.stderr,
+          stdout: e?.stdout,
+          exitCode: typeof e?.exitCode === 'number' ? e.exitCode : null,
+          timedOut: e?.timedOut === true,
+          signal: e?.signal ?? null,
+        })) throw err;
+        if (!budget.take()) throw err;
+        source = 'bare';
+        return await run('openclaw', realtimePluginInstallArgs(pinned, source), opts);
+      }
+    };
 
-    /** The install child exited 0: report what it ACTUALLY left on disk. */
+    /** The install child exited 0: report what it ACTUALLY left on disk, against the pin. */
     const installed = (): StepResult => {
       // Report the ACTUAL on-disk transition, not just command success — the old
       // "updated via openclaw" was printed even when the version never moved.
-      const after = readVersion(home);
-      const expected = (ctx.readCliVersion ?? readPackageVersion)();
-      const comparable = Boolean(after && semver.valid(after) && semver.valid(expected));
-      const lag = comparable && semver.lt(after!, expected);
+      // #1109 round 2: the copy OpenClaw SELECTED, not the highest version on
+      // disk — a leftover project dir at the pin can sit beside an older copy
+      // OpenClaw actually loads. Could-not-tell is not success.
+      const selected = ctx.readLanded(home);
+      const after = selected.version;
+      const landed = landedVersionVerdict(selected, pinned);
       const changed = before && after && before !== after ? `${before} → ${after}` : null;
-      const transition = lag
-        ? `${changed ? `${changed}; ` : ''}still v${after} — CLI is v${expected}`
-        : !comparable ? 'installed version unreadable — could not compare plugin to CLI'
-        : changed ?? (semver.eq(after!, expected) ? `up to date (v${after})` : `v${after} installed — CLI is v${expected}`);
+      // The install was pinned to exactly `pinned`; any other version — older
+      // (a stale ClawHub copy) or newer — is not what was asked for, never
+      // "up to date".
+      const transition = landed.ok
+        ? changed ?? `up to date (v${landed.version})`
+        : landed.version === null
+          ? `could not confirm the installed version — ${selected.version === null ? selected.reason : 'unreadable'}`
+          : `${changed ? `${changed}; ` : ''}${landed.summary}`;
+      // #606 r1 (3): a child that exited 0 but left anything other than the pin,
+      // or a version this step cannot read, has not done the work it was asked
+      // to — it is unfinished (`update` exits non-zero), and the footer carries
+      // the command that finishes it. That holds with a purge failure too.
+      const unresolved = landed.ok ? {} : { unfinished: true, rerun: rerunCommand() };
+      // #1109 round 4: on a host that predates `npm:` the bare retry is
+      // resolved on ClawHub first when ClawHub has that exact version. Say
+      // so, and what removes the ambiguity.
+      const legacyNote = !landed.ok && source === 'bare'
+        ? [`this OpenClaw predates the \`npm:\` source and resolves the plain package name on ClawHub before npm; upgrade OpenClaw (2026.4.26 or later), then run \`${realtimePluginInstallCommand(pinned)}\``]
+        : [];
       if (purgeFailure) {
         return {
           status: 'warn' as const,
           summary: `${transition} — legacy copy left behind`,
-          detail: [sanitiseForReport(`could not remove legacy extension at ${extDir}: ${purgeFailure}`, { home })],
-          ...(lag || !comparable ? { rerun: PLUGIN_RERUN } : {}),
+          detail: [...coreNote, ...legacyNote, sanitiseForReport(`could not remove legacy extension at ${extDir}: ${purgeFailure}`, { home })],
+          ...unresolved,
         };
       }
-      // #606 r1 (3): a child that exited 0 but left the plugin behind the CLI, or
-      // a version this step cannot read, has not done the work it was asked to —
-      // it is unresolved, and the footer must carry the command that finishes it.
-      return lag || !comparable
-        ? { status: 'warn' as const, summary: transition, rerun: PLUGIN_RERUN }
-        : { status: 'ok' as const, summary: transition };
+      const detail = [...coreNote, ...legacyNote];
+      return landed.ok
+        ? { status: 'ok' as const, summary: transition, ...(detail.length ? { detail } : {}) }
+        : { status: 'warn' as const, summary: transition, ...(detail.length ? { detail } : {}), ...unresolved };
     };
 
     /** The install child failed: say why, and name the one command that finishes the step. */
@@ -1012,12 +1307,12 @@ async function stepOpenClawPluginLocked(
             ...(stillOn
               ? [`OpenClaw's own plugin list still shows shieldcortex-realtime v${stillOn}, enabled — the refused install did not replace it`]
               : []),
-            `run \`${PLUGIN_RERUN}\` from the shell where \`openclaw\` resolves that reference (an env-sourced reference reads the variable its id names); re-running \`shieldcortex update\` repeats the install OpenClaw just refused`,
+            `run \`${rerunCommand()}\` from the shell where \`openclaw\` resolves that reference (an env-sourced reference reads the variable its id names); re-running \`shieldcortex update\` repeats the install OpenClaw just refused`,
             ...purgeDetail,
           ],
           truncated: report.truncated,
           unfinished: true,
-          recovery: { command: PLUGIN_RERUN, note: SECRET_REF_NOTE },
+          recovery: { command: rerunCommand(), note: SECRET_REF_NOTE },
           ...(stillOn ? { stillOn } : {}),
         };
       }
@@ -1038,10 +1333,12 @@ async function stepOpenClawPluginLocked(
       // #604: a timeout or a non-zero exit says how the CHILD ended, not what it
       // left behind. Read the end state before calling the step failed.
       if (!e?.spawnFailed && (e?.timedOut || typeof e?.exitCode === 'number')) {
-        const end = await readRealtimePluginEndState(home, { run, readVersion });
-        const expected = (ctx.readCliVersion ?? readPackageVersion)();
+        const end = await readRealtimePluginEndState(home, { run, readLanded: ctx.readLanded });
+        const expected = pinned;
         const how = describeInstallEnd(err, timeoutMs);
-        if (end.version && semver.valid(expected) && semver.gte(end.version, expected)) {
+        // Exactly the pin, captured before the install — a newer copy is not
+        // "the target version in place" any more than an older one is.
+        if (end.version && landedVersionVerdict(end.version, pinned).ok) {
           return {
             status: purgeFailure ? 'warn' as const : 'ok' as const,
             summary: e.timedOut
@@ -1052,14 +1349,14 @@ async function stepOpenClawPluginLocked(
           };
         }
         const endLine = end.version !== null
-          ? `installed is v${end.version}, target v${expected} — re-run: ${PLUGIN_RERUN}`
-          : `end state unknown (${end.reason}) — re-run: ${PLUGIN_RERUN}`;
+          ? `installed is v${end.version}, target v${expected} — re-run: ${rerunCommand()}`
+          : `end state unknown (${end.reason}) — re-run: ${rerunCommand()}`;
         return {
           status: 'warn' as const,
           summary: `update failed — ${report.reason}`,
           detail: [...report.detail, endLine, ...purgeDetail],
           truncated: report.truncated,
-          rerun: PLUGIN_RERUN,
+          rerun: rerunCommand(),
           unfinished: true,
         };
       }
@@ -1068,7 +1365,7 @@ async function stepOpenClawPluginLocked(
         summary: `update failed — ${report.reason}`,
         detail: [...report.detail, ...purgeDetail],
         truncated: report.truncated,
-        rerun: PLUGIN_RERUN,
+        rerun: rerunCommand(),
         unfinished: true,
       };
     };
@@ -1076,12 +1373,26 @@ async function stepOpenClawPluginLocked(
     try {
       // `openclaw plugins update` no-ops when OpenClaw recorded an exact-pinned
       // spec (observed 2026-06-09: the index pinned @4.30.2 → "up to date" while
-      // npm had 4.31.0). A forced @latest install reliably advances the plugin
-      // AND rewrites the tracked spec to @latest so future updates work.
+      // npm had 4.31.0). A forced install pinned to this CLI's own version
+      // advances the plugin to exactly that version, from npm; every later
+      // `shieldcortex update` re-pins it the same way.
       await install();
       return installed();
     } catch (err) {
       if (classifyOpenClawInstallEnding(installSaid(err)) !== 'secret-ref') return await failed(err);
+      // #1109 review: on a host that predates `npm:` the refused install WAS
+      // this run's one bare-spec run. A second identical bare run is past the
+      // budget — report the refusal and the command instead.
+      if (budget.spent) {
+        const r = await failed(err);
+        return {
+          ...r,
+          detail: [
+            'not retried: this OpenClaw predates the `npm:` source, and this run\'s one retry with the plain package name was the install it just refused',
+            ...(r.detail ?? []),
+          ],
+        };
+      }
       // #1071: OpenClaw refused before installing anything — it could not
       // resolve the gateway secret reference for this child. That is not a
       // reason to give up: the same `openclaw plugins install --force` is the
@@ -1128,7 +1439,7 @@ async function stepOpenClawPluginLocked(
         // (#1105 r2): what it said is used to classify its ending, never
         // shown — no scrub can find a value it quoted, escaped, trimmed or
         // cut apart.
-        r = await failed(boot.used ? credentialedRetryFailure(retryErr, boot.env) : retryErr);
+        r = await failed(boot.used ? credentialedRetryFailure(retryErr, boot.env, rerunCommand()) : retryErr);
       }
       // Why the boot env did not help, when it matters: the retry failed too.
       const bootNote = !boot.used && retryFailed ? [`gateway boot env not used: ${boot.reason}`] : [];
@@ -1174,7 +1485,7 @@ const CREDENTIALED_OUTPUT_WITHHELD = 'its output is withheld: this retry carried
  * refusal (with the config key from a fixed set), its unsettled-reload
  * refusal, an exit status, a timeout, or a child that could not start.
  */
-function credentialedRetryFailure(err: unknown, creds: GatewayCredentials): CapturedError {
+function credentialedRetryFailure(err: unknown, creds: GatewayCredentials, command: string): CapturedError {
   const e = (err ?? {}) as CapturedError;
   const said = redactGatewayCredentials(installSaid(err), creds);
   const ending = classifyOpenClawInstallEnding(said);
@@ -1189,7 +1500,7 @@ function credentialedRetryFailure(err: unknown, creds: GatewayCredentials): Capt
   }
   if (!e.spawnFailed && (ending !== null || e.timedOut)) lines.push(CREDENTIALED_OUTPUT_WITHHELD);
   const out = new Error(e.timedOut ? 'openclaw plugins install timed out' : 'openclaw plugins install failed') as CapturedError;
-  out.command = PLUGIN_RERUN;
+  out.command = command;
   out.stdout = '';
   out.stderr = lines.join('\n');
   out.exitCode = exitCode;
@@ -1714,7 +2025,7 @@ export async function stepVerifyProtection(
    * SHIELDCORTEX_VERBOSE itself, which is how `update --help` reached the
    * upgrade with nobody having parsed the flags.
    */
-  options: { verbose?: boolean; allowConversationAccess?: boolean } = {},
+  options: { verbose?: boolean; allowConversationAccess?: boolean; bareRetryBudget?: BareRetryBudget } = {},
 ): Promise<StepResult> {
   // #248: split unreadable vs absent. Caller owns process.exitCode from ledger.
   const registration = readRealtimePluginRegistration(home);
@@ -1740,6 +2051,8 @@ export async function stepVerifyProtection(
       // #577: parsed at the entry point, not re-read from process.argv down
       // here — that deep read was invisible to update's own argument parser.
       grantConversationAccess: options.allowConversationAccess ?? false,
+      // #1109 review: one bare-spec retry for the whole `update` run.
+      ...(options.bareRetryBudget ? { bareRetryBudget: options.bareRetryBudget } : {}),
     });
     // The closing screen says what this found, in plain words. The forensic
     // report (load-list state, probe results) prints only with --verbose.
@@ -1870,6 +2183,41 @@ export async function handleUpdateCommand(
   await (deps.run ?? runUpdate)(parseUpdateOptions(args, deps.env ?? process.env));
 }
 
+/**
+ * The host table and the offer to wire present-but-unwired hosts, at the end
+ * of `update`.
+ *
+ * #1109 round 5 (Astra B5): when npm updated a different ShieldCortex install
+ * (`coreUpdate === 'elsewhere'`), accepting that offer would run THIS older
+ * copy's OpenClaw installer, pinning the realtime plugin to its version. The
+ * offer is skipped with the same recovery the plugin step and the protection
+ * check name; an installed plugin's unfinished step still makes the run exit 1.
+ */
+export async function stepOfferUnwiredHosts(
+  home: string,
+  ctx: { currentVersion: string; coreUpdate: CoreUpdateOutcome },
+): Promise<void> {
+  try {
+    const { offerUnwiredHosts, formatHostTable, scanHostTable } = await import('../setup/host-table.js');
+    const table = scanHostTable(home);
+    const todo = table.rows.filter((r) => r.present && !r.wired);
+    if (todo.length === 0) return;
+    if (ctx.coreUpdate === 'elsewhere') {
+      process.stdout.write(
+        `\n  ${paint('yellow', '⚠')}  ${paint('gray', `host setup not offered — npm updated a different ShieldCortex install than the one running this update; run \`${CORE_ELSEWHERE_RECOVERY.command}\` ${CORE_ELSEWHERE_RECOVERY.note}`)}\n`,
+      );
+      return;
+    }
+    process.stdout.write('\n');
+    for (const line of formatHostTable(table, ctx.currentVersion)) {
+      process.stdout.write(`${line}\n`);
+    }
+    await offerUnwiredHosts({ mode: 'update', home });
+  } catch {
+    /* update must not fail on the host table */
+  }
+}
+
 export async function runUpdate(options: UpdateOptions): Promise<void> {
   const home = homedir();
   const currentVersion = IN_PROCESS_VERSION;
@@ -1903,8 +2251,9 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   }
 
   let reexecFailed = false;
+  let handoff: number | 'failed' | null | undefined;
   if (mainUpdated) {
-    const handoff = await reexecUpdatedCli(currentVersion);
+    handoff = await reexecUpdatedCli(currentVersion);
     if (typeof handoff === 'number') process.exit(handoff);
     reexecFailed = handoff === 'failed';
   }
@@ -1913,7 +2262,15 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   // Runs unconditionally: a pre-existing broken binding heals on any update.
   const engineResult = await stepVerifyEngine();
 
-  const pluginResult = await stepOpenClawPlugin(home);
+  // #1109 review 7: how the core step ended decides what the plugin pin means.
+  // #1109 round 4: including npm having updated a different install.
+  const coreUpdate: CoreUpdateOutcome = coreUpdateOutcome({
+    mainUpdated, npmStatus, reexeced, latestVersion: latest.version, currentVersion, handoff,
+  });
+  // #1109 review: at most one bare-spec install for this whole run — the
+  // plugin step and the protection check's reconcile share it.
+  const bareRetryBudget = new BareRetryBudget();
+  const pluginResult = await stepOpenClawPlugin(home, { coreUpdate, bareRetryBudget });
   const skillResult = await stepOpenClawSkill(home);
   // The two FILE-COPIED host integrations the upgrade path used to walk past
   // (#574, #576). Both refresh only what is already installed, and neither
@@ -1933,9 +2290,14 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
 
   const protection: StepResult = reexecFailed
     ? { status: 'unproven', summary: 'protection unproven', detail: ['New CLI could not be started; re-run update before verifying protection.', 'next: shieldcortex update'] }
+    // #1109 round 4: the protection check's reconcile installs the plugin at
+    // THIS process's version — the old copy's, when npm updated another one.
+    : coreUpdate === 'elsewhere'
+      ? { status: 'unproven', summary: 'protection unproven', detail: ['npm updated a different ShieldCortex install than the one running this update; nothing was reconciled against this older copy.', `next: ${CORE_ELSEWHERE_RECOVERY.command} ${CORE_ELSEWHERE_RECOVERY.note}`] }
     : await stepVerifyProtection(home, {
       verbose: options.verbose,
       allowConversationAccess: options.allowConversationAccess,
+      bareRetryBudget,
     });
 
   // If the binding couldn't be auto-healed, print the exact copy-paste fix.
@@ -1984,20 +2346,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   maybePrintActionGuardDefaultOffNotice(fromVersion, mainUpdated);
   await maybePrintDashboardHint();
 
-  try {
-    const { offerUnwiredHosts, formatHostTable, scanHostTable } = await import('../setup/host-table.js');
-    const table = scanHostTable(home);
-    const todo = table.rows.filter((r) => r.present && !r.wired);
-    if (todo.length > 0) {
-      process.stdout.write('\n');
-      for (const line of formatHostTable(table, currentVersion)) {
-        process.stdout.write(`${line}\n`);
-      }
-      await offerUnwiredHosts({ mode: 'update', home });
-    }
-  } catch {
-    /* update must not fail on the host table */
-  }
+  await stepOfferUnwiredHosts(home, { currentVersion, coreUpdate });
 
   // Guard switch as configured. Off is the default since 4.54.15, and an
   // off-by-design Guard is neutral: a plugin-load check that could not
