@@ -159,6 +159,53 @@ describe('duplicate repair — extension-only branch is preflighted too', () => 
     expect(said()).toMatch(/Repair complete/);
     expect(process.exitCode).not.toBe(1);
   });
+
+  it('#1109 round 3: leftovers removed, but the SELECTED copy is older than this CLI — not "Repair complete", exit 1, command printed', async () => {
+    recordedNpmInstall('0.0.1');
+    const ext = extensionCopy('0.0.1');
+    __setRealtimePublishCheckForTest(() => ({ ok: true }));
+
+    await repairOpenClawPlugin();
+
+    expect(fs.existsSync(ext)).toBe(false);
+    expect(said()).not.toMatch(/Repair complete\./);
+    expect(said()).toMatch(/Repair incomplete: duplicates removed, but the plugin is on v0\.0\.1, CLI is v/);
+    expect(said()).toContain(`openclaw plugins install --force npm:${PKG}@${SELF()}`);
+    expect(process.exitCode).toBe(1);
+  });
+
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  (asRoot ? it.skip : it)('#1109 round 3: a duplicate that cannot be removed is not "Repair complete" — exit 1', async () => {
+    recordedNpmInstall(SELF());
+    const ext = extensionCopy(SELF());
+    const extensions = path.dirname(ext);
+    __setRealtimePublishCheckForTest(() => ({ ok: true }));
+    fs.chmodSync(extensions, 0o555);
+    try {
+      await repairOpenClawPlugin();
+    } finally {
+      fs.chmodSync(extensions, 0o755);
+    }
+
+    expect(fs.existsSync(ext)).toBe(true);
+    expect(said()).toMatch(/failed to remove/);
+    expect(said()).not.toMatch(/Repair complete\./);
+    expect(said()).toMatch(/Repair incomplete: a duplicate could not be removed/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('#1109 round 3: a candidate whose version cannot be read is not deleted', async () => {
+    recordedNpmInstall(SELF());
+    const ext = extensionCopy(SELF());
+    fs.writeFileSync(path.join(ext, 'openclaw.plugin.json'), '{ not json');
+    __setRealtimePublishCheckForTest(() => ({ ok: true }));
+
+    await repairOpenClawPlugin();
+
+    expect(fs.existsSync(ext)).toBe(true);
+    expect(said()).toMatch(/Not repairing: could not read the copy at .* that the install would remove/);
+    expect(process.exitCode).toBe(1);
+  });
 });
 
 describe('managed-pin heal — a failure reaches the exit code', () => {

@@ -17,6 +17,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import {
   readLinkedRealtimeInstall,
+  readRealtimeReplacementEvidence,
   readSelectedRealtimeInstall,
   readSelectedRealtimePluginVersion,
 } from '../openclaw-realtime-install.js';
@@ -211,5 +212,38 @@ describe('readSelectedRealtimeInstall — the copy OpenClaw selected, not the hi
     writeRealtimeProject('unrecorded', '5.20.2');
     expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'none' });
     expect(readSelectedRealtimePluginVersion(home).version).toBeNull();
+  });
+});
+
+describe('#1109 round 3 — readRealtimeReplacementEvidence: what a forced install must know first', () => {
+  it('an index-only install newer than a stale npm project is what is selected (the stale project does not hide it)', () => {
+    writeRealtimeProject('drakon-systems-shieldcortex-realtime-stale', '5.17.3');
+    const live = path.join(home, 'elsewhere', 'shieldcortex-realtime');
+    fs.mkdirSync(live, { recursive: true });
+    fs.writeFileSync(path.join(live, 'package.json'), JSON.stringify({ name: PKG, version: '5.21.0' }));
+    const e = readRealtimeReplacementEvidence(home, index({ [ID]: { source: 'npm', installPath: live } }, [{ pluginId: ID, rootDir: live }]));
+    expect(e.selected).toMatchObject({ state: 'selected', version: '5.21.0' });
+    expect(e.linked).toEqual({ state: 'absent' });
+    expect(e.deleting).toEqual([]);
+  });
+
+  it('reads every copy scheduled for deletion: a version, unknown for an unreadable one, nothing for an empty dir', () => {
+    const newer = path.join(home, 'a');
+    fs.mkdirSync(newer);
+    fs.writeFileSync(path.join(newer, 'openclaw.plugin.json'), JSON.stringify({ id: ID, version: '5.22.0' }));
+    const broken = path.join(home, 'b');
+    fs.mkdirSync(broken);
+    fs.writeFileSync(path.join(broken, 'openclaw.plugin.json'), '{ nope');
+    const empty = path.join(home, 'c');
+    fs.mkdirSync(empty);
+    const e = readRealtimeReplacementEvidence(home, { deleting: [newer, broken, empty, path.join(home, 'missing')] });
+    expect(e.deleting).toEqual([
+      { dir: newer, state: 'ok', version: '5.22.0' },
+      { dir: broken, state: 'unknown', why: expect.stringContaining('not strict JSON') },
+    ]);
+  });
+
+  it('an unreadable index makes the selected copy unknown', () => {
+    expect(readRealtimeReplacementEvidence(home, unreadableIndex).selected.state).toBe('unknown');
   });
 });

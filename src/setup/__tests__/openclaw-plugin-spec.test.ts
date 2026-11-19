@@ -127,6 +127,29 @@ describe('isLegacyNpmProtocolRefusal — the ONLY output that earns a bare retry
     expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: PRE_NPM_PREFIX_STDERR, stdout: said })).toBe(false);
   });
 
+  it('#1109 round 3 — stdout ALLOWLIST: empty, or the one `Downloading npm:…` line OpenClaw logs on that path', () => {
+    const DOWNLOADING = `Downloading npm:${REALTIME_PLUGIN_PACKAGE}@5.20.2\u2026`;
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: PRE_NPM_PREFIX_STDERR, stdout: `${DOWNLOADING}\n` })).toBe(true);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: PRE_NPM_PREFIX_STDERR, stdout: '\n  \n' })).toBe(true);
+    for (const stdout of [
+      // Unknown diagnostics with no failure word in them — the round-2
+      // blacklist let these through.
+      'Plugin host notice: registry mirror in use',
+      'npm notice New major version of npm available',
+      'Resolved @drakon-systems/shieldcortex-realtime to 5.20.2',
+      // The allowed line, but more than once, or with something after it.
+      `${DOWNLOADING}\n${DOWNLOADING}`,
+      `${DOWNLOADING}\nInstalled plugin: shieldcortex-realtime`,
+      // Close to the allowed line but not it.
+      `Downloading npm:${REALTIME_PLUGIN_PACKAGE}@latest\u2026`,
+      `Downloading clawhub:${REALTIME_PLUGIN_PACKAGE}@5.20.2\u2026`,
+      `Downloading npm:@someone-else/plugin@5.20.2\u2026`,
+    ]) {
+      expect({ stdout, retry: isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: PRE_NPM_PREFIX_STDERR, stdout }) })
+        .toEqual({ stdout, retry: false });
+    }
+  });
+
   it('#1109 round 2 — ALLOWLIST: any stderr line that is not a known refusal form means no retry', () => {
     for (const extra of [
       'npm warn deprecated something@1.0.0',
@@ -239,14 +262,30 @@ describe('runWithNpmSourceFallbackSync + BareRetryBudget', () => {
 
 describe('never clobber a deliberate, newer or unreadable install', () => {
   const absent = { state: 'absent' as const };
+  const sel = (version: string) => ({ state: 'selected' as const, version });
+  const none = { state: 'none' as const };
   it('keeps linked, newer and could-not-tell installs; replaces equal, older and absent ones', () => {
-    expect(assessRealtimeReplacement({ version: '5.20.2', linked: { state: 'linked', at: '/dev/sc' } }, '5.20.2')).toMatchObject({ replace: false, why: 'linked' });
-    expect(assessRealtimeReplacement({ version: '5.21.0', linked: absent }, '5.20.2')).toMatchObject({ replace: false, why: 'newer' });
-    expect(assessRealtimeReplacement({ version: '5.17.3', linked: { state: 'unknown', why: 'openclaw.json is not strict JSON' } }, '5.20.2'))
+    expect(assessRealtimeReplacement({ selected: sel('5.20.2'), linked: { state: 'linked', at: '/dev/sc' } }, '5.20.2')).toMatchObject({ replace: false, why: 'linked' });
+    expect(assessRealtimeReplacement({ selected: sel('5.21.0'), linked: absent }, '5.20.2')).toMatchObject({ replace: false, why: 'newer' });
+    expect(assessRealtimeReplacement({ selected: sel('5.17.3'), linked: { state: 'unknown', why: 'openclaw.json is not strict JSON' } }, '5.20.2'))
       .toMatchObject({ replace: false, why: 'unknown', summary: expect.stringContaining('could not tell whether the plugin is a linked install') });
-    expect(assessRealtimeReplacement({ version: '5.20.2', linked: absent }, '5.20.2')).toEqual({ replace: true });
-    expect(assessRealtimeReplacement({ version: '5.17.3', linked: absent }, '5.20.2')).toEqual({ replace: true });
-    expect(assessRealtimeReplacement({ version: null, linked: absent }, '5.20.2')).toEqual({ replace: true });
+    expect(assessRealtimeReplacement({ selected: sel('5.20.2'), linked: absent }, '5.20.2')).toEqual({ replace: true });
+    expect(assessRealtimeReplacement({ selected: sel('5.17.3'), linked: absent }, '5.20.2')).toEqual({ replace: true });
+    expect(assessRealtimeReplacement({ selected: none, linked: absent }, '5.20.2')).toEqual({ replace: true });
+  });
+
+  it('#1109 round 3: a selected copy that cannot be told is never replaced', () => {
+    expect(assessRealtimeReplacement({ selected: { state: 'unknown', why: 'index unreadable' }, linked: absent }, '5.20.2'))
+      .toMatchObject({ replace: false, why: 'unknown', summary: expect.stringContaining('could not tell which copy OpenClaw selected (index unreadable)') });
+  });
+
+  it('#1109 round 3: a copy about to be DELETED that is newer or unreadable stops the replacement', () => {
+    expect(assessRealtimeReplacement({ selected: sel('5.17.3'), linked: absent, deleting: [{ dir: '/x/ext', state: 'ok', version: '5.21.0' }] }, '5.20.2'))
+      .toMatchObject({ replace: false, why: 'newer', summary: expect.stringContaining('/x/ext holds v5.21.0') });
+    expect(assessRealtimeReplacement({ selected: none, linked: absent, deleting: [{ dir: '/x/ext', state: 'unknown', why: 'not strict JSON' }] }, '5.20.2'))
+      .toMatchObject({ replace: false, why: 'unknown' });
+    expect(assessRealtimeReplacement({ selected: sel('5.17.3'), linked: absent, deleting: [{ dir: '/x/ext', state: 'ok', version: '5.20.2' }] }, '5.20.2'))
+      .toEqual({ replace: true });
   });
 });
 
@@ -408,6 +447,19 @@ describe('`shieldcortex update` plugin step', () => {
     const r = await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => '5.20.1', readCliVersion: () => CLI });
     expect(f.installs()).toEqual([NPM_ARGS]);
     expect(r.unfinished).toBe(true);
+  });
+
+  it('#1109 round 3: the legacy refusal plus an UNKNOWN stdout diagnostic gets no bare retry (update production path)', async () => {
+    const f = scripted([{ stderr: PRE_NPM_PREFIX_STDERR, stdout: 'Plugin host notice: registry mirror in use' }]);
+    const r = await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => '5.20.1', readCliVersion: () => CLI });
+    expect(f.installs()).toEqual([NPM_ARGS]);
+    expect(r.unfinished).toBe(true);
+  });
+
+  it('#1109 round 3: the legacy refusal with OpenClaw\'s own `Downloading npm:…` stdout line still earns the bare retry', async () => {
+    const f = scripted([{ stderr: PRE_NPM_PREFIX_STDERR, stdout: `Downloading npm:${REALTIME_PLUGIN_PACKAGE}@${CLI}\u2026` }, null]);
+    await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => CLI, readCliVersion: () => CLI });
+    expect(f.installs()).toEqual([NPM_ARGS, BARE_ARGS]);
   });
 
   it('the refusal phrase quoted on stdout (stderr says something else) gets no bare retry', async () => {
@@ -661,6 +713,72 @@ describe('`shieldcortex update` plugin step', () => {
     expect(r.summary).toContain(`the plugin is on v5.17.3, CLI is v${CLI}`);
     expect(r.unfinished).toBe(true);
     expect(exitCodeOf(r)).toBe(1);
+  });
+
+  it('#1109 round 3 — a stale npm project does not hide a NEWER selected extension: no force, nothing deleted, unfinished', async () => {
+    const stale = join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-old', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+    mkdirSync(stale, { recursive: true });
+    writeFileSync(join(stale, 'package.json'), JSON.stringify({ name: REALTIME_PLUGIN_PACKAGE, version: '5.17.3' }));
+    // No record names a copy, so OpenClaw loads the one in extensions/ — v5.21.0.
+    const ext = join(home, '.openclaw', 'extensions', 'shieldcortex-realtime');
+    mkdirSync(ext, { recursive: true });
+    writeFileSync(join(ext, 'index.js'), 'export default {};\n');
+    writeFileSync(join(ext, 'openclaw.plugin.json'), JSON.stringify({ id: 'shieldcortex-realtime', version: '5.21.0' }));
+    writeFileSync(join(ext, 'package.json'), JSON.stringify({ name: 'shieldcortex-realtime', type: 'module', private: true }));
+    const f = scripted([null]);
+    const r = await stepOpenClawPlugin(home, { run: f.run, readCliVersion: () => CLI });
+    expect(f.calls).toEqual([]); // no npm view, no install
+    expect(existsSync(join(ext, 'openclaw.plugin.json'))).toBe(true); // the legacy purge did not run
+    expect(r.status).toBe('warn');
+    expect(r.summary).toContain(`the plugin is on v5.21.0, newer than this CLI (v${CLI})`);
+    expect(r.unfinished).toBe(true);
+    expect(exitCodeOf(r)).toBe(1);
+  });
+
+  it('#1109 round 3 — the legacy copy scheduled for deletion is checked too: a newer one is kept even when another copy is selected', async () => {
+    const live = join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-live', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+    mkdirSync(live, { recursive: true });
+    writeFileSync(join(live, 'package.json'), JSON.stringify({ name: REALTIME_PLUGIN_PACKAGE, version: '5.17.3' }));
+    writeFileSync(join(home, '.openclaw', 'plugins', 'installs.json'),
+      JSON.stringify({ installRecords: { 'shieldcortex-realtime': { source: 'npm', installPath: live } } }));
+    const ext = join(home, '.openclaw', 'extensions', 'shieldcortex-realtime');
+    mkdirSync(ext, { recursive: true });
+    writeFileSync(join(ext, 'openclaw.plugin.json'), JSON.stringify({ id: 'shieldcortex-realtime', version: '5.22.0' }));
+    const f = scripted([null]);
+    const r = await stepOpenClawPlugin(home, { run: f.run, readCliVersion: () => CLI });
+    expect(f.calls).toEqual([]);
+    expect(existsSync(join(ext, 'openclaw.plugin.json'))).toBe(true);
+    expect(r.summary).toMatch(/holds v5\.22\.0, newer than this CLI/);
+    expect(r.unfinished).toBe(true);
+  });
+
+  it('#1109 round 3 — kept linked install: a leftover npm copy AT the pin beside an OLDER selected linked copy is unfinished', async () => {
+    const leftover = join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-leftover', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+    mkdirSync(leftover, { recursive: true });
+    writeFileSync(join(leftover, 'package.json'), JSON.stringify({ name: REALTIME_PLUGIN_PACKAGE, version: CLI }));
+    const checkout = join(home, 'dev', 'plugins', 'openclaw');
+    mkdirSync(checkout, { recursive: true });
+    writeFileSync(join(checkout, 'package.json'), JSON.stringify({ name: REALTIME_PLUGIN_PACKAGE, version: '5.17.3' }));
+    writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { load: { paths: [checkout] } } }));
+    const f = scripted([null]);
+    const r = await stepOpenClawPlugin(home, { run: f.run, readCliVersion: () => CLI });
+    expect(f.installs()).toEqual([]);
+    expect(r.status).toBe('warn');
+    expect(r.summary).toContain('linked install (v5.17.3)');
+    expect(r.unfinished).toBe(true);
+    expect(exitCodeOf(r)).toBe(1);
+  });
+
+  it('#1109 round 3 — kept install whose link state is unknown is unfinished even when the selected copy reads as the pin', async () => {
+    const f = scripted([null]);
+    const r = await stepOpenClawPlugin(home, {
+      run: f.run,
+      readCliVersion: () => CLI,
+      readExistingInstall: () => ({ selected: { state: 'selected', version: CLI }, linked: { state: 'unknown', why: 'openclaw.json is not strict JSON' } }),
+    });
+    expect(f.installs()).toEqual([]);
+    expect(r.status).toBe('warn');
+    expect(r.unfinished).toBe(true);
   });
 
   it('#1109 round 2 — the selected copy cannot be told: not success', async () => {

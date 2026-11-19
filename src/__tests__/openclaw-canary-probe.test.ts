@@ -242,4 +242,41 @@ describe('runPluginSelfCheck — reads the on-disk version and enforces the vers
     expect(v.ok).toBe(true);
     expect(v.versionProof).toBe(true);
   });
+
+  it('#1109 round 3 — two installs: a leftover copy AT the expected version beside an OLDER selected copy is NOT a version match', async () => {
+    const copy = (project: string, version: string): string => {
+      const dir = path.join(home, '.openclaw', 'npm', 'projects', project, 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', version }));
+      return dir;
+    };
+    copy('drakon-systems-shieldcortex-realtime-leftover', '4.47.2');
+    const selected = copy('drakon-systems-shieldcortex-realtime-live', '4.25.4');
+    fs.mkdirSync(path.join(home, '.openclaw', 'plugins'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.openclaw', 'plugins', 'installs.json'),
+      JSON.stringify({ installRecords: { [PLUGIN]: { source: 'npm', installPath: selected } } }));
+    const v = await runPluginSelfCheck(home, {
+      pluginId: PLUGIN,
+      expectedVersion: '4.47.2',
+      readIndex: () => indexEnabled,
+      readLiveRoster: () => [PLUGIN],
+      canaryProbe: async () => passingCanary,
+    });
+    expect(v.ok).toBe(false);
+    expect(v.versionProof).toBe(false);
+    expect(v.reasons.join('\n')).toMatch(/on-disk build 4\.25\.4 is OLDER than expected 4\.47\.2/);
+  });
+
+  it('#1109 round 3 — a selected copy that cannot be told fails the proof and says why', async () => {
+    const v = await runPluginSelfCheck(home, {
+      pluginId: PLUGIN,
+      expectedVersion: '4.47.2',
+      readIndex: () => indexEnabled,
+      readLiveRoster: () => [PLUGIN],
+      canaryProbe: async () => passingCanary,
+      readOnDiskVersion: () => ({ version: null, reason: 'could not tell which copy OpenClaw selected — two copies' }),
+    });
+    expect(v.versionProof).toBe(false);
+    expect(v.reasons.join('\n')).toMatch(/could not read the selected plugin copy's version .*\(could not tell which copy OpenClaw selected — two copies\)/);
+  });
 });

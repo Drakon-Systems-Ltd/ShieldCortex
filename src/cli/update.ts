@@ -19,7 +19,7 @@ import { fileURLToPath } from 'url';
 import semver from 'semver';
 import { resolveRealtimePluginInstallPath, readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
 import {
-  readLinkedRealtimeInstall,
+  readRealtimeReplacementEvidence,
   readSelectedRealtimePluginVersion,
   type LinkedRealtimeInstall,
 } from '../integrations/openclaw-realtime-install.js';
@@ -34,6 +34,7 @@ import {
   parseNpmViewVersion,
   realtimePluginInstallArgs,
   realtimePluginInstallCommand,
+  type ExistingRealtimeInstall,
   type RealtimePluginSpecSource,
 } from '../setup/openclaw-plugin-spec.js';
 import type { CapturedError } from '../integrations/child-output.js';
@@ -950,6 +951,14 @@ export async function stepOpenClawPlugin(
     /** Defaults to OpenClaw's own files under `home` (the linked install's package/manifest, path records). */
     readLinkedInstall?: (home: string) => LinkedRealtimeInstall;
     /**
+     * Before the install (#1109 round 3): the copy OpenClaw SELECTED, its link
+     * state, and every copy this step is about to delete. Defaults to
+     * OpenClaw's own records under `home`; a suite that injects
+     * `readPluginVersion` gets that reader as the selected copy (it is
+     * scripting "what is installed").
+     */
+    readExistingInstall?: (home: string, deleting: readonly string[]) => ExistingRealtimeInstall;
+    /**
      * After the install: the version of the copy OpenClaw SELECTED (#1109
      * round 2), or why it could not be told. Defaults to OpenClaw's install
      * records; a suite that injects only `readPluginVersion` gets that reader
@@ -1006,7 +1015,13 @@ export async function stepOpenClawPlugin(
       readVersion,
       readCliVersion: deps.readCliVersion,
       confirmPublished: deps.confirmPublished ?? ((pin) => confirmRealtimePluginPublished(pin, run)),
-      readLinkedInstall: deps.readLinkedInstall ?? ((h) => readLinkedRealtimeInstall(h)),
+      readExisting: deps.readExistingInstall ?? ((h, deleting) => {
+        const evidence = readRealtimeReplacementEvidence(h, { deleting });
+        const linked = deps.readLinkedInstall ? deps.readLinkedInstall(h) : evidence.linked;
+        if (!deps.readPluginVersion) return { ...evidence, linked };
+        const v = readVersion(h);
+        return { ...evidence, linked, selected: v ? { state: 'selected' as const, version: v } : { state: 'none' as const } };
+      }),
       readLanded: deps.readLandedVersion ?? (deps.readPluginVersion
         ? (h) => {
           const v = readVersion(h);
@@ -1032,7 +1047,7 @@ async function stepOpenClawPluginLocked(
     readVersion: typeof readInstalledRealtimePluginVersion;
     readCliVersion?: typeof readPackageVersion;
     confirmPublished: (pin: string) => Promise<PluginPublishCheck>;
-    readLinkedInstall: (home: string) => LinkedRealtimeInstall;
+    readExisting: (home: string, deleting: readonly string[]) => ExistingRealtimeInstall;
     readLanded: (home: string) => { version: string } | { version: null; reason: string };
     coreUpdate?: CoreUpdateOutcome;
     bareRetryBudget: BareRetryBudget;
@@ -1060,13 +1075,19 @@ async function stepOpenClawPluginLocked(
         rerun: realtimePluginInstallCommand(null),
       };
     }
-    const before = readVersion(home);
     // Never clobber a deliberate or newer install: `--force` would replace a
     // linked checkout or downgrade a newer plugin, and `npm install -g`'s
-    // postinstall reaches this code without anyone asking for that.
-    const keep = assessRealtimeReplacement({ version: before, linked: ctx.readLinkedInstall(home) }, pinned);
+    // postinstall reaches this code without anyone asking for that. #1109
+    // round 3: decided on the copy OpenClaw SELECTED — a stale npm project
+    // must not hide a newer selected extension or index-only install — and on
+    // the legacy extension this step is about to delete.
+    const existing = ctx.readExisting(home, legacy ? [extDir] : []);
+    const before = existing.selected.state === 'selected' ? existing.selected.version : null;
+    const keep = assessRealtimeReplacement(existing, pinned);
     if (!keep.replace) {
-      const atPin = landedVersionVerdict(before, pinned).ok;
+      // Kept is only "done" when the SELECTED copy is exactly the pin and
+      // nothing about it is unknown; anything else is unfinished.
+      const atPin = keep.why !== 'unknown' && landedVersionVerdict(before, pinned).ok;
       return {
         status: atPin ? 'ok' as const : 'warn' as const,
         summary: keep.summary,

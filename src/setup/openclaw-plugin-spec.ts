@@ -22,7 +22,8 @@
  *     not allowed` on stderr. The retry is an ALLOWLIST: the child exited on
  *     its own (no timeout, no signal) with a non-zero code, and every
  *     non-blank stderr line is one of that refusal's known forms. Any other
- *     line, on stderr or a failure word on stdout, means no retry. That earns
+ *     line on stderr, or any stdout beyond the one `Downloading npm:…` line
+ *     OpenClaw logs on that path, means no retry. That earns
  *     ONE retry with the bare spec at the same exact version — one per
  *     top-level operation (an `update` run, an `openclaw install`, a reconcile
  *     run across all its passes), tracked by a `BareRetryBudget`. Nothing ever
@@ -110,16 +111,23 @@ const ALLOWED_REFUSAL_LINES: readonly RegExp[] = [
 ];
 
 /**
- * A failure word on STDOUT means more happened than the refusal (stdout is not
- * where the refusal goes, so it is not allowlisted line by line — but it must
- * not carry another failure either).
+ * The ONLY stdout a legacy refusal produces (#1109 round 3 — an allowlist,
+ * not a list of failure words). At cb9955dd5c~1 the npm installer
+ * (src/plugins/install.ts `installPluginFromNpmSpec`) validates the spec
+ * BEFORE it logs, so it prints nothing; the hook-pack fallback that runs next
+ * (src/cli/plugins-install-command.ts `tryInstallHookPackFromNpmSpec` →
+ * src/hooks/install.ts:426 `installHooksFromNpmSpec`) logs
+ * `Downloading ${spec.trim()}…` through `createHookPackInstallLogger`
+ * (`defaultRuntime.log`, i.e. console.log — stdout) and only then fails the
+ * same validation. Nothing else on that path writes to stdout. So stdout is
+ * empty (a runtime that suppresses logs) or exactly that one line for this
+ * package's `npm:` spec at an exact version; any other line means something
+ * else happened, and there is no retry.
  */
-const STDOUT_FAILURE_MARKER = new RegExp([
-  'unsupported npm spec', 'error', 'fail', 'integrity', 'checksum', 'trust', 'provenance', 'signature',
-  'polic(?:y|ies)', 'consent', 'cancell?ed', 'denied', 'forbidden', 'blocked', 'refus',
-  'secret ?ref', 'gateway\\.auth', 'network', 'econn', 'enotfound', 'eai_again', 'etimedout',
-  'socket', 'timed? ?out', '\\b40[0-9]\\b', 'e404', 'not found', 'unauthori[sz]ed', 'invalid', 'clawhub',
-].join('|'), 'i');
+const ALLOWED_REFUSAL_STDOUT_LINE = new RegExp(
+  '^Downloading npm:' + REALTIME_PLUGIN_PACKAGE.replace(/[.*+?^$()|[\]{}\\/]/g, '\\$&') + '@' +
+  '(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?\u2026$',
+);
 
 function lines(text: string | null | undefined): string[] {
   return (text ?? '').replace(ANSI, '').split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
@@ -142,7 +150,8 @@ export interface InstallChildOutcome {
  * the prefix: the child exited normally with a non-zero code (not timed out,
  * not signalled), its stderr carries the anchored refusal line, EVERY
  * non-blank stderr line is one of the allowlisted refusal forms, and stdout
- * carries no failure word. Anything unrecognised is not a legacy refusal.
+ * is empty or the one allowlisted `Downloading npm:…` line. Anything
+ * unrecognised, on either stream, is not a legacy refusal.
  */
 export function isLegacyNpmProtocolRefusal(outcome: InstallChildOutcome): boolean {
   if (outcome.timedOut || outcome.signal) return false;
@@ -150,7 +159,8 @@ export function isLegacyNpmProtocolRefusal(outcome: InstallChildOutcome): boolea
   const err = lines(outcome.stderr);
   if (!err.some((l) => ALLOWED_REFUSAL_LINES[0].test(l))) return false;
   if (!err.every((l) => ALLOWED_REFUSAL_LINES.some((re) => re.test(l)))) return false;
-  return !lines(outcome.stdout).some((l) => STDOUT_FAILURE_MARKER.test(l));
+  const out = lines(outcome.stdout);
+  return out.length === 0 || (out.length === 1 && ALLOWED_REFUSAL_STDOUT_LINE.test(out[0]));
 }
 
 /**
@@ -271,8 +281,16 @@ export function parseNpmViewVersion(stdout: string): { state: 'versions'; versio
 
 /** What is installed now, as far as the replacement decision needs to know. */
 export interface ExistingRealtimeInstall {
-  /** The installed version, or null when none is installed / readable. */
-  version: string | null;
+  /**
+   * The copy OpenClaw SELECTED (`readSelectedRealtimeInstall`, #1109 round 3)
+   * — never the highest version anywhere on disk: a stale npm project must not
+   * hide a newer copy OpenClaw actually loads. `unknown` when the records
+   * could not be read or disagree.
+   */
+  selected:
+    | { state: 'selected'; version: string }
+    | { state: 'none' }
+    | { state: 'unknown'; why: string };
   /**
    * Whether it is a linked/path install (`readLinkedRealtimeInstall`):
    * `unknown` when OpenClaw's records could not be read.
@@ -281,6 +299,16 @@ export interface ExistingRealtimeInstall {
     | { state: 'linked'; at: string }
     | { state: 'absent' }
     | { state: 'unknown'; why: string };
+  /**
+   * Every other copy the caller will DELETE before or as part of the install
+   * (e.g. `update`'s legacy extensions purge, a duplicate repair's
+   * candidates). A copy here that is newer than the pin, or whose version
+   * cannot be read, stops the replacement just like the selected copy would.
+   */
+  deleting?: ReadonlyArray<
+    | { dir: string; state: 'ok'; version: string }
+    | { dir: string; state: 'unknown'; why: string }
+  >;
 }
 
 export type ReplacementDecision =
@@ -289,18 +317,38 @@ export type ReplacementDecision =
 
 /**
  * May a forced install of `pin` replace what is there? Not a linked/path
- * install (someone pointed OpenClaw at a checkout on purpose), not an install
- * newer than the pin (that would be a downgrade), and not when OpenClaw's
- * records could not be read (we cannot tell whether it is linked).
+ * install (someone pointed OpenClaw at a checkout on purpose), not when the
+ * selected copy — or any copy about to be deleted — is newer than the pin
+ * (that would be a downgrade), and not when OpenClaw's records could not tell
+ * which copy is selected, whether it is linked, or what a doomed copy holds.
  */
 export function assessRealtimeReplacement(existing: ExistingRealtimeInstall, pin: string): ReplacementDecision {
-  const at = existing.version ? ` (v${existing.version})` : '';
+  const sel = existing.selected;
+  const at = sel.state === 'selected' ? ` (v${sel.version})` : '';
   if (existing.linked.state === 'linked') {
     return { replace: false, why: 'linked', summary: `left alone — the plugin is a linked install${at} at ${existing.linked.at}` };
   }
-  const v = exactPluginPin(existing.version);
+  if (sel.state === 'unknown') {
+    return { replace: false, why: 'unknown', summary: `left alone — could not tell which copy OpenClaw selected (${sel.why})` };
+  }
+  const v = sel.state === 'selected' ? exactPluginPin(sel.version) : null;
+  if (sel.state === 'selected' && !v) {
+    return { replace: false, why: 'unknown', summary: `left alone — the selected copy's version is not exact (${JSON.stringify(sel.version)})` };
+  }
   if (v && semver.gt(v, pin)) {
     return { replace: false, why: 'newer', summary: `left alone — the plugin is on v${v}, newer than this CLI (v${pin})` };
+  }
+  for (const copy of existing.deleting ?? []) {
+    if (copy.state === 'unknown') {
+      return { replace: false, why: 'unknown', summary: `left alone — could not read the copy at ${copy.dir} that the install would remove (${copy.why})` };
+    }
+    const cv = exactPluginPin(copy.version);
+    if (!cv) {
+      return { replace: false, why: 'unknown', summary: `left alone — the copy at ${copy.dir} that the install would remove has no exact version` };
+    }
+    if (semver.gt(cv, pin)) {
+      return { replace: false, why: 'newer', summary: `left alone — ${copy.dir} holds v${cv}, newer than this CLI (v${pin})` };
+    }
   }
   if (existing.linked.state === 'unknown') {
     return {

@@ -29,8 +29,7 @@ import {
   runWithNpmSourceFallbackSync,
   type ExistingRealtimeInstall,
 } from './openclaw-plugin-spec.js';
-import { readLinkedRealtimeInstall, readSelectedRealtimePluginVersion } from '../integrations/openclaw-realtime-install.js';
-import { readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
+import { readRealtimeReplacementEvidence, readSelectedRealtimePluginVersion } from '../integrations/openclaw-realtime-install.js';
 import { nextCausalSeq } from './causal-seq.js';
 
 /**
@@ -341,10 +340,10 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   const apply = options.apply ?? defaultApply();
   const runCommand = options.runCommand ?? defaultRunCommand;
   const bareRetryBudget = options.bareRetryBudget ?? new BareRetryBudget();
-  const readExistingInstall = options.readExistingInstall ?? ((h: string): ExistingRealtimeInstall => ({
-    version: readInstalledRealtimePluginVersion(h),
-    linked: readLinkedRealtimeInstall(h),
-  }));
+  // #1109 round 3: the copy OpenClaw SELECTED and its link state — not the
+  // highest version on disk.
+  const readExistingInstall = options.readExistingInstall
+    ?? ((h: string): ExistingRealtimeInstall => readRealtimeReplacementEvidence(h));
   const readLandedVersion = options.readLandedVersion ?? ((h: string) => readSelectedRealtimePluginVersion(h));
   const reloadGateway = options.reloadGateway ?? defaultReloadGateway;
   const selfCheck = options.selfCheck

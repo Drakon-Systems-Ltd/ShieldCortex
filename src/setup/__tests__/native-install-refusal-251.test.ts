@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals
 
 import {
   classifyNativePluginInstallFailure,
+  handleOpenClawCommand,
   installOpenClawHook,
   openClawConfigPath,
   getLastNativePluginInstallRefusal,
@@ -490,8 +491,10 @@ describe('native package install — verified against the pin, never clobbering 
     await installOpenClawHook({ noHooks: true, restartGateway: false });
 
     expect(calls.filter((a) => a[1] === 'install')).toEqual([]);
-    expect(logLines.join('\n')).toContain(`left alone — the plugin is on v999.0.0, newer than this CLI (v${selfVersion()})`);
-    expect(logLines.join('\n')).toContain(`openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@${selfVersion()}`);
+    // #1109 round 3: kept is not installed — reported, with the command, exit 1.
+    expect(warnLines.join('\n')).toContain(`Real-time plugin not installed: the plugin is on v999.0.0, newer than this CLI (v${selfVersion()})`);
+    expect(warnLines.join('\n')).toContain(`openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@${selfVersion()}`);
+    expect(process.exitCode).toBe(1);
   });
 
   it('a linked install (plugins.load.paths → a checkout\'s plugins/openclaw) is kept: no forced package install replaces it', async () => {
@@ -506,7 +509,87 @@ describe('native package install — verified against the pin, never clobbering 
     await installOpenClawHook({ noHooks: true, restartGateway: false });
 
     expect(calls.filter((a) => a.includes('--force'))).toEqual([]);
-    expect(logLines.join('\n')).toMatch(/left alone — the plugin is a linked install/);
+    expect(warnLines.join('\n')).toMatch(/Real-time plugin not installed: the plugin is a linked install \(v5\.0\.0\)/);
+    expect(process.exitCode).toBe(1);
+  });
+});
+
+describe('#1109 round 3 — a kept install is not an install (through `shieldcortex openclaw install`)', () => {
+  const selfVersion = (): string => JSON.parse(
+    fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..', 'package.json'), 'utf-8'),
+  ).version;
+  const linkedCheckout = (version: string): string => {
+    const checkout = path.join(tempHome, 'src', 'ShieldCortex', 'plugins', 'openclaw');
+    fs.mkdirSync(checkout, { recursive: true });
+    fs.writeFileSync(path.join(checkout, 'package.json'), JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', version }));
+    return checkout;
+  };
+  const record = (calls: string[][]) => (_cmd: string, args: readonly string[]) => {
+    calls.push([...args]);
+    return { status: 0, stdout: '', stderr: '' };
+  };
+  const all = (): string => [...logLines, ...warnLines].join('\n');
+
+  it.each([
+    ['--no-gateway-restart', ['--no-hooks', '--no-gateway-restart']],
+    ['default restart flags', ['--no-hooks']],
+  ])('a kept linked copy that is NOT the pin: no "Installed through native …" line, exit 1 (%s)', async (_label, argv) => {
+    writeConfig({ plugins: { allow: [], entries: {}, load: { paths: [linkedCheckout('5.0.0')] } } });
+    __setNativePluginInstallForTest(null);
+    const calls: string[][] = [];
+    __setNativeSpawnForTest(record(calls));
+    const prevSkip = process.env.SHIELDCORTEX_SKIP_GATEWAY_RESTART;
+    process.env.SHIELDCORTEX_SKIP_GATEWAY_RESTART = '1';
+    try {
+      await handleOpenClawCommand('install', argv);
+    } finally {
+      if (prevSkip === undefined) delete process.env.SHIELDCORTEX_SKIP_GATEWAY_RESTART;
+      else process.env.SHIELDCORTEX_SKIP_GATEWAY_RESTART = prevSkip;
+    }
+
+    expect(calls.filter((a) => a[1] === 'install')).toEqual([]);
+    expect(all()).not.toMatch(/Installed through native OpenClaw/);
+    expect(all()).not.toMatch(/Installed real-time plugin/);
+    expect(warnLines.join('\n')).toContain('Real-time plugin not installed: the plugin is a linked install (v5.0.0)');
+    expect(warnLines.join('\n')).toContain(`To replace it with v${selfVersion()}: openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@${selfVersion()}`);
+    expect(warnLines.join('\n')).toMatch(/Not installed — the existing install was kept/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('a kept linked copy AT the pin is fine: said plainly, no install claimed, no failure exit', async () => {
+    writeConfig({ plugins: { allow: [], entries: {}, load: { paths: [linkedCheckout(selfVersion())] } } });
+    __setNativePluginInstallForTest(null);
+    const calls: string[][] = [];
+    __setNativeSpawnForTest(record(calls));
+
+    await handleOpenClawCommand('install', ['--no-hooks', '--no-gateway-restart']);
+
+    expect(calls.filter((a) => a[1] === 'install')).toEqual([]);
+    expect(logLines.join('\n')).toContain(`Real-time plugin already at v${selfVersion()}`);
+    expect(logLines.join('\n')).toMatch(/Existing install kept — it is already this CLI's version; nothing was installed/);
+    expect(all()).not.toMatch(/Installed through native OpenClaw/);
+    expect(process.exitCode).not.toBe(1);
+  });
+
+  it('a stale npm project does not hide a NEWER selected extension copy: no forced install, exit 1', async () => {
+    writeConfig({ plugins: { allow: [], entries: {} } });
+    const stale = path.join(tempHome, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-old', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+    fs.mkdirSync(stale, { recursive: true });
+    fs.writeFileSync(path.join(stale, 'package.json'), JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', version: '5.0.0' }));
+    const ext = path.join(tempHome, '.openclaw', 'extensions', PLUGIN);
+    fs.mkdirSync(ext, { recursive: true });
+    fs.writeFileSync(path.join(ext, 'index.js'), 'export default {};\n');
+    fs.writeFileSync(path.join(ext, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, version: '999.0.0' }));
+    __setNativePluginInstallForTest(null);
+    const calls: string[][] = [];
+    __setNativeSpawnForTest(record(calls));
+
+    await handleOpenClawCommand('install', ['--no-hooks', '--no-gateway-restart']);
+
+    expect(calls.filter((a) => a.includes('--force'))).toEqual([]);
+    expect(warnLines.join('\n')).toContain(`the plugin is on v999.0.0, newer than this CLI (v${selfVersion()})`);
+    expect(JSON.parse(fs.readFileSync(path.join(ext, 'openclaw.plugin.json'), 'utf-8')).version).toBe('999.0.0');
+    expect(process.exitCode).toBe(1);
   });
 });
 
@@ -612,6 +695,24 @@ describe('#1109 round 2 — the development installs (--link, local copy) are an
     expect(fs.existsSync(path.join(extensionCopy(), 'openclaw.plugin.json'))).toBe(true);
     expect(JSON.parse(fs.readFileSync(path.join(extensionCopy(), 'openclaw.plugin.json'), 'utf-8')).version).toBe(selfVersion());
     expect(warnLines.join('\n')).not.toMatch(/Local plugin copy written, but/);
+  });
+
+  it.each([
+    ['refused (policy)', { status: 1, stdout: '', stderr: 'Error: install blocked by plugin install policy\n' }],
+    ['timed out', { status: null, stdout: '', stderr: '', error: Object.assign(new Error('spawnSync openclaw ETIMEDOUT'), { code: 'ETIMEDOUT' }) }],
+    ['killed', { status: null, stdout: '', stderr: '', signal: 'SIGKILL' }],
+  ])('#1109 round 3: offline, then the --link attempt itself is %s: NO local copy, exit 1', async (_label, linkResult) => {
+    writeConfig({ plugins: { allow: [], entries: {} } });
+    __setNativePluginInstallForTest(null);
+    __setNativeSpawnForTest((_cmd, args) => (args.includes('--link')
+      ? linkResult as never
+      : { status: 1, stdout: '', stderr: 'npm error code EAI_AGAIN\nnpm error network request failed\n' }));
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    expect(fs.existsSync(extensionCopy())).toBe(false);
+    expect(warnLines.join('\n')).toMatch(/Nothing was installed/);
+    expect(process.exitCode).toBe(1);
   });
 
   it('the local copy is verified: an OpenClaw record that still selects an older copy makes it exit 1', async () => {

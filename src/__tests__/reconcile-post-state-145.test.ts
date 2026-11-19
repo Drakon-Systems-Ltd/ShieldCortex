@@ -74,7 +74,7 @@ describe('#145 — the closing state is re-read after remediation', () => {
       // #1109 round 2: the install step checks the copy OpenClaw selected; the
       // reload landed 4.47.19 (the field timeline). Never the real ~/.openclaw.
       readLandedVersion: () => ({ version: '4.47.19' }),
-      readExistingInstall: () => ({ version: '4.47.16', linked: { state: 'absent' } }),
+      readExistingInstall: () => ({ selected: { state: 'selected', version: '4.47.16' }, linked: { state: 'absent' } }),
       reloadGateway: async () => ({ restarted: true }),
       selfCheck: async () => passingSelfCheck,
       pruneDir: () => void 0,
@@ -99,7 +99,7 @@ describe('#145 — the closing state is re-read after remediation', () => {
       // #1109 round 2: the install step checks the copy OpenClaw selected; the
       // reload landed 4.47.19 (the field timeline). Never the real ~/.openclaw.
       readLandedVersion: () => ({ version: '4.47.19' }),
-      readExistingInstall: () => ({ version: '4.47.16', linked: { state: 'absent' } }),
+      readExistingInstall: () => ({ selected: { state: 'selected', version: '4.47.16' }, linked: { state: 'absent' } }),
       reloadGateway: async () => ({ restarted: true }),
       selfCheck: async () => ({
         ...passingSelfCheck,
@@ -128,7 +128,7 @@ describe('#145 — the closing state is re-read after remediation', () => {
       // #1109 round 2: the install step checks the copy OpenClaw selected; the
       // reload landed 4.47.19 (the field timeline). Never the real ~/.openclaw.
       readLandedVersion: () => ({ version: '4.47.19' }),
-      readExistingInstall: () => ({ version: '4.47.16', linked: { state: 'absent' } }),
+      readExistingInstall: () => ({ selected: { state: 'selected', version: '4.47.16' }, linked: { state: 'absent' } }),
       reloadGateway: async () => ({ restarted: true }),
       selfCheck: async () => passingSelfCheck,
       pruneDir: () => void 0,

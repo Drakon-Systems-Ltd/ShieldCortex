@@ -202,8 +202,13 @@ where `<version>` is exactly this CLI's version.
 - **What they replace.** `--force` replaces an existing npm or ClawHub install
   of the plugin that is on the CLI's version or older. That includes a copy
   you pinned to an older version yourself.
-- **What they leave alone.** A linked or local-path install, any install
-  newer than the CLI, and any install whose link status cannot be read. A
+- **What they leave alone.** A linked or local-path install, an install
+  newer than the CLI, and an install whose link status or selected copy
+  cannot be read. "Newer" is judged on the copy OpenClaw selected (see "What
+  counts as done" below), not on the highest version on disk, and on every
+  copy the command is about to delete (`update`'s removal of a legacy
+  `~/.openclaw/extensions` copy, the duplicates a repair removes): a newer or
+  unreadable one stops the replacement and nothing is deleted. A
   link is recognised by what is at the path, not by its name: a
   `plugins.load.paths` entry whose `package.json` is
   `@drakon-systems/shieldcortex-realtime` or whose `openclaw.plugin.json` id is
@@ -213,7 +218,11 @@ where `<version>` is exactly this CLI's version.
   files exists but cannot be read (including an `openclaw.json` written as
   JSON5, which this check does not parse), the answer is "could not tell", and
   nothing is replaced. In all of these cases they print the install command
-  instead, and `shieldcortex update` exits 1 until the plugin matches the CLI.
+  instead. A kept install only counts as done when the selected copy is
+  exactly the CLI's version and nothing about it was unknown; otherwise
+  `shieldcortex update` reports the step unfinished and `shieldcortex
+  openclaw install` says the plugin was not installed. Both exit 1, including
+  `openclaw install --no-gateway-restart`.
 - **When they install nothing.** If the CLI cannot read its own exact
   version, nothing is installed — no package, no `--link`, no local copy.
   `shieldcortex update` and the duplicate repair in `shieldcortex openclaw
@@ -226,7 +235,10 @@ where `<version>` is exactly this CLI's version.
   before it deletes anything, including a leftover copy in
   `~/.openclaw/extensions`. It deletes a duplicate only when OpenClaw's own
   records name a different copy as the one it loads. Otherwise it reports,
-  changes nothing and exits 1. A managed-pin heal that does not finish also
+  changes nothing and exits 1. When it only removed leftovers (no reinstall),
+  it says "Repair complete" only if every removal worked and the copy
+  OpenClaw selects is exactly the CLI's version; otherwise it prints the
+  install command and exits 1. A managed-pin heal that does not finish also
   makes the repair exit 1.
 - **What counts as done.** Only the copy OpenClaw selected, at exactly the
   CLI's version. The selected copy is the one OpenClaw's SQLite install index
@@ -241,8 +253,10 @@ where `<version>` is exactly this CLI's version.
   install is retried with the plain package name at the same exact version
   only when OpenClaw exited normally with an error and every line it wrote to
   stderr is that refusal (`unsupported npm spec: protocol specs are not
-  allowed`, and the `Also not a valid hook pack:` line it adds). Any other
-  line, a timeout or a killed process means no retry. The retry happens at
+  allowed`, and the `Also not a valid hook pack:` line it adds), and its
+  stdout is empty or the single `Downloading npm:@drakon-systems/shieldcortex-realtime@<version>…`
+  line those OpenClaw releases log on that path. Any other line on either
+  stream, a timeout or a killed process means no retry. The retry happens at
   most once per command run (not once per step), and nothing falls back to
   `clawhub:`.
 - **Development installs (`shieldcortex openclaw install` only).** When the
@@ -253,9 +267,11 @@ where `<version>` is exactly this CLI's version.
   `~/.openclaw/extensions/shieldcortex-realtime`. They run only when there is
   no `openclaw` to ask, or the npm attempt failed because the package could
   not be reached here (offline, DNS, not on npm, or an OpenClaw older than
-  `npm:`). They never run after an integrity, trust, provenance, policy,
-  consent or OpenClaw config refusal, after a timeout, or after a failure the
-  installer does not recognise. Both are checked against the CLI's version
+  `npm:`). They never run after the npm attempt hit an integrity, trust,
+  provenance, policy, consent or OpenClaw config refusal, a timeout, or a
+  failure the installer does not recognise. The local copy also does not run
+  when the `--link` attempt itself was refused for one of those reasons, timed
+  out or was killed. Both are checked against the CLI's version
   like any other install, and a mismatch exits 1.
 
 ### Gateway restart consent

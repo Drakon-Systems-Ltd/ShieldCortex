@@ -289,3 +289,70 @@ export function readSelectedRealtimePluginVersion(
   return { version: null, reason: `could not tell which copy OpenClaw selected — ${s.why}` };
 }
 
+
+// ── 3. Everything a forced replacement must know (#1109 round 3) ────────────
+
+type CopyRead =
+  | { state: 'absent' }
+  | { dir: string; state: 'ok'; version: string }
+  | { dir: string; state: 'unknown'; why: string };
+
+/**
+ * The version of a copy the caller is about to DELETE. Nothing there — or a
+ * directory with neither package.json nor openclaw.plugin.json (an
+ * interrupted copy, a half-reaped uninstall) — is `absent`: there is no build
+ * to lose. A file that exists but cannot be read, or carries no exact
+ * version, is `unknown`.
+ */
+function readDoomedCopy(dir: string): CopyRead {
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(dir);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { state: 'absent' };
+    return { dir, state: 'unknown', why: `cannot stat ${dir}: ${(err as Error).message}` };
+  }
+  if (!st.isDirectory()) return { state: 'absent' };
+  const pkg = readJsonObject(path.join(dir, 'package.json'));
+  const manifest = readJsonObject(path.join(dir, 'openclaw.plugin.json'));
+  if (pkg.state === 'missing' && manifest.state === 'missing') return { state: 'absent' };
+  const v = readPluginDirVersion(dir);
+  return v.state === 'ok' ? { dir, state: 'ok', version: v.version } : { dir, state: 'unknown', why: v.why };
+}
+
+export interface ReplacementEvidenceOptions extends SelectedReadOptions {
+  /** Copies the caller will delete before or as part of the install. */
+  deleting?: readonly string[];
+}
+
+/**
+ * What `assessRealtimeReplacement` needs before ANY forced install or
+ * deletion: the copy OpenClaw selected (not the highest version on disk — a
+ * stale npm project must not hide a newer selected extension or index-only
+ * install), whether it is linked, and the version of every copy the caller is
+ * about to delete.
+ */
+export function readRealtimeReplacementEvidence(
+  home: string,
+  options: ReplacementEvidenceOptions = {},
+): {
+  selected: SelectedRealtimeInstall;
+  linked: LinkedRealtimeInstall;
+  deleting: Array<{ dir: string; state: 'ok'; version: string } | { dir: string; state: 'unknown'; why: string }>;
+} {
+  const readIndex = options.readIndex ?? readPluginInstallIndexState;
+  // One index read for both answers, so they describe the same moment.
+  const index = readIndex(home);
+  const opts = { readIndex: () => index };
+  const deleting: Array<{ dir: string; state: 'ok'; version: string } | { dir: string; state: 'unknown'; why: string }> = [];
+  for (const dir of options.deleting ?? []) {
+    const c = readDoomedCopy(dir);
+    if (c.state !== 'absent') deleting.push(c);
+  }
+  return {
+    selected: readSelectedRealtimeInstall(home, opts),
+    linked: readLinkedRealtimeInstall(home, opts),
+    deleting,
+  };
+}
