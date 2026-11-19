@@ -22,7 +22,6 @@ import {
   exactPluginPin,
   isLegacyNpmProtocolRefusal,
   landedVersionVerdict,
-  readLinkedRealtimeInstall,
   realtimePluginInstallArgs,
   realtimePluginInstallCommand,
   realtimePluginInstallSpec,
@@ -102,34 +101,62 @@ describe('realtime plugin install spec — the one source of truth', () => {
 describe('isLegacyNpmProtocolRefusal — the ONLY output that earns a bare retry', () => {
   it('matches the pre-`npm:` refusal as an anchored stderr line, with or without the hook-pack echo', () => {
     expect(LEGACY_NPM_PROTOCOL_REFUSAL).toBe(PRE_NPM_PREFIX_REFUSAL);
-    expect(isLegacyNpmProtocolRefusal({ stderr: PRE_NPM_PREFIX_REFUSAL })).toBe(true);
-    expect(isLegacyNpmProtocolRefusal({ stderr: PRE_NPM_PREFIX_STDERR, stdout: '' })).toBe(true);
-    expect(isLegacyNpmProtocolRefusal({ stderr: `Error: ${PRE_NPM_PREFIX_REFUSAL}\n` })).toBe(true);
-    expect(isLegacyNpmProtocolRefusal({ stderr: `\u001b[31m${PRE_NPM_PREFIX_REFUSAL}\u001b[39m` })).toBe(true);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: PRE_NPM_PREFIX_REFUSAL })).toBe(true);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: PRE_NPM_PREFIX_STDERR, stdout: '' })).toBe(true);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: `Error: ${PRE_NPM_PREFIX_REFUSAL}\n` })).toBe(true);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: `\u001b[31m${PRE_NPM_PREFIX_REFUSAL}\u001b[39m` })).toBe(true);
   });
 
   it('NOT when the phrase is on stdout only', () => {
-    expect(isLegacyNpmProtocolRefusal({ stderr: '', stdout: PRE_NPM_PREFIX_REFUSAL })).toBe(false);
-    expect(isLegacyNpmProtocolRefusal({ stderr: 'exit 1', stdout: PRE_NPM_PREFIX_STDERR })).toBe(false);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: '', stdout: PRE_NPM_PREFIX_REFUSAL })).toBe(false);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: 'exit 1', stdout: PRE_NPM_PREFIX_STDERR })).toBe(false);
   });
 
   it('NOT when the phrase is quoted inside a longer stderr line', () => {
-    expect(isLegacyNpmProtocolRefusal({ stderr: `plugin said: "${PRE_NPM_PREFIX_REFUSAL}"` })).toBe(false);
-    expect(isLegacyNpmProtocolRefusal({ stderr: `warning: earlier run hit ${PRE_NPM_PREFIX_REFUSAL}` })).toBe(false);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: `plugin said: "${PRE_NPM_PREFIX_REFUSAL}"` })).toBe(false);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: `warning: earlier run hit ${PRE_NPM_PREFIX_REFUSAL}` })).toBe(false);
   });
 
   it.each(OTHER_FAILURES)('NOT when the refusal line comes with a %s failure (on stderr)', (_label, said) => {
-    expect(isLegacyNpmProtocolRefusal({ stderr: said })).toBe(false);
-    expect(isLegacyNpmProtocolRefusal({ stderr: `${PRE_NPM_PREFIX_REFUSAL}\n${said}` })).toBe(false);
-    expect(isLegacyNpmProtocolRefusal({ stderr: `${said}\n${PRE_NPM_PREFIX_STDERR}` })).toBe(false);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: said })).toBe(false);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: `${PRE_NPM_PREFIX_REFUSAL}\n${said}` })).toBe(false);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: `${said}\n${PRE_NPM_PREFIX_STDERR}` })).toBe(false);
   });
 
   it.each(OTHER_FAILURES)('NOT when the refusal line comes with a %s failure (on stdout)', (_label, said) => {
-    expect(isLegacyNpmProtocolRefusal({ stderr: PRE_NPM_PREFIX_STDERR, stdout: said })).toBe(false);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: PRE_NPM_PREFIX_STDERR, stdout: said })).toBe(false);
+  });
+
+  it('#1109 round 2 — ALLOWLIST: any stderr line that is not a known refusal form means no retry', () => {
+    for (const extra of [
+      'npm warn deprecated something@1.0.0',
+      'Error: EACCES: permission denied, mkdir \'/root/.openclaw/npm\'',
+      'TLS: unable to verify the first certificate',
+      'install failed',
+      `[plugins] ${PRE_NPM_PREFIX_REFUSAL}`,
+      'Also not a valid hook pack: package.json missing openclaw.hooks',
+    ]) {
+      expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: `${PRE_NPM_PREFIX_STDERR}\n${extra}` })).toBe(false);
+      expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: `${extra}\n${PRE_NPM_PREFIX_REFUSAL}` })).toBe(false);
+    }
+  });
+
+  it('#1109 round 2 — only a NORMAL non-zero exit: not a timeout, a signal, exit 0 or no exit code', () => {
+    expect(isLegacyNpmProtocolRefusal({ exitCode: null, timedOut: true, stderr: PRE_NPM_PREFIX_STDERR })).toBe(false);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, timedOut: true, stderr: PRE_NPM_PREFIX_STDERR })).toBe(false);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: null, signal: 'SIGTERM', stderr: PRE_NPM_PREFIX_STDERR })).toBe(false);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 0, stderr: PRE_NPM_PREFIX_STDERR })).toBe(false);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: null, stderr: PRE_NPM_PREFIX_STDERR })).toBe(false);
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: PRE_NPM_PREFIX_STDERR })).toBe(true);
+  });
+
+  it('the hook-pack echo alone (no plugin refusal line) is not the refusal', () => {
+    expect(isLegacyNpmProtocolRefusal({ exitCode: 1, stderr: `Also not a valid hook pack: ${PRE_NPM_PREFIX_REFUSAL}` })).toBe(false);
   });
 
   it('NOT when a different `unsupported npm spec` reason is in the output too', () => {
     expect(isLegacyNpmProtocolRefusal({
+      exitCode: 1,
       stderr: `${PRE_NPM_PREFIX_REFUSAL}\nunsupported npm spec: use an exact version or dist-tag (ranges are not allowed)`,
     })).toBe(false);
   });
@@ -137,7 +164,7 @@ describe('isLegacyNpmProtocolRefusal — the ONLY output that earns a bare retry
 
 describe('runWithNpmSourceFallbackSync + BareRetryBudget', () => {
   type R = { status: number; stderr: string; stdout?: string };
-  const failureOf = (r: R) => (r.status === 0 ? null : { stderr: r.stderr, stdout: r.stdout ?? '' });
+  const failureOf = (r: R) => (r.status === 0 ? null : { stderr: r.stderr, stdout: r.stdout ?? '', exitCode: r.status });
 
   it('runs the npm: spec once when it succeeds', () => {
     const calls: string[][] = [];
@@ -191,6 +218,18 @@ describe('runWithNpmSourceFallbackSync + BareRetryBudget', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('#1109 round 2: does NOT retry a timed-out child, even with the refusal on stderr', () => {
+    const calls: string[][] = [];
+    const res = runWithNpmSourceFallbackSync(
+      realtimePluginInstallArgs('5.20.2'),
+      (a) => { calls.push(a); return { status: 1, stderr: PRE_NPM_PREFIX_STDERR }; },
+      (r) => (r.status === 0 ? null : { stderr: r.stderr, exitCode: null, timedOut: true }),
+      new BareRetryBudget(),
+    );
+    expect(calls).toHaveLength(1);
+    expect(res.fellBack).toBe(false);
+  });
+
   it('does not retry a command that carries no exact npm: realtime spec', () => {
     const calls: string[][] = [];
     runWithNpmSourceFallbackSync(['plugins', 'update', REALTIME_PLUGIN_PACKAGE], (a) => { calls.push(a); return { status: 1, stderr: PRE_NPM_PREFIX_REFUSAL }; }, failureOf, new BareRetryBudget());
@@ -198,45 +237,25 @@ describe('runWithNpmSourceFallbackSync + BareRetryBudget', () => {
   });
 });
 
-describe('never clobber a deliberate or newer install', () => {
-  let home: string;
-  beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), 'sc-npm-keep-'));
-    mkdirSync(join(home, '.openclaw', 'plugins'), { recursive: true });
-  });
-  afterEach(() => rmSync(home, { recursive: true, force: true }));
-  const writeJson = (rel: string, v: unknown) => writeFileSync(join(home, '.openclaw', rel), JSON.stringify(v));
-
-  it('a plugins.load.paths entry is a linked install', () => {
-    writeJson('openclaw.json', { plugins: { load: { paths: ['/src/ShieldCortex/plugins/openclaw/shieldcortex-realtime'] } } });
-    expect(readLinkedRealtimeInstall(home)).toBe('/src/ShieldCortex/plugins/openclaw/shieldcortex-realtime');
-  });
-
-  it('a `source: "path"` install record (installs.json or openclaw.json) is a linked install', () => {
-    writeJson('plugins/installs.json', { installRecords: { 'shieldcortex-realtime': { source: 'path', sourcePath: '/dev/sc-plugin' } } });
-    expect(readLinkedRealtimeInstall(home)).toBe('/dev/sc-plugin');
-    rmSync(join(home, '.openclaw', 'plugins', 'installs.json'));
-    writeJson('openclaw.json', { plugins: { installs: { 'shieldcortex-realtime': { source: 'path', installPath: '/dev/other' } } } });
-    expect(readLinkedRealtimeInstall(home)).toBe('/dev/other');
-  });
-
-  it.each(['npm', 'clawhub', undefined])('a `%s` install record is not linked — it is replaceable', (source) => {
-    writeJson('plugins/installs.json', { installRecords: { 'shieldcortex-realtime': { source, installPath: '/x' } } });
-    expect(readLinkedRealtimeInstall(home)).toBeNull();
-  });
-
-  it('keeps linked and newer installs, replaces equal, older and absent ones', () => {
-    expect(assessRealtimeReplacement({ version: '5.20.2', linkedAt: '/dev/sc' }, '5.20.2')).toMatchObject({ replace: false, why: 'linked' });
-    expect(assessRealtimeReplacement({ version: '5.21.0', linkedAt: null }, '5.20.2')).toMatchObject({ replace: false, why: 'newer' });
-    expect(assessRealtimeReplacement({ version: '5.20.2', linkedAt: null }, '5.20.2')).toEqual({ replace: true });
-    expect(assessRealtimeReplacement({ version: '5.17.3', linkedAt: null }, '5.20.2')).toEqual({ replace: true });
-    expect(assessRealtimeReplacement({ version: null, linkedAt: null }, '5.20.2')).toEqual({ replace: true });
+describe('never clobber a deliberate, newer or unreadable install', () => {
+  const absent = { state: 'absent' as const };
+  it('keeps linked, newer and could-not-tell installs; replaces equal, older and absent ones', () => {
+    expect(assessRealtimeReplacement({ version: '5.20.2', linked: { state: 'linked', at: '/dev/sc' } }, '5.20.2')).toMatchObject({ replace: false, why: 'linked' });
+    expect(assessRealtimeReplacement({ version: '5.21.0', linked: absent }, '5.20.2')).toMatchObject({ replace: false, why: 'newer' });
+    expect(assessRealtimeReplacement({ version: '5.17.3', linked: { state: 'unknown', why: 'openclaw.json is not strict JSON' } }, '5.20.2'))
+      .toMatchObject({ replace: false, why: 'unknown', summary: expect.stringContaining('could not tell whether the plugin is a linked install') });
+    expect(assessRealtimeReplacement({ version: '5.20.2', linked: absent }, '5.20.2')).toEqual({ replace: true });
+    expect(assessRealtimeReplacement({ version: '5.17.3', linked: absent }, '5.20.2')).toEqual({ replace: true });
+    expect(assessRealtimeReplacement({ version: null, linked: absent }, '5.20.2')).toEqual({ replace: true });
   });
 });
 
 describe('landedVersionVerdict — only the pin is success', () => {
   it('equal is ok; older, newer and unreadable are not', () => {
     expect(landedVersionVerdict('5.20.2', '5.20.2')).toEqual({ ok: true, version: '5.20.2' });
+    expect(landedVersionVerdict({ version: '5.20.2' }, '5.20.2')).toEqual({ ok: true, version: '5.20.2' });
+    expect(landedVersionVerdict({ version: null, reason: 'could not tell which copy OpenClaw selected — x' }, '5.20.2'))
+      .toMatchObject({ ok: false, version: null, summary: 'could not tell which copy OpenClaw selected — x — expected v5.20.2' });
     expect(landedVersionVerdict('5.17.3', '5.20.2')).toMatchObject({ ok: false, version: '5.17.3', summary: 'the plugin is on v5.17.3, CLI is v5.20.2' });
     expect(landedVersionVerdict('5.21.0', '5.20.2')).toMatchObject({ ok: false, version: '5.21.0' });
     expect(landedVersionVerdict(null, '5.20.2')).toMatchObject({ ok: false, version: null });
@@ -316,7 +335,9 @@ describe('`shieldcortex update` plugin step', () => {
       if (cmd === 'npm') {
         const asked = args[1].slice(args[1].lastIndexOf('@') + 1);
         const published = opts.published === undefined ? asked : opts.published;
-        return published === null ? Promise.reject(childFailure('npm error code E404')) : Promise.resolve({ stdout: `${published}\n`, stderr: '' });
+        // `npm view … version --json`: a JSON string, or nothing for a missing version.
+        return published === null ? Promise.reject(childFailure('npm error code E404'))
+          : Promise.resolve({ stdout: published === '' ? '' : `${JSON.stringify(published)}\n`, stderr: '' });
       }
       if (args[1] === 'list') {
         return opts.listed
@@ -355,7 +376,7 @@ describe('`shieldcortex update` plugin step', () => {
   it('asks npm for EXACTLY the pin before anything destructive', async () => {
     const f = scripted([null]);
     await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: versions('5.17.3', CLI), readCliVersion: () => CLI });
-    expect(f.calls[0]).toEqual({ cmd: 'npm', args: ['view', `${REALTIME_PLUGIN_PACKAGE}@${CLI}`, 'version'] });
+    expect(f.calls[0]).toEqual({ cmd: 'npm', args: ['view', `${REALTIME_PLUGIN_PACKAGE}@${CLI}`, 'version', '--json'] });
   });
 
   it('a host that predates `npm:` gets ONE bare exact retry, and it lands', async () => {
@@ -519,7 +540,7 @@ describe('`shieldcortex update` plugin step', () => {
       run: f.run,
       readPluginVersion: () => '5.20.1',
       readCliVersion: () => CLI,
-      readLinkedInstall: () => '/src/ShieldCortex/plugins/openclaw',
+      readLinkedInstall: () => ({ state: 'linked', at: '/src/ShieldCortex/plugins/openclaw' }),
     });
     expect(f.calls).toEqual([]);
     expect(r.summary).toMatch(/left alone — the plugin is a linked install/);
@@ -529,17 +550,75 @@ describe('`shieldcortex update` plugin step', () => {
 
   it('a linked install AT the pin is ok, and still not replaced', async () => {
     const f = scripted([null]);
-    const r = await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => CLI, readCliVersion: () => CLI, readLinkedInstall: () => '/dev/sc' });
+    const r = await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => CLI, readCliVersion: () => CLI, readLinkedInstall: () => ({ state: 'linked', at: '/dev/sc' }) });
     expect(f.calls).toEqual([]);
     expect(r.status).toBe('ok');
     expect(r.unfinished).toBeUndefined();
   });
 
-  it('a linked install found from OpenClaw\'s own files (plugins.load.paths) is preserved by default', async () => {
-    writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { load: { paths: ['/dev/shieldcortex-realtime'] } } }));
+  it('#1109 round 2: a link to a checkout\'s plugins/openclaw (no plugin id in the path) is found from what is AT the path', async () => {
+    const checkout = join(home, 'src', 'ShieldCortex', 'plugins', 'openclaw');
+    mkdirSync(checkout, { recursive: true });
+    writeFileSync(join(checkout, 'package.json'), JSON.stringify({ name: REALTIME_PLUGIN_PACKAGE, version: '5.20.1' }));
+    writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { load: { paths: [checkout] } } }));
     const f = scripted([null]);
-    await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => '5.20.1', readCliVersion: () => CLI });
+    const r = await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => '5.20.1', readCliVersion: () => CLI });
+    expect(f.calls).toEqual([]);
+    expect(r.summary).toBe(`left alone — the plugin is a linked install (v5.20.1) at ${checkout}`);
+    expect(r.unfinished).toBe(true);
+  });
+
+  it('#1109 round 2: an openclaw.json that cannot be parsed is "could not tell" — nothing is forced in', async () => {
+    writeFileSync(join(home, '.openclaw', 'openclaw.json'), '{ plugins: { load: { paths: [ /* json5 */ ] } } }');
+    const f = scripted([null]);
+    const r = await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => '5.20.1', readCliVersion: () => CLI });
+    expect(f.calls).toEqual([]);
+    expect(r.summary).toMatch(/could not tell whether the plugin is a linked install .*not strict JSON/);
+    expect((r.detail ?? []).join('\n')).toContain(NPM_CMD);
+    expect(r.unfinished).toBe(true);
+    expect(exitCodeOf(r)).toBe(1);
+  });
+
+  it('#1109 round 2: a timed-out install whose stderr is the legacy refusal gets no bare retry', async () => {
+    const f = scripted([null]);
+    const run = ((cmd: string, args: string[], o: unknown) => (cmd === 'openclaw' && args[1] === 'install'
+      ? (f.calls.push({ cmd, args }), Promise.reject(childFailure(PRE_NPM_PREFIX_STDERR, { timedOut: true, exitCode: null })))
+      : (f.run as unknown as (c: string, a: string[], o: unknown) => Promise<unknown>)(cmd, args, o))) as never;
+    const r = await stepOpenClawPlugin(home, { run, readPluginVersion: () => '5.20.1', readCliVersion: () => CLI });
+    expect(f.installs()).toEqual([NPM_ARGS]);
+    expect(r.unfinished).toBe(true);
+  });
+
+  it('#1109 round 2: a signal-killed install whose stderr is the legacy refusal gets no bare retry', async () => {
+    const f = scripted([null]);
+    const run = ((cmd: string, args: string[], o: unknown) => (cmd === 'openclaw' && args[1] === 'install'
+      ? (f.calls.push({ cmd, args }), Promise.reject(childFailure(PRE_NPM_PREFIX_STDERR, { exitCode: null, signal: 'SIGKILL' })))
+      : (f.run as unknown as (c: string, a: string[], o: unknown) => Promise<unknown>)(cmd, args, o))) as never;
+    const r = await stepOpenClawPlugin(home, { run, readPluginVersion: () => '5.20.1', readCliVersion: () => CLI });
+    expect(f.installs()).toEqual([NPM_ARGS]);
+    expect(r.unfinished).toBe(true);
+  });
+
+  it('#1109 round 2: an unknown extra stderr line next to the refusal gets no bare retry', async () => {
+    const f = scripted([`${PRE_NPM_PREFIX_STDERR}\nnpm warn something unexpected`]);
+    const r = await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => '5.20.1', readCliVersion: () => CLI });
+    expect(f.installs()).toEqual([NPM_ARGS]);
+    expect(r.unfinished).toBe(true);
+  });
+
+  it.each([
+    ['text, not JSON', 'npm notice something\n"5.20.2"'],
+    ['a different version', '"5.20.1"'],
+    ['two versions', '["5.20.2","5.20.3"]'],
+  ])('#1109 round 2: npm view answering %s is not "published"', async (_label, stdout) => {
+    const f = scripted([null]);
+    const run = ((cmd: string, args: string[], o: unknown) => (cmd === 'npm'
+      ? (f.calls.push({ cmd, args }), Promise.resolve({ stdout, stderr: '' }))
+      : (f.run as unknown as (c: string, a: string[], o: unknown) => Promise<unknown>)(cmd, args, o))) as never;
+    const r = await stepOpenClawPlugin(home, { run, readPluginVersion: () => '5.20.1', readCliVersion: () => CLI });
     expect(f.installs()).toEqual([]);
+    expect(r.summary).toMatch(/^not updated — /);
+    expect(r.unfinished).toBe(true);
   });
 
   it('a NEWER plugin is never downgraded — e.g. when the core npm step failed and the pin is the old CLI', async () => {
@@ -561,6 +640,40 @@ describe('`shieldcortex update` plugin step', () => {
     const r = await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: versions('5.17.3', CLI), readCliVersion: () => CLI, coreUpdate: 'failed' });
     expect(r.status).toBe('ok');
     expect((r.detail ?? []).join('\n')).toMatch(/CLI itself was not updated .*v5\.20\.2/);
+  });
+
+  it('#1109 round 2 — two installs: a leftover at the pin + the SELECTED older copy is NOT success (real files, default readers)', async () => {
+    const project = (name: string, version: string): string => {
+      const dir = join(home, '.openclaw', 'npm', 'projects', name, 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: REALTIME_PLUGIN_PACKAGE, version }));
+      return dir;
+    };
+    project('drakon-systems-shieldcortex-realtime-leftover', CLI);
+    const selected = project('drakon-systems-shieldcortex-realtime-live', '5.17.3');
+    // No SQLite index on this host: installs.json's record is what OpenClaw loads.
+    writeFileSync(join(home, '.openclaw', 'plugins', 'installs.json'),
+      JSON.stringify({ installRecords: { 'shieldcortex-realtime': { source: 'npm', installPath: selected } } }));
+    const f = scripted([null]);
+    const r = await stepOpenClawPlugin(home, { run: f.run, readCliVersion: () => CLI });
+    expect(f.installs()).toEqual([NPM_ARGS]);
+    expect(r.status).toBe('warn');
+    expect(r.summary).toContain(`the plugin is on v5.17.3, CLI is v${CLI}`);
+    expect(r.unfinished).toBe(true);
+    expect(exitCodeOf(r)).toBe(1);
+  });
+
+  it('#1109 round 2 — the selected copy cannot be told: not success', async () => {
+    const f = scripted([null]);
+    const r = await stepOpenClawPlugin(home, {
+      run: f.run,
+      readPluginVersion: () => '5.20.1',
+      readCliVersion: () => CLI,
+      readLandedVersion: () => ({ version: null, reason: 'could not tell which copy OpenClaw selected — two copies' }),
+    });
+    expect(r.summary).toMatch(/could not confirm the installed version — could not tell which copy OpenClaw selected/);
+    expect(r.unfinished).toBe(true);
+    expect(exitCodeOf(r)).toBe(1);
   });
 
   it('confirmPublished is injectable and its refusal reason is shown', async () => {

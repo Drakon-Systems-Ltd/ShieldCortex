@@ -19,31 +19,31 @@
  *  2. ONE BARE RETRY PER OPERATION, ONLY ON THE LEGACY REFUSAL. OpenClaw hosts
  *     older than the `npm:` prefix (it landed in 2026.4.26) refuse it before
  *     installing anything, printing `unsupported npm spec: protocol specs are
- *     not allowed` on stderr. That exact line on stderr, with no other failure
- *     marker anywhere in the output, earns ONE retry with the bare spec at the
- *     same exact version — one per top-level operation (an `update` run, an
- *     `openclaw install`, a reconcile run across all its passes), tracked by a
- *     `BareRetryBudget`. Anything else (integrity, trust, policy, consent,
- *     secret reference, network, 404, or output that merely quotes the phrase)
- *     is surfaced as is. Nothing ever falls back to `clawhub:`.
+ *     not allowed` on stderr. The retry is an ALLOWLIST: the child exited on
+ *     its own (no timeout, no signal) with a non-zero code, and every
+ *     non-blank stderr line is one of that refusal's known forms. Any other
+ *     line, on stderr or a failure word on stdout, means no retry. That earns
+ *     ONE retry with the bare spec at the same exact version — one per
+ *     top-level operation (an `update` run, an `openclaw install`, a reconcile
+ *     run across all its passes), tracked by a `BareRetryBudget`. Nothing ever
+ *     falls back to `clawhub:`.
  *  3. NEVER CLOBBER A DELIBERATE OR NEWER INSTALL. Before a forced install,
- *     `assessRealtimeReplacement` keeps a linked/path install and any install
- *     newer than the pin, and the caller prints the command instead.
- *  4. VERIFY AGAINST THE PIN. `landedVersionVerdict` compares what is on disk
- *     after the install with the pin captured BEFORE it; older and newer are
- *     both "not the pinned build".
+ *     `assessRealtimeReplacement` keeps a linked/path install, any install
+ *     newer than the pin, and — when OpenClaw's records could not be read —
+ *     whatever is there; the caller prints the command instead.
+ *  4. VERIFY AGAINST THE PIN. `landedVersionVerdict` compares the copy OpenClaw
+ *     SELECTED (see `readSelectedRealtimeInstall`) with the pin captured
+ *     BEFORE the install; older, newer and "could not tell which copy" are all
+ *     "not the pinned build".
  *
  * `--force` is always passed: since OpenClaw 2026.7 a non-ClawHub source
  * installed without a terminal is cancelled unless `--force` confirms it, and
  * `--force` also overwrites an existing npm/ClawHub install (rule 3 is what
  * keeps that from reaching a linked or newer one).
  */
-import fs from 'fs';
-import path from 'path';
 import semver from 'semver';
 
 export const REALTIME_PLUGIN_PACKAGE = '@drakon-systems/shieldcortex-realtime';
-const REALTIME_PLUGIN_ID = 'shieldcortex-realtime';
 
 /** `npm:` forces npm; `bare` is only for hosts that predate that prefix. */
 export type RealtimePluginSpecSource = 'npm' | 'bare';
@@ -93,49 +93,105 @@ export const LEGACY_NPM_PROTOCOL_REFUSAL = 'unsupported npm spec: protocol specs
 const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
 
 /**
- * The line shapes that refusal takes on stderr: the plugin installer's own
- * line, optionally `Error:`-prefixed, and the hook-pack fallback's echo of the
- * same validator (`Also not a valid hook pack: <same text>`). Anchored: the
- * line is the refusal, nothing more.
+ * The ONLY stderr lines a legacy refusal is made of (OpenClaw <= 2026.4.25,
+ * src/cli/plugins-install-command.ts + plugins-command-helpers.ts at
+ * cb9955dd5c~1): the npm installer's error through `defaultRuntime.error`
+ * (console.error), followed — because the plugin installer failed — by
+ * `formatPluginInstallWithHookFallbackError`'s second line, `Also not a valid
+ * hook pack: <the hook-pack installer's error>`, which is the same validator's
+ * text. An optional `Error:` prefix covers a runtime that prints the Error
+ * object. Anchored: the line is the refusal and nothing more. OpenClaw's
+ * banner is written to stdout and only on a TTY (src/cli/banner.ts), so there
+ * is no banner line to allow on stderr.
  */
-const REFUSAL_LINE = /^(?:error:\s*)?unsupported npm spec: protocol specs are not allowed\.?$/i;
-const HOOK_PACK_ECHO_LINE = /^also not a valid hook pack:\s*unsupported npm spec: protocol specs are not allowed\.?$/i;
+const ALLOWED_REFUSAL_LINES: readonly RegExp[] = [
+  /^(?:error:\s*)?unsupported npm spec: protocol specs are not allowed\.?$/i,
+  /^also not a valid hook pack:\s*unsupported npm spec: protocol specs are not allowed\.?$/i,
+];
 
 /**
- * Any of these anywhere in the child's output means something other than (or
- * as well as) the legacy refusal happened — a mixed or ambiguous failure,
- * which is surfaced, never retried.
+ * A failure word on STDOUT means more happened than the refusal (stdout is not
+ * where the refusal goes, so it is not allowlisted line by line — but it must
+ * not carry another failure either).
  */
-const OTHER_FAILURE_MARKER = new RegExp([
-  'integrity', 'checksum', 'trust', 'provenance', 'signature',
+const STDOUT_FAILURE_MARKER = new RegExp([
+  'unsupported npm spec', 'error', 'fail', 'integrity', 'checksum', 'trust', 'provenance', 'signature',
   'polic(?:y|ies)', 'consent', 'cancell?ed', 'denied', 'forbidden', 'blocked', 'refus',
-  'secret ?ref', 'secret reference', 'gateway\\.auth',
-  'network', 'econn', 'enotfound', 'eai_again', 'etimedout', 'socket', 'fetch failed', 'timed? ?out',
-  '\\b40[0-9]\\b', 'e404', 'not found', 'unauthori[sz]ed',
-  'config is invalid', 'already exists', 'clawhub',
+  'secret ?ref', 'gateway\\.auth', 'network', 'econn', 'enotfound', 'eai_again', 'etimedout',
+  'socket', 'timed? ?out', '\\b40[0-9]\\b', 'e404', 'not found', 'unauthori[sz]ed', 'invalid', 'clawhub',
 ].join('|'), 'i');
 
 function lines(text: string | null | undefined): string[] {
   return (text ?? '').replace(ANSI, '').split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
 }
 
+/** How the install child ended, as far as the retry decision needs to know. */
+export interface InstallChildOutcome {
+  stderr?: string | null;
+  stdout?: string | null;
+  /** The child's own exit code; null when it did not exit normally. */
+  exitCode: number | null;
+  /** Killed by this process's deadline. */
+  timedOut?: boolean;
+  /** Killed by a signal. */
+  signal?: string | null;
+}
+
 /**
  * True only when OpenClaw refused the `npm:` source itself because it predates
- * the prefix: the refusal is an anchored line on STDERR (never stdout, never a
- * report this process wrote), and no other line — on either stream — carries
- * a failure marker or a different `unsupported npm spec` reason.
+ * the prefix: the child exited normally with a non-zero code (not timed out,
+ * not signalled), its stderr carries the anchored refusal line, EVERY
+ * non-blank stderr line is one of the allowlisted refusal forms, and stdout
+ * carries no failure word. Anything unrecognised is not a legacy refusal.
  */
-export function isLegacyNpmProtocolRefusal(output: { stderr?: string | null; stdout?: string | null }): boolean {
-  const err = lines(output.stderr);
-  if (!err.some((l) => REFUSAL_LINE.test(l))) return false;
-  for (const l of err) {
-    if (REFUSAL_LINE.test(l) || HOOK_PACK_ECHO_LINE.test(l)) continue;
-    if (/unsupported npm spec/i.test(l) || OTHER_FAILURE_MARKER.test(l)) return false;
-  }
-  for (const l of lines(output.stdout)) {
-    if (/unsupported npm spec/i.test(l) || OTHER_FAILURE_MARKER.test(l)) return false;
-  }
-  return true;
+export function isLegacyNpmProtocolRefusal(outcome: InstallChildOutcome): boolean {
+  if (outcome.timedOut || outcome.signal) return false;
+  if (typeof outcome.exitCode !== 'number' || outcome.exitCode === 0) return false;
+  const err = lines(outcome.stderr);
+  if (!err.some((l) => ALLOWED_REFUSAL_LINES[0].test(l))) return false;
+  if (!err.every((l) => ALLOWED_REFUSAL_LINES.some((re) => re.test(l)))) return false;
+  return !lines(outcome.stdout).some((l) => STDOUT_FAILURE_MARKER.test(l));
+}
+
+/**
+ * Why the `npm:` package install did not happen, for one decision only (#1109
+ * round 2): may `shieldcortex openclaw install` fall back to its development
+ * installs (`--link` to the checkout's plugins/openclaw, or a local copy)?
+ *
+ *  - `refused`: OpenClaw or npm said no on purpose — integrity, trust,
+ *    provenance, signature, policy, consent, a cancelled install, a security
+ *    scan, an invalid or missing config. Never worked around.
+ *  - `unavailable`: the package could not be had here — offline/DNS/connection
+ *    failures, 404/no matching version, or a host older than the `npm:` prefix
+ *    (its refusal). The development fallbacks are for exactly this.
+ *  - `other`: anything else, including a timeout (the child may still land,
+ *    #604) or a signal. Treated like `refused`: nothing is worked around.
+ *
+ * A refusal word anywhere outranks an unavailability word.
+ */
+export type NpmInstallFailureClass = 'refused' | 'unavailable' | 'other';
+
+const REFUSED_MARKER = new RegExp([
+  'integrity', 'checksum', 'trust', 'provenance', 'signature', 'polic(?:y|ies)', 'consent',
+  'cancell?ed', 'denied', 'forbidden', 'blocked', 'refus', 'security', 'dangerous', 'unsafe',
+  'secret ?ref', 'gateway\\.auth', 'config is invalid', 'invalid config', 'no(?: openclaw)? config',
+  'config(?:uration)?[^\\r\\n]{0,80}(?:not found|does not exist)', 'openclaw\\.json',
+  'unauthori[sz]ed', '\\b40[13]\\b', 'eacces', 'eperm',
+].join('|'), 'i');
+
+const UNAVAILABLE_MARKER = new RegExp([
+  'enotfound', 'eai_again', 'econnrefused', 'econnreset', 'enetunreach', 'ehostunreach', 'etimedout',
+  'fetch failed', 'network', 'offline', 'getaddrinfo', 'socket hang up',
+  'e404', '\\b404\\b', 'not found', 'notarget', 'no matching version', 'is not in this registry',
+].join('|'), 'i');
+
+export function classifyNpmInstallFailure(outcome: InstallChildOutcome): NpmInstallFailureClass {
+  if (outcome.timedOut || outcome.signal || typeof outcome.exitCode !== 'number') return 'other';
+  if (isLegacyNpmProtocolRefusal(outcome)) return 'unavailable';
+  const all = [...lines(outcome.stderr), ...lines(outcome.stdout)];
+  if (all.some((l) => REFUSED_MARKER.test(l))) return 'refused';
+  if (all.some((l) => UNAVAILABLE_MARKER.test(l))) return 'unavailable';
+  return 'other';
 }
 
 /**
@@ -174,12 +230,13 @@ export function bareFallbackArgs(args: readonly string[]): string[] | null {
  * Run a synchronous install, retrying ONCE with the bare spec when — and only
  * when — the host refused the `npm:` source (see `isLegacyNpmProtocolRefusal`)
  * and the operation's budget still has its one bare run. `failureOf` returns
- * the failed child's stderr/stdout, or null when it succeeded.
+ * how the failed child ended (streams, exit code, timeout/signal), or null
+ * when it succeeded.
  */
 export function runWithNpmSourceFallbackSync<R>(
   args: readonly string[],
   run: (args: string[]) => R,
-  failureOf: (r: R) => { stderr?: string | null; stdout?: string | null } | null,
+  failureOf: (r: R) => InstallChildOutcome | null,
   budget: BareRetryBudget,
 ): { result: R; args: string[]; fellBack: boolean } {
   const first = run([...args]);
@@ -189,71 +246,70 @@ export function runWithNpmSourceFallbackSync<R>(
   return { result: run(bare), args: bare, fellBack: true };
 }
 
+// ── Is the pin on npm? ─────────────────────────────────────────────────────
+
+/**
+ * Strictly parse `npm view <pkg>@<spec> version --json`: empty output (no such
+ * version), one JSON string, or a JSON array of strings. Anything else —
+ * including text around the JSON — is unparseable, never "published".
+ */
+export function parseNpmViewVersion(stdout: string): { state: 'versions'; versions: string[] } | { state: 'unparseable' } {
+  const text = stdout.trim();
+  if (text === '') return { state: 'versions', versions: [] };
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch {
+    return { state: 'unparseable' };
+  }
+  if (typeof v === 'string') return { state: 'versions', versions: [v] };
+  if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return { state: 'versions', versions: v as string[] };
+  return { state: 'unparseable' };
+}
+
 // ── Never clobber a deliberate or newer install ─────────────────────────────
 
 /** What is installed now, as far as the replacement decision needs to know. */
 export interface ExistingRealtimeInstall {
   /** The installed version, or null when none is installed / readable. */
   version: string | null;
-  /** Where a linked/path install lives (load.paths entry or a `path` install record), else null. */
-  linkedAt: string | null;
+  /**
+   * Whether it is a linked/path install (`readLinkedRealtimeInstall`):
+   * `unknown` when OpenClaw's records could not be read.
+   */
+  linked:
+    | { state: 'linked'; at: string }
+    | { state: 'absent' }
+    | { state: 'unknown'; why: string };
 }
 
 export type ReplacementDecision =
   | { replace: true }
-  | { replace: false; why: 'linked'; summary: string }
-  | { replace: false; why: 'newer'; summary: string };
+  | { replace: false; why: 'linked' | 'newer' | 'unknown'; summary: string };
 
 /**
  * May a forced install of `pin` replace what is there? Not a linked/path
- * install (someone pointed OpenClaw at a checkout on purpose), and not an
- * install newer than the pin (that would be a downgrade).
+ * install (someone pointed OpenClaw at a checkout on purpose), not an install
+ * newer than the pin (that would be a downgrade), and not when OpenClaw's
+ * records could not be read (we cannot tell whether it is linked).
  */
 export function assessRealtimeReplacement(existing: ExistingRealtimeInstall, pin: string): ReplacementDecision {
   const at = existing.version ? ` (v${existing.version})` : '';
-  if (existing.linkedAt) {
-    return { replace: false, why: 'linked', summary: `left alone — the plugin is a linked install${at} at ${existing.linkedAt}` };
+  if (existing.linked.state === 'linked') {
+    return { replace: false, why: 'linked', summary: `left alone — the plugin is a linked install${at} at ${existing.linked.at}` };
   }
   const v = exactPluginPin(existing.version);
   if (v && semver.gt(v, pin)) {
     return { replace: false, why: 'newer', summary: `left alone — the plugin is on v${v}, newer than this CLI (v${pin})` };
   }
+  if (existing.linked.state === 'unknown') {
+    return {
+      replace: false,
+      why: 'unknown',
+      summary: `left alone — could not tell whether the plugin is a linked install (${existing.linked.why})`,
+    };
+  }
   return { replace: true };
-}
-
-/**
- * Where a linked/path realtime install is registered, from OpenClaw's own
- * files under `home`: a `plugins.load.paths` entry naming the plugin, or an
- * install record whose source is a local path (`openclaw plugins install
- * --link` / `<dir>` record `source: "path"`). Null when neither exists or the
- * files cannot be read — an unreadable file is not evidence of a link.
- */
-export function readLinkedRealtimeInstall(home: string): string | null {
-  const readJson = (p: string): Record<string, unknown> | null => {
-    try {
-      const v = JSON.parse(fs.readFileSync(p, 'utf-8')) as unknown;
-      return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-    } catch {
-      return null;
-    }
-  };
-  const isPathRecord = (rec: unknown): string | null => {
-    if (!rec || typeof rec !== 'object') return null;
-    const r = rec as { source?: unknown; sourcePath?: unknown; installPath?: unknown };
-    if (r.source !== 'path') return null;
-    const where = typeof r.sourcePath === 'string' ? r.sourcePath : typeof r.installPath === 'string' ? r.installPath : 'a local path';
-    return where;
-  };
-  const config = readJson(path.join(home, '.openclaw', 'openclaw.json'));
-  const plugins = (config?.plugins ?? null) as { load?: { paths?: unknown }; installs?: Record<string, unknown> } | null;
-  const loadPaths = Array.isArray(plugins?.load?.paths) ? plugins!.load!.paths as unknown[] : [];
-  const linked = loadPaths.find((p) => typeof p === 'string' && p.includes(REALTIME_PLUGIN_ID));
-  if (typeof linked === 'string') return linked;
-  const legacyRecord = isPathRecord(plugins?.installs?.[REALTIME_PLUGIN_ID]);
-  if (legacyRecord) return legacyRecord;
-  const registry = readJson(path.join(home, '.openclaw', 'plugins', 'installs.json')) as
-    { installRecords?: Record<string, unknown> } | null;
-  return isPathRecord(registry?.installRecords?.[REALTIME_PLUGIN_ID]);
 }
 
 // ── Verify what landed ──────────────────────────────────────────────────────
@@ -263,10 +319,21 @@ export type LandedVerdict =
   | { ok: false; version: string | null; summary: string };
 
 /**
- * Compare what is on disk after an install with the pin captured BEFORE it.
- * Only the pinned build is success; older, newer and unreadable are not.
+ * Compare the copy OpenClaw selected after an install with the pin captured
+ * BEFORE it. Only the pinned build is success; older, newer, unreadable and
+ * "could not tell which copy" are not. `landed` is a version string, or the
+ * `{ version, reason }` read of the selected copy.
  */
-export function landedVersionVerdict(landed: string | null | undefined, pin: string): LandedVerdict {
+export function landedVersionVerdict(
+  landed: string | null | undefined | { version: string | null; reason?: string },
+  pin: string,
+): LandedVerdict {
+  if (landed && typeof landed === 'object') {
+    if (landed.version === null) {
+      return { ok: false, version: null, summary: `${landed.reason ?? 'installed version unreadable'} — expected v${pin}` };
+    }
+    return landedVersionVerdict(landed.version, pin);
+  }
   const v = exactPluginPin(landed);
   if (!v) return { ok: false, version: null, summary: `installed version unreadable — expected v${pin}` };
   if (semver.eq(v, pin)) return { ok: true, version: v };

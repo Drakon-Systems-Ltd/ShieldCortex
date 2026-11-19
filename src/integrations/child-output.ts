@@ -39,6 +39,8 @@ export interface CapturedError extends Error {
   stderr?: string;
   exitCode?: number | null;
   timedOut?: boolean;
+  /** The signal that ended the child, when it did not exit on its own (and was not timed out). */
+  signal?: string | null;
   spawnFailed?: boolean;
   command?: string;
   /** Node's spawn errno (ENOENT, EACCES, …). */

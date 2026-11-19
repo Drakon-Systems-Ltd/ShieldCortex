@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execSync, spawnSync } from 'child_process';
+import semver from 'semver';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { gatewayRestartAdvice, gatewayBootLogAdvice } from './gateway-restart-command.js';
 import { nextCausalSeq } from './causal-seq.js';
@@ -43,13 +44,20 @@ import {
   BareRetryBudget,
   REALTIME_PLUGIN_PACKAGE,
   assessRealtimeReplacement,
+  classifyNpmInstallFailure,
   exactPluginPin,
   landedVersionVerdict,
-  readLinkedRealtimeInstall,
   realtimePluginInstallArgs,
   realtimePluginInstallCommand,
   runWithNpmSourceFallbackSync,
+  parseNpmViewVersion,
+  type InstallChildOutcome,
 } from './openclaw-plugin-spec.js';
+import {
+  readLinkedRealtimeInstall,
+  readSelectedRealtimeInstall,
+  readSelectedRealtimePluginVersion,
+} from '../integrations/openclaw-realtime-install.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1209,6 +1217,8 @@ type NativeSpawnResult = {
   status: number | null;
   stdout?: string | Buffer | null;
   stderr?: string | Buffer | null;
+  signal?: string | null;
+  error?: NodeJS.ErrnoException;
 };
 type NativeSpawnFn = (
   command: string,
@@ -1278,6 +1288,12 @@ export interface NativePluginInstallRefusal {
   truncated: boolean;
   /** Which attempt produced this refusal (package vs linked). */
   label: string;
+  /**
+   * #1109 round 2: true only when the npm package could not be had HERE
+   * (offline, 404, a host older than `npm:`). Only then may the development
+   * installs (`--link`, the local copy) run. Absent/false = they do not.
+   */
+  npmUnavailable?: boolean;
 }
 
 let lastNativePluginInstallRefusal: NativePluginInstallRefusal | null = null;
@@ -1377,6 +1393,23 @@ function reportNativePluginConfigRemedy(refusal: NativePluginInstallRefusal | nu
   }
 }
 
+/** How a spawnSync child ended, for the bare-retry allowlist and the fallback class. */
+function spawnOutcome(r: {
+  status: number | null;
+  stdout?: string | Buffer | null;
+  stderr?: string | Buffer | null;
+  signal?: string | null;
+  error?: Error;
+}): InstallChildOutcome {
+  return {
+    stderr: spawnResultText(r.stderr),
+    stdout: spawnResultText(r.stdout),
+    exitCode: typeof r.status === 'number' ? r.status : null,
+    timedOut: (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT',
+    signal: r.signal ?? null,
+  };
+}
+
 function spawnResultText(value: string | Buffer | null | undefined): string {
   if (typeof value === 'string') return value;
   if (Buffer.isBuffer(value)) return value.toString('utf-8');
@@ -1412,86 +1445,111 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   // ClawHub, whose copy is stale. `--force` is what OpenClaw 2026.7+ requires
   // to accept a non-ClawHub source without a terminal — and it overwrites an
   // existing install, which `npm install -g`'s postinstall reaches without
-  // anyone asking. So, first (#1109 review): a linked/path install, or one
-  // newer than this CLI, is kept and the command printed instead; and with no
-  // exact version to pin to there is no package attempt at all. A host older
-  // than the `npm:` prefix gets one bare-spec retry for this whole install.
-  // (`--link` takes no `--force`: OpenClaw rejects the pair.)
+  // anyone asking. So, first (#1109 review): a linked/path install, one newer
+  // than this CLI, or one whose link status OpenClaw's records cannot tell, is
+  // kept and the command printed instead. A host older than the `npm:` prefix
+  // gets one bare-spec retry for this whole install.
+  //
+  // With no exact version to pin to, NOTHING is installed — not the package,
+  // not the development `--link`, not the local copy (#1109 round 2).
   const pin = exactPluginPin(readSelfVersion());
-  if (pin) {
-    const keep = assessRealtimeReplacement(
-      { version: readInstalledRealtimePluginVersion(home), linkedAt: readLinkedRealtimeInstall(home) },
-      pin,
-    );
-    if (!keep.replace) {
-      console.log(`Real-time plugin ${keep.summary}.`);
-      console.log(`  To replace it with v${pin}: ${realtimePluginInstallCommand(pin)}`);
-      return keep.why === 'linked' ? 'native-link' : 'native-package';
-    }
+  if (!pin) {
+    const refusal: NativePluginInstallRefusal = {
+      reason: `could not read this CLI's exact version, so nothing was installed — run \`${realtimePluginInstallCommand(null)}\``,
+      detail: [],
+      configInvalid: false,
+      truncated: false,
+      label: 'package install',
+      npmUnavailable: false,
+    };
+    nativePluginInstallRefusals = [refusal];
+    lastNativePluginInstallRefusal = refusal;
+    return null;
   }
-  const attempts: Array<{ args: string[]; label: string }> = pin
-    ? [{ args: realtimePluginInstallArgs(pin), label: 'package install' }]
-    : [];
-  const packageSource = resolvePluginPackageSource();
-  if (fs.existsSync(packageSource)) {
-    attempts.push({ args: ['plugins', 'install', '--link', packageSource], label: 'linked install' });
+  const keep = assessRealtimeReplacement(
+    { version: readInstalledRealtimePluginVersion(home), linked: readLinkedRealtimeInstall(home) },
+    pin,
+  );
+  if (!keep.replace) {
+    console.log(`Real-time plugin ${keep.summary}.`);
+    console.log(`  To replace it with v${pin}: ${realtimePluginInstallCommand(pin)}`);
+    return keep.why === 'linked' ? 'native-link' : 'native-package';
   }
 
-  const refusals: NativePluginInstallRefusal[] = pin ? [] : [{
-    reason: `could not read this CLI's exact version, so the plugin package was not installed — run \`${realtimePluginInstallCommand(null)}\``,
-    detail: [],
-    configInvalid: false,
-    truncated: false,
-    label: 'package install',
-  }];
   const spawn = _nativeSpawnForTest ?? ((command, args, options) =>
     spawnSync(command, args as string[], options));
   const budget = new BareRetryBudget();
+  const run = (args: string[]) => spawn('openclaw', args, {
+    env,
+    encoding: 'utf-8',
+    timeout: NATIVE_INSTALL_TIMEOUT_MS,
+  });
+  const outcomeOf = spawnOutcome;
+  /** Exit 0 is not the pinned build: check the copy OpenClaw selected. */
+  const verified = (label: string, mode: PluginInstallMode): PluginInstallMode => {
+    const landed = landedVersionVerdict(readSelectedRealtimePluginVersion(home), pin);
+    if (landed.ok) {
+      console.log(`Installed real-time plugin v${landed.version} via OpenClaw ${label}.`);
+    } else {
+      console.warn(`  Real-time plugin installed by OpenClaw (${label}), but ${landed.summary}.`);
+      console.warn(`  Run: ${realtimePluginInstallCommand(pin)}`);
+      process.exitCode = 1;
+    }
+    return mode;
+  };
 
-  for (const attempt of attempts) {
-    const { result } = runWithNpmSourceFallbackSync(
-      attempt.args,
-      (args) => spawn('openclaw', args, {
-        env,
-        encoding: 'utf-8',
-        timeout: NATIVE_INSTALL_TIMEOUT_MS,
-      }),
-      (r) => (r.status === 0 ? null : { stderr: spawnResultText(r.stderr), stdout: spawnResultText(r.stdout) }),
-      budget,
-    );
+  // 1. The supported install: the npm package at exactly this CLI's version.
+  const { result: pkg } = runWithNpmSourceFallbackSync(
+    realtimePluginInstallArgs(pin),
+    run,
+    (r) => (r.status === 0 ? null : outcomeOf(r)),
+    budget,
+  );
+  if (pkg.status === 0) {
+    lastNativePluginInstallRefusal = null;
+    nativePluginInstallRefusals = [];
+    // Registered natively either way — never fall back to a second, copied
+    // install — but anything other than the pin is reported, with the
+    // command, and the run exits non-zero.
+    return verified('package install', 'native-package');
+  }
+  // #251: do not discard the child's reason.
+  const failureClass = classifyNpmInstallFailure(outcomeOf(pkg));
+  const refusals: NativePluginInstallRefusal[] = [{
+    ...classifyNativePluginInstallFailure(
+      spawnResultText(pkg.stdout),
+      spawnResultText(pkg.stderr),
+      typeof pkg.status === 'number' ? pkg.status : null,
+      { home, label: 'package install' },
+    ),
+    npmUnavailable: failureClass === 'unavailable',
+  }];
 
-    if (result.status === 0) {
+  // 2. The development exception (#1109 round 2): `--link` to this checkout's
+  //    plugins/openclaw — only when the package could not be had HERE
+  //    (offline, 404, a host older than `npm:`). Never after an integrity,
+  //    trust, policy, consent or config refusal, a timeout or an unknown
+  //    failure: those are surfaced, not worked around. Verified against the
+  //    pin like the package install. (`--link` takes no `--force`: OpenClaw
+  //    rejects the pair.)
+  const packageSource = resolvePluginPackageSource();
+  if (failureClass === 'unavailable' && fs.existsSync(packageSource)) {
+    const linked = run(['plugins', 'install', '--link', packageSource]);
+    if (linked.status === 0) {
       lastNativePluginInstallRefusal = null;
       nativePluginInstallRefusals = [];
-      if (attempt.label !== 'package install') {
-        console.log(`Installed real-time plugin via OpenClaw ${attempt.label}.`);
-        return 'native-link';
-      }
-      // Exit 0 is not the pinned build on disk (the incident: exit 0 and a
-      // stale ClawHub copy). Registered natively either way — never fall back
-      // to a second, copied install — but anything other than the pin is
-      // reported, with the command, and the run exits non-zero.
-      const landed = landedVersionVerdict(readInstalledRealtimePluginVersion(home), pin!);
-      if (landed.ok) {
-        console.log(`Installed real-time plugin v${landed.version} via OpenClaw ${attempt.label}.`);
-      } else {
-        console.warn(`  Real-time plugin installed by OpenClaw, but ${landed.summary}.`);
-        console.warn(`  Run: ${realtimePluginInstallCommand(pin)}`);
-        process.exitCode = 1;
-      }
-      return 'native-package';
+      console.log('  The npm package could not be installed here; linked the local plugin build instead (development install).');
+      return verified('linked install', 'native-link');
     }
-
-    // #251: do not discard the child's reason. Bare `return null` after two
-    // failed attempts is how install/repair swallowed "OpenClaw config is
-    // invalid" while the copy fallback still printed plain success.
-    const refusal = classifyNativePluginInstallFailure(
-      spawnResultText(result.stdout),
-      spawnResultText(result.stderr),
-      typeof result.status === 'number' ? result.status : null,
-      { home: resolveUserHome(), label: attempt.label },
-    );
-    refusals.push(refusal);
+    refusals.push({
+      ...classifyNativePluginInstallFailure(
+        spawnResultText(linked.stdout),
+        spawnResultText(linked.stderr),
+        typeof linked.status === 'number' ? linked.status : null,
+        { home, label: 'linked install' },
+      ),
+      npmUnavailable: true,
+    });
   }
 
   nativePluginInstallRefusals = refusals;
@@ -1634,6 +1692,25 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
     return 'native-link';
   }
 
+  // #1109 round 2: the local copy is the DEVELOPMENT / offline exception, not
+  // a second route around OpenClaw. It runs only with an exact version to
+  // verify against, and only when the npm package could not be had here (no
+  // `openclaw` to ask, offline, 404, a host older than `npm:`) — never after
+  // an integrity, trust, policy, consent or config refusal, a timeout, or a
+  // failure nobody recognised.
+  const copyPin = exactPluginPin(readSelfVersion());
+  const blockingRefusal = nativePluginInstallRefusals.find((r) => r.npmUnavailable !== true) ?? null;
+  if (!copyPin || blockingRefusal) {
+    console.warn(
+      !copyPin
+        ? '  Nothing was installed: could not read this CLI\'s exact version, so there is no version to install or verify.'
+        : '  Nothing was installed: the local plugin copy is only used when the npm package cannot be installed here (offline, not on npm, or an OpenClaw older than the `npm:` source), not after the refusal above.',
+    );
+    console.warn(`  Fix the reported cause, then run \`${realtimePluginInstallCommand(copyPin)}\` or re-run \`shieldcortex openclaw install\`.`);
+    process.exitCode = 1;
+    return 'skipped';
+  }
+
   const home = resolveUserHome();
   const openclawDir = path.join(home, '.openclaw');
   const requiredFiles = ['index.js', 'interceptor.js', 'intercept-ingest.js', 'openclaw.plugin.json'];
@@ -1767,6 +1844,15 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
         fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
       }
     } catch { /* keep whatever version the manifest has */ }
+
+    // #1109 round 2: verified against the pin like every other install — the
+    // copy OpenClaw will select, not just the files written.
+    const copied = landedVersionVerdict(readSelectedRealtimePluginVersion(home), copyPin);
+    if (!copied.ok) {
+      console.warn(`  Local plugin copy written, but ${copied.summary}.`);
+      console.warn(`  Run: ${realtimePluginInstallCommand(copyPin)}`);
+      process.exitCode = 1;
+    }
 
     const grantConversationAccess = options.grantConversationAccess === true;
     if (trustLocalPlugin(destDir, pluginVersion, undefined, { grantConversationAccess })) {
@@ -2336,7 +2422,10 @@ async function writeOpenClawInstall(
         console.warn(`    ${gatewayBootLogAdvice()}`);
         process.exitCode = 1;
       } else if (!check.versionProof) {
-        console.warn('✗ Honest-state self-check FAILED: the loaded plugin version is OLDER than expected (silent downgrade, #74).');
+        // #1109 round 2: say which way it is off — older and newer both fail.
+        const versionReason = check.reasons.find((r) => r.startsWith('version proof FAILED'))
+          ?.replace(/^version proof FAILED:\s*/, '');
+        console.warn(`✗ Honest-state self-check FAILED: the plugin version is not the one this CLI expects — ${versionReason ?? 'version unreadable'}.`);
         console.warn('  Reinstall pinned to the expected version:');
         console.warn('    SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1 SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1 shieldcortex repair');
         process.exitCode = 1;
@@ -2616,7 +2705,7 @@ export async function repairOpenClawManagedPins(
     return { status: 'failed', message: `Could not read this CLI's exact version, so nothing was changed. Run \`${installCommand}\` then \`openclaw gateway restart\`.` };
   }
   const keep = assessRealtimeReplacement(
-    { version: readInstalledRealtimePluginVersion(home), linkedAt: readLinkedRealtimeInstall(home) },
+    { version: readInstalledRealtimePluginVersion(home), linked: readLinkedRealtimeInstall(home) },
     pin,
   );
   if (!keep.replace) {
@@ -2673,15 +2762,16 @@ export async function repairOpenClawManagedPins(
   const { result: reinstall, args: ranArgs } = runWithNpmSourceFallbackSync(
     realtimePluginInstallArgs(pin),
     (args) => spawnSync(openclawBin, args, { encoding: 'utf-8', env: spawnEnv, timeout: 180000 }),
-    (r) => (r.status === 0 ? null : { stderr: r.stderr, stdout: r.stdout }),
+    (r) => (r.status === 0 ? null : spawnOutcome(r)),
     bareRetryBudget,
   );
   if (reinstall.status !== 0) {
     const out = `${reinstall.stderr ?? ''}${reinstall.stdout ?? ''}`.trim().split('\n').slice(-4).join('\n');
     return { status: 'failed', message: `Reinstall failed after reconciling the manifest:\n${out}\nManifest backup: ${manifestPath}.repair-backup-${ts}` };
   }
-  // Exit 0 is not the pinned build on disk; only the pin is healed.
-  const landed = landedVersionVerdict(readInstalledRealtimePluginVersion(home), pin);
+  // Exit 0 is not the pinned build: the copy OpenClaw SELECTED must be the
+  // pin (#1109 round 2 — not the highest version anywhere on disk).
+  const landed = landedVersionVerdict(readSelectedRealtimePluginVersion(home), pin);
   if (!landed.ok) {
     return { status: 'failed', message: `Reinstall exited 0, but ${landed.summary}. Run \`openclaw ${ranArgs.join(' ')}\` then \`openclaw gateway restart\`. Manifest backup: ${manifestPath}.repair-backup-${ts}` };
   }
@@ -2746,12 +2836,16 @@ export async function repairOpenClawPlugin(): Promise<void> {
     } else if (pinResult.status === 'failed') {
       console.log(`  ✗ ${pinResult.message}`);
       console.log('');
+      // #1109 round 2: a heal that did not finish is a repair that did not
+      // finish — the command exits non-zero, whatever the steps below do.
+      process.exitCode = 1;
     }
     // 'clean' / 'not-installed' → stay quiet and fall through to the dup check.
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.log(`  ✗ managed-pin reconcile errored — ${msg}`);
     console.log('');
+    process.exitCode = 1;
   }
 
   // Find duplicate install locations (same scan as the doctor check).
@@ -2788,9 +2882,74 @@ export async function repairOpenClawPlugin(): Promise<void> {
   for (const p of displayPaths) console.log(`  - ${p}`);
   console.log('');
 
+  // #1109 round 2: every branch below deletes something, so the same checks
+  // run before EITHER of them — an exact version, nothing linked / newer /
+  // unreadable to clobber, that version on npm — and a candidate is only
+  // deleted once OpenClaw's records prove a DIFFERENT copy is the one it
+  // selected. Otherwise the repair reports and stops, with nothing changed.
+  const stop = (lines: string[]): void => {
+    for (const l of lines) console.error(l);
+    process.exitCode = 1;
+  };
+  const reinstallPin = exactPluginPin(readSelfVersion());
+  if (!reinstallPin) {
+    stop([
+      'Cannot run repair: could not read this CLI\'s exact version. Nothing was changed.',
+      `Run \`${realtimePluginInstallCommand(null)}\` by hand once \`shieldcortex --version\` works.`,
+    ]);
+    return;
+  }
+  const linkedState = readLinkedRealtimeInstall(home);
+  const keep = assessRealtimeReplacement(
+    { version: readInstalledRealtimePluginVersion(home), linked: linkedState },
+    reinstallPin,
+  );
+  if (!keep.replace) {
+    stop([
+      `Not repairing: ${keep.summary.replace(/^left alone — /, '')}. Nothing was changed.`,
+      `To replace it with v${reinstallPin} anyway: ${realtimePluginInstallCommand(reinstallPin)}`,
+    ]);
+    return;
+  }
+  // A candidate newer than the pin is a newer build, not a leftover.
+  for (const p of dupCandidates) {
+    const v = readCandidateVersion(p);
+    if (v && semver.gt(v, reinstallPin)) {
+      stop([
+        `Not repairing: ${p.replace(home, '~')} holds v${v}, newer than this CLI (v${reinstallPin}). Nothing was changed.`,
+        `Remove it yourself if it is a leftover, then re-run \`shieldcortex openclaw repair\`.`,
+      ]);
+      return;
+    }
+  }
+  const selected = readSelectedRealtimeInstall(home);
+  const selectedDir = selected.state === 'selected' ? selected.dir : null;
+  const insideCandidate = selectedDir !== null && dupCandidates.some((p) => isSameOrInside(selectedDir, p));
+  if (selected.state !== 'selected' || insideCandidate) {
+    stop([
+      selected.state === 'unknown'
+        ? `Not repairing: ${selected.why}. Nothing was changed.`
+        : selected.state === 'none'
+          ? 'Not repairing: no install record names another copy of the plugin, so these may be the only install. Nothing was changed.'
+          : `Not repairing: OpenClaw selected ${selectedDir!.replace(home, '~')} — one of the copies above, not a duplicate. Nothing was changed.`,
+      `To reinstall the plugin cleanly: ${realtimePluginInstallCommand(reinstallPin)}`,
+    ]);
+    return;
+  }
+  const spawnEnv = openClawChildEnv({}, home);
+  const published = (_publishCheckForTest ?? confirmRealtimePluginPublishedSync)(reinstallPin, spawnEnv);
+  if (!published.ok) {
+    stop([
+      `Not repairing: ${published.reason}. Nothing was changed.`,
+      `Re-run \`shieldcortex openclaw repair\` once ${REALTIME_PLUGIN_PACKAGE}@${reinstallPin} is on npm.`,
+    ]);
+    return;
+  }
+
   if (!hasHooksDup) {
-    // Simple case: extensions/ leftovers only. No sticky state — just rm.
-    console.log('All duplicates are in ~/.openclaw/extensions/ (no sticky state). Removing:');
+    // Simple case: extensions/ leftovers only. No sticky state — just rm. The
+    // copy OpenClaw selected (proven above) is elsewhere.
+    console.log(`All duplicates are in ~/.openclaw/extensions/ (no sticky state); OpenClaw uses ${selectedDir!.replace(home, '~')} (v${selected.version}). Removing:`);
     for (const p of dupCandidates) {
       try {
         fs.rmSync(p, { recursive: true, force: true });
@@ -2857,32 +3016,8 @@ export async function repairOpenClawPlugin(): Promise<void> {
     process.exit(1);
   }
 
-  const spawnEnv = openClawChildEnv({}, home);
-
-  // #1109 review: everything below is destructive (uninstall, rm, then a
-  // forced install). Before any of it: an exact version to pin to, nothing
-  // linked or newer to clobber, and that exact version actually on npm.
-  const reinstallPin = exactPluginPin(readSelfVersion());
-  if (!reinstallPin) {
-    console.error('Cannot run repair: could not read this CLI\'s exact version, so there is no version to reinstall. Nothing was changed.');
-    console.error(`Run \`${realtimePluginInstallCommand(null)}\` by hand once \`shieldcortex --version\` works.`);
-    process.exit(1);
-  }
-  const keep = assessRealtimeReplacement(
-    { version: readInstalledRealtimePluginVersion(home), linkedAt: readLinkedRealtimeInstall(home) },
-    reinstallPin,
-  );
-  if (!keep.replace) {
-    console.error(`Not repairing: the realtime plugin is ${keep.summary.replace(/^left alone — the plugin is /, '')}. Nothing was changed.`);
-    console.error(`To replace it with v${reinstallPin} anyway: ${realtimePluginInstallCommand(reinstallPin)}`);
-    process.exit(1);
-  }
-  const published = confirmRealtimePluginPublishedSync(reinstallPin, spawnEnv);
-  if (!published.ok) {
-    console.error(`Not repairing: ${published.reason}. Nothing was changed.`);
-    console.error(`Re-run \`shieldcortex openclaw repair\` once ${REALTIME_PLUGIN_PACKAGE}@${reinstallPin} is on npm.`);
-    process.exit(1);
-  }
+  // The preflight above (exact pin, nothing linked/newer/unreadable, a
+  // different selected copy, the pin on npm) already ran for this branch too.
 
   // Step 3: Uninstall the plugin. The uninstall command requires interactive
   // confirmation by default; pipe `y\n` via stdin to auto-confirm.
@@ -2964,7 +3099,7 @@ export async function repairOpenClawPlugin(): Promise<void> {
   const { result: installResult, args: reinstallArgs } = runWithNpmSourceFallbackSync(
     realtimePluginInstallArgs(reinstallPin),
     (args) => spawnSync(openclawBin, args, { encoding: 'utf-8', env: spawnEnv, timeout: 120000 }),
-    (r) => (r.status === 0 ? null : { stderr: r.stderr, stdout: r.stdout }),
+    (r) => (r.status === 0 ? null : spawnOutcome(r)),
     bareRetryBudget,
   );
   if (installResult.status !== 0) {
@@ -2982,7 +3117,7 @@ export async function repairOpenClawPlugin(): Promise<void> {
   // Exit 0 is not the pinned build on disk (the incident was exit 0 and a
   // stale copy). The config is restored below either way; the run ends
   // non-zero with the command when the pin did not land.
-  const landed = landedVersionVerdict(readInstalledRealtimePluginVersion(home), reinstallPin);
+  const landed = landedVersionVerdict(readSelectedRealtimePluginVersion(home), reinstallPin);
   if (landed.ok) {
     console.log(`  ✓ install succeeded (v${landed.version})`);
   } else {
@@ -3039,17 +3174,60 @@ export async function repairOpenClawPlugin(): Promise<void> {
   console.log('Repair complete. Restart the OpenClaw gateway to load the fresh plugin install.');
 }
 
+let _publishCheckForTest: ((pin: string, env: NodeJS.ProcessEnv) => { ok: true } | { ok: false; reason: string }) | null = null;
+/** Test seam: answer the repair's `npm view` publication check without a real `npm`. */
+export function __setRealtimePublishCheckForTest(
+  fn: ((pin: string, env: NodeJS.ProcessEnv) => { ok: true } | { ok: false; reason: string }) | null,
+): void {
+  _publishCheckForTest = fn;
+}
+
 /**
  * Is the realtime plugin on npm at exactly `pin`? `npm view` of a version that
  * does not exist prints nothing (or fails E404); anything other than the pin
  * itself — including a timeout or no `npm` — is "cannot confirm".
  */
-function confirmRealtimePluginPublishedSync(pin: string, env: NodeJS.ProcessEnv): { ok: true } | { ok: false; reason: string } {
-  const r = spawnSync('npm', ['view', `${REALTIME_PLUGIN_PACKAGE}@${pin}`, 'version'], { encoding: 'utf-8', env, timeout: 15000 });
-  const listed = (typeof r.stdout === 'string' ? r.stdout : '').trim().split(/\s+/).pop() ?? '';
-  if (r.status === 0 && listed === pin) return { ok: true };
-  if (r.status === 0) return { ok: false, reason: `npm has no ${REALTIME_PLUGIN_PACKAGE}@${pin} yet` };
-  return { ok: false, reason: `could not confirm ${REALTIME_PLUGIN_PACKAGE}@${pin} on npm (${r.error ? r.error.message : `npm view exited ${r.status ?? 'by signal'}`})` };
+export function confirmRealtimePluginPublishedSync(
+  pin: string,
+  env: NodeJS.ProcessEnv,
+  spawn: typeof spawnSync = spawnSync,
+): { ok: true } | { ok: false; reason: string } {
+  const r = spawn('npm', ['view', `${REALTIME_PLUGIN_PACKAGE}@${pin}`, 'version', '--json'], { encoding: 'utf-8', env, timeout: 15000 });
+  // A normal exit 0 only: no spawn error, no signal, no timeout.
+  if (r.error || r.signal || r.status !== 0) {
+    const how = r.error ? r.error.message : r.signal ? `npm view killed by ${r.signal}` : `npm view exited ${r.status}`;
+    return { ok: false, reason: `could not confirm ${REALTIME_PLUGIN_PACKAGE}@${pin} on npm (${how})` };
+  }
+  const listed = parseNpmViewVersion(typeof r.stdout === 'string' ? r.stdout : String(r.stdout ?? ''));
+  if (listed.state === 'unparseable') {
+    return { ok: false, reason: `could not confirm ${REALTIME_PLUGIN_PACKAGE}@${pin} on npm (npm view printed something other than JSON)` };
+  }
+  if (listed.versions.length === 1 && listed.versions[0] === pin) return { ok: true };
+  return { ok: false, reason: `npm has no ${REALTIME_PLUGIN_PACKAGE}@${pin} yet` };
+}
+
+/** The version in a duplicate candidate dir (manifest first, then package.json), or null. */
+function readCandidateVersion(dir: string): string | null {
+  for (const file of ['openclaw.plugin.json', 'package.json']) {
+    try {
+      const v = (JSON.parse(fs.readFileSync(path.join(dir, file), 'utf-8')) as { version?: unknown }).version;
+      if (typeof v === 'string' && semver.valid(v.trim())) return semver.valid(v.trim());
+    } catch { /* next */ }
+  }
+  return null;
+}
+
+function isSameOrInside(child: string, parent: string): boolean {
+  const real = (p: string): string => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const c = real(child);
+  const p = real(parent);
+  return c === p || c.startsWith(p + path.sep);
 }
 
 /**

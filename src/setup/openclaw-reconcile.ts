@@ -24,11 +24,12 @@ import {
   REALTIME_PLUGIN_PACKAGE,
   assessRealtimeReplacement,
   exactPluginPin,
-  readLinkedRealtimeInstall,
+  landedVersionVerdict,
   realtimePluginInstallCommand,
   runWithNpmSourceFallbackSync,
   type ExistingRealtimeInstall,
 } from './openclaw-plugin-spec.js';
+import { readLinkedRealtimeInstall, readSelectedRealtimePluginVersion } from '../integrations/openclaw-realtime-install.js';
 import { readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
 import { nextCausalSeq } from './causal-seq.js';
 
@@ -155,6 +156,12 @@ export interface ReconcileOptions {
   bareRetryBudget?: BareRetryBudget;
   /** What realtime install is there now, for the never-clobber check (defaults to OpenClaw's own files under `home`). */
   readExistingInstall?: (home: string) => ExistingRealtimeInstall;
+  /**
+   * After a realtime install step exits 0: the version of the copy OpenClaw
+   * SELECTED, or why it could not be told (#1109 round 2). Defaults to
+   * OpenClaw's own install records under `home`.
+   */
+  readLandedVersion?: (home: string) => { version: string } | { version: null; reason: string };
   /** Injectable gateway reload (defaults to the guarded restartOpenClawGateway). */
   reloadGateway?: () => Promise<GatewayReloadResult>;
   /** Injectable self-check (defaults to runPluginSelfCheck). */
@@ -336,8 +343,9 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   const bareRetryBudget = options.bareRetryBudget ?? new BareRetryBudget();
   const readExistingInstall = options.readExistingInstall ?? ((h: string): ExistingRealtimeInstall => ({
     version: readInstalledRealtimePluginVersion(h),
-    linkedAt: readLinkedRealtimeInstall(h),
+    linked: readLinkedRealtimeInstall(h),
   }));
+  const readLandedVersion = options.readLandedVersion ?? ((h: string) => readSelectedRealtimePluginVersion(h));
   const reloadGateway = options.reloadGateway ?? defaultReloadGateway;
   const selfCheck = options.selfCheck
     ?? ((h: string, p: string) => runPluginSelfCheck(h, { pluginId: p, expectedVersion: options.expectedVersion }));
@@ -556,10 +564,12 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     const { result: r, args: ranArgs } = runWithNpmSourceFallbackSync(
       step.command ?? [],
       runCommand,
-      (out) => (out.status === 0 ? null : { stderr: out.stderr ?? '', stdout: out.stdout ?? '' }),
+      // `describeSpawnOutcome` drops both streams for a timeout, a signal or a
+      // spawn failure, so those can never match the refusal allowlist.
+      (out) => (out.status === 0 ? null : { stderr: out.stderr ?? '', stdout: out.stdout ?? '', exitCode: out.status }),
       bareRetryBudget,
     );
-    const ok = r.status === 0;
+    let ok = r.status === 0;
     // #221: was `split('\n').slice(-1)[0]` — the LAST line. When OpenClaw
     // refuses because its config is invalid, its last line is the reassurance
     // "Audit, status, health, logs, tasks list/audit, and doctor commands still
@@ -582,10 +592,25 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
       mode: ok ? 'plain' : 'failure',
       neverEmpty: true,
     });
-    const summary = summarised.lines[0] ?? '';
+    let summary = summarised.lines[0] ?? '';
+    // #1109 round 2: a realtime install that exited 0 is checked here, on its
+    // own step, against the pin — the copy OpenClaw selected, not just the
+    // exit code. The later self-check still runs; this does not wait for it.
+    let landedMismatch: string | null = null;
+    if (ok && realtimeInstall) {
+      const pin = exactPluginPin(options.expectedVersion)!;
+      const landed = landedVersionVerdict(readLandedVersion(home), pin);
+      if (!landed.ok) {
+        ok = false;
+        landedMismatch = `install exited 0, but ${landed.summary}; run \`${realtimePluginInstallCommand(pin)}\``;
+        summary = landedMismatch;
+      }
+    }
     stepResults.push({ kind: step.kind, ok, detail: summary });
-    if (ok) noteChange();
-    if (!ok) messages.push(`command failed (openclaw ${ranArgs.join(' ')}): ${summary}`);
+    // The install changed the host even when it left the wrong build.
+    if (ok || landedMismatch) noteChange();
+    if (landedMismatch) messages.push(`plugin install not finished: ${landedMismatch}`);
+    else if (!ok) messages.push(`command failed (openclaw ${ranArgs.join(' ')}): ${summary}`);
   }
 
   // #145: re-read the state AFTER remediation. The pre-remediation snapshot is

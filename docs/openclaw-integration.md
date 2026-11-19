@@ -129,6 +129,10 @@ worth knowing before you update a box that runs OpenClaw:
 - It does nothing to OpenClaw for local (non-global) installs, when `CI=true`
   or `CONTINUOUS_INTEGRATION=true`, or inside Docker/containers (it prints the
   manual command instead).
+- It does nothing to OpenClaw when `shieldcortex update` runs the package
+  install. `update` sets `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` on that one npm
+  child (never in your shell) and then refreshes the plugin, skill and hook
+  itself, so one `update` run installs the plugin once.
 - A failed refresh is non-fatal and prints the manual command.
 - Separately from OpenClaw, on macOS it restarts a ShieldCortex dashboard
   service that is still serving the previous build.
@@ -198,26 +202,61 @@ where `<version>` is exactly this CLI's version.
 - **What they replace.** `--force` replaces an existing npm or ClawHub install
   of the plugin that is on the CLI's version or older. That includes a copy
   you pinned to an older version yourself.
-- **What they leave alone.** A linked or local-path install (an entry in
-  `plugins.load.paths`, or an install OpenClaw recorded with
-  `source: "path"`), and any install newer than the CLI. They print the
-  install command instead, and `shieldcortex update` exits 1 until the plugin
-  matches the CLI.
+- **What they leave alone.** A linked or local-path install, any install
+  newer than the CLI, and any install whose link status cannot be read. A
+  link is recognised by what is at the path, not by its name: a
+  `plugins.load.paths` entry whose `package.json` is
+  `@drakon-systems/shieldcortex-realtime` or whose `openclaw.plugin.json` id is
+  `shieldcortex-realtime` (so a link to a checkout's `plugins/openclaw` counts),
+  or an install record with `source: "path"` in `openclaw.json`,
+  `plugins/installs.json` or OpenClaw's SQLite install index. If one of those
+  files exists but cannot be read (including an `openclaw.json` written as
+  JSON5, which this check does not parse), the answer is "could not tell", and
+  nothing is replaced. In all of these cases they print the install command
+  instead, and `shieldcortex update` exits 1 until the plugin matches the CLI.
 - **When they install nothing.** If the CLI cannot read its own exact
-  version, nothing is installed. `shieldcortex update`, and the duplicate
-  repair in `shieldcortex openclaw repair` (which uninstalls first), also
-  check that npm has that exact plugin version before they delete or replace
+  version, nothing is installed — no package, no `--link`, no local copy.
+  `shieldcortex update` and the duplicate repair in `shieldcortex openclaw
+  repair` also ask npm (`npm view <package>@<version> version --json`, which
+  must exit 0 and answer exactly that version) before they delete or replace
   anything. The release publishes the CLI before the plugin, so for a few
   minutes after a release the plugin version may not be on npm yet. In each
   case the step is reported unfinished (exit 1) with the command to run.
-- **What counts as done.** Only the plugin at exactly the CLI's version. An
-  older or newer version after an install is reported with the command to
-  run, and `shieldcortex update` exits 1.
-- **Older OpenClaw.** OpenClaw before 2026.4.26 does not accept `npm:`. When
-  OpenClaw refuses it with exactly that error, the install is retried with
-  the plain package name at the same exact version, at most once per command
-  run (not once per step). No other failure is retried, and nothing falls
-  back to `clawhub:`.
+- **Duplicate repair.** `shieldcortex openclaw repair` runs those checks
+  before it deletes anything, including a leftover copy in
+  `~/.openclaw/extensions`. It deletes a duplicate only when OpenClaw's own
+  records name a different copy as the one it loads. Otherwise it reports,
+  changes nothing and exits 1. A managed-pin heal that does not finish also
+  makes the repair exit 1.
+- **What counts as done.** Only the copy OpenClaw selected, at exactly the
+  CLI's version. The selected copy is the one OpenClaw's SQLite install index
+  names (its plugin entry and its install record, which must agree), else the
+  `plugins/installs.json` record on OpenClaw releases without the index, else
+  a linked or `~/.openclaw/extensions` copy that OpenClaw finds by itself. It
+  is not the highest version found on disk: a leftover copy at the right
+  version does not count. An older or newer version, or a selected copy that
+  cannot be told, is reported with the command to run, and
+  `shieldcortex update` exits 1.
+- **Older OpenClaw.** OpenClaw before 2026.4.26 does not accept `npm:`. The
+  install is retried with the plain package name at the same exact version
+  only when OpenClaw exited normally with an error and every line it wrote to
+  stderr is that refusal (`unsupported npm spec: protocol specs are not
+  allowed`, and the `Also not a valid hook pack:` line it adds). Any other
+  line, a timeout or a killed process means no retry. The retry happens at
+  most once per command run (not once per step), and nothing falls back to
+  `clawhub:`.
+- **Development installs (`shieldcortex openclaw install` only).** When the
+  npm package cannot be installed on this machine, the installer has two
+  fallbacks meant for development and offline machines: `openclaw plugins
+  install --link` to the `plugins/openclaw` directory of the installed
+  ShieldCortex package, then a copy into
+  `~/.openclaw/extensions/shieldcortex-realtime`. They run only when there is
+  no `openclaw` to ask, or the npm attempt failed because the package could
+  not be reached here (offline, DNS, not on npm, or an OpenClaw older than
+  `npm:`). They never run after an integrity, trust, provenance, policy,
+  consent or OpenClaw config refusal, after a timeout, or after a failure the
+  installer does not recognise. Both are checked against the CLI's version
+  like any other install, and a mismatch exits 1.
 
 ### Gateway restart consent
 

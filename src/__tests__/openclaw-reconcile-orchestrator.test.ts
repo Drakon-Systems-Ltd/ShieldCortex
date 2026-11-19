@@ -108,6 +108,49 @@ describe('reconcileOpenClawPluginState', () => {
     expect(install!.join(' ')).not.toMatch(/@latest/);
   });
 
+  it('#1109 round 2: an install step that exits 0 but leaves the selected copy off the pin FAILS on its own step', async () => {
+    setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: () => ({ status: 0, output: '' }), // "succeeds", lands nothing
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck, // even a self-check that says yes does not rescue it
+    });
+    const step = res.stepResults.find((r) => r.kind === 'openclaw-install-pinned');
+    expect(step).toMatchObject({ ok: false, detail: expect.stringContaining('install exited 0, but the plugin is on v4.25.4, CLI is v4.47.2') });
+    expect(res.messages.join('\n')).toMatch(/plugin install not finished: .*npm:@drakon-systems\/shieldcortex-realtime@4\.47\.2/);
+    expect(res.ok).toBe(false);
+  });
+
+  it('#1109 round 2: an install step whose selected copy cannot be told FAILS on its own step', async () => {
+    setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: () => ({ status: 0, output: '' }),
+      readLandedVersion: () => ({ version: null, reason: 'could not tell which copy OpenClaw selected — two copies' }),
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    expect(res.stepResults.find((r) => r.kind === 'openclaw-install-pinned')).toMatchObject({ ok: false });
+    expect(res.ok).toBe(false);
+  });
+
+  it('#1109 round 2: an install step that lands the pin in the selected copy is ok', async () => {
+    setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
+    const pkg = path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-abc', PKG_SUBPATH, 'package.json');
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: (argv) => {
+        if (argv[1] === 'install') fs.writeFileSync(pkg, JSON.stringify({ version: '4.47.2' }));
+        return { status: 0, output: '' };
+      },
+      readLandedVersion: () => ({ version: JSON.parse(fs.readFileSync(pkg, 'utf-8')).version }),
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    expect(res.stepResults.find((r) => r.kind === 'openclaw-install-pinned')).toMatchObject({ ok: true });
+  });
+
   const NPM_4472 = ['plugins', 'install', '--force', 'npm:@drakon-systems/shieldcortex-realtime@4.47.2'];
   const BARE_4472 = ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@4.47.2'];
   const PRE_NPM = 'unsupported npm spec: protocol specs are not allowed';
@@ -178,7 +221,11 @@ describe('reconcileOpenClawPluginState', () => {
     setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
     const cfgPath = path.join(home, '.openclaw', 'openclaw.json');
     const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
-    cfg.plugins.load = { paths: ['/src/ShieldCortex/plugins/openclaw/shieldcortex-realtime'] };
+    // #1109 round 2: identified by what is AT the path — a checkout's plugins/openclaw.
+    const checkout = path.join(home, 'src', 'ShieldCortex', 'plugins', 'openclaw');
+    fs.mkdirSync(checkout, { recursive: true });
+    fs.writeFileSync(path.join(checkout, 'package.json'), JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', version: '4.25.4' }));
+    cfg.plugins.load = { paths: [checkout] };
     fs.writeFileSync(cfgPath, JSON.stringify(cfg));
     const calls: string[][] = [];
     const res = await reconcileOpenClawPluginState({

@@ -85,7 +85,9 @@ describe('OpenClaw native refusals (#706)', () => {
     }));
     await installOpenClawHook({ noHooks: true, restartGateway: false });
     expect(getLastNativePluginInstallRefusal()?.configMissing).toBe(true);
-    expect(getNativePluginInstallRefusals()).toHaveLength(2);
+    // #1109 round 2: a config refusal is not "npm unavailable here", so the
+    // development --link is not tried after it.
+    expect(getNativePluginInstallRefusals()).toHaveLength(1);
     const output = warnings.join('\n');
     expect(output).toMatch(/No OpenClaw config was found/);
     expect(output).toContain(openClawConfigPath());
@@ -94,9 +96,11 @@ describe('OpenClaw native refusals (#706)', () => {
     expect(process.exitCode).toBe(1);
   });
 
-  // Review of 2d250a45 (B1): the local fallback creates openclaw.json, so the
-  // summary must not repeat the historical refusal as "still missing".
-  it('does not call a config the fallback created "still missing"', async () => {
+  // Review of 2d250a45 (B1) used to cover the local fallback creating
+  // openclaw.json after this refusal. #1109 round 2: the local copy is the
+  // offline/development exception and no longer runs after a config refusal,
+  // so nothing creates the config and nothing claims it exists.
+  it('a missing-config refusal makes no local copy and creates no config (#1109 round 2)', async () => {
     const localSource = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-706-local-'));
     try {
       fs.writeFileSync(path.join(localSource, 'index.js'), 'export default {};\n');
@@ -112,15 +116,14 @@ describe('OpenClaw native refusals (#706)', () => {
         stderr: args.includes('--link') ? 'Plugin path not found: /plugin\n' : 'Error: config not found: ~/.openclaw/openclaw.json\n',
       }));
       await installOpenClawHook({ noHooks: true, restartGateway: false });
-      expect(getNativePluginInstallRefusals()).toHaveLength(2);
+      expect(getNativePluginInstallRefusals()).toHaveLength(1);
       expect(getLastNativePluginInstallRefusal()?.configMissing).toBe(true);
-      expect(fs.existsSync(openClawConfigPath())).toBe(true);
-      const config = JSON.parse(fs.readFileSync(openClawConfigPath(), 'utf-8'));
-      expect(config.plugins.allow).toContain('shieldcortex-realtime');
+      expect(fs.existsSync(openClawConfigPath())).toBe(false);
+      expect(fs.existsSync(path.join(home, '.openclaw', 'extensions', 'shieldcortex-realtime'))).toBe(false);
       const output = [...logs, ...warnings].join('\n');
-      expect(output).not.toMatch(/still missing/);
-      expect(output).toMatch(/OpenClaw config was missing when the native install ran/);
-      expect(output).toContain(`${openClawConfigPath()} now exists`);
+      expect(output).toMatch(/No OpenClaw config was found/);
+      expect(output).toMatch(/Nothing was installed/);
+      expect(output).not.toContain(`${openClawConfigPath()} now exists`);
       expect(output).not.toMatch(/with the plugin registration/);
       expect(process.exitCode).toBe(1);
     } finally {
@@ -128,10 +131,11 @@ describe('OpenClaw native refusals (#706)', () => {
     }
   });
 
-  // Review of 935db2ba (B2): file existence is not registration. A config
-  // write that leaves a partial file and then throws must not be summarised
-  // as a successful registration.
-  it('does not claim registration when the config write leaves a partial file and fails', async () => {
+  // Review of 935db2ba (B2): file existence is not registration. That case
+  // was a config write by the local fallback after this refusal; #1109 round
+  // 2 stops the fallback there, so no config write is attempted at all — and
+  // nothing is summarised as a registration.
+  it('after a missing-config refusal no config write is attempted, and no registration is claimed (#1109 round 2)', async () => {
     const localSource = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-706-partial-'));
     try {
       fs.writeFileSync(path.join(localSource, 'index.js'), 'export default {};\n');
@@ -160,16 +164,14 @@ describe('OpenClaw native refusals (#706)', () => {
         stderr: args.includes('--link') ? 'Plugin path not found: /plugin\n' : 'Error: config not found: ~/.openclaw/openclaw.json\n',
       }));
       await installOpenClawHook({ noHooks: true, restartGateway: false });
-      expect(partialWrites).toBeGreaterThan(0);
-      expect(fs.existsSync(configPath)).toBe(true);
-      expect(() => JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toThrow();
-      expect(getNativePluginInstallRefusals()).toHaveLength(2);
+      expect(partialWrites).toBe(0);
+      expect(fs.existsSync(configPath)).toBe(false);
+      expect(getNativePluginInstallRefusals()).toHaveLength(1);
       expect(getLastNativePluginInstallRefusal()?.configMissing).toBe(true);
-      expect(errors.join('\n')).toMatch(/NOT registered in openclaw\.json/);
-      const output = [...logs, ...warnings].join('\n');
+      const output = [...logs, ...warnings, ...errors].join('\n');
       expect(output).not.toMatch(/with the plugin registration/);
-      expect(output).not.toMatch(/still missing/);
-      expect(output).toMatch(/OpenClaw config was missing when the native install ran/);
+      expect(output).not.toMatch(/Registered plugin in OpenClaw config/);
+      expect(output).toMatch(/Nothing was installed/);
       expect(process.exitCode).toBe(1);
     } finally {
       fs.rmSync(localSource, { recursive: true, force: true });

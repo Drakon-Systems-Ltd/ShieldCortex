@@ -750,6 +750,76 @@ export function readPluginInstallIndex(home: string): PluginIndexRow | null {
   }
 }
 
+/**
+ * The install index with "absent" and "could not read" kept apart (#1109
+ * round 2). `readPluginInstallIndex` above folds both into null, which is right
+ * for a diagnosis but wrong for a decision to overwrite something: a forced
+ * install must not read "I could not open OpenClaw's index" as "OpenClaw
+ * recorded nothing". Absent = no DB file, no `installed_plugin_index` table, or
+ * no row. Unreadable = the DB, the binding or a JSON column could not be read.
+ */
+export type PluginInstallIndexState =
+  | { state: 'absent' }
+  | { state: 'unreadable'; why: string }
+  | { state: 'ok'; row: PluginIndexRow };
+
+export function readPluginInstallIndexState(home: string): PluginInstallIndexState {
+  const dbPath = openClawSqlitePath(home);
+  try {
+    fs.lstatSync(dbPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { state: 'absent' };
+    return { state: 'unreadable', why: `cannot stat ${dbPath}: ${(err as Error).message}` };
+  }
+  let db: import('better-sqlite3').Database | null = null;
+  try {
+    const require = createRequireSafe();
+    const Database = require('better-sqlite3') as typeof import('better-sqlite3');
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const table = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'installed_plugin_index'")
+      .get();
+    if (!table) return { state: 'absent' };
+    const row = db
+      .prepare(
+        'SELECT install_records_json, plugins_json, warning, generated_at_ms ' +
+          'FROM installed_plugin_index ORDER BY generated_at_ms DESC LIMIT 1',
+      )
+      .get() as
+      | { install_records_json: unknown; plugins_json: unknown; warning: string | null; generated_at_ms: number }
+      | undefined;
+    if (!row) return { state: 'absent' };
+    let installRecords: unknown;
+    let plugins: unknown;
+    try {
+      installRecords = JSON.parse(String(row.install_records_json));
+      plugins = JSON.parse(String(row.plugins_json));
+    } catch {
+      return { state: 'unreadable', why: 'the install index row is not valid JSON' };
+    }
+    if (!installRecords || typeof installRecords !== 'object' || Array.isArray(installRecords) || !Array.isArray(plugins)) {
+      return { state: 'unreadable', why: 'the install index row has an unexpected shape' };
+    }
+    return {
+      state: 'ok',
+      row: {
+        installRecords: installRecords as Record<string, IndexInstallRecord>,
+        plugins: plugins as IndexPluginEntry[],
+        warning: row.warning ?? null,
+        generatedAtMs: row.generated_at_ms,
+      },
+    };
+  } catch (err) {
+    return { state: 'unreadable', why: `cannot read ${dbPath}: ${err instanceof Error ? err.message : String(err)}` };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
 function createRequireSafe(): NodeRequire {
   return createRequire(import.meta.url);
 }
