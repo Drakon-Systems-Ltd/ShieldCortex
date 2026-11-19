@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **On OpenClaw 2026.11.5 and later, `shieldcortex update` and `shieldcortex openclaw install` could install an old ClawHub copy of the OpenClaw plugin; they now install the exact matching version from npm.** OpenClaw 2026.11.5 looks up a plugin name without a source prefix on ClawHub and no longer falls back to npm, and ClawHub has an old 5.17.3 copy of `@drakon-systems/shieldcortex-realtime`. Every install ShieldCortex runs (`update`, `openclaw install`, `openclaw repair`, and the repair steps `doctor` and `repair` plan) now asks for `npm:@drakon-systems/shieldcortex-realtime@<version>`, where the version is ShieldCortex's own (for `update`, the version it just installed), with `--force` so OpenClaw accepts the npm source without a terminal. Every fix hint that names the install command prints that same form. An OpenClaw older than the `npm:` prefix (before 2026.4.26) refuses it before installing anything; only that refusal is retried, once, with the same exact version and no prefix. No other failure is retried, and nothing falls back to ClawHub. If an install still leaves a different version than the one asked for, `update` reports the plugin as not updated and names the command that fixes it, instead of "up to date". Off remains the default. Nothing about what the guard allows or blocks changes.
+
 ## [5.20.2] - 2026-11-18
 
 ### Fixed

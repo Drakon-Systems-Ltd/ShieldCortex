@@ -163,6 +163,10 @@ describe('doctor — checkOpenClawPluginVersion (staleness)', () => {
     expect(r.message).toContain('4.29.0');
     expect(r.message).toContain('4.30.1');
     expect(r.fix).toContain('shieldcortex-realtime');
+    // OpenClaw 2026.11.5 resolves an unprefixed spec on ClawHub (stale copy):
+    // the fix names npm explicitly, pinned to the version this CLI expects.
+    expect(r.fix).toContain('`openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@4.30.1`');
+    expect(r.fix).not.toMatch(/install(?: --force)? @drakon-systems/);
   });
 
   it('PASSes when the installed plugin matches the running package', async () => {

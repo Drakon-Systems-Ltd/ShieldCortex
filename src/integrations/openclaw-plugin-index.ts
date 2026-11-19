@@ -13,6 +13,7 @@ import {
   findGatewayAttributedRegistrationSince,
 } from './openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from './openclaw-gateway-process.js';
+import { REALTIME_PLUGIN_PACKAGE, realtimePluginInstallArgs } from '../setup/openclaw-plugin-spec.js';
 
 /**
  * Reconciling OpenClaw plugin-install state across its three authoritative
@@ -590,6 +591,13 @@ export interface PlanOptions {
  */
 export function planReconcileActions(verdict: ReconcileVerdict, opts: PlanOptions): ReconcileStep[] {
   const { packageName, expectedVersion } = opts;
+  // Every install is pinned to the expected version and, for the realtime
+  // plugin, forced to npm (`npm:`, with the `--force` OpenClaw 2026.7+ needs to
+  // accept a non-ClawHub source without a terminal): OpenClaw 2026.11.5
+  // resolves an unprefixed spec on ClawHub, whose copy is stale.
+  const pinnedInstall = (): string[] => packageName === REALTIME_PLUGIN_PACKAGE
+    ? realtimePluginInstallArgs(expectedVersion)
+    : ['plugins', 'install', '--force', `${packageName}@${expectedVersion}`];
   const steps: ReconcileStep[] = [];
   const prune = opts.duplicateDirsToPrune ?? [];
 
@@ -622,7 +630,7 @@ export function planReconcileActions(verdict: ReconcileVerdict, opts: PlanOption
       pruneStep();
       steps.push({
         kind: 'openclaw-install-pinned',
-        command: ['plugins', 'install', '--force', `${packageName}@${expectedVersion}`],
+        command: pinnedInstall(),
         description: `reinstall pinned to ${expectedVersion} (refuse the downgrade a floating spec re-resolved to)`,
       });
       reloadThenVerify();
@@ -641,7 +649,7 @@ export function planReconcileActions(verdict: ReconcileVerdict, opts: PlanOption
     case 'install':
       steps.push({
         kind: 'openclaw-install',
-        command: ['plugins', 'install', `${packageName}@${expectedVersion}`],
+        command: pinnedInstall(),
         description: `install the plugin pinned to ${expectedVersion}`,
       });
       reloadThenVerify();

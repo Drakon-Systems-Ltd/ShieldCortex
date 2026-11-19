@@ -131,7 +131,7 @@ describe('#221 — no swallow is left behind in the OpenClaw steps', () => {
  */
 describe('#952 — secret-ref and drain endings are not a finished swap', () => {
   const CLI = '5.15.2';
-  const FORCE_INSTALL = 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest';
+  const FORCE_INSTALL = `openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@${CLI}`;
 
   /** OpenClaw's exact refusal: gateway/credentials.ts, `GatewaySecretRefUnavailableError`. Its own `Fix:` lines come with it. */
   const SECRET_REF_STDERR = [
@@ -407,7 +407,7 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
 describe('#1071 — a gateway secret reference does not end the plugin step', () => {
   const CLI = '5.20.0';
   const BEFORE = '5.19.0';
-  const FORCE_INSTALL = 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest';
+  const FORCE_INSTALL = `openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@${CLI}`;
   const INSTALL_ARGS = FORCE_INSTALL.split(' ').slice(1);
   const RELOAD_WAIT = 'openclaw plugins reload shieldcortex-realtime --wait';
   /** OpenClaw 2026.11.3's exact refusal (`GatewaySecretRefUnavailableError`, dist/credentials-*.mjs). */

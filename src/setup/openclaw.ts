@@ -38,6 +38,11 @@ import { helpGate } from '../cli/help-gate.js';
 import { COMMAND_HELP_SPECS } from '../cli/wants-help.js';
 import { resolveConversationAccessConsent } from './conversation-access-consent.js';
 import { withOwnConfigWrite } from '../audit/agent-config-watch-own-write.js';
+import {
+  realtimePluginInstallArgs,
+  realtimePluginInstallCommand,
+  runWithNpmSourceFallbackSync,
+} from './openclaw-plugin-spec.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1394,8 +1399,14 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   // and the local-copy fallback still have something to work with.
 
   const env = openClawChildEnv();
+  // The package install is pinned to this CLI's own version and forced to npm
+  // (`npm:`): OpenClaw 2026.11.5 resolves an unprefixed spec on ClawHub, whose
+  // copy is stale. `--force` is what OpenClaw 2026.7+ requires to accept a
+  // non-ClawHub source without a terminal (and it overwrites an existing
+  // install, so a re-run refreshes instead of refusing "already exists"). A
+  // host older than the `npm:` prefix gets one bare-spec retry, below.
   const attempts: Array<{ args: string[]; label: string }> = [
-    { args: ['plugins', 'install', '@drakon-systems/shieldcortex-realtime@latest'], label: 'package install' },
+    { args: realtimePluginInstallArgs(readSelfVersion()), label: 'package install' },
   ];
   const packageSource = resolvePluginPackageSource();
   if (fs.existsSync(packageSource)) {
@@ -1407,11 +1418,15 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
     spawnSync(command, args as string[], options));
 
   for (const attempt of attempts) {
-    const result = spawn('openclaw', attempt.args, {
-      env,
-      encoding: 'utf-8',
-      timeout: NATIVE_INSTALL_TIMEOUT_MS,
-    });
+    const { result } = runWithNpmSourceFallbackSync(
+      attempt.args,
+      (args) => spawn('openclaw', args, {
+        env,
+        encoding: 'utf-8',
+        timeout: NATIVE_INSTALL_TIMEOUT_MS,
+      }),
+      (r) => (r.status === 0 ? null : `${spawnResultText(r.stderr)}\n${spawnResultText(r.stdout)}`),
+    );
 
     if (result.status === 0) {
       lastNativePluginInstallRefusal = null;
@@ -1606,7 +1621,7 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
         console.warn('  Nothing was installed. Fix the reported cause, rebuild (`npm run build`), then retry `shieldcortex openclaw install`.');
       } else {
         console.warn('  Nothing was installed. Installing @drakon-systems/shieldcortex-realtime through OpenClaw failed (reason above); no local plugin copy ships with the npm package.');
-        console.warn('  Fix the reported cause and re-run `shieldcortex openclaw install`, or run `openclaw plugins install @drakon-systems/shieldcortex-realtime` directly.');
+        console.warn(`  Fix the reported cause and re-run \`shieldcortex openclaw install\`, or run \`${realtimePluginInstallCommand(readSelfVersion())}\` directly.`);
       }
       process.exitCode = 1;
     } else {
@@ -2005,7 +2020,7 @@ async function writeOpenClawInstall(
     console.error('');
     console.error('If OpenClaw is installed, try running directly:');
     console.error('  openclaw skills install shieldcortex');
-    console.error('  openclaw plugins install @drakon-systems/shieldcortex-realtime');
+    console.error(`  ${realtimePluginInstallCommand(readSelfVersion())}`);
     console.error('');
     console.error('Or install OpenClaw first:');
     console.error('  npm install -g openclaw');
@@ -2207,7 +2222,7 @@ async function writeOpenClawInstall(
   console.log('');
   console.log('Native OpenClaw install is also supported:');
   console.log('  openclaw skills install shieldcortex');
-  console.log('  openclaw plugins install @drakon-systems/shieldcortex-realtime');
+  console.log(`  ${realtimePluginInstallCommand(readSelfVersion())}`);
 
   // Best-effort gateway restart so the new plugin/hook are picked up
   // immediately. Skipped only when the caller explicitly opts out, both
@@ -2373,7 +2388,7 @@ export async function openClawHookStatus(): Promise<void> {
       configState.inLegacyInstalls ? 'plugins.installs (legacy — will be cleaned on next install)' : null,
       configState.inEntries ? 'plugins.entries' : null,
     ].filter(Boolean).join(' + ');
-    console.log(`  Real-time plugin: config references (${refs}) but no files on disk — run \`openclaw plugins install @drakon-systems/shieldcortex-realtime\` to reinstall`);
+    console.log(`  Real-time plugin: config references (${refs}) but no files on disk — run \`${realtimePluginInstallCommand(readSelfVersion())}\` to reinstall`);
     return;
   }
 
@@ -2514,7 +2529,6 @@ export interface ManagedPinRepairResult {
 export async function repairOpenClawManagedPins(homeArg?: string): Promise<ManagedPinRepairResult> {
   const home = homeArg ?? resolveUserHome();
   const pluginId = 'shieldcortex-realtime';
-  const pluginSpec = '@drakon-systems/shieldcortex-realtime@latest';
 
   const projectDir = resolveRealtimeProjectDir(home);
   const manifest = readRealtimeProjectManifest(home);
@@ -2532,6 +2546,8 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
   const latentPins = findLatentEoverridePins(manifest);
   const disabled = isRealtimePluginDisabledInConfig(home);
   const selfVersion = readSelfVersion();
+  const installArgs = realtimePluginInstallArgs(selfVersion);
+  const installCommand = realtimePluginInstallCommand(selfVersion);
   const deps = (typeof manifest.dependencies === 'object' && manifest.dependencies
     ? manifest.dependencies
     : {}) as Record<string, unknown>;
@@ -2577,7 +2593,7 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
     openclawBin = execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 }).trim();
     if (!openclawBin || !fs.existsSync(openclawBin)) throw new Error('not on PATH');
   } catch {
-    return { status: 'failed', message: 'Manifest reconciled, but `openclaw` is not on PATH to reinstall. Run `openclaw plugins install --force ' + pluginSpec + '` then `openclaw gateway restart`.' };
+    return { status: 'failed', message: 'Manifest reconciled, but `openclaw` is not on PATH to reinstall. Run `' + installCommand + '` then `openclaw gateway restart`.' };
   }
   const spawnEnv = openClawChildEnv({}, home);
 
@@ -2588,8 +2604,12 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
 
   // 5. Reinstall so OpenClaw recomputes a consistent manifest (re-derives the
   //    stripped pins at the override version — no more drift).
-  console.log(`  - reinstalling: openclaw plugins install --force ${pluginSpec}`);
-  const reinstall = spawnSync(openclawBin, ['plugins', 'install', '--force', pluginSpec], { encoding: 'utf-8', env: spawnEnv, timeout: 180000 });
+  console.log(`  - reinstalling: ${installCommand}`);
+  const { result: reinstall } = runWithNpmSourceFallbackSync(
+    installArgs,
+    (args) => spawnSync(openclawBin, args, { encoding: 'utf-8', env: spawnEnv, timeout: 180000 }),
+    (r) => (r.status === 0 ? null : `${r.stderr ?? ''}\n${r.stdout ?? ''}`),
+  );
   if (reinstall.status !== 0) {
     const out = `${reinstall.stderr ?? ''}${reinstall.stdout ?? ''}`.trim().split('\n').slice(-4).join('\n');
     return { status: 'failed', message: `Reinstall failed after reconciling the manifest:\n${out}\nManifest backup: ${manifestPath}.repair-backup-${ts}` };
@@ -2839,11 +2859,13 @@ export async function repairOpenClawPlugin(): Promise<void> {
   console.log('');
 
   // Step 5: Reinstall from npm.
-  console.log('Step 3/3: openclaw plugins install @drakon-systems/shieldcortex-realtime@latest');
-  const installResult = spawnSync(
-    openclawBin,
-    ['plugins', 'install', '@drakon-systems/shieldcortex-realtime@latest'],
-    { encoding: 'utf-8', env: spawnEnv, timeout: 120000 },
+  const reinstallVersion = readSelfVersion();
+  const reinstallCommand = realtimePluginInstallCommand(reinstallVersion);
+  console.log(`Step 3/3: ${reinstallCommand}`);
+  const { result: installResult, args: reinstallArgs } = runWithNpmSourceFallbackSync(
+    realtimePluginInstallArgs(reinstallVersion),
+    (args) => spawnSync(openclawBin, args, { encoding: 'utf-8', env: spawnEnv, timeout: 120000 }),
+    (r) => (r.status === 0 ? null : `${r.stderr ?? ''}\n${r.stdout ?? ''}`),
   );
   if (installResult.status !== 0) {
     console.error('  ✗ install failed:');
@@ -2854,7 +2876,7 @@ export async function repairOpenClawPlugin(): Promise<void> {
     if (configSnapshot.raw) {
       console.error('Your previous OpenClaw config has been backed up — see the safety backup line above.');
     }
-    console.error('Try again with: openclaw plugins install @drakon-systems/shieldcortex-realtime@latest');
+    console.error(`Try again with: openclaw ${reinstallArgs.join(' ')}`);
     process.exit(1);
   }
   console.log('  ✓ install succeeded');

@@ -24,7 +24,7 @@ import type { CapturedError } from '../../integrations/child-output.js';
  */
 
 const PKG = '5.2.1';
-const PLUGIN_RERUN = 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest';
+const PLUGIN_RERUN = `openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@${PKG}`;
 const SKILL_ARGS = ['skills', 'install', 'shieldcortex', '--force', '--acknowledge-install-policy-warning'];
 const SKILL_RERUN = `openclaw ${SKILL_ARGS.join(' ')}`;
 

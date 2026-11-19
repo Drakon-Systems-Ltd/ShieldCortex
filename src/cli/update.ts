@@ -19,6 +19,12 @@ import { fileURLToPath } from 'url';
 import semver from 'semver';
 import { resolveRealtimePluginInstallPath, readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
 import { describeRunFailure, sanitiseForReport } from '../integrations/child-output.js';
+import {
+  realtimePluginInstallArgs,
+  realtimePluginInstallCommand,
+  rejectsNpmSourcePrefix,
+  type RealtimePluginSpecSource,
+} from '../setup/openclaw-plugin-spec.js';
 import type { CapturedError } from '../integrations/child-output.js';
 import {
   GATEWAY_BOOT_ENV_DISPLAY,
@@ -739,8 +745,22 @@ export function isRealtimePluginRegistered(home: string): boolean {
   return readRealtimePluginRegistration(home).registered;
 }
 
-const PLUGIN_INSTALL_ARGS = ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@latest'];
-const PLUGIN_RERUN = `openclaw ${PLUGIN_INSTALL_ARGS.join(' ')}`;
+/**
+ * The plugin version this CLI expects, read from the package.json on disk NOW
+ * — after the npm step that is the newly installed core, also when the re-exec
+ * into it failed and this (older) process carries on. Never
+ * `IN_PROCESS_VERSION`, which is the version being replaced. The plugin ships
+ * in lockstep with core, so this is the exact version to install. Null when it
+ * cannot be read; the install then falls back to `@latest` (still from npm).
+ */
+function expectedPluginVersion(read: () => string = readPackageVersion): string | null {
+  try {
+    const v = read();
+    return semver.valid(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
 /**
  * #952: the command that finishes a swap OpenClaw refused because the previous
  * generation's admitted work had not settled. It is the recovery OpenClaw's own
@@ -888,7 +908,7 @@ export async function stepOpenClawPlugin(
       summary: 'skipped — ~/.openclaw could not be taken exclusively',
       detail: [scrubHomePath(acquired.busy, home)],
       unfinished: true,
-      rerun: PLUGIN_RERUN,
+      rerun: realtimePluginInstallCommand(expectedPluginVersion(deps.readCliVersion)),
     }));
   }
   try {
@@ -939,8 +959,26 @@ async function stepOpenClawPluginLocked(
     // #1105: `credentials` (the local gateway's boot credential, retry only) go
     // into a copy of that env for this one child — never into `process.env`,
     // never onto the command line, never anywhere else.
-    const install = (credentials?: GatewayCredentials) => run('openclaw', PLUGIN_INSTALL_ARGS,
-      credentials ? { ...installOpts, env: { ...installOpts.env, ...credentials } } : installOpts);
+    //
+    // The spec is `npm:@drakon-systems/shieldcortex-realtime@<expected>`: an
+    // exact pin from npm, because OpenClaw 2026.11.5 resolves an unprefixed
+    // spec on ClawHub, which carries a stale copy. A host that predates the
+    // `npm:` prefix refuses it outright; that refusal, and only that one, earns
+    // ONE retry with the bare (still exact) spec, and every later attempt and
+    // printed command uses the bare form on that host.
+    const pinned = expectedPluginVersion(ctx.readCliVersion);
+    let source: RealtimePluginSpecSource = 'npm';
+    const rerunCommand = (): string => realtimePluginInstallCommand(pinned, source);
+    const install = async (credentials?: GatewayCredentials) => {
+      const opts = credentials ? { ...installOpts, env: { ...installOpts.env, ...credentials } } : installOpts;
+      try {
+        return await run('openclaw', realtimePluginInstallArgs(pinned, source), opts);
+      } catch (err) {
+        if (source !== 'npm' || !rejectsNpmSourcePrefix(installSaid(err))) throw err;
+        source = 'bare';
+        return await run('openclaw', realtimePluginInstallArgs(pinned, source), opts);
+      }
+    };
 
     /** The install child exited 0: report what it ACTUALLY left on disk. */
     const installed = (): StepResult => {
@@ -950,24 +988,30 @@ async function stepOpenClawPluginLocked(
       const expected = (ctx.readCliVersion ?? readPackageVersion)();
       const comparable = Boolean(after && semver.valid(after) && semver.valid(expected));
       const lag = comparable && semver.lt(after!, expected);
+      // The install was pinned to exactly `expected`; any other version is not
+      // what was asked for (a stale ClawHub copy, or a different copy read) —
+      // never "up to date".
+      const mismatch = comparable && !semver.eq(after!, expected);
       const changed = before && after && before !== after ? `${before} → ${after}` : null;
       const transition = lag
         ? `${changed ? `${changed}; ` : ''}still v${after} — CLI is v${expected}`
         : !comparable ? 'installed version unreadable — could not compare plugin to CLI'
-        : changed ?? (semver.eq(after!, expected) ? `up to date (v${after})` : `v${after} installed — CLI is v${expected}`);
+        : mismatch ? `${changed ? `${changed}; ` : ''}v${after} installed — CLI is v${expected}`
+        : changed ?? `up to date (v${after})`;
       if (purgeFailure) {
         return {
           status: 'warn' as const,
           summary: `${transition} — legacy copy left behind`,
           detail: [sanitiseForReport(`could not remove legacy extension at ${extDir}: ${purgeFailure}`, { home })],
-          ...(lag || !comparable ? { rerun: PLUGIN_RERUN } : {}),
+          ...(mismatch || !comparable ? { rerun: rerunCommand() } : {}),
         };
       }
       // #606 r1 (3): a child that exited 0 but left the plugin behind the CLI, or
       // a version this step cannot read, has not done the work it was asked to —
       // it is unresolved, and the footer must carry the command that finishes it.
-      return lag || !comparable
-        ? { status: 'warn' as const, summary: transition, rerun: PLUGIN_RERUN }
+      // A pinned install that landed any version other than the pin counts too.
+      return mismatch || !comparable
+        ? { status: 'warn' as const, summary: transition, rerun: rerunCommand() }
         : { status: 'ok' as const, summary: transition };
     };
 
@@ -1012,12 +1056,12 @@ async function stepOpenClawPluginLocked(
             ...(stillOn
               ? [`OpenClaw's own plugin list still shows shieldcortex-realtime v${stillOn}, enabled — the refused install did not replace it`]
               : []),
-            `run \`${PLUGIN_RERUN}\` from the shell where \`openclaw\` resolves that reference (an env-sourced reference reads the variable its id names); re-running \`shieldcortex update\` repeats the install OpenClaw just refused`,
+            `run \`${rerunCommand()}\` from the shell where \`openclaw\` resolves that reference (an env-sourced reference reads the variable its id names); re-running \`shieldcortex update\` repeats the install OpenClaw just refused`,
             ...purgeDetail,
           ],
           truncated: report.truncated,
           unfinished: true,
-          recovery: { command: PLUGIN_RERUN, note: SECRET_REF_NOTE },
+          recovery: { command: rerunCommand(), note: SECRET_REF_NOTE },
           ...(stillOn ? { stillOn } : {}),
         };
       }
@@ -1052,14 +1096,14 @@ async function stepOpenClawPluginLocked(
           };
         }
         const endLine = end.version !== null
-          ? `installed is v${end.version}, target v${expected} — re-run: ${PLUGIN_RERUN}`
-          : `end state unknown (${end.reason}) — re-run: ${PLUGIN_RERUN}`;
+          ? `installed is v${end.version}, target v${expected} — re-run: ${rerunCommand()}`
+          : `end state unknown (${end.reason}) — re-run: ${rerunCommand()}`;
         return {
           status: 'warn' as const,
           summary: `update failed — ${report.reason}`,
           detail: [...report.detail, endLine, ...purgeDetail],
           truncated: report.truncated,
-          rerun: PLUGIN_RERUN,
+          rerun: rerunCommand(),
           unfinished: true,
         };
       }
@@ -1068,7 +1112,7 @@ async function stepOpenClawPluginLocked(
         summary: `update failed — ${report.reason}`,
         detail: [...report.detail, ...purgeDetail],
         truncated: report.truncated,
-        rerun: PLUGIN_RERUN,
+        rerun: rerunCommand(),
         unfinished: true,
       };
     };
@@ -1076,8 +1120,9 @@ async function stepOpenClawPluginLocked(
     try {
       // `openclaw plugins update` no-ops when OpenClaw recorded an exact-pinned
       // spec (observed 2026-06-09: the index pinned @4.30.2 → "up to date" while
-      // npm had 4.31.0). A forced @latest install reliably advances the plugin
-      // AND rewrites the tracked spec to @latest so future updates work.
+      // npm had 4.31.0). A forced install pinned to this CLI's own version
+      // advances the plugin to exactly that version, from npm; every later
+      // `shieldcortex update` re-pins it the same way.
       await install();
       return installed();
     } catch (err) {
@@ -1128,7 +1173,7 @@ async function stepOpenClawPluginLocked(
         // (#1105 r2): what it said is used to classify its ending, never
         // shown — no scrub can find a value it quoted, escaped, trimmed or
         // cut apart.
-        r = await failed(boot.used ? credentialedRetryFailure(retryErr, boot.env) : retryErr);
+        r = await failed(boot.used ? credentialedRetryFailure(retryErr, boot.env, rerunCommand()) : retryErr);
       }
       // Why the boot env did not help, when it matters: the retry failed too.
       const bootNote = !boot.used && retryFailed ? [`gateway boot env not used: ${boot.reason}`] : [];
@@ -1174,7 +1219,7 @@ const CREDENTIALED_OUTPUT_WITHHELD = 'its output is withheld: this retry carried
  * refusal (with the config key from a fixed set), its unsettled-reload
  * refusal, an exit status, a timeout, or a child that could not start.
  */
-function credentialedRetryFailure(err: unknown, creds: GatewayCredentials): CapturedError {
+function credentialedRetryFailure(err: unknown, creds: GatewayCredentials, command: string): CapturedError {
   const e = (err ?? {}) as CapturedError;
   const said = redactGatewayCredentials(installSaid(err), creds);
   const ending = classifyOpenClawInstallEnding(said);
@@ -1189,7 +1234,7 @@ function credentialedRetryFailure(err: unknown, creds: GatewayCredentials): Capt
   }
   if (!e.spawnFailed && (ending !== null || e.timedOut)) lines.push(CREDENTIALED_OUTPUT_WITHHELD);
   const out = new Error(e.timedOut ? 'openclaw plugins install timed out' : 'openclaw plugins install failed') as CapturedError;
-  out.command = PLUGIN_RERUN;
+  out.command = command;
   out.stdout = '';
   out.stderr = lines.join('\n');
   out.exitCode = exitCode;

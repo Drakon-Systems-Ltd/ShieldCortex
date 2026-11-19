@@ -59,7 +59,7 @@ describe('planReconcileActions — command routing per #74 state', () => {
     const plan = planFor('version-regressed');
     const pinned = plan.find((s) => s.kind === 'openclaw-install-pinned');
     expect(pinned).toBeTruthy();
-    expect(joinCmd(pinned)).toBe(`openclaw plugins install --force ${PKG}@4.47.2`);
+    expect(joinCmd(pinned)).toBe(`openclaw plugins install --force npm:${PKG}@4.47.2`);
     expect(joinCmd(pinned)).not.toMatch(/@latest/);
   });
 
@@ -89,7 +89,7 @@ describe('planReconcileActions — command routing per #74 state', () => {
   it('not-installed plans a pinned install then reload + self-check', () => {
     const plan = planFor('not-installed');
     const install = plan.find((s) => s.kind === 'openclaw-install');
-    expect(joinCmd(install)).toBe(`openclaw plugins install ${PKG}@4.47.2`);
+    expect(joinCmd(install)).toBe(`openclaw plugins install --force npm:${PKG}@4.47.2`);
     expect(plan[plan.length - 1].kind).toBe('self-check');
   });
 });

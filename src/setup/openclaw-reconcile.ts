@@ -19,6 +19,7 @@ import { resolveRepairConsent } from './repair-consent.js';
 import { resolveConversationAccessConsent } from './conversation-access-consent.js';
 import { summariseCommandOutput } from '../integrations/child-output.js';
 import { gatewayBootLogAdvice, gatewayRestartCommand } from './gateway-restart-command.js';
+import { runWithNpmSourceFallbackSync } from './openclaw-plugin-spec.js';
 import { nextCausalSeq } from './causal-seq.js';
 
 /**
@@ -490,8 +491,14 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
       stepResults.push({ kind: step.kind, ok, detail: `pruned ${(step.dirs ?? []).length} dir(s)` });
       continue;
     }
-    // openclaw-* command steps.
-    const r = runCommand(step.command ?? []);
+    // openclaw-* command steps. An `npm:` install refused by a host that
+    // predates the prefix is retried once with the bare, still pinned spec;
+    // no other failure is retried.
+    const { result: r, args: ranArgs } = runWithNpmSourceFallbackSync(
+      step.command ?? [],
+      runCommand,
+      (out) => (out.status === 0 ? null : out.output),
+    );
     const ok = r.status === 0;
     // #221: was `split('\n').slice(-1)[0]` — the LAST line. When OpenClaw
     // refuses because its config is invalid, its last line is the reassurance
@@ -518,7 +525,7 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     const summary = summarised.lines[0] ?? '';
     stepResults.push({ kind: step.kind, ok, detail: summary });
     if (ok) noteChange();
-    if (!ok) messages.push(`command failed (openclaw ${(step.command ?? []).join(' ')}): ${summary}`);
+    if (!ok) messages.push(`command failed (openclaw ${ranArgs.join(' ')}): ${summary}`);
   }
 
   // #145: re-read the state AFTER remediation. The pre-remediation snapshot is

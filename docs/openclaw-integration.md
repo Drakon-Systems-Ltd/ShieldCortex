@@ -23,13 +23,17 @@ This lets OpenClaw keep its native memory behavior while ShieldCortex adds secur
 
 ```bash
 openclaw skills install shieldcortex
-openclaw plugins install @drakon-systems/shieldcortex-realtime
+openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@latest
 openclaw gateway restart
 ```
 
 This uses OpenClaw's native npm hook-pack and plugin-pack install flow. The
 hook comes from `shieldcortex`; the real-time plugin comes from the standalone
-`@drakon-systems/shieldcortex-realtime` package.
+`@drakon-systems/shieldcortex-realtime` package. Keep the `npm:` prefix: from
+OpenClaw 2026.11.5 a spec without it installs from ClawHub, whose copy of the
+plugin is old. `--force` confirms the npm source when there is no terminal to
+ask. OpenClaw releases before 2026.4.26 do not know `npm:`; drop the prefix
+there.
 
 ### ShieldCortex wrapper (compatibility path)
 
@@ -148,8 +152,11 @@ it, but that skips the native-module check too — prefer the variable.
 box. The [updating guide](UPDATING.md#updating) is the operator summary;
 this page is what each step does.
 
-- **Plugin** — `openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest`.
-  The forced form is deliberate: it replaces a registration pinned to an older
+- **Plugin** — `openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@<version>`,
+  where `<version>` is the ShieldCortex version just installed (the plugin
+  ships in lockstep). `npm:` and the exact version keep OpenClaw 2026.11.5 and
+  later from installing the old ClawHub copy instead; an OpenClaw that predates
+  `npm:` is retried once without it. The forced form is deliberate: it replaces a registration pinned to an older
   version or left half-installed, where a bare update would stay on the pin or
   refuse. It runs under the `~/.openclaw` update lock (below). A plugin install
   that did not land is reported as unfinished with that exact command as the
@@ -177,7 +184,7 @@ later id-based updates. On an older OpenClaw, or to recover a broken install,
 use the forced form `shieldcortex update` uses itself:
 
 ```bash
-openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest
+openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@latest
 ```
 
 The two do not conflict: both end with the same registration pointing at the
@@ -395,7 +402,7 @@ which openclaw
 Hook/plugin not active after install:
 1. Run `shieldcortex openclaw status`
 2. Restart OpenClaw gateway
-3. Reinstall with `openclaw skills install shieldcortex` and `openclaw plugins install @drakon-systems/shieldcortex-realtime`
+3. Reinstall with `openclaw skills install shieldcortex` and `openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@latest`
 4. If `status` shows a legacy `internal/cortex-memory` path, rerun `shieldcortex openclaw install` once to migrate and clean up duplicates
 
 Permission denied during install:

@@ -378,6 +378,60 @@ describe('tryNativeOpenClawPluginInstall real spawn wiring (#251)', () => {
   });
 });
 
+describe('native package install — npm: source, exact pin (OpenClaw 2026.11.5 ClawHub default)', () => {
+  const selfVersion = (): string => JSON.parse(
+    fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..', 'package.json'), 'utf-8'),
+  ).version;
+  const NPM = (): string[] => ['plugins', 'install', '--force', `npm:@drakon-systems/shieldcortex-realtime@${selfVersion()}`];
+  const BARE = (): string[] => ['plugins', 'install', '--force', `@drakon-systems/shieldcortex-realtime@${selfVersion()}`];
+  const isPackageAttempt = (args: readonly string[]) => !args.includes('--link');
+
+  it('first attempt is `plugins install --force npm:…@<this CLI version>`', async () => {
+    writeConfig({ plugins: { allow: [], entries: {} } });
+    __setNativePluginInstallForTest(null);
+    const calls: string[][] = [];
+    __setNativeSpawnForTest((_cmd, args) => { calls.push([...args]); return { status: 0, stdout: '', stderr: '' }; });
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    expect(calls[0]).toEqual(NPM());
+    expect(calls.flat().join(' ')).not.toMatch(/@latest|clawhub:/);
+  });
+
+  it('retries ONCE with the bare exact spec when OpenClaw predates `npm:`', async () => {
+    writeConfig({ plugins: { allow: [], entries: {} } });
+    __setNativePluginInstallForTest(null);
+    const calls: string[][] = [];
+    __setNativeSpawnForTest((_cmd, args) => {
+      calls.push([...args]);
+      return args.some((a) => a.startsWith('npm:'))
+        ? { status: 1, stdout: '', stderr: 'unsupported npm spec: protocol specs are not allowed\n' }
+        : { status: 0, stdout: '', stderr: '' };
+    });
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    expect(calls.slice(0, 2)).toEqual([NPM(), BARE()]);
+    expect(calls.filter(isPackageAttempt)).toHaveLength(2);
+    expect(getLastNativePluginInstallRefusal()).toBeNull();
+  });
+
+  it.each([
+    ['consent', 'Install cancelled; rerun with --force after reviewing the source.\n'],
+    ['integrity', 'npm error code EINTEGRITY\n'],
+    ['network', 'npm error code ENOTFOUND\n'],
+  ])('does NOT retry the package install on a %s failure', async (_label, stderr) => {
+    writeConfig({ plugins: { allow: [], entries: {} } });
+    __setNativePluginInstallForTest(null);
+    const calls: string[][] = [];
+    __setNativeSpawnForTest((_cmd, args) => { calls.push([...args]); return { status: 1, stdout: '', stderr }; });
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    expect(calls.filter(isPackageAttempt)).toEqual([NPM()]);
+  });
+});
+
 describe('#251 source contract — tryNativeOpenClawPluginInstall keeps child output', () => {
   it('classifies spawn output instead of bare-null discard', () => {
     const src = fs.readFileSync(

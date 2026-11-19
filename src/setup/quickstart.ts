@@ -12,6 +12,7 @@ import path from 'path';
 import readline from 'readline/promises';
 import { setupClaudeMd } from './claude-md.js';
 import { handleOpenClawCommand } from './openclaw.js';
+import { realtimePluginInstallCommand } from './openclaw-plugin-spec.js';
 import { handleCopilotCommand } from './copilot.js';
 import { handleCodexCommand } from './codex.js';
 
@@ -107,7 +108,7 @@ function printAutoGuide(): void {
   lines.push('Direct commands:');
   lines.push('  shieldcortex setup');
   lines.push('  openclaw hooks install shieldcortex');
-  lines.push('  openclaw plugins install @drakon-systems/shieldcortex-realtime');
+  lines.push(`  ${realtimePluginInstallCommand(null)}`);
   lines.push('  # or compatibility wrapper: shieldcortex openclaw install');
   lines.push('  shieldcortex copilot install');
   lines.push('  shieldcortex codex install');

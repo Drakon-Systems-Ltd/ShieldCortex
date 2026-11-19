@@ -200,7 +200,7 @@ describe('OpenClaw native refusals (#706)', () => {
       expect(output.includes('npm run build')).toBe(expectBuildHint);
       if (!expectBuildHint) {
         expect(output).toMatch(/no local plugin copy ships with the npm package/i);
-        expect(output).toMatch(/openclaw plugins install @drakon-systems\/shieldcortex-realtime/);
+        expect(output).toMatch(/openclaw plugins install --force npm:@drakon-systems\/shieldcortex-realtime@\d+\.\d+\.\d+/);
       }
       expect(process.exitCode).toBe(1);
     },

@@ -102,8 +102,33 @@ describe('reconcileOpenClawPluginState', () => {
       selfCheck: async () => passingSelfCheck,
     });
     const install = calls.find((a) => a.includes('install'));
-    expect(install).toEqual(['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@4.47.2']);
+    expect(install).toEqual(['plugins', 'install', '--force', 'npm:@drakon-systems/shieldcortex-realtime@4.47.2']);
     expect(install!.join(' ')).not.toMatch(/@latest/);
+  });
+
+  it.each([
+    ['an OpenClaw that predates `npm:`', 'unsupported npm spec: protocol specs are not allowed', true],
+    ['an integrity failure', 'npm error code EINTEGRITY', false],
+    ['a consent refusal', 'Install cancelled; rerun with --force after reviewing the source.', false],
+  ] as const)('pinned reinstall: %s — only the `npm:` refusal earns ONE bare exact retry', async (_label, said, retried) => {
+    setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
+    const calls: string[][] = [];
+    await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: (argv) => { calls.push(argv); return { status: 1, output: said }; },
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    // The converge loop may run the plan more than once; within each run the
+    // `npm:` install comes first and is followed by at most one bare retry.
+    const NPM = ['plugins', 'install', '--force', 'npm:@drakon-systems/shieldcortex-realtime@4.47.2'];
+    const BARE = ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@4.47.2'];
+    const installs = calls.filter((a) => a.includes('install'));
+    const runs = installs.filter((a) => a[3].startsWith('npm:')).length;
+    expect(runs).toBeGreaterThanOrEqual(1);
+    const perRun = retried ? [NPM, BARE] : [NPM];
+    expect(installs).toEqual(Array.from({ length: runs }, () => perRun).flat());
+    expect(installs.flat().join(' ')).not.toMatch(/clawhub:|@latest/);
   });
 
   it('healthy state runs only the self-check, executes no openclaw command', async () => {

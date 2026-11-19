@@ -63,7 +63,7 @@ import type { CapturedError } from '../integrations/child-output.js';
 
 const CLI = '5.20.1';
 const BEFORE = '5.20.0';
-const FORCE_INSTALL = 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest';
+const FORCE_INSTALL = `openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@${CLI}`;
 const INSTALL_ARGS = FORCE_INSTALL.split(' ').slice(1);
 /** OpenClaw 2026.11.4's exact refusal (dist/credentials-*.mjs, `GatewaySecretRefUnavailableError`). */
 const SECRET_REF_STDERR = [

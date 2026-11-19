@@ -180,7 +180,7 @@ describe('#788 update footer re-run line', () => {
   });
 
   it('prints an ordinary re-run command unchanged', () => {
-    const rerun = 'openclaw plugins install @drakon-systems/shieldcortex-realtime';
+    const rerun = 'openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@5.20.2';
     const out = runFooter([{ label: 'OpenClaw plugin', rerun }]).replace(RENDERER_SGR, '');
     expect(out).toContain(`OpenClaw plugin: re-run ${rerun}`);
   });
