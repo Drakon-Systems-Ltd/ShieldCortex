@@ -45,11 +45,14 @@ function joinCmd(step: { command?: string[] } | undefined): string {
 }
 
 describe('planReconcileActions — command routing per #74 state', () => {
-  it('silent-drop routes OpenClaw-tracked plugin through `plugins update` (NOT install)', () => {
+  it('silent-drop refreshes the OpenClaw-tracked realtime plugin with the PINNED npm install, never `plugins update`', () => {
+    // #1109 review: `plugins update` follows the existing install record's
+    // source — a stale ClawHub record updates from ClawHub. The refresh is the
+    // pinned `npm:` install instead.
     const plan = planFor('enabled-not-loaded');
-    const update = plan.find((s) => s.kind === 'openclaw-update');
-    expect(update).toBeTruthy();
-    expect(joinCmd(update)).toBe(`openclaw plugins update ${PKG}`);
+    expect(plan.some((s) => s.kind === 'openclaw-update')).toBe(false);
+    const pinned = plan.find((s) => s.kind === 'openclaw-install-pinned');
+    expect(joinCmd(pinned)).toBe(`openclaw plugins install --force npm:${PKG}@4.47.2`);
     // The failing path on aiquant was `shieldcortex openclaw install` → source
     // not found. There must be no plain (non-pinned, non-forced) install here.
     expect(plan.some((s) => s.kind === 'openclaw-install')).toBe(false);

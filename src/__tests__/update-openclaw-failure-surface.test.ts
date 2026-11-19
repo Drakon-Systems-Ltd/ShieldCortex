@@ -8,6 +8,7 @@ import { classifyOpenClawInstallEnding, collectUnresolved, footer, stepOpenClawP
 import { buildUpdateSummary, renderUpdateSummary, type UpdateSummaryInput } from '../cli/update-summary.js';
 import { NO_STYLE } from '../cli/term-ui.js';
 import type { CapturedError } from '../integrations/child-output.js';
+import { answersNpmView } from './npm-view-fixture.js';
 
 /**
  * #221 — `update` must surface what the child said, not restate the command.
@@ -43,13 +44,13 @@ beforeEach(() => {
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 function rejectWith(over: Partial<CapturedError>) {
-  return () => Promise.reject(Object.assign(new Error('exit 1: openclaw plugins install'), {
+  return answersNpmView(() => Promise.reject(Object.assign(new Error('exit 1: openclaw plugins install'), {
     exitCode: 1,
     command: 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest',
     stdout: '',
     stderr: '',
     ...over,
-  }) as CapturedError);
+  }) as CapturedError));
 }
 
 describe('#221 — the reason reaches the operator', () => {
@@ -164,7 +165,7 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
       }
       return rejectWith(install)();
     };
-    return { run: run as never, calls };
+    return { run: answersNpmView(run) as never, calls };
   }
 
   it.each([
@@ -470,7 +471,7 @@ describe('#1071 — a gateway secret reference does not end the plugin step', ()
       onDisk = CLI;
       return Promise.resolve({ stdout: 'Installed shieldcortex-realtime', stderr: '' });
     };
-    return { run: run as never, calls, readPluginVersion: () => onDisk };
+    return { run: answersNpmView(run) as never, calls, readPluginVersion: () => onDisk };
   }
 
   function step(f: ReturnType<typeof fakeOpenClaw>) {
@@ -540,7 +541,7 @@ describe('#1071 — a gateway secret reference does not end the plugin step', ()
   it('an ordinary failure is not retried', async () => {
     const f = fakeOpenClaw(() => true);
     const r = await stepOpenClawPlugin(home, {
-      run: ((cmd: string, args: string[]) => {
+      run: answersNpmView((cmd: string, args: string[]) => {
         f.calls.push({ cmd, args, env: {} });
         return rejectWith({ stderr: 'OpenClaw config is invalid: ~/.openclaw/openclaw.json' })();
       }) as never,
@@ -694,6 +695,9 @@ describe('#1071 — a gateway secret reference does not end the plugin step', ()
       return stepOpenClawPlugin(home, {
         readPluginVersion: () => (existsSync(installedMark) ? CLI : BEFORE),
         readCliVersion: () => CLI,
+        // PATH holds only the fake `openclaw`; the #1109 publication check is
+        // not what this case is about.
+        confirmPublished: async () => ({ published: true }),
       });
     }
 

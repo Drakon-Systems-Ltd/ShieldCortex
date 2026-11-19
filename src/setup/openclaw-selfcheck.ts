@@ -95,7 +95,7 @@ export interface SelfCheckVerdict {
   /** Which of the three roster answers we actually have. */
   rosterState: RosterProofState;
   canaryProof: boolean;
-  /** onDiskVersion >= expectedVersion (inert/true when no expectedVersion given). */
+  /** onDiskVersion === expectedVersion (inert/true when no expectedVersion given). */
   versionProof: boolean;
   reasons: string[];
 }
@@ -222,8 +222,11 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
     reasons.push('canary proof FAILED: canary denied but no audit entry appeared — cannot prove the interceptor fired');
   }
 
-  // Version proof: onDisk must be >= expected. Inert (true) when the caller
-  // supplied no expectedVersion (e.g. pure roster+canary unit tests).
+  // Version proof: onDisk must BE expected — the plugin ships in lockstep with
+  // the CLI and every install is pinned to that exact version, so a newer
+  // build is "not the pinned build" just as an older one is (#1109 review).
+  // Inert (true) when the caller supplied no expectedVersion (e.g. pure
+  // roster+canary unit tests).
   let versionProof = true;
   if (input.expectedVersion) {
     const onDisk = semver.valid(input.onDiskVersion ?? '') ?? semver.valid(semver.coerce(input.onDiskVersion ?? '') ?? '');
@@ -234,6 +237,9 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
     } else if (expected && semver.lt(onDisk, expected)) {
       versionProof = false;
       reasons.push(`version proof FAILED: on-disk build ${onDisk} is OLDER than expected ${expected} — a silent downgrade (the 4.25.4 class); refuse it`);
+    } else if (expected && !semver.eq(onDisk, expected)) {
+      versionProof = false;
+      reasons.push(`version proof FAILED: on-disk build ${onDisk} is not the pinned ${expected} (newer than this CLI expects)`);
     } else {
       reasons.push(`version proof: on-disk build ${onDisk} satisfies expected ${expected ?? input.expectedVersion}`);
     }

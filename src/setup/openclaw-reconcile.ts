@@ -19,7 +19,17 @@ import { resolveRepairConsent } from './repair-consent.js';
 import { resolveConversationAccessConsent } from './conversation-access-consent.js';
 import { summariseCommandOutput } from '../integrations/child-output.js';
 import { gatewayBootLogAdvice, gatewayRestartCommand } from './gateway-restart-command.js';
-import { runWithNpmSourceFallbackSync } from './openclaw-plugin-spec.js';
+import {
+  BareRetryBudget,
+  REALTIME_PLUGIN_PACKAGE,
+  assessRealtimeReplacement,
+  exactPluginPin,
+  readLinkedRealtimeInstall,
+  realtimePluginInstallCommand,
+  runWithNpmSourceFallbackSync,
+  type ExistingRealtimeInstall,
+} from './openclaw-plugin-spec.js';
+import { readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
 import { nextCausalSeq } from './causal-seq.js';
 
 /**
@@ -130,8 +140,21 @@ export interface ReconcileOptions {
    * and we are not under a Jest worker — so tests and headless runs dry-run.
    */
   apply?: boolean;
-  /** Injectable openclaw executor (defaults to a guarded spawnSync). */
-  runCommand?: (argv: string[]) => { status: number; output: string };
+  /**
+   * Injectable openclaw executor (defaults to a guarded spawnSync). `stderr` /
+   * `stdout` are the child's own streams when the executor has them; only a
+   * refusal on `stderr` can earn the one bare-spec retry (#1109 review), so an
+   * executor that reports `output` alone never gets one.
+   */
+  runCommand?: (argv: string[]) => { status: number; output: string; stderr?: string; stdout?: string };
+  /**
+   * The ONE bare-spec retry this whole reconcile run may spend (#1109 review):
+   * created by the first pass and handed to every later pass, so the
+   * operation as a whole — not each pass — gets at most one.
+   */
+  bareRetryBudget?: BareRetryBudget;
+  /** What realtime install is there now, for the never-clobber check (defaults to OpenClaw's own files under `home`). */
+  readExistingInstall?: (home: string) => ExistingRealtimeInstall;
   /** Injectable gateway reload (defaults to the guarded restartOpenClawGateway). */
   reloadGateway?: () => Promise<GatewayReloadResult>;
   /** Injectable self-check (defaults to runPluginSelfCheck). */
@@ -218,7 +241,10 @@ export interface RawSpawnResult {
  * unconditionally hostile under Jest by design (repair-consent.ts). This
  * seam is pure and needs neither.
  */
-export function describeSpawnOutcome(command: string, r: RawSpawnResult): { status: number; output: string } {
+export function describeSpawnOutcome(
+  command: string,
+  r: RawSpawnResult,
+): { status: number; output: string; stderr?: string; stdout?: string } {
   if (r.error) {
     const code = r.error.code;
     if (code === 'ENOENT') return { status: 1, output: `openclaw binary not found (ENOENT): ${command}` };
@@ -228,7 +254,12 @@ export function describeSpawnOutcome(command: string, r: RawSpawnResult): { stat
   if (r.signal) {
     return { status: 1, output: `openclaw command killed by signal ${r.signal}: ${command}` };
   }
-  return { status: r.status ?? 1, output: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+  return {
+    status: r.status ?? 1,
+    output: `${r.stdout ?? ''}${r.stderr ?? ''}`,
+    stderr: typeof r.stderr === 'string' ? r.stderr : '',
+    stdout: typeof r.stdout === 'string' ? r.stdout : '',
+  };
 }
 
 /**
@@ -237,7 +268,7 @@ export function describeSpawnOutcome(command: string, r: RawSpawnResult): { stat
  * gate. Returns a non-zero status with an explanatory line when skipped so the
  * caller does not mistake a skip for a success.
  */
-export function defaultRunCommand(argv: string[]): { status: number; output: string } {
+export function defaultRunCommand(argv: string[]): { status: number; output: string; stderr?: string; stdout?: string } {
   if (process.env.JEST_WORKER_ID !== undefined) {
     return { status: 1, output: 'skipped under test runner' };
   }
@@ -302,6 +333,11 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   const pluginId = options.pluginId ?? REALTIME_PLUGIN_ID;
   const apply = options.apply ?? defaultApply();
   const runCommand = options.runCommand ?? defaultRunCommand;
+  const bareRetryBudget = options.bareRetryBudget ?? new BareRetryBudget();
+  const readExistingInstall = options.readExistingInstall ?? ((h: string): ExistingRealtimeInstall => ({
+    version: readInstalledRealtimePluginVersion(h),
+    linkedAt: readLinkedRealtimeInstall(h),
+  }));
   const reloadGateway = options.reloadGateway ?? defaultReloadGateway;
   const selfCheck = options.selfCheck
     ?? ((h: string, p: string) => runPluginSelfCheck(h, { pluginId: p, expectedVersion: options.expectedVersion }));
@@ -491,13 +527,37 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
       stepResults.push({ kind: step.kind, ok, detail: `pruned ${(step.dirs ?? []).length} dir(s)` });
       continue;
     }
+    // #1109 review: a realtime install is forced (`--force`), so before it
+    // runs: it must carry an exact pin (the planner leaves the command empty
+    // when there is none), and it must not replace a linked/path install or
+    // one newer than the pin. Refused here, the step fails with the command —
+    // nothing is run.
+    const cmd = step.command ?? [];
+    const realtimeInstall = (step.kind === 'openclaw-install' || step.kind === 'openclaw-install-pinned')
+      && (cmd.length === 0 || cmd.some((a) => a.includes(REALTIME_PLUGIN_PACKAGE)));
+    if (realtimeInstall) {
+      const pin = exactPluginPin(options.expectedVersion);
+      const refusal = !pin || cmd.length === 0
+        ? `not installed — no exact plugin version to pin to (expected ${JSON.stringify(options.expectedVersion)}); run \`${realtimePluginInstallCommand(null)}\``
+        : (() => {
+          const keep = assessRealtimeReplacement(readExistingInstall(home), pin);
+          return keep.replace ? null : `${keep.summary}; to replace it with v${pin}: \`${realtimePluginInstallCommand(pin)}\``;
+        })();
+      if (refusal) {
+        stepResults.push({ kind: step.kind, ok: false, detail: refusal });
+        messages.push(`plugin install skipped: ${refusal}`);
+        continue;
+      }
+    }
     // openclaw-* command steps. An `npm:` install refused by a host that
-    // predates the prefix is retried once with the bare, still pinned spec;
-    // no other failure is retried.
+    // predates the prefix (an anchored stderr line, nothing else wrong) is
+    // retried with the bare, still pinned spec — once for this whole run,
+    // across every pass; no other failure is retried.
     const { result: r, args: ranArgs } = runWithNpmSourceFallbackSync(
       step.command ?? [],
       runCommand,
-      (out) => (out.status === 0 ? null : out.output),
+      (out) => (out.status === 0 ? null : { stderr: out.stderr ?? '', stdout: out.stdout ?? '' }),
+      bareRetryBudget,
     );
     const ok = r.status === 0;
     // #221: was `split('\n').slice(-1)[0]` — the LAST line. When OpenClaw
@@ -567,6 +627,7 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     messages.push(`state still ${postVerdict.state} after pass ${pass} — running another detect→remediate pass (#156)`);
     const retry = await reconcileOpenClawPluginState({
       ...options,
+      bareRetryBudget,
       pass: pass + 1,
       ...(lastChangeSeq !== undefined ? { lastChangeSeq } : {}),
     });

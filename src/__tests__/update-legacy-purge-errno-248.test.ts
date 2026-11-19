@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { stepOpenClawPlugin } from '../cli/update.js';
+import { answersNpmView } from './npm-view-fixture.js';
 
 /**
  * #248 item 5 — a denied legacy-extension purge (`fs.rmSync` on a root-owned
@@ -31,7 +32,7 @@ afterEach(() => rmSync(home, { recursive: true, force: true }));
 describe('#248 — a denied legacy purge is surfaced, not swallowed', () => {
   it('reports the purge denial when the underlying install succeeds', async () => {
     const r = await stepOpenClawPlugin(home, {
-      run: (() => Promise.resolve({ stdout: '', stderr: '' })) as never,
+      run: answersNpmView(() => Promise.resolve({ stdout: '', stderr: '' })) as never,
       rm: (() => { throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }); }) as never,
     });
 
@@ -47,7 +48,7 @@ describe('#248 — a denied legacy purge is surfaced, not swallowed', () => {
 
   it('folds the purge denial into the failure report when the install ALSO fails', async () => {
     const r = await stepOpenClawPlugin(home, {
-      run: (() => Promise.reject(Object.assign(new Error('exit 1'), { exitCode: 1, stdout: '', stderr: '' }))) as never,
+      run: answersNpmView(() => Promise.reject(Object.assign(new Error('exit 1'), { exitCode: 1, stdout: '', stderr: '' }))) as never,
       rm: (() => { throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }); }) as never,
     });
 
@@ -60,7 +61,7 @@ describe('#248 — a denied legacy purge is surfaced, not swallowed', () => {
 
   it('stays quiet about the purge when it succeeds (no behaviour change on the happy path)', async () => {
     const r = await stepOpenClawPlugin(home, {
-      run: (() => Promise.resolve({ stdout: '', stderr: '' })) as never,
+      run: answersNpmView(() => Promise.resolve({ stdout: '', stderr: '' })) as never,
       rm: (() => {}) as never,
       readPluginVersion: () => '5.0.0',
       readCliVersion: () => '5.0.0',

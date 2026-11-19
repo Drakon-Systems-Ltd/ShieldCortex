@@ -432,6 +432,72 @@ describe('native package install — npm: source, exact pin (OpenClaw 2026.11.5 
   });
 });
 
+describe('native package install — verified against the pin, never clobbering a linked or newer install (#1109 review)', () => {
+  const selfVersion = (): string => JSON.parse(
+    fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..', 'package.json'), 'utf-8'),
+  ).version;
+  /** What `openclaw plugins install` leaves on disk: an npm project holding the plugin at `version`. */
+  const land = (version: string): void => {
+    const dir = path.join(tempHome, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-abc',
+      'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', version }));
+  };
+  const extensionCopy = (): string => path.join(tempHome, '.openclaw', 'extensions', PLUGIN);
+
+  it('exit 0 and the pinned build on disk: installed, no failure exit', async () => {
+    writeConfig({ plugins: { allow: [], entries: {} } });
+    __setNativePluginInstallForTest(null);
+    __setNativeSpawnForTest((_cmd, args) => { if (args.some((a) => a.startsWith('npm:'))) land(selfVersion()); return { status: 0, stdout: '', stderr: '' }; });
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    expect(logLines.join('\n')).toContain(`Installed real-time plugin v${selfVersion()} via OpenClaw package install.`);
+    expect(process.exitCode).not.toBe(1);
+  });
+
+  it('exit 0 but a stale (ClawHub) build on disk: reported with the npm: command, exit 1, and no second copied install', async () => {
+    writeConfig({ plugins: { allow: [], entries: {} } });
+    __setNativePluginInstallForTest(null);
+    __setNativeSpawnForTest((_cmd, args) => { if (args.some((a) => a.startsWith('npm:'))) land('5.17.3'); return { status: 0, stdout: '', stderr: '' }; });
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    const warned = warnLines.join('\n');
+    expect(warned).toContain(`the plugin is on v5.17.3, CLI is v${selfVersion()}`);
+    expect(warned).toContain(`openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@${selfVersion()}`);
+    expect(warned).not.toMatch(/FAILED|unprotected/i);
+    expect(process.exitCode).toBe(1);
+    expect(fs.existsSync(extensionCopy())).toBe(false);
+  });
+
+  it('a NEWER install is kept: no package install runs, the command is printed', async () => {
+    writeConfig({ plugins: { allow: [], entries: {} } });
+    land('999.0.0');
+    __setNativePluginInstallForTest(null);
+    const calls: string[][] = [];
+    __setNativeSpawnForTest((_cmd, args) => { calls.push([...args]); return { status: 0, stdout: '', stderr: '' }; });
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    expect(calls.filter((a) => a[1] === 'install')).toEqual([]);
+    expect(logLines.join('\n')).toContain(`left alone — the plugin is on v999.0.0, newer than this CLI (v${selfVersion()})`);
+    expect(logLines.join('\n')).toContain(`openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@${selfVersion()}`);
+  });
+
+  it('a linked install (plugins.load.paths) is kept: no forced package install replaces it', async () => {
+    writeConfig({ plugins: { allow: [], entries: {}, load: { paths: ['/src/ShieldCortex/plugins/openclaw/shieldcortex-realtime'] } } });
+    __setNativePluginInstallForTest(null);
+    const calls: string[][] = [];
+    __setNativeSpawnForTest((_cmd, args) => { calls.push([...args]); return { status: 0, stdout: '', stderr: '' }; });
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    expect(calls.filter((a) => a.includes('--force'))).toEqual([]);
+    expect(logLines.join('\n')).toMatch(/left alone — the plugin is a linked install/);
+  });
+});
+
 describe('#251 source contract — tryNativeOpenClawPluginInstall keeps child output', () => {
   it('classifies spawn output instead of bare-null discard', () => {
     const src = fs.readFileSync(

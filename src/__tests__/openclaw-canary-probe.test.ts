@@ -166,10 +166,20 @@ describe('evaluateSelfCheck — version proof (onDiskVersion >= expectedVersion)
     expect(v.ok).toBe(true);
   });
 
-  it('passes the version proof when on-disk is newer than expected', () => {
+  it('FAILS the version proof when on-disk is newer than expected — only the pinned build passes (#1109 review)', () => {
     const v = evaluateSelfCheck({
       pluginId: PLUGIN, index: indexEnabled, liveRoster: [PLUGIN], canary: passingCanary,
       expectedVersion: '4.47.2', onDiskVersion: '4.47.3',
+    });
+    expect(v.versionProof).toBe(false);
+    expect(v.ok).toBe(false);
+    expect(v.reasons.join('\n')).toMatch(/4\.47\.3 is not the pinned 4\.47\.2/);
+  });
+
+  it('passes the version proof when on-disk is exactly the expected build', () => {
+    const v = evaluateSelfCheck({
+      pluginId: PLUGIN, index: indexEnabled, liveRoster: [PLUGIN], canary: passingCanary,
+      expectedVersion: '4.47.2', onDiskVersion: '4.47.2',
     });
     expect(v.versionProof).toBe(true);
     expect(v.ok).toBe(true);

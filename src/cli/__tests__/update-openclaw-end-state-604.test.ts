@@ -11,6 +11,7 @@ import {
   parsePluginListVersion,
   DEFAULT_OPENCLAW_STEP_TIMEOUT_MS,
 } from '../update.js';
+import { answersNpmView } from '../../__tests__/npm-view-fixture.js';
 import type { CapturedError } from '../../integrations/child-output.js';
 
 /**
@@ -89,7 +90,7 @@ function fakeOpenClaw(script: { install: () => Promise<{ stdout: string; stderr:
 }
 
 function plugin(run: never, installedOnDisk: string | null) {
-  return stepOpenClawPlugin(home, { run, readPluginVersion: () => installedOnDisk, readCliVersion: () => PKG });
+  return stepOpenClawPlugin(home, { run: answersNpmView(run), readPluginVersion: () => installedOnDisk, readCliVersion: () => PKG });
 }
 
 function skill(run: never) {
@@ -177,14 +178,17 @@ describe('#604 — plugin step reads the end state after a timeout or non-zero e
     expect(r.status).toBe('warn');
     expect(r.summary).toContain('installed version unreadable');
     expect(r.rerun).toBe(PLUGIN_RERUN);
+    expect(r.unfinished).toBe(true);
   });
 
   it('#606 r1 (3): child exited 0 but the plugin is still behind the CLI — unresolved, with the re-run', async () => {
     const f = fakeOpenClaw({ install: async () => ({ stdout: '', stderr: '' }) });
     const r = await plugin(f.run, '5.1.0');
     expect(r.status).toBe('warn');
-    expect(r.summary).toContain(`still v5.1.0 — CLI is v${PKG}`);
+    expect(r.summary).toContain(`the plugin is on v5.1.0, CLI is v${PKG}`);
     expect(r.rerun).toBe(PLUGIN_RERUN);
+    // #1109 review: unfinished, so `update` exits non-zero.
+    expect(r.unfinished).toBe(true);
   });
 
   it('parses the plugin list past leading log lines and ignores a non-semver version', () => {

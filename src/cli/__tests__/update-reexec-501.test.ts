@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { reexecUpdatedCli, stepOpenClawPlugin } from '../update.js';
+import { answersNpmView } from '../../__tests__/npm-view-fixture.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
@@ -60,7 +61,7 @@ describe('plugin update reads the installed version against the fresh CLI', () =
       fs.writeFileSync(path.join(dir, 'installs.json'), JSON.stringify({ installRecords: { 'shieldcortex-realtime': {} } }));
       let reads = 0;
       return await stepOpenClawPlugin(home, {
-        run: async () => ({ stdout: '', stderr: '' }),
+        run: answersNpmView(async () => ({ stdout: '', stderr: '' })),
         readPluginVersion: () => reads++ === 0 ? before : after,
         readCliVersion: () => expected,
       });
@@ -70,7 +71,8 @@ describe('plugin update reads the installed version against the fresh CLI', () =
   it('a pinned old install is WARN, not up to date', async () => {
     const result = await runCase('4.54.15', '4.54.15');
     expect(result.status).toBe('warn');
-    expect(result.summary).toContain('still v4.54.15 — CLI is v5.0.0');
+    expect(result.summary).toContain('the plugin is on v4.54.15, CLI is v5.0.0');
+    expect(result.unfinished).toBe(true);
     expect(result.summary).not.toContain('up to date');
   });
 

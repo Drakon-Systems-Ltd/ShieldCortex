@@ -21,6 +21,7 @@ import {
   findLatentEoverridePins,
   stripManagedPinsFromManifest,
   isRealtimePluginDisabledInConfig,
+  readInstalledRealtimePluginVersion,
 } from '../integrations/openclaw-plugin-state.js';
 import { summariseCommandOutput } from '../integrations/child-output.js';
 import { invokingUserHome, OPENCLAW_HOME_MARKERS } from './user-home.js';
@@ -39,6 +40,12 @@ import { COMMAND_HELP_SPECS } from '../cli/wants-help.js';
 import { resolveConversationAccessConsent } from './conversation-access-consent.js';
 import { withOwnConfigWrite } from '../audit/agent-config-watch-own-write.js';
 import {
+  BareRetryBudget,
+  REALTIME_PLUGIN_PACKAGE,
+  assessRealtimeReplacement,
+  exactPluginPin,
+  landedVersionVerdict,
+  readLinkedRealtimeInstall,
   realtimePluginInstallArgs,
   realtimePluginInstallCommand,
   runWithNpmSourceFallbackSync,
@@ -1399,23 +1406,47 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   // and the local-copy fallback still have something to work with.
 
   const env = openClawChildEnv();
-  // The package install is pinned to this CLI's own version and forced to npm
-  // (`npm:`): OpenClaw 2026.11.5 resolves an unprefixed spec on ClawHub, whose
-  // copy is stale. `--force` is what OpenClaw 2026.7+ requires to accept a
-  // non-ClawHub source without a terminal (and it overwrites an existing
-  // install, so a re-run refreshes instead of refusing "already exists"). A
-  // host older than the `npm:` prefix gets one bare-spec retry, below.
-  const attempts: Array<{ args: string[]; label: string }> = [
-    { args: realtimePluginInstallArgs(readSelfVersion()), label: 'package install' },
-  ];
+  const home = resolveUserHome();
+  // The package install is pinned to this CLI's own exact version and forced
+  // to npm (`npm:`): OpenClaw 2026.11.5 resolves an unprefixed spec on
+  // ClawHub, whose copy is stale. `--force` is what OpenClaw 2026.7+ requires
+  // to accept a non-ClawHub source without a terminal — and it overwrites an
+  // existing install, which `npm install -g`'s postinstall reaches without
+  // anyone asking. So, first (#1109 review): a linked/path install, or one
+  // newer than this CLI, is kept and the command printed instead; and with no
+  // exact version to pin to there is no package attempt at all. A host older
+  // than the `npm:` prefix gets one bare-spec retry for this whole install.
+  // (`--link` takes no `--force`: OpenClaw rejects the pair.)
+  const pin = exactPluginPin(readSelfVersion());
+  if (pin) {
+    const keep = assessRealtimeReplacement(
+      { version: readInstalledRealtimePluginVersion(home), linkedAt: readLinkedRealtimeInstall(home) },
+      pin,
+    );
+    if (!keep.replace) {
+      console.log(`Real-time plugin ${keep.summary}.`);
+      console.log(`  To replace it with v${pin}: ${realtimePluginInstallCommand(pin)}`);
+      return keep.why === 'linked' ? 'native-link' : 'native-package';
+    }
+  }
+  const attempts: Array<{ args: string[]; label: string }> = pin
+    ? [{ args: realtimePluginInstallArgs(pin), label: 'package install' }]
+    : [];
   const packageSource = resolvePluginPackageSource();
   if (fs.existsSync(packageSource)) {
     attempts.push({ args: ['plugins', 'install', '--link', packageSource], label: 'linked install' });
   }
 
-  const refusals: NativePluginInstallRefusal[] = [];
+  const refusals: NativePluginInstallRefusal[] = pin ? [] : [{
+    reason: `could not read this CLI's exact version, so the plugin package was not installed — run \`${realtimePluginInstallCommand(null)}\``,
+    detail: [],
+    configInvalid: false,
+    truncated: false,
+    label: 'package install',
+  }];
   const spawn = _nativeSpawnForTest ?? ((command, args, options) =>
     spawnSync(command, args as string[], options));
+  const budget = new BareRetryBudget();
 
   for (const attempt of attempts) {
     const { result } = runWithNpmSourceFallbackSync(
@@ -1425,14 +1456,30 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
         encoding: 'utf-8',
         timeout: NATIVE_INSTALL_TIMEOUT_MS,
       }),
-      (r) => (r.status === 0 ? null : `${spawnResultText(r.stderr)}\n${spawnResultText(r.stdout)}`),
+      (r) => (r.status === 0 ? null : { stderr: spawnResultText(r.stderr), stdout: spawnResultText(r.stdout) }),
+      budget,
     );
 
     if (result.status === 0) {
       lastNativePluginInstallRefusal = null;
       nativePluginInstallRefusals = [];
-      console.log(`Installed real-time plugin via OpenClaw ${attempt.label}.`);
-      return attempt.label === 'package install' ? 'native-package' : 'native-link';
+      if (attempt.label !== 'package install') {
+        console.log(`Installed real-time plugin via OpenClaw ${attempt.label}.`);
+        return 'native-link';
+      }
+      // Exit 0 is not the pinned build on disk (the incident: exit 0 and a
+      // stale ClawHub copy). Registered natively either way — never fall back
+      // to a second, copied install — but anything other than the pin is
+      // reported, with the command, and the run exits non-zero.
+      const landed = landedVersionVerdict(readInstalledRealtimePluginVersion(home), pin!);
+      if (landed.ok) {
+        console.log(`Installed real-time plugin v${landed.version} via OpenClaw ${attempt.label}.`);
+      } else {
+        console.warn(`  Real-time plugin installed by OpenClaw, but ${landed.summary}.`);
+        console.warn(`  Run: ${realtimePluginInstallCommand(pin)}`);
+        process.exitCode = 1;
+      }
+      return 'native-package';
     }
 
     // #251: do not discard the child's reason. Bare `return null` after two
@@ -2275,7 +2322,7 @@ async function writeOpenClawInstall(
       const check = await runPluginSelfCheck(home, { expectedVersion: readSelfVersion() ?? undefined });
       console.log('');
       if (check.ok) {
-        console.log('✓ Honest-state self-check: plugin confirmed loaded (roster), enforcing (live canary), version ≥ expected.');
+        console.log('✓ Honest-state self-check: plugin confirmed loaded (roster), enforcing (live canary), version matches this CLI.');
       } else if (check.rosterState === 'absent') {
         console.warn('✗ Honest-state self-check FAILED: the RUNNING gateway booted WITHOUT the plugin.');
         console.warn('  Protection would report ON while actually OFF (issue #74). Reconcile the install:');
@@ -2526,7 +2573,11 @@ export interface ManagedPinRepairResult {
  * Returns a structured result; prints progress so `shieldcortex openclaw repair`
  * reads coherently.
  */
-export async function repairOpenClawManagedPins(homeArg?: string): Promise<ManagedPinRepairResult> {
+export async function repairOpenClawManagedPins(
+  homeArg?: string,
+  /** The one bare-spec retry for the whole operation (`openclaw repair` shares one). */
+  bareRetryBudget: BareRetryBudget = new BareRetryBudget(),
+): Promise<ManagedPinRepairResult> {
   const home = homeArg ?? resolveUserHome();
   const pluginId = 'shieldcortex-realtime';
 
@@ -2546,8 +2597,8 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
   const latentPins = findLatentEoverridePins(manifest);
   const disabled = isRealtimePluginDisabledInConfig(home);
   const selfVersion = readSelfVersion();
-  const installArgs = realtimePluginInstallArgs(selfVersion);
-  const installCommand = realtimePluginInstallCommand(selfVersion);
+  const pin = exactPluginPin(selfVersion);
+  const installCommand = realtimePluginInstallCommand(pin);
   const deps = (typeof manifest.dependencies === 'object' && manifest.dependencies
     ? manifest.dependencies
     : {}) as Record<string, unknown>;
@@ -2556,6 +2607,20 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
 
   if (risks.length === 0 && !disabled && !staleShieldcortex) {
     return { status: 'clean', message: 'Realtime plugin pins are consistent and the plugin is enabled. Nothing to reconcile.' };
+  }
+
+  // #1109 review: the heal ends in a forced reinstall. Without an exact pin
+  // there is nothing safe to install, and a linked or newer plugin is not
+  // ours to replace — refuse before the manifest is touched.
+  if (!pin) {
+    return { status: 'failed', message: `Could not read this CLI's exact version, so nothing was changed. Run \`${installCommand}\` then \`openclaw gateway restart\`.` };
+  }
+  const keep = assessRealtimeReplacement(
+    { version: readInstalledRealtimePluginVersion(home), linkedAt: readLinkedRealtimeInstall(home) },
+    pin,
+  );
+  if (!keep.replace) {
+    return { status: 'failed', message: `Realtime plugin ${keep.summary}; nothing was changed. To replace it with v${pin}: \`${installCommand}\`.` };
   }
 
   console.log('Reconciling OpenClaw managed plugin pins (EOVERRIDE guard):');
@@ -2605,14 +2670,20 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
   // 5. Reinstall so OpenClaw recomputes a consistent manifest (re-derives the
   //    stripped pins at the override version — no more drift).
   console.log(`  - reinstalling: ${installCommand}`);
-  const { result: reinstall } = runWithNpmSourceFallbackSync(
-    installArgs,
+  const { result: reinstall, args: ranArgs } = runWithNpmSourceFallbackSync(
+    realtimePluginInstallArgs(pin),
     (args) => spawnSync(openclawBin, args, { encoding: 'utf-8', env: spawnEnv, timeout: 180000 }),
-    (r) => (r.status === 0 ? null : `${r.stderr ?? ''}\n${r.stdout ?? ''}`),
+    (r) => (r.status === 0 ? null : { stderr: r.stderr, stdout: r.stdout }),
+    bareRetryBudget,
   );
   if (reinstall.status !== 0) {
     const out = `${reinstall.stderr ?? ''}${reinstall.stdout ?? ''}`.trim().split('\n').slice(-4).join('\n');
     return { status: 'failed', message: `Reinstall failed after reconciling the manifest:\n${out}\nManifest backup: ${manifestPath}.repair-backup-${ts}` };
+  }
+  // Exit 0 is not the pinned build on disk; only the pin is healed.
+  const landed = landedVersionVerdict(readInstalledRealtimePluginVersion(home), pin);
+  if (!landed.ok) {
+    return { status: 'failed', message: `Reinstall exited 0, but ${landed.summary}. Run \`openclaw ${ranArgs.join(' ')}\` then \`openclaw gateway restart\`. Manifest backup: ${manifestPath}.repair-backup-${ts}` };
   }
 
   // 6. Verify no residual drift.
@@ -2624,6 +2695,7 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
 
   const parts = [`Reconciled ${latentPins.length} override-shadowed pin(s)`];
   if (staleShieldcortex) parts.push(`advanced shieldcortex to ${selfVersion}`);
+  parts.push(`plugin at v${landed.version}`);
   if (disabled) parts.push('re-enabled the plugin');
   return { status: 'healed', message: `${parts.join(', ')}. Restart to load it: openclaw gateway restart` };
 }
@@ -2638,6 +2710,9 @@ export async function repairOpenClawPlugin(): Promise<void> {
     console.log('OpenClaw not detected (~/.openclaw missing). Nothing to repair.');
     return;
   }
+  // #1109 review: one bare-spec retry for this whole repair — the reconcile,
+  // the managed-pin heal and the duplicate repair below share it.
+  const bareRetryBudget = new BareRetryBudget();
 
   // #74 first concern: reconcile conflicted install metadata (installs.json ↔
   // SQLite index ↔ config) and the silent-drop / version-regression states the
@@ -2648,7 +2723,7 @@ export async function repairOpenClawPlugin(): Promise<void> {
     const selfVersion = readSelfVersion();
     if (selfVersion) {
       const { reconcileOpenClawPluginState, formatReconcileReport } = await import('./openclaw-reconcile.js');
-      const result = await reconcileOpenClawPluginState({ home, expectedVersion: selfVersion });
+      const result = await reconcileOpenClawPluginState({ home, expectedVersion: selfVersion, bareRetryBudget });
       if (result.verdict.state !== 'healthy' || result.applied) {
         for (const line of formatReconcileReport(result)) console.log(`  ${line}`);
         console.log('');
@@ -2664,7 +2739,7 @@ export async function repairOpenClawPlugin(): Promise<void> {
   // Next concern: reconcile managed-pin drift / re-enable a plugin that
   // OpenClaw auto-disabled after an EOVERRIDE on update (openclaw#91772).
   try {
-    const pinResult = await repairOpenClawManagedPins(home);
+    const pinResult = await repairOpenClawManagedPins(home, bareRetryBudget);
     if (pinResult.status === 'healed') {
       console.log(`  ✓ ${pinResult.message}`);
       console.log('');
@@ -2784,6 +2859,31 @@ export async function repairOpenClawPlugin(): Promise<void> {
 
   const spawnEnv = openClawChildEnv({}, home);
 
+  // #1109 review: everything below is destructive (uninstall, rm, then a
+  // forced install). Before any of it: an exact version to pin to, nothing
+  // linked or newer to clobber, and that exact version actually on npm.
+  const reinstallPin = exactPluginPin(readSelfVersion());
+  if (!reinstallPin) {
+    console.error('Cannot run repair: could not read this CLI\'s exact version, so there is no version to reinstall. Nothing was changed.');
+    console.error(`Run \`${realtimePluginInstallCommand(null)}\` by hand once \`shieldcortex --version\` works.`);
+    process.exit(1);
+  }
+  const keep = assessRealtimeReplacement(
+    { version: readInstalledRealtimePluginVersion(home), linkedAt: readLinkedRealtimeInstall(home) },
+    reinstallPin,
+  );
+  if (!keep.replace) {
+    console.error(`Not repairing: the realtime plugin is ${keep.summary.replace(/^left alone — the plugin is /, '')}. Nothing was changed.`);
+    console.error(`To replace it with v${reinstallPin} anyway: ${realtimePluginInstallCommand(reinstallPin)}`);
+    process.exit(1);
+  }
+  const published = confirmRealtimePluginPublishedSync(reinstallPin, spawnEnv);
+  if (!published.ok) {
+    console.error(`Not repairing: ${published.reason}. Nothing was changed.`);
+    console.error(`Re-run \`shieldcortex openclaw repair\` once ${REALTIME_PLUGIN_PACKAGE}@${reinstallPin} is on npm.`);
+    process.exit(1);
+  }
+
   // Step 3: Uninstall the plugin. The uninstall command requires interactive
   // confirmation by default; pipe `y\n` via stdin to auto-confirm.
   console.log('Step 1/3: openclaw plugins uninstall shieldcortex-realtime');
@@ -2858,14 +2958,14 @@ export async function repairOpenClawPlugin(): Promise<void> {
   }
   console.log('');
 
-  // Step 5: Reinstall from npm.
-  const reinstallVersion = readSelfVersion();
-  const reinstallCommand = realtimePluginInstallCommand(reinstallVersion);
+  // Step 5: Reinstall from npm, pinned.
+  const reinstallCommand = realtimePluginInstallCommand(reinstallPin);
   console.log(`Step 3/3: ${reinstallCommand}`);
   const { result: installResult, args: reinstallArgs } = runWithNpmSourceFallbackSync(
-    realtimePluginInstallArgs(reinstallVersion),
+    realtimePluginInstallArgs(reinstallPin),
     (args) => spawnSync(openclawBin, args, { encoding: 'utf-8', env: spawnEnv, timeout: 120000 }),
-    (r) => (r.status === 0 ? null : `${r.stderr ?? ''}\n${r.stdout ?? ''}`),
+    (r) => (r.status === 0 ? null : { stderr: r.stderr, stdout: r.stdout }),
+    bareRetryBudget,
   );
   if (installResult.status !== 0) {
     console.error('  ✗ install failed:');
@@ -2879,7 +2979,15 @@ export async function repairOpenClawPlugin(): Promise<void> {
     console.error(`Try again with: openclaw ${reinstallArgs.join(' ')}`);
     process.exit(1);
   }
-  console.log('  ✓ install succeeded');
+  // Exit 0 is not the pinned build on disk (the incident was exit 0 and a
+  // stale copy). The config is restored below either way; the run ends
+  // non-zero with the command when the pin did not land.
+  const landed = landedVersionVerdict(readInstalledRealtimePluginVersion(home), reinstallPin);
+  if (landed.ok) {
+    console.log(`  ✓ install succeeded (v${landed.version})`);
+  } else {
+    console.error(`  ✗ install exited 0, but ${landed.summary}`);
+  }
   console.log('');
 
   // Step 5: Restore the customer's plugin config snapshot.
@@ -2923,7 +3031,25 @@ export async function repairOpenClawPlugin(): Promise<void> {
   }
   console.log('');
 
+  if (!landed.ok) {
+    console.error(`Repair not finished: ${landed.summary}. Run: openclaw ${reinstallArgs.join(' ')}`);
+    process.exitCode = 1;
+    return;
+  }
   console.log('Repair complete. Restart the OpenClaw gateway to load the fresh plugin install.');
+}
+
+/**
+ * Is the realtime plugin on npm at exactly `pin`? `npm view` of a version that
+ * does not exist prints nothing (or fails E404); anything other than the pin
+ * itself — including a timeout or no `npm` — is "cannot confirm".
+ */
+function confirmRealtimePluginPublishedSync(pin: string, env: NodeJS.ProcessEnv): { ok: true } | { ok: false; reason: string } {
+  const r = spawnSync('npm', ['view', `${REALTIME_PLUGIN_PACKAGE}@${pin}`, 'version'], { encoding: 'utf-8', env, timeout: 15000 });
+  const listed = (typeof r.stdout === 'string' ? r.stdout : '').trim().split(/\s+/).pop() ?? '';
+  if (r.status === 0 && listed === pin) return { ok: true };
+  if (r.status === 0) return { ok: false, reason: `npm has no ${REALTIME_PLUGIN_PACKAGE}@${pin} yet` };
+  return { ok: false, reason: `could not confirm ${REALTIME_PLUGIN_PACKAGE}@${pin} on npm (${r.error ? r.error.message : `npm view exited ${r.status ?? 'by signal'}`})` };
 }
 
 /**

@@ -15,6 +15,18 @@ import { handleOpenClawCommand } from './openclaw.js';
 import { realtimePluginInstallCommand } from './openclaw-plugin-spec.js';
 import { handleCopilotCommand } from './copilot.js';
 import { handleCodexCommand } from './codex.js';
+import { fileURLToPath } from 'url';
+
+/** This CLI's own version, for the printed plugin command (exact when readable). */
+function cliVersion(): string | null {
+  try {
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+    const v = (JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf-8')) as { version?: unknown }).version;
+    return typeof v === 'string' ? v : null;
+  } catch {
+    return null;
+  }
+}
 
 type QuickstartTarget = 'claude' | 'openclaw' | 'copilot' | 'codex' | 'security';
 type DetectedInstaller = QuickstartTarget;
@@ -108,7 +120,7 @@ function printAutoGuide(): void {
   lines.push('Direct commands:');
   lines.push('  shieldcortex setup');
   lines.push('  openclaw hooks install shieldcortex');
-  lines.push(`  ${realtimePluginInstallCommand(null)}`);
+  lines.push(`  ${realtimePluginInstallCommand(cliVersion())}`);
   lines.push('  # or compatibility wrapper: shieldcortex openclaw install');
   lines.push('  shieldcortex copilot install');
   lines.push('  shieldcortex codex install');

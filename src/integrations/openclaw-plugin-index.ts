@@ -13,7 +13,7 @@ import {
   findGatewayAttributedRegistrationSince,
 } from './openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from './openclaw-gateway-process.js';
-import { REALTIME_PLUGIN_PACKAGE, realtimePluginInstallArgs } from '../setup/openclaw-plugin-spec.js';
+import { REALTIME_PLUGIN_PACKAGE, exactPluginPin, realtimePluginInstallArgs } from '../setup/openclaw-plugin-spec.js';
 
 /**
  * Reconciling OpenClaw plugin-install state across its three authoritative
@@ -591,13 +591,23 @@ export interface PlanOptions {
  */
 export function planReconcileActions(verdict: ReconcileVerdict, opts: PlanOptions): ReconcileStep[] {
   const { packageName, expectedVersion } = opts;
+  const realtime = packageName === REALTIME_PLUGIN_PACKAGE;
   // Every install is pinned to the expected version and, for the realtime
   // plugin, forced to npm (`npm:`, with the `--force` OpenClaw 2026.7+ needs to
   // accept a non-ClawHub source without a terminal): OpenClaw 2026.11.5
-  // resolves an unprefixed spec on ClawHub, whose copy is stale.
-  const pinnedInstall = (): string[] => packageName === REALTIME_PLUGIN_PACKAGE
-    ? realtimePluginInstallArgs(expectedVersion)
+  // resolves an unprefixed spec on ClawHub, whose copy is stale. An expected
+  // version that is not exact plans NO command at all — the executor reports
+  // the empty install as refused rather than run a floating one.
+  const realtimePin = realtime ? exactPluginPin(expectedVersion) : null;
+  const pinnedInstall = (): string[] => realtime
+    ? (realtimePin ? realtimePluginInstallArgs(realtimePin) : [])
     : ['plugins', 'install', '--force', `${packageName}@${expectedVersion}`];
+  // #1109 review: `openclaw plugins update <pkg>` follows the EXISTING install
+  // record's source — a stale ClawHub record updates from ClawHub. For the
+  // realtime plugin every refresh is the pinned npm install instead.
+  const refresh = (description: string): ReconcileStep => realtime
+    ? { kind: 'openclaw-install-pinned', command: pinnedInstall(), description: `${description} — reinstalled from npm pinned to ${expectedVersion} (never \`plugins update\`, which follows a ClawHub record)` }
+    : { kind: 'openclaw-update', command: ['plugins', 'update', packageName], description };
   const steps: ReconcileStep[] = [];
   const prune = opts.duplicateDirsToPrune ?? [];
 
@@ -618,11 +628,7 @@ export function planReconcileActions(verdict: ReconcileVerdict, opts: PlanOption
   switch (verdict.recommendedAction) {
     case 'update-openclaw-tracked':
       pruneStep();
-      steps.push({
-        kind: 'openclaw-update',
-        command: ['plugins', 'update', packageName],
-        description: 'refresh the OpenClaw-tracked plugin via `openclaw plugins update` (the SC install path skips tracked plugins)',
-      });
+      steps.push(refresh('refresh the OpenClaw-tracked plugin (the SC install path skips tracked plugins)'));
       reloadThenVerify();
       break;
 
@@ -638,11 +644,7 @@ export function planReconcileActions(verdict: ReconcileVerdict, opts: PlanOption
 
     case 'dedupe-and-reload':
       pruneStep();
-      steps.push({
-        kind: 'openclaw-update',
-        command: ['plugins', 'update', packageName],
-        description: 'refresh the canonical install after pruning duplicates',
-      });
+      steps.push(refresh('refresh the canonical install after pruning duplicates'));
       reloadThenVerify();
       break;
 
