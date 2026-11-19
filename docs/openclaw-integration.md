@@ -162,7 +162,12 @@ this page is what each step does.
   where `<version>` is the ShieldCortex version just installed (the plugin
   ships in lockstep). `npm:` and the exact version keep OpenClaw 2026.11.5 and
   later from installing the old ClawHub copy instead; an OpenClaw that predates
-  `npm:` is retried once without it. The forced form is deliberate: it replaces a registration pinned to an older
+  `npm:` is retried once without it. If npm updated a different ShieldCortex
+  install than the one running `update` (a project-local or `npx` copy, or a
+  second global prefix), this process's version is not the core npm just
+  installed: the plugin step changes nothing, the protection check is
+  skipped, and `update` exits 1 — run `shieldcortex update` again with the
+  updated install first on `PATH` (`npm prefix -g` names its prefix). The forced form is deliberate: it replaces a registration pinned to an older
   version or left half-installed, where a bare update would stay on the pin or
   refuse. It runs under the `~/.openclaw` update lock (below). A plugin install
   that did not land is reported as unfinished with that exact command as the
@@ -204,7 +209,9 @@ where `<version>` is exactly this CLI's version.
   you pinned to an older version yourself.
 - **What they leave alone.** A linked or local-path install, an install
   newer than the CLI, and an install whose link status or selected copy
-  cannot be read. "Newer" is judged on the copy OpenClaw selected (see "What
+  cannot be read. A record naming a copy that is no longer on disk (deleted by
+  hand, a half-finished uninstall, a cleaned-out npm project) is not "cannot
+  be read": there is nothing to keep, so the install runs. "Newer" is judged on the copy OpenClaw selected (see "What
   counts as done" below), not on the highest version on disk, and on every
   copy the command is about to delete (`update`'s removal of a legacy
   `~/.openclaw/extensions` copy, the duplicates a repair removes): a newer or
@@ -246,9 +253,13 @@ where `<version>` is exactly this CLI's version.
   `plugins/installs.json` record on OpenClaw releases without the index, else
   a linked or `~/.openclaw/extensions` copy that OpenClaw finds by itself. It
   is not the highest version found on disk: a leftover copy at the right
-  version does not count. An older or newer version, or a selected copy that
-  cannot be told, is reported with the command to run, and
-  `shieldcortex update` exits 1.
+  version does not count. Neither does a copy whose install record says it
+  came from anywhere but npm (or a local path, for a linked install), at any
+  version, nor a record whose copy is not on disk. The same check decides
+  after an install that exited non-zero or timed out: what
+  `openclaw plugins list` reports is OpenClaw's index, not proof. An older or
+  newer version, or a selected copy that cannot be told, is reported with the
+  command to run, and `shieldcortex update` exits 1.
 - **Older OpenClaw.** OpenClaw before 2026.4.26 does not accept `npm:`. The
   install is retried with the plain package name at the same exact version
   only when OpenClaw exited normally with an error and every line it wrote to
@@ -257,8 +268,12 @@ where `<version>` is exactly this CLI's version.
   stdout is empty or the single `Downloading npm:@drakon-systems/shieldcortex-realtime@<version>…`
   line those OpenClaw releases log on that path. Any other line on either
   stream, a timeout or a killed process means no retry. The retry happens at
-  most once per command run (not once per step), and nothing falls back to
-  `clawhub:`.
+  most once per command run (not once per step), and no `clawhub:` spec is
+  ever used. Those OpenClaw releases try the plain name on ClawHub before npm,
+  though, so if ClawHub carries that exact version the retry installs
+  ClawHub's copy and records it as such. That is never reported as done: the
+  step is unfinished (exit 1) and says to upgrade OpenClaw to 2026.4.26 or
+  later, then run the `npm:` command.
 - **Development installs (`shieldcortex openclaw install` only).** When the
   npm package cannot be installed on this machine, the installer has two
   fallbacks meant for development and offline machines: `openclaw plugins
