@@ -2030,7 +2030,6 @@ describe('release review round 2 B1 — installer option aliases, abbreviations 
     expect(parseInstallCommands(j('npm', 'i', PKG, ';', 'export', 'NPM_CONFIG_TAG=beta'))[0].versionOption).toBeUndefined();
   });
 });
-});
 
 // Release review (v5.20.0) nits. Astra N1: a NAMED remote spec
 // (`name@git+https://…`, `name@https://…`) was looked up by name although the
