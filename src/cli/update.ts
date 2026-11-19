@@ -2183,6 +2183,41 @@ export async function handleUpdateCommand(
   await (deps.run ?? runUpdate)(parseUpdateOptions(args, deps.env ?? process.env));
 }
 
+/**
+ * The host table and the offer to wire present-but-unwired hosts, at the end
+ * of `update`.
+ *
+ * #1109 round 5 (Astra B5): when npm updated a different ShieldCortex install
+ * (`coreUpdate === 'elsewhere'`), accepting that offer would run THIS older
+ * copy's OpenClaw installer, pinning the realtime plugin to its version. The
+ * offer is skipped with the same recovery the plugin step and the protection
+ * check name; an installed plugin's unfinished step still makes the run exit 1.
+ */
+export async function stepOfferUnwiredHosts(
+  home: string,
+  ctx: { currentVersion: string; coreUpdate: CoreUpdateOutcome },
+): Promise<void> {
+  try {
+    const { offerUnwiredHosts, formatHostTable, scanHostTable } = await import('../setup/host-table.js');
+    const table = scanHostTable(home);
+    const todo = table.rows.filter((r) => r.present && !r.wired);
+    if (todo.length === 0) return;
+    if (ctx.coreUpdate === 'elsewhere') {
+      process.stdout.write(
+        `\n  ${paint('yellow', '⚠')}  ${paint('gray', `host setup not offered — npm updated a different ShieldCortex install than the one running this update; run \`${CORE_ELSEWHERE_RECOVERY.command}\` ${CORE_ELSEWHERE_RECOVERY.note}`)}\n`,
+      );
+      return;
+    }
+    process.stdout.write('\n');
+    for (const line of formatHostTable(table, ctx.currentVersion)) {
+      process.stdout.write(`${line}\n`);
+    }
+    await offerUnwiredHosts({ mode: 'update', home });
+  } catch {
+    /* update must not fail on the host table */
+  }
+}
+
 export async function runUpdate(options: UpdateOptions): Promise<void> {
   const home = homedir();
   const currentVersion = IN_PROCESS_VERSION;
@@ -2311,20 +2346,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   maybePrintActionGuardDefaultOffNotice(fromVersion, mainUpdated);
   await maybePrintDashboardHint();
 
-  try {
-    const { offerUnwiredHosts, formatHostTable, scanHostTable } = await import('../setup/host-table.js');
-    const table = scanHostTable(home);
-    const todo = table.rows.filter((r) => r.present && !r.wired);
-    if (todo.length > 0) {
-      process.stdout.write('\n');
-      for (const line of formatHostTable(table, currentVersion)) {
-        process.stdout.write(`${line}\n`);
-      }
-      await offerUnwiredHosts({ mode: 'update', home });
-    }
-  } catch {
-    /* update must not fail on the host table */
-  }
+  await stepOfferUnwiredHosts(home, { currentVersion, coreUpdate });
 
   // Guard switch as configured. Off is the default since 4.54.15, and an
   // off-by-design Guard is neutral: a plugin-load check that could not
