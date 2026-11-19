@@ -124,7 +124,7 @@ This skill ships no executable files. Install the tools it describes from npm:
 ```bash
 npm install -g shieldcortex          # CLI, MCP server and the cortex-memory hook
 shieldcortex quickstart              # detect hosts and wire them (asks first)
-openclaw plugins install @drakon-systems/shieldcortex-realtime   # optional realtime plugin
+openclaw plugins install npm:@drakon-systems/shieldcortex-realtime   # optional realtime plugin
 ```
 
 ### Automatic self-heal at gateway bootstrap

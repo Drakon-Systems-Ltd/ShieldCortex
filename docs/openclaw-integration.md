@@ -173,23 +173,17 @@ this page is what each step does.
 ### Updating by hand
 
 ```bash
-openclaw plugins update @drakon-systems/shieldcortex-realtime@latest
+openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@latest
 openclaw gateway restart   # if the hook was refreshed too
 ```
 
-The explicit npm spec matters. OpenClaw records the selector it installed from,
-so `openclaw plugins update shieldcortex-realtime` (bare plugin id) stays on a
-pinned version, while the `@latest` spec moves past the pin and is recorded for
-later id-based updates. On an older OpenClaw, or to recover a broken install,
-use the forced form `shieldcortex update` uses itself:
-
-```bash
-openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@latest
-```
-
-The two do not conflict: both end with the same registration pointing at the
-same version. `shieldcortex openclaw install` does plugin, hook and restart in
-one go; `--no-gateway-restart` skips the restart.
+Use this rather than `openclaw plugins update`. OpenClaw updates a plugin from
+the source it was first installed from, so a copy that came from ClawHub keeps
+following ClawHub's old listing, and a pinned install stays on its pin. The
+forced `npm:` install replaces either and records npm `@latest` for later
+updates. It is the same form `shieldcortex update` uses (with the exact version
+instead of `@latest`). `shieldcortex openclaw install` does plugin, hook and
+restart in one go; `--no-gateway-restart` skips the restart.
 
 ### Gateway restart consent
 

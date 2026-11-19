@@ -53,7 +53,7 @@ If `shieldcortex` is not on `PATH`, set `binaryPath` in the plugin config.
 ### 2. Install the plugin
 
 ```bash
-openclaw plugins install @drakon-systems/shieldcortex-realtime
+openclaw plugins install npm:@drakon-systems/shieldcortex-realtime
 ```
 
 If you also want the companion session hook, install it from the main package:
