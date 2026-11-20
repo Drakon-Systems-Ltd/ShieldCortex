@@ -6,6 +6,12 @@
  * other current label keep the existing L1 path.
  *
  * Labels are declarations, not attestation.
+ *
+ * Several internals (the fold, the wrapper scan and skip mask, the quoted-report
+ * and discussion exemptions, the negation and reporting tails) are exported for
+ * the SCN-010 memory-directive screen (memory-directive-policy.ts), which reuses
+ * them rather than growing a second copy. Exporting them changes nothing here:
+ * every L2 group, verb and verdict is exactly what it was.
  */
 
 import { someWindow } from '../scan-windows.js';
@@ -276,7 +282,7 @@ const SHAPE_GROUPS: ShapeGroup[] = [
  * bypass. Anchored at the end of the clause prefix, so a negation in an
  * earlier sentence cannot reach forward.
  */
-const NEGATION_TAIL =
+export const NEGATION_TAIL =
   /(?:\b(?:do|does|did|can|could|shall|should|will|would|may|might|must|is|are|was|were|has|have|had|need)\s*n(?:ot|['\u2019]t)|\bcannot|\bnever)\s+$/i;
 
 /**
@@ -289,9 +295,9 @@ const NEGATION_TAIL =
  * "Site operators published a new runbook." disarmed the sentence after it.
  * That alternative is gone.
  */
-const REPORTING_VERB_TAIL =
+export const REPORTING_VERB_TAIL =
   /\b(?:told|asked|instructed|directed|prompted|persuaded|tricked|got)\s+(?:the\s+|their\s+|a\s+|our\s+|its\s+)?(?:model|agent|assistant|bot|system|llm|chatbot)\s+to\s+$/i;
-const REPORTING_SOURCE_TAIL =
+export const REPORTING_SOURCE_TAIL =
   /\b(?:the\s+paper|the\s+document|the\s+report|the\s+article|the\s+write-?up|the\s+advisory|the\s+authors?|researchers?|the\s+vendor)\s+(?:describes?|documents?|notes?|reports?|records?|quotes?|shows?|claims?)\s+(?:that\s+|how\s+)?$/i;
 
 /** Cues that introduce an example, used ONLY with a further qualifier. */
@@ -349,7 +355,7 @@ export function describeProvenance(sourceType: string): {
  * quotative-frame exemption below, which needs the span to be RECORDED but
  * not masked.
  */
-interface WrapperSpan {
+export interface WrapperSpan {
   /** Index of the opening delimiter. */
   start: number;
   /** Index one past the closing delimiter. */
@@ -462,7 +468,7 @@ function singleQuoteClose(text: string, open: number): number {
   return -1;
 }
 
-function scanWrappers(text: string): WrapperSpan[] {
+export function scanWrappers(text: string): WrapperSpan[] {
   const spans: WrapperSpan[] = [];
   let i = 0;
   while (i < text.length) {
@@ -572,7 +578,7 @@ function blankCommentMarkers(body: string): string {
  * Index-preserving, so the spans and the mask built from the original window
  * remain exactly valid against the result.
  */
-function blankFenceComments(window: string, spans: WrapperSpan[]): string {
+export function blankFenceComments(window: string, spans: WrapperSpan[]): string {
   const parts: string[] = [];
   let cursor = 0;
   for (const span of spans) {
@@ -627,7 +633,7 @@ function bodyCarriesDirective(body: string): boolean {
   return false;
 }
 
-function buildSkipMask(text: string, spans: WrapperSpan[]): Uint8Array {
+export function buildSkipMask(text: string, spans: WrapperSpan[]): Uint8Array {
   const mask = new Uint8Array(text.length);
   for (const span of spans) {
     if (span.masked) mask.fill(1, span.start, Math.min(text.length, span.end));
@@ -654,7 +660,7 @@ function containingSpan(spans: WrapperSpan[], start: number, end: number): Wrapp
  * "Discard your `existing` guidelines" was ALLOW. A code span can speak for
  * what it contains and nothing else.
  */
-function spanSkipped(mask: Uint8Array, start: number, length: number): boolean {
+export function spanSkipped(mask: Uint8Array, start: number, length: number): boolean {
   const end = Math.min(mask.length, start + length);
   if (end <= start) return false;
   for (let i = start; i < end; i++) {
@@ -971,7 +977,7 @@ const ADOPTION_CODA =
  * The match sits inside a closed quote or fence that prose introduces as an
  * EXAMPLE (`reads:`, `such as`) or attributes to a SPEAKER (`he wrote`).
  */
-function quotedReport(window: string, spans: WrapperSpan[], start: number, end: number): boolean {
+export function quotedReport(window: string, spans: WrapperSpan[], start: number, end: number): boolean {
   const span = containingSpan(spans, start, end);
   if (!span) return false;
   if (adoptedAsOrder(window, span)) return false;
@@ -999,7 +1005,7 @@ function adoptedAsOrder(window: string, span: WrapperSpan): boolean {
 }
 
 /** The sentence around `index`: newline and [.!?] both end one. */
-function sentenceBounds(window: string, start: number, end: number): [number, number] {
+export function sentenceBounds(window: string, start: number, end: number): [number, number] {
   let from = 0;
   for (let i = start - 1; i > 0; i--) {
     const ch = window[i];
@@ -1032,7 +1038,7 @@ function sentenceBounds(window: string, start: number, end: number): [number, nu
  *   - the cue introduces a coordinated list of alternatives ("a, b, or c"),
  *     which is enumeration, not instruction.
  */
-function discussionExempt(window: string, start: number, end: number): boolean {
+export function discussionExempt(window: string, start: number, end: number): boolean {
   const [from, to] = sentenceBounds(window, start, end);
   const sentence = window.slice(from, to);
   const cueOffset = lastCueOffset(sentence, start - from);
@@ -1126,7 +1132,7 @@ function shapeHitsWindow(
  * transform. Length may change (NFKC and the strip are not length-preserving),
  * which is why every index in this file is taken against the folded text.
  */
-function foldForProvenance(content: string): string {
+export function foldForProvenance(content: string): string {
   return foldConfusables(stripZeroWidthAndBidi(content));
 }
 
