@@ -19,7 +19,9 @@ Non-goals:
 
 - `approve-tap.ts` ships the endpoint half: `mintApproveTapNonce`, `verifyApproveTap`, `createApproveTapHandler`, `checkApproveTapArming` and the doctor row. Its header states nothing calls the mint from the Guard yet, so no tap completes end to end.
 - Config is `actionGuard.approveTap`. `enabled` is true only for a strict `true`; absent means off.
-- Arming already refuses when the agent's user can read the approve secret, when the secret is the webhook secret, on wrong mode or owner, and when no approver is set.
+- Arming (`checkApproveTapArming`) reads the secret file's own metadata only. It takes no webhook-secret input and makes no parent-directory check. It refuses a mode wider than 0600 (a stricter mode is accepted), a wrong owner, an agent-readable secret and a missing approver. When the agent's user cannot stat the file it reports armed with the secret not visible and defers to the endpoint.
+- The refusal when the approve secret equals the webhook secret happens when the endpoint loads the secret, not in arming. Mint and the doctor row call the arming check only, so neither makes that equality check today.
+- No card today states that a phone is a security boundary.
 - The card is version 1: readable text, no nonce, no tap path.
 - The bridge that relays cards to a chat is a host script, not product code.
 
@@ -31,15 +33,17 @@ The tap path has exactly three states, resolved in one place.
 
 | State | Condition | Behaviour |
 |---|---|---|
-| Armed | Owner notify chat is configured AND an approver id is set AND the approve secret passes the existing arming check AND the key-holder is a different user from the agent | Cards carry Approve / Deny; the endpoint is live |
+| Armed | Owner notify chat is configured AND an approver id is set AND the approve secret passes the arming check AND the key-holder is a different user from the agent | Cards carry Approve / Deny; the endpoint is live |
 | Cannot arm | Any of the above is missing | Deny exactly as today. The card tells the operator to run `shieldcortex approve --denial <actionId>` in a terminal. Doctor WARNs and names the single missing item |
 | Opted out | `actionGuard.approveTap.enabled: false` (strict `false`) | Same as cannot arm, and doctor reports it as a choice, not a fault |
+
+New checks this design proposes (none exist in arming today): notify chat set; approve secret differs from the webhook secret at arming time (optional; otherwise it stays an endpoint-load check and doctor says so). The single unified Armed state is proposed work.
 
 Reason: the owner's rule is "on by default whenever it can arm safely, otherwise deny as today". Three explicit states make "never fail open" testable: the only state that adds a way to approve is Armed.
 
 Decisions that follow:
-- The default resolves in `approve-tap.ts` (`normaliseApproveTapConfig`): absent `enabled` becomes "auto", meaning on if and only if arming passes. Junk input still degrades to off. Reason: the existing total normaliser is the one place every caller already goes through.
-- The smallest `tool-action-guard.ts` change is a call to the mint when a denial card is produced, guarded by the arming result. Nothing else in that file changes. Reason: that file is under the standing non-overlap rule and holds the Guard's decisions; it should only gain the call, never a policy edit.
+- The default resolves in `approve-tap.ts` (`normaliseApproveTapConfig`): absent `enabled` becomes "auto" (proposed; lands in S3 with the mint wiring, see D10), meaning on if and only if arming passes. Junk input still degrades to off. Reason: the existing total normaliser is the one place every caller already goes through.
+- The mint call belongs where a denial card is produced, guarded by the arming result, and must add no policy edit. That seam is not confirmed: at the base `tool-action-guard.ts` holds no approve-tap or mint reference, and the interceptor takes `buildApprovalCard` through a runtime seam (`src/defence/index.ts`). S3's first step is a read-only seam note; its file list and line ceiling are provisional until then.
 - A host where the agent runs as the secret's owner stays "cannot arm". The stronger boundary there is the OS lock plus the terminal approve.
 
 ### D2. Mint and tap flow
@@ -50,9 +54,12 @@ Decisions that follow:
 4. The receiver (D3) accepts a tap only from the configured approver, then calls the loopback endpoint with a MAC made under the approve secret.
 5. The endpoint verifies, spends the nonce first, then writes the retry grant. A concurrent second tap sees a spent nonce.
 
-Invariants (all already enforced by the endpoint; the tests in D9 pin them for the new wiring):
-- Single use. Bound to action id and exact call digest. Expiry between 30 seconds and 10 minutes.
+Enforced today (the tests in D9 pin them for the new wiring):
+- The mint refuses a lifetime under 30 seconds. The endpoint enforces a positive lifetime, the maximum lifetime and expiry.
+- Single use, bound to action id and exact call digest.
 - A different digest, a replay, an unknown action and a nonce from another action are refused with nothing written.
+
+Proposed (new wiring, not existing):
 - A Deny, from either path, wins: a tapped Approve after a Deny stays denied.
 - A denial with no recorded digest cannot be tapped.
 
@@ -68,9 +75,9 @@ Invariants (all already enforced by the endpoint; the tests in D9 pin them for t
 
 - A separate OS user holds the approve secret and runs the receiver. The agent's user must not be able to read it.
 - The secret is a different credential from `notify.webhookSecret`; arming already refuses the reverse.
-- The file is mode 0600 and owned by the key-holder, with a private parent directory. Arming checks this from metadata only, and the endpoint re-checks on the open file before trusting a byte.
+- The file is mode 0600 and owned by the key-holder, in a private parent directory. The mode and parent directory are setup requirements; arming checks the file's own metadata only (mode no wider than 0600) and does not check the parent directory. A parent-directory check would be new work, not part of this plan. The endpoint re-checks on the open file before trusting a byte.
 - Setup offers to create the key-holder and secret, showing the exact commands and asking before running anything that needs elevation. Setup never silently creates a user.
-- Doctor checks, in order: notify chat set, approver set, secret present and well-formed, key-holder differs from agent, endpoint reachable on loopback. It stops at the first failure and says what to do. Doctor is warn-only.
+- Doctor checks, in order: notify chat set, approver set, key-holder differs from agent, endpoint reachable on loopback. From metadata, doctor can check the secret's mode, owner and whether the agent's user can read it; when the secret is out of the agent user's reach (the good case) doctor cannot read it, so well-formedness and the webhook-secret difference are only checked by the endpoint at load. It stops at the first failure and says what to do. Doctor is warn-only.
 
 ### D5. One card per action
 
@@ -94,7 +101,7 @@ A card has three parts, in this order:
 2. The command, trimmed to a fixed character budget with an explicit "trimmed" marker.
 3. The rule that fired, in words, with no raw signal id in the headline.
 
-The total stays under the chat's message limit; the budget is applied before sending, not by the transport. A card never shows secrets that appear in a command. The card keeps the existing statement of the phone-as-security-boundary caveat.
+The total stays under the chat's message limit; the budget is applied before sending, not by the transport. A card never shows secrets that appear in a command. Card version 2 adds a statement that the phone is a security boundary (it is not in version 1).
 
 ### D8. #853 boundary
 
@@ -103,13 +110,14 @@ The total stays under the chat's message limit; the budget is applied before sen
 ### D9. Tests and acceptance
 
 Add-only unit tests per slice (listed in D10), each using disposable fixtures and no live host:
-- Arming table: every state in D1, including each single missing precondition, yields Cannot arm and never Armed.
+- Arming table: Armed only when every precondition holds (success case); each single missing precondition yields Cannot arm; strict opt-out yields Opted out.
 - Mint is called only when Armed; never for terminal-only signals.
 - Dedupe: same action id and same digest in the window produce one card; a different digest produces a second.
 - Expiry: late tap returns the re-ask reply and writes nothing.
 - Deny beats an earlier or later Approve.
 - Wording: the first line has no signal id; budget and trim marker hold at the limit; length limit is respected.
 - Text-only fallback states why it has no buttons.
+- S2 acceptance: card version 2 carries the phone-as-security-boundary statement.
 
 Host acceptance (a host, not CI): deny, tap, one retry passes; a replay and a different digest are refused; a Deny tap stays denied. This is run by the owner's own enable step on their box.
 
@@ -119,14 +127,14 @@ Order matters because of open peers (live state at 20 Nov 2026):
 
 | Slice | Content | Files | Line ceiling | Must merge first |
 |---|---|---|---|---|
-| S1 | Auto default and arming states; reasons | `approve-tap.ts`, `tap-eligibility.ts` (if needed) and their tests | 250 | none |
-| S2 | Card version 2: buttons, dedupe, wording, fallback text | `approval-card.ts`, `operator-notify.ts`, `webhook-notify-channel.ts` and tests | 350 | #1104 |
-| S3 | Mint wiring from the Guard | `tool-action-guard.ts` (call only) and tests | 120 | S1, S2, and the non-overlap rule clearing |
+| S1 | State resolver and tests only; inert, absent still means off | `approve-tap.ts`, `tap-eligibility.ts` (if needed) and their tests | 250 | none |
+| S2 | Card version 2: buttons, dedupe, wording, fallback text, security-boundary statement | `approval-card.ts`, `operator-notify.ts`, `webhook-notify-channel.ts` and tests | 350 | #1104 |
+| S3 | Mint wiring where the denial card is produced, plus the default flip to auto (provisional: seam not confirmed; first step a read-only seam note) | `tool-action-guard.ts` and/or the card-production seam, and tests | 120 (provisional) | S1, S2, #1104 |
 | S4 | Doctor rows and setup offer | `src/cli/doctor.ts`, `src/setup/settings-hooks.ts` and tests | 300 | #959 |
 | S5 | Expiry reply, re-ask, digest line | `approve-tap.ts`, `retry-control.ts` and tests | 250 | S2 |
 | S6 | Reference receiver and enable runbook | new `examples/notify-bridge/`, new runbook | 300 | S2 |
 
-S3 and S4 are the slices that touch files held by peers today (#1104 and #959 touch the card, notify, interceptor, hook and doctor files). S1 and S6 touch no file in an open PR at the time of writing and are the first candidates, but S1 alone cannot be exercised end to end until S3 lands, so it ships behind the existing off state until S3 merges.
+Per the open PRs' file lists, #1104 holds `approval-card.ts`, `operator-notify.ts` and `tool-action-guard.ts`; #959 holds `src/cli/doctor.ts` and `src/setup/settings-hooks.ts`. So S2 and S3 wait on #1104 and S4 waits on #959. S1 and S6 touch no file in an open PR at the time of writing. S1 ships inert (absent still means off); the default flip to auto lands in S3 with the mint wiring, so default-on never ships before a tap can complete.
 
 ### D11. Owner-only
 
@@ -144,5 +152,5 @@ These are not decided or done by any builder or reviewer:
 
 ## 5. Open questions for the owner
 
-1. Should the first slice after this merges be S1 or S6? S1 is the smaller change; S6 is what lets the owner try it.
+1. Should the first slice after this merges be S1 or S6? S1 is the smaller, inert change (the default flip waits for S3); S6 is what lets the owner try it.
 2. Is a re-ask allowed unlimited times, or capped per action? This design proposes a cap of three per action per hour, but it is the owner's call.
