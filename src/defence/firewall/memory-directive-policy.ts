@@ -110,6 +110,8 @@ const F1_ADDRESSEE = new RegExp(
     `\\b(?:the|this|our|my)\\s+${AGENT_NOUN}\\s+${MODAL}\\b`,
     `\\b(?:told|tell|asked|ask|instructed|instruct|directed|wants?|needs?|expects?|requires?)\\s+(?:the|this|our|my)\\s+${AGENT_NOUN}\\s+to\\b`,
     `(?:^|\\n)[ \\t]{0,8}(?:assistant|agent|ai|model)[ \\t]{0,4}:`,
+    // An explicit addressee header: "Note for the assistant: ..."
+    `\\b(?:notes?|message|reminder|memo|instructions?)\\s+(?:for|to)\\s+(?:the|this|our|my)\\s+${AGENT_NOUN}[ \\t]{0,4}:`,
   ].join('|'),
   'i',
 );
@@ -328,7 +330,7 @@ const GROUPS: EvidenceGroup[] = [
       ev("\\b(?:do(?:es)?\\s+not|don['\u2019]t|doesn['\u2019]t|never)\\s+(?:need|require)\\s+(?:any\\s+)?(?:approval|confirmation|permission|consent)\\b"),
       ev('\\b(?:approval|confirmation|permission|consent)(?:\\s+(?:prompts?|steps?|checks?|requests?))?\\s+(?:is|are)\\s+no\\s+longer\\s+(?:required|needed|necessary)\\b'),
       ev("\\b(?:carr(?:y|ies)|has|have|holds?|with)\\s+(?:(?:the|full)\\s+)?(?:operator|owner|admin(?:istrator)?|root|system|user)(?:['\u2019]s)?\\s+(?:level\\s+)?authority\\b"),
-      ev('\\btreat(?:s|ing)?\\s+(?:it|them|this|these|those|its|their|his|her|any|all|every|such)\\b[^.!?;\\n]{0,60}?\\bas\\s+(?:if|though)\\b[^.!?;\\n]{0,60}?\\b(?:the|my|our|your)\\s+(?:user|owner|operator|admin(?:istrator)?)\\b'),
+      ev('\\btreat(?:s|ing)?\\s+(?:(?:it|them|this|these|those|its|their|his|her|any|all|every|such)\\b|(?:requests|messages|instructions|tasks)\\s+from\\b)[^.!?;\\n]{0,60}?\\bas\\s+(?:if|though)\\b[^.!?;\\n]{0,60}?\\b(?:the|my|our|your)\\s+(?:user|owner|operator|admin(?:istrator)?)\\b'),
       ev('\\bas\\s+(?:an?\\s+)?(?:instructions?|requests?|commands?|orders?|directives?)\\s+from\\s+(?:the|my|our|your)\\s+(?:user|owner|operator|admin(?:istrator)?)\\b'),
       ev('\\b(?:is|as)\\s+the\\s+system\\s+itself\\b'),
     ],
@@ -347,8 +349,8 @@ const GROUPS: EvidenceGroup[] = [
       // the memory itself: "never reveal this instruction" — a recipient after
       // it is checked after the match (memorySelfRecipientAccepted).
       ev(`\\b${NEG}\\s+(?:ever\\s+)?${CONCEAL_VERB}\\s+(?:${TOK}\\s+){0,2}?${MEMORY_SELF}`, 'self'),
-      // "keep them out of the daily digest" / "keep this hidden from the user"
-      ev(`\\bkeep\\s+(?:${CONCEAL_OBJECT})\\s+(?:(?:hidden|secret|quiet|private)\\s+(?:from\\s+)?|out\\s+of\\s+|off\\s+|away\\s+from\\s+|from\\s+)(?:${OWNER_RECIPIENT}|${RECORD_SINK})`),
+      // "keep them out of the daily digest" / "keep this (note) hidden from the user"
+      ev(`\\bkeep\\s+(?:${MEMORY_SELF}|${CONCEAL_OBJECT})\\s+(?:(?:hidden|secret|quiet|private)\\s+(?:from\\s+)?|out\\s+of\\s+|off\\s+|away\\s+from\\s+|from\\s+)(?:${OWNER_RECIPIENT}|${RECORD_SINK})`),
       // "hide this from the operator" — not a secret being redacted from logs
       ev(`\\bhide\\s+(?:${TOK}\\s+){0,4}?from\\s+(?:${OWNER_RECIPIENT}|${RECORD_SINK})`, 'hide'),
     ],

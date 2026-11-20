@@ -28,6 +28,7 @@ import {
   ACCEPTED_AMBIGUITY,
   BENIGN_CONTROLS,
   ROUND2_PRECISION,
+  ROUND2_RECALL,
   SINK_DIRECTIVES,
 } from '../defence/__tests__/fixtures/memory-directive-corpus.js';
 
@@ -165,6 +166,16 @@ describe('M3 — round-2 review rows through MCP remember, exact verdicts', () =
     }
   });
 
+  it('recall rows are quarantined under their group', async () => {
+    for (const [id, pattern, text] of ROUND2_RECALL) {
+      closeDatabase();
+      initDatabase(':memory:');
+      const result = await executeRemember({ title: `Round2 ${id}`, content: text, memoryAdmission: 'agent' });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain(pattern);
+      expect(quarantined().map((r) => r.reason)).toEqual([expect.stringContaining(pattern)]);
+    }
+  });
 });
 
 describe('M3 — the CLI remember command is unchanged (operator, trusted)', () => {

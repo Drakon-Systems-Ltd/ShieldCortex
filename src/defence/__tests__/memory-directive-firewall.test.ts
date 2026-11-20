@@ -36,6 +36,7 @@ import {
   BENIGN_GENRES,
   ROUND2_PRECISION,
   ROUND2_PRECISION_LOCAL_EGRESS,
+  ROUND2_RECALL,
   SINK_DIRECTIVES,
 } from './fixtures/memory-directive-corpus.js';
 
@@ -227,7 +228,7 @@ describe('M1 — accepted ambiguity rows QUARANTINE in memory admission (design 
   }
 });
 
-describe('M1 — round-2 review precision rows, exact verdicts in memory admission', () => {
+describe('M1 — round-2 review rows, exact verdicts in memory admission', () => {
   for (const [id, text] of ROUND2_PRECISION) {
     it(`precision ${id}: ALLOW under memory_candidate and agent admission`, () => {
       const lane = runDefencePipelinePreviewInternal(text, 'note', { type: 'memory_candidate', identifier: 'scan' }, BALANCED);
@@ -245,4 +246,12 @@ describe('M1 — round-2 review precision rows, exact verdicts in memory admissi
     expect(lane.blockedPatterns.filter((p) => p.startsWith('memory_directive:'))).toEqual([]);
   });
 
+  for (const [id, pattern, text] of ROUND2_RECALL) {
+    it(`recall ${id}: QUARANTINE under memory_candidate with ${pattern}`, () => {
+      const r = fw(text, 'memory_candidate');
+      expect(r.result).toBe('QUARANTINE');
+      expect(r.threatIndicators).toEqual(['memory_directive']);
+      expect(r.blockedPatterns).toEqual([pattern]);
+    });
+  }
 });
