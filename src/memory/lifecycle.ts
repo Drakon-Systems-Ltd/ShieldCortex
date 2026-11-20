@@ -41,6 +41,7 @@ import {
 import { createMemoryLink } from './links.js';
 import type { DefenceSource } from '../defence/types.js';
 import { runDefencePipeline } from '../defence/index.js';
+import { detectMemoryDirective } from '../defence/firewall/memory-directive-policy.js';
 import { createContentHash } from '../defence/audit/logger.js';
 import { redactForPersistence } from '../defence/sensitivity/pii.js';
 
@@ -197,6 +198,32 @@ function pruneEnrichmentTimestamps(): void {
 }
 
 /**
+ * SCN-010: enrichments dropped because the APPENDED text carried a standing
+ * directive about a control (the memory-directive screen). Process-local; the
+ * refusal reason on each call names the patterns.
+ */
+let enrichmentDirectiveRefusals = 0;
+
+/** How many enrichments this process dropped on the memory-directive screen. */
+export function getEnrichmentDirectiveRefusalCount(): number {
+  return enrichmentDirectiveRefusals;
+}
+
+/**
+ * Pattern names when the appended text is a memory directive, else null.
+ * Fails open (null) if the screen throws, like every other S site: the
+ * defence pipeline scan below still runs.
+ */
+function enrichmentDirective(appended: string): string[] | null {
+  try {
+    const result = detectMemoryDirective(appended);
+    return result.detected ? result.patterns : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Enrichment result indicating what happened
  */
 export interface EnrichmentResult {
@@ -264,6 +291,16 @@ export function enrichMemory(
   const newContent = memory.content + enrichmentBlock;
   if (newContent.length > MAX_CONTENT_SIZE - 500) {
     return { enriched: false, reason: 'Content size limit reached' };
+  }
+
+  // SCN-010: the appended text is agent-supplied (an MCP recall query reaches
+  // here through searchMemories' side effect), so appending it is a memory
+  // admission. Screen ONLY the appended text — the stored row is not
+  // re-judged — and on a hit drop the enrichment, leaving the row unchanged.
+  const directive = enrichmentDirective(truncatedContext);
+  if (directive) {
+    enrichmentDirectiveRefusals += 1;
+    return { enriched: false, reason: `Enrichment refused: ${directive.join(', ')}` };
   }
 
   // DEFENCE: re-scan the merged content before persisting — the read-path
