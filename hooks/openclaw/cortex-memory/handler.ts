@@ -548,13 +548,20 @@ async function runSessionExtraction(event, { sessionEntry, tags, sourceIdentifie
     const patterns = candidateScreen ? candidateScreen(mem.content, mem.title) : null;
     if (patterns) {
       refused++;
-      // Names and a title, never the refused text — it is the part nobody
-      // wanted persisted. No new sink: this is the hook's existing console.
+      // Never the refused text — it is the part nobody wanted persisted. This
+      // hook has no DB, so its record is its existing console.
       // SCN-010: the names may be memory-directive (S) or L2; the wrapper says which.
       const indicator = typeof extract.refusalIndicator === "function"
         ? extract.refusalIndicator(patterns)
         : "non_authoritative_instruction";
-      console.log(`[cortex-memory] Candidate refused (${indicator}: ${patterns.join(", ")}): "${mem.title}"`);
+      if (indicator === "memory_directive") {
+        // One names-only line per refused candidate, attributed to
+        // memory_candidate. No title: an extracted title is candidate text.
+        console.log(`[cortex-memory] Candidate refused under memory_candidate (${indicator}: ${patterns.join(", ")})`);
+      } else {
+        // Pre-existing L2 refusal line, unchanged: names and the title.
+        console.log(`[cortex-memory] Candidate refused (${indicator}: ${patterns.join(", ")}): "${mem.title}"`);
+      }
       continue;
     }
 

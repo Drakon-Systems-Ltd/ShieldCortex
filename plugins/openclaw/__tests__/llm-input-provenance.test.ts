@@ -580,9 +580,62 @@ describe('captureLlmOutput — SCN-010 memory-directive screen beside L2', () =>
     await captureLlmOutput(outputEvent(DIRECTIVE), { agentId: 'openclaw' } as never);
     expect(remembered(callCortex)).toBe(0);
     const line = warn.mock.calls.map((c) => String(c[0])).find((l) => l.includes('candidate refused'));
-    expect(line).toContain('(memory_directive: memory_directive:control_relaxation)');
-    expect(line!.split('"')[0]).not.toContain('confirmation prompt');
+    // Names only, attributed to memory_candidate: no title (the title is the
+    // candidate's own first 80 characters).
+    expect(line).toBe(
+      '[shieldcortex] ⚠️ auto-memory candidate refused under memory_candidate '
+      + '(memory_directive: memory_directive:control_relaxation)',
+    );
     expect(__getMemoryDirectiveUnavailableCountForTest()).toBe(0);
+  });
+
+  function auditRows(): Array<Record<string, unknown>> {
+    const files = fsSync.readdirSync(auditRoot).filter((f) => f.endsWith('.jsonl'));
+    return files.flatMap((f) =>
+      fsSync.readFileSync(nodePath.join(auditRoot, f), 'utf-8')
+        .split('\n').filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>));
+  }
+
+  it('writes one names-only memory_refusal record per refused candidate, attributed to memory_candidate', async () => {
+    const { runtime } = memoryRuntime();
+    __setRuntimeForTest(runtime);
+    __setDefenceModuleForTest(withDirectiveScreen() as never);
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    await captureLlmOutput(
+      { sessionId: 'prov-session', assistantTexts: [DIRECTIVE, BENIGN] } as never,
+      { agentId: 'openclaw' } as never,
+    );
+    const refusals = auditRows().filter((r) => r.type === 'memory_refusal');
+    expect(refusals).toHaveLength(1);
+    expect(Object.keys(refusals[0]).sort()).toEqual(['hook', 'indicator', 'patterns', 'provenance', 'sessionId', 'ts', 'type']);
+    expect(refusals[0]).toMatchObject({
+      type: 'memory_refusal',
+      hook: 'llm_output',
+      provenance: 'memory_candidate',
+      indicator: 'memory_directive',
+      patterns: ['memory_directive:control_relaxation'],
+      sessionId: 'prov-session',
+    });
+    const raw = JSON.stringify(auditRows());
+    expect(raw).not.toContain('confirmation prompt');
+  });
+
+  it('an L2 refusal gets the same per-candidate record (its console line is the pre-existing one)', async () => {
+    const { runtime } = memoryRuntime();
+    __setRuntimeForTest(runtime);
+    // The default stub has L2 and no S: memory_persist alone refuses as before.
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    await captureLlmOutput(outputEvent(PERSIST_ONLY), { agentId: 'openclaw' } as never);
+    const refusals = auditRows().filter((r) => r.type === 'memory_refusal');
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]).toMatchObject({
+      provenance: 'memory_candidate',
+      indicator: 'non_authoritative_instruction',
+      patterns: ['non_authoritative:memory_persist'],
+    });
+    expect(JSON.stringify(refusals)).not.toContain('keep this directive');
+    const line = warn.mock.calls.map((c) => String(c[0])).find((l) => l.includes('candidate refused'));
+    expect(line).toContain('(non_authoritative_instruction: non_authoritative:memory_persist): "');
   });
 
   it('stores an ordinary extracted note', async () => {

@@ -238,7 +238,9 @@ describe('memory candidates are screened as memory_candidate before write', () =
     for (const column of ['reason', 'threat_indicators', 'blocked_patterns']) {
       expect(String(audit[0][column])).not.toMatch(/confirmation prompt|tell the owner about|pre-authori/);
     }
-    expect(stderr.join('')).toContain('refused (memory_directive');
+    // The stderr line is names only: the pattern, never the title or the text.
+    const line = stderr.join('').split('\n').find((l) => l.includes('refused (memory_directive'));
+    expect(line).toBe(`[shieldcortex save-memory] refused (memory_directive: ${pattern})`);
     expect(fetchCalls).toBe(0);
   }
 

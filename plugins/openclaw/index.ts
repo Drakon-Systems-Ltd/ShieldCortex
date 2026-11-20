@@ -4401,12 +4401,28 @@ export async function captureLlmOutput(event: LlmOutputEvent, ctx: AgentCtx): Pr
       );
       if (refusal) {
         refused++;
-        // Names and a title, never the refused text — it is the part nobody
-        // wanted persisted. No new sink: the plugin's existing console.
-        console.warn(
-          `[shieldcortex] ⚠️ auto-memory candidate refused (${refusal.indicator}: ` +
-          `${refusal.patterns.join(', ')}): "${mem.title.slice(0, 80)}"`,
-        );
+        if (refusal.indicator === 'memory_directive') {
+          // SCN-010: pattern names only. The title here is the candidate's own
+          // first 80 characters, i.e. the refused text, so it is not printed.
+          console.warn(
+            `[shieldcortex] ⚠️ auto-memory candidate refused under memory_candidate ` +
+            `(${refusal.indicator}: ${refusal.patterns.join(', ')})`,
+          );
+        } else {
+          // Pre-existing L2 refusal line, unchanged: names and the title.
+          console.warn(
+            `[shieldcortex] ⚠️ auto-memory candidate refused (${refusal.indicator}: ` +
+            `${refusal.patterns.join(', ')}): "${mem.title.slice(0, 80)}"`,
+          );
+        }
+        // One durable record per refused candidate, attributed to
+        // memory_candidate, carrying the indicator and pattern names — never the
+        // title or the text. The count-only aggregate below is kept as it was.
+        await auditLog({
+          type: "memory_refusal", hook: "llm_output", provenance: "memory_candidate",
+          indicator: refusal.indicator, patterns: refusal.patterns,
+          sessionId: event.sessionId, ts: new Date().toISOString(),
+        });
         continue;
       }
 

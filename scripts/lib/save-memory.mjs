@@ -212,9 +212,12 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
   const refusal = screenAutoCaptureCandidate(defence, memory.content, memory.title);
   if (refusal) {
     writeRefusalAudit(db, project, sourceIdentifier, refusal);
+    // SCN-010: a memory-directive refusal prints pattern names only (the audit
+    // row above is the record). The L2 line keeps its pre-existing title.
+    const titleTail = refusal.indicator === MEMORY_DIRECTIVE_INDICATOR ? '' : `: ${memory.title}`;
     process.stderr.write(
       `[shieldcortex save-memory] refused (${refusal.indicator}: `
-      + `${refusal.patterns.join(', ')}): ${memory.title}\n`,
+      + `${refusal.patterns.join(', ')})${titleTail}\n`,
     );
     return;
   }
