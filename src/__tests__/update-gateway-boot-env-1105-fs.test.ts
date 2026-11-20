@@ -24,6 +24,10 @@ const seam = {
   withhold: [] as string[],
   /** Every path the module opened the boot env by. */
   bootEnvOpens: [] as string[],
+  /** #1105 reopened: run once, immediately before the module opens a path ending in `suffix`. */
+  beforeOpenOf: null as null | { suffix: string; run: () => void },
+  /** Every path the module opened a unit-listed `secrets/` file or directory by. */
+  unitOpens: [] as string[],
 };
 
 const wrapped: typeof realFs = {
@@ -34,6 +38,12 @@ const wrapped: typeof realFs = {
       const run = seam.beforeBootEnvOpen;
       seam.beforeBootEnvOpen = null;
       run?.();
+    }
+    if (typeof p === 'string' && /\/(secrets|gateway-boot\.env)$/.test(p)) seam.unitOpens.push(p);
+    const hook = seam.beforeOpenOf;
+    if (hook && typeof p === 'string' && p.endsWith(hook.suffix)) {
+      seam.beforeOpenOf = null;
+      hook.run();
     }
     return (realFs.openSync as (...a: unknown[]) => number)(p, ...rest);
   }) as typeof realFs.openSync,
@@ -89,6 +99,8 @@ beforeEach(() => {
   seam.noProcFd = false;
   seam.withhold = [];
   seam.bootEnvOpens = [];
+  seam.beforeOpenOf = null;
+  seam.unitOpens = [];
   saved = {};
   for (const k of ENV_KEYS) {
     saved[k] = process.env[k];
@@ -148,5 +160,101 @@ describe('#1105 r2 B-dir — no O_NOFOLLOW / O_DIRECTORY / O_NONBLOCK, nothing r
       reason: '~/.openclaw/gateway.systemd.env cannot be opened without following links on this platform',
     });
     expect(seam.bootEnvOpens).toEqual([]);
+  });
+});
+
+/**
+ * #1105 reopened: a unit-listed file in a subdirectory (`secrets/`) is reached
+ * one component at a time through the checked descriptors, and every
+ * directory above it is re-checked after each open. A `secrets/` swapped for
+ * a link to another private directory between opening it and opening the
+ * file inside it is refused on both routes.
+ */
+describe('#1105 reopened — unit-listed files are bound to the directories that were checked', () => {
+  const secretsDir = () => join(home, '.openclaw', 'secrets');
+  const unitRun = () => (_args: readonly string[], _env: Record<string, string>) => ({
+    status: 0,
+    stdout: [
+      `EnvironmentFiles=${join(home, '.openclaw', 'gateway.systemd.env')} (ignore_errors=yes)`,
+      `EnvironmentFiles=${join(secretsDir(), 'gateway-boot.env')} (ignore_errors=yes)`,
+      'LoadState=loaded',
+      '',
+    ].join('\n'),
+  });
+  const resolveUnit = () => resolveGatewayBootCredentials({
+    home, refusedPath: 'gateway.auth.token', env: process.env, systemctl: unitRun(),
+  });
+
+  beforeEach(() => {
+    // The generated file holds no credential; the token is only in secrets/.
+    realFs.writeFileSync(join(home, '.openclaw', 'gateway.systemd.env'), 'OPENCLAW_SERVICE_KIND=gateway\n');
+    realFs.mkdirSync(secretsDir(), { mode: 0o700 });
+    realFs.chmodSync(secretsDir(), 0o700);
+    realFs.writeFileSync(join(secretsDir(), 'gateway-boot.env'), `OPENCLAW_GATEWAY_TOKEN=${TOKEN}\n`);
+    realFs.chmodSync(join(secretsDir(), 'gateway-boot.env'), 0o600);
+  });
+
+  /** Replace `~/.openclaw/secrets` with a link to another private dir holding a different token. */
+  function swapSecretsForLink() {
+    const other = join(home, 'other-secrets');
+    realFs.mkdirSync(other, { mode: 0o700 });
+    realFs.chmodSync(other, 0o700);
+    realFs.writeFileSync(join(other, 'gateway-boot.env'), `OPENCLAW_GATEWAY_TOKEN=${SWAPPED}\n`);
+    realFs.chmodSync(join(other, 'gateway-boot.env'), 0o600);
+    realFs.renameSync(secretsDir(), join(home, '.openclaw', 'checked-secrets'));
+    realFs.symlinkSync(other, secretsDir());
+  }
+
+  it('control: the token in secrets/ is used, read through the checked descriptors', () => {
+    expect(resolveUnit()).toEqual({
+      used: true,
+      env: { OPENCLAW_GATEWAY_TOKEN: TOKEN },
+      keys: ['OPENCLAW_GATEWAY_TOKEN'],
+      from: ['~/.openclaw/secrets/gateway-boot.env'],
+    });
+    if (hasProcFd) {
+      expect(seam.unitOpens).toHaveLength(2);
+      for (const p of seam.unitOpens) expect(p).toMatch(/^\/proc\/self\/fd\/\d+\/(secrets|gateway-boot\.env)$/);
+    }
+  });
+
+  it.each([
+    ['through /proc/self/fd', false],
+    ['by path, re-checked after the open (no /proc/self/fd)', true],
+  ])('secrets/ swapped for a link between opening it and opening the file: refused (%s)', (_label, noProcFd) => {
+    seam.noProcFd = noProcFd;
+    seam.beforeOpenOf = { suffix: 'gateway-boot.env', run: swapSecretsForLink };
+    const r = resolveUnit();
+    expect(realFs.lstatSync(secretsDir()).isSymbolicLink()).toBe(true);
+    expect(r).toEqual({
+      used: false,
+      reason: '~/.openclaw changed while it was being read (one of the EnvironmentFiles systemd lists for openclaw-gateway.service), so no boot env was used',
+    });
+    expect(JSON.stringify(r)).not.toContain(SWAPPED);
+    expect(JSON.stringify(r)).not.toContain(TOKEN);
+    expect(JSON.stringify(r)).not.toContain(home);
+  });
+
+  it.each([
+    ['through /proc/self/fd', false],
+    ['by path, re-checked after the open (no /proc/self/fd)', true],
+  ])('~/.openclaw swapped for a link to a dir holding the SAME checked secrets/: refused, every level above is re-checked (%s)', (_label, noProcFd) => {
+    seam.noProcFd = noProcFd;
+    seam.beforeOpenOf = {
+      suffix: 'gateway-boot.env',
+      run: () => {
+        const moved = join(home, 'moved-openclaw');
+        realFs.mkdirSync(moved, { mode: 0o700 });
+        realFs.chmodSync(moved, 0o700);
+        // The very directory that was checked, inode and all, now under a link.
+        realFs.renameSync(secretsDir(), join(moved, 'secrets'));
+        realFs.renameSync(join(home, '.openclaw'), join(home, 'checked-openclaw'));
+        realFs.symlinkSync(moved, join(home, '.openclaw'));
+      },
+    };
+    const r = resolveUnit();
+    expect(realFs.lstatSync(join(home, '.openclaw')).isSymbolicLink()).toBe(true);
+    expect(r).toMatchObject({ used: false, reason: expect.stringMatching(/^~\/\.openclaw changed while it was being read/) });
+    expect(JSON.stringify(r)).not.toContain(TOKEN);
   });
 });
