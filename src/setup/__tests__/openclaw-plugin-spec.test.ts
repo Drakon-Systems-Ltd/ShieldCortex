@@ -769,6 +769,37 @@ describe('`shieldcortex update` plugin step', () => {
     expect(exitCodeOf(r)).toBe(1);
   });
 
+  it.each([
+    ['openclaw.json plugins.installs', 'openclaw.json'],
+    ['installs.json', 'installs.json'],
+  ] as const)('#1110 round 3 — a %s record at the pin beside a whitespace-padded OLDER load path is not a clean ok', async (_label, source) => {
+    const checkout = join(home, 'dev', 'plugins', 'openclaw');
+    mkdirSync(checkout, { recursive: true });
+    writeFileSync(join(checkout, 'package.json'), JSON.stringify({ name: REALTIME_PLUGIN_PACKAGE, version: '5.17.3' }));
+    const plugins: Record<string, unknown> = { load: { paths: [`  ${checkout}  `] } };
+    if (source === 'openclaw.json') {
+      const ext = join(home, '.openclaw', 'extensions', 'shieldcortex-realtime');
+      mkdirSync(join(ext, 'dist'), { recursive: true });
+      writeFileSync(join(ext, 'dist', 'index.js'), '');
+      writeFileSync(join(ext, 'package.json'), JSON.stringify({ name: REALTIME_PLUGIN_PACKAGE, version: CLI }));
+      plugins.installs = { 'shieldcortex-realtime': { source: 'npm', version: CLI } };
+      rmSync(join(home, '.openclaw', 'plugins', 'installs.json'));
+    } else {
+      const rec = join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+      mkdirSync(rec, { recursive: true });
+      writeFileSync(join(rec, 'package.json'), JSON.stringify({ name: REALTIME_PLUGIN_PACKAGE, version: CLI }));
+      writeFileSync(join(home, '.openclaw', 'plugins', 'installs.json'),
+        JSON.stringify({ installRecords: { 'shieldcortex-realtime': { source: 'npm', installPath: rec, version: CLI } } }));
+    }
+    writeFileSync(join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins }));
+    const f = scripted([null]);
+    const r = await stepOpenClawPlugin(home, { run: f.run, readCliVersion: () => CLI });
+    expect(f.installs()).toEqual([]);
+    expect(r.status).toBe('warn');
+    expect(r.unfinished).toBe(true);
+    expect(exitCodeOf(r)).toBe(1);
+  });
+
   it('#1109 round 3 — kept install whose link state is unknown is unfinished even when the selected copy reads as the pin', async () => {
     const f = scripted([null]);
     const r = await stepOpenClawPlugin(home, {

@@ -22,6 +22,7 @@ import {
   readSelectedRealtimePluginVersion,
 } from '../openclaw-realtime-install.js';
 import { readPluginInstallIndexState, type PluginInstallIndexState } from '../openclaw-plugin-index.js';
+import { assessRealtimeReplacement } from '../../setup/openclaw-plugin-spec.js';
 
 const ID = 'shieldcortex-realtime';
 const PKG = '@drakon-systems/shieldcortex-realtime';
@@ -304,5 +305,222 @@ describe('#1109 round 3 — readRealtimeReplacementEvidence: what a forced insta
 
   it('an unreadable index makes the selected copy unknown', () => {
     expect(readRealtimeReplacementEvidence(home, unreadableIndex).selected.state).toBe('unknown');
+  });
+});
+
+/**
+ * #1110 — OpenClaw <= 2026.4.24 has no installs.json and no SQLite index: its
+ * install record is openclaw.json `plugins.installs`, and the copy is the npm
+ * package under ~/.openclaw/extensions (`dist/index.js`, no root index.js).
+ * Temp-directory JSON only; the index is the injectable reader or simply absent.
+ */
+describe('#1110 — a native install recorded in openclaw.json plugins.installs', () => {
+  const PIN = '5.20.3';
+  const ext = (): string => path.join(home, '.openclaw', 'extensions', ID);
+  /** The published package layout: package.json + manifest + dist/index.js, NO root index.js. */
+  const nativeCopy = (version: string, dir = ext()): string => {
+    fs.mkdirSync(path.join(dir, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'dist', 'index.js'), '');
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: PKG, version, main: './dist/index.js' }));
+    fs.writeFileSync(path.join(dir, 'openclaw.plugin.json'), JSON.stringify({ id: ID, version }));
+    return dir;
+  };
+  const record = (rec: Record<string, unknown>): void => writeJson('openclaw.json', { plugins: { installs: { [ID]: rec } } });
+  const decide = () => assessRealtimeReplacement(readRealtimeReplacementEvidence(home), PIN);
+
+  it('a NEWER native copy is selected, with its source, and a forced install is refused', () => {
+    const dir = nativeCopy('999.0.0');
+    record({ source: 'npm', spec: PKG, installPath: dir, version: '999.0.0' });
+    expect(readSelectedRealtimeInstall(home)).toEqual({
+      state: 'selected', dir, version: '999.0.0', evidence: 'openclaw.json plugins.installs record', source: 'npm',
+    });
+    expect(decide()).toMatchObject({ replace: false, why: 'newer' });
+  });
+
+  it('an exact-pin native copy verifies; an OLDER one may be replaced', () => {
+    const dir = nativeCopy(PIN);
+    record({ source: 'npm', installPath: dir, version: PIN });
+    expect(readSelectedRealtimePluginVersion(home)).toEqual({ version: PIN });
+    nativeCopy('5.17.3');
+    record({ source: 'npm', installPath: dir, version: '5.17.3' });
+    expect(readSelectedRealtimeInstall(home)).toMatchObject({ state: 'selected', version: '5.17.3' });
+    expect(decide()).toEqual({ replace: true });
+  });
+
+  it('a record with no installPath names the extensions directory (a `~/` path resolves too)', () => {
+    nativeCopy(PIN);
+    record({ source: 'npm', version: PIN });
+    expect(readSelectedRealtimeInstall(home)).toMatchObject({ state: 'selected', dir: ext(), version: PIN, source: 'npm' });
+    record({ source: 'npm', installPath: `~/.openclaw/extensions/${ID}` });
+    expect(readSelectedRealtimeInstall(home)).toMatchObject({ state: 'selected', dir: ext(), version: PIN });
+  });
+
+  it.each(['clawhub', 'archive'])('a `%s` record is not pinned npm provenance — but the replacement decision still sees the copy', (source) => {
+    const dir = nativeCopy(PIN);
+    record({ source, installPath: dir, version: PIN });
+    expect(readSelectedRealtimePluginVersion(home))
+      .toEqual({ version: null, reason: `the copy OpenClaw selected (v${PIN}) was installed from ${source}, not npm` });
+    expect(readRealtimeReplacementEvidence(home).selected).toMatchObject({ state: 'selected', version: PIN, source });
+  });
+
+  it.each([
+    ['unparseable package.json', (dir: string) => fs.writeFileSync(path.join(dir, 'package.json'), '{ nope')],
+    ['no exact version', (dir: string) => fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: PKG, version: 'latest' }))],
+  ])('a recorded copy that EXISTS but is unreadable (%s) is unknown, and a forced install is refused', (_label, write) => {
+    const dir = nativeCopy('999.0.0');
+    fs.rmSync(path.join(dir, 'openclaw.plugin.json'));
+    write(dir);
+    record({ source: 'npm', installPath: dir });
+    expect(readSelectedRealtimeInstall(home).state).toBe('unknown');
+    expect(readSelectedRealtimePluginVersion(home).version).toBeNull();
+    expect(decide()).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
+  it('CONFLICT: the record says one version, the copy it names another ⇒ unknown', () => {
+    const dir = nativeCopy('5.17.3');
+    record({ source: 'npm', installPath: dir, version: PIN });
+    expect(readSelectedRealtimeInstall(home)).toEqual({
+      state: 'unknown', why: `openclaw.json plugins.installs says v${PIN}, but the copy it names is v5.17.3`,
+    });
+    expect(decide()).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
+  it('CONFLICT: installs.json and openclaw.json name copies at different versions ⇒ unknown; the same version is not a conflict', () => {
+    const dir = nativeCopy('999.0.0');
+    record({ source: 'npm', installPath: dir });
+    const p = writeRealtimeProject('recorded', PIN);
+    writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'npm', installPath: p } } });
+    expect(readSelectedRealtimeInstall(home)).toEqual({
+      state: 'unknown', why: `installs.json and openclaw.json name two copies (v${PIN}, v999.0.0)`,
+    });
+    nativeCopy(PIN);
+    expect(readSelectedRealtimeInstall(home)).toMatchObject({ state: 'selected', dir: p, version: PIN, evidence: 'installs.json record' });
+  });
+
+  it('a DANGLING record (its copy is gone) is none, says so, and does not block a reinstall', () => {
+    const gone = path.join(home, '.openclaw', 'extensions', ID);
+    record({ source: 'npm', installPath: gone, version: '999.0.0' });
+    expect(readSelectedRealtimeInstall(home))
+      .toEqual({ state: 'none', dangling: `the copy openclaw.json plugins.installs names is not on disk (${gone})` });
+    expect(readSelectedRealtimePluginVersion(home).version).toBeNull();
+    expect(decide()).toEqual({ replace: true });
+  });
+
+  it('the index, when OpenClaw has one, still wins over a leftover openclaw.json record', () => {
+    const dir = nativeCopy('999.0.0');
+    record({ source: 'npm', installPath: dir });
+    const p = writeRealtimeProject('indexed', PIN);
+    expect(readSelectedRealtimeInstall(home, index({ [ID]: { source: 'npm', installPath: p } })))
+      .toMatchObject({ state: 'selected', dir: p, version: PIN, evidence: 'install index record' });
+  });
+
+  it('NO record at all: the native layout in the extensions directory is still discovered (newer ⇒ kept)', () => {
+    const dir = nativeCopy('999.0.0');
+    expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'selected', dir, version: '999.0.0', evidence: 'extensions directory' });
+    expect(decide()).toMatchObject({ replace: false, why: 'newer' });
+    // …and after a dangling index record, too.
+    expect(readSelectedRealtimeInstall(home, index({ [ID]: { source: 'npm', installPath: path.join(home, 'gone') } })))
+      .toMatchObject({ state: 'selected', dir, version: '999.0.0' });
+  });
+
+  it('NO record: a native-layout copy whose package.json cannot be parsed is unknown, never none', () => {
+    const dir = nativeCopy('999.0.0');
+    fs.rmSync(path.join(dir, 'openclaw.plugin.json'));
+    fs.writeFileSync(path.join(dir, 'package.json'), '{ nope');
+    expect(readSelectedRealtimeInstall(home).state).toBe('unknown');
+  });
+
+  it('the direct install\'s deletion evidence: a newer extension copy no reader selects still refuses the install', () => {
+    // No record, no dist/index.js, no root index.js — only a package.json.
+    fs.mkdirSync(ext(), { recursive: true });
+    fs.writeFileSync(path.join(ext(), 'package.json'), JSON.stringify({ name: PKG, version: '999.0.0' }));
+    expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'none' });
+    expect(assessRealtimeReplacement(readRealtimeReplacementEvidence(home, { deleting: [ext()] }), PIN))
+      .toMatchObject({ replace: false, why: 'newer' });
+  });
+
+  it('unchanged: a path record is the linked reader\'s, and a bare extensions directory is still not an install', () => {
+    record({ source: 'path', installPath: '/dev/b' });
+    expect(readLinkedRealtimeInstall(home)).toEqual({ state: 'linked', at: '/dev/b' });
+    fs.rmSync(path.join(home, '.openclaw', 'openclaw.json'));
+    fs.mkdirSync(path.join(ext(), 'dist'), { recursive: true });
+    expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'none' });
+    fs.writeFileSync(path.join(ext(), 'openclaw.plugin.json'), JSON.stringify({ id: ID, version: '999.0.0' }));
+    expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'none' });
+  });
+
+  // #1110 round 2: OpenClaw ranks a `plugins.load.paths` copy above a
+  // record-matched extension copy, so the record alone cannot claim the pin.
+  const recordAndLoadPath = (loadVersion: string, recordVersion = PIN): { dir: string; linked: string } => {
+    const dir = nativeCopy(recordVersion);
+    const linked = checkout(loadVersion);
+    writeJson('openclaw.json', { plugins: { load: { paths: [linked] }, installs: { [ID]: { source: 'npm', version: recordVersion } } } });
+    return { dir, linked };
+  };
+
+  it('CONFLICT: a load-path copy and a record copy at DIFFERENT versions ⇒ unknown, never the record copy', () => {
+    const { linked } = recordAndLoadPath('5.17.3');
+    expect(readSelectedRealtimeInstall(home)).toEqual({
+      state: 'unknown',
+      why: `a plugins.load.paths copy (v5.17.3, ${linked}) and the openclaw.json plugins.installs record copy (v${PIN}) disagree`,
+    });
+    expect(readSelectedRealtimePluginVersion(home).version).toBeNull();
+    expect(decide()).toMatchObject({ replace: false });
+  });
+
+  it('CONFLICT survives a whitespace-padded load path (OpenClaw trims it and loads the copy)', () => {
+    const dir = nativeCopy(PIN);
+    const linked = checkout('5.17.3');
+    writeJson('openclaw.json', { plugins: { load: { paths: [`  ${linked}  `] }, installs: { [ID]: { source: 'npm', version: PIN } } } });
+    expect(readSelectedRealtimeInstall(home)).toEqual({
+      state: 'unknown',
+      why: `a plugins.load.paths copy (v5.17.3, ${linked}) and the openclaw.json plugins.installs record copy (v${PIN}) disagree`,
+    });
+    expect(readSelectedRealtimeInstall(home)).not.toMatchObject({ state: 'selected', dir });
+    expect(decide()).toMatchObject({ replace: false });
+  });
+
+  it('round 3: an installs.json record at the pin + a whitespace-padded OLDER load path ⇒ unknown, never the record\'s pin', () => {
+    const rec = writeRealtimeProject('drakon-systems-shieldcortex-realtime', PIN);
+    writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'npm', installPath: rec, version: PIN } } });
+    const linked = checkout('5.17.3');
+    writeJson('openclaw.json', { plugins: { load: { paths: [`  ${linked}  `] } } });
+    expect(readSelectedRealtimeInstall(home)).toEqual({
+      state: 'unknown',
+      why: `a plugins.load.paths copy (v5.17.3, ${linked}) and the installs.json record copy (v${PIN}) disagree`,
+    });
+    expect(readSelectedRealtimePluginVersion(home).version).toBeNull();
+    expect(assessRealtimeReplacement(readRealtimeReplacementEvidence(home), PIN)).toMatchObject({ replace: false });
+  });
+
+  it('round 3: the linked reader reports the trimmed load path — one identity for discovery and version reading', () => {
+    const linked = checkout('5.17.3');
+    writeJson('openclaw.json', { plugins: { load: { paths: [`\t ${linked} \n`] } } });
+    expect(readLinkedRealtimeInstall(home)).toEqual({ state: 'linked', at: linked });
+  });
+
+  it('round 3: a path record whose identity cannot be read beside a record copy ⇒ unknown, not the record\'s pin', () => {
+    const rec = writeRealtimeProject('drakon-systems-shieldcortex-realtime', PIN);
+    writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'npm', installPath: rec, version: PIN } } });
+    const bad = path.join(home, 'dev', 'plugin');
+    fs.mkdirSync(bad, { recursive: true });
+    fs.writeFileSync(path.join(bad, 'package.json'), '{ not json');
+    writeJson('openclaw.json', { plugins: { installs: { [ID]: { source: 'path', sourcePath: bad } } } });
+    expect(readLinkedRealtimeInstall(home)).toEqual({ state: 'linked', at: bad });
+    expect(readSelectedRealtimeInstall(home).state).toBe('unknown');
+    expect(readSelectedRealtimePluginVersion(home).version).toBeNull();
+  });
+
+  it('a load-path copy whose version cannot be read beside a record copy ⇒ unknown', () => {
+    const { linked } = recordAndLoadPath(PIN);
+    fs.writeFileSync(path.join(linked, 'package.json'), JSON.stringify({ name: PKG, version: 'latest' }));
+    expect(readSelectedRealtimeInstall(home).state).toBe('unknown');
+  });
+
+  it('a load-path copy and a record copy at the SAME version stay selected (the record copy)', () => {
+    const { dir } = recordAndLoadPath(PIN);
+    expect(readSelectedRealtimeInstall(home)).toEqual({
+      state: 'selected', dir, version: PIN, evidence: 'openclaw.json plugins.installs record', source: 'npm',
+    });
   });
 });
