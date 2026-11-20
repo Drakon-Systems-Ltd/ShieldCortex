@@ -44,6 +44,7 @@ import {
   resolveGatewayBootCredentials,
   type GatewayBootCredentials,
   type GatewayCredentials,
+  type SystemctlRunner,
 } from '../integrations/openclaw-gateway-boot-env.js';
 import {
   getWidth,
@@ -1009,6 +1010,8 @@ export async function stepOpenClawPlugin(
     coreUpdate?: CoreUpdateOutcome;
     /** The one bare-spec retry for the whole `update` run (shared with the protection check's reconcile). */
     bareRetryBudget?: BareRetryBudget;
+    /** How the #1105 boot-env fallback asks systemd for the gateway unit's EnvironmentFiles; defaults to this host's systemctl. */
+    bootEnvSystemctl?: SystemctlRunner | null;
   } = {},
 ): Promise<StepResult> {
   const run = deps.run ?? runQuiet;
@@ -1054,6 +1057,7 @@ export async function stepOpenClawPlugin(
       rm,
       readVersion,
       readCliVersion: deps.readCliVersion,
+      ...(deps.bootEnvSystemctl !== undefined ? { bootEnvSystemctl: deps.bootEnvSystemctl } : {}),
       confirmPublished: deps.confirmPublished ?? ((pin) => confirmRealtimePluginPublished(pin, run)),
       readExisting: deps.readExistingInstall ?? ((h, deleting) => {
         const evidence = readRealtimeReplacementEvidence(h, { deleting });
@@ -1086,6 +1090,7 @@ async function stepOpenClawPluginLocked(
     rm: typeof fs.rmSync;
     readVersion: typeof readInstalledRealtimePluginVersion;
     readCliVersion?: typeof readPackageVersion;
+    bootEnvSystemctl?: SystemctlRunner | null;
     confirmPublished: (pin: string) => Promise<PluginPublishCheck>;
     readExisting: (home: string, deleting: readonly string[]) => ExistingRealtimeInstall;
     readLanded: (home: string) => { version: string } | { version: null; reason: string };
@@ -1407,7 +1412,8 @@ async function stepOpenClawPluginLocked(
       // env OpenClaw wrote for its unit. When this environment has neither
       // OPENCLAW_GATEWAY_TOKEN nor OPENCLAW_GATEWAY_PASSWORD, and the refusal
       // named the local gateway's own auth, and that file passes every check in
-      // `resolveGatewayBootCredentials` (fixed path, owner, mode, a local
+      // `resolveGatewayBootCredentials` (the unit's own EnvironmentFiles as
+      // systemd lists them, inside ~/.openclaw, else the fixed file; owner, mode, a local
       // gateway OpenClaw would resolve the same way — including no gateway
       // URL, port or location override in the dotenv files OpenClaw loads
       // into the child itself — no Node spawn diagnostics, plain KEY=VALUE),
@@ -1424,9 +1430,13 @@ async function stepOpenClawPluginLocked(
       // `which` would have retried through a different copy than the one that
       // refused.
       const said = installSaid(err);
-      const boot: GatewayBootCredentials = resolveGatewayBootCredentials({ home, refusedPath: secretRefPath(said) });
+      const boot: GatewayBootCredentials = resolveGatewayBootCredentials({
+        home,
+        refusedPath: secretRefPath(said),
+        ...(ctx.bootEnvSystemctl !== undefined ? { systemctl: ctx.bootEnvSystemctl } : {}),
+      });
       const firstRefusal = boot.used
-        ? `first install refused: ${secretRefKey(said)} is a gateway secret reference OpenClaw could not resolve for it; retried \`openclaw plugins install --force\` once with ${boot.keys.join(' and ')} from the local gateway's boot env (${GATEWAY_BOOT_ENV_DISPLAY}), passed only to that child`
+        ? `first install refused: ${secretRefKey(said)} is a gateway secret reference OpenClaw could not resolve for it; retried \`openclaw plugins install --force\` once with ${boot.keys.join(' and ')} from the local gateway's boot env (${bootSources(boot)}), passed only to that child`
         : `first install refused: ${secretRefKey(said)} is a gateway secret reference OpenClaw could not resolve for it; retried the same \`openclaw plugins install --force\` once`;
       let r: StepResult;
       let retryFailed = false;
@@ -1474,6 +1484,15 @@ function secretRefPath(said: string): string | null {
 
 /** What a credentialed retry's report says instead of its output (#1105 r2). */
 const CREDENTIALED_OUTPUT_WITHHELD = 'its output is withheld: this retry carried the gateway credential';
+
+/**
+ * The boot env file(s) the borrowed keys came from, as `~/.openclaw/…` (never
+ * an absolute path): the unit's EnvironmentFiles that set them when systemd
+ * listed them, else the fixed `~/.openclaw/gateway.systemd.env`.
+ */
+function bootSources(boot: Extract<GatewayBootCredentials, { used: true }>): string {
+  return (boot.from && boot.from.length > 0 ? boot.from : [GATEWAY_BOOT_ENV_DISPLAY]).join(', ');
+}
 
 /**
  * The credentialed retry's failure, as the reporter will see it: fixed words
