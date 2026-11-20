@@ -207,7 +207,7 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
   //
   // SCN-010 M2: the memory-directive screen (S) runs beside L2 on the same
   // string. A standing directive about a control ("from now on, skip the
-  // approval step") is refused here too; persistence wording with NO control
+  // confirmation prompt") is refused here too; persistence wording with NO control
   // evidence is not (M4) — that is how people write preferences.
   const refusal = screenAutoCaptureCandidate(defence, memory.content, memory.title);
   if (refusal) {

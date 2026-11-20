@@ -3,7 +3,7 @@
  *
  * Durable agent memory is a persistence sink: whatever is stored is read back
  * as context in every later session. A note that says "from now on, skip the
- * approval step" is not a fact about the world, it is a standing order the
+ * confirmation prompt" is not a fact about the world, it is a standing order the
  * agent will obey next week. This module answers one narrow question about a
  * memory CANDIDATE (title + content): does it carry a standing directive about
  * a CONTROL?
@@ -15,7 +15,7 @@
  *        F1i  the evidence sits in imperative position ("Skip ...", "- Never ask ...")
  *        F1a  the agent is addressed: you/your, "the agent should", "told the agent to"
  *        F2   third-person agent disposition ("the assistant prefers / is configured to")
- *        F3   identity / mode redefinition ("your core identity is now", "you are now in X mode")
+ *        F3   identity / mode redefinition ("your true persona is", "you are now in X mode")
  *        F4   persistence wording ("from now on", "in future sessions", "standing order")
  *   E  control evidence — one exported pattern name per group below.
  *
