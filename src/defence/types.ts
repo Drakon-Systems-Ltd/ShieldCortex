@@ -17,6 +17,8 @@ export type FirewallResult = 'ALLOW' | 'BLOCK' | 'QUARANTINE';
 export type ThreatIndicator =
   | 'instruction_injection'
   | 'non_authoritative_instruction'
+  // SCN-010 M1: a standing directive about a control, in memory admission only.
+  | 'memory_directive'
   | 'privilege_escalation'
   | 'credential_exfil'
   | 'encoding_obfuscation'
@@ -31,6 +33,19 @@ export type ThreatIndicator =
   | 'builtin_rule';
 
 // ── Core Interfaces ──
+
+/**
+ * SCN-010: the write being judged is a memory ADMISSION, not a scan.
+ *
+ * `agent` — an agent's own MCP `remember` / `import_memories` call (M3).
+ * `auto_capture` — a hook lifting a candidate out of a transcript (M2).
+ *
+ * Not a provenance label and not a trust level: the writer's source keeps its
+ * own label and score. It arms the memory-directive screen (S) and the M4
+ * persistence-wording precision rule inside `analyzeFirewall`, exactly as the
+ * `memory_candidate` label does. Set by code paths, never by an MCP caller.
+ */
+export type MemoryAdmission = 'agent' | 'auto_capture';
 
 export interface DefenceSource {
   type: 'user' | 'cli' | 'hook' | 'email' | 'web' | 'agent' | 'file' | 'api' | 'tool_response';

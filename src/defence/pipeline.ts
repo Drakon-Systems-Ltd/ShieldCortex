@@ -15,6 +15,7 @@ import type {
   FragmentationAnalysis,
   SensitivityClassification,
   TrustScore,
+  MemoryAdmission,
 } from './types.js';
 import { DEFAULT_DEFENCE_CONFIG } from './types.js';
 
@@ -63,6 +64,14 @@ export interface PipelineRunOptions {
    * held outside title/content, so it hashes what the row will store.
    */
   redactionSiblings?: { tags?: string[] | string | null; metadata?: unknown };
+  /**
+   * SCN-010: this write is a memory ADMISSION (an agent's MCP `remember`, a
+   * hook's auto-capture). Arms the memory-directive screen and the M4
+   * persistence-wording rule in analyzeFirewall for a source whose label is
+   * not `memory_candidate`. Grants nothing a caller could not already get by
+   * declaring `memory_candidate`; changes no trust score and no label.
+   */
+  memoryAdmission?: MemoryAdmission;
 }
 
 type DeferredPipelineEffect = () => void;
@@ -88,13 +97,16 @@ function runExternalEffect(options: InternalPipelineRunOptions, effect: Deferred
  * `PipelineRunOptions` is caller-supplied and untyped at runtime: spreading it
  * would let a JS caller smuggle internal keys (`sanitiseInputForTest`,
  * `sideEffects`, `deferredEffects`) past the type system and replace a real
- * decision layer or silence persistence. Public callers get exactly two knobs.
+ * decision layer or silence persistence. Public callers get only these knobs.
  */
 function publicPipelineOptions(options?: PipelineRunOptions): PipelineRunOptions {
   return {
     sourceAttested: options?.sourceAttested,
     trustModifierMode: options?.trustModifierMode,
     redactionSiblings: options?.redactionSiblings,
+    memoryAdmission: options?.memoryAdmission === 'agent' || options?.memoryAdmission === 'auto_capture'
+      ? options.memoryAdmission
+      : undefined,
   };
 }
 
@@ -198,6 +210,7 @@ function runDefencePipelineInternal(
       trust.score,
       cfg,
       sanitisation.strippedCategories,
+      { memoryAdmission: options.memoryAdmission },
     );
 
     // Carry forward any sanitisation threat indicators (deduped — the firewall

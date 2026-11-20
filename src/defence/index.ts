@@ -49,6 +49,16 @@ export {
   UNTRUSTED_DATA_ORIGIN_SOURCES,
 } from './firewall/index.js';
 export type { NonAuthoritativeInstructionResult, NonAuthoritativePattern } from './firewall/index.js';
+// SCN-010 memory-directive screen — exported for the same reason: the OpenClaw
+// realtime plugin's auto-memory path screens candidates out of process.
+export {
+  MEMORY_DIRECTIVE_INDICATOR,
+  MEMORY_DIRECTIVE_PATTERN,
+  detectMemoryDirective,
+  memoryCandidateText,
+} from './firewall/index.js';
+export type { MemoryDirectivePattern, MemoryDirectiveResult } from './firewall/index.js';
+export type { MemoryAdmission } from './types.js';
 
 // Sensitivity
 export { classifySensitivity, redactContent, redactForDisplay } from './sensitivity/index.js';
