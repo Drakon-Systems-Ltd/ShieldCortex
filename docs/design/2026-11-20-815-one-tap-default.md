@@ -19,7 +19,7 @@ Non-goals:
 
 - `approve-tap.ts` ships the endpoint half: `mintApproveTapNonce`, `verifyApproveTap`, `createApproveTapHandler`, `checkApproveTapArming` and the doctor row. Its header states nothing calls the mint from the Guard yet, so no tap completes end to end.
 - Config is `actionGuard.approveTap`. `enabled` is true only for a strict `true`; absent means off.
-- Arming (`checkApproveTapArming`) reads the secret file's own metadata only. It takes no webhook-secret input and makes no parent-directory check. It refuses a mode wider than 0600 (a stricter mode is accepted), a wrong owner, an agent-readable secret and a missing approver. When the agent's user cannot stat the file it reports armed with the secret not visible and defers to the endpoint.
+- Arming (`checkApproveTapArming`) reads the secret file's own metadata only. It takes no webhook-secret input and makes no parent-directory check. It refuses a mode wider than 0600 (a stricter mode is accepted), a secret owned by the agent's user or by root, and a missing approver. When the agent's user cannot stat the file it reports armed with the secret not visible and defers to the endpoint.
 - The refusal when the approve secret equals the webhook secret happens when the endpoint loads the secret, not in arming. Mint and the doctor row call the arming check only, so neither makes that equality check today.
 - No card today states that a phone is a security boundary.
 - The card is version 1: readable text, no nonce, no tap path.
@@ -58,10 +58,11 @@ Enforced today (the tests in D9 pin them for the new wiring):
 - The mint refuses a lifetime under 30 seconds. The endpoint enforces a positive lifetime, the maximum lifetime and expiry.
 - Single use, bound to action id and exact call digest.
 - A different digest, a replay, an unknown action and a nonce from another action are refused with nothing written.
+- A denial with no recorded digest cannot be tapped.
+- An operator Deny since the card went out wins: a later Approve stays denied.
 
 Proposed (new wiring, not existing):
-- A Deny, from either path, wins: a tapped Approve after a Deny stays denied.
-- A denial with no recorded digest cannot be tapped.
+- The chat Deny path feeds the existing operator-Deny suppression, so a tapped Approve after a chat Deny stays denied.
 
 ### D3. Receiver contract
 
@@ -74,7 +75,7 @@ Proposed (new wiring, not existing):
 ### D4. Key-holder
 
 - A separate OS user holds the approve secret and runs the receiver. The agent's user must not be able to read it.
-- The secret is a different credential from `notify.webhookSecret`; arming already refuses the reverse.
+- The secret is a different credential from `notify.webhookSecret`; the endpoint refuses the reverse when it loads the secret; metadata-only arming does not check it (see D1 new checks).
 - The file is mode 0600 and owned by the key-holder, in a private parent directory. The mode and parent directory are setup requirements; arming checks the file's own metadata only (mode no wider than 0600) and does not check the parent directory. A parent-directory check would be new work, not part of this plan. The endpoint re-checks on the open file before trusting a byte.
 - Setup offers to create the key-holder and secret, showing the exact commands and asking before running anything that needs elevation. Setup never silently creates a user.
 - Doctor checks, in order: notify chat set, approver set, key-holder differs from agent, endpoint reachable on loopback. From metadata, doctor can check the secret's mode, owner and whether the agent's user can read it; when the secret is out of the agent user's reach (the good case) doctor cannot read it, so well-formedness and the webhook-secret difference are only checked by the endpoint at load. It stops at the first failure and says what to do. Doctor is warn-only.
@@ -146,7 +147,7 @@ These are not decided or done by any builder or reviewer:
 
 ## 4. Risks
 
-- A phone is a security boundary. The card says so, and the approver id is inside the MAC, so a tap signed for one user cannot be replayed as another.
+- A phone is a security boundary. Card version 2 will say so (S2), and the approver id is inside the MAC, so a tap signed for one user cannot be replayed as another.
 - Default-on could surprise a host that arms by accident. Mitigation: arming requires an owner chat, an approver id and a separate key-holder, all explicit; the strict opt-out remains.
 - Dedupe could hide a genuinely new action. Mitigation: the key is the exact call digest, so a different call is a new card.
 
