@@ -1477,7 +1477,9 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   // #1109 round 3: decided on the copy OpenClaw SELECTED, never the highest
   // version on disk — a stale npm project must not hide a newer selected
   // extension or index-only install from this check.
-  const existing = readRealtimeReplacementEvidence(home);
+  // #1110: and on the extension copy this install could replace (OpenClaw
+  // <= 2026.4.24 installs the package there), as `update` already does.
+  const existing = readRealtimeReplacementEvidence(home, { deleting: [path.join(home, '.openclaw', 'extensions', PLUGIN_DIR_NAME)] });
   const keep = assessRealtimeReplacement(existing, pin);
   if (!keep.replace) {
     // Nothing is installed on this branch. Kept is only fine when the copy

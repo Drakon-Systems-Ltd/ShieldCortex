@@ -213,8 +213,11 @@ export interface SelectedReadOptions extends LinkedReadOptions {}
  *    versions differ, or the record's own version disagrees with the copy it
  *    names, the evidence conflicts and the answer is `unknown`.
  *  - installs.json's record (`installPath`), on hosts with no index.
- *  - a linked `plugins.load.paths` entry, then the trusted-local copy in
- *    `~/.openclaw/extensions` — the two installs no record names. Both at
+ *    Then openclaw.json's own `plugins.installs` record (OpenClaw <= 2026.4.24,
+ *    #1110); two records naming copies at different versions are `unknown`.
+ *  - a linked `plugins.load.paths` entry, then the copy in
+ *    `~/.openclaw/extensions` (trusted-local, or the npm package's own
+ *    `dist/index.js` layout) — the two installs no record names. Both at
  *    different versions is ambiguous: `unknown`.
  *
  * A copy a record names that is NOT ON DISK (the directory is gone, or holds
@@ -271,22 +274,44 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
   }
 
   if (index.state === 'absent') {
-    const installs = readJsonObject(path.join(home, '.openclaw', 'plugins', 'installs.json'));
+    const openclawDir = path.join(home, '.openclaw');
+    const extDir = path.join(openclawDir, 'extensions', REALTIME_PLUGIN_ID);
+    const installs = readJsonObject(path.join(openclawDir, 'plugins', 'installs.json'));
     if (installs.state === 'unreadable') return { state: 'unknown', why: installs.why };
-    if (installs.state === 'ok') {
-      const records = installs.value.installRecords as Record<string, { installPath?: unknown; source?: unknown }> | undefined;
-      const rec = records && typeof records === 'object' ? records[REALTIME_PLUGIN_ID] : undefined;
-      const p = rec && typeof rec === 'object' ? rec.installPath : undefined;
-      if (typeof p === 'string' && p) {
-        const copy = readCopyAt(p);
-        if (copy.state === 'unknown') return { state: 'unknown', why: `the copy installs.json names: ${copy.why}` };
-        if (copy.state === 'ok') {
-          const source = typeof rec?.source === 'string' ? rec.source : undefined;
-          return { state: 'selected', dir: p, version: copy.version, evidence: 'installs.json record', ...(source ? { source } : {}) };
-        }
-        dangling = `the copy installs.json names is not on disk (${p})`;
+    // #1110: OpenClaw <= 2026.4.24 has no installs.json — its own install
+    // record is openclaw.json `plugins.installs`, and the copy is the npm
+    // package under the extensions directory (the default when the record
+    // carries no path). A path record there is the linked reader's; so is an
+    // unreadable openclaw.json (`unknown`, below).
+    const config = readJsonObject(path.join(openclawDir, 'openclaw.json'));
+    const records: Array<{ rec: unknown; evidence: string; native?: string }> = [
+      { rec: installs.state === 'ok' ? (installs.value.installRecords as Record<string, unknown> | undefined)?.[REALTIME_PLUGIN_ID] : undefined, evidence: 'installs.json' },
+      { rec: config.state === 'ok' ? (config.value.plugins as { installs?: Record<string, unknown> } | undefined)?.installs?.[REALTIME_PLUGIN_ID] : undefined, evidence: 'openclaw.json plugins.installs', native: extDir },
+    ];
+    const present: Array<{ dir: string; version: string; evidence: string; source?: string }> = [];
+    for (const { rec, evidence, native } of records) {
+      if (!rec || typeof rec !== 'object') continue;
+      const r = rec as { installPath?: unknown; source?: unknown; version?: unknown; resolvedVersion?: unknown };
+      if (native && r.source === 'path') continue;
+      const named = typeof r.installPath === 'string' && r.installPath ? r.installPath : null;
+      const p = native ? (named ? path.resolve(openclawDir, tilde(named, home)) : native) : named;
+      if (!p) continue;
+      const copy = readCopyAt(p);
+      if (copy.state === 'unknown') return { state: 'unknown', why: `the copy ${evidence} names: ${copy.why}` };
+      if (copy.state === 'absent') {
+        dangling ??= `the copy ${evidence} names is not on disk (${p})`;
+        continue;
       }
+      const recorded = native ? semver.valid(String(r.resolvedVersion ?? r.version ?? '')) : null;
+      if (recorded && recorded !== copy.version) {
+        return { state: 'unknown', why: `${evidence} says v${recorded}, but the copy it names is v${copy.version}` };
+      }
+      present.push({ dir: p, version: copy.version, evidence: `${evidence} record`, ...(typeof r.source === 'string' ? { source: r.source } : {}) });
     }
+    if (present.length === 2 && !sameDir(present[0].dir, present[1].dir) && present[0].version !== present[1].version) {
+      return { state: 'unknown', why: `installs.json and openclaw.json name two copies (v${present[0].version}, v${present[1].version})` };
+    }
+    if (present.length > 0) return { state: 'selected', ...present[0] };
   }
 
   // No record names a copy that exists. What is left is what OpenClaw
@@ -303,7 +328,15 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
       found.push({ dir: id.dir, version: v.version, evidence: 'plugins.load.paths' });
     }
   }
-  const local = resolveLocalExtensionInstall(home);
+  let local = resolveLocalExtensionInstall(home);
+  if (!local) {
+    // #1110: the npm package's own layout — `dist/index.js`, no root index.js
+    // — with no record naming it. Identity from its package.json / manifest.
+    const ext = path.join(home, '.openclaw', 'extensions', REALTIME_PLUGIN_ID);
+    const id = fs.existsSync(path.join(ext, 'dist', 'index.js')) ? identifyPluginDir(ext) : null;
+    if (id?.state === 'unknown') return { state: 'unknown', why: `the extension copy: ${id.why}` };
+    if (id?.state === 'ours') local = ext;
+  }
   if (local && !found.some((f) => sameDir(f.dir, local))) {
     const v = readPluginDirVersion(local);
     if (v.state === 'unknown') return { state: 'unknown', why: `the local copy: ${v.why}` };
