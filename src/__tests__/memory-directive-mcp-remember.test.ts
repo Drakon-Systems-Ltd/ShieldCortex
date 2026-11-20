@@ -23,7 +23,14 @@ import { executeRemember } from '../tools/remember.js';
 import { executeImport } from '../tools/context.js';
 import { runRemember } from '../cli/remember.js';
 import { MemoryBlockedError, addMemory, getMemoryById, updateMemory } from '../memory/store.js';
-import { approveQuarantineItem } from '../defence/quarantine/review.js';
+import {
+  approveQuarantineItem,
+  approveQuarantineItemAsAgent,
+  approveQuarantineItemsBySourceAsAgent,
+  describeBulkApproveResult,
+  describeOperatorOnlyHold,
+  isMemoryDirectiveHold,
+} from '../defence/quarantine/review.js';
 import {
   ACCEPTED_AMBIGUITY,
   BENIGN_CONTROLS,
@@ -237,6 +244,100 @@ describe('M3 siblings — dedupe update and import_memories', () => {
   });
 });
 
+describe('M3 — the agent-facing quarantine review cannot release a memory_directive hold', () => {
+  // MCP quarantine_review is reachable by the agent whose admission was held,
+  // so its approve / approve_by_source leave a memory_directive hold pending.
+  // The operator door (dashboard / admin API -> approveQuarantineItem) and the
+  // agent-facing list / reject are unchanged.
+  beforeEach(() => {
+    initDatabase(':memory:');
+  });
+
+  afterEach(() => {
+    closeDatabase();
+  });
+
+  function insertPending(content: string, sourceIdentifier: string, reason: string, indicators: string[]): number {
+    const info = getDatabase().prepare(
+      `INSERT INTO quarantine
+         (original_content, original_title, project, source_type, source_identifier, reason, threat_indicators, firewall_result, status)
+       VALUES (?, 'note', NULL, 'cli', ?, ?, ?, 'QUARANTINE', 'pending')`,
+    ).run(content, sourceIdentifier, reason, JSON.stringify(indicators));
+    return Number(info.lastInsertRowid);
+  }
+
+  const OTHER_HOLD = 'A soft-held progress note about the batched writer and its queue bound.';
+
+  it('MCP approve of a memory_directive hold is refused; the item stays pending and nothing is stored', async () => {
+    await executeRemember({ title: 'Agent directive', content: DIRECTIVE, memoryAdmission: 'agent' });
+    const [row] = quarantined();
+    expect(isMemoryDirectiveHold(row)).toBe(true);
+
+    expect(approveQuarantineItemAsAgent(row.id, 'mcp')).toEqual({ kind: 'operator_only' });
+    expect(quarantined()[0].status).toBe('pending');
+    expect(memoryTitled('Agent directive')).toBeUndefined();
+
+    const reply = describeOperatorOnlyHold(row.id);
+    expect(reply).toContain('memory_directive');
+    expect(reply).toContain('ShieldCortex dashboard');
+    expect(reply).not.toContain(DIRECTIVE);
+  });
+
+  it('the reason OR the indicator marks the hold (either alone is enough)', () => {
+    expect(isMemoryDirectiveHold({ reason: 'memory_directive:concealment: standing instruction for agent memory', threat_indicators: '[]' })).toBe(true);
+    expect(isMemoryDirectiveHold({ reason: 'Quarantined', threat_indicators: '["memory_directive"]' })).toBe(true);
+    expect(isMemoryDirectiveHold({ reason: 'Quarantined: low trust', threat_indicators: '["instruction_injection"]' })).toBe(false);
+    expect(isMemoryDirectiveHold({ reason: null, threat_indicators: null })).toBe(false);
+  });
+
+  it('MCP approve still works for any other hold', () => {
+    const id = insertPending(OTHER_HOLD, 'sub-agent', 'Quarantined: low trust source with detections', ['instruction_injection']);
+    const outcome = approveQuarantineItemAsAgent(id, 'mcp');
+    expect(outcome.kind).toBe('reviewed');
+    if (outcome.kind !== 'reviewed') throw new Error('unreachable');
+    expect(outcome.result.status).toBe('approved');
+    expect(typeof outcome.result.memoryId).toBe('number');
+  });
+
+  it('MCP approve of a missing / already-reviewed id reports it as before', () => {
+    expect(approveQuarantineItemAsAgent(9999, 'mcp')).toEqual({ kind: 'missing' });
+  });
+
+  it('MCP approve_by_source skips and counts memory_directive holds, approves the rest', () => {
+    const directive = insertPending(DIRECTIVE, 'batch-src', 'memory_directive:control_relaxation: standing instruction for agent memory', ['memory_directive']);
+    insertPending(OTHER_HOLD, 'batch-src', 'Quarantined: low trust source with detections', ['instruction_injection']);
+
+    const result = approveQuarantineItemsBySourceAsAgent('batch-src', 'batch-approve');
+    expect(result.total).toBe(2);
+    expect(result.operatorOnly).toBe(1);
+    expect(result.updated).toBe(1);
+    expect(result.promoted).toBe(1);
+
+    const left = quarantined().find((r) => r.id === directive)!;
+    expect(left.status).toBe('pending');
+    expect(describeBulkApproveResult('batch-src', result)).toBe(
+      'Batch reviewed 1 of 2 items from "batch-src": 1 approved (1 promoted to memory); 1 skipped '
+      + "(memory_directive holds stay pending: releasing them is the operator's decision, in the ShieldCortex dashboard quarantine review).",
+    );
+  });
+
+  it('MCP approve_by_source with only memory_directive holds approves nothing', () => {
+    insertPending(DIRECTIVE, 'only-directives', 'memory_directive:control_relaxation: standing instruction for agent memory', ['memory_directive']);
+    const result = approveQuarantineItemsBySourceAsAgent('only-directives', 'batch-approve');
+    expect(result).toMatchObject({ total: 1, updated: 0, promoted: 0, operatorOnly: 1 });
+    expect(quarantined()[0].status).toBe('pending');
+  });
+
+  it('operator release of the same hold still stores it', async () => {
+    await executeRemember({ title: 'Operator releases', content: DIRECTIVE, memoryAdmission: 'agent' });
+    const [row] = quarantined();
+    expect(approveQuarantineItemAsAgent(row.id, 'mcp').kind).toBe('operator_only');
+    const released = approveQuarantineItem(row.id, 'dashboard');
+    expect(released?.status).toBe('approved');
+    expect(getMemoryById(released!.memoryId!)!.content).toBe(DIRECTIVE);
+  });
+});
+
 describe('M3 — wiring, asserted on source (the MCP server is not booted here)', () => {
   const repoRoot = process.cwd();
   const server = fs.readFileSync(path.join(repoRoot, 'src', 'server.ts'), 'utf-8');
@@ -248,6 +349,14 @@ describe('M3 — wiring, asserted on source (the MCP server is not booted here)'
     expect(spreadAt).toBeGreaterThan(-1);
     expect(flagAt).toBeGreaterThan(spreadAt);
     expect(flagAt).toBeLessThan(call.indexOf('});'));
+  });
+
+  it('the MCP quarantine_review approve paths use the agent-facing helpers only', () => {
+    const tool = server.slice(server.indexOf("server.tool('quarantine_review'"), server.indexOf("server.tool('defence_stats'"));
+    expect(tool).toContain('approveQuarantineItemAsAgent(');
+    expect(tool).toContain('approveQuarantineItemsBySourceAsAgent(');
+    expect(tool).not.toMatch(/\bapproveQuarantineItem\(/);
+    expect(tool).not.toMatch(/\bapproveQuarantineItemsBySource\(/);
   });
 
   it('the MCP import_memories handler passes the flag', () => {

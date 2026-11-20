@@ -885,12 +885,17 @@ this tool checks for new contradictions at any time.`,
       const text = (items as any[]).map((q: any) => `[${q.id}] ${q.original_title || 'Untitled'} | source: ${q.source_type}:${q.source_identifier} | reason: ${q.reason}`).join('\n');
       return { content: [{ type: 'text', text: framedRecall(text) }] };
     } else if (args.action === 'approve' && args.quarantineId) {
-      const { approveQuarantineItem, describeApproveResult } = await import('./defence/quarantine/review.js');
-      const result = approveQuarantineItem(args.quarantineId, args.notes || 'mcp');
-      if (!result) {
+      // SCN-010 M3: a memory-directive hold is released by the operator only;
+      // this agent-facing surface leaves it pending and says so.
+      const { approveQuarantineItemAsAgent, describeApproveResult, describeOperatorOnlyHold } = await import('./defence/quarantine/review.js');
+      const outcome = approveQuarantineItemAsAgent(args.quarantineId, args.notes || 'mcp');
+      if (outcome.kind === 'missing') {
         return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} was not pending or no longer exists.` }] };
       }
-      return { content: [{ type: 'text', text: describeApproveResult(args.quarantineId, result) }] };
+      if (outcome.kind === 'operator_only') {
+        return { content: [{ type: 'text', text: describeOperatorOnlyHold(args.quarantineId) }] };
+      }
+      return { content: [{ type: 'text', text: describeApproveResult(args.quarantineId, outcome.result) }] };
     } else if (args.action === 'reject' && args.quarantineId) {
       const { rejectQuarantineItem } = await import('./defence/quarantine/review.js');
       const result = rejectQuarantineItem(args.quarantineId, args.notes || 'mcp');
@@ -899,8 +904,9 @@ this tool checks for new contradictions at any time.`,
       }
       return { content: [{ type: 'text', text: `Quarantine item ${args.quarantineId} rejected.` }] };
     } else if (args.action === 'approve_by_source' && args.sourceIdentifier) {
-      const { approveQuarantineItemsBySource, describeBulkApproveResult } = await import('./defence/quarantine/review.js');
-      const result = approveQuarantineItemsBySource(args.sourceIdentifier, args.notes || 'batch-approve');
+      const { approveQuarantineItemsBySourceAsAgent, describeBulkApproveResult } = await import('./defence/quarantine/review.js');
+      // SCN-010 M3: memory-directive holds are skipped (left pending) and counted.
+      const result = approveQuarantineItemsBySourceAsAgent(args.sourceIdentifier, args.notes || 'batch-approve');
       if (result.total === 0) {
         return { content: [{ type: 'text', text: `No pending quarantine items from source "${args.sourceIdentifier}".` }] };
       }
