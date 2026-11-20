@@ -1297,7 +1297,7 @@ const SAFE_SIGNALS = new Set([
   'touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger', 'modify-shell-startup',
   'dd-overwrite', 'recursive-perms-system-dir', 'registry-code-exec',
   'decode-pipe-to-shell', 'change-permissions', 'git-mutate',
-  'recursive-find-delete', 'external-egress', 'oversized-command',
+  'recursive-find-delete', 'external-egress', 'env-credential-egress', 'oversized-command',
   'opaque-script-invocation', 'opaque-script', 'opaque-command-substitution', 'secret-egress-fold',
   'force-push', 'force-push-invocation',
   // #436: schema-rejection (#412) and the other verdicts that were reaching
@@ -2612,7 +2612,8 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   { re: /(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:[\w.~-]*\/)*(?:(?:psql|mysql|mariadb|sqlite3|sqlcmd|duckdb|clickhouse(?:-client)?|cockroach)\b[^\n]*\b(?:drop\s+(?:database|schema|table)\b|truncate\s+(?:table\s+)?(?!-)[\w."`[\]]|delete\s+from\s+[\w."`[\]]+\s*(?:;|["']|$))|dropdb\b|mysqladmin\b[^|;&\n]*\sdrop\b|mongo(?:sh)?\b[^\n]*(?:dropDatabase|\.drop)\s*\(|redis-cli\b[^|;&\n]*\bflush(?:all|db)\b|(?:terraform|tofu|terragrunt)\b[^|;&\n]*\s(?:destroy\b|(?<=\n)apply\b[^|;&\n]*\s-destroy\b|apply\b(?:(?!\sapply\b)[^|;&\n])*\s-destroy\b)|pulumi\b[^|;&\n]*\s(?:destroy|down)\b|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s(?:ns|namespaces?|pvc?|persistentvolumes?|persistentvolumeclaims?|deploy(?:ments?)?|statefulsets?|sts|nodes?|crds?|customresourcedefinitions?|all)\b(?![-.])|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s--all\b|helm\b[^|;&\n]*\s(?:uninstall|delete)\b|aws\b[^|;&\n]*\s(?:terminate-instances|delete-[\w-]+|rb|(?<=\n)s3\s+rm\b[^|;&\n]*\s--recursive|s3(?=[^\S\n]*\n)\s+rm\b[^|;&\n]*\s--recursive|s3[^\S\n]+rm\b(?:(?!\ss3\s+rm\b)[^|;&\n])*\s--recursive)\b|gcloud\b[^|;&\n]*\sdelete\b|gsutil\b[^|;&\n]*\s(?:rb\b|(?<=\n)rm\b[^|;&\n]*\s-\w*r|rm\b(?:(?!\srm\b)[^|;&\n])*\s-\w*r)|az\b[^|;&\n]*\s(?:group|vm)\s+delete\b|doctl\b[^|;&\n]*\s(?:delete|rm)\b|gh\s+(?:repo\s+delete\b|api\b[^|;&\n]*(?:-X|--method)[\s=]*DELETE\b)|docker(?:-compose)?\b[^|;&\n]*\s(?:system\s+prune|volume\s+(?:prune|rm)|(?<=\n)down\b[^|;&\n]*\s(?:-v|--volumes)\b|down\b(?:(?!\sdown\b)[^|;&\n])*\s(?:-v|--volumes)\b)|(?:flyctl|fly)\s+(?:apps?\s+(?:destroy|delete)|destroy|volumes?\s+(?:destroy|delete)|postgres\s+(?:destroy|delete))\b|heroku\s+(?:apps:destroy|pg:reset)\b|vercel\s+(?:rm|remove)\b|wrangler\s+delete\b)/i, signal: 'destroy-data-or-infra', dataQuotes: true },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   // #505: `.ssh` behind any home root + `authorized_keys` as a path segment — mirrors the guard row.
-  { re: /\/etc\/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|\/home\/[^\s\/'"]+|\/root|\/Users\/[^\s\/'"]+)\/\.ssh(?![\w.-])|(?:^|[\s'"=:\/])\.ssh\/authorized_keys2?\b|\/authorized_keys2?\b|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
+  // #1005: plus the named credential stores (the guard's CREDENTIAL_STORE_PATH_SRC, alternative for alternative).
+  { re: /\/etc\/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|\/home\/[^\s\/'"]+|\/root|\/Users\/[^\s\/'"]+)\/\.ssh(?![\w.-])|(?:^|[\s'"=:\/])\.ssh\/authorized_keys2?\b|\/authorized_keys2?\b|id_rsa|\.aws\/credentials|\.env\b|\.netrc\b|_netrc\b|\.git-credentials\b|\.config\/gh\/hosts\.ya?ml\b|\.docker\/config\.json\b|\.pgpass\b|\.pypirc\b|\.vault-token\b|application_default_credentials\.json\b|\.config\/gcloud\/(?:credentials|access_tokens)\.db\b|\.azure\/(?:accessTokens\.json|msal_token_cache\.(?:json|bin))\b|(?:^|[\s'"=:\/~@])\.secrets?\/|(?<!\.ssh\/)\bid_(?:ed25519|ecdsa|dsa)\b(?!\.pub)/i, signal: 'touch-sensitive-path' },
   // #505: a shell write shape onto a login/interactive startup file — mirrors the guard row.
   { re: /(?:(?:>>?|>\|)(?:[ \t]|\\\n)*|\btee\b(?:(?:[ \t]|\\\n)+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|"[^"\n]*"|[^\s'"|;&<>\\-][^\s'"|;&<>\\]*))*(?:[ \t]|\\\n)+|\bsed\b(?=[^|;&\n]*[ \t](?:-[a-zA-Z]*i|--in-place))[^|;&\n]*(?:[ \t]|\\\n)+)['"]?(?:[^\s'"|;&<>]*\/)?(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b)|\b(?:cp|mv|install)\b[^|;&\n]*(?:[ \t]|\\\n)+['"]?(?:[^\s'"|;&<>]*\/)?(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b)['"]?\s*(?=$|[|;&\n])/i, signal: 'modify-shell-startup' },
   // Guard's own approval store (#118): agent-side writes here mint approvals.
@@ -2667,6 +2668,14 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
   { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
+  // #1005 (SCN-008b): a network client at command position whose request, in
+  // the same statement, expands a credential-named variable. Blunter than the
+  // guard (outage only): the name is a substring test, and a credential in an
+  // auth option (`-H`, `-u`) gates here although the guard leaves it to R1.
+  // Linear: no token class crosses an anchor, and the gap stops before the
+  // next client word, so each character is read from at most one anchor.
+  // `dataQuotes`: an `echo "curl …"` / `git commit -m` mention is not a call.
+  { re: /(?:^|[;&|(\n"'`])[^\S\n]*(?:(?:if|then|elif|else|do|while|until|!|\{)[^\S\n]+)*(?:\w+=[^\s'"`;&|()]*[^\S\n]+)*(?:(?:[\w.~-]*\/)*(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec|xargs)(?:[^\S\n]+(?:-[^\s'"`;&|()]+|\w+=[^\s'"`;&|()]*|\d+(?:\.\d+)?[smhd]?))*[^\S\n]+)*(?:[\w.~-]*\/)*(?:curl|wget|https?|xh|aria2c)(?=[\s'"`;&|)]|$)(?:(?![\s'"`(](?:[\w.~-]*\/)*(?:curl|wget|https?|xh|aria2c)(?=[\s'"`;&|)]|$))[^;&|\n])*?\$(?:\{|\(printenv[^\S\n]+)?\w*?(?:(?<!page_)(?<!next_)(?<!cursor_)(?<!csrf_)(?<!xsrf_)token|secret|passw(?:or)?d|credential|api_?key|access_?key|private_?key)/i, signal: 'env-credential-egress', dataQuotes: true },
 ];
 
 /** Same command/path/url field set tool-action-guard.ts extracts — narrow, not the whole args object. */

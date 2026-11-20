@@ -98,6 +98,7 @@ export const SIGNAL_PHRASES: Readonly<Record<string, string>> = Object.freeze({
   'modify-shell-startup': 'changes a file that runs every time a shell starts',
   // Data leaving the machine.
   'external-egress': 'sends data off this machine',
+  'env-credential-egress': 'sends a credential from your environment off this process',
   'network-egress': 'sends data off this machine',
   'data-exfiltration': 'may copy data off this machine',
   'secret-egress': 'tries to send a secret or credential off this machine',
@@ -232,6 +233,7 @@ export const SIGNAL_CLASSES: Readonly<Record<string, SignalClass>> = Object.free
   'disable-action-guard': 'target',
   'modify-shell-startup': 'target',
   'external-egress': 'send',
+  'env-credential-egress': 'send',
   'network-egress': 'send',
   'data-exfiltration': 'send',
   'secret-egress': 'send',
