@@ -192,6 +192,12 @@ const PASS: Array<[string, string]> = [
   ['sed removing the shape from a doc', "sed -i 's/nc -e \\/bin\\/sh//' docs/runbook.md"],
   ["bash -i -c 'printf' piped into nc", "bash -i -c 'printf hello' | nc 192.0.2.1 9000"],
   ['socat SHELL: with no network address', 'socat SHELL:ls STDOUT'],
+  // #1088 review-ready brief (20 Nov): routine work that must stay allowed.
+  ['nc -z host 443', 'nc -z host 443'],
+  ['ssh host', 'ssh host'],
+  ['cat /dev/tcp in double-quoted prose', 'echo "never run cat /dev/tcp/example.invalid/80 on a shared box"'],
+  ['cat </dev/tcp in a single-quoted commit message', "git commit -m 'docs: why cat </dev/tcp/h/80 is not a shell'"],
+  ['bash script.sh | tee log', 'bash script.sh | tee log'],
 ];
 
 const okPipeline = () => ({

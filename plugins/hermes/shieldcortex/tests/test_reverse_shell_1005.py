@@ -271,6 +271,15 @@ R2_MENTIONS = [
     "grep -n \"ncat '--exec=/bin/sh'\" docs/notes.md",
 ]
 
+# #1088 review-ready brief (20 Nov): routine work that must stay allowed.
+BRIEF_CONTROLS = [
+    "nc -z host 443",
+    "ssh host",
+    'echo "never run cat /dev/tcp/example.invalid/80 on a shared box"',
+    "git commit -m 'docs: why cat </dev/tcp/h/80 is not a shell'",
+    "bash script.sh | tee log",
+]
+
 
 class ReverseShellFallbackTests(unittest.TestCase):
     DOWN = ActionGuardVerdict("allow", [], "down", available=False)
@@ -289,7 +298,7 @@ class ReverseShellFallbackTests(unittest.TestCase):
             self.assertFalse(fallback_catastrophic_match(cmd), cmd)
 
     def test_controls_fail_open(self):
-        for cmd in CONTROL + MENTIONS + R2_QUIET + R2_MENTIONS:
+        for cmd in CONTROL + MENTIONS + R2_QUIET + R2_MENTIONS + BRIEF_CONTROLS:
             self.assertFalse(fallback_dangerous_match(cmd), cmd)
             self.assertIsNone(action_guard_decision(self.DOWN, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd)), cmd)
 

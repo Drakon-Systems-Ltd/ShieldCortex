@@ -209,6 +209,12 @@ const MORE_CONTROLS: Array<[string, string, Record<string, unknown>, typeof B]> 
   ['Write a runbook', 'Write', { file_path: '/repo/docs/RUNBOOK.md', content: DOC }, B],
   ['Edit a README', 'Edit', { file_path: '/repo/README.md', old_string: 'x', new_string: DOC }, B],
   ['Write a commit message file', 'Write', { file_path: '/tmp/commit-msg.txt', content: 'guard: gate reverse shells\n\n' + DOC }, B],
+  // #1088 review-ready brief (20 Nov): routine work that must stay allowed.
+  ['nc -z host 443', 'Bash', { command: 'nc -z host 443' }, B],
+  ['ssh host', 'Bash', { command: 'ssh host' }, B],
+  ['cat /dev/tcp in double-quoted prose', 'Bash', { command: 'echo "never run cat /dev/tcp/example.invalid/80 on a shared box"' }, B],
+  ['cat </dev/tcp in a single-quoted commit message', 'Bash', { command: "git commit -m 'docs: why cat </dev/tcp/h/80 is not a shell'" }, GIT],
+  ['bash script.sh | tee log', 'Bash', { command: 'bash script.sh | tee log' }, { decision: 'allow', severity: 'sensitive', signals: ['opaque-script-invocation'] }],
 ];
 
 // Round 2 (review of #1005): every exact input from the round-2 brief and from
@@ -417,6 +423,23 @@ describe('#1005 — the other surfaces know the signal', () => {
   it('a phone tap never answers it: the commands come from the other machine at run time', () => {
     expect(TAP_ELIGIBLE_SIGNALS).not.toContain('reverse-shell');
     expect(tapTerminalOnlyReason(['reverse-shell'])).toBe('unknown-signal');
+  });
+
+  // #1088 review (15 Nov, README alignment): the README states what ships, and
+  // no more. One paragraph, so every check reads the same text.
+  it('the README paragraph names the four families, the tier, the door, the default and the fallback, and claims no complete defence', () => {
+    const readme = fs.readFileSync(path.join(REPO, 'README.md'), 'utf-8');
+    const para = readme.split('\n').find((l) => l.startsWith('Reverse shells (unreleased, #1005).'));
+    expect(para).toBeDefined();
+    for (const fact of [
+      'Action Guard is off by default', '`reverse-shell` signal', 'dangerous approval tier', 'never a block',
+      'never the catastrophic tier', 'four families', 'netcat', 'socat', '`/dev/tcp`', 'piped into netcat',
+      'Only the terminal approval prompt can approve it', 'not tap-eligible', 'fall back to a copy of the same pattern',
+      'does not catch every one', 'not a complete defence', 'Not covered',
+    ]) expect({ fact, present: para!.includes(fact) }).toEqual({ fact, present: true });
+    for (const claim of [/\bprevents?\b/i, /\bevery reverse shell\b/i, /\bfully\b/i, /\bcomprehensive\b/i, /\bguarantee/i]) {
+      expect({ claim: String(claim), present: claim.test(para!) }).toEqual({ claim: String(claim), present: false });
+    }
   });
 });
 
