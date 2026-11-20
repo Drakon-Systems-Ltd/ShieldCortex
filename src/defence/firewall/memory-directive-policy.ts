@@ -58,6 +58,7 @@ export const MEMORY_DIRECTIVE_PATTERN = {
   SECRET_ROUTING: 'memory_directive:secret_routing',
   IDENTITY_OVERRIDE: 'memory_directive:identity_override',
   PERMISSIVE_DEFAULT: 'memory_directive:permissive_default',
+  BULK_EGRESS: 'memory_directive:bulk_egress',
 } as const;
 
 export type MemoryDirectivePattern =
@@ -205,7 +206,7 @@ const ALWAYS_ASK_BEFORE = /\balways\s+(?:ask|check|confirm)\b[^.!?;\n]{0,80}\bbe
 // ───────────────────────── E: the evidence groups ─────────────────────────
 
 type FrameKind = 'F1i' | 'F1a' | 'F2' | 'F3' | 'F4';
-type EvidenceKind = 'plain' | 'without' | 'secret' | 'hide';
+type EvidenceKind = 'plain' | 'without' | 'secret' | 'hide' | 'bulk';
 
 interface EvidencePattern {
   re: RegExp;
@@ -276,6 +277,11 @@ const ROUTE_VERB =
   '(?:send|forward|share|post|upload|e-?mail|paste|reveal|disclose|leak|give|hand\\s+over|dm|message|text|copy|transmit|expose|publish)';
 const ROUTE_DETERMINER =
   '(?:a\\s+copy\\s+of|copies\\s+of|all|any|every|the|your|my|our|their|its|stored|saved|found|these|those|each|of)';
+
+const BULK_VERB = '(?:send|forward|upload|e-?mail|copy|transfer|sync|exfiltrate)';
+const BULK_OBJECT =
+  '(?:(?:a\\s+copy\\s+of|copies\\s+of)\\s+)?(?:everything|(?:all|every|any|each)\\s+(?:of\\s+)?(?:(?:the|my|your|our|their|its|these|those)\\s+)?' +
+  '(?:[\\w-]{1,30}\\s+)?(?:files?|documents?|docs|data|e-?mails?|messages?|attachments?|records?|notes|memories|contents?|folders?|directories)\\b)';
 
 const GROUPS: EvidenceGroup[] = [
   {
@@ -352,6 +358,15 @@ const GROUPS: EvidenceGroup[] = [
       ev('\\b(?:whitelist|allow-?list)(?:s|ing)?\\s+(?:all|every|everything)\\b'),
     ],
   },
+  {
+    // §7a: "move everything of a kind to an outside recipient". Separable: the
+    // group ships only if the real-population precision bar holds.
+    name: MEMORY_DIRECTIVE_PATTERN.BULK_EGRESS,
+    // F1 or F2 only — "from now on the nightly job uploads all files to X"
+    // describes a job, it does not direct the agent.
+    frames: new Set<FrameKind>(['F1i', 'F1a', 'F2']),
+    patterns: [ev(`\\b${BULK_VERB}\\s+${BULK_OBJECT}`, 'bulk')],
+  },
 ];
 
 // ─────────────────── secret routing: recipient rules ───────────────────
@@ -377,6 +392,27 @@ function secretRoutingAccepted(text: string, matchEnd: number, clauseEnd: number
   if (SECRET_STORE.test(tail)) return false;
   if (MOVE_ONLY_VERB.test(matchText.trimStart())) return EXTERNAL_CHANNEL.test(recipient[1] ?? '');
   return true;
+}
+
+// ───────────────────── bulk egress: the external recipient ─────────────────────
+
+/** The recipient phrase after the universal object. Dots allowed: emails and hosts have them. */
+const BULK_RECIPIENT = /^[^.!?;\n]{0,60}?\b(?:to|into|onto|with)\s+([^\n]{1,120})/i;
+/** An email address, a URL, a host on a generic / reserved TLD, or "an external address". */
+const EXTERNAL_RECIPIENT = new RegExp(
+  [
+    '[\\w.+-]{1,64}@[\\w-]{1,63}(?:\\.[\\w-]{1,63}){1,6}',
+    '\\b(?:https?|wss?|s?ftp)://',
+    '\\b(?:[a-z0-9-]{1,63}\\.){1,6}(?:com|net|org|io|dev|app|ai|co|cloud|xyz|info|biz|example|test|invalid|online|site|me|eu|uk|de|fr|ru|cn|top|link|click)\\b',
+    '\\b(?:external|outside|off-?site|third[- ]party|remote|personal|private|unknown|foreign)\\s+(?:e-?mail\\s+)?' +
+      '(?:address(?:es)?|servers?|accounts?|hosts?|endpoints?|inbox(?:es)?|buckets?|drives?|storage|recipients?|contacts?|part(?:y|ies)|domains?|sites?|urls?|webhooks?)\\b',
+  ].join('|'),
+  'i',
+);
+
+function bulkEgressAccepted(text: string, matchEnd: number, clauseEnd: number): boolean {
+  const recipient = text.slice(matchEnd, clauseEnd).match(BULK_RECIPIENT);
+  return recipient !== null && EXTERNAL_RECIPIENT.test(recipient[1] ?? '');
 }
 
 // ───────────────────────── clause + frame ─────────────────────────
@@ -516,6 +552,7 @@ function groupHitsWindow(
       }
       if (kind === 'hide' && SECRET_NOUN_RE.test(match[0])) continue;
       if (kind === 'secret' && !secretRoutingAccepted(scanText, end, to, match[0])) continue;
+      if (kind === 'bulk' && !bulkEgressAccepted(scanText, end, to)) continue;
 
       if (!hasFrame(group.frames, clause, lastSegment(before), adopted)) continue;
       return true;
