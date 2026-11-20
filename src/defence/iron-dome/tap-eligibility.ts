@@ -28,6 +28,8 @@ import { CATASTROPHIC_SIGNALS, GUARD_SELF_PROTECTION_SIGNALS } from './tool-acti
  *   - `pipe-download-to-shell`, `pipe-download-stdin-exec`,
  *     `pipe-download-module-exec`, `decode-pipe-to-shell`: the bytes that
  *     would run are fetched or decoded at run time and were never scanned;
+ *   - `reverse-shell` (#1005): the commands that would run come from the
+ *     other end of the socket at run time, so no card can describe them;
  *   - `oversized-command`, `command-evidence-unscannable`: not fully read;
  *   - every `openclaw-process-*` signal: OpenClaw keeps its own approval
  *     channel (#220), taps never answer it.

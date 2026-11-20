@@ -102,6 +102,7 @@ export const SIGNAL_PHRASES: Readonly<Record<string, string>> = Object.freeze({
   'data-exfiltration': 'may copy data off this machine',
   'secret-egress': 'tries to send a secret or credential off this machine',
   'secret-egress-fold': 'tries to send a secret or credential off this machine',
+  'reverse-shell': 'opens a shell that another machine can control',
   // Running programs and services.
   'stop-process-or-service': 'stops a running program',
   'service-restart': 'restarts a running service',
@@ -234,6 +235,8 @@ export const SIGNAL_CLASSES: Readonly<Record<string, SignalClass>> = Object.free
   'external-egress': 'send',
   'network-egress': 'send',
   'data-exfiltration': 'send',
+  // #1005: the WHAT must name where the shell is wired to; one that cannot goes generic.
+  'reverse-shell': 'send',
   'secret-egress': 'send',
   'secret-egress-fold': 'send',
   'stop-process-or-service': 'stop',

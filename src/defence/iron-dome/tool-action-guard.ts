@@ -1040,6 +1040,10 @@ const DANGEROUS: Pattern[] = [
   // #503: database / cloud / infrastructure teardown. Every one of these scored `allow` (benign) — the destruction tiers were filesystem-centric. Command position only, so prose and grep for these words stay quiet; an opening quote counts as a command start so `bash -c` / `ssh host '…'` wrappers are still seen. SQL verbs only behind a database client; DELETE gated only with no WHERE.
   // #503 ReDoS: A verb's second gap stops at the next copy of that verb (`(?!\sdelete\b)`), so a verb-dense line with no separator is linear, not quadratic; the matches and spans are unchanged, because the greedy gap already picked the last verb before the target. That rule holds only when the verb ends on the binary's own line, so two spellings keep the plain gap: a verb reached through its own newline (the `(?<=\n)` arm), and a newline INSIDE the two-word `s3 rm` (the `(?=[^\S\n]*\n)` arm; the stopping arm takes same-line `[^\S\n]+` only). Each runs at most once per start, so the row stays linear.
   { re: /(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:[\w.~-]*\/)*(?:(?:psql|mysql|mariadb|sqlite3|sqlcmd|duckdb|clickhouse(?:-client)?|cockroach)\b[^\n]*\b(?:drop\s+(?:database|schema|table)\b|truncate\s+(?:table\s+)?(?!-)[\w."`[\]]|delete\s+from\s+[\w."`[\]]+\s*(?:;|["']|$))|dropdb\b|mysqladmin\b[^|;&\n]*\sdrop\b|mongo(?:sh)?\b[^\n]*(?:dropDatabase|\.drop)\s*\(|redis-cli\b[^|;&\n]*\bflush(?:all|db)\b|(?:terraform|tofu|terragrunt)\b[^|;&\n]*\s(?:destroy\b|(?<=\n)apply\b[^|;&\n]*\s-destroy\b|apply\b(?:(?!\sapply\b)[^|;&\n])*\s-destroy\b)|pulumi\b[^|;&\n]*\s(?:destroy|down)\b|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s(?:ns|namespaces?|pvc?|persistentvolumes?|persistentvolumeclaims?|deploy(?:ments?)?|statefulsets?|sts|nodes?|crds?|customresourcedefinitions?|all)\b(?![-.])|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s--all\b|helm\b[^|;&\n]*\s(?:uninstall|delete)\b|aws\b[^|;&\n]*\s(?:terminate-instances|delete-[\w-]+|rb|(?<=\n)s3\s+rm\b[^|;&\n]*\s--recursive|s3(?=[^\S\n]*\n)\s+rm\b[^|;&\n]*\s--recursive|s3[^\S\n]+rm\b(?:(?!\ss3\s+rm\b)[^|;&\n])*\s--recursive)\b|gcloud\b[^|;&\n]*\sdelete\b|gsutil\b[^|;&\n]*\s(?:rb\b|(?<=\n)rm\b[^|;&\n]*\s-\w*r|rm\b(?:(?!\srm\b)[^|;&\n])*\s-\w*r)|az\b[^|;&\n]*\s(?:group|vm)\s+delete\b|doctl\b[^|;&\n]*\s(?:delete|rm)\b|gh\s+(?:repo\s+delete\b|api\b[^|;&\n]*(?:-X|--method)[\s=]*DELETE\b)|docker(?:-compose)?\b[^|;&\n]*\s(?:system\s+prune|volume\s+(?:prune|rm)|(?<=\n)down\b[^|;&\n]*\s(?:-v|--volumes)\b|down\b(?:(?!\sdown\b)[^|;&\n])*\s(?:-v|--volumes)\b)|(?:flyctl|fly)\s+(?:apps?\s+(?:destroy|delete)|destroy|volumes?\s+(?:destroy|delete)|postgres\s+(?:destroy|delete))\b|heroku\s+(?:apps:destroy|pg:reset)\b|vercel\s+(?:rm|remove)\b|wrangler\s+delete\b)/i, signal: 'destroy-data-or-infra' },
+  // #1005: reverse shell. An interactive shell wired to a network socket, so another machine runs commands here. Approval tier: a bind shell for a lab, a CTF or a debug session is legitimate, so it asks rather than blocks. Five arms. (1) netcat (`nc`, `netcat`, `ncat`, `nc.traditional`) with an exec flag: a short-flag word holding `e` or `c` (`-e`, `-c`, `-nve`) or `--exec`/`--sh-exec`/`--lua-exec`, before or after host and port; or netcat's output piped straight into a shell (`nc h p | sh`). (2) `socat` with an EXEC:/SYSTEM:/SHELL: address and a network address, in either order (any case); a port forward has no exec address. (3) a shell whose stdin is a /dev/tcp or /dev/udp socket: redirected from it (`bash < /dev/tcp/h/p`, `0<`, `<>`), or duplicated from it after the redirection (`>& /dev/tcp/h/p 0>&1`, `5<> /dev/tcp/h/p 0<&5`). `cat`, `echo` or `printf` reading or writing a socket is not a shell. (4) `exec N<>/dev/tcp/…` (or `N<`), then a later shell reading a descriptor (`sh <&N`, `bash 0<&N`), a `$cmd` or `eval` writing to one (the `while read` loops), or `<&N` piped into a shell. (5) an interactive shell (`sh -i`) piped straight into netcat (the mkfifo shape).
+  // Command position: the start, after `;` `&` `|` `(` or a newline, or an opening quote (so `bash -c "…"` and `ssh host '…'` are seen); then any of `if then elif else while until do ! {`, `VAR=value` and leading redirections (`2>/dev/null`); then any run of wrappers (`env`, `sudo`, `timeout`, `nice`, `stdbuf`, `busybox`, … at any path), each followed only by the words it takes itself: options, the one argument of an option that takes one (`sudo -u x`, `env -u NAME`, `timeout -s KILL`, `--signal TERM`; a short cluster only when its last letter is that option, so `-uroot` is whole), `NAME=VAL` (env, sudo), a duration (timeout) and redirections. The first other word is the command, and an arm must start there: in `env echo nc -e` or `timeout 5 echo nc -e` the command is `echo` and nothing matches (#1088 r2). `busybox nc` is applet dispatch, so the applet is the binary. A binary or a flag may be quoted whole (`'nc'`, `"--exec=…"`); quoted mentions under echo/grep/git commit are demoted by the classifier. No /i: `-C` is netcat's CRLF flag, not exec.
+  // Linear on every input, with no length bound (padding is never a bypass). A scan starts only at an anchor or at `exec`, and no word runs over an anchor whose own scan would cover the same text: a quote or paren is crossed only where no command could start right after it; a backslash-newline is crossed only as a continuation, and then it is no anchor; `&` is crossed only glued to a redirection (`>&`, `&>`); a quote, separator or newline escaped by one backslash is no anchor and is crossed as an escape pair. Shell tails cross no quote or paren at all, each `exec` scan stops at the next /dev/tcp path, and words split one way only (each wrapper word's kind is fixed by its first characters, and an option's argument is mandatory, so `env --a --a …` or `sudo -u x sudo -u x …` has a single parse).
+  { re: /(?:^|(?<![^\\]\\)(?:[;|("'`]|(?<![<>])&(?!>)|(?<![^\\]\\\r)\n))[^\S\n]*(?:(?:(?:if|then|elif|else|while|until|do|!|\{)|\w+=(?:[^\s;&|"'`(\\<>]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n])*|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?:[^\s;&|"'`(\\<>]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n])+)(?:[^\S\n]|(?<!\\)\\\r?\n)+)*(?:(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[ABEFGHIJKLMNOPQSVWXYZbdefijklmnoqsvwxyz]*[acughpCUrtTDR](?=[^\S\n]|\\\r?\n)|-(?:auth-type|login-class|user|group|host|prompt|close-from|other-user|role|type|command-timeout|chdir|chroot)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![ABEFGHIJKLMNOPQSVWXYZbdefijklmnoqsvwxyz]*[acughpCUrtTDR](?=[^\S\n]|\\\r?\n)|-(?:auth-type|login-class|user|group|host|prompt|close-from|other-user|role|type|command-timeout|chdir|chroot)(?=[^\S\n]|\\\r?\n)))|\w+=|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|doas(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[ABDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstvwxyz]*[auC](?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![ABDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstvwxyz]*[auC](?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|env(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[ABDEFGHIJKLMNOQRTUVWXYZbcdefghijklmnopqrstvwxyz]*[auCSP](?=[^\S\n]|\\\r?\n)|-(?:argv0|unset|chdir|split-string)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![ABDEFGHIJKLMNOQRTUVWXYZbcdefghijklmnopqrstvwxyz]*[auCSP](?=[^\S\n]|\\\r?\n)|-(?:argv0|unset|chdir|split-string)(?=[^\S\n]|\\\r?\n)))|\w+=|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|timeout(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:\d+(?:\.\d*)?|\.\d+)[smhd]?(?=[^\S\n]|\\\r?\n)|(?:-(?:(?:[A-Zabcdefghijlmnopqrtuvwxyz]*[sk](?=[^\S\n]|\\\r?\n)|-(?:signal|kill-after)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zabcdefghijlmnopqrtuvwxyz]*[sk](?=[^\S\n]|\\\r?\n)|-(?:signal|kill-after)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|time(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[A-Zabcdeghijklmnpqrstuvwxyz]*[fo](?=[^\S\n]|\\\r?\n)|-(?:format|output)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zabcdeghijklmnpqrstuvwxyz]*[fo](?=[^\S\n]|\\\r?\n)|-(?:format|output)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|stdbuf(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[A-Zabcdfghjklmnpqrstuvwxyz]*[ioe](?=[^\S\n]|\\\r?\n)|-(?:input|output|error)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zabcdfghjklmnpqrstuvwxyz]*[ioe](?=[^\S\n]|\\\r?\n)|-(?:input|output|error)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|nice(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[A-Zabcdefghijklmopqrstuvwxyz]*[n](?=[^\S\n]|\\\r?\n)|-(?:adjustment)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zabcdefghijklmopqrstuvwxyz]*[n](?=[^\S\n]|\\\r?\n)|-(?:adjustment)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|ionice(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[ABCDEFGHIJKLMNOQRSTUVWXYZabdefghijklmoqrstvwxyz]*[cnpPu](?=[^\S\n]|\\\r?\n)|-(?:class|classdata|pid|pgid|uid)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![ABCDEFGHIJKLMNOQRSTUVWXYZabdefghijklmoqrstvwxyz]*[cnpPu](?=[^\S\n]|\\\r?\n)|-(?:class|classdata|pid|pgid|uid)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|exec(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[A-Zbcdefghijklmnopqrstuvwxyz]*[a](?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zbcdefghijklmnopqrstuvwxyz]*[a](?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|(?:nohup|setsid|command|builtin|busybox)(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*)(?:[^\S\n]|(?<!\\)\\\r?\n)+)*(?:(?:'(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)'|"(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)"|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!["']?(?:-[A-Za-z]*[ec]|--(?:sh-|lua-)?exec(?![\w-])))(?!#)(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+["']?(?:-[A-Za-z]*[ec]|--(?:sh-|lua-)?exec(?![\w-]))|[^\S\n]*\|(?!\|)[^\S\n]*(?:'(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)'|"(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)"|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S])))|(?:'(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?socat'|"(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?socat"|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?socat)(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?=(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!["']?(?:[eE][xX][eE][cC]|[sS][yY][sS][tT][eE][mM]|[sS][hH][eE][lL][lL]):)(?!#)(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*(?:[^\S\n]|(?<!\\)\\\r?\n)+["']?(?:[eE][xX][eE][cC]|[sS][yY][sS][tT][eE][mM]|[sS][hH][eE][lL][lL]):)(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!["']?(?:[tT][cC][pP]|[uU][dD][pP]|[sS][cC][tT][pP]|[oO][pP][eE][nN][sS][sS][lL]|[sS][sS][lL]|[sS][oO][cC][kK][sS]|[pP][rR][oO][xX][yY]|[vV][sS][oO][cC][kK])[\w-]*:)(?!#)(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*(?:[^\S\n]|(?<!\\)\\\r?\n)+["']?(?:[tT][cC][pP]|[uU][dD][pP]|[sS][cC][tT][pP]|[oO][pP][eE][nN][sS][sS][lL]|[sS][sS][lL]|[sS][oO][cC][kK][sS]|[pP][rR][oO][xX][yY]|[vV][sS][oO][cC][kK])[\w-]*:|(?:'(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)'|"(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)"|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!-[A-Za-z]*i[A-Za-z]*(?![^\s;&|]))(?!#)(?:[^\s;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*(?:[^\S\n]|(?<!\\)\\\r?\n)+-[A-Za-z]*i[A-Za-z]*(?![^\s;&|])(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!#)(?:[^\s;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*[^\S\n]*\|(?!\|)[^\S\n]*(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))|(?:(?!(?<![^\\]\\)(?<![\d<>&])0?<>?[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/)|(?<![^\\]\\)(?:[<>&]|>\|)[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*(?:(?<![^\\]\\)(?<![\d<>&])0?<>?[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/)|(?<![^\\]\\)(?:[<>&]|>\|)[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/)(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?![0-](?!\d))|(?<![^\\]\\)(?<![\d<>&])0?<>?[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*(?:(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?![0-](?!\d))|(?<![^\\]\\)(?<![\d<>&])0?<>?[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/)))))|\bexec(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:\d+|\{\w+\})(?:<>|<)[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/)(?:(?!\/dev\/(?:tcp|udp)\/)[\s\S])*?(?:(?<![^\\]\\)(?:[;|(`]|(?<![<>])&(?!>)|(?<![^\\]\\\r)\n)[^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)+)*(?:(?:'(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)'|"(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)"|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w)|\$\{?\w+\}?(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:[12]?>&|&>)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*(?<![^\\]\\)(?<![\d<>&])(?:[12]?>&|&>)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w)|eval(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:[12]?>&|&>)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))(?:(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>))|"\$\{?\w+\}?"))*(?<![^\\]\\)(?<![\d<>&])(?:[12]?>&|&>)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))|(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w)(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*[^\S\n]*\|(?!\|)[^\S\n]*(?:'(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)'|"(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)"|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S])))/, signal: 'reverse-shell' },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   // The dotfile here means the FILE, never a property access (issue #165).
   // `process.env`, `import.meta.env` and `env.FOO` are lookups — reading them
@@ -3844,6 +3848,10 @@ function blankedRun(src: string, a: number, b: number): string {
 interface SpanCtx {
   urls: Array<[number, number]>;        // [start,end) of each http(s) URL token
   dataQuotes: Array<[number, number]>;  // CONTENT ranges (open+1..close) of quotes that are pure data args
+  /** #1088 r5b: `dataQuotes` plus the quotes whose data command sits behind
+   *  `env [-i] [NAME=VAL…]`. Read ONLY by the rows in ENV_DATA_QUOTE_SIGNALS,
+   *  so no row that predates them is relieved by the env read. */
+  envDataQuotes: Array<[number, number]>;
   substitutions: Array<[number, number]>; // `$(…)` / backtick spans — executed even inside a data quote
   scriptLiterals: Array<[number, number]>; // comment + string-literal ranges in interpreter-source regions
   /** Literals whose OWN LINE calls a shell-out sink — the argument of an
@@ -3865,6 +3873,15 @@ const MAX_CLASSIFY_ITERS_LARGE = 6;
 const LARGE_SURFACE = 8_192;
 /** How far back a quote may look for its own command word / text flag. */
 const QUOTE_PREFIX_CAP = 512;
+/**
+ * #1088 r5b (Jarvis B1): the rows whose quote-demotion also reads through an
+ * `env [-i] [NAME=VAL…]` prefix, so `env FOO=1 printf 'nc -e …'` is a mention
+ * for them. Every other row reads the command word exactly as before #1005:
+ * on them the env read relieved `env -i echo '…' | xargs sh -c '{}'`, which
+ * runs the quote. Mirrored by name in the three fallbacks.
+ */
+const ENV_DATA_QUOTE_SIGNALS: ReadonlySet<string> = new Set(['reverse-shell']);
+const ENV_PREFIX_RE = /^env\s+(?:-i\s+|\w+=\S*\s+)*/;
 
 function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCtx {
   const urls: Array<[number, number]> = [];
@@ -3906,6 +3923,7 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
     : regions.filter(r => r.lang === 'sh').map(r => [r.start, r.end] as [number, number]);
 
   const dataQuotes: Array<[number, number]> = [];
+  const envDataQuotes: Array<[number, number]> = [];
   const substitutions: Array<[number, number]> = [];
   // `eval` can re-run any captured text, so with one present NO quote is data.
   const evalPresent = EVAL_REACTIVATOR.test(text);
@@ -3957,18 +3975,27 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
           const bare = truncated
             ? ''
             : prefix.replace(/^\s+/, '').replace(/^(?:\w+=\S*\s+)*/, '').replace(/^(?:sudo|doas)\s+/, '');
+          // #1088 r5b: the same word read through `env [-i] [NAME=VAL…]`, for
+          // ENV_DATA_QUOTE_SIGNALS only (see envDataQuotes).
+          const envBare = bare.replace(ENV_PREFIX_RE, '');
           // A quote is DATA when, in its own statement:
           //   - the command word is a recognised data command (allowlist), or
           //   - it is the value of a long-form text flag on a non-executor.
           // A quote in command position, in assignment position, inside a
           // command substitution, or after any other command, stays executed.
           const isAssignment = /(?:^|\s)(?:export\s+|local\s+|declare\s+\S+\s+)?\w+(?:\[[^\]]*\])?\+?=$/.test(prefix);
-          const isDataCommand = !truncated && DATA_COMMAND.test(bare)
-            && !gitQuotedArgIsWriteFlag(bare, text.slice(open + 1, i));
-          const isTextFlag = !truncated && TEXT_FLAG.test(prefix)
-            && !EXEC_COMMAND_WORD.test(bare.trim().split(/\s+/)[0] ?? '');
-          if (!evalPresent && depth === 0 && !isAssignment && (isDataCommand || isTextFlag)) {
-            dataQuotes.push([open + 1, i]);
+          const isData = (word: string): boolean =>
+            (!truncated && DATA_COMMAND.test(word)
+              && !gitQuotedArgIsWriteFlag(word, text.slice(open + 1, i)))
+            || (!truncated && TEXT_FLAG.test(prefix)
+              && !EXEC_COMMAND_WORD.test(word.trim().split(/\s+/)[0] ?? ''));
+          if (!evalPresent && depth === 0 && !isAssignment) {
+            if (isData(bare)) {
+              dataQuotes.push([open + 1, i]);
+              envDataQuotes.push([open + 1, i]);
+            } else if (envBare !== bare && isData(envBare)) {
+              envDataQuotes.push([open + 1, i]);
+            }
           }
           q = null;
         }
@@ -3981,7 +4008,7 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
     // (fail-closed: everything after it is executed, not quoted data).
     while (subStack.length > 0) substitutions.push([subStack.pop() as number, rangeEnd]);
   }
-  return { urls, dataQuotes, substitutions, scriptLiterals, sinkArgLiterals, regions: scriptRegions };
+  return { urls, dataQuotes, envDataQuotes, substitutions, scriptLiterals, sinkArgLiterals, regions: scriptRegions };
 }
 
 /**
@@ -4089,6 +4116,7 @@ function classifyWithCtx(
   end: number,
   text: string,
   pathTarget = false,
+  envQuotes = false,
 ): SpanClass {
   // 1) URL — inert data being fetched; only becomes code via `curl … | bash`,
   //    whose pipe-to-shell pattern's span CROSSES the URL (not contained in it).
@@ -4107,7 +4135,8 @@ function classifyWithCtx(
   //    when only quote/backslash glue or whitespace bridges them. Unquoted flags,
   //    paths, operators and substitutions remain executed. Path-target names
   //    inside a pure echo/printf string stay mentions (reference, not open).
-  if (coveredByDataQuotes(ctx.dataQuotes, start, end, text)
+  //    #1088 r5b: only ENV_DATA_QUOTE_SIGNALS rows read the env-prefixed list.
+  if (coveredByDataQuotes(envQuotes ? ctx.envDataQuotes : ctx.dataQuotes, start, end, text)
       && !intersects(ctx.substitutions, start, end)) return 'mention';
 
   // 3) Interpreter source (issue #89). Shell regions never reach here.
@@ -5635,6 +5664,34 @@ export function isGuardSelfProtectionVerdict(signals: readonly string[] | undefi
   return Array.isArray(signals) && signals.some(s => GUARD_SELF_PROTECTION_SIGNALS.includes(s));
 }
 
+/**
+ * #1005 — PROMPT-ONLY signals. A require_approval verdict carrying one of
+ * these is released only by a human answer: the approval prompt, or an
+ * operator's own `shieldcortex approve` in a terminal. Neither a standing
+ * `autoApprove` entry nor the approval broker's pre-clear (nor its
+ * auto-approve when the operator does not answer in time) releases it.
+ *
+ * Why a named exemption rather than a distinct action: the allowlist matches
+ * by substring over the verdict's family, action AND signals, so a renamed
+ * action would still be released by entries such as `exec`, `egress`,
+ * `shell`, `reverse` or the empty string (Case's review of #1088,
+ * 5994115085). Unlike the self-protection floor, this does not touch the
+ * documented postures: watch-only advisory, the enforce-when-ready shadow,
+ * the OpenClaw failure policy and Hermes behave as for any dangerous verdict.
+ *
+ * The ONE list. The Claude Code hook reads it from this module and carries a
+ * duplicate for an older dist; the OpenClaw interceptor carries a duplicate.
+ * Held equal by enforcement-surface-parity.
+ */
+export const GUARD_PROMPT_ONLY_SIGNALS: readonly string[] = Object.freeze([
+  'reverse-shell',
+]);
+
+/** True when a verdict's signals may be released only by a human answer. */
+export function isGuardPromptOnlyVerdict(signals: readonly string[] | undefined): boolean {
+  return Array.isArray(signals) && signals.some(s => GUARD_PROMPT_ONLY_SIGNALS.includes(s));
+}
+
 /** #342 — interpreter-API recursive-delete call spans (not shell verbs). */
 const INTERPRETER_RECURSIVE_DELETE_SPAN =
   /(?:shutil\s*\.\s*rmtree|os\s*\.\s*removedirs|FileUtils\s*\.\s*rm_rf|\brm\s*\(|(?:fs\s*\.\s*)?(?:promises\s*\.\s*)?rm(?:Sync)?\s*\()/i;
@@ -5706,10 +5763,11 @@ function matchSpansClassified(
     const m0 = text.match(p.re);
     if (!m0) continue;
     const pathTarget = PATH_TARGET_SIGNALS.has(p.signal);
+    const envQuotes = ENV_DATA_QUOTE_SIGNALS.has(p.signal);
     // Fast path: the first occurrence is executed → keep immediately (the common
     // case for a real command). Only search further when it's not.
     const s0 = m0.index ?? 0;
-    const c0raw = classifyWithCtx(ctx, s0, s0 + m0[0].length, text, pathTarget);
+    const c0raw = classifyWithCtx(ctx, s0, s0 + m0[0].length, text, pathTarget, envQuotes);
     // #342: interpreter API recursive-delete is the effect, not a mention.
     const c0 = (c0raw === 'mention'
       && p.signal === 'recursive-force-delete'
@@ -5738,7 +5796,7 @@ function matchSpansClassified(
     let iters = 0;
     for (const m of text.matchAll(g)) {
       const s = m.index ?? 0;
-      const cRaw = classifyWithCtx(ctx, s, s + m[0].length, text, pathTarget);
+      const cRaw = classifyWithCtx(ctx, s, s + m[0].length, text, pathTarget, envQuotes);
       const c = (cRaw === 'mention'
         && p.signal === 'recursive-force-delete'
         && INTERPRETER_RECURSIVE_DELETE_SPAN.test(m[0]))
@@ -5782,6 +5840,7 @@ const REMEDIATION: Record<string, string> = {
   'recursive-perms-system-dir': 'confirm this is intentional — recursive permission changes on a system directory can break the host',
   'truncate-to-zero': 'confirm the target file before truncating — this discards its contents',
   'destroy-data-or-infra': 'confirm the target database, cluster or cloud resource before running this — it destroys data or infrastructure that a local undo cannot bring back',
+  'reverse-shell': 'an interactive shell is wired to a network socket, so another machine can run commands here — confirm the destination and why it needs a shell before running this',
   'dd-overwrite': 'confirm the destination before running dd — it overwrites the target without confirmation',
   'opaque-script-invocation': 'the guard could not read the invoked script, so its contents were not scanned — inspect the file before running it',
   'opaque-command-substitution': 'the guard could not read the file a $(cat …) / $(< …) substitution splices into this command, so that text was not scanned — inspect the file before running it',
@@ -8951,6 +9010,10 @@ function dangerActionFor(signals: string[], family: ToolFamily): string {
   if (signals.includes('install-package') || signals.includes('install-package-global')) return 'install_package';
   if (signals.includes('registry-code-exec')) return 'run_registry_package';
   if (signals.includes('modify-scheduler')) return 'modify_cron';
+  // #1005: the remote end drives the shell over the network — the egress class, not a generic exec.
+  // An `autoApprove` entry naming this action does not release it: the signal is
+  // in GUARD_PROMPT_ONLY_SIGNALS, which both enforcement planes check first.
+  if (signals.includes('reverse-shell')) return 'network_egress';
   if (signals.includes('external-egress')) return 'network_egress';
   if (signals.includes('touch-sensitive-path')) return 'access_secret_path';
   if (signals.includes('wipe-history-or-logs')) return 'wipe_logs';
