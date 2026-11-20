@@ -348,6 +348,9 @@ describe('#1005 — every reverse-shell shape asks for approval', () => {
 
   it.each(ATTACK)('%s is approval-eligible: brokered to a human, never pre-cleared, never terminal by tier', (_name, command) => {
     const v = bash(command);
+    // #1088 round-0 NIT: held because of this row, not because of some other signal.
+    expect({ decision: v.decision, severity: v.severity, rs: v.signals.includes('reverse-shell') })
+      .toEqual({ decision: 'require_approval', severity: 'dangerous', rs: true });
     expect(brokerDecision({ tool: 'Bash', toolInput: { command }, verdict: v, judge: null }).outcome).toBe('hold');
     expect(isPreClearable(v.signals)).toBe(false);
     expect(v.signals.filter((s) => CATASTROPHIC_SIGNALS.includes(s) || GUARD_SELF_PROTECTION_SIGNALS.includes(s))).toEqual([]);
@@ -384,6 +387,9 @@ describe('#1005 round 2 — quoted words, wrappers, socket stdin, netcat piped i
 
   it.each(R2_GATES)('%s is approval-eligible', (_name, command) => {
     const v = bash(command);
+    // #1088 round-0 NIT: held because of this row, not because of some other signal.
+    expect({ decision: v.decision, severity: v.severity, rs: v.signals.includes('reverse-shell') })
+      .toEqual({ decision: 'require_approval', severity: 'dangerous', rs: true });
     expect(brokerDecision({ tool: 'Bash', toolInput: { command }, verdict: v, judge: null }).outcome).toBe('hold');
     expect(isPreClearable(v.signals)).toBe(false);
   });
