@@ -25,6 +25,10 @@ from sc_client import (  # noqa: E402
 from policy import action_guard_decision  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[4]
+# #1088 review r3: the comment-blanker fixtures shared with src/__tests__/fallback-reverse-shell-1005.test.ts.
+R3 = json.loads((REPO / "src/__tests__/fixtures/fallback-comments-1088.json").read_text(encoding="utf-8"))
+R5_GATES = [c for _n, c in R3["gate"]]
+R5_CONTROLS = [c for _n, c in R3["quiet"]]
 
 
 def row():
@@ -336,21 +340,21 @@ class ReverseShellFallbackTests(unittest.TestCase):
     DOWN = ActionGuardVerdict("allow", [], "down", available=False)
 
     def test_every_attack_blocks_while_degraded_and_enforcing(self):
-        for cmd in ATTACK + MORE_GATES + R2_GATES + R4_GATES:
+        for cmd in ATTACK + MORE_GATES + R2_GATES + R4_GATES + R5_GATES:
             surface = fallback_surface({"command": cmd})
             self.assertTrue(fallback_dangerous_match(surface), cmd)
             d = action_guard_decision(self.DOWN, enforce=True, fallback_dangerous=fallback_dangerous_match(surface))
             self.assertEqual((cmd, d and d["action"]), (cmd, "block"))
 
     def test_every_attack_is_the_reverse_shell_row_and_never_catastrophic(self):
-        for cmd in ATTACK + MORE_GATES + R2_GATES + R4_GATES:
+        for cmd in ATTACK + MORE_GATES + R2_GATES + R4_GATES + R5_GATES:
             # As fallback_dangerous_match runs it: on the text with its comments blanked.
             self.assertTrue(_fallback_executed_match(row(), sc_client._fallback_blank_comments(cmd)), cmd)
             # Approval tier on the live guard: the fail-closed catastrophic floor never sees it.
             self.assertFalse(fallback_catastrophic_match(cmd), cmd)
 
     def test_controls_fail_open(self):
-        for cmd in CONTROL + MENTIONS + R2_QUIET + R2_MENTIONS + BRIEF_CONTROLS + R4_CONTROLS:
+        for cmd in CONTROL + MENTIONS + R2_QUIET + R2_MENTIONS + BRIEF_CONTROLS + R4_CONTROLS + R5_CONTROLS:
             self.assertFalse(fallback_dangerous_match(cmd), cmd)
             self.assertIsNone(action_guard_decision(self.DOWN, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd)), cmd)
 
@@ -472,17 +476,17 @@ class ReverseShellLinearTests(unittest.TestCase):
 
 
 class CommentWalkLinearTests(unittest.TestCase):
-    """#1088 review r2 B2: the comment walk is one pass. Every `#` inside a backtick substitution
-    ends at the next backtick; a rescan to the end of the line per `#` would be quadratic."""
+    """#1088 review r2 B2 / r3: the comment walk is one pass, called directly in a bounded child."""
 
     def test_comment_walk_returns_in_a_bounded_child(self):
         script = (
             "import importlib.util, sys\n"
             "spec = importlib.util.spec_from_file_location('scc', sys.argv[1])\n"
             "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
-            "for head, unit in (('`', ' # `'), ('', ' #'), ('', \" '#'\")):\n"
+            "for head, unit in (('`', ' # `'), ('', ' #'), ('', \" '#'\"), ('', ' #\\n'), ('', ';#x\\n'), ('', '\"a\" #\\n')):\n"
             "    t = head + unit * (200000 // len(unit))\n"
-            "    assert len(m._fallback_blank_comments(t)) == len(t)\n"
+            "    r = m._fallback_blank_comments(t)\n"
+            "    assert len(r) == len(t) and r.count('\\n') == t.count('\\n')\n"
             "    m.fallback_dangerous_match(t)\n"
             "print('done')\n"
         )
@@ -492,15 +496,16 @@ class CommentWalkLinearTests(unittest.TestCase):
         )
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "done"), r.stderr[-2000:])
 
-    def test_blanking_keeps_length_newlines_and_quoted_hashes(self):
-        f = sc_client._fallback_blank_comments
-        self.assertEqual(f("ls # x\nnc"), "ls    \nnc")
-        self.assertEqual(f("echo '# x' # y"), "echo '# x'    ")
-        self.assertEqual(f("echo a#b"), "echo a#b")
-        self.assertEqual(f("echo \\# x"), "echo \\# x")
-        self.assertEqual(f("echo `true # x`; y"), "echo `true    `; y")
-        # Fail closed: syntax whose quotes the walk would mis-pair is left as it is.
-        self.assertEqual(f("echo $'a' # b"), "echo $'a' # b")
+
+class CommentBlankFixtureTests(unittest.TestCase):
+    """#1088 review r3: a `#` is blanked only where bash certainly starts a comment (shared fixture table)."""
+
+    def test_every_fixture_blanks_exactly_as_tabled(self):
+        for name, given, want in R3["blank"]:
+            self.assertEqual(sc_client._fallback_blank_comments(given), want, name)
+
+    def test_the_sanitizer_keeps_a_hash_that_continues_a_word(self):
+        self.assertEqual(sc_client._fallback_blank_comments("echo $(printf x)#tag"), "echo $(printf x)#tag")
 
 
 if __name__ == "__main__":

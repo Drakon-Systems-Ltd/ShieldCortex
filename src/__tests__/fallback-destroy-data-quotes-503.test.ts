@@ -189,11 +189,11 @@ describe('#503 R2 — the hook and the interceptor carry the same quoted-data ru
   // The two JS copies are kept in lockstep by hand; the Hermes port is pinned
   // behaviourally by DestroyRowDataQuoteTests on the same cases.
   const consts = (file: string): string[] => fs.readFileSync(path.join(REPO, file), 'utf-8').split('\n')
-    .filter((l) => /^const FALLBACK_(?:DATA_COMMAND_RE|TEXT_FLAG_RE|EXEC_WORD_RE|UNSAFE_PIPE_RE|QUOTE_UNMODELLED_RE|WORD_BREAK|QUOTE_PREFIX_CAP|INERT_MATCH_CAP) =/.test(l));
+    .filter((l) => /^const FALLBACK_(?:DATA_COMMAND_RE|TEXT_FLAG_RE|EXEC_WORD_RE|UNSAFE_PIPE_RE|QUOTE_UNMODELLED_RE|WORD_BREAK|MAYBE_COMMENT_BREAK|COMMENT_UNMODELLED_RE|QUOTE_PREFIX_CAP|INERT_MATCH_CAP) =/.test(l));
 
   it('same constants, and the row is tagged on both', () => {
     const hook = consts('scripts/pre-tool-hook.mjs');
-    expect(hook).toHaveLength(8);
+    expect(hook).toHaveLength(10);
     expect(hook).toEqual(consts('plugins/openclaw/interceptor.ts'));
     for (const f of ['scripts/pre-tool-hook.mjs', 'plugins/openclaw/interceptor.ts']) {
       expect(fs.readFileSync(path.join(REPO, f), 'utf-8')).toContain("signal: 'destroy-data-or-infra', dataQuotes: true }");
