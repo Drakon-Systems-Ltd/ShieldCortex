@@ -31,6 +31,26 @@ const READINESS_GATED = { actionGuard: { enabled: true, enforce: true, readiness
 // The deprecated alias spelling must not leak a loosening past the strict view.
 const ALIAS_OFF = { interceptor: { actionGuard: { enabled: false, enforce: false } } };
 
+// #853 Option A: under enforce, a headless approvable call with NO approval
+// card route is ADVISORY (allowed + logged), so "the strict posture is in
+// force" is only observable as a deny when a route exists. A usable webhook
+// carries the #815 denial card and IS a route. The receiver is a closed
+// loopback port: delivery fails fast, the route still counts, the hook still
+// denies. The truly unrouted advisory case is pinned explicitly below.
+const WEBHOOK_ROUTE = { enabled: true, webhookUrl: 'http://127.0.0.1:9/unreachable' };
+/** The same body, with a usable webhook card route on whichever block carries the guard. */
+function withRoute(body: Record<string, unknown>): Record<string, unknown> {
+  const isBlock = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+  const out: Record<string, unknown> = { ...body };
+  if (isBlock(out.actionGuard) || !isBlock(out.interceptor)) {
+    out.actionGuard = { ...(isBlock(out.actionGuard) ? out.actionGuard : {}), notify: WEBHOOK_ROUTE };
+  } else {
+    const ic = out.interceptor as Record<string, unknown>;
+    out.interceptor = { ...ic, actionGuard: { ...(isBlock(ic.actionGuard) ? ic.actionGuard : {}), notify: WEBHOOK_ROUTE } };
+  }
+  return out;
+}
+
 // A genuinely signed body: the HMAC src/cloud/config.ts verifies (canonical
 // body = the object without `_sig`, `JSON.stringify(rest, null, 2)`), keyed by
 // the `.integrity-key` written beside config.json. Since r5 the hook and
@@ -134,11 +154,24 @@ describe('#878 B1 — installed Claude Code hook, symlinked unsigned config.json
   for (const shape of ['relative', 'absolute', 'nested'] as const) {
     for (const [name, body] of fixtures) {
       it(`${shape} link to unsigned ${name}: denied (strict), not allowed as off`, () => {
-        linkTo(shape, body);
+        linkTo(shape, withRoute(body));
         const run = runHookOk();
         expect(run.decision).toBe('deny');
       });
     }
+  }
+
+  // #853 §3 regression: the strict posture with NO card route is still the
+  // ENFORCING guard (it reaches the approval path and logs it), but a headless
+  // approvable call there is advisory — never a silent Guard-off allow.
+  for (const shape of ['relative', 'absolute', 'nested'] as const) {
+    it(`${shape} link to unsigned Guard off, no card route: strict guard reached, advisory (allow + log), not off`, () => {
+      linkTo(shape, GUARD_OFF);
+      const run = runHookOk();
+      expect(run.decision).toBeUndefined();
+      expect(run.stderr).toMatch(/needs approval/);
+      expect(run.stderr).toMatch(/NO card route/);
+    });
   }
 
   it('control: a regular unsigned Guard-off file is still honoured (no decision)', () => {
@@ -147,8 +180,22 @@ describe('#878 B1 — installed Claude Code hook, symlinked unsigned config.json
   });
 
   it('control: a regular unsigned enforcing file still denies', () => {
-    writeFileSync(join(configDir, 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: true } }));
+    writeFileSync(join(configDir, 'config.json'), JSON.stringify(withRoute({ actionGuard: { enabled: true, enforce: true } })));
     expect(runHookOk().decision).toBe('deny');
+  });
+
+  it('control (#853 §3): a regular unsigned enforcing file with NO card route is advisory (allow + log)', () => {
+    writeFileSync(join(configDir, 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: true } }));
+    const run = runHookOk();
+    expect(run.decision).toBeUndefined();
+    expect(run.stderr).toMatch(/NO card route/);
+  });
+
+  it('control: a regular unsigned Guard-off file with a webhook route is still honoured as off (no decision)', () => {
+    writeFileSync(join(configDir, 'config.json'), JSON.stringify(withRoute(GUARD_OFF)));
+    const run = runHookOk();
+    expect(run.decision).toBeUndefined();
+    expect(run.stderr).not.toMatch(/needs approval/);
   });
 
   it('dangling link: nothing to read, the same {} src reads (src: unreadable → defaults)', () => {
@@ -408,43 +455,46 @@ describe('#878 r5 B1 — symlinked config.json: only a verifying signature is ho
   const sidecar = (content: string) => writeFileSync(join(configDir, '.config-sig'), content, { mode: 0o600 });
   const linkRaw = (body: Record<string, unknown>) => linkTo('relative', body);
 
-  type Row = { name: string; plant: () => void; src: 'tampered' | 'unverified' | 'valid' | 'self-heal'; shared: string };
+  // #853 Option A: the hook rows plant the same bodies with a usable webhook
+  // card route, so a held-strict link is observable as a deny (see withRoute).
+  const OFF_BOTH_ROUTED = withRoute(OFF_BOTH);
+  type Row = { name: string; plant: (off?: Record<string, unknown>) => void; src: 'tampered' | 'unverified' | 'valid' | 'self-heal'; shared: string };
   const BAD: Row[] = [
-    { name: 'empty `_sig` string', plant: () => { writeIntegrityKey(); linkRaw({ ...OFF_BOTH, _sig: '' }); }, src: 'tampered', shared: 'tampered' },
-    { name: 'junk `_sig` string', plant: () => { writeIntegrityKey(); linkRaw({ ...OFF_BOTH, _sig: 'deadbeef' }); }, src: 'tampered', shared: 'tampered' },
-    { name: 'forged 64-hex `_sig`', plant: () => { writeIntegrityKey(); linkRaw({ ...OFF_BOTH, _sig: 'f'.repeat(64) }); }, src: 'tampered', shared: 'tampered' },
+    { name: 'empty `_sig` string', plant: (off = OFF_BOTH) => { writeIntegrityKey(); linkRaw({ ...off, _sig: '' }); }, src: 'tampered', shared: 'tampered' },
+    { name: 'junk `_sig` string', plant: (off = OFF_BOTH) => { writeIntegrityKey(); linkRaw({ ...off, _sig: 'deadbeef' }); }, src: 'tampered', shared: 'tampered' },
+    { name: 'forged 64-hex `_sig`', plant: (off = OFF_BOTH) => { writeIntegrityKey(); linkRaw({ ...off, _sig: 'f'.repeat(64) }); }, src: 'tampered', shared: 'tampered' },
     {
       name: 'genuine `_sig` lifted from a different (enforcing) body',
-      plant: () => { writeIntegrityKey(); linkRaw({ ...OFF_BOTH, _sig: signedBody({ actionGuard: { enabled: true, enforce: true } })._sig }); },
+      plant: (off = OFF_BOTH) => { writeIntegrityKey(); linkRaw({ ...off, _sig: signedBody({ actionGuard: { enabled: true, enforce: true } })._sig }); },
       src: 'tampered', shared: 'tampered',
     },
-    { name: 'empty `.config-sig`', plant: () => { writeIntegrityKey(); linkRaw(OFF_BOTH); sidecar(''); }, src: 'tampered', shared: 'tampered' },
-    { name: 'junk `.config-sig`', plant: () => { writeIntegrityKey(); linkRaw(OFF_BOTH); sidecar('00'); }, src: 'tampered', shared: 'tampered' },
+    { name: 'empty `.config-sig`', plant: (off = OFF_BOTH) => { writeIntegrityKey(); linkRaw(off); sidecar(''); }, src: 'tampered', shared: 'tampered' },
+    { name: 'junk `.config-sig`', plant: (off = OFF_BOTH) => { writeIntegrityKey(); linkRaw(off); sidecar('00'); }, src: 'tampered', shared: 'tampered' },
     {
       name: '`.config-sig` is a directory',
-      plant: () => { writeIntegrityKey(); linkRaw(OFF_BOTH); mkdirSync(join(configDir, '.config-sig')); },
+      plant: (off = OFF_BOTH) => { writeIntegrityKey(); linkRaw(off); mkdirSync(join(configDir, '.config-sig')); },
       src: 'tampered', shared: 'tampered',
     },
     {
       name: 'junk `_sig` + empty `.config-sig` (no self-heal from an empty sidecar)',
-      plant: () => { writeIntegrityKey(); linkRaw({ ...OFF_BOTH, _sig: 'x' }); sidecar(''); },
+      plant: (off = OFF_BOTH) => { writeIntegrityKey(); linkRaw({ ...off, _sig: 'x' }); sidecar(''); },
       src: 'tampered', shared: 'tampered',
     },
-    { name: 'numeric `_sig` (not a string: legacy scheme, no sidecar)', plant: () => { writeIntegrityKey(); linkRaw({ ...OFF_BOTH, _sig: 1 }); }, src: 'unverified', shared: 'unsigned' },
-    { name: 'genuine `_sig` but no `.integrity-key` to verify it with', plant: () => { linkRaw(signedBody(OFF_BOTH)); }, src: 'tampered', shared: 'tampered' },
+    { name: 'numeric `_sig` (not a string: legacy scheme, no sidecar)', plant: (off = OFF_BOTH) => { writeIntegrityKey(); linkRaw({ ...off, _sig: 1 }); }, src: 'unverified', shared: 'unsigned' },
+    { name: 'genuine `_sig` but no `.integrity-key` to verify it with', plant: (off = OFF_BOTH) => { linkRaw(signedBody(off)); }, src: 'tampered', shared: 'tampered' },
   ];
   const GOOD: Row[] = [
-    { name: 'genuine embedded `_sig`', plant: () => { writeIntegrityKey(); linkRaw(signedBody(OFF_BOTH)); }, src: 'valid', shared: 'valid' },
+    { name: 'genuine embedded `_sig`', plant: (off = OFF_BOTH) => { writeIntegrityKey(); linkRaw(signedBody(off)); }, src: 'valid', shared: 'valid' },
     {
       name: 'genuine legacy `.config-sig` over the exact bytes',
-      plant: () => { writeIntegrityKey(); linkRaw(OFF_BOTH); sidecar(hmac(JSON.stringify(OFF_BOTH))); },
+      plant: (off = OFF_BOTH) => { writeIntegrityKey(); linkRaw(off); sidecar(hmac(JSON.stringify(off))); },
       src: 'valid', shared: 'valid',
     },
     {
       name: 'self-heal: stale `_sig`, genuine legacy `.config-sig` over the exact bytes',
-      plant: () => {
+      plant: (off = OFF_BOTH) => {
         writeIntegrityKey();
-        const body = { ...OFF_BOTH, _sig: 'deadbeef' };
+        const body = { ...off, _sig: 'deadbeef' };
         linkRaw(body);
         sidecar(hmac(JSON.stringify(body)));
       },
@@ -455,13 +505,13 @@ describe('#878 r5 B1 — symlinked config.json: only a verifying signature is ho
   describe('installed Claude Code hook (/bin/sh -c "<node> dist/index.js hook pre-tool")', () => {
     for (const row of BAD) {
       it(`${row.name}: denied (strict), not allowed as Guard off`, () => {
-        row.plant();
+        row.plant(OFF_BOTH_ROUTED);
         expect(runHookOk().decision).toBe('deny');
       });
     }
     for (const row of GOOD) {
       it(`control: ${row.name}: honoured (no decision)`, () => {
-        row.plant();
+        row.plant(OFF_BOTH_ROUTED);
         expect(runHookOk().decision).toBeUndefined();
       });
     }
@@ -548,7 +598,7 @@ describe('#878 r5 B1 — symlinked config.json: only a verifying signature is ho
     copyFileSync(join(repoRoot, 'scripts', 'pre-tool-hook.mjs'), join(copy, 'pre-tool-hook.mjs'));
     for (const dep of ['state-perms.mjs', 'harness-pid.mjs']) copyFileSync(join(repoRoot, 'scripts', 'lib', dep), join(copy, 'lib', dep));
     writeIntegrityKey();
-    linkRaw(signedBody(OFF_BOTH));
+    linkRaw(signedBody(OFF_BOTH_ROUTED));
     const command = `${process.execPath} ${join(copy, 'pre-tool-hook.mjs')}`;
     const run = runHookOk(command);
     expect(run.decision).toBe('deny');

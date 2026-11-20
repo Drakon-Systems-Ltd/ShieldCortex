@@ -187,7 +187,11 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
     mkdirSync(join(home, '.shieldcortex'), { recursive: true });
     writeFileSync(
       join(home, '.shieldcortex', 'config.json'),
-      JSON.stringify({ actionGuard: { enabled: true, enforce: true } }),
+      // #853: an OpenClaw card route is CONFIGURED so a headless dangerous
+      // call is denied (with no route it is advisory). This substitute dist
+      // cannot assemble that route, so the hold fails closed to the denial
+      // record this suite reads.
+      JSON.stringify({ actionGuard: { enabled: true, enforce: true, notify: { enabled: true, openclaw: true } } }),
     );
     substituteDist = mkdtempSync(join(tmpdir(), 'sc-517-evidence-dist-'));
     mkdirSync(join(substituteDist, 'defence', 'iron-dome'), { recursive: true });
@@ -332,7 +336,10 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
     const r = runHook(EVIDENCE_COMMAND);
     expect(r.decision).toBe('deny');
 
-    const rows = denialRows().filter((row) => row.outcome === 'denied_no_prompt_surface');
+    // The fixture's signals include `git-force-push`, which the #853 ruling
+    // makes always-block: refused as `auto_denied` with or without a prompt
+    // surface, never `denied_no_prompt_surface`.
+    const rows = denialRows().filter((row) => row.outcome === 'auto_denied');
     expect(rows).toHaveLength(2);
     const [pending, final] = rows;
     expect((pending.notify as { status?: string }).status).toBe('pending');
@@ -408,7 +415,8 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
   it('does not change the realtime audit row on this plane (terminal rows still carry no matches)', () => {
     runHook(EVIDENCE_COMMAND);
 
-    const terminal = auditRows().filter((row) => row.outcome === 'denied_no_prompt_surface' && row.action !== 'notify');
+    // Always-block fixture (see above): the terminal row is `auto_denied`.
+    const terminal = auditRows().filter((row) => row.outcome === 'auto_denied' && row.action !== 'notify');
     expect(terminal.length).toBeGreaterThan(0);
     for (const row of terminal) {
       expect(row.matches).toBeUndefined();

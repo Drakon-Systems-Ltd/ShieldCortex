@@ -82,7 +82,8 @@ describe('action-guard hook install (PreToolUse)', () => {
     } else {
       expect(command).toBe('shieldcortex hook pre-tool');
     }
-    expect(entry.hooks?.[0]?.timeout).toBe(10);
+    // #853: sized for a held call (requiredPreToolTimeoutSeconds()).
+    expect(entry.hooks?.[0]?.timeout).toBe(135);
   });
 
   it('setupHooks does not duplicate an existing PreToolUse entry', async () => {

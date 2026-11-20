@@ -58,7 +58,12 @@ const SIGNAL_SET = new Set(GUARD_SIGNAL_VOCABULARY);
 
 /** Record contracts. A row is a DENIAL only if BOTH its event and outcome say so. */
 export const EVENT_ENUM = Object.freeze(['action_guard_denial', 'action_guard_warning']);
-export const DENIAL_OUTCOMES = Object.freeze(['auto_denied', 'denied_no_prompt_surface', 'failure_denied']);
+// #853: a call HELD under an owner card that did not run (denied, expired,
+// card failed, or a refused duplicate) is a stop with its own outcome.
+export const DENIAL_OUTCOMES = Object.freeze([
+  'auto_denied', 'denied_no_prompt_surface', 'failure_denied',
+  'held_denied', 'held_expired', 'held_card_failed', 'held_duplicate',
+]);
 export const WARNING_OUTCOMES = Object.freeze(['warned', 'failure_allowed']);
 export const RETRY_OUTCOMES = Object.freeze(['retry_granted', 'retry_denied', 'retry_grant_failed']);
 export const OUTCOME_ENUM = Object.freeze([...DENIAL_OUTCOMES, ...WARNING_OUTCOMES, ...RETRY_OUTCOMES]);
