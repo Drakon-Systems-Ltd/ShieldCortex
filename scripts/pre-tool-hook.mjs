@@ -2982,27 +2982,45 @@ function fallbackDataQuoteRanges(text) {
  * quotes and outside a comment, nothing more is blanked (that line and every
  * line after it), and an unclosed quote blanks nothing after it. A missed
  * comment can only make the fallback stricter.
+ * #1088 r4: blanking also stops for good, keeping the rest of the text, at
+ *  - a `#` inside an unclosed `[`: an array subscript keeps a `#` as data after
+ *    a blank or a newline (`declare -A a; a[ #]=v` stores the key ` #` and runs
+ *    the rest of the line). The depth counts every unquoted, unescaped `[` and
+ *    `]`, floored at 0 (a subscript, a `[` test or a glob alike), so it is never
+ *    below bash's subscript depth;
+ *  - the first unquoted newline that ends a line holding anything but blanks and
+ *    a comment. An alias defined there (`alias q='a['`, or by `eval`, `source`,
+ *    `$x` …) applies from the next line on, and its text can turn a later `#`
+ *    into data (`q #]=1; nc …`). Bash reads a whole line before running any of
+ *    it, so no alias defined in the text reaches a `#` blanked here.
  */
 function fallbackBlankComments(text) {
   let out = '';
   let q = null;
-  let escEnd = -1;   // index just past the last `\x` pair: a `#` there follows an escaped character
+  let escEnd = -1;    // index just past the last `\x` pair: a `#` there follows an escaped character
+  let depth = 0;      // unclosed `[` outside quotes
+  let code = false;   // this line holds more than blanks and a comment
   for (let i = 0; i < text.length; i++) {
     if (q !== "'") {
       FALLBACK_COMMENT_UNMODELLED_RE.lastIndex = i;
       if (FALLBACK_COMMENT_UNMODELLED_RE.test(text)) return out + text.slice(i);
     }
     const c = text[i];
-    if (c === '\\' && q !== "'") { out += text.slice(i, i + 2); escEnd = i + 2; i++; continue; }
+    if (c === '\\' && q !== "'") { out += text.slice(i, i + 2); escEnd = i + 2; code = true; i++; continue; }
     if (q) { out += c; if (c === q) q = null; continue; }
-    if (c === '"' || c === "'") { q = c; out += c; continue; }
+    if (c === '\n' && code) return out + text.slice(i);
     if (c === '#' && (i === 0 || (i !== escEnd && FALLBACK_WORD_BREAK.includes(text[i - 1])))) {
+      if (depth > 0) return out + text.slice(i);
       const eol = text.indexOf('\n', i);
       const end = eol < 0 ? text.length : eol;
       out += ' '.repeat(end - i);
       i = end - 1;
       continue;
     }
+    if (c !== ' ' && c !== '\t' && c !== '\n') code = true;
+    if (c === '"' || c === "'") q = c;
+    else if (c === '[') depth++;
+    else if (c === ']' && depth > 0) depth--;
     out += c;
   }
   return out;

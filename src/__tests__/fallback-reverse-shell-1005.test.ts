@@ -29,7 +29,7 @@ const INTERCEPTOR_PATH = path.join(REPO, 'plugins', 'openclaw', 'interceptor.ts'
 
 /** #1088 review r3: the comment-blanker fixtures this suite shares with the Hermes test (test_reverse_shell_1005.py). */
 const R3 = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'fallback-comments-1088.json'), 'utf-8')) as {
-  gate: Array<[string, string]>; quiet: Array<[string, string]>; blank: Array<[string, string, string]>;
+  gate: Array<[string, string]>; quiet: Array<[string, string]>; row_quiet: Array<[string, string]>; blank: Array<[string, string, string]>;
 };
 
 const GATE: Array<[string, string]> = [
@@ -412,12 +412,41 @@ describe('#1005 — the normal guard agrees with the fallback', () => {
   // #1088 r3: nor a `#` after VT, CR or FF. The guard's stripComments starts a comment after any `\s`
   // (pre-existing, every row, kept unchanged on purpose since #713 r3); bash does not break words there,
   // so the nc runs. The fallbacks now read it; the guard gap is reported for a follow-up.
+  // #1088 r4: nor a `#` inside an array subscript, or after an alias that a previous line defined with an
+  // open `[` or quote. stripComments drops ` #…` there as well (same pre-existing gap, same follow-up).
   const GUARD_SHARED_GAPS = ['echo piped into a shell', 'r2: a comment inside backticks ends at the closing backtick',
-    ...R3.gate.map(([n]) => `r3: ${n}`).filter((n) => /\b(?:VT|CR|FF)\b/.test(n))];
-  it('the guard gaps listed here are exactly the six VT/CR/FF fixtures plus the two older ones', () => {
-    expect(GUARD_SHARED_GAPS).toHaveLength(8);
+    ...R3.gate.map(([n]) => `r3: ${n}`).filter((n) => /\b(?:VT|CR|FF)\b/.test(n) || /^r3: r4 .*\b(?:subscript|alias)\b/.test(n))];
+  it('the guard gaps listed here are exactly the six VT/CR/FF fixtures, the seven r4 subscript and alias fixtures, and the two older ones', () => {
+    expect(GUARD_SHARED_GAPS).toHaveLength(15);
+  });
+  // #1088 r4 (astra nit 1): an option operand named `nc` is not the command. Another row (sudo/doas
+  // privilege-escalation) may still hold these; the reverse-shell row must not.
+  it.each(R3.row_quiet)('r4: %s is not a reverse shell to the real guard', (_name, command) => {
+    expect(evaluateToolCall('Bash', { command }).signals ?? []).not.toContain('reverse-shell');
   });
   it.each(GATE.filter(([n]) => !GUARD_SHARED_GAPS.includes(n)))('%s is a reverse shell to the real guard', (_name, command) => {
     expect(evaluateToolCall('Bash', { command }).signals).toContain('reverse-shell');
+  });
+});
+
+// #1088 r4 (astra nit 1): the hook's reverse-shell row itself, from its shipped fallback section (sliced as
+// the #509 test does). Byte parity with the interceptor and Hermes rows is pinned elsewhere in this suite.
+describe('#1088 r4 — wrapper operands, the reverse-shell row alone', () => {
+  const hookSrc = fs.readFileSync(HOOK_PATH, 'utf8');
+  const start = hookSrc.indexOf('const FALLBACK_DANGEROUS_PATTERNS');
+  const end = hookSrc.indexOf('// ==================== AUDIT (local JSONL)');
+  const api = new Function(`${hookSrc.slice(start, end)}\nreturn { patterns: FALLBACK_DANGEROUS_PATTERNS, executed: fallbackExecutedMatch, blank: fallbackBlankComments };`)() as {
+    patterns: Array<{ re: RegExp; signal: string }>; executed: (re: RegExp, text: string) => boolean; blank: (text: string) => string;
+  };
+  const rowMatches = (command: string) => {
+    const row = api.patterns.find((p) => p.signal === 'reverse-shell');
+    if (!row) throw new Error('no reverse-shell row in the hook');
+    return api.executed(row.re, api.blank(command));
+  };
+  it.each(R3.gate.filter(([n]) => /^r4 (?:sudo|env|doas)\b/.test(n)))('hook: the row matches %s', (_name, command) => {
+    expect(rowMatches(command)).toBe(true);
+  });
+  it.each(R3.row_quiet)('hook: the row stays quiet on %s', (_name, command) => {
+    expect(rowMatches(command)).toBe(false);
   });
 });

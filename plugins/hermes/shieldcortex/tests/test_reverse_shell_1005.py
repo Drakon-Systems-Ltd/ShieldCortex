@@ -29,6 +29,8 @@ REPO = Path(__file__).resolve().parents[4]
 R3 = json.loads((REPO / "src/__tests__/fixtures/fallback-comments-1088.json").read_text(encoding="utf-8"))
 R5_GATES = [c for _n, c in R3["gate"]]
 R5_CONTROLS = [c for _n, c in R3["quiet"]]
+# #1088 r4 (astra nit 1): the reverse-shell row stays quiet (a sudo/doas row may still hold these).
+R5_ROW_QUIET = [c for _n, c in R3["row_quiet"]]
 
 
 def row():
@@ -361,6 +363,12 @@ class ReverseShellFallbackTests(unittest.TestCase):
     def test_the_row_stays_quiet_on_near_misses(self):
         for cmd in ROW_QUIET + R2_QUIET + R4_ROW_QUIET:
             self.assertFalse(row().search(cmd), cmd)
+
+    def test_wrapper_operands_are_not_the_command(self):
+        # #1088 r4: an option operand named `nc` (sudo -a/-c and long forms, env --argv0, doas -a) is not nc.
+        assert R5_ROW_QUIET
+        for cmd in R5_ROW_QUIET:
+            self.assertFalse(_fallback_executed_match(row(), sc_client._fallback_blank_comments(cmd)), cmd)
 
     def test_no_case_insensitive_flag(self):
         # `-C` is netcat's CRLF flag; the row must not fold case.

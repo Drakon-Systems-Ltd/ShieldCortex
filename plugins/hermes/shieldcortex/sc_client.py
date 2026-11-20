@@ -278,8 +278,17 @@ def _fallback_blank_comments(text: str) -> str:
     or right after a _FALLBACK_WORD_BREAK character (`echo $(true)#; nc ...` and `;\\v#; nc ...` keep the nc).
     From the first _FALLBACK_COMMENT_UNMODELLED construct outside single quotes and outside a comment,
     nothing more is blanked (that line and every line after it), and an unclosed quote blanks nothing after
-    it. A missed comment can only make the fallback stricter. Mirrors fallbackBlankComments in the other two."""
+    it. A missed comment can only make the fallback stricter.
+    #1088 r4: blanking also stops for good, keeping the rest of the text, at a `#` inside an unclosed `[` (an
+    array subscript keeps a `#` as data after a blank or a newline: `declare -A a; a[ #]=v` stores the key ` #`;
+    the depth counts every unquoted, unescaped `[` and `]`, floored at 0, so it is never below bash's subscript
+    depth), and at the first unquoted newline that ends a line holding anything but blanks and a comment (an
+    alias defined there, by `alias`, `eval`, `source`, `$x` ..., applies from the next line on and can turn a
+    later `#` into data: `alias q='a['` then `q #]=1; nc ...`; bash reads a whole line before running any of
+    it). Mirrors fallbackBlankComments in the other two."""
     out, q, esc_end, i, n = [], None, -1, 0, len(text)
+    depth = 0  # unclosed `[` outside quotes
+    code = False  # this line holds more than blanks and a comment
     while i < n:
         if q != "'" and _FALLBACK_COMMENT_UNMODELLED.match(text, i):
             out.append(text[i:])
@@ -288,6 +297,7 @@ def _fallback_blank_comments(text: str) -> str:
         if c == "\\" and q != "'":
             out.append(text[i:i + 2])
             esc_end = i + 2
+            code = True
             i += 2
             continue
         if q:
@@ -296,17 +306,26 @@ def _fallback_blank_comments(text: str) -> str:
                 q = None
             i += 1
             continue
-        if c in "\"'":
-            q = c
-            out.append(c)
-            i += 1
-            continue
+        if c == "\n" and code:
+            out.append(text[i:])
+            break
         if c == "#" and (i == 0 or (i != esc_end and text[i - 1] in _FALLBACK_WORD_BREAK)):
+            if depth > 0:
+                out.append(text[i:])
+                break
             eol = text.find("\n", i)
             end = n if eol < 0 else eol
             out.append(" " * (end - i))
             i = end
             continue
+        if c not in " \t\n":
+            code = True
+        if c in "\"'":
+            q = c
+        elif c == "[":
+            depth += 1
+        elif c == "]" and depth > 0:
+            depth -= 1
         out.append(c)
         i += 1
     return "".join(out)
