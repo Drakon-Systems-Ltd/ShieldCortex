@@ -889,23 +889,29 @@ async function checkAndSaveKeywordTrigger(messageText, event) {
     return false;
   }
 
-  // NOT screened as a memory_candidate, deliberately. A keyword trigger is the
-  // operator typing "remember this" — explicit, attended intent, which is the
-  // trusted side of the provenance policy. Screening it would mean telling an
-  // operator they may not save words they chose to save.
+  // No CLIENT-SIDE candidate screen here, deliberately. A keyword trigger is
+  // the operator typing "remember this" — explicit, attended intent — so this
+  // hook does not refuse it the way it refuses an auto-captured candidate.
+  //
+  // It is still screened on admission (SCN-010 M3). The save below is the MCP
+  // `remember` tool (callCortex -> mcporter -> the shieldcortex MCP server),
+  // whose handler marks the write as an agent memory admission. A standing
+  // directive about a control is therefore QUARANTINED there, not stored, and
+  // releasing it is the operator's decision (the dashboard's quarantine
+  // review); anything else is stored as before.
   //
   // THE CAVEAT, WRITTEN DOWN (r2/B8). Attended intent is an inference from a
   // SUBSTRING, not an attestation. The match is `lower.indexOf(phrase)`
   // anywhere in the message, and several triggers ("we decided", "going with",
   // "important:") are ordinary English. So an operator who pastes or forwards
-  // a tool result that itself contains "remember this: <directive>", and adds
-  // nothing, gets that directive stored with the operator's own trust — the
-  // classic confused deputy, where the authority is real and the intent is
-  // borrowed. It is accepted here because the alternative (screening an
-  // explicit save) breaks the one path where the operator is unambiguously
-  // in the loop, and because the trigger still requires a HUMAN TURN to carry
-  // it: nothing auto-captured reaches this function. The exposure is measured
-  // in openclaw-memory-candidate-screen.test.ts rather than assumed away.
+  // a tool result that itself contains "remember this: <text>", and adds
+  // nothing, gets that text saved under the operator's trigger — the classic
+  // confused deputy, where the authority is real and the intent is borrowed.
+  // The M3 admission screen narrows this to text WITHOUT control evidence
+  // (a false belief, a non-L2 instruction); the trigger still requires a
+  // HUMAN TURN to carry it, and nothing auto-captured reaches this function.
+  // The exposure is measured in openclaw-memory-candidate-screen.test.ts
+  // rather than assumed away.
   //
   // The trigger phrase carries the authoritative classification — pass its
   // extractorType so the wrapper pins category/purpose instead of re-guessing

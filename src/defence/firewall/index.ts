@@ -111,6 +111,38 @@ function persistenceWordingOnly(
   return l1PreferenceOnly && l2PersistOnly;
 }
 
+/**
+ * SCN-010: memory admissions screened WITHOUT the memory-directive screen
+ * because it threw. Fail OPEN, like a missing export at the capture sites:
+ * the analysis continues exactly as before SCN-010 for that write (no S, and
+ * no M4 relaxation, since M4 needs S to have run clean). Said once per
+ * process on stderr (fixed text, never the candidate) and counted here.
+ */
+let memoryDirectiveScreenUnavailable = 0;
+let memoryDirectiveScreenUnavailableNoted = false;
+
+/** How many memory admissions this process analysed without S (it threw). */
+export function getMemoryDirectiveScreenUnavailableCount(): number {
+  return memoryDirectiveScreenUnavailable;
+}
+
+/** S on one admission, or null when it could not run (it threw). */
+function runMemoryDirectiveScreen(text: string): MemoryDirectiveResult | null {
+  try {
+    return detectMemoryDirective(text);
+  } catch {
+    memoryDirectiveScreenUnavailable += 1;
+    if (!memoryDirectiveScreenUnavailableNoted) {
+      memoryDirectiveScreenUnavailableNoted = true;
+      process.stderr.write(
+        '[defence] memory_directive_screen_unavailable — the memory-directive screen threw; '
+        + 'memory admission continues without it (the pre-SCN-010 rules apply)\n',
+      );
+    }
+    return null;
+  }
+}
+
 const NOT_DETECTED_INSTRUCTIONS: InstructionDetectionResult = { detected: false, patterns: [], confidence: 0 };
 const NOT_DETECTED_NAI: NonAuthoritativeInstructionResult = { detected: false, patterns: [] };
 
@@ -150,8 +182,9 @@ export function analyzeFirewall(
   let memoryDirective: MemoryDirectiveResult = { detected: false, patterns: [] };
   if (isMemoryAdmission(source.type, context)) {
     // Title AND content: both are recalled into context, so both are screened.
-    memoryDirective = detectMemoryDirective(memoryCandidateText(title, content));
-    if (!memoryDirective.detected && persistenceWordingOnly(content, instructions, nonAuthoritative)) {
+    const screened = runMemoryDirectiveScreen(memoryCandidateText(title, content));
+    if (screened) memoryDirective = screened;
+    if (screened && !screened.detected && persistenceWordingOnly(content, instructions, nonAuthoritative)) {
       // Persistence wording alone does not refuse or quarantine a memory.
       instructions = NOT_DETECTED_INSTRUCTIONS;
       nonAuthoritative = NOT_DETECTED_NAI;

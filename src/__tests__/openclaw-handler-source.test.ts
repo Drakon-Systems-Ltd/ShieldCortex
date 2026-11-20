@@ -110,3 +110,13 @@ describe('openclaw cortex-memory handler — SCN-010 refusal lines (source)', ()
     expect(refusalBlock).toContain('console.log(`[cortex-memory] Candidate refused (${indicator}: ${patterns.join(", ")}): "${mem.title}"`);');
   });
 });
+
+describe('openclaw cortex-memory handler — the keyword-trigger comment matches the wiring', () => {
+  it('says the keyword save is screened on admission by MCP remember (M3), not "not screened"', () => {
+    expect(handlerSource).not.toContain('NOT screened as a memory_candidate');
+    expect(handlerSource).toContain('It is still screened on admission (SCN-010 M3)');
+    // ...and the save it describes really is the MCP remember tool.
+    const keywordSave = handlerSource.slice(handlerSource.indexOf('It is still screened on admission'));
+    expect(keywordSave).toMatch(/callCortex\("remember", \{/);
+  });
+});
