@@ -14,5 +14,6 @@ export function createOpenClawRuntime(opts?: { logPrefix?: string; configPath?: 
     extractKeywordMemory: typeof import('../../../scripts/lib/openclaw-extract.mjs').extractKeywordMemory;
     extractSessionMemoriesWithDistill: typeof import('../../../scripts/lib/openclaw-extract.mjs').extractSessionMemoriesWithDistill | null;
     loadMemoryCandidateScreen: typeof import('../../../scripts/lib/openclaw-extract.mjs').loadMemoryCandidateScreen | null;
+    refusalIndicator: typeof import('../../../scripts/lib/openclaw-extract.mjs').refusalIndicator | null;
   } | null>;
 };

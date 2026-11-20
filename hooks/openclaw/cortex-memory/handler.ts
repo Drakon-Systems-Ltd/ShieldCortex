@@ -550,7 +550,11 @@ async function runSessionExtraction(event, { sessionEntry, tags, sourceIdentifie
       refused++;
       // Names and a title, never the refused text — it is the part nobody
       // wanted persisted. No new sink: this is the hook's existing console.
-      console.log(`[cortex-memory] Candidate refused (non_authoritative_instruction: ${patterns.join(", ")}): "${mem.title}"`);
+      // SCN-010: the names may be memory-directive (S) or L2; the wrapper says which.
+      const indicator = typeof extract.refusalIndicator === "function"
+        ? extract.refusalIndicator(patterns)
+        : "non_authoritative_instruction";
+      console.log(`[cortex-memory] Candidate refused (${indicator}: ${patterns.join(", ")}): "${mem.title}"`);
       continue;
     }
 
