@@ -13,11 +13,26 @@
  * dist/systemd-service-files-*.mjs `SYSTEMD_GATEWAY_DOTENV_FILENAME`,
  * dist/systemd-*.mjs `mutation.publish(environmentFilePath, content, 384)`).
  *
- * This module reads exactly that file, and only to hand the two gateway
- * credential keys to the one install child that OpenClaw just refused. Rules:
+ * An operator can add more `EnvironmentFile=` lines to that unit (or a
+ * drop-in) and keep the credential there instead — e.g.
+ * `~/.openclaw/secrets/gateway-boot.env` after the generated file. systemd
+ * reads every listed file in order, a later file overriding an earlier one per
+ * key, so the gateway's value is whatever the LAST file that sets the key
+ * says (#1105 reopened, clawdbot1).
  *
- *  - Fixed path: `<home>/.openclaw/gateway.systemd.env`. No path comes from an
- *    environment variable, a config value, or the unit file. When anything
+ * This module reads those files, and only to hand the two gateway credential
+ * keys to the one install child that OpenClaw just refused. Rules:
+ *
+ *  - Paths come only from the unit's effective EnvironmentFiles as systemd
+ *    reports them (`systemctl --user show -p EnvironmentFiles
+ *    openclaw-gateway.service`, drop-ins included), constrained to the checked
+ *    state dir: every listed path must be a plain absolute path inside
+ *    `<home>/.openclaw/` — no `.`/`..`/empty segment, no wildcard — or nothing
+ *    is read. When systemd gives no answer (not Linux, no systemctl, no user
+ *    manager, the unit unknown or listing no file) only the fixed
+ *    `<home>/.openclaw/gateway.systemd.env` is read, exactly as before. No
+ *    path comes from an environment variable, a config value, or the unit
+ *    file's text. When anything
  *    could point OpenClaw at a different state dir, config or gateway
  *    (OPENCLAW_STATE_DIR, OPENCLAW_HOME, OPENCLAW_PROFILE, OPENCLAW_CONFIG_PATH,
  *    OPENCLAW_GATEWAY_URL, OPENCLAW_GATEWAY_PORT, or any legacy CLAWDBOT_*
@@ -57,10 +72,25 @@
  *    others); both files are then opened THROUGH that descriptor
  *    (`/proc/self/fd/<n>/…`, where the kernel provides it; elsewhere by path,
  *    with only the post-open identity check below) with O_NOFOLLOW, and the
- *    directory's identity is re-checked after each open. Each file is
- *    checked on its own descriptor; the boot env must be a regular file, one
+ *    directory's identity is re-checked after each open. A unit-listed file
+ *    in a subdirectory is reached one component at a time the same way: each
+ *    directory on its path opened through its parent's descriptor with
+ *    O_DIRECTORY|O_NOFOLLOW and given the state dir's checks, and every
+ *    directory above it re-checked after each open. Each file is
+ *    checked on its own descriptor; a boot env must be a regular file, one
  *    link, owned by that user, not writable by group or others, at most
- *    64 KiB. Without O_NOFOLLOW, O_DIRECTORY and O_NONBLOCK nothing is read.
+ *    64 KiB. A link anywhere on the way, or any failed check, means nothing
+ *    is used. Without O_NOFOLLOW, O_DIRECTORY and O_NONBLOCK nothing is read.
+ *  - Same order and precedence as systemd: listed files are applied in order,
+ *    later over earlier, per key. A file listed with `-` that does not exist
+ *    is skipped; a required one that does not exist means nothing is used
+ *    (systemd would not start the unit). When the LAST file that sets a key
+ *    sets it in a form not taken here, that key is not used at all — an
+ *    earlier file's value is not what the gateway has.
+ *  - systemctl is run by fixed absolute path (`/usr/bin/systemctl`, else
+ *    `/bin/systemctl`), with fixed arguments, no shell, a short timeout, and
+ *    an environment of only LC_ALL and the two variables that locate the user
+ *    manager; what it prints is parsed, never shown.
  *  - Parsed, never run: entries found the way systemd's EnvironmentFile
  *    parser finds them (a backslash-newline continues a value, a quoted value
  *    can span lines), but only a credential entry on ONE line, in the form
@@ -73,7 +103,9 @@
  *    never shown (update.ts reports it in fixed words), and
  *    `redactGatewayCredentials` scrubs them as a second line of defence.
  */
+import { spawnSync } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { debuglog } from 'util';
 
@@ -114,9 +146,47 @@ const MAX_DOTENV_BYTES = 1024 * 1024;
 /** openclaw.json is read only to find the gateway mode; a config past this is not read. */
 const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
 
+/**
+ * `from` is set only when the files came from the gateway unit's
+ * EnvironmentFiles: the file(s) the used keys came from, each as
+ * `~/.openclaw/…` (or a fixed phrase), never an absolute path. Without it the
+ * keys came from `GATEWAY_BOOT_ENV_DISPLAY`.
+ */
 export type GatewayBootCredentials =
-  | { used: true; env: GatewayCredentials; keys: GatewayCredentialKey[] }
+  | { used: true; env: GatewayCredentials; keys: GatewayCredentialKey[]; from?: string[] }
   | { used: false; reason: string };
+
+/** The gateway's systemd user unit, as OpenClaw installs it. */
+export const GATEWAY_UNIT = 'openclaw-gateway.service';
+
+/**
+ * Runs systemctl with these arguments and this complete environment; null when
+ * it could not be run (missing, killed, timed out). A parameter only so a test
+ * can stand in for a host's systemd.
+ */
+export type SystemctlRunner = (
+  args: readonly string[],
+  env: Record<string, string>,
+) => { status: number | null; stdout: string } | null;
+
+/** One `EnvironmentFiles=` entry as systemd reports it. */
+export interface UnitEnvironmentFile {
+  path: string;
+  /** `ignore_errors=yes` — the `-` prefix: a missing file is skipped. */
+  optional: boolean;
+}
+
+/**
+ * What systemd says about the gateway unit's EnvironmentFiles:
+ *  - `files`: the unit is loaded; its effective list, in order (may be empty);
+ *  - `unknown`: no answer about a loadable unit (no systemd, no user manager,
+ *    the unit not found / masked / not loadable);
+ *  - `unparsable`: systemd answered with something this does not understand.
+ */
+export type UnitEnvironmentFiles =
+  | { kind: 'files'; files: UnitEnvironmentFile[] }
+  | { kind: 'unknown' }
+  | { kind: 'unparsable' };
 
 function isCredentialKey(key: string): key is GatewayCredentialKey {
   return (GATEWAY_CREDENTIAL_KEYS as readonly string[]).includes(key);
@@ -195,7 +265,32 @@ type SdState =
  */
 export function parseGatewayBootEnv(text: string): GatewayCredentials {
   const out: GatewayCredentials = {};
-  if (text.includes('\0')) return out;
+  for (const [key, entry] of Object.entries(parseGatewayBootEnvEntries(text)) as [GatewayCredentialKey, GatewayKeyEntry][]) {
+    if (entry.kind === 'value') out[key] = entry.value;
+  }
+  return out;
+}
+
+/**
+ * What one file says about a credential key: absent (no entry), a value this
+ * takes, or `unusable` — the file's last entry for the key is in a form this
+ * does not take (or what the file sets cannot be known at all), so the
+ * gateway's value for it is not knowable from here.
+ */
+export type GatewayKeyEntry = { kind: 'value'; value: string } | { kind: 'unusable' };
+
+/**
+ * `parseGatewayBootEnv`, per key: absent keys are missing from the result.
+ * Needed across several files: an `unusable` last entry in a LATER file
+ * overrides an earlier file's value in the gateway, so it must not fall back
+ * to it. A body with a NUL, or one whose meaning depends on the systemd
+ * version, marks both keys unusable. Pure.
+ */
+export function parseGatewayBootEnvEntries(text: string): Partial<Record<GatewayCredentialKey, GatewayKeyEntry>> {
+  const allUnusable = (): Partial<Record<GatewayCredentialKey, GatewayKeyEntry>> =>
+    Object.fromEntries(GATEWAY_CREDENTIAL_KEYS.map((k) => [k, { kind: 'unusable' }]));
+  const out: Partial<Record<GatewayCredentialKey, GatewayKeyEntry>> = {};
+  if (text.includes('\0')) return allUnusable();
   let state: SdState = 'preKey';
   let keyStart = 0;
   let keyEnd = 0;
@@ -210,8 +305,7 @@ export function parseGatewayBootEnv(text: string): GatewayCredentials {
     // slice; decodeValue refuses it (whitespace in a bare value, a control
     // character in a quoted one).
     const value = decodeValue(text.slice(valueStart, end));
-    if (value === null) delete out[key];
-    else out[key] = value;
+    out[key] = value === null ? { kind: 'unusable' } : { kind: 'value', value };
   };
 
   for (let i = 0; i < text.length; i++) {
@@ -273,7 +367,7 @@ export function parseGatewayBootEnv(text: string): GatewayCredentials {
     || state === 'doubleQuote' || state === 'doubleQuoteEscape') {
     finish(text.length);
   }
-  return versionDependent ? {} : out;
+  return versionDependent ? allUnusable() : out;
 }
 
 type Owned = { uid: number | bigint; mode: number | bigint };
@@ -306,12 +400,17 @@ function openFlags(): { dir: number; file: number } | null {
   };
 }
 
-/** `~/.openclaw`, open, and the identity it was checked under. */
+/**
+ * `~/.openclaw` (or a directory under it, reached from it), open, and the
+ * identity it was checked under. `parent` is the checked directory it was
+ * opened through; every one up to `~/.openclaw` is re-checked after each open.
+ */
 interface StateDir {
   fd: number;
   dev: bigint;
   ino: bigint;
   path: string;
+  parent?: StateDir;
 }
 
 /**
@@ -356,6 +455,23 @@ function openStateDir(home: string, euid: number, flags: { dir: number }): { dir
   return { reason };
 }
 
+/**
+ * The path `name` inside the checked directory is opened by: through the
+ * directory's own descriptor where the kernel provides `/proc/self/fd`, else
+ * by path (see `openInDir`).
+ */
+function inDirPath(dir: StateDir, name: string): string {
+  const viaFd = `/proc/self/fd/${dir.fd}`;
+  let bound = false;
+  try {
+    const st = fs.statSync(viaFd, { bigint: true });
+    bound = st.dev === dir.dev && st.ino === dir.ino;
+  } catch {
+    bound = false;
+  }
+  return path.join(bound ? viaFd : dir.path, name);
+}
+
 /** Thrown by `openInDir` when `~/.openclaw` is no longer the directory that was checked. */
 const DIR_CHANGED = 'SC_STATE_DIR_CHANGED';
 
@@ -368,24 +484,19 @@ const DIR_CHANGED = 'SC_STATE_DIR_CHANGED';
  * catches a swap still in place when the file has been opened, not one made
  * and undone around the open. Either way, a `~/.openclaw` that is no longer
  * the checked directory after the open — or is now a link — is refused,
- * because it is no longer the one the gateway reads either.
+ * because it is no longer the one the gateway reads either. For a directory
+ * below `~/.openclaw` the same holds for it and every directory above it.
  */
 function openInDir(dir: StateDir, name: string, flags: number): number {
-  const viaFd = `/proc/self/fd/${dir.fd}`;
-  let bound = false;
-  try {
-    const st = fs.statSync(viaFd, { bigint: true });
-    bound = st.dev === dir.dev && st.ino === dir.ino;
-  } catch {
-    bound = false;
-  }
-  const fd = fs.openSync(path.join(bound ? viaFd : dir.path, name), flags);
-  let still = false;
-  try {
-    const now = fs.lstatSync(dir.path, { bigint: true });
-    still = !now.isSymbolicLink() && now.dev === dir.dev && now.ino === dir.ino;
-  } catch {
-    still = false;
+  const fd = fs.openSync(inDirPath(dir, name), flags);
+  let still = true;
+  for (let d: StateDir | undefined = dir; d && still; d = d.parent) {
+    try {
+      const now = fs.lstatSync(d.path, { bigint: true });
+      still = !now.isSymbolicLink() && now.dev === d.dev && now.ino === d.ino;
+    } catch {
+      still = false;
+    }
   }
   if (!still) {
     try { fs.closeSync(fd); } catch { /* already closed */ }
@@ -491,45 +602,59 @@ function confirmLocalGateway(dir: StateDir, flags: { file: number }): string | n
   }
 }
 
-/** The boot env's text (read through the checked directory), or why it was not read. */
-function readOwnedBootEnv(dir: StateDir, euid: number, flags: { file: number }): { text: string } | { reason: string } {
+/** One boot env file's text, or that it does not exist, or why it was not read. */
+type EnvFileRead = { text: string } | { missing: true } | { reason: string };
+
+/**
+ * A boot env's text, read as `name` through the checked directory `dir`, or
+ * why it was not read. `display` is what every reason calls it (never an
+ * absolute path). Absent is reported as `missing`; what that means is the
+ * caller's to say.
+ */
+function readOwnedEnvFile(dir: StateDir, name: string, display: string, euid: number, flags: { file: number }): EnvFileRead {
   let fd: number;
   try {
-    fd = openInDir(dir, 'gateway.systemd.env', flags.file);
+    fd = openInDir(dir, name, flags.file);
   } catch (err) {
     const code = errCode(err);
     if (code === DIR_CHANGED) return { reason: '~/.openclaw changed while it was being read' };
-    if (code === 'ENOENT') return { reason: `there is no ${GATEWAY_BOOT_ENV_DISPLAY}` };
-    if (code === 'ELOOP') return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} is a symbolic link` };
-    return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} could not be opened (${code})` };
+    if (code === 'ENOENT') return { missing: true };
+    if (code === 'ELOOP') return { reason: `${display} is a symbolic link` };
+    return { reason: `${display} could not be opened (${code})` };
   }
   const buf = Buffer.alloc(MAX_BOOT_ENV_BYTES + 1);
   try {
     const st = fs.fstatSync(fd);
-    if (!st.isFile()) return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} is not a regular file` };
+    if (!st.isFile()) return { reason: `${display} is not a regular file` };
     const problem = ownerProblem(st, euid);
-    if (problem) return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} ${problem}` };
-    if (st.nlink !== 1) return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} has more than one hard link` };
+    if (problem) return { reason: `${display} ${problem}` };
+    if (st.nlink !== 1) return { reason: `${display} has more than one hard link` };
     const n = readBounded(fd, buf);
-    if (n > MAX_BOOT_ENV_BYTES) return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} is larger than 64 KiB` };
+    if (n > MAX_BOOT_ENV_BYTES) return { reason: `${display} is larger than 64 KiB` };
     // systemd refuses a value that is not valid UTF-8; a lenient decode would
     // hand the child a value the gateway never had.
     let text: string;
     try {
       text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf.subarray(0, n));
     } catch {
-      return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} is not valid UTF-8` };
+      return { reason: `${display} is not valid UTF-8` };
     }
     // Rejected, not cut short: OpenClaw never writes a NUL, so a file with one
     // is not the file it wrote.
-    if (text.includes('\0')) return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} contains a NUL byte` };
+    if (text.includes('\0')) return { reason: `${display} contains a NUL byte` };
     return { text };
   } catch (err) {
-    return { reason: `${GATEWAY_BOOT_ENV_DISPLAY} could not be read (${errCode(err)})` };
+    return { reason: `${display} could not be read (${errCode(err)})` };
   } finally {
     buf.fill(0);
     try { fs.closeSync(fd); } catch { /* already closed */ }
   }
+}
+
+/** The fixed boot env's text (read through the checked directory), or why it was not read. */
+function readOwnedBootEnv(dir: StateDir, euid: number, flags: { file: number }): { text: string } | { reason: string } {
+  const read = readOwnedEnvFile(dir, 'gateway.systemd.env', GATEWAY_BOOT_ENV_DISPLAY, euid, flags);
+  return 'missing' in read ? { reason: `there is no ${GATEWAY_BOOT_ENV_DISPLAY}` } : read;
 }
 
 /** What every message calls the two dotenv files OpenClaw loads at startup. Never an absolute path. */
@@ -712,19 +837,294 @@ function locationOverride(env: NodeJS.ProcessEnv): string | null {
   return /^[A-Za-z0-9_]{1,64}$/.test(legacy) ? legacy : 'a CLAWDBOT_* variable';
 }
 
+/** Where systemctl lives; fixed, never looked up on PATH (as `/bin/ps` in approve-provenance.ts). */
+const SYSTEMCTL_CANDIDATES = ['/usr/bin/systemctl', '/bin/systemctl'] as const;
+const SYSTEMCTL_TIMEOUT_MS = 3000;
+const MAX_SYSTEMCTL_BYTES = 64 * 1024;
+/** More EnvironmentFiles than this is not a unit OpenClaw or an operator wrote by hand. */
+const MAX_UNIT_ENV_FILES = 32;
+
+/** The fixed argv: one unit, two properties, nothing taken from the environment or a config. */
+export const SYSTEMCTL_SHOW_ARGS = [
+  '--user', '--no-pager', 'show', '--property=LoadState', '--property=EnvironmentFiles', '--', GATEWAY_UNIT,
+] as const;
+
+/**
+ * This host's systemctl, or null when there is none to ask about `home`'s
+ * gateway: not Linux, no systemctl at a fixed path, or `home` is not the home
+ * of the user this process runs as — `systemctl --user` reaches only that
+ * user's manager, whose units do not describe a gateway under another home.
+ */
+function hostSystemctl(home: string): SystemctlRunner | null {
+  if (process.platform !== 'linux') return null;
+  let ownHome: string;
+  try {
+    ownHome = os.userInfo().homedir;
+  } catch {
+    return null;
+  }
+  if (!ownHome || path.resolve(ownHome) !== path.resolve(home)) return null;
+  const bin = SYSTEMCTL_CANDIDATES.find((p) => {
+    try {
+      return fs.statSync(p).isFile();
+    } catch {
+      return false;
+    }
+  });
+  if (!bin) return null;
+  return (args, env) => {
+    const r = spawnSync(bin, args, {
+      encoding: 'utf8',
+      env,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: SYSTEMCTL_TIMEOUT_MS,
+      maxBuffer: MAX_SYSTEMCTL_BYTES,
+      windowsHide: true,
+    });
+    if (r.error || r.signal) return null;
+    return { status: r.status, stdout: typeof r.stdout === 'string' ? r.stdout : '' };
+  };
+}
+
+/**
+ * The whole environment systemctl is given: a fixed locale and the two
+ * variables that locate the user's manager, nothing else — never a gateway
+ * credential, never anything the caller's environment adds.
+ */
+export function systemctlChildEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = { LC_ALL: 'C' };
+  for (const k of ['XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'] as const) {
+    const v = env[k];
+    if (typeof v === 'string' && v !== '') out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * `systemctl show --property=LoadState --property=EnvironmentFiles` output,
+ * parsed. systemd prints one `EnvironmentFiles=<path> (ignore_errors=yes|no)`
+ * line per entry (src/systemctl/systemctl-show.c, `"%s (ignore_errors=%s)"`;
+ * checked on systemd 255), in the order it reads them, and nothing for an
+ * empty list; `LoadState=not-found` for a unit it does not know. Any other
+ * line, a missing LoadState, or a control character is `unparsable`. Pure.
+ */
+export function parseUnitEnvironmentFiles(stdout: string): UnitEnvironmentFiles {
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x09\x0b-\x1f\x7f]/.test(stdout)) return { kind: 'unparsable' };
+  let loadState: string | null = null;
+  const files: UnitEnvironmentFile[] = [];
+  for (const line of stdout.split('\n')) {
+    if (line === '') continue;
+    const load = line.match(/^LoadState=([a-z-]+)$/);
+    if (load) {
+      if (loadState !== null) return { kind: 'unparsable' };
+      loadState = load[1];
+      continue;
+    }
+    const entry = line.match(/^EnvironmentFiles=(.+) \(ignore_errors=(yes|no)\)$/);
+    if (!entry) return { kind: 'unparsable' };
+    files.push({ path: entry[1], optional: entry[2] === 'yes' });
+  }
+  if (loadState === null) return { kind: 'unparsable' };
+  // not-found, masked, bad-setting, error…: systemd cannot start the unit from
+  // what it has, so it names no environment the gateway was started with.
+  if (loadState !== 'loaded') return { kind: 'unknown' };
+  if (files.length > MAX_UNIT_ENV_FILES) return { kind: 'unparsable' };
+  return { kind: 'files', files };
+}
+
+/** What systemd says the gateway unit loads, asked once through `run`. */
+function unitEnvironmentFiles(run: SystemctlRunner | null, env: NodeJS.ProcessEnv): UnitEnvironmentFiles {
+  if (!run) return { kind: 'unknown' };
+  let r: ReturnType<SystemctlRunner>;
+  try {
+    r = run(SYSTEMCTL_SHOW_ARGS, systemctlChildEnv(env));
+  } catch {
+    return { kind: 'unknown' };
+  }
+  // No answer, or a failed one (no user bus: "Failed to connect to bus"):
+  // there is no manager to ask. An unknown unit is exit 0 + not-found.
+  if (!r || r.status !== 0) return { kind: 'unknown' };
+  return parseUnitEnvironmentFiles(r.stdout);
+}
+
+/** A path segment safe to show as part of `~/.openclaw/…`: it came from systemctl, so only a plain name is echoed. */
+const DISPLAY_SEGMENT = /^[A-Za-z0-9._@+-]{1,64}$/;
+
+/** `~/.openclaw/<segments>` when every segment is plain, else `fallback`. */
+function displayUnder(segments: readonly string[], fallback: string): string {
+  return segments.every((s) => DISPLAY_SEGMENT.test(s)) ? `~/.openclaw/${segments.join('/')}` : fallback;
+}
+
+/** One listed file, checked to lie inside `~/.openclaw`: its segments below it, and its display name. */
+interface PlannedEnvFile {
+  segments: string[];
+  display: string;
+  optional: boolean;
+}
+
+/**
+ * A listed EnvironmentFile as segments below `~/.openclaw`, or why the whole
+ * resolution is refused. The listed text must be absolute, have no wildcard
+ * (systemd globs it; this does not), start with `<home>/.openclaw/`, and have
+ * no empty, `.` or `..` segment below it. Reasons never quote the listed path.
+ */
+function planEnvFile(stateDirPath: string, f: UnitEnvironmentFile): PlannedEnvFile | { reason: string } {
+  const listed = `the gateway unit (${GATEWAY_UNIT}) lists an EnvironmentFile`;
+  if (!path.isAbsolute(f.path)) return { reason: `${listed} that is not an absolute path, so no boot env was read` };
+  if (/[*?[\\]/.test(f.path)) return { reason: `${listed} with a wildcard or backslash, which is not read here, so no boot env was read` };
+  const prefix = `${stateDirPath}/`;
+  if (!f.path.startsWith(prefix)) return { reason: `${listed} outside ~/.openclaw, which is not read here, so no boot env was read` };
+  const segments = f.path.slice(prefix.length).split('/');
+  if (segments.some((s) => s === '' || s === '.' || s === '..')) {
+    return { reason: `${listed} under ~/.openclaw with an empty, "." or ".." path segment, so no boot env was read` };
+  }
+  return { segments, display: displayUnder(segments, 'an EnvironmentFile under ~/.openclaw'), optional: f.optional };
+}
+
+/**
+ * A planned file's text, reached from the checked `~/.openclaw` one component
+ * at a time: each directory on the way opened through its parent's descriptor
+ * with O_DIRECTORY|O_NOFOLLOW and given the state dir's checks (a directory,
+ * the user's own, not writable by group or others), the file itself given
+ * the boot env checks. A missing file or directory is `missing`.
+ */
+function readPlannedEnvFile(dir: StateDir, plan: PlannedEnvFile, euid: number, flags: { dir: number; file: number }): EnvFileRead {
+  const opened: number[] = [];
+  const notRead = `so ${plan.display} was not read`;
+  try {
+    let cur = dir;
+    for (let i = 0; i < plan.segments.length - 1; i++) {
+      const seg = plan.segments[i];
+      const sub = displayUnder(plan.segments.slice(0, i + 1), 'a directory under ~/.openclaw');
+      let fd: number;
+      try {
+        fd = openInDir(cur, seg, flags.dir);
+      } catch (err) {
+        const code = errCode(err);
+        if (code === DIR_CHANGED) return { reason: '~/.openclaw changed while it was being read' };
+        if (code === 'ENOENT') return { missing: true };
+        if (code === 'ELOOP') return { reason: `${sub} is a symbolic link, ${notRead}` };
+        if (code === 'ENOTDIR') {
+          // Linux reports a link opened O_DIRECTORY|O_NOFOLLOW as ENOTDIR;
+          // looked at (not followed) only to name it. Refused either way.
+          let link = false;
+          try {
+            link = fs.lstatSync(inDirPath(cur, seg)).isSymbolicLink();
+          } catch {
+            link = false;
+          }
+          return { reason: `${sub} ${link ? 'is a symbolic link' : 'is not a directory'}, ${notRead}` };
+        }
+        return { reason: `${sub} could not be opened (${code}), ${notRead}` };
+      }
+      opened.push(fd);
+      let st: fs.BigIntStats;
+      try {
+        st = fs.fstatSync(fd, { bigint: true });
+      } catch (err) {
+        return { reason: `${sub} could not be read (${errCode(err)}), ${notRead}` };
+      }
+      if (!st.isDirectory()) return { reason: `${sub} is not a directory, ${notRead}` };
+      const problem = ownerProblem(st, euid);
+      if (problem) return { reason: `${sub} ${problem}, ${notRead}` };
+      cur = { fd, dev: st.dev, ino: st.ino, path: path.join(cur.path, seg), parent: cur };
+    }
+    return readOwnedEnvFile(cur, plan.segments[plan.segments.length - 1], plan.display, euid, flags);
+  } finally {
+    for (const fd of opened) {
+      try { fs.closeSync(fd); } catch { /* already closed */ }
+    }
+  }
+}
+
+/**
+ * The credential keys the gateway unit's EnvironmentFiles give it, read as
+ * systemd reads them: every listed file in order, later over earlier, per
+ * key. Every path is checked before any file is read; any refusal is the
+ * whole resolution's. A key whose LAST setting is one this does not take is
+ * not used — not even an earlier file's value for it, which the gateway does
+ * not have.
+ */
+function credentialsFromUnitFiles(
+  dir: StateDir,
+  files: UnitEnvironmentFile[],
+  euid: number,
+  flags: { dir: number; file: number },
+): GatewayBootCredentials {
+  const plans: PlannedEnvFile[] = [];
+  for (const f of files) {
+    const plan = planEnvFile(dir.path, f);
+    if ('reason' in plan) return { used: false, reason: plan.reason };
+    plans.push(plan);
+  }
+  const lists = `the EnvironmentFiles systemd lists for ${GATEWAY_UNIT}`;
+  const state: Partial<Record<GatewayCredentialKey, { entry: GatewayKeyEntry; display: string }>> = {};
+  const read: string[] = [];
+  for (const plan of plans) {
+    const got = readPlannedEnvFile(dir, plan, euid, flags);
+    if ('missing' in got) {
+      if (plan.optional) continue;
+      return {
+        used: false,
+        reason: `${plan.display} is a required EnvironmentFile of ${GATEWAY_UNIT} (no "-") but does not exist, so the gateway's environment is not known and no boot env was used`,
+      };
+    }
+    if ('reason' in got) return { used: false, reason: `${got.reason} (one of ${lists}), so no boot env was used` };
+    read.push(plan.display);
+    const entries = parseGatewayBootEnvEntries(got.text);
+    for (const k of GATEWAY_CREDENTIAL_KEYS) {
+      const entry = entries[k];
+      if (entry) state[k] = { entry, display: plan.display };
+    }
+  }
+  const env: GatewayCredentials = {};
+  const from: string[] = [];
+  const unusable: string[] = [];
+  for (const k of GATEWAY_CREDENTIAL_KEYS) {
+    const s = state[k];
+    if (!s) continue;
+    if (s.entry.kind === 'value') {
+      env[k] = s.entry.value;
+      if (!from.includes(s.display)) from.push(s.display);
+    } else {
+      unusable.push(`${k} (in ${s.display})`);
+    }
+  }
+  const keys = GATEWAY_CREDENTIAL_KEYS.filter((k) => env[k] !== undefined);
+  if (keys.length > 0) return { used: true, env, keys, from };
+  if (unusable.length > 0) {
+    return {
+      used: false,
+      reason: unusable.length === 1
+        ? `the last setting of ${unusable[0]} in ${lists} is not a plain line, so no earlier value was used`
+        : `the last settings of ${unusable.join(' and ')} in ${lists} are not plain lines, so no earlier value was used`,
+    };
+  }
+  if (read.length === 0) return { used: false, reason: `none of ${lists} exists (all are optional)` };
+  return {
+    used: false,
+    reason: `${read.join(', ')} (${lists}) ${read.length === 1 ? 'has' : 'have'} no plain OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD line`,
+  };
+}
+
 /**
  * The local gateway's boot credential for ONE install child that OpenClaw
  * refused for an unresolvable gateway secret reference, or why there is none.
  *
  * `refusedPath` is the config path OpenClaw's refusal named. `geteuid` is a
- * parameter only so a test can stand in for a file owned by someone else.
- * The reason strings never contain a credential value or an absolute path.
+ * parameter only so a test can stand in for a file owned by someone else;
+ * `systemctl` only so a test can stand in for a host's systemd (null: there
+ * is none). The reason strings never contain a credential value or an
+ * absolute path.
  */
 export function resolveGatewayBootCredentials(params: {
   home: string;
   refusedPath: string | null;
   env?: NodeJS.ProcessEnv;
   geteuid?: () => number;
+  systemctl?: SystemctlRunner | null;
 }): GatewayBootCredentials {
   const env = params.env ?? process.env;
   if (GATEWAY_CREDENTIAL_KEYS.some((k) => env[k]?.trim())) {
@@ -752,6 +1152,21 @@ export function resolveGatewayBootCredentials(params: {
     if (notLocal) return { used: false, reason: notLocal };
     const dotEnv = runtimeDotEnvProblem(opened.dir, params.home, euid, flags);
     if (dotEnv) return { used: false, reason: dotEnv };
+    // Every refusal above has run; only now is systemd asked which files the
+    // gateway unit loads, and only then is any of them read.
+    const run = params.systemctl !== undefined ? params.systemctl : hostSystemctl(params.home);
+    const unit = unitEnvironmentFiles(run, env);
+    if (unit.kind === 'unparsable') {
+      return { used: false, reason: `systemctl's answer about ${GATEWAY_UNIT}'s EnvironmentFiles was not understood, so no boot env was read` };
+    }
+    if (unit.kind === 'files' && unit.files.length > 0) return credentialsFromUnitFiles(opened.dir, unit.files, euid, flags);
+    // No systemd answer (not Linux, no systemctl, no user manager, the unit
+    // unknown or listing no file): read the fixed file only, exactly as
+    // before. Safe because nothing about that read depends on systemd — it is
+    // the file OpenClaw itself writes for the unit, under the checked
+    // directory, with every check above — and its keys still go only to the
+    // one retry child for a confirmed local gateway. At worst the value is
+    // not the gateway's current one and the retry fails as it did before.
     const read = readOwnedBootEnv(opened.dir, euid, flags);
     if ('reason' in read) return { used: false, reason: read.reason };
     const creds = parseGatewayBootEnv(read.text);
