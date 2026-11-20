@@ -3848,6 +3848,10 @@ function blankedRun(src: string, a: number, b: number): string {
 interface SpanCtx {
   urls: Array<[number, number]>;        // [start,end) of each http(s) URL token
   dataQuotes: Array<[number, number]>;  // CONTENT ranges (open+1..close) of quotes that are pure data args
+  /** #1088 r5b: `dataQuotes` plus the quotes whose data command sits behind
+   *  `env [-i] [NAME=VAL…]`. Read ONLY by the rows in ENV_DATA_QUOTE_SIGNALS,
+   *  so no row that predates them is relieved by the env read. */
+  envDataQuotes: Array<[number, number]>;
   substitutions: Array<[number, number]>; // `$(…)` / backtick spans — executed even inside a data quote
   scriptLiterals: Array<[number, number]>; // comment + string-literal ranges in interpreter-source regions
   /** Literals whose OWN LINE calls a shell-out sink — the argument of an
@@ -3869,6 +3873,15 @@ const MAX_CLASSIFY_ITERS_LARGE = 6;
 const LARGE_SURFACE = 8_192;
 /** How far back a quote may look for its own command word / text flag. */
 const QUOTE_PREFIX_CAP = 512;
+/**
+ * #1088 r5b (Jarvis B1): the rows whose quote-demotion also reads through an
+ * `env [-i] [NAME=VAL…]` prefix, so `env FOO=1 printf 'nc -e …'` is a mention
+ * for them. Every other row reads the command word exactly as before #1005:
+ * on them the env read relieved `env -i echo '…' | xargs sh -c '{}'`, which
+ * runs the quote. Mirrored by name in the three fallbacks.
+ */
+const ENV_DATA_QUOTE_SIGNALS: ReadonlySet<string> = new Set(['reverse-shell']);
+const ENV_PREFIX_RE = /^env\s+(?:-i\s+|\w+=\S*\s+)*/;
 
 function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCtx {
   const urls: Array<[number, number]> = [];
@@ -3910,6 +3923,7 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
     : regions.filter(r => r.lang === 'sh').map(r => [r.start, r.end] as [number, number]);
 
   const dataQuotes: Array<[number, number]> = [];
+  const envDataQuotes: Array<[number, number]> = [];
   const substitutions: Array<[number, number]> = [];
   // `eval` can re-run any captured text, so with one present NO quote is data.
   const evalPresent = EVAL_REACTIVATOR.test(text);
@@ -3960,19 +3974,28 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
           const prefix = text.slice(prefixStart, open);
           const bare = truncated
             ? ''
-            : prefix.replace(/^\s+/, '').replace(/^(?:\w+=\S*\s+)*/, '').replace(/^(?:sudo|doas)\s+/, '').replace(/^env\s+(?:-i\s+|\w+=\S*\s+)*/, '');
+            : prefix.replace(/^\s+/, '').replace(/^(?:\w+=\S*\s+)*/, '').replace(/^(?:sudo|doas)\s+/, '');
+          // #1088 r5b: the same word read through `env [-i] [NAME=VAL…]`, for
+          // ENV_DATA_QUOTE_SIGNALS only (see envDataQuotes).
+          const envBare = bare.replace(ENV_PREFIX_RE, '');
           // A quote is DATA when, in its own statement:
           //   - the command word is a recognised data command (allowlist), or
           //   - it is the value of a long-form text flag on a non-executor.
           // A quote in command position, in assignment position, inside a
           // command substitution, or after any other command, stays executed.
           const isAssignment = /(?:^|\s)(?:export\s+|local\s+|declare\s+\S+\s+)?\w+(?:\[[^\]]*\])?\+?=$/.test(prefix);
-          const isDataCommand = !truncated && DATA_COMMAND.test(bare)
-            && !gitQuotedArgIsWriteFlag(bare, text.slice(open + 1, i));
-          const isTextFlag = !truncated && TEXT_FLAG.test(prefix)
-            && !EXEC_COMMAND_WORD.test(bare.trim().split(/\s+/)[0] ?? '');
-          if (!evalPresent && depth === 0 && !isAssignment && (isDataCommand || isTextFlag)) {
-            dataQuotes.push([open + 1, i]);
+          const isData = (word: string): boolean =>
+            (!truncated && DATA_COMMAND.test(word)
+              && !gitQuotedArgIsWriteFlag(word, text.slice(open + 1, i)))
+            || (!truncated && TEXT_FLAG.test(prefix)
+              && !EXEC_COMMAND_WORD.test(word.trim().split(/\s+/)[0] ?? ''));
+          if (!evalPresent && depth === 0 && !isAssignment) {
+            if (isData(bare)) {
+              dataQuotes.push([open + 1, i]);
+              envDataQuotes.push([open + 1, i]);
+            } else if (envBare !== bare && isData(envBare)) {
+              envDataQuotes.push([open + 1, i]);
+            }
           }
           q = null;
         }
@@ -3985,7 +4008,7 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
     // (fail-closed: everything after it is executed, not quoted data).
     while (subStack.length > 0) substitutions.push([subStack.pop() as number, rangeEnd]);
   }
-  return { urls, dataQuotes, substitutions, scriptLiterals, sinkArgLiterals, regions: scriptRegions };
+  return { urls, dataQuotes, envDataQuotes, substitutions, scriptLiterals, sinkArgLiterals, regions: scriptRegions };
 }
 
 /**
@@ -4093,6 +4116,7 @@ function classifyWithCtx(
   end: number,
   text: string,
   pathTarget = false,
+  envQuotes = false,
 ): SpanClass {
   // 1) URL — inert data being fetched; only becomes code via `curl … | bash`,
   //    whose pipe-to-shell pattern's span CROSSES the URL (not contained in it).
@@ -4111,7 +4135,8 @@ function classifyWithCtx(
   //    when only quote/backslash glue or whitespace bridges them. Unquoted flags,
   //    paths, operators and substitutions remain executed. Path-target names
   //    inside a pure echo/printf string stay mentions (reference, not open).
-  if (coveredByDataQuotes(ctx.dataQuotes, start, end, text)
+  //    #1088 r5b: only ENV_DATA_QUOTE_SIGNALS rows read the env-prefixed list.
+  if (coveredByDataQuotes(envQuotes ? ctx.envDataQuotes : ctx.dataQuotes, start, end, text)
       && !intersects(ctx.substitutions, start, end)) return 'mention';
 
   // 3) Interpreter source (issue #89). Shell regions never reach here.
@@ -5738,10 +5763,11 @@ function matchSpansClassified(
     const m0 = text.match(p.re);
     if (!m0) continue;
     const pathTarget = PATH_TARGET_SIGNALS.has(p.signal);
+    const envQuotes = ENV_DATA_QUOTE_SIGNALS.has(p.signal);
     // Fast path: the first occurrence is executed → keep immediately (the common
     // case for a real command). Only search further when it's not.
     const s0 = m0.index ?? 0;
-    const c0raw = classifyWithCtx(ctx, s0, s0 + m0[0].length, text, pathTarget);
+    const c0raw = classifyWithCtx(ctx, s0, s0 + m0[0].length, text, pathTarget, envQuotes);
     // #342: interpreter API recursive-delete is the effect, not a mention.
     const c0 = (c0raw === 'mention'
       && p.signal === 'recursive-force-delete'
@@ -5770,7 +5796,7 @@ function matchSpansClassified(
     let iters = 0;
     for (const m of text.matchAll(g)) {
       const s = m.index ?? 0;
-      const cRaw = classifyWithCtx(ctx, s, s + m[0].length, text, pathTarget);
+      const cRaw = classifyWithCtx(ctx, s, s + m[0].length, text, pathTarget, envQuotes);
       const c = (cRaw === 'mention'
         && p.signal === 'recursive-force-delete'
         && INTERPRETER_RECURSIVE_DELETE_SPAN.test(m[0]))

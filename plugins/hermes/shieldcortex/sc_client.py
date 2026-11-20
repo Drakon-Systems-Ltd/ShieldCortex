@@ -216,8 +216,11 @@ _FALLBACK_QUOTE_PREFIX_CAP = 512  # a command word further back is not recognise
 _FALLBACK_INERT_MATCH_CAP = 64  # inert matches looked past before the row fails closed
 
 
-def _fallback_data_quote_ranges(text: str) -> list:
-    """`(open, close + 1)` of every quoted data argument, or [] when none can be trusted."""
+def _fallback_data_quote_ranges(text: str, env_prefix: bool = False) -> list:
+    """`(open, close + 1)` of every quoted data argument, or [] when none can be trusted.
+    #1088 r5b (Jarvis B1): `env_prefix` also reads the command word through `env [-i] [NAME=VAL...]`;
+    only the reverse-shell row asks for it, so no older row is relieved by it (mirrors the guard's
+    ENV_DATA_QUOTE_SIGNALS)."""
     if _FALLBACK_QUOTE_UNMODELLED.search(text):
         return []
     ranges, unquoted = [], []  # quote contents blanked, so the pipe check never reads quoted text
@@ -239,7 +242,9 @@ def _fallback_data_quote_ranges(text: str) -> list:
             if c == q:
                 prefix = text[stmt_start:open_at]
                 if open_at - stmt_start <= _FALLBACK_QUOTE_PREFIX_CAP:
-                    bare = re.sub(r"^env\s+(?:-i\s+|\w+=\S*\s+)*", "", re.sub(r"^(?:sudo|doas)\s+", "", re.sub(r"^(?:\w+=\S*\s+)*", "", prefix.lstrip())))
+                    bare = re.sub(r"^(?:sudo|doas)\s+", "", re.sub(r"^(?:\w+=\S*\s+)*", "", prefix.lstrip()))
+                    if env_prefix:
+                        bare = re.sub(r"^env\s+(?:-i\s+|\w+=\S*\s+)*", "", bare)
                     word = (bare.split() or [""])[0]
                     if not _FALLBACK_ASSIGNMENT.search(prefix) and (
                         _FALLBACK_DATA_COMMAND.match(bare)
@@ -331,15 +336,16 @@ def _fallback_blank_comments(text: str) -> str:
     return "".join(out)
 
 
-def _fallback_executed_match(rx, text: str, accept=None) -> bool:
-    """True when `rx` matches somewhere outside a quoted data argument (and `accept`, if given, takes its end)."""
+def _fallback_executed_match(rx, text: str, accept=None, env_prefix: bool = False) -> bool:
+    """True when `rx` matches somewhere outside a quoted data argument (and `accept`, if given, takes its end).
+    `env_prefix`: see _fallback_data_quote_ranges (the reverse-shell row only)."""
     ranges, inert, pos = None, 0, 0
     while True:
         m = rx.search(text, pos)
         if m is None:
             return False
         if ranges is None:
-            ranges = _fallback_data_quote_ranges(text)
+            ranges = _fallback_data_quote_ranges(text, env_prefix)
         if not any(a <= m.start() and m.end() <= b for a, b in ranges) and (accept is None or accept(m.end())):
             return True
         inert += 1
@@ -414,7 +420,7 @@ def fallback_dangerous_match(content: str) -> bool:
     return any(
         _fallback_posture_match(content) if p is _FALLBACK_POSTURE_ROW
         else _fallback_executed_match(p, content) if p is _FALLBACK_DESTROY_ROW
-        else _fallback_executed_match(p, _fallback_blank_comments(content)) if p is _FALLBACK_REVERSE_SHELL_ROW
+        else _fallback_executed_match(p, _fallback_blank_comments(content), env_prefix=True) if p is _FALLBACK_REVERSE_SHELL_ROW
         else p.search(content)
         for p in _FALLBACK_DANGEROUS
         if not (p is _FALLBACK_POSTURE_ROW and lock_read_only)

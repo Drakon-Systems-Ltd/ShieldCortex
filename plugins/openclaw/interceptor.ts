@@ -1082,9 +1082,14 @@ const FALLBACK_COMMENT_UNMODELLED_RE = /\$[('{\[]|`|<<|\\\r?\n|[?*+@!]\(|\(\(|\[
 const FALLBACK_QUOTE_PREFIX_CAP = 512;
 /** Inert matches looked past before the row fails closed. */
 const FALLBACK_INERT_MATCH_CAP = 64;
+/** #1088 r5b (Jarvis B1): the rows whose data quotes are also read through an `env [-i] [NAME=VAL…]`
+ *  prefix (`env FOO=1 printf 'nc -e …'` is a mention). Every other row reads the command word as before
+ *  #1005. Mirrors the guard's ENV_DATA_QUOTE_SIGNALS. */
+const FALLBACK_ENV_DATA_QUOTE_SIGNALS: readonly string[] = ['reverse-shell'];
 
-/** `[open, close + 1)` of every quoted data argument, or [] when none can be trusted. */
-function fallbackDataQuoteRanges(text: string): Array<[number, number]> {
+/** `[open, close + 1)` of every quoted data argument, or [] when none can be trusted. `envPrefix` also
+ *  reads the command word through `env [-i] [NAME=VAL…]` (FALLBACK_ENV_DATA_QUOTE_SIGNALS rows only). */
+function fallbackDataQuoteRanges(text: string, envPrefix = false): Array<[number, number]> {
   if (FALLBACK_QUOTE_UNMODELLED_RE.test(text)) return [];
   const ranges: Array<[number, number]> = [];
   // Quote contents blanked, so the pipe check below never reads quoted text.
@@ -1107,7 +1112,9 @@ function fallbackDataQuoteRanges(text: string): Array<[number, number]> {
       if (c !== q) continue;
       const prefix = text.slice(stmtStart, open);
       if (open - stmtStart <= FALLBACK_QUOTE_PREFIX_CAP) {
-        const bare = prefix.replace(/^\s+/, '').replace(/^(?:\w+=\S*\s+)*/, '').replace(/^(?:sudo|doas)\s+/, '').replace(/^env\s+(?:-i\s+|\w+=\S*\s+)*/, '');
+        let bare = prefix.replace(/^\s+/, '').replace(/^(?:\w+=\S*\s+)*/, '').replace(/^(?:sudo|doas)\s+/, '');
+        // #1088 r5b: read through `env [-i] [NAME=VAL…]` only for FALLBACK_ENV_DATA_QUOTE_SIGNALS rows.
+        if (envPrefix) bare = bare.replace(/^env\s+(?:-i\s+|\w+=\S*\s+)*/, '');
         const isAssignment = /(?:^|\s)(?:export\s+|local\s+|declare\s+\S+\s+)?\w+(?:\[[^\]]*\])?\+?=$/.test(prefix);
         const word = bare.split(/\s+/)[0] ?? '';
         if (!isAssignment && (FALLBACK_DATA_COMMAND_RE.test(bare)
@@ -1193,8 +1200,9 @@ function fallbackBlankComments(text: string): string {
   return out;
 }
 
-/** True when `re` matches somewhere outside a quoted data argument (and `accept`, if given, takes its end). */
-function fallbackExecutedMatch(re: RegExp, text: string, accept?: (end: number) => boolean): boolean {
+/** True when `re` matches somewhere outside a quoted data argument (and `accept`, if given, takes its end).
+ *  `envPrefix`: the row is in FALLBACK_ENV_DATA_QUOTE_SIGNALS. */
+function fallbackExecutedMatch(re: RegExp, text: string, accept?: (end: number) => boolean, envPrefix = false): boolean {
   const g = new RegExp(re.source, re.flags.replace('g', '') + 'g');
   let ranges: Array<[number, number]> | null = null;
   let inert = 0;
@@ -1202,7 +1210,7 @@ function fallbackExecutedMatch(re: RegExp, text: string, accept?: (end: number) 
     g.lastIndex = from;
     const m = text.matchAll(g).next().value;   // matchAll starts at lastIndex
     if (!m) return false;
-    ranges ??= fallbackDataQuoteRanges(text);
+    ranges ??= fallbackDataQuoteRanges(text, envPrefix);
     const start = m.index ?? 0;
     const end = start + m[0].length;
     if (!ranges.some(([a, b]) => start >= a && end <= b) && (!accept || accept(end))) return true;
@@ -1256,7 +1264,8 @@ function fallbackDangerousMatch(args: Record<string, unknown> | undefined, toolN
   for (const { re, signal, lockPath, dataQuotes, postureTail, inertComments } of FALLBACK_DANGEROUS_PATTERNS) {
     if (lockReadOnly && lockPath === true) continue;
     if (postureTail === true ? fallbackPostureMatch(re, text)
-      : dataQuotes === true ? fallbackExecutedMatch(re, inertComments === true ? fallbackBlankComments(text) : text)
+      : dataQuotes === true ? fallbackExecutedMatch(re, inertComments === true ? fallbackBlankComments(text) : text,
+        undefined, FALLBACK_ENV_DATA_QUOTE_SIGNALS.includes(signal))
       : re.test(text)) return signal;
   }
   return null;
