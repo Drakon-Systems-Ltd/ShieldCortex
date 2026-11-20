@@ -114,6 +114,7 @@ import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
 import { isRepairLogName } from '../logs/retention.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
+import { realtimePluginInstallCommand } from '../setup/openclaw-plugin-spec.js';
 import {
   CLAUDE_CODE_ENFORCEMENT_FLOOR,
   detectClaudeCode,
@@ -201,6 +202,11 @@ export const VACUUM_FREE_SHARE = 0.2;
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
+
+/** The command that installs the realtime plugin this CLI expects, from npm, pinned. */
+function cliRealtimeInstallCommand(): string {
+  return realtimePluginInstallCommand(pkg.version);
+}
 
 // ANSI colour codes
 const bold = '\x1b[1m';
@@ -3082,7 +3088,7 @@ export async function checkOpenClawPluginPackage(
           `plugin. This is the stale state behind the gateway crash-loop incident.`,
         fix:
           `Remove ${barePkgDir.replace(os.homedir(), '~')} then reinstall the supported plugin: ` +
-          `\`openclaw plugins install @drakon-systems/shieldcortex-realtime\``,
+          `\`${cliRealtimeInstallCommand()}\``,
         needsOpenClawCli: {
           subcommand: 'plugins',
           fallbackFix:
@@ -4837,6 +4843,36 @@ function pluginPlaneDisarmed(live: ReturnType<typeof readOpenClawPluginGuardLive
   );
 }
 
+/**
+ * #651 item 2: positive proof that no Action Guard plane is live on this host.
+ * Only then may a row whose own guidance is "no action, this is not
+ * unprotected" read as INFO. Every input must be a CONFIRMED reading:
+ *  - the signed config is read, its integrity verdict is `valid`, `absent` or
+ *    an unsigned file the runtime will adopt (an unreadable, malformed,
+ *    tampered or non-adoptable file is unknown, not off), and it says
+ *    disabled;
+ *  - the OpenClaw plugin roster is readable AND names a disarmed plugin plane
+ *    (an unreadable roster or a plugin that enables the guard is not off);
+ *  - no Claude Code hook is enforcing.
+ * Anything else keeps the pre-#651 WARN. Read-only; changes no posture.
+ */
+export function guardProvenOffEverywhere(
+  core: ReturnType<typeof inspectActionGuardCoreConfig>,
+  integrity: Pick<ReturnType<typeof inspectConfigIntegrity>, 'verdict' | 'adoption'>,
+  pluginLive: ReturnType<typeof readOpenClawPluginGuardLive>,
+  planes: HostGatePlanes,
+): boolean {
+  if (core === 'unknown' || core.enabled) return false;
+  const verdict = integrity.verdict;
+  const signedRead =
+    verdict === 'valid' ||
+    verdict === 'absent' ||
+    verdict === 'unsigned';
+  if (!signedRead) return false;
+  if (!pluginLive.readable || !pluginPlaneDisarmed(pluginLive)) return false;
+  return !claudePlaneEnforcing(planes);
+}
+
 function openclawGatePosture(live: ReturnType<typeof readOpenClawPluginGuardLive>): OpenClawGatePosture {
   if (!live.readable) return 'unknown';
   if (live.pluginEnabled === false) return 'off';
@@ -5183,7 +5219,12 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
         // the fix is the sink, not the off switch. Warn-mode and disabled
         // hosts stay WARN: under-configured, not enforcing. Plugin-off stays
         // WARN (Jarvis 5.0.6: leftover signed Enforce is not a live gate).
-        const status: CheckResult['status'] = armed ? 'fail' : 'warn';
+        // #651 item 2: with every plane CONFIRMED off the row's own fix is
+        // "do not add a webhook, do not enable Guard": nothing to do, so INFO.
+        // Unproven states keep the WARN.
+        const provenOff = !armed && !effective.enabled
+          && guardProvenOffEverywhere(inspectActionGuardCoreConfig(), integrity, pluginLive, planes);
+        const status: CheckResult['status'] = armed ? 'fail' : provenOff ? 'info' : 'warn';
         const prefix = signedUnknown
           ? `Action Guard's signed posture is unknown (${describeAdoptionBlock(integrity.adoption ?? 'unknown')}; ` +
             'see the config integrity row), and whatever it resolves to, it would run with'
@@ -5231,12 +5272,16 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
                 : `actionGuard.notify.webhookUrl unset${notifyOn ? '' : ', notify.enabled is not true'}`) +
               `) — unattended denials stay in the audit log and session-guard index only. ` +
               `The #242 cron incidents were this shape.`) + plainArmed,
-          fix: armed
-            ? webhookFix
-            : signedUnknown
-              ? 'The signed Action Guard posture is unknown until config.json can be adopted: resolve the config ' +
-                'integrity row first. Do not enable Action Guard from this line.'
-              : pluginOffFix,
+          ...(provenOff
+            ? {}
+            : {
+                fix: armed
+                  ? webhookFix
+                  : signedUnknown
+                    ? 'The signed Action Guard posture is unknown until config.json can be adopted: resolve the config ' +
+                      'integrity row first. Do not enable Action Guard from this line.'
+                    : pluginOffFix,
+              }),
           // #878: armed is false whenever signedUnknown, so this row's fix is
           // the unknown one above; the report must print it, not a
           // "Guard is off" step matched from the notify wording.
@@ -5384,9 +5429,15 @@ export function policyLockRows(): CheckResult[] {
       // well as a real "off", and signed-off does not prove the OpenClaw plane
       // is off (its plugin config can enable the guard). Neither is confirmed
       // absence, so the WARN stays until a reader can prove both.
+      // #651 item 2: INFO only on positive proof that no plane is live (see
+      // guardProvenOffEverywhere). The unreadable / corrupt / plugin-enabled /
+      // roster-unreadable shapes the r2 note above names all fail that proof
+      // and keep this WARN.
+      const provenOff = !liveGating && !signedUnknown
+        && guardProvenOffEverywhere(core, integrity, pluginLive, planes);
       rows.push({
         label: `${label} policy lock`,
-        status: liveGating ? 'fail' : 'warn',
+        status: liveGating ? 'fail' : provenOff ? 'info' : 'warn',
         message:
           `${summary.headline}${liveGating
             ? (claudePlaneEnforcing(planes) && pluginOff
@@ -5394,13 +5445,19 @@ export function policyLockRows(): CheckResult[] {
               : ' — Action Guard is live, but a one-line edit to config.json switches it off and nothing would notice')
             : signedUnknown
               ? ' — the signed Action Guard posture is unknown (see the config integrity row), so doctor does not call it off.'
-              : ' — Guard is off on this host. A lock is optional. This is not unprotected.'}`,
-        fix: liveGating
-          ? `${PROTECT_HINT} to pin the security-critical keys to a root-owned file this user cannot write.`
-          : signedUnknown
-            // #878: unknown is not off — do not say "while Guard is off".
-            ? 'Do not run protect from this warning. A root lock is optional; resolve the config integrity row first. Do not uninstall.'
-            : 'Do not run protect from this warning. A root lock is optional while Guard is off. Do not uninstall.',
+              : provenOff
+                ? ' — Guard is off on this host (signed config reads off, the OpenClaw plugin plane is disarmed, no Claude Code hook is enforcing). A lock is optional. This is not unprotected.'
+                : ' — Guard is off on this host. A lock is optional. This is not unprotected.'}`,
+        ...(provenOff
+          ? {}
+          : {
+              fix: liveGating
+                ? `${PROTECT_HINT} to pin the security-critical keys to a root-owned file this user cannot write.`
+                : signedUnknown
+                  // #878: unknown is not off — do not say "while Guard is off".
+                  ? 'Do not run protect from this warning. A root lock is optional; resolve the config integrity row first. Do not uninstall.'
+                  : 'Do not run protect from this warning. A root lock is optional while Guard is off. Do not uninstall.',
+            }),
         ...(!liveGating && signedUnknown ? { postureUnknown: true as const } : {}),
       });
       break;
@@ -8719,7 +8776,7 @@ export async function checkOpenClawPluginVersion(
       label,
       status: 'warn',
       message: `realtime plugin v${installed} installed, v${expectedVersion} available`,
-      fix: 'Run `openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest` (reliable past a pinned spec), then restart the gateway',
+      fix: `Run \`${realtimePluginInstallCommand(expectedVersion)}\`, then restart the gateway`,
       needsOpenClawCli: { subcommand: 'plugins' },
     };
   }
@@ -8929,7 +8986,7 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         status: 'fail',
         message:
           'openclaw.json ENABLES the realtime plugin but no package is installed on this host — the gateway boots with NO memory firewall and NO action guard while config reports it ON',
-        fix: 'Install the plugin: `openclaw plugins install @drakon-systems/shieldcortex-realtime@latest`, then restart the gateway (or run `shieldcortex repair`, which will do both).',
+        fix: `Install the plugin: \`${realtimePluginInstallCommand(verdict.expectedVersion)}\`, then restart the gateway (or run \`shieldcortex repair\`, which will do both).`,
         // Highest-severity unactionable site: BOTH offered routes spawn the
         // refused subcommand, and the message says the gateway boots with no
         // memory firewall and no action guard.
@@ -9477,7 +9534,7 @@ export async function checkPluginStartupIntent(home: string = os.homedir()): Pro
       `(activation.onStartup=${intent.onStartup}, hook capability=${intent.hookCapability}) — ` +
       `this is the aiquant silent-skip`,
     fix:
-      'Reinstall the current plugin so the on-disk manifest has `activation.onStartup: true` and `onCapabilities: ["hook"]`: `shieldcortex repair` or `openclaw plugins install @drakon-systems/shieldcortex-realtime`.',
+      'Reinstall the current plugin so the on-disk manifest has `activation.onStartup: true` and `onCapabilities: ["hook"]`: `shieldcortex repair` or `' + cliRealtimeInstallCommand() + '`.',
   };
 }
 

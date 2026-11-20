@@ -56,7 +56,7 @@ ShieldCortex updated to 5.9.0 - 1 thing to check
   [!]   OpenClaw       plugin 5.7.0 is behind ShieldCortex 5.9.0
                        OpenClaw doesn't have this update's fixes yet.
                        Fix: openclaw plugins install --force
-                         @drakon-systems/shieldcortex-realtime@latest
+                         npm:@drakon-systems/shieldcortex-realtime@5.9.0
   [ok]  Skill          updated
   [off] Guard          off (the default)
 
@@ -67,12 +67,12 @@ ShieldCortex updated to 5.9.0 - 2 things to check
   [!]   OpenClaw       plugin 5.7.0 is behind ShieldCortex 5.9.0
                        OpenClaw doesn't have this update's fixes yet.
                        Fix: openclaw plugins install --force
-                         @drakon-systems/shieldcortex-realtime@latest
+                         npm:@drakon-systems/shieldcortex-realtime@5.9.0
   [ok]  Skill          updated
   [!]   Guard          on, but OpenClaw's plugin is out of date
                        Guard needs the plugin from this update.
                        Fix: openclaw plugins install --force
-                         @drakon-systems/shieldcortex-realtime@latest
+                         npm:@drakon-systems/shieldcortex-realtime@5.9.0
 
 Update failed - 2 problems to fix
 
@@ -209,7 +209,7 @@ exports[`update summary: five scenarios f: plugin behind, Guard off (snapshot) 1
   ! OpenClaw       plugin 5.7.0 is behind ShieldCortex 5.9.0
                    OpenClaw doesn't have this update's fixes yet.
                    Fix: openclaw plugins install --force
-                     @drakon-systems/shieldcortex-realtime@latest
+                     npm:@drakon-systems/shieldcortex-realtime@5.9.0
   ✓ Skill          updated
   ○ Guard          off (the default)"
 `;
@@ -222,12 +222,12 @@ exports[`update summary: five scenarios f: plugin behind, Guard on (snapshot) 1`
   ! OpenClaw       plugin 5.7.0 is behind ShieldCortex 5.9.0
                    OpenClaw doesn't have this update's fixes yet.
                    Fix: openclaw plugins install --force
-                     @drakon-systems/shieldcortex-realtime@latest
+                     npm:@drakon-systems/shieldcortex-realtime@5.9.0
   ✓ Skill          updated
   ! Guard          on, but OpenClaw's plugin is out of date
                    Guard needs the plugin from this update.
                    Fix: openclaw plugins install --force
-                     @drakon-systems/shieldcortex-realtime@latest"
+                     npm:@drakon-systems/shieldcortex-realtime@5.9.0"
 `;
 
 exports[`update summary: five scenarios g: gateway without plugin, plugin step warned, Guard off (snapshot) 1`] = `

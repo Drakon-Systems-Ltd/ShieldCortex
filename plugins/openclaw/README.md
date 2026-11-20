@@ -53,8 +53,10 @@ If `shieldcortex` is not on `PATH`, set `binaryPath` in the plugin config.
 ### 2. Install the plugin
 
 ```bash
-openclaw plugins install @drakon-systems/shieldcortex-realtime
+openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@latest
 ```
+
+`npm:` makes OpenClaw 2026.11.5 and later install from npm (an unprefixed spec now resolves on ClawHub, which has an old copy). `--force` is what OpenClaw 2026.7 and later need to accept an npm install without a terminal; it also replaces an existing install.
 
 If you also want the companion session hook, install it from the main package:
 

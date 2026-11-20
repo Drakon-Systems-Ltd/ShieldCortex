@@ -681,14 +681,17 @@ describe('doctor — NOTIFY fail tracks the live OpenClaw plane, not leftover si
     expect(notify!.status).toBe('fail');
   });
 
-  it('WARNs (no webhook, no --action-guard-enable) when plugin-off AND signed Guard is also off', async () => {
+  it('INFO (no webhook, no --action-guard-enable) when plugin-off AND signed Guard is also off — #651 item 2', async () => {
+    // Positive proof of "nothing is live": signed config read and off, plugin
+    // roster read and disarmed, no Claude hook. The row's own guidance was
+    // "do not add a webhook, do not enable Guard", i.e. nothing to do.
     writeConfig({ actionGuard: { enabled: false, notify: { enabled: true } } });
     writePluginConfig({ actionGuard: { enabled: false } });
     const results = await checkActionGuard();
     const notify = results.find((r) => /notify/i.test(r.label));
-    expect(notify!.status).toBe('warn');
-    expect(notify!.fix ?? '').not.toMatch(/--action-guard-notify-webhook/);
-    expect(notify!.fix ?? '').toMatch(/do not add a webhook/i);
+    expect(notify!.status).toBe('info');
+    expect(notify!.fix).toBeUndefined();
+    expect(notify!.message).not.toMatch(/--action-guard-notify-webhook/);
     const config = results.find((r) => r.label === 'Action guard posture');
     expect(config?.fix ?? '').not.toMatch(/--action-guard-enable/);
     expect(config?.fix ?? '').toMatch(/do not enable Action Guard/i);
@@ -791,6 +794,77 @@ describe('doctor — NOTIFY fail tracks the live OpenClaw plane, not leftover si
     expect(lock.message).toMatch(/Claude Code hook/i);
     expect(lock.message).not.toMatch(/Guard is off on this host/i);
     expect(lock.fix ?? '').toMatch(/protect/i);
+  });
+
+  // #651 item 2 — WARN rows whose own guidance is "no action" read INFO only
+  // on positive proof that no Guard plane is live. Each negative control
+  // removes one leg of that proof and must keep the WARN.
+  describe('#651 item 2 — proven-off rows are INFO, unproven rows stay WARN', () => {
+    const notifyRow = async () => (await checkActionGuard()).find((r) => /notify/i.test(r.label));
+    const lockRow = () => policyLockRows().find((r) => r.label.includes('policy lock'))!;
+
+    it('policy lock row moves to INFO with its evidence, no fix, and --strict exits 0', () => {
+      writeConfig({ actionGuard: { enabled: false } });
+      writePluginConfig({ actionGuard: { enabled: false } });
+      const lock = lockRow();
+      expect(lock.status).toBe('info');
+      expect(lock.fix).toBeUndefined();
+      expect(lock.message).toMatch(/signed config reads off/);
+      expect(lock.message).toMatch(/not unprotected/i);
+      expect(doctorExitCode([lock], { strict: true })).toBe(0);
+    });
+
+    it('notify row moves to INFO with no fix, and --strict exits 0', async () => {
+      writeConfig({ actionGuard: { enabled: false } });
+      writePluginConfig({ actionGuard: { enabled: false } });
+      const notify = (await notifyRow())!;
+      expect(notify.status).toBe('info');
+      expect(notify.fix).toBeUndefined();
+      expect(doctorExitCode([notify], { strict: true })).toBe(0);
+    });
+
+    const unproven: Array<[string, () => void]> = [
+      ['no OpenClaw roster at all (plane unproven)', () => writeConfig({ actionGuard: { enabled: false } })],
+      ['an unreadable OpenClaw roster', () => {
+        writeConfig({ actionGuard: { enabled: false } });
+        fs.mkdirSync(path.join(isolated, '.openclaw'), { recursive: true });
+        fs.writeFileSync(path.join(isolated, '.openclaw', 'openclaw.json'), '{not-json');
+      }],
+      ['a plugin entry with no Guard keys (not shown disarmed)', () => {
+        writeConfig({ actionGuard: { enabled: false } });
+        writePluginConfig({});
+      }],
+      ['a plugin config that enables the guard while signed config is off', () => {
+        writeConfig({ actionGuard: { enabled: false } });
+        writePluginConfig({ interceptor: { enabled: true }, actionGuard: { enabled: true, enforce: true } });
+      }],
+      ['a malformed signed config (unknown, not off)', () => {
+        fs.mkdirSync(path.dirname(configPath()), { recursive: true });
+        fs.writeFileSync(configPath(), '{not-json');
+        clearCloudConfigCache();
+        writePluginConfig({ actionGuard: { enabled: false } });
+      }],
+      ['signed config enabled (leftover Enforce is a mismatch, not "off")', () => {
+        writeConfig({ actionGuard: { enabled: true, enforce: true } });
+        writePluginConfig({ actionGuard: { enabled: false, enforce: false } });
+      }],
+    ];
+
+    it.each(unproven)('policy lock stays WARN with %s', (_name, arrange) => {
+      arrange();
+      const lock = lockRow();
+      expect(lock.status).toBe('warn');
+      expect(lock.fix ?? '').toMatch(/Do not run protect/i);
+      expect(doctorExitCode([lock], { strict: true })).toBe(1);
+    });
+
+    it.each(unproven)('notify row is never INFO with %s', async (_name, arrange) => {
+      arrange();
+      // The row may be absent entirely (a config that cannot be read); it is
+      // never an INFO "no action" row.
+      const notify = await notifyRow();
+      expect(notify?.status).not.toBe('info');
+    });
   });
 
   it('#536 leftover signed Enforce + plugin-off stays WARN when Claude is unwired', async () => {

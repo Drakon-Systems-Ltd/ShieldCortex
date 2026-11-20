@@ -3476,11 +3476,130 @@ const PY_DOC_READBACK_RE = new RegExp([
   String.raw`\/proc\/|\.pyw?\b`,
 ].join('|'));
 
-/** Every top-level module the code imports is in `PY_DOC_SAFE_IMPORTS`. */
+/**
+ * #1079 follow-up: the readback gate judges the names PYTHON reads, not the
+ * bytes on disk. Python folds every identifier to NFKC (PEP 3131), so
+ * `_<U+FF3F>doc<U+FF3F>_` IS `__doc__` (six compatibility low lines fold to
+ * `_`), a fullwidth or mathematical-bold `globals` IS the builtin, and
+ * `from <fullwidth inspect> import getdoc` imports `inspect`. The patterns
+ * above are ASCII, so they run on folded text, never on the raw source:
+ *
+ * - NFKC is exactly Python's fold. It also makes a mixed spelling of an allowed
+ *   dunder (`__name<U+FF3F>_`) the ASCII one, so it is judged as `__name__` is.
+ * - NFKD is the same fold without composition. NFKC can compose a combining
+ *   mark onto the ASCII letter before it (`getattr` + U+0301 is `getattŕ`);
+ *   Python composes the same way, so that is another name, but the gate does
+ *   not lean on it. NFKD never removes or moves an ASCII character, so every
+ *   ASCII spelling the source holds is still there to match.
+ *
+ * Both views must pass. ASCII text is its own NFKC and NFKD.
+ *
+ * `null` (refuse the blanking) when the code holds more than 30 code points in
+ * a row that can sit in one run of combining marks once decomposed
+ * (`PY_DOC_MARK_RUN_RE`). Normalization reorders each such run by combining
+ * class, and on an adversarial run (U+0315 x n, then U+0300 x n, inside an
+ * ordinary string literal) that costs time quadratic in the run: 32 s for one
+ * 256 KiB script. The test is a single linear pass made before any
+ * normalization. Past the bound nothing is normalized and the docstrings keep
+ * their scan surface, which is what any doubt costs here. 30 is the longest
+ * run UAX #15's Stream-Safe Text Format allows. Under it, a run in the
+ * decomposed text is at most 63 marks long (3 trailing the code point before
+ * the run, 2 from each of the 30 in it; a code point that decomposes to a
+ * starter never begins with a mark), so the reordering is linear in the
+ * length of the source.
+ */
+function pyDocGateViews(code: string): string[] | null {
+  if (/^[\x00-\x7f]*$/.test(code)) return [code];
+  if (PY_DOC_MARK_RUN_RE.test(code)) return null;
+  return [code.normalize('NFKC'), code.normalize('NFKD')];
+}
+
+/**
+ * 31 code points in a row each of which NFKD turns into combining marks only:
+ * every mark (`\p{M}`, which holds every code point of nonzero combining
+ * class) and the two halfwidth katakana sound marks, U+FF9E and U+FF9F, whose
+ * compatibility forms are the combining U+3099 and U+309A. No other code point
+ * decomposes to marks only (every one is swept against this runtime's own
+ * normalizer in docstring-blank-nfkc-1079.test.ts). Every other code point
+ * contains a starter once decomposed, and a starter ends the run. Matching
+ * costs at most 31 steps per code point, so it is linear.
+ */
+const PY_DOC_MARK_RUN_RE = /[\p{M}\uFF9E\uFF9F]{31}/u;
+
+/**
+ * A PEP 263 coding declaration makes Python decode the file with another codec
+ * while the resolver hands the guard UTF-8: under utf-7 `+AF8AXw-` is `__`,
+ * under latin-1 byte 0xAA is `ª` (NFKC `a`) where the guard sees U+FFFD. No
+ * view of the UTF-8 text is then the program, so a declaration naming a codec
+ * that does not read the file as UTF-8 refuses the blanking.
+ *
+ * A declaration is what CPython's tokenizer takes for one, not the word
+ * `coding` anywhere (a docstring's "encoding: json" is prose, and Python reads
+ * that file as UTF-8):
+ *
+ * - a comment that is the only thing on its line, holding `coding:` or
+ *   `coding=` and then a name (`PY_CODING_COOKIE_RE`, the PEP's own pattern);
+ * - on physical line 1, or on line 2 when line 1 is blank or only a comment,
+ *   after a leading BOM. The first declaration found is the one Python uses.
+ *
+ * Physical lines are the ones Python runs the file by. compile() of the
+ * bytes, `python3 file.py` and `python3 - <file.py` all split at `\r\n`, `\r`
+ * and `\n` alike before looking for a declaration, so a cookie on line 3 is a
+ * comment however lines 1 and 2 end (`#!x\r\r# coding: latin-1` runs as
+ * UTF-8). `tokenize.detect_encoding` splits at `\n` only and would take that
+ * cookie for line 1's, but no way of running the file uses it: it decodes
+ * source for display (`inspect`, `linecache`, `tokenize.open`), and each of
+ * those names already refuses the blanking (`PY_DOC_READBACK_RE`). A BOM with
+ * a declaration other than utf-8 is a SyntaxError, so that file never runs.
+ */
+function pyDeclaresForeignEncoding(src: string): boolean {
+  const text = src.charCodeAt(0) === 0xfeff ? src.slice(1) : src;
+  for (const line of text.split(/\r\n|\r|\n/, 2)) {
+    const m = line.match(PY_CODING_COOKIE_RE);
+    if (m) return !pyCodecReadsUtf8(m[1]);
+    if (!/^[ \t\f]*(?:#|$)/.test(line)) break;   // code on line 1: line 2 is never read
+  }
+  return false;
+}
+
+/** PEP 263, inside one physical line; Python's `.` crosses U+2028/U+2029, which `[^\r\n]` does too. */
+const PY_CODING_COOKIE_RE = /^[ \t\f]*#[^\r\n]*?coding[:=][ \t]*([-\w.]+)/;
+
+/**
+ * Codec names that make Python read the file as UTF-8 does: the tokenizer's
+ * own spelling (the first 12 characters lowercased with `_` as `-`, equal to
+ * `utf-8` or starting `utf-8-`, so `UTF_8`, `utf-8-unix` and `utf-8-sig`),
+ * then `codecs.lookup`, whose aliases for `utf_8` and `ascii` are listed
+ * below (Python 3.9 to 3.14 agree). An ASCII file reads the same under both,
+ * and ASCII rejects any other byte. Latin-1, UTF-7, UTF-16 and every other
+ * codec are foreign.
+ */
+function pyCodecReadsUtf8(name: string): boolean {
+  const head = name.slice(0, 12).toLowerCase().replace(/_/g, '-');
+  if (head === 'utf-8' || head.startsWith('utf-8-')) return true;
+  // codecs.lookup: lowercase, each run of `-`/`_` one `_`, none at either end.
+  const norm = name.toLowerCase().replace(/[-_]+/g, '_').replace(/^_|_$/g, '');
+  return PY_UTF8_CODEC_MODULES.has(norm) || PY_UTF8_CODEC_ALIASES.has(norm) || PY_UTF8_CODEC_ALIASES.has(norm.replace(/\./g, '_'));
+}
+const PY_UTF8_CODEC_MODULES = new Set(['utf_8', 'ascii']);
+const PY_UTF8_CODEC_ALIASES = new Set([
+  'u8', 'utf', 'utf8', 'utf8_ucs2', 'utf8_ucs4', 'cp65001',
+  '646', 'ansi_x3.4_1968', 'ansi_x3.4_1986', 'ansi_x3_4_1968', 'cp367', 'csascii', 'ibm367',
+  'iso646_us', 'iso_646.irv_1991', 'iso_ir_6', 'us', 'us_ascii',
+]);
+
+/**
+ * Every top-level module the code imports is in `PY_DOC_SAFE_IMPORTS`.
+ * `code` is logical lines (`pyLogicalLines`), so a statement ends at `;` or
+ * at a line break that no code backslash joins, `\r` included (review r3 of
+ * #1093): ending it at `\n` only read a CR-only file's first import as
+ * running to the end of the file, so `import os\rimport click` checked `os`
+ * alone once a CR-ended docstring could be blanked.
+ */
 function pyImportsAreDocSafe(code: string): boolean {
-  const FROM_RE = /\bfrom[ \t]+([\w.]+)[ \t]+import\b(?:[ \t]*\([^)]*\)|[^\n;]*)/g;
+  const FROM_RE = /\bfrom[ \t]+([\w.]+)[ \t]+import\b(?:[ \t]*\([^)]*\)|[^\r\n;]*)/g;
   for (const m of code.matchAll(FROM_RE)) if (!PY_DOC_SAFE_IMPORTS.has(m[1].split('.')[0])) return false;
-  for (const m of code.replace(FROM_RE, ' ').matchAll(/\bimport\b([^\n;]*)/g)) {
+  for (const m of code.replace(FROM_RE, ' ').matchAll(/\bimport\b([^\r\n;]*)/g)) {
     for (const part of m[1].split(',')) {
       const name = part.trim().split(/\s+/)[0] ?? '';
       if (!PY_DOC_SAFE_IMPORTS.has(name.split('.')[0])) return false;
@@ -3490,11 +3609,72 @@ function pyImportsAreDocSafe(code: string): boolean {
 }
 
 /**
+ * The gate's text as Python's logical lines (review r4 of #1093). `gaps` is
+ * what `pythonStandaloneDocstrings` read as a token gap in code, in order:
+ * each `\` that is an explicit line join, and each form feed. Python deletes
+ * a join's backslash and the break after it (`\r\n`, `\r`, `\n`) and reads
+ * one statement, and no token spans the join, so it separates tokens as a
+ * space does; a form feed between tokens is whitespace too. Each becomes one
+ * space here, so that the import and from scans and the readback terms that
+ * allow only spaces and tabs between tokens (`help (`, `.stdout =`) read the
+ * statement Python runs: read by physical line, `import os \<break>as os,
+ * click` checked `os` alone and `help \<break>(main)` was no call, while the
+ * same-line spellings are held.
+ *
+ * Only those offsets change (review r4 of #1096). A backslash in a comment
+ * is comment text, and the comment still ends at the break; in a string it
+ * is part of the literal. Joined anyway, `import os # \` then `import click`
+ * read as one import of `os`, and `# help \` then `(42))` as a call. A form
+ * feed in a comment or a string separates no tokens either: rewritten,
+ * `# from<FF>os<FF>import (` read as a from-import whose parenthesised list
+ * swallowed the next line's `import click`. That includes an f- or t-string's
+ * format spec, the text after the `:` that ends a replacement field's
+ * expression (review r5 of #1096): Python hands `from<FF>os<FF>import (` in
+ * `f"{when:from<FF>os<FF>import (}"` to `format()` as it stands. Every other
+ * byte is left as Python reads it, so mid-line comments keep their scan
+ * surface (#532).
+ *
+ * It runs before NFKC (`pyDocGateViews`), so only U+005C joins. NFKC also
+ * turns a fullwidth or small reverse solidus into `\`, but Python rejects
+ * those outside a string. A space is a starter, so it never lengthens a run
+ * of combining marks. One forward splice: linear.
+ */
+function pyLogicalLines(code: string, gaps: readonly number[]): string {
+  if (gaps.length === 0) return code;
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const at of gaps) {
+    parts.push(code.slice(cursor, at), ' ');
+    cursor = at + 1 + (code[at] === '\\' ? pyLineBreakLength(code, at + 1) : 0);
+  }
+  parts.push(code.slice(cursor));
+  return parts.join('');
+}
+
+/** An f-string field past its expression: in its format spec (`pythonStandaloneDocstrings`). */
+const FORMAT_SPEC = -1;
+
+/**
  * `[start, end)` of each triple-quoted literal that is a whole logical line by
  * itself (see `blankPythonDocstrings`); `null` when the walk is not certain it
  * reads the source as Python would.
+ *
+ * Lines are Python's physical lines, the ones `pyDeclaresForeignEncoding`
+ * reads (review r3 of #1093): Python reads the whole file with universal
+ * newlines, so `\r\n`, `\r` and `\n` each end a line, a comment and a
+ * standalone docstring, and `\` before any of them is one continuation. A
+ * walk that ended lines at `\n` only held a CR-ended helper its LF spelling
+ * relieves; Python runs both alike.
+ *
+ * `gaps` receives, in order, the offset of each token gap the walk reads as
+ * code (`pyLogicalLines`): a `\` that joins two physical lines, and a form
+ * feed between tokens or in the expression of an f- or t-string's
+ * replacement field. Never one in a comment or a string literal, and never
+ * one in a format spec: a `:` outside any bracket of the expression (`:=`
+ * included, which Python reads as a spec starting `=`) begins literal text,
+ * where only a nested `{…}` is code again and `}` ends the field.
  */
-function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null {
+function pythonStandaloneDocstrings(src: string, gaps: number[]): Array<[number, number]> | null {
   const found: Array<[number, number]> = [];
   const n = src.length;
   let depth = 0;
@@ -3502,13 +3682,14 @@ function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null
   let i = 0;
   while (i < n) {
     const c = src[i];
-    if (c === '\n') { if (depth === 0) lineStart = true; i++; continue; }
-    if (c === ' ' || c === '\t' || c === '\r' || c === '\f') { i++; continue; }
-    if (c === '#') { while (i < n && src[i] !== '\n') i++; continue; }
+    if (c === '\n' || c === '\r') { if (depth === 0) lineStart = true; i++; continue; }
+    if (c === ' ' || c === '\t' || c === '\f') { if (c === '\f') gaps.push(i); i++; continue; }
+    if (c === '#') { while (i < n && src[i] !== '\n' && src[i] !== '\r') i++; continue; }
     if (c === '\\') {
-      const skip = src[i + 1] === '\n' ? 2 : src[i + 1] === '\r' && src[i + 2] === '\n' ? 3 : 0;
+      const skip = pyLineBreakLength(src, i + 1);
       if (!skip) return null;
-      i += skip; lineStart = false; continue;
+      gaps.push(i);
+      i += 1 + skip; continue;    // joins two physical lines: neither starts nor ends a logical one
     }
     if (c === '(' || c === '[' || c === '{') { depth++; lineStart = false; i++; continue; }
     if (c === ')' || c === ']' || c === '}') { if (--depth < 0) return null; lineStart = false; i++; continue; }
@@ -3522,20 +3703,33 @@ function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null
     const delim = triple ? q + q + q : q;
     const fmt = /[ft]/.test(prefix);
     let k = j + delim.length;
-    let field = 0;
+    // The open replacement fields, innermost last: how many brackets are open
+    // in the field's expression, or FORMAT_SPEC once its spec has begun.
+    const fields: number[] = [];
     let close = -1;
     while (k < n) {
       const ch = src[k];
-      if (fmt && field > 0) {
+      if (fmt && fields.length > 0) {
         if (ch === '"' || ch === "'" || ch === '\\' || ch === '#') return null;
-        if (ch === '{') field++;
-        else if (ch === '}') field--;
+        const top = fields.length - 1;
+        const open = fields[top];
+        if (open === FORMAT_SPEC) {         // literal text: only a nested field is code
+          if (ch === '{') fields.push(0);
+          else if (ch === '}') fields.pop();
+        } else if (ch === '\f') gaps.push(k);   // the expression is code
+        else if (ch === ':' && open === 0) fields[top] = FORMAT_SPEC;   // `:=` too, as in Python
+        else if (ch === '(' || ch === '[' || ch === '{') fields[top] = open + 1;
+        else if (ch === ')' || ch === ']' || ch === '}') {
+          if (open > 0) fields[top] = open - 1;
+          else if (ch === '}') fields.pop();
+          else return null;
+        }
         k++;
         continue;
       }
-      if (ch === '\\') { k += 2; continue; }
-      if (!triple && ch === '\n') return null;
-      if (fmt && ch === '{') { if (src[k + 1] === '{') { k += 2; continue; } field = 1; k++; continue; }
+      if (ch === '\\') { k += 1 + (pyLineBreakLength(src, k + 1) || 1); continue; }
+      if (!triple && (ch === '\n' || ch === '\r')) return null;
+      if (fmt && ch === '{') { if (src[k + 1] === '{') { k += 2; continue; } fields.push(0); k++; continue; }
       if (src.startsWith(delim, k)) { close = k; break; }
       k++;
     }
@@ -3543,8 +3737,8 @@ function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null
     const end = close + delim.length;
     if (triple && lineStart && depth === 0 && (prefix === '' || prefix === 'r' || prefix === 'u')) {
       let e = end;
-      while (e < n && (src[e] === ' ' || src[e] === '\t' || src[e] === '\r')) e++;
-      if (e >= n || src[e] === '\n') found.push([i, end]);
+      while (e < n && (src[e] === ' ' || src[e] === '\t')) e++;
+      if (e >= n || pyLineBreakLength(src, e)) found.push([i, end]);
     }
     lineStart = false;
     i = end;
@@ -3552,16 +3746,36 @@ function pythonStandaloneDocstrings(src: string): Array<[number, number]> | null
   return depth === 0 ? found : null;
 }
 
-function blankPythonDocstrings(src: string, lang: ScriptLang): string {
+/** Length of the Python line break at `at` (`\r\n` is 2; `\r`, `\n` are 1), else 0. */
+function pyLineBreakLength(src: string, at: number): number {
+  if (src[at] === '\n') return 1;
+  if (src[at] !== '\r') return 0;
+  return src[at + 1] === '\n' ? 2 : 1;
+}
+
+/**
+ * @param src the source with its comments already blanked (#532).
+ * @param asRead the file exactly as the resolver returned it. A coding
+ *   declaration is a comment, so `src` no longer holds one, and the IFS
+ *   rewrite (`deobfuscateIfs`) can swallow a line break, and with it a
+ *   declaration on line 2. Python decodes these bytes.
+ */
+function blankPythonDocstrings(src: string, lang: ScriptLang, asRead: string): string {
   if (lang !== 'python' || !src || !(src.includes('"""') || src.includes("'''"))) return src;
-  const docs = pythonStandaloneDocstrings(src);
+  if (pyDeclaresForeignEncoding(asRead)) return src;
+  const gaps: number[] = [];
+  const docs = pythonStandaloneDocstrings(src, gaps);
   if (!docs || docs.length === 0) return src;
   let code = '';
   let cursor = 0;
   for (const [lo, hi] of docs) { code += src.slice(cursor, lo) + blankedRun(src, lo, hi); cursor = hi; }
   code += src.slice(cursor);
-  const gated = code.replace(PY_DOC_ALLOWED_DUNDER_RE, ' ');
-  if (PY_DOC_READBACK_RE.test(gated) || !pyImportsAreDocSafe(gated)) return src;
+  const views = pyDocGateViews(pyLogicalLines(code, gaps));   // `code` keeps `src`'s offsets
+  if (!views) return src;
+  for (const view of views) {
+    const gated = view.replace(PY_DOC_ALLOWED_DUNDER_RE, ' ');
+    if (PY_DOC_READBACK_RE.test(gated) || !pyImportsAreDocSafe(gated)) return src;
+  }
   // Egress evidence is not the floor: a docstring naming a network
   // destination keeps contributing it exactly as before #1077 (the #920
   // secret-egress fixtures rely on it). Only guard-path prose is relieved.
@@ -6492,7 +6706,7 @@ function foldScriptSources(
       ? expandFileSubstitutions(plainSrc, resolveScriptSource, subst, 1)
       : plainSrc;
     const reviewedScan = next.lang !== 'sh'
-      ? blankPythonDocstrings(blankInterpreterComments(plainSrc, next.lang), next.lang)
+      ? blankPythonDocstrings(blankInterpreterComments(plainSrc, next.lang), next.lang, src)
       : expandedSrc === plainSrc
         ? commandScanText(plainSrc)
         : `${commandScanText(plainSrc)}\n${commandScanText(expandedSrc)}`;

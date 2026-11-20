@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { stepOpenClawPlugin } from '../update.js';
+import { answersNpmView } from '../../__tests__/npm-view-fixture.js';
 import { fixHermesPluginShadowing } from '../doctor.js';
 import { updateLockPath } from '../../setup/host-swap.js';
 import { probeHermesDiscovery } from '../../setup/hermes-plugins.js';
@@ -89,7 +90,7 @@ describe("update's OpenClaw plugin step writes under the root's lock (#574 r4 bl
     const ran: string[][] = [];
     const removed: string[] = [];
     await stepOpenClawPlugin(home, {
-      run: (async (cmd: string, args: string[]) => { ran.push([cmd, ...args]); }) as never,
+      run: answersNpmView(async (cmd: string, args: string[]) => { ran.push([cmd, ...args]); return { stdout: '', stderr: '' }; }) as never,
       rm: ((target: fs.PathLike) => { removed.push(String(target)); }) as typeof fs.rmSync,
       readPluginVersion: (() => '4.31.0') as never,
       readCliVersion: (() => '4.31.0') as never,

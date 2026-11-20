@@ -246,6 +246,8 @@ describe('#648 — WHY: one table, every signal the guard can emit', () => {
     'firewall-cmd', 'send-keys',
     // #1025: `nativeExec` provenance enums on an audit-only field, never a signal.
     'agent-written', 'compiled-output',
+    // #1079: PEP 263 codec name compared in the docstring readback gate, never a signal.
+    'utf-8',
   ]);
 
   function stripComments(src: string): string {

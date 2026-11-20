@@ -51,7 +51,11 @@ export interface UpdateSummaryInput {
   engine: { ok: boolean; packagedPrebuild?: boolean; remediation?: string | null };
   /** OpenClaw plugin step. 'skip' = OpenClaw plugin not installed. */
   /** `recovery`: the fix when re-running the install is not one (#952). */
-  plugin: { status: SummaryStepStatus; rerun?: string; recovery?: { command: string; note?: string } };
+  /**
+   * `stillOn`: after OpenClaw refused the install, the version OpenClaw's own
+   * plugin list still names, enabled (#1105).
+   */
+  plugin: { status: SummaryStepStatus; rerun?: string; recovery?: { command: string; note?: string }; stillOn?: string };
   skill: { status: SummaryStepStatus; rerun?: string };
   hook?: { status: SummaryStepStatus };
   hermes?: { status: SummaryStepStatus; reason?: string };
@@ -238,11 +242,19 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
   // off it used to collapse into a green "installed" row (PR #773 review).
   const pluginBehind = pluginInstalled && p.versionOk === false;
   const pluginFixCommand = p.nextCommand ?? 'shieldcortex repair';
+  const pluginStepFailed = input.plugin.status === 'warn' || input.plugin.status === 'failed';
+  // #1105: OpenClaw refused this run's install and its own plugin list still
+  // names the previous version, enabled. The finding is "not updated, still on
+  // X". That list is install inventory (OpenClaw derives its "loaded" status
+  // from `enabled`), not evidence of what the running gateway loaded: rows
+  // built on it say "installed", never "running".
+  const stillOn = pluginStepFailed && input.plugin.stillOn ? sanitiseDisplayField(input.plugin.stillOn) : '';
   // The plugin check proved the running gateway has no ShieldCortex plugin.
   // The one red OpenClaw case; it wins over every other OpenClaw row below
-  // (PR #773 follow-up: a plugin-step warning used to hide it as yellow).
+  // (PR #773 follow-up: a plugin-step warning used to hide it as yellow). A
+  // still-listed version does not soften it (#1105 r2): inventory cannot
+  // contradict a check that proved the plugin absent at runtime.
   const pluginAbsent = p.status === 'failed';
-  const pluginStepFailed = input.plugin.status === 'warn' || input.plugin.status === 'failed';
   // The command the plugin step itself named for finishing its work — a re-run
   // or a recovery (#952). When the step failed, the OpenClaw "couldn't be
   // updated" row gives it, and so does the Guard row when it reports the plugin
@@ -261,7 +273,9 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
         label: 'OpenClaw',
         mark: 'fail',
         // Keep the plugin step's own problem inside the red row.
-        text: (pluginStepFailed ? 'plugin couldn\'t be updated, and ' : '')
+        text: (pluginStepFailed
+          ? (stillOn ? 'plugin not updated (' + stillOn + ' still installed), and ' : 'plugin couldn\'t be updated, and ')
+          : '')
           + 'the gateway started without the ShieldCortex plugin',
         why: 'Memory protection is not running in OpenClaw.',
         command: pluginFixCommand,
@@ -271,8 +285,14 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
       rows.push({
         label: 'OpenClaw',
         mark: 'check',
-        text: 'plugin couldn\'t be updated',
-        why: 'OpenClaw keeps running the previous plugin.',
+        text: stillOn ? 'plugin not updated (still on ' + stillOn + ')' : 'plugin couldn\'t be updated',
+        // Inventory only: installed and listed enabled, never "running".
+        // Without the list, nothing is known about what OpenClaw has now: a
+        // step that timed out or failed late may have installed part or all
+        // of it, so this says only that the update was not confirmed.
+        why: stillOn
+          ? 'The previous version is still installed and listed enabled.'
+          : 'The update was not confirmed complete; what OpenClaw has installed now is not known.',
         command: stepCommand ?? 'shieldcortex update',
         commandLabel: 'Fix',
         commandNote: stepCommandNote,

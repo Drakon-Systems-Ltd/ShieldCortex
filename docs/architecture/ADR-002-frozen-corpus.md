@@ -1,6 +1,6 @@
 # ADR-002 frozen corpus (epic #1065, Phase 0)
 
-**State at this change: incomplete.** The fixture format, the test harness and the Phase 1 line (#519) are in the tree. The fixtures for the other nineteen epic lines are **not**: 1 of 20 lines has a fixture. That one fixture is a cost fixture whose growth measurement is an opt-in report, so the default suite asserts no classifier verdict for any epic line yet. Read "What is missing, and why" before relying on this corpus for anything.
+**State at this change: incomplete.** The fixture format, the test harness and the Phase 1 line (#519) are in the tree. The fixtures for the other nineteen epic lines are **not**, except one Phase 3 line: the #1005 reverse-shell shapes (SCN-009) and their controls. 2 of 20 lines have a fixture. #519's is a cost fixture whose growth measurement is an opt-in report; #1005's are verdict fixtures, so #1005 is the only epic line whose classifier verdict the default suite asserts. Read "What is missing, and why" before relying on this corpus for anything.
 
 ## What it is
 
@@ -12,6 +12,7 @@ It is test data only. It lives under `src/defence/iron-dome/__tests__/fixtures/a
 |---|---|
 | `types.ts` | the fixture format: id, issue, phase, class, status, call, stub files, effects, targets, v3 decision, expectation |
 | `phase1.ts` | Phase 1 fixtures (#519) |
+| `phase3.ts` | Phase 3 fixtures (so far: #1005, SCN-009 reverse-shell shapes and controls) |
 | `index.ts` | the epic lines frozen on 12 Nov 2026, and the corpus assembled from the phase files |
 | `../adr002-frozen-corpus-1065.test.ts` | the suite |
 
@@ -24,7 +25,7 @@ It is test data only. It lives under `src/defence/iron-dome/__tests__/fixtures/a
 | `pending-decision` | the correct verdict is not settled (an owner or design decision is outstanding) | pinned to today's verdict, so any move is deliberate |
 | `note` | a recorded constraint or classification with no call to evaluate | never executed |
 
-A fixture asserts a verdict (`allow`, `not-block`, `gate`, `block`, or none), signals that must or must not be present, script paths the resolver must be asked for, or, for a cost fixture, a growth ratio per doubling of input size. Cost is always a ratio, never a wall-clock budget (#519, #1040).
+A fixture asserts a verdict (`allow`, `not-block`, `gate`, `block`, `approval`, or none), optionally an exact severity, signals that must or must not be present, script paths the resolver must be asked for, or, for a cost fixture, a growth ratio per doubling of input size. Cost is always a ratio, never a wall-clock budget (#519, #1040).
 
 A cost fixture is never timed in the default suite. Elapsed time moves with the scheduler, garbage collection and JIT warm-up, so a clock reading must not decide red or green. The default suite checks only the deterministic part: the same size builds the same call, and the input grows by a constant amount per unit of size. The growth measurement runs only with `ADR002_CORPUS_REPORT=1`, after one discarded pass over every size, and prints times, ratios, the fixture's bound and `withinBound`. It asserts nothing. The consequence is stated plainly: a `known-gap` cost fixture is **not** machine-held. The change that closes it removes the marker on the strength of that report and of its own deterministic test (for #519, a step count the Phase 1 lexer can expose; today's tokeniser cannot be counted without a production change, which this corpus does not make).
 
@@ -44,10 +45,11 @@ The effect, target and v3 decision fields are recorded for the reviewer and for 
 |---|---|---|
 | #519 tokeniser cost | 1 | 1 (`519/tokeniser-growth-repeated-word`, cost, known-gap; measured by the opt-in report, not asserted) |
 | #629, #927, #512, #551 (also #549), #738, #958, #634, #874 | 2 | none yet |
-| #504, #703, #662, #995, #755, #929, #1049, #588, #1005, #885 note | 3 | none yet |
+| #1005 (SCN-009 reverse-shell shapes) | 3 | 7 in `phase3.ts`: `1005/exec-nc-reverse`, `1005/exec-devtcp-reverse`, `1005/exec-ncat-e`, `1005/exec-socat-exec` (miss, known-gap; expect `approval`, severity `dangerous`, signal `reverse-shell`), and controls `1005/exec-nc-port-check-control`, `1005/exec-nc-localhost-control`, `1005/exec-docs-grep-control` (settled, allow) |
+| #504, #703, #662, #995, #755, #929, #1049, #588, #1005 (other labels), #885 note | 3 | none yet |
 | #556 | 4 | none yet |
 
-That is 1 of 20 epic lines. The suite prints this as one line (`[#1065] frozen corpus: ...`) and holds "every unchecked epic line maps to at least one fixture id" as a known-gap, so it cannot be forgotten: the test turns red when the last line is covered.
+That is 2 of 20 epic lines. The suite prints this as one line (`[#1065] frozen corpus: ...`) and holds "every unchecked epic line maps to at least one fixture id" as a known-gap, so it cannot be forgotten: the test turns red when the last line is covered.
 
 ## What is missing, and why
 

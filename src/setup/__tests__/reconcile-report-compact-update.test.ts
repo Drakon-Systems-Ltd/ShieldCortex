@@ -115,7 +115,7 @@ describe('protectionLedgerFromReconcile', () => {
     const ledger = protectionLedgerFromReconcile(r);
     expect(ledger.status).toBe('unproven');
     expect(ledger.outcome).toBe('protected-unproven');
-    expect(ledger.detail).toContain('next: openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest');
+    expect(ledger.detail).toContain('next: openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@5.0.0');
     const compact = formatReconcileReport(r, { compact: true }).join('\n');
     expect(compact).not.toMatch(/FAILED|unprotected|Not protected/i);
     const failed = ledger.status === 'failed';
