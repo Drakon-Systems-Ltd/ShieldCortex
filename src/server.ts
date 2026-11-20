@@ -304,7 +304,16 @@ Content is scanned through the defence pipeline before storage. Suspicious conte
         };
       }
       const resolved = resolveToolSourceFull(args.source as DefenceSource | undefined, 'remember');
-      const result = await executeRemember({ ...args, source: resolved.source, sourceAttested: resolved.attested });
+      // SCN-010 M3: an agent's MCP remember is a memory ADMISSION. The flag is
+      // assigned after the spread, so neither a caller arg nor a self-declared
+      // source / sourceType can set or clear it. The CLI `remember` command
+      // (operator, trusted) calls executeRemember without it.
+      const result = await executeRemember({
+        ...args,
+        source: resolved.source,
+        sourceAttested: resolved.attested,
+        memoryAdmission: 'agent',
+      });
       const remembered = formatRememberResult(result);
       return {
         content: [{ type: 'text', text: result.success ? framedRecall(remembered) : remembered }],
@@ -612,7 +621,8 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       } catch {
         // JSON parse failures will be caught by executeImport
       }
-      const result = executeImport(args);
+      // SCN-010 M3 sibling: an agent's MCP import is a memory admission too.
+      const result = executeImport(args, { memoryAdmission: 'agent' });
       return {
         content: [{
           type: 'text',

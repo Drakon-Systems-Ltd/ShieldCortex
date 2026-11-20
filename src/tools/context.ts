@@ -24,7 +24,7 @@ import { getDatabase } from '../database/init.js';
 import { Memory, ContextSummary, ConsolidationResult } from '../memory/types.js';
 import { resolveProject } from '../context/project-context.js';
 import { guardReadBySensitivity, guardContextSummary } from '../defence/trust/read-guard.js';
-import type { DefenceSource } from '../defence/types.js';
+import type { DefenceSource, MemoryAdmission } from '../defence/types.js';
 import { recallFrameFields } from '../../scripts/lib/recall-frame.mjs';
 
 // Input schema for getting context
@@ -398,13 +398,17 @@ export const importSchema = strictObject({
   data: z.string().describe('JSON data to import'),
 });
 
-export function executeImport(input: { data: string }): {
+export function executeImport(
+  input: { data: string },
+  /** SCN-010: set by the MCP handler only; arms the memory-directive screen per row. */
+  options?: { memoryAdmission?: MemoryAdmission },
+): {
   success: boolean;
   imported?: number;
   error?: string;
 } {
   try {
-    const imported = importMemories(input.data);
+    const imported = importMemories(input.data, options);
     return { success: true, imported };
   } catch (error) {
     return {

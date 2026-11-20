@@ -26,7 +26,7 @@ const existingMemory = {
   tags: [] as string[],
 };
 
-const updateMemoryMock = jest.fn((_id: number, updates: { content?: string }) => ({
+const updateMemoryMock = jest.fn((_id: number, updates: { content?: string }, _options?: unknown) => ({
   ...existingMemory,
   content: updates.content ?? existingMemory.content,
 }));
@@ -79,5 +79,18 @@ describe('remember dedupe genuinely updates the existing memory', () => {
     expect(addMemoryMock).not.toHaveBeenCalled();
     // The returned memory reflects the updated content.
     expect(result.memory!.id).toBe(42);
+    // No admission flag on a plain (CLI / internal) call.
+    expect(updateMemoryMock.mock.calls[0][2]).toBeUndefined();
+  });
+
+  it('SCN-010 M3: the dedupe update carries the MCP agent admission flag', async () => {
+    const { executeRemember } = await loadRemember();
+    await executeRemember({
+      title: 'Postgres connection pool sizing',
+      content: 'Use a pool size of 10 for the API service. Raised to 20 after load tests.',
+      memoryAdmission: 'agent',
+    });
+    expect(updateMemoryMock).toHaveBeenCalledTimes(1);
+    expect(updateMemoryMock.mock.calls[0][2]).toEqual({ memoryAdmission: 'agent' });
   });
 });

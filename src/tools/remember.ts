@@ -12,6 +12,7 @@ import { MemoryCategory, MemoryType, MemoryPurpose, MemoryScope } from '../memor
 import { formatErrorForMcp } from '../errors.js';
 import { resolveProject } from '../context/project-context.js';
 import { shouldFilterMemory } from '../memory/save-filter.js';
+import type { MemoryAdmission } from '../defence/types.js';
 
 // Input schema for the remember tool
 export const rememberSchema = strictObject({
@@ -56,6 +57,16 @@ export type RememberInput = z.infer<typeof rememberSchema> & {
    * args). Threat-graph Phase B.
    */
   sourceAttested?: boolean;
+  /**
+   * INTERNAL — SCN-010 M3. Set to `'agent'` by the MCP `remember` handler
+   * AFTER spreading the caller's args, so no caller can set or clear it, and
+   * deliberately absent from rememberSchema. It is not a label and not a
+   * trust level: the write keeps its own source. It arms the memory-directive
+   * screen for this admission — a standing directive about a control is
+   * QUARANTINED through the normal quarantine path, where an operator release
+   * is the trusted save. The CLI `remember` command never sets it.
+   */
+  memoryAdmission?: MemoryAdmission;
 };
 
 /**
@@ -81,7 +92,7 @@ export async function executeRemember(input: RememberInput): Promise<{
 }> {
   // #412 live execute path schema gate
   {
-    const { sourceAttested: _omitAttested, ...publicInput } = input as Record<string, unknown>;
+    const { sourceAttested: _omitAttested, memoryAdmission: _omitAdmission, ...publicInput } = input as Record<string, unknown>;
     const checked = rememberSchema.safeParse(publicInput);
     if (!checked.success) {
       return { success: false, error: 'Invalid remember input: ' + (checked.error.issues[0]?.message ?? 'schema validation failed') };
@@ -148,8 +159,15 @@ export async function executeRemember(input: RememberInput): Promise<{
     if (existing.length > 0 && existing[0].relevanceScore > 0.9) {
       const existingMemory = existing[0].memory;
       const contentChanged = existingMemory.content !== content;
+      // SCN-010 M3: the update is an admission too. Under the agent flag the
+      // re-scan runs the memory-directive screen; a hit fails closed exactly as
+      // any other non-ALLOW update does (refused, not merged).
       const updated = contentChanged
-        ? updateMemory(existingMemory.id, { content, title })
+        ? updateMemory(
+          existingMemory.id,
+          { content, title },
+          input.memoryAdmission ? { memoryAdmission: input.memoryAdmission } : undefined,
+        )
         : existingMemory;
       const target = updated ?? existingMemory;
       return {
@@ -217,7 +235,7 @@ export async function executeRemember(input: RememberInput): Promise<{
       memoryInput,
       undefined,
       derivedSource ?? { type: 'cli', identifier: 'mcp' },
-      { sourceAttested: input.sourceAttested },
+      { sourceAttested: input.sourceAttested, memoryAdmission: input.memoryAdmission },
     );
 
     // Auto-detect and create relationships with existing memories
