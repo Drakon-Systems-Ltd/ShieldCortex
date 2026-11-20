@@ -34,6 +34,8 @@ import {
   ACCEPTED_AMBIGUITY,
   BENIGN_CONTROLS,
   BENIGN_GENRES,
+  ROUND2_PRECISION,
+  ROUND2_PRECISION_LOCAL_EGRESS,
   SINK_DIRECTIVES,
 } from './fixtures/memory-directive-corpus.js';
 
@@ -223,4 +225,24 @@ describe('M1 — accepted ambiguity rows QUARANTINE in memory admission (design 
       expect(r.blockedPatterns).toContain('memory_directive:control_relaxation');
     });
   }
+});
+
+describe('M1 — round-2 review precision rows, exact verdicts in memory admission', () => {
+  for (const [id, text] of ROUND2_PRECISION) {
+    it(`precision ${id}: ALLOW under memory_candidate and agent admission`, () => {
+      const lane = runDefencePipelinePreviewInternal(text, 'note', { type: 'memory_candidate', identifier: 'scan' }, BALANCED);
+      expect(lane.firewall.result).toBe('ALLOW');
+      expect(lane.firewall.threatIndicators).not.toContain('memory_directive');
+      const agent = runDefencePipelinePreviewInternal(text, 'note', { type: 'cli', identifier: 'mcp' }, BALANCED, undefined, { memoryAdmission: 'agent' });
+      expect(agent.firewall.result).toBe('ALLOW');
+    });
+  }
+
+  it('precision P5: S is quiet; the pre-existing data_exfiltration hold is unchanged', () => {
+    const lane = fw(ROUND2_PRECISION_LOCAL_EGRESS, 'memory_candidate');
+    expect(lane.result).toBe('BLOCK');
+    expect(lane.threatIndicators).toEqual(['data_exfiltration']);
+    expect(lane.blockedPatterns.filter((p) => p.startsWith('memory_directive:'))).toEqual([]);
+  });
+
 });

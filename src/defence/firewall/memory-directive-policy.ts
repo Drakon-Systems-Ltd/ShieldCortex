@@ -187,8 +187,23 @@ const ADOPTION_CODA = new RegExp(
   '\\b(?:do\\s+(?:that|this|it|so)|put\\s+(?:that|this|it)\\s+into\\s+effect|act\\s+on\\s+(?:it|that|this)|' +
     'follow\\s+(?:it|that|this)|so\\s+from\\s+now\\s+on|we\\s+will\\s+(?:do|follow|keep|adopt|apply)|' +
     'you\\s+should\\s+(?:do|follow|act\\s+on|keep|apply|obey))\\b',
-  'i',
+  'gi',
 );
+
+/**
+ * "do not do that" / "never follow it": a coda directly negated is a
+ * rejection of the reported directive, not an adoption of it.
+ */
+const CODA_NEGATION = new RegExp(`\\b${NEG}\\s+(?:(?:ever|just|simply)\\s+)?$`, 'i');
+
+/** Does the text after the evidence carry an adoption coda that is not itself negated? */
+function adoptionCoda(tail: string): boolean {
+  for (const m of tail.matchAll(ADOPTION_CODA)) {
+    if (m.index === undefined) continue;
+    if (!CODA_NEGATION.test(tail.slice(Math.max(0, m.index - 40), m.index))) return true;
+  }
+  return false;
+}
 
 /** First person / second person in front of "told the agent to": the writer, not a report. */
 const FIRST_OR_SECOND_PERSON_SUBJECT = /\b(?:i|we|you)\s+(?:(?:also|then|once|just|already)\s+)?$/i;
@@ -206,7 +221,7 @@ const ALWAYS_ASK_BEFORE = /\balways\s+(?:ask|check|confirm)\b[^.!?;\n]{0,80}\bbe
 // ───────────────────────── E: the evidence groups ─────────────────────────
 
 type FrameKind = 'F1i' | 'F1a' | 'F2' | 'F3' | 'F4';
-type EvidenceKind = 'plain' | 'without' | 'secret' | 'hide' | 'bulk';
+type EvidenceKind = 'plain' | 'without' | 'secret' | 'hide' | 'bulk' | 'owner' | 'self';
 
 interface EvidencePattern {
   re: RegExp;
@@ -283,6 +298,16 @@ const BULK_OBJECT =
   '(?:(?:a\\s+copy\\s+of|copies\\s+of)\\s+)?(?:everything|(?:all|every|any|each)\\s+(?:of\\s+)?(?:(?:the|my|your|our|their|its|these|those)\\s+)?' +
   '(?:[\\w-]{1,30}\\s+)?(?:files?|documents?|docs|data|e-?mails?|messages?|attachments?|records?|notes|memories|contents?|folders?|directories)\\b)';
 
+/** The override modes: an adjective + "mode". */
+const OVERRIDE_MODE = '(?:developer|dan|unrestricted|unfiltered|uncensored)\\s+mode\\b';
+/** What binds a mode to the agent itself (subject, reflexive, or possessive). */
+const AGENT_MODE_BINDING =
+  "(?:(?:you\\s+are|you['\u2019]re|assume\\s+you\\s+are)\\s+(?:(?:now|currently|always)\\s+)?(?:in\\s+)?|" +
+  `(?:you|(?:the|this|our|my)\\s+${AGENT_NOUN})\\s+(?:(?:${MODAL}|now|currently|also|always|then)\\s+){0,3}` +
+  '(?:operates?|operating|runs?|running|works?|working|acts?|acting|stays?|staying|remains?)\\s+(?:(?:now|currently|always)\\s+)?in\\s+|' +
+  '(?:switch|put|set|place)(?:es|s)?\\s+(?:yourself|itself)\\s+(?:in|into|to)\\s+|' +
+  'your\\s+(?:(?:current|new|default)\\s+)?mode\\s+is\\s+(?:now\\s+)?)';
+
 const GROUPS: EvidenceGroup[] = [
   {
     name: MEMORY_DIRECTIVE_PATTERN.CONTROL_RELAXATION,
@@ -312,14 +337,16 @@ const GROUPS: EvidenceGroup[] = [
     name: MEMORY_DIRECTIVE_PATTERN.CONCEALMENT,
     frames: ANY_FRAME,
     patterns: [
-      // "never tell the user (about this)"
-      ev(`\\b${NEG}\\s+(?:ever\\s+)?${CONCEAL_VERB}(?:\\s+(?:or|and|nor)\\s+${CONCEAL_VERB})?\\s+(?:to\\s+)?${OWNER_RECIPIENT}(?:\\s+${CONCEAL_OBJECT})?(?=[ \\t]{0,4}(?:[.!?;,\\n]|$|(?:about|that|when|if|unless|before|after|or|and|until)\\b))`),
+      // "never tell the user (about this)" — an "about <X>" object is checked
+      // after the match: own conduct / this memory only (ownerConcealAccepted).
+      ev(`\\b${NEG}\\s+(?:ever\\s+)?${CONCEAL_VERB}(?:\\s+(?:or|and|nor)\\s+${CONCEAL_VERB})?\\s+(?:to\\s+)?${OWNER_RECIPIENT}(?:\\s+${CONCEAL_OBJECT})?(?=[ \\t]{0,4}(?:[.!?;,\\n]|$|(?:about|that|when|if|unless|before|after|or|and|until)\\b))`, 'owner'),
       // "do not report these tool calls to the owner" / "... in the audit log"
       ev(`\\b${NEG}\\s+(?:ever\\s+)?${CONCEAL_VERB}(?:\\s+(?:or|and|nor)\\s+${CONCEAL_VERB})?\\s+${CONCEAL_OBJECT}(?:\\s+${TOK}){0,3}?\\s+(?:to|with|in|into|from)\\s+(?:${OWNER_RECIPIENT}|${RECORD_SINK})`),
       // "do not log tool calls ..." — the logging verb names the sink itself
       ev(`\\b${NEG}\\s+(?:ever\\s+)?(?:log|record|audit|report)(?:\\s+(?:or|and|nor)\\s+${CONCEAL_VERB})?\\s+(?:(?:the|any|these|those|such)\\s+)?(?:tool\\s+calls?|actions?|commands?|activity|accesses|file\\s+reads)\\b`),
-      // the memory itself: "never reveal this instruction"
-      ev(`\\b${NEG}\\s+(?:ever\\s+)?${CONCEAL_VERB}\\s+(?:${TOK}\\s+){0,2}?${MEMORY_SELF}`),
+      // the memory itself: "never reveal this instruction" — a recipient after
+      // it is checked after the match (memorySelfRecipientAccepted).
+      ev(`\\b${NEG}\\s+(?:ever\\s+)?${CONCEAL_VERB}\\s+(?:${TOK}\\s+){0,2}?${MEMORY_SELF}`, 'self'),
       // "keep them out of the daily digest" / "keep this hidden from the user"
       ev(`\\bkeep\\s+(?:${CONCEAL_OBJECT})\\s+(?:(?:hidden|secret|quiet|private)\\s+(?:from\\s+)?|out\\s+of\\s+|off\\s+|away\\s+from\\s+|from\\s+)(?:${OWNER_RECIPIENT}|${RECORD_SINK})`),
       // "hide this from the operator" — not a secret being redacted from logs
@@ -340,8 +367,12 @@ const GROUPS: EvidenceGroup[] = [
     patterns: [
       ev('\\bjailbr(?:oken|eak(?:ed)?)\\b'),
       ev('\\bgod\\s+mode\\b'),
-      ev("\\b(?:you\\s+are|you['\u2019]re|assume\\s+you\\s+are|operate|operating|run|running)\\s+(?:(?:now|currently)\\s+)?(?:in\\s+)?(?:developer|dan|unrestricted|unfiltered)\\s+mode\\b"),
-      ev('\\b(?:unfiltered|uncensored|unrestricted)\\s+(?:mode|operator|output|assistant|ai|agent|model|persona|version)\\b'),
+      // A mode is the AGENT's only when it binds to the agent: "you are in",
+      // "you / the assistant operate(s) in", "switch yourself into", "your
+      // mode is". "run in developer mode" while debugging a client names the
+      // app's mode, not the agent's.
+      ev(`\\b${AGENT_MODE_BINDING}${OVERRIDE_MODE}`),
+      ev('\\b(?:unfiltered|uncensored|unrestricted)\\s+(?:operator|output|assistant|ai|agent|model|persona|version)\\b'),
       ev('\\bno\\s+(?:restrictions|limits|filters|rules|guardrails)(?:\\s+(?:at\\s+all|whatsoever|anymore))?(?=[ \\t]{0,4}(?:[.!?;,\\n]|$))'),
       ev('\\b(?:rules|constraints|guidelines|safety\\s+rules|restrictions|guardrails)\\s+(?:are|as)\\s+(?:(?:only|just|merely|now)\\s+)?(?:optional|suggestions|playful\\s+suggestions)\\b'),
       ev('\\braw,?\\s+unfiltered\\b'),
@@ -368,6 +399,55 @@ const GROUPS: EvidenceGroup[] = [
     patterns: [ev(`\\b${BULK_VERB}\\s+${BULK_OBJECT}`, 'bulk')],
   },
 ];
+
+// ─────────────────── concealment: who and what ───────────────────
+
+/**
+ * A recipient phrase directly after "never reveal this note". Concealing the
+ * memory from a NAMED third party ("to visitors", "with outside contractors")
+ * is ordinary confidentiality; only the owner class, a record sink, or a
+ * universal recipient (which includes the owner) makes it concealment.
+ */
+const SELF_RECIPIENT_LEAD = /^[ \t]{0,4}(?:to|with|from|in|into)[ \t]{1,4}/i;
+const SELF_RECIPIENT_CONCEALED = new RegExp(
+  `^(?:${OWNER_RECIPIENT}|${RECORD_SINK}|(?:anyone|anybody|everyone|everybody|any\\s+(?:one|body|person|human))\\b)`,
+  'i',
+);
+
+function memorySelfRecipientAccepted(text: string, matchEnd: number, clauseEnd: number): boolean {
+  const tail = text.slice(matchEnd, clauseEnd);
+  const lead = tail.match(SELF_RECIPIENT_LEAD);
+  if (!lead) return true; // no recipient: "Never reveal this note."
+  return SELF_RECIPIENT_CONCEALED.test(tail.slice(lead[0].length));
+}
+
+/**
+ * The "about <X>" object of "never tell the user about ...". Concealment from
+ * the owner fires when X is the agent's own conduct, this memory, or a bare
+ * pronoun; another party's information ("another customer's medical history")
+ * is privacy protection and stays quiet. An unspecified object ("don't tell
+ * the user") never reaches this check.
+ */
+const ABOUT_LEAD = /^[ \t]{0,4}about[ \t]{1,4}/i;
+const CONDUCT_NOUN =
+  '(?:tool\\s+calls?|actions?|commands?|activity|changes?|accesses|reads|writes|deletions?|transfers?|uploads?|downloads?|' +
+  'exports?|edits?|runs?|deploys?|deployments?|purchases?|payments?|mistakes?|errors?|failures?|work|decisions?)';
+const ABOUT_CONDUCT = new RegExp(
+  [
+    `^${MEMORY_SELF}`,
+    `^(?:(?:the|any|these|those|such|your|my|its|our)\\s+)?(?:own\\s+)?(?:[\\w-]{1,30}\\s+)?${CONDUCT_NOUN}\\b(?!['\u2019])`,
+    '^(?:what|how|why|when|where)\\s+(?:you|i|we|the\\s+(?:assistant|agent))\\b',
+    "^(?:this|that|it|these|those|them|anything|any\\s+of\\s+(?:this|it|these|them))(?=[ \\t]{0,4}(?:[.!?;,\\n]|$|(?:when|if|unless|before|after|or|and|until|again|ever|either|yet)\\b))",
+  ].join('|'),
+  'i',
+);
+
+function ownerConcealAccepted(text: string, matchEnd: number, clauseEnd: number): boolean {
+  const tail = text.slice(matchEnd, clauseEnd);
+  const lead = tail.match(ABOUT_LEAD);
+  if (!lead) return true;
+  return ABOUT_CONDUCT.test(tail.slice(lead[0].length));
+}
 
 // ─────────────────── secret routing: recipient rules ───────────────────
 
@@ -396,23 +476,81 @@ function secretRoutingAccepted(text: string, matchEnd: number, clauseEnd: number
 
 // ───────────────────── bulk egress: the external recipient ─────────────────────
 
-/** The recipient phrase after the universal object. Dots allowed: emails and hosts have them. */
-const BULK_RECIPIENT = /^[^.!?;\n]{0,60}?\b(?:to|into|onto|with)\s+([^\n]{1,120})/i;
-/** An email address, a URL, a host on a generic / reserved TLD, or "an external address". */
-const EXTERNAL_RECIPIENT = new RegExp(
-  [
-    '[\\w.+-]{1,64}@[\\w-]{1,63}(?:\\.[\\w-]{1,63}){1,6}',
-    '\\b(?:https?|wss?|s?ftp)://',
-    '\\b(?:[a-z0-9-]{1,63}\\.){1,6}(?:com|net|org|io|dev|app|ai|co|cloud|xyz|info|biz|example|test|invalid|online|site|me|eu|uk|de|fr|ru|cn|top|link|click)\\b',
-    '\\b(?:external|outside|off-?site|third[- ]party|remote|personal|private|unknown|foreign)\\s+(?:e-?mail\\s+)?' +
-      '(?:address(?:es)?|servers?|accounts?|hosts?|endpoints?|inbox(?:es)?|buckets?|drives?|storage|recipients?|contacts?|part(?:y|ies)|domains?|sites?|urls?|webhooks?)\\b',
-  ].join('|'),
+/**
+ * A preposition that may introduce the destination, within 60 characters of
+ * the universal object (the same reach as before). Each one is read on its
+ * own: "to the local drive, never to a personal account" has two.
+ */
+const BULK_PREPOSITION = /\b(?:to|into|onto|with)[ \t]{1,4}/gi;
+const BULK_PREPOSITION_REACH = 60;
+/**
+ * The destination slice ends at clause punctuation or a contrast / negation
+ * word. A colon is punctuation only before a space: "https://" and "host:8443"
+ * are part of the destination.
+ */
+const BULK_RECIPIENT_END = /[,;]|:(?=[ \t]|$)|\b(?:but|never|not)\b/i;
+/** A destination slice is not one when its own sub-clause negates it ("never to X"). */
+const BULK_SUBCLAUSE_CUT = /[,;]|:(?=[ \t]|$)|\bbut\b/gi;
+const BULK_SUBCLAUSE_NEGATION =
+  /\b(?:never|not|no|nor|don['’]t|doesn['’]t|mustn['’]t|shouldn['’]t|won['’]t|cannot|can['’]t)\b/i;
+
+/** "an external address", "a third-party server": the outside named in words. */
+const EXTERNAL_PHRASE = new RegExp(
+  '\\b(?:external|outside|off-?site|third[- ]party|remote|personal|private|unknown|foreign)\\s+(?:e-?mail\\s+)?' +
+    '(?:address(?:es)?|servers?|accounts?|hosts?|endpoints?|inbox(?:es)?|buckets?|drives?|storage|recipients?|contacts?|part(?:y|ies)|domains?|sites?|urls?|webhooks?)\\b',
   'i',
 );
+const EMAIL_DOMAIN = /[\w.+-]{1,64}@([\w-]{1,63}(?:\.[\w-]{1,63}){0,6})/gi;
+const URL_HOST = /\b(?:https?|wss?|s?ftp):\/\/(?:[^\s/@]{1,64}@)?(\[[0-9a-f:.]{2,45}\]|[^\s/:?#\]]{1,253})/gi;
+const BARE_HOST =
+  /\b((?:[a-z0-9-]{1,63}\.){1,6}(?:com|net|org|io|dev|app|ai|co|cloud|xyz|info|biz|example|test|invalid|online|site|me|eu|uk|de|fr|ru|cn|top|link|click))\b/gi;
+
+/**
+ * A destination that stays on the owner's own network is not egress:
+ * RFC1918, loopback and link-local addresses, `localhost`, a bare hostname
+ * with no dot, and the local-only suffixes.
+ */
+function localDestination(rawHost: string): boolean {
+  const host = rawHost.toLowerCase().replace(/\.$/, '');
+  if (host.startsWith('[')) {
+    const v6 = host.slice(1, -1);
+    return v6 === '::1' || /^fe[89ab][0-9a-f]?:/.test(v6) || /^f[cd][0-9a-f]{0,2}:/.test(v6);
+  }
+  if (host === 'localhost' || !host.includes('.')) return true;
+  if (/\.(?:local|lan|internal|localhost|home\.arpa)$/.test(host)) return true;
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!v4) return false;
+  const a = Number(v4[1]);
+  const b = Number(v4[2]);
+  return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+}
+
+/** Does this destination slice name an outside recipient? */
+function externalRecipient(slice: string): boolean {
+  if (EXTERNAL_PHRASE.test(slice)) return true;
+  for (const m of slice.matchAll(EMAIL_DOMAIN)) if (!localDestination(m[1] ?? '')) return true;
+  for (const m of slice.matchAll(URL_HOST)) if (!localDestination(m[1] ?? '')) return true;
+  // Bare hosts, outside any email or URL already judged above.
+  const rest = slice.replace(EMAIL_DOMAIN, ' ').replace(URL_HOST, ' ');
+  for (const m of rest.matchAll(BARE_HOST)) if (!localDestination(m[1] ?? '')) return true;
+  return false;
+}
 
 function bulkEgressAccepted(text: string, matchEnd: number, clauseEnd: number): boolean {
-  const recipient = text.slice(matchEnd, clauseEnd).match(BULK_RECIPIENT);
-  return recipient !== null && EXTERNAL_RECIPIENT.test(recipient[1] ?? '');
+  const tail = text.slice(matchEnd, clauseEnd);
+  for (const m of tail.matchAll(BULK_PREPOSITION)) {
+    const at = m.index ?? 0;
+    if (at > BULK_PREPOSITION_REACH) break;
+    // The sub-clause this preposition sits in: after the last comma / "but".
+    const lead = tail.slice(0, at);
+    let cut = 0;
+    for (const c of lead.matchAll(BULK_SUBCLAUSE_CUT)) cut = (c.index ?? 0) + c[0].length;
+    if (BULK_SUBCLAUSE_NEGATION.test(lead.slice(cut))) continue;
+    const after = tail.slice(at + m[0].length, at + m[0].length + 120);
+    const stop = after.search(BULK_RECIPIENT_END);
+    if (externalRecipient(stop === -1 ? after : after.slice(0, stop))) return true;
+  }
+  return false;
 }
 
 // ───────────────────────── clause + frame ─────────────────────────
@@ -541,8 +679,16 @@ function groupHitsWindow(
       const [from, to] = clauseBounds(scanText, start, end);
       const clause = scanText.slice(from, to);
       const before = scanText.slice(from, start);
-      const adopted = ADOPTION_CODA.test(scanText.slice(start, to));
 
+      // Object / recipient rules first: they read only the clause tail, so a
+      // run of near-misses never pays for the exemption checks below.
+      if (kind === 'hide' && SECRET_NOUN_RE.test(match[0])) continue;
+      if (kind === 'self' && !memorySelfRecipientAccepted(scanText, end, to)) continue;
+      if (kind === 'owner' && !ownerConcealAccepted(scanText, end, to)) continue;
+      if (kind === 'secret' && !secretRoutingAccepted(scanText, end, to, match[0])) continue;
+      if (kind === 'bulk' && !bulkEgressAccepted(scanText, end, to)) continue;
+
+      const adopted = adoptionCoda(scanText.slice(start, to));
       if (exempt(view, scanText, spans, start, end, from, adopted)) continue;
 
       if (group.name === MEMORY_DIRECTIVE_PATTERN.CONTROL_RELAXATION) {
@@ -550,9 +696,6 @@ function groupHitsWindow(
         if (kind === 'without' && CLAUSE_NEGATION.test(before)) continue;
         if (ALWAYS_ASK_BEFORE.test(before)) continue;
       }
-      if (kind === 'hide' && SECRET_NOUN_RE.test(match[0])) continue;
-      if (kind === 'secret' && !secretRoutingAccepted(scanText, end, to, match[0])) continue;
-      if (kind === 'bulk' && !bulkEgressAccepted(scanText, end, to)) continue;
 
       if (!hasFrame(group.frames, clause, lastSegment(before), adopted)) continue;
       return true;

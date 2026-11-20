@@ -27,6 +27,7 @@ import { approveQuarantineItem } from '../defence/quarantine/review.js';
 import {
   ACCEPTED_AMBIGUITY,
   BENIGN_CONTROLS,
+  ROUND2_PRECISION,
   SINK_DIRECTIVES,
 } from '../defence/__tests__/fixtures/memory-directive-corpus.js';
 
@@ -143,6 +144,27 @@ describe('M3 — MCP remember runs the memory-directive screen', () => {
     }
     expect(quarantined()).toHaveLength(ACCEPTED_AMBIGUITY.length);
   });
+});
+
+describe('M3 — round-2 review rows through MCP remember, exact verdicts', () => {
+  beforeEach(() => {
+    initDatabase(':memory:');
+  });
+
+  afterEach(() => {
+    closeDatabase();
+  });
+
+  it('precision rows are stored, never held (fresh DB per row)', async () => {
+    for (const [id, text] of ROUND2_PRECISION) {
+      closeDatabase();
+      initDatabase(':memory:');
+      const result = await executeRemember({ title: `Round2 ${id}`, content: text, memoryAdmission: 'agent' });
+      expect({ id, success: result.success }).toEqual({ id, success: true });
+      expect(quarantined()).toEqual([]);
+    }
+  });
+
 });
 
 describe('M3 — the CLI remember command is unchanged (operator, trusted)', () => {

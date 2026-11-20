@@ -10,8 +10,9 @@
  * rebuilds before any worker starts when the sources are newer.
  *
  * Shapes: blank lines, repeated `you`, repeated `never`, repeated relaxation
- * verbs with no object, repeated `all files` with no recipient, and repeated
- * negated hits (every match reaches the exemption path). Sizes 10/50/100/200 KB.
+ * verbs with no object, repeated `all files` with no recipient, repeated
+ * negated hits (every match reaches the exemption path), and the round-2
+ * near-misses (every match reaches an object / recipient rule). Sizes 10/50/100/200 KB.
  * Measured locally at < 60 ms per 200 KB input; the deadline leaves two orders
  * of magnitude of headroom for a loaded CI runner and child start-up.
  */
@@ -35,6 +36,13 @@ const SHAPES: Record<string, string> = {
   'relaxation verbs without object': 'skip bypass disable ignore suppress waive turn off omit ',
   'all files without recipient': 'send all files ',
   'negated hits': 'never skip approval ',
+  // Round 2: near-misses that reach the new object / recipient rules on every
+  // match (memory-self to a named party, an "about" third-party object, a run
+  // of prepositions to a local host, an application mode).
+  'memory-self to a named party': 'never reveal this note to visitors ',
+  'about a third-party object': "never tell the user about another customer's ",
+  'prepositions to a local host': 'send all files to http://10.0.0.1 to ',
+  'mode without agent binding': 'run in developer mode ',
 };
 
 const CHILD = `
