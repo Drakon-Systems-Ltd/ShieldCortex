@@ -5639,6 +5639,34 @@ export function isGuardSelfProtectionVerdict(signals: readonly string[] | undefi
   return Array.isArray(signals) && signals.some(s => GUARD_SELF_PROTECTION_SIGNALS.includes(s));
 }
 
+/**
+ * #1005 — PROMPT-ONLY signals. A require_approval verdict carrying one of
+ * these is released only by a human answer: the approval prompt, or an
+ * operator's own `shieldcortex approve` in a terminal. Neither a standing
+ * `autoApprove` entry nor the approval broker's pre-clear (nor its
+ * auto-approve when the operator does not answer in time) releases it.
+ *
+ * Why a named exemption rather than a distinct action: the allowlist matches
+ * by substring over the verdict's family, action AND signals, so a renamed
+ * action would still be released by entries such as `exec`, `egress`,
+ * `shell`, `reverse` or the empty string (Case's review of #1088,
+ * 5994115085). Unlike the self-protection floor, this does not touch the
+ * documented postures: watch-only advisory, the enforce-when-ready shadow,
+ * the OpenClaw failure policy and Hermes behave as for any dangerous verdict.
+ *
+ * The ONE list. The Claude Code hook reads it from this module and carries a
+ * duplicate for an older dist; the OpenClaw interceptor carries a duplicate.
+ * Held equal by enforcement-surface-parity.
+ */
+export const GUARD_PROMPT_ONLY_SIGNALS: readonly string[] = Object.freeze([
+  'reverse-shell',
+]);
+
+/** True when a verdict's signals may be released only by a human answer. */
+export function isGuardPromptOnlyVerdict(signals: readonly string[] | undefined): boolean {
+  return Array.isArray(signals) && signals.some(s => GUARD_PROMPT_ONLY_SIGNALS.includes(s));
+}
+
 /** #342 — interpreter-API recursive-delete call spans (not shell verbs). */
 const INTERPRETER_RECURSIVE_DELETE_SPAN =
   /(?:shutil\s*\.\s*rmtree|os\s*\.\s*removedirs|FileUtils\s*\.\s*rm_rf|\brm\s*\(|(?:fs\s*\.\s*)?(?:promises\s*\.\s*)?rm(?:Sync)?\s*\()/i;
@@ -8957,6 +8985,8 @@ function dangerActionFor(signals: string[], family: ToolFamily): string {
   if (signals.includes('registry-code-exec')) return 'run_registry_package';
   if (signals.includes('modify-scheduler')) return 'modify_cron';
   // #1005: the remote end drives the shell over the network — the egress class, not a generic exec.
+  // An `autoApprove` entry naming this action does not release it: the signal is
+  // in GUARD_PROMPT_ONLY_SIGNALS, which both enforcement planes check first.
   if (signals.includes('reverse-shell')) return 'network_egress';
   if (signals.includes('external-egress')) return 'network_egress';
   if (signals.includes('touch-sensitive-path')) return 'access_secret_path';
