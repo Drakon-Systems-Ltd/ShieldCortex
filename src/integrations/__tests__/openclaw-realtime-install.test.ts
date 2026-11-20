@@ -448,4 +448,36 @@ describe('#1110 — a native install recorded in openclaw.json plugins.installs'
     fs.writeFileSync(path.join(ext(), 'openclaw.plugin.json'), JSON.stringify({ id: ID, version: '999.0.0' }));
     expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'none' });
   });
+
+  // #1110 round 2: OpenClaw ranks a `plugins.load.paths` copy above a
+  // record-matched extension copy, so the record alone cannot claim the pin.
+  const recordAndLoadPath = (loadVersion: string, recordVersion = PIN): { dir: string; linked: string } => {
+    const dir = nativeCopy(recordVersion);
+    const linked = checkout(loadVersion);
+    writeJson('openclaw.json', { plugins: { load: { paths: [linked] }, installs: { [ID]: { source: 'npm', version: recordVersion } } } });
+    return { dir, linked };
+  };
+
+  it('CONFLICT: a load-path copy and a record copy at DIFFERENT versions ⇒ unknown, never the record copy', () => {
+    const { linked } = recordAndLoadPath('5.17.3');
+    expect(readSelectedRealtimeInstall(home)).toEqual({
+      state: 'unknown',
+      why: `a plugins.load.paths copy (v5.17.3, ${linked}) and the openclaw.json plugins.installs record copy (v${PIN}) disagree`,
+    });
+    expect(readSelectedRealtimePluginVersion(home).version).toBeNull();
+    expect(decide()).toMatchObject({ replace: false });
+  });
+
+  it('a load-path copy whose version cannot be read beside a record copy ⇒ unknown', () => {
+    const { linked } = recordAndLoadPath(PIN);
+    fs.writeFileSync(path.join(linked, 'package.json'), JSON.stringify({ name: PKG, version: 'latest' }));
+    expect(readSelectedRealtimeInstall(home).state).toBe('unknown');
+  });
+
+  it('a load-path copy and a record copy at the SAME version stay selected (the record copy)', () => {
+    const { dir } = recordAndLoadPath(PIN);
+    expect(readSelectedRealtimeInstall(home)).toEqual({
+      state: 'selected', dir, version: PIN, evidence: 'openclaw.json plugins.installs record', source: 'npm',
+    });
+  });
 });

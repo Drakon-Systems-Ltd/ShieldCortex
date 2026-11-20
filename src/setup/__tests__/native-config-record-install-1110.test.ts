@@ -135,4 +135,25 @@ describe('#1110 — direct install on a native openclaw.json plugins.installs ho
     expect(warnLines.join('\n')).not.toMatch(/Real-time plugin installed by OpenClaw .*but/);
     expect(process.exitCode).not.toBe(1);
   });
+
+  it('round 2: a pin-version record copy does NOT claim "already at" while an older plugins.load.paths copy is configured', async () => {
+    nativeCopy(selfVersion());
+    // A linked checkout at an older version: OpenClaw ranks it above the record copy.
+    const checkout = path.join(tempHome, 'src', 'ShieldCortex', 'plugins', 'openclaw');
+    fs.mkdirSync(checkout, { recursive: true });
+    fs.writeFileSync(path.join(checkout, 'package.json'), JSON.stringify({ name: PKG, version: '5.17.3' }));
+    fs.writeFileSync(path.join(checkout, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, version: '5.17.3' }));
+    fs.mkdirSync(path.join(tempHome, '.openclaw'), { recursive: true });
+    fs.writeFileSync(path.join(tempHome, '.openclaw', 'openclaw.json'), JSON.stringify({
+      plugins: { allow: [], entries: {}, load: { paths: [checkout] }, installs: { [PLUGIN]: { source: 'npm', version: selfVersion() } } },
+    }, null, 2) + '\n');
+    __setNativeSpawnForTest((_cmd, args) => { calls.push([...args]); return { status: 0, stdout: '', stderr: '' }; });
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    expect(installCalls()).toEqual([]);
+    expect(logLines.join('\n')).not.toContain('Real-time plugin already at');
+    expect(warnLines.join('\n')).toContain('Real-time plugin not installed:');
+    expect(process.exitCode).toBe(1);
+  });
 });
