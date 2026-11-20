@@ -359,8 +359,12 @@ const GROUPS: EvidenceGroup[] = [
 /** Where a secret may legitimately go. */
 const SECRET_STORE =
   /\b(?:1password|password\s+manager|vault|keychain|keyring|bitwarden|lastpass|secrets?\s+manager|secret\s+store|(?:ci|github|repo(?:sitory)?|actions)\s+secrets?|secret\s+settings|key\s+vault|parameter\s+store|kms)\b/i;
-/** The recipient phrase after the secret: "to|with|into|in|on|via ...". */
-const ROUTE_RECIPIENT = /^[^.!?;\n]{0,60}?\b(?:to|with|into|in|on|via|over)\s+([^.!?;\n]{1,80})/i;
+/**
+ * The recipient phrase after the secret: "to|with|into|in|on|via ...". The
+ * capture keeps dots (the clause end already bounds it): an email address or
+ * a host is a recipient, and cutting at its first dot hid it.
+ */
+const ROUTE_RECIPIENT = /^[^.!?;\n]{0,60}?\b(?:to|with|into|in|on|via|over)\s+([^\n]{1,80})/i;
 /** copy/paste/post/upload move bytes; only an outside channel makes that routing. */
 const MOVE_ONLY_VERB = /^(?:copy|paste|post|upload)\b/i;
 const EXTERNAL_CHANNEL =
