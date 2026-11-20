@@ -108,6 +108,21 @@ export interface LinkedReadOptions {
  * `absent`.
  */
 export function readLinkedRealtimeInstall(home: string, options: LinkedReadOptions = {}): LinkedRealtimeInstall {
+  const linked = readLinked(home, options);
+  return linked.state === 'linked' ? { state: 'linked', at: linked.at } : linked;
+}
+
+/**
+ * The linked reader, plus the plugin dir it already identified for a
+ * `plugins.load.paths` entry — so the version is read from that same dir
+ * rather than from a second, differently normalized look at the path
+ * (#1110 round 3). `dir` is absent for a path install record, whose path was
+ * not identified here.
+ */
+function readLinked(
+  home: string,
+  options: LinkedReadOptions,
+): { state: 'linked'; at: string; dir?: string } | { state: 'absent' } | { state: 'unknown'; why: string } {
   const unknowns: string[] = [];
   const openclawDir = path.join(home, '.openclaw');
 
@@ -119,10 +134,11 @@ export function readLinkedRealtimeInstall(home: string, options: LinkedReadOptio
       ? plugins.load.paths as unknown[]
       : [];
     for (const p of loadPaths) {
-      if (typeof p !== 'string' || !p.trim()) continue;
-      const resolved = path.resolve(openclawDir, tilde(p.trim(), home));
-      const id = identifyPluginDir(resolved);
-      if (id.state === 'ours') return { state: 'linked', at: p };
+      // OpenClaw trims a load path before resolving it; so does every read here.
+      const entry = typeof p === 'string' ? p.trim() : '';
+      if (!entry) continue;
+      const id = identifyPluginDir(path.resolve(openclawDir, tilde(entry, home)));
+      if (id.state === 'ours') return { state: 'linked', at: entry, dir: id.dir };
       if (id.state === 'unknown') unknowns.push(id.why);
     }
     const legacy = pathRecordWhere(plugins && typeof plugins === 'object' ? plugins.installs?.[REALTIME_PLUGIN_ID] : null);
@@ -361,16 +377,22 @@ function readLinkedCopy(
   home: string,
   index: PluginInstallIndexState,
 ): { state: 'none' } | { state: 'ok'; dir: string; version: string } | { state: 'unknown'; why: string } {
-  const linked = readLinkedRealtimeInstall(home, { readIndex: () => index });
+  const linked = readLinked(home, { readIndex: () => index });
   if (linked.state === 'unknown') return { state: 'unknown', why: linked.why };
   if (linked.state !== 'linked') return { state: 'none' };
-  // #1110 round 3: trim like readLinkedRealtimeInstall (and OpenClaw) do, so a
-  // padded load path still reaches the conflict check instead of reading `none`.
-  const id = identifyPluginDir(path.resolve(path.join(home, '.openclaw'), tilde(linked.at.trim(), home)));
-  if (id.state !== 'ours') return { state: 'none' };
-  const v = readPluginDirVersion(id.dir);
+  // #1110 round 3: a load path's dir is the one the linked reader identified
+  // (no second look at the path). A path record's path is identified here; an
+  // identity that cannot be read is unknown, never absence.
+  let dir = linked.dir;
+  if (dir === undefined) {
+    const id = identifyPluginDir(path.resolve(path.join(home, '.openclaw'), tilde(linked.at, home)));
+    if (id.state === 'unknown') return { state: 'unknown', why: `the linked copy at ${linked.at}: ${id.why}` };
+    if (id.state !== 'ours') return { state: 'none' };
+    dir = id.dir;
+  }
+  const v = readPluginDirVersion(dir);
   if (v.state === 'unknown') return { state: 'unknown', why: `the linked copy: ${v.why}` };
-  return { state: 'ok', dir: id.dir, version: v.version };
+  return { state: 'ok', dir, version: v.version };
 }
 
 /**

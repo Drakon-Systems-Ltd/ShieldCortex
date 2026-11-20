@@ -156,4 +156,37 @@ describe('#1110 — direct install on a native openclaw.json plugins.installs ho
     expect(warnLines.join('\n')).toContain('Real-time plugin not installed:');
     expect(process.exitCode).toBe(1);
   });
+
+  it.each([
+    ['openclaw.json plugins.installs', 'openclaw.json'],
+    ['installs.json', 'installs.json'],
+  ] as const)('round 3: a %s record at the pin does NOT claim "already at" beside a whitespace-padded older load path', async (_label, source) => {
+    const checkout = path.join(tempHome, 'src', 'ShieldCortex', 'plugins', 'openclaw');
+    fs.mkdirSync(checkout, { recursive: true });
+    fs.writeFileSync(path.join(checkout, 'package.json'), JSON.stringify({ name: PKG, version: '5.17.3' }));
+    fs.writeFileSync(path.join(checkout, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, version: '5.17.3' }));
+    const plugins: Record<string, unknown> = { allow: [], entries: {}, load: { paths: [`  ${checkout}  `] } };
+    if (source === 'openclaw.json') {
+      nativeCopy(selfVersion());
+      plugins.installs = { [PLUGIN]: { source: 'npm', version: selfVersion() } };
+    } else {
+      const rec = path.join(tempHome, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+      fs.mkdirSync(path.join(rec, 'dist'), { recursive: true });
+      fs.writeFileSync(path.join(rec, 'dist', 'index.js'), '');
+      fs.writeFileSync(path.join(rec, 'package.json'), JSON.stringify({ name: PKG, version: selfVersion() }));
+      fs.mkdirSync(path.join(tempHome, '.openclaw', 'plugins'), { recursive: true });
+      fs.writeFileSync(path.join(tempHome, '.openclaw', 'plugins', 'installs.json'),
+        JSON.stringify({ installRecords: { [PLUGIN]: { source: 'npm', installPath: rec, version: selfVersion() } } }));
+    }
+    fs.mkdirSync(path.join(tempHome, '.openclaw'), { recursive: true });
+    fs.writeFileSync(path.join(tempHome, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins }, null, 2) + '\n');
+    __setNativeSpawnForTest((_cmd, args) => { calls.push([...args]); return { status: 0, stdout: '', stderr: '' }; });
+
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+
+    expect(installCalls()).toEqual([]);
+    expect(logLines.join('\n')).not.toContain('Real-time plugin already at');
+    expect(warnLines.join('\n')).toContain('Real-time plugin not installed:');
+    expect(process.exitCode).toBe(1);
+  });
 });

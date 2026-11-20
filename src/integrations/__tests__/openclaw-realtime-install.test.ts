@@ -480,6 +480,37 @@ describe('#1110 — a native install recorded in openclaw.json plugins.installs'
     expect(decide()).toMatchObject({ replace: false });
   });
 
+  it('round 3: an installs.json record at the pin + a whitespace-padded OLDER load path ⇒ unknown, never the record\'s pin', () => {
+    const rec = writeRealtimeProject('drakon-systems-shieldcortex-realtime', PIN);
+    writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'npm', installPath: rec, version: PIN } } });
+    const linked = checkout('5.17.3');
+    writeJson('openclaw.json', { plugins: { load: { paths: [`  ${linked}  `] } } });
+    expect(readSelectedRealtimeInstall(home)).toEqual({
+      state: 'unknown',
+      why: `a plugins.load.paths copy (v5.17.3, ${linked}) and the installs.json record copy (v${PIN}) disagree`,
+    });
+    expect(readSelectedRealtimePluginVersion(home).version).toBeNull();
+    expect(assessRealtimeReplacement(readRealtimeReplacementEvidence(home), PIN)).toMatchObject({ replace: false });
+  });
+
+  it('round 3: the linked reader reports the trimmed load path — one identity for discovery and version reading', () => {
+    const linked = checkout('5.17.3');
+    writeJson('openclaw.json', { plugins: { load: { paths: [`\t ${linked} \n`] } } });
+    expect(readLinkedRealtimeInstall(home)).toEqual({ state: 'linked', at: linked });
+  });
+
+  it('round 3: a path record whose identity cannot be read beside a record copy ⇒ unknown, not the record\'s pin', () => {
+    const rec = writeRealtimeProject('drakon-systems-shieldcortex-realtime', PIN);
+    writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'npm', installPath: rec, version: PIN } } });
+    const bad = path.join(home, 'dev', 'plugin');
+    fs.mkdirSync(bad, { recursive: true });
+    fs.writeFileSync(path.join(bad, 'package.json'), '{ not json');
+    writeJson('openclaw.json', { plugins: { installs: { [ID]: { source: 'path', sourcePath: bad } } } });
+    expect(readLinkedRealtimeInstall(home)).toEqual({ state: 'linked', at: bad });
+    expect(readSelectedRealtimeInstall(home).state).toBe('unknown');
+    expect(readSelectedRealtimePluginVersion(home).version).toBeNull();
+  });
+
   it('a load-path copy whose version cannot be read beside a record copy ⇒ unknown', () => {
     const { linked } = recordAndLoadPath(PIN);
     fs.writeFileSync(path.join(linked, 'package.json'), JSON.stringify({ name: PKG, version: 'latest' }));
