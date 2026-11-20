@@ -468,6 +468,18 @@ describe('#1110 — a native install recorded in openclaw.json plugins.installs'
     expect(decide()).toMatchObject({ replace: false });
   });
 
+  it('CONFLICT survives a whitespace-padded load path (OpenClaw trims it and loads the copy)', () => {
+    const dir = nativeCopy(PIN);
+    const linked = checkout('5.17.3');
+    writeJson('openclaw.json', { plugins: { load: { paths: [`  ${linked}  `] }, installs: { [ID]: { source: 'npm', version: PIN } } } });
+    expect(readSelectedRealtimeInstall(home)).toEqual({
+      state: 'unknown',
+      why: `a plugins.load.paths copy (v5.17.3, ${linked}) and the openclaw.json plugins.installs record copy (v${PIN}) disagree`,
+    });
+    expect(readSelectedRealtimeInstall(home)).not.toMatchObject({ state: 'selected', dir });
+    expect(decide()).toMatchObject({ replace: false });
+  });
+
   it('a load-path copy whose version cannot be read beside a record copy ⇒ unknown', () => {
     const { linked } = recordAndLoadPath(PIN);
     fs.writeFileSync(path.join(linked, 'package.json'), JSON.stringify({ name: PKG, version: 'latest' }));

@@ -364,7 +364,9 @@ function readLinkedCopy(
   const linked = readLinkedRealtimeInstall(home, { readIndex: () => index });
   if (linked.state === 'unknown') return { state: 'unknown', why: linked.why };
   if (linked.state !== 'linked') return { state: 'none' };
-  const id = identifyPluginDir(path.resolve(path.join(home, '.openclaw'), tilde(linked.at, home)));
+  // #1110 round 3: trim like readLinkedRealtimeInstall (and OpenClaw) do, so a
+  // padded load path still reaches the conflict check instead of reading `none`.
+  const id = identifyPluginDir(path.resolve(path.join(home, '.openclaw'), tilde(linked.at.trim(), home)));
   if (id.state !== 'ours') return { state: 'none' };
   const v = readPluginDirVersion(id.dir);
   if (v.state === 'unknown') return { state: 'unknown', why: `the linked copy: ${v.why}` };
