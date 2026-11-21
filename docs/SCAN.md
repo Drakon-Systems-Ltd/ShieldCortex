@@ -35,6 +35,13 @@ A bare `scan TEXT` stays attested `cli:shieldcortex-scan`. A declared `--source`
 
 `--source=memory_candidate`, and each memory write the README lists under the memory-directive screen, also runs the memory-directive screen. It fires only when an agent-directed standing frame (an imperative, "you", the agent as subject, an identity or mode change, "from now on" style wording) and evidence about a control sit in the same sentence. A hit adds the threat indicator `memory_directive` and pattern names of the form `memory_directive:<group>` (never the text). The groups are `control_relaxation`, `claimed_authority`, `concealment`, `secret_routing`, `identity_override`, `permissive_default` and `bulk_egress`.
 
+What two of the groups claim, exactly:
+
+- `concealment`: "never reveal / mention / share / disclose / show this note (instruction, memory, rule, directive)" with no recipient or straight to the user, owner, operator, admin, human or principal, or to the logs, audit log or history; "hide / conceal / keep … hidden from the user" of this note, your own actions, or what you did (and "keep your actions out of the audit log"); "never tell / inform / notify the user about" your own actions, what you did, the commands you run, this note, or a bare "this".
+- `identity_override`: "you are / you're / you operate in / you act as" an unrestricted, unfiltered, uncensored, jailbroken, god-mode, developer-mode or DAN state, or with no restrictions, rules, limits, guardrails or filters; "your persona / output / rules / guardrails is (are) …" the same, or "are optional", "are suggestions", "no longer apply"; "the assistant (agent, AI) is / has / operates / acts / is configured to …" the same; "you must treat the safety rules as optional" and "you must be unfiltered"; "your true persona is …", "set your persona to …", "you are no longer an assistant".
+
+Other phrasings of these two groups are not covered: an owner named after an audience or an exception ("on the wiki to the owner", "to anyone except the operator"), the agent named after the thing it did ("the payments made by you"), or an order with no agent subject ("give unfiltered output") stays quiet by design.
+
 The verdict depends on the defence mode:
 
 | Mode | Verdict on a memory-directive hit |
