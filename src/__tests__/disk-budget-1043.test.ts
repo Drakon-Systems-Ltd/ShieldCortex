@@ -238,6 +238,23 @@ describe('#1043 doctor Memories row names the cap setter at the cap', () => {
     expect(extractFixCommands(result.fix)).toEqual(['shieldcortex config --memory-cap ltm=2000']);
   });
 
+  it('the suggested cap is clamped to the setter maximum (100000)', () => {
+    const result = runMemoryStatsCheck(memoriesDb(0, 57_000), { maxShortTermMemories: 100, maxLongTermMemories: 60_000 });
+    expect(extractFixCommands(result.fix)).toEqual(['shieldcortex config --memory-cap ltm=100000']);
+  });
+
+  it('at the setter maximum doctor says so plainly and names no command', () => {
+    const result = runMemoryStatsCheck(memoriesDb(0, 95_000), { maxShortTermMemories: 100, maxLongTermMemories: 100_000 });
+    expect(result.status).toBe('warn');
+    expect(extractFixCommands(result.fix)).toEqual([]);
+    expect(result.fix).toMatch(/already at the largest the setter accepts \(100000\), so it cannot be raised further/);
+  });
+
+  it('a hand-edited cap below the setter minimum is suggested at the minimum (100)', () => {
+    const result = runMemoryStatsCheck(memoriesDb(0, 20), { maxShortTermMemories: 100, maxLongTermMemories: 20 });
+    expect(extractFixCommands(result.fix)).toEqual(['shieldcortex config --memory-cap ltm=100']);
+  });
+
   it('STM strictly over its cap still names consolidate', () => {
     const result = runMemoryStatsCheck(memoriesDb(101, 10), CAPS);
     expect(extractFixCommands(result.fix)).toEqual(['shieldcortex consolidate']);

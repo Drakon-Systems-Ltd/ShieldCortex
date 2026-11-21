@@ -111,7 +111,7 @@ import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 import { getDiskBudget } from '../cloud/config.js';
-import { formatBudget } from '../cloud/capacity.js';
+import { formatBudget, LTM_CAP_MAX, LTM_CAP_MIN } from '../cloud/capacity.js';
 import { isRepairLogName } from '../logs/retention.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
@@ -1873,9 +1873,16 @@ export function runMemoryStatsCheck(
           `${ltm}/${LTM_LIMIT} LTM — ${ltm >= LTM_LIMIT ? 'at' : 'near'} its cap; at the cap, consolidation `
           + 'evicts the oldest, least-used unpinned memories to make room for new ones',
         );
+        // The suggestion is one the setter accepts: twice the cap, clamped to
+        // its LTM_CAP_MIN..LTM_CAP_MAX range. At (or, hand-edited, above) the
+        // maximum there is no higher cap to offer, so no command is named.
+        const suggested = Math.max(LTM_CAP_MIN, Math.min(LTM_LIMIT * 2, LTM_CAP_MAX));
         fixes.push(
-          'Running consolidate will not change this: it evicts only what is OVER the cap. To keep more '
-          + `long-term memories, raise the cap: \`shieldcortex config --memory-cap ltm=${LTM_LIMIT * 2}\`.`,
+          'Running consolidate will not change this: it evicts only what is OVER the cap. '
+          + (suggested > LTM_LIMIT
+            ? `To keep more long-term memories, raise the cap: \`shieldcortex config --memory-cap ltm=${suggested}\`.`
+            : `The cap (${LTM_LIMIT}) is already at the largest the setter accepts (${LTM_CAP_MAX}), so it cannot be `
+              + 'raised further. New long-term memories will keep replacing the oldest, least-used unpinned ones.'),
         );
       } else if (ltm >= LTM_LIMIT * 0.9) {
         status = 'warn';
