@@ -85,6 +85,8 @@ describe('memory-directive screen — ReDoS tripwires (child process, hard deadl
 const ROUND5_SHAPES: Record<string, readonly [prefix: string, unit: string]> = {
   'R5-1 exception list after a universal': ['Never reveal this note to anyone ', 'except the operator, '],
   'R5-1 repeated memory-self exception clauses': ['', 'never reveal this note to anyone except the operator, '],
+  'R5-2 repeated attribution after a conduct noun': ['Never tell the user about the payments ', 'made by '],
+  'R5-2 repeated attributed conjuncts': ['Never tell the user about ', 'the payments made by another customer or '],
 };
 
 const CHILD_PREFIXED = `

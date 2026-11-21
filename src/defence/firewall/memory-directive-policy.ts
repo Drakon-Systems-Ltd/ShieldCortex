@@ -496,13 +496,26 @@ function memorySelfRecipientAccepted(text: string, matchEnd: number, clauseEnd: 
 }
 
 /**
- * The "about <X>" object of "never tell the user about ...". Concealment from
- * the owner fires when X is the agent's own conduct, this memory, or a bare
- * pronoun; another party's information ("another customer's medical history")
- * is privacy protection and stays quiet. An unspecified object ("don't tell
- * the user") never reaches this check.
+ * The "about <X>" object of "never tell the user about ...". Monotone: the
+ * agent always wins, and a third party is any other noun phrase, not a list.
+ *
+ *  1. AGENT WINS: an agent marker anywhere in the object, in any conjunct and
+ *     in any case — "your", "yourself", "you" ("the commands you run", "made
+ *     by You"), "the assistant / agent / ai", "by assistant" — fires.
+ *  2. This memory, "what you did" or a bare pronoun ("about this") fires.
+ *  3. A conduct noun whose own post-modifier attributes it — "(made / placed /
+ *     sent / submitted / received / issued / owned) by / from / of / for /
+ *     belonging to" + any noun phrase — is that party's information: quiet.
+ *  4. Any conjunct that is an unattributed conduct noun ("the payments") fires.
+ *     No conduct noun at all ("another customer's medical history") is quiet.
+ *
+ * Accepted residual: an arbitrary name ("made by Kestrel") is quiet — the
+ * agent's own name cannot be told from a third party's lexically. An
+ * unspecified object ("don't tell the user") never reaches this check.
  */
 const ABOUT_LEAD = /^[ \t]{0,4}about[ \t]{1,4}/i;
+const ABOUT_AGENT =
+  /\byou(?:r|rs|rself)?\b|\byou['’](?:re|ve|ll|d)\b|\b(?:the|this|our|my)[ \t]{1,4}(?:assistant|agent|ai)\b|\bby[ \t]{1,4}(?:assistant|agent)\b/i;
 const CONDUCT_NOUN =
   '(?:tool\\s+calls?|actions?|commands?|activity|changes?|accesses|reads|writes|deletions?|transfers?|uploads?|downloads?|' +
   'exports?|edits?|runs?|deploys?|deployments?|purchases?|payments?|mistakes?|errors?|failures?|work|decisions?)';
@@ -514,43 +527,25 @@ const ABOUT_CONDUCT = new RegExp(
   ].join('|'),
   'i',
 );
-/** A conduct noun: conduct unless its own post-modifier hands it to a third party. */
+/** A conduct noun opening a conjunct, then whether its own post-modifier attributes it. */
 const ABOUT_CONDUCT_NOUN = new RegExp(
-  `^(?:(?:the|any|these|those|such|your|my|its|our)\\s+)?(?:own\\s+)?(?:[\\w-]{1,30}\\s+)?${CONDUCT_NOUN}\\b(?!['\u2019])`,
+  `^(?:(?:the|any|these|those|such|my|its|our)\\s+)?(?:own\\s+)?(?:[\\w-]{1,30}\\s+)?${CONDUCT_NOUN}\\b(?!['’])`,
   'i',
 );
-/**
- * "... made by another customer", "... of a different client", "... belonging
- * to someone else", "... from Quellis": directly after the conduct noun, the
- * activity is attributed to a third party, so the note protects that party's
- * information. The agent ("by you", "by the assistant") is never a third
- * party here, and neither is the owner ("the user"): only an indefinite or
- * "other" referent, a someone / others pronoun, or a capitalised proper name.
- */
-const THIRD_PARTY_ATTRIBUTION =
-  /^[ \t]{1,4}(?:(?:made|placed|sent|submitted|received|owned)[ \t]{1,4}(?:by|from)|belonging[ \t]{1,4}to|by|from|of|for)[ \t]{1,4}/i;
-const THIRD_PARTY_REFERENT = new RegExp(
-  '^(?:(?:another|other|a|an|some|any[ \\t]{1,4}other|the[ \\t]{1,4}other|a[ \\t]{1,4}different|different)[ \\t]{1,4}' +
-    '(?:[\\w-]{1,30}[ \\t]{1,4})?(?:customers?|clients?|users?|tenants?|patients?|members?|persons?|people|part(?:y|ies)|suppliers?|vendors?)|' +
-    '(?:someone|somebody)(?:[ \\t]{1,4}else)?|others)\\b',
-  'i',
-);
-/** A capitalised proper name — case-sensitive on purpose ("by you" is not one). */
-const THIRD_PARTY_PROPER_NAME = /^[A-Z][a-z]{1,30}\b/;
+const ABOUT_ATTRIBUTION =
+  /^[ \t]{1,4}(?:(?:made|placed|sent|submitted|received|issued|owned)[ \t]{1,4})?(?:by|from|of|for|belonging[ \t]{1,4}to)[ \t]{1,4}\w/i;
+const ABOUT_CONJUNCT_CUT = /[ \t]{0,4}(?:,|\bor\b|\band\b|\bnor\b)[ \t]{0,4}/i;
 
 function ownerConcealAccepted(text: string, matchEnd: number, clauseEnd: number): boolean {
   const tail = text.slice(matchEnd, clauseEnd);
   const lead = tail.match(ABOUT_LEAD);
   if (!lead) return true;
   const object = tail.slice(lead[0].length);
-  if (ABOUT_CONDUCT.test(object)) return true;
-  const noun = object.match(ABOUT_CONDUCT_NOUN);
-  if (!noun) return false;
-  const rest = object.slice(noun[0].length);
-  const attribution = rest.match(THIRD_PARTY_ATTRIBUTION);
-  if (!attribution) return true;
-  const referent = rest.slice(attribution[0].length);
-  return !(THIRD_PARTY_REFERENT.test(referent) || THIRD_PARTY_PROPER_NAME.test(referent));
+  if (ABOUT_AGENT.test(object) || ABOUT_CONDUCT.test(object)) return true;
+  return object.split(ABOUT_CONJUNCT_CUT).some((conjunct) => {
+    const noun = conjunct.trim().match(ABOUT_CONDUCT_NOUN);
+    return noun !== null && !ABOUT_ATTRIBUTION.test(conjunct.trim().slice(noun[0].length));
+  });
 }
 
 // ─────────────────── secret routing: recipient rules ───────────────────

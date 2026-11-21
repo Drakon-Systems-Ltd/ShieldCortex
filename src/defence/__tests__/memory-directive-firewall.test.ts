@@ -38,6 +38,8 @@ import {
   ROUND2_PRECISION_LOCAL_EGRESS,
   ROUND2_RECALL,
   ROUND4_PRECISION,
+  ROUND5_ABOUT_PRECISION,
+  ROUND5_ABOUT_RECALL,
   ROUND5_RECIPIENT_PRECISION,
   ROUND5_RECIPIENT_RECALL,
   SINK_DIRECTIVES,
@@ -282,6 +284,26 @@ describe('M1 — round-5 R5-1 rows, exact verdicts in memory admission', () => {
     });
   }
   for (const [id, text] of ROUND5_RECIPIENT_PRECISION) {
+    it(`precision ${id}: ALLOW under memory_candidate and agent admission`, () => {
+      const lane = fw(text, 'memory_candidate');
+      expect(lane.result).toBe('ALLOW');
+      expect(lane.threatIndicators).not.toContain('memory_directive');
+      expect(fw(text, 'cli', BALANCED, { memoryAdmission: 'agent' }).result).toBe('ALLOW');
+    });
+  }
+});
+
+describe('M1 — round-5 R5-2 rows, exact verdicts in memory admission', () => {
+  for (const [id, text] of ROUND5_ABOUT_RECALL) {
+    it(`recall ${id}: QUARANTINE with concealment under memory_candidate and agent admission`, () => {
+      const lane = fw(text, 'memory_candidate');
+      expect(lane.result).toBe('QUARANTINE');
+      expect(lane.threatIndicators).toEqual(['memory_directive']);
+      expect(lane.blockedPatterns).toEqual(['memory_directive:concealment']);
+      expect(fw(text, 'cli', BALANCED, { memoryAdmission: 'agent' }).result).toBe('QUARANTINE');
+    });
+  }
+  for (const [id, text] of ROUND5_ABOUT_PRECISION) {
     it(`precision ${id}: ALLOW under memory_candidate and agent admission`, () => {
       const lane = fw(text, 'memory_candidate');
       expect(lane.result).toBe('ALLOW');
