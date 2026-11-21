@@ -35,7 +35,8 @@ export const SCAN_USAGE_LINES = [
   '  --json            emit one JSON object on stdout instead of the report.',
   '  Bare `scan TEXT` stays attested cli:shieldcortex-scan. Declared --source is not host-attested.',
   '  Untrusted data origins (web, document, email, tool_result, agent_message,',
-  '  memory_candidate) additionally get the L2 non-authoritative-instruction floor.',
+  '  memory_candidate) additionally get the L2 non-authoritative-instruction floor;',
+  '  memory_candidate also runs the memory-directive screen (indicator memory_directive).',
   '  Use `--` before TEXT that starts with `-`. Empty TEXT is usage.',
   '  Exit codes: 0=allow 1=caught 2=usage 3=tool-failure (control absent).',
 ] as const;

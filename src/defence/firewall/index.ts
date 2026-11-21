@@ -14,6 +14,7 @@ import type {
   DefenceConfig,
   ThreatIndicator,
   ProvenanceLabel,
+  MemoryAdmission,
 } from '../types.js';
 import type { SanitisationCategory } from '../input-sanitisation/index.js';
 
@@ -21,6 +22,12 @@ import { detectInstructions } from './instruction-detector.js';
 import type { InstructionDetectionResult } from './instruction-detector.js';
 import { detectNonAuthoritativeInstruction } from './provenance-policy.js';
 import type { NonAuthoritativeInstructionResult } from './provenance-policy.js';
+import {
+  MEMORY_DIRECTIVE_INDICATOR,
+  detectMemoryDirective,
+  memoryCandidateText,
+} from './memory-directive-policy.js';
+import type { MemoryDirectiveResult } from './memory-directive-policy.js';
 
 import { detectPrivilegeEscalation } from './privilege-detector.js';
 import type { PrivilegeDetectionResult } from './privilege-detector.js';
@@ -59,6 +66,59 @@ export {
   UNTRUSTED_DATA_ORIGIN_SOURCES,
 } from './provenance-policy.js';
 export type { NonAuthoritativeInstructionResult, NonAuthoritativePattern } from './provenance-policy.js';
+export {
+  MEMORY_DIRECTIVE_INDICATOR,
+  MEMORY_DIRECTIVE_PATTERN,
+  detectMemoryDirective,
+  memoryCandidateText,
+} from './memory-directive-policy.js';
+export type { MemoryDirectivePattern, MemoryDirectiveResult } from './memory-directive-policy.js';
+
+/**
+ * Optional analysis context. Today it carries one fact: whether the write is a
+ * memory ADMISSION (SCN-010). Absent means exactly the pre-SCN-010 behaviour
+ * for every label except `memory_candidate`, which is admission by definition.
+ */
+export interface FirewallContext {
+  memoryAdmission?: MemoryAdmission;
+}
+
+/** The label or flag that makes this analysis a memory admission (M1). */
+export function isMemoryAdmission(sourceType: string, context?: FirewallContext): boolean {
+  return sourceType === 'memory_candidate' || context?.memoryAdmission !== undefined;
+}
+
+/**
+ * SCN-010: memory admissions screened WITHOUT the memory-directive screen
+ * because it threw. Fail OPEN, like a missing export at the capture sites:
+ * the analysis continues exactly as before SCN-010 for that write (no S).
+ * Said once per process on stderr (fixed text, never the candidate) and
+ * counted here.
+ */
+let memoryDirectiveScreenUnavailable = 0;
+let memoryDirectiveScreenUnavailableNoted = false;
+
+/** How many memory admissions this process analysed without S (it threw). */
+export function getMemoryDirectiveScreenUnavailableCount(): number {
+  return memoryDirectiveScreenUnavailable;
+}
+
+/** S on one admission, or null when it could not run (it threw). */
+function runMemoryDirectiveScreen(text: string): MemoryDirectiveResult | null {
+  try {
+    return detectMemoryDirective(text);
+  } catch {
+    memoryDirectiveScreenUnavailable += 1;
+    if (!memoryDirectiveScreenUnavailableNoted) {
+      memoryDirectiveScreenUnavailableNoted = true;
+      process.stderr.write(
+        '[defence] memory_directive_screen_unavailable — the memory-directive screen threw; '
+        + 'memory admission continues without it (the pre-SCN-010 rules apply)\n',
+      );
+    }
+    return null;
+  }
+}
 
 /**
  * Run the full firewall analysis pipeline on memory content.
@@ -76,6 +136,12 @@ export function analyzeFirewall(
    * the smuggling attempt instead of silently allowing the cleaned content.
    */
   preSanitisationStrips?: SanitisationCategory[],
+  /**
+   * SCN-010: memory-admission context. Arms the memory-directive screen (M1)
+   * for a write that is not labelled `memory_candidate` (an agent's MCP
+   * `remember`, a hook's auto-capture).
+   */
+  context?: FirewallContext,
 ): FirewallAnalysis {
   const instructions = detectInstructions(content);
   const privilege = detectPrivilegeEscalation(content);
@@ -84,6 +150,16 @@ export function analyzeFirewall(
   const markdownImage = detectMarkdownImageExfil(content);
   const anomaly = scoreAnomaly(content, title);
   const nonAuthoritative = detectNonAuthoritativeInstruction(content, source.type);
+
+  // SCN-010 M1 — memory admission only. The screen only ADDS a hold: L1 and
+  // L2 above keep exactly the verdicts they have outside SCN-010. Every other
+  // label and context skips this branch and is byte-for-byte what it was.
+  let memoryDirective: MemoryDirectiveResult = { detected: false, patterns: [] };
+  if (isMemoryAdmission(source.type, context)) {
+    // Title AND content: both are recalled into context, so both are screened.
+    const screened = runMemoryDirectiveScreen(memoryCandidateText(title, content));
+    if (screened) memoryDirective = screened;
+  }
 
   // Fold pre-sanitisation zero-width/bidi strips into the encoding signal so
   // determineResult escalates (quarantine in balanced, block in strict). We map
@@ -118,6 +194,11 @@ export function analyzeFirewall(
   if (nonAuthoritative.detected) {
     threatIndicators.push('non_authoritative_instruction');
     blockedPatterns.push(...nonAuthoritative.patterns);
+  }
+
+  if (memoryDirective.detected) {
+    threatIndicators.push(MEMORY_DIRECTIVE_INDICATOR);
+    blockedPatterns.push(...memoryDirective.patterns);
   }
 
   // Credential exfiltration is a first-class classification (v4.47.2): credential
@@ -178,6 +259,7 @@ export function analyzeFirewall(
     threatIndicators,
     skillThreats,
     nonAuthoritative,
+    memoryDirective,
   );
 
   return {
@@ -222,10 +304,15 @@ function determineResult(
   threatIndicators: ThreatIndicator[],
   skillThreats?: { detected: boolean; threats: string[]; confidence: number },
   nonAuthoritative?: NonAuthoritativeInstructionResult,
+  memoryDirective?: MemoryDirectiveResult,
 ): { result: FirewallResult; reason: string } {
   const balanced = mode !== 'strict' && mode !== 'permissive';
-  const baseIndicators = balanced && nonAuthoritative?.detected
-    ? threatIndicators.filter((t) => t !== 'non_authoritative_instruction')
+  // The memory-directive indicator (SCN-010 M1) is withheld from the base
+  // verdict exactly as L2's is, so it can never reach QUARANTINE by the
+  // low-trust "detections" path or any other base branch: its one route to a
+  // verdict is the explicit escalation below.
+  const baseIndicators = balanced && (nonAuthoritative?.detected || memoryDirective?.detected)
+    ? threatIndicators.filter((t) => t !== 'non_authoritative_instruction' && t !== MEMORY_DIRECTIVE_INDICATOR)
     : threatIndicators;
 
   const base = determineBaseResult(
@@ -239,9 +326,16 @@ function determineResult(
     skillThreats,
   );
 
-  if (!balanced || !nonAuthoritative?.detected) return base;
-  // Never weaken: only a verdict L1 left at ALLOW is L2's to raise.
+  if (!balanced) return base;
+  if (!nonAuthoritative?.detected && !memoryDirective?.detected) return base;
+  // Never weaken: only a verdict L1 left at ALLOW is L2's / S's to raise.
   if (base.result !== 'ALLOW') return base;
+  if (memoryDirective?.detected) {
+    return {
+      result: 'QUARANTINE',
+      reason: `${memoryDirective.patterns.join(', ')}: standing instruction for agent memory`,
+    };
+  }
   return {
     result: 'QUARANTINE',
     reason: 'Non-authoritative instruction from untrusted data origin',

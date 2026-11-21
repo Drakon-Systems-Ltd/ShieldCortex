@@ -500,6 +500,11 @@ export function createOpenClawRuntime({
         loadMemoryCandidateScreen: typeof mod.loadMemoryCandidateScreen === "function"
           ? mod.loadMemoryCandidateScreen
           : null,
+        // SCN-010: names the indicator a refusal belongs to (memory_directive
+        // or L2). Optional for the same reason; absent means the L2 name.
+        refusalIndicator: typeof mod.refusalIndicator === "function"
+          ? mod.refusalIndicator
+          : null,
       };
       return _openClawExtract;
     } catch {

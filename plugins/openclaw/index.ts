@@ -88,6 +88,9 @@ type DefenceModule = {
     content: string,
     sourceType: string,
   ) => { detected: boolean; patterns: string[] };
+  /** SCN-010 memory-directive screen. Optional for the same reason: an older
+   *  dist without it keeps the L2 candidate screen alone. */
+  detectMemoryDirective?: (text: string) => { detected: boolean; patterns: string[] };
   /** #225 sink: the notify transport shared with the Action Guard (#143).
    *  Every member is optional — an older installed dist won't have them, and
    *  the guard must degrade to a loud log rather than fail. The field names
@@ -434,9 +437,11 @@ export function __resetConfigStateForTest(): void {
   _lastShieldConfigRef = null;
   _provenanceUndeclared = 0;
   _l2Degraded = 0;
+  _memoryDirectiveUnavailable = 0;
   // Re-arm the once-per-load config-failure warning (#226).
   _shieldConfigLoadFailureLogged = false;
   _l2DegradedLogged = false;
+  _memoryDirectiveUnavailableLogged = false;
   _registered = false;
   _beforeToolCallRegistered = false;
   _registrationError = null;
@@ -2005,6 +2010,65 @@ function noteL2Degraded(reason: string): void {
     'origin was judged by the base scanner alone; L1 is unaffected and nothing is blocked by ' +
     'this. (Logged once per plugin load; the count is in shieldcortex-status.)',
   );
+}
+
+/**
+ * SCN-010: auto-memory candidates screened WITHOUT the memory-directive screen
+ * (`memory_directive_screen_unavailable`). Same plane and same rules as the L2
+ * counter above: fail open (the L2 screen still runs), count it, say it once.
+ */
+let _memoryDirectiveUnavailable = 0;
+let _memoryDirectiveUnavailableLogged = false;
+
+/** Test seam: the memory-directive-unavailable count for this plugin load. */
+export function __getMemoryDirectiveUnavailableCountForTest(): number {
+  return _memoryDirectiveUnavailable;
+}
+
+function noteMemoryDirectiveUnavailable(reason: string): void {
+  _memoryDirectiveUnavailable += 1;
+  if (_memoryDirectiveUnavailableLogged) return;
+  _memoryDirectiveUnavailableLogged = true;
+  console.warn(
+    `[shieldcortex] ⚠️ memory_directive_screen_unavailable — ${reason}. Auto-memory candidates were ` +
+    'screened by the L2 provenance floor alone; nothing is blocked by this. (Logged once per plugin ' +
+    'load; the count is in shieldcortex-status.)',
+  );
+}
+
+/**
+ * Pattern names from the memory-directive screen, `[]` when it ran clean, and
+ * `null` when it could not run (no module, no export, a throw) — which the
+ * caller must treat as "S absent", never as "S clean".
+ */
+function applyMemoryDirectiveScreen(mod: DefenceModule | null, text: string): string[] | null {
+  if (!mod || typeof mod.detectMemoryDirective !== 'function') {
+    noteMemoryDirectiveUnavailable('the installed shieldcortex package has no detectMemoryDirective export');
+    return null;
+  }
+  try {
+    const result = mod.detectMemoryDirective(text);
+    return result?.detected && Array.isArray(result.patterns) ? [...result.patterns] : [];
+  } catch {
+    noteMemoryDirectiveUnavailable('the memory-directive screen threw');
+    return null;
+  }
+}
+
+/**
+ * The refusal decision for one auto-memory candidate (SCN-010 M2).
+ * S hit -> refuse under `memory_directive`. L2 hit -> refuse, exactly as before
+ * SCN-010 (persistence wording included). S only adds refusals.
+ */
+function autoMemoryRefusal(
+  directive: string[] | null,
+  provenance: string[],
+): { indicator: string; patterns: string[] } | null {
+  if (directive && directive.length > 0) {
+    return { indicator: 'memory_directive', patterns: [...directive, ...provenance] };
+  }
+  if (provenance.length === 0) return null;
+  return { indicator: 'non_authoritative_instruction', patterns: provenance };
 }
 
 // ==================== POLICY LOCK (#501) ====================
@@ -4327,19 +4391,36 @@ export async function captureLlmOutput(event: LlmOutputEvent, ctx: AgentCtx): Pr
       // than new coverage -- but the rule is the same at every capture site,
       // so a later change to extractMemories cannot quietly open a gap the
       // other sites do not have.
-      const patterns = applyProvenanceFloor(
-        defenceMod,
-        `${mem.title}\n${mem.content}`,
-        'memory_candidate',
+      const candidate = `${mem.title}\n${mem.content}`;
+      // SCN-010 M2: the memory-directive screen beside L2, on the same string.
+      const refusal = autoMemoryRefusal(
+        applyMemoryDirectiveScreen(defenceMod, candidate),
+        applyProvenanceFloor(defenceMod, candidate, 'memory_candidate'),
       );
-      if (patterns.length > 0) {
+      if (refusal) {
         refused++;
-        // Names and a title, never the refused text — it is the part nobody
-        // wanted persisted. No new sink: the plugin's existing console.
-        console.warn(
-          `[shieldcortex] ⚠️ auto-memory candidate refused (non_authoritative_instruction: ` +
-          `${patterns.join(', ')}): "${mem.title.slice(0, 80)}"`,
-        );
+        if (refusal.indicator === 'memory_directive') {
+          // SCN-010: pattern names only. The title here is the candidate's own
+          // first 80 characters, i.e. the refused text, so it is not printed.
+          console.warn(
+            `[shieldcortex] ⚠️ auto-memory candidate refused under memory_candidate ` +
+            `(${refusal.indicator}: ${refusal.patterns.join(', ')})`,
+          );
+        } else {
+          // Pre-existing L2 refusal line, unchanged: names and the title.
+          console.warn(
+            `[shieldcortex] ⚠️ auto-memory candidate refused (${refusal.indicator}: ` +
+            `${refusal.patterns.join(', ')}): "${mem.title.slice(0, 80)}"`,
+          );
+        }
+        // One durable record per refused candidate, attributed to
+        // memory_candidate, carrying the indicator and pattern names — never the
+        // title or the text. The count-only aggregate below is kept as it was.
+        await auditLog({
+          type: "memory_refusal", hook: "llm_output", provenance: "memory_candidate",
+          indicator: refusal.indicator, patterns: refusal.patterns,
+          sessionId: event.sessionId, ts: new Date().toISOString(),
+        });
         continue;
       }
 
@@ -4809,6 +4890,8 @@ export default {
               // "available" while the floor is absent is the silent-clean bug
               // this product already fixed once, one layer down.
               `  Provenance floor (L2): ${_l2Degraded === 0 ? 'applied' : `DEGRADED — ${_l2Degraded} text(s) scanned without it`}\n` +
+              // SCN-010: the auto-memory memory-directive screen, its own line.
+              `  Memory-directive screen: ${_memoryDirectiveUnavailable === 0 ? 'applied' : `UNAVAILABLE — memory_directive_screen_unavailable: ${_memoryDirectiveUnavailable} candidate(s) screened without it`}\n` +
               `  Auto memory: ${autoMemory} | Dedupe: ${dedupe}\n` +
               `  Cloud sync: ${cloud}`,
           };

@@ -287,6 +287,66 @@ export function approveQuarantineItemsBySource(sourceIdentifier: string, reviewe
   return approveQuarantineItems(ids.map((item) => item.id), reviewedBy);
 }
 
+// ───────────── SCN-010 M3: memory-directive holds are operator-only ─────────────
+
+/**
+ * A hold the memory-directive screen made (an agent's memory admission carried
+ * a standing instruction about a control). Releasing one is the operator's
+ * decision, so the agent-facing review surface never approves it.
+ */
+export function isMemoryDirectiveHold(row: { reason: string | null; threat_indicators: string | null }): boolean {
+  if (typeof row.reason === 'string' && row.reason.includes('memory_directive:')) return true;
+  return parseIndicators(row.threat_indicators).some(
+    (name) => name === 'memory_directive' || name.startsWith('memory_directive:'),
+  );
+}
+
+export type AgentApproveOutcome =
+  | { kind: 'reviewed'; result: QuarantineReviewResult }
+  | { kind: 'missing' }
+  | { kind: 'operator_only' };
+
+/**
+ * The agent-facing approve (MCP `quarantine_review`): same as
+ * approveQuarantineItem, except a memory-directive hold is left pending and
+ * reported as operator-only. The operator doors are unchanged.
+ */
+export function approveQuarantineItemAsAgent(id: number, reviewedBy: string): AgentApproveOutcome {
+  return withTransaction(() => {
+    const row = getPendingQuarantineRow(id);
+    if (!row) return { kind: 'missing' };
+    if (isMemoryDirectiveHold(row)) return { kind: 'operator_only' };
+    return { kind: 'reviewed', result: approveExistingPendingRow(row, reviewedBy) };
+  });
+}
+
+/**
+ * The agent-facing by-source approve: memory-directive holds are skipped (left
+ * pending) and counted in `operatorOnly`; `total` counts every pending item
+ * from the source.
+ */
+export function approveQuarantineItemsBySourceAsAgent(
+  sourceIdentifier: string,
+  reviewedBy: string,
+): QuarantineBulkReviewResult & { operatorOnly: number } {
+  const rows = getDatabase().prepare(
+    "SELECT id, reason, threat_indicators FROM quarantine WHERE status = 'pending' AND source_identifier = ? ORDER BY created_at ASC"
+  ).all(sourceIdentifier) as Array<{ id: number; reason: string | null; threat_indicators: string | null }>;
+  const allowed = rows.filter((row) => !isMemoryDirectiveHold(row)).map((row) => row.id);
+  const operatorOnly = rows.length - allowed.length;
+  const result = allowed.length > 0
+    ? approveQuarantineItems(allowed, reviewedBy)
+    : { success: true, updated: 0, total: 0, promoted: 0, rejected: 0, items: [] };
+  return { ...result, total: rows.length, operatorOnly };
+}
+
+/** Reply text when the agent asks to approve a memory-directive hold. Names only. */
+export function describeOperatorOnlyHold(id: number): string {
+  return `Quarantine item ${id} was not approved: it was held as a standing instruction for agent memory `
+    + '(memory_directive), and releasing it is the operator\'s decision. It stays pending; the operator can '
+    + 'review it in the ShieldCortex dashboard (quarantine review).';
+}
+
 /**
  * Reply text for an approval request (MCP `quarantine_review`). Reports the
  * recorded outcome: a refused approval says so (#824).
@@ -300,11 +360,18 @@ export function describeApproveResult(id: number, result: QuarantineReviewResult
 }
 
 /** Reply text for a by-source approval batch: approved and refused counts. */
-export function describeBulkApproveResult(sourceIdentifier: string, result: QuarantineBulkReviewResult): string {
+export function describeBulkApproveResult(
+  sourceIdentifier: string,
+  result: QuarantineBulkReviewResult & { operatorOnly?: number },
+): string {
   const approved = result.updated - result.rejected;
   const notApproved = result.rejected > 0
     ? `; ${result.rejected} not approved (could not be admitted; now rejected, not added to memory)`
     : '';
+  const operatorOnly = result.operatorOnly && result.operatorOnly > 0
+    ? `; ${result.operatorOnly} skipped (memory_directive holds stay pending: releasing them is the operator's decision, `
+      + 'in the ShieldCortex dashboard quarantine review)'
+    : '';
   return `Batch reviewed ${result.updated} of ${result.total} items from "${sourceIdentifier}": `
-    + `${approved} approved (${result.promoted} promoted to memory)${notApproved}.`;
+    + `${approved} approved (${result.promoted} promoted to memory)${notApproved}${operatorOnly}.`;
 }

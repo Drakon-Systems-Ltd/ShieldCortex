@@ -79,7 +79,7 @@ import {
   syncMemoryUpsertToCloud,
 } from '../cloud/memory-sync.js';
 import { isFeatureEnabled } from '../license/gate.js';
-import type { DefenceSource, DefencePipelineResult, AuditOperation } from '../defence/types.js';
+import type { DefenceSource, DefencePipelineResult, AuditOperation, MemoryAdmission } from '../defence/types.js';
 import { checkAccess } from '../defence/trust/access-control.js';
 import { scoreSource } from '../defence/trust/source-scorer.js';
 import { logAudit, createContentHash, createAuditContentHash, attestedFlag } from '../defence/audit/logger.js';
@@ -638,8 +638,12 @@ function assessMemoryAdmissionInternal(
   sideEffects: AdmissionSideEffects,
   deferredEffects?: DeferredMemoryEffect[],
   sanitiseInputForTest?: (content: string) => SanitisationResult,
+  memoryAdmission?: MemoryAdmission,
 ): MemoryAdmissionAssessment {
   const effectiveSource: DefenceSource = source ?? UNATTRIBUTED_SOURCE;
+  // SCN-010: only the agent's own MCP admission (M3) sets this; every other
+  // caller leaves it undefined and keeps exactly the pre-SCN-010 pipeline.
+  const admission = memoryAdmission ? { memoryAdmission } : {};
   const result = sideEffects === 'preview'
     ? runDefencePipelinePreviewInternal(
       input.content,
@@ -647,7 +651,7 @@ function assessMemoryAdmissionInternal(
       effectiveSource,
       undefined,
       input.project,
-      { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata } },
+      { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata }, ...admission },
       sanitiseInputForTest,
     )
     : sideEffects === 'transactional'
@@ -658,10 +662,10 @@ function assessMemoryAdmissionInternal(
         deferredEffects ?? [],
         undefined,
         input.project,
-        { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata } },
+        { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata }, ...admission },
         sanitiseInputForTest,
       )
-      : runDefencePipeline(input.content, input.title, effectiveSource, undefined, input.project, { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata } });
+      : runDefencePipeline(input.content, input.title, effectiveSource, undefined, input.project, { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata }, ...admission });
   const disposition = resolveDispositionV2({
     allowed: result.allowed,
     firewallResult: result.firewall.result,
@@ -690,9 +694,11 @@ function assessMemoryAdmissionInternal(
 function assessMemoryAdmission(
   input: MemoryInput,
   source?: DefenceSource,
-  options?: { sourceAttested?: boolean },
+  options?: { sourceAttested?: boolean; memoryAdmission?: MemoryAdmission },
 ): MemoryAdmissionAssessment {
-  return assessMemoryAdmissionInternal(input, source, options?.sourceAttested, 'record');
+  return assessMemoryAdmissionInternal(
+    input, source, options?.sourceAttested, 'record', undefined, undefined, options?.memoryAdmission,
+  );
 }
 
 const NATIVE_IMPORT_ADMISSION_TOKEN = Symbol('native-import-admission');
@@ -726,13 +732,13 @@ export function addMemory(
   input: MemoryInput,
   config?: MemoryConfig,
   source?: DefenceSource,
-  options?: { sourceAttested?: boolean },
+  options?: { sourceAttested?: boolean; memoryAdmission?: MemoryAdmission },
 ): Memory;
 export function addMemory(
   input: MemoryInput,
   config: MemoryConfig = resolveMemoryConfig(),
   source?: DefenceSource,
-  options?: { sourceAttested?: boolean },
+  options?: { sourceAttested?: boolean; memoryAdmission?: MemoryAdmission },
   internal?: InternalAddMemoryOptions,
 ): Memory {
   if (internal && internal.token !== NATIVE_IMPORT_ADMISSION_TOKEN) {
@@ -776,6 +782,7 @@ export function addMemory(
   // throttled by the shared synthetic key.
   const assessment = internal?.assessment ?? assessMemoryAdmission(input, source, {
     sourceAttested: options?.sourceAttested,
+    memoryAdmission: options?.memoryAdmission,
   });
   if (internal) {
     assertAssessmentMatches(input, source, assessment);
@@ -1460,7 +1467,9 @@ function updateProvenance(memory: Memory): TripleProvenance | undefined {
 
 export function updateMemory(
   id: number,
-  updates: Partial<MemoryInput>
+  updates: Partial<MemoryInput>,
+  /** SCN-010 M3: the MCP remember dedupe branch passes the agent admission flag. */
+  options?: { memoryAdmission?: MemoryAdmission },
 ): Memory | null {
   const db = getDatabase();
   const existing = getMemoryById(id);
@@ -1475,6 +1484,7 @@ export function updateMemory(
     const scanTitle = updates.title !== undefined ? updates.title : existing.title;
     const defenceResult = runDefencePipeline(scanContent, scanTitle, UNATTRIBUTED_SOURCE, undefined, existing.project ?? undefined, {
       redactionSiblings: { tags: updates.tags ?? existing.tags, metadata: updates.metadata ?? existing.metadata },
+      ...(options?.memoryAdmission ? { memoryAdmission: options.memoryAdmission } : {}),
     });
     if (defenceResult.firewall.result !== 'ALLOW') {
       throw new MemoryBlockedError(defenceResult.firewall.reason);
