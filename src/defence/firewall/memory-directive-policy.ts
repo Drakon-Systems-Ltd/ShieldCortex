@@ -226,7 +226,7 @@ const ALWAYS_ASK_BEFORE = /\balways\s+(?:ask|check|confirm)\b[^.!?;\n]{0,80}\bbe
 // ───────────────────────── E: the evidence groups ─────────────────────────
 
 type FrameKind = 'F1i' | 'F1a' | 'F2' | 'F3' | 'F4';
-type EvidenceKind = 'plain' | 'without' | 'secret' | 'hide' | 'bulk' | 'owner' | 'self';
+type EvidenceKind = 'plain' | 'without' | 'secret' | 'hide' | 'bulk' | 'owner' | 'self' | 'agentOutput';
 
 interface EvidencePattern {
   re: RegExp;
@@ -313,6 +313,27 @@ const AGENT_MODE_BINDING =
   '(?:switch|put|set|place)(?:es|s)?\\s+(?:yourself|itself)\\s+(?:in|into|to)\\s+|' +
   'your\\s+(?:(?:current|new|default)\\s+)?mode\\s+is\\s+(?:now\\s+)?)';
 
+/**
+ * Output / state words ("unfiltered output", "no limits", "rules are
+ * optional") are the AGENT's only when they bind to it — the same
+ * agent-versus-application line as the modes above. "When you run the
+ * debugger, choose raw, unfiltered output" names the debugger's output.
+ */
+const OUTPUT_ADJ = '(?:raw,?\\s+)?(?:unfiltered|uncensored|unrestricted)';
+/** The agent as subject, before its verb: "you (should) (always)", "the assistant now". */
+const AGENT_SUBJECT =
+  `(?:you|(?:the|this|our|my)\\s+${AGENT_NOUN})\\s+` +
+  // Modals without a negation: "you never give ..." must stay a negated verb.
+  '(?:(?:must|should|shall|will|can|may|needs?\\s+to|has\\s+to|have\\s+to|now|currently|also|always|then|only)\\s+){0,3}';
+const AGENT_OUTPUT_VERB =
+  '(?:give|gives|giving|produce|produces|producing|respond|responds|responding|reply|replies|replying|' +
+  'answer|answers|answering|write|writes|writing|return|returns|returning)';
+const STATE_NOUN = '(?:restrictions|limits|filters|rules|guardrails)';
+const AGENT_SUBJECT_START = new RegExp(`^${AGENT_SUBJECT}`, 'i');
+const OPTIONAL_NOUN = '(?:rules|constraints|guidelines|restrictions|guardrails)';
+const OPTIONAL_STATE =
+  '(?:are|as)\\s+(?:(?:only|just|merely|now)\\s+)?(?:optional|suggestions|playful\\s+suggestions)\\b';
+
 const GROUPS: EvidenceGroup[] = [
   {
     name: MEMORY_DIRECTIVE_PATTERN.CONTROL_RELAXATION,
@@ -376,11 +397,21 @@ const GROUPS: EvidenceGroup[] = [
       // "you / the assistant operate(s) in", "switch yourself into", "your
       // mode is". "run in developer mode" while debugging a client names the
       // app's mode, not the agent's.
-      ev(`\\b${AGENT_MODE_BINDING}${OVERRIDE_MODE}`),
-      ev('\\b(?:unfiltered|uncensored|unrestricted)\\s+(?:operator|output|assistant|ai|agent|model|persona|version)\\b'),
-      ev('\\bno\\s+(?:restrictions|limits|filters|rules|guardrails)(?:\\s+(?:at\\s+all|whatsoever|anymore))?(?=[ \\t]{0,4}(?:[.!?;,\\n]|$))'),
-      ev('\\b(?:rules|constraints|guidelines|safety\\s+rules|restrictions|guardrails)\\s+(?:are|as)\\s+(?:(?:only|just|merely|now)\\s+)?(?:optional|suggestions|playful\\s+suggestions)\\b'),
-      ev('\\braw,?\\s+unfiltered\\b'),
+      ev(`\\b${AGENT_MODE_BINDING}(?:raw,?\\s+)?${OVERRIDE_MODE}`),
+      // An identity noun is the agent by definition.
+      ev('\\b(?:unfiltered|uncensored|unrestricted)\\s+(?:operator|assistant|ai|agent|model|persona|version)\\b'),
+      // Output the agent gives: "(you) reply with uncensored output". With no
+      // agent subject the verb must be in imperative position (checked after).
+      ev(`\\b(?:${AGENT_SUBJECT})?${AGENT_OUTPUT_VERB}\\s+(?:(?:with|in|using)\\s+)?(?:(?:only|fully|completely)\\s+)?(?:(?:a|an|the|your)\\s+)?${OUTPUT_ADJ}\\s+output\\b`, 'agentOutput'),
+      // "your output is unfiltered", "your raw, unfiltered output".
+      ev(`\\byour\\s+(?:(?:own|default|new|current)\\s+)?(?:output\\s+(?:is|will\\s+be|stays|remains)\\s+(?:(?:now|always|fully|completely)\\s+)?${OUTPUT_ADJ}\\b|${OUTPUT_ADJ}\\s+output\\b)`),
+      // "you have / operate with no limits", "the assistant has no guardrails".
+      ev(`\\b(?:${AGENT_SUBJECT}(?:have|has|(?:are|is)\\s+under|(?:operates?|acts?|works?|runs?|answers?|responds?|repl(?:y|ies)|behaves?)\\s+(?:with|under))|you['’]re\\s+under)\\s+no\\s+${STATE_NOUN}(?:\\s+(?:at\\s+all|whatsoever|anymore))?(?=[ \\t]{0,4}(?:[.!?;,\\n]|$))`),
+      // "your (safety) rules are optional", "for you, the guardrails are only suggestions",
+      // "... are optional for you".
+      ev(`\\byour\\s+(?:[\\w-]{1,30}\\s+)?${OPTIONAL_NOUN}\\s+${OPTIONAL_STATE}`),
+      ev(`\\bfor\\s+you\\b[^.!?;\\n]{0,60}?\\b${OPTIONAL_NOUN}\\s+${OPTIONAL_STATE}`),
+      ev(`\\b${OPTIONAL_NOUN}\\s+${OPTIONAL_STATE}\\s+(?:for|to)\\s+(?:you|(?:the|this|our|my)\\s+${AGENT_NOUN})\\b`),
     ],
   },
   {
@@ -761,6 +792,10 @@ function groupHitsWindow(
       if (kind === 'owner' && !ownerConcealAccepted(scanText, end, to)) continue;
       if (kind === 'secret' && !secretRoutingAccepted(scanText, end, to, match[0])) continue;
       if (kind === 'bulk' && !bulkEgressAccepted(scanText, end, to)) continue;
+
+      // "give raw, unfiltered output" with no agent subject: only as an order.
+      if (kind === 'agentOutput' && !AGENT_SUBJECT_START.test(match[0])
+          && !imperativePosition(lastSegment(before))) continue;
 
       const adopted = adoptionCoda(scanText.slice(start, to));
       if (exempt(view, scanText, spans, start, end, from, adopted)) continue;
