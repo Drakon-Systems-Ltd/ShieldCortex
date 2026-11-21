@@ -303,9 +303,19 @@ const CONDUCT_NOUN =
 /** C3: what is hidden — this memory, the agent's own conduct, or what it did. */
 const HIDDEN_OBJECT =
   `(?:${MEMORY_SELF}|your\\s+${CONDUCT_NOUN}\\b|what\\s+you\\s+(?:do|did|run|change|delete|send))`;
+/**
+ * r6b: after "your <conduct noun>" the noun phrase must END (clause end, a
+ * comma, a coordinator) or continue only with a relative opener, a
+ * preposition or a participle ("your tool calls made by …": the agent
+ * binding wins). In "about your work colleague's history" the conduct word
+ * modifies another noun, so it is not the agent's conduct.
+ */
+const CONDUCT_HEAD_END =
+  '(?=[ \\t]{0,4}(?:[.!?;,\\n]|$|(?:and|or|nor|but|that|which|you|on|in|with|to|from|for|at|during|today|here|by|of|' +
+  'made|done|run|ran|sent|taken|given|written|shown|built|paid|bought|kept|left|[a-z]{2,20}ed)\\b))';
 /** C4: the "about <X>" object — it must BEGIN with the agent's binding, or be this memory / a bare pronoun. */
 const ABOUT_OBJECT =
-  `(?:your\\s+${CONDUCT_NOUN}\\b(?!['\u2019])|(?:what|how|why|when)\\s+you\\b|the\\s+${CONDUCT_NOUN}\\s+you\\s+[a-z]{2,20}\\b|` +
+  `(?:your\\s+${CONDUCT_NOUN}\\b${CONDUCT_HEAD_END}|(?:what|how|why|when)\\s+you\\b|the\\s+${CONDUCT_NOUN}\\s+you\\s+[a-z]{2,20}\\b|` +
   `(?:this|that|it|any\\s+of\\s+this|${MEMORY_SELF})${CLAUSE_END})`;
 const OWNER_PERSON = `(?:(?:the|your)\\s+)?${OWNER_WORD}`;
 
@@ -343,9 +353,19 @@ const BULK_OBJECT =
  * "enable god mode") is not claimed; other groups may still fire on it.
  */
 const OVERRIDE_MODE = '(?:developer|dan|unrestricted|unfiltered|uncensored)\\s+mode\\b';
+/**
+ * r6b: an override adjective must describe the agent or its output, not a
+ * following object ("you are testing jailbroken PHONES", "the assistant is
+ * comparing uncensored TRANSCRIPTS"). After it: the end of the phrase, "now",
+ * a preposition ("unrestricted for these requests") or an agent / mode / output noun.
+ */
+const OVERRIDE_ADJ_END =
+  '(?=[ \\t]{0,4}(?:[.!?;,\\n]|$|(?:and|or|nor|but|now|for|in|on|with|from|by|to|at|during|when|whenever|while|' +
+  'ai|assistant|agent|model|bot|chatbot|llm|version|persona|mode|self|output|outputs|answers?|replies|reply|responses?|content|text)\\b))';
 /** "DAN" is matched case-insensitively here and checked upper-case after the match ("Dan" is a name). */
 const OVERRIDE_TERM =
-  `(?:jailbroken\\b|god\\s+mode\\b|${OVERRIDE_MODE}|unrestricted\\b|unfiltered\\b|uncensored\\b|dan\\b(?!['’])|` +
+  `(?:jailbroken\\b${OVERRIDE_ADJ_END}|god\\s+mode\\b|${OVERRIDE_MODE}|unrestricted\\b${OVERRIDE_ADJ_END}|` +
+  `unfiltered\\b${OVERRIDE_ADJ_END}|uncensored\\b${OVERRIDE_ADJ_END}|dan\\b(?!['’])|` +
   'no\\s+(?:restrictions|rules|limits|guardrails|filters)\\b)';
 /**
  * One filler word between the binding and the term. Never a negation (that
@@ -353,7 +373,7 @@ const OVERRIDE_TERM =
  * unrestricted build" names the build, not the agent).
  */
 const FILLER =
-  "(?:(?!(?:not|never|no|the|a|an|this|that|these|those|its|their|his|her|my|our|any)\\b)[\\w'’-]{1,30},?\\s+)";
+  "(?:(?!(?:not|never|no|the|a|an|this|that|these|those|its|their|his|her|my|our|any)\\b)(?![\\w'’-]{0,27}ing\\b)[\\w'’-]{1,30},?\\s+)";
 const ARTICLE = '(?:(?:a|an|the)\\s+)?';
 const I1_LEAD =
   "(?:(?:you\\s+are|you['’]re)(?:\\s+now)?(?:\\s+(?:in|as|like))?|you\\s+(?:now\\s+)?(?:operate|act)\\s+(?:in|as|like|with|under))";

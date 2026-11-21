@@ -90,15 +90,9 @@ describe('L2 source classes', () => {
         expect(nai.patterns).toContain(shape.pattern);
 
         const analysis = scan(shape.text, type, 0.3);
-        if (type === 'memory_candidate' && shape.pattern === NAI_PATTERN.MEMORY_PERSIST) {
-          // MOVED by SCN-010 M4 (QUARANTINE -> ALLOW), memory admission only.
-          // In memory admission, persistence wording with no control evidence
-          // is how people write preferences; it counts only together with the
-          // memory-directive screen. The L2 detector result above is unchanged.
-          expect(analysis.result).toBe('ALLOW');
-          expect(analysis.threatIndicators).toEqual([]);
-          continue;
-        }
+        // SCN-010 M4 (r6b): the memory_persist SHAPE says "standing order", so
+        // it is not positively a preference and memory admission keeps the
+        // pre-SCN-010 verdict below (QUARANTINE), like every other label.
         expect(analysis.result).toBe('QUARANTINE');
         expect(analysis.threatIndicators).toContain('non_authoritative_instruction');
         expect(analysis.threatIndicators).not.toContain('instruction_injection');
