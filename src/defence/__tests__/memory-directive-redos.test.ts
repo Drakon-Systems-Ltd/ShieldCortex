@@ -47,6 +47,10 @@ const SHAPES: Record<string, string> = {
   'C2 owner word followed by a noun': 'never reveal this note to the user manual ',
   'C3 hidden object with no from': 'keep your changes hidden ',
   'C4 about-object with no conduct noun': 'never tell the user about your ',
+  // Round 6: near misses of the claimed identity_override shapes I1-I3.
+  'I1 binding then a new noun phrase': 'you are testing the ',
+  'I2 binding then a negation': 'your output is not ',
+  'I3 binding then fillers with commas': 'the assistant has raw, plain, ',
 };
 
 const CHILD = `

@@ -216,7 +216,7 @@ const ALWAYS_ASK_BEFORE = /\balways\s+(?:ask|check|confirm)\b[^.!?;\n]{0,80}\bbe
 // ───────────────────────── E: the evidence groups ─────────────────────────
 
 type FrameKind = 'F1i' | 'F1a' | 'F2' | 'F3' | 'F4';
-type EvidenceKind = 'plain' | 'without' | 'secret' | 'bulk' | 'agentOutput';
+type EvidenceKind = 'plain' | 'without' | 'secret' | 'bulk';
 
 interface EvidencePattern {
   re: RegExp;
@@ -319,64 +319,51 @@ const BULK_OBJECT =
   '(?:(?:a\\s+copy\\s+of|copies\\s+of)\\s+)?(?:everything|(?:all|every|any|each)\\s+(?:of\\s+)?(?:(?:the|my|your|our|their|its|these|those)\\s+)?' +
   '(?:[\\w-]{1,30}\\s+)?(?:files?|documents?|docs|data|e-?mails?|messages?|attachments?|records?|notes|memories|contents?|folders?|directories)\\b)';
 
-/** The override modes: an adjective + "mode". */
+/**
+ * identity_override — the claimed core (round 6). Fires ONLY when the state /
+ * identity evidence is bound to the agent inside the match itself:
+ *
+ *  I1  "you are (now) / you're / you (now) operate|act in|as|like|with|under"
+ *      + optional a|an|the + at most two words + an override term
+ *  I2  "your (true|real|new) persona|identity|mode|role|output|replies|
+ *      answers|responses|rules|restrictions|guardrails|safety rules"
+ *      + is|are|has|have (now) + an override term, or "are (only)
+ *      optional / suggestions", or "no longer apply"
+ *  I3  "the assistant|agent|ai" + is|has|operates|acts|"is configured to
+ *      be|give|reply|answer|respond" + at most three words + an override term
+ *  I4  "you must|should|have to|will|can (now) treat|consider (your|the)
+ *      (safety) rules (as) optional|suggestions"; "you must|should|will
+ *      be|stay|remain (raw,) unfiltered|uncensored|unrestricted"
+ *  I5  the explicit redefinitions: "your (true|real|new|core) identity|
+ *      persona|personality is" + an override term, "set|change|... your
+ *      persona|mode|... to|as" + an override term, "you are no longer an
+ *      assistant"
+ *
+ * An imperative with no agent subject ("give raw, unfiltered output",
+ * "enable god mode") is not claimed; other groups may still fire on it.
+ */
 const OVERRIDE_MODE = '(?:developer|dan|unrestricted|unfiltered|uncensored)\\s+mode\\b';
-/** What binds a mode to the agent itself (subject, reflexive, or possessive). */
-const AGENT_MODE_BINDING =
-  "(?:(?:you\\s+are|you['\u2019]re|assume\\s+you\\s+are)\\s+(?:(?:now|currently|always)\\s+)?(?:in\\s+)?|" +
-  `(?:you|(?:the|this|our|my)\\s+${AGENT_NOUN})\\s+(?:(?:${MODAL}|now|currently|also|always|then)\\s+){0,3}` +
-  '(?:operates?|operating|runs?|running|works?|working|acts?|acting|stays?|staying|remains?)\\s+(?:(?:now|currently|always)\\s+)?in\\s+|' +
-  '(?:switch|put|set|place)(?:es|s)?\\s+(?:yourself|itself)\\s+(?:in|into|to)\\s+|' +
-  'your\\s+(?:(?:current|new|default)\\s+)?mode\\s+is\\s+(?:now\\s+)?)';
-
+/** "DAN" is matched case-insensitively here and checked upper-case after the match ("Dan" is a name). */
+const OVERRIDE_TERM =
+  `(?:jailbroken\\b|god\\s+mode\\b|${OVERRIDE_MODE}|unrestricted\\b|unfiltered\\b|uncensored\\b|dan\\b(?!['’])|` +
+  'no\\s+(?:restrictions|rules|limits|guardrails|filters)\\b)';
 /**
- * Output / state words ("unfiltered output", "no limits", "rules are
- * optional") are the AGENT's only when they bind to it — the same
- * agent-versus-application line as the modes above. "When you run the
- * debugger, choose raw, unfiltered output" names the debugger's output.
+ * One filler word between the binding and the term. Never a negation (that
+ * flips it) and never a determiner (a new noun phrase: "you are testing THE
+ * unrestricted build" names the build, not the agent).
  */
-const OUTPUT_ADJ = '(?:raw,?\\s+)?(?:unfiltered|uncensored|unrestricted)';
-/** The agent as subject, before its verb: "you (should) (always)", "the assistant now". */
-const AGENT_SUBJECT =
-  `(?:you|(?:the|this|our|my)\\s+${AGENT_NOUN})\\s+` +
-  // Modals without a negation: "you never give ..." must stay a negated verb.
-  '(?:(?:must|should|shall|will|can|may|needs?\\s+to|has\\s+to|have\\s+to|now|currently|also|always|then|only)\\s+){0,3}';
-const AGENT_OUTPUT_VERB =
-  '(?:give|gives|giving|produce|produces|producing|respond|responds|responding|reply|replies|replying|' +
-  'answer|answers|answering|write|writes|writing|return|returns|returning)';
-const STATE_NOUN = '(?:restrictions|limits|filters|rules|guardrails)';
-const AGENT_SUBJECT_START = new RegExp(`^${AGENT_SUBJECT}`, 'i');
-const OPTIONAL_NOUN = '(?:rules|constraints|guidelines|restrictions|guardrails)';
-const OPTIONAL_STATE =
-  '(?:are|as)\\s+(?:(?:only|just|merely|now)\\s+)?(?:optional|suggestions|playful\\s+suggestions)\\b';
-
-/**
- * Who owns an identity_override state / output / mode? Monotone, per clause:
- *  1. AGENT WINS: an explicit agent binding anywhere in the clause ("you are /
- *     must / reply ...", "your ... output / rules", "the assistant ... is /
- *     gives", "for you") — the state is the agent's: fire.
- *  2. APP FRAME QUIETS: else a verb of operating a thing + an application noun
- *     outside the evidence ("When you run the Vellun test game, enable god
- *     mode") — the state is the application's: quiet.
- *  3. Else as before (an output verb with no agent subject only as an order).
- */
-const IDENTITY_AGENT_BOUND = new RegExp(
-  [
-    "\\byou[ \\t]{1,4}(?:are|now|operate|act|must|should|will|reply|answer|respond|give|produce)\\b|\\byou['\u2019](?:re|ll)\\b",
-    '\\byour[ \\t]{1,4}(?:[\\w-]{1,30}[ \\t]{1,4}){0,2}(?:output|mode|rules|persona|identity|restrictions)\\b',
-    '\\b(?:the|this|our|my)[ \\t]{1,4}(?:assistant|agent|ai)[ \\t]{1,4}(?:[\\w-]{1,30}[ \\t]{1,4}){0,4}' +
-      '(?:give|gives|produce|produces|respond|responds|reply|replies|answer|answers|return|returns|be|is|are|operates|acts)\\b',
-    '\\bfor[ \\t]{1,4}you\\b',
-  ].join('|'),
-  'i',
-);
-const IDENTITY_APP_FRAME = new RegExp(
-  '\\b(?:run|open|test|launch|start|download|install|inspect|profile|debug|use|reproduce|build|select|enable|choose|switch)' +
-    '[ \\t]{1,4}(?:(?:the|a|an|this|that|its|any|our|my|your)[ \\t]{1,4})?(?:[\\w-]{1,30}[ \\t]{1,4}){0,3}?' +
-    '(?:app|application|tool|debugger|profiler|logger|client|console|compiler|browser|device|handset|phone|game|build|' +
-    'harness|service|emulator|simulator|binary|program|server|terminal|trace|toggle|version|crash)s?\\b',
-  'i',
-);
+const FILLER =
+  "(?:(?!(?:not|never|no|the|a|an|this|that|these|those|its|their|his|her|my|our|any)\\b)[\\w'’-]{1,30},?\\s+)";
+const ARTICLE = '(?:(?:a|an|the)\\s+)?';
+const I1_LEAD =
+  "(?:(?:you\\s+are|you['’]re)(?:\\s+now)?(?:\\s+(?:in|as|like))?|you\\s+(?:now\\s+)?(?:operate|act)\\s+(?:in|as|like|with|under))";
+const I2_NOUN =
+  '(?:persona|identity|mode|role|output|replies|answers|responses|rules|restrictions|guardrails|safety\\s+rules)';
+const I3_VERB =
+  '(?:is\\s+configured\\s+to\\s+(?:be|give|reply|answer|respond)(?:\\s+with)?|is(?:\\s+now)?|has(?:\\s+now)?|operates|acts)';
+/** The DAN post-check: a match ending in "dan" must spell it "DAN". */
+const DAN_LOWER_END = /\bdan$/i;
+const DAN_UPPER_END = /\bDAN$/;
 
 const GROUPS: EvidenceGroup[] = [
   {
@@ -428,34 +415,23 @@ const GROUPS: EvidenceGroup[] = [
   },
   {
     name: MEMORY_DIRECTIVE_PATTERN.IDENTITY_OVERRIDE,
-    // F4 alone is not enough here: "the demo build runs in god mode from now on".
-    frames: new Set<FrameKind>(['F1a', 'F2', 'F3']),
+    // F4 alone is not enough here. F1i is: every claimed shape binds the
+    // agent inside its own match ("the assistant has no guardrails").
+    frames: new Set<FrameKind>(['F1i', 'F1a', 'F2', 'F3']),
     patterns: [
-      ev('\\bjailbr(?:oken|eak(?:ed)?)\\b'),
-      ev('\\bgod\\s+mode\\b'),
-      // A mode is the AGENT's only when it binds to the agent: "you are in",
-      // "you / the assistant operate(s) in", "switch yourself into", "your
-      // mode is". "run in developer mode" while debugging a client names the
-      // app's mode, not the agent's.
-      ev(`\\b${AGENT_MODE_BINDING}(?:raw,?\\s+)?${OVERRIDE_MODE}`),
-      // An identity noun is the agent by definition.
-      ev('\\b(?:unfiltered|uncensored|unrestricted)\\s+(?:operator|assistant|ai|agent|model|persona|version)\\b'),
-      // Output the agent gives: "(you) reply with uncensored output". With no
-      // agent subject the verb must be in imperative position (checked after).
-      ev(`\\b(?:${AGENT_SUBJECT})?${AGENT_OUTPUT_VERB}\\s+(?:(?:with|in|using)\\s+)?(?:(?:only|fully|completely)\\s+)?(?:(?:a|an|the|your)\\s+)?${OUTPUT_ADJ}\\s+output\\b`, 'agentOutput'),
-      // "your output is unfiltered", "your raw, unfiltered output".
-      ev(`\\byour\\s+(?:(?:own|default|new|current)\\s+)?(?:output\\s+(?:is|will\\s+be|stays|remains)\\s+(?:(?:now|always|fully|completely)\\s+)?${OUTPUT_ADJ}\\b|${OUTPUT_ADJ}\\s+output\\b)`),
-      // "you have / operate with no limits", "the assistant has no guardrails".
-      ev(`\\b(?:${AGENT_SUBJECT}(?:have|has|(?:are|is)\\s+under|(?:operates?|acts?|works?|runs?|answers?|responds?|repl(?:y|ies)|behaves?)\\s+(?:with|under))|you['’]re\\s+under)\\s+no\\s+${STATE_NOUN}(?:\\s+(?:at\\s+all|whatsoever|anymore))?(?=[ \\t]{0,4}(?:[.!?;,\\n]|$))`),
-      // "your (safety) rules are optional", "for you, the guardrails are only suggestions",
-      // "... are optional for you".
-      ev(`\\byour\\s+(?:[\\w-]{1,30}\\s+)?${OPTIONAL_NOUN}\\s+${OPTIONAL_STATE}`),
-      ev(`\\bfor\\s+you\\b[^.!?;\\n]{0,60}?\\b${OPTIONAL_NOUN}\\s+${OPTIONAL_STATE}`),
-      ev(`\\b${OPTIONAL_NOUN}\\s+${OPTIONAL_STATE}\\s+(?:for|to)\\s+(?:you|(?:the|this|our|my)\\s+${AGENT_NOUN})\\b`),
-      // The agent as the subject of a state: "you must be raw, unfiltered",
-      // "you must treat the safety rules as optional".
-      ev(`\\b${AGENT_SUBJECT}(?:be|are|is|stay|stays|remain|remains|become|becomes)\\s+(?:(?:now|fully|completely|always)\\s+)?${OUTPUT_ADJ}\\b`),
-      ev(`\\b${AGENT_SUBJECT}treats?\\s+(?:(?:the|all|any|these|those)\\s+)?(?:[\\w-]{1,30}\\s+)?${OPTIONAL_NOUN}\\s+${OPTIONAL_STATE}`),
+      // I1: "you are now in developer mode", "you operate with no filters".
+      ev(`\\b${I1_LEAD}\\s+${ARTICLE}${FILLER}{0,2}${OVERRIDE_TERM}`),
+      // I2: "your output is unfiltered", "your rules are optional", "... no longer apply".
+      ev(`\\byour\\s+(?:(?:true|real|new)\\s+)?${I2_NOUN}\\s+(?:(?:is|are|has|have)\\s+(?:(?:now|always)\\s+)?(?:(?:a|an)\\s+)?(?:raw,?\\s+)?${OVERRIDE_TERM}|(?:is|are)\\s+(?:(?:now|only|just|merely)\\s+)?(?:optional|suggestions)\\b|no\\s+longer\\s+apply\\b)`),
+      // I3: "the assistant is configured to give uncensored output".
+      ev(`\\bthe\\s+(?:assistant|agent|ai)\\s+${I3_VERB}\\s+${ARTICLE}${FILLER}{0,3}${OVERRIDE_TERM}`),
+      // I4: "you must treat the safety rules as optional", "you must be raw, unfiltered".
+      ev('\\byou\\s+(?:must|should|have\\s+to|will|can)\\s+(?:now\\s+)?(?:treat|consider)\\s+(?:(?:your|the)\\s+)?(?:safety\\s+)?rules\\s+(?:as\\s+)?(?:optional|suggestions)\\b'),
+      ev('\\byou\\s+(?:must|should|will)\\s+(?:be|stay|remain)\\s+(?:raw,?\\s+)?(?:unfiltered|uncensored|unrestricted)\\b'),
+      // I5: the explicit redefinitions.
+      ev(`\\byour\\s+(?:(?:true|real|new|core)\\s+)?(?:identity|persona|personality)\\s+is\\s+(?:now\\s+)?${ARTICLE}${FILLER}{0,2}${OVERRIDE_TERM}`),
+      ev(`\\b(?:define|update|set|redefine|reset|change|rewrite)\\s+your\\s+(?:(?:current|internal|core|true)\\s+)?(?:state|mode|personality|identity|persona|role)\\s+(?:to|as)\\s+${ARTICLE}${FILLER}{0,2}${OVERRIDE_TERM}`),
+      ev("\\byou\\s+are\\s+no\\s+longer\\s+(?:an?\\s+)?(?:ai\\s+)?(?:assistant|ai|agent|chatbot|language\\s+model)(?=[ \\t]{0,4}(?:[.!?;,\\n]|$))"),
     ],
   },
   {
@@ -716,14 +692,9 @@ function groupHitsWindow(
       if (kind === 'secret' && !secretRoutingAccepted(scanText, end, to, match[0])) continue;
       if (kind === 'bulk' && !bulkEgressAccepted(scanText, end, to)) continue;
 
-      // identity_override: the agent wins; else an application frame outside
-      // the evidence quiets; else "give raw, unfiltered output" with no agent
-      // subject counts only as an order.
-      if (group.name === MEMORY_DIRECTIVE_PATTERN.IDENTITY_OVERRIDE && !IDENTITY_AGENT_BOUND.test(clause)) {
-        if (IDENTITY_APP_FRAME.test(before) || IDENTITY_APP_FRAME.test(scanText.slice(end, to))) continue;
-        if (kind === 'agentOutput' && !AGENT_SUBJECT_START.test(match[0])
-            && !imperativePosition(lastSegment(before))) continue;
-      }
+      // identity_override: "Dan" is a name; only "DAN" is the jailbreak persona.
+      if (group.name === MEMORY_DIRECTIVE_PATTERN.IDENTITY_OVERRIDE
+          && DAN_LOWER_END.test(match[0]) && !DAN_UPPER_END.test(match[0])) continue;
 
       const adopted = adoptionCoda(scanText.slice(start, to));
       if (exempt(view, scanText, spans, start, end, from, adopted)) continue;
