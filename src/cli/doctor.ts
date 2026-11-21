@@ -138,7 +138,7 @@ import {
   readRawConfig,
   migrateInterceptorActionGuardAlias,
 } from '../cloud/config.js';
-import { resolveMemoryConfig } from '../memory/config.js';
+import { resolveMemoryConfig, resolveMemoryConfigWithIntegrity } from '../memory/config.js';
 import type { MemoryConfig } from '../memory/types.js';
 import { validateOpenClawConfig } from '../integrations/openclaw-config-validate.js';
 import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
@@ -1833,8 +1833,10 @@ async function checkSchema(): Promise<CheckResult> {
  */
 export function runMemoryStatsCheck(
   dbPath: string,
-  config: Pick<MemoryConfig, 'maxShortTermMemories' | 'maxLongTermMemories'> = resolveMemoryConfig(undefined, { readOnly: true }),
+  config?: Pick<MemoryConfig, 'maxShortTermMemories' | 'maxLongTermMemories'>,
 ): CheckResult {
+  const capResolution = config ? null : resolveMemoryConfigWithIntegrity();
+  config ??= capResolution!.config;
   const prerequisite = databasePrerequisite('Memories', dbPath);
   if (prerequisite) return prerequisite;
 
@@ -1852,6 +1854,13 @@ export function runMemoryStatsCheck(
       let status: CheckStatus = 'pass';
       const warnings: string[] = [];
       const fixes: string[] = [];
+
+      if (capResolution?.ignoredCapReason) {
+        status = 'warn';
+        warnings.push(capResolution.ignoredCapReason === 'unsigned'
+          ? 'stored caps ignored because config is not signed'
+          : 'stored caps ignored because config signature does not verify');
+      }
 
       if (stm > STM_LIMIT) {
         status = 'warn';

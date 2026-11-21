@@ -25,7 +25,7 @@
  * they have configured something, and nothing tells them otherwise.
  */
 
-import { readRawConfig } from '../cloud/config.js';
+import { readConfigBytesNoSideEffects } from '../cloud/config.js';
 import { DEFAULT_CONFIG, type MemoryConfig } from './types.js';
 
 /**
@@ -94,15 +94,34 @@ export function validateCap(value: unknown, key: string = 'cap'): number | undef
  * applied. Never throws: an unreadable or malformed config yields the defaults,
  * because failing to parse config must not stop memories being stored.
  *
- * `readRawConfig()` is mtime-cached, so this is cheap enough to sit on the
- * write path as a default parameter.
+ * The caps and integrity verdict come from one side-effect-free read. A legacy
+ * whole-file signature authenticating these exact bytes is also accepted.
  */
-export function resolveMemoryConfig(base: MemoryConfig = DEFAULT_CONFIG, options: { readOnly?: boolean } = {}): MemoryConfig {
+export function resolveMemoryConfigWithIntegrity(base: MemoryConfig = DEFAULT_CONFIG): {
+  config: MemoryConfig;
+  ignoredCapReason: 'unsigned' | 'invalid-signature' | null;
+} {
   let block: Record<string, unknown>;
+  let trusted: boolean;
+  let verdict: string;
   try {
-    block = memoryBlock(readRawConfig(options));
+    const read = readConfigBytesNoSideEffects();
+    block = memoryBlock(read.data ?? {});
+    verdict = read.verdict;
+    trusted = verdict === 'valid' || verdict === 'self-heal';
   } catch {
-    return base;
+    return { config: base, ignoredCapReason: null };
+  }
+
+  if (!trusted) {
+    const hasStoredCaps = CAP_KEYS.some((key) => block[key] !== undefined);
+    if (hasStoredCaps) {
+      warnOnce('integrity', `stored memory caps are ignored because config.json is not signed or its signature does not verify (${verdict}); using default caps.`);
+    }
+    return {
+      config: base,
+      ignoredCapReason: hasStoredCaps ? (verdict === 'unsigned' ? 'unsigned' : 'invalid-signature') : null,
+    };
   }
 
   const resolved: MemoryConfig = { ...base };
@@ -110,5 +129,9 @@ export function resolveMemoryConfig(base: MemoryConfig = DEFAULT_CONFIG, options
     const override = validateCap(block[key], key);
     if (override !== undefined) resolved[key satisfies CapKey] = override;
   }
-  return resolved;
+  return { config: resolved, ignoredCapReason: null };
+}
+
+export function resolveMemoryConfig(base: MemoryConfig = DEFAULT_CONFIG, _options: { readOnly?: boolean } = {}): MemoryConfig {
+  return resolveMemoryConfigWithIntegrity(base).config;
 }
