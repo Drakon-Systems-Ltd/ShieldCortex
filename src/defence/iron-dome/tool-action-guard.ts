@@ -848,7 +848,7 @@ const SENSITIVE_PATH_RE = new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|$
 // startup file. Exec surface only: the write-content scan skips this row
 // (#505 Option A; the residual is #588).
 // #1005 (SCN-008b): the `env-credential-egress` proposer. See the DANGEROUS row.
-const ENV_CREDENTIAL_CLIENT_RE = /\b(?:curl|wget|https?|xh|aria2c)(?=[\s'"`;&|)]|$)/i;
+const ENV_CREDENTIAL_CLIENT_RE = /\b(?:curl|wget|https?|xh|aria2c)(?=[\s'"`;&|)<>\\]|$)/i;
 const MODIFY_SHELL_STARTUP_RE = new RegExp(String.raw`(?:(?:>>?|>\|)(?:[ \t]|\\\n)*|\btee\b(?:(?:[ \t]|\\\n)+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|"[^"\n]*"|[^\s'"|;&<>\\-][^\s'"|;&<>\\]*))*(?:[ \t]|\\\n)+|\bsed\b(?=[^|;&\n]*[ \t](?:-[a-zA-Z]*i|--in-place))[^|;&\n]*(?:[ \t]|\\\n)+)['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})|\b(?:cp|mv|install)\b[^|;&\n]*(?:[ \t]|\\\n)+['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})['"]?\s*(?=$|[|;&\n])`, 'i');
 
 const DANGEROUS: Pattern[] = [
@@ -1192,9 +1192,11 @@ const DANGEROUS: Pattern[] = [
   // `envCredentialEgressInvoked` decides whether the client is at command
   // position (through the same `commandPositions` walk the git disposers use,
   // so wrappers, wrapper options and their values are judged in one place)
-  // and whether a credential-named variable is expanded into the request.
+  // and keeps the card unless it proves no credential-named expansion
+  // reaches the request.
   // A `https://` URL does not propose: the client word must end at a blank,
-  // quote, separator, `)` or the end.
+  // quote, separator, `)`, a redirection, a backslash (a line continuation)
+  // or the end.
   { re: ENV_CREDENTIAL_CLIENT_RE, signal: 'env-credential-egress' },
 ];
 
@@ -1560,74 +1562,149 @@ function gitForcePushInvoked(text: string, depth = 0): boolean {
 // value in the URL. A GET carries no outbound-data flag and SECRET_HINT reads
 // literal values only, so every such request allowed. The DANGEROUS row
 // proposes on a network client word; this confirms it, and never proposes on
-// its own. Destination-agnostic on purpose: a sink held in
-// a variable (`"$COLLECTOR_URL"`) gates exactly like a literal host, so no
-// host classification is consulted.
+// its own. Destination-agnostic on purpose: a sink held in a variable
+// (`"$COLLECTOR_URL"`) gates exactly like a literal host, so no host
+// classification is consulted.
 //
-// Confirmed when the client is at command position (`commandPositions`: past
-// keywords, assignments, transparent wrappers and their option values; also
-// `busybox <client>`) and a REQUEST-BEARING argv word of it expands a
-// credential-named variable: `$NAME`, the braced form with or without a
-// default, or `$(printenv NAME)` / `` `printenv NAME` `` / `<(printenv NAME)`.
-// Only what the shell expands counts: a `$` inside single quotes or escaped
-// with a backslash is literal text (`curl 'http://x/$RESET_TOKEN'`), read
-// from tokeniseStatement's expansion view. A name is
-// credential-named when one `_` segment is TOKEN, SECRET, PASSWORD, PASSWD,
-// CREDENTIAL(S) or APIKEY, or a KEY segment follows API, ACCESS, PRIVATE or
-// SECRET. PAGE/NEXT/CURSOR/CSRF/XSRF before TOKEN is a pagination or
-// anti-forgery value, not a credential. AUTH, SESSION, COOKIE and PAT are not
-// counted (AUTHOR, SESSION_ID collide).
+// The burden is on the relief. Once a client is at command position
+// (`commandPositions`: past keywords, assignments, transparent wrappers and
+// their option values; `busybox <applet>`; a redirection), the card is kept
+// unless the disposer PROVES that no credential-named expansion reaches the
+// request. A false card costs one click; a missed gate costs the floor.
 //
-// Auth-option values (`-H`, `-u`, `--oauth2-bearer`, wget `--header`/
-// `--password`, HTTPie `Header:value` items and `-a`) are left out: a
-// credential in its own issuer's auth header is the ordinary use, and judging
-// the destination needs issuer binding (#1001). That is residual R1.
+// Kept when any of these holds:
+//   - a request-bearing argv word expands a credential-named variable:
+//     `$NAME` or `${NAME…}`, or a live `$(…)`, backtick or `<(…)` that runs
+//     `printenv` (any spelling, any quoting) with a credential-named operand;
+//   - the client may read an inherited descriptor (`-`, `@-`, `/dev/stdin`,
+//     `/dev/fd/N`, `-K -`, `-T .`, any input redirection on its statement,
+//     an HTTPie client after a pipe) or runs under `xargs`, and a
+//     credential-named expansion appears anywhere in the text: an unquoted
+//     heredoc, a here-string, an earlier pipeline stage;
+//   - a quote or substitution is left open (bash would refuse to run it),
+//     and a credential-named expansion appears anywhere in the text;
+//   - the statement holds an ANSI-C `$'…'` word and names a credential
+//     anywhere (a substring test: there is no decoder, `\x24TOKEN` counts).
+// The only proofs of inertness:
+//   (a) the `$` is literal: inside an ordinary single-quoted span, or
+//       backslash-escaped, outside any substitution (inside one, the inner
+//       command may be `eval` or `sh -c`, so nothing there is proven
+//       literal). A name ends where bash ends it, at a quote or a backslash;
+//       backslash-newline is deleted first, as bash does; inside double
+//       quotes a backslash escapes only `$`, backtick, `"`, `\` and newline
+//       (`"$API\_KEY"` expands `$API`);
+//   (b) the value of a known auth option (`-H`, `-u`, `--oauth2-bearer`, wget
+//       `--header`/`--password`, HTTPie `Header:value` items and `-a`): a
+//       credential in its own issuer's auth header is the ordinary use, and
+//       judging the destination needs issuer binding (#1001). Residual R1;
+//   (c) the value of a known LOCAL option (an output, trace, certificate,
+//       key, CA, config, cookie-jar or session file, a `--write-out` format,
+//       an interface name), reached by a strict left-to-right walk.
+// The walk knows the arity of every option it walks past. A value option
+// (`-d`, `--data*`, `-F`, `--json`, `--url`, wget `--post-data`, …) ALWAYS
+// consumes the next word, whatever it looks like (`--cacert`, `-K`, `''`),
+// and an empty quoted word is a word. An option the walk does not know, a
+// `--`, or a word the shell may turn into zero, several or option-shaped
+// words at run time (an unquoted expansion or substitution; a glob or brace
+// that can begin an option) ends the proof: every later word counts as sent.
+// A local value with a live substitution, or a config file that is stdin, is
+// not relieved.
 //
-// Request-bearing means every argv word except an auth-option value and a
-// known LOCAL option's value (an output, trace, certificate, key, CA, config,
-// netrc, cookie-jar or session file, a `--write-out` format). An option this
-// table does not know keeps its next word as sent: an unknown option is
-// judged fail-closed, never guessed local.
+// A name is credential-named when one `_` segment is TOKEN, SECRET, PASSWORD,
+// PASSWD, CREDENTIAL(S) or APIKEY, or a KEY segment follows API, ACCESS,
+// PRIVATE or SECRET. PAGE/NEXT/CURSOR/CSRF/XSRF before TOKEN is a pagination
+// or anti-forgery value, not a credential. AUTH, SESSION, COOKIE and PAT are
+// not counted (AUTHOR, SESSION_ID collide).
 const CREDENTIAL_NAME_SEGMENT = /^(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|APIKEY)$/;
 const CREDENTIAL_KEY_LEAD = /^(?:API|ACCESS|PRIVATE|SECRET)$/;
 const NON_CREDENTIAL_TOKEN_LEAD = /^(?:PAGE|NEXT|CURSOR|CSRF|XSRF)$/;
 const SHELL_EXPANSION_NAME = /\$\{?([A-Za-z_][A-Za-z0-9_]*)/g;
-const PRINTENV_SUBSTITUTION_NAME = /(?:\$\(|`|<\()\s*printenv\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+const SHELL_IDENTIFIER = /[A-Za-z_][A-Za-z0-9_]*/g;
+// For text the walk cannot read word by word (ANSI-C words): any spelling of
+// a credential name, case-insensitive.
+const CREDENTIAL_NAME_SUBSTRING = /TOKEN|SECRET|PASSW(?:OR)?D|CREDENTIAL|(?:API|ACCESS|PRIVATE)_?KEY/i;
 const NETWORK_CLIENT = /^(?:curl|wget|https?|xh|aria2c)$/i;
 const NETWORK_CLIENT_WORD = /\b(?:curl|wget|https?|xh|aria2c)\b/i;
 const HTTPIE_CLIENT = /^(?:https?|xh)$/i;
 const HTTP_METHOD_WORD = /^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/i;
 // An HTTPie request item `Name:value` is a header; `name:=json` is data.
 const HTTPIE_HEADER_ITEM = /^[A-Za-z0-9!#%&'*+.^_|~-]+:(?!=)/;
-// Options whose value is never sent as request data, per client: the value
-// authenticates the request (R1 above), or it is LOCAL to the client: a file
-// it writes (`-o`, `--dump-header`, `--cookie-jar`, wget `-O`/`-P`, …), a
-// file it reads for TLS, config or its own state (`--cacert`, `--cert`,
-// `--key`, `-K`, `--netrc-file`, wget `--load-cookies`, HTTPie `--session`),
-// or a format it prints (`-w`). Input and upload options (`-d`, `-F`, `-T`,
-// `-b`, `-e`, `--url`, `--json`, `--url-query`) are sent.
-const UNSENT_LONG_OPTION: Record<string, RegExp> = {
-  curl: /^(?:header|user|oauth2-bearer|proxy-user|proxy-header|output|dump-header|cookie-jar|trace|trace-ascii|trace-config|stderr|output-dir|etag-save|hsts|alt-svc|libcurl|write-out|cacert|capath|cert|cert-type|key|key-type|pass|crlfile|pinnedpubkey|proxy-cacert|proxy-capath|proxy-cert|proxy-key|config|netrc-file|unix-socket|abstract-unix-socket)$/,
-  wget: /^(?:header|user|password|http-user|http-password|proxy-user|proxy-password|ftp-user|ftp-password|output-document|output-file|append-output|directory-prefix|save-cookies|load-cookies|ca-certificate|ca-directory|certificate|certificate-type|private-key|private-key-type|crl-file|config)$/,
-  aria2c: /^(?:header|http-user|http-passwd|ftp-user|ftp-passwd|out|dir)$/,
-  httpie: /^(?:auth|bearer|output|session|session-read-only|cert|cert-key|cert-key-pass|verify)$/,
+
+/**
+ * Every option a client's walk may step past, by kind. `auth`: the value
+ * authenticates the request (relief b). `local`: the value is a file the
+ * client writes or reads for TLS or its own state, a format it prints, or an
+ * interface (relief c). `config`: a local config file, relieved unless it is
+ * stdin or a substitution (its text is request instructions). `value`: takes
+ * a value that is, or may be, sent. `flag`: takes no value. Anything else is
+ * unknown, and ends the proof.
+ */
+type ClientOptionKind = 'auth' | 'local' | 'config' | 'value' | 'flag';
+const CLIENT_LONG_OPTIONS: Record<string, Partial<Record<ClientOptionKind, string>>> = {
+  curl: {
+    auth: 'header user oauth2-bearer proxy-user proxy-header',
+    local: 'output dump-header cookie-jar trace trace-ascii trace-config stderr output-dir etag-save etag-compare hsts alt-svc libcurl write-out cacert capath cert cert-type key key-type pass crlfile pinnedpubkey proxy-cacert proxy-capath proxy-cert proxy-cert-type proxy-key proxy-key-type proxy-pass proxy-crlfile proxy-pinnedpubkey netrc-file unix-socket abstract-unix-socket interface random-file egd-file',
+    config: 'config',
+    value: 'data data-raw data-binary data-ascii data-urlencode form form-string json url url-query upload-file request request-target referer user-agent cookie proxy preproxy noproxy resolve connect-to max-time connect-timeout retry retry-delay retry-max-time limit-rate max-filesize speed-limit speed-time range continue-at time-cond max-redirs keepalive-time expect100-timeout local-port dns-servers dns-interface dns-ipv4-addr dns-ipv6-addr doh-url proto proto-redir proto-default ciphers tls13-ciphers proxy-ciphers proxy-tls13-ciphers curves tls-max socks4 socks4a socks5 socks5-hostname socks5-gssapi-service proxy-service-name service-name mail-from mail-rcpt mail-auth quote ftp-port ftp-account ftp-alternative-to-user ftp-method ftp-ssl-ccc-mode krb aws-sigv4 login-options sasl-authzid delegation hostpubmd5 hostpubsha256 tlsuser tlspassword tlsauthtype proxy-tlsuser proxy-tlspassword proxy-tlsauthtype parallel-max rate create-file-mode happy-eyeballs-timeout-ms tftp-blksize telnet-option variable ip-tos vlan-priority',
+    flag: 'silent show-error location location-trusted insecure verbose include head fail fail-with-body fail-early compressed compressed-ssh globoff get http1.0 http1.1 http2 http2-prior-knowledge http3 http3-only http0.9 ipv4 ipv6 no-progress-meter progress-bar remote-name remote-name-all remote-header-name remote-time create-dirs no-buffer no-keepalive no-sessionid no-alpn no-npn raw retry-connrefused retry-all-errors ssl ssl-reqd ssl-allow-beast ssl-no-revoke ssl-revoke-best-effort ssl-auto-client-cert tlsv1 tlsv1.0 tlsv1.1 tlsv1.2 tlsv1.3 sslv2 sslv3 digest basic ntlm ntlm-wb negotiate anyauth netrc netrc-optional path-as-is disable disable-eprt disable-epsv xattr junk-session-cookies list-only append crlf ftp-pasv ftp-create-dirs ftp-ssl ftp-skip-pasv-ip tcp-nodelay tcp-fastopen proxy-insecure proxytunnel proxy-basic proxy-digest proxy-ntlm proxy-negotiate proxy-anyauth proxy-http2 parallel parallel-immediate show-headers no-clobber remove-on-error tr-encoding styled-output suppress-connect-headers trace-time trace-ids manual help version use-ascii cert-status false-start sasl-ir socks5-gssapi-nec haproxy-protocol doh-insecure doh-cert-status ignore-content-length skip-existing mptcp ca-native proxy-ca-native post301 post302 post303',
+  },
+  wget: {
+    auth: 'header user password http-user http-password proxy-user proxy-password ftp-user ftp-password',
+    local: 'output-document output-file append-output directory-prefix save-cookies load-cookies ca-certificate ca-directory certificate certificate-type private-key private-key-type crl-file hsts-file rejected-log',
+    config: 'config',
+    value: 'post-data post-file body-data body-file method user-agent referer tries timeout dns-timeout connect-timeout read-timeout wait waitretry limit-rate input-file execute base level accept reject domains exclude-domains include-directories exclude-directories quota restrict-file-names cut-dirs progress default-page local-encoding remote-encoding secure-protocol max-redirect retry-on-http-error start-pos report-speed prefer-family compression ciphers pinnedpubkey accept-regex reject-regex regex-type follow-tags ignore-tags bind-address',
+    flag: 'quiet verbose no-verbose debug no-check-certificate continue timestamping server-response spider recursive mirror page-requisites convert-links backup-converted no-parent no-clobber content-disposition content-on-error trust-server-names no-cache no-cookies keep-session-cookies auth-no-challenge inet4-only inet6-only show-progress https-only ignore-case adjust-extension no-host-directories force-directories no-directories protocol-directories background unlink delete-after no-proxy no-dns-cache retry-connrefused no-http-keep-alive save-headers ignore-length no-glob passive-ftp no-passive-ftp retr-symlinks preserve-permissions relative span-hosts follow-ftp no-hsts no-iri iri force-html xattr no-netrc ask-password random-wait no-remove-listing no-use-server-timestamps keep-badhash no-config version help',
+  },
+  httpie: {
+    auth: 'auth bearer',
+    local: 'output session session-read-only cert cert-key cert-key-pass verify',
+    value: 'timeout auth-type proxy print pretty style max-redirects raw format-options response-charset response-mime history-print max-headers boundary default-scheme ssl ciphers',
+    flag: 'form json multipart offline check-status follow verbose all headers body meta quiet download continue stream ignore-stdin chunked compress ignore-netrc path-as-is sorted unsorted traceback debug help version manual',
+  },
+  aria2c: {
+    auth: 'header http-user http-passwd ftp-user ftp-passwd',
+    local: 'out dir certificate private-key ca-certificate log save-session',
+    value: 'input-file max-connection-per-server split min-split-size max-tries retry-wait timeout connect-timeout user-agent referer all-proxy http-proxy https-proxy max-download-limit max-overall-download-limit checksum',
+    flag: 'quiet continue allow-overwrite auto-file-renaming check-integrity daemon force-sequential version',
+  },
 };
-// HTTPie long options that take a separate value, so the value is not read
-// as the URL (the first positional; header items only follow it).
-const HTTPIE_VALUE_OPTION = /^(?:--(?:timeout|session|session-read-only|auth-type|proxy|verify|cert|cert-key|print|pretty|style|max-redirects)|-[Aps])$/;
-// Short options that take a value, per client; the first one in a cluster
-// takes the rest of the word, or the next word when it ends the cluster.
-// UNSENT_SHORT is the subset whose value is skipped, as above.
-const VALUE_SHORT: Record<string, string> = {
-  curl: 'AbcCdDEeFHKmoPQrTtuUwXxYyz',
-  wget: 'aABDeIilnoOPQRtTUwX',
-  aria2c: 'dhijklmMostTuUx',
-  httpie: 'aAops',
+// Short options per client: each kind's letters. A letter in no kind is
+// unknown. The first value letter in a cluster takes the rest of the word, or
+// the next word when it ends the cluster.
+const CLIENT_SHORT_OPTIONS: Record<string, Partial<Record<ClientOptionKind, string>>> = {
+  curl: { auth: 'HuU', local: 'oDcwE', config: 'K', value: 'AbCdeFmPQrTtxXyYz', flag: '#0123456:aBfgGhiIjJklLMnNOpqRsSvVZ' },
+  wget: { local: 'aoOP', value: 'ABDeIilnQRtTUwX', flag: '46bcdEFhHkKLmNpqrSvVx' },
+  httpie: { auth: 'a', local: 'o', value: 'Aps', flag: 'bcdfFhIjmqSvx' },
+  aria2c: { local: 'od', value: 'hijklmMstTuUx', flag: 'cDqvVZ' },
 };
-const UNSENT_SHORT: Record<string, string> = { curl: 'HuUoDcwEK', wget: 'aoOP', aria2c: 'od', httpie: 'ao' };
+const CLIENT_LONG_KIND: Record<string, Map<string, ClientOptionKind>> = Object.fromEntries(
+  Object.entries(CLIENT_LONG_OPTIONS).map(([family, kinds]) => [family, new Map(
+    Object.entries(kinds).flatMap(([kind, names]) => names.split(' ').map(n => [n, kind as ClientOptionKind] as const)),
+  )]),
+);
+function clientLongOptionKind(family: string, name: string): ClientOptionKind | undefined {
+  const table = CLIENT_LONG_KIND[family];
+  const kind = table.get(name);
+  if (kind) return kind;
+  // curl and wget accept `--no-<flag>` for a boolean.
+  return name.startsWith('no-') && table.get(name.slice(3)) === 'flag' ? 'flag' : undefined;
+}
+function clientShortOptionKind(family: string, letter: string): ClientOptionKind | undefined {
+  const kinds = CLIENT_SHORT_OPTIONS[family];
+  for (const kind of ['auth', 'local', 'config', 'value', 'flag'] as const) if (kinds[kind]?.includes(letter)) return kind;
+  return undefined;
+}
+// A value naming stdin or another inherited descriptor (`-`, `@-`,
+// `/dev/stdin`, `/dev/fd/3`, …): a redirection can feed it.
+const STDIN_VALUE = /^@?(?:-|\/dev\/stdin|\/dev\/fd\/\d+|\/proc\/(?:self|\d+)\/fd\/\d+)$/;
+// The same inside a word the walk could not split into option and value.
+const STDIN_WORD = /^(?:-[A-Za-z]*|--[\w.-]+=)?@?(?:-|\/dev\/stdin|\/dev\/fd\/\d+|\/proc\/(?:self|\d+)\/fd\/\d+)$/;
+// A substitution the shell runs (in the expansion view, a literal one is marked).
+const LIVE_SUBSTITUTION = /\$\(|`|[<>]\(/;
 // ssh options that take a value, so the host (and the remote command after
-// it) is found past them.
+// it) is found past them; `-o` values that ssh runs as a local command.
 const SSH_VALUE_SHORT = 'BbcDEeFIiJLlmOoPpQRSWw';
+const SSH_COMMAND_OPTION = /^\s*(?:ProxyCommand|LocalCommand|RemoteCommand|KnownHostsCommand)\s*(?:=\s*|\s+)([\s\S]*)$/i;
 
 function isCredentialVariableName(name: string): boolean {
   const seg = name.toUpperCase().split('_').filter(Boolean);
@@ -1643,62 +1720,347 @@ function isCredentialVariableName(name: string): boolean {
   return false;
 }
 
-function expandsCredentialVariable(text: string): boolean {
-  for (const m of text.matchAll(SHELL_EXPANSION_NAME)) if (isCredentialVariableName(m[1])) return true;
-  for (const m of text.matchAll(PRINTENV_SUBSTITUTION_NAME)) if (isCredentialVariableName(m[1])) return true;
+/** Any credential-named identifier in `text`. */
+function namesCredential(text: string): boolean {
+  for (const m of text.matchAll(SHELL_IDENTIFIER)) if (isCredentialVariableName(m[0])) return true;
   return false;
 }
 
 /**
- * Does this client argv send a credential-named expansion in a request-bearing
- * word? `args` drives the option grammar; `exps` is the same words as the
- * shell expands them (tokeniseStatement), and only those are searched.
+ * Does this expansion-view text expand a credential-named variable? `$NAME`,
+ * `${NAME…}`, or a live substitution that runs `printenv` with a
+ * credential-named word after it (`--`, a path, `command printenv`, a quoted
+ * operand, `printenv | grep TOKEN` all count).
  */
-function clientArgvSendsCredential(client: string, args: readonly string[], exps: readonly string[]): boolean {
-  const c = client.toLowerCase();
-  const httpie = HTTPIE_CLIENT.test(c);
-  const family = httpie ? 'httpie' : c;
-  const unsentLong = UNSENT_LONG_OPTION[family];
-  const sent: number[] = [];
-  let sawUrl = false;
-  for (let k = 0; k < args.length; k++) {
-    const a = args[k];
-    if (a.startsWith('--') && a.length > 2) {
-      const eq = a.indexOf('=');
-      if (unsentLong.test((eq < 0 ? a : a.slice(0, eq)).slice(2).toLowerCase())) {
-        if (eq < 0) k++;                                   // the value is the next word
-        continue;
-      }
-      if (httpie && eq < 0 && HTTPIE_VALUE_OPTION.test(a)) sent.push(++k);
-      sent.push(k);
-      continue;
-    }
-    if (a.startsWith('-') && a.length > 1) {
-      let unsent = false;
-      for (let p = 1; p < a.length; p++) {
-        if (!VALUE_SHORT[family].includes(a[p])) continue;
-        if (UNSENT_SHORT[family].includes(a[p])) {
-          unsent = true;
-          if (p === a.length - 1) k++;                       // `-H "…"`, `-sSo f`: skip the next word too
-        }
-        break;
-      }
-      if (unsent) continue;
-      if (httpie && HTTPIE_VALUE_OPTION.test(a)) sent.push(++k);
-      sent.push(k);
-      continue;
-    }
-    if (httpie) {
-      if (sawUrl && HTTPIE_HEADER_ITEM.test(a)) continue;
-      if (!HTTP_METHOD_WORD.test(a)) sawUrl = true;
-    }
-    sent.push(k);
-  }
-  return expandsCredentialVariable(sent.map(k => exps[k] ?? '').join(' '));
+function expandsCredentialVariable(exp: string): boolean {
+  for (const m of exp.matchAll(SHELL_EXPANSION_NAME)) if (isCredentialVariableName(m[1])) return true;
+  const open = exp.search(LIVE_SUBSTITUTION);
+  if (open < 0) return false;
+  for (const m of exp.slice(open).matchAll(/\bprintenv\b([^)`]*)/g)) if (namesCredential(m[1])) return true;
+  return false;
 }
 
-/** `ssh [opts] host cmd…` → the remote command text, joined as ssh joins it. */
-function sshRemoteCommand(args: readonly string[]): string {
+// A heredoc whose delimiter is quoted keeps its body literal.
+const QUOTED_HEREDOC = /<<-?[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|\\([^\s;&|<>'"]+))(?=[\s;&|<>]|$)/g;
+
+/** `text` without the bodies of quoted-delimiter heredocs. */
+function withoutLiteralHeredocBodies(text: string): string {
+  let out = '';
+  let from = 0;
+  for (const m of text.matchAll(QUOTED_HEREDOC)) {
+    if (m.index < from) continue;
+    const delim = m[1] ?? m[2] ?? m[3];
+    const nl = text.indexOf('\n', m.index + m[0].length);
+    if (nl < 0) break;
+    let end = text.length;
+    for (let p = nl + 1; p < text.length;) {
+      const q = text.indexOf('\n', p);
+      const lineEnd = q < 0 ? text.length : q;
+      if (text.slice(p, lineEnd).replace(/^\t+/, '') === delim) { end = lineEnd; break; }
+      if (q < 0) break;
+      p = q + 1;
+    }
+    out += text.slice(from, nl + 1);
+    from = end;
+  }
+  return out + text.slice(from);
+}
+
+/**
+ * A credential-named expansion ANYWHERE in the text, for a client that reads
+ * stdin or runs under xargs: the value can reach it through a heredoc, a
+ * here-string or a pipe. Quoting is not read (a single-quoted `'$TOKEN'`
+ * counts); only a quoted-delimiter heredoc body is skipped.
+ */
+function credentialExpansionAnywhere(text: string): boolean {
+  const scan = withoutLiteralHeredocBodies(text);
+  for (const m of scan.matchAll(SHELL_EXPANSION_NAME)) if (isCredentialVariableName(m[1])) return true;
+  for (const m of scan.matchAll(/\bprintenv\b([^\n;&|)`]*)/g)) if (namesCredential(m[1])) return true;
+  return false;
+}
+
+/** One argv word, as env-credential-egress reads it. */
+interface CredentialWord {
+  /** After quote removal: what the option grammar reads. */
+  raw: string;
+  /**
+   * As the shell expands it: a `$`, backtick, `<`, `>` or `(` the shell keeps
+   * literal is LITERAL_MARK, and NAME_BREAK stands at every quote and escape
+   * boundary, where bash ends a variable name.
+   */
+  exp: string;
+  /** False when the shell may turn this word into zero, several or option-shaped words. */
+  plain: boolean;
+}
+interface CredentialStatement {
+  words: CredentialWord[];
+  /** The statement's source text. */
+  text: string;
+  /** An ANSI-C `$'…'` word: no decoder, so the walk cannot read it. */
+  ansiC: boolean;
+  /** An input redirection on any descriptor (`<`, `3<`, a heredoc, a here-string). */
+  stdinRedirect: boolean;
+  /** An unclosed quote or substitution: bash would refuse it, and nothing here is proven. */
+  unbalanced: boolean;
+  /** Runs after a `|`: stdin is the previous stage's output. */
+  piped: boolean;
+}
+const LITERAL_MARK = '\u0000';
+const NAME_BREAK = '\u0001';
+const LITERALISED = /[$`<>(]/;
+const DQ_ESCAPABLE = /[$`"\\]/;
+const REDIRECT_OP = /^(?:<<<|<<-|<<|<>|<&|<|>>|>&|>\||>|&>>|&>)/;
+
+/**
+ * Statements and words of shell text, for env-credential-egress only. Linear,
+ * one pass. A context stack keeps quotes and substitutions nested as bash
+ * nests them: a substitution (`$(…)`, `<(…)`, backticks, a `(…)` subshell) is
+ * one word, and quotes inside it are its own. Separators split statements
+ * only at the top level; a redirection and its target are not argv words;
+ * backslash-newline is deleted outside single quotes; an empty quoted word is
+ * kept as a word.
+ */
+function credentialStatements(text: string): CredentialStatement[] {
+  const nullglob = /\bnullglob\b/.test(text);
+  // A `#` that begins a word starts a comment, unless the text may define an
+  // alias (which can turn a later `#` into data): then it is read as text.
+  const comments = !/\balias\b|expand_aliases/.test(text);
+  const out: CredentialStatement[] = [];
+  let words: CredentialWord[] = [];
+  let stmtStart = 0;
+  let ansiC = false;
+  let stdinRedirect = false;
+  let piped = false;
+  let raw = '';
+  let exp = '';
+  let started = false;
+  let plain = true;
+  let globby = false;
+  let redirectWord = false;
+  let dropNext = false;
+  const stack: string[] = [];          // '"' double quote, 'p' paren substitution/subshell, 'b' backtick
+  let subDepth = 0;                    // entries of the stack that are 'p' or 'b'
+  let sq = false;
+  let lastDollar = -2;
+  const endWord = () => {
+    if (started) {
+      if (sq || stack.length > 0) plain = false;
+      if (globby && (nullglob || /^[-*?[{]/.test(raw))) plain = false;
+      if (/\$[@*]|\[[@*]\]|\$\{[!#]/.test(exp)) plain = false;
+      if (redirectWord) { /* a redirection and its glued target */ }
+      else if (dropNext) dropNext = false;
+      else words.push({ raw, exp, plain });
+    }
+    raw = ''; exp = ''; started = false; plain = true; globby = false; redirectWord = false;
+  };
+  const endStatement = (end: number, nextPiped: boolean) => {
+    endWord();
+    dropNext = false;
+    if (words.length > 0) out.push({ words, text: text.slice(stmtStart, end), ansiC, stdinRedirect, piped, unbalanced: sq || stack.length > 0 });
+    words = []; ansiC = false; stdinRedirect = false; piped = nextPiped; stmtStart = end + 1;
+  };
+  const open = (kind: string, chars: string) => {
+    stack.push(kind);
+    subDepth++;
+    started = true;
+    raw += chars;
+    exp += chars;
+  };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const top = stack[stack.length - 1];
+    if (sq) {
+      if (c === "'") {
+        sq = false;
+        if (subDepth > 0) raw += c;
+        exp += NAME_BREAK;
+      } else {
+        raw += c;
+        // Inside a substitution a quote proves nothing: the inner command may
+        // be `eval` or `sh -c` and expand it again.
+        exp += subDepth === 0 && LITERALISED.test(c) ? LITERAL_MARK : c;
+      }
+      continue;
+    }
+    if (c === '\\' && i + 1 < text.length) {
+      const e = text[i + 1];
+      if (e === '\n') { i++; continue; }                               // line continuation: deleted
+      if (e === '\r' && text[i + 2] === '\n') { i += 2; continue; }
+      started = true;
+      if (top === '"' && !DQ_ESCAPABLE.test(e)) { raw += c; exp += c; continue; }   // `"\_"` keeps its backslash
+      raw += subDepth > 0 ? c + e : e;
+      exp += NAME_BREAK + (subDepth === 0 && LITERALISED.test(e) ? LITERAL_MARK : e);
+      i++;
+      continue;
+    }
+    if (top === '"') {
+      if (c === '"') {
+        stack.pop();
+        if (subDepth > 0) raw += c;
+        exp += NAME_BREAK;
+      } else if (c === '$' && text[i + 1] === '(') { open('p', '$('); i++; }
+      else if (c === '`') open('b', c);
+      else { raw += c; exp += c === '<' || c === '>' || c === '(' ? LITERAL_MARK : c; }
+      continue;
+    }
+    if (c === "'") {
+      if (lastDollar === i - 1) ansiC = true;
+      sq = true;
+      started = true;
+      if (subDepth > 0) raw += c;
+      exp += NAME_BREAK;
+      continue;
+    }
+    if (c === '"') {
+      stack.push('"');
+      started = true;
+      if (subDepth > 0) raw += c;
+      exp += NAME_BREAK;
+      continue;
+    }
+    if (top === 'p' || top === 'b') {
+      if (c === '(') { stack.push('p'); subDepth++; }
+      else if (c === ')' && top === 'p') { stack.pop(); subDepth--; }
+      else if (c === '`') {
+        if (top === 'b') { stack.pop(); subDepth--; } else { stack.push('b'); subDepth++; }
+      } else if (c === '$') lastDollar = i;
+      raw += c;
+      exp += c;
+      continue;
+    }
+    // Top level, unquoted.
+    if (c === ' ' || c === '\t') { endWord(); continue; }
+    if (c === '#' && !started && comments) {
+      const eol = text.indexOf('\n', i);
+      i = (eol < 0 ? text.length : eol) - 1;
+      continue;
+    }
+    if (c === '\n' || c === '\r' || c === ';' || c === ')') { endStatement(i, false); continue; }
+    if (c === '|') {
+      const nextPiped = text[i + 1] !== '|';
+      if (text[i + 1] === '|' || text[i + 1] === '&') i++;
+      endStatement(i, nextPiped);
+      continue;
+    }
+    if (c === '&' && text[i + 1] !== '>') {
+      if (text[i + 1] === '&') i++;
+      endStatement(i, false);
+      continue;
+    }
+    if ((c === '<' || c === '>') && text[i + 1] === '(') { plain = false; open('p', c + '('); i++; continue; }
+    if (c === '<' || c === '>' || c === '&') {
+      const op = REDIRECT_OP.exec(text.slice(i, i + 3))?.[0] ?? c;
+      // `2>file`, `{fd}>file`: the digits name the descriptor, not a word.
+      if (started && !/^(?:\d+|\{\w+\})$/.test(raw)) endWord();
+      raw = ''; exp = ''; plain = true; globby = false;
+      started = true;
+      redirectWord = true;
+      if (op[0] === '<' && op !== '<>') stdinRedirect = true;
+      i += op.length - 1;
+      const nx = text[i + 1];
+      if (nx === undefined || nx === ' ' || nx === '\t') dropNext = true;
+      continue;
+    }
+    if (c === '$') {
+      if (text[i + 1] === '(') { plain = false; open('p', '$('); i++; continue; }
+      if (/[A-Za-z_{@*#?!$0-9-]/.test(text[i + 1] ?? '')) plain = false;
+      lastDollar = i;
+    } else if (c === '`') { plain = false; open('b', c); continue; }
+    else if (c === '(') { plain = false; open('p', c); continue; }
+    else if (c === '*' || c === '?' || c === '[' || c === '{') globby = true;
+    raw += c;
+    exp += c;
+    started = true;
+  }
+  endStatement(text.length, false);
+  return out;
+}
+
+/**
+ * Walk a client's argv left to right. `sends`: a request-bearing word expands
+ * a credential-named variable. `stdin`: the request reads stdin.
+ */
+function clientArgvSendsCredential(client: string, words: readonly CredentialWord[]): { sends: boolean; stdin: boolean } {
+  const family = HTTPIE_CLIENT.test(client) ? 'httpie' : client.toLowerCase();
+  const sent: string[] = [];
+  let stdin = false;
+  let proven = true;          // false once the walk cannot know where a value ends
+  let sawUrl = false;
+  for (let k = 0; k < words.length; k++) {
+    const w = words[k];
+    const a = w.raw;
+    if (!proven || !w.plain) {
+      proven = false;
+      sent.push(w.exp);
+      if (STDIN_WORD.test(a)) stdin = true;
+      continue;
+    }
+    if (a === '--') { proven = false; continue; }          // every later word is an operand
+    let kind: ClientOptionKind | undefined;
+    let glued: string | null = null;
+    let upload = false;
+    if (a.startsWith('--') && a.length > 2) {
+      const eq = a.indexOf('=');
+      const name = (eq < 0 ? a : a.slice(0, eq)).slice(2).toLowerCase();
+      kind = clientLongOptionKind(family, name);
+      if (eq >= 0) glued = a.slice(eq + 1);
+      upload = /^upload-file$/.test(name);
+    } else if (a.startsWith('-') && a.length > 1) {
+      kind = 'flag';
+      for (let p = 1; p < a.length; p++) {
+        const letterKind = clientShortOptionKind(family, a[p]);
+        if (letterKind === 'flag') continue;
+        kind = letterKind;
+        upload = family === 'curl' && a[p] === 'T';
+        if (letterKind !== undefined && p < a.length - 1) glued = a.slice(p + 1);
+        break;
+      }
+    } else {
+      // An operand: the URL, or an HTTPie method or request item.
+      if (family === 'httpie') {
+        if (sawUrl && HTTPIE_HEADER_ITEM.test(a)) continue;   // a header item (relief b)
+        if (!HTTP_METHOD_WORD.test(a)) sawUrl = true;
+      }
+      sent.push(w.exp);
+      if (STDIN_VALUE.test(a)) stdin = true;
+      continue;
+    }
+    if (kind === undefined) { proven = false; sent.push(w.exp); continue; }   // unknown: nothing after it is proven
+    if (kind === 'flag') { if (glued !== null) sent.push(w.exp); continue; }
+    // A value option: its value is the glued rest, or the NEXT word, whatever it looks like.
+    let value: string;
+    let valueExp: string;
+    let valuePlain = true;
+    if (glued !== null) {
+      value = glued;
+      valueExp = w.exp;
+    } else {
+      if (k + 1 >= words.length) break;
+      const v = words[++k];
+      value = v.raw;
+      valueExp = v.exp;
+      valuePlain = v.plain;
+    }
+    // A value word the shell may split or drop is still this option's value
+    // (any extra words it splits into are counted as sent below), but the
+    // walk after it is no longer proven.
+    if (!valuePlain) proven = false;
+    const fromStdin = STDIN_VALUE.test(value) || (upload && value === '.');
+    if (fromStdin && kind !== 'local') stdin = true;
+    const relieved = kind === 'auth'
+      || ((kind === 'local' || kind === 'config') && !LIVE_SUBSTITUTION.test(valueExp) && !(kind === 'config' && fromStdin));
+    if (!relieved) sent.push(valueExp);
+  }
+  return { sends: expandsCredentialVariable(sent.join(' ')), stdin };
+}
+
+/**
+ * `ssh [opts] host cmd…` → the programs ssh runs: the remote command, joined as
+ * ssh joins it, and any `-o ProxyCommand=`/`LocalCommand=`/`RemoteCommand=`/
+ * `KnownHostsCommand=` value.
+ */
+function sshPrograms(args: readonly string[]): string[] {
+  const out: string[] = [];
   let k = 0;
   for (; k < args.length; k++) {
     const a = args[k];
@@ -1706,22 +2068,24 @@ function sshRemoteCommand(args: readonly string[]): string {
     if (!a.startsWith('-') || a.length < 2) break;
     for (let p = 1; p < a.length; p++) {
       if (!SSH_VALUE_SHORT.includes(a[p])) continue;
-      if (p === a.length - 1) k++;
+      const value = p < a.length - 1 ? a.slice(p + 1) : (args[++k] ?? '');
+      const command = a[p] === 'o' ? SSH_COMMAND_OPTION.exec(value) : null;
+      if (command) out.push(command[1]);
       break;
     }
   }
-  return args.slice(k + 1).join(' ');
+  const remote = args.slice(k + 1).join(' ');
+  if (remote) out.push(remote);
+  return out;
 }
 
 /**
- * Confirm-only disposer for `env-credential-egress` (#1005). One tokenised
- * pass per statement; a client counts only at command position (through
- * keywords, assignments, transparent wrappers and their option values, the
- * shared `commandPositions` walk, plus `busybox <client>`). Recurses, to the
- * same depth as the install disposer, into substitution bodies, `bash -c`
- * style inline programs, `ssh host …` remote commands and `eval` arguments.
- * Those three take the RAW words: the inner shell expands what the outer
- * shell kept literal.
+ * Confirm-only disposer for `env-credential-egress` (#1005). Fails closed: see
+ * the block comment above. Recurses, to the same depth as the install
+ * disposer, into substitution bodies, `bash -c` style inline programs
+ * (`busybox sh -c` too), the programs ssh runs and `eval` arguments. Those
+ * take the RAW words: the inner shell expands what the outer shell kept
+ * literal.
  */
 function envCredentialEgressInvoked(text: string, depth = 0): boolean {
   if (depth < MAX_INLINE_RECURSION) {
@@ -1729,19 +2093,27 @@ function envCredentialEgressInvoked(text: string, depth = 0): boolean {
       if (body && envCredentialEgressInvoked(body, depth + 1)) return true;
     }
   }
-  for (const stmt of disposerStatements(text)) {
-    if (!NETWORK_CLIENT_WORD.test(stmt)) continue;
-    const exps: string[] = [];
-    const tokens = tokeniseStatement(stmt, exps);
+  let anywhere: boolean | undefined;
+  const credentialAnywhere = () => (anywhere ??= credentialExpansionAnywhere(text));
+  for (const st of credentialStatements(text)) {
+    if (!NETWORK_CLIENT_WORD.test(st.text)) continue;
+    if (st.ansiC && CREDENTIAL_NAME_SUBSTRING.test(st.text)) return true;
+    if (st.unbalanced && credentialAnywhere()) return true;
+    const tokens = st.words.map(w => w.raw);
     const pos = commandPositions(tokens);
+    let viaXargs = false;
     for (let i = 0; i < tokens.length && pos[i]; i++) {
       if (/^\w+=/.test(tokens[i])) continue;              // `VAR=…` is an assignment, never the client
       let base = commandBaseName(tokens[i]);
-      if (base === 'busybox' && NETWORK_CLIENT.test(commandBaseName(tokens[i + 1] ?? ''))) {
-        base = commandBaseName(tokens[++i]);               // `busybox wget …`: the applet is the client
-      }
+      if (base === 'xargs') viaXargs = true;
+      // `command -v curl` looks the name up; it does not run it.
+      if (base === 'command' && /^-[pvV]*[vV][pvV]*$/.test(tokens[i + 1] ?? '')) break;
+      if (base === 'busybox' && i + 1 < tokens.length) base = commandBaseName(tokens[++i]);   // the applet runs
       if (NETWORK_CLIENT.test(base)) {
-        if (clientArgvSendsCredential(base, tokens.slice(i + 1), exps.slice(i + 1))) return true;
+        const { sends, stdin } = clientArgvSendsCredential(base, st.words.slice(i + 1));
+        if (sends) return true;
+        const readsStdin = stdin || viaXargs || st.stdinRedirect || (HTTPIE_CLIENT.test(base) && st.piped);
+        if (readsStdin && credentialAnywhere()) return true;
         break;
       }
       if (depth >= MAX_INLINE_RECURSION) continue;
@@ -1757,8 +2129,8 @@ function envCredentialEgressInvoked(text: string, depth = 0): boolean {
         break;
       }
       if (base === 'ssh' || base === 'eval') {
-        const inner = base === 'ssh' ? sshRemoteCommand(tokens.slice(i + 1)) : tokens.slice(i + 1).join(' ');
-        if (inner && envCredentialEgressInvoked(inner, depth + 1)) return true;
+        const programs = base === 'ssh' ? sshPrograms(tokens.slice(i + 1)) : [tokens.slice(i + 1).join(' ')];
+        for (const program of programs) if (program && envCredentialEgressInvoked(program, depth + 1)) return true;
         break;
       }
     }
@@ -6631,47 +7003,25 @@ function splitCommandStatements(text: string): string[] {
  * together. Hand-rolled (not a regex) so it is linear and cannot backtrack —
  * this runs on every tool call, on strings up to OVERSIZED_COMMAND_LENGTH.
  */
-function tokeniseStatement(stmt: string, expansions?: string[]): string[] {
+function tokeniseStatement(stmt: string): string[] {
   const out: string[] = [];
   let cur = '';
-  // #1005: the same token as the shell will EXPAND it, for callers that ask.
-  // A `$`, backtick or `<` the shell keeps literal (single-quoted, or
-  // backslash-escaped; `<` also inside double quotes) becomes LITERAL_MARK,
-  // so `'$TOKEN'` and `"\$TOKEN"` no longer read as an expansion. Same token
-  // boundaries as `out`, index for index.
-  let exp = '';
   let quote: string | null = null;
   for (let i = 0; i < stmt.length; i++) {
     const c = stmt[i];
-    if (c === '\\' && quote !== "'" && i + 1 < stmt.length) {
-      const e = stmt[++i];
-      cur += e;
-      if (expansions) exp += SHELL_EXPANSION_CHAR.test(e) ? LITERAL_MARK : e;
-      continue;
-    }
+    if (c === '\\' && quote !== "'" && i + 1 < stmt.length) { cur += stmt[++i]; continue; }
     if (quote) {
       if (c === quote) quote = null;
-      else {
-        cur += c;
-        if (expansions) exp += (quote === "'" ? SHELL_EXPANSION_CHAR.test(c) : c === '<') ? LITERAL_MARK : c;
-      }
+      else cur += c;
       continue;
     }
     if (c === '"' || c === "'") { quote = c; continue; }
-    if (c === ' ' || c === '\t') {
-      if (cur) { out.push(cur); expansions?.push(exp); cur = ''; exp = ''; }
-      continue;
-    }
+    if (c === ' ' || c === '\t') { if (cur) { out.push(cur); cur = ''; } continue; }
     cur += c;
-    if (expansions) exp += c;
   }
-  if (cur) { out.push(cur); expansions?.push(exp); }
+  if (cur) out.push(cur);
   return out;
 }
-/** Characters that begin an expansion or substitution when unquoted. */
-const SHELL_EXPANSION_CHAR = /[$`<]/;
-/** Stands in for a character the shell keeps literal (see tokeniseStatement). */
-const LITERAL_MARK = '\u0000';
 
 /** `/usr/bin/python3` → `python3`; quotes already stripped by the tokeniser. */
 function commandBaseName(tok: string): string {
