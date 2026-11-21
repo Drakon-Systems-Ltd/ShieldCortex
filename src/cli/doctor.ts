@@ -2570,39 +2570,34 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
   }
 
   try {
+    // #1043: ONE traversal policy for every bucket below. `treeSize` never
+    // follows a symbolic link (lstat; a link, FIFO or socket counts 0 bytes)
+    // and the total is the sum of it over the top-level entries. The audit
+    // plane is subtracted from that total, so it must be measured the same
+    // way: before this, the total skipped links but the audit figure followed
+    // them, and an `audit` symlink to unrelated evidence could subtract bytes
+    // that were never counted — turning an over-budget database into a pass.
+    const treeSize = (target: string): number => {
+      try {
+        const st = fs.lstatSync(target);
+        if (st.isFile()) return st.size;
+        if (!st.isDirectory()) return 0;
+        let total = 0;
+        for (const name of fs.readdirSync(target)) total += treeSize(path.join(target, name));
+        return total;
+      } catch {
+        return 0; // Skip inaccessible entries
+      }
+    };
+
     let dataSize = 0;
     let modelsSize = 0;
-
-    function walkInto(dir: string, bucket: 'data' | 'models'): void {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-        try {
-          if (entry.isDirectory()) {
-            walkInto(fullPath, bucket);
-          } else if (entry.isFile()) {
-            const size = fs.statSync(fullPath).size;
-            if (bucket === 'models') modelsSize += size;
-            else dataSize += size;
-          }
-        } catch {
-          // Skip inaccessible files
-        }
-      }
-    }
-
-    const topLevel = fs.readdirSync(scDir, { withFileTypes: true });
-    for (const entry of topLevel) {
-      const fullPath = path.join(scDir, entry.name);
-      try {
-        if (entry.isDirectory()) {
-          walkInto(fullPath, entry.name === 'models' ? 'models' : 'data');
-        } else if (entry.isFile()) {
-          dataSize += fs.statSync(fullPath).size;
-        }
-      } catch {
-        // Skip inaccessible top-level entries
-      }
+    let auditLogSize = 0;
+    for (const entry of fs.readdirSync(scDir, { withFileTypes: true })) {
+      const bytes = treeSize(path.join(scDir, entry.name));
+      if (entry.isDirectory() && entry.name === 'models') modelsSize += bytes;
+      else dataSize += bytes;
+      if (entry.isDirectory() && entry.name === 'audit') auditLogSize = bytes;
     }
 
     // Bucket the data so the remedy can name the actual consumer rather than always
@@ -2614,22 +2609,11 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     const BACKUP_RE = /^memories\.db\.(pre-backfill|empty-live|stub|corrupt|recovery-failed|bak)/;
     const LIVE_DB = new Set(['memories.db', 'memories.db-wal', 'memories.db-shm']);
     const LOG_DIRS = new Set(['logs', 'audit', 'recall-log', 'precompact-log', 'quarantine']);
-    const sizeOf = (target: string): number => {
-      try {
-        const st = fs.statSync(target);
-        if (st.isFile()) return st.size;
-        let total = 0;
-        for (const e of fs.readdirSync(target, { withFileTypes: true })) total += sizeOf(path.join(target, e.name));
-        return total;
-      } catch {
-        return 0;
-      }
-    };
     for (const entry of fs.readdirSync(scDir, { withFileTypes: true })) {
       const fp = path.join(scDir, entry.name);
-      if (entry.isFile() && BACKUP_RE.test(entry.name)) backupsSize += sizeOf(fp);
-      else if (entry.isFile() && LIVE_DB.has(entry.name)) liveDbSize += sizeOf(fp);
-      else if (entry.isDirectory() && LOG_DIRS.has(entry.name)) logsSize += sizeOf(fp);
+      if (entry.isFile() && BACKUP_RE.test(entry.name)) backupsSize += treeSize(fp);
+      else if (entry.isFile() && LIVE_DB.has(entry.name)) liveDbSize += treeSize(fp);
+      else if (entry.isDirectory() && LOG_DIRS.has(entry.name)) logsSize += treeSize(fp);
     }
 
     // #573: "logs" as one lump is not actionable. The live incident read
@@ -2639,8 +2623,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     // project-key repair logs (retention, and a command behind it). Split it.
     // The audit plane is measured as a whole directory and REPORTED ONLY. This
     // check never recommends an action against it and nothing in this release
-    // deletes or rewrites an audit file.
-    const auditLogSize = sizeOf(path.join(scDir, 'audit'));
+    // deletes or rewrites an audit file. (Measured in the walk above.)
     // Counted by the SAME grammar `logs prune` acts on (isRepairLogName), so
     // the number shown here is exactly the set the recommended command would
     // consider — not doctor's own approximation of it.
@@ -2648,7 +2631,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     try {
       for (const e of fs.readdirSync(path.join(scDir, 'logs'), { withFileTypes: true })) {
         if (e.isFile() && isRepairLogName(e.name)) {
-          repairLogs.bytes += sizeOf(path.join(scDir, 'logs', e.name));
+          repairLogs.bytes += treeSize(path.join(scDir, 'logs', e.name));
           repairLogs.files++;
         }
       }

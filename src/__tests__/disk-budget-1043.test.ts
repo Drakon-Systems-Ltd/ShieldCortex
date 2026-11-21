@@ -179,6 +179,34 @@ describe('#1043 doctor Disk row uses the effective budget', () => {
     expect(result.fix).toMatch(/#579/);
   });
 
+  it('a symlinked audit DIRECTORY cannot hide over-budget memory data', async () => {
+    // The link target is outside the data dir, so the total never counts it;
+    // before round 2 the audit figure followed the link and was subtracted
+    // anyway, turning this FAIL into "0 B / 100 MB … within the limit".
+    sparse('memories.db-wal', 150 * MiB);
+    const outside = path.join(tempDir, 'outside-evidence');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'realtime.jsonl'), '');
+    fs.truncateSync(path.join(outside, 'realtime.jsonl'), 150 * MiB);
+    fs.symlinkSync(outside, path.join(scDir, 'audit'));
+    const result = await checkDiskUsage(scDir);
+    expect(result.status).toBe('fail');
+    expect(result.message).toMatch(/^150\.0 MB \/ 100 MB limit/);
+  });
+
+  it('a symlink NESTED inside audit cannot hide over-budget memory data either', async () => {
+    sparse('memories.db-wal', 150 * MiB);
+    sparse('audit/realtime-2026-11-21.jsonl', 1 * MiB);
+    const outside = path.join(tempDir, 'outside-evidence');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'big.jsonl'), '');
+    fs.truncateSync(path.join(outside, 'big.jsonl'), 150 * MiB);
+    fs.symlinkSync(outside, path.join(scDir, 'audit', 'linked'));
+    const result = await checkDiskUsage(scDir);
+    expect(result.status).toBe('fail');
+    expect(result.message).toMatch(/^150\.0 MB \/ 100 MB limit \+ 1\.0 MB audit \(not counted\)/);
+  });
+
   it('memory data over the budget still FAILs, with audit shown separately', async () => {
     sparse('memories.db-wal', 99 * MiB);
     sparse('audit/realtime-2026-11-21.jsonl', 50 * MiB);
