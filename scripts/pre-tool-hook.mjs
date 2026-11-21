@@ -3143,15 +3143,17 @@ function selfProtectionSignals(guard) {
 }
 
 // #1005 (Case's review of #1088): the prompt-only signals. DUPLICATED from
-// tool-action-guard.ts `GUARD_PROMPT_ONLY_SIGNALS` for a dist that predates
-// the export; the live path reads the guard's own export. Held equal by
-// enforcement-surface-parity.
+// tool-action-guard.ts `GUARD_PROMPT_ONLY_SIGNALS`; held equal by
+// enforcement-surface-parity. The live path takes the UNION of this list and
+// the guard's own export, never the export alone: an older dist that already
+// emits `env-credential-egress` exports only `['reverse-shell']`.
 const FALLBACK_PROMPT_ONLY_SIGNALS = ['reverse-shell', 'env-credential-egress'];
 
-/** The prompt-only signals the live guard exports, else the duplicate. */
+/** The prompt-only signals: this duplicate plus whatever the live guard exports. */
 function promptOnlySignals(guard) {
   const list = guard?.GUARD_PROMPT_ONLY_SIGNALS;
-  return Array.isArray(list) && list.length > 0 ? list : FALLBACK_PROMPT_ONLY_SIGNALS;
+  if (!Array.isArray(list)) return FALLBACK_PROMPT_ONLY_SIGNALS;
+  return [...new Set([...FALLBACK_PROMPT_ONLY_SIGNALS, ...list.filter(s => typeof s === 'string')])];
 }
 
 /** A self-protection signal the WS2 fallback scan matches, or null. Checked
