@@ -810,6 +810,14 @@ class EnvCredentialFallbackFoldR2Tests(unittest.TestCase):
         for name, cmd, fallback_gates, _guard in self.FX["gaps"]:
             self.assertEqual(fallback_dangerous_match(fallback_surface({"command": cmd})), fallback_gates, name)
 
+    def test_non_ascii_reads_as_the_hook_and_interceptor_do(self):
+        # fold r3 (Astra r2 #5): Python's \w is Unicode by default, JS's is ASCII. The
+        # rows this change touches compile with re.ASCII, so `.pgpass` followed by a
+        # non-ASCII suffix, and `$` followed by a non-ASCII letter, read as on the JS planes.
+        from sc_client import fallback_dangerous_match, fallback_surface
+        for name, cmd, fallback_gates in self.FX["nonAscii"]:
+            self.assertEqual(bool(fallback_dangerous_match(fallback_surface({"command": cmd}))), fallback_gates, name)
+
     def test_new_store_behaves_as_a_listed_store_does(self):
         # The path row is a plain search on every fallback: on origin/main a
         # read or echo naming ~/.aws/credentials already gates while degraded,

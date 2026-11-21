@@ -230,10 +230,38 @@ describe('#1005 — the env-credential-egress outage row is linear and unbounded
   const hookRow = envRowSource(hookSrc);
   const rows: Array<[string, RegExp]> = [['hook', new RegExp(hookRow)], ['interceptor', new RegExp(envRowSource(pluginSrc))]];
 
-  it('one row in three copies: hook and interceptor byte-identical, Hermes the same with `/` for `\\/`, no flags', () => {
+  // fold r3: Hermes reads the row with JS semantics. re.ASCII makes \w, \d, \b
+  // and case ASCII, as in a JS regex without `u`; JS's \s is Unicode, so \s and
+  // \S are spelt out as JS's whitespace set (`[^\S\n]` as that set minus \n).
+  const U = '\\' + 'u';
+  const JS_WS = String.raw`\t\n\x0b\x0c\r \xa0` + ['1680', `2000-${U}200a`, '2028', '2029', '202f', '205f', '3000', 'feff'].map((h) => U + h).join('');
+  function toPyAscii(src: string): string {
+    let out = '';
+    for (let i = 0; i < src.length; i++) {
+      const c = src[i];
+      if (c === '\\') {
+        const e = src[++i];
+        out += e === 's' ? `[${JS_WS}]` : e === 'S' ? `[^${JS_WS}]` : c + e;
+        continue;
+      }
+      if (c !== '[') { out += c; continue; }
+      let j = i + 1;
+      while (j < src.length && src[j] !== ']') j += src[j] === '\\' ? 2 : 1;
+      const body = src.slice(i + 1, j);
+      const toks: string[] = body.match(/\\[\s\S]|[\s\S]/g) ?? [];
+      if (body === String.raw`\s\S`) out += `[${body}]`;
+      else if (body === String.raw`^\S\n`) out += `[${JS_WS.replace(String.raw`\n`, '')}]`;
+      else if (toks.includes(String.raw`\S`)) throw new Error(`unsupported class [${body}]`);
+      else out += `[${toks.map((t) => (t === String.raw`\s` ? JS_WS : t)).join('')}]`;
+      i = j;
+    }
+    return out;
+  }
+
+  it('one row in three copies: hook and interceptor byte-identical, Hermes the same with `/` for `\\/`, read with JS semantics', () => {
     expect(envRowSource(pluginSrc)).toBe(hookRow);
     const py = hermesSrc.split('\n').find((l) => l.startsWith('_FALLBACK_ENV_CREDENTIAL_ROW = re.compile(r"""'));
-    expect(py).toBe(`_FALLBACK_ENV_CREDENTIAL_ROW = re.compile(r"""${hookRow.replace(/\\\//g, '/')}""")`);
+    expect(py).toBe(`_FALLBACK_ENV_CREDENTIAL_ROW = re.compile(r"""${toPyAscii(hookRow.replace(/\\\//g, '/'))}""", re.ASCII)`);
   });
 
   const envShapes: Record<string, string> = {
@@ -254,6 +282,12 @@ describe('#1005 — the env-credential-egress outage row is linear and unbounded
     'client+header-spam': 'curl ' + '-H x '.repeat(PAD / 5),
     'client+local-option-spam': 'curl ' + '-o x '.repeat(PAD / 5),
     'client+continuation-spam': 'curl ' + '\\\n '.repeat(PAD / 3),
+    // fold r3: value options take the next word whatever it looks like.
+    'client+data-option-spam': 'curl ' + '--data-raw '.repeat(PAD / 11),
+    'client+data-then-local-spam': 'curl ' + '-d -K '.repeat(PAD / 6),
+    'client+unknown-long-spam': 'curl ' + '--frob '.repeat(PAD / 7),
+    'client+empty-word-spam': 'curl ' + "'' ".repeat(PAD / 3),
+    'client+quoted-printenv-spam': 'curl "$(printenv \'x '.repeat(PAD / 18),
     'bash-c-nesting': 'bash -c "curl '.repeat(PAD / 14),
     'wrapper-spam': 'env '.repeat(PAD / 4),
     'wrapper-flag-spam': 'env ' + '-a '.repeat(PAD / 3),

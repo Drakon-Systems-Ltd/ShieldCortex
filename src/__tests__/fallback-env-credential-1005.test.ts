@@ -33,6 +33,7 @@ const FX = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'fallback
   gate: Array<[string, string]>;
   quiet: Array<[string, string]>;
   gaps: Array<[string, string, boolean, string]>;
+  nonAscii: Array<[string, string, boolean]>;
 };
 
 /** A listed store on origin/main beside a store this change adds, same tool, same shape. */
@@ -86,6 +87,9 @@ describe('#1005 fold r2 — OpenClaw interceptor fallback', () => {
   it.each(FX.gaps)('pinned: %s', async (_name, command, fallbackGates) => {
     expect(await gated('Bash', { command })).toBe(fallbackGates);
   });
+  it.each(FX.nonAscii)('non-ASCII input, same answer as Hermes: %s', async (_name, command, fallbackGates) => {
+    expect(await gated('Bash', { command })).toBe(fallbackGates);
+  });
   it.each(STORE_PAIRS)('a new store behaves as a listed store does: %s', async (_l, tool, listed, added) => {
     const both = { listed: await gated(tool, listed), added: await gated(tool, added) };
     expect(both).toEqual({ listed: both.listed, added: both.listed });
@@ -131,6 +135,9 @@ describe('#1005 fold r2 — Claude Code hook fallback', () => {
     expect(await runHook('Bash', { command })).toBeUndefined();
   });
   it.each(FX.gaps)('pinned: %s', async (_name, command, fallbackGates) => {
+    expect(await runHook('Bash', { command })).toBe(fallbackGates ? 'ask' : undefined);
+  });
+  it.each(FX.nonAscii)('non-ASCII input, same answer as Hermes: %s', async (_name, command, fallbackGates) => {
     expect(await runHook('Bash', { command })).toBe(fallbackGates ? 'ask' : undefined);
   });
   it.each(STORE_PAIRS)('a new store behaves as a listed store does: %s', async (_l, tool, listed, added) => {
