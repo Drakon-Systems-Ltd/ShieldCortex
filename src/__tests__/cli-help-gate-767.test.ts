@@ -247,6 +247,15 @@ describe('#767 — `<command> --help` prints usage, exits 0 and writes nothing u
     }
   }, 30_000);
 
+  // #1043: the capacity setters' help is side-effect free — usage, exit 0,
+  // nothing written under HOME (no config, signature or key).
+  it.each(['--memory-cap', '--disk-budget'])('config %s help writes nothing', (flag) => {
+    for (const args of [[flag, '--help'], [flag, flag === '--memory-cap' ? 'ltm=2000' : '1GB', '--help']]) {
+      const r = expectUsageAndNoWrites(['config', ...args], 'Usage');
+      expect(r.stdout).toBe(`${DISPATCH_HELP.config}\n`);
+    }
+  }, 30_000);
+
   it.each(VERB_FORMS)('%s -h and bare help are the same request', (command) => {
     for (const form of ['-h', 'help']) {
       const r = expectUsageAndNoWrites([command, form], 'Usage');
@@ -468,6 +477,8 @@ describe('#767 round 3 — each option is read the way its own parser reads it',
       ['config', '--memory-host-posture', '--help'],
       ['config', '--memory-host-runtime', '--help'],
       ['config', '--auto-memory-sampling', '--help'],
+      ['config', '--memory-cap', '--help'],
+      ['config', '--disk-budget', '--help'],
       ['config', '--action-guard-notify-webhook', '--help'],
     ]) expectHelp(argv, true);
   });
@@ -633,6 +644,7 @@ describe('#767 round 3 — each option is read the way its own parser reads it',
         '--action-guard-notify-webhook': 'unless-double-dash', '--memory-inject-contract': 'unless-double-dash',
         '--memory-plane': 'unless-double-dash', '--memory-host-posture': 'unless-double-dash',
         '--memory-host-runtime': 'unless-double-dash', '--auto-memory-sampling': 'unless-double-dash',
+        '--memory-cap': 'unless-double-dash', '--disk-budget': 'unless-double-dash',
       }),
       ...prefixed('consolidate', global),
       ...prefixed('dashboard', global),

@@ -20,6 +20,8 @@ import {
 } from '../defence/iron-dome/policy-lock.js';
 import { emitProtectedAudit } from '../defence/iron-dome/protected-root.js';
 import { openRecoveryAuditSink, type RecoveryAuditSink } from './recovery-audit.js';
+import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
+import { isValidDiskBudgetBytes, type MemoryCapSpec } from './capacity.js';
 
 export interface CloudConfig {
   cloudApiKey: string | null;
@@ -3001,6 +3003,100 @@ export function setAutoMemorySamplingTurns(n: number): void {
       : {};
     existing.stopHookSamplingTurns = n;
     raw.autoMemory = existing;
+  });
+}
+
+// ── Capacity: memory caps and disk budget (#1043) ─────
+
+export interface DiskBudget {
+  bytes: number;
+  /** `config` = a valid stored override; `invalid` = one was stored but refused. */
+  source: 'default' | 'config' | 'invalid';
+}
+
+let diskBudgetWarned = false;
+
+/**
+ * The effective ShieldCortex directory budget: a valid signed
+ * storage.diskBudgetBytes, else DIRECTORY_BUDGET_BYTES. Always a read-only
+ * read (no adoption, self-heal or signature write), and never throws: a bad
+ * or unreadable value falls back to the default, which is the larger-or-equal
+ * historical budget, never toward deletion.
+ */
+export function getDiskBudget(): DiskBudget {
+  let raw: Record<string, unknown>;
+  try {
+    raw = readRawConfig({ readOnly: true });
+  } catch {
+    return { bytes: DIRECTORY_BUDGET_BYTES, source: 'default' };
+  }
+  const storage = raw.storage;
+  const value = isPlainBlock(storage) ? storage.diskBudgetBytes : undefined;
+  if (storage === undefined || (isPlainBlock(storage) && value === undefined)) {
+    return { bytes: DIRECTORY_BUDGET_BYTES, source: 'default' };
+  }
+  if (isValidDiskBudgetBytes(value)) return { bytes: value, source: 'config' };
+  if (!diskBudgetWarned) {
+    diskBudgetWarned = true;
+    console.warn('[shieldcortex] storage.diskBudgetBytes is not a valid byte count (50 MiB to 50 GiB) — using the default. '
+      + 'Set it with `shieldcortex config --disk-budget <size>`.');
+  }
+  return { bytes: DIRECTORY_BUDGET_BYTES, source: 'invalid' };
+}
+
+export interface CapacityUpdate extends MemoryCapSpec {
+  diskBudgetBytes?: number;
+}
+
+/**
+ * Refuse to replace a malformed `memory` or `storage` block. Overwriting a
+ * non-object block with `{}` would silently discard whatever the operator put
+ * there; they should see it and fix it.
+ */
+function assertCapacityBlocks(raw: Record<string, unknown>, update: CapacityUpdate): void {
+  const targets: Array<'memory' | 'storage'> = [];
+  if (update.maxLongTermMemories !== undefined || update.maxShortTermMemories !== undefined) targets.push('memory');
+  if (update.diskBudgetBytes !== undefined) targets.push('storage');
+  for (const key of targets) {
+    if (Object.prototype.hasOwnProperty.call(raw, key) && !isPlainBlock(raw[key])) {
+      throw new Error(`Refusing to write: the "${key}" entry in config.json is not an object. `
+        + 'Nothing was changed. Fix that entry by hand (then `shieldcortex config --resign`), and retry.');
+    }
+  }
+}
+
+/**
+ * The SIGNED write path for the capacity settings: one mutateRawConfig call
+ * for every field given, so the file is re-signed once and the existing
+ * corrupt / tampered / symlink refusals apply unchanged. Callers validate the
+ * values (see ./capacity.ts); this re-checks them, because the stored value is
+ * what enforcement later trusts. Writes settings only — it never opens the
+ * memory database or deletes anything.
+ */
+export function setCapacityConfig(update: CapacityUpdate): void {
+  const { maxLongTermMemories: ltm, maxShortTermMemories: stm, diskBudgetBytes } = update;
+  for (const n of [ltm, stm]) {
+    if (n !== undefined && (!Number.isSafeInteger(n) || n < 10)) throw new Error('Invalid memory cap.');
+  }
+  if (diskBudgetBytes !== undefined && !isValidDiskBudgetBytes(diskBudgetBytes)) throw new Error('Invalid disk budget.');
+  if (ltm === undefined && stm === undefined && diskBudgetBytes === undefined) return;
+  // Shape check on the bytes as they are, BEFORE the mutation path's ordinary
+  // read can adopt or self-heal the file, so a refusal changes nothing at all.
+  const current = readConfigBytesNoSideEffects();
+  if (current.data) assertCapacityBlocks(current.data, update);
+  mutateRawConfig((raw) => {
+    assertCapacityBlocks(raw, update);
+    if (ltm !== undefined || stm !== undefined) {
+      const memory = (raw.memory ?? {}) as Record<string, unknown>;
+      if (ltm !== undefined) memory.maxLongTermMemories = ltm;
+      if (stm !== undefined) memory.maxShortTermMemories = stm;
+      raw.memory = memory;
+    }
+    if (diskBudgetBytes !== undefined) {
+      const storage = (raw.storage ?? {}) as Record<string, unknown>;
+      storage.diskBudgetBytes = diskBudgetBytes;
+      raw.storage = storage;
+    }
   });
 }
 

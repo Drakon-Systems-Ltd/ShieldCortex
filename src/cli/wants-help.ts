@@ -416,7 +416,7 @@ const PROTECT_SPEC = helpSpec({ '--config': first('unless-double-dash'), '--agen
  * following token of. The values are enums, keys, URLs and numbers; a bare
  * `help` after any of them is that option's (invalid) value, and the handler is
  * the one to refuse it. Ten of them read `args[idx + 1]` whenever it is
- * truthy and refuse it as INVALID; the six signed-write and webhook options
+ * truthy and refuse it as INVALID; the eight signed-write and webhook options
  * refuse a `--`-leading token as MISSING without reading it.
  */
 const CONFIG_SPEC = helpSpec({
@@ -436,6 +436,8 @@ const CONFIG_SPEC = helpSpec({
   '--memory-host-posture': first('unless-double-dash'),
   '--memory-host-runtime': first('unless-double-dash'),
   '--auto-memory-sampling': first('unless-double-dash'),
+  '--memory-cap': first('unless-double-dash'),
+  '--disk-budget': first('unless-double-dash'),
 });
 
 /** `review-copilot annotate --id <id> | --pending [--limit N]`: `Number(args[idx + 1])`. */

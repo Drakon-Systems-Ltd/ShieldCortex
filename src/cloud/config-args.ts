@@ -29,6 +29,8 @@ export const CONFIG_VALUE_FLAGS_UNLESS_DASH = [
   '--memory-host-posture',
   '--memory-host-runtime',
   '--auto-memory-sampling',
+  '--memory-cap',
+  '--disk-budget',
 ] as const;
 
 export const CONFIG_BOOLEAN_FLAGS = [
