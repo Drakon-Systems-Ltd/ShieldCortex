@@ -93,6 +93,7 @@ const FIRST: Probe[] = [
     ['--action-guard-notify-webhook', 'agNotifyWebhookIdx'], ['--memory-inject-contract', 'memInjectContractIdx'],
     ['--memory-plane', 'memPlaneIdx'], ['--memory-host-posture', 'hostPostureIdx'],
     ['--memory-host-runtime', 'hostRuntimeIdx'], ['--auto-memory-sampling', 'autoMemSamplingIdx'],
+    ['--memory-cap', 'capIdx'], ['--disk-budget', 'budgetIdx'],
   ].map(([flag, idx]) => ({ command: 'config' as const, prefix: [], flags: [flag], read: inlineReader('src/cloud/cli.ts', idx) })),
   { command: 'scan-skills', prefix: [], flags: ['--dir'], read: (args) => {
     const declaration = nodeMatching('src/index.ts', (n): n is ts.VariableDeclaration => ts.isVariableDeclaration(n) && n.name.getText(source('src/index.ts')) === 'customDir');

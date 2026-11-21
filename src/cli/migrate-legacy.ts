@@ -6,7 +6,8 @@ import readline from 'readline';
 import Database from 'better-sqlite3';
 import { deriveProjectKey } from '../context/derive-project-key.js';
 import { redactForPersistence } from '../defence/sensitivity/pii.js';
-import { planBackup, pruneOldBackups, DISK_LIMIT_BYTES } from './backup-budget.js';
+import { planBackup, pruneOldBackups } from './backup-budget.js';
+import { getDiskBudget } from '../cloud/config.js';
 import { COMMAND_HELP_SPECS, commandWantsHelp } from './wants-help.js';
 import { prepareRepairLogDir, writeRepairLogRecord } from '../logs/retention.js';
 
@@ -1010,7 +1011,8 @@ export async function repairProjectKeys(opts: RepairOptions = {}): Promise<Repai
     // maintenance command doctor had just RECOMMENDED into the thing that put
     // the host over its own limit, with no way to win by hand because the next
     // repair simply recreated it.
-    const plan = planBackup({ dbPath, limitBytes: DISK_LIMIT_BYTES });
+    // #1043: the effective budget (signed storage.diskBudgetBytes or the default), read-only.
+    const plan = planBackup({ dbPath, limitBytes: getDiskBudget().bytes });
     if (plan.action === 'refuse') {
       console.error(`Aborted — ${plan.reason}`);
       report.aborted = plan.reason;

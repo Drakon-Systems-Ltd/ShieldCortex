@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { initDatabase, closeDatabase, getDatabase } from '../database/init.js';
-import { enforceMemoryLimits } from '../memory/consolidate.js';
+import { enforceMemoryLimits, fullCleanup } from '../memory/consolidate.js';
 import { __resetCapWarningsForTest } from '../memory/config.js';
 
 /**
@@ -121,5 +121,17 @@ describe('configurable caps — the resolver is actually consulted', () => {
 
     expect(deleted).toBe(1);
     expect(longTermCount()).toBe(24);
+  });
+
+  it('#1043: fullCleanup() with no argument (the server\'s 4-hourly path) honours a cap RAISED above 1000', () => {
+    // It used to default to DEFAULT_CONFIG, so `config --memory-cap ltm=1200`
+    // was undone every four hours: 1100 rows evicted back down to 1000.
+    writeConfig({ memory: { maxLongTermMemories: 1200 } });
+    seedEvictable(1100);
+
+    const result = fullCleanup();
+
+    expect(result.consolidation.evictedLongTerm).toBe(0);
+    expect(longTermCount()).toBe(1100);
   });
 });

@@ -100,18 +100,20 @@ describe('#649 the issue shape: a majority database with almost no free pages', 
     writeBytes('logs/other.log', Math.round(0.445 * unit));
     writeBytes('memories.db.bak.2026-01-01T00-00-00-000Z', Math.round(0.32 * unit));
 
-    const result = await checkDiskUsage(scDir, Math.round(100 * unit));
+    // #1043: audit is no longer counted against the limit, so the limit is
+    // scaled to what the memory data alone (DB + repair + other) overruns.
+    const result = await checkDiskUsage(scDir, Math.round(64 * unit));
 
     expect(result.status).toBe('fail');
     expect(result.fix).not.toMatch(/No single measured consumer/);
-    expect(result.fix).toMatch(/^Largest measured consumer: the database, .* counted against the limit \(5\d%\)\./);
+    expect(result.fix).toMatch(/^Largest measured consumer: the database, .* counted against the limit \(9\d%\)\./);
     // The free-page figure is reported as what it is, and does not draw vacuum.
     expect(result.fix).toMatch(/free pages/);
     expect(result.fix).toMatch(/not free disk space/);
     expect(result.fix).not.toMatch(/shieldcortex vacuum/);
     // The budget is not the filesystem.
     expect(result.fix).toMatch(/not a measurement of free space on the filesystem/);
-    // Audit is the runner-up at ~44%: named, with #579, and no command.
+    // Audit is ~44% of the measured footprint: named, with #579, and no command.
     expect(result.fix).toContain('#579');
     expect(result.fix).not.toMatch(/logs prune/);
     // Backups are visible and exempt, never blamed.
@@ -147,14 +149,17 @@ describe('#649 the issue shape: a majority database with almost no free pages', 
 describe('#649 biggest bucket is not the same thing as majority', () => {
   it('names the largest term even when it holds under half', async () => {
     writeBytes('memories.db', 40 * KB);
-    writeBytes('audit/realtime-2026-01-01.jsonl', 30 * KB);
+    repairLogs(3, 10 * KB);
     writeBytes('state/worker.json', 30 * KB);
+    writeBytes('audit/realtime-2026-01-01.jsonl', 40 * KB);
 
     const result = await checkDiskUsage(scDir, 64 * KB);
 
     expect(result.status).toBe('fail');
+    // #1043: audit is shown on its own line, not ranked against the limit.
     expect(result.fix).toMatch(/^Largest measured consumer: the database, 40\.0 KB of the 100\.0 KB .*\(40%\)/);
-    expect(result.fix).toMatch(/Then audit evidence 30\.0 KB, everything else 30\.0 KB\./);
+    expect(result.fix).toMatch(/Then repair logs 30\.0 KB, everything else 30\.0 KB\./);
+    expect(result.fix).toMatch(/Audit evidence \(40\.0 KB, not counted against the limit\)/);
     expectSafe(result.fix);
   });
 
@@ -165,8 +170,9 @@ describe('#649 biggest bucket is not the same thing as majority', () => {
 
     const result = await checkDiskUsage(scDir, 32 * KB);
 
+    // #1043: audit evidence is not ranked against the limit; it keeps its own #579 line.
     expect(result.fix).toMatch(
-      /^Largest measured consumers, tied: the database and audit evidence and everything else, 20\.0 KB each .*\(33% each\)/,
+      /^Largest measured consumers, tied: the database and everything else, 20\.0 KB each .*\(50% each\)/,
     );
     expect(result.fix).toContain('#579');
     expect(result.fix).not.toMatch(/shieldcortex vacuum|logs prune/);
@@ -219,8 +225,9 @@ describe('#649 audit evidence: reported, never acted on', () => {
 
     const result = await checkDiskUsage(scDir, 64 * KB);
 
-    expect(result.fix).toMatch(/^Largest measured consumer: audit evidence/);
-    expect(result.fix).toMatch(/no automatic retention yet \(#579\), and nothing here deletes it/);
+    // #1043: audit is not ranked against the limit, but is still named with #579.
+    expect(result.fix).toMatch(/^Largest measured consumer: everything else/);
+    expect(result.fix).toMatch(/Audit evidence \(40\.0 KB, not counted against the limit\) has no automatic retention yet \(#579\), and nothing here deletes it/);
     expect(result.fix).not.toMatch(/logs prune|shieldcortex vacuum/);
     expectSafe(result.fix);
   });
@@ -341,11 +348,11 @@ describe('#649 the fallback survives the human report', () => {
       const out = render(result, verbose);
       const text = flat(out);
 
-      expect(text).toMatch(/Largest measured consumers, tied: the database and repair logs, 40\.0 KB each of the 115\.0 KB counted against the limit \(35% each\)\./);
-      expect(text).toMatch(/Then audit evidence 30\.0 KB, everything else 5\.0 KB\./);
+      expect(text).toMatch(/Largest measured consumers, tied: the database and repair logs, 40\.0 KB each of the 85\.0 KB counted against the limit \(47% each\)\./);
+      expect(text).toMatch(/Then everything else 5\.0 KB\./);
       expect(text).toMatch(/free pages could not be read, so nothing about what fills it was measured and no command is named for it/);
       expect(text).toMatch(/shieldcortex logs prune \(without --execute\)/);
-      expect(text).toMatch(/Audit evidence \(26%\) has no automatic retention yet \(#579\), and nothing here deletes it/);
+      expect(text).toMatch(/Audit evidence \(30\.0 KB, not counted against the limit\) has no automatic retention yet \(#579\), and nothing here deletes it/);
       expect(text).toMatch(/not a measurement of free space on the filesystem — inspect before removing anything/);
       expect(out).toMatch(/^\s*\$ shieldcortex logs prune$/m);
       expect(text).not.toMatch(/logs prune --execute|shieldcortex vacuum/);
