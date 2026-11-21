@@ -356,6 +356,23 @@ function noteDirectiveScreenUnavailable(reason) {
   );
 }
 
+let _l2ThrewNoted = false;
+
+/**
+ * Say once per process that the L2 provenance screen threw, in the same fixed,
+ * names-only words as the OpenClaw capture path: never the exception, the
+ * title or the candidate. The verdict is unchanged (that candidate is judged
+ * without L2); there is no counter to bump here, for the reason above.
+ */
+function noteProvenanceScreenThrew() {
+  if (_l2ThrewNoted) return;
+  _l2ThrewNoted = true;
+  process.stderr.write(
+    '[shieldcortex save-memory] provenance_screen_unavailable — the L2 provenance screen threw; auto-capture '
+    + 'continues without it for that candidate (logged once per process)\n',
+  );
+}
+
 /**
  * `{ indicator, patterns }` when the candidate must be refused, else null.
  *
@@ -398,6 +415,7 @@ export function screenAutoCaptureCandidate(defence, content, title) {
     try {
       nai = defence.detectNonAuthoritativeInstruction(candidate, 'memory_candidate');
     } catch {
+      noteProvenanceScreenThrew();
       nai = null;
     }
   }
