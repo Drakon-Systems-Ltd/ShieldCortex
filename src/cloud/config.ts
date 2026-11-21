@@ -21,7 +21,7 @@ import {
 import { emitProtectedAudit } from '../defence/iron-dome/protected-root.js';
 import { openRecoveryAuditSink, type RecoveryAuditSink } from './recovery-audit.js';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
-import { isValidDiskBudgetBytes, type MemoryCapSpec } from './capacity.js';
+import { formatBudget, isValidDiskBudgetBytes, type MemoryCapSpec } from './capacity.js';
 
 export interface CloudConfig {
   cloudApiKey: string | null;
@@ -3010,38 +3010,63 @@ export function setAutoMemorySamplingTurns(n: number): void {
 
 export interface DiskBudget {
   bytes: number;
-  /** `config` = a valid stored override; `invalid` = one was stored but refused. */
-  source: 'default' | 'config' | 'invalid';
+  /**
+   * `config`    a valid override in a correctly signed config.json;
+   * `invalid`   one was stored in a signed file but is not a valid byte count;
+   * `untrusted` one was stored but config.json's signature does not verify
+   *             (tampered, unsigned or unverifiable), so it is ignored.
+   */
+  source: 'default' | 'config' | 'invalid' | 'untrusted';
 }
 
 let diskBudgetWarned = false;
 
+function warnDiskBudgetOnce(message: string): void {
+  if (diskBudgetWarned) return;
+  diskBudgetWarned = true;
+  console.warn(`[shieldcortex] ${message}`);
+}
+
 /**
- * The effective ShieldCortex directory budget: a valid signed
- * storage.diskBudgetBytes, else DIRECTORY_BUDGET_BYTES. Always a read-only
- * read (no adoption, self-heal or signature write), and never throws: a bad
- * or unreadable value falls back to the default, which is the larger-or-equal
- * historical budget, never toward deletion.
+ * The effective ShieldCortex directory budget: storage.diskBudgetBytes from a
+ * CORRECTLY SIGNED config.json, else DIRECTORY_BUDGET_BYTES. The value and the
+ * integrity verdict come from the same read of the same bytes, with no side
+ * effects at all (no adoption, self-heal, key mint, cache update or signature
+ * write). A tampered, unsigned or unverifiable file's budget is ignored with
+ * one warning, because this number gates the session-capture valve and the
+ * doctor verdict, and a same-UID edit must not move it. Never throws; every
+ * failure falls back to the default, the larger-or-equal historical budget,
+ * never toward deletion.
  */
 export function getDiskBudget(): DiskBudget {
-  let raw: Record<string, unknown>;
+  let read: ConfigBytes;
   try {
-    raw = readRawConfig({ readOnly: true });
+    read = readConfigBytesNoSideEffects();
   } catch {
     return { bytes: DIRECTORY_BUDGET_BYTES, source: 'default' };
   }
-  const storage = raw.storage;
+  const storage = read.data?.storage;
   const value = isPlainBlock(storage) ? storage.diskBudgetBytes : undefined;
   if (storage === undefined || (isPlainBlock(storage) && value === undefined)) {
     return { bytes: DIRECTORY_BUDGET_BYTES, source: 'default' };
   }
-  if (isValidDiskBudgetBytes(value)) return { bytes: value, source: 'config' };
-  if (!diskBudgetWarned) {
-    diskBudgetWarned = true;
-    console.warn('[shieldcortex] storage.diskBudgetBytes is not a valid byte count (50 MiB to 50 GiB) — using the default. '
-      + 'Set it with `shieldcortex config --disk-budget <size>`.');
+  // 'self-heal': a legacy whole-file signature still verifies these exact
+  // bytes (only the embedded _sig is stale), so the content is authentic.
+  if (read.verdict !== 'valid' && read.verdict !== 'self-heal') {
+    warnDiskBudgetOnce(`storage.diskBudgetBytes is ignored: config.json's signature does not verify (${read.verdict}), `
+      + `so the ${formatBudget(DIRECTORY_BUDGET_BYTES)} default applies. Run \`shieldcortex doctor\` to see why, `
+      + 'and `shieldcortex config --resign` only once you have reviewed the file.');
+    return { bytes: DIRECTORY_BUDGET_BYTES, source: 'untrusted' };
   }
+  if (isValidDiskBudgetBytes(value)) return { bytes: value, source: 'config' };
+  warnDiskBudgetOnce('storage.diskBudgetBytes is not a valid byte count (50 MiB to 50 GiB) — using the default. '
+    + 'Set it with `shieldcortex config --disk-budget <size>`.');
   return { bytes: DIRECTORY_BUDGET_BYTES, source: 'invalid' };
+}
+
+/** Reset the once-per-process disk-budget warning. Tests only. */
+export function __resetDiskBudgetWarningForTest(): void {
+  diskBudgetWarned = false;
 }
 
 export interface CapacityUpdate extends MemoryCapSpec {

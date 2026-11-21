@@ -17,7 +17,7 @@ import path from 'path';
 import { createHmac, randomUUID } from 'crypto';
 import Database from 'better-sqlite3';
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
-import { clearCloudConfigCache, getDiskBudget } from '../cloud/config.js';
+import { __resetDiskBudgetWarningForTest, clearCloudConfigCache, getDiskBudget } from '../cloud/config.js';
 import { checkDiskUsage, runMemoryStatsCheck } from '../cli/doctor.js';
 import { extractFixCommands } from '../cli/doctor-report.js';
 import { sessionPressureThresholdBytes } from '../sessions/retention.js';
@@ -54,8 +54,17 @@ beforeEach(() => {
   fs.mkdirSync(scDir, { recursive: true });
   process.env.SHIELDCORTEX_CONFIG_DIR = configDir;
   clearCloudConfigCache();
+  __resetDiskBudgetWarningForTest();
   jest.spyOn(console, 'warn').mockImplementation(() => {});
 });
+
+/** Every entry in the config dir: name, bytes and mtime (a no-write proof). */
+function configDirSnapshot(): Array<[string, string, number]> {
+  return fs.readdirSync(configDir).sort().map((name) => {
+    const p = path.join(configDir, name);
+    return [name, fs.readFileSync(p, 'utf-8'), fs.lstatSync(p).mtimeMs];
+  });
+}
 
 afterEach(() => {
   jest.restoreAllMocks();
@@ -86,6 +95,43 @@ describe('#1043 getDiskBudget', () => {
   ])('falls back to the default, never lower, for an invalid value %j', (cfg) => {
     writeSignedConfig(cfg);
     expect(getDiskBudget()).toEqual({ bytes: DIRECTORY_BUDGET_BYTES, source: 'invalid' });
+  });
+
+  it('a TAMPERED budget (signed 1 GiB, edited to 50 MiB) is ignored: default, one warning, nothing written', () => {
+    writeSignedConfig({ storage: { diskBudgetBytes: 1024 * MiB } });
+    const file = path.join(configDir, 'config.json');
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf-8').replace(String(1024 * MiB), String(50 * MiB)));
+    clearCloudConfigCache();
+    const before = configDirSnapshot();
+    const warn = console.warn as unknown as jest.Mock;
+
+    expect(getDiskBudget()).toEqual({ bytes: DIRECTORY_BUDGET_BYTES, source: 'untrusted' });
+    expect(getDiskBudget()).toEqual({ bytes: DIRECTORY_BUDGET_BYTES, source: 'untrusted' });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toMatch(/signature does not verify \(tampered\)/);
+    expect(configDirSnapshot()).toEqual(before);
+  });
+
+  it('an UNSIGNED budget (no signature at all) is ignored and the file is not adopted', () => {
+    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ storage: { diskBudgetBytes: 2048 * MiB } }));
+    clearCloudConfigCache();
+    const before = configDirSnapshot();
+    expect(getDiskBudget()).toEqual({ bytes: DIRECTORY_BUDGET_BYTES, source: 'untrusted' });
+    // No .integrity-key minted, no .config-sig adopted, config.json untouched.
+    expect(configDirSnapshot()).toEqual(before);
+    expect(before.map(([name]) => name)).toEqual(['config.json']);
+  });
+
+  it('doctor judges against the default, not a tampered budget, and says why', async () => {
+    writeSignedConfig({ storage: { diskBudgetBytes: 1024 * MiB } });
+    const file = path.join(configDir, 'config.json');
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf-8').replace(String(1024 * MiB), String(2048 * MiB)));
+    clearCloudConfigCache();
+    sparse('memories.db-wal', 99 * MiB);
+    const result = await checkDiskUsage(scDir);
+    expect(result.status).toBe('fail');
+    expect(result.message).toMatch(/99\.0 MB \/ 100 MB limit/);
+    expect(result.fix).toMatch(/signature does not verify, so it is ignored/);
   });
 
   it('the session-capture valve gate is unchanged at the default and follows a raised budget', () => {

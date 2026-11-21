@@ -2553,8 +2553,11 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
   // already chose a number does not need telling it exists.
   const budgetHint = budget.source === 'config'
     ? ''
-    : ` The ${limitLabel} budget is the default; if this host is meant to keep more, raise it with `
-      + '`shieldcortex config --disk-budget <size>` (e.g. 1GB).';
+    : budget.source === 'untrusted'
+      ? ` storage.diskBudgetBytes is set, but config.json's signature does not verify, so it is ignored and the `
+        + `${limitLabel} default applies — see the config integrity row.`
+      : ` The ${limitLabel} budget is the default; if this host is meant to keep more, raise it with `
+        + '`shieldcortex config --disk-budget <size>` (e.g. 1GB).';
   const dirProbe = probePath(scDir);
   if (dirProbe.kind === 'denied' || dirProbe.kind === 'error') {
     // "Directory not yet created" is a ✅. An unreadable one is not — this is
