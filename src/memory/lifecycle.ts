@@ -210,15 +210,36 @@ export function getEnrichmentDirectiveRefusalCount(): number {
 }
 
 /**
+ * SCN-010: enrichments screened WITHOUT the memory-directive screen because it
+ * threw. Counted apart from the refusals above, and said once per process on
+ * stderr in fixed words (never the exception, the appended text or the title).
+ */
+let enrichmentDirectiveUnavailable = 0;
+let enrichmentDirectiveUnavailableNoted = false;
+
+/** How many enrichments this process screened without S (it threw). */
+export function getEnrichmentDirectiveUnavailableCount(): number {
+  return enrichmentDirectiveUnavailable;
+}
+
+/**
  * Pattern names when the appended text is a memory directive, else null.
  * Fails open (null) if the screen throws, like every other S site: the
- * defence pipeline scan below still runs.
+ * defence pipeline scan below still runs. A throw is counted and noted once.
  */
 function enrichmentDirective(appended: string): string[] | null {
   try {
     const result = detectMemoryDirective(appended);
     return result.detected ? result.patterns : null;
   } catch {
+    enrichmentDirectiveUnavailable += 1;
+    if (!enrichmentDirectiveUnavailableNoted) {
+      enrichmentDirectiveUnavailableNoted = true;
+      process.stderr.write(
+        '[shieldcortex] memory_directive_screen_unavailable — the memory-directive screen threw; '
+        + 'recall enrichment continues without it (logged once per process)\n',
+      );
+    }
     return null;
   }
 }

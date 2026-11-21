@@ -255,8 +255,8 @@ export function screenMemoryCandidate(content, detect, title, detectDirective) {
   const candidate = candidateText(content, title);
   if (!candidate) return null;
 
-  const directive = runDetector(() => detectDirective(candidate), typeof detectDirective === 'function');
-  const nai = runDetector(() => detect(candidate, 'memory_candidate'), typeof detect === 'function');
+  const directive = runDetector(() => detectDirective(candidate), typeof detectDirective === 'function', noteDirectiveScreenThrew);
+  const nai = runDetector(() => detect(candidate, 'memory_candidate'), typeof detect === 'function', noteL2ScreenThrew);
 
   const naiPatterns = nai && nai.detected && Array.isArray(nai.patterns) ? nai.patterns : null;
   if (directive && directive.detected) {
@@ -271,14 +271,44 @@ export function screenMemoryCandidate(content, detect, title, detectDirective) {
   return naiPatterns ?? [];
 }
 
-/** A detector's result, or null when it is absent or throws. */
-function runDetector(call, available) {
+/** A detector's result, or null when it is absent or throws (`onThrow` is told; never the error). */
+function runDetector(call, available, onThrow) {
   if (!available) return null;
   try {
     return call() ?? null;
   } catch {
+    onThrow();
     return null;
   }
+}
+
+/**
+ * Candidates this process screened without a detector because it THREW. Kept
+ * apart from refusals; each kind is also said once per process in fixed words
+ * (never the exception, the candidate text or the title).
+ */
+let _directiveThrewCount = 0;
+let _l2ThrewCount = 0;
+let _l2ThrewNoted = false;
+
+/** `{ memoryDirective, l2 }`: candidates screened without that detector because it threw. */
+export function getScreenUnavailableCounts() {
+  return { memoryDirective: _directiveThrewCount, l2: _l2ThrewCount };
+}
+
+function noteDirectiveScreenThrew() {
+  _directiveThrewCount += 1;
+  noteDirectiveScreenUnavailable('the memory-directive screen threw');
+}
+
+function noteL2ScreenThrew() {
+  _l2ThrewCount += 1;
+  if (_l2ThrewNoted) return;
+  _l2ThrewNoted = true;
+  console.warn(
+    '[cortex-memory] provenance_screen_unavailable — the L2 provenance screen threw; auto-capture '
+    + 'continues without it for that candidate (logged once per process).',
+  );
 }
 
 /** Title and content as the single string the screen judges. */

@@ -15,4 +15,5 @@ export function screenMemoryCandidate(
 ): string[] | null;
 export const MEMORY_DIRECTIVE_INDICATOR: 'memory_directive';
 export function refusalIndicator(patterns: string[]): 'memory_directive' | 'non_authoritative_instruction';
+export function getScreenUnavailableCounts(): { memoryDirective: number; l2: number };
 export function loadMemoryCandidateScreen(): Promise<((content: string, title?: string) => string[] | null) | null>;
