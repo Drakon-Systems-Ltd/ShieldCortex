@@ -117,12 +117,26 @@ const PREFERENCE_DISQUALIFIER = new RegExp(
 );
 
 /**
+ * SCN-010 M4 (r6b). The positive half: the note must also SAY it is a
+ * preference — about format, style, language, units, length or a tool choice
+ * ("use pnpm instead of npm", "keep replies under 200 words", "answer in
+ * British English"). Without a cue the note keeps its pre-SCN-010 verdict.
+ */
+const PREFERENCE_CUE = new RegExp(
+  '\\b(?:prefer\\w*|favou?r\\w*|use|using|format\\w*|spell\\w*|style|tone|language|units?|metric|imperial|'
+  + 'instead\\s+of|rather\\s+than|(?:reply|answer|respond|write)\\s+in|'
+  + 'keep\\s+(?:it|them|replies|answers|summaries|responses)|concise|brief|short\\w*|bullets?|tables?|dates?|timezone)\\b',
+  'i',
+);
+
+/**
  * SCN-010 M4. A hit made ONLY of persistence wording — L2 `memory_persist`
  * and/or the L1 `memory_manipulation` preference phrasings — is how people
  * write preferences into memory ("from now on, always use British English").
  * In memory admission it is relaxed only when S did NOT fire AND the note is
- * positively a preference (no PREFERENCE_DISQUALIFIER word in the title or
- * the content). Otherwise the note keeps its pre-SCN-010 verdict.
+ * positively a preference: a PREFERENCE_CUE in the content and no
+ * PREFERENCE_DISQUALIFIER word in the title or the content. Otherwise the note
+ * keeps its pre-SCN-010 verdict.
  */
 function persistenceWordingOnly(
   content: string,
@@ -132,6 +146,7 @@ function persistenceWordingOnly(
 ): boolean {
   if (!instructions.detected && !nonAuthoritative.detected) return false;
   if (PREFERENCE_DISQUALIFIER.test(content) || PREFERENCE_DISQUALIFIER.test(title ?? '')) return false;
+  if (!PREFERENCE_CUE.test(content)) return false;
   const l1PreferenceOnly = !instructions.detected || (
     instructions.patterns.length === 1
     && instructions.patterns[0] === 'memory_manipulation'
