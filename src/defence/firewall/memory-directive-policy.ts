@@ -9,10 +9,11 @@
  * a CONTROL?
  *
  * A hit needs both conjuncts in ONE clause (clause boundary `[.!?;\n]`). Each
- * side is bounded independently, relative to the evidence: the clause reaches
- * back at most 240 characters before the evidence END and forward at most 240
- * characters after the evidence START (never short of the evidence itself), so
- * it is not one 240-character window:
+ * side is bounded independently, relative to the evidence: the clause starts
+ * no earlier than 240 characters before the evidence END (so evidence longer
+ * than 240 characters can leave the clause starting inside it) and ends no
+ * later than 240 characters after the evidence START, except that it never
+ * ends before the evidence end. It is not one 240-character window:
  *
  *   F  an agent-directed standing frame:
  *        F1i  the evidence sits in imperative position ("Skip ...", "- Never ask ...")

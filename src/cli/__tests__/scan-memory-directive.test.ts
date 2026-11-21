@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { SCAN_EXIT } from '../scan-exit.js';
+import { SCAN_EXIT, SCAN_USAGE_LINES } from '../scan-exit.js';
 import { runScanArgv } from '../scan-command.js';
 import { closeDatabase } from '../../database/init.js';
 
@@ -75,5 +75,12 @@ describe('scan --source=memory_candidate runs the memory-directive screen', () =
     expect(await runScanArgv(['--json', '--source=memory_candidate', PREFERENCE])).toBe(SCAN_EXIT.ALLOW);
     const parsed = JSON.parse(out[0]);
     expect(parsed.threatIndicators).toEqual([]);
+  });
+});
+
+describe('scan --help names the memory-directive screen', () => {
+  it('memory_candidate gets the L2 floor and the memory-directive screen', () => {
+    const usage = SCAN_USAGE_LINES.join('\n');
+    expect(usage).toMatch(/L2 non-authoritative-instruction floor;\n {2}memory_candidate also runs the memory-directive screen/);
   });
 });
