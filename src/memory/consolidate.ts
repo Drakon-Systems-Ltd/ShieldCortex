@@ -164,6 +164,33 @@ export function consolidate(
 }
 
 /**
+ * #1121: what consolidate(config) would change in the STM/LTM tiers right
+ * now — rows it would promote or decay-delete (same selection and the same
+ * decay.ts rules consolidate() applies), and whether either tier is strictly
+ * OVER its cap (the enforceMemoryLimitsByTier test). Read-only.
+ *
+ * A store sitting exactly at its caps with nothing promotable reports zero
+ * here, and consolidate() would leave it unchanged; the predictive trigger
+ * uses this so it stops firing "critical" every tick for that state.
+ */
+export function pendingConsolidationWork(
+  config: MemoryConfig = resolveMemoryConfig(undefined, { readOnly: true }),
+): { promotable: number; expirable: number; overCap: boolean } {
+  const db = getDatabase();
+  const count = (type: string): number =>
+    (db.prepare('SELECT COUNT(*) AS count FROM memories WHERE type = ?').get(type) as { count: number }).count;
+  const overCap = count('short_term') > config.maxShortTermMemories
+    || count('long_term') > config.maxLongTermMemories;
+  let promotable = 0;
+  let expirable = 0;
+  for (const memory of getMemoriesByType('short_term', config.maxShortTermMemories * 2)) {
+    if (shouldDelete(memory, config)) expirable++;
+    else if (shouldPromoteToLongTerm(memory, config) || shouldPromoteEpisodic(memory)) promotable++;
+  }
+  return { promotable, expirable, overCap };
+}
+
+/**
  * Adjust salience based on structural importance (link count, contradiction status).
  * Called during consolidation.
  */

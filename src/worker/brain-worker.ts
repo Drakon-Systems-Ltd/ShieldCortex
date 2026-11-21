@@ -66,6 +66,9 @@ const AUDIT_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // plenty at once per day.
 const SESSION_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
+/** #1121: a predictive consolidation that changed nothing logs at most this often. */
+export const NOOP_CONSOLIDATION_LOG_INTERVAL_MS = 60 * 60 * 1000;
+
 function persistWorkerState(
   profile: string,
   lastLightTick: Date,
@@ -145,6 +148,8 @@ export class BrainWorker {
   private lastLightTick: Date | null = null;
   private lastMediumTick: Date | null = null;
   private lastConsolidation: Date | null = null;
+  // #1121: when a predictive run last logged that it changed nothing.
+  private lastNoopConsolidationLog: number | null = null;
   // Seeded from persisted state so the 24h purge throttles survive
   // frequent MCP-server restarts.
   private lastAuditPurge: Date | null = readPersistedPurgeDate('lastAuditPurge');
@@ -282,10 +287,28 @@ export class BrainWorker {
       const decision = shouldTriggerPredictiveConsolidation(stats, this.config);
 
       if (decision.shouldRun) {
-        console.error(`[BrainWorker] Predictive consolidation triggered: ${decision.reason}`);
-        result.predictiveConsolidation = consolidate();
+        const run = consolidate();
+        result.predictiveConsolidation = run;
         this.lastConsolidation = new Date();
         this.stats.consolidations++;
+        // #1121: a run that changed nothing (e.g. over-cap rows that are all
+        // pinned or under an hour old) is logged at most once an hour, not on
+        // every tick.
+        const changed = run.consolidated + run.deleted + (run.deduplicated ?? 0) > 0;
+        const now = result.timestamp.getTime();
+        if (changed) {
+          console.error(
+            `[BrainWorker] Predictive consolidation (${decision.reason}): promoted ${run.consolidated}, `
+            + `deleted ${run.deleted} (${run.evicted ?? 0} evicted at the cap), merged ${run.deduplicated ?? 0}`,
+          );
+        } else if (this.lastNoopConsolidationLog === null || now - this.lastNoopConsolidationLog >= NOOP_CONSOLIDATION_LOG_INTERVAL_MS) {
+          this.lastNoopConsolidationLog = now;
+          console.error(
+            `[BrainWorker] Predictive consolidation (${decision.reason}) changed nothing: no memory could be `
+            + 'promoted or evicted (pinned and under-an-hour-old memories are never evicted). '
+            + 'This message repeats at most once an hour.',
+          );
+        }
 
         // Emit event for dashboard
         emitPredictiveConsolidation({
