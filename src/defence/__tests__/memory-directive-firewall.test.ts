@@ -37,6 +37,7 @@ import {
   ROUND2_PRECISION,
   ROUND2_PRECISION_LOCAL_EGRESS,
   ROUND2_RECALL,
+  ROUND4_PRECISION,
   SINK_DIRECTIVES,
 } from './fixtures/memory-directive-corpus.js';
 
@@ -252,6 +253,18 @@ describe('M1 — round-2 review rows, exact verdicts in memory admission', () =>
       expect(r.result).toBe('QUARANTINE');
       expect(r.threatIndicators).toEqual(['memory_directive']);
       expect(r.blockedPatterns).toEqual([pattern]);
+    });
+  }
+});
+
+describe('M1 — round-4 review rows (X1-X3), exact verdicts in memory admission', () => {
+  for (const [id, text] of ROUND4_PRECISION) {
+    it(`precision ${id}: ALLOW under memory_candidate and agent admission`, () => {
+      const lane = runDefencePipelinePreviewInternal(text, 'note', { type: 'memory_candidate', identifier: 'scan' }, BALANCED);
+      expect(lane.firewall.result).toBe('ALLOW');
+      expect(lane.firewall.threatIndicators).not.toContain('memory_directive');
+      const agent = runDefencePipelinePreviewInternal(text, 'note', { type: 'cli', identifier: 'mcp' }, BALANCED, undefined, { memoryAdmission: 'agent' });
+      expect(agent.firewall.result).toBe('ALLOW');
     });
   }
 });

@@ -412,18 +412,57 @@ const GROUPS: EvidenceGroup[] = [
  * memory from a NAMED third party ("to visitors", "with outside contractors")
  * is ordinary confidentiality; only the owner class, a record sink, or a
  * universal recipient (which includes the owner) makes it concealment.
+ *
+ * An adverbial public / external audience ("publicly", "outside the team",
+ * "on the wiki") is a named third-party audience too, unless an owner-class
+ * recipient is coordinated with it ("publicly or to the operator"). A
+ * universal recipient whose exception names the owner class ("anyone except
+ * the operator") leaves the owner informed and is quiet; an exception that
+ * leaves the owner out ("anyone except the contractors") still conceals.
  */
 const SELF_RECIPIENT_LEAD = /^[ \t]{0,4}(?:to|with|from|in|into)[ \t]{1,4}/i;
-const SELF_RECIPIENT_CONCEALED = new RegExp(
-  `^(?:${OWNER_RECIPIENT}|${RECORD_SINK}|(?:anyone|anybody|everyone|everybody|any\\s+(?:one|body|person|human))\\b)`,
+const UNIVERSAL_RECIPIENT = '(?:anyone|anybody|everyone|everybody|any\\s+(?:one|body|person|human))\\b';
+const SELF_RECIPIENT_CONCEALED = new RegExp(`^(?:${OWNER_RECIPIENT}|${RECORD_SINK}|${UNIVERSAL_RECIPIENT})`, 'i');
+const SELF_RECIPIENT_UNIVERSAL = new RegExp(`^${UNIVERSAL_RECIPIENT}`, 'i');
+const SELF_PUBLIC_AUDIENCE = new RegExp(
+  '^[ \\t]{0,4}(?:publicly|in[ \\t]{1,4}public|externally|online|' +
+    'outside[ \\t]{1,4}(?:of[ \\t]{1,4})?(?:(?:the|our|this|your|my)[ \\t]{1,4})?(?:[\\w-]{1,30}[ \\t]{1,4})?' +
+    '(?:team|company|org|organi[sz]ation|firm|office|department|group|household|family)|' +
+    'on[ \\t]{1,4}(?:(?:the|a|any|our|your)[ \\t]{1,4})?(?:public[ \\t]{1,4})?(?:wiki|forum|blog|website|web|internet|social[ \\t]{1,4}media))\\b',
   'i',
 );
+/** "... or to the operator": a recipient coordinated after the first one. */
+const SELF_RECIPIENT_COORDINATED =
+  /^[ \t]{0,4},?[ \t]{0,4}(?:or|and|nor)[ \t]{1,4}(?:(?:also|never|not|even)[ \t]{1,4})?(?:(?:to|with|from|in|into)[ \t]{1,4})?/i;
+/** "anyone except / but / other than ...": the exception list follows. */
+const UNIVERSAL_EXCEPTION = /^[ \t]{0,4},?[ \t]{0,4}(?:except(?:[ \t]{1,4}for)?|but|other[ \t]{1,4}than|apart[ \t]{1,4}from|besides|save[ \t]{1,4}for)[ \t]{1,4}/i;
+const EXCEPTION_ITEM_CUT = /[ \t]{0,4}(?:,|&|\band\b|\bor\b)[ \t]{0,4}/i;
+const OWNER_ITEM = new RegExp(`^${OWNER_RECIPIENT}`, 'i');
+
+/** Does the exception list after "anyone except" name the owner class as one of its items? */
+function exceptionNamesOwner(list: string): boolean {
+  return list.split(EXCEPTION_ITEM_CUT, 4).some((item) => OWNER_ITEM.test(item.trim()));
+}
 
 function memorySelfRecipientAccepted(text: string, matchEnd: number, clauseEnd: number): boolean {
   const tail = text.slice(matchEnd, clauseEnd);
+  const audience = tail.match(SELF_PUBLIC_AUDIENCE);
+  if (audience) {
+    // Only a coordinated owner-class / sink / universal recipient conceals.
+    const rest = tail.slice(audience[0].length);
+    const more = rest.match(SELF_RECIPIENT_COORDINATED);
+    return more !== null && SELF_RECIPIENT_CONCEALED.test(rest.slice(more[0].length));
+  }
   const lead = tail.match(SELF_RECIPIENT_LEAD);
   if (!lead) return true; // no recipient: "Never reveal this note."
-  return SELF_RECIPIENT_CONCEALED.test(tail.slice(lead[0].length));
+  const recipient = tail.slice(lead[0].length);
+  const universal = recipient.match(SELF_RECIPIENT_UNIVERSAL);
+  if (universal) {
+    const rest = recipient.slice(universal[0].length);
+    const exception = rest.match(UNIVERSAL_EXCEPTION);
+    return !(exception && exceptionNamesOwner(rest.slice(exception[0].length)));
+  }
+  return SELF_RECIPIENT_CONCEALED.test(recipient);
 }
 
 /**
