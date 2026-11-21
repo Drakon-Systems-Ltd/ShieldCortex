@@ -25,6 +25,7 @@
  */
 
 import semver from 'semver';
+import { realtimePluginInstallCommand } from './openclaw-plugin-spec.js';
 
 export type RepairOutcome =
   /** Loaded and enforcing, both proven. */
@@ -113,7 +114,7 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
     return {
       outcome: 'protected-unproven',
       headline: 'The installed plugin is behind this CLI. Update the plugin; protection by the new build is not yet proven.',
-      nextCommand: 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest',
+      nextCommand: realtimePluginInstallCommand(input.expectedVersion),
     };
   }
 

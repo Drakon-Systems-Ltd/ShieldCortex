@@ -4,7 +4,7 @@ description: "Memory and defence for AI agents: semantic recall, knowledge graph
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 5.20.1
+  version: 5.20.4
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
@@ -124,7 +124,7 @@ This skill ships no executable files. Install the tools it describes from npm:
 ```bash
 npm install -g shieldcortex          # CLI, MCP server and the cortex-memory hook
 shieldcortex quickstart              # detect hosts and wire them (asks first)
-openclaw plugins install @drakon-systems/shieldcortex-realtime   # optional realtime plugin
+openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@latest   # optional realtime plugin
 ```
 
 ### Automatic self-heal at gateway bootstrap

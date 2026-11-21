@@ -12,7 +12,9 @@
  * missing line needs. The test holds that gap as a known-gap, so CI goes red
  * when the last line is covered and the marker has not been removed.
  * 2 of 20 epic lines have a fixture. #519's is a cost fixture, whose growth
- * measurement is an opt-in report; #1005's are verdict fixtures.
+ * measurement is an opt-in report; #1005's are verdict fixtures. The SCN-009
+ * reverse-shell fixtures are `settled` since #1088; #1005's other labels
+ * (SCN-008 part A) are still `known-gap`, so its epic line stays unchecked.
  */
 import type { FrozenFixture } from './types.js';
 import { PHASE1_FIXTURES } from './phase1.js';

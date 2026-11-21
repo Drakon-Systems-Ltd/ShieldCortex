@@ -26,7 +26,7 @@ describe('#156 — repair says whether you are protected, in English', () => {
     });
     expect(v.outcome).toBe('protected-unproven');
     expect(v.headline).not.toMatch(/FAILED|Not protected/i);
-    expect(v.nextCommand).toBe('openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest');
+    expect(v.nextCommand).toBe('openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@latest');
   });
 
   it('a loaded previous-major plugin is update lag; live absence still outranks lag', () => {

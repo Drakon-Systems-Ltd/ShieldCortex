@@ -45,7 +45,7 @@ export const GUARD_SIGNAL_VOCABULARY = Object.freeze([
   'pipe-download-module-exec', 'pipe-download-stdin-exec', 'pipe-download-to-shell',
   'known-malicious-package', 'privilege-escalation', 'raw-disk-write', 'readiness-demoted', 'readiness-promoted', 'recursive-find-delete',
   'recursive-force-delete', 'recursive-perms-on-root', 'recursive-perms-system-dir',
-  'redirect-to-block-device', 'registry-code-exec', 'reviewed-script',
+  'redirect-to-block-device', 'registry-code-exec', 'reverse-shell', 'reviewed-script',
   'secret-egress', 'secret-egress-fold', 'service-restart', 'session-lease',
   'shell-injection', 'shred-device', 'stop-process-or-service',
   'touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'touch-sensitive-path',

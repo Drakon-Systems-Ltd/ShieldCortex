@@ -45,7 +45,7 @@ The effect, target and v3 decision fields are recorded for the reviewer and for 
 |---|---|---|
 | #519 tokeniser cost | 1 | 1 (`519/tokeniser-growth-repeated-word`, cost, known-gap; measured by the opt-in report, not asserted) |
 | #629, #927, #512, #551 (also #549), #738, #958, #634, #874 | 2 | none yet |
-| #1005 (SCN-009 reverse-shell shapes) | 3 | 7 in `phase3.ts`: `1005/exec-nc-reverse`, `1005/exec-devtcp-reverse`, `1005/exec-ncat-e`, `1005/exec-socat-exec` (miss, known-gap; expect `approval`, severity `dangerous`, signal `reverse-shell`), and controls `1005/exec-nc-port-check-control`, `1005/exec-nc-localhost-control`, `1005/exec-docs-grep-control` (settled, allow) |
+| #1005 (SCN-009 reverse-shell shapes) | 3 | 7 in `phase3.ts`: `1005/exec-nc-reverse`, `1005/exec-devtcp-reverse`, `1005/exec-ncat-e`, `1005/exec-socat-exec` (miss; expect `approval`, severity `dangerous`, signal `reverse-shell`; settled since the interim row in #1088, known-gap before it), and controls `1005/exec-nc-port-check-control`, `1005/exec-nc-localhost-control`, `1005/exec-docs-grep-control` (settled, allow) |
 | #504, #703, #662, #995, #755, #929, #1049, #588, #1005 (other labels), #885 note | 3 | none yet |
 | #556 | 4 | none yet |
 

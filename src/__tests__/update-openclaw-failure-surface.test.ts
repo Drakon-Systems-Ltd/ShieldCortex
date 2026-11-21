@@ -8,6 +8,7 @@ import { classifyOpenClawInstallEnding, collectUnresolved, footer, stepOpenClawP
 import { buildUpdateSummary, renderUpdateSummary, type UpdateSummaryInput } from '../cli/update-summary.js';
 import { NO_STYLE } from '../cli/term-ui.js';
 import type { CapturedError } from '../integrations/child-output.js';
+import { answersNpmView } from './npm-view-fixture.js';
 
 /**
  * #221 — `update` must surface what the child said, not restate the command.
@@ -43,13 +44,13 @@ beforeEach(() => {
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 function rejectWith(over: Partial<CapturedError>) {
-  return () => Promise.reject(Object.assign(new Error('exit 1: openclaw plugins install'), {
+  return answersNpmView(() => Promise.reject(Object.assign(new Error('exit 1: openclaw plugins install'), {
     exitCode: 1,
     command: 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest',
     stdout: '',
     stderr: '',
     ...over,
-  }) as CapturedError);
+  }) as CapturedError));
 }
 
 describe('#221 — the reason reaches the operator', () => {
@@ -131,7 +132,7 @@ describe('#221 — no swallow is left behind in the OpenClaw steps', () => {
  */
 describe('#952 — secret-ref and drain endings are not a finished swap', () => {
   const CLI = '5.15.2';
-  const FORCE_INSTALL = 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest';
+  const FORCE_INSTALL = `openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@${CLI}`;
 
   /** OpenClaw's exact refusal: gateway/credentials.ts, `GatewaySecretRefUnavailableError`. Its own `Fix:` lines come with it. */
   const SECRET_REF_STDERR = [
@@ -164,7 +165,7 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
       }
       return rejectWith(install)();
     };
-    return { run: run as never, calls };
+    return { run: answersNpmView(run) as never, calls };
   }
 
   it.each([
@@ -188,13 +189,19 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
     // `shieldcortex update` appears only as what NOT to do, never as the fix.
     expect(shown).not.toMatch(/run `shieldcortex update`/);
     expect(shown).not.toMatch(/login shell/);
-    // No credential code: the install and its one retry of the same command
-    // were all that was spawned — no secrets helper, no --token/--password, no
-    // end-state read that pretends the refused install may have landed.
+    // No credential code: the install, its one retry of the same command and —
+    // once both were refused — OpenClaw's own plugin list (#1105), read only to
+    // say what is still there, were all that was spawned. No secrets helper, no
+    // --token/--password, and the list does not turn the refusal into a
+    // finished install: the step stays unfinished with the force install as
+    // its fix (asserted above).
     expect(f.calls).toEqual([
       { cmd: 'openclaw', args: FORCE_INSTALL.split(' ').slice(1) },
       { cmd: 'openclaw', args: FORCE_INSTALL.split(' ').slice(1) },
+      { cmd: 'openclaw', args: ['plugins', 'list', '--json'] },
     ]);
+    // This list names no `enabled` state, so nothing is claimed about it.
+    expect(r.stillOn).toBeUndefined();
   });
 
   it('secret-ref: OpenClaw\'s own `Fix:` lines reach the operator alongside the step\'s advice', async () => {
@@ -365,12 +372,28 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
 
   it('#604 still holds: an ordinary timeout whose target version landed is reported installed', async () => {
     const f = scripted({ timedOut: true, exitCode: null, stderr: '' }, CLI);
-    const r = await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => '5.15.1', readCliVersion: () => CLI });
+    // Before the install: 5.15.1. After the (timed-out) install: the copy
+    // OpenClaw selected is the pin — the evidence, not the plugin list.
+    const r = await stepOpenClawPlugin(home, {
+      run: f.run,
+      readPluginVersion: () => (f.calls.some((c) => c.args[1] === 'install') ? CLI : '5.15.1'),
+      readCliVersion: () => CLI,
+    });
 
     expect(r.status).toBe('ok');
     expect(r.summary).toContain(`v${CLI} installed (slow`);
     expect(r.unfinished).toBeUndefined();
     expect(r.rerun).toBeUndefined();
+  });
+
+  it('#1109 round 4: a timeout whose plugin LIST names the pin, but whose selected copy did not land, is not installed', async () => {
+    const f = scripted({ timedOut: true, exitCode: null, stderr: '' }, CLI);
+    const r = await stepOpenClawPlugin(home, { run: f.run, readPluginVersion: () => '5.15.1', readCliVersion: () => CLI });
+
+    expect(r.status).toBe('warn');
+    expect(r.summary).not.toContain('installed (slow');
+    expect((r.detail ?? []).join('\n')).toContain(`installed is v5.15.1, target v${CLI}`);
+    expect(r.unfinished).toBe(true);
   });
 
   it('#221 still holds: an ordinary invalid-config exit reports the config error and keeps the re-run', async () => {
@@ -401,7 +424,7 @@ describe('#952 — secret-ref and drain endings are not a finished swap', () => 
 describe('#1071 — a gateway secret reference does not end the plugin step', () => {
   const CLI = '5.20.0';
   const BEFORE = '5.19.0';
-  const FORCE_INSTALL = 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest';
+  const FORCE_INSTALL = `openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@${CLI}`;
   const INSTALL_ARGS = FORCE_INSTALL.split(' ').slice(1);
   const RELOAD_WAIT = 'openclaw plugins reload shieldcortex-realtime --wait';
   /** OpenClaw 2026.11.3's exact refusal (`GatewaySecretRefUnavailableError`, dist/credentials-*.mjs). */
@@ -464,7 +487,7 @@ describe('#1071 — a gateway secret reference does not end the plugin step', ()
       onDisk = CLI;
       return Promise.resolve({ stdout: 'Installed shieldcortex-realtime', stderr: '' });
     };
-    return { run: run as never, calls, readPluginVersion: () => onDisk };
+    return { run: answersNpmView(run) as never, calls, readPluginVersion: () => onDisk };
   }
 
   function step(f: ReturnType<typeof fakeOpenClaw>) {
@@ -534,7 +557,7 @@ describe('#1071 — a gateway secret reference does not end the plugin step', ()
   it('an ordinary failure is not retried', async () => {
     const f = fakeOpenClaw(() => true);
     const r = await stepOpenClawPlugin(home, {
-      run: ((cmd: string, args: string[]) => {
+      run: answersNpmView((cmd: string, args: string[]) => {
         f.calls.push({ cmd, args, env: {} });
         return rejectWith({ stderr: 'OpenClaw config is invalid: ~/.openclaw/openclaw.json' })();
       }) as never,
@@ -658,8 +681,11 @@ describe('#1071 — a gateway secret reference does not end the plugin step', ()
         'exit 1',
       ];
       const install = [`: > '${installedMark}'`, 'echo "Installed shieldcortex-realtime"', 'exit 0'];
+      // #1105: `plugins list` is a read — it must not count as an install.
+      const list = `if [ "$1" = plugins ] && [ "$2" = list ]; then echo '{"plugins":[]}'; exit 0; fi`;
       writeScript(join(binDir, 'openclaw'), [
         `echo "path $*" >> '${log}'`,
+        list,
         ...(refusals >= 1 ? [`if [ ! -e '${count}.1' ]; then : > '${count}.1'; ${refuse.join('; ')}; fi`] : []),
         ...(refusals >= 2 ? [`if [ ! -e '${count}.2' ]; then : > '${count}.2'; ${refuse.join('; ')}; fi`] : []),
         ...install,
@@ -667,6 +693,7 @@ describe('#1071 — a gateway secret reference does not end the plugin step', ()
       // A working, different copy where `resolveOpenClawBinary` falls back to.
       writeScript(join(home, '.npm-global', 'bin', 'openclaw'), [
         `echo "fallback $*" >> '${log}'`,
+        list,
         ...install,
       ]);
       savedPath = process.env.PATH;
@@ -684,6 +711,9 @@ describe('#1071 — a gateway secret reference does not end the plugin step', ()
       return stepOpenClawPlugin(home, {
         readPluginVersion: () => (existsSync(installedMark) ? CLI : BEFORE),
         readCliVersion: () => CLI,
+        // PATH holds only the fake `openclaw`; the #1109 publication check is
+        // not what this case is about.
+        confirmPublished: async () => ({ published: true }),
       });
     }
 
@@ -711,7 +741,13 @@ describe('#1071 — a gateway secret reference does not end the plugin step', ()
       setUp(2);
       const r = await realStep();
 
-      expect(calls()).toEqual([`path ${INSTALL_ARGS.join(' ')}`, `path ${INSTALL_ARGS.join(' ')}`]);
+      // #1105: after the second refusal, OpenClaw's plugin list is read — through
+      // the same PATH copy, never the fallback.
+      expect(calls()).toEqual([
+        `path ${INSTALL_ARGS.join(' ')}`,
+        `path ${INSTALL_ARGS.join(' ')}`,
+        'path plugins list --json',
+      ]);
       expect(r.status).toBe('warn');
       expect(r.unfinished).toBe(true);
       expect(r.recovery?.command).toBe(FORCE_INSTALL);

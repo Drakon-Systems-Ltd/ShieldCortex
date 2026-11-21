@@ -637,6 +637,24 @@ class DestroyRowDataQuoteTests(unittest.TestCase):
             d = action_guard_decision(down, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd))
             self.assertEqual((cmd, d and d["action"]), (cmd, "block"))
 
+    def test_env_prefix_relieves_no_teardown(self):
+        # #1088 r5b (Jarvis B1): only the reverse-shell row reads a data quote through
+        # `env [-i] [NAME=VAL...]`; this row keeps main's verdict. The first one runs the quote.
+        from sc_client import fallback_dangerous_match
+        kn = "kube" + "ctl " + "del" + "ete ns prod"
+        down = ActionGuardVerdict("allow", [], "down", available=False)
+        for cmd in (
+            f"env -i echo '{kn}' | xargs -I{{}} sh -c '{{}}'",
+            f"env FOO=1 echo '{kn}'",
+            f"env -i git commit -m '{kn}'",
+            f"env -i rg --pre '{kn}' x",
+        ):
+            self.assertTrue(fallback_dangerous_match(cmd), cmd)
+            d = action_guard_decision(down, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd))
+            self.assertEqual((cmd, d and d["action"]), (cmd, "block"))
+        # The same quote with no env prefix is still a mention.
+        self.assertFalse(fallback_dangerous_match(f"echo '{kn}'"))
+
     def test_quoted_mentions_fail_open_like_the_real_guard(self):
         from sc_client import fallback_dangerous_match
         down = ActionGuardVerdict("allow", [], "down", available=False)

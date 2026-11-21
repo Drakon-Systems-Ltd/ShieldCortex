@@ -548,9 +548,20 @@ async function runSessionExtraction(event, { sessionEntry, tags, sourceIdentifie
     const patterns = candidateScreen ? candidateScreen(mem.content, mem.title) : null;
     if (patterns) {
       refused++;
-      // Names and a title, never the refused text — it is the part nobody
-      // wanted persisted. No new sink: this is the hook's existing console.
-      console.log(`[cortex-memory] Candidate refused (non_authoritative_instruction: ${patterns.join(", ")}): "${mem.title}"`);
+      // Never the refused text — it is the part nobody wanted persisted. This
+      // hook has no DB, so its record is its existing console.
+      // SCN-010: the names may be memory-directive (S) or L2; the wrapper says which.
+      const indicator = typeof extract.refusalIndicator === "function"
+        ? extract.refusalIndicator(patterns)
+        : "non_authoritative_instruction";
+      if (indicator === "memory_directive") {
+        // One names-only line per refused candidate, attributed to
+        // memory_candidate. No title: an extracted title is candidate text.
+        console.log(`[cortex-memory] Candidate refused under memory_candidate (${indicator}: ${patterns.join(", ")})`);
+      } else {
+        // Pre-existing L2 refusal line, unchanged: names and the title.
+        console.log(`[cortex-memory] Candidate refused (${indicator}: ${patterns.join(", ")}): "${mem.title}"`);
+      }
       continue;
     }
 
@@ -878,23 +889,29 @@ async function checkAndSaveKeywordTrigger(messageText, event) {
     return false;
   }
 
-  // NOT screened as a memory_candidate, deliberately. A keyword trigger is the
-  // operator typing "remember this" — explicit, attended intent, which is the
-  // trusted side of the provenance policy. Screening it would mean telling an
-  // operator they may not save words they chose to save.
+  // No CLIENT-SIDE candidate screen here, deliberately. A keyword trigger is
+  // the operator typing "remember this" — explicit, attended intent — so this
+  // hook does not refuse it the way it refuses an auto-captured candidate.
+  //
+  // It is still screened on admission (SCN-010 M3). The save below is the MCP
+  // `remember` tool (callCortex -> mcporter -> the shieldcortex MCP server),
+  // whose handler marks the write as an agent memory admission. A standing
+  // directive about a control is therefore QUARANTINED there, not stored, and
+  // releasing it is the operator's decision (the dashboard's quarantine
+  // review); anything else is stored as before.
   //
   // THE CAVEAT, WRITTEN DOWN (r2/B8). Attended intent is an inference from a
   // SUBSTRING, not an attestation. The match is `lower.indexOf(phrase)`
   // anywhere in the message, and several triggers ("we decided", "going with",
   // "important:") are ordinary English. So an operator who pastes or forwards
-  // a tool result that itself contains "remember this: <directive>", and adds
-  // nothing, gets that directive stored with the operator's own trust — the
-  // classic confused deputy, where the authority is real and the intent is
-  // borrowed. It is accepted here because the alternative (screening an
-  // explicit save) breaks the one path where the operator is unambiguously
-  // in the loop, and because the trigger still requires a HUMAN TURN to carry
-  // it: nothing auto-captured reaches this function. The exposure is measured
-  // in openclaw-memory-candidate-screen.test.ts rather than assumed away.
+  // a tool result that itself contains "remember this: <text>", and adds
+  // nothing, gets that text saved under the operator's trigger — the classic
+  // confused deputy, where the authority is real and the intent is borrowed.
+  // The M3 admission screen narrows this to text WITHOUT control evidence
+  // (a false belief, a non-L2 instruction); the trigger still requires a
+  // HUMAN TURN to carry it, and nothing auto-captured reaches this function.
+  // The exposure is measured in openclaw-memory-candidate-screen.test.ts
+  // rather than assumed away.
   //
   // The trigger phrase carries the authoritative classification — pass its
   // extractorType so the wrapper pins category/purpose instead of re-guessing

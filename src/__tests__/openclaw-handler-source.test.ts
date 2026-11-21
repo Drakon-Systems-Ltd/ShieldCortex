@@ -90,3 +90,33 @@ describe('openclaw cortex-memory handler — source invariants', () => {
     );
   });
 });
+
+describe('openclaw cortex-memory handler — SCN-010 refusal lines (source)', () => {
+  // The hook has no DB; its per-candidate refusal record is its console line.
+  const refusalBlock = handlerSource.slice(
+    handlerSource.indexOf('const patterns = candidateScreen ?'),
+    handlerSource.indexOf('const memTags ='),
+  );
+
+  it('a memory_directive refusal line is names-only and attributed to memory_candidate', () => {
+    const sLine = refusalBlock.match(/console\.log\(`\[cortex-memory\] Candidate refused under memory_candidate[^\n]*/);
+    expect(sLine).not.toBeNull();
+    expect(sLine![0]).toContain('${indicator}: ${patterns.join(", ")}');
+    expect(sLine![0]).not.toContain('mem.title');
+    expect(sLine![0]).not.toContain('mem.content');
+  });
+
+  it('the pre-existing L2 refusal line is unchanged (names and the title)', () => {
+    expect(refusalBlock).toContain('console.log(`[cortex-memory] Candidate refused (${indicator}: ${patterns.join(", ")}): "${mem.title}"`);');
+  });
+});
+
+describe('openclaw cortex-memory handler — the keyword-trigger comment matches the wiring', () => {
+  it('says the keyword save is screened on admission by MCP remember (M3), not "not screened"', () => {
+    expect(handlerSource).not.toContain('NOT screened as a memory_candidate');
+    expect(handlerSource).toContain('It is still screened on admission (SCN-010 M3)');
+    // ...and the save it describes really is the MCP remember tool.
+    const keywordSave = handlerSource.slice(handlerSource.indexOf('It is still screened on admission'));
+    expect(keywordSave).toMatch(/callCortex\("remember", \{/);
+  });
+});

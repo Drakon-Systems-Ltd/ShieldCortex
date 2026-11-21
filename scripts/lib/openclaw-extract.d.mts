@@ -7,5 +7,13 @@ export function extractSessionMemoriesWithDistill(conversationText: string, opts
 }): Promise<{ memories: Array<{ title: string; content: string; category: string; memoryPurpose: string; tags: string[]; salience?: number; capture_layer: string }>; path: string; reason?: string }>;
 export function extractKeywordMemory(content: string, extractorType?: string): Array<{ title: string; content: string; category: string; memoryPurpose: string }>;
 export const NON_AUTHORITATIVE_INDICATOR: 'non_authoritative_instruction';
-export function screenMemoryCandidate(content: unknown, detect: ((content: string, sourceType: string) => { detected: boolean; patterns?: string[] }) | null, title?: string): string[] | null;
+export function screenMemoryCandidate(
+  content: unknown,
+  detect: ((content: string, sourceType: string) => { detected: boolean; patterns?: string[] }) | null,
+  title?: string,
+  detectDirective?: ((content: string) => { detected: boolean; patterns?: string[] }) | null,
+): string[] | null;
+export const MEMORY_DIRECTIVE_INDICATOR: 'memory_directive';
+export function refusalIndicator(patterns: string[]): 'memory_directive' | 'non_authoritative_instruction';
+export function getScreenUnavailableCounts(): { memoryDirective: number; l2: number };
 export function loadMemoryCandidateScreen(): Promise<((content: string, title?: string) => string[] | null) | null>;

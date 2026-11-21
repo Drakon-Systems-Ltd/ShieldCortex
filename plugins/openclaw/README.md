@@ -53,8 +53,10 @@ If `shieldcortex` is not on `PATH`, set `binaryPath` in the plugin config.
 ### 2. Install the plugin
 
 ```bash
-openclaw plugins install @drakon-systems/shieldcortex-realtime
+openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@latest
 ```
+
+`npm:` makes OpenClaw 2026.11.5 and later install from npm (an unprefixed spec now resolves on ClawHub, which has an old copy). `--force` is what OpenClaw 2026.7 and later need to accept an npm install without a terminal; it also replaces an existing install.
 
 If you also want the companion session hook, install it from the main package:
 
@@ -138,7 +140,7 @@ Everything below is relative to whichever of the two you use:
 
 - `actionGuard.enabled`: turn the before-tool-call Action Guard on or off (default `false`; unsigned configs leave Guard off)
 - `actionGuard.enforce`: enforce dangerous-operation gating (default `true` when Guard is on); `false` opts down to warn-and-allow. Catastrophic operations are blocked only while Guard is enabled.
-- `actionGuard.autoApprove`: array of operation allowlist entries for unattended agents that legitimately need specific dangerous operations
+- `actionGuard.autoApprove`: array of operation allowlist entries for unattended agents that legitimately need specific dangerous operations. An entry matches the verdict's family, action or signal by substring. It never releases a catastrophic operation (always refused, with no approval to give), a write to the guard's own state or config, or a `reverse-shell` verdict (#1005). A write to the guard's own state or config always needs a human answer, in watch-only, the shadow and under a failure policy of `allow` too. A `reverse-shell` verdict needs one too, except where every dangerous-tier call runs without one: watch-only advisory (`enforce: false`), the enforce-when-ready shadow, or a session whose failure policy for high severity is `allow` when it is unattended with no approval-broker decision, its approver fails with an error, or the guard cannot be reached.
 - `actionGuard.auditAllows`: audit recognised (sensitive-tier) allow-decisions so "scanned & allowed" is distinguishable from "never scanned" (default `true`; benign allows are never audited)
 - `actionGuard.notify`: operator-notification transport (`enabled`, `webhookUrl`, `webhookSecret`, `openclaw`, `timeoutMs`). Off unless `enabled` is exactly `true`. Used both for held tool calls and for conversation-firewall detections.
 

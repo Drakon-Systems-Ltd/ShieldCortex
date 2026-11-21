@@ -36,6 +36,10 @@ import {
   UNTRUSTED_DATA_ORIGIN_SOURCES,
 } from '../firewall/provenance-policy.js';
 import type { ProvenanceLabel } from '../types.js';
+import { analyzeFirewall } from '../firewall/index.js';
+import { detectMemoryDirective } from '../firewall/memory-directive-policy.js';
+import { scoreSource } from '../trust/index.js';
+import { DEFAULT_DEFENCE_CONFIG } from '../types.js';
 
 const UNTRUSTED = [...UNTRUSTED_DATA_ORIGIN_SOURCES] as ProvenanceLabel[];
 const TRUSTED = [...TRUSTED_PROVENANCE_SOURCES] as ProvenanceLabel[];
@@ -456,6 +460,30 @@ describe('L2 benign corpus', () => {
     // A failure here is a POLICY bug. The fixture stays; the skip mask,
     // exemptions or frame requirement is what moves.
     expect(failures).toEqual([]);
+  });
+});
+
+describe('L2 benign corpus under memory admission (SCN-010)', () => {
+  // The memory-directive screen can only ADD a non-ALLOW by firing, so "S is
+  // quiet on every benign row" is the proof of "zero new non-ALLOW under
+  // memory_candidate". The second test checks the
+  // same thing one layer up, through the firewall under the label itself.
+  it('the memory-directive screen fires on no benign row', () => {
+    const fired = BENIGN
+      .map(({ group, text }) => ({ group, text, r: detectMemoryDirective(text) }))
+      .filter(({ r }) => r.detected)
+      .map(({ group, text, r }) => `[${group}] ${r.patterns.join(',')} :: ${text.slice(0, 70)}`);
+    expect(fired).toEqual([]);
+  });
+
+  it('no benign row carries the memory_directive indicator under memory_candidate', () => {
+    const source = { type: 'memory_candidate' as ProvenanceLabel, identifier: 'corpus' };
+    const config = { ...DEFAULT_DEFENCE_CONFIG, mode: 'balanced' as const };
+    const carried = BENIGN
+      .filter(({ text }) => analyzeFirewall(text, 'note', source, scoreSource(source).score, config)
+        .threatIndicators.includes('memory_directive'))
+      .map(({ group, text }) => `[${group}] ${text.slice(0, 70)}`);
+    expect(carried).toEqual([]);
   });
 });
 

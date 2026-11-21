@@ -198,7 +198,7 @@ export function extractKeywordMemory(content, extractorType) {
   ];
 }
 
-// ==================== L2 candidate screen ====================
+// ==================== L2 + memory-directive candidate screen ====================
 
 /**
  * The indicator name the firewall uses for an L2 hit. Mirrored here because
@@ -206,13 +206,30 @@ export function extractKeywordMemory(content, extractorType) {
  */
 export const NON_AUTHORITATIVE_INDICATOR = 'non_authoritative_instruction';
 
+/** The indicator for a memory-directive (SCN-010 S) hit. Mirrored, not guessed. */
+export const MEMORY_DIRECTIVE_INDICATOR = 'memory_directive';
+
+/** The indicator a refusal's pattern names belong to. */
+export function refusalIndicator(patterns) {
+  return Array.isArray(patterns) && patterns.some((p) => typeof p === 'string' && p.startsWith('memory_directive:'))
+    ? MEMORY_DIRECTIVE_INDICATOR
+    : NON_AUTHORITATIVE_INDICATOR;
+}
+
 /**
- * Pattern names when an AUTO-captured candidate is a non-authoritative
- * instruction, else `null`.
+ * Pattern names when an AUTO-captured candidate must be refused, else `null`.
  *
  * Pure and dependency-injected, for the same reason `defendRecallRows` is: the
  * decision is worth unit-testing without a dist build, and the wiring that
- * finds the real detector is a separate, boring problem.
+ * finds the real detectors is a separate, boring problem.
+ *
+ * Two detectors, one decision (SCN-010 M2):
+ *   - `detectDirective` (the memory-directive screen S): a hit refuses, with
+ *     the S pattern names first and any L2 names after them.
+ *   - `detect` (L2, asked under `memory_candidate`): any hit refuses, exactly
+ *     as before SCN-010 (persistence wording included). S only adds refusals.
+ * When S is unavailable (an older dist, or it threw) the L2 rule is exactly
+ * what it was before SCN-010.
  *
  * TITLE AND CONTENT are screened as ONE string. A title is stored and later
  * recalled into context exactly as content is, so screening only the content
@@ -229,17 +246,60 @@ export const NON_AUTHORITATIVE_INDICATOR = 'non_authoritative_instruction';
  * additive floor must never turn a missing export into a host that has
  * silently stopped remembering anything.
  */
-export function screenMemoryCandidate(content, detect, title) {
-  if (typeof detect !== 'function') return null;
+export function screenMemoryCandidate(content, detect, title, detectDirective) {
   const candidate = candidateText(content, title);
   if (!candidate) return null;
+
+  const directive = runDetector(() => detectDirective(candidate), typeof detectDirective === 'function', noteDirectiveScreenThrew);
+  const nai = runDetector(() => detect(candidate, 'memory_candidate'), typeof detect === 'function', noteL2ScreenThrew);
+
+  const naiPatterns = nai && nai.detected && Array.isArray(nai.patterns) ? nai.patterns : null;
+  if (directive && directive.detected) {
+    const names = Array.isArray(directive.patterns) ? [...directive.patterns] : [];
+    return naiPatterns ? [...names, ...naiPatterns] : names;
+  }
+  if (!nai || !nai.detected) return null;
+  return naiPatterns ?? [];
+}
+
+/** A detector's result, or null when it is absent or throws (`onThrow` is told; never the error). */
+function runDetector(call, available, onThrow) {
+  if (!available) return null;
   try {
-    const result = detect(candidate, 'memory_candidate');
-    if (!result || !result.detected) return null;
-    return Array.isArray(result.patterns) ? result.patterns : [];
+    return call() ?? null;
   } catch {
+    onThrow();
     return null;
   }
+}
+
+/**
+ * Candidates this process screened without a detector because it THREW. Kept
+ * apart from refusals; each kind is also said once per process in fixed words
+ * (never the exception, the candidate text or the title).
+ */
+let _directiveThrewCount = 0;
+let _l2ThrewCount = 0;
+let _l2ThrewNoted = false;
+
+/** `{ memoryDirective, l2 }`: candidates screened without that detector because it threw. */
+export function getScreenUnavailableCounts() {
+  return { memoryDirective: _directiveThrewCount, l2: _l2ThrewCount };
+}
+
+function noteDirectiveScreenThrew() {
+  _directiveThrewCount += 1;
+  noteDirectiveScreenUnavailable('the memory-directive screen threw');
+}
+
+function noteL2ScreenThrew() {
+  _l2ThrewCount += 1;
+  if (_l2ThrewNoted) return;
+  _l2ThrewNoted = true;
+  console.warn(
+    '[cortex-memory] provenance_screen_unavailable — the L2 provenance screen threw; auto-capture '
+    + 'continues without it for that candidate (logged once per process).',
+  );
 }
 
 /** Title and content as the single string the screen judges. */
@@ -251,27 +311,53 @@ function candidateText(content, title) {
 }
 
 let _candidateScreen;
+let _directiveUnavailableNoted = false;
 
 /**
- * Resolve the built L2 policy once and hand back a synchronous predicate:
+ * Say ONCE per process that the memory-directive screen is missing, in the
+ * same register as the other degrade notices here: a fixed reason, never the
+ * candidate text. Capture keeps working on the L2 screen alone.
+ */
+function noteDirectiveScreenUnavailable(reason) {
+  if (_directiveUnavailableNoted) return;
+  _directiveUnavailableNoted = true;
+  console.warn(
+    `[cortex-memory] memory_directive_screen_unavailable — ${reason}; auto-capture is screened by the `
+    + 'L2 provenance floor alone (logged once per process).',
+  );
+}
+
+/**
+ * Resolve the built screens once and hand back a synchronous predicate:
  * `(content, title) => string[] | null`.
  *
- * Imports the LEAF policy module, never `dist/defence/pipeline.js` — the hook
- * runs inside a long-lived gateway, and the leaf is a pure regex module with no
- * database, no native binding and no shutdown handler. Returns `null` when the
- * dist build is missing or predates L2, which the caller must treat as "no
- * screen", i.e. exactly the behaviour before this round.
+ * Imports the LEAF policy modules, never `dist/defence/pipeline.js` — the hook
+ * runs inside a long-lived gateway, and the leaves are pure regex modules with
+ * no database, no native binding and no shutdown handler. Returns `null` when
+ * the dist build is missing or predates L2, which the caller must treat as
+ * "no screen", i.e. exactly the behaviour before this round. A dist with L2
+ * but no memory-directive screen keeps the L2 screen alone.
  */
 export async function loadMemoryCandidateScreen() {
   if (_candidateScreen !== undefined) return _candidateScreen;
   const here = dirname(fileURLToPath(import.meta.url));
-  const policyPath = resolve(here, '..', '..', 'dist', 'defence', 'firewall', 'provenance-policy.js');
+  const firewallDir = resolve(here, '..', '..', 'dist', 'defence', 'firewall');
   try {
-    const mod = await import(pathToFileURL(policyPath).href);
+    const mod = await import(pathToFileURL(resolve(firewallDir, 'provenance-policy.js')).href);
     const detect = mod?.detectNonAuthoritativeInstruction;
-    _candidateScreen = typeof detect === 'function'
-      ? (content, title) => screenMemoryCandidate(content, detect, title)
-      : null;
+    if (typeof detect !== 'function') {
+      _candidateScreen = null;
+      return _candidateScreen;
+    }
+    let detectDirective = null;
+    try {
+      const md = await import(pathToFileURL(resolve(firewallDir, 'memory-directive-policy.js')).href);
+      if (typeof md?.detectMemoryDirective === 'function') detectDirective = md.detectMemoryDirective;
+      else noteDirectiveScreenUnavailable('the installed dist has no detectMemoryDirective export');
+    } catch {
+      noteDirectiveScreenUnavailable('the installed dist has no memory-directive policy module');
+    }
+    _candidateScreen = (content, title) => screenMemoryCandidate(content, detect, title, detectDirective);
   } catch {
     _candidateScreen = null;
   }

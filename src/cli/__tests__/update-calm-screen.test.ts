@@ -48,7 +48,7 @@ function base(over: Partial<UpdateSummaryInput> = {}): UpdateSummaryInput {
   };
 }
 
-const PLUGIN_INSTALL_COMMAND = 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest';
+const PLUGIN_INSTALL_COMMAND = 'openclaw plugins install --force npm:@drakon-systems/shieldcortex-realtime@5.9.0';
 const PLUGIN_BEHIND: UpdateSummaryInput['protection'] = {
   status: 'unproven',
   loaded: 'unknown',

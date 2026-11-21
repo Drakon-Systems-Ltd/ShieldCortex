@@ -58,12 +58,13 @@ describe('reconcileOpenClawPluginState', () => {
     // An index-only omission is attention, not proof of a live unload.
     expect(res.verdict.state).toBe('load-unproven');
     expect(res.verdict.severity).toBe('warn');
-    expect(res.plan.some((s) => s.kind === 'openclaw-update')).toBe(true);
+    expect(res.plan.some((s) => s.kind === 'openclaw-install-pinned')).toBe(true);
+    expect(res.plan.some((s) => s.kind === 'openclaw-update')).toBe(false);
     expect(res.applied).toBe(false);
     expect(calls).toHaveLength(0);
   });
 
-  it('apply: executes the silent-drop remediation via `plugins update`, then self-checks', async () => {
+  it('apply: executes the silent-drop remediation via the pinned npm install (never `plugins update`), then self-checks', async () => {
     setup({ roster: [{ pluginId: 'brave', enabled: true }], onDisk: '4.47.2' });
     const calls: string[][] = [];
     let reloaded = false;
@@ -73,7 +74,8 @@ describe('reconcileOpenClawPluginState', () => {
       reloadGateway: async () => { reloaded = true; return { restarted: true }; },
       selfCheck: async () => passingSelfCheck,
     });
-    expect(calls).toContainEqual(['plugins', 'update', '@drakon-systems/shieldcortex-realtime']);
+    expect(calls).toContainEqual(['plugins', 'install', '--force', 'npm:@drakon-systems/shieldcortex-realtime@4.47.2']);
+    expect(calls.some((a) => a[1] === 'update')).toBe(false);
     expect(reloaded).toBe(true);
     expect(res.applied).toBe(true);
     expect(res.ok).toBe(true);
@@ -102,8 +104,156 @@ describe('reconcileOpenClawPluginState', () => {
       selfCheck: async () => passingSelfCheck,
     });
     const install = calls.find((a) => a.includes('install'));
-    expect(install).toEqual(['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@4.47.2']);
+    expect(install).toEqual(['plugins', 'install', '--force', 'npm:@drakon-systems/shieldcortex-realtime@4.47.2']);
     expect(install!.join(' ')).not.toMatch(/@latest/);
+  });
+
+  it('#1109 round 2: an install step that exits 0 but leaves the selected copy off the pin FAILS on its own step', async () => {
+    setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: () => ({ status: 0, output: '' }), // "succeeds", lands nothing
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck, // even a self-check that says yes does not rescue it
+    });
+    const step = res.stepResults.find((r) => r.kind === 'openclaw-install-pinned');
+    expect(step).toMatchObject({ ok: false, detail: expect.stringContaining('install exited 0, but the plugin is on v4.25.4, CLI is v4.47.2') });
+    expect(res.messages.join('\n')).toMatch(/plugin install not finished: .*npm:@drakon-systems\/shieldcortex-realtime@4\.47\.2/);
+    expect(res.ok).toBe(false);
+  });
+
+  it('#1109 round 2: an install step whose selected copy cannot be told FAILS on its own step', async () => {
+    setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: () => ({ status: 0, output: '' }),
+      readLandedVersion: () => ({ version: null, reason: 'could not tell which copy OpenClaw selected — two copies' }),
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    expect(res.stepResults.find((r) => r.kind === 'openclaw-install-pinned')).toMatchObject({ ok: false });
+    expect(res.ok).toBe(false);
+  });
+
+  it('#1109 round 2: an install step that lands the pin in the selected copy is ok', async () => {
+    setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
+    const pkg = path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-abc', PKG_SUBPATH, 'package.json');
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: (argv) => {
+        if (argv[1] === 'install') fs.writeFileSync(pkg, JSON.stringify({ version: '4.47.2' }));
+        return { status: 0, output: '' };
+      },
+      readLandedVersion: () => ({ version: JSON.parse(fs.readFileSync(pkg, 'utf-8')).version }),
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    expect(res.stepResults.find((r) => r.kind === 'openclaw-install-pinned')).toMatchObject({ ok: true });
+  });
+
+  const NPM_4472 = ['plugins', 'install', '--force', 'npm:@drakon-systems/shieldcortex-realtime@4.47.2'];
+  const BARE_4472 = ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@4.47.2'];
+  const PRE_NPM = 'unsupported npm spec: protocol specs are not allowed';
+
+  it.each([
+    ['an OpenClaw that predates `npm:` (refusal on stderr)', { stderr: PRE_NPM, stdout: '' }, true],
+    ['the refusal mixed with an integrity failure', { stderr: `${PRE_NPM}\nnpm error code EINTEGRITY`, stdout: '' }, false],
+    ['the refusal phrase on stdout only', { stderr: 'install failed', stdout: PRE_NPM }, false],
+    ['an executor that reports combined output only', { stderr: undefined, stdout: undefined }, false],
+    ['an integrity failure', { stderr: 'npm error code EINTEGRITY', stdout: '' }, false],
+    ['a consent refusal', { stderr: 'Install cancelled; rerun with --force after reviewing the source.', stdout: '' }, false],
+  ] as const)('pinned reinstall: %s — at most ONE bare exact retry for the WHOLE reconcile run, across every pass', async (_label, streams, retried) => {
+    setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
+    const calls: string[][] = [];
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: (argv) => {
+        calls.push(argv);
+        return { status: 1, output: `${streams.stdout ?? ''}${streams.stderr ?? PRE_NPM}`, ...(streams.stderr === undefined ? {} : { stderr: streams.stderr, stdout: streams.stdout }) };
+      },
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    const installs = calls.filter((a) => a.includes('install'));
+    // The converge loop really did run the plan more than once…
+    expect(res.passes ?? 1).toBeGreaterThan(1);
+    expect(installs.filter((a) => a[3].startsWith('npm:')).length).toBe(res.passes);
+    // …and the operation as a whole spent at most one bare run.
+    expect(installs.filter((a) => !a[3].startsWith('npm:'))).toEqual(retried ? [BARE_4472] : []);
+    expect(installs[0]).toEqual(NPM_4472);
+    if (retried) expect(installs[1]).toEqual(BARE_4472);
+    expect(installs.flat().join(' ')).not.toMatch(/clawhub:|@latest/);
+  });
+
+  it('a ClawHub-origin install record is refreshed from npm at the pin — never `plugins update`', async () => {
+    setup({ roster: [{ pluginId: 'brave', enabled: true }], onDisk: '4.47.2' });
+    const db = new Database(path.join(home, '.openclaw', 'state', 'openclaw.sqlite'));
+    db.prepare('UPDATE installed_plugin_index SET install_records_json = ?').run(
+      JSON.stringify({ [PLUGIN]: { source: 'clawhub', spec: 'clawhub:@drakon-systems/shieldcortex-realtime@5.17.3', version: '4.47.2' } }),
+    );
+    db.close();
+    const calls: string[][] = [];
+    await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: (argv) => { calls.push(argv); return { status: 0, output: '' }; },
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    expect(calls.filter((a) => a[1] === 'update')).toEqual([]);
+    expect(calls.filter((a) => a[1] === 'install')[0]).toEqual(NPM_4472);
+  });
+
+  it('a NEWER on-disk plugin is never downgraded by a reconcile install — the step is refused with the command', async () => {
+    setup({ roster: [{ pluginId: 'brave', enabled: true }], onDisk: '4.48.0' });
+    const calls: string[][] = [];
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: (argv) => { calls.push(argv); return { status: 0, output: '' }; },
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    expect(calls.filter((a) => a[1] === 'install')).toEqual([]);
+    expect(res.ok).toBe(false);
+    expect(res.messages.join('\n')).toMatch(/left alone — the plugin is on v4\.48\.0, newer than this CLI \(v4\.47\.2\).*npm:@drakon-systems\/shieldcortex-realtime@4\.47\.2/);
+  });
+
+  it('a linked install (plugins.load.paths) is never replaced by a reconcile install', async () => {
+    setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
+    const cfgPath = path.join(home, '.openclaw', 'openclaw.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+    // #1109 round 2: identified by what is AT the path — a checkout's plugins/openclaw.
+    const checkout = path.join(home, 'src', 'ShieldCortex', 'plugins', 'openclaw');
+    fs.mkdirSync(checkout, { recursive: true });
+    fs.writeFileSync(path.join(checkout, 'package.json'), JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', version: '4.25.4' }));
+    cfg.plugins.load = { paths: [checkout] };
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg));
+    const calls: string[][] = [];
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: (argv) => { calls.push(argv); return { status: 0, output: '' }; },
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    expect(calls.filter((a) => a[1] === 'install')).toEqual([]);
+    expect(res.ok).toBe(false);
+    expect(res.messages.join('\n')).toMatch(/linked install/);
+  });
+
+  it('a non-exact expected version runs NO install — refused, with the human command', async () => {
+    // Index omission → the tracked-refresh route, which needs an install.
+    setup({ roster: [{ pluginId: 'brave', enabled: true }], onDisk: '4.25.4' });
+    const calls: string[][] = [];
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: 'unknown', apply: true,
+      runCommand: (argv) => { calls.push(argv); return { status: 0, output: '' }; },
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    expect(calls.filter((a) => a[1] === 'install')).toEqual([]);
+    expect(calls.some((a) => a.length === 0)).toBe(false);
+    expect(res.stepResults.find((r) => r.kind === 'openclaw-install-pinned')).toMatchObject({ ok: false });
+    expect(res.messages.join('\n')).toMatch(/no exact plugin version to pin to.*npm:@drakon-systems\/shieldcortex-realtime@latest/);
+    expect(res.ok).toBe(false);
   });
 
   it('healthy state runs only the self-check, executes no openclaw command', async () => {
@@ -118,6 +268,52 @@ describe('reconcileOpenClawPluginState', () => {
     expect(res.verdict.state).toBe('healthy');
     expect(calls.length).toBe(0);
     expect(res.ok).toBe(true);
+  });
+
+  /** The copy OpenClaw's index (and installs.json) record names, deleted from disk. */
+  const recordedCopy = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-abc', PKG_SUBPATH);
+
+  it('#1109 round 4 (CASE blocking 1): a DANGLING record — the copy it names was deleted — gets the pinned install, not "could not tell"', async () => {
+    setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
+    fs.rmSync(recordedCopy(), { recursive: true, force: true });
+    const calls: string[][] = [];
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: (argv) => {
+        calls.push(argv);
+        if (argv[1] === 'install') {
+          // OpenClaw writes the copy and rewrites its index row in the same install.
+          fs.mkdirSync(recordedCopy(), { recursive: true });
+          fs.writeFileSync(path.join(recordedCopy(), 'package.json'), JSON.stringify({ version: '4.47.2' }));
+          const db = new Database(path.join(home, '.openclaw', 'state', 'openclaw.sqlite'));
+          db.prepare('UPDATE installed_plugin_index SET install_records_json = ?').run(
+            JSON.stringify({ [PLUGIN]: { source: 'npm', version: '4.47.2', installPath: recordedCopy() } }),
+          );
+          db.close();
+        }
+        return { status: 0, output: '' };
+      },
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    expect(calls.filter((a) => a[1] === 'install')[0]).toEqual(['plugins', 'install', '--force', 'npm:@drakon-systems/shieldcortex-realtime@4.47.2']);
+    expect(res.messages.join('\n')).not.toMatch(/could not tell which copy OpenClaw selected/);
+    const step = res.stepResults.find((r) => r.kind === 'openclaw-install-pinned' || r.kind === 'openclaw-install');
+    expect(step).toMatchObject({ ok: true });
+  });
+
+  it('#1109 round 4: a recorded copy that EXISTS but cannot be parsed still refuses the install', async () => {
+    setup({ roster: [{ pluginId: PLUGIN, enabled: true }], onDisk: '4.25.4' });
+    fs.writeFileSync(path.join(recordedCopy(), 'package.json'), '{ nope');
+    const calls: string[][] = [];
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: (argv) => { calls.push(argv); return { status: 0, output: '' }; },
+      reloadGateway: async () => ({ restarted: true }),
+      selfCheck: async () => passingSelfCheck,
+    });
+    expect(calls.filter((a) => a[1] === 'install')).toEqual([]);
+    expect(res.ok).toBe(false);
   });
 });
 

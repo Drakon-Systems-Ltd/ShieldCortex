@@ -13,7 +13,7 @@ import { getDatabase, withTransaction } from '../database/init.js';
 import { resolveMemoryConfig } from './config.js';
 import { expireQuarantineItems } from '../defence/quarantine/auto-expire.js';
 import { guardReadRows } from '../defence/trust/read-guard.js';
-import type { DefenceSource } from '../defence/types.js';
+import type { DefenceSource, MemoryAdmission } from '../defence/types.js';
 import {
   Memory,
   MemoryConfig,
@@ -1145,7 +1145,15 @@ export function exportMemories(project?: string, source?: DefenceSource): string
 /**
  * Import memories from JSON
  */
-export function importMemories(json: string): number {
+export function importMemories(
+  json: string,
+  /**
+   * SCN-010: `{ memoryAdmission: 'agent' }` from the MCP `import_memories`
+   * handler arms the memory-directive screen for every row; a hit is
+   * quarantined (and skipped here, like any other held row).
+   */
+  options?: { memoryAdmission?: MemoryAdmission },
+): number {
   // Wrap in transaction for atomic import. addMemory opens its own nested
   // transaction (better-sqlite3 SAVEPOINT), so a per-row block rolls back only
   // that row and the clean rows still commit.
@@ -1185,7 +1193,7 @@ export function importMemories(json: string): number {
           { type: 'file', identifier: 'import' },
           // Code-constant identity → attested by construction. A poisoned
           // import row that BLOCKs accrues to the file:import channel.
-          { sourceAttested: true },
+          { sourceAttested: true, memoryAdmission: options?.memoryAdmission },
         );
         imported++;
       } catch {
