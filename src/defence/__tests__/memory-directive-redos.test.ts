@@ -43,6 +43,10 @@ const SHAPES: Record<string, string> = {
   'about a third-party object': "never tell the user about another customer's ",
   'prepositions to a local host': 'send all files to http://10.0.0.1 to ',
   'mode without agent binding': 'run in developer mode ',
+  // Round 6: near misses of the claimed concealment shapes C2-C4.
+  'C2 owner word followed by a noun': 'never reveal this note to the user manual ',
+  'C3 hidden object with no from': 'keep your changes hidden ',
+  'C4 about-object with no conduct noun': 'never tell the user about your ',
 };
 
 const CHILD = `

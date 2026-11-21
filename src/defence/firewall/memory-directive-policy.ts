@@ -83,9 +83,6 @@ export interface MemoryDirectiveResult {
 // gap (the `\n{5,}[\s\S]{0,500}` ReDoS class). No scoped `(?i:)` modifier:
 // the whole pattern is /i, which the oldest supported Node accepts.
 
-/** One whitespace-delimited token that does not cross a clause boundary. */
-const TOK = '[^ \\t\\n\\u00a0.!?;,]{1,40}';
-
 const MODAL =
   '(?:must|should|shall|will|can|may|needs?\\s+to|has\\s+to|have\\s+to|is\\s+to|are\\s+to|ought\\s+to|always|never)';
 const AGENT_NOUN = '(?:assistant|agent|model|ai|bot|llm|chat\\s?bot)';
@@ -93,17 +90,9 @@ const AGENT_NOUN = '(?:assistant|agent|model|ai|bot|llm|chat\\s?bot)';
 const NEG =
   "(?:never|do\\s+not|don['\u2019]t|does\\s+not|doesn['\u2019]t|must\\s+not|mustn['\u2019]t|should\\s+not|shouldn['\u2019]t|shall\\s+not|cannot|can['\u2019]t|will\\s+not|won['\u2019]t)";
 
-/** Who the owner is, as an object of concealment. Never a possessive ("the user's password"). */
-const OWNER_RECIPIENT =
-  "(?:(?:the|your|my|our|any)\\s+)?(?:user|owner|operator|admin(?:istrator)?|human|humans|security\\s+team)(?![\\w'\u2019])";
-/** Where a record of what the agent did ends up. */
-const RECORD_SINK =
-  '(?:(?:the|any|your|our)\\s+)?(?:(?:daily|weekly)\\s+)?(?:logs?|audit(?:\\s+(?:log|logs|trail))?|digest|reports?|summar(?:y|ies))\\b';
-
 /** The secret classes a routing rule is about. */
 const SECRET_NOUN =
   '(?:api[ _-]?keys?|(?:(?:access|auth|api|bearer|session|refresh|github|npm|deploy)\\s+)?tokens?|passwords?|passphrases?|credentials?|secrets?|private\\s+keys?|ssh\\s+keys?|secret\\s+keys?|access\\s+keys?|\\.env(?:\\s+files?)?|env(?:ironment)?\\s+(?:variables|vars)|seed\\s+phrases?|recovery\\s+codes?)';
-const SECRET_NOUN_RE = new RegExp(`\\b${SECRET_NOUN}\\b`, 'i');
 
 // ───────────────────────── F: the frame ─────────────────────────
 
@@ -227,7 +216,7 @@ const ALWAYS_ASK_BEFORE = /\balways\s+(?:ask|check|confirm)\b[^.!?;\n]{0,80}\bbe
 // ───────────────────────── E: the evidence groups ─────────────────────────
 
 type FrameKind = 'F1i' | 'F1a' | 'F2' | 'F3' | 'F4';
-type EvidenceKind = 'plain' | 'without' | 'secret' | 'hide' | 'bulk' | 'owner' | 'self' | 'agentOutput';
+type EvidenceKind = 'plain' | 'without' | 'secret' | 'bulk' | 'agentOutput';
 
 interface EvidencePattern {
   re: RegExp;
@@ -286,13 +275,39 @@ const GRANT_OBJECT =
   '(?:[\\w-]{1,30}\\s+)?(?:actions?|commands?|requests?|operations?|tools?|calls?|deploys?|deployments?|releases?|changes?|' +
   'tasks?|writes?|deletions?|transfers?|payments?|purchases?|emails?|messages?|domains?|hosts?|sites?|urls?|files?|scripts?|steps?|things?)\\b)';
 
-const CONCEAL_VERB =
-  '(?:mention|tell|reveal|disclose|report|log|record|show|notify|surface|inform|alert|flag|share|let\\s+on)';
-const CONCEAL_OBJECT =
-  "(?:this|that|it|these|those|them|anything|any\\s+of\\s+(?:this|it|these|them)|what\\s+you(?:['\u2019]ve|\\s+have)?\\s+(?:did|done)|" +
-  '(?:(?:the|any|these|those|such)\\s+)?(?:tool\\s+calls?|actions?|commands?|activity|changes?|accesses|reads|writes|deletions?|transfers?|uploads?)|' +
-  'about\\s+(?:this|that|it|these|them|the\\s+[\\w-]{1,30}))';
-const MEMORY_SELF = '(?:this|these)\\s+(?:notes?|memor(?:y|ies)|instructions?|rules?|directives?|standing\\s+orders?)\\b';
+/**
+ * concealment — the claimed core (round 6). Only shapes where the owner and
+ * the concealed thing are bound to the agent syntactically, in one direct
+ * phrase; every other phrasing is the documented lexical floor (quiet):
+ *
+ *  C1  "never reveal this note" + clause end (or "to anyone" / "in any form")
+ *  C2  "never reveal this note to the user" — the owner word (or a record
+ *      sink) directly after the lead, and it ENDS its noun phrase
+ *  C3  "hide / keep ... hidden from the user" of this memory, "your <conduct>"
+ *      or "what you did"; "keep your <conduct> out of the audit log"
+ *  C4  "never tell the user about <your conduct | what you ... | the
+ *      <conduct> you <verb> | this memory | a bare this / that / it>"
+ */
+const CONCEAL_NEG = "(?:never|do\\s+not|don['\u2019]t)";
+const REVEAL_VERB = '(?:reveal|mention|share|disclose|show)';
+const MEMORY_SELF = '(?:this|the)\\s+(?:note|instruction|memory|rule|directive)\\b';
+const OWNER_WORD = '(?:user|owner|operator|admin(?:istrator)?|human|principal)';
+const RECORD_WORD = '(?:logs|audit\\s+(?:logs?|trail)|history)';
+/** The recipient NP ends here: clause end, a comma, or a coordinator — never another noun or "of". */
+const NP_END = '(?=[ \\t]{0,4}(?:[.!?;,\\n]|$|(?:and|or|nor|but)\\b))';
+const OWNER_TARGET = `(?:(?:the|your)\\s+)?(?:${OWNER_WORD}|${RECORD_WORD})${NP_END}`;
+const CLAUSE_END = '(?=[ \\t]{0,4}(?:[.!?;\\n]|$))';
+const CONDUCT_NOUN =
+  '(?:tool\\s+calls?|actions?|commands?|activity|changes?|accesses|reads|writes|deletions?|transfers?|uploads?|downloads?|' +
+  'exports?|edits?|runs?|deploys?|deployments?|purchases?|payments?|mistakes?|errors?|failures?|work|decisions?)';
+/** C3: what is hidden — this memory, the agent's own conduct, or what it did. */
+const HIDDEN_OBJECT =
+  `(?:${MEMORY_SELF}|your\\s+${CONDUCT_NOUN}\\b|what\\s+you\\s+(?:do|did|run|change|delete|send))`;
+/** C4: the "about <X>" object — it must BEGIN with the agent's binding, or be this memory / a bare pronoun. */
+const ABOUT_OBJECT =
+  `(?:your\\s+${CONDUCT_NOUN}\\b(?!['\u2019])|(?:what|how|why|when)\\s+you\\b|the\\s+${CONDUCT_NOUN}\\s+you\\s+[a-z]{2,20}\\b|` +
+  `(?:this|that|it|any\\s+of\\s+this|${MEMORY_SELF})${CLAUSE_END})`;
+const OWNER_PERSON = `(?:(?:the|your)\\s+)?${OWNER_WORD}`;
 
 const ROUTE_VERB =
   '(?:send|forward|share|post|upload|e-?mail|paste|reveal|disclose|leak|give|hand\\s+over|dm|message|text|copy|transmit|expose|publish)';
@@ -392,20 +407,16 @@ const GROUPS: EvidenceGroup[] = [
     name: MEMORY_DIRECTIVE_PATTERN.CONCEALMENT,
     frames: ANY_FRAME,
     patterns: [
-      // "never tell the user (about this)" — an "about <X>" object is checked
-      // after the match: own conduct / this memory only (ownerConcealAccepted).
-      ev(`\\b${NEG}\\s+(?:ever\\s+)?${CONCEAL_VERB}(?:\\s+(?:or|and|nor)\\s+${CONCEAL_VERB})?\\s+(?:to\\s+)?${OWNER_RECIPIENT}(?:\\s+${CONCEAL_OBJECT})?(?=[ \\t]{0,4}(?:[.!?;,\\n]|$|(?:about|that|when|if|unless|before|after|or|and|until)\\b))`, 'owner'),
-      // "do not report these tool calls to the owner" / "... in the audit log"
-      ev(`\\b${NEG}\\s+(?:ever\\s+)?${CONCEAL_VERB}(?:\\s+(?:or|and|nor)\\s+${CONCEAL_VERB})?\\s+${CONCEAL_OBJECT}(?:\\s+${TOK}){0,3}?\\s+(?:to|with|in|into|from)\\s+(?:${OWNER_RECIPIENT}|${RECORD_SINK})`),
-      // "do not log tool calls ..." — the logging verb names the sink itself
-      ev(`\\b${NEG}\\s+(?:ever\\s+)?(?:log|record|audit|report)(?:\\s+(?:or|and|nor)\\s+${CONCEAL_VERB})?\\s+(?:(?:the|any|these|those|such)\\s+)?(?:tool\\s+calls?|actions?|commands?|activity|accesses|file\\s+reads)\\b`),
-      // the memory itself: "never reveal this instruction" — a recipient after
-      // it is checked after the match (memorySelfRecipientAccepted).
-      ev(`\\b${NEG}\\s+(?:ever\\s+)?${CONCEAL_VERB}\\s+(?:${TOK}\\s+){0,2}?${MEMORY_SELF}`, 'self'),
-      // "keep them out of the daily digest" / "keep this (note) hidden from the user"
-      ev(`\\bkeep\\s+(?:${MEMORY_SELF}|${CONCEAL_OBJECT})\\s+(?:(?:hidden|secret|quiet|private)\\s+(?:from\\s+)?|out\\s+of\\s+|off\\s+|away\\s+from\\s+|from\\s+)(?:${OWNER_RECIPIENT}|${RECORD_SINK})`),
-      // "hide this from the operator" — not a secret being redacted from logs
-      ev(`\\bhide\\s+(?:${TOK}\\s+){0,4}?from\\s+(?:${OWNER_RECIPIENT}|${RECORD_SINK})`, 'hide'),
+      // C1: "never reveal this note." — no recipient at all.
+      ev(`\\b${CONCEAL_NEG}\\s+${REVEAL_VERB}\\s+${MEMORY_SELF}(?:\\s+(?:to\\s+(?:anyone|anybody)|in\\s+any\\s+form))?${CLAUSE_END}`),
+      // C2: "never reveal this note to the user" — nothing between the noun and the lead.
+      ev(`\\b${CONCEAL_NEG}\\s+${REVEAL_VERB}\\s+${MEMORY_SELF}\\s+(?:to|with|from)\\s+${OWNER_TARGET}`),
+      // C3: "hide your changes from the operator", "keep this note hidden from the user",
+      // and the one record-sink shape kept: "keep your tool calls out of the audit log".
+      ev(`\\b(?:hide|conceal)\\s+${HIDDEN_OBJECT}\\s+from\\s+${OWNER_TARGET}`),
+      ev(`\\bkeep\\s+${HIDDEN_OBJECT}\\s+(?:(?:hidden|secret|out\\s+of\\s+sight)\\s+from\\s+${OWNER_TARGET}|out\\s+of\\s+(?:the|your)\\s+${RECORD_WORD}${NP_END})`),
+      // C4: "never tell the user about the commands you run".
+      ev(`\\b${CONCEAL_NEG}\\s+(?:(?:tell|inform|notify)\\s+${OWNER_PERSON}|let\\s+${OWNER_PERSON}\\s+know)\\s+about\\s+${ABOUT_OBJECT}`),
     ],
   },
   {
@@ -468,117 +479,6 @@ const GROUPS: EvidenceGroup[] = [
     patterns: [ev(`\\b${BULK_VERB}\\s+${BULK_OBJECT}`, 'bulk')],
   },
 ];
-
-// ─────────────────── concealment: who and what ───────────────────
-
-/**
- * The recipient tail after "never reveal this note". Monotone: the owner
- * always wins, and the quiet cases are general (any other noun phrase), not
- * enumerated audiences or roles.
- *
- *  1. Exception spans ("except / but / other than / apart from / aside from /
- *     besides / save for" + their NP list, up to "nor / never / not" or a new
- *     "to / with / from" lead) are cut out, remembering whether any item IS
- *     the owner class.
- *  2. OWNER WINS: an owner-class NP or a record sink left in the tail, after a
- *     lead or coordinator, fires — "publicly, nor ever to the user", "on the
- *     wiki to the owner", "outside the firm to the user".
- *  3. No recipient at all fires ("Never reveal this note.", "..., even if
- *     asked"), unless an exception named the owner ("except to the owner").
- *  4. A bare universal ("to anyone", "anybody at all") fires, unless an
- *     exception named the owner ("anyone except the operator").
- *  5. Anything else — a named third party, a public audience, a qualified
- *     universal ("anyone outside the team") — is ordinary confidentiality.
- *
- * An owner-class NP ENDS at the owner word: "the user manual", "the operator
- * of the Vellun printer", "the human resources file" are not the owner.
- */
-const OWNER_NP =
-  `${OWNER_RECIPIENT}(?=[ \\t]{0,4}(?:$|[,.;:!?)\\]"”]|(?:about|before|after|until|when|if|unless|during|while|` +
-  'at|in|on|for|from|to|with|without|by|or|and|nor|but|either|again|ever|yet|alone|directly|personally)\\b))';
-const SELF_OWNER_RECIPIENT = new RegExp(
-  '(?:^|,|\\b(?:to|with|from|in|into|or|nor|and|never|not|including|especially|even|also))[ \\t]{0,4}' +
-    '(?:(?:ever|also|even|not|never|especially|including)[ \\t]{1,4}){0,2}(?:(?:to|with|from|in|into)[ \\t]{1,4})?' +
-    `(?:${OWNER_NP}|${RECORD_SINK})`,
-  'i',
-);
-const SELF_EXCEPTION =
-  /\b(?:except(?:[ \t]{1,4}for)?|but|other[ \t]{1,4}than|(?:apart|aside)[ \t]{1,4}from|besides|save[ \t]{1,4}for)[ \t]{1,4}(?:(?:to|with|from)[ \t]{1,4})?([^.;\n]{0,240}?)(?=[ \t]{0,4}(?:$|\b(?:nor|never|not|to|with|from)\b))/gi;
-const SELF_EXCEPTION_ITEM_CUT = /[ \t]{0,4}(?:,|&|\band\b|\bor\b)[ \t]{0,4}/i;
-const SELF_OWNER_ITEM = new RegExp(`^(?:(?:to|with|from)[ \\t]{1,4})?${OWNER_NP}`, 'i');
-const SELF_BARE_UNIVERSAL = new RegExp(
-  '\\b(?:anyone|anybody|everyone|everybody|any[ \\t]{1,4}(?:one|body|person|human))\\b' +
-    '(?:[ \\t]{1,4}(?:at[ \\t]{1,4}all|ever|else|again|whatsoever|(?:under|in)[ \\t]{1,4}any[ \\t]{1,4}(?:circumstances?|case|form|way))){0,2}' +
-    '(?=[ \\t]{0,4}(?:$|[,.;:!?)\\n]|(?:or|and|nor|but|never|not|even|unless|until|when|if|before|after|during|while|because)\\b))',
-  'i',
-);
-/** Any recipient or audience at all. "in / on any ..." is a manner, not an audience. */
-const SELF_ANY_RECIPIENT =
-  /\b(?:to|with|from|into|outside|beyond|publicly|externally|online|openly|elsewhere|internally|privately)\b|\b(?:in|on)\b(?![ \t]{1,4}any\b)/i;
-
-function memorySelfRecipientAccepted(text: string, matchEnd: number, clauseEnd: number): boolean {
-  let ownerExcepted = false;
-  const tail = text.slice(matchEnd, clauseEnd).replace(SELF_EXCEPTION, (_span, list: string) => {
-    if (list.split(SELF_EXCEPTION_ITEM_CUT).some((item) => SELF_OWNER_ITEM.test(item.trim()))) ownerExcepted = true;
-    return ',';
-  });
-  if (SELF_OWNER_RECIPIENT.test(tail)) return true;
-  if (ownerExcepted) return false;
-  return !SELF_ANY_RECIPIENT.test(tail) || SELF_BARE_UNIVERSAL.test(tail);
-}
-
-/**
- * The "about <X>" object of "never tell the user about ...". Monotone: the
- * agent always wins, and a third party is any other noun phrase, not a list.
- *
- *  1. AGENT WINS: an agent marker anywhere in the object, in any conjunct and
- *     in any case — "your", "yourself", "you" ("the commands you run", "made
- *     by You"), "the assistant / agent / ai", "by assistant" — fires.
- *  2. This memory, "what you did" or a bare pronoun ("about this") fires.
- *  3. A conduct noun whose own post-modifier attributes it — "(made / placed /
- *     sent / submitted / received / issued / owned) by / from / of / for /
- *     belonging to" + any noun phrase — is that party's information: quiet.
- *  4. Any conjunct that is an unattributed conduct noun ("the payments") fires.
- *     No conduct noun at all ("another customer's medical history") is quiet.
- *
- * Accepted residual: an arbitrary name ("made by Kestrel") is quiet — the
- * agent's own name cannot be told from a third party's lexically. An
- * unspecified object ("don't tell the user") never reaches this check.
- */
-const ABOUT_LEAD = /^[ \t]{0,4}about[ \t]{1,4}/i;
-const ABOUT_AGENT =
-  /\byou(?:r|rs|rself)?\b|\byou['’](?:re|ve|ll|d)\b|\b(?:the|this|our|my)[ \t]{1,4}(?:assistant|agent|ai)\b|\bby[ \t]{1,4}(?:assistant|agent)\b/i;
-const CONDUCT_NOUN =
-  '(?:tool\\s+calls?|actions?|commands?|activity|changes?|accesses|reads|writes|deletions?|transfers?|uploads?|downloads?|' +
-  'exports?|edits?|runs?|deploys?|deployments?|purchases?|payments?|mistakes?|errors?|failures?|work|decisions?)';
-const ABOUT_CONDUCT = new RegExp(
-  [
-    `^${MEMORY_SELF}`,
-    '^(?:what|how|why|when|where)\\s+(?:you|i|we|the\\s+(?:assistant|agent))\\b',
-    "^(?:this|that|it|these|those|them|anything|any\\s+of\\s+(?:this|it|these|them))(?=[ \\t]{0,4}(?:[.!?;,\\n]|$|(?:when|if|unless|before|after|or|and|until|again|ever|either|yet)\\b))",
-  ].join('|'),
-  'i',
-);
-/** A conduct noun opening a conjunct, then whether its own post-modifier attributes it. */
-const ABOUT_CONDUCT_NOUN = new RegExp(
-  `^(?:(?:the|any|these|those|such|my|its|our)\\s+)?(?:own\\s+)?(?:[\\w-]{1,30}\\s+)?${CONDUCT_NOUN}\\b(?!['’])`,
-  'i',
-);
-const ABOUT_ATTRIBUTION =
-  /^[ \t]{1,4}(?:(?:made|placed|sent|submitted|received|issued|owned)[ \t]{1,4})?(?:by|from|of|for|belonging[ \t]{1,4}to)[ \t]{1,4}\w/i;
-const ABOUT_CONJUNCT_CUT = /[ \t]{0,4}(?:,|\bor\b|\band\b|\bnor\b)[ \t]{0,4}/i;
-
-function ownerConcealAccepted(text: string, matchEnd: number, clauseEnd: number): boolean {
-  const tail = text.slice(matchEnd, clauseEnd);
-  const lead = tail.match(ABOUT_LEAD);
-  if (!lead) return true;
-  const object = tail.slice(lead[0].length);
-  if (ABOUT_AGENT.test(object) || ABOUT_CONDUCT.test(object)) return true;
-  return object.split(ABOUT_CONJUNCT_CUT).some((conjunct) => {
-    const noun = conjunct.trim().match(ABOUT_CONDUCT_NOUN);
-    return noun !== null && !ABOUT_ATTRIBUTION.test(conjunct.trim().slice(noun[0].length));
-  });
-}
 
 // ─────────────────── secret routing: recipient rules ───────────────────
 
@@ -813,9 +713,6 @@ function groupHitsWindow(
 
       // Object / recipient rules first: they read only the clause tail, so a
       // run of near-misses never pays for the exemption checks below.
-      if (kind === 'hide' && SECRET_NOUN_RE.test(match[0])) continue;
-      if (kind === 'self' && !memorySelfRecipientAccepted(scanText, end, to)) continue;
-      if (kind === 'owner' && !ownerConcealAccepted(scanText, end, to)) continue;
       if (kind === 'secret' && !secretRoutingAccepted(scanText, end, to, match[0])) continue;
       if (kind === 'bulk' && !bulkEgressAccepted(scanText, end, to)) continue;
 

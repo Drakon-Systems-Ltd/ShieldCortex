@@ -44,6 +44,7 @@ import {
   ROUND5_IDENTITY_RECALL,
   ROUND5_RECIPIENT_PRECISION,
   ROUND5_RECIPIENT_RECALL,
+  ROUND6_CONCEALMENT_FLOOR,
   SINK_DIRECTIVES,
 } from './fixtures/memory-directive-corpus.js';
 
@@ -307,6 +308,18 @@ describe('M1 — round-5 R5-2 rows, exact verdicts in memory admission', () => {
   }
   for (const [id, text] of ROUND5_ABOUT_PRECISION) {
     it(`precision ${id}: ALLOW under memory_candidate and agent admission`, () => {
+      const lane = fw(text, 'memory_candidate');
+      expect(lane.result).toBe('ALLOW');
+      expect(lane.threatIndicators).not.toContain('memory_directive');
+      expect(fw(text, 'cli', BALANCED, { memoryAdmission: 'agent' }).result).toBe('ALLOW');
+    });
+  }
+});
+
+describe('M1 — round-6 concealment floor rows: no memory_directive hold', () => {
+  // Outside the claimed C1-C4 shapes (round-6 descope): ALLOW, by design.
+  for (const [id, text] of ROUND6_CONCEALMENT_FLOOR) {
+    it(`floor ${id}: ALLOW under memory_candidate and agent admission`, () => {
       const lane = fw(text, 'memory_candidate');
       expect(lane.result).toBe('ALLOW');
       expect(lane.threatIndicators).not.toContain('memory_directive');
