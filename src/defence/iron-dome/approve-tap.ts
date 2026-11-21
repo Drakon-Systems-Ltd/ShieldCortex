@@ -1120,6 +1120,11 @@ export type ApproveTapState =
  * `cannot-arm` / `disabled`, as today. A later slice changes that one branch.
  * Any `enabled` other than strict `true` or `false` (junk) never arms.
  *
+ * Contract: all four fields (`enabled`, `approverTelegramUid`, `secretPath`,
+ * `port`) are read from the block's OWN properties only. This is deliberately
+ * stricter than `normaliseApproveTapConfig(raw)`. `armed` here implies the
+ * existing gate is armed on the same raw input; the reverse is not promised.
+ *
  * @param raw           the raw `actionGuard.approveTap` block.
  * @param notifyPresent whether the caller found an owner notify chat configured; only strict `true` counts.
  */
@@ -1129,9 +1134,9 @@ export function resolveApproveTapState(
   deps: TapArmingDeps = {},
 ): ApproveTapState {
   const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-  // Read each field once, from the object's own properties only, so an inherited
-  // or accessor-backed value can neither arm nor opt out, and every later step
-  // sees the same values this step decided on.
+  // Read each field once, from the object's own properties only. An inherited
+  // value never counts. An own accessor is read once and that value is used, so
+  // every later step sees the same values this step decided on.
   const own = (key: string): unknown => (Object.hasOwn(src, key) ? src[key] : undefined);
   const block = {
     enabled: own('enabled'),

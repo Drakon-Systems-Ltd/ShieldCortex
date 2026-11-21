@@ -122,7 +122,7 @@ describe('resolveApproveTapState (#815 S1, inert)', () => {
     expect(resolveApproveTapState(ownTrue, true, deps())).toMatchObject({ state: 'armed' });
   });
 
-  it('T12 enabled is read once: an accessor that flips after the first read cannot arm', () => {
+  it('T12 enabled is read once: an own accessor\'s first value decides', () => {
     let reads = 0;
     const raw = { approverTelegramUid: good.approverTelegramUid, secretPath: good.secretPath };
     Object.defineProperty(raw, 'enabled', { enumerable: true, get: () => (++reads === 1 ? true : false) });
@@ -139,6 +139,46 @@ describe('resolveApproveTapState (#815 S1, inert)', () => {
   it('T13 notify presence is strict: only boolean true counts', () => {
     for (const notify of [1, 'yes', {}, undefined, null] as unknown as boolean[]) {
       expect(resolveApproveTapState(good, notify, deps())).toMatchObject({ state: 'cannot-arm', missing: 'no-notify-chat' });
+    }
+  });
+
+  const withProto = (own: object, inherited: object): unknown => Object.setPrototypeOf({ ...own }, inherited);
+  const approver = { approverTelegramUid: good.approverTelegramUid }, secret = { secretPath: good.secretPath };
+  const oldGate = (raw: unknown): boolean => checkApproveTapArming(normaliseApproveTapConfig(raw), deps()).armed;
+  it('D1 inherited secretPath: cannot-arm here, armed under the existing gate', () => {
+    const raw = withProto({ enabled: true, ...approver }, secret);
+    expect(resolveApproveTapState(raw, true, deps())).toMatchObject({ state: 'cannot-arm', missing: 'no-secret-path' });
+    expect(oldGate(raw)).toBe(true);
+  });
+
+  it('D2 inherited approver: cannot-arm here, armed under the existing gate', () => {
+    const raw = withProto({ enabled: true, ...secret }, approver);
+    expect(resolveApproveTapState(raw, true, deps())).toMatchObject({ state: 'cannot-arm', missing: 'no-approver' });
+    expect(oldGate(raw)).toBe(true);
+  });
+
+  it('D3 one-way: resolver armed implies the existing gate is armed on the same raw input', () => {
+    const rows = [good, withProto({ enabled: true, ...approver }, secret), withProto({ enabled: true, ...secret }, approver),
+      withProto({ enabled: true }, { ...approver, ...secret }), withProto(good, { enabled: false }),
+      withProto({ ...approver, ...secret }, { enabled: true }), Object.assign(Object.create(null), good)];
+    const armed = rows.filter((raw) => resolveApproveTapState(raw, true, deps()).state === 'armed');
+    expect(armed.length).toBeGreaterThan(0);
+    for (const raw of armed) expect(oldGate(raw)).toBe(true);
+  });
+  it('D4 a null-prototype object with all fields own arms', () => {
+    expect(resolveApproveTapState(Object.assign(Object.create(null), good), true, deps()).state).toBe('armed');
+  });
+  it('D5 an own key named hasOwnProperty holding junk does not change the result', () => {
+    expect(resolveApproveTapState({ ...good, hasOwnProperty: 'junk' }, true, deps()).state).toBe('armed');
+    expect(resolveApproveTapState({ ...good, enabled: false, hasOwnProperty: () => true }, true, deps()).state).toBe('opted-out');
+  });
+  it('D6 lstat runs once on the armed path, never for opted-out, disabled or no-notify-chat', () => {
+    const cases: Array<[unknown, boolean, string, number]> = [[good, true, 'armed', 1], [{ ...good, enabled: false }, true, 'opted-out', 0],
+      [{ ...good, enabled: undefined }, true, 'cannot-arm', 0], [good, false, 'cannot-arm', 0]];
+    for (const [raw, notify, state, calls] of cases) {
+      let n = 0;
+      expect(resolveApproveTapState(raw, notify, deps({ lstat: () => { n += 1; return stat()(); } })).state).toBe(state);
+      expect(n).toBe(calls);
     }
   });
 });
