@@ -21,7 +21,7 @@ import { __resetDiskBudgetWarningForTest, clearCloudConfigCache, getDiskBudget }
 import { checkDiskUsage, runMemoryStatsCheck } from '../cli/doctor.js';
 import { extractFixCommands } from '../cli/doctor-report.js';
 import { sessionPressureThresholdBytes } from '../sessions/retention.js';
-import { DIRECTORY_BUDGET_BYTES, WARN_DB_FILE_BYTES } from '../limits.js';
+import { DIRECTORY_BUDGET_BYTES, MAX_DB_FILE_BYTES, WARN_DB_FILE_BYTES } from '../limits.js';
 
 const MiB = 1024 * 1024;
 const originalConfigDir = process.env.SHIELDCORTEX_CONFIG_DIR;
@@ -134,12 +134,16 @@ describe('#1043 getDiskBudget', () => {
     expect(result.fix).toMatch(/signature does not verify, so it is ignored/);
   });
 
-  it('the session-capture valve gate is unchanged at the default and follows a raised budget', () => {
+  it('the session-capture valve gate is unchanged at the default and never moves past the DB-file policy', () => {
     expect(sessionPressureThresholdBytes(DIRECTORY_BUDGET_BYTES)).toBe(WARN_DB_FILE_BYTES);
     expect(sessionPressureThresholdBytes()).toBe(WARN_DB_FILE_BYTES);
-    expect(sessionPressureThresholdBytes(1024 * MiB)).toBe(512 * MiB);
-    // Never below the historical 50 MB gate, even for the smallest budget.
-    expect(sessionPressureThresholdBytes(50 * MiB)).toBe(WARN_DB_FILE_BYTES);
+    // A raised directory budget does not move the independent 100 MB live-DB
+    // block, so capture cleanup still starts at the DB-file WARN threshold.
+    expect(sessionPressureThresholdBytes(1024 * MiB)).toBe(WARN_DB_FILE_BYTES);
+    expect(sessionPressureThresholdBytes(50 * 1024 * MiB)).toBe(WARN_DB_FILE_BYTES);
+    expect(sessionPressureThresholdBytes(1024 * MiB)).toBeLessThan(MAX_DB_FILE_BYTES);
+    // A smaller budget trims earlier, at half of it.
+    expect(sessionPressureThresholdBytes(60 * MiB)).toBe(30 * MiB);
   });
 });
 
@@ -253,6 +257,22 @@ describe('#1043 doctor Memories row names the cap setter at the cap', () => {
   it('a hand-edited cap below the setter minimum is suggested at the minimum (100)', () => {
     const result = runMemoryStatsCheck(memoriesDb(0, 20), { maxShortTermMemories: 100, maxLongTermMemories: 20 });
     expect(extractFixCommands(result.fix)).toEqual(['shieldcortex config --memory-cap ltm=100']);
+  });
+
+  it('LTM OVER its cap (1200/1000, e.g. a lowered cap) names consolidate, never a higher cap', () => {
+    const result = runMemoryStatsCheck(memoriesDb(10, 1200), CAPS);
+    expect(result.status).toBe('warn');
+    expect(result.message).toMatch(/1200\/1000 LTM — over its cap/);
+    expect(result.message).not.toMatch(/at its cap/);
+    expect(result.fix).not.toMatch(/will not change this/);
+    expect(result.fix).toMatch(/pinned rows are never evicted/);
+    expect(extractFixCommands(result.fix)).toEqual(['shieldcortex consolidate']);
+  });
+
+  it('one row over the cap (1001/1000) is over, not at, the cap', () => {
+    const over = runMemoryStatsCheck(memoriesDb(0, 1001), CAPS);
+    expect(over.message).toMatch(/1001\/1000 LTM — over its cap/);
+    expect(extractFixCommands(over.fix)).toEqual(['shieldcortex consolidate']);
   });
 
   it('STM strictly over its cap still names consolidate', () => {

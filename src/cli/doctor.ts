@@ -1864,7 +1864,18 @@ export function runMemoryStatsCheck(
           'made of fresh captures clears on a later run.',
         );
       }
-      if (ltm >= LTM_LIMIT * 0.95) {
+      if (ltm > LTM_LIMIT) {
+        // Over the cap (e.g. the operator just lowered it): consolidate DOES
+        // change this state — enforceMemoryLimitsByTier evicts the excess.
+        // Offering a higher cap here would undo the operator's own choice.
+        status = 'warn';
+        warnings.push(`${ltm}/${LTM_LIMIT} LTM — over its cap`);
+        fixes.push(
+          'LTM is over its cap. Run `shieldcortex consolidate` to evict the oldest, least-used long-term memories ' +
+          'down to the cap (the brain worker does the same on its own schedule). Rows captured within the last ' +
+          'hour and pinned rows are never evicted, so a breach made of fresh or pinned rows can remain after it runs.',
+        );
+      } else if (ltm >= LTM_LIMIT * 0.95) {
         // #1043/#1121: at the cap, consolidate cannot help — it evicts only
         // rows OVER the cap, so the store is already forgetting one old memory
         // per new one. The command that changes this state is the cap setter.

@@ -15,7 +15,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import type Database from 'better-sqlite3';
+import { WARN_DB_FILE_BYTES } from '../limits.js';
 import { initDatabase, closeDatabase, getDatabase } from '../database/init.js';
 import { recordEvent } from '../sessions/capture.js';
 import {
@@ -152,6 +156,30 @@ describe('session_events retention (#110)', () => {
       const deleted = purgeSessionEventsUnderSizePressure({ maxRows: 10 });
       expect(deleted).toBe(0);
       expect(eventCount(db)).toBe(50);
+    });
+
+    it('#1043: a raised disk budget does not delay the valve past the DB-file WARN threshold', () => {
+      // File-backed DB pushed just over the 50 MB live-DB WARN threshold. The
+      // DB file keeps its own 100 MB block whatever the directory budget, so a
+      // 1 GiB budget must still trim here (it used to wait for 512 MiB).
+      closeDatabase();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-valve-1043-'));
+      try {
+        initDatabase(path.join(dir, 'memories.db'));
+        const db = getDatabase();
+        db.exec('CREATE TABLE ballast (b BLOB)');
+        db.prepare('INSERT INTO ballast (b) VALUES (zeroblob(?))').run(WARN_DB_FILE_BYTES + 1024 * 1024);
+        for (let i = 0; i < 50; i++) insertEvent(daysAgo(50 - i));
+        db.pragma('wal_checkpoint(TRUNCATE)');
+        expect(fs.statSync(path.join(dir, 'memories.db')).size).toBeGreaterThan(WARN_DB_FILE_BYTES);
+        const deleted = purgeSessionEventsUnderSizePressure({ maxRows: 10, diskBudgetBytes: 1024 * 1024 * 1024 });
+        expect(deleted).toBe(40);
+        expect(eventCount(db)).toBe(10);
+      } finally {
+        closeDatabase();
+        fs.rmSync(dir, { recursive: true, force: true });
+        initDatabase(':memory:');
+      }
     });
 
     it('trims the OLDEST rows down to the cap when over pressure', () => {

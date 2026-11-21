@@ -76,13 +76,15 @@ export const SESSION_PRESSURE_BATCH_ROWS = 2_000;
 
 /**
  * #1043: the DB-file size at which the valve starts trimming, for a given
- * ShieldCortex directory budget. Half the budget, and never below the
- * historical 50 MB WARN threshold — so the 100 MiB default budget gives
- * exactly the old gate, and an operator who raises the budget (e.g. to 1 GB)
- * stops the valve purging capture rows from a database well inside it.
+ * ShieldCortex directory budget: half the budget, never above the live-DB
+ * 50 MB WARN threshold. The DB file has its own 100 MB block
+ * (MAX_DB_FILE_BYTES) that a raised directory budget does NOT move
+ * (limits.ts keeps the two policies apart), so a larger budget must not delay
+ * capture cleanup toward that block. The 100 MiB default gives exactly the old
+ * gate; a smaller budget trims earlier so the directory budget holds.
  */
 export function sessionPressureThresholdBytes(diskBudgetBytes: number = DIRECTORY_BUDGET_BYTES): number {
-  return Math.max(WARN_DB_FILE_BYTES, Math.floor(diskBudgetBytes / 2));
+  return Math.min(WARN_DB_FILE_BYTES, Math.floor(diskBudgetBytes / 2));
 }
 
 /** Bounds for the env override — anything outside is treated as invalid. */
