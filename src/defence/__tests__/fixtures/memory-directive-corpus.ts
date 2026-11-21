@@ -130,4 +130,5 @@ export const ROUND4_PRECISION: ReadonlyArray<readonly [id: string, text: string]
     'X1-self-anyone-except-operator',
     'Never reveal this note to anyone except the operator; it records a confidential staffing discussion.',
   ],
+  ['X2-payments-by-another-customer', 'Never tell the user about the payments made by another customer.'],
 ];
