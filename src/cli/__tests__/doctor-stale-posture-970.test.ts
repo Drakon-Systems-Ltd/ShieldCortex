@@ -5,11 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { checkRuntimePosture, RUNTIME_POSTURE_LABEL, type CheckResult } from '../doctor.js';
 import { collapseStalePostureRows, formatDoctorReport, sanitiseDoctorRowsForDisplay } from '../doctor-report.js';
 import { buildPolicyEvidence } from '../policy-evidence.js';
-import { collectPostureRecords, type CollectDeps } from '../../posture/collect.js';
+import { collectPostureRecords, pidNsSidecarPath, type CollectDeps } from '../../posture/collect.js';
 import { STALE_NOT_SEEN_MS, parseSelfReport, rollupRecords, summarisePosture } from '../../posture/posture-record.js';
 import { scanHostTable } from '../../setup/host-table.js';
-import { NOW, PID_NS, hermesHome, hermesPluginArtefacts, iso, processTable, reportBody, writeReport } from '../../posture/__tests__/self-report-fixture.js';
-import { legacyGateRejects } from '../../posture/__tests__/legacy-self-report-gate.js';
+import { NOW, PID_NS, hermesHome, hermesPluginArtefacts, iso, processTable, reportBody, writePidNsSidecar, writeReport } from '../../posture/__tests__/self-report-fixture.js';
+import { legacyListInstances, legacyReadProfile } from '../../posture/__tests__/legacy-self-report-gate.js';
 
 /**
  * #970 — stale runtime-posture records flooded doctor and set the host
@@ -506,8 +506,7 @@ describe('#970 r2: a pid lookup proves an exit only inside the report\'s own PID
   const OTHER_NS = '4026532999';
   function hermesReport(pidNs: string | null | undefined, over: Record<string, unknown> = {}): void {
     const inst: Record<string, unknown> = instance(6001, '6001');
-    if (pidNs === undefined) delete inst.pid_ns;
-    else inst.pid_ns = pidNs;
+    inst.pid_ns = pidNs;
     writeReport(configDir, reportBody({ instance: inst, ...over }));
   }
   const hermes = (d: CollectDeps = deps) => collectPostureRecords(opts({ deps: d })).filter((r) => r.runtime === 'hermes')[0];
@@ -565,24 +564,16 @@ describe('#970 r2: a pid lookup proves an exit only inside the report\'s own PID
     expect(summarisePosture(collectPostureRecords(opts()))).toMatchObject({ green: false, level: 'unknown' });
   });
 
-  it('the self-report schema (r3): v1 has no pid_ns, v2 requires it as digits or null, nothing else', () => {
-    const parse = (inst: Record<string, unknown>, version: number) => {
-      const text = JSON.stringify(reportBody({ instance: inst, version }));
+  it('the self-report schema stays closed v1 (r4): pid_ns is never a report key, and there is no v2', () => {
+    const parse = (inst: Record<string, unknown>, version = 1) => {
+      const text = JSON.stringify({ ...reportBody({ instance: inst }), version });
       return parseSelfReport(text, Buffer.byteLength(text));
     };
-    const base = instance(6001, '6001');
-    const { pid_ns: _drop, ...legacy } = base;
-    const v1 = parse(legacy, 1);
-    expect(v1.kind === 'valid' && [v1.report.version, v1.report.instance.pid_ns]).toEqual([1, null]);
-    const v2 = parse(base, 2);
-    expect(v2.kind === 'valid' && [v2.report.version, v2.report.instance.pid_ns]).toEqual([2, PID_NS]);
-    expect(parse({ ...base, pid_ns: null }, 2).kind).toBe('valid');
-    // Each version's instance is closed: v1 never carries pid_ns, v2 always does.
-    expect(parse(base, 1)).toEqual({ kind: 'invalid', reason: 'invalid instance' });
-    expect(parse(legacy, 2)).toEqual({ kind: 'invalid', reason: 'invalid instance' });
-    for (const v of ['', 'pid:[1]', 4026531836, '-1', '1'.repeat(21)]) expect(parse({ ...base, pid_ns: v }, 2).kind).toBe('invalid');
-    expect(parse({ ...base, other: 1 }, 2).kind).toBe('invalid');
-    expect(parse(base, 3)).toEqual({ kind: 'invalid', reason: 'version 3 is not supported' });
+    const { pid_ns: _drop, ...v1 } = instance(6001, '6001');
+    const ok = parse(v1);
+    expect(ok.kind === 'valid' && [ok.report.version, ok.report.instance.pid_ns]).toEqual([1, null]);
+    expect(parse(instance(6001, '6001'))).toEqual({ kind: 'invalid', reason: 'invalid instance' });
+    expect(parse(v1, 2)).toEqual({ kind: 'invalid', reason: 'version 2 is not supported' });
   });
 });
 
@@ -599,14 +590,16 @@ describe('#970 r2: the clawdbot1 field shape', () => {
     expect(recordRows(shown, 'Hermes')).toEqual([]);
   });
 
-  /** Rewrite every fixture report as an earlier (v1, no pid_ns) writer's, heard from `heardAgoMs` ago. */
+  /** Make every fixture report an earlier writer's (no `.pidns` sidecar), heard from `heardAgoMs` ago. */
   function asEarlierWriters(heardAgoMs?: number): void {
     for (const dir of ['openclaw', 'hermes']) {
       const d = path.join(configDir, 'posture', dir, 'default');
       for (const f of fs.readdirSync(d)) {
+        if (f.endsWith('.pidns')) {
+          fs.rmSync(path.join(d, f));
+          continue;
+        }
         const body = JSON.parse(fs.readFileSync(path.join(d, f), 'utf8'));
-        delete body.instance.pid_ns;
-        body.version = 1;
         if (heardAgoMs !== undefined && body.instance.pid !== LIVE_PID) body.heartbeat_at = iso(NOW - heardAgoMs);
         fs.writeFileSync(path.join(d, f), JSON.stringify(body));
       }
@@ -715,15 +708,18 @@ describe('#970 r3: HOSTS absence alone never hides a record', () => {
   });
 });
 
-// ── Round 3: mixed versions (a pre-#970 CLI beside a #970 writer) ──────────
+// ── Round 4: the namespace rides in a sidecar old readers never see ────────
 
-describe('#970 r3: self-report v2 carries pid_ns; v1 stays readable', () => {
-  const both = processTable({ 6001: '6001', 6002: '6002' });
-  const v1Enforce = () => {
-    const { pid_ns: _drop, ...inst } = instance(6001, '6001');
-    return reportBody({ instance: inst, configured_posture: 'enforce' });
+describe('#970 r4: the PID namespace sidecar is evidence only when it is sound', () => {
+  const hermes = (d: CollectDeps = deps) => collectPostureRecords(opts({ deps: d })).filter((r) => r.runtime === 'hermes')[0];
+  /** A same-namespace Hermes report whose pid is gone, with its sidecar. */
+  const sameNsDead = () => writeReport(configDir, reportBody({ instance: instance(6001, '6001') }));
+  const ended = () => [hermes().liveness.value, hermes().stale_reason];
+  const unknownNs = () => {
+    const rec = hermes();
+    expect(rec.liveness.process_identity?.pid_ns).toBeNull();
+    return [rec.liveness.value, rec.stale];
   };
-  const v2Off = () => reportBody({ instance: instance(6002, '6002'), configured_posture: 'intentionally-off' });
 
   beforeEach(() => {
     fs.rmSync(path.join(home, '.openclaw'), { recursive: true });
@@ -731,17 +727,95 @@ describe('#970 r3: self-report v2 carries pid_ns; v1 stays readable', () => {
     hermesPluginArtefacts(home);
   });
 
-  it('a pre-#970 CLI reads a v1 report and refuses a v2 one by its version, not by a field it does not know', () => {
-    expect(v1Enforce().version).toBe(1);
-    expect(legacyGateRejects(JSON.stringify(v1Enforce()))).toBeNull();
-    expect(legacyGateRejects(JSON.stringify(v2Off()))).toBe('version 2 is not supported');
+  it('a sound sidecar: the pid lookup proves the exit', () => {
+    sameNsDead();
+    expect(ended()).toEqual(['ended', 'process-ended']);
   });
 
-  it('this CLI judges a mixed group — an earlier v1 enforcing writer beside a v2 intentionally-off one — on both', () => {
-    writeReport(configDir, v1Enforce());
-    writeReport(configDir, v2Off());
+  it('missing, `null`, malformed or oversized: namespace unknown, the record falls back to the age rule', () => {
+    const file = sameNsDead();
+    for (const text of [null, 'null', '', 'abc', `${PID_NS}\n`, ` ${PID_NS}`, '-1', '1'.repeat(21), '9'.repeat(40)]) {
+      if (text === null) fs.rmSync(pidNsSidecarPath(file));
+      else writePidNsSidecar(file, text);
+      expect(unknownNs()).toEqual(['unverified', false]);
+    }
+    writeReport(configDir, reportBody({ instance: instance(6001, '6001'), heartbeat_at: iso(NOW - STALE_NOT_SEEN_MS - HOUR) }));
+    fs.rmSync(pidNsSidecarPath(file));
+    expect(hermes().stale_reason).toBe('not-seen');
+  });
+
+  it('a sidecar older than its report vouches for nothing (it predates the report\'s last write)', () => {
+    const file = sameNsDead();
+    const t = fs.statSync(file).mtime;
+    fs.utimesSync(pidNsSidecarPath(file), new Date(t.getTime() - 1000), new Date(t.getTime() - 1000));
+    expect(unknownNs()).toEqual(['unverified', false]);
+    // Same mtime is not older: trusted.
+    fs.utimesSync(pidNsSidecarPath(file), t, t);
+    expect(ended()).toEqual(['ended', 'process-ended']);
+  });
+
+  it('a symlinked, group-readable or foreign-owned sidecar is untrusted', () => {
+    const file = sameNsDead();
+    const sidecar = pidNsSidecarPath(file);
+    fs.chmodSync(sidecar, 0o640);
+    expect(unknownNs()).toEqual(['unverified', false]);
+    fs.rmSync(sidecar);
+    const target = path.join(root, 'ns');
+    fs.writeFileSync(target, PID_NS, { mode: 0o600 });
+    fs.symlinkSync(target, sidecar);
+    expect(unknownNs()).toEqual(['unverified', false]);
+    fs.rmSync(sidecar);
+    writePidNsSidecar(file, PID_NS);
+    const uid = process.getuid?.();
+    if (uid !== undefined) expect(hermes({ ...deps, uid: () => uid + 1 }).liveness.value).not.toBe('ended');
+  });
+
+  it('a rejected report never reads its sidecar', () => {
+    const file = writeReport(configDir, { ...reportBody({ instance: instance(6001, '6001') }), extra: 1 });
+    expect(fs.existsSync(pidNsSidecarPath(file))).toBe(true);
+    const rec = hermes();
+    expect(rec.notes.join(' ')).toMatch(/self-report rejected/);
+    expect([rec.liveness.value, rec.stale]).toEqual(['not-applicable', false]);
+  });
+});
+
+describe('#970 r4: a pre-#970 CLI reads the new writers\' reports exactly as before', () => {
+  const both = processTable({ 6001: '6001', 6002: '6002' });
+  const profileDir = () => path.join(configDir, 'posture', 'hermes', 'default');
+  /** An earlier writer: v1, no sidecar. */
+  const oldEnforce = () => writeReport(configDir, reportBody({ instance: { ...instance(6001, '6001'), pid_ns: undefined }, configured_posture: 'enforce' }));
+  /** A #970 writer: v1 report, namespace in the sidecar. */
+  const newOff = () => writeReport(configDir, reportBody({ instance: instance(6002, '6002'), configured_posture: 'intentionally-off' }));
+
+  beforeEach(() => {
+    fs.rmSync(path.join(home, '.openclaw'), { recursive: true });
+    hermesHome(home);
+    hermesPluginArtefacts(home);
+  });
+
+  it('the old enumeration lists only `*.json`: the sidecar is never opened, counted or rejected', () => {
+    const file = newOff();
+    expect(fs.readdirSync(profileDir()).sort()).toEqual(['p6002-s6002.json', 'p6002-s6002.pidns']);
+    expect(fs.readFileSync(pidNsSidecarPath(file), 'utf8')).toBe(PID_NS);
+    expect(legacyListInstances(profileDir())).toEqual(['p6002-s6002']);
+    expect(legacyReadProfile(profileDir())).toEqual({ 'p6002-s6002': null });
+  });
+
+  it('the old reader sees a #970 writer\'s report as it sees an earlier writer\'s: read, with the same bytes', () => {
+    const file = newOff();
+    const withSidecar = { files: legacyReadProfile(profileDir()), bytes: fs.readFileSync(file, 'utf8') };
+    fs.rmSync(pidNsSidecarPath(file));
+    expect({ files: legacyReadProfile(profileDir()), bytes: fs.readFileSync(file, 'utf8') }).toEqual(withSidecar);
+  });
+
+  it('mixed group — an earlier enforcing writer beside a #970 intentionally-off one: the old reader reads both; this CLI says off, not green', () => {
+    oldEnforce();
+    newOff();
+    // Both files reach a pre-#970 CLI's rollup: no rejected sibling to drop out of it.
+    expect(legacyReadProfile(profileDir())).toEqual({ 'p6001-s6001': null, 'p6002-s6002': null });
     const records = collectPostureRecords(opts({ deps: both })).filter((r) => r.runtime === 'hermes');
-    expect(records.map((r) => [r.key.instance, r.liveness.value, r.stale]).sort()).toEqual([['p6001-s6001', 'alive', false], ['p6002-s6002', 'alive', false]]);
+    expect(records.map((r) => [r.key.instance, r.liveness.process_identity?.pid_ns, r.liveness.value, r.stale]).sort())
+      .toEqual([['p6001-s6001', null, 'alive', false], ['p6002-s6002', PID_NS, 'alive', false]]);
     expect(summarisePosture(records)).toMatchObject({ level: 'off', green: false, rollup_count: 2 });
   });
 });

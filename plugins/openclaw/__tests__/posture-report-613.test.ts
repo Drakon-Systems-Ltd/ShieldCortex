@@ -1,17 +1,17 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import plugin, {
   __resetConfigStateForTest,
   __setDefenceModuleForTest,
   __setRuntimeForTest,
 } from '../index.js';
-import { __resetPostureStateForTest, writePostureSelfReport } from '../posture-report.js';
+import { POSTURE_PID_NS_SUFFIX, __resetPostureStateForTest, writePostureSelfReport } from '../posture-report.js';
 import { evaluateToolCall } from '../../../src/defence/iron-dome/tool-action-guard.js';
 import { parseSelfReport } from '../../../src/posture/posture-record.js';
-import { collectPostureRecords, linuxPidNamespace, linuxProcessStart } from '../../../src/posture/collect.js';
-import { legacyGateRejects } from '../../../src/posture/__tests__/legacy-self-report-gate.js';
+import { collectPostureRecords, linuxPidNamespace, linuxProcessStart, readSelfReportFile } from '../../../src/posture/collect.js';
+import { legacyGateRejects, legacyListInstances } from '../../../src/posture/__tests__/legacy-self-report-gate.js';
 
 /**
  * #613 — the OpenClaw plugin's process-side posture self-report.
@@ -97,12 +97,19 @@ describe('#613 writer', () => {
     expect(r.policy_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(r.instance.liveness).toBe('process');
     expect(r.instance.pid).toBe(process.pid);
-    // #970: the writer records its PID namespace — the collector's own, here —
-    // in a v2 report, which a pre-#970 CLI refuses by version (r3).
-    expect(r.instance.pid_ns).toBe(process.platform === 'linux' ? linuxPidNamespace() : null);
-    expect(r.version).toBe(2);
-    expect(legacyGateRejects(fs.readFileSync(reportFile(), 'utf8'))).toBe('version 2 is not supported');
-    expect(fs.readdirSync(reportDir())).toEqual([`${r.instance.key}.json`]);
+    // #970: a closed v1 report, which a pre-#970 CLI lists and reads as before ...
+    expect(r.version).toBe(1);
+    expect(legacyGateRejects(fs.readFileSync(reportFile(), 'utf8'))).toBeNull();
+    expect(legacyListInstances(reportDir())).toEqual([r.instance.key]);
+    // ... and its PID namespace (the collector's own, here) in the sidecar,
+    // written after it, owner-only, which the CLI joins by basename.
+    const sidecar = path.join(reportDir(), `${r.instance.key}${POSTURE_PID_NS_SUFFIX}`);
+    expect(fs.readdirSync(reportDir()).sort()).toEqual([`${r.instance.key}.json`, `${r.instance.key}${POSTURE_PID_NS_SUFFIX}`]);
+    expect(fs.readFileSync(sidecar, 'utf8')).toBe(linuxPidNamespace() ?? 'null');
+    expect(fs.statSync(sidecar).mode & 0o077).toBe(0);
+    expect(fs.statSync(sidecar).mtimeMs).toBeGreaterThanOrEqual(fs.statSync(reportFile()).mtimeMs);
+    const joined = readSelfReportFile(reportFile(), { runtime: 'openclaw', profile: 'default', instance: r.instance.key }, process.getuid?.());
+    expect(joined.kind === 'valid' && joined.report.instance.pid_ns).toBe(process.platform === 'linux' ? linuxPidNamespace() : null);
     expect(fs.statSync(reportFile()).mode & 0o077).toBe(0);
     for (const d of [path.join(configDir, 'posture'), path.join(configDir, 'posture', 'openclaw'), reportDir()]) {
       expect(fs.statSync(d).mode & 0o077).toBe(0);
@@ -113,6 +120,46 @@ describe('#613 writer', () => {
     fs.writeFileSync(path.join(configDir, 'posture'), 'a file');
     expect(() => writePostureSelfReport({ configDir, profile: 'default', configuredPosture: 'enforce', scanner: 'available' })).not.toThrow();
     expect(writePostureSelfReport({ configDir, profile: 'default', configuredPosture: 'enforce', scanner: 'available' })).toBe(false);
+  });
+
+  it('a failed sidecar write never fails the report (#970)', () => {
+    expect(writePostureSelfReport({ configDir, profile: 'default', configuredPosture: 'enforce', scanner: 'available' })).toBe(true);
+    const key = path.basename(reportFile(), '.json');
+    const sidecar = path.join(reportDir(), `${key}${POSTURE_PID_NS_SUFFIX}`);
+    fs.rmSync(sidecar);
+    fs.mkdirSync(sidecar);
+    expect(writePostureSelfReport({ configDir, profile: 'default', configuredPosture: 'advisory', scanner: 'available' })).toBe(true);
+    expect(readReport().configured_posture).toBe('advisory');
+    expect(fs.readdirSync(reportDir()).filter((n) => n.includes('.tmp-'))).toEqual([]);
+  });
+
+  it('an unreadable /proc namespace still writes the report, with a null sidecar (#970)', () => {
+    const real = fs.statSync;
+    const spy = jest.spyOn(fs, 'statSync').mockImplementation(((p: fs.PathLike, o?: unknown) => {
+      if (String(p).startsWith('/proc/')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      return (real as (p: fs.PathLike, o?: unknown) => unknown)(p, o);
+    }) as typeof fs.statSync);
+    try {
+      expect(writePostureSelfReport({ configDir, profile: 'default', configuredPosture: 'enforce', scanner: 'available' })).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+    const key = path.basename(reportFile(), '.json');
+    expect(readReport().version).toBe(1);
+    expect(fs.readFileSync(path.join(reportDir(), `${key}${POSTURE_PID_NS_SUFFIX}`), 'utf8')).toBe('null');
+  });
+
+  it('prunes week-old sidecars with week-old reports, and keeps its own (#970)', () => {
+    writePostureSelfReport({ configDir, profile: 'default', configuredPosture: 'enforce', scanner: 'available' });
+    const key = path.basename(reportFile(), '.json');
+    const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+    for (const n of ['p1-s1.json', `p1-s1${POSTURE_PID_NS_SUFFIX}`, `p2-s2${POSTURE_PID_NS_SUFFIX}`]) {
+      fs.writeFileSync(path.join(reportDir(), n), '1', { mode: 0o600 });
+      fs.utimesSync(path.join(reportDir(), n), old, old);
+    }
+    for (const n of [`${key}.json`, `${key}${POSTURE_PID_NS_SUFFIX}`]) fs.utimesSync(path.join(reportDir(), n), old, old);
+    expect(writePostureSelfReport({ configDir, profile: 'default', configuredPosture: 'advisory', scanner: 'available' })).toBe(true);
+    expect(fs.readdirSync(reportDir()).sort()).toEqual([`${key}.json`, `${key}${POSTURE_PID_NS_SUFFIX}`]);
   });
 
   it('this live process reads back as current and loaded through the real collector (Linux start check)', () => {

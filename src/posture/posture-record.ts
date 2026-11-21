@@ -59,18 +59,7 @@
 export const POSTURE_RECORD_VERSION = 1;
 
 export const SELF_REPORT_SCHEMA = 'shieldcortex.posture.self-report';
-/**
- * #970: the self-report versions this CLI reads. v2 adds `instance.pid_ns`
- * (required); v1 has no such key. Every version's schema is closed, and a CLI
- * from before #970 reads only v1 — it refuses a v2 report by its version. So a
- * v2 writer (the OpenClaw / Hermes plugin) must not be newer than the CLI that
- * reads it: `shieldcortex update` updates the CLI first and pins / copies the
- * plugins from that same package.
- */
-export const SELF_REPORT_VERSIONS = [1, 2] as const;
-export type SelfReportVersion = (typeof SELF_REPORT_VERSIONS)[number];
-/** The newest version: what the OpenClaw and Hermes plugins write. */
-export const SELF_REPORT_VERSION: SelfReportVersion = 2;
+export const SELF_REPORT_VERSION = 1;
 /** Hard cap on a self-report file. Anything bigger is rejected unread. */
 export const SELF_REPORT_MAX_BYTES = 8192;
 /** A self-report heartbeat older than this is stale, and stale is unknown. */
@@ -262,7 +251,7 @@ export interface SelfReportDenial {
 
 export interface SelfReport {
   schema: typeof SELF_REPORT_SCHEMA;
-  version: SelfReportVersion;
+  version: typeof SELF_REPORT_VERSION;
   runtime: GateRuntimeId;
   profile: string;
   plane: 'tool-gate';
@@ -272,8 +261,10 @@ export interface SelfReport {
     process_start: string | null;
     /**
      * #970: the writer's PID namespace id (Linux: inode of
-     * /proc/self/ns/pid). Required in a v2 report (null when the writer could
-     * not read it); a v1 report has no such key and parses as null.
+     * /proc/self/ns/pid), or null when unknown. NOT a key of the report: the
+     * schema stays closed v1, which every earlier CLI reads, so
+     * `parseSelfReport` always gives null and the collector fills it in from
+     * the report's `.pidns` sidecar (see collect.ts).
      */
     pid_ns: string | null;
     started_at: string;
@@ -382,8 +373,7 @@ export function parseSelfReport(text: string, sizeBytes: number): SelfReportRead
   if (!isObj(raw)) return { kind: 'invalid', reason: 'not a JSON object' };
   const o = raw;
   if (o.schema !== SELF_REPORT_SCHEMA) return { kind: 'invalid', reason: 'unrecognised schema id' };
-  const version = SELF_REPORT_VERSIONS.find((v) => v === o.version);
-  if (version === undefined) {
+  if (o.version !== SELF_REPORT_VERSION) {
     return { kind: 'invalid', reason: `version ${typeof o.version === 'number' ? o.version : '?'} is not supported` };
   }
   const extra = Object.keys(o).filter((k) => !(TOP_KEYS as readonly string[]).includes(k));
@@ -397,12 +387,8 @@ export function parseSelfReport(text: string, sizeBytes: number): SelfReportRead
   if (o.plane !== 'tool-gate') return bad('plane');
 
   const inst = o.instance;
-  // #970: v2 adds `pid_ns`, and requires it; v1 has no such key.
-  const instKeys = ['key', 'pid', 'process_start', 'started_at', 'liveness'];
-  if (!isObj(inst) || !exactKeys(inst, version === 2 ? [...instKeys, 'pid_ns'] : instKeys)) return bad('instance');
-  const pidNs = version === 2 ? inst.pid_ns : null;
+  if (!isObj(inst) || !exactKeys(inst, ['key', 'pid', 'process_start', 'started_at', 'liveness'])) return bad('instance');
   if (!isValidInstanceKey(inst.key) || !nullable(inst.pid, isPid) || !nullable(inst.process_start, isStart)
-    || !nullable(pidNs, isStart)
     || !isIso(inst.started_at) || (inst.liveness !== 'process' && inst.liveness !== 'per-call')) return bad('instance');
 
   if (!nullable(o.runtime_version, isIdent)) return bad('runtime_version');
@@ -430,7 +416,7 @@ export function parseSelfReport(text: string, sizeBytes: number): SelfReportRead
     kind: 'valid',
     report: {
       schema: SELF_REPORT_SCHEMA,
-      version,
+      version: SELF_REPORT_VERSION,
       runtime: o.runtime,
       profile: o.profile,
       plane: 'tool-gate',
@@ -438,7 +424,7 @@ export function parseSelfReport(text: string, sizeBytes: number): SelfReportRead
         key: inst.key,
         pid: inst.pid as number | null,
         process_start: inst.process_start as string | null,
-        pid_ns: pidNs as string | null,
+        pid_ns: null,
         started_at: inst.started_at,
         liveness: inst.liveness,
       },

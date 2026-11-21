@@ -4,7 +4,8 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { collectPostureRecords, linuxPidNamespace, linuxProcessStart, postureSelfReportDir } from '../collect.js';
+import { collectPostureRecords, linuxPidNamespace, linuxProcessStart, pidNsSidecarPath, postureSelfReportDir, readSelfReportFile } from '../collect.js';
+import { legacyGateRejects, legacyListInstances } from './legacy-self-report-gate.js';
 import { DEFAULT_MAX_AGE_MS, MAX_INSTANCES_PER_PROFILE, parseSelfReport, summarisePosture } from '../posture-record.js';
 import {
   LIVE,
@@ -259,13 +260,20 @@ describe('#613 cross-runtime schema contract: the Hermes writer output passes th
       expect(parsed.report.configured_posture).toBe('advisory');
       expect(parsed.report.policy_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
       expect(parsed.report.instance.liveness).toBe('process');
-      // #970: the writer records its PID namespace — the collector's own, here.
-      expect(parsed.report.instance.pid_ns).toBe(process.platform === 'linux' ? linuxPidNamespace() : null);
       expect(parsed.report.denials.blocked_action!.tested_path).toBe('pre_tool_call:terminal');
       expect(parsed.report.denials.blocked_action_count).toBe(1);
     }
     expect(fs.statSync(file).mode & 0o077).toBe(0);
     expect(fs.statSync(path.dirname(file)).mode & 0o077).toBe(0);
+    // #970: a closed v1 report a pre-#970 CLI lists and reads as before; the
+    // PID namespace (the collector's own, here) rides in the sidecar it never lists.
+    const key = path.basename(file, '.json');
+    expect(legacyGateRejects(text)).toBeNull();
+    expect(legacyListInstances(path.dirname(file))).toEqual([key]);
+    expect(fs.readdirSync(path.dirname(file)).sort()).toEqual([`${key}.json`, `${key}.pidns`]);
+    expect(fs.statSync(pidNsSidecarPath(file)).mode & 0o077).toBe(0);
+    const joined = readSelfReportFile(file, { runtime: 'hermes', profile: 'work', instance: key }, process.getuid?.());
+    expect(joined.kind === 'valid' && joined.report.instance.pid_ns).toBe(process.platform === 'linux' ? linuxPidNamespace() : null);
     // The python process has exited: on Linux the real check says so.
     if (process.platform === 'linux') {
       hermesHome(home);

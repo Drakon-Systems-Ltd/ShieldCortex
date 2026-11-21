@@ -1,13 +1,13 @@
 /**
- * #613 test fixtures: a valid self-report body and a writer that lays it
+ * #613 test fixtures: a valid v1 self-report body and a writer that lays it
  * out exactly where the runtimes do, with the permissions they use. Not a
  * test file itself (no `.test.ts`).
  */
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { SELF_REPORT_SCHEMA } from '../posture-record.js';
-import { postureSelfReportDir, type CollectDeps } from '../collect.js';
+import { SELF_REPORT_SCHEMA, SELF_REPORT_VERSION } from '../posture-record.js';
+import { pidNsSidecarPath, postureSelfReportDir, type CollectDeps } from '../collect.js';
 
 export const NOW = Date.parse('2026-09-29T12:00:00.000Z');
 export const iso = (ms: number) => new Date(ms).toISOString();
@@ -20,7 +20,8 @@ export const INSTANCE = `p${PID}-s${START}`;
  * #970: the PID namespace the fixture's reports and its fake process table
  * share, so a pid missing from `processTable` proves the process exited. A
  * report without `pid_ns` (an earlier writer) or with another one is never
- * ended by a pid lookup.
+ * ended by a pid lookup. The namespace is never in the report body:
+ * `writeReport` puts it in the `.pidns` sidecar, as the writers do.
  */
 export const PID_NS = '4026531836';
 
@@ -38,20 +39,15 @@ export function denial(over: Obj = {}): Obj {
   };
 }
 
-/**
- * A fresh, valid Hermes report from a live process on the default profile.
- * #970: like the writers, the version follows the instance — 2 when it records
- * `pid_ns`, 1 (an earlier writer, or the Claude Code hook) when it does not —
- * unless `over.version` names one.
- */
+/** A fresh, valid Hermes report from a live process on the default profile. */
 export function reportBody(over: Obj = {}): Obj {
   const base: Obj = {
     schema: SELF_REPORT_SCHEMA,
-    version: 2,
+    version: SELF_REPORT_VERSION,
     runtime: 'hermes',
     profile: 'default',
     plane: 'tool-gate',
-    instance: { key: INSTANCE, pid: PID, process_start: START, pid_ns: PID_NS, started_at: iso(NOW - 3_600_000), liveness: 'process' },
+    instance: { key: INSTANCE, pid: PID, process_start: START, started_at: iso(NOW - 3_600_000), liveness: 'process' },
     runtime_version: null,
     plugin: { id: 'shieldcortex', version: '0.1.0', hash: H('b') },
     heartbeat_at: iso(NOW - 60_000),
@@ -62,14 +58,12 @@ export function reportBody(over: Obj = {}): Obj {
     degraded_intervals: [],
     denials: { blocked_action: null, synthetic_probe: null, blocked_action_count: 0 },
   };
-  const body = { ...base, ...over };
-  if (!('version' in over)) body.version = Object.prototype.hasOwnProperty.call(body.instance as Obj, 'pid_ns') ? 2 : 1;
-  return body;
+  return { ...base, ...over };
 }
 
 /** Same process, different pid/start: a second instance on the same profile. */
 export function otherInstance(pid: number, start: string): Obj {
-  return { key: `p${pid}-s${start}`, pid, process_start: start, pid_ns: PID_NS, started_at: iso(NOW - 1_800_000), liveness: 'process' };
+  return { key: `p${pid}-s${start}`, pid, process_start: start, started_at: iso(NOW - 1_800_000), liveness: 'process' };
 }
 
 export function writeRaw(configDir: string, runtime: string, profile: string, instance: string, text: string): string {
@@ -83,14 +77,46 @@ export function writeRaw(configDir: string, runtime: string, profile: string, in
   return file;
 }
 
+/**
+ * Lay a report out as the writers do. #970: a resident-process report (an
+ * OpenClaw / Hermes writer) gets a `.pidns` sidecar, written after it, holding
+ * `PID_NS` — or `instance.pid_ns` when the body names one (digits, or null for
+ * `null`), which is taken out of the report. `pid_ns: undefined` is an earlier
+ * writer: no sidecar. A per-call report (Claude Code hook) never has one.
+ */
 export function writeReport(configDir: string, body: Obj, fileInstance?: string, fileProfile?: string): string {
-  return writeRaw(
+  let inst = body.instance;
+  let pidNs: unknown;
+  if (isObj(inst)) {
+    if (Object.prototype.hasOwnProperty.call(inst, 'pid_ns')) {
+      const { pid_ns: named, ...rest } = inst;
+      pidNs = named;
+      inst = rest;
+    } else if (inst.liveness === 'process' && inst.pid !== null) {
+      pidNs = PID_NS;
+    }
+  }
+  const file = writeRaw(
     configDir,
     String(body.runtime),
     fileProfile ?? String(body.profile),
     fileInstance ?? String((body.instance as Obj).key),
-    JSON.stringify(body),
+    JSON.stringify({ ...body, instance: inst }),
   );
+  if (pidNs !== undefined) writePidNsSidecar(file, pidNs === null ? 'null' : String(pidNs));
+  return file;
+}
+
+/** Write `text` as the `.pidns` sidecar of a report file, owner-only. */
+export function writePidNsSidecar(reportFile: string, text: string): string {
+  const sidecar = pidNsSidecarPath(reportFile);
+  fs.writeFileSync(sidecar, text, { mode: 0o600 });
+  fs.chmodSync(sidecar, 0o600);
+  return sidecar;
+}
+
+function isObj(v: unknown): v is Obj {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
 }
 
 /**

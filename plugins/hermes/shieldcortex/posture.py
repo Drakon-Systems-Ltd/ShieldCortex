@@ -42,10 +42,14 @@ import time
 from datetime import datetime, timezone
 
 SCHEMA = "shieldcortex.posture.self-report"
-# #970: v2 carries instance.pid_ns. A CLI from before #970 reads only v1 and
-# refuses this report by version, so the CLI must be updated before this plugin
-# (`shieldcortex update` does that, and copies this plugin from its own package).
-VERSION = 2
+VERSION = 1
+# #970: this process's PID namespace id goes in a sidecar beside the report,
+# <instance>.pidns (its digits, or "null"), NOT in the report: the report stays
+# the closed v1 schema that every CLI, earlier ones included, reads, and an
+# earlier CLI lists only *.json names, so it never sees the sidecar. It is
+# rewritten after every report write: the CLI trusts it only when it is not
+# older than the report.
+PID_NS_SUFFIX = ".pidns"
 MAX_BYTES = 8192
 MAX_INTERVALS = 8
 REASON_MAX = 120
@@ -247,10 +251,37 @@ def _secure_dir(path):
         os.chmod(path, 0o700)
 
 
+def _write_pid_ns_sidecar(path, pid_ns):
+    """#970: write <key>.pidns atomically (temp + rename, owner-only).
+
+    Best-effort: a failure leaves no sidecar or an older one, which the CLI
+    reads as "namespace unknown"; it never fails the report write.
+    """
+    tmp = None
+    try:
+        tmp = "%s.tmp-%d-%s" % (path, os.getpid(), secrets.token_hex(4))
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp, flags, 0o600)
+        try:
+            os.write(fd, (pid_ns if pid_ns else "null").encode("ascii"))
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+        tmp = None
+    except Exception:
+        pass
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+
+
 def _prune(directory, keep, now):
     try:
         for name in os.listdir(directory):
-            if name == keep:
+            if name in keep:
                 continue
             full = os.path.join(directory, name)
             try:
@@ -258,7 +289,8 @@ def _prune(directory, keep, now):
                 if not stat.S_ISREG(st.st_mode):
                     continue
                 age = now - st.st_mtime
-                if (".tmp-" in name and age > 3600) or (name.endswith(".json") and age > PRUNE_AFTER_SECONDS):
+                report = name.endswith(".json") or name.endswith(PID_NS_SUFFIX)
+                if (".tmp-" in name and age > 3600) or (report and age > PRUNE_AFTER_SECONDS):
                     os.unlink(full)
             except Exception:
                 pass
@@ -331,7 +363,6 @@ def write_self_report(
                 "key": ident["key"],
                 "pid": ident["pid"],
                 "process_start": ident["start"],
-                "pid_ns": ident["pid_ns"],
                 "started_at": ident["started_at"],
                 "liveness": "process",
             },
@@ -360,7 +391,10 @@ def write_self_report(
             os.close(fd)
         os.replace(tmp, path)
         tmp = None
-        _prune(directory, name, ts)
+        # After the report, so the sidecar's mtime is not older than it (#970).
+        sidecar = "%s%s" % (ident["key"], PID_NS_SUFFIX)
+        _write_pid_ns_sidecar(os.path.join(directory, sidecar), ident["pid_ns"])
+        _prune(directory, (name, sidecar), ts)
         return True
     except Exception:
         return False

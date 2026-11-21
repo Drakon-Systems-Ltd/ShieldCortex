@@ -46,8 +46,7 @@ describe('#613 self-report is untrusted input — strict schema', () => {
   });
 
   it('rejects an unknown version as invalid (never guessed forward)', () => {
-    // #970: v2 is known (it adds instance.pid_ns); the next one is not.
-    expect(read({ version: 3 })).toEqual({ kind: 'invalid', reason: 'version 3 is not supported' });
+    expect(read({ version: 2 }).kind).toBe('invalid');
   });
 
   it('rejects the wrong schema id', () => {

@@ -23,6 +23,14 @@
  * reporter is still the process that wrote it. That check only proves an
  * exit inside the reporter's own PID namespace (#970): a report that recorded
  * another namespace, or none, is never `ended` by a pid lookup here.
+ *
+ * #970: the namespace travels in a SIDECAR beside the report,
+ *
+ *     <configDir>/posture/<runtime>/<profile>/<instance>.pidns
+ *
+ * holding only its digits (or `null`), never in the report: the report stays
+ * the closed v1 schema every earlier CLI reads, and an earlier CLI lists only
+ * `*.json` names, so it never sees the sidecar. See `readPidNsSidecar`.
  */
 
 import fs from 'fs';
@@ -83,6 +91,12 @@ export function defaultConfigDir(home: string = os.homedir()): string {
 export function postureSelfReportDir(configDir: string = defaultConfigDir()): string {
   return path.join(configDir, 'posture');
 }
+
+/** #970: the PID-namespace sidecar's suffix; `<instance>.pidns` sits beside `<instance>.json`. */
+export const PID_NS_SIDECAR_SUFFIX = '.pidns';
+/** Largest sidecar read: 20 digits, or `null`. */
+const PID_NS_SIDECAR_MAX_BYTES = 32;
+const PID_NS_RE = /^[0-9]{1,20}$/;
 
 /** Where one process's self-report lives. */
 export function selfReportPath(configDir: string, runtime: GateRuntimeId, profile: string, instance: string): string {
@@ -160,6 +174,51 @@ function listNames(dir: string): string[] {
   }
 }
 
+/** The PID-namespace sidecar for a self-report file (same basename, `.pidns`). */
+export function pidNsSidecarPath(reportFile: string): string {
+  return reportFile.endsWith('.json') ? `${reportFile.slice(0, -'.json'.length)}${PID_NS_SIDECAR_SUFFIX}` : `${reportFile}${PID_NS_SIDECAR_SUFFIX}`;
+}
+
+/**
+ * #970: the reporter's PID namespace from its report's sidecar, or null
+ * ("namespace unknown": the record then falls back to the 7-day age rule, like
+ * any report from an earlier writer). Untrusted like the report: a regular
+ * file (never a symlink), owned by this user, owner-only, tiny, and exactly
+ * digits or `null`. Missing, unreadable or malformed is null.
+ *
+ * It is trusted only when its mtime is NOT OLDER than the report it sits
+ * beside: the writers rewrite it after every report write, so an older one is
+ * from before the report's last write and vouches for nothing. (The basename
+ * is the process's start identity — pid + start ticks, or pid + a random
+ * token — so a different process does not share it; the mtime rule also
+ * covers a sidecar whose rewrite failed.)
+ */
+export function readPidNsSidecar(reportFile: string, reportMtimeMs: number, uid: number | undefined): string | null {
+  const file = pidNsSidecarPath(reportFile);
+  let fd: number | null = null;
+  try {
+    const st = fs.lstatSync(file);
+    if (!st.isFile() || st.size > PID_NS_SIDECAR_MAX_BYTES) return null;
+    if (process.platform !== 'win32') {
+      if (uid !== undefined && st.uid !== uid) return null;
+      if ((st.mode & 0o077) !== 0) return null;
+    }
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const opened = fs.fstatSync(fd);
+    if (opened.ino !== st.ino || opened.mtimeMs < reportMtimeMs) return null;
+    const buf = Buffer.alloc(PID_NS_SIDECAR_MAX_BYTES + 1);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    const text = buf.subarray(0, n).toString('utf8');
+    return PID_NS_RE.test(text) ? text : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* read-only handle */ }
+    }
+  }
+}
+
 /** Read one self-report as untrusted input. Never follows a symlink. */
 export function readSelfReportFile(
   file: string,
@@ -195,6 +254,8 @@ export function readSelfReportFile(
       if (r.runtime !== expect.runtime) return invalid('report names a different runtime than its path');
       if (r.profile !== expect.profile) return invalid('report names a different profile than its path (wrong profile)');
       if (r.instance.key !== expect.instance) return invalid('report names a different instance than its file');
+      // #970: join the namespace sidecar, against the mtime of the report actually read.
+      r.instance.pid_ns = readPidNsSidecar(file, fs.fstatSync(fd).mtimeMs, uid);
     }
     return read;
   } catch {
