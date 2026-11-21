@@ -16,42 +16,23 @@
 //
 // The Jest suite cannot catch either: ts-jest's ESM preset shims require(), so
 // bare/relative require() "works" in tests but throws under real Node ESM.
+//
+// Each file is parsed with the TypeScript parser (a devDependency, already
+// needed to build dist) and only real call expressions count, so a require()
+// named in a comment, a string or a regex literal is never flagged. The
+// earlier regex tokenizer could not tell a regex literal from a quote: a `'`
+// or a backtick inside /…/ started a "string" it never closed where the code
+// did, the rest of the file drifted in and out of step, and a doc comment
+// that mentions require('child_process') was read as code (#1005 CI,
+// dist/defence/iron-dome/tool-action-guard.js:1683, a file with no require()).
+//
+// Usage: node scripts/check-no-bare-require.mjs [distDir]   (default ./dist)
 import { readdirSync, readFileSync, statSync } from 'fs';
 import path from 'path';
+import ts from 'typescript';
 
-const DIST = path.join(process.cwd(), 'dist');
+const DIST = path.resolve(process.argv[2] ?? path.join(process.cwd(), 'dist'));
 const offenders = [];
-
-// Matches a require( call that is NOT a property access (foo.require / .require)
-// and NOT the createRequire( factory itself. Captures the leading boundary char
-// so we can compute the line, plus (optionally) a string-literal argument.
-const REQUIRE_CALL = /(^|[^.\w])require\s*\(\s*(['"])([^'"]*)\2\s*\)|(^|[^.\w])require\s*\(/g;
-
-// Blank out comment contents BEFORE scanning so the word "require(" inside a
-// `//` or `/* */` comment is not flagged (the dist/database/init.js:439 false
-// positive was a require() mentioned in a comment). Replace each comment's
-// characters in place — newlines preserved, everything else turned to spaces —
-// so byte offsets and therefore reported line numbers stay correct.
-//
-// Known limitation: string- and template-literal CONTENTS are NOT stripped, so
-// a literal like "...require('./x.js')..." could still be flagged. Robustly
-// stripping strings with a regex is fragile (escapes, nesting, template
-// interpolation) and the real-world defect was comments, so we only strip
-// those. No current dist offender lives inside a string literal.
-function stripComments(src) {
-  // Match: line comments, block comments, single- or double-quoted strings,
-  // and template literals. Comments are blanked; strings/templates are kept
-  // verbatim so a `//` or `/*` inside a string is never mistaken for a comment.
-  const TOKEN = /\/\/[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g;
-  return src.replace(TOKEN, (match) => {
-    if (match.startsWith('//') || match.startsWith('/*')) {
-      // Blank the comment but preserve newlines to keep line numbers stable.
-      return match.replace(/[^\n]/g, ' ');
-    }
-    // String/template literal — leave untouched.
-    return match;
-  });
-}
 
 function isRelativeNonJson(spec) {
   if (spec === undefined) return false;
@@ -59,28 +40,42 @@ function isRelativeNonJson(spec) {
   return !spec.endsWith('.json');
 }
 
+/** Every `require(…)` call (callee the bare identifier, not `x.require`) and
+ *  whether the file calls `createRequire(…)` / `module.createRequire(…)`. */
+function scanCalls(file, text) {
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const requires = [];
+  let hasShim = false;
+  const visit = (node) => {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      if (ts.isIdentifier(callee) && callee.text === 'require') {
+        const arg = node.arguments[0];
+        const spec = arg && (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) ? arg.text : undefined;
+        requires.push({ spec, line: sf.getLineAndCharacterOfPosition(callee.getStart(sf)).line + 1 });
+      }
+      if ((ts.isIdentifier(callee) && callee.text === 'createRequire')
+        || (ts.isPropertyAccessExpression(callee) && callee.name.text === 'createRequire')) {
+        hasShim = true;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return { requires, hasShim };
+}
+
 function walk(dir) {
   for (const entry of readdirSync(dir)) {
     const full = path.join(dir, entry);
     if (statSync(full).isDirectory()) { walk(full); continue; }
     if (!full.endsWith('.js')) continue;
-    // Strip comments first so commented-out require()/createRequire() mentions
-    // are ignored by both the shim check and the offender scan.
-    const src = stripComments(readFileSync(full, 'utf8'));
-    const hasShim = /createRequire\s*\(/.test(src);
-
-    REQUIRE_CALL.lastIndex = 0;
-    let m;
-    while ((m = REQUIRE_CALL.exec(src)) !== null) {
-      // Group 3 is the string literal arg when the require had a literal arg.
-      const spec = m[3];
+    const { requires, hasShim } = scanCalls(full, readFileSync(full, 'utf8'));
+    for (const { spec, line } of requires) {
       const relativeNonJson = isRelativeNonJson(spec);
-
       // Offender if: (a) no shim (any require is a bare-require risk), OR
       //             (b) it require()s a relative non-.json (internal ESM).
       if (!hasShim || relativeNonJson) {
-        const index = m.index;
-        const line = src.slice(0, index).split('\n').length;
         const why = relativeNonJson
           ? `require('${spec}') — relative ESM module must be imported, not require()d (Node 20 ERR_REQUIRE_ESM)`
           : `bare require() with no createRequire shim`;
