@@ -488,7 +488,7 @@ describe('#1005 — the other surfaces know the signal', () => {
   // no more. One paragraph, so every check reads the same text.
   it('the README paragraph names the four families, the tier, the door, the default and the fallback, and claims no complete defence', () => {
     const readme = fs.readFileSync(path.join(REPO, 'README.md'), 'utf-8');
-    const para = readme.split('\n').find((l) => l.startsWith('Reverse shells (unreleased, #1005).'));
+    const para = readme.split('\n').find((l) => l.startsWith('Reverse shells (since 5.20.4, #1005).'));
     expect(para).toBeDefined();
     for (const fact of [
       'Action Guard is off by default', '`reverse-shell` signal', 'dangerous approval tier', 'never a block',
