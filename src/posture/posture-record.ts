@@ -37,10 +37,10 @@
  *  - **No host-wide rollup to green.** A summary is its weakest record.
  *  - **Stale is listed, never judged (#970).** A record whose reporter the
  *    host shows has ended, that has not been seen for `STALE_NOT_SEEN_MS`,
- *    that a newer current record of the same group supersedes, or whose
- *    runtime the host table calls absent stays in the list with
- *    `stale: true` and a reason, and is left out of the summary. Silence and
- *    start-time ordering are not proof that anything ended. A process the
+ *    or that a newer current record of the same group supersedes stays in
+ *    the list with `stale: true` and a reason, and is left out of the
+ *    summary. Silence, start-time ordering and the host table calling a
+ *    runtime absent are not proof that anything ended. A process the
  *    host confirms is running is never stale: a live `unknown` still sets the
  *    summary. A present runtime whose reports are ALL stale keeps one
  *    non-green "no current report" record, so an old report never judges a
@@ -208,10 +208,13 @@ export type ObsoleteReason =
  *   than `max_age`, beside a NEWER record of the same (runtime, profile,
  *   plane) that is current itself and temporally valid. Never applied to a
  *   resident process: a later start time is not proof an earlier one ended.
- * - `runtime-absent`: the host table classifies the runtime as absent and no
- *   running process contradicts it.
+ *
+ * The host table calling a runtime absent is NOT a reason: it is a heuristic
+ * (a conventional home on this host), and a report from a container or a
+ * non-standard home is still evidence. Absence only withholds the "present,
+ * no current report" marker (`noCurrentReportRecord`).
  */
-export type StaleReason = 'process-ended' | 'superseded' | 'not-seen' | 'runtime-absent';
+export type StaleReason = 'process-ended' | 'superseded' | 'not-seen';
 
 export interface PostureRecord {
   record_version: typeof POSTURE_RECORD_VERSION;
@@ -811,11 +814,6 @@ export function deriveMemoryOnlyRecord(input: MemoryOnlyInput): PostureRecord {
 
 // ── Staleness across records (#970) ─────────────────────────────────────────
 
-export interface StaleContext {
-  /** Runtimes the host table classifies as absent on this box. */
-  absentRuntimes?: Iterable<PostureRuntimeId>;
-}
-
 function parsedMs(iso: string | null | undefined): number | null {
   if (typeof iso !== 'string') return null;
   const t = Date.parse(iso);
@@ -849,14 +847,10 @@ function supersedingHeartbeat(r: PostureRecord): number | null {
  *   resident process is never superseded by start-time order: two concurrent
  *   reporters both stay judged until one is shown to have ended or passes
  *   the not-seen age.
- * - **Runtime absent.** A record for a runtime the host table says is not on
- *   this box is stale — unless the host confirms its process is running,
- *   which contradicts "absent" and is never hidden.
  *
  * A reason already set is kept: it is the more specific one.
  */
-export function markStaleRecords(records: readonly PostureRecord[], ctx: StaleContext = {}): PostureRecord[] {
-  const absent = new Set<PostureRuntimeId>(ctx.absentRuntimes ?? []);
+export function markStaleRecords(records: readonly PostureRecord[]): PostureRecord[] {
   const newestCurrent = new Map<string, number>();
   for (const r of records) {
     const t = supersedingHeartbeat(r);
@@ -873,13 +867,7 @@ export function markStaleRecords(records: readonly PostureRecord[], ctx: StaleCo
     const newer = newestCurrent.get(groupKey(r));
     return newer !== undefined && newer > heartbeat;
   };
-  return records.map((r) => {
-    if (r.stale) return r;
-    let reason: StaleReason | null = null;
-    if (absent.has(r.runtime) && r.liveness.value !== 'alive') reason = 'runtime-absent';
-    else if (superseded(r)) reason = 'superseded';
-    return reason ? { ...r, stale: true, stale_reason: reason } : r;
-  });
+  return records.map((r) => (!r.stale && superseded(r) ? { ...r, stale: true, stale_reason: 'superseded' } : r));
 }
 
 /**
@@ -904,7 +892,6 @@ const STALE_TEXT: Record<StaleReason, string> = {
   'process-ended': 'the reporting process has ended',
   superseded: 'per-call hook silent past max_age, and a newer current record reported for the same runtime',
   'not-seen': `not seen for ${STALE_NOT_SEEN_MS / (24 * 60 * 60 * 1000)} days or more`,
-  'runtime-absent': 'the runtime is not present on this host',
 };
 
 export function staleReasonText(reason: StaleReason): string {

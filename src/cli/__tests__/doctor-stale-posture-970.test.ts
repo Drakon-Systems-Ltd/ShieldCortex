@@ -126,13 +126,14 @@ describe('#970 the host posture is judged on live instances only', () => {
     expect(host.status).toBe('info');
   });
 
-  it('a record for an absent runtime is stale by that rule alone, when the host cannot check its process', () => {
+  it('absence alone never hides a fresh record the host cannot check: it is judged as unverified (r3)', () => {
     writeReport(configDir, reportBody({ instance: instance(6001, '6001') }));
     const cannotTell: CollectDeps = { processStart: () => undefined };
-    const [rec] = collectPostureRecords(opts({ deps: cannotTell })).filter((r) => r.runtime === 'hermes');
-    expect(rec.liveness.value).toBe('unverified');
-    expect({ stale: rec.stale, reason: rec.stale_reason }).toEqual({ stale: true, reason: 'runtime-absent' });
-    expect(rollupRecords([rec])).toEqual([]);
+    const hermes = collectPostureRecords(opts({ deps: cannotTell })).filter((r) => r.runtime === 'hermes');
+    // The report itself and no marker: an absent runtime never gets one.
+    expect(hermes).toHaveLength(1);
+    expect([hermes[0].liveness.value, hermes[0].stale, hermes[0].stale_reason]).toEqual(['unverified', false, null]);
+    expect(rollupRecords(hermes)).toHaveLength(1);
   });
 
   it('a process the host confirms is running is judged even when HOSTS says its runtime is absent', () => {
@@ -598,19 +599,35 @@ describe('#970 r2: the clawdbot1 field shape', () => {
     expect(recordRows(shown, 'Hermes')).toEqual([]);
   });
 
-  it('the same shape from earlier writers (no pid_ns): still judged on the live OpenClaw only', () => {
-    fieldFixture();
+  /** Rewrite every fixture report as an earlier (v1, no pid_ns) writer's, heard from `heardAgoMs` ago. */
+  function asEarlierWriters(heardAgoMs?: number): void {
     for (const dir of ['openclaw', 'hermes']) {
       const d = path.join(configDir, 'posture', dir, 'default');
       for (const f of fs.readdirSync(d)) {
         const body = JSON.parse(fs.readFileSync(path.join(d, f), 'utf8'));
         delete body.instance.pid_ns;
         body.version = 1;
+        if (heardAgoMs !== undefined && body.instance.pid !== LIVE_PID) body.heartbeat_at = iso(NOW - heardAgoMs);
         fs.writeFileSync(path.join(d, f), JSON.stringify(body));
       }
     }
+  }
+
+  it('the same shape from earlier writers (no pid_ns), heard within 7 days: the dead reports are judged as unverified, not hidden (r3)', () => {
+    fieldFixture();
+    asEarlierWriters();
     const records = collectPostureRecords(opts());
-    expect(records.filter((r) => r.runtime === 'hermes').every((r) => r.stale_reason === 'runtime-absent')).toBe(true);
+    const hermes = records.filter((r) => r.runtime === 'hermes');
+    expect(hermes.map((r) => [r.liveness.value, r.stale])).toEqual([['unverified', false], ['unverified', false]]);
+    expect(summarisePosture(records)).toMatchObject({ level: 'unknown', green: false });
+  });
+
+  it('the same shape from earlier writers, not heard for 7 days: judged on the live OpenClaw only, no Hermes marker', () => {
+    fieldFixture();
+    asEarlierWriters(STALE_NOT_SEEN_MS + HOUR);
+    const records = collectPostureRecords(opts());
+    expect(records.filter((r) => r.runtime === 'hermes').map((r) => [r.key.instance !== null, r.stale_reason]))
+      .toEqual([[true, 'not-seen'], [true, 'not-seen']]);
     expect(rollupRecords(records).map((r) => r.key.instance)).toEqual([`p${LIVE_PID}-s${LIVE_START}`]);
     expect(summarisePosture(records)).toMatchObject({ level: 'advisory', rollup_count: 1 });
   });
@@ -632,6 +649,69 @@ describe('#970 r2: the collapsed line never calls an unverified report live', ()
     const shown = collapseStalePostureRows(await checkRuntimePosture(opts({ deps: d })));
     expect(shown.find((r) => r.label === `${RUNTIME_POSTURE_LABEL}: OpenClaw`)!.message)
       .toBe('1 current (1 unverified), 1 stale hidden (--verbose to list)');
+  });
+});
+
+// ── Round 3: heuristic absence never hides a fresh report ───────────────────
+
+describe('#970 r3: HOSTS absence alone never hides a record', () => {
+  const OTHER_NS = '4026532999';
+  /** A 30-second-old intentionally-off report from another PID namespace (a container, say). */
+  const offFromContainer = (runtime: 'hermes' | 'openclaw', heardAgoMs = 30_000) => writeReport(configDir, reportBody({
+    runtime,
+    configured_posture: 'intentionally-off',
+    heartbeat_at: iso(NOW - heardAgoMs),
+    instance: { ...instance(6001, '6001'), pid_ns: OTHER_NS },
+  }));
+  const noOpenClaw = { openclawBinaryPresent: () => false };
+  const absentOpts = () => ({ ...opts(), hostDeps: noOpenClaw });
+
+  beforeEach(() => {
+    // Neither runtime has a home here; only Claude Code is present, and enforcing.
+    fs.rmSync(path.join(home, '.openclaw'), { recursive: true });
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    writeReport(configDir, reportBody({
+      runtime: 'claude_code',
+      plugin: { id: 'shieldcortex-pre-tool-hook', version: '5.20.4', hash: null },
+      instance: { key: 'c-live', pid: null, process_start: null, started_at: iso(NOW - HOUR), liveness: 'per-call' },
+    }));
+  });
+
+  it('the fixture: HOSTS says Hermes and OpenClaw are absent', () => {
+    const present = Object.fromEntries(scanHostTable(home, noOpenClaw).rows.map((r) => [r.id, r.present]));
+    expect([present.openclaw, present.hermes, present.claude]).toEqual([false, false, true]);
+  });
+
+  for (const [runtime, name] of [['hermes', 'Hermes'], ['openclaw', 'OpenClaw']] as const) {
+    it(`a fresh foreign-namespace intentionally-off ${name} report: judged, and the host is not green`, async () => {
+      offFromContainer(runtime);
+      const records = collectPostureRecords(absentOpts());
+      const recs = records.filter((r) => r.runtime === runtime);
+      // The report itself, judged; no marker for an absent runtime.
+      expect(recs.map((r) => [r.key.instance, r.liveness.value, r.stale, r.stale_reason])).toEqual([['p6001-s6001', 'unverified', false, null]]);
+      expect(summarisePosture(records)).toMatchObject({ green: false, level: 'unknown', rollup_count: 2, stale_count: 0 });
+
+      const host = hostRow(await checkRuntimePosture(absentOpts()));
+      expect(host.status).not.toBe('pass');
+      expect(host.message).toMatch(new RegExp(`^weakest of 2 record\\(s\\) judged \\(2 found\\): unknown \\(${name}, tool-gate\\)`));
+      expect(JSON.parse(JSON.stringify(buildPolicyEvidence(absentOpts()))).summary).toMatchObject({ green: false });
+    });
+
+    it(`a ${name} report aged past STALE_NOT_SEEN_MS on an absent runtime: hidden, no marker, the host on Claude alone`, async () => {
+      offFromContainer(runtime, STALE_NOT_SEEN_MS + HOUR);
+      const records = collectPostureRecords(absentOpts());
+      expect(records.filter((r) => r.runtime === runtime).map((r) => [r.key.instance, r.stale_reason])).toEqual([['p6001-s6001', 'not-seen']]);
+      expect(summarisePosture(records)).toMatchObject({ green: true, level: 'loaded-enforce', rollup_count: 1, stale_count: 1 });
+      expect(hostRow(await checkRuntimePosture(absentOpts())).status).toBe('pass');
+    });
+  }
+
+  it('absence keeps one effect: an absent runtime whose reports are all stale gets no marker, a present one does', () => {
+    offFromContainer('hermes', STALE_NOT_SEEN_MS + HOUR);
+    expect(collectPostureRecords(absentOpts()).filter((r) => r.runtime === 'hermes').map((r) => r.key.instance)).toEqual(['p6001-s6001']);
+    hermesHome(home);
+    expect(collectPostureRecords(absentOpts()).filter((r) => r.runtime === 'hermes').map((r) => [r.key.instance, r.stale]))
+      .toEqual([['p6001-s6001', true], [null, false]]);
   });
 });
 

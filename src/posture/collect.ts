@@ -45,7 +45,6 @@ import {
   type LivenessCheck,
   type MemoryOnlyRuntimeId,
   type PostureRecord,
-  type PostureRuntimeId,
   type SelfReportRead,
 } from './posture-record.js';
 import { hostArtefactWired, scanHostTable, type HostId, type HostTableDeps } from '../setup/host-table.js';
@@ -357,8 +356,6 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
   const dir = postureSelfReportDir(configDir);
   const table = scanHostTable(home, opts.hostDeps ?? {});
   const present = new Map(table.rows.map((r) => [r.id, r.present]));
-  // #970: the same host table the HOSTS section prints decides "absent".
-  const absentRuntimes = (Object.keys(HOST_ID_FOR) as PostureRuntimeId[]).filter((rt) => !present.get(HOST_ID_FOR[rt]));
   const records: PostureRecord[] = [];
 
   for (const runtime of GATE_RUNTIMES) {
@@ -399,10 +396,11 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
       if (pf.skipped > 0) {
         for (const r of recs) r.notes.push(`${pf.skipped} further instance report(s) for this profile were not read (cap ${MAX_INSTANCES_PER_PROFILE})`);
       }
-      // #970: staleness is decided within this (runtime, profile). A PRESENT
-      // runtime whose every report is stale keeps one non-green record — the
-      // same one it would get with no report at all.
-      const marked = markStaleRecords(recs, { absentRuntimes });
+      // #970: staleness is decided within this (runtime, profile), on evidence
+      // only — the host table calling the runtime absent hides nothing. A
+      // PRESENT runtime whose every report is stale keeps one non-green record
+      // (the one it would get with no report at all); an absent one does not.
+      const marked = markStaleRecords(recs);
       records.push(...marked);
       if (present.get(hostId) && marked.length > 0 && marked.every((r) => r.stale)) {
         records.push(noCurrentReportRecord(derive({ kind: 'absent' }), marked.length));
@@ -414,7 +412,7 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
     const hostId = HOST_ID_FOR[runtime];
     const { installed } = probeInstalled(runtime, home, 'default');
     if (!present.get(hostId) && installed === 'no') continue;
-    records.push(...markStaleRecords([deriveMemoryOnlyRecord({ runtime, profile: 'default', installed, nowMs })], { absentRuntimes }));
+    records.push(deriveMemoryOnlyRecord({ runtime, profile: 'default', installed, nowMs }));
   }
 
   return records;
