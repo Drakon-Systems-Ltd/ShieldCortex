@@ -286,10 +286,38 @@ export interface SelfReport {
   };
 }
 
+/**
+ * #970 — why a self-report was rejected, structurally (never by its reason
+ * text):
+ *
+ * - `content`: an owner-only regular file under the size cap, in a directory
+ *   only this user can write, whose bytes are wrong — not JSON, wrong schema,
+ *   version or keys, an invalid field, or a runtime / profile / instance that
+ *   does not match its path. Its mtime is this user's own write, so it may
+ *   age the record like a heartbeat would.
+ * - `trust`: anything the trust checks refuse — an insecure directory, a
+ *   symlink or other non-regular file, another owner, group / other access,
+ *   oversize, a failed lstat / open / read. Its mtime proves nothing (whoever
+ *   could plant it can set it), so it is never aged out.
+ *
+ * Unset is `trust`: a new or unclassified rejection fails closed.
+ */
+export type SelfReportRejection = 'trust' | 'content';
+
 export type SelfReportRead =
   | { kind: 'absent' }
-  | { kind: 'invalid'; reason: string; instance?: string }
+  | { kind: 'invalid'; reason: string; instance?: string; rejection?: SelfReportRejection }
   | { kind: 'valid'; report: SelfReport };
+
+/**
+ * #970 — the one predicate for "may this rejected report go stale by age":
+ * only a `content` rejection. Every place that ages, folds or drops a
+ * rejected record asks this; a `trust` (or unclassified) rejection is judged
+ * regardless of age.
+ */
+export function rejectionMayAge(read: SelfReportRead): boolean {
+  return read.kind === 'invalid' && read.rejection === 'content';
+}
 
 // ── Validation ──────────────────────────────────────────────────────────────
 
@@ -362,26 +390,28 @@ const TOP_KEYS = [
  */
 export function parseSelfReport(text: string, sizeBytes: number): SelfReportRead {
   if (!Number.isFinite(sizeBytes) || sizeBytes > SELF_REPORT_MAX_BYTES) {
-    return { kind: 'invalid', reason: `size ${sizeBytes} bytes exceeds the ${SELF_REPORT_MAX_BYTES}-byte cap` };
+    return { kind: 'invalid', reason: `size ${sizeBytes} bytes exceeds the ${SELF_REPORT_MAX_BYTES}-byte cap`, rejection: 'trust' };
   }
+  // #970: every rejection below is of the bytes themselves.
+  const content = (reason: string): SelfReportRead => ({ kind: 'invalid', reason, rejection: 'content' });
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
-    return { kind: 'invalid', reason: 'not JSON' };
+    return content('not JSON');
   }
-  if (!isObj(raw)) return { kind: 'invalid', reason: 'not a JSON object' };
+  if (!isObj(raw)) return content('not a JSON object');
   const o = raw;
-  if (o.schema !== SELF_REPORT_SCHEMA) return { kind: 'invalid', reason: 'unrecognised schema id' };
+  if (o.schema !== SELF_REPORT_SCHEMA) return content('unrecognised schema id');
   if (o.version !== SELF_REPORT_VERSION) {
-    return { kind: 'invalid', reason: `version ${typeof o.version === 'number' ? o.version : '?'} is not supported` };
+    return content(`version ${typeof o.version === 'number' ? o.version : '?'} is not supported`);
   }
   const extra = Object.keys(o).filter((k) => !(TOP_KEYS as readonly string[]).includes(k));
-  if (extra.length > 0) return { kind: 'invalid', reason: 'unknown keys' };
+  if (extra.length > 0) return content('unknown keys');
   const missing = TOP_KEYS.filter((k) => !(k in o));
-  if (missing.length > 0) return { kind: 'invalid', reason: `missing keys: ${missing.join(', ')}` };
+  if (missing.length > 0) return content(`missing keys: ${missing.join(', ')}`);
 
-  const bad = (field: string): SelfReportRead => ({ kind: 'invalid', reason: `invalid ${field}` });
+  const bad = (field: string): SelfReportRead => content(`invalid ${field}`);
   if (!isGateRuntime(o.runtime)) return bad('runtime');
   if (!isValidProfileId(o.profile)) return bad('profile');
   if (o.plane !== 'tool-gate') return bad('plane');
@@ -508,7 +538,8 @@ export interface ToolGateInput {
   maxAgeMs?: number;
   /**
    * #970: mtime of the self-report file, when the collector has one. Only
-   * used to age a REJECTED report, which has no trustworthy heartbeat.
+   * used to age a report rejected for its CONTENT (`rejectionMayAge`), which
+   * has no trustworthy heartbeat; a trust rejection ignores it.
    */
   lastSeenMs?: number | null;
 }
@@ -598,8 +629,10 @@ export function deriveToolGateRecord(input: ToolGateInput): PostureRecord {
     const why = `self-report rejected: ${read.reason}`;
     rec.runtime_loaded = unknown<RuntimeLoaded>('unknown', 'loaded', why);
     notes.push(why);
+    // #970: only a content rejection is aged, even if a caller passes an
+    // mtime for a trust rejection (whoever planted that file set its mtime).
     const seen = input.lastSeenMs;
-    if (typeof seen === 'number' && Number.isFinite(seen) && nowMs - seen > STALE_NOT_SEEN_MS) {
+    if (rejectionMayAge(read) && typeof seen === 'number' && Number.isFinite(seen) && nowMs - seen > STALE_NOT_SEEN_MS) {
       rec.stale = true;
       rec.stale_reason = 'not-seen';
     }

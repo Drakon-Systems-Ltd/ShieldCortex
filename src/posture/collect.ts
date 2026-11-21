@@ -48,6 +48,7 @@ import {
   markStaleRecords,
   noCurrentReportRecord,
   parseSelfReport,
+  rejectionMayAge,
   type GateRuntimeId,
   type Installed,
   type LivenessCheck,
@@ -225,7 +226,10 @@ export function readSelfReportFile(
   expect: { runtime: GateRuntimeId; profile: string; instance: string },
   uid: number | undefined,
 ): SelfReportRead {
-  const invalid = (reason: string): SelfReportRead => ({ kind: 'invalid', reason, instance: expect.instance });
+  // #970: every rejection here is a TRUST rejection (its mtime is no evidence)
+  // except a content rejection of a file that passed every trust check.
+  const invalid = (reason: string): SelfReportRead => ({ kind: 'invalid', reason, instance: expect.instance, rejection: 'trust' });
+  const contentInvalid = (reason: string): SelfReportRead => ({ kind: 'invalid', reason, instance: expect.instance, rejection: 'content' });
   let st: fs.Stats;
   try {
     st = fs.lstatSync(file);
@@ -248,12 +252,14 @@ export function readSelfReportFile(
     const buf = Buffer.alloc(SELF_REPORT_MAX_BYTES + 1);
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
     const read = parseSelfReport(buf.subarray(0, n).toString('utf8'), n);
-    if (read.kind === 'invalid') return invalid(read.reason);
+    // parseSelfReport classifies its own rejections (oversize is trust); an
+    // unclassified one stays trust.
+    if (read.kind === 'invalid') return read.rejection === 'content' ? contentInvalid(read.reason) : invalid(read.reason);
     if (read.kind === 'valid') {
       const r = read.report;
-      if (r.runtime !== expect.runtime) return invalid('report names a different runtime than its path');
-      if (r.profile !== expect.profile) return invalid('report names a different profile than its path (wrong profile)');
-      if (r.instance.key !== expect.instance) return invalid('report names a different instance than its file');
+      if (r.runtime !== expect.runtime) return contentInvalid('report names a different runtime than its path');
+      if (r.profile !== expect.profile) return contentInvalid('report names a different profile than its path (wrong profile)');
+      if (r.instance.key !== expect.instance) return contentInvalid('report names a different instance than its file');
       // #970: join the namespace sidecar, against the mtime of the report actually read.
       r.instance.pid_ns = readPidNsSidecar(file, fs.fstatSync(fd).mtimeMs, uid);
     }
@@ -446,13 +452,17 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
         let read: SelfReportRead;
         const file = path.join(dir, runtime, pf.profile, `${instance}.json`);
         if (pf.insecure) {
-          read = { kind: 'invalid', reason: `insecure self-report directory: ${pf.insecure}`, instance };
+          read = { kind: 'invalid', reason: `insecure self-report directory: ${pf.insecure}`, instance, rejection: 'trust' };
         } else if (!isGateRuntime(runtime)) {
-          read = { kind: 'invalid', reason: 'unknown runtime', instance };
+          // Trust: no reader vouches for a path under a runtime it cannot validate.
+          read = { kind: 'invalid', reason: 'unknown runtime', instance, rejection: 'trust' };
         } else {
           read = readSelfReportFile(file, { runtime, profile: pf.profile, instance }, uid);
         }
-        recs.push(derive(read, checkLiveness(read, deps, collectorNs), read.kind === 'invalid' ? fileMtimeMs(file) : null));
+        // #970: a file's mtime ages only a CONTENT rejection; a trust rejection
+        // (insecure dir, symlink, foreign owner, mode, oversize, unreadable) is
+        // judged whatever its age, exactly as before #970.
+        recs.push(derive(read, checkLiveness(read, deps, collectorNs), rejectionMayAge(read) ? fileMtimeMs(file) : null));
       }
       if (pf.skipped > 0) {
         for (const r of recs) r.notes.push(`${pf.skipped} further instance report(s) for this profile were not read (cap ${MAX_INSTANCES_PER_PROFILE})`);

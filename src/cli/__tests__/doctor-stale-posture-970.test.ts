@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { checkRuntimePosture, RUNTIME_POSTURE_LABEL, type CheckResult } from '../doctor.js';
 import { collapseStalePostureRows, formatDoctorReport, sanitiseDoctorRowsForDisplay } from '../doctor-report.js';
 import { buildPolicyEvidence } from '../policy-evidence.js';
-import { collectPostureRecords, pidNsSidecarPath, type CollectDeps } from '../../posture/collect.js';
-import { STALE_NOT_SEEN_MS, parseSelfReport, rollupRecords, summarisePosture } from '../../posture/posture-record.js';
+import { collectPostureRecords, pidNsSidecarPath, readSelfReportFile, type CollectDeps } from '../../posture/collect.js';
+import { STALE_NOT_SEEN_MS, deriveToolGateRecord, parseSelfReport, rollupRecords, summarisePosture, type SelfReportRead } from '../../posture/posture-record.js';
 import { scanHostTable } from '../../setup/host-table.js';
 import { NOW, PID_NS, hermesHome, hermesPluginArtefacts, iso, processTable, reportBody, writePidNsSidecar, writeReport } from '../../posture/__tests__/self-report-fixture.js';
 import { legacyListInstances, legacyReadProfile } from '../../posture/__tests__/legacy-self-report-gate.js';
@@ -572,8 +572,8 @@ describe('#970 r2: a pid lookup proves an exit only inside the report\'s own PID
     const { pid_ns: _drop, ...v1 } = instance(6001, '6001');
     const ok = parse(v1);
     expect(ok.kind === 'valid' && [ok.report.version, ok.report.instance.pid_ns]).toEqual([1, null]);
-    expect(parse(instance(6001, '6001'))).toEqual({ kind: 'invalid', reason: 'invalid instance' });
-    expect(parse(v1, 2)).toEqual({ kind: 'invalid', reason: 'version 2 is not supported' });
+    expect(parse(instance(6001, '6001'))).toEqual({ kind: 'invalid', reason: 'invalid instance', rejection: 'content' });
+    expect(parse(v1, 2)).toEqual({ kind: 'invalid', reason: 'version 2 is not supported', rejection: 'content' });
   });
 });
 
@@ -820,5 +820,150 @@ describe('#970 r4: a pre-#970 CLI reads the new writers\' reports exactly as bef
     expect(records.map((r) => [r.key.instance, r.liveness.process_identity?.pid_ns, r.liveness.value, r.stale]).sort())
       .toEqual([['p6001-s6001', null, 'alive', false], ['p6002-s6002', PID_NS, 'alive', false]]);
     expect(summarisePosture(records)).toMatchObject({ level: 'off', green: false, rollup_count: 2 });
+  });
+});
+
+// ── Round 5: a trust-rejected report is never aged out ─────────────────────
+
+describe('#970 r5: a trust-rejected self-report is judged whatever its age (as before #970)', () => {
+  /** Eight days: past STALE_NOT_SEEN_MS. In an untrusted place that mtime is whoever planted the file. */
+  const OLD = NOW - 8 * DAY;
+  const noOpenClaw = { openclawBinaryPresent: () => false };
+  const absentOpts = (over: { deps?: CollectDeps } = {}) => ({ ...opts(over), hostDeps: noOpenClaw });
+  const realUid = () => (typeof process.getuid === 'function' ? process.getuid() : undefined);
+  const profileDir = (profile = 'default') => path.join(configDir, 'posture', 'hermes', profile);
+  const age = (file: string) => fs.utimesSync(file, new Date(OLD), new Date(OLD));
+  /** An 8-day-old Hermes report (file and heartbeat) on the default profile. */
+  const oldHermes = (): string => {
+    const file = writeReport(configDir, reportBody({ heartbeat_at: iso(OLD), instance: instance(6001, '6001', 9 * DAY) }));
+    age(file);
+    return file;
+  };
+
+  beforeEach(() => {
+    // Hermes ABSENT from HOSTS (only ~/.hermes/ekho-state), no OpenClaw; Claude Code present and enforcing, fresh.
+    fs.rmSync(path.join(home, '.openclaw'), { recursive: true });
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    writeReport(configDir, reportBody({
+      runtime: 'claude_code',
+      plugin: { id: 'shieldcortex-pre-tool-hook', version: '5.20.4', hash: null },
+      instance: { key: 'c-live', pid: null, process_start: null, started_at: iso(NOW - HOUR), liveness: 'per-call' },
+    }));
+  });
+
+  it('the fixture: Hermes absent, and Claude alone makes the host green', () => {
+    const present = Object.fromEntries(scanHostTable(home, noOpenClaw).rows.map((r) => [r.id, r.present]));
+    expect([present.hermes, present.openclaw, present.claude]).toEqual([false, false, true]);
+    expect(summarisePosture(collectPostureRecords(absentOpts()))).toMatchObject({ green: true, level: 'loaded-enforce' });
+  });
+
+  const trustRejections: Array<[string, RegExp, () => void]> = [
+    ['in a group-writable self-report directory', /insecure self-report directory: directory writable by group or others/, () => {
+      oldHermes();
+      fs.chmodSync(profileDir(), 0o770);
+    }],
+    ['that is a symlink', /not a regular file/, () => {
+      const file = oldHermes();
+      const planted = path.join(root, 'planted.json');
+      fs.renameSync(file, planted);
+      fs.symlinkSync(planted, file);
+      fs.lutimesSync(file, new Date(OLD), new Date(OLD));
+    }],
+    ['with mode 0640', /must be owner-only/, () => {
+      fs.chmodSync(oldHermes(), 0o640);
+    }],
+    ['of 9000 bytes (over the cap)', /size 9000 bytes exceeds/, () => {
+      const file = oldHermes();
+      fs.writeFileSync(file, ' '.repeat(9000));
+      age(file);
+    }],
+    ['that cannot be read', /self-report rejected: unreadable/, () => {
+      fs.chmodSync(oldHermes(), 0o000);
+    }],
+  ];
+
+  for (const [what, reason, plant] of trustRejections) {
+    it(`an 8-day-old Hermes report ${what}: not stale, judged unknown, and the host is not green`, async () => {
+      plant();
+      const records = collectPostureRecords(absentOpts());
+      const hermes = records.filter((r) => r.runtime === 'hermes');
+      expect(hermes.map((r) => [r.key.instance, r.stale, r.stale_reason, r.runtime_loaded.value])).toEqual([['p6001-s6001', false, null, 'unknown']]);
+      expect(hermes[0].notes.join(' ')).toMatch(reason);
+      expect(summarisePosture(records)).toMatchObject({ green: false, level: 'unknown', rollup_count: 2, stale_count: 0 });
+
+      const rows = await checkRuntimePosture(absentOpts());
+      expect(hostRow(rows).status).not.toBe('pass');
+      expect(hostRow(rows).message).toMatch(/^weakest of 2 record\(s\) judged \(2 found\): unknown \(Hermes, tool-gate\)/);
+      // Shown as its own row, never folded into a "stale hidden" line.
+      const shown = collapseStalePostureRows(rows);
+      expect(shown.filter((r) => /stale hidden/.test(r.message))).toEqual([]);
+      expect(recordRows(shown, 'Hermes')).toHaveLength(1);
+      expect(JSON.parse(JSON.stringify(buildPolicyEvidence(absentOpts()))).summary).toMatchObject({ green: false, stale_count: 0 });
+    });
+  }
+
+  it('an 8-day-old report under directories owned by another user: not stale, and the host is not green', () => {
+    oldHermes();
+    const uid = realUid();
+    if (uid === undefined) return; // no uids on this platform: nothing to own
+    const records = collectPostureRecords(absentOpts({ deps: { ...deps, uid: () => uid + 1 } }));
+    const hermes = records.filter((r) => r.runtime === 'hermes');
+    expect(hermes.map((r) => [r.key.instance, r.stale, r.stale_reason])).toEqual([['p6001-s6001', false, null]]);
+    expect(hermes[0].notes.join(' ')).toMatch(/insecure self-report directory: directory owned by another user/);
+    expect(summarisePosture(records)).toMatchObject({ green: false, stale_count: 0 });
+  });
+
+  it('a file owned by another user is a trust rejection, and an 8-day-old one is never aged out', () => {
+    // Chowning needs root, so the reader is told it runs as another uid; the
+    // record is then derived with the old file mtime the collector would pass.
+    const file = oldHermes();
+    const uid = realUid();
+    if (uid === undefined) return;
+    const read = readSelfReportFile(file, { runtime: 'hermes', profile: 'default', instance: 'p6001-s6001' }, uid + 1);
+    expect(read).toMatchObject({ kind: 'invalid', reason: 'owned by another user', rejection: 'trust' });
+    const rec = deriveToolGateRecord({ runtime: 'hermes', profile: 'default', installed: 'no', read, nowMs: NOW, lastSeenMs: OLD });
+    expect([rec.stale, rec.stale_reason, rec.runtime_loaded.value]).toEqual([false, null, 'unknown']);
+  });
+
+  it('defence in depth: only a content rejection is aged, whatever lastSeenMs a caller passes; unclassified is trust', () => {
+    const derive = (read: SelfReportRead) =>
+      deriveToolGateRecord({ runtime: 'hermes', profile: 'default', installed: 'no', read, nowMs: NOW, lastSeenMs: OLD });
+    const stale = (extra: Record<string, unknown>) => derive({ kind: 'invalid', reason: 'x', instance: 'p6001-s6001', ...extra } as SelfReportRead).stale;
+    expect(stale({})).toBe(false);
+    expect(stale({ rejection: 'trust' })).toBe(false);
+    expect(stale({ rejection: 'bogus' })).toBe(false);
+    expect(stale({ rejection: 'content' })).toBe(true);
+  });
+
+  it('cross-profile: a live enforcing hermes/work beside an insecure 8-day-old hermes/default — default stays, judged and non-green', async () => {
+    hermesHome(home);
+    hermesPluginArtefacts(home);
+    writeReport(configDir, reportBody({ profile: 'work', instance: instance(LIVE_PID, LIVE_START) }));
+    oldHermes();
+    fs.chmodSync(profileDir('default'), 0o770);
+    const records = collectPostureRecords(absentOpts());
+    const hermes = records.filter((r) => r.runtime === 'hermes');
+    expect(hermes.map((r) => [r.profile, r.key.instance, r.stale, r.liveness.value]).sort()).toEqual([
+      ['default', 'p6001-s6001', false, 'not-applicable'],
+      ['work', `p${LIVE_PID}-s${LIVE_START}`, false, 'alive'],
+    ]);
+    const dflt = hermes.find((r) => r.profile === 'default')!;
+    expect(dflt.notes.join(' ')).toMatch(/insecure self-report directory/);
+    expect(rollupRecords(records).map((r) => r.source)).toContain(dflt.source);
+    expect(summarisePosture(records)).toMatchObject({ green: false, level: 'unknown', weakest: dflt.source, stale_count: 0 });
+    expect(hostRow(await checkRuntimePosture(absentOpts())).status).not.toBe('pass');
+  });
+
+  it('positive control: an 8-day-old CONTENT-invalid owner-only report in a secure directory still goes stale', async () => {
+    const file = writeReport(configDir, { ...reportBody({ heartbeat_at: iso(OLD), instance: instance(6001, '6001') }), extra: 1 });
+    age(file);
+    const records = collectPostureRecords(absentOpts());
+    const hermes = records.filter((r) => r.runtime === 'hermes');
+    expect(hermes.map((r) => [r.stale, r.stale_reason])).toEqual([[true, 'not-seen']]);
+    expect(hermes[0].notes.join(' ')).toMatch(/self-report rejected: unknown keys/);
+    expect(summarisePosture(records)).toMatchObject({ green: true, level: 'loaded-enforce', stale_count: 1 });
+    // The same file seen recently is a judged unknown.
+    fs.utimesSync(file, new Date(NOW - HOUR), new Date(NOW - HOUR));
+    expect(summarisePosture(collectPostureRecords(absentOpts()))).toMatchObject({ green: false, level: 'unknown', stale_count: 0 });
   });
 });
