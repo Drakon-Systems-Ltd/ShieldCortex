@@ -43,6 +43,7 @@
  */
 
 import { getDatabase, checkDatabaseSize } from '../database/init.js';
+import { DIRECTORY_BUDGET_BYTES, WARN_DB_FILE_BYTES } from '../limits.js';
 
 /** Default age-based retention window. */
 export const DEFAULT_SESSION_RETENTION_DAYS = 30;
@@ -72,6 +73,17 @@ export const SESSION_PRESSURE_ROW_CAP = 10_000;
  * within a handful of ticks instead of one big stall.
  */
 export const SESSION_PRESSURE_BATCH_ROWS = 2_000;
+
+/**
+ * #1043: the DB-file size at which the valve starts trimming, for a given
+ * ShieldCortex directory budget. Half the budget, and never below the
+ * historical 50 MB WARN threshold — so the 100 MiB default budget gives
+ * exactly the old gate, and an operator who raises the budget (e.g. to 1 GB)
+ * stops the valve purging capture rows from a database well inside it.
+ */
+export function sessionPressureThresholdBytes(diskBudgetBytes: number = DIRECTORY_BUDGET_BYTES): number {
+  return Math.max(WARN_DB_FILE_BYTES, Math.floor(diskBudgetBytes / 2));
+}
 
 /** Bounds for the env override — anything outside is treated as invalid. */
 const MIN_RETENTION_DAYS = 1;
@@ -164,9 +176,9 @@ export function purgeOldSessionEvents(
 
 /**
  * Size-pressure valve. Cheap to call: it first checks the DB file size and
- * bails unless the file has crossed the warning threshold (reusing the
- * codebase's existing 50MB WARN_DB_SIZE via checkDatabaseSize(), so we don't
- * keep a second copy of the threshold). When over pressure, it trims the
+ * bails unless the file has crossed the pressure threshold — the existing
+ * 50MB WARN_DB_SIZE at the default budget, half a raised budget otherwise
+ * (#1043, sessionPressureThresholdBytes). When over pressure, it trims the
  * OLDEST session_events rows down to the row cap so capture growth can never
  * carry the DB to the 100MB block. Eviction is plain oldest-first (ts, then
  * id for stable ordering within a timestamp) — unlike the audit valve there
@@ -186,14 +198,16 @@ export function purgeOldSessionEvents(
  * converges to it over several light ticks instead of one long transaction.
  */
 export function purgeSessionEventsUnderSizePressure(
-  options: { warnBytes?: number; maxRows?: number; batchRows?: number } = {},
+  options: { warnBytes?: number; maxRows?: number; batchRows?: number; diskBudgetBytes?: number } = {},
 ): number {
   const db = getDatabase();
   const maxRows = options.maxRows ?? SESSION_PRESSURE_ROW_CAP;
   const batchRows = options.batchRows ?? SESSION_PRESSURE_BATCH_ROWS;
 
   if (options.warnBytes === undefined) {
-    if (!checkDatabaseSize().warning) return 0;
+    // #1043: the gate follows the effective directory budget the caller
+    // passes (the brain worker reads the signed storage.diskBudgetBytes).
+    if (checkDatabaseSize().size <= sessionPressureThresholdBytes(options.diskBudgetBytes)) return 0;
   }
 
   return db.transaction(() => {

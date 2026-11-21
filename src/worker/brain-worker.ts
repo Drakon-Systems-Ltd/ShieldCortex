@@ -42,7 +42,7 @@ import { writeHeartbeatIfDue } from '../defence/ledger/chain.js';
 import { resolveLedgerConfig } from '../defence/ledger/config.js';
 import { runProjectorWithLease } from '../threat-graph/projector.js';
 import { defaultRealtimeAuditDir } from '../threat-graph/shared.js';
-import { isThreatGraphEnabled } from '../cloud/config.js';
+import { getDiskBudget, isThreatGraphEnabled } from '../cloud/config.js';
 import {
   purgeOldSessionEvents,
   purgeSessionEventsUnderSizePressure,
@@ -342,7 +342,8 @@ export class BrainWorker {
       // session_events; old rows only feed on-demand replay, so deletion is
       // lossy-but-safe (see src/sessions/retention.ts).
       try {
-        const sessionPressurePurged = purgeSessionEventsUnderSizePressure();
+        // #1043: gated on the effective (signed or default) disk budget.
+        const sessionPressurePurged = purgeSessionEventsUnderSizePressure({ diskBudgetBytes: getDiskBudget().bytes });
         if (sessionPressurePurged > 0) {
           console.error(`[BrainWorker] Session-capture size-pressure valve purged ${sessionPressurePurged} rows`);
         }

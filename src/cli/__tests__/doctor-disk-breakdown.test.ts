@@ -90,7 +90,8 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     writeBytes('memories.db', 2 * KB);
     writeBytes('audit/realtime.jsonl', 40 * KB);
     const result = await checkDiskUsage(tmpDir, 32 * KB);
-    expect(result.status).toBe('fail');
+    // #1043: audit is not counted against the budget; over it alone is a WARN.
+    expect(result.status).toBe('warn');
     expect(result.fix).toMatch(/audit/);
     expect(result.fix).toContain('#579');
     expect(result.fix).not.toMatch(/logs prune --execute/);

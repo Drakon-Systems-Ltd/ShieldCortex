@@ -110,7 +110,8 @@ import { getCanonicalSchema } from '../database/init.js';
 import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
-import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
+import { getDiskBudget } from '../cloud/config.js';
+import { formatBudget } from '../cloud/capacity.js';
 import { isRepairLogName } from '../logs/retention.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
@@ -1863,14 +1864,27 @@ export function runMemoryStatsCheck(
           'made of fresh captures clears on a later run.',
         );
       }
-      if (ltm >= LTM_LIMIT * 0.9) {
+      if (ltm >= LTM_LIMIT * 0.95) {
+        // #1043/#1121: at the cap, consolidate cannot help — it evicts only
+        // rows OVER the cap, so the store is already forgetting one old memory
+        // per new one. The command that changes this state is the cap setter.
+        status = 'warn';
+        warnings.push(
+          `${ltm}/${LTM_LIMIT} LTM — ${ltm >= LTM_LIMIT ? 'at' : 'near'} its cap; at the cap, consolidation `
+          + 'evicts the oldest, least-used unpinned memories to make room for new ones',
+        );
+        fixes.push(
+          'Running consolidate will not change this: it evicts only what is OVER the cap. To keep more '
+          + `long-term memories, raise the cap: \`shieldcortex config --memory-cap ltm=${LTM_LIMIT * 2}\`.`,
+        );
+      } else if (ltm >= LTM_LIMIT * 0.9) {
         status = 'warn';
         warnings.push(`${ltm}/${LTM_LIMIT} LTM — approaching limit`);
         fixes.push(
-          'Housekeeping. LTM is near its cap. Run `shieldcortex consolidate` if you want it now; otherwise the ' +
-          'worker does it. Note that consolidation evicts long-term rows only once LTM is OVER the cap (never ' +
-          'rows captured within the last hour or pinned rows), so this row can stay while LTM sits between ' +
-          '90% and 100%. No action needed unless recall feels stale.',
+          'Housekeeping. LTM is near its cap. The worker consolidates on its own schedule, and consolidation ' +
+          'evicts long-term rows only once LTM is OVER the cap (never rows captured within the last hour or ' +
+          'pinned rows), so this row can stay while LTM sits between 90% and 95%. No action needed unless ' +
+          'recall feels stale.',
         );
       }
 
@@ -2527,7 +2541,20 @@ function readDbFreeSpace(dbPath: string): DbFreeSpace | null {
   }
 }
 
-export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = DIRECTORY_BUDGET_BYTES, options: { dbPath?: string } = {}): Promise<CheckResult> {
+/**
+ * #1043: `limitBytes` omitted means the effective budget — a valid signed
+ * storage.diskBudgetBytes, else the 100 MiB default (read-only read). A
+ * supplied limit wins and reads no config.
+ */
+export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes?: number, options: { dbPath?: string } = {}): Promise<CheckResult> {
+  const budget = limitBytes === undefined ? getDiskBudget() : { bytes: limitBytes, source: 'config' as const };
+  const limitLabel = formatBudget(budget.bytes);
+  // Only an unconfigured budget gets the setter as a hint; an operator who
+  // already chose a number does not need telling it exists.
+  const budgetHint = budget.source === 'config'
+    ? ''
+    : ` The ${limitLabel} budget is the default; if this host is meant to keep more, raise it with `
+      + '`shieldcortex config --disk-budget <size>` (e.g. 1GB).';
   const dirProbe = probePath(scDir);
   if (dirProbe.kind === 'denied' || dirProbe.kind === 'error') {
     // "Directory not yet created" is a ✅. An unreadable one is not — this is
@@ -2536,7 +2563,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     return unreadableResult('Disk', scDir, dirProbe);
   }
   if (dirProbe.kind === 'absent') {
-    return { label: 'Disk', status: 'pass', message: '0 B / 100 MB limit (directory not yet created)' };
+    return { label: 'Disk', status: 'pass', message: `0 B / ${limitLabel} limit (directory not yet created)` };
   }
 
   try {
@@ -2640,10 +2667,17 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     // shown, no longer able to deadlock the thing that creates them.
     dataSize -= backupsSize;
 
-    const limit = limitBytes; // 100 MB by default; applies to the data portion only
-    const limitMb = Math.round(limit / (1024 * 1024));
-    const pct = (dataSize / limit) * 100;
-    const dataStr = `${formatBytes(dataSize)} / ${limitMb} MB limit`;
+    // #1043: the row is judged on the memory data only — the database, its
+    // WAL, repair and other logs, state. The realtime audit plane is shown as
+    // its own number and never FAILs the row: it has no retention yet (#579)
+    // and nothing here deletes evidence, so a FAIL it caused would have no
+    // remedy. It can still WARN when it is what pushes the total over 80%.
+    const limit = budget.bytes;
+    const memoryData = Math.max(0, dataSize - auditLogSize);
+    const pct = (memoryData / limit) * 100;
+    const totalPct = (dataSize / limit) * 100;
+    const dataStr = `${formatBytes(memoryData)} / ${limitLabel} limit`;
+    const auditStr = auditLogSize > 0 ? ` + ${formatBytes(auditLogSize)} audit (not counted)` : '';
     const modelsStr = modelsSize > 0 ? ` + ${formatBytes(modelsSize)} models` : '';
     const backupsStr = backupsSize > 0 ? ` + ${formatBytes(backupsSize)} backups` : '';
 
@@ -2705,18 +2739,16 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
           + 'space — `shieldcortex vacuum` reclaims it on disk, in place, via the bundled engine '
           + '(no sqlite3 CLI needed), without deleting anything.';
       }
-      if (shareOf(auditLogSize) >= CONSUMER_SHARE) {
-        // Reported, never acted on. Naming a command here would be a lie:
-        // nothing in this release deletes or rewrites an audit file.
-        return `${formatBytes(auditLogSize)} of the measured ${formatBytes(measured)} is realtime `
-          + 'audit evidence under ~/.shieldcortex/audit/. That plane has NO AUTOMATIC RETENTION '
-          + 'yet — it is an unread queue with concurrent writers, a projector cursor and stop-hook '
-          + 'recovery reading it, so bounding it safely is separate work, tracked in #579. Nothing '
-          + 'here will delete security evidence for you.';
-      }
       reportOnly = true;
       return largestConsumerReport();
     };
+    // Reported, never acted on. Naming a command here would be a lie: nothing
+    // in this release deletes or rewrites an audit file.
+    const auditRemedy = (): string => `${formatBytes(auditLogSize)} of the measured ${formatBytes(measured)} is realtime `
+      + 'audit evidence under ~/.shieldcortex/audit/. That plane has NO AUTOMATIC RETENTION '
+      + 'yet — it is an unread queue with concurrent writers, a projector cursor and stop-hook '
+      + 'recovery reading it, so bounding it safely is separate work, tracked in #579. It is not '
+      + 'counted against the budget. Nothing here will delete security evidence for you.';
     // Set when remedy() fell through to the report: its only command is the
     // `logs prune` dry run, an inspection step, so the human report must keep
     // the attribution and scope prose next to it.
@@ -2740,16 +2772,17 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
      * will fail because the freelist is small.
      */
     const largestConsumerReport = (): string => {
-      const terms: Array<{ key: 'db' | 'audit' | 'repair' | 'other'; label: string; bytes: number }> = [
+      // #1043: audit evidence is not counted against the limit, so it is not
+      // ranked here; it gets its own note below when it is large.
+      const terms: Array<{ key: 'db' | 'repair' | 'other'; label: string; bytes: number }> = [
         { key: 'db', label: 'the database', bytes: liveDbSize },
-        { key: 'audit', label: 'audit evidence', bytes: auditLogSize },
         { key: 'repair', label: 'repair logs', bytes: repairLogSize },
         { key: 'other', label: 'everything else', bytes: otherSize },
       ];
       const budgeted = terms.reduce((sum, t) => sum + t.bytes, 0);
       const ranked = terms.filter((t) => t.bytes > 0).sort((a, b) => b.bytes - a.bytes);
       const exempt = backupsSize > 0 ? ` Backups (${formatBytes(backupsSize)}) are exempt from the limit.` : '';
-      const scope = ` The ${limitMb} MB limit is ShieldCortex's own footprint budget, not a measurement of `
+      const scope = ` The ${limitLabel} limit is ShieldCortex's own footprint budget, not a measurement of `
         + 'free space on the filesystem — inspect before removing anything.';
       if (ranked.length === 0 || budgeted === 0) {
         return `Nothing measured counts against the limit.${exempt}${scope}`;
@@ -2781,8 +2814,6 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
               + `${Math.round(VACUUM_FREE_SHARE * 100)}% where compacting is worth a full rewrite. `
               + 'Doctor does not measure which rows fill the database, so it names no command to shrink it.');
           }
-        } else if (t.key === 'audit') {
-          notes.push('Audit evidence has no automatic retention yet (#579), and nothing here deletes it.');
         } else if (t.key === 'repair') {
           notes.push('`shieldcortex logs prune` (without --execute) lists which project-key repair logs '
             + 'retention would remove; it never touches audit evidence.');
@@ -2791,33 +2822,45 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
             + 'like), so no command is named for it.');
         }
       }
-      // A large audit plane that is not the top term is still worth one line:
-      // it is the term an operator is most likely to try to clear by hand.
-      if (!top.some((t) => t.key === 'audit') && auditLogSize > 0 && pctOf(auditLogSize) >= 25) {
-        notes.push(`Audit evidence (${pctOf(auditLogSize)}%) has no automatic retention yet (#579), `
-          + 'and nothing here deletes it.');
+      // A large audit plane is still worth one line: it is the term an
+      // operator is most likely to try to clear by hand.
+      if (auditLogSize > 0 && shareOf(auditLogSize) >= 0.25) {
+        notes.push(`Audit evidence (${formatBytes(auditLogSize)}, not counted against the limit) has no `
+          + 'automatic retention yet (#579), and nothing here deletes it.');
       }
       return `${head}${restText}${exempt} ${notes.join(' ')}${scope}`;
     };
 
+    const sizes = `${dataStr}${auditStr}${backupsStr}${modelsStr}`;
     if (pct >= 95) {
       return {
         label: 'Disk',
         status: 'fail',
-        message: `${dataStr}${backupsStr}${modelsStr} — at limit! (${breakdown})`,
-        fix: remedy(),
+        message: `${sizes} — at limit! (${breakdown})`,
+        fix: remedy() + budgetHint,
         ...(reportOnly ? { fixNoteWithCommands: true as const } : {}),
       };
     } else if (pct >= 80) {
       return {
         label: 'Disk',
         status: 'warn',
-        message: `${dataStr}${backupsStr}${modelsStr} — approaching limit (${breakdown})`,
-        fix: remedy(),
+        message: `${sizes} — approaching limit (${breakdown})`,
+        fix: remedy() + budgetHint,
         ...(reportOnly ? { fixNoteWithCommands: true as const } : {}),
       };
+    } else if (totalPct >= 80) {
+      // Audit alone tipped the total: a WARN at most, never a FAIL.
+      return {
+        label: 'Disk',
+        status: 'warn',
+        message: `${sizes} — memory data is within the limit; with audit evidence the total is `
+          + `${Math.round(totalPct)}% of it (${breakdown})`,
+        fix: auditRemedy() + budgetHint,
+        // Keep the "nothing here deletes evidence" prose next to any command.
+        fixNoteWithCommands: true as const,
+      };
     } else {
-      return { label: 'Disk', status: 'pass', message: `${dataStr}${backupsStr}${modelsStr}` };
+      return { label: 'Disk', status: 'pass', message: sizes };
     }
   } catch (err: unknown) {
     // A directory that stats but cannot be listed (mode 700, another owner) is

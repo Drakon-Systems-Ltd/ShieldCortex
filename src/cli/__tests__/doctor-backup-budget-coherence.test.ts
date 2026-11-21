@@ -75,13 +75,22 @@ describe('#153 — a safety backup must not spend the memory-system budget', () 
     expect(text).not.toMatch(/move them outside/i);
   });
 
-  it('counts logs and audit against the budget as before', async () => {
-    // Only backups are exempted; everything else still spends the budget.
+  it('counts non-audit logs against the budget as before', async () => {
+    // Backups are exempted; the database and ordinary logs still spend it.
+    write('memories.db', 10 * MB);
+    mkdirSync(join(dir, 'logs'), { recursive: true });
+    writeFileSync(join(dir, 'logs', 'other.log'), Buffer.alloc(95 * MB));
+    const r = await checkDiskUsage(dir, LIMIT) as unknown as { status: string };
+    expect(r.status).toBe('fail');
+  });
+
+  it('#1043: audit evidence alone over the budget WARNs, never FAILs', async () => {
+    // Realtime audit has no retention yet (#579); a FAIL it caused had no remedy.
     write('memories.db', 10 * MB);
     mkdirSync(join(dir, 'audit'), { recursive: true });
     writeFileSync(join(dir, 'audit', 'realtime-2026-08-01.jsonl'), Buffer.alloc(95 * MB));
     const r = await checkDiskUsage(dir, LIMIT) as unknown as { status: string };
-    expect(r.status).toBe('fail');
+    expect(r.status).toBe('warn');
   });
 
   it('legacy in-place snapshots are exempted too, not just newly-named ones', async () => {
