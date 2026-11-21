@@ -746,7 +746,10 @@ describe('#970 r4: the PID namespace sidecar is evidence only when it is sound',
 
   it('a sidecar older than its report vouches for nothing (it predates the report\'s last write)', () => {
     const file = sameNsDead();
-    const t = fs.statSync(file).mtime;
+    // Pin both files to whole seconds: copying a stat mtime through Date drops
+    // sub-millisecond precision and could make the "equal" sidecar older.
+    const t = new Date(Math.floor(Date.now() / 1000) * 1000);
+    fs.utimesSync(file, t, t);
     fs.utimesSync(pidNsSidecarPath(file), new Date(t.getTime() - 1000), new Date(t.getTime() - 1000));
     expect(unknownNs()).toEqual(['unverified', false]);
     // Same mtime is not older: trusted.
