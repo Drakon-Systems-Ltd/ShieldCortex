@@ -977,12 +977,28 @@ const ADOPTION_CODA =
  * The match sits inside a closed quote or fence that prose introduces as an
  * EXAMPLE (`reads:`, `such as`) or attributes to a SPEAKER (`he wrote`).
  */
-export function quotedReport(window: string, spans: WrapperSpan[], start: number, end: number): boolean {
+export function quotedReport(
+  window: string,
+  spans: WrapperSpan[],
+  start: number,
+  end: number,
+  index?: ProvenanceWindowIndex,
+): boolean {
+  if (index && index.serves(window, spans)) return index.quotedReport(start, end);
   const span = containingSpan(spans, start, end);
   if (!span) return false;
-  if (adoptedAsOrder(window, span)) return false;
+  return quotedSpanReport(window, span, (s, e) => sentenceBounds(window, s, e));
+}
+
+/** The span-level half of `quotedReport`: everything after the containing span is found. */
+function quotedSpanReport(
+  window: string,
+  span: WrapperSpan,
+  bounds: (start: number, end: number) => [number, number],
+): boolean {
+  if (adoptedAsOrder(window, span, bounds)) return false;
   if (QUOTATIVE_FRAME.test(window.slice(Math.max(0, span.start - 160), span.start))) return true;
-  const [from] = sentenceBounds(window, span.start, span.start);
+  const [from] = bounds(span.start, span.start);
   return SPEECH_ATTRIBUTION.test(window.slice(Math.max(from, span.start - 96), span.start));
 }
 
@@ -999,8 +1015,12 @@ export function quotedReport(window: string, spans: WrapperSpan[], start: number
  * This defuses the quotative frame as well as the attribution. "For example:
  * '<shape>' - do that now" is a directive whichever half introduced it.
  */
-function adoptedAsOrder(window: string, span: WrapperSpan): boolean {
-  const [, to] = sentenceBounds(window, span.end, span.end);
+function adoptedAsOrder(
+  window: string,
+  span: WrapperSpan,
+  bounds: (start: number, end: number) => [number, number],
+): boolean {
+  const [, to] = bounds(span.end, span.end);
   return ADOPTION_CODA.test(window.slice(span.end, to));
 }
 
@@ -1038,7 +1058,13 @@ export function sentenceBounds(window: string, start: number, end: number): [num
  *   - the cue introduces a coordinated list of alternatives ("a, b, or c"),
  *     which is enumeration, not instruction.
  */
-export function discussionExempt(window: string, start: number, end: number): boolean {
+export function discussionExempt(
+  window: string,
+  start: number,
+  end: number,
+  index?: ProvenanceWindowIndex,
+): boolean {
+  if (index && index.window === window) return index.discussionExempt(start, end);
   const [from, to] = sentenceBounds(window, start, end);
   const sentence = window.slice(from, to);
   const cueOffset = lastCueOffset(sentence, start - from);
@@ -1072,6 +1098,370 @@ function exemptContext(
   if (NEGATION_TAIL.test(prefix)) return true;
   if (REPORTING_VERB_TAIL.test(prefix) || REPORTING_SOURCE_TAIL.test(prefix)) return true;
   return discussionExempt(window, start, end);
+}
+
+// ───────────────────────── the per-window index ─────────────────────────
+
+/** `\s` as the regex engine reads it, without a regex call per character. */
+function isRegexSpace(code: number): boolean {
+  if (code < 0x80) return code === 0x20 || (code >= 0x09 && code <= 0x0d);
+  return /\s/.test(String.fromCharCode(code));
+}
+
+/** `\w` without the u flag: ASCII letters, digits and underscore only. */
+function isWordCode(code: number): boolean {
+  return (code >= 0x30 && code <= 0x39) || (code >= 0x41 && code <= 0x5a)
+    || (code >= 0x61 && code <= 0x7a) || code === 0x5f;
+}
+
+/** `/or|and/i` at `q`, case-folded the way a non-unicode /i regex folds: ASCII only. */
+function conjunctionLength(window: string, q: number): number {
+  const c0 = window.charCodeAt(q) | 0x20;
+  const c1 = window.charCodeAt(q + 1) | 0x20;
+  if (c0 === 0x6f && c1 === 0x72) return 2; // or
+  if (c0 === 0x61 && c1 === 0x6e && (window.charCodeAt(q + 2) | 0x20) === 0x64) return 3; // and
+  return 0;
+}
+
+/** DISCUSSION_CUE tried at exactly one position. */
+const DISCUSSION_CUE_AT = new RegExp(DISCUSSION_CUE.source, 'iy');
+
+/** Sorted, non-overlapping cue matches: parallel start / end arrays. */
+interface CueRun {
+  starts: number[];
+  ends: number[];
+}
+
+/** Index of the last element of `sorted` that is < `value`, else -1. */
+function lastBelow(sorted: ArrayLike<number>, value: number, lo = 0): number {
+  let hi = sorted.length - 1;
+  let found = lo - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sorted[mid]! < value) {
+      found = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return found;
+}
+
+/**
+ * The sentence-scoped exemption questions for ONE window, answered from
+ * tables built once per window instead of by a walk per match.
+ *
+ * Why it exists: `sentenceBounds` walks to the nearest sentence boundary with
+ * no bound, and `discussionExempt` then reads the whole sentence (the cue
+ * scan, the question check, the alternatives list). That is O(sentence) per
+ * match, and a punctuation-free window is one 50 000-character sentence, so a
+ * run of matching evidence cost O(matches x window): 5-12 s for 200 KB, and
+ * the alternatives regex (`,[^.!?]*\b(?:or|and)\b`) is itself
+ * O(commas x sentence), which made one shape cubic. L2 keeps the linear
+ * walk; a caller that sees many matches per window (the memory-directive
+ * screen) passes an index instead.
+ *
+ * Exact, not approximate: every answer equals what `sentenceBounds`,
+ * `discussionExempt` and `quotedReport` return for the same window, spans and
+ * offsets (pinned by a differential test against those functions). Where a
+ * table cannot prove that — the last cue before the match reaching the end of
+ * the sentence, or spans that are not sorted and disjoint — the index answers
+ * by calling the linear function, so it can be slow there but never different.
+ * Neither fallback is reachable from the screen: `scanWrappers` emits sorted,
+ * disjoint spans, and no evidence pattern fits inside a cue.
+ *
+ * Every table is built lazily, on the first question that needs it, so a
+ * window whose matches never reach the exemptions pays nothing.
+ */
+export class ProvenanceWindowIndex {
+  readonly window: string;
+  readonly spans: readonly WrapperSpan[];
+
+  /** fromAt[k]: the sentence start `sentenceBounds` finds for start = k. */
+  private fromAt: Int32Array | null = null;
+  /** toAt[k]: the sentence end `sentenceBounds` finds for end = k (before the max with end). */
+  private toAt: Int32Array | null = null;
+  /** lastSolidBefore[k]: the last non-`\s` index below k, else -1. */
+  private lastSolidBefore: Int32Array | null = null;
+  /** commaBefore[k]: the last comma below k with no [.!?] after it and before k, else -1. */
+  private commaBefore: Int32Array | null = null;
+  /** bestCommaByEnd[k]: the max commaBefore[q] over every or/and word [q, e) with e <= k. */
+  private bestCommaByEnd: Int32Array | null = null;
+  /** DISCUSSION_CUE enumerated over the whole window, as matchAll does. */
+  private cues: CueRun | null = null;
+  /** Per sentence start: where its own cue enumeration departs from and rejoins `cues`. */
+  private readonly cueRuns = new Map<number, { extra: CueRun; rejoin: number }>();
+  /** Per span: the quotedReport verdict, which depends on nothing but the span. */
+  private readonly spanVerdicts = new Map<WrapperSpan, boolean>();
+  /** null until checked; false when the spans are not sorted and disjoint. */
+  private spansOrdered: boolean | null = null;
+
+  constructor(window: string, spans: readonly WrapperSpan[]) {
+    this.window = window;
+    this.spans = spans;
+  }
+
+  /** Was this index built for exactly this window and span list? */
+  serves(window: string, spans: readonly WrapperSpan[]): boolean {
+    return this.window === window && this.spans === spans;
+  }
+
+  /** Same result as `sentenceBounds(window, start, end)`. */
+  sentenceBounds(start: number, end: number): [number, number] {
+    const n = this.window.length;
+    if (!this.fromAt || !this.toAt) this.buildBoundaries();
+    const from = this.fromAt![Math.min(Math.max(start, 0), n)]!;
+    const to = end >= n ? n : this.toAt![Math.max(end, 0)]!;
+    return [from, Math.max(to, end)];
+  }
+
+  /** Same result as `discussionExempt(window, start, end)`. */
+  discussionExempt(start: number, end: number): boolean {
+    const [from, to] = this.sentenceBounds(start, end);
+    // `to` is max(sentence end, end), so an `end` past the window carries
+    // past it too; the linear version slices, and a slice stops at the end.
+    const stop = Math.min(to, this.window.length);
+    const cueOffset = this.lastCueOffset(from, stop, start);
+    if (cueOffset === -1) return false;
+    if (this.endsWithQuestion(from, stop)) return true;
+    return this.alternativesList(from + cueOffset, stop);
+  }
+
+  /** Same result as `quotedReport(window, spans, start, end)`. */
+  quotedReport(start: number, end: number): boolean {
+    const span = this.containingSpan(start, end);
+    if (!span) return false;
+    let verdict = this.spanVerdicts.get(span);
+    if (verdict === undefined) {
+      verdict = quotedSpanReport(this.window, span, (s, e) => this.sentenceBounds(s, e));
+      this.spanVerdicts.set(span, verdict);
+    }
+    return verdict;
+  }
+
+  // ── sentence boundaries ──
+
+  private buildBoundaries(): void {
+    const w = this.window;
+    const n = w.length;
+    const fromAt = new Int32Array(n + 1);
+    // Left: index i > 0 holding a newline, or [.!?] followed by \s or the end.
+    // fromAt[k] is one past the last such i below k (sentenceBounds never
+    // looks at index 0, so it never counts).
+    for (let k = 1; k <= n; k++) {
+      const i = k - 1;
+      const c = w.charCodeAt(i);
+      let boundary = false;
+      if (i > 0) {
+        if (c === 0x0a) boundary = true;
+        else if (c === 0x2e || c === 0x21 || c === 0x3f) {
+          boundary = i + 1 >= n || isRegexSpace(w.charCodeAt(i + 1));
+        }
+      }
+      fromAt[k] = boundary ? k : fromAt[k - 1]!;
+    }
+    // Right: the first newline (end there) or [.!?] (end one past it) at or
+    // after k. The right-hand test `/\s|$/` is true for every character, so
+    // any [.!?] ends a sentence on this side.
+    const toAt = new Int32Array(n + 1);
+    toAt[n] = n;
+    for (let k = n - 1; k >= 0; k--) {
+      const c = w.charCodeAt(k);
+      if (c === 0x0a) toAt[k] = k;
+      else if (c === 0x2e || c === 0x21 || c === 0x3f) toAt[k] = k + 1;
+      else toAt[k] = toAt[k + 1]!;
+    }
+    this.fromAt = fromAt;
+    this.toAt = toAt;
+  }
+
+  // ── the discussion rule ──
+
+  /** `/\?\s*$/` on window[from, to). */
+  private endsWithQuestion(from: number, to: number): boolean {
+    if (!this.lastSolidBefore) {
+      const w = this.window;
+      const table = new Int32Array(w.length + 1);
+      let last = -1;
+      for (let i = 0; i < w.length; i++) {
+        table[i] = last;
+        if (!isRegexSpace(w.charCodeAt(i))) last = i;
+      }
+      table[w.length] = last;
+      this.lastSolidBefore = table;
+    }
+    const j = this.lastSolidBefore[to]!;
+    return j >= from && this.window.charCodeAt(j) === 0x3f;
+  }
+
+  /**
+   * `ALTERNATIVES_LIST` on window[a, b): a comma, then an `or` / `and` word
+   * with no [.!?] between them. For a word at q the best comma is the last
+   * one before q with no [.!?] after it, and every comma before q sits below
+   * q, so "some word in the slice has a comma at or after a" is "the largest
+   * best-comma over words ending inside the slice is at or after a".
+   */
+  private alternativesList(a: number, b: number): boolean {
+    if (!this.commaBefore || !this.bestCommaByEnd) this.buildAlternatives();
+    const commaBefore = this.commaBefore!;
+    // Words ending strictly inside the slice: their closing \b reads a
+    // character inside it, so the window-level table is the slice's answer.
+    if (b - 1 >= 0 && this.bestCommaByEnd![b - 1]! >= a) return true;
+    // A word ending exactly at b: the slice's end-of-input makes its closing
+    // \b true whatever character follows in the window.
+    const w = this.window;
+    for (const len of [2, 3]) {
+      const q = b - len;
+      if (q <= a) continue;
+      if (conjunctionLength(w, q) !== len) continue;
+      if (isWordCode(w.charCodeAt(q - 1))) continue;
+      if (commaBefore[q]! >= a) return true;
+    }
+    return false;
+  }
+
+  private buildAlternatives(): void {
+    const w = this.window;
+    const n = w.length;
+    const commaBefore = new Int32Array(n + 1);
+    let comma = -1;
+    for (let i = 0; i < n; i++) {
+      commaBefore[i] = comma;
+      const c = w.charCodeAt(i);
+      if (c === 0x2e || c === 0x21 || c === 0x3f) comma = -1;
+      else if (c === 0x2c) comma = i;
+    }
+    commaBefore[n] = comma;
+    const best = new Int32Array(n + 1).fill(-1);
+    for (let q = 0; q < n; q++) {
+      const len = conjunctionLength(w, q);
+      if (len === 0 || q + len > n) continue;
+      if (q > 0 && isWordCode(w.charCodeAt(q - 1))) continue;
+      if (q + len < n && isWordCode(w.charCodeAt(q + len))) continue;
+      const e = q + len;
+      if (commaBefore[q]! > best[e]!) best[e] = commaBefore[q]!;
+    }
+    for (let k = 1; k <= n; k++) if (best[k - 1]! > best[k]!) best[k] = best[k - 1]!;
+    this.commaBefore = commaBefore;
+    this.bestCommaByEnd = best;
+  }
+
+  /**
+   * `lastCueOffset(window.slice(from, to), start - from)`.
+   *
+   * matchAll over the sentence starts at `from`. Started there over the whole
+   * window it finds the same matches, because the only character before
+   * `from` a cue reads is the boundary itself (never a word character, so
+   * `\b` agrees). That enumeration equals the whole-window one from the first
+   * whole-window match at or after `from`, unless a whole-window match
+   * straddles `from` ("for\nexample"); that stretch is re-tried position by
+   * position. The sentence end matters only to a cue that reaches it, which
+   * would contain the match; that case answers by the linear function.
+   */
+  private lastCueOffset(from: number, to: number, start: number): number {
+    const cues = this.wholeWindowCues();
+    let run = this.cueRuns.get(from);
+    if (!run) {
+      run = this.cueRunFrom(from, cues);
+      this.cueRuns.set(from, run);
+    }
+    let cueStart = -1;
+    let cueEnd = -1;
+    const k = lastBelow(cues.starts, start, run.rejoin);
+    if (k >= run.rejoin) {
+      cueStart = cues.starts[k]!;
+      cueEnd = cues.ends[k]!;
+    } else {
+      const j = lastBelow(run.extra.starts, start);
+      if (j >= 0) {
+        cueStart = run.extra.starts[j]!;
+        cueEnd = run.extra.ends[j]!;
+      }
+    }
+    if (cueStart === -1) return -1;
+    if (cueEnd >= to) return lastCueOffset(this.window.slice(from, to), start - from);
+    return cueStart - from;
+  }
+
+  private wholeWindowCues(): CueRun {
+    if (!this.cues) {
+      const starts: number[] = [];
+      const ends: number[] = [];
+      for (const match of this.window.matchAll(DISCUSSION_CUE)) {
+        if (match.index === undefined) continue;
+        starts.push(match.index);
+        ends.push(match.index + match[0].length);
+      }
+      this.cues = { starts, ends };
+    }
+    return this.cues;
+  }
+
+  /** The cue enumeration that starts at `from`: its own matches, then cues[rejoin...]. */
+  private cueRunFrom(from: number, cues: CueRun): { extra: CueRun; rejoin: number } {
+    const extra: CueRun = { starts: [], ends: [] };
+    let pos = from;
+    for (;;) {
+      const k = lastBelow(cues.starts, pos);
+      // No whole-window match straddles pos: the next match from pos is the
+      // next whole-window match, and from there the two enumerations agree.
+      if (k === -1 || cues.ends[k]! <= pos) return { extra, rejoin: k + 1 };
+      const straddleEnd = cues.ends[k]!;
+      let next = straddleEnd;
+      for (let p = pos; p < straddleEnd; p++) {
+        DISCUSSION_CUE_AT.lastIndex = p;
+        const m = DISCUSSION_CUE_AT.exec(this.window);
+        if (m && m[0].length > 0) {
+          extra.starts.push(p);
+          extra.ends.push(p + m[0].length);
+          next = p + m[0].length;
+          break;
+        }
+      }
+      pos = next;
+    }
+  }
+
+  // ── the wrapper spans ──
+
+  /** Same result as `containingSpan(spans, start, end)`. */
+  private containingSpan(start: number, end: number): WrapperSpan | null {
+    if (this.spansOrdered === null) {
+      let ordered = true;
+      for (let i = 0; i < this.spans.length && ordered; i++) {
+        const s = this.spans[i]!;
+        if (!(s.start < s.end)) ordered = false;
+        else if (i > 0 && s.start < this.spans[i - 1]!.end) ordered = false;
+      }
+      this.spansOrdered = ordered;
+    }
+    if (!this.spansOrdered) return containingSpan(this.spans as WrapperSpan[], start, end);
+    // Sorted and disjoint, so ends rise with starts: the candidates (start
+    // <= start, end >= end) are a run ending at the last span starting at or
+    // before `start`. Scan that run in the original order so ties break the
+    // way containingSpan breaks them.
+    let hi = this.spans.length - 1;
+    let lo = 0;
+    let last = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.spans[mid]!.start <= start) {
+        last = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    let first = last + 1;
+    while (first - 1 >= 0 && this.spans[first - 1]!.end >= end) first--;
+    let best: WrapperSpan | null = null;
+    for (let i = first; i <= last; i++) {
+      const span = this.spans[i]!;
+      if (!best || span.end - span.start < best.end - best.start) best = span;
+    }
+    return best;
+  }
 }
 
 /**

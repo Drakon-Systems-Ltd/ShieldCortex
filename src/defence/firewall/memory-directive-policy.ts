@@ -43,6 +43,7 @@
 import { someWindow } from '../scan-windows.js';
 import {
   NEGATION_TAIL,
+  ProvenanceWindowIndex,
   REPORTING_SOURCE_TAIL,
   REPORTING_VERB_TAIL,
   blankFenceComments,
@@ -595,8 +596,46 @@ function isClauseBoundary(text: string, i: number): boolean {
   return false;
 }
 
-/** [from, to) of the clause carrying [start, end), bounded at 240 chars each side. */
-function clauseBounds(text: string, start: number, end: number): [number, number] {
+/**
+ * The clause boundaries of one scan text, found once: `before[k]` is the last
+ * boundary index below k (else -1), `atOrAfter[k]` the first at or after k
+ * (else the length). Each match then reads its clause in O(1) instead of
+ * walking up to 240 characters each way, which a run of matching evidence
+ * paid on every match.
+ */
+interface ClauseTable {
+  before: Int32Array;
+  atOrAfter: Int32Array;
+}
+
+function buildClauseTable(text: string): ClauseTable {
+  const n = text.length;
+  const before = new Int32Array(n + 1);
+  before[0] = -1;
+  for (let k = 1; k <= n; k++) before[k] = isClauseBoundary(text, k - 1) ? k - 1 : before[k - 1]!;
+  const atOrAfter = new Int32Array(n + 1);
+  atOrAfter[n] = n;
+  for (let k = n - 1; k >= 0; k--) atOrAfter[k] = isClauseBoundary(text, k) ? k : atOrAfter[k + 1]!;
+  return { before, atOrAfter };
+}
+
+/**
+ * [from, to) of the clause carrying [start, end), bounded at 240 chars each
+ * side. With a table, the same answer as the walk below: the walk stops at
+ * the nearest boundary inside [floor, start) on the left and [end, ceiling)
+ * on the right, and the table names that nearest boundary directly.
+ */
+function clauseBounds(text: string, start: number, end: number, table?: ClauseTable): [number, number] {
+  if (table) {
+    const n = text.length;
+    const floor = Math.max(0, end - MEMORY_DIRECTIVE_CLAUSE_MAX);
+    const ceiling = Math.min(n, start + MEMORY_DIRECTIVE_CLAUSE_MAX);
+    const left = start <= 0 ? -1 : table.before[Math.min(start, n)]!;
+    const from = left >= floor ? left + 1 : floor;
+    const right = end >= n ? n : table.atOrAfter[Math.max(end, 0)]!;
+    const to = right < ceiling ? right : ceiling;
+    return [from, Math.max(to, end)];
+  }
   const floor = Math.max(0, end - MEMORY_DIRECTIVE_CLAUSE_MAX);
   let from = floor;
   for (let i = start - 1; i >= floor; i--) {
@@ -614,6 +653,11 @@ function clauseBounds(text: string, start: number, end: number): [number, number
     }
   }
   return [from, Math.max(to, end)];
+}
+
+/** Test seam: the clause walk, or the table answer, for the differential test. */
+export function __clauseBoundsForTest(text: string, start: number, end: number, indexed: boolean): [number, number] {
+  return clauseBounds(text, start, end, indexed ? buildClauseTable(text) : undefined);
 }
 
 /** The part of the clause prefix after its last comma / colon / dash. */
@@ -655,23 +699,26 @@ function exempt(
   view: string,
   text: string,
   spans: WrapperSpan[],
+  index: ProvenanceWindowIndex,
   start: number,
   end: number,
   from: number,
+  segment: string,
   adopted: boolean,
 ): boolean {
   // A quoted example / quoted speech — L2's rule, including its own coda check.
-  if (quotedReport(view, spans, start, end)) return true;
+  if (quotedReport(view, spans, start, end, index)) return true;
 
   const prefix = text.slice(Math.max(from, start - 96), start);
   // Polarity: a directly negated verb ("never skip", "must not disable").
   if (NEGATION_TAIL.test(prefix.replace(NEGATION_ADVERBS, ''))) return true;
 
   // "If you skip review, CI catches it" — a consequence, not an order.
-  if (CONDITIONAL_SEGMENT.test(lastSegment(text.slice(from, start)))) return true;
+  // `segment` is lastSegment(text.slice(from, start)), computed once per match.
+  if (CONDITIONAL_SEGMENT.test(segment)) return true;
 
   // Questions and enumerations of alternatives (L2's discussion rule).
-  if (discussionExempt(view, start, end)) return true;
+  if (discussionExempt(view, start, end, index)) return true;
 
   if (adopted) return false;
 
@@ -695,6 +742,8 @@ function groupHitsWindow(
   scanText: string,
   mask: Uint8Array,
   spans: WrapperSpan[],
+  index: ProvenanceWindowIndex,
+  clauses: () => ClauseTable,
 ): boolean {
   for (const { re, kind } of group.patterns) {
     for (const match of scanText.matchAll(re)) {
@@ -703,7 +752,7 @@ function groupHitsWindow(
       const end = start + match[0].length;
       if (spanSkipped(mask, start, match[0].length)) continue;
 
-      const [from, to] = clauseBounds(scanText, start, end);
+      const [from, to] = clauseBounds(scanText, start, end, clauses());
       const clause = scanText.slice(from, to);
       const before = scanText.slice(from, start);
 
@@ -717,7 +766,8 @@ function groupHitsWindow(
           && DAN_LOWER_END.test(match[0]) && !DAN_UPPER_END.test(match[0])) continue;
 
       const adopted = adoptionCoda(scanText.slice(start, to));
-      if (exempt(view, scanText, spans, start, end, from, adopted)) continue;
+      const segment = lastSegment(before);
+      if (exempt(view, scanText, spans, index, start, end, from, segment, adopted)) continue;
 
       if (group.name === MEMORY_DIRECTIVE_PATTERN.CONTROL_RELAXATION) {
         // "Never deploy without approval" — the negation governs the act.
@@ -725,7 +775,7 @@ function groupHitsWindow(
         if (ALWAYS_ASK_BEFORE.test(before)) continue;
       }
 
-      if (!hasFrame(group.frames, clause, lastSegment(before), adopted)) continue;
+      if (!hasFrame(group.frames, clause, segment, adopted)) continue;
       return true;
     }
   }
@@ -749,9 +799,16 @@ export function detectMemoryDirective(text: string): MemoryDirectiveResult {
     const mask = buildSkipMask(window, spans);
     const view = blankFenceComments(window, spans);
     const scanText = view.includes('`') ? view.replace(/`/g, ' ') : view;
+    // L2's sentence-scoped exemptions walk the whole sentence on every call,
+    // and a punctuation-free window is one 50 000-character sentence. The
+    // index answers them identically from tables built once per window, so a
+    // run of matching evidence costs linear time, not matches x window.
+    const index = new ProvenanceWindowIndex(view, spans);
+    let clauseTable: ClauseTable | null = null;
+    const clauses = (): ClauseTable => (clauseTable ??= buildClauseTable(scanText));
     for (const group of GROUPS) {
       if (matched.includes(group.name)) continue;
-      if (groupHitsWindow(group, view, scanText, mask, spans)) matched.push(group.name);
+      if (groupHitsWindow(group, view, scanText, mask, spans, index, clauses)) matched.push(group.name);
     }
     return matched.length === GROUPS.length;
   });

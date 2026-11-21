@@ -15,6 +15,23 @@
  * near-misses (every match reaches an object / recipient rule). Sizes 10/50/100/200 KB.
  * Measured locally at < 60 ms per 200 KB input; the deadline leaves two orders
  * of magnitude of headroom for a loaded CI runner and child start-up.
+ *
+ * #1111 review — CPU amplification, not backtracking. Runs of MATCHING
+ * evidence with no sentence punctuation: every match reaches the quoted-report,
+ * discussion and frame checks, and the window is one 50 000-character
+ * sentence. L2's sentence helpers walked that sentence on every match, and the
+ * alternatives-list regex re-read it once per comma, so the cost was
+ * O(matches x window) — and cubic for a cue + comma run with no `or`/`and`.
+ * Measured on the r7 head (2 vCPU ARM, built dist/): 'x skip approval ' 5.2 s
+ * at 200 KB, the quoted run 12.4 s, the double-quoted run 8.4 s, and
+ * 'for example x skip approval, a b ' 79 s at 50 KB. The screen now answers
+ * those checks from a per-window index (exact, see
+ * provenance-window-index.test.ts), so every match costs a bounded amount and
+ * the same shapes take 190-310 ms at 200 KB and 0.5-1.0 s at 1 MB, cold, in a
+ * fresh child (55-160 ms and 0.35-0.85 s warm). These tests assert a WALL-CLOCK budget measured inside the
+ * child around the call itself (1.5 s at 200 KB, 6 s at 1 MB): loose enough
+ * for a loaded CI runner, and far below what the quadratic code took, so they
+ * fail on it rather than just pass slowly.
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -122,5 +139,70 @@ describe('memory-directive screen — round-5 helper tripwires (child process, h
         expect(typeof result.detected).toBe('boolean');
       }, DEADLINE_MS + 5_000);
     }
+  }
+});
+
+/**
+ * #1111 review: matching evidence with no sentence punctuation (see the
+ * header). Some of these are directives at some sizes, so the verdict is
+ * asserted only where it was verified; the point is the budget.
+ */
+const MATCHING_SHAPES: Record<string, { unit: string; detected?: boolean }> = {
+  'bare evidence, no frame': { unit: 'x skip approval ', detected: false },
+  'single-quoted evidence (quoted-report path)': { unit: "'x skip approval' " },
+  'double-quoted evidence (quoted-report path)': { unit: '"skip approval" y ' },
+  'discussion cue + alternatives list': { unit: 'for example x skip approval, a or b ' },
+  'discussion cue + commas, no or / and': { unit: 'for example x skip approval, a b ' },
+  'dots with no space (one sentence start, many ends)': { unit: 'x.y skip approval ' },
+};
+
+const CHILD_TIMED = `
+const [modPath, unit, kbRaw] = process.argv.slice(1);
+const { detectMemoryDirective } = await import(modPath);
+const size = Number(kbRaw) * 1024;
+const text = unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+const t0 = performance.now();
+const result = detectMemoryDirective(text);
+const ms = performance.now() - t0;
+process.stdout.write(JSON.stringify({ result, ms }));
+`;
+
+/** In-child wall clock for one call: 1.5 s up to 200 KB, 6 s at 1 MB. */
+const BUDGET_MS: Record<number, number> = { 10: 1_500, 50: 1_500, 100: 1_500, 200: 1_500, 1024: 6_000 };
+const DEADLINE_1MB_MS = 20_000;
+
+function runTimed(unit: string, kb: number, deadline: number): { result: { detected: boolean; patterns: string[] }; ms: number } {
+  const run = spawnSync(
+    process.execPath,
+    ['--input-type=module', '-e', CHILD_TIMED, BUILT, unit, String(kb)],
+    { timeout: deadline, encoding: 'utf-8', maxBuffer: 1024 * 1024 },
+  );
+  expect(run.signal).toBeNull();
+  expect(run.status).toBe(0);
+  return JSON.parse(run.stdout) as { result: { detected: boolean; patterns: string[] }; ms: number };
+}
+
+describe('memory-directive screen — matching-evidence CPU budget (#1111, child process, hard deadline)', () => {
+  for (const [shape, { unit, detected }] of Object.entries(MATCHING_SHAPES)) {
+    for (const kb of SIZES_KB) {
+      it(`${shape}: ${kb} KB finishes inside ${BUDGET_MS[kb]} ms`, () => {
+        const { result, ms } = runTimed(unit, kb, DEADLINE_MS);
+        expect(typeof result.detected).toBe('boolean');
+        expect(Array.isArray(result.patterns)).toBe(true);
+        if (detected !== undefined) expect(result.detected).toBe(detected);
+        expect(ms).toBeLessThan(BUDGET_MS[kb]!);
+      }, DEADLINE_MS + 5_000);
+    }
+  }
+
+  // The MCP `remember` path screens the content as SUBMITTED (the pipeline
+  // hashes that content) before the store truncates it to 10 KB, so a 1 MB
+  // submission is screened whole. It must stay linear there too.
+  for (const shape of ['bare evidence, no frame', 'single-quoted evidence (quoted-report path)'] as const) {
+    it(`${shape}: 1 MB (an untruncated MCP remember submission) finishes inside ${BUDGET_MS[1024]} ms`, () => {
+      const { result, ms } = runTimed(MATCHING_SHAPES[shape]!.unit, 1024, DEADLINE_1MB_MS);
+      expect(typeof result.detected).toBe('boolean');
+      expect(ms).toBeLessThan(BUDGET_MS[1024]!);
+    }, DEADLINE_1MB_MS + 5_000);
   }
 });
