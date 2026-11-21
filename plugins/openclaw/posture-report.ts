@@ -90,11 +90,26 @@ function linuxSelfStart(): string | null {
   }
 }
 
+/**
+ * #970: this process's PID namespace id (Linux: inode of /proc/self/ns/pid),
+ * so the CLI can tell whether its own pid lookup can prove this process
+ * exited. Null elsewhere or when unreadable.
+ */
+function linuxSelfPidNamespace(): string | null {
+  if (process.platform !== 'linux') return null;
+  try {
+    const ino = fs.statSync('/proc/self/ns/pid', { bigint: true }).ino;
+    return ino > 0n ? ino.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-let identity: { key: string; pid: number; start: string | null; startedAt: string } | null = null;
+let identity: { key: string; pid: number; start: string | null; pidNs: string | null; startedAt: string } | null = null;
 function processIdentity() {
   if (!identity) {
     const start = linuxSelfStart();
@@ -102,6 +117,7 @@ function processIdentity() {
       key: start ? `p${process.pid}-s${start}` : `p${process.pid}-r${randomBytes(4).toString('hex')}`,
       pid: process.pid,
       start,
+      pidNs: linuxSelfPidNamespace(),
       startedAt: iso(Date.now() - Math.round(process.uptime() * 1000)),
     };
   }
@@ -282,7 +298,7 @@ export function writePostureSelfReport(input: PostureReportInput): boolean {
       runtime: 'openclaw',
       profile,
       plane: 'tool-gate',
-      instance: { key: id.key, pid: id.pid, process_start: id.start, started_at: id.startedAt, liveness: 'process' },
+      instance: { key: id.key, pid: id.pid, process_start: id.start, pid_ns: id.pidNs, started_at: id.startedAt, liveness: 'process' },
       runtime_version: typeof input.runtimeVersion === 'string' && IDENT_RE.test(input.runtimeVersion) ? input.runtimeVersion : null,
       plugin: {
         id: PLUGIN_ID,

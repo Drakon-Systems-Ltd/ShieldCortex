@@ -259,6 +259,8 @@ describe('#613 cross-runtime schema contract: the Hermes writer output passes th
       expect(parsed.report.configured_posture).toBe('advisory');
       expect(parsed.report.policy_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
       expect(parsed.report.instance.liveness).toBe('process');
+      // #970: the writer records its PID namespace — the collector's own, here.
+      expect(parsed.report.instance.pid_ns).toBe(process.platform === 'linux' ? linuxPidNamespace() : null);
       expect(parsed.report.denials.blocked_action!.tested_path).toBe('pre_tool_call:terminal');
       expect(parsed.report.denials.blocked_action_count).toBe(1);
     }

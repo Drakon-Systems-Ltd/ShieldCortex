@@ -100,6 +100,19 @@ def _linux_self_start():
         return None
 
 
+def _linux_self_pid_ns():
+    """#970: this process's PID namespace id (inode of /proc/self/ns/pid), or None.
+
+    The CLI only treats a missing pid as proof this process exited when its own
+    namespace id is the same one.
+    """
+    try:
+        ino = os.stat("/proc/self/ns/pid").st_ino
+        return str(ino) if isinstance(ino, int) and ino > 0 else None
+    except Exception:
+        return None
+
+
 def process_identity():
     """This process's start identity, computed once per process."""
     global _identity
@@ -107,7 +120,7 @@ def process_identity():
         start = _linux_self_start()
         pid = os.getpid()
         key = "p%d-s%s" % (pid, start) if start else "p%d-r%s" % (pid, secrets.token_hex(4))
-        _identity = {"key": key, "pid": pid, "start": start, "started_at": _iso(_IMPORTED_AT)}
+        _identity = {"key": key, "pid": pid, "start": start, "pid_ns": _linux_self_pid_ns(), "started_at": _iso(_IMPORTED_AT)}
     return _identity
 
 
@@ -315,6 +328,7 @@ def write_self_report(
                 "key": ident["key"],
                 "pid": ident["pid"],
                 "process_start": ident["start"],
+                "pid_ns": ident["pid_ns"],
                 "started_at": ident["started_at"],
                 "liveness": "process",
             },

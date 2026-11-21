@@ -79,6 +79,11 @@ class WriterTests(PostureCase):
         self.assertRegex(r["plugin"]["hash"], SHA)
         self.assertEqual(r["instance"]["liveness"], "process")
         self.assertEqual(r["instance"]["pid"], os.getpid())
+        # #970: the PID namespace id the CLI compares before trusting a pid lookup.
+        if sys.platform.startswith("linux"):
+            self.assertEqual(r["instance"]["pid_ns"], str(os.stat("/proc/self/ns/pid").st_ino))
+        else:
+            self.assertIsNone(r["instance"]["pid_ns"])
         self.assertEqual(os.path.basename(self.report_path()), r["instance"]["key"] + ".json")
         self.assertEqual(r["denials"], {"blocked_action": None, "synthetic_probe": None, "blocked_action_count": 0})
 
