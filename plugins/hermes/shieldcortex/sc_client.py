@@ -68,6 +68,13 @@ def fallback_catastrophic_match(content: str) -> bool:
 # Quoted data is a mention here too: see fallback_dangerous_match.
 _FALLBACK_DESTROY_ROW = re.compile(r'''(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:[\w.~-]*/)*(?:(?:psql|mysql|mariadb|sqlite3|sqlcmd|duckdb|clickhouse(?:-client)?|cockroach)\b[^\n]*\b(?:drop\s+(?:database|schema|table)\b|truncate\s+(?:table\s+)?(?!-)[\w."`[\]]|delete\s+from\s+[\w."`[\]]+\s*(?:;|["']|$))|dropdb\b|mysqladmin\b[^|;&\n]*\sdrop\b|mongo(?:sh)?\b[^\n]*(?:dropDatabase|\.drop)\s*\(|redis-cli\b[^|;&\n]*\bflush(?:all|db)\b|(?:terraform|tofu|terragrunt)\b[^|;&\n]*\s(?:destroy\b|(?<=\n)apply\b[^|;&\n]*\s-destroy\b|apply\b(?:(?!\sapply\b)[^|;&\n])*\s-destroy\b)|pulumi\b[^|;&\n]*\s(?:destroy|down)\b|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s(?:ns|namespaces?|pvc?|persistentvolumes?|persistentvolumeclaims?|deploy(?:ments?)?|statefulsets?|sts|nodes?|crds?|customresourcedefinitions?|all)\b(?![-.])|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s--all\b|helm\b[^|;&\n]*\s(?:uninstall|delete)\b|aws\b[^|;&\n]*\s(?:terminate-instances|delete-[\w-]+|rb|(?<=\n)s3\s+rm\b[^|;&\n]*\s--recursive|s3(?=[^\S\n]*\n)\s+rm\b[^|;&\n]*\s--recursive|s3[^\S\n]+rm\b(?:(?!\ss3\s+rm\b)[^|;&\n])*\s--recursive)\b|gcloud\b[^|;&\n]*\sdelete\b|gsutil\b[^|;&\n]*\s(?:rb\b|(?<=\n)rm\b[^|;&\n]*\s-\w*r|rm\b(?:(?!\srm\b)[^|;&\n])*\s-\w*r)|az\b[^|;&\n]*\s(?:group|vm)\s+delete\b|doctl\b[^|;&\n]*\s(?:delete|rm)\b|gh\s+(?:repo\s+delete\b|api\b[^|;&\n]*(?:-X|--method)[\s=]*DELETE\b)|docker(?:-compose)?\b[^|;&\n]*\s(?:system\s+prune|volume\s+(?:prune|rm)|(?<=\n)down\b[^|;&\n]*\s(?:-v|--volumes)\b|down\b(?:(?!\sdown\b)[^|;&\n])*\s(?:-v|--volumes)\b)|(?:flyctl|fly)\s+(?:apps?\s+(?:destroy|delete)|destroy|volumes?\s+(?:destroy|delete)|postgres\s+(?:destroy|delete))\b|heroku\s+(?:apps:destroy|pg:reset)\b|vercel\s+(?:rm|remove)\b|wrangler\s+delete\b)''', re.I)
 
+# #1005: reverse shell -- mirrors the guard's reverse-shell row (netcat exec flags or netcat piped into a shell,
+# socat EXEC:/SYSTEM:/SHELL: with a network address, a shell whose stdin is a /dev/tcp|udp socket, exec N<>/dev/tcp then
+# a shell on that descriptor, an interactive shell piped into netcat). No re.I: netcat's -C is CRLF, not exec.
+# Linear: see the guard row. Quoted data is a mention here too, and the row runs on the text with its shell
+# comments blanked (_fallback_blank_comments), as the guard strips them.
+_FALLBACK_REVERSE_SHELL_ROW = re.compile(r'''(?:^|(?<![^\\]\\)(?:[;|("'`]|(?<![<>])&(?!>)|(?<![^\\]\\\r)\n))[^\S\n]*(?:(?:(?:if|then|elif|else|while|until|do|!|\{)|\w+=(?:[^\s;&|"'`(\\<>]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n])*|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?:[^\s;&|"'`(\\<>]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n])+)(?:[^\S\n]|(?<!\\)\\\r?\n)+)*(?:(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[ABEFGHIJKLMNOPQSVWXYZbdefijklmnoqsvwxyz]*[acughpCUrtTDR](?=[^\S\n]|\\\r?\n)|-(?:auth-type|login-class|user|group|host|prompt|close-from|other-user|role|type|command-timeout|chdir|chroot)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![ABEFGHIJKLMNOPQSVWXYZbdefijklmnoqsvwxyz]*[acughpCUrtTDR](?=[^\S\n]|\\\r?\n)|-(?:auth-type|login-class|user|group|host|prompt|close-from|other-user|role|type|command-timeout|chdir|chroot)(?=[^\S\n]|\\\r?\n)))|\w+=|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|doas(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[ABDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstvwxyz]*[auC](?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![ABDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstvwxyz]*[auC](?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|env(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[ABDEFGHIJKLMNOQRTUVWXYZbcdefghijklmnopqrstvwxyz]*[auCSP](?=[^\S\n]|\\\r?\n)|-(?:argv0|unset|chdir|split-string)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![ABDEFGHIJKLMNOQRTUVWXYZbcdefghijklmnopqrstvwxyz]*[auCSP](?=[^\S\n]|\\\r?\n)|-(?:argv0|unset|chdir|split-string)(?=[^\S\n]|\\\r?\n)))|\w+=|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|timeout(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:\d+(?:\.\d*)?|\.\d+)[smhd]?(?=[^\S\n]|\\\r?\n)|(?:-(?:(?:[A-Zabcdefghijlmnopqrtuvwxyz]*[sk](?=[^\S\n]|\\\r?\n)|-(?:signal|kill-after)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zabcdefghijlmnopqrtuvwxyz]*[sk](?=[^\S\n]|\\\r?\n)|-(?:signal|kill-after)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|time(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[A-Zabcdeghijklmnpqrstuvwxyz]*[fo](?=[^\S\n]|\\\r?\n)|-(?:format|output)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zabcdeghijklmnpqrstuvwxyz]*[fo](?=[^\S\n]|\\\r?\n)|-(?:format|output)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|stdbuf(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[A-Zabcdfghjklmnpqrstuvwxyz]*[ioe](?=[^\S\n]|\\\r?\n)|-(?:input|output|error)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zabcdfghjklmnpqrstuvwxyz]*[ioe](?=[^\S\n]|\\\r?\n)|-(?:input|output|error)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|nice(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[A-Zabcdefghijklmopqrstuvwxyz]*[n](?=[^\S\n]|\\\r?\n)|-(?:adjustment)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zabcdefghijklmopqrstuvwxyz]*[n](?=[^\S\n]|\\\r?\n)|-(?:adjustment)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|ionice(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[ABCDEFGHIJKLMNOQRSTUVWXYZabdefghijklmoqrstvwxyz]*[cnpPu](?=[^\S\n]|\\\r?\n)|-(?:class|classdata|pid|pgid|uid)(?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![ABCDEFGHIJKLMNOQRSTUVWXYZabdefghijklmoqrstvwxyz]*[cnpPu](?=[^\S\n]|\\\r?\n)|-(?:class|classdata|pid|pgid|uid)(?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|exec(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-(?:(?:[A-Zbcdefghijklmnopqrstuvwxyz]*[a](?=[^\S\n]|\\\r?\n))(?:[^\S\n]|(?<!\\)\\\r?\n)+(?![\s#]|\\\r?\n)|(?![A-Zbcdefghijklmnopqrstuvwxyz]*[a](?=[^\S\n]|\\\r?\n)))|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*|(?:nohup|setsid|command|builtin|busybox)(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:(?:-|(?:\d+|&(?=>))?(?:<>|>>|[<>]&?)[^\S\n]*(?![<>&\s]))(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))*))*)(?:[^\S\n]|(?<!\\)\\\r?\n)+)*(?:(?:'(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)'|"(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)"|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!["']?(?:-[A-Za-z]*[ec]|--(?:sh-|lua-)?exec(?![\w-])))(?!#)(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+["']?(?:-[A-Za-z]*[ec]|--(?:sh-|lua-)?exec(?![\w-]))|[^\S\n]*\|(?!\|)[^\S\n]*(?:'(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:bash|sh|zsh|dash|ksh|ash)'|"(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:bash|sh|zsh|dash|ksh|ash)"|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:bash|sh|zsh|dash|ksh|ash))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S])))|(?:'(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?socat'|"(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?socat"|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?socat)(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?=(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!["']?(?:[eE][xX][eE][cC]|[sS][yY][sS][tT][eE][mM]|[sS][hH][eE][lL][lL]):)(?!#)(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*(?:[^\S\n]|(?<!\\)\\\r?\n)+["']?(?:[eE][xX][eE][cC]|[sS][yY][sS][tT][eE][mM]|[sS][hH][eE][lL][lL]):)(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!["']?(?:[tT][cC][pP]|[uU][dD][pP]|[sS][cC][tT][pP]|[oO][pP][eE][nN][sS][sS][lL]|[sS][sS][lL]|[sS][oO][cC][kK][sS]|[pP][rR][oO][xX][yY]|[vV][sS][oO][cC][kK])[\w-]*:)(?!#)(?:[^\s;&|"'`(\\]|(?!["'(][^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)|\w+=|(?:\d+|&(?=>))?[<>]|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:sudo|doas|env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|builtin|exec|busybox)(?:[^\S\n]|(?<!\\)\\\r?\n)|["']?(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)|socat)(?![\w.-])))["'(]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*(?:[^\S\n]|(?<!\\)\\\r?\n)+["']?(?:[tT][cC][pP]|[uU][dD][pP]|[sS][cC][tT][pP]|[oO][pP][eE][nN][sS][sS][lL]|[sS][sS][lL]|[sS][oO][cC][kK][sS]|[pP][rR][oO][xX][yY]|[vV][sS][oO][cC][kK])[\w-]*:|(?:'(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:bash|sh|zsh|dash|ksh|ash)'|"(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:bash|sh|zsh|dash|ksh|ash)"|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:bash|sh|zsh|dash|ksh|ash))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!-[A-Za-z]*i[A-Za-z]*(?![^\s;&|]))(?!#)(?:[^\s;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*(?:[^\S\n]|(?<!\\)\\\r?\n)+-[A-Za-z]*i[A-Za-z]*(?![^\s;&|])(?:(?:[^\S\n]|(?<!\\)\\\r?\n)+(?!#)(?:[^\s;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<=[<>])&|(?<![<>])&(?=>))+)*[^\S\n]*\|(?!\|)[^\S\n]*(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:nc(?:\.(?:traditional|openbsd))?|netcat|ncat)(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))|(?:(?!(?<![^\\]\\)(?<![\d<>&])0?<>?[^\S\n]*(?:"/dev/(?:tcp|udp)/[^"\s]*"|'/dev/(?:tcp|udp)/[^'\s]*'|/dev/(?:tcp|udp)/)|(?<![^\\]\\)(?:[<>&]|>\|)[^\S\n]*(?:"/dev/(?:tcp|udp)/[^"\s]*"|'/dev/(?:tcp|udp)/[^'\s]*'|/dev/(?:tcp|udp)/))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*(?:(?<![^\\]\\)(?<![\d<>&])0?<>?[^\S\n]*(?:"/dev/(?:tcp|udp)/[^"\s]*"|'/dev/(?:tcp|udp)/[^'\s]*'|/dev/(?:tcp|udp)/)|(?<![^\\]\\)(?:[<>&]|>\|)[^\S\n]*(?:"/dev/(?:tcp|udp)/[^"\s]*"|'/dev/(?:tcp|udp)/[^'\s]*'|/dev/(?:tcp|udp)/)(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?![0-](?!\d))|(?<![^\\]\\)(?<![\d<>&])0?<>?[^\S\n]*(?:"/dev/(?:tcp|udp)/[^"\s]*"|'/dev/(?:tcp|udp)/[^'\s]*'|/dev/(?:tcp|udp)/))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*(?:(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?![0-](?!\d))|(?<![^\\]\\)(?<![\d<>&])0?<>?[^\S\n]*(?:"/dev/(?:tcp|udp)/[^"\s]*"|'/dev/(?:tcp|udp)/[^'\s]*'|/dev/(?:tcp|udp)/)))))|\bexec(?:[^\S\n]|(?<!\\)\\\r?\n)+(?:\d+|\{\w+\})(?:<>|<)[^\S\n]*(?:"/dev/(?:tcp|udp)/[^"\s]*"|'/dev/(?:tcp|udp)/[^'\s]*'|/dev/(?:tcp|udp)/)(?:(?!/dev/(?:tcp|udp)/)[\s\S])*?(?:(?<![^\\]\\)(?:[;|(`]|(?<![<>])&(?!>)|(?<![^\\]\\\r)\n)[^\S\n]*(?:(?:if|then|elif|else|while|until|do|!|\{)(?:[^\S\n]|(?<!\\)\\\r?\n)+)*(?:(?:'(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:bash|sh|zsh|dash|ksh|ash)'|"(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:bash|sh|zsh|dash|ksh|ash)"|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:bash|sh|zsh|dash|ksh|ash))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w)|\$\{?\w+\}?(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:[12]?>&|&>)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*(?<![^\\]\\)(?<![\d<>&])(?:[12]?>&|&>)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w)|eval(?=[\s;&|)<>]|\\\r?\n|(?![\s\S]))(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:[12]?>&|&>)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))(?:(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>))|"\$\{?\w+\}?"))*(?<![^\\]\\)(?<![\d<>&])(?:[12]?>&|&>)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))|(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w)(?:(?!(?<![^\\]\\)(?<![\d<>&])(?:0?<&|0>&)(?:[3-9]|[1-9]\d+|\$\{?\w+\}?)(?!\w))(?:[^\n;&|"'`()\\]|(?<!\\)\\[^\r\n]|(?<!\\)\\\r?\n|(?<=[<>])&|(?<![<>])&(?=>)))*[^\S\n]*\|(?!\|)[^\S\n]*(?:'(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:bash|sh|zsh|dash|ksh|ash)'|"(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:bash|sh|zsh|dash|ksh|ash)"|(?:(?:\.{1,2}|~[\w-]*)?/(?:[\w.~-]*/)*)?(?:bash|sh|zsh|dash|ksh|ash))(?=[\s;&|)<>]|\\\r?\n|(?![\s\S])))''')
+
 # #922: `guard posture off|advisory` is a loosening INVOCATION, not vocabulary —
 # the posture row of the other two fallbacks. The phrase counts only behind a
 # command-position invoker (shieldcortex, a wrapper, or a `$var` command), after
@@ -114,6 +121,7 @@ _FALLBACK_DANGEROUS = [
     re.compile(r"\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)", re.I),
     re.compile(r"\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log", re.I),
     _FALLBACK_DESTROY_ROW,
+    _FALLBACK_REVERSE_SHELL_ROW,
     # #505: `.ssh` behind any home root + `authorized_keys` as a path segment — mirrors the guard row.
     re.compile(r"/etc/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|/home/[^\s/'\"]+|/root|/Users/[^\s/'\"]+)/\.ssh(?![\w.-])|(?:^|[\s'\"=:/])\.ssh/authorized_keys2?\b|/authorized_keys2?\b|id_rsa|\.aws/credentials|\.env\b", re.I),
     # #505: a shell write shape onto a login/interactive startup file — mirrors the guard row.
@@ -186,7 +194,7 @@ def fallback_surface(args: dict) -> str:
 # quote; an unclosed quote is never data; no quote is data when the text pairs
 # quotes the shell does not (review R3 on #626): a quote in a comment, an
 # ANSI-C `$'...'`, heredoc text, or `${...}` with its own nested quotes.
-# Used only for _FALLBACK_DESTROY_ROW and _FALLBACK_POSTURE_ROW.
+# Used only for _FALLBACK_DESTROY_ROW, _FALLBACK_REVERSE_SHELL_ROW and _FALLBACK_POSTURE_ROW.
 # Kept in sync with plugins/openclaw/interceptor.ts and scripts/pre-tool-hook.mjs.
 _FALLBACK_NESTED_EXEC = re.compile(r"\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+/|\bfunction\b|[\w.-]+\s*\(\s*\)\s*\{", re.I)
 # #922 r3: plus `cat`, whose quoted operand is a filename, never executed.
@@ -195,31 +203,48 @@ _FALLBACK_TEXT_FLAG = re.compile(r"(?:^|\s)--(?:text|body|message|comment|descri
 _FALLBACK_EXEC_WORD = re.compile(r"(?:bash|sh|zsh|ksh|dash|ash|python[\d.]*|node|nodejs|ruby|perl|php|eval|exec|source|ssh|scp|docker|podman|kubectl|nsenter|chroot|busybox|xargs|find|flock|watch|make|awk|sed|su|runuser|systemd-run|at|batch)", re.I)
 _FALLBACK_UNSAFE_PIPE = re.compile(r"(?<!\|)\|(?!\|)&?(?![ \t]*(?:grep|egrep|fgrep|zgrep|rg|ag|ack|head|tail|less|more|wc|sort|uniq|cut|tr|jq|cat|tee|column|nl|fold|fmt)(?:[ \t\n|;&)]|$))")  # `||` is not a pipe
 _FALLBACK_QUOTE_UNMODELLED = re.compile(r"\$'|<<|\$\{")  # quotes the walk below would mis-pair
-_FALLBACK_WORD_BREAK = " \t\n\r\v\f;&|()<>"  # a `#` after one of these (or at the start) opens a comment
+# #1088 r3: a `#` after one of these, or at the start of the text, certainly opens a comment: bash's blanks and
+# its operator characters, but not `)` (`echo $(x)#y` is one word) and not VT, CR or FF (no word break to bash).
+_FALLBACK_WORD_BREAK = " \t\n;&|(<>"
+# A `#` after one of these might open a comment; the data-quote walk then trusts no quote (fails closed).
+_FALLBACK_MAYBE_COMMENT_BREAK = " \t\n\r\v\f;&|()<>"
+# #1088 r3: where the comment blanker stops for good, matched at each position outside single quotes: `$(`, `$[`,
+# `${`, `$'`, a backtick, a heredoc, a line continuation, `((`, `[[`, an extglob group.
+_FALLBACK_COMMENT_UNMODELLED = re.compile(r"\$[('{\[]|`|<<|\\\r?\n|[?*+@!]\(|\(\(|\[\[")
 _FALLBACK_ASSIGNMENT = re.compile(r"(?:^|\s)(?:export\s+|local\s+|declare\s+\S+\s+)?\w+(?:\[[^\]]*\])?\+?=$")
 _FALLBACK_QUOTE_PREFIX_CAP = 512  # a command word further back is not recognised (the quote stays executed)
 _FALLBACK_INERT_MATCH_CAP = 64  # inert matches looked past before the row fails closed
 
 
-def _fallback_data_quote_ranges(text: str) -> list:
-    """`(open, close + 1)` of every quoted data argument, or [] when none can be trusted."""
-    if _FALLBACK_NESTED_EXEC.search(text) or _FALLBACK_QUOTE_UNMODELLED.search(text):
+def _fallback_data_quote_ranges(text: str, env_prefix: bool = False) -> list:
+    """`(open, close + 1)` of every quoted data argument, or [] when none can be trusted.
+    #1088 r5b (Jarvis B1): `env_prefix` also reads the command word through `env [-i] [NAME=VAL...]`;
+    only the reverse-shell row asks for it, so no older row is relieved by it (mirrors the guard's
+    ENV_DATA_QUOTE_SIGNALS)."""
+    if _FALLBACK_QUOTE_UNMODELLED.search(text):
         return []
     ranges, unquoted = [], []  # quote contents blanked, so the pipe check never reads quoted text
+    # #1005 review B3 (astra): only single-quote contents blanked, for the nested-exec check --
+    # a backtick or `$(` inside '...' is literal, inside "..." or bare it runs. An unclosed '...' is read raw.
+    live = []
     q, open_at, stmt_start, i, n = None, -1, 0, 0, len(text)
     comment_checked_to = 0  # end of the last line already found free of quotes after a `#`
     while i < n:
         c = text[i]
         if c == "\\" and q != "'":  # bash escaping: outside quotes and inside "..."
             unquoted.append("  " if q else text[i:i + 2])
+            live.append(text[i:i + 2])
             i += 2
             continue
         if q:
             unquoted.append(" ")
+            live.append(" " if q == "'" else c)
             if c == q:
                 prefix = text[stmt_start:open_at]
                 if open_at - stmt_start <= _FALLBACK_QUOTE_PREFIX_CAP:
                     bare = re.sub(r"^(?:sudo|doas)\s+", "", re.sub(r"^(?:\w+=\S*\s+)*", "", prefix.lstrip()))
+                    if env_prefix:
+                        bare = re.sub(r"^env\s+(?:-i\s+|\w+=\S*\s+)*", "", bare)
                     word = (bare.split() or [""])[0]
                     if not _FALLBACK_ASSIGNMENT.search(prefix) and (
                         _FALLBACK_DATA_COMMAND.match(bare)
@@ -230,11 +255,12 @@ def _fallback_data_quote_ranges(text: str) -> list:
             i += 1
             continue
         unquoted.append(c)
+        live.append(c)
         if c in "\"'":
             q, open_at = c, i
         elif c in ";\n|&(":
             stmt_start = i + 1
-        elif c == "#" and i >= comment_checked_to and (i == 0 or text[i - 1] in _FALLBACK_WORD_BREAK):
+        elif c == "#" and i >= comment_checked_to and (i == 0 or text[i - 1] in _FALLBACK_MAYBE_COMMENT_BREAK):
             # A comment runs to the end of the line, and a quote in it is no
             # quote to the shell. Rather than model it (a `\ #` is not one),
             # trust no quote at all when one is there. Kept walking either way.
@@ -243,18 +269,83 @@ def _fallback_data_quote_ranges(text: str) -> list:
             if text.find('"', i, comment_checked_to) >= 0 or text.find("'", i, comment_checked_to) >= 0:
                 return []
         i += 1
-    return [] if _FALLBACK_UNSAFE_PIPE.search("".join(unquoted)) else ranges
+    if q == "'":
+        live.append(text[open_at:])
+    return [] if _FALLBACK_NESTED_EXEC.search("".join(live)) or _FALLBACK_UNSAFE_PIPE.search("".join(unquoted)) else ranges
 
 
-def _fallback_executed_match(rx, text: str, accept=None) -> bool:
-    """True when `rx` matches somewhere outside a quoted data argument (and `accept`, if given, takes its end)."""
+def _fallback_blank_comments(text: str) -> str:
+    """#1005 review r2 B2: `text` with every shell comment blanked to spaces, length and newlines kept,
+    so _FALLBACK_REVERSE_SHELL_ROW never starts in one. The guard drops comments before its rows run
+    (`stripComments`); a `# docs: 'nc -e'` line runs nothing, and the next line is still read.
+    #1088 r3: fail closed, since blanked text is text the row never reads. A `#` is blanked, to the end of
+    its line, only where bash certainly starts a comment: unquoted, unescaped, and at the start of the text
+    or right after a _FALLBACK_WORD_BREAK character (`echo $(true)#; nc ...` and `;\\v#; nc ...` keep the nc).
+    From the first _FALLBACK_COMMENT_UNMODELLED construct outside single quotes and outside a comment,
+    nothing more is blanked (that line and every line after it), and an unclosed quote blanks nothing after
+    it. A missed comment can only make the fallback stricter.
+    #1088 r4: blanking also stops for good, keeping the rest of the text, at a `#` inside an unclosed `[` (an
+    array subscript keeps a `#` as data after a blank or a newline: `declare -A a; a[ #]=v` stores the key ` #`;
+    the depth counts every unquoted, unescaped `[` and `]`, floored at 0, so it is never below bash's subscript
+    depth), and at the first unquoted newline that ends a line holding anything but blanks and a comment (an
+    alias defined there, by `alias`, `eval`, `source`, `$x` ..., applies from the next line on and can turn a
+    later `#` into data: `alias q='a['` then `q #]=1; nc ...`; bash reads a whole line before running any of
+    it). Mirrors fallbackBlankComments in the other two."""
+    out, q, esc_end, i, n = [], None, -1, 0, len(text)
+    depth = 0  # unclosed `[` outside quotes
+    code = False  # this line holds more than blanks and a comment
+    while i < n:
+        if q != "'" and _FALLBACK_COMMENT_UNMODELLED.match(text, i):
+            out.append(text[i:])
+            break
+        c = text[i]
+        if c == "\\" and q != "'":
+            out.append(text[i:i + 2])
+            esc_end = i + 2
+            code = True
+            i += 2
+            continue
+        if q:
+            out.append(c)
+            if c == q:
+                q = None
+            i += 1
+            continue
+        if c == "\n" and code:
+            out.append(text[i:])
+            break
+        if c == "#" and (i == 0 or (i != esc_end and text[i - 1] in _FALLBACK_WORD_BREAK)):
+            if depth > 0:
+                out.append(text[i:])
+                break
+            eol = text.find("\n", i)
+            end = n if eol < 0 else eol
+            out.append(" " * (end - i))
+            i = end
+            continue
+        if c not in " \t\n":
+            code = True
+        if c in "\"'":
+            q = c
+        elif c == "[":
+            depth += 1
+        elif c == "]" and depth > 0:
+            depth -= 1
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _fallback_executed_match(rx, text: str, accept=None, env_prefix: bool = False) -> bool:
+    """True when `rx` matches somewhere outside a quoted data argument (and `accept`, if given, takes its end).
+    `env_prefix`: see _fallback_data_quote_ranges (the reverse-shell row only)."""
     ranges, inert, pos = None, 0, 0
     while True:
         m = rx.search(text, pos)
         if m is None:
             return False
         if ranges is None:
-            ranges = _fallback_data_quote_ranges(text)
+            ranges = _fallback_data_quote_ranges(text, env_prefix)
         if not any(a <= m.start() and m.end() <= b for a, b in ranges) and (accept is None or accept(m.end())):
             return True
         inert += 1
@@ -329,6 +420,7 @@ def fallback_dangerous_match(content: str) -> bool:
     return any(
         _fallback_posture_match(content) if p is _FALLBACK_POSTURE_ROW
         else _fallback_executed_match(p, content) if p is _FALLBACK_DESTROY_ROW
+        else _fallback_executed_match(p, _fallback_blank_comments(content), env_prefix=True) if p is _FALLBACK_REVERSE_SHELL_ROW
         else p.search(content)
         for p in _FALLBACK_DANGEROUS
         if not (p is _FALLBACK_POSTURE_ROW and lock_read_only)

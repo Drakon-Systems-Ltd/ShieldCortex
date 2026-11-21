@@ -34,6 +34,20 @@ const KD = 'kube' + 'ctl ' + 'del' + 'ete namespace prod';
 const HU = 'helm ' + 'unin' + 'stall';
 const PSQL = 'ps' + 'ql -c ';
 const DROP = 'DR' + 'OP TABLE users';
+const KN = 'kube' + 'ctl ' + 'del' + 'ete ns prod';
+
+/**
+ * #1088 r5b (Jarvis B1): the quoted-data step reads through an `env [-i]
+ * [NAME=VAL…]` prefix for the reverse-shell row ONLY. This row reads the
+ * command word exactly as it did before #1005, so each of these keeps main's
+ * verdict on every plane. The first one runs the quote (xargs hands it to sh).
+ */
+const ENV_PREFIXED: Array<[string, string]> = [
+  ['r5b: env -i echo piped into xargs sh -c', `env -i echo '${KN}' | xargs -I{} sh -c '{}'`],
+  ['r5b: env FOO=1 echo', `env FOO=1 echo '${KN}'`],
+  ['r5b: env -i git commit -m', `env -i git commit -m '${KN}'`],
+  ['r5b: env -i rg --pre', `env -i rg --pre '${KN}' x`],
+];
 
 /**
  * Review R3 on #626: quotes the shell never sees as quotes must not open or
@@ -76,6 +90,7 @@ const GATE: Array<[string, string]> = [
   ['an unclosed quote is not data', `echo "x; ${TF}`],
   ['eval re-runs the quoted text', `eval "${TF}"`],
   ...EXEC_COMMENT,
+  ...ENV_PREFIXED,
 ];
 
 const PASS: Array<[string, string]> = [
@@ -91,6 +106,8 @@ const PASS: Array<[string, string]> = [
   ['or-list after the grep', `grep -qF "${TF}" RUNBOOK.md || echo missing`],
   ['control: git status', 'git status'],
   ...MULTILINE_DATA,
+  // #1088 r5b: the same quote with no env prefix keeps its verdict (a mention).
+  ['r5b control: echo, no env prefix', `echo '${KN}'`],
 ];
 
 const okPipeline = () => ({
@@ -185,15 +202,49 @@ describe('#503 R2 — the normal guard agrees on every mention', () => {
   });
 });
 
+describe('#1088 r5b — an env prefix relieves no teardown on the real guard (Jarvis B1)', () => {
+  it.each(ENV_PREFIXED)("%s keeps main's verdict: approval, destroy-data-or-infra", (_name, command) => {
+    const v = evaluateToolCall('Bash', { command });
+    expect({ decision: v.decision, teardown: (v.signals ?? []).includes('destroy-data-or-infra') })
+      .toEqual({ decision: 'require_approval', teardown: true });
+  });
+});
+
+describe('#1088 r5b — the env read is one list, on the reverse-shell row only, in every copy', () => {
+  const list = (src: string, marker: RegExp): string[] => {
+    const m = marker.exec(src);
+    expect(m).not.toBeNull();
+    const body = src.slice(m!.index + m![0].length);
+    return [...body.slice(0, body.search(/[\])]/)).matchAll(/'([a-z-]+)'/g)].map((x) => x[1]);
+  };
+  const read = (f: string) => fs.readFileSync(path.join(REPO, f), 'utf-8');
+  it('guard, hook and interceptor name exactly reverse-shell', () => {
+    expect(list(read('src/defence/iron-dome/tool-action-guard.ts'), /const ENV_DATA_QUOTE_SIGNALS: ReadonlySet<string> = new Set\(\[/)).toEqual(['reverse-shell']);
+    expect(list(read('scripts/pre-tool-hook.mjs'), /const FALLBACK_ENV_DATA_QUOTE_SIGNALS = \[/)).toEqual(['reverse-shell']);
+    expect(list(read('plugins/openclaw/interceptor.ts'), /const FALLBACK_ENV_DATA_QUOTE_SIGNALS: readonly string\[\] = \[/)).toEqual(['reverse-shell']);
+  });
+  it('each copy strips env only behind its flag, and Hermes passes the flag for the reverse-shell row alone', () => {
+    const strip = /\.replace\(\/\^env\\s\+\(\?:-i\\s\+\|\\w\+=\\S\*\\s\+\)\*\/, ''\)/g;
+    for (const f of ['scripts/pre-tool-hook.mjs', 'plugins/openclaw/interceptor.ts']) {
+      const src = read(f);
+      expect({ f, strips: src.match(strip)?.length ?? 0 }).toEqual({ f, strips: 1 });
+      expect(src).toContain("if (envPrefix) bare = bare.replace(/^env\\s+(?:-i\\s+|\\w+=\\S*\\s+)*/, '');");
+    }
+    const py = read('plugins/hermes/shieldcortex/sc_client.py');
+    expect(py.match(/env_prefix=True/g)).toEqual(['env_prefix=True']);
+    expect(py).toContain('_fallback_executed_match(p, _fallback_blank_comments(content), env_prefix=True) if p is _FALLBACK_REVERSE_SHELL_ROW');
+  });
+});
+
 describe('#503 R2 — the hook and the interceptor carry the same quoted-data rule', () => {
   // The two JS copies are kept in lockstep by hand; the Hermes port is pinned
   // behaviourally by DestroyRowDataQuoteTests on the same cases.
   const consts = (file: string): string[] => fs.readFileSync(path.join(REPO, file), 'utf-8').split('\n')
-    .filter((l) => /^const FALLBACK_(?:DATA_COMMAND_RE|TEXT_FLAG_RE|EXEC_WORD_RE|UNSAFE_PIPE_RE|QUOTE_UNMODELLED_RE|WORD_BREAK|QUOTE_PREFIX_CAP|INERT_MATCH_CAP) =/.test(l));
+    .filter((l) => /^const FALLBACK_(?:DATA_COMMAND_RE|TEXT_FLAG_RE|EXEC_WORD_RE|UNSAFE_PIPE_RE|QUOTE_UNMODELLED_RE|WORD_BREAK|MAYBE_COMMENT_BREAK|COMMENT_UNMODELLED_RE|QUOTE_PREFIX_CAP|INERT_MATCH_CAP) =/.test(l));
 
   it('same constants, and the row is tagged on both', () => {
     const hook = consts('scripts/pre-tool-hook.mjs');
-    expect(hook).toHaveLength(8);
+    expect(hook).toHaveLength(10);
     expect(hook).toEqual(consts('plugins/openclaw/interceptor.ts'));
     for (const f of ['scripts/pre-tool-hook.mjs', 'plugins/openclaw/interceptor.ts']) {
       expect(fs.readFileSync(path.join(REPO, f), 'utf-8')).toContain("signal: 'destroy-data-or-infra', dataQuotes: true }");
