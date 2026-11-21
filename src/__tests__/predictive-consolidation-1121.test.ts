@@ -95,6 +95,10 @@ describe('#1121 a run that changes nothing is logged at most once an hour', () =
 
     const noop = errors.filter((l) => /Predictive consolidation .* changed nothing/.test(l));
     expect(noop).toHaveLength(1);
+    // The light-tick summary is throttled the same way (round 2): one line,
+    // not one per tick.
+    const summary = errors.filter((l) => /\[BrainWorker\] Light tick: pruned 0 activations, consolidated 0/.test(l));
+    expect(summary).toHaveLength(1);
     expect(errors.some((l) => /Predictive consolidation triggered/.test(l))).toBe(false);
     expect(stmCount()).toBe(105);
   });

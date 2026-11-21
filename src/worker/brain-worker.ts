@@ -69,6 +69,11 @@ const SESSION_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /** #1121: a predictive consolidation that changed nothing logs at most this often. */
 export const NOOP_CONSOLIDATION_LOG_INTERVAL_MS = 60 * 60 * 1000;
 
+/** #1121: whether a consolidation run promoted, deleted or merged anything. */
+function consolidationChanged(run: { consolidated: number; deleted: number; deduplicated?: number }): boolean {
+  return run.consolidated + run.deleted + (run.deduplicated ?? 0) > 0;
+}
+
 function persistWorkerState(
   profile: string,
   lastLightTick: Date,
@@ -150,6 +155,8 @@ export class BrainWorker {
   private lastConsolidation: Date | null = null;
   // #1121: when a predictive run last logged that it changed nothing.
   private lastNoopConsolidationLog: number | null = null;
+  // #1121: when the light-tick summary last logged a tick that changed nothing.
+  private lastNoopSummaryLog: number | null = null;
   // Seeded from persisted state so the 24h purge throttles survive
   // frequent MCP-server restarts.
   private lastAuditPurge: Date | null = readPersistedPurgeDate('lastAuditPurge');
@@ -294,9 +301,8 @@ export class BrainWorker {
         // #1121: a run that changed nothing (e.g. over-cap rows that are all
         // pinned or under an hour old) is logged at most once an hour, not on
         // every tick.
-        const changed = run.consolidated + run.deleted + (run.deduplicated ?? 0) > 0;
         const now = result.timestamp.getTime();
-        if (changed) {
+        if (consolidationChanged(run)) {
           console.error(
             `[BrainWorker] Predictive consolidation (${decision.reason}): promoted ${run.consolidated}, `
             + `deleted ${run.deleted} (${run.evicted ?? 0} evicted at the cap), merged ${run.deduplicated ?? 0}`,
@@ -461,8 +467,17 @@ export class BrainWorker {
       // Emit light tick event
       emitWorkerLightTick(result);
 
-      // Log summary
-      if (result.activationsPruned > 0 || result.predictiveConsolidation) {
+      // Log summary. #1121: a tick that changed nothing (a predictive run
+      // that promoted, deleted and merged nothing, and no activation pruned)
+      // logs at most once an hour, like the explanation above — at the cap
+      // that run happens every tick.
+      const pc = result.predictiveConsolidation;
+      const tickChanged = result.activationsPruned > 0 || (pc !== null && consolidationChanged(pc));
+      const tickNow = result.timestamp.getTime();
+      const noopSummaryDue = pc !== null && !tickChanged
+        && (this.lastNoopSummaryLog === null || tickNow - this.lastNoopSummaryLog >= NOOP_CONSOLIDATION_LOG_INTERVAL_MS);
+      if (noopSummaryDue) this.lastNoopSummaryLog = tickNow;
+      if (tickChanged || noopSummaryDue) {
         console.error(
           `[BrainWorker] Light tick: pruned ${result.activationsPruned} activations` +
           (result.predictiveConsolidation
