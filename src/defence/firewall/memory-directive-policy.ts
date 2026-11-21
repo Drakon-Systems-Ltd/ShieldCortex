@@ -8,8 +8,11 @@
  * memory CANDIDATE (title + content): does it carry a standing directive about
  * a CONTROL?
  *
- * A hit needs both conjuncts in ONE clause (bounded at 240 characters, clause
- * boundary `[.!?;\n]`):
+ * A hit needs both conjuncts in ONE clause (clause boundary `[.!?;\n]`). Each
+ * side is bounded independently, relative to the evidence: the clause reaches
+ * back at most 240 characters before the evidence END and forward at most 240
+ * characters after the evidence START (never short of the evidence itself), so
+ * it is not one 240-character window:
  *
  *   F  an agent-directed standing frame:
  *        F1i  the evidence sits in imperative position ("Skip ...", "- Never ask ...")
