@@ -783,6 +783,70 @@ class EnvCredentialFallbackTests(unittest.TestCase):
             self.assertLess(large, 8 * small + 0.005, (unit, small, large))
 
 
+class EnvCredentialFallbackFoldR2Tests(unittest.TestCase):
+    """
+    #1005 fold r2 (Astra 5, Grok B2): the shared case list in
+    src/__tests__/fixtures/fallback-env-credential-1005.json, also driven
+    through the real interceptor and hook by fallback-env-credential-1005.test.ts.
+    gate: an unquoted ssh remote command, a continuation, wrappers with option
+    values, busybox, `\\curl`, backtick and `<(...)` printenv. quiet: a known local
+    option's value, a single-quoted or escaped `$`, a mention.
+    """
+
+    FX = json.loads((Path(__file__).resolve().parents[4] / "src/__tests__/fixtures/fallback-env-credential-1005.json").read_text(encoding="utf-8"))
+
+    def test_gate(self):
+        from sc_client import fallback_dangerous_match, fallback_surface
+        for name, cmd in self.FX["gate"]:
+            self.assertTrue(fallback_dangerous_match(fallback_surface({"command": cmd})), name)
+
+    def test_quiet(self):
+        from sc_client import fallback_dangerous_match, fallback_surface
+        for name, cmd in self.FX["quiet"]:
+            self.assertFalse(fallback_dangerous_match(fallback_surface({"command": cmd})), name)
+
+    def test_pinned_gaps(self):
+        from sc_client import fallback_dangerous_match, fallback_surface
+        for name, cmd, fallback_gates, _guard in self.FX["gaps"]:
+            self.assertEqual(fallback_dangerous_match(fallback_surface({"command": cmd})), fallback_gates, name)
+
+    def test_new_store_behaves_as_a_listed_store_does(self):
+        # The path row is a plain search on every fallback: on origin/main a
+        # read or echo naming ~/.aws/credentials already gates while degraded,
+        # so one naming a new store gates the same way, and no more.
+        from sc_client import fallback_dangerous_match, fallback_surface
+        pairs = [
+            ({"path": "/home/u/.aws/credentials"}, {"path": "/home/u/.vault-token"}),
+            ({"path": "/home/u/.aws/credentials"}, {"path": "/home/u/project/.secret/release.json"}),
+            ({"command": "echo 'copy the sample into ~/.aws/credentials'"}, {"command": "echo 'Create ~/.vault-token only when Vault login has succeeded.'"}),
+            ({"command": "cat ~/.aws/credentials"}, {"command": "cat ~/.netrc"}),
+        ]
+        for listed, added in pairs:
+            got = (fallback_dangerous_match(fallback_surface(listed)), fallback_dangerous_match(fallback_surface(added)))
+            self.assertEqual(got, (True, True), (listed, added))
+        # Example copies of a new store are not the store; `.env.example` keeps origin/main's reading.
+        self.assertFalse(fallback_dangerous_match("cat ./docs/examples/.netrc.example"))
+        self.assertTrue(fallback_dangerous_match("cat docs/.env.example"))
+
+    def test_row_is_linear_on_quote_glued_client_spam(self):
+        # fold r2: a client word glued to a quote opener, closer or escape made a draft of
+        # the row quadratic; every unit after the client now refuses to step onto one.
+        from sc_client import _FALLBACK_ENV_CREDENTIAL_ROW as row
+
+        def time_of(unit, reps):
+            s = unit * reps
+            runs = []
+            for _ in range(3):
+                t = time.perf_counter()
+                self.assertIsNone(row.search(s))
+                runs.append(time.perf_counter() - t)
+            return sorted(runs)[1]
+
+        for unit in ('"a"curl ', '\\"curl ', "'curl ", 'env -u env ', 'ssh -p -p ', 'curl -o ', 'curl \\\n '):
+            small, large = time_of(unit, 1000), time_of(unit, 4000)
+            self.assertLess(large, 8 * small + 0.005, (unit, small, large))
+
+
 class DangerousFailClosedPolicyTests(unittest.TestCase):
     """Scanner-unreachable now fails CLOSED on dangerous shapes when enforcing."""
 
