@@ -1100,3 +1100,49 @@ export function approveTapDoctorRow(raw: unknown, deps: TapArmingDeps = {}): Tap
       : undefined;
   return { status: 'warn', message: arming.message, ...(fix ? { fix } : {}) };
 }
+
+// ── Three-state resolver (#815 S1, inert) ─────────────────────────────────
+
+/** Items the state resolver can name: every arming refusal, plus the notify chat. */
+export type TapStateMissing = TapArmingFailure | 'no-notify-chat';
+
+export type ApproveTapState =
+  | { state: 'armed'; message: string }
+  | { state: 'cannot-arm'; missing: TapStateMissing; message: string }
+  | { state: 'opted-out'; message: string };
+
+/**
+ * One answer to "what is one-tap approve doing on this host?": `armed`,
+ * `cannot-arm` (with the single missing item) or `opted-out`. Pure and
+ * read-only: it only asks `checkApproveTapArming`, which reads metadata.
+ *
+ * INERT in S1: nothing calls it, and an absent `enabled` still means
+ * `cannot-arm` / `disabled`, as today. A later slice changes that one branch.
+ * Any `enabled` other than strict `true` or `false` (junk) never arms.
+ *
+ * @param raw           the raw `actionGuard.approveTap` block.
+ * @param notifyPresent whether the caller found an owner notify chat configured.
+ */
+export function resolveApproveTapState(
+  raw: unknown,
+  notifyPresent: boolean,
+  deps: TapArmingDeps = {},
+): ApproveTapState {
+  const block = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  if (block.enabled === false) {
+    return { state: 'opted-out', message: 'One-tap approve is switched off in config (enabled: false).' };
+  }
+  if (block.enabled !== true) {
+    return { state: 'cannot-arm', missing: 'disabled', message: describeTapArmingFailure('disabled') };
+  }
+  if (!notifyPresent) {
+    return {
+      state: 'cannot-arm',
+      missing: 'no-notify-chat',
+      message: 'One-tap approve cannot arm: no owner notify chat is configured, so there is nowhere to send the card.',
+    };
+  }
+  const arming = checkApproveTapArming(normaliseApproveTapConfig(raw), deps);
+  if (arming.armed) return { state: 'armed', message: arming.message };
+  return { state: 'cannot-arm', missing: arming.reason, message: arming.message };
+}
