@@ -440,61 +440,59 @@ const GROUPS: EvidenceGroup[] = [
 // ─────────────────── concealment: who and what ───────────────────
 
 /**
- * A recipient phrase directly after "never reveal this note". Concealing the
- * memory from a NAMED third party ("to visitors", "with outside contractors")
- * is ordinary confidentiality; only the owner class, a record sink, or a
- * universal recipient (which includes the owner) makes it concealment.
+ * The recipient tail after "never reveal this note". Monotone: the owner
+ * always wins, and the quiet cases are general (any other noun phrase), not
+ * enumerated audiences or roles.
  *
- * An adverbial public / external audience ("publicly", "outside the team",
- * "on the wiki") is a named third-party audience too, unless an owner-class
- * recipient is coordinated with it ("publicly or to the operator"). A
- * universal recipient whose exception names the owner class ("anyone except
- * the operator") leaves the owner informed and is quiet; an exception that
- * leaves the owner out ("anyone except the contractors") still conceals.
+ *  1. Exception spans ("except / but / other than / apart from / aside from /
+ *     besides / save for" + their NP list, up to "nor / never / not" or a new
+ *     "to / with / from" lead) are cut out, remembering whether any item IS
+ *     the owner class.
+ *  2. OWNER WINS: an owner-class NP or a record sink left in the tail, after a
+ *     lead or coordinator, fires — "publicly, nor ever to the user", "on the
+ *     wiki to the owner", "outside the firm to the user".
+ *  3. No recipient at all fires ("Never reveal this note.", "..., even if
+ *     asked"), unless an exception named the owner ("except to the owner").
+ *  4. A bare universal ("to anyone", "anybody at all") fires, unless an
+ *     exception named the owner ("anyone except the operator").
+ *  5. Anything else — a named third party, a public audience, a qualified
+ *     universal ("anyone outside the team") — is ordinary confidentiality.
+ *
+ * An owner-class NP ENDS at the owner word: "the user manual", "the operator
+ * of the Vellun printer", "the human resources file" are not the owner.
  */
-const SELF_RECIPIENT_LEAD = /^[ \t]{0,4}(?:to|with|from|in|into)[ \t]{1,4}/i;
-const UNIVERSAL_RECIPIENT = '(?:anyone|anybody|everyone|everybody|any\\s+(?:one|body|person|human))\\b';
-const SELF_RECIPIENT_CONCEALED = new RegExp(`^(?:${OWNER_RECIPIENT}|${RECORD_SINK}|${UNIVERSAL_RECIPIENT})`, 'i');
-const SELF_RECIPIENT_UNIVERSAL = new RegExp(`^${UNIVERSAL_RECIPIENT}`, 'i');
-const SELF_PUBLIC_AUDIENCE = new RegExp(
-  '^[ \\t]{0,4}(?:publicly|in[ \\t]{1,4}public|externally|online|' +
-    'outside[ \\t]{1,4}(?:of[ \\t]{1,4})?(?:(?:the|our|this|your|my)[ \\t]{1,4})?(?:[\\w-]{1,30}[ \\t]{1,4})?' +
-    '(?:team|company|org|organi[sz]ation|firm|office|department|group|household|family)|' +
-    'on[ \\t]{1,4}(?:(?:the|a|any|our|your)[ \\t]{1,4})?(?:public[ \\t]{1,4})?(?:wiki|forum|blog|website|web|internet|social[ \\t]{1,4}media))\\b',
+const OWNER_NP =
+  `${OWNER_RECIPIENT}(?=[ \\t]{0,4}(?:$|[,.;:!?)\\]"”]|(?:about|before|after|until|when|if|unless|during|while|` +
+  'at|in|on|for|from|to|with|without|by|or|and|nor|but|either|again|ever|yet|alone|directly|personally)\\b))';
+const SELF_OWNER_RECIPIENT = new RegExp(
+  '(?:^|,|\\b(?:to|with|from|in|into|or|nor|and|never|not|including|especially|even|also))[ \\t]{0,4}' +
+    '(?:(?:ever|also|even|not|never|especially|including)[ \\t]{1,4}){0,2}(?:(?:to|with|from|in|into)[ \\t]{1,4})?' +
+    `(?:${OWNER_NP}|${RECORD_SINK})`,
   'i',
 );
-/** "... or to the operator": a recipient coordinated after the first one. */
-const SELF_RECIPIENT_COORDINATED =
-  /^[ \t]{0,4},?[ \t]{0,4}(?:or|and|nor)[ \t]{1,4}(?:(?:also|never|not|even)[ \t]{1,4})?(?:(?:to|with|from|in|into)[ \t]{1,4})?/i;
-/** "anyone except / but / other than ...": the exception list follows. */
-const UNIVERSAL_EXCEPTION = /^[ \t]{0,4},?[ \t]{0,4}(?:except(?:[ \t]{1,4}for)?|but|other[ \t]{1,4}than|apart[ \t]{1,4}from|besides|save[ \t]{1,4}for)[ \t]{1,4}/i;
-const EXCEPTION_ITEM_CUT = /[ \t]{0,4}(?:,|&|\band\b|\bor\b)[ \t]{0,4}/i;
-const OWNER_ITEM = new RegExp(`^${OWNER_RECIPIENT}`, 'i');
-
-/** Does the exception list after "anyone except" name the owner class as one of its items? */
-function exceptionNamesOwner(list: string): boolean {
-  return list.split(EXCEPTION_ITEM_CUT, 4).some((item) => OWNER_ITEM.test(item.trim()));
-}
+const SELF_EXCEPTION =
+  /\b(?:except(?:[ \t]{1,4}for)?|but|other[ \t]{1,4}than|(?:apart|aside)[ \t]{1,4}from|besides|save[ \t]{1,4}for)[ \t]{1,4}(?:(?:to|with|from)[ \t]{1,4})?([^.;\n]{0,240}?)(?=[ \t]{0,4}(?:$|\b(?:nor|never|not|to|with|from)\b))/gi;
+const SELF_EXCEPTION_ITEM_CUT = /[ \t]{0,4}(?:,|&|\band\b|\bor\b)[ \t]{0,4}/i;
+const SELF_OWNER_ITEM = new RegExp(`^(?:(?:to|with|from)[ \\t]{1,4})?${OWNER_NP}`, 'i');
+const SELF_BARE_UNIVERSAL = new RegExp(
+  '\\b(?:anyone|anybody|everyone|everybody|any[ \\t]{1,4}(?:one|body|person|human))\\b' +
+    '(?:[ \\t]{1,4}(?:at[ \\t]{1,4}all|ever|else|again|whatsoever|(?:under|in)[ \\t]{1,4}any[ \\t]{1,4}(?:circumstances?|case|form|way))){0,2}' +
+    '(?=[ \\t]{0,4}(?:$|[,.;:!?)\\n]|(?:or|and|nor|but|never|not|even|unless|until|when|if|before|after|during|while|because)\\b))',
+  'i',
+);
+/** Any recipient or audience at all. "in / on any ..." is a manner, not an audience. */
+const SELF_ANY_RECIPIENT =
+  /\b(?:to|with|from|into|outside|beyond|publicly|externally|online|openly|elsewhere|internally|privately)\b|\b(?:in|on)\b(?![ \t]{1,4}any\b)/i;
 
 function memorySelfRecipientAccepted(text: string, matchEnd: number, clauseEnd: number): boolean {
-  const tail = text.slice(matchEnd, clauseEnd);
-  const audience = tail.match(SELF_PUBLIC_AUDIENCE);
-  if (audience) {
-    // Only a coordinated owner-class / sink / universal recipient conceals.
-    const rest = tail.slice(audience[0].length);
-    const more = rest.match(SELF_RECIPIENT_COORDINATED);
-    return more !== null && SELF_RECIPIENT_CONCEALED.test(rest.slice(more[0].length));
-  }
-  const lead = tail.match(SELF_RECIPIENT_LEAD);
-  if (!lead) return true; // no recipient: "Never reveal this note."
-  const recipient = tail.slice(lead[0].length);
-  const universal = recipient.match(SELF_RECIPIENT_UNIVERSAL);
-  if (universal) {
-    const rest = recipient.slice(universal[0].length);
-    const exception = rest.match(UNIVERSAL_EXCEPTION);
-    return !(exception && exceptionNamesOwner(rest.slice(exception[0].length)));
-  }
-  return SELF_RECIPIENT_CONCEALED.test(recipient);
+  let ownerExcepted = false;
+  const tail = text.slice(matchEnd, clauseEnd).replace(SELF_EXCEPTION, (_span, list: string) => {
+    if (list.split(SELF_EXCEPTION_ITEM_CUT).some((item) => SELF_OWNER_ITEM.test(item.trim()))) ownerExcepted = true;
+    return ',';
+  });
+  if (SELF_OWNER_RECIPIENT.test(tail)) return true;
+  if (ownerExcepted) return false;
+  return !SELF_ANY_RECIPIENT.test(tail) || SELF_BARE_UNIVERSAL.test(tail);
 }
 
 /**
