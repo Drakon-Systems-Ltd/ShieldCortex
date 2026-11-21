@@ -35,6 +35,11 @@
  *    `synthetic-probe` from `blocked-action`; only blocked actions are counted.
  *  - **Memory-only is never a tool gate.**
  *  - **No host-wide rollup to green.** A summary is its weakest record.
+ *  - **Stale is listed, never judged (#970).** A record whose reporter is
+ *    gone, superseded, long unseen, or whose runtime the host table calls
+ *    absent stays in the list with `stale: true` and a reason, and is left
+ *    out of the summary. A process the host confirms is running is never
+ *    stale: a live `unknown` still sets the summary.
  *  - **The self-report is untrusted.** It is size-capped and validated
  *    against a closed schema, never executed or interpolated; an unknown
  *    version is `unknown`, not guessed forward.
@@ -60,6 +65,12 @@ export const MAX_DEGRADED_INTERVALS = 8;
 export const MAX_REASON_CHARS = 120;
 /** Most instances the collector reads per (runtime, profile). */
 export const MAX_INSTANCES_PER_PROFILE = 16;
+/**
+ * #970: a self-report whose process this host cannot confirm, and that has
+ * not been seen (heartbeat, or file mtime for a rejected report) for this
+ * long, is stale: listed, never judged for the host posture.
+ */
+export const STALE_NOT_SEEN_MS = 7 * 24 * 60 * 60 * 1000;
 
 export const HOST_INTEGRITY_LIMITATION =
   'Self-reports are host-local files written by runtime processes on this host. Anything running ' +
@@ -161,6 +172,23 @@ export type ObsoleteReason =
   | 'future-dated'
   | 'scanner-degraded';
 
+/**
+ * #970 — why a record is stale (kept in the list, never judged for the host
+ * posture):
+ *
+ * - `process-ended`: the host says the reporting pid is gone, or now belongs
+ *   to another process.
+ * - `superseded`: the host cannot check the process, and a later-started
+ *   process reported for the same (runtime, profile, plane) — a restart.
+ * - `not-seen`: the host cannot check the process and nothing was heard from
+ *   it for `STALE_NOT_SEEN_MS`.
+ * - `no-recent-call`: a per-call hook (no resident process) whose last call
+ *   is older than `max_age`. Recency is that reporter's only evidence.
+ * - `runtime-absent`: the host table classifies the runtime as absent and no
+ *   running process contradicts it.
+ */
+export type StaleReason = 'process-ended' | 'superseded' | 'not-seen' | 'no-recent-call' | 'runtime-absent';
+
 export interface PostureRecord {
   record_version: typeof POSTURE_RECORD_VERSION;
   /** `sc://posture/<runtime>/<profile>/<plane>/<instance|none>`. */
@@ -186,6 +214,14 @@ export interface PostureRecord {
   incidents: FieldEvidence<number | null>;
   degraded_intervals: DegradedInterval[];
   notes: string[];
+  /**
+   * #970: true when nothing shows this record's reporter is still there (see
+   * `StaleReason`). A stale record stays in the list and is never judged for
+   * the host posture. A process the host confirms is running is never stale,
+   * whatever it reports: a live `unknown` is a finding, not a leftover.
+   */
+  stale: boolean;
+  stale_reason: StaleReason | null;
 }
 
 export interface SelfReportDenial {
@@ -442,6 +478,11 @@ export interface ToolGateInput {
   liveness?: LivenessCheck;
   nowMs: number;
   maxAgeMs?: number;
+  /**
+   * #970: mtime of the self-report file, when the collector has one. Only
+   * used to age a REJECTED report, which has no trustworthy heartbeat.
+   */
+  lastSeenMs?: number | null;
 }
 
 function denialObsolete(
@@ -509,6 +550,8 @@ export function deriveToolGateRecord(input: ToolGateInput): PostureRecord {
     incidents: unknown<number | null>(null, 'denials.blocked_action_count', 'synthetic probes are never counted'),
     degraded_intervals: [],
     notes,
+    stale: false,
+    stale_reason: null,
   };
 
   if (read.kind === 'absent') {
@@ -527,6 +570,11 @@ export function deriveToolGateRecord(input: ToolGateInput): PostureRecord {
     const why = `self-report rejected: ${read.reason}`;
     rec.runtime_loaded = unknown<RuntimeLoaded>('unknown', 'loaded', why);
     notes.push(why);
+    const seen = input.lastSeenMs;
+    if (typeof seen === 'number' && Number.isFinite(seen) && nowMs - seen > STALE_NOT_SEEN_MS) {
+      rec.stale = true;
+      rec.stale_reason = 'not-seen';
+    }
     return rec;
   }
 
@@ -578,6 +626,15 @@ export function deriveToolGateRecord(input: ToolGateInput): PostureRecord {
       plugin_identity: plugin,
       note: livenessNote,
     });
+
+  // #970: staleness is about whether the reporter is still there, so it is
+  // decided here, before any early return. `alive` is never stale.
+  let staleReason: StaleReason | null = null;
+  if (liveness === 'ended') staleReason = 'process-ended';
+  else if (liveness === 'per-call' && nowMs - heartbeatMs > maxAgeMs) staleReason = 'no-recent-call';
+  else if (liveness === 'unverified' && nowMs - heartbeatMs > STALE_NOT_SEEN_MS) staleReason = 'not-seen';
+  rec.stale = staleReason !== null;
+  rec.stale_reason = staleReason;
 
   if (heartbeatMs > nowMs + FUTURE_SKEW_MS) {
     const why = `self-report heartbeat is dated in the future (${r.heartbeat_at})`;
@@ -701,7 +758,66 @@ export function deriveMemoryOnlyRecord(input: MemoryOnlyInput): PostureRecord {
     incidents: stat<number | null>(null, 'not a tool gate'),
     degraded_intervals: [],
     notes: ['memory-only host: ShieldCortex serves memory here and cannot gate tool calls'],
+    stale: false,
+    stale_reason: null,
   };
+}
+
+// ── Staleness across records (#970) ─────────────────────────────────────────
+
+export interface StaleContext {
+  /** Runtimes the host table classifies as absent on this box. */
+  absentRuntimes?: Iterable<PostureRuntimeId>;
+}
+
+/**
+ * The cross-record half of staleness; `deriveToolGateRecord` decides the
+ * per-record half. Returns copies, never edits its input.
+ *
+ * - **Superseded.** Where the host cannot check a resident process, a
+ *   later-started process reporting for the same (runtime, profile, plane) is
+ *   the evidence of a restart, and the earlier report is stale.
+ * - **Runtime absent.** A record for a runtime the host table says is not on
+ *   this box is stale — unless the host confirms its process is running,
+ *   which contradicts "absent" and is never hidden.
+ *
+ * A reason already set is kept: it is the more specific one.
+ */
+export function markStaleRecords(records: readonly PostureRecord[], ctx: StaleContext = {}): PostureRecord[] {
+  const absent = new Set<PostureRuntimeId>(ctx.absentRuntimes ?? []);
+  const startedMs = (r: PostureRecord): number | null => {
+    const id = r.liveness.process_identity;
+    if (!id || id.liveness_mode !== 'process') return null;
+    const t = Date.parse(id.started_at);
+    return Number.isNaN(t) ? null : t;
+  };
+  const newest = new Map<string, number>();
+  for (const r of records) {
+    const t = startedMs(r);
+    if (t === null) continue;
+    const k = groupKey(r);
+    if (!newest.has(k) || t > newest.get(k)!) newest.set(k, t);
+  }
+  return records.map((r) => {
+    if (r.stale) return r;
+    let reason: StaleReason | null = null;
+    const t = startedMs(r);
+    if (r.liveness.value === 'unverified' && t !== null && t < (newest.get(groupKey(r)) ?? t)) reason = 'superseded';
+    else if (absent.has(r.runtime) && r.liveness.value !== 'alive') reason = 'runtime-absent';
+    return reason ? { ...r, stale: true, stale_reason: reason } : r;
+  });
+}
+
+const STALE_TEXT: Record<StaleReason, string> = {
+  'process-ended': 'the reporting process has ended',
+  superseded: 'a later-started process reported for the same runtime',
+  'not-seen': `not seen for ${STALE_NOT_SEEN_MS / (24 * 60 * 60 * 1000)} days or more`,
+  'no-recent-call': 'per-call hook with no call within max_age',
+  'runtime-absent': 'the runtime is not present on this host',
+};
+
+export function staleReasonText(reason: StaleReason): string {
+  return STALE_TEXT[reason];
 }
 
 // ── Levels, rollup, rendering ───────────────────────────────────────────────
@@ -761,6 +877,8 @@ export interface PostureSummary {
   record_count: number;
   /** Records in the rollup; the rest are listed but have no evidence of still running. */
   rollup_count: number;
+  /** #970: records listed but never judged because they are stale. */
+  stale_count: number;
   completeness: 'not-claimed';
 }
 
@@ -769,16 +887,18 @@ function groupKey(r: PostureRecord): string {
 }
 
 /**
- * Which records the rollup judges. Every `current` record counts, and every
- * record whose process the host says is alive counts. A (runtime, profile,
- * plane) with no current record contributes its records as-is, so an
- * all-ended or all-stale group can never be green. Ended or unverifiable
- * leftovers BESIDE a current member are listed but not rolled up: nothing
- * shows they are still running.
+ * Which records the rollup judges. A stale record (#970) is never judged:
+ * nothing shows its reporter is still there. Of the rest, every `current`
+ * record counts, and every record whose process the host says is alive
+ * counts. A (runtime, profile, plane) with no current record contributes its
+ * non-stale records as-is, so a group the host cannot vouch for is never
+ * green. Unverifiable leftovers BESIDE a current member are listed but not
+ * rolled up: nothing shows they are still running.
  */
 export function rollupRecords(records: readonly PostureRecord[]): PostureRecord[] {
-  const hasCurrent = new Set(records.filter((r) => r.membership === 'current').map(groupKey));
-  return records.filter((r) =>
+  const fresh = records.filter((r) => !r.stale);
+  const hasCurrent = new Set(fresh.filter((r) => r.membership === 'current').map(groupKey));
+  return fresh.filter((r) =>
     r.membership === 'current'
     || r.liveness.value === 'alive'
     || !hasCurrent.has(groupKey(r)));
@@ -786,8 +906,9 @@ export function rollupRecords(records: readonly PostureRecord[]): PostureRecord[
 
 export function summarisePosture(records: readonly PostureRecord[]): PostureSummary {
   const judged = rollupRecords(records);
+  const stale_count = records.filter((r) => r.stale).length;
   if (judged.length === 0) {
-    return { level: 'unknown', green: false, weakest: null, record_count: records.length, rollup_count: 0, completeness: 'not-claimed' };
+    return { level: 'unknown', green: false, weakest: null, record_count: records.length, rollup_count: 0, stale_count, completeness: 'not-claimed' };
   }
   let weakest = judged[0];
   let level = postureLevel(weakest);
@@ -804,6 +925,7 @@ export function summarisePosture(records: readonly PostureRecord[]): PostureSumm
     weakest: weakest.source,
     record_count: records.length,
     rollup_count: judged.length,
+    stale_count,
     completeness: 'not-claimed',
   };
 }

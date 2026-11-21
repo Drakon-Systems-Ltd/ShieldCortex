@@ -35,12 +35,14 @@ import {
   isGateRuntime,
   isValidInstanceKey,
   isValidProfileId,
+  markStaleRecords,
   parseSelfReport,
   type GateRuntimeId,
   type Installed,
   type LivenessCheck,
   type MemoryOnlyRuntimeId,
   type PostureRecord,
+  type PostureRuntimeId,
   type SelfReportRead,
 } from './posture-record.js';
 import { hostArtefactWired, scanHostTable, type HostId, type HostTableDeps } from '../setup/host-table.js';
@@ -239,6 +241,15 @@ function reportingProfiles(dir: string, runtime: GateRuntimeId, uid: number | un
   return out;
 }
 
+/** mtime of a self-report file, or null. lstat: a symlink is never followed. */
+function fileMtimeMs(file: string): number | null {
+  try {
+    return fs.lstatSync(file).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 function isRegularFile(p: string): boolean {
   try {
     return fs.lstatSync(p).isFile();
@@ -318,7 +329,7 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
     const list: ProfileFiles[] = profiles.length > 0 ? profiles : [{ profile: 'default', insecure: null, instances: [], skipped: 0 }];
     for (const pf of list) {
       const inst = probeInstalled(runtime, home, pf.profile);
-      const derive = (read: SelfReportRead, liveness: LivenessCheck = 'unsupported') => deriveToolGateRecord({
+      const derive = (read: SelfReportRead, liveness: LivenessCheck = 'unsupported', lastSeenMs: number | null = null) => deriveToolGateRecord({
         runtime,
         profile: pf.profile,
         installed: inst.installed,
@@ -327,6 +338,7 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
         liveness,
         nowMs,
         maxAgeMs: opts.maxAgeMs,
+        lastSeenMs,
       });
       const recs: PostureRecord[] = [];
       if (pf.instances.length === 0) {
@@ -334,14 +346,15 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
       }
       for (const instance of pf.instances) {
         let read: SelfReportRead;
+        const file = path.join(dir, runtime, pf.profile, `${instance}.json`);
         if (pf.insecure) {
           read = { kind: 'invalid', reason: `insecure self-report directory: ${pf.insecure}`, instance };
         } else if (!isGateRuntime(runtime)) {
           read = { kind: 'invalid', reason: 'unknown runtime', instance };
         } else {
-          read = readSelfReportFile(path.join(dir, runtime, pf.profile, `${instance}.json`), { runtime, profile: pf.profile, instance }, uid);
+          read = readSelfReportFile(file, { runtime, profile: pf.profile, instance }, uid);
         }
-        recs.push(derive(read, checkLiveness(read, deps)));
+        recs.push(derive(read, checkLiveness(read, deps), read.kind === 'invalid' ? fileMtimeMs(file) : null));
       }
       if (pf.skipped > 0) {
         for (const r of recs) r.notes.push(`${pf.skipped} further instance report(s) for this profile were not read (cap ${MAX_INSTANCES_PER_PROFILE})`);
@@ -357,5 +370,7 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
     records.push(deriveMemoryOnlyRecord({ runtime, profile: 'default', installed, nowMs }));
   }
 
-  return records;
+  // #970: the same host table the HOSTS section prints decides "absent".
+  const absentRuntimes = (Object.keys(HOST_ID_FOR) as PostureRuntimeId[]).filter((rt) => !present.get(HOST_ID_FOR[rt]));
+  return markStaleRecords(records, { absentRuntimes });
 }
