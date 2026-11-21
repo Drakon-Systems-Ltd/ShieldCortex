@@ -178,9 +178,11 @@ export function purgeOldSessionEvents(
 
 /**
  * Size-pressure valve. Cheap to call: it first checks the DB file size and
- * bails unless the file has crossed the pressure threshold — the existing
- * 50MB WARN_DB_SIZE at the default budget, half a raised budget otherwise
- * (#1043, sessionPressureThresholdBytes). When over pressure, it trims the
+ * bails unless the file has crossed the pressure threshold — half the
+ * directory budget, never above the existing 50MB WARN_DB_SIZE, so the
+ * default or a raised budget keeps the old 50MB gate and only a lowered
+ * budget trims earlier (#1043, sessionPressureThresholdBytes). When over
+ * pressure, it trims the
  * OLDEST session_events rows down to the row cap so capture growth can never
  * carry the DB to the 100MB block. Eviction is plain oldest-first (ts, then
  * id for stable ordering within a timestamp) — unlike the audit valve there
