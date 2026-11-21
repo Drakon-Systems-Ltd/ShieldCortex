@@ -20,7 +20,17 @@
  *
  * A file is bounded host-local evidence, never liveness on its own: for a
  * resident process the host's process-start check decides whether the
- * reporter is still the process that wrote it.
+ * reporter is still the process that wrote it. That check only proves an
+ * exit inside the reporter's own PID namespace (#970): a report that recorded
+ * another namespace, or none, is never `ended` by a pid lookup here.
+ *
+ * #970: the namespace travels in a SIDECAR beside the report,
+ *
+ *     <configDir>/posture/<runtime>/<profile>/<instance>.pidns
+ *
+ * holding only its digits (or `null`), never in the report: the report stays
+ * the closed v1 schema every earlier CLI reads, and an earlier CLI lists only
+ * `*.json` names, so it never sees the sidecar. See `readPidNsSidecar`.
  */
 
 import fs from 'fs';
@@ -35,7 +45,10 @@ import {
   isGateRuntime,
   isValidInstanceKey,
   isValidProfileId,
+  markStaleRecords,
+  noCurrentReportRecord,
   parseSelfReport,
+  rejectionMayAge,
   type GateRuntimeId,
   type Installed,
   type LivenessCheck,
@@ -51,6 +64,12 @@ export interface CollectDeps {
    * when it does not, undefined when this host cannot tell.
    */
   processStart?: (pid: number) => string | null | undefined;
+  /**
+   * #970: the collector's own PID namespace id (Linux: inode of
+   * /proc/self/ns/pid), or null where it cannot be read. A pid lookup proves
+   * a reporter exited only when its report recorded this same id.
+   */
+  pidNamespace?: () => string | null;
   /** This user's uid, or undefined where the platform has none. */
   uid?: () => number | undefined;
 }
@@ -73,6 +92,12 @@ export function defaultConfigDir(home: string = os.homedir()): string {
 export function postureSelfReportDir(configDir: string = defaultConfigDir()): string {
   return path.join(configDir, 'posture');
 }
+
+/** #970: the PID-namespace sidecar's suffix; `<instance>.pidns` sits beside `<instance>.json`. */
+export const PID_NS_SIDECAR_SUFFIX = '.pidns';
+/** Largest sidecar read: 20 digits, or `null`. */
+const PID_NS_SIDECAR_MAX_BYTES = 32;
+const PID_NS_RE = /^[0-9]{1,20}$/;
 
 /** Where one process's self-report lives. */
 export function selfReportPath(configDir: string, runtime: GateRuntimeId, profile: string, instance: string): string {
@@ -98,8 +123,24 @@ export function linuxProcessStart(pid: number): string | null | undefined {
   return start && /^[0-9]+$/.test(start) ? start : undefined;
 }
 
+/**
+ * Linux: this process's PID namespace id — the inode of /proc/self/ns/pid,
+ * the same number `readlink` shows as `pid:[<inode>]`. Null elsewhere or when
+ * unreadable. The writers record the same value in each report (#970).
+ */
+export function linuxPidNamespace(): string | null {
+  if (process.platform !== 'linux') return null;
+  try {
+    const ino = fs.statSync('/proc/self/ns/pid', { bigint: true }).ino;
+    return ino > 0n ? ino.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 const defaultDeps: Required<CollectDeps> = {
   processStart: linuxProcessStart,
+  pidNamespace: linuxPidNamespace,
   uid: () => (typeof process.getuid === 'function' ? process.getuid() : undefined),
 };
 
@@ -134,13 +175,61 @@ function listNames(dir: string): string[] {
   }
 }
 
+/** The PID-namespace sidecar for a self-report file (same basename, `.pidns`). */
+export function pidNsSidecarPath(reportFile: string): string {
+  return reportFile.endsWith('.json') ? `${reportFile.slice(0, -'.json'.length)}${PID_NS_SIDECAR_SUFFIX}` : `${reportFile}${PID_NS_SIDECAR_SUFFIX}`;
+}
+
+/**
+ * #970: the reporter's PID namespace from its report's sidecar, or null
+ * ("namespace unknown": the record then falls back to the 7-day age rule, like
+ * any report from an earlier writer). Untrusted like the report: a regular
+ * file (never a symlink), owned by this user, owner-only, tiny, and exactly
+ * digits or `null`. Missing, unreadable or malformed is null.
+ *
+ * It is trusted only when its mtime is NOT OLDER than the report it sits
+ * beside: the writers rewrite it after every report write, so an older one is
+ * from before the report's last write and vouches for nothing. (The basename
+ * is the process's start identity — pid + start ticks, or pid + a random
+ * token — so a different process does not share it; the mtime rule also
+ * covers a sidecar whose rewrite failed.)
+ */
+export function readPidNsSidecar(reportFile: string, reportMtimeMs: number, uid: number | undefined): string | null {
+  const file = pidNsSidecarPath(reportFile);
+  let fd: number | null = null;
+  try {
+    const st = fs.lstatSync(file);
+    if (!st.isFile() || st.size > PID_NS_SIDECAR_MAX_BYTES) return null;
+    if (process.platform !== 'win32') {
+      if (uid !== undefined && st.uid !== uid) return null;
+      if ((st.mode & 0o077) !== 0) return null;
+    }
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const opened = fs.fstatSync(fd);
+    if (opened.ino !== st.ino || opened.mtimeMs < reportMtimeMs) return null;
+    const buf = Buffer.alloc(PID_NS_SIDECAR_MAX_BYTES + 1);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    const text = buf.subarray(0, n).toString('utf8');
+    return PID_NS_RE.test(text) ? text : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* read-only handle */ }
+    }
+  }
+}
+
 /** Read one self-report as untrusted input. Never follows a symlink. */
 export function readSelfReportFile(
   file: string,
   expect: { runtime: GateRuntimeId; profile: string; instance: string },
   uid: number | undefined,
 ): SelfReportRead {
-  const invalid = (reason: string): SelfReportRead => ({ kind: 'invalid', reason, instance: expect.instance });
+  // #970: every rejection here is a TRUST rejection (its mtime is no evidence)
+  // except a content rejection of a file that passed every trust check.
+  const invalid = (reason: string): SelfReportRead => ({ kind: 'invalid', reason, instance: expect.instance, rejection: 'trust' });
+  const contentInvalid = (reason: string): SelfReportRead => ({ kind: 'invalid', reason, instance: expect.instance, rejection: 'content' });
   let st: fs.Stats;
   try {
     st = fs.lstatSync(file);
@@ -163,12 +252,16 @@ export function readSelfReportFile(
     const buf = Buffer.alloc(SELF_REPORT_MAX_BYTES + 1);
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
     const read = parseSelfReport(buf.subarray(0, n).toString('utf8'), n);
-    if (read.kind === 'invalid') return invalid(read.reason);
+    // parseSelfReport classifies its own rejections (oversize is trust); an
+    // unclassified one stays trust.
+    if (read.kind === 'invalid') return read.rejection === 'content' ? contentInvalid(read.reason) : invalid(read.reason);
     if (read.kind === 'valid') {
       const r = read.report;
-      if (r.runtime !== expect.runtime) return invalid('report names a different runtime than its path');
-      if (r.profile !== expect.profile) return invalid('report names a different profile than its path (wrong profile)');
-      if (r.instance.key !== expect.instance) return invalid('report names a different instance than its file');
+      if (r.runtime !== expect.runtime) return contentInvalid('report names a different runtime than its path');
+      if (r.profile !== expect.profile) return contentInvalid('report names a different profile than its path (wrong profile)');
+      if (r.instance.key !== expect.instance) return contentInvalid('report names a different instance than its file');
+      // #970: join the namespace sidecar, against the mtime of the report actually read.
+      r.instance.pid_ns = readPidNsSidecar(file, fs.fstatSync(fd).mtimeMs, uid);
     }
     return read;
   } catch {
@@ -180,10 +273,16 @@ export function readSelfReportFile(
   }
 }
 
-function checkLiveness(read: SelfReportRead, deps: Required<CollectDeps>): LivenessCheck {
+function checkLiveness(read: SelfReportRead, deps: Required<CollectDeps>, collectorNs: string | null): LivenessCheck {
   if (read.kind !== 'valid') return 'unsupported';
-  const { pid, process_start: start, liveness } = read.report.instance;
+  const { pid, process_start: start, liveness, pid_ns: reportNs } = read.report.instance;
   if (liveness !== 'process' || pid === null) return 'unsupported';
+  // #970: a pid number means something only inside its own PID namespace. A
+  // report from another namespace cannot be looked up here at all; one that
+  // recorded none (an earlier writer) can still be shown ALIVE by an exact
+  // pid + start match, but a miss is not proof it exited.
+  if (reportNs !== null && collectorNs !== null && reportNs !== collectorNs) return 'unscoped';
+  const sameNs = reportNs !== null && reportNs === collectorNs;
   let seen: string | null | undefined;
   try {
     seen = deps.processStart(pid);
@@ -191,10 +290,11 @@ function checkLiveness(read: SelfReportRead, deps: Required<CollectDeps>): Liven
     seen = undefined;
   }
   if (seen === undefined) return 'unsupported';
-  if (seen === null) return 'ended';
+  if (seen === null) return sameNs ? 'ended' : 'unscoped';
   // Pid exists. Without a reported start token a reused pid is indistinguishable.
   if (start === null) return 'unsupported';
-  return seen === start ? 'alive' : 'ended';
+  if (seen === start) return 'alive';
+  return sameNs ? 'ended' : 'unscoped';
 }
 
 interface ProfileFiles {
@@ -237,6 +337,15 @@ function reportingProfiles(dir: string, runtime: GateRuntimeId, uid: number | un
     });
   }
   return out;
+}
+
+/** mtime of a self-report file, or null. lstat: a symlink is never followed. */
+function fileMtimeMs(file: string): number | null {
+  try {
+    return fs.lstatSync(file).mtimeMs;
+  } catch {
+    return null;
+  }
 }
 
 function isRegularFile(p: string): boolean {
@@ -305,6 +414,12 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
   } catch {
     uid = undefined;
   }
+  let collectorNs: string | null;
+  try {
+    collectorNs = deps.pidNamespace();
+  } catch {
+    collectorNs = null;
+  }
   const dir = postureSelfReportDir(configDir);
   const table = scanHostTable(home, opts.hostDeps ?? {});
   const present = new Map(table.rows.map((r) => [r.id, r.present]));
@@ -318,7 +433,7 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
     const list: ProfileFiles[] = profiles.length > 0 ? profiles : [{ profile: 'default', insecure: null, instances: [], skipped: 0 }];
     for (const pf of list) {
       const inst = probeInstalled(runtime, home, pf.profile);
-      const derive = (read: SelfReportRead, liveness: LivenessCheck = 'unsupported') => deriveToolGateRecord({
+      const derive = (read: SelfReportRead, liveness: LivenessCheck = 'unsupported', lastSeenMs: number | null = null) => deriveToolGateRecord({
         runtime,
         profile: pf.profile,
         installed: inst.installed,
@@ -327,6 +442,7 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
         liveness,
         nowMs,
         maxAgeMs: opts.maxAgeMs,
+        lastSeenMs,
       });
       const recs: PostureRecord[] = [];
       if (pf.instances.length === 0) {
@@ -334,19 +450,32 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
       }
       for (const instance of pf.instances) {
         let read: SelfReportRead;
+        const file = path.join(dir, runtime, pf.profile, `${instance}.json`);
         if (pf.insecure) {
-          read = { kind: 'invalid', reason: `insecure self-report directory: ${pf.insecure}`, instance };
+          read = { kind: 'invalid', reason: `insecure self-report directory: ${pf.insecure}`, instance, rejection: 'trust' };
         } else if (!isGateRuntime(runtime)) {
-          read = { kind: 'invalid', reason: 'unknown runtime', instance };
+          // Trust: no reader vouches for a path under a runtime it cannot validate.
+          read = { kind: 'invalid', reason: 'unknown runtime', instance, rejection: 'trust' };
         } else {
-          read = readSelfReportFile(path.join(dir, runtime, pf.profile, `${instance}.json`), { runtime, profile: pf.profile, instance }, uid);
+          read = readSelfReportFile(file, { runtime, profile: pf.profile, instance }, uid);
         }
-        recs.push(derive(read, checkLiveness(read, deps)));
+        // #970: a file's mtime ages only a CONTENT rejection; a trust rejection
+        // (insecure dir, symlink, foreign owner, mode, oversize, unreadable) is
+        // judged whatever its age, exactly as before #970.
+        recs.push(derive(read, checkLiveness(read, deps, collectorNs), rejectionMayAge(read) ? fileMtimeMs(file) : null));
       }
       if (pf.skipped > 0) {
         for (const r of recs) r.notes.push(`${pf.skipped} further instance report(s) for this profile were not read (cap ${MAX_INSTANCES_PER_PROFILE})`);
       }
-      records.push(...recs);
+      // #970: staleness is decided within this (runtime, profile), on evidence
+      // only — the host table calling the runtime absent hides nothing. A
+      // PRESENT runtime whose every report is stale keeps one non-green record
+      // (the one it would get with no report at all); an absent one does not.
+      const marked = markStaleRecords(recs);
+      records.push(...marked);
+      if (present.get(hostId) && marked.length > 0 && marked.every((r) => r.stale)) {
+        records.push(noCurrentReportRecord(derive({ kind: 'absent' }), marked.length));
+      }
     }
   }
 

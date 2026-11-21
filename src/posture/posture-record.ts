@@ -35,6 +35,16 @@
  *    `synthetic-probe` from `blocked-action`; only blocked actions are counted.
  *  - **Memory-only is never a tool gate.**
  *  - **No host-wide rollup to green.** A summary is its weakest record.
+ *  - **Stale is listed, never judged (#970).** A record whose reporter the
+ *    host shows has ended, that has not been seen for `STALE_NOT_SEEN_MS`,
+ *    or that a newer current record of the same group supersedes stays in
+ *    the list with `stale: true` and a reason, and is left out of the
+ *    summary. Silence, start-time ordering and the host table calling a
+ *    runtime absent are not proof that anything ended. A process the
+ *    host confirms is running is never stale: a live `unknown` still sets the
+ *    summary. A present runtime whose reports are ALL stale keeps one
+ *    non-green "no current report" record, so an old report never judges a
+ *    host greener than no report at all.
  *  - **The self-report is untrusted.** It is size-capped and validated
  *    against a closed schema, never executed or interpolated; an unknown
  *    version is `unknown`, not guessed forward.
@@ -60,6 +70,12 @@ export const MAX_DEGRADED_INTERVALS = 8;
 export const MAX_REASON_CHARS = 120;
 /** Most instances the collector reads per (runtime, profile). */
 export const MAX_INSTANCES_PER_PROFILE = 16;
+/**
+ * #970: a self-report whose process this host cannot confirm, and that has
+ * not been seen (heartbeat, or file mtime for a rejected report) for this
+ * long, is stale: listed, never judged for the host posture.
+ */
+export const STALE_NOT_SEEN_MS = 7 * 24 * 60 * 60 * 1000;
 
 export const HOST_INTEGRITY_LIMITATION =
   'Self-reports are host-local files written by runtime processes on this host. Anything running ' +
@@ -114,6 +130,12 @@ export interface ProcessIdentity {
   pid: number | null;
   /** Host-specific start token (Linux: /proc/<pid>/stat starttime). */
   process_start: string | null;
+  /**
+   * #970: the reporter's PID namespace (Linux: inode of /proc/self/ns/pid),
+   * null when it did not record one. A pid lookup only proves the process
+   * exited when this equals the collector's own namespace.
+   */
+  pid_ns: string | null;
   started_at: string;
   liveness_mode: LivenessMode;
 }
@@ -161,6 +183,28 @@ export type ObsoleteReason =
   | 'future-dated'
   | 'scanner-degraded';
 
+/**
+ * #970 — why a record is stale (kept in the list, never judged for the host
+ * posture). Each needs evidence; silence alone is never enough:
+ *
+ * - `process-ended`: the host says the reporting pid is gone, or now belongs
+ *   to another process, AND the report recorded the same PID namespace as
+ *   the collector's — outside that namespace a missing pid proves nothing.
+ * - `not-seen`: the host cannot confirm the process (or it is a per-call
+ *   hook, or the report was rejected) and nothing was heard from it for
+ *   `STALE_NOT_SEEN_MS`.
+ * - `superseded`: a per-call hook (no resident process) silent for longer
+ *   than `max_age`, beside a NEWER record of the same (runtime, profile,
+ *   plane) that is current itself and temporally valid. Never applied to a
+ *   resident process: a later start time is not proof an earlier one ended.
+ *
+ * The host table calling a runtime absent is NOT a reason: it is a heuristic
+ * (a conventional home on this host), and a report from a container or a
+ * non-standard home is still evidence. Absence only withholds the "present,
+ * no current report" marker (`noCurrentReportRecord`).
+ */
+export type StaleReason = 'process-ended' | 'superseded' | 'not-seen';
+
 export interface PostureRecord {
   record_version: typeof POSTURE_RECORD_VERSION;
   /** `sc://posture/<runtime>/<profile>/<plane>/<instance|none>`. */
@@ -186,6 +230,14 @@ export interface PostureRecord {
   incidents: FieldEvidence<number | null>;
   degraded_intervals: DegradedInterval[];
   notes: string[];
+  /**
+   * #970: true when nothing shows this record's reporter is still there (see
+   * `StaleReason`). A stale record stays in the list and is never judged for
+   * the host posture. A process the host confirms is running is never stale,
+   * whatever it reports: a live `unknown` is a finding, not a leftover.
+   */
+  stale: boolean;
+  stale_reason: StaleReason | null;
 }
 
 export interface SelfReportDenial {
@@ -207,6 +259,14 @@ export interface SelfReport {
     key: string;
     pid: number | null;
     process_start: string | null;
+    /**
+     * #970: the writer's PID namespace id (Linux: inode of
+     * /proc/self/ns/pid), or null when unknown. NOT a key of the report: the
+     * schema stays closed v1, which every earlier CLI reads, so
+     * `parseSelfReport` always gives null and the collector fills it in from
+     * the report's `.pidns` sidecar (see collect.ts).
+     */
+    pid_ns: string | null;
     started_at: string;
     liveness: LivenessMode;
   };
@@ -226,10 +286,38 @@ export interface SelfReport {
   };
 }
 
+/**
+ * #970 — why a self-report was rejected, structurally (never by its reason
+ * text):
+ *
+ * - `content`: an owner-only regular file under the size cap, in a directory
+ *   only this user can write, whose bytes are wrong — not JSON, wrong schema,
+ *   version or keys, an invalid field, or a runtime / profile / instance that
+ *   does not match its path. Its mtime is this user's own write, so it may
+ *   age the record like a heartbeat would.
+ * - `trust`: anything the trust checks refuse — an insecure directory, a
+ *   symlink or other non-regular file, another owner, group / other access,
+ *   oversize, a failed lstat / open / read. Its mtime proves nothing (whoever
+ *   could plant it can set it), so it is never aged out.
+ *
+ * Unset is `trust`: a new or unclassified rejection fails closed.
+ */
+export type SelfReportRejection = 'trust' | 'content';
+
 export type SelfReportRead =
   | { kind: 'absent' }
-  | { kind: 'invalid'; reason: string; instance?: string }
+  | { kind: 'invalid'; reason: string; instance?: string; rejection?: SelfReportRejection }
   | { kind: 'valid'; report: SelfReport };
+
+/**
+ * #970 — the one predicate for "may this rejected report go stale by age":
+ * only a `content` rejection. Every place that ages, folds or drops a
+ * rejected record asks this; a `trust` (or unclassified) rejection is judged
+ * regardless of age.
+ */
+export function rejectionMayAge(read: SelfReportRead): boolean {
+  return read.kind === 'invalid' && read.rejection === 'content';
+}
 
 // ── Validation ──────────────────────────────────────────────────────────────
 
@@ -302,26 +390,28 @@ const TOP_KEYS = [
  */
 export function parseSelfReport(text: string, sizeBytes: number): SelfReportRead {
   if (!Number.isFinite(sizeBytes) || sizeBytes > SELF_REPORT_MAX_BYTES) {
-    return { kind: 'invalid', reason: `size ${sizeBytes} bytes exceeds the ${SELF_REPORT_MAX_BYTES}-byte cap` };
+    return { kind: 'invalid', reason: `size ${sizeBytes} bytes exceeds the ${SELF_REPORT_MAX_BYTES}-byte cap`, rejection: 'trust' };
   }
+  // #970: every rejection below is of the bytes themselves.
+  const content = (reason: string): SelfReportRead => ({ kind: 'invalid', reason, rejection: 'content' });
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
-    return { kind: 'invalid', reason: 'not JSON' };
+    return content('not JSON');
   }
-  if (!isObj(raw)) return { kind: 'invalid', reason: 'not a JSON object' };
+  if (!isObj(raw)) return content('not a JSON object');
   const o = raw;
-  if (o.schema !== SELF_REPORT_SCHEMA) return { kind: 'invalid', reason: 'unrecognised schema id' };
+  if (o.schema !== SELF_REPORT_SCHEMA) return content('unrecognised schema id');
   if (o.version !== SELF_REPORT_VERSION) {
-    return { kind: 'invalid', reason: `version ${typeof o.version === 'number' ? o.version : '?'} is not supported` };
+    return content(`version ${typeof o.version === 'number' ? o.version : '?'} is not supported`);
   }
   const extra = Object.keys(o).filter((k) => !(TOP_KEYS as readonly string[]).includes(k));
-  if (extra.length > 0) return { kind: 'invalid', reason: 'unknown keys' };
+  if (extra.length > 0) return content('unknown keys');
   const missing = TOP_KEYS.filter((k) => !(k in o));
-  if (missing.length > 0) return { kind: 'invalid', reason: `missing keys: ${missing.join(', ')}` };
+  if (missing.length > 0) return content(`missing keys: ${missing.join(', ')}`);
 
-  const bad = (field: string): SelfReportRead => ({ kind: 'invalid', reason: `invalid ${field}` });
+  const bad = (field: string): SelfReportRead => content(`invalid ${field}`);
   if (!isGateRuntime(o.runtime)) return bad('runtime');
   if (!isValidProfileId(o.profile)) return bad('profile');
   if (o.plane !== 'tool-gate') return bad('plane');
@@ -364,6 +454,7 @@ export function parseSelfReport(text: string, sizeBytes: number): SelfReportRead
         key: inst.key,
         pid: inst.pid as number | null,
         process_start: inst.process_start as string | null,
+        pid_ns: null,
         started_at: inst.started_at,
         liveness: inst.liveness,
       },
@@ -427,9 +518,12 @@ function evidence<V>(value: V, method: EvidenceMethod, source: string, over: Par
 /**
  * What the host could say about the reporting process.
  * `alive` / `ended` only from a real check; `unsupported` when this host
- * exposes no start identity (or the report named no pid).
+ * exposes no start identity (or the report named no pid). `unscoped` (#970):
+ * the pid lookup found nothing matching, but the report's PID namespace is
+ * different from the collector's or was not recorded, so that is not proof
+ * the process exited.
  */
-export type LivenessCheck = 'alive' | 'ended' | 'unsupported';
+export type LivenessCheck = 'alive' | 'ended' | 'unsupported' | 'unscoped';
 
 export interface ToolGateInput {
   runtime: GateRuntimeId;
@@ -442,6 +536,12 @@ export interface ToolGateInput {
   liveness?: LivenessCheck;
   nowMs: number;
   maxAgeMs?: number;
+  /**
+   * #970: mtime of the self-report file, when the collector has one. Only
+   * used to age a report rejected for its CONTENT (`rejectionMayAge`), which
+   * has no trustworthy heartbeat; a trust rejection ignores it.
+   */
+  lastSeenMs?: number | null;
 }
 
 function denialObsolete(
@@ -509,6 +609,8 @@ export function deriveToolGateRecord(input: ToolGateInput): PostureRecord {
     incidents: unknown<number | null>(null, 'denials.blocked_action_count', 'synthetic probes are never counted'),
     degraded_intervals: [],
     notes,
+    stale: false,
+    stale_reason: null,
   };
 
   if (read.kind === 'absent') {
@@ -527,6 +629,13 @@ export function deriveToolGateRecord(input: ToolGateInput): PostureRecord {
     const why = `self-report rejected: ${read.reason}`;
     rec.runtime_loaded = unknown<RuntimeLoaded>('unknown', 'loaded', why);
     notes.push(why);
+    // #970: only a content rejection is aged, even if a caller passes an
+    // mtime for a trust rejection (whoever planted that file set its mtime).
+    const seen = input.lastSeenMs;
+    if (rejectionMayAge(read) && typeof seen === 'number' && Number.isFinite(seen) && nowMs - seen > STALE_NOT_SEEN_MS) {
+      rec.stale = true;
+      rec.stale_reason = 'not-seen';
+    }
     return rec;
   }
 
@@ -538,6 +647,7 @@ export function deriveToolGateRecord(input: ToolGateInput): PostureRecord {
     instance: r.instance.key,
     pid: r.instance.pid,
     process_start: r.instance.process_start,
+    pid_ns: r.instance.pid_ns,
     started_at: r.instance.started_at,
     liveness_mode: r.instance.liveness,
   };
@@ -566,6 +676,10 @@ export function deriveToolGateRecord(input: ToolGateInput): PostureRecord {
   } else if (check === 'ended') {
     liveness = 'ended';
     livenessNote = 'the reporting process has exited, or its pid now belongs to a different process';
+  } else if (check === 'unscoped') {
+    liveness = 'unverified';
+    livenessNote = 'this host cannot confirm the reporting process is still running: the report was written in another PID '
+      + 'namespace, or did not record one, so a missing pid here is not proof it exited';
   } else {
     liveness = 'unverified';
     livenessNote = 'this host cannot confirm the reporting process is still running';
@@ -578,6 +692,17 @@ export function deriveToolGateRecord(input: ToolGateInput): PostureRecord {
       plugin_identity: plugin,
       note: livenessNote,
     });
+
+  // #970: staleness is about whether the reporter is still there, so it is
+  // decided here, before any early return. `alive` is never stale. A per-call
+  // hook silent past max_age is NOT stale on that alone (silence does not end
+  // a session): it is judged as unknown, unless `markStaleRecords` finds a
+  // newer current record beside it, or it reaches the not-seen age.
+  let staleReason: StaleReason | null = null;
+  if (liveness === 'ended') staleReason = 'process-ended';
+  else if ((liveness === 'unverified' || liveness === 'per-call') && nowMs - heartbeatMs > STALE_NOT_SEEN_MS) staleReason = 'not-seen';
+  rec.stale = staleReason !== null;
+  rec.stale_reason = staleReason;
 
   if (heartbeatMs > nowMs + FUTURE_SKEW_MS) {
     const why = `self-report heartbeat is dated in the future (${r.heartbeat_at})`;
@@ -701,7 +826,95 @@ export function deriveMemoryOnlyRecord(input: MemoryOnlyInput): PostureRecord {
     incidents: stat<number | null>(null, 'not a tool gate'),
     degraded_intervals: [],
     notes: ['memory-only host: ShieldCortex serves memory here and cannot gate tool calls'],
+    stale: false,
+    stale_reason: null,
   };
+}
+
+// ── Staleness across records (#970) ─────────────────────────────────────────
+
+function parsedMs(iso: string | null | undefined): number | null {
+  if (typeof iso !== 'string') return null;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : t;
+}
+
+/**
+ * A record that may supersede another: current (so its heartbeat is within
+ * max_age and not in the future), not stale, and temporally valid — its
+ * process start parses and is not after the collection or its own heartbeat.
+ * Returns its heartbeat, or null.
+ */
+function supersedingHeartbeat(r: PostureRecord): number | null {
+  if (r.stale || r.membership !== 'current' || r.runtime_loaded.method !== 'process-self-report') return null;
+  const heartbeat = parsedMs(r.runtime_loaded.observed_at);
+  const started = parsedMs(r.liveness.process_identity?.started_at);
+  const collected = parsedMs(r.collected_at);
+  if (heartbeat === null || started === null || collected === null) return null;
+  if (started > collected + FUTURE_SKEW_MS || started > heartbeat + FUTURE_SKEW_MS) return null;
+  return heartbeat;
+}
+
+/**
+ * The cross-record half of staleness; `deriveToolGateRecord` decides the
+ * per-record half. Returns copies, never edits its input.
+ *
+ * - **Superseded** (per-call hooks only). A per-call record silent for longer
+ *   than its max_age is stale when a NEWER record of the same (runtime,
+ *   profile, plane) is current, not stale and temporally valid. A stale,
+ *   ended, unverified or future-dated record supersedes nothing, and a
+ *   resident process is never superseded by start-time order: two concurrent
+ *   reporters both stay judged until one is shown to have ended or passes
+ *   the not-seen age.
+ *
+ * A reason already set is kept: it is the more specific one.
+ */
+export function markStaleRecords(records: readonly PostureRecord[]): PostureRecord[] {
+  const newestCurrent = new Map<string, number>();
+  for (const r of records) {
+    const t = supersedingHeartbeat(r);
+    if (t === null) continue;
+    const k = groupKey(r);
+    if (!newestCurrent.has(k) || t > newestCurrent.get(k)!) newestCurrent.set(k, t);
+  }
+  const superseded = (r: PostureRecord): boolean => {
+    if (r.liveness.value !== 'per-call' || r.membership === 'current') return false;
+    const heartbeat = parsedMs(r.liveness.observed_at);
+    const collected = parsedMs(r.collected_at);
+    const maxAge = r.liveness.max_age_ms;
+    if (heartbeat === null || collected === null || maxAge === null || collected - heartbeat <= maxAge) return false;
+    const newer = newestCurrent.get(groupKey(r));
+    return newer !== undefined && newer > heartbeat;
+  };
+  return records.map((r) => (!r.stale && superseded(r) ? { ...r, stale: true, stale_reason: 'superseded' } : r));
+}
+
+/**
+ * #970 — the one record a PRESENT runtime / profile keeps when every report
+ * found for it is stale: `base` is that group's no-report placeholder (what
+ * the collector derives for a runtime that never reported), so an old report
+ * never judges the host greener than no report at all. It is not stale, so
+ * it is judged, and like any no-report record it is never green.
+ */
+export function noCurrentReportRecord(base: PostureRecord, staleCount: number): PostureRecord {
+  const why = `present, no current report: all ${staleCount} report(s) found for this runtime are stale`;
+  return {
+    ...base,
+    runtime_loaded: { ...base.runtime_loaded, note: why },
+    notes: [...base.notes.filter((n) => n !== 'no self-report from the runtime process'), why],
+    stale: false,
+    stale_reason: null,
+  };
+}
+
+const STALE_TEXT: Record<StaleReason, string> = {
+  'process-ended': 'the reporting process has ended',
+  superseded: 'per-call hook silent past max_age, and a newer current record reported for the same runtime',
+  'not-seen': `not seen for ${STALE_NOT_SEEN_MS / (24 * 60 * 60 * 1000)} days or more`,
+};
+
+export function staleReasonText(reason: StaleReason): string {
+  return STALE_TEXT[reason];
 }
 
 // ── Levels, rollup, rendering ───────────────────────────────────────────────
@@ -761,6 +974,8 @@ export interface PostureSummary {
   record_count: number;
   /** Records in the rollup; the rest are listed but have no evidence of still running. */
   rollup_count: number;
+  /** #970: records listed but never judged because they are stale. */
+  stale_count: number;
   completeness: 'not-claimed';
 }
 
@@ -769,16 +984,18 @@ function groupKey(r: PostureRecord): string {
 }
 
 /**
- * Which records the rollup judges. Every `current` record counts, and every
- * record whose process the host says is alive counts. A (runtime, profile,
- * plane) with no current record contributes its records as-is, so an
- * all-ended or all-stale group can never be green. Ended or unverifiable
- * leftovers BESIDE a current member are listed but not rolled up: nothing
- * shows they are still running.
+ * Which records the rollup judges. A stale record (#970) is never judged:
+ * nothing shows its reporter is still there. Of the rest, every `current`
+ * record counts, and every record whose process the host says is alive
+ * counts. A (runtime, profile, plane) with no current record contributes its
+ * non-stale records as-is, so a group the host cannot vouch for is never
+ * green. Unverifiable leftovers BESIDE a current member are listed but not
+ * rolled up: nothing shows they are still running.
  */
 export function rollupRecords(records: readonly PostureRecord[]): PostureRecord[] {
-  const hasCurrent = new Set(records.filter((r) => r.membership === 'current').map(groupKey));
-  return records.filter((r) =>
+  const fresh = records.filter((r) => !r.stale);
+  const hasCurrent = new Set(fresh.filter((r) => r.membership === 'current').map(groupKey));
+  return fresh.filter((r) =>
     r.membership === 'current'
     || r.liveness.value === 'alive'
     || !hasCurrent.has(groupKey(r)));
@@ -786,8 +1003,9 @@ export function rollupRecords(records: readonly PostureRecord[]): PostureRecord[
 
 export function summarisePosture(records: readonly PostureRecord[]): PostureSummary {
   const judged = rollupRecords(records);
+  const stale_count = records.filter((r) => r.stale).length;
   if (judged.length === 0) {
-    return { level: 'unknown', green: false, weakest: null, record_count: records.length, rollup_count: 0, completeness: 'not-claimed' };
+    return { level: 'unknown', green: false, weakest: null, record_count: records.length, rollup_count: 0, stale_count, completeness: 'not-claimed' };
   }
   let weakest = judged[0];
   let level = postureLevel(weakest);
@@ -804,6 +1022,7 @@ export function summarisePosture(records: readonly PostureRecord[]): PostureSumm
     weakest: weakest.source,
     record_count: records.length,
     rollup_count: judged.length,
+    stale_count,
     completeness: 'not-claimed',
   };
 }
