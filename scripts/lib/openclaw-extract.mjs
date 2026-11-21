@@ -209,9 +209,6 @@ export const NON_AUTHORITATIVE_INDICATOR = 'non_authoritative_instruction';
 /** The indicator for a memory-directive (SCN-010 S) hit. Mirrored, not guessed. */
 export const MEMORY_DIRECTIVE_INDICATOR = 'memory_directive';
 
-/** The one L2 pattern that is persistence wording, nothing more (SCN-010 M4). */
-const MEMORY_PERSIST_PATTERN = 'non_authoritative:memory_persist';
-
 /** The indicator a refusal's pattern names belong to. */
 export function refusalIndicator(patterns) {
   return Array.isArray(patterns) && patterns.some((p) => typeof p === 'string' && p.startsWith('memory_directive:'))
@@ -226,15 +223,13 @@ export function refusalIndicator(patterns) {
  * decision is worth unit-testing without a dist build, and the wiring that
  * finds the real detectors is a separate, boring problem.
  *
- * Two detectors, one decision (SCN-010 M2 + M4):
+ * Two detectors, one decision (SCN-010 M2):
  *   - `detectDirective` (the memory-directive screen S): a hit refuses, with
  *     the S pattern names first and any L2 names after them.
- *   - `detect` (L2, asked under `memory_candidate`): a hit refuses UNLESS its
- *     only pattern is `memory_persist` AND S ran and was quiet. Persistence
- *     wording with no control evidence is how people write preferences into
- *     memory (M4); it counts only together with S.
+ *   - `detect` (L2, asked under `memory_candidate`): any hit refuses, exactly
+ *     as before SCN-010 (persistence wording included). S only adds refusals.
  * When S is unavailable (an older dist, or it threw) the L2 rule is exactly
- * what it was before SCN-010: M4 needs S's answer to apply.
+ * what it was before SCN-010.
  *
  * TITLE AND CONTENT are screened as ONE string. A title is stored and later
  * recalled into context exactly as content is, so screening only the content
@@ -264,10 +259,6 @@ export function screenMemoryCandidate(content, detect, title, detectDirective) {
     return naiPatterns ? [...names, ...naiPatterns] : names;
   }
   if (!nai || !nai.detected) return null;
-  // M4: S ran and was quiet, and L2 saw only persistence wording.
-  if (directive && naiPatterns && naiPatterns.length > 0 && naiPatterns.every((p) => p === MEMORY_PERSIST_PATTERN)) {
-    return null;
-  }
   return naiPatterns ?? [];
 }
 

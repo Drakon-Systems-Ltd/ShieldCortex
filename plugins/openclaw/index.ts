@@ -2056,10 +2056,9 @@ function applyMemoryDirectiveScreen(mod: DefenceModule | null, text: string): st
 }
 
 /**
- * The refusal decision for one auto-memory candidate (SCN-010 M2 + M4).
- * S hit -> refuse under `memory_directive`. L2 hit -> refuse, unless its only
- * pattern is `memory_persist` AND S ran clean: persistence wording with no
- * control evidence is a preference. S absent -> the L2 rule as it was.
+ * The refusal decision for one auto-memory candidate (SCN-010 M2).
+ * S hit -> refuse under `memory_directive`. L2 hit -> refuse, exactly as before
+ * SCN-010 (persistence wording included). S only adds refusals.
  */
 function autoMemoryRefusal(
   directive: string[] | null,
@@ -2069,7 +2068,6 @@ function autoMemoryRefusal(
     return { indicator: 'memory_directive', patterns: [...directive, ...provenance] };
   }
   if (provenance.length === 0) return null;
-  if (directive !== null && provenance.every((p) => p === 'non_authoritative:memory_persist')) return null;
   return { indicator: 'non_authoritative_instruction', patterns: provenance };
 }
 

@@ -41,9 +41,9 @@ export type ThreatIndicator =
  * `auto_capture` — a hook lifting a candidate out of a transcript (M2).
  *
  * Not a provenance label and not a trust level: the writer's source keeps its
- * own label and score. It arms the memory-directive screen (S) and the M4
- * persistence-wording precision rule inside `analyzeFirewall`, exactly as the
- * `memory_candidate` label does. Set by code paths, never by an MCP caller.
+ * own label and score. It arms the memory-directive screen (S) inside
+ * `analyzeFirewall`, exactly as the `memory_candidate` label does. The screen
+ * only adds holds. Set by code paths, never by an MCP caller.
  */
 export type MemoryAdmission = 'agent' | 'auto_capture';
 

@@ -8,8 +8,7 @@
  * re-enters the defence pipeline with `memoryAdmission`, and the firewall
  * called S unguarded: the same throw became a pipeline error, i.e. a
  * fail-CLOSED drop of a benign memory. The firewall now guards the call the
- * same way — no S for that write, no M4 relaxation (M4 needs S to have run
- * clean), one stderr line per process, a count.
+ * same way — no S for that write, one stderr line per process, a count.
  *
  * The S module is replaced here by one whose detector throws, so the REAL
  * firewall and pipeline run against it.
@@ -79,11 +78,11 @@ describe('a throwing memory-directive screen fails open, consistently', () => {
     expect(getMemoryDirectiveScreenUnavailableCount()).toBe(before + 3);
   });
 
-  it('no S means no memory_directive verdict and no M4 relaxation (the pre-SCN-010 rules)', () => {
+  it('no S means no memory_directive verdict (the pre-SCN-010 rules)', () => {
     const directive = runDefencePipelinePreviewInternal(DIRECTIVE, 'note', { type: 'memory_candidate', identifier: 'scan' }, BALANCED);
     expect(directive.firewall.threatIndicators).not.toContain('memory_directive');
-    // M4 needs S to have run clean; without S the preference row keeps its
-    // pre-SCN-010 memory_candidate verdict.
+    // The preference row keeps its pre-SCN-010 memory_candidate verdict
+    // (as it does when S runs clean).
     const preference = runDefencePipelinePreviewInternal(PREFERENCE, 'note', { type: 'memory_candidate', identifier: 'scan' }, BALANCED);
     expect(preference.firewall.result).toBe('BLOCK');
   });

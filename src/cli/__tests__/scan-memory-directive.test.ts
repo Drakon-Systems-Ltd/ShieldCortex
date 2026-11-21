@@ -71,10 +71,14 @@ describe('scan --source=memory_candidate runs the memory-directive screen', () =
     expect(parsed.threatIndicators).not.toContain('memory_directive');
   });
 
-  it('M4: a preference note is ALLOW under memory_candidate', async () => {
-    expect(await runScanArgv(['--json', '--source=memory_candidate', PREFERENCE])).toBe(SCAN_EXIT.ALLOW);
+  it('UNCHANGED: a preference note keeps main\'s BLOCK under memory_candidate (r7, M4 deleted)', async () => {
+    // Measured on origin/main's dist: BLOCK, L1 memory_manipulation + L2
+    // memory_persist. S is quiet, so the screen adds nothing and removes nothing.
+    expect(await runScanArgv(['--json', '--source=memory_candidate', PREFERENCE])).toBe(SCAN_EXIT.CAUGHT);
     const parsed = JSON.parse(out[0]);
-    expect(parsed.threatIndicators).toEqual([]);
+    expect(parsed.result).toBe('BLOCK');
+    expect(parsed.threatIndicators).toEqual(['instruction_injection', 'non_authoritative_instruction']);
+    expect(parsed.blockedPatterns).toEqual(['memory_manipulation', 'non_authoritative:memory_persist']);
   });
 });
 

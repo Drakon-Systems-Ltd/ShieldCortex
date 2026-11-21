@@ -66,10 +66,10 @@ export interface PipelineRunOptions {
   redactionSiblings?: { tags?: string[] | string | null; metadata?: unknown };
   /**
    * SCN-010: this write is a memory ADMISSION (an agent's MCP `remember`, a
-   * hook's auto-capture). Arms the memory-directive screen and the M4
-   * persistence-wording rule in analyzeFirewall for a source whose label is
-   * not `memory_candidate`. Grants nothing a caller could not already get by
-   * declaring `memory_candidate`; changes no trust score and no label.
+   * hook's auto-capture). Arms the memory-directive screen in analyzeFirewall
+   * for a source whose label is not `memory_candidate`; the screen only adds
+   * holds. Grants nothing a caller could not already get by declaring
+   * `memory_candidate`; changes no trust score and no label.
    */
   memoryAdmission?: MemoryAdmission;
 }

@@ -466,7 +466,7 @@ describe('L2 benign corpus', () => {
 describe('L2 benign corpus under memory admission (SCN-010)', () => {
   // The memory-directive screen can only ADD a non-ALLOW by firing, so "S is
   // quiet on every benign row" is the proof of "zero new non-ALLOW under
-  // memory_candidate" (M4 can only remove a hit). The second test checks the
+  // memory_candidate". The second test checks the
   // same thing one layer up, through the firewall under the label itself.
   it('the memory-directive screen fires on no benign row', () => {
     const fired = BENIGN

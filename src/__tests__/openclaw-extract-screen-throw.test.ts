@@ -3,10 +3,10 @@
  * (`scripts/lib/openclaw-extract.mjs` `screenMemoryCandidate`) must not fail
  * SILENTLY when an installed detector throws.
  *
- * Fail-open and M4 stay exactly as they were: a throwing memory-directive
- * screen counts as "S did not run", so a benign candidate is still remembered
- * and a persistence-wording-only candidate keeps the pre-SCN-010 L2 refusal
- * (M4 needs S to have run clean). What changes: each throw is counted apart
+ * Fail-open stays exactly as it was: a throwing memory-directive screen
+ * counts as "S did not run", so a benign candidate is still remembered and a
+ * persistence-wording-only candidate keeps the pre-SCN-010 L2 refusal (as it
+ * does when S runs clean, too). What changes: each throw is counted apart
  * from refusals, and each detector's throw is said once per process in fixed
  * words — never the exception message, the candidate text or the title.
  */
@@ -53,12 +53,12 @@ const directiveNotices = () => output.filter((l) => l.includes('memory_directive
 const l2Notices = () => output.filter((l) => l.includes('provenance_screen_unavailable'));
 
 describe('openclaw-extract screenMemoryCandidate: a throwing detector is reported, not silent', () => {
-  it('a throwing memory-directive screen: fail-open and M4 unchanged, counted, said once', () => {
+  it('a throwing memory-directive screen: fail-open and the L2 rule unchanged, counted, said once', () => {
     const before = getScreenUnavailableCounts();
 
     // Fail open: a benign candidate is still remembered.
     expect(screenMemoryCandidate(BENIGN, detectNonAuthoritativeInstruction, TITLE, throwingDirective)).toBeNull();
-    // A throw is "S did not run": no M4 relaxation, the L2 rule as before.
+    // A throw is "S did not run": the L2 rule as before.
     expect(screenMemoryCandidate(PREFERENCE, detectNonAuthoritativeInstruction, TITLE, throwingDirective))
       .toEqual(['non_authoritative:memory_persist']);
 

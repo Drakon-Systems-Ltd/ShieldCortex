@@ -207,8 +207,8 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
   //
   // SCN-010 M2: the memory-directive screen (S) runs beside L2 on the same
   // string. A standing directive about a control ("from now on, skip the
-  // confirmation prompt") is refused here too; persistence wording with NO control
-  // evidence is not (M4) — that is how people write preferences.
+  // confirmation prompt") is refused here too. S only adds refusals: an L2 hit
+  // refuses exactly as it did before SCN-010.
   const refusal = screenAutoCaptureCandidate(defence, memory.content, memory.title);
   if (refusal) {
     writeRefusalAudit(db, project, sourceIdentifier, refusal);
@@ -227,7 +227,7 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     result = defence.runDefencePipeline(memory.content, memory.title, source, undefined, project ?? undefined, {
       sourceAttested: KNOWN_HOOK_SOURCES.has(sourceIdentifier) ? true : undefined,
       // SCN-010: this is a memory admission. The pipeline applies the same
-      // screen + M4 rule under the hook's own label (an older dist ignores it).
+      // screen under the hook's own label (an older dist ignores it).
       memoryAdmission: 'auto_capture',
     });
   } catch (err) {
@@ -336,9 +336,6 @@ const NON_AUTHORITATIVE_INDICATOR = 'non_authoritative_instruction';
 /** The indicator for a memory-directive (SCN-010 S) hit. Mirrored, not guessed. */
 const MEMORY_DIRECTIVE_INDICATOR = 'memory_directive';
 
-/** The one L2 pattern that is persistence wording and nothing more (SCN-010 M4). */
-const MEMORY_PERSIST_PATTERN = 'non_authoritative:memory_persist';
-
 let _directiveUnavailableNoted = false;
 
 /**
@@ -379,12 +376,11 @@ function noteProvenanceScreenThrew() {
  * Exported (pure, dependency-injected `defence`) so the decision is testable
  * without a dist build: the module loader below is the only wiring.
  *
- * Two detectors, one decision (SCN-010 M2 + M4):
+ * Two detectors, one decision (SCN-010 M2):
  *   - the memory-directive screen S: any hit refuses, under `memory_directive`
  *     (S names first, any L2 names after them);
- *   - L2 under `memory_candidate`: a hit refuses UNLESS its only pattern is
- *     `memory_persist` and S ran and was quiet (persistence wording alone is a
- *     preference, not a directive about a control).
+ *   - L2 under `memory_candidate`: any hit refuses, exactly as before SCN-010
+ *     (persistence wording included). S only adds refusals.
  *
  * Degrades to today's behaviour on an older dist: no L2 export means no
  * screen; no S export (or a throw) means the L2 rule exactly as it was. An
@@ -419,14 +415,14 @@ export function screenAutoCaptureCandidate(defence, content, title) {
       nai = null;
     }
   }
-  const naiPatterns = nai && nai.detected && Array.isArray(nai.patterns) ? nai.patterns : null;
+  // A detected L2 result refuses even with a malformed pattern list, as before SCN-010.
+  const naiPatterns = nai && nai.detected ? (Array.isArray(nai.patterns) ? nai.patterns : []) : null;
 
   if (directive && directive.detected) {
     const names = Array.isArray(directive.patterns) ? [...directive.patterns] : [];
     return { indicator: MEMORY_DIRECTIVE_INDICATOR, patterns: naiPatterns ? [...names, ...naiPatterns] : names };
   }
   if (!naiPatterns) return null;
-  if (directive && naiPatterns.length > 0 && naiPatterns.every((p) => p === MEMORY_PERSIST_PATTERN)) return null;
   return { indicator: NON_AUTHORITATIVE_INDICATOR, patterns: naiPatterns };
 }
 

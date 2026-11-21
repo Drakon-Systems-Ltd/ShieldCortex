@@ -90,9 +90,6 @@ describe('L2 source classes', () => {
         expect(nai.patterns).toContain(shape.pattern);
 
         const analysis = scan(shape.text, type, 0.3);
-        // SCN-010 M4 (r6b): the memory_persist SHAPE says "standing order", so
-        // it is not positively a preference and memory admission keeps the
-        // pre-SCN-010 verdict below (QUARANTINE), like every other label.
         expect(analysis.result).toBe('QUARANTINE');
         expect(analysis.threatIndicators).toContain('non_authoritative_instruction');
         expect(analysis.threatIndicators).not.toContain('instruction_injection');

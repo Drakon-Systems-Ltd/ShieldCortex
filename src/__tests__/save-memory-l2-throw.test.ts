@@ -4,8 +4,8 @@
  * swallow a THROWING L2 `detectNonAuthoritativeInstruction` silently.
  *
  * The verdict is unchanged: a throwing L2 is "L2 did not run" for that
- * candidate (fail open), and M4 is untouched (an S hit still refuses; a clean
- * S still lets a candidate through). What changes: the throw is said once per
+ * candidate (fail open), and S is untouched (an S hit still refuses; a clean
+ * S adds nothing). What changes: the throw is said once per
  * process in fixed, names-only words, the same `provenance_screen_unavailable`
  * notice as the OpenClaw capture path — never the exception message, the
  * candidate text or the title. save-memory is a short-lived hook with no
@@ -51,7 +51,7 @@ afterAll(() => {
 const l2Notices = () => output.filter((l) => l.includes('provenance_screen_unavailable'));
 
 describe('save-memory screenAutoCaptureCandidate: a throwing L2 is reported, not silent', () => {
-  it('fail-open verdicts unchanged, M4 unchanged, one fixed notice, no sentinel anywhere', () => {
+  it('fail-open verdicts unchanged, S unchanged, one fixed notice, no sentinel anywhere', () => {
     // Fail open: a benign candidate is still remembered.
     expect(screenAutoCaptureCandidate(DEFENCE, BENIGN, TITLE)).toBeNull();
     expect(l2Notices()).toHaveLength(1);

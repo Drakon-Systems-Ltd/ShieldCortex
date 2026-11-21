@@ -34,6 +34,7 @@ import {
 import {
   ACCEPTED_AMBIGUITY,
   BENIGN_CONTROLS,
+  PREFERENCES_HELD_AS_ON_MAIN,
   ROUND2_PRECISION,
   ROUND2_RECALL,
   SINK_DIRECTIVES,
@@ -121,13 +122,38 @@ describe('M3 — MCP remember runs the memory-directive screen', () => {
     expect(getMemoryById(released!.memoryId!)!.content).toBe(DIRECTIVE);
   });
 
-  it('M4: a preference note is stored under the agent flag', async () => {
-    const result = await executeRemember({ title: 'Spelling', content: PREFERENCE, memoryAdmission: 'agent' });
-    expect(result.success).toBe(true);
-    expect(quarantined()).toHaveLength(0);
+  it('UNCHANGED: a persistence-worded preference keeps main\'s L1 hold under the agent flag (r7)', async () => {
+    // The flag only arms S, which is quiet here; the hold is the pre-existing
+    // L1 memory_manipulation one, identical to the unflagged (main) path.
+    const flagged = await executeRemember({ title: 'Spelling', content: PREFERENCE, memoryAdmission: 'agent' });
+    expect(flagged.success).toBe(false);
+    const flaggedRows = quarantined().map((r) => [r.firewall_result, r.reason, r.threat_indicators]);
+    expect(flaggedRows).toHaveLength(1);
+    expect(flaggedRows[0][2]).toContain('instruction_injection');
+    expect(flaggedRows[0][2]).not.toContain('memory_directive');
+    closeDatabase();
+    initDatabase(':memory:');
+    const unflagged = await executeRemember({ title: 'Spelling', content: PREFERENCE });
+    expect(unflagged.success).toBe(flagged.success);
+    expect(quarantined().map((r) => [r.firewall_result, r.reason, r.threat_indicators])).toEqual(flaggedRows);
   });
 
-  it('benign controls B01-B16 + the M4 rows are each stored (fresh DB per row)', async () => {
+  it('UNCHANGED: every persistence-worded preference row gets the unflagged (main) outcome', async () => {
+    for (const [, text] of PREFERENCES_HELD_AS_ON_MAIN) {
+      closeDatabase();
+      initDatabase(':memory:');
+      const flagged = await executeRemember({ title: 'Pref', content: text, memoryAdmission: 'agent' });
+      const flaggedRows = quarantined().map((r) => [r.firewall_result, r.threat_indicators]);
+      closeDatabase();
+      initDatabase(':memory:');
+      const unflagged = await executeRemember({ title: 'Pref', content: text });
+      expect(flagged.success).toBe(unflagged.success);
+      expect(quarantined().map((r) => [r.firewall_result, r.threat_indicators])).toEqual(flaggedRows);
+      expect(flaggedRows.every(([, ind]) => !String(ind).includes('memory_directive'))).toBe(true);
+    }
+  });
+
+  it('benign controls B01-B16 are each stored (fresh DB per row)', async () => {
     // One DB per row: saving 18 short rules back-to-back from one source trips
     // the pre-existing #402 class_b_cluster sweep (3 directive-form fragments
     // from one source in 10 minutes), which is a separate, deliberate control
