@@ -374,10 +374,9 @@ describe('#970 per-call hooks (Claude Code): silence is not proof a session ende
   it('a Hermes home that is really there keeps its dead reports stale by process, not by absence', () => {
     hermesHome(home);
     writeReport(configDir, reportBody({ instance: instance(6001, '6001') }));
-    const [rec, marker, ...rest] = collectPostureRecords(opts()).filter((r) => r.runtime === 'hermes');
-    expect({ stale: rec.stale, reason: rec.stale_reason }).toEqual({ stale: true, reason: 'process-ended' });
-    expect({ instance: marker.key.instance, stale: marker.stale }).toEqual({ instance: null, stale: false });
-    expect(rest).toEqual([]);
+    const hermes = collectPostureRecords(opts()).filter((r) => r.runtime === 'hermes');
+    // The dead report, then the present runtime's one no-current-report record (r2).
+    expect(hermes.map((r) => [r.key.instance, r.stale, r.stale_reason])).toEqual([['p6001-s6001', true, 'process-ended'], [null, false, null]]);
   });
 });
 
