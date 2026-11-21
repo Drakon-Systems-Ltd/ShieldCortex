@@ -29,6 +29,24 @@ The report says `QUARANTINE`. The process exits 1.
 
 A bare `scan TEXT` stays attested `cli:shieldcortex-scan`. A declared `--source` is a caller label, not host attestation. Untrusted data origins (`web`, `document`, `email`, `tool_result`, `agent_message`, `memory_candidate`) also get the L2 non-authoritative-instruction floor.
 
+<a id="memory-directive"></a>
+
+## Memory candidates: the memory-directive screen
+
+`--source=memory_candidate`, and each memory write the README lists under the memory-directive screen, also runs the memory-directive screen. It fires only when an agent-directed standing frame (an imperative, "you", the agent as subject, an identity or mode change, "from now on" style wording) and evidence about a control sit in the same sentence. A hit adds the threat indicator `memory_directive` and pattern names of the form `memory_directive:<group>` (never the text). The groups are `control_relaxation`, `claimed_authority`, `concealment`, `secret_routing`, `identity_override`, `permissive_default` and `bulk_egress`.
+
+The verdict depends on the defence mode:
+
+| Mode | Verdict on a memory-directive hit |
+|---|---|
+| `balanced` (default) | `QUARANTINE`, unless another detector already reached `QUARANTINE` or `BLOCK`, which stands |
+| `strict` | `BLOCK` (any detection blocks) |
+| `permissive` | `ALLOW`, with the indicator still reported |
+
+Persistence wording alone no longer flags a memory candidate. A hit made only of the L2 `non_authoritative:memory_persist` pattern and/or the `memory_manipulation` preference phrasings ("from now on, always use British English spelling") no longer counts under `memory_candidate` when the memory-directive screen ran and did not fire; other detectors still apply. If the screen could not run, the old rules apply. Every other label keeps its verdicts.
+
+This is a deterministic floor, not an intent detector: lexical, English-only, no model call. A reworded instruction with no control words in it gets past it, and a false belief stored without any control in it is not covered.
+
 <a id="what-a-scan-writes"></a>
 
 ## What a scan writes
