@@ -1189,7 +1189,7 @@ export function importMemories(
             salience: typeof memory.salience === 'number' ? memory.salience : 0.5,
             metadata: parseJsonField<Record<string, unknown>>(memory.metadata, {}),
           },
-          DEFAULT_CONFIG,
+          resolveMemoryConfig(undefined, { readOnly: true }), // #1043: the operator's caps, not the defaults
           { type: 'file', identifier: 'import' },
           // Code-constant identity → attested by construction. A poisoned
           // import row that BLOCKs accrues to the file:import channel.
@@ -1224,7 +1224,7 @@ export function vacuumDatabase(): { success: boolean; message: string } {
  * Useful for dry-run mode
  */
 export function previewConsolidation(
-  config: MemoryConfig = DEFAULT_CONFIG
+  config: MemoryConfig = resolveMemoryConfig(undefined, { readOnly: true })
 ): {
   toPromote: Memory[];
   toDelete: Memory[];
@@ -1267,7 +1267,7 @@ export function previewConsolidation(
  * Returns true if consolidation is recommended
  */
 export function shouldTriggerConsolidation(
-  config: MemoryConfig = DEFAULT_CONFIG
+  config: MemoryConfig = resolveMemoryConfig(undefined, { readOnly: true })
 ): { shouldRun: boolean; reason: string } {
   const stats = getMemoryStats();
   const stmFullness = stats.shortTerm / config.maxShortTermMemories;
@@ -1302,7 +1302,7 @@ export function shouldTriggerConsolidation(
  * Best run periodically to keep database healthy
  */
 export function fullCleanup(
-  config: MemoryConfig = DEFAULT_CONFIG
+  config: MemoryConfig = resolveMemoryConfig(undefined, { readOnly: true })
 ): { consolidation: ConsolidationResult; vacuumed: boolean; merged: number; quarantineExpired: number } {
   // Run consolidation
   const consolidation = consolidate(config);
