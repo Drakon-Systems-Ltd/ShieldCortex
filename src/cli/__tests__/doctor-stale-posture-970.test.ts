@@ -9,6 +9,7 @@ import { collectPostureRecords, type CollectDeps } from '../../posture/collect.j
 import { STALE_NOT_SEEN_MS, parseSelfReport, rollupRecords, summarisePosture } from '../../posture/posture-record.js';
 import { scanHostTable } from '../../setup/host-table.js';
 import { NOW, PID_NS, hermesHome, hermesPluginArtefacts, iso, processTable, reportBody, writeReport } from '../../posture/__tests__/self-report-fixture.js';
+import { legacyGateRejects } from '../../posture/__tests__/legacy-self-report-gate.js';
 
 /**
  * #970 — stale runtime-posture records flooded doctor and set the host
@@ -563,18 +564,24 @@ describe('#970 r2: a pid lookup proves an exit only inside the report\'s own PID
     expect(summarisePosture(collectPostureRecords(opts()))).toMatchObject({ green: false, level: 'unknown' });
   });
 
-  it('the self-report schema: pid_ns is optional, digits or null, nothing else', () => {
-    const parse = (inst: Record<string, unknown>) => {
-      const text = JSON.stringify(reportBody({ instance: inst }));
+  it('the self-report schema (r3): v1 has no pid_ns, v2 requires it as digits or null, nothing else', () => {
+    const parse = (inst: Record<string, unknown>, version: number) => {
+      const text = JSON.stringify(reportBody({ instance: inst, version }));
       return parseSelfReport(text, Buffer.byteLength(text));
     };
     const base = instance(6001, '6001');
     const { pid_ns: _drop, ...legacy } = base;
-    const ok = parse(legacy);
-    expect(ok.kind === 'valid' && ok.report.instance.pid_ns).toBeNull();
-    for (const v of [PID_NS, null]) expect(parse({ ...base, pid_ns: v }).kind).toBe('valid');
-    for (const v of ['', 'pid:[1]', 4026531836, '-1', '1'.repeat(21)]) expect(parse({ ...base, pid_ns: v }).kind).toBe('invalid');
-    expect(parse({ ...base, other: 1 }).kind).toBe('invalid');
+    const v1 = parse(legacy, 1);
+    expect(v1.kind === 'valid' && [v1.report.version, v1.report.instance.pid_ns]).toEqual([1, null]);
+    const v2 = parse(base, 2);
+    expect(v2.kind === 'valid' && [v2.report.version, v2.report.instance.pid_ns]).toEqual([2, PID_NS]);
+    expect(parse({ ...base, pid_ns: null }, 2).kind).toBe('valid');
+    // Each version's instance is closed: v1 never carries pid_ns, v2 always does.
+    expect(parse(base, 1)).toEqual({ kind: 'invalid', reason: 'invalid instance' });
+    expect(parse(legacy, 2)).toEqual({ kind: 'invalid', reason: 'invalid instance' });
+    for (const v of ['', 'pid:[1]', 4026531836, '-1', '1'.repeat(21)]) expect(parse({ ...base, pid_ns: v }, 2).kind).toBe('invalid');
+    expect(parse({ ...base, other: 1 }, 2).kind).toBe('invalid');
+    expect(parse(base, 3)).toEqual({ kind: 'invalid', reason: 'version 3 is not supported' });
   });
 });
 
@@ -598,6 +605,7 @@ describe('#970 r2: the clawdbot1 field shape', () => {
       for (const f of fs.readdirSync(d)) {
         const body = JSON.parse(fs.readFileSync(path.join(d, f), 'utf8'));
         delete body.instance.pid_ns;
+        body.version = 1;
         fs.writeFileSync(path.join(d, f), JSON.stringify(body));
       }
     }
@@ -624,5 +632,36 @@ describe('#970 r2: the collapsed line never calls an unverified report live', ()
     const shown = collapseStalePostureRows(await checkRuntimePosture(opts({ deps: d })));
     expect(shown.find((r) => r.label === `${RUNTIME_POSTURE_LABEL}: OpenClaw`)!.message)
       .toBe('1 current (1 unverified), 1 stale hidden (--verbose to list)');
+  });
+});
+
+// ── Round 3: mixed versions (a pre-#970 CLI beside a #970 writer) ──────────
+
+describe('#970 r3: self-report v2 carries pid_ns; v1 stays readable', () => {
+  const both = processTable({ 6001: '6001', 6002: '6002' });
+  const v1Enforce = () => {
+    const { pid_ns: _drop, ...inst } = instance(6001, '6001');
+    return reportBody({ instance: inst, configured_posture: 'enforce' });
+  };
+  const v2Off = () => reportBody({ instance: instance(6002, '6002'), configured_posture: 'intentionally-off' });
+
+  beforeEach(() => {
+    fs.rmSync(path.join(home, '.openclaw'), { recursive: true });
+    hermesHome(home);
+    hermesPluginArtefacts(home);
+  });
+
+  it('a pre-#970 CLI reads a v1 report and refuses a v2 one by its version, not by a field it does not know', () => {
+    expect(v1Enforce().version).toBe(1);
+    expect(legacyGateRejects(JSON.stringify(v1Enforce()))).toBeNull();
+    expect(legacyGateRejects(JSON.stringify(v2Off()))).toBe('version 2 is not supported');
+  });
+
+  it('this CLI judges a mixed group — an earlier v1 enforcing writer beside a v2 intentionally-off one — on both', () => {
+    writeReport(configDir, v1Enforce());
+    writeReport(configDir, v2Off());
+    const records = collectPostureRecords(opts({ deps: both })).filter((r) => r.runtime === 'hermes');
+    expect(records.map((r) => [r.key.instance, r.liveness.value, r.stale]).sort()).toEqual([['p6001-s6001', 'alive', false], ['p6002-s6002', 'alive', false]]);
+    expect(summarisePosture(records)).toMatchObject({ level: 'off', green: false, rollup_count: 2 });
   });
 });

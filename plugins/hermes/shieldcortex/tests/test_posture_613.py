@@ -64,14 +64,13 @@ class PostureCase(unittest.TestCase):
 
 
 class WriterTests(PostureCase):
-    def test_writes_the_v1_schema(self):
+    def test_writes_the_v2_schema(self):
         self.assertTrue(posture.write_self_report(
             self.config_dir, profile="default", configured_posture="enforce",
             scanner="available", policy={"enforce": True}))
         r = self.read_report()
         self.assertEqual(set(r), REQUIRED_KEYS)
         self.assertEqual(r["schema"], posture.SCHEMA)
-        self.assertEqual(r["version"], 1)
         self.assertEqual(r["runtime"], "hermes")
         self.assertEqual(r["plane"], "tool-gate")
         self.assertIs(r["loaded"], True)
@@ -79,7 +78,9 @@ class WriterTests(PostureCase):
         self.assertRegex(r["plugin"]["hash"], SHA)
         self.assertEqual(r["instance"]["liveness"], "process")
         self.assertEqual(r["instance"]["pid"], os.getpid())
-        # #970: the PID namespace id the CLI compares before trusting a pid lookup.
+        # #970: the PID namespace id the CLI compares before trusting a pid lookup,
+        # carried by a v2 report (r3: a pre-#970 CLI refuses v2 by version).
+        self.assertEqual(r["version"], 2)
         if sys.platform.startswith("linux"):
             self.assertEqual(r["instance"]["pid_ns"], str(os.stat("/proc/self/ns/pid").st_ino))
         else:

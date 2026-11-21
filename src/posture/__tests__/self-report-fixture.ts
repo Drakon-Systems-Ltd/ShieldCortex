@@ -1,12 +1,12 @@
 /**
- * #613 test fixtures: a valid v1 self-report body and a writer that lays it
+ * #613 test fixtures: a valid self-report body and a writer that lays it
  * out exactly where the runtimes do, with the permissions they use. Not a
  * test file itself (no `.test.ts`).
  */
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { SELF_REPORT_SCHEMA, SELF_REPORT_VERSION } from '../posture-record.js';
+import { SELF_REPORT_SCHEMA } from '../posture-record.js';
 import { postureSelfReportDir, type CollectDeps } from '../collect.js';
 
 export const NOW = Date.parse('2026-09-29T12:00:00.000Z');
@@ -38,11 +38,16 @@ export function denial(over: Obj = {}): Obj {
   };
 }
 
-/** A fresh, valid Hermes report from a live process on the default profile. */
+/**
+ * A fresh, valid Hermes report from a live process on the default profile.
+ * #970: like the writers, the version follows the instance — 2 when it records
+ * `pid_ns`, 1 (an earlier writer, or the Claude Code hook) when it does not —
+ * unless `over.version` names one.
+ */
 export function reportBody(over: Obj = {}): Obj {
   const base: Obj = {
     schema: SELF_REPORT_SCHEMA,
-    version: SELF_REPORT_VERSION,
+    version: 2,
     runtime: 'hermes',
     profile: 'default',
     plane: 'tool-gate',
@@ -57,7 +62,9 @@ export function reportBody(over: Obj = {}): Obj {
     degraded_intervals: [],
     denials: { blocked_action: null, synthetic_probe: null, blocked_action_count: 0 },
   };
-  return { ...base, ...over };
+  const body = { ...base, ...over };
+  if (!('version' in over)) body.version = Object.prototype.hasOwnProperty.call(body.instance as Obj, 'pid_ns') ? 2 : 1;
+  return body;
 }
 
 /** Same process, different pid/start: a second instance on the same profile. */

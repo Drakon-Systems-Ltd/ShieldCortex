@@ -11,6 +11,7 @@ import { __resetPostureStateForTest, writePostureSelfReport } from '../posture-r
 import { evaluateToolCall } from '../../../src/defence/iron-dome/tool-action-guard.js';
 import { parseSelfReport } from '../../../src/posture/posture-record.js';
 import { collectPostureRecords, linuxPidNamespace, linuxProcessStart } from '../../../src/posture/collect.js';
+import { legacyGateRejects } from '../../../src/posture/__tests__/legacy-self-report-gate.js';
 
 /**
  * #613 — the OpenClaw plugin's process-side posture self-report.
@@ -96,8 +97,11 @@ describe('#613 writer', () => {
     expect(r.policy_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(r.instance.liveness).toBe('process');
     expect(r.instance.pid).toBe(process.pid);
-    // #970: the writer records its PID namespace — the collector's own, here.
+    // #970: the writer records its PID namespace — the collector's own, here —
+    // in a v2 report, which a pre-#970 CLI refuses by version (r3).
     expect(r.instance.pid_ns).toBe(process.platform === 'linux' ? linuxPidNamespace() : null);
+    expect(r.version).toBe(2);
+    expect(legacyGateRejects(fs.readFileSync(reportFile(), 'utf8'))).toBe('version 2 is not supported');
     expect(fs.readdirSync(reportDir())).toEqual([`${r.instance.key}.json`]);
     expect(fs.statSync(reportFile()).mode & 0o077).toBe(0);
     for (const d of [path.join(configDir, 'posture'), path.join(configDir, 'posture', 'openclaw'), reportDir()]) {

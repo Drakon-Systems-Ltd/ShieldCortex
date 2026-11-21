@@ -42,7 +42,10 @@ import time
 from datetime import datetime, timezone
 
 SCHEMA = "shieldcortex.posture.self-report"
-VERSION = 1
+# #970: v2 carries instance.pid_ns. A CLI from before #970 reads only v1 and
+# refuses this report by version, so the CLI must be updated before this plugin
+# (`shieldcortex update` does that, and copies this plugin from its own package).
+VERSION = 2
 MAX_BYTES = 8192
 MAX_INTERVALS = 8
 REASON_MAX = 120

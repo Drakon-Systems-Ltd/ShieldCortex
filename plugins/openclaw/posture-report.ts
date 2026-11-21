@@ -34,7 +34,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const POSTURE_SCHEMA = 'shieldcortex.posture.self-report';
-export const POSTURE_VERSION = 1;
+/**
+ * #970: v2 carries `instance.pid_ns`. A CLI from before #970 reads only v1 and
+ * refuses this report by version, so the CLI must be updated before this
+ * plugin (`shieldcortex update` does that, and pins this plugin to its own
+ * version).
+ */
+export const POSTURE_VERSION = 2;
 export const POSTURE_MAX_BYTES = 8192;
 const MAX_INTERVALS = 8;
 const REASON_MAX = 120;
