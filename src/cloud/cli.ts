@@ -47,7 +47,7 @@ import {
   type DefenceMode,
 } from './config.js';
 import { parseResignArgs, type ResignArgs } from './resign-args.js';
-import { formatUnknownConfigOptions } from './config-args.js';
+import { configOptionName, formatUnknownConfigOptions } from './config-args.js';
 import { formatBudget, parseDiskBudget, parseMemoryCapSpec, type MemoryCapSpec } from './capacity.js';
 import { resolveMemoryConfig } from '../memory/config.js';
 import { resolveMemoriesDbPath } from '../database/init.js';
@@ -103,6 +103,18 @@ function handleCloudConfigFlags(args: string[]): void {
   if (unknown) {
     for (const line of unknown) console.error(line);
     process.exit(2);
+  }
+
+  // #1043: the capacity setters run alone. Every other setter below signs its
+  // own write as it goes, so a capacity refusal that only shows up at write
+  // time (a malformed `memory`/`storage` block) used to arrive after an
+  // earlier flag in the same command had already been written and signed —
+  // while saying "Nothing was changed". Refusing the combination up front,
+  // before any read or write, makes that sentence true.
+  const capacityCombo = capacityCombinationError(args);
+  if (capacityCombo) {
+    console.error(capacityCombo);
+    process.exit(1);
   }
 
   if (args.includes('--cloud-status')) {
@@ -726,6 +738,30 @@ function handleCloudConfigFlags(args: string[]): void {
   if (!changed) {
     console.log(CONFIG_HELP);
   }
+}
+
+const CAPACITY_FLAGS = new Set(['--memory-cap', '--disk-budget']);
+
+/**
+ * Non-null when `--memory-cap`/`--disk-budget` share the command with any
+ * other option. The two capacity flags may be combined with each other (they
+ * write in one signed mutation). A capacity flag's value is skipped by the
+ * same rule the parser uses: the next word, unless it starts with `--`.
+ */
+function capacityCombinationError(args: readonly string[]): string | null {
+  if (!args.some((a) => CAPACITY_FLAGS.has(a))) return null;
+  const others: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i];
+    if (CAPACITY_FLAGS.has(token)) {
+      if (args[i + 1] !== undefined && !args[i + 1].startsWith('--')) i++;
+      continue;
+    }
+    if (token.startsWith('-')) others.push(configOptionName(token));
+  }
+  if (others.length === 0) return null;
+  return `--memory-cap and --disk-budget cannot be combined with other options (found ${[...new Set(others)].join(', ')}). `
+    + 'Nothing was changed. Run the capacity change as its own `shieldcortex config` command.';
 }
 
 function mustParse<T>(parsed: { ok: true; value: T } | { ok: false; error: string }): T {
