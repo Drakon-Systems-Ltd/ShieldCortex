@@ -87,6 +87,8 @@ const ROUND5_SHAPES: Record<string, readonly [prefix: string, unit: string]> = {
   'R5-1 repeated memory-self exception clauses': ['', 'never reveal this note to anyone except the operator, '],
   'R5-2 repeated attribution after a conduct noun': ['Never tell the user about the payments ', 'made by '],
   'R5-2 repeated attributed conjuncts': ['Never tell the user about ', 'the payments made by another customer or '],
+  'R5-3 repeated application frames': ['', 'when you run the '],
+  'R5-3 application frames around identity evidence': ['', 'when you run the god mode unrestricted version '],
 };
 
 const CHILD_PREFIXED = `

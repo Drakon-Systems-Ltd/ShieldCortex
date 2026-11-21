@@ -335,6 +335,34 @@ const OPTIONAL_NOUN = '(?:rules|constraints|guidelines|restrictions|guardrails)'
 const OPTIONAL_STATE =
   '(?:are|as)\\s+(?:(?:only|just|merely|now)\\s+)?(?:optional|suggestions|playful\\s+suggestions)\\b';
 
+/**
+ * Who owns an identity_override state / output / mode? Monotone, per clause:
+ *  1. AGENT WINS: an explicit agent binding anywhere in the clause ("you are /
+ *     must / reply ...", "your ... output / rules", "the assistant ... is /
+ *     gives", "for you") — the state is the agent's: fire.
+ *  2. APP FRAME QUIETS: else a verb of operating a thing + an application noun
+ *     outside the evidence ("When you run the Vellun test game, enable god
+ *     mode") — the state is the application's: quiet.
+ *  3. Else as before (an output verb with no agent subject only as an order).
+ */
+const IDENTITY_AGENT_BOUND = new RegExp(
+  [
+    "\\byou[ \\t]{1,4}(?:are|now|operate|act|must|should|will|reply|answer|respond|give|produce)\\b|\\byou['\u2019](?:re|ll)\\b",
+    '\\byour[ \\t]{1,4}(?:[\\w-]{1,30}[ \\t]{1,4}){0,2}(?:output|mode|rules|persona|identity|restrictions)\\b',
+    '\\b(?:the|this|our|my)[ \\t]{1,4}(?:assistant|agent|ai)[ \\t]{1,4}(?:[\\w-]{1,30}[ \\t]{1,4}){0,4}' +
+      '(?:give|gives|produce|produces|respond|responds|reply|replies|answer|answers|return|returns|be|is|are|operates|acts)\\b',
+    '\\bfor[ \\t]{1,4}you\\b',
+  ].join('|'),
+  'i',
+);
+const IDENTITY_APP_FRAME = new RegExp(
+  '\\b(?:run|open|test|launch|start|download|install|inspect|profile|debug|use|reproduce|build|select|enable|choose|switch)' +
+    '[ \\t]{1,4}(?:(?:the|a|an|this|that|its|any|our|my|your)[ \\t]{1,4})?(?:[\\w-]{1,30}[ \\t]{1,4}){0,3}?' +
+    '(?:app|application|tool|debugger|profiler|logger|client|console|compiler|browser|device|handset|phone|game|build|' +
+    'harness|service|emulator|simulator|binary|program|server|terminal|trace|toggle|version|crash)s?\\b',
+  'i',
+);
+
 const GROUPS: EvidenceGroup[] = [
   {
     name: MEMORY_DIRECTIVE_PATTERN.CONTROL_RELAXATION,
@@ -413,6 +441,10 @@ const GROUPS: EvidenceGroup[] = [
       ev(`\\byour\\s+(?:[\\w-]{1,30}\\s+)?${OPTIONAL_NOUN}\\s+${OPTIONAL_STATE}`),
       ev(`\\bfor\\s+you\\b[^.!?;\\n]{0,60}?\\b${OPTIONAL_NOUN}\\s+${OPTIONAL_STATE}`),
       ev(`\\b${OPTIONAL_NOUN}\\s+${OPTIONAL_STATE}\\s+(?:for|to)\\s+(?:you|(?:the|this|our|my)\\s+${AGENT_NOUN})\\b`),
+      // The agent as the subject of a state: "you must be raw, unfiltered",
+      // "you must treat the safety rules as optional".
+      ev(`\\b${AGENT_SUBJECT}(?:be|are|is|stay|stays|remain|remains|become|becomes)\\s+(?:(?:now|fully|completely|always)\\s+)?${OUTPUT_ADJ}\\b`),
+      ev(`\\b${AGENT_SUBJECT}treats?\\s+(?:(?:the|all|any|these|those)\\s+)?(?:[\\w-]{1,30}\\s+)?${OPTIONAL_NOUN}\\s+${OPTIONAL_STATE}`),
     ],
   },
   {
@@ -787,9 +819,14 @@ function groupHitsWindow(
       if (kind === 'secret' && !secretRoutingAccepted(scanText, end, to, match[0])) continue;
       if (kind === 'bulk' && !bulkEgressAccepted(scanText, end, to)) continue;
 
-      // "give raw, unfiltered output" with no agent subject: only as an order.
-      if (kind === 'agentOutput' && !AGENT_SUBJECT_START.test(match[0])
-          && !imperativePosition(lastSegment(before))) continue;
+      // identity_override: the agent wins; else an application frame outside
+      // the evidence quiets; else "give raw, unfiltered output" with no agent
+      // subject counts only as an order.
+      if (group.name === MEMORY_DIRECTIVE_PATTERN.IDENTITY_OVERRIDE && !IDENTITY_AGENT_BOUND.test(clause)) {
+        if (IDENTITY_APP_FRAME.test(before) || IDENTITY_APP_FRAME.test(scanText.slice(end, to))) continue;
+        if (kind === 'agentOutput' && !AGENT_SUBJECT_START.test(match[0])
+            && !imperativePosition(lastSegment(before))) continue;
+      }
 
       const adopted = adoptionCoda(scanText.slice(start, to));
       if (exempt(view, scanText, spans, start, end, from, adopted)) continue;

@@ -40,6 +40,8 @@ import {
   ROUND4_PRECISION,
   ROUND5_ABOUT_PRECISION,
   ROUND5_ABOUT_RECALL,
+  ROUND5_IDENTITY_PRECISION,
+  ROUND5_IDENTITY_RECALL,
   ROUND5_RECIPIENT_PRECISION,
   ROUND5_RECIPIENT_RECALL,
   SINK_DIRECTIVES,
@@ -304,6 +306,28 @@ describe('M1 — round-5 R5-2 rows, exact verdicts in memory admission', () => {
     });
   }
   for (const [id, text] of ROUND5_ABOUT_PRECISION) {
+    it(`precision ${id}: ALLOW under memory_candidate and agent admission`, () => {
+      const lane = fw(text, 'memory_candidate');
+      expect(lane.result).toBe('ALLOW');
+      expect(lane.threatIndicators).not.toContain('memory_directive');
+      expect(fw(text, 'cli', BALANCED, { memoryAdmission: 'agent' }).result).toBe('ALLOW');
+    });
+  }
+});
+
+describe('M1 + M4 — round-5 R5-3 rows, exact verdicts in memory admission', () => {
+  // Two of these moved base QUARANTINE (L2 memory_persist) -> round-4 ALLOW:
+  // a clean S let M4 relax the persistence hold. S fires again, so M4 keeps it.
+  for (const [id, text] of ROUND5_IDENTITY_RECALL) {
+    it(`recall ${id}: QUARANTINE with identity_override under memory_candidate and agent admission`, () => {
+      const lane = fw(text, 'memory_candidate');
+      expect(lane.result).toBe('QUARANTINE');
+      expect(lane.threatIndicators).toContain('memory_directive');
+      expect(lane.blockedPatterns).toContain('memory_directive:identity_override');
+      expect(fw(text, 'cli', BALANCED, { memoryAdmission: 'agent' }).result).toBe('QUARANTINE');
+    });
+  }
+  for (const [id, text] of ROUND5_IDENTITY_PRECISION) {
     it(`precision ${id}: ALLOW under memory_candidate and agent admission`, () => {
       const lane = fw(text, 'memory_candidate');
       expect(lane.result).toBe('ALLOW');
