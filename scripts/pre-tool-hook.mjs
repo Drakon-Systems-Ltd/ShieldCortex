@@ -3132,7 +3132,7 @@ function selfProtectionSignals(guard) {
 // tool-action-guard.ts `GUARD_PROMPT_ONLY_SIGNALS` for a dist that predates
 // the export; the live path reads the guard's own export. Held equal by
 // enforcement-surface-parity.
-const FALLBACK_PROMPT_ONLY_SIGNALS = ['reverse-shell'];
+const FALLBACK_PROMPT_ONLY_SIGNALS = ['reverse-shell', 'env-credential-egress'];
 
 /** The prompt-only signals the live guard exports, else the duplicate. */
 function promptOnlySignals(guard) {

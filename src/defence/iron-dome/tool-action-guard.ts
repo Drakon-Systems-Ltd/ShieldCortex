@@ -5923,6 +5923,9 @@ export function isGuardSelfProtectionVerdict(signals: readonly string[] | undefi
  */
 export const GUARD_PROMPT_ONLY_SIGNALS: readonly string[] = Object.freeze([
   'reverse-shell',
+  // #1005 (SCN-008b): the card cannot show the value that would leave, so a
+  // standing `network_egress`/`egress`/`exec` entry must not release it.
+  'env-credential-egress',
 ]);
 
 /** True when a verdict's signals may be released only by a human answer. */
@@ -9281,6 +9284,7 @@ function dangerActionFor(signals: string[], family: ToolFamily): string {
   // An `autoApprove` entry naming this action does not release it: the signal is
   // in GUARD_PROMPT_ONLY_SIGNALS, which both enforcement planes check first.
   if (signals.includes('reverse-shell')) return 'network_egress';
+  // Same exemption for env-credential-egress (also prompt-only).
   if (signals.includes('env-credential-egress')) return 'network_egress';
   if (signals.includes('external-egress')) return 'network_egress';
   if (signals.includes('touch-sensitive-path')) return 'access_secret_path';
