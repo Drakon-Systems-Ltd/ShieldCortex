@@ -51,6 +51,10 @@ describe('resolveApproveTapState (#815 S1, inert)', () => {
     expect(resolveApproveTapState({ ...good, enabled: false }, true, deps())).toMatchObject({ state: 'opted-out' });
   });
 
+  it('T3b own false is opted-out whatever else is missing (false-enabled, no notify chat)', () => {
+    expect(resolveApproveTapState({ ...good, enabled: false }, false, deps())).toMatchObject({ state: 'opted-out' });
+  });
+
   it('T4 absent enabled is cannot-arm/disabled today (S3 changes this one branch to auto)', () => {
     const { enabled: _enabled, ...absent } = good;
     expect(resolveApproveTapState(absent, true, deps())).toMatchObject({ state: 'cannot-arm', missing: 'disabled' });
@@ -90,5 +94,51 @@ describe('resolveApproveTapState (#815 S1, inert)', () => {
       .toMatchObject({ armed: true, secretVisible: false });
     expect(resolveApproveTapState({ ...good, enabled: 'true' }, true, deps({ lstat: errno('EACCES') })).state).toBe('cannot-arm');
     expect(resolveApproveTapState(good, false, deps({ lstat: errno('EACCES') }))).toMatchObject({ missing: 'no-notify-chat' });
+  });
+
+  it('T9 inherited enabled never arms and never opts out (own-property read only)', () => {
+    const own = { approverTelegramUid: good.approverTelegramUid, secretPath: good.secretPath };
+    const viaLiteral = { __proto__: { enabled: true, ...own } };
+    const viaSetPrototype = Object.setPrototypeOf({ ...own }, { enabled: true });
+    const inheritedFalse = { __proto__: { enabled: false } };
+    for (const raw of [viaLiteral, viaSetPrototype, inheritedFalse]) {
+      expect(resolveApproveTapState(raw, true, deps())).toMatchObject({ state: 'cannot-arm', missing: 'disabled' });
+    }
+  });
+
+  it('T10 a JSON "__proto__" key assigned onto a plain object is an inherited enabled: disabled', () => {
+    const parsed = JSON.parse('{"__proto__":{"enabled":true},"approverTelegramUid":"123456","secretPath":"/fixture/approve.secret"}');
+    const assigned = Object.assign({}, parsed) as Record<string, unknown>;
+    expect(Object.hasOwn(assigned, 'enabled')).toBe(false);
+    expect(resolveApproveTapState(assigned, true, deps())).toMatchObject({ state: 'cannot-arm', missing: 'disabled' });
+    // The raw JSON.parse result has no enabled of its own either.
+    expect(resolveApproveTapState(parsed, true, deps())).toMatchObject({ state: 'cannot-arm', missing: 'disabled' });
+  });
+
+  it('T11 own false beats inherited true; own true with inherited false still arms', () => {
+    const ownFalse = Object.setPrototypeOf({ ...good, enabled: false }, { enabled: true });
+    expect(resolveApproveTapState(ownFalse, true, deps())).toMatchObject({ state: 'opted-out' });
+    const ownTrue = Object.setPrototypeOf({ ...good, enabled: true }, { enabled: false });
+    expect(resolveApproveTapState(ownTrue, true, deps())).toMatchObject({ state: 'armed' });
+  });
+
+  it('T12 enabled is read once: an accessor that flips after the first read cannot arm', () => {
+    let reads = 0;
+    const raw = { approverTelegramUid: good.approverTelegramUid, secretPath: good.secretPath };
+    Object.defineProperty(raw, 'enabled', { enumerable: true, get: () => (++reads === 1 ? true : false) });
+    const r = resolveApproveTapState(raw, true, deps());
+    expect(reads).toBe(1);
+    expect(r.state).toBe('armed');
+    reads = 0;
+    const flipUp = { approverTelegramUid: good.approverTelegramUid, secretPath: good.secretPath };
+    Object.defineProperty(flipUp, 'enabled', { enumerable: true, get: () => (++reads === 1 ? 'false' : true) });
+    expect(resolveApproveTapState(flipUp, true, deps())).toMatchObject({ state: 'cannot-arm', missing: 'disabled' });
+    expect(reads).toBe(1);
+  });
+
+  it('T13 notify presence is strict: only boolean true counts', () => {
+    for (const notify of [1, 'yes', {}, undefined, null] as unknown as boolean[]) {
+      expect(resolveApproveTapState(good, notify, deps())).toMatchObject({ state: 'cannot-arm', missing: 'no-notify-chat' });
+    }
   });
 });

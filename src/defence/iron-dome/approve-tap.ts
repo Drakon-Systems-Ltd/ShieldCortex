@@ -1121,28 +1121,38 @@ export type ApproveTapState =
  * Any `enabled` other than strict `true` or `false` (junk) never arms.
  *
  * @param raw           the raw `actionGuard.approveTap` block.
- * @param notifyPresent whether the caller found an owner notify chat configured.
+ * @param notifyPresent whether the caller found an owner notify chat configured; only strict `true` counts.
  */
 export function resolveApproveTapState(
   raw: unknown,
   notifyPresent: boolean,
   deps: TapArmingDeps = {},
 ): ApproveTapState {
-  const block = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  // Read each field once, from the object's own properties only, so an inherited
+  // or accessor-backed value can neither arm nor opt out, and every later step
+  // sees the same values this step decided on.
+  const own = (key: string): unknown => (Object.hasOwn(src, key) ? src[key] : undefined);
+  const block = {
+    enabled: own('enabled'),
+    approverTelegramUid: own('approverTelegramUid'),
+    secretPath: own('secretPath'),
+    port: own('port'),
+  };
   if (block.enabled === false) {
     return { state: 'opted-out', message: 'One-tap approve is switched off in config (enabled: false).' };
   }
   if (block.enabled !== true) {
     return { state: 'cannot-arm', missing: 'disabled', message: describeTapArmingFailure('disabled') };
   }
-  if (!notifyPresent) {
+  if (notifyPresent !== true) {
     return {
       state: 'cannot-arm',
       missing: 'no-notify-chat',
       message: 'One-tap approve cannot arm: no owner notify chat is configured, so there is nowhere to send the card.',
     };
   }
-  const arming = checkApproveTapArming(normaliseApproveTapConfig(raw), deps);
+  const arming = checkApproveTapArming(normaliseApproveTapConfig(block), deps);
   if (arming.armed) return { state: 'armed', message: arming.message };
   return { state: 'cannot-arm', missing: arming.reason, message: arming.message };
 }
