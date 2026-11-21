@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { collectPostureRecords, linuxProcessStart, postureSelfReportDir } from '../collect.js';
+import { collectPostureRecords, linuxPidNamespace, linuxProcessStart, postureSelfReportDir } from '../collect.js';
 import { DEFAULT_MAX_AGE_MS, MAX_INSTANCES_PER_PROFILE, parseSelfReport, summarisePosture } from '../posture-record.js';
 import {
   LIVE,
@@ -164,7 +164,10 @@ describe('#613 self-report file is untrusted', () => {
       const t = new Date(NOW - (total - i) * 1000);
       fs.utimesSync(f, t, t);
     }
-    const hermes = collect().filter((r) => r.runtime === 'hermes');
+    const all = collect().filter((r) => r.runtime === 'hermes');
+    // #970: every one of these pids has exited, so the present Hermes also keeps its one no-current-report record.
+    expect(all.filter((r) => r.key.instance === null).map((r) => r.stale)).toEqual([false]);
+    const hermes = all.filter((r) => r.key.instance !== null);
     expect(hermes).toHaveLength(MAX_INSTANCES_PER_PROFILE);
     expect(hermes.some((r) => r.key.instance === `p${1000 + total - 1}-s${total}`)).toBe(true);
     expect(hermes.some((r) => r.key.instance === 'p1000-s1')).toBe(false);
@@ -198,16 +201,27 @@ describe('#613 process-start check (Linux /proc)', () => {
     expect(linuxProcessStart(2 ** 22 + 12345)).toBeNull();
   });
 
-  (linux ? it : it.skip)('the real check: this process alive, a mismatched start token ended', () => {
+  (linux ? it : it.skip)('reads this process\'s own PID namespace id (#970)', () => {
+    const ns = linuxPidNamespace();
+    expect(ns).toMatch(/^[0-9]+$/);
+    expect(fs.readlinkSync('/proc/self/ns/pid')).toBe(`pid:[${ns}]`);
+  });
+
+  (linux ? it : it.skip)('the real check: this process alive, a mismatched start token ended (same PID namespace)', () => {
     hermesInstalled();
     const start = linuxProcessStart(process.pid)!;
-    writeReport(configDir, reportBody({ instance: otherInstance(process.pid, start) }));
-    writeReport(configDir, reportBody({ profile: 'reuse', instance: otherInstance(process.pid, `${start}9`) }));
-    const recs = collectPostureRecords({ home, configDir, nowMs: NOW, hostDeps: noOpenClawBinary }).filter((r) => r.runtime === 'hermes');
+    const ns = linuxPidNamespace();
+    writeReport(configDir, reportBody({ instance: { ...otherInstance(process.pid, start), pid_ns: ns } }));
+    writeReport(configDir, reportBody({ profile: 'reuse', instance: { ...otherInstance(process.pid, `${start}9`), pid_ns: ns } }));
+    writeReport(configDir, reportBody({ profile: 'foreign', instance: { ...otherInstance(process.pid, `${start}9`), pid_ns: `${ns}9` } }));
+    const recs = collectPostureRecords({ home, configDir, nowMs: NOW, hostDeps: noOpenClawBinary })
+      .filter((r) => r.runtime === 'hermes' && r.key.instance !== null);
     const byProfile = Object.fromEntries(recs.map((r) => [r.profile, r]));
     expect(byProfile.default.liveness.value).toBe('alive');
     expect(byProfile.default.membership).toBe('current');
     expect(byProfile.reuse.liveness.value).toBe('ended');
+    // #970: in another PID namespace the same pid number is a different process.
+    expect(byProfile.foreign.liveness.value).toBe('unverified');
   });
 
   it('with no start token reported, a live pid cannot be told from a reused one: unverified', () => {

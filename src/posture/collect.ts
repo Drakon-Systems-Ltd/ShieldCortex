@@ -20,7 +20,9 @@
  *
  * A file is bounded host-local evidence, never liveness on its own: for a
  * resident process the host's process-start check decides whether the
- * reporter is still the process that wrote it.
+ * reporter is still the process that wrote it. That check only proves an
+ * exit inside the reporter's own PID namespace (#970): a report that recorded
+ * another namespace, or none, is never `ended` by a pid lookup here.
  */
 
 import fs from 'fs';
@@ -36,6 +38,7 @@ import {
   isValidInstanceKey,
   isValidProfileId,
   markStaleRecords,
+  noCurrentReportRecord,
   parseSelfReport,
   type GateRuntimeId,
   type Installed,
@@ -53,6 +56,12 @@ export interface CollectDeps {
    * when it does not, undefined when this host cannot tell.
    */
   processStart?: (pid: number) => string | null | undefined;
+  /**
+   * #970: the collector's own PID namespace id (Linux: inode of
+   * /proc/self/ns/pid), or null where it cannot be read. A pid lookup proves
+   * a reporter exited only when its report recorded this same id.
+   */
+  pidNamespace?: () => string | null;
   /** This user's uid, or undefined where the platform has none. */
   uid?: () => number | undefined;
 }
@@ -100,8 +109,24 @@ export function linuxProcessStart(pid: number): string | null | undefined {
   return start && /^[0-9]+$/.test(start) ? start : undefined;
 }
 
+/**
+ * Linux: this process's PID namespace id — the inode of /proc/self/ns/pid,
+ * the same number `readlink` shows as `pid:[<inode>]`. Null elsewhere or when
+ * unreadable. The writers record the same value in each report (#970).
+ */
+export function linuxPidNamespace(): string | null {
+  if (process.platform !== 'linux') return null;
+  try {
+    const ino = fs.statSync('/proc/self/ns/pid', { bigint: true }).ino;
+    return ino > 0n ? ino.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 const defaultDeps: Required<CollectDeps> = {
   processStart: linuxProcessStart,
+  pidNamespace: linuxPidNamespace,
   uid: () => (typeof process.getuid === 'function' ? process.getuid() : undefined),
 };
 
@@ -182,10 +207,16 @@ export function readSelfReportFile(
   }
 }
 
-function checkLiveness(read: SelfReportRead, deps: Required<CollectDeps>): LivenessCheck {
+function checkLiveness(read: SelfReportRead, deps: Required<CollectDeps>, collectorNs: string | null): LivenessCheck {
   if (read.kind !== 'valid') return 'unsupported';
-  const { pid, process_start: start, liveness } = read.report.instance;
+  const { pid, process_start: start, liveness, pid_ns: reportNs } = read.report.instance;
   if (liveness !== 'process' || pid === null) return 'unsupported';
+  // #970: a pid number means something only inside its own PID namespace. A
+  // report from another namespace cannot be looked up here at all; one that
+  // recorded none (an earlier writer) can still be shown ALIVE by an exact
+  // pid + start match, but a miss is not proof it exited.
+  if (reportNs !== null && collectorNs !== null && reportNs !== collectorNs) return 'unscoped';
+  const sameNs = reportNs !== null && reportNs === collectorNs;
   let seen: string | null | undefined;
   try {
     seen = deps.processStart(pid);
@@ -193,10 +224,11 @@ function checkLiveness(read: SelfReportRead, deps: Required<CollectDeps>): Liven
     seen = undefined;
   }
   if (seen === undefined) return 'unsupported';
-  if (seen === null) return 'ended';
+  if (seen === null) return sameNs ? 'ended' : 'unscoped';
   // Pid exists. Without a reported start token a reused pid is indistinguishable.
   if (start === null) return 'unsupported';
-  return seen === start ? 'alive' : 'ended';
+  if (seen === start) return 'alive';
+  return sameNs ? 'ended' : 'unscoped';
 }
 
 interface ProfileFiles {
@@ -316,9 +348,17 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
   } catch {
     uid = undefined;
   }
+  let collectorNs: string | null;
+  try {
+    collectorNs = deps.pidNamespace();
+  } catch {
+    collectorNs = null;
+  }
   const dir = postureSelfReportDir(configDir);
   const table = scanHostTable(home, opts.hostDeps ?? {});
   const present = new Map(table.rows.map((r) => [r.id, r.present]));
+  // #970: the same host table the HOSTS section prints decides "absent".
+  const absentRuntimes = (Object.keys(HOST_ID_FOR) as PostureRuntimeId[]).filter((rt) => !present.get(HOST_ID_FOR[rt]));
   const records: PostureRecord[] = [];
 
   for (const runtime of GATE_RUNTIMES) {
@@ -354,12 +394,19 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
         } else {
           read = readSelfReportFile(file, { runtime, profile: pf.profile, instance }, uid);
         }
-        recs.push(derive(read, checkLiveness(read, deps), read.kind === 'invalid' ? fileMtimeMs(file) : null));
+        recs.push(derive(read, checkLiveness(read, deps, collectorNs), read.kind === 'invalid' ? fileMtimeMs(file) : null));
       }
       if (pf.skipped > 0) {
         for (const r of recs) r.notes.push(`${pf.skipped} further instance report(s) for this profile were not read (cap ${MAX_INSTANCES_PER_PROFILE})`);
       }
-      records.push(...recs);
+      // #970: staleness is decided within this (runtime, profile). A PRESENT
+      // runtime whose every report is stale keeps one non-green record — the
+      // same one it would get with no report at all.
+      const marked = markStaleRecords(recs, { absentRuntimes });
+      records.push(...marked);
+      if (present.get(hostId) && marked.length > 0 && marked.every((r) => r.stale)) {
+        records.push(noCurrentReportRecord(derive({ kind: 'absent' }), marked.length));
+      }
     }
   }
 
@@ -367,10 +414,8 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
     const hostId = HOST_ID_FOR[runtime];
     const { installed } = probeInstalled(runtime, home, 'default');
     if (!present.get(hostId) && installed === 'no') continue;
-    records.push(deriveMemoryOnlyRecord({ runtime, profile: 'default', installed, nowMs }));
+    records.push(...markStaleRecords([deriveMemoryOnlyRecord({ runtime, profile: 'default', installed, nowMs })], { absentRuntimes }));
   }
 
-  // #970: the same host table the HOSTS section prints decides "absent".
-  const absentRuntimes = (Object.keys(HOST_ID_FOR) as PostureRuntimeId[]).filter((rt) => !present.get(HOST_ID_FOR[rt]));
-  return markStaleRecords(records, { absentRuntimes });
+  return records;
 }

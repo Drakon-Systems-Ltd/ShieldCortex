@@ -35,11 +35,16 @@
  *    `synthetic-probe` from `blocked-action`; only blocked actions are counted.
  *  - **Memory-only is never a tool gate.**
  *  - **No host-wide rollup to green.** A summary is its weakest record.
- *  - **Stale is listed, never judged (#970).** A record whose reporter is
- *    gone, superseded, long unseen, or whose runtime the host table calls
- *    absent stays in the list with `stale: true` and a reason, and is left
- *    out of the summary. A process the host confirms is running is never
- *    stale: a live `unknown` still sets the summary.
+ *  - **Stale is listed, never judged (#970).** A record whose reporter the
+ *    host shows has ended, that has not been seen for `STALE_NOT_SEEN_MS`,
+ *    that a newer current record of the same group supersedes, or whose
+ *    runtime the host table calls absent stays in the list with
+ *    `stale: true` and a reason, and is left out of the summary. Silence and
+ *    start-time ordering are not proof that anything ended. A process the
+ *    host confirms is running is never stale: a live `unknown` still sets the
+ *    summary. A present runtime whose reports are ALL stale keeps one
+ *    non-green "no current report" record, so an old report never judges a
+ *    host greener than no report at all.
  *  - **The self-report is untrusted.** It is size-capped and validated
  *    against a closed schema, never executed or interpolated; an unknown
  *    version is `unknown`, not guessed forward.
@@ -125,6 +130,12 @@ export interface ProcessIdentity {
   pid: number | null;
   /** Host-specific start token (Linux: /proc/<pid>/stat starttime). */
   process_start: string | null;
+  /**
+   * #970: the reporter's PID namespace (Linux: inode of /proc/self/ns/pid),
+   * null when it did not record one. A pid lookup only proves the process
+   * exited when this equals the collector's own namespace.
+   */
+  pid_ns: string | null;
   started_at: string;
   liveness_mode: LivenessMode;
 }
@@ -174,20 +185,22 @@ export type ObsoleteReason =
 
 /**
  * #970 — why a record is stale (kept in the list, never judged for the host
- * posture):
+ * posture). Each needs evidence; silence alone is never enough:
  *
  * - `process-ended`: the host says the reporting pid is gone, or now belongs
- *   to another process.
- * - `superseded`: the host cannot check the process, and a later-started
- *   process reported for the same (runtime, profile, plane) — a restart.
- * - `not-seen`: the host cannot check the process and nothing was heard from
- *   it for `STALE_NOT_SEEN_MS`.
- * - `no-recent-call`: a per-call hook (no resident process) whose last call
- *   is older than `max_age`. Recency is that reporter's only evidence.
+ *   to another process, AND the report recorded the same PID namespace as
+ *   the collector's — outside that namespace a missing pid proves nothing.
+ * - `not-seen`: the host cannot confirm the process (or it is a per-call
+ *   hook, or the report was rejected) and nothing was heard from it for
+ *   `STALE_NOT_SEEN_MS`.
+ * - `superseded`: a per-call hook (no resident process) silent for longer
+ *   than `max_age`, beside a NEWER record of the same (runtime, profile,
+ *   plane) that is current itself and temporally valid. Never applied to a
+ *   resident process: a later start time is not proof an earlier one ended.
  * - `runtime-absent`: the host table classifies the runtime as absent and no
  *   running process contradicts it.
  */
-export type StaleReason = 'process-ended' | 'superseded' | 'not-seen' | 'no-recent-call' | 'runtime-absent';
+export type StaleReason = 'process-ended' | 'superseded' | 'not-seen' | 'runtime-absent';
 
 export interface PostureRecord {
   record_version: typeof POSTURE_RECORD_VERSION;
@@ -243,6 +256,12 @@ export interface SelfReport {
     key: string;
     pid: number | null;
     process_start: string | null;
+    /**
+     * #970, additive: the writer's PID namespace id (Linux: inode of
+     * /proc/self/ns/pid). Optional on disk — a report without it parses as
+     * null, so every earlier writer's report stays valid.
+     */
+    pid_ns: string | null;
     started_at: string;
     liveness: LivenessMode;
   };
@@ -363,8 +382,12 @@ export function parseSelfReport(text: string, sizeBytes: number): SelfReportRead
   if (o.plane !== 'tool-gate') return bad('plane');
 
   const inst = o.instance;
-  if (!isObj(inst) || !exactKeys(inst, ['key', 'pid', 'process_start', 'started_at', 'liveness'])) return bad('instance');
+  // #970: `pid_ns` is the one optional key, so reports from earlier writers stay valid.
+  const instKeys = ['key', 'pid', 'process_start', 'started_at', 'liveness'];
+  if (!isObj(inst) || !(exactKeys(inst, instKeys) || exactKeys(inst, [...instKeys, 'pid_ns']))) return bad('instance');
+  const pidNs = inst.pid_ns === undefined ? null : inst.pid_ns;
   if (!isValidInstanceKey(inst.key) || !nullable(inst.pid, isPid) || !nullable(inst.process_start, isStart)
+    || !nullable(pidNs, isStart)
     || !isIso(inst.started_at) || (inst.liveness !== 'process' && inst.liveness !== 'per-call')) return bad('instance');
 
   if (!nullable(o.runtime_version, isIdent)) return bad('runtime_version');
@@ -400,6 +423,7 @@ export function parseSelfReport(text: string, sizeBytes: number): SelfReportRead
         key: inst.key,
         pid: inst.pid as number | null,
         process_start: inst.process_start as string | null,
+        pid_ns: pidNs as string | null,
         started_at: inst.started_at,
         liveness: inst.liveness,
       },
@@ -463,9 +487,12 @@ function evidence<V>(value: V, method: EvidenceMethod, source: string, over: Par
 /**
  * What the host could say about the reporting process.
  * `alive` / `ended` only from a real check; `unsupported` when this host
- * exposes no start identity (or the report named no pid).
+ * exposes no start identity (or the report named no pid). `unscoped` (#970):
+ * the pid lookup found nothing matching, but the report's PID namespace is
+ * different from the collector's or was not recorded, so that is not proof
+ * the process exited.
  */
-export type LivenessCheck = 'alive' | 'ended' | 'unsupported';
+export type LivenessCheck = 'alive' | 'ended' | 'unsupported' | 'unscoped';
 
 export interface ToolGateInput {
   runtime: GateRuntimeId;
@@ -586,6 +613,7 @@ export function deriveToolGateRecord(input: ToolGateInput): PostureRecord {
     instance: r.instance.key,
     pid: r.instance.pid,
     process_start: r.instance.process_start,
+    pid_ns: r.instance.pid_ns,
     started_at: r.instance.started_at,
     liveness_mode: r.instance.liveness,
   };
@@ -614,6 +642,10 @@ export function deriveToolGateRecord(input: ToolGateInput): PostureRecord {
   } else if (check === 'ended') {
     liveness = 'ended';
     livenessNote = 'the reporting process has exited, or its pid now belongs to a different process';
+  } else if (check === 'unscoped') {
+    liveness = 'unverified';
+    livenessNote = 'this host cannot confirm the reporting process is still running: the report was written in another PID '
+      + 'namespace, or did not record one, so a missing pid here is not proof it exited';
   } else {
     liveness = 'unverified';
     livenessNote = 'this host cannot confirm the reporting process is still running';
@@ -628,11 +660,13 @@ export function deriveToolGateRecord(input: ToolGateInput): PostureRecord {
     });
 
   // #970: staleness is about whether the reporter is still there, so it is
-  // decided here, before any early return. `alive` is never stale.
+  // decided here, before any early return. `alive` is never stale. A per-call
+  // hook silent past max_age is NOT stale on that alone (silence does not end
+  // a session): it is judged as unknown, unless `markStaleRecords` finds a
+  // newer current record beside it, or it reaches the not-seen age.
   let staleReason: StaleReason | null = null;
   if (liveness === 'ended') staleReason = 'process-ended';
-  else if (liveness === 'per-call' && nowMs - heartbeatMs > maxAgeMs) staleReason = 'no-recent-call';
-  else if (liveness === 'unverified' && nowMs - heartbeatMs > STALE_NOT_SEEN_MS) staleReason = 'not-seen';
+  else if ((liveness === 'unverified' || liveness === 'per-call') && nowMs - heartbeatMs > STALE_NOT_SEEN_MS) staleReason = 'not-seen';
   rec.stale = staleReason !== null;
   rec.stale_reason = staleReason;
 
@@ -770,13 +804,39 @@ export interface StaleContext {
   absentRuntimes?: Iterable<PostureRuntimeId>;
 }
 
+function parsedMs(iso: string | null | undefined): number | null {
+  if (typeof iso !== 'string') return null;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : t;
+}
+
+/**
+ * A record that may supersede another: current (so its heartbeat is within
+ * max_age and not in the future), not stale, and temporally valid — its
+ * process start parses and is not after the collection or its own heartbeat.
+ * Returns its heartbeat, or null.
+ */
+function supersedingHeartbeat(r: PostureRecord): number | null {
+  if (r.stale || r.membership !== 'current' || r.runtime_loaded.method !== 'process-self-report') return null;
+  const heartbeat = parsedMs(r.runtime_loaded.observed_at);
+  const started = parsedMs(r.liveness.process_identity?.started_at);
+  const collected = parsedMs(r.collected_at);
+  if (heartbeat === null || started === null || collected === null) return null;
+  if (started > collected + FUTURE_SKEW_MS || started > heartbeat + FUTURE_SKEW_MS) return null;
+  return heartbeat;
+}
+
 /**
  * The cross-record half of staleness; `deriveToolGateRecord` decides the
  * per-record half. Returns copies, never edits its input.
  *
- * - **Superseded.** Where the host cannot check a resident process, a
- *   later-started process reporting for the same (runtime, profile, plane) is
- *   the evidence of a restart, and the earlier report is stale.
+ * - **Superseded** (per-call hooks only). A per-call record silent for longer
+ *   than its max_age is stale when a NEWER record of the same (runtime,
+ *   profile, plane) is current, not stale and temporally valid. A stale,
+ *   ended, unverified or future-dated record supersedes nothing, and a
+ *   resident process is never superseded by start-time order: two concurrent
+ *   reporters both stay judged until one is shown to have ended or passes
+ *   the not-seen age.
  * - **Runtime absent.** A record for a runtime the host table says is not on
  *   this box is stale — unless the host confirms its process is running,
  *   which contradicts "absent" and is never hidden.
@@ -785,34 +845,53 @@ export interface StaleContext {
  */
 export function markStaleRecords(records: readonly PostureRecord[], ctx: StaleContext = {}): PostureRecord[] {
   const absent = new Set<PostureRuntimeId>(ctx.absentRuntimes ?? []);
-  const startedMs = (r: PostureRecord): number | null => {
-    const id = r.liveness.process_identity;
-    if (!id || id.liveness_mode !== 'process') return null;
-    const t = Date.parse(id.started_at);
-    return Number.isNaN(t) ? null : t;
-  };
-  const newest = new Map<string, number>();
+  const newestCurrent = new Map<string, number>();
   for (const r of records) {
-    const t = startedMs(r);
+    const t = supersedingHeartbeat(r);
     if (t === null) continue;
     const k = groupKey(r);
-    if (!newest.has(k) || t > newest.get(k)!) newest.set(k, t);
+    if (!newestCurrent.has(k) || t > newestCurrent.get(k)!) newestCurrent.set(k, t);
   }
+  const superseded = (r: PostureRecord): boolean => {
+    if (r.liveness.value !== 'per-call' || r.membership === 'current') return false;
+    const heartbeat = parsedMs(r.liveness.observed_at);
+    const collected = parsedMs(r.collected_at);
+    const maxAge = r.liveness.max_age_ms;
+    if (heartbeat === null || collected === null || maxAge === null || collected - heartbeat <= maxAge) return false;
+    const newer = newestCurrent.get(groupKey(r));
+    return newer !== undefined && newer > heartbeat;
+  };
   return records.map((r) => {
     if (r.stale) return r;
     let reason: StaleReason | null = null;
-    const t = startedMs(r);
-    if (r.liveness.value === 'unverified' && t !== null && t < (newest.get(groupKey(r)) ?? t)) reason = 'superseded';
-    else if (absent.has(r.runtime) && r.liveness.value !== 'alive') reason = 'runtime-absent';
+    if (absent.has(r.runtime) && r.liveness.value !== 'alive') reason = 'runtime-absent';
+    else if (superseded(r)) reason = 'superseded';
     return reason ? { ...r, stale: true, stale_reason: reason } : r;
   });
 }
 
+/**
+ * #970 — the one record a PRESENT runtime / profile keeps when every report
+ * found for it is stale: `base` is that group's no-report placeholder (what
+ * the collector derives for a runtime that never reported), so an old report
+ * never judges the host greener than no report at all. It is not stale, so
+ * it is judged, and like any no-report record it is never green.
+ */
+export function noCurrentReportRecord(base: PostureRecord, staleCount: number): PostureRecord {
+  const why = `present, no current report: all ${staleCount} report(s) found for this runtime are stale`;
+  return {
+    ...base,
+    runtime_loaded: { ...base.runtime_loaded, note: why },
+    notes: [...base.notes.filter((n) => n !== 'no self-report from the runtime process'), why],
+    stale: false,
+    stale_reason: null,
+  };
+}
+
 const STALE_TEXT: Record<StaleReason, string> = {
   'process-ended': 'the reporting process has ended',
-  superseded: 'a later-started process reported for the same runtime',
+  superseded: 'per-call hook silent past max_age, and a newer current record reported for the same runtime',
   'not-seen': `not seen for ${STALE_NOT_SEEN_MS / (24 * 60 * 60 * 1000)} days or more`,
-  'no-recent-call': 'per-call hook with no call within max_age',
   'runtime-absent': 'the runtime is not present on this host',
 };
 

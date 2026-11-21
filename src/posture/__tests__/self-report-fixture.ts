@@ -16,6 +16,13 @@ export const H = (c: string) => `sha256:${c.repeat(64)}`;
 export const PID = 4242;
 export const START = '100';
 export const INSTANCE = `p${PID}-s${START}`;
+/**
+ * #970: the PID namespace the fixture's reports and its fake process table
+ * share, so a pid missing from `processTable` proves the process exited. A
+ * report without `pid_ns` (an earlier writer) or with another one is never
+ * ended by a pid lookup.
+ */
+export const PID_NS = '4026531836';
 
 type Obj = Record<string, unknown>;
 
@@ -39,7 +46,7 @@ export function reportBody(over: Obj = {}): Obj {
     runtime: 'hermes',
     profile: 'default',
     plane: 'tool-gate',
-    instance: { key: INSTANCE, pid: PID, process_start: START, started_at: iso(NOW - 3_600_000), liveness: 'process' },
+    instance: { key: INSTANCE, pid: PID, process_start: START, pid_ns: PID_NS, started_at: iso(NOW - 3_600_000), liveness: 'process' },
     runtime_version: null,
     plugin: { id: 'shieldcortex', version: '0.1.0', hash: H('b') },
     heartbeat_at: iso(NOW - 60_000),
@@ -55,7 +62,7 @@ export function reportBody(over: Obj = {}): Obj {
 
 /** Same process, different pid/start: a second instance on the same profile. */
 export function otherInstance(pid: number, start: string): Obj {
-  return { key: `p${pid}-s${start}`, pid, process_start: start, started_at: iso(NOW - 1_800_000), liveness: 'process' };
+  return { key: `p${pid}-s${start}`, pid, process_start: start, pid_ns: PID_NS, started_at: iso(NOW - 1_800_000), liveness: 'process' };
 }
 
 export function writeRaw(configDir: string, runtime: string, profile: string, instance: string, text: string): string {
@@ -79,10 +86,14 @@ export function writeReport(configDir: string, body: Obj, fileInstance?: string,
   );
 }
 
-/** Deps with a fake process table: pid → start token. Absent pids have exited. */
-export function processTable(table: Record<number, string>): CollectDeps {
+/**
+ * Deps with a fake process table: pid → start token, seen from `PID_NS`.
+ * Absent pids have exited (for reports that recorded `PID_NS`).
+ */
+export function processTable(table: Record<number, string>, pidNs: string | null = PID_NS): CollectDeps {
   return {
     processStart: (pid) => (Object.prototype.hasOwnProperty.call(table, pid) ? table[pid] : null),
+    pidNamespace: () => pidNs,
     uid: () => (typeof process.getuid === 'function' ? process.getuid() : undefined),
   };
 }

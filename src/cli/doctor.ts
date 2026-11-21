@@ -4931,11 +4931,14 @@ export function readHostGatePlanesWithPosture(hostHome?: string): HostGatePlanes
  * `--strict` runs that passed before this check existed). The HOSTS table and
  * the host-contract `bound` evidence are untouched and stay display-only.
  *
- * #970: the host summary judges live records only. A stale record (its
- * process ended, was superseded, went unseen, or its runtime is absent from
- * the HOSTS table — see `StaleReason`) is still a row here, marked
- * `posture.stale`, always `info`, and never judged. The default report folds
- * a runtime's stale rows into one line; `--verbose` and `--json` keep them.
+ * #970: the host summary never judges a stale record (its process is shown
+ * to have ended, it went unseen for the not-seen age, a newer current record
+ * superseded a silent per-call one, or its runtime is absent from the HOSTS
+ * table — see `StaleReason`). It is still a row here, marked `posture.stale`,
+ * always `info`. A present runtime whose reports are all stale keeps one
+ * non-green "present, no current report" row, so it is judged exactly as if
+ * it had never reported. The default report folds a runtime's stale rows
+ * into one line; `--verbose` and `--json` keep them.
  *
  * Read-only: no config, consent or Guard state is changed by collecting, and
  * no self-report file is deleted.
@@ -5006,6 +5009,7 @@ export async function checkRuntimePosture(opts: CollectOptions = {}): Promise<Ch
         stale: r.stale,
         staleReason: r.stale_reason,
         instance: r.key.instance !== null,
+        verified: r.membership === 'current',
       },
     };
   });

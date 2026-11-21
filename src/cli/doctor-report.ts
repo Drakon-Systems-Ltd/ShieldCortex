@@ -90,25 +90,39 @@ export interface DoctorPostureRowMeta {
   group: string;
   stale: boolean;
   staleReason: string | null;
-  /** False for the placeholder row of a runtime that never reported. */
+  /**
+   * False for the placeholder row of a runtime with no report, and for the
+   * "present, no current report" row of one whose reports are all stale.
+   */
   instance: boolean;
+  /**
+   * True only when the host vouches for this record as current (a confirmed
+   * running process, or a per-call hook within max_age). A non-stale record
+   * that is not verified — an unchecked process, a rejected report — is
+   * counted as current but flagged unverified, never called live.
+   */
+  verified: boolean;
 }
 
 /**
  * #970 — the default report's view of the posture rows: each runtime's stale
- * rows fold into ONE line that says how many are live and how many are
+ * rows fold into ONE line that says how many are current (not stale), how
+ * many of those the host could not verify, and how many stale ones are
  * hidden, placed after that runtime's last row. Rows that are not stale are
  * returned untouched and in place. Stale rows are always `info`, so this
  * never changes a pass / warn / fail count.
  */
 export function collapseStalePostureRows<T extends DoctorReportItem>(rows: readonly T[]): Array<T | DoctorReportItem> {
-  const counts = new Map<string, { live: number; stale: number }>();
+  const counts = new Map<string, { current: number; unverified: number; stale: number }>();
   const lastIndex = new Map<string, number>();
   rows.forEach((r, i) => {
     if (!r.posture) return;
-    const c = counts.get(r.posture.group) ?? { live: 0, stale: 0 };
+    const c = counts.get(r.posture.group) ?? { current: 0, unverified: 0, stale: 0 };
     if (r.posture.stale) c.stale += 1;
-    else if (r.posture.instance) c.live += 1;
+    else if (r.posture.instance) {
+      c.current += 1;
+      if (!r.posture.verified) c.unverified += 1;
+    }
     counts.set(r.posture.group, c);
     lastIndex.set(r.posture.group, i);
   });
@@ -122,7 +136,8 @@ export function collapseStalePostureRows<T extends DoctorReportItem>(rows: reado
     out.push({
       label: group,
       status: 'info',
-      message: `${c.live} live, ${c.stale} stale instance${c.stale === 1 ? '' : 's'} hidden (--verbose to list)`,
+      message: `${c.current} current${c.unverified > 0 ? ` (${c.unverified} unverified)` : ''}, ` +
+        `${c.stale} stale hidden (--verbose to list)`,
     });
   });
   return out;

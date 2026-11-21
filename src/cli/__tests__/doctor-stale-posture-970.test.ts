@@ -6,9 +6,9 @@ import { checkRuntimePosture, RUNTIME_POSTURE_LABEL, type CheckResult } from '..
 import { collapseStalePostureRows, formatDoctorReport, sanitiseDoctorRowsForDisplay } from '../doctor-report.js';
 import { buildPolicyEvidence } from '../policy-evidence.js';
 import { collectPostureRecords, type CollectDeps } from '../../posture/collect.js';
-import { STALE_NOT_SEEN_MS, rollupRecords, summarisePosture } from '../../posture/posture-record.js';
+import { STALE_NOT_SEEN_MS, parseSelfReport, rollupRecords, summarisePosture } from '../../posture/posture-record.js';
 import { scanHostTable } from '../../setup/host-table.js';
-import { NOW, hermesHome, iso, processTable, reportBody, writeReport } from '../../posture/__tests__/self-report-fixture.js';
+import { NOW, PID_NS, hermesHome, hermesPluginArtefacts, iso, processTable, reportBody, writeReport } from '../../posture/__tests__/self-report-fixture.js';
 
 /**
  * #970 — stale runtime-posture records flooded doctor and set the host
@@ -51,7 +51,7 @@ afterEach(() => {
 });
 
 function instance(pid: number, start: string, startedAgoMs = HOUR): Record<string, unknown> {
-  return { key: `p${pid}-s${start}`, pid, process_start: start, started_at: iso(NOW - startedAgoMs), liveness: 'process' };
+  return { key: `p${pid}-s${start}`, pid, process_start: start, pid_ns: PID_NS, started_at: iso(NOW - startedAgoMs), liveness: 'process' };
 }
 
 function openclawReport(pid: number, start: string, over: Record<string, unknown> = {}): void {
@@ -187,10 +187,10 @@ describe('#970 output: stale rows fold into one line per runtime', () => {
       `${RUNTIME_POSTURE_LABEL}: OpenClaw (tool-gate, p${LIVE_PID}-s${LIVE_START})`,
     ]);
     expect(recordRows(shown, 'Hermes')).toEqual([]);
-    const collapsed = shown.filter((r) => /stale instances? hidden/.test(r.message));
+    const collapsed = shown.filter((r) => /stale hidden/.test(r.message));
     expect(collapsed.map((r) => `${r.label} — ${r.message}`)).toEqual([
-      `${RUNTIME_POSTURE_LABEL}: OpenClaw — 1 live, 4 stale instances hidden (--verbose to list)`,
-      `${RUNTIME_POSTURE_LABEL}: Hermes — 0 live, 2 stale instances hidden (--verbose to list)`,
+      `${RUNTIME_POSTURE_LABEL}: OpenClaw — 1 current, 4 stale hidden (--verbose to list)`,
+      `${RUNTIME_POSTURE_LABEL}: Hermes — 0 current, 2 stale hidden (--verbose to list)`,
     ]);
     for (const r of collapsed) expect(r.status).toBe('info');
     // 7 record rows became 1 live + 2 collapsed; nothing else moved.
@@ -199,18 +199,19 @@ describe('#970 output: stale rows fold into one line per runtime', () => {
 
     // The default report does the folding itself, from the full row set.
     const text = formatDoctorReport(sanitiseDoctorRowsForDisplay(rows), { width: 200 }).join('\n');
-    expect(text).toMatch(/Runtime posture: OpenClaw\n\s+1 live, 4 stale instances hidden \(--verbose to list\)/);
-    expect(text).toMatch(/Runtime posture: Hermes\n\s+0 live, 2 stale instances hidden \(--verbose to list\)/);
+    expect(text).toMatch(/Runtime posture: OpenClaw\n\s+1 current, 4 stale hidden \(--verbose to list\)/);
+    expect(text).toMatch(/Runtime posture: Hermes\n\s+0 current, 2 stale hidden \(--verbose to list\)/);
+    expect(text).not.toMatch(/\blive\b, \d+ stale/);
     for (const pid of [...DEAD_OPENCLAW, ...DEAD_HERMES]) expect(text).not.toContain(`p${pid}-s${pid}`);
     expect(text).toContain(`p${LIVE_PID}-s${LIVE_START}`);
   });
 
-  it('one stale instance is singular', async () => {
+  it('one current, one stale', async () => {
     openclawReport(LIVE_PID, LIVE_START);
     openclawReport(5001, '5001');
     const shown = collapseStalePostureRows(await checkRuntimePosture(opts()));
     expect(shown.find((r) => r.label === `${RUNTIME_POSTURE_LABEL}: OpenClaw`)!.message)
-      .toBe('1 live, 1 stale instance hidden (--verbose to list)');
+      .toBe('1 current, 1 stale hidden (--verbose to list)');
   });
 
   it('--verbose lists every record: the uncollapsed rows name each stale instance and why', async () => {
@@ -218,7 +219,7 @@ describe('#970 output: stale rows fold into one line per runtime', () => {
     const rows = await checkRuntimePosture(opts());
     const text = formatDoctorReport(sanitiseDoctorRowsForDisplay(rows), { width: 200, verbose: true }).join('\n');
     for (const pid of [...DEAD_OPENCLAW, ...DEAD_HERMES]) expect(text).toContain(`p${pid}-s${pid}`);
-    expect(text).not.toMatch(/stale instances? hidden/);
+    expect(text).not.toMatch(/stale hidden/);
     const stale = rows.filter((r) => r.posture?.stale);
     expect(stale).toHaveLength(6);
     for (const r of stale) {
@@ -272,15 +273,12 @@ describe('#970 every record is kept and marked stale: true|false with a reason (
 describe('#970 stale rules where the host cannot check a process', () => {
   const cannotTell: CollectDeps = { processStart: () => undefined };
 
-  it('a restart supersedes the earlier report for the same runtime', () => {
+  it('two concurrent fresh reporters: a later start supersedes nothing, both are judged (r2)', () => {
     openclawReport(7001, '1', { instance: instance(7001, '1', 3 * HOUR) });
     openclawReport(7002, '2', { instance: instance(7002, '2', HOUR) });
     const recs = collectPostureRecords(opts({ deps: cannotTell }));
-    const by = Object.fromEntries(recs.map((r) => [r.key.instance, r]));
-    expect({ stale: by['p7001-s1'].stale, reason: by['p7001-s1'].stale_reason }).toEqual({ stale: true, reason: 'superseded' });
-    expect(by['p7002-s2'].stale).toBe(false);
-    // The newest is still judged, and it is unknown: nothing vouches for it.
-    expect(summarisePosture(recs)).toMatchObject({ level: 'unknown', rollup_count: 1, stale_count: 1 });
+    for (const r of recs) expect({ instance: r.key.instance, stale: r.stale, liveness: r.liveness.value }).toEqual({ instance: r.key.instance, stale: false, liveness: 'unverified' });
+    expect(summarisePosture(recs)).toMatchObject({ level: 'unknown', rollup_count: 2, stale_count: 0 });
   });
 
   it('not seen for STALE_NOT_SEEN_MS is stale; seen more recently is a judged unknown', () => {
@@ -309,7 +307,7 @@ describe('#970 stale rules where the host cannot check a process', () => {
   });
 });
 
-describe('#970 per-call hooks (Claude Code): the last call within max_age is the only evidence', () => {
+describe('#970 per-call hooks (Claude Code): silence is not proof a session ended', () => {
   function claudeReport(key: string, heartbeatAgoMs: number, over: Record<string, unknown> = {}): void {
     writeReport(configDir, reportBody({
       runtime: 'claude_code',
@@ -325,27 +323,307 @@ describe('#970 per-call hooks (Claude Code): the last call within max_age is the
     fs.rmSync(path.join(home, '.openclaw'), { recursive: true });
   });
 
-  it('a session whose last call is older than max_age is stale; a recent one is judged', async () => {
+  it('silent past max_age beside a NEWER current session: superseded and hidden', async () => {
     claudeReport('c-live', 10 * 60_000, { configured_posture: 'advisory' });
     claudeReport('c-old1', 30 * HOUR);
     claudeReport('c-old2', 40 * HOUR);
     const recs = collectPostureRecords(opts()).filter((r) => r.runtime === 'claude_code');
     const by = Object.fromEntries(recs.map((r) => [r.key.instance, r]));
     expect(by['c-live'].stale).toBe(false);
-    expect(by['c-old1'].stale_reason).toBe('no-recent-call');
-    expect(by['c-old2'].stale_reason).toBe('no-recent-call');
+    expect(by['c-old1'].stale_reason).toBe('superseded');
+    expect(by['c-old2'].stale_reason).toBe('superseded');
 
     const rows = await checkRuntimePosture(opts());
     expect(hostRow(rows).message).toMatch(/^weakest of 1 record\(s\) judged \(3 found, 2 stale not judged\): advisory \(Claude Code, tool-gate\)/);
     const shown = collapseStalePostureRows(rows);
     expect(shown.find((r) => r.label === `${RUNTIME_POSTURE_LABEL}: Claude Code`)!.message)
-      .toBe('1 live, 2 stale instances hidden (--verbose to list)');
+      .toBe('1 current, 2 stale hidden (--verbose to list)');
+  });
+
+  it('silent past max_age with NO newer current session: not stale, judged as unknown (r2)', async () => {
+    claudeReport('c-quiet', 25 * HOUR, { configured_posture: 'intentionally-off' });
+    claudeReport('c-quieter', 30 * HOUR);
+    const recs = collectPostureRecords(opts()).filter((r) => r.runtime === 'claude_code');
+    for (const r of recs) expect({ k: r.key.instance, stale: r.stale }).toEqual({ k: r.key.instance, stale: false });
+    expect(summarisePosture(recs)).toMatchObject({ level: 'unknown', green: false, rollup_count: 2, stale_count: 0 });
+  });
+
+  it('a silent session is not superseded by a newer one that is itself past max_age (r2)', () => {
+    claudeReport('c-a', 26 * HOUR);
+    claudeReport('c-b', 40 * HOUR);
+    const recs = collectPostureRecords(opts()).filter((r) => r.runtime === 'claude_code');
+    expect(recs.filter((r) => r.stale)).toEqual([]);
+  });
+
+  it('a current session with a future-dated start supersedes nothing (r2)', () => {
+    claudeReport('c-future', 60_000, { instance: { key: 'c-future', pid: null, process_start: null, started_at: iso(NOW + DAY), liveness: 'per-call' } });
+    claudeReport('c-old', 30 * HOUR);
+    const by = Object.fromEntries(collectPostureRecords(opts()).filter((r) => r.runtime === 'claude_code').map((r) => [r.key.instance, r]));
+    expect(by['c-future'].membership).toBe('current');
+    expect(by['c-old'].stale).toBe(false);
+  });
+
+  it('not seen for STALE_NOT_SEEN_MS: stale; a present Claude whose sessions are ALL stale keeps one non-green row (r2)', async () => {
+    claudeReport('c-gone', STALE_NOT_SEEN_MS + HOUR);
+    const recs = collectPostureRecords(opts()).filter((r) => r.runtime === 'claude_code');
+    expect(recs.map((r) => [r.key.instance, r.stale, r.stale_reason])).toEqual([['c-gone', true, 'not-seen'], [null, false, null]]);
+    expect(recs[1].notes.join(' ')).toMatch(/present, no current report: all 1 report\(s\) found for this runtime are stale/);
+    expect(summarisePosture(recs)).toMatchObject({ green: false, rollup_count: 1, stale_count: 1 });
   });
 
   it('a Hermes home that is really there keeps its dead reports stale by process, not by absence', () => {
     hermesHome(home);
     writeReport(configDir, reportBody({ instance: instance(6001, '6001') }));
-    const [rec] = collectPostureRecords(opts()).filter((r) => r.runtime === 'hermes');
+    const [rec, marker, ...rest] = collectPostureRecords(opts()).filter((r) => r.runtime === 'hermes');
     expect({ stale: rec.stale, reason: rec.stale_reason }).toEqual({ stale: true, reason: 'process-ended' });
+    expect({ instance: marker.key.instance, stale: marker.stale }).toEqual({ instance: null, stale: false });
+    expect(rest).toEqual([]);
+  });
+});
+
+// ── Round 2: silence or heuristics are not proof that something ended ────────
+
+describe('#970 r2: an old report never judges a host greener than no report', () => {
+  function claudeEnforcing(): void {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    writeReport(configDir, reportBody({
+      runtime: 'claude_code',
+      plugin: { id: 'shieldcortex-pre-tool-hook', version: '5.20.4', hash: null },
+      instance: { key: 'c-live', pid: null, process_start: null, started_at: iso(NOW - HOUR), liveness: 'per-call' },
+    }));
+  }
+
+  beforeEach(() => {
+    fs.rmSync(path.join(home, '.openclaw'), { recursive: true });
+    hermesHome(home);
+    hermesPluginArtefacts(home);
+    claudeEnforcing();
+  });
+
+  it('present Hermes with only an ended report, plus enforcing Claude: not green, and the marker row is there', async () => {
+    writeReport(configDir, reportBody({ instance: instance(6001, '6001') }));
+    const records = collectPostureRecords(opts());
+    const hermes = records.filter((r) => r.runtime === 'hermes');
+    expect(hermes.map((r) => [r.key.instance, r.stale, r.stale_reason])).toEqual([['p6001-s6001', true, 'process-ended'], [null, false, null]]);
+    const summary = summarisePosture(records);
+    expect(summary).toMatchObject({ green: false, level: 'unobserved', weakest: 'sc://posture/hermes/default/tool-gate/none' });
+
+    const rows = await checkRuntimePosture(opts());
+    const host = hostRow(rows);
+    expect(host.status).toBe('info');
+    expect(host.message).toMatch(/^weakest of 2 record\(s\) judged \(3 found, 1 stale not judged\): unobserved \(Hermes, tool-gate\)/);
+    const shown = collapseStalePostureRows(rows);
+    const marker = recordRows(shown, 'Hermes');
+    expect(marker).toHaveLength(1);
+    expect(marker[0]).toMatchObject({ label: `${RUNTIME_POSTURE_LABEL}: Hermes (tool-gate)`, status: 'info' });
+    expect(marker[0].message).toMatch(/no reporting instance \(unobserved\).*present, no current report: all 1 report\(s\) found for this runtime are stale/);
+    expect(shown.find((r) => r.label === `${RUNTIME_POSTURE_LABEL}: Hermes`)!.message).toBe('0 current, 1 stale hidden (--verbose to list)');
+
+    // Exactly what the host says with no Hermes report at all.
+    fs.rmSync(path.join(configDir, 'posture', 'hermes'), { recursive: true });
+    const none = summarisePosture(collectPostureRecords(opts()));
+    expect({ level: none.level, green: none.green, weakest: none.weakest }).toEqual({ level: summary.level, green: summary.green, weakest: summary.weakest });
+  });
+
+  it('policy-evidence carries the same marker and the same non-green summary', () => {
+    writeReport(configDir, reportBody({ instance: instance(6001, '6001') }));
+    const evidence = JSON.parse(JSON.stringify(buildPolicyEvidence(opts())));
+    expect(evidence.summary).toMatchObject({ green: false, level: 'unobserved' });
+    expect(evidence.records.filter((r: { runtime: string; stale: boolean }) => r.runtime === 'hermes' && !r.stale)).toHaveLength(1);
+  });
+
+  it('every Hermes report not seen for STALE_NOT_SEEN_MS: still one non-green row, not a green host', () => {
+    writeReport(configDir, reportBody({ heartbeat_at: iso(NOW - STALE_NOT_SEEN_MS - HOUR), instance: instance(6001, '6001') }));
+    const summary = summarisePosture(collectPostureRecords(opts({ deps: { processStart: () => undefined } })));
+    expect(summary).toMatchObject({ green: false, stale_count: 1, rollup_count: 2 });
+  });
+
+  it('an absent runtime still drops out entirely: no marker', () => {
+    fs.rmSync(path.join(home, '.hermes'), { recursive: true });
+    fs.mkdirSync(path.join(home, '.hermes', 'ekho-state'), { recursive: true });
+    writeReport(configDir, reportBody({ instance: instance(6001, '6001') }));
+    const hermes = collectPostureRecords(opts()).filter((r) => r.runtime === 'hermes');
+    expect(hermes.map((r) => [r.stale, r.stale_reason])).toEqual([[true, 'process-ended']]);
+    expect(summarisePosture(collectPostureRecords(opts()))).toMatchObject({ green: true, level: 'loaded-enforce' });
+  });
+});
+
+describe('#970 r2: supersession needs evidence', () => {
+  beforeEach(() => {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    writeReport(configDir, reportBody({
+      runtime: 'claude_code',
+      plugin: { id: 'shieldcortex-pre-tool-hook', version: '5.20.4', hash: null },
+      instance: { key: 'c-live', pid: null, process_start: null, started_at: iso(NOW - HOUR), liveness: 'per-call' },
+    }));
+  });
+
+  /** 7001 cannot be checked here; 7002 is shown gone. */
+  const mixed: CollectDeps = { processStart: (pid) => (pid === 7002 ? null : undefined), pidNamespace: () => PID_NS };
+
+  it('an older fresh reporter plus a newer ENDED reporter: the fresh one stays judged, the host is not green', () => {
+    openclawReport(7001, '1', { instance: instance(7001, '1', 3 * HOUR), heartbeat_at: iso(NOW - 60_000) });
+    openclawReport(7002, '2', { instance: instance(7002, '2', HOUR), heartbeat_at: iso(NOW - 10 * 60_000) });
+    const recs = collectPostureRecords(opts({ deps: mixed }));
+    const by = Object.fromEntries(recs.map((r) => [r.key.instance, r]));
+    expect([by['p7001-s1'].stale, by['p7001-s1'].liveness.value]).toEqual([false, 'unverified']);
+    expect([by['p7002-s2'].stale, by['p7002-s2'].stale_reason]).toEqual([true, 'process-ended']);
+    expect(rollupRecords(recs).map((r) => r.key.instance).sort()).toEqual(['c-live', 'p7001-s1']);
+    expect(summarisePosture(recs)).toMatchObject({ green: false, level: 'unknown' });
+  });
+
+  it('an older fresh reporter plus a newer NOT-SEEN reporter: the fresh one stays judged', () => {
+    const cannotTell: CollectDeps = { processStart: () => undefined, pidNamespace: () => PID_NS };
+    openclawReport(7001, '1', { instance: instance(7001, '1', 10 * DAY), heartbeat_at: iso(NOW - 60_000) });
+    openclawReport(7002, '2', { instance: instance(7002, '2', 9 * DAY), heartbeat_at: iso(NOW - 8 * DAY) });
+    const recs = collectPostureRecords(opts({ deps: cannotTell }));
+    const by = Object.fromEntries(recs.map((r) => [r.key.instance, r]));
+    expect(by['p7001-s1'].stale).toBe(false);
+    expect(by['p7002-s2'].stale_reason).toBe('not-seen');
+    expect(summarisePosture(recs)).toMatchObject({ green: false, level: 'unknown' });
+  });
+
+  it('a newer reporter with a future-dated start supersedes nothing', () => {
+    const cannotTell: CollectDeps = { processStart: () => undefined, pidNamespace: () => PID_NS };
+    openclawReport(7001, '1', { instance: instance(7001, '1', 3 * HOUR) });
+    openclawReport(7002, '2', { instance: instance(7002, '2', -DAY) });
+    const recs = collectPostureRecords(opts({ deps: cannotTell }));
+    expect(recs.filter((r) => r.stale)).toEqual([]);
+  });
+
+  it('two concurrent fresh reporters with process checks unsupported: both judged, the host is not green', () => {
+    const cannotTell: CollectDeps = { processStart: () => undefined, pidNamespace: () => null };
+    openclawReport(7001, '1', { instance: instance(7001, '1', 3 * HOUR) });
+    openclawReport(7002, '2', { instance: instance(7002, '2', HOUR) });
+    const recs = collectPostureRecords(opts({ deps: cannotTell }));
+    expect(rollupRecords(recs).map((r) => r.key.instance).sort()).toEqual(['c-live', 'p7001-s1', 'p7002-s2']);
+    expect(summarisePosture(recs)).toMatchObject({ green: false, level: 'unknown', stale_count: 0 });
+  });
+});
+
+describe('#970 r2: a pid lookup proves an exit only inside the report\'s own PID namespace', () => {
+  const OTHER_NS = '4026532999';
+  function hermesReport(pidNs: string | null | undefined, over: Record<string, unknown> = {}): void {
+    const inst: Record<string, unknown> = instance(6001, '6001');
+    if (pidNs === undefined) delete inst.pid_ns;
+    else inst.pid_ns = pidNs;
+    writeReport(configDir, reportBody({ instance: inst, ...over }));
+  }
+  const hermes = (d: CollectDeps = deps) => collectPostureRecords(opts({ deps: d })).filter((r) => r.runtime === 'hermes')[0];
+
+  beforeEach(() => {
+    fs.rmSync(path.join(home, '.openclaw'), { recursive: true });
+    hermesHome(home);
+    hermesPluginArtefacts(home);
+  });
+
+  it('same namespace, pid gone: ended and stale', () => {
+    hermesReport(PID_NS);
+    expect([hermes().liveness.value, hermes().stale_reason]).toEqual(['ended', 'process-ended']);
+  });
+
+  it('a different namespace: not stale by pid, judged as unverified', () => {
+    hermesReport(OTHER_NS);
+    const rec = hermes();
+    expect([rec.liveness.value, rec.stale, rec.membership]).toEqual(['unverified', false, 'unobserved']);
+    expect(rec.liveness.note).toMatch(/another PID namespace, or did not record one/);
+    expect(rec.liveness.process_identity?.pid_ns).toBe(OTHER_NS);
+    // Even a pid that exists here with the same start is not this process.
+    expect(hermes(processTable({ 6001: '6001' })).liveness.value).toBe('unverified');
+  });
+
+  it('no namespace recorded (an earlier writer): not stale by pid; an exact pid + start match is still alive', () => {
+    hermesReport(undefined);
+    const rec = hermes();
+    expect([rec.liveness.value, rec.stale]).toEqual(['unverified', false]);
+    expect(rec.liveness.process_identity?.pid_ns).toBeNull();
+    expect(hermes(processTable({ 6001: '999' })).stale).toBe(false);
+    expect(hermes(processTable({ 6001: '6001' })).liveness.value).toBe('alive');
+  });
+
+  it('pid_ns: null, or a collector that cannot read its own namespace: not stale by pid', () => {
+    hermesReport(null);
+    expect(hermes().stale).toBe(false);
+    hermesReport(PID_NS);
+    expect(hermes(processTable({}, null)).stale).toBe(false);
+  });
+
+  it('the age rule still applies outside the namespace', () => {
+    hermesReport(OTHER_NS, { heartbeat_at: iso(NOW - STALE_NOT_SEEN_MS - HOUR) });
+    expect(hermes().stale_reason).toBe('not-seen');
+  });
+
+  it('a mismatched namespace beside enforcing Claude does not turn the host green', () => {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    writeReport(configDir, reportBody({
+      runtime: 'claude_code',
+      plugin: { id: 'shieldcortex-pre-tool-hook', version: '5.20.4', hash: null },
+      instance: { key: 'c-live', pid: null, process_start: null, started_at: iso(NOW - HOUR), liveness: 'per-call' },
+    }));
+    hermesReport(OTHER_NS);
+    expect(summarisePosture(collectPostureRecords(opts()))).toMatchObject({ green: false, level: 'unknown' });
+  });
+
+  it('the self-report schema: pid_ns is optional, digits or null, nothing else', () => {
+    const parse = (inst: Record<string, unknown>) => {
+      const text = JSON.stringify(reportBody({ instance: inst }));
+      return parseSelfReport(text, Buffer.byteLength(text));
+    };
+    const base = instance(6001, '6001');
+    const { pid_ns: _drop, ...legacy } = base;
+    const ok = parse(legacy);
+    expect(ok.kind === 'valid' && ok.report.instance.pid_ns).toBeNull();
+    for (const v of [PID_NS, null]) expect(parse({ ...base, pid_ns: v }).kind).toBe('valid');
+    for (const v of ['', 'pid:[1]', 4026531836, '-1', '1'.repeat(21)]) expect(parse({ ...base, pid_ns: v }).kind).toBe('invalid');
+    expect(parse({ ...base, other: 1 }).kind).toBe('invalid');
+  });
+});
+
+describe('#970 r2: the clawdbot1 field shape', () => {
+  it('Hermes absent with dead reports, 1 live + many dead OpenClaw: Hermes not judged, one line per runtime, host on the live OpenClaw only', async () => {
+    fieldFixture();
+    const records = collectPostureRecords(opts());
+    expect(records.filter((r) => r.runtime === 'hermes').every((r) => r.stale && r.key.instance !== null)).toBe(true);
+    expect(rollupRecords(records).map((r) => r.key.instance)).toEqual([`p${LIVE_PID}-s${LIVE_START}`]);
+    const shown = collapseStalePostureRows(await checkRuntimePosture(opts()));
+    expect(shown.filter((r) => /stale hidden/.test(r.message)).map((r) => r.label)).toEqual([
+      `${RUNTIME_POSTURE_LABEL}: OpenClaw`, `${RUNTIME_POSTURE_LABEL}: Hermes`,
+    ]);
+    expect(recordRows(shown, 'Hermes')).toEqual([]);
+  });
+
+  it('the same shape from earlier writers (no pid_ns): still judged on the live OpenClaw only', () => {
+    fieldFixture();
+    for (const dir of ['openclaw', 'hermes']) {
+      const d = path.join(configDir, 'posture', dir, 'default');
+      for (const f of fs.readdirSync(d)) {
+        const body = JSON.parse(fs.readFileSync(path.join(d, f), 'utf8'));
+        delete body.instance.pid_ns;
+        fs.writeFileSync(path.join(d, f), JSON.stringify(body));
+      }
+    }
+    const records = collectPostureRecords(opts());
+    expect(records.filter((r) => r.runtime === 'hermes').every((r) => r.stale_reason === 'runtime-absent')).toBe(true);
+    expect(rollupRecords(records).map((r) => r.key.instance)).toEqual([`p${LIVE_PID}-s${LIVE_START}`]);
+    expect(summarisePosture(records)).toMatchObject({ level: 'advisory', rollup_count: 1 });
+  });
+});
+
+describe('#970 r2: the collapsed line never calls an unverified report live', () => {
+  it('a recent malformed report beside a dead one: "1 current (1 unverified)"', async () => {
+    writeReport(configDir, { ...reportBody({ runtime: 'openclaw', instance: instance(7001, '1') }), extra: 1 });
+    openclawReport(5001, '5001');
+    const shown = collapseStalePostureRows(await checkRuntimePosture(opts()));
+    expect(shown.find((r) => r.label === `${RUNTIME_POSTURE_LABEL}: OpenClaw`)!.message)
+      .toBe('1 current (1 unverified), 1 stale hidden (--verbose to list)');
+  });
+
+  it('a fresh unverifiable report beside a dead one: "1 current (1 unverified)"', async () => {
+    openclawReport(7001, '1');
+    openclawReport(5001, '5001');
+    const d: CollectDeps = { processStart: (pid) => (pid === 5001 ? null : undefined), pidNamespace: () => PID_NS };
+    const shown = collapseStalePostureRows(await checkRuntimePosture(opts({ deps: d })));
+    expect(shown.find((r) => r.label === `${RUNTIME_POSTURE_LABEL}: OpenClaw`)!.message)
+      .toBe('1 current (1 unverified), 1 stale hidden (--verbose to list)');
   });
 });
