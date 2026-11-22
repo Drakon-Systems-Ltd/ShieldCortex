@@ -296,7 +296,8 @@ const TAP_DIGEST_SHAPE = /^[0-9a-f]{64}$/;
  *
  * No card, never a partial one, when the denial is not retryable (not a
  * `denied_no_prompt_surface` denial, or no well-formed action id), when a tap
- * value is missing or malformed, or when the nonce would show in the text.
+ * value is missing or malformed, or when the nonce would show in the text
+ * or in the digest: it appears on Approve and nowhere else on the card.
  */
 export function buildDenialCardBlockV2(
   n: ActionGuardOutcomeNotification,
@@ -318,7 +319,7 @@ export function buildDenialCardBlockV2(
   // Version 1 offers a command and choices only for a retryable denial, and for the id checked above.
   if (v1.approveCommand === undefined || v1.actions?.[0]?.actionId !== actionId) return undefined;
   // `text` holds the headline, the three lines and the command.
-  if (v1.text.includes(nonce)) return undefined;
+  if (v1.text.includes(nonce) || argsHash.includes(nonce)) return undefined;
   return {
     version: WEBHOOK_CARD_VERSION_2,
     kind: 'denial',
