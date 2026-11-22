@@ -25,7 +25,8 @@
  * they have configured something, and nothing tells them otherwise.
  */
 
-import { readRawConfig } from '../cloud/config.js';
+import { readConfigBytesNoSideEffects } from '../cloud/config.js';
+import { LTM_CAP_MAX, STM_CAP_MAX } from '../cloud/capacity.js';
 import { DEFAULT_CONFIG, type MemoryConfig } from './types.js';
 
 /**
@@ -37,6 +38,15 @@ export const MIN_MEMORY_CAP = 10;
 /** Keys accepted inside the `memory` block. */
 const CAP_KEYS = ['maxShortTermMemories', 'maxLongTermMemories'] as const;
 type CapKey = (typeof CAP_KEYS)[number];
+
+/**
+ * Ceiling for a cap that is NOT authorized by a verifying embedded signature:
+ * the largest value the signed `config --memory-cap` setter accepts (#1132).
+ */
+const UNTRUSTED_CAP_CEILING: Record<CapKey, number> = {
+  maxShortTermMemories: STM_CAP_MAX,
+  maxLongTermMemories: LTM_CAP_MAX,
+};
 
 /** Warn at most once per key per process — this is read on every write path. */
 const warned = new Set<string>();
@@ -90,19 +100,77 @@ export function validateCap(value: unknown, key: string = 'cap'): number | undef
 }
 
 /**
+ * `base` with every cap reset to the built-in default. Unverified caps never
+ * floor or fall back on a caller-supplied `base` (#1132 follow-up).
+ */
+function withDefaultCaps(base: MemoryConfig): MemoryConfig {
+  const resolved: MemoryConfig = { ...base };
+  for (const key of CAP_KEYS) resolved[key] = DEFAULT_CONFIG[key];
+  return resolved;
+}
+
+/**
  * `DEFAULT_CONFIG` with any valid operator overrides from the `memory` block
  * applied. Never throws: an unreadable or malformed config yields the defaults,
  * because failing to parse config must not stop memories being stored.
  *
- * `readRawConfig()` is mtime-cached, so this is cheap enough to sit on the
- * write path as a default parameter.
+ * The caps and integrity verdict come from one side-effect-free read. Only a
+ * verifying embedded signature authorizes caps as written; a legacy signature
+ * does not. Unverified caps are clamped per key to
+ * `max(default, min(stored, setter maximum))` (#1132): they can never lower
+ * eviction below the built-in default, and an honest raised cap is kept up to
+ * the setter maximum. Every branch returns a fresh object, never `base` itself.
+ *
+ * The floor and fallback for unverified caps is the built-in DEFAULT_CONFIG,
+ * never the caller-supplied `base` (#1132 follow-up): a caller cannot lower
+ * the floor below the default, nor raise unverified caps above what the file
+ * and setter maximum allow. `base` supplies every non-cap field, and supplies
+ * cap fallbacks only when the file's embedded signature verifies.
  */
-export function resolveMemoryConfig(base: MemoryConfig = DEFAULT_CONFIG, options: { readOnly?: boolean } = {}): MemoryConfig {
+export function resolveMemoryConfigWithIntegrity(base: MemoryConfig = DEFAULT_CONFIG): {
+  config: MemoryConfig;
+  ignoredCapReason: 'unsigned' | 'unverified' | 'invalid-signature' | null;
+} {
   let block: Record<string, unknown>;
+  let trusted: boolean;
+  let verdict: string;
+  let hasEmbeddedSignature = false;
   try {
-    block = memoryBlock(readRawConfig(options));
+    const read = readConfigBytesNoSideEffects();
+    block = memoryBlock(read.data ?? {});
+    verdict = read.verdict;
+    hasEmbeddedSignature = typeof read.data?._sig === 'string';
+    trusted = hasEmbeddedSignature && verdict === 'valid';
   } catch {
-    return base;
+    return { config: withDefaultCaps(base), ignoredCapReason: null };
+  }
+
+  if (!trusted) {
+    // #1132: an unverified cap may only ever REDUCE eviction. Below the
+    // built-in default it is ignored (a forged lower cap cannot evict); above
+    // it, it is honoured up to the setter's maximum (an honest raised cap that
+    // was never embedded-signed does not silently evict on upgrade).
+    const resolved: MemoryConfig = withDefaultCaps(base);
+    for (const key of CAP_KEYS) {
+      const stored = validateCap(block[key], key);
+      if (stored !== undefined) {
+        resolved[key satisfies CapKey] = Math.max(DEFAULT_CONFIG[key], Math.min(stored, UNTRUSTED_CAP_CEILING[key]));
+      }
+    }
+    const hasStoredCaps = CAP_KEYS.some((key) => block[key] !== undefined);
+    if (hasStoredCaps) {
+      warnOnce('integrity', !hasEmbeddedSignature && verdict === 'valid'
+        ? 'stored memory caps are not verified because config.json has only a legacy signature; caps below the default are ignored.'
+        : verdict === 'unverified'
+        ? 'stored memory caps are not verified because config.json is unsigned and unverified; caps below the default are ignored.'
+        : `stored memory caps are not verified because config.json is not signed or its signature does not verify (${verdict}); caps below the default are ignored.`);
+    }
+    return {
+      config: resolved,
+      ignoredCapReason: hasStoredCaps
+        ? (verdict === 'unsigned' || (!hasEmbeddedSignature && verdict === 'valid') ? 'unsigned' : verdict === 'unverified' ? 'unverified' : 'invalid-signature')
+        : null,
+    };
   }
 
   const resolved: MemoryConfig = { ...base };
@@ -110,5 +178,9 @@ export function resolveMemoryConfig(base: MemoryConfig = DEFAULT_CONFIG, options
     const override = validateCap(block[key], key);
     if (override !== undefined) resolved[key satisfies CapKey] = override;
   }
-  return resolved;
+  return { config: resolved, ignoredCapReason: null };
+}
+
+export function resolveMemoryConfig(base: MemoryConfig = DEFAULT_CONFIG, _options: { readOnly?: boolean } = {}): MemoryConfig {
+  return resolveMemoryConfigWithIntegrity(base).config;
 }

@@ -2,7 +2,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
 import { assertSafeRuntimeForDbPath, closeDatabase, expandPath, holdsStartupLock, initDatabase, isDatabaseInitialized, resolveMemoriesDbPath, StartupLockHeldError } from '../database/init.js';
 import { readRawConfig } from '../cloud/config.js';
 import { resolveMemoryConfig } from '../memory/config.js';
@@ -63,7 +62,7 @@ export async function configuredChannels(fetchImpl?: typeof fetch): Promise<Noti
 }
 
 /** The checks this command can affect, plus any maintenance-step failures. */
-async function storageDoctor(dataDir: string, dbPath: string, limit: number, config: MemoryConfig): Promise<CheckResult[]> {
+async function storageDoctor(dataDir: string, dbPath: string, limit: number | undefined, config: MemoryConfig): Promise<CheckResult[]> {
   return [runMemoryStatsCheck(dbPath, config), runSemanticCoverageCheck(dbPath), await checkDiskUsage(dataDir, limit, { dbPath })];
 }
 
@@ -73,7 +72,9 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
   if (!injectedPath) assertSafeRuntimeForDbPath(dbPath);
   const dataDir = deps.dataDir ?? path.dirname(dbPath);
   const config = deps.consolidateConfig ?? resolveMemoryConfig(undefined, { readOnly: options.dryRun === true });
-  const limit = deps.diskLimit ?? DIRECTORY_BUDGET_BYTES;
+  // #1043: undefined lets checkDiskUsage resolve the effective (signed or
+  // default) budget read-only, and show the setter hint when it is the default.
+  const limit = deps.diskLimit;
   const dryRun = options.dryRun === true;
   const steps: MaintainReport['steps'] = {
     consolidate: step('skipped', 'not checked'), embed: step('skipped', 'not checked'),

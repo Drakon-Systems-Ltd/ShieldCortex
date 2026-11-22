@@ -37,6 +37,8 @@ import {
   MEMORY_HOST_POSTURES,
   MEMORY_HOST_RUNTIMES,
   setAutoMemorySamplingTurns,
+  setCapacityConfig,
+  getDiskBudget,
   NATIVE_INJECT_CONTRACTS,
   MEMORY_PLANE_VALUES,
   ConfigIntegrityRefusal,
@@ -45,7 +47,11 @@ import {
   type DefenceMode,
 } from './config.js';
 import { parseResignArgs, type ResignArgs } from './resign-args.js';
-import { formatUnknownConfigOptions } from './config-args.js';
+import { configOptionName, formatUnknownConfigOptions } from './config-args.js';
+import { formatBudget, parseDiskBudget, parseMemoryCapSpec, type MemoryCapSpec } from './capacity.js';
+import { resolveMemoryConfig } from '../memory/config.js';
+import { resolveMemoriesDbPath } from '../database/init.js';
+import { getBetterSqlite3 } from '../database/better-sqlite3-guard.js';
 import type { RankerEngine } from '../memory/types.js';
 
 const VALID_RANKER_ENGINES: RankerEngine[] = ['rrf', 'legacy'];
@@ -97,6 +103,18 @@ function handleCloudConfigFlags(args: string[]): void {
   if (unknown) {
     for (const line of unknown) console.error(line);
     process.exit(2);
+  }
+
+  // #1043: the capacity setters run alone. Every other setter below signs its
+  // own write as it goes, so a capacity refusal that only shows up at write
+  // time (a malformed `memory`/`storage` block) used to arrive after an
+  // earlier flag in the same command had already been written and signed —
+  // while saying "Nothing was changed". Refusing the combination up front,
+  // before any read or write, makes that sentence true.
+  const capacityCombo = capacityCombinationError(args);
+  if (capacityCombo) {
+    console.error(capacityCombo);
+    process.exit(1);
   }
 
   if (args.includes('--cloud-status')) {
@@ -191,6 +209,20 @@ function handleCloudConfigFlags(args: string[]): void {
       if (!Number.isInteger(turns) || turns < 1 || turns > 20) {
         return `Invalid value for --auto-memory-sampling: "${sampling.value}". Provide an integer between 1 and 20 (≤ 5 recommended).`;
       }
+    }
+    // #1043: the capacity setters are validated here too, so an invalid
+    // value refuses before any other flag in the same command writes.
+    const memoryCap = valueOf('--memory-cap');
+    if (memoryCap.present) {
+      if (!memoryCap.value) return 'Missing value for --memory-cap. Use ltm=N, stm=N or ltm=N,stm=M.';
+      const parsed = parseMemoryCapSpec(memoryCap.value);
+      if (!parsed.ok) return parsed.error;
+    }
+    const diskBudget = valueOf('--disk-budget');
+    if (diskBudget.present) {
+      if (!diskBudget.value) return 'Missing value for --disk-budget. Use e.g. 250MB, 1GB, 500MiB or a byte count.';
+      const parsed = parseDiskBudget(diskBudget.value);
+      if (!parsed.ok) return parsed.error;
     }
     return null;
   })();
@@ -659,6 +691,26 @@ function handleCloudConfigFlags(args: string[]): void {
     changed = true;
   }
 
+  // #1043: signed capacity setters. Both flags write in ONE signed mutation.
+  const capIdx = args.indexOf('--memory-cap');
+  const budgetIdx = args.indexOf('--disk-budget');
+  if (capIdx !== -1 || budgetIdx !== -1) {
+    // Values were validated by the preflight above; re-parse for the numbers.
+    const caps: MemoryCapSpec = capIdx !== -1 ? mustParse(parseMemoryCapSpec(args[capIdx + 1] ?? '')) : {};
+    const budget = budgetIdx !== -1 ? mustParse(parseDiskBudget(args[budgetIdx + 1] ?? '')) : undefined;
+    const before = resolveMemoryConfig(undefined, { readOnly: true });
+    const beforeBudget = getDiskBudget();
+    try {
+      setCapacityConfig({ ...caps, ...(budget !== undefined ? { diskBudgetBytes: budget } : {}) });
+    } catch (err) {
+      if (err instanceof ConfigIntegrityRefusal) throw err;
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+    reportCapacityChange(caps, before, budget, beforeBudget);
+    changed = true;
+  }
+
   if (args.includes('--allow-revoke-by-source')) {
     setRevokeBySourceEnabled(true);
     console.log('Revoke-by-source ENABLED. `forget --fromSource` can now bulk-delete a source\'s memories (trust-hierarchy ACL still applies). Disable again with --disallow-revoke-by-source when done.');
@@ -685,6 +737,90 @@ function handleCloudConfigFlags(args: string[]): void {
 
   if (!changed) {
     console.log(CONFIG_HELP);
+  }
+}
+
+const CAPACITY_FLAGS = new Set(['--memory-cap', '--disk-budget']);
+
+/**
+ * Non-null when `--memory-cap`/`--disk-budget` share the command with any
+ * other option. The two capacity flags may be combined with each other (they
+ * write in one signed mutation). A capacity flag's value is skipped by the
+ * same rule the parser uses: the next word, unless it starts with `--`.
+ */
+function capacityCombinationError(args: readonly string[]): string | null {
+  if (!args.some((a) => CAPACITY_FLAGS.has(a))) return null;
+  const others: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i];
+    if (CAPACITY_FLAGS.has(token)) {
+      if (args[i + 1] !== undefined && !args[i + 1].startsWith('--')) i++;
+      continue;
+    }
+    if (token.startsWith('-')) others.push(configOptionName(token));
+  }
+  if (others.length === 0) return null;
+  return `--memory-cap and --disk-budget cannot be combined with other options (found ${[...new Set(others)].join(', ')}). `
+    + 'Nothing was changed. Run the capacity change as its own `shieldcortex config` command.';
+}
+
+function mustParse<T>(parsed: { ok: true; value: T } | { ok: false; error: string }): T {
+  if (!parsed.ok) {
+    console.error(parsed.error);
+    process.exit(1);
+  }
+  return parsed.value;
+}
+
+/**
+ * Current STM/LTM counts, read-only, for the lowering warning only. Null when
+ * there is no database or it cannot be read; the setter never needs it.
+ */
+function countMemoriesReadOnly(): { shortTerm: number; longTerm: number } | null {
+  try {
+    const Database = getBetterSqlite3();
+    const db = new Database(resolveMemoriesDbPath(), { readonly: true, fileMustExist: true });
+    try {
+      const count = (type: string): number =>
+        (db.prepare('SELECT COUNT(*) AS c FROM memories WHERE type = ?').get(type) as { c: number }).c;
+      return { shortTerm: count('short_term'), longTerm: count('long_term') };
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+function reportCapacityChange(
+  caps: MemoryCapSpec,
+  before: { maxLongTermMemories: number; maxShortTermMemories: number },
+  budget: number | undefined,
+  beforeBudget: { bytes: number },
+): void {
+  const tiers = [
+    { name: 'Long-term (LTM)', next: caps.maxLongTermMemories, prev: before.maxLongTermMemories, key: 'longTerm' as const },
+    { name: 'Short-term (STM)', next: caps.maxShortTermMemories, prev: before.maxShortTermMemories, key: 'shortTerm' as const },
+  ];
+  let counts: ReturnType<typeof countMemoriesReadOnly> | undefined;
+  for (const t of tiers) {
+    if (t.next === undefined) continue;
+    console.log(`${t.name} memory cap: ${t.prev} -> ${t.next} (signed write).`);
+    if (t.next < t.prev) {
+      if (counts === undefined) counts = countMemoriesReadOnly();
+      const current = counts ? counts[t.key] : null;
+      if (current === null || current > t.next) {
+        console.log(
+          `  Warning: ${current === null ? 'the store may hold' : `the store holds ${current}`} ${t.name} memories, more than the new cap. `
+          + 'Nothing is deleted now, but the next normal consolidation will evict the oldest unpinned memories '
+          + 'until the tier is back at the cap.',
+        );
+      }
+    }
+  }
+  if (budget !== undefined) {
+    console.log(`Disk budget: ${formatBudget(beforeBudget.bytes)} -> ${formatBudget(budget)} (${budget} bytes, signed write).`);
+    console.log('  This is the budget doctor and maintenance judge ShieldCortex\'s own data against. It deletes nothing.');
   }
 }
 

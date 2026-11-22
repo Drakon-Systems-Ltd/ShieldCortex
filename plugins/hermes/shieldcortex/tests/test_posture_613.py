@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -62,6 +63,13 @@ class PostureCase(unittest.TestCase):
         with open(self.report_path(profile), encoding="utf-8") as fh:
             return json.load(fh)
 
+    def sidecar_path(self, profile="default"):
+        return self.report_path(profile)[: -len(".json")] + posture.PID_NS_SUFFIX
+
+    def read_sidecar(self, profile="default"):
+        with open(self.sidecar_path(profile), encoding="ascii") as fh:
+            return fh.read()
+
 
 class WriterTests(PostureCase):
     def test_writes_the_v1_schema(self):
@@ -79,7 +87,15 @@ class WriterTests(PostureCase):
         self.assertRegex(r["plugin"]["hash"], SHA)
         self.assertEqual(r["instance"]["liveness"], "process")
         self.assertEqual(r["instance"]["pid"], os.getpid())
+        # #970: the closed v1 instance (a pre-#970 CLI rejects any other key) ...
+        self.assertEqual(set(r["instance"]), {"key", "pid", "process_start", "started_at", "liveness"})
         self.assertEqual(os.path.basename(self.report_path()), r["instance"]["key"] + ".json")
+        # ... and the PID namespace the CLI compares before trusting a pid lookup
+        # in the sidecar beside it, written after it, owner-only.
+        expected = str(os.stat("/proc/self/ns/pid").st_ino) if sys.platform.startswith("linux") else "null"
+        self.assertEqual(self.read_sidecar(), expected)
+        self.assertEqual(os.stat(self.sidecar_path()).st_mode & 0o077, 0)
+        self.assertGreaterEqual(os.stat(self.sidecar_path()).st_mtime_ns, os.stat(self.report_path()).st_mtime_ns)
         self.assertEqual(r["denials"], {"blocked_action": None, "synthetic_probe": None, "blocked_action_count": 0})
 
     def test_atomic_private_and_bounded(self):
@@ -87,7 +103,7 @@ class WriterTests(PostureCase):
             self.config_dir, profile="default", configured_posture="enforce",
             scanner="degraded", degraded_reason="x" * 10_000)
         d = os.path.dirname(self.report_path())
-        self.assertEqual(os.listdir(d), [os.path.basename(self.report_path())])
+        self.assertEqual(sorted(os.listdir(d)), sorted([os.path.basename(self.report_path()), os.path.basename(self.sidecar_path())]))
         self.assertEqual(os.stat(self.report_path()).st_mode & 0o077, 0)
         for directory in (d, os.path.dirname(d), os.path.dirname(os.path.dirname(d))):
             self.assertEqual(os.stat(directory).st_mode & 0o077, 0)
@@ -101,6 +117,42 @@ class WriterTests(PostureCase):
             fh.write("a file, not a dir")
         self.assertFalse(posture.write_self_report(
             self.config_dir, profile="default", configured_posture="enforce"))
+
+    def test_unreadable_pid_namespace_writes_a_null_sidecar(self):
+        # #970: /proc unreadable — the report is still written; the sidecar says null.
+        real_stat = os.stat
+
+        def no_proc(path, *a, **kw):
+            if str(path).startswith("/proc/"):
+                raise PermissionError(path)
+            return real_stat(path, *a, **kw)
+
+        with mock.patch.object(posture, "_identity", None), mock.patch("os.stat", side_effect=no_proc):
+            self.assertTrue(posture.write_self_report(self.config_dir, profile="default", configured_posture="enforce"))
+            self.assertEqual(self.read_sidecar(), "null")
+            self.assertEqual(self.read_report()["version"], 1)
+
+    def test_a_failed_sidecar_write_never_fails_the_report(self):
+        # #970: a directory where the sidecar goes makes its rename fail.
+        os.makedirs(self.sidecar_path())
+        self.assertTrue(posture.write_self_report(self.config_dir, profile="default", configured_posture="enforce"))
+        self.assertEqual(self.read_report()["configured_posture"], "enforce")
+        d = os.path.dirname(self.report_path())
+        self.assertEqual([n for n in os.listdir(d) if ".tmp-" in n], [])
+
+    def test_prunes_old_sidecars_with_old_reports_and_keeps_its_own(self):
+        posture.write_self_report(self.config_dir, profile="default", configured_posture="enforce")
+        d = os.path.dirname(self.report_path())
+        old = time.time() - posture.PRUNE_AFTER_SECONDS - 3600
+        for name in ("p1-s1.json", "p1-s1" + posture.PID_NS_SUFFIX, "p2-s2" + posture.PID_NS_SUFFIX):
+            path = os.path.join(d, name)
+            with open(path, "w") as fh:
+                fh.write("1")
+            os.utime(path, (old, old))
+        for path in (self.report_path(), self.sidecar_path()):
+            os.utime(path, (old, old))
+        posture.write_self_report(self.config_dir, profile="default", configured_posture="advisory")
+        self.assertEqual(sorted(os.listdir(d)), sorted([os.path.basename(self.report_path()), os.path.basename(self.sidecar_path())]))
 
     def test_rejects_values_outside_the_closed_sets(self):
         self.assertFalse(posture.write_self_report(

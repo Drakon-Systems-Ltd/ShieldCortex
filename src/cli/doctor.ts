@@ -110,7 +110,8 @@ import { getCanonicalSchema } from '../database/init.js';
 import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
-import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
+import { getDiskBudget } from '../cloud/config.js';
+import { formatBudget, LTM_CAP_MAX, LTM_CAP_MIN } from '../cloud/capacity.js';
 import { isRepairLogName } from '../logs/retention.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
@@ -137,8 +138,9 @@ import {
   readRawConfig,
   migrateInterceptorActionGuardAlias,
 } from '../cloud/config.js';
-import { resolveMemoryConfig } from '../memory/config.js';
+import { resolveMemoryConfigWithIntegrity } from '../memory/config.js';
 import type { MemoryConfig } from '../memory/types.js';
+import { DEFAULT_CONFIG as DEFAULT_MEMORY_CAPS } from '../memory/types.js';
 import { validateOpenClawConfig } from '../integrations/openclaw-config-validate.js';
 import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
@@ -151,6 +153,7 @@ import {
   formatDoctorReport,
   nextCommandForFailures,
   sanitiseDoctorRowsForDisplay,
+  type DoctorPostureRowMeta,
   shouldColorDoctor,
   type DoctorReportStyle,
 } from './doctor-report.js';
@@ -181,6 +184,7 @@ import {
   postureLevel,
   renderPostureLine,
   runtimeLabel,
+  staleReasonText,
   summarisePosture,
 } from '../posture/posture-record.js';
 import {
@@ -232,6 +236,8 @@ export interface CheckResult {
   verboseNote?: string;
   /** See DoctorReportItem.postureUnknown (#878) — the report prints this row's own fix. */
   postureUnknown?: true;
+  /** See DoctorReportItem.posture (#970) — set on every per-record `Runtime posture` row. */
+  posture?: DoctorPostureRowMeta;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
@@ -1832,8 +1838,10 @@ async function checkSchema(): Promise<CheckResult> {
  */
 export function runMemoryStatsCheck(
   dbPath: string,
-  config: Pick<MemoryConfig, 'maxShortTermMemories' | 'maxLongTermMemories'> = resolveMemoryConfig(undefined, { readOnly: true }),
+  config?: Pick<MemoryConfig, 'maxShortTermMemories' | 'maxLongTermMemories'>,
 ): CheckResult {
+  const capResolution = config ? null : resolveMemoryConfigWithIntegrity();
+  config ??= capResolution!.config;
   const prerequisite = databasePrerequisite('Memories', dbPath);
   if (prerequisite) return prerequisite;
 
@@ -1852,6 +1860,25 @@ export function runMemoryStatsCheck(
       const warnings: string[] = [];
       const fixes: string[] = [];
 
+      if (capResolution?.ignoredCapReason) {
+        status = 'warn';
+        // #1132: unverified caps are clamped, not dropped — below the default
+        // they are ignored, above it they apply up to the setter maximum. The
+        // count rows below use that effective cap.
+        const why = capResolution.ignoredCapReason === 'unsigned'
+          ? 'config lacks a verifying embedded signature'
+          : capResolution.ignoredCapReason === 'unverified'
+            ? 'config is unsigned and unverified'
+            : 'config signature does not verify';
+        warnings.push(
+          `stored caps not verified because ${why}; caps below the default `
+          + `(LTM ${DEFAULT_MEMORY_CAPS.maxLongTermMemories}, STM ${DEFAULT_MEMORY_CAPS.maxShortTermMemories}) are ignored`,
+        );
+        fixes.push(capResolution.ignoredCapReason === 'invalid-signature'
+          ? 'Review config.json; if the memory caps are yours, run `shieldcortex config --resign` to sign them.'
+          : 'Review config.json; if the memory caps are yours, set them with `shieldcortex config --memory-cap ltm=N,stm=M` to sign them.');
+      }
+
       if (stm > STM_LIMIT) {
         status = 'warn';
         warnings.push(`${stm}/${STM_LIMIT} STM — consolidation needed`);
@@ -1863,14 +1890,45 @@ export function runMemoryStatsCheck(
           'made of fresh captures clears on a later run.',
         );
       }
-      if (ltm >= LTM_LIMIT * 0.9) {
+      if (ltm > LTM_LIMIT) {
+        // Over the cap (e.g. the operator just lowered it): consolidate DOES
+        // change this state — enforceMemoryLimitsByTier evicts the excess.
+        // Offering a higher cap here would undo the operator's own choice.
+        status = 'warn';
+        warnings.push(`${ltm}/${LTM_LIMIT} LTM — over its cap`);
+        fixes.push(
+          'LTM is over its cap. Run `shieldcortex consolidate` to evict the oldest, least-used long-term memories ' +
+          'down to the cap (the brain worker does the same on its own schedule). Rows captured within the last ' +
+          'hour and pinned rows are never evicted, so a breach made of fresh or pinned rows can remain after it runs.',
+        );
+      } else if (ltm >= LTM_LIMIT * 0.95) {
+        // #1043/#1121: at the cap, consolidate cannot help — it evicts only
+        // rows OVER the cap, so the store is already forgetting one old memory
+        // per new one. The command that changes this state is the cap setter.
+        status = 'warn';
+        warnings.push(
+          `${ltm}/${LTM_LIMIT} LTM — ${ltm >= LTM_LIMIT ? 'at' : 'near'} its cap; at the cap, consolidation `
+          + 'evicts the oldest, least-used unpinned memories to make room for new ones',
+        );
+        // The suggestion is one the setter accepts: twice the cap, clamped to
+        // its LTM_CAP_MIN..LTM_CAP_MAX range. At (or, hand-edited, above) the
+        // maximum there is no higher cap to offer, so no command is named.
+        const suggested = Math.max(LTM_CAP_MIN, Math.min(LTM_LIMIT * 2, LTM_CAP_MAX));
+        fixes.push(
+          'Running consolidate will not change this: it evicts only what is OVER the cap. '
+          + (suggested > LTM_LIMIT
+            ? `To keep more long-term memories, raise the cap: \`shieldcortex config --memory-cap ltm=${suggested}\`.`
+            : `The cap (${LTM_LIMIT}) is already at the largest the setter accepts (${LTM_CAP_MAX}), so it cannot be `
+              + 'raised further. New long-term memories will keep replacing the oldest, least-used unpinned ones.'),
+        );
+      } else if (ltm >= LTM_LIMIT * 0.9) {
         status = 'warn';
         warnings.push(`${ltm}/${LTM_LIMIT} LTM — approaching limit`);
         fixes.push(
-          'Housekeeping. LTM is near its cap. Run `shieldcortex consolidate` if you want it now; otherwise the ' +
-          'worker does it. Note that consolidation evicts long-term rows only once LTM is OVER the cap (never ' +
-          'rows captured within the last hour or pinned rows), so this row can stay while LTM sits between ' +
-          '90% and 100%. No action needed unless recall feels stale.',
+          'Housekeeping. LTM is near its cap. The worker consolidates on its own schedule, and consolidation ' +
+          'evicts long-term rows only once LTM is OVER the cap (never rows captured within the last hour or ' +
+          'pinned rows), so this row can stay while LTM sits between 90% and 95%. No action needed unless ' +
+          'recall feels stale.',
         );
       }
 
@@ -2527,7 +2585,23 @@ function readDbFreeSpace(dbPath: string): DbFreeSpace | null {
   }
 }
 
-export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = DIRECTORY_BUDGET_BYTES, options: { dbPath?: string } = {}): Promise<CheckResult> {
+/**
+ * #1043: `limitBytes` omitted means the effective budget — a valid signed
+ * storage.diskBudgetBytes, else the 100 MiB default (read-only read). A
+ * supplied limit wins and reads no config.
+ */
+export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes?: number, options: { dbPath?: string } = {}): Promise<CheckResult> {
+  const budget = limitBytes === undefined ? getDiskBudget() : { bytes: limitBytes, source: 'config' as const };
+  const limitLabel = formatBudget(budget.bytes);
+  // Only an unconfigured budget gets the setter as a hint; an operator who
+  // already chose a number does not need telling it exists.
+  const budgetHint = budget.source === 'config'
+    ? ''
+    : budget.source === 'untrusted'
+      ? ` storage.diskBudgetBytes is set, but config.json's signature does not verify, so it is ignored and the `
+        + `${limitLabel} default applies — see the config integrity row.`
+      : ` The ${limitLabel} budget is the default; if this host is meant to keep more, raise it with `
+        + '`shieldcortex config --disk-budget <size>` (e.g. 1GB).';
   const dirProbe = probePath(scDir);
   if (dirProbe.kind === 'denied' || dirProbe.kind === 'error') {
     // "Directory not yet created" is a ✅. An unreadable one is not — this is
@@ -2536,43 +2610,38 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     return unreadableResult('Disk', scDir, dirProbe);
   }
   if (dirProbe.kind === 'absent') {
-    return { label: 'Disk', status: 'pass', message: '0 B / 100 MB limit (directory not yet created)' };
+    return { label: 'Disk', status: 'pass', message: `0 B / ${limitLabel} limit (directory not yet created)` };
   }
 
   try {
+    // #1043: ONE traversal policy for every bucket below. `treeSize` never
+    // follows a symbolic link (lstat; a link, FIFO or socket counts 0 bytes)
+    // and the total is the sum of it over the top-level entries. The audit
+    // plane is subtracted from that total, so it must be measured the same
+    // way: before this, the total skipped links but the audit figure followed
+    // them, and an `audit` symlink to unrelated evidence could subtract bytes
+    // that were never counted — turning an over-budget database into a pass.
+    const treeSize = (target: string): number => {
+      try {
+        const st = fs.lstatSync(target);
+        if (st.isFile()) return st.size;
+        if (!st.isDirectory()) return 0;
+        let total = 0;
+        for (const name of fs.readdirSync(target)) total += treeSize(path.join(target, name));
+        return total;
+      } catch {
+        return 0; // Skip inaccessible entries
+      }
+    };
+
     let dataSize = 0;
     let modelsSize = 0;
-
-    function walkInto(dir: string, bucket: 'data' | 'models'): void {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-        try {
-          if (entry.isDirectory()) {
-            walkInto(fullPath, bucket);
-          } else if (entry.isFile()) {
-            const size = fs.statSync(fullPath).size;
-            if (bucket === 'models') modelsSize += size;
-            else dataSize += size;
-          }
-        } catch {
-          // Skip inaccessible files
-        }
-      }
-    }
-
-    const topLevel = fs.readdirSync(scDir, { withFileTypes: true });
-    for (const entry of topLevel) {
-      const fullPath = path.join(scDir, entry.name);
-      try {
-        if (entry.isDirectory()) {
-          walkInto(fullPath, entry.name === 'models' ? 'models' : 'data');
-        } else if (entry.isFile()) {
-          dataSize += fs.statSync(fullPath).size;
-        }
-      } catch {
-        // Skip inaccessible top-level entries
-      }
+    let auditLogSize = 0;
+    for (const entry of fs.readdirSync(scDir, { withFileTypes: true })) {
+      const bytes = treeSize(path.join(scDir, entry.name));
+      if (entry.isDirectory() && entry.name === 'models') modelsSize += bytes;
+      else dataSize += bytes;
+      if (entry.isDirectory() && entry.name === 'audit') auditLogSize = bytes;
     }
 
     // Bucket the data so the remedy can name the actual consumer rather than always
@@ -2584,22 +2653,11 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     const BACKUP_RE = /^memories\.db\.(pre-backfill|empty-live|stub|corrupt|recovery-failed|bak)/;
     const LIVE_DB = new Set(['memories.db', 'memories.db-wal', 'memories.db-shm']);
     const LOG_DIRS = new Set(['logs', 'audit', 'recall-log', 'precompact-log', 'quarantine']);
-    const sizeOf = (target: string): number => {
-      try {
-        const st = fs.statSync(target);
-        if (st.isFile()) return st.size;
-        let total = 0;
-        for (const e of fs.readdirSync(target, { withFileTypes: true })) total += sizeOf(path.join(target, e.name));
-        return total;
-      } catch {
-        return 0;
-      }
-    };
     for (const entry of fs.readdirSync(scDir, { withFileTypes: true })) {
       const fp = path.join(scDir, entry.name);
-      if (entry.isFile() && BACKUP_RE.test(entry.name)) backupsSize += sizeOf(fp);
-      else if (entry.isFile() && LIVE_DB.has(entry.name)) liveDbSize += sizeOf(fp);
-      else if (entry.isDirectory() && LOG_DIRS.has(entry.name)) logsSize += sizeOf(fp);
+      if (entry.isFile() && BACKUP_RE.test(entry.name)) backupsSize += treeSize(fp);
+      else if (entry.isFile() && LIVE_DB.has(entry.name)) liveDbSize += treeSize(fp);
+      else if (entry.isDirectory() && LOG_DIRS.has(entry.name)) logsSize += treeSize(fp);
     }
 
     // #573: "logs" as one lump is not actionable. The live incident read
@@ -2609,8 +2667,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     // project-key repair logs (retention, and a command behind it). Split it.
     // The audit plane is measured as a whole directory and REPORTED ONLY. This
     // check never recommends an action against it and nothing in this release
-    // deletes or rewrites an audit file.
-    const auditLogSize = sizeOf(path.join(scDir, 'audit'));
+    // deletes or rewrites an audit file. (Measured in the walk above.)
     // Counted by the SAME grammar `logs prune` acts on (isRepairLogName), so
     // the number shown here is exactly the set the recommended command would
     // consider — not doctor's own approximation of it.
@@ -2618,7 +2675,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     try {
       for (const e of fs.readdirSync(path.join(scDir, 'logs'), { withFileTypes: true })) {
         if (e.isFile() && isRepairLogName(e.name)) {
-          repairLogs.bytes += sizeOf(path.join(scDir, 'logs', e.name));
+          repairLogs.bytes += treeSize(path.join(scDir, 'logs', e.name));
           repairLogs.files++;
         }
       }
@@ -2640,10 +2697,17 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     // shown, no longer able to deadlock the thing that creates them.
     dataSize -= backupsSize;
 
-    const limit = limitBytes; // 100 MB by default; applies to the data portion only
-    const limitMb = Math.round(limit / (1024 * 1024));
-    const pct = (dataSize / limit) * 100;
-    const dataStr = `${formatBytes(dataSize)} / ${limitMb} MB limit`;
+    // #1043: the row is judged on the memory data only — the database, its
+    // WAL, repair and other logs, state. The realtime audit plane is shown as
+    // its own number and never FAILs the row: it has no retention yet (#579)
+    // and nothing here deletes evidence, so a FAIL it caused would have no
+    // remedy. It can still WARN when it is what pushes the total over 80%.
+    const limit = budget.bytes;
+    const memoryData = Math.max(0, dataSize - auditLogSize);
+    const pct = (memoryData / limit) * 100;
+    const totalPct = (dataSize / limit) * 100;
+    const dataStr = `${formatBytes(memoryData)} / ${limitLabel} limit`;
+    const auditStr = auditLogSize > 0 ? ` + ${formatBytes(auditLogSize)} audit (not counted)` : '';
     const modelsStr = modelsSize > 0 ? ` + ${formatBytes(modelsSize)} models` : '';
     const backupsStr = backupsSize > 0 ? ` + ${formatBytes(backupsSize)} backups` : '';
 
@@ -2705,18 +2769,16 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
           + 'space — `shieldcortex vacuum` reclaims it on disk, in place, via the bundled engine '
           + '(no sqlite3 CLI needed), without deleting anything.';
       }
-      if (shareOf(auditLogSize) >= CONSUMER_SHARE) {
-        // Reported, never acted on. Naming a command here would be a lie:
-        // nothing in this release deletes or rewrites an audit file.
-        return `${formatBytes(auditLogSize)} of the measured ${formatBytes(measured)} is realtime `
-          + 'audit evidence under ~/.shieldcortex/audit/. That plane has NO AUTOMATIC RETENTION '
-          + 'yet — it is an unread queue with concurrent writers, a projector cursor and stop-hook '
-          + 'recovery reading it, so bounding it safely is separate work, tracked in #579. Nothing '
-          + 'here will delete security evidence for you.';
-      }
       reportOnly = true;
       return largestConsumerReport();
     };
+    // Reported, never acted on. Naming a command here would be a lie: nothing
+    // in this release deletes or rewrites an audit file.
+    const auditRemedy = (): string => `${formatBytes(auditLogSize)} of the measured ${formatBytes(measured)} is realtime `
+      + 'audit evidence under ~/.shieldcortex/audit/. That plane has NO AUTOMATIC RETENTION '
+      + 'yet — it is an unread queue with concurrent writers, a projector cursor and stop-hook '
+      + 'recovery reading it, so bounding it safely is separate work, tracked in #579. It is not '
+      + 'counted against the budget. Nothing here will delete security evidence for you.';
     // Set when remedy() fell through to the report: its only command is the
     // `logs prune` dry run, an inspection step, so the human report must keep
     // the attribution and scope prose next to it.
@@ -2740,16 +2802,17 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
      * will fail because the freelist is small.
      */
     const largestConsumerReport = (): string => {
-      const terms: Array<{ key: 'db' | 'audit' | 'repair' | 'other'; label: string; bytes: number }> = [
+      // #1043: audit evidence is not counted against the limit, so it is not
+      // ranked here; it gets its own note below when it is large.
+      const terms: Array<{ key: 'db' | 'repair' | 'other'; label: string; bytes: number }> = [
         { key: 'db', label: 'the database', bytes: liveDbSize },
-        { key: 'audit', label: 'audit evidence', bytes: auditLogSize },
         { key: 'repair', label: 'repair logs', bytes: repairLogSize },
         { key: 'other', label: 'everything else', bytes: otherSize },
       ];
       const budgeted = terms.reduce((sum, t) => sum + t.bytes, 0);
       const ranked = terms.filter((t) => t.bytes > 0).sort((a, b) => b.bytes - a.bytes);
       const exempt = backupsSize > 0 ? ` Backups (${formatBytes(backupsSize)}) are exempt from the limit.` : '';
-      const scope = ` The ${limitMb} MB limit is ShieldCortex's own footprint budget, not a measurement of `
+      const scope = ` The ${limitLabel} limit is ShieldCortex's own footprint budget, not a measurement of `
         + 'free space on the filesystem — inspect before removing anything.';
       if (ranked.length === 0 || budgeted === 0) {
         return `Nothing measured counts against the limit.${exempt}${scope}`;
@@ -2781,8 +2844,6 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
               + `${Math.round(VACUUM_FREE_SHARE * 100)}% where compacting is worth a full rewrite. `
               + 'Doctor does not measure which rows fill the database, so it names no command to shrink it.');
           }
-        } else if (t.key === 'audit') {
-          notes.push('Audit evidence has no automatic retention yet (#579), and nothing here deletes it.');
         } else if (t.key === 'repair') {
           notes.push('`shieldcortex logs prune` (without --execute) lists which project-key repair logs '
             + 'retention would remove; it never touches audit evidence.');
@@ -2791,33 +2852,45 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
             + 'like), so no command is named for it.');
         }
       }
-      // A large audit plane that is not the top term is still worth one line:
-      // it is the term an operator is most likely to try to clear by hand.
-      if (!top.some((t) => t.key === 'audit') && auditLogSize > 0 && pctOf(auditLogSize) >= 25) {
-        notes.push(`Audit evidence (${pctOf(auditLogSize)}%) has no automatic retention yet (#579), `
-          + 'and nothing here deletes it.');
+      // A large audit plane is still worth one line: it is the term an
+      // operator is most likely to try to clear by hand.
+      if (auditLogSize > 0 && shareOf(auditLogSize) >= 0.25) {
+        notes.push(`Audit evidence (${formatBytes(auditLogSize)}, not counted against the limit) has no `
+          + 'automatic retention yet (#579), and nothing here deletes it.');
       }
       return `${head}${restText}${exempt} ${notes.join(' ')}${scope}`;
     };
 
+    const sizes = `${dataStr}${auditStr}${backupsStr}${modelsStr}`;
     if (pct >= 95) {
       return {
         label: 'Disk',
         status: 'fail',
-        message: `${dataStr}${backupsStr}${modelsStr} — at limit! (${breakdown})`,
-        fix: remedy(),
+        message: `${sizes} — at limit! (${breakdown})`,
+        fix: remedy() + budgetHint,
         ...(reportOnly ? { fixNoteWithCommands: true as const } : {}),
       };
     } else if (pct >= 80) {
       return {
         label: 'Disk',
         status: 'warn',
-        message: `${dataStr}${backupsStr}${modelsStr} — approaching limit (${breakdown})`,
-        fix: remedy(),
+        message: `${sizes} — approaching limit (${breakdown})`,
+        fix: remedy() + budgetHint,
         ...(reportOnly ? { fixNoteWithCommands: true as const } : {}),
       };
+    } else if (totalPct >= 80) {
+      // Audit alone tipped the total: a WARN at most, never a FAIL.
+      return {
+        label: 'Disk',
+        status: 'warn',
+        message: `${sizes} — memory data is within the limit; with audit evidence the total is `
+          + `${Math.round(totalPct)}% of it (${breakdown})`,
+        fix: auditRemedy() + budgetHint,
+        // Keep the "nothing here deletes evidence" prose next to any command.
+        fixNoteWithCommands: true as const,
+      };
     } else {
-      return { label: 'Disk', status: 'pass', message: `${dataStr}${backupsStr}${modelsStr}` };
+      return { label: 'Disk', status: 'pass', message: sizes };
     }
   } catch (err: unknown) {
     // A directory that stats but cannot be listed (mode 700, another owner) is
@@ -4927,7 +5000,17 @@ export function readHostGatePlanesWithPosture(hostHome?: string): HostGatePlanes
  * `--strict` runs that passed before this check existed). The HOSTS table and
  * the host-contract `bound` evidence are untouched and stay display-only.
  *
- * Read-only: no config, consent or Guard state is changed by collecting.
+ * #970: the host summary never judges a stale record (its process is shown
+ * to have ended, it went unseen for the not-seen age, a newer current record
+ * superseded a silent per-call one, or its runtime is absent from the HOSTS
+ * table — see `StaleReason`). It is still a row here, marked `posture.stale`,
+ * always `info`. A present runtime whose reports are all stale keeps one
+ * non-green "present, no current report" row, so it is judged exactly as if
+ * it had never reported. The default report folds a runtime's stale rows
+ * into one line; `--verbose` and `--json` keep them.
+ *
+ * Read-only: no config, consent or Guard state is changed by collecting, and
+ * no self-report file is deleted.
  */
 export const RUNTIME_POSTURE_LABEL = 'Runtime posture';
 
@@ -4984,25 +5067,39 @@ export async function checkRuntimePosture(opts: CollectOptions = {}): Promise<Ch
     const level = postureLevel(r);
     const scope = [r.profile === 'default' ? null : r.profile, r.plane, r.key.instance].filter(Boolean).join(', ');
     const notes = r.notes.length > 0 ? ` (${r.notes.join('; ')})` : '';
+    // #970: a stale record is listed, never judged, and never a pass.
+    const stale = r.stale_reason ? ` — stale (${staleReasonText(r.stale_reason)}); not judged for the host posture` : '';
     return {
       label: `${RUNTIME_POSTURE_LABEL}: ${runtimeLabel(r.runtime)} (${scope})`,
-      status: level === 'loaded-enforce' ? 'pass' : 'info',
-      message: `${renderPostureLine(r)}${notes}`,
+      status: level === 'loaded-enforce' && !r.stale ? 'pass' : 'info',
+      message: `${renderPostureLine(r)}${notes}${stale}`,
+      posture: {
+        group: `${RUNTIME_POSTURE_LABEL}: ${runtimeLabel(r.runtime)}`,
+        stale: r.stale,
+        staleReason: r.stale_reason,
+        instance: r.key.instance !== null,
+        verified: r.membership === 'current',
+      },
     };
   });
   const boundary = codexToolBoundaryRow(records.map((r) => r.runtime));
   if (boundary) rows.push(boundary);
   const summary = summarisePosture(records);
   const weakest = records.find((r) => r.source === summary.weakest);
+  const found = `${records.length} found` + (summary.stale_count > 0 ? `, ${summary.stale_count} stale not judged` : '');
+  const caveat = ' — records found only, not a claim that no other runtime process exists;' +
+    ' self-reports are host-local evidence, not attestation — full records: `shieldcortex policy-evidence`';
   rows.push({
     label: `${RUNTIME_POSTURE_LABEL} (host)`,
     status: summary.green ? 'pass' : 'info',
     message: records.length === 0
       ? 'no runtime on this box shows a ShieldCortex gate or memory integration — posture unknown'
-      : `weakest of ${summary.rollup_count} record(s) judged (${records.length} found): ${summary.level}` +
-        (weakest ? ` (${runtimeLabel(weakest.runtime)}, ${weakest.plane})` : '') +
-        ' — records found only, not a claim that no other runtime process exists;' +
-        ' self-reports are host-local evidence, not attestation — full records: `shieldcortex policy-evidence`',
+      // #970: nothing live to judge is its own statement, not `unknown`.
+      : summary.rollup_count === 0
+        ? `no live instances reporting (${found})${caveat}`
+        : `weakest of ${summary.rollup_count} record(s) judged (${found}): ${summary.level}` +
+          (weakest ? ` (${runtimeLabel(weakest.runtime)}, ${weakest.plane})` : '') +
+          caveat,
   });
   return rows;
 }
@@ -10158,6 +10255,8 @@ export async function runDoctor(
       results: visible.map((r) => ({
         label: r.label, status: r.status, message: r.message, fix: r.fix,
         ...(r.verboseNote ? { verboseNote: r.verboseNote } : {}),
+        // #970: additive — every posture record row says whether it is stale.
+        ...(r.posture ? { stale: r.posture.stale, staleReason: r.posture.staleReason } : {}),
       })),
     }, 2));
     const jsonExit = doctorExitCode(visible, { strict: args.includes('--strict') });

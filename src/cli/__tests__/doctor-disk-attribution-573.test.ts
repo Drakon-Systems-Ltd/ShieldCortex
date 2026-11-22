@@ -133,7 +133,9 @@ describe('#573 the DISK breakdown reports the sizes it measured', () => {
 
     const result = await checkDiskUsage(scDir, 32 * KB);
 
-    expect(result.status).toBe('fail');
+    // #1043: 19 KB of memory data is under the limit; the audit plane takes
+    // the total over it, which WARNs (audit never FAILs the row).
+    expect(result.status).toBe('warn');
     expect(result.message).toMatch(/audit 20\.0 KB/);
     expect(result.message).toMatch(/repair 12\.0 KB/);
     expect(result.message).toMatch(/other 3\.0 KB/);
@@ -182,7 +184,7 @@ describe('#573 the remedy follows the measurement, or names no command', () => {
 
     const result = await checkDiskUsage(scDir, 32 * KB);
 
-    expect(result.status).toBe('fail');
+    expect(result.status).toBe('warn'); // #1043: audit alone never FAILs
     expect(result.fix).toMatch(/audit/);
     // The honest answer is "no retention for this plane yet, here is where
     // that is tracked" — not a command that would not touch it.

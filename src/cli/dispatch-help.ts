@@ -136,6 +136,13 @@ Options:
   --memory-host-posture <mcp_sidecar_no_inject|bus_contract>  Honest sidecar (also turns inject off) or bus-contract posture (signed write)
   --memory-host-runtime <openclaw|claude_code|hermes>[,…]  Declare the bound host runtime(s) doctor must prove (signed write)
   --auto-memory-sampling <n>  Stop-hook sampling cadence in turns (1-20, ≤ 5 recommended; signed write)
+  --memory-cap <ltm=N[,stm=M]>  Memory caps: ltm 100-100000 (default 1000), stm 10-10000 (default 100)
+                           (signed write). Deletes nothing now; at a cap, normal consolidation evicts
+                           the oldest unpinned memories, so lowering a cap below the current count
+                           means a later consolidation evicts the excess
+  --disk-budget <size>     Budget doctor and maintenance judge ShieldCortex's own data against, e.g.
+                           250MB, 1GB, 500MiB or bytes (50 MiB-50 GiB, default 100 MiB; signed
+                           write). Not free disk space, and it deletes nothing
   --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)
   --resign               Preview re-signing a config.json that fails its integrity check (writes nothing)
   --resign --confirm <sha256>  Re-sign the parse of exactly the previewed bytes (full sha256). Refused if

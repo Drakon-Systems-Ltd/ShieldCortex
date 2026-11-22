@@ -35,6 +35,15 @@ import { fileURLToPath } from 'node:url';
 
 export const POSTURE_SCHEMA = 'shieldcortex.posture.self-report';
 export const POSTURE_VERSION = 1;
+/**
+ * #970: this process's PID namespace id goes in a sidecar beside the report,
+ * `<instance>.pidns` (its digits, or `null`), NOT in the report: the report
+ * stays the closed v1 schema that every CLI, earlier ones included, reads, and
+ * an earlier CLI lists only `*.json` names, so it never sees the sidecar. It
+ * is rewritten after every report write: the CLI trusts it only when it is
+ * not older than the report.
+ */
+export const POSTURE_PID_NS_SUFFIX = '.pidns';
 export const POSTURE_MAX_BYTES = 8192;
 const MAX_INTERVALS = 8;
 const REASON_MAX = 120;
@@ -90,11 +99,26 @@ function linuxSelfStart(): string | null {
   }
 }
 
+/**
+ * #970: this process's PID namespace id (Linux: inode of /proc/self/ns/pid),
+ * so the CLI can tell whether its own pid lookup can prove this process
+ * exited. Null elsewhere or when unreadable.
+ */
+function linuxSelfPidNamespace(): string | null {
+  if (process.platform !== 'linux') return null;
+  try {
+    const ino = fs.statSync('/proc/self/ns/pid', { bigint: true }).ino;
+    return ino > 0n ? ino.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-let identity: { key: string; pid: number; start: string | null; startedAt: string } | null = null;
+let identity: { key: string; pid: number; start: string | null; pidNs: string | null; startedAt: string } | null = null;
 function processIdentity() {
   if (!identity) {
     const start = linuxSelfStart();
@@ -102,6 +126,7 @@ function processIdentity() {
       key: start ? `p${process.pid}-s${start}` : `p${process.pid}-r${randomBytes(4).toString('hex')}`,
       pid: process.pid,
       start,
+      pidNs: linuxSelfPidNamespace(),
       startedAt: iso(Date.now() - Math.round(process.uptime() * 1000)),
     };
   }
@@ -170,21 +195,44 @@ function secureDir(dir: string): void {
   if ((st.mode & 0o077) !== 0) fs.chmodSync(dir, 0o700);
 }
 
-function prune(dir: string, keep: string, nowMs: number): void {
+function prune(dir: string, keep: readonly string[], nowMs: number): void {
   try {
     for (const name of fs.readdirSync(dir)) {
-      if (name === keep) continue;
+      if (keep.includes(name)) continue;
       const full = path.join(dir, name);
       try {
         const st = fs.lstatSync(full);
         const tmp = name.includes('.tmp-');
         if (!st.isFile()) continue;
-        if ((tmp && nowMs - st.mtimeMs > 60 * 60 * 1000) || (!tmp && name.endsWith('.json') && nowMs - st.mtimeMs > PRUNE_AFTER_MS)) {
+        const report = name.endsWith('.json') || name.endsWith(POSTURE_PID_NS_SUFFIX);
+        if ((tmp && nowMs - st.mtimeMs > 60 * 60 * 1000) || (!tmp && report && nowMs - st.mtimeMs > PRUNE_AFTER_MS)) {
           fs.unlinkSync(full);
         }
       } catch { /* raced */ }
     }
   } catch { /* best-effort */ }
+}
+
+/**
+ * #970: write `<key>.pidns` atomically (temp + rename, owner-only). Best-effort:
+ * a failure leaves no sidecar or an older one, which the CLI reads as
+ * "namespace unknown"; it never fails the report write.
+ */
+function writePidNsSidecar(dir: string, key: string, pidNs: string | null): void {
+  let tmp: string | null = null;
+  try {
+    const file = path.join(dir, `${key}${POSTURE_PID_NS_SUFFIX}`);
+    tmp = `${file}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
+    fs.writeFileSync(tmp, pidNs ?? 'null', { flag: 'wx', mode: 0o600 });
+    fs.renameSync(tmp, file);
+    tmp = null;
+  } catch {
+    /* best-effort */
+  } finally {
+    if (tmp) {
+      try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+    }
+  }
 }
 
 const states = new Map<string, ProfileState>();
@@ -315,7 +363,9 @@ export function writePostureSelfReport(input: PostureReportInput): boolean {
     tmp = null;
     s.lastWriteMs = nowMs;
     s.lastBody = comparable;
-    prune(dir, `${id.key}.json`, nowMs);
+    // After the report, so the sidecar's mtime is not older than it (#970).
+    writePidNsSidecar(dir, id.key, id.pidNs);
+    prune(dir, [`${id.key}.json`, `${id.key}${POSTURE_PID_NS_SUFFIX}`], nowMs);
     return true;
   } catch {
     return false;

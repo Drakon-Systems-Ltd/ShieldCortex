@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { initDatabase, closeDatabase, getDatabase } from '../database/init.js';
-import { enforceMemoryLimits } from '../memory/consolidate.js';
+import { enforceMemoryLimits, fullCleanup } from '../memory/consolidate.js';
 import { __resetCapWarningsForTest } from '../memory/config.js';
 
 /**
@@ -27,10 +27,9 @@ let configDir: string;
 function writeConfig(obj: unknown): void {
   const key = 'a'.repeat(64);
   writeFileSync(join(configDir, '.integrity-key'), key, { mode: 0o600 });
-  const body = JSON.stringify(obj, null, 2) + '\n';
-  writeFileSync(join(configDir, 'config.json'), body);
+  const body = JSON.stringify(obj, null, 2);
   const sig = createHmac('sha256', key).update(body, 'utf-8').digest('hex');
-  writeFileSync(join(configDir, '.config-sig'), sig, { mode: 0o600 });
+  writeFileSync(join(configDir, 'config.json'), JSON.stringify({ ...(obj as object), _sig: sig }, null, 2) + '\n');
 }
 
 const DAYS = 86_400_000;
@@ -121,5 +120,17 @@ describe('configurable caps — the resolver is actually consulted', () => {
 
     expect(deleted).toBe(1);
     expect(longTermCount()).toBe(24);
+  });
+
+  it('#1043: fullCleanup() with no argument (the server\'s 4-hourly path) honours a cap RAISED above 1000', () => {
+    // It used to default to DEFAULT_CONFIG, so `config --memory-cap ltm=1200`
+    // was undone every four hours: 1100 rows evicted back down to 1000.
+    writeConfig({ memory: { maxLongTermMemories: 1200 } });
+    seedEvictable(1100);
+
+    const result = fullCleanup();
+
+    expect(result.consolidation.evictedLongTerm).toBe(0);
+    expect(longTermCount()).toBe(1100);
   });
 });
