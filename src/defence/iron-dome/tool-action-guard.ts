@@ -825,20 +825,26 @@ const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlog
 // `/etc` account files and a `.env` file.
 // #1005 (SCN-008a): plus the named credential stores below, each a path
 // segment, so reading or uploading one cards whatever the destination is. A
-// `.secret`/`.secrets` directory counts only as its own segment (after start,
-// a blank, a quote, `=`, `:`, `/`, `~` or curl's `@`), never `docs/my.secrets/`.
+// `.secret`/`.secrets` directory is one of those names: the directory itself
+// (`tar czf s.tgz ~/.secrets`) and anything under it, never `docs/my.secrets/`.
 // An `id_ed25519`/`id_ecdsa`/`id_dsa` basename counts OUTSIDE a `.ssh/`
 // directory only: a home-rooted `~/.ssh/…` is the SSH_DIR rule's, and a bare
 // relative `.ssh/…` stays judged as before (#874/#920 relative-path refusal).
 // `~/.kube/config` and `.npmrc` are left out on purpose: routine kubectl and
 // registry work names them on almost every call.
-// Each store name is a WHOLE filename: no word character, `.` or `-` on
-// either side, so `.netrc.example`, `.git-credentials.sample`,
-// `hosts.yml.bak`, `.vault-token-old`, `my.netrc` and `id_ed25519.pub` are
-// not the store. This is stricter than the older alternatives above
+// Each store name is a WHOLE filename, with ONE boundary for every store
+// (fold A1). Start: no word character, `.` or `-` on the left, so a shell
+// operator (`<`, `>`, `|`, `;`, `&`, `(`, `)`, a backtick, `$(`), a quote,
+// `=`, `:`, `/`, `~`, `@` or a backslash escape (`\.secrets`) all start it;
+// or a short option letter directly before it after a blank or the start
+// (`curl -T.netrc`, an attached operand). End: no word character, `.` or `-`
+// on the right, so `/`, the end, a blank, a quote or an operator all end it.
+// So `.netrc.example`, `.git-credentials.sample`, `hosts.yml.bak`,
+// `.vault-token-old`, `my.netrc`, `.secretsmanager`, `x.secrets` and
+// `id_ed25519.pub` are not the store. This is stricter than the older alternatives above
 // (`.env\b`, `id_rsa`, `.aws/credentials`), which still card `.env.example`
 // and `id_rsa.pub` as they do on origin/main; those are left as they are.
-const CREDENTIAL_STORE_PATH_SRC = String.raw`(?<![\w.-])(?:\.netrc|_netrc|\.git-credentials|\.config\/gh\/hosts\.ya?ml|\.docker\/config\.json|\.pgpass|\.pypirc|\.vault-token|application_default_credentials\.json|\.config\/gcloud\/(?:credentials|access_tokens)\.db|\.azure\/(?:accessTokens\.json|msal_token_cache\.(?:json|bin))|(?<!\.ssh\/)id_(?:ed25519|ecdsa|dsa))(?![\w.-])|(?:^|[\s'"=:\/~@])\.secrets?\/`;
+const CREDENTIAL_STORE_PATH_SRC = String.raw`(?:(?<![\w.-])|(?<=(?:^|\s)-[A-Za-z]))(?:\.netrc|_netrc|\.git-credentials|\.config\/gh\/hosts\.ya?ml|\.docker\/config\.json|\.pgpass|\.pypirc|\.vault-token|application_default_credentials\.json|\.config\/gcloud\/(?:credentials|access_tokens)\.db|\.azure\/(?:accessTokens\.json|msal_token_cache\.(?:json|bin))|\.secrets?|(?<!\.ssh\/)id_(?:ed25519|ecdsa|dsa))(?![\w.-])`;
 const SENSITIVE_PATH_RE = new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|${SSH_DIR_PATH_SRC}|${AUTHORIZED_KEYS_PATH_SRC}|id_rsa|\.aws\/credentials|(?<![A-Za-z0-9_])\.env\b|${CREDENTIAL_STORE_PATH_SRC}`, 'i');
 // #505: a shell WRITE shape whose destination is a startup file. The write
 // prefix is a redirect (`>`, `>>`, noclobber `>|`), `tee` with any run of
