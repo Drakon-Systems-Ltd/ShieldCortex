@@ -1,6 +1,6 @@
 # ADR-002 v3 (proposed amendment): align with the 20 Oct design contract; build the command model first
 
-**Status:** Proposed (v3). **Not accepted.** The accepted text is still [ADR-002 v2 round 3](./ADR-002-provenance-first-enforcement.md) (operator decision 2026-09-29). Nothing in this document is in force, and this change switches nothing on or off: no default, no posture and no entry on the always-block list changes with it.
+**Status:** Accepted (v3, operator decision 2026-11-22: all six Section 7 answers accepted as recommended; see the decision record in Section 7). Where this document and [ADR-002 v2 round 3](./ADR-002-provenance-first-enforcement.md) differ, this document governs. Accepting it switches no enforcement on: posture and defaults change only through the build in epic #1065 and the Section 3.6 gate. Folding this text into ADR-002 and removing this file is tracked on #1065.
 **Date:** 2026-11-12
 **Author:** Jarvis (builder lane, epic #1065 Phase 0), from the build plan recorded on #1065.
 **Decision:** operator. The six questions in Section 7 need an owner answer before any of them takes effect.
@@ -173,4 +173,11 @@ Items 2, 3, 4 and 6 change answers the owner gave on 29 Sep and touch Guard defa
 
 The one-line form, for a digest: "ADR-002 v3: align with your 20 Oct rules (block list plus log, taint as a log flag first), and build the parser before anything else. OK?"
 
-**Decision record:** none yet. This section is where the answer is recorded.
+**Decision record (2026-11-22, operator):** all six accepted as recommended.
+
+1. Accepted: the 20 Oct contract (#875) supersedes v2 where they differ.
+2. Accepted: BLOCK on the fixed list, LOG by default, HOLD only under enforce and for the guard's own state.
+3. Accepted: the Section 3.5 always-block list. Scoping answers: a lease-protected force push to a non-default branch is **logged**, not blocked (#512); "disabling the guard" means a **write** to the guard's config or hook registration, and a read of those files is not (#927, #874).
+4. Accepted: unclassified or unresolved commands are logged with a marker by default, not held.
+5. Accepted: taint ships as an audit flag first. Condition attached: the measured numbers are reviewed four weeks after the taint flag ships, and any promotion to a hold is a separate decision on those numbers.
+6. Accepted: v2 Section 2.5's gate governs whether enforce may become a default again.
