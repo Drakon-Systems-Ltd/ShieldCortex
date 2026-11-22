@@ -247,6 +247,12 @@ function writeConfigSignature(jsonContent: string): void {
  */
 type IntegrityVerdict = 'valid' | 'self-heal' | 'tampered' | 'unverified';
 
+function hasMemoryCaps(parsed: Record<string, unknown>): boolean {
+  const memory = parsed.memory;
+  return memory !== null && typeof memory === 'object' && !Array.isArray(memory) &&
+    (Object.hasOwn(memory, 'maxShortTermMemories') || Object.hasOwn(memory, 'maxLongTermMemories'));
+}
+
 /**
  * Verify a parsed config object's integrity, returning a three-way verdict.
  *
@@ -271,7 +277,8 @@ type IntegrityVerdict = 'valid' | 'self-heal' | 'tampered' | 'unverified';
  *
  * `rawFileContent` is the literal bytes read from disk (needed for the legacy
  * whole-file signature). On a missing legacy sig file we adopt the current
- * content as trusted (first run after upgrade), matching prior behaviour.
+ * content as trusted, except when it declares memory caps: those bytes must
+ * be authenticated before they can control eviction.
  */
 function checkConfigIntegrity(
   parsed: Record<string, unknown>,
@@ -291,6 +298,11 @@ function checkConfigIntegrity(
   const sideEffects = opts.sideEffects !== false;
   const readOnly = opts.readOnly === true;
   try {
+    // Caps can evict stored memories. Never turn unsigned cap bytes into a
+    // trusted legacy signature during an incidental read.
+    if (typeof parsed._sig !== 'string' && !existsSync(getSigFile()) && hasMemoryCaps(parsed)) {
+      return sideEffects ? 'unverified' : 'unsigned';
+    }
     // A read-only inspection (doctor, the re-sign preview) must not mint an
     // integrity key: a missing key leaves nothing to verify against, which is
     // reported as tampered exactly as the minting path would conclude.
@@ -368,7 +380,8 @@ function readIntegrityKeyNoMint(): string | null {
  *  - `unverified` legacy adoption depends on a write that this read does not
  *                 make: a read-only read, or (#878) any read of an unsigned
  *                 file behind a symlinked config.json, which the runtime
- *                 enforces as the strict posture. Not cached.
+ *                 enforces as the strict posture, or an unsigned file declaring
+ *                 memory caps, which is never auto-adopted. Not cached.
  */
 export type ConfigIntegrity = 'absent' | 'valid' | 'self-heal' | 'malformed' | 'unreadable' | 'tampered' | 'unverified';
 
@@ -725,16 +738,17 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
     // `noWrite`: no legacy-signature adoption and no `.integrity-key` mint.
     const verdict = checkConfigIntegrity(data, content, { readOnly: noWrite });
     if (verdict === 'unverified') {
-      // Only a no-write read gets here: an unsigned file whose adoption has not
-      // run. On the runtime path that is a symlinked config.json (or one whose
-      // link state is unknown), and readRawConfigState holds it at the strict
-      // posture (#878 design: an unknown verdict is never Guard off).
-      if (!options.readOnly) {
+      configTampered = false;
+      // An unsigned file whose adoption has not run. On the runtime path this
+      // is a symlink, an unknown link state, or unsigned memory caps. All read
+      // at the strict posture; caps also block incidental writes.
+      const unsignedCaps = hasMemoryCaps(data) && linked === false;
+      if (!options.readOnly && !unsignedCaps) {
         warnUnsignedSymlinkOnce(configFile, linked);
         establishedPosture = { file: configFile, content, integrity: 'unverified' };
       }
       delete data._sig;
-      return { data, parseFailed: unknownLink, integrity: 'unverified', unverified: true };
+      return { data, parseFailed: unknownLink || unsignedCaps, integrity: 'unverified', unverified: true };
     }
     configTampered = verdict === 'tampered';
     if (verdict === 'tampered') {
@@ -856,9 +870,8 @@ function readRawConfigState(options: { readOnly?: boolean } = {}): RawConfigStat
   // #647: applied HERE, on the effective view only, never to the state a
   // write starts from — same order and same function as before, so every
   // reader sees exactly what it saw before #647.
-  // #878: on the runtime path an `unverified` verdict (an unsigned file behind
-  // a symlinked config.json, which the read layer does not adopt) is unknown,
-  // and unknown is enforced as the same strict posture — never Guard off.
+  // #878: on the runtime path an `unverified` verdict is enforced as strict,
+  // whether from a symlinked config.json or unsigned memory caps.
   // Read-only callers get the file's own data plus `unverified` and report
   // the posture as unknown instead.
   // A `held` read (the file is blank, unreadable or malformed now, after this
@@ -897,8 +910,9 @@ export function readRawConfig(options: { readOnly?: boolean } = {}): Record<stri
  *  - `unknown` something visible without writing may stop the adoption (a
  *              non-file key, a dangling sidecar link, a config directory this
  *              user cannot write); if it does, the runtime reads it tampered.
+ *  - `caps`    unsigned memory caps are never adopted; the runtime reads strict.
  */
-export type UnsignedAdoptionBlock = 'linked' | 'fails' | 'unknown';
+export type UnsignedAdoptionBlock = 'linked' | 'fails' | 'unknown' | 'caps';
 
 export interface ConfigIntegrityReport {
   /**
@@ -949,12 +963,14 @@ export function configPostureOutlook(report: Pick<ConfigIntegrityReport, 'verdic
 /** An unsigned file's posture outlook, from its adoption block (undefined: unobstructed). */
 function outlookOfAdoption(block: UnsignedAdoptionBlock | undefined): ConfigPostureOutlook {
   if (block === undefined) return 'file';
-  return block === 'fails' ? 'strict' : 'unknown';
+  return block === 'fails' || block === 'caps' ? 'strict' : 'unknown';
 }
 
 /** Plain words for an {@link UnsignedAdoptionBlock}, for doctor rows. */
 export function describeAdoptionBlock(block: UnsignedAdoptionBlock): string {
   switch (block) {
+    case 'caps':
+      return 'config.json has unsigned memory caps, which the runtime never adopts or signs on read';
     case 'linked':
       return 'config.json is a symbolic link to a file with no signature, which is never adopted (nothing is written beside a link)';
     case 'fails':
@@ -1006,6 +1022,7 @@ export function readConfigBytesNoSideEffects(): ConfigBytes {
     // #878: `unsigned` promises that the next ordinary read adopts the file.
     // Where it will not, the answer is unverified, with the reason — the same
     // outlook inspectActionGuardCoreConfig acts on.
+    if (!linked && hasMemoryCaps(data)) return { path, verdict: 'unverified', adoption: 'caps', linked, bytes, data };
     const outlook = unsignedAdoptionOutlook();
     if (outlook !== 'unobstructed') return { path, verdict: 'unverified', adoption: outlook, linked, bytes, data };
   }
@@ -1794,6 +1811,10 @@ function mutateRawConfig(
     return false;
   }
   const { data, parseFailed, integrity } = readRawConfigStateUnlocked();
+  if (integrity === 'unverified' && hasMemoryCaps(data)) {
+    if (onParseFail === 'throw') throw new Error('Refusing to sign unsigned memory caps during a config write; restore a signed backup or remove the unsigned cap keys first.');
+    return false;
+  }
   if (parseFailed) {
     console.error('[ShieldCortex] config.json is unreadable — refusing to overwrite (would wipe settings incl. cloudApiKey). Fix or remove the file.');
     if (onParseFail === 'throw') {
@@ -2064,7 +2085,8 @@ export function inspectActionGuardCoreConfig(): ActionGuardCoreConfig | 'unknown
     // An unsigned file: what the runtime enforces depends on the adoption —
     // the same outlook, through the same mapping, inspectConfigIntegrity
     // reports and every doctor row grades by (#878).
-    const adoption = unsignedAdoptionOutlook();
+    const adoption = !configIsSymlink(getConfigFile()) && hasMemoryCaps(state.data)
+      ? 'caps' : unsignedAdoptionOutlook();
     switch (outlookOfAdoption(adoption === 'unobstructed' ? undefined : adoption)) {
       case 'file':
         // The next ordinary read adopts it and enforces what it says (doctor's
@@ -2072,6 +2094,11 @@ export function inspectActionGuardCoreConfig(): ActionGuardCoreConfig | 'unknown
         return resolveActionGuardCore(state.data);
       case 'strict': {
         // A failed adoption is classified tampered: the strict view.
+        if (adoption === 'caps') {
+          return resolveActionGuardCore(
+            applyPolicyLock(applyStrictFailClosedPosture(state.data), readPolicyLock({ audit: false })),
+          );
+        }
         const unlocked = readRawConfigStateUnlocked({ readOnly: true });
         if (unlocked.parseFailed || unlocked.readFailed) return 'unknown';
         return resolveActionGuardCore(

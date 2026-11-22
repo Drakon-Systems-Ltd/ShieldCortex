@@ -104,10 +104,12 @@ export function resolveMemoryConfigWithIntegrity(base: MemoryConfig = DEFAULT_CO
   let block: Record<string, unknown>;
   let trusted: boolean;
   let verdict: string;
+  let unsignedCaps = false;
   try {
     const read = readConfigBytesNoSideEffects();
     block = memoryBlock(read.data ?? {});
     verdict = read.verdict;
+    unsignedCaps = read.adoption === 'caps';
     trusted = verdict === 'valid' || verdict === 'self-heal';
   } catch {
     return { config: base, ignoredCapReason: null };
@@ -123,7 +125,7 @@ export function resolveMemoryConfigWithIntegrity(base: MemoryConfig = DEFAULT_CO
     return {
       config: base,
       ignoredCapReason: hasStoredCaps
-        ? (verdict === 'unsigned' ? 'unsigned' : verdict === 'unverified' ? 'unverified' : 'invalid-signature')
+        ? (verdict === 'unsigned' || unsignedCaps ? 'unsigned' : verdict === 'unverified' ? 'unverified' : 'invalid-signature')
         : null,
     };
   }
