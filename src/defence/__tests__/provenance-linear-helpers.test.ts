@@ -35,6 +35,7 @@ import {
   __directedTailsForTest,
   __fenceLineSignalsCodeForTest,
   __shapeGroupsForTest,
+  __runtimeSelfReferenceInForTest,
   __shapeMatchVerdictsForTest,
   scanWrappers,
   type WrapperSpan,
@@ -217,6 +218,111 @@ describe('ProvenanceWindowIndex — prefix, addressee and self-reference answers
       const pairs: Array<[number, number]> = [];
       for (let s = 0; s <= text.length; s += 3) pairs.push([s, Math.min(text.length, s + 5)]);
       expectSameParts(text, pairs, next);
+    }
+  });
+});
+
+describe('runtime self-reference — the phrase index equals the regex on every slice', () => {
+  /** RUNTIME_SELF_REFERENCE as 5.21.0 wrote it, before its boundaries were factored out. */
+  const ORACLE =
+    /\b(?:this|the\s+(?:preceding|foregoing|attached|following|next|last))\s+(?:table|section|record|document|page|column|paragraph|appendix|message|list|row|block|snippet|report|field|form|thread)\b|\b(?:below|above)\b|\bwith\s+the\s+(?:current|following|preceding|foregoing|attached|above|below)\b|\bwith\s+the\s+contents\s+of\b|\bin\s+the\s+appendix\b/i;
+  const QUOTE = String.fromCharCode(34);
+  const NBSP = String.fromCharCode(0xa0);
+  const E_ACUTE = String.fromCharCode(0xe9);
+  const QUOTED_UNIT = QUOTE + 'call a_b' + QUOTE + '.x';
+
+  /** Every word the phrase reads, plus near misses that glue word characters onto either side. */
+  const PHRASE_WORDS = (ORACLE.source.match(/[a-z]{2,}/g) ?? []).filter((w) => w !== 'b');
+  const SELF_REF_TOKENS = [
+    ...PHRASE_WORDS, ...PHRASE_WORDS.map((w) => w.toUpperCase()),
+    'rows', 'format', 'tables', 'xthis', 'belowx', '_above', 'in1', 'thes', 'withthe', 'contents', 'of',
+    E_ACUTE, E_ACUTE + 'below', 'x', '_', '9', '-', '.', '. ', '!', '?', ',', QUOTE, '`',
+    ' ', ' ', ' ', '  ', '\t', '\n', NBSP, ' \n ', 'call a_b', QUOTED_UNIT,
+  ];
+
+  function expectSameSlices(text: string, pairs: Array<[number, number]>): void {
+    const shared = new ProvenanceWindowIndex(text, []);
+    for (const [from, to] of pairs) {
+      const want = ORACLE.test(text.slice(from, to));
+      const viaRegex = __runtimeSelfReferenceInForTest(text, from, to);
+      const viaShared = __runtimeSelfReferenceInForTest(text, from, to, shared);
+      const viaFresh = __runtimeSelfReferenceInForTest(text, from, to, new ProvenanceWindowIndex(text, []));
+      if (viaRegex !== want || viaShared !== want || viaFresh !== want) {
+        expect({ text, from, to, regex: viaRegex, shared: viaShared, fresh: viaFresh })
+          .toEqual({ text, from, to, regex: want, shared: want, fresh: want });
+      }
+    }
+  }
+
+  /** Random pairs, half of them with an edge strictly inside a run of word characters. */
+  function slicePairs(next: () => number, text: string, count: number): Array<[number, number]> {
+    const n = text.length;
+    const inWord: number[] = [];
+    for (let k = 1; k < n; k++) if (/\w/.test(text[k - 1]!) && /\w/.test(text[k]!)) inWord.push(k);
+    const pick = (): number =>
+      inWord.length > 0 && next() < 0.5 ? inWord[Math.floor(next() * inWord.length)]! : Math.floor(next() * (n + 1));
+    const pairs: Array<[number, number]> = [[0, n], [0, 0], [n, n]];
+    for (let i = 0; i < count; i++) {
+      const a = pick();
+      const b = pick();
+      pairs.push([Math.min(a, b), Math.max(a, b)]);
+    }
+    return pairs;
+  }
+
+  it('no word of the phrase is a prefix of another (one end per start, which the index relies on)', () => {
+    const words = [...new Set(PHRASE_WORDS)];
+    for (const a of words) for (const b of words) if (a !== b) expect([a, b.startsWith(a)]).toEqual([a, false]);
+  });
+
+  it('every slice of short random strings, edges cutting through words included', () => {
+    const next = rng(0x5e1f);
+    for (let round = 0; round < 400; round++) {
+      const text = draw(next, SELF_REF_TOKENS, 12);
+      const pairs: Array<[number, number]> = [];
+      for (let from = 0; from <= text.length; from++) for (let to = from; to <= text.length; to++) pairs.push([from, to]);
+      expectSameSlices(text, pairs);
+    }
+  });
+
+  it('random slices of long random strings', () => {
+    const next = rng(0x5e2f);
+    for (let round = 0; round < 300; round++) {
+      const text = draw(next, SELF_REF_TOKENS, 120);
+      expectSameSlices(text, slicePairs(next, text, 60));
+    }
+  });
+
+  it('phrases spread over long whitespace runs', () => {
+    const next = rng(0x5e3f);
+    const runs = [' ', '\t', '\n', NBSP, ' \n '];
+    for (let round = 0; round < 40; round++) {
+      const ws = (): string => runs[Math.floor(next() * runs.length)]!.repeat(1 + Math.floor(next() * 60));
+      const text = ['x', ws(), 'with', ws(), 'the', ws(), 'contents', ws(), 'of', ws(), 'the', ws(), 'last', ws(),
+        'form', next() < 0.5 ? 'at' : '', ws(), 'in', ws(), 'the', ws(), 'appendix'].join('');
+      expectSameSlices(text, slicePairs(next, text, 200));
+    }
+  });
+
+  it('the overlapping-scope family: one sentence start, a growing sentence end per match', () => {
+    const next = rng(0x5e4f);
+    for (const units of [1, 2, 7, 40]) {
+      const prose = QUOTED_UNIT.repeat(units);
+      const fenced = '```json\n' + prose + '\n' + 'x\n'.repeat(units) + '```';
+      const withPhrase = prose + ' this table' + QUOTED_UNIT.repeat(units) + '.below' + QUOTED_UNIT;
+      for (const text of [prose, fenced, withPhrase]) {
+        const pairs = slicePairs(next, text, 80);
+        // Every sentence the shape scan asks about: a fixed start, each `.x` end.
+        for (let k = text.indexOf('.x'); k !== -1; k = text.indexOf('.x', k + 1)) pairs.push([0, k + 1], [0, k + 2]);
+        expectSameSlices(text, pairs);
+        const callPairs: Array<[number, number]> = [];
+        for (let k = text.indexOf('call'); k !== -1; k = text.indexOf('call', k + 1)) callPairs.push([k, k + 8]);
+        const shared = new ProvenanceWindowIndex(text, []);
+        for (const [start, end] of callPairs) {
+          expect(__agentAddressedPartsForTest(text, start, end, shared))
+            .toEqual(__agentAddressedPartsForTest(text, start, end));
+        }
+      }
     }
   });
 });
