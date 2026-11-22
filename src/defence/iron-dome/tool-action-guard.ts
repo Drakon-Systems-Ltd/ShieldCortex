@@ -2032,7 +2032,7 @@ function clientArgvSendsCredential(client: string, words: readonly CredentialWor
       kind = clientLongOptionKind(family, name);
       if (eq >= 0) glued = a.slice(eq + 1);
       upload = /^upload-file$/.test(name);
-      resume = family === 'curl' && name === 'continue-at';
+      resume = family === 'curl' && /^continue-at$/.test(name);
     } else if (a.startsWith('-') && a.length > 1) {
       kind = 'flag';
       for (let p = 1; p < a.length; p++) {
