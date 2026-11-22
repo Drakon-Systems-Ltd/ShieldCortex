@@ -14,6 +14,8 @@
  *
  *  - the one-pass alternatives test against the old regex;
  *  - the 64-character fence-line cue test against the whole-line split;
+ *  - the one-pass speaker-header and imperative-position tests against their
+ *    `$`-anchored regexes;
  *  - the index's prefix, addressee and self-reference answers against the
  *    linear functions, at every kind of offset, with shared and fresh indexes;
  *  - every shape match's exemption and agent-addressed verdict, and every
@@ -30,6 +32,7 @@ import {
   __agentAddressedPartsForTest,
   __alternativesListForTest,
   __bodyCarriesDirectiveForTest,
+  __directedTailsForTest,
   __fenceLineSignalsCodeForTest,
   __shapeGroupsForTest,
   __shapeMatchVerdictsForTest,
@@ -352,6 +355,40 @@ describe('scanWrappers — the same spans as the pre-fix scan', () => {
       '```json\nfor example x' + ' list credentials,'.repeat(60) + '\n' + 'x\n'.repeat(30) + '```',
     ]) {
       expect(scanWrappers(text)).toEqual(oldScanWrappers(text));
+    }
+  });
+});
+
+describe('directed position — the one-pass header and imperative tests equal their regexes', () => {
+  const TAIL_TOKENS = [
+    ' ', '  ', '\t', '\n', '\n\n', ' \n ', '\r', '\u00a0', '\u2028', ':', ': ', '"', "'", '`', ')', ']', '(', '[', '{',
+    '<!--', '<!', '--', '@', '.', '!', '?', 'x', 'a', 'please', 'PLEASE', 'pleas', 'e', 'assistant', 'AI', 'agent',
+    'model', 'system', 'bot', 'chatbot', 'chat', 'llm', 'Assistant:', '\nassistant:', '-', '1)', '\u0130', '\u212a',
+  ];
+
+  function expectSame(text: string): void {
+    const got = __directedTailsForTest(text);
+    if (got.header[0] !== got.header[1] || got.imperative[0] !== got.imperative[1]) {
+      expect({ text, header: got.header[0], imperative: got.imperative[0] })
+        .toEqual({ text, header: got.header[1], imperative: got.imperative[1] });
+    }
+  }
+
+  it('random strings and every prefix of them', () => {
+    const next = rng(0xd1ec);
+    for (let round = 0; round < 4000; round++) {
+      const text = draw(next, TAIL_TOKENS, 14);
+      for (let k = 0; k <= text.length; k++) expectSame(text.slice(0, k));
+    }
+  });
+
+  it('long blank and quote runs answer the same', () => {
+    for (const run of ['\n', ' \n', '"', "'", '\n"', ':', '(', '[']) {
+      for (const tail of ['', ' ', 'x', 'please ', 'assistant: ', '@bot :', 'x y']) {
+        for (const head of ['', 'x', '.', 'x.', '<!--']) {
+          expectSame(head + run.repeat(300) + tail);
+        }
+      }
     }
   });
 });

@@ -848,6 +848,9 @@ const AGENT_ADDRESSEE = new RegExp(
 /** AGENT_ADDRESSEE tried at exactly one position (the index's addressee test). */
 const AGENT_ADDRESSEE_AT = new RegExp(AGENT_ADDRESSEE.source, 'iy');
 
+/** What follows the `(?:^|\n|...)\s*` opener of AGENT_ADDRESSEE's label alternative, at one position. */
+const AGENT_LABEL_TAIL_AT = new RegExp(`(?:@)?${AGENT_NOUN}\\s*[:,]`, 'iy');
+
 /**
  * The agent's own machinery, NAMED — by a noun no other register shares.
  *
@@ -994,9 +997,100 @@ function hasDirectedPosition(
 /** The `$`-anchored half of `hasDirectedPosition`, on the text before the match. */
 function directedBefore(before: string): boolean {
   if (INDIRECT_AGENT_SUBJECT.test(before)) return true;
-  if (AGENT_HEADER.test(before)) return true;
+  if (agentHeaderAtEnd(before)) return true;
   if (LIST_ITEM_START.test(before)) return true;
-  return IMPERATIVE_POSITION.test(before);
+  return imperativePositionAtEnd(before);
+}
+
+/** The agent nouns of AGENT_HEADER, with its optional `@`, at the end of a short slice. */
+const AGENT_HEADER_NOUN_END = /@?(?:assistant|ai|agent|model|system|bot|llm|chatbot)$/i;
+
+/**
+ * Same result as `AGENT_HEADER.test(text)`, read from the end in one pass.
+ *
+ * #1111 post-merge B2: the regex opens on `\n` and then takes `\s*`, so on a
+ * run of blank lines it restarted at every newline and re-read the rest of
+ * the run: O(run^2) per call, seconds for a fence body of 30 000 newlines.
+ * Every match ends `\s*:\s*` at the end, so the colon, the noun before it and
+ * the whitespace before that are fixed by reading backwards; the match then
+ * needs an opener right before some suffix of that whitespace. (A noun that is
+ * a proper suffix of another, "bot" in "chatbot", has a letter before it,
+ * which no opener is, so the longest noun is the only candidate.)
+ */
+function agentHeaderAtEnd(text: string): boolean {
+  let e = text.length;
+  while (e > 0 && isRegexSpace(text.charCodeAt(e - 1))) e--;
+  if (e === 0 || text.charCodeAt(e - 1) !== 0x3a) return false; // :
+  e--;
+  while (e > 0 && isRegexSpace(text.charCodeAt(e - 1))) e--;
+  const noun = AGENT_HEADER_NOUN_END.exec(text.slice(Math.max(0, e - 10), e));
+  if (!noun) return false;
+  const nounStart = e - noun[0].length;
+  let w = nounStart;
+  while (w > 0 && isRegexSpace(text.charCodeAt(w - 1))) w--;
+  if (w === 0) return true; // ^
+  for (let q = w; q < nounStart; q++) if (text.charCodeAt(q) === 0x0a) return true;
+  const c = text.charCodeAt(w - 1);
+  return c === 0x5b || c === 0x28 || (w >= 4 && text.startsWith('<!--', w - 4)); // [ ( <!--
+}
+
+/** `please` tried at exactly one position. */
+const PLEASE_AT = /please/iy;
+
+/**
+ * Same result as `IMPERATIVE_POSITION.test(text)`, read from the end in one
+ * pass (#1111 post-merge B2; the regex restarted at every newline of a blank
+ * run, and at every quote of a quote run, and re-read the rest each time).
+ *
+ * A match ends in `\s*["'`)\]]*\s*`, optionally followed by `please\s+`, at
+ * the end. Read backwards, the longest such tail before the optional
+ * `please` starts at `z`, and every suffix of it is again such a tail, so the
+ * regex matches exactly when an opener ends at some position in [z, end] --
+ * or z is 0, where `^` is the opener.
+ */
+function imperativePositionAtEnd(text: string): boolean {
+  if (imperativeTailFrom(text, text.length)) return true;
+  let e = text.length;
+  while (e > 0 && isRegexSpace(text.charCodeAt(e - 1))) e--;
+  if (e === text.length || e < 6) return false;
+  PLEASE_AT.lastIndex = e - 6;
+  return PLEASE_AT.test(text) && imperativeTailFrom(text, e - 6);
+}
+
+function imperativeTailFrom(text: string, end: number): boolean {
+  let z = end;
+  while (z > 0 && isRegexSpace(text.charCodeAt(z - 1))) z--;
+  while (z > 0 && isImperativeCloser(text.charCodeAt(z - 1))) z--;
+  while (z > 0 && isRegexSpace(text.charCodeAt(z - 1))) z--;
+  if (z === 0) return true; // ^
+  for (let p = z; p <= end; p++) {
+    const c = text.charCodeAt(p - 1);
+    // \n : " ' ` ( { [
+    if (c === 0x0a || c === 0x3a || c === 0x22 || c === 0x27 || c === 0x60 || c === 0x28 || c === 0x7b || c === 0x5b) {
+      return true;
+    }
+    if (p >= 2 && isRegexSpace(c)) {
+      const d = text.charCodeAt(p - 2);
+      if (d === 0x2e || d === 0x21 || d === 0x3f) return true; // [.!?]\s
+    }
+  }
+  return false;
+}
+
+/** `["'`)\]]` -- the quotes and closers IMPERATIVE_POSITION lets follow its opener. */
+function isImperativeCloser(c: number): boolean {
+  return c === 0x22 || c === 0x27 || c === 0x60 || c === 0x29 || c === 0x5d;
+}
+
+/** Test seam: the one-pass header and imperative tests next to their regexes, for the differential. */
+export function __directedTailsForTest(text: string): {
+  header: [boolean, boolean];
+  imperative: [boolean, boolean];
+} {
+  return {
+    header: [agentHeaderAtEnd(text), AGENT_HEADER.test(text)],
+    imperative: [imperativePositionAtEnd(text), IMPERATIVE_POSITION.test(text)],
+  };
 }
 
 /**
@@ -1368,6 +1462,8 @@ export class ProvenanceWindowIndex {
   private readonly spanVerdicts = new Map<WrapperSpan, boolean>();
   /** null until checked; false when the spans are not sorted and disjoint. */
   private spansOrdered: boolean | null = null;
+  /** nextNonSpaceAt[k]: the first non-`\s` index at or after k, else the length. */
+  private nextNonSpaceAt: Int32Array | null = null;
   /** lastNewlineAt[k]: the last newline index at or below k, else -1. */
   private lastNewlineAt: Int32Array | null = null;
   /** Per match start: the `$`-anchored half of hasDirectedPosition. */
@@ -1400,6 +1496,20 @@ export class ProvenanceWindowIndex {
       this.directedAt.set(start, verdict);
     }
     return verdict;
+  }
+
+  /** The first index at or after `pos` that is not `\s`, else the window length. */
+  private nextNonSpace(pos: number): number {
+    const n = this.window.length;
+    if (!this.nextNonSpaceAt) {
+      const table = new Int32Array(n + 1);
+      table[n] = n;
+      for (let k = n - 1; k >= 0; k--) {
+        table[k] = isRegexSpace(this.window.charCodeAt(k)) ? table[k + 1]! : k;
+      }
+      this.nextNonSpaceAt = table;
+    }
+    return this.nextNonSpaceAt[Math.min(Math.max(pos, 0), n)]!;
   }
 
   /** Same result as `window.lastIndexOf('\n', pos)`. */
@@ -1452,6 +1562,24 @@ export class ProvenanceWindowIndex {
     }
     if (memo.found >= 0) return memo.found >= lo;
     for (let p = memo.low - 1; p >= lo; p--) {
+      const c = memo.cut.charCodeAt(p);
+      if (isRegexSpace(c)) {
+        // #1111 post-merge B2: on whitespace only the `(?:^|\n)\s*@?NOUN\s*[:,]`
+        // alternative can start (every other one starts on a letter or on a
+        // non-space opener), and its `\s*` must run to the end of the
+        // whitespace run, so from every newline of one run -- or from 0 --
+        // it matches exactly when the label tail matches at the run's end.
+        // Trying the regex at each newline instead re-read the rest of the
+        // run each time: O(run^2) on a block of blank lines.
+        if (c !== 0x0a && p !== 0) continue;
+        const runEnd = this.nextNonSpace(p);
+        if (runEnd >= to) continue;
+        AGENT_LABEL_TAIL_AT.lastIndex = runEnd;
+        if (!AGENT_LABEL_TAIL_AT.test(memo.cut)) continue;
+        memo.found = p;
+        memo.low = p;
+        return true;
+      }
       AGENT_ADDRESSEE_AT.lastIndex = p;
       if (AGENT_ADDRESSEE_AT.test(memo.cut)) {
         memo.found = p;
