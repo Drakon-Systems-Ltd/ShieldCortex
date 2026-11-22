@@ -814,7 +814,8 @@ const OPENCLAW_CONFIG_PATH_RE = /(?:^|[\s'"=:(\\/])\.openclaw[\\/]+openclaw\.jso
 // (`.ssh/authorized_keys`, `/authorized_keys`); `SHELL_STARTUP_FILE_SRC` is a
 // login/interactive startup file by basename (the same set
 // `SHELL_RC_BASENAME_RE` scans the content of, plus fish's config).
-const SSH_DIR_PATH_SRC = String.raw`(?:~|\$\{?HOME\}?|\/home\/[^\s\/'"]+|\/root|\/Users\/[^\s\/'"]+)\/\.ssh(?![\w.-])`;
+const HOME_ROOT_SRC = String.raw`(?:~|\$\{?HOME\}?|\/home\/[^\s\/'"]+|\/root|\/Users\/[^\s\/'"]+)`;
+const SSH_DIR_PATH_SRC = String.raw`${HOME_ROOT_SRC}\/\.ssh(?![\w.-])`;
 const AUTHORIZED_KEYS_PATH_SRC = String.raw`(?:^|[\s'"=:\/])\.ssh\/authorized_keys2?\b|\/authorized_keys2?\b`;
 const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b`;
 // #702: the sensitive-path set as ONE regex, named so the `touch-sensitive-path`
@@ -827,8 +828,9 @@ const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlog
 // segment, so reading or uploading one cards whatever the destination is. A
 // `.secret`/`.secrets` directory is one of those names: the directory itself
 // (`tar czf s.tgz ~/.secrets`) and anything under it, never `docs/my.secrets/`.
-// An `id_ed25519`/`id_ecdsa`/`id_dsa` basename counts OUTSIDE a `.ssh/`
-// directory only: a home-rooted `~/.ssh/…` is the SSH_DIR rule's, and a bare
+// An `id_ed25519`/`id_ecdsa`/`id_dsa` basename counts outside a `.ssh/`
+// directory, and under one only on a non-home absolute path (fold A2, C10
+// below): a home-rooted `~/.ssh/…` is the SSH_DIR rule's, and a bare
 // relative `.ssh/…` stays judged as before (#874/#920 relative-path refusal).
 // `~/.kube/config` and `.npmrc` are left out on purpose: routine kubectl and
 // registry work names them on almost every call.
@@ -844,7 +846,28 @@ const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlog
 // `id_ed25519.pub` are not the store. This is stricter than the older alternatives above
 // (`.env\b`, `id_rsa`, `.aws/credentials`), which still card `.env.example`
 // and `id_rsa.pub` as they do on origin/main; those are left as they are.
-const CREDENTIAL_STORE_PATH_SRC = String.raw`(?:(?<![\w.-])|(?<=(?:^|\s)-[A-Za-z]))(?:\.netrc|_netrc|\.git-credentials|\.config\/gh\/hosts\.ya?ml|\.docker\/config\.json|\.pgpass|\.pypirc|\.vault-token|application_default_credentials\.json|\.config\/gcloud\/(?:credentials|access_tokens)\.db|\.azure\/(?:accessTokens\.json|msal_token_cache\.(?:json|bin))|\.secrets?|(?<!\.ssh\/)id_(?:ed25519|ecdsa|dsa))(?![\w.-])`;
+// Fold A2. C2: every `/` inside a multi-segment store name is one shared
+// separator, one or more slashes with any number of `./` segments between them
+// (`.config//gh/hosts.yml`, `.azure/./accessTokens.json`); `..` is not
+// resolved (expansion-aware matching, #1065). C3: the store DIRECTORIES
+// `.config/gh`, `.config/gcloud`, `.docker` and `.azure`, home-anchored on the
+// SSH_DIR roots because `.docker/` and `.azure/` are ordinary project folders.
+// The directory matches only as an OPERAND: the path ends at the directory, or
+// at one separator followed by the end, a glob character, a brace or a lone
+// `.` (`tar cz ~/.docker`, `rsync -a ~/.docker/ …`, `cat ~/.config/gh/*`). A
+// named child that is not a store file (`~/.config/gh/config.yml`,
+// `hosts.yml.bak`) is not the store; only the named store files are.
+// C10: an `id_ed25519`/`id_ecdsa`/`id_dsa` key under a `.ssh/` segment of an
+// ABSOLUTE path that starts at a token start (`/opt/agent/.ssh/id_ed25519`).
+// A home `.ssh` directory in any spelling (`~/./.ssh`, `$HOME/…`,
+// `/home/<u>//.ssh`, `/root/./.ssh`) stays the SSH_DIR rule's, and a relative
+// `.ssh/id_*` stays judged as before (#874/#920); `.pub` is still excluded.
+const STORE_SEP_SRC = String.raw`\/+(?:\.\/+)*`;
+const STORE_DIR_END_SRC = String.raw`(?:${STORE_SEP_SRC}(?:[*?\[{]|\.(?![\w.\/-])|(?![\w.\/-]))|(?![\w.\/-]))`;
+const CREDENTIAL_STORE_DIR_SRC = String.raw`${HOME_ROOT_SRC}${STORE_SEP_SRC}(?:\.config${STORE_SEP_SRC}(?:gh|gcloud)|\.docker|\.azure)${STORE_DIR_END_SRC}`;
+const ABS_SSH_KEY_PATH_SRC = String.raw`(?:^|(?<=[\s'"=:<>|;&()\x60]))\/(?!(?:home\/[^\s\/'"]+|Users\/[^\s\/'"]+|root)${STORE_SEP_SRC}\.ssh\/)(?:[^\s\/'"=:<>|;&()\x60]+\/+)*\.ssh${STORE_SEP_SRC}id_(?:ed25519|ecdsa|dsa)(?![\w.-])`;
+const CREDENTIAL_STORE_NAME_SRC = String.raw`(?:(?<![\w.-])|(?<=(?:^|\s)-[A-Za-z]))(?:\.netrc|_netrc|\.git-credentials|\.config${STORE_SEP_SRC}gh${STORE_SEP_SRC}hosts\.ya?ml|\.docker${STORE_SEP_SRC}config\.json|\.pgpass|\.pypirc|\.vault-token|application_default_credentials\.json|\.config${STORE_SEP_SRC}gcloud${STORE_SEP_SRC}(?:credentials|access_tokens)\.db|\.azure${STORE_SEP_SRC}(?:accessTokens\.json|msal_token_cache\.(?:json|bin))|\.secrets?|(?<!\.ssh\/)id_(?:ed25519|ecdsa|dsa))(?![\w.-])`;
+const CREDENTIAL_STORE_PATH_SRC = String.raw`(?:${CREDENTIAL_STORE_NAME_SRC}|${CREDENTIAL_STORE_DIR_SRC}|${ABS_SSH_KEY_PATH_SRC})`;
 const SENSITIVE_PATH_RE = new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|${SSH_DIR_PATH_SRC}|${AUTHORIZED_KEYS_PATH_SRC}|id_rsa|\.aws\/credentials|(?<![A-Za-z0-9_])\.env\b|${CREDENTIAL_STORE_PATH_SRC}`, 'i');
 // #505: a shell WRITE shape whose destination is a startup file. The write
 // prefix is a redirect (`>`, `>>`, noclobber `>|`), `tee` with any run of
