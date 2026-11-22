@@ -76,6 +76,71 @@ export interface DoctorReportItem {
    * message text — that text names notify / denial-capable sinks too.
    */
   postureUnknown?: true;
+  /**
+   * #970: set on every per-record `Runtime posture` row. A `stale` row is not
+   * judged for the host posture; the default report folds each runtime's
+   * stale rows into one line (`collapseStalePostureRows`), `--verbose` lists
+   * them, and `--json` emits `stale` / `staleReason` on each.
+   */
+  posture?: DoctorPostureRowMeta;
+}
+
+export interface DoctorPostureRowMeta {
+  /** Label of the one line this runtime's stale rows fold into. */
+  group: string;
+  stale: boolean;
+  staleReason: string | null;
+  /**
+   * False for the placeholder row of a runtime with no report, and for the
+   * "present, no current report" row of one whose reports are all stale.
+   */
+  instance: boolean;
+  /**
+   * True only when the host vouches for this record as current (a confirmed
+   * running process, or a per-call hook within max_age). A non-stale record
+   * that is not verified — an unchecked process, a rejected report — is
+   * counted as current but flagged unverified, never called live.
+   */
+  verified: boolean;
+}
+
+/**
+ * #970 — the default report's view of the posture rows: each runtime's stale
+ * rows fold into ONE line that says how many are current (not stale), how
+ * many of those the host could not verify, and how many stale ones are
+ * hidden, placed after that runtime's last row. Rows that are not stale are
+ * returned untouched and in place. Stale rows are always `info`, so this
+ * never changes a pass / warn / fail count.
+ */
+export function collapseStalePostureRows<T extends DoctorReportItem>(rows: readonly T[]): Array<T | DoctorReportItem> {
+  const counts = new Map<string, { current: number; unverified: number; stale: number }>();
+  const lastIndex = new Map<string, number>();
+  rows.forEach((r, i) => {
+    if (!r.posture) return;
+    const c = counts.get(r.posture.group) ?? { current: 0, unverified: 0, stale: 0 };
+    if (r.posture.stale) c.stale += 1;
+    else if (r.posture.instance) {
+      c.current += 1;
+      if (!r.posture.verified) c.unverified += 1;
+    }
+    counts.set(r.posture.group, c);
+    lastIndex.set(r.posture.group, i);
+  });
+  const out: Array<T | DoctorReportItem> = [];
+  rows.forEach((r, i) => {
+    if (!r.posture?.stale) out.push(r);
+    const group = r.posture?.group;
+    if (group === undefined || lastIndex.get(group) !== i) return;
+    const c = counts.get(group)!;
+    if (c.stale === 0) return;
+    out.push({
+      label: group,
+      status: 'info',
+      message: `${c.current} current${c.unverified > 0 ? ` (${c.unverified} unverified)` : ''}, ` +
+        `${c.stale} stale hidden (--verbose to list)`,
+    });
+  });
+  return out;
 }
 
 export interface FormatDoctorReportOpts {
@@ -538,11 +603,13 @@ function renderPassLine(it: DoctorReportItem, width: number, style: DoctorReport
  * caller prints with console.log per line or join('\\n')).
  */
 export function formatDoctorReport(
-  results: DoctorReportItem[],
+  allResults: DoctorReportItem[],
   opts: FormatDoctorReportOpts = {},
 ): string[] {
   const width = clampWidth(opts.width ?? detectWidth());
   const verbose = opts.verbose === true;
+  // #970: `--verbose` lists every posture record; the default folds stale ones.
+  const results = verbose ? allResults : collapseStalePostureRows(allResults);
   const style = opts.color ? (opts.style ?? defaultColorStyle()) : (opts.style ?? NO_STYLE);
   const version = opts.version?.trim() || '';
   const target = opts.target?.trim() || '';

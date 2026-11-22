@@ -7,7 +7,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { SELF_REPORT_SCHEMA, SELF_REPORT_VERSION } from '../posture-record.js';
-import { postureSelfReportDir, type CollectDeps } from '../collect.js';
+import { pidNsSidecarPath, postureSelfReportDir, type CollectDeps } from '../collect.js';
 
 export const NOW = Date.parse('2026-09-29T12:00:00.000Z');
 export const iso = (ms: number) => new Date(ms).toISOString();
@@ -16,6 +16,14 @@ export const H = (c: string) => `sha256:${c.repeat(64)}`;
 export const PID = 4242;
 export const START = '100';
 export const INSTANCE = `p${PID}-s${START}`;
+/**
+ * #970: the PID namespace the fixture's reports and its fake process table
+ * share, so a pid missing from `processTable` proves the process exited. A
+ * report without `pid_ns` (an earlier writer) or with another one is never
+ * ended by a pid lookup. The namespace is never in the report body:
+ * `writeReport` puts it in the `.pidns` sidecar, as the writers do.
+ */
+export const PID_NS = '4026531836';
 
 type Obj = Record<string, unknown>;
 
@@ -69,20 +77,56 @@ export function writeRaw(configDir: string, runtime: string, profile: string, in
   return file;
 }
 
+/**
+ * Lay a report out as the writers do. #970: a resident-process report (an
+ * OpenClaw / Hermes writer) gets a `.pidns` sidecar, written after it, holding
+ * `PID_NS` — or `instance.pid_ns` when the body names one (digits, or null for
+ * `null`), which is taken out of the report. `pid_ns: undefined` is an earlier
+ * writer: no sidecar. A per-call report (Claude Code hook) never has one.
+ */
 export function writeReport(configDir: string, body: Obj, fileInstance?: string, fileProfile?: string): string {
-  return writeRaw(
+  let inst = body.instance;
+  let pidNs: unknown;
+  if (isObj(inst)) {
+    if (Object.prototype.hasOwnProperty.call(inst, 'pid_ns')) {
+      const { pid_ns: named, ...rest } = inst;
+      pidNs = named;
+      inst = rest;
+    } else if (inst.liveness === 'process' && inst.pid !== null) {
+      pidNs = PID_NS;
+    }
+  }
+  const file = writeRaw(
     configDir,
     String(body.runtime),
     fileProfile ?? String(body.profile),
     fileInstance ?? String((body.instance as Obj).key),
-    JSON.stringify(body),
+    JSON.stringify({ ...body, instance: inst }),
   );
+  if (pidNs !== undefined) writePidNsSidecar(file, pidNs === null ? 'null' : String(pidNs));
+  return file;
 }
 
-/** Deps with a fake process table: pid → start token. Absent pids have exited. */
-export function processTable(table: Record<number, string>): CollectDeps {
+/** Write `text` as the `.pidns` sidecar of a report file, owner-only. */
+export function writePidNsSidecar(reportFile: string, text: string): string {
+  const sidecar = pidNsSidecarPath(reportFile);
+  fs.writeFileSync(sidecar, text, { mode: 0o600 });
+  fs.chmodSync(sidecar, 0o600);
+  return sidecar;
+}
+
+function isObj(v: unknown): v is Obj {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/**
+ * Deps with a fake process table: pid → start token, seen from `PID_NS`.
+ * Absent pids have exited (for reports that recorded `PID_NS`).
+ */
+export function processTable(table: Record<number, string>, pidNs: string | null = PID_NS): CollectDeps {
   return {
     processStart: (pid) => (Object.prototype.hasOwnProperty.call(table, pid) ? table[pid] : null),
+    pidNamespace: () => pidNs,
     uid: () => (typeof process.getuid === 'function' ? process.getuid() : undefined),
   };
 }
