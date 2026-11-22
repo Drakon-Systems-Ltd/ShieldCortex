@@ -594,7 +594,7 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   'touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger', 'modify-shell-startup',
   'dd-overwrite', 'recursive-perms-system-dir', 'registry-code-exec',
   'decode-pipe-to-shell', 'change-permissions', 'git-mutate',
-  'recursive-find-delete', 'external-egress', 'env-credential-egress', 'oversized-command',
+  'recursive-find-delete', 'external-egress', 'oversized-command',
   'opaque-script-invocation', 'opaque-script', 'opaque-command-substitution', 'secret-egress-fold',
   'force-push', 'force-push-invocation',
   // #436: parity with the hook's SAFE_SIGNALS. Guard reason codes, not

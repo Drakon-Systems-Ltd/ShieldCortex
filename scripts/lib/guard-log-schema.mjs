@@ -34,7 +34,7 @@ export const GUARD_SIGNAL_VOCABULARY = Object.freeze([
   'approval-required', 'change-permissions', 'command-exec', 'credential-access',
   'dangerous-shell', 'data-exfiltration', 'dd-overwrite', 'decode-pipe-to-shell',
   'delete-critical-path', 'delete-root-or-home', 'destructive-filesystem',
-  'disable-action-guard', 'disk-partition-tool', 'env-credential-egress', 'exec-like', 'external-egress', 'fallback-scan',
+  'disable-action-guard', 'disk-partition-tool', 'exec-like', 'external-egress', 'fallback-scan',
   'file-delete', 'filesystem-destructive', 'force-push', 'force-push-invocation',
   'fork-bomb', 'format-filesystem', 'git-delete-branch', 'git-force-push',
   'git-mutate', 'install-package', 'install-package-global', 'invalid-tool-input',

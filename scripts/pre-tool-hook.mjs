@@ -1299,7 +1299,7 @@ const SAFE_SIGNALS = new Set([
   'touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger', 'modify-shell-startup',
   'dd-overwrite', 'recursive-perms-system-dir', 'registry-code-exec',
   'decode-pipe-to-shell', 'change-permissions', 'git-mutate',
-  'recursive-find-delete', 'external-egress', 'env-credential-egress', 'oversized-command',
+  'recursive-find-delete', 'external-egress', 'oversized-command',
   'opaque-script-invocation', 'opaque-script', 'opaque-command-substitution', 'secret-egress-fold',
   'force-push', 'force-push-invocation',
   // #436: schema-rejection (#412) and the other verdicts that were reaching
@@ -3121,17 +3121,15 @@ function selfProtectionSignals(guard) {
 }
 
 // #1005 (Case's review of #1088): the prompt-only signals. DUPLICATED from
-// tool-action-guard.ts `GUARD_PROMPT_ONLY_SIGNALS`; held equal by
-// enforcement-surface-parity. The live path takes the UNION of this list and
-// the guard's own export, never the export alone: an older dist that already
-// emits `env-credential-egress` exports only `['reverse-shell']`.
-const FALLBACK_PROMPT_ONLY_SIGNALS = ['reverse-shell', 'env-credential-egress'];
+// tool-action-guard.ts `GUARD_PROMPT_ONLY_SIGNALS` for a dist that predates
+// the export; the live path reads the guard's own export. Held equal by
+// enforcement-surface-parity.
+const FALLBACK_PROMPT_ONLY_SIGNALS = ['reverse-shell'];
 
-/** The prompt-only signals: this duplicate plus whatever the live guard exports. */
+/** The prompt-only signals the live guard exports, else the duplicate. */
 function promptOnlySignals(guard) {
   const list = guard?.GUARD_PROMPT_ONLY_SIGNALS;
-  if (!Array.isArray(list)) return FALLBACK_PROMPT_ONLY_SIGNALS;
-  return [...new Set([...FALLBACK_PROMPT_ONLY_SIGNALS, ...list.filter(s => typeof s === 'string')])];
+  return Array.isArray(list) && list.length > 0 ? list : FALLBACK_PROMPT_ONLY_SIGNALS;
 }
 
 /** A self-protection signal the WS2 fallback scan matches, or null. Checked
