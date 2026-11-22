@@ -40,10 +40,9 @@ let configDir: string;
 function writeConfig(obj: unknown): void {
   const key = 'a'.repeat(64);
   writeFileSync(join(configDir, '.integrity-key'), key, { mode: 0o600 });
-  const body = JSON.stringify(obj, null, 2) + '\n';
-  writeFileSync(join(configDir, 'config.json'), body);
+  const body = JSON.stringify(obj, null, 2);
   const sig = createHmac('sha256', key).update(body, 'utf-8').digest('hex');
-  writeFileSync(join(configDir, '.config-sig'), sig, { mode: 0o600 });
+  writeFileSync(join(configDir, 'config.json'), JSON.stringify({ ...(obj as object), _sig: sig }, null, 2) + '\n');
 }
 
 /** Write a body that is not valid JSON at all (still signed, so the failure

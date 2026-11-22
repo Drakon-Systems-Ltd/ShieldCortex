@@ -94,8 +94,8 @@ export function validateCap(value: unknown, key: string = 'cap'): number | undef
  * applied. Never throws: an unreadable or malformed config yields the defaults,
  * because failing to parse config must not stop memories being stored.
  *
- * The caps and integrity verdict come from one side-effect-free read. A legacy
- * whole-file signature authenticating these exact bytes is also accepted.
+ * The caps and integrity verdict come from one side-effect-free read. Only a
+ * verifying embedded signature authorizes caps; a legacy signature does not.
  */
 export function resolveMemoryConfigWithIntegrity(base: MemoryConfig = DEFAULT_CONFIG): {
   config: MemoryConfig;
@@ -104,13 +104,13 @@ export function resolveMemoryConfigWithIntegrity(base: MemoryConfig = DEFAULT_CO
   let block: Record<string, unknown>;
   let trusted: boolean;
   let verdict: string;
-  let unsignedCaps = false;
+  let hasEmbeddedSignature = false;
   try {
     const read = readConfigBytesNoSideEffects();
     block = memoryBlock(read.data ?? {});
     verdict = read.verdict;
-    unsignedCaps = read.adoption === 'caps';
-    trusted = verdict === 'valid' || verdict === 'self-heal';
+    hasEmbeddedSignature = typeof read.data?._sig === 'string';
+    trusted = hasEmbeddedSignature && verdict === 'valid';
   } catch {
     return { config: base, ignoredCapReason: null };
   }
@@ -118,14 +118,16 @@ export function resolveMemoryConfigWithIntegrity(base: MemoryConfig = DEFAULT_CO
   if (!trusted) {
     const hasStoredCaps = CAP_KEYS.some((key) => block[key] !== undefined);
     if (hasStoredCaps) {
-      warnOnce('integrity', verdict === 'unverified'
+      warnOnce('integrity', !hasEmbeddedSignature && verdict === 'valid'
+        ? 'stored memory caps are ignored because config.json has only a legacy signature; using default caps.'
+        : verdict === 'unverified'
         ? 'stored memory caps are ignored because config.json is unsigned and unverified; using default caps.'
         : `stored memory caps are ignored because config.json is not signed or its signature does not verify (${verdict}); using default caps.`);
     }
     return {
       config: base,
       ignoredCapReason: hasStoredCaps
-        ? (verdict === 'unsigned' || unsignedCaps ? 'unsigned' : verdict === 'unverified' ? 'unverified' : 'invalid-signature')
+        ? (verdict === 'unsigned' || (!hasEmbeddedSignature && verdict === 'valid') ? 'unsigned' : verdict === 'unverified' ? 'unverified' : 'invalid-signature')
         : null,
     };
   }

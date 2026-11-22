@@ -5,7 +5,7 @@ import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { resolveMemoryConfig, __resetCapWarningsForTest } from '../memory/config.js';
 import { checkActionGuard, runMemoryStatsCheck } from '../cli/doctor.js';
-import { clearCloudConfigCache, getCloudConfig, inspectConfigIntegrity, setCloudConfig } from '../cloud/config.js';
+import { clearCloudConfigCache, getCloudConfig, inspectActionGuardCoreConfig, inspectConfigIntegrity, setCloudConfig } from '../cloud/config.js';
 import { DEFAULT_CONFIG } from '../memory/types.js';
 
 const originalDir = process.env.SHIELDCORTEX_CONFIG_DIR;
@@ -86,7 +86,7 @@ describe('#1125 signed memory caps', () => {
     expect([caps.maxShortTermMemories, caps.maxLongTermMemories]).toEqual([
       DEFAULT_CONFIG.maxShortTermMemories, DEFAULT_CONFIG.maxLongTermMemories,
     ]);
-    expect(runMemoryStatsCheck(dbPath).message).toContain('stored caps ignored because config is not signed');
+    expect(runMemoryStatsCheck(dbPath).message).toContain('stored caps ignored because config lacks a verifying embedded signature');
     expect(snapshot()).toEqual(before);
   });
 
@@ -103,7 +103,7 @@ describe('#1125 signed memory caps', () => {
     expect(snapshot()).toEqual(before);
   });
 
-  it('does not promote unsigned lower caps when an ordinary accessor reads first', () => {
+  it('ordinary accessor adopts unsigned config without trusting its caps', () => {
     writeEmbeddedConfig({ maxShortTermMemories: 250, maxLongTermMemories: 5000 });
     expect(resolveMemoryConfig().maxLongTermMemories).toBe(5000);
     writeConfig({ maxShortTermMemories: 10, maxLongTermMemories: 10 }, false);
@@ -111,11 +111,11 @@ describe('#1125 signed memory caps', () => {
     const before = snapshot();
     expect(getCloudConfig().cloudEnabled).toBe(false);
     expect(getCloudConfig().cloudEnabled).toBe(false);
-    expect(fs.existsSync(path.join(configDir, '.config-sig'))).toBe(false);
-    expect(inspectConfigIntegrity()).toMatchObject({ verdict: 'unverified', adoption: 'caps' });
+    expect(fs.existsSync(path.join(configDir, '.config-sig'))).toBe(true);
+    expect(inspectConfigIntegrity().verdict).toBe('valid');
     expect(resolveMemoryConfig().maxLongTermMemories).toBe(DEFAULT_CONFIG.maxLongTermMemories);
-    expect(runMemoryStatsCheck(dbPath).message).toContain('stored caps ignored because config is not signed');
-    expect(snapshot()).toEqual(before);
+    expect(runMemoryStatsCheck(dbPath).message).toContain('stored caps ignored because config lacks a verifying embedded signature');
+    expect(snapshot()).not.toEqual(before);
   });
 
   it('still adopts an unsigned config without memory caps', () => {
@@ -126,36 +126,42 @@ describe('#1125 signed memory caps', () => {
     expect(inspectConfigIntegrity().verdict).toBe('valid');
   });
 
-  it('doctor explains unsigned caps without changing bytes, and a setter refuses to sign them', async () => {
+  it('unsigned caps keep normal Guard posture and do not block a setter', async () => {
     writeConfig({ maxLongTermMemories: 10 }, false);
     const before = snapshot();
     const integrity = (await checkActionGuard()).find((row) => row.label.endsWith('config integrity'));
-    expect(integrity?.message).toContain('unsigned memory caps');
-    expect(integrity?.message).toContain('Nothing is adopted or signed');
+    expect(integrity?.message).not.toContain('unsigned memory caps');
     expect(snapshot()).toEqual(before);
-    expect(() => setCloudConfig({ cloudEnabled: true })).toThrow('Refusing to sign unsigned memory caps');
-    expect(snapshot()).toEqual(before);
+    expect(inspectActionGuardCoreConfig()).toMatchObject({ enabled: false });
+    expect(() => setCloudConfig({ cloudEnabled: true })).not.toThrow();
+    expect(getCloudConfig().cloudEnabled).toBe(true);
+    expect(resolveMemoryConfig().maxLongTermMemories).toBe(10);
+    expect(typeof JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'), 'utf8'))._sig).toBe('string');
   });
 
-  it('accepts a legacy signature over the exact config bytes', () => {
+  it('ignores legacy-only authentic caps with a warning', () => {
     writeConfig({ maxShortTermMemories: 25, maxLongTermMemories: 50 }, true);
     const before = snapshot();
     getCloudConfig();
     const caps = resolveMemoryConfig();
-    expect([caps.maxShortTermMemories, caps.maxLongTermMemories]).toEqual([25, 50]);
-    expect(runMemoryStatsCheck(dbPath).message).not.toContain('stored caps ignored');
+    expect([caps.maxShortTermMemories, caps.maxLongTermMemories]).toEqual([
+      DEFAULT_CONFIG.maxShortTermMemories, DEFAULT_CONFIG.maxLongTermMemories,
+    ]);
+    expect(runMemoryStatsCheck(dbPath).message).toContain('stored caps ignored');
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('only a legacy signature'));
     expect(snapshot()).toEqual(before);
   });
 
-  it('accepts a valid embedded signature and a stale embedded signature backed by exact legacy bytes', () => {
+  it('accepts a valid embedded signature but ignores stale embedded signature backed by legacy bytes', () => {
     writeEmbeddedConfig({ maxShortTermMemories: 25, maxLongTermMemories: 50 });
+    fs.writeFileSync(path.join(configDir, '.config-sig'), '0'.repeat(64));
     let before = snapshot();
     expect(resolveMemoryConfig().maxLongTermMemories).toBe(50);
     expect(snapshot()).toEqual(before);
 
     writeEmbeddedConfig({ maxShortTermMemories: 30, maxLongTermMemories: 60 }, true);
     before = snapshot();
-    expect(resolveMemoryConfig().maxLongTermMemories).toBe(60);
+    expect(resolveMemoryConfig().maxLongTermMemories).toBe(DEFAULT_CONFIG.maxLongTermMemories);
     expect(snapshot()).toEqual(before);
   });
 

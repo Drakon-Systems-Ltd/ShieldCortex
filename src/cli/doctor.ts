@@ -138,7 +138,7 @@ import {
   readRawConfig,
   migrateInterceptorActionGuardAlias,
 } from '../cloud/config.js';
-import { resolveMemoryConfig, resolveMemoryConfigWithIntegrity } from '../memory/config.js';
+import { resolveMemoryConfigWithIntegrity } from '../memory/config.js';
 import type { MemoryConfig } from '../memory/types.js';
 import { validateOpenClawConfig } from '../integrations/openclaw-config-validate.js';
 import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
@@ -1858,7 +1858,7 @@ export function runMemoryStatsCheck(
       if (capResolution?.ignoredCapReason) {
         status = 'warn';
         warnings.push(capResolution.ignoredCapReason === 'unsigned'
-          ? 'stored caps ignored because config is not signed'
+          ? 'stored caps ignored because config lacks a verifying embedded signature'
           : capResolution.ignoredCapReason === 'unverified'
             ? 'stored caps ignored because config is unsigned and unverified'
             : 'stored caps ignored because config signature does not verify');
@@ -5596,13 +5596,11 @@ export function policyLockRows(): CheckResult[] {
         status: 'warn',
         message:
           `verdict: unverified — ${describeAdoptionBlock(block)}. The file's own Action Guard values are not ` +
-          (block === 'fails' || block === 'caps'
+          (block === 'fails'
             ? 'in force: the strict fail-closed posture is (guard on + enforcing, no auto-approve, broker off, defence mode strict). '
             : 'reported as in force: the signed posture is unknown, and the runtime holds the strict fail-closed posture. ') +
           `Nothing is adopted or signed while this lasts. ${HMAC_NOTE}`,
-        fix: block === 'caps'
-          ? 'Restore a signed backup, or remove the unsigned cap keys and then set them through the config CLI. Re-run doctor.'
-          : block === 'linked'
+        fix: block === 'linked'
           ? 'Replace the config.json symlink with the file it points to; the next read then adopts it and the next ' +
             'write signs it. Then re-run doctor.'
           : block === 'fails'
@@ -5610,8 +5608,8 @@ export function policyLockRows(): CheckResult[] {
               'mints a key and adopts the file. Then re-run doctor.'
             : 'Check that this user can write the config directory and that .integrity-key and .config-sig, if present, ' +
               'are regular files. Then re-run doctor.',
-        // A failed adoption and unsigned caps have a known strict outlook.
-        ...(block !== 'fails' && block !== 'caps' ? { postureUnknown: true as const } : {}),
+        // #878: 'fails' is the strict outlook (known); every other block is unknown.
+        ...(block !== 'fails' ? { postureUnknown: true as const } : {}),
       });
       break;
     }
