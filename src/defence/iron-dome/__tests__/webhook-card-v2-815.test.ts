@@ -134,7 +134,7 @@ describe('#815 S2a — version 2 denial card (inert builder)', () => {
     expect(build({ ...note(), actionId: undefined })).toBeUndefined();
     expect(build({ ...note(), actionId: 'act-0123456789ABCDEF' })).toBeUndefined();
     expect(build({ ...note(), actionId: `${ACTION_ID}0` })).toBeUndefined();
-    expect(build(note(), undefined as unknown as ApprovalCardSummary)).toBeUndefined();
+    expect(buildDenialCardBlockV2(note(), undefined as unknown as ApprovalCardSummary, TAP)).toBeUndefined();
   });
 
   it.each<[string, unknown]>([
@@ -155,11 +155,13 @@ describe('#815 S2a — version 2 denial card (inert builder)', () => {
     ['an expiry that is a string', { ...TAP, exp: String(EXP) }],
     ['an expiry that is not a safe integer', { ...TAP, exp: Number.MAX_SAFE_INTEGER + 2 }],
   ])('gives no card, never a partial one, for %s', (_name, tap) => {
-    expect(build(note(), CARD, tap)).toBeUndefined();
+    expect(buildDenialCardBlockV2(note(), CARD, tap as WebhookCardTap)).toBeUndefined();
   });
 
-  it('gives no card if the nonce would show in a line a person reads', () => {
-    expect(build(note(), { ...CARD, who: `Claude Code on ${NONCE}` })).toBeUndefined();
+  it('never shows the nonce in a line a person reads, even when a line handed in contains it', () => {
+    const card = build(note(), { ...CARD, who: `Claude Code on ${NONCE}` });
+    expect(`${card?.who}\n${card?.text}`).not.toContain(NONCE);
+    expect(JSON.stringify(card ?? { nonce: NONCE }).split(NONCE)).toHaveLength(2);
   });
 
   it('is pure: no clock, no network, inputs untouched, same answer twice', () => {
