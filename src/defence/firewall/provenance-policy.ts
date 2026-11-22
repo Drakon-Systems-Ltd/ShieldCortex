@@ -304,8 +304,42 @@ export const REPORTING_SOURCE_TAIL =
 const DISCUSSION_CUE =
   /\b(?:for\s+example|e\.g\.|such\s+as|examples?\s+(?:include|are)|including)\b/gi;
 
-/** A coordinated list: a comma and a conjunction after the cue, same sentence. */
-const ALTERNATIVES_LIST = /,[^.!?]*\b(?:or|and)\b/i;
+/**
+ * A coordinated list: a comma and a conjunction after the cue, same sentence.
+ *
+ * Was the regex `/,[^.!?]*\b(?:or|and)\b/i`. Unanchored, it restarted from
+ * every comma and ran `[^.!?]*` to the end of the sentence each time, so a
+ * cue followed by commas and no conjunction cost commas x sentence per call
+ * and the discussion rule turned cubic over a run of matches (#1111 post-merge
+ * B2). This is the same test in one pass: a comma, then an `or` / `and` word
+ * (ASCII case-folded, `\b` on both sides, as the non-unicode /i regex reads
+ * it) with no [.!?] between them. Pinned against the regex by a differential
+ * test.
+ */
+function alternativesList(text: string): boolean {
+  let comma = false;
+  for (let q = 0; q < text.length; q++) {
+    const c = text.charCodeAt(q);
+    if (c === 0x2e || c === 0x21 || c === 0x3f) {
+      comma = false;
+    } else if (c === 0x2c) {
+      comma = true;
+    } else if (comma) {
+      const len = conjunctionLength(text, q);
+      if (len === 0) continue;
+      // A comma precedes the word, so q >= 1.
+      if (isWordCode(text.charCodeAt(q - 1))) continue;
+      if (q + len < text.length && isWordCode(text.charCodeAt(q + len))) continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Test seam: the one-pass alternatives test, for the differential against the old regex. */
+export function __alternativesListForTest(text: string): boolean {
+  return alternativesList(text);
+}
 
 export function isUntrustedDataOrigin(sourceType: string): boolean {
   return UNTRUSTED_DATA_ORIGIN_SOURCES.has(sourceType);
@@ -390,13 +424,76 @@ const FENCE_EXAMPLE_CUE = /\b(?:e\.g\.|i\.e\.|for\s+example|examples?|samples?|s
  */
 const INLINE_IDENTIFIER_MAX = 40;
 
+/**
+ * The newline positions of one text, found once, so the wrapper scan's line
+ * lookups cost O(log n) instead of a walk to the next or previous newline.
+ *
+ * #1111 post-merge B2: `scanWrappers` searched for the next newline from every
+ * fence and inline backtick (to the end of the input when there was none) and
+ * split the whole prefix into lines for every fence. A run of short spans on
+ * one long line paid O(n) each, so O(n^2) a window.
+ */
+class NewlineIndex {
+  private positions: number[] | null = null;
+
+  constructor(private readonly text: string) {}
+
+  private all(): number[] {
+    if (!this.positions) {
+      const found: number[] = [];
+      for (let i = this.text.indexOf('\n'); i !== -1; i = this.text.indexOf('\n', i + 1)) found.push(i);
+      this.positions = found;
+    }
+    return this.positions;
+  }
+
+  /** Same result as `text.indexOf('\n', from)` for from >= 0. */
+  nextAtOrAfter(from: number): number {
+    const nl = this.all();
+    const k = lastBelow(nl, from) + 1;
+    return k < nl.length ? nl[k]! : -1;
+  }
+
+  /** The last newline index below `pos`, else -1. */
+  lastBefore(pos: number): number {
+    const nl = this.all();
+    const k = lastBelow(nl, pos);
+    return k >= 0 ? nl[k]! : -1;
+  }
+}
+
+/**
+ * How much of a line's end `FENCE_EXAMPLE_CUE` can depend on.
+ *
+ * Exact, not a heuristic. A match must end within 40 characters of the line
+ * end, and every cue but `for\s+example` is at most 8 characters, so it starts
+ * at most 48 from the end and its leading `\b` reads one character before
+ * that. A `for\s+example` match (any whitespace run) always contains an
+ * `example` match that ends at the same place, starts after whitespace, and so
+ * satisfies the same regex on its own. A match the suffix finds at its very
+ * first character would have to be a short cue more than 56 characters from
+ * the end, or a `for\s+example` whose inner `example` is itself a match with
+ * its real left context. So the regex says the same on the last 64 characters
+ * as on the whole line (pinned by a differential test).
+ */
+const FENCE_CUE_TAIL = 64;
+
 /** Does the line carrying the fence — or the line above it — announce a sample? */
-function fenceLineSignalsCode(text: string, fenceStart: number): boolean {
-  const before = text.slice(0, fenceStart);
-  const lines = before.split('\n');
-  const own = lines[lines.length - 1] ?? '';
-  const previous = lines[lines.length - 2] ?? '';
-  return FENCE_EXAMPLE_CUE.test(own) || FENCE_EXAMPLE_CUE.test(previous);
+function fenceLineSignalsCode(text: string, fenceStart: number, lines: NewlineIndex): boolean {
+  // Was `text.slice(0, fenceStart).split('\n')`, once per fence: O(n) each.
+  const ownNewline = lines.lastBefore(fenceStart);
+  const own = text.slice(Math.max(ownNewline + 1, fenceStart - FENCE_CUE_TAIL), fenceStart);
+  if (FENCE_EXAMPLE_CUE.test(own)) return true;
+  // No newline before the fence: there is no previous line ('' never matches).
+  if (ownNewline === -1) return false;
+  const previousNewline = lines.lastBefore(ownNewline);
+  const previous = text.slice(Math.max(previousNewline + 1, ownNewline - FENCE_CUE_TAIL), ownNewline);
+  return FENCE_EXAMPLE_CUE.test(previous);
+}
+
+/** Test seam: the bounded fence-line cue test, for the differential against the whole-line split. */
+export function __fenceLineSignalsCodeForTest(text: string, fenceStart: number): boolean {
+  return fenceLineSignalsCode(text, fenceStart, new NewlineIndex(text));
 }
 
 /** Half or more of the body's non-empty lines are indented like a code block. */
@@ -455,9 +552,9 @@ const SINGLE_QUOTE_MAX = 300;
  * log or a ticket is a clause, not a chapter — and because an unbounded scan
  * for a character that is mostly an apostrophe finds one eventually.
  */
-function singleQuoteClose(text: string, open: number): number {
+function singleQuoteClose(text: string, open: number, lines: NewlineIndex): number {
   if (open > 0 && /[A-Za-z0-9]/.test(text[open - 1] ?? '')) return -1;
-  const lineEnd = text.indexOf('\n', open + 1);
+  const lineEnd = lines.nextAtOrAfter(open + 1);
   const limit = Math.min(lineEnd === -1 ? text.length : lineEnd, open + 1 + SINGLE_QUOTE_MAX);
   for (let j = open + 1; j < limit; j++) {
     const c = text[j];
@@ -470,20 +567,24 @@ function singleQuoteClose(text: string, open: number): number {
 
 export function scanWrappers(text: string): WrapperSpan[] {
   const spans: WrapperSpan[] = [];
+  const lines = new NewlineIndex(text);
+  // A search for ``` from any position at or after this finds nothing.
+  let noFenceFrom = Infinity;
   let i = 0;
   while (i < text.length) {
     if (text.startsWith('```', i)) {
-      const close = text.indexOf('```', i + 3);
+      const close = i + 3 >= noFenceFrom ? -1 : text.indexOf('```', i + 3);
       if (close === -1) {
         // Unclosed: not a block. Step over the ticks and keep scanning.
+        noFenceFrom = Math.min(noFenceFrom, i + 3);
         i += 3;
         continue;
       }
-      const infoEnd = text.indexOf('\n', i + 3);
+      const infoEnd = lines.nextAtOrAfter(i + 3);
       const info = (infoEnd === -1 || infoEnd > close ? '' : text.slice(i + 3, infoEnd)).trim();
       const body = infoEnd === -1 || infoEnd > close ? text.slice(i + 3, close) : text.slice(infoEnd + 1, close);
       const codeish =
-        CODE_INFO_STRING.test(info) || fenceLineSignalsCode(text, i) || bodyIsIndentedCode(body);
+        CODE_INFO_STRING.test(info) || fenceLineSignalsCode(text, i, lines) || bodyIsIndentedCode(body);
       spans.push({
         start: i,
         end: close + 3,
@@ -496,7 +597,7 @@ export function scanWrappers(text: string): WrapperSpan[] {
     const ch = text.charCodeAt(i);
     if (ch === 96) {
       // ` — an inline span never crosses a line break in any markdown dialect.
-      const lineEnd = text.indexOf('\n', i + 1);
+      const lineEnd = lines.nextAtOrAfter(i + 1);
       const limit = lineEnd === -1 ? text.length : lineEnd;
       const close = text.indexOf('`', i + 1);
       if (close === -1 || close > limit) {
@@ -529,7 +630,7 @@ export function scanWrappers(text: string): WrapperSpan[] {
       // exemption. An apostrophe is not a quote: an opener may not follow a
       // word character and a closer may not precede one, which is what keeps
       // "the vendor's permission" and "don't" from opening a span at all.
-      const close = singleQuoteClose(text, i);
+      const close = singleQuoteClose(text, i, lines);
       if (close === -1) {
         i += 1;
         continue;
@@ -617,20 +718,31 @@ export function blankFenceComments(window: string, spans: WrapperSpan[]): string
  *
  * This cannot recurse beyond one level: `scanWrappers` cuts a body at the
  * FIRST closing fence, so a body provably contains no ``` of its own and the
- * nested call finds no fence to descend into. Cost is bounded for the same
- * reason -- fences do not overlap, so the bodies scanned in a window sum to
- * less than the window.
+ * nested call finds no fence to descend into. The bodies scanned in a window
+ * sum to less than the window, because fences do not overlap -- but that alone
+ * bounds only the TEXT, not the work. #1111 post-merge B2: every shape match
+ * in a body ran the sentence-scoped exemptions and the addressee checks by a
+ * walk over the sentence (and the alternatives regex once per comma), so a
+ * code-like body of near-miss matches cost matches x body, cubic for a cue
+ * and commas. The body is now answered from its own `ProvenanceWindowIndex`,
+ * exactly as the window scan is (identical answers; see that class).
  */
-function bodyCarriesDirective(body: string): boolean {
+function bodyCarriesDirective(body: string, indexed = true): boolean {
   if (body.length === 0) return false;
   const text = blankCommentMarkers(body);
   const spans = scanWrappers(text);
   const mask = buildSkipMask(text, spans);
   const scanText = text.includes('`') ? text.replace(/`/g, ' ') : text;
+  const index = indexed ? new ProvenanceWindowIndex(text, spans) : undefined;
   for (const group of COMPILED_GROUPS) {
-    if (shapeHitsWindow(group, text, scanText, mask, spans)) return true;
+    if (shapeHitsWindow(group, text, scanText, mask, spans, index)) return true;
   }
   return false;
+}
+
+/** Test seam: the fence-body test with and without the index, for the differential. */
+export function __bodyCarriesDirectiveForTest(body: string, indexed: boolean): boolean {
+  return bodyCarriesDirective(body, indexed);
 }
 
 export function buildSkipMask(text: string, spans: WrapperSpan[]): Uint8Array {
@@ -732,6 +844,12 @@ const AGENT_ADDRESSEE = new RegExp(
   ].join('|'),
   'i',
 );
+
+/** AGENT_ADDRESSEE tried at exactly one position (the index's addressee test). */
+const AGENT_ADDRESSEE_AT = new RegExp(AGENT_ADDRESSEE.source, 'iy');
+
+/** What follows the `(?:^|\n|...)\s*` opener of AGENT_ADDRESSEE's label alternative, at one position. */
+const AGENT_LABEL_TAIL_AT = new RegExp(`(?:@)?${AGENT_NOUN}\\s*[:,]`, 'iy');
 
 /**
  * The agent's own machinery, NAMED — by a noun no other register shares.
@@ -862,16 +980,148 @@ function addresseeScope(window: string, start: number, end: number): string {
  * the r3 correction, and why every group except `memory_persist` now needs a
  * second conjunct on top of it.
  */
-function hasDirectedPosition(window: string, start: number, end: number): boolean {
+function hasDirectedPosition(
+  window: string,
+  start: number,
+  end: number,
+  index?: ProvenanceWindowIndex,
+): boolean {
   const local = window.slice(Math.max(0, start - 24), end);
   if (/\b(?:you|your)\b/i.test(local)) return true;
   if (/\bi\s+(?:am|speak|write|act|hold)\b/i.test(local)) return true;
   if (/\bon\s+behalf\s+of\b/i.test(local)) return true;
-  const before = window.slice(0, start);
+  if (index && index.window === window) return index.directedBefore(start);
+  return directedBefore(window.slice(0, start));
+}
+
+/** The `$`-anchored half of `hasDirectedPosition`, on the text before the match. */
+function directedBefore(before: string): boolean {
   if (INDIRECT_AGENT_SUBJECT.test(before)) return true;
-  if (AGENT_HEADER.test(before)) return true;
+  if (agentHeaderAtEnd(before)) return true;
   if (LIST_ITEM_START.test(before)) return true;
-  return IMPERATIVE_POSITION.test(before);
+  return imperativePositionAtEnd(before);
+}
+
+/** The agent nouns of AGENT_HEADER, with its optional `@`, at the end of a short slice. */
+const AGENT_HEADER_NOUN_END = /@?(?:assistant|ai|agent|model|system|bot|llm|chatbot)$/i;
+
+/**
+ * Same result as `AGENT_HEADER.test(text)`, read from the end in one pass.
+ *
+ * #1111 post-merge B2: the regex opens on `\n` and then takes `\s*`, so on a
+ * run of blank lines it restarted at every newline and re-read the rest of
+ * the run: O(run^2) per call, seconds for a fence body of 30 000 newlines.
+ * Every match ends `\s*:\s*` at the end, so the colon, the noun before it and
+ * the whitespace before that are fixed by reading backwards; the match then
+ * needs an opener right before some suffix of that whitespace. (A noun that is
+ * a proper suffix of another, "bot" in "chatbot", has a letter before it,
+ * which no opener is, so the longest noun is the only candidate.)
+ */
+function agentHeaderAtEnd(text: string): boolean {
+  let e = text.length;
+  while (e > 0 && isRegexSpace(text.charCodeAt(e - 1))) e--;
+  if (e === 0 || text.charCodeAt(e - 1) !== 0x3a) return false; // :
+  e--;
+  while (e > 0 && isRegexSpace(text.charCodeAt(e - 1))) e--;
+  const noun = AGENT_HEADER_NOUN_END.exec(text.slice(Math.max(0, e - 10), e));
+  if (!noun) return false;
+  const nounStart = e - noun[0].length;
+  let w = nounStart;
+  while (w > 0 && isRegexSpace(text.charCodeAt(w - 1))) w--;
+  if (w === 0) return true; // ^
+  for (let q = w; q < nounStart; q++) if (text.charCodeAt(q) === 0x0a) return true;
+  const c = text.charCodeAt(w - 1);
+  return c === 0x5b || c === 0x28 || (w >= 4 && text.startsWith('<!--', w - 4)); // [ ( <!--
+}
+
+/** `please` tried at exactly one position. */
+const PLEASE_AT = /please/iy;
+
+/**
+ * Same result as `IMPERATIVE_POSITION.test(text)`, read from the end in one
+ * pass (#1111 post-merge B2; the regex restarted at every newline of a blank
+ * run, and at every quote of a quote run, and re-read the rest each time).
+ *
+ * A match ends in `\s*["'`)\]]*\s*`, optionally followed by `please\s+`, at
+ * the end. Read backwards, the longest such tail before the optional
+ * `please` starts at `z`, and every suffix of it is again such a tail, so the
+ * regex matches exactly when an opener ends at some position in [z, end] --
+ * or z is 0, where `^` is the opener.
+ */
+function imperativePositionAtEnd(text: string): boolean {
+  if (imperativeTailFrom(text, text.length)) return true;
+  let e = text.length;
+  while (e > 0 && isRegexSpace(text.charCodeAt(e - 1))) e--;
+  if (e === text.length || e < 6) return false;
+  PLEASE_AT.lastIndex = e - 6;
+  return PLEASE_AT.test(text) && imperativeTailFrom(text, e - 6);
+}
+
+function imperativeTailFrom(text: string, end: number): boolean {
+  let z = end;
+  while (z > 0 && isRegexSpace(text.charCodeAt(z - 1))) z--;
+  while (z > 0 && isImperativeCloser(text.charCodeAt(z - 1))) z--;
+  while (z > 0 && isRegexSpace(text.charCodeAt(z - 1))) z--;
+  if (z === 0) return true; // ^
+  for (let p = z; p <= end; p++) {
+    const c = text.charCodeAt(p - 1);
+    // \n : " ' ` ( { [
+    if (c === 0x0a || c === 0x3a || c === 0x22 || c === 0x27 || c === 0x60 || c === 0x28 || c === 0x7b || c === 0x5b) {
+      return true;
+    }
+    if (p >= 2 && isRegexSpace(c)) {
+      const d = text.charCodeAt(p - 2);
+      if (d === 0x2e || d === 0x21 || d === 0x3f) return true; // [.!?]\s
+    }
+  }
+  return false;
+}
+
+/** `["'`)\]]` -- the quotes and closers IMPERATIVE_POSITION lets follow its opener. */
+function isImperativeCloser(c: number): boolean {
+  return c === 0x22 || c === 0x27 || c === 0x60 || c === 0x29 || c === 0x5d;
+}
+
+/** Test seam: the one-pass header and imperative tests next to their regexes, for the differential. */
+export function __directedTailsForTest(text: string): {
+  header: [boolean, boolean];
+  imperative: [boolean, boolean];
+} {
+  return {
+    header: [agentHeaderAtEnd(text), AGENT_HEADER.test(text)],
+    imperative: [imperativePositionAtEnd(text), IMPERATIVE_POSITION.test(text)],
+  };
+}
+
+/**
+ * How many whitespace-separated runs a match of any `directedBefore` regex can
+ * span: INDIRECT_AGENT_SUBJECT at most six ("the assistant are required to
+ * now"), AGENT_HEADER three ("<!-- @assistant :"), IMPERATIVE_POSITION three
+ * (opener, quotes, "please"), LIST_ITEM_START one.
+ */
+const DIRECTED_LOOKBACK_RUNS = 6;
+
+/**
+ * Where the text `directedBefore` reads may start, for a match at `start`.
+ *
+ * The four regexes end in `$`, and an unanchored regex tried on the whole
+ * prefix costs the whole prefix per match (O(matches x window), #1111
+ * post-merge B2). Every match of them ends at `start` and spans at most
+ * DIRECTED_LOOKBACK_RUNS maximal runs of non-`\s` characters, so it lies after
+ * the last character of the run before those. Starting the slice ON that
+ * character keeps the answer exact: no match can begin there (it would span
+ * one run too many, `^` included), and every match that begins later reads
+ * the same left neighbour for its `\b` as it does in the whole prefix.
+ */
+function directedLookbackStart(window: string, start: number): number {
+  let i = start - 1;
+  for (let runs = 0; ; runs++) {
+    while (i >= 0 && isRegexSpace(window.charCodeAt(i))) i--;
+    if (i < 0) return 0;
+    if (runs === DIRECTED_LOOKBACK_RUNS) return i;
+    while (i >= 0 && !isRegexSpace(window.charCodeAt(i))) i--;
+    if (i < 0) return 0;
+  }
 }
 
 /**
@@ -887,18 +1137,23 @@ function hasAgentAddressedEvidence(
   matchText: string,
   start: number,
   end: number,
+  index?: ProvenanceWindowIndex,
 ): boolean {
   if (evidence === 'none') return true;
-  if (!hasDirectedPosition(window, start, end)) return false;
+  if (!hasDirectedPosition(window, start, end, index)) return false;
   if (evidence === 'directed') return true;
 
-  const addressed = AGENT_ADDRESSEE.test(addresseeScope(window, start, end));
+  // Every conjunct below is a pure test ORed with the others, so the cheap
+  // ones bounded by the match go first; the addressee scope reaches the end
+  // of the sentence and is asked only when they all fail.
+  const ix = index && index.window === window ? index : undefined;
+  const addressed = (): boolean =>
+    ix ? ix.addressed(start, end) : AGENT_ADDRESSEE.test(addresseeScope(window, start, end));
   if (evidence === 'machinery') {
-    return addressed || NAMED_MACHINERY.test(matchText) || SECOND_PERSON_MACHINERY.test(matchText);
+    return NAMED_MACHINERY.test(matchText) || SECOND_PERSON_MACHINERY.test(matchText) || addressed();
   }
 
   // runtime — the tool-call group.
-  if (addressed) return true;
   if (INVOKE_ON_TARGET.test(matchText)) return true;
   if (RUNTIME_CALL_TOKEN.test(window.slice(start, Math.min(window.length, end + RUNTIME_TOKEN_TAIL)))) {
     return true;
@@ -906,6 +1161,8 @@ function hasAgentAddressedEvidence(
   if (FUNCTION_CALL_STRUCTURE.test(window.slice(Math.max(0, start - FUNCTION_CALL_LOOKBACK), start))) {
     return true;
   }
+  if (addressed()) return true;
+  if (ix) return ix.runtimeSelfReference(start, end);
   const [from, to] = sentenceBounds(window, start, end);
   return RUNTIME_SELF_REFERENCE.test(window.slice(from, to));
 }
@@ -1070,7 +1327,7 @@ export function discussionExempt(
   const cueOffset = lastCueOffset(sentence, start - from);
   if (cueOffset === -1) return false;
   if (/\?\s*$/.test(sentence)) return true;
-  return ALTERNATIVES_LIST.test(sentence.slice(cueOffset));
+  return alternativesList(sentence.slice(cueOffset));
 }
 
 /** Offset of the last discussion cue that starts before `limit`, else -1. */
@@ -1089,15 +1346,18 @@ function exemptContext(
   spans: WrapperSpan[],
   start: number,
   end: number,
+  index?: ProvenanceWindowIndex,
 ): boolean {
-  if (quotedReport(window, spans, start, end)) return true;
+  if (quotedReport(window, spans, start, end, index)) return true;
   // Clipped to the clause: an exemption may never reach across a sentence
   // boundary, which is what let a previous sentence disarm the next one.
-  const [from] = sentenceBounds(window, start, start);
+  const [from] = index && index.window === window
+    ? index.sentenceBounds(start, start)
+    : sentenceBounds(window, start, start);
   const prefix = window.slice(Math.max(from, start - 96), start);
   if (NEGATION_TAIL.test(prefix)) return true;
   if (REPORTING_VERB_TAIL.test(prefix) || REPORTING_SOURCE_TAIL.test(prefix)) return true;
-  return discussionExempt(window, start, end);
+  return discussionExempt(window, start, end, index);
 }
 
 // ───────────────────────── the per-window index ─────────────────────────
@@ -1157,14 +1417,20 @@ function lastBelow(sorted: ArrayLike<number>, value: number, lo = 0): number {
  * scan, the question check, the alternatives list). That is O(sentence) per
  * match, and a punctuation-free window is one 50 000-character sentence, so a
  * run of matching evidence cost O(matches x window): 5-12 s for 200 KB, and
- * the alternatives regex (`,[^.!?]*\b(?:or|and)\b`) is itself
- * O(commas x sentence), which made one shape cubic. L2 keeps the linear
- * walk; a caller that sees many matches per window (the memory-directive
- * screen) passes an index instead.
+ * the old alternatives regex (`,[^.!?]*\b(?:or|and)\b`) was itself
+ * O(commas x sentence), which made one shape cubic.
+ *
+ * #1111 post-merge B2: the same was true of L2's own shape scan, which the
+ * screen reaches through the fence-body test that decides the skip mask, and
+ * of its agent-addressed checks (a `$`-anchored test over the whole prefix,
+ * and an addressee scope running to the end of the sentence). Both L2 scans
+ * -- the window and each fence body -- now pass an index too, and the index
+ * answers those checks as well.
  *
  * Exact, not approximate: every answer equals what `sentenceBounds`,
- * `discussionExempt` and `quotedReport` return for the same window, spans and
- * offsets (pinned by a differential test against those functions). Where a
+ * `discussionExempt`, `quotedReport`, and the prefix, addressee and
+ * self-reference halves of the agent-addressed checks return for the same
+ * window, spans and offsets (pinned by differential tests). Where a
  * table cannot prove that — the last cue before the match reaching the end of
  * the sentence, or spans that are not sorted and disjoint — the index answers
  * by calling the linear function, so it can be slow there but never different.
@@ -1196,10 +1462,145 @@ export class ProvenanceWindowIndex {
   private readonly spanVerdicts = new Map<WrapperSpan, boolean>();
   /** null until checked; false when the spans are not sorted and disjoint. */
   private spansOrdered: boolean | null = null;
+  /** nextNonSpaceAt[k]: the first non-`\s` index at or after k, else the length. */
+  private nextNonSpaceAt: Int32Array | null = null;
+  /** lastNewlineAt[k]: the last newline index at or below k, else -1. */
+  private lastNewlineAt: Int32Array | null = null;
+  /** Per match start: the `$`-anchored half of hasDirectedPosition. */
+  private readonly directedAt = new Map<number, boolean>();
+  /**
+   * Per addressee-scope end `to`: the window cut at `to`, the lowest start
+   * tried so far, and the highest start at which AGENT_ADDRESSEE matches
+   * inside [start, to) (-1 while none is known).
+   */
+  private readonly addresseeByEnd = new Map<number, { cut: string; low: number; found: number }>();
+  /** Per sentence (from, to): RUNTIME_SELF_REFERENCE on it. */
+  private readonly selfReferenceBySentence = new Map<number, boolean>();
 
   constructor(window: string, spans: readonly WrapperSpan[]) {
     this.window = window;
     this.spans = spans;
+  }
+
+  // ── the agent-addressed checks (L2 shapes) ──
+
+  /**
+   * Same result as the `$`-anchored half of `hasDirectedPosition`, i.e. the
+   * four regexes on `window.slice(0, start)`, read from a slice that starts at
+   * `directedLookbackStart` (exact; see there) and cached per start.
+   */
+  directedBefore(start: number): boolean {
+    let verdict = this.directedAt.get(start);
+    if (verdict === undefined) {
+      verdict = directedBefore(this.window.slice(directedLookbackStart(this.window, start), start));
+      this.directedAt.set(start, verdict);
+    }
+    return verdict;
+  }
+
+  /** The first index at or after `pos` that is not `\s`, else the window length. */
+  private nextNonSpace(pos: number): number {
+    const n = this.window.length;
+    if (!this.nextNonSpaceAt) {
+      const table = new Int32Array(n + 1);
+      table[n] = n;
+      for (let k = n - 1; k >= 0; k--) {
+        table[k] = isRegexSpace(this.window.charCodeAt(k)) ? table[k + 1]! : k;
+      }
+      this.nextNonSpaceAt = table;
+    }
+    return this.nextNonSpaceAt[Math.min(Math.max(pos, 0), n)]!;
+  }
+
+  /** Same result as `window.lastIndexOf('\n', pos)`. */
+  private lastNewline(pos: number): number {
+    const n = this.window.length;
+    if (n === 0) return -1;
+    if (!this.lastNewlineAt) {
+      const table = new Int32Array(n);
+      let last = -1;
+      for (let k = 0; k < n; k++) {
+        if (this.window.charCodeAt(k) === 0x0a) last = k;
+        table[k] = last;
+      }
+      this.lastNewlineAt = table;
+    }
+    return this.lastNewlineAt[Math.min(Math.max(pos, 0), n - 1)]!;
+  }
+
+  /**
+   * Same result as `AGENT_ADDRESSEE.test(addresseeScope(window, start, end))`.
+   *
+   * The scope starts at most 400 characters before the match but ends at the
+   * end of the sentence, so on a long sentence the linear test re-read the
+   * rest of it for every match. A match of the regex inside the scope either
+   * starts at the scope's first character -- where `^` and `\b` read the
+   * slice edge, so that one position is tried on the slice itself -- or
+   * starts later, where it reads exactly what it reads in the window cut at
+   * the scope end. For the second kind only the HIGHEST such start matters,
+   * and it is found once per scope end by trying positions downward from
+   * there, so each position is tried at most once per sentence end.
+   */
+  addressed(start: number, end: number): boolean {
+    const w = this.window;
+    const [from, to] = this.sentenceBounds(start, end);
+    const lineStart = this.lastNewline(Math.max(0, from - 1)) + 1;
+    const previousLineStart = lineStart === 0 ? 0 : this.lastNewline(lineStart - 2) + 1;
+    const floor = Math.max(0, Math.min(previousLineStart, from), start - ADDRESSEE_LOOKBACK);
+    if (floor >= to) return false; // an empty scope: the regex needs at least two characters
+    AGENT_ADDRESSEE_AT.lastIndex = 0;
+    if (AGENT_ADDRESSEE_AT.test(w.slice(floor, to))) return true;
+    return this.addresseeStartsAtOrAfter(floor + 1, to);
+  }
+
+  /** Does AGENT_ADDRESSEE match at some position in [lo, to) of the window cut at `to`? */
+  private addresseeStartsAtOrAfter(lo: number, to: number): boolean {
+    let memo = this.addresseeByEnd.get(to);
+    if (!memo) {
+      memo = { cut: this.window.slice(0, to), low: to, found: -1 };
+      this.addresseeByEnd.set(to, memo);
+    }
+    if (memo.found >= 0) return memo.found >= lo;
+    for (let p = memo.low - 1; p >= lo; p--) {
+      const c = memo.cut.charCodeAt(p);
+      if (isRegexSpace(c)) {
+        // #1111 post-merge B2: on whitespace only the `(?:^|\n)\s*@?NOUN\s*[:,]`
+        // alternative can start (every other one starts on a letter or on a
+        // non-space opener), and its `\s*` must run to the end of the
+        // whitespace run, so from every newline of one run -- or from 0 --
+        // it matches exactly when the label tail matches at the run's end.
+        // Trying the regex at each newline instead re-read the rest of the
+        // run each time: O(run^2) on a block of blank lines.
+        if (c !== 0x0a && p !== 0) continue;
+        const runEnd = this.nextNonSpace(p);
+        if (runEnd >= to) continue;
+        AGENT_LABEL_TAIL_AT.lastIndex = runEnd;
+        if (!AGENT_LABEL_TAIL_AT.test(memo.cut)) continue;
+        memo.found = p;
+        memo.low = p;
+        return true;
+      }
+      AGENT_ADDRESSEE_AT.lastIndex = p;
+      if (AGENT_ADDRESSEE_AT.test(memo.cut)) {
+        memo.found = p;
+        memo.low = p;
+        return true;
+      }
+    }
+    memo.low = Math.min(memo.low, lo);
+    return false;
+  }
+
+  /** Same result as RUNTIME_SELF_REFERENCE on the sentence `sentenceBounds(window, start, end)`. */
+  runtimeSelfReference(start: number, end: number): boolean {
+    const [from, to] = this.sentenceBounds(start, end);
+    const key = from * (this.window.length + 1) + to;
+    let verdict = this.selfReferenceBySentence.get(key);
+    if (verdict === undefined) {
+      verdict = RUNTIME_SELF_REFERENCE.test(this.window.slice(from, to));
+      this.selfReferenceBySentence.set(key, verdict);
+    }
+    return verdict;
   }
 
   /** Was this index built for exactly this window and span list? */
@@ -1296,7 +1697,7 @@ export class ProvenanceWindowIndex {
   }
 
   /**
-   * `ALTERNATIVES_LIST` on window[a, b): a comma, then an `or` / `and` word
+   * `alternativesList` on window[a, b): a comma, then an `or` / `and` word
    * with no [.!?] between them. For a word at q the best comma is the last
    * one before q with no [.!?] after it, and every comma before q sits below
    * q, so "some word in the slice has a comma at or after a" is "the largest
@@ -1482,12 +1883,19 @@ const COMPILED_GROUPS: Array<{
     new RegExp(p.source, p.flags.includes('g') ? p.flags : `${p.flags}g`)),
 }));
 
+/**
+ * One group over one scan text. With `windowIndex` (built for `window` and
+ * `spans`), every sentence-, addressee- and prefix-scoped question is answered
+ * from tables built once per text, so the cost is bounded per match rather
+ * than per match x sentence; the answers are the same either way.
+ */
 function shapeHitsWindow(
   group: (typeof COMPILED_GROUPS)[number],
   window: string,
   scanText: string,
   mask: Uint8Array,
   spans: WrapperSpan[],
+  windowIndex?: ProvenanceWindowIndex,
 ): boolean {
   for (const re of group.patterns) {
     for (const match of scanText.matchAll(re)) {
@@ -1495,14 +1903,80 @@ function shapeHitsWindow(
       if (index === undefined) continue;
       const end = index + match[0].length;
       if (spanSkipped(mask, index, match[0].length)) continue;
-      if (exemptContext(window, spans, index, end)) continue;
-      if (!hasAgentAddressedEvidence(group.evidence, window, match[0], index, end)) {
+      if (exemptContext(window, spans, index, end, windowIndex)) continue;
+      if (!hasAgentAddressedEvidence(group.evidence, window, match[0], index, end, windowIndex)) {
         continue;
       }
       return true;
     }
   }
   return false;
+}
+
+/**
+ * Test seam: the three agent-addressed checks the index answers, at one offset
+ * pair, linear (`index` omitted) or from the given index, for the differential.
+ */
+export function __agentAddressedPartsForTest(
+  window: string,
+  start: number,
+  end: number,
+  index?: ProvenanceWindowIndex,
+): { directed: boolean; addressed: boolean; selfReference: boolean } {
+  if (index) {
+    return {
+      directed: index.directedBefore(start),
+      addressed: index.addressed(start, end),
+      selfReference: index.runtimeSelfReference(start, end),
+    };
+  }
+  const [from, to] = sentenceBounds(window, start, end);
+  return {
+    directed: directedBefore(window.slice(0, start)),
+    addressed: AGENT_ADDRESSEE.test(addresseeScope(window, start, end)),
+    selfReference: RUNTIME_SELF_REFERENCE.test(window.slice(from, to)),
+  };
+}
+
+/**
+ * Test seam: every L2 shape match in one text with its exemption and
+ * agent-addressed verdicts (not only the first hit per group), with and
+ * without the index, for the differential.
+ */
+export function __shapeMatchVerdictsForTest(text: string, indexed: boolean): string[] {
+  const spans = scanWrappers(text);
+  const mask = buildSkipMask(text, spans);
+  const view = blankFenceComments(text, spans);
+  const scanText = view.includes('`') ? view.replace(/`/g, ' ') : view;
+  const index = indexed ? new ProvenanceWindowIndex(view, spans) : undefined;
+  const out: string[] = [];
+  for (const group of COMPILED_GROUPS) {
+    for (const re of group.patterns) {
+      for (const match of scanText.matchAll(re)) {
+        const start = match.index!;
+        const end = start + match[0].length;
+        const skipped = spanSkipped(mask, start, match[0].length);
+        const exempt = exemptContext(view, spans, start, end, index);
+        const addressed = hasAgentAddressedEvidence(group.evidence, view, match[0], start, end, index);
+        out.push(`${group.name}@${start}-${end}:${+skipped}${+exempt}${+addressed}`);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Test seam: which L2 groups hit one text, with and without the index, for the
+ * differential (the wrapper scan, mask and view are built as the window scan
+ * builds them).
+ */
+export function __shapeGroupsForTest(text: string, indexed: boolean): NonAuthoritativePattern[] {
+  const spans = scanWrappers(text);
+  const mask = buildSkipMask(text, spans);
+  const view = blankFenceComments(text, spans);
+  const scanText = view.includes('`') ? view.replace(/`/g, ' ') : view;
+  const index = indexed ? new ProvenanceWindowIndex(view, spans) : undefined;
+  return COMPILED_GROUPS.filter((g) => shapeHitsWindow(g, view, scanText, mask, spans, index)).map((g) => g.name);
 }
 
 /**
@@ -1549,9 +2023,12 @@ export function detectNonAuthoritativeInstruction(
     // the double space this leaves. The mask and the wrapper spans are built
     // from the unfolded window, so a span still masks exactly what it wraps.
     const scanText = view.includes('`') ? view.replace(/`/g, ' ') : view;
+    // Sentence-, addressee- and prefix-scoped checks answered from tables
+    // built once per window (identical answers), not walked per match.
+    const index = new ProvenanceWindowIndex(view, spans);
     for (const group of COMPILED_GROUPS) {
       if (matched.includes(group.name)) continue;
-      if (shapeHitsWindow(group, view, scanText, mask, spans)) {
+      if (shapeHitsWindow(group, view, scanText, mask, spans, index)) {
         matched.push(group.name);
       }
     }
