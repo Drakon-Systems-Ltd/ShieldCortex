@@ -838,8 +838,8 @@ const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlog
 // (fold A1). Start: no word character, `.` or `-` on the left, so a shell
 // operator (`<`, `>`, `|`, `;`, `&`, `(`, `)`, a backtick, `$(`), a quote,
 // `=`, `:`, `/`, `~`, `@` or a backslash escape (`\.secrets`) all start it;
-// or a short option letter directly before it after a blank or the start
-// (`curl -T.netrc`, an attached operand). End: no word character, `.` or `-`
+// or a short option word directly before it after a blank or the start
+// (`curl -T.netrc`, an attached operand; fold A2c below). End: no word character, `.` or `-`
 // on the right, so `/`, the end, a blank, a quote or an operator all end it.
 // So `.netrc.example`, `.git-credentials.sample`, `hosts.yml.bak`,
 // `.vault-token-old`, `my.netrc`, `.secretsmanager`, `x.secrets` and
@@ -862,11 +862,24 @@ const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlog
 // A home `.ssh` directory in any spelling (`~/./.ssh`, `$HOME/…`,
 // `/home/<u>//.ssh`, `/root/./.ssh`) stays the SSH_DIR rule's, and a relative
 // `.ssh/id_*` stays judged as before (#874/#920); `.pub` is still excluded.
+// Fold A2c: the attached-operand start is an option WORD, not one letter. A
+// word that opens with a single `-` and a run of ASCII letters starts a store
+// name after ANY letter of the run, so a short-option cluster with the operand
+// attached to its last letter (`curl -sT.netrc`, `ssh-keygen -yfid_ed25519`)
+// is the store too. The same holds when the word opens with a quote, or has a
+// backslash before the dash or before a letter of the run; the shell removes
+// both. The run is CONSUMED from the dash, not a variable-length lookbehind,
+// so a long letter run is scanned once from its dash and the row stays linear
+// (a lookbehind would rescan the run from every letter). Python has no
+// variable-length lookbehind, so Hermes holds this same consumed form. It
+// starts every store name and the absolute `.ssh/` key path; the home store
+// directories need nothing, because their home roots have no left boundary.
 const STORE_SEP_SRC = String.raw`\/+(?:\.\/+)*`;
+const STORE_OPTION_WORD_SRC = String.raw`(?:^|(?<=\s))(?:['"]-[A-Za-z]+|\\?-(?:\\?[A-Za-z])+)`;
 const STORE_DIR_END_SRC = String.raw`(?:${STORE_SEP_SRC}(?:[*?\[{]|\.(?![\w.\/-])|(?![\w.\/-]))|(?![\w.\/-]))`;
 const CREDENTIAL_STORE_DIR_SRC = String.raw`${HOME_ROOT_SRC}${STORE_SEP_SRC}(?:\.config${STORE_SEP_SRC}(?:gh|gcloud)|\.docker|\.azure)${STORE_DIR_END_SRC}`;
-const ABS_SSH_KEY_PATH_SRC = String.raw`(?:^|(?<=[\s'"=:<>|;&()\x60]))\/(?!(?:home\/[^\s\/'"]+|Users\/[^\s\/'"]+|root)${STORE_SEP_SRC}\.ssh\/)(?:[^\s\/'"=:<>|;&()\x60]+\/+)*\.ssh${STORE_SEP_SRC}id_(?:ed25519|ecdsa|dsa)(?![\w.-])`;
-const CREDENTIAL_STORE_NAME_SRC = String.raw`(?:(?<![\w.-])|(?<=(?:^|\s)-[A-Za-z]))(?:\.netrc|_netrc|\.git-credentials|\.config${STORE_SEP_SRC}gh${STORE_SEP_SRC}hosts\.ya?ml|\.docker${STORE_SEP_SRC}config\.json|\.pgpass|\.pypirc|\.vault-token|application_default_credentials\.json|\.config${STORE_SEP_SRC}gcloud${STORE_SEP_SRC}(?:credentials|access_tokens)\.db|\.azure${STORE_SEP_SRC}(?:accessTokens\.json|msal_token_cache\.(?:json|bin))|\.secrets?|(?<!\.ssh\/)id_(?:ed25519|ecdsa|dsa))(?![\w.-])`;
+const ABS_SSH_KEY_PATH_SRC = String.raw`(?:^|(?<=[\s'"=:<>|;&()\x60])|${STORE_OPTION_WORD_SRC})\/(?!(?:home\/[^\s\/'"]+|Users\/[^\s\/'"]+|root)${STORE_SEP_SRC}\.ssh\/)(?:[^\s\/'"=:<>|;&()\x60]+\/+)*\.ssh${STORE_SEP_SRC}id_(?:ed25519|ecdsa|dsa)(?![\w.-])`;
+const CREDENTIAL_STORE_NAME_SRC = String.raw`(?:(?<![\w.-])|${STORE_OPTION_WORD_SRC})(?:\.netrc|_netrc|\.git-credentials|\.config${STORE_SEP_SRC}gh${STORE_SEP_SRC}hosts\.ya?ml|\.docker${STORE_SEP_SRC}config\.json|\.pgpass|\.pypirc|\.vault-token|application_default_credentials\.json|\.config${STORE_SEP_SRC}gcloud${STORE_SEP_SRC}(?:credentials|access_tokens)\.db|\.azure${STORE_SEP_SRC}(?:accessTokens\.json|msal_token_cache\.(?:json|bin))|\.secrets?|(?<!\.ssh\/)id_(?:ed25519|ecdsa|dsa))(?![\w.-])`;
 const CREDENTIAL_STORE_PATH_SRC = String.raw`(?:${CREDENTIAL_STORE_NAME_SRC}|${CREDENTIAL_STORE_DIR_SRC}|${ABS_SSH_KEY_PATH_SRC})`;
 const SENSITIVE_PATH_RE = new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|${SSH_DIR_PATH_SRC}|${AUTHORIZED_KEYS_PATH_SRC}|id_rsa|\.aws\/credentials|(?<![A-Za-z0-9_])\.env\b|${CREDENTIAL_STORE_PATH_SRC}`, 'i');
 // #505: a shell WRITE shape whose destination is a startup file. The write
