@@ -100,6 +100,16 @@ export function validateCap(value: unknown, key: string = 'cap'): number | undef
 }
 
 /**
+ * `base` with every cap reset to the built-in default. Unverified caps never
+ * floor or fall back on a caller-supplied `base` (#1132 follow-up).
+ */
+function withDefaultCaps(base: MemoryConfig): MemoryConfig {
+  const resolved: MemoryConfig = { ...base };
+  for (const key of CAP_KEYS) resolved[key] = DEFAULT_CONFIG[key];
+  return resolved;
+}
+
+/**
  * `DEFAULT_CONFIG` with any valid operator overrides from the `memory` block
  * applied. Never throws: an unreadable or malformed config yields the defaults,
  * because failing to parse config must not stop memories being stored.
@@ -110,6 +120,12 @@ export function validateCap(value: unknown, key: string = 'cap'): number | undef
  * `max(default, min(stored, setter maximum))` (#1132): they can never lower
  * eviction below the built-in default, and an honest raised cap is kept up to
  * the setter maximum. Every branch returns a fresh object, never `base` itself.
+ *
+ * The floor and fallback for unverified caps is the built-in DEFAULT_CONFIG,
+ * never the caller-supplied `base` (#1132 follow-up): a caller cannot lower
+ * the floor below the default, nor raise unverified caps above what the file
+ * and setter maximum allow. `base` supplies every non-cap field, and supplies
+ * cap fallbacks only when the file's embedded signature verifies.
  */
 export function resolveMemoryConfigWithIntegrity(base: MemoryConfig = DEFAULT_CONFIG): {
   config: MemoryConfig;
@@ -126,7 +142,7 @@ export function resolveMemoryConfigWithIntegrity(base: MemoryConfig = DEFAULT_CO
     hasEmbeddedSignature = typeof read.data?._sig === 'string';
     trusted = hasEmbeddedSignature && verdict === 'valid';
   } catch {
-    return { config: { ...base }, ignoredCapReason: null };
+    return { config: withDefaultCaps(base), ignoredCapReason: null };
   }
 
   if (!trusted) {
@@ -134,11 +150,11 @@ export function resolveMemoryConfigWithIntegrity(base: MemoryConfig = DEFAULT_CO
     // built-in default it is ignored (a forged lower cap cannot evict); above
     // it, it is honoured up to the setter's maximum (an honest raised cap that
     // was never embedded-signed does not silently evict on upgrade).
-    const resolved: MemoryConfig = { ...base };
+    const resolved: MemoryConfig = withDefaultCaps(base);
     for (const key of CAP_KEYS) {
       const stored = validateCap(block[key], key);
       if (stored !== undefined) {
-        resolved[key satisfies CapKey] = Math.max(base[key], Math.min(stored, UNTRUSTED_CAP_CEILING[key]));
+        resolved[key satisfies CapKey] = Math.max(DEFAULT_CONFIG[key], Math.min(stored, UNTRUSTED_CAP_CEILING[key]));
       }
     }
     const hasStoredCaps = CAP_KEYS.some((key) => block[key] !== undefined);

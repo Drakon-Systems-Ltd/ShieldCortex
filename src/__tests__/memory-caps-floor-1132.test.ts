@@ -209,3 +209,50 @@ describe('#1132 unverified memory caps are clamped to [default, setter max]', ()
     expect(row.fix).toContain('config --memory-cap');
   });
 });
+
+describe('#1132 follow-up: unverified caps floor and fall back on DEFAULT_CONFIG, never the caller-supplied base', () => {
+  const lowBase = { ...DEFAULT_CONFIG, dbPath: '/nowhere/low.db', maxLongTermMemories: 20, maxShortTermMemories: 10 };
+  const highBase = { ...DEFAULT_CONFIG, dbPath: '/nowhere/high.db', maxLongTermMemories: 50_000, maxShortTermMemories: 5_000 };
+  const defaults = [DEFAULT_CONFIG.maxLongTermMemories, DEFAULT_CONFIG.maxShortTermMemories];
+  const caps = (c: { maxLongTermMemories: number; maxShortTermMemories: number }) => [c.maxLongTermMemories, c.maxShortTermMemories];
+
+  it.each([['lowBase', lowBase], ['highBase', highBase]])('B1: %s with no config file resolves to the defaults', (_name, base) => {
+    expect(fs.existsSync(configFile())).toBe(false);
+    const resolved = resolveMemoryConfig(base);
+    expect(caps(resolved)).toEqual(defaults);
+    expect(caps(resolved)).not.toEqual(caps(base));
+    // Non-cap fields still come from base.
+    expect(resolved.dbPath).toBe(base.dbPath);
+  });
+
+  it.each([['lowBase', lowBase], ['highBase', highBase]])('B2: %s with an unverified LOWER cap resolves to the defaults', (_name, base) => {
+    writeUnsigned({ maxLongTermMemories: 20, maxShortTermMemories: 10 });
+    const resolved = resolveMemoryConfig(base);
+    expect(caps(resolved)).toEqual(defaults);
+    expect(caps(resolved)).not.toEqual(caps(base));
+    expect(resolved.dbPath).toBe(base.dbPath);
+  });
+
+  it.each([['lowBase', lowBase], ['highBase', highBase]])('B3: %s with an unverified RAISED cap resolves to the clamped stored value', (_name, base) => {
+    writeUnsigned({ maxLongTermMemories: 1200, maxShortTermMemories: 250 });
+    const resolved = resolveMemoryConfig(base);
+    expect(caps(resolved)).toEqual([1200, 250]);
+    expect(caps(resolved)).not.toEqual(caps(base));
+  });
+
+  it.each([['lowBase', lowBase], ['highBase', highBase]])('B4: %s with an unverified file lacking caps resolves to the defaults', (_name, base) => {
+    writeUnsigned({});
+    expect(caps(resolveMemoryConfig(base))).toEqual(defaults);
+  });
+
+  it.each([['lowBase', lowBase], ['highBase', highBase]])('B5: %s with an unverified over-ceiling cap resolves to the setter maximum', (_name, base) => {
+    writeUnsigned({ maxLongTermMemories: 1e9, maxShortTermMemories: 1e9 });
+    expect(caps(resolveMemoryConfig(base))).toEqual([LTM_CAP_MAX, STM_CAP_MAX]);
+  });
+
+  it('B6: an embedded-signed cap is honoured as written regardless of base', () => {
+    writeEmbeddedSigned({ maxLongTermMemories: 1200, maxShortTermMemories: 250 });
+    expect(caps(resolveMemoryConfig(lowBase))).toEqual([1200, 250]);
+    expect(caps(resolveMemoryConfig(highBase))).toEqual([1200, 250]);
+  });
+});
