@@ -1278,7 +1278,9 @@ const COMMAND_WRAPPER = /^(?:sudo|doas|env|nohup|time|timeout|xargs|nice|ionice|
 const CMD_PREFIX_KEYWORD = /^(?:if|then|elif|else|while|until|do|!|\{|\()$/;
 // bash options that CONSUME the next token as a value — the inline-program scan
 // must step over the value to reach `-c` (`bash -O extglob -c '…'`, #codex-P1).
-const BASH_VALUE_OPTION = /^(?:-O|\+O|--rcfile|--init-file)$/;
+// `-o`/`+o` take an option name in every sh-family shell (`bash -o pipefail -c`,
+// `sh -euo pipefail -c`), as the last letter of a cluster too.
+const BASH_VALUE_OPTION = /^(?:[-+][A-Za-z]*[oO]|--rcfile|--init-file)$/;
 // git GLOBAL options (before the subcommand) that consume the next token, so the
 // real subcommand is found past them (`git -c k=v -C dir branch -D`).
 const GIT_GLOBAL_VALUE_OPT = /^(?:-c|-C|--git-dir|--work-tree|--namespace|--exec-path|--super-prefix)$/;
@@ -1323,12 +1325,12 @@ function gitAtCommandPosition(tokens: readonly string[], i: number): boolean {
  * `gitAtCommandPosition(tokens, i)`. The per-index form rescans the prefix, so
  * a walk that asks it at each token is O(tokens²) on a wrapper-dense statement
  * (`nice env nohup` x 1100, where every token is at command position).
+ * With `from`, the walk starts there and only adds positions to `out`.
  */
-function commandPositions(tokens: readonly string[]): boolean[] {
-  const out: boolean[] = new Array(tokens.length).fill(false);
+function commandPositions(tokens: readonly string[], from = 0, out: boolean[] = new Array(tokens.length).fill(false)): boolean[] {
   let sawWrapper = false;
   let prevWasFlag = false;
-  for (let k = 0; k < tokens.length; k++) {
+  for (let k = from; k < tokens.length; k++) {
     out[k] = true;
     const t = tokens[k];
     const base = commandBaseName(t);
@@ -1742,8 +1744,10 @@ function expandsCredentialVariable(exp: string): boolean {
 
 // A heredoc whose delimiter is quoted keeps its body literal.
 const QUOTED_HEREDOC = /<<-?[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|\\([^\s;&|<>'"]+))(?=[\s;&|<>]|$)/g;
+// Any heredoc operator (not a here-string): its body lines are not shell words.
+const HEREDOC_OPERATOR = /(?<!<)<<(?!<)/;
 
-/** `text` without the bodies of quoted-delimiter heredocs. */
+/** `text` with the bodies of quoted-delimiter heredocs blanked (offsets kept). */
 function withoutLiteralHeredocBodies(text: string): string {
   let out = '';
   let from = 0;
@@ -1760,24 +1764,27 @@ function withoutLiteralHeredocBodies(text: string): string {
       if (q < 0) break;
       p = q + 1;
     }
-    out += text.slice(from, nl + 1);
+    out += text.slice(from, nl + 1) + text.slice(nl + 1, end).replace(/[^\n]/g, ' ');
     from = end;
   }
   return out + text.slice(from);
 }
 
 /**
- * A credential-named expansion ANYWHERE in the text, for a client that reads
- * stdin or runs under xargs: the value can reach it through a heredoc, a
- * here-string or a pipe. Quoting is not read (a single-quoted `'$TOKEN'`
- * counts); only a quoted-delimiter heredoc body is skipped.
+ * Offsets of every credential-named expansion ANYWHERE in the text, for a
+ * client that reads stdin or runs under xargs: the value can reach it through
+ * a heredoc, a here-string or a pipe. Quoting is not read here (a
+ * single-quoted `'$TOKEN'` counts); only a quoted-delimiter heredoc body is
+ * skipped. The caller drops an offset only inside a span already proven inert.
  */
-function credentialExpansionAnywhere(text: string): boolean {
+function credentialExpansionOffsets(text: string): number[] {
   const scan = withoutLiteralHeredocBodies(text);
-  for (const m of scan.matchAll(SHELL_EXPANSION_NAME)) if (isCredentialVariableName(m[1])) return true;
-  for (const m of scan.matchAll(/\bprintenv\b([^\n;&|)`]*)/g)) if (namesCredential(m[1])) return true;
-  return false;
+  const out: number[] = [];
+  for (const m of scan.matchAll(SHELL_EXPANSION_NAME)) if (isCredentialVariableName(m[1])) out.push(m.index);
+  for (const m of scan.matchAll(/\bprintenv\b([^\n;&|)`]*)/g)) if (namesCredential(m[1])) out.push(m.index);
+  return out;
 }
+type SourceSpan = readonly [number, number];
 
 /** One argv word, as env-credential-egress reads it. */
 interface CredentialWord {
@@ -1791,6 +1798,8 @@ interface CredentialWord {
   exp: string;
   /** False when the shell may turn this word into zero, several or option-shaped words. */
   plain: boolean;
+  /** Source offsets of the word, quotes included. */
+  span: SourceSpan;
 }
 interface CredentialStatement {
   words: CredentialWord[];
@@ -1804,6 +1813,11 @@ interface CredentialStatement {
   unbalanced: boolean;
   /** Runs after a `|`: stdin is the previous stage's output. */
   piped: boolean;
+  /**
+   * Source spans whose `$` the shell keeps literal: an ordinary single-quoted
+   * span or a backslash-escaped `$`, outside any substitution.
+   */
+  literal: SourceSpan[];
 }
 const LITERAL_MARK = '\u0000';
 const NAME_BREAK = '\u0001';
@@ -1831,6 +1845,9 @@ function credentialStatements(text: string): CredentialStatement[] {
   let ansiC = false;
   let stdinRedirect = false;
   let piped = false;
+  let literal: SourceSpan[] = [];
+  let sqStart = -1;
+  let wordStart = 0;
   let raw = '';
   let exp = '';
   let started = false;
@@ -1842,6 +1859,7 @@ function credentialStatements(text: string): CredentialStatement[] {
   let subDepth = 0;                    // entries of the stack that are 'p' or 'b'
   let sq = false;
   let lastDollar = -2;
+  let wordEnd = 0;
   const endWord = () => {
     if (started) {
       if (sq || stack.length > 0) plain = false;
@@ -1849,15 +1867,15 @@ function credentialStatements(text: string): CredentialStatement[] {
       if (/\$[@*]|\[[@*]\]|\$\{[!#]/.test(exp)) plain = false;
       if (redirectWord) { /* a redirection and its glued target */ }
       else if (dropNext) dropNext = false;
-      else words.push({ raw, exp, plain });
+      else words.push({ raw, exp, plain, span: [wordStart, wordEnd] });
     }
     raw = ''; exp = ''; started = false; plain = true; globby = false; redirectWord = false;
   };
   const endStatement = (end: number, nextPiped: boolean) => {
     endWord();
     dropNext = false;
-    if (words.length > 0) out.push({ words, text: text.slice(stmtStart, end), ansiC, stdinRedirect, piped, unbalanced: sq || stack.length > 0 });
-    words = []; ansiC = false; stdinRedirect = false; piped = nextPiped; stmtStart = end + 1;
+    if (words.length > 0) out.push({ words, text: text.slice(stmtStart, end), ansiC, stdinRedirect, piped, unbalanced: sq || stack.length > 0, literal });
+    words = []; ansiC = false; stdinRedirect = false; piped = nextPiped; stmtStart = end + 1; literal = [];
   };
   const open = (kind: string, chars: string) => {
     stack.push(kind);
@@ -1869,9 +1887,12 @@ function credentialStatements(text: string): CredentialStatement[] {
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     const top = stack[stack.length - 1];
+    if (!started) wordStart = i;
+    wordEnd = i;
     if (sq) {
       if (c === "'") {
         sq = false;
+        if (sqStart >= 0) literal.push([sqStart, i + 1]);
         if (subDepth > 0) raw += c;
         exp += NAME_BREAK;
       } else {
@@ -1888,6 +1909,7 @@ function credentialStatements(text: string): CredentialStatement[] {
       if (e === '\r' && text[i + 2] === '\n') { i += 2; continue; }
       started = true;
       if (top === '"' && !DQ_ESCAPABLE.test(e)) { raw += c; exp += c; continue; }   // `"\_"` keeps its backslash
+      if (e === '$' && subDepth === 0) literal.push([i, i + 2]);
       raw += subDepth > 0 ? c + e : e;
       exp += NAME_BREAK + (subDepth === 0 && LITERALISED.test(e) ? LITERAL_MARK : e);
       i++;
@@ -1905,6 +1927,7 @@ function credentialStatements(text: string): CredentialStatement[] {
     }
     if (c === "'") {
       if (lastDollar === i - 1) ansiC = true;
+      sqStart = subDepth === 0 && lastDollar !== i - 1 ? i : -1;
       sq = true;
       started = true;
       if (subDepth > 0) raw += c;
@@ -1972,17 +1995,20 @@ function credentialStatements(text: string): CredentialStatement[] {
     exp += c;
     started = true;
   }
+  wordEnd = text.length;
   endStatement(text.length, false);
   return out;
 }
 
 /**
  * Walk a client's argv left to right. `sends`: a request-bearing word expands
- * a credential-named variable. `stdin`: the request reads stdin.
+ * a credential-named variable. `stdin`: the request reads stdin. `relieved`:
+ * the spans of the words the walk proved inert (relief b or c).
  */
-function clientArgvSendsCredential(client: string, words: readonly CredentialWord[]): { sends: boolean; stdin: boolean } {
+function clientArgvSendsCredential(client: string, words: readonly CredentialWord[]): { sends: boolean; stdin: boolean; relieved: SourceSpan[] } {
   const family = HTTPIE_CLIENT.test(client) ? 'httpie' : client.toLowerCase();
   const sent: string[] = [];
+  const reliefSpans: SourceSpan[] = [];
   let stdin = false;
   let proven = true;          // false once the walk cannot know where a value ends
   let sawUrl = false;
@@ -1999,12 +2025,14 @@ function clientArgvSendsCredential(client: string, words: readonly CredentialWor
     let kind: ClientOptionKind | undefined;
     let glued: string | null = null;
     let upload = false;
+    let resume = false;         // curl `-C -`: the `-` is the automatic resume offset, not stdin
     if (a.startsWith('--') && a.length > 2) {
       const eq = a.indexOf('=');
       const name = (eq < 0 ? a : a.slice(0, eq)).slice(2).toLowerCase();
       kind = clientLongOptionKind(family, name);
       if (eq >= 0) glued = a.slice(eq + 1);
       upload = /^upload-file$/.test(name);
+      resume = family === 'curl' && name === 'continue-at';
     } else if (a.startsWith('-') && a.length > 1) {
       kind = 'flag';
       for (let p = 1; p < a.length; p++) {
@@ -2012,13 +2040,14 @@ function clientArgvSendsCredential(client: string, words: readonly CredentialWor
         if (letterKind === 'flag') continue;
         kind = letterKind;
         upload = family === 'curl' && a[p] === 'T';
+        resume = family === 'curl' && a[p] === 'C';
         if (letterKind !== undefined && p < a.length - 1) glued = a.slice(p + 1);
         break;
       }
     } else {
       // An operand: the URL, or an HTTPie method or request item.
       if (family === 'httpie') {
-        if (sawUrl && HTTPIE_HEADER_ITEM.test(a)) continue;   // a header item (relief b)
+        if (sawUrl && HTTPIE_HEADER_ITEM.test(a)) { reliefSpans.push(w.span); continue; }   // a header item (relief b)
         if (!HTTP_METHOD_WORD.test(a)) sawUrl = true;
       }
       sent.push(w.exp);
@@ -2030,6 +2059,7 @@ function clientArgvSendsCredential(client: string, words: readonly CredentialWor
     // A value option: its value is the glued rest, or the NEXT word, whatever it looks like.
     let value: string;
     let valueExp: string;
+    let valueSpan = w.span;
     let valuePlain = true;
     if (glued !== null) {
       value = glued;
@@ -2039,19 +2069,21 @@ function clientArgvSendsCredential(client: string, words: readonly CredentialWor
       const v = words[++k];
       value = v.raw;
       valueExp = v.exp;
+      valueSpan = v.span;
       valuePlain = v.plain;
     }
     // A value word the shell may split or drop is still this option's value
     // (any extra words it splits into are counted as sent below), but the
     // walk after it is no longer proven.
     if (!valuePlain) proven = false;
-    const fromStdin = STDIN_VALUE.test(value) || (upload && value === '.');
+    const fromStdin = !resume && (STDIN_VALUE.test(value) || (upload && value === '.'));
     if (fromStdin && kind !== 'local') stdin = true;
     const relieved = kind === 'auth'
       || ((kind === 'local' || kind === 'config') && !LIVE_SUBSTITUTION.test(valueExp) && !(kind === 'config' && fromStdin));
     if (!relieved) sent.push(valueExp);
+    else reliefSpans.push(valueSpan);
   }
-  return { sends: expandsCredentialVariable(sent.join(' ')), stdin };
+  return { sends: expandsCredentialVariable(sent.join(' ')), stdin, relieved: reliefSpans };
 }
 
 /**
@@ -2093,27 +2125,71 @@ function envCredentialEgressInvoked(text: string, depth = 0): boolean {
       if (body && envCredentialEgressInvoked(body, depth + 1)) return true;
     }
   }
-  let anywhere: boolean | undefined;
-  const credentialAnywhere = () => (anywhere ??= credentialExpansionAnywhere(text));
-  for (const st of credentialStatements(text)) {
+  const statements = credentialStatements(text);
+  // Single quotes are read only when every quote closes and no heredoc body
+  // (whose lines are not shell words) is in the text.
+  const quotesRead = !HEREDOC_OPERATOR.test(text) && statements.every(st => !st.unbalanced);
+  let offsets: number[] | undefined;
+  // A credential-named expansion anywhere in the text, outside the spans
+  // proven inert: an auth or local value the client walk relieved, a literal
+  // span of the client's own statement or of a `printf`/`echo` stage piped
+  // straight into it. Never a literal span of any other command: it may
+  // evaluate its argument (`bash -c '…$TOKEN' | curl -d @- …`).
+  const credentialAnywhere = (inert: readonly SourceSpan[] = []): boolean => {
+    offsets ??= credentialExpansionOffsets(text).sort((a, b) => a - b);
+    const spans = [...inert].sort((x, y) => x[0] - y[0]);
+    let k = 0;
+    for (const o of offsets) {
+      while (k < spans.length && spans[k][1] <= o) k++;   // ends before this offset, and every later one
+      if (k >= spans.length || o < spans[k][0]) return true;
+    }
+    return false;
+  };
+  for (let s = 0; s < statements.length; s++) {
+    const st = statements[s];
     if (!NETWORK_CLIENT_WORD.test(st.text)) continue;
     if (st.ansiC && CREDENTIAL_NAME_SUBSTRING.test(st.text)) return true;
     if (st.unbalanced && credentialAnywhere()) return true;
     const tokens = st.words.map(w => w.raw);
     const pos = commandPositions(tokens);
     let viaXargs = false;
+    let wrapped = false;        // a word other than a keyword or assignment came before
     for (let i = 0; i < tokens.length && pos[i]; i++) {
       if (/^\w+=/.test(tokens[i])) continue;              // `VAR=…` is an assignment, never the client
       let base = commandBaseName(tokens[i]);
+      // `command -v curl` looks the name up; it does not run it. Only when
+      // `command` is the statement's first word: after a wrapper it may be
+      // an option's value (`env -u command -v curl …` runs curl).
+      if (base === 'command' && !wrapped && /^-[pvV]*[vV][pvV]*$/.test(tokens[i + 1] ?? '')) break;
+      if (!CMD_PREFIX_KEYWORD.test(base)) wrapped = true;
+      if (base === 'busybox' && i + 1 < tokens.length) {
+        // The applet runs, and the wrapper walk also goes on from it
+        // (`busybox env wget …`). Added to the walk, never replacing it: the
+        // word may be an option's value (`env -u busybox … curl`).
+        while (i + 2 < tokens.length && commandBaseName(tokens[i + 1]) === 'busybox') i++;
+        commandPositions(tokens, ++i, pos);
+        base = commandBaseName(tokens[i]);
+      }
       if (base === 'xargs') viaXargs = true;
-      // `command -v curl` looks the name up; it does not run it.
-      if (base === 'command' && /^-[pvV]*[vV][pvV]*$/.test(tokens[i + 1] ?? '')) break;
-      if (base === 'busybox' && i + 1 < tokens.length) base = commandBaseName(tokens[++i]);   // the applet runs
+      // `env -S STRING` runs STRING as a command line, split and `${NAME}`-expanded
+      // by env itself: unread, so it keeps the card on any credential expansion.
+      if (base === 'env' && envSplitStringGiven(tokens, i + 1)) {
+        if (credentialAnywhere()) return true;
+        break;
+      }
       if (NETWORK_CLIENT.test(base)) {
-        const { sends, stdin } = clientArgvSendsCredential(base, st.words.slice(i + 1));
+        const { sends, stdin, relieved } = clientArgvSendsCredential(base, st.words.slice(i + 1));
         if (sends) return true;
         const readsStdin = stdin || viaXargs || st.stdinRedirect || (HTTPIE_CLIENT.test(base) && st.piped);
-        if (readsStdin && credentialAnywhere()) return true;
+        if (readsStdin) {
+          const inert = [...relieved];
+          if (quotesRead) {
+            inert.push(...st.literal);
+            const prev = statements[s - 1];
+            if (st.piped && prev && /^(?:printf|echo)$/.test(prev.words[0].raw)) inert.push(...prev.literal);
+          }
+          if (credentialAnywhere(inert)) return true;
+        }
         break;
       }
       if (depth >= MAX_INLINE_RECURSION) continue;
@@ -2134,6 +2210,21 @@ function envCredentialEgressInvoked(text: string, depth = 0): boolean {
         break;
       }
     }
+  }
+  return false;
+}
+
+/**
+ * Does the `env` whose options start at `from` take `-S`/`--split-string`
+ * (glued, clustered `-iS`, or abbreviated `--sp`)? Steps over the values of
+ * `-u`/`-C`; stops at the first operand.
+ */
+function envSplitStringGiven(tokens: readonly string[], from: number): boolean {
+  for (let j = from; j < tokens.length; j++) {
+    const t = tokens[j];
+    if (t === '--' || !/^-./.test(t)) return false;
+    if (/^-[^-]*S|^--s/.test(t)) return true;
+    if (/^-[^-]*[uC]$|^--(?:u|ch)[\w-]*$/.test(t)) j++;   // its value is the next word
   }
   return false;
 }
