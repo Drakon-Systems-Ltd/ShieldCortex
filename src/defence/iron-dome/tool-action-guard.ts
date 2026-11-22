@@ -2216,15 +2216,30 @@ function envCredentialEgressInvoked(text: string, depth = 0): boolean {
 
 /**
  * Does the `env` whose options start at `from` take `-S`/`--split-string`
- * (glued, clustered `-iS`, or abbreviated `--sp`)? Steps over the values of
- * `-u`/`-C`; stops at the first operand.
+ * (glued, clustered `-iS`, or abbreviated `--sp`)? Walks each short cluster
+ * letter by letter: a value-taking letter (`-u`, `-C`, `-a`, and BSD `-P`,
+ * `-L`, `-U`) owns the rest of its word (`-uCC`, `-C./SDK`) or, if nothing is
+ * glued, the next word. So an `S` inside a value (`-uHTTPS_PROXY`) is not
+ * `-S`. Long options use any unique prefix (`--c` is `--chdir`). Stops at the
+ * first operand.
  */
 function envSplitStringGiven(tokens: readonly string[], from: number): boolean {
   for (let j = from; j < tokens.length; j++) {
     const t = tokens[j];
     if (t === '--' || !/^-./.test(t)) return false;
-    if (/^-[^-]*S|^--s/.test(t)) return true;
-    if (/^-[^-]*[uC]$|^--(?:u|ch)[\w-]*$/.test(t)) j++;   // its value is the next word
+    if (t.startsWith('--')) {
+      if (/^--s/.test(t)) return true;
+      if (/^--(?:u|c|a)[\w-]*$/.test(t)) j++;   // `--unset`/`--chdir`/`--argv0` without `=`: the next word
+      continue;
+    }
+    for (let k = 1; k < t.length; k++) {
+      const letter = t[k];
+      if (letter === 'S') return true;
+      if ('uCaPLU'.includes(letter)) {
+        if (k === t.length - 1) j++;            // nothing glued: the value is the next word
+        break;                                   // glued: the rest of the word is the value
+      }
+    }
   }
   return false;
 }
