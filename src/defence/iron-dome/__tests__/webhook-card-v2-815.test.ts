@@ -1,26 +1,14 @@
 /**
  * #815 S2a — the version 2 (one-tap) card type and its builder, inert.
  * Nothing calls the builder yet, so the webhook still sends version 1.
- *
- * Pinned here: nonce on Approve only, digest and expiry on the card; the
- * nonce in no line a person reads and no command; no card at all (never a
- * partial one) when the denial is not retryable or a tap value is missing or
- * malformed; the builder is pure; the version 1 card is unchanged.
+ * Pinned: nonce on Approve only, digest and expiry on the card; the nonce in
+ * no line a person reads and no command; no card (never a partial one) when
+ * the denial is not retryable or a tap value is missing or malformed; each
+ * notification field read once; pure builder; version 1 card unchanged.
  */
 import { describe, it, expect, jest } from '@jest/globals';
-import {
-  WEBHOOK_CARD_VERSION,
-  WEBHOOK_CARD_VERSION_2,
-  buildDenialCardBlockV2,
-  createWebhookNotifyChannel,
-  type WebhookCardTap,
-  type WebhookCardV2,
-} from '../webhook-notify-channel.js';
-import {
-  buildActionGuardOutcomeNotification,
-  type ActionGuardOutcomeInput,
-  type ActionGuardOutcomeNotification,
-} from '../operator-notify.js';
+import { WEBHOOK_CARD_VERSION, WEBHOOK_CARD_VERSION_2, buildDenialCardBlockV2, createWebhookNotifyChannel, type WebhookCardTap, type WebhookCardV2 } from '../webhook-notify-channel.js';
+import { buildActionGuardOutcomeNotification, type ActionGuardOutcomeInput, type ActionGuardOutcomeNotification } from '../operator-notify.js';
 import type { ApprovalCardSummary } from '../approval-card.js';
 import type { TapMacFields } from '../approve-tap.js';
 
@@ -159,9 +147,22 @@ describe('#815 S2a — version 2 denial card (inert builder)', () => {
   });
 
   it('never shows the nonce in a line a person reads, even when a line handed in contains it', () => {
-    const card = build(note(), { ...CARD, who: `Claude Code on ${NONCE}` });
-    expect(`${card?.who}\n${card?.text}`).not.toContain(NONCE);
-    expect(JSON.stringify(card ?? { nonce: NONCE }).split(NONCE)).toHaveLength(2);
+    const card = build(note(), { ...CARD, who: `Claude Code on ${NONCE}` })!; // a card IS built: the line is withheld
+    expect(`${card.who}\n${card.text}`).not.toContain(NONCE);
+    expect(JSON.stringify(card).split(NONCE)).toHaveLength(2);
+  });
+
+  it('reads each notification field once, so a getter cannot have one action id checked and another returned', () => {
+    const reads = { event: 0, outcome: 0, actionId: 0 };
+    const n = Object.defineProperties({ ...note() }, {
+      event: { enumerable: true, get: () => (reads.event++, 'action_guard_denial') },
+      outcome: { enumerable: true, get: () => (reads.outcome++, 'denied_no_prompt_surface') },
+      actionId: { enumerable: true, get: () => (reads.actionId++ < 2 ? ACTION_ID : '') }, // well-formed for two checks, then empty
+    }) as ActionGuardOutcomeNotification;
+    expect([build(n), reads]).toEqual([build(), { event: 1, outcome: 1, actionId: 1 }]);
+    let late = 0; // an id that turns well-formed only after the first read is refused on that read
+    const flip = Object.defineProperty({ ...note() }, 'actionId', { enumerable: true, get: () => (late++ ? ACTION_ID : '') });
+    expect([build(flip), late]).toEqual([undefined, 1]);
   });
 
   it('is pure: no clock, no network, inputs untouched, same answer twice', () => {
