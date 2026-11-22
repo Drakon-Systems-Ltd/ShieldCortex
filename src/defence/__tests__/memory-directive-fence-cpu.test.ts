@@ -102,15 +102,6 @@ function budget(len: number): number {
   return len <= 16_500 ? 600 : 1_500;
 }
 
-/**
- * Firewall verdict per family where it is not ALLOW. The machinery family
- * carries an older-detector instruction phrase, so it was QUARANTINE (by L1's
- * instruction detector, not by S) on 5.21.0 too.
- */
-const EXPECTED_RESULT: Record<string, string> = {
-  fencedBlankLinesMachinery: 'QUARANTINE',
-};
-
 const CASES: Array<[family: string, sizes: number[]]> = [
   // The review's exact families (fenced near miss by N, then by length).
   ['fencedNearMiss', [100, 200, 400, 800, 2000]],
