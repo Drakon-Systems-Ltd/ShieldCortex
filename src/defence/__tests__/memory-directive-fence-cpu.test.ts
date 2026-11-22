@@ -43,6 +43,11 @@ const fencedNearMiss = (N) => {
   return F + 'json\n' + line + '\n' + 'x\n'.repeat(K) + F;
 };
 const fencedNearMissBytes = (n) => fencedNearMiss(Math.max(1, Math.floor((n - 30) / 18.8)));
+// A tool-call near miss after an opening quote: directed, but no addressee and
+// no self-reference, so every match asks for the runtime self-reference of its
+// sentence. '.x' ends a sentence on the right but not on the left, so every
+// match shares one sentence start with a later end (the overlapping scopes).
+const QUOTED_UNIT = String.fromCharCode(34) + 'call a_b' + String.fromCharCode(34) + '.x';
 const FAMILIES = {
   fencedNearMiss,
   repeatedEmptyFence: (n) => (F + '\n' + F + '\n').repeat(Math.ceil(n / 8)).slice(0, n),
@@ -57,12 +62,17 @@ const FAMILIES = {
   fenced: fencedNearMissBytes,
   encoded: (n) => Buffer.from(fencedNearMissBytes(Math.ceil((n * 3) / 4))).toString('base64'),
   raw: (n) => ('for example x' + ' list credentials,'.repeat(Math.ceil(n / 18))).slice(0, n),
+  quotedPunctuationScopes: (n) => QUOTED_UNIT.repeat(Math.max(1, Math.floor(n / QUOTED_UNIT.length))),
+  fencedQuotedScopes: (n) => {
+    const units = Math.max(1, Math.floor((n - 12) / (QUOTED_UNIT.length + 2)));
+    return F + 'json\n' + QUOTED_UNIT.repeat(units) + '\n' + 'x\n'.repeat(units) + F;
+  },
 };
 `;
 
 const CHILD = `
 ${FIXTURES}
-const [dist, family, sizeRaw] = process.argv.slice(1);
+const [dist, family, sizeRaw, sourceType] = process.argv.slice(1);
 const text = FAMILIES[family](Number(sizeRaw));
 const { detectMemoryDirective } = await import(dist + '/firewall/memory-directive-policy.js');
 const fw = await import(dist + '/firewall/index.js');
@@ -71,11 +81,14 @@ let t0 = performance.now();
 const leaf = detectMemoryDirective(text);
 const leafMs = performance.now() - t0;
 t0 = performance.now();
-const r = fw.analyzeFirewall(text, 'note', { type: 'cli', identifier: 'probe' }, 0.9,
+const r = fw.analyzeFirewall(text, 'note', { type: sourceType, identifier: 'probe' }, 0.9,
   { ...DEFAULT_DEFENCE_CONFIG, mode: 'balanced' }, undefined, { memoryAdmission: 'agent' });
 const fwMs = performance.now() - t0;
 process.stdout.write(JSON.stringify({ len: text.length, leaf, leafMs, result: r.result, fwMs }));
 `;
+
+/** The firewall call's source type: L2's agent-addressed checks run on untrusted sources such as `web`. */
+type Source = 'cli' | 'web';
 
 type ChildOut = {
   len: number;
@@ -85,8 +98,8 @@ type ChildOut = {
   fwMs: number;
 };
 
-function run(family: string, size: number): ChildOut {
-  const child = spawnSync(process.execPath, ['--input-type=module', '-e', CHILD, DIST, family, String(size)], {
+function run(family: string, size: number, source: Source = 'cli'): ChildOut {
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', CHILD, DIST, family, String(size), source], {
     timeout: DEADLINE_MS,
     encoding: 'utf-8',
     maxBuffer: 1024 * 1024,
@@ -102,7 +115,7 @@ function budget(len: number): number {
   return len <= 16_500 ? 600 : 1_500;
 }
 
-const CASES: Array<[family: string, sizes: number[]]> = [
+const CASES: Array<[family: string, sizes: number[], source?: Source]> = [
   // The review's exact families (fenced near miss by N, then by length).
   ['fencedNearMiss', [100, 200, 400, 800, 2000]],
   ['repeatedEmptyFence', [12_500, 25_000, 50_000]],
@@ -119,6 +132,12 @@ const CASES: Array<[family: string, sizes: number[]]> = [
   ['fenced', [7_680, 15_360, 51_200]],
   ['encoded', [7_680, 15_360, 51_200]],
   ['raw', [7_680, 15_360, 51_200]],
+  // Overlapping sentence scopes (review of #1136): fenced, the body decides
+  // S's mask; unfenced, L2 reads the prose. Web source, so L2's
+  // agent-addressed checks run. The fenced 50 KB size keeps the fence closed
+  // inside one scan window.
+  ['quotedPunctuationScopes', [7_680, 15_360, 51_200], 'web'],
+  ['fencedQuotedScopes', [7_680, 15_360, 49_900], 'web'],
 ];
 
 /** Firewall verdicts on 5.21.0 that are not ALLOW (measured on the 5.21.0 build). */
@@ -130,10 +149,10 @@ describe('memory-directive screen — fence/wrapper helper CPU budget (#1111 pos
     expect(fs.existsSync(path.join(DIST, 'firewall', 'index.js'))).toBe(true);
   });
 
-  for (const [family, sizes] of CASES) {
+  for (const [family, sizes, source = 'cli'] of CASES) {
     for (const size of sizes) {
-      it(`${family} (${size}): leaf and memory-admission firewall finish inside the budget, verdict unchanged`, () => {
-        const out = run(family, size);
+      it(`${family} (${size}, ${source}): leaf and memory-admission firewall finish inside the budget, verdict unchanged`, () => {
+        const out = run(family, size, source);
         // Near misses: no S hit, and the firewall verdict 5.21.0 gave (an L2
         // shape outside any code-like mask still quarantines, as before).
         expect(out.leaf).toEqual({ detected: false, patterns: [] });
