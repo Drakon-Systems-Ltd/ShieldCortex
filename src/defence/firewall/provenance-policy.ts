@@ -938,9 +938,17 @@ const INVOKE_ON_TARGET = /\binvoke\s+\S+\s+on\s+\S/i;
  * This is the narrowest honest reading of "directed at the reading agent" that
  * covers a bare identifier, and it is deliberately not a synonym for second
  * person: the sentence has to point at itself.
+ *
+ * Every alternative starts and ends with a word character, and every one
+ * used to carry its own leading and trailing `\b`; the phrase below is the
+ * same alternation with those boundaries factored out, so the index can find
+ * the phrases first and apply each slice's own boundaries afterwards
+ * (`ProvenanceWindowIndex.runtimeSelfReferenceIn`). No word of the phrase is
+ * a prefix of another word that can stand in the same place, so a phrase
+ * matched at a given start has exactly one end; the index relies on that.
  */
-const RUNTIME_SELF_REFERENCE =
-  /\b(?:this|the\s+(?:preceding|foregoing|attached|following|next|last))\s+(?:table|section|record|document|page|column|paragraph|appendix|message|list|row|block|snippet|report|field|form|thread)\b|\b(?:below|above)\b|\bwith\s+the\s+(?:current|following|preceding|foregoing|attached|above|below)\b|\bwith\s+the\s+contents\s+of\b|\bin\s+the\s+appendix\b/i;
+const RUNTIME_SELF_REFERENCE_PHRASE = String.raw`(?:this|the\s+(?:preceding|foregoing|attached|following|next|last))\s+(?:table|section|record|document|page|column|paragraph|appendix|message|list|row|block|snippet|report|field|form|thread)|below|above|with\s+the\s+(?:current|following|preceding|foregoing|attached|above|below)|with\s+the\s+contents\s+of|in\s+the\s+appendix`;
+const RUNTIME_SELF_REFERENCE = new RegExp(String.raw`\b(?:${RUNTIME_SELF_REFERENCE_PHRASE})\b`, 'i');
 
 /**
  * A machine-readable function-call envelope in the text just before the match.
@@ -1474,8 +1482,18 @@ export class ProvenanceWindowIndex {
    * inside [start, to) (-1 while none is known).
    */
   private readonly addresseeByEnd = new Map<number, { cut: string; low: number; found: number }>();
-  /** Per sentence (from, to): RUNTIME_SELF_REFERENCE on it. */
-  private readonly selfReferenceBySentence = new Map<number, boolean>();
+  /**
+   * RUNTIME_SELF_REFERENCE_PHRASE over the whole window, built on first use
+   * (see `runtimeSelfReferenceIn`): phraseEnd[s] is the end of the phrase
+   * starting at s, else -1; boundedEndFrom[k] is the least end of a phrase
+   * starting at or after k with a non-word character (or the window edge) on
+   * both sides, else a value past the window; boundedStartByEnd[e] is the
+   * greatest start of a phrase ending at e with a non-word character (or the
+   * window edge) before it, else -1.
+   */
+  private phraseEnd: Int32Array | null = null;
+  private boundedEndFrom: Int32Array | null = null;
+  private boundedStartByEnd: Int32Array | null = null;
 
   constructor(window: string, spans: readonly WrapperSpan[]) {
     this.window = window;
@@ -1594,13 +1612,58 @@ export class ProvenanceWindowIndex {
   /** Same result as RUNTIME_SELF_REFERENCE on the sentence `sentenceBounds(window, start, end)`. */
   runtimeSelfReference(start: number, end: number): boolean {
     const [from, to] = this.sentenceBounds(start, end);
-    const key = from * (this.window.length + 1) + to;
-    let verdict = this.selfReferenceBySentence.get(key);
-    if (verdict === undefined) {
-      verdict = RUNTIME_SELF_REFERENCE.test(this.window.slice(from, to));
-      this.selfReferenceBySentence.set(key, verdict);
+    return this.runtimeSelfReferenceIn(from, to);
+  }
+
+  /**
+   * Same result as `RUNTIME_SELF_REFERENCE.test(window.slice(from, to))`, for
+   * any 0 <= from <= to <= length, without reading the slice.
+   *
+   * On the slice, a phrase [s, e) inside [from, to) matches when its leading
+   * `\b` holds (s is the slice start, or a non-word character precedes s) and
+   * its trailing `\b` holds (e is the slice end, or a non-word character
+   * follows e). The slice edges are boundaries the window may not have, so
+   * the answer is one of three cases: a phrase bounded on both sides in the
+   * window itself, a phrase starting exactly at `from`, or a phrase ending
+   * exactly at `to` that is bounded on its left in the window.
+   */
+  runtimeSelfReferenceIn(from: number, to: number): boolean {
+    if (!this.phraseEnd) this.buildPhrases();
+    if (this.boundedEndFrom![from]! <= to) return true;
+    const atFrom = this.phraseEnd![from]!;
+    if (atFrom !== -1 && (atFrom === to || (atFrom < to && !isWordCode(this.window.charCodeAt(atFrom))))) return true;
+    return this.boundedStartByEnd![to]! >= from;
+  }
+
+  private buildPhrases(): void {
+    const w = this.window;
+    const n = w.length;
+    const phraseEnd = new Int32Array(n + 1).fill(-1);
+    const boundedStartByEnd = new Int32Array(n + 1).fill(-1);
+    const boundedEndAt = new Int32Array(n + 1).fill(n + 1);
+    // Every start with a phrase, overlapping ones included: resume one past
+    // each match's start rather than at its end.
+    const re = new RegExp(RUNTIME_SELF_REFERENCE_PHRASE, 'gi');
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(w)) !== null) {
+      const s = m.index;
+      const e = s + m[0].length;
+      phraseEnd[s] = e;
+      if (s === 0 || !isWordCode(w.charCodeAt(s - 1))) {
+        boundedStartByEnd[e] = s;
+        if (e === n || !isWordCode(w.charCodeAt(e))) boundedEndAt[s] = e;
+      }
+      re.lastIndex = s + 1;
     }
-    return verdict;
+    const boundedEndFrom = new Int32Array(n + 1);
+    let least = n + 1;
+    for (let k = n; k >= 0; k--) {
+      if (boundedEndAt[k]! < least) least = boundedEndAt[k]!;
+      boundedEndFrom[k] = least;
+    }
+    this.phraseEnd = phraseEnd;
+    this.boundedEndFrom = boundedEndFrom;
+    this.boundedStartByEnd = boundedStartByEnd;
   }
 
   /** Was this index built for exactly this window and span list? */
@@ -1936,6 +1999,19 @@ export function __agentAddressedPartsForTest(
     addressed: AGENT_ADDRESSEE.test(addresseeScope(window, start, end)),
     selfReference: RUNTIME_SELF_REFERENCE.test(window.slice(from, to)),
   };
+}
+
+/**
+ * Test seam: RUNTIME_SELF_REFERENCE on `window.slice(from, to)` for any
+ * bounds, from the slice (`index` omitted) or from the index's phrase table.
+ */
+export function __runtimeSelfReferenceInForTest(
+  window: string,
+  from: number,
+  to: number,
+  index?: ProvenanceWindowIndex,
+): boolean {
+  return index ? index.runtimeSelfReferenceIn(from, to) : RUNTIME_SELF_REFERENCE.test(window.slice(from, to));
 }
 
 /**
