@@ -77,10 +77,9 @@ describe('#650 doctor STM row clears after its own suggested command', () => {
   function writeFixtureConfig(obj: unknown): void {
     const key = 'a'.repeat(64);
     fs.writeFileSync(path.join(scDir, '.integrity-key'), key, { mode: 0o600 });
-    const body = JSON.stringify(obj, null, 2) + '\n';
-    fs.writeFileSync(path.join(scDir, 'config.json'), body);
+    const body = JSON.stringify(obj, null, 2);
     const sig = createHmac('sha256', key).update(body, 'utf-8').digest('hex');
-    fs.writeFileSync(path.join(scDir, '.config-sig'), sig, { mode: 0o600 });
+    fs.writeFileSync(path.join(scDir, 'config.json'), JSON.stringify({ ...(obj as object), _sig: sig }, null, 2) + '\n');
   }
 
   afterEach(() => {

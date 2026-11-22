@@ -138,8 +138,9 @@ import {
   readRawConfig,
   migrateInterceptorActionGuardAlias,
 } from '../cloud/config.js';
-import { resolveMemoryConfig } from '../memory/config.js';
+import { resolveMemoryConfigWithIntegrity } from '../memory/config.js';
 import type { MemoryConfig } from '../memory/types.js';
+import { DEFAULT_CONFIG as DEFAULT_MEMORY_CAPS } from '../memory/types.js';
 import { validateOpenClawConfig } from '../integrations/openclaw-config-validate.js';
 import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
@@ -1837,8 +1838,10 @@ async function checkSchema(): Promise<CheckResult> {
  */
 export function runMemoryStatsCheck(
   dbPath: string,
-  config: Pick<MemoryConfig, 'maxShortTermMemories' | 'maxLongTermMemories'> = resolveMemoryConfig(undefined, { readOnly: true }),
+  config?: Pick<MemoryConfig, 'maxShortTermMemories' | 'maxLongTermMemories'>,
 ): CheckResult {
+  const capResolution = config ? null : resolveMemoryConfigWithIntegrity();
+  config ??= capResolution!.config;
   const prerequisite = databasePrerequisite('Memories', dbPath);
   if (prerequisite) return prerequisite;
 
@@ -1856,6 +1859,25 @@ export function runMemoryStatsCheck(
       let status: CheckStatus = 'pass';
       const warnings: string[] = [];
       const fixes: string[] = [];
+
+      if (capResolution?.ignoredCapReason) {
+        status = 'warn';
+        // #1132: unverified caps are clamped, not dropped — below the default
+        // they are ignored, above it they apply up to the setter maximum. The
+        // count rows below use that effective cap.
+        const why = capResolution.ignoredCapReason === 'unsigned'
+          ? 'config lacks a verifying embedded signature'
+          : capResolution.ignoredCapReason === 'unverified'
+            ? 'config is unsigned and unverified'
+            : 'config signature does not verify';
+        warnings.push(
+          `stored caps not verified because ${why}; caps below the default `
+          + `(LTM ${DEFAULT_MEMORY_CAPS.maxLongTermMemories}, STM ${DEFAULT_MEMORY_CAPS.maxShortTermMemories}) are ignored`,
+        );
+        fixes.push(capResolution.ignoredCapReason === 'invalid-signature'
+          ? 'Review config.json; if the memory caps are yours, run `shieldcortex config --resign` to sign them.'
+          : 'Review config.json; if the memory caps are yours, set them with `shieldcortex config --memory-cap ltm=N,stm=M` to sign them.');
+      }
 
       if (stm > STM_LIMIT) {
         status = 'warn';

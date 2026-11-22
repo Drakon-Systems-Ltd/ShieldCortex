@@ -964,7 +964,7 @@ export function describeAdoptionBlock(block: UnsignedAdoptionBlock): string {
   }
 }
 
-interface ConfigBytes {
+export interface ConfigBytes {
   path: string;
   verdict: ConfigIntegrity | 'unsigned';
   adoption?: UnsignedAdoptionBlock;
@@ -973,7 +973,7 @@ interface ConfigBytes {
   data: Record<string, unknown> | null;
 }
 
-function readConfigBytesNoSideEffects(): ConfigBytes {
+export function readConfigBytesNoSideEffects(): ConfigBytes {
   const path = getConfigFile();
   // lstat, as the readers do (#878): a dangling symlink is not an absent file.
   let linked: boolean;
