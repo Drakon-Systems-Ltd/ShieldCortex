@@ -252,7 +252,8 @@ function buildDenialCardBlock(n: ActionGuardOutcomeNotification, card: ApprovalC
 // ── #815 S2a: the version 2 (one-tap) card. Inert: nothing calls it yet ────
 
 /** Version of the one-tap card block. `WEBHOOK_CARD_VERSION` stays 1, and
- *  every card this channel sends is still version 1. */
+ *  every card this channel sends is still version 1. The note there reserves
+ *  version 2 as a nonce on each action; as built, only Approve carries one. */
 export const WEBHOOK_CARD_VERSION_2 = 2 as const;
 
 /** The mint values a version 2 card carries, named as approve-tap.ts names
@@ -302,16 +303,20 @@ export function buildDenialCardBlockV2(
   card: ApprovalCardSummary,
   tap: WebhookCardTap,
 ): WebhookCardV2 | undefined {
-  if (!n || typeof n !== 'object' || n.event !== 'action_guard_denial') return undefined;
+  if (!n || typeof n !== 'object') return undefined;
   if (!card || typeof card !== 'object' || !tap || typeof tap !== 'object') return undefined;
+  // Read each notification field once and build from the copy, so a
+  // getter-backed input cannot have one value checked and another returned.
+  const { event, outcome, actionId } = n;
+  if (event !== 'action_guard_denial' || outcome !== 'denied_no_prompt_surface') return undefined;
+  if (typeof actionId !== 'string' || !ACTION_ID_SHAPE.test(actionId)) return undefined;
   const { nonce, argsHash, exp } = tap;
   if (typeof nonce !== 'string' || !TAP_NONCE_SHAPE.test(nonce)) return undefined;
   if (typeof argsHash !== 'string' || !TAP_DIGEST_SHAPE.test(argsHash)) return undefined;
   if (!Number.isSafeInteger(exp) || exp <= 0) return undefined;
-  const v1 = buildDenialCardBlock(n, card);
-  // Version 1 offers a command and choices only for a retryable denial.
-  const actionId = v1.actions?.[0]?.actionId;
-  if (v1.approveCommand === undefined || actionId === undefined) return undefined;
+  const v1 = buildDenialCardBlock({ event, outcome, actionId } as ActionGuardOutcomeNotification, card);
+  // Version 1 offers a command and choices only for a retryable denial, and for the id checked above.
+  if (v1.approveCommand === undefined || v1.actions?.[0]?.actionId !== actionId) return undefined;
   // `text` holds the headline, the three lines and the command.
   if (v1.text.includes(nonce)) return undefined;
   return {
