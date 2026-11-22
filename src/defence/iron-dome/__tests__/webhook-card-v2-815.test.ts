@@ -146,6 +146,21 @@ describe('#815 S2a — version 2 denial card (inert builder)', () => {
     expect(buildDenialCardBlockV2(note(), CARD, tap as WebhookCardTap)).toBeUndefined();
   });
 
+  it.each<[string, string]>([
+    ['at the start', NONCE + 'ab'.repeat(16)],
+    ['in the middle', 'ab'.repeat(8) + NONCE + 'ab'.repeat(8)],
+    ['at the end', 'ab'.repeat(16) + NONCE],
+  ])('gives no card when a well-formed digest holds the whole nonce %s', (_name, argsHash) => {
+    expect(argsHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(build(note(), CARD, { ...TAP, argsHash })).toBeUndefined();
+  });
+
+  it('still builds for a well-formed digest that does not hold the nonce, with the nonce once on the card', () => {
+    const card = build(note(), CARD, { ...TAP, argsHash: 'cd'.repeat(32) })!;
+    expect(card.argsHash).toBe('cd'.repeat(32));
+    expect(JSON.stringify(card).split(NONCE)).toHaveLength(2);
+  });
+
   it('never shows the nonce in a line a person reads, even when a line handed in contains it', () => {
     const card = build(note(), { ...CARD, who: `Claude Code on ${NONCE}` })!; // a card IS built: the line is withheld
     expect(`${card.who}\n${card.text}`).not.toContain(NONCE);
