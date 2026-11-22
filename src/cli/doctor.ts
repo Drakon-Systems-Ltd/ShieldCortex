@@ -152,6 +152,7 @@ import {
   formatDoctorReport,
   nextCommandForFailures,
   sanitiseDoctorRowsForDisplay,
+  type DoctorPostureRowMeta,
   shouldColorDoctor,
   type DoctorReportStyle,
 } from './doctor-report.js';
@@ -182,6 +183,7 @@ import {
   postureLevel,
   renderPostureLine,
   runtimeLabel,
+  staleReasonText,
   summarisePosture,
 } from '../posture/posture-record.js';
 import {
@@ -233,6 +235,8 @@ export interface CheckResult {
   verboseNote?: string;
   /** See DoctorReportItem.postureUnknown (#878) — the report prints this row's own fix. */
   postureUnknown?: true;
+  /** See DoctorReportItem.posture (#970) — set on every per-record `Runtime posture` row. */
+  posture?: DoctorPostureRowMeta;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
@@ -4985,7 +4989,17 @@ export function readHostGatePlanesWithPosture(hostHome?: string): HostGatePlanes
  * `--strict` runs that passed before this check existed). The HOSTS table and
  * the host-contract `bound` evidence are untouched and stay display-only.
  *
- * Read-only: no config, consent or Guard state is changed by collecting.
+ * #970: the host summary never judges a stale record (its process is shown
+ * to have ended, it went unseen for the not-seen age, a newer current record
+ * superseded a silent per-call one, or its runtime is absent from the HOSTS
+ * table — see `StaleReason`). It is still a row here, marked `posture.stale`,
+ * always `info`. A present runtime whose reports are all stale keeps one
+ * non-green "present, no current report" row, so it is judged exactly as if
+ * it had never reported. The default report folds a runtime's stale rows
+ * into one line; `--verbose` and `--json` keep them.
+ *
+ * Read-only: no config, consent or Guard state is changed by collecting, and
+ * no self-report file is deleted.
  */
 export const RUNTIME_POSTURE_LABEL = 'Runtime posture';
 
@@ -5042,25 +5056,39 @@ export async function checkRuntimePosture(opts: CollectOptions = {}): Promise<Ch
     const level = postureLevel(r);
     const scope = [r.profile === 'default' ? null : r.profile, r.plane, r.key.instance].filter(Boolean).join(', ');
     const notes = r.notes.length > 0 ? ` (${r.notes.join('; ')})` : '';
+    // #970: a stale record is listed, never judged, and never a pass.
+    const stale = r.stale_reason ? ` — stale (${staleReasonText(r.stale_reason)}); not judged for the host posture` : '';
     return {
       label: `${RUNTIME_POSTURE_LABEL}: ${runtimeLabel(r.runtime)} (${scope})`,
-      status: level === 'loaded-enforce' ? 'pass' : 'info',
-      message: `${renderPostureLine(r)}${notes}`,
+      status: level === 'loaded-enforce' && !r.stale ? 'pass' : 'info',
+      message: `${renderPostureLine(r)}${notes}${stale}`,
+      posture: {
+        group: `${RUNTIME_POSTURE_LABEL}: ${runtimeLabel(r.runtime)}`,
+        stale: r.stale,
+        staleReason: r.stale_reason,
+        instance: r.key.instance !== null,
+        verified: r.membership === 'current',
+      },
     };
   });
   const boundary = codexToolBoundaryRow(records.map((r) => r.runtime));
   if (boundary) rows.push(boundary);
   const summary = summarisePosture(records);
   const weakest = records.find((r) => r.source === summary.weakest);
+  const found = `${records.length} found` + (summary.stale_count > 0 ? `, ${summary.stale_count} stale not judged` : '');
+  const caveat = ' — records found only, not a claim that no other runtime process exists;' +
+    ' self-reports are host-local evidence, not attestation — full records: `shieldcortex policy-evidence`';
   rows.push({
     label: `${RUNTIME_POSTURE_LABEL} (host)`,
     status: summary.green ? 'pass' : 'info',
     message: records.length === 0
       ? 'no runtime on this box shows a ShieldCortex gate or memory integration — posture unknown'
-      : `weakest of ${summary.rollup_count} record(s) judged (${records.length} found): ${summary.level}` +
-        (weakest ? ` (${runtimeLabel(weakest.runtime)}, ${weakest.plane})` : '') +
-        ' — records found only, not a claim that no other runtime process exists;' +
-        ' self-reports are host-local evidence, not attestation — full records: `shieldcortex policy-evidence`',
+      // #970: nothing live to judge is its own statement, not `unknown`.
+      : summary.rollup_count === 0
+        ? `no live instances reporting (${found})${caveat}`
+        : `weakest of ${summary.rollup_count} record(s) judged (${found}): ${summary.level}` +
+          (weakest ? ` (${runtimeLabel(weakest.runtime)}, ${weakest.plane})` : '') +
+          caveat,
   });
   return rows;
 }
@@ -10216,6 +10244,8 @@ export async function runDoctor(
       results: visible.map((r) => ({
         label: r.label, status: r.status, message: r.message, fix: r.fix,
         ...(r.verboseNote ? { verboseNote: r.verboseNote } : {}),
+        // #970: additive — every posture record row says whether it is stale.
+        ...(r.posture ? { stale: r.posture.stale, staleReason: r.posture.staleReason } : {}),
       })),
     }, 2));
     const jsonExit = doctorExitCode(visible, { strict: args.includes('--strict') });
