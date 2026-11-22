@@ -140,6 +140,7 @@ import {
 } from '../cloud/config.js';
 import { resolveMemoryConfigWithIntegrity } from '../memory/config.js';
 import type { MemoryConfig } from '../memory/types.js';
+import { DEFAULT_CONFIG as DEFAULT_MEMORY_CAPS } from '../memory/types.js';
 import { validateOpenClawConfig } from '../integrations/openclaw-config-validate.js';
 import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
@@ -1861,11 +1862,21 @@ export function runMemoryStatsCheck(
 
       if (capResolution?.ignoredCapReason) {
         status = 'warn';
-        warnings.push(capResolution.ignoredCapReason === 'unsigned'
-          ? 'stored caps ignored because config lacks a verifying embedded signature'
+        // #1132: unverified caps are clamped, not dropped — below the default
+        // they are ignored, above it they apply up to the setter maximum. The
+        // count rows below use that effective cap.
+        const why = capResolution.ignoredCapReason === 'unsigned'
+          ? 'config lacks a verifying embedded signature'
           : capResolution.ignoredCapReason === 'unverified'
-            ? 'stored caps ignored because config is unsigned and unverified'
-            : 'stored caps ignored because config signature does not verify');
+            ? 'config is unsigned and unverified'
+            : 'config signature does not verify';
+        warnings.push(
+          `stored caps not verified because ${why}; caps below the default `
+          + `(LTM ${DEFAULT_MEMORY_CAPS.maxLongTermMemories}, STM ${DEFAULT_MEMORY_CAPS.maxShortTermMemories}) are ignored`,
+        );
+        fixes.push(capResolution.ignoredCapReason === 'invalid-signature'
+          ? 'Review config.json; if the memory caps are yours, run `shieldcortex config --resign` to sign them.'
+          : 'Review config.json; if the memory caps are yours, set them with `shieldcortex config --memory-cap ltm=N,stm=M` to sign them.');
       }
 
       if (stm > STM_LIMIT) {

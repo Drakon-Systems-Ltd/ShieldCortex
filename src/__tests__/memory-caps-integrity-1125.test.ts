@@ -73,7 +73,7 @@ describe('#1125 signed memory caps', () => {
     expect(resolveMemoryConfig().maxLongTermMemories).toBe(DEFAULT_CONFIG.maxLongTermMemories);
     expect(resolveMemoryConfig().maxLongTermMemories).toBe(DEFAULT_CONFIG.maxLongTermMemories);
     const row = runMemoryStatsCheck(dbPath);
-    expect(row.message).toContain('stored caps ignored because config signature does not verify');
+    expect(row.message).toContain('stored caps not verified because config signature does not verify');
     expect(row.status).toBe('warn');
     expect(console.warn).toHaveBeenCalledTimes(1);
     expect(snapshot()).toEqual(before);
@@ -86,7 +86,7 @@ describe('#1125 signed memory caps', () => {
     expect([caps.maxShortTermMemories, caps.maxLongTermMemories]).toEqual([
       DEFAULT_CONFIG.maxShortTermMemories, DEFAULT_CONFIG.maxLongTermMemories,
     ]);
-    expect(runMemoryStatsCheck(dbPath).message).toContain('stored caps ignored because config lacks a verifying embedded signature');
+    expect(runMemoryStatsCheck(dbPath).message).toContain('stored caps not verified because config lacks a verifying embedded signature');
     expect(snapshot()).toEqual(before);
   });
 
@@ -97,7 +97,7 @@ describe('#1125 signed memory caps', () => {
     const before = snapshot();
     expect(resolveMemoryConfig().maxLongTermMemories).toBe(DEFAULT_CONFIG.maxLongTermMemories);
     const row = runMemoryStatsCheck(dbPath);
-    expect(row.message).toContain('stored caps ignored because config is unsigned and unverified');
+    expect(row.message).toContain('stored caps not verified because config is unsigned and unverified');
     expect(row.message).not.toContain('signature does not verify');
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('config.json is unsigned and unverified'));
     expect(snapshot()).toEqual(before);
@@ -114,7 +114,7 @@ describe('#1125 signed memory caps', () => {
     expect(fs.existsSync(path.join(configDir, '.config-sig'))).toBe(true);
     expect(inspectConfigIntegrity().verdict).toBe('valid');
     expect(resolveMemoryConfig().maxLongTermMemories).toBe(DEFAULT_CONFIG.maxLongTermMemories);
-    expect(runMemoryStatsCheck(dbPath).message).toContain('stored caps ignored because config lacks a verifying embedded signature');
+    expect(runMemoryStatsCheck(dbPath).message).toContain('stored caps not verified because config lacks a verifying embedded signature');
     expect(snapshot()).not.toEqual(before);
   });
 
@@ -126,7 +126,12 @@ describe('#1125 signed memory caps', () => {
     expect(inspectConfigIntegrity().verdict).toBe('valid');
   });
 
-  it('unsigned caps keep normal Guard posture and do not block a setter', async () => {
+  // KNOWN #1125 RESIDUAL (write-path signing, N-A on PR #1132): any config write
+  // through mutateRawConfig adopts the unsigned file and signs it as it stands,
+  // so the forged LTM 10 becomes a verified cap after setCloudConfig. This test
+  // PINS that current behaviour (Guard posture and the setter stay normal); the
+  // #1125 follow-up must flip the final cap assertion deliberately.
+  it('unsigned caps keep normal Guard posture and a setter; pins the #1125 write-path signing residual', async () => {
     writeConfig({ maxLongTermMemories: 10 }, false);
     const before = snapshot();
     const integrity = (await checkActionGuard()).find((row) => row.label.endsWith('config integrity'));
@@ -135,6 +140,7 @@ describe('#1125 signed memory caps', () => {
     expect(inspectActionGuardCoreConfig()).toMatchObject({ enabled: false });
     expect(() => setCloudConfig({ cloudEnabled: true })).not.toThrow();
     expect(getCloudConfig().cloudEnabled).toBe(true);
+    // Residual: the write signed the forged cap, so it is now trusted as written.
     expect(resolveMemoryConfig().maxLongTermMemories).toBe(10);
     expect(typeof JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'), 'utf8'))._sig).toBe('string');
   });
@@ -147,7 +153,7 @@ describe('#1125 signed memory caps', () => {
     expect([caps.maxShortTermMemories, caps.maxLongTermMemories]).toEqual([
       DEFAULT_CONFIG.maxShortTermMemories, DEFAULT_CONFIG.maxLongTermMemories,
     ]);
-    expect(runMemoryStatsCheck(dbPath).message).toContain('stored caps ignored');
+    expect(runMemoryStatsCheck(dbPath).message).toContain('stored caps not verified');
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('only a legacy signature'));
     expect(snapshot()).toEqual(before);
   });
@@ -169,7 +175,7 @@ describe('#1125 signed memory caps', () => {
     expect(resolveMemoryConfig().maxLongTermMemories).toBe(DEFAULT_CONFIG.maxLongTermMemories);
     writeConfig({}, false);
     expect(resolveMemoryConfig().maxShortTermMemories).toBe(DEFAULT_CONFIG.maxShortTermMemories);
-    expect(runMemoryStatsCheck(dbPath).message).not.toContain('stored caps ignored');
+    expect(runMemoryStatsCheck(dbPath).message).not.toContain('stored caps not verified');
     expect(console.warn).not.toHaveBeenCalled();
   });
 });

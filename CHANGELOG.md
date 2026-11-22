@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
-- **Memory eviction caps require a verifying embedded config signature (#1125).** Unsigned, tampered, stale-embedded and legacy-only signed `memory` caps now use the built-in limits (LTM 1000, STM 100) with a warning and a Doctor Memories explanation, rather than trusting lower values that could evict stored memories. Ordinary unsigned-config adoption and Guard posture are unchanged: an incidental read can create a legacy signature but cannot authorize memory caps. Set caps through `config --memory-cap` or review and re-sign a hand-edited file to write a new embedded signature. No change to default caps or to other signed settings.
+- **Unverified memory caps can no longer lower eviction limits (#1125).** `memory` caps apply as written only when config.json has a verifying embedded signature (written by `config --memory-cap`, or by `config --resign` after a tampered hand edit). Unsigned, tampered, stale-embedded or legacy-only-signed caps are unverified: values below the built-in limits (LTM 1000, STM 100) are ignored, and higher values are kept up to the setter maximum (LTM 100,000, STM 10,000), so an existing raised cap does not evict memories on upgrade. A warning and the Doctor Memories row name the reason and the effective caps; sign unverified caps with `config --memory-cap`. Known limit: a later config write, including an automatic cloud-sync write, signs the file as it stands, so an unsigned cap edit present at that moment becomes verified (tracked in #1125). Default caps, Guard posture and config writes are unchanged.
 
 ## [5.21.0] - 2026-11-21
 
