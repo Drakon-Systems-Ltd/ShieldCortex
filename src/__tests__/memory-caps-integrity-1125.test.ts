@@ -88,6 +88,19 @@ describe('#1125 signed memory caps', () => {
     expect(snapshot()).toEqual(before);
   });
 
+  it('calls a symlinked unsigned cap unverified and leaves it untouched', () => {
+    const target = path.join(root, 'unsigned-config.json');
+    fs.writeFileSync(target, JSON.stringify({ memory: { maxLongTermMemories: 10 } }) + '\n');
+    fs.symlinkSync(target, path.join(configDir, 'config.json'));
+    const before = snapshot();
+    expect(resolveMemoryConfig().maxLongTermMemories).toBe(DEFAULT_CONFIG.maxLongTermMemories);
+    const row = runMemoryStatsCheck(dbPath);
+    expect(row.message).toContain('stored caps ignored because config is unsigned and unverified');
+    expect(row.message).not.toContain('signature does not verify');
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('config.json is unsigned and unverified'));
+    expect(snapshot()).toEqual(before);
+  });
+
   it('accepts a legacy signature over the exact config bytes', () => {
     writeConfig({ maxShortTermMemories: 25, maxLongTermMemories: 50 }, true);
     const before = snapshot();

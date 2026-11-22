@@ -99,7 +99,7 @@ export function validateCap(value: unknown, key: string = 'cap'): number | undef
  */
 export function resolveMemoryConfigWithIntegrity(base: MemoryConfig = DEFAULT_CONFIG): {
   config: MemoryConfig;
-  ignoredCapReason: 'unsigned' | 'invalid-signature' | null;
+  ignoredCapReason: 'unsigned' | 'unverified' | 'invalid-signature' | null;
 } {
   let block: Record<string, unknown>;
   let trusted: boolean;
@@ -116,11 +116,15 @@ export function resolveMemoryConfigWithIntegrity(base: MemoryConfig = DEFAULT_CO
   if (!trusted) {
     const hasStoredCaps = CAP_KEYS.some((key) => block[key] !== undefined);
     if (hasStoredCaps) {
-      warnOnce('integrity', `stored memory caps are ignored because config.json is not signed or its signature does not verify (${verdict}); using default caps.`);
+      warnOnce('integrity', verdict === 'unverified'
+        ? 'stored memory caps are ignored because config.json is unsigned and unverified; using default caps.'
+        : `stored memory caps are ignored because config.json is not signed or its signature does not verify (${verdict}); using default caps.`);
     }
     return {
       config: base,
-      ignoredCapReason: hasStoredCaps ? (verdict === 'unsigned' ? 'unsigned' : 'invalid-signature') : null,
+      ignoredCapReason: hasStoredCaps
+        ? (verdict === 'unsigned' ? 'unsigned' : verdict === 'unverified' ? 'unverified' : 'invalid-signature')
+        : null,
     };
   }
 

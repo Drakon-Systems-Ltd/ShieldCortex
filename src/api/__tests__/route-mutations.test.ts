@@ -146,6 +146,7 @@ describe('API route mutation regressions', () => {
         getTrustedSkills: () => [],
         isConfigTampered: () => false,
         readRawConfig: () => ({}),
+        readConfigBytesNoSideEffects: () => ({ path: '', verdict: 'absent', linked: false, bytes: null, data: null }),
         shouldSyncProject: () => true,
         isSensitiveLevel: () => false,
         getCloudIronDomeCache: () => null,

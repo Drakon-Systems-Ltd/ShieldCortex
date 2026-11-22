@@ -1859,7 +1859,9 @@ export function runMemoryStatsCheck(
         status = 'warn';
         warnings.push(capResolution.ignoredCapReason === 'unsigned'
           ? 'stored caps ignored because config is not signed'
-          : 'stored caps ignored because config signature does not verify');
+          : capResolution.ignoredCapReason === 'unverified'
+            ? 'stored caps ignored because config is unsigned and unverified'
+            : 'stored caps ignored because config signature does not verify');
       }
 
       if (stm > STM_LIMIT) {
