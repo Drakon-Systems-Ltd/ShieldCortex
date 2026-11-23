@@ -987,10 +987,16 @@ function groupKey(r: PostureRecord): string {
  * Which records the rollup judges. A stale record (#970) is never judged:
  * nothing shows its reporter is still there. Of the rest, every `current`
  * record counts, and every record whose process the host says is alive
- * counts. A (runtime, profile, plane) with no current record contributes its
- * non-stale records as-is, so a group the host cannot vouch for is never
- * green. Unverifiable leftovers BESIDE a current member are listed but not
- * rolled up: nothing shows they are still running.
+ * counts. A structurally rejected self-report (#1135) also counts, even
+ * beside a current sibling: capability `tool-gate`, loaded `unknown` and
+ * liveness `not-applicable` is how a rejected read is derived, distinct from
+ * an absent read (loaded `unobserved`) and from a validated report (liveness
+ * is per-call, alive, ended or unverified). It is unknown evidence, and
+ * selection does not read the rejection text. A (runtime, profile, plane)
+ * with no current record contributes its non-stale records as-is, so a group
+ * the host cannot vouch for is never green. Unverifiable leftovers BESIDE a
+ * current member are listed but not rolled up: nothing shows they are still
+ * running.
  */
 export function rollupRecords(records: readonly PostureRecord[]): PostureRecord[] {
   const fresh = records.filter((r) => !r.stale);
@@ -998,6 +1004,9 @@ export function rollupRecords(records: readonly PostureRecord[]): PostureRecord[
   return fresh.filter((r) =>
     r.membership === 'current'
     || r.liveness.value === 'alive'
+    || (r.capability.value === 'tool-gate'
+      && r.runtime_loaded.value === 'unknown'
+      && r.liveness.value === 'not-applicable')
     || !hasCurrent.has(groupKey(r)));
 }
 
