@@ -28,6 +28,7 @@ import {
   type PluginIndexRow,
 } from '../integrations/openclaw-plugin-index.js';
 import type { LockResult } from './host-swap.js';
+import { openClawEffectiveHome } from './openclaw-effective-home.js';
 
 export const REALTIME_PLUGIN_ID = 'shieldcortex-realtime';
 
@@ -104,7 +105,9 @@ function childFailureDetail(result: PluginsUninstallChild): string {
         ? `killed by ${result.signal}`
         : `exited ${result.status}`;
   const extra = [text(result.stderr), text(result.stdout)].filter(Boolean).join('\n').slice(0, 500);
-  return `openclaw plugins uninstall ${REALTIME_PLUGIN_ID} ${how}${extra ? `: ${extra}` : ''}. Nothing was deleted.`;
+  // The child may have deleted files or records before a nonzero exit, signal,
+  // or timeout. This process did not continue, and it did not strip config.
+  return `openclaw plugins uninstall ${REALTIME_PLUGIN_ID} ${how}${extra ? `: ${extra}` : ''}. ShieldCortex did not delete anything further and did not strip config; the child may already have changed files.`;
 }
 
 function childFailed(result: PluginsUninstallChild): boolean {
@@ -230,8 +233,24 @@ function resolveOverridePath(raw: string, home: string): { path: string } | { un
  * honour STATE_DIR / CONFIG_PATH / PROFILE from the inherited env, so a
  * different or unresolvable target must not be declared clean from the
  * default tree, and must not be spawned.
+ *
+ * An explicit OPENCLAW_HOME that openClawEffectiveHome cannot resolve
+ * (relative, `~user`) is the same refusal. openClawUserHome ignores that
+ * value and falls back to another home; acting there would uninstall the
+ * fallback. A supported absolute or `~/` override must be the home we are
+ * about to act on, not a different tree.
  */
 export function realtimeUninstallTargetingRefusal(home: string): string | null {
+  const explicitHome = process.env.OPENCLAW_HOME?.trim();
+  if (explicitHome) {
+    const effective = openClawEffectiveHome();
+    if ('unresolvable' in effective) {
+      return `OPENCLAW_HOME="${explicitHome}" is unresolvable: ${effective.unresolvable}. Refusing rather than uninstalling another home. Nothing was changed.`;
+    }
+    if (path.resolve(effective.home) !== path.resolve(home)) {
+      return `OPENCLAW_HOME resolves to ${effective.home}, not ${path.resolve(home)}. Refusing rather than acting on another home. Nothing was changed.`;
+    }
+  }
   const statePrimary = process.env.OPENCLAW_STATE_DIR?.trim();
   const stateOverride = statePrimary || process.env.CLAWDBOT_STATE_DIR?.trim();
   if (stateOverride) {
@@ -336,22 +355,93 @@ function stripVerifiedConfig(home: string): { ok: true } | { ok: false; detail: 
   return { ok: true };
 }
 
-function verifiedGone(home: string): RealtimeUninstallResult | null {
+/**
+ * installs.json presence is what sent a pathless record down the CLI path.
+ * The selected-copy reader skips a record with no installPath, so a re-read
+ * of that reader is not a re-read of the registration. A retained or
+ * unreadable key is not absence. This does not edit the file.
+ */
+function retainedRegistration(home: string): RealtimeUninstallResult | null {
+  const installs = readInstallsRecord(home);
+  if (installs === 'unreadable') {
+    return {
+      status: 'unverified',
+      detail: `${path.join(home, '.openclaw', 'plugins', 'installs.json')} could not be read after uninstall. Unknown is not absent. Config was not stripped.`,
+    };
+  }
+  if (installs === 'names') {
+    return {
+      status: 'failed',
+      detail: `OpenClaw's installs.json still names ${REALTIME_PLUGIN_ID}. The install record is still there. Config was not stripped.`,
+    };
+  }
+  return null;
+}
+
+/**
+ * openclaw.json plugins.installs[id] that names the legacy extensions dir
+ * (no installPath means that dir), and nothing else is registered. That
+ * record is config this process strips after it removes the directory it
+ * just identified. It is not an installs.json or SQLite registration, and
+ * it is not a path/link. A record that names any other path is not owned.
+ */
+function legacyConfigRecordIsOwned(home: string): boolean {
+  const installs = readInstallsRecord(home);
+  if (installs !== 'missing' && installs !== 'no-record') return false;
+  const index = readPluginInstallIndexState(home);
+  if (index.state === 'unreadable') return false;
+  if (index.state === 'ok' && indexNamesPlugin(index.row)) return false;
+  const configPath = path.join(home, '.openclaw', 'openclaw.json');
+  let raw: string;
+  try {
+    raw = fs.readFileSync(configPath, 'utf-8');
+  } catch {
+    return false;
+  }
+  let config: unknown;
+  try {
+    config = JSON.parse(raw) as unknown;
+  } catch {
+    return false;
+  }
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return false;
+  const plugins = (config as { plugins?: unknown }).plugins;
+  if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return false;
+  const records = (plugins as { installs?: unknown }).installs;
+  if (!records || typeof records !== 'object' || Array.isArray(records)) return false;
+  if (!Object.prototype.hasOwnProperty.call(records, REALTIME_PLUGIN_ID)) return false;
+  const rec = (records as Record<string, unknown>)[REALTIME_PLUGIN_ID];
+  if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return false;
+  const r = rec as { source?: unknown; installPath?: unknown };
+  if (r.source === 'path') return false;
+  const named = typeof r.installPath === 'string' && r.installPath ? r.installPath : null;
+  if (!named) return true;
+  const openclawDir = path.join(home, '.openclaw');
+  const expanded = named === '~' ? home : named.startsWith('~/') ? path.join(home, named.slice(2)) : named;
+  return path.resolve(openclawDir, expanded) === path.resolve(legacyDir(home));
+}
+
+function verifiedGone(home: string, opts?: { ownedLegacyConfig?: boolean }): RealtimeUninstallResult | null {
   const index = readPluginInstallIndexState(home);
   if (index.state === 'unreadable') {
     return { status: 'unverified', detail: `OpenClaw's plugin install index could not be read after uninstall (${index.why}). Not reported as removed.` };
   }
+  if (index.state === 'ok' && indexNamesPlugin(index.row)) {
+    return { status: 'failed', detail: `OpenClaw's install index still names ${REALTIME_PLUGIN_ID}. Config was not stripped.` };
+  }
+  const retained = retainedRegistration(home);
+  if (retained) return retained;
   const selected = readSelectedRealtimeInstall(home);
   if (selected.state === 'unknown') {
     return { status: 'unverified', detail: `${selected.why} Not reported as removed.` };
   }
-  if (index.state === 'ok' && indexNamesPlugin(index.row)) {
-    return { status: 'failed', detail: `OpenClaw's install index still names ${REALTIME_PLUGIN_ID}. Config was not stripped.` };
-  }
   if (selected.state === 'selected') {
     return { status: 'failed', detail: `OpenClaw still has a loadable copy at ${selected.dir}. Config was not stripped.` };
   }
-  if (selected.dangling) {
+  // Deleting the legacy dir makes the openclaw.json record that named it
+  // look dangling. That record is the config strip below, not a managed
+  // registration that outlived the child. Any other dangling record still fails.
+  if (selected.dangling && !(opts?.ownedLegacyConfig && legacyConfigRecordIsOwned(home))) {
     return { status: 'failed', detail: `${selected.dangling}. The record is still there. Config was not stripped.` };
   }
   const legacy = inspectLegacy(home);
@@ -367,11 +457,15 @@ function verifiedGone(home: string): RealtimeUninstallResult | null {
   return null;
 }
 
-function finishRemoved(home: string, detail: string): RealtimeUninstallResult {
-  const still = verifiedGone(home);
+function finishRemoved(home: string, detail: string, opts?: { ownedLegacyConfig?: boolean }): RealtimeUninstallResult {
+  const still = verifiedGone(home, opts);
   if (still) return still;
   const cleaned = stripVerifiedConfig(home);
   if (!cleaned.ok) return { status: 'failed', detail: cleaned.detail };
+  if (opts?.ownedLegacyConfig) {
+    const after = verifiedGone(home);
+    if (after) return after;
+  }
   const leftovers = listManagedRealtimeProjectCopies(home);
   const leftoverNote = leftovers.length
     ? ` Left in place (not an install, not removed): ${leftovers.join(', ')}.`
@@ -380,13 +474,14 @@ function finishRemoved(home: string, detail: string): RealtimeUninstallResult {
 }
 
 function removeLegacyDir(home: string): RealtimeUninstallResult {
+  const ownedLegacyConfig = legacyConfigRecordIsOwned(home);
   const dir = legacyDir(home);
   try {
     fs.rmSync(dir, { recursive: true });
   } catch (err) {
     return { status: 'failed', detail: `could not remove ${dir}: ${(err as Error).message}. Config was not stripped.` };
   }
-  return finishRemoved(home, `Removed real-time plugin from ${dir}.`);
+  return finishRemoved(home, `Removed real-time plugin from ${dir}.`, { ownedLegacyConfig });
 }
 
 /**
@@ -473,6 +568,8 @@ export function uninstallManagedRealtimePlugin(deps: RealtimeUninstallDeps): Rea
       if (indexAfter.state === 'ok' && indexNamesPlugin(indexAfter.row)) {
         return { status: 'failed', detail: `OpenClaw's install index still names ${REALTIME_PLUGIN_ID}. Config was not stripped.` };
       }
+      const retained = retainedRegistration(home);
+      if (retained) return retained;
       const selectedAfter = readSelectedRealtimeInstall(home);
       if (selectedAfter.state === 'unknown') {
         return { status: 'unverified', detail: `${selectedAfter.why} Config was not stripped.` };

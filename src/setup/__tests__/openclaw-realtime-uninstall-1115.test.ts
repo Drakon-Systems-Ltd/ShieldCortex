@@ -415,6 +415,192 @@ describe('#1115 managed realtime uninstall', () => {
     }
   });
 
+  it('a recorded legacy extensions copy is removed together with its openclaw.json install record', () => {
+    const dir = path.join(home, '.openclaw', 'extensions', ID);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: PKG, version: '5.22.1' }));
+    fs.writeFileSync(path.join(dir, 'openclaw.plugin.json'), JSON.stringify({ id: ID, version: '5.22.1' }));
+    fs.writeFileSync(path.join(dir, 'index.js'), 'export default {};\n');
+    const file = path.join(home, '.openclaw', 'openclaw.json');
+    fs.writeFileSync(file, JSON.stringify({
+      plugins: {
+        allow: [ID, 'other-plugin'],
+        entries: { [ID]: { enabled: true }, other: { enabled: true } },
+        installs: { [ID]: { source: 'npm', version: '5.22.1' } },
+      },
+    }, null, 2) + '\n');
+    let spawned = false;
+
+    const result = uninstallPlugin({
+      resolveBinary: () => '/fake/bin/openclaw',
+      spawn: () => { spawned = true; return { status: 0, signal: null, stdout: '', stderr: '' }; },
+    });
+
+    expect(result.status).toBe('removed');
+    expect(spawned).toBe(false);
+    expect(fs.existsSync(dir)).toBe(false);
+    expect(fs.existsSync(path.dirname(dir))).toBe(true);
+    const config = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(config.plugins.installs[ID]).toBeUndefined();
+    expect(config.plugins.entries[ID]).toBeUndefined();
+    expect(config.plugins.entries.other).toEqual({ enabled: true });
+    expect(config.plugins.allow).toEqual(['other-plugin']);
+    expect(result.detail).not.toMatch(/record is still there/);
+    expect(fs.existsSync(updateLockPath(path.join(home, '.openclaw')))).toBe(false);
+  });
+
+  it('a legacy directory is not deleted when installs.json still names the plugin', () => {
+    const dir = path.join(home, '.openclaw', 'extensions', ID);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: PKG, version: '5.22.1' }));
+    fs.writeFileSync(path.join(dir, 'openclaw.plugin.json'), JSON.stringify({ id: ID, version: '5.22.1' }));
+    const installsFile = path.join(home, '.openclaw', 'plugins', 'installs.json');
+    fs.mkdirSync(path.dirname(installsFile), { recursive: true });
+    const record = JSON.stringify({ installRecords: { [ID]: { source: 'npm', version: '5.22.1' } } });
+    fs.writeFileSync(installsFile, record);
+    const configBefore = writeConfig();
+    const { spawn, calls } = okSpawn();
+
+    const result = uninstallPlugin({ resolveBinary: () => '/fake/bin/openclaw', spawn });
+
+    expect(result.status).toBe('failed');
+    expect(calls).toHaveLength(1);
+    expect(fs.existsSync(dir)).toBe(true);
+    expect(fs.readFileSync(installsFile, 'utf-8')).toBe(record);
+    expect(fs.readFileSync(path.join(home, '.openclaw', 'openclaw.json'), 'utf-8')).toBe(configBefore);
+    expect(result.detail).toMatch(/still there/);
+    expect(result.detail).not.toMatch(/install record is gone/);
+  });
+
+  it('a pathless installs.json record that a zero-exit child leaves in place is not treated as removed', () => {
+    const installPath = writeManaged('drakon-systems-shieldcortex-realtime-pathless');
+    const installsFile = path.join(home, '.openclaw', 'plugins', 'installs.json');
+    fs.mkdirSync(path.dirname(installsFile), { recursive: true });
+    const record = JSON.stringify({ installRecords: { [ID]: { source: 'npm', version: '5.22.1' } } });
+    fs.writeFileSync(installsFile, record);
+    const configBefore = writeConfig();
+    const { spawn, calls } = okSpawn();
+
+    const result = uninstallPlugin({ resolveBinary: () => '/fake/bin/openclaw', spawn });
+
+    expect(result.status).toBe('failed');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toEqual([...PLUGINS_UNINSTALL_ARGV]);
+    expect(fs.readFileSync(installsFile, 'utf-8')).toBe(record);
+    expect(fs.readFileSync(path.join(home, '.openclaw', 'openclaw.json'), 'utf-8')).toBe(configBefore);
+    expect(fs.existsSync(installPath)).toBe(true);
+    expect(result.detail).toMatch(/installs\.json still names/);
+    expect(result.detail).not.toMatch(/install record is gone/);
+    expect(fs.existsSync(updateLockPath(path.join(home, '.openclaw')))).toBe(false);
+  });
+
+  it('a pathless installs.json record the child actually clears is removed, and the project dir stays', () => {
+    const installPath = writeManaged('drakon-systems-shieldcortex-realtime-pathless');
+    const installsFile = path.join(home, '.openclaw', 'plugins', 'installs.json');
+    fs.mkdirSync(path.dirname(installsFile), { recursive: true });
+    fs.writeFileSync(installsFile, JSON.stringify({ installRecords: { [ID]: { source: 'npm', version: '5.22.1' } } }));
+    writeConfig();
+    const { spawn, calls } = okSpawn(() => {
+      fs.writeFileSync(installsFile, JSON.stringify({ installRecords: {} }));
+    });
+
+    const result = uninstallPlugin({ resolveBinary: () => '/fake/bin/openclaw', spawn });
+
+    expect(result.status).toBe('removed');
+    expect(calls).toHaveLength(1);
+    expect(fs.existsSync(installPath)).toBe(true);
+    expect(result.leftovers).toContain(installPath);
+    const config = JSON.parse(fs.readFileSync(path.join(home, '.openclaw', 'openclaw.json'), 'utf-8'));
+    expect(config.plugins.entries[ID]).toBeUndefined();
+    expect(config.plugins.allow).toEqual(['other-plugin']);
+    expect(JSON.parse(fs.readFileSync(installsFile, 'utf-8')).installRecords[ID]).toBeUndefined();
+  });
+
+  it('a relative OPENCLAW_HOME does not uninstall a populated fallback home', () => {
+    const installPath = path.join(
+      otherHome, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-fallback',
+      'node_modules', '@drakon-systems', ID,
+    );
+    fs.mkdirSync(installPath, { recursive: true });
+    fs.writeFileSync(path.join(installPath, 'package.json'), JSON.stringify({ name: PKG, version: '5.22.1' }));
+    fs.writeFileSync(path.join(installPath, 'openclaw.plugin.json'), JSON.stringify({ id: ID, version: '5.22.1' }));
+    fs.writeFileSync(path.join(installPath, 'index.js'), 'export default {};\n');
+    const installsFile = path.join(otherHome, '.openclaw', 'plugins', 'installs.json');
+    fs.mkdirSync(path.dirname(installsFile), { recursive: true });
+    const record = JSON.stringify({
+      installRecords: { [ID]: { source: 'npm', version: '5.22.1', installPath } },
+    });
+    fs.writeFileSync(installsFile, record);
+    const configFile = path.join(otherHome, '.openclaw', 'openclaw.json');
+    const configBefore = JSON.stringify({
+      plugins: { allow: [ID], entries: { [ID]: { enabled: true } } },
+    }, null, 2) + '\n';
+    fs.writeFileSync(configFile, configBefore);
+    process.env.OPENCLAW_HOME = 'relative-profile';
+    let spawned = false;
+
+    const result = uninstallPlugin({
+      resolveBinary: () => '/fake/bin/openclaw',
+      spawn: () => { spawned = true; return { status: 0, signal: null, stdout: '', stderr: '' }; },
+    });
+
+    expect(result.status).toBe('refused');
+    expect(spawned).toBe(false);
+    expect(result.detail).toMatch(/unresolvable/);
+    expect(result.detail).not.toContain(path.resolve('relative-profile'));
+    expect(fs.existsSync(installPath)).toBe(true);
+    expect(fs.readFileSync(installsFile, 'utf-8')).toBe(record);
+    expect(fs.readFileSync(configFile, 'utf-8')).toBe(configBefore);
+    expect(fs.existsSync(updateLockPath(path.join(otherHome, '.openclaw')))).toBe(false);
+    expect(fs.existsSync(path.join(home, '.openclaw', 'extensions'))).toBe(false);
+  });
+
+  it('an expanded ~/ OPENCLAW_HOME still uninstalls that home', () => {
+    const installPath = writeManaged('drakon-systems-shieldcortex-realtime-tilde');
+    writeInstalls(installPath);
+    writeConfig();
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    process.env.OPENCLAW_HOME = '~/';
+    try {
+      const { spawn, calls } = okSpawn(() => {
+        fs.writeFileSync(path.join(home, '.openclaw', 'plugins', 'installs.json'), JSON.stringify({ installRecords: {} }));
+      });
+      const result = uninstallPlugin({ resolveBinary: () => '/fake/bin/openclaw', spawn });
+      expect(result.status).toBe('removed');
+      expect(calls).toHaveLength(1);
+      expect(calls[0].options.env?.HOME).toBe(home);
+      expect(calls[0].options.env?.OPENCLAW_HOME).toBe(home);
+      expect(fs.existsSync(path.join(otherHome, '.openclaw'))).toBe(false);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = prevProfile;
+    }
+  });
+
+  it('a nonzero child is failed without claiming the child deleted nothing', () => {
+    const installPath = writeManaged('drakon-systems-shieldcortex-realtime-abc123');
+    writeInstalls(installPath);
+    const configBefore = writeConfig();
+
+    const result = uninstallPlugin({
+      resolveBinary: () => '/fake/bin/openclaw',
+      spawn: () => ({ status: 1, signal: null, stdout: '', stderr: 'partial' }),
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.detail).toMatch(/exited 1/);
+    expect(result.detail).toMatch(/partial/);
+    expect(result.detail).toMatch(/did not strip config/);
+    expect(result.detail).not.toMatch(/Nothing was deleted/);
+    expect(fs.readFileSync(path.join(home, '.openclaw', 'openclaw.json'), 'utf-8')).toBe(configBefore);
+    expect(fs.existsSync(installPath)).toBe(true);
+  });
+
   it('OPENCLAW_STATE_DIR pointing at another tree does not declare this home clean', () => {
     const installPath = writeManaged('drakon-systems-shieldcortex-realtime-abc123');
     writeInstalls(installPath);
@@ -505,6 +691,30 @@ describe('#1115 deep-clean does not delete a managed project or restart over a f
     expect(fs.readFileSync(path.join(home, '.openclaw', 'openclaw.json'), 'utf-8')).toBe(configBefore);
     expect(fs.existsSync(installPath)).toBe(true);
     expect(result.removed.join('\n')).not.toMatch(/plugins\.entries/);
+  });
+
+  it('dry run does not uninstall a legacy copy or rewrite its config', async () => {
+    const dir = path.join(home, '.openclaw', 'extensions', ID);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: PKG, version: '5.22.1' }));
+    fs.writeFileSync(path.join(dir, 'openclaw.plugin.json'), JSON.stringify({ id: ID, version: '5.22.1' }));
+    fs.writeFileSync(path.join(dir, 'index.js'), 'export default {};\n');
+    const configBefore = writeConfig();
+    const restart = jest.fn(async () => ({ attempted: true, restarted: true, method: 'test' as const }));
+
+    const out = await runDeepClean({
+      dryRun: true,
+      restartGateway: true,
+      restart: restart as never,
+    });
+
+    expect(out.pluginRemoval.status).toBe('refused');
+    expect(out.pluginRemoval.detail).toMatch(/dry run/i);
+    expect(out.pluginRemoval.status).not.toBe('removed');
+    expect(fs.existsSync(dir)).toBe(true);
+    expect(fs.readFileSync(path.join(home, '.openclaw', 'openclaw.json'), 'utf-8')).toBe(configBefore);
+    expect(restart).not.toHaveBeenCalled();
+    expect(out.gateway).toBeUndefined();
   });
 });
 

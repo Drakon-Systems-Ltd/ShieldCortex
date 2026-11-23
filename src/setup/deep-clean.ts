@@ -714,6 +714,9 @@ function execGatewayRestartCommand(): GatewayRestartResult {
  * realtime uninstall helper has verified the install record is gone. A
  * failed or unverified removal does not strip that config and does not
  * restart the gateway.
+ *
+ * dryRun does not call uninstall. The old unconditional call deleted a
+ * legacy copy and rewrote config before cleanResidue ever saw dryRun.
  */
 export async function runDeepClean(options: {
   dryRun?: boolean;
@@ -727,7 +730,10 @@ export async function runDeepClean(options: {
   pluginRemoval: RealtimeUninstallResult;
 }> {
   const report = scanForResidue();
-  const pluginRemoval = options.pluginRemoval ?? uninstallPlugin();
+  const pluginRemoval = options.pluginRemoval
+    ?? (options.dryRun
+      ? { status: 'refused' as const, detail: 'dry run: realtime plugin uninstall was not run. Nothing was changed.' }
+      : uninstallPlugin());
   const verified = pluginRemoval.status === 'removed' || pluginRemoval.status === 'absent';
   const cleanReport: ResidueReport = verified
     ? report
