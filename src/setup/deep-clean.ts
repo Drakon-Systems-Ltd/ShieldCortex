@@ -12,51 +12,41 @@
  * state, and offers a single surgical clean-up pass.
  *
  * Scope: read/write of JSON config files + directory removal under the user's
- * home directory. No network, no sudo escalation. Subprocesses are limited to
- * an argv-array `getent` lookup (sudo-home resolution) and the fixed
- * gateway-restart command from gateway-restart-command.ts.
+ * home directory. No network, no sudo escalation. Home resolution is
+ * openClawUserHome (absolute OPENCLAW_HOME, sudo). Subprocesses are the
+ * fixed gateway-restart command from gateway-restart-command.ts. A managed
+ * npm project is listed and never deleted here.
  */
 
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
-import { execFileSync, execSync } from 'child_process';
+import { execSync } from 'child_process';
 import { gatewayRestartCommand } from './gateway-restart-command.js';
 import { withOwnConfigWrite } from '../audit/agent-config-watch-own-write.js';
 import { nextCausalSeq } from './causal-seq.js';
+import { openClawUserHome, uninstallPlugin } from './openclaw.js';
+import {
+  listManagedRealtimeProjectCopies,
+  type RealtimeUninstallResult,
+} from './openclaw-realtime-uninstall.js';
 
 const PLUGIN_ID = 'shieldcortex-realtime';
 const HOOK_NAME = 'cortex-memory';
 
-/** Same conservative shape as openclaw.ts's SAFE_USERNAME (#429): SUDO_USER
- *  is environment-controlled, so anything outside it is ignored, not looked up. */
-const SAFE_USERNAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
-
 /**
- * Resolve the real user's home directory (mirrors openclaw.ts behaviour so the
- * two modules agree on which home to touch under sudo).
+ * The home uninstall and deep-clean must agree on. openClawUserHome honours
+ * an absolute OPENCLAW_HOME and sudo; a private os.homedir() resolver made
+ * `OPENCLAW_HOME=… uninstall --deep` edit the operator's real home.
  */
 function resolveHome(): string {
-  const sudoUser = process.env.SUDO_USER;
-  if (sudoUser && SAFE_USERNAME.test(sudoUser)) {
-    try {
-      const entry = execFileSync('getent', ['passwd', sudoUser], {
-        encoding: 'utf-8',
-        timeout: 5000,
-      }).trim();
-      const homeDir = entry.split(':')[5];
-      if (homeDir && fs.existsSync(homeDir)) return homeDir;
-    } catch {
-      // getent not available (macOS)
-    }
-  }
-  return os.homedir();
+  return openClawUserHome();
 }
 
 type Removal =
   | { kind: 'delete-config-key'; file: string; keyPath: string[] }
   | { kind: 'filter-config-array'; file: string; keyPath: string[]; contains: string }
-  | { kind: 'delete-directory'; path: string };
+  | { kind: 'delete-directory'; path: string }
+  | { kind: 'report-only'; path: string };
 
 /**
  * Classification of residue paths. Drives orphan detection: a `plugin-config`
@@ -70,7 +60,8 @@ export type ResidueCategory =
   | 'clawhub-skill-lock'    // .clawhub/lock.json: .skills.shieldcortex
   | 'plugin-dir'            // current extensions dir (the install itself)
   | 'hook-dir'              // current cortex-memory hook dir (the install itself)
-  | 'legacy-hook-dir';      // pre-v4.x hook paths kept around for migration cleanup only
+  | 'legacy-hook-dir'       // pre-v4.x hook paths kept around for migration cleanup only
+  | 'managed-project-reported'; // listed, never deleted — OpenClaw owns this tree
 
 export interface ResiduePath {
   description: string;
@@ -278,6 +269,17 @@ export function scanForResidue(): ResidueReport {
     });
   }
 
+  // Listed so the operator can see it. Not a delete-directory: OpenClaw owns
+  // this tree, and a leftover generation dir is not an install (#226).
+  for (const dir of listManagedRealtimeProjectCopies(home)) {
+    paths.push({
+      description: dir,
+      removal: { kind: 'report-only', path: dir },
+      present: true,
+      category: 'managed-project-reported',
+    });
+  }
+
   const dirtyCount = paths.filter((p) => p.present).length;
   const cleanCount = paths.length - dirtyCount;
   return { paths, dirtyCount, cleanCount };
@@ -433,6 +435,10 @@ export function scanForOrphans(): OrphanReport {
         // warning after every update because we always-orphaned the lock even
         // with a live skill — "recommendations don't stick" was a false positive.
         return !installState.skillInstalled;
+      case 'managed-project-reported':
+        // Not residue we purge. Listing it as an orphan would tell the
+        // operator --deep deletes a tree this command leaves alone.
+        return false;
     }
   });
 
@@ -466,7 +472,21 @@ export function cleanResidue(report: ResidueReport, options: CleanOptions = {}):
 
     try {
       const r = entry.removal;
+      if (r.kind === 'report-only') {
+        continue;
+      }
       if (r.kind === 'delete-directory') {
+        let st: fs.Stats;
+        try {
+          st = fs.lstatSync(r.path);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          throw err;
+        }
+        if (st.isSymbolicLink()) {
+          result.errors.push({ description: entry.description, error: 'symlink left alone' });
+          continue;
+        }
         if (!options.dryRun) {
           fs.rmSync(r.path, { recursive: true, force: true });
         }
@@ -689,19 +709,38 @@ function execGatewayRestartCommand(): GatewayRestartResult {
 /**
  * High-level entry point used by `shieldcortex uninstall --deep`.
  * Scans → cleans → (optionally) restarts gateway.
+ *
+ * Plugin config and the extensions plugin dir are cleaned only after the
+ * realtime uninstall helper has verified the install record is gone. A
+ * failed or unverified removal does not strip that config and does not
+ * restart the gateway.
  */
-export async function runDeepClean(options: { dryRun?: boolean; restartGateway?: boolean } = {}): Promise<{
+export async function runDeepClean(options: {
+  dryRun?: boolean;
+  restartGateway?: boolean;
+  pluginRemoval?: RealtimeUninstallResult;
+  restart?: () => Promise<Awaited<ReturnType<typeof restartOpenClawGateway>>>;
+} = {}): Promise<{
   report: ResidueReport;
   result: CleanResult;
   gateway?: Awaited<ReturnType<typeof restartOpenClawGateway>>;
+  pluginRemoval: RealtimeUninstallResult;
 }> {
   const report = scanForResidue();
-  const result = cleanResidue(report, { dryRun: options.dryRun });
+  const pluginRemoval = options.pluginRemoval ?? uninstallPlugin();
+  const verified = pluginRemoval.status === 'removed' || pluginRemoval.status === 'absent';
+  const cleanReport: ResidueReport = verified
+    ? report
+    : {
+        ...report,
+        paths: report.paths.filter((p) => p.category !== 'plugin-config' && p.category !== 'plugin-dir'),
+      };
+  const result = cleanResidue(cleanReport, { dryRun: options.dryRun });
   let gateway: Awaited<ReturnType<typeof restartOpenClawGateway>> | undefined;
-  if (options.restartGateway && !options.dryRun && result.removed.length > 0) {
-    gateway = await restartOpenClawGateway();
+  if (verified && options.restartGateway && !options.dryRun && result.removed.length > 0) {
+    gateway = await (options.restart ?? restartOpenClawGateway)();
   }
-  return { report, result, gateway };
+  return { report, result, gateway, pluginRemoval };
 }
 
 // Exported for tests

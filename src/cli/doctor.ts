@@ -3068,11 +3068,13 @@ async function checkOpenClawResidue(): Promise<CheckResult> {
       label: 'OpenClaw residue',
       status: 'warn',
       message: `${report.orphanCount} orphan${report.orphanCount === 1 ? '' : 's'} — ${first}${suffix}`,
-      fix: 'Run `shieldcortex uninstall --deep --confirm` to purge, or reinstall with `shieldcortex openclaw install`',
-      // Only the reinstall half needs OpenClaw; the purge is pure filesystem.
+      fix: 'Run `shieldcortex uninstall --deep --confirm` to remove verified residue (a managed plugin that is still registered is left in place), or reinstall with `shieldcortex openclaw install`',
+      // Only the reinstall half needs OpenClaw; the purge does not delete a
+      // managed npm project, and it does not strip plugin config until removal
+      // is verified.
       needsOpenClawCli: {
         subcommand: 'plugins',
-        fallbackFix: 'Run `shieldcortex uninstall --deep --confirm` to purge the residue (pure filesystem — this half still works). Reinstalling needs a valid OpenClaw config first.',
+        fallbackFix: 'Run `shieldcortex uninstall --deep --confirm` to remove residue only after the plugin uninstall is verified. It does not delete a managed npm project. Reinstalling needs a valid OpenClaw config first.',
       },
     };
   } catch (err: unknown) {

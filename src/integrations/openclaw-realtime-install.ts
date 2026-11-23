@@ -61,7 +61,7 @@ function tilde(p: string, home: string): string {
 }
 
 /** Is the directory at `entry` (or the file's directory) the realtime plugin? */
-function identifyPluginDir(entry: string): { state: 'ours'; dir: string } | { state: 'not-ours' } | { state: 'unknown'; why: string } {
+export function identifyPluginDir(entry: string): { state: 'ours'; dir: string } | { state: 'not-ours' } | { state: 'unknown'; why: string } {
   let st: fs.Stats;
   try {
     st = fs.statSync(entry);

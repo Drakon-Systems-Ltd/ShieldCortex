@@ -57,6 +57,12 @@ import {
   readSelectedRealtimeInstall,
   readSelectedRealtimePluginVersion,
 } from '../integrations/openclaw-realtime-install.js';
+import {
+  spawnOpenClawPluginsUninstall,
+  uninstallManagedRealtimePlugin,
+  type RealtimeUninstallDeps,
+  type RealtimeUninstallResult,
+} from './openclaw-realtime-uninstall.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1927,54 +1933,21 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
 }
 
 /**
- * Remove the plugin from ~/.openclaw/extensions/shieldcortex-realtime/
+ * Remove the realtime plugin. A managed npm install is removed by OpenClaw's
+ * own `plugins uninstall`, then re-read. Exit 0 from that CLI is not success.
+ * Does not create extensions/, and does not delete a managed project dir.
  */
-function uninstallPlugin(): boolean {
-  const extensionsDir = findExtensionsDir();
-  if (!extensionsDir) return false;
-
-  const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
-  if (!fs.existsSync(destDir)) return false;
-
-  try {
-    const configPath = openClawConfigPath();
-    if (fs.existsSync(configPath)) {
-      const raw = fs.readFileSync(configPath, 'utf-8');
-      const config = JSON.parse(raw);
-      const pluginId = PLUGIN_DIR_NAME;
-
-      // Idempotency: only write the config if there's actually something
-      // to remove. Pre-v4.12.11 this rewrote openclaw.json every time
-      // even when no SC entries existed (e.g. a re-run of `uninstall
-      // --deep` after a previous successful uninstall).
-      const allowHasIt = Array.isArray(config.plugins?.allow)
-        && config.plugins.allow.some((e: unknown) => typeof e === 'string' && e.includes(pluginId));
-      const installsHasIt = !!config.plugins?.installs?.[pluginId];
-      const entriesHasIt = !!config.plugins?.entries?.[pluginId];
-      const needsWrite = allowHasIt || installsHasIt || entriesHasIt;
-
-      if (needsWrite) {
-        if (Array.isArray(config.plugins?.allow)) {
-          // Remove both old file-path entries and new short-name entries
-          config.plugins.allow = config.plugins.allow.filter(
-            (entry: string) => !entry.includes(pluginId),
-          );
-        }
-        if (config.plugins?.installs?.[pluginId]) {
-          delete config.plugins.installs[pluginId];
-        }
-        if (config.plugins?.entries?.[pluginId]) {
-          delete config.plugins.entries[pluginId];
-        }
-        withOwnConfigWrite(configPath, () => { const out = JSON.stringify(config, null, 2) + '\n'; fs.writeFileSync(configPath, out, 'utf-8'); return out; });
-      }
-    }
-    fs.rmSync(destDir, { recursive: true });
-    console.log(`Removed real-time plugin from ${destDir}`);
-    return true;
-  } catch {
-    return false;
-  }
+export function uninstallPlugin(
+  deps: Partial<Omit<RealtimeUninstallDeps, 'home'>> = {},
+): RealtimeUninstallResult {
+  const home = openClawUserHome();
+  return uninstallManagedRealtimePlugin({
+    home,
+    spawn: deps.spawn ?? spawnSync,
+    resolveBinary: deps.resolveBinary ?? resolveOpenClawBinary,
+    childEnv: deps.childEnv ?? ((resolved) => openClawChildEnv({}, resolved)),
+    acquireLock: deps.acquireLock ?? acquireUpdateLock,
+  });
 }
 
 /**
@@ -2478,12 +2451,11 @@ async function writeOpenClawInstall(
   }
 }
 
-export async function uninstallOpenClawHook(): Promise<void> {
+export async function uninstallOpenClawHook(): Promise<RealtimeUninstallResult> {
   const hooksDirs = findAllHooksDirs();
 
   if (hooksDirs.length === 0) {
     console.log('Neither Claude Code nor OpenClaw is installed on this system.');
-    return;
   }
 
   let removed = 0;
@@ -2501,11 +2473,23 @@ export async function uninstallOpenClawHook(): Promise<void> {
     }
   }
 
-  // Remove the real-time plugin
-  uninstallPlugin();
+  // Remove the real-time plugin. A false from the old helper was ignored,
+  // so a managed install stayed loaded while this command continued.
+  const pluginRemoval = uninstallPlugin();
+  if (pluginRemoval.status === 'removed') {
+    console.log(pluginRemoval.detail);
+  } else if (pluginRemoval.status === 'absent') {
+    console.log(pluginRemoval.detail);
+  } else {
+    process.exitCode = 1;
+    console.error(pluginRemoval.detail);
+  }
 
-  // Clean up legacy plugin entry if present
-  cleanupLegacyPlugin();
+  // Path-style plugins.allow entries are config. Do not strip them while a
+  // managed install is still registered — that is the same lie as --deep.
+  if (pluginRemoval.status === 'removed' || pluginRemoval.status === 'absent') {
+    cleanupLegacyPlugin();
+  }
 
   // Remove installed skill copies (#197) — before this, an "uninstalled" box
   // kept a stale ClawHub skill that would silently age (the aiquant disease,
@@ -2515,6 +2499,7 @@ export async function uninstallOpenClawHook(): Promise<void> {
   if (removed === 0) {
     console.log('cortex-memory hook is not installed.');
   }
+  return pluginRemoval;
 }
 
 export async function openClawHookStatus(): Promise<void> {
@@ -3054,15 +3039,14 @@ export async function repairOpenClawPlugin(): Promise<void> {
   }
   console.log('');
 
-  // Step 2: Resolve openclaw binary.
-  let openclawBin: string;
-  try {
-    openclawBin = execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 }).trim();
-    if (!openclawBin || !fs.existsSync(openclawBin)) {
-      throw new Error('not on PATH');
-    }
-  } catch {
-    console.error('Cannot run repair: `openclaw` binary not found on PATH.');
+  // Step 2: Resolve openclaw binary. Same resolver as uninstall (#179) —
+  // `which` alone misses user-level installs. The spawn is the shared
+  // primitive; repair does not use uninstall's postcondition. Repair
+  // continues to a reinstall, so "selected copy is gone" would abort a
+  // repair whose other copy is supposed to remain until that reinstall.
+  const openclawBin = resolveOpenClawBinary(home);
+  if (!openclawBin) {
+    console.error('Cannot run repair: `openclaw` binary not found on PATH or in known install locations.');
     console.error('Install OpenClaw first, or run `shieldcortex openclaw install` to set up the integration.');
     process.exit(1);
   }
@@ -3073,12 +3057,7 @@ export async function repairOpenClawPlugin(): Promise<void> {
   // Step 3: Uninstall the plugin. The uninstall command requires interactive
   // confirmation by default; pipe `y\n` via stdin to auto-confirm.
   console.log('Step 1/3: openclaw plugins uninstall shieldcortex-realtime');
-  const uninstallResult = spawnSync(openclawBin, ['plugins', 'uninstall', pluginId], {
-    encoding: 'utf-8',
-    env: spawnEnv,
-    input: 'y\n',
-    timeout: 60000,
-  });
+  const uninstallResult = spawnOpenClawPluginsUninstall(openclawBin, spawnEnv);
   if (uninstallResult.status !== 0) {
     console.error('  ✗ uninstall failed:');
     if (uninstallResult.stderr) console.error(uninstallResult.stderr);

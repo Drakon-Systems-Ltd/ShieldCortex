@@ -423,6 +423,7 @@ describe('deep-clean — orphan detection (doctor path)', () => {
         'plugin-dir',
         'hook-dir',
         'legacy-hook-dir',
+        'managed-project-reported',
       ]).toContain(p.category);
     }
   });

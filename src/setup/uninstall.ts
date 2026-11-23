@@ -13,6 +13,7 @@ import os from 'os';
 import readline from 'readline';
 import { uninstallService } from '../service/install.js';
 import { uninstallOpenClawHook } from './openclaw.js';
+import type { RealtimeUninstallResult } from './openclaw-realtime-uninstall.js';
 import { uninstallCodex } from './codex.js';
 import { uninstallHermes } from './hermes.js';
 import { uninstallCopilot } from './copilot.js';
@@ -265,11 +266,14 @@ export async function uninstallAll(options?: {
     console.error(`Failed to uninstall service: ${err.message}`);
   }
 
-  // 2. Uninstall OpenClaw hook
+  // 2. Uninstall OpenClaw hook and the realtime plugin. A leftover managed
+  // plugin must not be followed by "Uninstall complete."
+  let pluginRemoval: RealtimeUninstallResult | undefined;
   try {
-    await uninstallOpenClawHook();
+    pluginRemoval = await uninstallOpenClawHook();
   } catch (err: any) {
     console.error(`Failed to uninstall OpenClaw hook: ${err.message}`);
+    process.exitCode = 1;
   }
 
   // 3. Remove hooks from settings.json
@@ -324,9 +328,16 @@ export async function uninstallAll(options?: {
   if (options?.deep) {
     try {
       const { runDeepClean } = await import('./deep-clean.js');
+      const verified = pluginRemoval?.status === 'removed' || pluginRemoval?.status === 'absent';
       const { report, result, gateway } = await runDeepClean({
-        restartGateway: options?.restartGateway !== false,
+        restartGateway: verified && options?.restartGateway !== false,
+        pluginRemoval,
       });
+      for (const entry of report.paths) {
+        if (entry.category === 'managed-project-reported' && entry.present) {
+          console.log(`Left in place (not removed): ${entry.description}`);
+        }
+      }
       if (result.removed.length > 0) {
         console.log(`\nDeep clean: removed ${result.removed.length} residue reference(s):`);
         for (const r of result.removed) {
@@ -359,7 +370,13 @@ export async function uninstallAll(options?: {
 
   // The last thing on screen is what we deliberately did NOT remove, and why
   // (#197). Silence about a kept artifact reads as coverage.
-  console.log('\nUninstall complete.\n');
+  const pluginVerified = pluginRemoval?.status === 'removed' || pluginRemoval?.status === 'absent';
+  if (pluginVerified) {
+    console.log('\nUninstall complete.\n');
+  } else {
+    console.error('\nUninstall incomplete: the realtime plugin was not verified removed.\n');
+    process.exitCode = 1;
+  }
   console.log(formatKeptSummary());
   console.log('\nTo clear the npx cache:');
   console.log('  npx cache clean shieldcortex  (npm 9+)');

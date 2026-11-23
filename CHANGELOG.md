@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Uninstall no longer reports success while a managed OpenClaw realtime plugin is still registered (#1115).** `shieldcortex uninstall` and `shieldcortex openclaw uninstall` used to stop when `~/.openclaw/extensions/shieldcortex-realtime` was missing, so an OpenClaw managed npm install stayed loaded and the summary could still say the uninstall was complete. Uninstall now asks OpenClaw to remove that plugin and only succeeds when OpenClaw's own records no longer name a loadable copy. It does not delete the managed project directory, does not edit OpenClaw's install index, and does not strip the plugin's config until that removal is verified. `uninstall --deep` lists a leftover managed project and leaves it on disk; it does not restart the gateway over a failed or unverified removal. A linked checkout, an unreadable install index, or an OpenClaw state, config, or profile override this command cannot verify is refused and left unchanged.
+
 ## [5.22.1] - 2026-11-23
 
 This release publishes the changes tagged as 5.22.0, with corrected release notes; 5.22.0 itself was never published to npm. It makes Action Guard ask before a command reads, writes or uploads a credential store. Action Guard is still off by default, so nothing changes unless you have turned it on.

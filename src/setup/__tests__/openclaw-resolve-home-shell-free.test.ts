@@ -166,11 +166,34 @@ describe('deep-clean resolveHome via scanForResidue (#429)', () => {
       expect(execSyncMock).not.toHaveBeenCalled();
       // The resolved sudo home actually drives the scan.
       const scannedPaths = report.paths.map((p) =>
-        p.removal.kind === 'delete-directory' ? p.removal.path : p.removal.file,
+        p.removal.kind === 'delete-directory' || p.removal.kind === 'report-only'
+          ? p.removal.path
+          : p.removal.file,
       );
       expect(scannedPaths.some((p) => p.startsWith(sudoHome))).toBe(true);
     } finally {
       rmSync(sudoHome, { recursive: true, force: true });
+    }
+  });
+
+  it('honours an absolute OPENCLAW_HOME and does not scan os.homedir()', () => {
+    const profile = mkdtempSync(join(tmpdir(), 'sc-oc-home-'));
+    const previous = process.env.OPENCLAW_HOME;
+    try {
+      process.env.OPENCLAW_HOME = profile;
+      const report = deepClean.scanForResidue();
+      const scannedPaths = report.paths.map((p) =>
+        p.removal.kind === 'delete-directory' || p.removal.kind === 'report-only'
+          ? p.removal.path
+          : p.removal.file,
+      );
+      expect(scannedPaths.some((p) => p.startsWith(join(profile, '.openclaw')))).toBe(true);
+      expect(scannedPaths.some((p) => p.startsWith(join(homedir(), '.openclaw')))).toBe(false);
+      expect(execSyncMock).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.OPENCLAW_HOME;
+      else process.env.OPENCLAW_HOME = previous;
+      rmSync(profile, { recursive: true, force: true });
     }
   });
 });

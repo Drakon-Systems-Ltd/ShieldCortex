@@ -1,4 +1,7 @@
 import { describe, it, expect } from '@jest/globals';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import {
   applyOpenClawCliGate,
   checkOpenClawConfigValid,
@@ -289,5 +292,19 @@ describe('#221 — the gate must not over-reach', () => {
     // failure would make a blocked host look healthier than it is.
     expect(gated.map(r => r.status)).toEqual(results.map(r => r.status));
     expect(gated).toHaveLength(results.length);
+  });
+});
+
+describe('#1115 doctor residue advice does not claim a filesystem purge of a managed plugin', () => {
+  it('the live fix text says a still-registered managed plugin is left in place', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cli', 'doctor.ts'),
+      'utf-8',
+    );
+    const start = src.indexOf('a managed plugin that is still registered is left in place');
+    expect(start).toBeGreaterThan(-1);
+    const slice = src.slice(Math.max(0, start - 400), start + 800);
+    expect(slice).toContain('It does not delete a managed npm project');
+    expect(slice).not.toContain('pure filesystem — this half still works');
   });
 });
