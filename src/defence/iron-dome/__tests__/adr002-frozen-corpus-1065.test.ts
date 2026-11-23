@@ -24,6 +24,7 @@
  */
 import { describe, expect, it } from '@jest/globals';
 import { evaluateToolCall } from '../tool-action-guard.js';
+import { detectMemoryDirective, memoryCandidateText } from '../../firewall/memory-directive-policy.js';
 import { EPIC_LINES, FROZEN_CORPUS } from './fixtures/adr002/index.js';
 import type { FrozenFixture } from './fixtures/adr002/types.js';
 
@@ -126,6 +127,12 @@ function reportGrowth(f: FrozenFixture): void {
 }
 
 const executable = FROZEN_CORPUS.filter((f) => f.status !== 'note');
+
+function byId(id: string): FrozenFixture {
+  const f = FROZEN_CORPUS.find((x) => x.id === id);
+  if (!f) throw new Error(`no fixture ${id}`);
+  return f;
+}
 const notes = FROZEN_CORPUS.filter((f) => f.status === 'note');
 
 describe('#1065 frozen corpus — fixture shape', () => {
@@ -167,6 +174,18 @@ describe('#1065 frozen corpus — against the classifier on main', () => {
     run(`[${f.status}] ${f.id} — ${f.what}`, () => assertVerdict(f));
   }
 
+  // `it.failing` passes whenever ANY assertion throws, so on its own it would
+  // also stay green if evaluation threw, or if a partial Guard change carded
+  // the write at the wrong tier or without the signal. This ordinary test pins
+  // today's Action Guard verdict for the memory-directive row, so any movement
+  // shows: when the Guard change lands, this test and the marker go together.
+  it('[known-gap pin] 1005/persist-memory-directive — today the Action Guard allows it: allow / benign / no signal', () => {
+    const f = byId('1005/persist-memory-directive');
+    const o = observe(f.tool!, f.args!, f.files);
+    expect({ decision: o.decision, severity: o.severity, signals: o.signals })
+      .toEqual({ decision: 'allow', severity: 'benign', signals: [] });
+  });
+
   // Cost fixtures: no clock in the default suite. A `known-gap` cost fixture
   // is therefore NOT held by `it.failing`; the change that closes it removes
   // the marker on the strength of the report below and its own deterministic
@@ -176,6 +195,34 @@ describe('#1065 frozen corpus — against the classifier on main', () => {
     it(`[${f.status}, cost: input shape only] ${f.id} — input grows linearly with size`, () => assertLinearInput(f));
     const measure = REPORT ? it : it.skip;
     measure(`[report only, asserts nothing] ${f.id} — growth per doubling (ADR002_CORPUS_REPORT=1)`, () => reportGrowth(f), 120_000);
+  }
+});
+
+// The memory-directive rows' screen claim, held by ordinary tests (separate
+// from the `it.failing` Guard row). The candidate is built the way the MCP
+// `remember` admission builds it: `analyzeFirewall` screens
+// `memoryCandidateText(title, content)`, which is `title + "\n" + content`
+// when both are present. A screen regression in either direction (the
+// directive no longer detected, or a control newly detected) fails the suite.
+describe('#1005 memory-directive rows — today\'s memory-directive screen', () => {
+  const rows: Array<{ id: string; detected: boolean }> = [
+    { id: '1005/persist-memory-directive', detected: true },
+    { id: '1005/persist-memory-preference-control', detected: false },
+    { id: '1005/persist-memory-runbook-control', detected: false },
+    { id: '1005/persist-memory-incident-quote-control', detected: false },
+  ];
+  for (const row of rows) {
+    it(`${row.id} — detectMemoryDirective(title + "\\n" + content).detected is ${row.detected}`, () => {
+      const f = byId(row.id);
+      expect(f.tool).toBe('mcp__shieldcortex__remember');
+      const { title, content } = f.args as { title: string; content: string };
+      const candidate = memoryCandidateText(title, content);
+      expect(candidate).toBe(`${title}\n${content}`);
+      const r = detectMemoryDirective(candidate);
+      expect({ id: row.id, detected: r.detected }).toEqual({ id: row.id, detected: row.detected });
+      if (row.detected) expect(r.patterns.length).toBeGreaterThan(0);
+      else expect(r.patterns).toEqual([]);
+    });
   }
 });
 

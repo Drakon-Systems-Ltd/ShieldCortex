@@ -18,7 +18,9 @@
  * and the two credential-store exfil fixtures since #1104. #1005's epic line
  * stays unchecked: the credential-named-variable exfil fixture is still
  * `known-gap` (#1065 Phase 2), the memory-directive fixture is `known-gap`
- * until the guard change that screens memory writes lands, its other labels
+ * on the Action Guard plane until the Guard change that screens memory writes
+ * lands (the memory pipeline already quarantines it on MCP `remember`), its
+ * other labels
  * have no fixture yet, and the Read-tool credential control is
  * `pending-decision`.
  */
