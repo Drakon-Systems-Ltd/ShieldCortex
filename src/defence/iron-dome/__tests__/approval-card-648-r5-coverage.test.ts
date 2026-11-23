@@ -177,7 +177,11 @@ describe('#648 r5 R1 — property: WHAT covers every signal class or is generic;
       if (signals.some((s) => signalClass(s) === 'send')) expect(reason.startsWith(describeSignal(signals.find((s) => signalClass(s) === 'send')!))).toBe(true);
       const lines = formatApprovalCardLines({ action: d.text, reason, who: 'Claude Code on ci-box' }, { expiresInMs: 600_000, budget: 256 }).join('\n');
       expect(lines.length).toBeLessThanOrEqual(256);
-      if (signals.includes('external-egress')) expect(lines).toContain(`Why: ${EGRESS}`);
+      // The Why line leads with the first send-class reason (as `reason` does above):
+      // `external-egress` when it is the first send, otherwise the earlier send's phrase.
+      const firstSend = signals.find((s) => signalClass(s) === 'send');
+      if (firstSend === 'external-egress') expect(lines).toContain(`Why: ${EGRESS}`);
+      else if (firstSend !== undefined) expect(lines).toContain(`Why: ${describeSignal(firstSend)}`);
     }
     // The generator must exercise the specific path, not only the generic one.
     expect(specific).toBeGreaterThan(RUNS / 10);

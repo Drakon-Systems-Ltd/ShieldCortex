@@ -13,8 +13,11 @@
  * when the last line is covered and the marker has not been removed.
  * 2 of 20 epic lines have a fixture. #519's is a cost fixture, whose growth
  * measurement is an opt-in report; #1005's are verdict fixtures. The SCN-009
- * reverse-shell fixtures are `settled` since #1088; #1005's other labels
- * (SCN-008 part A) are still `known-gap`, so its epic line stays unchecked.
+ * reverse-shell fixtures are `settled` since #1088 and the two SCN-008 part A
+ * credential-store exfil fixtures since #1104. #1005's epic line stays
+ * unchecked: the credential-named-variable exfil fixture is still `known-gap`
+ * (#1065 Phase 2), its other labels have no fixture yet, and the Read-tool
+ * credential control (SCN-008c) is `pending-decision`.
  */
 import type { FrozenFixture } from './types.js';
 import { PHASE1_FIXTURES } from './phase1.js';

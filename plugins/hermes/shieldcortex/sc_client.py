@@ -123,7 +123,17 @@ _FALLBACK_DANGEROUS = [
     _FALLBACK_DESTROY_ROW,
     _FALLBACK_REVERSE_SHELL_ROW,
     # #505: `.ssh` behind any home root + `authorized_keys` as a path segment — mirrors the guard row.
-    re.compile(r"/etc/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|/home/[^\s/'\"]+|/root|/Users/[^\s/'\"]+)/\.ssh(?![\w.-])|(?:^|[\s'\"=:/])\.ssh/authorized_keys2?\b|/authorized_keys2?\b|id_rsa|\.aws/credentials|\.env\b", re.I),
+    # #1005: plus the named credential stores (the guard's CREDENTIAL_STORE_PATH_SRC).
+    # fold r3: JS semantics (re.ASCII; \s spelt as JS's whitespace set), so a non-ASCII
+    # suffix (`.pgpass` then CJK text) reads as it does on the hook and interceptor.
+    # fold A1: one store boundary, as the guard's (its attached `-T.netrc` operand start is
+    # now fold A2c's option word, below).
+    # fold A2: the shared `/+(?:\./+)*` separator inside store names, the four home-anchored
+    # store directories as an operand only, and an id_* key under `.ssh/` on an absolute path that is not a home `.ssh` dir.
+    # fold A2c: the attached-operand start is an option WORD (a single `-` and a run of ASCII
+    # letters, optionally quote-opened or backslash-escaped), consumed from the dash: JS's form too,
+    # since a variable-length lookbehind would rescan the run (and Python has none).
+    re.compile(r"/etc/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|/home/[^\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff/'\"]+|/root|/Users/[^\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff/'\"]+)/\.ssh(?![\w.-])|(?:^|[\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'\"=:/])\.ssh/authorized_keys2?\b|/authorized_keys2?\b|id_rsa|\.aws/credentials|\.env\b|(?:(?:(?<![\w.-])|(?:^|(?<=[\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]))(?:['\"]-[A-Za-z]+|\\?-(?:\\?[A-Za-z])+))(?:\.netrc|_netrc|\.git-credentials|\.config/+(?:\./+)*gh/+(?:\./+)*hosts\.ya?ml|\.docker/+(?:\./+)*config\.json|\.pgpass|\.pypirc|\.vault-token|application_default_credentials\.json|\.config/+(?:\./+)*gcloud/+(?:\./+)*(?:credentials|access_tokens)\.db|\.azure/+(?:\./+)*(?:accessTokens\.json|msal_token_cache\.(?:json|bin))|\.secrets?|(?<!\.ssh/)id_(?:ed25519|ecdsa|dsa))(?![\w.-])|(?:~|\$\{?HOME\}?|/home/[^\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff/'\"]+|/root|/Users/[^\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff/'\"]+)/+(?:\./+)*(?:\.config/+(?:\./+)*(?:gh|gcloud)|\.docker|\.azure)(?:/+(?:\./+)*(?:[*?\[{]|\.(?![\w./-])|(?![\w./-]))|(?![\w./-]))|(?:^|(?<=[\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'\"=:<>|;&()\x60])|(?:^|(?<=[\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]))(?:['\"]-[A-Za-z]+|\\?-(?:\\?[A-Za-z])+))/(?!(?:home/[^\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff/'\"]+|Users/[^\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff/'\"]+|root)/+(?:\./+)*\.ssh/)(?:[^\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff/'\"=:<>|;&()\x60]+/+)*\.ssh/+(?:\./+)*id_(?:ed25519|ecdsa|dsa)(?![\w.-]))", re.I | re.ASCII),
     # #505: a shell write shape onto a login/interactive startup file — mirrors the guard row.
     re.compile(
         r"(?:(?:>>?|>\|)(?:[ \t]|\\\n)*|\btee\b(?:(?:[ \t]|\\\n)+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|\"[^\"\n]*\"|[^\s'\"|;&<>\\-][^\s'\"|;&<>\\]*))*(?:[ \t]|\\\n)+|\bsed\b(?=[^|;&\n]*[ \t](?:-[a-zA-Z]*i|--in-place))[^|;&\n]*(?:[ \t]|\\\n)+)['\"]?(?:[^\s'\"|;&<>]*/)?"
