@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **The memory-capture hook's own audit rows are now part of the chained ledger (#1140).** When the capture hook refused an auto-captured candidate, or could not run the defence pipeline, it wrote its `defence_audit` row with a plain INSERT that carried no chain columns. On a database whose chained ledger had already started, every such row made `shieldcortex ledger verify` report the ledger as inconsistent (`unchained-row-after-start`), even though nothing had been tampered with. These rows now go through the same chained writer as every other audit row, with the same columns and values as before. If the chain has started and the compiled chained writer cannot be loaded (the `dist` build is missing), the hook writes no audit row rather than an unchained one; the capture is still dropped and the line it prints on stderr is the record. On a database with no chain yet, the row is written as before. Rows written by earlier versions are not changed by this fix, so a ledger that already holds them still reports them.
+
 ## [5.22.1] - 2026-11-23
 
 This release publishes the changes tagged as 5.22.0, with corrected release notes; 5.22.0 itself was never published to npm. It makes Action Guard ask before a command reads, writes or uploads a credential store. Action Guard is still off by default, so nothing changes unless you have turned it on.

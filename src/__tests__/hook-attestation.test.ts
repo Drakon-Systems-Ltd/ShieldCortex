@@ -125,8 +125,9 @@ describe('hook plane attestation', () => {
     //   - writeRefusalAudit — the L2 provenance floor refused an auto-captured
     //     candidate, which is a claim about the CANDIDATE, not about the hook
     //     that carried it.
-    // Both route through ONE INSERT (writeBlockAudit) so the two cannot drift,
-    // and that INSERT must not carry source_attested (schema default NULL).
+    // Both route through ONE writer (writeBlockAudit) so the two cannot drift,
+    // and neither its INSERT nor the values it hands the chained writer may
+    // carry source_attested (schema default NULL).
     // Textual pin on the shipped .mjs.
     const src = fs.readFileSync(path.join(repoRoot, 'scripts', 'lib', 'save-memory.mjs'), 'utf-8');
     const fnStart = src.indexOf('function writeBlockAudit');
@@ -137,6 +138,26 @@ describe('hook plane attestation', () => {
     expect(insertStart).toBeGreaterThan(-1);
     const insertStmt = fnBody.slice(insertStart, fnBody.indexOf(').run(', insertStart));
     expect(insertStmt).not.toContain('source_attested');
+    // #1140: the row's values are built once and handed to BOTH writers (the
+    // plain INSERT before a chain exists, the chained writer after), so the
+    // no-source_attested rule has to hold for that one object too. `operation`
+    // and `content_hash` stay absent as well: this row describes no stored
+    // content.
+    const valuesStart = fnBody.indexOf('const values = {');
+    expect(valuesStart).toBeGreaterThan(-1);
+    const valuesObj = fnBody.slice(valuesStart, fnBody.indexOf('};', valuesStart));
+    for (const column of ['source_attested', 'operation', 'content_hash']) {
+      expect(valuesObj).not.toContain(column);
+    }
+    // #1140: the plain INSERT is reachable only while no chain exists, and the
+    // chained database path goes through the chained writer with no plain
+    // INSERT after it (no unchained fallback on a chained database).
+    const chainCheck = fnBody.indexOf('if (ledgerChainStarted(db)) return true;');
+    expect(chainCheck).toBeGreaterThan(-1);
+    expect(chainCheck).toBeLessThan(insertStart);
+    const chainedWrite = fnBody.indexOf('_chainedAuditWriter.insert(db, values)');
+    expect(chainedWrite).toBeGreaterThan(insertStart);
+    expect(fnBody.indexOf('INSERT INTO', chainedWrite)).toBe(-1);
     // And the deliberate-NULL decision is documented where the next editor
     // will see it, so it isn't "fixed" into an accruing row later.
     expect(src.slice(0, fnStart + fnBody.length)).toMatch(/DELIBERATELY absent/);
