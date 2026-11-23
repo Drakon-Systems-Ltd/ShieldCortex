@@ -7,11 +7,16 @@
  * resolver against the package already present in this worktree, to prove the
  * helper follows import() rather than the CJS export. That is not a consumer
  * install receipt.
+ *
+ * The exports-target cases are private fixtures. A script inside the fixture
+ * calls import.meta.resolve and does not import the package. On this Node that
+ * call takes one argument and resolves from the calling module.
  */
+import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { afterEach, describe, expect, it } from '@jest/globals';
 import {
   checkModelCache,
@@ -27,7 +32,55 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const scratch: string[] = [];
 
 function present(): string {
-  return 'file:///virtual/node_modules/@huggingface/transformers/dist/transformers.node.mjs';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-1108-present-'));
+  scratch.push(dir);
+  const file = path.join(dir, 'transformers.node.mjs');
+  fs.writeFileSync(file, 'export {};\n');
+  return pathToFileURL(file).href;
+}
+
+/**
+ * Private package with the installed package's node.import / node.require
+ * export shape. The resolver is that package's own import.meta.resolve, not a
+ * hand-written path. It never imports the module and never downloads a model.
+ */
+function exportsFixture(esmFile: boolean): {
+  resolve: (spec: string) => string;
+  esmPath: string;
+  cjsPath: string;
+} {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-1108-exports-'));
+  scratch.push(root);
+  fs.mkdirSync(path.join(root, 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+    name: '@huggingface/transformers',
+    private: true,
+    type: 'module',
+    exports: {
+      node: {
+        import: { default: './dist/transformers.node.mjs' },
+        require: { default: './dist/transformers.node.cjs' },
+      },
+      default: { default: './dist/transformers.web.js' },
+    },
+  }));
+  const esmPath = path.join(root, 'dist', 'transformers.node.mjs');
+  const cjsPath = path.join(root, 'dist', 'transformers.node.cjs');
+  if (esmFile) fs.writeFileSync(esmPath, 'export {};\n');
+  const script = path.join(root, 'resolve-entry.mjs');
+  fs.writeFileSync(script, 'process.stdout.write(import.meta.resolve(process.argv[2]));\n');
+  const resolve = (spec: string): string => {
+    const out = spawnSync(process.execPath, [script, spec], {
+      encoding: 'utf8',
+      cwd: root,
+      env: { PATH: '/usr/bin:/bin' },
+    });
+    if (out.status !== 0 || typeof out.stdout !== 'string' || out.stdout.length === 0) {
+      throw new Error(out.stderr || `could not resolve ${spec}`);
+    }
+    return out.stdout;
+  };
+  return { resolve, esmPath, cjsPath };
 }
 
 function absent(): string {
@@ -117,15 +170,98 @@ describe('#1108 optional ML doctor diagnosis', () => {
     }
   });
 
-  it('any non-empty resolved string is presence; the path is not re-read as CJS or ESM', async () => {
+  it('a missing exported ESM entry is an unavailable install, not a present package', async () => {
+    const fixture = exportsFixture(false);
+    const resolved = fixture.resolve('@huggingface/transformers');
+    expect(resolved).toContain('transformers.node.mjs');
+    expect(resolved).not.toContain('transformers.node.cjs');
+    expect(fs.existsSync(new URL(resolved))).toBe(false);
+    expect(fs.existsSync(fixture.cjsPath)).toBe(false);
+
+    const env = { SHIELDCORTEX_MODEL_DIR: path.join(os.tmpdir(), 'sc-1108-absent-cache') };
+    const row = await checkOptionalMlStack({ env, resolve: fixture.resolve });
+    expect(row.status).toBe('fail');
+    expect(row.message).toContain(MISSING);
+    expect(row.message).toMatch(/semantic recall cannot load/);
+    expect(row.message).not.toMatch(/will download/);
+    expect(doctorExitCode([row])).toBe(1);
+
+    const cache = await checkModelCache({ env, resolve: fixture.resolve });
+    expect(cache.status).toBe('info');
+    expect(cache.message).not.toContain('will download');
+    expect(cache.message).not.toMatch(/embed-backfill/);
+    expect(cache.message).toMatch(/Optional ML stack/);
+
+    const coverage = await checkSemanticCoverageAt(path.join(os.tmpdir(), 'no-such-1108.db'), {
+      env,
+      resolve: fixture.resolve,
+    });
+    expect(coverage.status).toBe('pass');
+    expect(coverage.fix).toBeUndefined();
+    expect(coverage.message).not.toMatch(/embed-backfill/);
+    expect(coverage.message).not.toMatch(/will download|would download/);
+    expect(coverage.message).toMatch(/Optional ML stack/);
+  });
+
+  it('exact skip=1 stays an informational opt-out when the exported ESM entry is missing', async () => {
+    const fixture = exportsFixture(false);
     const row = await checkOptionalMlStack({
+      env: { SHIELDCORTEX_SKIP_EMBEDDINGS: '1' },
+      resolve: fixture.resolve,
+    });
+    expect(row.status).toBe('info');
+    expect(row.message).not.toContain(MISSING);
+    expect(row.message).toMatch(/SHIELDCORTEX_SKIP_EMBEDDINGS=1/);
+    expect(doctorExitCode([row])).toBe(0);
+    expect(doctorExitCode([row], { strict: true })).toBe(0);
+    for (const value of ['0', 'true', 'yes', '', '1 ']) {
+      const notSkip = await checkOptionalMlStack({
+        env: { SHIELDCORTEX_SKIP_EMBEDDINGS: value },
+        resolve: fixture.resolve,
+      });
+      expect(notSkip.status).toBe('fail');
+      expect(notSkip.message).toContain(MISSING);
+    }
+  });
+
+  it('a missing unused CJS entry does not hide a present ESM entry', async () => {
+    const fixture = exportsFixture(true);
+    const resolved = fixture.resolve('@huggingface/transformers');
+    expect(resolved).toContain('transformers.node.mjs');
+    expect(resolved).not.toContain('transformers.node.cjs');
+    expect(fs.statSync(new URL(resolved)).isFile()).toBe(true);
+    expect(fs.existsSync(fixture.cjsPath)).toBe(false);
+
+    const row = await checkOptionalMlStack({ env: {}, resolve: fixture.resolve });
+    expect(row.status).toBe('pass');
+    expect(row.message).toMatch(/@huggingface\/transformers is installed/);
+    expect(row.message).not.toContain(MISSING);
+    expect(doctorExitCode([row])).toBe(0);
+  });
+
+  it('a resolved path is presence only when that local file exists', async () => {
+    const missingUrl = pathToFileURL(path.join(os.tmpdir(), 'sc-1108-absent-entry.mjs')).href;
+    const missing = await checkOptionalMlStack({ env: {}, resolve: () => missingUrl });
+    expect(missing.status).toBe('fail');
+    expect(missing.message).toContain(MISSING);
+
+    const bare = await checkOptionalMlStack({
       env: {},
       resolve: () => '/virtual/transformers.node.cjs',
     });
-    expect(row.status).toBe('pass');
+    expect(bare.status).toBe('fail');
+    expect(bare.message).toContain(MISSING);
+
     const empty = await checkOptionalMlStack({ env: {}, resolve: () => '' });
     expect(empty.status).toBe('fail');
     expect(empty.message).toContain(MISSING);
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-1108-file-'));
+    scratch.push(dir);
+    const file = path.join(dir, 'transformers.node.mjs');
+    fs.writeFileSync(file, 'export {};\n');
+    const ok = await checkOptionalMlStack({ env: {}, resolve: () => pathToFileURL(file).href });
+    expect(ok.status).toBe('pass');
   });
 
   it('embeddings row does not promise a download when the package is missing', async () => {

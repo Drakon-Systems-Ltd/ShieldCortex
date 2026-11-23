@@ -2030,12 +2030,13 @@ async function checkSemanticCoverage(): Promise<CheckResult> {
 /**
  * Coverage advice is only offered when an embed-backfill could actually run.
  *
- * #1108: if the optional embeddings package cannot be resolved, or embeddings
- * were turned off with SHIELDCORTEX_SKIP_EMBEDDINGS=1, this row does not
- * recommend a backfill and does not promise a download. That fault belongs
- * to the Optional ML stack row (or to the intentional opt-out), not to the
- * cache. The package stays optional; the flag is not treated as disabling
- * any defence path that does not itself honour it.
+ * #1108: if the optional embeddings package cannot be resolved, or the ESM entry
+ * it resolves to is not a file, or embeddings were turned off with
+ * SHIELDCORTEX_SKIP_EMBEDDINGS=1, this row does not recommend a backfill and
+ * does not promise a download. That fault belongs to the Optional ML stack row
+ * (or to the intentional opt-out), not to the cache. The package stays
+ * optional; the flag is not treated as disabling any defence path that does
+ * not itself honour it.
  *
  * #632: the prerequisite is the worker's own configuration (root, offline flag
  * and HF_ENDPOINT) plus the cache it points at, from the same readiness helper
@@ -9794,8 +9795,10 @@ export interface OptionalMlProbe {
  * points at dist/transformers.node.cjs. Both files exist in the pinned 3.8.1,
  * so a require-resolve would pass on a complete install, but a missing CJS
  * entry must not be reported as a missing package while the ESM entry the
- * runtime imports still resolves. On this Node, import.meta.resolve takes one
- * argument and resolves from the calling module (dist/cli/doctor.js once built).
+ * runtime imports is a file on disk. Resolution is not presence:
+ * import.meta.resolve returns a file URL for an exports target even when that
+ * file is absent. On this Node, import.meta.resolve takes one argument and
+ * resolves from the calling module (dist/cli/doctor.js once built).
  */
 export function resolveOptionalMlPackage(resolve?: OptionalMlResolve): string {
   return (resolve ?? defaultResolveOptionalMlPackage)(OPTIONAL_ML_PACKAGE);
@@ -9810,19 +9813,40 @@ function embeddingsIntentionallyDisabled(env?: Record<string, string | undefined
   return (env ?? process.env).SHIELDCORTEX_SKIP_EMBEDDINGS === '1';
 }
 
+/**
+ * A nonempty resolved string is not an install. The ESM target has to be a
+ * local file. This stats that file. It does not import the module, load onnx,
+ * or download anything. A missing export is the same unavailable install as a
+ * resolve that throws.
+ */
+function resolvedOptionalMlFileExists(resolved: string): boolean {
+  if (typeof resolved !== 'string' || resolved.length === 0) return false;
+  try {
+    const fileUrl = resolved.startsWith('file:')
+      ? new URL(resolved)
+      : path.isAbsolute(resolved)
+        ? pathToFileURL(resolved)
+        : null;
+    if (fileUrl === null || fileUrl.protocol !== 'file:') return false;
+    return fs.statSync(fileUrl).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function optionalMlPackagePresent(resolve?: OptionalMlResolve): boolean {
   try {
-    const hit = resolveOptionalMlPackage(resolve);
-    return typeof hit === 'string' && hit.length > 0;
+    return resolvedOptionalMlFileExists(resolveOptionalMlPackage(resolve));
   } catch {
     return false;
   }
 }
 
 /**
- * Shared gate for the cache and coverage rows. One resolvability helper, not
- * a second copy of the resolve call. 'disabled' wins over 'missing': an
- * intentional opt-out is not a failed install.
+ * Shared gate for the cache and coverage rows. One presence helper, not a
+ * second copy of the resolve call. 'disabled' wins over 'missing': an
+ * intentional opt-out is not a failed install. A missing exported file is
+ * 'missing', so those rows do not promise a download.
  */
 function optionalMlUseBlock(opts: OptionalMlProbe = {}): 'missing' | 'disabled' | null {
   if (embeddingsIntentionallyDisabled(opts.env)) return 'disabled';
@@ -9833,7 +9857,9 @@ function optionalMlUseBlock(opts: OptionalMlProbe = {}): 'missing' | 'disabled' 
 /**
  * #1108. A missing optional package used to leave doctor at exit 0, with the
  * Embeddings row promising a download that cannot happen. This row is the
- * named install failure. It does not inspect the cache and it does not open
+ * named install failure. A resolved exports target that is not a file on disk
+ * is that same failure: the package metadata can survive without the module
+ * the worker would import. It does not inspect the cache and it does not open
  * the database — those are different faults.
  *
  * SHIELDCORTEX_SKIP_EMBEDDINGS=1 is the documented opt-out (generator.ts
@@ -9895,9 +9921,10 @@ export async function checkModelCache(
   // #632: root, offline flag and HF_ENDPOINT come from the worker's resolver.
   // Files on disk are not inference — the message never claims it is active.
   // #1108: do not inspect, and do not promise a download, when the package
-  // cannot be resolved or embeddings were intentionally turned off. One fail
-  // lives on the Optional ML stack row; this row must not invent a second,
-  // and it must not relabel a missing package as a corrupt cache.
+  // cannot be resolved, the resolved ESM entry is not a file, or embeddings
+  // were intentionally turned off. One fail lives on the Optional ML stack
+  // row; this row must not invent a second, and it must not relabel a missing
+  // package as a corrupt cache.
   const blocked = optionalMlUseBlock(opts);
   if (blocked === 'missing') {
     return {
