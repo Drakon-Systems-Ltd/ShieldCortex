@@ -319,6 +319,8 @@ describe('#1140: hook-written BLOCK rows are chained once the chain has started'
 
   it('chain started, two overlapping first calls in one process: both rows are chained and linked', () => {
     const dbPath = makeDb('overlap.db', { chain: true });
+    const before = inspect(dbPath);
+    expect(before.rows).toHaveLength(0);
 
     // Both calls start before either has loaded the chained writer, and the
     // writer takes SLOW_CHAIN_LOAD_MS to load. The second call must wait for
@@ -342,7 +344,7 @@ describe('#1140: hook-written BLOCK rows are chained once the chain has started'
     expect(rows[1].prev_hash).toBe(rows[0].row_hash);
     expect(report.problems).toEqual([]);
     expect(report.status).toBe('consistent');
-    expect(report.chainedRows).toBe(2);
+    expect(report.chainedRows).toBe(before.report.chainedRows + 2);
   }, CASE_MS);
 
   it('chain started, two overlapping first calls, chained writer not loadable: still no row', () => {

@@ -1068,24 +1068,36 @@ let _getDatabase = null;
 // defence modules, so writeBlockAudit can stay synchronous.
 let _chainedAuditWriter = null;
 let _chainedAuditWriterKey = null;
+// The load itself, in flight or settled. Calls that overlap share it: a second
+// call that arrives while the first is still importing must wait for that
+// import, not return early and find `_chainedAuditWriter` still null — which on
+// a chained database would mean its audit row is silently not written.
+let _chainedAuditWriterLoad = null;
 
-async function loadChainedAuditWriter(distRoot) {
-  if (_chainedAuditWriterKey === distRoot) return;
+/** Resolves once the writer for `distRoot` has loaded or is known absent. Never rejects. */
+function loadChainedAuditWriter(distRoot) {
+  if (_chainedAuditWriterKey === distRoot && _chainedAuditWriterLoad) return _chainedAuditWriterLoad;
   _chainedAuditWriterKey = distRoot;
   _chainedAuditWriter = null;
-  try {
-    const chainUrl = pathToFileURL(resolve(distRoot, 'defence', 'ledger', 'chain.js')).href;
-    const chainMod = await import(chainUrl);
-    if (typeof chainMod.insertChainedAuditRow === 'function') {
-      _chainedAuditWriter = {
-        insert: chainMod.insertChainedAuditRow,
-        noteFailure:
-          typeof chainMod.noteAuditWriteFailure === 'function' ? chainMod.noteAuditWriteFailure : null,
-      };
+  _chainedAuditWriterLoad = (async () => {
+    let writer = null;
+    try {
+      const chainUrl = pathToFileURL(resolve(distRoot, 'defence', 'ledger', 'chain.js')).href;
+      const chainMod = await import(chainUrl);
+      if (typeof chainMod.insertChainedAuditRow === 'function') {
+        writer = {
+          insert: chainMod.insertChainedAuditRow,
+          noteFailure:
+            typeof chainMod.noteAuditWriteFailure === 'function' ? chainMod.noteAuditWriteFailure : null,
+        };
+      }
+    } catch {
+      // Absent or unloadable: writeBlockAudit writes no row on a chained database.
     }
-  } catch {
-    // Absent or unloadable: writeBlockAudit writes no row on a chained database.
-  }
+    // A load superseded by one for another dist root must not publish its result.
+    if (_chainedAuditWriterKey === distRoot) _chainedAuditWriter = writer;
+  })();
+  return _chainedAuditWriterLoad;
 }
 
 async function loadDefenceModules(db) {
