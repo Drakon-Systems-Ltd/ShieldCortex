@@ -830,8 +830,13 @@ const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlog
 // (`tar czf s.tgz ~/.secrets`) and anything under it, never `docs/my.secrets/`.
 // An `id_ed25519`/`id_ecdsa`/`id_dsa` basename counts outside a `.ssh/`
 // directory, and under one only on a non-home absolute path (fold A2, C10
-// below): a home-rooted `~/.ssh/…` is the SSH_DIR rule's, and a bare
-// relative `.ssh/…` stays judged as before (#874/#920 relative-path refusal).
+// below): a home-rooted `~/.ssh/…` is the SSH_DIR rule's, and a relative key
+// written directly after `.ssh/` (`.ssh/id_ed25519`, `./.ssh/id_ecdsa`) stays
+// judged as before (#874/#920 relative-path refusal). That exclusion is a
+// spelling check (a `.ssh/` lookbehind), not a directory-segment check: a
+// relative key with `//` or `/./` between `.ssh` and the key
+// (`.ssh//id_ed25519`, `.ssh/./id_ecdsa`) is read as a key outside `.ssh/`
+// and asks. That is stricter than origin/main, on purpose; no ask is lost.
 // `~/.kube/config` and `.npmrc` are left out on purpose: routine kubectl and
 // registry work names them on almost every call.
 // Each store name is a WHOLE filename, with ONE boundary for every store
@@ -859,9 +864,12 @@ const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlog
 // `hosts.yml.bak`) is not the store; only the named store files are.
 // C10: an `id_ed25519`/`id_ecdsa`/`id_dsa` key under a `.ssh/` segment of an
 // ABSOLUTE path that starts at a token start (`/opt/agent/.ssh/id_ed25519`).
-// A home `.ssh` directory in any spelling (`~/./.ssh`, `$HOME/…`,
-// `/home/<u>//.ssh`, `/root/./.ssh`) stays the SSH_DIR rule's, and a relative
-// `.ssh/id_*` stays judged as before (#874/#920); `.pub` is still excluded.
+// A home `.ssh` directory is left out of C10 in any spelling (`~/./.ssh`,
+// `$HOME/…`, `/home/<u>//.ssh`, `/root/./.ssh`), but the SSH_DIR rule only
+// matches the canonical `<home>/.ssh`, so an `id_ed25519`/`id_ecdsa`/`id_dsa`
+// key under a non-canonical home spelling is ALLOWED (known gap, #1065;
+// `id_rsa` still asks by name). A relative `.ssh/id_*` is as described above
+// (#874/#920; the `//` and `/./` spellings ask); `.pub` is still excluded.
 // Fold A2c: the attached-operand start is an option WORD, not one letter. A
 // word that opens with a single `-` and a run of ASCII letters starts a store
 // name after ANY letter of the run, so a short-option cluster with the operand
