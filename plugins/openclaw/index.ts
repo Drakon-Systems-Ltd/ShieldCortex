@@ -431,6 +431,9 @@ export function __setRuntimeForTest(runtime: OpenClawRuntime | null): void {
 export function __loadConfigForTest(): Promise<SCConfig> {
   return loadConfig();
 }
+export function __isDefenceModuleDistrustedForTest(): boolean {
+  return _defenceModuleDistrusted;
+}
 export function __resetConfigStateForTest(): void {
   _mergedConfig = null;
   _configOverride = null;
@@ -2253,7 +2256,10 @@ async function applyPolicyLockToPluginConfig(config: SCConfig): Promise<SCConfig
     // to a plugin load. Shaped as a raw config view so the ONE precedence
     // implementation in dist does the work.
     const view = { actionGuard: { ...(config.interceptor?.actionGuard ?? {}) } } as Record<string, unknown>;
-    const verdict = mod.readPolicyLock({ audit: false }) as { status?: string } | undefined;
+    const verdict = mod.readPolicyLock({ audit: false }) as {
+      status?: string;
+      policy?: { actionGuard?: { enabled?: boolean; enforce?: boolean; broker?: { enabled?: boolean }; autoApprove?: unknown; reviewedScripts?: unknown } };
+    } | undefined;
     // #501 review BLOCK-1, mirrored from the hook: a reader that LOADS and lies
     // is treated exactly like one that could not be loaded at all. The hook's
     // copy of this closed a real `SHIELDCORTEX_DIST_ROOT` bypass; this copy
@@ -2263,13 +2269,39 @@ async function applyPolicyLockToPluginConfig(config: SCConfig): Promise<SCConfig
     if ((status === undefined || status === 'absent' || status === 'unsupported') && inlinePolicyLockPresent()) {
       return failClosed();
     }
+    // Capture only primitive evidence before either the applier or its result
+    // accessor can change the input view or the reader's verdict.
+    const isBlock = (value: unknown): value is Record<string, unknown> =>
+      value !== null && typeof value === 'object' && !Array.isArray(value);
+    const policy: unknown = verdict?.policy;
+    const pin = isBlock(policy) ? policy.actionGuard : undefined;
+    const broker = isBlock(pin) ? pin.broker : undefined;
+    const validPins = isBlock(policy)
+      && (pin === undefined || (isBlock(pin)
+        && (pin.enabled === undefined || typeof pin.enabled === 'boolean')
+        && (pin.enforce === undefined || typeof pin.enforce === 'boolean')
+        && (pin.broker === undefined || (isBlock(broker)
+          && (broker.enabled === undefined || typeof broker.enabled === 'boolean')))));
+    const emptyGuardExpected = status === 'locked' && validPins
+      && Object.keys(view.actionGuard as Record<string, unknown>).length === 0
+      && (!isBlock(pin) || (pin.enabled !== true && pin.enforce !== true
+        && (!isBlock(broker) || broker.enabled !== false)
+        && pin.autoApprove === undefined && pin.reviewedScripts === undefined));
     const locked = mod.applyPolicyLock(view, verdict);
-    // The reader answered, and it agreed with the inline probe. Trust
-    // restored (a `repair` mid-process must not stay latched into the
-    // degraded path).
-    _defenceModuleDistrusted = false;
     const guard = locked.actionGuard;
-    if (!guard || typeof guard !== 'object' || Array.isArray(guard)) return config;
+    // A partial lock can leave an empty input guard untouched. Only accept an
+    // empty result when the reported policy has no pin that would add a guard
+    // key; a missing policy or a nonempty input still requires a guard result.
+    if (!guard || typeof guard !== 'object' || Array.isArray(guard)
+      || (Object.keys(guard).length === 0 && !emptyGuardExpected)) {
+      if (inlinePolicyLockPresent()) return failClosed();
+      _defenceModuleDistrusted = false;
+      return config;
+    }
+    // The reader answered, and it agreed with the inline probe. Trust
+    // restored only after the lock result includes a usable guard (a `repair`
+    // mid-process must not stay latched into the degraded path).
+    _defenceModuleDistrusted = false;
     return withGuardPosture(config, guard as Record<string, unknown>);
   } catch {
     // A reader that throws is treated exactly like a lock that cannot be
