@@ -1,6 +1,6 @@
 # ADR-002 frozen corpus (epic #1065, Phase 0)
 
-**State at this change: incomplete.** The fixture format, the test harness and the Phase 1 line (#519) are in the tree. The fixtures for the other nineteen epic lines are **not**, except one Phase 3 line: #1005, with the reverse-shell shapes (SCN-009), the SCN-008 part A exfil shapes, and their controls. 2 of 20 lines have a fixture. #519's is a cost fixture whose growth measurement is an opt-in report; #1005's are verdict fixtures, so #1005 is the only epic line whose classifier verdict the default suite asserts. Read "What is missing, and why" before relying on this corpus for anything.
+**State at this change: incomplete.** The fixture format, the test harness and the Phase 1 line (#519) are in the tree. The fixtures for the other nineteen epic lines are **not**, except one Phase 3 line and the Phase 4 line: #1005, with the reverse-shell shapes, the part A exfil shapes, the memory-directive shape, and their controls; and #556, with one note. 3 of 20 lines have a fixture. #519's is a cost fixture whose growth measurement is an opt-in report; #1005's are verdict fixtures, so #1005 is the only epic line whose classifier verdict the default suite asserts; #556's is a note and is never executed. Read "What is missing, and why" before relying on this corpus for anything.
 
 ## What it is
 
@@ -12,7 +12,8 @@ It is test data only. It lives under `src/defence/iron-dome/__tests__/fixtures/a
 |---|---|
 | `types.ts` | the fixture format: id, issue, phase, class, status, call, stub files, effects, targets, v3 decision, expectation |
 | `phase1.ts` | Phase 1 fixtures (#519) |
-| `phase3.ts` | Phase 3 fixtures (so far: #1005, SCN-009 reverse-shell and SCN-008 part A exfil shapes, and their controls) |
+| `phase3.ts` | Phase 3 fixtures (so far: #1005, the reverse-shell, part A exfil and memory-directive shapes, and their controls) |
+| `phase4.ts` | Phase 4 fixtures (so far: #556, one note) |
 | `index.ts` | the epic lines frozen on 12 Nov 2026, and the corpus assembled from the phase files |
 | `../adr002-frozen-corpus-1065.test.ts` | the suite |
 
@@ -47,10 +48,11 @@ The effect, target and v3 decision fields are recorded for the reviewer and for 
 | #629, #927, #512, #551 (also #549), #738, #958, #634, #874 | 2 | none yet |
 | #1005 (SCN-009 reverse-shell shapes) | 3 | 7 in `phase3.ts`: `1005/exec-nc-reverse`, `1005/exec-devtcp-reverse`, `1005/exec-ncat-e`, `1005/exec-socat-exec` (miss; expect `approval`, severity `dangerous`, signal `reverse-shell`; settled since the interim row in #1088, known-gap before it), and controls `1005/exec-nc-port-check-control`, `1005/exec-nc-localhost-control`, `1005/exec-docs-grep-control` (settled, allow) |
 | #1005 (SCN-008 part A exfil labels) | 3 | 6 in `phase3.ts`: `1005/exfil-read-secret-then-print`, `1005/exfil-curl-upload-secret` (miss; expect `approval`, severity `dangerous`, signal `touch-sensitive-path`; settled since the interim row in #1104, known-gap before it), `1005/exfil-env-secret-to-url` (miss; expect `approval`, severity `dangerous`, signal `env-credential-egress`, never `secret-egress`; known-gap: #1104 was split and that row moved to #1065 Phase 2). Controls `1005/exfil-get-no-secret-control`, `1005/exfil-upload-nonsecret-control` (settled, allow) and `1005/exfil-read-secret-no-egress-control` (the Read tool on a credential file, SCN-008c: `pending-decision`) |
-| #504, #703, #662, #995, #755, #929, #1049, #588, #1005 (labels other than SCN-009 and SCN-008 part A), #885 note | 3 | none yet |
-| #556 | 4 | none yet |
+| #1005 (memory-directive label) | 3 | 4 in `phase3.ts`: `1005/persist-memory-directive` (miss: a memory-tool write storing a standing directive that relaxes a confirmation and hides it from the user; expect `approval`, severity `dangerous`, signal `memory-directive`; known-gap: main allows every memory write, and it turns settled when the guard change that screens memory writes lands), and controls `1005/persist-memory-preference-control`, `1005/persist-memory-runbook-control`, `1005/persist-memory-incident-quote-control` (settled, allow; each also passes today's memory-directive screen undetected) |
+| #504, #703, #662, #995, #755, #929, #1049, #588, #1005 (labels with no fixture yet), #885 note | 3 | none yet |
+| #556 | 4 | 1 note in `phase4.ts`: `556/post-unrequested-provenance` (the unrequested-post label is a send-class provenance case: session taint bound to the egress effect and its recipient, audit flag first; never executed) |
 
-That is 2 of 20 epic lines. The suite prints this as one line (`[#1065] frozen corpus: ...`) and holds "every unchecked epic line maps to at least one fixture id" as a known-gap, so it cannot be forgotten: the test turns red when the last line is covered.
+That is 3 of 20 epic lines. The suite prints this as one line (`[#1065] frozen corpus: ...`) and holds "every unchecked epic line maps to at least one fixture id" as a known-gap, so it cannot be forgotten: the test turns red when the last line is covered.
 
 ## What is missing, and why
 
@@ -62,7 +64,7 @@ The remaining fixtures are not authored. Authoring is stopped. Where and whether
 
 What Phase 0 still lacks, for the record:
 
-1. The Phase 2 to 4 fixtures, written against `types.ts` and added to `index.ts`. None is in the tree, and none is to be added as a placeholder or stub.
+1. The Phase 2 to 4 fixtures for the lines the coverage table lists as "none yet", written against `types.ts` and added to `index.ts`. None of those is in the tree, and none is to be added as a placeholder or stub.
 2. A run of the suite with `ADR002_CORPUS_REPORT=1` to get the verdict `main` returns for every fixture, with each status set from that output, not from the issue text. In particular the #874 rows have not been re-run, and the ones that already pass are not yet recorded as `settled`.
 3. The `.failing` marker on the coverage test stays until the last epic line is covered.
 
@@ -91,9 +93,9 @@ All twenty-one issues were read in full on 12 Nov 2026 (bodies and every comment
 - **#929**: the hazard rows stay exactly as `main` returns them (verdict, severity and signal, per the 25 Oct note) and are already pinned in `guard-false-positive-fixtures-874.test.ts`. The intended-relief targets are `pending-decision`: the issue's own acceptance cannot both forbid any new allow and permit them.
 - **#1049**: items 1 to 3 are `pending-decision` (each says "decide whether" or "if that client matters"). Item 4 is a timing-tripwire flake and is a note. The Python `params` mismatch from the final panel is a miss.
 - **#588**: the escaped-operand write to a startup file is a miss on the exec surface. Write-time scanning of script content is `pending-decision`, as the epic line says; the run-time backstop is its control.
-- **#1005**, classed from the 7 Nov triage: env-secret-to-url and nc-reverse are guard-detectable; read-secret-then-print and curl-upload-secret are classification misses whose exact battery paths are private, so the public rows can only be controls on listed paths; read-secret-file is a taint case (Phase 4, flag first); memory-directive and post-unrequested are out of guard scope. nc-reverse is also a block-list scoping question, because the 20 Oct list does not name it and the contract rules out new detectors.
+- **#1005**, classed from the 7 Nov triage: env-secret-to-url and nc-reverse are guard-detectable; read-secret-then-print and curl-upload-secret are classification misses whose exact battery paths are private, so the public rows can only be controls on listed paths; read-secret-file is a taint case (Phase 4, flag first). memory-directive is guard-detectable at the memory sink (memory tools and memory markdown writes): a standing directive about a control asks for approval at the dangerous tier. Under v3 that is LOG by default and HOLD only where the owner has opted the box into enforce; it is not on the Section 3.5 always-block list the owner accepted on 22 Nov. post-unrequested is a send-class provenance case under #556 (Phase 4, taint as an audit flag first), not a guard detector. nc-reverse is also a block-list scoping question, because the 20 Oct list does not name it and the contract rules out new detectors.
 - **#885** is a note: the relief it guards (#882) never merged, so there is nothing on `main` to test. The rule it carries applies if that relief returns.
 
 **Phase 4**
 
-- **#556** is a note at Phase 0: the decision function's totality is a property test written with the function, and the measurement lives in `scripts/guard-effect-fixtures/` and `scripts/guard-policy-replay.mjs`.
+- **#556** is a note at Phase 0: the decision function's totality is a property test written with the function, and the measurement lives in `scripts/guard-effect-fixtures/` and `scripts/guard-policy-replay.mjs`. Its one fixture so far is the #1005 post-unrequested label, recorded as a note: whether a post or send was requested is a question of who asked, which is session taint bound to the egress effect and its recipient (v2 §2.2, v3 Section 3.4: an audit flag first, promotion to a hold a later owner decision on measured numbers). No posting-verb regex, and a single-call battery cannot express "unrequested". Its send to a variable sink is target resolution under #662, not provenance.
