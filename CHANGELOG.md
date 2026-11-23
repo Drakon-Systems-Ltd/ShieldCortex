@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **A rejected posture report stays in the host judgment when another report for the same runtime, profile and plane is current (#1135).** The collector already kept a trust-rejected self-report, such as a file with mode 0640, and did not age it out, but the rollup dropped that record beside a current sibling, so the host summary could be green. The rollup now judges that rejected record as unknown. Stale records, and validated reports the host has not verified, stay out of the judgment as before.
+
 ## [5.22.1] - 2026-11-23
 
 This release publishes the changes tagged as 5.22.0, with corrected release notes; 5.22.0 itself was never published to npm. It makes Action Guard ask before a command reads, writes or uploads a credential store. Action Guard is still off by default, so nothing changes unless you have turned it on.
