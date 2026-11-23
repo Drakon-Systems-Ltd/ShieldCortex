@@ -2030,6 +2030,13 @@ async function checkSemanticCoverage(): Promise<CheckResult> {
 /**
  * Coverage advice is only offered when an embed-backfill could actually run.
  *
+ * #1108: if the optional embeddings package cannot be resolved, or embeddings
+ * were turned off with SHIELDCORTEX_SKIP_EMBEDDINGS=1, this row does not
+ * recommend a backfill and does not promise a download. That fault belongs
+ * to the Optional ML stack row (or to the intentional opt-out), not to the
+ * cache. The package stays optional; the flag is not treated as disabling
+ * any defence path that does not itself honour it.
+ *
  * #632: the prerequisite is the worker's own configuration (root, offline flag
  * and HF_ENDPOINT) plus the cache it points at, from the same readiness helper
  * the hook gate uses. An invalid setting, or an offline cache that is missing,
@@ -2039,13 +2046,32 @@ async function checkSemanticCoverage(): Promise<CheckResult> {
  * download it); missing siblings online keep the pre-#632 behaviour.
  *
  * Exported with explicit env/home so tests drive the real check against a
- * fixture database and cache.
+ * fixture database and cache. An explicit `env` is the whole environment for
+ * the skip flag, matching inspectEmbeddingReadiness — not a patch on
+ * process.env. Omit it and the live process environment is used.
  */
 export async function checkSemanticCoverageAt(
   dbPath: string,
-  opts: { env?: Record<string, string | undefined>; home?: string } = {},
+  opts: {
+    env?: Record<string, string | undefined>;
+    home?: string;
+    /** Injected package resolve. Default matches ESM import(), not require(). */
+    resolve?: (spec: string) => string;
+  } = {},
 ): Promise<CheckResult> {
   const label = 'Semantic coverage';
+  // Before the cache inspector: a missing package or an intentional opt-out
+  // must not fall through to "that would download model.onnx".
+  const blocked = optionalMlUseBlock(opts);
+  if (blocked) {
+    return {
+      label,
+      status: 'pass',
+      message: blocked === 'disabled'
+        ? 'embeddings are intentionally disabled via SHIELDCORTEX_SKIP_EMBEDDINGS=1 — coverage skipped (see the Optional ML stack row). A backfill cannot run while that flag is set.'
+        : 'optional package is not installed — coverage skipped (see the Optional ML stack row). A backfill cannot load without that package.',
+    };
+  }
   try {
     const { inspectEmbeddingReadiness } = await import('../embeddings/model-cache.js');
     const { boundForDisplay } = await import('../embeddings/model-config.js');
@@ -9731,16 +9757,169 @@ export async function checkStatePermissions(stateDir: string = getShieldCortexDi
   };
 }
 
-// ── Check 8: Model cache ─────────────────────────────────
-async function checkModelCache(): Promise<CheckResult> {
+// ── Check 8: Optional ML package, then model cache ───────
+/**
+ * The package the embedding worker and the semantic-analysis layer actually
+ * load, by a dynamic import of @huggingface/transformers. This check only
+ * resolves that specifier. It never imports it.
+ */
+const OPTIONAL_ML_PACKAGE = '@huggingface/transformers';
+
+/**
+ * Exact doctor token for a dropped optional install. Info rows must not use it.
+ */
+const OPTIONAL_ML_MISSING_TOKEN = 'missing optional dependency: @huggingface/transformers';
+
+export type OptionalMlResolve = (spec: string) => string;
+
+export interface OptionalMlProbe {
+  /**
+   * Whole environment for the skip decision when provided. Omit it to read
+   * process.env. A partial object is not merged — that is how tests keep
+   * Jest's global SHIELDCORTEX_SKIP_EMBEDDINGS=1 from becoming an opt-out
+   * they did not ask for.
+   */
+  env?: Record<string, string | undefined>;
+  /** Injected. Production uses {@link defaultResolveOptionalMlPackage}. */
+  resolve?: OptionalMlResolve;
+}
+
+/**
+ * Resolve-only. Does not import the module, load onnx, or touch the cache.
+ *
+ * Default is `import.meta.resolve`, the same call CI uses and the same ESM
+ * condition the worker loads (package exports `node.import` →
+ * dist/transformers.node.mjs). `createRequire().resolve` is a different
+ * contract: this package is `"type": "module"` and its `require` condition
+ * points at dist/transformers.node.cjs. Both files exist in the pinned 3.8.1,
+ * so a require-resolve would pass on a complete install, but a missing CJS
+ * entry must not be reported as a missing package while the ESM entry the
+ * runtime imports still resolves. On this Node, import.meta.resolve takes one
+ * argument and resolves from the calling module (dist/cli/doctor.js once built).
+ */
+export function resolveOptionalMlPackage(resolve?: OptionalMlResolve): string {
+  return (resolve ?? defaultResolveOptionalMlPackage)(OPTIONAL_ML_PACKAGE);
+}
+
+function defaultResolveOptionalMlPackage(spec: string): string {
+  return import.meta.resolve(spec);
+}
+
+function embeddingsIntentionallyDisabled(env?: Record<string, string | undefined>): boolean {
+  // Same comparison as src/embeddings/generator.ts. 'true' / 'yes' are not an opt-out.
+  return (env ?? process.env).SHIELDCORTEX_SKIP_EMBEDDINGS === '1';
+}
+
+function optionalMlPackagePresent(resolve?: OptionalMlResolve): boolean {
+  try {
+    const hit = resolveOptionalMlPackage(resolve);
+    return typeof hit === 'string' && hit.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Shared gate for the cache and coverage rows. One resolvability helper, not
+ * a second copy of the resolve call. 'disabled' wins over 'missing': an
+ * intentional opt-out is not a failed install.
+ */
+function optionalMlUseBlock(opts: OptionalMlProbe = {}): 'missing' | 'disabled' | null {
+  if (embeddingsIntentionallyDisabled(opts.env)) return 'disabled';
+  if (!optionalMlPackagePresent(opts.resolve)) return 'missing';
+  return null;
+}
+
+/**
+ * #1108. A missing optional package used to leave doctor at exit 0, with the
+ * Embeddings row promising a download that cannot happen. This row is the
+ * named install failure. It does not inspect the cache and it does not open
+ * the database — those are different faults.
+ *
+ * SHIELDCORTEX_SKIP_EMBEDDINGS=1 is the documented opt-out (generator.ts
+ * rejects, background preload does not run, and the semantic-analysis layer
+ * degrades to available:false). The review-copilot judge worker imports
+ * transformers without reading that flag, so this row does not claim the
+ * flag disables that path.
+ */
+export async function checkOptionalMlStack(opts: OptionalMlProbe = {}): Promise<CheckResult> {
+  const label = 'Optional ML stack';
+  const skipped = embeddingsIntentionallyDisabled(opts.env);
+  const present = optionalMlPackagePresent(opts.resolve);
+  if (!present && !skipped) {
+    return {
+      label,
+      status: 'fail',
+      message:
+        `${OPTIONAL_ML_MISSING_TOKEN} — semantic recall cannot load. ` +
+        'This is an install problem, not a model-cache miss and not database corruption.',
+      fix:
+        'Reinstall so the optional package is retained. npm can drop it when an install script in its subtree fails and still exit 0. ' +
+        'If semantic recall is not wanted, set SHIELDCORTEX_SKIP_EMBEDDINGS=1. ' +
+        'Do not repair the model cache or the database for this row.',
+    };
+  }
+  if (skipped && !present) {
+    return {
+      label,
+      status: 'info',
+      message:
+        'embeddings are intentionally disabled via SHIELDCORTEX_SKIP_EMBEDDINGS=1, so the optional package is not required. ' +
+        'Semantic recall and the semantic-analysis defence layer stay unavailable.',
+    };
+  }
+  if (skipped && present) {
+    return {
+      label,
+      status: 'info',
+      message:
+        '@huggingface/transformers is installed, but embeddings are intentionally disabled via SHIELDCORTEX_SKIP_EMBEDDINGS=1. ' +
+        'Semantic recall and the semantic-analysis defence layer stay unavailable. ' +
+        'Package presence only — model cache and inference were not checked.',
+    };
+  }
+  return {
+    label,
+    status: 'pass',
+    message:
+      'optional dependency @huggingface/transformers is installed. Package presence only — model cache and inference were not checked.',
+  };
+}
+
+export async function checkModelCache(
+  opts: OptionalMlProbe = {},
+): Promise<CheckResult> {
   // #383: "directory non-empty" was a green lie for truncated model.onnx.
   // Integrity is size (+ trusted sidecar sha, or live sha). Never pass a
   // corrupt weight; never fail the whole doctor run on a missing optional model.
   // #632: root, offline flag and HF_ENDPOINT come from the worker's resolver.
   // Files on disk are not inference — the message never claims it is active.
+  // #1108: do not inspect, and do not promise a download, when the package
+  // cannot be resolved or embeddings were intentionally turned off. One fail
+  // lives on the Optional ML stack row; this row must not invent a second,
+  // and it must not relabel a missing package as a corrupt cache.
+  const blocked = optionalMlUseBlock(opts);
+  if (blocked === 'missing') {
+    return {
+      label: 'Embeddings',
+      status: 'info',
+      message:
+        'model cache not inspected — the optional package is not installed (see the Optional ML stack row). ' +
+        'This is not a corrupt cache. No download is offered from this row.',
+    };
+  }
+  if (blocked === 'disabled') {
+    return {
+      label: 'Embeddings',
+      status: 'info',
+      message:
+        'model cache not inspected — embeddings are intentionally disabled via SHIELDCORTEX_SKIP_EMBEDDINGS=1 ' +
+        '(see the Optional ML stack row). No download is offered while that flag is set.',
+    };
+  }
   try {
     const { inspectEmbeddingModelForDoctor } = await import('../embeddings/model-cache.js');
-    const formatted = await inspectEmbeddingModelForDoctor();
+    const formatted = await inspectEmbeddingModelForDoctor({ env: opts.env });
     return {
       label: 'Embeddings',
       status: formatted.status,
@@ -10101,6 +10280,7 @@ export async function runDoctor(
     async () => checkStaleShieldCortexCopies(), // #674: an old copy can rewrite chained audit rows
     checkClaudeCodeVersion,
     checkAgentConfigWatch,
+    checkOptionalMlStack,
     checkModelCache,
   ];
 

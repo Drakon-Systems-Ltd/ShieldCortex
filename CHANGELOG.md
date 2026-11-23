@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Doctor fails when the optional embeddings package is missing (#1108).** If `@huggingface/transformers` cannot be resolved and `SHIELDCORTEX_SKIP_EMBEDDINGS` is not `1`, the Optional ML stack row fails and `shieldcortex doctor` exits 1. The Embeddings and Semantic coverage rows no longer say the model will download, or tell you to run embed-backfill, when that package is missing or embeddings were turned off on purpose. A package that is present is reported as installed only — not as a healthy cache or a working model. Turning embeddings off with `SHIELDCORTEX_SKIP_EMBEDDINGS=1` stays an info line, and the package stays optional. This does not change what `npm i` installs.
 - **A rejected posture report stays in the host judgment when another report for the same runtime, profile and plane is current (#1135).** The collector already kept a trust-rejected self-report, such as a file with mode 0640, and did not age it out, but the rollup dropped that record beside a current sibling, so the host summary could be green. The rollup now judges that rejected record as unknown. Stale records, and validated reports the host has not verified, stay out of the judgment as before.
 
 ## [5.22.1] - 2026-11-23

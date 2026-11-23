@@ -217,6 +217,7 @@ const EXEMPT: Record<string, string> = {
   checkAttestationCoverage: 'SQLite only',
   checkStaleShieldCortexCopies: 'install-copy scan only',
   checkClaudeCodeVersion: 'claude binary version only',
+  checkOptionalMlStack: 'package resolve only, no config.json read',
   checkModelCache: 'model cache directory only',
 };
 
