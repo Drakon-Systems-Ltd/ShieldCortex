@@ -3,11 +3,16 @@ import {
   DEFAULT_MAX_AGE_MS,
   POSTURE_RECORD_VERSION,
   SELF_REPORT_MAX_BYTES,
+  STALE_NOT_SEEN_MS,
   deriveMemoryOnlyRecord,
   deriveToolGateRecord,
+  markStaleRecords,
+  noCurrentReportRecord,
   parseSelfReport,
   postureLevel,
+  rejectionMayAge,
   renderPostureLine,
+  rollupRecords,
   summarisePosture,
   type FieldEvidence,
   type LivenessCheck,
@@ -313,3 +318,209 @@ describe('#613 no host-wide rollup to green, and no completeness claim', () => {
     expect(line).not.toMatch(/enforced|protected|proves/i);
   });
 });
+
+describe('#1135 a non-stale rejected report stays judged beside a current same-group sibling', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const OLD = NOW - 8 * DAY;
+  const RECENT = NOW - 60_000;
+  const sources = (records: readonly PostureRecord[]) => rollupRecords(records).map((r) => r.source).sort();
+
+  function rejected(opts: {
+    reason?: string;
+    instance?: string | null;
+    rejection?: 'trust' | 'content';
+    lastSeenMs?: number | null;
+    profile?: string;
+    runtime?: 'hermes' | 'openclaw' | 'claude_code';
+  } = {}): PostureRecord {
+    const reason = opts.reason ?? 'readable or writable by group or others (must be owner-only)';
+    const base = { kind: 'invalid' as const, reason };
+    const readInvalid: SelfReportRead = opts.instance === null
+      ? (opts.rejection ? { ...base, rejection: opts.rejection } : base)
+      : (opts.rejection
+        ? { ...base, instance: opts.instance ?? 'p6001-s6001', rejection: opts.rejection }
+        : { ...base, instance: opts.instance ?? 'p6001-s6001' });
+    return deriveToolGateRecord({
+      runtime: opts.runtime ?? 'hermes',
+      profile: opts.profile ?? 'default',
+      installed: 'yes',
+      read: readInvalid,
+      nowMs: NOW,
+      lastSeenMs: opts.lastSeenMs === undefined ? OLD : opts.lastSeenMs,
+    });
+  }
+
+  it('keeps a trust rejection beside a current sibling, in either order, recent or old', () => {
+    const live = currentLike();
+    for (const seen of [OLD, RECENT]) {
+      const bad = rejected({ rejection: 'trust', lastSeenMs: seen });
+      expect(bad.stale).toBe(false);
+      expect(bad.stale_reason).toBeNull();
+      expect(bad.runtime_loaded.value).toBe('unknown');
+      expect(bad.liveness.value).toBe('not-applicable');
+      expect(postureLevel(bad)).toBe('unknown');
+      for (const records of [[live, bad], [bad, live]]) {
+        expect(sources(records)).toEqual([live.source, bad.source].sort());
+        expect(summarisePosture(records)).toMatchObject({
+          green: false,
+          level: 'unknown',
+          weakest: bad.source,
+          record_count: 2,
+          rollup_count: 2,
+          stale_count: 0,
+        });
+      }
+    }
+  });
+
+  it('an omitted rejection classification and a rejection with no instance still cannot evade judgment', () => {
+    const live = currentLike();
+    const omitted = rejected({ lastSeenMs: OLD });
+    const noInstance = rejected({ instance: null, rejection: 'trust', lastSeenMs: OLD });
+    expect(omitted.stale).toBe(false);
+    expect(noInstance.source).toBe('sc://posture/hermes/default/tool-gate/none');
+    expect(noInstance.stale).toBe(false);
+    expect(sources([live, omitted])).toEqual([live.source, omitted.source].sort());
+    expect(sources([noInstance, live])).toContain(noInstance.source);
+    expect(summarisePosture([live, omitted]).green).toBe(false);
+    expect(summarisePosture([live, noInstance]).green).toBe(false);
+  });
+
+  it('reason text does not change selection', () => {
+    const live = currentLike();
+    const ownerOnly = rejected({ reason: 'must be owner-only', rejection: 'trust' });
+    const otherWords = rejected({ reason: 'a completely different sentence', rejection: 'trust' });
+    expect(ownerOnly.notes.join(' ')).not.toBe(otherWords.notes.join(' '));
+    expect(sources([live, ownerOnly])).toEqual(sources([otherWords, live]));
+    expect(sources([live, ownerOnly])).toContain(ownerOnly.source);
+  });
+
+  it('a recent content rejection is judged unknown; an aged one is stale and excluded', () => {
+    const live = currentLike();
+    const recent = rejected({ rejection: 'content', reason: 'not JSON', lastSeenMs: RECENT });
+    expect([recent.stale, recent.stale_reason, postureLevel(recent)]).toEqual([false, null, 'unknown']);
+    expect(sources([live, recent])).toEqual([live.source, recent.source].sort());
+    expect(summarisePosture([recent, live])).toMatchObject({ green: false, level: 'unknown', weakest: recent.source, stale_count: 0 });
+
+    const aged = rejected({ rejection: 'content', reason: 'not JSON', instance: 'p6002-s6002', lastSeenMs: NOW - STALE_NOT_SEEN_MS - 1 });
+    expect([aged.stale, aged.stale_reason]).toEqual([true, 'not-seen']);
+    expect(sources([live, aged])).toEqual([live.source]);
+    expect(summarisePosture([live, aged])).toMatchObject({ green: true, level: 'loaded-enforce', rollup_count: 1, stale_count: 1 });
+  });
+
+  it('rejectionMayAge stays fail-closed: only an explicit content rejection may age', () => {
+    expect(rejectionMayAge({ kind: 'absent' })).toBe(false);
+    expect(rejectionMayAge(read())).toBe(false);
+    expect(rejectionMayAge({ kind: 'invalid', reason: 'x' })).toBe(false);
+    expect(rejectionMayAge({ kind: 'invalid', reason: 'x', rejection: 'trust' })).toBe(false);
+    expect(rejectionMayAge({ kind: 'invalid', reason: 'x', rejection: 'content' })).toBe(true);
+    expect(rejectionMayAge({ kind: 'invalid', reason: 'x', rejection: 'bogus' } as unknown as SelfReportRead)).toBe(false);
+  });
+
+  it('ended, not-seen and superseded records stay listed but out of judgment', () => {
+    const live = currentLike();
+    const ended = gate(read({ instance: otherInstance(77, '5') }), 'yes', 'ended');
+    expect(ended.stale_reason).toBe('process-ended');
+    expect(sources([live, ended])).toEqual([live.source]);
+    expect([live, ended]).toHaveLength(2);
+
+    const quiet = gate(read({
+      heartbeat_at: iso(NOW - STALE_NOT_SEEN_MS - 1000),
+      instance: otherInstance(88, '8'),
+    }), 'yes', 'unsupported');
+    expect(quiet.stale_reason).toBe('not-seen');
+    expect(sources([live, quiet])).toEqual([live.source]);
+
+    const older = deriveToolGateRecord({
+      runtime: 'claude_code',
+      profile: 'default',
+      installed: 'yes',
+      read: read({
+        runtime: 'claude_code',
+        heartbeat_at: iso(NOW - DEFAULT_MAX_AGE_MS - 60_000),
+        instance: { key: 'c-old', pid: null, process_start: null, started_at: iso(NOW - DEFAULT_MAX_AGE_MS - 120_000), liveness: 'per-call' },
+      }),
+      nowMs: NOW,
+    });
+    const newer = deriveToolGateRecord({
+      runtime: 'claude_code',
+      profile: 'default',
+      installed: 'yes',
+      read: read({
+        runtime: 'claude_code',
+        heartbeat_at: iso(NOW - 60_000),
+        instance: { key: 'c-new', pid: null, process_start: null, started_at: iso(NOW - 120_000), liveness: 'per-call' },
+      }),
+      nowMs: NOW,
+    });
+    const marked = markStaleRecords([older, newer]);
+    expect(marked.find((r) => r.key.instance === 'c-old')).toMatchObject({ stale: true, stale_reason: 'superseded' });
+    expect(marked).toHaveLength(2);
+    expect(rollupRecords(marked).map((r) => r.key.instance)).toEqual(['c-new']);
+  });
+
+  it('does not treat an absent placeholder or an unverified validated sibling as a rejection', () => {
+    const live = currentLike();
+    const absent = gate({ kind: 'absent' });
+    expect(absent.runtime_loaded.value).toBe('unobserved');
+    expect(absent.liveness.value).toBe('not-applicable');
+    expect(sources([live, absent])).toEqual([live.source]);
+
+    const unverified = gate(read({ instance: otherInstance(77, '5') }), 'yes', 'unsupported');
+    expect([unverified.liveness.value, unverified.runtime_loaded.value, unverified.stale]).toEqual(['unverified', 'unknown', false]);
+    expect(sources([live, unverified])).toEqual([live.source]);
+    expect(sources([unverified])).toEqual([unverified.source]);
+
+    const marker = noCurrentReportRecord(absent, 2);
+    expect(marker.runtime_loaded.value).toBe('unobserved');
+    expect(marker.stale).toBe(false);
+    expect(summarisePosture([marker]).green).toBe(false);
+    expect(sources([marker])).toEqual([marker.source]);
+  });
+
+  it('a running reporter with an old heartbeat stays a judged unknown, and sibling policy is unchanged', () => {
+    const live = currentLike();
+    const runningOld = gate(read({
+      heartbeat_at: iso(NOW - STALE_NOT_SEEN_MS - 1000),
+      instance: otherInstance(99, '9'),
+    }), 'yes', 'alive');
+    expect(runningOld.stale).toBe(false);
+    expect(runningOld.runtime_loaded.value).toBe('unknown');
+    expect(sources([live, runningOld])).toEqual([live.source, runningOld.source].sort());
+    expect(summarisePosture([live, runningOld]).green).toBe(false);
+
+    const second = gate(read({ instance: otherInstance(4, '4') }));
+    expect(summarisePosture([live, second])).toMatchObject({ green: true, level: 'loaded-enforce', rollup_count: 2 });
+
+    const advisory = gate(read({ configured_posture: 'advisory', instance: otherInstance(3, '3') }));
+    const off = gate(read({ configured_posture: 'intentionally-off', instance: otherInstance(5, '5') }));
+    const unresolved = gate(read({ configured_posture: 'unknown', instance: otherInstance(6, '6') }));
+    expect(summarisePosture([live, advisory]).green).toBe(false);
+    expect(summarisePosture([live, off]).green).toBe(false);
+    expect(summarisePosture([live, unresolved]).green).toBe(false);
+    expect(rollupRecords([live, advisory, off, unresolved])).toHaveLength(4);
+
+    const mem = deriveMemoryOnlyRecord({ runtime: 'codex', profile: 'default', installed: 'yes', nowMs: NOW });
+    const bad = rejected({ rejection: 'trust' });
+    expect(sources([live, mem, bad])).toEqual([live.source, mem.source, bad.source].sort());
+    expect(summarisePosture([live, mem]).green).toBe(false);
+
+    // gate() always derives hermes/default; build the other groups explicitly.
+    const work = deriveToolGateRecord({
+      runtime: 'hermes', profile: 'work', installed: 'yes', liveness: 'alive', nowMs: NOW,
+      read: read({ profile: 'work', instance: otherInstance(7, '7') }),
+    });
+    const otherRuntime = deriveToolGateRecord({
+      runtime: 'openclaw', profile: 'default', installed: 'yes', liveness: 'alive', nowMs: NOW,
+      read: read({ runtime: 'openclaw', instance: otherInstance(8, '8') }),
+    });
+    const crossProfile = rejected({ profile: 'default', rejection: 'trust' });
+    const crossRuntime = rejected({ runtime: 'claude_code', rejection: 'trust', instance: 'p6001-s6001' });
+    expect(sources([work, crossProfile])).toEqual([work.source, crossProfile.source].sort());
+    expect(sources([otherRuntime, crossRuntime])).toEqual([otherRuntime.source, crossRuntime.source].sort());
+  });
+});
+
+function currentLike(): PostureRecord {
+  return gate(read());
+}

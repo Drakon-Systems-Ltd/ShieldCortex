@@ -967,3 +967,126 @@ describe('#970 r5: a trust-rejected self-report is judged whatever its age (as b
     expect(summarisePosture(collectPostureRecords(absentOpts()))).toMatchObject({ green: false, level: 'unknown', stale_count: 0 });
   });
 });
+
+describe('#1135 a mode-0640 rejection beside a current same-group sibling is still judged', () => {
+  const OLD = NOW - 8 * DAY;
+  const REJECTED = 'sc://posture/hermes/default/tool-gate/p6001-s6001';
+  const noOpenClaw = { openclawBinaryPresent: () => false };
+  const caseOpts = () => ({
+    ...opts({ deps: processTable({ 5000: '500' }) }),
+    hostDeps: noOpenClaw,
+  });
+
+  function plant(): string {
+    fs.rmSync(path.join(home, '.openclaw'), { recursive: true, force: true });
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    writeReport(configDir, reportBody({
+      runtime: 'claude_code',
+      plugin: { id: 'shieldcortex-pre-tool-hook', version: '5.20.4', hash: null },
+      instance: { key: 'c-live', pid: null, process_start: null, started_at: iso(NOW - HOUR), liveness: 'per-call' },
+    }));
+    writeReport(configDir, reportBody({ instance: instance(5000, '500') }));
+    const file = writeReport(configDir, reportBody({
+      heartbeat_at: iso(OLD),
+      instance: instance(6001, '6001', 8 * DAY),
+    }));
+    // Writers reset modes. The bad mode is applied after those writes, and the directories stay owner-only.
+    fs.chmodSync(file, 0o640);
+    fs.utimesSync(file, new Date(OLD), new Date(OLD));
+    return file;
+  }
+
+  it('keeps the rejected hermes/default report in the rollup, the summary and doctor output', async () => {
+    const file = plant();
+    expect(fs.statSync(file).mode & 0o777).toBe(0o640);
+    expect(fs.statSync(path.dirname(file)).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(path.join(configDir, 'posture')).mode & 0o777).toBe(0o700);
+
+    const records = collectPostureRecords(caseOpts());
+    expect(records.map((r) => `${r.runtime}/${r.profile}/${r.key.instance}`).sort()).toEqual([
+      'claude_code/default/c-live',
+      'hermes/default/p5000-s500',
+      'hermes/default/p6001-s6001',
+    ]);
+    const rejected = records.find((r) => r.key.instance === 'p6001-s6001')!;
+    expect(rejected.source).toBe(REJECTED);
+    expect(rejected.runtime_loaded.value).toBe('unknown');
+    expect(rejected.membership).toBe('unobserved');
+    expect(rejected.liveness.value).toBe('not-applicable');
+    expect(rejected.stale).toBe(false);
+    expect(rejected.stale_reason).toBeNull();
+    expect(rejected.notes.join(' ')).toMatch(/must be owner-only/);
+    expect(rejected.notes.join(' ')).not.toMatch(/insecure self-report directory/);
+    expect(records.find((r) => r.key.instance === 'p5000-s500')).toMatchObject({ membership: 'current', liveness: { value: 'alive' } });
+    expect(records.find((r) => r.key.instance === 'c-live')).toMatchObject({ membership: 'current', liveness: { value: 'per-call' } });
+
+    expect(rollupRecords(records).map((r) => r.source).sort()).toEqual([
+      'sc://posture/claude_code/default/tool-gate/c-live',
+      'sc://posture/hermes/default/tool-gate/p5000-s500',
+      REJECTED,
+    ]);
+    expect(summarisePosture(records)).toEqual({
+      level: 'unknown',
+      green: false,
+      weakest: REJECTED,
+      record_count: 3,
+      rollup_count: 3,
+      stale_count: 0,
+      completeness: 'not-claimed',
+    });
+
+    const evidence = JSON.parse(JSON.stringify(buildPolicyEvidence(caseOpts()))) as {
+      summary: { green: boolean; weakest: string | null; level: string; record_count: number; rollup_count: number; stale_count: number };
+      records: Array<{ source: string; runtime_loaded: { value: string }; membership: string; liveness: { value: string }; stale: boolean; stale_reason: string | null }>;
+    };
+    const evidenced = evidence.records.find((r) => r.source === REJECTED);
+    expect(evidenced).toMatchObject({
+      runtime_loaded: { value: 'unknown' },
+      membership: 'unobserved',
+      liveness: { value: 'not-applicable' },
+      stale: false,
+      stale_reason: null,
+    });
+    expect(evidence.summary).toMatchObject({
+      green: false,
+      level: 'unknown',
+      weakest: REJECTED,
+      record_count: 3,
+      rollup_count: 3,
+      stale_count: 0,
+    });
+
+    const rows = await checkRuntimePosture(caseOpts());
+    const host = hostRow(rows);
+    expect(host.status).toBe('info');
+    expect(host.message).toMatch(/^weakest of 3 record\(s\) judged \(3 found\): unknown \(Hermes, tool-gate\)/);
+    expect(host.status).not.toBe('pass');
+    for (const r of rows) expect(['pass', 'info']).toContain(r.status);
+
+    const rejectedRow = rows.find((r) => r.label.includes('p6001-s6001'))!;
+    expect(rejectedRow.status).toBe('info');
+    expect(rejectedRow.message).toMatch(/self-report rejected/);
+    expect(rejectedRow.message).toMatch(/must be owner-only/);
+    expect(rejectedRow.message).not.toMatch(/stale \(/);
+    expect(rejectedRow.posture).toEqual({
+      group: `${RUNTIME_POSTURE_LABEL}: Hermes`,
+      stale: false,
+      staleReason: null,
+      instance: true,
+      verified: false,
+    });
+    const shown = collapseStalePostureRows(rows);
+    expect(shown.find((r) => r.label.includes('p6001-s6001'))).toBe(rejectedRow);
+    expect(shown.filter((r) => /stale hidden/.test(r.message))).toEqual([]);
+
+    for (const verbose of [false, true]) {
+      const text = formatDoctorReport(sanitiseDoctorRowsForDisplay(rows), { width: 240, verbose }).join('\n');
+      expect(text).toContain('p6001-s6001');
+      expect(text).toContain('self-report rejected');
+      expect(text).toContain('must be owner-only');
+      expect(text).toContain('weakest of 3 record(s) judged (3 found): unknown');
+      expect(text).not.toMatch(/stale hidden/);
+      expect(text).not.toMatch(/not judged for the host posture/);
+    }
+  });
+});
