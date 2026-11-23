@@ -23,7 +23,7 @@ Four things to know before you upgrade, if Action Guard is on:
 
 ## [5.22.0] - 2026-11-23
 
-Tagged but never published to npm; superseded by 5.22.1. The publish run was stopped before any package was published because the tagged release notes overstated the change. 5.22.1 carries the same code with corrected notes.
+Tagged but never published to npm; superseded by 5.22.1. The publish run was stopped before any package was published because the tagged release notes were missing two review corrections: how each host handles the new ask (including the Claude Code deny when there is no prompt to show) and what the outage fallbacks match (a Read of a store file or a quoted store name). 5.22.1 carries the same code with corrected notes.
 
 ## [5.21.1] - 2026-11-22
 
