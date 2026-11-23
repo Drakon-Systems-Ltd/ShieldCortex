@@ -431,6 +431,9 @@ export function __setRuntimeForTest(runtime: OpenClawRuntime | null): void {
 export function __loadConfigForTest(): Promise<SCConfig> {
   return loadConfig();
 }
+export function __isDefenceModuleDistrustedForTest(): boolean {
+  return _defenceModuleDistrusted;
+}
 export function __resetConfigStateForTest(): void {
   _mergedConfig = null;
   _configOverride = null;
@@ -2264,12 +2267,16 @@ async function applyPolicyLockToPluginConfig(config: SCConfig): Promise<SCConfig
       return failClosed();
     }
     const locked = mod.applyPolicyLock(view, verdict);
-    // The reader answered, and it agreed with the inline probe. Trust
-    // restored (a `repair` mid-process must not stay latched into the
-    // degraded path).
-    _defenceModuleDistrusted = false;
     const guard = locked.actionGuard;
-    if (!guard || typeof guard !== 'object' || Array.isArray(guard)) return config;
+    if (!guard || typeof guard !== 'object' || Array.isArray(guard) || Object.keys(guard).length === 0) {
+      if (inlinePolicyLockPresent()) return failClosed();
+      _defenceModuleDistrusted = false;
+      return config;
+    }
+    // The reader answered, and it agreed with the inline probe. Trust
+    // restored only after the lock result includes a usable guard (a `repair`
+    // mid-process must not stay latched into the degraded path).
+    _defenceModuleDistrusted = false;
     return withGuardPosture(config, guard as Record<string, unknown>);
   } catch {
     // A reader that throws is treated exactly like a lock that cannot be
