@@ -15,14 +15,19 @@
  *   - chain started, chained writer not loadable: NO row is written (an
  *     unchained row on a chained database is worse than no row) and verify is
  *     unchanged;
- *   - no chain yet: a row is still written, unchained, exactly as before.
+ *   - no chain yet: a row is still written, unchained, exactly as before;
+ *   - two overlapping first calls in ONE process: the second call waits for
+ *     the chained writer the first call is still loading, so both rows are
+ *     written and linked (and, with no writer to load, both still write none).
  *
  * How: the REAL writer, unmodified, runs in a child process from a throwaway
  * package whose `dist/` re-exports the real build module by module. Two
  * modules are test-owned where a case needs it:
  *   - `defence/firewall/provenance-policy.js` flags one inert marker word, so a
  *     refusal is produced without any instruction-shaped text in this file;
- *   - `defence/pipeline.js` throws, for the pipeline-error case.
+ *   - `defence/pipeline.js` throws, for the pipeline-error case;
+ *   - `defence/ledger/chain.js` settles late (a timer, then the real module),
+ *     for the overlapping-calls case, so the overlap does not depend on timing.
  * The chain writer, the database module and the verifier are the real ones.
  *
  * Hermetic: every database is a new file under a temp directory; the child
@@ -50,7 +55,10 @@ const MARKER = 'sc1140-refusal-marker';
 const CHILD_MS = 30_000;
 const CASE_MS = 2 * CHILD_MS;
 
-type Variant = 'full' | 'pipeline-throws' | 'no-chain-writer' | 'no-dist';
+type Variant = 'full' | 'pipeline-throws' | 'no-chain-writer' | 'no-dist' | 'slow-chain-writer';
+
+/** How long the `slow-chain-writer` chain module takes to finish loading. */
+const SLOW_CHAIN_LOAD_MS = 400;
 
 const reexport = (rel: string): string =>
   `export * from ${JSON.stringify(pathToFileURL(path.join(realDist, rel)).href)};\n`;
@@ -90,7 +98,16 @@ function buildPackage(root: string, variant: Variant): string {
       ? "export function runDefencePipeline() { throw new Error('sc1140 fixture pipeline fault'); }\n"
       : reexport('defence/pipeline.js'),
   );
-  if (variant !== 'no-chain-writer') {
+  if (variant === 'slow-chain-writer') {
+    // The real chain module, but this copy of it finishes loading only after a
+    // timer. A second call that does not wait for the first call's load sees
+    // "no writer" for the whole of that window.
+    write(
+      'defence/ledger/chain.js',
+      `await new Promise((done) => setTimeout(done, ${SLOW_CHAIN_LOAD_MS}));\n`
+      + reexport('defence/ledger/chain.js'),
+    );
+  } else if (variant !== 'no-chain-writer') {
     write('defence/ledger/chain.js', reexport('defence/ledger/chain.js'));
   }
   return pkg;
@@ -139,8 +156,13 @@ describe('#1140: hook-written BLOCK rows are chained once the chain has started'
     return dbPath;
   }
 
-  /** Run the real writer once, in its own process, against `dbPath`. */
-  function runWriter(variant: Variant, dbPath: string, content: string): { stderr: string } {
+  /**
+   * Run the real writer in its own process against `dbPath`: once for a single
+   * `content`, or — given several — as calls that all start before any of them
+   * has finished (one `Promise.all`, one process, one database handle).
+   */
+  function runWriter(variant: Variant, dbPath: string, content: string | string[]): { stderr: string } {
+    const contents = Array.isArray(content) ? content : [content];
     const pkg = buildPackage(tempDir, variant);
     const home = path.join(tempDir, `home-${variant}`);
     const configDir = path.join(home, '.shieldcortex');
@@ -158,12 +180,12 @@ describe('#1140: hook-written BLOCK rows are chained once the chain has started'
       "import './netguard.mjs';\n"
       + "import { createRequire } from 'module';\n"
       + "import { saveAutoExtractedMemory } from './scripts/lib/save-memory.mjs';\n"
-      + 'const [sqliteEntry, dbPath, content] = process.argv.slice(2);\n'
+      + 'const [sqliteEntry, dbPath, ...contents] = process.argv.slice(2);\n'
       + 'const Database = createRequire(import.meta.url)(sqliteEntry);\n'
       + 'const db = new Database(dbPath);\n'
-      + 'await saveAutoExtractedMemory(db, {\n'
+      + 'await Promise.all(contents.map((content) => saveAutoExtractedMemory(db, {\n'
       + "  title: 'Queue design note', content, category: 'note', salience: 0.6, tags: ['auto-extracted'],\n"
-      + "}, 'sc1140', { source: 'session-end-hook' });\n"
+      + "}, 'sc1140', { source: 'session-end-hook' })));\n"
       + 'db.close();\n'
       + 'process.exit(0);\n',
     );
@@ -177,7 +199,7 @@ describe('#1140: hook-written BLOCK rows are chained once the chain has started'
     env.SHIELDCORTEX_CONFIG_DIR = configDir;
     env.SHIELDCORTEX_AUDIT_DIR = auditDir;
 
-    const res = spawnSync(process.execPath, [probe, sqliteEntry, dbPath, content], {
+    const res = spawnSync(process.execPath, [probe, sqliteEntry, dbPath, ...contents], {
       cwd: pkg,
       env,
       encoding: 'utf-8',
@@ -294,6 +316,52 @@ describe('#1140: hook-written BLOCK rows are chained once the chain has started'
     },
     CASE_MS,
   );
+
+  it('chain started, two overlapping first calls in one process: both rows are chained and linked', () => {
+    const dbPath = makeDb('overlap.db', { chain: true });
+
+    // Both calls start before either has loaded the chained writer, and the
+    // writer takes SLOW_CHAIN_LOAD_MS to load. The second call must wait for
+    // that load rather than conclude there is no writer.
+    const { stderr } = runWriter('slow-chain-writer', dbPath, [
+      `First overlapping note. ${MARKER}`,
+      `Second overlapping note. ${MARKER}`,
+    ]);
+    expect(stderr.match(/refused \(non_authoritative_instruction/g)).toHaveLength(2);
+
+    const { rows, memories, report } = inspect(dbPath);
+    expect(memories).toBe(0);
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.source_type).toBe('memory_candidate');
+      expect(row.reason).toBe('Refused auto-capture: non_authoritative_instruction (sc1140_fixture)');
+      expectUnchangedShape(row);
+      expectChained(row);
+    }
+    expect(rows[1].seq).toBe(Number(rows[0].seq) + 1);
+    expect(rows[1].prev_hash).toBe(rows[0].row_hash);
+    expect(report.problems).toEqual([]);
+    expect(report.status).toBe('consistent');
+    expect(report.chainedRows).toBe(2);
+  }, CASE_MS);
+
+  it('chain started, two overlapping first calls, chained writer not loadable: still no row', () => {
+    const dbPath = makeDb('overlap-no-writer.db', { chain: true });
+    const before = inspect(dbPath);
+
+    const { stderr } = runWriter('no-chain-writer', dbPath, [
+      `First overlapping note. ${MARKER}`,
+      `Second overlapping note. ${MARKER}`,
+    ]);
+    expect(stderr.match(/refused \(/g)).toHaveLength(2);
+
+    const after = inspect(dbPath);
+    expect(after.memories).toBe(0);
+    expect(after.rows).toHaveLength(0);
+    expect(after.report.problems).toEqual([]);
+    expect(after.report.status).toBe('consistent');
+    expect(after.report.chainedRows).toBe(before.report.chainedRows);
+  }, CASE_MS);
 
   it('no chain yet: the row is still written, unchained, as before', () => {
     const dbPath = makeDb('no-chain.db', { chain: false });
