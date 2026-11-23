@@ -70,6 +70,30 @@ async function loadWithOutput(output: Record<string, unknown>): Promise<any> {
 
 describeHere('#1146 malformed loaded policy-lock output', () => {
   it.each([
+    ['defenceMode only', { defenceMode: 'balanced' }, { defenceMode: 'balanced' }],
+    ['memory only', { memory: { inject: { mode: 'off' } } }, { memory: { inject: { mode: 'off' } } }],
+    ['actionGuard.enabled false only', { actionGuard: { enabled: false } }, {}],
+  ])('trusts the real applier for a %s lock with an empty input guard', async (_name, policy, expectedPosture) => {
+    fs.writeFileSync(path.join(protectedRoot, 'policy.json'), JSON.stringify({ v: 1, ...policy }));
+    __setRuntimeForTest({
+      callCortex: async () => null,
+      isOpenClawAutoMemoryEnabled: () => false,
+      loadShieldConfig: async () => ({
+        interceptor: { enabled: false, failurePolicy: { high: 'allow' } },
+        actionGuard: {},
+      }),
+    } as any);
+    const verdict = { status: 'locked', path: path.join(protectedRoot, 'policy.json'), policy };
+    expect(applyPolicyLock({ actionGuard: {} }, verdict as any)).toMatchObject({ actionGuard: {}, ...expectedPosture });
+    __setDefenceModuleForTest({ readPolicyLock: () => verdict, applyPolicyLock } as any);
+
+    const config = await __loadConfigForTest();
+    expect(config.interceptor).toMatchObject({ enabled: false, failurePolicy: { high: 'allow' }, actionGuard: {} });
+    expect(config.interceptor.actionGuard).toEqual({});
+    expect(__isDefenceModuleDistrustedForTest()).toBe(false);
+  });
+
+  it.each([
     ['missing', {}],
     ['null', { actionGuard: null }],
     ['array', { actionGuard: [] }],

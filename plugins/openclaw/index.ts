@@ -2256,7 +2256,10 @@ async function applyPolicyLockToPluginConfig(config: SCConfig): Promise<SCConfig
     // to a plugin load. Shaped as a raw config view so the ONE precedence
     // implementation in dist does the work.
     const view = { actionGuard: { ...(config.interceptor?.actionGuard ?? {}) } } as Record<string, unknown>;
-    const verdict = mod.readPolicyLock({ audit: false }) as { status?: string } | undefined;
+    const verdict = mod.readPolicyLock({ audit: false }) as {
+      status?: string;
+      policy?: { actionGuard?: { enabled?: boolean; enforce?: boolean; broker?: { enabled?: boolean }; autoApprove?: unknown; reviewedScripts?: unknown } };
+    } | undefined;
     // #501 review BLOCK-1, mirrored from the hook: a reader that LOADS and lies
     // is treated exactly like one that could not be loaded at all. The hook's
     // copy of this closed a real `SHIELDCORTEX_DIST_ROOT` bypass; this copy
@@ -2268,7 +2271,16 @@ async function applyPolicyLockToPluginConfig(config: SCConfig): Promise<SCConfig
     }
     const locked = mod.applyPolicyLock(view, verdict);
     const guard = locked.actionGuard;
-    if (!guard || typeof guard !== 'object' || Array.isArray(guard) || Object.keys(guard).length === 0) {
+    // A partial lock can leave an empty input guard untouched. Only accept an
+    // empty result when the reported policy has no pin that would add a guard
+    // key; a missing policy or a nonempty input still requires a guard result.
+    const pin = verdict?.policy?.actionGuard;
+    const emptyGuardExpected = status === 'locked' && verdict?.policy !== undefined
+      && Object.keys(view.actionGuard as Record<string, unknown>).length === 0
+      && pin?.enabled !== true && pin?.enforce !== true && pin?.broker?.enabled !== false
+      && pin?.autoApprove === undefined && pin?.reviewedScripts === undefined;
+    if (!guard || typeof guard !== 'object' || Array.isArray(guard)
+      || (Object.keys(guard).length === 0 && !emptyGuardExpected)) {
       if (inlinePolicyLockPresent()) return failClosed();
       _defenceModuleDistrusted = false;
       return config;
