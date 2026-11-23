@@ -626,34 +626,84 @@ function insertQuarantineRow(db, memory, project, source, result) {
  * different label. Leave NULL — do not "fix" these into accruing rows.
  */
 function writeBlockAudit(db, { project, sourceType, sourceIdentifier, reason, indicators, patterns }) {
+  // #1140: once this database has a chained ledger, a row written here without
+  // chain columns is an `unchained-row-after-start` problem for
+  // `shieldcortex ledger verify`. So the row goes through the SAME chained
+  // writer logAudit uses, on the hook's own handle. Same columns, same values.
+  const values = {
+    memory_id: null,
+    project: project || null,
+    timestamp: new Date().toISOString(),
+    source_type: sourceType,
+    source_identifier: sourceIdentifier,
+    trust_score: 0,
+    sensitivity_level: 'INTERNAL',
+    firewall_result: 'BLOCK',
+    anomaly_score: 0,
+    threat_indicators: JSON.stringify(indicators ?? []),
+    blocked_patterns: JSON.stringify(patterns ?? []),
+    reason,
+    fragmentation_score: null,
+    pipeline_duration_ms: 0,
+  };
+  let chainStarted;
   try {
-    db.prepare(`
-      INSERT INTO defence_audit (
-        memory_id, project, timestamp,
-        source_type, source_identifier,
-        trust_score, sensitivity_level, firewall_result,
-        anomaly_score, threat_indicators, blocked_patterns,
-        reason, fragmentation_score, pipeline_duration_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'BLOCK', ?, ?, ?, ?, ?, ?)
-    `).run(
-      null,
-      project || null,
-      new Date().toISOString(),
-      sourceType,
-      sourceIdentifier,
-      0,
-      'INTERNAL',
-      0,
-      JSON.stringify(indicators ?? []),
-      JSON.stringify(patterns ?? []),
-      reason,
-      null,
-      0,
-    );
+    // One write transaction: the "has the chain started?" read and the plain
+    // insert cannot be split by another process starting the chain between them.
+    chainStarted = db.transaction(() => {
+      if (ledgerChainStarted(db)) return true;
+      // No chain yet (no ledger tables, or no ledger identity row): the row is
+      // part of the unchained history, exactly as before #1140.
+      db.prepare(`
+        INSERT INTO defence_audit (
+          memory_id, project, timestamp,
+          source_type, source_identifier,
+          trust_score, sensitivity_level, firewall_result,
+          anomaly_score, threat_indicators, blocked_patterns,
+          reason, fragmentation_score, pipeline_duration_ms
+        ) VALUES (
+          @memory_id, @project, @timestamp,
+          @source_type, @source_identifier,
+          @trust_score, @sensitivity_level, @firewall_result,
+          @anomaly_score, @threat_indicators, @blocked_patterns,
+          @reason, @fragmentation_score, @pipeline_duration_ms
+        )
+      `).run(values);
+      return false;
+    }).immediate();
   } catch {
-    // Schema may be older than the audit columns. Better silent here than
-    // raising into the hook — the stderr line above carries the signal.
+    // Schema may be older than the audit columns, or the database is busy.
+    // Better silent here than raising into the hook — the stderr line the
+    // caller prints carries the signal.
+    return;
   }
+  if (!chainStarted) return;
+
+  // The chain has started. From here there is NO plain-insert fallback: an
+  // unchained row on a chained database is worse than no row. If the compiled
+  // chained writer is not loadable (dist build missing), nothing is written
+  // and the caller's stderr line is the record.
+  if (!_chainedAuditWriter) return;
+  try {
+    _chainedAuditWriter.insert(db, values);
+  } catch (err) {
+    // Never raise into the hook. Count the loss the way logAudit does, so the
+    // next chained write in this process records a lost-coverage marker.
+    try {
+      if (_chainedAuditWriter.noteFailure) _chainedAuditWriter.noteFailure(err);
+    } catch {
+      // nothing further to do
+    }
+  }
+}
+
+/** True when this database has a chained ledger (tables AND identity row). */
+function ledgerChainStarted(db) {
+  const table = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ledger_meta'")
+    .get();
+  if (!table) return false;
+  return db.prepare('SELECT 1 FROM ledger_meta WHERE id = 1').get() !== undefined;
 }
 
 function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
@@ -1013,6 +1063,30 @@ async function disposeEmbedderWithinBudget() {
 let _defenceCache = null;
 let _defenceCacheKey = null;
 let _getDatabase = null;
+// #1140: the compiled chained audit writer (dist/defence/ledger/chain.js), or
+// null when it could not be loaded. Loaded once per dist root, beside the
+// defence modules, so writeBlockAudit can stay synchronous.
+let _chainedAuditWriter = null;
+let _chainedAuditWriterKey = null;
+
+async function loadChainedAuditWriter(distRoot) {
+  if (_chainedAuditWriterKey === distRoot) return;
+  _chainedAuditWriterKey = distRoot;
+  _chainedAuditWriter = null;
+  try {
+    const chainUrl = pathToFileURL(resolve(distRoot, 'defence', 'ledger', 'chain.js')).href;
+    const chainMod = await import(chainUrl);
+    if (typeof chainMod.insertChainedAuditRow === 'function') {
+      _chainedAuditWriter = {
+        insert: chainMod.insertChainedAuditRow,
+        noteFailure:
+          typeof chainMod.noteAuditWriteFailure === 'function' ? chainMod.noteAuditWriteFailure : null,
+      };
+    }
+  } catch {
+    // Absent or unloadable: writeBlockAudit writes no row on a chained database.
+  }
+}
 
 async function loadDefenceModules(db) {
   // Resolve the dist build relative to this file's location. save-memory.mjs
@@ -1059,6 +1133,8 @@ async function loadDefenceModules(db) {
     // module loader (Jest: "module not been linked"), which would silently
     // disable the screen. Sequential costs nothing once the graph is linked.
     const directiveMod = await import(directiveUrl).catch(() => ({}));
+    // #1140: sequential for the same reason; never throws.
+    await loadChainedAuditWriter(distRoot);
 
     if (typeof pipelineMod.runDefencePipeline !== 'function') return null;
     if (typeof initMod.initDatabase !== 'function') return null;
@@ -1088,6 +1164,9 @@ async function loadDefenceModules(db) {
     ensureDatabaseSingleton(db, _defenceCache);
     return _defenceCache;
   } catch {
+    // A partial dist can still hold the chained writer; try it on its own so a
+    // fallback row on a chained database is chained rather than dropped.
+    await loadChainedAuditWriter(distRoot);
     return null;
   }
 }
