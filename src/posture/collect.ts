@@ -16,8 +16,9 @@
  * untrusted: the directories and the file must be owned by this user and not
  * writable by anyone else, the file must be a regular file (symlinks are not
  * followed) under the size cap, those file checks are repeated on the opened
- * descriptor, and its content must name the same runtime, profile and instance
- * as its path. Then `parseSelfReport` validates it.
+ * descriptor using its exact device and inode, and its content must name the
+ * same runtime, profile and instance as its path. Then `parseSelfReport`
+ * validates it.
  *
  * A file is bounded host-local evidence, never liveness on its own: for a
  * resident process the host's process-start check decides whether the
@@ -180,6 +181,63 @@ function listNames(dir: string): string[] | null {
   }
 }
 
+/**
+ * Exact stat, same request as `linuxPidNamespace`. Device and inode stay
+ * bigint. A number stat has already rounded those identifiers; converting the
+ * rounded number back to bigint does not recover them.
+ */
+const EXACT_STAT = { bigint: true } as const;
+
+const NS_PER_MS = 1_000_000n;
+const MAX_SAFE_MS = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_SAFE_MS = BigInt(Number.MIN_SAFE_INTEGER);
+
+/** Fractional milliseconds from an exact nanosecond timestamp. Not `BigIntStats.mtimeMs`. */
+function mtimeMsFromNs(ns: bigint): number {
+  const ms = ns / NS_PER_MS;
+  const frac = ns % NS_PER_MS;
+  if (ms > MAX_SAFE_MS || ms < MIN_SAFE_MS) return Number.NaN;
+  return Number(ms) + Number(frac) / 1e6;
+}
+
+/**
+ * Comparable mtime. A number `mtimeMs` already carries a fraction, or is not
+ * finite. An exact stat's fraction lives in `mtimeNs`; its `mtimeMs` is whole
+ * milliseconds and is not a substitute. No precise value is not a timestamp.
+ */
+function preciseMtimeMs(st: { mtimeMs?: unknown; mtimeNs?: unknown }): number {
+  if (typeof st.mtimeMs === 'number') return st.mtimeMs;
+  if (typeof st.mtimeNs === 'bigint') return mtimeMsFromNs(st.mtimeNs);
+  return Number.NaN;
+}
+
+function sameDeviceInode(a: { dev: unknown; ino: unknown }, b: { dev: unknown; ino: unknown }): boolean {
+  return typeof a.dev === 'bigint' && typeof a.ino === 'bigint'
+    && typeof b.dev === 'bigint' && typeof b.ino === 'bigint'
+    && a.dev === b.dev && a.ino === b.ino;
+}
+
+function exceedsByteCap(size: unknown, cap: number): boolean {
+  if (typeof size === 'bigint') return size > BigInt(cap);
+  return typeof size === 'number' && size > cap;
+}
+
+function byteCountAbove(n: number, size: unknown): boolean {
+  if (typeof size === 'bigint') return BigInt(n) > size;
+  if (typeof size === 'number') return n > size;
+  return true;
+}
+
+function ownedByOther(stUid: unknown, uid: number): boolean {
+  if (typeof stUid === 'bigint') return stUid !== BigInt(uid);
+  return typeof stUid !== 'number' || stUid !== uid;
+}
+
+function groupOrOtherBits(mode: unknown): boolean {
+  if (typeof mode === 'bigint') return (mode & 0o077n) !== 0n;
+  return typeof mode !== 'number' || (mode & 0o077) !== 0;
+}
+
 /** The PID-namespace sidecar for a self-report file (same basename, `.pidns`). */
 export function pidNsSidecarPath(reportFile: string): string {
   return reportFile.endsWith('.json') ? `${reportFile.slice(0, -'.json'.length)}${PID_NS_SIDECAR_SUFFIX}` : `${reportFile}${PID_NS_SIDECAR_SUFFIX}`;
@@ -192,33 +250,37 @@ export function pidNsSidecarPath(reportFile: string): string {
  * file (never a symlink), owned by this user, owner-only, tiny, and exactly
  * digits or `null`. Missing, unreadable or malformed is null.
  *
- * It is trusted only when its mtime is NOT OLDER than the report it sits
- * beside: the writers rewrite it after every report write, so an older one is
- * from before the report's last write and vouches for nothing. (The basename
- * is the process's start identity — pid + start ticks, or pid + a random
- * token — so a different process does not share it; the mtime rule also
- * covers a sidecar whose rewrite failed.)
+ * It is trusted only when both mtimes are finite and the sidecar's is NOT
+ * OLDER than the report it sits beside: the writers rewrite it after every
+ * report write, so an older one is from before the report's last write and
+ * vouches for nothing. A missing or non-finite timestamp is not evidence the
+ * sidecar is fresh. (The basename is the process's start identity — pid +
+ * start ticks, or pid + a random token — so a different process does not share
+ * it; the mtime rule also covers a sidecar whose rewrite failed.)
  */
 export function readPidNsSidecar(reportFile: string, reportMtimeMs: number, uid: number | undefined): string | null {
   const file = pidNsSidecarPath(reportFile);
   let fd: number | null = null;
   try {
-    const st = fs.lstatSync(file);
-    if (!st.isFile() || st.size > PID_NS_SIDECAR_MAX_BYTES) return null;
+    const st = fs.lstatSync(file, EXACT_STAT);
+    if (!st.isFile() || exceedsByteCap(st.size, PID_NS_SIDECAR_MAX_BYTES)) return null;
     if (process.platform !== 'win32') {
-      if (uid !== undefined && st.uid !== uid) return null;
-      if ((st.mode & 0o077) !== 0) return null;
+      if (uid !== undefined && ownedByOther(st.uid, uid)) return null;
+      if (groupOrOtherBits(st.mode)) return null;
     }
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
-    const opened = fs.fstatSync(fd);
-    // Type, size, owner, mode, and dev+ino are decided on this descriptor.
-    // A failure stays null and does not change the report's rejection.
-    if (!opened.isFile() || opened.size > PID_NS_SIDECAR_MAX_BYTES) return null;
+    const opened = fs.fstatSync(fd, EXACT_STAT);
+    // Type, size, owner, mode, and exact dev+ino are decided on this descriptor.
+    // A failure stays null and does not change the report's rejection. A
+    // timestamp that is not finite is not namespace evidence.
+    if (!opened.isFile() || exceedsByteCap(opened.size, PID_NS_SIDECAR_MAX_BYTES)) return null;
     if (process.platform !== 'win32') {
-      if (uid !== undefined && opened.uid !== uid) return null;
-      if ((opened.mode & 0o077) !== 0) return null;
+      if (uid !== undefined && ownedByOther(opened.uid, uid)) return null;
+      if (groupOrOtherBits(opened.mode)) return null;
     }
-    if (opened.dev !== st.dev || opened.ino !== st.ino || opened.mtimeMs < reportMtimeMs) return null;
+    const openedMtimeMs = preciseMtimeMs(opened);
+    if (!sameDeviceInode(opened, st)) return null;
+    if (typeof reportMtimeMs !== 'number' || !Number.isFinite(openedMtimeMs) || !Number.isFinite(reportMtimeMs) || openedMtimeMs < reportMtimeMs) return null;
     const buf = Buffer.alloc(PID_NS_SIDECAR_MAX_BYTES + 1);
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
     const text = buf.subarray(0, n).toString('utf8');
@@ -244,43 +306,49 @@ export function readSelfReportFile(
   const contentInvalid = (reason: string, observedMtimeMs: number): SelfReportRead => ({
     kind: 'invalid', reason, instance: expect.instance, rejection: 'content', observedMtimeMs,
   });
-  const oversize = (size: number): SelfReportRead => invalid(`size ${size} bytes exceeds the ${SELF_REPORT_MAX_BYTES}-byte cap`);
-  let st: fs.Stats;
+  const oversize = (size: number | bigint): SelfReportRead => invalid(`size ${size} bytes exceeds the ${SELF_REPORT_MAX_BYTES}-byte cap`);
+  let st: fs.BigIntStats;
   try {
-    st = fs.lstatSync(file);
+    st = fs.lstatSync(file, EXACT_STAT);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     return code === 'ENOENT' || code === 'ENOTDIR' ? { kind: 'absent' } : invalid('unreadable');
   }
   if (!st.isFile()) return invalid('not a regular file');
   if (process.platform !== 'win32') {
-    if (uid !== undefined && st.uid !== uid) return invalid('owned by another user');
-    if ((st.mode & 0o077) !== 0) return invalid('readable or writable by group or others (must be owner-only)');
+    if (uid !== undefined && ownedByOther(st.uid, uid)) return invalid('owned by another user');
+    if (groupOrOtherBits(st.mode)) return invalid('readable or writable by group or others (must be owner-only)');
   }
-  if (st.size > SELF_REPORT_MAX_BYTES) {
-    return invalid(`size ${st.size} bytes exceeds the ${SELF_REPORT_MAX_BYTES}-byte cap`);
+  if (exceedsByteCap(st.size, SELF_REPORT_MAX_BYTES)) {
+    return typeof st.size === 'bigint' || typeof st.size === 'number'
+      ? oversize(st.size)
+      : invalid('unreadable');
   }
   let fd: number | null = null;
   try {
     // O_NOFOLLOW applies only to a final-component symlink. Type, owner, mode,
-    // size, identity, and content-rejection mtime come from the opened descriptor.
+    // size, exact device and inode, and content-rejection mtime come from the
+    // opened descriptor. Fractional mtime is kept; a whole-millisecond bigint
+    // is not used in its place.
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
-    const opened = fs.fstatSync(fd);
+    const opened = fs.fstatSync(fd, EXACT_STAT);
     if (!opened.isFile()) return invalid('not a regular file');
-    if (opened.size > SELF_REPORT_MAX_BYTES) return oversize(opened.size);
-    if (process.platform !== 'win32') {
-      if (uid !== undefined && opened.uid !== uid) return invalid('owned by another user');
-      if ((opened.mode & 0o077) !== 0) return invalid('readable or writable by group or others (must be owner-only)');
+    if (exceedsByteCap(opened.size, SELF_REPORT_MAX_BYTES)) {
+      return typeof opened.size === 'bigint' || typeof opened.size === 'number' ? oversize(opened.size) : invalid('unreadable');
     }
-    if (opened.dev !== st.dev || opened.ino !== st.ino) return invalid('unreadable');
-    const observedMtimeMs = opened.mtimeMs;
+    if (process.platform !== 'win32') {
+      if (uid !== undefined && ownedByOther(opened.uid, uid)) return invalid('owned by another user');
+      if (groupOrOtherBits(opened.mode)) return invalid('readable or writable by group or others (must be owner-only)');
+    }
+    if (!sameDeviceInode(opened, st)) return invalid('unreadable');
+    const observedMtimeMs = preciseMtimeMs(opened);
     const buf = Buffer.alloc(SELF_REPORT_MAX_BYTES + 1);
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
     if (n > SELF_REPORT_MAX_BYTES) return oversize(n);
-    if (n > opened.size) return invalid('unreadable');
+    if (byteCountAbove(n, opened.size)) return invalid('unreadable');
     const read = parseSelfReport(buf.subarray(0, n).toString('utf8'), n);
-    const again = fs.fstatSync(fd);
-    if (!again.isFile() || again.dev !== opened.dev || again.ino !== opened.ino || again.size !== opened.size) {
+    const again = fs.fstatSync(fd, EXACT_STAT);
+    if (!again.isFile() || !sameDeviceInode(again, opened) || again.size !== opened.size) {
       return invalid('unreadable');
     }
     // parseSelfReport classifies its own rejections (oversize is trust); an

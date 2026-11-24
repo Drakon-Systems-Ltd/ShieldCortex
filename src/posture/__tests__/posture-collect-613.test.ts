@@ -299,7 +299,7 @@ describe('#1153 opened descriptor', () => {
   const posixIt = process.platform === 'win32' ? it.skip : it;
   const expectSpec = { runtime: 'hermes' as const, profile: 'default', instance: INSTANCE };
 
-  function patchedStat(real: fs.Stats, over: Partial<fs.Stats> & { isFile?: () => boolean }): fs.Stats {
+  function patchedStat(real: fs.Stats | fs.BigIntStats, over: object): fs.Stats | fs.BigIntStats {
     return new Proxy(real, {
       get(target, prop, receiver) {
         if (Object.prototype.hasOwnProperty.call(over, prop)) return (over as Record<PropertyKey, unknown>)[prop];
@@ -309,9 +309,17 @@ describe('#1153 opened descriptor', () => {
     });
   }
 
+  function nextId(value: number | bigint): number | bigint {
+    return typeof value === 'bigint' ? value + 1n : value + 1;
+  }
+
+  function withGroupRead(mode: number | bigint): number | bigint {
+    return typeof mode === 'bigint' ? mode | 0o040n : mode | 0o040;
+  }
+
   function withOpenedStat(
     file: string,
-    patch: (real: fs.Stats, call: number) => (Partial<fs.Stats> & { isFile?: () => boolean }) | null,
+    patch: (real: fs.Stats | fs.BigIntStats, call: number) => object | null,
     run: () => void,
   ): void {
     const fds = new Map<number, string>();
@@ -324,8 +332,8 @@ describe('#1153 opened descriptor', () => {
       return fd;
     }) as typeof fs.openSync);
     const fstatSpy = jest.spyOn(fs, 'fstatSync').mockImplementation(((fd: number, opts?: { bigint?: boolean }) => {
-      const real = Reflect.apply(realFstat, fs, [fd, opts]) as fs.Stats;
-      if (opts?.bigint || fds.get(fd) !== file) return real;
+      const real = Reflect.apply(realFstat, fs, [fd, opts]) as fs.Stats | fs.BigIntStats;
+      if (fds.get(fd) !== file) return real;
       const n = (calls.get(fd) ?? 0) + 1;
       calls.set(fd, n);
       const over = patch(real, n);
@@ -369,7 +377,7 @@ describe('#1153 opened descriptor', () => {
 
   posixIt('descriptor mode with group or other bits is the owner-only rejection', () => {
     const file = writeReport(configDir, reportBody());
-    withOpenedStat(file, (real) => ({ mode: real.mode | 0o040 }), () => {
+    withOpenedStat(file, (real) => ({ mode: withGroupRead(real.mode) }), () => {
       expectTrust(readReport(file), 'readable or writable by group or others (must be owner-only)');
     });
   });
@@ -378,21 +386,21 @@ describe('#1153 opened descriptor', () => {
     const uid = process.getuid?.();
     expect(typeof uid).toBe('number');
     const file = writeReport(configDir, reportBody());
-    withOpenedStat(file, (real) => ({ uid: real.uid + 1 }), () => {
+    withOpenedStat(file, (real) => ({ uid: nextId(real.uid) }), () => {
       expectTrust(readReport(file, uid), 'owned by another user');
     });
   });
 
   it('descriptor dev different from the pre-open stat is unreadable', () => {
     const file = writeReport(configDir, reportBody());
-    withOpenedStat(file, (real) => ({ dev: real.dev + 1 }), () => {
+    withOpenedStat(file, (real) => ({ dev: nextId(real.dev) }), () => {
       expectTrust(readReport(file), 'unreadable');
     });
   });
 
   it('descriptor ino different from the pre-open stat is unreadable', () => {
     const file = writeReport(configDir, reportBody());
-    withOpenedStat(file, (real) => ({ ino: real.ino + 1 }), () => {
+    withOpenedStat(file, (real) => ({ ino: nextId(real.ino) }), () => {
       expectTrust(readReport(file), 'unreadable');
     });
   });
@@ -407,7 +415,7 @@ describe('#1153 opened descriptor', () => {
 
   it('a second descriptor stat with a different size discards the parse', () => {
     const file = writeReport(configDir, reportBody());
-    withOpenedStat(file, (real, call) => (call === 1 ? null : { size: real.size + 1 }), () => {
+    withOpenedStat(file, (real, call) => (call === 1 ? null : { size: nextId(real.size) }), () => {
       const read = readReport(file);
       expect(read.kind).not.toBe('valid');
       expect(read).not.toMatchObject({ rejection: 'content' });
@@ -417,7 +425,7 @@ describe('#1153 opened descriptor', () => {
 
   it('a second descriptor stat with a different ino discards the parse', () => {
     const file = writeReport(configDir, reportBody());
-    withOpenedStat(file, (real, call) => (call === 1 ? null : { ino: real.ino + 1 }), () => {
+    withOpenedStat(file, (real, call) => (call === 1 ? null : { ino: nextId(real.ino) }), () => {
       const read = readReport(file);
       expect(read.kind).not.toBe('valid');
       expect(read).not.toMatchObject({ rejection: 'content' });
@@ -463,7 +471,7 @@ describe('#1153 opened descriptor', () => {
     });
   });
 
-  function expectSidecarUnknown(patch: (real: fs.Stats) => Partial<fs.Stats> & { isFile?: () => boolean }): void {
+  function expectSidecarUnknown(patch: (real: fs.Stats | fs.BigIntStats) => object): void {
     const file = writeReport(configDir, reportBody());
     withOpenedStat(pidNsSidecarPath(file), (real) => patch(real), () => {
       const read = readReport(file);
@@ -486,11 +494,191 @@ describe('#1153 opened descriptor', () => {
   });
 
   posixIt('a sidecar descriptor with group or other bits stays namespace-unknown', () => {
-    expectSidecarUnknown((real) => ({ mode: real.mode | 0o040 }));
+    expectSidecarUnknown((real) => ({ mode: withGroupRead(real.mode) }));
   });
 
   it('a sidecar descriptor dev mismatch stays namespace-unknown', () => {
-    expectSidecarUnknown((real) => ({ dev: real.dev + 1 }));
+    expectSidecarUnknown((real) => ({ dev: nextId(real.dev) }));
+  });
+
+  // Identifiers past 2^53 collapse to one Number. The pair below is adjacent
+  // and Number(LOST_A) === Number(LOST_B). Synthetic stats only.
+  const LOST_A = 2n ** 53n;
+  const LOST_B = LOST_A + 1n;
+  const REPORT_NS = 1_500_000_500_000n;
+  const OLDER_NS = 1_500_000_300_000n;
+  const NEWER_NS = 1_500_000_700_000n;
+
+  function withExactStats(
+    patches: Map<string, (real: fs.BigIntStats, call: number) => object | null>,
+    run: () => void,
+  ): void {
+    const fds = new Map<number, string>();
+    const calls = new Map<number, number>();
+    const realOpen = fs.openSync;
+    const realFstat = fs.fstatSync;
+    const realLstat = fs.lstatSync;
+    const openSpy = jest.spyOn(fs, 'openSync').mockImplementation(((...args: Parameters<typeof fs.openSync>) => {
+      const fd = Reflect.apply(realOpen, fs, args) as number;
+      fds.set(fd, String(args[0]));
+      return fd;
+    }) as typeof fs.openSync);
+    const lstatSpy = jest.spyOn(fs, 'lstatSync').mockImplementation(((p: fs.PathLike, opts?: { bigint?: boolean }) => {
+      const real = Reflect.apply(realLstat, fs, [p, opts]) as fs.Stats | fs.BigIntStats;
+      const patch = patches.get(String(p));
+      if (!patch || !opts?.bigint) return real;
+      const over = patch(real as fs.BigIntStats, 0);
+      return over ? patchedStat(real, over) : real;
+    }) as typeof fs.lstatSync);
+    const fstatSpy = jest.spyOn(fs, 'fstatSync').mockImplementation(((fd: number, opts?: { bigint?: boolean }) => {
+      const real = Reflect.apply(realFstat, fs, [fd, opts]) as fs.Stats | fs.BigIntStats;
+      const patch = patches.get(fds.get(fd) ?? '');
+      if (!patch || !opts?.bigint) return real;
+      const n = (calls.get(fd) ?? 0) + 1;
+      calls.set(fd, n);
+      const over = patch(real as fs.BigIntStats, n);
+      return over ? patchedStat(real, over) : real;
+    }) as typeof fs.fstatSync);
+    try {
+      run();
+    } finally {
+      openSpy.mockRestore();
+      lstatSpy.mockRestore();
+      fstatSpy.mockRestore();
+    }
+  }
+
+  function namespaceOf(file: string): { pidNs: string | null; liveness: string } {
+    const read = readReport(file);
+    expect(read.kind).toBe('valid');
+    const pidNs = read.kind === 'valid' ? read.report.instance.pid_ns : null;
+    const [rec] = collectPostureRecords({
+      home,
+      configDir,
+      nowMs: NOW,
+      hostDeps: noOpenClawBinary,
+      deps: processTable({}),
+    }).filter((r) => r.runtime === 'hermes');
+    expect(rec.notes.join(' ')).not.toMatch(/self-report rejected/);
+    return { pidNs, liveness: rec.liveness.value };
+  }
+
+  it('an exact inode outside the safe integer range still matches and the sidecar joins', () => {
+    expect(Number(LOST_A)).toBe(Number(LOST_B));
+    expect(LOST_A).not.toBe(LOST_B);
+    const file = writeReport(configDir, reportBody());
+    withExactStats(new Map([[file, () => ({ dev: LOST_B, ino: LOST_B })]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: PID_NS, liveness: 'ended' });
+    });
+  });
+
+  it('adjacent inodes that collapse as numbers are not the same file', () => {
+    const file = writeReport(configDir, reportBody());
+    withExactStats(new Map([[file, (_real, call) => ({ dev: LOST_B, ino: call === 0 ? LOST_A : LOST_B })]]), () => {
+      expectTrust(readReport(file), 'unreadable');
+    });
+  });
+
+  it('adjacent device ids that collapse as numbers are not the same file', () => {
+    const file = writeReport(configDir, reportBody());
+    withExactStats(new Map([[file, (_real, call) => ({ dev: call === 0 ? LOST_A : LOST_B, ino: LOST_B })]]), () => {
+      expectTrust(readReport(file), 'unreadable');
+    });
+  });
+
+  it('a post-read inode that only differs past the safe integer range discards the parse', () => {
+    const file = writeReport(configDir, reportBody());
+    withExactStats(new Map([[file, (_real, call) => ({ dev: LOST_B, ino: call === 2 ? LOST_A : LOST_B })]]), () => {
+      const read = readReport(file);
+      expect(read.kind).not.toBe('valid');
+      expect(read).not.toMatchObject({ rejection: 'content' });
+      expectTrust(read, 'unreadable');
+    });
+  });
+
+  function nsTime(ns: bigint): (real: fs.BigIntStats, call: number) => object | null {
+    return (_real, call) => (call === 0 ? null : { mtimeMs: ns / 1_000_000n, mtimeNs: ns });
+  }
+
+  it('a sidecar that is only fractionally older than the report is not namespace evidence', () => {
+    expect(REPORT_NS / 1_000_000n).toBe(OLDER_NS / 1_000_000n);
+    expect(OLDER_NS < REPORT_NS).toBe(true);
+    const file = writeReport(configDir, reportBody());
+    withExactStats(new Map([[file, nsTime(REPORT_NS)], [pidNsSidecarPath(file), nsTime(OLDER_NS)]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: null, liveness: 'unverified' });
+    });
+  });
+
+  it('an equal fractional sidecar mtime still joins', () => {
+    const file = writeReport(configDir, reportBody());
+    withExactStats(new Map([[file, nsTime(REPORT_NS)], [pidNsSidecarPath(file), nsTime(REPORT_NS)]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: PID_NS, liveness: 'ended' });
+    });
+  });
+
+  it('a fractionally newer sidecar mtime still joins', () => {
+    const file = writeReport(configDir, reportBody());
+    withExactStats(new Map([[file, nsTime(REPORT_NS)], [pidNsSidecarPath(file), nsTime(NEWER_NS)]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: PID_NS, liveness: 'ended' });
+    });
+  });
+
+  it('a sidecar timestamp that is not the precise value does not join', () => {
+    const file = writeReport(configDir, reportBody());
+    const unavailable = (_real: fs.BigIntStats, call: number) => (call === 0 ? null : { mtimeMs: 1_500_001n, mtimeNs: undefined });
+    withExactStats(new Map([[file, nsTime(REPORT_NS)], [pidNsSidecarPath(file), unavailable]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: null, liveness: 'unverified' });
+    });
+  });
+
+  it('a non-finite report mtime does not admit sidecar namespace evidence', () => {
+    const file = writeReport(configDir, reportBody());
+    const unavailable = (_real: fs.BigIntStats, call: number) => (call === 0 ? null : { mtimeMs: 1n, mtimeNs: undefined });
+    withExactStats(new Map([[file, unavailable]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: null, liveness: 'unverified' });
+    });
+  });
+
+  it('a numeric NaN sidecar mtime does not join, and equality of fractional numbers still does', () => {
+    const file = writeReport(configDir, reportBody());
+    const side = pidNsSidecarPath(file);
+    const at = (ms: number) => (_real: fs.BigIntStats, call: number) => (call === 0 ? null : { mtimeMs: ms });
+    withExactStats(new Map([[file, at(1000.5)], [side, at(1000.5)]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: PID_NS, liveness: 'ended' });
+    });
+    withExactStats(new Map([[file, at(1000.5)], [side, at(1000.25)]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: null, liveness: 'unverified' });
+    });
+    withExactStats(new Map([[file, at(1000.5)], [side, at(Number.NaN)]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: null, liveness: 'unverified' });
+    });
+    withExactStats(new Map([[file, at(Number.NaN)], [side, at(1000.5)]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: null, liveness: 'unverified' });
+    });
+  });
+
+  it('content-rejection age uses the fractional nanosecond mtime, not the truncated bigint', () => {
+    const file = writeReport(configDir, { ...reportBody(), extra: 1 });
+    fs.utimesSync(file, new Date(NOW - EIGHT_DAYS), new Date(NOW - EIGHT_DAYS));
+    const recentNs = BigInt(NOW - HOUR) * 1_000_000n + 500_000n;
+    withOpenedStat(file, () => ({ mtimeMs: BigInt(NOW - EIGHT_DAYS), mtimeNs: recentNs }), () => {
+      const [rec] = collect().filter((r) => r.runtime === 'hermes');
+      expect(rec.stale).toBe(false);
+      expect(rec.runtime_loaded.value).toBe('unknown');
+      expect(rec.liveness.value).toBe('not-applicable');
+    });
+  });
+
+  it('content-rejection age follows an old fractional nanosecond mtime when the truncated bigint is recent', () => {
+    const file = writeReport(configDir, { ...reportBody(), extra: 1 });
+    fs.utimesSync(file, new Date(NOW - HOUR), new Date(NOW - HOUR));
+    const oldNs = BigInt(NOW - EIGHT_DAYS) * 1_000_000n + 500_000n;
+    withOpenedStat(file, () => ({ mtimeMs: BigInt(NOW - HOUR), mtimeNs: oldNs }), () => {
+      const [rec] = collect().filter((r) => r.runtime === 'hermes');
+      expect(rec.stale).toBe(true);
+      expect(rec.stale_reason).toBe('not-seen');
+      expect(rec.liveness.value).toBe('not-applicable');
+    });
   });
 
   it('aging does not call a path lstat and fileMtimeMs is gone', () => {
