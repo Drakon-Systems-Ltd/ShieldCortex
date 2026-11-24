@@ -53,6 +53,8 @@ function evidence(args: string[]): { code: number; output: string } {
   roots.push(root);
   const home = path.join(root, 'home');
   const configDir = path.join(home, '.shieldcortex');
+  // #1133: the home is judged too, so its mode is set, not left to the umask.
+  fs.mkdirSync(home, { mode: 0o700 });
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   writeReport(configDir, reportBody({
     runtime: 'claude_code',

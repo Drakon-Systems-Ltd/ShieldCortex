@@ -54,7 +54,8 @@ const prevProfile = process.env.OPENCLAW_PROFILE;
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-oc-posture-613-'));
   configDir = path.join(root, '.shieldcortex');
-  fs.mkdirSync(configDir, { recursive: true });
+  // Owner-only like the real state dir (#163), not whatever the umask gives.
+  fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
   process.env.SHIELDCORTEX_CONFIG_DIR = configDir;
   delete process.env.OPENCLAW_PROFILE;
   __resetConfigStateForTest();
@@ -165,8 +166,9 @@ describe('#613 writer', () => {
   it('this live process reads back as current and loaded through the real collector (Linux start check)', () => {
     if (process.platform !== 'linux' || !linuxProcessStart(process.pid)) return;
     writePostureSelfReport({ configDir, profile: 'default', configuredPosture: 'enforce', scanner: 'available', policy: { enforce: true } });
-    const home = path.join(root, 'home');
-    fs.mkdirSync(home, { recursive: true });
+    // #1133: the private temp root is the home holding the config dir, so the
+    // trust walk stops there instead of judging the host's temp parents.
+    const home = root;
     const [rec] = collectPostureRecords({ home, configDir, hostDeps: { openclawBinaryPresent: () => false } })
       .filter((x) => x.runtime === 'openclaw');
     expect(rec.liveness.value).toBe('alive');

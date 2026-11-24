@@ -4,8 +4,9 @@
  * Reads, never writes: no directory is created, no config or consent file is
  * touched, Guard is never armed, no host binary is executed. The only probe
  * that looks outside the home is host-table's OpenClaw binary lookup, which
- * callers (and tests) can inject, and the Linux `/proc/<pid>/stat` read that
- * checks a reporting process's start identity.
+ * callers (and tests) can inject, the Linux `/proc/<pid>/stat` read that
+ * checks a reporting process's start identity, and (#1133) the stat of each
+ * directory above a config directory that lies outside the home.
  *
  * Self-reports live at
  *
@@ -14,8 +15,11 @@
  * one file per reporting process, written by the runtime processes
  * themselves (Claude Code hook, OpenClaw plugin, Hermes plugin). Each file is
  * untrusted: the directories and the file must be owned by this user and not
- * writable by anyone else, the file must be a regular file (symlinks are not
- * followed) under the size cap, those file checks are repeated on the opened
+ * writable by anyone else, and so must the config directory. Every directory
+ * above it, up to the home (or the filesystem root, for a config directory
+ * outside the home), must be owned by this user or root and not writable by
+ * anyone else unless sticky (#1133). The file must be a regular file (symlinks
+ * are not followed) under the size cap, those file checks are repeated on the opened
  * descriptor using its exact device and inode, and its content must name the
  * same runtime, profile and instance as its path. Then `parseSelfReport`
  * validates it.
@@ -167,6 +171,89 @@ function insecureDir(dir: string, uid: number | undefined): string | null {
   if (uid !== undefined && st.uid !== uid) return 'directory owned by another user';
   if ((st.mode & 0o022) !== 0) return 'directory writable by group or others';
   return null;
+}
+
+/** True when `dir` is `top` or lies below it. Both are absolute and resolved. */
+function atOrBelow(dir: string, top: string): boolean {
+  const rel = path.relative(top, dir);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
+/**
+ * Why a directory ABOVE the config directory is not trustworthy, or null.
+ * Owned by this user or by root (root can write anywhere already). Writable
+ * by group or others only when sticky (as /tmp): then no one else can rename
+ * or remove the entry below it, which the walk has already checked. `follow`
+ * judges the directory a symlink names (the home only); otherwise a symlink
+ * is not a real directory.
+ */
+function insecureAncestor(dir: string, uid: number | undefined, follow = false): string | null {
+  let st: fs.Stats;
+  try {
+    st = follow ? fs.statSync(dir) : fs.lstatSync(dir);
+  } catch {
+    return 'unreadable directory';
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) return 'not a real directory';
+  if (uid !== undefined && st.uid !== uid && st.uid !== 0) return 'directory owned by another user';
+  if ((st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0) return 'directory writable by group or others';
+  return null;
+}
+
+/**
+ * #1133: why the config directory, or a directory above it, makes every
+ * self-report under it untrusted; null when the path is private.
+ *
+ * The config directory gets the posture directories' own rule (a real
+ * directory, not a symlink; this user's; not writable by group or others).
+ *
+ * Inside the home, each directory above it is judged as named, up to and
+ * including the home: a symlink there is not a real directory. The home
+ * itself is judged as the directory it names, since the system may link it.
+ *
+ * Outside the home (a `SHIELDCORTEX_CONFIG_DIR` elsewhere), the walk follows
+ * the real path of its parent, so system links such as macOS `/tmp` are
+ * followed, and goes to the filesystem root, or stops after the home if that
+ * real path is inside it.
+ *
+ * Windows has no owner/mode check here, as for the posture directories, so
+ * nothing above the config directory is walked there.
+ */
+function insecureConfigAncestry(configDir: string, home: string, uid: number | undefined): string | null {
+  // Resolved, so a trailing separator cannot make lstat follow a symlinked config dir.
+  const cfg = path.resolve(configDir);
+  const own = insecureDir(cfg, uid);
+  if (own) return `${own} (config directory)`;
+  if (process.platform === 'win32') return null;
+  const above = (why: string) => `${why} (above the config directory)`;
+  const named = path.resolve(home);
+  if (cfg !== named && atOrBelow(cfg, named)) {
+    for (let dir = path.dirname(cfg); ; dir = path.dirname(dir)) {
+      const why = insecureAncestor(dir, uid, dir === named);
+      if (why) return above(why);
+      if (dir === named) return null;
+    }
+  }
+  let dir: string;
+  try {
+    dir = fs.realpathSync(path.dirname(cfg));
+  } catch {
+    return above('unreadable directory');
+  }
+  let top: string | null;
+  try {
+    top = fs.realpathSync(named);
+  } catch {
+    top = null;
+  }
+  const stopAtHome = top !== null && atOrBelow(dir, top);
+  for (;;) {
+    const why = insecureAncestor(dir, uid);
+    if (why) return above(why);
+    const parent = path.dirname(dir);
+    if ((stopAtHome && dir === top) || parent === dir) return null;
+    dir = parent;
+  }
 }
 
 /**
@@ -451,14 +538,19 @@ function zeroInstanceProfile(profile: string, insecure: string | null): ProfileF
   return { profile, insecure: insecure ?? 'unreadable directory', instances: [], skipped: 0 };
 }
 
-/** Profiles and instance files a gate runtime has reported from (names only). */
-function reportingProfiles(dir: string, runtime: GateRuntimeId, uid: number | undefined): ProfileFiles[] {
+/**
+ * Profiles and instance files a gate runtime has reported from (names only).
+ * `ancestry` is the #1133 finding for the config directory and above it.
+ */
+function reportingProfiles(dir: string, runtime: GateRuntimeId, uid: number | undefined, ancestry: () => string | null): ProfileFiles[] {
   const rtDir = path.join(dir, runtime);
   const rootNames = listNames(dir);
-  // Unlistable posture root: the runtime name was never seen. That loss sits
-  // above this directory (#1133); do not invent a runtime here.
+  // Unlistable posture root: the runtime name was never seen; do not invent a
+  // runtime here. No posture root, or no directory for this runtime, is the
+  // ordinary missing report: nothing above it is judged for that (#1133).
   if (rootNames === null || rootNames.indexOf(runtime) < 0) return [];
-  const rootInsecure = insecureDir(dir, uid) ?? insecureDir(rtDir, uid);
+  // #1133: a listed runtime directory is only as private as the path above it.
+  const rootInsecure = ancestry() ?? insecureDir(dir, uid) ?? insecureDir(rtDir, uid);
   const profileNames = listNames(rtDir);
   // Listed runtime directory that cannot be listed: keep the finding. A
   // successful empty listing is not this case.
@@ -578,10 +670,13 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
   const table = scanHostTable(home, opts.hostDeps ?? {});
   const present = new Map(table.rows.map((r) => [r.id, r.present]));
   const records: PostureRecord[] = [];
+  // #1133: judged once, and only when some runtime directory was listed.
+  let ancestryFinding: string | null | undefined;
+  const ancestry = () => (ancestryFinding === undefined ? (ancestryFinding = insecureConfigAncestry(configDir, home, uid)) : ancestryFinding);
 
   for (const runtime of GATE_RUNTIMES) {
     const hostId = HOST_ID_FOR[runtime];
-    const profiles = reportingProfiles(dir, runtime, uid);
+    const profiles = reportingProfiles(dir, runtime, uid, ancestry);
     const base = probeInstalled(runtime, home, 'default');
     if (!present.get(hostId) && base.installed === 'no' && profiles.length === 0) continue;
     const list: ProfileFiles[] = profiles.length > 0 ? profiles : [{ profile: 'default', insecure: null, instances: [], skipped: 0 }];

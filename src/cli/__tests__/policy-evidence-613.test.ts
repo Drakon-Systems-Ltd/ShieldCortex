@@ -22,6 +22,8 @@ beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-evidence-613-'));
   home = path.join(root, 'home');
   configDir = path.join(home, '.shieldcortex');
+  // #1133: the home is judged too, so its mode is set, not left to the umask.
+  fs.mkdirSync(home, { mode: 0o700 });
   fs.mkdirSync(path.join(home, '.hermes'), { recursive: true });
   fs.writeFileSync(path.join(home, '.hermes', 'config.yaml'), 'x: 1\n');
   hermesPluginArtefacts(home);

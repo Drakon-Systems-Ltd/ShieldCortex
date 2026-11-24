@@ -42,7 +42,9 @@ beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-posture-613-'));
   home = path.join(root, 'home');
   configDir = path.join(home, '.shieldcortex');
-  fs.mkdirSync(configDir, { recursive: true });
+  // Owner-only like the real state dir (#163) and the sibling suites, not
+  // whatever the umask gives: #1133 judges the config dir and home too.
+  fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: true } }));
 });
 
