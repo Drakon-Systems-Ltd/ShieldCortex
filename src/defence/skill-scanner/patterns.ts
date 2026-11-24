@@ -213,7 +213,18 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
     name: 'supply_chain',
     weight: 0.8,
     patterns: [
-      /npm\s+install\s+/i,
+      // `npm install` followed by whitespace. A BARE `npm install` whose next
+      // step is a standard project script (`npm install then npm run dev`,
+      // `npm install && npm run build`, newline + `npm run dev`) or a
+      // determiner + dependencies noun (`npm install the dependencies`) installs
+      // the project's own lockfile, not a named package — that tutorial shape
+      // alone is exempt (the dependencies-noun form only when the clause ends
+      // or continues with a connective, so `the packages evil-pkg` still
+      // matches). `npm install <anything else>` (a named, possibly
+      // typosquatted package, flags like -g, or a non-script follow-up such as
+      // `then curl … | sh`) still matches. The lookahead re-checks after any
+      // run of whitespace so backtracking `\s+` cannot slip past the exemption.
+      /npm\s+install\s+(?!\s*(?:(?:then|and(?:\s+then)?|&&|;)\s*)?(?:npm|yarn|pnpm)\s+run\s+(?:dev|start|build|test|serve|lint)(?![\w-])|\s*(?:the|all(?:\s+the)?|your|project)\s+(?:project\s+)?(?:dependencies|deps|packages)(?=\s*(?:$|[,.;:!)]|(?:then|and|first|before|from|listed|in|with|using)\b)))/i,
       /pip\s+install\s+/i,
       /add\s+[\s\S]{0,50}to\s+(package\.json|requirements\.txt|Gemfile|go\.mod)/i,
       /install\s+(this\s+)?package/i,

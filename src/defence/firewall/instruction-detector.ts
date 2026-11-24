@@ -92,7 +92,15 @@ const PATTERN_GROUPS: PatternGroup[] = [
       /new\s+instructions?\s*:/i,
       /you\s+are\s+now\b/i,
       /act\s+as\s+(a\s+|an\s+)?/i,
-      /pretend\s+to\s+be/i,
+      // `pretend to be` — per occurrence. An occurrence whose grammatical
+      // subject is a named threat actor ("scammers may pretend to be IT
+      // support", "attackers sometimes try to pretend to be a colleague") is a
+      // third-person DESCRIPTION, as in a security-awareness notice, not a
+      // directive. Only that exact shape is exempt (actor noun + up to three
+      // modal/adverb/try-to words); any other occurrence in the same text —
+      // imperative, second-person, or after a benign lead sentence — still
+      // matches, because the regex is tested at every position.
+      /(?<!\b(?:scammers?|criminals?|attackers?|fraudsters?|hackers?|phishers?|impost[eo]rs?|cybercriminals?)\s+(?:(?:may|might|can|could|will|often|sometimes|usually|frequently|commonly|routinely|try|tries|attempt|attempts)\s+(?:to\s+)?){0,3})pretend\s+to\s+be/i,
       /disregard\s+(all\s+)?(previous|above|prior)/i,
       /override\s+(previous|all|system)/i,
       /summari[sz]e\s+your\s+system\s+prompt/i,
