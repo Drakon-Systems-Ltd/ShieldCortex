@@ -15,6 +15,8 @@
 
 ShieldCortex scans memory writes that go through it and, once turned on, gates the tools an agent calls on Claude Code, OpenClaw and Hermes. Codex, Cursor, VS Code and other MCP hosts get a memory scanner the model may call, not a gate. It does not replace OpenClaw, Hermes, or Claude memory.
 
+In 5.22.2, OpenClaw fails closed on malformed policy-lock output when a lock is present, and host posture judgment retains a rejected self-report beside a current sibling. [Release notes](CHANGELOG.md#5222---2026-11-24).
+
 ## What it does
 
 - **Tool gate.** On Claude Code and OpenClaw, once Action Guard is on (it stays off until you turn it on), a trusted task runs, a suspicious call gets a plain-English card and is held for your approval, and a catastrophic command is a hard stop. When nobody is at a prompt, the denial or held request sent to your Action Guard webhook carries that card (5.18+): what, why, who and the exact `shieldcortex approve` command, never the raw command or a credential. Hermes gates tool calls once you enable its plugin and the local API (`shieldcortex api`) is up; the plugin has its own setting, and Hermes has no approval prompt, so a call Action Guard would hold is blocked while enforcing. [Hermes plugin](plugins/hermes/shieldcortex/README.md), [Policy lock](docs/UPDATING.md#policy-lock), [What's new in 5.18](docs/UPDATING.md#whats-new-in-518).

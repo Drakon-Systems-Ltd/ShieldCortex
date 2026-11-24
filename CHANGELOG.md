@@ -7,8 +7,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.22.2] - 2026-11-24
+
+This patch release fixes two security-relevant failure paths: OpenClaw handles malformed policy-lock results without silently discarding an on-disk lock, and the host posture rollup keeps a rejected current self-report in its judgment. It adds no API and makes no breaking change.
+
+### Security
+- **OpenClaw fails closed when a policy-lock applier returns a malformed Action Guard result (#1147).** With an on-disk lock present, a missing, non-object, array or unexpectedly empty `actionGuard` result now takes the existing strict degraded posture instead of using the unlocked plugin config. A valid partial lock may still produce an empty guard when the input guard is empty and the lock has no pin that would add a guard key. The plugin captures that evidence before calling the applier, so an applier cannot make its malformed result look valid by mutating the input or verdict. When no on-disk lock is present, malformed output leaves the plugin on its existing config.
+
 ### Fixed
-- **A rejected posture report stays in the host judgment when another report for the same runtime, profile and plane is current (#1135).** The collector already kept a trust-rejected self-report, such as a file with mode 0640, and did not age it out, but the rollup dropped that record beside a current sibling, so the host summary could be green. The rollup now judges that rejected record as unknown. Stale records, and validated reports the host has not verified, stay out of the judgment as before.
+- **A rejected posture report stays in the host judgment when another report for the same runtime, profile and plane is current (#1150; tracked in #1135).** The collector already kept a structurally rejected self-report, such as a file with mode 0640, and did not age it out, but the rollup dropped that record beside a current sibling, so the host summary could be green. The rollup now judges that rejected record as unknown. Stale records, and validated reports the host has not verified, stay out of the judgment as before.
 
 ## [5.22.1] - 2026-11-23
 
