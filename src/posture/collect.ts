@@ -167,11 +167,15 @@ function insecureDir(dir: string, uid: number | undefined): string | null {
   return null;
 }
 
-function listNames(dir: string): string[] {
+/**
+ * Names in `dir`, or null when it cannot be listed. A successful listing of
+ * nothing is `[]`, never null: an empty secure directory is not unreadable.
+ */
+function listNames(dir: string): string[] | null {
   try {
     return fs.readdirSync(dir).sort();
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -304,16 +308,34 @@ interface ProfileFiles {
   skipped: number;
 }
 
+/** One profile carrying an insecure-directory finding and no instance id. */
+function zeroInstanceProfile(profile: string, insecure: string | null): ProfileFiles {
+  return { profile, insecure: insecure ?? 'unreadable directory', instances: [], skipped: 0 };
+}
+
 /** Profiles and instance files a gate runtime has reported from (names only). */
 function reportingProfiles(dir: string, runtime: GateRuntimeId, uid: number | undefined): ProfileFiles[] {
   const rtDir = path.join(dir, runtime);
-  if (listNames(dir).indexOf(runtime) < 0) return [];
+  const rootNames = listNames(dir);
+  // Unlistable posture root: the runtime name was never seen. That loss sits
+  // above this directory (#1133); do not invent a runtime here.
+  if (rootNames === null || rootNames.indexOf(runtime) < 0) return [];
   const rootInsecure = insecureDir(dir, uid) ?? insecureDir(rtDir, uid);
+  const profileNames = listNames(rtDir);
+  // Listed runtime directory that cannot be listed: keep the finding. A
+  // successful empty listing is not this case.
+  if (profileNames === null) return [zeroInstanceProfile('default', rootInsecure)];
   const out: ProfileFiles[] = [];
-  for (const profile of listNames(rtDir)) {
+  for (const profile of profileNames) {
     if (!isValidProfileId(profile)) continue;
     const pDir = path.join(rtDir, profile);
     const insecure = rootInsecure ?? insecureDir(pDir, uid);
+    const names = listNames(pDir);
+    if (names === null) {
+      // Listed profile directory that cannot be listed: keep the entry.
+      out.push(zeroInstanceProfile(profile, insecure));
+      continue;
+    }
     // Newest first, so the cap drops the oldest leftovers, never a live report.
     const mtime = (n: string) => {
       try {
@@ -322,7 +344,7 @@ function reportingProfiles(dir: string, runtime: GateRuntimeId, uid: number | un
         return 0;
       }
     };
-    const all = listNames(pDir)
+    const all = names
       .filter((n) => n.endsWith('.json'))
       .map((n) => n.slice(0, -'.json'.length))
       .filter(isValidInstanceKey)
@@ -336,6 +358,9 @@ function reportingProfiles(dir: string, runtime: GateRuntimeId, uid: number | un
       skipped: Math.max(0, all.length - MAX_INSTANCES_PER_PROFILE),
     });
   }
+  // Insecure, and nothing under it produced a profile entry (empty, or only
+  // names outside the profile grammar). A secure empty listing stays [].
+  if (out.length === 0 && rootInsecure) return [zeroInstanceProfile('default', rootInsecure)];
   return out;
 }
 
@@ -446,7 +471,18 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
       });
       const recs: PostureRecord[] = [];
       if (pf.instances.length === 0) {
-        recs.push(derive({ kind: 'absent' }));
+        // #1153: insecure with no instance file is a trust rejection, not an
+        // omission and not an absent read. No instance id is invented, and
+        // absent is not also recorded.
+        if (pf.insecure) {
+          recs.push(derive({
+            kind: 'invalid',
+            reason: `insecure self-report directory: ${pf.insecure}`,
+            rejection: 'trust',
+          }));
+        } else {
+          recs.push(derive({ kind: 'absent' }));
+        }
       }
       for (const instance of pf.instances) {
         let read: SelfReportRead;
