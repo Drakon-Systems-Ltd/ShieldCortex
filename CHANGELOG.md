@@ -13,7 +13,7 @@ All notable changes to this project will be documented in this file.
 
 ## [5.22.1] - 2026-11-23
 
-This release publishes the changes tagged as 5.22.0, with corrected release notes; 5.22.0 itself was never published to npm. Action Guard now recognises commands that read, write or upload the credential stores listed below. The shared Guard setting is off by default. In Claude Code and OpenClaw, turning Guard on is not enough to trigger an approval prompt: Watch only logs a warning for these calls, as does Enforce when ready until its readiness conditions are met. When enforcing, these hosts can ask if an approver is available; their existing outage policies and hard blocks still apply. The enabled Hermes adapter enforces by default, independently of readiness, and blocks rather than prompts unless set to advisory. Its hard blocks still apply in advisory mode.
+This release publishes the changes tagged as 5.22.0, with corrected release notes; 5.22.0 itself was never published to npm. Action Guard now recognises commands that read, write or upload the credential stores listed below. The shared Guard setting is off by default. In Claude Code and OpenClaw, enabling Guard with otherwise default settings turns enforcement on. In Watch only, these calls are logged and allowed. Enforce when ready also logs and allows them until its readiness conditions are met. When enforcing, these hosts can ask if an approver is available; their existing outage policies and hard blocks still apply. The enabled Hermes adapter enforces by default, independently of readiness, and blocks rather than prompts unless set to advisory. Its hard blocks still apply in advisory mode.
 
 Four things to know before you upgrade (approval behaviour below assumes enforcement):
 
