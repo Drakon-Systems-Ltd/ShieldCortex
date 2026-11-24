@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **An insecure or unlistable self-report directory is a trust rejection even when it contains no report (#1153, collector only).** If a gate runtime's directory is listed under the posture root, and that directory or a listed profile directory is insecure or cannot be listed, the collector emits one non-stale trust rejection (runtime loaded unknown, no instance id) instead of omitting the runtime or recording it as absent. A secure, successfully listed, empty runtime directory is still omitted when the host is absent and there are no artefacts. Descriptor checks, rejection aging, and ancestor-directory trust are not part of this change.
 - **A rejected posture report stays in the host judgment when another report for the same runtime, profile and plane is current (#1135).** The collector already kept a trust-rejected self-report, such as a file with mode 0640, and did not age it out, but the rollup dropped that record beside a current sibling, so the host summary could be green. The rollup now judges that rejected record as unknown. Stale records, and validated reports the host has not verified, stay out of the judgment as before.
 
 ## [5.22.1] - 2026-11-23
