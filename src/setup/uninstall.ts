@@ -343,7 +343,7 @@ export async function uninstallAll(options?: {
         for (const r of result.removed) {
           console.log(`  - ${r}`);
         }
-      } else if (report.dirtyCount === 0) {
+      } else if (report.dirtyCount === 0 && pluginRemoval?.status !== 'refused') {
         console.log('\nDeep clean: no OpenClaw residue detected.');
       }
       if (result.errors.length > 0) {

@@ -58,6 +58,7 @@ import {
   readSelectedRealtimePluginVersion,
 } from '../integrations/openclaw-realtime-install.js';
 import {
+  realtimeUninstallTargetingRefusal,
   spawnOpenClawPluginsUninstall,
   uninstallManagedRealtimePlugin,
   type RealtimeUninstallDeps,
@@ -2452,6 +2453,17 @@ async function writeOpenClawInstall(
 }
 
 export async function uninstallOpenClawHook(): Promise<RealtimeUninstallResult> {
+  // Resolve or refuse the target before any hook, config, or skill write.
+  // An unresolvable OPENCLAW_HOME used to fall through to another home, and
+  // this function removed hooks before the plugin helper's refusal and skills
+  // after it.
+  const targeting = realtimeUninstallTargetingRefusal(resolveUserHome());
+  if (targeting) {
+    process.exitCode = 1;
+    console.error(targeting);
+    return { status: 'refused', detail: targeting };
+  }
+
   const hooksDirs = findAllHooksDirs();
 
   if (hooksDirs.length === 0) {
