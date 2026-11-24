@@ -72,8 +72,9 @@ export const MAX_REASON_CHARS = 120;
 export const MAX_INSTANCES_PER_PROFILE = 16;
 /**
  * #970: a self-report whose process this host cannot confirm, and that has
- * not been seen (heartbeat, or file mtime for a rejected report) for this
- * long, is stale: listed, never judged for the host posture.
+ * not been seen (heartbeat, or the opened-descriptor mtime of a content
+ * rejection) for this long, is stale: listed, never judged for the host
+ * posture. A trust rejection ignores that mtime and is never aged.
  */
 export const STALE_NOT_SEEN_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -306,7 +307,14 @@ export type SelfReportRejection = 'trust' | 'content';
 
 export type SelfReportRead =
   | { kind: 'absent' }
-  | { kind: 'invalid'; reason: string; instance?: string; rejection?: SelfReportRejection }
+  | {
+      kind: 'invalid';
+      reason: string;
+      instance?: string;
+      rejection?: SelfReportRejection;
+      /** Opened-descriptor mtime of a content rejection. Absent on trust. */
+      observedMtimeMs?: number | null;
+    }
   | { kind: 'valid'; report: SelfReport };
 
 /**
@@ -537,9 +545,10 @@ export interface ToolGateInput {
   nowMs: number;
   maxAgeMs?: number;
   /**
-   * #970: mtime of the self-report file, when the collector has one. Only
-   * used to age a report rejected for its CONTENT (`rejectionMayAge`), which
-   * has no trustworthy heartbeat; a trust rejection ignores it.
+   * #970: opened-descriptor mtime of a content rejection, when the collector
+   * carried one. Only used to age a report rejected for its CONTENT
+   * (`rejectionMayAge`), which has no trustworthy heartbeat; a trust
+   * rejection ignores it.
    */
   lastSeenMs?: number | null;
 }
@@ -994,9 +1003,12 @@ function groupKey(r: PostureRecord): string {
  * is per-call, alive, ended or unverified). It is unknown evidence, and
  * selection does not read the rejection text. A (runtime, profile, plane)
  * with no current record contributes its non-stale records as-is, so a group
- * the host cannot vouch for is never green. Unverifiable leftovers BESIDE a
- * current member are listed but not rolled up: nothing shows they are still
- * running.
+ * the host cannot vouch for is never green. A validated report the host has
+ * not verified (liveness `unverified`, or any other non-stale leftover that
+ * is not `current` and not `alive`) is excluded only beside a current member
+ * of the same runtime, profile, and plane. With no current member it remains
+ * eligible: judged, not green. It is not the #1135 structural rejection
+ * (loaded `unknown` and liveness `not-applicable`).
  */
 export function rollupRecords(records: readonly PostureRecord[]): PostureRecord[] {
   const fresh = records.filter((r) => !r.stale);
