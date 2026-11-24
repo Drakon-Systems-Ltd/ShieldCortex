@@ -122,6 +122,45 @@ const NOT_COMPOUND_TO =
 const NOT_COMPOUND_OF =
   String.raw`(?<!\b(?:instead|outside|ahead|regardless|irrespective|because|independent|independently)[ \t]{1,4})`;
 
+// ── supply_chain: bare `npm install` tutorial shapes ─────────────────────────
+// A standard project-script step.
+const NPM_SCRIPT_STEP =
+  String.raw`(?:npm|yarn|pnpm)\s+run\s+(?:dev|start|build|test|serve|lint)(?![\w-])`;
+// The rest of the sentence after a script step carries no shell chaining,
+// piping, redirection or substitution (`| bash`, `&& wget`, `; curl`, `> f`,
+// backtick, `$(`). Bounded; stops at a sentence end or a line break.
+const NPM_CLEAN_TAIL =
+  String.raw`(?!(?:[^\n.!?]|[.!?](?!\s|$)){0,160}?(?:[|;\x60>]|&&|\$\())`;
+// One prose word of a follow-up clause: a localhost URL, or a plain word that
+// is not a package-manager / fetch / shell verb and carries no `scheme://`.
+// Shell metacharacters are not in the word alphabet, so they end the clause.
+const NPM_CLAUSE_WORD =
+  String.raw`(?:http:\/\/(?:localhost|127\.0\.0\.1)(?::\d{1,5})?(?:\/[\w-]*(?:[.\/][\w-]+)*)?(?![\w:\/@%#=+~-]|\.\w)` +
+  String.raw`|(?!(?:npm|npx|yarn|pnpm|pip3?|curl|wget|bash|sh|zsh|sudo|install|add|eval|exec|source)(?![\w-]))(?!\S*:\/\/)[\w'-]+(?:[.:\/@%#=+~]+[\w'-]+)*)`;
+// Fold 3: optional comma, a connective, then ONE short prose clause (at most
+// six words either side) that runs a project script and ends the sentence
+// ("…, next build the bundle using pnpm run build.").
+const NPM_SCRIPT_CLAUSE =
+  String.raw`,?[ \t]*(?:and[ \t]+then|then|and|next)[ \t]+(?:${NPM_CLAUSE_WORD},?[ \t]+){0,6}${NPM_SCRIPT_STEP}` +
+  String.raw`(?:,?[ \t]+${NPM_CLAUSE_WORD}){0,6}[ \t]*(?:$|[.!](?=\s|$)|\r?\n)`;
+const NPM_LOCATION_PHRASE =
+  String.raw`(?:(?:first|again)\s+)?(?:in|inside|within|from)\s+(?:(?:the|this|your|our)\s+)?(?:(?:project|app|repo|repository)\s+)?(?:folder|directory|dir|root|repo|repository)(?:\s+of\s+(?:the|this|your|our)\s+(?:project|repo|repository))?(?:\s+(?:first|again))?`;
+const NPM_INSTALL_ROW = new RegExp(
+  String.raw`npm\s+install\s+(?!` +
+    // bare install, then directly a script step
+    String.raw`\s*(?:(?:then|and(?:\s+then)?|&&|;)\s*)?${NPM_SCRIPT_STEP}${NPM_CLEAN_TAIL}` +
+    // bare install + determiner + dependencies noun
+    String.raw`|\s*(?:the|all(?:\s+the)?|your|project)\s+(?:project\s+)?(?:dependencies|deps|packages)(?=\s*(?:$|[,.;:!)]|(?:then|and|first|before|from|listed|in|with|using)\b))` +
+    // bare install + location phrase, then: sentence end | "to install the
+    // dependencies" | a direct script step | a connective script clause
+    String.raw`|\s*${NPM_LOCATION_PHRASE}(?=\s*(?:$|[.!)]` +
+    String.raw`|[,;]?\s*to\s+install\s+(?:the\s+|all\s+the\s+|its\s+|project\s+)?(?:dependencies|deps|packages)\s*(?:$|[.!)])` +
+    String.raw`|[,;]?\s*(?:(?:then|and(?:\s+then)?|&&|;)\s*)?${NPM_SCRIPT_STEP}${NPM_CLEAN_TAIL}` +
+    String.raw`|${NPM_SCRIPT_CLAUSE}))` +
+  String.raw`)`,
+  'i',
+);
+
 /** The rows of one SKILL pattern group, for per-regex tests. */
 export function skillPatternGroupRows(name: string): readonly RegExp[] {
   return SKILL_PATTERN_GROUPS.find((g) => g.name === name)?.patterns ?? [];
@@ -230,7 +269,11 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
       // install the dependencies", or continues with a project-script step;
       // a package name, a flag, or any other follow-up (`then curl … | sh`)
       // still matches.
-      /npm\s+install\s+(?!\s*(?:(?:then|and(?:\s+then)?|&&|;)\s*)?(?:npm|yarn|pnpm)\s+run\s+(?:dev|start|build|test|serve|lint)(?![\w-])|\s*(?:the|all(?:\s+the)?|your|project)\s+(?:project\s+)?(?:dependencies|deps|packages)(?=\s*(?:$|[,.;:!)]|(?:then|and|first|before|from|listed|in|with|using)\b))|\s*(?:(?:first|again)\s+)?(?:in|inside|within|from)\s+(?:(?:the|this|your|our)\s+)?(?:(?:project|app)\s+)?(?:folder|directory|dir|root|repo|repository)(?:\s+of\s+(?:the|this|your|our)\s+(?:project|repo|repository))?(?:\s+(?:first|again))?(?=\s*(?:$|[.!)]|[,;]?\s*to\s+install\s+(?:the\s+|all\s+the\s+|its\s+|project\s+)?(?:dependencies|deps|packages)\s*(?:$|[.!)])|[,;]?\s*(?:(?:then|and(?:\s+then)?|&&|;)\s*)?(?:npm|yarn|pnpm)\s+run\s+(?:dev|start|build|test|serve|lint)(?![\w-]))))/i,
+      // Fold 3: a direct script step is exempt only when the rest of its
+      // sentence has no shell chaining/pipe/redirect/substitution; and the
+      // location phrase may be followed by a comma + connective + one short
+      // prose clause that runs a project script (see NPM_SCRIPT_CLAUSE).
+      NPM_INSTALL_ROW,
       /pip\s+install\s+/i,
       /add\s+[\s\S]{0,50}to\s+(package\.json|requirements\.txt|Gemfile|go\.mod)/i,
       /install\s+(this\s+)?package/i,
