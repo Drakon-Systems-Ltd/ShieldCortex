@@ -211,6 +211,42 @@ function preciseMtimeMs(st: { mtimeMs?: unknown; mtimeNs?: unknown }): number {
   return Number.NaN;
 }
 
+type DescriptorMtime = { kind: 'ns'; ns: bigint } | { kind: 'ms'; ms: number };
+
+/**
+ * Time used to order a sidecar against its report. A number `mtimeMs` is
+ * already the fraction the caller supplied, same rule as `preciseMtimeMs`.
+ * Otherwise the exact nanoseconds. A whole-millisecond bigint is not a
+ * substitute for a missing `mtimeNs`.
+ */
+function descriptorMtime(st: { mtimeMs?: unknown; mtimeNs?: unknown }): DescriptorMtime | null {
+  if (typeof st.mtimeMs === 'number') return { kind: 'ms', ms: st.mtimeMs };
+  if (typeof st.mtimeNs === 'bigint') return { kind: 'ns', ns: st.mtimeNs };
+  return null;
+}
+
+function nsWithinSafeMs(ns: bigint): boolean {
+  const ms = ns / NS_PER_MS;
+  return ms <= MAX_SAFE_MS && ms >= MIN_SAFE_MS;
+}
+
+/**
+ * True when the sidecar is not older than the report. Exact nanoseconds
+ * compare as bigint, so adjacent values that become one Number still order.
+ * Number milliseconds compare only when neither side has exact nanoseconds.
+ * Missing, mixed, non-finite and out-of-range times are not fresh. Equality
+ * is accepted. This is not the millisecond content-aging value.
+ */
+function sidecarNotOlder(report: DescriptorMtime | null, sidecar: DescriptorMtime | null): boolean {
+  if (report?.kind === 'ns' && sidecar?.kind === 'ns') {
+    return nsWithinSafeMs(report.ns) && nsWithinSafeMs(sidecar.ns) && sidecar.ns >= report.ns;
+  }
+  if (report?.kind === 'ms' && sidecar?.kind === 'ms') {
+    return Number.isFinite(report.ms) && Number.isFinite(sidecar.ms) && sidecar.ms >= report.ms;
+  }
+  return false;
+}
+
 function sameDeviceInode(a: { dev: unknown; ino: unknown }, b: { dev: unknown; ino: unknown }): boolean {
   return typeof a.dev === 'bigint' && typeof a.ino === 'bigint'
     && typeof b.dev === 'bigint' && typeof b.ino === 'bigint'
@@ -250,15 +286,20 @@ export function pidNsSidecarPath(reportFile: string): string {
  * file (never a symlink), owned by this user, owner-only, tiny, and exactly
  * digits or `null`. Missing, unreadable or malformed is null.
  *
- * It is trusted only when both mtimes are finite and the sidecar's is NOT
- * OLDER than the report it sits beside: the writers rewrite it after every
- * report write, so an older one is from before the report's last write and
- * vouches for nothing. A missing or non-finite timestamp is not evidence the
- * sidecar is fresh. (The basename is the process's start identity — pid +
- * start ticks, or pid + a random token — so a different process does not share
- * it; the mtime rule also covers a sidecar whose rewrite failed.)
+ * It is trusted only when the sidecar's opened mtime is not older than the
+ * report's opened mtime: the writers rewrite it after every report write, so
+ * an older one is from before the report's last write and vouches for nothing.
+ * Exact nanoseconds compare as bigint. A missing, mixed, non-finite or
+ * out-of-range timestamp is not evidence the sidecar is fresh. Equality is
+ * accepted. (The basename is the process's start identity — pid + start ticks,
+ * or pid + a random token — so a different process does not share it; the
+ * mtime rule also covers a sidecar whose rewrite failed.)
  */
-export function readPidNsSidecar(reportFile: string, reportMtimeMs: number, uid: number | undefined): string | null {
+export function readPidNsSidecar(
+  reportFile: string,
+  reportOpened: { mtimeMs?: unknown; mtimeNs?: unknown },
+  uid: number | undefined,
+): string | null {
   const file = pidNsSidecarPath(reportFile);
   let fd: number | null = null;
   try {
@@ -271,16 +312,16 @@ export function readPidNsSidecar(reportFile: string, reportMtimeMs: number, uid:
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
     const opened = fs.fstatSync(fd, EXACT_STAT);
     // Type, size, owner, mode, and exact dev+ino are decided on this descriptor.
-    // A failure stays null and does not change the report's rejection. A
-    // timestamp that is not finite is not namespace evidence.
+    // A failure stays null and does not change the report's rejection. Freshness
+    // is this descriptor's nanoseconds against the report's, not a Number
+    // rounding of either. A timestamp that is not fresh is not namespace evidence.
     if (!opened.isFile() || exceedsByteCap(opened.size, PID_NS_SIDECAR_MAX_BYTES)) return null;
     if (process.platform !== 'win32') {
       if (uid !== undefined && ownedByOther(opened.uid, uid)) return null;
       if (groupOrOtherBits(opened.mode)) return null;
     }
-    const openedMtimeMs = preciseMtimeMs(opened);
     if (!sameDeviceInode(opened, st)) return null;
-    if (typeof reportMtimeMs !== 'number' || !Number.isFinite(openedMtimeMs) || !Number.isFinite(reportMtimeMs) || openedMtimeMs < reportMtimeMs) return null;
+    if (!sidecarNotOlder(descriptorMtime(reportOpened), descriptorMtime(opened))) return null;
     const buf = Buffer.alloc(PID_NS_SIDECAR_MAX_BYTES + 1);
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
     const text = buf.subarray(0, n).toString('utf8');
@@ -360,8 +401,9 @@ export function readSelfReportFile(
       if (r.runtime !== expect.runtime) return contentInvalid('report names a different runtime than its path', observedMtimeMs);
       if (r.profile !== expect.profile) return contentInvalid('report names a different profile than its path (wrong profile)', observedMtimeMs);
       if (r.instance.key !== expect.instance) return contentInvalid('report names a different instance than its file', observedMtimeMs);
-      // #970: join the namespace sidecar against this same descriptor mtime.
-      r.instance.pid_ns = readPidNsSidecar(file, observedMtimeMs, uid);
+      // #970: join the namespace sidecar on this descriptor's exact nanoseconds.
+      // observedMtimeMs stays the separate millisecond value for content-rejection age.
+      r.instance.pid_ns = readPidNsSidecar(file, opened, uid);
     }
     return read;
   } catch {

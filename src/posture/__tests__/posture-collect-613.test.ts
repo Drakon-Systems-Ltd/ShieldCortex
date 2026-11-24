@@ -623,6 +623,36 @@ describe('#1153 opened descriptor', () => {
     });
   });
 
+  // Contemporary epoch, 1_764_000_000_000 ms. Adjacent nanoseconds collapse to
+  // one finite Number. Synthetic in-memory timestamps only. Older must not
+  // join; equal and newer must.
+  const CONTEMPORARY_EQUAL_NS = 1_764_000_000_000n * 1_000_000n + 2n;
+  const CONTEMPORARY_OLDER_NS = CONTEMPORARY_EQUAL_NS - 1n;
+  const CONTEMPORARY_NEWER_NS = CONTEMPORARY_EQUAL_NS + 1n;
+
+  function numberMs(ns: bigint): number {
+    return Number(ns / 1_000_000n) + Number(ns % 1_000_000n) / 1e6;
+  }
+
+  it('adjacent nanoseconds at a contemporary epoch still order the sidecar', () => {
+    expect(numberMs(CONTEMPORARY_OLDER_NS)).toBe(numberMs(CONTEMPORARY_EQUAL_NS));
+    expect(numberMs(CONTEMPORARY_NEWER_NS)).toBe(numberMs(CONTEMPORARY_EQUAL_NS));
+    expect(Number.isFinite(numberMs(CONTEMPORARY_EQUAL_NS))).toBe(true);
+    expect(CONTEMPORARY_OLDER_NS < CONTEMPORARY_EQUAL_NS).toBe(true);
+    expect(CONTEMPORARY_NEWER_NS > CONTEMPORARY_EQUAL_NS).toBe(true);
+    const file = writeReport(configDir, reportBody());
+    const side = pidNsSidecarPath(file);
+    withExactStats(new Map([[file, nsTime(CONTEMPORARY_EQUAL_NS)], [side, nsTime(CONTEMPORARY_OLDER_NS)]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: null, liveness: 'unverified' });
+    });
+    withExactStats(new Map([[file, nsTime(CONTEMPORARY_EQUAL_NS)], [side, nsTime(CONTEMPORARY_EQUAL_NS)]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: PID_NS, liveness: 'ended' });
+    });
+    withExactStats(new Map([[file, nsTime(CONTEMPORARY_EQUAL_NS)], [side, nsTime(CONTEMPORARY_NEWER_NS)]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: PID_NS, liveness: 'ended' });
+    });
+  });
+
   it('a sidecar timestamp that is not the precise value does not join', () => {
     const file = writeReport(configDir, reportBody());
     const unavailable = (_real: fs.BigIntStats, call: number) => (call === 0 ? null : { mtimeMs: 1_500_001n, mtimeNs: undefined });
