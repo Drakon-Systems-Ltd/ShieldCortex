@@ -125,10 +125,33 @@ function expectExitZero(run: { status: number | null; stdout: string; stderr: st
 describe('built CLI JSON/SARIF on stdout is terminal-safe (#798)', () => {
   it('doctor --json escapes home-derived paths and round-trips them', () => {
     const fx = fixture(UNSAFE);
+    // #1108: SHIELDCORTEX_SKIP_EMBEDDINGS=1 no longer prints the embedding
+    // cache path, and that advice must not come back just to feed this probe.
+    // A malformed config.json is a real doctor row (Action guard config
+    // integrity) that names its absolute path. An empty file is "absent", not
+    // malformed, so the bytes have to be a non-object.
+    const configPath = path.join(fx.home, '.shieldcortex', 'config.json');
+    fs.writeFileSync(configPath, '[]\n');
     const stdout = doctorJson(cli(['doctor', '--json'], fx).stdout);
     expectTerminalSafe(stdout);
-    const body = JSON.parse(stdout) as { results: Array<{ message: string; fix?: string }> };
+    const body = JSON.parse(stdout) as {
+      results: Array<{ label: string; status: string; message: string; fix?: string }>;
+    };
+    const integrity = body.results.find((r) => r.label === 'Action guard config integrity');
+    expect(integrity).toMatchObject({
+      status: 'fail',
+      fix: `Fix or restore ${configPath}, then re-run doctor.`,
+    });
+    expect(integrity?.message).toContain('verdict: malformed');
     expect(body.results.some((r) => `${r.message}\n${r.fix ?? ''}`.includes(fx.home))).toBe(true);
+    for (const label of ['Optional ML stack', 'Embeddings', 'Semantic coverage']) {
+      const row = body.results.find((r) => r.label === label);
+      const text = `${row?.message ?? ''}\n${row?.fix ?? ''}`;
+      expect(row).toBeDefined();
+      expect(text).not.toContain(fx.home);
+      expect(text).not.toMatch(/embed-backfill/);
+      expect(text).not.toMatch(/will download|would download/);
+    }
   }, 150_000);
 
   it('doctor --json with a clean home is byte-identical to plain JSON.stringify', () => {

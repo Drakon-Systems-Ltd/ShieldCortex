@@ -9,12 +9,13 @@ All notable changes to this project will be documented in this file.
 
 ## [5.22.2] - 2026-11-24
 
-This patch release fixes two security-relevant failure paths: OpenClaw handles malformed policy-lock results without silently discarding an on-disk lock, and the host posture rollup keeps a rejected current self-report in its judgment. It adds no API and makes no breaking change.
+This 5.22.2 patch addresses three failure paths: OpenClaw handles malformed policy-lock results without silently discarding an on-disk lock; the host posture rollup keeps a rejected current self-report in its judgment; and `shieldcortex doctor` exits 1 for missing or incomplete optional embeddings unless `SHIELDCORTEX_SKIP_EMBEDDINGS=1`. Embeddings remain optional; no API is added.
 
 ### Security
 - **OpenClaw fails closed when a policy-lock applier returns a malformed Action Guard result (#1147).** With an on-disk lock present, a missing, non-object, array or unexpectedly empty `actionGuard` result now takes the existing strict degraded posture instead of using the unlocked plugin config. A valid partial lock may still produce an empty guard when the input guard is empty and the lock has no pin that would add a guard key. The plugin captures that evidence before calling the applier, so an applier cannot make its malformed result look valid by mutating the input or verdict. When no on-disk lock is present, malformed output leaves the plugin on its existing config.
 
 ### Fixed
+- **Doctor fails when the optional embeddings package is missing (#1108).** If `@huggingface/transformers` cannot be resolved, or the ESM entry that resolution names is not a file on disk, and `SHIELDCORTEX_SKIP_EMBEDDINGS` is not `1`, the Optional ML stack row fails and `shieldcortex doctor` exits 1. The Embeddings and Semantic coverage rows no longer say the model will download, or tell you to run embed-backfill, when that package is missing or incomplete, or embeddings were turned off on purpose. A package that is present is reported as installed only — not as a healthy cache or a working model. Turning embeddings off with `SHIELDCORTEX_SKIP_EMBEDDINGS=1` stays an info line, and the package stays optional. This does not change what `npm i` installs.
 - **A rejected posture report stays in the host judgment when another report for the same runtime, profile and plane is current (#1150; tracked in #1135).** The collector already kept a structurally rejected self-report, such as a file with mode 0640, and did not age it out, but the rollup dropped that record beside a current sibling, so the host summary could be green. The rollup now judges that rejected record as unknown. Stale records, and validated reports the host has not verified, stay out of the judgment as before.
 
 ## [5.22.1] - 2026-11-23

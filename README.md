@@ -15,7 +15,7 @@
 
 ShieldCortex scans memory writes that go through it and, once turned on, gates the tools an agent calls on Claude Code, OpenClaw and Hermes. Codex, Cursor, VS Code and other MCP hosts get a memory scanner the model may call, not a gate. It does not replace OpenClaw, Hermes, or Claude memory.
 
-In 5.22.2, OpenClaw fails closed on malformed policy-lock output when a lock is present, and host posture judgment retains a rejected self-report beside a current sibling. [Release notes](CHANGELOG.md#5222---2026-11-24).
+The 5.22.2 changes make OpenClaw fail closed on malformed policy-lock output when a lock is present, keep a rejected self-report in host posture judgment beside a current sibling, and make `shieldcortex doctor` exit 1 for missing or incomplete optional embeddings unless `SHIELDCORTEX_SKIP_EMBEDDINGS=1`. Embeddings remain optional. [Release notes](CHANGELOG.md#5222---2026-11-24).
 
 ## What it does
 
