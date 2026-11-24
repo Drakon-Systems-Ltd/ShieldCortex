@@ -5,8 +5,10 @@
  * touched, Guard is never armed, no host binary is executed. The only probe
  * that looks outside the home is host-table's OpenClaw binary lookup, which
  * callers (and tests) can inject, the Linux `/proc/<pid>/stat` read that
- * checks a reporting process's start identity, and (#1133) the stat of each
- * directory above a config directory that lies outside the home.
+ * checks a reporting process's start identity, and (#1133) the lstat or
+ * readlink of each name on the path to the config directory, which reaches
+ * the filesystem root for a config directory outside the home or behind a
+ * link that leads out of it.
  *
  * Self-reports live at
  *
@@ -15,10 +17,12 @@
  * one file per reporting process, written by the runtime processes
  * themselves (Claude Code hook, OpenClaw plugin, Hermes plugin). Each file is
  * untrusted: the directories and the file must be owned by this user and not
- * writable by anyone else, and so must the config directory. Every directory
- * above it, up to the home (or the filesystem root, for a config directory
- * outside the home), must be owned by this user or root and not writable by
- * anyone else unless sticky (#1133). The file must be a regular file (symlinks
+ * writable by anyone else, and so must the config directory, which is never a
+ * symlink. Every directory on the path that names it, up to the home (or the
+ * filesystem root, outside the home), must be owned by this user or root and
+ * not writable by anyone else unless sticky; a symlink on that path must be
+ * owned by this user or root and is judged again along the path it names
+ * (#1133, `insecureNamedPath`). The file must be a regular file (symlinks
  * are not followed) under the size cap, those file checks are repeated on the opened
  * descriptor using its exact device and inode, and its content must name the
  * same runtime, profile and instance as its path. Then `parseSelfReport`
@@ -173,27 +177,38 @@ function insecureDir(dir: string, uid: number | undefined): string | null {
   return null;
 }
 
-/** True when `dir` is `top` or lies below it. Both are absolute and resolved. */
-function atOrBelow(dir: string, top: string): boolean {
-  const rel = path.relative(top, dir);
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+/**
+ * #1133: the most symbolic links one ancestry judgment follows. macOS's own
+ * limit (MAXSYMLINKS), below Linux's 40. A path that needs more is not judged
+ * and is not trusted.
+ */
+const MAX_ANCESTRY_LINKS = 32;
+/** #1133: the most names one ancestry judgment visits, including the names links add. */
+const MAX_ANCESTRY_STEPS = 4096;
+
+/** The names in `p`. Empty and `.` names are dropped; `..` is kept for the walk. */
+function pathNames(p: string): string[] {
+  return p.split(path.sep).filter((n) => n !== '' && n !== '.');
+}
+
+function startsWithNames(names: readonly string[], prefix: readonly string[]): boolean {
+  return prefix.length <= names.length && prefix.every((n, i) => names[i] === n);
+}
+
+/** A failed stat, as a finding: gone is not the same as unreadable. */
+function statFailure(err: unknown): string {
+  return (err as NodeJS.ErrnoException | null)?.code === 'ENOENT' ? 'missing directory' : 'unreadable directory';
 }
 
 /**
- * Why a directory ABOVE the config directory is not trustworthy, or null.
- * Owned by this user or by root (root can write anywhere already). Writable
- * by group or others only when sticky (as /tmp): then no one else can rename
- * or remove the entry below it, which the walk has already checked. `follow`
- * judges the directory a symlink names (the home only); otherwise a symlink
- * is not a real directory.
+ * Why a directory on the path above the config directory is not trustworthy,
+ * or null. Owned by this user or by root (root can write anywhere already).
+ * Writable by group or others only when sticky (as /tmp): then no one else can
+ * rename or remove an entry in it that this user or root owns, and the walk
+ * requires that of the next entry. A symlink is not a real directory here:
+ * the walk follows links itself, so `st` is never one it meant to follow.
  */
-function insecureAncestor(dir: string, uid: number | undefined, follow = false): string | null {
-  let st: fs.Stats;
-  try {
-    st = follow ? fs.statSync(dir) : fs.lstatSync(dir);
-  } catch {
-    return 'unreadable directory';
-  }
+function untrustedAncestor(st: fs.Stats, uid: number | undefined): string | null {
   if (st.isSymbolicLink() || !st.isDirectory()) return 'not a real directory';
   if (uid !== undefined && st.uid !== uid && st.uid !== 0) return 'directory owned by another user';
   if ((st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0) return 'directory writable by group or others';
@@ -201,59 +216,151 @@ function insecureAncestor(dir: string, uid: number | undefined, follow = false):
 }
 
 /**
- * #1133: why the config directory, or a directory above it, makes every
+ * #1133: why the path that names `start` (an absolute, resolved directory:
+ * the config directory's parent) is not trustworthy, or null.
+ *
+ * The path is resolved here one name at a time, as the system resolves it,
+ * and every step is judged before it is taken:
+ *
+ * - a directory: `untrustedAncestor`;
+ * - a symbolic link: the directory holding it has already been judged; the
+ *   link must be owned by this user or root; then the path it names is walked
+ *   the same way, from the directory holding it (relative) or afresh
+ *   (absolute). So a link is judged both where it is named and where it leads;
+ * - `..`: the parent of a directory already judged on this walk, or, above
+ *   where the walk began, the walk begins again there.
+ *
+ * A walk begins at the home when the path starts with the home, as named or
+ * as its real path. The home is judged as the directory it names (the system
+ * may link it); nothing above it, nor a link naming it, is judged. Any other
+ * walk begins at the filesystem root, so root-owned system directories and
+ * links (macOS `/tmp`, `/var`) are judged and accepted.
+ *
+ * Bounded: at most MAX_ANCESTRY_LINKS links and MAX_ANCESTRY_STEPS names, past
+ * which the path is not trusted. A point-in-time judgment by path (lstat,
+ * readlink, stat): it is not atomic with the later reads, so a change between
+ * the two is not seen here. Only the report file itself is checked again on
+ * its open descriptor (#1160). Owner and mode bits only: ACLs, extended
+ * attributes, mount options and bind mounts are not consulted.
+ */
+function insecureNamedPath(start: string, home: string, uid: number | undefined): string | null {
+  const homeNamed = path.resolve(home);
+  const homeNames = pathNames(homeNamed);
+  let homeReal: string | null | undefined;
+  let homeRealNames: string[] = [];
+  let homeLost = 'unreadable directory';
+  const fsRoot = path.parse(homeNamed).root;
+  let anchor = fsRoot;
+  let cur = fsRoot;
+  let todo: string[] = [];
+
+  // Begin (again) at the absolute path `names`. Null, or why it is untrusted.
+  const begin = (names: string[]): string | null => {
+    if (homeReal === undefined) {
+      try {
+        // The system's realpath: the JS one resolves `..` in a link's target
+        // by its spelling, not as the system does.
+        homeReal = fs.realpathSync.native(homeNamed);
+        homeRealNames = pathNames(homeReal);
+      } catch (err) {
+        homeReal = null;
+        homeLost = statFailure(err);
+      }
+    }
+    const inHome = startsWithNames(names, homeNames)
+      ? homeNames.length
+      : homeReal !== null && startsWithNames(names, homeRealNames) ? homeRealNames.length : -1;
+    let st: fs.Stats;
+    if (inHome >= 0) {
+      if (homeReal === null) return homeLost;
+      try {
+        st = fs.statSync(homeNamed);
+      } catch (err) {
+        return statFailure(err);
+      }
+      anchor = homeReal;
+      todo = names.slice(inHome);
+    } else {
+      try {
+        st = fs.lstatSync(fsRoot);
+      } catch (err) {
+        return statFailure(err);
+      }
+      anchor = fsRoot;
+      todo = names;
+    }
+    cur = anchor;
+    return untrustedAncestor(st, uid);
+  };
+
+  let why = begin(pathNames(start));
+  if (why) return why;
+  let links = 0;
+  for (let steps = 0; todo.length > 0; steps++) {
+    if (steps >= MAX_ANCESTRY_STEPS) return 'path too long to judge';
+    const name = todo.shift() as string;
+    if (name === '..') {
+      if (cur !== anchor) {
+        cur = path.dirname(cur);
+      } else if (path.dirname(cur) !== cur) {
+        why = begin([...pathNames(path.dirname(cur)), ...todo]);
+        if (why) return why;
+      }
+      continue;
+    }
+    const next = path.join(cur, name);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(next);
+    } catch (err) {
+      return statFailure(err);
+    }
+    if (!st.isSymbolicLink()) {
+      why = untrustedAncestor(st, uid);
+      if (why) return why;
+      cur = next;
+      continue;
+    }
+    if (uid !== undefined && st.uid !== uid && st.uid !== 0) return 'symbolic link owned by another user';
+    if (++links > MAX_ANCESTRY_LINKS) return 'too many symbolic links';
+    let target: string;
+    try {
+      target = fs.readlinkSync(next);
+    } catch {
+      return 'unreadable symbolic link';
+    }
+    if (path.isAbsolute(target)) {
+      why = begin([...pathNames(target), ...todo]);
+      if (why) return why;
+    } else {
+      todo = [...pathNames(target), ...todo];
+    }
+  }
+  return null;
+}
+
+/**
+ * #1133: why the config directory, or the path that names it, makes every
  * self-report under it untrusted; null when the path is private.
  *
  * The config directory gets the posture directories' own rule (a real
  * directory, not a symlink; this user's; not writable by group or others).
- *
- * Inside the home, each directory above it is judged as named, up to and
- * including the home: a symlink there is not a real directory. The home
- * itself is judged as the directory it names, since the system may link it.
- *
- * Outside the home (a `SHIELDCORTEX_CONFIG_DIR` elsewhere), the walk follows
- * the real path of its parent, so system links such as macOS `/tmp` are
- * followed, and goes to the filesystem root, or stops after the home if that
- * real path is inside it.
+ * Its parent path, as named, is then judged by `insecureNamedPath`: up to the
+ * home for a path inside it, else to the filesystem root, following and
+ * judging each link on the way.
  *
  * Windows has no owner/mode check here, as for the posture directories, so
  * nothing above the config directory is walked there.
  */
 function insecureConfigAncestry(configDir: string, home: string, uid: number | undefined): string | null {
-  // Resolved, so a trailing separator cannot make lstat follow a symlinked config dir.
+  // Resolved, as the collector's own joined paths are, so a trailing separator
+  // cannot make lstat follow a symlinked config dir.
   const cfg = path.resolve(configDir);
   const own = insecureDir(cfg, uid);
   if (own) return `${own} (config directory)`;
   if (process.platform === 'win32') return null;
-  const above = (why: string) => `${why} (above the config directory)`;
-  const named = path.resolve(home);
-  if (cfg !== named && atOrBelow(cfg, named)) {
-    for (let dir = path.dirname(cfg); ; dir = path.dirname(dir)) {
-      const why = insecureAncestor(dir, uid, dir === named);
-      if (why) return above(why);
-      if (dir === named) return null;
-    }
-  }
-  let dir: string;
-  try {
-    dir = fs.realpathSync(path.dirname(cfg));
-  } catch {
-    return above('unreadable directory');
-  }
-  let top: string | null;
-  try {
-    top = fs.realpathSync(named);
-  } catch {
-    top = null;
-  }
-  const stopAtHome = top !== null && atOrBelow(dir, top);
-  for (;;) {
-    const why = insecureAncestor(dir, uid);
-    if (why) return above(why);
-    const parent = path.dirname(dir);
-    if ((stopAtHome && dir === top) || parent === dir) return null;
-    dir = parent;
-  }
+  const why = insecureNamedPath(path.dirname(cfg), home, uid);
+  return why ? `${why} (above the config directory)` : null;
 }
 
 /**
