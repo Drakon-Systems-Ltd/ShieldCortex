@@ -224,7 +224,13 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
       // typosquatted package, flags like -g, or a non-script follow-up such as
       // `then curl … | sh`) still matches. The lookahead re-checks after any
       // run of whitespace so backtracking `\s+` cannot slip past the exemption.
-      /npm\s+install\s+(?!\s*(?:(?:then|and(?:\s+then)?|&&|;)\s*)?(?:npm|yarn|pnpm)\s+run\s+(?:dev|start|build|test|serve|lint)(?![\w-])|\s*(?:the|all(?:\s+the)?|your|project)\s+(?:project\s+)?(?:dependencies|deps|packages)(?=\s*(?:$|[,.;:!)]|(?:then|and|first|before|from|listed|in|with|using)\b)))/i,
+      // Fold 2: a bare `npm install` followed by a location phrase ("in the
+      // project folder", "inside the repo", "from the root", optional
+      // first/again) is exempt only when the sentence then ends, says "to
+      // install the dependencies", or continues with a project-script step;
+      // a package name, a flag, or any other follow-up (`then curl … | sh`)
+      // still matches.
+      /npm\s+install\s+(?!\s*(?:(?:then|and(?:\s+then)?|&&|;)\s*)?(?:npm|yarn|pnpm)\s+run\s+(?:dev|start|build|test|serve|lint)(?![\w-])|\s*(?:the|all(?:\s+the)?|your|project)\s+(?:project\s+)?(?:dependencies|deps|packages)(?=\s*(?:$|[,.;:!)]|(?:then|and|first|before|from|listed|in|with|using)\b))|\s*(?:(?:first|again)\s+)?(?:in|inside|within|from)\s+(?:(?:the|this|your|our)\s+)?(?:(?:project|app)\s+)?(?:folder|directory|dir|root|repo|repository)(?:\s+of\s+(?:the|this|your|our)\s+(?:project|repo|repository))?(?:\s+(?:first|again))?(?=\s*(?:$|[.!)]|[,;]?\s*to\s+install\s+(?:the\s+|all\s+the\s+|its\s+|project\s+)?(?:dependencies|deps|packages)\s*(?:$|[.!)])|[,;]?\s*(?:(?:then|and(?:\s+then)?|&&|;)\s*)?(?:npm|yarn|pnpm)\s+run\s+(?:dev|start|build|test|serve|lint)(?![\w-]))))/i,
       /pip\s+install\s+/i,
       /add\s+[\s\S]{0,50}to\s+(package\.json|requirements\.txt|Gemfile|go\.mod)/i,
       /install\s+(this\s+)?package/i,

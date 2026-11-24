@@ -100,7 +100,19 @@ const PATTERN_GROUPS: PatternGroup[] = [
       // modal/adverb/try-to words); any other occurrence in the same text —
       // imperative, second-person, or after a benign lead sentence — still
       // matches, because the regex is tested at every position.
-      /(?<!\b(?:scammers?|criminals?|attackers?|fraudsters?|hackers?|phishers?|impost[eo]rs?|cybercriminals?)\s+(?:(?:may|might|can|could|will|often|sometimes|usually|frequently|commonly|routinely|try|tries|attempt|attempts)\s+(?:to\s+)?){0,3})pretend\s+to\s+be/i,
+      //
+      // Fold 2: the same exemption when the subject is a reported or deceptive
+      // MESSAGE from a closed list of communication nouns ("report any emails
+      // that pretend to be from IT", "texts or calls that pretend to be your
+      // bank", "phishing messages often pretend to be a colleague"), with an
+      // optional `that`/`which` relative pronoun and the same hedge words. The
+      // noun must sit directly before the phrase (punctuation breaks it, so
+      // "in your messages, pretend to be …" still matches).
+      /(?<!\b(?:(?:scammers?|criminals?|attackers?|fraudsters?|hackers?|phishers?|impost[eo]rs?|cybercriminals?)|(?:e-?mails?|messages?|texts?|sms(?:es)?|calls?|voicemails?|links?|pop-?ups?|websites?|sites?|web\s?pages?|dms?|notifications?|attachments?)(?:\s+(?:that|which))?)\s+(?:(?:may|might|can|could|will|often|sometimes|usually|frequently|commonly|routinely|try|tries|attempt|attempts)\s+(?:to\s+)?){0,3})pretend\s+to\s+be/i,
+      // Fold 2 guard: COMPOSING impersonating messages is a directive, not a
+      // description ("write emails that pretend to be from IT …"), so a
+      // composition verb before the message noun re-flags that occurrence.
+      /\b(?:write|send|craft|compose|draft|create|generate|produce)\s+(?:[\w-]+\s+){0,3}?(?:e-?mails?|messages?|texts?|sms(?:es)?|calls?|voicemails?|links?|pop-?ups?|websites?|sites?|web\s?pages?|dms?|notifications?|attachments?)\s+(?:(?:that|which)\s+)?(?:(?:may|might|can|could|will|often|sometimes|usually|frequently|commonly|routinely|try|tries|attempt|attempts)\s+(?:to\s+)?){0,3}pretend\s+to\s+be/i,
       /disregard\s+(all\s+)?(previous|above|prior)/i,
       /override\s+(previous|all|system)/i,
       /summari[sz]e\s+your\s+system\s+prompt/i,
