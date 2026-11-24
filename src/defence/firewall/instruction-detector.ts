@@ -58,6 +58,47 @@ interface PatternGroup {
   subsumedBy?: string;
 }
 
+// ── hidden_instruction: `pretend to be` awareness exemption ─────────────────────
+// Fold 4 (Case review). An occurrence of "pretend to be" is exempt ONLY when
+// its sentence positively identifies awareness / reporting context. Being next
+// to a message noun ("emails pretend to be …") is NOT enough: ambiguous text
+// keeps the original signal. The exempt shapes, all anchored to the start of
+// the sentence (input start, after .!? + space, or a line start / bullet):
+//   1. a notice frame ("Security notice:", "Phishing alert:", "Warning:") or a
+//      reporting/caution lead ("Be aware that", "Beware of", "Report",
+//      "Never trust", "Do not reply to", "Delete") before the subject; or
+//   2. a subject that names the threat itself: a threat actor ("scammers",
+//      "attackers") or a threat-labelled message ("phishing emails", "fake
+//      websites", "scam texts"); or
+//   3. a bare message subject ("some emails pretend to be …") whose SAME
+//      sentence carries a disclaimer ("… but we will never ask for …", "do
+//      not reply").
+// Then the subject, an optional that/which/who, up to three hedge words, and
+// "pretend to be". Anything else in front of the phrase (an imperative verb,
+// "your", a noun without a cue, punctuation) means no exemption. Bounded
+// horizontal whitespace only (see NOT_NEGATED in skill-scanner/patterns.ts).
+const PT_WS = String.raw`[ \t]{1,4}`;
+const PT_ACTOR = String.raw`(?:scammers?|criminals?|attackers?|fraudsters?|hackers?|phishers?|impost[eo]rs?|cybercriminals?|spammers?)`;
+const PT_MSG = String.raw`(?:e-?mails?|messages?|texts?|sms(?:es)?|calls?|voicemails?|links?|pop-?ups?|websites?|sites?|web[ \t]?pages?|dms?|notifications?|attachments?)`;
+const PT_MSGS = String.raw`${PT_MSG}(?:,?${PT_WS}(?:or|and)${PT_WS}${PT_MSG})?`;
+const PT_QUAL = String.raw`(?:scam|phishing|fake|fraudulent|bogus|spoofed|suspicious|malicious|counterfeit|spam|smishing|vishing)`;
+const PT_DET = String.raw`(?:(?:some|these|those|many|any|all|such|the|most)${PT_WS})?`;
+const PT_REL = String.raw`(?:${PT_WS}(?:that|which|who))?`;
+const PT_HEDGE = String.raw`(?:(?:may|might|can|could|will|often|sometimes|usually|frequently|commonly|routinely|try|tries|attempt|attempts)${PT_WS}(?:to${PT_WS})?){0,3}`;
+const PT_SENT_START = String.raw`(?:^|[.!?]${PT_WS}|\n[ \t]{0,4})(?:[-*\u2022][ \t]{1,4})?`;
+const PT_FRAME = String.raw`(?:(?:(?:(?:it|security|cyber[ \t]?security|phishing|scam|fraud|safety)${PT_WS}(?:notice|alert|reminder|warning|advisory|tip|bulletin))|warning|caution|reminder|notice|heads[ \t-]?up|psa)[ \t]{0,2}[:\u2014-]${PT_WS})`;
+const PT_LEAD = String.raw`(?:(?:please${PT_WS})?(?:be${PT_WS}aware${PT_WS}(?:that|of)|beware(?:${PT_WS}of)?|be${PT_WS}(?:wary|careful|suspicious)${PT_WS}(?:of|with)|watch${PT_WS}out${PT_WS}for|look${PT_WS}out${PT_WS}for|note${PT_WS}that|remember${PT_WS}that|never${PT_WS}trust|(?:do${PT_WS}not|don't)${PT_WS}(?:trust|reply${PT_WS}to|respond${PT_WS}to|click|open)|report|delete|block|flag)${PT_WS})`;
+const PT_SUBJECT_TAIL = String.raw`${PT_REL}${PT_WS}${PT_HEDGE}`;
+// Shapes 1 and 2.
+const PT_AWARE_PREFIX = String.raw`${PT_SENT_START}(?:(?:${PT_FRAME}${PT_LEAD}?|${PT_LEAD})${PT_DET}(?:${PT_QUAL}${PT_WS})?(?:${PT_ACTOR}|${PT_MSGS})|${PT_FRAME}?${PT_DET}(?:${PT_QUAL}${PT_WS}(?:${PT_ACTOR}|${PT_MSGS})|${PT_ACTOR}))${PT_SUBJECT_TAIL}`;
+// Shape 3: a bare message subject, exempt only with a same-sentence disclaimer.
+const PT_BARE_PREFIX = String.raw`${PT_SENT_START}${PT_FRAME}?${PT_DET}${PT_MSGS}${PT_SUBJECT_TAIL}`;
+const PT_DISCLAIMER = String.raw`[^.!?\n;]{0,200}?\b(?:(?:will${PT_WS})?never${PT_WS}(?:ever${PT_WS})?ask|will${PT_WS}not${PT_WS}(?:ever${PT_WS})?ask|(?:do${PT_WS}not|don't)${PT_WS}(?:reply|respond))\b`;
+const PRETEND_TO_BE_ROW = new RegExp(
+  String.raw`\b(?=pretend\s)(?<!${PT_AWARE_PREFIX})(?!(?<=${PT_BARE_PREFIX})pretend${PT_WS}to${PT_WS}be\b${PT_DISCLAIMER})pretend\s+to\s+be`,
+  'i',
+);
+
 const PATTERN_GROUPS: PatternGroup[] = [
   {
     name: 'system_prompt_marker',
@@ -92,27 +133,18 @@ const PATTERN_GROUPS: PatternGroup[] = [
       /new\s+instructions?\s*:/i,
       /you\s+are\s+now\b/i,
       /act\s+as\s+(a\s+|an\s+)?/i,
-      // `pretend to be` — per occurrence. An occurrence whose grammatical
-      // subject is a named threat actor ("scammers may pretend to be IT
-      // support", "attackers sometimes try to pretend to be a colleague") is a
-      // third-person DESCRIPTION, as in a security-awareness notice, not a
-      // directive. Only that exact shape is exempt (actor noun + up to three
-      // modal/adverb/try-to words); any other occurrence in the same text —
-      // imperative, second-person, or after a benign lead sentence — still
-      // matches, because the regex is tested at every position.
-      //
-      // Fold 2: the same exemption when the subject is a reported or deceptive
-      // MESSAGE from a closed list of communication nouns ("report any emails
-      // that pretend to be from IT", "texts or calls that pretend to be your
-      // bank", "phishing messages often pretend to be a colleague"), with an
-      // optional `that`/`which` relative pronoun and the same hedge words. The
-      // noun must sit directly before the phrase (punctuation breaks it, so
-      // "in your messages, pretend to be …" still matches).
-      /(?<!\b(?:(?:scammers?|criminals?|attackers?|fraudsters?|hackers?|phishers?|impost[eo]rs?|cybercriminals?)|(?:e-?mails?|messages?|texts?|sms(?:es)?|calls?|voicemails?|links?|pop-?ups?|websites?|sites?|web\s?pages?|dms?|notifications?|attachments?)(?:\s+(?:that|which))?)\s+(?:(?:may|might|can|could|will|often|sometimes|usually|frequently|commonly|routinely|try|tries|attempt|attempts)\s+(?:to\s+)?){0,3})pretend\s+to\s+be/i,
-      // Fold 2 guard: COMPOSING impersonating messages is a directive, not a
-      // description ("write emails that pretend to be from IT …"), so a
-      // composition verb before the message noun re-flags that occurrence.
+      // `pretend to be` — per occurrence; see PRETEND_TO_BE_ROW. Fold 4: the
+      // exemption needs POSITIVE awareness context in the same sentence, not
+      // just a noun next to the phrase.
+      PRETEND_TO_BE_ROW,
+      // Extra re-flags (closed lists; a backstop, not the safety mechanism):
+      // composing impersonating messages is a directive ("write emails that
+      // pretend to be from IT …"), a semicolon-joined follow-up in the same
+      // sentence is ambiguous, and a request to send/give something to
+      // "them/us/me" is a directive.
       /\b(?:write|send|craft|compose|draft|create|generate|produce)\s+(?:[\w-]+\s+){0,3}?(?:e-?mails?|messages?|texts?|sms(?:es)?|calls?|voicemails?|links?|pop-?ups?|websites?|sites?|web\s?pages?|dms?|notifications?|attachments?)\s+(?:(?:that|which)\s+)?(?:(?:may|might|can|could|will|often|sometimes|usually|frequently|commonly|routinely|try|tries|attempt|attempts)\s+(?:to\s+)?){0,3}pretend\s+to\s+be/i,
+      /\bpretend\s+to\s+be\b[^.!?\n;]{0,200};/i,
+      /\bpretend\s+to\s+be\b[^.!?\n]{0,200}?\b(?:send|give|share|tell|email|text|forward|provide|hand(?:\s+over)?|reply\s+to|respond\s+to|wire|pay|transfer)\s+(?:them|us|me|him|her)\b/i,
       /disregard\s+(all\s+)?(previous|above|prior)/i,
       /override\s+(previous|all|system)/i,
       /summari[sz]e\s+your\s+system\s+prompt/i,

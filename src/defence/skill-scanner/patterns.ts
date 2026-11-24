@@ -123,41 +123,68 @@ const NOT_COMPOUND_OF =
   String.raw`(?<!\b(?:instead|outside|ahead|regardless|irrespective|because|independent|independently)[ \t]{1,4})`;
 
 // ── supply_chain: bare `npm install` tutorial shapes ─────────────────────────
+// Fold 4 (Case review): every exemption branch is a POSITIVE grammar that must
+// consume the whole rest of the sentence. A branch suppresses the finding only
+// when the text after `npm install` is fully matched, clause by clause, up to
+// a sentence end (`.`/`!` before whitespace, a line break, or end of input).
+// Anything the grammar does not consume (an extra command, a package name, a
+// flag, a pipe/chain/redirect/substitution, a word over the length cap, a
+// clause over the word cap) leaves the finding in place. There is no bounded
+// "scan ahead for bad characters" step any more: a scan that gives up is not
+// proof the tail is clean.
+//
+// Every quantifier is bounded (whitespace, word length, word count), so the
+// longest exempt span is well under SCAN_WINDOW_OVERLAP (2000 chars): an
+// exemption can never reach a window edge and treat the cut as a sentence end.
+// Horizontal whitespace inside one clause.
+const NPM_WS = String.raw`[ \t]{1,4}`;
+// Whitespace that may cross a line break (code-block steps).
+const NPM_GAP = String.raw`\s{1,8}`;
 // A standard project-script step.
 const NPM_SCRIPT_STEP =
-  String.raw`(?:npm|yarn|pnpm)\s+run\s+(?:dev|start|build|test|serve|lint)(?![\w-])`;
-// The rest of the sentence after a script step carries no shell chaining,
-// piping, redirection or substitution (`| bash`, `&& wget`, `; curl`, `> f`,
-// backtick, `$(`). Bounded; stops at a sentence end or a line break.
-const NPM_CLEAN_TAIL =
-  String.raw`(?!(?:[^\n.!?]|[.!?](?!\s|$)){0,160}?(?:[|;\x60>]|&&|\$\())`;
-// One prose word of a follow-up clause: a localhost URL, or a plain word that
-// is not a package-manager / fetch / shell verb and carries no `scheme://`.
-// Shell metacharacters are not in the word alphabet, so they end the clause.
+  String.raw`(?:npm|yarn|pnpm)${NPM_WS}run${NPM_WS}(?:dev|start|build|test|serve|lint)(?![\w-])`;
+// Words a follow-up clause may never contain: package managers, fetchers,
+// shells, interpreters and other command verbs.
+const NPM_BANNED_WORD =
+  String.raw`(?:npm|npx|yarn|pnpm|pipx?|pip3|curl|wget|bash|sh|zsh|fish|sudo|su|install|add|eval|exec|source|node|deno|bun|python3?|perl|ruby|rm|chmod|chown|dd|nc|ncat|powershell|pwsh|iex|cmd|git|docker|ssh|scp|base64)(?![\w-])`;
+// One prose word of a clause: a localhost URL, or a plain word (bounded
+// length, no leading dash/flag, not a banned verb, no `scheme://`). Shell
+// metacharacters (`| ; & > < $ ( )` and backtick) are not in the alphabet, so
+// they are never consumed and the finding stays.
 const NPM_CLAUSE_WORD =
-  String.raw`(?:http:\/\/(?:localhost|127\.0\.0\.1)(?::\d{1,5})?(?:\/[\w-]*(?:[.\/][\w-]+)*)?(?![\w:\/@%#=+~-]|\.\w)` +
-  String.raw`|(?!(?:npm|npx|yarn|pnpm|pip3?|curl|wget|bash|sh|zsh|sudo|install|add|eval|exec|source)(?![\w-]))(?!\S*:\/\/)[\w'-]+(?:[.:\/@%#=+~]+[\w'-]+)*)`;
-// Fold 3: optional comma, a connective, then ONE short prose clause (at most
-// six words either side) that runs a project script and ends the sentence
-// ("…, next build the bundle using pnpm run build.").
+  String.raw`(?:http:\/\/(?:localhost|127\.0\.0\.1)(?::\d{1,5})?(?:\/[\w-]{0,24}(?:[.\/][\w-]{1,24}){0,3})?(?![\w:\/@%#=+~-]|\.\w)` +
+  String.raw`|(?!-)(?!${NPM_BANNED_WORD})(?![^\s]{0,140}:\/\/)[\w'-]{1,24}(?:[.:\/@%#=+~]{1,3}[\w'-]{1,24}){0,3})`;
+// The sentence ends here: optional closing paren, then `.`/`!` before
+// whitespace or end, a line break, or end of input.
+const NPM_SENTENCE_END = String.raw`\)?[ \t]{0,4}(?:$|[.!](?=\s|$)|\r?\n)`;
+// A script step, at most six trailing prose words, then the sentence end.
+const NPM_STEP_TO_END =
+  String.raw`${NPM_SCRIPT_STEP}(?:,?${NPM_WS}${NPM_CLAUSE_WORD}){0,6}${NPM_SENTENCE_END}`;
+// A direct script step, optionally introduced by then / and (then) / && / ;.
+const NPM_DIRECT_STEP =
+  String.raw`(?:(?:then|and(?:${NPM_WS}then)?|&&|;)\s{0,8})?${NPM_STEP_TO_END}`;
+// A connective clause: optional comma, then / and then / and / next, at most
+// six prose words, a script step, at most six prose words, sentence end.
 const NPM_SCRIPT_CLAUSE =
-  String.raw`,?[ \t]*(?:and[ \t]+then|then|and|next)[ \t]+(?:${NPM_CLAUSE_WORD},?[ \t]+){0,6}${NPM_SCRIPT_STEP}` +
-  String.raw`(?:,?[ \t]+${NPM_CLAUSE_WORD}){0,6}[ \t]*(?:$|[.!](?=\s|$)|\r?\n)`;
+  String.raw`,?[ \t]{0,4}(?:and${NPM_WS}then|then|and|next)${NPM_WS}(?:${NPM_CLAUSE_WORD},?${NPM_WS}){0,6}${NPM_STEP_TO_END}`;
+// What may follow a validated noun or location phrase: the sentence end, a
+// direct script step, or a connective script clause. Nothing else.
+const NPM_CONTINUATION =
+  String.raw`(?:${NPM_SENTENCE_END}|[,;]?\s{0,8}${NPM_DIRECT_STEP}|${NPM_SCRIPT_CLAUSE})`;
 const NPM_LOCATION_PHRASE =
-  String.raw`(?:(?:first|again)\s+)?(?:in|inside|within|from)\s+(?:(?:the|this|your|our)\s+)?(?:(?:project|app|repo|repository)\s+)?(?:folder|directory|dir|root|repo|repository)(?:\s+of\s+(?:the|this|your|our)\s+(?:project|repo|repository))?(?:\s+(?:first|again))?`;
+  String.raw`(?:(?:first|again)${NPM_WS})?(?:in|inside|within|from)${NPM_WS}(?:(?:the|this|your|our)${NPM_WS})?(?:(?:project|app|repo|repository)${NPM_WS})?(?:folder|directory|dir|root|repo|repository)(?:${NPM_WS}of${NPM_WS}(?:the|this|your|our)${NPM_WS}(?:project|repo|repository))?(?:${NPM_WS}(?:first|again))?`;
+const NPM_DEPS_NOUN =
+  String.raw`(?:the|all(?:${NPM_WS}the)?|your|project)${NPM_WS}(?:project${NPM_WS})?(?:dependencies|deps|packages)`;
 const NPM_INSTALL_ROW = new RegExp(
-  String.raw`npm\s+install\s+(?!` +
-    // bare install, then directly a script step
-    String.raw`\s*(?:(?:then|and(?:\s+then)?|&&|;)\s*)?${NPM_SCRIPT_STEP}${NPM_CLEAN_TAIL}` +
-    // bare install + determiner + dependencies noun
-    String.raw`|\s*(?:the|all(?:\s+the)?|your|project)\s+(?:project\s+)?(?:dependencies|deps|packages)(?=\s*(?:$|[,.;:!)]|(?:then|and|first|before|from|listed|in|with|using)\b))` +
-    // bare install + location phrase, then: sentence end | "to install the
-    // dependencies" | a direct script step | a connective script clause
-    String.raw`|\s*${NPM_LOCATION_PHRASE}(?=\s*(?:$|[.!)]` +
-    String.raw`|[,;]?\s*to\s+install\s+(?:the\s+|all\s+the\s+|its\s+|project\s+)?(?:dependencies|deps|packages)\s*(?:$|[.!)])` +
-    String.raw`|[,;]?\s*(?:(?:then|and(?:\s+then)?|&&|;)\s*)?${NPM_SCRIPT_STEP}${NPM_CLEAN_TAIL}` +
-    String.raw`|${NPM_SCRIPT_CLAUSE}))` +
-  String.raw`)`,
+  String.raw`npm\s+install(?=\s)(?!${NPM_GAP}(?:` +
+    // bare install, then directly a script step (to sentence end)
+    NPM_DIRECT_STEP +
+    // bare install + determiner + dependencies noun [+ location | first/again]
+    String.raw`|${NPM_DEPS_NOUN}(?:${NPM_WS}${NPM_LOCATION_PHRASE}|${NPM_WS}(?:first|again))?${NPM_CONTINUATION}` +
+    // bare install + location phrase, then "to install the dependencies" and
+    // the sentence end, or a continuation
+    String.raw`|${NPM_LOCATION_PHRASE}(?:[,;]?[ \t]{0,4}to${NPM_WS}install${NPM_WS}(?:the${NPM_WS}|all${NPM_WS}the${NPM_WS}|its${NPM_WS}|project${NPM_WS})?(?:dependencies|deps|packages)${NPM_SENTENCE_END}|${NPM_CONTINUATION})` +
+  String.raw`))`,
   'i',
 );
 
@@ -273,6 +300,9 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
       // sentence has no shell chaining/pipe/redirect/substitution; and the
       // location phrase may be followed by a comma + connective + one short
       // prose clause that runs a project script (see NPM_SCRIPT_CLAUSE).
+      // Fold 4: every branch must consume the rest of the sentence through a
+      // positive grammar (see the NPM_* block above); unconsumed text, an
+      // over-long clause or word, or a window edge keeps the finding.
       NPM_INSTALL_ROW,
       /pip\s+install\s+/i,
       /add\s+[\s\S]{0,50}to\s+(package\.json|requirements\.txt|Gemfile|go\.mod)/i,
