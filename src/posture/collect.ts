@@ -15,8 +15,9 @@
  * themselves (Claude Code hook, OpenClaw plugin, Hermes plugin). Each file is
  * untrusted: the directories and the file must be owned by this user and not
  * writable by anyone else, the file must be a regular file (symlinks are not
- * followed) under the size cap, and its content must name the same runtime,
- * profile and instance as its path. Then `parseSelfReport` validates it.
+ * followed) under the size cap, those file checks are repeated on the opened
+ * descriptor, and its content must name the same runtime, profile and instance
+ * as its path. Then `parseSelfReport` validates it.
  *
  * A file is bounded host-local evidence, never liveness on its own: for a
  * resident process the host's process-start check decides whether the
@@ -210,7 +211,14 @@ export function readPidNsSidecar(reportFile: string, reportMtimeMs: number, uid:
     }
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
     const opened = fs.fstatSync(fd);
-    if (opened.ino !== st.ino || opened.mtimeMs < reportMtimeMs) return null;
+    // Type, size, owner, mode, and dev+ino are decided on this descriptor.
+    // A failure stays null and does not change the report's rejection.
+    if (!opened.isFile() || opened.size > PID_NS_SIDECAR_MAX_BYTES) return null;
+    if (process.platform !== 'win32') {
+      if (uid !== undefined && opened.uid !== uid) return null;
+      if ((opened.mode & 0o077) !== 0) return null;
+    }
+    if (opened.dev !== st.dev || opened.ino !== st.ino || opened.mtimeMs < reportMtimeMs) return null;
     const buf = Buffer.alloc(PID_NS_SIDECAR_MAX_BYTES + 1);
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
     const text = buf.subarray(0, n).toString('utf8');
@@ -233,7 +241,10 @@ export function readSelfReportFile(
   // #970: every rejection here is a TRUST rejection (its mtime is no evidence)
   // except a content rejection of a file that passed every trust check.
   const invalid = (reason: string): SelfReportRead => ({ kind: 'invalid', reason, instance: expect.instance, rejection: 'trust' });
-  const contentInvalid = (reason: string): SelfReportRead => ({ kind: 'invalid', reason, instance: expect.instance, rejection: 'content' });
+  const contentInvalid = (reason: string, observedMtimeMs: number): SelfReportRead => ({
+    kind: 'invalid', reason, instance: expect.instance, rejection: 'content', observedMtimeMs,
+  });
+  const oversize = (size: number): SelfReportRead => invalid(`size ${size} bytes exceeds the ${SELF_REPORT_MAX_BYTES}-byte cap`);
   let st: fs.Stats;
   try {
     st = fs.lstatSync(file);
@@ -251,21 +262,38 @@ export function readSelfReportFile(
   }
   let fd: number | null = null;
   try {
-    // O_NOFOLLOW closes the lstat→open race for a swapped-in symlink.
+    // O_NOFOLLOW applies only to a final-component symlink. Type, owner, mode,
+    // size, identity, and content-rejection mtime come from the opened descriptor.
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const opened = fs.fstatSync(fd);
+    if (!opened.isFile()) return invalid('not a regular file');
+    if (opened.size > SELF_REPORT_MAX_BYTES) return oversize(opened.size);
+    if (process.platform !== 'win32') {
+      if (uid !== undefined && opened.uid !== uid) return invalid('owned by another user');
+      if ((opened.mode & 0o077) !== 0) return invalid('readable or writable by group or others (must be owner-only)');
+    }
+    if (opened.dev !== st.dev || opened.ino !== st.ino) return invalid('unreadable');
+    const observedMtimeMs = opened.mtimeMs;
     const buf = Buffer.alloc(SELF_REPORT_MAX_BYTES + 1);
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    if (n > SELF_REPORT_MAX_BYTES) return oversize(n);
+    if (n > opened.size) return invalid('unreadable');
     const read = parseSelfReport(buf.subarray(0, n).toString('utf8'), n);
+    const again = fs.fstatSync(fd);
+    if (!again.isFile() || again.dev !== opened.dev || again.ino !== opened.ino || again.size !== opened.size) {
+      return invalid('unreadable');
+    }
     // parseSelfReport classifies its own rejections (oversize is trust); an
-    // unclassified one stays trust.
-    if (read.kind === 'invalid') return read.rejection === 'content' ? contentInvalid(read.reason) : invalid(read.reason);
+    // unclassified one stays trust. Only a content rejection carries the
+    // opened descriptor's mtime.
+    if (read.kind === 'invalid') return read.rejection === 'content' ? contentInvalid(read.reason, observedMtimeMs) : invalid(read.reason);
     if (read.kind === 'valid') {
       const r = read.report;
-      if (r.runtime !== expect.runtime) return contentInvalid('report names a different runtime than its path');
-      if (r.profile !== expect.profile) return contentInvalid('report names a different profile than its path (wrong profile)');
-      if (r.instance.key !== expect.instance) return contentInvalid('report names a different instance than its file');
-      // #970: join the namespace sidecar, against the mtime of the report actually read.
-      r.instance.pid_ns = readPidNsSidecar(file, fs.fstatSync(fd).mtimeMs, uid);
+      if (r.runtime !== expect.runtime) return contentInvalid('report names a different runtime than its path', observedMtimeMs);
+      if (r.profile !== expect.profile) return contentInvalid('report names a different profile than its path (wrong profile)', observedMtimeMs);
+      if (r.instance.key !== expect.instance) return contentInvalid('report names a different instance than its file', observedMtimeMs);
+      // #970: join the namespace sidecar against this same descriptor mtime.
+      r.instance.pid_ns = readPidNsSidecar(file, observedMtimeMs, uid);
     }
     return read;
   } catch {
@@ -362,15 +390,6 @@ function reportingProfiles(dir: string, runtime: GateRuntimeId, uid: number | un
   // names outside the profile grammar). A secure empty listing stays [].
   if (out.length === 0 && rootInsecure) return [zeroInstanceProfile('default', rootInsecure)];
   return out;
-}
-
-/** mtime of a self-report file, or null. lstat: a symlink is never followed. */
-function fileMtimeMs(file: string): number | null {
-  try {
-    return fs.lstatSync(file).mtimeMs;
-  } catch {
-    return null;
-  }
 }
 
 function isRegularFile(p: string): boolean {
@@ -495,10 +514,13 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
         } else {
           read = readSelfReportFile(file, { runtime, profile: pf.profile, instance }, uid);
         }
-        // #970: a file's mtime ages only a CONTENT rejection; a trust rejection
-        // (insecure dir, symlink, foreign owner, mode, oversize, unreadable) is
-        // judged whatever its age, exactly as before #970.
-        recs.push(derive(read, checkLiveness(read, deps, collectorNs), rejectionMayAge(read) ? fileMtimeMs(file) : null));
+        // Content-rejection age uses the opened descriptor mtime carried on that
+        // read, and only when rejectionMayAge is true. A missing or non-finite
+        // mtime is null. Trust, absent, and validated reads do not pass one.
+        const carried = read.kind === 'invalid' && typeof read.observedMtimeMs === 'number' && Number.isFinite(read.observedMtimeMs)
+          ? read.observedMtimeMs
+          : null;
+        recs.push(derive(read, checkLiveness(read, deps, collectorNs), rejectionMayAge(read) ? carried : null));
       }
       if (pf.skipped > 0) {
         for (const r of recs) r.notes.push(`${pf.skipped} further instance report(s) for this profile were not read (cap ${MAX_INSTANCES_PER_PROFILE})`);

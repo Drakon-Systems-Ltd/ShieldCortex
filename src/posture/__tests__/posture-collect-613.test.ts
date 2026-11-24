@@ -3,13 +3,15 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { collectPostureRecords, linuxPidNamespace, linuxProcessStart, pidNsSidecarPath, postureSelfReportDir, readSelfReportFile } from '../collect.js';
 import { legacyGateRejects, legacyListInstances } from './legacy-self-report-gate.js';
-import { DEFAULT_MAX_AGE_MS, MAX_INSTANCES_PER_PROFILE, parseSelfReport, summarisePosture } from '../posture-record.js';
+import { DEFAULT_MAX_AGE_MS, MAX_INSTANCES_PER_PROFILE, SELF_REPORT_MAX_BYTES, STALE_NOT_SEEN_MS, parseSelfReport, summarisePosture } from '../posture-record.js';
 import {
+  INSTANCE,
   LIVE,
   NOW,
+  PID_NS,
   hermesHome,
   hermesPluginArtefacts,
   iso,
@@ -283,5 +285,219 @@ describe('#613 cross-runtime schema contract: the Hermes writer output passes th
       expect(rec.membership).toBe('ended');
       expect(rec.runtime_loaded.value).toBe('unobserved');
     }
+  });
+});
+
+/**
+ * #1153: trust and content-rejection age come from the opened descriptor.
+ * Metadata disagreements are synthetic stats on that descriptor. The path
+ * lstat stays real. No production seam.
+ */
+describe('#1153 opened descriptor', () => {
+  const HOUR = 60 * 60 * 1000;
+  const EIGHT_DAYS = STALE_NOT_SEEN_MS + 24 * HOUR;
+  const posixIt = process.platform === 'win32' ? it.skip : it;
+  const expectSpec = { runtime: 'hermes' as const, profile: 'default', instance: INSTANCE };
+
+  function patchedStat(real: fs.Stats, over: Partial<fs.Stats> & { isFile?: () => boolean }): fs.Stats {
+    return new Proxy(real, {
+      get(target, prop, receiver) {
+        if (Object.prototype.hasOwnProperty.call(over, prop)) return (over as Record<PropertyKey, unknown>)[prop];
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+  }
+
+  function withOpenedStat(
+    file: string,
+    patch: (real: fs.Stats, call: number) => (Partial<fs.Stats> & { isFile?: () => boolean }) | null,
+    run: () => void,
+  ): void {
+    const fds = new Map<number, string>();
+    const calls = new Map<number, number>();
+    const realOpen = fs.openSync;
+    const realFstat = fs.fstatSync;
+    const openSpy = jest.spyOn(fs, 'openSync').mockImplementation(((...args: Parameters<typeof fs.openSync>) => {
+      const fd = Reflect.apply(realOpen, fs, args) as number;
+      fds.set(fd, String(args[0]));
+      return fd;
+    }) as typeof fs.openSync);
+    const fstatSpy = jest.spyOn(fs, 'fstatSync').mockImplementation(((fd: number, opts?: { bigint?: boolean }) => {
+      const real = Reflect.apply(realFstat, fs, [fd, opts]) as fs.Stats;
+      if (opts?.bigint || fds.get(fd) !== file) return real;
+      const n = (calls.get(fd) ?? 0) + 1;
+      calls.set(fd, n);
+      const over = patch(real, n);
+      return over ? patchedStat(real, over) : real;
+    }) as typeof fs.fstatSync);
+    try {
+      run();
+    } finally {
+      openSpy.mockRestore();
+      fstatSpy.mockRestore();
+    }
+  }
+
+  function readReport(file: string, uid: number | undefined = process.getuid?.()) {
+    return readSelfReportFile(file, expectSpec, uid);
+  }
+
+  function expectTrust(read: { kind: string; rejection?: string; reason?: string; observedMtimeMs?: number | null }, reason: string): void {
+    expect(read.kind).not.toBe('valid');
+    expect(read.rejection).not.toBe('content');
+    expect(read).toMatchObject({ kind: 'invalid', rejection: 'trust', reason });
+    expect(read.observedMtimeMs).toBeUndefined();
+  }
+
+  it('a descriptor that agrees with the pre-open stat stays valid and the sidecar still joins', () => {
+    const file = writeReport(configDir, reportBody());
+    const read = readReport(file);
+    expect(read.kind).toBe('valid');
+    if (read.kind !== 'valid') return;
+    // writeReport lays a digit sidecar on every platform, so the join is PID_NS
+    // here. Real writers record null off Linux; that path is locked by the writer suites.
+    expect(read.report.instance.pid_ns).toBe(PID_NS);
+  });
+
+  it('descriptor isFile false is not a regular file', () => {
+    const file = writeReport(configDir, reportBody());
+    withOpenedStat(file, () => ({ isFile: () => false }), () => {
+      expectTrust(readReport(file), 'not a regular file');
+    });
+  });
+
+  posixIt('descriptor mode with group or other bits is the owner-only rejection', () => {
+    const file = writeReport(configDir, reportBody());
+    withOpenedStat(file, (real) => ({ mode: real.mode | 0o040 }), () => {
+      expectTrust(readReport(file), 'readable or writable by group or others (must be owner-only)');
+    });
+  });
+
+  posixIt('descriptor uid different from the uid argument is owned by another user', () => {
+    const uid = process.getuid?.();
+    expect(typeof uid).toBe('number');
+    const file = writeReport(configDir, reportBody());
+    withOpenedStat(file, (real) => ({ uid: real.uid + 1 }), () => {
+      expectTrust(readReport(file, uid), 'owned by another user');
+    });
+  });
+
+  it('descriptor dev different from the pre-open stat is unreadable', () => {
+    const file = writeReport(configDir, reportBody());
+    withOpenedStat(file, (real) => ({ dev: real.dev + 1 }), () => {
+      expectTrust(readReport(file), 'unreadable');
+    });
+  });
+
+  it('descriptor ino different from the pre-open stat is unreadable', () => {
+    const file = writeReport(configDir, reportBody());
+    withOpenedStat(file, (real) => ({ ino: real.ino + 1 }), () => {
+      expectTrust(readReport(file), 'unreadable');
+    });
+  });
+
+  it('descriptor size above the cap is the existing oversize rejection', () => {
+    const file = writeReport(configDir, reportBody());
+    const size = SELF_REPORT_MAX_BYTES + 1;
+    withOpenedStat(file, () => ({ size }), () => {
+      expectTrust(readReport(file), `size ${size} bytes exceeds the ${SELF_REPORT_MAX_BYTES}-byte cap`);
+    });
+  });
+
+  it('a second descriptor stat with a different size discards the parse', () => {
+    const file = writeReport(configDir, reportBody());
+    withOpenedStat(file, (real, call) => (call === 1 ? null : { size: real.size + 1 }), () => {
+      const read = readReport(file);
+      expect(read.kind).not.toBe('valid');
+      expect(read).not.toMatchObject({ rejection: 'content' });
+      expectTrust(read, 'unreadable');
+    });
+  });
+
+  it('a second descriptor stat with a different ino discards the parse', () => {
+    const file = writeReport(configDir, reportBody());
+    withOpenedStat(file, (real, call) => (call === 1 ? null : { ino: real.ino + 1 }), () => {
+      const read = readReport(file);
+      expect(read.kind).not.toBe('valid');
+      expect(read).not.toMatchObject({ rejection: 'content' });
+      expectTrust(read, 'unreadable');
+    });
+  });
+
+  it('content-rejection age follows a recent descriptor mtime when the path stat is old', () => {
+    const file = writeReport(configDir, { ...reportBody(), extra: 1 });
+    fs.utimesSync(file, new Date(NOW - EIGHT_DAYS), new Date(NOW - EIGHT_DAYS));
+    const recent = NOW - HOUR;
+    withOpenedStat(file, () => ({ mtimeMs: recent }), () => {
+      expect(readReport(file)).toMatchObject({
+        kind: 'invalid', rejection: 'content', reason: 'unknown keys', observedMtimeMs: recent,
+      });
+      const [rec] = collect().filter((r) => r.runtime === 'hermes');
+      expect(rec.stale).toBe(false);
+      expect(rec.runtime_loaded.value).toBe('unknown');
+      expect(rec.liveness.value).toBe('not-applicable');
+    });
+  });
+
+  it('content-rejection age follows an old descriptor mtime when the path stat is recent', () => {
+    const file = writeReport(configDir, { ...reportBody(), extra: 1 });
+    fs.utimesSync(file, new Date(NOW - HOUR), new Date(NOW - HOUR));
+    const old = NOW - EIGHT_DAYS;
+    withOpenedStat(file, () => ({ mtimeMs: old }), () => {
+      const [rec] = collect().filter((r) => r.runtime === 'hermes');
+      expect(rec.stale).toBe(true);
+      expect(rec.stale_reason).toBe('not-seen');
+      expect(rec.runtime_loaded.value).toBe('unknown');
+      expect(rec.liveness.value).toBe('not-applicable');
+    });
+  });
+
+  it('a non-finite descriptor mtime does not age a content rejection', () => {
+    const file = writeReport(configDir, { ...reportBody(), extra: 1 });
+    fs.utimesSync(file, new Date(NOW - EIGHT_DAYS), new Date(NOW - EIGHT_DAYS));
+    withOpenedStat(file, () => ({ mtimeMs: Number.NaN }), () => {
+      const [rec] = collect().filter((r) => r.runtime === 'hermes');
+      expect(rec.stale).toBe(false);
+      expect(rec.liveness.value).toBe('not-applicable');
+    });
+  });
+
+  function expectSidecarUnknown(patch: (real: fs.Stats) => Partial<fs.Stats> & { isFile?: () => boolean }): void {
+    const file = writeReport(configDir, reportBody());
+    withOpenedStat(pidNsSidecarPath(file), (real) => patch(real), () => {
+      const read = readReport(file);
+      expect(read.kind).toBe('valid');
+      if (read.kind === 'valid') expect(read.report.instance.pid_ns).toBeNull();
+      const [rec] = collectPostureRecords({
+        home,
+        configDir,
+        nowMs: NOW,
+        hostDeps: noOpenClawBinary,
+        deps: processTable({}),
+      }).filter((r) => r.runtime === 'hermes');
+      expect(rec.liveness.value).toBe('unverified');
+      expect(rec.notes.join(' ')).not.toMatch(/self-report rejected/);
+    });
+  }
+
+  it('a sidecar descriptor that is not a regular file stays namespace-unknown', () => {
+    expectSidecarUnknown(() => ({ isFile: () => false }));
+  });
+
+  posixIt('a sidecar descriptor with group or other bits stays namespace-unknown', () => {
+    expectSidecarUnknown((real) => ({ mode: real.mode | 0o040 }));
+  });
+
+  it('a sidecar descriptor dev mismatch stays namespace-unknown', () => {
+    expectSidecarUnknown((real) => ({ dev: real.dev + 1 }));
+  });
+
+  it('aging does not call a path lstat and fileMtimeMs is gone', () => {
+    const src = fs.readFileSync(path.join(REPO, 'src/posture/collect.ts'), 'utf8');
+    expect(src.includes('fileMtimeMs')).toBe(false);
+    const aging = src.slice(src.indexOf('rejectionMayAge(read)'));
+    expect(aging.startsWith('rejectionMayAge(read)')).toBe(true);
+    expect(aging.slice(0, 220)).not.toContain('lstatSync');
   });
 });
