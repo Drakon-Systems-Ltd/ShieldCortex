@@ -13,9 +13,9 @@ All notable changes to this project will be documented in this file.
 
 ## [5.22.1] - 2026-11-23
 
-This release publishes the changes tagged as 5.22.0, with corrected release notes; 5.22.0 itself was never published to npm. It makes Action Guard ask before a command reads, writes or uploads a credential store. Action Guard is still off by default, so nothing changes unless you have turned it on.
+This release publishes the changes tagged as 5.22.0, with corrected release notes; 5.22.0 itself was never published to npm. Action Guard now recognises commands that read, write or upload the credential stores listed below. The shared Guard setting is off by default. In Claude Code and OpenClaw, turning Guard on is not enough to trigger an approval prompt: Watch only logs a warning for these calls, as does Enforce when ready until its readiness conditions are met. When enforcing, these hosts can ask if an approver is available; their existing outage policies and hard blocks still apply. The enabled Hermes adapter enforces by default, independently of readiness, and blocks rather than prompts unless set to advisory. Its hard blocks still apply in advisory mode.
 
-Four things to know before you upgrade, if Action Guard is on:
+Four things to know before you upgrade (approval behaviour below assumes enforcement):
 
 - More calls ask for approval. A command that reads, writes, lists or uploads one of the named credential stores (such as `~/.netrc`, `.git-credentials`, the GitHub CLI `hosts.yml`, the Docker `config.json`, `.pgpass`, `.pypirc`, `.vault-token`, the gcloud and Azure token files, or a `.secret`/`.secrets` directory) now asks, as `~/.ssh` and `.aws/credentials` already did, whatever the upload's destination. A Write or Edit tool call on one of these files asks too. While the guard is running, a Read tool call is unchanged. The new rule asks rather than blocks, and each host handles that ask as it handles any other Action Guard ask: Hermes has no approval prompt, so an enforcing Hermes install blocks the call; the Claude Code hook denies it when Claude Code has no prompt to show; and Action Guard's other blocking checks, such as the catastrophic ones, still apply to the same call.
 - A store name that is not used as a file can also ask, for example in a `git log -S` string, a `jq` path or a `grep` pattern. This over-asking is accepted.
