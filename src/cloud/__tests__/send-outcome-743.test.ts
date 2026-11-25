@@ -26,10 +26,17 @@ const http = (status: number): SendFailure => ({ ok: false, kind: 'http', status
 const network: SendFailure = { ok: false, kind: 'network' };
 const skipped: SendFailure = { ok: false, kind: 'skipped' };
 
-/** The retention note must stay conditional: no claim that a row exists or was not queued. */
-const CONDITIONAL_RETENTION =
-  'If the retry worker receives another permanent refusal for a queued entry, it marks that entry failed.';
+/**
+ * The note describes client retry policy, not what the server meant: 408 and
+ * 425 are classified non-retryable too, so no "permanent refusal" diagnosis.
+ * It stays conditional: no claim that a row exists or was not queued.
+ */
+const POLICY_NOTE =
+  'The retry worker treats every HTTP 4xx status except 429 as non-retryable under the current policy. ' +
+  'If it receives one for a queued entry, it marks that entry failed.';
 const RETENTION_CLAIM = /(are|stays?|remains?) in the (sync )?queue|not queued/i;
+const SERVER_DIAGNOSIS = /permanent|temporary|outage/i;
+const LOCAL_SKIP = 'not sent (local precondition)';
 
 function memory(total: number, synced: number, outcomes: Array<[SendFailure, number]>) {
   const failures = emptySendFailureTally();
@@ -120,11 +127,28 @@ describe('#743 formatFullSyncSummary', () => {
     );
     // One explanatory line for the whole command, not one per row or batch.
     expect(lines).toHaveLength(3);
-    expect(lines[2]).toBe(
-      `Rejected entries are a permanent refusal, not a temporary outage. ${CONDITIONAL_RETENTION}`,
-    );
+    expect(lines[2]).toBe(POLICY_NOTE);
     expect(text).not.toMatch(RETENTION_CLAIM);
+    expect(text).not.toMatch(SERVER_DIAGNOSIS);
   });
+
+  it.each([408, 425])(
+    '%i (temporary by HTTP meaning, non-retryable by current policy): states the policy, not a diagnosis',
+    (status) => {
+      // Classification is unchanged; only the wording around it is pinned here.
+      expect(classifySendFailure(http(status))).toBe('permanent');
+      const lines = formatFullSyncSummary(memory(3, 0, [[http(status), 3]]), graph([[http(status), 1]]));
+      expect(lines).toEqual([
+        `Finished. 0/3 memories synced, 3 rejected by the cloud (HTTP ${status}).`,
+        `Graph replica: 4 entities, 2 relationships, 3 memory links, 1 batch rejected by the cloud (HTTP ${status}).`,
+        POLICY_NOTE,
+      ]);
+      const text = lines.join('\n');
+      expect(text).not.toMatch(SERVER_DIAGNOSIS);
+      expect(text).not.toMatch(RETENTION_CLAIM);
+      expect(text).not.toMatch(/queued for retry/);
+    },
+  );
 
   it('429 and 503 are still "queued for retry", with no permanent note', () => {
     const r429 = formatFullSyncSummary(memory(50, 0, [[http(429), 50]]), cleanGraph);
@@ -152,7 +176,7 @@ describe('#743 formatFullSyncSummary', () => {
     );
     expect(lines[0]).toBe(
       'Finished. 50/160 memories synced, 58 queued for retry, 50 rejected by the cloud (HTTP 402), ' +
-      '2 not sent (cloud sync not configured locally).',
+      `2 ${LOCAL_SKIP}.`,
     );
     expect(lines[1]).toBe(
       'Graph replica: 4 entities, 2 relationships, 3 memory links, 1 batch queued for retry, ' +
@@ -169,7 +193,7 @@ describe('#743 formatFullSyncSummary', () => {
   it('a local skip alone is not described as a cloud refusal or a retry', () => {
     const lines = formatFullSyncSummary(memory(3, 0, [[skipped, 3]]), cleanGraph);
     expect(lines).toEqual([
-      'Finished. 0/3 memories synced, 3 not sent (cloud sync not configured locally).',
+      `Finished. 0/3 memories synced, 3 ${LOCAL_SKIP}.`,
       'Graph replica: 4 entities, 2 relationships, 3 memory links.',
     ]);
   });
@@ -204,10 +228,26 @@ describe('#743 createFirstSendDiagnostic', () => {
     note(http(403));
     expect(log).toHaveBeenCalledTimes(1);
     const line = log.mock.calls[0][0];
-    expect(line).toMatch(/HTTP 402/);
-    expect(line).toContain(CONDITIONAL_RETENTION);
+    expect(line).toBe(
+      `[shieldcortex] Cloud sync received HTTP 402 for a live update. ${POLICY_NOTE} ` +
+      'Further non-retryable statuses in this process are not logged.',
+    );
     expect(line).not.toMatch(/queued for retry/);
     expect(line).not.toMatch(RETENTION_CLAIM);
+    expect(line).not.toMatch(SERVER_DIAGNOSIS);
+  });
+
+  it.each([408, 425])('%i: the live line states the policy, not a diagnosis', (status) => {
+    const log = jest.fn<(line: string) => void>();
+    const note = createFirstSendDiagnostic(log);
+    note(http(status));
+    expect(log).toHaveBeenCalledTimes(1);
+    const line = log.mock.calls[0][0];
+    expect(line).toBe(
+      `[shieldcortex] Cloud sync received HTTP ${status} for a live update. ${POLICY_NOTE} ` +
+      'Further non-retryable statuses in this process are not logged.',
+    );
+    expect(line).not.toMatch(SERVER_DIAGNOSIS);
   });
 
   it('never prints a status outside the HTTP range', () => {

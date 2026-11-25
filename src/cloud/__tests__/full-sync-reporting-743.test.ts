@@ -16,10 +16,16 @@ import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals
 const API_KEY = 'sc_test_key_743_not_real';
 const BASE_URL = 'https://cloud.example.invalid';
 const BODY_SENTINEL = 'BODY-SENTINEL-743';
-/** Retention wording is conditional: the sender cannot verify a queued row still exists. */
-const CONDITIONAL_RETENTION =
-  'If the retry worker receives another permanent refusal for a queued entry, it marks that entry failed.';
+/**
+ * The note states client retry policy, not a server diagnosis (408/425 are
+ * non-retryable by policy too), and stays conditional: the sender cannot
+ * verify a queued row still exists.
+ */
+const POLICY_NOTE =
+  'The retry worker treats every HTTP 4xx status except 429 as non-retryable under the current policy. ' +
+  'If it receives one for a queued entry, it marks that entry failed.';
 const RETENTION_CLAIM = /(are|stays?|remains?) in the (sync )?queue|not queued/i;
+const SERVER_DIAGNOSIS = /permanent|temporary|outage/i;
 
 let cloudEnabled = true;
 
@@ -172,12 +178,40 @@ describe('#743 full sync reports the HTTP status class', () => {
     expect(text).not.toMatch(RETENTION_CLAIM);
     expect(lines[0]).toBe('Finished. 0/120 memories synced, 120 rejected by the cloud (HTTP 402).');
     expect(lines).toHaveLength(3);
-    expect(lines[2]).toBe(
-      `Rejected entries are a permanent refusal, not a temporary outage. ${CONDITIONAL_RETENTION}`,
-    );
+    expect(lines[2]).toBe(POLICY_NOTE);
+    expect(text).not.toMatch(SERVER_DIAGNOSIS);
     expect(text).not.toContain(BASE_URL);
     expect(text).not.toContain(API_KEY);
     expect(text).not.toContain(BODY_SENTINEL);
+    for (const r of responses) {
+      expect(r.text).not.toHaveBeenCalled();
+      expect(r.json).not.toHaveBeenCalled();
+    }
+  });
+
+  it('408 / 425: temporary by HTTP meaning but non-retryable by policy; summary states the policy', async () => {
+    mockFetch({ memories: [{ status: 408 }], graph: [{ status: 425 }] });
+    const { memory, graph, lines } = await runFullSync();
+
+    // Classification and queue writes are unchanged: still counted non-retryable, still enqueued pending.
+    expect(memory.failures).toEqual({
+      permanent: 120, transient: 0, skipped: 0, permanentStatus: 408, mixedPermanentStatus: false,
+    });
+    expect(graph.failures).toMatchObject({ permanent: 1, transient: 0, permanentStatus: 425 });
+    expectQueueWritesUnchanged(120, 1);
+
+    expect(lines).toEqual([
+      'Finished. 0/120 memories synced, 120 rejected by the cloud (HTTP 408).',
+      'Graph replica: 0 entities, 0 relationships, 0 memory links, 1 batch rejected by the cloud (HTTP 425).',
+      POLICY_NOTE,
+    ]);
+    const text = lines.join('\n');
+    expect(text).not.toMatch(SERVER_DIAGNOSIS);
+    expect(text).not.toMatch(RETENTION_CLAIM);
+    expect(text).not.toMatch(/queued for retry/);
+    for (const forbidden of [BASE_URL, API_KEY, BODY_SENTINEL]) {
+      expect(text).not.toContain(forbidden);
+    }
     for (const r of responses) {
       expect(r.text).not.toHaveBeenCalled();
       expect(r.json).not.toHaveBeenCalled();
@@ -235,7 +269,7 @@ describe('#743 full sync reports the HTTP status class', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
     expect(memory.failures).toMatchObject({ permanent: 0, transient: 0, skipped: 120 });
     expectQueueWritesUnchanged(120, 1);
-    expect(lines[0]).toBe('Finished. 0/120 memories synced, 120 not sent (cloud sync not configured locally).');
+    expect(lines[0]).toBe('Finished. 0/120 memories synced, 120 not sent (local precondition).');
     expect(lines.join('\n')).not.toMatch(/rejected|HTTP|queued for retry/);
   });
 });
@@ -280,7 +314,7 @@ describe('#743 live dispatch: one status-only diagnostic per process', () => {
   };
   const settle = () => new Promise((r) => setTimeout(r, 20));
 
-  it('transient first, then repeated permanent refusals across memory and graph: exactly one line', async () => {
+  it('transient first, then repeated non-retryable statuses across memory and graph: exactly one line', async () => {
     const errors = jest.spyOn(console, 'error').mockImplementation(() => {});
     const graphEnvelope = buildEnvelope([], [], [], ['live-743']);
 
@@ -301,9 +335,12 @@ describe('#743 live dispatch: one status-only diagnostic per process', () => {
 
     expect(errors).toHaveBeenCalledTimes(1);
     const line = errors.mock.calls[0].map(String).join(' ');
-    expect(line).toMatch(/HTTP 402/);
-    expect(line).toContain(CONDITIONAL_RETENTION);
+    expect(line).toBe(
+      `[shieldcortex] Cloud sync received HTTP 402 for a live update. ${POLICY_NOTE} ` +
+      'Further non-retryable statuses in this process are not logged.',
+    );
     expect(line).not.toMatch(RETENTION_CLAIM);
+    expect(line).not.toMatch(SERVER_DIAGNOSIS);
     for (const forbidden of [BASE_URL, API_KEY, BODY_SENTINEL, 'secret-title-743', 'secret-content-743', 'live-743']) {
       expect(line).not.toContain(forbidden);
     }

@@ -3,7 +3,10 @@
  *
  * Reporting only. The retry policy lives in sync-queue.ts and is unchanged:
  * the classification below reuses its `classifyHttpStatus`, so "permanent"
- * here means exactly what the retry worker will do with that status. Nothing
+ * here means exactly what the retry worker will do with that status: it
+ * names a client policy, not what the server meant. 408 and 425 are
+ * "permanent" here too, so user-facing text describes the policy and never
+ * diagnoses a refusal as permanent or rules out a temporary cause. Nothing
  * here reads a response body or prints a URL, key, or payload — the only
  * remote fact surfaced is the numeric HTTP status.
  */
@@ -91,16 +94,26 @@ function failureParts(failed: number, tally: SendFailureTally | undefined, unit:
   const parts: string[] = [];
   if (t.transient > 0) parts.push(`${unit(t.transient)} queued for retry`);
   if (t.permanent > 0) parts.push(`${unit(t.permanent)} rejected by the cloud (${statusLabel(t)})`);
-  if (t.skipped > 0) parts.push(`${unit(t.skipped)} not sent (cloud sync not configured locally)`);
+  if (t.skipped > 0) parts.push(`${unit(t.skipped)} not sent (local precondition)`);
   return parts;
 }
 
 /**
+ * What the retry worker does under the current `classifyHttpStatus` policy.
+ * States client behaviour only: it covers 408/425 truthfully and makes no
+ * claim about why the server refused. Conditional on a queued entry because
+ * the sender cannot verify a row exists (an enqueue can throw, the queue cap
+ * can evict), so never "they are in the queue" or "not queued".
+ */
+const RETRY_POLICY_NOTE =
+  'The retry worker treats every HTTP 4xx status except 429 as non-retryable under the current policy. ' +
+  'If it receives one for a queued entry, it marks that entry failed.';
+
+/**
  * The `cloud sync --full` summary. "Queued for retry" is reserved for
- * transient failures. Permanently refused rows still take the unchanged
- * enqueue path, but this formatter cannot verify a row exists (an enqueue can
- * throw, the queue cap can evict), so the note is conditional: what the worker
- * does with a queued entry, never "they are in the queue" or "not queued".
+ * transient failures. Rows with a non-retryable status still take the
+ * unchanged enqueue path; the one-line note says what the worker does with
+ * them, not what the status means.
  */
 export function formatFullSyncSummary(memory: FullSyncMemorySummary, graph: FullSyncGraphSummary): string[] {
   const memParts = failureParts(memory.failed, memory.failures, (n) => String(n));
@@ -116,19 +129,14 @@ export function formatFullSyncSummary(memory: FullSyncMemorySummary, graph: Full
   ];
   const anyPermanent = (memory.failed > 0 && (memory.failures?.permanent ?? 0) > 0)
     || (graph.failedBatches > 0 && (graph.failures?.permanent ?? 0) > 0);
-  if (anyPermanent) {
-    lines.push(
-      'Rejected entries are a permanent refusal, not a temporary outage. ' +
-      'If the retry worker receives another permanent refusal for a queued entry, it marks that entry failed.',
-    );
-  }
+  if (anyPermanent) lines.push(RETRY_POLICY_NOTE);
   return lines;
 }
 
 /**
  * Live dispatch has no command summary. This returns a sink that logs the
- * first permanent HTTP status it sees and nothing after that — one line per
- * process, status number only, no per-row repeats.
+ * first HTTP status the retry policy treats as non-retryable and nothing
+ * after that — one line per process, status number only, no per-row repeats.
  */
 export function createFirstSendDiagnostic(log: (line: string) => void): (outcome: CloudSendOutcome) => void {
   let reported = false;
@@ -138,9 +146,8 @@ export function createFirstSendDiagnostic(log: (line: string) => void): (outcome
     if (classifySendFailure(outcome) !== 'permanent') return;
     reported = true;
     log(
-      `[shieldcortex] Cloud sync refused a live update with HTTP ${outcome.status} (permanent, not a temporary outage). ` +
-      'If the retry worker receives another permanent refusal for a queued entry, it marks that entry failed. ' +
-      'Further refusals in this process are not logged.',
+      `[shieldcortex] Cloud sync received HTTP ${outcome.status} for a live update. ${RETRY_POLICY_NOTE} ` +
+      'Further non-retryable statuses in this process are not logged.',
     );
   };
 }

@@ -852,8 +852,9 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
         maxCreatedAt: new Date().toISOString(),
       }).removed;
     }
-    // #743: "queued for retry" only for transient failures; a permanent
-    // refusal is reported once with its HTTP status number.
+    // #743: "queued for retry" only for transient failures; a status the
+    // retry policy treats as non-retryable is reported with its HTTP status
+    // number and one note on what the worker does, not what the status means.
     for (const line of formatFullSyncSummary(memoryResult, graphResult)) {
       console.log(line);
     }
