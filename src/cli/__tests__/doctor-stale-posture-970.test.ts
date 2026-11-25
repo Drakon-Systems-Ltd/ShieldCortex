@@ -966,6 +966,93 @@ describe('#970 r5: a trust-rejected self-report is judged whatever its age (as b
     fs.utimesSync(file, new Date(NOW - HOUR), new Date(NOW - HOUR));
     expect(summarisePosture(collectPostureRecords(absentOpts()))).toMatchObject({ green: false, level: 'unknown', stale_count: 0 });
   });
+
+  // #1153 slice 1. Root can readdir a mode-030 directory, so a green=false
+  // assertion there would not prove the unlistable branch. Windows has no
+  // owner/mode check. Skip both; do not treat a skip as a pass of that branch.
+  const proveUnlistable = process.platform !== 'win32'
+    && typeof process.getuid === 'function'
+    && process.getuid() !== 0;
+  const itUnlistable = proveUnlistable ? it : it.skip;
+  const itPosix = process.platform === 'win32' ? it.skip : it;
+  const postureRoot = () => path.join(configDir, 'posture');
+  const siblingGreen = () => {
+    expect(summarisePosture(collectPostureRecords(absentOpts()))).toMatchObject({ green: true, level: 'loaded-enforce' });
+  };
+  const expectZeroInstanceRejection = (records: ReturnType<typeof collectPostureRecords>) => {
+    const hermes = records.filter((r) => r.runtime === 'hermes');
+    expect(hermes).toHaveLength(1);
+    expect(hermes[0].key.instance).toBeNull();
+    expect(hermes[0].source).toBe('sc://posture/hermes/default/tool-gate/none');
+    expect([hermes[0].stale, hermes[0].stale_reason, hermes[0].runtime_loaded.value, hermes[0].liveness.value])
+      .toEqual([false, null, 'unknown', 'not-applicable']);
+    expect(hermes[0].notes.join(' ')).toMatch(/insecure self-report directory: directory writable by group or others/);
+    expect(hermes[0].notes.join(' ')).not.toMatch(/no self-report/);
+    expect(records.some((r) => r.runtime === 'claude_code' && !r.stale)).toBe(true);
+    expect(rollupRecords(records).map((r) => r.source)).toContain(hermes[0].source);
+    expect(summarisePosture(records)).toMatchObject({ green: false, level: 'unknown', rollup_count: 2, stale_count: 0 });
+  };
+
+  itUnlistable('a listed runtime directory that this uid cannot list is one non-stale trust rejection, not an omission', () => {
+    siblingGreen();
+    const hermesDir = path.join(postureRoot(), 'hermes');
+    fs.mkdirSync(hermesDir);
+    try {
+      fs.chmodSync(hermesDir, 0o030);
+      expect(fs.lstatSync(hermesDir).mode & 0o777).toBe(0o030);
+      expect(fs.readdirSync(postureRoot())).toContain('hermes');
+      expect(() => fs.readdirSync(hermesDir)).toThrow();
+      expectZeroInstanceRejection(collectPostureRecords(absentOpts()));
+    } finally {
+      fs.chmodSync(hermesDir, 0o700);
+    }
+  });
+
+  itUnlistable('a listable runtime whose profile directory this uid cannot list is one non-stale trust rejection, not absent', () => {
+    siblingGreen();
+    const rtDir = path.join(postureRoot(), 'hermes');
+    const pDir = path.join(rtDir, 'default');
+    fs.mkdirSync(pDir, { recursive: true });
+    fs.chmodSync(rtDir, 0o700);
+    try {
+      fs.chmodSync(pDir, 0o030);
+      expect(fs.lstatSync(pDir).mode & 0o777).toBe(0o030);
+      expect(fs.readdirSync(rtDir)).toEqual(['default']);
+      expect(() => fs.readdirSync(pDir)).toThrow();
+      expectZeroInstanceRejection(collectPostureRecords(absentOpts()));
+    } finally {
+      fs.chmodSync(pDir, 0o700);
+    }
+  });
+
+  it('a secure, successfully listed, empty runtime directory stays omitted, and the host stays green', () => {
+    siblingGreen();
+    const hermesDir = path.join(postureRoot(), 'hermes');
+    fs.mkdirSync(hermesDir, { recursive: true });
+    fs.chmodSync(hermesDir, 0o700);
+    expect(fs.readdirSync(hermesDir)).toEqual([]);
+    const records = collectPostureRecords(absentOpts());
+    expect(records.filter((r) => r.runtime === 'hermes')).toEqual([]);
+    expect(summarisePosture(records)).toMatchObject({ green: true, level: 'loaded-enforce' });
+  });
+
+  itPosix('a listable group-writable profile directory that holds a report stays one trust rejection, not rejection plus absent', () => {
+    oldHermes();
+    fs.chmodSync(profileDir(), 0o770);
+    try {
+      expect(fs.readdirSync(profileDir()).some((n) => n.endsWith('.json'))).toBe(true);
+      const records = collectPostureRecords(absentOpts());
+      const hermes = records.filter((r) => r.runtime === 'hermes');
+      expect(hermes).toHaveLength(1);
+      expect(hermes[0].key.instance).toBe('p6001-s6001');
+      expect(hermes[0].stale).toBe(false);
+      expect(hermes[0].runtime_loaded.value).toBe('unknown');
+      expect(hermes[0].notes.join(' ')).toMatch(/insecure self-report directory: directory writable by group or others/);
+      expect(summarisePosture(records)).toMatchObject({ green: false, level: 'unknown', stale_count: 0 });
+    } finally {
+      fs.chmodSync(profileDir(), 0o700);
+    }
+  });
 });
 
 describe('#1135 a mode-0640 rejection beside a current same-group sibling is still judged', () => {

@@ -15,8 +15,10 @@
  * themselves (Claude Code hook, OpenClaw plugin, Hermes plugin). Each file is
  * untrusted: the directories and the file must be owned by this user and not
  * writable by anyone else, the file must be a regular file (symlinks are not
- * followed) under the size cap, and its content must name the same runtime,
- * profile and instance as its path. Then `parseSelfReport` validates it.
+ * followed) under the size cap, those file checks are repeated on the opened
+ * descriptor using its exact device and inode, and its content must name the
+ * same runtime, profile and instance as its path. Then `parseSelfReport`
+ * validates it.
  *
  * A file is bounded host-local evidence, never liveness on its own: for a
  * resident process the host's process-start check decides whether the
@@ -167,12 +169,109 @@ function insecureDir(dir: string, uid: number | undefined): string | null {
   return null;
 }
 
-function listNames(dir: string): string[] {
+/**
+ * Names in `dir`, or null when it cannot be listed. A successful listing of
+ * nothing is `[]`, never null: an empty secure directory is not unreadable.
+ */
+function listNames(dir: string): string[] | null {
   try {
     return fs.readdirSync(dir).sort();
   } catch {
-    return [];
+    return null;
   }
+}
+
+/**
+ * Exact stat, same request as `linuxPidNamespace`. Device and inode stay
+ * bigint. A number stat has already rounded those identifiers; converting the
+ * rounded number back to bigint does not recover them.
+ */
+const EXACT_STAT = { bigint: true } as const;
+
+const NS_PER_MS = 1_000_000n;
+const MAX_SAFE_MS = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_SAFE_MS = BigInt(Number.MIN_SAFE_INTEGER);
+
+/** Fractional milliseconds from an exact nanosecond timestamp. Not `BigIntStats.mtimeMs`. */
+function mtimeMsFromNs(ns: bigint): number {
+  const ms = ns / NS_PER_MS;
+  const frac = ns % NS_PER_MS;
+  if (ms > MAX_SAFE_MS || ms < MIN_SAFE_MS) return Number.NaN;
+  return Number(ms) + Number(frac) / 1e6;
+}
+
+/**
+ * Comparable mtime. A number `mtimeMs` already carries a fraction, or is not
+ * finite. An exact stat's fraction lives in `mtimeNs`; its `mtimeMs` is whole
+ * milliseconds and is not a substitute. No precise value is not a timestamp.
+ */
+function preciseMtimeMs(st: { mtimeMs?: unknown; mtimeNs?: unknown }): number {
+  if (typeof st.mtimeMs === 'number') return st.mtimeMs;
+  if (typeof st.mtimeNs === 'bigint') return mtimeMsFromNs(st.mtimeNs);
+  return Number.NaN;
+}
+
+type DescriptorMtime = { kind: 'ns'; ns: bigint } | { kind: 'ms'; ms: number };
+
+/**
+ * Time used to order a sidecar against its report. A number `mtimeMs` is
+ * already the fraction the caller supplied, same rule as `preciseMtimeMs`.
+ * Otherwise the exact nanoseconds. A whole-millisecond bigint is not a
+ * substitute for a missing `mtimeNs`.
+ */
+function descriptorMtime(st: { mtimeMs?: unknown; mtimeNs?: unknown }): DescriptorMtime | null {
+  if (typeof st.mtimeMs === 'number') return { kind: 'ms', ms: st.mtimeMs };
+  if (typeof st.mtimeNs === 'bigint') return { kind: 'ns', ns: st.mtimeNs };
+  return null;
+}
+
+function nsWithinSafeMs(ns: bigint): boolean {
+  const ms = ns / NS_PER_MS;
+  return ms <= MAX_SAFE_MS && ms >= MIN_SAFE_MS;
+}
+
+/**
+ * True when the sidecar is not older than the report. Exact nanoseconds
+ * compare as bigint, so adjacent values that become one Number still order.
+ * Number milliseconds compare only when neither side has exact nanoseconds.
+ * Missing, mixed, non-finite and out-of-range times are not fresh. Equality
+ * is accepted. This is not the millisecond content-aging value.
+ */
+function sidecarNotOlder(report: DescriptorMtime | null, sidecar: DescriptorMtime | null): boolean {
+  if (report?.kind === 'ns' && sidecar?.kind === 'ns') {
+    return nsWithinSafeMs(report.ns) && nsWithinSafeMs(sidecar.ns) && sidecar.ns >= report.ns;
+  }
+  if (report?.kind === 'ms' && sidecar?.kind === 'ms') {
+    return Number.isFinite(report.ms) && Number.isFinite(sidecar.ms) && sidecar.ms >= report.ms;
+  }
+  return false;
+}
+
+function sameDeviceInode(a: { dev: unknown; ino: unknown }, b: { dev: unknown; ino: unknown }): boolean {
+  return typeof a.dev === 'bigint' && typeof a.ino === 'bigint'
+    && typeof b.dev === 'bigint' && typeof b.ino === 'bigint'
+    && a.dev === b.dev && a.ino === b.ino;
+}
+
+function exceedsByteCap(size: unknown, cap: number): boolean {
+  if (typeof size === 'bigint') return size > BigInt(cap);
+  return typeof size === 'number' && size > cap;
+}
+
+function byteCountAbove(n: number, size: unknown): boolean {
+  if (typeof size === 'bigint') return BigInt(n) > size;
+  if (typeof size === 'number') return n > size;
+  return true;
+}
+
+function ownedByOther(stUid: unknown, uid: number): boolean {
+  if (typeof stUid === 'bigint') return stUid !== BigInt(uid);
+  return typeof stUid !== 'number' || stUid !== uid;
+}
+
+function groupOrOtherBits(mode: unknown): boolean {
+  if (typeof mode === 'bigint') return (mode & 0o077n) !== 0n;
+  return typeof mode !== 'number' || (mode & 0o077) !== 0;
 }
 
 /** The PID-namespace sidecar for a self-report file (same basename, `.pidns`). */
@@ -187,26 +286,42 @@ export function pidNsSidecarPath(reportFile: string): string {
  * file (never a symlink), owned by this user, owner-only, tiny, and exactly
  * digits or `null`. Missing, unreadable or malformed is null.
  *
- * It is trusted only when its mtime is NOT OLDER than the report it sits
- * beside: the writers rewrite it after every report write, so an older one is
- * from before the report's last write and vouches for nothing. (The basename
- * is the process's start identity — pid + start ticks, or pid + a random
- * token — so a different process does not share it; the mtime rule also
- * covers a sidecar whose rewrite failed.)
+ * It is trusted only when the sidecar's opened mtime is not older than the
+ * report's opened mtime: the writers rewrite it after every report write, so
+ * an older one is from before the report's last write and vouches for nothing.
+ * Exact nanoseconds compare as bigint. A missing, mixed, non-finite or
+ * out-of-range timestamp is not evidence the sidecar is fresh. Equality is
+ * accepted. (The basename is the process's start identity — pid + start ticks,
+ * or pid + a random token — so a different process does not share it; the
+ * mtime rule also covers a sidecar whose rewrite failed.)
  */
-export function readPidNsSidecar(reportFile: string, reportMtimeMs: number, uid: number | undefined): string | null {
+export function readPidNsSidecar(
+  reportFile: string,
+  reportOpened: { mtimeMs?: unknown; mtimeNs?: unknown },
+  uid: number | undefined,
+): string | null {
   const file = pidNsSidecarPath(reportFile);
   let fd: number | null = null;
   try {
-    const st = fs.lstatSync(file);
-    if (!st.isFile() || st.size > PID_NS_SIDECAR_MAX_BYTES) return null;
+    const st = fs.lstatSync(file, EXACT_STAT);
+    if (!st.isFile() || exceedsByteCap(st.size, PID_NS_SIDECAR_MAX_BYTES)) return null;
     if (process.platform !== 'win32') {
-      if (uid !== undefined && st.uid !== uid) return null;
-      if ((st.mode & 0o077) !== 0) return null;
+      if (uid !== undefined && ownedByOther(st.uid, uid)) return null;
+      if (groupOrOtherBits(st.mode)) return null;
     }
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
-    const opened = fs.fstatSync(fd);
-    if (opened.ino !== st.ino || opened.mtimeMs < reportMtimeMs) return null;
+    const opened = fs.fstatSync(fd, EXACT_STAT);
+    // Type, size, owner, mode, and exact dev+ino are decided on this descriptor.
+    // A failure stays null and does not change the report's rejection. Freshness
+    // is this descriptor's nanoseconds against the report's, not a Number
+    // rounding of either. A timestamp that is not fresh is not namespace evidence.
+    if (!opened.isFile() || exceedsByteCap(opened.size, PID_NS_SIDECAR_MAX_BYTES)) return null;
+    if (process.platform !== 'win32') {
+      if (uid !== undefined && ownedByOther(opened.uid, uid)) return null;
+      if (groupOrOtherBits(opened.mode)) return null;
+    }
+    if (!sameDeviceInode(opened, st)) return null;
+    if (!sidecarNotOlder(descriptorMtime(reportOpened), descriptorMtime(opened))) return null;
     const buf = Buffer.alloc(PID_NS_SIDECAR_MAX_BYTES + 1);
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
     const text = buf.subarray(0, n).toString('utf8');
@@ -229,39 +344,66 @@ export function readSelfReportFile(
   // #970: every rejection here is a TRUST rejection (its mtime is no evidence)
   // except a content rejection of a file that passed every trust check.
   const invalid = (reason: string): SelfReportRead => ({ kind: 'invalid', reason, instance: expect.instance, rejection: 'trust' });
-  const contentInvalid = (reason: string): SelfReportRead => ({ kind: 'invalid', reason, instance: expect.instance, rejection: 'content' });
-  let st: fs.Stats;
+  const contentInvalid = (reason: string, observedMtimeMs: number): SelfReportRead => ({
+    kind: 'invalid', reason, instance: expect.instance, rejection: 'content', observedMtimeMs,
+  });
+  const oversize = (size: number | bigint): SelfReportRead => invalid(`size ${size} bytes exceeds the ${SELF_REPORT_MAX_BYTES}-byte cap`);
+  let st: fs.BigIntStats;
   try {
-    st = fs.lstatSync(file);
+    st = fs.lstatSync(file, EXACT_STAT);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     return code === 'ENOENT' || code === 'ENOTDIR' ? { kind: 'absent' } : invalid('unreadable');
   }
   if (!st.isFile()) return invalid('not a regular file');
   if (process.platform !== 'win32') {
-    if (uid !== undefined && st.uid !== uid) return invalid('owned by another user');
-    if ((st.mode & 0o077) !== 0) return invalid('readable or writable by group or others (must be owner-only)');
+    if (uid !== undefined && ownedByOther(st.uid, uid)) return invalid('owned by another user');
+    if (groupOrOtherBits(st.mode)) return invalid('readable or writable by group or others (must be owner-only)');
   }
-  if (st.size > SELF_REPORT_MAX_BYTES) {
-    return invalid(`size ${st.size} bytes exceeds the ${SELF_REPORT_MAX_BYTES}-byte cap`);
+  if (exceedsByteCap(st.size, SELF_REPORT_MAX_BYTES)) {
+    return typeof st.size === 'bigint' || typeof st.size === 'number'
+      ? oversize(st.size)
+      : invalid('unreadable');
   }
   let fd: number | null = null;
   try {
-    // O_NOFOLLOW closes the lstat→open race for a swapped-in symlink.
+    // O_NOFOLLOW applies only to a final-component symlink. Type, owner, mode,
+    // size, exact device and inode, and content-rejection mtime come from the
+    // opened descriptor. Fractional mtime is kept; a whole-millisecond bigint
+    // is not used in its place.
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const opened = fs.fstatSync(fd, EXACT_STAT);
+    if (!opened.isFile()) return invalid('not a regular file');
+    if (exceedsByteCap(opened.size, SELF_REPORT_MAX_BYTES)) {
+      return typeof opened.size === 'bigint' || typeof opened.size === 'number' ? oversize(opened.size) : invalid('unreadable');
+    }
+    if (process.platform !== 'win32') {
+      if (uid !== undefined && ownedByOther(opened.uid, uid)) return invalid('owned by another user');
+      if (groupOrOtherBits(opened.mode)) return invalid('readable or writable by group or others (must be owner-only)');
+    }
+    if (!sameDeviceInode(opened, st)) return invalid('unreadable');
+    const observedMtimeMs = preciseMtimeMs(opened);
     const buf = Buffer.alloc(SELF_REPORT_MAX_BYTES + 1);
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    if (n > SELF_REPORT_MAX_BYTES) return oversize(n);
+    if (byteCountAbove(n, opened.size)) return invalid('unreadable');
     const read = parseSelfReport(buf.subarray(0, n).toString('utf8'), n);
+    const again = fs.fstatSync(fd, EXACT_STAT);
+    if (!again.isFile() || !sameDeviceInode(again, opened) || again.size !== opened.size) {
+      return invalid('unreadable');
+    }
     // parseSelfReport classifies its own rejections (oversize is trust); an
-    // unclassified one stays trust.
-    if (read.kind === 'invalid') return read.rejection === 'content' ? contentInvalid(read.reason) : invalid(read.reason);
+    // unclassified one stays trust. Only a content rejection carries the
+    // opened descriptor's mtime.
+    if (read.kind === 'invalid') return read.rejection === 'content' ? contentInvalid(read.reason, observedMtimeMs) : invalid(read.reason);
     if (read.kind === 'valid') {
       const r = read.report;
-      if (r.runtime !== expect.runtime) return contentInvalid('report names a different runtime than its path');
-      if (r.profile !== expect.profile) return contentInvalid('report names a different profile than its path (wrong profile)');
-      if (r.instance.key !== expect.instance) return contentInvalid('report names a different instance than its file');
-      // #970: join the namespace sidecar, against the mtime of the report actually read.
-      r.instance.pid_ns = readPidNsSidecar(file, fs.fstatSync(fd).mtimeMs, uid);
+      if (r.runtime !== expect.runtime) return contentInvalid('report names a different runtime than its path', observedMtimeMs);
+      if (r.profile !== expect.profile) return contentInvalid('report names a different profile than its path (wrong profile)', observedMtimeMs);
+      if (r.instance.key !== expect.instance) return contentInvalid('report names a different instance than its file', observedMtimeMs);
+      // #970: join the namespace sidecar on this descriptor's exact nanoseconds.
+      // observedMtimeMs stays the separate millisecond value for content-rejection age.
+      r.instance.pid_ns = readPidNsSidecar(file, opened, uid);
     }
     return read;
   } catch {
@@ -304,16 +446,34 @@ interface ProfileFiles {
   skipped: number;
 }
 
+/** One profile carrying an insecure-directory finding and no instance id. */
+function zeroInstanceProfile(profile: string, insecure: string | null): ProfileFiles {
+  return { profile, insecure: insecure ?? 'unreadable directory', instances: [], skipped: 0 };
+}
+
 /** Profiles and instance files a gate runtime has reported from (names only). */
 function reportingProfiles(dir: string, runtime: GateRuntimeId, uid: number | undefined): ProfileFiles[] {
   const rtDir = path.join(dir, runtime);
-  if (listNames(dir).indexOf(runtime) < 0) return [];
+  const rootNames = listNames(dir);
+  // Unlistable posture root: the runtime name was never seen. That loss sits
+  // above this directory (#1133); do not invent a runtime here.
+  if (rootNames === null || rootNames.indexOf(runtime) < 0) return [];
   const rootInsecure = insecureDir(dir, uid) ?? insecureDir(rtDir, uid);
+  const profileNames = listNames(rtDir);
+  // Listed runtime directory that cannot be listed: keep the finding. A
+  // successful empty listing is not this case.
+  if (profileNames === null) return [zeroInstanceProfile('default', rootInsecure)];
   const out: ProfileFiles[] = [];
-  for (const profile of listNames(rtDir)) {
+  for (const profile of profileNames) {
     if (!isValidProfileId(profile)) continue;
     const pDir = path.join(rtDir, profile);
     const insecure = rootInsecure ?? insecureDir(pDir, uid);
+    const names = listNames(pDir);
+    if (names === null) {
+      // Listed profile directory that cannot be listed: keep the entry.
+      out.push(zeroInstanceProfile(profile, insecure));
+      continue;
+    }
     // Newest first, so the cap drops the oldest leftovers, never a live report.
     const mtime = (n: string) => {
       try {
@@ -322,7 +482,7 @@ function reportingProfiles(dir: string, runtime: GateRuntimeId, uid: number | un
         return 0;
       }
     };
-    const all = listNames(pDir)
+    const all = names
       .filter((n) => n.endsWith('.json'))
       .map((n) => n.slice(0, -'.json'.length))
       .filter(isValidInstanceKey)
@@ -336,16 +496,10 @@ function reportingProfiles(dir: string, runtime: GateRuntimeId, uid: number | un
       skipped: Math.max(0, all.length - MAX_INSTANCES_PER_PROFILE),
     });
   }
+  // Insecure, and nothing under it produced a profile entry (empty, or only
+  // names outside the profile grammar). A secure empty listing stays [].
+  if (out.length === 0 && rootInsecure) return [zeroInstanceProfile('default', rootInsecure)];
   return out;
-}
-
-/** mtime of a self-report file, or null. lstat: a symlink is never followed. */
-function fileMtimeMs(file: string): number | null {
-  try {
-    return fs.lstatSync(file).mtimeMs;
-  } catch {
-    return null;
-  }
 }
 
 function isRegularFile(p: string): boolean {
@@ -446,7 +600,18 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
       });
       const recs: PostureRecord[] = [];
       if (pf.instances.length === 0) {
-        recs.push(derive({ kind: 'absent' }));
+        // #1153: insecure with no instance file is a trust rejection, not an
+        // omission and not an absent read. No instance id is invented, and
+        // absent is not also recorded.
+        if (pf.insecure) {
+          recs.push(derive({
+            kind: 'invalid',
+            reason: `insecure self-report directory: ${pf.insecure}`,
+            rejection: 'trust',
+          }));
+        } else {
+          recs.push(derive({ kind: 'absent' }));
+        }
       }
       for (const instance of pf.instances) {
         let read: SelfReportRead;
@@ -459,10 +624,13 @@ export function collectPostureRecords(opts: CollectOptions = {}): PostureRecord[
         } else {
           read = readSelfReportFile(file, { runtime, profile: pf.profile, instance }, uid);
         }
-        // #970: a file's mtime ages only a CONTENT rejection; a trust rejection
-        // (insecure dir, symlink, foreign owner, mode, oversize, unreadable) is
-        // judged whatever its age, exactly as before #970.
-        recs.push(derive(read, checkLiveness(read, deps, collectorNs), rejectionMayAge(read) ? fileMtimeMs(file) : null));
+        // Content-rejection age uses the opened descriptor mtime carried on that
+        // read, and only when rejectionMayAge is true. A missing or non-finite
+        // mtime is null. Trust, absent, and validated reads do not pass one.
+        const carried = read.kind === 'invalid' && typeof read.observedMtimeMs === 'number' && Number.isFinite(read.observedMtimeMs)
+          ? read.observedMtimeMs
+          : null;
+        recs.push(derive(read, checkLiveness(read, deps, collectorNs), rejectionMayAge(read) ? carried : null));
       }
       if (pf.skipped > 0) {
         for (const r of recs) r.notes.push(`${pf.skipped} further instance report(s) for this profile were not read (cap ${MAX_INSTANCES_PER_PROFILE})`);
