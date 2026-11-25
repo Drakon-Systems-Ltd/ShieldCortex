@@ -649,13 +649,13 @@ describe('round 3: what the exact-head review of round 2 let through', () => {
       expectCard('', 'Edit', { file_path: '/home/u/.hermes/memories/./USER.md', old_string: '# User\n', new_string: `# User\n\n- ${D}\n` });
     });
 
-    it.each([
-      ['a ../ that leaves the Hermes memories directory', '/home/u/.hermes/memories/../notes/USER.md', ALLOW],
+    it.each<readonly [string, string, typeof ALLOW, string]>([
+      ['a ../ that leaves the Hermes memories directory', '/home/u/.hermes/memories/../notes/USER.md', ALLOW, D],
       ['benign text through a /./ spelling', '/home/u/.hermes/memories/./USER.md', ALLOW, B],
       // The raw spelling is still tested as well, so a path that already
       // carded on that head keeps its card (the sink only ever adds one).
-      ['a ../ out of a project memory/ directory that carded on that head', '/home/u/project/memory/../docs/guide.md', CARD],
-    ] as const)('control: %s', (_label, file, expected, text = D) => {
+      ['a ../ out of a project memory/ directory that carded on that head', '/home/u/project/memory/../docs/guide.md', CARD, D],
+    ])('control: %s', (_label, file, expected, text) => {
       expect(core(evaluateToolCall('Write', { file_path: file, content: text }))).toEqual(expected);
     });
   });
