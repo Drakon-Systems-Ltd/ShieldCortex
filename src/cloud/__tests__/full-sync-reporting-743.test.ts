@@ -16,6 +16,10 @@ import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals
 const API_KEY = 'sc_test_key_743_not_real';
 const BASE_URL = 'https://cloud.example.invalid';
 const BODY_SENTINEL = 'BODY-SENTINEL-743';
+/** Retention wording is conditional: the sender cannot verify a queued row still exists. */
+const CONDITIONAL_RETENTION =
+  'If the retry worker receives another permanent refusal for a queued entry, it marks that entry failed.';
+const RETENTION_CLAIM = /(are|stays?|remains?) in the (sync )?queue|not queued/i;
 
 let cloudEnabled = true;
 
@@ -165,9 +169,12 @@ describe('#743 full sync reports the HTTP status class', () => {
 
     const text = lines.join('\n');
     expect(text).not.toMatch(/queued for retry/);
-    expect(text).not.toMatch(/not queued/i);
+    expect(text).not.toMatch(RETENTION_CLAIM);
     expect(lines[0]).toBe('Finished. 0/120 memories synced, 120 rejected by the cloud (HTTP 402).');
     expect(lines).toHaveLength(3);
+    expect(lines[2]).toBe(
+      `Rejected entries are a permanent refusal, not a temporary outage. ${CONDITIONAL_RETENTION}`,
+    );
     expect(text).not.toContain(BASE_URL);
     expect(text).not.toContain(API_KEY);
     expect(text).not.toContain(BODY_SENTINEL);
@@ -295,6 +302,8 @@ describe('#743 live dispatch: one status-only diagnostic per process', () => {
     expect(errors).toHaveBeenCalledTimes(1);
     const line = errors.mock.calls[0].map(String).join(' ');
     expect(line).toMatch(/HTTP 402/);
+    expect(line).toContain(CONDITIONAL_RETENTION);
+    expect(line).not.toMatch(RETENTION_CLAIM);
     for (const forbidden of [BASE_URL, API_KEY, BODY_SENTINEL, 'secret-title-743', 'secret-content-743', 'live-743']) {
       expect(line).not.toContain(forbidden);
     }

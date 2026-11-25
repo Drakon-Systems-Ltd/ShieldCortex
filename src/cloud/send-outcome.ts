@@ -97,9 +97,10 @@ function failureParts(failed: number, tally: SendFailureTally | undefined, unit:
 
 /**
  * The `cloud sync --full` summary. "Queued for retry" is reserved for
- * transient failures. Permanently refused rows are still written to the sync
- * queue as pending (unchanged), so the note says what the worker will do with
- * them rather than claiming they were not queued.
+ * transient failures. Permanently refused rows still take the unchanged
+ * enqueue path, but this formatter cannot verify a row exists (an enqueue can
+ * throw, the queue cap can evict), so the note is conditional: what the worker
+ * does with a queued entry, never "they are in the queue" or "not queued".
  */
 export function formatFullSyncSummary(memory: FullSyncMemorySummary, graph: FullSyncGraphSummary): string[] {
   const memParts = failureParts(memory.failed, memory.failures, (n) => String(n));
@@ -117,8 +118,8 @@ export function formatFullSyncSummary(memory: FullSyncMemorySummary, graph: Full
     || (graph.failedBatches > 0 && (graph.failures?.permanent ?? 0) > 0);
   if (anyPermanent) {
     lines.push(
-      'Rejected entries are a permanent refusal, not a temporary outage. They are in the sync queue, ' +
-      'but the retry worker marks them failed instead of retrying if the cloud refuses them again.',
+      'Rejected entries are a permanent refusal, not a temporary outage. ' +
+      'If the retry worker receives another permanent refusal for a queued entry, it marks that entry failed.',
     );
   }
   return lines;
@@ -138,7 +139,7 @@ export function createFirstSendDiagnostic(log: (line: string) => void): (outcome
     reported = true;
     log(
       `[shieldcortex] Cloud sync refused a live update with HTTP ${outcome.status} (permanent, not a temporary outage). ` +
-      'The entry stays in the sync queue; the retry worker marks it failed if refused again. ' +
+      'If the retry worker receives another permanent refusal for a queued entry, it marks that entry failed. ' +
       'Further refusals in this process are not logged.',
     );
   };

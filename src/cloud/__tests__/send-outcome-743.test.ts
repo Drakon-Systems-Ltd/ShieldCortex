@@ -19,11 +19,19 @@ import {
   type CloudSendOutcome,
 } from '../send-outcome.js';
 
-const http = (status: number): CloudSendOutcome => ({ ok: false, kind: 'http', status });
-const network: CloudSendOutcome = { ok: false, kind: 'network' };
-const skipped: CloudSendOutcome = { ok: false, kind: 'skipped' };
+/** classifySendFailure / recordSendFailure accept failures only; keep test inputs that narrow. */
+type SendFailure = Exclude<CloudSendOutcome, { ok: true }>;
 
-function memory(total: number, synced: number, outcomes: Array<[CloudSendOutcome, number]>) {
+const http = (status: number): SendFailure => ({ ok: false, kind: 'http', status });
+const network: SendFailure = { ok: false, kind: 'network' };
+const skipped: SendFailure = { ok: false, kind: 'skipped' };
+
+/** The retention note must stay conditional: no claim that a row exists or was not queued. */
+const CONDITIONAL_RETENTION =
+  'If the retry worker receives another permanent refusal for a queued entry, it marks that entry failed.';
+const RETENTION_CLAIM = /(are|stays?|remains?) in the (sync )?queue|not queued/i;
+
+function memory(total: number, synced: number, outcomes: Array<[SendFailure, number]>) {
   const failures = emptySendFailureTally();
   let failed = 0;
   for (const [o, n] of outcomes) {
@@ -33,7 +41,7 @@ function memory(total: number, synced: number, outcomes: Array<[CloudSendOutcome
   return { total, synced, failed, failures };
 }
 
-function graph(outcomes: Array<[CloudSendOutcome, number]>) {
+function graph(outcomes: Array<[SendFailure, number]>) {
   const failures = emptySendFailureTally();
   let failedBatches = 0;
   for (const [o, n] of outcomes) {
@@ -112,9 +120,10 @@ describe('#743 formatFullSyncSummary', () => {
     );
     // One explanatory line for the whole command, not one per row or batch.
     expect(lines).toHaveLength(3);
-    expect(lines[2]).toMatch(/permanent/i);
-    expect(lines[2]).toMatch(/sync queue/);
-    expect(lines[2]).toMatch(/failed/);
+    expect(lines[2]).toBe(
+      `Rejected entries are a permanent refusal, not a temporary outage. ${CONDITIONAL_RETENTION}`,
+    );
+    expect(text).not.toMatch(RETENTION_CLAIM);
   });
 
   it('429 and 503 are still "queued for retry", with no permanent note', () => {
@@ -196,8 +205,9 @@ describe('#743 createFirstSendDiagnostic', () => {
     expect(log).toHaveBeenCalledTimes(1);
     const line = log.mock.calls[0][0];
     expect(line).toMatch(/HTTP 402/);
+    expect(line).toContain(CONDITIONAL_RETENTION);
     expect(line).not.toMatch(/queued for retry/);
-    expect(line).not.toMatch(/not queued/i);
+    expect(line).not.toMatch(RETENTION_CLAIM);
   });
 
   it('never prints a status outside the HTTP range', () => {
