@@ -11,9 +11,12 @@
  *       `save_memory`, `memory_store`, a `memory` tool whose action or
  *       command stores text, and every storing op of an `operations` batch):
  *       every string it would store, under any key;
- *   G2  a Write / Edit / MultiEdit whose target is memory markdown
+ *   G2  a write-family call (or an unknown-family call carrying new-side
+ *       text) where ANY path value it carries is memory markdown
  *       (`isMemoryWritePath`, or a `.md` file directly inside a Hermes
- *       memories directory), on the RAW written text.
+ *       memories directory), raw and lexically normalised spellings both, on
+ *       the RAW written text; and an `apply_patch` whose file header names
+ *       memory markdown, on the lines it adds there.
  *
  * It only EXTRACTS and SCREENS. The screen itself is
  * `detectMemoryDirective` (firewall/memory-directive-policy.ts), reused as
@@ -28,7 +31,9 @@
  * Output is pattern names and fixed reason codes only, never memory text.
  */
 
+import { posix } from 'node:path';
 import { detectMemoryDirective, type MemoryDirectiveResult } from '../firewall/memory-directive-policy.js';
+import { PATH_KEYS } from './tool-input-schema.js';
 
 /** The one guard signal for this sink. */
 export const MEMORY_DIRECTIVE_SIGNAL = 'memory-directive';
@@ -41,9 +46,15 @@ export type MemoryDirectiveScreen = (text: string) => MemoryDirectiveResult;
  *   - `remember`: ShieldCortex MCP (`mcp__shieldcortex__remember`,
  *     `mcp__memory__remember`, bare `remember`);
  *   - `save_memory`: Gemini CLI (`{fact}`);
- *   - `memory_store`: OpenClaw memory-lancedb (`{text, importance, category}`).
+ *   - `memory_store`: OpenClaw memory-lancedb (`{text, importance, category}`);
+ *   - `import_memories`: ShieldCortex MCP (`{data: <JSON text>}`; the JSON
+ *     text is one stored string and is screened as such);
+ *   - `create_entities` / `add_observations`: the official MCP memory
+ *     server (`entities[].observations[]`, `observations[].contents[]`).
  */
-const STORING_TOOLS: ReadonlySet<string> = new Set(['remember', 'save_memory', 'memory_store']);
+const STORING_TOOLS: ReadonlySet<string> = new Set([
+  'remember', 'save_memory', 'memory_store', 'import_memories', 'create_entities', 'add_observations',
+]);
 /**
  * Normalised tool names that store only for some ops: `memory` (Hermes
  * `{action, target, content, old_text}` or `{operations: [...]}`; Anthropic's
@@ -59,17 +70,40 @@ const NON_STORING_OPS: ReadonlySet<string> = new Set([
 const OP_KEYS = ['action', 'op', 'operation', 'command'] as const;
 
 /**
- * Keys never read: the REPLACED side of an edit names text that is going
- * away, not a new standing order. Exact key names; every other string leaf,
- * under any key and in any array, is stored text.
+ * Keys not read at a REPLACEMENT position (the argument bag, each top-level
+ * `operations[]` entry, each top-level `edits[]` entry): there the replaced
+ * side names text that is going away, not a new standing order. Exact key
+ * names. Anywhere else (a nested object, an array element) they are ordinary
+ * stored text: nothing there establishes replacement semantics.
  */
 const REPLACED_SIDE_KEYS: ReadonlySet<string> = new Set(['old_text', 'old_string', 'old_str']);
 /**
- * G2 also skips the keys that name WHERE a write goes. The screen would not
- * fire on a path, so this is precision only: a file name is not a clause of
- * the note and is kept out of the joined text.
+ * G2 also skips, at the same positions, the keys that name WHERE a write
+ * goes. The screen would not fire on a path, so this is precision only: a
+ * file name is not a clause of the note and is kept out of the joined text.
  */
 const MARKDOWN_SKIP_KEYS: ReadonlySet<string> = new Set([...REPLACED_SIDE_KEYS, 'file_path', 'path', 'notebook_path']);
+
+/**
+ * Batch keys on the argument bag, matched in ANY case: every array under
+ * one is a batch whose entries are replacement positions (and, for an op
+ * tool, op positions). A host's own casing is not the guard's to guess.
+ */
+const BATCH_KEYS: ReadonlySet<string> = new Set(['operations', 'edits']);
+
+/**
+ * Keys that name where a write goes, matched in ANY case: the guard's
+ * `PATH_KEYS` plus `notebook_path`. G2 reads EVERY one of them on the
+ * argument bag and in each top-level `edits[]` entry, not the first one, so
+ * a decoy key cannot hide the file a host actually writes.
+ */
+const SINK_PATH_KEYS: ReadonlySet<string> = new Set([...PATH_KEYS, 'notebook_path'].map((k) => k.toLowerCase()));
+
+/** Keys that carry the NEW side of an edit; an unknown-family call needs one
+ *  (any case) to be a G2 write. */
+const NEW_SIDE_KEYS: ReadonlySet<string> = new Set([
+  'content', 'contents', 'new_string', 'new_str', 'new_text', 'file_text', 'insert_text', 'text',
+]);
 
 /** Containers deeper than this below the argument bag (which is depth 0) are
  *  not walked; one is a hold (`too-deep`), never a silent skip. */
@@ -125,13 +159,15 @@ function opIsNonStoring(obj: Record<string, unknown>): boolean {
 
 /**
  * Every string leaf of the call that it would store, arrays included, down
- * to `MEMORY_SCREEN_MAX_DEPTH`, minus the keys `sink` never reads.
+ * to `MEMORY_SCREEN_MAX_DEPTH`, minus the keys `sink` does not read at a
+ * replacement position (the argument bag and each entry of a top-level
+ * `operations` / `edits` array, either key in any case).
  *
  * Op keys are consulted for `memory-op-tool` only, and only in two places:
- * the argument bag itself and each entry of its top-level `operations`
+ * the argument bag itself and each entry of a top-level `operations`
  * array. A non-storing entry is skipped whole. A non-storing argument bag
- * skips its own fields but not `operations`: Hermes applies a batch whenever
- * one is present and ignores the top-level action.
+ * skips its own fields but not a batch: Hermes applies `operations`
+ * whenever one is present and ignores the top-level action.
  *
  * Overflow (too much text, too many leaves or nodes, a container too deep)
  * is reported, never truncated silently.
@@ -158,40 +194,48 @@ export function collectStoredText(args: unknown, sink: MemoryDirectiveSinkKind =
     return true;
   };
 
-  const walk = (value: unknown, depth: number, opPosition: boolean): void => {
+  /**
+   * `position`: `bag` (the argument bag), `op` (an entry of a top-level
+   * `operations` batch), `edit` (an entry of a top-level `edits` batch) or
+   * `plain` (anything else). The first three are replacement positions.
+   */
+  const walk = (value: unknown, depth: number, position: 'bag' | 'op' | 'edit' | 'plain'): void => {
     if (overflow) return;
     if (typeof value === 'string') { take(value); return; }
     if (value === null || typeof value !== 'object') return;
     if (!enter(depth)) return;
     if (Array.isArray(value)) {
       for (const el of value) {
-        walk(el, depth + 1, false);
+        walk(el, depth + 1, 'plain');
         if (overflow) return;
       }
       return;
     }
     const obj = value as Record<string, unknown>;
-    const nonStoring = opPosition && opIsNonStoring(obj);
+    const nonStoring = sink === 'memory-op-tool' && (position === 'bag' || position === 'op') && opIsNonStoring(obj);
     for (const [k, v] of Object.entries(obj)) {
-      if (skipKeys.has(k)) continue;
-      if (depth === 0 && sink === 'memory-op-tool' && k === 'operations') {
+      if (position !== 'plain' && skipKeys.has(k)) continue;
+      const batch = position === 'bag' ? k.toLowerCase() : '';
+      if (BATCH_KEYS.has(batch)) {
+        // A batch is read whatever the bag's own op says: Hermes applies
+        // `operations` whenever present and ignores the top-level action.
         if (Array.isArray(v)) {
           if (!enter(1)) return;
-          for (const op of v) {
-            walk(op, 2, true);
+          for (const entry of v) {
+            walk(entry, 2, batch === 'operations' ? 'op' : 'edit');
             if (overflow) return;
           }
         } else {
-          walk(v, 1, false);
+          walk(v, 1, 'plain');
         }
       } else if (!nonStoring) {
-        walk(v, depth + 1, false);
+        walk(v, depth + 1, 'plain');
       }
       if (overflow) return;
     }
   };
 
-  walk(args, 0, sink === 'memory-op-tool');
+  walk(args, 0, 'bag');
   return { leaves, overflow };
 }
 
@@ -200,32 +244,155 @@ export function collectStoredText(args: unknown, sink: MemoryDirectiveSinkKind =
 const HERMES_MEMORIES_MD_RE = /(^|\/)\.hermes\/(profiles\/[^/]+\/)?memories\/[^/]+\.md$/i;
 
 /**
- * Memory markdown for THIS sink: `isMemoryWritePath` (passed in, so the
+ * A lexical spelling of `path` the host resolves to the same file:
+ * backslashes as `/`, `//`, `/./` and `a/../` collapsed (no filesystem I/O,
+ * no symlinks), a trailing `/` dropped, and the trailing dots and spaces
+ * Windows drops from a file name dropped too.
+ */
+export function normaliseSinkPath(path: string): string {
+  const slashed = String(path || '').trim().replace(/\\/g, '/');
+  if (!slashed) return '';
+  let out = posix.normalize(slashed);
+  // Hand-rolled (linear) trims: a trailing `/`, then trailing dots/spaces
+  // unless they are a whole `.` / `..` segment.
+  while (out.length > 1 && out.endsWith('/')) out = out.slice(0, -1);
+  let end = out.length;
+  while (end > 0 && (out[end - 1] === '.' || out[end - 1] === ' ')) end -= 1;
+  return end > 0 && out[end - 1] !== '/' ? out.slice(0, end) : out;
+}
+
+/**
+ * Memory markdown for THIS sink, tested on the raw spelling AND on
+ * `normaliseSinkPath` of it (either one is enough, so a path that is memory
+ * markdown as written stays so): `isMemoryWritePath` (passed in, so the
  * guard's own predicate, which also drives the #93 write-content scan, is
  * unchanged) or a `.md` file directly inside a Hermes memories directory
  * (`USER.md` there is not a memory basename). NotebookEdit stays out of the
  * Hermes rule.
  */
-export function isSinkMemoryMarkdown(normalisedName: string, path: string, memoryWritePath: boolean): boolean {
-  if (memoryWritePath) return true;
-  if (normalisedName.includes('notebook')) return false;
-  return HERMES_MEMORIES_MD_RE.test(String(path || '').trim().replace(/\\/g, '/'));
+export function isSinkMemoryMarkdown(
+  normalisedName: string,
+  path: string,
+  isMemoryWritePath: (path: string) => boolean,
+): boolean {
+  const hermes = !normalisedName.includes('notebook');
+  for (const p of [String(path || '').trim().replace(/\\/g, '/'), normaliseSinkPath(path)]) {
+    if (!p) continue;
+    if (isMemoryWritePath(p)) return true;
+    if (hermes && HERMES_MEMORIES_MD_RE.test(p)) return true;
+  }
+  return false;
+}
+
+/** Own keys of `obj` (any case) that are in `keys`, with their values. */
+function valuesUnder(obj: unknown, keys: ReadonlySet<string>): unknown[] {
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) return [];
+  return Object.entries(obj as Record<string, unknown>)
+    .filter(([k]) => keys.has(k.toLowerCase()))
+    .map(([, v]) => v);
+}
+
+/** The objects G2 reads paths and new-side keys from: the bag and each
+ *  entry of a top-level `edits` array (any case). */
+function editPositions(args: Record<string, unknown>): unknown[] {
+  const out: unknown[] = [args];
+  for (const v of valuesUnder(args, new Set(['edits']))) if (Array.isArray(v)) out.push(...v);
+  return out;
+}
+
+/** EVERY string path value of the call (`SINK_PATH_KEYS`, any case), on the
+ *  bag and in each top-level `edits[]` entry. */
+export function sinkPathValues(args: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const pos of editPositions(args)) {
+    for (const v of valuesUnder(pos, SINK_PATH_KEYS)) if (typeof v === 'string' && v) out.push(v);
+  }
+  return out;
+}
+
+/** True when the call carries a new-side text key (any case) on the bag or
+ *  in a top-level `edits[]` entry. */
+function carriesNewSideText(args: Record<string, unknown>): boolean {
+  return editPositions(args).some((pos) => valuesUnder(pos, NEW_SIDE_KEYS).length > 0);
+}
+
+/** Keys an `apply_patch` call carries its patch text in (any case). */
+const PATCH_TEXT_KEYS: ReadonlySet<string> = new Set(['input', 'patch']);
+/** `*** Add File: p`, `*** Update File: p`, `*** Delete File: p`, `*** Move to: p`. */
+const PATCH_FILE_HEADER_RE = /^\*\*\* (Add File|Update File|Delete File|Move to): (.+)$/;
+
+/**
+ * The lines an `apply_patch` call adds to memory markdown (each `+` line of
+ * a file section whose header, or `*** Move to:` destination, is memory
+ * markdown, minus the `+`), or null when no header names memory markdown.
+ * Removed and context lines are not read: they are not stored.
+ */
+export function patchAddedMemoryText(
+  normalisedName: string,
+  args: Record<string, unknown>,
+  isMemoryPath: (path: string) => boolean,
+): string | null {
+  let named = false;
+  const added: string[] = [];
+  for (const text of valuesUnder(args, PATCH_TEXT_KEYS)) {
+    if (typeof text !== 'string') continue;
+    let inMemory = false;
+    for (const line of text.split(/\r?\n/)) {
+      const header = PATCH_FILE_HEADER_RE.exec(line);
+      if (header) {
+        const memory = header[1] !== 'Delete File' && isSinkMemoryMarkdown(normalisedName, header[2], isMemoryPath);
+        // A move keeps the section's memory-ness: either end is memory markdown.
+        inMemory = header[1] === 'Move to' ? inMemory || memory : memory;
+        named = named || memory;
+      } else if (line.startsWith('*** End Patch') || line.startsWith('*** Begin Patch')) {
+        inMemory = false;
+      } else if (inMemory && line.startsWith('+')) {
+        added.push(line.slice(1));
+      }
+    }
+  }
+  return named ? added.join('\n') : null;
+}
+
+/** What the sink screens for this call: its kind and the value to collect
+ *  stored text from. */
+export interface MemorySinkTarget {
+  kind: MemoryDirectiveSinkKind;
+  stored: unknown;
 }
 
 /**
- * Which memory sink this call is, or null. `normalisedName` is the guard's
- * `normaliseToolName`; `family` its `classifyFamily`; `memoryPath` is
- * `isSinkMemoryMarkdown` of the call's path. Read-side memory tools
- * (`recall`, `get_context`, `graph`, `forget`) are never a sink.
+ * Which memory sink this call is, and what it stores, or null.
+ * `normalisedName` is the guard's `normaliseToolName`; `family` its
+ * `classifyFamily`. Read-side memory tools (`recall`, `get_context`,
+ * `graph`, `forget`) are never a sink; read- and exec-family calls are never
+ * a G2 sink.
+ *
+ *   - a storing tool / an op tool: the whole argument bag;
+ *   - G2: a `write`-family call, or an `unknown`-family call carrying a
+ *     new-side text key (`str_replace`, `search_replace`), where ANY path
+ *     value is memory markdown: the whole argument bag;
+ *   - otherwise an `apply_patch` whose header names memory markdown: the
+ *     lines it adds there.
  */
-export function memorySinkKind(
+export function memorySinkTarget(
   normalisedName: string,
   family: string,
-  memoryPath: boolean,
-): MemoryDirectiveSinkKind | null {
-  if (STORING_TOOLS.has(normalisedName)) return 'memory-tool';
-  if (OP_TOOLS.has(normalisedName)) return 'memory-op-tool';
-  if (family === 'write' && memoryPath) return 'memory-markdown';
+  args: Record<string, unknown>,
+  isMemoryWritePath: (path: string) => boolean,
+): MemorySinkTarget | null {
+  if (STORING_TOOLS.has(normalisedName)) return { kind: 'memory-tool', stored: args };
+  if (OP_TOOLS.has(normalisedName)) return { kind: 'memory-op-tool', stored: args };
+  if (family !== 'write' && family !== 'unknown') return null;
+  if (family === 'write' || carriesNewSideText(args)) {
+    if (sinkPathValues(args).some((p) => isSinkMemoryMarkdown(normalisedName, p, isMemoryWritePath))) {
+      return { kind: 'memory-markdown', stored: args };
+    }
+  }
+  if (normalisedName === 'apply_patch') {
+    const added = patchAddedMemoryText(normalisedName, args, isMemoryWritePath);
+    if (added !== null) return { kind: 'memory-markdown', stored: [added] };
+  }
   return null;
 }
 

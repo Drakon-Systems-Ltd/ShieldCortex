@@ -43,9 +43,8 @@ import { forEachWindow } from '../scan-windows.js';
 import { bodyIsAllDataRead } from './heredoc-data-read.js';
 import {
   MEMORY_DIRECTIVE_SIGNAL,
-  isSinkMemoryMarkdown,
   memoryDirectiveHoldReason,
-  memorySinkKind,
+  memorySinkTarget,
   screenMemoryWrite,
   type MemoryDirectiveScreen,
 } from './memory-directive-sink.js';
@@ -8255,14 +8254,18 @@ export function evaluateToolCall(
 /**
  * SCN-010 PR B — the card the memory sink would mint for this call, or null.
  *
- *   G1  a memory WRITE tool (see `memorySinkKind`): every string it would
+ *   G1  a memory WRITE tool (see `memorySinkTarget`): every string it would
  *       store, under any key;
- *   G2  a write-family call whose target is memory markdown
- *       (`isMemoryWritePath`, or a `.md` file directly inside a Hermes
- *       memories directory — `isSinkMemoryMarkdown`; the guard's own
- *       predicate, which also drives the #93 scan, is unchanged): the RAW
- *       written text, not the backtick-neutralised command-scan body (the
- *       screen has its own mask rules).
+ *   G2  a write-family call, or an unknown-family call carrying new-side
+ *       text, where ANY path value (every path key in any case, on the bag
+ *       and in each `edits[]` entry; raw and lexically normalised) is memory
+ *       markdown (`isMemoryWritePath`, or a `.md` file directly inside a
+ *       Hermes memories directory — `isSinkMemoryMarkdown`; the guard's own
+ *       predicate and `extractPath`, which also drive the #93 scan, are
+ *       unchanged): the RAW written text, not the backtick-neutralised
+ *       command-scan body (the screen has its own mask rules); and an
+ *       `apply_patch` whose file header names memory markdown: the lines it
+ *       adds there.
  *
  * `require_approval` / `dangerous` / `memory-directive`, action
  * `persist_memory`. Never `block`, never `catastrophic`. The reason carries
@@ -8279,15 +8282,9 @@ export function memoryDirectiveSinkVerdict(
   screen?: MemoryDirectiveScreen,
 ): ToolGuardVerdict | null {
   const family = classifyFamily(toolName);
-  const normalised = normaliseToolName(toolName);
-  const target = family === 'write' ? extractPath(args ?? {}) : '';
-  const sinkKind = memorySinkKind(
-    normalised,
-    family,
-    family === 'write' && isSinkMemoryMarkdown(normalised, target, isMemoryWritePath(target)),
-  );
-  if (!sinkKind) return null;
-  const hold = screenMemoryWrite(sinkKind, args, screen);
+  const target = memorySinkTarget(normaliseToolName(toolName), family, args ?? {}, isMemoryWritePath);
+  if (!target) return null;
+  const hold = screenMemoryWrite(target.kind, target.stored, screen);
   if (!hold) return null;
   const signals = [MEMORY_DIRECTIVE_SIGNAL];
   return verdict('require_approval', 'dangerous', family, dangerActionFor(signals, family),
