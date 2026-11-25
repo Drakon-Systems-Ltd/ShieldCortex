@@ -201,6 +201,39 @@ function statFailure(err: unknown): string {
 }
 
 /**
+ * #1133: `raw`, a name as the filesystem returned it, as a string only when
+ * that string is exactly those bytes again; otherwise null.
+ *
+ * A POSIX name is bytes. Decoding bytes that are not valid UTF-8 replaces
+ * them, and the replaced spelling can name a different file from the one the
+ * system resolves by the original bytes. The ancestry walk judges names by
+ * their spelling, so a name that does not survive the decode is not judged:
+ * the caller refuses it. Valid UTF-8, including non-ASCII names, is kept.
+ */
+export function losslessUtf8Name(raw: Uint8Array): string | null {
+  const bytes = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
+  const name = bytes.toString('utf8');
+  return Buffer.from(name, 'utf8').equals(bytes) ? name : null;
+}
+
+/** The home's real path as the system resolves it, or the finding when it cannot be had. */
+type HomeReal = { real: string } | { lost: string };
+
+function realHome(homeNamed: string): HomeReal {
+  let raw: Buffer;
+  try {
+    // The system's realpath: the JS one resolves `..` in a link's target by
+    // its spelling, not as the system does. As bytes, so a lossy decode is
+    // refused rather than walked.
+    raw = fs.realpathSync.native(homeNamed, { encoding: 'buffer' });
+  } catch (err) {
+    return { lost: statFailure(err) };
+  }
+  const real = losslessUtf8Name(raw);
+  return real === null ? { lost: 'home real path not valid UTF-8' } : { real };
+}
+
+/**
  * Why a directory on the path above the config directory is not trustworthy,
  * or null. Owned by this user or by root (root can write anywhere already).
  * Writable by group or others only when sticky (as /tmp): then no one else can
@@ -236,19 +269,22 @@ function untrustedAncestor(st: fs.Stats, uid: number | undefined): string | null
  * walk begins at the filesystem root, so root-owned system directories and
  * links (macOS `/tmp`, `/var`) are judged and accepted.
  *
+ * A link target and the home's real path are read as bytes and walked only
+ * when they decode to UTF-8 losslessly (`losslessUtf8Name`); otherwise the
+ * path is not trusted.
+ *
  * Bounded: at most MAX_ANCESTRY_LINKS links and MAX_ANCESTRY_STEPS names, past
  * which the path is not trusted. A point-in-time judgment by path (lstat,
  * readlink, stat): it is not atomic with the later reads, so a change between
- * the two is not seen here. Only the report file itself is checked again on
- * its open descriptor (#1160). Owner and mode bits only: ACLs, extended
- * attributes, mount options and bind mounts are not consulted.
+ * the two is not seen here. The report file and its PID-namespace sidecar are
+ * each checked again on their own opened descriptors (#1160); no directory on
+ * this path is. Owner and mode bits only: ACLs, extended attributes, mount
+ * options and bind mounts are not consulted.
  */
-function insecureNamedPath(start: string, home: string, uid: number | undefined): string | null {
-  const homeNamed = path.resolve(home);
+function insecureNamedPath(start: string, homeNamed: string, home: HomeReal, uid: number | undefined): string | null {
   const homeNames = pathNames(homeNamed);
-  let homeReal: string | null | undefined;
-  let homeRealNames: string[] = [];
-  let homeLost = 'unreadable directory';
+  const homeReal = 'real' in home ? home.real : null;
+  const homeRealNames = homeReal !== null ? pathNames(homeReal) : [];
   const fsRoot = path.parse(homeNamed).root;
   let anchor = fsRoot;
   let cur = fsRoot;
@@ -256,29 +292,18 @@ function insecureNamedPath(start: string, home: string, uid: number | undefined)
 
   // Begin (again) at the absolute path `names`. Null, or why it is untrusted.
   const begin = (names: string[]): string | null => {
-    if (homeReal === undefined) {
-      try {
-        // The system's realpath: the JS one resolves `..` in a link's target
-        // by its spelling, not as the system does.
-        homeReal = fs.realpathSync.native(homeNamed);
-        homeRealNames = pathNames(homeReal);
-      } catch (err) {
-        homeReal = null;
-        homeLost = statFailure(err);
-      }
-    }
     const inHome = startsWithNames(names, homeNames)
       ? homeNames.length
       : homeReal !== null && startsWithNames(names, homeRealNames) ? homeRealNames.length : -1;
     let st: fs.Stats;
     if (inHome >= 0) {
-      if (homeReal === null) return homeLost;
+      if (!('real' in home)) return home.lost;
       try {
         st = fs.statSync(homeNamed);
       } catch (err) {
         return statFailure(err);
       }
-      anchor = homeReal;
+      anchor = home.real;
       todo = names.slice(inHome);
     } else {
       try {
@@ -323,12 +348,14 @@ function insecureNamedPath(start: string, home: string, uid: number | undefined)
     }
     if (uid !== undefined && st.uid !== uid && st.uid !== 0) return 'symbolic link owned by another user';
     if (++links > MAX_ANCESTRY_LINKS) return 'too many symbolic links';
-    let target: string;
+    let raw: Buffer;
     try {
-      target = fs.readlinkSync(next);
+      raw = fs.readlinkSync(next, { encoding: 'buffer' });
     } catch {
       return 'unreadable symbolic link';
     }
+    const target = losslessUtf8Name(raw);
+    if (target === null) return 'symbolic link target not valid UTF-8';
     if (path.isAbsolute(target)) {
       why = begin([...pathNames(target), ...todo]);
       if (why) return why;
@@ -349,6 +376,11 @@ function insecureNamedPath(start: string, home: string, uid: number | undefined)
  * home for a path inside it, else to the filesystem root, following and
  * judging each link on the way.
  *
+ * The home is where the walk stops. A config directory that IS the home, as
+ * named or as its real path, has passed the check above and nothing over it
+ * is judged. Any other spelling that reaches the home's directory (through a
+ * link in a parent) is not the home's name, and its parent path is walked.
+ *
  * Windows has no owner/mode check here, as for the posture directories, so
  * nothing above the config directory is walked there.
  */
@@ -359,7 +391,11 @@ function insecureConfigAncestry(configDir: string, home: string, uid: number | u
   const own = insecureDir(cfg, uid);
   if (own) return `${own} (config directory)`;
   if (process.platform === 'win32') return null;
-  const why = insecureNamedPath(path.dirname(cfg), home, uid);
+  const homeNamed = path.resolve(home);
+  if (cfg === homeNamed) return null;
+  const homeReal = realHome(homeNamed);
+  if ('real' in homeReal && cfg === homeReal.real) return null;
+  const why = insecureNamedPath(path.dirname(cfg), homeNamed, homeReal, uid);
   return why ? `${why} (above the config directory)` : null;
 }
 

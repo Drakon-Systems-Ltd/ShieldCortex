@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { collectPostureRecords } from '../collect.js';
+import { collectPostureRecords, losslessUtf8Name } from '../collect.js';
 import { summarisePosture, type PostureRecord } from '../posture-record.js';
 import { LIVE, NOW, hermesHome, reportBody, writeReport } from './self-report-fixture.js';
 
@@ -31,7 +31,11 @@ let home: string;
 let configDir: string;
 
 beforeEach(() => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-posture-ancestry-1133-'));
+  // The temp prefix is canonical (on macOS os.tmpdir() sits behind the /var
+  // link), so the names the mocks below compare are the names the walk
+  // reaches from the home's real path. Only the prefix: every link a case
+  // tests is made under it and stays a link.
+  root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-posture-ancestry-1133-')));
   home = path.join(root, 'home');
   configDir = path.join(home, '.shieldcortex');
   fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
@@ -132,6 +136,31 @@ describe('#1133 control: a private path from home to the report is trusted', () 
     expectTrusted(collect(dir, { home: linkHome }));
     fs.chmodSync(realHome, 0o770);
     expectRejected(collect(dir, { home: linkHome }), /directory writable by group or others \(above the config directory\)/);
+  });
+});
+
+describe('#1133 a config directory that is the home itself (SHIELDCORTEX_CONFIG_DIR)', () => {
+  itPosix('a private home used as the config dir is trusted under a parent that is not private', () => {
+    writeReport(home, reportBody());
+    fs.chmodSync(root, 0o770);
+    expectTrusted(collect(home));
+    expectTrusted(collect(`${home}${path.sep}`));
+  });
+
+  itPosix('the home used as the config dir still gets the config-dir check', () => {
+    writeReport(home, reportBody());
+    fs.chmodSync(home, 0o770);
+    expectRejected(collect(home), /directory writable by group or others \(config directory\)/);
+  });
+
+  itPosix('the home named through a link: its real path as the config dir stops at the home; the link is never one', () => {
+    const realHome = privateDir(root, 'real-home');
+    const linkHome = path.join(root, 'link-home');
+    fs.symlinkSync(realHome, linkHome);
+    writeReport(realHome, reportBody());
+    fs.chmodSync(root, 0o770);
+    expectTrusted(collect(realHome, { home: linkHome }));
+    expectRejected(collect(linkHome, { home: linkHome }), /not a real directory \(config directory\)/);
   });
 });
 
@@ -490,5 +519,82 @@ describe('#1133 a config directory outside the home named through a link', () =>
     expectTrusted(collect(dir));
     fs.chmodSync(home, 0o770);
     expectRejected(collect(dir), /directory writable by group or others \(above the config directory\)/);
+  });
+
+  itPosix('another spelling of the home, through a link, is not the home: the path it names is judged', () => {
+    const parent = privateDir(ext, 'parent');
+    const fixtureHome = privateDir(parent, 'home');
+    writeReport(fixtureHome, reportBody());
+    const shared = privateDir(ext, 'shared');
+    fs.symlinkSync(parent, path.join(shared, 'alias'));
+    const alias = path.join(shared, 'alias', 'home');
+    expectTrusted(collect(alias, { home: fixtureHome }));
+    fs.chmodSync(parent, 0o770);
+    // Named as the home, the config dir is the home: nothing above it is judged.
+    expectTrusted(collect(fixtureHome, { home: fixtureHome }));
+    // Named through the link, the same directory's parent path is judged, link target included.
+    expectRejected(collect(alias, { home: fixtureHome }), /directory writable by group or others \(above the config directory\)/);
+  });
+});
+
+describe('#1133 names are judged only when they decode losslessly', () => {
+  const bytes = (...b: number[]) => Uint8Array.from(b);
+
+  it('valid UTF-8 names, ASCII or not, decode to themselves', () => {
+    const names = ['config', '.shieldcortex', 'caf\u{E9}', '\u{43A}\u{43E}\u{43D}\u{444}\u{438}\u{433}', '\u{8A2D}\u{5B9A}', 'lock-\u{1F512}', '\u{FEFF}bom-first', ''];
+    for (const name of names) expect(losslessUtf8Name(Buffer.from(name, 'utf8'))).toBe(name);
+  });
+
+  it('bytes that are not valid UTF-8 are refused, not replaced', () => {
+    const invalid = [
+      bytes(0xff),
+      bytes(0x61, 0x80, 0x62), // a lone continuation byte
+      bytes(0xc3), // a truncated sequence
+      bytes(0xc0, 0xae), // an overlong encoding
+      bytes(0xed, 0xa0, 0x80), // an encoded surrogate
+      bytes(0xf4, 0x90, 0x80, 0x80), // above U+10FFFF
+    ];
+    for (const raw of invalid) expect(losslessUtf8Name(raw)).toBeNull();
+  });
+
+  it('only the bytes of the given view are decoded', () => {
+    const backing = Buffer.from([0xff, 0x61, 0x62, 0xff]);
+    expect(losslessUtf8Name(backing.subarray(1, 3))).toBe('ab');
+  });
+
+  // Compatibility: link targets and the home's real path are now read as
+  // bytes; valid non-ASCII names are judged exactly as before. The names have
+  // no Unicode decomposition, so a normalizing filesystem stores them as given.
+  const cyr = '\u{43A}\u{43E}\u{43D}\u{444}\u{438}\u{433}';
+  const cjk = '\u{8A2D}\u{5B9A}';
+
+  itPosix('a private link with a non-ASCII target, in a non-ASCII home, is trusted; a writable target is not', () => {
+    const uHome = privateDir(root, `home-${cjk}`);
+    const real = privateDir(uHome, `dotfiles-${cjk}`, cyr);
+    privateDir(real, 'sc');
+    writeReport(path.join(real, 'sc'), reportBody());
+    fs.symlinkSync(path.join(`dotfiles-${cjk}`, cyr), path.join(uHome, '.config'));
+    fs.symlinkSync(real, path.join(uHome, '.config-abs'));
+    expectTrusted(collect(path.join(uHome, '.config', 'sc'), { home: uHome }));
+    expectTrusted(collect(path.join(uHome, '.config-abs', 'sc'), { home: uHome }));
+    fs.chmodSync(real, 0o770);
+    expectRejected(collect(path.join(uHome, '.config', 'sc'), { home: uHome }), /directory writable by group or others \(above the config directory\)/);
+  });
+
+  itPosix('a non-ASCII home named through a link is judged by its real path, as before', () => {
+    const realHome = privateDir(root, `real-${cyr}`);
+    const linkHome = path.join(root, `link-${cjk}`);
+    fs.symlinkSync(realHome, linkHome);
+    const dir = privateDir(linkHome, '.shieldcortex');
+    writeReport(dir, reportBody());
+    // A link that names the home by its real spelling is recognized as the home.
+    privateDir(realHome, 'sub');
+    fs.symlinkSync(path.join(realHome, 'sub'), path.join(realHome, 'to-sub'));
+    const viaReal = privateDir(realHome, 'sub', 'sc');
+    writeReport(viaReal, reportBody());
+    expectTrusted(collect(dir, { home: linkHome }));
+    expectTrusted(collect(path.join(linkHome, 'to-sub', 'sc'), { home: linkHome }));
+    fs.chmodSync(realHome, 0o770);
+    expectRejected(collect(dir, { home: linkHome }), /directory writable by group or others \(above the config directory\)/);
   });
 });
