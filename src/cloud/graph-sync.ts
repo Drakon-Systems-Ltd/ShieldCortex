@@ -12,6 +12,14 @@ import {
 import { enqueueFailedGraphSync, enqueueGraphOutbox } from './sync-queue.js';
 import type { Memory } from '../memory/types.js';
 import { deletionPolicyFromMemory, shouldSyncRecord } from './memory-sync.js';
+import {
+  emptySendFailureTally,
+  isReportableHttpStatus,
+  noteLiveDispatchOutcome,
+  recordSendFailure,
+  type CloudSendOutcome,
+  type SendFailureTally,
+} from './send-outcome.js';
 
 export interface SyncedGraphEntityRecord {
   external_id: string;
@@ -119,7 +127,7 @@ export function buildEnvelope(
   };
 }
 
-async function postGraphEnvelope(envelope: GraphSyncEnvelope): Promise<boolean> {
+async function postGraphEnvelope(envelope: GraphSyncEnvelope): Promise<CloudSendOutcome> {
   const config = getCloudConfig();
   if (
     !config.cloudEnabled ||
@@ -131,7 +139,7 @@ async function postGraphEnvelope(envelope: GraphSyncEnvelope): Promise<boolean> 
       (!envelope.prune_memory_external_ids || envelope.prune_memory_external_ids.length === 0)
     )
   ) {
-    return false;
+    return { ok: false, kind: 'skipped' };
   }
 
   const controller = new AbortController();
@@ -149,13 +157,16 @@ async function postGraphEnvelope(envelope: GraphSyncEnvelope): Promise<boolean> 
     });
 
     if (!res.ok) {
-      return false;
+      // #743: keep the numeric status only. The body is never read.
+      return isReportableHttpStatus(res.status)
+        ? { ok: false, kind: 'http', status: res.status }
+        : { ok: false, kind: 'network' };
     }
 
     updateLastSyncAt();
-    return true;
+    return { ok: true };
   } catch {
-    return false;
+    return { ok: false, kind: 'network' };
   } finally {
     clearTimeout(timeoutId);
   }
@@ -272,8 +283,9 @@ export function writeGraphSyncOutbox(
 }
 
 export function dispatchGraphOutboxBestEffort(envelope: GraphSyncEnvelope, deliveryKey: string): void {
-  postGraphEnvelope(envelope).then((ok) => {
-    if (!ok) return;
+  postGraphEnvelope(envelope).then((outcome) => {
+    noteLiveDispatchOutcome(outcome);
+    if (!outcome.ok) return;
     try {
       const db = getDatabase();
       db.prepare(`
@@ -352,6 +364,8 @@ export async function syncAllGraphToCloud(): Promise<{
   memoryEntities: number;
   syncedBatches: number;
   failedBatches: number;
+  /** #743 — how the failed batches split: permanent refusal, transient, local skip. */
+  failures: SendFailureTally;
 }> {
   const db = getDatabase();
   const memoryRows = db.prepare(
@@ -412,6 +426,7 @@ export async function syncAllGraphToCloud(): Promise<{
   const batchSize = 200;
   let syncedBatches = 0;
   let failedBatches = 0;
+  const failures = emptySendFailureTally();
 
   for (let pruneIndex = 0; pruneIndex < pruneMemoryExternalIds.length; pruneIndex += batchSize) {
     const pruneEnvelope = buildEnvelope(
@@ -420,11 +435,12 @@ export async function syncAllGraphToCloud(): Promise<{
       [],
       pruneMemoryExternalIds.slice(pruneIndex, pruneIndex + batchSize),
     );
-    const ok = await postGraphEnvelope(pruneEnvelope);
-    if (ok) {
+    const outcome = await postGraphEnvelope(pruneEnvelope);
+    if (outcome.ok) {
       syncedBatches++;
     } else {
       failedBatches++;
+      recordSendFailure(failures, outcome, 1);
       enqueueFailedGraphSync(pruneEnvelope);
     }
   }
@@ -449,11 +465,12 @@ export async function syncAllGraphToCloud(): Promise<{
       envelope.memory_entities.length > 0;
     if (!hasPayload) continue;
 
-    const ok = await postGraphEnvelope(envelope);
-    if (ok) {
+    const outcome = await postGraphEnvelope(envelope);
+    if (outcome.ok) {
       syncedBatches++;
     } else {
       failedBatches++;
+      recordSendFailure(failures, outcome, 1);
       enqueueFailedGraphSync(envelope);
     }
   }
@@ -464,5 +481,6 @@ export async function syncAllGraphToCloud(): Promise<{
     memoryEntities: memoryEntities.length,
     syncedBatches,
     failedBatches,
+    failures,
   };
 }

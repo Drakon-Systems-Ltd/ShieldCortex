@@ -57,6 +57,7 @@ import type { RankerEngine } from '../memory/types.js';
 const VALID_RANKER_ENGINES: RankerEngine[] = ['rrf', 'legacy'];
 import { syncAllGraphToCloud } from './graph-sync.js';
 import { syncAllMemoriesToCloud } from './memory-sync.js';
+import { formatFullSyncSummary } from './send-outcome.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import { initDatabase } from '../database/init.js';
 import { reconcileSyncQueue } from './sync-queue.js';
@@ -851,14 +852,11 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
         maxCreatedAt: new Date().toISOString(),
       }).removed;
     }
-    console.log(
-      `Finished. ${memoryResult.synced}/${memoryResult.total} memories synced` +
-      `${memoryResult.failed > 0 ? `, ${memoryResult.failed} queued for retry` : ''}.`
-    );
-    console.log(
-      `Graph replica: ${graphResult.entities} entities, ${graphResult.triples} relationships, ${graphResult.memoryEntities} memory links` +
-      `${graphResult.failedBatches > 0 ? `, ${graphResult.failedBatches} batch${graphResult.failedBatches === 1 ? '' : 'es'} queued for retry` : ''}.`
-    );
+    // #743: "queued for retry" only for transient failures; a permanent
+    // refusal is reported once with its HTTP status number.
+    for (const line of formatFullSyncSummary(memoryResult, graphResult)) {
+      console.log(line);
+    }
     if (reconciled > 0) {
       console.log(`Reconciled ${reconciled} stale sync queue entr${reconciled === 1 ? 'y' : 'ies'}.`);
     }
