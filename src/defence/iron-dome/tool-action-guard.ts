@@ -5752,12 +5752,18 @@ export function isGuardSelfProtectionVerdict(signals: readonly string[] | undefi
  * documented postures: watch-only advisory, the enforce-when-ready shadow,
  * the OpenClaw failure policy and Hermes behave as for any dangerous verdict.
  *
+ * `memory-directive` (SCN-010 PR B): a stored standing order that relaxes a
+ * control is exactly what an operator's `memory` / `remember` / `persist`
+ * allowlist entry or a broker's guess must not release on the operator's
+ * behalf. The person whose controls it relaxes answers it.
+ *
  * The ONE list. The Claude Code hook reads it from this module and carries a
  * duplicate for an older dist; the OpenClaw interceptor carries a duplicate.
  * Held equal by enforcement-surface-parity.
  */
 export const GUARD_PROMPT_ONLY_SIGNALS: readonly string[] = Object.freeze([
   'reverse-shell',
+  'memory-directive',
 ]);
 
 /** True when a verdict's signals may be released only by a human answer. */
