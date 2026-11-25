@@ -212,6 +212,12 @@ describe('API route mutation regressions', () => {
         purgeOldEntries: jest.fn(),
         reconcileSyncQueue: jest.fn(() => ({ removed: 0 })),
         claimRetryBatch: jest.fn(() => []),
+        // #743: send-outcome.js binds this name at link time. This double
+        // outlives resetModules(), so the later memory-route tests in this
+        // file load store.js -> graph-sync.js -> send-outcome.js against it.
+        // Same mapping as the real classifier.
+        classifyHttpStatus: (status: number): 'transient' | 'permanent' =>
+          status !== 429 && status >= 400 && status < 500 ? 'permanent' : 'transient',
         SYNC_QUEUE_LEASE_MS: 60_000,
       }));
 
