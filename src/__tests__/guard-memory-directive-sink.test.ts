@@ -424,10 +424,10 @@ describe('round 2: what the round-1 build let through', () => {
   const CARD = { decision: 'require_approval', severity: 'dangerous', signals: [SIGNAL] };
   const HERMES_USER_MD = '/home/u/.hermes/memories/USER.md';
 
-  /** One object chain `levels` containers deep below the argument bag, ending in `{content: text}`. */
+  /** An argument bag (depth 0) whose deepest container, `{content: text}`, is at depth `levels`. */
   function nestUnder(levels: number, text: string): Record<string, unknown> {
     let node: Record<string, unknown> = { content: text };
-    for (let i = levels - 1; i >= 1; i--) node = { [`level${i}`]: node };
+    for (let i = levels; i >= 1; i--) node = { [`level${i}`]: node };
     return node;
   }
 

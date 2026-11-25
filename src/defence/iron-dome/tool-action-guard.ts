@@ -43,6 +43,7 @@ import { forEachWindow } from '../scan-windows.js';
 import { bodyIsAllDataRead } from './heredoc-data-read.js';
 import {
   MEMORY_DIRECTIVE_SIGNAL,
+  isSinkMemoryMarkdown,
   memoryDirectiveHoldReason,
   memorySinkKind,
   screenMemoryWrite,
@@ -8254,16 +8255,20 @@ export function evaluateToolCall(
 /**
  * SCN-010 PR B — the card the memory sink would mint for this call, or null.
  *
- *   G1  a memory WRITE tool (see `memorySinkKind`): the stored text;
+ *   G1  a memory WRITE tool (see `memorySinkKind`): every string it would
+ *       store, under any key;
  *   G2  a write-family call whose target is memory markdown
- *       (`isMemoryWritePath`): the RAW written text, not the backtick-
- *       neutralised command-scan body (the screen has its own mask rules).
+ *       (`isMemoryWritePath`, or a `.md` file directly inside a Hermes
+ *       memories directory — `isSinkMemoryMarkdown`; the guard's own
+ *       predicate, which also drives the #93 scan, is unchanged): the RAW
+ *       written text, not the backtick-neutralised command-scan body (the
+ *       screen has its own mask rules).
  *
  * `require_approval` / `dangerous` / `memory-directive`, action
  * `persist_memory`. Never `block`, never `catastrophic`. The reason carries
- * pattern names or a fixed cause, never memory text. A screen that throws and
- * text too large to screen both card (an attacker-shaped input must not turn a
- * gap into an allow).
+ * pattern names or a fixed cause, never memory text. A screen that throws,
+ * text too large to screen and text nested too deep to screen all card (an
+ * attacker-shaped input must not turn a gap into an allow).
  *
  * Exported for tests (the `screen` seam); `evaluateToolCall` applies it only
  * to a verdict that is otherwise `allow`.
@@ -8274,10 +8279,12 @@ export function memoryDirectiveSinkVerdict(
   screen?: MemoryDirectiveScreen,
 ): ToolGuardVerdict | null {
   const family = classifyFamily(toolName);
+  const normalised = normaliseToolName(toolName);
+  const target = family === 'write' ? extractPath(args ?? {}) : '';
   const sinkKind = memorySinkKind(
-    normaliseToolName(toolName),
+    normalised,
     family,
-    family === 'write' && isMemoryWritePath(extractPath(args ?? {})),
+    family === 'write' && isSinkMemoryMarkdown(normalised, target, isMemoryWritePath(target)),
   );
   if (!sinkKind) return null;
   const hold = screenMemoryWrite(sinkKind, args, screen);
