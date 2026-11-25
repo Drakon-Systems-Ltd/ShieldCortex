@@ -26,8 +26,12 @@ import { withOwnConfigWrite } from '../audit/agent-config-watch-own-write.js';
 import { nextCausalSeq } from './causal-seq.js';
 import { openClawUserHome, uninstallPlugin } from './openclaw.js';
 import {
+  isRealtimePluginReference,
+  isStrippableRealtimeLoadPath,
   listManagedRealtimeProjectCopies,
+  planRealtimeUninstall,
   realtimeUninstallTargetingRefusal,
+  type RealtimeUninstallPlan,
   type RealtimeUninstallResult,
 } from './openclaw-realtime-uninstall.js';
 
@@ -43,9 +47,20 @@ function resolveHome(): string {
   return openClawUserHome();
 }
 
+/**
+ * Which array entries a filter-config-array removal drops. Plugin allow and
+ * load-path entries match the realtime plugin exactly (#1115 r4); a substring
+ * de-allowed `shieldcortex-realtime-extra`. `substring` is the older
+ * hooks.internal.allow rule, unchanged here.
+ */
+type ArrayMatch =
+  | { by: 'substring'; value: string }
+  | { by: 'plugin-reference' }
+  | { by: 'plugin-load-path'; home: string };
+
 type Removal =
   | { kind: 'delete-config-key'; file: string; keyPath: string[] }
-  | { kind: 'filter-config-array'; file: string; keyPath: string[]; contains: string }
+  | { kind: 'filter-config-array'; file: string; keyPath: string[]; match: ArrayMatch }
   | { kind: 'delete-directory'; path: string }
   | { kind: 'report-only'; path: string };
 
@@ -145,17 +160,26 @@ function deletePath(root: Record<string, unknown>, keyPath: string[]): boolean {
   return false;
 }
 
+function arrayEntryMatches(match: ArrayMatch, entry: unknown): boolean {
+  switch (match.by) {
+    case 'substring':
+      return typeof entry === 'string' && entry.includes(match.value);
+    case 'plugin-reference':
+      return isRealtimePluginReference(entry);
+    case 'plugin-load-path':
+      return isStrippableRealtimeLoadPath(entry, match.home);
+  }
+}
+
 function filterArrayAtPath(
   root: Record<string, unknown>,
   keyPath: string[],
-  contains: string,
+  match: ArrayMatch,
 ): boolean {
   const target = getPath(root, keyPath);
   if (!Array.isArray(target)) return false;
   const before = target.length;
-  const filtered = target.filter(
-    (entry) => !(typeof entry === 'string' && entry.includes(contains)),
-  );
+  const filtered = target.filter((entry) => !arrayEntryMatches(match, entry));
   if (filtered.length === before) return false;
   // Re-walk and assign back so we don't rely on aliasing
   let node: Record<string, unknown> = root;
@@ -193,21 +217,25 @@ export function scanForResidue(): ResidueReport {
     present: !!getPath(cfg, ['plugins', 'entries', PLUGIN_ID]),
     category: 'plugin-config',
   });
+  const allowMatch: ArrayMatch = { by: 'plugin-reference' };
   paths.push({
     description: `openclaw.json: .plugins.allow[] contains "${PLUGIN_ID}"`,
-    removal: { kind: 'filter-config-array', file: openclawJson, keyPath: ['plugins', 'allow'], contains: PLUGIN_ID },
+    removal: { kind: 'filter-config-array', file: openclawJson, keyPath: ['plugins', 'allow'], match: allowMatch },
     present: ((): boolean => {
       const arr = getPath(cfg, ['plugins', 'allow']);
-      return Array.isArray(arr) && arr.some((e) => typeof e === 'string' && e.includes(PLUGIN_ID));
+      return Array.isArray(arr) && arr.some((e) => arrayEntryMatches(allowMatch, e));
     })(),
     category: 'plugin-config',
   });
+  // A matching load path that exists and does not identify as ours is
+  // another plugin's, and stays.
+  const loadPathMatch: ArrayMatch = { by: 'plugin-load-path', home };
   paths.push({
     description: `openclaw.json: .plugins.load.paths[] contains "${PLUGIN_ID}"`,
-    removal: { kind: 'filter-config-array', file: openclawJson, keyPath: ['plugins', 'load', 'paths'], contains: PLUGIN_ID },
+    removal: { kind: 'filter-config-array', file: openclawJson, keyPath: ['plugins', 'load', 'paths'], match: loadPathMatch },
     present: ((): boolean => {
       const arr = getPath(cfg, ['plugins', 'load', 'paths']);
-      return Array.isArray(arr) && arr.some((e) => typeof e === 'string' && e.includes(PLUGIN_ID));
+      return Array.isArray(arr) && arr.some((e) => arrayEntryMatches(loadPathMatch, e));
     })(),
     category: 'plugin-config',
   });
@@ -233,7 +261,7 @@ export function scanForResidue(): ResidueReport {
   });
   paths.push({
     description: 'openclaw.json: .hooks.internal.allow[] contains "shieldcortex"',
-    removal: { kind: 'filter-config-array', file: openclawJson, keyPath: ['hooks', 'internal', 'allow'], contains: 'shieldcortex' },
+    removal: { kind: 'filter-config-array', file: openclawJson, keyPath: ['hooks', 'internal', 'allow'], match: { by: 'substring', value: 'shieldcortex' } },
     present: ((): boolean => {
       const arr = getPath(cfg, ['hooks', 'internal', 'allow']);
       return Array.isArray(arr) && arr.some((e) => typeof e === 'string' && e.includes('shieldcortex'));
@@ -522,7 +550,7 @@ export function cleanResidue(report: ResidueReport, options: CleanOptions = {}):
         }
       } else if (r.kind === 'filter-config-array') {
         const cfg = loadConfig(r.file);
-        if (filterArrayAtPath(cfg, r.keyPath, r.contains)) {
+        if (filterArrayAtPath(cfg, r.keyPath, r.match)) {
           dirtyConfigFiles.add(r.file);
           result.removed.push(entry.description);
         }
@@ -729,6 +757,16 @@ function execGatewayRestartCommand(): GatewayRestartResult {
   };
 }
 
+function dryRunPluginResult(plan: RealtimeUninstallPlan): RealtimeUninstallResult {
+  if (plan.action === 'refused' || plan.action === 'absent') {
+    return { status: plan.action, detail: plan.detail };
+  }
+  return {
+    status: 'planned',
+    detail: `dry run: ${plan.summary}. Not run. Plugin config is not listed until a real run verifies the removal.`,
+  };
+}
+
 /**
  * High-level entry point used by `shieldcortex uninstall --deep`.
  * Scans → cleans → (optionally) restarts gateway.
@@ -743,14 +781,21 @@ function execGatewayRestartCommand(): GatewayRestartResult {
  * that config and does not restart the gateway.
  *
  * An ambiguous OpenClaw target is refused before any hook, config, or
- * workspace-lock write. Nothing is cleaned from the fallback home.
+ * workspace-lock write. Nothing is cleaned from the fallback home. The same
+ * holds for every refusal the read-only uninstall plan decides (a linked or
+ * unreadable install, an unverified directory at the plugin's default path),
+ * and for a refused plugin result handed in by the caller.
  *
  * A verified `removed` plugin result counts as a change for the optional
  * restart, even when no other residue was purged. Dry run and incomplete
  * removal still suppress the restart.
  *
  * dryRun does not call uninstall. The old unconditional call deleted a
- * legacy copy and rewrote config before cleanResidue ever saw dryRun.
+ * legacy copy and rewrote config before cleanResidue ever saw dryRun. A dry
+ * run reports the plan instead: a refusal, `absent`, or `planned` with what
+ * a real run would attempt. With `planned`, plugin config and the plugin
+ * directory are not listed, because a real run strips that config only after
+ * it verifies the removal.
  */
 export async function runDeepClean(options: {
   dryRun?: boolean;
@@ -763,20 +808,21 @@ export async function runDeepClean(options: {
   gateway?: Awaited<ReturnType<typeof restartOpenClawGateway>>;
   pluginRemoval: RealtimeUninstallResult;
 }> {
-  const targeting = realtimeUninstallTargetingRefusal(resolveHome());
-  if (targeting) {
-    return {
-      report: { paths: [], dirtyCount: 0, cleanCount: 0 },
-      result: { removed: [], errors: [] },
-      pluginRemoval: { status: 'refused', detail: targeting },
-    };
-  }
+  const refused = (detail: string) => ({
+    report: { paths: [], dirtyCount: 0, cleanCount: 0 },
+    result: { removed: [], errors: [] },
+    pluginRemoval: { status: 'refused' as const, detail },
+  });
+  const home = resolveHome();
+  const targeting = realtimeUninstallTargetingRefusal(home);
+  if (targeting) return refused(targeting);
+  if (options.pluginRemoval?.status === 'refused') return refused(options.pluginRemoval.detail);
+  const plan = options.pluginRemoval ? null : planRealtimeUninstall(home);
+  if (plan?.action === 'refused') return refused(plan.detail);
 
   const report = scanForResidue();
   const pluginRemoval = options.pluginRemoval
-    ?? (options.dryRun
-      ? { status: 'refused' as const, detail: 'dry run: realtime plugin uninstall was not run. Nothing was changed.' }
-      : uninstallPlugin());
+    ?? (options.dryRun ? dryRunPluginResult(plan!) : uninstallPlugin());
   const verified = pluginRemoval.status === 'removed' || pluginRemoval.status === 'absent';
   const cleanReport: ResidueReport = {
     ...report,

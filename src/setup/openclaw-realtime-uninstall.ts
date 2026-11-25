@@ -38,7 +38,8 @@ export const PLUGINS_UNINSTALL_ARGV = ['plugins', 'uninstall', REALTIME_PLUGIN_I
 export const PLUGINS_UNINSTALL_TIMEOUT_MS = 60_000;
 export const PLUGINS_UNINSTALL_STDIN = 'y\n';
 
-export type RealtimeUninstallStatus = 'absent' | 'removed' | 'refused' | 'failed' | 'unverified';
+/** `planned` is dry run only: what a real run would attempt. Nothing was run. */
+export type RealtimeUninstallStatus = 'absent' | 'removed' | 'refused' | 'failed' | 'unverified' | 'planned';
 
 export interface RealtimeUninstallResult {
   status: RealtimeUninstallStatus;
@@ -73,6 +74,11 @@ export interface RealtimeUninstallDeps {
   resolveBinary: (home: string) => string | null;
   childEnv: (home: string) => NodeJS.ProcessEnv;
   acquireLock: (root: string) => LockResult;
+  /**
+   * Throws when openclaw.json cannot be written. Checked before the legacy
+   * copy is deleted. Defaults to fs.accessSync(W_OK); tests inject it.
+   */
+  checkConfigWritable?: (file: string) => void;
 }
 
 export function spawnOpenClawPluginsUninstall(
@@ -87,6 +93,42 @@ export function spawnOpenClawPluginsUninstall(
     timeout: PLUGINS_UNINSTALL_TIMEOUT_MS,
     shell: false,
   });
+}
+
+/**
+ * A config string refers to the realtime plugin only when it is exactly the
+ * id, or a path (contains `/` or `\`) with a segment that is exactly the id.
+ * Legacy allow entries were index-file paths under extensions/<id>/, so a
+ * basename test alone would miss them. A substring is not a reference:
+ * `shieldcortex-realtime-extra` is another plugin and keeps its entries.
+ */
+export function isRealtimePluginReference(entry: unknown): entry is string {
+  if (typeof entry !== 'string') return false;
+  if (entry === REALTIME_PLUGIN_ID) return true;
+  if (!/[\\/]/.test(entry)) return false;
+  return entry.split(/[\\/]/).includes(REALTIME_PLUGIN_ID);
+}
+
+/**
+ * A plugins.load.paths entry cleanup may strip: it refers to the plugin
+ * (above), and the path it resolves to is gone or identifies as ours. A
+ * matching path that exists and is not ours is someone else's load path and
+ * stays. Trimmed and resolved the way the linked-install reader resolves it.
+ */
+export function isStrippableRealtimeLoadPath(entry: unknown, home: string): boolean {
+  if (typeof entry !== 'string') return false;
+  const trimmed = entry.trim();
+  if (!isRealtimePluginReference(trimmed)) return false;
+  const openclawDir = path.join(home, '.openclaw');
+  const expanded = trimmed === '~' ? home : trimmed.startsWith('~/') ? path.join(home, trimmed.slice(2)) : trimmed;
+  const target = path.resolve(openclawDir, expanded);
+  try {
+    fs.statSync(target);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR';
+  }
+  return identifyPluginDir(target).state === 'ours';
 }
 
 function text(value: string | Buffer | null | undefined): string {
@@ -291,7 +333,7 @@ function isLegacySelected(home: string, dir: string): boolean {
 function configNeedsCleanup(config: Record<string, unknown>): boolean {
   const plugins = config.plugins as { allow?: unknown; entries?: unknown; installs?: unknown } | undefined;
   if (plugins && typeof plugins === 'object') {
-    if (Array.isArray(plugins.allow) && plugins.allow.some((e) => typeof e === 'string' && e.includes(REALTIME_PLUGIN_ID))) return true;
+    if (Array.isArray(plugins.allow) && plugins.allow.some(isRealtimePluginReference)) return true;
     if (plugins.entries && typeof plugins.entries === 'object' && REALTIME_PLUGIN_ID in (plugins.entries as object)) return true;
     if (plugins.installs && typeof plugins.installs === 'object' && REALTIME_PLUGIN_ID in (plugins.installs as object)) return true;
   }
@@ -300,33 +342,38 @@ function configNeedsCleanup(config: Record<string, unknown>): boolean {
   return Boolean(hookInstalls && typeof hookInstalls === 'object' && REALTIME_PLUGIN_ID in (hookInstalls as object));
 }
 
+type ConfigStripPlan =
+  | { ok: true; configPath: string; content: string | null }
+  | { ok: false; detail: string };
+
 /**
- * Strict JSON only, and only keys OpenClaw's CLI is already known to leave
- * (plugins.allow / entries / installs in openclaw.json, and the hook-pack pin
- * repair clears itself). Does not author plugins.installs, and does not
- * write installs.json or the SQLite index.
+ * Read-only. Strict JSON only, and only keys OpenClaw's CLI is already known
+ * to leave (plugins.allow / entries / installs in openclaw.json, and the
+ * hook-pack pin repair clears itself). `content` is the stripped file, or
+ * null when there is nothing to strip (including no file). Does not author
+ * plugins.installs, and does not touch installs.json or the SQLite index.
  */
-function stripVerifiedConfig(home: string): { ok: true } | { ok: false; detail: string } {
+function planConfigStrip(home: string): ConfigStripPlan {
   const configPath = path.join(home, '.openclaw', 'openclaw.json');
   let raw: string;
   try {
     raw = fs.readFileSync(configPath, 'utf-8');
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return { ok: true };
-    return { ok: false, detail: `cannot read ${configPath}: ${(err as Error).message}. Not rewritten.` };
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { ok: true, configPath, content: null };
+    return { ok: false, detail: `cannot read ${configPath}: ${(err as Error).message}.` };
   }
   let config: Record<string, unknown>;
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return { ok: false, detail: `${configPath} is not strict JSON. Not rewritten.` };
+      return { ok: false, detail: `${configPath} is not strict JSON.` };
     }
     config = parsed as Record<string, unknown>;
   } catch {
-    return { ok: false, detail: `${configPath} is not strict JSON. Not rewritten.` };
+    return { ok: false, detail: `${configPath} is not strict JSON.` };
   }
-  if (!configNeedsCleanup(config)) return { ok: true };
+  if (!configNeedsCleanup(config)) return { ok: true, configPath, content: null };
   const plugins = config.plugins as {
     allow?: unknown;
     entries?: Record<string, unknown>;
@@ -334,7 +381,7 @@ function stripVerifiedConfig(home: string): { ok: true } | { ok: false; detail: 
   } | undefined;
   if (plugins && typeof plugins === 'object') {
     if (Array.isArray(plugins.allow)) {
-      plugins.allow = plugins.allow.filter((entry) => typeof entry !== 'string' || !entry.includes(REALTIME_PLUGIN_ID));
+      plugins.allow = plugins.allow.filter((entry) => !isRealtimePluginReference(entry));
     }
     if (plugins.entries && REALTIME_PLUGIN_ID in plugins.entries) delete plugins.entries[REALTIME_PLUGIN_ID];
     if (plugins.installs && REALTIME_PLUGIN_ID in plugins.installs) delete plugins.installs[REALTIME_PLUGIN_ID];
@@ -343,14 +390,29 @@ function stripVerifiedConfig(home: string): { ok: true } | { ok: false; detail: 
   if (hooks?.internal?.installs && REALTIME_PLUGIN_ID in hooks.internal.installs) {
     delete hooks.internal.installs[REALTIME_PLUGIN_ID];
   }
+  return { ok: true, configPath, content: JSON.stringify(config, null, 2) + '\n' };
+}
+
+function writeConfigStrip(configPath: string, content: string): void {
+  withOwnConfigWrite(configPath, () => {
+    fs.writeFileSync(configPath, content, 'utf-8');
+    return content;
+  });
+}
+
+function defaultCheckConfigWritable(file: string): void {
+  fs.accessSync(file, fs.constants.W_OK);
+}
+
+/** Plan and write in one step, for the path where ShieldCortex deleted nothing. */
+function stripVerifiedConfig(home: string): { ok: true } | { ok: false; detail: string } {
+  const plan = planConfigStrip(home);
+  if (!plan.ok) return { ok: false, detail: `${plan.detail} Not rewritten.` };
+  if (plan.content === null) return { ok: true };
   try {
-    const out = JSON.stringify(config, null, 2) + '\n';
-    withOwnConfigWrite(configPath, () => {
-      fs.writeFileSync(configPath, out, 'utf-8');
-      return out;
-    });
+    writeConfigStrip(plan.configPath, plan.content);
   } catch (err) {
-    return { ok: false, detail: `could not update ${configPath}: ${(err as Error).message}. Not reported as removed.` };
+    return { ok: false, detail: `could not update ${plan.configPath}: ${(err as Error).message}. Not reported as removed.` };
   }
   return { ok: true };
 }
@@ -457,15 +519,7 @@ function verifiedGone(home: string, opts?: { ownedLegacyConfig?: boolean }): Rea
   return null;
 }
 
-function finishRemoved(home: string, detail: string, opts?: { ownedLegacyConfig?: boolean }): RealtimeUninstallResult {
-  const still = verifiedGone(home, opts);
-  if (still) return still;
-  const cleaned = stripVerifiedConfig(home);
-  if (!cleaned.ok) return { status: 'failed', detail: cleaned.detail };
-  if (opts?.ownedLegacyConfig) {
-    const after = verifiedGone(home);
-    if (after) return after;
-  }
+function removedResult(home: string, detail: string): RealtimeUninstallResult {
   const leftovers = listManagedRealtimeProjectCopies(home);
   const leftoverNote = leftovers.length
     ? ` Left in place (not an install, not removed): ${leftovers.join(', ')}.`
@@ -473,58 +527,128 @@ function finishRemoved(home: string, detail: string, opts?: { ownedLegacyConfig?
   return { status: 'removed', detail: `${detail}${leftoverNote}`, ...(leftovers.length ? { leftovers } : {}) };
 }
 
-function removeLegacyDir(home: string): RealtimeUninstallResult {
-  const ownedLegacyConfig = legacyConfigRecordIsOwned(home);
+/** CLI path with no legacy copy: ShieldCortex deleted nothing itself. */
+function finishRemoved(home: string, detail: string): RealtimeUninstallResult {
+  const still = verifiedGone(home);
+  if (still) return still;
+  const cleaned = stripVerifiedConfig(home);
+  if (!cleaned.ok) return { status: 'failed', detail: cleaned.detail };
+  return removedResult(home, detail);
+}
+
+/**
+ * The only legacy delete. The caller holds the update lock; everything here
+ * is re-checked immediately before rmSync: the leaf must still identify as
+ * ours, openclaw.json must be strict JSON (or missing), and it must be
+ * writable when it needs a strip. The stripped content is computed before
+ * the delete, so a refusal changes nothing, and the write after the delete
+ * has nothing left to validate. Only the leaf is lstat'd; a symlinked
+ * ancestor of extensions/ is not detected here.
+ */
+function removeLegacyDir(home: string, deps: RealtimeUninstallDeps, opts: { afterCli: boolean }): RealtimeUninstallResult {
   const dir = legacyDir(home);
+  const unchanged = opts.afterCli
+    ? `ShieldCortex did not delete ${dir} and did not strip config. openclaw plugins uninstall already ran and may have changed files.`
+    : 'Nothing was changed.';
+  const legacy = inspectLegacy(home);
+  if (legacy.kind === 'symlink') {
+    return { status: 'refused', detail: `${dir} is a symlink. Refusing to follow it. ${unchanged}` };
+  }
+  if (legacy.kind === 'unknown') {
+    return { status: 'refused', detail: `${legacy.why} ${unchanged}` };
+  }
+  if (legacy.kind !== 'ours') {
+    return { status: 'refused', detail: `${dir} no longer identifies as ${REALTIME_PLUGIN_ID}. ${unchanged}` };
+  }
+  const strip = planConfigStrip(home);
+  if (!strip.ok) {
+    return { status: 'refused', detail: `${strip.detail} Its ${REALTIME_PLUGIN_ID} entries could not be stripped after the delete. ${unchanged}` };
+  }
+  if (strip.content !== null) {
+    try {
+      (deps.checkConfigWritable ?? defaultCheckConfigWritable)(strip.configPath);
+    } catch (err) {
+      return {
+        status: 'refused',
+        detail: `${strip.configPath} cannot be written (${(err as Error).message}), so its ${REALTIME_PLUGIN_ID} entries could not be stripped after the delete. ${unchanged}`,
+      };
+    }
+  }
+  const ownedLegacyConfig = legacyConfigRecordIsOwned(home);
   try {
     fs.rmSync(dir, { recursive: true });
   } catch (err) {
     return { status: 'failed', detail: `could not remove ${dir}: ${(err as Error).message}. Config was not stripped.` };
   }
-  return finishRemoved(home, `Removed real-time plugin from ${dir}.`, { ownedLegacyConfig });
+  const removed = `${dir} was removed.`;
+  const still = verifiedGone(home, { ownedLegacyConfig });
+  if (still) return { ...still, detail: `${removed} ${still.detail}` };
+  if (strip.content !== null) {
+    try {
+      writeConfigStrip(strip.configPath, strip.content);
+    } catch (err) {
+      return {
+        status: 'failed',
+        detail: `${removed} ${strip.configPath} was not updated (${(err as Error).message}); its ${REALTIME_PLUGIN_ID} entries are still there. Not reported as removed.`,
+      };
+    }
+  }
+  if (ownedLegacyConfig) {
+    const after = verifiedGone(home);
+    if (after) return { ...after, detail: `${removed} ${after.detail}` };
+  }
+  return removedResult(home, `Removed real-time plugin from ${dir}.`);
 }
 
+export type RealtimeUninstallPlan =
+  | { action: 'refused'; detail: string }
+  | { action: 'absent'; detail: string }
+  | { action: 'cli'; summary: string }
+  | { action: 'legacy-rm'; summary: string };
+
 /**
- * Remove the realtime plugin, or say exactly why that did not happen.
- * Reads first. No mkdir of extensions/. No deletion of a managed project.
+ * Read-only. Every refusal uninstall can decide before it changes anything:
+ * targeting, a linked or unreadable source, a symlinked or unreadable legacy
+ * leaf, and an OpenClaw record while a directory that does not identify as
+ * ours sits at the plugin's default path. Callers run this before any hook,
+ * skill, or config write, and the helper runs it again inside the lock.
  */
-export function uninstallManagedRealtimePlugin(deps: RealtimeUninstallDeps): RealtimeUninstallResult {
-  const { home } = deps;
+export function planRealtimeUninstall(home: string): RealtimeUninstallPlan {
   if (!path.isAbsolute(home)) {
-    return { status: 'refused', detail: `home ${JSON.stringify(home)} is not absolute, so it was not resolved against the process cwd. Nothing was changed.` };
+    return { action: 'refused', detail: `home ${JSON.stringify(home)} is not absolute, so it was not resolved against the process cwd. Nothing was changed.` };
   }
 
   const targeting = realtimeUninstallTargetingRefusal(home);
-  if (targeting) return { status: 'refused', detail: targeting };
+  if (targeting) return { action: 'refused', detail: targeting };
 
   const linked = readLinkedRealtimeInstall(home);
   if (linked.state === 'linked') {
-    return { status: 'refused', detail: `refusing to uninstall a linked/path install at ${linked.at}. Nothing was changed.` };
+    return { action: 'refused', detail: `refusing to uninstall a linked/path install at ${linked.at}. Nothing was changed.` };
   }
   if (linked.state === 'unknown') {
-    return { status: 'refused', detail: `cannot tell whether the plugin is linked (${linked.why}). Nothing was changed.` };
+    return { action: 'refused', detail: `cannot tell whether the plugin is linked (${linked.why}). Nothing was changed.` };
   }
 
   const index = readPluginInstallIndexState(home);
   if (index.state === 'unreadable') {
-    return { status: 'refused', detail: `OpenClaw's plugin install index could not be read (${index.why}). Nothing was changed.` };
+    return { action: 'refused', detail: `OpenClaw's plugin install index could not be read (${index.why}). Nothing was changed.` };
   }
   const selected = readSelectedRealtimeInstall(home);
   if (selected.state === 'unknown') {
-    return { status: 'refused', detail: `${selected.why} Nothing was changed.` };
+    return { action: 'refused', detail: `${selected.why} Nothing was changed.` };
   }
 
   const legacy = inspectLegacy(home);
   if (legacy.kind === 'symlink') {
-    return { status: 'refused', detail: `${legacyDir(home)} is a symlink. Refusing to follow it. Nothing was changed.` };
+    return { action: 'refused', detail: `${legacyDir(home)} is a symlink. Refusing to follow it. Nothing was changed.` };
   }
   if (legacy.kind === 'unknown') {
-    return { status: 'refused', detail: `${legacy.why} Nothing was changed.` };
+    return { action: 'refused', detail: `${legacy.why} Nothing was changed.` };
   }
 
   const installs = readInstallsRecord(home);
   if (installs === 'unreadable') {
-    return { status: 'refused', detail: `${path.join(home, '.openclaw', 'plugins', 'installs.json')} could not be read. Unknown is not absent. Nothing was changed.` };
+    return { action: 'refused', detail: `${path.join(home, '.openclaw', 'plugins', 'installs.json')} could not be read. Unknown is not absent. Nothing was changed.` };
   }
 
   const indexRecord = index.state === 'ok' && indexNamesPlugin(index.row);
@@ -537,10 +661,36 @@ export function uninstallManagedRealtimePlugin(deps: RealtimeUninstallDeps): Rea
   const needsLegacyRm = legacyOurs && (selectedLegacy || (!indexRecord && !installsRecord && !selectedOther));
 
   if (!needsCli && !needsLegacyRm) {
-    return { status: 'absent', detail: `${REALTIME_PLUGIN_ID} plugin is not installed.` };
+    return { action: 'absent', detail: `${REALTIME_PLUGIN_ID} plugin is not installed.` };
   }
 
-  if (needsCli) {
+  // OpenClaw's uninstall resolves a record with no path, or a path outside
+  // its managed roots, to this default directory and removes it by name.
+  // A directory there that is not ours is not handed to it.
+  if (needsCli && legacy.kind === 'not-ours') {
+    return {
+      action: 'refused',
+      detail: `${legacyDir(home)} exists but does not identify as ${REALTIME_PLUGIN_ID}, while an OpenClaw install record still names the plugin. OpenClaw's uninstall may remove that default path by name, so it was not run. Move that directory aside, then re-run. Nothing was changed.`,
+    };
+  }
+
+  return needsCli
+    ? { action: 'cli', summary: `would run openclaw plugins uninstall ${REALTIME_PLUGIN_ID}` }
+    : { action: 'legacy-rm', summary: `would remove the extensions copy at ${legacyDir(home)}` };
+}
+
+/**
+ * Remove the realtime plugin, or say exactly why that did not happen.
+ * Reads first. No mkdir of extensions/. ShieldCortex itself does not delete
+ * a managed project; OpenClaw's own uninstall may remove the copy it manages.
+ */
+export function uninstallManagedRealtimePlugin(deps: RealtimeUninstallDeps): RealtimeUninstallResult {
+  const { home } = deps;
+  const plan = planRealtimeUninstall(home);
+  if (plan.action === 'refused') return { status: 'refused', detail: plan.detail };
+  if (plan.action === 'absent') return { status: 'absent', detail: plan.detail };
+
+  if (plan.action === 'cli') {
     const bin = deps.resolveBinary(home);
     if (!bin) {
       return {
@@ -587,7 +737,7 @@ export function uninstallManagedRealtimePlugin(deps: RealtimeUninstallDeps): Rea
       if (legacyAfter.kind === 'unknown') {
         return { status: 'unverified', detail: `${legacyAfter.why} Config was not stripped.` };
       }
-      if (legacyAfter.kind === 'ours') return removeLegacyDir(home);
+      if (legacyAfter.kind === 'ours') return removeLegacyDir(home, deps, { afterCli: true });
       if (selectedAfter.state === 'selected') {
         return { status: 'failed', detail: `OpenClaw still has a loadable copy at ${selectedAfter.dir}. Config was not stripped.` };
       }
@@ -603,7 +753,18 @@ export function uninstallManagedRealtimePlugin(deps: RealtimeUninstallDeps): Rea
     return { status: 'failed', detail: `${lock.busy} Nothing was changed.` };
   }
   try {
-    return removeLegacyDir(home);
+    // Re-plan inside the lock. A record, a link, or a different directory
+    // that appeared since the read above is a refusal, not a legacy delete.
+    const again = planRealtimeUninstall(home);
+    if (again.action !== 'legacy-rm') {
+      return {
+        status: 'refused',
+        detail: again.action === 'refused'
+          ? again.detail
+          : `the plugin's install state changed while waiting for the update lock (now: ${again.action}). Nothing was changed. Re-run uninstall.`,
+      };
+    }
+    return removeLegacyDir(home, deps, { afterCli: false });
   } finally {
     lock.lock.release();
   }

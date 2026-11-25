@@ -708,9 +708,10 @@ describe('#1115 deep-clean does not delete a managed project or restart over a f
       restart: restart as never,
     });
 
-    expect(out.pluginRemoval.status).toBe('refused');
+    // A dry run is "not run", not a refusal: it reports the planned action.
+    expect(out.pluginRemoval.status).toBe('planned');
     expect(out.pluginRemoval.detail).toMatch(/dry run/i);
-    expect(out.pluginRemoval.status).not.toBe('removed');
+    expect(out.pluginRemoval.detail).toContain(dir);
     expect(fs.existsSync(dir)).toBe(true);
     expect(fs.readFileSync(path.join(home, '.openclaw', 'openclaw.json'), 'utf-8')).toBe(configBefore);
     expect(restart).not.toHaveBeenCalled();
@@ -731,5 +732,188 @@ describe('#1115 repair shares the spawn primitive, not the postcondition', () =>
     const uninstallStart = src.indexOf('export function uninstallPlugin');
     const uninstallEnd = src.indexOf('function pluginStatus', uninstallStart);
     expect(src.slice(uninstallStart, uninstallEnd)).not.toContain('findExtensionsDir');
+  });
+});
+
+describe('#1115 r4 exact plugin references, checked deletes, collision refusal', () => {
+  const EXTRA = 'shieldcortex-realtime-extra';
+  const configFile = () => path.join(home, '.openclaw', 'openclaw.json');
+  const installsFile = () => path.join(home, '.openclaw', 'plugins', 'installs.json');
+  const noSpawn = () => { throw new Error('spawn must not be called'); };
+
+  function plantOurs(): string {
+    const dir = path.join(home, '.openclaw', 'extensions', ID);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: PKG, version: '5.22.1' }));
+    fs.writeFileSync(path.join(dir, 'openclaw.plugin.json'), JSON.stringify({ id: ID, version: '5.22.1' }));
+    fs.writeFileSync(path.join(dir, 'index.js'), 'export default {};\n');
+    return dir;
+  }
+
+  function plantForeign(): string {
+    const dir = path.join(home, '.openclaw', 'extensions', ID);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'someone-elses-plugin', version: '1.0.0' }));
+    fs.writeFileSync(path.join(dir, 'marker'), 'keep');
+    return dir;
+  }
+
+  function writePathlessInstallsRecord(): string {
+    fs.mkdirSync(path.dirname(installsFile()), { recursive: true });
+    const raw = JSON.stringify({ installRecords: { [ID]: { source: 'npm', version: '5.22.1' } } });
+    fs.writeFileSync(installsFile(), raw);
+    return raw;
+  }
+
+  it('a verified legacy removal keeps allow entries and config keys that only share a prefix with the id', () => {
+    plantOurs();
+    const ext = path.join(home, '.openclaw', 'extensions');
+    fs.writeFileSync(configFile(), JSON.stringify({
+      plugins: {
+        allow: [ID, 'other-plugin', EXTRA, path.join(ext, ID, 'index.js'), path.join(ext, EXTRA, 'index.js')],
+        entries: { [ID]: { enabled: true }, [EXTRA]: { enabled: true } },
+      },
+    }, null, 2) + '\n');
+
+    const result = uninstallPlugin({ resolveBinary: () => '/fake/bin/openclaw', spawn: noSpawn });
+
+    expect(result.status).toBe('removed');
+    const cfg = JSON.parse(fs.readFileSync(configFile(), 'utf-8'));
+    expect(cfg.plugins.allow).toEqual(['other-plugin', EXTRA, path.join(ext, EXTRA, 'index.js')]);
+    expect(cfg.plugins.entries).toEqual({ [EXTRA]: { enabled: true } });
+  });
+
+  it('an openclaw.json this process cannot write is refused before the legacy copy is deleted', () => {
+    const dir = plantOurs();
+    const configBefore = writeConfig();
+    const checked: string[] = [];
+
+    const result = uninstallPlugin({
+      resolveBinary: () => '/fake/bin/openclaw',
+      spawn: noSpawn,
+      checkConfigWritable: (file) => {
+        checked.push(file);
+        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      },
+    });
+
+    expect(result.status).toBe('refused');
+    expect(checked).toEqual([configFile()]);
+    expect(result.detail).toMatch(/EACCES/);
+    expect(result.detail).toMatch(/Nothing was changed/);
+    expect(fs.existsSync(path.join(dir, 'openclaw.plugin.json'))).toBe(true);
+    expect(fs.readFileSync(configFile(), 'utf-8')).toBe(configBefore);
+  });
+
+  it('a config write that fails after the delete is failed, and says the directory was already removed', () => {
+    const dir = plantOurs();
+    const configBefore = writeConfig();
+    const realWrite = fs.writeFileSync;
+    const writeSpy = jest.spyOn(fs, 'writeFileSync').mockImplementation(((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+      if (file === configFile()) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+      return (realWrite as (...a: unknown[]) => void)(file, ...rest);
+    }) as typeof fs.writeFileSync);
+
+    let result: ReturnType<typeof uninstallPlugin>;
+    try {
+      result = uninstallPlugin({ resolveBinary: () => '/fake/bin/openclaw', spawn: noSpawn, checkConfigWritable: () => {} });
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    expect(result.status).toBe('failed');
+    expect(result.detail).toContain(`${dir} was removed.`);
+    expect(result.detail).toMatch(/was not updated \(ENOSPC/);
+    expect(fs.existsSync(dir)).toBe(false);
+    expect(fs.readFileSync(configFile(), 'utf-8')).toBe(configBefore);
+  });
+
+  it('after the CLI, an unwritable openclaw.json stops the legacy delete and says the child already ran', () => {
+    const dir = plantOurs();
+    writePathlessInstallsRecord();
+    const configBefore = writeConfig();
+    const { spawn, calls } = okSpawn(() => {
+      fs.writeFileSync(installsFile(), JSON.stringify({ installRecords: {} }));
+    });
+
+    const result = uninstallPlugin({
+      resolveBinary: () => '/fake/bin/openclaw',
+      spawn,
+      checkConfigWritable: () => { throw Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' }); },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(result.status).toBe('refused');
+    expect(result.detail).toMatch(/EROFS/);
+    expect(result.detail).toMatch(/already ran/);
+    expect(fs.existsSync(path.join(dir, 'openclaw.plugin.json'))).toBe(true);
+    expect(fs.readFileSync(configFile(), 'utf-8')).toBe(configBefore);
+  });
+
+  it('after the CLI, a non-strict openclaw.json with no install index is unverified and the legacy copy stays', () => {
+    // Pin: the selected-copy reader reads openclaw.json strictly and answers
+    // `unknown` before the legacy delete is reached, index or no index.
+    const dir = plantOurs();
+    writePathlessInstallsRecord();
+    writeConfig();
+    const { spawn, calls } = okSpawn(() => {
+      fs.writeFileSync(installsFile(), JSON.stringify({ installRecords: {} }));
+      fs.writeFileSync(configFile(), '{ json5: true, }\n');
+    });
+
+    const result = uninstallPlugin({ resolveBinary: () => '/fake/bin/openclaw', spawn });
+
+    expect(calls).toHaveLength(1);
+    expect(result.status).toBe('unverified');
+    expect(fs.existsSync(path.join(dir, 'openclaw.plugin.json'))).toBe(true);
+    expect(fs.readFileSync(configFile(), 'utf-8')).toBe('{ json5: true, }\n');
+  });
+
+  it('a legacy copy that stops identifying as ours while the lock is taken is not deleted', () => {
+    const dir = plantOurs();
+    const configBefore = writeConfig();
+
+    const result = uninstallPlugin({
+      resolveBinary: () => '/fake/bin/openclaw',
+      spawn: noSpawn,
+      acquireLock: () => {
+        fs.rmSync(path.join(dir, 'openclaw.plugin.json'));
+        fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'someone-elses-plugin', version: '1.0.0' }));
+        fs.writeFileSync(path.join(dir, 'marker'), 'keep');
+        return { lock: { release: () => {} } };
+      },
+    });
+
+    expect(result.status).toBe('refused');
+    expect(fs.readFileSync(path.join(dir, 'marker'), 'utf-8')).toBe('keep');
+    expect(fs.readFileSync(configFile(), 'utf-8')).toBe(configBefore);
+  });
+
+  it('an install record plus an unverified directory at the default path is refused before OpenClaw is asked', () => {
+    const dir = plantForeign();
+    const recordBefore = writePathlessInstallsRecord();
+    const configBefore = writeConfig();
+    const { spawn, calls } = okSpawn();
+
+    const result = uninstallPlugin({ resolveBinary: () => '/fake/bin/openclaw', spawn });
+
+    expect(result.status).toBe('refused');
+    expect(calls).toHaveLength(0);
+    expect(result.detail).toContain(dir);
+    expect(result.detail).toMatch(/Nothing was changed/);
+    expect(fs.readFileSync(path.join(dir, 'marker'), 'utf-8')).toBe('keep');
+    expect(fs.readFileSync(installsFile(), 'utf-8')).toBe(recordBefore);
+    expect(fs.readFileSync(configFile(), 'utf-8')).toBe(configBefore);
+  });
+
+  it('a same-name directory with no record is still absent and kept', () => {
+    const dir = plantForeign();
+    const { spawn, calls } = okSpawn();
+
+    const result = uninstallPlugin({ resolveBinary: () => '/fake/bin/openclaw', spawn });
+
+    expect(result.status).toBe('absent');
+    expect(calls).toHaveLength(0);
+    expect(fs.readFileSync(path.join(dir, 'marker'), 'utf-8')).toBe('keep');
   });
 });

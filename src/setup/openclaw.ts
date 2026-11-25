@@ -58,7 +58,8 @@ import {
   readSelectedRealtimePluginVersion,
 } from '../integrations/openclaw-realtime-install.js';
 import {
-  realtimeUninstallTargetingRefusal,
+  isRealtimePluginReference,
+  planRealtimeUninstall,
   spawnOpenClawPluginsUninstall,
   uninstallManagedRealtimePlugin,
   type RealtimeUninstallDeps,
@@ -802,8 +803,10 @@ function cleanupLegacyPlugin(): void {
     // (pre-v2026.3 format used raw file paths instead of plugin IDs)
     if (Array.isArray(config.plugins?.allow)) {
       const before = config.plugins.allow.length;
+      // Exact id or a path segment only: `shieldcortex-realtime-extra` is
+      // another plugin, and its allow entry stays.
       config.plugins.allow = config.plugins.allow.filter(
-        (e: string) => !e.includes(PLUGIN_DIR_NAME) || e === PLUGIN_DIR_NAME,
+        (e: unknown) => !isRealtimePluginReference(e) || e === PLUGIN_DIR_NAME,
       );
       if (config.plugins.allow.length < before) changed = true;
     }
@@ -1948,6 +1951,7 @@ export function uninstallPlugin(
     resolveBinary: deps.resolveBinary ?? resolveOpenClawBinary,
     childEnv: deps.childEnv ?? ((resolved) => openClawChildEnv({}, resolved)),
     acquireLock: deps.acquireLock ?? acquireUpdateLock,
+    ...(deps.checkConfigWritable ? { checkConfigWritable: deps.checkConfigWritable } : {}),
   });
 }
 
@@ -2453,15 +2457,15 @@ async function writeOpenClawInstall(
 }
 
 export async function uninstallOpenClawHook(): Promise<RealtimeUninstallResult> {
-  // Resolve or refuse the target before any hook, config, or skill write.
-  // An unresolvable OPENCLAW_HOME used to fall through to another home, and
-  // this function removed hooks before the plugin helper's refusal and skills
-  // after it.
-  const targeting = realtimeUninstallTargetingRefusal(resolveUserHome());
-  if (targeting) {
+  // One read-only plan before any hook, config, or skill write. Targeting,
+  // a linked or unreadable install, and an unverified directory at the
+  // plugin's default path are all refused here. This function used to remove
+  // hooks before the plugin helper's refusal and skills after it.
+  const plan = planRealtimeUninstall(resolveUserHome());
+  if (plan.action === 'refused') {
     process.exitCode = 1;
-    console.error(targeting);
-    return { status: 'refused', detail: targeting };
+    console.error(plan.detail);
+    return { status: 'refused', detail: plan.detail };
   }
 
   const hooksDirs = findAllHooksDirs();

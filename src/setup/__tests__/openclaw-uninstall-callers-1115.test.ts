@@ -311,3 +311,129 @@ describe('#1115 callers refuse an ambiguous target before OpenClaw writes', () =
     expect(fs.existsSync(path.join(otherHome, '.openclaw', 'hooks'))).toBe(false);
   }, 30000);
 });
+
+describe('#1115 r4 callers keep unrelated plugin references', () => {
+  const EXTRA = 'shieldcortex-realtime-extra';
+
+  function allowFixture(): string[] {
+    const ext = path.join(home, '.openclaw', 'extensions');
+    return [ID, 'other-plugin', EXTRA, path.join(ext, ID, 'index.js'), path.join(ext, EXTRA, 'index.js')];
+  }
+
+  it('openclaw uninstall with nothing installed keeps prefix-sharing allow entries', async () => {
+    const ext = path.join(home, '.openclaw', 'extensions');
+    const configFile = path.join(home, '.openclaw', 'openclaw.json');
+    fs.writeFileSync(configFile, JSON.stringify({ plugins: { allow: allowFixture() } }, null, 2) + '\n');
+
+    const result = await uninstallOpenClawHook();
+
+    expect(result.status).toBe('absent');
+    const cfg = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
+    // The bare id is kept by design (install relies on it); the path entry
+    // that names our directory is the legacy shape and goes.
+    expect(cfg.plugins.allow).toEqual([ID, 'other-plugin', EXTRA, path.join(ext, EXTRA, 'index.js')]);
+  }, 30000);
+
+  it('deep clean keeps prefix-sharing allow entries and load paths that exist and are not ours', async () => {
+    const ext = path.join(home, '.openclaw', 'extensions');
+    const extraDir = path.join(ext, EXTRA);
+    fs.mkdirSync(extraDir, { recursive: true });
+    fs.writeFileSync(path.join(extraDir, 'package.json'), JSON.stringify({ name: 'someone-elses-extra', version: '1.0.0' }));
+    const vendorSameName = path.join(home, 'vendor', ID);
+    fs.mkdirSync(vendorSameName, { recursive: true });
+    fs.writeFileSync(path.join(vendorSameName, 'package.json'), JSON.stringify({ name: 'vendor-fork', version: '1.0.0' }));
+    const dangling = path.join(home, 'gone', ID, 'index.js');
+    const configFile = path.join(home, '.openclaw', 'openclaw.json');
+    fs.writeFileSync(configFile, JSON.stringify({
+      plugins: {
+        allow: allowFixture(),
+        entries: { [ID]: { enabled: true }, [EXTRA]: { enabled: true } },
+        load: { paths: [extraDir, vendorSameName, dangling, '/abs/other-plugin'] },
+      },
+    }, null, 2) + '\n');
+
+    const out = await runDeepClean();
+
+    expect(out.pluginRemoval.status).toBe('absent');
+    const cfg = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
+    expect(cfg.plugins.allow).toEqual(['other-plugin', EXTRA, path.join(ext, EXTRA, 'index.js')]);
+    expect(cfg.plugins.entries).toEqual({ [EXTRA]: { enabled: true } });
+    expect(cfg.plugins.load.paths).toEqual([extraDir, vendorSameName, '/abs/other-plugin']);
+    expect(fs.existsSync(path.join(extraDir, 'package.json'))).toBe(true);
+  });
+});
+
+describe('#1115 r4 a plugin-level refusal comes before any OpenClaw hook, skill, or config write', () => {
+  function plantLinkedFixture() {
+    const checkout = path.join(home, 'checkout');
+    fs.mkdirSync(checkout, { recursive: true });
+    fs.writeFileSync(path.join(checkout, 'package.json'), JSON.stringify({ name: PKG, version: '5.22.1' }));
+    const hook = path.join(home, '.openclaw', 'hooks', 'cortex-memory');
+    fs.mkdirSync(hook, { recursive: true });
+    fs.writeFileSync(path.join(hook, 'marker'), 'keep');
+    const skill = path.join(home, '.openclaw', 'workspace', 'skills', 'shieldcortex');
+    fs.mkdirSync(skill, { recursive: true });
+    fs.writeFileSync(path.join(skill, 'SKILL.md'), '---\nname: shieldcortex\n---\nkeep\n');
+    const configFile = path.join(home, '.openclaw', 'openclaw.json');
+    const configBefore = JSON.stringify({
+      plugins: { allow: [ID], entries: { [ID]: { enabled: true } }, load: { paths: [checkout] } },
+      hooks: { shieldcortex: { enabled: true } },
+    }, null, 2) + '\n';
+    fs.writeFileSync(configFile, configBefore);
+    const lockFile = path.join(home, '.openclaw', 'workspace', '.clawhub', 'lock.json');
+    fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+    const lockBefore = JSON.stringify({ skills: { shieldcortex: { version: '5.22.1' } } }, null, 2) + '\n';
+    fs.writeFileSync(lockFile, lockBefore);
+    return { hook, skill, configFile, configBefore, lockFile, lockBefore };
+  }
+
+  it('openclaw uninstall refuses a linked install before removing hooks or skills', async () => {
+    const f = plantLinkedFixture();
+
+    const result = await uninstallOpenClawHook();
+
+    expect(result.status).toBe('refused');
+    expect(result.detail).toMatch(/linked/);
+    expect(process.exitCode).toBe(1);
+    expect(fs.readFileSync(path.join(f.hook, 'marker'), 'utf-8')).toBe('keep');
+    expect(fs.existsSync(path.join(f.skill, 'SKILL.md'))).toBe(true);
+    expect(fs.readFileSync(f.configFile, 'utf-8')).toBe(f.configBefore);
+    expect(logSpy).not.toHaveBeenCalledWith(expect.stringMatching(/Removed cortex-memory hook/));
+  });
+
+  it('deep clean refuses a linked install before hook, config, or workspace-lock writes', async () => {
+    const f = plantLinkedFixture();
+    const restart = restartMock();
+
+    const out = await runDeepClean({ restartGateway: true, restart: restart as never });
+
+    expect(out.pluginRemoval.status).toBe('refused');
+    expect(out.result.removed).toEqual([]);
+    expect(restart).not.toHaveBeenCalled();
+    expect(fs.readFileSync(path.join(f.hook, 'marker'), 'utf-8')).toBe('keep');
+    expect(fs.readFileSync(f.configFile, 'utf-8')).toBe(f.configBefore);
+    expect(fs.readFileSync(f.lockFile, 'utf-8')).toBe(f.lockBefore);
+  });
+
+  it('deep clean handed a refused plugin result does not clean hook residue', async () => {
+    const hook = path.join(home, '.openclaw', 'hooks', 'cortex-memory');
+    fs.mkdirSync(hook, { recursive: true });
+    fs.writeFileSync(path.join(hook, 'marker'), 'keep');
+
+    const out = await runDeepClean({ pluginRemoval: { status: 'refused', detail: 'linked install' } });
+
+    expect(out.pluginRemoval.status).toBe('refused');
+    expect(out.result.removed).toEqual([]);
+    expect(fs.readFileSync(path.join(hook, 'marker'), 'utf-8')).toBe('keep');
+  });
+
+  it('a dry run with a refused plan reports the refusal and lists nothing', async () => {
+    const f = plantLinkedFixture();
+
+    const out = await runDeepClean({ dryRun: true });
+
+    expect(out.pluginRemoval.status).toBe('refused');
+    expect(out.result.removed).toEqual([]);
+    expect(fs.readFileSync(path.join(f.hook, 'marker'), 'utf-8')).toBe('keep');
+  });
+});
