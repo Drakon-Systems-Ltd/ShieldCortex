@@ -147,10 +147,35 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     expect(r.status).toBe('pass');
   });
 
-  it('the recorded directory is GONE and nothing else is on disk: FAILS, never "installed and enabled"', async () => {
-    migrated(pkgDir());
-    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
-    expect(r.status).toBe('fail');
+  // #260 r3: unproven, not uninstalled — a warn that says what was seen, in
+  // plain words, and does not borrow the boot-record copy.
+  const expectStalePathWarn = (r: { status: string; message: string; fix?: string }): void => {
+    expect(r.status).toBe('warn');
     expect(r.message).not.toMatch(/installed and enabled/i);
+    expect(r.message).toMatch(/points to a folder that is no longer there/);
+    expect(r.message).not.toMatch(/start-up|sqlite|config_machine_state|roster|index/i);
+    expect(r.fix ?? '').not.toMatch(/repair/i);
+  };
+
+  it('the recorded directory is GONE and nothing else is on disk: WARNS, never "installed and enabled", never a fail', async () => {
+    migrated(pkgDir());
+    expectStalePathWarn(await checkOpenClawPluginLoadState(home, '5.22.1'));
+  });
+
+  it('an EMPTY directory left at the recorded path is not an install: warns, does not pass', async () => {
+    fs.mkdirSync(pkgDir(), { recursive: true });
+    migrated(pkgDir());
+    expectStalePathWarn(await checkOpenClawPluginLoadState(home, '5.22.1'));
+  });
+
+  it('a real extension copy with dist/index.js (no root index.js) beside the stale record is not reported uninstalled', async () => {
+    migrated(pkgDir());
+    const ext = path.join(home, '.openclaw', 'extensions', PLUGIN);
+    fs.mkdirSync(path.join(ext, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(ext, 'dist', 'index.js'), '');
+    fs.writeFileSync(path.join(ext, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expect(r.status).not.toBe('fail');
+    expect(r.status).not.toBe('pass');
   });
 });

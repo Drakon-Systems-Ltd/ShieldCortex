@@ -263,7 +263,30 @@ describe('#260 r2 — install-index ENTRIES are validated, not just their contai
     ['a null plugins entry', { installRecords: {}, plugins: [null] }],
     ['a plugins entry with no pluginId', { installRecords: {}, plugins: [{ enabled: true }] }],
     ['a plugins entry with a non-string pluginId', { installRecords: {}, plugins: [{ pluginId: 7 }] }],
+    // #260 r3: a field we select on, present with the wrong type (OpenClaw's
+    // record schema is string().optional() for each).
+    ['a numeric installPath', { installRecords: { [PLUGIN]: { source: 'npm', installPath: 37, version: '6.0.0' } }, plugins: [] }],
+    ['a null installPath', { installRecords: { [PLUGIN]: { source: 'npm', installPath: null } }, plugins: [] }],
+    ['an object version', { installRecords: { [PLUGIN]: { source: 'npm', version: { major: 6 } } }, plugins: [] }],
+    ['a numeric resolvedVersion', { installRecords: { [PLUGIN]: { source: 'npm', resolvedVersion: 6 } }, plugins: [] }],
+    ['a numeric source', { installRecords: { [PLUGIN]: { source: 1, version: '6.0.0' } }, plugins: [] }],
+    ['a null source', { installRecords: { [PLUGIN]: { source: null } }, plugins: [] }],
+    ['an array sourcePath', { installRecords: { [PLUGIN]: { source: 'path', sourcePath: ['/x'] } }, plugins: [] }],
+    ['a bad field on ANOTHER plugin\'s record', { installRecords: { [PLUGIN]: { source: 'npm' }, other: { source: 'npm', installPath: 37 } }, plugins: [] }],
   ];
+
+  it('string-typed and absent record fields stay readable', () => {
+    writeMachineStateIndex({
+      installRecords: {
+        [PLUGIN]: { source: 'npm', installPath: '/x', version: '5.22.1', resolvedVersion: '5.22.1' },
+        bare: {},
+        linked: { source: 'path', sourcePath: '/y', somethingElse: 3 },
+      },
+      plugins: [],
+    });
+    expect(readPluginInstallIndexState(home).state).toBe('ok');
+    expect(readPluginInstallIndex(home)).not.toBeNull();
+  });
 
   it.each(BAD_ENTRIES)('new layout: %s ⇒ null / unreadable (never ok, never absent)', (_label, row) => {
     writeMachineStateIndex(row);
@@ -312,17 +335,70 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
   it.each([
     ['config_machine_state', (): void => writeMachineStateIndex(staleRow())],
     ['legacy table', (): void => writeIndex(staleRow())],
-  ])('%s: config enabled, no live roster, recorded path gone, no other build ⇒ enabled-not-installed / fail', (_label, write) => {
+  ])('%s: config enabled, no live roster, recorded path gone, no other build ⇒ load-unproven / warn (never healthy, never a fail)', (_label, write) => {
     writeConfig(true, true);
     write();
     const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
     expect(input.index!.installRecords[PLUGIN]?.installPath).toBe(gone());
     expect(input.indexInstallPathExists).toBe(false);
     const verdict = reconcilePluginState(input);
-    expect(verdict.state).toBe('enabled-not-installed');
-    expect(verdict.severity).toBe('fail');
-    expect(verdict.recommendedAction).toBe('install');
+    expect(verdict.state).toBe('load-unproven');
+    expect(verdict.severity).toBe('warn');
+    expect(verdict.recommendedAction).toBe('none');
+    expect(verdict.indexPathMissing).toBe(true);
     expect(verdict.reasons.join(' ')).toContain(gone());
+  });
+
+  // #260 r3 (Astra r2 blocker): a real copy in a layout this gather does not
+  // read — the packaged extension layout with dist/index.js and no root
+  // index.js. The stale record must not convict it as uninstalled.
+  it('stale path + a real extension copy with dist/index.js (no root index.js) ⇒ not a fail', () => {
+    writeConfig(true, true);
+    writeMachineStateIndex(staleRow());
+    const ext = path.join(home, '.openclaw', 'extensions', PLUGIN);
+    fs.mkdirSync(path.join(ext, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(ext, 'dist', 'index.js'), '');
+    fs.writeFileSync(path.join(ext, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
+    expect(input.indexInstallPathExists).toBe(false);
+    const verdict = reconcilePluginState(input);
+    expect(verdict.severity).not.toBe('fail');
+    expect(verdict.state).not.toBe('enabled-not-installed');
+    expect(verdict.state).not.toBe('healthy');
+  });
+
+  // #260 r3: an EMPTY directory left at the recorded path is not an install.
+  it('stale path + an empty directory at the recorded path ⇒ missing ⇒ warn, not healthy', () => {
+    writeConfig(true, true);
+    writeMachineStateIndex(staleRow());
+    fs.mkdirSync(gone(), { recursive: true });
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
+    expect(input.indexInstallPathExists).toBe(false);
+    expect(reconcilePluginState(input)).toMatchObject({ state: 'load-unproven', severity: 'warn', indexPathMissing: true });
+  });
+
+  it.each(['package.json', 'openclaw.plugin.json'])('a recorded directory holding %s counts as there', (marker) => {
+    writeConfig(true, true);
+    writeMachineStateIndex(staleRow());
+    fs.mkdirSync(gone(), { recursive: true });
+    fs.writeFileSync(path.join(gone(), marker), '{}');
+    expect(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null }).indexInstallPathExists).toBe(true);
+  });
+
+  // #260 r3 (C): the roster proves it loaded, not which version loaded.
+  it('path gone + live roster names the plugin + stale record 4.0.0 ⇒ not version-regressed', () => {
+    writeConfig(true, true);
+    writeMachineStateIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '4.0.0', installPath: gone() } },
+      plugins: [{ pluginId: PLUGIN, enabled: true }],
+    });
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => [PLUGIN] });
+    expect(input.indexInstallPathExists).toBe(false);
+    expect(input.onDiskVersion).toBeNull();
+    const verdict = reconcilePluginState(input);
+    expect(verdict.state).not.toBe('version-regressed');
+    expect(verdict.state).not.toBe('enabled-not-installed');
+    expect(verdict.severity).not.toBe('fail');
   });
 
   it('the stale record beside a real build elsewhere: the build decides (version from disk, not the record)', () => {

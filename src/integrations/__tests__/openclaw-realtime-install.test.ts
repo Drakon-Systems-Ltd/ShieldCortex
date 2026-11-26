@@ -179,6 +179,13 @@ describe('readLinkedRealtimeInstall — identity from what is at the path', () =
   it.each([
     ['a null realtime install record', { installRecords: { [ID]: null }, plugins: [] }],
     ['a null plugins entry', { installRecords: {}, plugins: [null] }],
+    // #260 r3: an object record, with a field we select on mistyped. Read as
+    // `ok` it names no path ⇒ `none` ⇒ replacing a 6.0.0 install is allowed.
+    ['a realtime record with a numeric installPath', { installRecords: { [ID]: { source: 'npm', installPath: 37, version: '6.0.0' } }, plugins: [] }],
+    ['a realtime record with a null version', { installRecords: { [ID]: { source: 'npm', version: null } }, plugins: [] }],
+    ['a realtime record with a numeric resolvedVersion', { installRecords: { [ID]: { source: 'npm', resolvedVersion: 6 } }, plugins: [] }],
+    ['a realtime record with an object source', { installRecords: { [ID]: { source: {}, version: '6.0.0' } }, plugins: [] }],
+    ['a realtime record with a numeric sourcePath', { installRecords: { [ID]: { source: 'path', sourcePath: 1 } }, plugins: [] }],
   ])('#260 r2: %s ⇒ unreadable ⇒ selected unknown ⇒ the forced replacement is REFUSED', (_label, idx) => {
     writeMigratedStateDb(JSON.stringify({ revision: 7, index: { version: 1, generatedAtMs: 7, diagnostics: [], ...idx } }));
     expect(readPluginInstallIndexState(home).state).toBe('unreadable');

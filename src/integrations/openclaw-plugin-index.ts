@@ -253,6 +253,13 @@ export interface ReconcileVerdict {
   installsJsonVersion: string | null;
   onDiskVersion: string | null;
   expectedVersion: string;
+  /**
+   * This verdict is `load-unproven` BECAUSE the install index records the
+   * plugin at a path that is gone and no other build was found (#260). False
+   * (or absent, on hand-built verdicts) on every other verdict, including
+   * other `load-unproven` ones.
+   */
+  indexPathMissing?: boolean;
   reasons: string[];
 }
 
@@ -327,8 +334,8 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // A running gateway that provably loaded the plugin outranks a stale path:
   // the build is somewhere we did not look, and "no package installed" would
   // be a false FAIL on a protected box.
-  const indexPathMissing =
-    Boolean(indexRecord) && input.indexInstallPathExists === false && loadedInLiveRoster !== true;
+  const indexPathGone = Boolean(indexRecord) && input.indexInstallPathExists === false;
+  const indexPathMissing = indexPathGone && loadedInLiveRoster !== true;
   const installed = Boolean(
     onDiskVersion ||
       input.onDiskInstallPath ||
@@ -353,8 +360,10 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   const metadataConflict = pathConflict || versionLayerConflict;
 
   // Effective running version: on-disk is ground truth, else the index record.
-  // A record whose directory is gone says nothing about what would run.
-  const effective = coerce(onDiskVersion) ?? (indexPathMissing ? null : coerce(indexVersion));
+  // A record whose directory is gone says nothing about what would run — not
+  // even when the live roster names the plugin: that proves it loaded, not
+  // which version loaded.
+  const effective = coerce(onDiskVersion) ?? (indexPathGone ? null : coerce(indexVersion));
   const expected = coerce(expectedVersion);
   const regressed = Boolean(effective && expected && semver.lt(effective, expected));
 
@@ -378,6 +387,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     installsJsonVersion,
     onDiskVersion,
     expectedVersion,
+    indexPathMissing: false,
   };
 
   // ── Priority order: most severe first ────────────────────────────────────
@@ -405,10 +415,16 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     //     code returned not-installed/ok here and doctor printed
     //     "skipped (realtime plugin not installed)" over exactly that.
     if (enabledInConfig) {
+      // #260: the index still records an install, at a path that is gone, and
+      // nothing was found where we look. That is not proof of absence — the
+      // build may sit in a layout or a configured load path this gather does
+      // not read — so it can neither pass nor convict. Unproven, warn.
+      if (indexPathMissing) {
+        reasons.push(`OpenClaw's install index records the plugin at ${indexRecord?.installPath}, which is gone; no other build was found where ShieldCortex looks — it may be installed elsewhere; load state is unproven`);
+        return { ...base, indexPathMissing: true, state: 'load-unproven', severity: 'warn', recommendedAction: 'none', reasons };
+      }
       reasons.push(
-        indexPathMissing
-          ? `openclaw.json ENABLES the realtime plugin but no package is installed on this host: OpenClaw's install index still records it at ${indexRecord?.installPath}, that directory is gone, and there is no other on-disk build — the gateway boots WITHOUT the interceptor while config reports it ON`
-          : 'openclaw.json ENABLES the realtime plugin but no package is installed on this host (no installs.json record, no index record, no on-disk build) — the gateway boots WITHOUT the interceptor while config reports it ON',
+        'openclaw.json ENABLES the realtime plugin but no package is installed on this host (no installs.json record, no index record, no on-disk build) — the gateway boots WITHOUT the interceptor while config reports it ON',
       );
       return { ...base, state: 'enabled-not-installed', severity: 'fail', recommendedAction: 'install', reasons };
     }
@@ -829,6 +845,14 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && !Array.isArray(v);
 
 /**
+ * The install-record fields our readers select a copy or a version from. Each
+ * is `string().optional()` in OpenClaw's own record schema (`source` is a
+ * string enum there), so a present non-string value is a record OpenClaw
+ * itself refuses — and a record we would otherwise read as "names no path".
+ */
+const INSTALL_RECORD_STRING_FIELDS = ['source', 'sourcePath', 'installPath', 'version', 'resolvedVersion'] as const;
+
+/**
  * The one shape check both readers and both layouts go through. Like OpenClaw
  * (`parsePluginInstallRecordMap`), ONE bad entry rejects the whole index: a
  * null record for a plugin is a record we could not read, not "no record".
@@ -838,6 +862,11 @@ function indexShapeFault(installRecords: unknown, plugins: unknown): string | nu
   if (!isPlainObject(installRecords) || !Array.isArray(plugins)) return 'the install index row has an unexpected shape';
   for (const [id, record] of Object.entries(installRecords)) {
     if (!isPlainObject(record)) return `the install record for ${JSON.stringify(id)} is not an object`;
+    for (const field of INSTALL_RECORD_STRING_FIELDS) {
+      if (record[field] !== undefined && typeof record[field] !== 'string') {
+        return `the install record for ${JSON.stringify(id)} has a non-string ${field}`;
+      }
+    }
   }
   if (!plugins.every((p) => isPlainObject(p) && typeof p.pluginId === 'string')) {
     return 'a plugins entry is not an object with a string pluginId';
@@ -1044,20 +1073,26 @@ function readInstallsJsonRecord(home: string, pluginId: string): InstallsJsonRec
 }
 
 /**
- * Is the directory the index record names on disk? Only "it is not there"
+ * Is the install the index record names on disk? It is there when the recorded
+ * directory holds a package.json or an openclaw.plugin.json — an empty
+ * directory left at the path is not an install. Only "it is not there"
  * (ENOENT/ENOTDIR on an absolute path) is false; no record, a path we cannot
  * resolve, or a stat that failed some other way is null — not checked.
  */
 function indexInstallPathOnDisk(index: PluginIndexRow | null, pluginId: string): boolean | null {
   const p = index?.installRecords?.[pluginId]?.installPath;
   if (typeof p !== 'string' || !path.isAbsolute(p)) return null;
-  try {
-    fs.statSync(p);
-    return true;
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    return code === 'ENOENT' || code === 'ENOTDIR' ? false : null;
+  let unchecked = false;
+  for (const marker of ['package.json', 'openclaw.plugin.json']) {
+    try {
+      fs.statSync(path.join(p, marker));
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') unchecked = true;
+    }
   }
+  return unchecked ? null : false;
 }
 
 function scanProjectDirs(home: string, pluginId: string): string[] {

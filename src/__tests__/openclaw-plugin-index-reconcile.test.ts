@@ -168,14 +168,21 @@ describe('#260 r2 — malformed and stale index input', () => {
 
   it('the recorded path is confirmed MISSING and nothing is on disk: never healthy', () => {
     const verdict = reconcilePluginState(base({ indexInstallPathExists: false }));
-    expect(verdict).toMatchObject({ state: 'enabled-not-installed', severity: 'fail', recommendedAction: 'install' });
+    expect(verdict).toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: true });
+    expect(verdict.reasons.join(' ')).toMatch(/records the plugin at \/gone, which is gone/);
+  });
+
+  it('indexPathMissing is false on every other verdict, including the other load-unproven ones', () => {
+    expect(reconcilePluginState(base()).indexPathMissing).toBe(false);
+    const rosterRace = reconcilePluginState(base({ liveRoster: [], registrationSeenAfterBoot: true }));
+    expect(rosterRace).toMatchObject({ state: 'load-unproven', indexPathMissing: false });
   });
 
   it('…and a paper installs.json record cannot vouch for it either', () => {
     const verdict = reconcilePluginState(
       base({ indexInstallPathExists: false, installsJson: { version: '5.22.1', installPath: '/gone' } }),
     );
-    expect(verdict).toMatchObject({ state: 'enabled-not-installed', severity: 'fail' });
+    expect(verdict).toMatchObject({ state: 'load-unproven', severity: 'warn', indexPathMissing: true });
   });
 
   it('…but a running gateway that provably loaded it is not convicted as uninstalled', () => {
@@ -184,6 +191,17 @@ describe('#260 r2 — malformed and stale index input', () => {
     );
     expect(verdict.state).not.toBe('enabled-not-installed');
     expect(verdict.severity).not.toBe('fail');
+    expect(verdict.indexPathMissing).toBe(false);
+  });
+
+  it('…and the missing copy\'s recorded version is never the running version, live roster or not (#260 r3)', () => {
+    const input = base({ indexInstallPathExists: false, liveRoster: ['shieldcortex-realtime'], liveLoadEvidence: 'boot-roster' });
+    input.index!.installRecords['shieldcortex-realtime'].version = '4.0.0';
+    const verdict = reconcilePluginState(input);
+    expect(verdict.state).not.toBe('version-regressed');
+    expect(verdict.severity).not.toBe('fail');
+    // Control: with the path present, the same record IS a regression.
+    expect(reconcilePluginState({ ...input, indexInstallPathExists: true }).state).toBe('version-regressed');
   });
 
   it('…not enabled in config either: plainly not installed, not the #222 wipe', () => {

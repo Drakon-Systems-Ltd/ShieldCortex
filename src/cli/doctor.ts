@@ -9192,6 +9192,19 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       // registration line was sighted after the snapshot. Neither loaded nor
       // absent can be proven from logs — a confident UNPROTECTED here is the
       // false alarm that trains operators to ignore the check that caught #74.
+      if (verdict.indexPathMissing) {
+        // #260: a different cause — OpenClaw's record points at a folder that
+        // is gone and we found no other copy. Not a pass, not a conviction.
+        return {
+          label,
+          status: 'warn',
+          message:
+            'couldn\'t confirm the realtime plugin is installed — OpenClaw\'s record of it points to a folder that is no longer there, ' +
+            'and no other copy was found in the usual places. It may be installed somewhere else. Neither OK nor a fault is confirmed',
+          fix: 'Check it: `shieldcortex openclaw status`',
+          verboseNote: `Prove enforcement live: ${LIVE_CANARY_COMMAND}`,
+        };
+      }
       return {
         label,
         status: 'warn',
