@@ -450,24 +450,61 @@ const CROSS_LINE_FENCE = '```';
 const CROSS_LINE_QUOTE = '"';
 
 /**
+ * `body` inside a closed bare fence, as a file that already holds a fence
+ * around it would show it. Nothing sits above the fence and it has no info
+ * string, and a filler line `.` goes above `body` for each line of it that
+ * starts with a space or tab, plus one, so the screen never reads the body
+ * as indented code. The screen therefore treats the fence as NOT a masked
+ * code block: it blanks the comment markers at its line starts and reads no
+ * quote, backtick or fence span inside it. With `close` false the fence is
+ * left for `body` to close (a line that holds a fence of its own).
+ */
+function inBareFence(body: string, close: boolean): string {
+  const indented = foldForProvenance(body).split('\n').filter((l) => /^[ \t]/.test(l)).length;
+  const filler = indented > 0 ? '.\n'.repeat(indented + 1) : '';
+  return `${CROSS_LINE_FENCE}\n${filler}${body}${close ? `\n${CROSS_LINE_FENCE}` : ''}`;
+}
+
+/**
  * What the sink screens for an `apply_patch` to memory markdown: a list of
  * texts, each screened on its own (null when no header names memory
  * markdown). A patch does not show the file around the lines it adds, and
- * the screen exempts a directive by its context (a closed fence or double
- * quote a cue introduces, a cue on the line above a fence), so no unit may
- * borrow context from text the file does not hold next to it:
+ * the screen reads context in both directions:
+ *   - it EXEMPTS a directive by its context: a masked fence (an info string,
+ *     a cue on the fence line or the line above, an indented body), or a
+ *     closed fence or double quote a cue introduces;
+ *   - it ADDS detections by its context: inside a closed fence it does not
+ *     mask, it blanks a line-leading comment marker (`#`, `//`, `<!--`, ...),
+ *     so "# <directive>" is quiet alone and a directive there; and inside an
+ *     enclosing fence or double quote it reads no span of the line's own, so
+ *     a backtick or single-quote example on the line loses its exemption.
+ * So no unit may borrow an exemption from text the file does not hold next
+ * to it, and each line is also shown in the enclosures the file may hold
+ * around it:
  *   (a) each memory file section's added lines, on their own (never joined
  *       across sections or files);
  *   (b) each added line that carries a fence or a double quote, on its own,
- *       and again behind an open double quote or an open fence (the file
- *       above it may hold either, which pairs its delimiters the other way);
+ *       and again behind an open double quote and inside an open bare fence
+ *       (the file above it may hold either, which pairs its delimiters the
+ *       other way); a line with a double quote but no fence also inside a
+ *       closed bare fence, and a line with a fence but no double quote also
+ *       inside a closed double quote (each enclosure that hides its own
+ *       delimiters);
  *   (c) each stretch of the other lines of one run (lines Codex writes next
- *       to each other), split at every line of (b): no span the screen reads
- *       crosses such a stretch, so it holds no context the file lacks.
+ *       to each other), split at every line of (b), on its own and inside a
+ *       closed bare fence. No fence or double quote pairs across such a
+ *       stretch, so its lines share one enclosure in the file: none, a fence
+ *       or a double quote. The bare fence shows the last two (a double quote
+ *       hides the same spans and blanks no marker).
  * Screening more units can only add holds. Identical units are screened once.
  * Past the screen's bounds (`MEMORY_SCREEN_MAX_CHARS` of added text, or more
  * than `MEMORY_SCREEN_MAX_LEAVES` units) the list is cut short; the call is
  * then held as too large to screen, never allowed on part of it.
+ * Not covered (the text is not in the patch): a directive the file already
+ * holds that added or removed lines unmask (lines that outvote an indented
+ * fence body, a removed cue line), one the screen finds only where its
+ * 50 000-character scan window cuts a larger file, and one it would find
+ * only across the line break between an added line and a file line.
  */
 export function patchMemoryScreenUnits(
   normalisedName: string,
@@ -485,6 +522,12 @@ export function patchMemoryScreenUnits(
   };
   // Already past what `screenMemoryWrite` reads: it holds on these alone.
   const full = (): boolean => chars > MEMORY_SCREEN_MAX_CHARS || units.size > MEMORY_SCREEN_MAX_LEAVES;
+  const addStretch = (stretch: string[]): void => {
+    if (stretch.length === 0) return;
+    const text = stretch.join('\n');
+    add(text);
+    add(inBareFence(text, true));
+  };
   for (const runs of sections) add(runs.flat().join('\n'));
   for (const runs of sections) {
     for (const run of runs) {
@@ -495,13 +538,14 @@ export function patchMemoryScreenUnits(
         const fence = folded.includes(CROSS_LINE_FENCE);
         const quote = folded.includes(CROSS_LINE_QUOTE);
         if (!fence && !quote) { stretch.push(line); continue; }
-        add(stretch.join('\n'));
+        addStretch(stretch);
         stretch = [];
         add(line);
         if (quote) add(`${CROSS_LINE_QUOTE}${line}`);
-        if (fence) add(`${CROSS_LINE_FENCE}\n${line}`);
+        add(inBareFence(line, !fence));
+        if (fence && !quote) add(`${CROSS_LINE_QUOTE}\n${line}\n${CROSS_LINE_QUOTE}`);
       }
-      add(stretch.join('\n'));
+      addStretch(stretch);
     }
   }
   return [...units];
