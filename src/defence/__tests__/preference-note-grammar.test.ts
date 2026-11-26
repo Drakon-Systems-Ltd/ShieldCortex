@@ -157,6 +157,30 @@ describe('G — boundary details', () => {
     expect(isClosedPreferenceNote('When the user asks for a list, keep it to 1.5 lines.')).toBe(false);
   });
 
+  it('a count must admit a non-empty answer: no zero, no leading zero, no "under" one (review r2 SF1)', () => {
+    const t2 = (action: string): string => `When the user asks for a translation, ${action}.`;
+    // The brief's literal rows. "sentence" / "line" are singular, which G's
+    // unit list does not contain, so each is also checked in plural below.
+    for (const action of [
+      'keep it to 0 words', 'keep it to 00 words', 'keep it to 05 words',
+      'keep it under one sentence', 'keep it under 1 line',
+      // Plural units, so only the count can be what fails.
+      'keep it to 0 sentences', 'keep it within 0 lines', 'keep it under 0 words',
+      'keep it to 00 lines', 'keep it within 00 words', 'keep it under 00 bullets',
+      'keep it to 01 paragraphs', 'keep it within 09 lines', 'keep it under 05 words',
+      'keep it under one sentences', 'keep it under 1 lines', 'keep it under one bullet points',
+      'keep it under 1 words',
+    ]) {
+      expect([action, isClosedPreferenceNote(t2(action))]).toEqual([action, false]);
+    }
+    for (const action of [
+      'keep it to 1 sentences', 'keep it to one sentences', 'keep it within one paragraphs', 'keep it within 1 lines',
+      'keep it under two sentences', 'keep it under 2 lines', 'keep it under 10 words', 'keep it to 99 words',
+    ]) {
+      expect([action, isClosedPreferenceNote(t2(action))]).toEqual([action, true]);
+    }
+  });
+
   it('a style from the T1 list is the only thing T2 "reply in" accepts', () => {
     expect(isClosedPreferenceNote('When the user asks for a summary, reply in Irish English.')).toBe(true);
     expect(isClosedPreferenceNote('When the user asks for a summary, reply in JSON.')).toBe(false);

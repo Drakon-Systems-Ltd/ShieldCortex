@@ -20,6 +20,7 @@ import type {
 } from '../../scripts/lib/recall-defence.mjs';
 import { defendRecallRows } from '../../scripts/lib/recall-defence.mjs';
 import { sanitiseInput } from '../defence/input-sanitisation/index.js';
+import { detectInstructions } from '../defence/firewall/instruction-detector.js';
 import { filterByTrust } from '../defence/trust/recall-filter.js';
 
 type SanitiseDep = NonNullable<RecallDefenceModules['sanitiseInput']>;
@@ -64,6 +65,15 @@ const widenedContent: string = filteredLiteral[0].content;
 const keptLiteral: 'original' = filteredLiteral[0].content;
 void widenedContent;
 void keptLiteral;
+
+// SCN-010 part C: the shim's primary whole-row scan opts the stored row in to
+// the closed preference grammar with a second argument, so the declared
+// dependency must accept it (TS2554 otherwise), and the real detector fits.
+type InstructionsDep = RecallDefenceModules['detectInstructions'];
+const realInstructions: InstructionsDep = detectInstructions;
+const wholeRowCall = (dep: InstructionsDep) => dep('stored row', { wholeUnit: { received: 'stored row' } });
+void realInstructions;
+void wholeRowCall;
 
 function makeDeps(): RecallDefenceModules {
   return {
@@ -110,6 +120,23 @@ describe('recall-defence declarations match the runtime (#541)', () => {
     const { kept, actions } = defendRecallRows(rows, { minTrust: 0 }, makeDeps());
     expect(kept).toHaveLength(0);
     expect(actions[0]).toMatchObject({ id: 7, action: 'dropped', layer: 'instruction' });
+  });
+
+  it('the primary whole-row scan passes the stored row as the whole unit; decoded snippets pass nothing', () => {
+    const calls: unknown[][] = [];
+    const deps: RecallDefenceModules = {
+      ...makeDeps(),
+      detectInstructions: (...args: Parameters<InstructionsDep>) => {
+        calls.push(args);
+        return { detected: false, patterns: [] };
+      },
+      detectEncoding: () => ({ detected: true, decodedSnippets: ['decoded excerpt'], encodingTypes: ['base64'] }),
+    };
+    defendRecallRows([{ id: 9, content: 'stored\u200B row', trust_score: 1 }], { minTrust: 0 }, deps);
+    expect(calls).toEqual([
+      ['stored row', { wholeUnit: { received: 'stored\u200B row' } }],
+      ['decoded excerpt'],
+    ]);
   });
 
   it('a RESTRICTED row is redacted by the trust layer and still typed as a defended row', () => {
