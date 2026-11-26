@@ -6,7 +6,8 @@ import semver from 'semver';
  * Reading the OpenClaw realtime plugin's *actually-installed* version.
  *
  * OpenClaw 2026.6.1 moved authoritative plugin state into a SQLite index
- * (`~/.openclaw/state/openclaw.sqlite` → `installed_plugin_index`) and stopped
+ * (`~/.openclaw/state/openclaw.sqlite` → `installed_plugin_index`, moved to a
+ * `config_machine_state` row in 2026.11.x) and stopped
  * updating the legacy `~/.openclaw/plugins/installs.json` `version` field. So
  * after `openclaw plugins install @latest` bumps the plugin on disk, that
  * registry field goes stale — which made `shieldcortex doctor`/`update` (both

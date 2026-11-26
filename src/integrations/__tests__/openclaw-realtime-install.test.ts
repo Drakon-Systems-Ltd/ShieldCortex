@@ -15,6 +15,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import Database from 'better-sqlite3';
 import {
   readLinkedRealtimeInstall,
   readRealtimeReplacementEvidence,
@@ -128,6 +129,48 @@ describe('readLinkedRealtimeInstall — identity from what is at the path', () =
 
   it('no DB file is absent, not unreadable', () => {
     expect(readPluginInstallIndexState(home)).toEqual({ state: 'absent' });
+  });
+
+  // #260: OpenClaw 2026.11.x moved the index into a config_machine_state row
+  // and dropped the old table. These use the REAL reader on a real fixture DB:
+  // "absent" here would let a forced install treat a recorded install as none.
+  const writeMigratedStateDb = (valueJson: string | null): void => {
+    const dir = path.join(home, '.openclaw', 'state');
+    fs.mkdirSync(dir, { recursive: true });
+    const db = new Database(path.join(dir, 'openclaw.sqlite'));
+    db.exec('CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)');
+    if (valueJson !== null) db.prepare("INSERT INTO config_machine_state VALUES ('plugins.installedIndex', ?, 1)").run(valueJson);
+    db.close();
+  };
+
+  it('#260: a migrated host (index in config_machine_state, no legacy table) is ok — and its record selects', () => {
+    const dir = writeRealtimeProject('drakon-systems-shieldcortex-realtime-abc', '5.22.1');
+    writeMigratedStateDb(JSON.stringify({
+      revision: 7,
+      index: {
+        version: 1, generatedAtMs: 7, diagnostics: [],
+        installRecords: { [ID]: { source: 'npm', version: '5.22.1', installPath: dir } },
+        plugins: [{ pluginId: ID, enabled: true, rootDir: dir }],
+      },
+    }));
+    const st = readPluginInstallIndexState(home);
+    expect(st.state).toBe('ok');
+    expect(st.state === 'ok' && st.row.installRecords[ID]?.version).toBe('5.22.1');
+    expect(readSelectedRealtimeInstall(home)).toMatchObject({ state: 'selected', version: '5.22.1' });
+  });
+
+  it('#260: a migrated state DB with no index row is absent', () => {
+    writeMigratedStateDb(null);
+    expect(readPluginInstallIndexState(home)).toEqual({ state: 'absent' });
+  });
+
+  it.each([
+    ['malformed JSON', '{"index": '],
+    ['the wrong shape', JSON.stringify({ revision: 1, index: { installRecords: [], plugins: 'x' } })],
+  ])('#260: a migrated index row with %s is unreadable ⇒ the selected copy is unknown', (_label, valueJson) => {
+    writeMigratedStateDb(valueJson);
+    expect(readPluginInstallIndexState(home).state).toBe('unreadable');
+    expect(readSelectedRealtimeInstall(home).state).toBe('unknown');
   });
 
   it('UNKNOWN when a load.paths entry\'s package.json cannot be parsed', () => {

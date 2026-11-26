@@ -17,8 +17,11 @@ import { REALTIME_PLUGIN_PACKAGE, exactPluginPin, realtimePluginInstallArgs } fr
 
 /**
  * Reconciling OpenClaw plugin-install state across its three authoritative
- * layers, and reading the new SQLite install index that OpenClaw 2026.6.1+
- * treats as ground truth.
+ * layers, and reading the SQLite install index that OpenClaw 2026.6.1+ treats
+ * as ground truth. The index lives in `~/.openclaw/state/openclaw.sqlite`: in
+ * the `installed_plugin_index` table up to 2026.10.x, and in the
+ * `config_machine_state` row `plugins.installedIndex` from 2026.11.x, whose
+ * migration drops the old table (#260). Both are read; the new row wins.
  *
  * Field incident #74 (aiquant, 2026-07-11): after a disable→enable→restart
  * cycle the realtime interceptor was `enabled:true` in config yet ABSENT from
@@ -38,7 +41,7 @@ export const REALTIME_PLUGIN_ID = 'shieldcortex-realtime';
 
 // ── Parsed shapes of the three layers ──────────────────────────────────────
 
-/** One entry from `installed_plugin_index.install_records_json`. */
+/** One entry from the install index's install records. */
 export interface IndexInstallRecord {
   source?: string;
   version?: string;
@@ -46,7 +49,7 @@ export interface IndexInstallRecord {
   installPath?: string;
 }
 
-/** One entry from `installed_plugin_index.plugins_json` — the LOADED roster. */
+/** One entry from the install index's plugin list. */
 export interface IndexPluginEntry {
   pluginId: string;
   enabled?: boolean;
@@ -54,7 +57,7 @@ export interface IndexPluginEntry {
   rootDir?: string;
 }
 
-/** The latest `installed_plugin_index` row, parsed. */
+/** The install index, parsed (from either SQLite layout). */
 export interface PluginIndexRow {
   installRecords: Record<string, IndexInstallRecord>;
   plugins: IndexPluginEntry[];
@@ -479,15 +482,15 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   }
 
   // 3. Cannot read the loaded roster (SQLite index unreadable): a broken
-  //    better-sqlite3 binding, a locked DB, or a pre-2026.6.1 OpenClaw with no
-  //    `installed_plugin_index` table all return a null index. We literally
+  //    better-sqlite3 binding, a locked DB, or an OpenClaw state DB holding
+  //    the index in neither layout we know all return a null index. We literally
   //    cannot know whether the plugin is loaded — reporting the #74 fail-open
   //    here would be a FALSE "UNPROTECTED" on a healthy box (the very binding
   //    fault repair pass-1 exists to fix). Classify as a diagnostic gap (warn),
   //    NEVER as a security fail-open. Only reached when enabled + installed but
   //    the index is unreadable; a genuinely uninstalled plugin fell out at (1).
   if (enabledInConfig && !loadedInIndex && index == null && loadedInLiveRoster !== true) {
-    reasons.push('cannot read the loaded roster — the SQLite plugin install index is unreadable (broken better-sqlite3 binding, locked DB, or pre-2026.6.1 OpenClaw with no installed_plugin_index table); cannot confirm whether the interceptor is loaded');
+    reasons.push('cannot read the loaded roster — the SQLite plugin install index is unreadable (broken better-sqlite3 binding, locked DB, or an OpenClaw state DB that holds no install index in a layout this version knows); cannot confirm whether the interceptor is loaded');
     return { ...base, state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
   }
 
@@ -695,20 +698,108 @@ function openClawSqlitePath(home: string): string {
   return path.join(home, '.openclaw', 'state', 'openclaw.sqlite');
 }
 
-function safeParse<T>(json: string | null | undefined, fallback: T): T {
-  if (!json || typeof json !== 'string') return fallback;
-  try {
-    return JSON.parse(json) as T;
-  } catch {
-    return fallback;
-  }
+/** Where OpenClaw keeps the install index inside `openclaw.sqlite`. */
+const MACHINE_STATE_TABLE = 'config_machine_state';
+const MACHINE_STATE_INDEX_KEY = 'plugins.installedIndex';
+const LEGACY_INDEX_TABLE = 'installed_plugin_index';
+
+/**
+ * The install index row as found, before either reader decides what a bad one
+ * means. `jsonValid` is false when the stored JSON did not parse; a field that
+ * could not be parsed is `undefined`.
+ */
+interface LocatedIndexRow {
+  layout: 'machine-state' | 'legacy';
+  jsonValid: boolean;
+  installRecords: unknown;
+  plugins: unknown;
+  warning: string | null;
+  generatedAtMs: number | undefined;
+}
+
+function tableExists(db: import('better-sqlite3').Database, name: string): boolean {
+  return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
 }
 
 /**
- * Read the latest `installed_plugin_index` row from OpenClaw's shared SQLite
- * state and parse the JSON columns we reconcile against. Opens READ-ONLY and
- * best-effort — returns null if the DB, table, or better-sqlite3 is unavailable
- * so callers degrade to the installs.json/on-disk layers rather than throwing.
+ * Find the install index in an open (read-only) OpenClaw state DB — the one
+ * place that knows both layouts, so the two public readers cannot disagree on
+ * where the index lives.
+ *
+ * OpenClaw 2026.11.x migrates the `installed_plugin_index` table into a
+ * `config_machine_state` row (`plugins.installedIndex`, JSON `{ revision,
+ * index }`) and DROPS the old table. A reader that only knows the old table
+ * sees a healthy migrated host as "no index" (#260). The new row wins when both
+ * exist, because that is the one current OpenClaw reads.
+ *
+ * Returns null when neither layout holds a row. Throws only what SQLite throws.
+ */
+function locateInstallIndexRow(db: import('better-sqlite3').Database): LocatedIndexRow | null {
+  if (tableExists(db, MACHINE_STATE_TABLE)) {
+    const row = db
+      .prepare(`SELECT value_json FROM ${MACHINE_STATE_TABLE} WHERE state_key = ?`)
+      .get(MACHINE_STATE_INDEX_KEY) as { value_json: unknown } | undefined;
+    if (row) {
+      let value: unknown;
+      try {
+        value = JSON.parse(String(row.value_json));
+      } catch {
+        return { layout: 'machine-state', jsonValid: false, installRecords: undefined, plugins: undefined, warning: null, generatedAtMs: undefined };
+      }
+      const index =
+        value && typeof value === 'object' && !Array.isArray(value)
+          ? (value as { index?: unknown }).index
+          : undefined;
+      const idx = (index && typeof index === 'object' && !Array.isArray(index) ? index : {}) as Record<string, unknown>;
+      return {
+        layout: 'machine-state',
+        jsonValid: true,
+        installRecords: idx.installRecords,
+        plugins: idx.plugins,
+        warning: typeof idx.warning === 'string' ? idx.warning : null,
+        generatedAtMs: typeof idx.generatedAtMs === 'number' ? idx.generatedAtMs : undefined,
+      };
+    }
+  }
+
+  if (!tableExists(db, LEGACY_INDEX_TABLE)) return null;
+  const legacy = db
+    .prepare(
+      'SELECT install_records_json, plugins_json, warning, generated_at_ms ' +
+        `FROM ${LEGACY_INDEX_TABLE} ORDER BY generated_at_ms DESC LIMIT 1`,
+    )
+    .get() as
+    | { install_records_json: unknown; plugins_json: unknown; warning: string | null; generated_at_ms: number }
+    | undefined;
+  if (!legacy) return null;
+  const parse = (raw: unknown): { ok: boolean; value: unknown } => {
+    try {
+      return { ok: true, value: JSON.parse(String(raw)) };
+    } catch {
+      return { ok: false, value: undefined };
+    }
+  };
+  const installRecords = parse(legacy.install_records_json);
+  const plugins = parse(legacy.plugins_json);
+  return {
+    layout: 'legacy',
+    jsonValid: installRecords.ok && plugins.ok,
+    installRecords: installRecords.value,
+    plugins: plugins.value,
+    warning: legacy.warning ?? null,
+    generatedAtMs: legacy.generated_at_ms,
+  };
+}
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * Read OpenClaw's plugin install index from its shared SQLite state (either
+ * layout — see {@link locateInstallIndexRow}) and parse the parts we reconcile
+ * against. Opens READ-ONLY and best-effort — returns null if the DB, the index,
+ * or better-sqlite3 is unavailable so callers degrade to the
+ * installs.json/on-disk layers rather than throwing.
  *
  * Read-only and path-scoped to the supplied `home`, so it is safe to exercise
  * against a temp fixture DB in tests without ever touching live `~/.openclaw`.
@@ -724,20 +815,24 @@ export function readPluginInstallIndex(home: string): PluginIndexRow | null {
     const require = createRequireSafe();
     const Database = require('better-sqlite3') as typeof import('better-sqlite3');
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    const row = db
-      .prepare(
-        'SELECT install_records_json, plugins_json, warning, generated_at_ms ' +
-          'FROM installed_plugin_index ORDER BY generated_at_ms DESC LIMIT 1',
-      )
-      .get() as
-      | { install_records_json: string; plugins_json: string; warning: string | null; generated_at_ms: number }
-      | undefined;
-    if (!row) return null;
+    const found = locateInstallIndexRow(db);
+    if (!found) return null;
+    if (found.layout === 'machine-state') {
+      // A row we cannot make sense of is "could not read", not an empty index.
+      if (!found.jsonValid || !isPlainObject(found.installRecords) || !Array.isArray(found.plugins)) return null;
+      return {
+        installRecords: found.installRecords as Record<string, IndexInstallRecord>,
+        plugins: found.plugins as IndexPluginEntry[],
+        warning: found.warning,
+        generatedAtMs: found.generatedAtMs,
+      };
+    }
+    // Legacy table: unchanged behaviour — a column that does not parse reads as empty.
     return {
-      installRecords: safeParse<Record<string, IndexInstallRecord>>(row.install_records_json, {}),
-      plugins: safeParse<IndexPluginEntry[]>(row.plugins_json, []),
-      warning: row.warning ?? null,
-      generatedAtMs: row.generated_at_ms,
+      installRecords: (found.installRecords || {}) as Record<string, IndexInstallRecord>,
+      plugins: (found.plugins || []) as IndexPluginEntry[],
+      warning: found.warning,
+      generatedAtMs: found.generatedAtMs,
     };
   } catch {
     return null;
@@ -755,8 +850,9 @@ export function readPluginInstallIndex(home: string): PluginIndexRow | null {
  * round 2). `readPluginInstallIndex` above folds both into null, which is right
  * for a diagnosis but wrong for a decision to overwrite something: a forced
  * install must not read "I could not open OpenClaw's index" as "OpenClaw
- * recorded nothing". Absent = no DB file, no `installed_plugin_index` table, or
- * no row. Unreadable = the DB, the binding or a JSON column could not be read.
+ * recorded nothing". Absent = no DB file, or no index row in EITHER layout
+ * (#260: a migrated 2026.11.x host has no legacy table and is not absent).
+ * Unreadable = the DB, the binding or the stored JSON could not be read.
  */
 export type PluginInstallIndexState =
   | { state: 'absent' }
@@ -776,37 +872,21 @@ export function readPluginInstallIndexState(home: string): PluginInstallIndexSta
     const require = createRequireSafe();
     const Database = require('better-sqlite3') as typeof import('better-sqlite3');
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    const table = db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'installed_plugin_index'")
-      .get();
-    if (!table) return { state: 'absent' };
-    const row = db
-      .prepare(
-        'SELECT install_records_json, plugins_json, warning, generated_at_ms ' +
-          'FROM installed_plugin_index ORDER BY generated_at_ms DESC LIMIT 1',
-      )
-      .get() as
-      | { install_records_json: unknown; plugins_json: unknown; warning: string | null; generated_at_ms: number }
-      | undefined;
-    if (!row) return { state: 'absent' };
-    let installRecords: unknown;
-    let plugins: unknown;
-    try {
-      installRecords = JSON.parse(String(row.install_records_json));
-      plugins = JSON.parse(String(row.plugins_json));
-    } catch {
+    const found = locateInstallIndexRow(db);
+    if (!found) return { state: 'absent' };
+    if (!found.jsonValid) {
       return { state: 'unreadable', why: 'the install index row is not valid JSON' };
     }
-    if (!installRecords || typeof installRecords !== 'object' || Array.isArray(installRecords) || !Array.isArray(plugins)) {
+    if (!isPlainObject(found.installRecords) || !Array.isArray(found.plugins)) {
       return { state: 'unreadable', why: 'the install index row has an unexpected shape' };
     }
     return {
       state: 'ok',
       row: {
-        installRecords: installRecords as Record<string, IndexInstallRecord>,
-        plugins: plugins as IndexPluginEntry[],
-        warning: row.warning ?? null,
-        generatedAtMs: row.generated_at_ms,
+        installRecords: found.installRecords as Record<string, IndexInstallRecord>,
+        plugins: found.plugins as IndexPluginEntry[],
+        warning: found.warning,
+        generatedAtMs: found.generatedAtMs,
       },
     };
   } catch (err) {

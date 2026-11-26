@@ -9184,8 +9184,8 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         // the old wording ("roster", "SQLite index unreadable") read as a fault.
         message:
           'couldn\'t read OpenClaw\'s plugin list, so couldn\'t check the realtime plugin is running. ' +
-          'This is a check that couldn\'t run, not a fault (the list file may be locked, or OpenClaw is older than 2026.6.1)',
-        fix: 'Couldn\'t read OpenClaw\'s plugin list file. If the plugin is already loaded you are protected. Do not run repair from this warning.',
+          'This is a check that couldn\'t run, not a fault (the list may be locked, or this OpenClaw version stores it in a way this ShieldCortex version cannot read yet)',
+        fix: 'Couldn\'t read OpenClaw\'s plugin list. If the plugin is already loaded you are protected. Do not run repair from this warning.',
       };
     case 'load-unproven':
       // #142: the boot roster snapshot races plugin registration, and a
