@@ -178,6 +178,14 @@ describe('#260 r2 — malformed and stale index input', () => {
     expect(verdict).toMatchObject({ state: 'enabled-not-installed', severity: 'fail' });
   });
 
+  it('…but a running gateway that provably loaded it is not convicted as uninstalled', () => {
+    const verdict = reconcilePluginState(
+      base({ indexInstallPathExists: false, liveRoster: ['shieldcortex-realtime'], liveLoadEvidence: 'boot-roster' }),
+    );
+    expect(verdict.state).not.toBe('enabled-not-installed');
+    expect(verdict.severity).not.toBe('fail');
+  });
+
   it('…not enabled in config either: plainly not installed, not the #222 wipe', () => {
     const verdict = reconcilePluginState(base({ indexInstallPathExists: false, config: { enabled: null, inAllow: false } }));
     expect(verdict).toMatchObject({ state: 'not-installed', severity: 'ok' });

@@ -324,7 +324,11 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // When the directory the index record names is CONFIRMED gone, no record
   // counts (the index is the layer OpenClaw itself loads from, so installs.json
   // cannot vouch for it either) — only a build actually on disk does.
-  const indexPathMissing = Boolean(indexRecord) && input.indexInstallPathExists === false;
+  // A running gateway that provably loaded the plugin outranks a stale path:
+  // the build is somewhere we did not look, and "no package installed" would
+  // be a false FAIL on a protected box.
+  const indexPathMissing =
+    Boolean(indexRecord) && input.indexInstallPathExists === false && loadedInLiveRoster !== true;
   const installed = Boolean(
     onDiskVersion ||
       input.onDiskInstallPath ||
