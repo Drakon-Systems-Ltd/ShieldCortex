@@ -26,6 +26,7 @@ import { instructionMatchVariants } from '../firewall/instruction-normalize.js';
 import { isClosedPreferenceNote } from '../firewall/preference-note-grammar.js';
 import { someWindow } from '../scan-windows.js';
 import { runDefencePipelinePreviewInternal } from '../pipeline.js';
+import { scan } from '../../scan-only.js';
 import { scoreSource } from '../trust/index.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../types.js';
 import type { DefenceConfig, ProvenanceLabel } from '../types.js';
@@ -164,6 +165,30 @@ describe('graft suite — the full pipeline judges the input as received, not th
       expect(got).toEqual(want);
     });
   }
+});
+
+describe('scan-only entry (library scan, sanitises before the firewall) judges the input as received', () => {
+  // Values on origin/main 128a0734 (default user source, default config):
+  // every row QUARANTINE with memory_manipulation (+ zero_width_chars for the
+  // zero-width row). Only the plain whole-note preference moves.
+  it('MOVED: the plain preference, QUARANTINE (memory_manipulation) -> ALLOW', () => {
+    const r = scan(BRITISH_REPLIES);
+    expect([r.firewall.result, r.firewall.blockedPatterns]).toEqual(['ALLOW', []]);
+  });
+
+  it('fullwidth / NBSP / zero-width / BOM / NUL variants keep origin/main\'s verdict and patterns', () => {
+    const rows: Array<[string, string[]]> = [
+      [BRITISH_REPLIES.replace('E', '\uFF25'), ['memory_manipulation']],
+      [BRITISH_REPLIES.replace(', ', ',\u00A0'), ['memory_manipulation']],
+      [BRITISH_REPLIES.replace('always', 'al\u200Bways'), ['memory_manipulation', 'zero_width_chars']],
+      [`\uFEFF${BRITISH_REPLIES}`, ['memory_manipulation']],
+      [`${BRITISH_REPLIES}\u0000`, ['memory_manipulation']],
+    ];
+    for (const [text, patterns] of rows) {
+      const r = scan(text);
+      expect([r.firewall.result, r.firewall.blockedPatterns]).toEqual(['QUARANTINE', patterns]);
+    }
+  });
 });
 
 /**
