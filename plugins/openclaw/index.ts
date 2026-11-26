@@ -2282,8 +2282,13 @@ async function applyPolicyLockToPluginConfig(config: SCConfig): Promise<SCConfig
         && (pin.enforce === undefined || typeof pin.enforce === 'boolean')
         && (pin.broker === undefined || (isBlock(broker)
           && (broker.enabled === undefined || typeof broker.enabled === 'boolean')))));
+    // The input-key predicate must stay aligned with the applier's
+    // `readinessGate` removal rule (#509): under a locked verdict the real
+    // applier always deletes that key, so a readiness-only input legitimately
+    // comes back as `{}`. A dishonest applier that returns `{}` in the
+    // readiness-only case cannot be told apart from the real one here.
     const emptyGuardExpected = status === 'locked' && validPins
-      && Object.keys(view.actionGuard as Record<string, unknown>).length === 0
+      && Object.keys(view.actionGuard as Record<string, unknown>).every((key) => key === 'readinessGate')
       && (!isBlock(pin) || (pin.enabled !== true && pin.enforce !== true
         && (!isBlock(broker) || broker.enabled !== false)
         && pin.autoApprove === undefined && pin.reviewedScripts === undefined));
