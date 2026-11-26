@@ -318,9 +318,33 @@ function carriesNewSideText(args: Record<string, unknown>): boolean {
 
 /** Keys an `apply_patch` call carries its patch text in (any case). */
 const PATCH_TEXT_KEYS: ReadonlySet<string> = new Set(['input', 'patch']);
-/** `*** Add File: p`, `*** Update File: p`, `*** Delete File: p`, `*** Move to: p`,
- *  matched on the trimmed line. */
-const PATCH_FILE_HEADER_RE = /^\*\*\* (Add File|Update File|Delete File|Move to): (.+)$/;
+/** Codex's patch markers (openai/codex `apply-patch/src/parser.rs`). */
+const PATCH_END = '*** End Patch';
+const PATCH_MOVE_TO = '*** Move to: ';
+const PATCH_FILE_HEADERS: ReadonlyArray<readonly [marker: string, state: 'add' | 'delete' | 'update']> = [
+  ['*** Add File: ', 'add'],
+  ['*** Delete File: ', 'delete'],
+  ['*** Update File: ', 'update'],
+];
+
+/** Rust's `char::is_whitespace` (Unicode White_Space), what `str::trim` and
+ *  `str::trim_end` strip. JS `trim` is a different set: it lacks U+0085 and
+ *  adds U+FEFF. */
+function isRustWhiteSpace(c: number): boolean {
+  return (c >= 0x09 && c <= 0x0d) || c === 0x20 || c === 0x85 || c === 0xa0 || c === 0x1680
+    || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f
+    || c === 0x205f || c === 0x3000;
+}
+function rustTrimEnd(s: string): string {
+  let end = s.length;
+  while (end > 0 && isRustWhiteSpace(s.charCodeAt(end - 1))) end--;
+  return s.slice(0, end);
+}
+function rustTrim(s: string): string {
+  let start = 0;
+  while (start < s.length && isRustWhiteSpace(s.charCodeAt(start))) start++;
+  return rustTrimEnd(s.slice(start));
+}
 
 /**
  * The lines an `apply_patch` call adds to memory markdown (each `+` line of
@@ -328,33 +352,67 @@ const PATCH_FILE_HEADER_RE = /^\*\*\* (Add File|Update File|Delete File|Move to)
  * markdown, minus the `+`), or null when no header names memory markdown.
  * Removed and context lines are not read: they are not stored.
  *
- * File headers and the Begin/End Patch markers are read on the trimmed line,
- * as Codex's parser reads them, so leading or trailing whitespace cannot hide
- * a header. A `+` line is read raw, as Codex reads it.
+ * It follows the state of Codex's parser (openai/codex@21aa552e,
+ * `streaming_parser.rs`), line by line (split on `\n`; the trailing `\r`
+ * each of its two line splits strips is dropped):
+ *   - outside a file section, and in an Add File or Delete File section, a
+ *     file header or `*** End Patch` is matched on the line trimmed of
+ *     Unicode White_Space at both ends (`rustTrim`, Rust's `str::trim`);
+ *   - in an Update File section it is matched on the line trimmed at the END
+ *     only (`rustTrimEnd`), so a line starting with a space there is a
+ *     context line, whatever follows the space; `*** Move to:` is read the
+ *     same way, once, and only before the section's first chunk line;
+ *   - a `+` line is read raw, in an Add File or Update File section.
+ * Invariant: for every patch Codex accepts, every line Codex writes into a
+ * memory markdown file is in the returned text. Codex rejects a patch with
+ * any other line shape; for such input this is the guard's own reading
+ * (Begin Patch changes no state, and headers are read again after End).
  */
 export function patchAddedMemoryText(
   normalisedName: string,
   args: Record<string, unknown>,
   isMemoryPath: (path: string) => boolean,
 ): string | null {
+  const isMemory = (path: string): boolean => isSinkMemoryMarkdown(normalisedName, path, isMemoryPath);
   let named = false;
   const added: string[] = [];
   for (const text of valuesUnder(args, PATCH_TEXT_KEYS)) {
     if (typeof text !== 'string') continue;
+    let state: 'outside' | 'add' | 'delete' | 'update' = 'outside';
     let inMemory = false;
-    for (const line of text.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      const header = PATCH_FILE_HEADER_RE.exec(trimmed);
-      if (header) {
-        const memory = header[1] !== 'Delete File' && isSinkMemoryMarkdown(normalisedName, header[2], isMemoryPath);
-        // A move keeps the section's memory-ness: either end is memory markdown.
-        inMemory = header[1] === 'Move to' ? inMemory || memory : memory;
-        named = named || memory;
-      } else if (trimmed.startsWith('*** End Patch') || trimmed.startsWith('*** Begin Patch')) {
+    let chunkSeen = false;
+    let moveSeen = false;
+    for (const split of text.split('\n')) {
+      let line = split;
+      for (let i = 0; i < 2 && line.endsWith('\r'); i++) line = line.slice(0, -1);
+      const marker: string = state === 'update' ? rustTrimEnd(line) : rustTrim(line);
+      if (marker === PATCH_END) {
+        state = 'outside';
         inMemory = false;
-      } else if (inMemory && line.startsWith('+')) {
-        added.push(line.slice(1));
+        continue;
       }
+      const header: (typeof PATCH_FILE_HEADERS)[number] | undefined =
+        PATCH_FILE_HEADERS.find(([prefix]) => marker.startsWith(prefix));
+      if (header) {
+        state = header[1];
+        inMemory = state !== 'delete' && isMemory(marker.slice(header[0].length));
+        named = named || inMemory;
+        chunkSeen = false;
+        moveSeen = false;
+        continue;
+      }
+      if (state === 'update') {
+        if (!chunkSeen && !moveSeen && marker.startsWith(PATCH_MOVE_TO)) {
+          moveSeen = true;
+          // A move keeps the section's memory-ness: either end is memory markdown.
+          const memory = isMemory(marker.slice(PATCH_MOVE_TO.length));
+          inMemory = inMemory || memory;
+          named = named || memory;
+          continue;
+        }
+        if (marker === '@@' || marker.startsWith('@@ ') || line === '' || /^[ +-]/.test(line)) chunkSeen = true;
+      }
+      if (inMemory && (state === 'add' || state === 'update') && line.startsWith('+')) added.push(line.slice(1));
     }
   }
   return named ? added.join('\n') : null;
