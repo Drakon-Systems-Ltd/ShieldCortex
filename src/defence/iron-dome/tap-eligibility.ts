@@ -30,6 +30,10 @@ import { CATASTROPHIC_SIGNALS, GUARD_SELF_PROTECTION_SIGNALS } from './tool-acti
  *     would run are fetched or decoded at run time and were never scanned;
  *   - `reverse-shell` (#1005): the commands that would run come from the
  *     other end of the socket at run time, so no card can describe them;
+ *   - `memory-directive` (SCN-010 PR B): prompt-only (GUARD_PROMPT_ONLY_SIGNALS,
+ *     and no prompt-only signal is tap-eligible). It changes the agent's
+ *     standing instructions for every later session, so it is answered at
+ *     the prompt or in a terminal (`shieldcortex approve --denial <id>`);
  *   - `oversized-command`, `command-evidence-unscannable`: not fully read;
  *   - every `openclaw-process-*` signal: OpenClaw keeps its own approval
  *     channel (#220), taps never answer it.

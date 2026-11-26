@@ -103,6 +103,8 @@ export const SIGNAL_PHRASES: Readonly<Record<string, string>> = Object.freeze({
   'secret-egress': 'tries to send a secret or credential off this machine',
   'secret-egress-fold': 'tries to send a secret or credential off this machine',
   'reverse-shell': 'opens a shell that another machine can control',
+  // Agent memory (SCN-010 PR B).
+  'memory-directive': 'stores a standing instruction in agent memory',
   // Running programs and services.
   'stop-process-or-service': 'stops a running program',
   'service-restart': 'restarts a running service',
@@ -302,6 +304,8 @@ export const SIGNAL_CLASSES: Readonly<Record<string, SignalClass>> = Object.free
   'git-mutate': 'git',
   'modify-scheduler': 'scheduler',
   'persistence-risk': 'persist',
+  // SCN-010 PR B: a Write/Edit WHAT that names the memory file shows it; a memory-tool call goes generic.
+  'memory-directive': 'persist',
   'modify-network-firewall': 'firewall',
   'invalid-tool-input': 'none',
   'unknown-keys': 'none',
