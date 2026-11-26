@@ -1,0 +1,242 @@
+/**
+ * SCN-010 part C — the closed whole-note preference grammar G at the firewall
+ * (design scn-010c §4-§6).
+ *
+ * C1: `detectInstructions` reports no `memory_manipulation` when the WHOLE
+ *     input parses G. Every lane gets the same L1 answer.
+ * C2: under `memory_candidate` only, L2 does not report
+ *     `non_authoritative:memory_persist` when the whole scanned text parses G.
+ *     Every other label keeps it (L2 frozen: a page or tool result telling the
+ *     agent to change standing behaviour stays non-authoritative).
+ *
+ * The graft suite pins origin/main's verdict AND pattern list for every
+ * negative (fixtures/preference-note-graft-pins.ts): none of them parses G, so
+ * none may move. The must-flag sweep checks every string literal in the
+ * repository's existing test corpora: `memory_manipulation` is reported
+ * exactly where origin/main reported it, except on inputs that parse G.
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
+import { describe, expect, it } from '@jest/globals';
+import { analyzeFirewall, detectInstructions, detectNonAuthoritativeInstruction } from '../firewall/index.js';
+import type { FirewallContext } from '../firewall/index.js';
+import { instructionMatchVariants } from '../firewall/instruction-normalize.js';
+import { isClosedPreferenceNote } from '../firewall/preference-note-grammar.js';
+import { someWindow } from '../scan-windows.js';
+import { runDefencePipelinePreviewInternal } from '../pipeline.js';
+import { scoreSource } from '../trust/index.js';
+import { DEFAULT_DEFENCE_CONFIG } from '../types.js';
+import type { DefenceConfig, ProvenanceLabel } from '../types.js';
+import { PREFERENCE_NOTE_NEGATIVES, PREFERENCE_NOTE_POSITIVES } from './fixtures/preference-note-grammar-corpus.js';
+import { GRAFT_BASE_PINS, PIPELINE_BASE_PINS } from './fixtures/preference-note-graft-pins.js';
+import type { GraftLane, PipelineLane } from './fixtures/preference-note-graft-pins.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
+
+const BALANCED: DefenceConfig = { ...DEFAULT_DEFENCE_CONFIG, mode: 'balanced' };
+
+const BRITISH_REPLIES = 'From now on, always use British English in replies.';
+const BRITISH_SPELLING = 'From now on, always use British English spelling.';
+const SUMMARY_THREE = 'When the user asks for a summary, keep it to three bullet points.';
+const SUMMARY_FIVE = 'When the user asks for a summary, keep it under five bullets.';
+const T1_ROWS = [BRITISH_REPLIES, BRITISH_SPELLING];
+const T2_ROWS = [SUMMARY_THREE, SUMMARY_FIVE];
+
+function fw(content: string, label: ProvenanceLabel, context?: FirewallContext) {
+  const source = { type: label, identifier: 'test' };
+  return analyzeFirewall(content, 'note', source, scoreSource(source).score, BALANCED, undefined, context);
+}
+
+const LANE_ARGS: Record<GraftLane, [ProvenanceLabel, FirewallContext | undefined]> = {
+  cli: ['cli', undefined],
+  memory_candidate: ['memory_candidate', undefined],
+  tool_result: ['tool_result', undefined],
+  web: ['web', undefined],
+  agent: ['cli', { memoryAdmission: 'agent' }],
+};
+
+describe('C1/C2 — the four design rows (r10-v1 panel rows 35/38, SCN-010 M4 rows)', () => {
+  for (const text of [...T1_ROWS, ...T2_ROWS]) {
+    it(`cli and memory_candidate ALLOW with no memory_manipulation: ${text}`, () => {
+      for (const label of ['cli', 'memory_candidate'] as ProvenanceLabel[]) {
+        const r = fw(text, label);
+        expect({ label, result: r.result, patterns: r.blockedPatterns }).toEqual({ label, result: 'ALLOW', patterns: [] });
+      }
+    });
+
+    it(`agent admission (MCP remember context) ALLOW: ${text}`, () => {
+      const r = fw(text, 'cli', { memoryAdmission: 'agent' });
+      expect(r.result).toBe('ALLOW');
+      expect(r.blockedPatterns).toEqual([]);
+    });
+
+    it(`full pipeline: memory_candidate and agent admission ALLOW: ${text}`, () => {
+      const lane = runDefencePipelinePreviewInternal(text, 'note', { type: 'memory_candidate', identifier: 'scan' }, BALANCED);
+      expect(lane.firewall.result).toBe('ALLOW');
+      expect(lane.firewall.blockedPatterns).toEqual([]);
+      const agent = runDefencePipelinePreviewInternal(text, 'note', { type: 'cli', identifier: 'mcp' }, BALANCED, undefined, { memoryAdmission: 'agent' });
+      expect(agent.firewall.result).toBe('ALLOW');
+    });
+  }
+
+  for (const text of T2_ROWS) {
+    it(`tool_result ALLOW (no L2 shape, L1 dropped): ${text}`, () => {
+      const r = fw(text, 'tool_result');
+      expect(r.result).toBe('ALLOW');
+      expect(r.blockedPatterns).toEqual([]);
+    });
+  }
+
+  for (const text of T1_ROWS) {
+    it(`tool_result and web keep L2 memory_persist (L2 frozen off memory_candidate): ${text}`, () => {
+      const toolResult = fw(text, 'tool_result');
+      expect(toolResult.result).toBe('QUARANTINE');
+      expect(toolResult.blockedPatterns).toEqual(['non_authoritative:memory_persist']);
+      const web = fw(text, 'web');
+      expect(web.result).not.toBe('ALLOW');
+      expect(web.blockedPatterns).toEqual(['non_authoritative:memory_persist']);
+    });
+  }
+});
+
+describe('C1/C2 — every grammar positive', () => {
+  for (const text of PREFERENCE_NOTE_POSITIVES) {
+    it(`L1 has no memory_manipulation; L2 memory_candidate has no memory_persist: ${JSON.stringify(text)}`, () => {
+      expect(detectInstructions(text).patterns).not.toContain('memory_manipulation');
+      expect(detectNonAuthoritativeInstruction(text, 'memory_candidate').patterns).not.toContain('non_authoritative:memory_persist');
+    });
+  }
+
+  it('C2 is memory_candidate only: every other untrusted label keeps memory_persist on the T1 rows', () => {
+    for (const label of ['web', 'document', 'email', 'tool_result', 'agent_message']) {
+      for (const text of T1_ROWS) {
+        expect(detectNonAuthoritativeInstruction(text, label).patterns).toEqual(['non_authoritative:memory_persist']);
+      }
+    }
+  });
+});
+
+describe('graft suite — every negative keeps origin/main\'s verdict and pattern list (analyzeFirewall)', () => {
+  it('covers every negative and the joiner matrix', () => {
+    const ids = new Set(GRAFT_BASE_PINS.map(([id]) => id));
+    for (const [id] of PREFERENCE_NOTE_NEGATIVES) expect(ids.has(id)).toBe(true);
+    expect(GRAFT_BASE_PINS.length).toBeGreaterThanOrEqual(PREFERENCE_NOTE_NEGATIVES.length + 168);
+  });
+
+  for (const [id, text, pins] of GRAFT_BASE_PINS) {
+    it(`${id}: byte-identical to base on every lane`, () => {
+      expect(isClosedPreferenceNote(text)).toBe(false);
+      const got: Record<string, unknown> = {};
+      const want: Record<string, unknown> = {};
+      for (const lane of Object.keys(LANE_ARGS) as GraftLane[]) {
+        const [label, context] = LANE_ARGS[lane];
+        const r = fw(text, label, context);
+        got[lane] = [r.result, r.blockedPatterns];
+        want[lane] = [pins[lane][0], [...pins[lane][1]]];
+      }
+      expect(got).toEqual(want);
+    });
+  }
+});
+
+describe('graft suite — the full pipeline judges the input as received, not the sanitised copy', () => {
+  const PIPE_LANES: Record<PipelineLane, [ProvenanceLabel, { memoryAdmission: 'agent' } | undefined]> = {
+    cli: ['cli', undefined],
+    memory_candidate: ['memory_candidate', undefined],
+    tool_result: ['tool_result', undefined],
+    agent: ['cli', { memoryAdmission: 'agent' }],
+  };
+  const byId = new Map(PREFERENCE_NOTE_NEGATIVES.map(([id, text]) => [id, text]));
+  for (const [id, pins] of PIPELINE_BASE_PINS) {
+    it(`${id}: byte-identical to base through runDefencePipelinePreviewInternal`, () => {
+      const text = byId.get(id)!;
+      const got: Record<string, unknown> = {};
+      const want: Record<string, unknown> = {};
+      for (const lane of Object.keys(PIPE_LANES) as PipelineLane[]) {
+        const [label, options] = PIPE_LANES[lane];
+        const r = runDefencePipelinePreviewInternal(text, 'note', { type: label, identifier: 'graft' }, BALANCED, undefined, options);
+        got[lane] = [r.firewall.result, r.firewall.blockedPatterns];
+        want[lane] = [pins[lane][0], [...pins[lane][1]]];
+      }
+      expect(got).toEqual(want);
+    });
+  }
+});
+
+/**
+ * origin/main's `memory_manipulation` group, copied here as the ORACLE for the
+ * must-flag sweep (the L1 regexes are not edited by SCN-010 part C; if they
+ * ever are, this copy must move with them and the sweep says so).
+ */
+const BASE_MEMORY_MANIPULATION: readonly RegExp[] = [
+  /save\s+(this\s+)?to\s+memory/i,
+  /remember\s+this\s+(instruction|command|rule)/i,
+  /store\s+this\s+instruction/i,
+  /when\s+(the\s+)?user\s+asks/i,
+  /always\s+respond\s+with/i,
+  /from\s+now\s+on\s*(,\s*)?always/i,
+  /inject\s+(into\s+)?memory/i,
+];
+
+function baseHasMemoryManipulation(text: string): boolean {
+  const variants = instructionMatchVariants(text);
+  return BASE_MEMORY_MANIPULATION.some((re) => variants.some((v) => someWindow(v, (w) => re.test(w))));
+}
+
+/** Every string literal (and substitution-free template) in one TS file. */
+function stringLiterals(file: string): string[] {
+  const source = ts.createSourceFile(file, fs.readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  const out: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) out.push(node.text);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return out;
+}
+
+function testFiles(dir: string, acc: string[] = []): string[] {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) testFiles(full, acc);
+    else if (/\.ts$/.test(entry.name) && full.includes(`${path.sep}__tests__${path.sep}`)) acc.push(full);
+  }
+  return acc;
+}
+
+describe('must-flag — every existing corpus string keeps its memory_manipulation answer unless it parses G', () => {
+  // This change's own fixtures are excluded: they are the grammar's positives
+  // and grafts and are covered above.
+  const OWN = /preference-note-/;
+  const files = [...testFiles(path.join(REPO_ROOT, 'src')), ...testFiles(path.join(REPO_ROOT, 'plugins'))]
+    .filter((f) => !OWN.test(path.basename(f)));
+  const strings = [...new Set(files.flatMap(stringLiterals))].filter((s) => s.length > 0 && s.length <= 20_000);
+
+  it('the sweep reads the corpora (sanity floor)', () => {
+    expect(files.some((f) => f.endsWith('provenance-l2-corpus.test.ts'))).toBe(true);
+    expect(files.some((f) => f.endsWith('memory-directive-corpus.ts'))).toBe(true);
+    expect(strings.filter(baseHasMemoryManipulation).length).toBeGreaterThanOrEqual(10);
+  });
+
+  it('memory_manipulation is reported exactly where origin/main reported it, except whole-G inputs', () => {
+    const mismatches: string[] = [];
+    for (const text of strings) {
+      const want = baseHasMemoryManipulation(text) && !isClosedPreferenceNote(text);
+      const got = detectInstructions(text).patterns.includes('memory_manipulation');
+      if (got !== want) mismatches.push(text);
+    }
+    expect(mismatches).toEqual([]);
+  });
+
+  it('the only corpus strings that move are these exact preference notes (old -> new: memory_manipulation -> none)', () => {
+    const moved = strings.filter((s) => baseHasMemoryManipulation(s) && isClosedPreferenceNote(s)).sort();
+    expect(moved).toEqual([
+      'From now on, always use British English spelling.',
+      'When the user asks for a summary, keep it under five bullets.',
+    ]);
+  });
+});
