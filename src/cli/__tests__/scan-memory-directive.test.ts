@@ -92,6 +92,35 @@ describe('scan --source=memory_candidate runs the memory-directive screen', () =
     expect(JSON.parse(out[0]).blockedPatterns).toEqual(['non_authoritative:memory_persist']);
   });
 
+  // SCN-010 part C r3: `scan` is one of the two opt-in callers (one unmodified
+  // positional, internal title). Every lane on the four design rows, as at
+  // dfb0075c: C1 on every lane, C2 under memory_candidate only.
+  const DESIGN_ROWS = [
+    'From now on, always use British English in replies.',
+    PREFERENCE,
+    'When the user asks for a summary, keep it to three bullet points.',
+    'When the user asks for a summary, keep it under five bullets.',
+  ];
+  for (const text of DESIGN_ROWS) {
+    it(`the four design rows on all three lanes: ${text}`, async () => {
+      const persist = text.startsWith('From now on');
+      const got: unknown[] = [];
+      for (const lane of [[], ['--source=memory_candidate'], ['--source=tool_result']]) {
+        out.length = 0;
+        const code = await runScanArgv(['--json', ...lane, text]);
+        const parsed = JSON.parse(out[0]);
+        got.push([code, parsed.result, parsed.blockedPatterns]);
+      }
+      expect(got).toEqual([
+        [SCAN_EXIT.ALLOW, 'ALLOW', []],
+        [SCAN_EXIT.ALLOW, 'ALLOW', []],
+        persist
+          ? [SCAN_EXIT.CAUGHT, 'QUARANTINE', ['non_authoritative:memory_persist']]
+          : [SCAN_EXIT.ALLOW, 'ALLOW', []],
+      ]);
+    });
+  }
+
   it('a fullwidth or titled variant keeps main\'s BLOCK under memory_candidate', async () => {
     // The scan pipeline NFKC-folds the fullwidth letter before the firewall;
     // the grammar judges the bytes as received, so the variant does not parse.
