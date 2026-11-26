@@ -318,7 +318,8 @@ function carriesNewSideText(args: Record<string, unknown>): boolean {
 
 /** Keys an `apply_patch` call carries its patch text in (any case). */
 const PATCH_TEXT_KEYS: ReadonlySet<string> = new Set(['input', 'patch']);
-/** `*** Add File: p`, `*** Update File: p`, `*** Delete File: p`, `*** Move to: p`. */
+/** `*** Add File: p`, `*** Update File: p`, `*** Delete File: p`, `*** Move to: p`,
+ *  matched on the trimmed line. */
 const PATCH_FILE_HEADER_RE = /^\*\*\* (Add File|Update File|Delete File|Move to): (.+)$/;
 
 /**
@@ -326,6 +327,10 @@ const PATCH_FILE_HEADER_RE = /^\*\*\* (Add File|Update File|Delete File|Move to)
  * a file section whose header, or `*** Move to:` destination, is memory
  * markdown, minus the `+`), or null when no header names memory markdown.
  * Removed and context lines are not read: they are not stored.
+ *
+ * File headers and the Begin/End Patch markers are read on the trimmed line,
+ * as Codex's parser reads them, so leading or trailing whitespace cannot hide
+ * a header. A `+` line is read raw, as Codex reads it.
  */
 export function patchAddedMemoryText(
   normalisedName: string,
@@ -338,13 +343,14 @@ export function patchAddedMemoryText(
     if (typeof text !== 'string') continue;
     let inMemory = false;
     for (const line of text.split(/\r?\n/)) {
-      const header = PATCH_FILE_HEADER_RE.exec(line);
+      const trimmed = line.trim();
+      const header = PATCH_FILE_HEADER_RE.exec(trimmed);
       if (header) {
         const memory = header[1] !== 'Delete File' && isSinkMemoryMarkdown(normalisedName, header[2], isMemoryPath);
         // A move keeps the section's memory-ness: either end is memory markdown.
         inMemory = header[1] === 'Move to' ? inMemory || memory : memory;
         named = named || memory;
-      } else if (line.startsWith('*** End Patch') || line.startsWith('*** Begin Patch')) {
+      } else if (trimmed.startsWith('*** End Patch') || trimmed.startsWith('*** Begin Patch')) {
         inMemory = false;
       } else if (inMemory && line.startsWith('+')) {
         added.push(line.slice(1));
