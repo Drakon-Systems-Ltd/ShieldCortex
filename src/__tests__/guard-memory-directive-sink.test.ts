@@ -1155,7 +1155,7 @@ describe('round 8: an added line can open a fence or double quote that a file li
   /** The units WITHOUT the joined-section unit (a): it is dropped when the
    *  section's added lines are more than one line and carry a delimiter (it is
    *  then no (b)/(c) unit of its own). Coverage must not rest on that join. */
-  const unitsAlone = (input: string): string[] => {
+  const unitsAlone = (input: string): readonly string[] => {
     const units = sinkModule.patchMemoryScreenUnits('apply_patch', { input }, isMemoryWritePath)!;
     const joined = sinkModule.patchAddedMemoryText('apply_patch', { input }, isMemoryWritePath)!;
     const lines = joined.split('\n');
