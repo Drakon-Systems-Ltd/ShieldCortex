@@ -121,16 +121,13 @@ export const MEMORY_SCREEN_MAX_LEAVES = 1024;
 export const MEMORY_SCREEN_MAX_NODES = 10_000;
 /** Units one `apply_patch` to memory markdown may produce and still be
  *  screened (`patchMemoryScreenUnits`), in place of `MEMORY_SCREEN_MAX_LEAVES`
- *  for that list only. A fence- or quote-carrying added line is nine units,
- *  so this is about 450 such lines; past it the call is held as too large.
- *  `MEMORY_SCREEN_MAX_CHARS` still applies to the units. */
+ *  for that list only; past it the call is held as too large. A fence- or
+ *  quote-carrying added line is up to nine units and the text around it adds
+ *  more, so the line count this allows depends on the layout: 455 such lines
+ *  in a row, 372 when each sits between ordinary lines.
+ *  `MEMORY_SCREEN_MAX_CHARS` still applies to the units. Only the routing in
+ *  `memorySinkTargets` sets it, as the target's explicit `maxLeaves`. */
 export const MEMORY_PATCH_SCREEN_MAX_UNITS = 4096;
-
-/** The unit lists `patchMemoryScreenUnits` returns. `collectStoredText` reads
- *  one of these against `MEMORY_PATCH_SCREEN_MAX_UNITS`; any other value it
- *  is given keeps `MEMORY_SCREEN_MAX_LEAVES`. Module-private, so no caller
- *  can mark its own value. */
-const PATCH_UNIT_LISTS = new WeakSet<readonly string[]>();
 
 /** `memory-tool`: a storing tool; `memory-op-tool`: a tool whose op decides;
  *  `memory-markdown`: a write-family call to memory markdown. */
@@ -182,16 +179,18 @@ function opIsNonStoring(obj: Record<string, unknown>): boolean {
  * skips its own fields but not a batch: Hermes applies `operations`
  * whenever one is present and ignores the top-level action.
  *
- * Leaves are bounded by `MEMORY_SCREEN_MAX_LEAVES`, or by
- * `MEMORY_PATCH_SCREEN_MAX_UNITS` when `args` is a unit list
- * `patchMemoryScreenUnits` returned. Overflow (too much text, too many
- * leaves or nodes, a container too deep) is reported, never truncated
- * silently.
+ * Leaves are bounded by `maxLeaves`: `MEMORY_SCREEN_MAX_LEAVES` unless the
+ * caller passes the target's own bound (`memorySinkTargets` sets
+ * `MEMORY_PATCH_SCREEN_MAX_UNITS` on an `apply_patch` unit list, and nothing
+ * else). Overflow (too much text, too many leaves or nodes, a container too
+ * deep) is reported, never truncated silently.
  */
-export function collectStoredText(args: unknown, sink: MemoryDirectiveSinkKind = 'memory-tool'): Collected {
+export function collectStoredText(
+  args: unknown,
+  sink: MemoryDirectiveSinkKind = 'memory-tool',
+  maxLeaves: number = MEMORY_SCREEN_MAX_LEAVES,
+): Collected {
   const skipKeys = sink === 'memory-markdown' ? MARKDOWN_SKIP_KEYS : REPLACED_SIDE_KEYS;
-  const maxLeaves = Array.isArray(args) && PATCH_UNIT_LISTS.has(args)
-    ? MEMORY_PATCH_SCREEN_MAX_UNITS : MEMORY_SCREEN_MAX_LEAVES;
   const leaves: string[] = [];
   let chars = 0;
   let nodes = 0;
@@ -555,11 +554,7 @@ export function patchMemoryScreenUnits(
   };
   // Already past what `screenMemoryWrite` reads: it holds on these alone.
   const full = (): boolean => chars > MEMORY_SCREEN_MAX_CHARS || units.size > MEMORY_PATCH_SCREEN_MAX_UNITS;
-  const done = (): string[] => {
-    const list = [...units];
-    PATCH_UNIT_LISTS.add(list);
-    return list;
-  };
+  const done = (): string[] => Object.freeze([...units]) as string[];
   const addStretch = (stretch: string[]): void => {
     if (stretch.length === 0) return;
     const text = stretch.join('\n');
@@ -586,46 +581,55 @@ export function patchMemoryScreenUnits(
   return done();
 }
 
-/** What the sink screens for this call: its kind and the value to collect
- *  stored text from. */
+/** What the sink screens for this call: its kind, the value to collect
+ *  stored text from, and the leaf bound for that value. `maxLeaves` is set
+ *  only by `memorySinkTargets`, and only on an `apply_patch` unit list. */
 export interface MemorySinkTarget {
   kind: MemoryDirectiveSinkKind;
   stored: unknown;
+  maxLeaves: number;
 }
 
 /**
- * Which memory sink this call is, and what it stores, or null.
+ * Every memory-sink screen this call needs, in order; empty when it is not a
+ * memory sink. The call asks when ANY of them asks.
  * `normalisedName` is the guard's `normaliseToolName`; `family` its
  * `classifyFamily`. Read-side memory tools (`recall`, `get_context`,
  * `graph`, `forget`) are never a sink; read- and exec-family calls are never
  * a G2 sink.
  *
  *   - a storing tool / an op tool: the whole argument bag;
+ *   - an `apply_patch` whose header names memory markdown: the lines it adds
+ *     there, as `patchMemoryScreenUnits`, under the patch bound. Built
+ *     whatever other keys the call carries: Codex writes the files its
+ *     headers name and ignores a `path` / `file_path` beside the patch, so
+ *     such a key must not route the patch around its units (review
+ *     6077789893);
  *   - G2: a `write`-family call, or an `unknown`-family call carrying a
  *     new-side text key (`str_replace`, `search_replace`), where ANY path
- *     value is memory markdown: the whole argument bag;
- *   - otherwise an `apply_patch` whose header names memory markdown: the
- *     lines it adds there, as `patchMemoryScreenUnits`.
+ *     value is memory markdown: the whole argument bag. For an `apply_patch`
+ *     this is in addition to the units above, never in place of them.
  */
-export function memorySinkTarget(
+export function memorySinkTargets(
   normalisedName: string,
   family: string,
   args: Record<string, unknown>,
   isMemoryWritePath: (path: string) => boolean,
-): MemorySinkTarget | null {
-  if (STORING_TOOLS.has(normalisedName)) return { kind: 'memory-tool', stored: args };
-  if (OP_TOOLS.has(normalisedName)) return { kind: 'memory-op-tool', stored: args };
-  if (family !== 'write' && family !== 'unknown') return null;
-  if (family === 'write' || carriesNewSideText(args)) {
-    if (sinkPathValues(args).some((p) => isSinkMemoryMarkdown(normalisedName, p, isMemoryWritePath))) {
-      return { kind: 'memory-markdown', stored: args };
-    }
-  }
+): MemorySinkTarget[] {
+  if (STORING_TOOLS.has(normalisedName)) return [{ kind: 'memory-tool', stored: args, maxLeaves: MEMORY_SCREEN_MAX_LEAVES }];
+  if (OP_TOOLS.has(normalisedName)) return [{ kind: 'memory-op-tool', stored: args, maxLeaves: MEMORY_SCREEN_MAX_LEAVES }];
+  if (family !== 'write' && family !== 'unknown') return [];
+  const targets: MemorySinkTarget[] = [];
   if (normalisedName === 'apply_patch') {
     const units = patchMemoryScreenUnits(normalisedName, args, isMemoryWritePath);
-    if (units !== null) return { kind: 'memory-markdown', stored: units };
+    if (units !== null) targets.push({ kind: 'memory-markdown', stored: units, maxLeaves: MEMORY_PATCH_SCREEN_MAX_UNITS });
   }
-  return null;
+  if (family === 'write' || carriesNewSideText(args)) {
+    if (sinkPathValues(args).some((p) => isSinkMemoryMarkdown(normalisedName, p, isMemoryWritePath))) {
+      targets.push({ kind: 'memory-markdown', stored: args, maxLeaves: MEMORY_SCREEN_MAX_LEAVES });
+    }
+  }
+  return targets;
 }
 
 /**
@@ -654,8 +658,9 @@ export function screenMemoryWrite(
   sink: MemoryDirectiveSinkKind,
   args: unknown,
   screen: MemoryDirectiveScreen = detectMemoryDirective,
+  maxLeaves: number = MEMORY_SCREEN_MAX_LEAVES,
 ): MemoryDirectiveHold | null {
-  const { leaves, overflow } = collectStoredText(args, sink);
+  const { leaves, overflow } = collectStoredText(args, sink, maxLeaves);
   if (overflow) return { sink, cause: overflow, patterns: [] };
   if (leaves.length === 0) return null;
   try {

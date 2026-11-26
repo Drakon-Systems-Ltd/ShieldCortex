@@ -44,8 +44,9 @@ import { bodyIsAllDataRead } from './heredoc-data-read.js';
 import {
   MEMORY_DIRECTIVE_SIGNAL,
   memoryDirectiveHoldReason,
-  memorySinkTarget,
+  memorySinkTargets,
   screenMemoryWrite,
+  type MemoryDirectiveHold,
   type MemoryDirectiveScreen,
 } from './memory-directive-sink.js';
 
@@ -8254,7 +8255,7 @@ export function evaluateToolCall(
 /**
  * SCN-010 PR B — the card the memory sink would mint for this call, or null.
  *
- *   G1  a memory WRITE tool (see `memorySinkTarget`): every string it would
+ *   G1  a memory WRITE tool (see `memorySinkTargets`): every string it would
  *       store, under any key;
  *   G2  a write-family call, or an unknown-family call carrying new-side
  *       text, where ANY path value (every path key in any case, on the bag
@@ -8282,9 +8283,14 @@ export function memoryDirectiveSinkVerdict(
   screen?: MemoryDirectiveScreen,
 ): ToolGuardVerdict | null {
   const family = classifyFamily(toolName);
-  const target = memorySinkTarget(normaliseToolName(toolName), family, args ?? {}, isMemoryWritePath);
-  if (!target) return null;
-  const hold = screenMemoryWrite(target.kind, target.stored, screen);
+  const targets = memorySinkTargets(normaliseToolName(toolName), family, args ?? {}, isMemoryWritePath);
+  // Every target is screened and any hold asks; a directive hold is the one
+  // the card names, so its pattern groups are shown over a fixed cause.
+  let hold: MemoryDirectiveHold | null = null;
+  for (const t of targets) {
+    const h = screenMemoryWrite(t.kind, t.stored, screen, t.maxLeaves);
+    if (h && (!hold || (hold.cause !== 'directive' && h.cause === 'directive'))) hold = h;
+  }
   if (!hold) return null;
   const signals = [MEMORY_DIRECTIVE_SIGNAL];
   return verdict('require_approval', 'dangerous', family, dangerActionFor(signals, family),
