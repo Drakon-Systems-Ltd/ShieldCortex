@@ -242,10 +242,173 @@ describe('#260 — the install index in config_machine_state (OpenClaw 2026.11.x
     });
     const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
     expect(input.index).not.toBeNull();
+    expect(input.indexInstallPathExists).toBe(true);
     const verdict = reconcilePluginState(input);
-    expect(verdict.state).not.toBe('index-unreadable');
+    expect(verdict.state).toBe('healthy');
+    expect(verdict.severity).toBe('ok');
     expect(verdict.indexReadable).toBe(true);
     expect(verdict.loadedInIndex).toBe(true);
+  });
+});
+
+/**
+ * #260 round 2 — one bad entry makes the whole index unreadable, in both
+ * layouts (OpenClaw's own parsePluginInstallRecordMap rejects the whole map).
+ */
+describe('#260 r2 — install-index ENTRIES are validated, not just their containers', () => {
+  const BAD_ENTRIES: Array<[string, { installRecords: Record<string, unknown>; plugins: unknown[] }]> = [
+    ['a null install record', { installRecords: { [PLUGIN]: null }, plugins: [] }],
+    ['a string install record', { installRecords: { other: 'npm' }, plugins: [] }],
+    ['an array install record', { installRecords: { [PLUGIN]: [] }, plugins: [] }],
+    ['a null plugins entry', { installRecords: {}, plugins: [null] }],
+    ['a plugins entry with no pluginId', { installRecords: {}, plugins: [{ enabled: true }] }],
+    ['a plugins entry with a non-string pluginId', { installRecords: {}, plugins: [{ pluginId: 7 }] }],
+  ];
+
+  it.each(BAD_ENTRIES)('new layout: %s ⇒ null / unreadable (never ok, never absent)', (_label, row) => {
+    writeMachineStateIndex(row);
+    expect(readPluginInstallIndex(home)).toBeNull();
+    expect(readPluginInstallIndexState(home)).toMatchObject({ state: 'unreadable', why: expect.any(String) });
+  });
+
+  it.each(BAD_ENTRIES)('legacy layout: %s ⇒ null / unreadable (never ok, never absent)', (_label, row) => {
+    writeIndex(row);
+    expect(readPluginInstallIndex(home)).toBeNull();
+    expect(readPluginInstallIndexState(home)).toMatchObject({ state: 'unreadable', why: expect.any(String) });
+  });
+
+  it('legacy layout: a column that does not parse still reads as empty for the diagnosis reader (unchanged)', () => {
+    writeIndex({ installRecords: { [PLUGIN]: { version: '4.47.2' } }, plugins: [] });
+    const db = new Database(path.join(home, '.openclaw', 'state', 'openclaw.sqlite'));
+    db.exec(`UPDATE installed_plugin_index SET plugins_json = 'not json'`);
+    db.close();
+    const idx = readPluginInstallIndex(home);
+    expect(idx!.plugins).toEqual([]);
+    expect(idx!.installRecords[PLUGIN]?.version).toBe('4.47.2');
+    expect(readPluginInstallIndexState(home).state).toBe('unreadable');
+  });
+
+  it('a null realtime record on a host with config enabled is a diagnostic gap, not a crash and not a verdict', () => {
+    writeConfig(true, true);
+    writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1');
+    writeMachineStateIndex({ installRecords: { [PLUGIN]: null }, plugins: [null] });
+    const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null }));
+    expect(verdict.state).toBe('index-unreadable');
+    expect(verdict.severity).toBe('warn');
+  });
+});
+
+/**
+ * #260 round 2 — an index record is a claim. When the directory it names is
+ * gone and nothing else is on disk, it must not read as an installed plugin.
+ */
+describe('#260 r2 — a stale index record does not prove an installation', () => {
+  const gone = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'reaped', PKG_SUBPATH);
+  const staleRow = () => ({
+    installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: gone() } },
+    plugins: [{ pluginId: PLUGIN, enabled: true }],
+  });
+
+  it.each([
+    ['config_machine_state', (): void => writeMachineStateIndex(staleRow())],
+    ['legacy table', (): void => writeIndex(staleRow())],
+  ])('%s: config enabled, no live roster, recorded path gone, no other build ⇒ enabled-not-installed / fail', (_label, write) => {
+    writeConfig(true, true);
+    write();
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
+    expect(input.index!.installRecords[PLUGIN]?.installPath).toBe(gone());
+    expect(input.indexInstallPathExists).toBe(false);
+    const verdict = reconcilePluginState(input);
+    expect(verdict.state).toBe('enabled-not-installed');
+    expect(verdict.severity).toBe('fail');
+    expect(verdict.recommendedAction).toBe('install');
+    expect(verdict.reasons.join(' ')).toContain(gone());
+  });
+
+  it('the stale record beside a real build elsewhere: the build decides (version from disk, not the record)', () => {
+    writeConfig(true, true);
+    writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1');
+    writeMachineStateIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: gone() } },
+      plugins: [{ pluginId: PLUGIN, enabled: true }],
+    });
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
+    expect(input.indexInstallPathExists).toBe(false);
+    expect(input.onDiskVersion).toBe('5.22.1');
+    expect(reconcilePluginState(input)).toMatchObject({ state: 'healthy', severity: 'ok' });
+  });
+
+  it('a record with no installPath, or a relative one, is "not checked" — never "missing"', () => {
+    writeConfig(true, true);
+    writeMachineStateIndex({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1' } }, plugins: [] });
+    expect(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null }).indexInstallPathExists).toBeNull();
+    fs.rmSync(path.join(home, '.openclaw', 'state'), { recursive: true });
+    writeMachineStateIndex({ installRecords: { [PLUGIN]: { source: 'npm', installPath: 'relative/dir' } }, plugins: [] });
+    expect(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null }).indexInstallPathExists).toBeNull();
+  });
+});
+
+/**
+ * #260 round 2 — both layout probes read ONE snapshot. A WAL fixture, a
+ * second (writer) connection, and the migration committed between the
+ * reader's two probes: without a read transaction the reader finds neither
+ * copy and says "absent" about an index that existed before and after.
+ *
+ * The seam is the prepare() of the reader's second sqlite_master probe — the
+ * exact gap the bug lives in — so the timing is deterministic.
+ */
+describe('#260 r2 — the two layout probes share one SQLite snapshot', () => {
+  it('a migration committing between the probes never reads as absent', () => {
+    writeIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '4.47.2' } },
+      plugins: [{ pluginId: PLUGIN, enabled: true }],
+    });
+    const dbPath = path.join(home, '.openclaw', 'state', 'openclaw.sqlite');
+    const writer = new Database(dbPath);
+    writer.pragma('journal_mode = WAL');
+    const migrated = JSON.stringify({
+      revision: 2,
+      index: { installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1' } }, plugins: [{ pluginId: PLUGIN, enabled: true }] },
+    });
+    const migrate = (): void => {
+      writer.exec(`BEGIN;
+        CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL);
+        INSERT INTO config_machine_state VALUES ('plugins.installedIndex', '${migrated}', 2);
+        DROP TABLE installed_plugin_index;
+        COMMIT;`);
+    };
+
+    const proto = Database.prototype as unknown as { prepare: (this: { readonly: boolean }, sql: string) => unknown };
+    const realPrepare = proto.prepare;
+    const run = (): { result: ReturnType<typeof readPluginInstallIndexState>; migrations: number } => {
+      let probes = 0;
+      let migrations = 0;
+      proto.prepare = function (sql: string) {
+        if (this.readonly && sql.includes('sqlite_master') && ++probes === 2) {
+          migrate();
+          migrations += 1;
+        }
+        return realPrepare.call(this, sql);
+      };
+      try {
+        return { result: readPluginInstallIndexState(home), migrations };
+      } finally {
+        proto.prepare = realPrepare;
+      }
+    };
+
+    try {
+      const { result, migrations } = run();
+      expect(migrations).toBe(1); // the migration really landed inside the read
+      expect(result.state).toBe('ok');
+      // …and it was one consistent copy: the pre-migration snapshot.
+      expect(result.state === 'ok' && result.row.installRecords[PLUGIN]?.version).toBe('4.47.2');
+      // The next read sees the migrated row.
+      const after = readPluginInstallIndexState(home);
+      expect(after.state === 'ok' && after.row.installRecords[PLUGIN]?.version).toBe('5.22.1');
+    } finally {
+      writer.close();
+    }
   });
 });
 

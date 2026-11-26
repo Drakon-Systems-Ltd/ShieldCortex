@@ -132,3 +132,63 @@ describe('reconcilePluginState — #74 field fixtures', () => {
     expect(JSON.stringify(fx.input)).toBe(snapshot);
   });
 });
+
+/**
+ * #260 round 2 — the reconciler is pure and takes an injectable index, so it
+ * cannot rely on the SQLite reader having validated what it is handed.
+ */
+describe('#260 r2 — malformed and stale index input', () => {
+  const base = (over: Partial<ReconcileInput> = {}): ReconcileInput => ({
+    pluginId: 'shieldcortex-realtime',
+    expectedVersion: '5.22.1',
+    config: { enabled: true, inAllow: true },
+    installsJson: null,
+    index: {
+      installRecords: { 'shieldcortex-realtime': { source: 'npm', version: '5.22.1', installPath: '/gone' } },
+      plugins: [{ pluginId: 'shieldcortex-realtime', enabled: true }],
+    },
+    onDiskVersion: null,
+    liveRoster: null,
+    ...over,
+  });
+
+  it('a null plugins entry does not throw', () => {
+    const input = base();
+    input.index!.plugins = [null as never, { pluginId: 'shieldcortex-realtime', enabled: true }];
+    const verdict = reconcilePluginState(input);
+    expect(verdict.loadedInIndex).toBe(true);
+    expect(verdict.state).toBe('healthy');
+  });
+
+  it('backward compatible: an index record with the path NOT checked keeps its verdict', () => {
+    expect(reconcilePluginState(base())).toMatchObject({ state: 'healthy', severity: 'ok' });
+    expect(reconcilePluginState(base({ indexInstallPathExists: null }))).toMatchObject({ state: 'healthy', severity: 'ok' });
+    expect(reconcilePluginState(base({ indexInstallPathExists: true }))).toMatchObject({ state: 'healthy', severity: 'ok' });
+  });
+
+  it('the recorded path is confirmed MISSING and nothing is on disk: never healthy', () => {
+    const verdict = reconcilePluginState(base({ indexInstallPathExists: false }));
+    expect(verdict).toMatchObject({ state: 'enabled-not-installed', severity: 'fail', recommendedAction: 'install' });
+  });
+
+  it('…and a paper installs.json record cannot vouch for it either', () => {
+    const verdict = reconcilePluginState(
+      base({ indexInstallPathExists: false, installsJson: { version: '5.22.1', installPath: '/gone' } }),
+    );
+    expect(verdict).toMatchObject({ state: 'enabled-not-installed', severity: 'fail' });
+  });
+
+  it('…not enabled in config either: plainly not installed, not the #222 wipe', () => {
+    const verdict = reconcilePluginState(base({ indexInstallPathExists: false, config: { enabled: null, inAllow: false } }));
+    expect(verdict).toMatchObject({ state: 'not-installed', severity: 'ok' });
+  });
+
+  it('a missing path with a real build on disk: the build decides, and the record\'s version is not the running version', () => {
+    const input = base({ indexInstallPathExists: false, onDiskInstallPath: '/home/u/.openclaw/extensions/shieldcortex-realtime' });
+    input.index!.installRecords['shieldcortex-realtime'].version = '4.0.0';
+    // The stale record says 4.0.0 (< expected): not a regression, it is not what runs.
+    expect(reconcilePluginState(input)).toMatchObject({ state: 'healthy', severity: 'ok' });
+    // Control: the same record with its path present IS the running version.
+    expect(reconcilePluginState({ ...input, indexInstallPathExists: true }).state).toBe('version-regressed');
+  });
+});

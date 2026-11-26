@@ -173,6 +173,20 @@ describe('readLinkedRealtimeInstall — identity from what is at the path', () =
     expect(readSelectedRealtimeInstall(home).state).toBe('unknown');
   });
 
+  // #260 round 2 (Astra): a corrupt RECORD inside a well-formed index. Read as
+  // `ok`, the null record names no copy, selection says `none`, and the forced
+  // install is allowed to replace an install it never looked at.
+  it.each([
+    ['a null realtime install record', { installRecords: { [ID]: null }, plugins: [] }],
+    ['a null plugins entry', { installRecords: {}, plugins: [null] }],
+  ])('#260 r2: %s ⇒ unreadable ⇒ selected unknown ⇒ the forced replacement is REFUSED', (_label, idx) => {
+    writeMigratedStateDb(JSON.stringify({ revision: 7, index: { version: 1, generatedAtMs: 7, diagnostics: [], ...idx } }));
+    expect(readPluginInstallIndexState(home).state).toBe('unreadable');
+    const evidence = readRealtimeReplacementEvidence(home);
+    expect(evidence.selected.state).toBe('unknown');
+    expect(assessRealtimeReplacement(evidence, '5.22.1')).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
   it('UNKNOWN when a load.paths entry\'s package.json cannot be parsed', () => {
     const dir = path.join(home, 'work', 'x');
     fs.mkdirSync(dir, { recursive: true });

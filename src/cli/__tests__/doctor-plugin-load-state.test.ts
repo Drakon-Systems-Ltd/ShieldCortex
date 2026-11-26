@@ -105,3 +105,52 @@ describe('checkOpenClawPluginLoadState', () => {
     expect(r.fix).toMatch(/repair/i);
   });
 });
+
+/**
+ * #260 round 2 — the migrated (config_machine_state) layout through the real
+ * doctor check. A stale index record must not reach the "installed and
+ * enabled" pass.
+ */
+describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
+  function migrated(installPath: string): void {
+    const oc = path.join(home, '.openclaw');
+    fs.mkdirSync(path.join(oc, 'state'), { recursive: true });
+    fs.writeFileSync(
+      path.join(oc, 'openclaw.json'),
+      JSON.stringify({
+        plugins: {
+          entries: { [PLUGIN]: { enabled: true, hooks: { allowConversationAccess: true } } },
+          allow: [PLUGIN],
+        },
+      }),
+    );
+    const db = new Database(path.join(oc, 'state', 'openclaw.sqlite'));
+    db.exec('CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)');
+    db.prepare("INSERT INTO config_machine_state VALUES ('plugins.installedIndex', ?, 1)").run(
+      JSON.stringify({
+        revision: 1,
+        index: {
+          installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath } },
+          plugins: [{ pluginId: PLUGIN, enabled: true }],
+        },
+      }),
+    );
+    db.close();
+  }
+  const pkgDir = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-abc', PKG_SUBPATH);
+
+  it('the recorded directory is there: passes', async () => {
+    fs.mkdirSync(pkgDir(), { recursive: true });
+    fs.writeFileSync(path.join(pkgDir(), 'package.json'), JSON.stringify({ version: '5.22.1' }));
+    migrated(pkgDir());
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expect(r.status).toBe('pass');
+  });
+
+  it('the recorded directory is GONE and nothing else is on disk: FAILS, never "installed and enabled"', async () => {
+    migrated(pkgDir());
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expect(r.status).toBe('fail');
+    expect(r.message).not.toMatch(/installed and enabled/i);
+  });
+});

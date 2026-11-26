@@ -136,6 +136,14 @@ export interface ReconcileInput {
    */
   onDiskInstallPath?: string | null;
   /**
+   * Whether the directory the index record's `installPath` names is on disk
+   * (#260). `false` = looked and it is gone: that record is a leftover, not
+   * proof of an install. `true` = it is there. null/undefined = not checked
+   * (no record, no usable path, or the check itself failed), which keeps the
+   * meaning every earlier fixture had.
+   */
+  indexInstallPathExists?: boolean | null;
+  /**
    * `~/.openclaw/npm/projects/*` dir names matching the plugin.
    *
    * A DUPLICATE-detection signal, not an installation one (#226). An uninstall
@@ -272,7 +280,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     config.enabled === true || (config.enabled == null && config.inAllow === true);
 
   const loadedInIndex = Boolean(
-    index?.plugins?.some((p) => p.pluginId === pluginId && p.enabled === true),
+    index?.plugins?.some((p) => p?.pluginId === pluginId && p.enabled === true),
   );
 
   // #103: the live gateway roster overrides the install index. Null = unread.
@@ -311,7 +319,17 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // purpose. It stays in the input because it is real evidence of a DUPLICATE
   // (see the `projectDirs.length > 1` branch below); it is just not evidence of
   // an installation.
-  const installed = Boolean(input.installsJson || onDiskVersion || indexRecord || input.onDiskInstallPath);
+  //
+  // #260: a record is a claim, and the index can outlive what it describes.
+  // When the directory the index record names is CONFIRMED gone, no record
+  // counts (the index is the layer OpenClaw itself loads from, so installs.json
+  // cannot vouch for it either) — only a build actually on disk does.
+  const indexPathMissing = Boolean(indexRecord) && input.indexInstallPathExists === false;
+  const installed = Boolean(
+    onDiskVersion ||
+      input.onDiskInstallPath ||
+      (!indexPathMissing && (input.installsJson || indexRecord)),
+  );
 
   // The index warning is present even on healthy hosts (it names every plugin
   // whose legacy/SQLite metadata differs), so it is a signal, not a verdict.
@@ -331,7 +349,8 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   const metadataConflict = pathConflict || versionLayerConflict;
 
   // Effective running version: on-disk is ground truth, else the index record.
-  const effective = coerce(onDiskVersion) ?? coerce(indexVersion);
+  // A record whose directory is gone says nothing about what would run.
+  const effective = coerce(onDiskVersion) ?? (indexPathMissing ? null : coerce(indexVersion));
   const expected = coerce(expectedVersion);
   const regressed = Boolean(effective && expected && semver.lt(effective, expected));
 
@@ -382,7 +401,11 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     //     code returned not-installed/ok here and doctor printed
     //     "skipped (realtime plugin not installed)" over exactly that.
     if (enabledInConfig) {
-      reasons.push('openclaw.json ENABLES the realtime plugin but no package is installed on this host (no installs.json record, no index record, no on-disk build) — the gateway boots WITHOUT the interceptor while config reports it ON');
+      reasons.push(
+        indexPathMissing
+          ? `openclaw.json ENABLES the realtime plugin but no package is installed on this host: OpenClaw's install index still records it at ${indexRecord?.installPath}, that directory is gone, and there is no other on-disk build — the gateway boots WITHOUT the interceptor while config reports it ON`
+          : 'openclaw.json ENABLES the realtime plugin but no package is installed on this host (no installs.json record, no index record, no on-disk build) — the gateway boots WITHOUT the interceptor while config reports it ON',
+      );
       return { ...base, state: 'enabled-not-installed', severity: 'fail', recommendedAction: 'install', reasons };
     }
     reasons.push('plugin not installed on this host (no config, installs.json, index record, or on-disk build)');
@@ -735,6 +758,13 @@ function tableExists(db: import('better-sqlite3').Database, name: string): boole
  * Returns null when neither layout holds a row. Throws only what SQLite throws.
  */
 function locateInstallIndexRow(db: import('better-sqlite3').Database): LocatedIndexRow | null {
+  // Both probes in ONE read transaction: a migration that commits between
+  // them would otherwise show us neither copy, and "absent" is an answer a
+  // forced install acts on.
+  return db.transaction(() => locateInstallIndexRowInSnapshot(db))();
+}
+
+function locateInstallIndexRowInSnapshot(db: import('better-sqlite3').Database): LocatedIndexRow | null {
   if (tableExists(db, MACHINE_STATE_TABLE)) {
     const row = db
       .prepare(`SELECT value_json FROM ${MACHINE_STATE_TABLE} WHERE state_key = ?`)
@@ -795,6 +825,23 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && !Array.isArray(v);
 
 /**
+ * The one shape check both readers and both layouts go through. Like OpenClaw
+ * (`parsePluginInstallRecordMap`), ONE bad entry rejects the whole index: a
+ * null record for a plugin is a record we could not read, not "no record".
+ * Returns why the shape is wrong, or null when it is fine.
+ */
+function indexShapeFault(installRecords: unknown, plugins: unknown): string | null {
+  if (!isPlainObject(installRecords) || !Array.isArray(plugins)) return 'the install index row has an unexpected shape';
+  for (const [id, record] of Object.entries(installRecords)) {
+    if (!isPlainObject(record)) return `the install record for ${JSON.stringify(id)} is not an object`;
+  }
+  if (!plugins.every((p) => isPlainObject(p) && typeof p.pluginId === 'string')) {
+    return 'a plugins entry is not an object with a string pluginId';
+  }
+  return null;
+}
+
+/**
  * Read OpenClaw's plugin install index from its shared SQLite state (either
  * layout — see {@link locateInstallIndexRow}) and parse the parts we reconcile
  * against. Opens READ-ONLY and best-effort — returns null if the DB, the index,
@@ -817,20 +864,18 @@ export function readPluginInstallIndex(home: string): PluginIndexRow | null {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
     const found = locateInstallIndexRow(db);
     if (!found) return null;
-    if (found.layout === 'machine-state') {
-      // A row we cannot make sense of is "could not read", not an empty index.
-      if (!found.jsonValid || !isPlainObject(found.installRecords) || !Array.isArray(found.plugins)) return null;
-      return {
-        installRecords: found.installRecords as Record<string, IndexInstallRecord>,
-        plugins: found.plugins as IndexPluginEntry[],
-        warning: found.warning,
-        generatedAtMs: found.generatedAtMs,
-      };
-    }
-    // Legacy table: unchanged behaviour — a column that does not parse reads as empty.
+    // A row we cannot make sense of is "could not read", not an empty index.
+    if (found.layout === 'machine-state' && !found.jsonValid) return null;
+    // Legacy table: a column that does not parse (or holds a falsy value) still
+    // reads as empty, as it always has. What DID parse is held to the same
+    // shape as the new layout — a null entry used to reach the reconciler.
+    const lenient = found.layout === 'legacy';
+    const installRecords = lenient ? found.installRecords || {} : found.installRecords;
+    const plugins = lenient ? found.plugins || [] : found.plugins;
+    if (indexShapeFault(installRecords, plugins)) return null;
     return {
-      installRecords: (found.installRecords || {}) as Record<string, IndexInstallRecord>,
-      plugins: (found.plugins || []) as IndexPluginEntry[],
+      installRecords: installRecords as Record<string, IndexInstallRecord>,
+      plugins: plugins as IndexPluginEntry[],
       warning: found.warning,
       generatedAtMs: found.generatedAtMs,
     };
@@ -877,9 +922,8 @@ export function readPluginInstallIndexState(home: string): PluginInstallIndexSta
     if (!found.jsonValid) {
       return { state: 'unreadable', why: 'the install index row is not valid JSON' };
     }
-    if (!isPlainObject(found.installRecords) || !Array.isArray(found.plugins)) {
-      return { state: 'unreadable', why: 'the install index row has an unexpected shape' };
-    }
+    const fault = indexShapeFault(found.installRecords, found.plugins);
+    if (fault) return { state: 'unreadable', why: fault };
     return {
       state: 'ok',
       row: {
@@ -995,6 +1039,23 @@ function readInstallsJsonRecord(home: string, pluginId: string): InstallsJsonRec
   }
 }
 
+/**
+ * Is the directory the index record names on disk? Only "it is not there"
+ * (ENOENT/ENOTDIR on an absolute path) is false; no record, a path we cannot
+ * resolve, or a stat that failed some other way is null — not checked.
+ */
+function indexInstallPathOnDisk(index: PluginIndexRow | null, pluginId: string): boolean | null {
+  const p = index?.installRecords?.[pluginId]?.installPath;
+  if (typeof p !== 'string' || !path.isAbsolute(p)) return null;
+  try {
+    fs.statSync(p);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === 'ENOENT' || code === 'ENOTDIR' ? false : null;
+  }
+}
+
 function scanProjectDirs(home: string, pluginId: string): string[] {
   try {
     return fs
@@ -1065,13 +1126,15 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
   liveRoster = classified.liveRoster;
   const liveLoadEvidence = classified.liveLoadEvidence;
   const registrationSeenAfterBoot = classified.registrationSeenAfterBoot;
+  const index = readIndex(home);
 
   return {
     pluginId,
     expectedVersion: options.expectedVersion,
     config: readConfigEnable(home, pluginId),
     installsJson: readInstallsJsonRecord(home, pluginId),
-    index: readIndex(home),
+    index,
+    indexInstallPathExists: indexInstallPathOnDisk(index, pluginId),
     onDiskVersion: readInstalledRealtimePluginVersion(home),
     // #226: the trusted-local-copy build, only when it is a REAL one (index.js
     // + openclaw.plugin.json). Kept separate from `onDiskVersion` so a valid
