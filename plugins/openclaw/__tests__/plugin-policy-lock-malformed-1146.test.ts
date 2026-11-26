@@ -60,12 +60,16 @@ function writeLock(): void {
   fs.writeFileSync(path.join(protectedRoot, 'policy.json'), JSON.stringify({ v: 1, actionGuard: { enabled: true, enforce: true } }));
 }
 
-function useEmptyGuardConfig(): void {
+function useGuardConfig(actionGuard: Record<string, unknown>): void {
   __setRuntimeForTest({
     callCortex: async () => null,
     isOpenClawAutoMemoryEnabled: () => false,
-    loadShieldConfig: async () => ({ interceptor: { enabled: false, failurePolicy: { high: 'allow' } }, actionGuard: {} }),
+    loadShieldConfig: async () => ({ interceptor: { enabled: false, failurePolicy: { high: 'allow' } }, actionGuard }),
   } as any);
+}
+
+function useEmptyGuardConfig(): void {
+  useGuardConfig({});
 }
 
 function expectStrictPosture(config: any): void {
@@ -101,6 +105,42 @@ describeHere('#1146 malformed loaded policy-lock output', () => {
     expect(config.interceptor).toMatchObject({ enabled: false, failurePolicy: { high: 'allow' }, actionGuard: {} });
     expect(config.interceptor.actionGuard).toEqual({});
     expect(__isDefenceModuleDistrustedForTest()).toBe(false);
+  });
+
+  // #1147 regression (blocks #1156): the real applier always deletes
+  // `readinessGate` under a locked verdict (#509), so a readiness-only input
+  // guard legitimately comes back as `{}`. That is a valid empty guard, not
+  // malformed output, and must not distrust the module or force strict.
+  it.each([
+    ['defenceMode strict only', { defenceMode: 'strict' }],
+    ['actionGuard.enabled false only', { actionGuard: { enabled: false } }],
+    ['actionGuard.enforce false + defenceMode balanced', { actionGuard: { enforce: false }, defenceMode: 'balanced' }],
+  ])('trusts the real applier for a %s lock over a readiness-only input guard', async (_name, policy) => {
+    fs.writeFileSync(path.join(protectedRoot, 'policy.json'), JSON.stringify({ v: 1, ...policy }));
+    useGuardConfig({ readinessGate: true });
+    const verdict = { status: 'locked', path: path.join(protectedRoot, 'policy.json'), policy };
+    expect(applyPolicyLock({ actionGuard: { readinessGate: true } }, verdict as any).actionGuard).toEqual({});
+    __setDefenceModuleForTest({ readPolicyLock: () => verdict, applyPolicyLock } as any);
+
+    const config = await __loadConfigForTest();
+    expect(__isDefenceModuleDistrustedForTest()).toBe(false);
+    expect(config.interceptor.enabled).toBe(false);
+    expect(config.interceptor.failurePolicy.high).toBe('allow');
+    expect(config.interceptor.actionGuard?.enabled).not.toBe(true);
+    expect(config.interceptor.actionGuard?.enforce).not.toBe(true);
+  });
+
+  // Negative control for the readiness-only allowance: any OTHER input key
+  // means an empty result dropped operator config, which stays malformed.
+  it('still fails closed when a stub applier empties a guard that held more than readinessGate', async () => {
+    const policy = { defenceMode: 'strict' };
+    fs.writeFileSync(path.join(protectedRoot, 'policy.json'), JSON.stringify({ v: 1, ...policy }));
+    useGuardConfig({ readinessGate: true, enabled: false });
+    __setDefenceModuleForTest({
+      readPolicyLock: () => ({ status: 'locked', path: path.join(protectedRoot, 'policy.json'), policy }),
+      applyPolicyLock: () => ({ actionGuard: {} }),
+    } as any);
+    expectStrictPosture(await __loadConfigForTest());
   });
 
   it.each([
