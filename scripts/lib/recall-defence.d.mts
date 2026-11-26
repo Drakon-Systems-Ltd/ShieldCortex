@@ -27,7 +27,15 @@ export interface RecallDefenceModules {
    */
   filterByTrust: (rows: DefendedRecallRow[], minTrust: number, project?: string) => DefendedRecallRow[];
   sanitiseInput?: (content: string) => RecallSanitisation | null | undefined;
-  detectInstructions: (content: string) => { detected: boolean; patterns?: string[] } | null;
+  /**
+   * The primary whole-row scan passes `{ wholeUnit: { received } }` (the
+   * stored row as received) to opt in to the closed preference grammar
+   * (SCN-010 part C); decoded-snippet rescans pass nothing.
+   */
+  detectInstructions: (
+    content: string,
+    options?: { wholeUnit?: { received: string } },
+  ) => { detected: boolean; patterns?: string[] } | null;
   detectEncoding: (content: string) => { detected: boolean; decodedSnippets?: string[]; encodingTypes?: string[] } | null;
   detectMarkdownImageExfil?: (content: string) => { detected: boolean; urls?: string[] } | null;
   scanForCredentials: (content: string) => { findings?: Array<{ action: string }> } | null;

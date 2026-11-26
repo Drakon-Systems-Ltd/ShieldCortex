@@ -210,7 +210,7 @@ function runDefencePipelineInternal(
       trust.score,
       cfg,
       sanitisation.strippedCategories,
-      { memoryAdmission: options.memoryAdmission, receivedContent: content },
+      { memoryAdmission: options.memoryAdmission, wholeUnit: { received: content } },
     );
 
     // Carry forward any sanitisation threat indicators (deduped — the firewall

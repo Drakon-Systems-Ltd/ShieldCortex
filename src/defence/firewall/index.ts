@@ -19,7 +19,7 @@ import type {
 import type { SanitisationCategory } from '../input-sanitisation/index.js';
 
 import { detectInstructions } from './instruction-detector.js';
-import type { InstructionDetectionResult } from './instruction-detector.js';
+import type { InstructionDetectionResult, WholeUnit } from './instruction-detector.js';
 import { detectNonAuthoritativeInstruction } from './provenance-policy.js';
 import type { NonAuthoritativeInstructionResult } from './provenance-policy.js';
 import {
@@ -46,7 +46,7 @@ import { scanForCredentials } from '../credential-leak/index.js';
 
 // Re-exports
 export { detectInstructions } from './instruction-detector.js';
-export type { InstructionDetectionOptions, InstructionDetectionResult } from './instruction-detector.js';
+export type { InstructionDetectionOptions, InstructionDetectionResult, WholeUnit } from './instruction-detector.js';
 export { detectPrivilegeEscalation } from './privilege-detector.js';
 export type { PrivilegeDetectionResult } from './privilege-detector.js';
 export { detectEncoding } from './encoding-detector.js';
@@ -80,19 +80,20 @@ export type { MemoryDirectivePattern, MemoryDirectiveResult } from './memory-dir
 
 /**
  * Optional analysis context: whether the write is a memory ADMISSION
- * (SCN-010), and the content as received before sanitisation (SCN-010 part
+ * (SCN-010), and whether `content` is a complete received unit (SCN-010 part
  * C). Absent means exactly the pre-SCN-010 behaviour for every label except
  * `memory_candidate`, which is admission by definition.
  */
 export interface FirewallContext {
   memoryAdmission?: MemoryAdmission;
   /**
-   * SCN-010 part C: the content AS RECEIVED, before Layer-1 sanitisation, when
-   * `content` is the sanitised copy. Read only by the closed preference
-   * grammar (C1/C2), which must parse the received bytes too, so a fullwidth,
-   * NBSP or zero-width variant of a preference note keeps today's verdict.
+   * SCN-010 part C OPT-IN: set ONLY when `content` is a complete received unit
+   * (the write pipeline, scan-only), with `received` the unit AS RECEIVED
+   * before Layer-1 sanitisation. Read only by the closed preference grammar
+   * (C1/C2) on the top-level L1/L2 calls; decoded snippets re-scanned below
+   * never get it. Absent means legacy detection.
    */
-  receivedContent?: string;
+  wholeUnit?: WholeUnit;
 }
 
 /** The label or flag that makes this analysis a memory admission (M1). */
@@ -155,14 +156,14 @@ export function analyzeFirewall(
    */
   context?: FirewallContext,
 ): FirewallAnalysis {
-  const received = { receivedContent: context?.receivedContent };
-  const instructions = detectInstructions(content, received);
+  const wholeUnit = context?.wholeUnit === undefined ? undefined : { wholeUnit: context.wholeUnit };
+  const instructions = detectInstructions(content, wholeUnit);
   const privilege = detectPrivilegeEscalation(content);
   const credentialExfil = detectCredentialExfil(content);
   const encoding = detectEncoding(content);
   const markdownImage = detectMarkdownImageExfil(content);
   const anomaly = scoreAnomaly(content, title);
-  const nonAuthoritative = detectNonAuthoritativeInstruction(content, source.type, received);
+  const nonAuthoritative = detectNonAuthoritativeInstruction(content, source.type, wholeUnit);
 
   // SCN-010 M1 — memory admission only. The screen only ADDS a hold: L1 and
   // L2 above keep exactly the verdicts they have outside SCN-010. Every other

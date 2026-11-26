@@ -15,7 +15,8 @@
  */
 
 import { someWindow } from '../scan-windows.js';
-import { isClosedPreferenceNote } from './preference-note-grammar.js';
+import { isClosedPreferenceWholeUnit } from './instruction-detector.js';
+import type { WholeUnit } from './instruction-detector.js';
 import { foldConfusables } from './confusables.js';
 import { stripZeroWidthAndBidi } from './instruction-normalize.js';
 import type { ProvenanceLabel } from '../types.js';
@@ -2079,11 +2080,11 @@ export function foldForProvenance(content: string): string {
 
 export interface NonAuthoritativeInstructionOptions {
   /**
-   * The input AS RECEIVED when `rawContent` is the write pipeline's sanitised
-   * copy (see `InstructionDetectionOptions.receivedContent`): the closed
-   * preference grammar must parse both.
+   * OPT-IN to the closed preference grammar for a complete received unit
+   * (see `InstructionDetectionOptions.wholeUnit`). Absent means the frozen L2
+   * answer byte for byte.
    */
-  receivedContent?: string;
+  wholeUnit?: WholeUnit;
 }
 
 export function detectNonAuthoritativeInstruction(
@@ -2095,17 +2096,15 @@ export function detectNonAuthoritativeInstruction(
     return { detected: false, patterns: [] };
   }
 
-  // SCN-010 part C (design scn-010c §4, C2): under `memory_candidate` ONLY, a
-  // candidate that is as a WHOLE one sentence of the closed preference
-  // grammar is not reported as `memory_persist`. Every other label keeps the
-  // frozen L2 answer: a web page or tool result telling the agent to change
-  // its standing behaviour stays non-authoritative. Every other group is
-  // unchanged. A positive whole-input parse, never conditional on another
-  // detector (the M4 lesson).
-  const received = options?.receivedContent;
+  // SCN-010 part C (design scn-010c §4, C2): under `memory_candidate` ONLY, an
+  // explicit whole unit that is one sentence of the closed preference grammar
+  // is not reported as `memory_persist`. Opt-in: without `wholeUnit` this is
+  // the frozen L2 answer. Every other label keeps it too: a web page or tool
+  // result telling the agent to change its standing behaviour stays
+  // non-authoritative. Every other group is unchanged. A positive whole-input
+  // parse, never conditional on another detector (the M4 lesson).
   const closedPreferenceNote = sourceType === 'memory_candidate'
-    && isClosedPreferenceNote(rawContent)
-    && (received === undefined || isClosedPreferenceNote(received));
+    && isClosedPreferenceWholeUnit(rawContent, options?.wholeUnit);
 
   const content = foldForProvenance(rawContent);
   const matched: NonAuthoritativePattern[] = [];

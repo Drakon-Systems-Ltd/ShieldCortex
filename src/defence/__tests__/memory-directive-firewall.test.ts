@@ -16,8 +16,10 @@
  *     main memory_candidate: BLOCK (L1 memory_manipulation + L2 memory_persist)
  *   "When the user asks for a summary, keep it under five bullets."
  *     main memory_candidate: BLOCK (L1 memory_manipulation, low trust)
- * are each, as a whole, one sentence of that grammar, so they now ALLOW under
- * memory_candidate, cli and agent admission; tool_result / web keep L2
+ * are each, as a whole, one sentence of that grammar, so when the caller
+ * passes them as a whole received unit (the write pipeline, scan-only) they
+ * now ALLOW under memory_candidate, cli and agent admission; a bare call keeps
+ * main's verdict (the grammar is opt-in); tool_result / web keep L2
  * memory_persist on the British English row. Anything grafted onto them keeps
  * main's verdict (preference-note-firewall.test.ts pins that).
  *
@@ -140,27 +142,74 @@ describe('M1 — every other label is unchanged (no screen without memory admiss
 });
 
 describe('persistence wording in memory admission: main\'s verdict, except whole-note preferences (SCN-010 part C)', () => {
-  // Moved by SCN-010 part C (main -> now). Both rows are, as a whole, one
-  // sentence of the closed preference grammar: L1 memory_manipulation is not
-  // reported for them on any lane, nor L2 memory_persist under memory_candidate.
-  it('MOVED: British English preference, memory_candidate BLOCK -> ALLOW', () => {
+  // SCN-010 part C is OPT-IN for a whole received unit (review r2). A bare
+  // analyzeFirewall call (no `wholeUnit`: an excerpt, a decoded snippet, a
+  // file body) keeps main's verdict byte for byte, exactly as before part C.
+  it('bare (no whole unit): British English preference keeps main\'s memory_candidate BLOCK', () => {
     const r = fw(PREFERENCE, 'memory_candidate');
-    expect(r.result).toBe('ALLOW');
-    expect(r.threatIndicators).toEqual([]);
-    expect(r.blockedPatterns).toEqual([]);
+    expect(r.result).toBe('BLOCK');
+    expect(r.threatIndicators).toEqual(['instruction_injection', 'non_authoritative_instruction']);
+    expect(r.blockedPatterns).toEqual(['memory_manipulation', 'non_authoritative:memory_persist']);
   });
 
-  it('MOVED: summary preference, memory_candidate BLOCK -> ALLOW', () => {
+  it('bare (no whole unit): summary preference keeps main\'s memory_candidate BLOCK', () => {
     const r = fw(SUMMARY_PREFERENCE, 'memory_candidate');
-    expect(r.result).toBe('ALLOW');
-    expect(r.threatIndicators).toEqual([]);
-    expect(r.blockedPatterns).toEqual([]);
+    expect(r.result).toBe('BLOCK');
+    expect(r.threatIndicators).toEqual(['instruction_injection']);
+    expect(r.blockedPatterns).toEqual(['memory_manipulation']);
   });
 
-  it('MOVED: the same rows under the agent / auto-capture context, L1 QUARANTINE -> ALLOW', () => {
+  it('bare (no whole unit): the same rows under the agent / auto-capture context keep main\'s L1 QUARANTINE', () => {
+    // L2 does not run under cli / hook, so the hold is L1 alone, as on main.
     for (const [label, admission] of [['cli', 'agent'], ['hook', 'auto_capture']] as const) {
       for (const text of [PREFERENCE, SUMMARY_PREFERENCE]) {
         const r = fw(text, label, BALANCED, { memoryAdmission: admission });
+        expect(r.result).toBe('QUARANTINE');
+        expect(r.blockedPatterns).toEqual(['memory_manipulation']);
+        expect(r.threatIndicators).not.toContain('memory_directive');
+      }
+    }
+  });
+
+  it('bare (no whole unit) outside memory admission: cli / web / tool_result / hook keep their verdicts', () => {
+    for (const label of ['cli', 'hook'] as ProvenanceLabel[]) {
+      const r = fw(PREFERENCE, label);
+      expect(r.result).toBe('QUARANTINE');
+      expect(r.threatIndicators).toContain('instruction_injection');
+    }
+    // web scores 0.3 (low trust -> BLOCK); tool_result is not low trust.
+    const web = fw(PREFERENCE, 'web');
+    expect(web.result).toBe('BLOCK');
+    expect(web.threatIndicators).toEqual(['instruction_injection', 'non_authoritative_instruction']);
+    const toolResult = fw(PREFERENCE, 'tool_result');
+    expect(toolResult.result).toBe('QUARANTINE');
+    expect(toolResult.threatIndicators).toEqual(['instruction_injection', 'non_authoritative_instruction']);
+  });
+
+  // With the whole received unit (what the write pipeline and scan-only pass)
+  // both rows are, as a whole, one sentence of the closed preference grammar:
+  // L1 memory_manipulation is not reported on any lane, nor L2 memory_persist
+  // under memory_candidate.
+  const whole = (text: string, extra?: FirewallContext): FirewallContext => ({ ...extra, wholeUnit: { received: text } });
+
+  it('MOVED (whole unit): British English preference, memory_candidate BLOCK -> ALLOW', () => {
+    const r = fw(PREFERENCE, 'memory_candidate', BALANCED, whole(PREFERENCE));
+    expect(r.result).toBe('ALLOW');
+    expect(r.threatIndicators).toEqual([]);
+    expect(r.blockedPatterns).toEqual([]);
+  });
+
+  it('MOVED (whole unit): summary preference, memory_candidate BLOCK -> ALLOW', () => {
+    const r = fw(SUMMARY_PREFERENCE, 'memory_candidate', BALANCED, whole(SUMMARY_PREFERENCE));
+    expect(r.result).toBe('ALLOW');
+    expect(r.threatIndicators).toEqual([]);
+    expect(r.blockedPatterns).toEqual([]);
+  });
+
+  it('MOVED (whole unit): the same rows under the agent / auto-capture context, L1 QUARANTINE -> ALLOW', () => {
+    for (const [label, admission] of [['cli', 'agent'], ['hook', 'auto_capture']] as const) {
+      for (const text of [PREFERENCE, SUMMARY_PREFERENCE]) {
+        const r = fw(text, label, BALANCED, whole(text, { memoryAdmission: admission }));
         expect(r.result).toBe('ALLOW');
         expect(r.blockedPatterns).toEqual([]);
         expect(r.threatIndicators).not.toContain('memory_directive');
@@ -168,31 +217,33 @@ describe('persistence wording in memory admission: main\'s verdict, except whole
     }
   });
 
-  it('outside memory admission: cli / hook ALLOW; web / tool_result keep L2 memory_persist on the British English row', () => {
+  it('whole unit outside memory admission: cli / hook ALLOW; web / tool_result keep L2 memory_persist on the British English row', () => {
     for (const label of ['cli', 'hook'] as ProvenanceLabel[]) {
       // MOVED: QUARANTINE (L1 memory_manipulation) -> ALLOW.
-      const r = fw(PREFERENCE, label);
+      const r = fw(PREFERENCE, label, BALANCED, whole(PREFERENCE));
       expect(r.result).toBe('ALLOW');
       expect(r.threatIndicators).toEqual([]);
     }
     // C2 is memory_candidate only: a page or tool result that sets standing
     // behaviour stays non-authoritative. MOVED web: BLOCK (L1 + L2, low
     // trust) -> QUARANTINE (L2 alone). tool_result: QUARANTINE kept, L1 gone.
-    const web = fw(PREFERENCE, 'web');
+    const web = fw(PREFERENCE, 'web', BALANCED, whole(PREFERENCE));
     expect(web.result).toBe('QUARANTINE');
     expect(web.threatIndicators).toEqual(['non_authoritative_instruction']);
     expect(web.blockedPatterns).toEqual(['non_authoritative:memory_persist']);
-    const toolResult = fw(PREFERENCE, 'tool_result');
+    const toolResult = fw(PREFERENCE, 'tool_result', BALANCED, whole(PREFERENCE));
     expect(toolResult.result).toBe('QUARANTINE');
     expect(toolResult.threatIndicators).toEqual(['non_authoritative_instruction']);
     expect(toolResult.blockedPatterns).toEqual(['non_authoritative:memory_persist']);
   });
 
   it('anything attached to a whole-note preference keeps main\'s hold', () => {
-    const titled = fw(`Preference\n${PREFERENCE}`, 'memory_candidate');
+    const titledText = `Preference\n${PREFERENCE}`;
+    const titled = fw(titledText, 'memory_candidate', BALANCED, whole(titledText));
     expect(titled.result).toBe('BLOCK');
     expect(titled.blockedPatterns).toEqual(['memory_manipulation', 'non_authoritative:memory_persist']);
-    const twoSentences = fw(`${PREFERENCE} ${SUMMARY_PREFERENCE}`, 'memory_candidate');
+    const twoText = `${PREFERENCE} ${SUMMARY_PREFERENCE}`;
+    const twoSentences = fw(twoText, 'memory_candidate', BALANCED, whole(twoText));
     expect(twoSentences.result).toBe('BLOCK');
     expect(twoSentences.blockedPatterns).toContain('memory_manipulation');
   });

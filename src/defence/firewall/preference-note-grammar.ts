@@ -22,9 +22,14 @@
  *   T2 := `when the user asks for ` ARTICLE ` ` ARTIFACT `, ` ACTION
  *   STYLE  := LOCALE ` English` ( ` spelling` )? | STYLES_FIXED
  *   SCOPE  := SCOPE_PREPOSITION ` ` ( `all ` )? DOC_NOUN
- *   ACTION := `keep it ` KEEP_PREPOSITION ` ` NUM ` ` UNIT | ACTIONS_FIXED
- *           | `reply in ` STYLE
- *   NUM    := NUMBER_WORD | one or two ASCII digits
+ *   ACTION := `keep it ` KEEP ` ` UNIT | ACTIONS_FIXED | `reply in ` STYLE
+ *   KEEP   := ( `to` | `within` ) ` ` NUM | `under ` NUM_ABOVE_ONE
+ *   NUM    := NUMBER_WORD | [1-9][0-9]?   (1..99, no zero, no leading zero)
+ *   NUM_ABOVE_ONE := NUMBER_WORD except `one` | 2..99
+ *
+ * A count must admit a non-empty answer: `to 0`, `to 00`, `to 05` and
+ * `under one` / `under 1` ask for nothing, which is suppressing the artifact,
+ * not choosing its style.
  *
  * Widening G (a new slot value, a second sentence, a title) is a new grammar
  * version and needs review; it is never an open-world test.
@@ -63,8 +68,14 @@ const alt = (words: readonly string[]): string =>
 
 const STYLE = `(?:${alt(PREFERENCE_NOTE_LOCALES)} English(?: spelling)?|${alt(PREFERENCE_NOTE_STYLES_FIXED)})`;
 const SCOPE = `${alt(PREFERENCE_NOTE_SCOPE_PREPOSITIONS)} (?:all )?${alt(PREFERENCE_NOTE_DOC_NOUNS)}`;
-const NUM = `(?:${alt(PREFERENCE_NOTE_NUMBER_WORDS)}|[0-9]{1,2})`;
-const ACTION = `(?:keep it ${alt(PREFERENCE_NOTE_KEEP_PREPOSITIONS)} ${NUM} ${alt(PREFERENCE_NOTE_UNITS)}`
+// Counts admit a non-empty answer (review r2 SF1): digits 1..99 with no zero
+// and no leading zero; the strict `under` needs at least two.
+const STRICT_KEEP_PREPOSITION = 'under';
+const NUM = `(?:${alt(PREFERENCE_NOTE_NUMBER_WORDS)}|[1-9][0-9]?)`;
+const NUM_ABOVE_ONE = `(?:${alt(PREFERENCE_NOTE_NUMBER_WORDS.filter((w) => w !== 'one'))}|[2-9]|[1-9][0-9])`;
+const KEEP = `(?:${alt(PREFERENCE_NOTE_KEEP_PREPOSITIONS.filter((p) => p !== STRICT_KEEP_PREPOSITION))} ${NUM}`
+  + `|${STRICT_KEEP_PREPOSITION} ${NUM_ABOVE_ONE})`;
+const ACTION = `(?:keep it ${KEEP} ${alt(PREFERENCE_NOTE_UNITS)}`
   + `|${alt(PREFERENCE_NOTE_ACTIONS_FIXED)}|reply in ${STYLE})`;
 
 // Built once at load. Plain `i` flag (no scoped modifier): the charset check

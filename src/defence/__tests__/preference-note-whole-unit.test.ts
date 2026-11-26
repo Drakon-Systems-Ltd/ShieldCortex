@@ -61,12 +61,30 @@ describe('detectInstructions / L2 with no whole-unit option are exactly origin/m
     expect(detectNonAuthoritativeInstruction(PREFERENCE, 'memory_candidate'))
       .toEqual({ detected: true, patterns: ['non_authoritative:memory_persist'] });
   });
+  it('the same sentence passed as a whole unit opts in: memory_manipulation / memory_persist dropped', () => {
+    for (const text of [PREFERENCE, PREFERENCE_T2]) {
+      expect(detectInstructions(text, { wholeUnit: { received: text } })).toEqual({ detected: false, patterns: [], confidence: 0 });
+    }
+    expect(detectNonAuthoritativeInstruction(PREFERENCE, 'memory_candidate', { wholeUnit: { received: PREFERENCE } }))
+      .toEqual({ detected: false, patterns: [] });
+  });
 });
 
 describe('decoded excerpt inside the firewall (index.ts decode-and-rescan)', () => {
   it('analyzeFirewall with no context: parent stays QUARANTINE on the decoded preference', () => {
     for (const label of ['cli', 'memory_candidate', 'tool_result'] as ProvenanceLabel[]) {
       const r = analyzeFirewall(PARENT_B64, 'note', { type: label, identifier: 'parent' }, 0.5, BALANCED);
+      expect([r.result, r.reason, r.threatIndicators]).toEqual([
+        'QUARANTINE', 'Encoded content contains instruction injection (base64)', ['encoding_obfuscation'],
+      ]);
+    }
+  });
+
+  it('analyzeFirewall with the parent as the whole unit: same verdict (the opt-in never reaches the snippet)', () => {
+    for (const label of ['cli', 'memory_candidate', 'tool_result'] as ProvenanceLabel[]) {
+      const r = analyzeFirewall(PARENT_B64, 'note', { type: label, identifier: 'parent' }, 0.5, BALANCED, undefined, {
+        wholeUnit: { received: PARENT_B64 },
+      });
       expect([r.result, r.reason, r.threatIndicators]).toEqual([
         'QUARANTINE', 'Encoded content contains instruction injection (base64)', ['encoding_obfuscation'],
       ]);
