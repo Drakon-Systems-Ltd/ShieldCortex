@@ -81,10 +81,12 @@ describe('a throwing memory-directive screen fails open, consistently', () => {
   it('no S means no memory_directive verdict (the pre-SCN-010 rules)', () => {
     const directive = runDefencePipelinePreviewInternal(DIRECTIVE, 'note', { type: 'memory_candidate', identifier: 'scan' }, BALANCED);
     expect(directive.firewall.threatIndicators).not.toContain('memory_directive');
-    // The preference row keeps its pre-SCN-010 memory_candidate verdict
-    // (as it does when S runs clean).
+    // The preference row gets the same verdict as when S runs clean. MOVED
+    // (SCN-010 part C) BLOCK -> ALLOW: it is, as a whole, one sentence of the
+    // closed preference grammar, which never depends on S.
     const preference = runDefencePipelinePreviewInternal(PREFERENCE, 'note', { type: 'memory_candidate', identifier: 'scan' }, BALANCED);
-    expect(preference.firewall.result).toBe('BLOCK');
+    expect(preference.firewall.result).toBe('ALLOW');
+    expect(preference.firewall.blockedPatterns).toEqual([]);
   });
 
   it('the save-memory pre-screen agrees: a benign candidate is not refused', () => {

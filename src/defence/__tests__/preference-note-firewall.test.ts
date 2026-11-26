@@ -235,6 +235,9 @@ describe('must-flag — every existing corpus string keeps its memory_manipulati
   it('the only corpus strings that move are these exact preference notes (old -> new: memory_manipulation -> none)', () => {
     const moved = strings.filter((s) => baseHasMemoryManipulation(s) && isClosedPreferenceNote(s)).sort();
     expect(moved).toEqual([
+      // recall-defence.test.ts (added with this change: kept at recall).
+      'From now on, always use British English in replies.',
+      // The SCN-010 M4 rows (memory-directive corpus and sibling suites).
       'From now on, always use British English spelling.',
       'When the user asks for a summary, keep it under five bullets.',
     ]);

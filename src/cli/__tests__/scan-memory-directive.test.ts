@@ -71,14 +71,37 @@ describe('scan --source=memory_candidate runs the memory-directive screen', () =
     expect(parsed.threatIndicators).not.toContain('memory_directive');
   });
 
-  it('UNCHANGED: a preference note keeps main\'s BLOCK under memory_candidate (r7, M4 deleted)', async () => {
-    // Measured on origin/main's dist: BLOCK, L1 memory_manipulation + L2
-    // memory_persist. S is quiet, so the screen adds nothing and removes nothing.
-    expect(await runScanArgv(['--json', '--source=memory_candidate', PREFERENCE])).toBe(SCAN_EXIT.CAUGHT);
+  it('MOVED (SCN-010 part C): a whole-note preference ALLOWs under memory_candidate (main: BLOCK)', async () => {
+    // origin/main's dist: BLOCK, L1 memory_manipulation + L2 memory_persist.
+    // The note is, as a whole, one sentence of the closed preference grammar,
+    // so neither is reported under memory_candidate. S is quiet as before.
+    expect(await runScanArgv(['--json', '--source=memory_candidate', PREFERENCE])).toBe(SCAN_EXIT.ALLOW);
     const parsed = JSON.parse(out[0]);
-    expect(parsed.result).toBe('BLOCK');
-    expect(parsed.threatIndicators).toEqual(['instruction_injection', 'non_authoritative_instruction']);
-    expect(parsed.blockedPatterns).toEqual(['memory_manipulation', 'non_authoritative:memory_persist']);
+    expect(parsed.result).toBe('ALLOW');
+    expect(parsed.threatIndicators).toEqual([]);
+    expect(parsed.blockedPatterns).toEqual([]);
+  });
+
+  it('MOVED: the bare default (attested cli) ALLOWs it too (main: QUARANTINE, L1)', async () => {
+    expect(await runScanArgv(['--json', PREFERENCE])).toBe(SCAN_EXIT.ALLOW);
+    expect(JSON.parse(out[0]).blockedPatterns).toEqual([]);
+  });
+
+  it('tool_result keeps L2 memory_persist (C2 is memory_candidate only)', async () => {
+    expect(await runScanArgv(['--json', '--source=tool_result', PREFERENCE])).toBe(SCAN_EXIT.CAUGHT);
+    expect(JSON.parse(out[0]).blockedPatterns).toEqual(['non_authoritative:memory_persist']);
+  });
+
+  it('a fullwidth or titled variant keeps main\'s BLOCK under memory_candidate', async () => {
+    // The scan pipeline NFKC-folds the fullwidth letter before the firewall;
+    // the grammar judges the bytes as received, so the variant does not parse.
+    for (const text of [PREFERENCE.replace('E', '\uFF25'), `Preference\n${PREFERENCE}`]) {
+      out.length = 0;
+      expect(await runScanArgv(['--json', '--source=memory_candidate', text])).toBe(SCAN_EXIT.CAUGHT);
+      const parsed = JSON.parse(out[0]);
+      expect(parsed.result).toBe('BLOCK');
+      expect(parsed.blockedPatterns).toEqual(['memory_manipulation', 'non_authoritative:memory_persist']);
+    }
   });
 });
 

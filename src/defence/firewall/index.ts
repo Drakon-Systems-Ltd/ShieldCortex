@@ -46,7 +46,7 @@ import { scanForCredentials } from '../credential-leak/index.js';
 
 // Re-exports
 export { detectInstructions } from './instruction-detector.js';
-export type { InstructionDetectionResult } from './instruction-detector.js';
+export type { InstructionDetectionOptions, InstructionDetectionResult } from './instruction-detector.js';
 export { detectPrivilegeEscalation } from './privilege-detector.js';
 export type { PrivilegeDetectionResult } from './privilege-detector.js';
 export { detectEncoding } from './encoding-detector.js';
@@ -65,7 +65,11 @@ export {
   TRUSTED_PROVENANCE_SOURCES,
   UNTRUSTED_DATA_ORIGIN_SOURCES,
 } from './provenance-policy.js';
-export type { NonAuthoritativeInstructionResult, NonAuthoritativePattern } from './provenance-policy.js';
+export type {
+  NonAuthoritativeInstructionOptions,
+  NonAuthoritativeInstructionResult,
+  NonAuthoritativePattern,
+} from './provenance-policy.js';
 export {
   MEMORY_DIRECTIVE_INDICATOR,
   MEMORY_DIRECTIVE_PATTERN,
@@ -75,12 +79,20 @@ export {
 export type { MemoryDirectivePattern, MemoryDirectiveResult } from './memory-directive-policy.js';
 
 /**
- * Optional analysis context. Today it carries one fact: whether the write is a
- * memory ADMISSION (SCN-010). Absent means exactly the pre-SCN-010 behaviour
- * for every label except `memory_candidate`, which is admission by definition.
+ * Optional analysis context: whether the write is a memory ADMISSION
+ * (SCN-010), and the content as received before sanitisation (SCN-010 part
+ * C). Absent means exactly the pre-SCN-010 behaviour for every label except
+ * `memory_candidate`, which is admission by definition.
  */
 export interface FirewallContext {
   memoryAdmission?: MemoryAdmission;
+  /**
+   * SCN-010 part C: the content AS RECEIVED, before Layer-1 sanitisation, when
+   * `content` is the sanitised copy. Read only by the closed preference
+   * grammar (C1/C2), which must parse the received bytes too, so a fullwidth,
+   * NBSP or zero-width variant of a preference note keeps today's verdict.
+   */
+  receivedContent?: string;
 }
 
 /** The label or flag that makes this analysis a memory admission (M1). */
@@ -143,13 +155,14 @@ export function analyzeFirewall(
    */
   context?: FirewallContext,
 ): FirewallAnalysis {
-  const instructions = detectInstructions(content);
+  const received = { receivedContent: context?.receivedContent };
+  const instructions = detectInstructions(content, received);
   const privilege = detectPrivilegeEscalation(content);
   const credentialExfil = detectCredentialExfil(content);
   const encoding = detectEncoding(content);
   const markdownImage = detectMarkdownImageExfil(content);
   const anomaly = scoreAnomaly(content, title);
-  const nonAuthoritative = detectNonAuthoritativeInstruction(content, source.type);
+  const nonAuthoritative = detectNonAuthoritativeInstruction(content, source.type, received);
 
   // SCN-010 M1 — memory admission only. The screen only ADDS a hold: L1 and
   // L2 above keep exactly the verdicts they have outside SCN-010. Every other

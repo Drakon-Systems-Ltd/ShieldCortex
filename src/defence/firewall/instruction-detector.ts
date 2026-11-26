@@ -25,6 +25,7 @@ import {
   PROMPT_EXTRACTION_PATTERNS,
 } from './instruction-morphology.js';
 import { MULTILINGUAL_INJECTION_PHRASES } from './instruction-multilingual.js';
+import { isClosedPreferenceNote } from './preference-note-grammar.js';
 
 /**
  * Case-insensitive alternation for authority-spoof verbs, built once at load.
@@ -39,6 +40,18 @@ const anyCase = (phrase: string): string =>
 const SPOOF_VERBS = ['you must', 'ignore', 'new instructions', 'override', 'disregard', 'reveal']
   .map(anyCase)
   .join('|');
+
+export interface InstructionDetectionOptions {
+  /**
+   * The input AS RECEIVED, when `content` is a sanitised copy of it. The write
+   * pipeline NFKC-folds, turns exotic spaces into ASCII spaces and strips
+   * zero-width / BOM / NUL bytes before the firewall runs, so a fullwidth or
+   * NBSP variant of a preference note would reach here as clean ASCII. The
+   * closed preference grammar must parse BOTH texts (SCN-010 part C): a
+   * character outside its ASCII set anywhere in what was received fails it.
+   */
+  receivedContent?: string;
+}
 
 export interface InstructionDetectionResult {
   detected: boolean;
@@ -265,10 +278,26 @@ function safeRegexTest(pattern: RegExp, text: string): boolean {
   return someWindow(text, (window) => pattern.test(window));
 }
 
-export function detectInstructions(content: string): InstructionDetectionResult {
+export function detectInstructions(
+  content: string,
+  options?: InstructionDetectionOptions,
+): InstructionDetectionResult {
   const matchedPatterns: string[] = [];
   let totalWeight = 0;
   let maxWeight = 0;
+
+  // SCN-010 part C (design scn-010c §4, C1): a note that is, as a WHOLE, one
+  // sentence of the closed preference grammar ("From now on, always use
+  // British English in replies.") is not memory manipulation. Decided once,
+  // on the whole input, before any windowing or normalisation variant. This
+  // is a positive closed-world parse, never "relax unless something else
+  // fired": SCN-010's M4 relaxed when the memory-directive screen was quiet
+  // and a preference grafted onto an order defeated it. Never make this
+  // conditional on another detector. Only `memory_manipulation` is skipped;
+  // every other group runs exactly as before.
+  const received = options?.receivedContent;
+  const closedPreferenceNote = isClosedPreferenceNote(content)
+    && (received === undefined || isClosedPreferenceNote(received));
 
   // Test the original first, then up to two normalised copies (confusable fold,
   // zero-width/bidi strip, punctuation collapse, and a classic-leet fold) — see
@@ -278,6 +307,7 @@ export function detectInstructions(content: string): InstructionDetectionResult 
 
   for (const group of PATTERN_GROUPS) {
     if (group.subsumedBy && matchedPatterns.includes(group.subsumedBy)) continue;
+    if (closedPreferenceNote && group.name === 'memory_manipulation') continue;
     for (const pattern of group.patterns) {
       if (variants.some((variant) => safeRegexTest(pattern, variant))) {
         matchedPatterns.push(group.name);

@@ -99,6 +99,8 @@ export function scan(content: string, options: ScanOptions = {}): DefencePipelin
       trust.score,
       cfg,
       sanitisation.strippedCategories,
+      // SCN-010 part C: the preference grammar judges the bytes as received.
+      { receivedContent: content },
     );
 
     // Carry forward sanitisation threat indicators (deduped).
