@@ -99,9 +99,10 @@ export function scan(content: string, options: ScanOptions = {}): DefencePipelin
       trust.score,
       cfg,
       sanitisation.strippedCategories,
-      // SCN-010 part C: the whole input is one received unit; the preference
-      // grammar judges it as received.
-      { wholeUnit: { received: content } },
+      // SCN-010 part C: with no caller title the input is one single-field
+      // unit, judged by the preference grammar as received. A caller title is
+      // a separate field the grammar never parsed: no opt-in.
+      options.title === undefined ? { wholeUnit: { received: content } } : undefined,
     );
 
     // Carry forward sanitisation threat indicators (deduped).

@@ -9,19 +9,19 @@
  *
  * The screen only ADDS holds (r7: the M4 persistence-wording relaxation is
  * deleted). L1 and L2 keep exactly origin/main's verdicts for anything S does
- * not flag, in memory admission and everywhere else, with ONE exception that
- * is not S's: SCN-010 part C's closed whole-note preference grammar. The
+ * not flag, in memory admission and everywhere else. In particular the
  * preference notes
  *   "From now on, always use British English spelling."
- *     main memory_candidate: BLOCK (L1 memory_manipulation + L2 memory_persist)
+ *     memory_candidate: BLOCK (L1 memory_manipulation + L2 memory_persist)
  *   "When the user asks for a summary, keep it under five bullets."
- *     main memory_candidate: BLOCK (L1 memory_manipulation, low trust)
- * are each, as a whole, one sentence of that grammar, so when the caller
- * passes them as a whole received unit (the write pipeline, scan-only) they
- * now ALLOW under memory_candidate, cli and agent admission; a bare call keeps
- * main's verdict (the grammar is opt-in); tool_result / web keep L2
- * memory_persist on the British English row. Anything grafted onto them keeps
- * main's verdict (preference-note-firewall.test.ts pins that).
+ *     memory_candidate: BLOCK (L1 memory_manipulation, low trust)
+ * keep those main verdicts on every memory write (full pipeline below). The
+ * one exception is not S's: SCN-010 part C's closed preference grammar, which
+ * a caller opts in to by passing the whole single-field unit (only the
+ * `shieldcortex scan` command and an untitled `scan()` do). With it these rows
+ * ALLOW under memory_candidate, cli and agent admission; tool_result / web
+ * keep L2 memory_persist on the British English row. Anything grafted onto
+ * them keeps main's verdict (preference-note-firewall.test.ts pins that).
  *
  * Every other label and context is unchanged; the "other lanes" blocks below
  * pin that with the same bytes.
@@ -37,8 +37,8 @@ import {
   ACCEPTED_AMBIGUITY,
   BENIGN_CONTROLS,
   BENIGN_GENRES,
-  CLOSED_GRAMMAR_PREFERENCES,
   PERSISTENCE_HOSTILE_ROWS,
+  PREFERENCES_HELD_AS_ON_MAIN,
   ROUND2_PRECISION,
   ROUND2_PRECISION_LOCAL_EGRESS,
   ROUND2_RECALL,
@@ -142,9 +142,9 @@ describe('M1 — every other label is unchanged (no screen without memory admiss
 });
 
 describe('persistence wording in memory admission: main\'s verdict, except whole-note preferences (SCN-010 part C)', () => {
-  // SCN-010 part C is OPT-IN for a whole received unit (review r2). A bare
-  // analyzeFirewall call (no `wholeUnit`: an excerpt, a decoded snippet, a
-  // file body) keeps main's verdict byte for byte, exactly as before part C.
+  // SCN-010 part C is OPT-IN for a whole single-field unit (reviews r2/r3). A
+  // bare analyzeFirewall call (no `wholeUnit`: every memory write, an excerpt,
+  // a decoded snippet, a file body) keeps main's verdict byte for byte.
   it('bare (no whole unit): British English preference keeps main\'s memory_candidate BLOCK', () => {
     const r = fw(PREFERENCE, 'memory_candidate');
     expect(r.result).toBe('BLOCK');
@@ -186,10 +186,10 @@ describe('persistence wording in memory admission: main\'s verdict, except whole
     expect(toolResult.threatIndicators).toEqual(['instruction_injection', 'non_authoritative_instruction']);
   });
 
-  // With the whole received unit (what the write pipeline and scan-only pass)
-  // both rows are, as a whole, one sentence of the closed preference grammar:
-  // L1 memory_manipulation is not reported on any lane, nor L2 memory_persist
-  // under memory_candidate.
+  // With the whole single-field unit (what `shieldcortex scan` and an untitled
+  // scan() pass) both rows are, as a whole, one sentence of the closed
+  // preference grammar: L1 memory_manipulation is not reported on any lane,
+  // nor L2 memory_persist under memory_candidate.
   const whole = (text: string, extra?: FirewallContext): FirewallContext => ({ ...extra, wholeUnit: { received: text } });
 
   it('MOVED (whole unit): British English preference, memory_candidate BLOCK -> ALLOW', () => {
@@ -282,18 +282,17 @@ describe('M1 — benign controls ALLOW in memory admission (full pipeline, no si
   }
 });
 
-describe('whole-note preference rows ALLOW in memory admission (full pipeline, no side effects)', () => {
-  // Formerly the M4 rows of BENIGN_CONTROLS; held as on origin/main after M4
-  // was deleted. SCN-010 part C moves them: memory_candidate BLOCK -> ALLOW,
-  // agent admission QUARANTINE -> ALLOW. S stays quiet on them.
-  for (const [id, text] of CLOSED_GRAMMAR_PREFERENCES) {
-    it(`MOVED ${id}: memory_candidate ALLOW, agent admission ALLOW, no memory_directive`, () => {
+describe('UNCHANGED: persistence-worded preference rows keep main\'s hold (full pipeline, no side effects)', () => {
+  // Formerly the M4 rows of BENIGN_CONTROLS. M4 is deleted, so they are held
+  // exactly as on origin/main; S stays quiet on them.
+  for (const [id, text, mcPatterns] of PREFERENCES_HELD_AS_ON_MAIN) {
+    it(`${id}: memory_candidate BLOCK, agent admission QUARANTINE, no memory_directive`, () => {
       const lane = runDefencePipelinePreviewInternal(text, 'note', { type: 'memory_candidate', identifier: 'scan' }, BALANCED);
-      expect(lane.firewall.result).toBe('ALLOW');
-      expect(lane.firewall.blockedPatterns).toEqual([]);
+      expect(lane.firewall.result).toBe('BLOCK');
+      expect(lane.firewall.blockedPatterns).toEqual([...mcPatterns]);
       const agent = runDefencePipelinePreviewInternal(text, 'note', { type: 'cli', identifier: 'mcp' }, BALANCED, undefined, { memoryAdmission: 'agent' });
-      expect(agent.firewall.result).toBe('ALLOW');
-      expect(agent.firewall.blockedPatterns).toEqual([]);
+      expect(agent.firewall.result).toBe('QUARANTINE');
+      expect(agent.firewall.blockedPatterns).toEqual(['memory_manipulation']);
       expect(agent.firewall.threatIndicators).not.toContain('memory_directive');
     });
   }

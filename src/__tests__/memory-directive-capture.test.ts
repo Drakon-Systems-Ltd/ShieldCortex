@@ -34,7 +34,7 @@ import {
   ACCEPTED_AMBIGUITY,
   BENIGN_CONTROLS,
   PERSISTENCE_HOSTILE_ROWS,
-  CLOSED_GRAMMAR_PREFERENCES,
+  PREFERENCES_HELD_AS_ON_MAIN,
   ROUND2_PRECISION,
   ROUND2_PRECISION_LOCAL_EGRESS,
   ROUND2_RECALL,
@@ -189,12 +189,10 @@ describe('openclaw-extract screenMemoryCandidate — S beside L2', () => {
     for (const [, text] of PERSISTENCE_HOSTILE_ROWS) expect(screen(text, 'Note')).toEqual(PERSIST);
   });
 
-  it('UNCHANGED: the whole-note preference rows get main\'s L2 answer at both screens', () => {
+  it('UNCHANGED: the persistence-worded preference rows get main\'s L2 answer at both screens', () => {
     // British English: L2 memory_persist -> refused, as on main. Summary: no L2
     // shape (its hold on main is L1, in the pipeline) -> not refused here.
-    // Both screens judge `title\ncontent` as ONE candidate, which is never a
-    // single sentence of SCN-010 part C's closed grammar, so C2 cannot apply.
-    for (const [, text, mcPatterns] of CLOSED_GRAMMAR_PREFERENCES) {
+    for (const [, text, mcPatterns] of PREFERENCES_HELD_AS_ON_MAIN) {
       const l2 = mcPatterns.filter((p) => p.startsWith('non_authoritative:'));
       const hook = screenAutoCaptureCandidate(REAL_DEFENCE, text, 'Note');
       const oc = screenMemoryCandidate(text, detectNonAuthoritativeInstruction, 'Note', detectMemoryDirective);

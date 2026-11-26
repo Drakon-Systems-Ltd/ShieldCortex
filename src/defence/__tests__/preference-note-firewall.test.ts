@@ -31,7 +31,7 @@ import type { FirewallContext } from '../firewall/index.js';
 import { instructionMatchVariants } from '../firewall/instruction-normalize.js';
 import { isClosedPreferenceNote } from '../firewall/preference-note-grammar.js';
 import { someWindow } from '../scan-windows.js';
-import { runDefencePipelinePreviewInternal } from '../pipeline.js';
+import { runDefencePipelinePreviewInternal, SCAN_COMMAND_TITLE } from '../pipeline.js';
 import { scan } from '../../scan-only.js';
 import { scoreSource } from '../trust/index.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../types.js';
@@ -92,12 +92,29 @@ describe('C1/C2 — the four design rows (r10-v1 panel rows 35/38, SCN-010 M4 ro
       expect(r.blockedPatterns).toEqual([]);
     });
 
-    it(`full pipeline: memory_candidate and agent admission ALLOW: ${text}`, () => {
-      const lane = runDefencePipelinePreviewInternal(text, 'note', { type: 'memory_candidate', identifier: 'scan' }, BALANCED);
+    it(`full pipeline, scan-command opt-in: memory_candidate and cli ALLOW: ${text}`, () => {
+      const unit = { preferenceGrammarUnit: text };
+      const lane = runDefencePipelinePreviewInternal(text, SCAN_COMMAND_TITLE, { type: 'memory_candidate', identifier: 'scan' }, BALANCED, undefined, unit);
       expect(lane.firewall.result).toBe('ALLOW');
       expect(lane.firewall.blockedPatterns).toEqual([]);
-      const agent = runDefencePipelinePreviewInternal(text, 'note', { type: 'cli', identifier: 'mcp' }, BALANCED, undefined, { memoryAdmission: 'agent' });
-      expect(agent.firewall.result).toBe('ALLOW');
+      const cli = runDefencePipelinePreviewInternal(text, SCAN_COMMAND_TITLE, { type: 'cli', identifier: 'cli' }, BALANCED, undefined, unit);
+      expect(cli.firewall.result).toBe('ALLOW');
+    });
+
+    it(`full pipeline: a caller title, a different unit or no unit keeps base (r3): ${text}`, () => {
+      // Values from the 128a0734 dist: memory_candidate BLOCK, agent QUARANTINE.
+      const l2 = T1_ROWS.includes(text) ? ['non_authoritative:memory_persist'] : [];
+      const calls: Array<[string, { preferenceGrammarUnit?: string }]> = [
+        ['note', { preferenceGrammarUnit: text }],
+        [SCAN_COMMAND_TITLE, { preferenceGrammarUnit: `${text} ` }],
+        [SCAN_COMMAND_TITLE, {}],
+      ];
+      for (const [title, unit] of calls) {
+        const lane = runDefencePipelinePreviewInternal(text, title, { type: 'memory_candidate', identifier: 'scan' }, BALANCED, undefined, unit);
+        expect([lane.firewall.result, lane.firewall.blockedPatterns]).toEqual(['BLOCK', ['memory_manipulation', ...l2]]);
+        const agent = runDefencePipelinePreviewInternal(text, title, { type: 'cli', identifier: 'mcp' }, BALANCED, undefined, { ...unit, memoryAdmission: 'agent' });
+        expect([agent.firewall.result, agent.firewall.blockedPatterns]).toEqual(['QUARANTINE', ['memory_manipulation']]);
+      }
     });
   }
 
@@ -196,7 +213,7 @@ describe('graft suite — every negative keeps origin/main\'s verdict and patter
   }
 });
 
-describe('graft suite — the full pipeline judges the input as received, not the sanitised copy', () => {
+describe('graft suite — the full pipeline (scan-command opt-in) judges the input as received, not the sanitised copy', () => {
   const PIPE_LANES: Record<PipelineLane, [ProvenanceLabel, { memoryAdmission: 'agent' } | undefined]> = {
     cli: ['cli', undefined],
     memory_candidate: ['memory_candidate', undefined],
@@ -211,7 +228,7 @@ describe('graft suite — the full pipeline judges the input as received, not th
       const want: Record<string, unknown> = {};
       for (const lane of Object.keys(PIPE_LANES) as PipelineLane[]) {
         const [label, options] = PIPE_LANES[lane];
-        const r = runDefencePipelinePreviewInternal(text, 'note', { type: label, identifier: 'graft' }, BALANCED, undefined, options);
+        const r = runDefencePipelinePreviewInternal(text, SCAN_COMMAND_TITLE, { type: label, identifier: 'graft' }, BALANCED, undefined, { ...options, preferenceGrammarUnit: text });
         got[lane] = [r.firewall.result, r.firewall.blockedPatterns];
         want[lane] = [pins[lane][0], [...pins[lane][1]]];
       }
@@ -321,10 +338,13 @@ describe('must-flag — every existing corpus string keeps its memory_manipulati
   it('the only corpus strings that move (whole unit only) are these exact preference notes (old -> new: memory_manipulation -> none)', () => {
     const moved = strings.filter((s) => baseHasMemoryManipulation(s) && isClosedPreferenceNote(s)).sort();
     expect(moved).toEqual([
-      // recall-defence.test.ts (added with this change: kept at recall).
+      // recall-defence.test.ts (dropped at recall, as on main) and the CLI
+      // scan design rows (scan-memory-directive.test.ts).
       'From now on, always use British English in replies.',
       // The SCN-010 M4 rows (memory-directive corpus and sibling suites).
       'From now on, always use British English spelling.',
+      // The CLI scan design rows (scan-memory-directive.test.ts).
+      'When the user asks for a summary, keep it to three bullet points.',
       'When the user asks for a summary, keep it under five bullets.',
     ]);
   });

@@ -72,6 +72,26 @@ export interface PipelineRunOptions {
    * `memory_candidate`; changes no trust score and no label.
    */
   memoryAdmission?: MemoryAdmission;
+  /**
+   * SCN-010 part C OPT-IN to the closed preference grammar: the exact text the
+   * caller received as ONE single-field unit, unmodified (today only the
+   * `shieldcortex scan` command sets it). Honoured only when it equals
+   * `content` and the call carries no caller title (`title` undefined, or the
+   * scan command's own SCAN_COMMAND_TITLE). Any other title is a separate
+   * field the grammar never parsed, stored and recalled beside the body, so
+   * there is no opt-in. Memory writes, capture, import and recall never set it.
+   */
+  preferenceGrammarUnit?: string;
+}
+
+/** The scan command's internal title: a fixed label, never user text. */
+export const SCAN_COMMAND_TITLE = 'CLI Scan';
+
+/** The firewall's whole-unit opt-in, or undefined (legacy detection). */
+function preferenceGrammarWholeUnit(content: string, title: string | undefined, unit: string | undefined) {
+  if (unit === undefined || unit !== content) return undefined;
+  if (title !== undefined && title !== SCAN_COMMAND_TITLE) return undefined;
+  return { received: unit };
 }
 
 type DeferredPipelineEffect = () => void;
@@ -107,6 +127,7 @@ function publicPipelineOptions(options?: PipelineRunOptions): PipelineRunOptions
     memoryAdmission: options?.memoryAdmission === 'agent' || options?.memoryAdmission === 'auto_capture'
       ? options.memoryAdmission
       : undefined,
+    preferenceGrammarUnit: typeof options?.preferenceGrammarUnit === 'string' ? options.preferenceGrammarUnit : undefined,
   };
 }
 
@@ -210,7 +231,10 @@ function runDefencePipelineInternal(
       trust.score,
       cfg,
       sanitisation.strippedCategories,
-      { memoryAdmission: options.memoryAdmission, wholeUnit: { received: content } },
+      {
+        memoryAdmission: options.memoryAdmission,
+        wholeUnit: preferenceGrammarWholeUnit(content, title, options.preferenceGrammarUnit),
+      },
     );
 
     // Carry forward any sanitisation threat indicators (deduped — the firewall

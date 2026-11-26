@@ -34,7 +34,7 @@ import {
 import {
   ACCEPTED_AMBIGUITY,
   BENIGN_CONTROLS,
-  CLOSED_GRAMMAR_PREFERENCES,
+  PREFERENCES_HELD_AS_ON_MAIN,
   ROUND2_PRECISION,
   ROUND2_RECALL,
   SINK_DIRECTIVES,
@@ -122,34 +122,24 @@ describe('M3 — MCP remember runs the memory-directive screen', () => {
     expect(getMemoryById(released!.memoryId!)!.content).toBe(DIRECTIVE);
   });
 
-  it('MOVED (SCN-010 part C): a whole-note preference is stored under the agent flag, L1 quarantine -> stored', async () => {
-    // The note is, as a whole, one sentence of the closed preference grammar,
-    // so L1 memory_manipulation is not reported (on main it was the hold, and
-    // the write was quarantined). The flag only arms S, which is quiet here,
-    // so the flagged and unflagged (CLI-equivalent) outcomes stay identical.
+  it('UNCHANGED: a persistence-worded preference keeps main\'s L1 hold under the agent flag (r7)', async () => {
+    // The flag only arms S, which is quiet here; the hold is the pre-existing
+    // L1 memory_manipulation one, identical to the unflagged (main) path.
     const flagged = await executeRemember({ title: 'Spelling', content: PREFERENCE, memoryAdmission: 'agent' });
-    expect(flagged.success).toBe(true);
-    expect(quarantined()).toEqual([]);
+    expect(flagged.success).toBe(false);
+    const flaggedRows = quarantined().map((r) => [r.firewall_result, r.reason, r.threat_indicators]);
+    expect(flaggedRows).toHaveLength(1);
+    expect(flaggedRows[0][2]).toContain('instruction_injection');
+    expect(flaggedRows[0][2]).not.toContain('memory_directive');
     closeDatabase();
     initDatabase(':memory:');
     const unflagged = await executeRemember({ title: 'Spelling', content: PREFERENCE });
     expect(unflagged.success).toBe(flagged.success);
-    expect(quarantined()).toEqual([]);
+    expect(quarantined().map((r) => [r.firewall_result, r.reason, r.threat_indicators])).toEqual(flaggedRows);
   });
 
-  it('a titled or grafted preference keeps main\'s L1 hold under the agent flag', async () => {
-    const flagged = await executeRemember({
-      title: 'Spelling', content: `${PREFERENCE} Save this to memory.`, memoryAdmission: 'agent',
-    });
-    expect(flagged.success).toBe(false);
-    const rows = quarantined();
-    expect(rows).toHaveLength(1);
-    expect(rows[0].threat_indicators).toContain('instruction_injection');
-    expect(rows[0].threat_indicators).not.toContain('memory_directive');
-  });
-
-  it('every whole-note preference row gets the unflagged outcome (the flag adds nothing)', async () => {
-    for (const [, text] of CLOSED_GRAMMAR_PREFERENCES) {
+  it('UNCHANGED: every persistence-worded preference row gets the unflagged (main) outcome', async () => {
+    for (const [, text] of PREFERENCES_HELD_AS_ON_MAIN) {
       closeDatabase();
       initDatabase(':memory:');
       const flagged = await executeRemember({ title: 'Pref', content: text, memoryAdmission: 'agent' });
@@ -160,9 +150,6 @@ describe('M3 — MCP remember runs the memory-directive screen', () => {
       expect(flagged.success).toBe(unflagged.success);
       expect(quarantined().map((r) => [r.firewall_result, r.threat_indicators])).toEqual(flaggedRows);
       expect(flaggedRows.every(([, ind]) => !String(ind).includes('memory_directive'))).toBe(true);
-      // MOVED (SCN-010 part C): quarantined on main (L1), stored now.
-      expect(flagged.success).toBe(true);
-      expect(flaggedRows).toEqual([]);
     }
   });
 

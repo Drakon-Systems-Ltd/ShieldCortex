@@ -200,13 +200,7 @@ export function defendRecallRows(rows, opts = {}, deps) {
     // the original (benign zero-width is harmless) is what gets injected.
     const scanContent = deps.sanitiseInput ? (deps.sanitiseInput(content)?.sanitised ?? content) : content;
 
-    // The stored row is one complete unit, so this primary scan opts it in to
-    // the closed preference grammar (SCN-010 part C), judged on the stored
-    // bytes as well as the sanitised copy: a fullwidth / NBSP / zero-width
-    // variant of a preference note is held exactly as before. The decoded
-    // rescan below passes nothing: an excerpt never qualifies its row. An
-    // older dist ignores the second argument.
-    const instr = deps.detectInstructions(scanContent, { wholeUnit: { received: content } });
+    const instr = deps.detectInstructions(scanContent);
     if (instr && instr.detected) {
       actions.push({ id: row.id, action: 'dropped', layer: 'instruction', reason: `instruction:${(instr.patterns ?? []).join(',')}` });
       continue;

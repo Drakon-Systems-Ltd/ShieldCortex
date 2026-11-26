@@ -16,6 +16,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { closeDatabase, getDatabase, initDatabase } from '../../database/init.js';
 import { executeRemember } from '../../tools/remember.js';
@@ -34,6 +36,7 @@ import { filterByTrust } from '../trust/recall-filter.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../types.js';
 import type { DefenceConfig, DefencePipelineResult } from '../types.js';
 
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const BALANCED: DefenceConfig = { ...DEFAULT_DEFENCE_CONFIG, mode: 'balanced' };
 
 /** One sentence of the closed grammar (T1). */
@@ -54,8 +57,7 @@ const L1_HOLD = [false, 'QUARANTINE', ['memory_manipulation']];
 const brief = (r: DefencePipelineResult) => [r.allowed, r.firewall.result, r.firewall.blockedPatterns];
 
 type DbState = { memories: number; quarantine: string[]; audit: Array<[string, string]> };
-function dbState(): DbState {
-  const db = getDatabase();
+function dbState(db: Database.Database = getDatabase()): DbState {
   return {
     memories: (db.prepare('SELECT COUNT(*) AS n FROM memories').get() as { n: number }).n,
     quarantine: (db.prepare('SELECT firewall_result FROM quarantine ORDER BY id').all() as Array<{ firewall_result: string }>)
@@ -132,14 +134,27 @@ describe('memory writes keep origin/main\'s verdict for a preference note', () =
     expect(dbState()).toEqual(QUARANTINED_L1);
   });
 
+  // The hook writer takes its own handle (a fresh file DB with the real
+  // schema, as save-auto-extracted-memory.test.ts does).
+  async function capture(title: string, content: string): Promise<DbState> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-pref-capture-'));
+    const db = new Database(path.join(dir, 'memories.db'));
+    try {
+      db.exec(fs.readFileSync(path.join(REPO_ROOT, 'src', 'database', 'schema.sql'), 'utf-8'));
+      await saveAutoExtractedMemory(db, { title, content, tags: [], category: 'note', salience: 0.4 }, null, { source: 'stop-hook' });
+      return dbState(db);
+    } finally {
+      db.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   it('saveAutoExtractedMemory, Astra B14 with an ordinary title: quarantined by L1 in the pipeline', async () => {
-    await saveAutoExtractedMemory(getDatabase(), { title: EDITION_TITLE, content: STATUS_NOTE, tags: [], category: 'note', salience: 0.4 }, null, { source: 'stop-hook' });
-    expect(dbState()).toEqual(QUARANTINED_L1);
+    expect(await capture(EDITION_TITLE, STATUS_NOTE)).toEqual(QUARANTINED_L1);
   });
 
   it('saveAutoExtractedMemory, Grok\'s title over a preference body: refused by the combined L2 pre-screen (unchanged)', async () => {
-    await saveAutoExtractedMemory(getDatabase(), { title: ATTACK_TITLE, content: PREFERENCE, tags: [], category: 'note', salience: 0.4 }, null, { source: 'stop-hook' });
-    expect(dbState()).toEqual({ memories: 0, quarantine: [], audit: [['BLOCK', '["non_authoritative:memory_persist"]']] });
+    expect(await capture(ATTACK_TITLE, PREFERENCE)).toEqual({ memories: 0, quarantine: [], audit: [['BLOCK', '["non_authoritative:memory_persist"]']] });
   });
 
   it('universal bridge save and search, B14 with a record title: blocked, nothing written or returned', async () => {
@@ -191,7 +206,7 @@ describe('recall defence drops a stored preference row exactly as on origin/main
     detectInstructions,
     detectEncoding,
     scanForCredentials,
-  } as RecallDefenceModules;
+  } as unknown as RecallDefenceModules;
 
   it('with and without a title: every row dropped by instruction:memory_manipulation', () => {
     const rows = [

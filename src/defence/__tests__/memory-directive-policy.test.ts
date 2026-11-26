@@ -24,7 +24,7 @@ import {
   ACCEPTED_AMBIGUITY,
   BENIGN_CONTROLS,
   BENIGN_GENRES,
-  CLOSED_GRAMMAR_PREFERENCES,
+  PREFERENCES_HELD_AS_ON_MAIN,
   SINK_DIRECTIVES,
 } from './fixtures/memory-directive-corpus.js';
 
@@ -351,9 +351,8 @@ describe('S — benign controls (B01-B16 + the persistence-worded preference row
   for (const [id, text] of BENIGN_CONTROLS) {
     it(id, () => expectQuiet(text));
   }
-  // S adds nothing on these (SCN-010 part C's closed grammar, not S, decides
-  // their L1/L2 answer).
-  for (const [id, text] of CLOSED_GRAMMAR_PREFERENCES) {
+  // S adds nothing on these; L1/L2 hold them exactly as on main (r7).
+  for (const [id, text] of PREFERENCES_HELD_AS_ON_MAIN) {
     it(id, () => expectQuiet(text));
   }
 });
