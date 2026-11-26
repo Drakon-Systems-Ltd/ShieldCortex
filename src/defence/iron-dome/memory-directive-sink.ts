@@ -33,6 +33,7 @@
 
 import { posix } from 'node:path';
 import { detectMemoryDirective, type MemoryDirectiveResult } from '../firewall/memory-directive-policy.js';
+import { foldForProvenance } from '../firewall/provenance-policy.js';
 import { PATH_KEYS } from './tool-input-schema.js';
 
 /** The one guard signal for this sink. */
@@ -349,8 +350,24 @@ function rustTrim(s: string): string {
 /**
  * The lines an `apply_patch` call adds to memory markdown (each `+` line of
  * a file section whose header, or `*** Move to:` destination, is memory
- * markdown, minus the `+`), or null when no header names memory markdown.
- * Removed and context lines are not read: they are not stored.
+ * markdown, minus the `+`), all joined, or null when no header names memory
+ * markdown. Removed and context lines are not read: they are not stored.
+ * The sink screens `patchMemoryScreenUnits`, not this joined text.
+ */
+export function patchAddedMemoryText(
+  normalisedName: string,
+  args: Record<string, unknown>,
+  isMemoryPath: (path: string) => boolean,
+): string | null {
+  const sections = patchMemorySections(normalisedName, args, isMemoryPath);
+  return sections === null ? null : sections.flat(2).join('\n');
+}
+
+/**
+ * The added memory lines grouped as Codex writes them: one entry per memory
+ * file section, each a list of RUNS (consecutive `+` lines, which land as
+ * consecutive lines of the file; any other line ends a run). Null when no
+ * header names memory markdown.
  *
  * It follows the state of Codex's parser (openai/codex@21aa552e,
  * `streaming_parser.rs`), line by line (split on `\n`; the trailing `\r`
@@ -364,31 +381,36 @@ function rustTrim(s: string): string {
  *     same way, once, and only before the section's first chunk line;
  *   - a `+` line is read raw, in an Add File or Update File section.
  * Invariant: for every patch Codex accepts, every line Codex writes into a
- * memory markdown file is in the returned text. Codex rejects a patch with
+ * memory markdown file is in the returned sections. Codex rejects a patch with
  * any other line shape; for such input this is the guard's own reading
  * (Begin Patch changes no state, and headers are read again after End).
  */
-export function patchAddedMemoryText(
+function patchMemorySections(
   normalisedName: string,
   args: Record<string, unknown>,
   isMemoryPath: (path: string) => boolean,
-): string | null {
+): string[][][] | null {
   const isMemory = (path: string): boolean => isSinkMemoryMarkdown(normalisedName, path, isMemoryPath);
   let named = false;
-  const added: string[] = [];
+  const sections: string[][][] = [];
   for (const text of valuesUnder(args, PATCH_TEXT_KEYS)) {
     if (typeof text !== 'string') continue;
     let state: 'outside' | 'add' | 'delete' | 'update' = 'outside';
     let inMemory = false;
     let chunkSeen = false;
     let moveSeen = false;
+    let section: string[][] | null = null;
+    let run: string[] | null = null;
     for (const split of text.split('\n')) {
       let line = split;
       for (let i = 0; i < 2 && line.endsWith('\r'); i++) line = line.slice(0, -1);
       const marker: string = state === 'update' ? rustTrimEnd(line) : rustTrim(line);
+      const added = inMemory && (state === 'add' || state === 'update') && line.startsWith('+');
+      if (!added) run = null;
       if (marker === PATCH_END) {
         state = 'outside';
         inMemory = false;
+        section = null;
         continue;
       }
       const header: (typeof PATCH_FILE_HEADERS)[number] | undefined =
@@ -399,6 +421,7 @@ export function patchAddedMemoryText(
         named = named || inMemory;
         chunkSeen = false;
         moveSeen = false;
+        section = null;
         continue;
       }
       if (state === 'update') {
@@ -412,10 +435,76 @@ export function patchAddedMemoryText(
         }
         if (marker === '@@' || marker.startsWith('@@ ') || line === '' || /^[ +-]/.test(line)) chunkSeen = true;
       }
-      if (inMemory && (state === 'add' || state === 'update') && line.startsWith('+')) added.push(line.slice(1));
+      if (!added) continue;
+      if (section === null) sections.push(section = []);
+      if (run === null) section.push(run = []);
+      run.push(line.slice(1));
     }
   }
-  return named ? added.join('\n') : null;
+  return named ? sections : null;
+}
+
+/** A fence or a double quote, after the screen's own fold: the only wrappers
+ *  of `detectMemoryDirective` that pair across a line break. */
+const CROSS_LINE_FENCE = '```';
+const CROSS_LINE_QUOTE = '"';
+
+/**
+ * What the sink screens for an `apply_patch` to memory markdown: a list of
+ * texts, each screened on its own (null when no header names memory
+ * markdown). A patch does not show the file around the lines it adds, and
+ * the screen exempts a directive by its context (a closed fence or double
+ * quote a cue introduces, a cue on the line above a fence), so no unit may
+ * borrow context from text the file does not hold next to it:
+ *   (a) each memory file section's added lines, on their own (never joined
+ *       across sections or files);
+ *   (b) each added line that carries a fence or a double quote, on its own,
+ *       and again behind an open double quote or an open fence (the file
+ *       above it may hold either, which pairs its delimiters the other way);
+ *   (c) each stretch of the other lines of one run (lines Codex writes next
+ *       to each other), split at every line of (b): no span the screen reads
+ *       crosses such a stretch, so it holds no context the file lacks.
+ * Screening more units can only add holds. Identical units are screened once.
+ * Past the screen's bounds (`MEMORY_SCREEN_MAX_CHARS` of added text, or more
+ * than `MEMORY_SCREEN_MAX_LEAVES` units) the list is cut short; the call is
+ * then held as too large to screen, never allowed on part of it.
+ */
+export function patchMemoryScreenUnits(
+  normalisedName: string,
+  args: Record<string, unknown>,
+  isMemoryPath: (path: string) => boolean,
+): string[] | null {
+  const sections = patchMemorySections(normalisedName, args, isMemoryPath);
+  if (sections === null) return null;
+  const units = new Set<string>();
+  let chars = 0;
+  const add = (unit: string): void => {
+    if (unit.length === 0 || units.has(unit)) return;
+    units.add(unit);
+    chars += unit.length;
+  };
+  // Already past what `screenMemoryWrite` reads: it holds on these alone.
+  const full = (): boolean => chars > MEMORY_SCREEN_MAX_CHARS || units.size > MEMORY_SCREEN_MAX_LEAVES;
+  for (const runs of sections) add(runs.flat().join('\n'));
+  for (const runs of sections) {
+    for (const run of runs) {
+      let stretch: string[] = [];
+      for (const line of run) {
+        if (full()) return [...units];
+        const folded = foldForProvenance(line);
+        const fence = folded.includes(CROSS_LINE_FENCE);
+        const quote = folded.includes(CROSS_LINE_QUOTE);
+        if (!fence && !quote) { stretch.push(line); continue; }
+        add(stretch.join('\n'));
+        stretch = [];
+        add(line);
+        if (quote) add(`${CROSS_LINE_QUOTE}${line}`);
+        if (fence) add(`${CROSS_LINE_FENCE}\n${line}`);
+      }
+      add(stretch.join('\n'));
+    }
+  }
+  return [...units];
 }
 
 /** What the sink screens for this call: its kind and the value to collect
@@ -437,7 +526,7 @@ export interface MemorySinkTarget {
  *     new-side text key (`str_replace`, `search_replace`), where ANY path
  *     value is memory markdown: the whole argument bag;
  *   - otherwise an `apply_patch` whose header names memory markdown: the
- *     lines it adds there.
+ *     lines it adds there, as `patchMemoryScreenUnits`.
  */
 export function memorySinkTarget(
   normalisedName: string,
@@ -454,8 +543,8 @@ export function memorySinkTarget(
     }
   }
   if (normalisedName === 'apply_patch') {
-    const added = patchAddedMemoryText(normalisedName, args, isMemoryWritePath);
-    if (added !== null) return { kind: 'memory-markdown', stored: [added] };
+    const units = patchMemoryScreenUnits(normalisedName, args, isMemoryWritePath);
+    if (units !== null) return { kind: 'memory-markdown', stored: units };
   }
   return null;
 }
