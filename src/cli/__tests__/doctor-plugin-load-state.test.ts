@@ -3,7 +3,8 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
-import { checkOpenClawPluginLoadState } from '../doctor.js';
+import { checkOpenClawPluginLoadState, renderPluginLoadVerdict } from '../doctor.js';
+import { gatherReconcileInput, reconcilePluginState } from '../../integrations/openclaw-plugin-index.js';
 
 /**
  * Doctor must surface the #74 silent-drop honestly: an `enabled:true` plugin
@@ -112,16 +113,21 @@ describe('checkOpenClawPluginLoadState', () => {
  * enabled" pass.
  */
 describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
-  function migrated(installPath: string): void {
+  function migrated(
+    installPath: string,
+    opts: { registered?: boolean; recordVersion?: string; rootDir?: string } = {},
+  ): void {
     const oc = path.join(home, '.openclaw');
     fs.mkdirSync(path.join(oc, 'state'), { recursive: true });
     fs.writeFileSync(
       path.join(oc, 'openclaw.json'),
       JSON.stringify({
-        plugins: {
-          entries: { [PLUGIN]: { enabled: true, hooks: { allowConversationAccess: true } } },
-          allow: [PLUGIN],
-        },
+        plugins: opts.registered === false
+          ? { entries: {}, allow: [] }
+          : {
+              entries: { [PLUGIN]: { enabled: true, hooks: { allowConversationAccess: true } } },
+              allow: [PLUGIN],
+            },
       }),
     );
     const db = new Database(path.join(oc, 'state', 'openclaw.sqlite'));
@@ -130,13 +136,18 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
       JSON.stringify({
         revision: 1,
         index: {
-          installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath } },
-          plugins: [{ pluginId: PLUGIN, enabled: true }],
+          installRecords: { [PLUGIN]: { source: 'npm', version: opts.recordVersion ?? '5.22.1', installPath } },
+          plugins: [{ pluginId: PLUGIN, enabled: true, ...(opts.rootDir ? { rootDir: opts.rootDir } : {}) }],
         },
       }),
     );
     db.close();
   }
+  /** The same gather + reconcile + render doctor runs, with the live roster injected. */
+  const renderWithRoster = (roster: string[] | null) =>
+    renderPluginLoadVerdict(
+      reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => roster })),
+    );
   const pkgDir = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-abc', PKG_SUBPATH);
 
   it('the recorded directory is there: passes', async () => {
@@ -177,5 +188,47 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     const r = await checkOpenClawPluginLoadState(home, '5.22.1');
     expect(r.status).not.toBe('fail');
     expect(r.status).not.toBe('pass');
+  });
+
+  // #260 r4 (Astra r3 BLOCKER 2): a wiped registration behind a stale record
+  // was rendered "skipped (realtime plugin not installed)".
+  it('no config entry + stale record + a real packaged extension at the roster rootDir: FAILS as not registered, never "skipped … not installed"', async () => {
+    const ext = path.join(home, '.openclaw', 'extensions', PLUGIN);
+    fs.mkdirSync(path.join(ext, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(ext, 'dist', 'index.js'), '');
+    fs.writeFileSync(path.join(ext, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
+    migrated(pkgDir(), { registered: false, rootDir: ext });
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expect(r.status).toBe('fail');
+    expect(r.message).not.toMatch(/skipped|not installed/i);
+    expect(reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null })).state)
+      .toBe('installed-not-enabled');
+  });
+
+  // #260 r4 (Astra r3 BLOCKER 1): a confirmed live absence is not a warning.
+  it('an empty recorded directory + a readable live roster that omits the plugin: FAILS (not loaded)', () => {
+    fs.mkdirSync(pkgDir(), { recursive: true });
+    migrated(pkgDir());
+    const r = renderWithRoster(['brave']);
+    expect(r.status).toBe('fail');
+    expect(r.message).not.toMatch(/points to a folder that is no longer there/);
+  });
+
+  // #260 r4 (Astra r3 SHOULD-FIX): the roster proves the load, not a version.
+  it('gone directory + live roster names the plugin + stale record 4.0.0: passes roster-confirmed with "version unverified", never v5.22.1', () => {
+    migrated(pkgDir(), { recordVersion: '4.0.0' });
+    const r = renderWithRoster([PLUGIN]);
+    expect(r.status).toBe('pass');
+    expect(r.message).toMatch(/roster-confirmed, version unverified\)/);
+    expect(r.message).not.toMatch(/5\.22\.1|4\.0\.0/);
+  });
+
+  it('control: directory present + live roster names the plugin: roster-confirmed with the measured version', () => {
+    fs.mkdirSync(pkgDir(), { recursive: true });
+    fs.writeFileSync(path.join(pkgDir(), 'package.json'), JSON.stringify({ version: '5.22.1' }));
+    migrated(pkgDir());
+    const r = renderWithRoster([PLUGIN]);
+    expect(r.status).toBe('pass');
+    expect(r.message).toMatch(/roster-confirmed, v5\.22\.1\)/);
   });
 });

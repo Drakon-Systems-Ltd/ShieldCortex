@@ -399,6 +399,48 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     expect(verdict.state).not.toBe('version-regressed');
     expect(verdict.state).not.toBe('enabled-not-installed');
     expect(verdict.severity).not.toBe('fail');
+    // #260 r4: load proven, version not — healthy, and it says so.
+    expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', versionUnverified: true });
+    expect(verdict.reasons.join(' ')).not.toMatch(/versions agree/);
+  });
+
+  // #260 r4 (Astra r3 BLOCKER 1): the install location is uncertain; the load
+  // result is not. A readable roster that omits the plugin still convicts.
+  it('empty recorded dir + a readable live roster that OMITS the plugin, no registration after boot ⇒ enabled-not-loaded / fail', () => {
+    writeConfig(true, true);
+    writeMachineStateIndex(staleRow());
+    fs.mkdirSync(gone(), { recursive: true });
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => ['brave'] });
+    expect(input.indexInstallPathExists).toBe(false);
+    expect(input.registrationSeenAfterBoot).not.toBe(true);
+    const verdict = reconcilePluginState(input);
+    expect(verdict.loadedInLiveRoster).toBe(false);
+    expect(verdict).toMatchObject({ state: 'enabled-not-loaded', severity: 'fail' });
+  });
+
+  it('gone recorded dir + a readable live roster that OMITS the plugin ⇒ enabled-not-loaded / fail', () => {
+    writeConfig(true, true);
+    writeMachineStateIndex(staleRow());
+    const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => ['brave'] }));
+    expect(verdict).toMatchObject({ state: 'enabled-not-loaded', severity: 'fail' });
+  });
+
+  // #260 r4 (Astra r3 BLOCKER 2): the #214 wipe shape behind a stale path.
+  it('no config entry / not allow-listed + stale path + a real packaged extension at the roster rootDir ⇒ installed-not-enabled, never not-installed', () => {
+    writeConfig(null, false);
+    const ext = path.join(home, '.openclaw', 'extensions', PLUGIN);
+    fs.mkdirSync(path.join(ext, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(ext, 'dist', 'index.js'), '');
+    fs.writeFileSync(path.join(ext, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
+    writeMachineStateIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: gone() } },
+      plugins: [{ pluginId: PLUGIN, enabled: true, rootDir: ext }],
+    });
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
+    expect(input.indexInstallPathExists).toBe(false);
+    const verdict = reconcilePluginState(input);
+    expect(verdict.state).not.toBe('not-installed');
+    expect(verdict).toMatchObject({ state: 'installed-not-enabled', severity: 'fail', recommendedAction: 're-register' });
   });
 
   it('the stale record beside a real build elsewhere: the build decides (version from disk, not the record)', () => {

@@ -260,6 +260,12 @@ export interface ReconcileVerdict {
    * other `load-unproven` ones.
    */
   indexPathMissing?: boolean;
+  /**
+   * `healthy` because the running gateway proved the load, but the installed
+   * version could not be verified: the index record points at a folder that is
+   * gone and no build was found on disk (#260). Absent on every other verdict.
+   */
+  versionUnverified?: boolean;
   reasons: string[];
 }
 
@@ -328,19 +334,13 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // an installation.
   //
   // #260: a record is a claim, and the index can outlive what it describes.
-  // When the directory the index record names is CONFIRMED gone, no record
-  // counts (the index is the layer OpenClaw itself loads from, so installs.json
-  // cannot vouch for it either) — only a build actually on disk does.
-  // A running gateway that provably loaded the plugin outranks a stale path:
-  // the build is somewhere we did not look, and "no package installed" would
-  // be a false FAIL on a protected box.
-  const indexPathGone = Boolean(indexRecord) && input.indexInstallPathExists === false;
-  const indexPathMissing = indexPathGone && loadedInLiveRoster !== true;
-  const installed = Boolean(
-    onDiskVersion ||
-      input.onDiskInstallPath ||
-      (!indexPathMissing && (input.installsJson || indexRecord)),
-  );
+  // A record whose directory is CONFIRMED gone still counts as an install
+  // here — every rule below runs exactly as it would without that knowledge.
+  // The stale path does two narrow things only: it withholds the record's
+  // version (see `effective`), and it blocks a PASS (see the end of this
+  // function). It never pre-empts another rule.
+  const indexPathMissing = Boolean(indexRecord) && input.indexInstallPathExists === false;
+  const installed = Boolean(input.installsJson || onDiskVersion || indexRecord || input.onDiskInstallPath);
 
   // The index warning is present even on healthy hosts (it names every plugin
   // whose legacy/SQLite metadata differs), so it is a signal, not a verdict.
@@ -362,8 +362,8 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // Effective running version: on-disk is ground truth, else the index record.
   // A record whose directory is gone says nothing about what would run — not
   // even when the live roster names the plugin: that proves it loaded, not
-  // which version loaded.
-  const effective = coerce(onDiskVersion) ?? (indexPathGone ? null : coerce(indexVersion));
+  // which version loaded. (No live-roster term in `indexPathMissing`.)
+  const effective = coerce(onDiskVersion) ?? (indexPathMissing ? null : coerce(indexVersion));
   const expected = coerce(expectedVersion);
   const regressed = Boolean(effective && expected && semver.lt(effective, expected));
 
@@ -415,14 +415,6 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     //     code returned not-installed/ok here and doctor printed
     //     "skipped (realtime plugin not installed)" over exactly that.
     if (enabledInConfig) {
-      // #260: the index still records an install, at a path that is gone, and
-      // nothing was found where we look. That is not proof of absence — the
-      // build may sit in a layout or a configured load path this gather does
-      // not read — so it can neither pass nor convict. Unproven, warn.
-      if (indexPathMissing) {
-        reasons.push(`OpenClaw's install index records the plugin at ${indexRecord?.installPath}, which is gone; no other build was found where ShieldCortex looks — it may be installed elsewhere; load state is unproven`);
-        return { ...base, indexPathMissing: true, state: 'load-unproven', severity: 'warn', recommendedAction: 'none', reasons };
-      }
       reasons.push(
         'openclaw.json ENABLES the realtime plugin but no package is installed on this host (no installs.json record, no index record, no on-disk build) — the gateway boots WITHOUT the interceptor while config reports it ON',
       );
@@ -574,6 +566,29 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   if (projectDirs.length > 1) {
     reasons.push(`${projectDirs.length} plugin project dirs on disk — prune the stale duplicate so a future toggle cannot re-resolve to it`);
     return { ...base, state: 'duplicate-install', severity: 'warn', recommendedAction: 'dedupe-and-reload', reasons };
+  }
+
+  // #260: THE ONLY THING A STALE INDEX PATH DOES. Every rule above ran as if
+  // the record were sound; control is here because none of them objected, and
+  // the next statement would be a pass. But the index records the plugin at a
+  // path that is gone and none of our own readers found a build anywhere, so
+  // nothing on this host backs "installed, versions agree".
+  //   - The running gateway provably loaded it ⇒ load is proven, so it stays
+  //     healthy — but WHICH version loaded is not known, and is not claimed.
+  //   - Otherwise ⇒ neither a pass nor a conviction: the build may sit in a
+  //     layout or a configured load path this gather does not read.
+  if (indexPathMissing && onDiskVersion == null && !input.onDiskInstallPath) {
+    if (loadedInLiveRoster === true) {
+      reasons.push(
+        input.liveLoadEvidence === 'gateway-pid-registration'
+          ? 'enabled, registration attributed to the RUNNING gateway PID after boot (hot-reload / post-boot load)'
+          : 'enabled, present on the running gateway boot roster',
+      );
+      reasons.push("load proven by the running gateway; the installed version could not be verified (OpenClaw's record points to a folder that is gone)");
+      return { ...base, versionUnverified: true, state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons };
+    }
+    reasons.push(`OpenClaw's install index records the plugin at ${indexRecord?.installPath}, which is gone; no other build was found where ShieldCortex looks — it may be installed elsewhere; load state is unproven`);
+    return { ...base, indexPathMissing: true, state: 'load-unproven', severity: 'warn', recommendedAction: 'none', reasons };
   }
 
   // Say exactly which evidence we have. Claiming "loaded in roster" off the

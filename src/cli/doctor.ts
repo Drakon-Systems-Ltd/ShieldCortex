@@ -9273,6 +9273,10 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       // without turning installation evidence into a live-load assertion.
       const rosterProven = verdict.loadedInLiveRoster === true;
       const version = verdict.onDiskVersion ?? verdict.expectedVersion;
+      // #260: load is proven but no version was measured (the index record
+      // points at a folder that is gone) — never print the expected version as
+      // though it had been read off this host.
+      const versionText = verdict.versionUnverified === true ? 'version unverified' : `v${version}`;
       if (!rosterProven) {
         // Status stays `pass`: the reconciler classified this `severity: 'ok'`
         // (installed, enabled, versions agree) and nothing is known to be
@@ -9311,8 +9315,8 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         label,
         status: 'pass',
         message: hotReload
-          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, v${version}); enforcement not probed here`
-          : `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here`,
+          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, ${versionText}); enforcement not probed here`
+          : `realtime plugin loaded (roster-confirmed, ${versionText}); enforcement not probed here`,
         verboseNote: `Prove it live with: ${LIVE_CANARY_COMMAND}`,
       };
     }

@@ -192,6 +192,43 @@ describe('#260 r2 — malformed and stale index input', () => {
     expect(verdict.state).not.toBe('enabled-not-installed');
     expect(verdict.severity).not.toBe('fail');
     expect(verdict.indexPathMissing).toBe(false);
+    // #260 r4: load is proven, the version is not — and is not claimed.
+    expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', recommendedAction: 'none', versionUnverified: true });
+    expect(verdict.reasons.join(' ')).toMatch(/load proven by the running gateway; the installed version could not be verified/);
+    expect(verdict.reasons.join(' ')).not.toMatch(/versions agree/);
+  });
+
+  it('versionUnverified is absent on an ordinary healthy verdict, and on a stale-path one with a build on disk (#260 r4)', () => {
+    expect(reconcilePluginState(base({ liveRoster: ['shieldcortex-realtime'] })).versionUnverified).toBeUndefined();
+    const onDisk = reconcilePluginState(
+      base({ indexInstallPathExists: false, liveRoster: ['shieldcortex-realtime'], onDiskVersion: '5.22.1' }),
+    );
+    expect(onDisk).toMatchObject({ state: 'healthy', severity: 'ok' });
+    expect(onDisk.versionUnverified).toBeUndefined();
+    expect(onDisk.reasons.join(' ')).toMatch(/versions agree/);
+  });
+
+  // #260 r4 (Astra r3 BLOCKER 1): the stale path blocks a pass and nothing
+  // else. A readable live roster that OMITS the plugin is a confirmed absence.
+  it('a stale path never pre-empts a confirmed live absence: enabled-not-loaded / fail', () => {
+    const verdict = reconcilePluginState(base({ indexInstallPathExists: false, liveRoster: ['brave'] }));
+    expect(verdict).toMatchObject({ state: 'enabled-not-loaded', severity: 'fail', indexPathMissing: false });
+    // …and the #142 registration race stays the ambiguity it was on main.
+    const race = reconcilePluginState(base({ indexInstallPathExists: false, liveRoster: ['brave'], registrationSeenAfterBoot: true }));
+    expect(race).toMatchObject({ state: 'load-unproven', severity: 'warn', indexPathMissing: false });
+  });
+
+  it('a stale path never pre-empts the other main rules (disabled-by-operator, config-unreadable, index says not loaded)', () => {
+    expect(reconcilePluginState(base({ indexInstallPathExists: false, config: { enabled: false, inAllow: true } })))
+      .toMatchObject({ state: 'disabled-by-operator', severity: 'warn' });
+    expect(reconcilePluginState(base({ indexInstallPathExists: false, config: { enabled: true, inAllow: true, readable: false } })))
+      .toMatchObject({ state: 'config-unreadable', severity: 'warn' });
+    const notInIndex = base({ indexInstallPathExists: false });
+    notInIndex.index!.plugins = [];
+    // main's rule 4, with main's action — not the stale-path warn.
+    expect(reconcilePluginState(notInIndex)).toMatchObject({
+      state: 'load-unproven', severity: 'warn', recommendedAction: 'update-openclaw-tracked', indexPathMissing: false,
+    });
   });
 
   it('…and the missing copy\'s recorded version is never the running version, live roster or not (#260 r3)', () => {
@@ -204,9 +241,11 @@ describe('#260 r2 — malformed and stale index input', () => {
     expect(reconcilePluginState({ ...input, indexInstallPathExists: true }).state).toBe('version-regressed');
   });
 
-  it('…not enabled in config either: plainly not installed, not the #222 wipe', () => {
+  // #260 r4 (Astra r3 BLOCKER 2): a stale path must not turn a registration
+  // loss into a silent "not installed" skip — main's #222 rule decides.
+  it('…not registered in config either: main\'s #222 rule runs — installed-not-enabled, never not-installed', () => {
     const verdict = reconcilePluginState(base({ indexInstallPathExists: false, config: { enabled: null, inAllow: false } }));
-    expect(verdict).toMatchObject({ state: 'not-installed', severity: 'ok' });
+    expect(verdict).toMatchObject({ state: 'installed-not-enabled', severity: 'fail', recommendedAction: 're-register' });
   });
 
   it('a missing path with a real build on disk: the build decides, and the record\'s version is not the running version', () => {
