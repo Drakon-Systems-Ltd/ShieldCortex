@@ -165,6 +165,14 @@ const RUN: Record<string, (doctor: Doctor) => Promise<unknown>> = {
   // (config-integrity-followups-878).
   checkChainedLedger: (d) => d.checkChainedLedger(),
   checkAgentConfigWatch: (d) => d.checkAgentConfigWatch(home),
+  // #1124: reads no config.json, but statfs's the config directory itself,
+  // so it runs here against the snapshot rather than being exempted. Called
+  // as runDoctor calls it, on getConfigDir() from the same module registry.
+  checkVolumeFreeSpace: async () => {
+    const { getConfigDir } = await import('../../cloud/config.js');
+    const { checkVolumeFreeSpace } = await import('../doctor-volume-space.js');
+    return checkVolumeFreeSpace(getConfigDir());
+  },
 };
 
 /** runDoctor's own config reads outside the check list (the HOSTS header). */

@@ -508,11 +508,13 @@ describe('against the real filesystem', () => {
       const evidence = readVolumeSpace(configured);
       expect(evidence).toMatchObject({ kind: 'unavailable', code: 'ENOTDIR' });
 
-      // A reader that would report a roomy volume for anything that resolves,
-      // the file included: nothing resolves, so no figure is printed.
+      // A reader that would report a roomy volume for anything the real
+      // statfs resolves, the file included: nothing resolves, so no figure is
+      // printed. The oracle is statfs itself, not realpath: Darwin's realpath
+      // accepts `file/`, `file/.` and `file/..` where its statfs says ENOTDIR.
       const asked: string[] = [];
       const row = checkVolumeFreeSpace(configured, {
-        statfsSync: (target) => { asked.push(target); fs.realpathSync.native(target); return ROOMY; },
+        statfsSync: (target) => { asked.push(target); fs.statfsSync(target); return ROOMY; },
       });
       expect(asked).toEqual([configured]);
       expect(row.status).toBe('warn');
