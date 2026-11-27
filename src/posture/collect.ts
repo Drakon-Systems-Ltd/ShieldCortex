@@ -441,6 +441,15 @@ function preciseMtimeMs(st: { mtimeMs?: unknown; mtimeNs?: unknown }): number {
   return Number.NaN;
 }
 
+/** Both stats carry bigint mtimeNs and ctimeNs, and they are equal. No Number conversion. */
+function sameExactTimes(
+  a: { mtimeNs?: unknown; ctimeNs?: unknown },
+  b: { mtimeNs?: unknown; ctimeNs?: unknown },
+): boolean {
+  return typeof a.mtimeNs === 'bigint' && typeof b.mtimeNs === 'bigint' && a.mtimeNs === b.mtimeNs
+    && typeof a.ctimeNs === 'bigint' && typeof b.ctimeNs === 'bigint' && a.ctimeNs === b.ctimeNs;
+}
+
 type DescriptorMtime = { kind: 'ns'; ns: bigint } | { kind: 'ms'; ms: number };
 
 /**
@@ -618,8 +627,17 @@ export function readSelfReportFile(
     if (n > SELF_REPORT_MAX_BYTES) return oversize(n);
     if (byteCountAbove(n, opened.size)) return invalid('unreadable');
     const read = parseSelfReport(buf.subarray(0, n).toString('utf8'), n);
+    // Post-read check on the same descriptor: type, exact device and inode,
+    // size, and the exact mtimeNs and ctimeNs (bigint, never converted). A
+    // changed or missing timestamp discards the parse as unreadable rather than
+    // aging it with the earlier mtime (#1160). A same-size rewrite that leaves
+    // both timestamps unchanged (coarse filesystem timestamps) is not detected.
+    // This does not authenticate the writer.
     const again = fs.fstatSync(fd, EXACT_STAT);
-    if (!again.isFile() || !sameDeviceInode(again, opened) || again.size !== opened.size) {
+    if (
+      !again.isFile() || !sameDeviceInode(again, opened) || again.size !== opened.size
+      || !sameExactTimes(again, opened)
+    ) {
       return invalid('unreadable');
     }
     // parseSelfReport classifies its own rejections (oversize is trust); an
