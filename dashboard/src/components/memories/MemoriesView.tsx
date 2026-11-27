@@ -4,6 +4,7 @@ import { useState, useMemo, useCallback } from 'react';
 import { Database } from 'lucide-react';
 import { useOpenClawSessions, useMemoriesWithRealtime } from '@/hooks/useMemories';
 import { useDashboardStore } from '@/lib/store';
+import { Button } from '@/components/ds/Button';
 import { CardError } from '@/components/ds/CardError';
 import { EmptyState } from '@/components/ds/EmptyState';
 import { Skeleton } from '@/components/ds/Skeleton';
@@ -28,15 +29,25 @@ export function MemoriesView() {
   const { selectedMemory, setSelectedMemory, projectFilter, typeFilter, categoryFilter } =
     useDashboardStore();
 
+  // Reset before the query observes a new scope, including a return to an old scope.
+  const scope = JSON.stringify([projectFilter, typeFilter, categoryFilter, search]);
+  const [page, setPage] = useState({ scope, offset: 0 });
+  const offset = page.scope === scope ? page.offset : 0;
+  if (page.scope !== scope) setPage({ scope, offset: 0 });
+
   const { data: openClawData } = useOpenClawSessions();
   const {
     data: memories = [],
     isLoading,
     isError,
     error,
+    pagination,
+    isFetching,
+    isPlaceholderData,
     refetch,
   } = useMemoriesWithRealtime({
-    limit: 1000,
+    offset,
+    limit: search ? 1000 : 50,
     project: projectFilter || undefined,
     type: typeFilter || undefined,
     category: categoryFilter || undefined,
@@ -45,6 +56,9 @@ export function MemoriesView() {
   });
 
   const sessions = useMemo(() => openClawData?.sessions ?? [], [openClawData?.sessions]);
+
+  const currentPage = !isError && !isPlaceholderData && pagination?.offset === offset ? pagination : undefined;
+  const pageSort = viewTab === 'all' && !search;
 
   const sorted = useMemo(() => {
     const arr = [...memories];
@@ -96,14 +110,16 @@ export function MemoriesView() {
                 : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)]'
             }`}
           >
-            All <span className="ml-1 text-[var(--sc-text-muted)]">{memories.length}</span>
+            All <span className="ml-1 text-[var(--sc-text-muted)]">{currentPage && (search ? memories.length : currentPage.total)}</span>
           </button>
         </div>
 
+        {pageSort && <label htmlFor="memory-sort" className="text-xs">Sort this page</label>}
         <Select
+          id="memory-sort"
           value={sortKey}
           onChange={(e) => setSortKey(e.target.value as SortKey)}
-          aria-label="Sort memories"
+          aria-label={pageSort ? undefined : 'Sort memories'}
           className="w-auto"
         >
           <option value="salience">Salience</option>
@@ -119,6 +135,28 @@ export function MemoriesView() {
           containerClassName="ml-auto w-56"
         />
       </div>
+
+      {viewTab === 'all' && currentPage && (
+        <div className="flex items-center gap-3 text-xs">
+          <span role="status">
+            {search ? `${memories.length} results returned (up to 1000)`
+              : memories.length ? `Showing ${currentPage.offset + 1}–${currentPage.offset + memories.length} of ${currentPage.total}`
+              : currentPage.total ? `No rows on this page (${currentPage.total} matches)` : '0 matches'}
+          </span>
+          {!search && (
+            <>
+              <Button size="sm" variant="secondary" disabled={isFetching || currentPage.offset === 0}
+                onClick={() => setPage({ scope, offset: Math.max(0, currentPage.offset - currentPage.limit) })}>
+                Previous
+              </Button>
+              <Button size="sm" variant="secondary" disabled={isFetching || !currentPage.hasMore}
+                onClick={() => setPage({ scope, offset: currentPage.offset + currentPage.limit })}>
+                Next
+              </Button>
+            </>
+          )}
+        </div>
+      )}
 
       {isError && (
         <CardError
@@ -158,13 +196,13 @@ export function MemoriesView() {
           )}
 
           {/* All memories view */}
-          {viewTab === 'all' && (
+          {viewTab === 'all' && currentPage && (
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
-              {sorted.length === 0 && (
+              {sorted.length === 0 && (search || currentPage.total === 0) && (
                 <EmptyState
                   className="col-span-full"
                   icon={Database}
-                  message={search ? 'No memories match your search.' : 'No memories found yet — they appear here as they are captured.'}
+                  message={search ? 'No memories match your search.' : 'No memories match the current filters.'}
                 />
               )}
               {sorted.map((memory) => (
