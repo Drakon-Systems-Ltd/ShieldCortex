@@ -295,6 +295,23 @@ export interface ReconcileVerdict {
   reasons: string[];
 }
 
+/**
+ * A path read out of OpenClaw's files, made safe to put in `reasons` (#260,
+ * Case review). Those reach `--json` and verbose terminal output, and the path
+ * is whatever the file says: a newline, an ANSI escape or a bidi override in
+ * it would forge or hide output. C0/C1 controls, DEL, line/paragraph
+ * separators and bidi controls are written as `\u{..}`; anything longer than
+ * 512 characters is cut and marked.
+ */
+export function safeForReason(p: unknown): string {
+  const text = typeof p === 'string' ? p : String(p);
+  const escaped = text.replace(
+    /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
+    (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`,
+  );
+  return escaped.length > 512 ? `${escaped.slice(0, 512)}\u2026(truncated)` : escaped;
+}
+
 function coerce(v: string | null | undefined): string | null {
   if (!v || typeof v !== 'string') return null;
   const c = semver.valid(v) ?? semver.valid(semver.coerce(v) ?? '');
@@ -610,7 +627,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
 
   // 5. installs.json ↔ SQLite index disagree (the precondition for a future drop).
   if (metadataConflict) {
-    if (pathConflict) reasons.push(`installs.json install path disagrees with the SQLite index (${installsPath} vs ${indexPath})`);
+    if (pathConflict) reasons.push(`installs.json install path disagrees with the SQLite index (${safeForReason(installsPath)} vs ${safeForReason(indexPath)})`);
     if (versionLayerConflict) reasons.push(`installs.json version ${installsJsonVersion} disagrees with index version ${indexVersion}`);
     return {
       ...base,
@@ -652,7 +669,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
       }
       // Live proof AND a build on disk: the ordinary pass below.
     } else {
-      const where = String(indexRecord?.installPath);
+      const where = safeForReason(indexRecord?.installPath);
       reasons.push(
         buildElsewhere
           ? `OpenClaw's install index records the plugin at ${where}, which holds no plugin build; a build exists elsewhere on disk, but nothing shows OpenClaw selected it and the running gateway did not prove the load — load state is unproven`

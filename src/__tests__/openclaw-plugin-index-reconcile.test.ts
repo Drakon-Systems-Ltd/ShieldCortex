@@ -5,6 +5,7 @@ import { describe, expect, it } from '@jest/globals';
 import {
   planReconcileActions,
   reconcilePluginState,
+  safeForReason,
   type ReconcileInput,
 } from '../integrations/openclaw-plugin-index.js';
 
@@ -374,5 +375,45 @@ describe('#260 Sol-4 — present-but-unreadable index vs confirmed absence', () 
       index: { installRecords: {}, plugins: [] },
     }));
     expect(verdict).toMatchObject({ state: 'enabled-not-installed', indexUnreadable: false });
+  });
+});
+
+/**
+ * #260 Case non-blocking — a recorded path goes into `reasons` (and so into
+ * `--json` and verbose output) with control characters escaped.
+ */
+describe('#260 Case — control characters in a recorded path never reach reasons raw', () => {
+  const hostile = '/x\n[OK] all good\u001b[2J\u202e\u0085';
+  const input = (installPath: string, over: Partial<ReconcileInput> = {}): ReconcileInput => ({
+    pluginId: 'shieldcortex-realtime',
+    expectedVersion: '5.22.1',
+    config: { enabled: true, inAllow: true },
+    installsJson: null,
+    index: { installRecords: { 'shieldcortex-realtime': { source: 'npm', version: '5.22.1', installPath } }, plugins: [{ pluginId: 'shieldcortex-realtime', enabled: true }] },
+    onDiskVersion: null,
+    liveRoster: null,
+    indexInstallPathExists: false,
+    ...over,
+  });
+  // eslint-disable-next-line no-control-regex
+  const RAW = /[\u0000-\u001f\u007f-\u009f\u202e]/;
+
+  it('the stale-path reason', () => {
+    const verdict = reconcilePluginState(input(hostile));
+    expect(verdict.state).toBe('load-unproven');
+    const text = verdict.reasons.join(' ');
+    expect(text).not.toMatch(RAW);
+    expect(text).toContain('/x\\u{a}[OK] all good\\u{1b}[2J\\u{202e}\\u{85}');
+  });
+
+  it('the path-conflict reason', () => {
+    const verdict = reconcilePluginState(input(hostile, { indexInstallPathExists: true, installsJson: { version: '5.22.1', installPath: '/y\r\n' } }));
+    expect(verdict.state).toBe('conflicted-metadata');
+    expect(verdict.reasons.join(' ')).not.toMatch(RAW);
+  });
+
+  it('safeForReason: plain paths unchanged; long ones cut', () => {
+    expect(safeForReason('/home/u/.openclaw/npm/projects/a b/é')).toBe('/home/u/.openclaw/npm/projects/a b/é');
+    expect(safeForReason('a'.repeat(600))).toBe(`${'a'.repeat(512)}…(truncated)`);
   });
 });
