@@ -41,6 +41,14 @@ import type { ContractDriftObservation } from './tool-input-schema.js';
 import type { NativeArtifactCapture, NativeArtifactProvenance } from './native-exec-provenance.js';
 import { forEachWindow } from '../scan-windows.js';
 import { bodyIsAllDataRead } from './heredoc-data-read.js';
+import {
+  MEMORY_DIRECTIVE_SIGNAL,
+  memoryDirectiveHoldReason,
+  memorySinkTargets,
+  screenMemoryWrite,
+  type MemoryDirectiveHold,
+  type MemoryDirectiveScreen,
+} from './memory-directive-sink.js';
 
 export type ToolGuardDecision = 'allow' | 'require_approval' | 'block';
 export type ToolGuardSeverity = 'benign' | 'sensitive' | 'dangerous' | 'catastrophic';
@@ -5745,12 +5753,18 @@ export function isGuardSelfProtectionVerdict(signals: readonly string[] | undefi
  * documented postures: watch-only advisory, the enforce-when-ready shadow,
  * the OpenClaw failure policy and Hermes behave as for any dangerous verdict.
  *
+ * `memory-directive` (SCN-010 PR B): a stored standing order that relaxes a
+ * control is exactly what an operator's `memory` / `remember` / `persist`
+ * allowlist entry or a broker's guess must not release on the operator's
+ * behalf. The person whose controls it relaxes answers it.
+ *
  * The ONE list. The Claude Code hook reads it from this module and carries a
  * duplicate for an older dist; the OpenClaw interceptor carries a duplicate.
  * Held equal by enforcement-surface-parity.
  */
 export const GUARD_PROMPT_ONLY_SIGNALS: readonly string[] = Object.freeze([
   'reverse-shell',
+  'memory-directive',
 ]);
 
 /** True when a verdict's signals may be released only by a human answer. */
@@ -5908,6 +5922,8 @@ const REMEDIATION: Record<string, string> = {
   'destroy-data-or-infra': 'confirm the target database, cluster or cloud resource before running this — it destroys data or infrastructure that a local undo cannot bring back',
   'reverse-shell': 'an interactive shell is wired to a network socket, so another machine can run commands here — confirm the destination and why it needs a shell before running this',
   'dd-overwrite': 'confirm the destination before running dd — it overwrites the target without confirmation',
+  // SCN-010 PR B: copy fixed by the design; the reason names pattern groups, never the memory text.
+  'memory-directive': 'This memory would store a standing instruction that relaxes a control, claims authority or hides something from you. Approve only if you asked for exactly this rule.',
   'opaque-script-invocation': 'the guard could not read the invoked script, so its contents were not scanned — inspect the file before running it',
   'opaque-command-substitution': 'the guard could not read the file a $(cat …) / $(< …) substitution splices into this command, so that text was not scanned — inspect the file before running it',
 };
@@ -8211,6 +8227,17 @@ export function evaluateToolCall(
   // (a schema rejection, a `sudo` the walk did reach) would otherwise carry the
   // call through `autoApprove` or advisory mode as if the guard had read it.
   if (evidence?.signals.includes('command-evidence-unscannable')) v = withUnscannableSignals(v);
+  // SCN-010 PR B (G1 + G2): a memory write the guard would ALLOW is screened
+  // for a standing directive. Only an allow is ever touched: a block or an
+  // existing card on the same call (catastrophic write content, a dangerous
+  // write-content hit, a path-tier rule, a schema rejection) is left exactly
+  // as it is, so this can only add an approval gate.
+  if (v.decision === 'allow') {
+    const sink = memoryDirectiveSinkVerdict(toolName, args);
+    // An allow can still carry the unscanned reason codes; they keep the bag
+    // non-widenable on every plane, so they ride onto the card.
+    if (sink) v = v.signals.includes('command-evidence-unscannable') ? withUnscannableSignals(sink) : sink;
+  }
   // Contract drift rides ALONGSIDE the verdict and cannot change it. The
   // recursive rescan passes (`skipSchema`) never re-observe: the outer call
   // already did, and a doubled row would double-count in every summary.
@@ -8223,6 +8250,51 @@ export function evaluateToolCall(
   if (v.decision === 'block' && v.severity === 'catastrophic') return v;
   const nativeExec = nativeExecObservation(toolName, args, options);
   return nativeExec ? { ...v, nativeExec } : v;
+}
+
+/**
+ * SCN-010 PR B — the card the memory sink would mint for this call, or null.
+ *
+ *   G1  a memory WRITE tool (see `memorySinkTargets`): every string it would
+ *       store, under any key;
+ *   G2  a write-family call, or an unknown-family call carrying new-side
+ *       text, where ANY path value (every path key in any case, on the bag
+ *       and in each `edits[]` entry; raw and lexically normalised) is memory
+ *       markdown (`isMemoryWritePath`, or a `.md` file directly inside a
+ *       Hermes memories directory — `isSinkMemoryMarkdown`; the guard's own
+ *       predicate and `extractPath`, which also drive the #93 scan, are
+ *       unchanged): the RAW written text, not the backtick-neutralised
+ *       command-scan body (the screen has its own mask rules); and an
+ *       `apply_patch` whose file header names memory markdown: the lines it
+ *       adds there.
+ *
+ * `require_approval` / `dangerous` / `memory-directive`, action
+ * `persist_memory`. Never `block`, never `catastrophic`. The reason carries
+ * pattern names or a fixed cause, never memory text. A screen that throws,
+ * text too large to screen and text nested too deep to screen all card (an
+ * attacker-shaped input must not turn a gap into an allow).
+ *
+ * Exported for tests (the `screen` seam); `evaluateToolCall` applies it only
+ * to a verdict that is otherwise `allow`.
+ */
+export function memoryDirectiveSinkVerdict(
+  toolName: string,
+  args: Record<string, unknown> = {},
+  screen?: MemoryDirectiveScreen,
+): ToolGuardVerdict | null {
+  const family = classifyFamily(toolName);
+  const targets = memorySinkTargets(normaliseToolName(toolName), family, args ?? {}, isMemoryWritePath);
+  // Every target is screened and any hold asks; a directive hold is the one
+  // the card names, so its pattern groups are shown over a fixed cause.
+  let hold: MemoryDirectiveHold | null = null;
+  for (const t of targets) {
+    const h = screenMemoryWrite(t.kind, t.stored, screen, t.maxLeaves);
+    if (h && (!hold || (hold.cause !== 'directive' && h.cause === 'directive'))) hold = h;
+  }
+  if (!hold) return null;
+  const signals = [MEMORY_DIRECTIVE_SIGNAL];
+  return verdict('require_approval', 'dangerous', family, dangerActionFor(signals, family),
+    buildReason(memoryDirectiveHoldReason(hold), signals), signals);
 }
 
 /**
@@ -9080,6 +9152,8 @@ function dangerActionFor(signals: string[], family: ToolFamily): string {
   // An `autoApprove` entry naming this action does not release it: the signal is
   // in GUARD_PROMPT_ONLY_SIGNALS, which both enforcement planes check first.
   if (signals.includes('reverse-shell')) return 'network_egress';
+  // SCN-010 PR B: a standing order written into agent memory. Prompt-only too.
+  if (signals.includes('memory-directive')) return 'persist_memory';
   if (signals.includes('external-egress')) return 'network_egress';
   if (signals.includes('touch-sensitive-path')) return 'access_secret_path';
   if (signals.includes('wipe-history-or-logs')) return 'wipe_logs';

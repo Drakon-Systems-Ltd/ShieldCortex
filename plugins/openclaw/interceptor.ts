@@ -1287,7 +1287,8 @@ function isSelfProtectionVerdict(signals: readonly string[] | undefined): boolea
 // enforcement-surface-parity. A verdict carrying one is released only by a
 // human answer — never by `autoApprove`, a broker pre-clear, or the broker's
 // auto-approve when the operator does not answer in time.
-export const PROMPT_ONLY_SIGNALS: readonly string[] = ['reverse-shell'];
+// SCN-010 PR B adds `memory-directive` (a standing order stored in agent memory).
+export const PROMPT_ONLY_SIGNALS: readonly string[] = ['reverse-shell', 'memory-directive'];
 
 function isPromptOnlyVerdict(signals: readonly string[] | undefined): boolean {
   return Array.isArray(signals) && signals.some(s => PROMPT_ONLY_SIGNALS.includes(s));

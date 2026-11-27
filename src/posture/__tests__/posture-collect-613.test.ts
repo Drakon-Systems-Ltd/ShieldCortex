@@ -42,7 +42,9 @@ beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-posture-613-'));
   home = path.join(root, 'home');
   configDir = path.join(home, '.shieldcortex');
-  fs.mkdirSync(configDir, { recursive: true });
+  // Owner-only like the real state dir (#163) and the sibling suites, not
+  // whatever the umask gives: #1133 judges the config dir and home too.
+  fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: true } }));
 });
 
@@ -661,11 +663,13 @@ describe('#1153 opened descriptor', () => {
     });
   });
 
-  it('a non-finite report mtime does not admit sidecar namespace evidence', () => {
+  // #1160: a report descriptor without an exact mtimeNs no longer reaches the
+  // sidecar join at all; the post-read timestamp check rejects it as trust.
+  it('a report descriptor without a precise mtime is a trust rejection, so no sidecar namespace evidence', () => {
     const file = writeReport(configDir, reportBody());
     const unavailable = (_real: fs.BigIntStats, call: number) => (call === 0 ? null : { mtimeMs: 1n, mtimeNs: undefined });
     withExactStats(new Map([[file, unavailable]]), () => {
-      expect(namespaceOf(file)).toEqual({ pidNs: null, liveness: 'unverified' });
+      expectTrust(readReport(file), 'unreadable');
     });
   });
 
@@ -709,6 +713,91 @@ describe('#1153 opened descriptor', () => {
       expect(rec.stale_reason).toBe('not-seen');
       expect(rec.liveness.value).toBe('not-applicable');
     });
+  });
+
+  // #1160: the post-read descriptor stat must carry the same exact mtimeNs and
+  // ctimeNs as the first one. Calls: 0 = path lstat, 1 = opened fstat,
+  // 2 = post-read fstat. Synthetic stats only; size, dev and ino stay real.
+  const CONTENT_BODY = () => ({ ...reportBody(), extra: 1 });
+  const atPostRead = (over: (real: fs.BigIntStats) => object) =>
+    (real: fs.BigIntStats, call: number) => (call === 2 ? over(real) : null);
+
+  function expectPostReadTrust(body: Parameters<typeof writeReport>[1], over: (real: fs.BigIntStats) => object): void {
+    const file = writeReport(configDir, body);
+    withExactStats(new Map([[file, atPostRead(over)]]), () => {
+      const read = readReport(file);
+      expect(read.kind).not.toBe('valid');
+      expect(read).not.toMatchObject({ rejection: 'content' });
+      expectTrust(read, 'unreadable');
+      expect(Object.prototype.hasOwnProperty.call(read, 'observedMtimeMs')).toBe(false);
+    });
+  }
+
+  it('#1160 a post-read mtimeNs change discards a content rejection without carrying the earlier mtime', () => {
+    expectPostReadTrust(CONTENT_BODY(), (real) => ({ mtimeNs: real.mtimeNs + 1n }));
+  });
+
+  it('#1160 a post-read mtimeNs change discards an otherwise valid report', () => {
+    expectPostReadTrust(reportBody(), (real) => ({ mtimeNs: real.mtimeNs + 1n }));
+  });
+
+  it('#1160 a post-read ctimeNs change discards a content rejection without carrying the earlier mtime', () => {
+    expectPostReadTrust(CONTENT_BODY(), (real) => ({ ctimeNs: real.ctimeNs + 1n }));
+  });
+
+  it('#1160 a post-read ctimeNs change discards an otherwise valid report', () => {
+    expectPostReadTrust(reportBody(), (real) => ({ ctimeNs: real.ctimeNs + 1n }));
+  });
+
+  it('#1160 a post-read mtimeNs change past the safe integer range still discards the parse', () => {
+    // Number() of these two is equal; the comparison must be bigint.
+    const file = writeReport(configDir, CONTENT_BODY());
+    withExactStats(new Map([[file, (_real, call) => (call === 0 ? null : { mtimeNs: call === 2 ? LOST_A : LOST_B })]]), () => {
+      expectTrust(readReport(file), 'unreadable');
+    });
+  });
+
+  it('#1160 a post-read timestamp change discards the parse in the collector too', () => {
+    const file = writeReport(configDir, CONTENT_BODY());
+    fs.utimesSync(file, new Date(NOW - HOUR), new Date(NOW - HOUR));
+    withExactStats(new Map([[file, atPostRead((real) => ({ mtimeNs: real.mtimeNs + 1n }))]]), () => {
+      const [rec] = collect().filter((r) => r.runtime === 'hermes');
+      // Trust rejection: no mtime is evidence, so it is not aged fresh.
+      expect(rec.runtime_loaded.value).toBe('unknown');
+      expect(rec.notes.join(' ')).toMatch(/unreadable/);
+    });
+  });
+
+  it('#1160 unchanged exact timestamps keep a content rejection aged with the opened descriptor mtime', () => {
+    const file = writeReport(configDir, CONTENT_BODY());
+    const same = (_real: fs.BigIntStats, call: number) => (call === 0 ? null : { mtimeMs: REPORT_NS / 1_000_000n, mtimeNs: REPORT_NS, ctimeNs: REPORT_NS });
+    withExactStats(new Map([[file, same]]), () => {
+      expect(readReport(file)).toMatchObject({
+        kind: 'invalid', rejection: 'content', reason: 'unknown keys', observedMtimeMs: 1_500_000.5,
+      });
+    });
+    // Real, unpatched stats: still a content rejection with a finite age.
+    const real = readReport(file);
+    expect(real).toMatchObject({ kind: 'invalid', rejection: 'content', reason: 'unknown keys' });
+    expect(real.kind === 'invalid' && Number.isFinite(real.observedMtimeMs)).toBe(true);
+  });
+
+  it('#1160 unchanged exact timestamps keep a valid report valid and the sidecar joined', () => {
+    const file = writeReport(configDir, reportBody());
+    const same = (_real: fs.BigIntStats, call: number) => (call === 0 ? null : { mtimeMs: REPORT_NS / 1_000_000n, mtimeNs: REPORT_NS, ctimeNs: REPORT_NS });
+    withExactStats(new Map([[file, same], [pidNsSidecarPath(file), nsTime(REPORT_NS)]]), () => {
+      expect(namespaceOf(file)).toEqual({ pidNs: PID_NS, liveness: 'ended' });
+    });
+  });
+
+  it('#1160 a non-bigint mtimeNs on the post-read stat is a trust rejection', () => {
+    expectPostReadTrust(CONTENT_BODY(), (real) => ({ mtimeNs: Number(real.mtimeNs) }));
+    expectPostReadTrust(reportBody(), () => ({ mtimeNs: undefined }));
+  });
+
+  it('#1160 a non-bigint ctimeNs on the post-read stat is a trust rejection', () => {
+    expectPostReadTrust(CONTENT_BODY(), (real) => ({ ctimeNs: Number(real.ctimeNs) }));
+    expectPostReadTrust(reportBody(), () => ({ ctimeNs: undefined }));
   });
 
   it('aging does not call a path lstat and fileMtimeMs is gone', () => {

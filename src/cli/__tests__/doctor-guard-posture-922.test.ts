@@ -78,6 +78,11 @@ beforeEach(() => {
   configDir = path.join(tmp, 'cfg');
   fs.mkdirSync(home);
   fs.mkdirSync(configDir);
+  // #1133: the config dir (outside the fixture home here) and the temp root
+  // above it are judged before a self-report is trusted, so their modes are
+  // set, not left to the umask (0775 under umask 0002 is group-writable).
+  fs.chmodSync(tmp, 0o700);
+  fs.chmodSync(configDir, 0o700);
   fs.mkdirSync(path.join(tmp, 'root'));
   saved = {
     SHIELDCORTEX_CONFIG_DIR: process.env.SHIELDCORTEX_CONFIG_DIR,
