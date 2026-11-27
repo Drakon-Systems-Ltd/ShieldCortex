@@ -87,11 +87,16 @@ export type { MemoryDirectivePattern, MemoryDirectiveResult } from './memory-dir
 export interface FirewallContext {
   memoryAdmission?: MemoryAdmission;
   /**
-   * SCN-010 part C OPT-IN: set ONLY when `content` is a complete received unit
-   * (the write pipeline, scan-only), with `received` the unit AS RECEIVED
-   * before Layer-1 sanitisation. Read only by the closed preference grammar
-   * (C1/C2) on the top-level L1/L2 calls; decoded snippets re-scanned below
-   * never get it. Absent means legacy detection.
+   * SCN-010 part C OPT-IN: set ONLY when `content` is a complete received unit,
+   * with `received` the unit AS RECEIVED before Layer-1 sanitisation. The only
+   * opt-in callers are the `shieldcortex scan` command (via
+   * `PipelineRunOptions.preferenceGrammarUnit`, honoured only when it equals
+   * `content` and the title is absent or `SCAN_COMMAND_TITLE`) and `scan()`
+   * from `shieldcortex/scan` when no `title` is passed. Memory writes,
+   * capture, import and recall never set it. Never for a decoded snippet, a
+   * sample, one field of a larger record or a file body. Read only by the
+   * closed preference grammar (C1/C2) on the top-level L1/L2 calls; decoded
+   * snippets re-scanned below never get it. Absent means legacy detection.
    */
   wholeUnit?: WholeUnit;
 }

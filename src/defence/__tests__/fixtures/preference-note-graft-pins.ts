@@ -286,9 +286,11 @@ export const GRAFT_BASE_PINS: ReadonlyArray<readonly [id: string, text: string, 
 export type PipelineLane = 'cli' | 'memory_candidate' | 'tool_result' | 'agent';
 
 /**
- * The same negatives through the FULL write pipeline (Layer-1 sanitisation,
- * then the firewall), `runDefencePipelinePreviewInternal(text, 'note', source,
- * balanced)`, pinned from origin/main 128a0734. The sanitiser NFKC-folds
+ * The same negatives through the FULL defence pipeline (Layer-1 sanitisation,
+ * then the firewall), pinned from origin/main 128a0734 with
+ * `runDefencePipelinePreviewInternal(text, 'note', source, balanced)` and
+ * replayed at head with the `shieldcortex scan` opt-in (`SCAN_COMMAND_TITLE`,
+ * `preferenceGrammarUnit` equal to the text). The sanitiser NFKC-folds
  * fullwidth letters, swaps NBSP for a space and strips zero-width / BOM / NUL
  * bytes, so these rows prove the grammar judges the input AS RECEIVED, not the
  * cleaned copy the firewall is handed.

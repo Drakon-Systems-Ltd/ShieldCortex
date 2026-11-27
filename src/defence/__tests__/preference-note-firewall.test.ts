@@ -3,8 +3,10 @@
  * (design scn-010c §4-§6).
  *
  * Opt-in (review r2): the grammar is consulted only when the caller passes
- * the input as a whole received unit (`wholeUnit`), as the write pipeline,
- * scan-only and the recall shim's primary scan do. A bare call is origin/main
+ * the input as a whole received unit (`wholeUnit`). The only opt-in callers
+ * are the `shieldcortex scan` command (through the pipeline's
+ * `preferenceGrammarUnit`) and untitled `scan()`; memory writes, capture,
+ * import and recall never opt in. A bare call is origin/main
  * byte for byte (the "bare" pins below; parent-level excerpt regressions are
  * in preference-note-whole-unit.test.ts).
  *
@@ -52,7 +54,7 @@ const SUMMARY_FIVE = 'When the user asks for a summary, keep it under five bulle
 const T1_ROWS = [BRITISH_REPLIES, BRITISH_SPELLING];
 const T2_ROWS = [SUMMARY_THREE, SUMMARY_FIVE];
 
-/** analyzeFirewall as the write pipeline calls it: the input is the whole received unit. */
+/** analyzeFirewall as an opt-in caller calls it: the input is the whole received unit. */
 function fw(content: string, label: ProvenanceLabel, context?: FirewallContext) {
   const source = { type: label, identifier: 'test' };
   return analyzeFirewall(content, 'note', source, scoreSource(source).score, BALANCED, undefined, {

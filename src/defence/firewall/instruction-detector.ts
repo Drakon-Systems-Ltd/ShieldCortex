@@ -42,9 +42,9 @@ const SPOOF_VERBS = ['you must', 'ignore', 'new instructions', 'override', 'disr
   .join('|');
 
 /**
- * A complete received unit (SCN-010 part C): a whole note or memory row as it
- * arrived, never an excerpt of one. `received` is the unit AS RECEIVED, before
- * any sanitisation; `content` may be the sanitised copy of it.
+ * A complete received unit (SCN-010 part C): one whole single-field input as
+ * it arrived, never an excerpt of one. `received` is the unit AS RECEIVED,
+ * before any sanitisation; `content` may be the sanitised copy of it.
  */
 export interface WholeUnit {
   received: string;
@@ -53,13 +53,17 @@ export interface WholeUnit {
 export interface InstructionDetectionOptions {
   /**
    * OPT-IN to the closed preference grammar. Pass it ONLY when `content` is a
-   * complete received unit (the write pipeline / scan-only firewall input, the
-   * recall shim's primary whole-row scan). Never for a decoded snippet, a
-   * sample, one field of a larger record or a file body: an excerpt that is a
-   * preference sentence says nothing about the unit it came from. Absent means
-   * exactly the legacy detection. When present, the grammar must parse BOTH
-   * `content` and `received`, so a fullwidth / NBSP / zero-width variant that
-   * sanitisation folded to clean ASCII still fails it.
+   * complete received unit. The only opt-in callers are the `shieldcortex
+   * scan` command (via `PipelineRunOptions.preferenceGrammarUnit`, honoured
+   * only when it equals `content` and the title is absent or
+   * `SCAN_COMMAND_TITLE`) and `scan()` from `shieldcortex/scan` when no `title`
+   * is passed. Memory writes, capture, import and recall never opt in. Never
+   * for a decoded snippet, a sample, one field of a larger record or a file
+   * body: an excerpt that is a preference sentence says nothing about the
+   * unit it came from. Absent means exactly the legacy detection. When
+   * present, the grammar must parse BOTH `content` and `received`, so a
+   * fullwidth / NBSP / zero-width variant that sanitisation folded to clean
+   * ASCII still fails it.
    */
   wholeUnit?: WholeUnit;
 }
