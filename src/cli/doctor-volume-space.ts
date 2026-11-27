@@ -33,14 +33,18 @@
  * that is three-quarters empty) for being small. A share alone would fail a
  * 4 TB disk with 20 GB free, which is nowhere near a write failure for a
  * store whose default budget is 100 MiB. Requiring both means a large volume
- * is judged by its bytes and a small one by its share; the two meet at 2 GiB
- * (fail) and 5 GiB (warn) of volume size.
+ * is judged by its bytes and a small one by its share; the two meet at
+ * 2000 MiB (fail: 100 MiB / 5%, a little under 2 GiB) and 5 GiB (warn) of
+ * volume size.
  *
  *   - 100 MiB is ShieldCortex's default disk budget. Below it the volume can
  *     no longer hold one more copy of a store at that budget, which is what
  *     a vacuum and the safety backup before a repair can each need.
- *   - 5% and 20% free are the `Disk` row's own 95% and 80% lines, so the two
- *     storage rows escalate at the same fullness.
+ *   - 5% and 20% free are chosen to echo the `Disk` row's 95% and 80% lines.
+ *     That is an analogy and not the same test: `Disk` compares
+ *     ShieldCortex's footprint with its budget and trips ON its line (`>=`);
+ *     this row reads the filesystem, trips strictly below, and also needs
+ *     the byte condition.
  *   - 1 GiB is ten default budgets: room to act before the fail line. What
  *     the budget exempts (backups, the model cache, audit evidence with no
  *     retention yet, #579) usually lands on the same volume.
@@ -119,10 +123,49 @@ function isCount(value: unknown): value is number {
 }
 
 /**
+ * The paths to ask about, deepest first: the configured home, then each
+ * shorter prefix of it down to the root.
+ *
+ * The home is kept as configured, `..` included. `/srv/link/../sc` is
+ * `/srv/sc` only if `/srv/link` is a real directory; if it is a link to
+ * `/mnt/data/sub`, the filesystem resolves the same string to `/mnt/data/sc`,
+ * on another volume. `path.resolve`, `path.normalize` and `path.join` all fold
+ * the `..` in the string without looking, so none of them may touch it: every
+ * path handed to `statfs` is a prefix of what was configured, and the
+ * filesystem does the resolving. The same goes for the walk up from a home
+ * that does not exist yet: the parent of `/srv/link/../sc` is `/srv/link/..`,
+ * which is `/mnt/data`, and `path.dirname` of a folded path would say `/srv`.
+ *
+ * Empty and `.` segments are dropped, which changes no directory and keeps a
+ * probe from ending in a separator or `/.`: `lstat` follows a final link
+ * spelled that way, and would report a dangling one as absent.
+ *
+ * Windows folds `..` in the string itself before it follows any link, so
+ * there `path.resolve` IS the operating system's reading.
+ */
+function pathsToProbe(scDir: string): string[] {
+  let absolute: string;
+  if (path.sep === '\\') absolute = path.resolve(scDir);
+  else if (path.isAbsolute(scDir)) absolute = scDir;
+  else absolute = `${process.cwd()}${path.sep}${scDir}`;
+  const root = path.parse(absolute).root;
+  const segments = absolute.slice(root.length)
+    .split(path.sep)
+    .filter((segment) => segment !== '' && segment !== '.');
+  const probes: string[] = [];
+  for (let depth = segments.length; depth > 0; depth--) {
+    probes.push(root + segments.slice(0, depth).join(path.sep));
+  }
+  probes.push(root);
+  return probes;
+}
+
+/**
  * Read free space for the volume holding `scDir`.
  *
  * `statfs` follows links, so a home that is a link to another volume reports
- * that volume. A home that does not exist yet is measured at its nearest
+ * that volume, and so does a home reached through a link and then `..` (see
+ * `pathsToProbe`). A home that does not exist yet is measured at its nearest
  * existing parent, which is where it will be created. A path that exists but
  * does not resolve (a link whose target is missing) is NOT walked past: the
  * home would live wherever the link points, and that is not known to be the
@@ -138,9 +181,10 @@ export function readVolumeSpace(scDir: string, deps: VolumeSpaceDeps = {}): Volu
   const lstat = deps.lstatSync ?? fs.lstatSync;
   const show = (target: string): string => homeToTilde(target, deps.home ?? os.homedir());
 
-  const homePath = path.resolve(scDir);
-  let target = homePath;
-  for (;;) {
+  const probes = pathsToProbe(scDir);
+  const homePath = probes[0];
+  for (let index = 0; ; index++) {
+    const target = probes[index];
     let stat: VolumeStatfs;
     try {
       stat = statfs(target);
@@ -167,11 +211,9 @@ export function readVolumeSpace(scDir: string, deps: VolumeSpaceDeps = {}): Volu
       if (lstatCode !== 'ENOENT') {
         return { kind: 'unavailable', reason: `inspecting ${show(target)} failed (${lstatCode})`, code: lstatCode };
       }
-      const parent = path.dirname(target);
-      if (parent === target) {
+      if (index === probes.length - 1) {
         return { kind: 'unavailable', reason: `no existing directory was found above ${show(homePath)}`, code };
       }
-      target = parent;
       continue;
     }
 
@@ -194,7 +236,7 @@ export function readVolumeSpace(scDir: string, deps: VolumeSpaceDeps = {}): Volu
       kind: 'measured',
       homePath,
       measuredPath: target,
-      homeExists: target === homePath,
+      homeExists: index === 0,
       totalBytes,
       availableBytes,
       availableShare: availableBytes / totalBytes,
@@ -256,9 +298,11 @@ export function volumeSpaceRow(evidence: VolumeSpaceEvidence, home: string = os.
       label: VOLUME_SPACE_LABEL,
       status: 'fail',
       message: `${figures} — nearly full`,
+      // Figures, the risk, and where to look. No instruction: what to do about
+      // a full volume is the operator's call, and this row is report-only.
       fix: `The volume is nearly full: ${line(VOLUME_NEAR_FULL_BYTES, VOLUME_NEAR_FULL_SHARE)}. Writes to the `
-        + 'ShieldCortex home (memory saves, audit evidence, backups) fail once it reaches zero. Free space on that '
-        + 'volume or grow it; `df -h` on that directory shows the volume and what else shares it. '
+        + 'ShieldCortex home (memory saves, audit evidence, backups) fail when the volume has no space left. '
+        + '`df -h` on that directory shows the volume and what else shares it. '
         + READ_ONLY_NOTE,
     };
   }
@@ -267,7 +311,9 @@ export function volumeSpaceRow(evidence: VolumeSpaceEvidence, home: string = os.
       label: VOLUME_SPACE_LABEL,
       status: 'warn',
       message: `${figures} — running low`,
-      fix: `The volume is running low: ${line(VOLUME_LOW_BYTES, VOLUME_LOW_SHARE)}. Nothing is failing yet. `
+      // Free-space counters do not show whether writes are succeeding, so
+      // this says only what was measured.
+      fix: `The volume is running low: ${line(VOLUME_LOW_BYTES, VOLUME_LOW_SHARE)}. `
         + '`df -h` on that directory shows the volume and what else shares it. '
         + READ_ONLY_NOTE,
     };

@@ -124,6 +124,64 @@ describe('readVolumeSpace', () => {
     expect(evidence.kind).toBe('unavailable');
   });
 
+  it('keeps a `..` in the configured path for the filesystem to resolve, and walks up prefix by prefix', () => {
+    // /srv/link may be a link to another volume, in which case /srv/link/..
+    // is that volume and not /srv. Only the filesystem knows, so every probe
+    // must be a prefix of the path as configured: never /srv/sc, never /srv.
+    const asked: string[] = [];
+    const evidence = readVolumeSpace('/srv/link/../sc/new', {
+      statfsSync: (target) => {
+        asked.push(target);
+        if (target !== '/srv/link/..') throw errno('ENOENT');
+        return sample(2 * GiB, 30 * MiB);
+      },
+      lstatSync: () => { throw errno('ENOENT'); },
+    });
+    expect(asked).toEqual(['/srv/link/../sc/new', '/srv/link/../sc', '/srv/link/..']);
+    expect(evidence).toMatchObject({
+      kind: 'measured',
+      homePath: '/srv/link/../sc/new',
+      measuredPath: '/srv/link/..',
+      homeExists: false,
+      availableBytes: 30 * MiB,
+    });
+  });
+
+  it('asks about an existing home under its configured spelling, `..` included', () => {
+    const asked: string[] = [];
+    const evidence = readVolumeSpace('/srv/link/../sc', {
+      statfsSync: (target) => { asked.push(target); return sample(2 * GiB, 30 * MiB); },
+    });
+    expect(asked).toEqual(['/srv/link/../sc']);
+    expect(evidence).toMatchObject({ kind: 'measured', measuredPath: '/srv/link/../sc', homeExists: true });
+  });
+
+  it.each([
+    ['a trailing separator', '/home/op/.shieldcortex/'],
+    ['a doubled separator', '/home/op//.shieldcortex'],
+    ['a `.` segment', '/home/op/./.shieldcortex/.'],
+  ])('reads %s as the same home, so a dangling link is still not walked past', (_name, configured) => {
+    // lstat on "link/" or "link/." follows the link and would call a dangling
+    // one absent; the probe has to be the bare name.
+    const asked: string[] = [];
+    const inspected: string[] = [];
+    const evidence = readVolumeSpace(configured, {
+      statfsSync: (target) => { asked.push(target); throw errno('ENOENT'); },
+      lstatSync: (target) => { inspected.push(target); return {}; },
+    });
+    expect(asked).toEqual([SC_DIR]);
+    expect(inspected).toEqual([SC_DIR]);
+    expect(evidence.kind).toBe('unavailable');
+  });
+
+  it('anchors a relative home at the working directory without folding its `..`', () => {
+    const asked: string[] = [];
+    readVolumeSpace('link/../sc', {
+      statfsSync: (target) => { asked.push(target); return sample(100 * GiB, 40 * GiB); },
+    });
+    expect(asked).toEqual([`${process.cwd()}${path.sep}link${path.sep}..${path.sep}sc`]);
+  });
+
   it.each([
     ['EACCES'],
     ['EPERM'],
@@ -215,6 +273,15 @@ describe('the Free space row', () => {
     // can be copied into a delete.
     expect(row.fix).not.toMatch(/shieldcortex [a-z]/);
     expect(row.fix).not.toMatch(/\brm\b|prune|vacuum|--execute/);
+    // The whole text, so an instruction cannot ride in beside the figures:
+    // what was measured, what it puts at risk, and where to look. Nothing to do.
+    expect(row.fix).toBe(
+      'The volume is nearly full: under 100 MB is available and under 5% of the volume is free. '
+      + 'Writes to the ShieldCortex home (memory saves, audit evidence, backups) fail when the volume has no '
+      + 'space left. `df -h` on that directory shows the volume and what else shares it. '
+      + 'This row only reads the filesystem and deletes nothing; the Disk row is the separate check of '
+      + 'ShieldCortex\'s own footprint against its budget.',
+    );
   });
 
   it('warns on a volume that is running low', () => {
@@ -223,7 +290,32 @@ describe('the Free space row', () => {
     expect(row.message).toContain('500.0 MB available of 100.0 GB');
     expect(row.message).toContain('running low');
     expect(row.message).not.toContain('nearly full');
-    expect(row.fix).toBeDefined();
+    // Only what the counters show: free space says nothing about whether
+    // writes are succeeding.
+    expect(row.fix).toBe(
+      'The volume is running low: under 1 GB is available and under 20% of the volume is free. '
+      + '`df -h` on that directory shows the volume and what else shares it. '
+      + 'This row only reads the filesystem and deletes nothing; the Disk row is the separate check of '
+      + 'ShieldCortex\'s own footprint against its budget.',
+    );
+  });
+
+  it('gives no cleanup instruction and makes no claim about writes, in any state', () => {
+    const rows = [
+      rowFor(100 * GiB, 40 * GiB),
+      rowFor(100 * GiB, 500 * MiB),
+      rowFor(100 * GiB, 50 * MiB),
+      rowFor(100 * GiB, 0),
+      checkVolumeFreeSpace(SC_DIR, { statfsSync: () => { throw errno('EACCES'); }, home: HOME }),
+      checkVolumeFreeSpace(SC_DIR, { statfsSync: null, home: HOME }),
+    ];
+    for (const row of rows) {
+      const text = `${row.message} ${row.fix ?? ''}`;
+      // A sentence that opens with a cleanup or resize verb is an instruction.
+      expect(text).not.toMatch(/(?:^|[.;:—] )(?:free|clear|clean|delete|remove|prune|purge|empty|grow|resize|expand)\b/i);
+      expect(text).not.toMatch(/\bfree (?:up )?(?:some )?space on\b|\bor grow\b|clean ?up|make room/i);
+      expect(text).not.toMatch(/nothing is failing|not failing|still succeed/i);
+    }
   });
 
   it('shows a share under 1% as such, never as 0%', () => {
@@ -310,6 +402,127 @@ describe('against the real filesystem', () => {
     const scDir = path.join(tmpDir, '.shieldcortex');
     fs.symlinkSync(path.join(tmpDir, 'gone'), scDir);
     expect(readVolumeSpace(scDir).kind).toBe('unavailable');
+    expect(readVolumeSpace(`${scDir}${path.sep}`).kind).toBe('unavailable');
+  });
+
+  /**
+   * Two "volumes" laid out in one temp directory:
+   *
+   *   <tmp>/roomy/link  ->  <tmp>/tight/sub
+   *
+   * so `<tmp>/roomy/link/..` is `<tmp>/tight`, and a home configured as
+   * `<tmp>/roomy/link/../sc` lives at `<tmp>/tight/sc`. Folding the `..` in
+   * the string instead gives `<tmp>/roomy/sc`, on the other volume.
+   *
+   * `statfs` here is the real path walk (`realpath`, which resolves exactly as
+   * `statfs` does) with made-up figures chosen by where the walk ends, so each
+   * test can tell WHICH volume answered and not merely that one did.
+   */
+  describe('a `..` after a link to another volume', () => {
+    const ROOMY = sample(500 * GiB, 400 * GiB);
+    const TIGHT = sample(2 * GiB, 30 * MiB);
+    let roomy: string;
+    let tight: string;
+    let reached: string[];
+
+    const statfsByRealVolume = (target: string): VolumeStatfs => {
+      // Throws ENOENT exactly where statfs would.
+      const real = fs.realpathSync.native(target);
+      reached.push(real);
+      if (real === tight || real.startsWith(tight + path.sep)) return TIGHT;
+      if (real === roomy || real.startsWith(roomy + path.sep)) return ROOMY;
+      throw errno('EIO');
+    };
+
+    beforeEach(() => {
+      const base = fs.realpathSync.native(tmpDir);
+      roomy = base + path.sep + 'roomy';
+      tight = base + path.sep + 'tight';
+      fs.mkdirSync(roomy);
+      fs.mkdirSync(tight);
+      fs.mkdirSync(tight + path.sep + 'sub');
+      fs.symlinkSync(tight + path.sep + 'sub', roomy + path.sep + 'link');
+      reached = [];
+    });
+
+    it('measures the volume an existing home is really on, not the one its folded spelling names', () => {
+      // Both spellings exist, so a wrong reading would be a confident pass.
+      fs.mkdirSync(tight + path.sep + 'sc');
+      fs.mkdirSync(roomy + path.sep + 'sc');
+      const configured = [roomy, 'link', '..', 'sc'].join(path.sep);
+
+      const evidence = readVolumeSpace(configured, { statfsSync: statfsByRealVolume });
+
+      expect(reached).toEqual([tight + path.sep + 'sc']);
+      expect(evidence).toMatchObject({
+        kind: 'measured',
+        measuredPath: configured,
+        homeExists: true,
+        totalBytes: 2 * GiB,
+        availableBytes: 30 * MiB,
+      });
+      expect(classifyVolumeSpace(evidence)).toBe('near-full');
+
+      const row = checkVolumeFreeSpace(configured, { statfsSync: statfsByRealVolume, home: HOME });
+      expect(row.status).toBe('fail');
+      expect(row.message).toBe(`30.0 MB available of 2.0 GB (1%) on the volume holding ${configured} — nearly full`);
+    });
+
+    it('measures a missing home at the parent the filesystem gives it, not the folded one', () => {
+      // <tmp>/roomy/new exists and <tmp>/tight/new does not: the folded
+      // spelling would find a parent on the roomy volume one step up.
+      fs.mkdirSync(roomy + path.sep + 'new');
+      const configured = [roomy, 'link', '..', 'new', 'sc'].join(path.sep);
+
+      const evidence = readVolumeSpace(configured, { statfsSync: statfsByRealVolume });
+
+      expect(reached).toEqual([tight]);
+      expect(evidence).toMatchObject({
+        kind: 'measured',
+        homePath: configured,
+        measuredPath: [roomy, 'link', '..'].join(path.sep),
+        homeExists: false,
+        totalBytes: 2 * GiB,
+        availableBytes: 30 * MiB,
+      });
+      expect(fs.existsSync(tight + path.sep + 'new')).toBe(false);
+    });
+
+    it('measures a missing home below a plain link at the link\'s volume', () => {
+      const configured = [roomy, 'link', 'deeper', 'sc'].join(path.sep);
+      const evidence = readVolumeSpace(configured, { statfsSync: statfsByRealVolume });
+      expect(reached).toEqual([tight + path.sep + 'sub']);
+      expect(evidence).toMatchObject({
+        kind: 'measured',
+        measuredPath: roomy + path.sep + 'link',
+        homeExists: false,
+        availableBytes: 30 * MiB,
+      });
+    });
+
+    it('does not walk past a dangling link that a `..` follows', () => {
+      // <tmp>/roomy/gone/.. is unknown: `gone` points nowhere. The folded
+      // spelling <tmp>/roomy/sc exists and must not answer for it.
+      fs.symlinkSync(tight + path.sep + 'missing', roomy + path.sep + 'gone');
+      fs.mkdirSync(roomy + path.sep + 'sc');
+      const configured = [roomy, 'gone', '..', 'sc'].join(path.sep);
+
+      const evidence = readVolumeSpace(configured, { statfsSync: statfsByRealVolume });
+
+      expect(reached).toEqual([]);
+      expect(evidence.kind).toBe('unavailable');
+      expect(checkVolumeFreeSpace(configured, { statfsSync: statfsByRealVolume }).message).toMatch(/^not measured — /);
+    });
+
+    it('agrees with the real statfs on which directory a `..` after a link names', () => {
+      // No injected reader: the real call must accept the unfolded spelling.
+      fs.mkdirSync(tight + path.sep + 'sc');
+      const configured = [roomy, 'link', '..', 'sc'].join(path.sep);
+      const evidence = readVolumeSpace(configured);
+      expect(evidence).toMatchObject({ kind: 'measured', measuredPath: configured, homeExists: true });
+      // The folded spelling does not exist, so only a real walk finds the home.
+      expect(fs.existsSync(roomy + path.sep + 'sc')).toBe(false);
+    });
   });
 });
 

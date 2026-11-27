@@ -201,7 +201,7 @@ or set `SHIELDCORTEX_SKIP_UPDATE_CHECK=1` for the dashboard/API process. The das
 
 ### Doctor: Free space
 
-`shieldcortex doctor` has two storage rows. **Disk** compares ShieldCortex's own footprint with its budget. **Free space** reads the filesystem: the space available to your user on the volume that holds the ShieldCortex home (`~/.shieldcortex`, or `SHIELDCORTEX_CONFIG_DIR` when set). A home that is a symlink is measured on the volume it points at; a home that does not exist yet is measured at its nearest existing parent.
+`shieldcortex doctor` has two storage rows. **Disk** compares ShieldCortex's own footprint with its budget. **Free space** reads the filesystem: the space available to your user on the volume that holds the ShieldCortex home (`~/.shieldcortex`, or `SHIELDCORTEX_CONFIG_DIR` when set). A home that is a symlink is measured on the volume it points at; a home that does not exist yet is measured at its nearest existing parent. The path is read the way the operating system resolves it, not by tidying the text: where `SHIELDCORTEX_CONFIG_DIR` has a `..` after a symlink, the `..` is taken from the directory the link points at, for the home and for the parent of a missing home alike, and the row names the path as you configured it.
 
 | Row shows | Status | When |
 | --- | --- | --- |
@@ -210,7 +210,7 @@ or set `SHIELDCORTEX_SKIP_UPDATE_CHECK=1` for the dashboard/API process. The das
 | `… — nearly full` | fail | less than 100 MiB available **and** less than 5% of the volume free |
 | `not measured — …` | warn | the volume could not be read, reports no size or figures that do not add up, or the home is a link whose target is missing |
 
-Both conditions must hold, so a 4 TB disk with 20 GB free and a small, mostly empty volume both pass. 100 MiB is the default disk budget, and 5% and 20% free match the Disk row's 95% and 80% lines. `not measured` means doctor has no figure: it does not mean the volume is full, and it does not mean it is fine. The row only reads. It deletes nothing, changes no setting, and its advice names `df -h`, not a cleanup command. It checks that one volume, so a database or model cache kept on another volume is not covered, and `shieldcortex maintain` does not run it.
+Both conditions must hold, so a 4 TB disk with 20 GB free and a small, mostly empty volume both pass. 100 MiB is the default disk budget. The 5% and 20% shares echo the Disk row's 95% and 80% lines, as an analogy only: Disk compares ShieldCortex's footprint with its budget and trips on the line, while this row reads the filesystem, trips strictly below the line, and also needs the byte condition. `not measured` means doctor has no figure: it does not mean the volume is full, and it does not mean it is fine. The row only reads. It deletes nothing, changes no setting, and its text gives the figures, says that writes to the home fail when the volume has no space left (nearly full only), and points at `df -h`; it does not tell you to clean up or resize anything, and it does not say whether writes are succeeding now. It checks that one volume, so a database or model cache kept on another volume is not covered, and `shieldcortex maintain` does not run it.
 
 <a id="whats-new-in-56"></a>
 
