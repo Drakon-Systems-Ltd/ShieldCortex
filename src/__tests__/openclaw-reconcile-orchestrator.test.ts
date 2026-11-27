@@ -28,15 +28,21 @@ function setup(opts: { roster: Array<{ pluginId: string; enabled: boolean }>; on
   fs.mkdirSync(path.join(oc, 'plugins'), { recursive: true });
   fs.mkdirSync(path.join(oc, 'state'), { recursive: true });
   const pkgDir = path.join(oc, 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-abc', PKG_SUBPATH);
-  fs.mkdirSync(pkgDir, { recursive: true });
-  fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ version: opts.onDisk }));
+  // A real npm build (#260: a package.json alone is leftover metadata, not an
+  // install): the manifest naming the plugin and the `main` entry point.
+  fs.mkdirSync(path.join(pkgDir, 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ version: opts.onDisk, main: './dist/index.js' }));
+  fs.writeFileSync(path.join(pkgDir, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, version: opts.onDisk }));
+  fs.writeFileSync(path.join(pkgDir, 'dist', 'index.js'), '');
   fs.writeFileSync(path.join(oc, 'openclaw.json'), JSON.stringify({ plugins: { entries: { [PLUGIN]: { enabled: true } }, allow: [PLUGIN] } }));
   fs.writeFileSync(path.join(oc, 'plugins', 'installs.json'), JSON.stringify({ installRecords: { [PLUGIN]: { version: opts.onDisk, installPath: pkgDir } } }));
   const db = new Database(path.join(oc, 'state', 'openclaw.sqlite'));
   db.exec(`CREATE TABLE installed_plugin_index (index_key TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL, host_contract_version TEXT NOT NULL, compat_registry_version TEXT NOT NULL, migration_version INTEGER NOT NULL, policy_hash TEXT NOT NULL, generated_at_ms INTEGER NOT NULL, refresh_reason TEXT, install_records_json TEXT NOT NULL, plugins_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL, warning TEXT, updated_at_ms INTEGER NOT NULL);`);
   db.prepare(`INSERT INTO installed_plugin_index VALUES ('k',1,'v','x',1,'h',1,'r',@ir,@pj,'[]',NULL,1)`).run({
     ir: JSON.stringify({ [PLUGIN]: { source: 'npm', version: opts.onDisk, installPath: pkgDir } }),
-    pj: JSON.stringify(opts.roster),
+    // Every OpenClaw that writes this table (2026.6–2026.10) requires a string
+    // rootDir on each entry; ours is the recorded install (#260).
+    pj: JSON.stringify(opts.roster.map((e) => ({ rootDir: e.pluginId === PLUGIN ? pkgDir : path.join(oc, 'extensions', e.pluginId), ...e }))),
   });
   db.close();
 }
