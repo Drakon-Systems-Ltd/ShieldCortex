@@ -35,9 +35,15 @@ const DEFAULT_CAPS = Object.freeze({ maxShortTermMemories: 100, maxLongTermMemor
 /**
  * The resolver already refuses anything below its minimum; this only keeps an
  * older or broken build from handing the fullness ratio a zero or a NaN.
+ *
+ * It must stay no narrower than the resolver's own domain (validateCap: a
+ * finite whole number). Under a verifying signature the resolver honours a
+ * cap with no setter ceiling, so a valid answer can exceed
+ * Number.MAX_SAFE_INTEGER; an isSafeInteger test here would refuse it and, since
+ * a refused answer falls back whole, drop the valid companion cap with it.
  */
 function usableCap(value) {
-  return Number.isSafeInteger(value) && value > 0;
+  return Number.isInteger(value) && value > 0;
 }
 
 /**

@@ -60,6 +60,13 @@ const CASE_MS = 2 * CHILD_MS;
 const INTEGRITY_KEY = 'e'.repeat(64);
 const DEFAULT_CAPS = { maxShortTermMemories: 100, maxLongTermMemories: 1000 };
 
+/**
+ * A whole number past Number.MAX_SAFE_INTEGER that the resolver still returns
+ * under a verifying signature. 1e16 + 250 is exactly representable (doubles are
+ * spaced 2 apart here), so the hook's printed denominator is a stable string.
+ */
+const ABOVE_SAFE_LTM = 1e16;
+
 /** Enough of `autoMemory` to reach the selectivity call site in all three hooks. */
 const AUTO_MEMORY = {
   enableStop: true,
@@ -304,6 +311,16 @@ describe('#1124 resolveCaptureMemoryCaps — caps come from the built resolver',
       expected: { maxShortTermMemories: 250, maxLongTermMemories: 5000 },
     },
     {
+      // The resolver honours any whole number >= its minimum under a verifying
+      // signature — the setter ceiling applies only to unverified caps (#1132) —
+      // so a signed cap can sit past Number.MAX_SAFE_INTEGER. The helper must
+      // accept that domain as-is: refusing the LTM here would also discard the
+      // valid STM raise beside it, since a refused answer falls back whole.
+      name: 'a signed LTM above Number.MAX_SAFE_INTEGER is honoured, with the STM raise beside it',
+      write: (h) => writeSigned(h, { maxShortTermMemories: 250, maxLongTermMemories: ABOVE_SAFE_LTM }),
+      expected: { maxShortTermMemories: 250, maxLongTermMemories: ABOVE_SAFE_LTM },
+    },
+    {
       name: 'signed LOWER caps are a legitimate resolved value and are honoured',
       write: (h) => writeSigned(h, { maxShortTermMemories: 10, maxLongTermMemories: 100 }),
       expected: { maxShortTermMemories: 10, maxLongTermMemories: 100 },
@@ -404,6 +421,20 @@ describe.each(HOOK_FILES)('#1124 %s — fullness denominator is the resolved cap
     expectRun(runHook(pkgFor('real'), home, file), { stored: 1000, denominator: 5250, pct: 19, threshold: 0.25 });
     expect(rowCount(home)).toBe(1000);
   }, CASE_MS);
+
+  // One real hook is enough to show the denominator reaches the ratio: all
+  // three take it from the same helper, and pre-compact is the one that both
+  // prints the denominator and records the fullness in its ring buffer.
+  if (file === 'pre-compact-hook.mjs') {
+    it('signed LTM above Number.MAX_SAFE_INTEGER: 1000 rows over 1e16 + 250 is 0% full → 0.25 band, not 1100', () => {
+      expect(Number.isSafeInteger(ABOVE_SAFE_LTM)).toBe(false);
+      writeSigned(home, { maxShortTermMemories: 250, maxLongTermMemories: ABOVE_SAFE_LTM });
+      seedDb(home, { shortTerm: 200, longTerm: 800 });
+
+      expectRun(runHook(pkgFor('real'), home, file), { stored: 1000, denominator: ABOVE_SAFE_LTM + 250, pct: 0, threshold: 0.25 });
+      expect(rowCount(home)).toBe(1000);
+    }, CASE_MS);
+  }
 
   it('unverified lower caps are clamped: 300 rows stay over 1100 (27%, 0.30), not 110', () => {
     writeUnsigned(home, { maxShortTermMemories: 10, maxLongTermMemories: 100 });
