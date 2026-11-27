@@ -28,6 +28,7 @@ import { resolveCaptureMemoryCaps } from './lib/memory-caps.mjs';
 import {
   extractMemorableSegments,
   processSegments,
+  BASE_THRESHOLD,
   PRE_COMPACT_CATEGORY_THRESHOLDS,
 } from './lib/extract-memorable-segments.mjs';
 
