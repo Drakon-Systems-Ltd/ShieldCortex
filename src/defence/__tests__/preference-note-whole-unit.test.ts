@@ -91,7 +91,7 @@ describe('decoded excerpt inside the firewall (index.ts decode-and-rescan)', () 
     }
   });
 
-  it('the write pipeline (an opt-in caller) does not extend the opt-in to its decoded snippets', () => {
+  it('the write pipeline (never an opt-in caller) keeps the hold on its decoded snippets', () => {
     const want: Record<string, unknown[]> = {
       cli: [false, 'QUARANTINE', 'Quarantined: Encoded content contains instruction injection (base64)', ['base64'], ['encoding_obfuscation', 'credential_leak']],
       memory_candidate: [false, 'BLOCK', 'Encoded content contains instruction injection (base64)', ['base64'], ['encoding_obfuscation', 'credential_leak']],
