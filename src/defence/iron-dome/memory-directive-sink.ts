@@ -542,7 +542,7 @@ export function patchMemoryScreenUnits(
   normalisedName: string,
   args: Record<string, unknown>,
   isMemoryPath: (path: string) => boolean,
-): string[] | null {
+): readonly string[] | null {
   const sections = patchMemorySections(normalisedName, args, isMemoryPath);
   if (sections === null) return null;
   const units = new Set<string>();
@@ -554,7 +554,7 @@ export function patchMemoryScreenUnits(
   };
   // Already past what `screenMemoryWrite` reads: it holds on these alone.
   const full = (): boolean => chars > MEMORY_SCREEN_MAX_CHARS || units.size > MEMORY_PATCH_SCREEN_MAX_UNITS;
-  const done = (): string[] => Object.freeze([...units]) as string[];
+  const done = (): readonly string[] => Object.freeze([...units]);
   const addStretch = (stretch: string[]): void => {
     if (stretch.length === 0) return;
     const text = stretch.join('\n');
