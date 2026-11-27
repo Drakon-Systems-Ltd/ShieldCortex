@@ -126,7 +126,10 @@ function isCount(value: unknown): value is number {
  * The paths to ask about, deepest first: the configured home, then each
  * shorter prefix of it down to the root.
  *
- * The home is kept as configured, `..` included. `/srv/link/../sc` is
+ * The home is kept as configured: nothing in it is folded, dropped or tidied,
+ * because each of those changes what the filesystem is asked.
+ *
+ * `..` first. `/srv/link/../sc` is
  * `/srv/sc` only if `/srv/link` is a real directory; if it is a link to
  * `/mnt/data/sub`, the filesystem resolves the same string to `/mnt/data/sc`,
  * on another volume. `path.resolve`, `path.normalize` and `path.join` all fold
@@ -136,9 +139,18 @@ function isCount(value: unknown): value is number {
  * that does not exist yet: the parent of `/srv/link/../sc` is `/srv/link/..`,
  * which is `/mnt/data`, and `path.dirname` of a folded path would say `/srv`.
  *
- * Empty and `.` segments are dropped, which changes no directory and keeps a
- * probe from ending in a separator or `/.`: `lstat` follows a final link
- * spelled that way, and would report a dangling one as absent.
+ * Empty and `.` segments are kept too, wherever they sit. They are not noise:
+ * `name/`, `name/.` and `name/./child` each require `name` to be a directory,
+ * and `statfs` on the bare `name` does not — it answers for a regular file.
+ * Dropping them would turn a home path that does not resolve (ENOTDIR) into a
+ * healthy reading of whatever volume the file is on. So the first probe is the
+ * configured string, character for character, and each later one is that
+ * string cut at a separator: `/srv/sc/.`, then `/srv/sc`, then `/srv`.
+ *
+ * Cutting at every separator is also what finds a dangling link spelled
+ * `link/` or `link/.`. `lstat` follows a final link written that way and
+ * reports it absent, exactly as `statfs` does; the next probe down is the bare
+ * `link`, where `lstat` sees the link itself.
  *
  * Windows folds `..` in the string itself before it follows any link, so
  * there `path.resolve` IS the operating system's reading.
@@ -147,16 +159,18 @@ function pathsToProbe(scDir: string): string[] {
   let absolute: string;
   if (path.sep === '\\') absolute = path.resolve(scDir);
   else if (path.isAbsolute(scDir)) absolute = scDir;
-  else absolute = `${process.cwd()}${path.sep}${scDir}`;
+  else {
+    const cwd = process.cwd();
+    absolute = `${cwd}${cwd.endsWith(path.sep) ? '' : path.sep}${scDir}`;
+  }
   const root = path.parse(absolute).root;
-  const segments = absolute.slice(root.length)
-    .split(path.sep)
-    .filter((segment) => segment !== '' && segment !== '.');
+  const segments = absolute.slice(root.length).split(path.sep);
   const probes: string[] = [];
   for (let depth = segments.length; depth > 0; depth--) {
     probes.push(root + segments.slice(0, depth).join(path.sep));
   }
-  probes.push(root);
+  // The last cut is the root itself when the path is the root or starts `//`.
+  if (probes[probes.length - 1] !== root) probes.push(root);
   return probes;
 }
 

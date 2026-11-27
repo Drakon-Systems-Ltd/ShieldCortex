@@ -158,20 +158,93 @@ describe('readVolumeSpace', () => {
 
   it.each([
     ['a trailing separator', '/home/op/.shieldcortex/'],
-    ['a doubled separator', '/home/op//.shieldcortex'],
-    ['a `.` segment', '/home/op/./.shieldcortex/.'],
-  ])('reads %s as the same home, so a dangling link is still not walked past', (_name, configured) => {
-    // lstat on "link/" or "link/." follows the link and would call a dangling
-    // one absent; the probe has to be the bare name.
+    ['a trailing `/.`', '/home/op/.shieldcortex/.'],
+    ['a trailing `/./`', '/home/op/.shieldcortex/./'],
+    ['a doubled separator inside', '/home/op//.shieldcortex'],
+    ['a `.` segment inside', '/home/op/./.shieldcortex'],
+    ['`.` and empty segments throughout', '/home/./op//.shieldcortex/.'],
+  ])('asks statfs about %s exactly as configured', (_name, configured) => {
+    // A separator or `/.` after a name is the spelling's demand that the name
+    // be a directory. statfs is content with a regular file, so tidying the
+    // spelling first would let a file answer for a directory that is not there.
+    const asked: string[] = [];
+    const evidence = readVolumeSpace(configured, {
+      statfsSync: (target) => { asked.push(target); return sample(100 * GiB, 40 * GiB); },
+    });
+    expect(asked).toEqual([configured]);
+    expect(evidence).toMatchObject({ kind: 'measured', homePath: configured, measuredPath: configured, homeExists: true });
+  });
+
+  it.each([
+    ['a trailing separator', '/srv/sc/'],
+    ['a trailing `/.`', '/srv/sc/.'],
+    ['a `.` segment before a child', '/srv/sc/./child'],
+  ])('does not measure a regular file configured with %s', (_name, configured) => {
+    // /srv/sc is a regular file on a roomy volume. Only the bare name would be
+    // answered; every spelling that walks through it is ENOTDIR.
+    const asked: string[] = [];
+    const evidence = readVolumeSpace(configured, {
+      statfsSync: (target) => {
+        asked.push(target);
+        if (target === '/srv/sc') return sample(500 * GiB, 400 * GiB);
+        throw errno('ENOTDIR');
+      },
+      lstatSync: () => { throw errno('ENOENT'); },
+    });
+    expect(asked).toEqual([configured]);
+    expect(evidence).toEqual({
+      kind: 'unavailable',
+      reason: `reading the volume at ${configured} failed (ENOTDIR)`,
+      code: 'ENOTDIR',
+    });
+  });
+
+  it.each([
+    ['a trailing separator', '/home/op/.shieldcortex/', ['/home/op/.shieldcortex/', SC_DIR]],
+    ['a trailing `/.`', '/home/op/.shieldcortex/.', ['/home/op/.shieldcortex/.', SC_DIR]],
+    ['a trailing `/./`', '/home/op/.shieldcortex/./', ['/home/op/.shieldcortex/./', '/home/op/.shieldcortex/.', SC_DIR]],
+  ])('still finds a dangling link configured with %s, at its bare name', (_name, configured, probes) => {
+    // lstat on "link/" or "link/." follows the link, as statfs does, and calls
+    // a dangling one absent. The bare name is the next prefix down, and there
+    // lstat sees the link itself.
     const asked: string[] = [];
     const inspected: string[] = [];
     const evidence = readVolumeSpace(configured, {
       statfsSync: (target) => { asked.push(target); throw errno('ENOENT'); },
-      lstatSync: (target) => { inspected.push(target); return {}; },
+      lstatSync: (target) => {
+        inspected.push(target);
+        if (target.endsWith('/') || target.endsWith('/.')) throw errno('ENOENT');
+        return {};
+      },
+      home: HOME,
     });
-    expect(asked).toEqual([SC_DIR]);
-    expect(inspected).toEqual([SC_DIR]);
-    expect(evidence.kind).toBe('unavailable');
+    expect(asked).toEqual(probes);
+    expect(inspected).toEqual(probes);
+    expect(evidence).toMatchObject({ kind: 'unavailable', code: 'ENOENT' });
+    expect((evidence as { reason: string }).reason).toContain('~/.shieldcortex exists but does not resolve');
+  });
+
+  it('walks up through every prefix of the configured spelling, `.` and empty segments included', () => {
+    const asked: string[] = [];
+    const evidence = readVolumeSpace('/srv/a/./b//c/', {
+      statfsSync: (target) => {
+        asked.push(target);
+        if (target !== '/srv') throw errno('ENOENT');
+        return sample(100 * GiB, 40 * GiB);
+      },
+      lstatSync: () => { throw errno('ENOENT'); },
+    });
+    expect(asked).toEqual(['/srv/a/./b//c/', '/srv/a/./b//c', '/srv/a/./b/', '/srv/a/./b', '/srv/a/.', '/srv/a', '/srv']);
+    expect(evidence).toMatchObject({ kind: 'measured', homePath: '/srv/a/./b//c/', measuredPath: '/srv', homeExists: false });
+  });
+
+  it('asks about the root once when the root is the home', () => {
+    const asked: string[] = [];
+    readVolumeSpace('/', {
+      statfsSync: (target) => { asked.push(target); throw errno('ENOENT'); },
+      lstatSync: () => { throw errno('ENOENT'); },
+    });
+    expect(asked).toEqual(['/']);
   });
 
   it('anchors a relative home at the working directory without folding its `..`', () => {
@@ -403,6 +476,73 @@ describe('against the real filesystem', () => {
     fs.symlinkSync(path.join(tmpDir, 'gone'), scDir);
     expect(readVolumeSpace(scDir).kind).toBe('unavailable');
     expect(readVolumeSpace(`${scDir}${path.sep}`).kind).toBe('unavailable');
+    expect(readVolumeSpace(`${scDir}${path.sep}.`).kind).toBe('unavailable');
+    expect(readVolumeSpace(`${scDir}${path.sep}.${path.sep}`).kind).toBe('unavailable');
+  });
+
+  describe('a home path that walks through a regular file', () => {
+    // statfs answers for a regular file, so the bare name measures. Any
+    // spelling that goes on past the name asks for a directory that is not
+    // there, and must not borrow the file's figures.
+    const ROOMY = sample(500 * GiB, 400 * GiB);
+    let file: string;
+
+    beforeEach(() => {
+      file = path.join(tmpDir, 'sc');
+      fs.writeFileSync(file, 'not a directory');
+    });
+
+    it.each([
+      ['a trailing separator', `${path.sep}`],
+      ['a trailing `/.`', `${path.sep}.`],
+      ['a trailing `/./`', `${path.sep}.${path.sep}`],
+      ['a doubled trailing separator', `${path.sep}${path.sep}`],
+      ['a `.` segment and then a child', `${path.sep}.${path.sep}child`],
+      ['a child that does not exist', `${path.sep}child${path.sep}.shieldcortex`],
+      ['a `..` back out of it', `${path.sep}..${path.sep}sc-dir`],
+    ])('is not measured when configured with %s', (_name, suffix) => {
+      fs.mkdirSync(path.join(tmpDir, 'sc-dir'));
+      const configured = `${file}${suffix}`;
+
+      // The real call: the kernel refuses the spelling.
+      const evidence = readVolumeSpace(configured);
+      expect(evidence).toMatchObject({ kind: 'unavailable', code: 'ENOTDIR' });
+
+      // A reader that would report a roomy volume for anything that resolves,
+      // the file included: nothing resolves, so no figure is printed.
+      const asked: string[] = [];
+      const row = checkVolumeFreeSpace(configured, {
+        statfsSync: (target) => { asked.push(target); fs.realpathSync.native(target); return ROOMY; },
+      });
+      expect(asked).toEqual([configured]);
+      expect(row.status).toBe('warn');
+      expect(row.message).toMatch(/^not measured — /);
+      expect(row.message).toContain('ENOTDIR');
+      expect(row.message).not.toMatch(/available of/);
+    });
+
+    it('is what statfs alone would have accepted: the bare name measures', () => {
+      // The control for the cases above: without the suffix the same file
+      // answers, which is why the suffix has to reach statfs.
+      expect(readVolumeSpace(file).kind).toBe('measured');
+    });
+  });
+
+  it.each([
+    ['a trailing separator', `${path.sep}`],
+    ['a trailing `/.`', `${path.sep}.`],
+  ])('measures a real directory configured with %s, under that spelling', (_name, suffix) => {
+    const configured = `${tmpDir}${suffix}`;
+    expect(readVolumeSpace(configured)).toMatchObject({ kind: 'measured', measuredPath: configured, homeExists: true });
+  });
+
+  it.each([
+    ['a trailing separator', `${path.sep}`],
+    ['a trailing `/.`', `${path.sep}.`],
+  ])('measures a missing home configured with %s at its nearest existing parent', (_name, suffix) => {
+    const configured = `${tmpDir}${path.sep}not-yet${path.sep}.shieldcortex${suffix}`;
+    expect(readVolumeSpace(configured)).toMatchObject({ kind: 'measured', measuredPath: tmpDir, homeExists: false });
+    expect(fs.readdirSync(tmpDir)).toEqual([]);
   });
 
   /**
