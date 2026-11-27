@@ -55,6 +55,15 @@ function writeProjectDir(dirName: string, version: string): string {
   return pkgDir;
 }
 
+/** The npm package layout OpenClaw loads: package.json `main`, the manifest naming the plugin, the entry point. */
+function writeRealBuild(dir: string, version: string): string {
+  fs.mkdirSync(path.join(dir, 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', version, main: './dist/index.js' }));
+  fs.writeFileSync(path.join(dir, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, version }));
+  fs.writeFileSync(path.join(dir, 'dist', 'index.js'), '');
+  return dir;
+}
+
 function writeIndex(row: {
   installRecords: Record<string, unknown>;
   plugins: unknown[];
@@ -256,7 +265,7 @@ describe('#260 — the install index in config_machine_state (OpenClaw 2026.11.x
   it('end-to-end on a migrated macOS-like host (no live roster): NOT index-unreadable', () => {
     writeConfig(true, true);
     const canonical = 'drakon-systems-shieldcortex-realtime-abc';
-    const installPath = writeProjectDir(canonical, '5.22.1');
+    const installPath = writeRealBuild(writeProjectDir(canonical, '5.22.1'), '5.22.1');
     writeMachineStateIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath } },
       plugins: [upstreamEntry(installPath)],
@@ -491,12 +500,37 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     expect(reconcilePluginState(input)).toMatchObject({ state: 'load-unproven', severity: 'warn', indexPathMissing: true });
   });
 
-  it.each(['package.json', 'openclaw.plugin.json'])('a recorded directory holding %s counts as there', (marker) => {
+  // Sol finding 3: a marker that EXISTS is not a build. Only a manifest that
+  // names the plugin plus an entry point file counts.
+  const manifest = JSON.stringify({ id: PLUGIN, version: '5.22.1' });
+  it.each<[string, (d: string) => void, boolean]>([
+    ['package.json only (leftover metadata)', (d) => fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ name: 'x', version: '5.22.1' })), false],
+    ['an empty-object openclaw.plugin.json only', (d) => fs.writeFileSync(path.join(d, 'openclaw.plugin.json'), '{}'), false],
+    ['a DIRECTORY named openclaw.plugin.json + dist/index.js', (d) => { fs.mkdirSync(path.join(d, 'openclaw.plugin.json')); fs.mkdirSync(path.join(d, 'dist')); fs.writeFileSync(path.join(d, 'dist', 'index.js'), ''); }, false],
+    ['a DIRECTORY named package.json', (d) => fs.mkdirSync(path.join(d, 'package.json')), false],
+    ['the manifest, no entry point', (d) => fs.writeFileSync(path.join(d, 'openclaw.plugin.json'), manifest), false],
+    ['the manifest + a DIRECTORY named index.js', (d) => { fs.writeFileSync(path.join(d, 'openclaw.plugin.json'), manifest); fs.mkdirSync(path.join(d, 'index.js')); }, false],
+    ['a manifest for ANOTHER plugin + dist/index.js', (d) => { fs.writeFileSync(path.join(d, 'openclaw.plugin.json'), JSON.stringify({ id: 'other' })); fs.mkdirSync(path.join(d, 'dist')); fs.writeFileSync(path.join(d, 'dist', 'index.js'), ''); }, false],
+    ['an unparseable manifest + index.js', (d) => { fs.writeFileSync(path.join(d, 'openclaw.plugin.json'), '{'); fs.writeFileSync(path.join(d, 'index.js'), ''); }, false],
+    ['a package.json `main` escaping the directory', (d) => { fs.writeFileSync(path.join(d, 'openclaw.plugin.json'), manifest); fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ main: '../../../../../../../../etc/hostname' })); }, false],
+    ['the manifest + index.js (trusted-local copy)', (d) => { fs.writeFileSync(path.join(d, 'openclaw.plugin.json'), manifest); fs.writeFileSync(path.join(d, 'index.js'), ''); }, true],
+    ['the manifest + dist/index.js (no package.json)', (d) => { fs.writeFileSync(path.join(d, 'openclaw.plugin.json'), manifest); fs.mkdirSync(path.join(d, 'dist')); fs.writeFileSync(path.join(d, 'dist', 'index.js'), ''); }, true],
+    ['the npm package layout (package.json main ./dist/index.js)', (d) => { writeRealBuild(d, '5.22.1'); }, true],
+    ['the manifest + package.json main lib/entry.mjs', (d) => { fs.writeFileSync(path.join(d, 'openclaw.plugin.json'), manifest); fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ main: 'lib/entry.mjs' })); fs.mkdirSync(path.join(d, 'lib')); fs.writeFileSync(path.join(d, 'lib', 'entry.mjs'), ''); }, true],
+  ])('a recorded directory holding %s ⇒ indexInstallPathExists %s', (_label, make, expected) => {
     writeConfig(true, true);
     writeMachineStateIndex(staleRow());
     fs.mkdirSync(gone(), { recursive: true });
-    fs.writeFileSync(path.join(gone(), marker), '{}');
-    expect(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null }).indexInstallPathExists).toBe(true);
+    make(gone());
+    expect(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null }).indexInstallPathExists).toBe(expected);
+  });
+
+  it('a recorded path that is a FILE, not a directory ⇒ false', () => {
+    writeConfig(true, true);
+    writeMachineStateIndex(staleRow());
+    fs.mkdirSync(path.dirname(gone()), { recursive: true });
+    fs.writeFileSync(gone(), '');
+    expect(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null }).indexInstallPathExists).toBe(false);
   });
 
   // #260 r3 (C): the roster proves it loaded, not which version loaded.
@@ -557,17 +591,88 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     expect(verdict).toMatchObject({ state: 'installed-not-enabled', severity: 'fail', recommendedAction: 're-register' });
   });
 
-  it('the stale record beside a real build elsewhere: the build decides (version from disk, not the record)', () => {
+  // Sol finding 3: this test used to assert a FALSE green. The other copy
+  // proves an install, not that OpenClaw selected it; the only "enabled"
+  // evidence is the stale row. Warn, no action.
+  it('the stale record beside a real build elsewhere, no live proof: load-unproven / warn / none — never healthy', () => {
     writeConfig(true, true);
-    writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1');
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
     writeMachineStateIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: gone() } },
       plugins: [upstreamEntry(gone())],
     });
     const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
     expect(input.indexInstallPathExists).toBe(false);
+    expect(input.indexRootDirExists).toBe(false);
     expect(input.onDiskVersion).toBe('5.22.1');
-    expect(reconcilePluginState(input)).toMatchObject({ state: 'healthy', severity: 'ok' });
+    const verdict = reconcilePluginState(input);
+    expect(verdict).toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: true });
+    expect(verdict.state).not.toBe('version-regressed');
+  });
+
+  it('positive control (Sol 3): the same host with a live roster naming the plugin ⇒ healthy at the measured version', () => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    writeMachineStateIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: gone() } },
+      plugins: [upstreamEntry(gone())],
+    });
+    const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => [PLUGIN] }));
+    expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', onDiskVersion: '5.22.1', indexPathMissing: false });
+    expect(verdict.versionUnverified).toBeUndefined();
+  });
+
+  it('positive control (Sol 3): the index SELECTS the real build (rootDir verified) though the record path is stale ⇒ ordinary rules, healthy', () => {
+    writeConfig(true, true);
+    const real = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    writeMachineStateIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: gone() } },
+      plugins: [upstreamEntry(real)],
+    });
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
+    expect(input.indexInstallPathExists).toBe(false);
+    expect(input.indexRootDirExists).toBe(true);
+    expect(reconcilePluginState(input)).toMatchObject({ state: 'healthy', severity: 'ok', indexPathMissing: false });
+  });
+
+  it('…and a rootDir holding only leftover metadata is no selection proof', () => {
+    writeConfig(true, true);
+    const leftover = writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1');
+    writeMachineStateIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: gone() } },
+      plugins: [upstreamEntry(leftover)],
+    });
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
+    expect(input.indexRootDirExists).toBe(false);
+    expect(reconcilePluginState(input)).toMatchObject({ state: 'load-unproven', indexPathMissing: true });
+  });
+
+  // Case #1 / Sol finding 2 through the real gather: a READ live roster that
+  // lacks the plugin on a stale-path host — non-null rosters, both shapes.
+  it.each([
+    ['a roster naming other plugins', ['brave']],
+    ['an empty roster', [] as string[]],
+  ])('stale-path host + %s, no race ⇒ enabled-not-loaded / FAIL / update-openclaw-tracked (as on main)', (_label, roster) => {
+    writeConfig(true, true);
+    writeMachineStateIndex(staleRow());
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => roster });
+    expect(input.liveRoster).toEqual(roster);
+    expect(input.indexInstallPathExists).toBe(false);
+    expect(reconcilePluginState(input)).toMatchObject({
+      state: 'enabled-not-loaded', severity: 'fail', recommendedAction: 'update-openclaw-tracked', indexPathMissing: false,
+    });
+  });
+
+  it.each([
+    ['a roster naming other plugins', ['brave']],
+    ['an empty roster', [] as string[]],
+  ])('stale-path host + %s + a #142 registration sighted after boot ⇒ the #142 warn, no action', (_label, roster) => {
+    writeConfig(true, true);
+    writeMachineStateIndex(staleRow());
+    // The race flag is only produced by the production log reader (needs a
+    // real boot line); everything else here is the real gather.
+    const input = { ...gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => roster }), registrationSeenAfterBoot: true };
+    expect(reconcilePluginState(input)).toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: false });
   });
 
   it('a record with no installPath, or a relative one, is "not checked" — never "missing"', () => {

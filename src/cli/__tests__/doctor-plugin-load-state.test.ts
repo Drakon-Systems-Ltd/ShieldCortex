@@ -22,6 +22,14 @@ afterEach(() => {
   fs.rmSync(home, { recursive: true, force: true });
 });
 
+/** The npm package layout OpenClaw loads: package.json `main`, the manifest, the entry point. */
+function writeRealBuild(dir: string, version: string): void {
+  fs.mkdirSync(path.join(dir, 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', version, main: './dist/index.js' }));
+  fs.writeFileSync(path.join(dir, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, version }));
+  fs.writeFileSync(path.join(dir, 'dist', 'index.js'), '');
+}
+
 function setup(opts: { enabled: boolean; roster: Array<{ pluginId: string; enabled: boolean }>; onDisk: string; recordVersion: string }): void {
   const oc = path.join(home, '.openclaw');
   fs.mkdirSync(path.join(oc, 'plugins'), { recursive: true });
@@ -29,7 +37,9 @@ function setup(opts: { enabled: boolean; roster: Array<{ pluginId: string; enabl
   const dirName = 'drakon-systems-shieldcortex-realtime-abc';
   const pkgDir = path.join(oc, 'npm', 'projects', dirName, PKG_SUBPATH);
   fs.mkdirSync(pkgDir, { recursive: true });
-  fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ version: opts.onDisk }));
+  // A real npm build (#260 Sol-3: package.json alone is leftover metadata,
+  // not an install): manifest naming the plugin + the `main` entry point.
+  writeRealBuild(pkgDir, opts.onDisk);
   fs.writeFileSync(
     path.join(oc, 'openclaw.json'),
     // #226: a fully-registered stanza now also carries the conversation-hook
@@ -168,9 +178,8 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     );
   const pkgDir = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-abc', PKG_SUBPATH);
 
-  it('the recorded directory is there: passes', async () => {
-    fs.mkdirSync(pkgDir(), { recursive: true });
-    fs.writeFileSync(path.join(pkgDir(), 'package.json'), JSON.stringify({ version: '5.22.1' }));
+  it('the recorded directory holds a real build: passes', async () => {
+    writeRealBuild(pkgDir(), '5.22.1');
     migrated(pkgDir());
     const r = await checkOpenClawPluginLoadState(home, '5.22.1');
     expect(r.status).toBe('pass');
@@ -208,6 +217,23 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     expect(r.status).not.toBe('pass');
   });
 
+  // Sol finding 3: a real npm build in ANOTHER project dir is an install, not
+  // proof that OpenClaw selected it. Before: a green "installed and enabled".
+  it('stale record + a real build in another project dir, no live proof: WARNS (no pass, no repair advice)', async () => {
+    migrated(pkgDir());
+    writeRealBuild(path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-other', PKG_SUBPATH), '5.22.1');
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expectStalePathWarn(r);
+  });
+
+  it('positive control: the same host with the live roster naming the plugin passes roster-confirmed at the measured version', () => {
+    migrated(pkgDir());
+    writeRealBuild(path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-other', PKG_SUBPATH), '5.22.1');
+    const r = renderWithRoster([PLUGIN]);
+    expect(r.status).toBe('pass');
+    expect(r.message).toMatch(/roster-confirmed, v5\.22\.1\)/);
+  });
+
   // #260 r4 (Astra r3 BLOCKER 2): a wiped registration behind a stale record
   // was rendered "skipped (realtime plugin not installed)".
   it('no config entry + stale record + a real packaged extension at the roster rootDir: FAILS as not registered, never "skipped … not installed"', async () => {
@@ -242,8 +268,7 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
   });
 
   it('control: directory present + live roster names the plugin: roster-confirmed with the measured version', () => {
-    fs.mkdirSync(pkgDir(), { recursive: true });
-    fs.writeFileSync(path.join(pkgDir(), 'package.json'), JSON.stringify({ version: '5.22.1' }));
+    writeRealBuild(pkgDir(), '5.22.1');
     migrated(pkgDir());
     const r = renderWithRoster([PLUGIN]);
     expect(r.status).toBe('pass');

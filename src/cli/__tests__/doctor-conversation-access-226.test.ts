@@ -84,8 +84,12 @@ function healthyInstall(entry: Record<string, unknown>): void {
   const oc = path.join(home, '.openclaw');
   const dirName = 'drakon-systems-shieldcortex-realtime-abc';
   const pkgDir = path.join(oc, 'npm', 'projects', dirName, PKG_SUBPATH);
-  fs.mkdirSync(pkgDir, { recursive: true });
-  fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ version: '4.47.35' }));
+  // A real npm build (#260: package.json alone is leftover metadata, not an
+  // install): the manifest naming the plugin and the `main` entry point.
+  fs.mkdirSync(path.join(pkgDir, 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ version: '4.47.35', main: './dist/index.js' }));
+  fs.writeFileSync(path.join(pkgDir, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, version: '4.47.35' }));
+  fs.writeFileSync(path.join(pkgDir, 'dist', 'index.js'), '');
   fs.mkdirSync(path.join(oc, 'state'), { recursive: true });
   fs.writeFileSync(
     path.join(oc, 'openclaw.json'),

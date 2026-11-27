@@ -169,7 +169,7 @@ describe('#260 r2 — malformed and stale index input', () => {
   it('the recorded path is confirmed MISSING and nothing is on disk: never healthy', () => {
     const verdict = reconcilePluginState(base({ indexInstallPathExists: false }));
     expect(verdict).toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: true });
-    expect(verdict.reasons.join(' ')).toMatch(/records the plugin at \/gone, which is gone/);
+    expect(verdict.reasons.join(' ')).toMatch(/records the plugin at \/gone, which holds no plugin build/);
   });
 
   it('indexPathMissing is false on every other verdict, including the other load-unproven ones', () => {
@@ -248,12 +248,67 @@ describe('#260 r2 — malformed and stale index input', () => {
     expect(verdict).toMatchObject({ state: 'installed-not-enabled', severity: 'fail', recommendedAction: 're-register' });
   });
 
-  it('a missing path with a real build on disk: the build decides, and the record\'s version is not the running version', () => {
+  // Sol finding 3: a build on disk is an install, not a selection. With the
+  // stale row as the only "enabled" evidence and no live proof, it is not a
+  // pass (it was a false green at e97f4048).
+  it('a missing path with a real build elsewhere on disk and no live proof: load-unproven, never healthy', () => {
     const input = base({ indexInstallPathExists: false, onDiskInstallPath: '/home/u/.openclaw/extensions/shieldcortex-realtime' });
     input.index!.installRecords['shieldcortex-realtime'].version = '4.0.0';
+    const verdict = reconcilePluginState(input);
     // The stale record says 4.0.0 (< expected): not a regression, it is not what runs.
-    expect(reconcilePluginState(input)).toMatchObject({ state: 'healthy', severity: 'ok' });
+    expect(verdict.state).not.toBe('version-regressed');
+    expect(verdict).toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: true });
+    expect(verdict.reasons.join(' ')).toMatch(/a build exists elsewhere on disk, but nothing shows OpenClaw selected it/);
+    expect(reconcilePluginState(base({ indexInstallPathExists: false, onDiskVersion: '5.22.1' })))
+      .toMatchObject({ state: 'load-unproven', severity: 'warn', indexPathMissing: true });
     // Control: the same record with its path present IS the running version.
     expect(reconcilePluginState({ ...input, indexInstallPathExists: true }).state).toBe('version-regressed');
+  });
+
+  it('positive control (Sol 3): the same host with the RUNNING gateway proving the load is healthy, with the measured version', () => {
+    const verdict = reconcilePluginState(base({
+      indexInstallPathExists: false, onDiskVersion: '5.22.1', liveRoster: ['shieldcortex-realtime'], liveLoadEvidence: 'boot-roster',
+    }));
+    expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', indexPathMissing: false });
+    expect(verdict.versionUnverified).toBeUndefined();
+  });
+
+  it('positive control (Sol 3): the index\'s own selection (rootDir) verified as a real build lets the ordinary rules decide', () => {
+    const input = base({ indexInstallPathExists: false, indexRootDirExists: true, onDiskVersion: '5.22.1' });
+    expect(reconcilePluginState(input)).toMatchObject({ state: 'healthy', severity: 'ok', indexPathMissing: false });
+    // …and a rootDir that is NOT a build is no selection proof.
+    expect(reconcilePluginState({ ...input, indexRootDirExists: false })).toMatchObject({ state: 'load-unproven', indexPathMissing: true });
+    expect(reconcilePluginState({ ...input, indexRootDirExists: null })).toMatchObject({ state: 'load-unproven', indexPathMissing: true });
+  });
+
+  // Case blocking #1 / Sol finding 2, measured: base fixture, roster
+  // ['brave'], boot-roster evidence, path gone. Merge-base 128a0734 gives
+  // enabled-not-loaded / fail / update-openclaw-tracked; e97f4048 gave
+  // load-unproven / warn / none. A read roster that lacks the plugin and an
+  // unread roster are different evidence.
+  it.each([
+    ['a roster that names other plugins', ['brave']],
+    ['an empty roster', [] as string[]],
+  ])('Case #1: stale path + %s (read, plugin absent), no registration race ⇒ enabled-not-loaded / FAIL / update-openclaw-tracked', (_label, roster) => {
+    for (const build of [{}, { onDiskVersion: '5.22.1' }, { onDiskInstallPath: '/x/ext' }]) {
+      const verdict = reconcilePluginState(base({ liveRoster: roster, liveLoadEvidence: 'boot-roster', indexInstallPathExists: false, ...build }));
+      expect(verdict).toMatchObject({
+        state: 'enabled-not-loaded', severity: 'fail', recommendedAction: 'update-openclaw-tracked', loadedInLiveRoster: false, indexPathMissing: false,
+      });
+    }
+  });
+
+  it.each([
+    ['a roster that names other plugins', ['brave']],
+    ['an empty roster', [] as string[]],
+  ])('Case #1: stale path + %s + a registration sighted after boot (#142) ⇒ still the #142 load-unproven warn, no action', (_label, roster) => {
+    const verdict = reconcilePluginState(base({ liveRoster: roster, indexInstallPathExists: false, registrationSeenAfterBoot: true }));
+    expect(verdict).toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: false });
+    expect(verdict.reasons.join(' ')).toMatch(/registration was sighted after that snapshot/);
+  });
+
+  it('Case #1 control: an UNREAD roster on the same stale-path host is the stale-path warn, not a conviction', () => {
+    expect(reconcilePluginState(base({ liveRoster: null, indexInstallPathExists: false })))
+      .toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: true });
   });
 });

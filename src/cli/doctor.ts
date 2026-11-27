@@ -9194,13 +9194,16 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       // false alarm that trains operators to ignore the check that caught #74.
       if (verdict.indexPathMissing) {
         // #260: a different cause — OpenClaw's record points at a folder that
-        // is gone and we found no other copy. Not a pass, not a conviction.
+        // holds no build, and nothing shows which other copy (if any) OpenClaw
+        // selected. A copy elsewhere on disk is not a selection (Sol finding
+        // 3), so the message does not depend on whether one was found. Not a
+        // pass, not a conviction.
         return {
           label,
           status: 'warn',
           message:
-            'couldn\'t confirm the realtime plugin is installed — OpenClaw\'s record of it points to a folder that is no longer there, ' +
-            'and no other copy was found in the usual places. It may be installed somewhere else. Neither OK nor a fault is confirmed',
+            'couldn\'t confirm the realtime plugin is installed and loaded — OpenClaw\'s record of it points to a folder that is no longer there, ' +
+            'and nothing shows that OpenClaw uses any other copy. It may be installed somewhere else. Neither OK nor a fault is confirmed',
           fix: 'Check it: `shieldcortex openclaw status`',
           verboseNote: `Prove enforcement live: ${LIVE_CANARY_COMMAND}`,
         };

@@ -136,13 +136,23 @@ export interface ReconcileInput {
    */
   onDiskInstallPath?: string | null;
   /**
-   * Whether the directory the index record's `installPath` names is on disk
-   * (#260). `false` = looked and it is gone: that record is a leftover, not
-   * proof of an install. `true` = it is there. null/undefined = not checked
+   * Whether the directory the index record's `installPath` names holds a REAL
+   * plugin build (#260): a directory whose `openclaw.plugin.json` names this
+   * plugin and that has an entry point file (package.json `main`, `index.js`
+   * or `dist/index.js`). `false` = looked and there is no build there (gone,
+   * empty, or only leftover metadata): that record is a leftover, not proof
+   * of an install. `true` = a build is there. null/undefined = not checked
    * (no record, no usable path, or the check itself failed), which keeps the
    * meaning every earlier fixture had.
    */
   indexInstallPathExists?: boolean | null;
+  /**
+   * The same check for the `rootDir` on the index's plugins entry for this
+   * plugin — the copy OpenClaw SELECTED (#260, Sol finding 3). `true` is
+   * independent proof that the index's selection points at a real build even
+   * when the record's `installPath` is stale. null/undefined = not checked.
+   */
+  indexRootDirExists?: boolean | null;
   /**
    * `~/.openclaw/npm/projects/*` dir names matching the plugin.
    *
@@ -255,9 +265,11 @@ export interface ReconcileVerdict {
   expectedVersion: string;
   /**
    * This verdict is `load-unproven` BECAUSE the install index records the
-   * plugin at a path that is gone and no other build was found (#260). False
-   * (or absent, on hand-built verdicts) on every other verdict, including
-   * other `load-unproven` ones.
+   * plugin at a path that holds no build, nothing shows which other copy (if
+   * any) OpenClaw selected, and the running gateway did not prove the load
+   * (#260). A build found elsewhere on disk does not clear it: a build on
+   * disk is not a selection. False (or absent, on hand-built verdicts) on
+   * every other verdict, including other `load-unproven` ones.
    */
   indexPathMissing?: boolean;
   /**
@@ -334,12 +346,20 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // an installation.
   //
   // #260: a record is a claim, and the index can outlive what it describes.
-  // A record whose directory is CONFIRMED gone still counts as an install
-  // here — every rule below runs exactly as it would without that knowledge.
-  // The stale path does two narrow things only: it withholds the record's
-  // version (see `effective`), and it blocks a PASS (see the end of this
-  // function). It never pre-empts another rule.
-  const indexPathMissing = Boolean(indexRecord) && input.indexInstallPathExists === false;
+  // A record whose directory CONFIRMEDLY holds no build still counts as an
+  // install here — every rule below runs exactly as it would without that
+  // knowledge. The stale path does two narrow things only: it withholds the
+  // record's version (see `effective`), and it blocks a PASS (see the end of
+  // this function). It never pre-empts another rule.
+  //
+  // Sol finding 3: the same stale row's plugins entry (`enabled: true`) is
+  // what lets control skip rule 4 and reach the pass, so it must not carry the
+  // pass on its own. Only independent evidence does: the running gateway
+  // proving the load, or the index's own selection (`rootDir`) verified as a
+  // real build. A build ShieldCortex found somewhere else on disk is neither.
+  const indexRecordPathGone = Boolean(indexRecord) && input.indexInstallPathExists === false;
+  const indexSelectionVerified = input.indexRootDirExists === true;
+  const indexPathMissing = indexRecordPathGone && !indexSelectionVerified;
   const installed = Boolean(input.installsJson || onDiskVersion || indexRecord || input.onDiskInstallPath);
 
   // The index warning is present even on healthy hosts (it names every plugin
@@ -363,7 +383,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // A record whose directory is gone says nothing about what would run — not
   // even when the live roster names the plugin: that proves it loaded, not
   // which version loaded. (No live-roster term in `indexPathMissing`.)
-  const effective = coerce(onDiskVersion) ?? (indexPathMissing ? null : coerce(indexVersion));
+  const effective = coerce(onDiskVersion) ?? (indexRecordPathGone ? null : coerce(indexVersion));
   const expected = coerce(expectedVersion);
   const regressed = Boolean(effective && expected && semver.lt(effective, expected));
 
@@ -571,24 +591,36 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // #260: THE ONLY THING A STALE INDEX PATH DOES. Every rule above ran as if
   // the record were sound; control is here because none of them objected, and
   // the next statement would be a pass. But the index records the plugin at a
-  // path that is gone and none of our own readers found a build anywhere, so
-  // nothing on this host backs "installed, versions agree".
+  // path that holds no build, and its selection (`rootDir`) is not verified,
+  // so nothing on this host backs "installed and enabled, versions agree".
   //   - The running gateway provably loaded it ⇒ load is proven, so it stays
-  //     healthy — but WHICH version loaded is not known, and is not claimed.
-  //   - Otherwise ⇒ neither a pass nor a conviction: the build may sit in a
-  //     layout or a configured load path this gather does not read.
-  if (indexPathMissing && onDiskVersion == null && !input.onDiskInstallPath) {
+  //     healthy. With no build found anywhere, WHICH version loaded is not
+  //     known, and is not claimed.
+  //   - Otherwise ⇒ neither a pass nor a conviction, whether or not a build
+  //     sits elsewhere on disk (Sol finding 3): a build on disk proves an
+  //     install, not that OpenClaw selected it.
+  if (indexPathMissing) {
+    const buildElsewhere = onDiskVersion != null || Boolean(input.onDiskInstallPath);
     if (loadedInLiveRoster === true) {
+      if (!buildElsewhere) {
+        reasons.push(
+          input.liveLoadEvidence === 'gateway-pid-registration'
+            ? 'enabled, registration attributed to the RUNNING gateway PID after boot (hot-reload / post-boot load)'
+            : 'enabled, present on the running gateway boot roster',
+        );
+        reasons.push("load proven by the running gateway; the installed version could not be verified (OpenClaw's record points to a folder that is gone)");
+        return { ...base, versionUnverified: true, state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons };
+      }
+      // Live proof AND a build on disk: the ordinary pass below.
+    } else {
+      const where = String(indexRecord?.installPath);
       reasons.push(
-        input.liveLoadEvidence === 'gateway-pid-registration'
-          ? 'enabled, registration attributed to the RUNNING gateway PID after boot (hot-reload / post-boot load)'
-          : 'enabled, present on the running gateway boot roster',
+        buildElsewhere
+          ? `OpenClaw's install index records the plugin at ${where}, which holds no plugin build; a build exists elsewhere on disk, but nothing shows OpenClaw selected it and the running gateway did not prove the load — load state is unproven`
+          : `OpenClaw's install index records the plugin at ${where}, which holds no plugin build; no other build was found where ShieldCortex looks — it may be installed elsewhere; load state is unproven`,
       );
-      reasons.push("load proven by the running gateway; the installed version could not be verified (OpenClaw's record points to a folder that is gone)");
-      return { ...base, versionUnverified: true, state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons };
+      return { ...base, indexPathMissing: true, state: 'load-unproven', severity: 'warn', recommendedAction: 'none', reasons };
     }
-    reasons.push(`OpenClaw's install index records the plugin at ${indexRecord?.installPath}, which is gone; no other build was found where ShieldCortex looks — it may be installed elsewhere; load state is unproven`);
-    return { ...base, indexPathMissing: true, state: 'load-unproven', severity: 'warn', recommendedAction: 'none', reasons };
   }
 
   // Say exactly which evidence we have. Claiming "loaded in roster" off the
@@ -1170,26 +1202,84 @@ function readInstallsJsonRecord(home: string, pluginId: string): InstallsJsonRec
 }
 
 /**
- * Is the install the index record names on disk? It is there when the recorded
- * directory holds a package.json or an openclaw.plugin.json — an empty
- * directory left at the path is not an install. Only "it is not there"
- * (ENOENT/ENOTDIR on an absolute path) is false; no record, a path we cannot
- * resolve, or a stat that failed some other way is null — not checked.
+ * Does `dir` hold a REAL build of the plugin (#260, Sol finding 3)? Not "does
+ * a marker path exist": a directory named `package.json`, or the
+ * `package.json` an uninstall left behind with nothing else, is not something
+ * OpenClaw can load. A build is:
+ *
+ *  - a directory, holding
+ *  - an `openclaw.plugin.json` regular file that parses to an object whose
+ *    `id` is this plugin (the manifest OpenClaw loads), and
+ *  - an entry point regular file: package.json `main` (the npm package's
+ *    `./dist/index.js`), else `index.js` (the trusted-local copy), else
+ *    `dist/index.js`.
+ *
+ * `false` = looked, and there is no build there (gone, ENOTDIR, empty, only
+ * metadata, a manifest for something else, no entry point). `null` = not
+ * checked: no path, a relative one, or a read that failed some other way
+ * (EACCES, EIO) — a measurement we do not have, never a verdict either way.
  */
-function indexInstallPathOnDisk(index: PluginIndexRow | null, pluginId: string): boolean | null {
-  const p = index?.installRecords?.[pluginId]?.installPath;
-  if (typeof p !== 'string' || !path.isAbsolute(p)) return null;
-  let unchecked = false;
-  for (const marker of ['package.json', 'openclaw.plugin.json']) {
+function verifiedPluginBuildAt(dir: unknown, pluginId: string): boolean | null {
+  if (typeof dir !== 'string' || !path.isAbsolute(dir)) return null;
+  const gone = (err: unknown): boolean => {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === 'ENOENT' || code === 'ENOTDIR';
+  };
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(dir);
+  } catch (err) {
+    return gone(err) ? false : null;
+  }
+  if (!st.isDirectory()) return false;
+
+  const readObject = (file: string): Record<string, unknown> | 'missing' | 'invalid' | null => {
+    let raw: string;
     try {
-      fs.statSync(path.join(p, marker));
-      return true;
+      if (!fs.statSync(file).isFile()) return 'invalid';
+      raw = fs.readFileSync(file, 'utf-8');
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException)?.code;
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') unchecked = true;
+      return gone(err) ? 'missing' : null;
+    }
+    try {
+      const v = JSON.parse(raw) as unknown;
+      return isPlainObject(v) ? v : 'invalid';
+    } catch {
+      return 'invalid';
+    }
+  };
+  const manifest = readObject(path.join(dir, 'openclaw.plugin.json'));
+  if (manifest === null) return null;
+  if (manifest === 'missing' || manifest === 'invalid' || manifest.id !== pluginId) return false;
+
+  const pkg = readObject(path.join(dir, 'package.json'));
+  if (pkg === null) return null;
+  const entries: string[] = [];
+  if (isPlainObject(pkg) && typeof pkg.main === 'string' && pkg.main.trim()) entries.push(pkg.main.trim());
+  entries.push('index.js', path.join('dist', 'index.js'));
+  let unchecked = false;
+  for (const rel of entries) {
+    const file = path.resolve(dir, rel);
+    // An entry point outside the build directory is not this build's.
+    if (file !== dir && !file.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep)) continue;
+    try {
+      if (fs.statSync(file).isFile()) return true;
+    } catch (err) {
+      if (!gone(err)) unchecked = true;
     }
   }
   return unchecked ? null : false;
+}
+
+/** {@link verifiedPluginBuildAt} for the path the index RECORD names. */
+function indexInstallPathOnDisk(index: PluginIndexRow | null, pluginId: string): boolean | null {
+  return verifiedPluginBuildAt(index?.installRecords?.[pluginId]?.installPath, pluginId);
+}
+
+/** {@link verifiedPluginBuildAt} for the copy the index's plugins entry SELECTED (`rootDir`). */
+function indexRootDirOnDisk(index: PluginIndexRow | null, pluginId: string): boolean | null {
+  const entry = index?.plugins?.find((p) => p?.pluginId === pluginId);
+  return verifiedPluginBuildAt(entry?.rootDir, pluginId);
 }
 
 function scanProjectDirs(home: string, pluginId: string): string[] {
@@ -1271,6 +1361,7 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
     installsJson: readInstallsJsonRecord(home, pluginId),
     index,
     indexInstallPathExists: indexInstallPathOnDisk(index, pluginId),
+    indexRootDirExists: indexRootDirOnDisk(index, pluginId),
     onDiskVersion: readInstalledRealtimePluginVersion(home),
     // #226: the trusted-local-copy build, only when it is a REAL one (index.js
     // + openclaw.plugin.json). Kept separate from `onDiskVersion` so a valid
