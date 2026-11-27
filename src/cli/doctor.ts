@@ -9095,6 +9095,14 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
   const label = 'OpenClaw plugin loaded';
   const fix = 'Run `shieldcortex repair` to reconcile the plugin install metadata and verify it actually loads.';
 
+  // #260 (Sol finding 4): "not installed" is a claim about records, and the
+  // install index — the main one — is there but could not be read. The
+  // reconciler no longer produces this pairing; a verdict built elsewhere
+  // that does must not reach the install advice below.
+  if (verdict.state === 'enabled-not-installed' && verdict.indexUnreadable === true) {
+    return renderPluginLoadVerdict({ ...verdict, state: 'index-unreadable', severity: 'warn', recommendedAction: 'none' });
+  }
+
   switch (verdict.state) {
     case 'not-installed':
       return { label, status: 'info', message: 'skipped (realtime plugin not installed)' };

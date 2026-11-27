@@ -275,3 +275,56 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     expect(r.message).toMatch(/roster-confirmed, v5\.22\.1\)/);
   });
 });
+
+/**
+ * #260 Sol finding 4 through the real doctor check: an index that is there
+ * but unreadable, with NO on-disk copy, warns without an install
+ * recommendation; a confirmed absence still FAILS with one.
+ */
+describe('#260 Sol-4 — doctor on a present-but-unreadable index with no copy on disk', () => {
+  const enabledConfig = (): void => {
+    const oc = path.join(home, '.openclaw');
+    fs.mkdirSync(path.join(oc, 'state'), { recursive: true });
+    fs.writeFileSync(path.join(oc, 'openclaw.json'), JSON.stringify({
+      plugins: { entries: { [PLUGIN]: { enabled: true, hooks: { allowConversationAccess: true } } }, allow: [PLUGIN] },
+    }));
+  };
+  const machineStateDb = (valueJson: string | null): void => {
+    const db = new Database(path.join(home, '.openclaw', 'state', 'openclaw.sqlite'));
+    db.exec('CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)');
+    if (valueJson !== null) db.prepare("INSERT INTO config_machine_state VALUES ('plugins.installedIndex', ?, 1)").run(valueJson);
+    db.close();
+  };
+
+  it.each([
+    ['malformed JSON', '{"revision": 1, "index": {'],
+    ['no numeric revision', JSON.stringify({ index: { installRecords: {}, plugins: [] } })],
+  ])('index row with %s: WARNS, no install command, no repair advice', async (_label, valueJson) => {
+    enabledConfig();
+    machineStateDb(valueJson);
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/couldn't read OpenClaw's plugin list/i);
+    expect(`${r.message} ${r.fix ?? ''}`).not.toMatch(/Install the plugin|plugins install|no package is installed/i);
+    expect(r.fix ?? '').toMatch(/Do not run repair from this warning/);
+  });
+
+  it('confirmed-absence control: a readable migrated DB with no index row + no copy FAILS with the install fix', async () => {
+    enabledConfig();
+    machineStateDb(null);
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/no package is installed/);
+    expect(r.fix ?? '').toMatch(/Install the plugin/);
+  });
+
+  it('a hand-built enabled-not-installed verdict carrying indexUnreadable renders the warn, not the install advice', () => {
+    const verdict = reconcilePluginState({
+      pluginId: PLUGIN, expectedVersion: '5.22.1', config: { enabled: true, inAllow: true }, installsJson: null, index: null, onDiskVersion: null,
+    });
+    expect(renderPluginLoadVerdict(verdict).status).toBe('fail');
+    const r = renderPluginLoadVerdict({ ...verdict, indexUnreadable: true });
+    expect(r.status).toBe('warn');
+    expect(r.fix ?? '').not.toMatch(/Install the plugin/);
+  });
+});

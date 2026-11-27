@@ -790,3 +790,61 @@ describe('gatherReconcileInput — reads all three layers off disk', () => {
     expect(verdict.recommendedAction).toBe('update-openclaw-tracked');
   });
 });
+
+/**
+ * #260 Sol finding 4 through the real gather: an index that is there but
+ * cannot be read reaches the reconciler as exactly that — with NO on-disk copy
+ * (the case the earlier malformed-index test, which seeded a copy, could not
+ * catch) — and a confirmed absence still fails.
+ */
+describe('#260 Sol-4 — gather carries present-but-unreadable', () => {
+  it.each([
+    ['a malformed migrated row', (): void => writeMachineStateIndex(null, '{"revision": 1, "index": {')],
+    ['a migrated row with a bad plugins entry', (): void => writeMachineStateIndex({ installRecords: {}, plugins: [{ pluginId: PLUGIN, rootDir: 7, enabled: true }] })],
+    ['a legacy row with a column that does not parse', (): void => {
+      writeIndex({ installRecords: {}, plugins: [] });
+      const db = new Database(path.join(home, '.openclaw', 'state', 'openclaw.sqlite'));
+      db.exec(`UPDATE installed_plugin_index SET install_records_json = 'not json'`);
+      db.close();
+    }],
+    ['a state DB that is not a database', (): void => {
+      fs.mkdirSync(path.join(home, '.openclaw', 'state'), { recursive: true });
+      fs.writeFileSync(path.join(home, '.openclaw', 'state', 'openclaw.sqlite'), 'not a sqlite database');
+    }],
+  ])('%s, config enabled, NO on-disk copy ⇒ index-unreadable / warn / none (never enabled-not-installed)', (_label, write) => {
+    writeConfig(true, true);
+    write();
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
+    expect(input.index).toBeNull();
+    expect(input.indexUnreadable).toBe(true);
+    expect(input.onDiskVersion).toBeNull();
+    expect(input.onDiskInstallPath).toBeNull();
+    const verdict = reconcilePluginState(input);
+    expect(verdict).toMatchObject({ state: 'index-unreadable', severity: 'warn', recommendedAction: 'none' });
+  });
+
+  it.each([
+    ['no state DB at all', (): void => undefined],
+    ['a migrated DB with no index row', (): void => writeMachineStateIndex(null)],
+    ['a readable index with no record for the plugin', (): void => writeMachineStateIndex({ installRecords: {}, plugins: [] })],
+  ])('confirmed-absence control: %s + config enabled + no copy ⇒ enabled-not-installed / fail / install', (_label, write) => {
+    writeConfig(true, true);
+    write();
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
+    expect(input.indexUnreadable).toBe(false);
+    expect(reconcilePluginState(input)).toMatchObject({ state: 'enabled-not-installed', severity: 'fail', recommendedAction: 'install' });
+  });
+
+  it('a read live roster without the plugin still convicts over an unreadable index', () => {
+    writeConfig(true, true);
+    writeMachineStateIndex(null, 'not json');
+    expect(reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => ['brave'] })))
+      .toMatchObject({ state: 'enabled-not-loaded', severity: 'fail' });
+  });
+
+  it('an injected readIndex keeps its old meaning (indexUnreadable unset)', () => {
+    writeConfig(true, true);
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readIndex: () => null, readLiveRoster: () => null });
+    expect(input.indexUnreadable).toBeUndefined();
+  });
+});

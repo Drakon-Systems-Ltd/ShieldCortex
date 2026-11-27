@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { describe, expect, it } from '@jest/globals';
 import {
+  planReconcileActions,
   reconcilePluginState,
   type ReconcileInput,
 } from '../integrations/openclaw-plugin-index.js';
@@ -310,5 +311,68 @@ describe('#260 r2 — malformed and stale index input', () => {
   it('Case #1 control: an UNREAD roster on the same stale-path host is the stale-path warn, not a conviction', () => {
     expect(reconcilePluginState(base({ liveRoster: null, indexInstallPathExists: false })))
       .toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: true });
+  });
+});
+
+/**
+ * #260 Sol finding 4 — an index that is PRESENT but unreadable is not a
+ * confirmed absence. Nothing found where we look + an unreadable index used to
+ * be rule 1's enabled-not-installed FAIL with install advice.
+ */
+describe('#260 Sol-4 — present-but-unreadable index vs confirmed absence', () => {
+  const nothing = (over: Partial<ReconcileInput> = {}): ReconcileInput => ({
+    pluginId: 'shieldcortex-realtime',
+    expectedVersion: '5.22.1',
+    config: { enabled: true, inAllow: true },
+    installsJson: null,
+    index: null,
+    onDiskVersion: null,
+    liveRoster: null,
+    ...over,
+  });
+
+  it('unreadable index, no copy found, roster unread ⇒ index-unreadable / warn / none — never enabled-not-installed / install', () => {
+    const verdict = reconcilePluginState(nothing({ indexUnreadable: true }));
+    expect(verdict).toMatchObject({ state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', indexUnreadable: true });
+    expect(verdict.reasons.join(' ')).toMatch(/UNKNOWN, not absent/);
+    // …and the planner turns it into a self-check, not an install.
+    expect(planReconcileActions(verdict, { pluginId: 'shieldcortex-realtime', packageName: '@drakon-systems/shieldcortex-realtime', expectedVersion: '5.22.1' })
+      .map((st) => st.kind)).toEqual(['self-check']);
+  });
+
+  it('confirmed-absence control: NO index (readable absence) + no copy ⇒ enabled-not-installed / fail / install, as on main', () => {
+    expect(reconcilePluginState(nothing())).toMatchObject({ state: 'enabled-not-installed', severity: 'fail', recommendedAction: 'install' });
+    expect(reconcilePluginState(nothing({ indexUnreadable: false }))).toMatchObject({ state: 'enabled-not-installed', recommendedAction: 'install' });
+  });
+
+  it('unreadable index + the running gateway proves the load ⇒ index-unreadable warn (says it is loaded), never a fail', () => {
+    const verdict = reconcilePluginState(nothing({ indexUnreadable: true, liveRoster: ['shieldcortex-realtime'], liveLoadEvidence: 'boot-roster' }));
+    expect(verdict).toMatchObject({ state: 'index-unreadable', severity: 'warn', recommendedAction: 'none' });
+    expect(verdict.reasons.join(' ')).toMatch(/RUNNING gateway has the plugin loaded/);
+  });
+
+  it.each([
+    ['a roster naming other plugins', ['brave']],
+    ['an empty roster', [] as string[]],
+  ])('unreadable index + a READ live roster without the plugin (%s) ⇒ enabled-not-loaded FAIL — independent evidence still convicts', (_label, roster) => {
+    expect(reconcilePluginState(nothing({ indexUnreadable: true, liveRoster: roster })))
+      .toMatchObject({ state: 'enabled-not-loaded', severity: 'fail', recommendedAction: 'reinstall-pinned' });
+  });
+
+  it('…with the #142 registration race ⇒ load-unproven / warn / none', () => {
+    expect(reconcilePluginState(nothing({ indexUnreadable: true, liveRoster: ['brave'], registrationSeenAfterBoot: true })))
+      .toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none' });
+  });
+
+  it('not enabled in config: unchanged (the gap only matters when config claims the plugin)', () => {
+    expect(reconcilePluginState(nothing({ indexUnreadable: true, config: { enabled: null, inAllow: false } })).state).toBe('not-installed');
+  });
+
+  it('a readable index wins over a stray flag: indexUnreadable only counts when index is null', () => {
+    const verdict = reconcilePluginState(nothing({
+      indexUnreadable: true,
+      index: { installRecords: {}, plugins: [] },
+    }));
+    expect(verdict).toMatchObject({ state: 'enabled-not-installed', indexUnreadable: false });
   });
 });

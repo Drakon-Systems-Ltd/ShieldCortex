@@ -115,6 +115,15 @@ export interface ReconcileInput {
   installsJson: InstallsJsonRecord | null;
   /** Parsed latest SQLite index row, or null when the index is unreadable. */
   index: PluginIndexRow | null;
+  /**
+   * The install index EXISTS but could not be read (#260, Sol finding 4): a
+   * row that does not parse, has the wrong shape, is over the size cap, or a
+   * DB the binding could not open. `index` is null either way; this is what
+   * keeps "could not read it" apart from "there is none". Only an unreadable
+   * index sets it. Optional: callers that inject `index` directly (and every
+   * earlier fixture) leave it unset, which keeps their meaning.
+   */
+  indexUnreadable?: boolean;
   /** Ground-truth version from the plugin's on-disk package.json, or null. */
   onDiskVersion: string | null;
   /**
@@ -248,6 +257,11 @@ export interface ReconcileVerdict {
   /** The SQLite install index was actually readable (false ⇒ we CANNOT know
    * whether the plugin is loaded — never claim UNPROTECTED off an unreadable index). */
   indexReadable: boolean;
+  /**
+   * The index is there but could not be read (#260, Sol finding 4) — as
+   * opposed to there being no index at all. Absent on hand-built verdicts.
+   */
+  indexUnreadable?: boolean;
   /** `~/.openclaw/openclaw.json` parsed (false ⇒ every config-derived field
    *  below is absence-of-evidence, not evidence-of-absence). */
   configReadable: boolean;
@@ -388,6 +402,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   const regressed = Boolean(effective && expected && semver.lt(effective, expected));
 
   const indexReadable = index != null;
+  const indexUnreadable = index == null && input.indexUnreadable === true;
   // Optional on the input so every pre-existing fixture keeps its meaning: a
   // caller that says nothing about readability is one that read the config.
   const configReadable = config.readable !== false;
@@ -407,6 +422,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     installsJsonVersion,
     onDiskVersion,
     expectedVersion,
+    indexUnreadable,
     indexPathMissing: false,
   };
 
@@ -424,6 +440,29 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     if (loadedInLiveRoster === true) reasons.push('the RUNNING gateway has the plugin loaded, so the box is protected right now — but what it will load at the next restart depends on this unreadable file');
     else if (loadedInIndex) reasons.push("OpenClaw's install index lists it as enabled — install state, not load state, and it cannot substitute for the config");
     return { ...base, state: 'config-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
+  }
+
+  // 0b. #260 (Sol finding 4): NOTHING found where we look, AND the install
+  //     index — the record most installs are known by — is there but could
+  //     not be read. Rule 1 below would call that a confirmed absence and, with
+  //     config enabling the plugin, FAIL and advise an install. That is a
+  //     verdict about a record we never read. Only independent evidence may
+  //     convict: a READ live roster that lacks the plugin (with the #142 race
+  //     guard). Otherwise it is the diagnostic gap it is — warn, no action.
+  if (!installed && enabledInConfig && indexUnreadable) {
+    if (loadedInLiveRoster === false && input.registrationSeenAfterBoot !== true) {
+      reasons.push('enabled:true in config but ABSENT from the RUNNING gateway boot roster — interceptor not loaded, host unprotected while status reports ON');
+      reasons.push("OpenClaw's plugin install index is present but could not be read, so whether a package is installed is unknown; the live roster is what convicts");
+      return { ...base, state: 'enabled-not-loaded', severity: 'fail', recommendedAction: 'reinstall-pinned', reasons };
+    }
+    if (loadedInLiveRoster === false) {
+      reasons.push('absent from the boot roster snapshot, but a plugin registration was sighted after that snapshot — registration races the boot line and CLI processes write identical lines, so load state is UNPROVEN; the consent-gated live canary is the arbiter');
+      reasons.push("OpenClaw's plugin install index is present but could not be read");
+      return { ...base, state: 'load-unproven', severity: 'warn', recommendedAction: 'none', reasons };
+    }
+    reasons.push("cannot read the loaded roster — OpenClaw's plugin install index is present but could not be read, and no build was found where ShieldCortex looks; whether the plugin is installed is UNKNOWN, not absent");
+    if (loadedInLiveRoster === true) reasons.push('the RUNNING gateway has the plugin loaded, so the box is protected right now');
+    return { ...base, state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
   }
 
   // 1. Nothing installed anywhere.
@@ -1115,8 +1154,17 @@ function createRequireSafe(): NodeRequire {
 export interface GatherOptions {
   pluginId?: string;
   expectedVersion: string;
-  /** Injectable index reader (defaults to the live SQLite read). */
+  /**
+   * Injectable index reader. When set, it is used as-is and "unreadable"
+   * cannot be told from "absent" (`indexUnreadable` stays unset).
+   */
   readIndex?: (home: string) => PluginIndexRow | null;
+  /**
+   * Injectable index-state reader (defaults to {@link readPluginInstallIndexState},
+   * the live SQLite read). Used when `readIndex` is not set; it keeps a
+   * present-but-unreadable index apart from no index (#260, Sol finding 4).
+   */
+  readIndexState?: (home: string) => PluginInstallIndexState;
   /**
    * Injectable live-roster reader (defaults to reading the gateway's newest
    * `http server listening` boot line). Returns null when it cannot be proven.
@@ -1300,7 +1348,6 @@ function scanProjectDirs(home: string, pluginId: string): string[] {
  */
 export function gatherReconcileInput(home: string, options: GatherOptions): ReconcileInput {
   const pluginId = options.pluginId ?? REALTIME_PLUGIN_ID;
-  const readIndex = options.readIndex ?? ((h: string) => readPluginInstallIndex(h));
   // The default roster read touches the host's real gateway log dir (/tmp/openclaw),
   // which no `home` override can redirect — so it must never fire under Jest, or a
   // test would silently inherit THIS box's roster. Tests inject readLiveRoster.
@@ -1352,7 +1399,19 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
   liveRoster = classified.liveRoster;
   const liveLoadEvidence = classified.liveLoadEvidence;
   const registrationSeenAfterBoot = classified.registrationSeenAfterBoot;
-  const index = readIndex(home);
+  // #260 (Sol finding 4): the state reader, so a present-but-unreadable index
+  // reaches the reconciler as exactly that. It is also the strict reader: a
+  // legacy column that does not parse is unreadable here, where the lenient
+  // `readPluginInstallIndex` still reads it as empty.
+  let index: PluginIndexRow | null;
+  let indexUnreadable: boolean | undefined;
+  if (options.readIndex) {
+    index = options.readIndex(home);
+  } else {
+    const st = (options.readIndexState ?? readPluginInstallIndexState)(home);
+    index = st.state === 'ok' ? st.row : null;
+    indexUnreadable = st.state === 'unreadable';
+  }
 
   return {
     pluginId,
@@ -1360,6 +1419,7 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
     config: readConfigEnable(home, pluginId),
     installsJson: readInstallsJsonRecord(home, pluginId),
     index,
+    ...(indexUnreadable !== undefined ? { indexUnreadable } : {}),
     indexInstallPathExists: indexInstallPathOnDisk(index, pluginId),
     indexRootDirExists: indexRootDirOnDisk(index, pluginId),
     onDiskVersion: readInstalledRealtimePluginVersion(home),
