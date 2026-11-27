@@ -199,6 +199,19 @@ or set `SHIELDCORTEX_SKIP_UPDATE_CHECK=1` for the dashboard/API process. The das
 
 `shieldcortex maintain` consolidates STM above its cap, backfills missing vectors (skipped while the embedding model is not cached), and vacuums when at least 20% of database pages are free. When STM is over its cap, plain `maintain` (without `--dry-run`) runs the first phase of `shieldcortex consolidate`, not its Dream Mode phase: it promotes worthy STM, deletes decayed STM, evicts unpinned memories older than one hour in either tier while that tier exceeds `maxShortTermMemories` or `maxLongTermMemories`, and resolves near-identical long-term pairs by deleting or downvoting one of them (memory text is never merged). It does not archive. Run `--dry-run` first to preview. It then runs doctor's Memories, Semantic coverage and Disk checks (not the full doctor) and sends any remaining FAIL, by check name only, to the configured Action Guard webhook; the same FAIL set is sent at most once every 24 hours. While a live ShieldCortex process holds the database, consolidation, embedding and vacuum are skipped, not failed. It exits 1 while a FAIL remains, so a scheduler can alert on it, and exits 2 on an unknown argument. Use `--dry-run` to preview without changing database contents or config; SQLite may create shared-memory sidecar files. Use `--json` for a structured report. Audit-log retention is not included yet (#579), and nothing schedules `maintain` yet.
 
+### Doctor: Free space
+
+`shieldcortex doctor` has two storage rows. **Disk** compares ShieldCortex's own footprint with its budget. **Free space** reads the filesystem: the space available to your user on the volume that holds the ShieldCortex home (`~/.shieldcortex`, or `SHIELDCORTEX_CONFIG_DIR` when set). A home that is a symlink is measured on the volume it points at; a home that does not exist yet is measured at its nearest existing parent.
+
+| Row shows | Status | When |
+| --- | --- | --- |
+| `… available of … (…%)` | pass | neither line below is crossed |
+| `… — running low` | warn | less than 1 GiB available **and** less than 20% of the volume free |
+| `… — nearly full` | fail | less than 100 MiB available **and** less than 5% of the volume free |
+| `not measured — …` | warn | the volume could not be read, reports no size or figures that do not add up, or the home is a link whose target is missing |
+
+Both conditions must hold, so a 4 TB disk with 20 GB free and a small, mostly empty volume both pass. 100 MiB is the default disk budget, and 5% and 20% free match the Disk row's 95% and 80% lines. `not measured` means doctor has no figure: it does not mean the volume is full, and it does not mean it is fine. The row only reads. It deletes nothing, changes no setting, and its advice names `df -h`, not a cleanup command. It checks that one volume, so a database or model cache kept on another volume is not covered, and `shieldcortex maintain` does not run it.
+
 <a id="whats-new-in-56"></a>
 
 ## What's new in 5.6

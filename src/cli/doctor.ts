@@ -113,6 +113,7 @@ import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 import { getDiskBudget } from '../cloud/config.js';
 import { formatBudget, LTM_CAP_MAX, LTM_CAP_MIN } from '../cloud/capacity.js';
 import { isRepairLogName } from '../logs/retention.js';
+import { checkVolumeFreeSpace } from './doctor-volume-space.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
 import { realtimePluginInstallCommand } from '../setup/openclaw-plugin-spec.js';
@@ -10276,6 +10277,7 @@ export async function runDoctor(
     checkProcesses,
     checkDashboardFreshness,
     checkDiskUsage,
+    async () => checkVolumeFreeSpace(getConfigDir()), // #1124: the filesystem, not the budget
     checkStatePermissions,
     checkLockFile,
     // #221: ahead of every OpenClaw check, so the root cause prints above the
