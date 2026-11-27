@@ -28,6 +28,7 @@ import { getAutoMemoryConfig } from './lib/auto-memory-config.mjs';
 import { extractCaptureMemories } from './lib/capture-distill.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { deriveProjectKey } from './lib/project-key.mjs';
+import { resolveCaptureMemoryCaps } from './lib/memory-caps.mjs';
 import {
   extractMemorableSegments,
   processSegments,
@@ -86,9 +87,8 @@ function getDbPath() {
 
 const { dir: DB_DIR, path: DB_PATH } = getDbPath();
 
-// Memory limits (kept in sync with pre-compact)
-const MAX_SHORT_TERM_MEMORIES = 100;
-const MAX_LONG_TERM_MEMORIES = 1000;
+// Memory caps for the fullness ratio are resolved per run (#1124) — see
+// scripts/lib/memory-caps.mjs.
 const MAX_AUTO_MEMORIES = 2;
 // Stop-hook uses pre-compact's tighter category thresholds — see
 // PRE_COMPACT_CATEGORY_THRESHOLDS in scripts/lib/extract-memorable-segments.mjs.
@@ -999,7 +999,10 @@ process.stdin.on('end', async () => {
         db = new Database(DB_PATH, { timeout: 5000 });
         const stats = getMemoryStats(db);
         const total = (stats.shortTerm || 0) + (stats.longTerm || 0);
-        const max = MAX_SHORT_TERM_MEMORIES + MAX_LONG_TERM_MEMORIES;
+        // #1124: the operator's resolved caps, not a hardcoded 100 + 1000.
+        // Falls back to 100 + 1000 itself, so this never skips extraction.
+        const caps = await resolveCaptureMemoryCaps();
+        const max = caps.maxShortTermMemories + caps.maxLongTermMemories;
         const dyn = getDynamicThreshold(total, max);
 
         const capture = await extractCaptureMemories(transcriptOut.text, {
