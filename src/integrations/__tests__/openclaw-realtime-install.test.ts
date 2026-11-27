@@ -159,6 +159,69 @@ describe('readLinkedRealtimeInstall — identity from what is at the path', () =
     expect(readSelectedRealtimeInstall(home)).toMatchObject({ state: 'selected', version: '5.22.1' });
   });
 
+  // #260 (Sol finding 1): selection evidence that OpenClaw itself would
+  // reject must refuse the forced replacement. An index OpenClaw 2026.11.7+
+  // would discard (non-numeric revision, a plugins entry without a string
+  // rootDir or a boolean enabled) used to read as `ok`; with the realtime
+  // record naming no path the bad rootDir was then dropped, selection fell
+  // through to `none`, and `none` permits replacement.
+  const upstreamIndex = (over: { revision?: unknown; entry?: Record<string, unknown>; record?: Record<string, unknown> } = {}, dir = '/nowhere'): string => {
+    const entry = {
+      pluginId: ID, manifestPath: path.join(dir, 'openclaw.plugin.json'), manifestHash: 'h', rootDir: dir, origin: 'global',
+      enabled: true, startup: { sidecar: false, memory: false, agentHarnesses: [] }, compat: [], ...over.entry,
+    };
+    for (const [k, v] of Object.entries(over.entry ?? {})) if (v === undefined) delete (entry as Record<string, unknown>)[k];
+    return JSON.stringify({
+      ...('revision' in over ? (over.revision === undefined ? {} : { revision: over.revision }) : { revision: 7 }),
+      index: {
+        version: 1, hostContractVersion: '2026.11.10', compatRegistryVersion: 'x', migrationVersion: 1, policyHash: 'h',
+        generatedAtMs: 7, diagnostics: [],
+        installRecords: { [ID]: { source: 'npm', ...(over.record ?? { version: '5.22.1', installPath: dir }) } },
+        plugins: [entry],
+      },
+    });
+  };
+
+  it.each([
+    ['a numeric rootDir (and no install path on the record)', { entry: { rootDir: 42 }, record: { version: '6.0.0' } }],
+    ['no rootDir at all (and no install path on the record)', { entry: { rootDir: undefined }, record: { version: '6.0.0' } }],
+    ['a string enabled', { entry: { enabled: 'yes' } }],
+    ['no enabled', { entry: { enabled: undefined } }],
+    ['no revision', { revision: undefined }],
+    ['a string revision', { revision: '7' }],
+  ])('#260 Sol-1: a migrated index with %s ⇒ unreadable ⇒ selected unknown ⇒ the forced replacement is REFUSED', (_label, over) => {
+    writeMigratedStateDb(upstreamIndex(over as never));
+    expect(readPluginInstallIndexState(home).state).toBe('unreadable');
+    const evidence = readRealtimeReplacementEvidence(home);
+    expect(evidence.selected.state).toBe('unknown');
+    expect(evidence.selected.state).not.toBe('none');
+    expect(assessRealtimeReplacement(evidence, '5.22.1')).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
+  it('#260 Sol-1 control: an upstream-shaped migrated index (every field OpenClaw 2026.11.x writes) selects its copy and allows the pinned replacement', () => {
+    const dir = writeRealtimeProject('drakon-systems-shieldcortex-realtime-abc', '5.22.1');
+    writeMigratedStateDb(upstreamIndex({}, dir));
+    const st = readPluginInstallIndexState(home);
+    expect(st.state).toBe('ok');
+    const evidence = readRealtimeReplacementEvidence(home);
+    expect(evidence.selected).toMatchObject({ state: 'selected', version: '5.22.1', dir });
+    expect(assessRealtimeReplacement(evidence, '5.22.1')).toEqual({ replace: true });
+  });
+
+  it('#260 Sol-1 control: an upstream-shaped index whose copy is gone and that no other copy backs is still `none` (nothing to lose)', () => {
+    writeMigratedStateDb(upstreamIndex({}, path.join(home, 'gone')));
+    expect(readSelectedRealtimeInstall(home)).toMatchObject({ state: 'none', dangling: expect.any(String) });
+  });
+
+  it.each([
+    ['an empty rootDir', { rootDir: '' }],
+    ['a blank rootDir', { rootDir: '   ' }],
+    ['no rootDir (a legacy row, which the reader does not require it on)', {}],
+  ])('#260 Sol-1: a roster entry for the plugin with %s ⇒ unknown, never none', (_label, extra) => {
+    const s = readSelectedRealtimeInstall(home, index({ [ID]: { source: 'npm', version: '6.0.0' } }, [{ pluginId: ID, enabled: true, ...extra }]));
+    expect(s).toMatchObject({ state: 'unknown', why: expect.stringMatching(/no usable rootDir/) });
+  });
+
   it('#260: a migrated state DB with no index row is absent', () => {
     writeMigratedStateDb(null);
     expect(readPluginInstallIndexState(home)).toEqual({ state: 'absent' });

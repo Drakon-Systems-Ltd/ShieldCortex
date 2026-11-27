@@ -136,8 +136,26 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
       JSON.stringify({
         revision: 1,
         index: {
+          version: 1,
+          hostContractVersion: '2026.11.10',
+          compatRegistryVersion: 'x',
+          migrationVersion: 1,
+          policyHash: 'h',
+          generatedAtMs: 1,
+          diagnostics: [],
           installRecords: { [PLUGIN]: { source: 'npm', version: opts.recordVersion ?? '5.22.1', installPath } },
-          plugins: [{ pluginId: PLUGIN, enabled: true, ...(opts.rootDir ? { rootDir: opts.rootDir } : {}) }],
+          // Upstream-shaped (OpenClaw 2026.11.x requires rootDir + enabled):
+          // rootDir is the recorded install unless the case names another.
+          plugins: [{
+            pluginId: PLUGIN,
+            manifestPath: path.join(opts.rootDir ?? installPath, 'openclaw.plugin.json'),
+            manifestHash: 'h',
+            rootDir: opts.rootDir ?? installPath,
+            origin: 'global',
+            enabled: true,
+            startup: { sidecar: false, memory: false, agentHarnesses: [] },
+            compat: [],
+          }],
         },
       }),
     );

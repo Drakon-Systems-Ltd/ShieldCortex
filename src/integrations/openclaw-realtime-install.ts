@@ -257,7 +257,17 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
   // Set when a record names a copy that is not on disk (see the doc above).
   let dangling: string | null = null;
   if (index.state === 'ok') {
-    const roster = index.row.plugins?.find((p) => p && p.pluginId === REALTIME_PLUGIN_ID)?.rootDir;
+    const entry = index.row.plugins?.find((p) => p && p.pluginId === REALTIME_PLUGIN_ID);
+    const roster: unknown = entry?.rootDir;
+    // #260 (Sol finding 1): the roster entry IS the selection evidence. One
+    // that names no usable copy (no rootDir, an empty or non-string one) is
+    // not "names nothing" — dropping it let a record-less row fall through to
+    // `none`, and `none` lets a forced install replace what is there. OpenClaw
+    // requires a string rootDir on every entry; the reader enforces the type,
+    // and this refuses what is left.
+    if (entry && (typeof roster !== 'string' || roster.trim() === '')) {
+      return { state: 'unknown', why: "OpenClaw's install index lists the plugin with no usable rootDir" };
+    }
     const record = index.row.installRecords?.[REALTIME_PLUGIN_ID];
     const recordPath = record && typeof record.installPath === 'string' ? record.installPath : null;
     const named = [

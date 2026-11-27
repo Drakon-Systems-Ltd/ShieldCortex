@@ -762,13 +762,29 @@ const MACHINE_STATE_INDEX_KEY = 'plugins.installedIndex';
 const LEGACY_INDEX_TABLE = 'installed_plugin_index';
 
 /**
+ * The most stored index JSON either reader will parse (#260, Case review).
+ * OpenClaw 2026.11.10's own index reader (`safeParseJson(row.value_json)`)
+ * applies no cap that we could find, so this is a plain robustness bound: a
+ * real index for a few dozen plugins is tens of KiB. A row over it is
+ * "could not read", never "absent" and never an empty index. Measured in
+ * SQLite (`length(CAST(... AS BLOB))`), so an oversized row is never pulled
+ * into this process at all.
+ */
+export const INSTALL_INDEX_MAX_JSON_BYTES = 16 * 1024 * 1024;
+
+/**
  * The install index row as found, before either reader decides what a bad one
- * means. `jsonValid` is false when the stored JSON did not parse; a field that
- * could not be parsed is `undefined`.
+ * means. `fault` says why the row as a whole cannot be used (the stored JSON
+ * does not parse, it is over the size cap, or the `{ revision, index }`
+ * envelope is wrong); null when it parsed. Legacy only: a single JSON column
+ * that did not parse is `undefined` with `fault` set, so the lenient diagnosis
+ * reader can keep reading it as empty, as it always has.
  */
 interface LocatedIndexRow {
   layout: 'machine-state' | 'legacy';
-  jsonValid: boolean;
+  fault: string | null;
+  /** Legacy only: the fault is one unparseable column, not an oversized row. */
+  columnFault?: boolean;
   installRecords: unknown;
   plugins: unknown;
   warning: string | null;
@@ -787,8 +803,15 @@ function tableExists(db: import('better-sqlite3').Database, name: string): boole
  * OpenClaw 2026.11.x migrates the `installed_plugin_index` table into a
  * `config_machine_state` row (`plugins.installedIndex`, JSON `{ revision,
  * index }`) and DROPS the old table. A reader that only knows the old table
- * sees a healthy migrated host as "no index" (#260). The new row wins when both
- * exist, because that is the one current OpenClaw reads.
+ * sees a healthy migrated host as "no index" (#260).
+ *
+ * When BOTH exist, the one with the later `generatedAtMs` wins (ties go to the
+ * new row, which is the one current OpenClaw reads). Both can exist after a
+ * downgrade to 2026.10.x: that version writes the legacy table again and
+ * leaves the 2026.11.x row behind, so "the new row always wins" would read a
+ * stale index (Case review). When the new row's own timestamp cannot be read
+ * (bad JSON, over the cap, wrong envelope) its freshness is unknown and it
+ * still wins — as an unreadable row, never papered over by the legacy table.
  *
  * Returns null when neither layout holds a row. Throws only what SQLite throws.
  */
@@ -800,43 +823,82 @@ function locateInstallIndexRow(db: import('better-sqlite3').Database): LocatedIn
 }
 
 function locateInstallIndexRowInSnapshot(db: import('better-sqlite3').Database): LocatedIndexRow | null {
-  if (tableExists(db, MACHINE_STATE_TABLE)) {
-    const row = db
-      .prepare(`SELECT value_json FROM ${MACHINE_STATE_TABLE} WHERE state_key = ?`)
-      .get(MACHINE_STATE_INDEX_KEY) as { value_json: unknown } | undefined;
-    if (row) {
-      let value: unknown;
-      try {
-        value = JSON.parse(String(row.value_json));
-      } catch {
-        return { layout: 'machine-state', jsonValid: false, installRecords: undefined, plugins: undefined, warning: null, generatedAtMs: undefined };
-      }
-      const index =
-        value && typeof value === 'object' && !Array.isArray(value)
-          ? (value as { index?: unknown }).index
-          : undefined;
-      const idx = (index && typeof index === 'object' && !Array.isArray(index) ? index : {}) as Record<string, unknown>;
-      return {
-        layout: 'machine-state',
-        jsonValid: true,
-        installRecords: idx.installRecords,
-        plugins: idx.plugins,
-        warning: typeof idx.warning === 'string' ? idx.warning : null,
-        generatedAtMs: typeof idx.generatedAtMs === 'number' ? idx.generatedAtMs : undefined,
-      };
-    }
+  const machine = tableExists(db, MACHINE_STATE_TABLE) ? readMachineStateIndexRow(db) : null;
+  const legacy = tableExists(db, LEGACY_INDEX_TABLE) ? readLegacyIndexRow(db) : null;
+  if (machine && legacy) {
+    const fresher =
+      machine.fault === null &&
+      typeof machine.generatedAtMs === 'number' &&
+      typeof legacy.generatedAtMs === 'number' &&
+      legacy.generatedAtMs > machine.generatedAtMs;
+    return fresher ? legacy : machine;
   }
+  return machine ?? legacy;
+}
 
-  if (!tableExists(db, LEGACY_INDEX_TABLE)) return null;
+function readMachineStateIndexRow(db: import('better-sqlite3').Database): LocatedIndexRow | null {
+  const row = db
+    .prepare(
+      `SELECT length(CAST(value_json AS BLOB)) AS bytes, ` +
+        `CASE WHEN length(CAST(value_json AS BLOB)) > ? THEN NULL ELSE value_json END AS value_json ` +
+        `FROM ${MACHINE_STATE_TABLE} WHERE state_key = ?`,
+    )
+    .get(INSTALL_INDEX_MAX_JSON_BYTES, MACHINE_STATE_INDEX_KEY) as { bytes: number | null; value_json: unknown } | undefined;
+  if (!row) return null;
+  const bad = (fault: string): LocatedIndexRow => ({
+    layout: 'machine-state', fault, installRecords: undefined, plugins: undefined, warning: null, generatedAtMs: undefined,
+  });
+  if (typeof row.bytes === 'number' && row.bytes > INSTALL_INDEX_MAX_JSON_BYTES) {
+    return bad(`the install index row is ${row.bytes} bytes, over the ${INSTALL_INDEX_MAX_JSON_BYTES}-byte cap`);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(String(row.value_json));
+  } catch {
+    return bad('the install index row is not valid JSON');
+  }
+  // OpenClaw 2026.11.7+ (`parseCachedInstalledPluginIndex`) reads the index
+  // only out of an object with a NUMERIC `revision`; anything else it treats
+  // as no usable index. So does this.
+  if (!isPlainObject(value) || typeof value.revision !== 'number') {
+    return bad('the install index row has no numeric revision');
+  }
+  if (!isPlainObject(value.index)) return bad('the install index row has no index object');
+  const idx = value.index;
+  return {
+    layout: 'machine-state',
+    fault: null,
+    installRecords: idx.installRecords,
+    plugins: idx.plugins,
+    warning: typeof idx.warning === 'string' ? idx.warning : null,
+    generatedAtMs: typeof idx.generatedAtMs === 'number' ? idx.generatedAtMs : undefined,
+  };
+}
+
+function readLegacyIndexRow(db: import('better-sqlite3').Database): LocatedIndexRow | null {
+  const cap = (col: string): string =>
+    `CASE WHEN length(CAST(${col} AS BLOB)) > @cap THEN NULL ELSE ${col} END AS ${col}`;
   const legacy = db
     .prepare(
-      'SELECT install_records_json, plugins_json, warning, generated_at_ms ' +
+      `SELECT length(CAST(install_records_json AS BLOB)) + length(CAST(plugins_json AS BLOB)) AS bytes, ` +
+        `${cap('install_records_json')}, ${cap('plugins_json')}, warning, generated_at_ms ` +
         `FROM ${LEGACY_INDEX_TABLE} ORDER BY generated_at_ms DESC LIMIT 1`,
     )
-    .get() as
-    | { install_records_json: unknown; plugins_json: unknown; warning: string | null; generated_at_ms: number }
+    .get({ cap: INSTALL_INDEX_MAX_JSON_BYTES }) as
+    | { bytes: number | null; install_records_json: unknown; plugins_json: unknown; warning: string | null; generated_at_ms: number }
     | undefined;
   if (!legacy) return null;
+  const generatedAtMs = typeof legacy.generated_at_ms === 'number' ? legacy.generated_at_ms : undefined;
+  if (typeof legacy.bytes === 'number' && legacy.bytes > INSTALL_INDEX_MAX_JSON_BYTES) {
+    return {
+      layout: 'legacy',
+      fault: `the install index row is ${legacy.bytes} bytes, over the ${INSTALL_INDEX_MAX_JSON_BYTES}-byte cap`,
+      installRecords: undefined,
+      plugins: undefined,
+      warning: null,
+      generatedAtMs,
+    };
+  }
   const parse = (raw: unknown): { ok: boolean; value: unknown } => {
     try {
       return { ok: true, value: JSON.parse(String(raw)) };
@@ -846,18 +908,21 @@ function locateInstallIndexRowInSnapshot(db: import('better-sqlite3').Database):
   };
   const installRecords = parse(legacy.install_records_json);
   const plugins = parse(legacy.plugins_json);
+  const columnsOk = installRecords.ok && plugins.ok;
   return {
     layout: 'legacy',
-    jsonValid: installRecords.ok && plugins.ok,
+    fault: columnsOk ? null : 'the install index row is not valid JSON',
+    columnFault: !columnsOk,
     installRecords: installRecords.value,
     plugins: plugins.value,
     warning: legacy.warning ?? null,
-    generatedAtMs: legacy.generated_at_ms,
+    generatedAtMs,
   };
 }
 
-const isPlainObject = (v: unknown): v is Record<string, unknown> =>
-  !!v && typeof v === 'object' && !Array.isArray(v);
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
 
 /**
  * The install-record fields our readers select a copy or a version from. Each
@@ -872,8 +937,18 @@ const INSTALL_RECORD_STRING_FIELDS = ['source', 'sourcePath', 'installPath', 've
  * (`parsePluginInstallRecordMap`), ONE bad entry rejects the whole index: a
  * null record for a plugin is a record we could not read, not "no record".
  * Returns why the shape is wrong, or null when it is fine.
+ *
+ * Plugin-list entries carry the SELECTION evidence (`rootDir` names the copy
+ * OpenClaw chose, `enabled` whether it is on). OpenClaw 2026.11.7+'s
+ * `InstalledPluginIndexRecordSchema` requires `pluginId: string`,
+ * `rootDir: string` and `enabled: boolean` on every entry and discards the
+ * whole index otherwise (#260, Sol finding 1) — so in the `config_machine_state`
+ * layout (`strict`) they are required here too. A legacy-table row (OpenClaw
+ * <= 2026.10.x) is held to the types when the fields are present; it is not
+ * failed for omitting them, which keeps the pre-2026.11 behaviour of reading
+ * it.
  */
-function indexShapeFault(installRecords: unknown, plugins: unknown): string | null {
+function indexShapeFault(installRecords: unknown, plugins: unknown, strict: boolean): string | null {
   if (!isPlainObject(installRecords) || !Array.isArray(plugins)) return 'the install index row has an unexpected shape';
   for (const [id, record] of Object.entries(installRecords)) {
     if (!isPlainObject(record)) return `the install record for ${JSON.stringify(id)} is not an object`;
@@ -883,8 +958,17 @@ function indexShapeFault(installRecords: unknown, plugins: unknown): string | nu
       }
     }
   }
-  if (!plugins.every((p) => isPlainObject(p) && typeof p.pluginId === 'string')) {
-    return 'a plugins entry is not an object with a string pluginId';
+  for (const p of plugins) {
+    if (!isPlainObject(p) || typeof p.pluginId !== 'string') {
+      return 'a plugins entry is not an object with a string pluginId';
+    }
+    const who = JSON.stringify(p.pluginId);
+    if (strict ? typeof p.rootDir !== 'string' : p.rootDir !== undefined && typeof p.rootDir !== 'string') {
+      return `the plugins entry for ${who} has no string rootDir`;
+    }
+    if (strict ? typeof p.enabled !== 'boolean' : p.enabled !== undefined && typeof p.enabled !== 'boolean') {
+      return `the plugins entry for ${who} has no boolean enabled`;
+    }
   }
   return null;
 }
@@ -913,14 +997,14 @@ export function readPluginInstallIndex(home: string): PluginIndexRow | null {
     const found = locateInstallIndexRow(db);
     if (!found) return null;
     // A row we cannot make sense of is "could not read", not an empty index.
-    if (found.layout === 'machine-state' && !found.jsonValid) return null;
-    // Legacy table: a column that does not parse (or holds a falsy value) still
-    // reads as empty, as it always has. What DID parse is held to the same
-    // shape as the new layout — a null entry used to reach the reconciler.
+    // Legacy table only: ONE column that does not parse (or holds a falsy
+    // value) still reads as empty, as it always has. What DID parse is held to
+    // the same shape check — a null entry used to reach the reconciler.
     const lenient = found.layout === 'legacy';
+    if (found.fault !== null && !(lenient && found.columnFault)) return null;
     const installRecords = lenient ? found.installRecords || {} : found.installRecords;
     const plugins = lenient ? found.plugins || [] : found.plugins;
-    if (indexShapeFault(installRecords, plugins)) return null;
+    if (indexShapeFault(installRecords, plugins, !lenient)) return null;
     return {
       installRecords: installRecords as Record<string, IndexInstallRecord>,
       plugins: plugins as IndexPluginEntry[],
@@ -967,10 +1051,8 @@ export function readPluginInstallIndexState(home: string): PluginInstallIndexSta
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
     const found = locateInstallIndexRow(db);
     if (!found) return { state: 'absent' };
-    if (!found.jsonValid) {
-      return { state: 'unreadable', why: 'the install index row is not valid JSON' };
-    }
-    const fault = indexShapeFault(found.installRecords, found.plugins);
+    if (found.fault !== null) return { state: 'unreadable', why: found.fault };
+    const fault = indexShapeFault(found.installRecords, found.plugins, found.layout === 'machine-state');
     if (fault) return { state: 'unreadable', why: fault };
     return {
       state: 'ok',

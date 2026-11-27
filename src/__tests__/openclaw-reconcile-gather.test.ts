@@ -152,18 +152,39 @@ function writeMachineStateIndex(
   db.close();
 }
 
+/**
+ * A plugins entry shaped the way OpenClaw 2026.11.x writes it — every field
+ * its `InstalledPluginIndexRecordSchema` requires (pluginId, manifestPath,
+ * manifestHash, rootDir, origin, enabled, startup, compat). The reader
+ * requires string `rootDir` and boolean `enabled` in this layout (#260, Sol
+ * finding 1), so the valid controls use the real shape, not a partial one.
+ */
+function upstreamEntry(rootDir: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    pluginId: PLUGIN,
+    manifestPath: path.join(rootDir, 'openclaw.plugin.json'),
+    manifestHash: 'h',
+    rootDir,
+    origin: 'global',
+    enabled: true,
+    startup: { sidecar: false, memory: false, agentHarnesses: [] },
+    compat: [],
+    ...over,
+  };
+}
+
 describe('#260 — the install index in config_machine_state (OpenClaw 2026.11.x)', () => {
   it('migrated layout (no legacy table): both readers return the index', () => {
     writeMachineStateIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: '/x' } },
-      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      plugins: [upstreamEntry('/x')],
       warning: 'DO NOT EDIT',
       generatedAtMs: 1763111111111,
     });
     const idx = readPluginInstallIndex(home);
     expect(idx).toEqual({
       installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: '/x' } },
-      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      plugins: [upstreamEntry('/x')],
       warning: 'DO NOT EDIT',
       generatedAtMs: 1763111111111,
     });
@@ -182,7 +203,7 @@ describe('#260 — the install index in config_machine_state (OpenClaw 2026.11.x
     });
     writeMachineStateIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1' } },
-      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      plugins: [upstreamEntry('/x')],
     });
     expect(readPluginInstallIndex(home)!.installRecords[PLUGIN]?.version).toBe('5.22.1');
     const st = readPluginInstallIndexState(home);
@@ -238,7 +259,7 @@ describe('#260 — the install index in config_machine_state (OpenClaw 2026.11.x
     const installPath = writeProjectDir(canonical, '5.22.1');
     writeMachineStateIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath } },
-      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      plugins: [upstreamEntry(installPath)],
     });
     const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
     expect(input.index).not.toBeNull();
@@ -248,6 +269,99 @@ describe('#260 — the install index in config_machine_state (OpenClaw 2026.11.x
     expect(verdict.severity).toBe('ok');
     expect(verdict.indexReadable).toBe(true);
     expect(verdict.loadedInIndex).toBe(true);
+  });
+});
+
+/**
+ * #260 Sol finding 1 — the migrated envelope and the SELECTION fields are
+ * validated the way OpenClaw 2026.11.7+ validates them before either reader
+ * says `ok`: a numeric `revision`, and on every plugins entry a string
+ * `rootDir` and a boolean `enabled`.
+ */
+describe('#260 Sol-1 — envelope + selection fields validated as OpenClaw does', () => {
+  const index = (plugins: unknown[]) => ({
+    version: 1, hostContractVersion: '2026.11.10', compatRegistryVersion: 'x', migrationVersion: 1, policyHash: 'h',
+    generatedAtMs: 5, diagnostics: [], installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1' } }, plugins,
+  });
+  it.each([
+    ['no revision', { index: index([upstreamEntry('/x')]) }],
+    ['a string revision', { revision: '5', index: index([upstreamEntry('/x')]) }],
+    ['a null revision', { revision: null, index: index([upstreamEntry('/x')]) }],
+    ['an entry with a numeric rootDir', { revision: 5, index: index([upstreamEntry('/x', { rootDir: 42 })]) }],
+    ['an entry with no rootDir', { revision: 5, index: index([{ pluginId: PLUGIN, enabled: true }]) }],
+    ['an entry with a string enabled', { revision: 5, index: index([upstreamEntry('/x', { enabled: 'true' })]) }],
+    ['an entry with no enabled', { revision: 5, index: index([{ pluginId: PLUGIN, rootDir: '/x' }]) }],
+    ['ANOTHER plugin\'s entry with no rootDir', { revision: 5, index: index([upstreamEntry('/x'), { pluginId: 'other', enabled: true }]) }],
+  ])('new layout: %s ⇒ null / unreadable', (_label, value) => {
+    writeMachineStateIndex(null, JSON.stringify(value));
+    expect(readPluginInstallIndex(home)).toBeNull();
+    expect(readPluginInstallIndexState(home)).toMatchObject({ state: 'unreadable', why: expect.any(String) });
+  });
+
+  it('control: the upstream-shaped row reads ok in both readers', () => {
+    writeMachineStateIndex(null, JSON.stringify({ revision: 5, index: index([upstreamEntry('/x')]) }));
+    expect(readPluginInstallIndexState(home).state).toBe('ok');
+    expect(readPluginInstallIndex(home)!.plugins[0]?.rootDir).toBe('/x');
+  });
+
+  it('legacy layout: a present rootDir / enabled must be typed right; an absent one is still read (pre-2026.11 rows)', () => {
+    writeIndex({ installRecords: {}, plugins: [{ pluginId: PLUGIN, rootDir: 42, enabled: true }] });
+    expect(readPluginInstallIndexState(home).state).toBe('unreadable');
+    expect(readPluginInstallIndex(home)).toBeNull();
+    fs.rmSync(path.join(home, '.openclaw', 'state'), { recursive: true });
+    writeIndex({ installRecords: {}, plugins: [{ pluginId: PLUGIN, rootDir: '/x', enabled: 'yes' }] });
+    expect(readPluginInstallIndexState(home).state).toBe('unreadable');
+    fs.rmSync(path.join(home, '.openclaw', 'state'), { recursive: true });
+    writeIndex({ installRecords: {}, plugins: [{ pluginId: PLUGIN }] });
+    expect(readPluginInstallIndexState(home).state).toBe('ok');
+  });
+});
+
+/**
+ * #260 Case non-blocking — the stored JSON is size-capped before JSON.parse,
+ * and when both layouts hold a row the fresher one wins.
+ */
+describe('#260 Case — value_json size cap and the fresher layout', () => {
+  const CAP = 16 * 1024 * 1024;
+
+  it('new layout: a row over the cap is unreadable (never absent, never parsed)', () => {
+    writeMachineStateIndex(null, JSON.stringify({ revision: 1, index: { pad: 'x'.repeat(CAP) } }));
+    expect(readPluginInstallIndex(home)).toBeNull();
+    expect(readPluginInstallIndexState(home)).toMatchObject({ state: 'unreadable', why: expect.stringMatching(/over the .*-byte cap/) });
+  });
+
+  it('legacy layout: a row over the cap is unreadable in BOTH readers (not the lenient "empty column")', () => {
+    writeIndex({ installRecords: { [PLUGIN]: { version: '5.22.1', pad: 'x'.repeat(CAP) } }, plugins: [] });
+    expect(readPluginInstallIndex(home)).toBeNull();
+    expect(readPluginInstallIndexState(home)).toMatchObject({ state: 'unreadable', why: expect.stringMatching(/over the .*-byte cap/) });
+  });
+
+  it('control: a row just under the cap reads ok', () => {
+    const pad = 'x'.repeat(CAP - 4096);
+    writeMachineStateIndex({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1' } }, plugins: [upstreamEntry('/x', { pad })] });
+    expect(readPluginInstallIndexState(home).state).toBe('ok');
+  });
+
+  it('downgrade: a legacy row NEWER than the leftover config_machine_state row wins', () => {
+    writeMachineStateIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1' } },
+      plugins: [upstreamEntry('/x')],
+      generatedAtMs: 1763000000000,
+    });
+    writeIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.20.0' } },
+      plugins: [{ pluginId: PLUGIN, enabled: false }],
+      generatedAtMs: 1764000000000,
+    });
+    expect(readPluginInstallIndex(home)!.installRecords[PLUGIN]?.version).toBe('5.20.0');
+    const st = readPluginInstallIndexState(home);
+    expect(st.state === 'ok' && st.row.generatedAtMs).toBe(1764000000000);
+  });
+
+  it('equal timestamps: the config_machine_state row wins', () => {
+    writeMachineStateIndex({ installRecords: { [PLUGIN]: { version: '5.22.1' } }, plugins: [upstreamEntry('/x')], generatedAtMs: 1763000000000 });
+    writeIndex({ installRecords: { [PLUGIN]: { version: '5.20.0' } }, plugins: [], generatedAtMs: 1763000000000 });
+    expect(readPluginInstallIndex(home)!.installRecords[PLUGIN]?.version).toBe('5.22.1');
   });
 });
 
@@ -329,7 +443,7 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
   const gone = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'reaped', PKG_SUBPATH);
   const staleRow = () => ({
     installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: gone() } },
-    plugins: [{ pluginId: PLUGIN, enabled: true }],
+    plugins: [upstreamEntry(gone())],
   });
 
   it.each([
@@ -390,7 +504,7 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     writeConfig(true, true);
     writeMachineStateIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '4.0.0', installPath: gone() } },
-      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      plugins: [upstreamEntry(gone())],
     });
     const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => [PLUGIN] });
     expect(input.indexInstallPathExists).toBe(false);
@@ -434,7 +548,7 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     fs.writeFileSync(path.join(ext, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
     writeMachineStateIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: gone() } },
-      plugins: [{ pluginId: PLUGIN, enabled: true, rootDir: ext }],
+      plugins: [upstreamEntry(ext)],
     });
     const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
     expect(input.indexInstallPathExists).toBe(false);
@@ -448,7 +562,7 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1');
     writeMachineStateIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: gone() } },
-      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      plugins: [upstreamEntry(gone())],
     });
     const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
     expect(input.indexInstallPathExists).toBe(false);
@@ -486,7 +600,7 @@ describe('#260 r2 — the two layout probes share one SQLite snapshot', () => {
     writer.pragma('journal_mode = WAL');
     const migrated = JSON.stringify({
       revision: 2,
-      index: { installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1' } }, plugins: [{ pluginId: PLUGIN, enabled: true }] },
+      index: { generatedAtMs: 2, installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1' } }, plugins: [upstreamEntry('/x')] },
     });
     const migrate = (): void => {
       writer.exec(`BEGIN;
