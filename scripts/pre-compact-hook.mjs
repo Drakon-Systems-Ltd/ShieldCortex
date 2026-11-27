@@ -24,6 +24,7 @@ import { recordHookInvocation } from './lib/telemetry.mjs';
 import { deriveProjectKey } from './lib/project-key.mjs';
 import { recordSessionEvent } from './lib/session-capture.mjs';
 import { writePrecompactLog } from './lib/precompact-log.mjs';
+import { resolveCaptureMemoryCaps } from './lib/memory-caps.mjs';
 import {
   extractMemorableSegments,
   processSegments,
@@ -46,9 +47,8 @@ function getDbPath() {
 
 const { dir: DB_DIR, path: DB_PATH } = getDbPath();
 
-// Memory limits (should match src/memory/types.ts DEFAULT_CONFIG)
-const MAX_SHORT_TERM_MEMORIES = 100;
-const MAX_LONG_TERM_MEMORIES = 1000;
+// Memory caps for the fullness ratio are resolved per run (#1124) — see
+// scripts/lib/memory-caps.mjs.
 
 // Maximum memories to auto-create per compaction.
 // Dropped 5 → 2 in v4.11.0 for the same reason thresholds were raised.
@@ -178,7 +178,10 @@ process.stdin.on('end', async () => {
     // Get current memory stats for dynamic threshold calculation
     const stats = getMemoryStats(db);
     const totalMemories = stats.shortTerm + stats.longTerm;
-    const maxMemories = MAX_SHORT_TERM_MEMORIES + MAX_LONG_TERM_MEMORIES;
+    // #1124: the operator's resolved caps, not a hardcoded 100 + 1000. Falls
+    // back to 100 + 1000 itself, so this never skips extraction.
+    const caps = await resolveCaptureMemoryCaps();
+    const maxMemories = caps.maxShortTermMemories + caps.maxLongTermMemories;
     const dynamicThreshold = getDynamicThreshold(totalMemories, maxMemories);
 
     console.error(`[auto-extract] Memory status: ${totalMemories}/${maxMemories} (${(totalMemories/maxMemories*100).toFixed(0)}% full)`);

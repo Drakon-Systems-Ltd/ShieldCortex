@@ -33,6 +33,7 @@ import { extractCaptureMemories } from './lib/capture-distill.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { deriveProjectKey } from './lib/project-key.mjs';
 import { recordSessionEvent } from './lib/session-capture.mjs';
+import { resolveCaptureMemoryCaps } from './lib/memory-caps.mjs';
 import {
   extractMemorableSegments,
   processSegments,
@@ -53,9 +54,8 @@ function getDbPath() {
 
 const { dir: DB_DIR, path: DB_PATH } = getDbPath();
 
-// Memory limits
-const MAX_SHORT_TERM_MEMORIES = 100;
-const MAX_LONG_TERM_MEMORIES = 1000;
+// Memory caps for the fullness ratio are resolved per run (#1124) — see
+// scripts/lib/memory-caps.mjs.
 
 // ==================== DYNAMIC THRESHOLD ====================
 
@@ -198,7 +198,10 @@ process.stdin.on('end', async () => {
 
         const stats = getMemoryStats(db);
         const totalMemories = stats.shortTerm + stats.longTerm;
-        const maxMemories = MAX_SHORT_TERM_MEMORIES + MAX_LONG_TERM_MEMORIES;
+        // #1124: the operator's resolved caps, not a hardcoded 100 + 1000.
+        // Falls back to 100 + 1000 itself, so this never skips extraction.
+        const caps = await resolveCaptureMemoryCaps();
+        const maxMemories = caps.maxShortTermMemories + caps.maxLongTermMemories;
         const dynamicThreshold = getDynamicThreshold(totalMemories, maxMemories);
 
         console.error(`[session-end] Memory status: ${totalMemories}/${maxMemories} (${(totalMemories/maxMemories*100).toFixed(0)}% full)`);
