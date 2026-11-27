@@ -503,7 +503,7 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
   // Sol finding 3: a marker that EXISTS is not a build. Only a manifest that
   // names the plugin plus an entry point file counts.
   const manifest = JSON.stringify({ id: PLUGIN, version: '5.22.1' });
-  it.each<[string, (d: string) => void, boolean]>([
+  const BUILD_SHAPES: Array<[string, (d: string) => void, boolean]> = [
     ['package.json only (leftover metadata)', (d) => fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ name: 'x', version: '5.22.1' })), false],
     ['an empty-object openclaw.plugin.json only', (d) => fs.writeFileSync(path.join(d, 'openclaw.plugin.json'), '{}'), false],
     ['a DIRECTORY named openclaw.plugin.json + dist/index.js', (d) => { fs.mkdirSync(path.join(d, 'openclaw.plugin.json')); fs.mkdirSync(path.join(d, 'dist')); fs.writeFileSync(path.join(d, 'dist', 'index.js'), ''); }, false],
@@ -517,7 +517,8 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     ['the manifest + dist/index.js (no package.json)', (d) => { fs.writeFileSync(path.join(d, 'openclaw.plugin.json'), manifest); fs.mkdirSync(path.join(d, 'dist')); fs.writeFileSync(path.join(d, 'dist', 'index.js'), ''); }, true],
     ['the npm package layout (package.json main ./dist/index.js)', (d) => { writeRealBuild(d, '5.22.1'); }, true],
     ['the manifest + package.json main lib/entry.mjs', (d) => { fs.writeFileSync(path.join(d, 'openclaw.plugin.json'), manifest); fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ main: 'lib/entry.mjs' })); fs.mkdirSync(path.join(d, 'lib')); fs.writeFileSync(path.join(d, 'lib', 'entry.mjs'), ''); }, true],
-  ])('a recorded directory holding %s ⇒ indexInstallPathExists %s', (_label, make, expected) => {
+  ];
+  it.each(BUILD_SHAPES.map(([label, make, expected]) => [label, expected, make] as const))('a recorded directory holding %s ⇒ indexInstallPathExists %s', (_label, expected, make) => {
     writeConfig(true, true);
     writeMachineStateIndex(staleRow());
     fs.mkdirSync(gone(), { recursive: true });
