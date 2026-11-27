@@ -629,9 +629,10 @@ export function readSelfReportFile(
     const read = parseSelfReport(buf.subarray(0, n).toString('utf8'), n);
     // Post-read check on the same descriptor: type, exact device and inode,
     // size, and the exact mtimeNs and ctimeNs (bigint, never converted). A
-    // same-size rewrite during the read changes the timestamps, so the parse
-    // is discarded rather than aged with the earlier mtime (#1160). This only
-    // detects a change seen by this descriptor; it does not authenticate the writer.
+    // changed or missing timestamp discards the parse as unreadable rather than
+    // aging it with the earlier mtime (#1160). A same-size rewrite that leaves
+    // both timestamps unchanged (coarse filesystem timestamps) is not detected.
+    // This does not authenticate the writer.
     const again = fs.fstatSync(fd, EXACT_STAT);
     if (
       !again.isFile() || !sameDeviceInode(again, opened) || again.size !== opened.size
