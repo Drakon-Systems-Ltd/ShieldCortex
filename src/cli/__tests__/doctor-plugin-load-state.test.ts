@@ -265,14 +265,15 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
 
   // #260 r4 (Astra r3 SHOULD-FIX): the roster proves the load, not a version.
   // r4c (owner ruling on jarvis r3): was `pass` "(roster-confirmed, version
-  // unverified)". The record's 4.0.0 is below expected, so it FAILS as main
-  // does — named as the install record's claim, never as a measured version.
+  // unverified)". No build is on disk, so main weighs the record: its 4.0.0
+  // is below expected and FAILS as main does — named as the install record's
+  // claim with the running version unknown (Case r5), never "running stale".
   it('gone directory + live roster names the plugin + stale record 4.0.0: FAILS as regressed on the record\'s claim, never a pass', () => {
     migrated(pkgDir(), { recordVersion: '4.0.0' });
     const r = renderWithRoster([PLUGIN]);
     expect(r.status).toBe('fail');
-    expect(r.message).toMatch(/regressed to v4\.0\.0 \(older than expected v5\.22\.1\).*OpenClaw's install record says that; the copy OpenClaw uses has no readable version/);
-    expect(r.message).not.toMatch(/roster-confirmed/);
+    expect(r.message).toMatch(/OpenClaw's install record says v4\.0\.0, older than expected v5\.22\.1; running version unknown/);
+    expect(r.message).not.toMatch(/running stale|regressed to|roster-confirmed/);
   });
 
   // r4c: the same host with the record at expected or carrying no version —
@@ -304,7 +305,54 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     migrated(pkgDir(), { recordVersion: '4.0.0' });
     const r = await checkOpenClawPluginLoadState(home, '5.22.1');
     expect(r.status).toBe('fail');
-    expect(r.message).toMatch(/regressed to v4\.0\.0 \(older than expected v5\.22\.1\).*OpenClaw's install record says that/);
+    expect(r.message).toMatch(/OpenClaw's install record says v4\.0\.0, older than expected v5\.22\.1; running version unknown/);
+    expect(r.message).not.toMatch(/running stale|regressed to/);
+  });
+
+  // Case r5 (review 6095672540): the stale row says 5.0.0, the indexed folder
+  // holds no build, and a real 5.22.1 build sits in another project dir.
+  // Neither version shows what the gateway runs: warn, never "running stale",
+  // never a pass. Through the real doctor check too (roster unread).
+  it('gone directory + stale record 5.0.0 + a real 5.22.1 build elsewhere: roster unread WARNS stale path, roster-proven WARNS version unverified — never "running stale"', async () => {
+    migrated(pkgDir(), { recordVersion: '5.0.0' });
+    writeRealBuild(path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-other', PKG_SUBPATH), '5.22.1');
+    for (const r of [renderWithRoster(null), await checkOpenClawPluginLoadState(home, '5.22.1')]) {
+      expectStalePathWarn(r);
+      expect(r.message).not.toMatch(/running stale|regressed|v5\.0\.0/);
+    }
+    const proven = renderWithRoster([PLUGIN]);
+    expect(proven.status).toBe('warn');
+    expect(proven.message).toMatch(/version unverified\) — the running gateway loaded it/);
+    expect(proven.message).not.toMatch(/running stale|regressed|v5\.0\.0|v5\.22\.1/);
+  });
+
+  // Case r5: the renderer says whose claim an UNVERIFIED regression is and
+  // that the running version is unknown; only a MEASURED one says "running
+  // stale". Hand-built verdicts pin the wording for each source.
+  it.each([
+    ['unverified, install record', { versionUnverified: true, installedVersionSource: 'index-record' as const },
+      /^realtime plugin: OpenClaw's install record says v4\.0\.0, older than expected v5\.22\.1; running version unknown/],
+    ['unverified, disk scan', { versionUnverified: true, installedVersionSource: 'disk' as const },
+      /^realtime plugin: the build on disk is v4\.0\.0, older than expected v5\.22\.1; running version unknown/],
+  ] as const)('renderer: version-regressed %s ⇒ fail, the claim named, running version unknown, never "running stale"', (_l, over, expected) => {
+    const r = renderPluginLoadVerdict({
+      ...reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null })),
+      state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned', installedVersion: '4.0.0', ...over,
+    });
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(expected);
+    expect(r.message).not.toMatch(/running stale|regressed to/);
+  });
+
+  it('renderer: a MEASURED version-regressed keeps "regressed to … running stale"', () => {
+    const r = renderPluginLoadVerdict({
+      ...reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null })),
+      state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned',
+      installedVersion: '4.0.0', installedVersionSource: 'selected-build', versionUnverified: undefined,
+    });
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/^realtime plugin regressed to v4\.0\.0 \(older than expected v5\.22\.1\) — running stale, refuse the downgrade/);
+    expect(r.message).not.toMatch(/running version unknown/);
   });
 
   // #260 r3 (Case r2 #1): the record path is gone and the SELECTED rootDir
@@ -320,7 +368,9 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     migrated(pkgDir(), { recordVersion: '4.0.0', rootDir: outOfScan() });
     const r = renderWithRoster(roster ? [...roster] : null);
     expect(r.status).toBe('fail');
-    expect(r.message).toMatch(/regressed to v4\.0\.0 \(older than expected v5\.22\.1\)/);
+    // Measured: the selected build's own version — keeps "running stale".
+    expect(r.message).toMatch(/regressed to v4\.0\.0 \(older than expected v5\.22\.1\) — running stale/);
+    expect(r.message).not.toMatch(/running version unknown/);
   });
 
   it.each([
@@ -367,7 +417,8 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     const r = await checkOpenClawPluginLoadState(home, '5.22.1');
     expect(r.status).toBe(status);
     if (status === 'fail') {
-      expect(r.message).toMatch(/regressed to v4\.0\.0 \(older than expected v5\.22\.1\).*the copy OpenClaw uses has no readable version/);
+      expect(r.message).toMatch(/OpenClaw's install record says v4\.0\.0, older than expected v5\.22\.1; running version unknown/);
+      expect(r.message).not.toMatch(/running stale|regressed to/);
     } else {
       expect(r.message).toMatch(/version unverified/);
       expect(r.message).not.toMatch(/v5\.22\.1/);

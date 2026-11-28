@@ -8,6 +8,7 @@ import {
   safeForReason,
   type ReconcileInput,
 } from '../integrations/openclaw-plugin-index.js';
+import { REALTIME_PLUGIN_PACKAGE } from '../setup/openclaw-plugin-spec.js';
 
 /**
  * Regression suite for the #74 conflicted-metadata / silent-drop class.
@@ -237,10 +238,11 @@ describe('#260 r2 — malformed and stale index input', () => {
     });
   });
 
-  // r4c (owner ruling on jarvis r3): was "never version-regressed". A record
-  // below expected fails as on main, roster proven or not — but it is named as
-  // the record's claim, never as the version the running gateway loaded.
-  it('…the missing copy\'s recorded version below expected fails as the RECORD\'s claim, live roster or not (r4c)', () => {
+  // r4c (owner ruling on jarvis r3): was "never version-regressed". With NO
+  // build on disk, a record below expected fails as on main (main weighs the
+  // record only when the disk scan found nothing), roster proven or not — but
+  // it is named as the record's claim, never as the version that loaded.
+  it('…no build on disk: the missing copy\'s recorded version below expected fails as the RECORD\'s claim, live roster or not (r4c, main\'s precedence)', () => {
     for (const roster of [['shieldcortex-realtime'], null]) {
       const input = base({ indexInstallPathExists: false, liveRoster: roster, ...(roster ? { liveLoadEvidence: 'boot-roster' as const } : {}) });
       input.index!.installRecords['shieldcortex-realtime'].version = '4.0.0';
@@ -295,7 +297,8 @@ describe('#260 r2 — malformed and stale index input', () => {
     const input = base({ indexInstallPathExists: false, onDiskInstallPath: '/home/u/.openclaw/extensions/shieldcortex-realtime' });
     input.index!.installRecords['shieldcortex-realtime'].version = '4.0.0';
     // r4c (owner ruling on jarvis r3): was load-unproven ("the stale record
-    // is not what runs"). A record below expected fails as on main.
+    // is not what runs"). The scan read no version (onDiskVersion null), so
+    // main weighs the record too: below expected, it fails as on main.
     expect(reconcilePluginState(input)).toMatchObject({
       state: 'version-regressed', severity: 'fail', installedVersion: '4.0.0', installedVersionSource: 'index-record', versionUnverified: true,
     });
@@ -324,6 +327,85 @@ describe('#260 r2 — malformed and stale index input', () => {
       versionUnverified: true, installedVersion: null, installedVersionSource: null,
     });
     expect(verdict.reasons.join(' ')).toMatch(/not proven to be the copy it loaded/);
+  });
+
+  // Case r5 (review 6095672540): the stale row says 5.0.0, both indexed paths
+  // hold no build, and the disk scan found a real 5.22.1 elsewhere. Neither
+  // version shows what the gateway runs. Main weighs the disk build over the
+  // record (`coerce(onDiskVersion) ?? coerce(indexVersion)`), so the record
+  // convicts nothing: warn, never pass, and no reinstall from the stale row.
+  describe('Case r5: stale record 5.0.0 beside a current disk build 5.22.1', () => {
+    const staleBesideCurrent = (over: Partial<ReconcileInput> = {}): ReconcileInput => {
+      const input = base({ indexInstallPathExists: false, indexRootDirExists: false, onDiskVersion: '5.22.1', ...over });
+      input.index!.installRecords['shieldcortex-realtime'].version = '5.0.0';
+      return input;
+    };
+    const noReinstall = (v: ReturnType<typeof reconcilePluginState>): void => {
+      expect(v.recommendedAction).toBe('none');
+      expect(planReconcileActions(v, { pluginId: 'shieldcortex-realtime', packageName: REALTIME_PLUGIN_PACKAGE, expectedVersion: '5.22.1' }).map((x) => x.kind)).toEqual(['self-check']);
+    };
+
+    it('roster unread ⇒ load-unproven / warn / none', () => {
+      const v = reconcilePluginState(staleBesideCurrent({ liveRoster: null }));
+      expect(v).toMatchObject({ state: 'load-unproven', severity: 'warn', indexPathMissing: true, installedVersion: null, installedVersionSource: null });
+      expect(v.reasons.join(' ')).not.toMatch(/v5\.0\.0|older than expected/);
+      noReinstall(v);
+    });
+
+    it('roster confirms the load ⇒ version-unverified / warn / none', () => {
+      const v = reconcilePluginState(staleBesideCurrent({ liveRoster: ['shieldcortex-realtime'], liveLoadEvidence: 'boot-roster' }));
+      expect(v).toMatchObject({ state: 'version-unverified', severity: 'warn', versionUnverified: true, installedVersion: null, installedVersionSource: null });
+      expect(v.reasons.join(' ')).not.toMatch(/v5\.0\.0|older than expected/);
+      noReinstall(v);
+    });
+
+    it('a READ roster that omits the plugin ⇒ enabled-not-loaded / FAIL (confirmed non-load, unchanged)', () => {
+      expect(reconcilePluginState(staleBesideCurrent({ liveRoster: ['brave'] })))
+        .toMatchObject({ state: 'enabled-not-loaded', severity: 'fail' });
+    });
+
+    it('the #142 registration race ⇒ the #142 warn, no action (unchanged)', () => {
+      expect(reconcilePluginState(staleBesideCurrent({ liveRoster: ['brave'], registrationSeenAfterBoot: true })))
+        .toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: false });
+    });
+
+    it('…a disk build BELOW expected still fails on the scan\'s claim (as main), the record notwithstanding', () => {
+      for (const roster of [null, ['shieldcortex-realtime']]) {
+        const input = staleBesideCurrent({ onDiskVersion: '4.0.0', liveRoster: roster });
+        input.index!.installRecords['shieldcortex-realtime'].version = '5.22.1';
+        expect(reconcilePluginState(input)).toMatchObject({
+          state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned',
+          versionUnverified: true, installedVersion: '4.0.0', installedVersionSource: 'disk',
+        });
+      }
+    });
+
+    // Same precedence when the selected build IS there but its version is
+    // unreadable (jarvis r3's branch, which used the same lowest-claim rule).
+    it.each([
+      ['roster unread', null],
+      ['roster-proven', ['shieldcortex-realtime']],
+    ] as const)('selected build verified, version unread (%s): record 5.0.0 + scan 5.22.1 ⇒ version-unverified / warn / none', (_l, roster) => {
+      const v = reconcilePluginState(staleBesideCurrent({ indexRootDirExists: true, selectedVersion: null, liveRoster: roster ? [...roster] : null }));
+      expect(v).toMatchObject({ state: 'version-unverified', severity: 'warn', versionUnverified: true, installedVersion: null });
+      noReinstall(v);
+    });
+
+    it('selected build verified, version unread: scan 4.0.0 (record at expected) ⇒ version-regressed / fail on the scan', () => {
+      const input = staleBesideCurrent({ indexRootDirExists: true, selectedVersion: null, onDiskVersion: '4.0.0' });
+      input.index!.installRecords['shieldcortex-realtime'].version = '5.22.1';
+      expect(reconcilePluginState(input)).toMatchObject({
+        state: 'version-regressed', severity: 'fail', versionUnverified: true, installedVersion: '4.0.0', installedVersionSource: 'disk',
+      });
+    });
+
+    it('selected build verified, version unread, NO scan build: record 4.0.0 ⇒ version-regressed / fail on the record (as main)', () => {
+      const input = staleBesideCurrent({ indexRootDirExists: true, selectedVersion: null, onDiskVersion: null });
+      input.index!.installRecords['shieldcortex-realtime'].version = '4.0.0';
+      expect(reconcilePluginState(input)).toMatchObject({
+        state: 'version-regressed', severity: 'fail', versionUnverified: true, installedVersion: '4.0.0', installedVersionSource: 'index-record',
+      });
+    });
   });
 
   it('positive control (Sol 3): the index\'s own selection (rootDir) verified as a real build lets the ordinary rules decide', () => {
