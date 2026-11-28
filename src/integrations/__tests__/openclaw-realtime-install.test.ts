@@ -15,6 +15,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import Database from 'better-sqlite3';
 import {
   readLinkedRealtimeInstall,
   readRealtimeReplacementEvidence,
@@ -130,6 +131,132 @@ describe('readLinkedRealtimeInstall — identity from what is at the path', () =
     expect(readPluginInstallIndexState(home)).toEqual({ state: 'absent' });
   });
 
+  // #260: OpenClaw 2026.11.x moved the index into a config_machine_state row
+  // and dropped the old table. These use the REAL reader on a real fixture DB:
+  // "absent" here would let a forced install treat a recorded install as none.
+  const writeMigratedStateDb = (valueJson: string | null): void => {
+    const dir = path.join(home, '.openclaw', 'state');
+    fs.mkdirSync(dir, { recursive: true });
+    const db = new Database(path.join(dir, 'openclaw.sqlite'));
+    db.exec('CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)');
+    if (valueJson !== null) db.prepare("INSERT INTO config_machine_state VALUES ('plugins.installedIndex', ?, 1)").run(valueJson);
+    db.close();
+  };
+
+  it('#260: a migrated host (index in config_machine_state, no legacy table) is ok — and its record selects', () => {
+    const dir = writeRealtimeProject('drakon-systems-shieldcortex-realtime-abc', '5.22.1');
+    writeMigratedStateDb(JSON.stringify({
+      revision: 7,
+      index: {
+        version: 1, generatedAtMs: 7, diagnostics: [],
+        installRecords: { [ID]: { source: 'npm', version: '5.22.1', installPath: dir } },
+        plugins: [{ pluginId: ID, enabled: true, rootDir: dir }],
+      },
+    }));
+    const st = readPluginInstallIndexState(home);
+    expect(st.state).toBe('ok');
+    expect(st.state === 'ok' && st.row.installRecords[ID]?.version).toBe('5.22.1');
+    expect(readSelectedRealtimeInstall(home)).toMatchObject({ state: 'selected', version: '5.22.1' });
+  });
+
+  // #260 (Sol finding 1): selection evidence that OpenClaw itself would
+  // reject must refuse the forced replacement. An index OpenClaw 2026.11.7+
+  // would discard (non-numeric revision, a plugins entry without a string
+  // rootDir or a boolean enabled) used to read as `ok`; with the realtime
+  // record naming no path the bad rootDir was then dropped, selection fell
+  // through to `none`, and `none` permits replacement.
+  const upstreamIndex = (over: { revision?: unknown; entry?: Record<string, unknown>; record?: Record<string, unknown> } = {}, dir = '/nowhere'): string => {
+    const entry = {
+      pluginId: ID, manifestPath: path.join(dir, 'openclaw.plugin.json'), manifestHash: 'h', rootDir: dir, origin: 'global',
+      enabled: true, startup: { sidecar: false, memory: false, agentHarnesses: [] }, compat: [], ...over.entry,
+    };
+    for (const [k, v] of Object.entries(over.entry ?? {})) if (v === undefined) delete (entry as Record<string, unknown>)[k];
+    return JSON.stringify({
+      ...('revision' in over ? (over.revision === undefined ? {} : { revision: over.revision }) : { revision: 7 }),
+      index: {
+        version: 1, hostContractVersion: '2026.11.10', compatRegistryVersion: 'x', migrationVersion: 1, policyHash: 'h',
+        generatedAtMs: 7, diagnostics: [],
+        installRecords: { [ID]: { source: 'npm', ...(over.record ?? { version: '5.22.1', installPath: dir }) } },
+        plugins: [entry],
+      },
+    });
+  };
+
+  it.each([
+    ['a numeric rootDir (and no install path on the record)', { entry: { rootDir: 42 }, record: { version: '6.0.0' } }],
+    ['no rootDir at all (and no install path on the record)', { entry: { rootDir: undefined }, record: { version: '6.0.0' } }],
+    ['a string enabled', { entry: { enabled: 'yes' } }],
+    ['no enabled', { entry: { enabled: undefined } }],
+    ['no revision', { revision: undefined }],
+    ['a string revision', { revision: '7' }],
+  ])('#260 Sol-1: a migrated index with %s ⇒ unreadable ⇒ selected unknown ⇒ the forced replacement is REFUSED', (_label, over) => {
+    writeMigratedStateDb(upstreamIndex(over as never));
+    expect(readPluginInstallIndexState(home).state).toBe('unreadable');
+    const evidence = readRealtimeReplacementEvidence(home);
+    expect(evidence.selected.state).toBe('unknown');
+    expect(evidence.selected.state).not.toBe('none');
+    expect(assessRealtimeReplacement(evidence, '5.22.1')).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
+  it('#260 Sol-1 control: an upstream-shaped migrated index (every field OpenClaw 2026.11.x writes) selects its copy and allows the pinned replacement', () => {
+    const dir = writeRealtimeProject('drakon-systems-shieldcortex-realtime-abc', '5.22.1');
+    writeMigratedStateDb(upstreamIndex({}, dir));
+    const st = readPluginInstallIndexState(home);
+    expect(st.state).toBe('ok');
+    const evidence = readRealtimeReplacementEvidence(home);
+    expect(evidence.selected).toMatchObject({ state: 'selected', version: '5.22.1', dir });
+    expect(assessRealtimeReplacement(evidence, '5.22.1')).toEqual({ replace: true });
+  });
+
+  it('#260 Sol-1 control: an upstream-shaped index whose copy is gone and that no other copy backs is still `none` (nothing to lose)', () => {
+    writeMigratedStateDb(upstreamIndex({}, path.join(home, 'gone')));
+    expect(readSelectedRealtimeInstall(home)).toMatchObject({ state: 'none', dangling: expect.any(String) });
+  });
+
+  it.each([
+    ['an empty rootDir', { rootDir: '' }],
+    ['a blank rootDir', { rootDir: '   ' }],
+    ['no rootDir (a legacy row, which the reader does not require it on)', {}],
+  ])('#260 Sol-1: a roster entry for the plugin with %s ⇒ unknown, never none', (_label, extra) => {
+    const s = readSelectedRealtimeInstall(home, index({ [ID]: { source: 'npm', version: '6.0.0' } }, [{ pluginId: ID, enabled: true, ...extra }]));
+    expect(s).toMatchObject({ state: 'unknown', why: expect.stringMatching(/no usable rootDir/) });
+  });
+
+  it('#260: a migrated state DB with no index row is absent', () => {
+    writeMigratedStateDb(null);
+    expect(readPluginInstallIndexState(home)).toEqual({ state: 'absent' });
+  });
+
+  it.each([
+    ['malformed JSON', '{"index": '],
+    ['the wrong shape', JSON.stringify({ revision: 1, index: { installRecords: [], plugins: 'x' } })],
+  ])('#260: a migrated index row with %s is unreadable ⇒ the selected copy is unknown', (_label, valueJson) => {
+    writeMigratedStateDb(valueJson);
+    expect(readPluginInstallIndexState(home).state).toBe('unreadable');
+    expect(readSelectedRealtimeInstall(home).state).toBe('unknown');
+  });
+
+  // #260 round 2 (Astra): a corrupt RECORD inside a well-formed index. Read as
+  // `ok`, the null record names no copy, selection says `none`, and the forced
+  // install is allowed to replace an install it never looked at.
+  it.each([
+    ['a null realtime install record', { installRecords: { [ID]: null }, plugins: [] }],
+    ['a null plugins entry', { installRecords: {}, plugins: [null] }],
+    // #260 r3: an object record, with a field we select on mistyped. Read as
+    // `ok` it names no path ⇒ `none` ⇒ replacing a 6.0.0 install is allowed.
+    ['a realtime record with a numeric installPath', { installRecords: { [ID]: { source: 'npm', installPath: 37, version: '6.0.0' } }, plugins: [] }],
+    ['a realtime record with a null version', { installRecords: { [ID]: { source: 'npm', version: null } }, plugins: [] }],
+    ['a realtime record with a numeric resolvedVersion', { installRecords: { [ID]: { source: 'npm', resolvedVersion: 6 } }, plugins: [] }],
+    ['a realtime record with an object source', { installRecords: { [ID]: { source: {}, version: '6.0.0' } }, plugins: [] }],
+    ['a realtime record with a numeric sourcePath', { installRecords: { [ID]: { source: 'path', sourcePath: 1 } }, plugins: [] }],
+  ])('#260 r2: %s ⇒ unreadable ⇒ selected unknown ⇒ the forced replacement is REFUSED', (_label, idx) => {
+    writeMigratedStateDb(JSON.stringify({ revision: 7, index: { version: 1, generatedAtMs: 7, diagnostics: [], ...idx } }));
+    expect(readPluginInstallIndexState(home).state).toBe('unreadable');
+    const evidence = readRealtimeReplacementEvidence(home);
+    expect(evidence.selected.state).toBe('unknown');
+    expect(assessRealtimeReplacement(evidence, '5.22.1')).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
   it('UNKNOWN when a load.paths entry\'s package.json cannot be parsed', () => {
     const dir = path.join(home, 'work', 'x');
     fs.mkdirSync(dir, { recursive: true });
@@ -182,7 +309,7 @@ describe('readSelectedRealtimeInstall — the copy OpenClaw selected, not the hi
     writeRealtimeProject('leftover', '5.20.2');
     const gone = path.join(home, 'gone');
     const s = readSelectedRealtimeInstall(home, index({ [ID]: { source: 'npm', installPath: gone } }, [{ pluginId: ID, rootDir: gone }]));
-    expect(s).toEqual({ state: 'none', dangling: `the copy OpenClaw's install index roster and install index record name is not on disk (${gone})` });
+    expect(s).toEqual({ state: 'none', dangling: `the copy OpenClaw's install index roster and install index record name is not on disk (${gone})`, danglingDirs: [gone, gone] });
     expect(readSelectedRealtimePluginVersion(home, index({ [ID]: { source: 'npm', installPath: gone } })))
       .toEqual({ version: null, reason: `the copy OpenClaw's install index record names is not on disk (${gone})` });
   });
@@ -217,7 +344,7 @@ describe('readSelectedRealtimeInstall — the copy OpenClaw selected, not the hi
   it('#1109 round 4: no index — installs.json naming a copy that is gone is none (dangling)', () => {
     const gone = path.join(home, '.openclaw', 'npm', 'projects', 'gone', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
     writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'npm', installPath: gone } } });
-    expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'none', dangling: `the copy installs.json names is not on disk (${gone})` });
+    expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'none', dangling: `the copy installs.json names is not on disk (${gone})`, danglingDirs: [gone] });
   });
 
   it('#1109 round 4 (npm provenance): a selected copy whose record says ClawHub is never a post-install version', () => {
@@ -401,7 +528,7 @@ describe('#1110 — a native install recorded in openclaw.json plugins.installs'
     const gone = path.join(home, '.openclaw', 'extensions', ID);
     record({ source: 'npm', installPath: gone, version: '999.0.0' });
     expect(readSelectedRealtimeInstall(home))
-      .toEqual({ state: 'none', dangling: `the copy openclaw.json plugins.installs names is not on disk (${gone})` });
+      .toEqual({ state: 'none', dangling: `the copy openclaw.json plugins.installs names is not on disk (${gone})`, danglingDirs: [gone] });
     expect(readSelectedRealtimePluginVersion(home).version).toBeNull();
     expect(decide()).toEqual({ replace: true });
   });
@@ -522,5 +649,47 @@ describe('#1110 — a native install recorded in openclaw.json plugins.installs'
     expect(readSelectedRealtimeInstall(home)).toEqual({
       state: 'selected', dir, version: PIN, evidence: 'openclaw.json plugins.installs record', source: 'npm',
     });
+  });
+});
+
+/**
+ * #260 r10 (Sol delta review at a524cf60): a record's `installPath` that is
+ * there but empty, blank or not a string is unknown — never "names no path".
+ * At a524cf60 an empty one was dropped, the selection fell through to `none`,
+ * and a forced install was allowed to replace whatever was there. Only an
+ * absent field is absent.
+ */
+describe('#260 r10 — a present but unusable installPath refuses the replacement', () => {
+  const BAD = [['empty', ''], ['blank', '   '], ['non-string', 42]] as const;
+  const decide = () => assessRealtimeReplacement(readRealtimeReplacementEvidence(home), '5.22.1');
+
+  it.each(BAD)('the index record\'s installPath is %s (no roster entry) ⇒ unknown, refused', (_t, value) => {
+    writeRealtimeProject('drakon-systems-shieldcortex-realtime-abc', '5.22.1');
+    const opts = index({ [ID]: { source: 'npm', version: '5.0.0', installPath: value } });
+    expect(readSelectedRealtimeInstall(home, opts)).toMatchObject({ state: 'unknown', why: expect.stringContaining('installPath') });
+    expect(assessRealtimeReplacement(readRealtimeReplacementEvidence(home, opts), '5.22.1')).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
+  it.each(BAD)('the index roster\'s rootDir is %s ⇒ unknown, refused', (_t, value) => {
+    const opts = index({}, [{ pluginId: ID, enabled: true, rootDir: value }]);
+    expect(readSelectedRealtimeInstall(home, opts)).toMatchObject({ state: 'unknown', why: expect.stringContaining('no usable rootDir') });
+  });
+
+  it.each(BAD)('no index: installs.json installPath is %s ⇒ unknown, refused', (_t, value) => {
+    writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'npm', version: '5.0.0', installPath: value } } });
+    expect(readSelectedRealtimeInstall(home)).toMatchObject({ state: 'unknown', why: expect.stringContaining('installs.json names: its installPath') });
+    expect(decide()).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
+  it.each(BAD)('no index: openclaw.json plugins.installs installPath is %s ⇒ unknown, refused (not the extensions default)', (_t, value) => {
+    writeJson('openclaw.json', { plugins: { installs: { [ID]: { source: 'npm', version: '5.0.0', installPath: value } } } });
+    expect(readSelectedRealtimeInstall(home)).toMatchObject({ state: 'unknown', why: expect.stringContaining('openclaw.json plugins.installs names: its installPath') });
+    expect(decide()).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
+  it('control: no index, installs.json record with NO installPath and nothing on disk ⇒ none, replacement allowed (as before)', () => {
+    writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'npm', version: '5.0.0' } } });
+    expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'none' });
+    expect(decide()).toEqual({ replace: true });
   });
 });

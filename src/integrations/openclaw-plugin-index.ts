@@ -17,8 +17,11 @@ import { REALTIME_PLUGIN_PACKAGE, exactPluginPin, realtimePluginInstallArgs } fr
 
 /**
  * Reconciling OpenClaw plugin-install state across its three authoritative
- * layers, and reading the new SQLite install index that OpenClaw 2026.6.1+
- * treats as ground truth.
+ * layers, and reading the SQLite install index that OpenClaw 2026.6.1+ treats
+ * as ground truth. The index lives in `~/.openclaw/state/openclaw.sqlite`: in
+ * the `installed_plugin_index` table up to 2026.10.x, and in the
+ * `config_machine_state` row `plugins.installedIndex` from 2026.11.x, whose
+ * migration drops the old table (#260). Both are read; the new row wins.
  *
  * Field incident #74 (aiquant, 2026-07-11): after a disable→enable→restart
  * cycle the realtime interceptor was `enabled:true` in config yet ABSENT from
@@ -38,7 +41,7 @@ export const REALTIME_PLUGIN_ID = 'shieldcortex-realtime';
 
 // ── Parsed shapes of the three layers ──────────────────────────────────────
 
-/** One entry from `installed_plugin_index.install_records_json`. */
+/** One entry from the install index's install records. */
 export interface IndexInstallRecord {
   source?: string;
   version?: string;
@@ -46,7 +49,7 @@ export interface IndexInstallRecord {
   installPath?: string;
 }
 
-/** One entry from `installed_plugin_index.plugins_json` — the LOADED roster. */
+/** One entry from the install index's plugin list. */
 export interface IndexPluginEntry {
   pluginId: string;
   enabled?: boolean;
@@ -54,7 +57,7 @@ export interface IndexPluginEntry {
   rootDir?: string;
 }
 
-/** The latest `installed_plugin_index` row, parsed. */
+/** The install index, parsed (from either SQLite layout). */
 export interface PluginIndexRow {
   installRecords: Record<string, IndexInstallRecord>;
   plugins: IndexPluginEntry[];
@@ -112,6 +115,15 @@ export interface ReconcileInput {
   installsJson: InstallsJsonRecord | null;
   /** Parsed latest SQLite index row, or null when the index is unreadable. */
   index: PluginIndexRow | null;
+  /**
+   * The install index EXISTS but could not be read (#260, Sol finding 4): a
+   * row that does not parse, has the wrong shape, is over the size cap, or a
+   * DB the binding could not open. `index` is null either way; this is what
+   * keeps "could not read it" apart from "there is none". Only an unreadable
+   * index sets it. Optional: callers that inject `index` directly (and every
+   * earlier fixture) leave it unset, which keeps their meaning.
+   */
+  indexUnreadable?: boolean;
   /** Ground-truth version from the plugin's on-disk package.json, or null. */
   onDiskVersion: string | null;
   /**
@@ -132,6 +144,56 @@ export interface ReconcileInput {
    * worse bug — that is the #222 shape.
    */
   onDiskInstallPath?: string | null;
+  /**
+   * Whether the directory the index record's `installPath` names holds a REAL
+   * plugin build (#260): a directory whose `openclaw.plugin.json` names this
+   * plugin and that has an entry point file (package.json `main`, `index.js`
+   * or `dist/index.js`). `false` = looked and there is no build there (gone,
+   * empty, or only leftover metadata): that record is a leftover, not proof
+   * of an install. `true` = a build is there. null/undefined = not checked
+   * (no record, no usable path, or the check itself failed), which keeps the
+   * meaning every earlier fixture had.
+   */
+  indexInstallPathExists?: boolean | null;
+  /**
+   * The index record names an absolute `installPath`, but the build check
+   * there could not run (EACCES, EIO: `indexInstallPathExists` null) — #260
+   * r8, Sol. Unread is not empty: that folder is never counted as one that
+   * holds no build.
+   */
+  indexInstallPathUnreadable?: boolean;
+  /**
+   * The exact version of the build at the record's `installPath` (its
+   * package.json, else its openclaw.plugin.json) — meaningful only when
+   * `indexInstallPathExists` is true (#260 r8). A copy OpenClaw's index does
+   * not select: below expected it convicts, it never clears the row.
+   */
+  recordPathVersion?: string | null;
+  /**
+   * The same check for the `rootDir` on the index's plugins entry for this
+   * plugin — the copy OpenClaw SELECTED (#260, Sol finding 3). `true` is
+   * independent proof that the index's selection points at a real build even
+   * when the record's `installPath` is stale. null/undefined = not checked.
+   */
+  indexRootDirExists?: boolean | null;
+  /**
+   * The exact version of the build at the index's selected `rootDir`, read
+   * out of that directory (its package.json, else its openclaw.plugin.json) —
+   * meaningful only when `indexRootDirExists` is true (#260, Case r2 #1).
+   * null/undefined = it could not be read. When the selection is verified this
+   * is the ONLY version that can clear the row: the newest build a disk scan
+   * finds (`onDiskVersion`) and the index record's version may convict (below
+   * expected ⇒ fail) but never stand in for it (r6).
+   */
+  selectedVersion?: string | null;
+  /**
+   * The index's plugins entry names an absolute `rootDir`, but the build check
+   * there could not run (EACCES, EIO: `indexRootDirExists` null) — #260 r7,
+   * Sol. The selected copy is named and unmeasured, so, as with a verified
+   * build whose version is unreadable, another copy or a record may convict
+   * but never clear the row.
+   */
+  indexRootDirUnreadable?: boolean;
   /**
    * `~/.openclaw/npm/projects/*` dir names matching the plugin.
    *
@@ -188,6 +250,15 @@ export type PluginLoadState =
   | 'index-unreadable'
   | 'load-unproven'
   | 'version-regressed'
+  /** #260 (jarvis r3): the build OpenClaw selected is real, but its version
+   *  could not be read and nothing lower was claimed. Not a pass: a version
+   *  check that cannot measure does not report one. */
+  | 'version-unverified'
+  /** #260 r6 (owner ruling): the folders OpenClaw's install index points at
+   *  hold no build and its record names a version older than expected, while
+   *  a build sits elsewhere on disk. Fails on the STALE RECORD — which copy
+   *  runs, and at what version, is unknown; neither version is claimed. */
+  | 'stale-index-record'
   | 'conflicted-metadata'
   | 'duplicate-install';
 
@@ -227,6 +298,11 @@ export interface ReconcileVerdict {
   /** The SQLite install index was actually readable (false ⇒ we CANNOT know
    * whether the plugin is loaded — never claim UNPROTECTED off an unreadable index). */
   indexReadable: boolean;
+  /**
+   * The index is there but could not be read (#260, Sol finding 4) — as
+   * opposed to there being no index at all. Absent on hand-built verdicts.
+   */
+  indexUnreadable?: boolean;
   /** `~/.openclaw/openclaw.json` parsed (false ⇒ every config-derived field
    *  below is absence-of-evidence, not evidence-of-absence). */
   configReadable: boolean;
@@ -242,13 +318,134 @@ export interface ReconcileVerdict {
   installsJsonVersion: string | null;
   onDiskVersion: string | null;
   expectedVersion: string;
+  /**
+   * This verdict is `load-unproven` BECAUSE the copy the install index points
+   * at holds no build — its selected `rootDir`, or (when no selection is
+   * verified) its record's `installPath` — and the running gateway did not
+   * prove the load (#260). A build found elsewhere on disk does not clear it:
+   * a build on disk is not a selection, and an equal-version record elsewhere
+   * is not the selected build. r6: also set on the `version-unverified` the
+   * running gateway's proof turns that into (so renderers say the copy holds
+   * no build, not that its version "could not be read"), and on
+   * `stale-index-record`. False (or absent, on hand-built verdicts) on every
+   * other verdict, including other `load-unproven` ones.
+   */
+  indexPathMissing?: boolean;
+  /**
+   * No version was measured for the copy the verdict is about (#260): the
+   * selected copy holds no build (load proven by the running gateway only),
+   * no layer recorded a version at all, or (jarvis r3) the verified selected
+   * build's own version could not be read. Never on `healthy` (r4c): the
+   * verdict is `version-unverified` (warn), `load-unproven` (warn),
+   * `version-regressed` when the claim main would weigh — the disk scan's
+   * build, else the install record (Case r5) — is older than expected, or
+   * `stale-index-record` (r6) when that record is older than expected but a
+   * build elsewhere on disk set it aside.
+   * Renderers say "version unverified" — never the expected version, and
+   * never the newest build a disk scan found. Absent on every other verdict.
+   */
+  versionUnverified?: boolean;
+  /**
+   * The version this verdict measured for the copy it is about, and where it
+   * was read (#260, Case r2 #1). `selected-build`: read out of the verified
+   * selected `rootDir`. `disk`: the newest build ShieldCortex's own scan found
+   * (no selection was checked). `index-record`: only OpenClaw's install record
+   * says so. `record-path-build` (r8): read out of the build at the record's
+   * `installPath` while the selected copy holds no build — a measured copy,
+   * but not the selected one, so it is only ever set to convict. null when
+   * nothing was measured. Never the expected version.
+   */
+  installedVersion?: string | null;
+  installedVersionSource?: 'selected-build' | 'disk' | 'index-record' | 'record-path-build' | null;
   reasons: string[];
+}
+
+/**
+ * A path read out of OpenClaw's files, made safe to put in `reasons` (#260,
+ * Case review). Those reach `--json` and verbose terminal output, and the path
+ * is whatever the file says: a newline, an ANSI escape or a bidi override in
+ * it would forge or hide output. C0/C1 controls, DEL, line/paragraph
+ * separators and bidi controls are written as `\u{..}`; anything longer than
+ * 512 characters is cut and marked.
+ */
+export function safeForReason(p: unknown): string {
+  const text = typeof p === 'string' ? p : String(p);
+  const escaped = text.replace(
+    /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
+    (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`,
+  );
+  return escaped.length > 512 ? `${escaped.slice(0, 512)}\u2026(truncated)` : escaped;
 }
 
 function coerce(v: string | null | undefined): string | null {
   if (!v || typeof v !== 'string') return null;
   const c = semver.valid(v) ?? semver.valid(semver.coerce(v) ?? '');
   return c ?? null;
+}
+
+/**
+ * #260 r10 (Sol): the ONE rule for a path field of OpenClaw's install index or
+ * an install record (`rootDir`, `installPath`), shared by gather, repair's
+ * preflight and the prune planner. Only a field that is not there is
+ * `absent`. One that is there but empty, blank, not a string, or relative
+ * names a folder no one here can find: `unknown` — and unknown refuses
+ * pruning and replacement, exactly as `.` does. (An empty string used to be
+ * dropped as "names nothing" by preflight and the planner, which then allowed
+ * a forced install and scheduled a deletion.) A `path` is only usable: a read
+ * of it that fails other than ENOENT/ENOTDIR is still not "absent".
+ */
+export type IndexPathField =
+  | { kind: 'absent' }
+  | { kind: 'path'; path: string }
+  | { kind: 'unknown'; why: string };
+
+export function indexPathField(value: unknown): IndexPathField {
+  if (value === undefined) return { kind: 'absent' };
+  if (typeof value !== 'string') return { kind: 'unknown', why: 'is not a string' };
+  if (value.trim() === '') return { kind: 'unknown', why: value === '' ? 'is empty' : 'is blank' };
+  if (!path.isAbsolute(value)) return { kind: 'unknown', why: `(${safeForReason(value)}) is not an absolute path` };
+  return { kind: 'path', path: value };
+}
+
+/**
+ * #260 r9 (Sol): an index field that names a folder at all — anything but
+ * absent ({@link indexPathField}). Such a folder whose build check returned
+ * null (a relative or empty path, a permission or I/O error) was NOT checked:
+ * it is never "holds no build".
+ */
+function namesFolder(p: unknown): boolean {
+  return indexPathField(p).kind !== 'absent';
+}
+
+/** Why a named folder could not be checked (#260 r9): a relative path is never resolved here. */
+function uncheckedBecause(p: unknown): string {
+  return typeof p === 'string' && path.isAbsolute(p)
+    ? 'permission or I/O error'
+    : 'not an absolute path, and OpenClaw resolves a relative one against its own working directory, which is not known here';
+}
+
+/**
+ * Case r5 (#260): the version claim weighed when nothing measured the copy a
+ * verdict is about — main's precedence, the disk scan's build if there is
+ * one, else OpenClaw's install record. Returned only when that ONE claim is
+ * below expected (it convicts as `version-regressed`, flagged
+ * `versionUnverified`); otherwise null — a claim at or above expected is not
+ * a measurement of what runs, and a stale record is never weighed against a
+ * build the scan did find. (r6: where the indexed folders hold no build, such
+ * a record still fails — as `stale-index-record`, on the record, not as a
+ * version.)
+ */
+function unmeasuredClaim(
+  scanVersion: string | null,
+  recordVersion: string | null,
+  expected: string | null,
+): [string, 'disk' | 'index-record'] | null {
+  const claim: [string, 'disk' | 'index-record'] | null = scanVersion
+    ? [scanVersion, 'disk']
+    : recordVersion
+      ? [recordVersion, 'index-record']
+      : null;
+  return claim && expected && semver.lt(claim[0], expected) ? claim : null;
 }
 
 /**
@@ -269,7 +466,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     config.enabled === true || (config.enabled == null && config.inAllow === true);
 
   const loadedInIndex = Boolean(
-    index?.plugins?.some((p) => p.pluginId === pluginId && p.enabled === true),
+    index?.plugins?.some((p) => p?.pluginId === pluginId && p.enabled === true),
   );
 
   // #103: the live gateway roster overrides the install index. Null = unread.
@@ -308,7 +505,48 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // purpose. It stays in the input because it is real evidence of a DUPLICATE
   // (see the `projectDirs.length > 1` branch below); it is just not evidence of
   // an installation.
-  const installed = Boolean(input.installsJson || onDiskVersion || indexRecord || input.onDiskInstallPath);
+  //
+  // #260: a record is a claim, and the index can outlive what it describes.
+  // A record whose directory CONFIRMEDLY holds no build still counts as an
+  // install here — every rule below runs exactly as it would without that
+  // knowledge. The stale path never clears the row: its record's version (or
+  // a scan's) may only convict (see `effective`); with both indexed folders
+  // empty and the record below expected it fails on the stale record itself
+  // (rule 4b, r6); otherwise it blocks a PASS (see the end of this function).
+  //
+  // Sol finding 3: the same stale row's plugins entry (`enabled: true`) is
+  // what lets control skip rule 4 and reach the pass, so it must not carry the
+  // pass on its own. Only independent evidence does: the running gateway
+  // proving the load, or the index's own selection (`rootDir`) verified as a
+  // real build. A build ShieldCortex found somewhere else on disk is neither.
+  //
+  // Case r2 / Sol r2: selection, build, provenance and version are checked
+  // SEPARATELY. The selection is the plugins entry's `rootDir`:
+  //   - verified (a real build there) ⇒ that build is the one the verdict is
+  //     about, and only its own version can clear the row (a scan or record
+  //     may convict, r6);
+  //   - stale (looked, no build there) ⇒ the selected build is missing, even
+  //     when the record's `installPath` (or another dir) holds an equal-version
+  //     build — a record elsewhere is not the selected build;
+  //   - named but its check failed (EACCES/EIO, r7) ⇒ as a verified build
+  //     whose version is unreadable: unmeasured, never cleared by another copy;
+  //   - not checked ⇒ the record's `installPath` decides, as before.
+  const indexRecordPathGone = Boolean(indexRecord) && input.indexInstallPathExists === false;
+  const indexSelectionVerified = input.indexRootDirExists === true;
+  const indexSelectionStale = input.indexRootDirExists === false;
+  // r7 (Sol): a named selection that could not be checked is an unmeasured
+  // selected copy, not "no selection" — it takes the verified-but-unreadable
+  // path below, never main's scan-else-record precedence.
+  const indexSelectionUnreadable =
+    input.indexRootDirUnreadable === true && !indexSelectionVerified && !indexSelectionStale;
+  const indexPathMissing =
+    indexSelectionStale || (indexRecordPathGone && !indexSelectionVerified && !indexSelectionUnreadable);
+  // A verified selection is an install in its own right: a linked or path
+  // install outside every place the disk scan looks, with no install record,
+  // is still a real build OpenClaw selected.
+  const installed = Boolean(
+    input.installsJson || onDiskVersion || indexRecord || input.onDiskInstallPath || indexSelectionVerified,
+  );
 
   // The index warning is present even on healthy hosts (it names every plugin
   // whose legacy/SQLite metadata differs), so it is a signal, not a verdict.
@@ -321,18 +559,113 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // Actionable disagreement between the two install layers.
   const installsPath = input.installsJson?.installPath ?? null;
   const indexPath = indexRecord?.installPath ?? null;
-  const pathConflict = Boolean(installsPath && indexPath && installsPath !== indexPath);
+  const pathConflict = namesFolder(installsPath ?? undefined) && namesFolder(indexPath ?? undefined) && installsPath !== indexPath;
   const versionLayerConflict = Boolean(
     installsJsonVersion && indexVersion && installsJsonVersion !== indexVersion,
   );
   const metadataConflict = pathConflict || versionLayerConflict;
 
-  // Effective running version: on-disk is ground truth, else the index record.
-  const effective = coerce(onDiskVersion) ?? coerce(indexVersion);
+  // The installed version, from ONE source chosen by what the selection says
+  // (Case r2 #1):
+  //   - verified selection ⇒ the version read out of that build. Unreadable ⇒
+  //     none: the disk scan's newest build and the record's version — even a
+  //     record naming that same folder (r6) — are claims, not readings, and
+  //     the expected pin is not a measurement at all. A claim below expected
+  //     is kept, to convict; it never acquits.
+  //   - missing selected build ⇒ nothing measured. Only main's claim (the
+  //     scan's build, else the record) below expected is kept, to convict;
+  //     otherwise no version is claimed (Case r5).
+  //   - selection named but unreadable (r7) ⇒ as a verified selection whose
+  //     version is unreadable: nothing measured, a claim may only convict.
+  //   - not checked ⇒ on-disk, else the index record — but never a record
+  //     whose own directory is gone: that says nothing about what would run.
+  // The live roster proves a load, never which version loaded.
+  const scanVersion = coerce(onDiskVersion);
+  let effective: string | null;
+  let installedVersionSource: ReconcileVerdict['installedVersionSource'];
+  let selectedVersionUnread = false;
+  let staleRecordBelowExpected = false;
+  if (indexSelectionVerified || indexSelectionUnreadable) {
+    effective = indexSelectionVerified ? coerce(input.selectedVersion) : null;
+    installedVersionSource = effective ? 'selected-build' : null;
+    // jarvis r3: the build's own version (package.json, else its own
+    // openclaw.plugin.json — r6) could not be read. No claim vouches for it —
+    // r6 (jarvis 6095709381): not even an install record naming THAT SAME
+    // folder, which is a record of an install, not a reading of the build.
+    // Case r5: a claim convicts only with main's precedence — the disk scan's
+    // build when there is one, else the install record (main:
+    // `coerce(onDiskVersion) ?? coerce(indexVersion)`) — and only when that
+    // one claim is below expected. Anything else ends in `version-unverified`
+    // (warn) at the end of this function — never a pass.
+    if (!effective) {
+      selectedVersionUnread = true;
+      const claim = unmeasuredClaim(scanVersion, coerce(indexVersion), coerce(expectedVersion));
+      if (claim) [effective, installedVersionSource] = claim;
+    }
+  } else if (indexPathMissing) {
+    // The copy the index points at holds no build, so nothing here measures
+    // what runs. Case r5: main's precedence decides which claim is weighed —
+    // the disk scan's build, else the install record — and only a claim below
+    // expected convicts (so a record of 4.0.0 with no build anywhere still
+    // fails, as on main). A current build on disk is not proof either: control
+    // reaches the missing-build rule below, which is never a pass.
+    const claim = unmeasuredClaim(scanVersion, coerce(indexVersion), coerce(expectedVersion));
+    [effective, installedVersionSource] = claim ?? [null, null];
+    // r6 (owner ruling, jarvis 6095709381 + Case 6095672540's conditions): a
+    // record below expected that main's precedence set aside (a build sits
+    // elsewhere on disk, not below expected) still FAILS — not as a measured
+    // regression, but on the STALE INDEX RECORD itself. See rule 4b below.
+    // r7 (Sol 3a): only when the indexed folders hold no build.
+    // r8 (Sol): the record's folder is tri-state — a build, no build, or not
+    // read. A build there is a measured copy (not the selected one): below
+    // expected it convicts as a regression of that copy, running version
+    // unknown; at or above expected (or its version unreadable) it convicts
+    // nothing and the empty selection still blocks a pass (the missing-build
+    // rule at the end). A folder that could not be read is not empty: the
+    // stale-record rule needs every indexed folder confirmed empty.
+    // r9 (Sol): confirmed means the check said `false`. A folder the record
+    // names whose check returned null — relative, unresolvable, permission —
+    // was not checked, flagged or not; only a record naming no folder has
+    // nothing to check.
+    const recordFolderConfirmedEmpty =
+      input.indexInstallPathExists === false ||
+      (input.indexInstallPathExists == null &&
+        input.indexInstallPathUnreadable !== true &&
+        !namesFolder(indexRecord?.installPath));
+    // Likewise the selected rootDir: stale (`false`), or named nowhere.
+    const selectedFolderConfirmedEmpty =
+      indexSelectionStale ||
+      !namesFolder(index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir);
+    const rec = coerce(indexVersion);
+    const exp = coerce(expectedVersion);
+    const atRecord = input.indexInstallPathExists === true ? coerce(input.recordPathVersion) : null;
+    if (!claim && atRecord && exp && semver.lt(atRecord, exp)) {
+      [effective, installedVersionSource] = [atRecord, 'record-path-build'];
+    }
+    staleRecordBelowExpected =
+      !claim &&
+      recordFolderConfirmedEmpty &&
+      selectedFolderConfirmedEmpty &&
+      Boolean(rec && exp && semver.lt(rec, exp));
+  } else {
+    effective = scanVersion ?? (indexRecordPathGone ? null : coerce(indexVersion));
+    installedVersionSource = scanVersion ? 'disk' : effective ? 'index-record' : null;
+  }
   const expected = coerce(expectedVersion);
   const regressed = Boolean(effective && expected && semver.lt(effective, expected));
+  const versionLabel =
+    (selectedVersionUnread ? "the build OpenClaw selected has no readable version, and " : '') +
+    (indexPathMissing ? "the copy OpenClaw's install index points at holds no plugin build, and " : '') +
+    (installedVersionSource === 'selected-build'
+      ? `the build OpenClaw selected is v${effective}`
+      : installedVersionSource === 'disk'
+        ? `the build on disk is v${effective}`
+        : installedVersionSource === 'record-path-build'
+          ? `the build in the folder OpenClaw's install record names (${safeForReason(indexRecord?.installPath)}) is v${effective}`
+          : `OpenClaw's install record says v${effective}`);
 
   const indexReadable = index != null;
+  const indexUnreadable = index == null && input.indexUnreadable === true;
   // Optional on the input so every pre-existing fixture keeps its meaning: a
   // caller that says nothing about readability is one that read the config.
   const configReadable = config.readable !== false;
@@ -352,6 +685,10 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     installsJsonVersion,
     onDiskVersion,
     expectedVersion,
+    indexUnreadable,
+    indexPathMissing: false,
+    installedVersion: effective,
+    installedVersionSource,
   };
 
   // ── Priority order: most severe first ────────────────────────────────────
@@ -370,6 +707,29 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     return { ...base, state: 'config-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
   }
 
+  // 0b. #260 (Sol finding 4): NOTHING found where we look, AND the install
+  //     index — the record most installs are known by — is there but could
+  //     not be read. Rule 1 below would call that a confirmed absence and, with
+  //     config enabling the plugin, FAIL and advise an install. That is a
+  //     verdict about a record we never read. Only independent evidence may
+  //     convict: a READ live roster that lacks the plugin (with the #142 race
+  //     guard). Otherwise it is the diagnostic gap it is — warn, no action.
+  if (!installed && enabledInConfig && indexUnreadable) {
+    if (loadedInLiveRoster === false && input.registrationSeenAfterBoot !== true) {
+      reasons.push('enabled:true in config but ABSENT from the RUNNING gateway boot roster — interceptor not loaded, host unprotected while status reports ON');
+      reasons.push("OpenClaw's plugin install index is present but could not be read, so whether a package is installed is unknown; the live roster is what convicts");
+      return { ...base, state: 'enabled-not-loaded', severity: 'fail', recommendedAction: 'reinstall-pinned', reasons };
+    }
+    if (loadedInLiveRoster === false) {
+      reasons.push('absent from the boot roster snapshot, but a plugin registration was sighted after that snapshot — registration races the boot line and CLI processes write identical lines, so load state is UNPROVEN; the consent-gated live canary is the arbiter');
+      reasons.push("OpenClaw's plugin install index is present but could not be read");
+      return { ...base, state: 'load-unproven', severity: 'warn', recommendedAction: 'none', reasons };
+    }
+    reasons.push("cannot read the loaded roster — OpenClaw's plugin install index is present but could not be read, and no build was found where ShieldCortex looks; whether the plugin is installed is UNKNOWN, not absent");
+    if (loadedInLiveRoster === true) reasons.push('the RUNNING gateway has the plugin loaded, so the box is protected right now');
+    return { ...base, state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
+  }
+
   // 1. Nothing installed anywhere.
   if (!installed) {
     // 1a. …but the config asks for it. This is NOT the benign "nothing is
@@ -379,7 +739,9 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     //     code returned not-installed/ok here and doctor printed
     //     "skipped (realtime plugin not installed)" over exactly that.
     if (enabledInConfig) {
-      reasons.push('openclaw.json ENABLES the realtime plugin but no package is installed on this host (no installs.json record, no index record, no on-disk build) — the gateway boots WITHOUT the interceptor while config reports it ON');
+      reasons.push(
+        'openclaw.json ENABLES the realtime plugin but no package is installed on this host (no installs.json record, no index record, no on-disk build) — the gateway boots WITHOUT the interceptor while config reports it ON',
+      );
       return { ...base, state: 'enabled-not-installed', severity: 'fail', recommendedAction: 'install', reasons };
     }
     reasons.push('plugin not installed on this host (no config, installs.json, index record, or on-disk build)');
@@ -479,15 +841,15 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   }
 
   // 3. Cannot read the loaded roster (SQLite index unreadable): a broken
-  //    better-sqlite3 binding, a locked DB, or a pre-2026.6.1 OpenClaw with no
-  //    `installed_plugin_index` table all return a null index. We literally
+  //    better-sqlite3 binding, a locked DB, or an OpenClaw state DB holding
+  //    the index in neither layout we know all return a null index. We literally
   //    cannot know whether the plugin is loaded — reporting the #74 fail-open
   //    here would be a FALSE "UNPROTECTED" on a healthy box (the very binding
   //    fault repair pass-1 exists to fix). Classify as a diagnostic gap (warn),
   //    NEVER as a security fail-open. Only reached when enabled + installed but
   //    the index is unreadable; a genuinely uninstalled plugin fell out at (1).
   if (enabledInConfig && !loadedInIndex && index == null && loadedInLiveRoster !== true) {
-    reasons.push('cannot read the loaded roster — the SQLite plugin install index is unreadable (broken better-sqlite3 binding, locked DB, or pre-2026.6.1 OpenClaw with no installed_plugin_index table); cannot confirm whether the interceptor is loaded');
+    reasons.push('cannot read the loaded roster — the SQLite plugin install index is unreadable (broken better-sqlite3 binding, locked DB, or an OpenClaw state DB that holds no install index in a layout this version knows); cannot confirm whether the interceptor is loaded');
     return { ...base, state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
   }
 
@@ -507,13 +869,61 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
 
   // 4. Version regression (e.g. reinstall regressed 4.47.2 → 4.25.4).
   if (regressed) {
-    reasons.push(`running version ${effective} is older than expected ${expected} — refuse downgrade, reinstall pinned`);
-    return { ...base, state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned', reasons };
+    reasons.push(`${versionLabel}, older than expected ${expected} — refuse downgrade, reinstall pinned`);
+    return {
+      ...base,
+      ...(selectedVersionUnread || indexPathMissing ? { versionUnverified: true } : {}),
+      state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned', reasons,
+    };
+  }
+
+  // #260 r15 (Jarvis 3): an index that is present but unreadable (bad JSON,
+  // an ill-typed or unknown-shape entry for ANY plugin) is UNKNOWN evidence —
+  // not "no index" and not "agrees". Every rule below would read its absence
+  // as agreement (no conflict, no duplicate, healthy), where the previous
+  // release read the same row and warned. Only the fails above may convict;
+  // otherwise warn, and plan no replacement and no prune off what we never read.
+  if (indexUnreadable) {
+    reasons.push("OpenClaw's plugin install index is present but could not be read, so whether its records agree with installs.json and the build on disk is UNKNOWN — this cannot be reported healthy");
+    if (loadedInLiveRoster === true) reasons.push('the RUNNING gateway has the plugin loaded, so the box is protected right now');
+    return { ...base, state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
+  }
+
+  // 4b. #260 r6 (owner ruling): the folders OpenClaw's index points at hold no
+  //     build, its install record names a version older than expected, and
+  //     main's precedence set that record aside only because a build sits
+  //     elsewhere on disk. Nothing shows which copy OpenClaw loaded — not even
+  //     a roster naming the plugin, which proves a load, not a copy — and this
+  //     is the security tier: a false green here is a silent downgrade. The
+  //     BASIS of this fail is the stale index record, not a measured version:
+  //     neither the record's version nor the disk build's is reported as
+  //     running. Repair reinstalls pinned to the expected version, which
+  //     rewrites the stale record (never acting on the record's version).
+  //     Rules 2/2a (a read roster that omits the plugin; the #142 race) ran
+  //     first and are unchanged. A rootDir verified as a real build never
+  //     reaches here: that build is measured and decides. Nor does a verified
+  //     build at the record's own path (r7): below expected it already failed
+  //     above as a measured copy (r8), otherwise the record is not shown
+  //     stale. Nor does a record path that could not be read (r8): unread is
+  //     not empty.
+  //     Rule 4 (index entry not enabled, roster unread) also runs first and
+  //     warns, as it pre-empts even a measured regression on main (r7, 3b).
+  if (staleRecordBelowExpected) {
+    const selectedRoot = index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir;
+    const where = safeForReason(indexSelectionStale ? selectedRoot : indexRecord?.installPath);
+    reasons.push(
+      `OpenClaw's install index points at ${where}, which holds no plugin build (stale index record), and that record names a version older than expected ${expected}; ` +
+        'a build found elsewhere on disk is not proven to be the copy OpenClaw loaded, so the running version is unknown — reinstall pinned to rewrite the stale record',
+    );
+    return {
+      ...base, indexPathMissing: true, installedVersion: null, installedVersionSource: null, versionUnverified: true,
+      state: 'stale-index-record', severity: 'fail', recommendedAction: 'reinstall-pinned', reasons,
+    };
   }
 
   // 5. installs.json ↔ SQLite index disagree (the precondition for a future drop).
   if (metadataConflict) {
-    if (pathConflict) reasons.push(`installs.json install path disagrees with the SQLite index (${installsPath} vs ${indexPath})`);
+    if (pathConflict) reasons.push(`installs.json install path disagrees with the SQLite index (${safeForReason(installsPath)} vs ${safeForReason(indexPath)})`);
     if (versionLayerConflict) reasons.push(`installs.json version ${installsJsonVersion} disagrees with index version ${indexVersion}`);
     return {
       ...base,
@@ -526,20 +936,113 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
 
   // 6. Duplicate project dirs accumulated on disk (authoritative layers agree).
   if (projectDirs.length > 1) {
-    reasons.push(`${projectDirs.length} plugin project dirs on disk — prune the stale duplicate so a future toggle cannot re-resolve to it`);
+    // Sol r2: the verdict does not say which dir is stale — it cannot, from
+    // names alone. Repair removes a dir only when it is shown to be an older
+    // or equal duplicate of the verified build OpenClaw selects
+    // (assessDuplicateProjectDirs); otherwise it removes nothing.
+    reasons.push(`${projectDirs.length} plugin project dirs on disk — a future toggle could re-resolve to the wrong one; repair removes only copies shown to be older or equal duplicates of the verified build OpenClaw selects`);
     return { ...base, state: 'duplicate-install', severity: 'warn', recommendedAction: 'dedupe-and-reload', reasons };
+  }
+
+  // #260: THE ONLY THING A MISSING SELECTED BUILD DOES. Every rule above ran
+  // as if the record were sound; control is here because none of them
+  // objected, and the next statement would be a pass. But the copy the index
+  // points at holds no build — its selected `rootDir`, or its record's path
+  // with no verified selection — so nothing on this host backs "installed and
+  // enabled at version X".
+  //   - The running gateway provably loaded it ⇒ load is proven, but WHICH
+  //     version loaded is not known and is not claimed — not even when a
+  //     build sits elsewhere on disk (Sol r2): the scan's newest build is not
+  //     proven to be the copy that process loaded. An unmeasured version is
+  //     never a pass, so this is `version-unverified` (warn), no action. A
+  //     claim below expected (main's precedence, Case r5) already failed
+  //     above, and so did a record below expected beside a build elsewhere on
+  //     disk — as the stale index record it is (rule 4b, r6), not as a
+  //     measured regression.
+  //   - Otherwise ⇒ neither a pass nor a conviction, whether or not a build
+  //     sits elsewhere on disk (Sol finding 3): a build on disk proves an
+  //     install, not that OpenClaw selected it.
+  if (indexPathMissing) {
+    const buildElsewhere = onDiskVersion != null || Boolean(input.onDiskInstallPath);
+    const selectedRoot = index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir;
+    const where = safeForReason(indexSelectionStale ? selectedRoot : indexRecord?.installPath);
+    const what = indexSelectionStale ? 'selects the plugin at' : 'records the plugin at';
+    // r8 (Sol): say so when the record's own folder could not be checked —
+    // it is neither a build nor shown empty.
+    // r9: flagged or not, a named folder whose check returned null.
+    if (input.indexInstallPathExists == null && (input.indexInstallPathUnreadable === true || namesFolder(indexRecord?.installPath))) {
+      reasons.push(
+        `the folder OpenClaw's install record names (${safeForReason(indexRecord?.installPath)}) could not be checked (${uncheckedBecause(indexRecord?.installPath)}), so whether it holds a build is unknown`,
+      );
+    }
+    if (loadedInLiveRoster === true) {
+      reasons.push(
+        input.liveLoadEvidence === 'gateway-pid-registration'
+          ? 'enabled, registration attributed to the RUNNING gateway PID after boot (hot-reload / post-boot load)'
+          : 'enabled, present on the running gateway boot roster',
+      );
+      reasons.push(
+        buildElsewhere
+          ? `load proven by the running gateway; the installed version could not be verified (OpenClaw's install index ${what} ${where}, which holds no plugin build; the build found elsewhere on disk is not proven to be the copy it loaded)`
+          : `load proven by the running gateway; the installed version could not be verified (OpenClaw's install index ${what} ${where}, which holds no plugin build)`,
+      );
+      return {
+        ...base, indexPathMissing: true, installedVersion: null, installedVersionSource: null, versionUnverified: true,
+        state: 'version-unverified', severity: 'warn', recommendedAction: 'none', reasons,
+      };
+    }
+    reasons.push(
+      buildElsewhere
+        ? `OpenClaw's install index ${what} ${where}, which holds no plugin build; a build exists elsewhere on disk, but nothing shows OpenClaw selected it and the running gateway did not prove the load — load state is unproven`
+        : `OpenClaw's install index ${what} ${where}, which holds no plugin build; no other build was found where ShieldCortex looks — it may be installed elsewhere; load state is unproven`,
+    );
+    return { ...base, indexPathMissing: true, state: 'load-unproven', severity: 'warn', recommendedAction: 'none', reasons };
   }
 
   // Say exactly which evidence we have. Claiming "loaded in roster" off the
   // install index alone is what made #103 a false positive.
   // #216: distinguish boot-snapshot proof from PID-attributed hot-reload proof.
+  // Case r2 #1: "versions agree" only when a version was measured; otherwise
+  // the verdict says it was not, and renderers print "version unverified".
+  // jarvis r3: the build OpenClaw selected is verified but its version could
+  // not be read, and nothing lower was claimed (that convicted above). A
+  // version check that cannot measure must not report a pass: warn, with load
+  // evidence stated as it is.
+  if (selectedVersionUnread) {
+    const selectedRoot = index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir;
+    reasons.push(
+      (indexSelectionUnreadable
+        ? `the copy OpenClaw selected (${safeForReason(selectedRoot)}) could not be ${typeof selectedRoot === 'string' && path.isAbsolute(selectedRoot) ? 'read' : 'checked'} (${uncheckedBecause(selectedRoot)}), so its version is not verified against expected ${expected ?? expectedVersion}; `
+        : `the build OpenClaw selected (${safeForReason(selectedRoot)}) is there, but its version could not be read (no readable version in its package.json or openclaw.plugin.json), so it is not verified against expected ${expected ?? expectedVersion}; `) +
+        (loadedInLiveRoster === true
+          ? 'the running gateway proves the load, not which version loaded'
+          : 'the running gateway boot roster could NOT be read, so the load is not proven either'),
+    );
+    return {
+      ...base, installedVersion: null, installedVersionSource: null, versionUnverified: true,
+      state: 'version-unverified', severity: 'warn', recommendedAction: 'none', reasons,
+    };
+  }
+
+  // r4c (owner ruling on jarvis r3): no layer recorded a version at all.
+  // Nothing was measured, so this is not a pass either.
+  const versionUnverified = effective == null;
+  const versionClause = versionUnverified
+    ? 'the installed version could not be verified'
+    : 'versions agree at the expected build';
   reasons.push(
     loadedInLiveRoster === true
       ? input.liveLoadEvidence === 'gateway-pid-registration'
-        ? 'enabled, registration attributed to the RUNNING gateway PID after boot (hot-reload / post-boot load), versions agree at the expected build'
-        : 'enabled, present on the running gateway boot roster, versions agree at the expected build'
-      : 'enabled and installed, versions agree at the expected build — but the running gateway boot roster could NOT be read, so the plugin is not proven loaded',
+        ? `enabled, registration attributed to the RUNNING gateway PID after boot (hot-reload / post-boot load), ${versionClause}`
+        : `enabled, present on the running gateway boot roster, ${versionClause}`
+      : `enabled and installed, ${versionClause} — but the running gateway boot roster could NOT be read, so the plugin is not proven loaded`,
   );
+  if (versionUnverified) {
+    return {
+      ...base, installedVersion: null, installedVersionSource: null, versionUnverified: true,
+      state: 'version-unverified', severity: 'warn', recommendedAction: 'none', reasons,
+    };
+  }
   return { ...base, state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons };
 }
 
@@ -616,7 +1119,7 @@ export function planReconcileActions(verdict: ReconcileVerdict, opts: PlanOption
       steps.push({
         kind: 'prune-duplicate-dirs',
         dirs: prune,
-        description: `prune ${prune.length} stale duplicate project dir(s) so a toggle cannot re-resolve to them`,
+        description: `prune ${prune.length} duplicate project dir(s) holding an older or equal copy of the verified selected build, so a toggle cannot re-resolve to them`,
       });
     }
   };
@@ -695,20 +1198,233 @@ function openClawSqlitePath(home: string): string {
   return path.join(home, '.openclaw', 'state', 'openclaw.sqlite');
 }
 
-function safeParse<T>(json: string | null | undefined, fallback: T): T {
-  if (!json || typeof json !== 'string') return fallback;
-  try {
-    return JSON.parse(json) as T;
-  } catch {
-    return fallback;
-  }
+/** Where OpenClaw keeps the install index inside `openclaw.sqlite`. */
+const MACHINE_STATE_TABLE = 'config_machine_state';
+const MACHINE_STATE_INDEX_KEY = 'plugins.installedIndex';
+const LEGACY_INDEX_TABLE = 'installed_plugin_index';
+
+/**
+ * The most stored index JSON either reader will parse (#260, Case review).
+ * OpenClaw 2026.11.10's own index reader (`safeParseJson(row.value_json)`)
+ * applies no cap that we could find, so this is a plain robustness bound: a
+ * real index for a few dozen plugins is tens of KiB. A row over it is
+ * "could not read", never "absent" and never an empty index. Measured in
+ * SQLite (`length(CAST(... AS BLOB))`), so an oversized row is never pulled
+ * into this process at all.
+ */
+export const INSTALL_INDEX_MAX_JSON_BYTES = 16 * 1024 * 1024;
+
+/**
+ * The install index row as found, before either reader decides what a bad one
+ * means. `fault` says why the row as a whole cannot be used (the stored JSON
+ * does not parse, it is over the size cap, or the `{ revision, index }`
+ * envelope is wrong); null when it parsed. Legacy only: a single JSON column
+ * that did not parse is `undefined` with `fault` set, so the lenient diagnosis
+ * reader can keep reading it as empty, as it always has.
+ */
+interface LocatedIndexRow {
+  layout: 'machine-state' | 'legacy';
+  fault: string | null;
+  /** Legacy only: the fault is one unparseable column, not an oversized row. */
+  columnFault?: boolean;
+  installRecords: unknown;
+  plugins: unknown;
+  warning: string | null;
+  generatedAtMs: number | undefined;
+}
+
+function tableExists(db: import('better-sqlite3').Database, name: string): boolean {
+  return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
 }
 
 /**
- * Read the latest `installed_plugin_index` row from OpenClaw's shared SQLite
- * state and parse the JSON columns we reconcile against. Opens READ-ONLY and
- * best-effort — returns null if the DB, table, or better-sqlite3 is unavailable
- * so callers degrade to the installs.json/on-disk layers rather than throwing.
+ * Find the install index in an open (read-only) OpenClaw state DB — the one
+ * place that knows both layouts, so the two public readers cannot disagree on
+ * where the index lives.
+ *
+ * OpenClaw 2026.11.x migrates the `installed_plugin_index` table into a
+ * `config_machine_state` row (`plugins.installedIndex`, JSON `{ revision,
+ * index }`) and DROPS the old table. A reader that only knows the old table
+ * sees a healthy migrated host as "no index" (#260).
+ *
+ * When BOTH exist, the one with the later `generatedAtMs` wins (ties go to the
+ * new row, which is the one current OpenClaw reads). Both can exist after a
+ * downgrade to 2026.10.x: that version writes the legacy table again and
+ * leaves the 2026.11.x row behind, so "the new row always wins" would read a
+ * stale index (Case review). When the new row's own timestamp cannot be read
+ * (bad JSON, over the cap, wrong envelope) its freshness is unknown and it
+ * still wins — as an unreadable row, never papered over by the legacy table.
+ *
+ * Returns null when neither layout holds a row. Throws only what SQLite throws.
+ */
+function locateInstallIndexRow(db: import('better-sqlite3').Database): LocatedIndexRow | null {
+  // Both probes in ONE read transaction: a migration that commits between
+  // them would otherwise show us neither copy, and "absent" is an answer a
+  // forced install acts on.
+  return db.transaction(() => locateInstallIndexRowInSnapshot(db))();
+}
+
+function locateInstallIndexRowInSnapshot(db: import('better-sqlite3').Database): LocatedIndexRow | null {
+  const machine = tableExists(db, MACHINE_STATE_TABLE) ? readMachineStateIndexRow(db) : null;
+  const legacy = tableExists(db, LEGACY_INDEX_TABLE) ? readLegacyIndexRow(db) : null;
+  if (machine && legacy) {
+    const fresher =
+      machine.fault === null &&
+      typeof machine.generatedAtMs === 'number' &&
+      typeof legacy.generatedAtMs === 'number' &&
+      legacy.generatedAtMs > machine.generatedAtMs;
+    return fresher ? legacy : machine;
+  }
+  return machine ?? legacy;
+}
+
+function readMachineStateIndexRow(db: import('better-sqlite3').Database): LocatedIndexRow | null {
+  const row = db
+    .prepare(
+      `SELECT length(CAST(value_json AS BLOB)) AS bytes, ` +
+        `CASE WHEN length(CAST(value_json AS BLOB)) > ? THEN NULL ELSE value_json END AS value_json ` +
+        `FROM ${MACHINE_STATE_TABLE} WHERE state_key = ?`,
+    )
+    .get(INSTALL_INDEX_MAX_JSON_BYTES, MACHINE_STATE_INDEX_KEY) as { bytes: number | null; value_json: unknown } | undefined;
+  if (!row) return null;
+  const bad = (fault: string): LocatedIndexRow => ({
+    layout: 'machine-state', fault, installRecords: undefined, plugins: undefined, warning: null, generatedAtMs: undefined,
+  });
+  if (typeof row.bytes === 'number' && row.bytes > INSTALL_INDEX_MAX_JSON_BYTES) {
+    return bad(`the install index row is ${row.bytes} bytes, over the ${INSTALL_INDEX_MAX_JSON_BYTES}-byte cap`);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(String(row.value_json));
+  } catch {
+    return bad('the install index row is not valid JSON');
+  }
+  // OpenClaw 2026.11.7+ (`parseCachedInstalledPluginIndex`) reads the index
+  // only out of an object with a NUMERIC `revision`; anything else it treats
+  // as no usable index. So does this.
+  if (!isPlainObject(value) || typeof value.revision !== 'number') {
+    return bad('the install index row has no numeric revision');
+  }
+  if (!isPlainObject(value.index)) return bad('the install index row has no index object');
+  const idx = value.index;
+  return {
+    layout: 'machine-state',
+    fault: null,
+    installRecords: idx.installRecords,
+    plugins: idx.plugins,
+    warning: typeof idx.warning === 'string' ? idx.warning : null,
+    generatedAtMs: typeof idx.generatedAtMs === 'number' ? idx.generatedAtMs : undefined,
+  };
+}
+
+function readLegacyIndexRow(db: import('better-sqlite3').Database): LocatedIndexRow | null {
+  const cap = (col: string): string =>
+    `CASE WHEN length(CAST(${col} AS BLOB)) > @cap THEN NULL ELSE ${col} END AS ${col}`;
+  const legacy = db
+    .prepare(
+      // Case r2 (non-blocking): `a + b` is NULL when either column is SQL
+      // NULL, which hid an oversized other column (its CASE below cut it to
+      // NULL, and the lenient reader read that as an empty index). Each
+      // column counts as 0 bytes when NULL; the sum is never NULL.
+      `SELECT coalesce(length(CAST(install_records_json AS BLOB)), 0) + coalesce(length(CAST(plugins_json AS BLOB)), 0) AS bytes, ` +
+        `${cap('install_records_json')}, ${cap('plugins_json')}, warning, generated_at_ms ` +
+        `FROM ${LEGACY_INDEX_TABLE} ORDER BY generated_at_ms DESC LIMIT 1`,
+    )
+    .get({ cap: INSTALL_INDEX_MAX_JSON_BYTES }) as
+    | { bytes: number | null; install_records_json: unknown; plugins_json: unknown; warning: string | null; generated_at_ms: number }
+    | undefined;
+  if (!legacy) return null;
+  const generatedAtMs = typeof legacy.generated_at_ms === 'number' ? legacy.generated_at_ms : undefined;
+  if (typeof legacy.bytes === 'number' && legacy.bytes > INSTALL_INDEX_MAX_JSON_BYTES) {
+    return {
+      layout: 'legacy',
+      fault: `the install index row is ${legacy.bytes} bytes, over the ${INSTALL_INDEX_MAX_JSON_BYTES}-byte cap`,
+      installRecords: undefined,
+      plugins: undefined,
+      warning: null,
+      generatedAtMs,
+    };
+  }
+  const parse = (raw: unknown): { ok: boolean; value: unknown } => {
+    try {
+      return { ok: true, value: JSON.parse(String(raw)) };
+    } catch {
+      return { ok: false, value: undefined };
+    }
+  };
+  const installRecords = parse(legacy.install_records_json);
+  const plugins = parse(legacy.plugins_json);
+  const columnsOk = installRecords.ok && plugins.ok;
+  return {
+    layout: 'legacy',
+    fault: columnsOk ? null : 'the install index row is not valid JSON',
+    columnFault: !columnsOk,
+    installRecords: installRecords.value,
+    plugins: plugins.value,
+    warning: legacy.warning ?? null,
+    generatedAtMs,
+  };
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/**
+ * The install-record fields our readers select a copy or a version from. Each
+ * is `string().optional()` in OpenClaw's own record schema (`source` is a
+ * string enum there), so a present non-string value is a record OpenClaw
+ * itself refuses — and a record we would otherwise read as "names no path".
+ */
+const INSTALL_RECORD_STRING_FIELDS = ['source', 'sourcePath', 'installPath', 'version', 'resolvedVersion'] as const;
+
+/**
+ * The one shape check both readers and both layouts go through. Like OpenClaw
+ * (`parsePluginInstallRecordMap`), ONE bad entry rejects the whole index: a
+ * null record for a plugin is a record we could not read, not "no record".
+ * Returns why the shape is wrong, or null when it is fine.
+ *
+ * Plugin-list entries carry the SELECTION evidence (`rootDir` names the copy
+ * OpenClaw chose, `enabled` whether it is on). OpenClaw 2026.11.7+'s
+ * `InstalledPluginIndexRecordSchema` requires `pluginId: string`,
+ * `rootDir: string` and `enabled: boolean` on every entry and discards the
+ * whole index otherwise (#260, Sol finding 1) — so in the `config_machine_state`
+ * layout (`strict`) they are required here too. A legacy-table row (OpenClaw
+ * <= 2026.10.x) is held to the types when the fields are present; it is not
+ * failed for omitting them, which keeps the pre-2026.11 behaviour of reading
+ * it.
+ */
+function indexShapeFault(installRecords: unknown, plugins: unknown, strict: boolean): string | null {
+  if (!isPlainObject(installRecords) || !Array.isArray(plugins)) return 'the install index row has an unexpected shape';
+  for (const [id, record] of Object.entries(installRecords)) {
+    if (!isPlainObject(record)) return `the install record for ${JSON.stringify(id)} is not an object`;
+    for (const field of INSTALL_RECORD_STRING_FIELDS) {
+      if (record[field] !== undefined && typeof record[field] !== 'string') {
+        return `the install record for ${JSON.stringify(id)} has a non-string ${field}`;
+      }
+    }
+  }
+  for (const p of plugins) {
+    if (!isPlainObject(p) || typeof p.pluginId !== 'string') {
+      return 'a plugins entry is not an object with a string pluginId';
+    }
+    const who = JSON.stringify(p.pluginId);
+    if (strict ? typeof p.rootDir !== 'string' : p.rootDir !== undefined && typeof p.rootDir !== 'string') {
+      return `the plugins entry for ${who} has no string rootDir`;
+    }
+    if (strict ? typeof p.enabled !== 'boolean' : p.enabled !== undefined && typeof p.enabled !== 'boolean') {
+      return `the plugins entry for ${who} has no boolean enabled`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Read OpenClaw's plugin install index from its shared SQLite state (either
+ * layout — see {@link locateInstallIndexRow}) and parse the parts we reconcile
+ * against. Opens READ-ONLY and best-effort — returns null if the DB, the index,
+ * or better-sqlite3 is unavailable so callers degrade to the
+ * installs.json/on-disk layers rather than throwing.
  *
  * Read-only and path-scoped to the supplied `home`, so it is safe to exercise
  * against a temp fixture DB in tests without ever touching live `~/.openclaw`.
@@ -724,20 +1440,22 @@ export function readPluginInstallIndex(home: string): PluginIndexRow | null {
     const require = createRequireSafe();
     const Database = require('better-sqlite3') as typeof import('better-sqlite3');
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    const row = db
-      .prepare(
-        'SELECT install_records_json, plugins_json, warning, generated_at_ms ' +
-          'FROM installed_plugin_index ORDER BY generated_at_ms DESC LIMIT 1',
-      )
-      .get() as
-      | { install_records_json: string; plugins_json: string; warning: string | null; generated_at_ms: number }
-      | undefined;
-    if (!row) return null;
+    const found = locateInstallIndexRow(db);
+    if (!found) return null;
+    // A row we cannot make sense of is "could not read", not an empty index.
+    // Legacy table only: ONE column that does not parse (or holds a falsy
+    // value) still reads as empty, as it always has. What DID parse is held to
+    // the same shape check — a null entry used to reach the reconciler.
+    const lenient = found.layout === 'legacy';
+    if (found.fault !== null && !(lenient && found.columnFault)) return null;
+    const installRecords = lenient ? found.installRecords || {} : found.installRecords;
+    const plugins = lenient ? found.plugins || [] : found.plugins;
+    if (indexShapeFault(installRecords, plugins, !lenient)) return null;
     return {
-      installRecords: safeParse<Record<string, IndexInstallRecord>>(row.install_records_json, {}),
-      plugins: safeParse<IndexPluginEntry[]>(row.plugins_json, []),
-      warning: row.warning ?? null,
-      generatedAtMs: row.generated_at_ms,
+      installRecords: installRecords as Record<string, IndexInstallRecord>,
+      plugins: plugins as IndexPluginEntry[],
+      warning: found.warning,
+      generatedAtMs: found.generatedAtMs,
     };
   } catch {
     return null;
@@ -755,8 +1473,9 @@ export function readPluginInstallIndex(home: string): PluginIndexRow | null {
  * round 2). `readPluginInstallIndex` above folds both into null, which is right
  * for a diagnosis but wrong for a decision to overwrite something: a forced
  * install must not read "I could not open OpenClaw's index" as "OpenClaw
- * recorded nothing". Absent = no DB file, no `installed_plugin_index` table, or
- * no row. Unreadable = the DB, the binding or a JSON column could not be read.
+ * recorded nothing". Absent = no DB file, or no index row in EITHER layout
+ * (#260: a migrated 2026.11.x host has no legacy table and is not absent).
+ * Unreadable = the DB, the binding or the stored JSON could not be read.
  */
 export type PluginInstallIndexState =
   | { state: 'absent' }
@@ -776,37 +1495,18 @@ export function readPluginInstallIndexState(home: string): PluginInstallIndexSta
     const require = createRequireSafe();
     const Database = require('better-sqlite3') as typeof import('better-sqlite3');
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    const table = db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'installed_plugin_index'")
-      .get();
-    if (!table) return { state: 'absent' };
-    const row = db
-      .prepare(
-        'SELECT install_records_json, plugins_json, warning, generated_at_ms ' +
-          'FROM installed_plugin_index ORDER BY generated_at_ms DESC LIMIT 1',
-      )
-      .get() as
-      | { install_records_json: unknown; plugins_json: unknown; warning: string | null; generated_at_ms: number }
-      | undefined;
-    if (!row) return { state: 'absent' };
-    let installRecords: unknown;
-    let plugins: unknown;
-    try {
-      installRecords = JSON.parse(String(row.install_records_json));
-      plugins = JSON.parse(String(row.plugins_json));
-    } catch {
-      return { state: 'unreadable', why: 'the install index row is not valid JSON' };
-    }
-    if (!installRecords || typeof installRecords !== 'object' || Array.isArray(installRecords) || !Array.isArray(plugins)) {
-      return { state: 'unreadable', why: 'the install index row has an unexpected shape' };
-    }
+    const found = locateInstallIndexRow(db);
+    if (!found) return { state: 'absent' };
+    if (found.fault !== null) return { state: 'unreadable', why: found.fault };
+    const fault = indexShapeFault(found.installRecords, found.plugins, found.layout === 'machine-state');
+    if (fault) return { state: 'unreadable', why: fault };
     return {
       state: 'ok',
       row: {
-        installRecords: installRecords as Record<string, IndexInstallRecord>,
-        plugins: plugins as IndexPluginEntry[],
-        warning: row.warning ?? null,
-        generatedAtMs: row.generated_at_ms,
+        installRecords: found.installRecords as Record<string, IndexInstallRecord>,
+        plugins: found.plugins as IndexPluginEntry[],
+        warning: found.warning,
+        generatedAtMs: found.generatedAtMs,
       },
     };
   } catch (err) {
@@ -829,8 +1529,17 @@ function createRequireSafe(): NodeRequire {
 export interface GatherOptions {
   pluginId?: string;
   expectedVersion: string;
-  /** Injectable index reader (defaults to the live SQLite read). */
+  /**
+   * Injectable index reader. When set, it is used as-is and "unreadable"
+   * cannot be told from "absent" (`indexUnreadable` stays unset).
+   */
   readIndex?: (home: string) => PluginIndexRow | null;
+  /**
+   * Injectable index-state reader (defaults to {@link readPluginInstallIndexState},
+   * the live SQLite read). Used when `readIndex` is not set; it keeps a
+   * present-but-unreadable index apart from no index (#260, Sol finding 4).
+   */
+  readIndexState?: (home: string) => PluginInstallIndexState;
   /**
    * Injectable live-roster reader (defaults to reading the gateway's newest
    * `http server listening` boot line). Returns null when it cannot be proven.
@@ -915,6 +1624,163 @@ function readInstallsJsonRecord(home: string, pluginId: string): InstallsJsonRec
   }
 }
 
+/**
+ * Does `dir` hold a REAL build of the plugin (#260, Sol finding 3)? Not "does
+ * a marker path exist": a directory named `package.json`, or the
+ * `package.json` an uninstall left behind with nothing else, is not something
+ * OpenClaw can load. A build is:
+ *
+ *  - a directory, holding
+ *  - an `openclaw.plugin.json` regular file that parses to an object whose
+ *    `id` is this plugin (the manifest OpenClaw loads), and
+ *  - an entry point regular file: package.json `main` (the npm package's
+ *    `./dist/index.js`), else `index.js` (the trusted-local copy), else
+ *    `dist/index.js`.
+ *
+ * `false` = looked, and there is no build there (gone, ENOTDIR, empty, only
+ * metadata, a manifest for something else, no entry point). `null` = not
+ * checked: no path, a relative one, or a read that failed some other way
+ * (EACCES, EIO) — a measurement we do not have, never a verdict either way.
+ */
+function verifiedPluginBuildAt(rawDir: unknown, pluginId: string): boolean | null {
+  const field = indexPathField(rawDir);
+  if (field.kind !== 'path') return null;
+  // Case r2 (non-blocking): normalise first. A recorded path with `..`, `//`
+  // or `.` segments made every resolved entry point fail the containment
+  // check below (`path.resolve` normalises them, the raw prefix did not), so
+  // a real build read as "no build" — a false `load-unproven`.
+  const dir = path.resolve(field.path);
+  const gone = (err: unknown): boolean => {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === 'ENOENT' || code === 'ENOTDIR';
+  };
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(dir);
+  } catch (err) {
+    return gone(err) ? false : null;
+  }
+  if (!st.isDirectory()) return false;
+
+  const readObject = (file: string): Record<string, unknown> | 'missing' | 'invalid' | null => {
+    let raw: string;
+    try {
+      if (!fs.statSync(file).isFile()) return 'invalid';
+      raw = fs.readFileSync(file, 'utf-8');
+    } catch (err) {
+      return gone(err) ? 'missing' : null;
+    }
+    try {
+      const v = JSON.parse(raw) as unknown;
+      return isPlainObject(v) ? v : 'invalid';
+    } catch {
+      return 'invalid';
+    }
+  };
+  const manifest = readObject(path.join(dir, 'openclaw.plugin.json'));
+  if (manifest === null) return null;
+  if (manifest === 'missing' || manifest === 'invalid' || manifest.id !== pluginId) return false;
+
+  // r7 (Sol): a package.json that cannot be read (EACCES) is handled like a
+  // corrupt one — the default entry points still decide, so a real build is
+  // verified and its version read (manifest fall-through) — except that "no
+  // entry found" is not "no build": its `main` is unknown, so that is null.
+  const pkg = readObject(path.join(dir, 'package.json'));
+  const entries: string[] = [];
+  if (isPlainObject(pkg) && typeof pkg.main === 'string' && pkg.main.trim()) entries.push(pkg.main.trim());
+  entries.push('index.js', path.join('dist', 'index.js'));
+  let unchecked = pkg === null;
+  for (const rel of entries) {
+    const file = path.resolve(dir, rel);
+    // An entry point outside the build directory is not this build's.
+    if (file !== dir && !file.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep)) continue;
+    try {
+      if (fs.statSync(file).isFile()) return true;
+    } catch (err) {
+      if (!gone(err)) unchecked = true;
+    }
+  }
+  return unchecked ? null : false;
+}
+
+/**
+ * The exact version of the plugin build in `dir` (#260, Case r2 #1): its
+ * package.json `version` (the npm package, a linked checkout), else its
+ * openclaw.plugin.json `version` (a trusted-local copy writes a version-less
+ * package.json and versions the manifest). The first of the two that carries
+ * a `version` string decides; one that is not an exact version, or a file
+ * that cannot be read, is null — never a guess.
+ *
+ * `manifestFallback` (#260 r6, jarvis 6095709381): for the version CHECK of
+ * the selected build, a package.json that yields no exact version (unreadable,
+ * not JSON, "latest") does not stop the read — the build's own
+ * openclaw.plugin.json is still a reading of that same build, so an older
+ * manifest is a measured regression. The prune planner keeps the strict read:
+ * it deletes on the version it reads, and a damaged package.json refuses.
+ */
+function readExactBuildVersion(dir: unknown, manifestFallback = false): string | null {
+  const field = indexPathField(dir);
+  if (field.kind !== 'path') return null;
+  const v = readBuildVersionState(field.path, manifestFallback);
+  return v.state === 'ok' ? v.version : null;
+}
+
+type BuildVersionState =
+  | { state: 'ok'; version: string }
+  /** Neither file is there: no build, nothing to lose. */
+  | { state: 'none' }
+  | { state: 'unreadable'; why: string };
+
+/** {@link readExactBuildVersion}, keeping "nothing there" apart from "could not read it". */
+function readBuildVersionState(dir: string, manifestFallback = false): BuildVersionState {
+  let sawFile = false;
+  // r6: with `manifestFallback`, a package.json that gives no exact version
+  // is remembered and the manifest is still read; its reason is kept.
+  let skipped: string | null = null;
+  for (const file of ['package.json', 'openclaw.plugin.json']) {
+    let why: string | null = null;
+    let raw: string | null = null;
+    try {
+      raw = fs.readFileSync(path.join(dir, file), 'utf-8');
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+      why = `cannot read ${file} (${code ?? 'error'})`;
+    }
+    sawFile = true;
+    if (raw !== null) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        why = `${file} is not valid JSON`;
+      }
+      if (!why && isPlainObject(parsed) && typeof parsed.version === 'string') {
+        const v = semver.valid(parsed.version.trim());
+        if (v) return { state: 'ok', version: v };
+        why = `${file} has no exact version`;
+      }
+    }
+    if (why) {
+      if (!(manifestFallback && file === 'package.json')) return { state: 'unreadable', why: skipped ?? why };
+      skipped = why;
+    }
+  }
+  if (skipped) return { state: 'unreadable', why: skipped };
+  return sawFile ? { state: 'unreadable', why: 'no version in package.json or openclaw.plugin.json' } : { state: 'none' };
+}
+
+/** {@link verifiedPluginBuildAt} for the path the index RECORD names. */
+function indexInstallPathOnDisk(index: PluginIndexRow | null, pluginId: string): boolean | null {
+  return verifiedPluginBuildAt(index?.installRecords?.[pluginId]?.installPath, pluginId);
+}
+
+/** {@link verifiedPluginBuildAt} for the copy the index's plugins entry SELECTED (`rootDir`). */
+function indexRootDirOnDisk(index: PluginIndexRow | null, pluginId: string): boolean | null {
+  const entry = index?.plugins?.find((p) => p?.pluginId === pluginId);
+  return verifiedPluginBuildAt(entry?.rootDir, pluginId);
+}
+
 function scanProjectDirs(home: string, pluginId: string): string[] {
   try {
     return fs
@@ -933,7 +1799,6 @@ function scanProjectDirs(home: string, pluginId: string): string[] {
  */
 export function gatherReconcileInput(home: string, options: GatherOptions): ReconcileInput {
   const pluginId = options.pluginId ?? REALTIME_PLUGIN_ID;
-  const readIndex = options.readIndex ?? ((h: string) => readPluginInstallIndex(h));
   // The default roster read touches the host's real gateway log dir (/tmp/openclaw),
   // which no `home` override can redirect — so it must never fire under Jest, or a
   // test would silently inherit THIS box's roster. Tests inject readLiveRoster.
@@ -985,13 +1850,58 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
   liveRoster = classified.liveRoster;
   const liveLoadEvidence = classified.liveLoadEvidence;
   const registrationSeenAfterBoot = classified.registrationSeenAfterBoot;
+  // #260 (Sol finding 4): the state reader, so a present-but-unreadable index
+  // reaches the reconciler as exactly that. It is also the strict reader: a
+  // legacy column that does not parse is unreadable here, where the lenient
+  // `readPluginInstallIndex` still reads it as empty.
+  let index: PluginIndexRow | null;
+  let indexUnreadable: boolean | undefined;
+  if (options.readIndex) {
+    index = options.readIndex(home);
+  } else {
+    const st = (options.readIndexState ?? readPluginInstallIndexState)(home);
+    index = st.state === 'ok' ? st.row : null;
+    indexUnreadable = st.state === 'unreadable';
+  }
 
+  const indexRootDirExists = indexRootDirOnDisk(index, pluginId);
+  const selectedRootDir = index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir;
+  const indexInstallPathExists = indexInstallPathOnDisk(index, pluginId);
+  const recordInstallPath = index?.installRecords?.[pluginId]?.installPath;
   return {
     pluginId,
     expectedVersion: options.expectedVersion,
     config: readConfigEnable(home, pluginId),
     installsJson: readInstallsJsonRecord(home, pluginId),
-    index: readIndex(home),
+    index,
+    ...(indexUnreadable !== undefined ? { indexUnreadable } : {}),
+    indexInstallPathExists,
+    // r8 (Sol): the record's folder, read the way the selected one is — its
+    // build's own version when it is a verified build, and "could not be
+    // checked" kept apart from "holds no build".
+    ...(indexInstallPathExists === true
+      ? { recordPathVersion: readExactBuildVersion(recordInstallPath, true) }
+      : {}),
+    // r9 (Sol): not only an absolute path the check could not read — any
+    // named folder whose check returned null (a relative path is never
+    // resolved here) is unchecked, never "holds no build".
+    ...(indexInstallPathExists === null && namesFolder(recordInstallPath)
+      ? { indexInstallPathUnreadable: true }
+      : {}),
+    indexRootDirExists,
+    // Case r2 #1: the selected build's OWN version, read out of `rootDir` —
+    // only when that is a verified build. The scan below does not look there
+    // (a linked or path install sits outside it), and its newest build is not
+    // necessarily the copy OpenClaw selected.
+    ...(indexRootDirExists === true
+      ? { selectedVersion: readExactBuildVersion(selectedRootDir, true) }
+      : {}),
+    // r7 (Sol): a named rootDir whose check failed is not "not named".
+    // r9: likewise a named rootDir that is relative — an unmeasured selected
+    // copy, not "no selection".
+    ...(indexRootDirExists === null && namesFolder(selectedRootDir)
+      ? { indexRootDirUnreadable: true }
+      : {}),
     onDiskVersion: readInstalledRealtimePluginVersion(home),
     // #226: the trusted-local-copy build, only when it is a REAL one (index.js
     // + openclaw.plugin.json). Kept separate from `onDiskVersion` so a valid
@@ -1087,6 +1997,194 @@ export function projectDirNameFromPath(p: string | null | undefined): string | n
  * path — used by the reconciler to know which duplicate dirs are prunable. */
 export function canonicalProjectDir(home: string): string | null {
   return projectDirNameFromPath(resolveRealtimePluginInstallPath(home));
+}
+
+/**
+ * Which duplicate `~/.openclaw/npm/projects/*` dirs a repair may remove —
+ * HOST-SAFETY CRITICAL (#74 finding 4; #260 Sol r2). The one rule: never
+ * remove the only intact copy. So a dir is pruned only when ALL of these hold,
+ * and otherwise NOTHING is pruned and `refused` says why:
+ *
+ *  - the install index is readable and names the kept dir unambiguously: its
+ *    selection (`rootDir`) and its install record (`installPath`) do not point
+ *    at different places;
+ *  - the kept dir is bound to the build PHYSICALLY (Case 6095369958): the
+ *    selected path's real location sits inside the real projects dir, its
+ *    first segment there is the kept dir, the raw index path names that same
+ *    dir, and both index paths (when both are recorded) resolve to it. A
+ *    selection outside the projects dir cannot be bound, so it refuses;
+ *  - the kept copy, at that real location, is a VERIFIED build (manifest
+ *    naming the plugin + an entry point) — a stale selection may be the
+ *    leftover, and another dir the only intact copy;
+ *  - the kept build's exact version can be read;
+ *  - every other dir is safe to lose: it holds no copy of the package at all,
+ *    or a copy whose exact version reads as older than or equal to the kept
+ *    one. A newer copy, or one whose version cannot be read, is never removed;
+ *  - no other dir is, contains, or sits inside the REAL location of the kept
+ *    build or its project dir (a symlinked kept path resolves into it), and
+ *    every one of those real locations can be resolved.
+ *
+ * Reads only; removes nothing. `packageName` names the package's directory
+ * under each project's `node_modules`.
+ */
+export interface DuplicatePruneAssessment {
+  /** Every project dir name matching the plugin. */
+  dirs: string[];
+  /** The dir kept: the one holding the verified build the index selects. */
+  keep: string | null;
+  keepVersion: string | null;
+  /** Dirs safe to remove. Empty whenever `refused` is set. */
+  prune: string[];
+  refused?: string;
+}
+
+export function assessDuplicateProjectDirs(
+  home: string,
+  index: PluginIndexRow | null,
+  pluginId: string = REALTIME_PLUGIN_ID,
+  packageName: string = REALTIME_PLUGIN_PACKAGE,
+): DuplicatePruneAssessment {
+  const projects = path.join(home, '.openclaw', 'npm', 'projects');
+  let dirs: string[];
+  try {
+    dirs = fs.readdirSync(projects).filter((d) => d.includes(pluginId)).sort();
+  } catch {
+    return { dirs: [], keep: null, keepVersion: null, prune: [] };
+  }
+  const nothing = { keep: null, keepVersion: null, prune: [] as string[] };
+  if (dirs.length <= 1) return { dirs, ...nothing };
+  const refuse = (why: string, kept: Partial<DuplicatePruneAssessment> = {}): DuplicatePruneAssessment => ({
+    dirs, ...nothing, ...kept, prune: [],
+    refused: `refusing to prune ${dirs.length} duplicate project dir(s): ${why}. Nothing was removed — resolve manually.`,
+  });
+
+  if (!index) return refuse("OpenClaw's install index could not be read, so which copy it selects is unknown");
+  const entry = index.plugins?.find((p) => p?.pluginId === pluginId);
+  // #260 r10 (Sol): a path field that is there but unusable (empty, blank,
+  // not a string, relative) is unknown, never "not named": dropping it let the
+  // other field alone choose the kept dir and a deletion was scheduled.
+  const rootField = indexPathField(entry?.rootDir);
+  const recordField = indexPathField(index.installRecords?.[pluginId]?.installPath);
+  for (const [name, field] of [['selected rootDir', rootField], ['install record installPath', recordField]] as const) {
+    if (field.kind === 'unknown') {
+      return refuse(`the install index's ${name} ${field.why}, so which copy it selects is unknown`);
+    }
+  }
+  const rootDir = rootField.kind === 'path' ? rootField.path : null;
+  const recordPath = recordField.kind === 'path' ? recordField.path : null;
+  // The index's selection first, else its install record.
+  const keepBuild = rootDir ?? recordPath;
+  if (!keepBuild) return refuse('the authoritative SQLite index does not resolve a live install dir — cannot safely tell which to keep');
+
+  // Case 6095369958: the dir kept must be, physically, the one holding the
+  // build that is verified below. A raw index path (`..`, a symlink, a
+  // symlinked HOME) can name one project dir while the filesystem resolves it
+  // into another. So the kept project is derived ONLY from the build's real
+  // location under the real projects dir; the same real path is verified; and
+  // anything that cannot be bound that way refuses.
+  let realProjects: string;
+  try {
+    realProjects = fs.realpathSync(projects);
+  } catch (err) {
+    return refuse(`the real location of the projects dir cannot be resolved (${(err as NodeJS.ErrnoException)?.code ?? 'error'})`);
+  }
+  type Bound = { real: string; name: string; raw: string | null } | { why: string };
+  const bind = (p: string): Bound => {
+    if (!path.isAbsolute(p)) return { why: `${safeForReason(p)} is not an absolute path` };
+    let real: string;
+    try {
+      real = fs.realpathSync(p);
+    } catch (err) {
+      return { why: `the real location of ${safeForReason(p)} cannot be resolved (${(err as NodeJS.ErrnoException)?.code ?? 'error'})` };
+    }
+    const rel = path.relative(realProjects, real);
+    if (!rel || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) {
+      return { why: `${safeForReason(p)} resolves to ${safeForReason(real)}, which is not inside the projects dir, so it cannot be bound to a project dir` };
+    }
+    return { real, name: rel.split(path.sep)[0], raw: projectDirNameFromPath(p) };
+  };
+  const namesDir = (raw: string | null): string => (raw ? `names project dir ${safeForReason(raw)}` : 'names no project dir');
+  const sel = bind(keepBuild);
+  if (rootDir && recordPath) {
+    const other = bind(recordPath);
+    if (('why' in sel) !== ('why' in other) || ('name' in sel && 'name' in other && sel.name !== other.name)) {
+      return refuse(`the install index selects ${safeForReason(rootDir)} but its install record names ${safeForReason(recordPath)}, and they do not resolve to the same project dir — which copy is live is ambiguous`);
+    }
+    if ('name' in other && other.raw !== other.name) {
+      return refuse(`the install record path ${safeForReason(recordPath)} ${namesDir(other.raw)}, but the build there physically lives in ${safeForReason(other.name)}`);
+    }
+  }
+  if ('why' in sel) return refuse(`the copy the index selects cannot be bound to a project dir: ${sel.why}`);
+  const keep = sel.name;
+  const realKeep = sel.real;
+  if (sel.raw !== keep) {
+    return refuse(`the index path ${safeForReason(keepBuild)} ${namesDir(sel.raw)}, but the build there physically lives in ${safeForReason(keep)}`, { keep });
+  }
+  if (!dirs.includes(keep)) {
+    return refuse(`the index's live install dir (${safeForReason(keep)}) is not present on disk — cannot safely tell which to keep`);
+  }
+  const realKeepDir = path.join(realProjects, keep);
+  let keepDirReal: string | null = null;
+  try {
+    keepDirReal = fs.realpathSync(path.join(projects, keep));
+  } catch {
+    keepDirReal = null;
+  }
+  if (keepDirReal !== realKeepDir) {
+    return refuse(`the kept project dir ${safeForReason(keep)} does not resolve to itself (it is an alias, or cannot be resolved)`, { keep });
+  }
+  // Verification runs on the SAME real path the kept project was derived from.
+  if (verifiedPluginBuildAt(realKeep, pluginId) !== true) {
+    return refuse(`the copy the index selects (${safeForReason(keepBuild)}) is not a verified plugin build — it may be the stale one, and another dir the only intact copy`, { keep });
+  }
+  const keepVersion = readExactBuildVersion(realKeep);
+  if (!keepVersion) {
+    return refuse(`the version of the kept build (${safeForReason(keepBuild)}) cannot be read, so no other copy can be shown to be older`, { keep });
+  }
+  // jarvis r3: no other dir may be, contain, or sit inside the kept build or
+  // its project dir — compared on the canonical values bound above.
+  const keptReal = [realKeep, realKeepDir];
+  const overlaps = (a: string, b: string): boolean =>
+    a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep);
+
+  const unsafe: string[] = [];
+  for (const d of dirs) {
+    if (d === keep) continue;
+    const projectDir = path.join(projects, d);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(projectDir);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT') continue;
+      unsafe.push(`${safeForReason(d)} cannot be read (${code ?? 'error'})`);
+      continue;
+    }
+    if (!st.isDirectory()) {
+      unsafe.push(`${safeForReason(d)} is not a plain directory`);
+      continue;
+    }
+    let real: string;
+    try {
+      real = fs.realpathSync(projectDir);
+    } catch (err) {
+      unsafe.push(`the real location of ${safeForReason(d)} cannot be resolved (${(err as NodeJS.ErrnoException)?.code ?? 'error'})`);
+      continue;
+    }
+    if (keptReal.some((k) => overlaps(real, k))) {
+      unsafe.push(`${safeForReason(d)} holds the kept build itself (it resolves to the same place as the kept build or its project dir)`);
+      continue;
+    }
+    const copy = readBuildVersionState(path.join(projectDir, 'node_modules', ...packageName.split('/')));
+    if (copy.state === 'none') continue;
+    if (copy.state === 'unreadable') {
+      unsafe.push(`the copy in ${safeForReason(d)} cannot be read (${copy.why})`);
+    } else if (semver.gt(copy.version, keepVersion)) {
+      unsafe.push(`${safeForReason(d)} holds v${copy.version}, newer than the kept v${keepVersion}`);
+    }
+  }
+  if (unsafe.length > 0) return refuse(unsafe.join('; '), { keep, keepVersion });
+  return { dirs, keep, keepVersion, prune: dirs.filter((d) => d !== keep) };
 }
 
 /**

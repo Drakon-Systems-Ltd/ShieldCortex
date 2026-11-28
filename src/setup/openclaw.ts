@@ -9,7 +9,8 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execSync, spawnSync } from 'child_process';
+import { execSync, spawnSync, type SpawnSyncReturns } from 'child_process';
+import { randomBytes } from 'crypto';
 import semver from 'semver';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { gatewayRestartAdvice, gatewayBootLogAdvice } from './gateway-restart-command.js';
@@ -56,6 +57,12 @@ import {
   readRealtimeReplacementEvidence,
   readSelectedRealtimeInstall,
   readSelectedRealtimePluginVersion,
+  managedManifestTarget,
+  managedManifestTargetStillHolds,
+  noRecordPinDoor,
+  readBoundManifest,
+  boundManifestUnchanged,
+  type BoundManifestRead,
 } from '../integrations/openclaw-realtime-install.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -2676,6 +2683,60 @@ function readSelfVersion(): string | null {
   }
 }
 
+/**
+ * #260 r12: create `file` exclusively (fails on any existing name, a link
+ * included) and write `text` to it; if writing fails, remove what this created.
+ * r15 (Jarvis 2): it gets `owner` on its descriptor first — a rename must not
+ * hand the manifest to whoever ran the repair (under sudo: root, 0600). An
+ * fchown that fails fails the create; there is no write that drops ownership.
+ */
+function createExclusive(file: string, text: string, mode: number, owner: { uid: number; gid: number }): void {
+  const fd = fs.openSync(file, 'wx', mode);
+  let ok = false;
+  try {
+    try {
+      fs.fchownSync(fd, owner.uid, owner.gid);
+    } catch (err) {
+      throw new Error(`could not keep the original owner ${owner.uid}:${owner.gid} (${err instanceof Error ? err.message : String(err)})`);
+    }
+    fs.fchmodSync(fd, mode);
+    fs.writeFileSync(fd, text);
+    fs.fsyncSync(fd);
+    ok = true;
+  } finally {
+    fs.closeSync(fd);
+    if (!ok) {
+      try { fs.unlinkSync(file); } catch { /* already gone */ }
+    }
+  }
+}
+
+/**
+ * #260 r15 (Jarvis 1): what the managed-pin heal launches. A parameter, never
+ * an environment variable (an env-selectable binary would be a new authority
+ * surface); production callers pass nothing and get the real lookup and
+ * runner. Tests pass recording fakes, so no test can reach a host's OpenClaw.
+ */
+export interface ManagedPinRepairDeps {
+  /** The `openclaw` binary to run, or null when there is none. */
+  resolveOpenClawBin?: () => string | null;
+  /** Run `bin` with `args` (enable and the pinned reinstall). */
+  runOpenClaw?: (bin: string, args: string[], options: { env: NodeJS.ProcessEnv; timeout: number }) => SpawnSyncReturns<string>;
+}
+
+function defaultResolveOpenClawBin(): string | null {
+  try {
+    const bin = execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 }).trim();
+    return bin && fs.existsSync(bin) ? bin : null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultRunOpenClaw(bin: string, args: string[], options: { env: NodeJS.ProcessEnv; timeout: number }): SpawnSyncReturns<string> {
+  return spawnSync(bin, args, { encoding: 'utf-8', env: options.env, timeout: options.timeout });
+}
+
 export type ManagedPinRepairStatus = 'not-installed' | 'clean' | 'healed' | 'failed';
 export interface ManagedPinRepairResult {
   status: ManagedPinRepairStatus;
@@ -2703,7 +2764,10 @@ export async function repairOpenClawManagedPins(
   homeArg?: string,
   /** The one bare-spec retry for the whole operation (`openclaw repair` shares one). */
   bareRetryBudget: BareRetryBudget = new BareRetryBudget(),
+  launch: ManagedPinRepairDeps = {},
 ): Promise<ManagedPinRepairResult> {
+  const resolveBin = launch.resolveOpenClawBin ?? defaultResolveOpenClawBin;
+  const runOpenClaw = launch.runOpenClaw ?? defaultRunOpenClaw;
   const home = homeArg ?? resolveUserHome();
   const pluginId = 'shieldcortex-realtime';
 
@@ -2741,9 +2805,29 @@ export async function repairOpenClawManagedPins(
   if (!pin) {
     return { status: 'failed', message: `Could not read this CLI's exact version, so nothing was changed. Run \`${installCommand}\` then \`openclaw gateway restart\`.` };
   }
-  const keep = assessRealtimeReplacement(readRealtimeReplacementEvidence(home), pin);
+  const evidence = readRealtimeReplacementEvidence(home);
+  const keep = assessRealtimeReplacement(evidence, pin);
   if (!keep.replace) {
     return { status: 'failed', message: `Realtime plugin ${keep.summary}; nothing was changed. To replace it with v${pin}: \`${installCommand}\`.` };
+  }
+  // #260 r11 (Sol): the manifest rewritten below must be the one of the copy
+  // the preflight just verified. `projectDir` comes from the disk resolver,
+  // which can choose a different copy (an empty installs.json path, a newer
+  // leftover project) — so compare real paths, and refuse on any doubt.
+  // r12 (Sol): the FILE is bound too (a package.json link into another
+  // project passed the folder check), by the same check doctor's advice uses.
+  const target = managedManifestTarget(home, evidence, projectDir);
+  // r15: refusing to write a project no install record names is an OWNER
+  // DECISION (writing one would be the r11 fail-open); the door it prints
+  // names the pins to remove by hand, because the reinstall keeps them.
+  if (!target.ok && target.why === 'no-record') {
+    return { status: 'failed', message: noRecordPinDoor(home, projectDir, manifest, selfVersion) };
+  }
+  if (!target.ok) {
+    const why = target.why === 'folders-disagree'
+      ? 'The plugin folders disagree: the managed project this repair would rewrite is not the one holding the copy OpenClaw selected'
+      : 'The managed project\'s package.json is not a plain file in the folder holding the copy OpenClaw selected (it is a link, or not a regular file)';
+    return { status: 'failed', message: `${why}, so nothing was changed. To reinstall it cleanly: \`${installCommand}\`, then \`openclaw gateway restart\`.` };
   }
 
   console.log('Reconciling OpenClaw managed plugin pins (EOVERRIDE guard):');
@@ -2752,42 +2836,87 @@ export async function repairOpenClawManagedPins(
   if (staleShieldcortex) console.log(`  - stale shieldcortex lib pin: ${String(deps.shieldcortex)} → ${selfVersion}`);
   if (disabled) console.log('  - plugin is disabled in config (auto-disabled after a failed update)');
 
-  // 1. Backup the project manifest before touching it.
-  const manifestPath = path.join(projectDir, 'package.json');
+  // 1. Backup the project manifest before touching it. r12: every write here
+  //    creates a NEW file inside the verified folder (exclusive create, so
+  //    never through an existing name or link) after re-checking the target,
+  //    and the manifest is replaced by rename — which replaces the directory
+  //    entry and never follows a link at it. Any doubt or error refuses; there
+  //    is no fallback to a direct write.
+  const manifestPath = target.manifestPath;
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const changed = (): ManagedPinRepairResult => ({ status: 'failed', message: 'The managed project changed while this repair was running (its folder moved, or its package.json was removed or replaced), so the manifest was not rewritten. Check it again: `shieldcortex doctor`.' });
+  // r13 (Sol): bind the read to the verified FILE. The type re-check alone let
+  // a different regular file (or the same inode rewritten) be replaced with
+  // bytes derived from the original — a lost update. Read once through a
+  // no-follow descriptor, parse from exactly those bytes, and before the
+  // backup and before the rename require the same file with the same bytes.
+  const fileChanged = (): ManagedPinRepairResult => ({ status: 'failed', message: 'The managed project\'s package.json changed while this repair was running; nothing was changed. Check it again: `shieldcortex doctor`.' });
+  let bound: BoundManifestRead;
+  let work: Record<string, unknown>;
   try {
-    fs.writeFileSync(`${manifestPath}.repair-backup-${ts}`, JSON.stringify(manifest, null, 2));
+    bound = readBoundManifest(manifestPath);
+    work = JSON.parse(bound.text) as Record<string, unknown>;
+  } catch {
+    return fileChanged();
+  }
+  // What was analysed above must be what is rewritten below.
+  if (JSON.stringify(work) !== JSON.stringify(manifest)) return fileChanged();
+  const workDeps = (typeof work.dependencies === 'object' && work.dependencies
+    ? work.dependencies
+    : {}) as Record<string, unknown>;
+  // Mode and owner from the bound read's own descriptor (r15, Jarvis 2).
+  const mode = bound.mode & 0o777;
+  const owner = { uid: bound.uid, gid: bound.gid };
+  try {
+    if (!managedManifestTargetStillHolds(target)) return changed();
+    if (!boundManifestUnchanged(manifestPath, bound)) return fileChanged();
+    createExclusive(`${manifestPath}.repair-backup-${ts}`, JSON.stringify(work, null, 2), mode, owner);
     console.log(`  - safety backup: ${`${manifestPath}.repair-backup-${ts}`.replace(home, '~')}`);
-  } catch { /* best-effort */ }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { status: 'failed', message: `Could not write a safety backup of the project manifest (${msg}), so nothing was changed.` };
+  }
 
   // 2. Strip co-present (latent) pins from deps AND managedPeerDependencies so
   //    the reinstall re-derives them at the CURRENT override version, then
-  //    advance the stale shieldcortex lib pin. `deps` is the same object the
+  //    advance the stale shieldcortex lib pin. `workDeps` is the same object the
   //    strip mutates in place; shieldcortex is never override-shadowed so it
   //    survives the strip.
-  stripManagedPinsFromManifest(manifest as Record<string, unknown>, latentPins);
-  if (staleShieldcortex && selfVersion) deps.shieldcortex = selfVersion;
-  (manifest as Record<string, unknown>).dependencies = deps;
+  stripManagedPinsFromManifest(work, latentPins);
+  if (staleShieldcortex && selfVersion) workDeps.shieldcortex = selfVersion;
+  work.dependencies = workDeps;
+  const tmp = path.join(target.projectDir, `.package.json.repair-${process.pid}-${randomBytes(6).toString('hex')}.tmp`);
+  let created = false;
   try {
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+    createExclusive(tmp, JSON.stringify(work, null, 2) + '\n', mode, owner);
+    created = true;
+    if (!managedManifestTargetStillHolds(target)) {
+      fs.unlinkSync(tmp);
+      return { ...changed(), message: `${changed().message} Backup left at ${manifestPath}.repair-backup-${ts}.` };
+    }
+    if (!boundManifestUnchanged(manifestPath, bound)) {
+      fs.unlinkSync(tmp);
+      return { ...fileChanged(), message: `${fileChanged().message} A safety backup of the contents read earlier is at ${manifestPath}.repair-backup-${ts}.` };
+    }
+    fs.renameSync(tmp, manifestPath);
   } catch (err) {
+    if (created) {
+      try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+    }
     const msg = err instanceof Error ? err.message : String(err);
     return { status: 'failed', message: `Could not write the project manifest (${msg}). Backup left at ${manifestPath}.repair-backup-${ts}.` };
   }
 
   // 3. Resolve the openclaw binary.
-  let openclawBin: string;
-  try {
-    openclawBin = execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 }).trim();
-    if (!openclawBin || !fs.existsSync(openclawBin)) throw new Error('not on PATH');
-  } catch {
+  const openclawBin = resolveBin();
+  if (!openclawBin) {
     return { status: 'failed', message: 'Manifest reconciled, but `openclaw` is not on PATH to reinstall. Run `' + installCommand + '` then `openclaw gateway restart`.' };
   }
   const spawnEnv = openClawChildEnv({}, home);
 
   // 4. Re-enable if it was auto-disabled.
   if (disabled) {
-    spawnSync(openclawBin, ['plugins', 'enable', pluginId], { encoding: 'utf-8', env: spawnEnv, timeout: 30000 });
+    runOpenClaw(openclawBin, ['plugins', 'enable', pluginId], { env: spawnEnv, timeout: 30000 });
   }
 
   // 5. Reinstall so OpenClaw recomputes a consistent manifest (re-derives the
@@ -2795,7 +2924,7 @@ export async function repairOpenClawManagedPins(
   console.log(`  - reinstalling: ${installCommand}`);
   const { result: reinstall, args: ranArgs } = runWithNpmSourceFallbackSync(
     realtimePluginInstallArgs(pin),
-    (args) => spawnSync(openclawBin, args, { encoding: 'utf-8', env: spawnEnv, timeout: 180000 }),
+    (args) => runOpenClaw(openclawBin, args, { env: spawnEnv, timeout: 180000 }),
     (r) => (r.status === 0 ? null : spawnOutcome(r)),
     bareRetryBudget,
   );

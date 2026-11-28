@@ -7,7 +7,7 @@ import {
   gatherReconcileInput,
   reconcilePluginState,
   planReconcileActions,
-  canonicalProjectDirFromIndex,
+  assessDuplicateProjectDirs,
   REALTIME_PLUGIN_ID,
   type ReconcileVerdict,
   type ReconcileStep,
@@ -65,6 +65,13 @@ export interface StepResult {
    * outcome (`timed-out` / `unconfirmed`), where the restart is kept.
    */
   changesUnloaded?: boolean;
+  /**
+   * #260 Sol r2: `self-check` steps only — this run changed the host, and no
+   * gateway restart PROVEN back up (a new process started after the request)
+   * followed the change. Whatever the self-check saw, it saw the gateway as
+   * it was before the change, so it cannot certify the repair.
+   */
+  preChangeEvidence?: boolean;
 }
 
 /**
@@ -208,6 +215,12 @@ export interface ReconcileOptions {
    * is older did not load it, even if this pass changes nothing itself.
    */
   lastChangeSeq?: number;
+  /**
+   * Internal (#260 Sol r2): the causal ticket of the latest gateway restart
+   * PROVEN back up (readiness saw a process started after it was requested)
+   * in an earlier pass. Changes with a later ticket are not loaded by it.
+   */
+  loadedThroughSeq?: number;
 }
 
 function defaultApply(): boolean {
@@ -372,8 +385,10 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   // state points at the STALE dir) so a prune can NEVER delete the live install
   // (#74 finding 4). enabled-not-loaded is included because aiquant hit the
   // silent drop WITH a leftover duplicate dir — the drop's precondition — and
-  // the old code never pruned it (#74 finding 5). When the index cannot name a
-  // live dir we REFUSE to prune and say so, rather than guess by name length.
+  // the old code never pruned it (#74 finding 5). #260 Sol r2: a dir the index
+  // NAMES is not enough — the kept copy must be a verified build, named
+  // unambiguously, and every removed dir an older or equal copy (or none);
+  // otherwise nothing is pruned and the refusal says why.
   const mayHaveDuplicateDirs =
     verdict.state === 'duplicate-install' ||
     verdict.state === 'conflicted-metadata' ||
@@ -383,8 +398,7 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     (verdict.state === 'load-unproven' && verdict.recommendedAction !== 'none');
   let dupDirs: string[] = [];
   if (mayHaveDuplicateDirs) {
-    const liveDir = canonicalProjectDirFromIndex(input.index, pluginId);
-    const scan = scanPrunableDirs(home, pluginId, liveDir);
+    const scan = assessDuplicateProjectDirs(home, input.index, pluginId, PACKAGE_NAME);
     dupDirs = scan.prune;
     if (scan.refused) messages.push(scan.refused);
   }
@@ -407,6 +421,11 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   let lastChangeSeq: number | undefined = options.lastChangeSeq;
   const noteChange = (): void => { lastChangeSeq = nextCausalSeq(); };
   let restartPending = false;
+  // #260 Sol r2: the latest restart PROVEN back up, by causal ticket. A
+  // self-check only certifies this run's changes when one of those came after
+  // the last change; otherwise it read the pre-change gateway.
+  let loadedThroughSeq: number | undefined = options.loadedThroughSeq;
+  let preChangeEvidence = false;
 
   if (!apply) {
     messages.push('dry-run: computed plan without executing (pass apply:true / SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1 to remediate)');
@@ -416,11 +435,26 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   for (const step of plan) {
     if (step.kind === 'self-check') {
       selfCheckResult = await selfCheck(home, pluginId);
-      stepResults.push({ kind: step.kind, ok: selfCheckResult.ok, detail: selfCheckResult.reasons.join('; ') });
+      // #260 Sol r2: evidence from a gateway that has not been PROVEN
+      // restarted since this run's last change describes the host before the
+      // repair. It may still be reported; it may not certify the repair.
+      preChangeEvidence = lastChangeSeq !== undefined
+        && (loadedThroughSeq === undefined || loadedThroughSeq < lastChangeSeq);
+      stepResults.push({
+        kind: step.kind,
+        ok: selfCheckResult.ok && !preChangeEvidence,
+        detail: preChangeEvidence
+          ? `${selfCheckResult.reasons.join('; ')} — read from the gateway as it was BEFORE this run's changes (no restart proven back up since), so it does not confirm the repair`
+          : selfCheckResult.reasons.join('; '),
+        ...(preChangeEvidence ? { preChangeEvidence: true } : {}),
+      });
       continue;
     }
     if (step.kind === 'gateway-reload') {
       const reloadRequestedAt = Date.now();
+      // A fresh restart is requested after this ticket, so after every change
+      // this run has made so far; a reused one carries its own (#977).
+      const reloadRequestSeq = nextCausalSeq();
       const r = await reloadGateway();
       // #156: WAIT for the gateway to actually come back before anything reads
       // the world again. `restartOpenClawGateway()` returns when the service
@@ -485,6 +519,13 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
           'gateway restart not confirmed back up, and changes made after it are not loaded yet: protection is NOT confirmed — run shieldcortex doctor to check the gateway before restarting it',
         );
       }
+      // #260 Sol r2: only a restart PROVEN back up (a process started after
+      // the request) loads what preceded it. Failed, skipped, timed-out and
+      // unconfirmed restarts load nothing this report may rely on.
+      if (restart === 'completed') {
+        const seq = r.reused ? r.requestedSeq : (r.requestedSeq ?? reloadRequestSeq);
+        if (seq !== undefined && (loadedThroughSeq === undefined || seq > loadedThroughSeq)) loadedThroughSeq = seq;
+      }
       stepResults.push({
         kind: step.kind,
         ok: r.restarted && !predatesChange,
@@ -518,20 +559,29 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
       continue;
     }
     if (step.kind === 'prune-duplicate-dirs') {
-      let ok = true;
-      let pruned = 0;
-      for (const d of step.dirs ?? []) {
+      const planned = step.dirs ?? [];
+      const removed: string[] = [];
+      const left: string[] = [];
+      for (const d of planned) {
         try {
           pruneDir(home, d);
-          pruned += 1;
+          removed.push(d);
         } catch (err) {
-          ok = false;
+          left.push(d);
           messages.push(`prune failed for ${d}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
       // A partial prune still changed the world the running gateway booted from.
-      if (pruned > 0) noteChange();
-      stepResults.push({ kind: step.kind, ok, detail: `pruned ${(step.dirs ?? []).length} dir(s)` });
+      if (removed.length > 0) noteChange();
+      // #260 Sol r2: say what was actually removed, not what was planned.
+      const ok = left.length === 0;
+      const detail = ok
+        ? `pruned ${removed.length} dir(s)`
+        : `pruned ${removed.length} of ${planned.length} dir(s); still on disk: ${left.join(', ')}`;
+      if (!ok) {
+        messages.push(`prune incomplete: removed ${removed.length} of ${planned.length} duplicate project dir(s) — ${left.join(', ')} still on disk, so a toggle can still re-resolve to it`);
+      }
+      stepResults.push({ kind: step.kind, ok, detail });
       continue;
     }
     // #1109 review: a realtime install is forced (`--force`), so before it
@@ -623,15 +673,29 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   // `restore-registration` counts as a remediation command: it is the whole
   // remediation for the #222 state, and a plan whose only action failed must
   // never come back ok just because it shells out to nothing.
+  // #260 Sol r2: a prune that left a duplicate behind did not do its job
+  // either — it counts like any other remediation step.
   const commandsOk = stepResults
-    .filter((s) => s.kind.startsWith('openclaw') || s.kind === 'restore-registration')
+    .filter((s) => s.kind.startsWith('openclaw') || s.kind === 'restore-registration' || s.kind === 'prune-duplicate-dirs')
     .every((s) => s.ok);
   // #977 review: a self-check run against a gateway that has not loaded this
-  // run's changes proves the OLD state. Never call that reconciled.
-  const ok = selfCheckOk && commandsOk && !restartPending;
+  // run's changes proves the OLD state. Never call that reconciled. #260 Sol
+  // r2: the same holds when the restart after them failed, was skipped, or
+  // was not proven back up — not only when a reused restart predates them.
+  const ok = selfCheckOk && commandsOk && !restartPending && !preChangeEvidence;
   if (!ok) {
     if (restartPending) {
       // The pending-restart message above already says what to do.
+    } else if (preChangeEvidence) {
+      const outcome = gatewayRestartOutcomeFromSteps(stepResults);
+      const why = outcome === 'failed'
+        ? 'the gateway restart after them failed'
+        : outcome === 'skipped'
+          ? 'the gateway was not restarted after them'
+          : 'the gateway restart after them was not confirmed back up';
+      messages.push(
+        `this run's changes are not confirmed loaded: ${why}, so the self-check read the gateway as it was before the repair — protection by the repaired install is NOT confirmed`,
+      );
     } else if (!selfCheckResult) {
       messages.push('self-check did not run — cannot confirm the plugin loaded; treating as FAILED');
     } else if (selfCheckResult.rosterProof && selfCheckResult.versionProof !== false && !selfCheckResult.canaryProof) {
@@ -654,6 +718,7 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
       bareRetryBudget,
       pass: pass + 1,
       ...(lastChangeSeq !== undefined ? { lastChangeSeq } : {}),
+      ...(loadedThroughSeq !== undefined ? { loadedThroughSeq } : {}),
     });
     return {
       verdict,
@@ -704,8 +769,9 @@ function shortProofChips(result: ReconcileExecResult): string {
     else if (sc.rosterState === 'absent') bits.push('roster absent');
     else bits.push('roster unread');
   }
-  const pruned = result.stepResults.find((s) => s.kind === 'prune-duplicate-dirs' && s.ok);
-  if (pruned) bits.push('pruned dups');
+  const prunes = result.stepResults.filter((s) => s.kind === 'prune-duplicate-dirs');
+  if (prunes.some((s) => !s.ok)) bits.push('prune incomplete');
+  else if (prunes.length > 0) bits.push('pruned dups');
   const reload = result.stepResults.find((s) => s.kind === 'gateway-reload' && s.ok);
   const restartOutcome = gatewayRestartOutcomeFromSteps(result.stepResults);
   const changesUnloaded = result.stepResults.some((s) => s.kind === 'gateway-reload' && s.changesUnloaded === true);
@@ -880,14 +946,26 @@ function restartVerdictInputs(stepResults: StepResult[]): {
   readinessUnproven: boolean;
   restartPending?: true;
   restartCommand?: string;
+  changesNotLoaded?: 'failed' | 'skipped' | 'unconfirmed';
 } {
   const outcome = gatewayRestartOutcomeFromSteps(stepResults);
   const readinessUnproven = outcome === 'timed-out' || outcome === 'unconfirmed';
   const owed = stepResults.some((s) => s.kind === 'gateway-reload' && (s.restart === 'pending' || s.changesUnloaded === true));
+  // #260 Sol r2: the LAST self-check read a gateway not proven restarted
+  // since this run's changes. Owed restarts (#977) are reported as such.
+  const selfChecks = stepResults.filter((s) => s.kind === 'self-check');
+  const lastPreChange = selfChecks[selfChecks.length - 1]?.preChangeEvidence === true;
+  const changesNotLoaded = !owed && lastPreChange
+    ? (outcome === 'failed' ? 'failed' : outcome === 'skipped' ? 'skipped' : 'unconfirmed')
+    : undefined;
   return {
     readinessUnproven,
     ...(owed ? { restartPending: true as const } : {}),
     ...(owed && outcome === 'pending' ? { restartCommand: manualGatewayRestartCommand() } : {}),
+    // Nothing restarted (failed / skipped): a manual restart is safe. An
+    // unconfirmed one may still be starting: doctor, never a restart.
+    ...(changesNotLoaded && changesNotLoaded !== 'unconfirmed' ? { restartCommand: manualGatewayRestartCommand() } : {}),
+    ...(changesNotLoaded ? { changesNotLoaded } : {}),
   };
 }
 
@@ -965,47 +1043,4 @@ export function protectionLedgerFromReconcile(result: ReconcileExecResult): {
     };
   }
   return { status: 'unproven', summary: 'protection unproven', detail, outcome: summary.outcome, facts };
-}
-
-/**
- * Compute which duplicate project dirs are safe to prune. HOST-SAFETY CRITICAL
- * (#74 finding 4): the keep-dir (`liveDir`) is the dir the AUTHORITATIVE SQLite
- * index resolves into — the one the loaded gateway actually runs from. We prune
- * every OTHER matching dir and NEVER the live one.
- *
- * We REFUSE (prune nothing, return a reason) rather than guess when:
- *   - the index cannot name a live dir (`liveDir == null`) — ambiguous, so a
- *     prune could delete the real install; or
- *   - the named live dir is not present on disk — we cannot confirm which of
- *     the on-disk dirs is real, so pruning any is unsafe.
- * The old shortest-name heuristic could drop the longer `__openclaw-generation__`
- * dir even when that was the registered/live one — that path is gone.
- */
-function scanPrunableDirs(
-  home: string,
-  pluginId: string,
-  liveDir: string | null,
-): { prune: string[]; refused?: string } {
-  let dirs: string[];
-  try {
-    dirs = fs
-      .readdirSync(path.join(home, '.openclaw', 'npm', 'projects'))
-      .filter((d) => d.includes(pluginId));
-  } catch {
-    return { prune: [] };
-  }
-  if (dirs.length <= 1) return { prune: [] };
-  if (!liveDir) {
-    return {
-      prune: [],
-      refused: `refusing to prune ${dirs.length} duplicate project dir(s): the authoritative SQLite index does not resolve a live install dir — cannot safely tell which to keep. Resolve manually.`,
-    };
-  }
-  if (!dirs.includes(liveDir)) {
-    return {
-      prune: [],
-      refused: `refusing to prune duplicate project dir(s): the index's live install dir (${liveDir}) is not present on disk — cannot safely tell which to keep. Resolve manually.`,
-    };
-  }
-  return { prune: dirs.filter((d) => d !== liveDir) };
 }

@@ -64,6 +64,12 @@ export interface RepairVerdictInput {
    * `readinessUnproven` is also set: then the next step is always doctor.
    */
   restartCommand?: string;
+  /**
+   * #260 Sol r2: this run changed the host and the self-check read a gateway
+   * not proven restarted since — the restart after the change failed, was
+   * skipped, or was not confirmed back up. Its evidence predates the repair.
+   */
+  changesNotLoaded?: 'failed' | 'skipped' | 'unconfirmed';
   onDiskVersion?: string | null;
   expectedVersion?: string;
 }
@@ -144,6 +150,28 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
       headline: 'This run\'s plugin changes are not loaded yet: the gateway was restarted before them, and a second restart is not issued in one run. Restart the gateway once more, then run shieldcortex doctor.',
       nextCommand: input.restartCommand ?? 'shieldcortex doctor',
     };
+  }
+
+  // #260 Sol r2: a passing self-check on the PRE-change gateway is not proof
+  // the repaired install is protecting anything. Unknown, with the one safe
+  // next step: restart when nothing restarted, doctor when one may be starting.
+  if (input.changesNotLoaded) {
+    const why = input.changesNotLoaded === 'failed'
+      ? 'the gateway restart after them failed'
+      : input.changesNotLoaded === 'skipped'
+        ? 'the gateway was not restarted after them'
+        : 'the gateway restart after them was not confirmed back up';
+    return input.changesNotLoaded === 'unconfirmed'
+      ? {
+        outcome: 'unknown',
+        headline: `This run's plugin changes are not confirmed loaded: ${why}, so the checks read the gateway as it was before the repair. It may still be starting — check it with shieldcortex doctor before restarting.`,
+        nextCommand: 'shieldcortex doctor',
+      }
+      : {
+        outcome: 'unknown',
+        headline: `This run's plugin changes are not loaded: ${why}, so the checks read the gateway as it was before the repair. Restart the gateway, then run shieldcortex doctor.`,
+        nextCommand: input.restartCommand ?? 'shieldcortex doctor',
+      };
   }
 
   if (sc?.ok) {

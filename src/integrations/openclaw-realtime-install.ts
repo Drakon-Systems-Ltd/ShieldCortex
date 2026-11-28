@@ -1,9 +1,10 @@
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import semver from 'semver';
-import { REALTIME_PLUGIN_PACKAGE } from '../setup/openclaw-plugin-spec.js';
-import { readPluginInstallIndexState, type PluginInstallIndexState } from './openclaw-plugin-index.js';
-import { resolveLocalExtensionInstall } from './openclaw-plugin-state.js';
+import { REALTIME_PLUGIN_PACKAGE, realtimePluginInstallCommand } from '../setup/openclaw-plugin-spec.js';
+import { indexPathField, readPluginInstallIndexState, safeForReason, type PluginInstallIndexState } from './openclaw-plugin-index.js';
+import { findLatentEoverridePins, resolveLocalExtensionInstall } from './openclaw-plugin-state.js';
 
 /**
  * Two questions every forced realtime-plugin install has to answer from
@@ -182,7 +183,7 @@ export type SelectedRealtimeInstall =
    * Nothing to load and nothing to lose. `dangling` says why when a record
    * DOES name a copy, but that copy is not on disk (#1109 round 4).
    */
-  | { state: 'none'; dangling?: string }
+  | { state: 'none'; dangling?: string; danglingDirs?: string[] }
   | { state: 'unknown'; why: string };
 
 type DirVersion = { state: 'ok'; version: string } | { state: 'unknown'; why: string };
@@ -256,13 +257,29 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
   }
   // Set when a record names a copy that is not on disk (see the doc above).
   let dangling: string | null = null;
+  const danglingDirs: string[] = [];
   if (index.state === 'ok') {
-    const roster = index.row.plugins?.find((p) => p && p.pluginId === REALTIME_PLUGIN_ID)?.rootDir;
+    const entry = index.row.plugins?.find((p) => p && p.pluginId === REALTIME_PLUGIN_ID);
+    // #260 (Sol finding 1): the roster entry IS the selection evidence. One
+    // that names no usable copy (no rootDir, an empty or non-string one) is
+    // not "names nothing" — dropping it let a record-less row fall through to
+    // `none`, and `none` lets a forced install replace what is there. OpenClaw
+    // requires a string rootDir on every entry; the reader enforces the type,
+    // and this refuses what is left.
+    const roster = indexPathField(entry?.rootDir);
+    if (entry && roster.kind !== 'path') {
+      return { state: 'unknown', why: `OpenClaw's install index lists the plugin with no usable rootDir${roster.kind === 'unknown' ? ` — its rootDir ${roster.why}` : ''}` };
+    }
+    // #260 r10 (Sol): the same rule for the record's installPath. An empty or
+    // blank one was dropped as "names nothing", which allowed the replacement.
     const record = index.row.installRecords?.[REALTIME_PLUGIN_ID];
-    const recordPath = record && typeof record.installPath === 'string' ? record.installPath : null;
+    const recordPath = indexPathField(record?.installPath);
+    if (recordPath.kind === 'unknown') {
+      return { state: 'unknown', why: `OpenClaw's install record's installPath ${recordPath.why}, so which copy it names is unknown` };
+    }
     const named = [
-      ...(typeof roster === 'string' && roster ? [{ dir: roster, evidence: 'install index roster' }] : []),
-      ...(recordPath ? [{ dir: recordPath, evidence: 'install index record' }] : []),
+      ...(roster.kind === 'path' ? [{ dir: roster.path, evidence: 'install index roster' }] : []),
+      ...(recordPath.kind === 'path' ? [{ dir: recordPath.path, evidence: 'install index record' }] : []),
     ];
     if (named.length > 0) {
       const present: Array<{ dir: string; evidence: string; version: string }> = [];
@@ -273,6 +290,7 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
       }
       if (present.length === 0) {
         dangling = `the copy OpenClaw's ${named.map((n) => n.evidence).join(' and ')} name${named.length === 1 ? 's' : ''} is not on disk (${named[0].dir})`;
+        danglingDirs.push(...named.map((n) => n.dir));
       } else {
         const versions = present.map((r) => r.version);
         if (present.length === 2 && !sameDir(present[0].dir, present[1].dir) && versions[0] !== versions[1]) {
@@ -312,13 +330,23 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
       if (!rec || typeof rec !== 'object') continue;
       const r = rec as { installPath?: unknown; source?: unknown; version?: unknown; resolvedVersion?: unknown };
       if (native && r.source === 'path') continue;
-      const named = typeof r.installPath === 'string' && r.installPath ? r.installPath : null;
+      // #260 r10 (Sol): a present installPath that is empty, blank or not a
+      // string names no folder anyone can check — unknown, never "no path".
+      // (openclaw.json's own record keeps its relative/`~` resolution against
+      // OpenClaw's dir, #1110; installs.json's relative one is refused below.)
+      const field = indexPathField(r.installPath);
+      const resolvable = native && typeof r.installPath === 'string' && r.installPath.trim() !== '';
+      if (field.kind === 'unknown' && !resolvable) {
+        return { state: 'unknown', why: `the copy ${evidence} names: its installPath ${field.why}` };
+      }
+      const named = field.kind === 'absent' ? null : (r.installPath as string);
       const p = native ? (named ? path.resolve(openclawDir, tilde(named, home)) : native) : named;
       if (!p) continue;
       const copy = readCopyAt(p);
       if (copy.state === 'unknown') return { state: 'unknown', why: `the copy ${evidence} names: ${copy.why}` };
       if (copy.state === 'absent') {
         dangling ??= `the copy ${evidence} names is not on disk (${p})`;
+        danglingDirs.push(p);
         continue;
       }
       const recorded = native ? semver.valid(String(r.resolvedVersion ?? r.version ?? '')) : null;
@@ -365,7 +393,7 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
     if (v.state === 'unknown') return { state: 'unknown', why: `the local copy: ${v.why}` };
     found.push({ dir: local, version: v.version, evidence: 'extensions directory' });
   }
-  if (found.length === 0) return dangling ? { state: 'none', dangling } : { state: 'none' };
+  if (found.length === 0) return dangling ? { state: 'none', dangling, danglingDirs } : { state: 'none' };
   if (found.length > 1 && found[0].version !== found[1].version) {
     return { state: 'unknown', why: `two unrecorded copies (v${found[0].version} linked, v${found[1].version} in extensions)` };
   }
@@ -439,6 +467,13 @@ type CopyRead =
  * cannot be read, or carries no exact version, is `unknown`.
  */
 function readCopyAt(dir: string): CopyRead {
+  // #260 r9 (Sol): a relative path names a folder against OpenClaw's own
+  // working directory, not this process's. Stat'ing it here measured some
+  // other folder, and "not there" let a forced install replace a copy no one
+  // checked. Not checked is not absent.
+  if (!path.isAbsolute(dir)) {
+    return { dir, state: 'unknown', why: `${dir} is not an absolute path, so which folder it names is not known here` };
+  }
   let st: fs.Stats;
   try {
     st = fs.statSync(dir);
@@ -489,4 +524,191 @@ export function readRealtimeReplacementEvidence(
     linked: readLinkedRealtimeInstall(home, opts),
     deleting,
   };
+}
+
+/**
+ * #260 r11 (Sol): the managed npm project folder that physically holds the
+ * copy a replacement preflight verified — the real path of the
+ * `~/.openclaw/npm/projects/<dir>` the selected copy's real location sits in.
+ * Null when the preflight verified no specific copy, or that copy is in no
+ * managed project, or a real path cannot be read. A write whose target comes
+ * from the disk resolver (`resolveRealtimeProjectDir`) goes to this folder or
+ * does not happen: the resolver can choose a different copy than OpenClaw did.
+ */
+export function verifiedRealtimeProjectDir(
+  home: string,
+  evidence: { selected: SelectedRealtimeInstall },
+): string | null {
+  if (evidence.selected.state !== 'selected') return null;
+  try {
+    const projects = fs.realpathSync(path.join(home, '.openclaw', 'npm', 'projects'));
+    const rel = path.relative(projects, fs.realpathSync(evidence.selected.dir));
+    if (!rel || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) return null;
+    return path.join(projects, rel.split(path.sep)[0]);
+  } catch {
+    return null;
+  }
+}
+
+/** Where a managed-pin repair may write, or why it may not. */
+export type ManagedManifestTarget =
+  | { ok: true; projectDir: string; manifestPath: string }
+  | { ok: false; why: 'folders-disagree' | 'manifest-not-plain-file' | 'no-record' };
+
+/**
+ * r15 (owner ruling, Jarvis 4a): a record whose copy is gone from disk still
+ * names its managed project. The real path of the one `npm/projects/<dir>`
+ * every dangling path sits in; null if any sits in none, or they disagree.
+ */
+function danglingRecordProjectDir(home: string, evidence: { selected: SelectedRealtimeInstall }): string | null {
+  const s = evidence.selected;
+  if (s.state !== 'none' || !s.danglingDirs?.length) return null;
+  const real = (p: string): string | null => {
+    try { return fs.realpathSync(p); } catch { return null; }
+  };
+  const projects = real(path.join(home, '.openclaw', 'npm', 'projects'));
+  const found = new Set<string>();
+  for (const dir of s.danglingDirs) {
+    let project: string | null = null;
+    for (let cur = path.resolve(dir); path.dirname(cur) !== cur; cur = path.dirname(cur)) {
+      if (projects && real(path.dirname(cur)) === projects) { project = real(cur); break; }
+    }
+    if (!project || path.dirname(project) !== projects) return null;
+    found.add(project);
+  }
+  return found.size === 1 ? [...found][0] : null;
+}
+
+/**
+ * #260 r12 (Sol): the one target check for a managed-pin repair, shared by the
+ * repair and by doctor's advice for it. The folder must be the one the
+ * preflight verified ({@link verifiedRealtimeProjectDir}) — and so must the
+ * FILE: its package.json must be a regular file, not a link, whose real path
+ * is that folder's own package.json. A link into a different project passed
+ * the folder check and was then written through. Any doubt refuses.
+ */
+export function managedManifestTarget(
+  home: string,
+  evidence: { selected: SelectedRealtimeInstall },
+  projectDir: string | null,
+): ManagedManifestTarget {
+  const verified = verifiedRealtimeProjectDir(home, evidence) ?? danglingRecordProjectDir(home, evidence);
+  // r15 (owner decision, Jarvis 4b): no record names any copy — refuse; see noRecordPinDoor.
+  if (evidence.selected.state === 'none' && !evidence.selected.dangling) return { ok: false, why: 'no-record' };
+  if (!verified || !projectDir) return { ok: false, why: 'folders-disagree' };
+  try {
+    if (fs.realpathSync(projectDir) !== verified) return { ok: false, why: 'folders-disagree' };
+  } catch {
+    return { ok: false, why: 'folders-disagree' };
+  }
+  const manifestPath = path.join(verified, 'package.json');
+  try {
+    const named = path.join(projectDir, 'package.json');
+    const st = fs.lstatSync(named);
+    if (st.isSymbolicLink() || !st.isFile() || fs.realpathSync(named) !== manifestPath) {
+      return { ok: false, why: 'manifest-not-plain-file' };
+    }
+  } catch {
+    return { ok: false, why: 'manifest-not-plain-file' };
+  }
+  return { ok: true, projectDir: verified, manifestPath };
+}
+
+/**
+ * r15 (Jarvis 4b): the door for the no-record refusal, shared by the repair and
+ * doctor. OpenClaw's reinstall keeps a stale dependency pin (it re-imports only
+ * its overrides), so the install alone does not heal this: name the pins and
+ * the file, then the install, then doctor. The path is on its own line,
+ * `~`-relative and escaped, never on a command line.
+ */
+export function noRecordPinDoor(home: string, projectDir: string, manifest: unknown, version: string | null): string {
+  const pins = findLatentEoverridePins(manifest);
+  const file = path.join(projectDir, 'package.json');
+  const shown = file.startsWith(home + path.sep) ? `~${file.slice(home.length)}` : file;
+  return 'No install record names the managed project holding these pins, so repair will not rewrite it (an owner decision), and a reinstall alone keeps them. ' +
+    (pins.length ? `Remove ${pins.map((p) => `dependencies.${p}`).join(', ')} (and the same names from openclaw.managedPeerDependencies, if listed) from that project's package.json, then run` : 'Run') +
+    ` \`${realtimePluginInstallCommand(version)}\`, then \`openclaw gateway restart\`, then \`shieldcortex doctor\` to confirm.\nFile: ${safeForReason(shown)}`;
+}
+
+/**
+ * Re-check, right before a write, that a target {@link managedManifestTarget}
+ * approved still holds: the folder's real path is unchanged and its
+ * package.json is still a regular file, not a link. False on any doubt.
+ */
+export function managedManifestTargetStillHolds(target: { projectDir: string; manifestPath: string }): boolean {
+  try {
+    if (fs.realpathSync(target.projectDir) !== target.projectDir) return false;
+    const st = fs.lstatSync(target.manifestPath);
+    return !st.isSymbolicLink() && st.isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** A manifest read bound to the file it came from (see {@link readBoundManifest}). */
+export interface BoundManifestRead {
+  text: string;
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  sha256: string;
+  /** The file's owner and mode bits, for a replacement that keeps them (r15). */
+  uid: number;
+  gid: number;
+  mode: number;
+}
+
+/**
+ * #260 r13 (Sol): read `file` through ONE descriptor opened without following
+ * a link (`O_NOFOLLOW`; where the platform has none, an lstat gate first),
+ * and record that descriptor's identity — dev, inode, size, mtime — and a
+ * sha256 of exactly the bytes read. Callers parse from `text`, so what they
+ * write back derives from the file {@link boundManifestUnchanged} re-checks.
+ * Throws on a link, a non-regular file, or any read error.
+ */
+export function readBoundManifest(file: string): BoundManifestRead {
+  const noFollow = fs.constants.O_NOFOLLOW;
+  if (typeof noFollow !== 'number') {
+    const st = fs.lstatSync(file);
+    if (st.isSymbolicLink() || !st.isFile()) throw new Error('package.json is not a plain file');
+  }
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (typeof noFollow === 'number' ? noFollow : 0));
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw new Error('package.json is not a plain file');
+    const bytes = fs.readFileSync(fd);
+    return {
+      text: bytes.toString('utf-8'),
+      dev: st.dev,
+      ino: st.ino,
+      size: st.size,
+      mtimeMs: st.mtimeMs,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      uid: st.uid,
+      gid: st.gid,
+      mode: st.mode,
+    };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Re-check, right before a write, that `file` is still the file `read` came
+ * from with the same bytes: its entry is not a link, has the same dev, inode,
+ * size and mtime, and a fresh bound read has the same identity and sha256. A
+ * different regular file (new inode) or the same inode rewritten fails it.
+ * False on any doubt.
+ */
+export function boundManifestUnchanged(file: string, read: BoundManifestRead): boolean {
+  try {
+    const st = fs.lstatSync(file);
+    if (st.isSymbolicLink() || !st.isFile()) return false;
+    if (st.dev !== read.dev || st.ino !== read.ino || st.size !== read.size || st.mtimeMs !== read.mtimeMs) return false;
+    const again = readBoundManifest(file);
+    return again.dev === read.dev && again.ino === read.ino && again.sha256 === read.sha256;
+  } catch {
+    return false;
+  }
 }

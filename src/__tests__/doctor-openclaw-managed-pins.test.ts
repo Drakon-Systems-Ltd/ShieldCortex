@@ -1,6 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { checkOpenClawManagedPinDrift } from '../cli/doctor.js';
 
@@ -29,6 +30,11 @@ describe('doctor — OpenClaw managed-pin drift / disabled realtime plugin', () 
     fs.mkdirSync(pkgDir, { recursive: true });
     fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', version: '4.32.8' }));
     fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(manifest, null, 2));
+    // #260 r12: OpenClaw's install record names this copy, so it is the copy
+    // OpenClaw selected and the repair's target check accepts this project.
+    const plugins = path.join(home, '.openclaw', 'plugins');
+    fs.mkdirSync(plugins, { recursive: true });
+    fs.writeFileSync(path.join(plugins, 'installs.json'), JSON.stringify({ installRecords: { 'shieldcortex-realtime': { version: '4.32.8', installPath: pkgDir } } }));
   }
   function setEnabled(enabled: boolean): void {
     const dir = path.join(home, '.openclaw');
@@ -73,5 +79,126 @@ describe('doctor — OpenClaw managed-pin drift / disabled realtime plugin', () 
     expect(r.status).toBe('fail');
     expect(r.message).toMatch(/disabled/i);
     expect(r.fix).toMatch(/shieldcortex openclaw repair/);
+  });
+});
+
+/**
+ * #260 r12 (Sol): the pin-drift row recommended `shieldcortex openclaw repair`
+ * where that repair's own target check refuses. Doctor now asks the SAME
+ * function (`managedManifestTarget`); when it refuses, the row gives
+ * diagnostic advice only — no repair command, no host path.
+ */
+describe('#260 r12: doctor offers the managed-pin repair only where its target check accepts', () => {
+  const ID = 'shieldcortex-realtime';
+  const PKG = '@drakon-systems/shieldcortex-realtime';
+  let home: string;
+  beforeEach(() => { home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-ocpins-r12-')); });
+  afterEach(() => { fs.rmSync(home, { recursive: true, force: true }); });
+
+  const put = (file: string, text: string): void => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+  };
+  /** A managed project holding the plugin at `version`, its manifest drifting (`peer` 1.0.0 vs override 2.0.0). */
+  function project(name: string, version: string): { root: string; dir: string } {
+    const root = path.join(home, '.openclaw', 'npm', 'projects', name);
+    const dir = path.join(root, 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+    put(path.join(dir, 'package.json'), JSON.stringify({ name: PKG, version, main: './dist/index.js' }));
+    put(path.join(dir, 'openclaw.plugin.json'), JSON.stringify({ id: ID, version }));
+    put(path.join(dir, 'dist', 'index.js'), '');
+    put(path.join(root, 'package.json'), JSON.stringify({ dependencies: { peer: '1.0.0' }, overrides: { peer: '2.0.0' } }));
+    return { root, dir };
+  }
+  function indexSelects(selected: string, version: string): void {
+    const dbPath = path.join(home, '.openclaw', 'state', 'openclaw.sqlite');
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    const db = new Database(dbPath);
+    try {
+      db.prepare('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT, updated_at_ms INTEGER)').run();
+      db.prepare('INSERT INTO config_machine_state VALUES (?, ?, 1)').run('plugins.installedIndex', JSON.stringify({
+        revision: 1,
+        index: { generatedAtMs: 1, installRecords: { [ID]: { source: 'npm', version, installPath: selected } }, plugins: [{ pluginId: ID, enabled: true, rootDir: selected }] },
+      }));
+    } finally {
+      db.close();
+    }
+  }
+  function config(installsPath: string, enabled = true): void {
+    put(path.join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { allow: [ID], entries: { [ID]: { enabled } } } }));
+    put(path.join(home, '.openclaw', 'plugins', 'installs.json'), JSON.stringify({ installRecords: { [ID]: { version: '5.22.1', installPath: installsPath } } }));
+  }
+  const expectDiagnosticOnly = (fix: string | undefined, why: RegExp): void => {
+    expect(fix).toBeDefined();
+    expect(fix).not.toMatch(/shieldcortex openclaw repair/);
+    expect(fix).toMatch(/Check it: `shieldcortex openclaw status`/);
+    expect(fix).toMatch(why);
+    expect(fix).not.toContain(home);
+  };
+
+  it('Sol\'s mismatch fixture (empty installs.json path; the index selects 5.22.1, the resolver a 5.23.0 project) — warn, no repair command', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', '5.22.1');
+    project('drakon-systems-shieldcortex-realtime-bbb', '5.23.0');
+    indexSelects(selected.dir, '5.22.1');
+    config('');
+
+    const r = await checkOpenClawManagedPinDrift(home);
+
+    expect(r.status).toBe('warn');
+    expectDiagnosticOnly(r.fix, /not the one holding the copy OpenClaw selected/);
+    expect(r.needsOpenClawCli).toBeUndefined();
+  });
+
+  it('the same mismatch with the plugin disabled — fail, no repair command', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', '5.22.1');
+    project('drakon-systems-shieldcortex-realtime-bbb', '5.23.0');
+    indexSelects(selected.dir, '5.22.1');
+    config('', false);
+
+    const r = await checkOpenClawManagedPinDrift(home);
+
+    expect(r.status).toBe('fail');
+    expectDiagnosticOnly(r.fix, /not the one holding the copy OpenClaw selected/);
+  });
+
+  it('the verified project\'s package.json is a symlink into another project — warn, no repair command', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', '5.22.1');
+    const other = project('other-managed-project', '5.23.0');
+    fs.unlinkSync(path.join(selected.root, 'package.json'));
+    fs.symlinkSync(path.join(other.root, 'package.json'), path.join(selected.root, 'package.json'));
+    indexSelects(selected.dir, '5.22.1');
+    config(selected.dir);
+
+    const r = await checkOpenClawManagedPinDrift(home);
+
+    expect(r.status).toBe('warn');
+    expectDiagnosticOnly(r.fix, /package\.json is not a plain file/);
+  });
+
+  it('no record selects any copy — warn, no repair command (the repair refuses: no record names the project)', async () => {
+    project('drakon-systems-shieldcortex-realtime-aaa', '5.22.1');
+    put(path.join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { allow: [ID], entries: { [ID]: { enabled: true } } } }));
+
+    const r = await checkOpenClawManagedPinDrift(home);
+
+    expect(r.status).toBe('warn');
+    // r15 (Jarvis 4b): the door the repair prints — the pins to remove by hand
+    // and the file (on its own line), then the install, then doctor.
+    expect(r.fix).not.toMatch(/shieldcortex openclaw repair/);
+    expect(r.fix).toMatch(/No install record names the managed project/);
+    expect(r.fix).toMatch(/Remove dependencies\.peer .*then run `openclaw plugins install .*`, then `openclaw gateway restart`, then `shieldcortex doctor` to confirm/);
+    expect(r.fix).toMatch(/\nFile: ~\/\.openclaw\/npm\/projects\/drakon-systems-shieldcortex-realtime-aaa\/package\.json$/);
+    expect(r.fix).not.toContain(home);
+  });
+
+  it('matching control: the index and the resolver name the same project — the repair command is still offered', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', '5.22.1');
+    indexSelects(selected.dir, '5.22.1');
+    config(selected.dir);
+
+    const r = await checkOpenClawManagedPinDrift(home);
+
+    expect(r.status).toBe('warn');
+    expect(r.fix).toMatch(/shieldcortex openclaw repair/);
+    expect(r.needsOpenClawCli).toEqual({ subcommand: 'plugins' });
   });
 });

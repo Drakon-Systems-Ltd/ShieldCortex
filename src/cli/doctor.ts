@@ -14,6 +14,7 @@ import { REQUIRED_HOOK_NAMES } from '../setup/settings-hooks.js';
 import { hookCommandResolves, hookCommandTrust } from '../setup/hook-command-resolution.js';
 import {
   resolveRealtimePluginInstallPath,
+  resolveRealtimeProjectDir,
   readInstalledRealtimePluginVersion,
   readRealtimeProjectManifest,
   findEoverrideRiskPins,
@@ -22,8 +23,10 @@ import {
 import {
   canonicalProjectDirFromIndex,
   gatherReconcileInput,
+  planReconcileActions,
   reconcilePluginState,
   REALTIME_PLUGIN_ID,
+  safeForReason,
   type ReconcileInput,
   type ReconcileVerdict,
 } from '../integrations/openclaw-plugin-index.js';
@@ -116,7 +119,13 @@ import { isRepairLogName } from '../logs/retention.js';
 import { checkVolumeFreeSpace } from './doctor-volume-space.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
-import { realtimePluginInstallCommand } from '../setup/openclaw-plugin-spec.js';
+import {
+  assessRealtimeReplacement,
+  exactPluginPin,
+  REALTIME_PLUGIN_PACKAGE,
+  realtimePluginInstallCommand,
+} from '../setup/openclaw-plugin-spec.js';
+import { managedManifestTarget, noRecordPinDoor, readRealtimeReplacementEvidence } from '../integrations/openclaw-realtime-install.js';
 import {
   CLAUDE_CODE_ENFORCEMENT_FLOOR,
   detectClaudeCode,
@@ -8772,29 +8781,48 @@ export async function checkOpenClawManagedPinDrift(
 
   const disabled = isRealtimePluginDisabledInConfig(home);
   const risks = findEoverrideRiskPins(manifest);
+  // #260 r12 (Sol): never offer the repair where its own target check (the
+  // same function) refuses — diagnostic advice only, no repair command, and
+  // no host path in the text (round 8).
+  const withTarget = (row: CheckResult): CheckResult => {
+    const projectDir = resolveRealtimeProjectDir(home);
+    const target = managedManifestTarget(home, readRealtimeReplacementEvidence(home), projectDir);
+    if (target.ok) return row;
+    const { needsOpenClawCli: _gate, ...rest } = row;
+    void _gate;
+    // r15: the same door the repair prints when it refuses for this reason.
+    if (target.why === 'no-record' && projectDir) return { ...rest, fix: noRecordPinDoor(home, projectDir, manifest, pkg.version) };
+    return {
+      ...rest,
+      fix: 'Check it: `shieldcortex openclaw status`. Repair will not rewrite the managed pins here: ' +
+        (target.why === 'folders-disagree'
+          ? 'the managed project holding this manifest is not the one holding the copy OpenClaw selected.'
+          : 'the managed project\'s package.json is not a plain file in the folder holding the copy OpenClaw selected.'),
+    };
+  };
 
   if (disabled) {
     const detail = risks.length
       ? ` (manifest still has a version-drifted pin: ${risks.map((r) => r.name).join(', ')})`
       : '';
-    return {
+    return withTarget({
       label,
       status: 'fail',
       message: `realtime plugin is DISABLED in OpenClaw config${detail} — threat telemetry is not flowing`,
       fix: 'Run `shieldcortex openclaw repair` to reconcile the managed pins, reinstall, and re-enable the plugin.',
       needsOpenClawCli: { subcommand: 'plugins' },
-    };
+    });
   }
 
   if (risks.length > 0) {
     const list = risks.map((r) => `${r.name} (dep ${r.dependencyVersion} ≠ override ${r.overrideVersion})`).join(', ');
-    return {
+    return withTarget({
       label,
       status: 'warn',
       message: `managed-pin drift will EOVERRIDE on the next \`openclaw update\`: ${list}`,
       fix: 'Run `shieldcortex openclaw repair` now to reconcile the pins before an update disables the plugin.',
       needsOpenClawCli: { subcommand: 'plugins' },
-    };
+    });
   }
 
   return { label, status: 'pass', message: 'no managed-pin drift; plugin enabled' };
@@ -8996,9 +9024,13 @@ export async function checkOpenClawPluginLoadState(
 
   const input = gatherReconcileInput(home, { expectedVersion });
   const verdict = reconcilePluginState(input);
-  const result = verdict.state === 'duplicate-install'
-    ? withDuplicateInstallEvidence(renderPluginLoadVerdict(verdict), home, input)
-    : renderPluginLoadVerdict(verdict);
+  const result = withRepairPreflight(
+    verdict.state === 'duplicate-install'
+      ? withDuplicateInstallEvidence(renderPluginLoadVerdict(verdict), home, input)
+      : renderPluginLoadVerdict(verdict),
+    verdict,
+    home,
+  );
 
   // #226: "loaded" is not "protecting the conversation". A plugin whose
   // conversation-access grant is missing has had its llm_input/llm_output
@@ -9026,6 +9058,60 @@ export async function checkOpenClawPluginLoadState(
     }
   }
   return result;
+}
+
+/**
+ * #260 r7 (Sol): doctor never offers a repair that repair's own #1109
+ * preflight would refuse for the same host. When the verdict's plan forces a
+ * realtime install and {@link assessRealtimeReplacement} would leave the
+ * plugin alone (a newer, linked or unreadable copy, or install evidence that
+ * conflicts), the fix says that and what to check — no repair or install
+ * command. The preflight's refusals are not weakened here; this only stops
+ * doctor promising what repair will not do.
+ *
+ * r8 (Sol): the preflight's own summary names host paths and versions, so it
+ * never shares a line with a command: the command line is code-authored, the
+ * reason is chosen from the refusal kind, and the summary goes on its own
+ * detail line, quoted, with every control, bidi, quote and backtick character
+ * escaped ({@link quotedHostText}) — no line break, no command span. The
+ * human report prints that prose beside the command (`fixNoteWithCommands`).
+ */
+const PREFLIGHT_REFUSAL: Record<'linked' | 'newer' | 'unknown', string> = {
+  linked: 'the plugin is a linked install',
+  newer: 'a copy on disk is newer than this CLI',
+  unknown: 'it could not confirm which copy OpenClaw uses, or could not read that copy',
+};
+
+/** Host text for a fix detail line: one line, quoted, nothing a command or line parser can pick up. */
+function quotedHostText(text: string): string {
+  return `"${safeForReason(text).replace(/[`"]/g, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`)}"`;
+}
+
+function withRepairPreflight(result: CheckResult, verdict: ReconcileVerdict, home: string): CheckResult {
+  if (result.status === 'pass') return result;
+  const pin = exactPluginPin(verdict.expectedVersion);
+  if (!pin) return result;
+  const plan = planReconcileActions(verdict, {
+    expectedVersion: verdict.expectedVersion,
+    pluginId: REALTIME_PLUGIN_ID,
+    packageName: REALTIME_PLUGIN_PACKAGE,
+  });
+  if (!plan.some((s) => s.kind === 'openclaw-install' || s.kind === 'openclaw-install-pinned')) return result;
+  const keep = assessRealtimeReplacement(readRealtimeReplacementEvidence(home), pin);
+  if (keep.replace) return result;
+  // The fix no longer runs an `openclaw plugins` command, so it is not gated.
+  // A display copy of the old fix would replace this one in the human report.
+  const { needsOpenClawCli: _gate, displayFix: _display, ...rest } = result;
+  void _gate;
+  void _display;
+  return {
+    ...rest,
+    fix:
+      'Check it: `shieldcortex openclaw status`. Repair will not reinstall the plugin here: ' +
+      `${PREFLIGHT_REFUSAL[keep.why]}.\n` +
+      `Repair's safety check said: ${quotedHostText(keep.summary.replace(/^left alone — /, ''))}`,
+    fixNoteWithCommands: true,
+  };
 }
 
 /**
@@ -9084,6 +9170,24 @@ export function withDuplicateInstallEvidence(
 }
 
 /**
+ * The version text for a passing plugin row (#260, Case r2 #1): `v<measured>`
+ * when the reconciler measured one, else "version unverified". Never the
+ * expected version: that is what this CLI wants, not what is on the host.
+ * Hand-built verdicts without `installedVersion` fall back to the layers they
+ * do carry (on-disk, then the index record), never to the pin; r7 (Sol): the
+ * index record's version is worded as the record's, not as a measured build.
+ * (`onDiskVersion` may itself be installs.json's record — #1176 scope.)
+ */
+export function measuredVersionText(verdict: ReconcileVerdict): string {
+  if (verdict.versionUnverified === true) return 'version unverified';
+  if (verdict.installedVersion !== undefined) {
+    return verdict.installedVersion ? `v${verdict.installedVersion}` : 'version unverified';
+  }
+  if (verdict.onDiskVersion) return `v${verdict.onDiskVersion}`;
+  return verdict.indexVersion ? `v${verdict.indexVersion} per OpenClaw's install record` : 'version unverified';
+}
+
+/**
  * Verdict → operator-facing check result. Split out of
  * `checkOpenClawPluginLoadState` so every state can be asserted directly
  * (#222): the bug there was not the classification but the RENDERING — a
@@ -9095,6 +9199,14 @@ export function withDuplicateInstallEvidence(
 export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult {
   const label = 'OpenClaw plugin loaded';
   const fix = 'Run `shieldcortex repair` to reconcile the plugin install metadata and verify it actually loads.';
+
+  // #260 (Sol finding 4): "not installed" is a claim about records, and the
+  // install index — the main one — is there but could not be read. The
+  // reconciler no longer produces this pairing; a verdict built elsewhere
+  // that does must not reach the install advice below.
+  if (verdict.state === 'enabled-not-installed' && verdict.indexUnreadable === true) {
+    return renderPluginLoadVerdict({ ...verdict, state: 'index-unreadable', severity: 'warn', recommendedAction: 'none' });
+  }
 
   switch (verdict.state) {
     case 'not-installed':
@@ -9185,14 +9297,30 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         // the old wording ("roster", "SQLite index unreadable") read as a fault.
         message:
           'couldn\'t read OpenClaw\'s plugin list, so couldn\'t check the realtime plugin is running. ' +
-          'This is a check that couldn\'t run, not a fault (the list file may be locked, or OpenClaw is older than 2026.6.1)',
-        fix: 'Couldn\'t read OpenClaw\'s plugin list file. If the plugin is already loaded you are protected. Do not run repair from this warning.',
+          'This is a check that couldn\'t run, not a fault (the list may be locked, or this OpenClaw version stores it in a way this ShieldCortex version cannot read yet)',
+        fix: 'Couldn\'t read OpenClaw\'s plugin list. If the plugin is already loaded you are protected. Do not run repair from this warning.',
       };
     case 'load-unproven':
       // #142: the boot roster snapshot races plugin registration, and a
       // registration line was sighted after the snapshot. Neither loaded nor
       // absent can be proven from logs — a confident UNPROTECTED here is the
       // false alarm that trains operators to ignore the check that caught #74.
+      if (verdict.indexPathMissing) {
+        // #260: a different cause — OpenClaw's record points at a folder that
+        // holds no build, and nothing shows which other copy (if any) OpenClaw
+        // selected. A copy elsewhere on disk is not a selection (Sol finding
+        // 3), so the message does not depend on whether one was found. Not a
+        // pass, not a conviction.
+        return {
+          label,
+          status: 'warn',
+          message:
+            'couldn\'t confirm the realtime plugin is installed and loaded — OpenClaw\'s plugin list points to a folder that holds no plugin build, ' +
+            'and nothing shows that OpenClaw uses any other copy. It may be installed somewhere else. Neither OK nor a fault is confirmed',
+          fix: 'Check it: `shieldcortex openclaw status`',
+          verboseNote: `Prove enforcement live: ${LIVE_CANARY_COMMAND}`,
+        };
+      }
       return {
         label,
         status: 'warn',
@@ -9220,9 +9348,63 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'fail',
-        message: `realtime plugin regressed to v${verdict.onDiskVersion ?? verdict.indexVersion} (older than expected v${verdict.expectedVersion}) — running stale, refuse the downgrade`,
+        // Case r5: an unverified regression is a claim, not a measurement —
+        // say whose claim it is and that the running version is unknown. Only
+        // a measured regression says "running stale".
+        // r8: `record-path-build` is the build in the record's folder — a
+        // measured copy, but not the one OpenClaw selects.
+        message: verdict.versionUnverified === true
+          ? `realtime plugin: ${
+            verdict.installedVersionSource === 'disk'
+              ? 'the build on disk is'
+              : verdict.installedVersionSource === 'record-path-build'
+                ? "the build in the folder OpenClaw's install record names is"
+                : "OpenClaw's install record says"
+          } v${verdict.installedVersion ?? verdict.onDiskVersion ?? verdict.indexVersion}, ` +
+            `older than expected v${verdict.expectedVersion}; running version unknown (nothing measured the copy OpenClaw uses) — refuse the downgrade`
+          : `realtime plugin regressed to v${verdict.installedVersion ?? verdict.onDiskVersion ?? verdict.indexVersion} (older than expected v${verdict.expectedVersion}) — running stale, refuse the downgrade`,
         fix,
         // The exact line the #221 operator chased for five days.
+        needsOpenClawCli: { subcommand: 'plugins' },
+      };
+    case 'version-unverified':
+      // #260 (jarvis r3): the selected build is real but its version could not
+      // be read. A version check that cannot measure must not pass — warn, and
+      // never print the expected version as if it had been read.
+      // r6: say what the evidence is — a copy whose version could not be
+      // read, or (indexPathMissing) a folder that holds no build at all.
+      return {
+        label,
+        status: 'warn',
+        message:
+          (verdict.indexPathMissing === true
+            ? 'realtime plugin enabled, but OpenClaw\'s plugin index points to a folder that holds no build, so which copy OpenClaw uses and its version are unknown (version unverified)'
+            : 'realtime plugin installed and enabled, but the version of the copy OpenClaw uses could not be read (version unverified)') +
+          (verdict.loadedInLiveRoster === true
+            ? ' — the running gateway loaded it; which version is not confirmed'
+            : ' — and the running gateway\'s start-up list could not be read, so the load is not confirmed either'),
+        // r7 (Sol): no action, so the fix is diagnostic only — never an
+        // install command (repair's #1109 preflight refuses to replace a
+        // copy it cannot read, or one the index evidence disagrees about).
+        fix: verdict.indexPathMissing === true
+          ? 'Check it: `shieldcortex openclaw status` — it shows which folder OpenClaw\'s plugin index points to and which copies are on disk.'
+          : 'Check it: `shieldcortex openclaw status`, and check that the selected copy\'s package.json and openclaw.plugin.json can be read and carry an exact version.',
+      };
+    case 'stale-index-record':
+      // #260 r6 (owner ruling): fails on the STALE INDEX RECORD — the folders
+      // OpenClaw's index points at hold no build and its record is older than
+      // expected. Not a measured regression: no version is printed as the
+      // running one. Repair reinstalls pinned to the expected version, which
+      // rewrites the record.
+      return {
+        label,
+        status: 'fail',
+        message:
+          'realtime plugin: OpenClaw\'s plugin index points to folders that hold no build (stale index record), and that record names a version older than expected; running version unknown' +
+          (verdict.loadedInLiveRoster === true
+            ? '. The running gateway loaded a copy, but nothing shows which one'
+            : ''),
+        fix: `Run \`shieldcortex repair\`: it reinstalls the plugin pinned to v${verdict.expectedVersion}, which rewrites OpenClaw's stale index record, and then checks the plugin loads.`,
         needsOpenClawCli: { subcommand: 'plugins' },
       };
     case 'conflicted-metadata':
@@ -9237,7 +9419,11 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'warn',
-        message: `${(verdict.onDiskVersion && 'realtime plugin has ') || ''}multiple install dirs on disk — prune the stale duplicate before a toggle re-resolves to it`,
+        // #260 Sol r2: no removal advice — doctor cannot tell which copy is
+        // stale, and the stale-looking one may be the only intact copy.
+        // `shieldcortex repair` removes only proven older/equal duplicates of
+        // the verified selected build, and nothing otherwise.
+        message: `${(verdict.onDiskVersion && 'realtime plugin has ') || ''}multiple install dirs on disk — a toggle could re-resolve to the wrong one`,
         fix,
         needsOpenClawCli: { subcommand: 'plugins' },
       };
@@ -9260,7 +9446,15 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       // with an explicit diagnostic gap, matching the reconciler's `ok` verdict
       // without turning installation evidence into a live-load assertion.
       const rosterProven = verdict.loadedInLiveRoster === true;
-      const version = verdict.onDiskVersion ?? verdict.expectedVersion;
+      // #260 (Case r2 #1): only a version the reconciler MEASURED for the copy
+      // it judged — never the expected version, which is the pin this CLI
+      // wants and was not read off this host. Both passes below use it.
+      const versionText = measuredVersionText(verdict);
+      // r4c: a version check that cannot measure never passes — not even on a
+      // hand-built `healthy` verdict that carries no version.
+      if (versionText === 'version unverified') {
+        return renderPluginLoadVerdict({ ...verdict, state: 'version-unverified', severity: 'warn' });
+      }
       if (!rosterProven) {
         // Status stays `pass`: the reconciler classified this `severity: 'ok'`
         // (installed, enabled, versions agree) and nothing is known to be
@@ -9271,7 +9465,7 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
           label,
           status: 'pass',
           message:
-            `realtime plugin installed and enabled at v${version} — but the RUNNING gateway's boot roster ` +
+            `realtime plugin installed and enabled (${versionText}) — but the RUNNING gateway's boot roster ` +
             'could not be read, so load is NOT separately proven',
           // Not in the message: a pass becomes a default-report warn when
           // conversation access is withheld, and that row must stay plain.
@@ -9299,8 +9493,8 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         label,
         status: 'pass',
         message: hotReload
-          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, v${version}); enforcement not probed here`
-          : `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here`,
+          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, ${versionText}); enforcement not probed here`
+          : `realtime plugin loaded (roster-confirmed, ${versionText}); enforcement not probed here`,
         verboseNote: `Prove it live with: ${LIVE_CANARY_COMMAND}`,
       };
     }
@@ -9490,16 +9684,27 @@ export function realRunningPluginVersionDeps(home: string = os.homedir()): Runni
     readGatewayPid: (): number | null => readRunningGatewayProcess(home)?.pid ?? null,
     readRosterConfirmedVersion: (): string | null => {
       try {
-        const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: pkg.version }));
-        if (verdict.loadedInLiveRoster === true) {
-          return readInstalledRealtimePluginVersion(home);
-        }
+        return rosterConfirmedSelectedVersion(
+          reconcilePluginState(gatherReconcileInput(home, { expectedVersion: pkg.version })),
+        );
       } catch {
         // roster unreadable — log path stays the only proof
       }
       return null;
     },
   };
+}
+
+/**
+ * #317's roster-composed version, honestly sourced (#260, Sol r2): the
+ * version read out of the build OpenClaw SELECTED, and only when the running
+ * gateway's roster proves the plugin loaded. Null otherwise — in particular
+ * for a version that came from ShieldCortex's own disk scan, which is not the
+ * selected copy and used to be compared against itself (disk vs disk).
+ */
+export function rosterConfirmedSelectedVersion(verdict: ReconcileVerdict): string | null {
+  if (verdict.loadedInLiveRoster !== true || verdict.installedVersionSource !== 'selected-build') return null;
+  return verdict.installedVersion ?? null;
 }
 
 export async function checkOpenClawRunningPluginVersion(
@@ -9556,8 +9761,8 @@ export async function checkOpenClawRunningPluginVersion(
         label,
         status: 'pass',
         message:
-          `running v${roster} matches on-disk v${diskVersion} (roster-confirmed; ` +
-          `log line unavailable on this platform)`,
+          `loaded (roster-confirmed) from the selected build v${roster}, which matches on-disk v${diskVersion}; ` +
+          `no registration line names the version this process loaded (log line unavailable on this platform)`,
       };
     }
     return {
