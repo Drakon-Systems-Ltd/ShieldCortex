@@ -47,6 +47,11 @@ export interface RepairVerdictInput {
     rosterState?: 'loaded' | 'absent' | 'unproven';
     canaryProof?: boolean;
     versionProof?: boolean;
+    /**
+     * #1179 r1: the version proof failed only because the selected copy's
+     * version could not be read (see the self-check's `versionUnread`).
+     */
+    versionUnread?: boolean;
   };
   /** Post-remediation state, when there was one. */
   postState?: string;
@@ -83,6 +88,25 @@ export interface RepairVerdict {
 }
 
 /**
+ * #1179 r1: the version proof failed, but no version was measured — the
+ * self-check could not read the selected copy's version, and no other layer
+ * read one older than this CLI. That is missing evidence, not a plugin behind
+ * this CLI: it must not be reported as one, or answered with a forced install.
+ * An older version read from disk or an install record (`onDiskVersion`) is
+ * still a measured one.
+ */
+export function versionProofUnmeasured(
+  selfCheck: { versionProof?: boolean; versionUnread?: boolean } | undefined,
+  onDiskVersion?: string | null,
+  expectedVersion?: string,
+): boolean {
+  if (selfCheck?.versionProof !== false || selfCheck.versionUnread !== true) return false;
+  const onDisk = semver.valid(onDiskVersion ?? '');
+  const expected = semver.valid(expectedVersion ?? '');
+  return !(onDisk && expected && semver.lt(onDisk, expected));
+}
+
+/**
  * Reduce the machinery's several proofs to the one thing an operator asked.
  *
  * The ordering is deliberate: PROVEN-BAD outranks unknown, and unknown outranks
@@ -110,13 +134,18 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
     };
   }
 
+  // #1179 r1: a version proof that failed for want of any version read says
+  // nothing about which build is installed. It is answered below, as unknown,
+  // after the restart cases; the two branches here need a measured version.
+  const versionUnmeasured = versionProofUnmeasured(sc, input.onDiskVersion, input.expectedVersion);
+
   // An old disk plugin is not proof the gateway is unprotected. A major CLI
   // upgrade can outrun the plugin install; unread logs cannot prove a silent
   // loaded-build downgrade either.
   const majorUpgradeLag = input.onDiskVersion && input.expectedVersion &&
     semver.valid(input.onDiskVersion) && semver.valid(input.expectedVersion) &&
     semver.major(input.onDiskVersion) < semver.major(input.expectedVersion);
-  if (sc?.versionProof === false && (sc.rosterState !== 'loaded' || majorUpgradeLag)) {
+  if (sc?.versionProof === false && !versionUnmeasured && (sc.rosterState !== 'loaded' || majorUpgradeLag)) {
     return {
       outcome: 'protected-unproven',
       headline: 'The installed plugin is behind this CLI. Update the plugin; protection by the new build is not yet proven.',
@@ -125,7 +154,7 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
   }
 
   // A silent downgrade of the loaded build remains a real fault.
-  if (sc?.versionProof === false) {
+  if (sc?.versionProof === false && !versionUnmeasured) {
     return {
       outcome: 'unprotected',
       headline: 'Not protected by the build you expect: an older version is installed than the one this CLI ships.',
@@ -172,6 +201,18 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
         headline: `This run's plugin changes are not loaded: ${why}, so the checks read the gateway as it was before the repair. Restart the gateway, then run shieldcortex doctor.`,
         nextCommand: input.restartCommand ?? 'shieldcortex doctor',
       };
+  }
+
+  // #1179 r1: no version was read at all (for example, OpenClaw's plugin list
+  // could not be read and no build was found). Unknown — not "behind", not a
+  // downgrade — and no install command: doctor says what it could not read.
+  // A roster proven absent already returned above.
+  if (versionUnmeasured) {
+    return {
+      outcome: 'unknown',
+      headline: 'Could not read which plugin version OpenClaw uses, so whether this CLI\'s build is the one protecting the gateway is unproven, not known-broken.',
+      nextCommand: 'shieldcortex doctor',
+    };
   }
 
   if (sc?.ok) {

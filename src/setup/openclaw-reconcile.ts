@@ -802,6 +802,8 @@ export function formatReconcileReport(
           rosterState: result.selfCheck.rosterState,
           canaryProof: result.selfCheck.canaryProof,
           versionProof: result.selfCheck.versionProof,
+          // #1179 r1: an unread version stays unknown, never "behind".
+          ...(result.selfCheck.versionUnread ? { versionUnread: true } : {}),
         },
       }
       : {}),
@@ -1016,6 +1018,8 @@ export function protectionLedgerFromReconcile(result: ReconcileExecResult): {
           rosterState: result.selfCheck.rosterState,
           canaryProof: result.selfCheck.canaryProof,
           versionProof: result.selfCheck.versionProof,
+          // #1179 r1: an unread version stays unknown, never "behind".
+          ...(result.selfCheck.versionUnread ? { versionUnread: true } : {}),
         },
       }
       : {}),

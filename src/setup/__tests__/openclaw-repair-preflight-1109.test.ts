@@ -10,19 +10,28 @@
  *  - Astra P2 (managed pins): a failed managed-pin heal makes the command exit
  *    non-zero, even when nothing else in the repair has work to do.
  *
- * Nothing here spawns `openclaw` or `npm`: the publication check is answered
- * through its seam, and every repair gets a recording no-op launcher for the
- * managed-pin heal (#1179) — refusing earlier is not what keeps a case off
- * the host's `openclaw`. The runQuiet case below runs `node` on purpose.
+ * Nothing here can run a native process (#1179 r1). Both layers of
+ * support/openclaw-host-isolation are in place: every repair gets a recording
+ * no-op launcher for the managed-pin heal, and `child_process` /
+ * `node:child_process` are mocked BEFORE the repair is imported, so a real
+ * launcher throws and is recorded — a lost forwarding of the fake fails in
+ * teardown instead of reaching the host's `openclaw`. The publication check is
+ * answered through its seam. The environment is scrubbed of OpenClaw /
+ * ShieldCortex / multi-clawd / Claude variables (and restored after each test)
+ * and HOME and OPENCLAW_HOME are a temp dir. runQuiet's real-`node` case lives
+ * in run-quiet-signal-1109.test.ts, without the tripwire.
  */
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import type { SpawnSyncReturns } from 'child_process';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { repairOpenClawPlugin, __setRealtimePublishCheckForTest, confirmRealtimePluginPublishedSync } from '../openclaw.js';
-import { __runQuietForTest } from '../../cli/update.js';
-import { parseNpmViewVersion } from '../openclaw-plugin-spec.js';
+import { expectNoLaunch, installLaunchTripwire, isolateHostEnv } from '../../__tests__/support/openclaw-host-isolation.js';
+
+const tripwire = installLaunchTripwire();
+
+const { repairOpenClawPlugin, __setRealtimePublishCheckForTest, confirmRealtimePluginPublishedSync } = await import('../openclaw.js');
+const { parseNpmViewVersion } = await import('../openclaw-plugin-spec.js');
 
 const ID = 'shieldcortex-realtime';
 const PKG = '@drakon-systems/shieldcortex-realtime';
@@ -30,16 +39,41 @@ const SELF = (): string => JSON.parse(
   fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..', 'package.json'), 'utf-8'),
 ).version;
 
+/**
+ * #1179: what the managed-pin heal launches, for every repair here: a recording
+ * fake with no `openclaw` (`resolveOpenClawBin` → null), never the real
+ * `which openclaw` and runner. A heal that gets past its refusals stops at
+ * "`openclaw` is not on PATH", after its manifest writes.
+ */
+const launch = {
+  lookups: 0,
+  runs: [] as string[][],
+  deps: {
+    resolveOpenClawBin: (): string | null => {
+      launch.lookups += 1;
+      return null;
+    },
+    runOpenClaw: (_bin: string, args: string[]): SpawnSyncReturns<string> => {
+      launch.runs.push(args);
+      return { pid: 0, output: [], stdout: '', stderr: '', status: 1, signal: null };
+    },
+  },
+};
+
 let home: string;
-let prevHome: string | undefined;
+let restoreEnv: () => void;
 let prevExit: typeof process.exitCode;
 let out: string[];
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-1109-repair-'));
   fs.mkdirSync(path.join(home, '.openclaw', 'plugins'), { recursive: true });
-  prevHome = process.env.OPENCLAW_HOME;
+  restoreEnv = isolateHostEnv(home);
+  // After the scrub (which clears OPENCLAW_*): the fixture is OpenClaw's home.
   process.env.OPENCLAW_HOME = home;
+  tripwire.reset();
+  launch.lookups = 0;
+  launch.runs = [];
   prevExit = process.exitCode;
   process.exitCode = undefined;
   out = [];
@@ -52,12 +86,17 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  __setRealtimePublishCheckForTest(null);
-  jest.restoreAllMocks();
-  if (prevHome === undefined) delete process.env.OPENCLAW_HOME;
-  else process.env.OPENCLAW_HOME = prevHome;
-  process.exitCode = prevExit;
-  fs.rmSync(home, { recursive: true, force: true });
+  try {
+    // No real launcher at all (not even `which openclaw`), and the fake ran nothing.
+    expectNoLaunch(tripwire);
+    expect(launch.runs).toEqual([]);
+  } finally {
+    __setRealtimePublishCheckForTest(null);
+    jest.restoreAllMocks();
+    restoreEnv();
+    process.exitCode = prevExit;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 const writeJson = (rel: string, v: unknown): void => {
@@ -85,33 +124,17 @@ const recordedNpmInstall = (version: string, extra: Record<string, unknown> = {}
 };
 const said = (): string => out.join('\n');
 
-/**
- * #1179: what the managed-pin heal launches, for every repair here: a recording
- * fake with no `openclaw` (`resolveOpenClawBin` → null), never the real
- * `which openclaw` and runner. A heal that gets past its refusals stops at
- * "`openclaw` is not on PATH", after its manifest writes.
- */
-const launch = {
-  lookups: 0,
-  runs: [] as string[][],
-  deps: {
-    resolveOpenClawBin: (): string | null => {
-      launch.lookups += 1;
-      return null;
-    },
-    runOpenClaw: (_bin: string, args: string[]): SpawnSyncReturns<string> => {
-      launch.runs.push(args);
-      return { pid: 0, output: [], stdout: '', stderr: '', status: 1, signal: null };
-    },
-  },
-};
-beforeEach(() => {
-  launch.lookups = 0;
-  launch.runs = [];
-});
-afterEach(() => {
-  // Reads only the fake, so it is independent of the cleanup hook above.
-  expect(launch.runs).toEqual([]);
+describe('#1179 r1: this suite runs behind the launch tripwire', () => {
+  it('both child_process specifiers resolve to the recording fakes (nothing is called)', async () => {
+    const mods = [await import('child_process'), await import('node:child_process')] as unknown as
+      (Record<string, unknown> & { default: Record<string, unknown> })[];
+    for (const cp of mods) {
+      for (const name of ['execSync', 'spawnSync', 'spawn'] as const) {
+        expect(cp[name]).toBe(tripwire.launchers[name]);
+        expect(cp.default[name]).toBe(tripwire.launchers[name]);
+      }
+    }
+  });
 });
 
 describe('duplicate repair — extension-only branch is preflighted too', () => {
@@ -315,13 +338,6 @@ describe('npm view publication check — strict JSON, normal exit 0 only (nit)',
     const res = confirmRealtimePluginPublishedSync('5.20.2', {}, answer(r as Partial<R>));
     expect(res.ok).toBe(false);
     expect((res as { reason: string }).reason).toMatch(why);
-  });
-
-  it('runQuiet REJECTS a child killed by a signal (it used to resolve like exit 0)', async () => {
-    await expect(__runQuietForTest(process.execPath, ['-e', 'process.kill(process.pid, "SIGTERM")'], { timeout: 20000 }))
-      .rejects.toMatchObject({ exitCode: null, signal: 'SIGTERM' });
-    await expect(__runQuietForTest(process.execPath, ['-e', 'process.stdout.write("ok")'], { timeout: 20000 }))
-      .resolves.toEqual({ stdout: 'ok', stderr: '' });
   });
 });
 

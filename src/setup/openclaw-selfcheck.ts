@@ -95,6 +95,12 @@ export interface SelfCheckVerdict {
   canaryProof: boolean;
   /** onDiskVersion === expectedVersion (inert/true when no expectedVersion given). */
   versionProof: boolean;
+  /**
+   * #1179 r1: set (true) only when `versionProof` failed because the selected
+   * copy's version could not be read. No version was measured, so this is not
+   * evidence of an older or newer build; the repair headline keeps it unknown.
+   */
+  versionUnread?: true;
   reasons: string[];
 }
 
@@ -231,11 +237,13 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
   // Inert (true) when the caller supplied no expectedVersion (e.g. pure
   // roster+canary unit tests).
   let versionProof = true;
+  let versionUnread = false;
   if (input.expectedVersion) {
     const onDisk = semver.valid(input.onDiskVersion ?? '') ?? semver.valid(semver.coerce(input.onDiskVersion ?? '') ?? '');
     const expected = semver.valid(input.expectedVersion) ?? semver.valid(semver.coerce(input.expectedVersion) ?? '');
     if (!onDisk) {
       versionProof = false;
+      versionUnread = true;
       reasons.push(`version proof FAILED: could not read the selected plugin copy's version to compare against expected ${input.expectedVersion}${input.onDiskReason ? ` (${input.onDiskReason})` : ''}`);
     } else if (expected && semver.lt(onDisk, expected)) {
       versionProof = false;
@@ -248,7 +256,15 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
     }
   }
 
-  return { ok: rosterProof && canaryProof && versionProof, rosterProof, rosterState, canaryProof, versionProof, reasons };
+  return {
+    ok: rosterProof && canaryProof && versionProof,
+    rosterProof,
+    rosterState,
+    canaryProof,
+    versionProof,
+    ...(versionUnread ? { versionUnread: true as const } : {}),
+    reasons,
+  };
 }
 
 export interface RunSelfCheckOptions {
