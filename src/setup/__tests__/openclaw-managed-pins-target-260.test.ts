@@ -441,8 +441,11 @@ describe.each(['new', 'legacy'] as const)('#260 r13: managed-pin repair rewrites
     const manifest = path.join(selected.root, 'package.json');
 
     // Swap right after the repair's own no-follow descriptor on the manifest
-    // opens (numeric flags; a plain path read passes a string flag).
-    const result = await raceAt(selected.root, (p, flags) => p === manifest && typeof flags === 'number', replaceWithNewInode);
+    // opens (numeric flags; a plain path read passes a string flag). The
+    // repair opens the verified folder's realpath, which differs from the
+    // tmpdir spelling on macOS (/var -> /private/var), so match either.
+    const realManifest = fs.realpathSync(manifest);
+    const result = await raceAt(selected.root, (p, flags) => (p === manifest || p === realManifest) && typeof flags === 'number', replaceWithNewInode);
 
     expect(result.status).toBe('failed');
     expect(result.message).toMatch(/package\.json changed while this repair was running; nothing was changed/);
