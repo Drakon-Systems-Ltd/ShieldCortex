@@ -449,6 +449,13 @@ type CopyRead =
  * cannot be read, or carries no exact version, is `unknown`.
  */
 function readCopyAt(dir: string): CopyRead {
+  // #260 r9 (Sol): a relative path names a folder against OpenClaw's own
+  // working directory, not this process's. Stat'ing it here measured some
+  // other folder, and "not there" let a forced install replace a copy no one
+  // checked. Not checked is not absent.
+  if (!path.isAbsolute(dir)) {
+    return { dir, state: 'unknown', why: `${dir} is not an absolute path, so which folder it names is not known here` };
+  }
   let st: fs.Stats;
   try {
     st = fs.statSync(dir);
