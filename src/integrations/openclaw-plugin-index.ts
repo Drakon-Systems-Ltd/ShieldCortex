@@ -559,7 +559,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // Actionable disagreement between the two install layers.
   const installsPath = input.installsJson?.installPath ?? null;
   const indexPath = indexRecord?.installPath ?? null;
-  const pathConflict = Boolean(installsPath && indexPath && installsPath !== indexPath);
+  const pathConflict = namesFolder(installsPath ?? undefined) && namesFolder(indexPath ?? undefined) && installsPath !== indexPath;
   const versionLayerConflict = Boolean(
     installsJsonVersion && indexVersion && installsJsonVersion !== indexVersion,
   );
