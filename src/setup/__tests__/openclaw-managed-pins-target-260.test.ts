@@ -187,3 +187,146 @@ describe('#260 r11: no verified copy in a managed project — refused, nothing w
     expect(backups(managed.root)).toEqual([]);
   });
 });
+
+/**
+ * #260 r12 (Sol): the folder check did not bind the FILE. A package.json that
+ * is a link into another project passed it and was written through; and a
+ * manifest removed or replaced after the last check still reached the write.
+ * Now the manifest must be a regular file in the verified folder, every write
+ * is a new file created there, and the manifest is replaced by rename after a
+ * re-check — any doubt refuses, nothing left behind.
+ */
+describe.each(['new', 'legacy'] as const)('#260 r12: managed-pin repair writes only the verified FILE (%s index layout)', (layout) => {
+  const leftovers = (root: string): string[] => fs.readdirSync(root).filter((f) => f.includes('.repair-backup-') || f.endsWith('.tmp'));
+
+  it('the verified project\'s package.json is a symlink into a different project — refused, both manifests byte-identical, no backup or tmp', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    const other = project('other-managed-project', semver.inc(SELF(), 'minor')!, '1.0.0');
+    fs.unlinkSync(path.join(selected.root, 'package.json'));
+    fs.symlinkSync(path.join(other.root, 'package.json'), path.join(selected.root, 'package.json'));
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    const otherBefore = fs.readFileSync(path.join(other.root, 'package.json'));
+
+    const result = await repairOpenClawManagedPins(home);
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/package\.json is not a plain file/);
+    expect(result.message).toMatch(/nothing was changed/);
+    expect(result.message).not.toContain(home);
+    expect(fs.lstatSync(path.join(selected.root, 'package.json')).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(path.join(other.root, 'package.json'))).toEqual(otherBefore);
+    expect(leftovers(selected.root)).toEqual([]);
+    expect(leftovers(other.root)).toEqual([]);
+  });
+
+  it('the manifest entry is not a regular file — refused, nothing written', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    // The resolver and reader still see a file; only the repair's own lstat of
+    // the target reports a non-regular entry (a FIFO here would block the read).
+    const real = fs.lstatSync;
+    jest.spyOn(fs, 'lstatSync').mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      const st = (real as (...a: unknown[]) => fs.Stats)(p, ...rest);
+      if (String(p) === path.join(selected.root, 'package.json')) return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { isFile: () => false });
+      return st;
+    }) as typeof fs.lstatSync);
+    const before = fs.readFileSync(path.join(selected.root, 'package.json'));
+
+    const result = await repairOpenClawManagedPins(home);
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/package\.json is not a plain file/);
+    expect(fs.readFileSync(path.join(selected.root, 'package.json'))).toEqual(before);
+    expect(leftovers(selected.root)).toEqual([]);
+  });
+
+  /** Run the repair with `swap` applied to the manifest once the replacement tmp file is created. */
+  async function raceAtTmp(root: string, swap: (manifest: string) => void): Promise<Awaited<ReturnType<typeof repairOpenClawManagedPins>>> {
+    const open = fs.openSync;
+    let raced = false;
+    jest.spyOn(fs, 'openSync').mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      const fd = (open as (...a: unknown[]) => number)(p, ...rest);
+      if (!raced && String(p).endsWith('.tmp')) {
+        raced = true;
+        swap(path.join(root, 'package.json'));
+      }
+      return fd;
+    }) as typeof fs.openSync);
+    const result = await repairOpenClawManagedPins(home);
+    expect(raced).toBe(true);
+    return result;
+  }
+
+  it('package.json removed between the last check and the rename — refused, no tmp left', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+
+    const result = await raceAtTmp(selected.root, (m) => fs.unlinkSync(m));
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/changed while this repair was running/);
+    expect(result.message).not.toMatch(/shieldcortex openclaw repair/);
+    expect(fs.existsSync(path.join(selected.root, 'package.json'))).toBe(false);
+    expect(fs.readdirSync(selected.root).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('package.json replaced by a link into another project between the last check and the rename — refused, other manifest untouched, no tmp left', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    const other = project('other-managed-project', semver.inc(SELF(), 'minor')!, '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    const otherBefore = fs.readFileSync(path.join(other.root, 'package.json'));
+
+    const result = await raceAtTmp(selected.root, (m) => {
+      fs.unlinkSync(m);
+      fs.symlinkSync(path.join(other.root, 'package.json'), m);
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/changed while this repair was running/);
+    expect(fs.lstatSync(path.join(selected.root, 'package.json')).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(path.join(other.root, 'package.json'))).toEqual(otherBefore);
+    expect(fs.readdirSync(selected.root).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+    expect(leftovers(other.root)).toEqual([]);
+  });
+
+  it('the rename itself throws — refused with a plain message, no tmp left, no direct-write fallback', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    const before = fs.readFileSync(path.join(selected.root, 'package.json'));
+    jest.spyOn(fs, 'renameSync').mockImplementation(() => { throw new Error('fixture: rename refused'); });
+    const write = jest.spyOn(fs, 'writeFileSync');
+
+    const result = await repairOpenClawManagedPins(home);
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/Could not write the project manifest \(fixture: rename refused\)/);
+    expect(fs.readFileSync(path.join(selected.root, 'package.json'))).toEqual(before);
+    expect(fs.readdirSync(selected.root).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+    // Only file-descriptor writes (the exclusive-create helper); never a path.
+    expect(write.mock.calls.every(([target]) => typeof target === 'number')).toBe(true);
+  });
+
+  it('control: a regular package.json — the repair proceeds and the manifest content is as before (pin stripped, mode kept, no tmp)', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    const manifest = path.join(selected.root, 'package.json');
+    fs.chmodSync(manifest, 0o640);
+    const original = JSON.parse(fs.readFileSync(manifest, 'utf-8')) as Record<string, unknown>;
+
+    const result = await repairOpenClawManagedPins(home);
+
+    expect(result.message).toMatch(/Manifest reconciled, but `openclaw` is not on PATH/);
+    expect(fs.lstatSync(manifest).isFile()).toBe(true);
+    expect(fs.statSync(manifest).mode & 0o777).toBe(0o640);
+    expect(fs.readFileSync(manifest, 'utf-8')).toBe(JSON.stringify({ dependencies: {}, overrides: { peer: '2.0.0' } }, null, 2) + '\n');
+    const [backup] = backups(selected.root);
+    expect(fs.readFileSync(path.join(selected.root, backup), 'utf-8')).toBe(JSON.stringify(original, null, 2));
+    expect(fs.readdirSync(selected.root).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+  });
+});
