@@ -321,6 +321,9 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
 
       let memories: Memory[];
       let total: number;
+      // Where the page starts inside `memories`. Every branch but the SQL-paged
+      // recent one below returns rows from position 0 and is sliced by offset.
+      let pageStart = offset;
       if (mode === 'search' && query) {
         // searchMemories already applies type/category filters internally, so
         // the filtered total is the size of the full result set. Fetch a
@@ -340,7 +343,21 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
         memories = getHighPriorityMemories(limit + offset + 1, project, undefined, filters);
         total = countHighPriorityMemories(project, filters);
       } else {
-        memories = getRecentMemories(limit + offset + 1, project, undefined, filters);
+        // A positive integer offset with a positive integer page size is
+        // skipped in SQL (same filter, same `last_accessed DESC`), so the
+        // rows before the page are not read back and mapped. This must match
+        // the condition getRecentMemories honours `offset` under: the rows
+        // it returns are then the page itself and must not be sliced by
+        // offset again. Offset 0, and any negative or non-finite value, keeps
+        // the read-then-slice path.
+        const pageInSql =
+          Number.isSafeInteger(limit) && limit > 0 && Number.isSafeInteger(offset) && offset > 0;
+        if (pageInSql) {
+          memories = getRecentMemories(limit, project, undefined, filters, undefined, offset);
+          pageStart = 0;
+        } else {
+          memories = getRecentMemories(limit + offset + 1, project, undefined, filters);
+        }
         total = countMemories(project, filters);
       }
 
@@ -349,7 +366,7 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
       // per-row dropping here (the dashboard is a management surface — low-trust
       // rows must stay visible to be triaged, and dropping post-slice would also
       // desync total/hasMore).
-      const paginatedMemories = memories.slice(offset, offset + limit);
+      const paginatedMemories = memories.slice(pageStart, pageStart + limit);
 
       // Batch-load entity_ids per memory so the constellation graph client
       // can map list rows to graph nodes without an N+1 fetch.

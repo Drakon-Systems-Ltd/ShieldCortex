@@ -2086,12 +2086,17 @@ export function countMemories(project?: string, filters?: MemoryListFilters): nu
   return (db.prepare(`SELECT COUNT(*) as count FROM memories ${clause}`).get(...params) as { count: number }).count;
 }
 
+function isPositiveSafeInteger(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
 export function getRecentMemories(
   limit: number = 10,
   project?: string,
   source?: DefenceSource,
   filters?: MemoryListFilters,
   attested?: boolean,
+  offset: number = 0,
 ): Memory[] {
   const db = getDatabase();
   const { clause, params } = buildMemoryFilterClause(project, filters);
@@ -2099,6 +2104,17 @@ export function getRecentMemories(
 
   sql += ' ORDER BY last_accessed DESC LIMIT ?';
   params.push(source ? limit * 2 : limit); // over-fetch when access-filtering
+
+  // `offset` is honoured only when `source` is absent and both limit and
+  // offset are positive integers: the rows before the page are skipped in SQL
+  // rather than read and mapped. With `source` set it is ignored, because
+  // skipping rows before the access filter would change which allowed rows
+  // come back. Any other limit/offset leaves the statement above untouched.
+  // Order is still `last_accessed DESC` alone; ties stay unspecified.
+  if (!source && isPositiveSafeInteger(limit) && isPositiveSafeInteger(offset)) {
+    sql += ' OFFSET ?';
+    params.push(offset);
+  }
 
   let rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
   if (source) rows = filterRowsByAccess(rows, source, attested);
