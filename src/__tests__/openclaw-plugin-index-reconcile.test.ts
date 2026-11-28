@@ -282,7 +282,7 @@ describe('#260 r2 — malformed and stale index input', () => {
     });
   });
 
-  // KNOWN GAP, tracked in issue #TBD-260-record-fallback (pre-existing on
+  // KNOWN GAP, tracked in issue #1176 (pre-existing on
   // main): record-only version treated as measured. With no selection checked
   // and nothing read off disk, the install record's version alone passes the
   // host. That is NOT the intended behaviour — a record is a claim, not a
@@ -292,7 +292,7 @@ describe('#260 r2 — malformed and stale index input', () => {
   it.each([
     ['roster-proven', ['shieldcortex-realtime']],
     ['roster unread', null],
-  ] as const)('KNOWN GAP pin (#TBD-260-record-fallback, pre-existing on main) — record-only version treated as measured (%s): healthy today', (_l, roster) => {
+  ] as const)('KNOWN GAP pin (#1176, pre-existing on main) — record-only version treated as measured (%s): healthy today', (_l, roster) => {
     const input = base({ indexInstallPathExists: null, liveRoster: roster ? [...roster] : null });
     input.index!.installRecords['shieldcortex-realtime'].version = '5.22.1';
     expect(reconcilePluginState(input)).toMatchObject({ state: 'healthy', severity: 'ok', installedVersion: '5.22.1' });
