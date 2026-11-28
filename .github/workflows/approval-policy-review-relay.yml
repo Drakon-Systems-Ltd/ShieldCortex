@@ -1,0 +1,17 @@
+# Relays formal PR reviews (submitted/dismissed) to the approval-policy workflow via workflow_run.
+# It does nothing itself and has no permissions: pull_request_review runs the PR's own copy of this
+# file, so the evaluation (and the statuses: write token) stays in approval-policy.yml on the default branch.
+name: approval-policy-review-relay
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  approval-policy-review-relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "review event relayed; approval-policy re-evaluates from the default branch"

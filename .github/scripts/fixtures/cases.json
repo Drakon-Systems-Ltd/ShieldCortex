@@ -1,0 +1,1722 @@
+[
+ {
+  "name": "default: sol APPROVE + green CI",
+  "expect": "success",
+  "patch": {},
+  "reasons_contain": [],
+  "classes": [
+   "default"
+  ]
+ },
+ {
+  "name": "default: no review",
+  "expect": "failure",
+  "patch": {
+   "comments": []
+  },
+  "reasons_contain": [
+   "needs APPROVE",
+   "sol"
+  ],
+  "classes": []
+ },
+ {
+  "name": "review at older head is no review",
+  "expect": "failure",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <OLD> | sol: APPROVE"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs APPROVE"
+  ],
+  "classes": []
+ },
+ {
+  "name": "CI red",
+  "expect": "failure",
+  "patch": {
+   "checks": [
+    {
+     "name": "test",
+     "status": "completed",
+     "conclusion": "failure"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "CI red: test=failure"
+  ],
+  "classes": []
+ },
+ {
+  "name": "CI pending alone posts pending (not green)",
+  "expect": "pending",
+  "patch": {
+   "checks": [
+    {
+     "name": "test",
+     "status": "in_progress",
+     "conclusion": null
+    }
+   ]
+  },
+  "reasons_contain": [
+   "CI pending"
+  ],
+  "classes": []
+ },
+ {
+  "name": "no CI at all fails closed",
+  "expect": "failure",
+  "patch": {
+   "checks": []
+  },
+  "reasons_contain": [
+   "no CI result"
+  ],
+  "classes": []
+ },
+ {
+  "name": "ignored check does not count",
+  "expect": "success",
+  "patch": {
+   "checks": [
+    {
+     "name": "test",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "evaluate",
+     "status": "completed",
+     "conclusion": "failure"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "own approval-policy status ignored, other status red",
+  "expect": "failure",
+  "patch": {
+   "statuses": [
+    {
+     "context": "approval-policy",
+     "state": "failure"
+    },
+    {
+     "context": "deploy/preview",
+     "state": "error"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "deploy/preview=error"
+  ],
+  "classes": []
+ },
+ {
+  "name": "own approval-policy status alone ignored",
+  "expect": "success",
+  "patch": {
+   "statuses": [
+    {
+     "context": "approval-policy",
+     "state": "failure"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "untrusted commenter cannot fake a seat",
+  "expect": "failure",
+  "patch": {
+   "comments": [
+    {
+     "user": "stranger",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs APPROVE"
+  ],
+  "classes": []
+ },
+ {
+  "name": "docs-only: one seat",
+  "expect": "success",
+  "patch": {
+   "files": [
+    {
+     "filename": "docs/guide.md",
+     "patch": "+x"
+    },
+    {
+     "filename": "README.md",
+     "patch": "+x"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": [
+   "docs-tests"
+  ]
+ },
+ {
+  "name": "docs-only: fleet APPROVE at head is one reviewer",
+  "expect": "success",
+  "patch": {
+   "files": [
+    {
+     "filename": "tests/a.test.ts",
+     "patch": "+x"
+    }
+   ],
+   "comments": [],
+   "reviews": [
+    {
+     "user": "CASE-Drakon",
+     "state": "APPROVED",
+     "commit_id": "<HEAD>",
+     "submitted_at": "2026-11-28T09:00:00Z"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": [
+   "docs-tests"
+  ]
+ },
+ {
+  "name": "docs-only: fleet APPROVE at older head",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "README.md",
+     "patch": "+x"
+    }
+   ],
+   "comments": [],
+   "reviews": [
+    {
+     "user": "CASE-Drakon",
+     "state": "APPROVED",
+     "commit_id": "<OLD>",
+     "submitted_at": "2026-11-28T09:00:00Z"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs 1 reviewer"
+  ],
+  "classes": []
+ },
+ {
+  "name": "docs + source: default rule also applies",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "README.md",
+     "patch": "+x"
+    },
+    {
+     "filename": "src/x.ts",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | opus: APPROVE"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs APPROVE",
+   "sol"
+  ],
+  "classes": [
+   "docs-tests",
+   "default"
+  ]
+ },
+ {
+  "name": "rule file without Fable",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": ".github/workflows/ci.yml",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs FABLE GREEN-LIGHT"
+  ],
+  "classes": [
+   "rule-files"
+  ]
+ },
+ {
+  "name": "rule file with both seats + Fable",
+  "expect": "success",
+  "patch": {
+   "files": [
+    {
+     "filename": ".github/workflows/ci.yml",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:05:00Z",
+     "body": "FABLE GREEN-LIGHT head <HEAD> | decision: MERGE | ref: reports/fable-greenlights/x.md"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": [
+   "rule-files"
+  ]
+ },
+ {
+  "name": "CLAUDE.md is a rule file even though it is .md",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "CLAUDE.md",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | reports: r.md"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs FABLE",
+   "opus"
+  ],
+  "classes": [
+   "rule-files",
+   "docs-tests"
+  ]
+ },
+ {
+  "name": "Fable at older head",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "AGENTS.md",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "FABLE GREEN-LIGHT head <OLD> | decision: MERGE"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs FABLE"
+  ],
+  "classes": []
+ },
+ {
+  "name": "Fable negative decision",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": ".claude/settings.json",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T11:00:00Z",
+     "body": "FABLE GREEN-LIGHT head <HEAD> | decision: HOLD until #161 | ref: x.md"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "latest decision: HOLD"
+  ],
+  "classes": []
+ },
+ {
+  "name": "Fable from untrusted user",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": ".github/CODEOWNERS",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    },
+    {
+     "user": "stranger",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "FABLE GREEN-LIGHT head <HEAD> | decision: MERGE"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs FABLE"
+  ],
+  "classes": []
+ },
+ {
+  "name": "rename out of .github still a rule-file change",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "src/ci.yml",
+     "previous_filename": ".github/workflows/ci.yml",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs FABLE"
+  ],
+  "classes": [
+   "rule-files"
+  ]
+ },
+ {
+  "name": "security path: sol only",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "src/auth/session.ts",
+     "patch": "+x"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "opus"
+  ],
+  "classes": [
+   "security"
+  ]
+ },
+ {
+  "name": "security path: sol + opus",
+  "expect": "success",
+  "patch": {
+   "files": [
+    {
+     "filename": "src/auth/session.ts",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "security path: fleet stand-in fills opus",
+  "expect": "success",
+  "patch": {
+   "files": [
+    {
+     "filename": "src/billing/stripe.ts",
+     "patch": "+x"
+    }
+   ],
+   "reviews": [
+    {
+     "user": "TARSDrakon",
+     "state": "APPROVED",
+     "commit_id": "<HEAD>",
+     "submitted_at": "2026-11-28T09:00:00Z"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "security label on a docs change",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "docs/a.md",
+     "patch": "+x"
+    }
+   ],
+   "pr": {
+    "number": 7,
+    "head_sha": "<HEAD>",
+    "title": "docs",
+    "state": "open",
+    "labels": [
+     "Security"
+    ]
+   }
+  },
+  "reasons_contain": [
+   "opus"
+  ],
+  "classes": [
+   "security"
+  ]
+ },
+ {
+  "name": "release title needs second seat",
+  "expect": "failure",
+  "patch": {
+   "pr": {
+    "number": 7,
+    "head_sha": "<HEAD>",
+    "title": "release: 1.2.3",
+    "state": "open",
+    "labels": []
+   }
+  },
+  "reasons_contain": [
+   "opus"
+  ],
+  "classes": [
+   "security"
+  ]
+ },
+ {
+  "name": "migration: seats + gate",
+  "expect": "success",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/0042_add_col.sql",
+     "patch": "+ALTER TABLE x ADD COLUMN y int;"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:06:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: tested 0042->0041 ok | backward-compatible: yes | backup: bk-123"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": [
+   "migrations"
+  ]
+ },
+ {
+  "name": "migration: no gate comment",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/0042_add_col.sql",
+     "patch": "+ALTER TABLE x ADD COLUMN y int;"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs MIGRATION GATE"
+  ],
+  "classes": []
+ },
+ {
+  "name": "migration: gate not backward-compatible",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/0042.sql",
+     "patch": "+ALTER TABLE x ADD y int;"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: ok | backward-compatible: no | backup: b1"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs MIGRATION GATE"
+  ],
+  "classes": []
+ },
+ {
+  "name": "migration: destructive is owner-only",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/0043_drop.sql",
+     "patch": "+DROP TABLE old_things;"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:06:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: tested 0042->0041 ok | backward-compatible: yes | backup: bk-123"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "destructive migration",
+   "owner-only"
+  ],
+  "classes": []
+ },
+ {
+  "name": "migration: removed DROP line is not destructive",
+  "expect": "success",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/0043.sql",
+     "patch": "-DROP TABLE x;\n+SELECT 1;"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:06:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: tested 0042->0041 ok | backward-compatible: yes | backup: bk-123"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "migration: patch missing fails closed to owner",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/0044_big.sql"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:06:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: tested 0042->0041 ok | backward-compatible: yes | backup: bk-123"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "no patch",
+   "owner-only"
+  ],
+  "classes": []
+ },
+ {
+  "name": "migration: destructive with owner APPROVE at head",
+  "expect": "success",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/0043_drop.sql",
+     "patch": "+TRUNCATE audit;"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:06:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: tested 0042->0041 ok | backward-compatible: yes | backup: bk-123"
+    }
+   ],
+   "reviews": [
+    {
+     "user": "owner-login",
+     "state": "APPROVED",
+     "commit_id": "<HEAD>",
+     "submitted_at": "2026-11-28T09:00:00Z"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "owner-only path: full panel is not enough",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "legal/terms.md",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:05:00Z",
+     "body": "FABLE GREEN-LIGHT head <HEAD> | decision: MERGE | ref: reports/fable-greenlights/x.md"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "owner-only"
+  ],
+  "classes": [
+   "owner-only"
+  ]
+ },
+ {
+  "name": "owner-only: .env file",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "deploy/.env.production",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE | reports: r.md"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "owner-only"
+  ],
+  "classes": []
+ },
+ {
+  "name": "owner-only label frozen",
+  "expect": "failure",
+  "patch": {
+   "pr": {
+    "number": 7,
+    "head_sha": "<HEAD>",
+    "title": "x",
+    "state": "open",
+    "labels": [
+     "frozen"
+    ]
+   }
+  },
+  "reasons_contain": [
+   "owner-only"
+  ],
+  "classes": []
+ },
+ {
+  "name": "owner APPROVE at older head does not count",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "pricing.json",
+     "patch": "+x"
+    }
+   ],
+   "reviews": [
+    {
+     "user": "owner-login",
+     "state": "APPROVED",
+     "commit_id": "<OLD>",
+     "submitted_at": "2026-11-28T09:00:00Z"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "owner-only"
+  ],
+  "classes": []
+ },
+ {
+  "name": "owner APPROVE at head clears owner-only",
+  "expect": "success",
+  "patch": {
+   "files": [
+    {
+     "filename": "pricing.json",
+     "patch": "+x"
+    }
+   ],
+   "reviews": [
+    {
+     "user": "owner-login",
+     "state": "APPROVED",
+     "commit_id": "<HEAD>",
+     "submitted_at": "2026-11-28T09:00:00Z"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "fleet CHANGES_REQUESTED at older head still blocks",
+  "expect": "failure",
+  "patch": {
+   "reviews": [
+    {
+     "user": "CASE-Drakon",
+     "state": "CHANGES_REQUESTED",
+     "commit_id": "<OLD>",
+     "submitted_at": "2026-11-28T09:00:00Z"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "CASE-Drakon CHANGES_REQUESTED"
+  ],
+  "classes": []
+ },
+ {
+  "name": "fleet CHANGES_REQUESTED later dismissed",
+  "expect": "success",
+  "patch": {
+   "reviews": [
+    {
+     "user": "CASE-Drakon",
+     "state": "CHANGES_REQUESTED",
+     "commit_id": "<OLD>",
+     "submitted_at": "2026-11-28T09:00:00Z"
+    },
+    {
+     "user": "CASE-Drakon",
+     "state": "DISMISSED",
+     "commit_id": "<OLD>",
+     "submitted_at": "2026-11-28T09:30:00Z"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "latest seat verdict wins: CHANGES after APPROVE",
+  "expect": "failure",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | reports: r.md"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T11:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: CHANGES_REQUESTED, F1 blocker"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "seat sol CHANGES_REQUESTED"
+  ],
+  "classes": []
+ },
+ {
+  "name": "latest seat verdict wins: APPROVE after CHANGES",
+  "expect": "success",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T09:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: CHANGES_REQUESTED"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | reports: r.md"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "NOT APPROVED is not an approval",
+  "expect": "failure",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: NOT APPROVED"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "CHANGES_REQUESTED"
+  ],
+  "classes": []
+ },
+ {
+  "name": "INDEPENDENT REVIEW PANEL format with model ids",
+  "expect": "success",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "INDEPENDENT REVIEW PANEL head <HEAD> | openai/gpt-6.2-sol: APPROVE | grok: n/a | reports: x"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "sha7 head prefix accepted",
+  "expect": "success",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head aaaaaaa | sol: APPROVE"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "seat filled by fleet wording",
+  "expect": "success",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: seat filled by CASE-Drakon APPROVE | reports: x"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "draft PR",
+  "expect": "failure",
+  "patch": {
+   "pr": {
+    "number": 7,
+    "head_sha": "<HEAD>",
+    "title": "x",
+    "state": "open",
+    "draft": true,
+    "labels": []
+   }
+  },
+  "reasons_contain": [
+   "draft"
+  ],
+  "classes": []
+ },
+ {
+  "name": "truncated file list",
+  "expect": "failure",
+  "patch": {
+   "pr": {
+    "number": 7,
+    "head_sha": "<HEAD>",
+    "title": "x",
+    "state": "open",
+    "labels": [],
+    "changed_files": 5
+   }
+  },
+  "reasons_contain": [
+   "truncated"
+  ],
+  "classes": []
+ },
+ {
+  "name": "closed PR is skipped",
+  "expect": "skip",
+  "patch": {
+   "pr": {
+    "number": 7,
+    "head_sha": "<HEAD>",
+    "title": "x",
+    "state": "closed",
+    "labels": []
+   }
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "unknown seat label ignored",
+  "expect": "failure",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | gemini: APPROVE"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs APPROVE"
+  ],
+  "classes": []
+ },
+ {
+  "name": "alembic: drop_column only in downgrade() is not destructive",
+  "expect": "success",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/versions/0050_add.py",
+     "patch": "+def upgrade():\n+    op.add_column('t', sa.Column('c', sa.Integer()))\n+\n+def downgrade():\n+    op.drop_column('t', 'c')"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:06:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: ok | backward-compatible: yes | backup: b1"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": [
+   "migrations"
+  ]
+ },
+ {
+  "name": "alembic: drop_column in upgrade() is destructive",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/versions/0051_drop.py",
+     "patch": "+def upgrade():\n+    op.drop_column('t', 'c')\n+\n+def downgrade():\n+    op.add_column('t', sa.Column('c', sa.Integer()))"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:06:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: ok | backward-compatible: yes | backup: b1"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "destructive migration",
+   "owner-only"
+  ],
+  "classes": []
+ },
+ {
+  "name": "logins compared case-insensitively",
+  "expect": "success",
+  "patch": {
+   "comments": [
+    {
+     "user": "LANE-BOT",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "path globs case-insensitive (stricter)",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "src/Auth/Login.ts",
+     "patch": "+x"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "opus"
+  ],
+  "classes": [
+   "security"
+  ]
+ },
+ {
+  "name": "fleet comment verdict APPROVE at head fills a seat",
+  "expect": "success",
+  "patch": {
+   "comments": [
+    {
+     "user": "TARSDrakon",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "Astra source review: **APPROVE** at `<HEAD>`. Fine."
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "fleet comment verdict at older head does not count",
+  "expect": "failure",
+  "patch": {
+   "comments": [
+    {
+     "user": "TARSDrakon",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "APPROVE at <OLD>"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs APPROVE"
+  ],
+  "classes": []
+ },
+ {
+  "name": "fleet comment CHANGES_REQUESTED blocks until lifted",
+  "expect": "failure",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE"
+    },
+    {
+     "user": "CASE-Drakon",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "CHANGES_REQUESTED at <OLD>: F1 blocker"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "CASE-Drakon comment CHANGES_REQUESTED"
+  ],
+  "classes": []
+ },
+ {
+  "name": "fleet comment CHANGES then APPROVE at head lifts it",
+  "expect": "success",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE"
+    },
+    {
+     "user": "CASE-Drakon",
+     "created_at": "2026-11-28T09:00:00Z",
+     "body": "CHANGES_REQUESTED at <OLD>"
+    },
+    {
+     "user": "CASE-Drakon",
+     "created_at": "2026-11-28T11:00:00Z",
+     "body": "APPROVE @ <HEAD>"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "author's own fleet comment cannot fill a seat when author_cannot_fill_seat",
+  "expect": "failure",
+  "patch": {
+   "pr": {
+    "number": 7,
+    "head_sha": "<HEAD>",
+    "title": "x",
+    "state": "open",
+    "labels": [],
+    "author": "TARSDrakon"
+   },
+   "comments": [
+    {
+     "user": "TARSDrakon",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "APPROVE at <HEAD>"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs APPROVE"
+  ],
+  "classes": []
+ },
+ {
+  "name": "same fleet login twice fills only one seat",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "src/auth/x.ts",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "case-drakon",
+     "created_at": "2026-11-28T10:01:00Z",
+     "body": "APPROVE at <HEAD>"
+    }
+   ],
+   "reviews": [
+    {
+     "user": "CASE-Drakon",
+     "state": "APPROVED",
+     "commit_id": "<HEAD>",
+     "submitted_at": "2026-11-28T09:00:00Z"
+    }
+   ],
+   "pr": {
+    "number": 7,
+    "head_sha": "<HEAD>",
+    "title": "x",
+    "state": "open",
+    "labels": [],
+    "author": "lane-bot"
+   }
+  },
+  "reasons_contain": [
+   "needs APPROVE"
+  ],
+  "classes": [
+   "security"
+  ]
+ },
+ {
+  "name": "CI pending plus missing seat is failure",
+  "expect": "failure",
+  "patch": {
+   "comments": [],
+   "checks": [
+    {
+     "name": "test",
+     "status": "queued",
+     "conclusion": null
+    }
+   ]
+  },
+  "reasons_contain": [
+   "CI pending",
+   "needs APPROVE"
+  ],
+  "classes": []
+ },
+ {
+  "name": "negated verdict: NOT APPROVE",
+  "expect": "failure",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: NOT APPROVE (blocking issue)"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "CHANGES_REQUESTED"
+  ],
+  "classes": []
+ },
+ {
+  "name": "negated verdict: would not approve",
+  "expect": "failure",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: would not approve"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "CHANGES_REQUESTED"
+  ],
+  "classes": []
+ },
+ {
+  "name": "negated verdict: won't approve",
+  "expect": "failure",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: won't approve"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "CHANGES_REQUESTED"
+  ],
+  "classes": []
+ },
+ {
+  "name": "'No findings. APPROVE' is an approval",
+  "expect": "success",
+  "patch": {
+   "comments": [
+    {
+     "user": "TARSDrakon",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "No findings. **APPROVE** at `<HEAD>`"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "fleet 'do not APPROVE at' is a block",
+  "expect": "failure",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE"
+    },
+    {
+     "user": "CASE-Drakon",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "I do not APPROVE at <HEAD>"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "CASE-Drakon comment CHANGES_REQUESTED"
+  ],
+  "classes": []
+ },
+ {
+  "name": "fleet comment: last verdict in the body wins",
+  "expect": "success",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE"
+    },
+    {
+     "user": "CASE-Drakon",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "was CHANGES_REQUESTED at <OLD>; now **APPROVE** at <HEAD>"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "fleet comment CR lifted by a later formal APPROVE at head",
+  "expect": "success",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE"
+    },
+    {
+     "user": "TARSDrakon",
+     "created_at": "2026-11-28T08:00:00Z",
+     "body": "CHANGES_REQUESTED at <OLD>"
+    }
+   ],
+   "reviews": [
+    {
+     "user": "TARSDrakon",
+     "state": "APPROVED",
+     "commit_id": "<HEAD>",
+     "submitted_at": "2026-11-28T09:00:00Z"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "formal APPROVE then later comment CR: block",
+  "expect": "failure",
+  "patch": {
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE"
+    },
+    {
+     "user": "TARSDrakon",
+     "created_at": "2026-11-28T11:00:00Z",
+     "body": "CHANGES_REQUESTED at <HEAD>"
+    }
+   ],
+   "reviews": [
+    {
+     "user": "TARSDrakon",
+     "state": "APPROVED",
+     "commit_id": "<HEAD>",
+     "submitted_at": "2026-11-28T09:00:00Z"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "TARSDrakon comment CHANGES_REQUESTED"
+  ],
+  "classes": []
+ },
+ {
+  "name": "owner comment cannot stand in for owner GitHub APPROVE",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "pricing.json",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE"
+    },
+    {
+     "user": "owner-login",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "APPROVE at <HEAD>"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "owner-only"
+  ],
+  "classes": []
+ },
+ {
+  "name": "Fable decision must match exactly",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": ".github/workflows/ci.yml",
+     "patch": "+x"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T11:00:00Z",
+     "body": "FABLE GREEN-LIGHT head <HEAD> | decision: MERGE BLOCKED pending owner | ref: x"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "latest decision: MERGE BLOCKED"
+  ],
+  "classes": []
+ },
+ {
+  "name": "SQL comment '-- Down' does not hide a DROP",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/030_x.sql",
+     "patch": "+-- Down: not needed\n+DROP TABLE events;"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:06:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: ok | backward-compatible: yes | backup: b1"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "destructive migration"
+  ],
+  "classes": []
+ },
+ {
+  "name": "alembic: hunk inside downgrade() is skipped",
+  "expect": "success",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/versions/1.py",
+     "patch": "@@ -20,3 +20,4 @@ def downgrade():\n     pass\n+    op.drop_column('t','c')"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:06:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: ok | backward-compatible: yes | backup: b1"
+    }
+   ]
+  },
+  "reasons_contain": [],
+  "classes": []
+ },
+ {
+  "name": "alembic: later hunk inside upgrade() is scanned",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/versions/1.py",
+     "patch": "@@ -20,3 +20,4 @@ def downgrade():\n+    op.drop_column('t','c')\n@@ -5,3 +5,4 @@ def upgrade():\n+    op.drop_table('x')"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:06:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: ok | backward-compatible: yes | backup: b1"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "destructive migration"
+  ],
+  "classes": []
+ },
+ {
+  "name": "alembic: function after downgrade() is scanned again",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/versions/2.py",
+     "patch": "+def downgrade():\n+    pass\n+def _helper():\n+    op.drop_table('x')"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:06:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: ok | backward-compatible: yes | backup: b1"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "destructive migration"
+  ],
+  "classes": []
+ },
+ {
+  "name": "migration gate: 'not tested' downgrade rejected",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/31.sql",
+     "patch": "+ALTER TABLE t ADD c int;"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: not tested | backward-compatible: yes | backup: b1"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs MIGRATION GATE"
+  ],
+  "classes": []
+ },
+ {
+  "name": "migration gate: 'backup: none' rejected",
+  "expect": "failure",
+  "patch": {
+   "files": [
+    {
+     "filename": "migrations/31.sql",
+     "patch": "+ALTER TABLE t ADD c int;"
+    }
+   ],
+   "comments": [
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "REVIEW head <HEAD> | sol: APPROVE | opus: APPROVE"
+    },
+    {
+     "user": "lane-bot",
+     "created_at": "2026-11-28T10:00:00Z",
+     "body": "MIGRATION GATE head <HEAD> | downgrade: round-trip ok (log x) | backward-compatible: yes | backup: none"
+    }
+   ]
+  },
+  "reasons_contain": [
+   "needs MIGRATION GATE"
+  ],
+  "classes": []
+ }
+]

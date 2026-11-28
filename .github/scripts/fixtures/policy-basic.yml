@@ -1,0 +1,57 @@
+# Test policy: one-seat lane (sol default, opus second seat for security), fleet stand-in on.
+version: 1
+repo: Example-Org/example
+lane: test0000
+trusted:
+  owner: [owner-login]
+  lane: [lane-bot]
+  fleet: [TARSDrakon, CASE-Drakon]
+seats:
+  sol: [sol, gpt-6.2-sol]
+  opus: [opus, claude-opus-5-5]
+fleet_stand_in: true
+author_cannot_fill_seat: true
+ci:
+  require_at_least_one: true
+  ignore: [evaluate]
+fable:
+  approve_decisions: [MERGE, APPROVE, GREEN-LIGHT, NORMAL RELEASE]
+default_class: default
+classes:
+  - name: owner-only
+    purpose: "Money, prices, legal text, credentials: owner only. Policy can never approve."
+    paths: ["legal/**", "**/pricing.json", "**/.env*"]
+    labels: [owner-only, frozen]
+    require:
+      owner: true
+  - name: rule-files
+    purpose: "P5 rule files: full review plus a Fable decision."
+    paths: [".github/**", "**/CODEOWNERS", "**/CLAUDE.md", "**/AGENTS.md", ".claude/**", ".husky/**"]
+    require:
+      seats: [sol, opus]
+      fable: true
+  - name: security
+    purpose: "Auth, crypto, payments: full panel, never relaxed."
+    paths: ["src/auth/**", "src/billing/**", "**/*crypto*"]
+    labels: [security]
+    titles: ['^release\b']
+    require:
+      seats: [sol, opus]
+  - name: migrations
+    purpose: "DECISIONS 2026-10-27: both seats, gate comment; destructive = owner."
+    paths: ["migrations/**"]
+    destructive_patterns: ['\bDROP\s+(TABLE|COLUMN)\b', '\bTRUNCATE\b', '\bDELETE\s+FROM\b', '\bop\.drop_(table|column)\b']
+    destructive_stop: ['^\s*def\s+downgrade\b']
+    require:
+      seats: [sol, opus]
+      migration_gate: true
+  - name: docs-tests
+    purpose: "Docs or tests only: one reviewer plus green CI."
+    paths: ["docs/**", "**/*.md", "tests/**", "**/*.test.ts"]
+    require:
+      any_seats: 1
+  - name: default
+    purpose: "Existing lane rule: Sol plus green CI."
+    paths: ["**"]
+    require:
+      seats: [sol]
