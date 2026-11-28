@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import type { Request, Response } from 'express';
-import { initDatabase, closeDatabase } from '../../database/init.js';
+import { initDatabase, closeDatabase, getDatabase } from '../../database/init.js';
 import { addMemory } from '../../memory/store.js';
 import { registerMemoryRoutes } from '../routes/memories.js';
 
@@ -94,6 +94,27 @@ describe('GET /api/memories filtered pagination totals', () => {
     expect(body.memories).toHaveLength(5);
     expect(body.pagination.total).toBe(8);
     expect(body.pagination.hasMore).toBe(true);
+  });
+
+  it('recent returns the last matching row past offset 1000', async () => {
+    const db = getDatabase();
+    const insert = db.prepare(`INSERT INTO memories
+      (uuid, type, category, title, content, project, last_accessed)
+      VALUES (?, 'long_term', 'error', 'Boundary row', 'Page fixture', 'boundary', ?)`);
+    const oldestId = db.transaction(() => {
+      let firstId = 0;
+      for (let i = 0; i < 1001; i++) {
+        const row = insert.run(`boundary-${i}`, new Date(i * 1000).toISOString());
+        if (i === 0) firstId = Number(row.lastInsertRowid);
+      }
+      return firstId;
+    })();
+
+    const body = await invoke(routeStore.handler('/api/memories'), {
+      mode: 'recent', project: 'boundary', category: 'error', limit: '50', offset: '1000',
+    });
+    expect(body.memories.map((row: { id: number }) => row.id)).toEqual([oldestId]);
+    expect(body.pagination).toEqual({ offset: 1000, limit: 50, total: 1001, hasMore: false });
   });
 
   it('reports hasMore false on the last filtered page', async () => {
