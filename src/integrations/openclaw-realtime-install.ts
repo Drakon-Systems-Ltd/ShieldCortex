@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import semver from 'semver';
 import { REALTIME_PLUGIN_PACKAGE } from '../setup/openclaw-plugin-spec.js';
-import { readPluginInstallIndexState, type PluginInstallIndexState } from './openclaw-plugin-index.js';
+import { indexPathField, readPluginInstallIndexState, type PluginInstallIndexState } from './openclaw-plugin-index.js';
 import { resolveLocalExtensionInstall } from './openclaw-plugin-state.js';
 
 /**
@@ -258,21 +258,26 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
   let dangling: string | null = null;
   if (index.state === 'ok') {
     const entry = index.row.plugins?.find((p) => p && p.pluginId === REALTIME_PLUGIN_ID);
-    const roster: unknown = entry?.rootDir;
     // #260 (Sol finding 1): the roster entry IS the selection evidence. One
     // that names no usable copy (no rootDir, an empty or non-string one) is
     // not "names nothing" — dropping it let a record-less row fall through to
     // `none`, and `none` lets a forced install replace what is there. OpenClaw
     // requires a string rootDir on every entry; the reader enforces the type,
     // and this refuses what is left.
-    if (entry && (typeof roster !== 'string' || roster.trim() === '')) {
-      return { state: 'unknown', why: "OpenClaw's install index lists the plugin with no usable rootDir" };
+    const roster = indexPathField(entry?.rootDir);
+    if (entry && roster.kind !== 'path') {
+      return { state: 'unknown', why: `OpenClaw's install index lists the plugin with no usable rootDir${roster.kind === 'unknown' ? ` — its rootDir ${roster.why}` : ''}` };
     }
+    // #260 r10 (Sol): the same rule for the record's installPath. An empty or
+    // blank one was dropped as "names nothing", which allowed the replacement.
     const record = index.row.installRecords?.[REALTIME_PLUGIN_ID];
-    const recordPath = record && typeof record.installPath === 'string' ? record.installPath : null;
+    const recordPath = indexPathField(record?.installPath);
+    if (recordPath.kind === 'unknown') {
+      return { state: 'unknown', why: `OpenClaw's install record's installPath ${recordPath.why}, so which copy it names is unknown` };
+    }
     const named = [
-      ...(typeof roster === 'string' && roster ? [{ dir: roster, evidence: 'install index roster' }] : []),
-      ...(recordPath ? [{ dir: recordPath, evidence: 'install index record' }] : []),
+      ...(roster.kind === 'path' ? [{ dir: roster.path, evidence: 'install index roster' }] : []),
+      ...(recordPath.kind === 'path' ? [{ dir: recordPath.path, evidence: 'install index record' }] : []),
     ];
     if (named.length > 0) {
       const present: Array<{ dir: string; evidence: string; version: string }> = [];
@@ -322,7 +327,16 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
       if (!rec || typeof rec !== 'object') continue;
       const r = rec as { installPath?: unknown; source?: unknown; version?: unknown; resolvedVersion?: unknown };
       if (native && r.source === 'path') continue;
-      const named = typeof r.installPath === 'string' && r.installPath ? r.installPath : null;
+      // #260 r10 (Sol): a present installPath that is empty, blank or not a
+      // string names no folder anyone can check — unknown, never "no path".
+      // (openclaw.json's own record keeps its relative/`~` resolution against
+      // OpenClaw's dir, #1110; installs.json's relative one is refused below.)
+      const field = indexPathField(r.installPath);
+      const resolvable = native && typeof r.installPath === 'string' && r.installPath.trim() !== '';
+      if (field.kind === 'unknown' && !resolvable) {
+        return { state: 'unknown', why: `the copy ${evidence} names: its installPath ${field.why}` };
+      }
+      const named = field.kind === 'absent' ? null : (r.installPath as string);
       const p = native ? (named ? path.resolve(openclawDir, tilde(named, home)) : native) : named;
       if (!p) continue;
       const copy = readCopyAt(p);

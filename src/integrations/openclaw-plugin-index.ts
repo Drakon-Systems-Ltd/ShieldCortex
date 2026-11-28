@@ -384,12 +384,37 @@ function coerce(v: string | null | undefined): string | null {
 }
 
 /**
+ * #260 r10 (Sol): the ONE rule for a path field of OpenClaw's install index or
+ * an install record (`rootDir`, `installPath`), shared by gather, repair's
+ * preflight and the prune planner. Only a field that is not there is
+ * `absent`. One that is there but empty, blank, not a string, or relative
+ * names a folder no one here can find: `unknown` — and unknown refuses
+ * pruning and replacement, exactly as `.` does. (An empty string used to be
+ * dropped as "names nothing" by preflight and the planner, which then allowed
+ * a forced install and scheduled a deletion.) A `path` is only usable: a read
+ * of it that fails other than ENOENT/ENOTDIR is still not "absent".
+ */
+export type IndexPathField =
+  | { kind: 'absent' }
+  | { kind: 'path'; path: string }
+  | { kind: 'unknown'; why: string };
+
+export function indexPathField(value: unknown): IndexPathField {
+  if (value === undefined) return { kind: 'absent' };
+  if (typeof value !== 'string') return { kind: 'unknown', why: 'is not a string' };
+  if (value.trim() === '') return { kind: 'unknown', why: value === '' ? 'is empty' : 'is blank' };
+  if (!path.isAbsolute(value)) return { kind: 'unknown', why: `(${safeForReason(value)}) is not an absolute path` };
+  return { kind: 'path', path: value };
+}
+
+/**
  * #260 r9 (Sol): an index field that names a folder at all — anything but
- * absent. Such a folder whose build check returned null (a relative path, a
- * permission or I/O error) was NOT checked: it is never "holds no build".
+ * absent ({@link indexPathField}). Such a folder whose build check returned
+ * null (a relative or empty path, a permission or I/O error) was NOT checked:
+ * it is never "holds no build".
  */
 function namesFolder(p: unknown): boolean {
-  return p !== undefined && p !== null;
+  return indexPathField(p).kind !== 'absent';
 }
 
 /** Why a named folder could not be checked (#260 r9): a relative path is never resolved here. */
@@ -1606,12 +1631,13 @@ function readInstallsJsonRecord(home: string, pluginId: string): InstallsJsonRec
  * (EACCES, EIO) — a measurement we do not have, never a verdict either way.
  */
 function verifiedPluginBuildAt(rawDir: unknown, pluginId: string): boolean | null {
-  if (typeof rawDir !== 'string' || !path.isAbsolute(rawDir)) return null;
+  const field = indexPathField(rawDir);
+  if (field.kind !== 'path') return null;
   // Case r2 (non-blocking): normalise first. A recorded path with `..`, `//`
   // or `.` segments made every resolved entry point fail the containment
   // check below (`path.resolve` normalises them, the raw prefix did not), so
   // a real build read as "no build" — a false `load-unproven`.
-  const dir = path.resolve(rawDir);
+  const dir = path.resolve(field.path);
   const gone = (err: unknown): boolean => {
     const code = (err as NodeJS.ErrnoException)?.code;
     return code === 'ENOENT' || code === 'ENOTDIR';
@@ -1681,8 +1707,9 @@ function verifiedPluginBuildAt(rawDir: unknown, pluginId: string): boolean | nul
  * it deletes on the version it reads, and a damaged package.json refuses.
  */
 function readExactBuildVersion(dir: unknown, manifestFallback = false): string | null {
-  if (typeof dir !== 'string' || !path.isAbsolute(dir)) return null;
-  const v = readBuildVersionState(dir, manifestFallback);
+  const field = indexPathField(dir);
+  if (field.kind !== 'path') return null;
+  const v = readBuildVersionState(field.path, manifestFallback);
   return v.state === 'ok' ? v.version : null;
 }
 
@@ -2021,9 +2048,18 @@ export function assessDuplicateProjectDirs(
 
   if (!index) return refuse("OpenClaw's install index could not be read, so which copy it selects is unknown");
   const entry = index.plugins?.find((p) => p?.pluginId === pluginId);
-  const rootDir = typeof entry?.rootDir === 'string' && entry.rootDir ? entry.rootDir : null;
-  const rec = index.installRecords?.[pluginId]?.installPath;
-  const recordPath = typeof rec === 'string' && rec ? rec : null;
+  // #260 r10 (Sol): a path field that is there but unusable (empty, blank,
+  // not a string, relative) is unknown, never "not named": dropping it let the
+  // other field alone choose the kept dir and a deletion was scheduled.
+  const rootField = indexPathField(entry?.rootDir);
+  const recordField = indexPathField(index.installRecords?.[pluginId]?.installPath);
+  for (const [name, field] of [['selected rootDir', rootField], ['install record installPath', recordField]] as const) {
+    if (field.kind === 'unknown') {
+      return refuse(`the install index's ${name} ${field.why}, so which copy it selects is unknown`);
+    }
+  }
+  const rootDir = rootField.kind === 'path' ? rootField.path : null;
+  const recordPath = recordField.kind === 'path' ? recordField.path : null;
   // The index's selection first, else its install record.
   const keepBuild = rootDir ?? recordPath;
   if (!keepBuild) return refuse('the authoritative SQLite index does not resolve a live install dir — cannot safely tell which to keep');
