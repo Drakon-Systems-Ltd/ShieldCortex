@@ -14,6 +14,7 @@ import { REQUIRED_HOOK_NAMES } from '../setup/settings-hooks.js';
 import { hookCommandResolves, hookCommandTrust } from '../setup/hook-command-resolution.js';
 import {
   resolveRealtimePluginInstallPath,
+  resolveRealtimeProjectDir,
   readInstalledRealtimePluginVersion,
   readRealtimeProjectManifest,
   findEoverrideRiskPins,
@@ -123,7 +124,7 @@ import {
   REALTIME_PLUGIN_PACKAGE,
   realtimePluginInstallCommand,
 } from '../setup/openclaw-plugin-spec.js';
-import { readRealtimeReplacementEvidence } from '../integrations/openclaw-realtime-install.js';
+import { managedManifestTarget, readRealtimeReplacementEvidence } from '../integrations/openclaw-realtime-install.js';
 import {
   CLAUDE_CODE_ENFORCEMENT_FLOOR,
   detectClaudeCode,
@@ -8779,29 +8780,45 @@ export async function checkOpenClawManagedPinDrift(
 
   const disabled = isRealtimePluginDisabledInConfig(home);
   const risks = findEoverrideRiskPins(manifest);
+  // #260 r12 (Sol): never offer the repair where its own target check (the
+  // same function) refuses — diagnostic advice only, no repair command, and
+  // no host path in the text (round 8).
+  const withTarget = (row: CheckResult): CheckResult => {
+    const target = managedManifestTarget(home, readRealtimeReplacementEvidence(home), resolveRealtimeProjectDir(home));
+    if (target.ok) return row;
+    const { needsOpenClawCli: _gate, ...rest } = row;
+    void _gate;
+    return {
+      ...rest,
+      fix: 'Check it: `shieldcortex openclaw status`. Repair will not rewrite the managed pins here: ' +
+        (target.why === 'folders-disagree'
+          ? 'the managed project holding this manifest is not the one holding the copy OpenClaw selected.'
+          : 'the managed project\'s package.json is not a plain file in the folder holding the copy OpenClaw selected.'),
+    };
+  };
 
   if (disabled) {
     const detail = risks.length
       ? ` (manifest still has a version-drifted pin: ${risks.map((r) => r.name).join(', ')})`
       : '';
-    return {
+    return withTarget({
       label,
       status: 'fail',
       message: `realtime plugin is DISABLED in OpenClaw config${detail} — threat telemetry is not flowing`,
       fix: 'Run `shieldcortex openclaw repair` to reconcile the managed pins, reinstall, and re-enable the plugin.',
       needsOpenClawCli: { subcommand: 'plugins' },
-    };
+    });
   }
 
   if (risks.length > 0) {
     const list = risks.map((r) => `${r.name} (dep ${r.dependencyVersion} ≠ override ${r.overrideVersion})`).join(', ');
-    return {
+    return withTarget({
       label,
       status: 'warn',
       message: `managed-pin drift will EOVERRIDE on the next \`openclaw update\`: ${list}`,
       fix: 'Run `shieldcortex openclaw repair` now to reconcile the pins before an update disables the plugin.',
       needsOpenClawCli: { subcommand: 'plugins' },
-    };
+    });
   }
 
   return { label, status: 'pass', message: 'no managed-pin drift; plugin enabled' };
