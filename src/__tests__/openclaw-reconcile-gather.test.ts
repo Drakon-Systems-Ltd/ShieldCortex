@@ -617,10 +617,13 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
 
   // Sol finding 3: this test used to assert a FALSE green. The other copy
   // proves an install, not that OpenClaw selected it; the only "enabled"
-  // evidence is the stale row. Warn, no action.
-  // Case r5 (was r4c version-regressed on the record's 5.0.0): main weighs the
-  // disk build (5.22.1) over the record, so the stale row convicts nothing.
-  // Neither version shows what the gateway runs — load-unproven, no reinstall.
+  // evidence is the stale row.
+  // r6 owner ruling (jarvis 6095709381, meeting Case 6095672540's three
+  // conditions): r4c failed this as version-regressed on the record's 5.0.0;
+  // Case r5 made it warn. It FAILS — on the STALE INDEX RECORD (the indexed
+  // folders hold no build, the record is older than expected), not as a
+  // measured regression: neither 5.0.0 nor 5.22.1 is reported as running, and
+  // repair reinstalls pinned to expected, rewriting the record.
   const staleRecordBesideCurrentBuild = (): void => {
     writeConfig(true, true);
     writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
@@ -630,7 +633,16 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     });
   };
 
-  it('the stale record (5.0.0) beside a real build elsewhere (5.22.1), roster unread ⇒ load-unproven / warn / no action — never healthy, never a reinstall (Case r5)', () => {
+  // The pinned reinstall rewrites the stale record; it pins the EXPECTED
+  // version (never the record's 5.0.0, never the disk build's).
+  const pinnedToExpected = (verdict: ReturnType<typeof reconcilePluginState>): void => {
+    const plan = planReconcileActions(verdict, { pluginId: PLUGIN, packageName: REALTIME_PLUGIN_PACKAGE, expectedVersion: '5.22.1' });
+    expect(plan.map((x) => x.kind)).toEqual(['openclaw-install-pinned', 'gateway-reload', 'self-check']);
+    expect(plan[0].command!.join(' ')).toContain('@5.22.1');
+    expect(plan[0].command!.join(' ')).not.toContain('5.0.0');
+  };
+
+  it('the stale record (5.0.0) beside a real build elsewhere (5.22.1), roster unread ⇒ stale-index-record / FAIL / reinstall-pinned — on the stale record, never a measured regression (r6 owner ruling)', () => {
     staleRecordBesideCurrentBuild();
     const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
     expect(input.indexInstallPathExists).toBe(false);
@@ -638,33 +650,52 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     expect(input.onDiskVersion).toBe('5.22.1');
     const verdict = reconcilePluginState(input);
     expect(verdict).toMatchObject({
-      state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: true,
-      installedVersion: null, installedVersionSource: null,
+      state: 'stale-index-record', severity: 'fail', recommendedAction: 'reinstall-pinned', indexPathMissing: true,
+      versionUnverified: true, installedVersion: null, installedVersionSource: null,
     });
-    // No reinstall from the stale row: the plan only self-checks.
-    expect(planReconcileActions(verdict, { pluginId: PLUGIN, packageName: REALTIME_PLUGIN_PACKAGE, expectedVersion: '5.22.1' }).map((x) => x.kind)).toEqual(['self-check']);
+    expect(verdict.reasons.join(' ')).toMatch(/holds no plugin build \(stale index record\)/);
+    expect(verdict.reasons.join(' ')).not.toMatch(/v5\.0\.0|regressed/);
+    pinnedToExpected(verdict);
     const rendered = renderPluginLoadVerdict(verdict);
-    expect(rendered.status).toBe('warn');
-    expect(rendered.message).not.toMatch(/running stale|regressed|v5\.0\.0/);
+    expect(rendered.status).toBe('fail');
+    expect(rendered.message).toMatch(/OpenClaw's plugin index points to folders that hold no build \(stale index record\).*; running version unknown/);
+    expect(rendered.message).not.toMatch(/running stale|regressed|as on main|v5\.0\.0|v5\.22\.1/);
+    expect(rendered.fix).toMatch(/shieldcortex repair.*pinned to v5\.22\.1.*rewrites OpenClaw's stale index record/);
   });
 
   // Sol r2 (r3 change): the load is proven; the scan's build elsewhere is not
   // the selected copy, so its version is not claimed as the one that loaded.
-  // Case r5 (was r4c version-regressed): the record's 5.0.0 is not weighed
-  // against the disk build — version-unverified, warn, no reinstall.
-  it('the same host with a live roster naming the plugin ⇒ version-unverified / warn / no action, never the scan\'s or the record\'s version (Case r5)', () => {
+  // r6 owner ruling (was Case r5 version-unverified / warn): the roster proves
+  // a load, not which copy — the same stale-record FAIL.
+  it('the same host with a live roster naming the plugin ⇒ stale-index-record / FAIL — never the scan\'s or the record\'s version (r6 owner ruling)', () => {
     staleRecordBesideCurrentBuild();
     const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => [PLUGIN] }));
     expect(verdict).toMatchObject({
-      state: 'version-unverified', severity: 'warn', recommendedAction: 'none', onDiskVersion: '5.22.1',
+      state: 'stale-index-record', severity: 'fail', recommendedAction: 'reinstall-pinned', onDiskVersion: '5.22.1',
       versionUnverified: true, installedVersion: null, installedVersionSource: null,
     });
-    // No reinstall from the stale row: the plan only self-checks.
-    expect(planReconcileActions(verdict, { pluginId: PLUGIN, packageName: REALTIME_PLUGIN_PACKAGE, expectedVersion: '5.22.1' }).map((x) => x.kind)).toEqual(['self-check']);
+    pinnedToExpected(verdict);
     const rendered = renderPluginLoadVerdict(verdict);
-    expect(rendered.status).toBe('warn');
-    expect(rendered.message).toMatch(/version unverified/);
-    expect(rendered.message).not.toMatch(/running stale|regressed|v5\.0\.0|v5\.22\.1/);
+    expect(rendered.status).toBe('fail');
+    expect(rendered.message).toMatch(/stale index record.*running version unknown\. The running gateway loaded a copy, but nothing shows which one/);
+    expect(rendered.message).not.toMatch(/running stale|regressed|as on main|v5\.0\.0|v5\.22\.1/);
+  });
+
+  // Positive control: a rootDir verified as the real 5.22.1 build is MEASURED
+  // and decides — the stale 5.0.0 record beside it does not fail the host.
+  it.each([
+    ['roster unread', null],
+    ['roster-proven', [PLUGIN]],
+  ] as const)('positive control (%s): the index rootDir IS the 5.22.1 build (record 5.0.0, path gone) ⇒ healthy, measured', (_l, roster) => {
+    writeConfig(true, true);
+    const real = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    writeMachineStateIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: gone() } },
+      plugins: [upstreamEntry(real)],
+    });
+    const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => (roster ? [...roster] : null) }));
+    expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', installedVersion: '5.22.1', installedVersionSource: 'selected-build' });
+    expect(renderPluginLoadVerdict(verdict).status).toBe('pass');
   });
 
   it('the same host with a READ roster that omits the plugin ⇒ enabled-not-loaded / FAIL (confirmed non-load, unchanged)', () => {
@@ -836,6 +867,8 @@ describe('#260 r3 — the selected build is measured, not assumed', () => {
     writeConfig(true, true);
     writeRealBuild(outOfScan(), '5.22.1');
     fs.writeFileSync(path.join(outOfScan(), 'package.json'), JSON.stringify({ main: './dist/index.js', version: 'not-a-version' }));
+    // r6: and no version in its own manifest either (that would be read).
+    fs.writeFileSync(path.join(outOfScan(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
     writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-old', '4.0.0'), '4.0.0');
     writeMachineStateIndex(row(outOfScan(), '5.22.1'));
     const input = gather(roster ? [...roster] : null);
@@ -849,13 +882,17 @@ describe('#260 r3 — the selected build is measured, not assumed', () => {
     expect(verdict.reasons.join(' ')).not.toMatch(/versions agree/);
   });
 
-  it('unreadable selected version, but the record names THAT SAME verified directory ⇒ the record speaks for it (4.0.0 regressed)', () => {
+  // r6 (jarvis 6095709381): was "the record speaks for it" — the same-dir
+  // record stood in for the build's version, and so acquitted at or above
+  // expected. It is a claim: below expected it convicts, flagged unverified.
+  it('unreadable selected version, record naming THAT SAME verified directory at 4.0.0 ⇒ the record convicts (version-regressed, unverified), never stands in as measured', () => {
     writeConfig(true, true);
     const selected = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-a', '4.0.0'), '4.0.0');
     fs.writeFileSync(path.join(selected, 'package.json'), '{ nope');
+    fs.writeFileSync(path.join(selected, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
     writeMachineStateIndex(row(selected, '4.0.0', selected));
     const verdict = reconcilePluginState(gather(null));
-    expect(verdict).toMatchObject({ state: 'version-regressed', installedVersion: '4.0.0', installedVersionSource: 'index-record' });
+    expect(verdict).toMatchObject({ state: 'version-regressed', installedVersion: '4.0.0', installedVersionSource: 'index-record', versionUnverified: true });
   });
 
   // CASE's onDiskVersion note: the scan's NEWEST build is not the selected copy.
@@ -940,7 +977,12 @@ describe('#260 jarvis r3 — unreadable selected version is never a pass', () =>
     ['config_machine_state', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeMachineStateIndex(r)],
   ] as const;
   const ROSTERS = [['roster unread', null], ['roster-proven', [PLUGIN]]] as const;
-  const corrupt = (): void => fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json');
+  // r6: the build's own manifest is read when package.json gives no version,
+  // so "unreadable" means neither file carries one.
+  const corrupt = (): void => {
+    fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json');
+    fs.writeFileSync(path.join(outOfScan(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
+  };
   const noVersion = (): void => {
     fs.writeFileSync(path.join(outOfScan(), 'package.json'), JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', main: './dist/index.js' }));
     fs.writeFileSync(path.join(outOfScan(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
@@ -1017,6 +1059,101 @@ describe('#260 jarvis r3 — unreadable selected version is never a pass', () =>
     const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => [PLUGIN] }));
     expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', installedVersion: '5.22.1', installedVersionSource: 'selected-build' });
     expect(renderPluginLoadVerdict(verdict).status).toBe('pass');
+  });
+});
+
+/**
+ * #260 r6 (jarvis review 6095709381, BLOCKING) — the same-dir record never
+ * acquits. A verified selected build in the normal npm layout whose own
+ * version cannot be read, with OpenClaw's install record naming THAT SAME
+ * folder. The record is a claim about the build, not a reading of it: below
+ * expected it convicts (named as the record's, running version unknown);
+ * otherwise the row is `version-unverified` (warn) and never prints the
+ * record's version. When package.json yields no version, the build's own
+ * openclaw.plugin.json is read: that IS a measurement of the selected build.
+ * Both index layouts, roster unread and roster proven, gather → reconcile →
+ * doctor's renderer.
+ */
+describe('#260 r6 — a same-dir install record only convicts, never acquits', () => {
+  const LAYOUTS = [
+    ['legacy installed_plugin_index', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeIndex(r)],
+    ['config_machine_state', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeMachineStateIndex(r)],
+  ] as const;
+  const ROSTERS = [['roster unread', null], ['roster-proven', [PLUGIN]]] as const;
+  const selectedDir = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-a', PKG_SUBPATH);
+  const manifest = (version?: string): void =>
+    fs.writeFileSync(path.join(selectedDir(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, ...(version ? { version } : {}) }));
+  const pkg = (body: string): void => fs.writeFileSync(path.join(selectedDir(), 'package.json'), body);
+  const corrupt = (): void => pkg('{ not json');
+  type Row = {
+    id: string;
+    damage: () => void;
+    record: string;
+    expect: 'warn' | 'record-fail' | 'measured-fail' | 'pass';
+    measured?: string;
+  };
+  const ROWS: Row[] = [
+    { id: 'a. corrupt package.json, no manifest version, record 5.22.1', damage: () => { corrupt(); manifest(); }, record: '5.22.1', expect: 'warn' },
+    { id: 'b1. package.json with no version, no manifest version, record 5.22.1', damage: () => { pkg(JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', main: './dist/index.js' })); manifest(); }, record: '5.22.1', expect: 'warn' },
+    { id: 'b2. package.json version "latest", no manifest version, record 5.22.1', damage: () => { pkg(JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', version: 'latest', main: './dist/index.js' })); manifest(); }, record: '5.22.1', expect: 'warn' },
+    { id: 'c. corrupt package.json, no manifest version, record NEWER (5.23.0)', damage: () => { corrupt(); manifest(); }, record: '5.23.0', expect: 'warn' },
+    { id: 'd. corrupt package.json, the build\'s own manifest says 4.0.0, record 5.22.1', damage: () => { corrupt(); manifest('4.0.0'); }, record: '5.22.1', expect: 'measured-fail', measured: '4.0.0' },
+    { id: 'd2. package.json version "latest", the build\'s own manifest says 4.0.0, record 5.22.1', damage: () => { pkg(JSON.stringify({ version: 'latest', main: './dist/index.js' })); manifest('4.0.0'); }, record: '5.22.1', expect: 'measured-fail', measured: '4.0.0' },
+    { id: 'd3 (control). corrupt package.json, the build\'s own manifest says 5.23.0, record 4.0.0', damage: () => { corrupt(); manifest('5.23.0'); }, record: '4.0.0', expect: 'pass', measured: '5.23.0' },
+    { id: 'e. corrupt package.json, no manifest version, record BELOW expected (4.0.0)', damage: () => { corrupt(); manifest(); }, record: '4.0.0', expect: 'record-fail' },
+  ];
+  const cases = ROWS.flatMap((r) => LAYOUTS.flatMap(([layout, write]) => ROSTERS.map(([rl, roster]) => [`${r.id} — ${layout}, ${rl}`, r, write, roster] as const)));
+
+  it.each(cases)('%s', (_title, r, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(selectedDir(), '5.22.1');
+    r.damage();
+    write({
+      installRecords: { [PLUGIN]: { source: 'npm', version: r.record, installPath: selectedDir() } },
+      plugins: [upstreamEntry(selectedDir())],
+    });
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => (roster ? [...roster] : null) });
+    expect(input).toMatchObject({ indexRootDirExists: true, indexInstallPathExists: true, selectedVersion: r.measured ?? null });
+    const verdict = reconcilePluginState(input);
+    const rendered = renderPluginLoadVerdict(verdict);
+    if (r.expect === 'pass') {
+      expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', installedVersion: r.measured, installedVersionSource: 'selected-build' });
+      expect(verdict.versionUnverified).toBeUndefined();
+      expect(rendered.status).toBe('pass');
+      expect(rendered.message).toContain(`v${r.measured}`);
+      return;
+    }
+    expect(verdict.severity).not.toBe('ok');
+    expect(rendered.status).not.toBe('pass');
+    if (r.expect === 'measured-fail') {
+      // The build's own manifest is a reading of the selected build: measured.
+      expect(verdict).toMatchObject({
+        state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned',
+        installedVersion: '4.0.0', installedVersionSource: 'selected-build',
+      });
+      expect(verdict.versionUnverified).toBeUndefined();
+      expect(rendered.message).toMatch(/regressed to v4\.0\.0 \(older than expected v5\.22\.1\) — running stale/);
+      expect(rendered.message).not.toMatch(/v5\.22\.1 \(|install record/);
+    } else if (r.expect === 'record-fail') {
+      expect(verdict).toMatchObject({
+        state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned',
+        versionUnverified: true, installedVersion: '4.0.0', installedVersionSource: 'index-record',
+      });
+      expect(verdict.reasons.join(' ')).toMatch(/the build OpenClaw selected has no readable version, and OpenClaw's install record says v4\.0\.0, older than expected 5\.22\.1/);
+      expect(rendered.status).toBe('fail');
+      expect(rendered.message).toMatch(/OpenClaw's install record says v4\.0\.0, older than expected v5\.22\.1; running version unknown/);
+      expect(rendered.message).not.toMatch(/running stale|regressed to/);
+    } else {
+      expect(verdict).toMatchObject({
+        state: 'version-unverified', severity: 'warn', recommendedAction: 'none',
+        versionUnverified: true, installedVersion: null, installedVersionSource: null,
+      });
+      expect(rendered.status).toBe('warn');
+      expect(rendered.message).toMatch(/could not be read \(version unverified\)/);
+      // The record's version is never printed as if measured.
+      expect(rendered.message).not.toMatch(new RegExp(`v${r.record.replace(/\./g, '\\.')}`));
+      expect(rendered.message).toMatch(roster ? /the running gateway loaded it/ : /load is not confirmed either/);
+    }
   });
 });
 

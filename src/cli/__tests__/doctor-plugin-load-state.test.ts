@@ -237,6 +237,9 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     expect(r.status).toBe('warn');
     expect(r.message).toMatch(/version unverified\) — the running gateway loaded it/);
     expect(r.message).not.toMatch(/5\.22\.1/);
+    // r6: the indexed folder holds no build — say that, not "could not be read".
+    expect(r.message).toMatch(/OpenClaw's plugin index points to a folder that holds no build/);
+    expect(r.message).not.toMatch(/could not be read \(version/);
   });
 
   // #260 r4 (Astra r3 BLOCKER 2): a wiped registration behind a stale record
@@ -297,6 +300,9 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     expect(proven.status).toBe('warn');
     expect(proven.message).toMatch(/version unverified\) — the running gateway loaded it/);
     expect(proven.message).not.toMatch(/v5\.22\.1/);
+    // r6: no build at the indexed folder — worded as such.
+    expect(proven.message).toMatch(/points to a folder that holds no build/);
+    expect(proven.message).not.toMatch(/could not be read \(version/);
     expectStalePathWarn(renderWithRoster(null));
     expectStalePathWarn(await checkOpenClawPluginLoadState(home, '5.22.1'));
   });
@@ -311,19 +317,21 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
 
   // Case r5 (review 6095672540): the stale row says 5.0.0, the indexed folder
   // holds no build, and a real 5.22.1 build sits in another project dir.
-  // Neither version shows what the gateway runs: warn, never "running stale",
-  // never a pass. Through the real doctor check too (roster unread).
-  it('gone directory + stale record 5.0.0 + a real 5.22.1 build elsewhere: roster unread WARNS stale path, roster-proven WARNS version unverified — never "running stale"', async () => {
+  // Neither version shows what the gateway runs. r6 owner ruling (jarvis
+  // 6095709381, on Case's conditions; Case r5 had both warn): FAILS on the
+  // STALE INDEX RECORD in both roster cases — plain words, running version
+  // unknown, no version printed as running, repair rewrites the record.
+  // Through the real doctor check too (roster unread).
+  it('gone directory + stale record 5.0.0 + a real 5.22.1 build elsewhere: FAILS on the stale index record, roster unread and roster-proven — never "running stale", never a version as running', async () => {
     migrated(pkgDir(), { recordVersion: '5.0.0' });
     writeRealBuild(path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-other', PKG_SUBPATH), '5.22.1');
-    for (const r of [renderWithRoster(null), await checkOpenClawPluginLoadState(home, '5.22.1')]) {
-      expectStalePathWarn(r);
-      expect(r.message).not.toMatch(/running stale|regressed|v5\.0\.0/);
+    for (const r of [renderWithRoster(null), await checkOpenClawPluginLoadState(home, '5.22.1'), renderWithRoster([PLUGIN])]) {
+      expect(r.status).toBe('fail');
+      expect(r.message).toMatch(/^realtime plugin: OpenClaw's plugin index points to folders that hold no build \(stale index record\), and that record names a version older than expected; running version unknown/);
+      expect(r.message).not.toMatch(/running stale|regressed|as on main|v5\.0\.0|v5\.22\.1/);
+      expect(r.fix).toMatch(/`shieldcortex repair`: it reinstalls the plugin pinned to v5\.22\.1, which rewrites OpenClaw's stale index record/);
     }
-    const proven = renderWithRoster([PLUGIN]);
-    expect(proven.status).toBe('warn');
-    expect(proven.message).toMatch(/version unverified\) — the running gateway loaded it/);
-    expect(proven.message).not.toMatch(/running stale|regressed|v5\.0\.0|v5\.22\.1/);
+    expect(renderWithRoster([PLUGIN]).message).toMatch(/The running gateway loaded a copy, but nothing shows which one/);
   });
 
   // Case r5: the renderer says whose claim an UNVERIFIED regression is and
@@ -394,29 +402,47 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
   ] as const)('out-of-scan rootDir whose version cannot be read (%s): WARNS "version unverified", never passes, never v5.22.1', (_l, roster, expected) => {
     writeRealBuild(outOfScan(), '5.22.1');
     fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json');
+    // r6: the build's own manifest is read next, so it carries no version here.
+    fs.writeFileSync(path.join(outOfScan(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
     migrated(pkgDir(), { recordVersion: '5.22.1', rootDir: outOfScan() });
     const r = renderWithRoster(roster ? [...roster] : null);
     expect(r.status).toBe('warn');
     expect(r.message).toMatch(expected);
     expect(r.message).not.toMatch(/5\.22\.1/);
+    // r6: a build IS there — its version could not be read (not "no build").
+    expect(r.message).toMatch(/the version of the copy OpenClaw uses could not be read/);
+    expect(r.message).not.toMatch(/holds no build/);
   });
 
   // jarvis r3 rows a/b through the real doctor check (roster unread: the temp
   // HOME has no gateway log), and row d as the warn.
+  // r6: "corrupt" leaves no version in the build's own manifest either (it is read next).
+  const corruptNoManifestVersion = (): void => {
+    fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json');
+    fs.writeFileSync(path.join(outOfScan(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
+  };
   it.each([
-    ['a. corrupt package.json, record 4.0.0 (path gone): fail, never pass', (): void => fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json'), '4.0.0', 'fail'],
+    ['a. corrupt package.json, record 4.0.0 (path gone): fail, never pass', corruptNoManifestVersion, '4.0.0', 'fail'],
     ['b. no version anywhere, record 4.0.0 (path gone): fail, never pass', (): void => {
       fs.writeFileSync(path.join(outOfScan(), 'package.json'), JSON.stringify({ main: './dist/index.js' }));
       fs.writeFileSync(path.join(outOfScan(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
     }, '4.0.0', 'fail'],
-    ['d. corrupt package.json, record at expected: warn, never pass', (): void => fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json'), '5.22.1', 'warn'],
+    ['d. corrupt package.json, record at expected: warn, never pass', corruptNoManifestVersion, '5.22.1', 'warn'],
+    // r6 (jarvis H11): the build's own manifest is a reading of that build —
+    // an older one is a MEASURED regression, whatever the record says.
+    ['H11. corrupt package.json, the build\'s own manifest says 4.0.0, record at expected: fail as measured', (): void => {
+      fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json');
+      fs.writeFileSync(path.join(outOfScan(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, version: '4.0.0' }));
+    }, '5.22.1', 'measured-fail'],
   ] as const)('checkOpenClawPluginLoadState, verified rootDir with an unreadable version — %s', async (_l, damage, recordVersion, status) => {
     writeRealBuild(outOfScan(), '5.22.1');
     damage();
     migrated(pkgDir(), { recordVersion, rootDir: outOfScan() });
     const r = await checkOpenClawPluginLoadState(home, '5.22.1');
-    expect(r.status).toBe(status);
-    if (status === 'fail') {
+    expect(r.status).toBe(status === 'measured-fail' ? 'fail' : status);
+    if (status === 'measured-fail') {
+      expect(r.message).toMatch(/^realtime plugin regressed to v4\.0\.0 \(older than expected v5\.22\.1\) — running stale/);
+    } else if (status === 'fail') {
       expect(r.message).toMatch(/OpenClaw's install record says v4\.0\.0, older than expected v5\.22\.1; running version unknown/);
       expect(r.message).not.toMatch(/running stale|regressed to/);
     } else {
