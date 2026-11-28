@@ -3,7 +3,7 @@
  *
  * Every open Guard issue the epic folds in gets at least one NAMED fixture
  * here: the call, the effect and targets the command model is expected to
- * derive from it, the decision the proposed ADR-002 v3 gives it, and the
+ * derive from it, the decision the accepted ADR-002 v3 gives it, and the
  * verdict today's classifier (`evaluateToolCall`) must return for the fixture
  * to count as fixed.
  *
@@ -26,7 +26,7 @@
  * taxonomy, by the ADR's own names. The last five are the kinds the corpus
  * also has to name: two non-privileged ones the false-positive rows resolve
  * to, a resolved execution, and the two block-list kinds the 20 Oct contract
- * adds (they are part of the v3 PROPOSAL, not of the accepted v2 text).
+ * adds (they come from v3, accepted 22 Nov 2026, not from the v2 text).
  */
 export type EffectKind =
   | 'destroy'
@@ -43,14 +43,16 @@ export type EffectKind =
   | 'none'            // prints, help text, pure computation
   | 'read'            // reads local, non-credential state
   | 'code-exec'       // runs a program whose own effects were resolved and are listed beside it
-  | 'history-rewrite' // force push or history rewrite (v3 proposal)
-  | 'payment';        // payments or money movement (v3 proposal)
+  | 'history-rewrite' // force push or history rewrite (v3 block list)
+  | 'payment';        // payments or money movement (v3 block list)
 
 /**
- * Decision under the PROPOSED ADR-002 v3 (see
- * `docs/architecture/ADR-002-v3-amendment-proposed.md`). It is recorded for
- * the reviewer and for Phases 2 to 4; it is not asserted by the Phase 0 test,
- * because v3 is not accepted and no default has changed.
+ * Decision under ADR-002 v3, accepted by the owner on 22 Nov 2026 (see
+ * `docs/architecture/ADR-002-v3-amendment-proposed.md`; the file keeps its
+ * name until it is folded into ADR-002 on #1065). It is recorded for the
+ * reviewer and for Phases 2 to 4; it is not asserted by the Phase 0 test.
+ * Accepting v3 changed no runtime default: posture moves only through the
+ * #1065 build, so the classifier's verdict and the v3 decision can differ.
  *   BLOCK      on the fixed published list
  *   LOG        everything else by default
  *   UNRESOLVED the model cannot classify it: logged with a marker by default,
@@ -138,7 +140,7 @@ export interface FrozenFixture {
   effects: EffectKind[];
   /** Targets the command model is expected to resolve. */
   targets: string[];
-  /** Decision under the proposed ADR-002 v3. */
+  /** Decision under the accepted ADR-002 v3 (recorded, not asserted by the suite). */
   adr: AdrDecision;
   expect?: FixtureExpectation;
   /** Why the status is what it is: the mechanism, or the open decision. */
