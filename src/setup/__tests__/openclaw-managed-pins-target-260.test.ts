@@ -330,3 +330,139 @@ describe.each(['new', 'legacy'] as const)('#260 r12: managed-pin repair writes o
     expect(fs.readdirSync(selected.root).filter((f) => f.endsWith('.tmp'))).toEqual([]);
   });
 });
+
+/**
+ * #260 round 13 (Sol): the r12 re-check bound the file's TYPE, not its
+ * identity. A package.json replaced by a different regular file (a new inode),
+ * or the same inode rewritten, between the read and the rename was still
+ * replaced with bytes derived from the original — a lost update. The read is
+ * now bound (one no-follow descriptor: dev, inode, size, mtime and a sha256 of
+ * the bytes parsed), and the backup and the rename each require the file to be
+ * that same file with those same bytes.
+ */
+describe.each(['new', 'legacy'] as const)('#260 r13: managed-pin repair rewrites only the manifest it read (%s index layout)', (layout) => {
+  const leftovers = (root: string): string[] => fs.readdirSync(root).filter((f) => f.includes('.repair-backup-') || f.endsWith('.tmp'));
+  const tmps = (root: string): string[] => fs.readdirSync(root).filter((f) => f.endsWith('.tmp'));
+  const REPLACEMENT = JSON.stringify({ dependencies: { peer: '1.0.0', added: '9.9.9' }, overrides: { peer: '2.0.0' } });
+
+  /** Run the repair, applying `swap` to the manifest once `when` first matches an openSync call. */
+  async function raceAt(
+    root: string,
+    when: (p: string, flags: unknown) => boolean,
+    swap: (manifest: string) => void,
+  ): Promise<Awaited<ReturnType<typeof repairOpenClawManagedPins>>> {
+    const open = fs.openSync;
+    let raced = false;
+    jest.spyOn(fs, 'openSync').mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      const fd = (open as (...a: unknown[]) => number)(p, ...rest);
+      if (!raced && when(String(p), rest[0])) {
+        raced = true;
+        swap(path.join(root, 'package.json'));
+      }
+      return fd;
+    }) as typeof fs.openSync);
+    const result = await repairOpenClawManagedPins(home);
+    expect(raced).toBe(true);
+    return result;
+  }
+  const atTmp = (p: string): boolean => p.endsWith('.tmp');
+  /** A different regular file (new inode) renamed over the manifest. */
+  const replaceWithNewInode = (m: string): void => {
+    const side = `${m}.fixture-replacement`;
+    fs.writeFileSync(side, REPLACEMENT);
+    fs.renameSync(side, m);
+  };
+
+  it('replaced by a different regular file (new inode) before the rename — refused, the replacement intact, no tmp', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    const manifest = path.join(selected.root, 'package.json');
+    const inodeBefore = fs.lstatSync(manifest).ino;
+
+    const result = await raceAt(selected.root, atTmp, replaceWithNewInode);
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/package\.json changed while this repair was running; nothing was changed/);
+    expect(fs.lstatSync(manifest).ino).not.toBe(inodeBefore);
+    expect(fs.readFileSync(manifest, 'utf-8')).toBe(REPLACEMENT);
+    expect(tmps(selected.root)).toEqual([]);
+  });
+
+  it('the same inode rewritten with different content before the rename — refused, the rewrite intact, no tmp', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    const manifest = path.join(selected.root, 'package.json');
+    const inodeBefore = fs.lstatSync(manifest).ino;
+
+    const result = await raceAt(selected.root, atTmp, (m) => fs.writeFileSync(m, REPLACEMENT));
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/package\.json changed while this repair was running; nothing was changed/);
+    expect(fs.lstatSync(manifest).ino).toBe(inodeBefore);
+    expect(fs.readFileSync(manifest, 'utf-8')).toBe(REPLACEMENT);
+    expect(tmps(selected.root)).toEqual([]);
+  });
+
+  it('the same inode rewritten with same-size bytes while its metadata reads unchanged — the content hash refuses it', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    const manifest = path.join(selected.root, 'package.json');
+    const original = fs.readFileSync(manifest, 'utf-8');
+    const sameSize = original.replace('"1.0.0"', '"1.0.1"');
+    expect(sameSize).not.toBe(original);
+    expect(sameSize.length).toBe(original.length);
+    // Every later lstat of the manifest reports the stat from before the
+    // rewrite, so only the bytes can tell the files apart.
+    const frozen = fs.lstatSync(manifest);
+    const realLstat = fs.lstatSync;
+    let rewritten = false;
+    jest.spyOn(fs, 'lstatSync').mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => (
+      rewritten && String(p) === manifest ? frozen : (realLstat as (...a: unknown[]) => fs.Stats)(p, ...rest)
+    )) as typeof fs.lstatSync);
+
+    const result = await raceAt(selected.root, atTmp, (m) => {
+      fs.writeFileSync(m, sameSize);
+      rewritten = true;
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/package\.json changed while this repair was running; nothing was changed/);
+    expect(fs.readFileSync(manifest, 'utf-8')).toBe(sameSize);
+    expect(tmps(selected.root)).toEqual([]);
+  });
+
+  it('replaced by a different regular file before the safety backup — refused, no backup and no tmp, the replacement intact', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    const manifest = path.join(selected.root, 'package.json');
+
+    // Swap right after the repair's own no-follow descriptor on the manifest
+    // opens (numeric flags; a plain path read passes a string flag).
+    const result = await raceAt(selected.root, (p, flags) => p === manifest && typeof flags === 'number', replaceWithNewInode);
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/package\.json changed while this repair was running; nothing was changed/);
+    expect(fs.readFileSync(manifest, 'utf-8')).toBe(REPLACEMENT);
+    expect(leftovers(selected.root)).toEqual([]);
+  });
+
+  it('control: the race hook fires but nothing changes — the repair proceeds and rewrites the manifest', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    const manifest = path.join(selected.root, 'package.json');
+    const original = JSON.parse(fs.readFileSync(manifest, 'utf-8')) as Record<string, unknown>;
+
+    const result = await raceAt(selected.root, atTmp, () => {});
+
+    expect(result.message).toMatch(/Manifest reconciled, but `openclaw` is not on PATH/);
+    expect(fs.readFileSync(manifest, 'utf-8')).toBe(JSON.stringify({ dependencies: {}, overrides: { peer: '2.0.0' } }, null, 2) + '\n');
+    const [backup] = backups(selected.root);
+    expect(fs.readFileSync(path.join(selected.root, backup), 'utf-8')).toBe(JSON.stringify(original, null, 2));
+    expect(tmps(selected.root)).toEqual([]);
+  });
+});
