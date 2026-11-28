@@ -608,6 +608,10 @@ export interface BoundManifestRead {
   size: number;
   mtimeMs: number;
   sha256: string;
+  /** The file's owner and mode bits, for a replacement that keeps them (r15). */
+  uid: number;
+  gid: number;
+  mode: number;
 }
 
 /**
@@ -636,6 +640,9 @@ export function readBoundManifest(file: string): BoundManifestRead {
       size: st.size,
       mtimeMs: st.mtimeMs,
       sha256: createHash('sha256').update(bytes).digest('hex'),
+      uid: st.uid,
+      gid: st.gid,
+      mode: st.mode,
     };
   } finally {
     fs.closeSync(fd);

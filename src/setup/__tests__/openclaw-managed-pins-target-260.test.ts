@@ -552,3 +552,121 @@ describe.each(['new', 'legacy'] as const)('#260 r15: the managed-pin repair laun
     expectNoLaunch(tripwire);
   });
 });
+
+/**
+ * #260 r15 (Jarvis 2): the r12 replace (exclusive create + rename) gave the
+ * new package.json the WRITER's uid:gid — measured gid 4 → 1001 on head,
+ * kept on main; under sudo the manifest became root-owned 0600, unreadable by
+ * OpenClaw. The backup and the replacement now get the original owner, read
+ * from the bound read's descriptor, by fchown on their own descriptor before
+ * the rename; if that fails, nothing is rewritten.
+ */
+describe.each(['new', 'legacy'] as const)('#260 r15: the managed-pin repair keeps the manifest\'s owner (%s index layout)', (layout) => {
+  const tmps = (root: string): string[] => fs.readdirSync(root).filter((f) => f.endsWith('.tmp'));
+  /** Record the fd each `.tmp` / backup create returns. */
+  function trackCreates(): { tmpFd: () => number | undefined; backupFd: () => number | undefined } {
+    const open = fs.openSync;
+    let tmpFd: number | undefined;
+    let backupFd: number | undefined;
+    jest.spyOn(fs, 'openSync').mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      const fd = (open as (...a: unknown[]) => number)(p, ...rest);
+      if (String(p).endsWith('.tmp')) tmpFd = fd;
+      if (String(p).includes('.repair-backup-')) backupFd = fd;
+      return fd;
+    }) as typeof fs.openSync);
+    return { tmpFd: () => tmpFd, backupFd: () => backupFd };
+  }
+
+  it('the new manifest and the backup get the ORIGINAL uid:gid by fchown on their own descriptors, before the rename', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    const manifest = path.join(selected.root, 'package.json');
+    const st = fs.statSync(manifest);
+    const created = trackCreates();
+    // Recorded, not performed: this proves which owner is asked for, whoever runs the test.
+    const fchown = jest.spyOn(fs, 'fchownSync').mockImplementation(() => {});
+    const rename = jest.spyOn(fs, 'renameSync');
+
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
+
+    expect(result.message).toMatch(/Manifest reconciled, but `openclaw` is not on PATH/);
+    expect(fchown.mock.calls).toEqual([
+      [created.backupFd(), st.uid, st.gid],
+      [created.tmpFd(), st.uid, st.gid],
+    ]);
+    expect(rename).toHaveBeenCalledTimes(1);
+    expect(fchown.mock.invocationCallOrder[1]).toBeLessThan(rename.mock.invocationCallOrder[0]);
+  });
+
+  it('fchown of the replacement fails (EPERM) — refused, manifest bytes and inode unchanged, no tmp left, the cause named', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    const manifest = path.join(selected.root, 'package.json');
+    const bytes = fs.readFileSync(manifest);
+    const ino = fs.statSync(manifest).ino;
+    const created = trackCreates();
+    const real = fs.fchownSync;
+    jest.spyOn(fs, 'fchownSync').mockImplementation(((fd: number, uid: number, gid: number) => {
+      if (fd === created.tmpFd()) throw Object.assign(new Error('EPERM: operation not permitted, fchown'), { code: 'EPERM' });
+      return real(fd, uid, gid);
+    }) as typeof fs.fchownSync);
+    const rename = jest.spyOn(fs, 'renameSync');
+
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/Could not write the project manifest \(could not keep the original owner \d+:\d+ \(EPERM/);
+    expect(rename).not.toHaveBeenCalled();
+    expect(fs.readFileSync(manifest)).toEqual(bytes);
+    expect(fs.statSync(manifest).ino).toBe(ino);
+    expect(tmps(selected.root)).toEqual([]);
+    expect(fake.lookups).toBe(0);
+  });
+
+  it('fchown of the backup fails — refused before anything is written, no backup or tmp left', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    const manifest = path.join(selected.root, 'package.json');
+    const bytes = fs.readFileSync(manifest);
+    jest.spyOn(fs, 'fchownSync').mockImplementation(() => {
+      throw Object.assign(new Error('EPERM: operation not permitted, fchown'), { code: 'EPERM' });
+    });
+
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/Could not write a safety backup .*could not keep the original owner.*so nothing was changed/);
+    expect(fs.readFileSync(manifest)).toEqual(bytes);
+    expect(fs.readdirSync(selected.root).filter((f) => f.includes('.repair-backup-') || f.endsWith('.tmp'))).toEqual([]);
+  });
+
+  // A real group, where the test user has one besides its primary (CI-safe skip otherwise).
+  const supplementary = typeof process.getgroups === 'function'
+    ? process.getgroups().find((g) => g !== process.getgid?.())
+    : undefined;
+  (supplementary === undefined ? it.skip : it)(
+    supplementary === undefined
+      ? 'real-gid fixture SKIPPED: the test user has no supplementary group to chgrp the manifest to'
+      : `real-gid fixture: a manifest in supplementary group ${supplementary} keeps that group after the heal`,
+    async () => {
+      const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+      writeIndex(layout, selected.dir, SELF());
+      baseConfig(selected.dir);
+      const manifest = path.join(selected.root, 'package.json');
+      fs.chownSync(manifest, fs.statSync(manifest).uid, supplementary!);
+      const before = fs.statSync(manifest);
+
+      const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
+
+      expect(result.message).toMatch(/Manifest reconciled, but `openclaw` is not on PATH/);
+      const after = fs.statSync(manifest);
+      expect(after.ino).not.toBe(before.ino);
+      expect([after.uid, after.gid]).toEqual([before.uid, supplementary]);
+      const [backup] = backups(selected.root);
+      expect(fs.statSync(path.join(selected.root, backup)).gid).toBe(supplementary);
+    },
+  );
+});

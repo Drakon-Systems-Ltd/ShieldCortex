@@ -2685,11 +2685,19 @@ function readSelfVersion(): string | null {
 /**
  * #260 r12: create `file` exclusively (fails on any existing name, a link
  * included) and write `text` to it; if writing fails, remove what this created.
+ * r15 (Jarvis 2): it gets `owner` on its descriptor first — a rename must not
+ * hand the manifest to whoever ran the repair (under sudo: root, 0600). An
+ * fchown that fails fails the create; there is no write that drops ownership.
  */
-function createExclusive(file: string, text: string, mode: number): void {
+function createExclusive(file: string, text: string, mode: number, owner: { uid: number; gid: number }): void {
   const fd = fs.openSync(file, 'wx', mode);
   let ok = false;
   try {
+    try {
+      fs.fchownSync(fd, owner.uid, owner.gid);
+    } catch (err) {
+      throw new Error(`could not keep the original owner ${owner.uid}:${owner.gid} (${err instanceof Error ? err.message : String(err)})`);
+    }
     fs.fchmodSync(fd, mode);
     fs.writeFileSync(fd, text);
     fs.fsyncSync(fd);
@@ -2849,12 +2857,13 @@ export async function repairOpenClawManagedPins(
   const workDeps = (typeof work.dependencies === 'object' && work.dependencies
     ? work.dependencies
     : {}) as Record<string, unknown>;
-  let mode: number;
+  // Mode and owner from the bound read's own descriptor (r15, Jarvis 2).
+  const mode = bound.mode & 0o777;
+  const owner = { uid: bound.uid, gid: bound.gid };
   try {
-    mode = fs.lstatSync(manifestPath).mode & 0o777;
     if (!managedManifestTargetStillHolds(target)) return changed();
     if (!boundManifestUnchanged(manifestPath, bound)) return fileChanged();
-    createExclusive(`${manifestPath}.repair-backup-${ts}`, JSON.stringify(work, null, 2), mode);
+    createExclusive(`${manifestPath}.repair-backup-${ts}`, JSON.stringify(work, null, 2), mode, owner);
     console.log(`  - safety backup: ${`${manifestPath}.repair-backup-${ts}`.replace(home, '~')}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -2872,7 +2881,7 @@ export async function repairOpenClawManagedPins(
   const tmp = path.join(target.projectDir, `.package.json.repair-${process.pid}-${randomBytes(6).toString('hex')}.tmp`);
   let created = false;
   try {
-    createExclusive(tmp, JSON.stringify(work, null, 2) + '\n', mode);
+    createExclusive(tmp, JSON.stringify(work, null, 2) + '\n', mode, owner);
     created = true;
     if (!managedManifestTargetStillHolds(target)) {
       fs.unlinkSync(tmp);
