@@ -4,6 +4,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
 import {
+  assessDuplicateProjectDirs,
   gatherReconcileInput,
   planReconcileActions,
   readPluginInstallIndex,
@@ -14,6 +15,8 @@ import { checkOpenClawPluginLoadState, renderPluginLoadVerdict } from '../cli/do
 import { extractFixCommands, formatDoctorReport, nextCommandForFailures, sanitiseDoctorRowsForDisplay } from '../cli/doctor-report.js';
 import { assessRealtimeReplacement, REALTIME_PLUGIN_PACKAGE } from '../setup/openclaw-plugin-spec.js';
 import { readRealtimeReplacementEvidence } from '../integrations/openclaw-realtime-install.js';
+import { reconcileOpenClawPluginState } from '../setup/openclaw-reconcile.js';
+import type { SelfCheckRunResult } from '../setup/openclaw-selfcheck.js';
 
 /**
  * Disk-level tests for the reconciler's input gathering — fully isolated in a
@@ -1907,6 +1910,178 @@ describe('#260 r9 — a relative indexed path is unchecked, never empty', () => 
     expect(verdict).toMatchObject({ state: 'stale-index-record', severity: 'fail', recommendedAction: 'reinstall-pinned' });
     expect(installSteps(verdict).length).toBeGreaterThan(0);
     expect(renderPluginLoadVerdict(verdict)).toMatchObject({ status: 'fail', message: expect.stringMatching(/folders that hold no build/) });
+    expect(preflight()).toEqual({ replace: true });
+  });
+});
+
+/**
+ * #260 r10 (Sol delta review at a524cf60). A path field that is THERE but
+ * empty, blank or not a string is unknown, never "not named". At a524cf60
+ * gather already treated "" as unchecked, but repair's preflight dropped an
+ * empty `installPath` and allowed a forced replacement, and the prune planner
+ * dropped an empty `rootDir` or `installPath`, let the other field choose the
+ * kept dir, and scheduled a deletion — while `.` refused both. One rule
+ * (`indexPathField`) now serves gather, preflight and the planner; only an
+ * absent field is absent.
+ */
+describe('#260 r10 — a present but empty / blank / non-string index path is unknown everywhere', () => {
+  const LAYOUTS = [
+    ['legacy installed_plugin_index', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeIndex(r)],
+    ['config_machine_state', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeMachineStateIndex(r)],
+  ] as const;
+  const BAD = [['empty', ''], ['blank', '   '], ['non-string', 42]] as const;
+  const FIELDS = ['rootDir', 'installPath', 'both'] as const;
+  type Field = (typeof FIELDS)[number];
+  const MATRIX = LAYOUTS.flatMap(([layout, write]) =>
+    BAD.flatMap(([bad, value]) => FIELDS.map((field) => [`${field} ${bad}, ${layout}`, write, field, value] as const)));
+  const gone = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'reaped', PKG_SUBPATH);
+  const gather = (roster: string[] | null) =>
+    gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => roster });
+  const preflight = () => assessRealtimeReplacement(readRealtimeReplacementEvidence(home), '5.22.1');
+  const installSteps = (v: ReturnType<typeof reconcilePluginState>) =>
+    planReconcileActions(v, { expectedVersion: '5.22.1', pluginId: PLUGIN, packageName: REALTIME_PLUGIN_PACKAGE })
+      .filter((s) => s.kind === 'openclaw-install' || s.kind === 'openclaw-install-pinned');
+  /** The index row with `field` (or both) set to `value`, the other to `fallback`. */
+  const row = (field: Field | null, value: unknown, fallback: string, version: string) => ({
+    installRecords: { [PLUGIN]: { source: 'npm', version, installPath: field === 'installPath' || field === 'both' ? value : fallback } },
+    plugins: [upstreamEntry(fallback, field === 'rootDir' || field === 'both' ? { rootDir: value } : {})],
+  });
+  const passing = {
+    ok: true, rosterProof: true, rosterState: 'loaded', canaryProof: true, versionProof: true, reasons: ['loaded'],
+    index: null, liveRoster: [PLUGIN], canary: { ran: true, denied: true, auditEntryFound: true },
+  } as SelfCheckRunResult;
+  /** The full repair run against the fixture, with every side effect recorded and nothing executed. */
+  const repair = async (roster: string[] | null) => {
+    const pruned: string[] = [];
+    const ran: string[][] = [];
+    const res = await reconcileOpenClawPluginState({
+      home,
+      pluginId: PLUGIN,
+      expectedVersion: '5.22.1',
+      apply: true,
+      grantConversationAccess: false,
+      readState: () => {
+        const input = gather(roster);
+        return { input, verdict: reconcilePluginState(input) };
+      },
+      pruneDir: (_h, d) => { pruned.push(d); },
+      runCommand: (argv) => { ran.push(argv); return { status: 0, output: '' }; },
+      restoreRegistration: () => ({ ok: true, detail: 'restored' }),
+      reloadGateway: async () => ({ restarted: true }),
+      waitForGateway: async () => ({ ready: true, waitedMs: 0 }),
+      selfCheck: async () => passing,
+    });
+    return { res, pruned, ran };
+  };
+
+  // (A) the selected copy and the record: one bad field, the other an
+  // absolute folder confirmed gone; record 5.0.0, a current build elsewhere.
+  it.each(MATRIX)('%s, other path confirmed gone ⇒ preflight refuses the replacement, no reinstall planned, doctor offers no repair', async (_t, write, field, value) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    write(row(field, value, gone(), '5.0.0'));
+    const input = gather(null);
+    const verdict = reconcilePluginState(input);
+    if (typeof value !== 'string') {
+      // The reader refuses a non-string path field outright: the whole index is unread.
+      expect(input).toMatchObject({ indexUnreadable: true, index: null });
+    } else {
+      if (field !== 'rootDir') expect(input).toMatchObject({ indexInstallPathExists: null, indexInstallPathUnreadable: true });
+      if (field !== 'installPath') expect(input).toMatchObject({ indexRootDirExists: null, indexRootDirUnreadable: true });
+    }
+    expect(verdict.severity).toBe('warn');
+    expect(verdict.recommendedAction).toBe('none');
+    expect(verdict.reasons.join(' ')).not.toMatch(/stale index record/);
+    expect(installSteps(verdict)).toEqual([]);
+    expect(preflight()).toMatchObject({ replace: false, why: 'unknown' });
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expect(r.status).toBe('warn');
+    expect(r.fix ?? '').not.toMatch(/shieldcortex repair|plugins install/);
+    const { res, pruned, ran } = await repair(null);
+    expect(res.plan.map((s) => s.kind)).not.toEqual(expect.arrayContaining(['prune-duplicate-dirs']));
+    expect(res.plan.some((s) => s.kind === 'openclaw-install' || s.kind === 'openclaw-install-pinned')).toBe(false);
+    expect(pruned).toEqual([]);
+    expect(ran.filter((a) => a.includes('install'))).toEqual([]);
+  });
+
+  // (B) Sol's prune fixture: the index names the current build (both fields),
+  // one field is then made bad; an older duplicate project dir sits beside it,
+  // and the roster read proves the plugin is NOT loaded.
+  it.each(MATRIX)('%s, duplicate 4.0.0 dir on disk, confirmed not loaded ⇒ the planner prunes nothing and repair neither prunes nor installs', async (_t, write, field, value) => {
+    writeConfig(true, true);
+    const keep = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-current', '5.22.1'), '5.22.1');
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-previous', '4.0.0'), '4.0.0');
+    write(row(field, value, keep, '5.22.1'));
+    const input = gather([]);
+    if (typeof value === 'string') expect(reconcilePluginState(input).state).toBe('enabled-not-loaded');
+    const report = assessDuplicateProjectDirs(home, input.index, PLUGIN, REALTIME_PLUGIN_PACKAGE);
+    expect(report.prune).toEqual([]);
+    expect(report.refused).toMatch(/refusing to prune/);
+    expect(preflight()).toMatchObject({ replace: false, why: 'unknown' });
+    const { res, pruned, ran } = await repair([]);
+    expect(res.plan.some((s) => s.kind === 'prune-duplicate-dirs')).toBe(false);
+    expect(pruned).toEqual([]);
+    // An install step the plan carries for this state is refused by preflight
+    // before it runs (exactly as for `.`); nothing is installed.
+    expect(ran.filter((a) => a.includes('install'))).toEqual([]);
+    const refusedInstall = res.stepResults.filter((s) => s.kind === 'openclaw-install' || s.kind === 'openclaw-install-pinned');
+    expect(refusedInstall.every((s) => s.ok === false)).toBe(true);
+    expect(fs.existsSync(path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-previous'))).toBe(true);
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expect(r.fix ?? '').not.toMatch(/shieldcortex repair|plugins install/);
+  });
+
+  // The planner's own rule, not only the reader's: a hand-built row (no type
+  // check upstream) with a bad field still refuses.
+  it.each(BAD.flatMap(([bad, value]) => (['rootDir', 'installPath'] as const).map((f) => [`${f} ${bad}`, f, value] as const)))(
+    'planner given a row whose %s refuses, naming the field', (_t, field, value) => {
+      const keep = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-current', '5.22.1'), '5.22.1');
+      writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-previous', '4.0.0'), '4.0.0');
+      const index = {
+        installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: field === 'installPath' ? value : keep } },
+        plugins: [{ pluginId: PLUGIN, enabled: true, rootDir: field === 'rootDir' ? value : keep }],
+      } as unknown as Parameters<typeof assessDuplicateProjectDirs>[1];
+      const report = assessDuplicateProjectDirs(home, index, PLUGIN, REALTIME_PLUGIN_PACKAGE);
+      expect(report.prune).toEqual([]);
+      expect(report.refused).toContain(field === 'rootDir' ? 'selected rootDir' : 'install record installPath');
+    },
+  );
+
+  // Controls: an ABSENT field behaves as before.
+  it.each(LAYOUTS)('control: record with no installPath, selected copy gone ⇒ preflight still allows the replacement (%s)', (_l, write) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0' } }, plugins: [upstreamEntry(gone())] });
+    expect(preflight()).toEqual({ replace: true });
+  });
+
+  it.each(LAYOUTS)('control: record with no installPath, duplicate 4.0.0 dir ⇒ the planner still prunes it (%s)', (_l, write) => {
+    writeConfig(true, true);
+    const keep = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-current', '5.22.1'), '5.22.1');
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-previous', '4.0.0'), '4.0.0');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1' } }, plugins: [upstreamEntry(keep)] });
+    const report = assessDuplicateProjectDirs(home, gather([]).index, PLUGIN, REALTIME_PLUGIN_PACKAGE);
+    expect(report).toMatchObject({ keep: 'drakon-systems-shieldcortex-realtime-current', prune: ['drakon-systems-shieldcortex-realtime-previous'] });
+    expect(report.refused).toBeUndefined();
+  });
+
+  it('control: legacy entry with no rootDir, record names the current build ⇒ the planner still prunes the older dir', () => {
+    writeConfig(true, true);
+    const keep = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-current', '5.22.1'), '5.22.1');
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-previous', '4.0.0'), '4.0.0');
+    writeIndex({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: keep } }, plugins: [{ pluginId: PLUGIN, enabled: true }] });
+    const report = assessDuplicateProjectDirs(home, gather([]).index, PLUGIN, REALTIME_PLUGIN_PACKAGE);
+    expect(report.prune).toEqual(['drakon-systems-shieldcortex-realtime-previous']);
+  });
+
+  // Control: both paths absolute and confirmed gone ⇒ still the round-9 stale-record FAIL.
+  it.each(LAYOUTS)('control: both indexed paths absolute and confirmed gone ⇒ stale-index-record FAIL, replacement allowed (%s)', (_l, write) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    write(row(null, undefined, gone(), '5.0.0'));
+    const verdict = reconcilePluginState(gather(null));
+    expect(verdict).toMatchObject({ state: 'stale-index-record', severity: 'fail', recommendedAction: 'reinstall-pinned' });
+    expect(installSteps(verdict).length).toBeGreaterThan(0);
     expect(preflight()).toEqual({ replace: true });
   });
 });

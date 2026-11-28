@@ -651,3 +651,45 @@ describe('#1110 — a native install recorded in openclaw.json plugins.installs'
     });
   });
 });
+
+/**
+ * #260 r10 (Sol delta review at a524cf60): a record's `installPath` that is
+ * there but empty, blank or not a string is unknown — never "names no path".
+ * At a524cf60 an empty one was dropped, the selection fell through to `none`,
+ * and a forced install was allowed to replace whatever was there. Only an
+ * absent field is absent.
+ */
+describe('#260 r10 — a present but unusable installPath refuses the replacement', () => {
+  const BAD = [['empty', ''], ['blank', '   '], ['non-string', 42]] as const;
+  const decide = () => assessRealtimeReplacement(readRealtimeReplacementEvidence(home), '5.22.1');
+
+  it.each(BAD)('the index record\'s installPath is %s (no roster entry) ⇒ unknown, refused', (_t, value) => {
+    writeRealtimeProject('drakon-systems-shieldcortex-realtime-abc', '5.22.1');
+    const opts = index({ [ID]: { source: 'npm', version: '5.0.0', installPath: value } });
+    expect(readSelectedRealtimeInstall(home, opts)).toMatchObject({ state: 'unknown', why: expect.stringContaining('installPath') });
+    expect(assessRealtimeReplacement(readRealtimeReplacementEvidence(home, opts), '5.22.1')).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
+  it.each(BAD)('the index roster\'s rootDir is %s ⇒ unknown, refused', (_t, value) => {
+    const opts = index({}, [{ pluginId: ID, enabled: true, rootDir: value }]);
+    expect(readSelectedRealtimeInstall(home, opts)).toMatchObject({ state: 'unknown', why: expect.stringContaining('no usable rootDir') });
+  });
+
+  it.each(BAD)('no index: installs.json installPath is %s ⇒ unknown, refused', (_t, value) => {
+    writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'npm', version: '5.0.0', installPath: value } } });
+    expect(readSelectedRealtimeInstall(home)).toMatchObject({ state: 'unknown', why: expect.stringContaining('installs.json names: its installPath') });
+    expect(decide()).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
+  it.each(BAD)('no index: openclaw.json plugins.installs installPath is %s ⇒ unknown, refused (not the extensions default)', (_t, value) => {
+    writeJson('openclaw.json', { plugins: { installs: { [ID]: { source: 'npm', version: '5.0.0', installPath: value } } } });
+    expect(readSelectedRealtimeInstall(home)).toMatchObject({ state: 'unknown', why: expect.stringContaining('openclaw.json plugins.installs names: its installPath') });
+    expect(decide()).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
+  it('control: no index, installs.json record with NO installPath and nothing on disk ⇒ none, replacement allowed (as before)', () => {
+    writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'npm', version: '5.0.0' } } });
+    expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'none' });
+    expect(decide()).toEqual({ replace: true });
+  });
+});
