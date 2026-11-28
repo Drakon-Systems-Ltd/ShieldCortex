@@ -9307,8 +9307,16 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         // Case r5: an unverified regression is a claim, not a measurement —
         // say whose claim it is and that the running version is unknown. Only
         // a measured regression says "running stale".
+        // r8: `record-path-build` is the build in the record's folder — a
+        // measured copy, but not the one OpenClaw selects.
         message: verdict.versionUnverified === true
-          ? `realtime plugin: ${verdict.installedVersionSource === 'disk' ? 'the build on disk is' : "OpenClaw's install record says"} v${verdict.installedVersion ?? verdict.onDiskVersion ?? verdict.indexVersion}, ` +
+          ? `realtime plugin: ${
+            verdict.installedVersionSource === 'disk'
+              ? 'the build on disk is'
+              : verdict.installedVersionSource === 'record-path-build'
+                ? "the build in the folder OpenClaw's install record names is"
+                : "OpenClaw's install record says"
+          } v${verdict.installedVersion ?? verdict.onDiskVersion ?? verdict.indexVersion}, ` +
             `older than expected v${verdict.expectedVersion}; running version unknown (nothing measured the copy OpenClaw uses) — refuse the downgrade`
           : `realtime plugin regressed to v${verdict.installedVersion ?? verdict.onDiskVersion ?? verdict.indexVersion} (older than expected v${verdict.expectedVersion}) — running stale, refuse the downgrade`,
         fix,
