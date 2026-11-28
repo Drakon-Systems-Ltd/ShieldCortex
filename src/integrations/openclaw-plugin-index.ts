@@ -384,6 +384,22 @@ function coerce(v: string | null | undefined): string | null {
 }
 
 /**
+ * #260 r9 (Sol): an index field that names a folder at all — anything but
+ * absent. Such a folder whose build check returned null (a relative path, a
+ * permission or I/O error) was NOT checked: it is never "holds no build".
+ */
+function namesFolder(p: unknown): boolean {
+  return p !== undefined && p !== null;
+}
+
+/** Why a named folder could not be checked (#260 r9): a relative path is never resolved here. */
+function uncheckedBecause(p: unknown): string {
+  return typeof p === 'string' && path.isAbsolute(p)
+    ? 'permission or I/O error'
+    : 'not an absolute path, and OpenClaw resolves a relative one against its own working directory, which is not known here';
+}
+
+/**
  * Case r5 (#260): the version claim weighed when nothing measured the copy a
  * verdict is about — main's precedence, the disk scan's build if there is
  * one, else OpenClaw's install record. Returned only when that ONE claim is
@@ -582,6 +598,19 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     // nothing and the empty selection still blocks a pass (the missing-build
     // rule at the end). A folder that could not be read is not empty: the
     // stale-record rule needs every indexed folder confirmed empty.
+    // r9 (Sol): confirmed means the check said `false`. A folder the record
+    // names whose check returned null — relative, unresolvable, permission —
+    // was not checked, flagged or not; only a record naming no folder has
+    // nothing to check.
+    const recordFolderConfirmedEmpty =
+      input.indexInstallPathExists === false ||
+      (input.indexInstallPathExists == null &&
+        input.indexInstallPathUnreadable !== true &&
+        !namesFolder(indexRecord?.installPath));
+    // Likewise the selected rootDir: stale (`false`), or named nowhere.
+    const selectedFolderConfirmedEmpty =
+      indexSelectionStale ||
+      !namesFolder(index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir);
     const rec = coerce(indexVersion);
     const exp = coerce(expectedVersion);
     const atRecord = input.indexInstallPathExists === true ? coerce(input.recordPathVersion) : null;
@@ -590,8 +619,8 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     }
     staleRecordBelowExpected =
       !claim &&
-      input.indexInstallPathExists !== true &&
-      input.indexInstallPathUnreadable !== true &&
+      recordFolderConfirmedEmpty &&
+      selectedFolderConfirmedEmpty &&
       Boolean(rec && exp && semver.lt(rec, exp));
   } else {
     effective = scanVersion ?? (indexRecordPathGone ? null : coerce(indexVersion));
@@ -903,9 +932,10 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     const what = indexSelectionStale ? 'selects the plugin at' : 'records the plugin at';
     // r8 (Sol): say so when the record's own folder could not be checked —
     // it is neither a build nor shown empty.
-    if (input.indexInstallPathUnreadable === true && input.indexInstallPathExists == null) {
+    // r9: flagged or not, a named folder whose check returned null.
+    if (input.indexInstallPathExists == null && (input.indexInstallPathUnreadable === true || namesFolder(indexRecord?.installPath))) {
       reasons.push(
-        `the folder OpenClaw's install record names (${safeForReason(indexRecord?.installPath)}) could not be checked (permission or I/O error), so whether it holds a build is unknown`,
+        `the folder OpenClaw's install record names (${safeForReason(indexRecord?.installPath)}) could not be checked (${uncheckedBecause(indexRecord?.installPath)}), so whether it holds a build is unknown`,
       );
     }
     if (loadedInLiveRoster === true) {
@@ -945,7 +975,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     const selectedRoot = index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir;
     reasons.push(
       (indexSelectionUnreadable
-        ? `the copy OpenClaw selected (${safeForReason(selectedRoot)}) could not be read (permission or I/O error), so its version is not verified against expected ${expected ?? expectedVersion}; `
+        ? `the copy OpenClaw selected (${safeForReason(selectedRoot)}) could not be ${typeof selectedRoot === 'string' && path.isAbsolute(selectedRoot) ? 'read' : 'checked'} (${uncheckedBecause(selectedRoot)}), so its version is not verified against expected ${expected ?? expectedVersion}; `
         : `the build OpenClaw selected (${safeForReason(selectedRoot)}) is there, but its version could not be read (no readable version in its package.json or openclaw.plugin.json), so it is not verified against expected ${expected ?? expectedVersion}; `) +
         (loadedInLiveRoster === true
           ? 'the running gateway proves the load, not which version loaded'
@@ -1813,7 +1843,10 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
     ...(indexInstallPathExists === true
       ? { recordPathVersion: readExactBuildVersion(recordInstallPath, true) }
       : {}),
-    ...(indexInstallPathExists === null && typeof recordInstallPath === 'string' && path.isAbsolute(recordInstallPath)
+    // r9 (Sol): not only an absolute path the check could not read — any
+    // named folder whose check returned null (a relative path is never
+    // resolved here) is unchecked, never "holds no build".
+    ...(indexInstallPathExists === null && namesFolder(recordInstallPath)
       ? { indexInstallPathUnreadable: true }
       : {}),
     indexRootDirExists,
@@ -1825,7 +1858,9 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
       ? { selectedVersion: readExactBuildVersion(selectedRootDir, true) }
       : {}),
     // r7 (Sol): a named rootDir whose check failed is not "not named".
-    ...(indexRootDirExists === null && typeof selectedRootDir === 'string' && path.isAbsolute(selectedRootDir)
+    // r9: likewise a named rootDir that is relative — an unmeasured selected
+    // copy, not "no selection".
+    ...(indexRootDirExists === null && namesFolder(selectedRootDir)
       ? { indexRootDirUnreadable: true }
       : {}),
     onDiskVersion: readInstalledRealtimePluginVersion(home),
