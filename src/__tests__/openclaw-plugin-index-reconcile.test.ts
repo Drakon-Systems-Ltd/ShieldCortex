@@ -594,3 +594,36 @@ describe('#260 Case — control characters in a recorded path never reach reason
     expect(safeForReason('a'.repeat(600))).toBe(`${'a'.repeat(512)}…(truncated)`);
   });
 });
+
+/**
+ * #260 r11 (Sol, non-blocking): the installs.json-vs-index path conflict.
+ * An empty or blank installs.json path names no folder anyone can check — it
+ * is unknown (r10), so it must not count as AGREEING with the index and
+ * suppress the pinned-install plan a disagreeing path produces. Only an
+ * absent path (the reader's null) is "no claim".
+ */
+describe('#260 r11 — an unknown installs.json path never suppresses the path conflict', () => {
+  const indexPath = '/home/u/.openclaw/npm/projects/p/node_modules/@drakon-systems/shieldcortex-realtime';
+  const input = (installPath: string | null): ReconcileInput => ({
+    pluginId: 'shieldcortex-realtime',
+    expectedVersion: '5.22.1',
+    config: { enabled: true, inAllow: true },
+    installsJson: { version: '5.22.1', installPath },
+    index: { installRecords: { 'shieldcortex-realtime': { source: 'npm', version: '5.22.1', installPath: indexPath } }, plugins: [{ pluginId: 'shieldcortex-realtime', enabled: true }] },
+    onDiskVersion: '5.22.1',
+    liveRoster: ['shieldcortex-realtime'],
+    indexInstallPathExists: true,
+  });
+  const plans = (installPath: string | null): string[] =>
+    planReconcileActions(reconcilePluginState(input(installPath)), { expectedVersion: '5.22.1', pluginId: 'shieldcortex-realtime', packageName: REALTIME_PLUGIN_PACKAGE }).map((s) => s.kind);
+
+  it.each([['empty', ''], ['blank', '   '], ['a disagreeing path', '/elsewhere']])('%s installs.json path: conflicted, the pinned install is planned', (_label, p) => {
+    expect(reconcilePluginState(input(p)).state).toBe('conflicted-metadata');
+    expect(plans(p)).toContain('openclaw-install-pinned');
+  });
+
+  it.each([['absent (null)', null], ['the same path', indexPath]])('control: %s installs.json path is no conflict', (_label, p) => {
+    expect(reconcilePluginState(input(p)).state).not.toBe('conflicted-metadata');
+    expect(plans(p)).not.toContain('openclaw-install-pinned');
+  });
+});
