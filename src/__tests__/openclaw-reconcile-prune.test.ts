@@ -242,6 +242,56 @@ describe('duplicate-dir prune — only a true duplicate of a verified, unambiguo
     untouched(GEN_DIR);
   });
 
+  // jarvis r3 (non-blocking, folded): the kept path, or its project dir, may
+  // be a symlink INTO the other project dir. Removing that dir would delete
+  // the only intact copy; realpath overlap refuses it.
+  it('the kept build path is a symlink into the other project dir ⇒ nothing pruned, the real build survives', async () => {
+    setupTwoDirHost({
+      dirs: [{ name: BASE_DIR, version: '4.47.2' }],
+      installsJsonPath: pkg(GEN_DIR), indexInstallPath: pkg(GEN_DIR), rosterEntries: [entry(GEN_DIR)],
+    });
+    fs.mkdirSync(path.dirname(pkg(GEN_DIR)), { recursive: true });
+    fs.symlinkSync(pkg(BASE_DIR), pkg(GEN_DIR), 'dir');
+    const { pruned, messages } = await runReconcile();
+    expect(pruned).toEqual([]);
+    untouched(BASE_DIR, GEN_DIR);
+    expect(fs.existsSync(path.join(pkg(BASE_DIR), 'dist', 'index.js'))).toBe(true);
+    expect(messages.join(' ')).toMatch(/refusing to prune .*holds the kept build itself/);
+  });
+
+  it('the kept PROJECT dir is a symlink to the other project dir ⇒ nothing pruned, the real build survives', async () => {
+    setupTwoDirHost({
+      dirs: [{ name: BASE_DIR, version: '4.47.2' }],
+      installsJsonPath: pkg(GEN_DIR), indexInstallPath: pkg(GEN_DIR), rosterEntries: [entry(GEN_DIR)],
+    });
+    fs.symlinkSync(path.join(projectsDir(), BASE_DIR), path.join(projectsDir(), GEN_DIR), 'dir');
+    const { pruned, messages } = await runReconcile();
+    expect(pruned).toEqual([]);
+    untouched(BASE_DIR, GEN_DIR);
+    expect(fs.existsSync(path.join(pkg(BASE_DIR), 'dist', 'index.js'))).toBe(true);
+    expect(messages.join(' ')).toMatch(/refusing to prune .*holds the kept build itself/);
+  });
+
+  it('positive control — kept path is a symlink to a build OUTSIDE the projects dir; a genuinely separate older copy is still pruned', async () => {
+    setupTwoDirHost({
+      dirs: [{ name: BASE_DIR, version: '4.40.0' }],
+      installsJsonPath: pkg(GEN_DIR), indexInstallPath: pkg(GEN_DIR), rosterEntries: [entry(GEN_DIR)],
+    });
+    // The real kept build lives elsewhere (a store dir); GEN_DIR's package path links to it.
+    const store = path.join(home, 'store', 'shieldcortex-realtime');
+    fs.mkdirSync(path.join(store, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(store, 'package.json'), JSON.stringify({ version: '4.47.2', main: './dist/index.js' }));
+    fs.writeFileSync(path.join(store, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, version: '4.47.2' }));
+    fs.writeFileSync(path.join(store, 'dist', 'index.js'), '');
+    fs.mkdirSync(path.dirname(pkg(GEN_DIR)), { recursive: true });
+    fs.symlinkSync(store, pkg(GEN_DIR), 'dir');
+    const { pruned, messages } = await runReconcile();
+    expect(pruned).toEqual([BASE_DIR]);
+    expect(fs.existsSync(path.join(projectsDir(), BASE_DIR))).toBe(false);
+    expect(fs.existsSync(path.join(store, 'dist', 'index.js'))).toBe(true);
+    expect(messages.join(' ')).not.toMatch(/refus/i);
+  });
+
   // Sol r2: report the prune that HAPPENED, not the one planned.
   it('a PARTIAL prune is reported as such and fails the repair, even with a passing self-check', async () => {
     const OTHER = 'drakon-systems-shieldcortex-realtime-0ld';

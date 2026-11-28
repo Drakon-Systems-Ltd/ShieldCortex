@@ -1761,7 +1761,10 @@ export function canonicalProjectDir(home: string): string | null {
  *  - the kept build's exact version can be read;
  *  - every other dir is safe to lose: it holds no copy of the package at all,
  *    or a copy whose exact version reads as older than or equal to the kept
- *    one. A newer copy, or one whose version cannot be read, is never removed.
+ *    one. A newer copy, or one whose version cannot be read, is never removed;
+ *  - no other dir is, contains, or sits inside the REAL location of the kept
+ *    build or its project dir (a symlinked kept path resolves into it), and
+ *    every one of those real locations can be resolved.
  *
  * Reads only; removes nothing. `packageName` names the package's directory
  * under each project's `node_modules`.
@@ -1820,6 +1823,18 @@ export function assessDuplicateProjectDirs(
   if (!keepVersion) {
     return refuse(`the version of the kept build (${safeForReason(keepBuild)}) cannot be read, so no other copy can be shown to be older`, { keep });
   }
+  // jarvis r3 (non-blocking, folded): the kept build or its project dir may be
+  // a symlink into another project dir; pruning that dir would delete the
+  // only intact copy. Resolve both, and refuse any dir that overlaps them.
+  let keptReal: string[];
+  try {
+    keptReal = [fs.realpathSync(keepBuild), fs.realpathSync(path.join(projects, keep))];
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return refuse(`the real location of the kept build (${safeForReason(keepBuild)}) cannot be resolved (${code ?? 'error'}), so no other dir can be shown not to hold it`, { keep, keepVersion });
+  }
+  const overlaps = (a: string, b: string): boolean =>
+    a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep);
 
   const unsafe: string[] = [];
   for (const d of dirs) {
@@ -1836,6 +1851,17 @@ export function assessDuplicateProjectDirs(
     }
     if (!st.isDirectory()) {
       unsafe.push(`${safeForReason(d)} is not a plain directory`);
+      continue;
+    }
+    let real: string;
+    try {
+      real = fs.realpathSync(projectDir);
+    } catch (err) {
+      unsafe.push(`the real location of ${safeForReason(d)} cannot be resolved (${(err as NodeJS.ErrnoException)?.code ?? 'error'})`);
+      continue;
+    }
+    if (keptReal.some((k) => overlaps(real, k))) {
+      unsafe.push(`${safeForReason(d)} holds the kept build itself (the kept path resolves into it through a symlink)`);
       continue;
     }
     const copy = readBuildVersionState(path.join(projectDir, 'node_modules', ...packageName.split('/')));
