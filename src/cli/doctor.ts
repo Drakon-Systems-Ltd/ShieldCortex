@@ -9294,7 +9294,7 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
           label,
           status: 'warn',
           message:
-            'couldn\'t confirm the realtime plugin is installed and loaded — OpenClaw\'s record of it points to a folder that holds no plugin build, ' +
+            'couldn\'t confirm the realtime plugin is installed and loaded — OpenClaw\'s plugin list points to a folder that holds no plugin build, ' +
             'and nothing shows that OpenClaw uses any other copy. It may be installed somewhere else. Neither OK nor a fault is confirmed',
           fix: 'Check it: `shieldcortex openclaw status`',
           verboseNote: `Prove enforcement live: ${LIVE_CANARY_COMMAND}`,
