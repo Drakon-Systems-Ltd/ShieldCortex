@@ -9326,6 +9326,11 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       // it judged — never the expected version, which is the pin this CLI
       // wants and was not read off this host. Both passes below use it.
       const versionText = measuredVersionText(verdict);
+      // r4c: a version check that cannot measure never passes — not even on a
+      // hand-built `healthy` verdict that carries no version.
+      if (versionText === 'version unverified') {
+        return renderPluginLoadVerdict({ ...verdict, state: 'version-unverified', severity: 'warn' });
+      }
       if (!rosterProven) {
         // Status stays `pass`: the reconciler classified this `severity: 'ok'`
         // (installed, enabled, versions agree) and nothing is known to be

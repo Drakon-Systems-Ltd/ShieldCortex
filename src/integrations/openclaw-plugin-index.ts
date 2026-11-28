@@ -301,12 +301,12 @@ export interface ReconcileVerdict {
    */
   indexPathMissing?: boolean;
   /**
-   * No version was measured for the copy the verdict is about (#260). Set on
-   * `healthy` when the selected copy holds no build (load proven by the
-   * running gateway only) or no layer recorded a version at all; and (jarvis
-   * r3) whenever the verified selected build's own version could not be read:
-   * then the verdict is `version-unverified` (warn), or `version-regressed`
-   * when the install record or the disk scan claims an older version.
+   * No version was measured for the copy the verdict is about (#260): the
+   * selected copy holds no build (load proven by the running gateway only),
+   * no layer recorded a version at all, or (jarvis r3) the verified selected
+   * build's own version could not be read. Never on `healthy` (r4c): the
+   * verdict is `version-unverified` (warn), or `version-regressed` when the
+   * install record or the disk scan claims an older version.
    * Renderers say "version unverified" — never the expected version, and
    * never the newest build a disk scan found. Absent on every other verdict.
    */
@@ -503,8 +503,18 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
       }
     }
   } else if (indexPathMissing) {
+    // r4c (owner ruling on jarvis r3): the copy the index points at holds no
+    // build, so nothing here measures what runs. A claim below expected —
+    // the scan's build or the install record — still convicts, as on main;
+    // the lowest one is named. Anything else is never a pass (see below).
     effective = scanVersion;
     installedVersionSource = effective ? 'disk' : null;
+    const exp = coerce(expectedVersion);
+    const rec = coerce(indexVersion);
+    if (rec && exp && semver.lt(rec, exp) && !(effective && semver.lt(effective, rec))) {
+      effective = rec;
+      installedVersionSource = 'index-record';
+    }
   } else {
     effective = scanVersion ?? (indexRecordPathGone ? null : coerce(indexVersion));
     installedVersionSource = scanVersion ? 'disk' : effective ? 'index-record' : null;
@@ -513,6 +523,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   const regressed = Boolean(effective && expected && semver.lt(effective, expected));
   const versionLabel =
     (selectedVersionUnread ? "the build OpenClaw selected has no readable version, and " : '') +
+    (indexPathMissing ? "the copy OpenClaw's install index points at holds no plugin build, and " : '') +
     (installedVersionSource === 'selected-build'
       ? `the build OpenClaw selected is v${effective}`
       : installedVersionSource === 'disk'
@@ -727,7 +738,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     reasons.push(`${versionLabel}, older than expected ${expected} — refuse downgrade, reinstall pinned`);
     return {
       ...base,
-      ...(selectedVersionUnread ? { versionUnverified: true } : {}),
+      ...(selectedVersionUnread || indexPathMissing ? { versionUnverified: true } : {}),
       state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned', reasons,
     };
   }
@@ -761,10 +772,12 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // points at holds no build — its selected `rootDir`, or its record's path
   // with no verified selection — so nothing on this host backs "installed and
   // enabled at version X".
-  //   - The running gateway provably loaded it ⇒ load is proven, so it stays
-  //     healthy. WHICH version loaded is not known and is not claimed — not
-  //     even when a build sits elsewhere on disk (Sol r2): the scan's newest
-  //     build is not proven to be the copy that process loaded.
+  //   - The running gateway provably loaded it ⇒ load is proven, but WHICH
+  //     version loaded is not known and is not claimed — not even when a
+  //     build sits elsewhere on disk (Sol r2): the scan's newest build is not
+  //     proven to be the copy that process loaded. r4c (owner ruling on jarvis
+  //     r3): an unmeasured version is never a pass, so this is
+  //     `version-unverified` (warn); a lower claim already failed above.
   //   - Otherwise ⇒ neither a pass nor a conviction, whether or not a build
   //     sits elsewhere on disk (Sol finding 3): a build on disk proves an
   //     install, not that OpenClaw selected it.
@@ -786,7 +799,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
       );
       return {
         ...base, installedVersion: null, installedVersionSource: null, versionUnverified: true,
-        state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons,
+        state: 'version-unverified', severity: 'warn', recommendedAction: 'none', reasons,
       };
     }
     reasons.push(
@@ -820,6 +833,8 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     };
   }
 
+  // r4c (owner ruling on jarvis r3): no layer recorded a version at all.
+  // Nothing was measured, so this is not a pass either.
   const versionUnverified = effective == null;
   const versionClause = versionUnverified
     ? 'the installed version could not be verified'
@@ -831,11 +846,13 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
         : `enabled, present on the running gateway boot roster, ${versionClause}`
       : `enabled and installed, ${versionClause} — but the running gateway boot roster could NOT be read, so the plugin is not proven loaded`,
   );
-  return {
-    ...base,
-    ...(versionUnverified ? { versionUnverified: true } : {}),
-    state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons,
-  };
+  if (versionUnverified) {
+    return {
+      ...base, installedVersion: null, installedVersionSource: null, versionUnverified: true,
+      state: 'version-unverified', severity: 'warn', recommendedAction: 'none', reasons,
+    };
+  }
+  return { ...base, state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons };
 }
 
 // ── Remediation planner (pure) ──────────────────────────────────────────────
