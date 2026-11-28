@@ -10,16 +10,40 @@
  * paths compared): a disagreement, or no verified copy in a managed project,
  * refuses with nothing written. Both SQLite index layouts.
  *
- * Nothing here runs `openclaw`: PATH is an empty folder, so a repair that
- * proceeds stops at "`openclaw` is not on PATH", after its manifest writes.
+ * Nothing here can run a native process: `child_process` is mocked, the
+ * `which openclaw` lookup reports "not found", and every launcher throws and
+ * is asserted unused. A repair that proceeds therefore stops at "`openclaw` is
+ * not on PATH", after its manifest writes. PATH deliberately still reaches the
+ * host's own (so an installed OpenClaw stays findable) behind a stub
+ * `openclaw` that records any run — the mock, not PATH, is the isolation.
  */
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import semver from 'semver';
 import Database from 'better-sqlite3';
+import { createRequire } from 'module';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { repairOpenClawManagedPins } from '../openclaw.js';
+
+const refuseLaunch = (name: string) => jest.fn((..._args: unknown[]): never => {
+  throw new Error(`fixture: ${name} must not launch a native process in this suite`);
+});
+const launchers = {
+  execSync: jest.fn((cmd: unknown): never => {
+    if (cmd === 'which openclaw') throw new Error('fixture: openclaw not found');
+    throw new Error(`fixture: execSync(${String(cmd)}) must not run in this suite`);
+  }),
+  execFileSync: refuseLaunch('execFileSync'),
+  spawnSync: refuseLaunch('spawnSync'),
+  spawn: refuseLaunch('spawn'),
+  exec: refuseLaunch('exec'),
+  execFile: refuseLaunch('execFile'),
+};
+// The real module's other exports stay; a self-import here would recurse.
+const actual = createRequire(import.meta.url)('child_process') as Record<string, unknown>;
+jest.unstable_mockModule('child_process', () => ({ ...actual, ...launchers, default: { ...actual, ...launchers } }));
+
+const { repairOpenClawManagedPins } = await import('../openclaw.js');
 
 const ID = 'shieldcortex-realtime';
 const PKG = '@drakon-systems/shieldcortex-realtime';
@@ -29,20 +53,33 @@ const SELF = (): string => JSON.parse(
 
 let home: string;
 let prevPath: string | undefined;
+let stubRan: string;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-260-pins-'));
   prevPath = process.env.PATH;
-  const emptyBin = path.join(home, 'empty-bin');
-  fs.mkdirSync(emptyBin);
-  process.env.PATH = emptyBin;
+  const stubBin = path.join(home, 'stub-bin');
+  stubRan = path.join(home, 'stub-openclaw-ran');
+  fs.mkdirSync(stubBin);
+  fs.writeFileSync(path.join(stubBin, 'openclaw'), `#!/bin/sh\necho ran >> '${stubRan}'\n`, { mode: 0o755 });
+  process.env.PATH = [stubBin, prevPath].filter(Boolean).join(path.delimiter);
+  for (const fn of Object.values(launchers)) fn.mockClear();
   jest.spyOn(console, 'log').mockImplementation(() => {});
 });
 
 afterEach(() => {
-  jest.restoreAllMocks();
-  process.env.PATH = prevPath;
-  fs.rmSync(home, { recursive: true, force: true });
+  try {
+    // The lookup is the only child_process call the repair may make here.
+    for (const [name, fn] of Object.entries(launchers)) {
+      const calls = name === 'execSync' ? fn.mock.calls.filter(([cmd]) => cmd !== 'which openclaw') : fn.mock.calls;
+      expect([name, calls]).toEqual([name, []]);
+    }
+    expect(fs.existsSync(stubRan)).toBe(false);
+  } finally {
+    jest.restoreAllMocks();
+    process.env.PATH = prevPath;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 const put = (file: string, text: string): void => {
@@ -121,7 +158,7 @@ describe.each(['new', 'legacy'] as const)('#260 r11: managed-pin repair writes o
     const result = await repairOpenClawManagedPins(home);
 
     // It rewrote the manifest (co-present pin stripped, backup kept), then
-    // stopped only because no `openclaw` is on this test's PATH.
+    // stopped only because this suite's mocked lookup finds no `openclaw`.
     expect(result.message).toMatch(/Manifest reconciled, but `openclaw` is not on PATH/);
     expect(backups(selected.root)).toHaveLength(1);
     const after = JSON.parse(fs.readFileSync(path.join(selected.root, 'package.json'), 'utf-8')) as { dependencies: Record<string, string> };
