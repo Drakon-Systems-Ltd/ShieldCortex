@@ -167,10 +167,19 @@ export interface ReconcileInput {
    * out of that directory (its package.json, else its openclaw.plugin.json) —
    * meaningful only when `indexRootDirExists` is true (#260, Case r2 #1).
    * null/undefined = it could not be read. When the selection is verified this
-   * is the ONLY version the verdict uses: neither the newest build a disk scan
-   * finds (`onDiskVersion`) nor the index record's version may stand in for it.
+   * is the ONLY version that can clear the row: the newest build a disk scan
+   * finds (`onDiskVersion`) and the index record's version may convict (below
+   * expected ⇒ fail) but never stand in for it (r6).
    */
   selectedVersion?: string | null;
+  /**
+   * The index's plugins entry names an absolute `rootDir`, but the build check
+   * there could not run (EACCES, EIO: `indexRootDirExists` null) — #260 r7,
+   * Sol. The selected copy is named and unmeasured, so, as with a verified
+   * build whose version is unreadable, another copy or a record may convict
+   * but never clear the row.
+   */
+  indexRootDirUnreadable?: boolean;
   /**
    * `~/.openclaw/npm/projects/*` dir names matching the plugin.
    *
@@ -442,9 +451,10 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // #260: a record is a claim, and the index can outlive what it describes.
   // A record whose directory CONFIRMEDLY holds no build still counts as an
   // install here — every rule below runs exactly as it would without that
-  // knowledge. The stale path does two narrow things only: it withholds the
-  // record's version (see `effective`), and it blocks a PASS (see the end of
-  // this function). It never pre-empts another rule.
+  // knowledge. The stale path never clears the row: its record's version (or
+  // a scan's) may only convict (see `effective`); with both indexed folders
+  // empty and the record below expected it fails on the stale record itself
+  // (rule 4b, r6); otherwise it blocks a PASS (see the end of this function).
   //
   // Sol finding 3: the same stale row's plugins entry (`enabled: true`) is
   // what lets control skip rule 4 and reach the pass, so it must not carry the
@@ -455,15 +465,24 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // Case r2 / Sol r2: selection, build, provenance and version are checked
   // SEPARATELY. The selection is the plugins entry's `rootDir`:
   //   - verified (a real build there) ⇒ that build is the one the verdict is
-  //     about, and its own version is the only version used;
+  //     about, and only its own version can clear the row (a scan or record
+  //     may convict, r6);
   //   - stale (looked, no build there) ⇒ the selected build is missing, even
   //     when the record's `installPath` (or another dir) holds an equal-version
   //     build — a record elsewhere is not the selected build;
+  //   - named but its check failed (EACCES/EIO, r7) ⇒ as a verified build
+  //     whose version is unreadable: unmeasured, never cleared by another copy;
   //   - not checked ⇒ the record's `installPath` decides, as before.
   const indexRecordPathGone = Boolean(indexRecord) && input.indexInstallPathExists === false;
   const indexSelectionVerified = input.indexRootDirExists === true;
   const indexSelectionStale = input.indexRootDirExists === false;
-  const indexPathMissing = indexSelectionStale || (indexRecordPathGone && !indexSelectionVerified);
+  // r7 (Sol): a named selection that could not be checked is an unmeasured
+  // selected copy, not "no selection" — it takes the verified-but-unreadable
+  // path below, never main's scan-else-record precedence.
+  const indexSelectionUnreadable =
+    input.indexRootDirUnreadable === true && !indexSelectionVerified && !indexSelectionStale;
+  const indexPathMissing =
+    indexSelectionStale || (indexRecordPathGone && !indexSelectionVerified && !indexSelectionUnreadable);
   // A verified selection is an install in its own right: a linked or path
   // install outside every place the disk scan looks, with no install record,
   // is still a real build OpenClaw selected.
@@ -498,6 +517,8 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   //   - missing selected build ⇒ nothing measured. Only main's claim (the
   //     scan's build, else the record) below expected is kept, to convict;
   //     otherwise no version is claimed (Case r5).
+  //   - selection named but unreadable (r7) ⇒ as a verified selection whose
+  //     version is unreadable: nothing measured, a claim may only convict.
   //   - not checked ⇒ on-disk, else the index record — but never a record
   //     whose own directory is gone: that says nothing about what would run.
   // The live roster proves a load, never which version loaded.
@@ -506,8 +527,8 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   let installedVersionSource: ReconcileVerdict['installedVersionSource'];
   let selectedVersionUnread = false;
   let staleRecordBelowExpected = false;
-  if (indexSelectionVerified) {
-    effective = coerce(input.selectedVersion);
+  if (indexSelectionVerified || indexSelectionUnreadable) {
+    effective = indexSelectionVerified ? coerce(input.selectedVersion) : null;
     installedVersionSource = effective ? 'selected-build' : null;
     // jarvis r3: the build's own version (package.json, else its own
     // openclaw.plugin.json — r6) could not be read. No claim vouches for it —
@@ -536,9 +557,14 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     // record below expected that main's precedence set aside (a build sits
     // elsewhere on disk, not below expected) still FAILS — not as a measured
     // regression, but on the STALE INDEX RECORD itself. See rule 4b below.
+    // r7 (Sol 3a): only when the indexed folders hold no build. A verified
+    // build at the record's own path refutes the record's version — that
+    // folder was read — so the record convicts nothing; the empty selection
+    // still blocks a pass (the missing-build rule at the end).
     const rec = coerce(indexVersion);
     const exp = coerce(expectedVersion);
-    staleRecordBelowExpected = !claim && Boolean(rec && exp && semver.lt(rec, exp));
+    staleRecordBelowExpected =
+      !claim && input.indexInstallPathExists !== true && Boolean(rec && exp && semver.lt(rec, exp));
   } else {
     effective = scanVersion ?? (indexRecordPathGone ? null : coerce(indexVersion));
     installedVersionSource = scanVersion ? 'disk' : effective ? 'index-record' : null;
@@ -779,7 +805,10 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   //     rewrites the stale record (never acting on the record's version).
   //     Rules 2/2a (a read roster that omits the plugin; the #142 race) ran
   //     first and are unchanged. A rootDir verified as a real build never
-  //     reaches here: that build is measured and decides.
+  //     reaches here: that build is measured and decides. Nor does a verified
+  //     build at the record's own path (r7): that reading refutes the record.
+  //     Rule 4 (index entry not enabled, roster unread) also runs first and
+  //     warns, as it pre-empts even a measured regression on main (r7, 3b).
   if (staleRecordBelowExpected) {
     const selectedRoot = index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir;
     const where = safeForReason(indexSelectionStale ? selectedRoot : indexRecord?.installPath);
@@ -875,7 +904,9 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   if (selectedVersionUnread) {
     const selectedRoot = index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir;
     reasons.push(
-      `the build OpenClaw selected (${safeForReason(selectedRoot)}) is there, but its version could not be read (no readable version in its package.json or openclaw.plugin.json), so it is not verified against expected ${expected ?? expectedVersion}; ` +
+      (indexSelectionUnreadable
+        ? `the copy OpenClaw selected (${safeForReason(selectedRoot)}) could not be read (permission or I/O error), so its version is not verified against expected ${expected ?? expectedVersion}; `
+        : `the build OpenClaw selected (${safeForReason(selectedRoot)}) is there, but its version could not be read (no readable version in its package.json or openclaw.plugin.json), so it is not verified against expected ${expected ?? expectedVersion}; `) +
         (loadedInLiveRoster === true
           ? 'the running gateway proves the load, not which version loaded'
           : 'the running gateway boot roster could NOT be read, so the load is not proven either'),
@@ -1542,12 +1573,15 @@ function verifiedPluginBuildAt(rawDir: unknown, pluginId: string): boolean | nul
   if (manifest === null) return null;
   if (manifest === 'missing' || manifest === 'invalid' || manifest.id !== pluginId) return false;
 
+  // r7 (Sol): a package.json that cannot be read (EACCES) is handled like a
+  // corrupt one — the default entry points still decide, so a real build is
+  // verified and its version read (manifest fall-through) — except that "no
+  // entry found" is not "no build": its `main` is unknown, so that is null.
   const pkg = readObject(path.join(dir, 'package.json'));
-  if (pkg === null) return null;
   const entries: string[] = [];
   if (isPlainObject(pkg) && typeof pkg.main === 'string' && pkg.main.trim()) entries.push(pkg.main.trim());
   entries.push('index.js', path.join('dist', 'index.js'));
-  let unchecked = false;
+  let unchecked = pkg === null;
   for (const rel of entries) {
     const file = path.resolve(dir, rel);
     // An entry point outside the build directory is not this build's.
@@ -1722,6 +1756,7 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
   }
 
   const indexRootDirExists = indexRootDirOnDisk(index, pluginId);
+  const selectedRootDir = index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir;
   return {
     pluginId,
     expectedVersion: options.expectedVersion,
@@ -1736,7 +1771,11 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
     // (a linked or path install sits outside it), and its newest build is not
     // necessarily the copy OpenClaw selected.
     ...(indexRootDirExists === true
-      ? { selectedVersion: readExactBuildVersion(index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir, true) }
+      ? { selectedVersion: readExactBuildVersion(selectedRootDir, true) }
+      : {}),
+    // r7 (Sol): a named rootDir whose check failed is not "not named".
+    ...(indexRootDirExists === null && typeof selectedRootDir === 'string' && path.isAbsolute(selectedRootDir)
+      ? { indexRootDirUnreadable: true }
       : {}),
     onDiskVersion: readInstalledRealtimePluginVersion(home),
     // #226: the trusted-local-copy build, only when it is a REAL one (index.js
