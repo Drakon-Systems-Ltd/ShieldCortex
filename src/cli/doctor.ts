@@ -124,7 +124,7 @@ import {
   REALTIME_PLUGIN_PACKAGE,
   realtimePluginInstallCommand,
 } from '../setup/openclaw-plugin-spec.js';
-import { managedManifestTarget, readRealtimeReplacementEvidence } from '../integrations/openclaw-realtime-install.js';
+import { managedManifestTarget, noRecordPinDoor, readRealtimeReplacementEvidence } from '../integrations/openclaw-realtime-install.js';
 import {
   CLAUDE_CODE_ENFORCEMENT_FLOOR,
   detectClaudeCode,
@@ -8784,10 +8784,13 @@ export async function checkOpenClawManagedPinDrift(
   // same function) refuses — diagnostic advice only, no repair command, and
   // no host path in the text (round 8).
   const withTarget = (row: CheckResult): CheckResult => {
-    const target = managedManifestTarget(home, readRealtimeReplacementEvidence(home), resolveRealtimeProjectDir(home));
+    const projectDir = resolveRealtimeProjectDir(home);
+    const target = managedManifestTarget(home, readRealtimeReplacementEvidence(home), projectDir);
     if (target.ok) return row;
     const { needsOpenClawCli: _gate, ...rest } = row;
     void _gate;
+    // r15: the same door the repair prints when it refuses for this reason.
+    if (target.why === 'no-record' && projectDir) return { ...rest, fix: noRecordPinDoor(home, projectDir, manifest, pkg.version) };
     return {
       ...rest,
       fix: 'Check it: `shieldcortex openclaw status`. Repair will not rewrite the managed pins here: ' +

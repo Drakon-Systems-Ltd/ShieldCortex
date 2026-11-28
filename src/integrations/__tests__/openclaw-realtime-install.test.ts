@@ -309,7 +309,7 @@ describe('readSelectedRealtimeInstall — the copy OpenClaw selected, not the hi
     writeRealtimeProject('leftover', '5.20.2');
     const gone = path.join(home, 'gone');
     const s = readSelectedRealtimeInstall(home, index({ [ID]: { source: 'npm', installPath: gone } }, [{ pluginId: ID, rootDir: gone }]));
-    expect(s).toEqual({ state: 'none', dangling: `the copy OpenClaw's install index roster and install index record name is not on disk (${gone})` });
+    expect(s).toEqual({ state: 'none', dangling: `the copy OpenClaw's install index roster and install index record name is not on disk (${gone})`, danglingDirs: [gone, gone] });
     expect(readSelectedRealtimePluginVersion(home, index({ [ID]: { source: 'npm', installPath: gone } })))
       .toEqual({ version: null, reason: `the copy OpenClaw's install index record names is not on disk (${gone})` });
   });
@@ -344,7 +344,7 @@ describe('readSelectedRealtimeInstall — the copy OpenClaw selected, not the hi
   it('#1109 round 4: no index — installs.json naming a copy that is gone is none (dangling)', () => {
     const gone = path.join(home, '.openclaw', 'npm', 'projects', 'gone', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
     writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'npm', installPath: gone } } });
-    expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'none', dangling: `the copy installs.json names is not on disk (${gone})` });
+    expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'none', dangling: `the copy installs.json names is not on disk (${gone})`, danglingDirs: [gone] });
   });
 
   it('#1109 round 4 (npm provenance): a selected copy whose record says ClawHub is never a post-install version', () => {
@@ -528,7 +528,7 @@ describe('#1110 — a native install recorded in openclaw.json plugins.installs'
     const gone = path.join(home, '.openclaw', 'extensions', ID);
     record({ source: 'npm', installPath: gone, version: '999.0.0' });
     expect(readSelectedRealtimeInstall(home))
-      .toEqual({ state: 'none', dangling: `the copy openclaw.json plugins.installs names is not on disk (${gone})` });
+      .toEqual({ state: 'none', dangling: `the copy openclaw.json plugins.installs names is not on disk (${gone})`, danglingDirs: [gone] });
     expect(readSelectedRealtimePluginVersion(home).version).toBeNull();
     expect(decide()).toEqual({ replace: true });
   });

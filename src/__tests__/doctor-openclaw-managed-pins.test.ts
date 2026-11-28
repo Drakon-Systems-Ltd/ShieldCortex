@@ -174,14 +174,20 @@ describe('#260 r12: doctor offers the managed-pin repair only where its target c
     expectDiagnosticOnly(r.fix, /package\.json is not a plain file/);
   });
 
-  it('no record selects any copy — warn, no repair command (the repair refuses: no verified copy)', async () => {
+  it('no record selects any copy — warn, no repair command (the repair refuses: no record names the project)', async () => {
     project('drakon-systems-shieldcortex-realtime-aaa', '5.22.1');
     put(path.join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { allow: [ID], entries: { [ID]: { enabled: true } } } }));
 
     const r = await checkOpenClawManagedPinDrift(home);
 
     expect(r.status).toBe('warn');
-    expectDiagnosticOnly(r.fix, /not the one holding the copy OpenClaw selected/);
+    // r15 (Jarvis 4b): the door the repair prints — the pins to remove by hand
+    // and the file (on its own line), then the install, then doctor.
+    expect(r.fix).not.toMatch(/shieldcortex openclaw repair/);
+    expect(r.fix).toMatch(/No install record names the managed project/);
+    expect(r.fix).toMatch(/Remove dependencies\.peer .*then run `openclaw plugins install .*`, then `openclaw gateway restart`, then `shieldcortex doctor` to confirm/);
+    expect(r.fix).toMatch(/\nFile: ~\/\.openclaw\/npm\/projects\/drakon-systems-shieldcortex-realtime-aaa\/package\.json$/);
+    expect(r.fix).not.toContain(home);
   });
 
   it('matching control: the index and the resolver name the same project — the repair command is still offered', async () => {

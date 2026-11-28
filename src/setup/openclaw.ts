@@ -59,6 +59,7 @@ import {
   readSelectedRealtimePluginVersion,
   managedManifestTarget,
   managedManifestTargetStillHolds,
+  noRecordPinDoor,
   readBoundManifest,
   boundManifestUnchanged,
   type BoundManifestRead,
@@ -2816,6 +2817,12 @@ export async function repairOpenClawManagedPins(
   // r12 (Sol): the FILE is bound too (a package.json link into another
   // project passed the folder check), by the same check doctor's advice uses.
   const target = managedManifestTarget(home, evidence, projectDir);
+  // r15: refusing to write a project no install record names is an OWNER
+  // DECISION (writing one would be the r11 fail-open); the door it prints
+  // names the pins to remove by hand, because the reinstall keeps them.
+  if (!target.ok && target.why === 'no-record') {
+    return { status: 'failed', message: noRecordPinDoor(home, projectDir, manifest, selfVersion) };
+  }
   if (!target.ok) {
     const why = target.why === 'folders-disagree'
       ? 'The plugin folders disagree: the managed project this repair would rewrite is not the one holding the copy OpenClaw selected'

@@ -2,9 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import semver from 'semver';
-import { REALTIME_PLUGIN_PACKAGE } from '../setup/openclaw-plugin-spec.js';
-import { indexPathField, readPluginInstallIndexState, type PluginInstallIndexState } from './openclaw-plugin-index.js';
-import { resolveLocalExtensionInstall } from './openclaw-plugin-state.js';
+import { REALTIME_PLUGIN_PACKAGE, realtimePluginInstallCommand } from '../setup/openclaw-plugin-spec.js';
+import { indexPathField, readPluginInstallIndexState, safeForReason, type PluginInstallIndexState } from './openclaw-plugin-index.js';
+import { findLatentEoverridePins, resolveLocalExtensionInstall } from './openclaw-plugin-state.js';
 
 /**
  * Two questions every forced realtime-plugin install has to answer from
@@ -183,7 +183,7 @@ export type SelectedRealtimeInstall =
    * Nothing to load and nothing to lose. `dangling` says why when a record
    * DOES name a copy, but that copy is not on disk (#1109 round 4).
    */
-  | { state: 'none'; dangling?: string }
+  | { state: 'none'; dangling?: string; danglingDirs?: string[] }
   | { state: 'unknown'; why: string };
 
 type DirVersion = { state: 'ok'; version: string } | { state: 'unknown'; why: string };
@@ -257,6 +257,7 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
   }
   // Set when a record names a copy that is not on disk (see the doc above).
   let dangling: string | null = null;
+  const danglingDirs: string[] = [];
   if (index.state === 'ok') {
     const entry = index.row.plugins?.find((p) => p && p.pluginId === REALTIME_PLUGIN_ID);
     // #260 (Sol finding 1): the roster entry IS the selection evidence. One
@@ -289,6 +290,7 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
       }
       if (present.length === 0) {
         dangling = `the copy OpenClaw's ${named.map((n) => n.evidence).join(' and ')} name${named.length === 1 ? 's' : ''} is not on disk (${named[0].dir})`;
+        danglingDirs.push(...named.map((n) => n.dir));
       } else {
         const versions = present.map((r) => r.version);
         if (present.length === 2 && !sameDir(present[0].dir, present[1].dir) && versions[0] !== versions[1]) {
@@ -344,6 +346,7 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
       if (copy.state === 'unknown') return { state: 'unknown', why: `the copy ${evidence} names: ${copy.why}` };
       if (copy.state === 'absent') {
         dangling ??= `the copy ${evidence} names is not on disk (${p})`;
+        danglingDirs.push(p);
         continue;
       }
       const recorded = native ? semver.valid(String(r.resolvedVersion ?? r.version ?? '')) : null;
@@ -390,7 +393,7 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
     if (v.state === 'unknown') return { state: 'unknown', why: `the local copy: ${v.why}` };
     found.push({ dir: local, version: v.version, evidence: 'extensions directory' });
   }
-  if (found.length === 0) return dangling ? { state: 'none', dangling } : { state: 'none' };
+  if (found.length === 0) return dangling ? { state: 'none', dangling, danglingDirs } : { state: 'none' };
   if (found.length > 1 && found[0].version !== found[1].version) {
     return { state: 'unknown', why: `two unrecorded copies (v${found[0].version} linked, v${found[1].version} in extensions)` };
   }
@@ -550,7 +553,31 @@ export function verifiedRealtimeProjectDir(
 /** Where a managed-pin repair may write, or why it may not. */
 export type ManagedManifestTarget =
   | { ok: true; projectDir: string; manifestPath: string }
-  | { ok: false; why: 'folders-disagree' | 'manifest-not-plain-file' };
+  | { ok: false; why: 'folders-disagree' | 'manifest-not-plain-file' | 'no-record' };
+
+/**
+ * r15 (owner ruling, Jarvis 4a): a record whose copy is gone from disk still
+ * names its managed project. The real path of the one `npm/projects/<dir>`
+ * every dangling path sits in; null if any sits in none, or they disagree.
+ */
+function danglingRecordProjectDir(home: string, evidence: { selected: SelectedRealtimeInstall }): string | null {
+  const s = evidence.selected;
+  if (s.state !== 'none' || !s.danglingDirs?.length) return null;
+  const real = (p: string): string | null => {
+    try { return fs.realpathSync(p); } catch { return null; }
+  };
+  const projects = real(path.join(home, '.openclaw', 'npm', 'projects'));
+  const found = new Set<string>();
+  for (const dir of s.danglingDirs) {
+    let project: string | null = null;
+    for (let cur = path.resolve(dir); path.dirname(cur) !== cur; cur = path.dirname(cur)) {
+      if (projects && real(path.dirname(cur)) === projects) { project = real(cur); break; }
+    }
+    if (!project || path.dirname(project) !== projects) return null;
+    found.add(project);
+  }
+  return found.size === 1 ? [...found][0] : null;
+}
 
 /**
  * #260 r12 (Sol): the one target check for a managed-pin repair, shared by the
@@ -565,7 +592,9 @@ export function managedManifestTarget(
   evidence: { selected: SelectedRealtimeInstall },
   projectDir: string | null,
 ): ManagedManifestTarget {
-  const verified = verifiedRealtimeProjectDir(home, evidence);
+  const verified = verifiedRealtimeProjectDir(home, evidence) ?? danglingRecordProjectDir(home, evidence);
+  // r15 (owner decision, Jarvis 4b): no record names any copy — refuse; see noRecordPinDoor.
+  if (evidence.selected.state === 'none' && !evidence.selected.dangling) return { ok: false, why: 'no-record' };
   if (!verified || !projectDir) return { ok: false, why: 'folders-disagree' };
   try {
     if (fs.realpathSync(projectDir) !== verified) return { ok: false, why: 'folders-disagree' };
@@ -583,6 +612,22 @@ export function managedManifestTarget(
     return { ok: false, why: 'manifest-not-plain-file' };
   }
   return { ok: true, projectDir: verified, manifestPath };
+}
+
+/**
+ * r15 (Jarvis 4b): the door for the no-record refusal, shared by the repair and
+ * doctor. OpenClaw's reinstall keeps a stale dependency pin (it re-imports only
+ * its overrides), so the install alone does not heal this: name the pins and
+ * the file, then the install, then doctor. The path is on its own line,
+ * `~`-relative and escaped, never on a command line.
+ */
+export function noRecordPinDoor(home: string, projectDir: string, manifest: unknown, version: string | null): string {
+  const pins = findLatentEoverridePins(manifest);
+  const file = path.join(projectDir, 'package.json');
+  const shown = file.startsWith(home + path.sep) ? `~${file.slice(home.length)}` : file;
+  return 'No install record names the managed project holding these pins, so repair will not rewrite it (an owner decision), and a reinstall alone keeps them. ' +
+    (pins.length ? `Remove ${pins.map((p) => `dependencies.${p}`).join(', ')} (and the same names from openclaw.managedPeerDependencies, if listed) from that project's package.json, then run` : 'Run') +
+    ` \`${realtimePluginInstallCommand(version)}\`, then \`openclaw gateway restart\`, then \`shieldcortex doctor\` to confirm.\nFile: ${safeForReason(shown)}`;
 }
 
 /**

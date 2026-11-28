@@ -34,6 +34,8 @@ const tripwire = installLaunchTripwire();
 
 const { repairOpenClawManagedPins } = await import('../openclaw.js');
 const { realtimePluginInstallArgs } = await import('../openclaw-plugin-spec.js');
+const { checkOpenClawManagedPinDrift } = await import('../../cli/doctor.js');
+const { findEoverrideRiskPins } = await import('../../integrations/openclaw-plugin-state.js');
 
 /** The recording fake every repair here gets: `bin` null = no openclaw. */
 const fake = {
@@ -211,7 +213,8 @@ describe('#260 r11: no verified copy in a managed project — refused, nothing w
     const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
 
     expect(result.status).toBe('failed');
-    expect(result.message).toMatch(/plugin folders disagree/);
+    // r15 (Jarvis 4b): refused as before; the reason is now "no record" (see the r15 no-record tests).
+    expect(result.message).toMatch(/No install record names the managed project/);
     expect(fs.readFileSync(path.join(onlyOnDisk.root, 'package.json'))).toEqual(before);
     expect(backups(onlyOnDisk.root)).toEqual([]);
   });
@@ -669,4 +672,150 @@ describe.each(['new', 'legacy'] as const)('#260 r15: the managed-pin repair keep
       expect(fs.statSync(path.join(selected.root, backup)).gid).toBe(supplementary);
     },
   );
+});
+
+/**
+ * #260 r15 (Jarvis 4, OWNER RULINGS). Main healed both of these; head refused.
+ *  (a) a DANGLING record — the index names the managed project, its plugin
+ *      build is gone, its package.json is left — HEALS again: the record binds
+ *      the project, when its real path is the resolver's and the manifest
+ *      passes the same plain-file and bound-read checks.
+ *  (b) NO record — still REFUSED (owner decision: writing a project no record
+ *      names is the r11 fail-open), but with a door that works: a reinstall
+ *      alone keeps the drifted pin, so the advice names the pins and the file.
+ */
+describe.each(['new', 'legacy'] as const)('#260 r15: dangling record heals, no record refuses with a working door (%s index layout)', (layout) => {
+  const leftovers = (root: string): string[] => fs.readdirSync(root).filter((f) => f.includes('.repair-backup-') || f.endsWith('.tmp'));
+  /** The project's plugin build is removed; its package.json (drifting `peer`) is left. */
+  function dangling(name: string): { root: string; dir: string } {
+    const p = project(name, SELF(), '1.0.0');
+    fs.rmSync(path.join(p.root, 'node_modules'), { recursive: true, force: true });
+    return p;
+  }
+  const supplementary = typeof process.getgroups === 'function'
+    ? process.getgroups().find((g) => g !== process.getgid?.())
+    : undefined;
+
+  it('(a) dangling record naming the managed project, drifted pins — healed: pins stripped, backup kept, owner and mode kept', async () => {
+    const p = dangling('drakon-systems-shieldcortex-realtime-aaa');
+    writeIndex(layout, p.dir, SELF());
+    baseConfig();
+    const manifest = path.join(p.root, 'package.json');
+    fs.chmodSync(manifest, 0o640);
+    if (supplementary !== undefined) fs.chownSync(manifest, fs.statSync(manifest).uid, supplementary);
+    const before = fs.statSync(manifest);
+
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
+
+    // Healed, then stopped only because this suite's fake finds no `openclaw`.
+    expect(result.message).toMatch(/Manifest reconciled, but `openclaw` is not on PATH/);
+    const after = fs.statSync(manifest);
+    expect((JSON.parse(fs.readFileSync(manifest, 'utf-8')) as { dependencies: Record<string, string> }).dependencies.peer).toBeUndefined();
+    expect([after.uid, after.gid, after.mode & 0o777]).toEqual([before.uid, before.gid, 0o640]);
+    expect(fs.readdirSync(p.root).filter((f) => f.includes('.repair-backup-'))).toHaveLength(1);
+    // Doctor agrees: the repair is offered where the repair heals.
+    expect((await checkOpenClawManagedPinDrift(home)).status).toBe('pass');
+  });
+
+  it('(a) doctor offers the repair for a dangling record before it runs', async () => {
+    const p = dangling('drakon-systems-shieldcortex-realtime-aaa');
+    writeIndex(layout, p.dir, SELF());
+    baseConfig();
+
+    const row = await checkOpenClawManagedPinDrift(home);
+
+    expect(row.status).toBe('warn');
+    expect(row.fix).toMatch(/shieldcortex openclaw repair/);
+  });
+
+  it('(a\') dangling record naming a DIFFERENT project than the resolver\'s — refused, nothing written in either', async () => {
+    const named = dangling('drakon-systems-shieldcortex-realtime-aaa');
+    const other = project('drakon-systems-shieldcortex-realtime-bbb', SELF(), '1.0.0');
+    writeIndex(layout, named.dir, SELF());
+    // installs.json points the disk resolver at the other project.
+    baseConfig(other.dir);
+    const before = [named.root, other.root].map((r) => fs.readFileSync(path.join(r, 'package.json')));
+
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/plugin folders disagree/);
+    expect([named.root, other.root].map((r) => fs.readFileSync(path.join(r, 'package.json')))).toEqual(before);
+    expect(leftovers(named.root)).toEqual([]);
+    expect(leftovers(other.root)).toEqual([]);
+    const row = await checkOpenClawManagedPinDrift(home);
+    expect(row.fix).not.toMatch(/shieldcortex openclaw repair/);
+  });
+
+  it('(a\') dangling record whose package.json is a link — refused by the same plain-file check', async () => {
+    const named = dangling('drakon-systems-shieldcortex-realtime-aaa');
+    const other = project('other-managed-project', SELF(), '1.0.0');
+    fs.unlinkSync(path.join(named.root, 'package.json'));
+    fs.symlinkSync(path.join(other.root, 'package.json'), path.join(named.root, 'package.json'));
+    writeIndex(layout, named.dir, SELF());
+    baseConfig();
+    const otherBefore = fs.readFileSync(path.join(other.root, 'package.json'));
+
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
+
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/package\.json is not a plain file/);
+    expect(fs.readFileSync(path.join(other.root, 'package.json'))).toEqual(otherBefore);
+    expect(leftovers(named.root)).toEqual([]);
+  });
+
+  it('(b) no record at all — refused, nothing written; the advice names the pins and the file, not "the install heals it"; doctor gives the same door', async () => {
+    const p = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    baseConfig();
+    if (layout === 'new') {
+      // An index that records nothing for the plugin (the legacy variant has no index at all).
+      const dbPath = path.join(home, '.openclaw', 'state', 'openclaw.sqlite');
+      fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+      const db = new Database(dbPath);
+      db.prepare('CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT, updated_at_ms INTEGER)').run();
+      db.prepare('INSERT INTO config_machine_state VALUES (?, ?, 1)').run('plugins.installedIndex', JSON.stringify({ revision: 1, index: { generatedAtMs: 1, installRecords: {}, plugins: [] } }));
+      db.close();
+    }
+    const manifest = path.join(p.root, 'package.json');
+    const before = fs.readFileSync(manifest);
+
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
+
+    expect(result.status).toBe('failed');
+    expect(fs.readFileSync(manifest)).toEqual(before);
+    expect(leftovers(p.root)).toEqual([]);
+    expect(fake.lookups).toBe(0);
+    expect(result.message).toMatch(/No install record names the managed project .*an owner decision.*a reinstall alone keeps them/);
+    expect(result.message).toMatch(/Remove dependencies\.peer /);
+    expect(result.message).toMatch(/then `shieldcortex doctor` to confirm/);
+    expect(result.message).not.toMatch(/reinstall (it )?cleanly|re-deriv|heals?\b/i);
+    // The path is on its own detail line, `~`-relative; never on the command line.
+    const lines = result.message.split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toBe('File: ~/.openclaw/npm/projects/drakon-systems-shieldcortex-realtime-aaa/package.json');
+    expect(lines[0]).not.toContain('.openclaw/npm');
+    expect(result.message).not.toContain(home);
+    // Doctor's advice is the same door.
+    expect((await checkOpenClawManagedPinDrift(home)).fix).toBe(result.message);
+  });
+
+  it('(b) measured with the injected fake: running only the suggested install leaves the drifted pin; doing what the door says clears doctor', async () => {
+    const p = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    baseConfig();
+    const manifest = path.join(p.root, 'package.json');
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
+    const command = /`(openclaw plugins install [^`]+)`/.exec(result.message)?.[1];
+    expect(command).toBe(`openclaw ${realtimePluginInstallArgs(SELF()).join(' ')}`);
+
+    // The operator runs the install alone (through the fake): the pin is still there.
+    fake.deps.runOpenClaw('openclaw', command!.split(' ').slice(1));
+    expect(findEoverrideRiskPins(JSON.parse(fs.readFileSync(manifest, 'utf-8')))).toEqual([{ name: 'peer', dependencyVersion: '1.0.0', overrideVersion: '2.0.0' }]);
+    expect((await checkOpenClawManagedPinDrift(home)).status).toBe('warn');
+
+    // Doing what the door says first — remove the named pin from that file — clears the row.
+    const m = JSON.parse(fs.readFileSync(manifest, 'utf-8')) as { dependencies: Record<string, string> };
+    delete m.dependencies.peer;
+    fs.writeFileSync(manifest, JSON.stringify(m));
+    expect((await checkOpenClawManagedPinDrift(home)).status).toBe('pass');
+  });
 });
