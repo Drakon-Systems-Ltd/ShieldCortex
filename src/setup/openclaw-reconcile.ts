@@ -14,7 +14,7 @@ import {
 } from '../integrations/openclaw-plugin-index.js';
 import { runPluginSelfCheck, type SelfCheckRunResult } from './openclaw-selfcheck.js';
 import { waitForGatewayReady } from './gateway-readiness.js';
-import { summariseRepair, renderRepairHeadline } from './repair-verdict.js';
+import { summariseRepair, renderRepairHeadline, type RepairVerdictInput } from './repair-verdict.js';
 import { resolveRepairConsent } from './repair-consent.js';
 import { resolveConversationAccessConsent } from './conversation-access-consent.js';
 import { summariseCommandOutput } from '../integrations/child-output.js';
@@ -752,6 +752,50 @@ export interface FormatReconcileReportOptions {
   compact?: boolean;
 }
 
+/**
+ * #1179 r2 (Astra): the post-remediation verdict's reading of the build
+ * OpenClaw selected, or null. Only the post-state (never the pre-remediation
+ * snapshot), and only a `selected-build` reading (never a disk-scan copy, a
+ * record-path build or an install record).
+ */
+function selectedBuildRead(result: ReconcileExecResult): string | null {
+  const post = result.postVerdict;
+  return post?.installedVersionSource === 'selected-build' ? post.installedVersion ?? null : null;
+}
+
+/**
+ * What both report adapters (`formatReconcileReport`,
+ * `protectionLedgerFromReconcile`) hand `summariseRepair`, built once so they
+ * cannot drift (#1179 r2).
+ */
+function repairVerdictInput(result: ReconcileExecResult): RepairVerdictInput {
+  const selected = selectedBuildRead(result);
+  return {
+    applied: result.applied,
+    onDiskVersion: (result.postVerdict ?? result.verdict).onDiskVersion,
+    expectedVersion: (result.postVerdict ?? result.verdict).expectedVersion,
+    canaryConsented: process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY === '1' || Boolean(process.stdin.isTTY),
+    ...restartVerdictInputs(result.stepResults),
+    // r2: the selected measurement and its source, as one pair.
+    ...(selected ? { installedVersion: selected, installedVersionSource: 'selected-build' as const } : {}),
+    ...(result.selfCheck
+      ? {
+        selfCheck: {
+          ok: result.selfCheck.ok,
+          rosterState: result.selfCheck.rosterState,
+          canaryProof: result.selfCheck.canaryProof,
+          versionProof: result.selfCheck.versionProof,
+          // #1179 r1: an unread version stays unknown, never "behind".
+          ...(result.selfCheck.versionUnread ? { versionUnread: true } : {}),
+          // r2: a known wrong source is not an unread version.
+          ...(result.selfCheck.versionWrongSource ? { versionWrongSource: true } : {}),
+        },
+      }
+      : {}),
+    ...(result.postVerdict ? { postState: result.postVerdict.state } : {}),
+  };
+}
+
 function shortProofChips(result: ReconcileExecResult): string {
   const sc = result.selfCheck;
   const bits: string[] = [];
@@ -762,6 +806,9 @@ function shortProofChips(result: ReconcileExecResult): string {
     if (verStep) {
       const m = verStep.detail.match(/(\d+\.\d+\.\d+)/);
       if (m) bits.push(`v${m[1]}`);
+    } else if (selectedBuildRead(result)) {
+      // #1179 r2: the post-state's reading of the selected build, not another copy.
+      bits.push(`v${selectedBuildRead(result)}`);
     } else if (result.postVerdict?.onDiskVersion) {
       bits.push(`v${result.postVerdict.onDiskVersion}`);
     }
@@ -789,26 +836,7 @@ export function formatReconcileReport(
   const { verdict } = result;
 
   // Always compute the English headline first (#156).
-  const summary = summariseRepair({
-    applied: result.applied,
-    onDiskVersion: (result.postVerdict ?? result.verdict).onDiskVersion,
-    expectedVersion: (result.postVerdict ?? result.verdict).expectedVersion,
-    canaryConsented: process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY === '1' || Boolean(process.stdin.isTTY),
-    ...restartVerdictInputs(result.stepResults),
-    ...(result.selfCheck
-      ? {
-        selfCheck: {
-          ok: result.selfCheck.ok,
-          rosterState: result.selfCheck.rosterState,
-          canaryProof: result.selfCheck.canaryProof,
-          versionProof: result.selfCheck.versionProof,
-          // #1179 r1: an unread version stays unknown, never "behind".
-          ...(result.selfCheck.versionUnread ? { versionUnread: true } : {}),
-        },
-      }
-      : {}),
-    ...(result.postVerdict ? { postState: result.postVerdict.state } : {}),
-  });
+  const summary = summariseRepair(repairVerdictInput(result));
   lines.push(...renderRepairHeadline(summary));
 
   // Compact operator path (update footer / mobile): no double FAIL essay.
@@ -1005,26 +1033,7 @@ export function protectionLedgerFromReconcile(result: ReconcileExecResult): {
   outcome: ReturnType<typeof summariseRepair>['outcome'];
   facts: ProtectionFacts;
 } {
-  const summary = summariseRepair({
-    applied: result.applied,
-    onDiskVersion: (result.postVerdict ?? result.verdict).onDiskVersion,
-    expectedVersion: (result.postVerdict ?? result.verdict).expectedVersion,
-    canaryConsented: process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY === '1' || Boolean(process.stdin.isTTY),
-    ...restartVerdictInputs(result.stepResults),
-    ...(result.selfCheck
-      ? {
-        selfCheck: {
-          ok: result.selfCheck.ok,
-          rosterState: result.selfCheck.rosterState,
-          canaryProof: result.selfCheck.canaryProof,
-          versionProof: result.selfCheck.versionProof,
-          // #1179 r1: an unread version stays unknown, never "behind".
-          ...(result.selfCheck.versionUnread ? { versionUnread: true } : {}),
-        },
-      }
-      : {}),
-    ...(result.postVerdict ? { postState: result.postVerdict.state } : {}),
-  });
+  const summary = summariseRepair(repairVerdictInput(result));
   const detail: string[] = [summary.headline];
   if (summary.nextCommand) detail.push(`next: ${summary.nextCommand}`);
   const facts = protectionFactsFromReconcile(result, summary.nextCommand);

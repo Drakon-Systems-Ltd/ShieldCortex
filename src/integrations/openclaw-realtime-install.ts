@@ -431,6 +431,21 @@ export function readSelectedRealtimePluginVersion(
   home: string,
   options: SelectedReadOptions = {},
 ): { version: string } | { version: null; reason: string } {
+  const r = readSelectedRealtimePluginVersionDetail(home, options);
+  return r.version === null ? { version: null, reason: r.reason } : r;
+}
+
+/**
+ * #1179 r2: the same read, the same answers, and one more fact for the
+ * self-check: `wrongSource` marks a null whose copy WAS read, but whose
+ * install record names a source other than npm or a local path. That is a
+ * known mismatch, not a version that could not be read. Every other caller
+ * keeps `readSelectedRealtimePluginVersion`'s shape.
+ */
+export function readSelectedRealtimePluginVersionDetail(
+  home: string,
+  options: SelectedReadOptions = {},
+): { version: string } | { version: null; reason: string; wrongSource?: true } {
   const s = readSelectedRealtimeInstall(home, options);
   if (s.state === 'selected') {
     // #1109 round 4 (npm provenance): OpenClaw <= 2026.4.25 resolves the bare
@@ -440,7 +455,7 @@ export function readSelectedRealtimePluginVersion(
     // whose install record names any source but npm (or a local path — a
     // linked development install) is not the pinned npm build, never success.
     if (s.source !== undefined && !PINNED_BUILD_SOURCES.has(s.source)) {
-      return { version: null, reason: `the copy OpenClaw selected (v${s.version}) was installed from ${s.source}, not npm` };
+      return { version: null, reason: `the copy OpenClaw selected (v${s.version}) was installed from ${s.source}, not npm`, wrongSource: true };
     }
     return { version: s.version };
   }

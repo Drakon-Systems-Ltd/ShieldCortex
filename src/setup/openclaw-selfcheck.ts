@@ -10,7 +10,7 @@ import {
   type PluginIndexRow,
 } from '../integrations/openclaw-plugin-index.js';
 import { resolveRealtimePluginInstallPath } from '../integrations/openclaw-plugin-state.js';
-import { readSelectedRealtimePluginVersion } from '../integrations/openclaw-realtime-install.js';
+import { readSelectedRealtimePluginVersionDetail } from '../integrations/openclaw-realtime-install.js';
 import { readLatestBootRoster, findRegistrationSince, findGatewayAttributedRegistrationSince, type BootRoster } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveRepairConsent } from './repair-consent.js';
@@ -101,6 +101,12 @@ export interface SelfCheckVerdict {
    * evidence of an older or newer build; the repair headline keeps it unknown.
    */
   versionUnread?: true;
+  /**
+   * #1179 r2: set (true) only when `versionProof` failed because the selected
+   * copy was read but its install record names a source other than npm or a
+   * local path. A known mismatch, not an unread version: never `versionUnread`.
+   */
+  versionWrongSource?: true;
   reasons: string[];
 }
 
@@ -140,6 +146,11 @@ export interface SelfCheckInput {
   onDiskVersion?: string | null;
   /** Why `onDiskVersion` is null (e.g. the records disagree), for the report. */
   onDiskReason?: string;
+  /**
+   * #1179 r2: `onDiskVersion` is null because the selected copy was read but
+   * was not installed from npm or a local path (`onDiskReason` says which).
+   */
+  onDiskWrongSource?: boolean;
 }
 
 /**
@@ -238,10 +249,17 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
   // roster+canary unit tests).
   let versionProof = true;
   let versionUnread = false;
+  let versionWrongSource = false;
   if (input.expectedVersion) {
     const onDisk = semver.valid(input.onDiskVersion ?? '') ?? semver.valid(semver.coerce(input.onDiskVersion ?? '') ?? '');
     const expected = semver.valid(input.expectedVersion) ?? semver.valid(semver.coerce(input.expectedVersion) ?? '');
-    if (!onDisk) {
+    if (!onDisk && input.onDiskWrongSource === true) {
+      // #1179 r2 (Astra): the copy was read; its source is what failed. Keep
+      // the reader's reason as the reason, never "could not read".
+      versionProof = false;
+      versionWrongSource = true;
+      reasons.push(`version proof FAILED: ${input.onDiskReason ?? 'the copy OpenClaw selected was not installed from npm or a local path'}, so it is not the pinned build expected at ${input.expectedVersion}`);
+    } else if (!onDisk) {
       versionProof = false;
       versionUnread = true;
       reasons.push(`version proof FAILED: could not read the selected plugin copy's version to compare against expected ${input.expectedVersion}${input.onDiskReason ? ` (${input.onDiskReason})` : ''}`);
@@ -263,6 +281,7 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
     canaryProof,
     versionProof,
     ...(versionUnread ? { versionUnread: true as const } : {}),
+    ...(versionWrongSource ? { versionWrongSource: true as const } : {}),
     reasons,
   };
 }
@@ -275,10 +294,12 @@ export interface RunSelfCheckOptions {
   readIndex?: (home: string) => PluginIndexRow | null;
   /**
    * Injectable reader of the SELECTED copy's version (defaults to
-   * `readSelectedRealtimePluginVersion`, #1109 round 3: a leftover copy at the
-   * right version next to an older selected one must not pass the proof).
+   * `readSelectedRealtimePluginVersionDetail`, #1109 round 3: a leftover copy
+   * at the right version next to an older selected one must not pass the
+   * proof; #1179 r2: `wrongSource` keeps a known source mismatch apart from
+   * an unread version).
    */
-  readOnDiskVersion?: (home: string) => string | null | { version: string } | { version: null; reason: string };
+  readOnDiskVersion?: (home: string) => string | null | { version: string } | { version: null; reason: string; wrongSource?: true };
   /**
    * Injectable live-roster reader (defaults to the gateway's newest
    * `http server listening` boot line, bounded by the running gateway's
@@ -330,7 +351,7 @@ export async function runPluginSelfCheck(
 ): Promise<SelfCheckRunResult> {
   const pluginId = options.pluginId ?? REALTIME_PLUGIN_ID;
   const readIndex = options.readIndex ?? ((h: string) => readPluginInstallIndex(h));
-  const readOnDisk = options.readOnDiskVersion ?? ((h: string) => readSelectedRealtimePluginVersion(h));
+  const readOnDisk = options.readOnDiskVersion ?? ((h: string) => readSelectedRealtimePluginVersionDetail(h));
   // The default roster read touches the host's real gateway log dir
   // (/tmp/openclaw), which no `home` override can redirect — so it must never
   // fire under Jest, or a test would silently inherit THIS box's roster and
@@ -398,6 +419,8 @@ export async function runPluginSelfCheck(
   const onDiskReason = onDiskRead !== null && typeof onDiskRead === 'object' && onDiskRead.version === null
     ? onDiskRead.reason
     : undefined;
+  const onDiskWrongSource = onDiskRead !== null && typeof onDiskRead === 'object' && onDiskRead.version === null &&
+    'wrongSource' in onDiskRead && onDiskRead.wrongSource === true;
   const canary = await probe(home, pluginId);
   const verdict = evaluateSelfCheck({
     pluginId,
@@ -409,6 +432,7 @@ export async function runPluginSelfCheck(
     expectedVersion: options.expectedVersion,
     onDiskVersion,
     ...(onDiskReason ? { onDiskReason } : {}),
+    ...(onDiskWrongSource ? { onDiskWrongSource: true } : {}),
   });
   return { ...verdict, index, liveRoster, canary };
 }

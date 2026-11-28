@@ -52,6 +52,12 @@ export interface RepairVerdictInput {
      * version could not be read (see the self-check's `versionUnread`).
      */
     versionUnread?: boolean;
+    /**
+     * #1179 r2: the version proof failed because the selected copy was not
+     * installed from npm or a local path (see the self-check's
+     * `versionWrongSource`). A known mismatch, never "could not read".
+     */
+    versionWrongSource?: boolean;
   };
   /** Post-remediation state, when there was one. */
   postState?: string;
@@ -77,6 +83,15 @@ export interface RepairVerdictInput {
   changesNotLoaded?: 'failed' | 'skipped' | 'unconfirmed';
   onDiskVersion?: string | null;
   expectedVersion?: string;
+  /**
+   * #1179 r2 (Astra): the post-remediation verdict's own measurement — its
+   * `installedVersion` and where it read it, as one pair from that verdict.
+   * Only `selected-build` (read out of the copy OpenClaw selected) is taken
+   * as the selected copy's version; a disk-scan copy, a record-path build or
+   * an install record never stands in for it here.
+   */
+  installedVersion?: string | null;
+  installedVersionSource?: 'selected-build' | 'disk' | 'index-record' | 'record-path-build' | null;
 }
 
 export interface RepairVerdict {
@@ -87,23 +102,47 @@ export interface RepairVerdict {
   nextCommand?: string;
 }
 
+/** A valid version strictly older than a valid expected one. */
+function olderThan(version: string | null | undefined, expectedVersion: string | undefined): boolean {
+  const v = semver.valid(version ?? '');
+  const expected = semver.valid(expectedVersion ?? '');
+  return Boolean(v && expected && semver.lt(v, expected));
+}
+
 /**
- * #1179 r1: the version proof failed, but no version was measured — the
- * self-check could not read the selected copy's version, and no other layer
- * read one older than this CLI. That is missing evidence, not a plugin behind
- * this CLI: it must not be reported as one, or answered with a forced install.
- * An older version read from disk or an install record (`onDiskVersion`) is
- * still a measured one.
+ * #1179 r2 (Astra): the post-state's reading of the build OpenClaw selected —
+ * `installedVersion` only when its source is `selected-build`. A disk-scan
+ * copy, a record-path build or an install record is never that reading.
+ */
+function selectedBuildReading(
+  input: Pick<RepairVerdictInput, 'installedVersion' | 'installedVersionSource'>,
+): string | null {
+  return input.installedVersionSource === 'selected-build' ? semver.valid(input.installedVersion ?? '') : null;
+}
+
+/**
+ * #1179 r1: the version proof failed, but no version older than this CLI was
+ * measured — the self-check had no version of its own to compare (it could
+ * not read one, or, r2, the copy's source is wrong) and the reading it is
+ * judged by is not older. That is not a plugin behind this CLI: it must not
+ * be reported as one, or answered with a forced install.
+ *
+ * r2 (Astra): the reading is the post-state's selected build when it has one
+ * (`selectedVersion`, see `selectedBuildReading`). Any version read there is
+ * a measurement, and another copy never overrides it. Without one, an older
+ * version read from disk or an install record (`onDiskVersion`) is still a
+ * measured one, as in r1.
  */
 export function versionProofUnmeasured(
-  selfCheck: { versionProof?: boolean; versionUnread?: boolean } | undefined,
+  selfCheck: { versionProof?: boolean; versionUnread?: boolean; versionWrongSource?: boolean } | undefined,
   onDiskVersion?: string | null,
   expectedVersion?: string,
+  selectedVersion?: string | null,
 ): boolean {
-  if (selfCheck?.versionProof !== false || selfCheck.versionUnread !== true) return false;
-  const onDisk = semver.valid(onDiskVersion ?? '');
-  const expected = semver.valid(expectedVersion ?? '');
-  return !(onDisk && expected && semver.lt(onDisk, expected));
+  if (selfCheck?.versionProof !== false) return false;
+  if (selfCheck.versionUnread !== true && selfCheck.versionWrongSource !== true) return false;
+  const selected = semver.valid(selectedVersion ?? '');
+  return !olderThan(selected ?? onDiskVersion, expectedVersion);
 }
 
 /**
@@ -137,29 +176,51 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
   // #1179 r1: a version proof that failed for want of any version read says
   // nothing about which build is installed. It is answered below, as unknown,
   // after the restart cases; the two branches here need a measured version.
-  const versionUnmeasured = versionProofUnmeasured(sc, input.onDiskVersion, input.expectedVersion);
+  // r2 (Astra): when the self-check had no version of its own, the version it
+  // is judged by is the post-state's reading of the selected build, if any.
+  const proofHadNoVersion = sc?.versionProof === false && (sc.versionUnread === true || sc.versionWrongSource === true);
+  const selected = proofHadNoVersion ? selectedBuildReading(input) : null;
+  const versionUnmeasured = versionProofUnmeasured(sc, input.onDiskVersion, input.expectedVersion, selected);
+  // r2: that selected build was read older than this CLI. Stale, reported by
+  // its own version — but the self-check could not verify the copy, and
+  // repair's safety check can refuse the reinstall there: doctor first.
+  const selectedStale = proofHadNoVersion && !versionUnmeasured && selected !== null;
+  const staleBySelected = `the build OpenClaw selected is v${selected}, older than ${semver.valid(input.expectedVersion ?? '')}, and this run's own check could not verify that copy. Check it with shieldcortex doctor before reinstalling`;
 
   // An old disk plugin is not proof the gateway is unprotected. A major CLI
   // upgrade can outrun the plugin install; unread logs cannot prove a silent
   // loaded-build downgrade either.
-  const majorUpgradeLag = input.onDiskVersion && input.expectedVersion &&
-    semver.valid(input.onDiskVersion) && semver.valid(input.expectedVersion) &&
-    semver.major(input.onDiskVersion) < semver.major(input.expectedVersion);
+  const measured = selectedStale ? selected : input.onDiskVersion;
+  const majorUpgradeLag = measured && input.expectedVersion &&
+    semver.valid(measured) && semver.valid(input.expectedVersion) &&
+    semver.major(measured) < semver.major(input.expectedVersion);
   if (sc?.versionProof === false && !versionUnmeasured && (sc.rosterState !== 'loaded' || majorUpgradeLag)) {
-    return {
-      outcome: 'protected-unproven',
-      headline: 'The installed plugin is behind this CLI. Update the plugin; protection by the new build is not yet proven.',
-      nextCommand: realtimePluginInstallCommand(input.expectedVersion),
-    };
+    return selectedStale
+      ? {
+        outcome: 'protected-unproven',
+        headline: `The installed plugin is behind this CLI: ${staleBySelected}; protection by the new build is not yet proven.`,
+        nextCommand: 'shieldcortex doctor',
+      }
+      : {
+        outcome: 'protected-unproven',
+        headline: 'The installed plugin is behind this CLI. Update the plugin; protection by the new build is not yet proven.',
+        nextCommand: realtimePluginInstallCommand(input.expectedVersion),
+      };
   }
 
   // A silent downgrade of the loaded build remains a real fault.
   if (sc?.versionProof === false && !versionUnmeasured) {
-    return {
-      outcome: 'unprotected',
-      headline: 'Not protected by the build you expect: an older version is installed than the one this CLI ships.',
-      nextCommand: 'npm i -g shieldcortex@latest && shieldcortex repair',
-    };
+    return selectedStale
+      ? {
+        outcome: 'unprotected',
+        headline: `Not protected by the build you expect: ${staleBySelected}.`,
+        nextCommand: 'shieldcortex doctor',
+      }
+      : {
+        outcome: 'unprotected',
+        headline: 'Not protected by the build you expect: an older version is installed than the one this CLI ships.',
+        nextCommand: 'npm i -g shieldcortex@latest && shieldcortex repair',
+      };
   }
 
   // #977 review: whatever the self-check saw, it saw a gateway that has not
@@ -207,7 +268,23 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
   // could not be read and no build was found). Unknown — not "behind", not a
   // downgrade — and no install command: doctor says what it could not read.
   // A roster proven absent already returned above.
+  // r2 (Astra): a known wrong source is that, not a read failure; and a
+  // selected build the post-state read (not older) is named as read.
   if (versionUnmeasured) {
+    if (sc?.versionWrongSource === true && sc.versionUnread !== true) {
+      return {
+        outcome: 'unknown',
+        headline: 'The plugin copy OpenClaw selected was not installed from npm or a local path, so it is not proven to be this CLI\'s pinned build. Check it with shieldcortex doctor.',
+        nextCommand: 'shieldcortex doctor',
+      };
+    }
+    if (selected !== null) {
+      return {
+        outcome: 'unknown',
+        headline: `This run's own check could not verify the copy OpenClaw selected, though the plugin state reads that build as v${selected}, so whether this CLI's build is the one protecting the gateway is unproven, not known-broken.`,
+        nextCommand: 'shieldcortex doctor',
+      };
+    }
     return {
       outcome: 'unknown',
       headline: 'Could not read which plugin version OpenClaw uses, so whether this CLI\'s build is the one protecting the gateway is unproven, not known-broken.',
