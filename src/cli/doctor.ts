@@ -9273,15 +9273,38 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       // #260 (jarvis r3): the selected build is real but its version could not
       // be read. A version check that cannot measure must not pass — warn, and
       // never print the expected version as if it had been read.
+      // r6: say what the evidence is — a copy whose version could not be
+      // read, or (indexPathMissing) a folder that holds no build at all.
       return {
         label,
         status: 'warn',
         message:
-          'realtime plugin installed and enabled, but the version of the copy OpenClaw uses could not be read (version unverified)' +
+          (verdict.indexPathMissing === true
+            ? 'realtime plugin enabled, but OpenClaw\'s plugin index points to a folder that holds no build, so which copy OpenClaw uses and its version are unknown (version unverified)'
+            : 'realtime plugin installed and enabled, but the version of the copy OpenClaw uses could not be read (version unverified)') +
           (verdict.loadedInLiveRoster === true
             ? ' — the running gateway loaded it; which version is not confirmed'
             : ' — and the running gateway\'s start-up list could not be read, so the load is not confirmed either'),
-        fix: 'Check it: `shieldcortex openclaw status`. If that copy\'s package.json is damaged, reinstall the plugin: `' + cliRealtimeInstallCommand() + '`',
+        fix: verdict.indexPathMissing === true
+          ? 'Check it: `shieldcortex openclaw status`. To rewrite OpenClaw\'s stale index record, reinstall the plugin: `' + cliRealtimeInstallCommand() + '`'
+          : 'Check it: `shieldcortex openclaw status`. If that copy\'s package.json is damaged, reinstall the plugin: `' + cliRealtimeInstallCommand() + '`',
+        needsOpenClawCli: { subcommand: 'plugins' },
+      };
+    case 'stale-index-record':
+      // #260 r6 (owner ruling): fails on the STALE INDEX RECORD — the folders
+      // OpenClaw's index points at hold no build and its record is older than
+      // expected. Not a measured regression: no version is printed as the
+      // running one. Repair reinstalls pinned to the expected version, which
+      // rewrites the record.
+      return {
+        label,
+        status: 'fail',
+        message:
+          'realtime plugin: OpenClaw\'s plugin index points to folders that hold no build (stale index record), and that record names a version older than expected; running version unknown' +
+          (verdict.loadedInLiveRoster === true
+            ? '. The running gateway loaded a copy, but nothing shows which one'
+            : ''),
+        fix: `Run \`shieldcortex repair\`: it reinstalls the plugin pinned to v${verdict.expectedVersion}, which rewrites OpenClaw's stale index record, and then checks the plugin loads.`,
         needsOpenClawCli: { subcommand: 'plugins' },
       };
     case 'conflicted-metadata':

@@ -231,6 +231,11 @@ export type PluginLoadState =
    *  could not be read and nothing lower was claimed. Not a pass: a version
    *  check that cannot measure does not report one. */
   | 'version-unverified'
+  /** #260 r6 (owner ruling): the folders OpenClaw's install index points at
+   *  hold no build and its record names a version older than expected, while
+   *  a build sits elsewhere on disk. Fails on the STALE RECORD — which copy
+   *  runs, and at what version, is unknown; neither version is claimed. */
+  | 'stale-index-record'
   | 'conflicted-metadata'
   | 'duplicate-install';
 
@@ -296,8 +301,11 @@ export interface ReconcileVerdict {
    * verified) its record's `installPath` — and the running gateway did not
    * prove the load (#260). A build found elsewhere on disk does not clear it:
    * a build on disk is not a selection, and an equal-version record elsewhere
-   * is not the selected build. False (or absent, on hand-built verdicts) on
-   * every other verdict, including other `load-unproven` ones.
+   * is not the selected build. r6: also set on the `version-unverified` the
+   * running gateway's proof turns that into (so renderers say the copy holds
+   * no build, not that its version "could not be read"), and on
+   * `stale-index-record`. False (or absent, on hand-built verdicts) on every
+   * other verdict, including other `load-unproven` ones.
    */
   indexPathMissing?: boolean;
   /**
@@ -305,9 +313,11 @@ export interface ReconcileVerdict {
    * selected copy holds no build (load proven by the running gateway only),
    * no layer recorded a version at all, or (jarvis r3) the verified selected
    * build's own version could not be read. Never on `healthy` (r4c): the
-   * verdict is `version-unverified` (warn), `load-unproven` (warn), or
+   * verdict is `version-unverified` (warn), `load-unproven` (warn),
    * `version-regressed` when the claim main would weigh — the disk scan's
-   * build, else the install record (Case r5) — is older than expected.
+   * build, else the install record (Case r5) — is older than expected, or
+   * `stale-index-record` (r6) when that record is older than expected but a
+   * build elsewhere on disk set it aside.
    * Renderers say "version unverified" — never the expected version, and
    * never the newest build a disk scan found. Absent on every other verdict.
    */
@@ -354,7 +364,9 @@ function coerce(v: string | null | undefined): string | null {
  * below expected (it convicts as `version-regressed`, flagged
  * `versionUnverified`); otherwise null — a claim at or above expected is not
  * a measurement of what runs, and a stale record is never weighed against a
- * build the scan did find.
+ * build the scan did find. (r6: where the indexed folders hold no build, such
+ * a record still fails — as `stale-index-record`, on the record, not as a
+ * version.)
  */
 function unmeasuredClaim(
   scanVersion: string | null,
@@ -479,8 +491,10 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // The installed version, from ONE source chosen by what the selection says
   // (Case r2 #1):
   //   - verified selection ⇒ the version read out of that build. Unreadable ⇒
-  //     none: the disk scan's newest build and the record's version are other
-  //     copies' claims, and the expected pin is not a measurement at all.
+  //     none: the disk scan's newest build and the record's version — even a
+  //     record naming that same folder (r6) — are claims, not readings, and
+  //     the expected pin is not a measurement at all. A claim below expected
+  //     is kept, to convict; it never acquits.
   //   - missing selected build ⇒ nothing measured. Only main's claim (the
   //     scan's build, else the record) below expected is kept, to convict;
   //     otherwise no version is claimed (Case r5).
@@ -491,29 +505,19 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   let effective: string | null;
   let installedVersionSource: ReconcileVerdict['installedVersionSource'];
   let selectedVersionUnread = false;
+  let staleRecordBelowExpected = false;
   if (indexSelectionVerified) {
     effective = coerce(input.selectedVersion);
     installedVersionSource = effective ? 'selected-build' : null;
-    // The build's own version could not be read. The install record speaks
-    // for it only when it names THAT SAME directory and a build is there —
-    // a record for the selected copy, not an equal-version record elsewhere.
-    const selectedRoot = index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir;
-    const recordPath = indexRecord?.installPath;
-    if (
-      !effective && input.indexInstallPathExists === true &&
-      typeof selectedRoot === 'string' && typeof recordPath === 'string' &&
-      path.resolve(selectedRoot) === path.resolve(recordPath)
-    ) {
-      effective = coerce(indexVersion);
-      installedVersionSource = effective ? 'index-record' : null;
-    }
-    // jarvis r3: still unread. Another copy's claim cannot vouch for the
-    // selected build. Case r5: it convicts only with main's precedence — the
-    // disk scan's build when there is one, else the install record (main:
+    // jarvis r3: the build's own version (package.json, else its own
+    // openclaw.plugin.json — r6) could not be read. No claim vouches for it —
+    // r6 (jarvis 6095709381): not even an install record naming THAT SAME
+    // folder, which is a record of an install, not a reading of the build.
+    // Case r5: a claim convicts only with main's precedence — the disk scan's
+    // build when there is one, else the install record (main:
     // `coerce(onDiskVersion) ?? coerce(indexVersion)`) — and only when that
-    // one claim is below expected. A stale record below expected beside a
-    // current build on disk measures nothing and convicts nothing: it ends in
-    // `version-unverified` (warn) at the end of this function — never a pass.
+    // one claim is below expected. Anything else ends in `version-unverified`
+    // (warn) at the end of this function — never a pass.
     if (!effective) {
       selectedVersionUnread = true;
       const claim = unmeasuredClaim(scanVersion, coerce(indexVersion), coerce(expectedVersion));
@@ -528,6 +532,13 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     // reaches the missing-build rule below, which is never a pass.
     const claim = unmeasuredClaim(scanVersion, coerce(indexVersion), coerce(expectedVersion));
     [effective, installedVersionSource] = claim ?? [null, null];
+    // r6 (owner ruling, jarvis 6095709381 + Case 6095672540's conditions): a
+    // record below expected that main's precedence set aside (a build sits
+    // elsewhere on disk, not below expected) still FAILS — not as a measured
+    // regression, but on the STALE INDEX RECORD itself. See rule 4b below.
+    const rec = coerce(indexVersion);
+    const exp = coerce(expectedVersion);
+    staleRecordBelowExpected = !claim && Boolean(rec && exp && semver.lt(rec, exp));
   } else {
     effective = scanVersion ?? (indexRecordPathGone ? null : coerce(indexVersion));
     installedVersionSource = scanVersion ? 'disk' : effective ? 'index-record' : null;
@@ -756,6 +767,32 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     };
   }
 
+  // 4b. #260 r6 (owner ruling): the folders OpenClaw's index points at hold no
+  //     build, its install record names a version older than expected, and
+  //     main's precedence set that record aside only because a build sits
+  //     elsewhere on disk. Nothing shows which copy OpenClaw loaded — not even
+  //     a roster naming the plugin, which proves a load, not a copy — and this
+  //     is the security tier: a false green here is a silent downgrade. The
+  //     BASIS of this fail is the stale index record, not a measured version:
+  //     neither the record's version nor the disk build's is reported as
+  //     running. Repair reinstalls pinned to the expected version, which
+  //     rewrites the stale record (never acting on the record's version).
+  //     Rules 2/2a (a read roster that omits the plugin; the #142 race) ran
+  //     first and are unchanged. A rootDir verified as a real build never
+  //     reaches here: that build is measured and decides.
+  if (staleRecordBelowExpected) {
+    const selectedRoot = index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir;
+    const where = safeForReason(indexSelectionStale ? selectedRoot : indexRecord?.installPath);
+    reasons.push(
+      `OpenClaw's install index points at ${where}, which holds no plugin build (stale index record), and that record names a version older than expected ${expected}; ` +
+        'a build found elsewhere on disk is not proven to be the copy OpenClaw loaded, so the running version is unknown — reinstall pinned to rewrite the stale record',
+    );
+    return {
+      ...base, indexPathMissing: true, installedVersion: null, installedVersionSource: null, versionUnverified: true,
+      state: 'stale-index-record', severity: 'fail', recommendedAction: 'reinstall-pinned', reasons,
+    };
+  }
+
   // 5. installs.json ↔ SQLite index disagree (the precondition for a future drop).
   if (metadataConflict) {
     if (pathConflict) reasons.push(`installs.json install path disagrees with the SQLite index (${safeForReason(installsPath)} vs ${safeForReason(indexPath)})`);
@@ -790,9 +827,10 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   //     build sits elsewhere on disk (Sol r2): the scan's newest build is not
   //     proven to be the copy that process loaded. An unmeasured version is
   //     never a pass, so this is `version-unverified` (warn), no action. A
-  //     claim below expected (main's precedence, Case r5) already failed above;
-  //     a stale record below expected beside a current build on disk is not a
-  //     measured regression and schedules no reinstall.
+  //     claim below expected (main's precedence, Case r5) already failed
+  //     above, and so did a record below expected beside a build elsewhere on
+  //     disk — as the stale index record it is (rule 4b, r6), not as a
+  //     measured regression.
   //   - Otherwise ⇒ neither a pass nor a conviction, whether or not a build
   //     sits elsewhere on disk (Sol finding 3): a build on disk proves an
   //     install, not that OpenClaw selected it.
@@ -813,7 +851,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
           : `load proven by the running gateway; the installed version could not be verified (OpenClaw's install index ${what} ${where}, which holds no plugin build)`,
       );
       return {
-        ...base, installedVersion: null, installedVersionSource: null, versionUnverified: true,
+        ...base, indexPathMissing: true, installedVersion: null, installedVersionSource: null, versionUnverified: true,
         state: 'version-unverified', severity: 'warn', recommendedAction: 'none', reasons,
       };
     }
@@ -1530,10 +1568,17 @@ function verifiedPluginBuildAt(rawDir: unknown, pluginId: string): boolean | nul
  * package.json and versions the manifest). The first of the two that carries
  * a `version` string decides; one that is not an exact version, or a file
  * that cannot be read, is null — never a guess.
+ *
+ * `manifestFallback` (#260 r6, jarvis 6095709381): for the version CHECK of
+ * the selected build, a package.json that yields no exact version (unreadable,
+ * not JSON, "latest") does not stop the read — the build's own
+ * openclaw.plugin.json is still a reading of that same build, so an older
+ * manifest is a measured regression. The prune planner keeps the strict read:
+ * it deletes on the version it reads, and a damaged package.json refuses.
  */
-function readExactBuildVersion(dir: unknown): string | null {
+function readExactBuildVersion(dir: unknown, manifestFallback = false): string | null {
   if (typeof dir !== 'string' || !path.isAbsolute(dir)) return null;
-  const v = readBuildVersionState(dir);
+  const v = readBuildVersionState(dir, manifestFallback);
   return v.state === 'ok' ? v.version : null;
 }
 
@@ -1544,29 +1589,41 @@ type BuildVersionState =
   | { state: 'unreadable'; why: string };
 
 /** {@link readExactBuildVersion}, keeping "nothing there" apart from "could not read it". */
-function readBuildVersionState(dir: string): BuildVersionState {
+function readBuildVersionState(dir: string, manifestFallback = false): BuildVersionState {
   let sawFile = false;
+  // r6: with `manifestFallback`, a package.json that gives no exact version
+  // is remembered and the manifest is still read; its reason is kept.
+  let skipped: string | null = null;
   for (const file of ['package.json', 'openclaw.plugin.json']) {
-    let raw: string;
+    let why: string | null = null;
+    let raw: string | null = null;
     try {
       raw = fs.readFileSync(path.join(dir, file), 'utf-8');
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
       if (code === 'ENOENT' || code === 'ENOTDIR') continue;
-      return { state: 'unreadable', why: `cannot read ${file} (${code ?? 'error'})` };
+      why = `cannot read ${file} (${code ?? 'error'})`;
     }
     sawFile = true;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return { state: 'unreadable', why: `${file} is not valid JSON` };
+    if (raw !== null) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        why = `${file} is not valid JSON`;
+      }
+      if (!why && isPlainObject(parsed) && typeof parsed.version === 'string') {
+        const v = semver.valid(parsed.version.trim());
+        if (v) return { state: 'ok', version: v };
+        why = `${file} has no exact version`;
+      }
     }
-    if (isPlainObject(parsed) && typeof parsed.version === 'string') {
-      const v = semver.valid(parsed.version.trim());
-      return v ? { state: 'ok', version: v } : { state: 'unreadable', why: `${file} has no exact version` };
+    if (why) {
+      if (!(manifestFallback && file === 'package.json')) return { state: 'unreadable', why: skipped ?? why };
+      skipped = why;
     }
   }
+  if (skipped) return { state: 'unreadable', why: skipped };
   return sawFile ? { state: 'unreadable', why: 'no version in package.json or openclaw.plugin.json' } : { state: 'none' };
 }
 
@@ -1679,7 +1736,7 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
     // (a linked or path install sits outside it), and its newest build is not
     // necessarily the copy OpenClaw selected.
     ...(indexRootDirExists === true
-      ? { selectedVersion: readExactBuildVersion(index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir) }
+      ? { selectedVersion: readExactBuildVersion(index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir, true) }
       : {}),
     onDiskVersion: readInstalledRealtimePluginVersion(home),
     // #226: the trusted-local-copy build, only when it is a REAL one (index.js
