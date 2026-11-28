@@ -726,12 +726,12 @@ describe('#260 r3 — the selected build is measured, not assumed', () => {
   });
 
   it.each([
-    ['roster unread', null, '5.22.1'],
-    ['roster-proven', [PLUGIN], '5.22.1'],
+    ['roster unread', '5.22.1', null],
+    ['roster-proven', '5.22.1', [PLUGIN]],
     // A version different from the pin proves the number is read, not assumed.
-    ['roster unread, newer build', null, '5.23.0'],
-    ['roster-proven, newer build', [PLUGIN], '5.23.0'],
-  ] as const)('out-of-scan rootDir, record path gone (%s, v%s) ⇒ healthy at the MEASURED version', (_l, roster, version) => {
+    ['roster unread', '5.23.0', null],
+    ['roster-proven', '5.23.0', [PLUGIN]],
+  ] as const)('out-of-scan rootDir, record path gone (%s, v%s) ⇒ healthy at the MEASURED version', (_l, version, roster) => {
     writeConfig(true, true);
     writeRealBuild(outOfScan(), version);
     writeMachineStateIndex(row(outOfScan(), '4.0.0'));

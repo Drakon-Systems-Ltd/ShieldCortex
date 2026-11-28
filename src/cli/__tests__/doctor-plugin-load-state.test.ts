@@ -287,11 +287,11 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
   });
 
   it.each([
-    ['roster unread', null, '5.22.1', /installed and enabled \(v5\.22\.1\)/],
-    ['roster-proven', [PLUGIN], '5.22.1', /roster-confirmed, v5\.22\.1\)/],
-    ['roster unread', null, '5.23.0', /installed and enabled \(v5\.23\.0\)/],
-    ['roster-proven', [PLUGIN], '5.23.0', /roster-confirmed, v5\.23\.0\)/],
-  ] as const)('out-of-scan rootDir (%s) at v%s: passes with the MEASURED version', (_l, roster, version, expected) => {
+    ['roster unread', '5.22.1', null, /installed and enabled \(v5\.22\.1\)/],
+    ['roster-proven', '5.22.1', [PLUGIN], /roster-confirmed, v5\.22\.1\)/],
+    ['roster unread', '5.23.0', null, /installed and enabled \(v5\.23\.0\)/],
+    ['roster-proven', '5.23.0', [PLUGIN], /roster-confirmed, v5\.23\.0\)/],
+  ] as const)('out-of-scan rootDir (%s) at v%s: passes with the MEASURED version', (_l, version, roster, expected) => {
     writeRealBuild(outOfScan(), version);
     migrated(pkgDir(), { recordVersion: '4.0.0', rootDir: outOfScan() });
     const r = renderWithRoster(roster ? [...roster] : null);
