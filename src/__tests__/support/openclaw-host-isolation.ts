@@ -35,7 +35,7 @@ export interface LaunchTripwire {
 export function installLaunchTripwire(): LaunchTripwire {
   const launchers = Object.fromEntries(LAUNCHERS.map((name) => [name, jest.fn((...args: unknown[]): never => {
     throw new Error(`tripwire: child_process.${name}(${JSON.stringify(args[0])}) must not run in this suite`);
-  })])) as LaunchTripwire['launchers'];
+  })])) as unknown as LaunchTripwire['launchers'];
   // The real module's other exports stay; a self-import here would recurse.
   const actual = createRequire(import.meta.url)('child_process') as Record<string, unknown>;
   jest.unstable_mockModule('child_process', () => ({ ...actual, ...launchers, default: { ...actual, ...launchers } }));
