@@ -877,6 +877,18 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     };
   }
 
+  // #260 r15 (Jarvis 3): an index that is present but unreadable (bad JSON,
+  // an ill-typed or unknown-shape entry for ANY plugin) is UNKNOWN evidence —
+  // not "no index" and not "agrees". Every rule below would read its absence
+  // as agreement (no conflict, no duplicate, healthy), where the previous
+  // release read the same row and warned. Only the fails above may convict;
+  // otherwise warn, and plan no replacement and no prune off what we never read.
+  if (indexUnreadable) {
+    reasons.push("OpenClaw's plugin install index is present but could not be read, so whether its records agree with installs.json and the build on disk is UNKNOWN — this cannot be reported healthy");
+    if (loadedInLiveRoster === true) reasons.push('the RUNNING gateway has the plugin loaded, so the box is protected right now');
+    return { ...base, state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
+  }
+
   // 4b. #260 r6 (owner ruling): the folders OpenClaw's index points at hold no
   //     build, its install record names a version older than expected, and
   //     main's precedence set that record aside only because a build sits
