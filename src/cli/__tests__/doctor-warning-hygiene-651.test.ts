@@ -467,6 +467,8 @@ describe('#651 item 4 — duplicate install dirs name observed paths, never a re
     expect(row.fix ?? '').toContain('`shieldcortex repair`');
     expect(row.message).toMatch(/inspect each .* before removing anything by hand/);
     expect(row.message).toMatch(/does not say which of these, if any, is stale or safe to delete/);
+    // #260 Sol r2: the row no longer tells the operator to prune anything.
+    expect(row.message).not.toMatch(/\bprune\b/i);
   }
 
   it('names every observed dir and the one the install index records', () => {

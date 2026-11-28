@@ -9275,7 +9275,11 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'warn',
-        message: `${(verdict.onDiskVersion && 'realtime plugin has ') || ''}multiple install dirs on disk — prune the stale duplicate before a toggle re-resolves to it`,
+        // #260 Sol r2: no removal advice — doctor cannot tell which copy is
+        // stale, and the stale-looking one may be the only intact copy.
+        // `shieldcortex repair` removes only proven older/equal duplicates of
+        // the verified selected build, and nothing otherwise.
+        message: `${(verdict.onDiskVersion && 'realtime plugin has ') || ''}multiple install dirs on disk — a toggle could re-resolve to the wrong one`,
         fix,
         needsOpenClawCli: { subcommand: 'plugins' },
       };

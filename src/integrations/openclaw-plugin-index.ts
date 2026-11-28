@@ -716,7 +716,11 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
 
   // 6. Duplicate project dirs accumulated on disk (authoritative layers agree).
   if (projectDirs.length > 1) {
-    reasons.push(`${projectDirs.length} plugin project dirs on disk — prune the stale duplicate so a future toggle cannot re-resolve to it`);
+    // Sol r2: the verdict does not say which dir is stale — it cannot, from
+    // names alone. Repair removes a dir only when it is shown to be an older
+    // or equal duplicate of the verified build OpenClaw selects
+    // (assessDuplicateProjectDirs); otherwise it removes nothing.
+    reasons.push(`${projectDirs.length} plugin project dirs on disk — a future toggle could re-resolve to the wrong one; repair removes only copies shown to be older or equal duplicates of the verified build OpenClaw selects`);
     return { ...base, state: 'duplicate-install', severity: 'warn', recommendedAction: 'dedupe-and-reload', reasons };
   }
 
@@ -858,7 +862,7 @@ export function planReconcileActions(verdict: ReconcileVerdict, opts: PlanOption
       steps.push({
         kind: 'prune-duplicate-dirs',
         dirs: prune,
-        description: `prune ${prune.length} stale duplicate project dir(s) so a toggle cannot re-resolve to them`,
+        description: `prune ${prune.length} duplicate project dir(s) holding an older or equal copy of the verified selected build, so a toggle cannot re-resolve to them`,
       });
     }
   };
@@ -1439,20 +1443,41 @@ function verifiedPluginBuildAt(dir: unknown, pluginId: string): boolean | null {
  */
 function readExactBuildVersion(dir: unknown): string | null {
   if (typeof dir !== 'string' || !path.isAbsolute(dir)) return null;
+  const v = readBuildVersionState(dir);
+  return v.state === 'ok' ? v.version : null;
+}
+
+type BuildVersionState =
+  | { state: 'ok'; version: string }
+  /** Neither file is there: no build, nothing to lose. */
+  | { state: 'none' }
+  | { state: 'unreadable'; why: string };
+
+/** {@link readExactBuildVersion}, keeping "nothing there" apart from "could not read it". */
+function readBuildVersionState(dir: string): BuildVersionState {
+  let sawFile = false;
   for (const file of ['package.json', 'openclaw.plugin.json']) {
-    let parsed: unknown;
+    let raw: string;
     try {
-      parsed = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf-8'));
+      raw = fs.readFileSync(path.join(dir, file), 'utf-8');
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
       if (code === 'ENOENT' || code === 'ENOTDIR') continue;
-      return null;
+      return { state: 'unreadable', why: `cannot read ${file} (${code ?? 'error'})` };
+    }
+    sawFile = true;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { state: 'unreadable', why: `${file} is not valid JSON` };
     }
     if (isPlainObject(parsed) && typeof parsed.version === 'string') {
-      return semver.valid(parsed.version.trim());
+      const v = semver.valid(parsed.version.trim());
+      return v ? { state: 'ok', version: v } : { state: 'unreadable', why: `${file} has no exact version` };
     }
   }
-  return null;
+  return sawFile ? { state: 'unreadable', why: 'no version in package.json or openclaw.plugin.json' } : { state: 'none' };
 }
 
 /** {@link verifiedPluginBuildAt} for the path the index RECORD names. */
@@ -1661,6 +1686,110 @@ export function projectDirNameFromPath(p: string | null | undefined): string | n
  * path — used by the reconciler to know which duplicate dirs are prunable. */
 export function canonicalProjectDir(home: string): string | null {
   return projectDirNameFromPath(resolveRealtimePluginInstallPath(home));
+}
+
+/**
+ * Which duplicate `~/.openclaw/npm/projects/*` dirs a repair may remove —
+ * HOST-SAFETY CRITICAL (#74 finding 4; #260 Sol r2). The one rule: never
+ * remove the only intact copy. So a dir is pruned only when ALL of these hold,
+ * and otherwise NOTHING is pruned and `refused` says why:
+ *
+ *  - the install index is readable and names the kept dir unambiguously: its
+ *    selection (`rootDir`) and its install record (`installPath`) do not point
+ *    at different places;
+ *  - the kept copy is a VERIFIED build (manifest naming the plugin + an entry
+ *    point) — a stale selection may be the leftover, and another dir the only
+ *    intact copy;
+ *  - the kept build's exact version can be read;
+ *  - every other dir is safe to lose: it holds no copy of the package at all,
+ *    or a copy whose exact version reads as older than or equal to the kept
+ *    one. A newer copy, or one whose version cannot be read, is never removed.
+ *
+ * Reads only; removes nothing. `packageName` names the package's directory
+ * under each project's `node_modules`.
+ */
+export interface DuplicatePruneAssessment {
+  /** Every project dir name matching the plugin. */
+  dirs: string[];
+  /** The dir kept: the one holding the verified build the index selects. */
+  keep: string | null;
+  keepVersion: string | null;
+  /** Dirs safe to remove. Empty whenever `refused` is set. */
+  prune: string[];
+  refused?: string;
+}
+
+export function assessDuplicateProjectDirs(
+  home: string,
+  index: PluginIndexRow | null,
+  pluginId: string = REALTIME_PLUGIN_ID,
+  packageName: string = REALTIME_PLUGIN_PACKAGE,
+): DuplicatePruneAssessment {
+  const projects = path.join(home, '.openclaw', 'npm', 'projects');
+  let dirs: string[];
+  try {
+    dirs = fs.readdirSync(projects).filter((d) => d.includes(pluginId)).sort();
+  } catch {
+    return { dirs: [], keep: null, keepVersion: null, prune: [] };
+  }
+  const nothing = { keep: null, keepVersion: null, prune: [] as string[] };
+  if (dirs.length <= 1) return { dirs, ...nothing };
+  const refuse = (why: string, kept: Partial<DuplicatePruneAssessment> = {}): DuplicatePruneAssessment => ({
+    dirs, ...nothing, ...kept, prune: [],
+    refused: `refusing to prune ${dirs.length} duplicate project dir(s): ${why}. Nothing was removed — resolve manually.`,
+  });
+
+  if (!index) return refuse("OpenClaw's install index could not be read, so which copy it selects is unknown");
+  const entry = index.plugins?.find((p) => p?.pluginId === pluginId);
+  const rootDir = typeof entry?.rootDir === 'string' && entry.rootDir ? entry.rootDir : null;
+  const rec = index.installRecords?.[pluginId]?.installPath;
+  const recordPath = typeof rec === 'string' && rec ? rec : null;
+  const rootProj = projectDirNameFromPath(rootDir);
+  const recProj = projectDirNameFromPath(recordPath);
+  if (rootDir && recordPath && rootProj !== recProj) {
+    return refuse(`the install index selects ${safeForReason(rootDir)} but its install record names ${safeForReason(recordPath)} — which copy is live is ambiguous`);
+  }
+  const keep = rootProj ?? recProj;
+  if (!keep) return refuse('the authoritative SQLite index does not resolve a live install dir — cannot safely tell which to keep');
+  if (!dirs.includes(keep)) {
+    return refuse(`the index's live install dir (${safeForReason(keep)}) is not present on disk — cannot safely tell which to keep`);
+  }
+  const keepBuild = (rootProj ? rootDir : recordPath) as string;
+  if (verifiedPluginBuildAt(keepBuild, pluginId) !== true) {
+    return refuse(`the copy the index selects (${safeForReason(keepBuild)}) is not a verified plugin build — it may be the stale one, and another dir the only intact copy`, { keep });
+  }
+  const keepVersion = readExactBuildVersion(keepBuild);
+  if (!keepVersion) {
+    return refuse(`the version of the kept build (${safeForReason(keepBuild)}) cannot be read, so no other copy can be shown to be older`, { keep });
+  }
+
+  const unsafe: string[] = [];
+  for (const d of dirs) {
+    if (d === keep) continue;
+    const projectDir = path.join(projects, d);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(projectDir);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT') continue;
+      unsafe.push(`${safeForReason(d)} cannot be read (${code ?? 'error'})`);
+      continue;
+    }
+    if (!st.isDirectory()) {
+      unsafe.push(`${safeForReason(d)} is not a plain directory`);
+      continue;
+    }
+    const copy = readBuildVersionState(path.join(projectDir, 'node_modules', ...packageName.split('/')));
+    if (copy.state === 'none') continue;
+    if (copy.state === 'unreadable') {
+      unsafe.push(`the copy in ${safeForReason(d)} cannot be read (${copy.why})`);
+    } else if (semver.gt(copy.version, keepVersion)) {
+      unsafe.push(`${safeForReason(d)} holds v${copy.version}, newer than the kept v${keepVersion}`);
+    }
+  }
+  if (unsafe.length > 0) return refuse(unsafe.join('; '), { keep, keepVersion });
+  return { dirs, keep, keepVersion, prune: dirs.filter((d) => d !== keep) };
 }
 
 /**
