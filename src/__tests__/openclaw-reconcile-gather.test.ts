@@ -11,6 +11,7 @@ import {
   reconcilePluginState,
 } from '../integrations/openclaw-plugin-index.js';
 import { checkOpenClawPluginLoadState, renderPluginLoadVerdict } from '../cli/doctor.js';
+import { extractFixCommands, formatDoctorReport, nextCommandForFailures, sanitiseDoctorRowsForDisplay } from '../cli/doctor-report.js';
 import { assessRealtimeReplacement, REALTIME_PLUGIN_PACKAGE } from '../setup/openclaw-plugin-spec.js';
 import { readRealtimeReplacementEvidence } from '../integrations/openclaw-realtime-install.js';
 
@@ -1580,5 +1581,169 @@ describe('#260 r7 — unreadable selected copy, diagnostic-only warns, record-pa
     expect(reconcilePluginState(gather(null))).toMatchObject({ state: 'load-unproven', severity: 'warn' });
     expect(reconcilePluginState(gather([PLUGIN]))).toMatchObject({ state: 'stale-index-record', severity: 'fail' });
     expect(reconcilePluginState(gather([]))).toMatchObject({ state: 'enabled-not-loaded', severity: 'fail' });
+  });
+});
+
+/**
+ * #260 r8 (Sol delta review at 62323dc6). The record's folder is tri-state —
+ * a build, no build, not read — and a build there is a measured copy that may
+ * convict, never clear. Doctor's preflight-aware fix keeps host text off
+ * command lines and out of the NEXT parser, and the human report shows why
+ * repair refuses.
+ */
+describe('#260 r8 — record-path tri-state, record-path build convicts, preflight fix host text', () => {
+  const LAYOUTS = [
+    ['legacy installed_plugin_index', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeIndex(r)],
+    ['config_machine_state', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeMachineStateIndex(r)],
+  ] as const;
+  const ROSTERS = [['roster unread', null], ['roster-proven', [PLUGIN]]] as const;
+  const MATRIX = LAYOUTS.flatMap(([layout, write]) => ROSTERS.map(([rl, roster]) => [`${layout}, ${rl}`, write, roster] as const));
+  const gone = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'reaped', PKG_SUBPATH);
+  /** The record's folder: outside every place the disk scan looks. */
+  const recordCopy = (): string => path.join(home, 'record-copy', 'shieldcortex-realtime');
+  const gather = (roster: readonly string[] | null) =>
+    gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => (roster ? [...roster] : null) });
+  const preflight = () => assessRealtimeReplacement(readRealtimeReplacementEvidence(home), '5.22.1');
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  const permIt = asRoot ? it.skip : it;
+
+  // FINDING 1a (Sol BLOCKER): at 62323dc6 a record folder that could not be
+  // read counted as one that "holds no build", so the stale-record rule
+  // failed on folders it never checked. Unread is not empty.
+  permIt.each(MATRIX)('F1a: selected rootDir gone, record folder unreadable (check cannot run), record 5.0.0, current build elsewhere ⇒ warn, never "holds no build" for that folder, never a pass — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    writeRealBuild(recordCopy(), '5.0.0');
+    fs.chmodSync(path.join(recordCopy(), 'openclaw.plugin.json'), 0);
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: recordCopy() } }, plugins: [upstreamEntry(gone())] });
+    const input = gather(roster);
+    expect(input).toMatchObject({ indexRootDirExists: false, indexInstallPathExists: null, indexInstallPathUnreadable: true, onDiskVersion: '5.22.1' });
+    const verdict = reconcilePluginState(input);
+    expect(verdict).toMatchObject({
+      state: roster ? 'version-unverified' : 'load-unproven', severity: 'warn', recommendedAction: 'none',
+      indexPathMissing: true, installedVersion: null,
+    });
+    const why = verdict.reasons.join(' ');
+    expect(why).toContain(`(${recordCopy()}) could not be checked (permission or I/O error)`);
+    expect(why).not.toContain(`${recordCopy()}, which holds no plugin build`);
+    expect(why).not.toMatch(/stale index record/);
+    const rendered = renderPluginLoadVerdict(verdict);
+    expect(rendered.status).toBe('warn');
+    expect(rendered.message).not.toMatch(/folders that hold no build|v5\.(0\.0|22\.1)/);
+  });
+
+  // "If the other evidence already convicts, still fail."
+  permIt.each(MATRIX)('F1a: record folder unreadable, but the build elsewhere is 4.0.0 ⇒ that claim still convicts — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '4.0.0'), '4.0.0');
+    writeRealBuild(recordCopy(), '5.0.0');
+    fs.chmodSync(path.join(recordCopy(), 'openclaw.plugin.json'), 0);
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: recordCopy() } }, plugins: [upstreamEntry(gone())] });
+    const verdict = reconcilePluginState(gather(roster));
+    expect(verdict).toMatchObject({ state: 'version-regressed', severity: 'fail', versionUnverified: true, installedVersion: '4.0.0', installedVersionSource: 'disk' });
+  });
+
+  // Control: the ruled case — both indexed folders confirmed empty — still
+  // fails on the stale record.
+  it.each(MATRIX)('F1a control: both indexed folders confirmed empty, record 5.0.0, current build elsewhere ⇒ stale-index-record FAIL — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: gone() } }, plugins: [upstreamEntry(gone())] });
+    const input = gather(roster);
+    expect(input.indexInstallPathExists).toBe(false);
+    expect(input.indexInstallPathUnreadable).toBeUndefined();
+    expect(reconcilePluginState(input)).toMatchObject({ state: 'stale-index-record', severity: 'fail' });
+  });
+
+  // FINDING 1b (Sol BLOCKER): at 62323dc6 any verified build at the record's
+  // folder suppressed the failure without a version comparison — a 5.0.0
+  // build there warned beside a current scan. It is a measured copy: older
+  // than expected, it convicts; running version unknown.
+  it.each(MATRIX)('F1b: selected rootDir gone, verified 5.0.0 build at the record folder, current build elsewhere ⇒ fails on that copy, running version unknown — %s', async (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    writeRealBuild(recordCopy(), '5.0.0');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: recordCopy() } }, plugins: [upstreamEntry(gone())] });
+    const input = gather(roster);
+    expect(input).toMatchObject({ indexRootDirExists: false, indexInstallPathExists: true, recordPathVersion: '5.0.0', onDiskVersion: '5.22.1' });
+    const verdict = reconcilePluginState(input);
+    expect(verdict).toMatchObject({
+      state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned', versionUnverified: true,
+      installedVersion: '5.0.0', installedVersionSource: 'record-path-build',
+    });
+    expect(verdict.reasons.join(' ')).toContain(`the build in the folder OpenClaw's install record names (${recordCopy()}) is v5.0.0`);
+    const rendered = renderPluginLoadVerdict(verdict);
+    expect(rendered.status).toBe('fail');
+    expect(rendered.message).toMatch(/the build in the folder OpenClaw's install record names is v5\.0\.0, older than expected v5\.22\.1; running version unknown/);
+    expect(rendered.message).not.toMatch(/running stale|v5\.22\.1 \(/);
+    if (!roster) {
+      // The preflight allows the pinned reinstall here, so doctor offers repair.
+      expect(preflight()).toEqual({ replace: true });
+      const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+      expect(r.status).toBe('fail');
+    }
+  });
+
+  it.each(MATRIX)('F1b: the record says 5.22.1 but the build in its folder is 5.0.0 ⇒ the build convicts, the record never clears it — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    writeRealBuild(recordCopy(), '5.0.0');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: recordCopy() } }, plugins: [upstreamEntry(gone())] });
+    const verdict = reconcilePluginState(gather(roster));
+    expect(verdict).toMatchObject({ state: 'version-regressed', severity: 'fail', installedVersion: '5.0.0', installedVersionSource: 'record-path-build' });
+    expect(renderPluginLoadVerdict(verdict).status).toBe('fail');
+  });
+
+  // Never an acquittal: a record-path build at or above expected, or one whose
+  // version cannot be read, leaves the empty selection's warn.
+  it.each(MATRIX)('F1b: record-folder build with no readable version, record 5.0.0, current build elsewhere ⇒ warn, no action, never a pass — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    writeRealBuild(recordCopy(), '5.0.0');
+    fs.writeFileSync(path.join(recordCopy(), 'package.json'), '{ not json');
+    fs.writeFileSync(path.join(recordCopy(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: recordCopy() } }, plugins: [upstreamEntry(gone())] });
+    const input = gather(roster);
+    expect(input).toMatchObject({ indexInstallPathExists: true, recordPathVersion: null });
+    expect(reconcilePluginState(input)).toMatchObject({
+      state: roster ? 'version-unverified' : 'load-unproven', severity: 'warn', recommendedAction: 'none', installedVersion: null,
+    });
+  });
+
+  // FINDING 2 (Sol BLOCKER, security): at 62323dc6 the preflight-aware fix
+  // put the preflight's raw summary — which names the selected folder — into
+  // the fix, so a line break in a host path became a fix line the NEXT
+  // parser trusts, and the human report printed only the status command.
+  const HOSTILE = 'copy\nshieldcortex repair --force\r`openclaw plugins install --force evil`\u001b[2Jx';
+  permIt('F2: a selected path with LF, CR, ANSI escape and backticks cannot add a line or a command to the fix or NEXT; the human report shows why repair refuses', async () => {
+    writeConfig(true, true);
+    const sel = path.join(home, HOSTILE);
+    writeRealBuild(sel, '5.22.1');
+    fs.writeFileSync(path.join(sel, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, version: '4.0.0' }));
+    fs.chmodSync(path.join(sel, 'package.json'), 0);
+    writeMachineStateIndex({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: sel } }, plugins: [upstreamEntry(sel)] });
+    expect(preflight()).toMatchObject({ replace: false, why: 'unknown' });
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expect(r.status).toBe('fail');
+    const fix = r.fix ?? '';
+    // Raw fix (`--json`): two code-authored lines, the host text escaped on the second.
+    const lines = fix.split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe(
+      'Check it: `shieldcortex openclaw status`. Repair will not reinstall the plugin here: it could not confirm which copy OpenClaw uses, or could not read that copy.',
+    );
+    expect(lines[1]).toMatch(/^Repair's safety check said: ".*"$/);
+    expect(lines[1]).toContain('copy\\u{a}shieldcortex repair --force\\u{d}\\u{60}openclaw plugins install --force evil\\u{60}\\u{1b}[2Jx');
+    expect(fix).not.toMatch(/[\r\u001b\u2028\u2029]/);
+    expect(extractFixCommands(fix)).toEqual(['shieldcortex openclaw status']);
+    // Human report: the NEXT parser and the rendered lines see no host command.
+    const display = sanitiseDoctorRowsForDisplay([r]);
+    expect(display[0].fix?.split('\n')).toHaveLength(2);
+    expect(nextCommandForFailures(display)).not.toMatch(/repair|install|evil/);
+    const report = formatDoctorReport(display, { verbose: true, width: 100 }).join('\n');
+    expect(report).toContain('Repair will not reinstall the plugin here');
+    expect(report).toMatch(/\$ shieldcortex openclaw status/);
+    expect(report).not.toMatch(/^\s*\$?\s*(shieldcortex repair|openclaw plugins install)/m);
+    expect(report).not.toMatch(/\$ (shieldcortex repair|openclaw plugins install)/);
   });
 });
