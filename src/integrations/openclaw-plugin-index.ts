@@ -227,6 +227,10 @@ export type PluginLoadState =
   | 'index-unreadable'
   | 'load-unproven'
   | 'version-regressed'
+  /** #260 (jarvis r3): the build OpenClaw selected is real, but its version
+   *  could not be read and nothing lower was claimed. Not a pass: a version
+   *  check that cannot measure does not report one. */
+  | 'version-unverified'
   | 'conflicted-metadata'
   | 'duplicate-install';
 
@@ -297,12 +301,14 @@ export interface ReconcileVerdict {
    */
   indexPathMissing?: boolean;
   /**
-   * `healthy`, but no version was measured for the copy it is about (#260):
-   * the selected build's version could not be read, the selected copy holds
-   * no build (load proven by the running gateway only), or no layer recorded
-   * a version at all. Renderers then say "version unverified" — never the
-   * expected version, and never the newest build a disk scan found. Absent on
-   * every other verdict.
+   * No version was measured for the copy the verdict is about (#260). Set on
+   * `healthy` when the selected copy holds no build (load proven by the
+   * running gateway only) or no layer recorded a version at all; and (jarvis
+   * r3) whenever the verified selected build's own version could not be read:
+   * then the verdict is `version-unverified` (warn), or `version-regressed`
+   * when the install record or the disk scan claims an older version.
+   * Renderers say "version unverified" — never the expected version, and
+   * never the newest build a disk scan found. Absent on every other verdict.
    */
   versionUnverified?: boolean;
   /**
@@ -460,6 +466,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   const scanVersion = coerce(onDiskVersion);
   let effective: string | null;
   let installedVersionSource: ReconcileVerdict['installedVersionSource'];
+  let selectedVersionUnread = false;
   if (indexSelectionVerified) {
     effective = coerce(input.selectedVersion);
     installedVersionSource = effective ? 'selected-build' : null;
@@ -476,6 +483,25 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
       effective = coerce(indexVersion);
       installedVersionSource = effective ? 'index-record' : null;
     }
+    // jarvis r3: still unread. Another copy's claim cannot vouch for the
+    // selected build, but a LOWER one is still evidence of a stale install, and
+    // main convicted on it. The lowest claim below expected convicts as
+    // `version-regressed`; anything else ends in `version-unverified` (warn) at
+    // the end of this function — never a pass.
+    if (!effective) {
+      selectedVersionUnread = true;
+      const exp = coerce(expectedVersion);
+      const claims: Array<[string | null, 'index-record' | 'disk']> = [
+        [coerce(indexVersion), 'index-record'],
+        [scanVersion, 'disk'],
+      ];
+      for (const [v, src] of claims) {
+        if (v && exp && semver.lt(v, exp) && (!effective || semver.lt(v, effective))) {
+          effective = v;
+          installedVersionSource = src;
+        }
+      }
+    }
   } else if (indexPathMissing) {
     effective = scanVersion;
     installedVersionSource = effective ? 'disk' : null;
@@ -486,11 +512,12 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   const expected = coerce(expectedVersion);
   const regressed = Boolean(effective && expected && semver.lt(effective, expected));
   const versionLabel =
-    installedVersionSource === 'selected-build'
+    (selectedVersionUnread ? "the build OpenClaw selected has no readable version, and " : '') +
+    (installedVersionSource === 'selected-build'
       ? `the build OpenClaw selected is v${effective}`
       : installedVersionSource === 'disk'
         ? `the build on disk is v${effective}`
-        : `OpenClaw's install record says v${effective}`;
+        : `OpenClaw's install record says v${effective}`);
 
   const indexReadable = index != null;
   const indexUnreadable = index == null && input.indexUnreadable === true;
@@ -698,7 +725,11 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // 4. Version regression (e.g. reinstall regressed 4.47.2 → 4.25.4).
   if (regressed) {
     reasons.push(`${versionLabel}, older than expected ${expected} — refuse downgrade, reinstall pinned`);
-    return { ...base, state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned', reasons };
+    return {
+      ...base,
+      ...(selectedVersionUnread ? { versionUnverified: true } : {}),
+      state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned', reasons,
+    };
   }
 
   // 5. installs.json ↔ SQLite index disagree (the precondition for a future drop).
@@ -771,6 +802,24 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // #216: distinguish boot-snapshot proof from PID-attributed hot-reload proof.
   // Case r2 #1: "versions agree" only when a version was measured; otherwise
   // the verdict says it was not, and renderers print "version unverified".
+  // jarvis r3: the build OpenClaw selected is verified but its version could
+  // not be read, and nothing lower was claimed (that convicted above). A
+  // version check that cannot measure must not report a pass: warn, with load
+  // evidence stated as it is.
+  if (selectedVersionUnread) {
+    const selectedRoot = index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir;
+    reasons.push(
+      `the build OpenClaw selected (${safeForReason(selectedRoot)}) is there, but its version could not be read (no readable version in its package.json or openclaw.plugin.json), so it is not verified against expected ${expected ?? expectedVersion}; ` +
+        (loadedInLiveRoster === true
+          ? 'the running gateway proves the load, not which version loaded'
+          : 'the running gateway boot roster could NOT be read, so the load is not proven either'),
+    );
+    return {
+      ...base, installedVersion: null, installedVersionSource: null, versionUnverified: true,
+      state: 'version-unverified', severity: 'warn', recommendedAction: 'none', reasons,
+    };
+  }
+
   const versionUnverified = effective == null;
   const versionClause = versionUnverified
     ? 'the installed version could not be verified'

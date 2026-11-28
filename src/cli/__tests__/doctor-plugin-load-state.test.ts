@@ -299,17 +299,42 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     expect(r.message).toMatch(expected);
   });
 
+  // jarvis r3: was `pass` "(version unverified)" at 2e119972. A version check
+  // that cannot measure never passes: warn, still never v5.22.1.
   it.each([
-    ['roster unread', null, /installed and enabled \(version unverified\)/],
-    ['roster-proven', [PLUGIN], /roster-confirmed, version unverified\)/],
-  ] as const)('out-of-scan rootDir whose version cannot be read (%s): passes saying "version unverified", never v5.22.1', (_l, roster, expected) => {
+    ['roster unread', null, /version unverified\) — and the running gateway's start-up list could not be read/],
+    ['roster-proven', [PLUGIN], /version unverified\) — the running gateway loaded it/],
+  ] as const)('out-of-scan rootDir whose version cannot be read (%s): WARNS "version unverified", never passes, never v5.22.1', (_l, roster, expected) => {
     writeRealBuild(outOfScan(), '5.22.1');
     fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json');
     migrated(pkgDir(), { recordVersion: '5.22.1', rootDir: outOfScan() });
     const r = renderWithRoster(roster ? [...roster] : null);
-    expect(r.status).toBe('pass');
+    expect(r.status).toBe('warn');
     expect(r.message).toMatch(expected);
     expect(r.message).not.toMatch(/5\.22\.1/);
+  });
+
+  // jarvis r3 rows a/b through the real doctor check (roster unread: the temp
+  // HOME has no gateway log), and row d as the warn.
+  it.each([
+    ['a. corrupt package.json, record 4.0.0 (path gone)', (): void => fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json'), '4.0.0', 'fail'],
+    ['b. no version anywhere, record 4.0.0 (path gone)', (): void => {
+      fs.writeFileSync(path.join(outOfScan(), 'package.json'), JSON.stringify({ main: './dist/index.js' }));
+      fs.writeFileSync(path.join(outOfScan(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
+    }, '4.0.0', 'fail'],
+    ['d. corrupt package.json, record at expected', (): void => fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json'), '5.22.1', 'warn'],
+  ] as const)('checkOpenClawPluginLoadState, verified rootDir with an unreadable version — %s: %s, never pass', async (_l, damage, recordVersion, status) => {
+    writeRealBuild(outOfScan(), '5.22.1');
+    damage();
+    migrated(pkgDir(), { recordVersion, rootDir: outOfScan() });
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expect(r.status).toBe(status);
+    if (status === 'fail') {
+      expect(r.message).toMatch(/regressed to v4\.0\.0 \(older than expected v5\.22\.1\).*the copy OpenClaw uses has no readable version/);
+    } else {
+      expect(r.message).toMatch(/version unverified/);
+      expect(r.message).not.toMatch(/v5\.22\.1/);
+    }
   });
 
   it('renderer: a hand-built healthy verdict with no measured version never prints the expected version', () => {

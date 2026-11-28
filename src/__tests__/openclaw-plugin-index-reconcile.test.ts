@@ -283,8 +283,12 @@ describe('#260 r2 — malformed and stale index input', () => {
   });
 
   it('positive control (Sol 3): the index\'s own selection (rootDir) verified as a real build lets the ordinary rules decide', () => {
-    const input = base({ indexInstallPathExists: false, indexRootDirExists: true, onDiskVersion: '5.22.1' });
+    // jarvis r3: the selected build's own version is now part of the input
+    // here; without it the selection's version is unread, which never passes.
+    const input = base({ indexInstallPathExists: false, indexRootDirExists: true, onDiskVersion: '5.22.1', selectedVersion: '5.22.1' });
     expect(reconcilePluginState(input)).toMatchObject({ state: 'healthy', severity: 'ok', indexPathMissing: false });
+    expect(reconcilePluginState({ ...input, selectedVersion: null }))
+      .toMatchObject({ state: 'version-unverified', severity: 'warn', recommendedAction: 'none', versionUnverified: true, indexPathMissing: false });
     // …and a rootDir that is NOT a build is no selection proof.
     expect(reconcilePluginState({ ...input, indexRootDirExists: false })).toMatchObject({ state: 'load-unproven', indexPathMissing: true });
     expect(reconcilePluginState({ ...input, indexRootDirExists: null })).toMatchObject({ state: 'load-unproven', indexPathMissing: true });

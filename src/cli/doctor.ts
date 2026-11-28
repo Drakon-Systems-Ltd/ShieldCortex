@@ -9258,9 +9258,29 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'fail',
-        message: `realtime plugin regressed to v${verdict.installedVersion ?? verdict.onDiskVersion ?? verdict.indexVersion} (older than expected v${verdict.expectedVersion}) — running stale, refuse the downgrade`,
+        message: `realtime plugin regressed to v${verdict.installedVersion ?? verdict.onDiskVersion ?? verdict.indexVersion} (older than expected v${verdict.expectedVersion}) — running stale, refuse the downgrade` +
+          // jarvis r3: that version is another record's claim; the copy
+          // OpenClaw uses had no readable version of its own.
+          (verdict.versionUnverified === true
+            ? `. ${verdict.installedVersionSource === 'disk' ? 'A build on disk' : "OpenClaw's install record"} says that; the copy OpenClaw uses has no readable version`
+            : ''),
         fix,
         // The exact line the #221 operator chased for five days.
+        needsOpenClawCli: { subcommand: 'plugins' },
+      };
+    case 'version-unverified':
+      // #260 (jarvis r3): the selected build is real but its version could not
+      // be read. A version check that cannot measure must not pass — warn, and
+      // never print the expected version as if it had been read.
+      return {
+        label,
+        status: 'warn',
+        message:
+          'realtime plugin installed and enabled, but the version of the copy OpenClaw uses could not be read (version unverified)' +
+          (verdict.loadedInLiveRoster === true
+            ? ' — the running gateway loaded it; which version is not confirmed'
+            : ' — and the running gateway\'s start-up list could not be read, so the load is not confirmed either'),
+        fix: 'Check it: `shieldcortex openclaw status`. If that copy\'s package.json is damaged, reinstall the plugin: `' + cliRealtimeInstallCommand() + '`',
         needsOpenClawCli: { subcommand: 'plugins' },
       };
     case 'conflicted-metadata':

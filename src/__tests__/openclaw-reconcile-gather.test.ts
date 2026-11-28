@@ -9,6 +9,7 @@ import {
   readPluginInstallIndexState,
   reconcilePluginState,
 } from '../integrations/openclaw-plugin-index.js';
+import { renderPluginLoadVerdict } from '../cli/doctor.js';
 
 /**
  * Disk-level tests for the reconciler's input gathering — fully isolated in a
@@ -778,7 +779,7 @@ describe('#260 r3 — the selected build is measured, not assumed', () => {
   it.each([
     ['roster unread', null],
     ['roster-proven', [PLUGIN]],
-  ] as const)('verified rootDir whose version cannot be read (%s) ⇒ healthy, versionUnverified — a scan build elsewhere at 4.0.0 does not stand in', (_l, roster) => {
+  ] as const)('verified rootDir whose version cannot be read (%s) + a scan build elsewhere at 4.0.0 ⇒ version-regressed / fail, as on main (jarvis r3)', (_l, roster) => {
     writeConfig(true, true);
     writeRealBuild(outOfScan(), '5.22.1');
     fs.writeFileSync(path.join(outOfScan(), 'package.json'), JSON.stringify({ main: './dist/index.js', version: 'not-a-version' }));
@@ -787,7 +788,11 @@ describe('#260 r3 — the selected build is measured, not assumed', () => {
     const input = gather(roster ? [...roster] : null);
     expect(input).toMatchObject({ indexRootDirExists: true, selectedVersion: null, onDiskVersion: '4.0.0' });
     const verdict = reconcilePluginState(input);
-    expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', versionUnverified: true, installedVersion: null });
+    // Was `healthy / ok` at 2e119972 — the fail-open jarvis r3 blocked.
+    expect(verdict).toMatchObject({
+      state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned',
+      versionUnverified: true, installedVersion: '4.0.0', installedVersionSource: 'disk',
+    });
     expect(verdict.reasons.join(' ')).not.toMatch(/versions agree/);
   });
 
@@ -859,6 +864,92 @@ describe('#260 r3 — the selected build is measured, not assumed', () => {
     expect(input).toMatchObject({ indexInstallPathExists: false, onDiskVersion: '5.22.1' });
     expect(input.indexRootDirExists).toBeNull();
     expect(reconcilePluginState(input)).toMatchObject(expected);
+  });
+});
+
+/**
+ * #260 jarvis r3 (BLOCKING) — the selected build is verified but its version
+ * cannot be read. A version check that cannot measure never reports a pass:
+ * a lower version claimed by the install record or the disk scan fails as on
+ * main; otherwise the verdict is `version-unverified` (warn). Both index
+ * layouts, roster unread and roster proven, through gather → reconcile →
+ * doctor's renderer.
+ */
+describe('#260 jarvis r3 — unreadable selected version is never a pass', () => {
+  const gone = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'reaped', PKG_SUBPATH);
+  const outOfScan = (): string => path.join(home, 'src', 'realtime');
+  const LAYOUTS = [
+    ['legacy installed_plugin_index', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeIndex(r)],
+    ['config_machine_state', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeMachineStateIndex(r)],
+  ] as const;
+  const ROSTERS = [['roster unread', null], ['roster-proven', [PLUGIN]]] as const;
+  const corrupt = (): void => fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json');
+  const noVersion = (): void => {
+    fs.writeFileSync(path.join(outOfScan(), 'package.json'), JSON.stringify({ name: '@drakon-systems/shieldcortex-realtime', main: './dist/index.js' }));
+    fs.writeFileSync(path.join(outOfScan(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
+  };
+  type Row = {
+    id: string;
+    damage: () => void;
+    record: { version: string; installPath: () => string } | null;
+    scanAt: string | null;
+    expect: 'fail' | 'warn';
+    source?: 'index-record' | 'disk';
+  };
+  const ROWS: Row[] = [
+    { id: 'a. corrupt package.json, record says 4.0.0 (record path gone)', damage: corrupt, record: { version: '4.0.0', installPath: gone }, scanAt: null, expect: 'fail', source: 'index-record' },
+    { id: 'b. no version anywhere, record says 4.0.0 (record path gone)', damage: noVersion, record: { version: '4.0.0', installPath: gone }, scanAt: null, expect: 'fail', source: 'index-record' },
+    { id: 'c. corrupt package.json, disk scan holds 4.0.0 elsewhere', damage: corrupt, record: { version: '5.22.1', installPath: gone }, scanAt: '4.0.0', expect: 'fail', source: 'disk' },
+    { id: 'd1. corrupt package.json, record at expected, nothing on disk', damage: corrupt, record: { version: '5.22.1', installPath: gone }, scanAt: null, expect: 'warn' },
+    { id: 'd2. corrupt package.json, no record, scan at expected', damage: corrupt, record: null, scanAt: '5.22.1', expect: 'warn' },
+    { id: 'd3. no version anywhere, record NEWER than expected (5.23.0), scan at expected', damage: noVersion, record: { version: '5.23.0', installPath: gone }, scanAt: '5.22.1', expect: 'warn' },
+  ];
+  const cases = ROWS.flatMap((r) => LAYOUTS.flatMap(([layout, write]) => ROSTERS.map(([rl, roster]) => [`${r.id} — ${layout}, ${rl}`, r, write, roster] as const)));
+
+  it.each(cases)('%s', (_title, r, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(outOfScan(), '5.22.1');
+    r.damage();
+    if (r.scanAt) writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-scan', r.scanAt), r.scanAt);
+    write({
+      installRecords: r.record ? { [PLUGIN]: { source: 'npm', version: r.record.version, installPath: r.record.installPath() } } : {},
+      plugins: [upstreamEntry(outOfScan())],
+    });
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => (roster ? [...roster] : null) });
+    expect(input).toMatchObject({ indexRootDirExists: true, selectedVersion: null, onDiskVersion: r.scanAt });
+    const verdict = reconcilePluginState(input);
+    const rendered = renderPluginLoadVerdict(verdict);
+    expect(verdict.versionUnverified).toBe(true);
+    expect(verdict.severity).not.toBe('ok');
+    expect(rendered.status).not.toBe('pass');
+    if (r.expect === 'fail') {
+      expect(verdict).toMatchObject({
+        state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned',
+        installedVersion: '4.0.0', installedVersionSource: r.source,
+      });
+      expect(verdict.reasons.join(' ')).toMatch(/the build OpenClaw selected has no readable version, and .*v4\.0\.0, older than expected 5\.22\.1/);
+      expect(rendered.status).toBe('fail');
+      expect(rendered.message).toMatch(/regressed to v4\.0\.0 \(older than expected v5\.22\.1\).*the copy OpenClaw uses has no readable version/);
+    } else {
+      expect(verdict).toMatchObject({
+        state: 'version-unverified', severity: 'warn', recommendedAction: 'none',
+        installedVersion: null, installedVersionSource: null, indexPathMissing: false,
+      });
+      expect(rendered.status).toBe('warn');
+      expect(rendered.message).toMatch(/version unverified/);
+      // Never the expected version printed as if measured.
+      expect(rendered.message).not.toMatch(/v5\.22\.1/);
+      expect(rendered.message).toMatch(roster ? /the running gateway loaded it/ : /load is not confirmed either/);
+    }
+  });
+
+  it('control: the same verified rootDir with a READABLE version at expected still passes (the warn is only for the unread version)', () => {
+    writeConfig(true, true);
+    writeRealBuild(outOfScan(), '5.22.1');
+    writeMachineStateIndex({ installRecords: { [PLUGIN]: { source: 'npm', version: '4.0.0', installPath: gone() } }, plugins: [upstreamEntry(outOfScan())] });
+    const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => [PLUGIN] }));
+    expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', installedVersion: '5.22.1', installedVersionSource: 'selected-build' });
+    expect(renderPluginLoadVerdict(verdict).status).toBe('pass');
   });
 });
 
