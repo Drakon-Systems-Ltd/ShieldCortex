@@ -9258,12 +9258,13 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'fail',
-        message: `realtime plugin regressed to v${verdict.installedVersion ?? verdict.onDiskVersion ?? verdict.indexVersion} (older than expected v${verdict.expectedVersion}) — running stale, refuse the downgrade` +
-          // jarvis r3: that version is another record's claim; the copy
-          // OpenClaw uses had no readable version of its own.
-          (verdict.versionUnverified === true
-            ? `. ${verdict.installedVersionSource === 'disk' ? 'A build on disk' : "OpenClaw's install record"} says that; the copy OpenClaw uses has no readable version`
-            : ''),
+        // Case r5: an unverified regression is a claim, not a measurement —
+        // say whose claim it is and that the running version is unknown. Only
+        // a measured regression says "running stale".
+        message: verdict.versionUnverified === true
+          ? `realtime plugin: ${verdict.installedVersionSource === 'disk' ? 'the build on disk is' : "OpenClaw's install record says"} v${verdict.installedVersion ?? verdict.onDiskVersion ?? verdict.indexVersion}, ` +
+            `older than expected v${verdict.expectedVersion}; running version unknown (nothing measured the copy OpenClaw uses) — refuse the downgrade`
+          : `realtime plugin regressed to v${verdict.installedVersion ?? verdict.onDiskVersion ?? verdict.indexVersion} (older than expected v${verdict.expectedVersion}) — running stale, refuse the downgrade`,
         fix,
         // The exact line the #221 operator chased for five days.
         needsOpenClawCli: { subcommand: 'plugins' },
