@@ -10,12 +10,15 @@
  *  - Astra P2 (managed pins): a failed managed-pin heal makes the command exit
  *    non-zero, even when nothing else in the repair has work to do.
  *
- * Nothing here spawns `openclaw` or `npm`: every refusal below happens before
- * the first child, and the publication check is answered through its seam.
+ * Nothing here spawns `openclaw` or `npm`: the publication check is answered
+ * through its seam, and every repair gets a recording no-op launcher for the
+ * managed-pin heal (#1179) — refusing earlier is not what keeps a case off
+ * the host's `openclaw`. The runQuiet case below runs `node` on purpose.
  */
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import type { SpawnSyncReturns } from 'child_process';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { repairOpenClawPlugin, __setRealtimePublishCheckForTest, confirmRealtimePluginPublishedSync } from '../openclaw.js';
 import { __runQuietForTest } from '../../cli/update.js';
@@ -82,13 +85,42 @@ const recordedNpmInstall = (version: string, extra: Record<string, unknown> = {}
 };
 const said = (): string => out.join('\n');
 
+/**
+ * #1179: what the managed-pin heal launches, for every repair here: a recording
+ * fake with no `openclaw` (`resolveOpenClawBin` → null), never the real
+ * `which openclaw` and runner. A heal that gets past its refusals stops at
+ * "`openclaw` is not on PATH", after its manifest writes.
+ */
+const launch = {
+  lookups: 0,
+  runs: [] as string[][],
+  deps: {
+    resolveOpenClawBin: (): string | null => {
+      launch.lookups += 1;
+      return null;
+    },
+    runOpenClaw: (_bin: string, args: string[]): SpawnSyncReturns<string> => {
+      launch.runs.push(args);
+      return { pid: 0, output: [], stdout: '', stderr: '', status: 1, signal: null };
+    },
+  },
+};
+beforeEach(() => {
+  launch.lookups = 0;
+  launch.runs = [];
+});
+afterEach(() => {
+  // Reads only the fake, so it is independent of the cleanup hook above.
+  expect(launch.runs).toEqual([]);
+});
+
 describe('duplicate repair — extension-only branch is preflighted too', () => {
   it('the extension copy IS the only install (no record names another): nothing deleted, exit 1', async () => {
     const ext = extensionCopy(SELF());
     let asked = false;
     __setRealtimePublishCheckForTest(() => { asked = true; return { ok: true }; });
 
-    await repairOpenClawPlugin();
+    await repairOpenClawPlugin(launch.deps);
 
     expect(fs.existsSync(ext)).toBe(true);
     expect(said()).toMatch(/Not repairing: .*Nothing was changed/);
@@ -102,7 +134,7 @@ describe('duplicate repair — extension-only branch is preflighted too', () => 
     const ext = extensionCopy('999.0.0');
     __setRealtimePublishCheckForTest(() => ({ ok: true }));
 
-    await repairOpenClawPlugin();
+    await repairOpenClawPlugin(launch.deps);
 
     expect(fs.existsSync(ext)).toBe(true);
     expect(said()).toMatch(/holds v999\.0\.0, newer than this CLI/);
@@ -115,7 +147,7 @@ describe('duplicate repair — extension-only branch is preflighted too', () => 
     writeJson('openclaw.json', { plugins: { load: { paths: [ext] } } });
     __setRealtimePublishCheckForTest(() => ({ ok: true }));
 
-    await repairOpenClawPlugin();
+    await repairOpenClawPlugin(launch.deps);
 
     expect(fs.existsSync(ext)).toBe(true);
     expect(said()).toMatch(/Not repairing: the plugin is a linked install/);
@@ -128,7 +160,7 @@ describe('duplicate repair — extension-only branch is preflighted too', () => 
     fs.writeFileSync(path.join(home, '.openclaw', 'openclaw.json'), '{ json5: true, }');
     __setRealtimePublishCheckForTest(() => ({ ok: true }));
 
-    await repairOpenClawPlugin();
+    await repairOpenClawPlugin(launch.deps);
 
     expect(fs.existsSync(ext)).toBe(true);
     expect(said()).toMatch(/could not tell whether the plugin is a linked install/);
@@ -140,7 +172,7 @@ describe('duplicate repair — extension-only branch is preflighted too', () => 
     const ext = extensionCopy(SELF());
     __setRealtimePublishCheckForTest((pin) => ({ ok: false, reason: `npm has no ${PKG}@${pin} yet` }));
 
-    await repairOpenClawPlugin();
+    await repairOpenClawPlugin(launch.deps);
 
     expect(fs.existsSync(ext)).toBe(true);
     expect(said()).toMatch(/Not repairing: npm has no .* yet\. Nothing was changed/);
@@ -152,7 +184,7 @@ describe('duplicate repair — extension-only branch is preflighted too', () => 
     const ext = extensionCopy(SELF());
     __setRealtimePublishCheckForTest(() => ({ ok: true }));
 
-    await repairOpenClawPlugin();
+    await repairOpenClawPlugin(launch.deps);
 
     expect(fs.existsSync(ext)).toBe(false);
     expect(fs.existsSync(live)).toBe(true);
@@ -165,7 +197,7 @@ describe('duplicate repair — extension-only branch is preflighted too', () => 
     const ext = extensionCopy('0.0.1');
     __setRealtimePublishCheckForTest(() => ({ ok: true }));
 
-    await repairOpenClawPlugin();
+    await repairOpenClawPlugin(launch.deps);
 
     expect(fs.existsSync(ext)).toBe(false);
     expect(said()).not.toMatch(/Repair complete\./);
@@ -182,7 +214,7 @@ describe('duplicate repair — extension-only branch is preflighted too', () => 
     __setRealtimePublishCheckForTest(() => ({ ok: true }));
     fs.chmodSync(extensions, 0o555);
     try {
-      await repairOpenClawPlugin();
+      await repairOpenClawPlugin(launch.deps);
     } finally {
       fs.chmodSync(extensions, 0o755);
     }
@@ -200,7 +232,7 @@ describe('duplicate repair — extension-only branch is preflighted too', () => 
     fs.writeFileSync(path.join(ext, 'openclaw.plugin.json'), '{ not json');
     __setRealtimePublishCheckForTest(() => ({ ok: true }));
 
-    await repairOpenClawPlugin();
+    await repairOpenClawPlugin(launch.deps);
 
     expect(fs.existsSync(ext)).toBe(true);
     expect(said()).toMatch(/Not repairing: could not read the copy at .* that the install would remove/);
@@ -218,17 +250,34 @@ describe('managed-pin heal — a failure reaches the exit code', () => {
     fs.writeFileSync(path.join(checkout, 'package.json'), JSON.stringify({ name: PKG, version: SELF() }));
     writeJson('openclaw.json', { plugins: { load: { paths: [checkout] } } });
 
-    await repairOpenClawPlugin();
+    await repairOpenClawPlugin(launch.deps);
 
     expect(said()).toMatch(/✗ Realtime plugin left alone — the plugin is a linked install/);
     expect(said()).toMatch(/No duplicate shieldcortex-realtime installs detected/);
     expect(process.exitCode).toBe(1);
   });
 
+  it('#1179: a heal that gets past every refusal asks the INJECTED lookup for `openclaw`, never the real one', async () => {
+    // A recorded, unlinked install at this CLI's version whose managed project
+    // has a drifted peer pin: nothing refuses, so the heal rewrites the
+    // manifest and then looks for `openclaw` to reinstall.
+    const live = recordedNpmInstall(SELF(), { dependencies: { [PKG]: SELF(), hono: '4.12.18' }, overrides: { hono: '4.12.21' } });
+    const projectRoot = path.resolve(live, '..', '..', '..');
+
+    await repairOpenClawPlugin(launch.deps);
+
+    expect(launch.lookups).toBe(1);
+    expect(launch.runs).toEqual([]);
+    expect(said()).toMatch(/✗ Manifest reconciled, but `openclaw` is not on PATH/);
+    expect((JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf-8')) as { dependencies: unknown }).dependencies)
+      .toEqual({ [PKG]: SELF() });
+    expect(process.exitCode).toBe(1);
+  });
+
   it('control: a clean host with nothing to heal and no duplicates exits 0', async () => {
     recordedNpmInstall(SELF());
 
-    await repairOpenClawPlugin();
+    await repairOpenClawPlugin(launch.deps);
 
     expect(said()).toMatch(/No duplicate shieldcortex-realtime installs detected/);
     expect(process.exitCode).not.toBe(1);

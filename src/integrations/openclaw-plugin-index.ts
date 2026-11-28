@@ -744,6 +744,18 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
       );
       return { ...base, state: 'enabled-not-installed', severity: 'fail', recommendedAction: 'install', reasons };
     }
+    // #1179: config does not claim the plugin, but "not installed" is still a
+    // claim about the install records, and the main one is present and was
+    // never read. The ok below would rest on that unread record, so this is
+    // the same diagnostic gap as 0b: warn, no action — an explicit
+    // enabled:false included (an installed copy found elsewhere still reaches
+    // the disabled-by-operator warn below). With NO index at all, the ok stands.
+    if (indexUnreadable) {
+      reasons.push("OpenClaw's plugin install index is present but could not be read, and no build was found where ShieldCortex looks — whether the plugin is installed is UNKNOWN, not absent, so it cannot be reported as not installed");
+      if (config.enabled === false) reasons.push(`openclaw.json explicitly disables it (plugins.entries.${pluginId}.enabled = false)`);
+      if (loadedInLiveRoster === true) reasons.push('the RUNNING gateway has the plugin loaded; openclaw.json does not enable it, so what loads at the next restart follows that');
+      return { ...base, state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
+    }
     reasons.push('plugin not installed on this host (no config, installs.json, index record, or on-disk build)');
     return { ...base, state: 'not-installed', severity: 'ok', recommendedAction: 'install', reasons };
   }

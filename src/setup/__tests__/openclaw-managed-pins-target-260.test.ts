@@ -414,6 +414,18 @@ describe.each(['new', 'legacy'] as const)('#260 r13: managed-pin repair rewrites
     return result;
   }
   const atTmp = (p: string): boolean => p.endsWith('.tmp');
+  /**
+   * #1179: a refusal AFTER the safety backup was written names that backup and
+   * never says "nothing was changed" — the backup is a file this repair wrote.
+   */
+  const refusedAfterBackup = (root: string, message: string, original: unknown): void => {
+    const found = backups(root);
+    expect(found).toHaveLength(1);
+    expect(message).toMatch(/package\.json changed while this repair was running, so it was not rewritten\. A safety backup of the contents read earlier was written first and is left at /);
+    expect(message).toContain(found[0]);
+    expect(message).not.toMatch(/nothing was changed/i);
+    expect(JSON.parse(fs.readFileSync(path.join(root, found[0]), 'utf-8'))).toEqual(original);
+  };
   /** A different regular file (new inode) renamed over the manifest. */
   const replaceWithNewInode = (m: string): void => {
     const side = `${m}.fixture-replacement`;
@@ -427,11 +439,12 @@ describe.each(['new', 'legacy'] as const)('#260 r13: managed-pin repair rewrites
     baseConfig(selected.dir);
     const manifest = path.join(selected.root, 'package.json');
     const inodeBefore = fs.lstatSync(manifest).ino;
+    const original: unknown = JSON.parse(fs.readFileSync(manifest, 'utf-8'));
 
     const result = await raceAt(selected.root, atTmp, replaceWithNewInode);
 
     expect(result.status).toBe('failed');
-    expect(result.message).toMatch(/package\.json changed while this repair was running; nothing was changed/);
+    refusedAfterBackup(selected.root, result.message, original);
     expect(fs.lstatSync(manifest).ino).not.toBe(inodeBefore);
     expect(fs.readFileSync(manifest, 'utf-8')).toBe(REPLACEMENT);
     expect(tmps(selected.root)).toEqual([]);
@@ -443,11 +456,12 @@ describe.each(['new', 'legacy'] as const)('#260 r13: managed-pin repair rewrites
     baseConfig(selected.dir);
     const manifest = path.join(selected.root, 'package.json');
     const inodeBefore = fs.lstatSync(manifest).ino;
+    const original: unknown = JSON.parse(fs.readFileSync(manifest, 'utf-8'));
 
     const result = await raceAt(selected.root, atTmp, (m) => fs.writeFileSync(m, REPLACEMENT));
 
     expect(result.status).toBe('failed');
-    expect(result.message).toMatch(/package\.json changed while this repair was running; nothing was changed/);
+    refusedAfterBackup(selected.root, result.message, original);
     expect(fs.lstatSync(manifest).ino).toBe(inodeBefore);
     expect(fs.readFileSync(manifest, 'utf-8')).toBe(REPLACEMENT);
     expect(tmps(selected.root)).toEqual([]);
@@ -477,7 +491,7 @@ describe.each(['new', 'legacy'] as const)('#260 r13: managed-pin repair rewrites
     });
 
     expect(result.status).toBe('failed');
-    expect(result.message).toMatch(/package\.json changed while this repair was running; nothing was changed/);
+    refusedAfterBackup(selected.root, result.message, JSON.parse(original));
     expect(fs.readFileSync(manifest, 'utf-8')).toBe(sameSize);
     expect(tmps(selected.root)).toEqual([]);
   });
