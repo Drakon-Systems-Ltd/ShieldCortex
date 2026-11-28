@@ -1755,9 +1755,14 @@ export function canonicalProjectDir(home: string): string | null {
  *  - the install index is readable and names the kept dir unambiguously: its
  *    selection (`rootDir`) and its install record (`installPath`) do not point
  *    at different places;
- *  - the kept copy is a VERIFIED build (manifest naming the plugin + an entry
- *    point) — a stale selection may be the leftover, and another dir the only
- *    intact copy;
+ *  - the kept dir is bound to the build PHYSICALLY (Case 6095369958): the
+ *    selected path's real location sits inside the real projects dir, its
+ *    first segment there is the kept dir, the raw index path names that same
+ *    dir, and both index paths (when both are recorded) resolve to it. A
+ *    selection outside the projects dir cannot be bound, so it refuses;
+ *  - the kept copy, at that real location, is a VERIFIED build (manifest
+ *    naming the plugin + an entry point) — a stale selection may be the
+ *    leftover, and another dir the only intact copy;
  *  - the kept build's exact version can be read;
  *  - every other dir is safe to lose: it holds no copy of the package at all,
  *    or a copy whose exact version reads as older than or equal to the kept
@@ -1805,34 +1810,78 @@ export function assessDuplicateProjectDirs(
   const rootDir = typeof entry?.rootDir === 'string' && entry.rootDir ? entry.rootDir : null;
   const rec = index.installRecords?.[pluginId]?.installPath;
   const recordPath = typeof rec === 'string' && rec ? rec : null;
-  const rootProj = projectDirNameFromPath(rootDir);
-  const recProj = projectDirNameFromPath(recordPath);
-  if (rootDir && recordPath && rootProj !== recProj) {
-    return refuse(`the install index selects ${safeForReason(rootDir)} but its install record names ${safeForReason(recordPath)} — which copy is live is ambiguous`);
+  // The index's selection first, else its install record.
+  const keepBuild = rootDir ?? recordPath;
+  if (!keepBuild) return refuse('the authoritative SQLite index does not resolve a live install dir — cannot safely tell which to keep');
+
+  // Case 6095369958: the dir kept must be, physically, the one holding the
+  // build that is verified below. A raw index path (`..`, a symlink, a
+  // symlinked HOME) can name one project dir while the filesystem resolves it
+  // into another. So the kept project is derived ONLY from the build's real
+  // location under the real projects dir; the same real path is verified; and
+  // anything that cannot be bound that way refuses.
+  let realProjects: string;
+  try {
+    realProjects = fs.realpathSync(projects);
+  } catch (err) {
+    return refuse(`the real location of the projects dir cannot be resolved (${(err as NodeJS.ErrnoException)?.code ?? 'error'})`);
   }
-  const keep = rootProj ?? recProj;
-  if (!keep) return refuse('the authoritative SQLite index does not resolve a live install dir — cannot safely tell which to keep');
+  type Bound = { real: string; name: string; raw: string | null } | { why: string };
+  const bind = (p: string): Bound => {
+    if (!path.isAbsolute(p)) return { why: `${safeForReason(p)} is not an absolute path` };
+    let real: string;
+    try {
+      real = fs.realpathSync(p);
+    } catch (err) {
+      return { why: `the real location of ${safeForReason(p)} cannot be resolved (${(err as NodeJS.ErrnoException)?.code ?? 'error'})` };
+    }
+    const rel = path.relative(realProjects, real);
+    if (!rel || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) {
+      return { why: `${safeForReason(p)} resolves to ${safeForReason(real)}, which is not inside the projects dir, so it cannot be bound to a project dir` };
+    }
+    return { real, name: rel.split(path.sep)[0], raw: projectDirNameFromPath(p) };
+  };
+  const namesDir = (raw: string | null): string => (raw ? `names project dir ${safeForReason(raw)}` : 'names no project dir');
+  const sel = bind(keepBuild);
+  if (rootDir && recordPath) {
+    const other = bind(recordPath);
+    if (('why' in sel) !== ('why' in other) || ('name' in sel && 'name' in other && sel.name !== other.name)) {
+      return refuse(`the install index selects ${safeForReason(rootDir)} but its install record names ${safeForReason(recordPath)}, and they do not resolve to the same project dir — which copy is live is ambiguous`);
+    }
+    if ('name' in other && other.raw !== other.name) {
+      return refuse(`the install record path ${safeForReason(recordPath)} ${namesDir(other.raw)}, but the build there physically lives in ${safeForReason(other.name)}`);
+    }
+  }
+  if ('why' in sel) return refuse(`the copy the index selects cannot be bound to a project dir: ${sel.why}`);
+  const keep = sel.name;
+  const realKeep = sel.real;
+  if (sel.raw !== keep) {
+    return refuse(`the index path ${safeForReason(keepBuild)} ${namesDir(sel.raw)}, but the build there physically lives in ${safeForReason(keep)}`, { keep });
+  }
   if (!dirs.includes(keep)) {
     return refuse(`the index's live install dir (${safeForReason(keep)}) is not present on disk — cannot safely tell which to keep`);
   }
-  const keepBuild = (rootProj ? rootDir : recordPath) as string;
-  if (verifiedPluginBuildAt(keepBuild, pluginId) !== true) {
+  const realKeepDir = path.join(realProjects, keep);
+  let keepDirReal: string | null = null;
+  try {
+    keepDirReal = fs.realpathSync(path.join(projects, keep));
+  } catch {
+    keepDirReal = null;
+  }
+  if (keepDirReal !== realKeepDir) {
+    return refuse(`the kept project dir ${safeForReason(keep)} does not resolve to itself (it is an alias, or cannot be resolved)`, { keep });
+  }
+  // Verification runs on the SAME real path the kept project was derived from.
+  if (verifiedPluginBuildAt(realKeep, pluginId) !== true) {
     return refuse(`the copy the index selects (${safeForReason(keepBuild)}) is not a verified plugin build — it may be the stale one, and another dir the only intact copy`, { keep });
   }
-  const keepVersion = readExactBuildVersion(keepBuild);
+  const keepVersion = readExactBuildVersion(realKeep);
   if (!keepVersion) {
     return refuse(`the version of the kept build (${safeForReason(keepBuild)}) cannot be read, so no other copy can be shown to be older`, { keep });
   }
-  // jarvis r3 (non-blocking, folded): the kept build or its project dir may be
-  // a symlink into another project dir; pruning that dir would delete the
-  // only intact copy. Resolve both, and refuse any dir that overlaps them.
-  let keptReal: string[];
-  try {
-    keptReal = [fs.realpathSync(keepBuild), fs.realpathSync(path.join(projects, keep))];
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    return refuse(`the real location of the kept build (${safeForReason(keepBuild)}) cannot be resolved (${code ?? 'error'}), so no other dir can be shown not to hold it`, { keep, keepVersion });
-  }
+  // jarvis r3: no other dir may be, contain, or sit inside the kept build or
+  // its project dir — compared on the canonical values bound above.
+  const keptReal = [realKeep, realKeepDir];
   const overlaps = (a: string, b: string): boolean =>
     a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep);
 
@@ -1861,7 +1910,7 @@ export function assessDuplicateProjectDirs(
       continue;
     }
     if (keptReal.some((k) => overlaps(real, k))) {
-      unsafe.push(`${safeForReason(d)} holds the kept build itself (the kept path resolves into it through a symlink)`);
+      unsafe.push(`${safeForReason(d)} holds the kept build itself (it resolves to the same place as the kept build or its project dir)`);
       continue;
     }
     const copy = readBuildVersionState(path.join(projectDir, 'node_modules', ...packageName.split('/')));
