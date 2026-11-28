@@ -305,8 +305,9 @@ export interface ReconcileVerdict {
    * selected copy holds no build (load proven by the running gateway only),
    * no layer recorded a version at all, or (jarvis r3) the verified selected
    * build's own version could not be read. Never on `healthy` (r4c): the
-   * verdict is `version-unverified` (warn), or `version-regressed` when the
-   * install record or the disk scan claims an older version.
+   * verdict is `version-unverified` (warn), `load-unproven` (warn), or
+   * `version-regressed` when the claim main would weigh — the disk scan's
+   * build, else the install record (Case r5) — is older than expected.
    * Renderers say "version unverified" — never the expected version, and
    * never the newest build a disk scan found. Absent on every other verdict.
    */
@@ -344,6 +345,28 @@ function coerce(v: string | null | undefined): string | null {
   if (!v || typeof v !== 'string') return null;
   const c = semver.valid(v) ?? semver.valid(semver.coerce(v) ?? '');
   return c ?? null;
+}
+
+/**
+ * Case r5 (#260): the version claim weighed when nothing measured the copy a
+ * verdict is about — main's precedence, the disk scan's build if there is
+ * one, else OpenClaw's install record. Returned only when that ONE claim is
+ * below expected (it convicts as `version-regressed`, flagged
+ * `versionUnverified`); otherwise null — a claim at or above expected is not
+ * a measurement of what runs, and a stale record is never weighed against a
+ * build the scan did find.
+ */
+function unmeasuredClaim(
+  scanVersion: string | null,
+  recordVersion: string | null,
+  expected: string | null,
+): [string, 'disk' | 'index-record'] | null {
+  const claim: [string, 'disk' | 'index-record'] | null = scanVersion
+    ? [scanVersion, 'disk']
+    : recordVersion
+      ? [recordVersion, 'index-record']
+      : null;
+  return claim && expected && semver.lt(claim[0], expected) ? claim : null;
 }
 
 /**
@@ -458,8 +481,9 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   //   - verified selection ⇒ the version read out of that build. Unreadable ⇒
   //     none: the disk scan's newest build and the record's version are other
   //     copies' claims, and the expected pin is not a measurement at all.
-  //   - missing selected build ⇒ the scan's build, for the downgrade check
-  //     only (a fail is never a false pass; the pass below claims no version).
+  //   - missing selected build ⇒ nothing measured. Only main's claim (the
+  //     scan's build, else the record) below expected is kept, to convict;
+  //     otherwise no version is claimed (Case r5).
   //   - not checked ⇒ on-disk, else the index record — but never a record
   //     whose own directory is gone: that says nothing about what would run.
   // The live roster proves a load, never which version loaded.
@@ -484,37 +508,26 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
       installedVersionSource = effective ? 'index-record' : null;
     }
     // jarvis r3: still unread. Another copy's claim cannot vouch for the
-    // selected build, but a LOWER one is still evidence of a stale install, and
-    // main convicted on it. The lowest claim below expected convicts as
-    // `version-regressed`; anything else ends in `version-unverified` (warn) at
-    // the end of this function — never a pass.
+    // selected build. Case r5: it convicts only with main's precedence — the
+    // disk scan's build when there is one, else the install record (main:
+    // `coerce(onDiskVersion) ?? coerce(indexVersion)`) — and only when that
+    // one claim is below expected. A stale record below expected beside a
+    // current build on disk measures nothing and convicts nothing: it ends in
+    // `version-unverified` (warn) at the end of this function — never a pass.
     if (!effective) {
       selectedVersionUnread = true;
-      const exp = coerce(expectedVersion);
-      const claims: Array<[string | null, 'index-record' | 'disk']> = [
-        [coerce(indexVersion), 'index-record'],
-        [scanVersion, 'disk'],
-      ];
-      for (const [v, src] of claims) {
-        if (v && exp && semver.lt(v, exp) && (!effective || semver.lt(v, effective))) {
-          effective = v;
-          installedVersionSource = src;
-        }
-      }
+      const claim = unmeasuredClaim(scanVersion, coerce(indexVersion), coerce(expectedVersion));
+      if (claim) [effective, installedVersionSource] = claim;
     }
   } else if (indexPathMissing) {
-    // r4c (owner ruling on jarvis r3): the copy the index points at holds no
-    // build, so nothing here measures what runs. A claim below expected —
-    // the scan's build or the install record — still convicts, as on main;
-    // the lowest one is named. Anything else is never a pass (see below).
-    effective = scanVersion;
-    installedVersionSource = effective ? 'disk' : null;
-    const exp = coerce(expectedVersion);
-    const rec = coerce(indexVersion);
-    if (rec && exp && semver.lt(rec, exp) && !(effective && semver.lt(effective, rec))) {
-      effective = rec;
-      installedVersionSource = 'index-record';
-    }
+    // The copy the index points at holds no build, so nothing here measures
+    // what runs. Case r5: main's precedence decides which claim is weighed —
+    // the disk scan's build, else the install record — and only a claim below
+    // expected convicts (so a record of 4.0.0 with no build anywhere still
+    // fails, as on main). A current build on disk is not proof either: control
+    // reaches the missing-build rule below, which is never a pass.
+    const claim = unmeasuredClaim(scanVersion, coerce(indexVersion), coerce(expectedVersion));
+    [effective, installedVersionSource] = claim ?? [null, null];
   } else {
     effective = scanVersion ?? (indexRecordPathGone ? null : coerce(indexVersion));
     installedVersionSource = scanVersion ? 'disk' : effective ? 'index-record' : null;
@@ -775,9 +788,11 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   //   - The running gateway provably loaded it ⇒ load is proven, but WHICH
   //     version loaded is not known and is not claimed — not even when a
   //     build sits elsewhere on disk (Sol r2): the scan's newest build is not
-  //     proven to be the copy that process loaded. r4c (owner ruling on jarvis
-  //     r3): an unmeasured version is never a pass, so this is
-  //     `version-unverified` (warn); a lower claim already failed above.
+  //     proven to be the copy that process loaded. An unmeasured version is
+  //     never a pass, so this is `version-unverified` (warn), no action. A
+  //     claim below expected (main's precedence, Case r5) already failed above;
+  //     a stale record below expected beside a current build on disk is not a
+  //     measured regression and schedules no reinstall.
   //   - Otherwise ⇒ neither a pass nor a conviction, whether or not a build
   //     sits elsewhere on disk (Sol finding 3): a build on disk proves an
   //     install, not that OpenClaw selected it.
