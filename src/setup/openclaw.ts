@@ -2850,7 +2850,14 @@ export async function repairOpenClawManagedPins(
   // bytes derived from the original — a lost update. Read once through a
   // no-follow descriptor, parse from exactly those bytes, and before the
   // backup and before the rename require the same file with the same bytes.
-  const fileChanged = (): ManagedPinRepairResult => ({ status: 'failed', message: 'The managed project\'s package.json changed while this repair was running; nothing was changed. Check it again: `shieldcortex doctor`.' });
+  // #1179: once the safety backup exists, "nothing was changed" denies a file
+  // this repair wrote — the refusal from that point names the backup instead.
+  const fileChanged = (backup?: string): ManagedPinRepairResult => ({
+    status: 'failed',
+    message: backup === undefined
+      ? 'The managed project\'s package.json changed while this repair was running; nothing was changed. Check it again: `shieldcortex doctor`.'
+      : `The managed project's package.json changed while this repair was running, so it was not rewritten. A safety backup of the contents read earlier was written first and is left at ${backup}. Check it again: \`shieldcortex doctor\`.`,
+  });
   let bound: BoundManifestRead;
   let work: Record<string, unknown>;
   try {
@@ -2896,7 +2903,7 @@ export async function repairOpenClawManagedPins(
     }
     if (!boundManifestUnchanged(manifestPath, bound)) {
       fs.unlinkSync(tmp);
-      return { ...fileChanged(), message: `${fileChanged().message} A safety backup of the contents read earlier is at ${manifestPath}.repair-backup-${ts}.` };
+      return fileChanged(`${manifestPath}.repair-backup-${ts}`);
     }
     fs.renameSync(tmp, manifestPath);
   } catch (err) {
@@ -2953,7 +2960,16 @@ export async function repairOpenClawManagedPins(
   return { status: 'healed', message: `${parts.join(', ')}. Restart to load it: openclaw gateway restart` };
 }
 
-export async function repairOpenClawPlugin(): Promise<void> {
+export async function repairOpenClawPlugin(
+  /**
+   * #1179: what the managed-pin heal below launches, passed straight through
+   * (see {@link ManagedPinRepairDeps}). The CLI passes nothing and gets the
+   * real lookup and runner; a suite driving this entry point passes recording
+   * fakes, so a case that gets past the heal's refusals cannot reach a host's
+   * `openclaw`.
+   */
+  launch: ManagedPinRepairDeps = {},
+): Promise<void> {
   const home = resolveUserHome();
   const openclawDir = path.join(home, '.openclaw');
   const configPath = path.join(openclawDir, 'openclaw.json');
@@ -2992,7 +3008,7 @@ export async function repairOpenClawPlugin(): Promise<void> {
   // Next concern: reconcile managed-pin drift / re-enable a plugin that
   // OpenClaw auto-disabled after an EOVERRIDE on update (openclaw#91772).
   try {
-    const pinResult = await repairOpenClawManagedPins(home, bareRetryBudget);
+    const pinResult = await repairOpenClawManagedPins(home, bareRetryBudget, launch);
     if (pinResult.status === 'healed') {
       console.log(`  ✓ ${pinResult.message}`);
       console.log('');

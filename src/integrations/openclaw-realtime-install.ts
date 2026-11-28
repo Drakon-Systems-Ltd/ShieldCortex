@@ -178,6 +178,16 @@ export type SelectedRealtimeInstall =
      * record does not say.
      */
     source?: string;
+    /**
+     * #1179 r3 (Astra 3): `source` comes from an install record that names a
+     * DIFFERENT folder from the copy OpenClaw selects, at the same version —
+     * the index roster's copy beside a record for another folder, or (#1110) a
+     * linked `plugins.load.paths` copy OpenClaw ranks above the record's. That
+     * source is not this copy's provenance. Report-only: `state`, `dir`,
+     * `version` and `evidence` do not change, and nothing that replaces or
+     * removes a copy reads it.
+     */
+    sourceUnbound?: true;
   }
   /**
    * Nothing to load and nothing to lose. `dangling` says why when a record
@@ -302,9 +312,17 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
         }
         // The record's source describes the selected copy only when the
         // record's own copy is there (same version as the roster's, above).
-        const recordPresent = present.some((r) => r.evidence === 'install index record');
-        const source = recordPresent && typeof record?.source === 'string' ? record.source : undefined;
-        return { state: 'selected', dir: present[0].dir, version: versions[0], evidence: present[0].evidence, ...(source ? { source } : {}) };
+        const recordCopy = present.find((r) => r.evidence === 'install index record');
+        const source = recordCopy && typeof record?.source === 'string' ? record.source : undefined;
+        // #1179 r3 (Astra 3): and only when that copy is the selected one by
+        // real path. A record for another folder at the same version says
+        // nothing about where the roster's copy came from.
+        const unbound = recordCopy !== undefined && sourceRefused(source) && !sameDir(recordCopy.dir, present[0].dir);
+        return {
+          state: 'selected', dir: present[0].dir, version: versions[0], evidence: present[0].evidence,
+          ...(source ? { source } : {}),
+          ...(unbound ? { sourceUnbound: true as const } : {}),
+        };
       }
     }
   }
@@ -367,6 +385,11 @@ export function readSelectedRealtimeInstall(home: string, options: SelectedReadO
         if (l.state === 'unknown') return l;
         if (l.state === 'ok' && !sameDir(l.dir, present[0].dir) && l.version !== present[0].version) {
           return { state: 'unknown', why: `a plugins.load.paths copy (v${l.version}, ${l.dir}) and the ${present[0].evidence} copy (v${present[0].version}) disagree` };
+        }
+        // #1179 r3 (OBS-1): at the same version OpenClaw still loads the
+        // linked copy, from another folder: the record's source is not its.
+        if (l.state === 'ok' && !sameDir(l.dir, present[0].dir) && sourceRefused(present[0].source)) {
+          return { state: 'selected', ...present[0], sourceUnbound: true };
         }
       }
       return { state: 'selected', ...present[0] };
@@ -431,6 +454,25 @@ export function readSelectedRealtimePluginVersion(
   home: string,
   options: SelectedReadOptions = {},
 ): { version: string } | { version: null; reason: string } {
+  const r = readSelectedRealtimePluginVersionDetail(home, options);
+  return r.version === null ? { version: null, reason: r.reason } : r;
+}
+
+/**
+ * #1179 r2: the same read, the same answers, and one more fact for the
+ * self-check: `wrongSource` marks a null whose copy WAS read, but whose
+ * install record names a source other than npm or a local path. That is a
+ * known mismatch, not a version that could not be read. Every other caller
+ * keeps `readSelectedRealtimePluginVersion`'s shape.
+ *
+ * r3: `provenanceUnverified` instead when that record names another folder
+ * (`sourceUnbound`), and `measuredVersion` on both: the selected copy's own
+ * version, read. The null itself never changes.
+ */
+export function readSelectedRealtimePluginVersionDetail(
+  home: string,
+  options: SelectedReadOptions = {},
+): { version: string } | { version: null; reason: string; wrongSource?: true; provenanceUnverified?: true; measuredVersion?: string } {
   const s = readSelectedRealtimeInstall(home, options);
   if (s.state === 'selected') {
     // #1109 round 4 (npm provenance): OpenClaw <= 2026.4.25 resolves the bare
@@ -439,8 +481,19 @@ export function readSelectedRealtimePluginVersion(
     // where the copy came from. An equal version is not npm provenance: a copy
     // whose install record names any source but npm (or a local path — a
     // linked development install) is not the pinned npm build, never success.
-    if (s.source !== undefined && !PINNED_BUILD_SOURCES.has(s.source)) {
-      return { version: null, reason: `the copy OpenClaw selected (v${s.version}) was installed from ${s.source}, not npm` };
+    if (sourceRefused(s.source)) {
+      // #1179 r3 (Astra 3): a source recorded for another folder is not this
+      // copy's. Still refused (never success), but as unverified provenance,
+      // not a known mismatch. Either way the copy's own version was read.
+      if (s.sourceUnbound === true) {
+        return {
+          version: null,
+          reason: `an install record says the plugin was installed from ${s.source}, but it names a different folder from the copy OpenClaw selected (both v${s.version}), so where the selected copy was installed from is unverified`,
+          provenanceUnverified: true,
+          measuredVersion: s.version,
+        };
+      }
+      return { version: null, reason: `the copy OpenClaw selected (v${s.version}) was installed from ${s.source}, not npm`, wrongSource: true, measuredVersion: s.version };
     }
     return { version: s.version };
   }
@@ -450,6 +503,11 @@ export function readSelectedRealtimePluginVersion(
 
 /** Install-record sources a post-install check may accept (see above). */
 const PINNED_BUILD_SOURCES: ReadonlySet<string> = new Set(['npm', 'path']);
+
+/** A recorded source the post-install check refuses: present, and not npm or a local path. */
+function sourceRefused(source: string | undefined): source is string {
+  return source !== undefined && !PINNED_BUILD_SOURCES.has(source);
+}
 
 
 // ── 3. Everything a forced replacement must know (#1109 round 3) ────────────

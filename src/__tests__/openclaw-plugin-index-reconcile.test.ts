@@ -542,8 +542,44 @@ describe('#260 Sol-4 — present-but-unreadable index vs confirmed absence', () 
       .toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none' });
   });
 
-  it('not enabled in config: unchanged (the gap only matters when config claims the plugin)', () => {
-    expect(reconcilePluginState(nothing({ indexUnreadable: true, config: { enabled: null, inAllow: false } })).state).toBe('not-installed');
+  // #1179 (item 2): "not installed / ok" is a claim about the install records,
+  // and the main one was never read. The old test here pinned exactly that ok.
+  it.each([
+    ['no stanza at all', { enabled: null, inAllow: false }],
+    ['an explicit enabled:false', { enabled: false, inAllow: false }],
+    ['an explicit enabled:false that is still allow-listed', { enabled: false, inAllow: true }],
+    ['no openclaw.json', { enabled: null, inAllow: false, present: false }],
+  ] as const)('not enabled in config (%s) + unreadable index + no copy found ⇒ index-unreadable / warn / none — never not-installed / ok', (_label, config) => {
+    const verdict = reconcilePluginState(nothing({ indexUnreadable: true, config: { ...config } }));
+    expect(verdict).toMatchObject({ state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', enabledInConfig: false, indexUnreadable: true });
+    expect(verdict.reasons.join(' ')).toMatch(/UNKNOWN, not absent/);
+    expect(planReconcileActions(verdict, { pluginId: 'shieldcortex-realtime', packageName: '@drakon-systems/shieldcortex-realtime', expectedVersion: '5.22.1' })
+      .map((st) => st.kind)).toEqual(['self-check']);
+  });
+
+  it('…the same with the running gateway proving the load: still the warn, and it says what the next restart follows', () => {
+    const verdict = reconcilePluginState(nothing({
+      indexUnreadable: true,
+      config: { enabled: false, inAllow: false },
+      liveRoster: ['shieldcortex-realtime'],
+      liveLoadEvidence: 'boot-roster',
+    }));
+    expect(verdict).toMatchObject({ state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', loadedInLiveRoster: true });
+    expect(verdict.reasons.join(' ')).toMatch(/explicitly disables it.*RUNNING gateway has the plugin loaded; openclaw\.json does not enable it/);
+  });
+
+  it('absent-index control: NO index (readable absence) + not enabled + no copy ⇒ still not-installed / ok', () => {
+    for (const indexUnreadable of [undefined, false]) {
+      for (const config of [{ enabled: null, inAllow: false }, { enabled: false, inAllow: false }]) {
+        expect(reconcilePluginState(nothing({ indexUnreadable, config })))
+          .toMatchObject({ state: 'not-installed', severity: 'ok' });
+      }
+    }
+  });
+
+  it('disabled control: an installed build + explicit enabled:false + unreadable index ⇒ still disabled-by-operator / warn', () => {
+    expect(reconcilePluginState(nothing({ indexUnreadable: true, onDiskVersion: '5.22.1', config: { enabled: false, inAllow: true } })))
+      .toMatchObject({ state: 'disabled-by-operator', severity: 'warn', recommendedAction: 'none' });
   });
 
   it('a readable index wins over a stray flag: indexUnreadable only counts when index is null', () => {

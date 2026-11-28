@@ -6,7 +6,8 @@
  * Two layers, both required:
  *  - the code under test takes its launcher as an explicit parameter, and the
  *    suite passes a recording fake (see `repairOpenClawManagedPins`'s deps);
- *  - {@link installLaunchTripwire} mocks `child_process` so every real
+ *  - {@link installLaunchTripwire} mocks `child_process` (and
+ *    `node:child_process`, #1179) so every real
  *    launcher throws AND is recorded; {@link expectNoLaunch} fails the test if
  *    any was called, even when the code under test swallowed the throw.
  *
@@ -25,6 +26,13 @@ import { expect, jest } from '@jest/globals';
 
 type Launcher = ReturnType<typeof jest.fn>;
 const LAUNCHERS = ['execSync', 'execFileSync', 'spawnSync', 'spawn', 'exec', 'execFile', 'fork'] as const;
+/**
+ * #1179: both spellings are mocked, explicitly. Product code imports
+ * `node:child_process` too (doctor reaches several such modules). Jest 30
+ * keys the prefixed specifier to the bare one's mock, but the tripwire must
+ * not rest on the resolver doing that.
+ */
+export const TRIPWIRED_SPECIFIERS = ['child_process', 'node:child_process'] as const;
 
 export interface LaunchTripwire {
   launchers: Record<(typeof LAUNCHERS)[number], Launcher>;
@@ -38,7 +46,9 @@ export function installLaunchTripwire(): LaunchTripwire {
   })])) as unknown as LaunchTripwire['launchers'];
   // The real module's other exports stay; a self-import here would recurse.
   const actual = createRequire(import.meta.url)('child_process') as Record<string, unknown>;
-  jest.unstable_mockModule('child_process', () => ({ ...actual, ...launchers, default: { ...actual, ...launchers } }));
+  for (const specifier of TRIPWIRED_SPECIFIERS) {
+    jest.unstable_mockModule(specifier, () => ({ ...actual, ...launchers, default: { ...actual, ...launchers } }));
+  }
   return {
     launchers,
     reset() {
