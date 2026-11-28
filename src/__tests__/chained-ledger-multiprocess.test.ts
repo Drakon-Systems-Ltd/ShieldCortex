@@ -68,23 +68,14 @@ if (barrierDir) {
   }
 }
 const start = Date.now();
-// Overlap by construction: announce once the FIRST append has committed, and do
-// not leave the loop until every peer has announced too (at least count
-// appends regardless). Release skew between processes on a slow runner can
-// exceed a whole fixed-size run, so a fixed count alone cannot guarantee
-// overlap.
+// Overlap by construction: announce once the FIRST append has committed, then
+// keep this writer alive until every peer has announced too. Waiting never
+// adds rows: release skew on a slow runner must not inflate the fixed run.
 const peers = peersArg ? peersArg.split(',') : [];
 const peerFile = (p) => joinPath(barrierDir, 'started-' + p);
 const missingPeers = () => peers.filter((p) => !goExists(peerFile(p)));
-let waitDeadline = 0;
 let ok = 0;
-for (let i = 0; ; i++) {
-  if (i >= count && (!barrierDir || missingPeers().length === 0)) break;
-  if (i >= count) {
-    // Only the wait for peers is bounded; a slow but progressing append run is not.
-    if (!waitDeadline) waitDeadline = Date.now() + 60_000;
-    if (Date.now() > waitDeadline) { process.stderr.write('peers never started: ' + missingPeers().join(',')); process.exit(4); }
-  }
+for (let i = 0; i < count; i++) {
   if (mode === 'crash' && i === count - 1) {
     __setLedgerFaultForTests(() => { process.kill(process.pid, 'SIGKILL'); });
   }
@@ -96,7 +87,16 @@ for (let i = 0; ; i++) {
     reason: tag + ' ' + i, fragmentation_score: null,
   });
   if (id > 0) ok++;
-  if (i === 0 && barrierDir) writeReady(peerFile(tag), '');
+  if (ok === 1 && id > 0 && barrierDir) writeReady(peerFile(tag), '');
+}
+if (barrierDir) {
+  // Only the wait for peers is bounded; a progressing append run is not.
+  const waitDeadline = Date.now() + 60_000;
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  while (missingPeers().length > 0) {
+    if (Date.now() > waitDeadline) { process.stderr.write('peers never started: ' + missingPeers().join(',')); process.exit(4); }
+    Atomics.wait(nap, 0, 0, 5);
+  }
 }
 const end = Date.now();
 closeDatabase();
@@ -168,6 +168,75 @@ describe('multi-process ledger gates', () => {
     } finally { db2.close(); }
   }, 60_000);
 
+  it('a completed append loop does not extend its timing window to a delayed peer', async () => {
+    const dbPath = path.join(work, 'delayed-peer.db');
+    const barrierDir = path.join(work, 'delayed-peer-barrier');
+    mkdirSync(barrierDir);
+    writeFileSync(path.join(barrierDir, 'go'), '');
+    const pending = runWriter(dbPath, 1, 'early', '', barrierDir, 'early,delayed');
+    let result!: Awaited<ReturnType<typeof runWriter>>;
+    let completed = false;
+    void pending.then(() => { completed = true; });
+    let releasedAt = 0;
+    try {
+      await waitFor(
+        () => existsSync(path.join(barrierDir, 'started-early')),
+        () => 'the early writer to commit its first append',
+        60_000,
+      );
+      // A singleton has no appends remaining. It must finish before this
+      // absent peer starts, rather than manufacture an overlap window.
+      await waitFor(() => completed, () => 'the completed singleton to exit without a peer', 5_000);
+    } finally {
+      // Release and join even on failure; never strand a child at its barrier.
+      releasedAt = Date.now();
+      writeFileSync(path.join(barrierDir, 'started-delayed'), '');
+      for (const child of liveChildren) {
+        if (!existsSync(path.join(barrierDir, 'started-early'))) child.kill('SIGKILL');
+      }
+      result = await pending;
+    }
+    expect({ code: result.code, err: result.err }).toEqual({ code: 0, err: '' });
+    expect(JSON.parse(result.out).ok).toBe(1);
+    expect(JSON.parse(result.out).end).toBeLessThan(releasedAt);
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      expect(db.prepare('SELECT COUNT(*) AS n FROM defence_audit').get()).toEqual({ n: 1 });
+      expect(verifyLedger(db).status).toBe('consistent');
+    } finally { db.close(); }
+  }, 90_000);
+
+  it('waits for a delayed peer while an append remains, without adding rows', async () => {
+    const dbPath = path.join(work, 'remaining-append.db');
+    const barrierDir = path.join(work, 'remaining-append-barrier');
+    mkdirSync(barrierDir);
+    writeFileSync(path.join(barrierDir, 'go'), '');
+    const pending = runWriter(dbPath, 2, 'early', '', barrierDir, 'early,delayed');
+    let result!: Awaited<ReturnType<typeof runWriter>>;
+    try {
+      await waitFor(() => existsSync(path.join(barrierDir, 'started-early')),
+        () => 'the first of two appends', 60_000);
+      await new Promise((r) => setTimeout(r, 150));
+      const waitingDb = new Database(dbPath, { readonly: true });
+      try {
+        expect(waitingDb.prepare('SELECT COUNT(*) AS n FROM defence_audit').get()).toEqual({ n: 1 });
+      } finally { waitingDb.close(); }
+    } finally {
+      writeFileSync(path.join(barrierDir, 'started-delayed'), '');
+      if (!existsSync(path.join(barrierDir, 'started-early'))) {
+        for (const child of liveChildren) child.kill('SIGKILL');
+      }
+      result = await pending;
+    }
+    expect({ code: result.code, err: result.err }).toEqual({ code: 0, err: '' });
+    expect(JSON.parse(result.out).ok).toBe(2);
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      expect(db.prepare('SELECT COUNT(*) AS n FROM defence_audit').get()).toEqual({ n: 2 });
+      expect(verifyLedger(db).status).toBe('consistent');
+    } finally { db.close(); }
+  }, 90_000);
+
   it('concurrent writer processes serialise through the DB transaction', async () => {
     const dbPath = path.join(work, 'concurrent.db');
     // Create the ledger once so the writers race on appends, not on genesis.
@@ -203,8 +272,8 @@ describe('multi-process ledger gates', () => {
       expect({ code: r.code, err: r.code === 0 ? '' : r.err }).toEqual({ code: 0, err: '' });
     }
     const timings = results.map((r) => JSON.parse(r.out) as { ok: number; start: number; end: number });
-    // Each writer appends at least EACH rows (more if it waited for peers).
-    expect(timings.map((t) => t.ok >= EACH)).toEqual(tags.map(() => true));
+    // Waiting for peers must not inflate row counts on a slow runner.
+    expect(timings.map((t) => t.ok)).toEqual(tags.map(() => EACH));
     const total = timings.reduce((n, t) => n + t.ok, 0);
 
     const db = new Database(dbPath, { readonly: true });
