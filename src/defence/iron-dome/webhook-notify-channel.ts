@@ -34,6 +34,7 @@ import {
   withholdSecretCardLine,
   type ApprovalCardSummary,
 } from './approval-card.js';
+import type { TapMacFields } from './approve-tap.js';
 import type {
   ActionGuardOutcomeNotification,
   AnyOperatorNotification,
@@ -245,6 +246,95 @@ function buildDenialCardBlock(n: ActionGuardOutcomeNotification, card: ApprovalC
       'To allow ONE retry, run in a terminal on that machine:',
       `  ${approveCommand}`,
     ]),
+  };
+}
+
+// ── #815 S2a: the version 2 (one-tap) card. Inert: nothing calls it yet ────
+
+/** Version of the one-tap card block. `WEBHOOK_CARD_VERSION` stays 1, and
+ *  every card this channel sends is still version 1. The note there reserves
+ *  version 2 as a nonce on each action; as built, only Approve carries one. */
+export const WEBHOOK_CARD_VERSION_2 = 2 as const;
+
+/** The mint values a version 2 card carries, named as approve-tap.ts names
+ *  them so a receiver builds the tap request from the card without renaming. */
+export type WebhookCardTap = Pick<TapMacFields, 'nonce' | 'argsHash' | 'exp'>;
+
+/** Approve carries the single-use nonce. Deny never does: refusing needs no
+ *  credential, and a Deny button must not be able to approve. */
+export type WebhookCardActionV2 =
+  | (WebhookCardAction & { action: 'approve'; nonce: string })
+  | (WebhookCardAction & { action: 'deny'; nonce?: never });
+
+export interface WebhookCardV2 {
+  version: typeof WEBHOOK_CARD_VERSION_2;
+  /** Version 2 exists only for a refused call whose retry can be approved. */
+  kind: 'denial';
+  headline: string;
+  what: string;
+  why: string;
+  who: string;
+  approveCommand: string;
+  /** The exact call digest the nonce is bound to (64 lowercase hex). */
+  argsHash: string;
+  /** When the nonce stops working, in epoch milliseconds. */
+  exp: number;
+  actions: [WebhookCardActionV2 & { action: 'approve' }, WebhookCardActionV2 & { action: 'deny' }];
+  /** The card as plain text. It never contains the nonce. */
+  text: string;
+}
+
+/** As approve-tap.ts checks them: 128-bit nonce, sha256 digest, lowercase hex. */
+const TAP_NONCE_SHAPE = /^[0-9a-f]{32}$/;
+const TAP_DIGEST_SHAPE = /^[0-9a-f]{64}$/;
+
+/**
+ * The version 2 card for a retryable headless denial, or nothing. Pure: it
+ * mints nothing and reads no file, config, network or clock, so it cannot
+ * tell whether `exp` has passed; the caller that mints (a later slice) owns
+ * that. The lines, command and text are the version 1 card's, unchanged.
+ *
+ * No card, never a partial one, when the denial is not retryable (not a
+ * `denied_no_prompt_surface` denial, or no well-formed action id), when a tap
+ * value is missing or malformed, or when the nonce would show in the text
+ * or in the digest: it appears on Approve and nowhere else on the card.
+ */
+export function buildDenialCardBlockV2(
+  n: ActionGuardOutcomeNotification,
+  card: ApprovalCardSummary,
+  tap: WebhookCardTap,
+): WebhookCardV2 | undefined {
+  if (!n || typeof n !== 'object') return undefined;
+  if (!card || typeof card !== 'object' || !tap || typeof tap !== 'object') return undefined;
+  // Read each notification field once and build from the copy, so a
+  // getter-backed input cannot have one value checked and another returned.
+  const { event, outcome, actionId } = n;
+  if (event !== 'action_guard_denial' || outcome !== 'denied_no_prompt_surface') return undefined;
+  if (typeof actionId !== 'string' || !ACTION_ID_SHAPE.test(actionId)) return undefined;
+  const { nonce, argsHash, exp } = tap;
+  if (typeof nonce !== 'string' || !TAP_NONCE_SHAPE.test(nonce)) return undefined;
+  if (typeof argsHash !== 'string' || !TAP_DIGEST_SHAPE.test(argsHash)) return undefined;
+  if (!Number.isSafeInteger(exp) || exp <= 0) return undefined;
+  const v1 = buildDenialCardBlock({ event, outcome, actionId } as ActionGuardOutcomeNotification, card);
+  // Version 1 offers a command and choices only for a retryable denial, and for the id checked above.
+  if (v1.approveCommand === undefined || v1.actions?.[0]?.actionId !== actionId) return undefined;
+  // `text` holds the headline, the three lines and the command.
+  if (v1.text.includes(nonce) || argsHash.includes(nonce)) return undefined;
+  return {
+    version: WEBHOOK_CARD_VERSION_2,
+    kind: 'denial',
+    headline: v1.headline,
+    what: v1.what,
+    why: v1.why,
+    who: v1.who,
+    approveCommand: v1.approveCommand,
+    argsHash,
+    exp,
+    actions: [
+      { action: 'approve', label: 'Approve retry', actionId, nonce },
+      { action: 'deny', label: 'Deny', actionId },
+    ],
+    text: v1.text,
   };
 }
 
