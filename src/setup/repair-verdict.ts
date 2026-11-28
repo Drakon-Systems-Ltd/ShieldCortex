@@ -58,6 +58,18 @@ export interface RepairVerdictInput {
      * `versionWrongSource`). A known mismatch, never "could not read".
      */
     versionWrongSource?: boolean;
+    /**
+     * #1179 r3 (Astra 3): the version proof failed because the install record
+     * naming a non-npm source is for a different folder from the selected
+     * copy (see the self-check's `versionProvenanceUnverified`). Provenance
+     * unverified: not "could not read", and not a known mismatch.
+     */
+    versionProvenanceUnverified?: boolean;
+    /**
+     * #1179 r3 (Astra 2): the self-check reader's own reading of the selected
+     * copy's version, when the proof failed on its source, not its version.
+     */
+    selectedCopyVersion?: string | null;
   };
   /** Post-remediation state, when there was one. */
   postState?: string;
@@ -129,18 +141,24 @@ function selectedBuildReading(
  *
  * r2 (Astra): the reading is the post-state's selected build when it has one
  * (`selectedVersion`, see `selectedBuildReading`). Any version read there is
- * a measurement, and another copy never overrides it. Without one, an older
- * version read from disk or an install record (`onDiskVersion`) is still a
- * measured one, as in r1.
+ * a measurement, and another copy never overrides it.
+ *
+ * r3 (Astra 2): `selectedVersion` is also the self-check reader's own reading
+ * of the selected copy (`selectedCopyVersion`) when the post-state has none,
+ * and a source recorded for another folder (`versionProvenanceUnverified`) is
+ * a proof with no version of its own too. Without a selected reading, an
+ * older `onDiskVersion` still makes this false — but `summariseRepair`
+ * reports that as the copy found on disk, never as the selected copy and
+ * never with an install command.
  */
 export function versionProofUnmeasured(
-  selfCheck: { versionProof?: boolean; versionUnread?: boolean; versionWrongSource?: boolean } | undefined,
+  selfCheck: { versionProof?: boolean; versionUnread?: boolean; versionWrongSource?: boolean; versionProvenanceUnverified?: boolean } | undefined,
   onDiskVersion?: string | null,
   expectedVersion?: string,
   selectedVersion?: string | null,
 ): boolean {
   if (selfCheck?.versionProof !== false) return false;
-  if (selfCheck.versionUnread !== true && selfCheck.versionWrongSource !== true) return false;
+  if (selfCheck.versionUnread !== true && selfCheck.versionWrongSource !== true && selfCheck.versionProvenanceUnverified !== true) return false;
   const selected = semver.valid(selectedVersion ?? '');
   return !olderThan(selected ?? onDiskVersion, expectedVersion);
 }
@@ -178,14 +196,44 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
   // after the restart cases; the two branches here need a measured version.
   // r2 (Astra): when the self-check had no version of its own, the version it
   // is judged by is the post-state's reading of the selected build, if any.
-  const proofHadNoVersion = sc?.versionProof === false && (sc.versionUnread === true || sc.versionWrongSource === true);
-  const selected = proofHadNoVersion ? selectedBuildReading(input) : null;
+  // r3 (Astra 3): a source recorded for another folder is such a proof too.
+  const proofHadNoVersion = sc?.versionProof === false &&
+    (sc.versionUnread === true || sc.versionWrongSource === true || sc.versionProvenanceUnverified === true);
+  // r3 (Astra 2): the selected measurement — the post-state's selected-build
+  // reading, else the self-check reader's own reading of the selected copy.
+  // Another copy never stands in for it, and never overrides it.
+  const selected = proofHadNoVersion
+    ? selectedBuildReading(input) ?? semver.valid(sc.selectedCopyVersion ?? '')
+    : null;
+  // r3: what is known about where the selected copy came from.
+  const provenance: 'wrong' | 'unverified' | null = !proofHadNoVersion || sc.versionUnread === true
+    ? null
+    : sc.versionWrongSource === true ? 'wrong' : sc.versionProvenanceUnverified === true ? 'unverified' : null;
   const versionUnmeasured = versionProofUnmeasured(sc, input.onDiskVersion, input.expectedVersion, selected);
   // r2: that selected build was read older than this CLI. Stale, reported by
   // its own version — but the self-check could not verify the copy, and
   // repair's safety check can refuse the reinstall there: doctor first.
   const selectedStale = proofHadNoVersion && !versionUnmeasured && selected !== null;
-  const staleBySelected = `the build OpenClaw selected is v${selected}, older than ${semver.valid(input.expectedVersion ?? '')}, and this run's own check could not verify that copy. Check it with shieldcortex doctor before reinstalling`;
+  // r3 (Astra 2): no selected reading, but an older copy found on disk. Main's
+  // outcome class, reported as that copy, with the selected version
+  // unverified: never "the installed plugin", never an install command.
+  const otherCopyStale = proofHadNoVersion && !versionUnmeasured && selected === null;
+  // r3 (CASE-B1): a live probe the operator consented to that did not confirm
+  // the plugin is never left out of a headline that answers for the version.
+  const probeFailed = proofHadNoVersion && input.canaryConsented && sc.canaryProof === false;
+  const probeNote = probeFailed ? ' The live enforcement probe did not confirm the plugin either.' : '';
+  const checkNext = probeFailed ? 'shieldcortex doctor --ai' : 'shieldcortex doctor';
+  const expected = semver.valid(input.expectedVersion ?? '');
+  const copyFact = provenance === 'wrong'
+    ? 'that copy was not installed from npm or a local path'
+    : provenance === 'unverified'
+      ? 'where that copy was installed from is unverified (the install record that names a source is for a different directory)'
+      : 'this run\'s own check could not verify that copy';
+  const staleBySelected = `the build OpenClaw selected is v${selected}, older than ${expected}, and ${copyFact}. Check it with shieldcortex doctor before reinstalling`;
+  const provenanceClause = provenance === 'wrong'
+    ? ' (and that copy was not installed from npm or a local path)'
+    : provenance === 'unverified' ? ' (and so is where it was installed from)' : '';
+  const otherCopy = `a plugin copy found on disk is v${semver.valid(input.onDiskVersion ?? '')}, older than ${expected}`;
 
   // An old disk plugin is not proof the gateway is unprotected. A major CLI
   // upgrade can outrun the plugin install; unread logs cannot prove a silent
@@ -195,32 +243,50 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
     semver.valid(measured) && semver.valid(input.expectedVersion) &&
     semver.major(measured) < semver.major(input.expectedVersion);
   if (sc?.versionProof === false && !versionUnmeasured && (sc.rosterState !== 'loaded' || majorUpgradeLag)) {
-    return selectedStale
-      ? {
+    if (selectedStale) {
+      return {
         outcome: 'protected-unproven',
-        headline: `The installed plugin is behind this CLI: ${staleBySelected}; protection by the new build is not yet proven.`,
-        nextCommand: 'shieldcortex doctor',
-      }
-      : {
-        outcome: 'protected-unproven',
-        headline: 'The installed plugin is behind this CLI. Update the plugin; protection by the new build is not yet proven.',
-        nextCommand: realtimePluginInstallCommand(input.expectedVersion),
+        headline: `The installed plugin is behind this CLI: ${staleBySelected}; protection by the new build is not yet proven.${probeNote}`,
+        nextCommand: checkNext,
       };
+    }
+    if (otherCopyStale) {
+      return {
+        outcome: 'protected-unproven',
+        headline: `A plugin copy found on disk is v${semver.valid(input.onDiskVersion ?? '')}, older than ${expected}, but the version OpenClaw selected is unverified${provenanceClause}, so protection by this CLI's build is not yet proven. Check it with shieldcortex doctor before reinstalling.${probeNote}`,
+        nextCommand: checkNext,
+      };
+    }
+    return {
+      outcome: 'protected-unproven',
+      headline: 'The installed plugin is behind this CLI. Update the plugin; protection by the new build is not yet proven.',
+      nextCommand: realtimePluginInstallCommand(input.expectedVersion),
+    };
   }
 
   // A silent downgrade of the loaded build remains a real fault.
   if (sc?.versionProof === false && !versionUnmeasured) {
-    return selectedStale
-      ? {
+    if (selectedStale) {
+      return {
         outcome: 'unprotected',
-        headline: `Not protected by the build you expect: ${staleBySelected}.`,
-        nextCommand: 'shieldcortex doctor',
-      }
-      : {
-        outcome: 'unprotected',
-        headline: 'Not protected by the build you expect: an older version is installed than the one this CLI ships.',
-        nextCommand: 'npm i -g shieldcortex@latest && shieldcortex repair',
+        headline: `Not protected by the build you expect: ${staleBySelected}.${probeNote}`,
+        nextCommand: checkNext,
       };
+    }
+    if (otherCopyStale) {
+      // r3: main's class for this reading, but the copy is another one: the
+      // selected build is not known to be the old one.
+      return {
+        outcome: 'unprotected',
+        headline: `Not proven protected by the build you expect: ${otherCopy}, and the version OpenClaw selected is unverified${provenanceClause}. Check it with shieldcortex doctor before reinstalling.${probeNote}`,
+        nextCommand: checkNext,
+      };
+    }
+    return {
+      outcome: 'unprotected',
+      headline: 'Not protected by the build you expect: an older version is installed than the one this CLI ships.',
+      nextCommand: 'npm i -g shieldcortex@latest && shieldcortex repair',
+    };
   }
 
   // #977 review: whatever the self-check saw, it saw a gateway that has not
@@ -270,11 +336,39 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
   // A roster proven absent already returned above.
   // r2 (Astra): a known wrong source is that, not a read failure; and a
   // selected build the post-state read (not older) is named as read.
+  // r3: a source recorded for another folder is unverified provenance; the
+  // selected copy's own version is named when it was read; and (CASE-B1) a
+  // consented probe that did not confirm the plugin leads, with the version
+  // fact beside it — never "not known-broken".
   if (versionUnmeasured) {
-    if (sc?.versionWrongSource === true && sc.versionUnread !== true) {
+    const v = selected !== null ? ` (v${selected})` : '';
+    if (probeFailed) {
+      const fact = provenance === 'wrong'
+        ? `the copy OpenClaw selected${v} was not installed from npm or a local path`
+        : provenance === 'unverified'
+          ? `the install record that names a source is for a different directory from the copy OpenClaw selected${v}, so where that copy was installed from is unverified`
+          : selected !== null
+            ? `this run's own check could not verify the copy OpenClaw selected, though the plugin state reads that build as v${selected}`
+            : 'which plugin version OpenClaw uses could not be read';
       return {
         outcome: 'unknown',
-        headline: 'The plugin copy OpenClaw selected was not installed from npm or a local path, so it is not proven to be this CLI\'s pinned build. Check it with shieldcortex doctor.',
+        headline: sc?.rosterState === 'loaded'
+          ? `The plugin is loaded, but the live enforcement probe did not confirm it, and ${fact}. That needs a look.`
+          : `Could not confirm the plugin is loaded, the live enforcement probe did not confirm it, and ${fact}. That needs a look.`,
+        nextCommand: 'shieldcortex doctor --ai',
+      };
+    }
+    if (provenance === 'wrong') {
+      return {
+        outcome: 'unknown',
+        headline: `The plugin copy OpenClaw selected${v} was not installed from npm or a local path, so it is not proven to be this CLI's pinned build. Check it with shieldcortex doctor.`,
+        nextCommand: 'shieldcortex doctor',
+      };
+    }
+    if (provenance === 'unverified') {
+      return {
+        outcome: 'unknown',
+        headline: `The install record that names where the plugin came from is for a different directory from the copy OpenClaw selected${v}, so where that copy was installed from is unverified, and it is not proven to be this CLI's pinned build. Check it with shieldcortex doctor.`,
         nextCommand: 'shieldcortex doctor',
       };
     }

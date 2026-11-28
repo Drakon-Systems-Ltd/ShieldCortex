@@ -764,6 +764,36 @@ function selectedBuildRead(result: ReconcileExecResult): string | null {
 }
 
 /**
+ * #1179 r3: the self-check's version proof failed with no version of its
+ * own — unread, a known wrong source, or a source recorded for another folder.
+ */
+function selfCheckHadNoVersion(sc: ReconcileExecResult['selfCheck']): boolean {
+  return sc?.versionProof === false &&
+    (sc.versionUnread === true || sc.versionWrongSource === true || sc.versionProvenanceUnverified === true);
+}
+
+/**
+ * #1179 r3 (Astra 1, 2c): the one plugin version the report names — the
+ * compact chip and the ledger's `facts.pluginVersion` — so neither can
+ * contradict the headline. In order: the version this run's update step
+ * installed; the selected measurement (the post-state's selected-build
+ * reading, else the self-check reader's own reading of the selected copy);
+ * the disk scan's version, but only when the self-check did not fail for want
+ * of a version of its own; otherwise none. Never another copy's version
+ * standing in for the selected one. With no self-check at all (a dry run),
+ * the scan version stays, as before.
+ */
+function reportedPluginVersion(result: ReconcileExecResult): string | null {
+  const step = result.stepResults.find((s) => s.kind === 'openclaw-update' && s.ok);
+  const fromStep = step?.detail.match(/(\d+\.\d+\.\d+)/)?.[1];
+  if (fromStep) return fromStep;
+  const selected = selectedBuildRead(result) ?? result.selfCheck?.selectedCopyVersion ?? null;
+  if (selected) return selected;
+  if (selfCheckHadNoVersion(result.selfCheck)) return null;
+  return (result.postVerdict ?? result.verdict).onDiskVersion ?? null;
+}
+
+/**
  * What both report adapters (`formatReconcileReport`,
  * `protectionLedgerFromReconcile`) hand `summariseRepair`, built once so they
  * cannot drift (#1179 r2).
@@ -789,6 +819,10 @@ function repairVerdictInput(result: ReconcileExecResult): RepairVerdictInput {
           ...(result.selfCheck.versionUnread ? { versionUnread: true } : {}),
           // r2: a known wrong source is not an unread version.
           ...(result.selfCheck.versionWrongSource ? { versionWrongSource: true } : {}),
+          // r3: a source recorded for another folder, and the selected copy's
+          // own version when the proof failed on its source.
+          ...(result.selfCheck.versionProvenanceUnverified ? { versionProvenanceUnverified: true } : {}),
+          ...(result.selfCheck.selectedCopyVersion ? { selectedCopyVersion: result.selfCheck.selectedCopyVersion } : {}),
         },
       }
       : {}),
@@ -802,16 +836,9 @@ function shortProofChips(result: ReconcileExecResult): string {
   if (sc) {
     if (sc.canaryProof) bits.push('guard live');
     else if (sc.canary?.ran) bits.push('guard unproven');
-    const verStep = result.stepResults.find((s) => s.kind === 'openclaw-update' && s.ok);
-    if (verStep) {
-      const m = verStep.detail.match(/(\d+\.\d+\.\d+)/);
-      if (m) bits.push(`v${m[1]}`);
-    } else if (selectedBuildRead(result)) {
-      // #1179 r2: the post-state's reading of the selected build, not another copy.
-      bits.push(`v${selectedBuildRead(result)}`);
-    } else if (result.postVerdict?.onDiskVersion) {
-      bits.push(`v${result.postVerdict.onDiskVersion}`);
-    }
+    // #1179 r3: the same version the ledger facts name (see reportedPluginVersion).
+    const version = reportedPluginVersion(result);
+    if (version) bits.push(`v${version}`);
     if (sc.rosterState === 'loaded') bits.push('roster ok');
     else if (sc.rosterState === 'absent') bits.push('roster absent');
     else bits.push('roster unread');
@@ -1004,8 +1031,6 @@ export function protectionFactsFromReconcile(
   nextCommand?: string,
 ): ProtectionFacts {
   const sc = result.selfCheck;
-  const verStep = result.stepResults.find((s) => s.kind === 'openclaw-update' && s.ok);
-  const fromStep = verStep?.detail.match(/(\d+\.\d+\.\d+)/)?.[1] ?? null;
   const restartOutcome = gatewayRestartOutcomeFromSteps(result.stepResults);
   // #977 review: never a restart command while the run's one restart is not
   // proven back up (timed-out / unconfirmed outrank pending above).
@@ -1016,7 +1041,8 @@ export function protectionFactsFromReconcile(
   return {
     loaded: sc?.rosterState === 'loaded' ? 'yes' : sc?.rosterState === 'absent' ? 'no' : 'unknown',
     ...(sc && sc.versionProof === false ? { versionOk: false } : {}),
-    pluginVersion: fromStep ?? (result.postVerdict ?? result.verdict).onDiskVersion ?? null,
+    // #1179 r3 (Astra 1): the version the headline and the chip go by.
+    pluginVersion: reportedPluginVersion(result),
     expectedVersion: (result.postVerdict ?? result.verdict).expectedVersion ?? null,
     gatewayReloaded: result.stepResults.some((s) => s.kind === 'gateway-reload' && s.ok),
     ...(restartOutcome ? { gatewayRestart: restartOutcome } : {}),

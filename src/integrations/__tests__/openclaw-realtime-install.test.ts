@@ -21,6 +21,7 @@ import {
   readRealtimeReplacementEvidence,
   readSelectedRealtimeInstall,
   readSelectedRealtimePluginVersion,
+  readSelectedRealtimePluginVersionDetail,
 } from '../openclaw-realtime-install.js';
 import { readPluginInstallIndexState, type PluginInstallIndexState } from '../openclaw-plugin-index.js';
 import { assessRealtimeReplacement } from '../../setup/openclaw-plugin-spec.js';
@@ -691,5 +692,68 @@ describe('#260 r10 — a present but unusable installPath refuses the replacemen
     writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'npm', version: '5.0.0' } } });
     expect(readSelectedRealtimeInstall(home)).toEqual({ state: 'none' });
     expect(decide()).toEqual({ replace: true });
+  });
+});
+
+/**
+ * #1179 r3 (Astra 3, adjudication OBS-1): an install record's `source` is the
+ * selected copy's provenance only when that record names the same physical
+ * folder (by real path). A record for another folder at the same version is
+ * marked `sourceUnbound`: the version check still refuses it (never success),
+ * but the detail says provenance unverified, not a known wrong source.
+ * `state`, `dir`, `version` and `evidence` are what they were.
+ */
+describe('#1179 r3 — a recorded source binds only to the folder its record names', () => {
+  const PIN = '5.22.1';
+  const UNBOUND = new RegExp(`an install record says the plugin was installed from clawhub, but it names a different folder from the copy OpenClaw selected \\(both v${PIN.replace(/\./g, '\\.')}\\)`);
+
+  it('roster A / record B / same version / ClawHub on B: selected A as before, the source unbound; the public reader still refuses', () => {
+    const a = writeRealtimeProject('a', PIN);
+    const b = writeRealtimeProject('b', PIN);
+    const opts = index({ [ID]: { source: 'clawhub', installPath: b } }, [{ pluginId: ID, enabled: true, rootDir: a }]);
+    expect(readSelectedRealtimeInstall(home, opts)).toEqual({
+      state: 'selected', dir: a, version: PIN, evidence: 'install index roster', source: 'clawhub', sourceUnbound: true,
+    });
+    const pub = readSelectedRealtimePluginVersion(home, opts);
+    expect(pub).toEqual({ version: null, reason: expect.stringMatching(UNBOUND) });
+    expect(readSelectedRealtimePluginVersionDetail(home, opts)).toEqual({
+      version: null, reason: expect.stringMatching(UNBOUND), provenanceUnverified: true, measuredVersion: PIN,
+    });
+    // The replacement decision sees the same selected copy it saw before.
+    expect(readRealtimeReplacementEvidence(home, opts).selected).toMatchObject({ state: 'selected', dir: a, version: PIN });
+  });
+
+  it('the same folder by real path (the record names a symlink to the roster\'s folder): bound — a known wrong source', () => {
+    const a = writeRealtimeProject('a', PIN);
+    const link = path.join(home, 'link-to-a');
+    fs.symlinkSync(a, link, 'dir');
+    const opts = index({ [ID]: { source: 'clawhub', installPath: link } }, [{ pluginId: ID, enabled: true, rootDir: a }]);
+    const s = readSelectedRealtimeInstall(home, opts);
+    expect(s).toMatchObject({ state: 'selected', dir: a, version: PIN, source: 'clawhub' });
+    expect(s).not.toHaveProperty('sourceUnbound');
+    expect(readSelectedRealtimePluginVersionDetail(home, opts)).toEqual({
+      version: null, reason: `the copy OpenClaw selected (v${PIN}) was installed from clawhub, not npm`, wrongSource: true, measuredVersion: PIN,
+    });
+  });
+
+  it('a record-only selection names its own folder: bound — a known wrong source, with the version it read', () => {
+    const p = writeRealtimeProject('hub', '5.23.0');
+    const opts = index({ [ID]: { source: 'clawhub', installPath: p } });
+    expect(readSelectedRealtimeInstall(home, opts)).not.toHaveProperty('sourceUnbound');
+    expect(readSelectedRealtimePluginVersionDetail(home, opts)).toMatchObject({ version: null, wrongSource: true, measuredVersion: '5.23.0' });
+  });
+
+  it('OBS-1: no index, an installs.json ClawHub record copy beside a linked load-path copy at the same version: unbound, still refused', () => {
+    const rec = writeRealtimeProject('drakon-systems-shieldcortex-realtime', PIN);
+    writeJson('plugins/installs.json', { installRecords: { [ID]: { source: 'clawhub', installPath: rec } } });
+    const linked = checkout(PIN);
+    writeJson('openclaw.json', { plugins: { load: { paths: [linked] } } });
+    expect(readSelectedRealtimeInstall(home)).toEqual({
+      state: 'selected', dir: rec, version: PIN, evidence: 'installs.json record', source: 'clawhub', sourceUnbound: true,
+    });
+    expect(readSelectedRealtimePluginVersion(home).version).toBeNull();
+    expect(readSelectedRealtimePluginVersionDetail(home)).toEqual({
+      version: null, reason: expect.stringMatching(UNBOUND), provenanceUnverified: true, measuredVersion: PIN,
+    });
   });
 });

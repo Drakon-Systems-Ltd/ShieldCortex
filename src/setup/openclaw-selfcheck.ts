@@ -107,6 +107,20 @@ export interface SelfCheckVerdict {
    * local path. A known mismatch, not an unread version: never `versionUnread`.
    */
   versionWrongSource?: true;
+  /**
+   * #1179 r3 (Astra 3): set (true) only when `versionProof` failed because the
+   * install record that names a source other than npm or a local path is for
+   * a different folder from the selected copy. Provenance unverified: neither
+   * an unread version nor a known mismatch.
+   */
+  versionProvenanceUnverified?: true;
+  /**
+   * #1179 r3 (Astra 2): the selected copy's own version, as the reader read
+   * it, when the proof failed on its source (`versionWrongSource`,
+   * `versionProvenanceUnverified`) rather than on its version. A measurement
+   * of the selected copy; never another copy's.
+   */
+  selectedCopyVersion?: string;
   reasons: string[];
 }
 
@@ -151,6 +165,13 @@ export interface SelfCheckInput {
    * was not installed from npm or a local path (`onDiskReason` says which).
    */
   onDiskWrongSource?: boolean;
+  /**
+   * #1179 r3: `onDiskVersion` is null because the record that names a non-npm
+   * source is for a different folder from the selected copy.
+   */
+  onDiskProvenanceUnverified?: boolean;
+  /** #1179 r3: the selected copy's version the reader read, on such a null. */
+  onDiskMeasuredVersion?: string;
 }
 
 /**
@@ -250,6 +271,7 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
   let versionProof = true;
   let versionUnread = false;
   let versionWrongSource = false;
+  let versionProvenanceUnverified = false;
   if (input.expectedVersion) {
     const onDisk = semver.valid(input.onDiskVersion ?? '') ?? semver.valid(semver.coerce(input.onDiskVersion ?? '') ?? '');
     const expected = semver.valid(input.expectedVersion) ?? semver.valid(semver.coerce(input.expectedVersion) ?? '');
@@ -259,6 +281,13 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
       versionProof = false;
       versionWrongSource = true;
       reasons.push(`version proof FAILED: ${input.onDiskReason ?? 'the copy OpenClaw selected was not installed from npm or a local path'}, so it is not the pinned build expected at ${input.expectedVersion}`);
+    } else if (!onDisk && input.onDiskProvenanceUnverified === true) {
+      // #1179 r3 (Astra 3): the copy was read; the record naming its source is
+      // for another folder. Still a failed proof, but neither "could not read"
+      // nor a known mismatch.
+      versionProof = false;
+      versionProvenanceUnverified = true;
+      reasons.push(`version proof FAILED: ${input.onDiskReason ?? 'the install record that names where the plugin came from is for a different folder from the copy OpenClaw selected'}, so it is not proven to be the pinned build expected at ${input.expectedVersion}`);
     } else if (!onDisk) {
       versionProof = false;
       versionUnread = true;
@@ -274,6 +303,11 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
     }
   }
 
+  // #1179 r3 (Astra 2): when the proof failed on the copy's source, not its
+  // version, the version the reader read is still the selected copy's.
+  const selectedCopyVersion = versionWrongSource || versionProvenanceUnverified
+    ? semver.valid(input.onDiskMeasuredVersion ?? '')
+    : null;
   return {
     ok: rosterProof && canaryProof && versionProof,
     rosterProof,
@@ -282,6 +316,8 @@ export function evaluateSelfCheck(input: SelfCheckInput): SelfCheckVerdict {
     versionProof,
     ...(versionUnread ? { versionUnread: true as const } : {}),
     ...(versionWrongSource ? { versionWrongSource: true as const } : {}),
+    ...(versionProvenanceUnverified ? { versionProvenanceUnverified: true as const } : {}),
+    ...(selectedCopyVersion ? { selectedCopyVersion } : {}),
     reasons,
   };
 }
@@ -297,9 +333,9 @@ export interface RunSelfCheckOptions {
    * `readSelectedRealtimePluginVersionDetail`, #1109 round 3: a leftover copy
    * at the right version next to an older selected one must not pass the
    * proof; #1179 r2: `wrongSource` keeps a known source mismatch apart from
-   * an unread version).
+   * an unread version; r3: `provenanceUnverified` and `measuredVersion`).
    */
-  readOnDiskVersion?: (home: string) => string | null | { version: string } | { version: null; reason: string; wrongSource?: true };
+  readOnDiskVersion?: (home: string) => string | null | { version: string } | { version: null; reason: string; wrongSource?: true; provenanceUnverified?: true; measuredVersion?: string };
   /**
    * Injectable live-roster reader (defaults to the gateway's newest
    * `http server listening` boot line, bounded by the running gateway's
@@ -421,6 +457,13 @@ export async function runPluginSelfCheck(
     : undefined;
   const onDiskWrongSource = onDiskRead !== null && typeof onDiskRead === 'object' && onDiskRead.version === null &&
     'wrongSource' in onDiskRead && onDiskRead.wrongSource === true;
+  // #1179 r3: the reader's other facts on such a null, forwarded as read.
+  const onDiskProvenanceUnverified = onDiskRead !== null && typeof onDiskRead === 'object' && onDiskRead.version === null &&
+    'provenanceUnverified' in onDiskRead && onDiskRead.provenanceUnverified === true;
+  const onDiskMeasuredVersion = onDiskRead !== null && typeof onDiskRead === 'object' && onDiskRead.version === null &&
+    'measuredVersion' in onDiskRead && typeof onDiskRead.measuredVersion === 'string'
+    ? onDiskRead.measuredVersion
+    : undefined;
   const canary = await probe(home, pluginId);
   const verdict = evaluateSelfCheck({
     pluginId,
@@ -433,6 +476,8 @@ export async function runPluginSelfCheck(
     onDiskVersion,
     ...(onDiskReason ? { onDiskReason } : {}),
     ...(onDiskWrongSource ? { onDiskWrongSource: true } : {}),
+    ...(onDiskProvenanceUnverified ? { onDiskProvenanceUnverified: true } : {}),
+    ...(onDiskMeasuredVersion ? { onDiskMeasuredVersion } : {}),
   });
   return { ...verdict, index, liveRoster, canary };
 }

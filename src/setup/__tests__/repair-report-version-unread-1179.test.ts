@@ -22,7 +22,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import type { ReconcileExecResult } from '../openclaw-reconcile.js';
 import type { CanaryResult, SelfCheckVerdict } from '../openclaw-selfcheck.js';
-import type { ReconcileInput, ReconcileVerdict } from '../../integrations/openclaw-plugin-index.js';
+import type { PluginInstallIndexState, ReconcileInput, ReconcileVerdict } from '../../integrations/openclaw-plugin-index.js';
 import { expectNoLaunch, installLaunchTripwire, isolateHostEnv } from '../../__tests__/support/openclaw-host-isolation.js';
 
 const tripwire = installLaunchTripwire();
@@ -42,17 +42,25 @@ const INSTALL = /plugins install|npm i -g|--force/;
 
 let home: string;
 let restoreEnv: () => void;
+let ttyDescriptor: PropertyDescriptor | undefined;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-1179-report-'));
   restoreEnv = isolateHostEnv(home);
   tripwire.reset();
+  // #1179 r3: the report takes canary consent from SHIELDCORTEX_ALLOW_GATEWAY_CANARY
+  // (scrubbed above) or a TTY stdin. Pin the TTY off, so a row is consented
+  // only when it sets the env itself, whatever terminal runs the suite.
+  ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true, writable: true });
 });
 
 afterEach(() => {
   try {
     expectNoLaunch(tripwire);
   } finally {
+    if (ttyDescriptor) Object.defineProperty(process.stdin, 'isTTY', ttyDescriptor);
+    else delete (process.stdin as { isTTY?: boolean }).isTTY;
     restoreEnv();
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -179,13 +187,19 @@ describe('#1179 r1 controls: measured stale versions and real roster failures ke
     expect(v.nextCommand).toMatch(/npm i -g shieldcortex/);
   });
 
-  it('the self-check read no version, but another layer measured one older: that measurement stands', () => {
+  // r3 (Astra 2) replaces r1's row here: that older reading is another copy's,
+  // not the selected one. It keeps main's outcome class, but it is reported as
+  // the copy found on disk, and the next step is doctor, never an install.
+  it('the self-check read no version, but another layer read an older copy: main\'s class, worded as that copy, next doctor (r3)', () => {
     const v = summariseRepair({
       applied: true, canaryConsented: false, expectedVersion: CLI, onDiskVersion: '5.20.0',
       selfCheck: { ok: false, rosterState: 'unproven', canaryProof: false, versionProof: false, versionUnread: true },
     });
     expect(v.outcome).toBe('protected-unproven');
-    expect(v.nextCommand).toBe(`openclaw plugins install --force npm:${PKG}@${CLI}`);
+    expect(v.headline).toMatch(/A plugin copy found on disk is v5\.20\.0, older than 5\.22\.1/);
+    expect(v.headline).toMatch(/the version OpenClaw selected is unverified/);
+    expect(v.headline).not.toMatch(/installed plugin is behind|build OpenClaw selected is v5\.20\.0/);
+    expect(v.nextCommand).toBe('shieldcortex doctor');
   });
 
   it('a roster proven ABSENT still says not protected, version read or not', () => {
@@ -366,7 +380,8 @@ describe('#1179 r2: a known wrong source is not an unread version', () => {
   it('the reader keeps its shape for every other caller; the detail marks the known mismatch', () => {
     clawhubCopy(CLI);
     expect(readSelectedRealtimePluginVersion(home)).toEqual({ version: null, reason: WRONG });
-    expect(readSelectedRealtimePluginVersionDetail(home)).toEqual({ version: null, reason: WRONG, wrongSource: true });
+    // r3: the detail also carries the selected copy's version it read.
+    expect(readSelectedRealtimePluginVersionDetail(home)).toEqual({ version: null, reason: WRONG, wrongSource: true, measuredVersion: CLI });
   });
 
   it('the real self-check runner: versionWrongSource, never versionUnread, and the reason says the source', async () => {
@@ -412,5 +427,352 @@ describe('#1179 r2: a known wrong source is not an unread version', () => {
     expect(ledger.outcome).toBe('protected-unproven');
     expect(ledger.detail[0]).toMatch(/the build OpenClaw selected is v4\.0\.0, older than 5\.22\.1/);
     expect(ledger.facts.nextCommand).toBe('shieldcortex doctor');
+  });
+});
+
+/**
+ * #1179 r3 (bounded post-adjudication round). Report layer only: what the
+ * full report, the compact report and the update ledger say. Repair's plan,
+ * its replacement gate and its commands do not change.
+ */
+const FAILED_PROBE: CanaryResult = { ran: true, denied: false, auditEntryFound: false };
+const consentCanary = (): void => {
+  process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY = '1';
+};
+const NOT_KNOWN_BROKEN = /not known-broken/;
+const WRONG_CLI = `the copy OpenClaw selected (v${CLI}) was installed from clawhub, not npm`;
+
+describe('#1179 r3 R1 (CASE-B1): a consented probe that did not confirm the plugin is never hidden behind the version line', () => {
+  it.each([
+    ['an unread version', {}, /which plugin version OpenClaw uses could not be read/],
+    ['a known wrong source', { onDiskReason: WRONG_CLI, onDiskWrongSource: true, onDiskMeasuredVersion: CLI }, /not installed from npm or a local path/],
+  ] as const)('loaded, consented, probe failed, %s: full, compact and ledger state the probe and the version fact; never "not known-broken"; next doctor --ai', (_l, over, fact) => {
+    consentCanary();
+    const check = unreadCheck({ liveRoster: [PLUGIN], canary: FAILED_PROBE, ...over });
+    expect(check).toMatchObject({ rosterState: 'loaded', canaryProof: false, versionProof: false });
+    const result = appliedSelfCheckOnly(unknownIndexVerdict({ enabled: null, inAllow: false }), check, FAILED_PROBE);
+    const full = formatReconcileReport(result);
+    const compact = formatReconcileReport(result, { compact: true });
+    const ledger = protectionLedgerFromReconcile(result);
+    // CASE's default: the probe verdict wins — unknown, ledger unproven.
+    expect(ledger).toMatchObject({ outcome: 'unknown', status: 'unproven' });
+    for (const text of [head(full), head(compact), ledger.detail.join('\n')]) {
+      expect(text).toMatch(/the live enforcement probe did not confirm it/);
+      expect(text).toMatch(fact);
+      expect(text).not.toMatch(NOT_KNOWN_BROKEN);
+      expect(text).not.toMatch(INSTALL);
+      expect(text).not.toMatch(DOWNGRADE);
+    }
+    expect(full[1]).toBe('   Next: shieldcortex doctor --ai');
+    expect(compact[1]).toBe('   Next: shieldcortex doctor --ai');
+    expect(ledger.facts.nextCommand).toBe('shieldcortex doctor --ai');
+  });
+
+  it.each([
+    ['unread', { versionUnread: true }, {}],
+    ['wrong source', { versionWrongSource: true, selectedCopyVersion: CLI }, {}],
+    ['provenance unverified', { versionProvenanceUnverified: true, selectedCopyVersion: CLI }, {}],
+    ['unread, the post-state read the selected build current', { versionUnread: true }, { installedVersion: CLI, installedVersionSource: 'selected-build' as const }],
+  ] as const)('consented probe failed + an unmeasured version (%s), roster loaded or unproven: the probe is stated, never "not known-broken", doctor --ai, no install', (_l, flags, extra) => {
+    for (const rosterState of ['loaded', 'unproven'] as const) {
+      const v = summariseRepair({
+        applied: true, canaryConsented: true, expectedVersion: CLI, onDiskVersion: null, ...extra,
+        selfCheck: { ok: false, rosterState, canaryProof: false, versionProof: false, ...flags },
+      });
+      expect(v.outcome).toBe('unknown');
+      expect(v.headline).toMatch(/the live enforcement probe did not confirm it/);
+      expect(v.headline).not.toMatch(NOT_KNOWN_BROKEN);
+      expect(v.headline).not.toMatch(INSTALL);
+      expect(v.nextCommand).toBe('shieldcortex doctor --ai');
+    }
+  });
+
+  it('controls: a failed probe on a current version, and an unread version with the probe not consented, keep their headlines', () => {
+    const current = summariseRepair({
+      applied: true, canaryConsented: true, expectedVersion: CLI,
+      selfCheck: { ok: false, rosterState: 'loaded', canaryProof: false, versionProof: true },
+    });
+    expect(current).toEqual({
+      outcome: 'unknown',
+      headline: 'The plugin is loaded, but the live enforcement probe did not confirm it. That needs a look.',
+      nextCommand: 'shieldcortex doctor --ai',
+    });
+    const notConsented = summariseRepair({
+      applied: true, canaryConsented: false, expectedVersion: CLI, onDiskVersion: null,
+      selfCheck: { ok: false, rosterState: 'loaded', canaryProof: false, versionProof: false, versionUnread: true },
+    });
+    expect(notConsented).toMatchObject({ outcome: 'unknown', nextCommand: 'shieldcortex doctor' });
+    expect(notConsented.headline).toMatch(/^Could not read which plugin version OpenClaw uses/);
+  });
+});
+
+/** A post-state whose selected build could not be read at all (package.json and manifest), with `elsewhere` found by the disk scan. */
+const unreadSelection = (elsewhere: string, roster: string[] | null): ReconcileVerdict => reconcilePluginState({
+  pluginId: PLUGIN,
+  expectedVersion: CLI,
+  config: { enabled: true, inAllow: true },
+  installsJson: null,
+  index: {
+    installRecords: { [PLUGIN]: { source: 'npm', version: CLI, installPath: SELECTED } },
+    plugins: [{ pluginId: PLUGIN, enabled: true, rootDir: SELECTED }],
+  },
+  indexRootDirExists: null,
+  indexRootDirUnreadable: true,
+  onDiskVersion: elsewhere,
+  liveRoster: roster,
+});
+const chipLine = (compact: string[]): string => compact.slice(2).join('\n');
+
+describe('#1179 r3 R2 (Astra 1, 2c): one reported version for the compact chip and the ledger facts', () => {
+  it.each([
+    ['roster unread', null],
+    ['roster-proven', [PLUGIN]],
+  ] as const)('conflicting copies control (selected 4.0.0, 5.22.1 elsewhere) — %s: facts.pluginVersion is the selected 4.0.0, as the headline and the chip say', (_l, roster) => {
+    const post = conflictingCopies('4.0.0', roster ? [...roster] : null);
+    const check = unreadCheck({ liveRoster: roster ? [...roster] : null, onDiskReason: STRICT_UNREAD });
+    const ledger = protectionLedgerFromReconcile(appliedSelfCheckOnly(post, check));
+    expect(ledger.summary).toMatch(/\bv4\.0\.0\b/);
+    expect(ledger.facts.pluginVersion).toBe('4.0.0');
+  });
+
+  it('the minor-behind conflict on a loaded gateway: facts.pluginVersion is the selected 5.20.0', () => {
+    const check = unreadCheck({ liveRoster: [PLUGIN], onDiskReason: STRICT_UNREAD });
+    const ledger = protectionLedgerFromReconcile(appliedSelfCheckOnly(conflictingCopies('5.20.0', [PLUGIN]), check));
+    expect(ledger.facts.pluginVersion).toBe('5.20.0');
+  });
+
+  it('a self-check that measured its own version: the chip and the facts name the selected build, not the other copy on disk', () => {
+    const check = unreadCheck({ onDiskVersion: '5.20.0' });
+    const result = appliedSelfCheckOnly(conflictingCopies('5.20.0', null), check);
+    expect(protectionLedgerFromReconcile(result).facts.pluginVersion).toBe('5.20.0');
+    const chips = chipLine(formatReconcileReport(result, { compact: true }));
+    expect(chips).toMatch(/\bv5\.20\.0\b/);
+    expect(chips).not.toMatch(/\bv5\.22\.1\b/);
+  });
+
+  it.each([
+    ['roster unread', null],
+    ['roster-proven', [PLUGIN]],
+  ] as const)('selected copy unread + a current leftover elsewhere — %s: no unqualified other-copy chip, pluginVersion null', (_l, roster) => {
+    const post = unreadSelection(CLI, roster ? [...roster] : null);
+    expect(post).toMatchObject({ state: 'version-unverified', installedVersion: null, onDiskVersion: CLI });
+    const result = appliedSelfCheckOnly(post, unreadCheck({ liveRoster: roster ? [...roster] : null, onDiskReason: STRICT_UNREAD }));
+    const compact = formatReconcileReport(result, { compact: true });
+    expect(compact[0]).toMatch(/^⚠️\s+Could not read which plugin version OpenClaw uses/);
+    expect(compact.join('\n')).not.toMatch(/\bv5\.22\.1\b/);
+    const ledger = protectionLedgerFromReconcile(result);
+    expect(ledger.facts.pluginVersion).toBeNull();
+    expect(ledger.detail.join('\n')).not.toMatch(/\bv5\.22\.1\b/);
+  });
+
+  it('a wrong-source copy only the self-check read (no post-state reading): the chip and the facts name that copy', () => {
+    const check = unreadCheck({ liveRoster: [PLUGIN], onDiskReason: 'the copy OpenClaw selected (v5.23.0) was installed from clawhub, not npm', onDiskWrongSource: true, onDiskMeasuredVersion: '5.23.0' });
+    expect(check).toMatchObject({ versionWrongSource: true, selectedCopyVersion: '5.23.0' });
+    const post = { ...unknownIndexVerdict({ enabled: null, inAllow: false }), onDiskVersion: '5.20.0' };
+    const result = appliedSelfCheckOnly(post, check);
+    expect(protectionLedgerFromReconcile(result).facts.pluginVersion).toBe('5.23.0');
+    const chips = chipLine(formatReconcileReport(result, { compact: true }));
+    expect(chips).toMatch(/\bv5\.23\.0\b/);
+    expect(chips).not.toMatch(/\bv5\.20\.0\b/);
+  });
+
+  it('control: no self-check ran (a dry run): the facts keep the scan version, as before', () => {
+    const verdict = conflictingCopies('4.0.0', null);
+    const dry: ReconcileExecResult = { verdict, plan: [], applied: false, stepResults: [], ok: false, messages: [] };
+    expect(protectionLedgerFromReconcile(dry).facts.pluginVersion).toBe(CLI);
+  });
+});
+
+describe('#1179 r3 R3 (Astra 2): another copy never decides the headline or the action', () => {
+  /**
+   * Astra's host: an install record alone (no roster entry) selects a ClawHub
+   * copy at 5.23.0; the CLI is 5.22.1; an old 5.20.0 npm project sits
+   * elsewhere on disk. The index is injected; the copies are temp files.
+   */
+  const astraHost = (): Extract<PluginInstallIndexState, { state: 'ok' }>['row'] => {
+    const hub = path.join(home, '.openclaw', 'clawhub', PLUGIN);
+    fs.mkdirSync(hub, { recursive: true });
+    fs.writeFileSync(path.join(hub, 'package.json'), JSON.stringify({ name: PKG, version: '5.23.0' }));
+    const stale = path.join(home, '.openclaw', 'npm', 'projects', 'old', 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+    fs.mkdirSync(stale, { recursive: true });
+    fs.writeFileSync(path.join(stale, 'package.json'), JSON.stringify({ name: PKG, version: '5.20.0' }));
+    return { installRecords: { [PLUGIN]: { source: 'clawhub', installPath: hub } }, plugins: [] } as never;
+  };
+
+  it.each([
+    ['roster unread', null],
+    ['roster loaded', [PLUGIN]],
+  ] as const)('Astra\'s record-only ClawHub 5.23.0 / CLI 5.22.1 / scan 5.20.0 — %s: no "behind" claim about the selected copy, no install command', async (_l, roster) => {
+    const row = astraHost();
+    const readIndex = (): PluginInstallIndexState => ({ state: 'ok', row });
+    // The real reader over that host, through the real self-check runner.
+    const check = await runPluginSelfCheck(home, {
+      expectedVersion: CLI,
+      readIndex: () => null,
+      readLiveRoster: () => (roster ? [...roster] : null),
+      readRegistrationSeenAfterBoot: () => false,
+      findGatewayAttributedRegistration: () => null,
+      findAnyRegistrationSince: () => null,
+      canaryProbe: async () => NO_CANARY,
+      readOnDiskVersion: (h) => readSelectedRealtimePluginVersionDetail(h, { readIndex }),
+    });
+    expect(check).toMatchObject({ versionProof: false, versionWrongSource: true, selectedCopyVersion: '5.23.0' });
+    // The post-state: a record-only selection takes main's unchecked
+    // precedence, the scan's 5.20.0 (source disk).
+    const post = reconcilePluginState({
+      pluginId: PLUGIN, expectedVersion: CLI, config: { enabled: true, inAllow: true }, installsJson: null,
+      index: row, onDiskVersion: '5.20.0', liveRoster: roster ? [...roster] : null,
+    });
+    expect(post).toMatchObject({ installedVersion: '5.20.0', installedVersionSource: 'disk' });
+    const result = appliedSelfCheckOnly(post, check);
+    const full = formatReconcileReport(result);
+    const compact = formatReconcileReport(result, { compact: true });
+    const ledger = protectionLedgerFromReconcile(result);
+    expect(ledger.outcome).toBe('unknown');
+    for (const text of [head(full), head(compact), ledger.detail.join('\n')]) {
+      expect(text).not.toMatch(DOWNGRADE);
+      expect(text).not.toMatch(INSTALL);
+      expect(text).toMatch(/\(v5\.23\.0\) was not installed from npm or a local path/);
+      expect(text).not.toMatch(/5\.20\.0/);
+    }
+    expect(full[1]).toBe('   Next: shieldcortex doctor');
+    expect(ledger.facts.nextCommand).toBe('shieldcortex doctor');
+    expect(ledger.facts.pluginVersion).toBe('5.23.0');
+    expect(chipLine(compact)).not.toMatch(/\bv5\.20\.0\b/);
+  });
+
+  it.each([
+    ['roster unread', null],
+    ['roster loaded', [PLUGIN]],
+  ] as const)('the gather family (both selected files unreadable, 4.0.0 only elsewhere) — %s: a disk finding, the selected version unverified, next doctor, no install', (_l, roster) => {
+    const post = unreadSelection('4.0.0', roster ? [...roster] : null);
+    expect(post).toMatchObject({ state: 'version-regressed', versionUnverified: true, installedVersion: '4.0.0', installedVersionSource: 'disk' });
+    const result = appliedSelfCheckOnly(post, unreadCheck({ liveRoster: roster ? [...roster] : null, onDiskReason: STRICT_UNREAD }));
+    const full = formatReconcileReport(result);
+    const compact = formatReconcileReport(result, { compact: true });
+    const ledger = protectionLedgerFromReconcile(result);
+    // Main's class for a 4.x copy under a 5.x CLI (the major-upgrade lag).
+    expect(ledger.outcome).toBe('protected-unproven');
+    for (const text of [head(full), head(compact), ledger.detail.join('\n')]) {
+      expect(text).toMatch(/A plugin copy found on disk is v4\.0\.0, older than 5\.22\.1/);
+      expect(text).toMatch(/the version OpenClaw selected is unverified/);
+      expect(text).not.toMatch(/installed plugin is behind|build OpenClaw selected is v4/);
+      expect(text).not.toMatch(INSTALL);
+    }
+    expect(full[1]).toBe('   Next: shieldcortex doctor');
+    expect(ledger.facts.nextCommand).toBe('shieldcortex doctor');
+    expect(ledger.facts.pluginVersion).toBeNull();
+    expect(ledger.summary).not.toMatch(/\bv4\.0\.0\b/);
+  });
+
+  it('the same with 5.20.0 elsewhere on a loaded gateway: main\'s class (unprotected) kept, worded as a disk finding, next doctor', () => {
+    const post = unreadSelection('5.20.0', [PLUGIN]);
+    expect(post).toMatchObject({ installedVersion: '5.20.0', installedVersionSource: 'disk' });
+    const ledger = protectionLedgerFromReconcile(appliedSelfCheckOnly(post, unreadCheck({ liveRoster: [PLUGIN], onDiskReason: STRICT_UNREAD })));
+    expect(ledger).toMatchObject({ outcome: 'unprotected', status: 'failed' });
+    expect(ledger.detail[0]).toMatch(/^Not proven protected by the build you expect: a plugin copy found on disk is v5\.20\.0, older than 5\.22\.1/);
+    expect(ledger.detail.join('\n')).not.toMatch(INSTALL);
+    expect(ledger.facts.nextCommand).toBe('shieldcortex doctor');
+  });
+
+  it('(2b) a wrong-source copy the post-state read OLDER keeps its known source in the stale headline', () => {
+    const check = unreadCheck({ onDiskReason: WRONG_CLI, onDiskWrongSource: true });
+    const ledger = protectionLedgerFromReconcile(appliedSelfCheckOnly(conflictingCopies('4.0.0', null), check));
+    expect(ledger.outcome).toBe('protected-unproven');
+    expect(ledger.detail[0]).toMatch(/the build OpenClaw selected is v4\.0\.0, older than 5\.22\.1, and that copy was not installed from npm or a local path/);
+    expect(ledger.facts.nextCommand).toBe('shieldcortex doctor');
+  });
+
+  it('a wrong-source copy the self-check itself read OLDER (no post-state reading): stale by that reading, its source kept, next doctor, no install', () => {
+    const check = unreadCheck({ onDiskReason: 'the copy OpenClaw selected (v5.20.0) was installed from clawhub, not npm', onDiskWrongSource: true, onDiskMeasuredVersion: '5.20.0' });
+    const ledger = protectionLedgerFromReconcile(appliedSelfCheckOnly(unknownIndexVerdict({ enabled: null, inAllow: false }), check));
+    expect(ledger.outcome).toBe('protected-unproven');
+    expect(ledger.detail[0]).toMatch(/the build OpenClaw selected is v5\.20\.0, older than 5\.22\.1, and that copy was not installed from npm or a local path/);
+    expect(ledger.detail.join('\n')).not.toMatch(INSTALL);
+    expect(ledger.facts.nextCommand).toBe('shieldcortex doctor');
+  });
+
+  it('exhaustive: with the self-check unread, wrong-source or provenance-unverified, no install command is ever printed, and a consented failed probe is never "not known-broken"', () => {
+    const versions = [null, '4.0.0', '5.20.0', CLI, '9.0.0'] as const;
+    for (const flags of [{ versionUnread: true }, { versionWrongSource: true }, { versionProvenanceUnverified: true }] as const) {
+      for (const rosterState of ['loaded', 'unproven'] as const) {
+        for (const onDiskVersion of versions) {
+          for (const selectedBuild of versions) {
+            for (const copy of versions) {
+              for (const canaryConsented of [true, false]) {
+                const v = summariseRepair({
+                  applied: true, canaryConsented, expectedVersion: CLI, onDiskVersion,
+                  ...(selectedBuild ? { installedVersion: selectedBuild, installedVersionSource: 'selected-build' as const } : {}),
+                  selfCheck: { ok: false, rosterState, canaryProof: false, versionProof: false, ...flags, ...(copy ? { selectedCopyVersion: copy } : {}) },
+                });
+                const text = renderRepairHeadline(v).join('\n');
+                expect(text).not.toMatch(INSTALL);
+                expect(v.nextCommand ?? '').not.toMatch(INSTALL);
+                if (canaryConsented) expect(text).not.toMatch(NOT_KNOWN_BROKEN);
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+});
+
+describe('#1179 r3 R4 (Astra 3): a source is that copy\'s only when its record names the same folder', () => {
+  /** The index roster selects folder A; the install record names folder B; both hold 5.22.1; B is recorded as ClawHub. */
+  const rosterAndRecordApart = (): PluginInstallIndexState => {
+    const write = (name: string): string => {
+      const dir = path.join(home, '.openclaw', 'npm', 'projects', name, 'node_modules', '@drakon-systems', 'shieldcortex-realtime');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: PKG, version: CLI }));
+      return dir;
+    };
+    const a = write('a');
+    const b = write('b');
+    return { state: 'ok', row: { installRecords: { [PLUGIN]: { source: 'clawhub', installPath: b } }, plugins: [{ pluginId: PLUGIN, enabled: true, rootDir: a }] } as never };
+  };
+
+  it('the self-check: provenance unverified — not "could not read", not a known mismatch; the proof still fails', () => {
+    const check = unreadCheck({ onDiskReason: 'a different folder', onDiskProvenanceUnverified: true, onDiskMeasuredVersion: CLI });
+    expect(check).toMatchObject({ ok: false, versionProof: false, versionProvenanceUnverified: true, selectedCopyVersion: CLI });
+    expect(check.versionUnread).toBeUndefined();
+    expect(check.versionWrongSource).toBeUndefined();
+    const why = check.reasons.join('\n');
+    expect(why).not.toMatch(/could not read the selected plugin copy's version/);
+    expect(why).toMatch(/version proof FAILED: a different folder, so it is not proven to be the pinned build expected at 5\.22\.1/);
+  });
+
+  it.each([
+    ['roster unread', null],
+    ['roster-proven', [PLUGIN]],
+  ] as const)('roster A / record B / both 5.22.1 / ClawHub on B, through the real runner and report — %s: provenance unverified, no definite mismatch, next doctor', async (_l, roster) => {
+    const state = rosterAndRecordApart();
+    const check = await runPluginSelfCheck(home, {
+      expectedVersion: CLI,
+      readIndex: () => null,
+      readLiveRoster: () => (roster ? [...roster] : null),
+      readRegistrationSeenAfterBoot: () => false,
+      findGatewayAttributedRegistration: () => null,
+      findAnyRegistrationSince: () => null,
+      canaryProbe: async () => NO_CANARY,
+      readOnDiskVersion: (h) => readSelectedRealtimePluginVersionDetail(h, { readIndex: () => state }),
+    });
+    expect(check).toMatchObject({ versionProof: false, versionProvenanceUnverified: true, selectedCopyVersion: CLI });
+    expect(check.versionWrongSource).toBeUndefined();
+    expect(check.versionUnread).toBeUndefined();
+    const result = appliedSelfCheckOnly(unknownIndexVerdict({ enabled: null, inAllow: false }), check);
+    const full = formatReconcileReport(result);
+    const compact = formatReconcileReport(result, { compact: true });
+    const ledger = protectionLedgerFromReconcile(result);
+    expect(ledger.outcome).toBe('unknown');
+    for (const text of [head(full), head(compact), ledger.detail.join('\n')]) {
+      expect(text).toMatch(/where that copy was installed from is unverified/);
+      expect(text).not.toMatch(/not installed from npm|installed from clawhub/);
+      expect(text).not.toMatch(/Could not read/i);
+      expect(text).not.toMatch(DOWNGRADE);
+      expect(text).not.toMatch(INSTALL);
+    }
+    expect(full[1]).toBe('   Next: shieldcortex doctor');
+    expect(full.join('\n')).not.toMatch(/installed from clawhub, not npm/);
   });
 });
