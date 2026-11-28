@@ -1,0 +1,58 @@
+# approval-policy: posts the commit status `approval-policy` on a PR head.
+# Runs the check and reads the policy from the DEFAULT branch only (pull_request_target, issue_comment,
+# workflow_run and workflow_dispatch all run default-branch code). PR code is never checked out or run,
+# so a PR cannot change the rules it is judged by. No third-party actions: the two files are fetched
+# from the default branch with the job token, and the check is Python 3 standard library only.
+# Formal reviews reach it through approval-policy-review-relay (pull_request_review -> workflow_run),
+# so no PR-head workflow ever holds the statuses: write token.
+name: approval-policy
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
+  issue_comment:
+    types: [created, edited, deleted]
+  workflow_run:
+    workflows: ["CI", "approval-policy-selftest", "approval-policy-review-relay"]
+    types: [completed]
+  check_suite:
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to re-evaluate"
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  checks: read
+  statuses: write
+
+concurrency:
+  group: approval-policy-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr || github.event.workflow_run.pull_requests[0].number || github.event.check_suite.pull_requests[0].number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch the check and the policy from the default branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          mkdir -p ap
+          for f in .github/scripts/approval_policy_check.py .github/approval-policy.yml; do
+            curl -fsSL --retry 3 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw" \
+              -o "ap/$(basename "$f")" "$GITHUB_API_URL/repos/$REPO/contents/$f?ref=$REF"
+          done
+      - name: Evaluate and post status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 -I ap/approval_policy_check.py --policy ap/approval-policy.yml --event "$GITHUB_EVENT_PATH"

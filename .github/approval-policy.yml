@@ -1,0 +1,176 @@
+# approval-policy.yml for Drakon-Systems-Ltd/ShieldCortex (improvement lane 8f2cc37a).
+# Read by .github/scripts/approval_policy_check.py from the DEFAULT branch, never from the PR head.
+# It posts the commit status `approval-policy` on the PR head. The status is green only when every rule
+# that the PR's touched paths, labels or title match is evidenced at the exact head. The strictest
+# combination wins. A file that matches no class, or a policy that fails to parse, makes the check red.
+#
+# Evidence that counts (formats: clawd skills/fleet-doctrine/references/review-protocol.md P10):
+#   REVIEW head <sha> | <seat>: APPROVE ...            (or INDEPENDENT REVIEW PANEL head <sha> | ...)
+#   FABLE GREEN-LIGHT head <sha> | decision: MERGE | ref: <verdict file>
+#   MIGRATION GATE head <sha> | downgrade: <tested> | backward-compatible: yes | backup: <id>
+#   a formal GitHub APPROVE at the exact head from a fleet account (fills one seat) or the owner.
+# Comments count only from trusted.lane / trusted.owner; anything else is ignored (P7).
+#
+# This file is a FLOOR. A stricter rule in the lane prompt, DECISIONS.md or a freeze still applies.
+# Owner-only items (money, prices, legal, credentials, data deletion, Guard posture, freezes) can never be
+# approved by this policy: they need the owner's own GitHub APPROVE at the exact head, and a lane never merges them.
+# Changing this file is a rule-file change (P5): its own PR, full review and a Fable decision.
+version: 1
+repo: Drakon-Systems-Ltd/ShieldCortex
+lane: 8f2cc37a
+trusted:
+  owner: [mkdelta221]
+  lane: [jarvis-drakon]
+  fleet: [TARSDrakon, CASE-Drakon, Veronica-Drakon, FRIDAY-Drakon]
+seats:
+  sol: [sol, gpt-6.2-sol, gpt-6.1-sol]
+  opus: [opus, claude-opus-5-5]
+fleet_stand_in: true
+# Parity with the lane rules and Claude Approvals ("the author can take one of those seats"): a fleet
+# account's own comment verdict on its own PR may fill one seat. Set true to demand a non-author seat.
+author_cannot_fill_seat: false
+ci:
+  require_at_least_one: true
+  ignore: [evaluate, approval-policy-review-relay]
+fable:
+  approve_decisions: [MERGE, "MERGE WITH FOLLOW-UP", APPROVE, GREEN-LIGHT, NORMAL RELEASE]
+default_class: default
+classes:
+  - name: owner-only
+    purpose: "Owner-only (DECISIONS 2026-10-27 16:0xZ, 2026-11-08 15:05Z, 2026-11-19 21:52Z): prices, legal/terms/privacy text, credentials, freezes. Only the owner's own GitHub APPROVE clears it."
+    paths:
+      - "**/terms/**"
+      - "**/terms.*"
+      - "**/privacy/**"
+      - "**/privacy.*"
+      - "**/legal/**"
+      - "**/(legal)/**"
+      - "**/pricing/**"
+      - "**/pricing.*"
+      - "**/api-pricing/**"
+      - "/LICENSE"
+      - "/LICENSE.md"
+      - "/LICENSE.txt"
+      - "/COPYING"
+      - "**/.env"
+      - "**/.env.local"
+      - "**/.env.production*"
+    labels: [owner-only, frozen, freeze, needs-michael]
+    require:
+      owner: true
+  - name: rule-files
+    purpose: "P5 rule files (CI config, CODEOWNERS, CLAUDE.md, AGENTS.md, .claude/, git hooks): full review plus a Fable decision."
+    paths:
+      - ".github/**"
+      - "**/.github/**"
+      - "**/CODEOWNERS"
+      - "**/CLAUDE.md"
+      - "**/AGENTS.md"
+      - "**/REVIEW.md"
+      - "**/.claude/**"
+      - "**/.codex/**"
+      - "**/.husky/**"
+      - "**/.githooks/**"
+      - "**/lefthook*"
+      - "**/.pre-commit-config*"
+      - "**/.gitlab-ci*"
+      - "**/.circleci/**"
+      - "**/azure-pipelines*"
+      - "**/.buildkite/**"
+    require:
+      seats: [sol, opus]
+      fable: true
+  - name: security
+    purpose: "Security, auth and payment paths: auth/sessions, crypto, signing/evidence, secrets, billing, migrations, the always-block list, release PRs (Sol + Opus). Full panel; never relaxed by any other rule."
+    paths:
+      - "**/*auth*"
+      - "**/*auth*/**"
+      - "**/*login*"
+      - "**/*login*/**"
+      - "**/*session*"
+      - "**/*session*/**"
+      - "**/*oauth*"
+      - "**/*crypt*"
+      - "**/*crypt*/**"
+      - "**/*secret*"
+      - "**/*secret*/**"
+      - "**/*token*"
+      - "**/*credential*"
+      - "**/*password*"
+      - "**/*mfa*"
+      - "**/*mfa*/**"
+      - "**/*billing*"
+      - "**/*billing*/**"
+      - "**/*stripe*"
+      - "**/*stripe*/**"
+      - "**/*payment*"
+      - "**/*payment*/**"
+      - "**/*checkout*"
+      - "**/*checkout*/**"
+      - "**/*subscription*"
+      - "**/*webhook*"
+      - "**/*webhook*/**"
+      - "**/*signing*"
+      - "**/*signature*"
+      - "**/*evidence*"
+      - "**/*always-block*"
+      - "**/*alwaysBlock*"
+      - "**/*always_block*"
+      - "src/license/**"
+    labels: [security, release]
+    titles: ['^(release|chore\(release\))\b', '\bGHSA-']
+    require:
+      seats: [sol, opus]
+  - name: migrations
+    purpose: "DECISIONS 2026-10-27 16:0xZ: both/all panel seats at the exact head, green CI, MIGRATION GATE evidence (tested downgrade, backward-compatible, fresh prod backup). Destructive data changes are owner-only. Lanes still keep the 2026-11-04 migration merge window."
+    paths:
+      - "**/migrations/**"
+      - "**/migrations.ts"
+      - "**/migrate*.ts"
+    destructive_patterns:
+      - '\bDROP\s+(TABLE|COLUMN|SCHEMA|DATABASE|INDEX\s+CONCURRENTLY)\b'
+      - '\bTRUNCATE\b'
+      - '\bDELETE\s+FROM\b'
+      - '\bALTER\s+TABLE\s+\S+\s+DROP\b'
+      - '\bop\.drop_(table|column)\b'
+      - '\bop\.execute\(\s*\S{0,4}(DELETE|DROP|TRUNCATE)\b'
+    destructive_stop:
+      - '^\s*def\s+downgrade\b'
+    require:
+      seats: [sol, opus]
+      migration_gate: true
+  - name: dependencies
+    purpose: "Dependency manifests and lockfiles only: one reviewer plus green CI. Major bumps stay FULL under the lane prompt."
+    paths:
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/pnpm-lock.yaml"
+      - "**/yarn.lock"
+      - "**/bun.lock"
+      - "**/bun.lockb"
+      - "**/requirements*.txt"
+      - "**/poetry.lock"
+      - "**/uv.lock"
+    require:
+      seats: [sol]
+  - name: docs-tests
+    purpose: "Docs or tests only: one reviewer plus green CI."
+    paths:
+      - "docs/**"
+      - "**/*.md"
+      - "**/test/**"
+      - "**/tests/**"
+      - "**/__tests__/**"
+      - "**/*.test.*"
+      - "**/*.spec.*"
+      - "**/test_*.py"
+      - "**/*_test.py"
+      - "**/fixtures/**"
+      - "**/e2e/**"
+    require:
+      any_seats: 1
+  - name: default
+    purpose: "Everything else follows the existing lane rule. DECISIONS 2026-11-15 12:5xZ: Sol alone plus green CI clears a PR, including guard/policy/install code."
+    paths: ["**"]
+    require:
+      seats: [sol]

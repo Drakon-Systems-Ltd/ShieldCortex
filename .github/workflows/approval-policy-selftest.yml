@@ -1,0 +1,49 @@
+# Runs the approval-policy unit tests and validates the policy file of the PR itself.
+# Read-only token; runs PR code without secrets. Only on changes to the check or the policy.
+name: approval-policy-selftest
+
+on:
+  pull_request:
+    paths:
+      - ".github/approval-policy.yml"
+      - ".github/scripts/approval_policy_check.py"
+      - ".github/scripts/test_approval_policy_check.py"
+      - ".github/scripts/fixtures/**"
+      - ".github/workflows/approval-policy*.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/approval-policy.yml"
+      - ".github/scripts/approval_policy_check.py"
+      - ".github/scripts/test_approval_policy_check.py"
+      - ".github/scripts/fixtures/**"
+      - ".github/workflows/approval-policy*.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  approval-policy-selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch the PR's check files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p t/fixtures
+          get() { curl -fsSL --retry 3 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw" -o "$2" "$GITHUB_API_URL/repos/$HEAD_REPO/contents/$1?ref=$REF"; }
+          get .github/scripts/approval_policy_check.py t/approval_policy_check.py
+          get .github/scripts/test_approval_policy_check.py t/test_approval_policy_check.py
+          get .github/scripts/fixtures/policy-basic.yml t/fixtures/policy-basic.yml
+          get .github/scripts/fixtures/cases.json t/fixtures/cases.json
+          get .github/approval-policy.yml t/approval-policy.yml
+      - name: Unit tests
+        working-directory: t
+        run: python3 -m unittest -v test_approval_policy_check
+      - name: Validate this repo's policy
+        working-directory: t
+        run: python3 approval_policy_check.py --validate approval-policy.yml
