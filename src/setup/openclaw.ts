@@ -56,6 +56,7 @@ import {
   readRealtimeReplacementEvidence,
   readSelectedRealtimeInstall,
   readSelectedRealtimePluginVersion,
+  verifiedRealtimeProjectDir,
 } from '../integrations/openclaw-realtime-install.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -2741,9 +2742,24 @@ export async function repairOpenClawManagedPins(
   if (!pin) {
     return { status: 'failed', message: `Could not read this CLI's exact version, so nothing was changed. Run \`${installCommand}\` then \`openclaw gateway restart\`.` };
   }
-  const keep = assessRealtimeReplacement(readRealtimeReplacementEvidence(home), pin);
+  const evidence = readRealtimeReplacementEvidence(home);
+  const keep = assessRealtimeReplacement(evidence, pin);
   if (!keep.replace) {
     return { status: 'failed', message: `Realtime plugin ${keep.summary}; nothing was changed. To replace it with v${pin}: \`${installCommand}\`.` };
+  }
+  // #260 r11 (Sol): the manifest rewritten below must be the one of the copy
+  // the preflight just verified. `projectDir` comes from the disk resolver,
+  // which can choose a different copy (an empty installs.json path, a newer
+  // leftover project) — so compare real paths, and refuse on any doubt.
+  const verifiedProject = verifiedRealtimeProjectDir(home, evidence);
+  let realProject: string | null;
+  try {
+    realProject = fs.realpathSync(projectDir);
+  } catch {
+    realProject = null;
+  }
+  if (!verifiedProject || realProject !== verifiedProject) {
+    return { status: 'failed', message: `The plugin folders disagree: the managed project this repair would rewrite is not the one holding the copy OpenClaw selected, so nothing was changed. To reinstall it cleanly: \`${installCommand}\`, then \`openclaw gateway restart\`.` };
   }
 
   console.log('Reconciling OpenClaw managed plugin pins (EOVERRIDE guard):');

@@ -521,3 +521,27 @@ export function readRealtimeReplacementEvidence(
     deleting,
   };
 }
+
+/**
+ * #260 r11 (Sol): the managed npm project folder that physically holds the
+ * copy a replacement preflight verified — the real path of the
+ * `~/.openclaw/npm/projects/<dir>` the selected copy's real location sits in.
+ * Null when the preflight verified no specific copy, or that copy is in no
+ * managed project, or a real path cannot be read. A write whose target comes
+ * from the disk resolver (`resolveRealtimeProjectDir`) goes to this folder or
+ * does not happen: the resolver can choose a different copy than OpenClaw did.
+ */
+export function verifiedRealtimeProjectDir(
+  home: string,
+  evidence: { selected: SelectedRealtimeInstall },
+): string | null {
+  if (evidence.selected.state !== 'selected') return null;
+  try {
+    const projects = fs.realpathSync(path.join(home, '.openclaw', 'npm', 'projects'));
+    const rel = path.relative(projects, fs.realpathSync(evidence.selected.dir));
+    if (!rel || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) return null;
+    return path.join(projects, rel.split(path.sep)[0]);
+  } catch {
+    return null;
+  }
+}
