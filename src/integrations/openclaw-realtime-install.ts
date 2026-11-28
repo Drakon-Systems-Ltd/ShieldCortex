@@ -545,3 +545,56 @@ export function verifiedRealtimeProjectDir(
     return null;
   }
 }
+
+/** Where a managed-pin repair may write, or why it may not. */
+export type ManagedManifestTarget =
+  | { ok: true; projectDir: string; manifestPath: string }
+  | { ok: false; why: 'folders-disagree' | 'manifest-not-plain-file' };
+
+/**
+ * #260 r12 (Sol): the one target check for a managed-pin repair, shared by the
+ * repair and by doctor's advice for it. The folder must be the one the
+ * preflight verified ({@link verifiedRealtimeProjectDir}) — and so must the
+ * FILE: its package.json must be a regular file, not a link, whose real path
+ * is that folder's own package.json. A link into a different project passed
+ * the folder check and was then written through. Any doubt refuses.
+ */
+export function managedManifestTarget(
+  home: string,
+  evidence: { selected: SelectedRealtimeInstall },
+  projectDir: string | null,
+): ManagedManifestTarget {
+  const verified = verifiedRealtimeProjectDir(home, evidence);
+  if (!verified || !projectDir) return { ok: false, why: 'folders-disagree' };
+  try {
+    if (fs.realpathSync(projectDir) !== verified) return { ok: false, why: 'folders-disagree' };
+  } catch {
+    return { ok: false, why: 'folders-disagree' };
+  }
+  const manifestPath = path.join(verified, 'package.json');
+  try {
+    const named = path.join(projectDir, 'package.json');
+    const st = fs.lstatSync(named);
+    if (st.isSymbolicLink() || !st.isFile() || fs.realpathSync(named) !== manifestPath) {
+      return { ok: false, why: 'manifest-not-plain-file' };
+    }
+  } catch {
+    return { ok: false, why: 'manifest-not-plain-file' };
+  }
+  return { ok: true, projectDir: verified, manifestPath };
+}
+
+/**
+ * Re-check, right before a write, that a target {@link managedManifestTarget}
+ * approved still holds: the folder's real path is unchanged and its
+ * package.json is still a regular file, not a link. False on any doubt.
+ */
+export function managedManifestTargetStillHolds(target: { projectDir: string; manifestPath: string }): boolean {
+  try {
+    if (fs.realpathSync(target.projectDir) !== target.projectDir) return false;
+    const st = fs.lstatSync(target.manifestPath);
+    return !st.isSymbolicLink() && st.isFile();
+  } catch {
+    return false;
+  }
+}

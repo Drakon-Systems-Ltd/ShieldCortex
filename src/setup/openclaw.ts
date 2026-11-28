@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execSync, spawnSync } from 'child_process';
+import { randomBytes } from 'crypto';
 import semver from 'semver';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { gatewayRestartAdvice, gatewayBootLogAdvice } from './gateway-restart-command.js';
@@ -56,7 +57,8 @@ import {
   readRealtimeReplacementEvidence,
   readSelectedRealtimeInstall,
   readSelectedRealtimePluginVersion,
-  verifiedRealtimeProjectDir,
+  managedManifestTarget,
+  managedManifestTargetStillHolds,
 } from '../integrations/openclaw-realtime-install.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -2677,6 +2679,26 @@ function readSelfVersion(): string | null {
   }
 }
 
+/**
+ * #260 r12: create `file` exclusively (fails on any existing name, a link
+ * included) and write `text` to it; if writing fails, remove what this created.
+ */
+function createExclusive(file: string, text: string, mode: number): void {
+  const fd = fs.openSync(file, 'wx', mode);
+  let ok = false;
+  try {
+    fs.fchmodSync(fd, mode);
+    fs.writeFileSync(fd, text);
+    fs.fsyncSync(fd);
+    ok = true;
+  } finally {
+    fs.closeSync(fd);
+    if (!ok) {
+      try { fs.unlinkSync(file); } catch { /* already gone */ }
+    }
+  }
+}
+
 export type ManagedPinRepairStatus = 'not-installed' | 'clean' | 'healed' | 'failed';
 export interface ManagedPinRepairResult {
   status: ManagedPinRepairStatus;
@@ -2751,15 +2773,14 @@ export async function repairOpenClawManagedPins(
   // the preflight just verified. `projectDir` comes from the disk resolver,
   // which can choose a different copy (an empty installs.json path, a newer
   // leftover project) — so compare real paths, and refuse on any doubt.
-  const verifiedProject = verifiedRealtimeProjectDir(home, evidence);
-  let realProject: string | null;
-  try {
-    realProject = fs.realpathSync(projectDir);
-  } catch {
-    realProject = null;
-  }
-  if (!verifiedProject || realProject !== verifiedProject) {
-    return { status: 'failed', message: `The plugin folders disagree: the managed project this repair would rewrite is not the one holding the copy OpenClaw selected, so nothing was changed. To reinstall it cleanly: \`${installCommand}\`, then \`openclaw gateway restart\`.` };
+  // r12 (Sol): the FILE is bound too (a package.json link into another
+  // project passed the folder check), by the same check doctor's advice uses.
+  const target = managedManifestTarget(home, evidence, projectDir);
+  if (!target.ok) {
+    const why = target.why === 'folders-disagree'
+      ? 'The plugin folders disagree: the managed project this repair would rewrite is not the one holding the copy OpenClaw selected'
+      : 'The managed project\'s package.json is not a plain file in the folder holding the copy OpenClaw selected (it is a link, or not a regular file)';
+    return { status: 'failed', message: `${why}, so nothing was changed. To reinstall it cleanly: \`${installCommand}\`, then \`openclaw gateway restart\`.` };
   }
 
   console.log('Reconciling OpenClaw managed plugin pins (EOVERRIDE guard):');
@@ -2768,13 +2789,25 @@ export async function repairOpenClawManagedPins(
   if (staleShieldcortex) console.log(`  - stale shieldcortex lib pin: ${String(deps.shieldcortex)} → ${selfVersion}`);
   if (disabled) console.log('  - plugin is disabled in config (auto-disabled after a failed update)');
 
-  // 1. Backup the project manifest before touching it.
-  const manifestPath = path.join(projectDir, 'package.json');
+  // 1. Backup the project manifest before touching it. r12: every write here
+  //    creates a NEW file inside the verified folder (exclusive create, so
+  //    never through an existing name or link) after re-checking the target,
+  //    and the manifest is replaced by rename — which replaces the directory
+  //    entry and never follows a link at it. Any doubt or error refuses; there
+  //    is no fallback to a direct write.
+  const manifestPath = target.manifestPath;
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const changed = (): ManagedPinRepairResult => ({ status: 'failed', message: 'The managed project changed while this repair was running (its folder moved, or its package.json was removed or replaced), so the manifest was not rewritten. Check it again: `shieldcortex doctor`.' });
+  let mode: number;
   try {
-    fs.writeFileSync(`${manifestPath}.repair-backup-${ts}`, JSON.stringify(manifest, null, 2));
+    mode = fs.lstatSync(manifestPath).mode & 0o777;
+    if (!managedManifestTargetStillHolds(target)) return changed();
+    createExclusive(`${manifestPath}.repair-backup-${ts}`, JSON.stringify(manifest, null, 2), mode);
     console.log(`  - safety backup: ${`${manifestPath}.repair-backup-${ts}`.replace(home, '~')}`);
-  } catch { /* best-effort */ }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { status: 'failed', message: `Could not write a safety backup of the project manifest (${msg}), so nothing was changed.` };
+  }
 
   // 2. Strip co-present (latent) pins from deps AND managedPeerDependencies so
   //    the reinstall re-derives them at the CURRENT override version, then
@@ -2784,9 +2817,20 @@ export async function repairOpenClawManagedPins(
   stripManagedPinsFromManifest(manifest as Record<string, unknown>, latentPins);
   if (staleShieldcortex && selfVersion) deps.shieldcortex = selfVersion;
   (manifest as Record<string, unknown>).dependencies = deps;
+  const tmp = path.join(target.projectDir, `.package.json.repair-${process.pid}-${randomBytes(6).toString('hex')}.tmp`);
+  let created = false;
   try {
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+    createExclusive(tmp, JSON.stringify(manifest, null, 2) + '\n', mode);
+    created = true;
+    if (!managedManifestTargetStillHolds(target)) {
+      fs.unlinkSync(tmp);
+      return { ...changed(), message: `${changed().message} Backup left at ${manifestPath}.repair-backup-${ts}.` };
+    }
+    fs.renameSync(tmp, manifestPath);
   } catch (err) {
+    if (created) {
+      try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+    }
     const msg = err instanceof Error ? err.message : String(err);
     return { status: 'failed', message: `Could not write the project manifest (${msg}). Backup left at ${manifestPath}.repair-backup-${ts}.` };
   }
