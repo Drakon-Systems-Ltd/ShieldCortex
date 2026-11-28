@@ -76,6 +76,9 @@ describe('#145 — the closing state is re-read after remediation', () => {
       readLandedVersion: () => ({ version: '4.47.19' }),
       readExistingInstall: () => ({ selected: { state: 'selected', version: '4.47.16' }, linked: { state: 'absent' } }),
       reloadGateway: async () => ({ restarted: true }),
+      // #260 Sol r2: success needs the restart PROVEN back up after the
+      // install; an unobserved one leaves the self-check reading the old gateway.
+      waitForGateway: async () => ({ ready: true, waitedMs: 1 }),
       selfCheck: async () => passingSelfCheck,
       pruneDir: () => void 0,
     });

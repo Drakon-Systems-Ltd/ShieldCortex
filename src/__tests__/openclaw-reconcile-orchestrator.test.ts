@@ -78,6 +78,8 @@ describe('reconcileOpenClawPluginState', () => {
       home, expectedVersion: '4.47.2', apply: true,
       runCommand: (argv) => { calls.push(argv); return { status: 0, output: '' }; },
       reloadGateway: async () => { reloaded = true; return { restarted: true }; },
+      // #260 Sol r2: success needs the restart PROVEN back up after the install.
+      waitForGateway: async () => ({ ready: true, waitedMs: 1 }),
       selfCheck: async () => passingSelfCheck,
     });
     expect(calls).toContainEqual(['plugins', 'install', '--force', 'npm:@drakon-systems/shieldcortex-realtime@4.47.2']);

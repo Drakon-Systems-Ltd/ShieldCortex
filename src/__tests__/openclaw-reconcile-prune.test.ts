@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { reconcileOpenClawPluginState } from '../setup/openclaw-reconcile.js';
+import { reconcileOpenClawPluginState, formatReconcileReport } from '../setup/openclaw-reconcile.js';
 import type { SelfCheckRunResult } from '../setup/openclaw-selfcheck.js';
 
 /**
@@ -240,6 +240,45 @@ describe('duplicate-dir prune — only a true duplicate of a verified, unambiguo
     const { pruned } = await runReconcile();
     expect(pruned).toEqual([BASE_DIR]);
     untouched(GEN_DIR);
+  });
+
+  // Sol r2: report the prune that HAPPENED, not the one planned.
+  it('a PARTIAL prune is reported as such and fails the repair, even with a passing self-check', async () => {
+    const OTHER = 'drakon-systems-shieldcortex-realtime-0ld';
+    bothKept([{ name: BASE_DIR, version: '4.40.0' }, { name: OTHER, version: '4.30.0' }, { name: GEN_DIR, version: '4.47.2' }], GEN_DIR);
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: () => ({ status: 0, output: '' }),
+      reloadGateway: async () => ({ restarted: true }),
+      waitForGateway: async () => ({ ready: true, waitedMs: 1 }),
+      selfCheck: async () => passingSelfCheck,
+      pruneDir: (h, d) => {
+        if (d === OTHER) throw new Error('EBUSY: resource busy');
+        fs.rmSync(path.join(h, '.openclaw', 'npm', 'projects', d), { recursive: true, force: true });
+      },
+    });
+    const step = res.stepResults.find((s) => s.kind === 'prune-duplicate-dirs');
+    expect(step).toMatchObject({ ok: false });
+    expect(step!.detail).toBe(`pruned 1 of 2 dir(s); still on disk: ${OTHER}`);
+    expect(res.ok).toBe(false);
+    expect(res.messages.join(' ')).toMatch(/prune incomplete: removed 1 of 2/);
+    expect(formatReconcileReport(res, { compact: true }).join(' ')).toMatch(/prune incomplete/);
+    expect(formatReconcileReport(res, { compact: true }).join(' ')).not.toMatch(/pruned dups/);
+    untouched(GEN_DIR, OTHER);
+  });
+
+  it('positive control — a complete prune reports the count removed and does not fail the repair', async () => {
+    bothKept([{ name: BASE_DIR, version: '4.40.0' }, { name: GEN_DIR, version: '4.47.2' }], GEN_DIR);
+    const res = await reconcileOpenClawPluginState({
+      home, expectedVersion: '4.47.2', apply: true,
+      runCommand: () => ({ status: 0, output: '' }),
+      reloadGateway: async () => ({ restarted: true }),
+      waitForGateway: async () => ({ ready: true, waitedMs: 1 }),
+      selfCheck: async () => passingSelfCheck,
+      pruneDir: (h, d) => { fs.rmSync(path.join(h, '.openclaw', 'npm', 'projects', d), { recursive: true, force: true }); },
+    });
+    expect(res.stepResults.find((s) => s.kind === 'prune-duplicate-dirs')).toMatchObject({ ok: true, detail: 'pruned 1 dir(s)' });
+    expect(res.ok).toBe(true);
   });
 
   it('dry-run plans the same (no prune step) on the stale-selection host', async () => {
