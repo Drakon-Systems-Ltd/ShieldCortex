@@ -9,7 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execSync, spawnSync } from 'child_process';
+import { execSync, spawnSync, type SpawnSyncReturns } from 'child_process';
 import { randomBytes } from 'crypto';
 import semver from 'semver';
 import { fileURLToPath, pathToFileURL } from 'url';
@@ -2702,6 +2702,32 @@ function createExclusive(file: string, text: string, mode: number): void {
   }
 }
 
+/**
+ * #260 r15 (Jarvis 1): what the managed-pin heal launches. A parameter, never
+ * an environment variable (an env-selectable binary would be a new authority
+ * surface); production callers pass nothing and get the real lookup and
+ * runner. Tests pass recording fakes, so no test can reach a host's OpenClaw.
+ */
+export interface ManagedPinRepairDeps {
+  /** The `openclaw` binary to run, or null when there is none. */
+  resolveOpenClawBin?: () => string | null;
+  /** Run `bin` with `args` (enable and the pinned reinstall). */
+  runOpenClaw?: (bin: string, args: string[], options: { env: NodeJS.ProcessEnv; timeout: number }) => SpawnSyncReturns<string>;
+}
+
+function defaultResolveOpenClawBin(): string | null {
+  try {
+    const bin = execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 }).trim();
+    return bin && fs.existsSync(bin) ? bin : null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultRunOpenClaw(bin: string, args: string[], options: { env: NodeJS.ProcessEnv; timeout: number }): SpawnSyncReturns<string> {
+  return spawnSync(bin, args, { encoding: 'utf-8', env: options.env, timeout: options.timeout });
+}
+
 export type ManagedPinRepairStatus = 'not-installed' | 'clean' | 'healed' | 'failed';
 export interface ManagedPinRepairResult {
   status: ManagedPinRepairStatus;
@@ -2729,7 +2755,10 @@ export async function repairOpenClawManagedPins(
   homeArg?: string,
   /** The one bare-spec retry for the whole operation (`openclaw repair` shares one). */
   bareRetryBudget: BareRetryBudget = new BareRetryBudget(),
+  launch: ManagedPinRepairDeps = {},
 ): Promise<ManagedPinRepairResult> {
+  const resolveBin = launch.resolveOpenClawBin ?? defaultResolveOpenClawBin;
+  const runOpenClaw = launch.runOpenClaw ?? defaultRunOpenClaw;
   const home = homeArg ?? resolveUserHome();
   const pluginId = 'shieldcortex-realtime';
 
@@ -2863,18 +2892,15 @@ export async function repairOpenClawManagedPins(
   }
 
   // 3. Resolve the openclaw binary.
-  let openclawBin: string;
-  try {
-    openclawBin = execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 }).trim();
-    if (!openclawBin || !fs.existsSync(openclawBin)) throw new Error('not on PATH');
-  } catch {
+  const openclawBin = resolveBin();
+  if (!openclawBin) {
     return { status: 'failed', message: 'Manifest reconciled, but `openclaw` is not on PATH to reinstall. Run `' + installCommand + '` then `openclaw gateway restart`.' };
   }
   const spawnEnv = openClawChildEnv({}, home);
 
   // 4. Re-enable if it was auto-disabled.
   if (disabled) {
-    spawnSync(openclawBin, ['plugins', 'enable', pluginId], { encoding: 'utf-8', env: spawnEnv, timeout: 30000 });
+    runOpenClaw(openclawBin, ['plugins', 'enable', pluginId], { env: spawnEnv, timeout: 30000 });
   }
 
   // 5. Reinstall so OpenClaw recomputes a consistent manifest (re-derives the
@@ -2882,7 +2908,7 @@ export async function repairOpenClawManagedPins(
   console.log(`  - reinstalling: ${installCommand}`);
   const { result: reinstall, args: ranArgs } = runWithNpmSourceFallbackSync(
     realtimePluginInstallArgs(pin),
-    (args) => spawnSync(openclawBin, args, { encoding: 'utf-8', env: spawnEnv, timeout: 180000 }),
+    (args) => runOpenClaw(openclawBin, args, { env: spawnEnv, timeout: 180000 }),
     (r) => (r.status === 0 ? null : spawnOutcome(r)),
     bareRetryBudget,
   );

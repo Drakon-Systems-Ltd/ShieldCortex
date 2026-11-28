@@ -10,17 +10,42 @@
  *
  * Everything is injected; nothing touches a live gateway.
  */
-import { describe, expect, it } from '@jest/globals';
-import {
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import type { GatewayReloadResult, ReconcileOptions } from '../openclaw-reconcile.js';
+import type { ReconcileInput } from '../../integrations/openclaw-plugin-index.js';
+import type { SelfCheckRunResult } from '../openclaw-selfcheck.js';
+import { expectNoLaunch, installLaunchTripwire, isolateHostEnv } from '../../__tests__/support/openclaw-host-isolation.js';
+
+// #260 r15 (Jarvis 1): a tripwire on every real launcher, before the code under test loads.
+const tripwire = installLaunchTripwire();
+const {
   reconcileOpenClawPluginState,
   formatReconcileReport,
   protectionLedgerFromReconcile,
   manualGatewayRestartCommand,
-  type GatewayReloadResult,
-  type ReconcileOptions,
-} from '../openclaw-reconcile.js';
-import { reconcilePluginState, type ReconcileInput } from '../../integrations/openclaw-plugin-index.js';
-import type { SelfCheckRunResult } from '../openclaw-selfcheck.js';
+} = await import('../openclaw-reconcile.js');
+const { reconcilePluginState } = await import('../../integrations/openclaw-plugin-index.js');
+
+// #260 r15 (Jarvis 1): HOME is a temp dir (this suite's executor runs default
+// to os.homedir()), host-pointing variables scrubbed, no real launcher runs.
+let isolatedHome: string;
+let restoreEnv: () => void;
+beforeEach(() => {
+  isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-260-evidence-'));
+  restoreEnv = isolateHostEnv(isolatedHome);
+  tripwire.reset();
+});
+afterEach(() => {
+  try {
+    expectNoLaunch(tripwire);
+  } finally {
+    restoreEnv();
+    fs.rmSync(isolatedHome, { recursive: true, force: true });
+  }
+});
 
 const PLUGIN = 'shieldcortex-realtime';
 

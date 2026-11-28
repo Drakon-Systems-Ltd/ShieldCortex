@@ -4,8 +4,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { reconcileOpenClawPluginState } from '../setup/openclaw-reconcile.js';
 import type { SelfCheckRunResult } from '../setup/openclaw-selfcheck.js';
+import { expectNoLaunch, installLaunchTripwire, isolateHostEnv } from './support/openclaw-host-isolation.js';
+
+// #260 r15 (Jarvis 1): a tripwire on every real launcher, before the code under test loads.
+const tripwire = installLaunchTripwire();
+const { reconcileOpenClawPluginState } = await import('../setup/openclaw-reconcile.js');
 
 /**
  * The reconciler orchestrator: gather → classify → plan → (execute behind
@@ -15,12 +19,20 @@ import type { SelfCheckRunResult } from '../setup/openclaw-selfcheck.js';
 const PLUGIN = 'shieldcortex-realtime';
 const PKG_SUBPATH = path.join('node_modules', '@drakon-systems', 'shieldcortex-realtime');
 let home: string;
+let restoreEnv: () => void;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-orch-'));
+  restoreEnv = isolateHostEnv(home);
+  tripwire.reset();
 });
 afterEach(() => {
-  fs.rmSync(home, { recursive: true, force: true });
+  try {
+    expectNoLaunch(tripwire);
+  } finally {
+    restoreEnv();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 function setup(opts: { roster: Array<{ pluginId: string; enabled: boolean }>; onDisk: string }): void {

@@ -3,20 +3,24 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
-import {
+import type { SelfCheckRunResult } from '../setup/openclaw-selfcheck.js';
+import { expectNoLaunch, installLaunchTripwire, isolateHostEnv } from './support/openclaw-host-isolation.js';
+
+// #260 r15 (Jarvis 1): a tripwire on every real launcher, before the code under test loads.
+const tripwire = installLaunchTripwire();
+const {
   assessDuplicateProjectDirs,
   gatherReconcileInput,
   planReconcileActions,
   readPluginInstallIndex,
   readPluginInstallIndexState,
   reconcilePluginState,
-} from '../integrations/openclaw-plugin-index.js';
-import { checkOpenClawPluginLoadState, renderPluginLoadVerdict } from '../cli/doctor.js';
-import { extractFixCommands, formatDoctorReport, nextCommandForFailures, sanitiseDoctorRowsForDisplay } from '../cli/doctor-report.js';
-import { assessRealtimeReplacement, REALTIME_PLUGIN_PACKAGE } from '../setup/openclaw-plugin-spec.js';
-import { readRealtimeReplacementEvidence } from '../integrations/openclaw-realtime-install.js';
-import { reconcileOpenClawPluginState } from '../setup/openclaw-reconcile.js';
-import type { SelfCheckRunResult } from '../setup/openclaw-selfcheck.js';
+} = await import('../integrations/openclaw-plugin-index.js');
+const { checkOpenClawPluginLoadState, renderPluginLoadVerdict } = await import('../cli/doctor.js');
+const { extractFixCommands, formatDoctorReport, nextCommandForFailures, sanitiseDoctorRowsForDisplay } = await import('../cli/doctor-report.js');
+const { assessRealtimeReplacement, REALTIME_PLUGIN_PACKAGE } = await import('../setup/openclaw-plugin-spec.js');
+const { readRealtimeReplacementEvidence } = await import('../integrations/openclaw-realtime-install.js');
+const { reconcileOpenClawPluginState } = await import('../setup/openclaw-reconcile.js');
 
 /**
  * Disk-level tests for the reconciler's input gathering — fully isolated in a
@@ -28,12 +32,20 @@ const PLUGIN = 'shieldcortex-realtime';
 const PKG_SUBPATH = path.join('node_modules', '@drakon-systems', 'shieldcortex-realtime');
 
 let home: string;
+let restoreEnv: () => void;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-reconcile-'));
+  restoreEnv = isolateHostEnv(home);
+  tripwire.reset();
 });
 afterEach(() => {
-  fs.rmSync(home, { recursive: true, force: true });
+  try {
+    expectNoLaunch(tripwire);
+  } finally {
+    restoreEnv();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 function writeConfig(enabled: boolean | null, inAllow: boolean): void {

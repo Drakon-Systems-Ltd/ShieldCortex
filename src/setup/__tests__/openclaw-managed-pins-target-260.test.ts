@@ -10,40 +10,47 @@
  * paths compared): a disagreement, or no verified copy in a managed project,
  * refuses with nothing written. Both SQLite index layouts.
  *
- * Nothing here can run a native process: `child_process` is mocked, the
- * `which openclaw` lookup reports "not found", and every launcher throws and
- * is asserted unused. A repair that proceeds therefore stops at "`openclaw` is
- * not on PATH", after its manifest writes. PATH deliberately still reaches the
- * host's own (so an installed OpenClaw stays findable) behind a stub
- * `openclaw` that records any run — the mock, not PATH, is the isolation.
+ * Nothing here can run a native process (#260 r15, Jarvis 1). The repair
+ * takes its `openclaw` lookup and runner as an explicit parameter, and every
+ * call here passes a recording fake (by default: "no openclaw", so a repair
+ * that proceeds stops at "`openclaw` is not on PATH", after its manifest
+ * writes). `child_process` is mocked as a tripwire: every launcher throws and
+ * is asserted unused — `which openclaw` included. The environment is scrubbed
+ * of OpenClaw/ShieldCortex/multi-clawd/Claude variables and HOME is a temp
+ * dir. PATH deliberately still reaches the host's own (so an installed
+ * OpenClaw stays findable) behind a stub `openclaw` that records any run —
+ * the injected fake and the tripwire, not PATH, are the isolation.
  */
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import semver from 'semver';
 import Database from 'better-sqlite3';
-import { createRequire } from 'module';
+import type { SpawnSyncReturns } from 'child_process';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { expectNoLaunch, installLaunchTripwire, isolateHostEnv } from '../../__tests__/support/openclaw-host-isolation.js';
 
-const refuseLaunch = (name: string) => jest.fn((..._args: unknown[]): never => {
-  throw new Error(`fixture: ${name} must not launch a native process in this suite`);
-});
-const launchers = {
-  execSync: jest.fn((cmd: unknown): never => {
-    if (cmd === 'which openclaw') throw new Error('fixture: openclaw not found');
-    throw new Error(`fixture: execSync(${String(cmd)}) must not run in this suite`);
-  }),
-  execFileSync: refuseLaunch('execFileSync'),
-  spawnSync: refuseLaunch('spawnSync'),
-  spawn: refuseLaunch('spawn'),
-  exec: refuseLaunch('exec'),
-  execFile: refuseLaunch('execFile'),
-};
-// The real module's other exports stay; a self-import here would recurse.
-const actual = createRequire(import.meta.url)('child_process') as Record<string, unknown>;
-jest.unstable_mockModule('child_process', () => ({ ...actual, ...launchers, default: { ...actual, ...launchers } }));
+const tripwire = installLaunchTripwire();
 
 const { repairOpenClawManagedPins } = await import('../openclaw.js');
+const { realtimePluginInstallArgs } = await import('../openclaw-plugin-spec.js');
+
+/** The recording fake every repair here gets: `bin` null = no openclaw. */
+const fake = {
+  bin: null as string | null,
+  lookups: 0,
+  runs: [] as string[][],
+  deps: {
+    resolveOpenClawBin: (): string | null => {
+      fake.lookups += 1;
+      return fake.bin;
+    },
+    runOpenClaw: (_bin: string, args: string[]): SpawnSyncReturns<string> => {
+      fake.runs.push(args);
+      return { pid: 0, output: [], stdout: '', stderr: '', status: 0, signal: null };
+    },
+  },
+};
 
 const ID = 'shieldcortex-realtime';
 const PKG = '@drakon-systems/shieldcortex-realtime';
@@ -52,32 +59,33 @@ const SELF = (): string => JSON.parse(
 ).version;
 
 let home: string;
-let prevPath: string | undefined;
+let restoreEnv: () => void;
 let stubRan: string;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-260-pins-'));
-  prevPath = process.env.PATH;
+  const hostPath = process.env.PATH;
+  restoreEnv = isolateHostEnv(home);
   const stubBin = path.join(home, 'stub-bin');
   stubRan = path.join(home, 'stub-openclaw-ran');
   fs.mkdirSync(stubBin);
   fs.writeFileSync(path.join(stubBin, 'openclaw'), `#!/bin/sh\necho ran >> '${stubRan}'\n`, { mode: 0o755 });
-  process.env.PATH = [stubBin, prevPath].filter(Boolean).join(path.delimiter);
-  for (const fn of Object.values(launchers)) fn.mockClear();
+  process.env.PATH = [stubBin, hostPath].filter(Boolean).join(path.delimiter);
+  tripwire.reset();
+  fake.bin = null;
+  fake.lookups = 0;
+  fake.runs = [];
   jest.spyOn(console, 'log').mockImplementation(() => {});
 });
 
 afterEach(() => {
   try {
-    // The lookup is the only child_process call the repair may make here.
-    for (const [name, fn] of Object.entries(launchers)) {
-      const calls = name === 'execSync' ? fn.mock.calls.filter(([cmd]) => cmd !== 'which openclaw') : fn.mock.calls;
-      expect([name, calls]).toEqual([name, []]);
-    }
+    // No real launcher at all — not even the `which openclaw` lookup.
+    expectNoLaunch(tripwire);
     expect(fs.existsSync(stubRan)).toBe(false);
   } finally {
     jest.restoreAllMocks();
-    process.env.PATH = prevPath;
+    restoreEnv();
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
@@ -138,7 +146,7 @@ describe.each(['new', 'legacy'] as const)('#260 r11: managed-pin repair writes o
     baseConfig('');
     const before = [selected.root, newer.root].map((r) => fs.readFileSync(path.join(r, 'package.json')));
 
-    const result = await repairOpenClawManagedPins(home);
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
 
     expect(result.status).toBe('failed');
     expect(result.message).toMatch(/plugin folders disagree/);
@@ -155,7 +163,7 @@ describe.each(['new', 'legacy'] as const)('#260 r11: managed-pin repair writes o
     writeIndex(layout, selected.dir, SELF());
     baseConfig(selected.dir);
 
-    const result = await repairOpenClawManagedPins(home);
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
 
     // It rewrote the manifest (co-present pin stripped, backup kept), then
     // stopped only because this suite's mocked lookup finds no `openclaw`.
@@ -172,7 +180,7 @@ describe.each(['new', 'legacy'] as const)('#260 r11: managed-pin repair writes o
     writeIndex(layout, link, SELF());
     baseConfig();
 
-    const result = await repairOpenClawManagedPins(home);
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
 
     expect(result.message).toMatch(/Manifest reconciled, but `openclaw` is not on PATH/);
     expect(backups(selected.root)).toHaveLength(1);
@@ -185,7 +193,7 @@ describe.each(['new', 'legacy'] as const)('#260 r11: managed-pin repair writes o
     const aliasHome = path.join(os.tmpdir(), `${path.basename(home)}-alias`);
     fs.symlinkSync(home, aliasHome);
     try {
-      const result = await repairOpenClawManagedPins(aliasHome);
+      const result = await repairOpenClawManagedPins(aliasHome, undefined, fake.deps);
       expect(result.message).toMatch(/Manifest reconciled, but `openclaw` is not on PATH/);
       expect(backups(selected.root)).toHaveLength(1);
     } finally {
@@ -200,7 +208,7 @@ describe('#260 r11: no verified copy in a managed project — refused, nothing w
     baseConfig();
     const before = fs.readFileSync(path.join(onlyOnDisk.root, 'package.json'));
 
-    const result = await repairOpenClawManagedPins(home);
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
 
     expect(result.status).toBe('failed');
     expect(result.message).toMatch(/plugin folders disagree/);
@@ -217,7 +225,7 @@ describe('#260 r11: no verified copy in a managed project — refused, nothing w
     writeIndex('new', elsewhere, SELF());
     baseConfig();
 
-    const result = await repairOpenClawManagedPins(home);
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
 
     expect(result.status).toBe('failed');
     expect(result.message).toMatch(/plugin folders disagree/);
@@ -245,7 +253,7 @@ describe.each(['new', 'legacy'] as const)('#260 r12: managed-pin repair writes o
     baseConfig(selected.dir);
     const otherBefore = fs.readFileSync(path.join(other.root, 'package.json'));
 
-    const result = await repairOpenClawManagedPins(home);
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
 
     expect(result.status).toBe('failed');
     expect(result.message).toMatch(/package\.json is not a plain file/);
@@ -271,7 +279,7 @@ describe.each(['new', 'legacy'] as const)('#260 r12: managed-pin repair writes o
     }) as typeof fs.lstatSync);
     const before = fs.readFileSync(path.join(selected.root, 'package.json'));
 
-    const result = await repairOpenClawManagedPins(home);
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
 
     expect(result.status).toBe('failed');
     expect(result.message).toMatch(/package\.json is not a plain file/);
@@ -291,7 +299,7 @@ describe.each(['new', 'legacy'] as const)('#260 r12: managed-pin repair writes o
       }
       return fd;
     }) as typeof fs.openSync);
-    const result = await repairOpenClawManagedPins(home);
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
     expect(raced).toBe(true);
     return result;
   }
@@ -338,7 +346,7 @@ describe.each(['new', 'legacy'] as const)('#260 r12: managed-pin repair writes o
     jest.spyOn(fs, 'renameSync').mockImplementation(() => { throw new Error('fixture: rename refused'); });
     const write = jest.spyOn(fs, 'writeFileSync');
 
-    const result = await repairOpenClawManagedPins(home);
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
 
     expect(result.status).toBe('failed');
     expect(result.message).toMatch(/Could not write the project manifest \(fixture: rename refused\)/);
@@ -356,7 +364,7 @@ describe.each(['new', 'legacy'] as const)('#260 r12: managed-pin repair writes o
     fs.chmodSync(manifest, 0o640);
     const original = JSON.parse(fs.readFileSync(manifest, 'utf-8')) as Record<string, unknown>;
 
-    const result = await repairOpenClawManagedPins(home);
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
 
     expect(result.message).toMatch(/Manifest reconciled, but `openclaw` is not on PATH/);
     expect(fs.lstatSync(manifest).isFile()).toBe(true);
@@ -398,7 +406,7 @@ describe.each(['new', 'legacy'] as const)('#260 r13: managed-pin repair rewrites
       }
       return fd;
     }) as typeof fs.openSync);
-    const result = await repairOpenClawManagedPins(home);
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
     expect(raced).toBe(true);
     return result;
   }
@@ -504,5 +512,43 @@ describe.each(['new', 'legacy'] as const)('#260 r13: managed-pin repair rewrites
     const [backup] = backups(selected.root);
     expect(fs.readFileSync(path.join(selected.root, backup), 'utf-8')).toBe(JSON.stringify(original, null, 2));
     expect(tmps(selected.root)).toEqual([]);
+  });
+});
+
+/**
+ * #260 r15 (Jarvis 1): this suite once ran a REAL `openclaw` with a forced
+ * install — emptying PATH did not stop `which openclaw` finding it. The
+ * repair's lookup and runner are now an explicit parameter; the fake given
+ * here is the only thing it can launch.
+ */
+describe.each(['new', 'legacy'] as const)('#260 r15: the managed-pin repair launches only the runner it is given (%s index layout)', (layout) => {
+  it('a full heal: the lookup and the pinned reinstall go through the injected fake, nothing real runs', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    fake.bin = path.join(home, 'fake-bin', 'openclaw');
+
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
+
+    expect(result.status).toBe('healed');
+    expect(fake.lookups).toBe(1);
+    expect(fake.runs).toEqual([realtimePluginInstallArgs(SELF())]);
+  });
+
+  it('tripwire: a recording `openclaw` first on PATH is never run when the repair reaches its launch step', async () => {
+    const selected = project('drakon-systems-shieldcortex-realtime-aaa', SELF(), '1.0.0');
+    writeIndex(layout, selected.dir, SELF());
+    baseConfig(selected.dir);
+    // The suite's own setup put the recorder first on PATH.
+    expect(process.env.PATH?.split(path.delimiter)[0]).toBe(path.join(home, 'stub-bin'));
+
+    const result = await repairOpenClawManagedPins(home, undefined, fake.deps);
+
+    // It got as far as looking for `openclaw` (the manifest was rewritten)…
+    expect(result.message).toMatch(/Manifest reconciled, but `openclaw` is not on PATH/);
+    expect(fake.lookups).toBe(1);
+    // …and neither the recorder on PATH nor any real launcher ran.
+    expect(fs.existsSync(stubRan)).toBe(false);
+    expectNoLaunch(tripwire);
   });
 });

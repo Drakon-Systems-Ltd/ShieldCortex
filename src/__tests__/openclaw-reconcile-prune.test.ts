@@ -3,9 +3,14 @@ import os from 'os';
 import path from 'path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { reconcileOpenClawPluginState, formatReconcileReport } from '../setup/openclaw-reconcile.js';
-import { assessDuplicateProjectDirs, type PluginIndexRow } from '../integrations/openclaw-plugin-index.js';
+import type { PluginIndexRow } from '../integrations/openclaw-plugin-index.js';
 import type { SelfCheckRunResult } from '../setup/openclaw-selfcheck.js';
+import { expectNoLaunch, installLaunchTripwire, isolateHostEnv } from './support/openclaw-host-isolation.js';
+
+// #260 r15 (Jarvis 1): a tripwire on every real launcher, before the code under test loads.
+const tripwire = installLaunchTripwire();
+const { reconcileOpenClawPluginState, formatReconcileReport } = await import('../setup/openclaw-reconcile.js');
+const { assessDuplicateProjectDirs } = await import('../integrations/openclaw-plugin-index.js');
 
 /**
  * #74 finding 4 (HOST-SAFETY BLOCKER): duplicate-dir pruning must NEVER delete a
@@ -24,8 +29,20 @@ const BASE_DIR = 'drakon-systems-shieldcortex-realtime-6e7e2e7717';
 const GEN_DIR = 'drakon-systems-shieldcortex-realtime-6e7e2e7717__openclaw-generation__1752230000-4.47.2-abc';
 
 let home: string;
-beforeEach(() => { home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-prune-')); });
-afterEach(() => { fs.rmSync(home, { recursive: true, force: true }); });
+let restoreEnv: () => void;
+beforeEach(() => {
+  home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-prune-'));
+  restoreEnv = isolateHostEnv(home);
+  tripwire.reset();
+});
+afterEach(() => {
+  try {
+    expectNoLaunch(tripwire);
+  } finally {
+    restoreEnv();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
 
 const passingSelfCheck: SelfCheckRunResult = {
   ok: true, rosterProof: true, rosterState: 'loaded', canaryProof: true, versionProof: true, reasons: ['ok'],

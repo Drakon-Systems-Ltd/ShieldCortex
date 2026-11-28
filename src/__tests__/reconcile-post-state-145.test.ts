@@ -11,13 +11,35 @@
  * commands disagree about the same fact, the operator cannot know which to
  * believe.
  */
-import { describe, it, expect } from '@jest/globals';
-import {
-  reconcileOpenClawPluginState,
-  formatReconcileReport,
-} from '../setup/openclaw-reconcile.js';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { afterEach, beforeEach, describe, it, expect } from '@jest/globals';
 import type { ReconcileInput, ReconcileVerdict } from '../integrations/openclaw-plugin-index.js';
-import { reconcilePluginState } from '../integrations/openclaw-plugin-index.js';
+import { expectNoLaunch, installLaunchTripwire, isolateHostEnv } from './support/openclaw-host-isolation.js';
+
+// #260 r15 (Jarvis 1): a tripwire on every real launcher, before the code under test loads.
+const tripwire = installLaunchTripwire();
+const { reconcileOpenClawPluginState, formatReconcileReport } = await import('../setup/openclaw-reconcile.js');
+const { reconcilePluginState } = await import('../integrations/openclaw-plugin-index.js');
+
+// #260 r15 (Jarvis 1): HOME is a temp dir (this suite's executor runs default
+// to os.homedir()), host-pointing variables scrubbed, no real launcher runs.
+let isolatedHome: string;
+let restoreEnv: () => void;
+beforeEach(() => {
+  isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-145-'));
+  restoreEnv = isolateHostEnv(isolatedHome);
+  tripwire.reset();
+});
+afterEach(() => {
+  try {
+    expectNoLaunch(tripwire);
+  } finally {
+    restoreEnv();
+    fs.rmSync(isolatedHome, { recursive: true, force: true });
+  }
+});
 
 const PLUGIN = 'shieldcortex-realtime';
 
