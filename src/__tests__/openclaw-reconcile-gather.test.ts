@@ -345,6 +345,21 @@ describe('#260 Case — value_json size cap and the fresher layout', () => {
     expect(readPluginInstallIndexState(home)).toMatchObject({ state: 'unreadable', why: expect.stringMatching(/over the .*-byte cap/) });
   });
 
+  // Case r2 (non-blocking): with one column SQL NULL, `a + b` was NULL, the
+  // oversized other column was cut to NULL by its CASE, and the lenient
+  // reader returned an EMPTY index instead of "could not read".
+  it('legacy layout, one column NULL and the other over the cap: unreadable in BOTH readers, never an empty index', () => {
+    const stateDir = path.join(home, '.openclaw', 'state');
+    fs.mkdirSync(stateDir, { recursive: true });
+    const db = new Database(path.join(stateDir, 'openclaw.sqlite'));
+    // A schema without NOT NULL, so either column can be SQL NULL.
+    db.exec('CREATE TABLE installed_plugin_index (index_key TEXT PRIMARY KEY, generated_at_ms INTEGER, install_records_json TEXT, plugins_json TEXT, warning TEXT)');
+    db.prepare('INSERT INTO installed_plugin_index VALUES (?, ?, ?, ?, NULL)').run('k', 1, null, JSON.stringify([{ pluginId: PLUGIN, pad: 'x'.repeat(CAP) }]));
+    db.close();
+    expect(readPluginInstallIndex(home)).toBeNull();
+    expect(readPluginInstallIndexState(home)).toMatchObject({ state: 'unreadable', why: expect.stringMatching(/over the .*-byte cap/) });
+  });
+
   it('control: a row just under the cap reads ok', () => {
     const pad = 'x'.repeat(CAP - 4096);
     writeMachineStateIndex({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1' } }, plugins: [upstreamEntry('/x', { pad })] });
@@ -676,6 +691,24 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     // real boot line); everything else here is the real gather.
     const input = { ...gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => roster }), registrationSeenAfterBoot: true };
     expect(reconcilePluginState(input)).toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: false });
+  });
+
+  // Case r2 (non-blocking): the recorded paths are normalised before the
+  // entry-point containment check — `..`, `//` and `.` segments used to make
+  // a real build read as "no build".
+  it.each([
+    ['a `..` segment', (d: string) => [path.dirname(d), '..', path.basename(path.dirname(d)), path.basename(d)].join(path.sep)],
+    ['a doubled separator', (d: string) => d.replace(`${path.sep}node_modules${path.sep}`, `${path.sep}node_modules${path.sep}${path.sep}`)],
+    ['a `.` segment and a trailing separator', (d: string) => `${path.dirname(d)}${path.sep}.${path.sep}${path.basename(d)}${path.sep}`],
+  ])('a selected rootDir / record path written with %s still verifies as the build it is', (_l, spell) => {
+    writeConfig(true, true);
+    const real = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    const odd = spell(real);
+    expect(odd).not.toBe(real);
+    writeMachineStateIndex({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: odd } }, plugins: [upstreamEntry(odd)] });
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null });
+    expect(input).toMatchObject({ indexInstallPathExists: true, indexRootDirExists: true, selectedVersion: '5.22.1' });
+    expect(reconcilePluginState(input)).toMatchObject({ state: 'healthy', indexPathMissing: false, installedVersion: '5.22.1' });
   });
 
   it('a record with no installPath, or a relative one, is "not checked" — never "missing"', () => {

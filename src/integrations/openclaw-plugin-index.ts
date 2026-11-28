@@ -1065,7 +1065,11 @@ function readLegacyIndexRow(db: import('better-sqlite3').Database): LocatedIndex
     `CASE WHEN length(CAST(${col} AS BLOB)) > @cap THEN NULL ELSE ${col} END AS ${col}`;
   const legacy = db
     .prepare(
-      `SELECT length(CAST(install_records_json AS BLOB)) + length(CAST(plugins_json AS BLOB)) AS bytes, ` +
+      // Case r2 (non-blocking): `a + b` is NULL when either column is SQL
+      // NULL, which hid an oversized other column (its CASE below cut it to
+      // NULL, and the lenient reader read that as an empty index). Each
+      // column counts as 0 bytes when NULL; the sum is never NULL.
+      `SELECT coalesce(length(CAST(install_records_json AS BLOB)), 0) + coalesce(length(CAST(plugins_json AS BLOB)), 0) AS bytes, ` +
         `${cap('install_records_json')}, ${cap('plugins_json')}, warning, generated_at_ms ` +
         `FROM ${LEGACY_INDEX_TABLE} ORDER BY generated_at_ms DESC LIMIT 1`,
     )
@@ -1381,8 +1385,13 @@ function readInstallsJsonRecord(home: string, pluginId: string): InstallsJsonRec
  * checked: no path, a relative one, or a read that failed some other way
  * (EACCES, EIO) — a measurement we do not have, never a verdict either way.
  */
-function verifiedPluginBuildAt(dir: unknown, pluginId: string): boolean | null {
-  if (typeof dir !== 'string' || !path.isAbsolute(dir)) return null;
+function verifiedPluginBuildAt(rawDir: unknown, pluginId: string): boolean | null {
+  if (typeof rawDir !== 'string' || !path.isAbsolute(rawDir)) return null;
+  // Case r2 (non-blocking): normalise first. A recorded path with `..`, `//`
+  // or `.` segments made every resolved entry point fail the containment
+  // check below (`path.resolve` normalises them, the raw prefix did not), so
+  // a real build read as "no build" — a false `load-unproven`.
+  const dir = path.resolve(rawDir);
   const gone = (err: unknown): boolean => {
     const code = (err as NodeJS.ErrnoException)?.code;
     return code === 'ENOENT' || code === 'ENOTDIR';
