@@ -22,6 +22,7 @@ import {
 import {
   canonicalProjectDirFromIndex,
   gatherReconcileInput,
+  planReconcileActions,
   reconcilePluginState,
   REALTIME_PLUGIN_ID,
   type ReconcileInput,
@@ -115,7 +116,13 @@ import { formatBudget, LTM_CAP_MAX, LTM_CAP_MIN } from '../cloud/capacity.js';
 import { isRepairLogName } from '../logs/retention.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
-import { realtimePluginInstallCommand } from '../setup/openclaw-plugin-spec.js';
+import {
+  assessRealtimeReplacement,
+  exactPluginPin,
+  REALTIME_PLUGIN_PACKAGE,
+  realtimePluginInstallCommand,
+} from '../setup/openclaw-plugin-spec.js';
+import { readRealtimeReplacementEvidence } from '../integrations/openclaw-realtime-install.js';
 import {
   CLAUDE_CODE_ENFORCEMENT_FLOOR,
   detectClaudeCode,
@@ -8995,9 +9002,13 @@ export async function checkOpenClawPluginLoadState(
 
   const input = gatherReconcileInput(home, { expectedVersion });
   const verdict = reconcilePluginState(input);
-  const result = verdict.state === 'duplicate-install'
-    ? withDuplicateInstallEvidence(renderPluginLoadVerdict(verdict), home, input)
-    : renderPluginLoadVerdict(verdict);
+  const result = withRepairPreflight(
+    verdict.state === 'duplicate-install'
+      ? withDuplicateInstallEvidence(renderPluginLoadVerdict(verdict), home, input)
+      : renderPluginLoadVerdict(verdict),
+    verdict,
+    home,
+  );
 
   // #226: "loaded" is not "protecting the conversation". A plugin whose
   // conversation-access grant is missing has had its llm_input/llm_output
@@ -9025,6 +9036,38 @@ export async function checkOpenClawPluginLoadState(
     }
   }
   return result;
+}
+
+/**
+ * #260 r7 (Sol): doctor never offers a repair that repair's own #1109
+ * preflight would refuse for the same host. When the verdict's plan forces a
+ * realtime install and {@link assessRealtimeReplacement} would leave the
+ * plugin alone (a newer, linked or unreadable copy, or install evidence that
+ * conflicts), the fix says that and what to check — no repair or install
+ * command. The preflight's refusals are not weakened here; this only stops
+ * doctor promising what repair will not do.
+ */
+function withRepairPreflight(result: CheckResult, verdict: ReconcileVerdict, home: string): CheckResult {
+  if (result.status === 'pass') return result;
+  const pin = exactPluginPin(verdict.expectedVersion);
+  if (!pin) return result;
+  const plan = planReconcileActions(verdict, {
+    expectedVersion: verdict.expectedVersion,
+    pluginId: REALTIME_PLUGIN_ID,
+    packageName: REALTIME_PLUGIN_PACKAGE,
+  });
+  if (!plan.some((s) => s.kind === 'openclaw-install' || s.kind === 'openclaw-install-pinned')) return result;
+  const keep = assessRealtimeReplacement(readRealtimeReplacementEvidence(home), pin);
+  if (keep.replace) return result;
+  // The fix no longer runs an `openclaw plugins` command, so it is not gated.
+  const { needsOpenClawCli: _gate, ...rest } = result;
+  void _gate;
+  return {
+    ...rest,
+    fix:
+      'Check it: `shieldcortex openclaw status`. Repair will not reinstall the plugin here: ' +
+      `${keep.summary.replace(/^left alone — /, '')}.`,
+  };
 }
 
 /**
@@ -9087,14 +9130,17 @@ export function withDuplicateInstallEvidence(
  * when the reconciler measured one, else "version unverified". Never the
  * expected version: that is what this CLI wants, not what is on the host.
  * Hand-built verdicts without `installedVersion` fall back to the layers they
- * do carry (on-disk, then the index record), never to the pin.
+ * do carry (on-disk, then the index record), never to the pin; r7 (Sol): the
+ * index record's version is worded as the record's, not as a measured build.
+ * (`onDiskVersion` may itself be installs.json's record — #1176 scope.)
  */
 export function measuredVersionText(verdict: ReconcileVerdict): string {
   if (verdict.versionUnverified === true) return 'version unverified';
-  const v = verdict.installedVersion !== undefined
-    ? verdict.installedVersion
-    : verdict.onDiskVersion ?? verdict.indexVersion;
-  return v ? `v${v}` : 'version unverified';
+  if (verdict.installedVersion !== undefined) {
+    return verdict.installedVersion ? `v${verdict.installedVersion}` : 'version unverified';
+  }
+  if (verdict.onDiskVersion) return `v${verdict.onDiskVersion}`;
+  return verdict.indexVersion ? `v${verdict.indexVersion} per OpenClaw's install record` : 'version unverified';
 }
 
 /**
@@ -9225,7 +9271,7 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
           label,
           status: 'warn',
           message:
-            'couldn\'t confirm the realtime plugin is installed and loaded — OpenClaw\'s record of it points to a folder that is no longer there, ' +
+            'couldn\'t confirm the realtime plugin is installed and loaded — OpenClaw\'s record of it points to a folder that holds no plugin build, ' +
             'and nothing shows that OpenClaw uses any other copy. It may be installed somewhere else. Neither OK nor a fault is confirmed',
           fix: 'Check it: `shieldcortex openclaw status`',
           verboseNote: `Prove enforcement live: ${LIVE_CANARY_COMMAND}`,
@@ -9285,10 +9331,12 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
           (verdict.loadedInLiveRoster === true
             ? ' — the running gateway loaded it; which version is not confirmed'
             : ' — and the running gateway\'s start-up list could not be read, so the load is not confirmed either'),
+        // r7 (Sol): no action, so the fix is diagnostic only — never an
+        // install command (repair's #1109 preflight refuses to replace a
+        // copy it cannot read, or one the index evidence disagrees about).
         fix: verdict.indexPathMissing === true
-          ? 'Check it: `shieldcortex openclaw status`. To rewrite OpenClaw\'s stale index record, reinstall the plugin: `' + cliRealtimeInstallCommand() + '`'
-          : 'Check it: `shieldcortex openclaw status`. If that copy\'s package.json is damaged, reinstall the plugin: `' + cliRealtimeInstallCommand() + '`',
-        needsOpenClawCli: { subcommand: 'plugins' },
+          ? 'Check it: `shieldcortex openclaw status` — it shows which folder OpenClaw\'s plugin index points to and which copies are on disk.'
+          : 'Check it: `shieldcortex openclaw status`, and check that the selected copy\'s package.json and openclaw.plugin.json can be read and carry an exact version.',
       };
     case 'stale-index-record':
       // #260 r6 (owner ruling): fails on the STALE INDEX RECORD — the folders
