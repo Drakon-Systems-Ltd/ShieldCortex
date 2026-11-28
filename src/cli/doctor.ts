@@ -25,6 +25,7 @@ import {
   planReconcileActions,
   reconcilePluginState,
   REALTIME_PLUGIN_ID,
+  safeForReason,
   type ReconcileInput,
   type ReconcileVerdict,
 } from '../integrations/openclaw-plugin-index.js';
@@ -9046,7 +9047,25 @@ export async function checkOpenClawPluginLoadState(
  * conflicts), the fix says that and what to check — no repair or install
  * command. The preflight's refusals are not weakened here; this only stops
  * doctor promising what repair will not do.
+ *
+ * r8 (Sol): the preflight's own summary names host paths and versions, so it
+ * never shares a line with a command: the command line is code-authored, the
+ * reason is chosen from the refusal kind, and the summary goes on its own
+ * detail line, quoted, with every control, bidi, quote and backtick character
+ * escaped ({@link quotedHostText}) — no line break, no command span. The
+ * human report prints that prose beside the command (`fixNoteWithCommands`).
  */
+const PREFLIGHT_REFUSAL: Record<'linked' | 'newer' | 'unknown', string> = {
+  linked: 'the plugin is a linked install',
+  newer: 'a copy on disk is newer than this CLI',
+  unknown: 'it could not confirm which copy OpenClaw uses, or could not read that copy',
+};
+
+/** Host text for a fix detail line: one line, quoted, nothing a command or line parser can pick up. */
+function quotedHostText(text: string): string {
+  return `"${safeForReason(text).replace(/[`"]/g, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`)}"`;
+}
+
 function withRepairPreflight(result: CheckResult, verdict: ReconcileVerdict, home: string): CheckResult {
   if (result.status === 'pass') return result;
   const pin = exactPluginPin(verdict.expectedVersion);
@@ -9060,13 +9079,17 @@ function withRepairPreflight(result: CheckResult, verdict: ReconcileVerdict, hom
   const keep = assessRealtimeReplacement(readRealtimeReplacementEvidence(home), pin);
   if (keep.replace) return result;
   // The fix no longer runs an `openclaw plugins` command, so it is not gated.
-  const { needsOpenClawCli: _gate, ...rest } = result;
+  // A display copy of the old fix would replace this one in the human report.
+  const { needsOpenClawCli: _gate, displayFix: _display, ...rest } = result;
   void _gate;
+  void _display;
   return {
     ...rest,
     fix:
       'Check it: `shieldcortex openclaw status`. Repair will not reinstall the plugin here: ' +
-      `${keep.summary.replace(/^left alone — /, '')}.`,
+      `${PREFLIGHT_REFUSAL[keep.why]}.\n` +
+      `Repair's safety check said: ${quotedHostText(keep.summary.replace(/^left alone — /, ''))}`,
+    fixNoteWithCommands: true,
   };
 }
 
