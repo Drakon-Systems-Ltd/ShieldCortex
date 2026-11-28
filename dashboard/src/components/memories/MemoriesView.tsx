@@ -29,8 +29,9 @@ type SortKey = 'salience' | 'recent' | 'oldest';
  *    deleted or accessed between two requests moves the rows after it, so one
  *    can repeat or be missed across a page boundary. The view says so beside
  *    the pager; it cannot detect or prevent it from here.
- *  - cheap deep pages. The route reads offset + limit + 1 rows and slices, so
- *    server work grows with the offset; only the response stays PAGE_SIZE.
+ *  - cheap deep pages. Past the first page the route asks SQLite for
+ *    LIMIT PAGE_SIZE OFFSET n instead of reading the earlier rows back and
+ *    slicing; what SQLite spends skipping those rows is unmeasured.
  */
 const PAGE_SIZE = 50;
 /** Search is one ranked window, not a paged or exhaustive result. */
