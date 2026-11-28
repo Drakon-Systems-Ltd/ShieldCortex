@@ -4,6 +4,7 @@ import path from 'path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { reconcileOpenClawPluginState, formatReconcileReport } from '../setup/openclaw-reconcile.js';
+import { assessDuplicateProjectDirs, type PluginIndexRow } from '../integrations/openclaw-plugin-index.js';
 import type { SelfCheckRunResult } from '../setup/openclaw-selfcheck.js';
 
 /**
@@ -256,7 +257,10 @@ describe('duplicate-dir prune — only a true duplicate of a verified, unambiguo
     expect(pruned).toEqual([]);
     untouched(BASE_DIR, GEN_DIR);
     expect(fs.existsSync(path.join(pkg(BASE_DIR), 'dist', 'index.js'))).toBe(true);
-    expect(messages.join(' ')).toMatch(/refusing to prune .*holds the kept build itself/);
+    // Case 6095369958: was /holds the kept build itself/ (the r4 overlap
+    // guard). The keep is now bound to the build's physical project first, so
+    // the refusal names the raw/physical disagreement.
+    expect(messages.join(' ')).toMatch(new RegExp(`refusing to prune .*physically lives in ${BASE_DIR}\\.`));
   });
 
   it('the kept PROJECT dir is a symlink to the other project dir ⇒ nothing pruned, the real build survives', async () => {
@@ -269,10 +273,15 @@ describe('duplicate-dir prune — only a true duplicate of a verified, unambiguo
     expect(pruned).toEqual([]);
     untouched(BASE_DIR, GEN_DIR);
     expect(fs.existsSync(path.join(pkg(BASE_DIR), 'dist', 'index.js'))).toBe(true);
-    expect(messages.join(' ')).toMatch(/refusing to prune .*holds the kept build itself/);
+    // Case 6095369958: was /holds the kept build itself/ — see above.
+    expect(messages.join(' ')).toMatch(new RegExp(`refusing to prune .*physically lives in ${BASE_DIR}\\.`));
   });
 
-  it('positive control — kept path is a symlink to a build OUTSIDE the projects dir; a genuinely separate older copy is still pruned', async () => {
+  // Case 6095369958 (deliberate change): was a positive control that PRUNED
+  // BASE_DIR. A kept build whose real location is outside the projects dir
+  // cannot be bound to a project dir, so which dir is "kept" is not physically
+  // established — nothing is pruned.
+  it('kept path is a symlink to a build OUTSIDE the projects dir ⇒ cannot be bound to a project dir, nothing pruned', async () => {
     setupTwoDirHost({
       dirs: [{ name: BASE_DIR, version: '4.40.0' }],
       installsJsonPath: pkg(GEN_DIR), indexInstallPath: pkg(GEN_DIR), rosterEntries: [entry(GEN_DIR)],
@@ -286,10 +295,10 @@ describe('duplicate-dir prune — only a true duplicate of a verified, unambiguo
     fs.mkdirSync(path.dirname(pkg(GEN_DIR)), { recursive: true });
     fs.symlinkSync(store, pkg(GEN_DIR), 'dir');
     const { pruned, messages } = await runReconcile();
-    expect(pruned).toEqual([BASE_DIR]);
-    expect(fs.existsSync(path.join(projectsDir(), BASE_DIR))).toBe(false);
+    expect(pruned).toEqual([]);
+    untouched(BASE_DIR, GEN_DIR);
     expect(fs.existsSync(path.join(store, 'dist', 'index.js'))).toBe(true);
-    expect(messages.join(' ')).not.toMatch(/refus/i);
+    expect(messages.join(' ')).toMatch(/refusing to prune .*not inside the projects dir, so it cannot be bound to a project dir/);
   });
 
   // Sol r2: report the prune that HAPPENED, not the one planned.
@@ -336,5 +345,138 @@ describe('duplicate-dir prune — only a true duplicate of a verified, unambiguo
     const res = await reconcileOpenClawPluginState({ home, expectedVersion: '4.47.2', apply: false });
     expect(res.plan.some((s) => s.kind === 'prune-duplicate-dirs')).toBe(false);
     untouched(BASE_DIR, GEN_DIR);
+  });
+});
+
+/**
+ * Case 6095369958 (BLOCKING) — the dir kept from pruning must be, physically,
+ * the project dir holding the verified build. Planner only: these call
+ * `assessDuplicateProjectDirs` directly and never invoke deletion. Raw index
+ * paths that name one dir while the filesystem resolves into another refuse;
+ * spellings that resolve to the same physical project bind normally.
+ */
+describe('prune planner binds keep to the canonical project (Case 6095369958)', () => {
+  const A = 'drakon-systems-shieldcortex-realtime-aaaa';
+  const B = 'drakon-systems-shieldcortex-realtime-bbbb';
+  const pkgIn = (h: string, d: string): string => path.join(h, '.openclaw', 'npm', 'projects', d, PKG_SUBPATH);
+  const idx = (rootDir: string | null, installPath: string | null): PluginIndexRow => ({
+    installRecords: installPath ? { [PLUGIN]: { source: 'npm', version: '4.47.2', installPath } } : {},
+    plugins: rootDir ? [{ pluginId: PLUGIN, enabled: true, rootDir }] : [],
+  } as unknown as PluginIndexRow);
+  const assess = (index: PluginIndexRow, h: string = home) =>
+    assessDuplicateProjectDirs(h, index, PLUGIN, '@drakon-systems/shieldcortex-realtime');
+  /** A (older, 4.40.0) and B (the build, 4.47.2), both real builds. */
+  const twoBuilds = (): void => {
+    mkProjectDir(A, '4.40.0');
+    mkProjectDir(B, '4.47.2');
+  };
+
+  it('positive control — plain layout, verified keep B, older separate copy A ⇒ prunes exactly A', () => {
+    twoBuilds();
+    const a = assess(idx(pkgIn(home, B), pkgIn(home, B)));
+    expect(a).toMatchObject({ keep: B, keepVersion: '4.47.2', prune: [A] });
+    expect(a.refused).toBeUndefined();
+  });
+
+  it('non-normalised rootDir projects/A/../B/... (raw name A, build physically in B) ⇒ refuses, B never pruned', () => {
+    twoBuilds();
+    const raw = path.join(projectsDir(), A) + `${path.sep}..${path.sep}` + path.join(B, PKG_SUBPATH);
+    const a = assess(idx(raw, raw));
+    expect(a.prune).toEqual([]);
+    expect(a.prune).not.toContain(B);
+    expect(a.keep).not.toBe(A);
+    expect(a.refused).toMatch(new RegExp(`names project dir ${A}, but the build there physically lives in ${B}\\. Nothing was removed — resolve manually\\.$`));
+  });
+
+  it('non-normalised rootDir only (no install record) ⇒ refuses the same way', () => {
+    twoBuilds();
+    const raw = path.join(projectsDir(), A) + `${path.sep}..${path.sep}` + path.join(B, PKG_SUBPATH);
+    const a = assess(idx(raw, null));
+    expect(a.prune).toEqual([]);
+    expect(a.refused).toMatch(new RegExp(`names project dir ${A}, but the build there physically lives in ${B}`));
+  });
+
+  it('kept rootDir is a symlink under project A pointing at the build in B ⇒ refuses; neither A nor B removable', () => {
+    mkProjectDir(B, '4.47.2');
+    fs.mkdirSync(path.dirname(pkgIn(home, A)), { recursive: true });
+    fs.symlinkSync(pkgIn(home, B), pkgIn(home, A), 'dir');
+    const a = assess(idx(pkgIn(home, A), pkgIn(home, A)));
+    expect(a.prune).toEqual([]);
+    expect(a.prune).not.toContain(A);
+    expect(a.prune).not.toContain(B);
+    expect(a.refused).toMatch(new RegExp(`names project dir ${A}, but the build there physically lives in ${B}`));
+  });
+
+  it('projects root reached through a symlinked HOME/.openclaw ⇒ still binds: older separate copy pruned, keep never pruned', () => {
+    // The real .openclaw lives elsewhere; HOME/.openclaw is a symlink to it.
+    const realOc = path.join(home, 'real-openclaw');
+    const linkHome = path.join(home, 'link-home');
+    fs.mkdirSync(path.join(realOc, 'npm', 'projects'), { recursive: true });
+    fs.mkdirSync(linkHome, { recursive: true });
+    fs.symlinkSync(realOc, path.join(linkHome, '.openclaw'), 'dir');
+    for (const [d, v] of [[A, '4.40.0'], [B, '4.47.2']] as const) {
+      const dir = pkgIn(linkHome, d);
+      fs.mkdirSync(path.join(dir, 'dist'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ version: v, main: './dist/index.js' }));
+      fs.writeFileSync(path.join(dir, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, version: v }));
+      fs.writeFileSync(path.join(dir, 'dist', 'index.js'), '');
+    }
+    const a = assess(idx(pkgIn(linkHome, B), pkgIn(linkHome, B)), linkHome);
+    expect(a).toMatchObject({ keep: B, keepVersion: '4.47.2', prune: [A] });
+    expect(a.refused).toBeUndefined();
+  });
+
+  it('rootDir and installPath name the same project by different spellings ⇒ one canonical project (positive control)', () => {
+    twoBuilds();
+    // A symlinked alias of HOME and a trailing slash / doubled separator.
+    const alias = path.join(os.tmpdir(), `sc-prune-alias-${process.pid}-${Date.now()}`);
+    fs.symlinkSync(home, alias, 'dir');
+    try {
+      const rootDir = path.join(projectsDir(), B) + path.sep + path.sep + PKG_SUBPATH + path.sep;
+      const installPath = pkgIn(alias, B);
+      const a = assess(idx(rootDir, installPath));
+      expect(a).toMatchObject({ keep: B, keepVersion: '4.47.2', prune: [A] });
+      expect(a.refused).toBeUndefined();
+    } finally {
+      fs.unlinkSync(alias);
+    }
+  });
+
+  it('rootDir and installPath resolve to different physical projects ⇒ refuses as ambiguous', () => {
+    twoBuilds();
+    const a = assess(idx(pkgIn(home, B), pkgIn(home, A)));
+    expect(a.prune).toEqual([]);
+    expect(a.refused).toMatch(/do not resolve to the same project dir — which copy is live is ambiguous/);
+  });
+
+  it('same raw project name, but the install record physically resolves into the other project ⇒ refuses, A never pruned', () => {
+    // Both raw paths say B; B's record path is a symlink into A's copy. Raw
+    // name parsing alone would keep B and prune A — the record's own target.
+    twoBuilds();
+    const recLink = path.join(projectsDir(), B, 'node_modules', 'record-link');
+    fs.symlinkSync(pkgIn(home, A), recLink, 'dir');
+    const a = assess(idx(pkgIn(home, B), recLink));
+    expect(a.prune).toEqual([]);
+    expect(a.prune).not.toContain(A);
+    expect(a.refused).toMatch(/do not resolve to the same project dir — which copy is live is ambiguous/);
+  });
+
+  it('install record path cannot be resolved while the selection can ⇒ refuses as ambiguous', () => {
+    twoBuilds();
+    const a = assess(idx(pkgIn(home, B), path.join(projectsDir(), B, 'node_modules', 'gone')));
+    expect(a.prune).toEqual([]);
+    expect(a.refused).toMatch(/ambiguous/);
+  });
+
+  it('selected build outside the projects root (out-of-scan rootDir) ⇒ refuses: the selection cannot be bound to a project dir', () => {
+    twoBuilds();
+    const out = path.join(home, 'src', 'realtime');
+    fs.mkdirSync(path.join(out, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(out, 'package.json'), JSON.stringify({ version: '4.47.2', main: './dist/index.js' }));
+    fs.writeFileSync(path.join(out, 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, version: '4.47.2' }));
+    fs.writeFileSync(path.join(out, 'dist', 'index.js'), '');
+    const a = assess(idx(out, null));
+    expect(a).toMatchObject({ keep: null, prune: [] });
+    expect(a.refused).toMatch(/not inside the projects dir, so it cannot be bound to a project dir\. Nothing was removed — resolve manually\.$/);
   });
 });
