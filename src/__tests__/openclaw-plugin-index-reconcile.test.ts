@@ -195,7 +195,9 @@ describe('#260 r2 — malformed and stale index input', () => {
     expect(verdict.severity).not.toBe('fail');
     expect(verdict.indexPathMissing).toBe(false);
     // #260 r4: load is proven, the version is not — and is not claimed.
-    expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', recommendedAction: 'none', versionUnverified: true });
+    // r4c (owner ruling on jarvis r3): was `healthy / ok`; an unmeasured
+    // version never passes, so it warns `version-unverified`.
+    expect(verdict).toMatchObject({ state: 'version-unverified', severity: 'warn', recommendedAction: 'none', versionUnverified: true });
     expect(verdict.reasons.join(' ')).toMatch(/load proven by the running gateway; the installed version could not be verified/);
     expect(verdict.reasons.join(' ')).not.toMatch(/versions agree/);
   });
@@ -207,7 +209,8 @@ describe('#260 r2 — malformed and stale index input', () => {
     const onDisk = reconcilePluginState(
       base({ indexInstallPathExists: false, liveRoster: ['shieldcortex-realtime'], onDiskVersion: '5.22.1' }),
     );
-    expect(onDisk).toMatchObject({ state: 'healthy', severity: 'ok', versionUnverified: true });
+    // r4c: was `healthy / ok`; never a pass on an unmeasured version.
+    expect(onDisk).toMatchObject({ state: 'version-unverified', severity: 'warn', versionUnverified: true });
     expect(onDisk.reasons.join(' ')).not.toMatch(/versions agree/);
   });
 
@@ -234,14 +237,48 @@ describe('#260 r2 — malformed and stale index input', () => {
     });
   });
 
-  it('…and the missing copy\'s recorded version is never the running version, live roster or not (#260 r3)', () => {
-    const input = base({ indexInstallPathExists: false, liveRoster: ['shieldcortex-realtime'], liveLoadEvidence: 'boot-roster' });
-    input.index!.installRecords['shieldcortex-realtime'].version = '4.0.0';
-    const verdict = reconcilePluginState(input);
-    expect(verdict.state).not.toBe('version-regressed');
-    expect(verdict.severity).not.toBe('fail');
+  // r4c (owner ruling on jarvis r3): was "never version-regressed". A record
+  // below expected fails as on main, roster proven or not — but it is named as
+  // the record's claim, never as the version the running gateway loaded.
+  it('…the missing copy\'s recorded version below expected fails as the RECORD\'s claim, live roster or not (r4c)', () => {
+    for (const roster of [['shieldcortex-realtime'], null]) {
+      const input = base({ indexInstallPathExists: false, liveRoster: roster, ...(roster ? { liveLoadEvidence: 'boot-roster' as const } : {}) });
+      input.index!.installRecords['shieldcortex-realtime'].version = '4.0.0';
+      const verdict = reconcilePluginState(input);
+      expect(verdict).toMatchObject({
+        state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned',
+        versionUnverified: true, installedVersion: '4.0.0', installedVersionSource: 'index-record',
+      });
+      expect(verdict.reasons.join(' ')).toMatch(/holds no plugin build, and OpenClaw's install record says v4\.0\.0, older than expected 5\.22\.1/);
+    }
+    // …at or above expected (or no version) it warns, never passes.
+    for (const v of ['5.22.1', '5.23.0', undefined]) {
+      const input = base({ indexInstallPathExists: false, liveRoster: ['shieldcortex-realtime'], liveLoadEvidence: 'boot-roster' });
+      input.index!.installRecords['shieldcortex-realtime'].version = v;
+      expect(reconcilePluginState(input)).toMatchObject({ state: 'version-unverified', severity: 'warn', versionUnverified: true, installedVersion: null });
+    }
     // Control: with the path present, the same record IS a regression.
-    expect(reconcilePluginState({ ...input, indexInstallPathExists: true }).state).toBe('version-regressed');
+    const present = base({ indexInstallPathExists: true, liveRoster: ['shieldcortex-realtime'], liveLoadEvidence: 'boot-roster' });
+    present.index!.installRecords['shieldcortex-realtime'].version = '4.0.0';
+    expect(reconcilePluginState(present).state).toBe('version-regressed');
+  });
+
+  // r4c (owner ruling on jarvis r3): no layer recorded a version at all and
+  // no path is stale — the reconciler's last pass. Was `healthy / ok` with
+  // versionUnverified; nothing was measured, so it warns.
+  it.each([
+    ['roster-proven', ['shieldcortex-realtime']],
+    ['roster unread', null],
+  ] as const)('no version recorded anywhere (%s): version-unverified / warn, never healthy (r4c)', (_l, roster) => {
+    const input = base({ indexInstallPathExists: null, liveRoster: roster ? [...roster] : null });
+    input.index!.installRecords['shieldcortex-realtime'].version = undefined;
+    expect(reconcilePluginState(input)).toMatchObject({
+      state: 'version-unverified', severity: 'warn', recommendedAction: 'none',
+      versionUnverified: true, installedVersion: null, installedVersionSource: null,
+    });
+    // Control: the same host with a version recorded passes on it.
+    input.index!.installRecords['shieldcortex-realtime'].version = '5.22.1';
+    expect(reconcilePluginState(input)).toMatchObject({ state: 'healthy', severity: 'ok', installedVersion: '5.22.1' });
   });
 
   // #260 r4 (Astra r3 BLOCKER 2): a stale path must not turn a registration
@@ -257,11 +294,17 @@ describe('#260 r2 — malformed and stale index input', () => {
   it('a missing path with a real build elsewhere on disk and no live proof: load-unproven, never healthy', () => {
     const input = base({ indexInstallPathExists: false, onDiskInstallPath: '/home/u/.openclaw/extensions/shieldcortex-realtime' });
     input.index!.installRecords['shieldcortex-realtime'].version = '4.0.0';
+    // r4c (owner ruling on jarvis r3): was load-unproven ("the stale record
+    // is not what runs"). A record below expected fails as on main.
+    expect(reconcilePluginState(input)).toMatchObject({
+      state: 'version-regressed', severity: 'fail', installedVersion: '4.0.0', installedVersionSource: 'index-record', versionUnverified: true,
+    });
+    // At expected, the same host is the stale-path warn.
+    input.index!.installRecords['shieldcortex-realtime'].version = '5.22.1';
     const verdict = reconcilePluginState(input);
-    // The stale record says 4.0.0 (< expected): not a regression, it is not what runs.
-    expect(verdict.state).not.toBe('version-regressed');
     expect(verdict).toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: true });
     expect(verdict.reasons.join(' ')).toMatch(/a build exists elsewhere on disk, but nothing shows OpenClaw selected it/);
+    input.index!.installRecords['shieldcortex-realtime'].version = '4.0.0';
     expect(reconcilePluginState(base({ indexInstallPathExists: false, onDiskVersion: '5.22.1' })))
       .toMatchObject({ state: 'load-unproven', severity: 'warn', indexPathMissing: true });
     // Control: the same record with its path present IS the running version.
@@ -271,12 +314,13 @@ describe('#260 r2 — malformed and stale index input', () => {
   // Sol r2: the RUNNING gateway proves the load, but the build a disk scan
   // found elsewhere is not proven to be the copy it loaded — so its version is
   // not claimed (this row asserted the scan's version as measured until r3).
-  it('positive control (Sol 3): the same host with the RUNNING gateway proving the load is healthy — version unverified, never the scan\'s', () => {
+  // r4c: was `healthy / ok`; the load is proven, the version is not, so warn.
+  it('the same host with the RUNNING gateway proving the load warns version-unverified — never a pass, never the scan\'s version', () => {
     const verdict = reconcilePluginState(base({
       indexInstallPathExists: false, onDiskVersion: '5.22.1', liveRoster: ['shieldcortex-realtime'], liveLoadEvidence: 'boot-roster',
     }));
     expect(verdict).toMatchObject({
-      state: 'healthy', severity: 'ok', indexPathMissing: false,
+      state: 'version-unverified', severity: 'warn', indexPathMissing: false,
       versionUnverified: true, installedVersion: null, installedVersionSource: null,
     });
     expect(verdict.reasons.join(' ')).toMatch(/not proven to be the copy it loaded/);

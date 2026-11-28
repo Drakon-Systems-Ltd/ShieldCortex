@@ -551,7 +551,10 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
   });
 
   // #260 r3 (C): the roster proves it loaded, not which version loaded.
-  it('path gone + live roster names the plugin + stale record 4.0.0 ⇒ not version-regressed', () => {
+  // r4c (owner ruling on jarvis r3): was "not version-regressed" + healthy.
+  // The record's 4.0.0 is below expected, so it fails as on main — named as
+  // the record's claim, never as the version that loaded.
+  it('path gone + live roster names the plugin + stale record 4.0.0 ⇒ version-regressed on the RECORD\'s claim (r4c)', () => {
     writeConfig(true, true);
     writeMachineStateIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '4.0.0', installPath: gone() } },
@@ -561,11 +564,12 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     expect(input.indexInstallPathExists).toBe(false);
     expect(input.onDiskVersion).toBeNull();
     const verdict = reconcilePluginState(input);
-    expect(verdict.state).not.toBe('version-regressed');
     expect(verdict.state).not.toBe('enabled-not-installed');
-    expect(verdict.severity).not.toBe('fail');
-    // #260 r4: load proven, version not — healthy, and it says so.
-    expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', versionUnverified: true });
+    expect(verdict).toMatchObject({
+      state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned',
+      versionUnverified: true, installedVersion: '4.0.0', installedVersionSource: 'index-record',
+    });
+    expect(verdict.reasons.join(' ')).toMatch(/holds no plugin build, and OpenClaw's install record says v4\.0\.0/);
     expect(verdict.reasons.join(' ')).not.toMatch(/versions agree/);
   });
 
@@ -611,7 +615,9 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
   // Sol finding 3: this test used to assert a FALSE green. The other copy
   // proves an install, not that OpenClaw selected it; the only "enabled"
   // evidence is the stale row. Warn, no action.
-  it('the stale record beside a real build elsewhere, no live proof: load-unproven / warn / none — never healthy', () => {
+  // r4c (owner ruling on jarvis r3): the record's 5.0.0 is below expected —
+  // was load-unproven / warn; now it fails as the record's claim.
+  it('the stale record (5.0.0) beside a real build elsewhere, no live proof: version-regressed on the record\'s claim — never healthy', () => {
     writeConfig(true, true);
     writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
     writeMachineStateIndex({
@@ -623,13 +629,16 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     expect(input.indexRootDirExists).toBe(false);
     expect(input.onDiskVersion).toBe('5.22.1');
     const verdict = reconcilePluginState(input);
-    expect(verdict).toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: true });
-    expect(verdict.state).not.toBe('version-regressed');
+    expect(verdict).toMatchObject({
+      state: 'version-regressed', severity: 'fail', installedVersion: '5.0.0', installedVersionSource: 'index-record', versionUnverified: true,
+    });
   });
 
   // Sol r2 (r3 change): the load is proven; the scan's build elsewhere is not
   // the selected copy, so its version is not claimed as the one that loaded.
-  it('positive control (Sol 3): the same host with a live roster naming the plugin ⇒ healthy, version unverified (not the scan\'s)', () => {
+  // r4c: was `healthy`, version unverified. The record's 5.0.0 is below
+  // expected, so the roster-proven host fails on that claim too.
+  it('the same host with a live roster naming the plugin ⇒ version-regressed on the record\'s claim, never the scan\'s version', () => {
     writeConfig(true, true);
     writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
     writeMachineStateIndex({
@@ -637,8 +646,8 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
       plugins: [upstreamEntry(gone())],
     });
     const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => [PLUGIN] }));
-    expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', onDiskVersion: '5.22.1', indexPathMissing: false });
-    expect(verdict).toMatchObject({ versionUnverified: true, installedVersion: null });
+    expect(verdict).toMatchObject({ state: 'version-regressed', severity: 'fail', onDiskVersion: '5.22.1', indexPathMissing: false });
+    expect(verdict).toMatchObject({ versionUnverified: true, installedVersion: '5.0.0', installedVersionSource: 'index-record' });
   });
 
   it('positive control (Sol 3): the index SELECTS the real build (rootDir verified) though the record path is stale ⇒ ordinary rules, healthy', () => {
@@ -837,7 +846,8 @@ describe('#260 r3 — the selected build is measured, not assumed', () => {
   // Sol r2: a stale SELECTION is not rescued by an equal-version record elsewhere.
   it.each([
     ['roster unread', null, { state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: true }],
-    ['roster-proven', [PLUGIN], { state: 'healthy', severity: 'ok', versionUnverified: true, installedVersion: null }],
+    // r4c: was `healthy / ok`; an unmeasured version never passes.
+    ['roster-proven', [PLUGIN], { state: 'version-unverified', severity: 'warn', versionUnverified: true, installedVersion: null }],
   ] as const)('stale selection (rootDir holds no build) + an equal-version build at the record path (%s) ⇒ never the record\'s version', (_l, roster, expected) => {
     writeConfig(true, true);
     const recordBuild = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-rec', '5.22.1'), '5.22.1');
@@ -855,7 +865,8 @@ describe('#260 r3 — the selected build is measured, not assumed', () => {
   // Sol r2: a stale RECORD with no selection at all, and a scan build elsewhere.
   it.each([
     ['roster unread', null, { state: 'load-unproven', severity: 'warn' }],
-    ['roster-proven', [PLUGIN], { state: 'healthy', severity: 'ok', versionUnverified: true, installedVersion: null }],
+    // r4c: was `healthy / ok`; an unmeasured version never passes.
+    ['roster-proven', [PLUGIN], { state: 'version-unverified', severity: 'warn', versionUnverified: true, installedVersion: null }],
   ] as const)('stale-record-only (no plugins entry, record path gone) + a scan build elsewhere (%s) ⇒ no pass on the scan\'s version', (_l, roster, expected) => {
     writeConfig(true, true);
     writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-x', '5.22.1'), '5.22.1');
@@ -950,6 +961,63 @@ describe('#260 jarvis r3 — unreadable selected version is never a pass', () =>
     const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => [PLUGIN] }));
     expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', installedVersion: '5.22.1', installedVersionSource: 'selected-build' });
     expect(renderPluginLoadVerdict(verdict).status).toBe('pass');
+  });
+});
+
+/**
+ * #260 r4c (owner ruling on jarvis r3: every path, not only a verified
+ * rootDir) — the index-selected folder AND the record's folder are gone, so
+ * nothing on the host measures the copy that runs. A record below expected
+ * fails as on main (named as the record's claim); otherwise it is never a
+ * pass: `version-unverified` (warn) when the running gateway proves the load,
+ * the stale-path `load-unproven` warn when it does not. Both index layouts,
+ * roster unread and roster proven, gather → reconcile → doctor's renderer.
+ */
+describe('#260 r4c — gone selected + record folders: an unmeasured version is never a pass', () => {
+  const gone = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'reaped', PKG_SUBPATH);
+  const LAYOUTS = [
+    ['legacy installed_plugin_index', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeIndex(r)],
+    ['config_machine_state', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeMachineStateIndex(r)],
+  ] as const;
+  const ROSTERS = [['roster unread', null], ['roster-proven', [PLUGIN]]] as const;
+  const RECORDS = [['record 4.0.0', '4.0.0'], ['record at expected 5.22.1', '5.22.1'], ['record with no version', null]] as const;
+  const cases = RECORDS.flatMap(([rl, v]) => LAYOUTS.flatMap(([layout, write]) => ROSTERS.map(([ro, roster]) => [`${rl} — ${layout}, ${ro}`, v, write, roster] as const)));
+
+  it.each(cases)('%s', (_title, recordVersion, write, roster) => {
+    writeConfig(true, true);
+    write({
+      installRecords: { [PLUGIN]: { source: 'npm', ...(recordVersion ? { version: recordVersion } : {}), installPath: gone() } },
+      plugins: [upstreamEntry(gone())],
+    });
+    const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => (roster ? [...roster] : null) });
+    expect(input).toMatchObject({ indexInstallPathExists: false, indexRootDirExists: false, onDiskVersion: null });
+    const verdict = reconcilePluginState(input);
+    const rendered = renderPluginLoadVerdict(verdict);
+    expect(verdict.severity).not.toBe('ok');
+    expect(rendered.status).not.toBe('pass');
+    if (recordVersion === '4.0.0') {
+      expect(verdict).toMatchObject({
+        state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned',
+        versionUnverified: true, installedVersion: '4.0.0', installedVersionSource: 'index-record',
+      });
+      expect(verdict.reasons.join(' ')).toMatch(/holds no plugin build, and OpenClaw's install record says v4\.0\.0, older than expected 5\.22\.1/);
+      expect(rendered.status).toBe('fail');
+      expect(rendered.message).toMatch(/regressed to v4\.0\.0 \(older than expected v5\.22\.1\).*OpenClaw's install record says that; the copy OpenClaw uses has no readable version/);
+      return;
+    }
+    expect(rendered.status).toBe('warn');
+    // Never the expected version printed as if measured.
+    expect(rendered.message).not.toMatch(/v5\.22\.1/);
+    if (roster) {
+      expect(verdict).toMatchObject({
+        state: 'version-unverified', severity: 'warn', recommendedAction: 'none',
+        versionUnverified: true, installedVersion: null, installedVersionSource: null,
+      });
+      expect(verdict.reasons.join(' ')).toMatch(/load proven by the running gateway; the installed version could not be verified/);
+      expect(rendered.message).toMatch(/version unverified\) — the running gateway loaded it/);
+    } else {
+      expect(verdict).toMatchObject({ state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: true });
+    }
   });
 });
 

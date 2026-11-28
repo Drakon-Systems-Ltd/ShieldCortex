@@ -228,12 +228,14 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
 
   // Sol r2 (r3 change): load proven by the roster; the other project dir's
   // build is not the selected copy, so its version is not printed as measured.
-  it('positive control: the same host with the live roster naming the plugin passes roster-confirmed, version unverified', () => {
+  // r4c (owner ruling on jarvis r3): was `pass` "(roster-confirmed, version
+  // unverified)". An unmeasured version never passes: warn.
+  it('the same host with the live roster naming the plugin WARNS "version unverified" (load proven), never passes', () => {
     migrated(pkgDir());
     writeRealBuild(path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-other', PKG_SUBPATH), '5.22.1');
     const r = renderWithRoster([PLUGIN]);
-    expect(r.status).toBe('pass');
-    expect(r.message).toMatch(/roster-confirmed, version unverified\)/);
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/version unverified\) — the running gateway loaded it/);
     expect(r.message).not.toMatch(/5\.22\.1/);
   });
 
@@ -262,12 +264,47 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
   });
 
   // #260 r4 (Astra r3 SHOULD-FIX): the roster proves the load, not a version.
-  it('gone directory + live roster names the plugin + stale record 4.0.0: passes roster-confirmed with "version unverified", never v5.22.1', () => {
+  // r4c (owner ruling on jarvis r3): was `pass` "(roster-confirmed, version
+  // unverified)". The record's 4.0.0 is below expected, so it FAILS as main
+  // does — named as the install record's claim, never as a measured version.
+  it('gone directory + live roster names the plugin + stale record 4.0.0: FAILS as regressed on the record\'s claim, never a pass', () => {
     migrated(pkgDir(), { recordVersion: '4.0.0' });
     const r = renderWithRoster([PLUGIN]);
-    expect(r.status).toBe('pass');
-    expect(r.message).toMatch(/roster-confirmed, version unverified\)/);
-    expect(r.message).not.toMatch(/5\.22\.1|4\.0\.0/);
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/regressed to v4\.0\.0 \(older than expected v5\.22\.1\).*OpenClaw's install record says that; the copy OpenClaw uses has no readable version/);
+    expect(r.message).not.toMatch(/roster-confirmed/);
+  });
+
+  // r4c: the same host with the record at expected or carrying no version —
+  // load proven, version not measured: warn, never a pass, never v5.22.1.
+  // Roster unread: the stale-path warn. Through the real doctor check too.
+  it.each([
+    ['record at expected 5.22.1', '5.22.1'],
+    ['record with no version', null],
+  ] as const)('gone directory + %s: roster-proven WARNS "version unverified", roster unread WARNS stale path, never a pass', async (_l, recordVersion) => {
+    migrated(pkgDir(), recordVersion ? { recordVersion } : {});
+    if (!recordVersion) {
+      // migrated() defaults the record to 5.22.1; strip the version field.
+      const db = new Database(path.join(home, '.openclaw', 'state', 'openclaw.sqlite'));
+      const row = db.prepare("SELECT value_json FROM config_machine_state WHERE state_key = 'plugins.installedIndex'").get() as { value_json: string };
+      const v = JSON.parse(row.value_json);
+      delete v.index.installRecords[PLUGIN].version;
+      db.prepare("UPDATE config_machine_state SET value_json = ? WHERE state_key = 'plugins.installedIndex'").run(JSON.stringify(v));
+      db.close();
+    }
+    const proven = renderWithRoster([PLUGIN]);
+    expect(proven.status).toBe('warn');
+    expect(proven.message).toMatch(/version unverified\) — the running gateway loaded it/);
+    expect(proven.message).not.toMatch(/v5\.22\.1/);
+    expectStalePathWarn(renderWithRoster(null));
+    expectStalePathWarn(await checkOpenClawPluginLoadState(home, '5.22.1'));
+  });
+
+  it('gone directory + stale record 4.0.0, roster unread (the real doctor check): FAILS as regressed on the record\'s claim', async () => {
+    migrated(pkgDir(), { recordVersion: '4.0.0' });
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/regressed to v4\.0\.0 \(older than expected v5\.22\.1\).*OpenClaw's install record says that/);
   });
 
   // #260 r3 (Case r2 #1): the record path is gone and the SELECTED rootDir
@@ -337,13 +374,15 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     }
   });
 
-  it('renderer: a hand-built healthy verdict with no measured version never prints the expected version', () => {
+  // r4c: was `pass` "(version unverified)". The renderer itself refuses to
+  // pass a healthy verdict that carries no measured version.
+  it('renderer: a hand-built healthy verdict with no measured version WARNS, never passes, never prints the expected version', () => {
     const r = renderPluginLoadVerdict({
       ...reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null })),
       state: 'healthy', severity: 'ok', recommendedAction: 'none', onDiskVersion: null, indexVersion: null,
       installedVersion: undefined, versionUnverified: undefined, loadedInLiveRoster: null,
     });
-    expect(r.status).toBe('pass');
+    expect(r.status).toBe('warn');
     expect(r.message).toMatch(/version unverified/);
     expect(r.message).not.toMatch(/5\.22\.1/);
   });
