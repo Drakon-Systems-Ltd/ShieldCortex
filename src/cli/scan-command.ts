@@ -279,16 +279,19 @@ async function runParsedScan(parsed: Extract<ParsedScanArgs, { ok: true }>): Pro
     const { initDatabase } = await import('../database/init.js');
     initDatabase(dbPath);
 
-    const { runDefencePipeline } = await import('../defence/pipeline.js');
+    const { runDefencePipeline, SCAN_COMMAND_TITLE } = await import('../defence/pipeline.js');
     // Bare CLI identity is hardcoded in this dispatch → attested by construction.
     // Declared --source is caller labelling only and is never host-attested.
+    // The one positional is the whole unmodified input and the title is the
+    // command's own label, so it opts in to the closed preference grammar
+    // (SCN-010 part C).
     result = runDefencePipeline(
       parsed.text,
-      'CLI Scan',
+      SCAN_COMMAND_TITLE,
       parsed.source,
       undefined,
       undefined,
-      { sourceAttested: parsed.sourceAttested },
+      { sourceAttested: parsed.sourceAttested, preferenceGrammarUnit: parsed.text },
     );
   } catch (err) {
     console.error(formatScanToolFailure(err));

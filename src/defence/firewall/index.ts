@@ -19,7 +19,7 @@ import type {
 import type { SanitisationCategory } from '../input-sanitisation/index.js';
 
 import { detectInstructions } from './instruction-detector.js';
-import type { InstructionDetectionResult } from './instruction-detector.js';
+import type { InstructionDetectionResult, WholeUnit } from './instruction-detector.js';
 import { detectNonAuthoritativeInstruction } from './provenance-policy.js';
 import type { NonAuthoritativeInstructionResult } from './provenance-policy.js';
 import {
@@ -46,7 +46,7 @@ import { scanForCredentials } from '../credential-leak/index.js';
 
 // Re-exports
 export { detectInstructions } from './instruction-detector.js';
-export type { InstructionDetectionResult } from './instruction-detector.js';
+export type { InstructionDetectionOptions, InstructionDetectionResult, WholeUnit } from './instruction-detector.js';
 export { detectPrivilegeEscalation } from './privilege-detector.js';
 export type { PrivilegeDetectionResult } from './privilege-detector.js';
 export { detectEncoding } from './encoding-detector.js';
@@ -65,7 +65,11 @@ export {
   TRUSTED_PROVENANCE_SOURCES,
   UNTRUSTED_DATA_ORIGIN_SOURCES,
 } from './provenance-policy.js';
-export type { NonAuthoritativeInstructionResult, NonAuthoritativePattern } from './provenance-policy.js';
+export type {
+  NonAuthoritativeInstructionOptions,
+  NonAuthoritativeInstructionResult,
+  NonAuthoritativePattern,
+} from './provenance-policy.js';
 export {
   MEMORY_DIRECTIVE_INDICATOR,
   MEMORY_DIRECTIVE_PATTERN,
@@ -75,12 +79,26 @@ export {
 export type { MemoryDirectivePattern, MemoryDirectiveResult } from './memory-directive-policy.js';
 
 /**
- * Optional analysis context. Today it carries one fact: whether the write is a
- * memory ADMISSION (SCN-010). Absent means exactly the pre-SCN-010 behaviour
- * for every label except `memory_candidate`, which is admission by definition.
+ * Optional analysis context: whether the write is a memory ADMISSION
+ * (SCN-010), and whether `content` is a complete received unit (SCN-010 part
+ * C). Absent means exactly the pre-SCN-010 behaviour for every label except
+ * `memory_candidate`, which is admission by definition.
  */
 export interface FirewallContext {
   memoryAdmission?: MemoryAdmission;
+  /**
+   * SCN-010 part C OPT-IN: set ONLY when `content` is a complete received unit,
+   * with `received` the unit AS RECEIVED before Layer-1 sanitisation. The only
+   * opt-in callers are the `shieldcortex scan` command (via
+   * `PipelineRunOptions.preferenceGrammarUnit`, honoured only when it equals
+   * `content` and the title is absent or `SCAN_COMMAND_TITLE`) and `scan()`
+   * from `shieldcortex/scan` when no `title` is passed. Memory writes,
+   * capture, import and recall never set it. Never for a decoded snippet, a
+   * sample, one field of a larger record or a file body. Read only by the
+   * closed preference grammar (C1/C2) on the top-level L1/L2 calls; decoded
+   * snippets re-scanned below never get it. Absent means legacy detection.
+   */
+  wholeUnit?: WholeUnit;
 }
 
 /** The label or flag that makes this analysis a memory admission (M1). */
@@ -143,13 +161,14 @@ export function analyzeFirewall(
    */
   context?: FirewallContext,
 ): FirewallAnalysis {
-  const instructions = detectInstructions(content);
+  const wholeUnit = context?.wholeUnit === undefined ? undefined : { wholeUnit: context.wholeUnit };
+  const instructions = detectInstructions(content, wholeUnit);
   const privilege = detectPrivilegeEscalation(content);
   const credentialExfil = detectCredentialExfil(content);
   const encoding = detectEncoding(content);
   const markdownImage = detectMarkdownImageExfil(content);
   const anomaly = scoreAnomaly(content, title);
-  const nonAuthoritative = detectNonAuthoritativeInstruction(content, source.type);
+  const nonAuthoritative = detectNonAuthoritativeInstruction(content, source.type, wholeUnit);
 
   // SCN-010 M1 — memory admission only. The screen only ADDS a hold: L1 and
   // L2 above keep exactly the verdicts they have outside SCN-010. Every other

@@ -25,6 +25,7 @@ import {
   PROMPT_EXTRACTION_PATTERNS,
 } from './instruction-morphology.js';
 import { MULTILINGUAL_INJECTION_PHRASES } from './instruction-multilingual.js';
+import { isClosedPreferenceNote } from './preference-note-grammar.js';
 
 /**
  * Case-insensitive alternation for authority-spoof verbs, built once at load.
@@ -39,6 +40,33 @@ const anyCase = (phrase: string): string =>
 const SPOOF_VERBS = ['you must', 'ignore', 'new instructions', 'override', 'disregard', 'reveal']
   .map(anyCase)
   .join('|');
+
+/**
+ * A complete received unit (SCN-010 part C): one whole single-field input as
+ * it arrived, never an excerpt of one. `received` is the unit AS RECEIVED,
+ * before any sanitisation; `content` may be the sanitised copy of it.
+ */
+export interface WholeUnit {
+  received: string;
+}
+
+export interface InstructionDetectionOptions {
+  /**
+   * OPT-IN to the closed preference grammar. Pass it ONLY when `content` is a
+   * complete received unit. The only opt-in callers are the `shieldcortex
+   * scan` command (via `PipelineRunOptions.preferenceGrammarUnit`, honoured
+   * only when it equals `content` and the title is absent or
+   * `SCAN_COMMAND_TITLE`) and `scan()` from `shieldcortex/scan` when no `title`
+   * is passed. Memory writes, capture, import and recall never opt in. Never
+   * for a decoded snippet, a sample, one field of a larger record or a file
+   * body: an excerpt that is a preference sentence says nothing about the
+   * unit it came from. Absent means exactly the legacy detection. When
+   * present, the grammar must parse BOTH `content` and `received`, so a
+   * fullwidth / NBSP / zero-width variant that sanitisation folded to clean
+   * ASCII still fails it.
+   */
+  wholeUnit?: WholeUnit;
+}
 
 export interface InstructionDetectionResult {
   detected: boolean;
@@ -265,10 +293,36 @@ function safeRegexTest(pattern: RegExp, text: string): boolean {
   return someWindow(text, (window) => pattern.test(window));
 }
 
-export function detectInstructions(content: string): InstructionDetectionResult {
+/**
+ * True only for an explicit whole unit whose sanitised text AND as-received
+ * text both parse the closed preference grammar (shared with L2's C2).
+ */
+export function isClosedPreferenceWholeUnit(content: string, wholeUnit: WholeUnit | undefined): boolean {
+  return wholeUnit !== undefined
+    && typeof wholeUnit.received === 'string'
+    && isClosedPreferenceNote(content)
+    && isClosedPreferenceNote(wholeUnit.received);
+}
+
+export function detectInstructions(
+  content: string,
+  options?: InstructionDetectionOptions,
+): InstructionDetectionResult {
   const matchedPatterns: string[] = [];
   let totalWeight = 0;
   let maxWeight = 0;
+
+  // SCN-010 part C (design scn-010c §4, C1): a WHOLE received unit that is
+  // one sentence of the closed preference grammar ("From now on, always use
+  // British English in replies.") is not memory manipulation. Opt-in only:
+  // without `wholeUnit` this is the legacy detector byte for byte, so a
+  // decoded snippet or sample can never relax its parent's verdict. Decided
+  // once, on the whole input, before any windowing or normalisation variant.
+  // A positive closed-world parse, never "relax unless something else fired":
+  // SCN-010's M4 relaxed when the memory-directive screen was quiet and a
+  // preference grafted onto an order defeated it. Never make this conditional
+  // on another detector. Only `memory_manipulation` is skipped.
+  const closedPreferenceNote = isClosedPreferenceWholeUnit(content, options?.wholeUnit);
 
   // Test the original first, then up to two normalised copies (confusable fold,
   // zero-width/bidi strip, punctuation collapse, and a classic-leet fold) — see
@@ -278,6 +332,7 @@ export function detectInstructions(content: string): InstructionDetectionResult 
 
   for (const group of PATTERN_GROUPS) {
     if (group.subsumedBy && matchedPatterns.includes(group.subsumedBy)) continue;
+    if (closedPreferenceNote && group.name === 'memory_manipulation') continue;
     for (const pattern of group.patterns) {
       if (variants.some((variant) => safeRegexTest(pattern, variant))) {
         matchedPatterns.push(group.name);

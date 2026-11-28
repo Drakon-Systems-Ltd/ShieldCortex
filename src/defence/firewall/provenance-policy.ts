@@ -15,6 +15,8 @@
  */
 
 import { someWindow } from '../scan-windows.js';
+import { isClosedPreferenceWholeUnit } from './instruction-detector.js';
+import type { WholeUnit } from './instruction-detector.js';
 import { foldConfusables } from './confusables.js';
 import { stripZeroWidthAndBidi } from './instruction-normalize.js';
 import type { ProvenanceLabel } from '../types.js';
@@ -2076,13 +2078,33 @@ export function foldForProvenance(content: string): string {
   return foldConfusables(stripZeroWidthAndBidi(content));
 }
 
+export interface NonAuthoritativeInstructionOptions {
+  /**
+   * OPT-IN to the closed preference grammar for a complete received unit
+   * (see `InstructionDetectionOptions.wholeUnit`). Absent means the frozen L2
+   * answer byte for byte.
+   */
+  wholeUnit?: WholeUnit;
+}
+
 export function detectNonAuthoritativeInstruction(
   rawContent: string,
   sourceType: string,
+  options?: NonAuthoritativeInstructionOptions,
 ): NonAuthoritativeInstructionResult {
   if (!isUntrustedDataOrigin(sourceType) || rawContent.length === 0) {
     return { detected: false, patterns: [] };
   }
+
+  // SCN-010 part C (design scn-010c §4, C2): under `memory_candidate` ONLY, an
+  // explicit whole unit that is one sentence of the closed preference grammar
+  // is not reported as `memory_persist`. Opt-in: without `wholeUnit` this is
+  // the frozen L2 answer. Every other label keeps it too: a web page or tool
+  // result telling the agent to change its standing behaviour stays
+  // non-authoritative. Every other group is unchanged. A positive whole-input
+  // parse, never conditional on another detector (the M4 lesson).
+  const closedPreferenceNote = sourceType === 'memory_candidate'
+    && isClosedPreferenceWholeUnit(rawContent, options?.wholeUnit);
 
   const content = foldForProvenance(rawContent);
   const matched: NonAuthoritativePattern[] = [];
@@ -2111,5 +2133,8 @@ export function detectNonAuthoritativeInstruction(
     return matched.length === COMPILED_GROUPS.length;
   });
 
-  return { detected: matched.length > 0, patterns: matched };
+  const patterns = closedPreferenceNote
+    ? matched.filter((name) => name !== NAI_PATTERN.MEMORY_PERSIST)
+    : matched;
+  return { detected: patterns.length > 0, patterns };
 }
