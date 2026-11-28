@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import semver from 'semver';
 import { REALTIME_PLUGIN_PACKAGE } from '../setup/openclaw-plugin-spec.js';
 import { indexPathField, readPluginInstallIndexState, type PluginInstallIndexState } from './openclaw-plugin-index.js';
@@ -594,6 +595,67 @@ export function managedManifestTargetStillHolds(target: { projectDir: string; ma
     if (fs.realpathSync(target.projectDir) !== target.projectDir) return false;
     const st = fs.lstatSync(target.manifestPath);
     return !st.isSymbolicLink() && st.isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** A manifest read bound to the file it came from (see {@link readBoundManifest}). */
+export interface BoundManifestRead {
+  text: string;
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  sha256: string;
+}
+
+/**
+ * #260 r13 (Sol): read `file` through ONE descriptor opened without following
+ * a link (`O_NOFOLLOW`; where the platform has none, an lstat gate first),
+ * and record that descriptor's identity — dev, inode, size, mtime — and a
+ * sha256 of exactly the bytes read. Callers parse from `text`, so what they
+ * write back derives from the file {@link boundManifestUnchanged} re-checks.
+ * Throws on a link, a non-regular file, or any read error.
+ */
+export function readBoundManifest(file: string): BoundManifestRead {
+  const noFollow = fs.constants.O_NOFOLLOW;
+  if (typeof noFollow !== 'number') {
+    const st = fs.lstatSync(file);
+    if (st.isSymbolicLink() || !st.isFile()) throw new Error('package.json is not a plain file');
+  }
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (typeof noFollow === 'number' ? noFollow : 0));
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw new Error('package.json is not a plain file');
+    const bytes = fs.readFileSync(fd);
+    return {
+      text: bytes.toString('utf-8'),
+      dev: st.dev,
+      ino: st.ino,
+      size: st.size,
+      mtimeMs: st.mtimeMs,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Re-check, right before a write, that `file` is still the file `read` came
+ * from with the same bytes: its entry is not a link, has the same dev, inode,
+ * size and mtime, and a fresh bound read has the same identity and sha256. A
+ * different regular file (new inode) or the same inode rewritten fails it.
+ * False on any doubt.
+ */
+export function boundManifestUnchanged(file: string, read: BoundManifestRead): boolean {
+  try {
+    const st = fs.lstatSync(file);
+    if (st.isSymbolicLink() || !st.isFile()) return false;
+    if (st.dev !== read.dev || st.ino !== read.ino || st.size !== read.size || st.mtimeMs !== read.mtimeMs) return false;
+    const again = readBoundManifest(file);
+    return again.dev === read.dev && again.ino === read.ino && again.sha256 === read.sha256;
   } catch {
     return false;
   }

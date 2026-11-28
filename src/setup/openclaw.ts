@@ -59,6 +59,9 @@ import {
   readSelectedRealtimePluginVersion,
   managedManifestTarget,
   managedManifestTargetStillHolds,
+  readBoundManifest,
+  boundManifestUnchanged,
+  type BoundManifestRead,
 } from '../integrations/openclaw-realtime-install.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -2798,11 +2801,31 @@ export async function repairOpenClawManagedPins(
   const manifestPath = target.manifestPath;
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const changed = (): ManagedPinRepairResult => ({ status: 'failed', message: 'The managed project changed while this repair was running (its folder moved, or its package.json was removed or replaced), so the manifest was not rewritten. Check it again: `shieldcortex doctor`.' });
+  // r13 (Sol): bind the read to the verified FILE. The type re-check alone let
+  // a different regular file (or the same inode rewritten) be replaced with
+  // bytes derived from the original — a lost update. Read once through a
+  // no-follow descriptor, parse from exactly those bytes, and before the
+  // backup and before the rename require the same file with the same bytes.
+  const fileChanged = (): ManagedPinRepairResult => ({ status: 'failed', message: 'The managed project\'s package.json changed while this repair was running; nothing was changed. Check it again: `shieldcortex doctor`.' });
+  let bound: BoundManifestRead;
+  let work: Record<string, unknown>;
+  try {
+    bound = readBoundManifest(manifestPath);
+    work = JSON.parse(bound.text) as Record<string, unknown>;
+  } catch {
+    return fileChanged();
+  }
+  // What was analysed above must be what is rewritten below.
+  if (JSON.stringify(work) !== JSON.stringify(manifest)) return fileChanged();
+  const workDeps = (typeof work.dependencies === 'object' && work.dependencies
+    ? work.dependencies
+    : {}) as Record<string, unknown>;
   let mode: number;
   try {
     mode = fs.lstatSync(manifestPath).mode & 0o777;
     if (!managedManifestTargetStillHolds(target)) return changed();
-    createExclusive(`${manifestPath}.repair-backup-${ts}`, JSON.stringify(manifest, null, 2), mode);
+    if (!boundManifestUnchanged(manifestPath, bound)) return fileChanged();
+    createExclusive(`${manifestPath}.repair-backup-${ts}`, JSON.stringify(work, null, 2), mode);
     console.log(`  - safety backup: ${`${manifestPath}.repair-backup-${ts}`.replace(home, '~')}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -2811,20 +2834,24 @@ export async function repairOpenClawManagedPins(
 
   // 2. Strip co-present (latent) pins from deps AND managedPeerDependencies so
   //    the reinstall re-derives them at the CURRENT override version, then
-  //    advance the stale shieldcortex lib pin. `deps` is the same object the
+  //    advance the stale shieldcortex lib pin. `workDeps` is the same object the
   //    strip mutates in place; shieldcortex is never override-shadowed so it
   //    survives the strip.
-  stripManagedPinsFromManifest(manifest as Record<string, unknown>, latentPins);
-  if (staleShieldcortex && selfVersion) deps.shieldcortex = selfVersion;
-  (manifest as Record<string, unknown>).dependencies = deps;
+  stripManagedPinsFromManifest(work, latentPins);
+  if (staleShieldcortex && selfVersion) workDeps.shieldcortex = selfVersion;
+  work.dependencies = workDeps;
   const tmp = path.join(target.projectDir, `.package.json.repair-${process.pid}-${randomBytes(6).toString('hex')}.tmp`);
   let created = false;
   try {
-    createExclusive(tmp, JSON.stringify(manifest, null, 2) + '\n', mode);
+    createExclusive(tmp, JSON.stringify(work, null, 2) + '\n', mode);
     created = true;
     if (!managedManifestTargetStillHolds(target)) {
       fs.unlinkSync(tmp);
       return { ...changed(), message: `${changed().message} Backup left at ${manifestPath}.repair-backup-${ts}.` };
+    }
+    if (!boundManifestUnchanged(manifestPath, bound)) {
+      fs.unlinkSync(tmp);
+      return { ...fileChanged(), message: `${fileChanged().message} A safety backup of the contents read earlier is at ${manifestPath}.repair-backup-${ts}.` };
     }
     fs.renameSync(tmp, manifestPath);
   } catch (err) {
