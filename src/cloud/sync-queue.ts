@@ -477,7 +477,7 @@ const BASE_BACKOFF_MS = 30_000;
  * 429 (rate limited) is deliberately transient — backing off and retrying is
  * exactly the right response to a rate limit.
  */
-function classifyHttpStatus(status: number): 'transient' | 'permanent' {
+export function classifyHttpStatus(status: number): 'transient' | 'permanent' {
   // 4xx (except 429) is a client error → permanent. 429 + 5xx → transient.
   if (status === 429) return 'transient';
   if (status >= 400 && status < 500) return 'permanent';

@@ -10,6 +10,14 @@ import {
   updateLastSyncAt,
 } from './config.js';
 import { enqueueFailedMemorySync, enqueueMemoryOutbox } from './sync-queue.js';
+import {
+  emptySendFailureTally,
+  isReportableHttpStatus,
+  noteLiveDispatchOutcome,
+  recordSendFailure,
+  type CloudSendOutcome,
+  type SendFailureTally,
+} from './send-outcome.js';
 import type { Memory } from '../memory/types.js';
 
 export interface SyncedMemoryRecord {
@@ -129,10 +137,10 @@ function hydrateMemoryRecord(memoryId: number): SyncedMemoryRecord | null {
   return rowToSyncRecord(row);
 }
 
-async function postEnvelope(envelope: MemorySyncEnvelope): Promise<boolean> {
+async function postEnvelope(envelope: MemorySyncEnvelope): Promise<CloudSendOutcome> {
   const config = getCloudConfig();
   if (!config.cloudEnabled || !config.cloudApiKey || envelope.memories.length === 0) {
-    return false;
+    return { ok: false, kind: 'skipped' };
   }
 
   const controller = new AbortController();
@@ -150,13 +158,16 @@ async function postEnvelope(envelope: MemorySyncEnvelope): Promise<boolean> {
     });
 
     if (!res.ok) {
-      return false;
+      // #743: keep the numeric status only. The body is never read.
+      return isReportableHttpStatus(res.status)
+        ? { ok: false, kind: 'http', status: res.status }
+        : { ok: false, kind: 'network' };
     }
 
     updateLastSyncAt();
-    return true;
+    return { ok: true };
   } catch {
-    return false;
+    return { ok: false, kind: 'network' };
   } finally {
     clearTimeout(timeoutId);
   }
@@ -227,8 +238,9 @@ export function dispatchMemoryOutboxBestEffort(
   deliveryKey?: string,
 ): void {
   const envelope = buildEnvelope([record]);
-  postEnvelope(envelope).then((ok) => {
-    if (ok) {
+  postEnvelope(envelope).then((outcome) => {
+    noteLiveDispatchOutcome(outcome);
+    if (outcome.ok) {
       try {
         acknowledgeMemoryOutbox(deliveryKey);
       } catch { /* worker will retry */ }
@@ -338,27 +350,37 @@ export function syncMemoryDeleteToCloud(memory: Memory): void {
   dispatchMemoryOutboxBestEffort(record, deliveryKey);
 }
 
-export async function syncAllMemoriesToCloud(): Promise<{ total: number; synced: number; failed: number }> {
+export async function syncAllMemoriesToCloud(): Promise<{
+  total: number;
+  synced: number;
+  failed: number;
+  /** #743 — how the `failed` records split: permanent refusal, transient, local skip. */
+  failures: SendFailureTally;
+}> {
   const db = getDatabase();
   const rows = db.prepare('SELECT * FROM memories ORDER BY id ASC').all() as Record<string, unknown>[];
   const records = rows.map(rowToSyncRecord).filter(shouldSyncRecord).map(applyContentMode);
 
   let synced = 0;
   let failed = 0;
+  const failures = emptySendFailureTally();
   const batchSize = 50;
 
   for (let i = 0; i < records.length; i += batchSize) {
     const batch = records.slice(i, i + batchSize);
-    const ok = await postEnvelope(buildEnvelope(batch));
-    if (ok) {
+    const outcome = await postEnvelope(buildEnvelope(batch));
+    if (outcome.ok) {
       synced += batch.length;
     } else {
       failed += batch.length;
+      recordSendFailure(failures, outcome, batch.length);
+      // Queue write unchanged (#743 is reporting only): every failed record,
+      // permanent or not, is still enqueued for the retry worker to classify.
       for (const record of batch) {
         enqueueFailedMemorySync(record);
       }
     }
   }
 
-  return { total: records.length, synced, failed };
+  return { total: records.length, synced, failed, failures };
 }
