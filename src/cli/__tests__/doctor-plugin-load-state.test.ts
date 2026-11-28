@@ -317,13 +317,13 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
   // jarvis r3 rows a/b through the real doctor check (roster unread: the temp
   // HOME has no gateway log), and row d as the warn.
   it.each([
-    ['a. corrupt package.json, record 4.0.0 (path gone)', (): void => fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json'), '4.0.0', 'fail'],
-    ['b. no version anywhere, record 4.0.0 (path gone)', (): void => {
+    ['a. corrupt package.json, record 4.0.0 (path gone): fail, never pass', (): void => fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json'), '4.0.0', 'fail'],
+    ['b. no version anywhere, record 4.0.0 (path gone): fail, never pass', (): void => {
       fs.writeFileSync(path.join(outOfScan(), 'package.json'), JSON.stringify({ main: './dist/index.js' }));
       fs.writeFileSync(path.join(outOfScan(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
     }, '4.0.0', 'fail'],
-    ['d. corrupt package.json, record at expected', (): void => fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json'), '5.22.1', 'warn'],
-  ] as const)('checkOpenClawPluginLoadState, verified rootDir with an unreadable version — %s: %s, never pass', async (_l, damage, recordVersion, status) => {
+    ['d. corrupt package.json, record at expected: warn, never pass', (): void => fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json'), '5.22.1', 'warn'],
+  ] as const)('checkOpenClawPluginLoadState, verified rootDir with an unreadable version — %s', async (_l, damage, recordVersion, status) => {
     writeRealBuild(outOfScan(), '5.22.1');
     damage();
     migrated(pkgDir(), { recordVersion, rootDir: outOfScan() });
