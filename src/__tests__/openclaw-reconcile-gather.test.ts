@@ -10,8 +10,9 @@ import {
   readPluginInstallIndexState,
   reconcilePluginState,
 } from '../integrations/openclaw-plugin-index.js';
-import { renderPluginLoadVerdict } from '../cli/doctor.js';
-import { REALTIME_PLUGIN_PACKAGE } from '../setup/openclaw-plugin-spec.js';
+import { checkOpenClawPluginLoadState, renderPluginLoadVerdict } from '../cli/doctor.js';
+import { assessRealtimeReplacement, REALTIME_PLUGIN_PACKAGE } from '../setup/openclaw-plugin-spec.js';
+import { readRealtimeReplacementEvidence } from '../integrations/openclaw-realtime-install.js';
 
 /**
  * Disk-level tests for the reconciler's input gathering — fully isolated in a
@@ -1376,5 +1377,208 @@ describe('#260 Sol-4 — gather carries present-but-unreadable', () => {
     writeConfig(true, true);
     const input = gatherReconcileInput(home, { expectedVersion: '5.22.1', readIndex: () => null, readLiveRoster: () => null });
     expect(input.indexUnreadable).toBeUndefined();
+  });
+});
+
+/**
+ * #260 r7 (Sol review at 7c5a9714). Both index layouts, roster unread and
+ * roster-proven, gather → reconcile → doctor's renderer, plus the #1109
+ * preflight repair would run (`assessRealtimeReplacement`).
+ */
+describe('#260 r7 — unreadable selected copy, diagnostic-only warns, record-path build', () => {
+  const LAYOUTS = [
+    ['legacy installed_plugin_index', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeIndex(r)],
+    ['config_machine_state', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeMachineStateIndex(r)],
+  ] as const;
+  const ROSTERS = [['roster unread', null], ['roster-proven', [PLUGIN]]] as const;
+  const MATRIX = LAYOUTS.flatMap(([layout, write]) => ROSTERS.map(([rl, roster]) => [`${layout}, ${rl}`, write, roster] as const));
+  const gone = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'reaped', PKG_SUBPATH);
+  /** A linked/path build outside every place the disk scan looks. */
+  const selected = (): string => path.join(home, 'linked', 'shieldcortex-realtime');
+  const gather = (roster: readonly string[] | null) =>
+    gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => (roster ? [...roster] : null) });
+  const preflight = () => assessRealtimeReplacement(readRealtimeReplacementEvidence(home), '5.22.1');
+  const noInstallAdvice = (fix: string | undefined): void => {
+    expect(fix ?? '').not.toMatch(/plugins install|--force|shieldcortex repair/);
+  };
+  // Permission rows need a non-root uid: root reads a mode-0 file.
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  const permIt = asRoot ? it.skip : it;
+
+  /** The selected copy: own manifest at `manifestVersion`, package.json unreadable by permission. */
+  const unreadableSelected = (manifestVersion: string | undefined, opts: { manifestUnreadable?: boolean } = {}): void => {
+    writeRealBuild(selected(), '5.22.1');
+    fs.writeFileSync(path.join(selected(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN, ...(manifestVersion ? { version: manifestVersion } : {}) }));
+    fs.chmodSync(path.join(selected(), 'package.json'), 0);
+    if (opts.manifestUnreadable) fs.chmodSync(path.join(selected(), 'openclaw.plugin.json'), 0);
+  };
+
+  // FINDING 1 (Sol BLOCKER): at 7c5a9714 an EACCES package.json made the
+  // build check return "not checked" before the manifest was read, and the
+  // current 5.22.1 copy elsewhere passed the row (roster-confirmed PASS at
+  // v5.22.1). Now it takes the corrupt path: the manifest is read — 4.0.0 is
+  // a measured regression.
+  permIt.each(MATRIX)('F1: package.json unreadable (EACCES), own manifest 4.0.0, a current 5.22.1 copy elsewhere ⇒ measured regression, never a pass — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    unreadableSelected('4.0.0');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: selected() } }, plugins: [upstreamEntry(selected())] });
+    const input = gather(roster);
+    expect(input).toMatchObject({ indexRootDirExists: true, selectedVersion: '4.0.0', onDiskVersion: '5.22.1' });
+    const verdict = reconcilePluginState(input);
+    expect(verdict).toMatchObject({
+      state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned',
+      installedVersion: '4.0.0', installedVersionSource: 'selected-build',
+    });
+    const rendered = renderPluginLoadVerdict(verdict);
+    expect(rendered.status).toBe('fail');
+    expect(rendered.message).toMatch(/regressed to v4\.0\.0/);
+  });
+
+  permIt.each(MATRIX)('F1: package.json unreadable (EACCES), manifest carries no version ⇒ version-unverified / warn, the other copy never clears it — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    unreadableSelected(undefined);
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: selected() } }, plugins: [upstreamEntry(selected())] });
+    const verdict = reconcilePluginState(gather(roster));
+    expect(verdict).toMatchObject({ state: 'version-unverified', severity: 'warn', recommendedAction: 'none', installedVersion: null, versionUnverified: true });
+    const rendered = renderPluginLoadVerdict(verdict);
+    expect(rendered.status).toBe('warn');
+    expect(rendered.message).not.toMatch(/v5\.22\.1/);
+    noInstallAdvice(rendered.fix);
+  });
+
+  // Same class: package.json AND manifest unreadable — the build check itself
+  // cannot run (null). A named rootDir that could not be checked is an
+  // unmeasured selected copy: another copy may convict, never clear.
+  permIt.each(MATRIX)('F1: package.json and manifest both unreadable (check cannot run), a current copy elsewhere ⇒ version-unverified / warn, never a pass — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    unreadableSelected('5.22.1', { manifestUnreadable: true });
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: selected() } }, plugins: [upstreamEntry(selected())] });
+    const input = gather(roster);
+    expect(input).toMatchObject({ indexRootDirExists: null, indexRootDirUnreadable: true, onDiskVersion: '5.22.1' });
+    const verdict = reconcilePluginState(input);
+    expect(verdict).toMatchObject({ state: 'version-unverified', severity: 'warn', recommendedAction: 'none', installedVersion: null, versionUnverified: true });
+    expect(verdict.reasons.join(' ')).toMatch(/could not be read \(permission or I\/O error\)/);
+    expect(renderPluginLoadVerdict(verdict).status).toBe('warn');
+  });
+
+  permIt.each(MATRIX)('F1: both files unreadable, the copy elsewhere is 4.0.0 ⇒ that claim convicts (versionUnverified), running version unknown — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '4.0.0'), '4.0.0');
+    unreadableSelected('5.22.1', { manifestUnreadable: true });
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: selected() } }, plugins: [upstreamEntry(selected())] });
+    const verdict = reconcilePluginState(gather(roster));
+    expect(verdict).toMatchObject({ state: 'version-regressed', severity: 'fail', versionUnverified: true, installedVersion: '4.0.0', installedVersionSource: 'disk' });
+    expect(renderPluginLoadVerdict(verdict).message).toMatch(/running version unknown/);
+  });
+
+  // FINDING 2 (general rule): doctor never offers a repair that repair's own
+  // preflight refuses. The measured regression above is a real FAIL, but the
+  // preflight will not replace a copy whose package.json it cannot read — so
+  // doctor says so instead of "Run `shieldcortex repair`".
+  permIt('F2: doctor does not offer repair when the preflight would refuse it (unreadable package.json, measured 4.0.0)', async () => {
+    writeConfig(true, true);
+    unreadableSelected('4.0.0');
+    writeMachineStateIndex({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: selected() } }, plugins: [upstreamEntry(selected())] });
+    expect(preflight()).toMatchObject({ replace: false, why: 'unknown' });
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/regressed to v4\.0\.0/);
+    noInstallAdvice(r.fix);
+    expect(r.fix).toMatch(/^Check it: `shieldcortex openclaw status`\. Repair will not reinstall the plugin here: /);
+    expect(r.needsOpenClawCli).toBeUndefined();
+  });
+
+  // FINDING 2 (Sol BLOCKER): version-unverified has no action, so its fix is
+  // diagnostic only. Sol's probe row: selected rootDir missing, a real 5.23.0
+  // build at the record's path — at 7c5a9714 the fix offered
+  // `openclaw plugins install --force …@5.22.1`, which the preflight refuses.
+  it.each(MATRIX)('F2: selected rootDir missing, newer 5.23.0 build at the record path (record 5.22.1) ⇒ warn, no action, no install command — %s', async (_t, write, roster) => {
+    writeConfig(true, true);
+    const atRecord = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.23.0'), '5.23.0');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: atRecord } }, plugins: [upstreamEntry(gone())] });
+    const verdict = reconcilePluginState(gather(roster));
+    expect(verdict).toMatchObject({ state: roster ? 'version-unverified' : 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: true });
+    const rendered = renderPluginLoadVerdict(verdict);
+    expect(rendered.status).toBe('warn');
+    noInstallAdvice(rendered.fix);
+    expect(rendered.fix).toMatch(/^Check it: `shieldcortex openclaw status`/);
+    expect(preflight().replace).toBe(false);
+    if (!roster) noInstallAdvice((await checkOpenClawPluginLoadState(home, '5.22.1')).fix);
+  });
+
+  it.each(MATRIX)('F2: verified selected build, corrupt package.json, no version anywhere ⇒ version-unverified fix is diagnostic only — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(selected(), '5.22.1');
+    fs.writeFileSync(path.join(selected(), 'package.json'), '{ not json');
+    fs.writeFileSync(path.join(selected(), 'openclaw.plugin.json'), JSON.stringify({ id: PLUGIN }));
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: selected() } }, plugins: [upstreamEntry(selected())] });
+    const verdict = reconcilePluginState(gather(roster));
+    expect(verdict).toMatchObject({ state: 'version-unverified', recommendedAction: 'none' });
+    const rendered = renderPluginLoadVerdict(verdict);
+    noInstallAdvice(rendered.fix);
+    expect(rendered.fix).toMatch(/package\.json and openclaw\.plugin\.json can be read and carry an exact version/);
+    expect(rendered.needsOpenClawCli).toBeUndefined();
+    expect(preflight().replace).toBe(false);
+  });
+
+  // FINDING 3a (Sol SHOULD-FIX): only the SELECTED folder is empty — the
+  // record's own path holds a verified 5.22.1 build, which refutes the
+  // record's 5.0.0. At 7c5a9714 this failed as stale-index-record ("folders
+  // that hold no build") and promised a repair the preflight refuses (record
+  // 5.0.0 vs copy 5.22.1 ⇒ unknown). The preflight's refusal stands (#1109:
+  // conflicting evidence never authorises a forced install), so the verdict no
+  // longer promises it: the empty selection still blocks a pass, as a warn
+  // with no action that names the selected folder.
+  it.each(MATRIX)('F3a: selected rootDir empty, verified 5.22.1 build at the record path, record 5.0.0 ⇒ warn, no action, names the selected folder — %s', async (_t, write, roster) => {
+    writeConfig(true, true);
+    const atRecord = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: atRecord } }, plugins: [upstreamEntry(gone())] });
+    const input = gather(roster);
+    expect(input).toMatchObject({ indexRootDirExists: false, indexInstallPathExists: true });
+    const verdict = reconcilePluginState(input);
+    expect(verdict).toMatchObject({
+      state: roster ? 'version-unverified' : 'load-unproven', severity: 'warn', recommendedAction: 'none',
+      indexPathMissing: true, installedVersion: null,
+    });
+    expect(verdict.reasons.join(' ')).toContain(`selects the plugin at ${gone()}, which holds no plugin build`);
+    expect(verdict.reasons.join(' ')).not.toMatch(/stale index record|v5\.0\.0/);
+    const rendered = renderPluginLoadVerdict(verdict);
+    expect(rendered.message).toMatch(/points to a folder that holds no (plugin )?build/);
+    expect(rendered.message).not.toMatch(/folders that hold no build|v5\.0\.0|v5\.22\.1/);
+    noInstallAdvice(rendered.fix);
+    expect(preflight()).toMatchObject({ replace: false, why: 'unknown' });
+    if (!roster) noInstallAdvice((await checkOpenClawPluginLoadState(home, '5.22.1')).fix);
+  });
+
+  // Positive control: both indexed folders empty (the ruled case) still fails
+  // as stale-index-record, and doctor still offers repair — the preflight
+  // allows that pinned reinstall.
+  it('F3a control: both indexed folders empty, record 5.0.0, current build elsewhere ⇒ stale-index-record FAIL, doctor offers repair, preflight allows it', async () => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    writeMachineStateIndex({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: gone() } }, plugins: [upstreamEntry(gone())] });
+    expect(preflight()).toEqual({ replace: true });
+    const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/stale index record/);
+    expect(r.fix).toMatch(/shieldcortex repair.*pinned to v5\.22\.1/);
+  });
+
+  // FINDING 3b (Sol SHOULD-FIX), decided: KEEP the warn. On main, an index
+  // entry that is not enabled with the roster unread is rule 4
+  // (load-unproven / warn), which runs BEFORE the version rule — main warns
+  // there even on a measured regression. The stale-record fail is a
+  // version-tier rule and keeps main's order. A read roster still decides
+  // (naming it ⇒ the stale-record FAIL; omitting it ⇒ enabled-not-loaded).
+  it.each(LAYOUTS)('F3b: both indexed folders empty + index entry enabled:false + roster unread ⇒ load-unproven / warn, as main does for that entry (%s)', (_l, write) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: gone() } }, plugins: [upstreamEntry(gone(), { enabled: false })] });
+    expect(reconcilePluginState(gather(null))).toMatchObject({ state: 'load-unproven', severity: 'warn' });
+    expect(reconcilePluginState(gather([PLUGIN]))).toMatchObject({ state: 'stale-index-record', severity: 'fail' });
+    expect(reconcilePluginState(gather([]))).toMatchObject({ state: 'enabled-not-loaded', severity: 'fail' });
   });
 });

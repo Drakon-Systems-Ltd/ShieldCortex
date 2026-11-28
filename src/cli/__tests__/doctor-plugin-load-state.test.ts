@@ -190,7 +190,9 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
   const expectStalePathWarn = (r: { status: string; message: string; fix?: string }): void => {
     expect(r.status).toBe('warn');
     expect(r.message).not.toMatch(/installed and enabled/i);
-    expect(r.message).toMatch(/points to a folder that is no longer there/);
+    // r7 (Sol/Grok nit): worded by the evidence — the folder may exist and
+    // hold no build (was "is no longer there").
+    expect(r.message).toMatch(/points to a folder that holds no plugin build/);
     expect(r.message).not.toMatch(/start-up|sqlite|config_machine_state|roster|index/i);
     expect(r.fix ?? '').not.toMatch(/repair/i);
   };
@@ -462,6 +464,17 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     expect(r.status).toBe('warn');
     expect(r.message).toMatch(/version unverified/);
     expect(r.message).not.toMatch(/5\.22\.1/);
+  });
+
+  // r7 (Sol, wording only): a hand-built verdict that carries only the index
+  // record's version names the record as its source — never as a build.
+  it('renderer: a hand-built healthy verdict carrying only the index record version words it as the record\'s', () => {
+    const r = renderPluginLoadVerdict({
+      ...reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null })),
+      state: 'healthy', severity: 'ok', recommendedAction: 'none', onDiskVersion: null, indexVersion: '5.22.1',
+      installedVersion: undefined, installedVersionSource: undefined, versionUnverified: undefined, loadedInLiveRoster: true,
+    });
+    expect(r.message).toMatch(/v5\.22\.1 per OpenClaw's install record/);
   });
 
   it('control: directory present + live roster names the plugin: roster-confirmed with the measured version', () => {
