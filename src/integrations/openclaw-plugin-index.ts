@@ -163,6 +163,15 @@ export interface ReconcileInput {
    */
   indexRootDirExists?: boolean | null;
   /**
+   * The exact version of the build at the index's selected `rootDir`, read
+   * out of that directory (its package.json, else its openclaw.plugin.json) —
+   * meaningful only when `indexRootDirExists` is true (#260, Case r2 #1).
+   * null/undefined = it could not be read. When the selection is verified this
+   * is the ONLY version the verdict uses: neither the newest build a disk scan
+   * finds (`onDiskVersion`) nor the index record's version may stand in for it.
+   */
+  selectedVersion?: string | null;
+  /**
    * `~/.openclaw/npm/projects/*` dir names matching the plugin.
    *
    * A DUPLICATE-detection signal, not an installation one (#226). An uninstall
@@ -278,20 +287,33 @@ export interface ReconcileVerdict {
   onDiskVersion: string | null;
   expectedVersion: string;
   /**
-   * This verdict is `load-unproven` BECAUSE the install index records the
-   * plugin at a path that holds no build, nothing shows which other copy (if
-   * any) OpenClaw selected, and the running gateway did not prove the load
-   * (#260). A build found elsewhere on disk does not clear it: a build on
-   * disk is not a selection. False (or absent, on hand-built verdicts) on
+   * This verdict is `load-unproven` BECAUSE the copy the install index points
+   * at holds no build — its selected `rootDir`, or (when no selection is
+   * verified) its record's `installPath` — and the running gateway did not
+   * prove the load (#260). A build found elsewhere on disk does not clear it:
+   * a build on disk is not a selection, and an equal-version record elsewhere
+   * is not the selected build. False (or absent, on hand-built verdicts) on
    * every other verdict, including other `load-unproven` ones.
    */
   indexPathMissing?: boolean;
   /**
-   * `healthy` because the running gateway proved the load, but the installed
-   * version could not be verified: the index record points at a folder that is
-   * gone and no build was found on disk (#260). Absent on every other verdict.
+   * `healthy`, but no version was measured for the copy it is about (#260):
+   * the selected build's version could not be read, the selected copy holds
+   * no build (load proven by the running gateway only), or no layer recorded
+   * a version at all. Renderers then say "version unverified" — never the
+   * expected version, and never the newest build a disk scan found. Absent on
+   * every other verdict.
    */
   versionUnverified?: boolean;
+  /**
+   * The version this verdict measured for the copy it is about, and where it
+   * was read (#260, Case r2 #1). `selected-build`: read out of the verified
+   * selected `rootDir`. `disk`: the newest build ShieldCortex's own scan found
+   * (no selection was checked). `index-record`: only OpenClaw's install record
+   * says so. null when nothing was measured. Never the expected version.
+   */
+  installedVersion?: string | null;
+  installedVersionSource?: 'selected-build' | 'disk' | 'index-record' | null;
   reasons: string[];
 }
 
@@ -388,10 +410,25 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // pass on its own. Only independent evidence does: the running gateway
   // proving the load, or the index's own selection (`rootDir`) verified as a
   // real build. A build ShieldCortex found somewhere else on disk is neither.
+  //
+  // Case r2 / Sol r2: selection, build, provenance and version are checked
+  // SEPARATELY. The selection is the plugins entry's `rootDir`:
+  //   - verified (a real build there) ⇒ that build is the one the verdict is
+  //     about, and its own version is the only version used;
+  //   - stale (looked, no build there) ⇒ the selected build is missing, even
+  //     when the record's `installPath` (or another dir) holds an equal-version
+  //     build — a record elsewhere is not the selected build;
+  //   - not checked ⇒ the record's `installPath` decides, as before.
   const indexRecordPathGone = Boolean(indexRecord) && input.indexInstallPathExists === false;
   const indexSelectionVerified = input.indexRootDirExists === true;
-  const indexPathMissing = indexRecordPathGone && !indexSelectionVerified;
-  const installed = Boolean(input.installsJson || onDiskVersion || indexRecord || input.onDiskInstallPath);
+  const indexSelectionStale = input.indexRootDirExists === false;
+  const indexPathMissing = indexSelectionStale || (indexRecordPathGone && !indexSelectionVerified);
+  // A verified selection is an install in its own right: a linked or path
+  // install outside every place the disk scan looks, with no install record,
+  // is still a real build OpenClaw selected.
+  const installed = Boolean(
+    input.installsJson || onDiskVersion || indexRecord || input.onDiskInstallPath || indexSelectionVerified,
+  );
 
   // The index warning is present even on healthy hosts (it names every plugin
   // whose legacy/SQLite metadata differs), so it is a signal, not a verdict.
@@ -410,13 +447,50 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   );
   const metadataConflict = pathConflict || versionLayerConflict;
 
-  // Effective running version: on-disk is ground truth, else the index record.
-  // A record whose directory is gone says nothing about what would run — not
-  // even when the live roster names the plugin: that proves it loaded, not
-  // which version loaded. (No live-roster term in `indexPathMissing`.)
-  const effective = coerce(onDiskVersion) ?? (indexRecordPathGone ? null : coerce(indexVersion));
+  // The installed version, from ONE source chosen by what the selection says
+  // (Case r2 #1):
+  //   - verified selection ⇒ the version read out of that build. Unreadable ⇒
+  //     none: the disk scan's newest build and the record's version are other
+  //     copies' claims, and the expected pin is not a measurement at all.
+  //   - missing selected build ⇒ the scan's build, for the downgrade check
+  //     only (a fail is never a false pass; the pass below claims no version).
+  //   - not checked ⇒ on-disk, else the index record — but never a record
+  //     whose own directory is gone: that says nothing about what would run.
+  // The live roster proves a load, never which version loaded.
+  const scanVersion = coerce(onDiskVersion);
+  let effective: string | null;
+  let installedVersionSource: ReconcileVerdict['installedVersionSource'];
+  if (indexSelectionVerified) {
+    effective = coerce(input.selectedVersion);
+    installedVersionSource = effective ? 'selected-build' : null;
+    // The build's own version could not be read. The install record speaks
+    // for it only when it names THAT SAME directory and a build is there —
+    // a record for the selected copy, not an equal-version record elsewhere.
+    const selectedRoot = index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir;
+    const recordPath = indexRecord?.installPath;
+    if (
+      !effective && input.indexInstallPathExists === true &&
+      typeof selectedRoot === 'string' && typeof recordPath === 'string' &&
+      path.resolve(selectedRoot) === path.resolve(recordPath)
+    ) {
+      effective = coerce(indexVersion);
+      installedVersionSource = effective ? 'index-record' : null;
+    }
+  } else if (indexPathMissing) {
+    effective = scanVersion;
+    installedVersionSource = effective ? 'disk' : null;
+  } else {
+    effective = scanVersion ?? (indexRecordPathGone ? null : coerce(indexVersion));
+    installedVersionSource = scanVersion ? 'disk' : effective ? 'index-record' : null;
+  }
   const expected = coerce(expectedVersion);
   const regressed = Boolean(effective && expected && semver.lt(effective, expected));
+  const versionLabel =
+    installedVersionSource === 'selected-build'
+      ? `the build OpenClaw selected is v${effective}`
+      : installedVersionSource === 'disk'
+        ? `the build on disk is v${effective}`
+        : `OpenClaw's install record says v${effective}`;
 
   const indexReadable = index != null;
   const indexUnreadable = index == null && input.indexUnreadable === true;
@@ -441,6 +515,8 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     expectedVersion,
     indexUnreadable,
     indexPathMissing: false,
+    installedVersion: effective,
+    installedVersionSource,
   };
 
   // ── Priority order: most severe first ────────────────────────────────────
@@ -621,7 +697,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
 
   // 4. Version regression (e.g. reinstall regressed 4.47.2 → 4.25.4).
   if (regressed) {
-    reasons.push(`running version ${effective} is older than expected ${expected} — refuse downgrade, reinstall pinned`);
+    reasons.push(`${versionLabel}, older than expected ${expected} — refuse downgrade, reinstall pinned`);
     return { ...base, state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned', reasons };
   }
 
@@ -644,52 +720,69 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     return { ...base, state: 'duplicate-install', severity: 'warn', recommendedAction: 'dedupe-and-reload', reasons };
   }
 
-  // #260: THE ONLY THING A STALE INDEX PATH DOES. Every rule above ran as if
-  // the record were sound; control is here because none of them objected, and
-  // the next statement would be a pass. But the index records the plugin at a
-  // path that holds no build, and its selection (`rootDir`) is not verified,
-  // so nothing on this host backs "installed and enabled, versions agree".
+  // #260: THE ONLY THING A MISSING SELECTED BUILD DOES. Every rule above ran
+  // as if the record were sound; control is here because none of them
+  // objected, and the next statement would be a pass. But the copy the index
+  // points at holds no build — its selected `rootDir`, or its record's path
+  // with no verified selection — so nothing on this host backs "installed and
+  // enabled at version X".
   //   - The running gateway provably loaded it ⇒ load is proven, so it stays
-  //     healthy. With no build found anywhere, WHICH version loaded is not
-  //     known, and is not claimed.
+  //     healthy. WHICH version loaded is not known and is not claimed — not
+  //     even when a build sits elsewhere on disk (Sol r2): the scan's newest
+  //     build is not proven to be the copy that process loaded.
   //   - Otherwise ⇒ neither a pass nor a conviction, whether or not a build
   //     sits elsewhere on disk (Sol finding 3): a build on disk proves an
   //     install, not that OpenClaw selected it.
   if (indexPathMissing) {
     const buildElsewhere = onDiskVersion != null || Boolean(input.onDiskInstallPath);
+    const selectedRoot = index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir;
+    const where = safeForReason(indexSelectionStale ? selectedRoot : indexRecord?.installPath);
+    const what = indexSelectionStale ? 'selects the plugin at' : 'records the plugin at';
     if (loadedInLiveRoster === true) {
-      if (!buildElsewhere) {
-        reasons.push(
-          input.liveLoadEvidence === 'gateway-pid-registration'
-            ? 'enabled, registration attributed to the RUNNING gateway PID after boot (hot-reload / post-boot load)'
-            : 'enabled, present on the running gateway boot roster',
-        );
-        reasons.push("load proven by the running gateway; the installed version could not be verified (OpenClaw's record points to a folder that is gone)");
-        return { ...base, versionUnverified: true, state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons };
-      }
-      // Live proof AND a build on disk: the ordinary pass below.
-    } else {
-      const where = safeForReason(indexRecord?.installPath);
+      reasons.push(
+        input.liveLoadEvidence === 'gateway-pid-registration'
+          ? 'enabled, registration attributed to the RUNNING gateway PID after boot (hot-reload / post-boot load)'
+          : 'enabled, present on the running gateway boot roster',
+      );
       reasons.push(
         buildElsewhere
-          ? `OpenClaw's install index records the plugin at ${where}, which holds no plugin build; a build exists elsewhere on disk, but nothing shows OpenClaw selected it and the running gateway did not prove the load — load state is unproven`
-          : `OpenClaw's install index records the plugin at ${where}, which holds no plugin build; no other build was found where ShieldCortex looks — it may be installed elsewhere; load state is unproven`,
+          ? `load proven by the running gateway; the installed version could not be verified (OpenClaw's install index ${what} ${where}, which holds no plugin build; the build found elsewhere on disk is not proven to be the copy it loaded)`
+          : `load proven by the running gateway; the installed version could not be verified (OpenClaw's install index ${what} ${where}, which holds no plugin build)`,
       );
-      return { ...base, indexPathMissing: true, state: 'load-unproven', severity: 'warn', recommendedAction: 'none', reasons };
+      return {
+        ...base, installedVersion: null, installedVersionSource: null, versionUnverified: true,
+        state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons,
+      };
     }
+    reasons.push(
+      buildElsewhere
+        ? `OpenClaw's install index ${what} ${where}, which holds no plugin build; a build exists elsewhere on disk, but nothing shows OpenClaw selected it and the running gateway did not prove the load — load state is unproven`
+        : `OpenClaw's install index ${what} ${where}, which holds no plugin build; no other build was found where ShieldCortex looks — it may be installed elsewhere; load state is unproven`,
+    );
+    return { ...base, indexPathMissing: true, state: 'load-unproven', severity: 'warn', recommendedAction: 'none', reasons };
   }
 
   // Say exactly which evidence we have. Claiming "loaded in roster" off the
   // install index alone is what made #103 a false positive.
   // #216: distinguish boot-snapshot proof from PID-attributed hot-reload proof.
+  // Case r2 #1: "versions agree" only when a version was measured; otherwise
+  // the verdict says it was not, and renderers print "version unverified".
+  const versionUnverified = effective == null;
+  const versionClause = versionUnverified
+    ? 'the installed version could not be verified'
+    : 'versions agree at the expected build';
   reasons.push(
     loadedInLiveRoster === true
       ? input.liveLoadEvidence === 'gateway-pid-registration'
-        ? 'enabled, registration attributed to the RUNNING gateway PID after boot (hot-reload / post-boot load), versions agree at the expected build'
-        : 'enabled, present on the running gateway boot roster, versions agree at the expected build'
-      : 'enabled and installed, versions agree at the expected build — but the running gateway boot roster could NOT be read, so the plugin is not proven loaded',
+        ? `enabled, registration attributed to the RUNNING gateway PID after boot (hot-reload / post-boot load), ${versionClause}`
+        : `enabled, present on the running gateway boot roster, ${versionClause}`
+      : `enabled and installed, ${versionClause} — but the running gateway boot roster could NOT be read, so the plugin is not proven loaded`,
   );
-  return { ...base, state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons };
+  return {
+    ...base,
+    ...(versionUnverified ? { versionUnverified: true } : {}),
+    state: 'healthy', severity: 'ok', recommendedAction: 'none', reasons,
+  };
 }
 
 // ── Remediation planner (pure) ──────────────────────────────────────────────
@@ -1336,6 +1429,32 @@ function verifiedPluginBuildAt(dir: unknown, pluginId: string): boolean | null {
   return unchecked ? null : false;
 }
 
+/**
+ * The exact version of the plugin build in `dir` (#260, Case r2 #1): its
+ * package.json `version` (the npm package, a linked checkout), else its
+ * openclaw.plugin.json `version` (a trusted-local copy writes a version-less
+ * package.json and versions the manifest). The first of the two that carries
+ * a `version` string decides; one that is not an exact version, or a file
+ * that cannot be read, is null — never a guess.
+ */
+function readExactBuildVersion(dir: unknown): string | null {
+  if (typeof dir !== 'string' || !path.isAbsolute(dir)) return null;
+  for (const file of ['package.json', 'openclaw.plugin.json']) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf-8'));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+      return null;
+    }
+    if (isPlainObject(parsed) && typeof parsed.version === 'string') {
+      return semver.valid(parsed.version.trim());
+    }
+  }
+  return null;
+}
+
 /** {@link verifiedPluginBuildAt} for the path the index RECORD names. */
 function indexInstallPathOnDisk(index: PluginIndexRow | null, pluginId: string): boolean | null {
   return verifiedPluginBuildAt(index?.installRecords?.[pluginId]?.installPath, pluginId);
@@ -1430,6 +1549,7 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
     indexUnreadable = st.state === 'unreadable';
   }
 
+  const indexRootDirExists = indexRootDirOnDisk(index, pluginId);
   return {
     pluginId,
     expectedVersion: options.expectedVersion,
@@ -1438,7 +1558,14 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
     index,
     ...(indexUnreadable !== undefined ? { indexUnreadable } : {}),
     indexInstallPathExists: indexInstallPathOnDisk(index, pluginId),
-    indexRootDirExists: indexRootDirOnDisk(index, pluginId),
+    indexRootDirExists,
+    // Case r2 #1: the selected build's OWN version, read out of `rootDir` —
+    // only when that is a verified build. The scan below does not look there
+    // (a linked or path install sits outside it), and its newest build is not
+    // necessarily the copy OpenClaw selected.
+    ...(indexRootDirExists === true
+      ? { selectedVersion: readExactBuildVersion(index?.plugins?.find((p) => p?.pluginId === pluginId)?.rootDir) }
+      : {}),
     onDiskVersion: readInstalledRealtimePluginVersion(home),
     // #226: the trusted-local-copy build, only when it is a REAL one (index.js
     // + openclaw.plugin.json). Kept separate from `onDiskVersion` so a valid

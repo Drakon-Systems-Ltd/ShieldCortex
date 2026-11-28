@@ -200,14 +200,15 @@ describe('#260 r2 — malformed and stale index input', () => {
     expect(verdict.reasons.join(' ')).not.toMatch(/versions agree/);
   });
 
-  it('versionUnverified is absent on an ordinary healthy verdict, and on a stale-path one with a build on disk (#260 r4)', () => {
+  // Sol r2 (r3 change): a stale-path host's scan build no longer counts as the
+  // measured version — the load is proven, the version is not.
+  it('versionUnverified is absent on an ordinary healthy verdict; set on a stale-path one even with a build on disk (#260 r4, Sol r2)', () => {
     expect(reconcilePluginState(base({ liveRoster: ['shieldcortex-realtime'] })).versionUnverified).toBeUndefined();
     const onDisk = reconcilePluginState(
       base({ indexInstallPathExists: false, liveRoster: ['shieldcortex-realtime'], onDiskVersion: '5.22.1' }),
     );
-    expect(onDisk).toMatchObject({ state: 'healthy', severity: 'ok' });
-    expect(onDisk.versionUnverified).toBeUndefined();
-    expect(onDisk.reasons.join(' ')).toMatch(/versions agree/);
+    expect(onDisk).toMatchObject({ state: 'healthy', severity: 'ok', versionUnverified: true });
+    expect(onDisk.reasons.join(' ')).not.toMatch(/versions agree/);
   });
 
   // #260 r4 (Astra r3 BLOCKER 1): the stale path blocks a pass and nothing
@@ -267,12 +268,18 @@ describe('#260 r2 — malformed and stale index input', () => {
     expect(reconcilePluginState({ ...input, indexInstallPathExists: true }).state).toBe('version-regressed');
   });
 
-  it('positive control (Sol 3): the same host with the RUNNING gateway proving the load is healthy, with the measured version', () => {
+  // Sol r2: the RUNNING gateway proves the load, but the build a disk scan
+  // found elsewhere is not proven to be the copy it loaded — so its version is
+  // not claimed (this row asserted the scan's version as measured until r3).
+  it('positive control (Sol 3): the same host with the RUNNING gateway proving the load is healthy — version unverified, never the scan\'s', () => {
     const verdict = reconcilePluginState(base({
       indexInstallPathExists: false, onDiskVersion: '5.22.1', liveRoster: ['shieldcortex-realtime'], liveLoadEvidence: 'boot-roster',
     }));
-    expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', indexPathMissing: false });
-    expect(verdict.versionUnverified).toBeUndefined();
+    expect(verdict).toMatchObject({
+      state: 'healthy', severity: 'ok', indexPathMissing: false,
+      versionUnverified: true, installedVersion: null, installedVersionSource: null,
+    });
+    expect(verdict.reasons.join(' ')).toMatch(/not proven to be the copy it loaded/);
   });
 
   it('positive control (Sol 3): the index\'s own selection (rootDir) verified as a real build lets the ordinary rules decide', () => {

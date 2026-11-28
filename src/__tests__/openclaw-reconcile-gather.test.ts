@@ -611,7 +611,9 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     expect(verdict.state).not.toBe('version-regressed');
   });
 
-  it('positive control (Sol 3): the same host with a live roster naming the plugin ⇒ healthy at the measured version', () => {
+  // Sol r2 (r3 change): the load is proven; the scan's build elsewhere is not
+  // the selected copy, so its version is not claimed as the one that loaded.
+  it('positive control (Sol 3): the same host with a live roster naming the plugin ⇒ healthy, version unverified (not the scan\'s)', () => {
     writeConfig(true, true);
     writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
     writeMachineStateIndex({
@@ -620,7 +622,7 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     });
     const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => [PLUGIN] }));
     expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', onDiskVersion: '5.22.1', indexPathMissing: false });
-    expect(verdict.versionUnverified).toBeUndefined();
+    expect(verdict).toMatchObject({ versionUnverified: true, installedVersion: null });
   });
 
   it('positive control (Sol 3): the index SELECTS the real build (rootDir verified) though the record path is stale ⇒ ordinary rules, healthy', () => {
@@ -683,6 +685,147 @@ describe('#260 r2 — a stale index record does not prove an installation', () =
     fs.rmSync(path.join(home, '.openclaw', 'state'), { recursive: true });
     writeMachineStateIndex({ installRecords: { [PLUGIN]: { source: 'npm', installPath: 'relative/dir' } }, plugins: [] });
     expect(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null }).indexInstallPathExists).toBeNull();
+  });
+});
+
+/**
+ * #260 r3 — Case r2 #1 / Sol r2: selection, build and version are verified
+ * SEPARATELY. When the record path is gone and the selected `rootDir` is a
+ * verified build, its OWN package.json version is the version — so a
+ * regression is still caught even outside every place the disk scan looks —
+ * and an unreadable one is "version unverified", never the expected pin. A
+ * stale selection, or an equal-version record elsewhere, is not the selected
+ * build; a disk scan is not a measured version.
+ */
+describe('#260 r3 — the selected build is measured, not assumed', () => {
+  const gone = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'reaped', PKG_SUBPATH);
+  /** A linked/path build outside installs.json, npm/projects and extensions — out of the disk scan. */
+  const outOfScan = (): string => path.join(home, 'src', 'realtime');
+  const row = (rootDir: string, recordVersion: string, installPath: string = gone()) => ({
+    installRecords: { [PLUGIN]: { source: 'npm', version: recordVersion, installPath } },
+    plugins: [upstreamEntry(rootDir)],
+  });
+  const gather = (roster: string[] | null) =>
+    gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => roster });
+
+  it.each([
+    ['roster unread', null],
+    ['roster-proven', [PLUGIN]],
+  ] as const)('out-of-scan rootDir at 4.0.0, record path gone (%s) ⇒ version-regressed / fail at the measured 4.0.0', (_l, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(outOfScan(), '4.0.0');
+    writeMachineStateIndex(row(outOfScan(), '4.0.0'));
+    const input = gather(roster ? [...roster] : null);
+    expect(input).toMatchObject({ indexInstallPathExists: false, indexRootDirExists: true, onDiskVersion: null, selectedVersion: '4.0.0' });
+    const verdict = reconcilePluginState(input);
+    expect(verdict).toMatchObject({
+      state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned',
+      installedVersion: '4.0.0', installedVersionSource: 'selected-build',
+    });
+    expect(verdict.reasons.join(' ')).toMatch(/the build OpenClaw selected is v4\.0\.0, older than expected 5\.22\.1/);
+  });
+
+  it.each([
+    ['roster unread', null, '5.22.1'],
+    ['roster-proven', [PLUGIN], '5.22.1'],
+    // A version different from the pin proves the number is read, not assumed.
+    ['roster unread, newer build', null, '5.23.0'],
+    ['roster-proven, newer build', [PLUGIN], '5.23.0'],
+  ] as const)('out-of-scan rootDir, record path gone (%s, v%s) ⇒ healthy at the MEASURED version', (_l, roster, version) => {
+    writeConfig(true, true);
+    writeRealBuild(outOfScan(), version);
+    writeMachineStateIndex(row(outOfScan(), '4.0.0'));
+    const verdict = reconcilePluginState(gather(roster ? [...roster] : null));
+    expect(verdict).toMatchObject({
+      state: 'healthy', severity: 'ok', installedVersion: version, installedVersionSource: 'selected-build', indexPathMissing: false,
+    });
+    expect(verdict.versionUnverified).toBeUndefined();
+  });
+
+  it.each([
+    ['roster unread', null],
+    ['roster-proven', [PLUGIN]],
+  ] as const)('verified rootDir whose version cannot be read (%s) ⇒ healthy, versionUnverified — a scan build elsewhere at 4.0.0 does not stand in', (_l, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(outOfScan(), '5.22.1');
+    fs.writeFileSync(path.join(outOfScan(), 'package.json'), JSON.stringify({ main: './dist/index.js', version: 'not-a-version' }));
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-old', '4.0.0'), '4.0.0');
+    writeMachineStateIndex(row(outOfScan(), '5.22.1'));
+    const input = gather(roster ? [...roster] : null);
+    expect(input).toMatchObject({ indexRootDirExists: true, selectedVersion: null, onDiskVersion: '4.0.0' });
+    const verdict = reconcilePluginState(input);
+    expect(verdict).toMatchObject({ state: 'healthy', severity: 'ok', versionUnverified: true, installedVersion: null });
+    expect(verdict.reasons.join(' ')).not.toMatch(/versions agree/);
+  });
+
+  it('unreadable selected version, but the record names THAT SAME verified directory ⇒ the record speaks for it (4.0.0 regressed)', () => {
+    writeConfig(true, true);
+    const selected = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-a', '4.0.0'), '4.0.0');
+    fs.writeFileSync(path.join(selected, 'package.json'), '{ nope');
+    writeMachineStateIndex(row(selected, '4.0.0', selected));
+    const verdict = reconcilePluginState(gather(null));
+    expect(verdict).toMatchObject({ state: 'version-regressed', installedVersion: '4.0.0', installedVersionSource: 'index-record' });
+  });
+
+  // CASE's onDiskVersion note: the scan's NEWEST build is not the selected copy.
+  it('the selected build is older than the newest build the scan finds ⇒ version-regressed on the SELECTED copy', () => {
+    writeConfig(true, true);
+    const selected = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-a', '4.0.0'), '4.0.0');
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-b', '5.22.1'), '5.22.1');
+    writeMachineStateIndex(row(selected, '4.0.0', selected));
+    const input = gather([PLUGIN]);
+    expect(input).toMatchObject({ onDiskVersion: '5.22.1', selectedVersion: '4.0.0', indexInstallPathExists: true, indexRootDirExists: true });
+    expect(reconcilePluginState(input)).toMatchObject({ state: 'version-regressed', severity: 'fail', installedVersion: '4.0.0' });
+  });
+
+  it.each([
+    ['5.22.1', 'healthy', 'ok'],
+    ['4.0.0', 'version-regressed', 'fail'],
+  ] as const)('roster-only verified root (plugins entry, no install record, out of scan) at v%s ⇒ %s — never "not installed"', (version, state, severity) => {
+    writeConfig(true, true);
+    writeRealBuild(outOfScan(), version);
+    writeMachineStateIndex({ installRecords: {}, plugins: [upstreamEntry(outOfScan())] });
+    const verdict = reconcilePluginState(gather(null));
+    expect(verdict).toMatchObject({ state, severity, installedVersion: version, installedVersionSource: 'selected-build' });
+  });
+
+  it('roster-only root that is NOT a build, nothing else on disk ⇒ the confirmed absence it is (enabled-not-installed)', () => {
+    writeConfig(true, true);
+    fs.mkdirSync(outOfScan(), { recursive: true });
+    writeMachineStateIndex({ installRecords: {}, plugins: [upstreamEntry(outOfScan())] });
+    expect(reconcilePluginState(gather(null))).toMatchObject({ state: 'enabled-not-installed', severity: 'fail' });
+  });
+
+  // Sol r2: a stale SELECTION is not rescued by an equal-version record elsewhere.
+  it.each([
+    ['roster unread', null, { state: 'load-unproven', severity: 'warn', recommendedAction: 'none', indexPathMissing: true }],
+    ['roster-proven', [PLUGIN], { state: 'healthy', severity: 'ok', versionUnverified: true, installedVersion: null }],
+  ] as const)('stale selection (rootDir holds no build) + an equal-version build at the record path (%s) ⇒ never the record\'s version', (_l, roster, expected) => {
+    writeConfig(true, true);
+    const recordBuild = writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-rec', '5.22.1'), '5.22.1');
+    // Named off the plugin id so the duplicate-dir rule stays out of this row.
+    const staleRoot = path.join(home, '.openclaw', 'npm', 'projects', 'selected-but-emptied', PKG_SUBPATH);
+    fs.mkdirSync(staleRoot, { recursive: true });
+    writeMachineStateIndex(row(staleRoot, '5.22.1', recordBuild));
+    const input = gather(roster ? [...roster] : null);
+    expect(input).toMatchObject({ indexInstallPathExists: true, indexRootDirExists: false });
+    const verdict = reconcilePluginState(input);
+    expect(verdict).toMatchObject(expected);
+    expect(verdict.reasons.join(' ')).toContain(staleRoot);
+  });
+
+  // Sol r2: a stale RECORD with no selection at all, and a scan build elsewhere.
+  it.each([
+    ['roster unread', null, { state: 'load-unproven', severity: 'warn' }],
+    ['roster-proven', [PLUGIN], { state: 'healthy', severity: 'ok', versionUnverified: true, installedVersion: null }],
+  ] as const)('stale-record-only (no plugins entry, record path gone) + a scan build elsewhere (%s) ⇒ no pass on the scan\'s version', (_l, roster, expected) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-x', '5.22.1'), '5.22.1');
+    writeMachineStateIndex({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.22.1', installPath: gone() } }, plugins: [] });
+    const input = gather(roster ? [...roster] : null);
+    expect(input).toMatchObject({ indexInstallPathExists: false, onDiskVersion: '5.22.1' });
+    expect(input.indexRootDirExists).toBeNull();
+    expect(reconcilePluginState(input)).toMatchObject(expected);
   });
 });
 

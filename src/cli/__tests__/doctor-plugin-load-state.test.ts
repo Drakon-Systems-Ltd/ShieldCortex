@@ -226,12 +226,15 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     expectStalePathWarn(r);
   });
 
-  it('positive control: the same host with the live roster naming the plugin passes roster-confirmed at the measured version', () => {
+  // Sol r2 (r3 change): load proven by the roster; the other project dir's
+  // build is not the selected copy, so its version is not printed as measured.
+  it('positive control: the same host with the live roster naming the plugin passes roster-confirmed, version unverified', () => {
     migrated(pkgDir());
     writeRealBuild(path.join(home, '.openclaw', 'npm', 'projects', 'drakon-systems-shieldcortex-realtime-other', PKG_SUBPATH), '5.22.1');
     const r = renderWithRoster([PLUGIN]);
     expect(r.status).toBe('pass');
-    expect(r.message).toMatch(/roster-confirmed, v5\.22\.1\)/);
+    expect(r.message).toMatch(/roster-confirmed, version unverified\)/);
+    expect(r.message).not.toMatch(/5\.22\.1/);
   });
 
   // #260 r4 (Astra r3 BLOCKER 2): a wiped registration behind a stale record
@@ -265,6 +268,59 @@ describe('#260 r2 — checkOpenClawPluginLoadState on a migrated index', () => {
     expect(r.status).toBe('pass');
     expect(r.message).toMatch(/roster-confirmed, version unverified\)/);
     expect(r.message).not.toMatch(/5\.22\.1|4\.0\.0/);
+  });
+
+  // #260 r3 (Case r2 #1): the record path is gone and the SELECTED rootDir
+  // is a verified build outside every place the disk scan looks. Its own
+  // version is measured — a regression still fails — and an unreadable one is
+  // "version unverified" in BOTH passes, never the expected v5.22.1.
+  const outOfScan = (): string => path.join(home, 'src', 'realtime');
+  it.each([
+    ['roster unread', null],
+    ['roster-proven', [PLUGIN]],
+  ] as const)('out-of-scan rootDir at 4.0.0 (%s): FAILS as regressed to v4.0.0', (_l, roster) => {
+    writeRealBuild(outOfScan(), '4.0.0');
+    migrated(pkgDir(), { recordVersion: '4.0.0', rootDir: outOfScan() });
+    const r = renderWithRoster(roster ? [...roster] : null);
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/regressed to v4\.0\.0 \(older than expected v5\.22\.1\)/);
+  });
+
+  it.each([
+    ['roster unread', null, '5.22.1', /installed and enabled \(v5\.22\.1\)/],
+    ['roster-proven', [PLUGIN], '5.22.1', /roster-confirmed, v5\.22\.1\)/],
+    ['roster unread', null, '5.23.0', /installed and enabled \(v5\.23\.0\)/],
+    ['roster-proven', [PLUGIN], '5.23.0', /roster-confirmed, v5\.23\.0\)/],
+  ] as const)('out-of-scan rootDir (%s) at v%s: passes with the MEASURED version', (_l, roster, version, expected) => {
+    writeRealBuild(outOfScan(), version);
+    migrated(pkgDir(), { recordVersion: '4.0.0', rootDir: outOfScan() });
+    const r = renderWithRoster(roster ? [...roster] : null);
+    expect(r.status).toBe('pass');
+    expect(r.message).toMatch(expected);
+  });
+
+  it.each([
+    ['roster unread', null, /installed and enabled \(version unverified\)/],
+    ['roster-proven', [PLUGIN], /roster-confirmed, version unverified\)/],
+  ] as const)('out-of-scan rootDir whose version cannot be read (%s): passes saying "version unverified", never v5.22.1', (_l, roster, expected) => {
+    writeRealBuild(outOfScan(), '5.22.1');
+    fs.writeFileSync(path.join(outOfScan(), 'package.json'), '{ not json');
+    migrated(pkgDir(), { recordVersion: '5.22.1', rootDir: outOfScan() });
+    const r = renderWithRoster(roster ? [...roster] : null);
+    expect(r.status).toBe('pass');
+    expect(r.message).toMatch(expected);
+    expect(r.message).not.toMatch(/5\.22\.1/);
+  });
+
+  it('renderer: a hand-built healthy verdict with no measured version never prints the expected version', () => {
+    const r = renderPluginLoadVerdict({
+      ...reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => null })),
+      state: 'healthy', severity: 'ok', recommendedAction: 'none', onDiskVersion: null, indexVersion: null,
+      installedVersion: undefined, versionUnverified: undefined, loadedInLiveRoster: null,
+    });
+    expect(r.status).toBe('pass');
+    expect(r.message).toMatch(/version unverified/);
+    expect(r.message).not.toMatch(/5\.22\.1/);
   });
 
   it('control: directory present + live roster names the plugin: roster-confirmed with the measured version', () => {

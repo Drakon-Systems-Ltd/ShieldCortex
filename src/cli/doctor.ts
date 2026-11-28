@@ -9083,6 +9083,21 @@ export function withDuplicateInstallEvidence(
 }
 
 /**
+ * The version text for a passing plugin row (#260, Case r2 #1): `v<measured>`
+ * when the reconciler measured one, else "version unverified". Never the
+ * expected version: that is what this CLI wants, not what is on the host.
+ * Hand-built verdicts without `installedVersion` fall back to the layers they
+ * do carry (on-disk, then the index record), never to the pin.
+ */
+export function measuredVersionText(verdict: ReconcileVerdict): string {
+  if (verdict.versionUnverified === true) return 'version unverified';
+  const v = verdict.installedVersion !== undefined
+    ? verdict.installedVersion
+    : verdict.onDiskVersion ?? verdict.indexVersion;
+  return v ? `v${v}` : 'version unverified';
+}
+
+/**
  * Verdict → operator-facing check result. Split out of
  * `checkOpenClawPluginLoadState` so every state can be asserted directly
  * (#222): the bug there was not the classification but the RENDERING — a
@@ -9243,7 +9258,7 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'fail',
-        message: `realtime plugin regressed to v${verdict.onDiskVersion ?? verdict.indexVersion} (older than expected v${verdict.expectedVersion}) — running stale, refuse the downgrade`,
+        message: `realtime plugin regressed to v${verdict.installedVersion ?? verdict.onDiskVersion ?? verdict.indexVersion} (older than expected v${verdict.expectedVersion}) — running stale, refuse the downgrade`,
         fix,
         // The exact line the #221 operator chased for five days.
         needsOpenClawCli: { subcommand: 'plugins' },
@@ -9283,11 +9298,10 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       // with an explicit diagnostic gap, matching the reconciler's `ok` verdict
       // without turning installation evidence into a live-load assertion.
       const rosterProven = verdict.loadedInLiveRoster === true;
-      const version = verdict.onDiskVersion ?? verdict.expectedVersion;
-      // #260: load is proven but no version was measured (the index record
-      // points at a folder that is gone) — never print the expected version as
-      // though it had been read off this host.
-      const versionText = verdict.versionUnverified === true ? 'version unverified' : `v${version}`;
+      // #260 (Case r2 #1): only a version the reconciler MEASURED for the copy
+      // it judged — never the expected version, which is the pin this CLI
+      // wants and was not read off this host. Both passes below use it.
+      const versionText = measuredVersionText(verdict);
       if (!rosterProven) {
         // Status stays `pass`: the reconciler classified this `severity: 'ok'`
         // (installed, enabled, versions agree) and nothing is known to be
@@ -9298,7 +9312,7 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
           label,
           status: 'pass',
           message:
-            `realtime plugin installed and enabled at v${version} — but the RUNNING gateway's boot roster ` +
+            `realtime plugin installed and enabled (${versionText}) — but the RUNNING gateway's boot roster ` +
             'could not be read, so load is NOT separately proven',
           // Not in the message: a pass becomes a default-report warn when
           // conversation access is withheld, and that row must stay plain.
@@ -9517,16 +9531,27 @@ export function realRunningPluginVersionDeps(home: string = os.homedir()): Runni
     readGatewayPid: (): number | null => readRunningGatewayProcess(home)?.pid ?? null,
     readRosterConfirmedVersion: (): string | null => {
       try {
-        const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: pkg.version }));
-        if (verdict.loadedInLiveRoster === true) {
-          return readInstalledRealtimePluginVersion(home);
-        }
+        return rosterConfirmedSelectedVersion(
+          reconcilePluginState(gatherReconcileInput(home, { expectedVersion: pkg.version })),
+        );
       } catch {
         // roster unreadable — log path stays the only proof
       }
       return null;
     },
   };
+}
+
+/**
+ * #317's roster-composed version, honestly sourced (#260, Sol r2): the
+ * version read out of the build OpenClaw SELECTED, and only when the running
+ * gateway's roster proves the plugin loaded. Null otherwise — in particular
+ * for a version that came from ShieldCortex's own disk scan, which is not the
+ * selected copy and used to be compared against itself (disk vs disk).
+ */
+export function rosterConfirmedSelectedVersion(verdict: ReconcileVerdict): string | null {
+  if (verdict.loadedInLiveRoster !== true || verdict.installedVersionSource !== 'selected-build') return null;
+  return verdict.installedVersion ?? null;
 }
 
 export async function checkOpenClawRunningPluginVersion(
@@ -9583,8 +9608,8 @@ export async function checkOpenClawRunningPluginVersion(
         label,
         status: 'pass',
         message:
-          `running v${roster} matches on-disk v${diskVersion} (roster-confirmed; ` +
-          `log line unavailable on this platform)`,
+          `loaded (roster-confirmed) from the selected build v${roster}, which matches on-disk v${diskVersion}; ` +
+          `no registration line names the version this process loaded (log line unavailable on this platform)`,
       };
     }
     return {

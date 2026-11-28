@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import {
   checkOpenClawRunningPluginVersion,
   parseRunningPluginVersion,
+  rosterConfirmedSelectedVersion,
 } from '../doctor.js';
+import type { ReconcileVerdict } from '../../integrations/openclaw-plugin-index.js';
 
 /**
  * The #94-class false green: doctor's "plugin loaded" surfaces read the version
@@ -127,6 +129,19 @@ describe('checkOpenClawRunningPluginVersion', () => {
     expect(r.message).toMatch(/roster-confirmed/i);
     expect(r.message).toMatch(/log line unavailable/i);
     expect(r.message).not.toMatch(/UNKNOWN/i);
+  });
+
+  // #260 r3 (Sol r2): the #317 roster compose takes the version read out of
+  // the SELECTED build, never the disk scan's (which it then compared against
+  // itself and always matched) and never the expected pin.
+  it('#260 the roster-composed version is the selected build\'s, or nothing', () => {
+    const v = (over: Partial<ReconcileVerdict>) => ({ loadedInLiveRoster: true, installedVersion: '4.53.0', installedVersionSource: 'selected-build', ...over }) as ReconcileVerdict;
+    expect(rosterConfirmedSelectedVersion(v({}))).toBe('4.53.0');
+    expect(rosterConfirmedSelectedVersion(v({ installedVersionSource: 'disk' }))).toBeNull();
+    expect(rosterConfirmedSelectedVersion(v({ installedVersionSource: 'index-record' }))).toBeNull();
+    expect(rosterConfirmedSelectedVersion(v({ installedVersion: null, installedVersionSource: null, versionUnverified: true }))).toBeNull();
+    expect(rosterConfirmedSelectedVersion(v({ loadedInLiveRoster: null }))).toBeNull();
+    expect(rosterConfirmedSelectedVersion(v({ loadedInLiveRoster: false }))).toBeNull();
   });
 
   it('#317 does not let roster compose override a FRESH stale log line (#94)', async () => {
