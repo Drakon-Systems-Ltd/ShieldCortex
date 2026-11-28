@@ -1747,3 +1747,166 @@ describe('#260 r8 — record-path tri-state, record-path build convicts, preflig
     expect(report).not.toMatch(/\$ (shieldcortex repair|openclaw plugins install)/);
   });
 });
+
+/**
+ * #260 r9 (Sol delta review at ca8fb1c5). "Not checked" is not "empty" for a
+ * RELATIVE path either: the build check returns null for one (it is resolved
+ * against OpenClaw's own working directory, never here), and at ca8fb1c5 that
+ * null still counted as a folder that holds no build — a stale-index-record
+ * FAIL and a scheduled reinstall on a folder no one looked at. The stale
+ * record now needs absence CONFIRMED for every indexed folder; an unchecked
+ * one is named as such and schedules nothing. Repair's preflight no longer
+ * stats a relative path against this process's cwd as if it were "not there".
+ */
+describe('#260 r9 — a relative indexed path is unchecked, never empty', () => {
+  const LAYOUTS = [
+    ['legacy installed_plugin_index', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeIndex(r)],
+    ['config_machine_state', (r: { installRecords: Record<string, unknown>; plugins: unknown[] }) => writeMachineStateIndex(r)],
+  ] as const;
+  const ROSTERS = [['roster unread', null], ['roster-proven', [PLUGIN]]] as const;
+  const MATRIX = LAYOUTS.flatMap(([layout, write]) => ROSTERS.map(([rl, roster]) => [`${layout}, ${rl}`, write, roster] as const));
+  const gone = (): string => path.join(home, '.openclaw', 'npm', 'projects', 'reaped', PKG_SUBPATH);
+  /** Relative to nothing this process knows: OpenClaw resolves it against its own cwd. */
+  const REL_RECORD = path.join('record-copy', 'shieldcortex-realtime');
+  const REL_ROOT = path.join('selected-copy', 'shieldcortex-realtime');
+  const unreadableCopy = (): string => {
+    const dir = writeRealBuild(path.join(home, 'unreadable-copy', 'shieldcortex-realtime'), '5.0.0');
+    fs.chmodSync(path.join(dir, 'openclaw.plugin.json'), 0);
+    return dir;
+  };
+  const gather = (roster: readonly string[] | null) =>
+    gatherReconcileInput(home, { expectedVersion: '5.22.1', readLiveRoster: () => (roster ? [...roster] : null) });
+  const preflight = () => assessRealtimeReplacement(readRealtimeReplacementEvidence(home), '5.22.1');
+  const installSteps = (v: ReturnType<typeof reconcilePluginState>) =>
+    planReconcileActions(v, { expectedVersion: '5.22.1', pluginId: PLUGIN, packageName: REALTIME_PLUGIN_PACKAGE })
+      .filter((s) => s.kind === 'openclaw-install' || s.kind === 'openclaw-install-pinned');
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  const permIt = asRoot ? it.skip : it;
+  /** Every unchecked row: a warn, no action, no reinstall, never the stale-record wording. */
+  const expectUncheckedWarn = (verdict: ReturnType<typeof reconcilePluginState>, state: string) => {
+    expect(verdict).toMatchObject({ state, severity: 'warn', recommendedAction: 'none', installedVersion: null });
+    expect(verdict.reasons.join(' ')).not.toMatch(/stale index record/);
+    expect(installSteps(verdict)).toEqual([]);
+    const rendered = renderPluginLoadVerdict(verdict);
+    expect(rendered.status).toBe('warn');
+    expect(rendered.message).not.toMatch(/folders that hold no build|stale index record/);
+    expect(rendered.fix ?? '').not.toMatch(/shieldcortex repair|plugins install/);
+  };
+
+  // (i) Sol's first fixture.
+  it.each(MATRIX)('(i) relative record installPath, selected rootDir gone, record 5.0.0, current build elsewhere ⇒ warn, the record folder "could not be checked", no reinstall — %s', async (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: REL_RECORD } }, plugins: [upstreamEntry(gone())] });
+    const input = gather(roster);
+    expect(input).toMatchObject({ indexRootDirExists: false, indexInstallPathExists: null, indexInstallPathUnreadable: true, onDiskVersion: '5.22.1' });
+    const verdict = reconcilePluginState(input);
+    expectUncheckedWarn(verdict, roster ? 'version-unverified' : 'load-unproven');
+    const why = verdict.reasons.join(' ');
+    expect(why).toContain(`(${REL_RECORD}) could not be checked (not an absolute path`);
+    expect(why).not.toContain(`${REL_RECORD}, which holds no plugin build`);
+    // Repair's preflight does not read the relative folder as "not there".
+    expect(preflight()).toMatchObject({ replace: false, why: 'unknown' });
+    if (!roster) {
+      const r = await checkOpenClawPluginLoadState(home, '5.22.1');
+      expect(r.status).toBe('warn');
+      expect(r.fix ?? '').not.toMatch(/shieldcortex repair|plugins install/);
+    }
+  });
+
+  // (ii) Sol's second fixture.
+  it.each(MATRIX)('(ii) relative selected rootDir, record installPath gone, record 5.0.0, current build elsewhere ⇒ warn, the selected copy "could not be checked", no reinstall — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: gone() } }, plugins: [upstreamEntry(REL_ROOT)] });
+    const input = gather(roster);
+    expect(input).toMatchObject({ indexRootDirExists: null, indexRootDirUnreadable: true, indexInstallPathExists: false, onDiskVersion: '5.22.1' });
+    const verdict = reconcilePluginState(input);
+    expectUncheckedWarn(verdict, 'version-unverified');
+    expect(verdict.reasons.join(' ')).toContain(`the copy OpenClaw selected (${REL_ROOT}) could not be checked (not an absolute path`);
+    expect(preflight()).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
+  it.each(MATRIX)('both indexed paths relative, record 5.0.0, current build elsewhere ⇒ warn, never a pass, no reinstall — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: REL_RECORD } }, plugins: [upstreamEntry(REL_ROOT)] });
+    const input = gather(roster);
+    expect(input).toMatchObject({
+      indexRootDirExists: null, indexRootDirUnreadable: true, indexInstallPathExists: null, indexInstallPathUnreadable: true,
+    });
+    expectUncheckedWarn(reconcilePluginState(input), 'version-unverified');
+    expect(preflight()).toMatchObject({ replace: false, why: 'unknown' });
+  });
+
+  permIt.each(MATRIX)('relative selected rootDir + record folder unreadable (permission) ⇒ warn, no reinstall — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    const copy = unreadableCopy();
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: copy } }, plugins: [upstreamEntry(REL_ROOT)] });
+    const input = gather(roster);
+    expect(input).toMatchObject({ indexRootDirExists: null, indexRootDirUnreadable: true, indexInstallPathExists: null, indexInstallPathUnreadable: true });
+    expectUncheckedWarn(reconcilePluginState(input), 'version-unverified');
+  });
+
+  permIt.each(MATRIX)('selected rootDir unreadable (permission) + relative record installPath ⇒ warn, no reinstall — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    const copy = unreadableCopy();
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: REL_RECORD } }, plugins: [upstreamEntry(copy)] });
+    const input = gather(roster);
+    expect(input).toMatchObject({ indexRootDirExists: null, indexRootDirUnreadable: true, indexInstallPathExists: null, indexInstallPathUnreadable: true });
+    const verdict = reconcilePluginState(input);
+    expectUncheckedWarn(verdict, 'version-unverified');
+    expect(verdict.reasons.join(' ')).toContain(`(${copy}) could not be read (permission or I/O error)`);
+  });
+
+  // Measured-elsewhere evidence still convicts: the unchecked folder never acquits.
+  it.each(MATRIX)('relative record installPath, selected rootDir gone, the build elsewhere is 4.0.0 ⇒ that claim still convicts — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '4.0.0'), '4.0.0');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: REL_RECORD } }, plugins: [upstreamEntry(gone())] });
+    expect(reconcilePluginState(gather(roster))).toMatchObject({ state: 'version-regressed', severity: 'fail', installedVersion: '4.0.0', installedVersionSource: 'disk' });
+  });
+
+  // The reconciler does not lean on the gatherer's flag: a record that names
+  // a folder whose check returned null is unchecked even when a caller passes
+  // no `indexInstallPathUnreadable`.
+  it.each(MATRIX)('reconciler: a named record folder with a null check and no flag is still not "confirmed empty" — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: REL_RECORD } }, plugins: [upstreamEntry(gone())] });
+    const { indexInstallPathUnreadable: _flag, ...input } = gather(roster);
+    void _flag;
+    expect(input.indexInstallPathExists).toBeNull();
+    const verdict = reconcilePluginState(input);
+    expectUncheckedWarn(verdict, roster ? 'version-unverified' : 'load-unproven');
+    expect(verdict.reasons.join(' ')).toContain(`(${REL_RECORD}) could not be checked (not an absolute path`);
+  });
+
+  it.each(MATRIX)('reconciler: a named selected rootDir with a null check and no flag is still not "confirmed empty" — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: gone() } }, plugins: [upstreamEntry(REL_ROOT)] });
+    const { indexRootDirUnreadable: _flag, ...input } = gather(roster);
+    void _flag;
+    expect(input).toMatchObject({ indexRootDirExists: null, indexInstallPathExists: false });
+    expectUncheckedWarn(reconcilePluginState(input), roster ? 'version-unverified' : 'load-unproven');
+  });
+
+  // Control: both indexed paths absolute and confirmed empty ⇒ still the stale-record FAIL.
+  it.each(MATRIX)('control: both indexed paths absolute and confirmed empty, record 5.0.0, current build elsewhere ⇒ stale-index-record FAIL — %s', (_t, write, roster) => {
+    writeConfig(true, true);
+    writeRealBuild(writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.22.1'), '5.22.1');
+    write({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: gone() } }, plugins: [upstreamEntry(gone())] });
+    const input = gather(roster);
+    expect(input).toMatchObject({ indexRootDirExists: false, indexInstallPathExists: false });
+    expect(input.indexInstallPathUnreadable).toBeUndefined();
+    expect(input.indexRootDirUnreadable).toBeUndefined();
+    const verdict = reconcilePluginState(input);
+    expect(verdict).toMatchObject({ state: 'stale-index-record', severity: 'fail', recommendedAction: 'reinstall-pinned' });
+    expect(installSteps(verdict).length).toBeGreaterThan(0);
+    expect(renderPluginLoadVerdict(verdict)).toMatchObject({ status: 'fail', message: expect.stringMatching(/folders that hold no build/) });
+    expect(preflight()).toEqual({ replace: true });
+  });
+});
